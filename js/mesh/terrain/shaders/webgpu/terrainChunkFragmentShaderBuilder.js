@@ -3,6 +3,7 @@
 import { getAerialPerspectiveWGSL } from '../../../../renderer/atmosphere/shaders/aerialPerspectiveCommon.js';
 import { getProceduralDetailWGSL } from './prroceduralDetailNoise.wgsl.js';
 import { getClusteredLightingWGSL } from '../../../../lighting/shaders/clusteredLighting.wgsl.js';
+import { TILE_CATEGORIES } from '../../../../types.js';
 
 const blendModeBlock = /* wgsl */`
 // ============================================================================
@@ -700,6 +701,20 @@ const GRASS_TILE_ID_COUNT: i32 = ${grassTileCount};
 const GRASS_TILE_IDS: array<i32, ${grassTileCount}> = array<i32, ${grassTileCount}>(${grassTileIds.join(', ')});
 const GRASS_SHADOW_STRENGTH: f32 = ${grassShadowStrength.toFixed(3)};
 `;
+    const textureCanonicalTileIdWGSL = `
+fn canonicalTextureTileId(tileId: f32) -> f32 {
+    let t = clamp(i32(round(tileId)), 0, 255);
+${TILE_CATEGORIES.map((category) => {
+        const canonicalTileId = category.ranges[0][0];
+        return category.ranges
+            .map(([minTileId, maxTileId]) =>
+                `    if (t >= ${minTileId} && t <= ${maxTileId}) { return ${canonicalTileId}.0; }`
+            )
+            .join('\n');
+    }).join('\n')}
+    return tileId;
+}
+`;
 
 
     return `
@@ -1203,8 +1218,11 @@ fn hash12(p: vec2<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
+${textureCanonicalTileIdWGSL}
+
 fn getNumVariants(tileId: f32, season: i32) -> i32 {
-    let t = clamp(i32(tileId + 0.5), 0, 255);
+    let canonicalTileId = canonicalTextureTileId(tileId);
+    let t = clamp(i32(canonicalTileId + 0.5), 0, 255);
     let s = clamp(season, 0, 3);
     let v = textureLoad(numVariantsTex, vec2<i32>(t, s), 0).r;
     return max(1, i32(round(v * 255.0)));
@@ -1229,7 +1247,8 @@ fn sampleZoneMaskSmooth(input: FragmentInput, layer: i32) -> f32 {
 }
 
 fn calculateRotation(worldTileCoord: vec2<f32>, tileId: f32, season: i32, seed: f32) -> f32 {
-    let h = hash12(worldTileCoord + vec2<f32>(tileId * 0.17, seed + f32(season) * 0.19));
+    let canonicalTileId = canonicalTextureTileId(tileId);
+    let h = hash12(worldTileCoord + vec2<f32>(canonicalTileId * 0.17, seed + f32(season) * 0.19));
     return floor(h * 4.0) * 1.5707963;
 }
 
@@ -1317,19 +1336,21 @@ fn getMicroPatternStyle(tileId: f32) -> i32 {
 // ----------------------------------------------------------------------------
 
 fn lookupTileLayer(tileId: f32, season: i32, variantIdx: i32) -> i32 {
+    let canonicalTileId = canonicalTextureTileId(tileId);
     let lookupSize = vec2<i32>(textureDimensions(tileTypeLookup));
     let maxVariants = lookupSize.x / 4;
     let x = (season * maxVariants + (variantIdx % maxVariants)) % lookupSize.x;
-    let y = i32(tileId) % lookupSize.y;
+    let y = i32(canonicalTileId) % lookupSize.y;
     let sample = textureLoad(tileTypeLookup, vec2<i32>(x, y), 0);
     return i32(round(sample.r));
 }
 
 fn lookupMacroTileLayer(tileId: f32, season: i32, variantIdx: i32) -> i32 {
+    let canonicalTileId = canonicalTextureTileId(tileId);
     let lookupSize = vec2<i32>(textureDimensions(macroTileTypeLookup));
     let maxVariants = lookupSize.x / 4;
     let x = (season * maxVariants + (variantIdx % maxVariants)) % lookupSize.x;
-    let y = i32(tileId) % lookupSize.y;
+    let y = i32(canonicalTileId) % lookupSize.y;
     let sample = textureLoad(macroTileTypeLookup, vec2<i32>(x, y), 0);
     return i32(round(sample.r));
 }
@@ -1388,8 +1409,9 @@ fn sampleTileColor(
     ddx_vUv: vec2<f32>,
     ddy_vUv: vec2<f32>
 ) -> vec4<f32> {
-    let varCount = getNumVariants(tileId, activeSeason);
-    let hashOffset = vec2<f32>(tileId * 0.17, f32(activeSeason) * 0.31);
+    let canonicalTileId = canonicalTextureTileId(tileId);
+    let varCount = getNumVariants(canonicalTileId, activeSeason);
+    let hashOffset = vec2<f32>(canonicalTileId * 0.17, f32(activeSeason) * 0.31);
 
     var currentVariant: i32 = 0;
     if (varCount > 1) {
@@ -1397,12 +1419,12 @@ fn sampleTileColor(
     }
 
     // Sample current tile
-    var atlasLayer = lookupTileLayer(tileId, activeSeason, currentVariant);
+    var atlasLayer = lookupTileLayer(canonicalTileId, activeSeason, currentVariant);
     var rotatedLocal = localUV;
     var ddx_rot = ddx_vUv;
     var ddy_rot = ddy_vUv;
     if (USE_VARIANT_ROTATION) {
-        let r = calculateRotation(worldTileCoord, tileId, activeSeason, 9547.0);
+        let r = calculateRotation(worldTileCoord, canonicalTileId, activeSeason, 9547.0);
         rotatedLocal = rotateUV(localUV, r);
         ddx_rot = rotateDeriv(ddx_vUv, r);
         ddy_rot = rotateDeriv(ddy_vUv, r);
@@ -1468,16 +1490,17 @@ fn sampleMacroTileColor(
     ddx_uv: vec2<f32>,
     ddy_uv: vec2<f32>
 ) -> vec4<f32> {
-    let r = calculateRotation(worldTileCoord, tileId, activeSeason, 100.0);
+    let canonicalTileId = canonicalTextureTileId(tileId);
+    let r = calculateRotation(worldTileCoord, canonicalTileId, activeSeason, 100.0);
 
-    let varCount = getNumVariants(tileId, activeSeason);
+    let varCount = getNumVariants(canonicalTileId, activeSeason);
     var varIdx: i32 = 0;
     if (varCount > 1) {
-        let h = hash12(worldTileCoord + vec2<f32>(tileId * 0.31, f32(activeSeason) * 0.53));
+        let h = hash12(worldTileCoord + vec2<f32>(canonicalTileId * 0.31, f32(activeSeason) * 0.53));
         varIdx = clamp(i32(floor(h * f32(varCount))), 0, varCount - 1);
     }
 
-    let macroLayer = lookupMacroTileLayer(tileId, activeSeason, varIdx);
+    let macroLayer = lookupMacroTileLayer(canonicalTileId, activeSeason, varIdx);
     let rotatedLocal = rotateUV(localUV, r);
 
     let ddx_rot = rotateDeriv(ddx_uv, r);
