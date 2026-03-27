@@ -1,0 +1,1459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script type="importmap">
+        {
+          "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
+            "three/": "https://cdn.jsdelivr.net/npm/three@0.178.0/"
+          }
+        }
+        </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spaceship Game - Development</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        #gameCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            cursor: crosshair;
+        }
+        
+        #game-ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 5px;
+            pointer-events: none;
+            z-index: 100;
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.1);
+        }
+        
+        #crash-screen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff0000;
+            font-family: 'Impact', sans-serif;
+            font-size: 72px;
+            font-weight: bold;
+            display: none;
+            z-index: 200;
+            text-shadow: 
+                0 0 10px rgba(255, 0, 0, 0.8),
+                0 0 20px rgba(255, 0, 0, 0.6),
+                0 0 30px rgba(255, 0, 0, 0.4);
+            animation: pulse 0.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.05); }
+            100% { transform: translate(-50%, -50%) scale(1); }
+        }
+        
+        #loading-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #1a1a2e 0%, #0f0f23 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 300;
+            color: white;
+        }
+        
+        .loading-spinner {
+            width: 60px;
+            height: 60px;
+            border: 3px solid rgba(0, 255, 255, 0.2);
+            border-top-color: #00ffff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            margin-top: 20px;
+            font-size: 18px;
+            color: #00ffff;
+        }
+        
+        #debug-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #0f0;
+            font-family: monospace;
+            font-size: 11px;
+            padding: 10px;
+            border: 1px solid #0f0;
+            display: none;
+            z-index: 100;
+        }
+        
+        .controls-hint {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 12px;
+            text-align: center;
+            z-index: 50;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="loading-screen">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Loading Terrain Engine...</div>
+    </div>
+    
+    <div id="debug-panel">
+        <div>FPS: <span id="fps">0</span></div>
+        <div>Chunks: <span id="chunks">0</span></div>
+        <div>Position: <span id="position">0, 0</span></div>
+    </div>
+    
+    <div class="controls-hint">
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug
+    </div>
+
+    <!-- Game modules -->
+    <script type="module">
+        import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js';
+        import { GameEngine } from './js/gameEngine.js';
+        import { createEngineConfig, createGameDataConfig } from './js/config/runtimeConfigs.js';
+        import { CubeSphereCoords } from './js/planet/cubeSphereCoords.js';
+        window.qtDiag = window.qtDiag || {
+            help() {
+                console.log('window.qtDiag is loaded, but the engine diagnostics are not bound yet.');
+            }
+        };
+        const engineConfig = createEngineConfig();
+        const gameDataConfig = createGameDataConfig();
+        const gameEngine = new GameEngine('gameCanvas', engineConfig, gameDataConfig);
+        window.gameEngine = gameEngine;
+        let debugMode = false;
+
+        function installQuadtreeDiagnostics(engine) {
+            function getTileManager() {
+                return engine?.renderer?.quadtreeTileManager ?? null;
+            }
+
+            function getTileStreamer() {
+                return getTileManager()?.tileStreamer ?? null;
+            }
+
+            function getQuadtreeGPU() {
+                return getTileManager()?.quadtreeGPU ?? null;
+            }
+
+            function getTerrainDebugMode() {
+                return engine?.engineConfig?.debug?.terrainFragmentDebugMode ?? 0;
+            }
+
+            function buildTileChain(face, depth, x, y, includeParents = true) {
+                const chain = [];
+                let d = depth | 0;
+                let tx = x | 0;
+                let ty = y | 0;
+                while (d >= 0) {
+                    chain.push({ face: face | 0, depth: d, x: tx, y: ty });
+                    if (!includeParents || d === 0) break;
+                    d--;
+                    tx >>= 1;
+                    ty >>= 1;
+                }
+                return chain;
+            }
+
+            function normalizeTileArg(faceOrTile, depth, x, y) {
+                if (typeof faceOrTile === 'object' && faceOrTile !== null) {
+                    return {
+                        face: faceOrTile.face | 0,
+                        depth: faceOrTile.depth | 0,
+                        x: faceOrTile.x | 0,
+                        y: faceOrTile.y | 0
+                    };
+                }
+                return {
+                    face: faceOrTile | 0,
+                    depth: depth | 0,
+                    x: x | 0,
+                    y: y | 0
+                };
+            }
+
+            async function inspectTile(faceOrTile, depth, x, y, options = {}) {
+                const tile = normalizeTileArg(faceOrTile, depth, x, y);
+                const includeParents = options.includeParents !== false;
+                const sampleSize = Number.isFinite(options.sampleSize) ? Math.max(1, Math.floor(options.sampleSize)) : 8;
+                const readGpuTable = options.readGpuTable !== false;
+
+                const tileManager = getTileManager();
+                const tileStreamer = getTileStreamer();
+                if (!tileManager || !tileStreamer) {
+                    console.warn('[QT-MANUAL] GPU quadtree tile manager is not ready');
+                    return null;
+                }
+
+                const gpuEntries = readGpuTable ? await tileManager.debugReadGPUHashTable?.() : null;
+                const chain = buildTileChain(tile.face, tile.depth, tile.x, tile.y, includeParents);
+                const summary = [];
+
+                for (const entry of chain) {
+                    const cpu = tileStreamer.debugLookup(entry.face, entry.depth, entry.x, entry.y);
+                    let gpu = null;
+                    if (cpu?.found && Array.isArray(gpuEntries) && Number.isInteger(cpu.slot)) {
+                        gpu = gpuEntries[cpu.slot] ?? null;
+                    }
+
+                    let heightStats = null;
+                    let tileStats = null;
+                    let scatterStats = null;
+                    if (cpu?.found) {
+                        heightStats = await tileStreamer.debugReadArrayLayerStats('height', cpu.layer, sampleSize);
+                        tileStats = await tileStreamer.debugReadArrayLayerStats('tile', cpu.layer, sampleSize);
+                        if (tileStreamer.requiredTypes?.includes?.('scatter')) {
+                            scatterStats = await tileStreamer.debugReadArrayLayerStats('scatter', cpu.layer, sampleSize);
+                        }
+                    }
+
+                    summary.push({
+                        face: entry.face,
+                        depth: entry.depth,
+                        x: entry.x,
+                        y: entry.y,
+                        cpuFound: !!cpu?.found,
+                        cpuLayer: cpu?.layer ?? null,
+                        cpuSlot: cpu?.slot ?? null,
+                        gpuSlotLayer: gpu?.layer ?? null,
+                        gpuKeyLo: gpu?.keyLo ?? null,
+                        gpuKeyHi: gpu?.keyHi ?? null,
+                        gpuMatchesCpu: !!(
+                            cpu?.found &&
+                            gpu &&
+                            gpu.keyLo === cpu.keyLo &&
+                            gpu.keyHi === cpu.keyHi &&
+                            gpu.layer === cpu.layer
+                        ),
+                        heightMin: heightStats?.min?.[0] ?? null,
+                        heightMax: heightStats?.max?.[0] ?? null,
+                        heightMean: heightStats?.mean?.[0] ?? null,
+                        tileMean: tileStats?.mean?.[0] ?? null,
+                        scatterMean: scatterStats?.mean?.[0] ?? null
+                    });
+                }
+
+                console.groupCollapsed(`[QT-MANUAL] inspectTile f${tile.face}:d${tile.depth}:${tile.x},${tile.y}`);
+                console.table(summary);
+                console.log('[QT-MANUAL] raw', { tile, summary, gpuEntriesRead: Array.isArray(gpuEntries) ? gpuEntries.length : 0 });
+                console.groupEnd();
+                return { tile, summary, gpuEntries };
+            }
+
+            function deriveTileCoordsFromInstance(inst) {
+                if (!inst || !Number.isFinite(inst.chunkSizeUV) || inst.chunkSizeUV <= 0) {
+                    return null;
+                }
+                const depth = Math.round(Math.log2(1 / inst.chunkSizeUV));
+                const x = Math.floor(inst.chunkLocation.x / inst.chunkSizeUV);
+                const y = Math.floor(inst.chunkLocation.y / inst.chunkSizeUV);
+                return {
+                    face: inst.face | 0,
+                    depth,
+                    x,
+                    y
+                };
+            }
+
+            function dedupeTiles(tiles) {
+                const seen = new Set();
+                const out = [];
+                for (const tile of tiles) {
+                    if (!tile) continue;
+                    const key = `${tile.face}:${tile.depth}:${tile.x}:${tile.y}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    out.push(tile);
+                }
+                return out;
+            }
+
+            function buildNeighborTiles(tile) {
+                if (!tile) return [];
+                return [
+                    { face: tile.face, depth: tile.depth, x: tile.x - 1, y: tile.y },
+                    { face: tile.face, depth: tile.depth, x: tile.x + 1, y: tile.y },
+                    { face: tile.face, depth: tile.depth, x: tile.x, y: tile.y - 1 },
+                    { face: tile.face, depth: tile.depth, x: tile.x, y: tile.y + 1 }
+                ].filter(t => t.x >= 0 && t.y >= 0);
+            }
+
+            function tileKey(tile) {
+                return `${tile.face}:${tile.depth}:${tile.x}:${tile.y}`;
+            }
+
+            function getCameraFaceUV() {
+                const cameraPosition = engine?.camera?.position ?? null;
+                const planetConfig = engine?.planetConfig ?? null;
+                const origin = planetConfig?.origin ?? null;
+                const radius = planetConfig?.radius ?? null;
+                if (!cameraPosition || !origin || !Number.isFinite(radius)) {
+                    return null;
+                }
+
+                const cx = Number(cameraPosition.x ?? 0);
+                const cy = Number(cameraPosition.y ?? 0);
+                const cz = Number(cameraPosition.z ?? 0);
+                const ox = Number(origin.x ?? 0);
+                const oy = Number(origin.y ?? 0);
+                const oz = Number(origin.z ?? 0);
+                const relativePos = {
+                    x: cx - ox,
+                    y: cy - oy,
+                    z: cz - oz,
+                    length() {
+                        return Math.hypot(this.x, this.y, this.z);
+                    },
+                    clone() {
+                        return {
+                            x: this.x,
+                            y: this.y,
+                            z: this.z,
+                            normalize() {
+                                const len = Math.hypot(this.x, this.y, this.z) || 1;
+                                this.x /= len;
+                                this.y /= len;
+                                this.z /= len;
+                                return this;
+                            }
+                        };
+                    }
+                };
+                const projected = CubeSphereCoords.worldPositionToFaceUV(relativePos, radius);
+                return {
+                    face: projected.face | 0,
+                    u: (projected.u + 1) * 0.5,
+                    v: (projected.v + 1) * 0.5,
+                    altitude: projected.altitude
+                };
+            }
+
+            function tileCenterDistanceSqToFaceUV(tile, faceUV) {
+                if (!tile || !faceUV || tile.face !== faceUV.face) {
+                    return Number.POSITIVE_INFINITY;
+                }
+                const gridSize = 1 << tile.depth;
+                const centerU = (tile.x + 0.5) / gridSize;
+                const centerV = (tile.y + 0.5) / gridSize;
+                const du = centerU - faceUV.u;
+                const dv = centerV - faceUV.v;
+                return du * du + dv * dv;
+            }
+
+            function findNearestResidentAncestor(tile, tileStreamer) {
+                if (!tile || !tileStreamer) return null;
+                let depth = tile.depth;
+                let x = tile.x;
+                let y = tile.y;
+                while (depth > 0) {
+                    depth--;
+                    x >>= 1;
+                    y >>= 1;
+                    const lookup = tileStreamer.debugLookup(tile.face, depth, x, y);
+                    if (lookup?.found) {
+                        return {
+                            face: tile.face,
+                            depth,
+                            x,
+                            y,
+                            layer: lookup.layer,
+                            slot: lookup.slot
+                        };
+                    }
+                }
+                return null;
+            }
+
+            function tileContains(ancestor, child) {
+                if (!ancestor || !child) return false;
+                if (ancestor.face !== child.face) return false;
+                if (ancestor.depth > child.depth) return false;
+                const shift = child.depth - ancestor.depth;
+                return (child.x >> shift) === ancestor.x && (child.y >> shift) === ancestor.y;
+            }
+
+            async function heightSignature(faceOrTile, depth, x, y, options = {}) {
+                const tile = normalizeTileArg(faceOrTile, depth, x, y);
+                const tileStreamer = getTileStreamer();
+                if (!tileStreamer) {
+                    console.warn('[QT-MANUAL] heightSignature: tile streamer is not ready');
+                    return null;
+                }
+
+                const sampleTexels = Number.isFinite(options.sampleTexels)
+                    ? Math.max(4, Math.floor(options.sampleTexels))
+                    : (tileStreamer.tileTextureSize || 128);
+                const maxTexel = Math.max(0, sampleTexels - 1);
+                const points = [
+                    { name: 'nw', x: 0, y: 0 },
+                    { name: 'ne', x: maxTexel, y: 0 },
+                    { name: 'sw', x: 0, y: maxTexel },
+                    { name: 'se', x: maxTexel, y: maxTexel },
+                    { name: 'c',  x: Math.floor(maxTexel * 0.5), y: Math.floor(maxTexel * 0.5) }
+                ];
+
+                const exact = tileStreamer.debugLookup(tile.face, tile.depth, tile.x, tile.y);
+                const ancestor = !exact?.found ? findNearestResidentAncestor(tile, tileStreamer) : null;
+                const source = exact?.found ? exact : ancestor;
+
+                if (!source?.layer && source?.layer !== 0) {
+                    const result = { tile, source: null, samples: null };
+                    console.log('[QT-MANUAL] heightSignature', result);
+                    return result;
+                }
+
+                const texels = await tileStreamer.debugReadArrayLayerTexels('height', source.layer, points);
+                const samples = {};
+                for (let i = 0; i < points.length; i++) {
+                    const label = points[i].name;
+                    samples[label] = texels?.texels?.[i]?.values?.[0] ?? null;
+                }
+
+                const result = {
+                    tile,
+                    source: {
+                        depth: exact?.found ? tile.depth : source.depth,
+                        x: exact?.found ? tile.x : source.x,
+                        y: exact?.found ? tile.y : source.y,
+                        layer: source.layer,
+                        exact: !!exact?.found
+                    },
+                    samples
+                };
+                console.log('[QT-MANUAL] heightSignature', result);
+                return result;
+            }
+
+            function meanAbsDeltaSamples(a, b) {
+                if (!a || !b) return null;
+                const names = ['nw', 'ne', 'sw', 'se', 'c'];
+                const vals = [];
+                for (const name of names) {
+                    const av = a[name];
+                    const bv = b[name];
+                    if (!Number.isFinite(av) || !Number.isFinite(bv)) continue;
+                    vals.push(Math.abs(av - bv));
+                }
+                if (vals.length === 0) return null;
+                return vals.reduce((sum, v) => sum + v, 0) / vals.length;
+            }
+
+            async function coverage(faceOrTile, depth, x, y, options = {}) {
+                const tile = normalizeTileArg(faceOrTile, depth, x, y);
+                const tileManager = getTileManager();
+                const tileStreamer = getTileStreamer();
+                const quadtreeGPU = getQuadtreeGPU();
+                if (!tileManager || !tileStreamer || !quadtreeGPU) {
+                    console.warn('[QT-MANUAL] coverage: GPU quadtree is not ready');
+                    return null;
+                }
+
+                const maxTiles = options.maxVisibleTiles ?? (quadtreeGPU.maxVisibleTiles || 2048);
+                const visibleTiles = await quadtreeGPU.readVisibleTiles(maxTiles);
+                const visibleSet = new Set((visibleTiles || []).map(tileKey));
+
+                const args = await tileManager.debugReadIndirectArgs?.();
+                const totalInstances = Array.isArray(args)
+                    ? args.reduce((sum, item) => sum + (item.instanceCount || 0), 0)
+                    : 0;
+                const instances = totalInstances > 0
+                    ? await quadtreeGPU.debugReadInstancesRange?.(0, totalInstances, totalInstances)
+                    : [];
+
+                const exactCpu = tileStreamer.debugLookup(tile.face, tile.depth, tile.x, tile.y);
+                const nearestAncestor = findNearestResidentAncestor(tile, tileStreamer);
+
+                const emittedInstances = (instances || []).map((inst, index) => {
+                    const derivedTile = deriveTileCoordsFromInstance(inst);
+                    return derivedTile ? { index, inst, tile: derivedTile } : null;
+                }).filter(Boolean);
+
+                const exactInstance = emittedInstances.find(entry =>
+                    entry.tile.face === tile.face &&
+                    entry.tile.depth === tile.depth &&
+                    entry.tile.x === tile.x &&
+                    entry.tile.y === tile.y
+                ) || null;
+
+                const coveringInstances = emittedInstances.filter(entry => tileContains(entry.tile, tile));
+                const ancestorCoveringInstances = coveringInstances.filter(entry => entry.tile.depth < tile.depth);
+
+                const result = {
+                    tile,
+                    visibleExact: visibleSet.has(tileKey(tile)),
+                    cpuResidentExact: !!exactCpu?.found,
+                    cpuExactLayer: exactCpu?.layer ?? null,
+                    cpuExactSlot: exactCpu?.slot ?? null,
+                    nearestResidentAncestor: nearestAncestor,
+                    exactInstance: exactInstance ? {
+                        index: exactInstance.index,
+                        tile: exactInstance.tile,
+                        layer: exactInstance.inst.layer,
+                        uvScale: exactInstance.inst.uvScale,
+                        edgeMask: exactInstance.inst.edgeMask,
+                        neighborLODs: exactInstance.inst.neighborLODs
+                    } : null,
+                    coveringInstances: coveringInstances.map(entry => ({
+                        index: entry.index,
+                        tile: entry.tile,
+                        layer: entry.inst.layer,
+                        uvScale: entry.inst.uvScale,
+                        edgeMask: entry.inst.edgeMask
+                    })),
+                    ancestorCoveringInstances: ancestorCoveringInstances.map(entry => ({
+                        index: entry.index,
+                        tile: entry.tile,
+                        layer: entry.inst.layer,
+                        uvScale: entry.inst.uvScale,
+                        edgeMask: entry.inst.edgeMask
+                    })),
+                    visibleNeighborSummary: buildNeighborTiles(tile).map(n => ({
+                        tile: n,
+                        visible: visibleSet.has(tileKey(n)),
+                        cpuResident: !!tileStreamer.debugLookup(n.face, n.depth, n.x, n.y)?.found
+                    }))
+                };
+
+                if (options.includeHeightSignature !== false) {
+                    result.heightSignature = await heightSignature(tile, null, null, null);
+                }
+
+                console.groupCollapsed(`[QT-MANUAL] coverage f${tile.face}:d${tile.depth}:${tile.x},${tile.y}`);
+                console.log('[QT-MANUAL] coverage result', result);
+                console.groupEnd();
+                return result;
+            }
+
+            async function captureCoverage(options = {}) {
+                const captureOptions = {
+                    instanceSampleCount: Number.isFinite(options.instanceSampleCount)
+                        ? Math.max(16, Math.floor(options.instanceSampleCount))
+                        : 32,
+                    candidateLimit: Number.isFinite(options.candidateLimit)
+                        ? Math.max(1, Math.floor(options.candidateLimit))
+                        : 1,
+                    inspectNeighbors: options.inspectNeighbors !== false,
+                    inspectParents: options.inspectParents !== false
+                };
+
+                console.groupCollapsed('[QT-MANUAL] captureCoverage start');
+                const captureResult = await capture(captureOptions);
+                const chosen = Array.isArray(captureResult?.chosen) ? captureResult.chosen[0] : null;
+                if (!chosen) {
+                    const result = { capture: captureResult, chosen: null, coverage: [] };
+                    window.__qtLastCoverageCapture = result;
+                    console.log('[QT-MANUAL] captureCoverage done', result);
+                    console.groupEnd();
+                    return result;
+                }
+
+                const targets = dedupeTiles([chosen, ...buildNeighborTiles(chosen)]);
+                const coverageResults = [];
+                for (const tile of targets) {
+                    coverageResults.push(await coverage(tile));
+                }
+
+                const heightSignatures = [];
+                for (const tile of targets) {
+                    heightSignatures.push(await heightSignature(tile));
+                }
+
+                const result = {
+                    capture: captureResult,
+                    chosen,
+                    coverage: coverageResults,
+                    heightSignatures
+                };
+                window.__qtLastCoverageCapture = result;
+                console.log('[QT-MANUAL] captureCoverage done', result);
+                console.groupEnd();
+                return result;
+            }
+
+            async function findCoverageHoles(options = {}) {
+                const tileManager = getTileManager();
+                const tileStreamer = getTileStreamer();
+                const quadtreeGPU = getQuadtreeGPU();
+                if (!tileManager || !tileStreamer || !quadtreeGPU) {
+                    console.warn('[QT-MANUAL] findCoverageHoles: GPU quadtree is not ready');
+                    return null;
+                }
+
+                const maxTiles = options.maxVisibleTiles ?? (quadtreeGPU.maxVisibleTiles || 2048);
+                const visibleTiles = await quadtreeGPU.readVisibleTiles(maxTiles);
+                const visibleSet = new Set((visibleTiles || []).map(tileKey));
+
+                const args = await tileManager.debugReadIndirectArgs?.();
+                const totalInstances = Array.isArray(args)
+                    ? args.reduce((sum, item) => sum + (item.instanceCount || 0), 0)
+                    : 0;
+                const instances = totalInstances > 0
+                    ? await quadtreeGPU.debugReadInstancesRange?.(0, totalInstances, totalInstances)
+                    : [];
+
+                const emittedInstances = (instances || []).map((inst, index) => {
+                    const tile = deriveTileCoordsFromInstance(inst);
+                    return tile ? { index, inst, tile } : null;
+                }).filter(Boolean);
+
+                const exactInstanceMap = new Map();
+                for (const entry of emittedInstances) {
+                    exactInstanceMap.set(tileKey(entry.tile), entry);
+                }
+
+                const coveringEntriesFor = (tile) =>
+                    emittedInstances.filter(entry => tileContains(entry.tile, tile));
+
+                const holes = [];
+                const missingExactCoveredByAncestor = [];
+                const residentVisibleWithoutExactInstance = [];
+                const mixedFrontier = [];
+
+                for (const tile of (visibleTiles || [])) {
+                    const key = tileKey(tile);
+                    const cpu = tileStreamer.debugLookup(tile.face, tile.depth, tile.x, tile.y);
+                    const exactInstance = exactInstanceMap.get(key) || null;
+                    const covering = coveringEntriesFor(tile);
+                    const ancestorCovering = covering.filter(entry => entry.tile.depth < tile.depth);
+                    const neighbors = buildNeighborTiles(tile).map(n => ({
+                        tile: n,
+                        visible: visibleSet.has(tileKey(n)),
+                        cpuResident: !!tileStreamer.debugLookup(n.face, n.depth, n.x, n.y)?.found
+                    }));
+
+                    const entry = {
+                        tile,
+                        cpuResidentExact: !!cpu?.found,
+                        cpuExactLayer: cpu?.layer ?? null,
+                        cpuExactSlot: cpu?.slot ?? null,
+                        exactInstance: exactInstance ? {
+                            index: exactInstance.index,
+                            tile: exactInstance.tile,
+                            layer: exactInstance.inst.layer,
+                            uvScale: exactInstance.inst.uvScale,
+                            edgeMask: exactInstance.inst.edgeMask,
+                            neighborLODs: exactInstance.inst.neighborLODs
+                        } : null,
+                        ancestorCoveringInstances: ancestorCovering.map(entry => ({
+                            index: entry.index,
+                            tile: entry.tile,
+                            layer: entry.inst.layer,
+                            uvScale: entry.inst.uvScale,
+                            edgeMask: entry.inst.edgeMask
+                        })),
+                        visibleNeighborSummary: neighbors
+                    };
+
+                    if (!cpu?.found && !exactInstance && ancestorCovering.length === 0) {
+                        holes.push(entry);
+                        continue;
+                    }
+                    if (!cpu?.found && !exactInstance && ancestorCovering.length > 0) {
+                        missingExactCoveredByAncestor.push(entry);
+                        continue;
+                    }
+                    if (cpu?.found && !exactInstance) {
+                        residentVisibleWithoutExactInstance.push(entry);
+                        continue;
+                    }
+                    const mixedNeighbor = neighbors.some(n => n.visible !== entry.cpuResidentExact || n.cpuResident !== entry.cpuResidentExact);
+                    if (mixedNeighbor || (exactInstance?.inst?.edgeMask ?? 0) !== 0) {
+                        mixedFrontier.push(entry);
+                    }
+                }
+
+                const result = {
+                    visibleCount: (visibleTiles || []).length,
+                    emittedInstanceCount: emittedInstances.length,
+                    holes,
+                    missingExactCoveredByAncestor,
+                    residentVisibleWithoutExactInstance,
+                    mixedFrontier
+                };
+                window.__qtLastHoleScan = result;
+
+                console.groupCollapsed('[QT-MANUAL] findCoverageHoles');
+                console.log('[QT-MANUAL] holeScanSummary', {
+                    visibleCount: result.visibleCount,
+                    emittedInstanceCount: result.emittedInstanceCount,
+                    holes: holes.length,
+                    missingExactCoveredByAncestor: missingExactCoveredByAncestor.length,
+                    residentVisibleWithoutExactInstance: residentVisibleWithoutExactInstance.length,
+                    mixedFrontier: mixedFrontier.length
+                });
+                if (holes.length > 0) {
+                    console.log('[QT-MANUAL] holes', holes);
+                }
+                if (residentVisibleWithoutExactInstance.length > 0) {
+                    console.log('[QT-MANUAL] residentVisibleWithoutExactInstance', residentVisibleWithoutExactInstance);
+                }
+                if (missingExactCoveredByAncestor.length > 0) {
+                    console.log('[QT-MANUAL] missingExactCoveredByAncestor', missingExactCoveredByAncestor);
+                }
+                console.groupEnd();
+                return result;
+            }
+
+            async function findHeightMismatchPairs(options = {}) {
+                const quadtreeGPU = getQuadtreeGPU();
+                const tileStreamer = getTileStreamer();
+                if (!quadtreeGPU || !tileStreamer) {
+                    console.warn('[QT-MANUAL] findHeightMismatchPairs: GPU quadtree is not ready');
+                    return null;
+                }
+
+                const maxTiles = options.maxVisibleTiles ?? (quadtreeGPU.maxVisibleTiles || 2048);
+                const visibleTiles = await quadtreeGPU.readVisibleTiles(maxTiles);
+                const visibleSet = new Set((visibleTiles || []).map(tileKey));
+                const signatureCache = new Map();
+
+                async function getSignature(tile) {
+                    const key = tileKey(tile);
+                    if (signatureCache.has(key)) return signatureCache.get(key);
+                    const sig = await heightSignature(tile, null, null, null, options);
+                    signatureCache.set(key, sig);
+                    return sig;
+                }
+
+                const mismatches = [];
+                for (const tile of (visibleTiles || [])) {
+                    const exact = tileStreamer.debugLookup(tile.face, tile.depth, tile.x, tile.y);
+                    if (!exact?.found) continue;
+
+                    const tileSig = await getSignature(tile);
+                    for (const neighbor of buildNeighborTiles(tile)) {
+                        const neighborVisible = visibleSet.has(tileKey(neighbor));
+                        const neighborExact = tileStreamer.debugLookup(neighbor.face, neighbor.depth, neighbor.x, neighbor.y);
+                        if (neighborVisible && neighborExact?.found) continue;
+
+                        const neighborSig = await getSignature(neighbor);
+                        const delta = meanAbsDeltaSamples(tileSig?.samples, neighborSig?.samples);
+                        if (!Number.isFinite(delta)) continue;
+
+                        mismatches.push({
+                            tile,
+                            tileVisible: true,
+                            tileExact: true,
+                            tileSource: tileSig?.source ?? null,
+                            neighbor,
+                            neighborVisible,
+                            neighborExact: !!neighborExact?.found,
+                            neighborSource: neighborSig?.source ?? null,
+                            meanAbsDelta: delta,
+                            tileSamples: tileSig?.samples ?? null,
+                            neighborSamples: neighborSig?.samples ?? null
+                        });
+                    }
+                }
+
+                mismatches.sort((a, b) => b.meanAbsDelta - a.meanAbsDelta);
+                const limit = Number.isFinite(options.limit) ? Math.max(1, Math.floor(options.limit)) : 50;
+                const result = {
+                    visibleCount: (visibleTiles || []).length,
+                    mismatchCount: mismatches.length,
+                    worst: mismatches.slice(0, limit)
+                };
+                window.__qtLastHeightMismatchScan = result;
+
+                console.groupCollapsed('[QT-MANUAL] findHeightMismatchPairs');
+                console.log('[QT-MANUAL] heightMismatchSummary', {
+                    visibleCount: result.visibleCount,
+                    mismatchCount: result.mismatchCount,
+                    reported: result.worst.length
+                });
+                console.log('[QT-MANUAL] heightMismatchWorst', result.worst);
+                console.groupEnd();
+                return result;
+            }
+
+            async function findLocalHeightMismatchPairs(options = {}) {
+                const quadtreeGPU = getQuadtreeGPU();
+                const tileStreamer = getTileStreamer();
+                if (!quadtreeGPU || !tileStreamer) {
+                    console.warn('[QT-MANUAL] findLocalHeightMismatchPairs: GPU quadtree is not ready');
+                    return null;
+                }
+
+                const cameraFaceUV = getCameraFaceUV();
+                if (!cameraFaceUV) {
+                    console.warn('[QT-MANUAL] findLocalHeightMismatchPairs: camera face UV is not available');
+                    return null;
+                }
+
+                const maxTiles = options.maxVisibleTiles ?? (quadtreeGPU.maxVisibleTiles || 2048);
+                const visibleTiles = await quadtreeGPU.readVisibleTiles(maxTiles);
+                const visibleSet = new Set((visibleTiles || []).map(tileKey));
+                const signatureCache = new Map();
+
+                async function getSignature(tile) {
+                    const key = tileKey(tile);
+                    if (signatureCache.has(key)) return signatureCache.get(key);
+                    const sig = await heightSignature(tile, null, null, null, options);
+                    signatureCache.set(key, sig);
+                    return sig;
+                }
+
+                const sameFaceVisible = (visibleTiles || [])
+                    .map(tile => ({
+                        tile,
+                        distanceSq: tileCenterDistanceSqToFaceUV(tile, cameraFaceUV)
+                    }))
+                    .filter(entry => Number.isFinite(entry.distanceSq))
+                    .sort((a, b) => a.distanceSq - b.distanceSq);
+
+                const maxCandidateTiles = Number.isFinite(options.maxCandidateTiles)
+                    ? Math.max(1, Math.floor(options.maxCandidateTiles))
+                    : 96;
+                const maxDistanceUV = Number.isFinite(options.maxDistanceUV)
+                    ? Math.max(0.001, options.maxDistanceUV)
+                    : 0.20;
+                const maxDistanceSq = maxDistanceUV * maxDistanceUV;
+                const candidateEntries = sameFaceVisible
+                    .filter(entry => entry.distanceSq <= maxDistanceSq)
+                    .slice(0, maxCandidateTiles);
+
+                const mismatches = [];
+                for (const entry of candidateEntries) {
+                    const tile = entry.tile;
+                    const exact = tileStreamer.debugLookup(tile.face, tile.depth, tile.x, tile.y);
+                    if (!exact?.found) continue;
+
+                    const tileSig = await getSignature(tile);
+                    for (const neighbor of buildNeighborTiles(tile)) {
+                        if (neighbor.face !== cameraFaceUV.face) continue;
+
+                        const neighborVisible = visibleSet.has(tileKey(neighbor));
+                        const neighborExact = tileStreamer.debugLookup(neighbor.face, neighbor.depth, neighbor.x, neighbor.y);
+                        if (neighborVisible && neighborExact?.found) continue;
+
+                        const neighborSig = await getSignature(neighbor);
+                        const delta = meanAbsDeltaSamples(tileSig?.samples, neighborSig?.samples);
+                        if (!Number.isFinite(delta)) continue;
+
+                        mismatches.push({
+                            cameraFaceUV,
+                            cameraDistanceSq: entry.distanceSq,
+                            tile,
+                            tileVisible: true,
+                            tileExact: true,
+                            tileSource: tileSig?.source ?? null,
+                            neighbor,
+                            neighborVisible,
+                            neighborExact: !!neighborExact?.found,
+                            neighborSource: neighborSig?.source ?? null,
+                            meanAbsDelta: delta,
+                            tileSamples: tileSig?.samples ?? null,
+                            neighborSamples: neighborSig?.samples ?? null
+                        });
+                    }
+                }
+
+                mismatches.sort((a, b) => {
+                    if (b.meanAbsDelta !== a.meanAbsDelta) return b.meanAbsDelta - a.meanAbsDelta;
+                    return a.cameraDistanceSq - b.cameraDistanceSq;
+                });
+
+                const limit = Number.isFinite(options.limit) ? Math.max(1, Math.floor(options.limit)) : 50;
+                const result = {
+                    cameraFaceUV,
+                    visibleCount: (visibleTiles || []).length,
+                    sameFaceVisibleCount: sameFaceVisible.length,
+                    candidateTileCount: candidateEntries.length,
+                    mismatchCount: mismatches.length,
+                    worst: mismatches.slice(0, limit)
+                };
+                window.__qtLastLocalHeightMismatchScan = result;
+
+                console.groupCollapsed('[QT-MANUAL] findLocalHeightMismatchPairs');
+                console.log('[QT-MANUAL] localHeightMismatchSummary', {
+                    cameraFaceUV,
+                    visibleCount: result.visibleCount,
+                    sameFaceVisibleCount: result.sameFaceVisibleCount,
+                    candidateTileCount: result.candidateTileCount,
+                    mismatchCount: result.mismatchCount,
+                    reported: result.worst.length
+                });
+                console.log('[QT-MANUAL] localHeightMismatchWorst', result.worst);
+                console.groupEnd();
+                return result;
+            }
+
+            async function findLocalGeometryOutliers(options = {}) {
+                const quadtreeGPU = getQuadtreeGPU();
+                const tileManager = getTileManager();
+                const tileStreamer = getTileStreamer();
+                if (!quadtreeGPU || !tileManager || !tileStreamer) {
+                    console.warn('[QT-MANUAL] findLocalGeometryOutliers: GPU quadtree is not ready');
+                    return null;
+                }
+
+                const cameraFaceUV = getCameraFaceUV();
+                if (!cameraFaceUV) {
+                    console.warn('[QT-MANUAL] findLocalGeometryOutliers: camera face UV is not available');
+                    return null;
+                }
+
+                const args = await tileManager.debugReadIndirectArgs?.();
+                const totalInstances = Array.isArray(args)
+                    ? args.reduce((sum, item) => sum + (item.instanceCount || 0), 0)
+                    : 0;
+                if (totalInstances <= 0) {
+                    console.warn('[QT-MANUAL] findLocalGeometryOutliers: no emitted instances');
+                    return null;
+                }
+
+                const instances = await quadtreeGPU.debugReadInstancesRange?.(0, totalInstances, totalInstances);
+                const sameFace = (instances || [])
+                    .map((inst, index) => {
+                        const tile = deriveTileCoordsFromInstance(inst);
+                        if (!tile || tile.face !== cameraFaceUV.face) return null;
+                        return {
+                            index,
+                            inst,
+                            tile,
+                            distanceSq: tileCenterDistanceSqToFaceUV(tile, cameraFaceUV)
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => a.distanceSq - b.distanceSq);
+
+                const maxCandidateTiles = Number.isFinite(options.maxCandidateTiles)
+                    ? Math.max(1, Math.floor(options.maxCandidateTiles))
+                    : 64;
+                const maxDistanceUV = Number.isFinite(options.maxDistanceUV)
+                    ? Math.max(0.001, options.maxDistanceUV)
+                    : 0.12;
+                const maxDistanceSq = maxDistanceUV * maxDistanceUV;
+                const candidates = sameFace
+                    .filter(entry => entry.distanceSq <= maxDistanceSq)
+                    .slice(0, maxCandidateTiles);
+
+                const duplicateCounts = new Map();
+                for (const entry of sameFace) {
+                    const key = tileKey(entry.tile);
+                    duplicateCounts.set(key, (duplicateCounts.get(key) || 0) + 1);
+                }
+
+                const statsCache = new Map();
+                async function getHeightStatsForLayer(layer) {
+                    if (!Number.isInteger(layer)) return null;
+                    if (statsCache.has(layer)) return statsCache.get(layer);
+                    const stats = await tileStreamer.debugReadArrayLayerStats('height', layer, 8);
+                    statsCache.set(layer, stats);
+                    return stats;
+                }
+
+                const rows = [];
+                for (const entry of candidates) {
+                    const cpu = tileStreamer.debugLookup(
+                        entry.tile.face,
+                        entry.tile.depth,
+                        entry.tile.x,
+                        entry.tile.y
+                    );
+                    const stats = await getHeightStatsForLayer(entry.inst.layer);
+                    const heightMin = stats?.min?.[0] ?? null;
+                    const heightMax = stats?.max?.[0] ?? null;
+                    const heightMean = stats?.mean?.[0] ?? null;
+                    const heightRange = Number.isFinite(heightMin) && Number.isFinite(heightMax)
+                        ? (heightMax - heightMin)
+                        : null;
+
+                    rows.push({
+                        index: entry.index,
+                        tile: entry.tile,
+                        layer: entry.inst.layer,
+                        lod: entry.inst.lod,
+                        uvScale: entry.inst.uvScale,
+                        uvOffset: entry.inst.uvOffset,
+                        chunkSizeUV: entry.inst.chunkSizeUV,
+                        edgeMask: entry.inst.edgeMask,
+                        neighborLODs: entry.inst.neighborLODs,
+                        distanceSq: entry.distanceSq,
+                        cpuFound: !!cpu?.found,
+                        cpuLayer: cpu?.layer ?? null,
+                        cpuSlot: cpu?.slot ?? null,
+                        gpuMatchesCpuLayer: !!(cpu?.found && cpu.layer === entry.inst.layer),
+                        duplicateCount: duplicateCounts.get(tileKey(entry.tile)) || 0,
+                        heightMin,
+                        heightMax,
+                        heightMean,
+                        heightRange
+                    });
+                }
+
+                const finiteRanges = rows.map(r => r.heightRange).filter(v => Number.isFinite(v)).sort((a, b) => a - b);
+                const finiteMeans = rows.map(r => r.heightMean).filter(v => Number.isFinite(v)).sort((a, b) => a - b);
+                function percentile(sorted, t) {
+                    if (sorted.length === 0) return null;
+                    const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor(t * (sorted.length - 1))));
+                    return sorted[idx];
+                }
+                const rangeP50 = percentile(finiteRanges, 0.5);
+                const rangeP90 = percentile(finiteRanges, 0.9);
+                const meanP10 = percentile(finiteMeans, 0.1);
+                const meanP90 = percentile(finiteMeans, 0.9);
+
+                const outliers = rows.map(row => {
+                    let score = 0;
+                    const reasons = [];
+
+                    if (!row.cpuFound) {
+                        score += 40;
+                        reasons.push('cpu-missing');
+                    }
+                    if (row.cpuFound && !row.gpuMatchesCpuLayer) {
+                        score += 60;
+                        reasons.push('layer-mismatch');
+                    }
+                    if ((row.duplicateCount || 0) > 1) {
+                        score += 50 * (row.duplicateCount - 1);
+                        reasons.push(`duplicate-x${row.duplicateCount}`);
+                    }
+                    if (Math.abs((row.uvScale ?? 1) - 1) > 0.001) {
+                        score += 25;
+                        reasons.push('uvScale');
+                    }
+                    if (row.edgeMask) {
+                        score += 4;
+                    }
+                    if (Number.isFinite(row.heightRange) && Number.isFinite(rangeP90) && row.heightRange > rangeP90 * 1.5) {
+                        score += 30;
+                        reasons.push('range-outlier');
+                    }
+                    if (Number.isFinite(row.heightMean) && Number.isFinite(meanP10) && row.heightMean < meanP10) {
+                        score += 8;
+                    }
+                    if (Number.isFinite(row.heightMean) && Number.isFinite(meanP90) && row.heightMean > meanP90) {
+                        score += 8;
+                    }
+
+                    return {
+                        ...row,
+                        score,
+                        reasons
+                    };
+                }).sort((a, b) => {
+                    if (b.score !== a.score) return b.score - a.score;
+                    if ((b.heightRange ?? -Infinity) !== (a.heightRange ?? -Infinity)) {
+                        return (b.heightRange ?? -Infinity) - (a.heightRange ?? -Infinity);
+                    }
+                    return a.distanceSq - b.distanceSq;
+                });
+
+                const limit = Number.isFinite(options.limit) ? Math.max(1, Math.floor(options.limit)) : 32;
+                const result = {
+                    cameraFaceUV,
+                    totalInstances,
+                    sameFaceInstanceCount: sameFace.length,
+                    candidateTileCount: candidates.length,
+                    rangeP50,
+                    rangeP90,
+                    meanP10,
+                    meanP90,
+                    worst: outliers.slice(0, limit)
+                };
+                window.__qtLastLocalGeometryOutlierScan = result;
+
+                console.groupCollapsed('[QT-MANUAL] findLocalGeometryOutliers');
+                console.log('[QT-MANUAL] localGeometryOutlierSummary', {
+                    cameraFaceUV,
+                    totalInstances,
+                    sameFaceInstanceCount: sameFace.length,
+                    candidateTileCount: candidates.length,
+                    rangeP50,
+                    rangeP90,
+                    meanP10,
+                    meanP90,
+                    reported: result.worst.length
+                });
+                console.log('[QT-MANUAL] localGeometryOutlierWorst', result.worst);
+                console.groupEnd();
+                return result;
+            }
+
+            async function capture(options = {}) {
+                const tileManager = getTileManager();
+                const quadtreeGPU = getQuadtreeGPU();
+                const tileStreamer = getTileStreamer();
+                if (!tileManager || !quadtreeGPU) {
+                    console.warn('[QT-MANUAL] GPU quadtree is not ready');
+                    return null;
+                }
+
+                const instanceSampleCount = Number.isFinite(options.instanceSampleCount)
+                    ? Math.max(16, Math.floor(options.instanceSampleCount))
+                    : 128;
+                const candidateLimit = Number.isFinite(options.candidateLimit)
+                    ? Math.max(1, Math.floor(options.candidateLimit))
+                    : 4;
+                const inspectNeighbors = options.inspectNeighbors !== false;
+                const inspectParents = options.inspectParents !== false;
+
+                console.groupCollapsed('[QT-MANUAL] capture start');
+
+                const statusResult = await status();
+                const sampleResult = await sampleInstances(instanceSampleCount);
+                const instances = sampleResult?.instances || [];
+
+                const scored = instances
+                    .map((inst, index) => {
+                        const tile = deriveTileCoordsFromInstance(inst);
+                        if (!tile) return null;
+                        const nl = inst.neighborLODs || {};
+                        const neighborVals = [nl.left, nl.right, nl.bottom, nl.top]
+                            .filter(v => Number.isFinite(v));
+                        const neighborSpread = neighborVals.length > 0
+                            ? Math.max(...neighborVals) - Math.min(...neighborVals)
+                            : 0;
+                        const edgeBits = inst.edgeMask || 0;
+                        const edgeBitCount =
+                            ((edgeBits >> 0) & 1) +
+                            ((edgeBits >> 1) & 1) +
+                            ((edgeBits >> 2) & 1) +
+                            ((edgeBits >> 3) & 1);
+                        const sameDepthNeighbors = buildNeighborTiles(tile);
+                        const missingNeighborCount = tileStreamer
+                            ? sameDepthNeighbors.filter(n => !tileStreamer.debugLookup(n.face, n.depth, n.x, n.y)?.found).length
+                            : 0;
+                        const score =
+                            edgeBitCount * 10 +
+                            neighborSpread * 5 +
+                            missingNeighborCount * 20 +
+                            (Math.abs((inst.uvScale ?? 1) - 1) > 0.001 ? 50 : 0);
+                        return {
+                            index,
+                            tile,
+                            inst,
+                            edgeBitCount,
+                            neighborSpread,
+                            missingNeighborCount,
+                            score
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.score - a.score);
+
+                const chosen = dedupeTiles(scored.slice(0, candidateLimit).map(entry => entry.tile));
+                const tilesToInspect = [];
+
+                for (const tile of chosen) {
+                    tilesToInspect.push(tile);
+                    if (inspectNeighbors) {
+                        tilesToInspect.push(...buildNeighborTiles(tile));
+                    }
+                }
+
+                const dedupedInspect = dedupeTiles(tilesToInspect);
+                console.log('[QT-MANUAL] captureCandidates', {
+                    chosen,
+                    inspectCount: dedupedInspect.length,
+                    scoredTop: scored.slice(0, candidateLimit).map(entry => ({
+                        index: entry.index,
+                        face: entry.tile.face,
+                        depth: entry.tile.depth,
+                        x: entry.tile.x,
+                        y: entry.tile.y,
+                        layer: entry.inst.layer,
+                        uvScale: entry.inst.uvScale,
+                        edgeMask: entry.inst.edgeMask,
+                        neighborLODs: entry.inst.neighborLODs,
+                        missingNeighborCount: entry.missingNeighborCount,
+                        score: entry.score
+                    }))
+                });
+
+                const inspections = [];
+                for (const tile of dedupedInspect) {
+                    inspections.push(await inspectTile(tile, null, null, null, {
+                        includeParents: inspectParents,
+                        sampleSize: 8,
+                        readGpuTable: true
+                    }));
+                }
+
+                const result = {
+                    status: statusResult,
+                    sample: sampleResult,
+                    chosen,
+                    inspections
+                };
+                window.__qtLastCapture = result;
+                console.log('[QT-MANUAL] capture done', result);
+                console.groupEnd();
+                return result;
+            }
+
+            function saveCapture(data = window.__qtLastCapture, filename = null) {
+                if (!data) {
+                    console.warn('[QT-MANUAL] no capture data available to save');
+                    return false;
+                }
+                const name = filename || `qt-manual-capture-${Date.now()}.json`;
+                const blob = new Blob([JSON.stringify(data, null, 2)], {
+                    type: 'application/json'
+                });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = name;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+                console.log('[QT-MANUAL] savedCapture', { filename: name });
+                return true;
+            }
+
+            async function sampleInstances(maxToRead = 32) {
+                const quadtreeGPU = getQuadtreeGPU();
+                const tileManager = getTileManager();
+                if (!quadtreeGPU || !tileManager) {
+                    console.warn('[QT-MANUAL] quadtree GPU is not ready');
+                    return null;
+                }
+
+                const rawArgs = await tileManager.debugReadIndirectArgs?.();
+                const args = Array.isArray(rawArgs) ? rawArgs : [];
+                const totalInstances = args.reduce((sum, item) => sum + (item.instanceCount || 0), 0);
+                if (totalInstances <= 0) {
+                    console.warn('[QT-MANUAL] no terrain instances to sample');
+                    return { args, instances: [] };
+                }
+
+                const readCount = Math.min(totalInstances, Math.max(1, Math.floor(maxToRead)));
+                const instances = await quadtreeGPU.debugReadInstancesRange?.(0, totalInstances, readCount);
+                console.groupCollapsed(`[QT-MANUAL] sampleInstances read=${readCount}/${totalInstances}`);
+                console.table((instances || []).map((inst, index) => ({
+                    index,
+                    face: inst.face,
+                    lod: inst.lod,
+                    layer: inst.layer,
+                    uvScale: inst.uvScale,
+                    chunkU: inst.chunkLocation?.x,
+                    chunkV: inst.chunkLocation?.y,
+                    chunkSizeUV: inst.chunkSizeUV,
+                    edgeMask: inst.edgeMask
+                })));
+                console.log('[QT-MANUAL] raw', { args, instances });
+                console.groupEnd();
+                return { args, instances };
+            }
+
+            async function status() {
+                const tileManager = getTileManager();
+                const tileStreamer = getTileStreamer();
+                const quadtreeGPU = getQuadtreeGPU();
+                if (!tileManager || !tileStreamer || !quadtreeGPU) {
+                    console.warn('[QT-MANUAL] GPU quadtree is not ready');
+                    return null;
+                }
+
+                const metaArgs = await tileManager.debugReadIndirectArgs?.();
+                const statusSummary = {
+                    terrainDebugMode: getTerrainDebugMode(),
+                    poolUsed: tileStreamer._tileInfo?.size ?? 0,
+                    poolTotal: tileStreamer.tilePoolSize ?? 0,
+                    freeLayers: tileStreamer.arrayPool?.freeLayers?.length ?? 0,
+                    dirtySlots: tileStreamer._dirtySlots?.size ?? 0,
+                    pendingCopies: tileStreamer.arrayPool?._pendingCopies?.length ?? 0,
+                    pendingGenerations: tileStreamer._generationQueue?.queue?.length ?? 0,
+                    activeGenerations: tileStreamer._generationQueue?.active ?? 0,
+                    maxVisibleTiles: quadtreeGPU.maxVisibleTiles ?? 0,
+                    totalInstances: Array.isArray(metaArgs)
+                        ? metaArgs.reduce((sum, item) => sum + (item.instanceCount || 0), 0)
+                        : 0
+                };
+
+                console.groupCollapsed('[QT-MANUAL] status');
+                console.table([statusSummary]);
+                console.log('[QT-MANUAL] raw', { statusSummary, metaArgs, hashStats: tileStreamer.getHashTableStats?.() ?? null });
+                console.groupEnd();
+                return { statusSummary, metaArgs, hashStats: tileStreamer.getHashTableStats?.() ?? null };
+            }
+
+            async function setTerrainDebugMode(mode) {
+                await engine.setTerrainDebugMode(mode | 0);
+                console.info(`[QT-MANUAL] terrainDebugMode=${mode | 0}`);
+            }
+
+            Object.assign(window.qtDiag, {
+                help() {
+                    console.log([
+                        'Filter tag: QT-MANUAL',
+                        'window.qtDiag.status()',
+                        'window.qtDiag.sampleInstances(64)',
+                        'window.qtDiag.inspectTile(face, depth, x, y)',
+                        'window.qtDiag.coverage(face, depth, x, y)',
+                        'window.qtDiag.heightSignature(face, depth, x, y)',
+                        'window.qtDiag.inspectTile({ face, depth, x, y }, null, null, null, { includeParents: true, sampleSize: 8 })',
+                        'window.qtDiag.capture()',
+                        'window.qtDiag.captureCoverage()',
+                        'window.qtDiag.findCoverageHoles()',
+                        'window.qtDiag.findHeightMismatchPairs()',
+                        'window.qtDiag.findLocalHeightMismatchPairs()',
+                        'window.qtDiag.findLocalGeometryOutliers()',
+                        'window.qtDiag.saveCapture()',
+                        'window.qtDiag.setTerrainDebugMode(mode)'
+                    ].join('\n'));
+                },
+                status,
+                sampleInstances,
+                inspectTile,
+                heightSignature,
+                coverage,
+                capture,
+                captureCoverage,
+                findCoverageHoles,
+                findHeightMismatchPairs,
+                findLocalHeightMismatchPairs,
+                findLocalGeometryOutliers,
+                saveCapture,
+                setTerrainDebugMode
+            });
+        }
+        installQuadtreeDiagnostics(gameEngine);
+        
+        // Loading screen
+        const loadingScreen = document.getElementById('loading-screen');
+        const debugPanel = document.getElementById('debug-panel');
+        
+        // Initialize game
+        async function init() {
+            try {
+                await gameEngine.start();
+
+                console.log('Game initialized');
+                
+                // Hide loading screen with fade
+                loadingScreen.style.transition = 'opacity 0.5s';
+                loadingScreen.style.opacity = '0';
+                setTimeout(() => {
+                    loadingScreen.style.display = 'none';
+                }, 500);
+                
+                // Start game loop
+                let lastTime = performance.now();
+                let frameCount = 0;
+                let fpsTime = 0;
+
+                const camera = gameEngine.camera;
+                const forward = new THREE.Vector3()
+                    .subVectors(camera.target, camera.position)
+                    .normalize();
+                const spawnPos = new THREE.Vector3()
+                    .copy(camera.position)
+                    .addScaledVector(forward, 40.0);
+              /*  const m = new THREE.Matrix4().compose(
+                    spawnPos,
+                    new THREE.Quaternion().setFromAxisAngle(
+                        new THREE.Vector3(0, 0, 1),
+                        Math.PI * 0.5
+                    ),
+                    new THREE.Vector3(100, 100, 100)
+                );*/
+            //    await gameEngine.renderer.loadGLB('/assets/test-wiz.glb', m);
+                function gameLoop(currentTime) {
+                    const deltaTime = (currentTime - lastTime) / 1000;
+                    lastTime = currentTime;
+                    
+                    // FPS counter
+                    frameCount++;
+                    fpsTime += deltaTime;
+                    if (fpsTime >= 1.0) {
+                        if (debugMode) {
+                            document.getElementById('fps').textContent = Math.round(frameCount / fpsTime);
+                        }
+                        frameCount = 0;
+                        fpsTime = 0;
+                    }
+                    
+               
+                    
+                    const clampedDelta = Math.min(deltaTime, 0.1);
+                    gameEngine.update(clampedDelta);
+                    gameEngine.render(clampedDelta);
+                    
+                    requestAnimationFrame(gameLoop);
+                    
+                }
+                requestAnimationFrame(gameLoop);
+                
+            } catch (error) {
+                console.error('Failed to initialize game:', error);
+                loadingScreen.innerHTML = `
+                    <div style="color: #ff4444; text-align: center;">
+                        <h2>Failed to Initialize</h2>
+                        <p>${error.message}</p>
+                        <p style="font-size: 12px; margin-top: 20px;">Check console for details</p>
+                    </div>
+                `;
+            }
+        }
+        
+        // Keyboard controls
+        window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'd') {
+                debugMode = !debugMode;
+                debugPanel.style.display = debugMode ? 'block' : 'none';
+            }
+        });
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            gameEngine.handleResize();
+        });
+        
+        // Start when page loads
+        window.addEventListener('load', init);
+        
+        // Expose for debugging
+        window.gameEngine = gameEngine;
+        
+        // Example audio input setup (for Hing)
+        window.setupAudioInput = (callback) => gameEngine.setupAudioInput(callback);
+        window.sendPitchEvent = (event, intensity) => gameEngine.onPitchDetected(event, intensity);
+    </script>
+</body>
+</html>
