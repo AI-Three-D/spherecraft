@@ -499,6 +499,12 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const midMaxLod = Number.isFinite(terrainShaderConfig.midMaxLOD)
         ? Math.max(nearMaxLod, Math.floor(terrainShaderConfig.midMaxLOD))
         : 4;
+    const nearToMidFadeStartChunks = Number.isFinite(terrainShaderConfig.nearToMidFadeStartChunks)
+        ? Math.max(0.0, terrainShaderConfig.nearToMidFadeStartChunks)
+        : 2.5;
+    const nearToMidFadeEndChunks = Number.isFinite(terrainShaderConfig.nearToMidFadeEndChunks)
+        ? Math.max(nearToMidFadeStartChunks + 0.01, terrainShaderConfig.nearToMidFadeEndChunks)
+        : 4.0;
     const pointSampleLodStart = Number.isFinite(terrainShaderConfig.pointSampleLodStart)
         ? Math.max(0, Math.floor(terrainShaderConfig.pointSampleLodStart))
         : 2;
@@ -537,6 +543,7 @@ if (enableSplat && lod <= splatBlendMaxLod) {
 } else if (enableSplat) {
     splatTier = 1;
 }
+    const enableNearToMidFade = lod === nearMaxLod;
     const enableMacroOverlay = lod >= macroStartLod;
     const usePointSampling = false;//lod >= pointSampleLodStart;
     const enableClusteredLights = lod <= clusteredMaxLod;
@@ -606,7 +613,18 @@ fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
     );
     // r32float is unfilterable on most hardware — manual bilinear.
     // The mask is low-frequency so this is the only filter it needs.
-    return clamp(sampleRGBA32FBilinear(terrainAOMask, uv, layer).r, 0.0, 1.0);
+    let ao = clamp(sampleRGBA32FBilinear(terrainAOMask, uv, layer).r, 0.0, 1.0);
+
+    // Terrain AO is baked per tile, so cross-border occluders can produce
+    // visibly cut masks at quadtree edges. Fade AO back to neutral near the
+    // tile border to suppress those seams.
+    let tileTexSize = vec2<f32>(textureDimensions(terrainAOMask)) * max(input.vAtlasScale, 0.000001);
+    let borderTexels = 4.0;
+    let borderUv = borderTexels / max(min(tileTexSize.x, tileTexSize.y), 1.0);
+    let edgeDist = min(min(input.vUv.x, 1.0 - input.vUv.x), min(input.vUv.y, 1.0 - input.vUv.y));
+    let interiorWeight = smoothstep(borderUv, borderUv * 2.5, edgeDist);
+
+    return mix(1.0, ao, interiorWeight);
 }
 ` : `
 fn sampleTerrainAO(_input: FragmentInput, _layer: i32) -> f32 {
@@ -715,6 +733,9 @@ const AP_FADE_END: f32 = ${apFadeEndMeters.toFixed(1)};
 
 const ENABLE_SPLAT: bool = ${enableSplat ? 'true' : 'false'};
 const SPLAT_TIER: i32 = ${splatTier};
+const ENABLE_NEAR_TO_MID_FADE: bool = ${enableNearToMidFade ? 'true' : 'false'};
+const NEAR_TO_MID_FADE_START_CHUNKS: f32 = ${nearToMidFadeStartChunks.toFixed(2)};
+const NEAR_TO_MID_FADE_END_CHUNKS: f32 = ${nearToMidFadeEndChunks.toFixed(2)};
 const ENABLE_MACRO_OVERLAY: bool = ${enableMacroOverlay ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
 const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
@@ -1124,25 +1145,37 @@ fn buildSphericalTBN(sphereDir: vec3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(tangent, bitangent, up);
 }
 
+fn calculateGeometricNormal(input: FragmentInput) -> vec3<f32> {
+    let dpdxWorld = dpdx(input.vWorldPosition);
+    let dpdyWorld = dpdy(input.vWorldPosition);
+    var n = normalize(cross(dpdyWorld, dpdxWorld));
+    if (dot(n, n) < 0.01) {
+        n = normalize(input.vSphereDir);
+    }
+    if (dot(n, input.vSphereDir) < 0.0) {
+        n = -n;
+    }
+    return n;
+}
 
 fn calculateNormal(input: FragmentInput, layer: i32) -> vec3<f32> {
     let uv = applyChunkAtlasUV(input.vUv, normalTexture, input.vAtlasOffset, input.vAtlasScale);
     ${normalTextureFilterable
         ? `
-    // .rg = hemi-oct encoded tangent normal in [0,1].
-    // .b  = slope (0 = flat, 1 = vertical) — available for future use.
-    // chunkLinearSampler: clamp-to-edge + trilinear; see binding 8 comment.
-    let s = textureSample(normalTexture, chunkLinearSampler, uv, layer);`
+    // Diagnostic: force mip 0 to test whether border seams are being widened
+    // by normal-map mip generation / trilinear blending across inconsistent tiles.
+    let s = textureSampleLevel(normalTexture, chunkLinearSampler, uv, layer, 0.0);`
         : `
-    // Unfilterable path: manual bilinear, same decode.
     let s = sampleRGBA32FBilinear(normalTexture, uv, layer);`
     }
-    // [0,1] → [-1,1], then hemi-oct → unit tangent-space vector.
     let tangentNormal = hemiOctDecode(s.rg * 2.0 - 1.0);
     let TBN = buildSphericalTBN(input.vSphereDir);
-    let worldNormal = normalize(TBN * tangentNormal);
+    var worldNormal = normalize(TBN * tangentNormal);
     if (dot(worldNormal, worldNormal) < 0.01) {
-        return normalize(input.vSphereDir);
+        worldNormal = normalize(input.vSphereDir);
+    }
+    if (dot(worldNormal, input.vSphereDir) < 0.0) {
+        worldNormal = -worldNormal;
     }
     return worldNormal;
 }
@@ -1485,6 +1518,15 @@ fn splatPrimaryWeight(splat: SplatData, local: vec2<f32>) -> f32 {
         0.0,
         1.0
     );
+}
+
+fn computeNearToMidDetailFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_NEAR_TO_MID_FADE) {
+        return 1.0;
+    }
+    let fadeStart = max(fragUniforms.chunkWidth * NEAR_TO_MID_FADE_START_CHUNKS, 0.0);
+    let fadeEnd = max(fragUniforms.chunkWidth * NEAR_TO_MID_FADE_END_CHUNKS, fadeStart + 0.001);
+    return 1.0 - smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
 }
 
 
@@ -1928,6 +1970,9 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     //      "not bound at all". The 1×1 dummy shows near-black (~0.004).
     //      A real 64×64 mask shows grey (~0.25). 128×128 shows ~0.5.
     if (debugMode == 19) {
+        if (!ENABLE_TERRAIN_AO) {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
         let dims = textureDimensions(terrainAOMask);
         let v = f32(dims.x) / 256.0;
         return vec4<f32>(v, v, v, 1.0);
@@ -1938,6 +1983,9 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     //      UV bias/scale is wrong for this tile. (Only diverges from 16
     //      on fallback tiles where uvScale < 1.)
     if (debugMode == 20) {
+        if (!ENABLE_TERRAIN_AO) {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
         let dims = vec2<i32>(textureDimensions(terrainAOMask));
         let mc = dims - vec2<i32>(1);
         let c  = clamp(vec2<i32>(input.vUv * vec2<f32>(dims)), vec2<i32>(0), mc);
@@ -2017,8 +2065,11 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
 
     // ---- Micro texture (with splat blending) ----
     var microSample: vec4<f32>;
+    let nearToMidDetailFade = computeNearToMidDetailFade(input);
 
     let fallbackTileId = sampleChunkTileId(input, layer);
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
    
     var splatResult: SplatData;
     splatResult.tileId1 = fallbackTileId;
@@ -2030,14 +2081,24 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     splatResult.cellLocal = vec2<f32>(0.0); 
     splatResult.hasBoundary = false;
     splatResult.bilinearValid = false;
+    var dominantTileId = fallbackTileId;
     if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
         splatResult = sampleSplatData(input, layer);
-        microSample = sampleMicroTextureWithSplat(
+        let detailedMicro = sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
         );
+        microSample = detailedMicro;
+        dominantTileId = splatResult.tileId1;
+
+        if (ENABLE_NEAR_TO_MID_FADE && nearToMidDetailFade < 0.999) {
+            let coarseMicro = sampleTileColor(
+                fallbackTileId, worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            microSample = mix(coarseMicro, detailedMicro, nearToMidDetailFade);
+            dominantTileId = select(fallbackTileId, splatResult.tileId1, nearToMidDetailFade > 0.5);
+        }
     } else {
-        let worldTileCoord = floor(input.vWorldPos);
-        let local = fract(input.vWorldPos);
         microSample = sampleTileColor(
             fallbackTileId, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
@@ -2049,13 +2110,17 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     }
 
     // Apply micro procedural detail based on dominant tile type
-    let dominantTileId = splatResult.tileId1;
     let microPatternStyle = getMicroPatternStyle(dominantTileId);
     var baseColor = microSample.rgb;//applyMicroDetail(microSample.rgb, input.vWorldPos, microPatternStyle);
 
      // ---- Macro texture overlay ----
     if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD) {
         var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
+        if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+            let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);
+            let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
+            macroColor = mix(macroColor, detailedMacro, macroFade);
+        }
         let macroStrength = computeMacroBlendStrength(input, layer, 1.0);
         baseColor = mix(baseColor, macroColor, macroStrength);
     }

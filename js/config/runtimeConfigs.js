@@ -27,7 +27,7 @@ function  buildLodPoolConfig(baseChunkSize, worldCoverage, maxLODLevels, slotsBy
     };
   }
 
-  return poolConfig;
+  return poolConfig; 
 }
 function nextPow2(n) {
   let p = 1;
@@ -103,6 +103,8 @@ export function createEngineConfig() {
         fullMaxLOD: 0,
         nearMaxLOD: 2,
         midMaxLOD: 4,
+        nearToMidFadeStartChunks: 2.5,
+        nearToMidFadeEndChunks: 4.0,
         pointSampleLodStart: 2,
         macroStartLod: 2,
         clusteredMaxLod: 1,
@@ -315,7 +317,7 @@ export function createGameDataConfig() {
             qualityLevels: GRASS_QUALITY_LEVELS,
             terrainShadowStrength: 0.18
           },
-          macroTileSpan: 16,   // macro texture covers 16x16 micro tiles (macroScale = 1/macroTileSpan)
+          macroTileSpan: 4,   // macro texture covers 16x16 micro tiles (macroScale = 1/macroTileSpan)
           macroMaxLOD: 3,     // upper LOD bound for macro overlay (lower bound in rendering.terrainShader.macroStartLod)
           // ── Tile transition blend rules ──────────────────────────────────────
           // Each entry selects which blend algorithm to use when two tile types

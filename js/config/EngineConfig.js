@@ -43,6 +43,14 @@ export class EngineConfig {
         fullMaxLOD: requireInt(terrainShader.fullMaxLOD ?? 0, 'rendering.terrainShader.fullMaxLOD', 0),
         nearMaxLOD: requireInt(terrainShader.nearMaxLOD ?? 2, 'rendering.terrainShader.nearMaxLOD', 0),
         midMaxLOD: requireInt(terrainShader.midMaxLOD ?? 4, 'rendering.terrainShader.midMaxLOD', 0),
+        nearToMidFadeStartChunks: requireNumber(
+          terrainShader.nearToMidFadeStartChunks ?? 2.5,
+          'rendering.terrainShader.nearToMidFadeStartChunks'
+        ),
+        nearToMidFadeEndChunks: requireNumber(
+          terrainShader.nearToMidFadeEndChunks ?? 4.0,
+          'rendering.terrainShader.nearToMidFadeEndChunks'
+        ),
         pointSampleLodStart: requireInt(terrainShader.pointSampleLodStart ?? 2, 'rendering.terrainShader.pointSampleLodStart', 0),
         macroStartLod: requireInt(terrainShader.macroStartLod ?? 2, 'rendering.terrainShader.macroStartLod', 0),
         clusteredMaxLod: requireInt(terrainShader.clusteredMaxLod ?? 1, 'rendering.terrainShader.clusteredMaxLod', 0),
