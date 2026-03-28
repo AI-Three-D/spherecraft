@@ -136,6 +136,13 @@ export class TileGenerator {
         return promise;
     }
 
+    async generateDiagnosticTile(tileAddr, options = {}) {
+        return this._generateTileInternal(tileAddr, {
+            includeBaseHeight: options?.includeBaseHeight === true,
+            trackStats: false
+        });
+    }
+
     /**
      * Check if a tile is currently being generated.
      * @param {TileAddress} tileAddr
@@ -197,8 +204,10 @@ export class TileGenerator {
         }
     }
 
-    async _generateTileInternal(tileAddr) {
+    async _generateTileInternal(tileAddr, options = {}) {
         const startTime = performance.now();
+        const includeBaseHeight = options?.includeBaseHeight === true;
+        const trackStats = options?.trackStats !== false;
     
         const gridSize = 1 << tileAddr.depth;
         const textures = {};
@@ -380,7 +389,10 @@ export class TileGenerator {
             splatPass
         });
 
-        const temporaryTextures = [gpuHeightBase];
+        const temporaryTextures = [];
+        if (gpuHeightBase && !includeBaseHeight) {
+            temporaryTextures.push(gpuHeightBase);
+        }
         if (tileTarget?.requiresResolve) {
             temporaryTextures.push(tileTarget.storageTexture);
         }
@@ -410,6 +422,10 @@ export class TileGenerator {
             textures.height = this._wrapGPUTexture(
                 gpuHeight, this.textureSize, heightFormat, true);
         }
+        if (includeBaseHeight && gpuHeightBase) {
+            textures.baseHeight = this._wrapGPUTexture(
+                gpuHeightBase, this.textureSize, heightFormat, true);
+        }
         if (this.requiredTypes.includes('normal') && gpuNormal) {
             textures.normal = this._wrapGPUTexture(
                 gpuNormal, this.textureSize, normalFormat, false);
@@ -437,16 +453,18 @@ export class TileGenerator {
         }
     
         // ── Update stats ──────────────────────────────────────────
-        const elapsed = performance.now() - startTime;
-        this._stats.totalGenerated++;
-        this._stats.totalTimeMs += elapsed;
+        if (trackStats) {
+            const elapsed = performance.now() - startTime;
+            this._stats.totalGenerated++;
+            this._stats.totalTimeMs += elapsed;
     
-        if (!this._stats.byDepth.has(tileAddr.depth)) {
-            this._stats.byDepth.set(tileAddr.depth, { count: 0, totalMs: 0 });
+            if (!this._stats.byDepth.has(tileAddr.depth)) {
+                this._stats.byDepth.set(tileAddr.depth, { count: 0, totalMs: 0 });
+            }
+            const depthStats = this._stats.byDepth.get(tileAddr.depth);
+            depthStats.count++;
+            depthStats.totalMs += elapsed;
         }
-        const depthStats = this._stats.byDepth.get(tileAddr.depth);
-        depthStats.count++;
-        depthStats.totalMs += elapsed;
     
         return textures;
     }

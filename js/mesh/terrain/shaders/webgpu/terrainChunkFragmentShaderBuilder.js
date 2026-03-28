@@ -919,6 +919,52 @@ fn applyChunkAtlasUV_2d(uv: vec2<f32>, texSize: vec2<f32>, atlasOffset: vec2<f32
     return (parentLocalUV * maxF + vec2<f32>(0.5)) / texSize;
 }
 
+fn decodeDebugEdgeMask(packedTopAndMask: f32) -> i32 {
+    let packed = fract(packedTopAndMask);
+    return clamp(i32(round(packed * 4096.0)), 0, 4095);
+}
+
+fn computeChunkAtlasRect(texSize: vec2<i32>, atlasOffset: vec2<f32>, atlasScale: f32) -> vec4<i32> {
+    let texSizeF = vec2<f32>(texSize);
+    let width = max(1, i32(floor(texSizeF.x * atlasScale + 0.5)));
+    let height = max(1, i32(floor(texSizeF.y * atlasScale + 0.5)));
+    let minX = clamp(i32(floor(atlasOffset.x * texSizeF.x + 0.5)), 0, texSize.x - 1);
+    let minY = clamp(i32(floor(atlasOffset.y * texSizeF.y + 0.5)), 0, texSize.y - 1);
+    let maxX = clamp(minX + width - 1, minX, texSize.x - 1);
+    let maxY = clamp(minY + height - 1, minY, texSize.y - 1);
+    return vec4<i32>(minX, minY, maxX, maxY);
+}
+
+struct AtlasLeakRisk {
+    any: bool,
+    leakX: bool,
+    leakY: bool,
+    isFallback: bool,
+};
+
+fn computeAtlasBilinearLeakRisk(
+    uv: vec2<f32>,
+    tex: texture_2d_array<f32>,
+    atlasOffset: vec2<f32>,
+    atlasScale: f32
+) -> AtlasLeakRisk {
+    let texSizeI = vec2<i32>(textureDimensions(tex));
+    let texSizeF = vec2<f32>(texSizeI);
+    let rect = computeChunkAtlasRect(texSizeI, atlasOffset, atlasScale);
+    let atlasUV = applyChunkAtlasUV_2d(uv, texSizeF, atlasOffset, atlasScale);
+    let coord = atlasUV * texSizeF - 0.5;
+    let base = floor(coord);
+    let leakX = base.x < f32(rect.x) || (base.x + 1.0) > f32(rect.z);
+    let leakY = base.y < f32(rect.y) || (base.y + 1.0) > f32(rect.w);
+
+    var risk: AtlasLeakRisk;
+    risk.any = leakX || leakY;
+    risk.leakX = leakX;
+    risk.leakY = leakY;
+    risk.isFallback = atlasScale < 0.999;
+    return risk;
+}
+
 fn snappedTileCenterUV(uv01: vec2<f32>, tilesPerSide: f32) -> vec2<f32> {
     let t = uv01 * vec2<f32>(tilesPerSide, tilesPerSide);
     let idx = clamp(floor(t), vec2<f32>(0.0), vec2<f32>(tilesPerSide - 1.0));
@@ -1889,6 +1935,46 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         let v = select(0.0, 1.0, splat.bilinearValid);
         let base = vec3<f32>(v, v, v);
         return vec4<f32>(mix(base, vec3<f32>(0.1, 0.6, 1.0), grid * 0.35), 1.0);
+    }
+    if (debugMode == 33) {
+        let edgeMask = decodeDebugEdgeMask(input.vDebugEdge.w);
+        let isFallback = input.vAtlasScale < 0.999;
+        let hasEdgeMask = edgeMask != 0;
+        let edgeDist = min(min(input.vUv.x, input.vUv.y), min(1.0 - input.vUv.x, 1.0 - input.vUv.y));
+        let edgeGlow = 1.0 - smoothstep(0.03, 0.07, edgeDist);
+        var base = vec3<f32>(0.10, 0.62, 0.16);
+        if (!isFallback && hasEdgeMask) {
+            base = vec3<f32>(0.10, 0.72, 0.92);
+        }
+        if (isFallback && hasEdgeMask) {
+            base = vec3<f32>(0.95, 0.58, 0.16);
+        }
+        if (isFallback && !hasEdgeMask) {
+            base = vec3<f32>(1.0, 0.18, 0.18);
+        }
+        return vec4<f32>(mix(base, vec3<f32>(1.0), edgeGlow * 0.18), 1.0);
+    }
+    if (debugMode == 34) {
+        let risk = computeAtlasBilinearLeakRisk(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+        let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+        let gridCell = fract(uv * splatSize);
+        let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
+        let grid = 1.0 - smoothstep(0.02, 0.05, edgeDist);
+        var base = vec3<f32>(0.05, 0.10, 0.05);
+        if (risk.isFallback) {
+            base = vec3<f32>(0.28, 0.22, 0.08);
+        }
+        if (risk.leakX && !risk.leakY) {
+            base = vec3<f32>(1.0, 0.18, 0.18);
+        }
+        if (risk.leakY && !risk.leakX) {
+            base = vec3<f32>(0.18, 0.55, 1.0);
+        }
+        if (risk.leakX && risk.leakY) {
+            base = vec3<f32>(1.0, 0.0, 1.0);
+        }
+        return vec4<f32>(mix(base, vec3<f32>(1.0), grid * 0.18), 1.0);
     }
     if (debugMode == 99) {
         return vec4<f32>(1.0, 0.0, 1.0, 1.0);

@@ -483,6 +483,32 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this._fpsFrames = 0;
             this._fpsLastSample = nowMs;
         }
+
+        const keys = this.inputManager.getKeys();
+        const mouseDelta = this.inputManager.getMouseDelta();
+        const wheelDelta = this.inputManager.getWheelDelta();
+
+        if (this.inputManager.consumeKeyPress('KeyU')) {
+            const result = this.renderer?.toggleTerrainManualDiagnosticSnapshot?.('key:u');
+            if (!result) {
+                Logger.warn('[GameEngine] Terrain manual snapshot unavailable');
+            }
+        }
+
+        const terrainSnapshotFrozen = this.renderer?.isTerrainManualDiagnosticFrozen?.() === true;
+        if (terrainSnapshotFrozen) {
+            this.gameState = {
+                time: performance.now(),
+                player: this.spaceship,
+                spaceship: this.spaceship,
+                objects: new Map(),
+                camera: this.camera,
+                altitudeZoneManager: this.altitudeZoneManager
+            };
+            this.updateUI();
+            return;
+        }
+
         this.gameTime.update();
         this._syncStarSystemTimeScale();
 
@@ -500,11 +526,6 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         if (this.altitudeZoneManager) {
             this.altitudeZoneManager.update(cameraRenderPos, deltaTime);
         }
-
-
-        const keys = this.inputManager.getKeys();
-        const mouseDelta = this.inputManager.getMouseDelta();
-        const wheelDelta = this.inputManager.getWheelDelta();
 
         if (this.cameraMode === 'manual') {
             this.updateManualCamera(deltaTime, keys, mouseDelta);
@@ -562,13 +583,14 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         this._renderInFlight = true;
         const clampedDelta = Math.min(Math.max(Number.isFinite(deltaTime) ? deltaTime : 0, 0), 0.1);
+        const terrainSnapshotFrozen = this.renderer?.isTerrainManualDiagnosticFrozen?.() === true;
         if (this.renderer && this.gameState) {
             try {
                 // We pass environmentState to renderer, where WeatherController picks it up.
                 await this.renderer.render(
                     this.gameState,
                     this.environmentState,
-                    clampedDelta,
+                    terrainSnapshotFrozen ? 0 : clampedDelta,
                     this.planetConfig,
                     this.sphericalMapper,
                     this.starSystem
@@ -669,7 +691,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     _resolveTerrainDebugModes(mode) {
-        if (mode >= 25 && mode <= 32) {
+        if (mode >= 25 && mode <= 34) {
             return { generatorMode: 0, fragmentMode: mode };
         }
         if (mode === 0) {
@@ -686,8 +708,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             27: 'Splat BiomeB',
             28: 'Tile Category',
             29: 'Splat Pair Change Mask',
+            30: 'Raw Height',
             31: 'Splat Raw Weight',
             32: 'Splat Bilinear Valid',
+            33: 'Fallback / Stitch Risk',
+            34: 'Atlas Bleed Risk',
             99: 'Fragment Test'
         };
         return names[mode] ?? 'Debug';

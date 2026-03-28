@@ -1615,6 +1615,15 @@ markTilesVisible(tiles) {
         return info?.layer ?? null;
     }
 
+    getLayerDebugInfo(layer) {
+        if (layer === null || layer === undefined) return null;
+        return {
+            layer,
+            ownerKey: this._layerToKey.get(layer) ?? null,
+            copyState: this._debugCopyStateByLayer.get(layer)?.state ?? 'unknown'
+        };
+    }
+
     getLoadedTiles() {
         const tiles = [];
         for (const [key, info] of this._tileInfo) {
@@ -1840,6 +1849,15 @@ markTilesVisible(tiles) {
         };
     }
 
+    async debugReadArrayLayerBuffer(type, layer, width = null, height = null) {
+        if (!this.arrayPool || layer === null || layer === undefined) return null;
+        const texture = this.arrayPool.textures.get(type);
+        if (!texture) return null;
+
+        const format = this.textureFormats[type] || this.arrayPool.formats?.[type] || 'rgba32float';
+        return this._debugReadTextureBuffer(texture, format, width, height, layer);
+    }
+
     async _debugReadTextureTexels(textureLike, format, texelCoords = [], layer = null) {
         const texture = textureLike?._gpuTexture?.texture || textureLike;
         if (!texture) return null;
@@ -1880,6 +1898,48 @@ markTilesVisible(tiles) {
         return {
             format,
             texels: results
+        };
+    }
+
+    async _debugReadTextureBuffer(textureLike, format, width = null, height = null, layer = null) {
+        const texture = textureLike?._gpuTexture?.texture || textureLike;
+        if (!texture) return null;
+
+        const texelBytes = gpuFormatBytesPerTexel(format);
+        if (!Number.isFinite(texelBytes) || texelBytes <= 0) return null;
+
+        const copyWidth = Math.max(1, Math.min(this.tileTextureSize, Math.floor(width ?? this.tileTextureSize)));
+        const copyHeight = Math.max(1, Math.min(this.tileTextureSize, Math.floor(height ?? this.tileTextureSize)));
+        const bytesPerRow = alignTo(copyWidth * texelBytes, 256);
+        const bufferSize = bytesPerRow * copyHeight;
+
+        const staging = this.device.createBuffer({
+            size: bufferSize,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+
+        const encoder = this.device.createCommandEncoder();
+        encoder.copyTextureToBuffer(
+            { texture, origin: { x: 0, y: 0, z: layer ?? 0 } },
+            { buffer: staging, bytesPerRow },
+            [copyWidth, copyHeight, 1]
+        );
+        this.device.queue.submit([encoder.finish()]);
+        await this.device.queue.onSubmittedWorkDone();
+        await staging.mapAsync(GPUMapMode.READ);
+
+        const mapped = staging.getMappedRange();
+        const buffer = mapped.slice(0);
+        staging.unmap();
+        staging.destroy();
+
+        return {
+            format,
+            width: copyWidth,
+            height: copyHeight,
+            texelBytes,
+            bytesPerRow,
+            buffer
         };
     }
 

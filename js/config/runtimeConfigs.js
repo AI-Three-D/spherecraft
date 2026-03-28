@@ -196,11 +196,11 @@ export function createEngineConfig() {
       },
       // ── Stitching diagnostics ─────────────────────────────────────
       // Enables targeted logging to pinpoint cracks/holes.
-      diagnosticsEnabled: true,
+      diagnosticsEnabled: false,
       diagnosticsIntervalFrames: 1,
       diagnosticsSampleInstances: 64,
       // Enable heavy per-readback snapshot logging (includes ScatterDebug).
-      diagnosticSnapshotIntervalFrames: 1,
+      diagnosticSnapshotIntervalFrames: 0,
     },
     generationQueue: {
       maxConcurrentTasks: 32,

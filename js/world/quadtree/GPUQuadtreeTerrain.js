@@ -8,10 +8,12 @@
 
 import { QuadtreeGPU } from './QuadtreeGPU.js';
 import { TileStreamer } from './tileStreamer.js';
+import { TileAddress } from './tileAddress.js';
 import { TerrainGeometryBuilder } from '../../mesh/terrain/terrainGeometryBuilder.js';
 import { Logger } from '../../config/Logger.js';
 
 const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
+const TERRAIN_MANUAL_TAG = '[QTManual]';
 
 
 // GPUQuadtreeTerrain.js
@@ -699,6 +701,26 @@ export class QuadtreeTileManager {
         this._diagLodSegments = [128, 64, 32, 16, 8, 4, 2];
         this._seamDiagTick = 0;
         this._seamDiagSeen = new Map();
+        this._deepSeamDiagTick = 0;
+        this._lastDeepSeamKey = '';
+        this._lightDiagFrame = 0;
+        this._manualDiagId = 0;
+        this._manualDiagState = {
+            status: 'idle',
+            requested: false,
+            frozen: false,
+            running: false,
+            completed: false,
+            reason: '',
+            snapshotId: 0,
+            requestedAt: 0,
+            startedAt: 0,
+            finishedAt: 0,
+            durationMs: 0,
+            lastSummary: null,
+            error: ''
+        };
+        this._manualDiagRunPending = false;
 
         // ── Debug profiling state ────────────────────────────────────
         this._profileFrame = 0;
@@ -796,6 +818,138 @@ export class QuadtreeTileManager {
         Logger.info('[QuadtreeTileManager] Initialized');
     }
 
+    toggleManualDiagnosticSnapshot(reason = 'manual') {
+        if (this._manualDiagState.frozen) {
+            if (this._manualDiagState.running) {
+                Logger.warn(
+                    `${TERRAIN_MANUAL_TAG} snapshot still running id=${this._manualDiagState.snapshotId}`
+                );
+                return this.getManualDiagnosticState();
+            }
+            this._releaseManualDiagnosticSnapshot();
+            return this.getManualDiagnosticState();
+        }
+        if (this._manualDiagState.requested || this._manualDiagState.running) {
+            Logger.warn(
+                `${TERRAIN_MANUAL_TAG} snapshot busy status=${this._manualDiagState.status} ` +
+                `id=${this._manualDiagState.snapshotId}`
+            );
+            return this.getManualDiagnosticState();
+        }
+        this._manualDiagId += 1;
+        this._manualDiagState = {
+            ...this._manualDiagState,
+            status: 'requested',
+            requested: true,
+            frozen: false,
+            running: false,
+            completed: false,
+            reason,
+            snapshotId: this._manualDiagId,
+            requestedAt: performance.now(),
+            startedAt: 0,
+            finishedAt: 0,
+            durationMs: 0,
+            error: ''
+        };
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} snapshot requested id=${this._manualDiagState.snapshotId} reason=${reason}`
+        );
+        return this.getManualDiagnosticState();
+    }
+
+    getManualDiagnosticState() {
+        const state = this._manualDiagState;
+        return state ? {
+            status: state.status,
+            requested: state.requested,
+            frozen: state.frozen,
+            running: state.running,
+            completed: state.completed,
+            reason: state.reason,
+            snapshotId: state.snapshotId,
+            requestedAt: state.requestedAt,
+            startedAt: state.startedAt,
+            finishedAt: state.finishedAt,
+            durationMs: state.durationMs,
+            error: state.error,
+            lastSummary: state.lastSummary
+        } : null;
+    }
+
+    isManualDiagnosticFrozen() {
+        return this._manualDiagState?.frozen === true;
+    }
+
+    _releaseManualDiagnosticSnapshot() {
+        const snapshotId = this._manualDiagState?.snapshotId ?? 0;
+        this._manualDiagState = {
+            ...this._manualDiagState,
+            status: 'idle',
+            requested: false,
+            frozen: false,
+            running: false,
+            completed: false,
+            reason: '',
+            requestedAt: 0,
+            startedAt: 0,
+            finishedAt: 0,
+            durationMs: 0,
+            error: ''
+        };
+        this._manualDiagRunPending = false;
+        Logger.warn(`${TERRAIN_MANUAL_TAG} snapshot released id=${snapshotId}`);
+    }
+
+    _activateManualDiagnosticSnapshotFreeze() {
+        if (!this._manualDiagState?.requested || this._manualDiagState.frozen) {
+            return;
+        }
+        this._manualDiagState = {
+            ...this._manualDiagState,
+            status: 'frozen',
+            requested: false,
+            frozen: true,
+            running: false,
+            completed: false,
+            startedAt: 0,
+            finishedAt: 0,
+            durationMs: 0,
+            error: ''
+        };
+        this._manualDiagRunPending = true;
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} snapshot frozen id=${this._manualDiagState.snapshotId} ` +
+            `reason=${this._manualDiagState.reason}`
+        );
+    }
+
+    _queueManualDiagnosticRun() {
+        if (!this._manualDiagState?.frozen || !this._manualDiagRunPending || this._manualDiagState.running) {
+            return;
+        }
+        this._manualDiagRunPending = false;
+        queueMicrotask(() => {
+            this._runManualDiagnosticSnapshot().catch((err) => {
+                this._manualDiagState = {
+                    ...this._manualDiagState,
+                    status: 'frozen',
+                    running: false,
+                    completed: true,
+                    finishedAt: performance.now(),
+                    durationMs: this._manualDiagState.startedAt > 0
+                        ? performance.now() - this._manualDiagState.startedAt
+                        : 0,
+                    error: err?.message ?? String(err)
+                };
+                Logger.error(
+                    `${TERRAIN_MANUAL_TAG} snapshot failed id=${this._manualDiagState.snapshotId} ` +
+                    `${err?.stack ?? err}`
+                );
+            });
+        });
+    }
+
     get maxGeomLOD() {
         return this._maxGeomLOD;
     }
@@ -857,6 +1011,13 @@ export class QuadtreeTileManager {
         if (!camera || !commandEncoder) return;
 
         this._lastCamera = camera;
+        if (this._manualDiagState?.requested) {
+            this._activateManualDiagnosticSnapshotFreeze();
+        }
+        if (this._manualDiagState?.frozen) {
+            this._queueManualDiagnosticRun();
+            return;
+        }
 
         const dp = this.engineConfig?.gpuQuadtree?.debugProfile;
         const profilingEnabled = dp?.enabled === true;
@@ -942,11 +1103,12 @@ export class QuadtreeTileManager {
 
         this.quadtreeGPU.tick();
         this._maybeReadbackVisibleTiles();
-        this._maybeLogStitchingDiagnostics();
+        this._maybeLogLightweightDiagnostics();
     }
 
     resolveFeedbackReadback() {
         if (!this.isReady()) return;
+        if (this._manualDiagState?.frozen) return;
         const dp = this.engineConfig?.gpuQuadtree?.debugProfile;
         const frozen = dp?.enabled === true && this._profileFrame > (dp.warmupFrames ?? 300);
         if (frozen && dp.freezeFeedback) return;
@@ -1277,6 +1439,613 @@ export class QuadtreeTileManager {
         if (!Number.isFinite(interval) || interval <= 0) return false;
         this._diagFrame = (this._diagFrame + 1) % interval;
         return this._diagFrame === 0;
+    }
+
+    _buildVisibleResidencySummary(tiles) {
+        const summary = {
+            totalVisible: Array.isArray(tiles) ? tiles.length : 0,
+            residentVisible: 0,
+            fallbackVisible: 0,
+            unresolvedVisible: 0,
+            ownVisibleNotReady: 0,
+            fallbackVisibleNotReady: 0,
+            residentOwnerMismatch: 0,
+            fallbackOwnerMismatch: 0,
+            samples: []
+        };
+        if (!Array.isArray(tiles) || tiles.length === 0 || !this.tileStreamer) {
+            return summary;
+        }
+
+        for (const tile of tiles) {
+            const visibleKey = this.tileStreamer._makeKey(tile.face, tile.depth, tile.x, tile.y);
+            const residentInfo = this.tileStreamer._tileInfo.get(visibleKey);
+            if (residentInfo) {
+                summary.residentVisible++;
+                const owner = this.tileStreamer.getLayerDebugInfo?.(residentInfo.layer);
+                const state = owner?.copyState ?? 'unknown';
+                if (state !== 'ready') {
+                    summary.ownVisibleNotReady++;
+                }
+                if ((owner?.ownerKey ?? null) !== visibleKey) {
+                    summary.residentOwnerMismatch++;
+                    if (summary.samples.length < 12) {
+                        summary.samples.push(
+                            `resident f${tile.face}:d${tile.depth}:${tile.x},${tile.y} ` +
+                            `L${residentInfo.layer} owner=${owner?.ownerKey ?? 'null'} state=${state}`
+                        );
+                    }
+                }
+                continue;
+            }
+
+            let depth = tile.depth;
+            let x = tile.x;
+            let y = tile.y;
+            let fallbackInfo = null;
+            let fallbackKey = '';
+            while (depth > 0) {
+                depth--;
+                x >>= 1;
+                y >>= 1;
+                fallbackKey = this.tileStreamer._makeKey(tile.face, depth, x, y);
+                fallbackInfo = this.tileStreamer._tileInfo.get(fallbackKey);
+                if (fallbackInfo) {
+                    break;
+                }
+            }
+            if (!fallbackInfo) {
+                summary.unresolvedVisible++;
+                if (summary.samples.length < 12) {
+                    summary.samples.push(`missing f${tile.face}:d${tile.depth}:${tile.x},${tile.y}`);
+                }
+                continue;
+            }
+
+            summary.fallbackVisible++;
+            const owner = this.tileStreamer.getLayerDebugInfo?.(fallbackInfo.layer);
+            const state = owner?.copyState ?? 'unknown';
+            if (state !== 'ready') {
+                summary.fallbackVisibleNotReady++;
+            }
+            if ((owner?.ownerKey ?? null) !== fallbackKey) {
+                summary.fallbackOwnerMismatch++;
+                if (summary.samples.length < 12) {
+                    summary.samples.push(
+                        `fallback f${tile.face}:d${tile.depth}:${tile.x},${tile.y} ` +
+                        `via=f${tile.face}:d${depth}:${x},${y} L${fallbackInfo.layer} ` +
+                        `owner=${owner?.ownerKey ?? 'null'} state=${state}`
+                    );
+                }
+            }
+        }
+
+        return summary;
+    }
+
+    _logManualRuntimeSummary(tiles) {
+        const runtime = this._buildVisibleResidencySummary(tiles);
+        const copyState = this.tileStreamer?.getCopyStateSummary?.() ?? null;
+        const hashStats = this.tileStreamer?.getHashTableStats?.() ?? null;
+        const genQueue = this.tileStreamer?._generationQueue;
+        const queuePending = genQueue?.queue?.length ?? 0;
+        const queueActive = genQueue?.active ?? 0;
+        const pendingCopies = this.tileStreamer?.arrayPool?._pendingCopies?.length ?? 0;
+        const dirtySlots = this.tileStreamer?._dirtySlots?.size ?? 0;
+        const poolUsed = this.tileStreamer?._tileInfo?.size ?? 0;
+        const poolTotal = this.tileStreamer?.tilePoolSize ?? 0;
+        const freeLayers = this.tileStreamer?.arrayPool?.freeLayers?.length ?? 0;
+        const visibleCount = Array.isArray(tiles) ? tiles.length : 0;
+
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} runtime visible=${visibleCount} ` +
+            `resident=${runtime.residentVisible} fallback=${runtime.fallbackVisible} ` +
+            `missing=${runtime.unresolvedVisible} ownNotReady=${runtime.ownVisibleNotReady} ` +
+            `fallbackNotReady=${runtime.fallbackVisibleNotReady} ` +
+            `ownerMismatch=${runtime.residentOwnerMismatch + runtime.fallbackOwnerMismatch}`
+        );
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} runtime pool=${poolUsed}/${poolTotal} freeLayers=${freeLayers} ` +
+            `pendingGen=${queuePending} activeGen=${queueActive} pendingCopies=${pendingCopies} dirtySlots=${dirtySlots}`
+        );
+        if (copyState) {
+            Logger.warn(
+                `${TERRAIN_MANUAL_TAG} runtime copies tracked=${copyState.trackedLayers} queued=${copyState.queued} ` +
+                `submitted=${copyState.submitted} ready=${copyState.ready} failed=${copyState.failed}`
+            );
+        }
+        if (hashStats) {
+            Logger.warn(
+                `${TERRAIN_MANUAL_TAG} runtime hash entries=${hashStats.totalEntries} ` +
+                `cpuCap=${hashStats.hashTableCapacity} gpuCap=${hashStats.gpuTableCapacity} ` +
+                `maskMatch=${hashStats.maskMatch ? 1 : 0} capMatch=${hashStats.capacityMatch ? 1 : 0}`
+            );
+        }
+        if (runtime.samples.length > 0) {
+            Logger.warn(`${TERRAIN_MANUAL_TAG} runtime samples ${runtime.samples.join(' ; ')}`);
+        }
+        return {
+            visible: visibleCount,
+            ...runtime,
+            copyState,
+            hashStats: hashStats
+                ? {
+                    totalEntries: hashStats.totalEntries,
+                    hashTableCapacity: hashStats.hashTableCapacity,
+                    gpuTableCapacity: hashStats.gpuTableCapacity,
+                    maskMatch: hashStats.maskMatch,
+                    capacityMatch: hashStats.capacityMatch
+                }
+                : null,
+            poolUsed,
+            poolTotal,
+            freeLayers,
+            queuePending,
+            queueActive,
+            pendingCopies,
+            dirtySlots
+        };
+    }
+
+    async _readAllVisibleInstancesForManualAudit() {
+        const maxLodLevels = this.quadtreeGPU?.lodLevels ?? 0;
+        if (!(maxLodLevels > 0)) {
+            return { instances: [], byKey: new Map(), duplicateCounts: new Map() };
+        }
+        const metaRaw = await this.quadtreeGPU?.debugReadMetaRaw?.(maxLodLevels);
+        const meta = this._parseMetaRaw(metaRaw, maxLodLevels);
+        const total = Array.isArray(meta?.lodArgs)
+            ? meta.lodArgs.reduce((sum, item) => sum + (item.instanceCount || 0), 0)
+            : 0;
+        if (!(total > 0)) {
+            return { instances: [], byKey: new Map(), duplicateCounts: new Map() };
+        }
+        const readCount = Math.min(total, 4096);
+        const instances = await this.quadtreeGPU?.debugReadInstancesRange?.(0, total, readCount) ?? [];
+        const byKey = new Map();
+        const duplicateCounts = new Map();
+        for (const inst of instances) {
+            const addr = getInstanceGridAddress(inst);
+            const key = addr
+                ? this.tileStreamer?._makeKey?.(addr.face, addr.depth, addr.x, addr.y)
+                : '';
+            if (key && !byKey.has(key)) {
+                byKey.set(key, inst);
+            }
+            if (key) {
+                duplicateCounts.set(key, (duplicateCounts.get(key) || 0) + 1);
+            }
+        }
+        return { instances, byKey, duplicateCounts };
+    }
+
+    _resolveVisibleTileSource(tile) {
+        if (!tile || !this.tileStreamer) {
+            return null;
+        }
+        const visibleKey = this.tileStreamer._makeKey(tile.face, tile.depth, tile.x, tile.y);
+        const residentInfo = this.tileStreamer._tileInfo.get(visibleKey);
+        if (residentInfo) {
+            return {
+                relation: 'resident',
+                visibleKey,
+                sourceKey: visibleKey,
+                sourceFace: tile.face,
+                sourceDepth: tile.depth,
+                sourceX: tile.x,
+                sourceY: tile.y,
+                layer: residentInfo.layer,
+                depthDelta: 0
+            };
+        }
+
+        let depth = tile.depth;
+        let x = tile.x;
+        let y = tile.y;
+        while (depth > 0) {
+            depth--;
+            x >>= 1;
+            y >>= 1;
+            const sourceKey = this.tileStreamer._makeKey(tile.face, depth, x, y);
+            const info = this.tileStreamer._tileInfo.get(sourceKey);
+            if (!info) continue;
+            return {
+                relation: 'fallback',
+                visibleKey,
+                sourceKey,
+                sourceFace: tile.face,
+                sourceDepth: depth,
+                sourceX: x,
+                sourceY: y,
+                layer: info.layer,
+                depthDelta: tile.depth - depth
+            };
+        }
+
+        return {
+            relation: 'missing',
+            visibleKey,
+            sourceKey: '',
+            sourceFace: tile.face,
+            sourceDepth: tile.depth,
+            sourceX: tile.x,
+            sourceY: tile.y,
+            layer: -1,
+            depthDelta: 0
+        };
+    }
+
+    _selectManualAuditTargets(tiles, instanceByKey) {
+        const list = Array.isArray(tiles) ? tiles : [];
+        if (list.length === 0) {
+            return [];
+        }
+
+        const visibleByKey = new Map();
+        const candidates = [];
+        for (const tile of list) {
+            const key = this.tileStreamer?._makeKey(tile.face, tile.depth, tile.x, tile.y);
+            if (!key) continue;
+            visibleByKey.set(key, tile);
+            const world = computeTileWorldCenter(tile, this.planetConfig);
+            const projection = projectWorldToCameraNdc(world, this._lastCamera);
+            const camDist = distance3(world, this._lastCamera?.position);
+            const centerDist = projection && projection.inFront
+                ? Math.hypot(projection.ndcX, projection.ndcY)
+                : Infinity;
+            candidates.push({
+                key,
+                tile,
+                source: this._resolveVisibleTileSource(tile),
+                inst: instanceByKey?.get(key) ?? null,
+                world,
+                projection,
+                camDist,
+                centerDist
+            });
+        }
+        const candidateByKey = new Map(candidates.map((candidate) => [candidate.key, candidate]));
+
+        const selected = [];
+        const seen = new Set();
+        const push = (candidate, reason) => {
+            if (!candidate || seen.has(candidate.key)) return;
+            seen.add(candidate.key);
+            selected.push({ ...candidate, reason });
+        };
+        const pushNeighbors = (candidate, labelPrefix) => {
+            if (!candidate?.tile) return;
+            const { face, depth, x, y } = candidate.tile;
+            const neighbors = [
+                { dx: -1, dy: 0, label: `${labelPrefix}:left` },
+                { dx: 1, dy: 0, label: `${labelPrefix}:right` },
+                { dx: 0, dy: -1, label: `${labelPrefix}:bottom` },
+                { dx: 0, dy: 1, label: `${labelPrefix}:top` }
+            ];
+            for (const neighbor of neighbors) {
+                const key = this.tileStreamer?._makeKey(face, depth, x + neighbor.dx, y + neighbor.dy);
+                if (!key || !visibleByKey.has(key)) continue;
+                push(candidateByKey.get(key) ?? null, neighbor.label);
+            }
+        };
+
+        const centerCandidates = candidates
+            .filter((item) => item.projection?.inFront)
+            .sort((a, b) => a.centerDist - b.centerDist);
+        const nearCandidates = candidates
+            .filter((item) => Number.isFinite(item.camDist))
+            .sort((a, b) => a.camDist - b.camDist);
+        const fallbackCenterCandidates = centerCandidates
+            .filter((item) => item.source?.relation === 'fallback');
+        const fallbackNearCandidates = nearCandidates
+            .filter((item) => item.source?.relation === 'fallback');
+
+        const centerPrimary = centerCandidates[0] ?? null;
+        push(centerPrimary, 'center#1');
+        pushNeighbors(centerPrimary, 'center#1-neighbor');
+        push(centerCandidates[1] ?? null, 'center#2');
+        pushNeighbors(centerCandidates[1] ?? null, 'center#2-neighbor');
+        push(centerCandidates[2] ?? null, 'center#3');
+        push(centerCandidates[3] ?? null, 'center#4');
+        push(nearCandidates[0] ?? null, 'near#1');
+        push(nearCandidates[1] ?? null, 'near#2');
+        push(fallbackCenterCandidates[0] ?? null, 'fallback-center#1');
+        pushNeighbors(fallbackCenterCandidates[0] ?? null, 'fallback-center#1-neighbor');
+        push(fallbackCenterCandidates[1] ?? null, 'fallback-center#2');
+        push(fallbackNearCandidates[0] ?? null, 'fallback-near#1');
+        push(fallbackNearCandidates[1] ?? null, 'fallback-near#2');
+
+        return selected.slice(0, 12);
+    }
+
+    async _auditVisibleTileTarget(target) {
+        const source = target?.source;
+        if (!target?.tile || !source) {
+            return;
+        }
+        const sourceAddr = new TileAddress(source.sourceFace, source.sourceDepth, source.sourceX, source.sourceY);
+        const layer = Number.isFinite(target?.inst?.layer) ? target.inst.layer : source.layer;
+        const instUvScale = target?.inst?.uvScale ?? NaN;
+        const expectedUvScale = source.relation === 'fallback'
+            ? Math.pow(0.5, Math.max(0, source.depthDelta))
+            : 1.0;
+        const projection = target.projection;
+        const owner = this.tileStreamer?.getLayerDebugInfo?.(layer) ?? null;
+        const fullTileSample = Math.max(8, Math.min(this.tileStreamer?.tileTextureSize ?? 128, 128));
+
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} audit-target reason=${target.reason} ` +
+            `visible=${source.visibleKey} source=${source.sourceKey || 'none'} relation=${source.relation} ` +
+            `layer=${layer} instLayer=${target?.inst?.layer ?? 'n/a'} ` +
+            `lod=${target?.inst?.lod ?? 'n/a'} edgeMask=${target?.inst?.edgeMask ?? 'n/a'} ` +
+            `uvScale=${Number.isFinite(instUvScale) ? instUvScale.toFixed(4) : 'n/a'} ` +
+            `expectedUvScale=${expectedUvScale.toFixed(4)} ` +
+            `owner=${owner?.ownerKey ?? 'null'} ownerState=${owner?.copyState ?? 'unknown'} ` +
+            `centerDist=${Number.isFinite(target.centerDist) ? target.centerDist.toFixed(4) : 'inf'} ` +
+            `camDist=${Number.isFinite(target.camDist) ? target.camDist.toFixed(1) : 'n/a'} ` +
+            `ndc=${projection ? `${projection.ndcX.toFixed(3)},${projection.ndcY.toFixed(3)},${projection.ndcZ.toFixed(3)}` : 'n/a'}`
+        );
+
+        if (source.relation === 'missing' || !(layer >= 0)) {
+            Logger.warn(`${TERRAIN_MANUAL_TAG} audit-target skipped visible=${source.visibleKey} reason=no-layer`);
+            return;
+        }
+
+        const liveHeightStats = await this.tileStreamer?.debugReadArrayLayerStats?.('height', layer, fullTileSample);
+        const liveTileStats = await this.tileStreamer?.debugReadArrayLayerStats?.('tile', layer, fullTileSample);
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} audit-live source=${source.sourceKey} ` +
+            `height{${formatLayerStats(liveHeightStats)}} tile{${formatLayerStats(liveTileStats)}}`
+        );
+
+        let freshTextures = null;
+        try {
+            freshTextures = await this.tileStreamer?.tileGenerator?.generateDiagnosticTile?.(sourceAddr, {
+                includeBaseHeight: true
+            });
+            if (!freshTextures) {
+                Logger.warn(`${TERRAIN_MANUAL_TAG} audit-fresh failed source=${source.sourceKey}`);
+                return;
+            }
+            const heightCompare = await this._debugCompareLiveTextureToFreshDense(
+                'height',
+                layer,
+                freshTextures.height,
+                source.sourceKey,
+                2
+            );
+            const tileCompare = await this._debugCompareLiveTextureToFreshDense(
+                'tile',
+                layer,
+                freshTextures.tile,
+                source.sourceKey,
+                4
+            );
+            const baseCompare = await this._debugCompareLiveTextureToFreshDense(
+                'height',
+                layer,
+                freshTextures.baseHeight,
+                source.sourceKey,
+                2
+            );
+            Logger.warn(
+                `${TERRAIN_MANUAL_TAG} audit-dense source=${source.sourceKey} ` +
+                `height{${heightCompare}} tile{${tileCompare}} baseHeight{${baseCompare}}`
+            );
+        } finally {
+            destroyWrappedTextures(freshTextures);
+        }
+    }
+
+    async _runManualTileAudit(tiles) {
+        const { instances, byKey, duplicateCounts } = await this._readAllVisibleInstancesForManualAudit();
+        const coverageSamples = [];
+        let exactVisible = 0;
+        let visibleWithoutExact = 0;
+        let residentWithoutExact = 0;
+        let fallbackWithoutExact = 0;
+        let duplicateVisible = 0;
+        for (const tile of Array.isArray(tiles) ? tiles : []) {
+            const visibleKey = this.tileStreamer?._makeKey?.(tile.face, tile.depth, tile.x, tile.y);
+            if (!visibleKey) continue;
+            const hasExact = byKey.has(visibleKey);
+            const source = this._resolveVisibleTileSource(tile);
+            if (hasExact) {
+                exactVisible++;
+                if ((duplicateCounts.get(visibleKey) || 0) > 1) {
+                    duplicateVisible++;
+                }
+                continue;
+            }
+            visibleWithoutExact++;
+            if (source?.relation === 'resident') {
+                residentWithoutExact++;
+            } else if (source?.relation === 'fallback') {
+                fallbackWithoutExact++;
+            }
+            if (coverageSamples.length < 10) {
+                coverageSamples.push(
+                    `${visibleKey}:${source?.relation ?? 'unknown'}${source?.sourceKey ? `->${source.sourceKey}` : ''}`
+                );
+            }
+        }
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} audit-coverage visible=${tiles?.length ?? 0} ` +
+            `exact=${exactVisible} missingExact=${visibleWithoutExact} ` +
+            `residentMissing=${residentWithoutExact} fallbackMissing=${fallbackWithoutExact} ` +
+            `duplicateVisible=${duplicateVisible}`
+        );
+        if (coverageSamples.length > 0) {
+            Logger.warn(`${TERRAIN_MANUAL_TAG} audit-coverage samples ${coverageSamples.join(' ; ')}`);
+        }
+
+        const consistencySamples = [];
+        let exactResident = 0;
+        let exactFallback = 0;
+        let consistentExact = 0;
+        let ownerMismatchCount = 0;
+        let uvScaleMismatchCount = 0;
+        let cpuLookupMismatchCount = 0;
+        let exactFallbackWithUnitScale = 0;
+        for (const tile of Array.isArray(tiles) ? tiles : []) {
+            const visibleKey = this.tileStreamer?._makeKey?.(tile.face, tile.depth, tile.x, tile.y);
+            if (!visibleKey) continue;
+            const inst = byKey.get(visibleKey);
+            if (!inst) continue;
+            const source = this._resolveVisibleTileSource(tile);
+            const owner = this.tileStreamer?.getLayerDebugInfo?.(inst.layer) ?? null;
+            const expectedUvScale = source?.relation === 'fallback'
+                ? Math.pow(0.5, Math.max(0, source.depthDelta))
+                : 1.0;
+            const cpuLookup = this.tileStreamer?.debugLookup?.(tile.face, tile.depth, tile.x, tile.y) ?? null;
+            const ownerMatches = (owner?.ownerKey ?? null) === (source?.sourceKey ?? null);
+            const uvScaleMatches = Number.isFinite(inst.uvScale)
+                ? Math.abs(inst.uvScale - expectedUvScale) <= 0.001
+                : false;
+            const cpuLookupMatches = source?.relation === 'resident'
+                ? (!!cpuLookup?.found && cpuLookup.layer === inst.layer)
+                : !cpuLookup?.found;
+
+            if (source?.relation === 'resident') {
+                exactResident++;
+            } else if (source?.relation === 'fallback') {
+                exactFallback++;
+                if (Number.isFinite(inst.uvScale) && Math.abs(inst.uvScale - 1.0) <= 0.001) {
+                    exactFallbackWithUnitScale++;
+                }
+            }
+            if (ownerMatches && uvScaleMatches && cpuLookupMatches) {
+                consistentExact++;
+                continue;
+            }
+            if (!ownerMatches) ownerMismatchCount++;
+            if (!uvScaleMatches) uvScaleMismatchCount++;
+            if (!cpuLookupMatches) cpuLookupMismatchCount++;
+            if (consistencySamples.length < 12) {
+                consistencySamples.push(
+                    `${visibleKey}:${source?.relation ?? 'unknown'} ` +
+                    `instL=${inst.layer} owner=${owner?.ownerKey ?? 'null'} ` +
+                    `cpu=${cpuLookup?.found ? `L${cpuLookup.layer}` : 'MISS'} ` +
+                    `uv=${Number.isFinite(inst.uvScale) ? inst.uvScale.toFixed(3) : 'n/a'} ` +
+                    `expUv=${expectedUvScale.toFixed(3)} edge=${inst.edgeMask ?? 'n/a'}`
+                );
+            }
+        }
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} audit-instance visible=${tiles?.length ?? 0} exact=${exactVisible} ` +
+            `resident=${exactResident} fallback=${exactFallback} consistent=${consistentExact} ` +
+            `ownerMismatch=${ownerMismatchCount} uvMismatch=${uvScaleMismatchCount} ` +
+            `cpuLookupMismatch=${cpuLookupMismatchCount} fallbackUnitScale=${exactFallbackWithUnitScale}`
+        );
+        if (consistencySamples.length > 0) {
+            Logger.warn(`${TERRAIN_MANUAL_TAG} audit-instance samples ${consistencySamples.join(' ; ')}`);
+        }
+
+        const targets = this._selectManualAuditTargets(tiles, byKey);
+        if (targets.length === 0) {
+            Logger.warn(`${TERRAIN_MANUAL_TAG} audit-targets none`);
+            return;
+        }
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} audit-targets visible=${tiles?.length ?? 0} ` +
+            `instances=${instances.length} selected=${targets.length} ` +
+            `${targets.map((target) => `${target.reason}:${target.source?.visibleKey ?? target.key}`).join(' ; ')}`
+        );
+        for (const target of targets) {
+            await this._auditVisibleTileTarget(target);
+        }
+    }
+
+    async _runManualDiagnosticSnapshot() {
+        if (!this._manualDiagState?.frozen || this._manualDiagState.running) {
+            return;
+        }
+
+        const snapshotId = this._manualDiagState.snapshotId;
+        const startedAt = performance.now();
+        this._manualDiagState = {
+            ...this._manualDiagState,
+            status: 'running',
+            running: true,
+            completed: false,
+            startedAt,
+            error: ''
+        };
+
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} snapshot begin id=${snapshotId} reason=${this._manualDiagState.reason}`
+        );
+
+        try {
+            const cfg = this.engineConfig?.gpuQuadtree;
+            const maxTiles = (cfg?.visibleReadbackMax && cfg.visibleReadbackMax > 0)
+                ? cfg.visibleReadbackMax
+                : (cfg?.maxVisibleTiles ?? 0);
+            let tiles = await this.quadtreeGPU?.readVisibleTiles?.(maxTiles);
+            if (!Array.isArray(tiles) || tiles.length === 0) {
+                tiles = Array.isArray(this._lastVisibleTiles) ? this._lastVisibleTiles : [];
+            } else {
+                this._lastVisibleTiles = tiles;
+            }
+
+            const summary = this._logManualRuntimeSummary(tiles);
+            await this._runManualTileAudit(tiles);
+            await this._diagnosticSnapshot(tiles);
+            await this._runStitchingDiagnostics();
+
+            const finishedAt = performance.now();
+            this._manualDiagState = {
+                ...this._manualDiagState,
+                status: 'frozen',
+                running: false,
+                completed: true,
+                finishedAt,
+                durationMs: finishedAt - startedAt,
+                lastSummary: summary,
+                error: ''
+            };
+            Logger.warn(
+                `${TERRAIN_MANUAL_TAG} snapshot complete id=${snapshotId} ` +
+                `durationMs=${(finishedAt - startedAt).toFixed(1)} press=U to release`
+            );
+        } catch (err) {
+            const finishedAt = performance.now();
+            this._manualDiagState = {
+                ...this._manualDiagState,
+                status: 'frozen',
+                running: false,
+                completed: true,
+                finishedAt,
+                durationMs: finishedAt - startedAt,
+                error: err?.message ?? String(err)
+            };
+            Logger.error(
+                `${TERRAIN_MANUAL_TAG} snapshot failed id=${snapshotId} ${err?.stack ?? err}`
+            );
+        }
+    }
+
+    _maybeLogLightweightDiagnostics() {
+        const interval = 120;
+        this._lightDiagFrame = (this._lightDiagFrame + 1) % interval;
+        if (this._lightDiagFrame !== 0) {
+            return;
+        }
+
+        const copyState = this.tileStreamer?.getCopyStateSummary?.() ?? null;
+        const visible = copyState?.lastVisible ?? null;
+        const queuePending = this.tileStreamer?._generationQueue?.queue?.length ?? 0;
+        const queueActive = this.tileStreamer?._generationQueue?.active ?? 0;
+        const pendingCopies = this.tileStreamer?.arrayPool?._pendingCopies?.length ?? 0;
+        const dirtySlots = this.tileStreamer?._dirtySlots?.size ?? 0;
+        const poolUsed = this.tileStreamer?._tileInfo?.size ?? 0;
+        const poolTotal = this.tileStreamer?.tilePoolSize ?? 0;
+
+        Logger.info(
+            `${TERRAIN_STEP_LOG_TAG} [QTLight] pool=${poolUsed}/${poolTotal} ` +
+            `pendingGen=${queuePending} activeGen=${queueActive} pendingCopies=${pendingCopies} dirtySlots=${dirtySlots}` +
+            `${visible ? ` visible=${visible.totalVisible} resident=${visible.residentVisible} fallback=${visible.fallbackVisible} ownNotReady=${visible.ownVisibleNotReady} fallbackNotReady=${visible.fallbackVisibleNotReady}` : ''}`
+        );
     }
   
     async _maybeReadbackVisibleTiles() {
@@ -1741,6 +2510,7 @@ export class QuadtreeTileManager {
         const ownDataInstances = classified?.ownDataInstances ?? sampledInstances.filter((inst) => Math.abs((inst?.uvScale ?? 1) - 1.0) < 0.001);
         if (fallbackInstances.length === 0) {
             Logger.info(`${TERRAIN_STEP_LOG_TAG} [QTAtlas] sampled=${sampledInstances.length} fallback=0 ownData=${ownDataInstances.length}`);
+            await this._runSeamPairDiagnostics(sampledInstances);
             return;
         }
 
@@ -1840,6 +2610,7 @@ export class QuadtreeTileManager {
         }
 
         if (!tileStreamer?.debugReadArrayLayerTexels || mixedPairs.length === 0) {
+            await this._runSeamPairDiagnostics(sampledInstances);
             return;
         }
 
@@ -1878,15 +2649,585 @@ export class QuadtreeTileManager {
         if (pairLogs.length > 0) {
             Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTAtlas] mixed-edge-heights ${pairLogs.join(' ; ')}`);
         }
+
+        await this._runSeamPairDiagnostics(sampledInstances);
     }
 
-    async _debugSampleHeightAtChunkUV(inst, localUV, readCache = null) {
+    async _runSeamPairDiagnostics(sampledInstances) {
+        if (!Array.isArray(sampledInstances) || sampledInstances.length === 0) {
+            return;
+        }
+
+        const seamPairs = collectSeamPairs(sampledInstances);
+        if (seamPairs.length === 0) {
+            Logger.info(`${TERRAIN_STEP_LOG_TAG} [QTSeam] sampled=${sampledInstances.length} pairs=0`);
+            return;
+        }
+
+        this._seamDiagTick = (this._seamDiagTick ?? 0) + 1;
+        const seamTick = this._seamDiagTick;
+        const seamSeen = this._seamDiagSeen ?? new Map();
+        this._seamDiagSeen = seamSeen;
+        const hist = new Map();
+
+        for (const pair of seamPairs) {
+            let seen = seamSeen.get(pair.key);
+            if (!seen) {
+                seen = { count: 0, lastTick: -1 };
+                seamSeen.set(pair.key, seen);
+            }
+            if (seen.lastTick !== seamTick) {
+                seen.lastTick = seamTick;
+                seen.count += 1;
+            }
+
+            let bucket = hist.get(pair.className);
+            if (!bucket) {
+                bucket = {
+                    className: pair.className,
+                    candidateCount: 0,
+                    persistentCount: 0,
+                    sampledPairs: [],
+                    currentNormMax: 0,
+                    currentNormSum: 0,
+                    currentMeterMax: 0,
+                    currentMeterSum: 0,
+                    intendedNormMax: 0,
+                    intendedNormSum: 0,
+                    intendedMeterMax: 0,
+                    intendedMeterSum: 0,
+                    pairMetricCount: 0
+                };
+                hist.set(pair.className, bucket);
+            }
+            bucket.candidateCount += 1;
+            if (seen.count >= 2) {
+                bucket.persistentCount += 1;
+            }
+            if (bucket.sampledPairs.length < 3) {
+                bucket.sampledPairs.push(pair);
+            }
+        }
+
+        for (const [key, seen] of seamSeen) {
+            if ((seen.lastTick ?? 0) < seamTick - 24) {
+                seamSeen.delete(key);
+            }
+        }
+
+        const readCache = new Map();
+        const worstPairs = [];
+        const heightScaleMeters = Number.isFinite(this.planetConfig?.heightScale)
+            ? this.planetConfig.heightScale
+            : (Number.isFinite(this.planetConfig?.maxTerrainHeight) ? this.planetConfig.maxTerrainHeight : 1);
+
+        for (const bucket of hist.values()) {
+            for (const pair of bucket.sampledPairs) {
+                const metrics = await this._measureSeamPair(pair, readCache);
+                if (!metrics) continue;
+                bucket.pairMetricCount += 1;
+                bucket.currentNormMax = Math.max(bucket.currentNormMax, metrics.currentNormMax);
+                bucket.currentNormSum += metrics.currentNormAvg;
+                bucket.currentMeterMax = Math.max(bucket.currentMeterMax, metrics.currentNormMax * heightScaleMeters);
+                bucket.currentMeterSum += metrics.currentNormAvg * heightScaleMeters;
+                bucket.intendedNormMax = Math.max(bucket.intendedNormMax, metrics.intendedNormMax);
+                bucket.intendedNormSum += metrics.intendedNormAvg;
+                bucket.intendedMeterMax = Math.max(bucket.intendedMeterMax, metrics.intendedNormMax * heightScaleMeters);
+                bucket.intendedMeterSum += metrics.intendedNormAvg * heightScaleMeters;
+                worstPairs.push({
+                    className: bucket.className,
+                    pair,
+                    metrics
+                });
+            }
+        }
+
+        Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTSeam] sampled=${sampledInstances.length} pairs=${seamPairs.length}`);
+        const classOrder = [
+            'own-own:same-depth',
+            'own-fallback:same-depth:no-mask',
+            'own-fallback:same-depth:mask',
+            'fallback-fallback:same-depth',
+            'coarse-fine:stitched'
+        ];
+        const orderedBuckets = Array.from(hist.values()).sort((a, b) => {
+            const ai = classOrder.indexOf(a.className);
+            const bi = classOrder.indexOf(b.className);
+            return (ai < 0 ? classOrder.length : ai) - (bi < 0 ? classOrder.length : bi);
+        });
+        for (const bucket of orderedBuckets) {
+            const sampled = bucket.pairMetricCount;
+            const currentNormAvg = sampled > 0 ? bucket.currentNormSum / sampled : 0;
+            const currentMeterAvg = sampled > 0 ? bucket.currentMeterSum / sampled : 0;
+            const intendedNormAvg = sampled > 0 ? bucket.intendedNormSum / sampled : 0;
+            const intendedMeterAvg = sampled > 0 ? bucket.intendedMeterSum / sampled : 0;
+            const maxImprove = bucket.currentMeterMax > 0
+                ? (1.0 - (bucket.intendedMeterMax / bucket.currentMeterMax)) * 100.0
+                : 0.0;
+            Logger.warn(
+                `${TERRAIN_STEP_LOG_TAG} [QTSeam] class=${bucket.className} ` +
+                `candidates=${bucket.candidateCount} persistent=${bucket.persistentCount} sampled=${sampled} ` +
+                `current[max=${bucket.currentNormMax.toFixed(5)}/${bucket.currentMeterMax.toFixed(2)}m avg=${currentNormAvg.toFixed(5)}/${currentMeterAvg.toFixed(2)}m] ` +
+                `intended[max=${bucket.intendedNormMax.toFixed(5)}/${bucket.intendedMeterMax.toFixed(2)}m avg=${intendedNormAvg.toFixed(5)}/${intendedMeterAvg.toFixed(2)}m] ` +
+                `maxImprove=${maxImprove.toFixed(1)}%`
+            );
+        }
+
+        worstPairs.sort((a, b) => b.metrics.currentNormMax - a.metrics.currentNormMax);
+        const worstLogs = [];
+        for (const item of worstPairs.slice(0, 4)) {
+            const aAddr = getInstanceGridAddress(item.pair.a);
+            const bAddr = getInstanceGridAddress(item.pair.b);
+            worstLogs.push(
+                `${item.className} ` +
+                `a=f${aAddr?.face}:d${aAddr?.depth}:${aAddr?.x},${aAddr?.y}:${item.pair.sideA} ` +
+                `b=f${bAddr?.face}:d${bAddr?.depth}:${bAddr?.x},${bAddr?.y}:${item.pair.sideB} ` +
+                `layers=${item.pair.a.layer}/${item.pair.b.layer} ` +
+                `uvScale=${(item.pair.a.uvScale ?? 1).toFixed(3)}/${(item.pair.b.uvScale ?? 1).toFixed(3)} ` +
+                `current=${item.metrics.currentNormMax.toFixed(5)}/${(item.metrics.currentNormMax * heightScaleMeters).toFixed(2)}m ` +
+                `intended=${item.metrics.intendedNormMax.toFixed(5)}/${(item.metrics.intendedNormMax * heightScaleMeters).toFixed(2)}m`
+            );
+        }
+        if (worstLogs.length > 0) {
+            Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTSeam] worst ${worstLogs.join(' ; ')}`);
+        }
+
+        const worstSettledCoarseFine = worstPairs.find((item) =>
+            item.className === 'coarse-fine:stitched'
+            && !isFallbackInstance(item.pair.a)
+            && !isFallbackInstance(item.pair.b)
+        );
+        const worstCoarseFine = worstSettledCoarseFine
+            ?? worstPairs.find((item) => item.className === 'coarse-fine:stitched')
+            ?? worstPairs[0]
+            ?? null;
+        if (worstCoarseFine) {
+            if (worstCoarseFine.className === 'coarse-fine:stitched') {
+                Logger.warn(
+                    `${TERRAIN_STEP_LOG_TAG} [QTSeam] deep-target=${
+                        worstSettledCoarseFine ? 'settled-own coarse-fine' : 'fallback-involved coarse-fine'
+                    }`
+                );
+            }
+            await this._maybeRunDeepSeamDiagnostics(worstCoarseFine, heightScaleMeters);
+        }
+    }
+
+    async _measureSeamPair(pair, readCache = null) {
+        return this._sampleSeamPairMetrics(pair, [0.25, 0.5, 0.75], readCache);
+    }
+
+    async _sampleSeamPairMetrics(pair, tValues, readCache = null) {
+        if (!pair?.a || !pair?.b) {
+            return null;
+        }
+        let currentNormMax = 0;
+        let currentNormSum = 0;
+        let intendedNormMax = 0;
+        let intendedNormSum = 0;
+        let samples = 0;
+        let currentMaxT = 0.0;
+        let intendedMaxT = 0.0;
+
+        for (const t of tValues) {
+            const seamSample = computeSharedEdgeSampleUVs(pair.a, pair.b, pair.sideA, t);
+            if (!seamSample) continue;
+            const currentA = await this._debugSampleHeightAtChunkUV(pair.a, seamSample.uvA, {
+                mode: 'current',
+                sampleLOD: pair.sampleLODA
+            }, readCache);
+            const currentB = await this._debugSampleHeightAtChunkUV(pair.b, seamSample.uvB, {
+                mode: 'current',
+                sampleLOD: pair.sampleLODB
+            }, readCache);
+            const intendedA = await this._debugSampleHeightAtChunkUV(pair.a, seamSample.uvA, {
+                mode: 'intended',
+                sampleLOD: pair.sampleLODA
+            }, readCache);
+            const intendedB = await this._debugSampleHeightAtChunkUV(pair.b, seamSample.uvB, {
+                mode: 'intended',
+                sampleLOD: pair.sampleLODB
+            }, readCache);
+            if (![currentA, currentB, intendedA, intendedB].every(Number.isFinite)) {
+                continue;
+            }
+
+            const currentDelta = Math.abs(currentA - currentB);
+            const intendedDelta = Math.abs(intendedA - intendedB);
+            if (currentDelta > currentNormMax) {
+                currentNormMax = currentDelta;
+                currentMaxT = t;
+            }
+            currentNormSum += currentDelta;
+            if (intendedDelta > intendedNormMax) {
+                intendedNormMax = intendedDelta;
+                intendedMaxT = t;
+            }
+            intendedNormSum += intendedDelta;
+            samples += 1;
+        }
+
+        if (samples === 0) {
+            return null;
+        }
+        return {
+            currentNormMax,
+            currentNormAvg: currentNormSum / samples,
+            intendedNormMax,
+            intendedNormAvg: intendedNormSum / samples,
+            currentMaxT,
+            intendedMaxT,
+            sampleCount: samples
+        };
+    }
+
+    async _maybeRunDeepSeamDiagnostics(item, heightScaleMeters) {
+        if (!item?.pair) return;
+        this._deepSeamDiagTick = (this._deepSeamDiagTick ?? 0) + 1;
+        const currentMeters = item.metrics.currentNormMax * heightScaleMeters;
+        const shouldRun =
+            currentMeters >= 5.0 &&
+            (item.pair.key !== this._lastDeepSeamKey || (this._deepSeamDiagTick % 6) === 0);
+        if (!shouldRun) {
+            return;
+        }
+        this._lastDeepSeamKey = item.pair.key;
+        await this._runDeepSeamDiagnostics(item, heightScaleMeters);
+    }
+
+    async _runDeepSeamDiagnostics(item, heightScaleMeters) {
+        const denseTs = buildUniformEdgeSamples(17);
+        const readCache = new Map();
+        const denseMetrics = await this._sampleSeamPairMetrics(item.pair, denseTs, readCache);
+        if (denseMetrics) {
+            const aAddr = getInstanceGridAddress(item.pair.a);
+            const bAddr = getInstanceGridAddress(item.pair.b);
+            Logger.warn(
+                `${TERRAIN_STEP_LOG_TAG} [QTSeam] deep class=${item.className} ` +
+                `a=f${aAddr?.face}:d${aAddr?.depth}:${aAddr?.x},${aAddr?.y}:${item.pair.sideA} ` +
+                `b=f${bAddr?.face}:d${bAddr?.depth}:${bAddr?.x},${bAddr?.y}:${item.pair.sideB} ` +
+                `denseSamples=${denseMetrics.sampleCount} ` +
+                `current[max=${denseMetrics.currentNormMax.toFixed(5)}/${(denseMetrics.currentNormMax * heightScaleMeters).toFixed(2)}m t=${denseMetrics.currentMaxT.toFixed(3)} ` +
+                `avg=${denseMetrics.currentNormAvg.toFixed(5)}/${(denseMetrics.currentNormAvg * heightScaleMeters).toFixed(2)}m] ` +
+                `intended[max=${denseMetrics.intendedNormMax.toFixed(5)}/${(denseMetrics.intendedNormMax * heightScaleMeters).toFixed(2)}m t=${denseMetrics.intendedMaxT.toFixed(3)} ` +
+                `avg=${denseMetrics.intendedNormAvg.toFixed(5)}/${(denseMetrics.intendedNormAvg * heightScaleMeters).toFixed(2)}m]`
+            );
+        }
+
+        const regenSummary = await this._debugComparePairLiveToFresh(item.pair, denseTs);
+        if (regenSummary) {
+            Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTSeam] regen-compare ${regenSummary}`);
+        }
+
+        const freshHeightSplit = await this._debugCompareFreshBaseVsFinal(item.pair, denseTs, heightScaleMeters);
+        if (freshHeightSplit) {
+            Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTSeam] fresh-height-split ${freshHeightSplit}`);
+        }
+    }
+
+    async _debugComparePairLiveToFresh(pair, tValues) {
+        const tileStreamer = this.tileStreamer;
+        const tileGenerator = tileStreamer?.tileGenerator;
+        if (!tileStreamer?.debugReadArrayLayerTexels || !tileStreamer?._debugReadTextureTexels || !tileGenerator) {
+            return '';
+        }
+
+        const parts = [];
+        for (const target of [
+            { label: 'a', inst: pair.a, side: pair.sideA },
+            { label: 'b', inst: pair.b, side: pair.sideB }
+        ]) {
+            const addr = getInstanceGridAddress(target.inst);
+            if (!addr) continue;
+            const tileAddr = new TileAddress(addr.face, addr.depth, addr.x, addr.y);
+            const coords = collectInstDiagnosticCoords(target.inst, target.side, tValues, tileStreamer.tileTextureSize);
+            let freshTextures = null;
+            try {
+                freshTextures = await tileGenerator.generateTile(tileAddr);
+                const heightSummary = await this._debugCompareLiveTextureToFresh(
+                    'height',
+                    target.inst.layer,
+                    freshTextures.height,
+                    coords,
+                    tileAddr.toString()
+                );
+                const tileSummary = await this._debugCompareLiveTextureToFresh(
+                    'tile',
+                    target.inst.layer,
+                    freshTextures.tile,
+                    coords,
+                    tileAddr.toString()
+                );
+                parts.push(
+                    `${target.label}=f${addr.face}:d${addr.depth}:${addr.x},${addr.y}:L${target.inst.layer} ` +
+                    `coords=${coords.length} ` +
+                    `height{${heightSummary}} tile{${tileSummary}}`
+                );
+            } catch (err) {
+                parts.push(
+                    `${target.label}=f${addr.face}:d${addr.depth}:${addr.x},${addr.y}:regen-failed:${err?.message ?? err}`
+                );
+            } finally {
+                destroyWrappedTextures(freshTextures);
+            }
+        }
+
+        return parts.join(' ; ');
+    }
+
+    async _debugCompareLiveTextureToFresh(type, layer, freshTexture, coords, expectedKey = '') {
+        const tileStreamer = this.tileStreamer;
+        if (!freshTexture || !Array.isArray(coords) || coords.length === 0) {
+            return 'unavailable';
+        }
+        const format = tileStreamer?.textureFormats?.[type]
+            || tileStreamer?.arrayPool?.formats?.[type]
+            || 'rgba32float';
+        const ownerBefore = tileStreamer?.getLayerDebugInfo?.(layer) ?? null;
+        const live = await tileStreamer.debugReadArrayLayerTexels(type, layer, coords);
+        const fresh = await tileStreamer._debugReadTextureTexels(freshTexture, format, coords);
+        const ownerAfter = tileStreamer?.getLayerDebugInfo?.(layer) ?? null;
+        const compare = summarizeTexelComparison(live?.texels, fresh?.texels, format);
+        const beforeKey = ownerBefore?.ownerKey ?? 'null';
+        const afterKey = ownerAfter?.ownerKey ?? 'null';
+        const beforeState = ownerBefore?.copyState ?? 'unknown';
+        const afterState = ownerAfter?.copyState ?? 'unknown';
+        const stable = beforeKey === afterKey;
+        const match = expectedKey
+            ? (beforeKey === expectedKey && afterKey === expectedKey)
+            : stable;
+        return (
+            `${compare} ` +
+            `owner{exp=${expectedKey || '-'} before=${beforeKey} after=${afterKey} ` +
+            `state=${beforeState}->${afterState} stable=${stable ? 1 : 0} match=${match ? 1 : 0}}`
+        );
+    }
+
+    async _debugCompareLiveTextureToFreshDense(type, layer, freshTexture, expectedKey = '', stride = 1) {
+        const tileStreamer = this.tileStreamer;
+        if (!freshTexture || !tileStreamer?.debugReadArrayLayerBuffer || !tileStreamer?._debugReadTextureBuffer) {
+            return 'unavailable';
+        }
+
+        const format = tileStreamer?.textureFormats?.[type]
+            || tileStreamer?.arrayPool?.formats?.[type]
+            || 'rgba32float';
+        const ownerBefore = tileStreamer?.getLayerDebugInfo?.(layer) ?? null;
+        const live = await tileStreamer.debugReadArrayLayerBuffer(type, layer);
+        const fresh = await tileStreamer._debugReadTextureBuffer(freshTexture, format);
+        const ownerAfter = tileStreamer?.getLayerDebugInfo?.(layer) ?? null;
+        if (!live?.buffer || !fresh?.buffer) {
+            return 'unavailable';
+        }
+
+        const compare = summarizeRasterComparison(live, fresh, stride);
+        const beforeKey = ownerBefore?.ownerKey ?? 'null';
+        const afterKey = ownerAfter?.ownerKey ?? 'null';
+        const beforeState = ownerBefore?.copyState ?? 'unknown';
+        const afterState = ownerAfter?.copyState ?? 'unknown';
+        const stable = beforeKey === afterKey;
+        const match = expectedKey
+            ? (beforeKey === expectedKey && afterKey === expectedKey)
+            : stable;
+        return (
+            `${compare} ` +
+            `owner{exp=${expectedKey || '-'} before=${beforeKey} after=${afterKey} ` +
+            `state=${beforeState}->${afterState} stable=${stable ? 1 : 0} match=${match ? 1 : 0}}`
+        );
+    }
+
+    async _debugCompareFreshBaseVsFinal(pair, tValues, heightScaleMeters) {
+        const tileStreamer = this.tileStreamer;
+        const tileGenerator = tileStreamer?.tileGenerator;
+        if (!tileGenerator?.generateDiagnosticTile) {
+            return '';
+        }
+
+        const freshByTarget = new Map();
+        const targets = [
+            { label: 'a', inst: pair.a },
+            { label: 'b', inst: pair.b }
+        ];
+        try {
+            for (const target of targets) {
+                const addr = getInstanceGridAddress(target.inst);
+                if (!addr) return '';
+                const tileAddr = new TileAddress(addr.face, addr.depth, addr.x, addr.y);
+                const textures = await tileGenerator.generateDiagnosticTile(tileAddr, {
+                    includeBaseHeight: true
+                });
+                freshByTarget.set(target.label, {
+                    key: tileAddr.toString(),
+                    inst: target.inst,
+                    textures,
+                    heightFormat: textures?.height?._gpuFormat
+                        || tileStreamer?.textureFormats?.height
+                        || 'r32float'
+                });
+            }
+
+            const baseMetrics = await this._sampleFreshTextureSeamMetrics(pair, tValues, {
+                a: {
+                    texture: freshByTarget.get('a')?.textures?.baseHeight,
+                    format: freshByTarget.get('a')?.heightFormat,
+                    inst: pair.a,
+                    cachePrefix: `${freshByTarget.get('a')?.key || 'a'}:base`
+                },
+                b: {
+                    texture: freshByTarget.get('b')?.textures?.baseHeight,
+                    format: freshByTarget.get('b')?.heightFormat,
+                    inst: pair.b,
+                    cachePrefix: `${freshByTarget.get('b')?.key || 'b'}:base`
+                }
+            });
+            const finalMetrics = await this._sampleFreshTextureSeamMetrics(pair, tValues, {
+                a: {
+                    texture: freshByTarget.get('a')?.textures?.height,
+                    format: freshByTarget.get('a')?.heightFormat,
+                    inst: pair.a,
+                    cachePrefix: `${freshByTarget.get('a')?.key || 'a'}:final`
+                },
+                b: {
+                    texture: freshByTarget.get('b')?.textures?.height,
+                    format: freshByTarget.get('b')?.heightFormat,
+                    inst: pair.b,
+                    cachePrefix: `${freshByTarget.get('b')?.key || 'b'}:final`
+                }
+            });
+            if (!baseMetrics && !finalMetrics) {
+                return '';
+            }
+
+            const baseMaxMeters = (baseMetrics?.normMax ?? 0) * heightScaleMeters;
+            const baseAvgMeters = (baseMetrics?.normAvg ?? 0) * heightScaleMeters;
+            const finalMaxMeters = (finalMetrics?.normMax ?? 0) * heightScaleMeters;
+            const finalAvgMeters = (finalMetrics?.normAvg ?? 0) * heightScaleMeters;
+            const amplifyMax = baseMaxMeters > 1e-6 ? (finalMaxMeters / baseMaxMeters) : 0;
+            const amplifyAvg = baseAvgMeters > 1e-6 ? (finalAvgMeters / baseAvgMeters) : 0;
+
+            return (
+                `a=${freshByTarget.get('a')?.key} b=${freshByTarget.get('b')?.key} ` +
+                `base[max=${(baseMetrics?.normMax ?? 0).toFixed(5)}/${baseMaxMeters.toFixed(2)}m ` +
+                `avg=${(baseMetrics?.normAvg ?? 0).toFixed(5)}/${baseAvgMeters.toFixed(2)}m] ` +
+                `final[max=${(finalMetrics?.normMax ?? 0).toFixed(5)}/${finalMaxMeters.toFixed(2)}m ` +
+                `avg=${(finalMetrics?.normAvg ?? 0).toFixed(5)}/${finalAvgMeters.toFixed(2)}m] ` +
+                `amplify[max=${amplifyMax.toFixed(2)}x avg=${amplifyAvg.toFixed(2)}x]`
+            );
+        } finally {
+            for (const entry of freshByTarget.values()) {
+                destroyWrappedTextures(entry?.textures);
+            }
+        }
+    }
+
+    async _sampleFreshTextureSeamMetrics(pair, tValues, sources) {
+        const readCache = new Map();
+        let normMax = 0;
+        let normSum = 0;
+        let sampleCount = 0;
+        let maxT = 0;
+
+        for (const t of tValues) {
+            const seamSample = computeSharedEdgeSampleUVs(pair.a, pair.b, pair.sideA, t);
+            if (!seamSample) continue;
+            const aValue = await this._debugSampleTextureHeightAtChunkUV(
+                sources?.a?.texture,
+                sources?.a?.format,
+                seamSample.uvA,
+                sources?.a?.inst,
+                readCache,
+                sources?.a?.cachePrefix || 'a'
+            );
+            const bValue = await this._debugSampleTextureHeightAtChunkUV(
+                sources?.b?.texture,
+                sources?.b?.format,
+                seamSample.uvB,
+                sources?.b?.inst,
+                readCache,
+                sources?.b?.cachePrefix || 'b'
+            );
+            if (![aValue, bValue].every(Number.isFinite)) {
+                continue;
+            }
+            const delta = Math.abs(aValue - bValue);
+            if (delta > normMax) {
+                normMax = delta;
+                maxT = t;
+            }
+            normSum += delta;
+            sampleCount += 1;
+        }
+
+        if (sampleCount === 0) {
+            return null;
+        }
+        return {
+            normMax,
+            normAvg: normSum / sampleCount,
+            sampleCount,
+            maxT
+        };
+    }
+
+    async _debugSampleTextureHeightAtChunkUV(textureLike, format, localUV, inst, readCache = null, cachePrefix = 'tex') {
+        const tileStreamer = this.tileStreamer;
+        const texSize = tileStreamer?.tileTextureSize ?? 0;
+        if (!(texSize > 0) || !tileStreamer?._debugReadTextureTexels || !textureLike || !inst) {
+            return null;
+        }
+        const footprint = computeVertexChunkHeightFootprint(localUV, inst, texSize);
+        if (!footprint) {
+            return null;
+        }
+        const coords = uniqueTexelCoords([
+            { x: footprint.x0, y: footprint.y0 },
+            { x: footprint.x1, y: footprint.y0 },
+            { x: footprint.x0, y: footprint.y1 },
+            { x: footprint.x1, y: footprint.y1 }
+        ]);
+
+        const values = new Map();
+        const texFormat = format || 'r32float';
+        for (const coord of coords) {
+            const cacheKey = `${cachePrefix}:${coord.x}:${coord.y}`;
+            let sampleValue = readCache?.get(cacheKey);
+            if (!Number.isFinite(sampleValue)) {
+                const readback = await tileStreamer._debugReadTextureTexels(textureLike, texFormat, [coord]);
+                sampleValue = readback?.texels?.[0]?.values?.[0];
+                if (Number.isFinite(sampleValue)) {
+                    readCache?.set(cacheKey, sampleValue);
+                }
+            }
+            if (!Number.isFinite(sampleValue)) {
+                return null;
+            }
+            values.set(`${coord.x},${coord.y}`, sampleValue);
+        }
+
+        const h00 = values.get(`${footprint.x0},${footprint.y0}`);
+        const h10 = values.get(`${footprint.x1},${footprint.y0}`);
+        const h01 = values.get(`${footprint.x0},${footprint.y1}`);
+        const h11 = values.get(`${footprint.x1},${footprint.y1}`);
+        if (![h00, h10, h01, h11].every(Number.isFinite)) {
+            return null;
+        }
+
+        const hx0 = h00 * (1.0 - footprint.fx) + h10 * footprint.fx;
+        const hx1 = h01 * (1.0 - footprint.fx) + h11 * footprint.fx;
+        return hx0 * (1.0 - footprint.fy) + hx1 * footprint.fy;
+    }
+
+    async _debugSampleHeightAtChunkUV(inst, localUV, options = null, readCache = null) {
         const tileStreamer = this.tileStreamer;
         const texSize = tileStreamer?.tileTextureSize ?? 0;
         if (!(texSize > 0) || !tileStreamer?.debugReadArrayLayerTexels) {
             return null;
         }
-        const footprint = computeVertexChunkHeightFootprint(localUV, inst, texSize);
+        const sampleMode = options?.mode ?? 'current';
+        const sampleLOD = Number.isFinite(options?.sampleLOD) ? Math.floor(options.sampleLOD) : (inst?.lod ?? 0);
+        const footprint = sampleMode === 'intended'
+            ? computeVertexIntendedHeightFootprint(localUV, inst, texSize, sampleLOD, this._diagLodSegments)
+            : computeVertexChunkHeightFootprint(localUV, inst, texSize);
         if (!footprint) {
             return null;
         }
@@ -2172,6 +3513,51 @@ function computeVertexChunkHeightFootprint(localUV, inst, texSize) {
     };
 }
 
+function computeVertexIntendedHeightFootprint(localUV, inst, texSize, sampleLOD, lodSegments) {
+    if (!(texSize > 0)) return null;
+    const uv = {
+        x: clamp01(localUV?.x ?? 0),
+        y: clamp01(localUV?.y ?? 0)
+    };
+    const remapped = remapToTexelGridJS(uv, sampleLOD, lodSegments);
+    const offsetX = inst?.uvOffset?.x ?? 0;
+    const offsetY = inst?.uvOffset?.y ?? 0;
+    const scale = inst?.uvScale ?? 1;
+    const sampleUVx = clamp01(offsetX + remapped.x * scale);
+    const sampleUVy = clamp01(offsetY + remapped.y * scale);
+    const maxIdx = Math.max(texSize - 1, 1);
+    const coordX = sampleUVx * maxIdx;
+    const coordY = sampleUVy * maxIdx;
+    const baseX = Math.floor(coordX);
+    const baseY = Math.floor(coordY);
+    return {
+        x0: clampInt(baseX, 0, texSize - 1),
+        x1: clampInt(baseX + 1, 0, texSize - 1),
+        y0: clampInt(baseY, 0, texSize - 1),
+        y1: clampInt(baseY + 1, 0, texSize - 1),
+        fx: coordX - baseX,
+        fy: coordY - baseY,
+    };
+}
+
+function remapToTexelGridJS(localUV, lod, lodSegments) {
+    const segments = getDiagSegmentsForLod(lod, lodSegments);
+    const denom = Math.max(segments - 1.0, 1.0);
+    const scale = segments / denom;
+    return {
+        x: clamp01((localUV?.x ?? 0) * scale),
+        y: clamp01((localUV?.y ?? 0) * scale)
+    };
+}
+
+function getDiagSegmentsForLod(lod, lodSegments) {
+    const segments = Array.isArray(lodSegments) && lodSegments.length > 0
+        ? lodSegments
+        : [128, 64, 32, 16, 8, 4, 2];
+    const idx = clampInt(Number.isFinite(lod) ? lod : 0, 0, Math.max(segments.length - 1, 0));
+    return Math.max(2, Number(segments[idx]) || 2);
+}
+
 function edgeSideLocalUV(side, t) {
     const clampedT = clamp01(t);
     if (side === 'left') return { x: 0.0, y: clampedT };
@@ -2203,4 +3589,554 @@ function uniqueTexelCoords(coords) {
 
 function clampInt(v, min, max) {
     return Math.max(min, Math.min(max, Math.floor(v)));
+}
+
+function distance3(a, b) {
+    const ax = a?.x ?? 0;
+    const ay = a?.y ?? 0;
+    const az = a?.z ?? 0;
+    const bx = b?.x ?? 0;
+    const by = b?.y ?? 0;
+    const bz = b?.z ?? 0;
+    return Math.hypot(ax - bx, ay - by, az - bz);
+}
+
+function computeTileWorldCenter(tile, planetConfig, heightBias = 0) {
+    if (!tile || !planetConfig) return null;
+    const grid = 1 << Math.max(0, tile.depth ?? 0);
+    const u = ((tile.x ?? 0) + 0.5) / Math.max(grid, 1);
+    const v = ((tile.y ?? 0) + 0.5) / Math.max(grid, 1);
+    const s = u * 2 - 1;
+    const t = v * 2 - 1;
+    let cx = 0, cy = 0, cz = 0;
+    switch (tile.face) {
+        case 0: cx = 1;   cy = t;  cz = -s; break;
+        case 1: cx = -1;  cy = t;  cz =  s; break;
+        case 2: cx = s;   cy = 1;  cz = -t; break;
+        case 3: cx = s;   cy = -1; cz =  t; break;
+        case 4: cx = s;   cy = t;  cz =  1; break;
+        case 5: cx = -s;  cy = t;  cz = -1; break;
+        default: cx = 0;  cy = 1;  cz =  0; break;
+    }
+    const len = Math.hypot(cx, cy, cz) || 1;
+    const radius = (planetConfig?.radius ?? 0) + heightBias;
+    const origin = planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
+    return {
+        x: origin.x + (cx / len) * radius,
+        y: origin.y + (cy / len) * radius,
+        z: origin.z + (cz / len) * radius
+    };
+}
+
+function transformPoint4(elements, x, y, z, w = 1) {
+    if (!Array.isArray(elements) && !(elements instanceof Float32Array)) {
+        return null;
+    }
+    return {
+        x: elements[0] * x + elements[4] * y + elements[8] * z + elements[12] * w,
+        y: elements[1] * x + elements[5] * y + elements[9] * z + elements[13] * w,
+        z: elements[2] * x + elements[6] * y + elements[10] * z + elements[14] * w,
+        w: elements[3] * x + elements[7] * y + elements[11] * z + elements[15] * w
+    };
+}
+
+function projectWorldToCameraNdc(world, camera) {
+    const viewElements = camera?.matrixWorldInverse?.elements;
+    const projElements = camera?.projectionMatrix?.elements;
+    if (!viewElements || !projElements || !world) {
+        return null;
+    }
+    const view = transformPoint4(viewElements, world.x, world.y, world.z, 1);
+    if (!view) return null;
+    const clip = transformPoint4(projElements, view.x, view.y, view.z, view.w);
+    if (!clip || Math.abs(clip.w) < 1e-6) {
+        return null;
+    }
+    return {
+        inFront: view.z < 0,
+        viewX: view.x,
+        viewY: view.y,
+        viewZ: view.z,
+        ndcX: clip.x / clip.w,
+        ndcY: clip.y / clip.w,
+        ndcZ: clip.z / clip.w
+    };
+}
+
+function buildTextureGridSampleCoords(texSize, samplesPerAxis = 5) {
+    const size = Math.max(1, Math.floor(texSize || 1));
+    const n = Math.max(2, Math.floor(samplesPerAxis || 2));
+    const coords = [];
+    const max = Math.max(size - 1, 0);
+    for (let iy = 0; iy < n; iy++) {
+        const fy = iy / Math.max(n - 1, 1);
+        const y = clampInt(fy * max, 0, max);
+        for (let ix = 0; ix < n; ix++) {
+            const fx = ix / Math.max(n - 1, 1);
+            const x = clampInt(fx * max, 0, max);
+            coords.push({ x, y });
+        }
+    }
+    return uniqueTexelCoords(coords);
+}
+
+function formatLayerStats(stats) {
+    if (!stats) {
+        return 'unavailable';
+    }
+    const min0 = Number.isFinite(stats.min?.[0]) ? stats.min[0].toFixed(5) : 'n/a';
+    const max0 = Number.isFinite(stats.max?.[0]) ? stats.max[0].toFixed(5) : 'n/a';
+    const mean0 = Number.isFinite(stats.mean?.[0]) ? stats.mean[0].toFixed(5) : 'n/a';
+    return (
+        `min=${min0} max=${max0} mean=${mean0} ` +
+        `nan=${stats.nanCount ?? 0} zero=${stats.zeroCount ?? 0} ` +
+        `below=${Number.isFinite(stats.belowRatio) ? (stats.belowRatio * 100).toFixed(1) : '0.0'}%`
+    );
+}
+
+function summarizeRasterComparison(liveRaster, freshRaster, stride = 1) {
+    if (!liveRaster?.buffer || !freshRaster?.buffer) {
+        return 'unavailable';
+    }
+    const format = String(liveRaster.format || freshRaster.format || 'r32float');
+    const width = Math.min(liveRaster.width ?? 0, freshRaster.width ?? 0);
+    const height = Math.min(liveRaster.height ?? 0, freshRaster.height ?? 0);
+    if (!(width > 0) || !(height > 0)) {
+        return 'unavailable';
+    }
+
+    const step = Math.max(1, Math.floor(stride || 1));
+    const liveDV = new DataView(liveRaster.buffer);
+    const freshDV = new DataView(freshRaster.buffer);
+    const tolerance = texelToleranceForFormat(format);
+    const liveStats = createRasterStats();
+    const freshStats = createRasterStats();
+    let mismatchCount = 0;
+    let sampleCount = 0;
+    let maxAbs = 0;
+    let firstMismatch = '';
+
+    for (let y = 0; y < height; y += step) {
+        for (let x = 0; x < width; x += step) {
+            const liveOffset = y * liveRaster.bytesPerRow + x * liveRaster.texelBytes;
+            const freshOffset = y * freshRaster.bytesPerRow + x * freshRaster.texelBytes;
+            const liveValues = readDiagTexel(liveDV, liveOffset, format);
+            const freshValues = readDiagTexel(freshDV, freshOffset, format);
+            updateRasterStats(liveStats, liveValues?.[0]);
+            updateRasterStats(freshStats, freshValues?.[0]);
+            sampleCount++;
+
+            let differs = false;
+            let localMax = 0;
+            const channelCount = Math.max(liveValues.length, freshValues.length);
+            for (let c = 0; c < channelCount; c++) {
+                const a = Number.isFinite(liveValues[c]) ? liveValues[c] : 0;
+                const b = Number.isFinite(freshValues[c]) ? freshValues[c] : 0;
+                const diff = Math.abs(a - b);
+                localMax = Math.max(localMax, diff);
+                if (diff > tolerance) {
+                    differs = true;
+                }
+            }
+            maxAbs = Math.max(maxAbs, localMax);
+            if (differs) {
+                mismatchCount++;
+                if (!firstMismatch) {
+                    firstMismatch = `${x},${y}:${formatTexelValues(liveValues)}!=${formatTexelValues(freshValues)}`;
+                }
+            }
+        }
+    }
+
+    return (
+        `samples=${sampleCount} mismatch(${mismatchCount}/${sampleCount}) maxAbs=${maxAbs.toFixed(5)} ` +
+        `live{${formatRasterStats(liveStats)}} fresh{${formatRasterStats(freshStats)}}` +
+        `${firstMismatch ? ` first=${firstMismatch}` : ''}`
+    );
+}
+
+function createRasterStats() {
+    return {
+        min: Infinity,
+        max: -Infinity,
+        sum: 0,
+        count: 0,
+        nan: 0
+    };
+}
+
+function updateRasterStats(stats, value) {
+    if (!stats) return;
+    if (!Number.isFinite(value)) {
+        stats.nan++;
+        return;
+    }
+    stats.min = Math.min(stats.min, value);
+    stats.max = Math.max(stats.max, value);
+    stats.sum += value;
+    stats.count++;
+}
+
+function formatRasterStats(stats) {
+    if (!stats) {
+        return 'unavailable';
+    }
+    const min = Number.isFinite(stats.min) ? stats.min.toFixed(5) : 'n/a';
+    const max = Number.isFinite(stats.max) ? stats.max.toFixed(5) : 'n/a';
+    const mean = stats.count > 0 ? (stats.sum / stats.count).toFixed(5) : 'n/a';
+    return `min=${min} max=${max} mean=${mean} nan=${stats.nan}`;
+}
+
+function halfToFloatDiag(h) {
+    const s = (h & 0x8000) ? -1 : 1;
+    const e = (h >> 10) & 0x1f;
+    const f = h & 0x03ff;
+    if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
+    if (e === 31) return f ? NaN : s * Infinity;
+    return s * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+
+function readDiagTexel(dv, offset, format) {
+    switch (format) {
+        case 'r32float':
+            return [dv.getFloat32(offset, true)];
+        case 'rgba32float':
+            return [
+                dv.getFloat32(offset, true),
+                dv.getFloat32(offset + 4, true),
+                dv.getFloat32(offset + 8, true),
+                dv.getFloat32(offset + 12, true)
+            ];
+        case 'r16float':
+            return [halfToFloatDiag(dv.getUint16(offset, true))];
+        case 'rgba16float':
+            return [
+                halfToFloatDiag(dv.getUint16(offset, true)),
+                halfToFloatDiag(dv.getUint16(offset + 2, true)),
+                halfToFloatDiag(dv.getUint16(offset + 4, true)),
+                halfToFloatDiag(dv.getUint16(offset + 6, true))
+            ];
+        case 'r8unorm':
+            return [dv.getUint8(offset) / 255];
+        case 'rgba8unorm':
+            return [
+                dv.getUint8(offset) / 255,
+                dv.getUint8(offset + 1) / 255,
+                dv.getUint8(offset + 2) / 255,
+                dv.getUint8(offset + 3) / 255
+            ];
+        default:
+            return [dv.getFloat32(offset, true)];
+    }
+}
+
+function seamEdgeBit(side) {
+    if (side === 'left') return 8;
+    if (side === 'right') return 2;
+    if (side === 'bottom') return 4;
+    return 1;
+}
+
+function isFallbackInstance(inst) {
+    return Math.abs((inst?.uvScale ?? 1.0) - 1.0) >= 0.001;
+}
+
+function seamHasEdgeMask(inst, side) {
+    return (((inst?.edgeMask ?? 0) & seamEdgeBit(side)) !== 0);
+}
+
+function seamSampleLOD(inst, side, neighborLOD) {
+    const selfLOD = inst?.lod ?? 0;
+    if (seamHasEdgeMask(inst, side) && Number.isFinite(neighborLOD) && neighborLOD > selfLOD) {
+        return neighborLOD;
+    }
+    return selfLOD;
+}
+
+function collectSeamPairs(sampledInstances) {
+    const instances = Array.isArray(sampledInstances) ? sampledInstances : [];
+    const keyToInst = new Map();
+    for (const inst of instances) {
+        const key = instanceSampleGridKey(inst);
+        if (key) {
+            keyToInst.set(key, inst);
+        }
+    }
+
+    const pairs = [];
+    const seen = new Set();
+    const sameDepthPairs = buildSameDepthSeamPairs(instances, keyToInst);
+    for (const pair of sameDepthPairs) {
+        if (seen.has(pair.key)) continue;
+        seen.add(pair.key);
+        pairs.push(pair);
+    }
+
+    const stitchedPairs = buildCoarseFineSeamPairs(instances, seen);
+    for (const pair of stitchedPairs) {
+        if (seen.has(pair.key)) continue;
+        seen.add(pair.key);
+        pairs.push(pair);
+    }
+    return pairs;
+}
+
+function buildSameDepthSeamPairs(instances, keyToInst) {
+    const pairs = [];
+    for (const inst of instances) {
+        const addr = getInstanceGridAddress(inst);
+        if (!addr) continue;
+        const neighbors = [
+            { sideA: 'right', sideB: 'left', key: `${addr.face}:${addr.depth}:${addr.x + 1}:${addr.y}` },
+            { sideA: 'top', sideB: 'bottom', key: `${addr.face}:${addr.depth}:${addr.x}:${addr.y + 1}` }
+        ];
+        for (const n of neighbors) {
+            const other = keyToInst.get(n.key);
+            if (!other) continue;
+            const className = classifySameDepthSeam(inst, other, n.sideA, n.sideB);
+            pairs.push({
+                key: makeOrderedPairKey(instanceSampleGridKey(inst), instanceSampleGridKey(other)),
+                className,
+                a: inst,
+                b: other,
+                sideA: n.sideA,
+                sideB: n.sideB,
+                sampleLODA: seamSampleLOD(inst, n.sideA, other.lod),
+                sampleLODB: seamSampleLOD(other, n.sideB, inst.lod)
+            });
+        }
+    }
+    return pairs;
+}
+
+function classifySameDepthSeam(a, b, sideA, sideB) {
+    const aFallback = isFallbackInstance(a);
+    const bFallback = isFallbackInstance(b);
+    if (!aFallback && !bFallback) {
+        return 'own-own:same-depth';
+    }
+    if (aFallback && bFallback) {
+        return 'fallback-fallback:same-depth';
+    }
+    const hasMask = seamHasEdgeMask(a, sideA) || seamHasEdgeMask(b, sideB);
+    return hasMask ? 'own-fallback:same-depth:mask' : 'own-fallback:same-depth:no-mask';
+}
+
+function buildCoarseFineSeamPairs(instances, seen) {
+    const pairs = [];
+    for (const inst of instances) {
+        for (const side of ['left', 'right', 'bottom', 'top']) {
+            if (!seamHasEdgeMask(inst, side)) continue;
+            const other = findCoveringNeighborForSeam(inst, side, instances);
+            if (!other) continue;
+            const keyA = instanceSampleGridKey(inst);
+            const keyB = instanceSampleGridKey(other);
+            const orderedKey = makeOrderedPairKey(keyA, keyB);
+            if (!orderedKey || seen.has(orderedKey)) continue;
+            const sideB = inferOppositeTouchingSide(inst, other, side);
+            if (!sideB) continue;
+            pairs.push({
+                key: orderedKey,
+                className: 'coarse-fine:stitched',
+                a: inst,
+                b: other,
+                sideA: side,
+                sideB,
+                sampleLODA: seamSampleLOD(inst, side, other.lod),
+                sampleLODB: seamSampleLOD(other, sideB, inst.lod)
+            });
+        }
+    }
+    return pairs;
+}
+
+function findCoveringNeighborForSeam(inst, side, instances) {
+    const a = getInstanceBounds(inst);
+    if (!a) return null;
+    let best = null;
+    let bestArea = Infinity;
+    for (const other of instances) {
+        if (other === inst) continue;
+        if ((other?.face ?? -1) !== a.face) continue;
+        const b = getInstanceBounds(other);
+        if (!b || !(b.size > a.size + 1e-6)) continue;
+        if (!boundsTouchOnSide(a, b, side)) continue;
+        const area = b.size;
+        if (area < bestArea) {
+            bestArea = area;
+            best = other;
+        }
+    }
+    return best;
+}
+
+function getInstanceBounds(inst) {
+    const addr = getInstanceGridAddress(inst);
+    if (!addr) return null;
+    const minX = inst?.chunkLocation?.x ?? 0;
+    const minY = inst?.chunkLocation?.y ?? 0;
+    const size = inst?.chunkSizeUV ?? addr.size;
+    return {
+        face: inst?.face ?? 0,
+        minX,
+        minY,
+        maxX: minX + size,
+        maxY: minY + size,
+        size
+    };
+}
+
+function boundsTouchOnSide(a, b, side) {
+    const eps = 1e-6;
+    if (side === 'left') {
+        return Math.abs(a.minX - b.maxX) < eps && rangesOverlap(a.minY, a.maxY, b.minY, b.maxY);
+    }
+    if (side === 'right') {
+        return Math.abs(a.maxX - b.minX) < eps && rangesOverlap(a.minY, a.maxY, b.minY, b.maxY);
+    }
+    if (side === 'bottom') {
+        return Math.abs(a.minY - b.maxY) < eps && rangesOverlap(a.minX, a.maxX, b.minX, b.maxX);
+    }
+    return Math.abs(a.maxY - b.minY) < eps && rangesOverlap(a.minX, a.maxX, b.minX, b.maxX);
+}
+
+function rangesOverlap(a0, a1, b0, b1) {
+    return Math.min(a1, b1) - Math.max(a0, b0) > 1e-6;
+}
+
+function inferOppositeTouchingSide(aInst, bInst, sideA) {
+    const a = getInstanceBounds(aInst);
+    const b = getInstanceBounds(bInst);
+    if (!a || !b) return '';
+    const eps = 1e-6;
+    if (sideA === 'left' && Math.abs(a.minX - b.maxX) < eps) return 'right';
+    if (sideA === 'right' && Math.abs(a.maxX - b.minX) < eps) return 'left';
+    if (sideA === 'bottom' && Math.abs(a.minY - b.maxY) < eps) return 'top';
+    if (sideA === 'top' && Math.abs(a.maxY - b.minY) < eps) return 'bottom';
+    return '';
+}
+
+function computeSharedEdgeSampleUVs(aInst, bInst, sideA, t) {
+    const a = getInstanceBounds(aInst);
+    const b = getInstanceBounds(bInst);
+    if (!a || !b) return null;
+    const clampedT = clamp01(t);
+    const eps = 1e-6;
+    if (sideA === 'left' || sideA === 'right') {
+        const worldX = sideA === 'left' ? a.minX : a.maxX;
+        const worldY = a.minY + clampedT * a.size;
+        let uvBX = 0;
+        if (Math.abs(worldX - b.minX) < eps) uvBX = 0;
+        else if (Math.abs(worldX - b.maxX) < eps) uvBX = 1;
+        else return null;
+        const uvBY = clamp01((worldY - b.minY) / Math.max(b.size, 1e-6));
+        return {
+            uvA: sideA === 'left' ? { x: 0.0, y: clampedT } : { x: 1.0, y: clampedT },
+            uvB: { x: uvBX, y: uvBY }
+        };
+    }
+    const worldY = sideA === 'bottom' ? a.minY : a.maxY;
+    const worldX = a.minX + clampedT * a.size;
+    let uvBY = 0;
+    if (Math.abs(worldY - b.minY) < eps) uvBY = 0;
+    else if (Math.abs(worldY - b.maxY) < eps) uvBY = 1;
+    else return null;
+    const uvBX = clamp01((worldX - b.minX) / Math.max(b.size, 1e-6));
+    return {
+        uvA: sideA === 'bottom' ? { x: clampedT, y: 0.0 } : { x: clampedT, y: 1.0 },
+        uvB: { x: uvBX, y: uvBY }
+    };
+}
+
+function buildUniformEdgeSamples(count = 17) {
+    const n = Math.max(2, Math.floor(count));
+    const out = [];
+    for (let i = 0; i < n; i++) {
+        out.push(i / Math.max(n - 1, 1));
+    }
+    return out;
+}
+
+function collectInstDiagnosticCoords(inst, side, tValues, texSize) {
+    const coords = [];
+    const addFootprint = (uv) => {
+        const footprint = computeVertexChunkHeightFootprint(uv, inst, texSize);
+        if (!footprint) return;
+        coords.push(
+            { x: footprint.x0, y: footprint.y0 },
+            { x: footprint.x1, y: footprint.y0 },
+            { x: footprint.x0, y: footprint.y1 },
+            { x: footprint.x1, y: footprint.y1 }
+        );
+    };
+
+    addFootprint({ x: 0.5, y: 0.5 });
+    for (const t of Array.isArray(tValues) ? tValues : []) {
+        addFootprint(edgeSideLocalUV(side, t));
+    }
+    return uniqueTexelCoords(coords);
+}
+
+function summarizeTexelComparison(liveTexels, freshTexels, format) {
+    const live = Array.isArray(liveTexels) ? liveTexels : [];
+    const fresh = Array.isArray(freshTexels) ? freshTexels : [];
+    const total = Math.min(live.length, fresh.length);
+    if (total <= 0) {
+        return 'no-samples';
+    }
+
+    const tolerance = texelToleranceForFormat(format);
+    let mismatchCount = 0;
+    let maxAbs = 0;
+    let firstMismatch = '';
+
+    for (let i = 0; i < total; i++) {
+        const a = Array.isArray(live[i]?.values) ? live[i].values : [];
+        const b = Array.isArray(fresh[i]?.values) ? fresh[i].values : [];
+        const channelCount = Math.max(a.length, b.length);
+        let localMax = 0;
+        let differs = false;
+        for (let c = 0; c < channelCount; c++) {
+            const av = Number.isFinite(a[c]) ? a[c] : 0;
+            const bv = Number.isFinite(b[c]) ? b[c] : 0;
+            const diff = Math.abs(av - bv);
+            localMax = Math.max(localMax, diff);
+            if (diff > tolerance) {
+                differs = true;
+            }
+        }
+        maxAbs = Math.max(maxAbs, localMax);
+        if (differs) {
+            mismatchCount++;
+            if (!firstMismatch) {
+                firstMismatch = `${live[i]?.x ?? 0},${live[i]?.y ?? 0}:${formatTexelValues(a)}!=${formatTexelValues(b)}`;
+            }
+        }
+    }
+
+    return mismatchCount > 0
+        ? `mismatch(${mismatchCount}/${total}) maxAbs=${maxAbs.toFixed(5)} first=${firstMismatch}`
+        : `match(${total}) maxAbs=${maxAbs.toFixed(5)}`;
+}
+
+function texelToleranceForFormat(format) {
+    const fmt = String(format || '').toLowerCase();
+    if (fmt.includes('8')) return (0.5 / 255.0) + 1e-6;
+    if (fmt.includes('16float')) return 5e-4;
+    return 1e-5;
+}
+
+function formatTexelValues(values) {
+    return (Array.isArray(values) ? values : [])
+        .map((v) => Number.isFinite(v) ? Number(v).toFixed(5) : 'NaN')
+        .join('/');
+}
+
+function destroyWrappedTextures(textures) {
+    if (!textures || typeof textures !== 'object') return;
+    for (const tex of Object.values(textures)) {
+        if (!tex) continue;
+        try { tex._gpuTexture?.texture?.destroy?.(); } catch {}
+        try { tex.dispose?.(); } catch {}
+    }
 }

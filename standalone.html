@@ -1301,6 +1301,7 @@
                     pendingGenerations: tileStreamer._generationQueue?.queue?.length ?? 0,
                     activeGenerations: tileStreamer._generationQueue?.active ?? 0,
                     maxVisibleTiles: quadtreeGPU.maxVisibleTiles ?? 0,
+                    manualSnapshot: tileManager.getManualDiagnosticState?.() ?? null,
                     totalInstances: Array.isArray(metaArgs)
                         ? metaArgs.reduce((sum, item) => sum + (item.instanceCount || 0), 0)
                         : 0
@@ -1316,6 +1317,17 @@
             async function setTerrainDebugMode(mode) {
                 await engine.setTerrainDebugMode(mode | 0);
                 console.info(`[QT-MANUAL] terrainDebugMode=${mode | 0}`);
+            }
+
+            function manualSnapshot(reason = 'console') {
+                const tileManager = getTileManager();
+                if (!tileManager?.toggleManualDiagnosticSnapshot) {
+                    console.warn('[QT-MANUAL] manual snapshot unavailable');
+                    return null;
+                }
+                const result = tileManager.toggleManualDiagnosticSnapshot(`console:${reason}`);
+                console.info('[QT-MANUAL] manualSnapshot', result);
+                return result;
             }
 
             Object.assign(window.qtDiag, {
@@ -1334,6 +1346,7 @@
                         'window.qtDiag.findHeightMismatchPairs()',
                         'window.qtDiag.findLocalHeightMismatchPairs()',
                         'window.qtDiag.findLocalGeometryOutliers()',
+                        'window.qtDiag.manualSnapshot()',
                         'window.qtDiag.saveCapture()',
                         'window.qtDiag.setTerrainDebugMode(mode)'
                     ].join('\n'));
@@ -1349,6 +1362,7 @@
                 findHeightMismatchPairs,
                 findLocalHeightMismatchPairs,
                 findLocalGeometryOutliers,
+                manualSnapshot,
                 saveCapture,
                 setTerrainDebugMode
             });

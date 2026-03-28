@@ -145,8 +145,11 @@ export class GameUI {
             <div>27: Splat biomeB</div>
             <div>28: Raw tile category</div>
             <div>29: Splat pair-change mask</div>
+            <div>30: Raw height</div>
             <div>31: Splat raw weight</div>
             <div>32: Splat bilinear-valid mask</div>
+            <div>33: Fallback / stitch risk</div>
+            <div>34: Atlas bleed risk</div>
             <div style="margin-top: 5px; color: #0f0;">Current: <span id="debug-mode-display">0 (Normal)</span></div>
             <div style="display: flex; gap: 6px; align-items: center; margin-top: 6px;">
                 <button id="terrain-debug-prev-btn" style="font-size: 11px;">Prev</button>

@@ -310,9 +310,6 @@ export const GROUND_FIELD_BAKE_CONFIG = {
     resolution: 32,
     maxBakesPerFrame: 8,
     runtimeScatterOversample: 1,
-    // Compact persistent field for dense ground cover. R/G store density and
-    // B/A pack climate so runtime field synthesis can skip separate climate
-    // sampling while still using the baked terrain scatter mask for coverage.
     channels: [
         {
             name: 'grass',

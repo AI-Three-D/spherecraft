@@ -4,6 +4,7 @@ export class GameInputManager {
         this.canvas = canvas;
         
         this.keys = new Set();
+        this._justPressedKeys = new Set();
         this.mousePosition = { x: 0, y: 0 };
         this.mouseDelta = { x: 0, y: 0 };
         this.isLeftMouseDown = false;
@@ -45,6 +46,9 @@ export class GameInputManager {
     }
 
     _onKeyDown(event) {
+        if (!this.keys.has(event.code)) {
+            this._justPressedKeys.add(event.code);
+        }
         this.keys.add(event.code);
     }
 
@@ -117,6 +121,14 @@ export class GameInputManager {
             }
         }
         return keyMap;
+    }
+
+    consumeKeyPress(code) {
+        if (!this._justPressedKeys.has(code)) {
+            return false;
+        }
+        this._justPressedKeys.delete(code);
+        return true;
     }
     
     getMouseDelta() {

@@ -273,6 +273,18 @@ export class Frontend {
         this.quadtreeTileManager?.refreshTiles?.();
     }
 
+    toggleTerrainManualDiagnosticSnapshot(reason = 'manual') {
+        return this.quadtreeTileManager?.toggleManualDiagnosticSnapshot?.(reason) ?? null;
+    }
+
+    getTerrainManualDiagnosticState() {
+        return this.quadtreeTileManager?.getManualDiagnosticState?.() ?? null;
+    }
+
+    isTerrainManualDiagnosticFrozen() {
+        return this.quadtreeTileManager?.isManualDiagnosticFrozen?.() === true;
+    }
+
     async updateChunks(gameState, environmentState, deltaTime, planetConfig, sphericalMapper) {
         if (this.uniformManager) {
             this.uniformManager.currentEnvironmentState = environmentState;
