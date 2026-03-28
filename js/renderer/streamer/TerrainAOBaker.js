@@ -44,6 +44,9 @@ export class TerrainAOBaker {
         this._seed         = (opts.seed ?? 0) >>> 0;
         this._gcCellWorldSize = opts.gcCellWorldSize ?? 3.0;
         this._textureFormats = opts.textureFormats || {};
+        this._tileLayerLookup = typeof opts.tileLayerLookup === 'function'
+            ? opts.tileLayerLookup
+            : null;
 
         const c = { ...TERRAIN_AO_CONFIG, ...(opts.aoConfig || {}) };
         const tree = { ...TERRAIN_AO_CONFIG.tree, ...(c.tree || {}) };
@@ -76,6 +79,8 @@ export class TerrainAOBaker {
         this._paramBuffer = null;
         this._tileBuffer  = null;
         this._tileStaging = null;
+        this._tileStagingU32 = null;
+        this._tileStagingF32 = null;
 
         this._bakeBGL   = null;
         this._bakePipe  = null;
@@ -247,14 +252,18 @@ update(encoder, scatterGPU, tileGPU) {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
-        // 8 u32 per tile × maxBatch. Kept tiny on purpose.
-        const tileBytes = this._maxBatch * 8 * 4;
+        // 40 u32 per tile × maxBatch. Includes neighbor fallback mapping
+        // (layer + uvBias/uvScale) so AO can sample across LOD borders.
+        const tileStride = 40;
+        const tileBytes = this._maxBatch * tileStride * 4;
         this._tileBuffer = this.device.createBuffer({
             label: 'TerrainAO-TileList',
             size: tileBytes,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
-        this._tileStaging = new Uint32Array(this._maxBatch * 8);
+        this._tileStaging = new ArrayBuffer(tileBytes);
+        this._tileStagingU32 = new Uint32Array(this._tileStaging);
+        this._tileStagingF32 = new Float32Array(this._tileStaging);
     }
 
     _createBakePipeline() {
@@ -414,17 +423,108 @@ update(encoder, scatterGPU, tileGPU) {
     }
 
     _uploadTiles(batch) {
-        const s = this._tileStaging;
-        s.fill(0);
+        const sU32 = this._tileStagingU32;
+        const sF32 = this._tileStagingF32;
+        sU32.fill(0);
+        const stride = 40;
         for (let i = 0; i < batch.length; i++) {
-            const b = i * 8;
+            const b = i * stride;
             const t = batch[i];
-            s[b]   = t.face;
-            s[b+1] = t.depth;
-            s[b+2] = t.tileX;
-            s[b+3] = t.tileY;
-            s[b+4] = t.layer;
+            const neighbors = this._resolveNeighborInfo(t);
+            sU32[b]   = t.face;
+            sU32[b+1] = t.depth;
+            sU32[b+2] = t.tileX;
+            sU32[b+3] = t.tileY;
+            sU32[b+4] = t.layer;
+            sF32[b+5] = 0.0;
+            sF32[b+6] = 0.0;
+            sF32[b+7] = 1.0;
+
+            this._writeNeighborInfo(sU32, sF32, b + 8,  neighbors.left);
+            this._writeNeighborInfo(sU32, sF32, b + 12, neighbors.right);
+            this._writeNeighborInfo(sU32, sF32, b + 16, neighbors.bottom);
+            this._writeNeighborInfo(sU32, sF32, b + 20, neighbors.top);
+            this._writeNeighborInfo(sU32, sF32, b + 24, neighbors.bottomLeft);
+            this._writeNeighborInfo(sU32, sF32, b + 28, neighbors.bottomRight);
+            this._writeNeighborInfo(sU32, sF32, b + 32, neighbors.topLeft);
+            this._writeNeighborInfo(sU32, sF32, b + 36, neighbors.topRight);
         }
-        this.device.queue.writeBuffer(this._tileBuffer, 0, s);
+        this.device.queue.writeBuffer(this._tileBuffer, 0, this._tileStaging);
+    }
+
+    _writeNeighborInfo(u32View, f32View, base, info) {
+        u32View[base] = info.layer >>> 0;
+        f32View[base + 1] = info.uvBiasX;
+        f32View[base + 2] = info.uvBiasY;
+        f32View[base + 3] = info.uvScale;
+    }
+
+    _resolveNeighborInfo(tile) {
+        const invalid = 0xFFFFFFFF;
+        const lookup = this._tileLayerLookup;
+        if (!lookup) {
+            return {
+                left: { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 },
+                right: { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 },
+                bottom: { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 },
+                top: { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 },
+                bottomLeft: { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 },
+                bottomRight: { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 },
+                topLeft: { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 },
+                topRight: { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 },
+            };
+        }
+
+        const gridSize = 1 << tile.depth;
+        const sample = (dx, dy) => {
+            const x = tile.tileX + dx;
+            const y = tile.tileY + dy;
+            if (x < 0 || x >= gridSize || y < 0 || y >= gridSize) {
+                return { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 };
+            }
+            return this._lookupLayerWithFallback(tile.face, tile.depth, x, y);
+        };
+
+        return {
+            left: sample(-1, 0),
+            right: sample(1, 0),
+            bottom: sample(0, -1),
+            top: sample(0, 1),
+            bottomLeft: sample(-1, -1),
+            bottomRight: sample(1, -1),
+            topLeft: sample(-1, 1),
+            topRight: sample(1, 1),
+        };
+    }
+
+    _lookupLayerWithFallback(face, depth, x, y) {
+        const invalid = 0xFFFFFFFF;
+        const lookup = this._tileLayerLookup;
+        const exact = lookup(face, depth, x, y);
+        if (Number.isInteger(exact) && exact >= 0) {
+            return { layer: exact >>> 0, uvBiasX: 0, uvBiasY: 0, uvScale: 1 };
+        }
+
+        let d = depth;
+        let tx = x;
+        let ty = y;
+        let scale = 1.0;
+        let biasX = 0.0;
+        let biasY = 0.0;
+        for (let step = 0; step < 16; step++) {
+            if (d === 0) break;
+            scale *= 0.5;
+            biasX += (tx & 1) * scale;
+            biasY += (ty & 1) * scale;
+            tx >>= 1;
+            ty >>= 1;
+            d -= 1;
+            const layer = lookup(face, d, tx, ty);
+            if (Number.isInteger(layer) && layer >= 0) {
+                return { layer: layer >>> 0, uvBiasX: biasX, uvBiasY: biasY, uvScale: scale };
+            }
+        }
+
+        return { layer: invalid, uvBiasX: 0, uvBiasY: 0, uvScale: 1 };
     }
 }

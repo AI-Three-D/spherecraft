@@ -11,6 +11,8 @@ import { TileStreamer } from './tileStreamer.js';
 import { TerrainGeometryBuilder } from '../../mesh/terrain/terrainGeometryBuilder.js';
 import { Logger } from '../../config/Logger.js';
 
+const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
+
 
 // GPUQuadtreeTerrain.js
 
@@ -694,6 +696,9 @@ export class QuadtreeTileManager {
         this._lastVisibleTiles = null;
         this._stitchDiagFrame = 0;
         this._stitchDiagPending = false;
+        this._diagLodSegments = [128, 64, 32, 16, 8, 4, 2];
+        this._seamDiagTick = 0;
+        this._seamDiagSeen = new Map();
 
         // ── Debug profiling state ────────────────────────────────────
         this._profileFrame = 0;
@@ -725,6 +730,9 @@ export class QuadtreeTileManager {
         // Compute maxGeomLOD from segment config (needed by QuadtreeGPU for indirect args)
         const baseSegments = this.engineConfig.chunkSegments;
         const lodSegments = TerrainGeometryBuilder.buildSegmentArray(baseSegments);
+        this._diagLodSegments = Array.isArray(lodSegments) && lodSegments.length > 0
+            ? [...lodSegments]
+            : this._diagLodSegments;
         this._maxGeomLOD = Math.max(0, lodSegments.length - 1);
         const maxAbsNormalized = 1.8; // max(|-1.1|, |1.8|)
         const maxHeightDisplacement = maxAbsNormalized * this.planetConfig.maxTerrainHeight;
@@ -1455,6 +1463,7 @@ export class QuadtreeTileManager {
       };
   
       const sampleBudget = cfg.diagnosticsSampleInstances ?? 64;
+      const sampledInstances = [];
       if (sampleBudget > 0 && meta?.lodArgs?.length) {
           const perLod = Math.max(1, Math.floor(sampleBudget / Math.max(1, maxLodLevels)));
           
@@ -1467,6 +1476,7 @@ export class QuadtreeTileManager {
                   perLod
               );
               if (!samples || samples.length === 0) continue;
+              sampledInstances.push(...samples);
   
               for (const inst of samples) {
                   const nl = inst.neighborLODs;
@@ -1544,6 +1554,8 @@ export class QuadtreeTileManager {
           pendingCopies: this.tileStreamer?.arrayPool?._pendingCopies?.length ?? 0,
           dirtySlots: this.tileStreamer?._dirtySlots?.size ?? 0
       };
+      const copyStateSummary = this.tileStreamer?.getCopyStateSummary?.() ?? null;
+      const visibleCopySummary = copyStateSummary?.lastVisible ?? null;
   
       // Build verdict
       const verdicts = [];
@@ -1572,6 +1584,12 @@ export class QuadtreeTileManager {
       if ((meta?.parentFallbackHits ?? 0) > meta?.lodArgs?.reduce((s, a) => s + (a.instanceCount || 0), 0) * 0.1) {
           verdicts.push(`HIGH_FALLBACK_RATE(${meta.parentFallbackHits})`);
       }
+      const visibleNonReadyCount =
+          (visibleCopySummary?.ownVisibleNotReady ?? 0) +
+          (visibleCopySummary?.fallbackVisibleNotReady ?? 0);
+      if (visibleNonReadyCount > 0) {
+          verdicts.push(`VISIBLE_COPY_NOT_READY(${visibleNonReadyCount})`);
+      }
   
       const verdictStr = verdicts.length > 0 ? verdicts.join(' | ') : 'NO_ANOMALY_DETECTED';
       
@@ -1583,6 +1601,22 @@ export class QuadtreeTileManager {
           `pendingCopies=${timingIssues.pendingCopies} ` +
           `dirtySlots=${timingIssues.dirtySlots}`
       );
+      if (copyStateSummary) {
+          Logger.info(
+              `${TERRAIN_STEP_LOG_TAG} [QTCommit] stitch-copy-summary tracked=${copyStateSummary.trackedLayers} ` +
+              `queued=${copyStateSummary.queued} submitted=${copyStateSummary.submitted} ` +
+              `ready=${copyStateSummary.ready} failed=${copyStateSummary.failed}`
+          );
+      }
+      if (visibleCopySummary) {
+          Logger.info(
+              `${TERRAIN_STEP_LOG_TAG} [QTCommit] stitch-visible-copy total=${visibleCopySummary.totalVisible} ` +
+              `resident=${visibleCopySummary.residentVisible} ownNotReady=${visibleCopySummary.ownVisibleNotReady} ` +
+              `fallbackVisible=${visibleCopySummary.fallbackVisible} ` +
+              `fallbackNotReady=${visibleCopySummary.fallbackVisibleNotReady}` +
+              `${visibleCopySummary.samples?.length ? ` samples=${visibleCopySummary.samples.join(' ; ')}` : ''}`
+          );
+      }
       Logger.info(
           `[QT-StitchDiag] Hash: loadFactor=${(hashHealth.loadFactor * 100).toFixed(1)}% ` +
           `entries=${hashStats?.totalEntries ?? 'N/A'}/${hashStats?.hashTableCapacity ?? 'N/A'}`
@@ -1612,20 +1646,12 @@ export class QuadtreeTileManager {
       const fallbackInstances = [];
       const ownDataInstances = [];
 
-      if (sampleBudget > 0 && meta?.lodArgs?.length) {
-          const perLod = Math.max(1, Math.floor(sampleBudget / Math.max(1, maxLodLevels)));
-          for (const a of meta.lodArgs) {
-              if (!a.instanceCount || a.instanceCount <= 0) continue;
-              const samples = await this.quadtreeGPU.debugReadInstancesRange?.(
-                  a.firstInstance, a.instanceCount, perLod
-              );
-              if (!samples) continue;
-              for (const inst of samples) {
-                  if (Math.abs(inst.uvScale - 1.0) < 0.001) {
-                      ownDataInstances.push(inst);
-                  } else {
-                      fallbackInstances.push(inst);
-                  }
+      if (sampledInstances.length > 0) {
+          for (const inst of sampledInstances) {
+              if (Math.abs(inst.uvScale - 1.0) < 0.001) {
+                  ownDataInstances.push(inst);
+              } else {
+                  fallbackInstances.push(inst);
               }
           }
       }
@@ -1694,7 +1720,212 @@ export class QuadtreeTileManager {
               `neighbor LOD resolution is failing for tiles that also use parent textures`
           );
       }
+
+      await this._runFallbackAtlasDiagnostics(sampledInstances, {
+          fallbackInstances,
+          ownDataInstances
+      });
   }
+
+    async _runFallbackAtlasDiagnostics(sampledInstances, classified = null) {
+        if (!Array.isArray(sampledInstances) || sampledInstances.length === 0) {
+            return;
+        }
+        const tileStreamer = this.tileStreamer;
+        const texSize = tileStreamer?.tileTextureSize ?? 0;
+        if (!(texSize > 0)) {
+            return;
+        }
+
+        const fallbackInstances = classified?.fallbackInstances ?? sampledInstances.filter((inst) => Math.abs((inst?.uvScale ?? 1) - 1.0) >= 0.001);
+        const ownDataInstances = classified?.ownDataInstances ?? sampledInstances.filter((inst) => Math.abs((inst?.uvScale ?? 1) - 1.0) < 0.001);
+        if (fallbackInstances.length === 0) {
+            Logger.info(`${TERRAIN_STEP_LOG_TAG} [QTAtlas] sampled=${sampledInstances.length} fallback=0 ownData=${ownDataInstances.length}`);
+            return;
+        }
+
+        const ownDataMap = new Map();
+        for (const inst of ownDataInstances) {
+            const key = instanceSampleGridKey(inst);
+            if (key) {
+                ownDataMap.set(key, inst);
+            }
+        }
+
+        let fallbackWithStitchMask = 0;
+        let fallbackBleedAny = 0;
+        let fallbackBleedOnStitchedEdge = 0;
+        let mixedAdjacencyCount = 0;
+        let mixedAdjacencyBleedCount = 0;
+        const bleedSamples = [];
+        const mixedPairs = [];
+        const seenPairs = new Set();
+
+        for (const inst of fallbackInstances) {
+            const addr = getInstanceGridAddress(inst);
+            if (!addr) continue;
+            const currentEdgeMask = inst.edgeMask ?? 0;
+            if (currentEdgeMask !== 0) {
+                fallbackWithStitchMask++;
+            }
+
+            const edgeAnalyses = [
+                { side: 'left', bit: 8, localUV: { x: 0.0, y: 0.5 }, neighborKey: `${addr.face}:${addr.depth}:${addr.x - 1}:${addr.y}` },
+                { side: 'right', bit: 2, localUV: { x: 1.0, y: 0.5 }, neighborKey: `${addr.face}:${addr.depth}:${addr.x + 1}:${addr.y}` },
+                { side: 'bottom', bit: 4, localUV: { x: 0.5, y: 0.0 }, neighborKey: `${addr.face}:${addr.depth}:${addr.x}:${addr.y - 1}` },
+                { side: 'top', bit: 1, localUV: { x: 0.5, y: 1.0 }, neighborKey: `${addr.face}:${addr.depth}:${addr.x}:${addr.y + 1}` },
+            ];
+
+            let hasAnyBleed = false;
+            let hasStitchedBleed = false;
+            for (const edge of edgeAnalyses) {
+                const footprint = computeFragmentAtlasBilinearFootprint(edge.localUV, inst, texSize);
+                if (!footprint) continue;
+                const bleeds = footprint.leakX || footprint.leakY;
+                const stitched = (currentEdgeMask & edge.bit) !== 0;
+                const mixedNeighbor = ownDataMap.get(edge.neighborKey) ?? null;
+
+                if (bleeds) {
+                    hasAnyBleed = true;
+                }
+                if (bleeds && stitched) {
+                    hasStitchedBleed = true;
+                }
+                if (mixedNeighbor) {
+                    mixedAdjacencyCount++;
+                    if (bleeds) {
+                        mixedAdjacencyBleedCount++;
+                    }
+                    const pairKey = makeOrderedPairKey(instanceSampleGridKey(inst), edge.neighborKey);
+                    if (pairKey && !seenPairs.has(pairKey)) {
+                        seenPairs.add(pairKey);
+                        mixedPairs.push({
+                            fallback: inst,
+                            own: mixedNeighbor,
+                            side: edge.side,
+                            footprint
+                        });
+                    }
+                }
+
+                if (bleeds && bleedSamples.length < 8) {
+                    bleedSamples.push(
+                        `f${addr.face}:d${addr.depth}:${addr.x},${addr.y}:${edge.side} ` +
+                        `uvScale=${(inst.uvScale ?? 1).toFixed(4)} edgeMask=${currentEdgeMask} ` +
+                        `allowedX=${footprint.rect.minX}-${footprint.rect.maxX} sampleX=${footprint.x0}-${footprint.x1} ` +
+                        `allowedY=${footprint.rect.minY}-${footprint.rect.maxY} sampleY=${footprint.y0}-${footprint.y1}` +
+                        `${mixedNeighbor ? ' mixedOwn=1' : ''}${stitched ? ' stitched=1' : ''}`
+                    );
+                }
+            }
+
+            if (hasAnyBleed) {
+                fallbackBleedAny++;
+            }
+            if (hasStitchedBleed) {
+                fallbackBleedOnStitchedEdge++;
+            }
+        }
+
+        Logger.warn(
+            `${TERRAIN_STEP_LOG_TAG} [QTAtlas] sampled=${sampledInstances.length} ` +
+            `fallback=${fallbackInstances.length} ownData=${ownDataInstances.length} ` +
+            `fallbackWithStitch=${fallbackWithStitchMask} ` +
+            `bleedAny=${fallbackBleedAny} ` +
+            `bleedOnStitchedEdge=${fallbackBleedOnStitchedEdge} ` +
+            `mixedAdj=${mixedAdjacencyCount} mixedAdjBleed=${mixedAdjacencyBleedCount}`
+        );
+        if (bleedSamples.length > 0) {
+            Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTAtlas] bleed-samples ${bleedSamples.join(' ; ')}`);
+        }
+
+        if (!tileStreamer?.debugReadArrayLayerTexels || mixedPairs.length === 0) {
+            return;
+        }
+
+        const readCache = new Map();
+        const pairLogs = [];
+        for (const pair of mixedPairs.slice(0, 3)) {
+            const tValues = [0.25, 0.5, 0.75];
+            const deltas = [];
+            for (const t of tValues) {
+                const fallbackUV = edgeSideLocalUV(pair.side, t, true);
+                const ownUV = edgeSideLocalUV(oppositeEdgeSide(pair.side), t, true);
+                const fallbackHeight = await this._debugSampleHeightAtChunkUV(pair.fallback, fallbackUV, readCache);
+                const ownHeight = await this._debugSampleHeightAtChunkUV(pair.own, ownUV, readCache);
+                if (!Number.isFinite(fallbackHeight) || !Number.isFinite(ownHeight)) {
+                    continue;
+                }
+                deltas.push({ t, delta: Math.abs(fallbackHeight - ownHeight) });
+            }
+            if (deltas.length === 0) {
+                continue;
+            }
+            const maxDelta = deltas.reduce((m, d) => Math.max(m, d.delta), 0);
+            const avgDelta = deltas.reduce((s, d) => s + d.delta, 0) / deltas.length;
+            const fallbackAddr = getInstanceGridAddress(pair.fallback);
+            const ownAddr = getInstanceGridAddress(pair.own);
+            pairLogs.push(
+                `fallback=f${fallbackAddr?.face}:d${fallbackAddr?.depth}:${fallbackAddr?.x},${fallbackAddr?.y}` +
+                `->own=f${ownAddr?.face}:d${ownAddr?.depth}:${ownAddr?.x},${ownAddr?.y} side=${pair.side} ` +
+                `fallbackLayer=${pair.fallback.layer} ownLayer=${pair.own.layer} ` +
+                `uvScale=${(pair.fallback.uvScale ?? 1).toFixed(4)} ` +
+                `heightDelta[max=${maxDelta.toFixed(5)} avg=${avgDelta.toFixed(5)}] ` +
+                `fragFootprintX=${pair.footprint?.x0}-${pair.footprint?.x1} ` +
+                `allowedX=${pair.footprint?.rect?.minX}-${pair.footprint?.rect?.maxX}`
+            );
+        }
+        if (pairLogs.length > 0) {
+            Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTAtlas] mixed-edge-heights ${pairLogs.join(' ; ')}`);
+        }
+    }
+
+    async _debugSampleHeightAtChunkUV(inst, localUV, readCache = null) {
+        const tileStreamer = this.tileStreamer;
+        const texSize = tileStreamer?.tileTextureSize ?? 0;
+        if (!(texSize > 0) || !tileStreamer?.debugReadArrayLayerTexels) {
+            return null;
+        }
+        const footprint = computeVertexChunkHeightFootprint(localUV, inst, texSize);
+        if (!footprint) {
+            return null;
+        }
+        const coords = uniqueTexelCoords([
+            { x: footprint.x0, y: footprint.y0 },
+            { x: footprint.x1, y: footprint.y0 },
+            { x: footprint.x0, y: footprint.y1 },
+            { x: footprint.x1, y: footprint.y1 }
+        ]);
+
+        const values = new Map();
+        for (const coord of coords) {
+            const cacheKey = `height:${inst.layer}:${coord.x}:${coord.y}`;
+            let sampleValue = readCache?.get(cacheKey);
+            if (!Number.isFinite(sampleValue)) {
+                const readback = await tileStreamer.debugReadArrayLayerTexels('height', inst.layer, [coord]);
+                sampleValue = readback?.texels?.[0]?.values?.[0];
+                if (Number.isFinite(sampleValue)) {
+                    readCache?.set(cacheKey, sampleValue);
+                }
+            }
+            if (!Number.isFinite(sampleValue)) {
+                return null;
+            }
+            values.set(`${coord.x},${coord.y}`, sampleValue);
+        }
+
+        const h00 = values.get(`${footprint.x0},${footprint.y0}`);
+        const h10 = values.get(`${footprint.x1},${footprint.y0}`);
+        const h01 = values.get(`${footprint.x0},${footprint.y1}`);
+        const h11 = values.get(`${footprint.x1},${footprint.y1}`);
+        if (![h00, h10, h01, h11].every(Number.isFinite)) {
+            return null;
+        }
+
+        const hx0 = h00 * (1.0 - footprint.fx) + h10 * footprint.fx;
+        const hx1 = h01 * (1.0 - footprint.fx) + h11 * footprint.fx;
+        return hx0 * (1.0 - footprint.fy) + hx1 * footprint.fy;
+    }
 
     async _maybeDiagnosticLog(tiles) {
         if (this._diagReadInstances) {
@@ -1832,4 +2063,144 @@ export class QuadtreeTileManager {
             }
         }).catch(() => {});
     }
+}
+
+function clamp01(v) {
+    return Math.min(1, Math.max(0, v));
+}
+
+function getInstanceGridAddress(inst) {
+    const size = inst?.chunkSizeUV ?? 0;
+    if (!(size > 0)) return null;
+    const depth = Math.max(0, Math.round(Math.log2(1 / size)));
+    const x = Math.max(0, Math.floor((inst.chunkLocation?.x ?? 0) / size + 1e-6));
+    const y = Math.max(0, Math.floor((inst.chunkLocation?.y ?? 0) / size + 1e-6));
+    return {
+        face: inst?.face ?? 0,
+        depth,
+        x,
+        y,
+        size
+    };
+}
+
+function instanceSampleGridKey(inst) {
+    const addr = getInstanceGridAddress(inst);
+    if (!addr) return '';
+    return `${addr.face}:${addr.depth}:${addr.x}:${addr.y}`;
+}
+
+function makeOrderedPairKey(a, b) {
+    if (!a || !b) return '';
+    return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+function buildChunkTexelRect(inst, texSize) {
+    if (!(texSize > 0)) return null;
+    const offsetX = inst?.uvOffset?.x ?? 0;
+    const offsetY = inst?.uvOffset?.y ?? 0;
+    const scale = inst?.uvScale ?? 1;
+    const width = Math.max(1, Math.floor(texSize * scale + 0.5));
+    const height = Math.max(1, Math.floor(texSize * scale + 0.5));
+    const minX = clampInt(Math.floor(offsetX * texSize + 0.5), 0, texSize - 1);
+    const minY = clampInt(Math.floor(offsetY * texSize + 0.5), 0, texSize - 1);
+    const maxX = clampInt(minX + width - 1, minX, texSize - 1);
+    const maxY = clampInt(minY + height - 1, minY, texSize - 1);
+    return {
+        minX,
+        minY,
+        maxX,
+        maxY,
+        width: Math.max(1, maxX - minX + 1),
+        height: Math.max(1, maxY - minY + 1)
+    };
+}
+
+function computeFragmentAtlasBilinearFootprint(localUV, inst, texSize) {
+    const rect = buildChunkTexelRect(inst, texSize);
+    if (!rect) return null;
+    const uv = {
+        x: clamp01(localUV?.x ?? 0),
+        y: clamp01(localUV?.y ?? 0)
+    };
+    const offsetX = inst?.uvOffset?.x ?? 0;
+    const offsetY = inst?.uvOffset?.y ?? 0;
+    const scale = inst?.uvScale ?? 1;
+    const parentLocalX = offsetX + uv.x * scale;
+    const parentLocalY = offsetY + uv.y * scale;
+    const maxF = Math.max(texSize - 1, 1);
+    const mappedX = (parentLocalX * maxF + 0.5) / texSize;
+    const mappedY = (parentLocalY * maxF + 0.5) / texSize;
+    const coordX = mappedX * texSize - 0.5;
+    const coordY = mappedY * texSize - 0.5;
+    const baseX = Math.floor(coordX);
+    const baseY = Math.floor(coordY);
+    return {
+        rect,
+        x0: clampInt(baseX, 0, texSize - 1),
+        x1: clampInt(baseX + 1, 0, texSize - 1),
+        y0: clampInt(baseY, 0, texSize - 1),
+        y1: clampInt(baseY + 1, 0, texSize - 1),
+        fx: coordX - baseX,
+        fy: coordY - baseY,
+        leakX: baseX < rect.minX || (baseX + 1) > rect.maxX,
+        leakY: baseY < rect.minY || (baseY + 1) > rect.maxY,
+    };
+}
+
+function computeVertexChunkHeightFootprint(localUV, inst, texSize) {
+    const rect = buildChunkTexelRect(inst, texSize);
+    if (!rect) return null;
+    const uv = {
+        x: clamp01(localUV?.x ?? 0),
+        y: clamp01(localUV?.y ?? 0)
+    };
+    const maxLocalX = Math.max(rect.width - 1, 1);
+    const maxLocalY = Math.max(rect.height - 1, 1);
+    const coordX = rect.minX + uv.x * maxLocalX;
+    const coordY = rect.minY + uv.y * maxLocalY;
+    const baseX = Math.floor(coordX);
+    const baseY = Math.floor(coordY);
+    return {
+        rect,
+        x0: clampInt(baseX, rect.minX, rect.maxX),
+        x1: clampInt(baseX + 1, rect.minX, rect.maxX),
+        y0: clampInt(baseY, rect.minY, rect.maxY),
+        y1: clampInt(baseY + 1, rect.minY, rect.maxY),
+        fx: coordX - baseX,
+        fy: coordY - baseY,
+    };
+}
+
+function edgeSideLocalUV(side, t) {
+    const clampedT = clamp01(t);
+    if (side === 'left') return { x: 0.0, y: clampedT };
+    if (side === 'right') return { x: 1.0, y: clampedT };
+    if (side === 'bottom') return { x: clampedT, y: 0.0 };
+    return { x: clampedT, y: 1.0 };
+}
+
+function oppositeEdgeSide(side) {
+    if (side === 'left') return 'right';
+    if (side === 'right') return 'left';
+    if (side === 'bottom') return 'top';
+    return 'bottom';
+}
+
+function uniqueTexelCoords(coords) {
+    const result = [];
+    const seen = new Set();
+    for (const coord of coords) {
+        const x = Math.floor(coord?.x ?? 0);
+        const y = Math.floor(coord?.y ?? 0);
+        const key = `${x},${y}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push({ x, y });
+    }
+    return result;
+}
+
+function clampInt(v, min, max) {
+    return Math.max(min, Math.min(max, Math.floor(v)));
 }

@@ -88,6 +88,8 @@ import {
 } from '../../renderer/resources/texture.js';
 import { Logger } from '../../config/Logger.js';
 
+const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
+
 function nextPow2(value) {
     let v = Math.max(1, Math.floor(value));
     v--;
@@ -492,6 +494,15 @@ export class TileStreamer {
         this._pendingDestructions   = [];
         this._destructionDelayFrames = 3;
         this._pendingCopyTextures = [];
+        this._debugCopyStateByLayer = new Map();
+        this._debugCopyBatchId = 0;
+        this._debugCopyQueueLogCount = 0;
+        this._debugCopyFlushLogCount = 0;
+        this._debugCopyReadyLogCount = 0;
+        this._debugCopyVerifyLogCount = 0;
+        this._debugCopyVerifyCaptureCount = 0;
+        this._debugVisibleCopyLogCount = 0;
+        this._lastCopyVisibilitySummary = null;
 
         this._generationQueue = new AsyncGenerationQueue({
             maxInFlight:     options.queueConfig?.maxConcurrentTasks  ?? 12,
@@ -638,6 +649,8 @@ drainScatterCommitQueue() {
         this._aoCommitQueue = [];
         this._scatterCommitQueue = [];
         this._pendingCopyTextures = [];
+        this._debugCopyStateByLayer?.clear?.();
+        this._lastCopyVisibilitySummary = null;
         this._lastVisibleTilesList = null;
         this._lastVisibleReadbackTime = 0;
         this._lastVisibleKeySet?.clear?.();
@@ -745,7 +758,23 @@ drainScatterCommitQueue() {
         }
 
         if (this.arrayPool) {
+            const flushedCopies = Array.isArray(this.arrayPool._pendingCopies)
+                ? this.arrayPool._pendingCopies.slice()
+                : [];
             const copyCount = this.arrayPool.flushPendingCopies();
+            let copyFencePromise = null;
+            if (copyCount > 0) {
+                const batchId = ++this._debugCopyBatchId;
+                this._debugMarkSubmittedCopies(flushedCopies, batchId);
+                copyFencePromise = this.device.queue.onSubmittedWorkDone()
+                    .then(async () => {
+                        this._debugMarkReadyCopies(flushedCopies, batchId);
+                        await this._debugVerifyCopiedLayers(flushedCopies, batchId);
+                    })
+                    .catch(() => {
+                        this._debugMarkFailedCopies(flushedCopies, batchId);
+                    });
+            }
             if (copyCount > 0 && this._pendingCopyTextures.length > 0) {
                 const textures = this._pendingCopyTextures.flat();
                 this._pendingCopyTextures.length = 0;
@@ -755,9 +784,14 @@ drainScatterCommitQueue() {
                     framesRemaining: this._destructionDelayFrames,
                     fenceResolved: false
                 };
-                this.device.queue.onSubmittedWorkDone()
-                    .then(() => { entry.fenceResolved = true; })
-                    .catch(() => { entry.fenceResolved = true; });
+                const resolveFence = () => { entry.fenceResolved = true; };
+                if (copyFencePromise) {
+                    copyFencePromise.then(resolveFence).catch(resolveFence);
+                } else {
+                    this.device.queue.onSubmittedWorkDone()
+                        .then(resolveFence)
+                        .catch(resolveFence);
+                }
                 this._pendingDestructions.push(entry);
             }
         }
@@ -1166,6 +1200,7 @@ _evictTile(key) {
     
         this._tileInfo.delete(key);
         this._layerToKey.delete(info.layer);
+        this._debugCopyStateByLayer.delete(info.layer);
         this.arrayPool.releaseLayer(info.layer);
     }
 
@@ -1191,6 +1226,7 @@ async _commitTile(tileAddr, textures) {
     }
 
     this.arrayPool.queueCopyToLayer(textures, layer);
+    this._debugRegisterQueuedCopy(tileAddr, layer, textures);
     this._destroyGeneratedTextures(textures);
 
     const keyLo = this.hashTable.makeKeyLo(tileAddr.x, tileAddr.y);
@@ -1198,6 +1234,7 @@ async _commitTile(tileAddr, textures) {
     const slot  = this.hashTable.insert(keyLo, keyHi, layer);
     if (slot < 0) {
         Logger.warn('[TileStreamer] Hash insert failed');
+        this._debugCopyStateByLayer.delete(layer);
         this.arrayPool.releaseLayer(layer);
         return;
     }
@@ -1368,6 +1405,77 @@ markTilesVisible(tiles) {
         );
     }
 
+    let residentVisible = 0;
+    let ownVisibleNotReady = 0;
+    let fallbackVisible = 0;
+    let fallbackVisibleNotReady = 0;
+    const nonReadySamples = [];
+
+    for (const tile of tiles) {
+        const visibleKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
+        const residentInfo = this._tileInfo.get(visibleKey);
+        if (residentInfo) {
+            residentVisible++;
+            const state = this._debugCopyStateByLayer.get(residentInfo.layer);
+            if (state && state.state !== 'ready') {
+                ownVisibleNotReady++;
+                if (nonReadySamples.length < 8) {
+                    nonReadySamples.push(
+                        `own f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${residentInfo.layer}:${state.state}`
+                    );
+                }
+            }
+            continue;
+        }
+
+        let depth = tile.depth;
+        let x = tile.x;
+        let y = tile.y;
+        while (depth > 0) {
+            depth--;
+            x >>= 1;
+            y >>= 1;
+            const ancestorKey = this._makeKey(tile.face, depth, x, y);
+            const ancestorInfo = this._tileInfo.get(ancestorKey);
+            if (!ancestorInfo) continue;
+            fallbackVisible++;
+            const state = this._debugCopyStateByLayer.get(ancestorInfo.layer);
+            if (state && state.state !== 'ready') {
+                fallbackVisibleNotReady++;
+                if (nonReadySamples.length < 8) {
+                    nonReadySamples.push(
+                        `fallback f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${ancestorInfo.layer}:${state.state}`
+                    );
+                }
+            }
+            break;
+        }
+    }
+
+    this._lastCopyVisibilitySummary = {
+        totalVisible: tiles.length,
+        residentVisible,
+        ownVisibleNotReady,
+        fallbackVisible,
+        fallbackVisibleNotReady,
+        samples: nonReadySamples,
+        timestamp: now
+    };
+
+    if (
+        ownVisibleNotReady > 0 ||
+        fallbackVisibleNotReady > 0 ||
+        this._debugVisibleCopyLogCount < 8
+    ) {
+        this._debugVisibleCopyLogCount++;
+        Logger.info(
+            `${TERRAIN_STEP_LOG_TAG} [QTCommit] visible-copy-state total=${tiles.length} ` +
+            `resident=${residentVisible} ownNotReady=${ownVisibleNotReady} ` +
+            `fallbackVisible=${fallbackVisible} fallbackNotReady=${fallbackVisibleNotReady}` +
+            `${nonReadySamples.length ? ` samples=${nonReadySamples.join(' ; ')}` : ''}`
+        );
+    }
+
     // ... existing lastUsed update logic unchanged ...
     for (const tile of tiles) {
         let { face, depth, x, y } = tile;
@@ -1502,6 +1610,30 @@ markTilesVisible(tiles) {
         return `f${face}:d${depth}:${x},${y}`;
     }
 
+    getLoadedLayer(face, depth, x, y) {
+        const info = this._tileInfo.get(this._makeKey(face, depth, x, y));
+        return info?.layer ?? null;
+    }
+
+    getLoadedTiles() {
+        const tiles = [];
+        for (const [key, info] of this._tileInfo) {
+            const parts = key.split(':');
+            if (parts.length < 3) continue;
+            const face = parseInt(parts[0].slice(1), 10);
+            const depth = parseInt(parts[1].slice(1), 10);
+            const xy = parts[2].split(',');
+            if (xy.length < 2) continue;
+            const x = parseInt(xy[0], 10);
+            const y = parseInt(xy[1], 10);
+            if (!Number.isFinite(face) || !Number.isFinite(depth) || !Number.isFinite(x) || !Number.isFinite(y)) {
+                continue;
+            }
+            tiles.push({ face, depth, x, y, layer: info.layer });
+        }
+        return tiles;
+    }
+
     getHashTableStats() {
         let totalEntries = 0;
         const byDepth = {};
@@ -1529,6 +1661,29 @@ markTilesVisible(tiles) {
             capacityMatch:     this.hashTable.capacity === gpuCap,
             maskMatch:         this.hashTable.mask      === gpuMask,
             sampleEntries
+        };
+    }
+
+    getCopyStateSummary() {
+        const counts = {
+            queued: 0,
+            submitted: 0,
+            ready: 0,
+            failed: 0,
+            unknown: 0
+        };
+        for (const state of this._debugCopyStateByLayer.values()) {
+            const key = state?.state || 'unknown';
+            if (Object.prototype.hasOwnProperty.call(counts, key)) {
+                counts[key]++;
+            } else {
+                counts.unknown++;
+            }
+        }
+        return {
+            ...counts,
+            trackedLayers: this._debugCopyStateByLayer.size,
+            lastVisible: this._lastCopyVisibilitySummary
         };
     }
 
@@ -1685,6 +1840,183 @@ markTilesVisible(tiles) {
         };
     }
 
+    async _debugReadTextureTexels(textureLike, format, texelCoords = [], layer = null) {
+        const texture = textureLike?._gpuTexture?.texture || textureLike;
+        if (!texture) return null;
+
+        const texelBytes = gpuFormatBytesPerTexel(format);
+        if (!Number.isFinite(texelBytes) || texelBytes <= 0) return null;
+
+        const coords = Array.isArray(texelCoords) ? texelCoords : [];
+        const size = this.tileTextureSize;
+        const results = [];
+
+        for (const coord of coords) {
+            const x = Math.max(0, Math.min(size - 1, Math.floor(coord?.x ?? 0)));
+            const y = Math.max(0, Math.min(size - 1, Math.floor(coord?.y ?? 0)));
+            const bytesPerRow = 256;
+            const staging = this.device.createBuffer({
+                size: bytesPerRow,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+            });
+
+            const encoder = this.device.createCommandEncoder();
+            encoder.copyTextureToBuffer(
+                { texture, origin: { x, y, z: layer ?? 0 } },
+                { buffer: staging, bytesPerRow },
+                [1, 1, 1]
+            );
+            this.device.queue.submit([encoder.finish()]);
+            await this.device.queue.onSubmittedWorkDone();
+            await staging.mapAsync(GPUMapMode.READ);
+
+            const dv = new DataView(staging.getMappedRange());
+            const values = readTexel(dv, 0, format);
+            staging.unmap();
+            staging.destroy();
+            results.push({ x, y, values });
+        }
+
+        return {
+            format,
+            texels: results
+        };
+    }
+
+    _debugRegisterQueuedCopy(tileAddr, layer, textures) {
+        const types = Object.keys(textures || {}).filter((type) => textures[type]?._gpuTexture?.texture);
+        const captureSources = this._debugCopyVerifyCaptureCount < 4;
+        if (captureSources) {
+            this._debugCopyVerifyCaptureCount++;
+        }
+
+        this._debugCopyStateByLayer.set(layer, {
+            key: tileAddr.toString(),
+            face: tileAddr.face,
+            depth: tileAddr.depth,
+            x: tileAddr.x,
+            y: tileAddr.y,
+            layer,
+            state: 'queued',
+            queuedAt: performance.now(),
+            submittedAt: 0,
+            readyAt: 0,
+            batchId: 0,
+            types,
+            sourceTextures: captureSources ? { ...textures } : null
+        });
+
+        if (this._debugCopyQueueLogCount < 12) {
+            this._debugCopyQueueLogCount++;
+            Logger.info(
+                `${TERRAIN_STEP_LOG_TAG} [QTCommit] queued key=${tileAddr.toString()} layer=${layer} ` +
+                `types=[${types.join(',')}] pendingCopies=${this.arrayPool?._pendingCopies?.length ?? 0}`
+            );
+        }
+    }
+
+    _debugMarkSubmittedCopies(flushedCopies, batchId) {
+        const now = performance.now();
+        const layerParts = [];
+        for (const copy of flushedCopies) {
+            const state = this._debugCopyStateByLayer.get(copy.layer);
+            if (!state) continue;
+            state.state = 'submitted';
+            state.submittedAt = now;
+            state.batchId = batchId;
+            layerParts.push(`L${copy.layer}:${state.key}`);
+        }
+
+        if (this._debugCopyFlushLogCount < 10) {
+            this._debugCopyFlushLogCount++;
+            Logger.info(
+                `${TERRAIN_STEP_LOG_TAG} [QTCommit] flush batch=${batchId} copies=${flushedCopies.length} ` +
+                `${layerParts.length ? `layers=${layerParts.slice(0, 6).join(', ')}` : 'layers=none'}`
+            );
+        }
+    }
+
+    _debugMarkReadyCopies(flushedCopies, batchId) {
+        const now = performance.now();
+        const readyParts = [];
+        for (const copy of flushedCopies) {
+            const state = this._debugCopyStateByLayer.get(copy.layer);
+            if (!state) continue;
+            state.state = 'ready';
+            state.readyAt = now;
+            state.batchId = batchId;
+            state.copyLatencyMs = state.queuedAt ? (now - state.queuedAt) : 0;
+            readyParts.push(`L${copy.layer}:${state.copyLatencyMs.toFixed(1)}ms`);
+        }
+
+        if (this._debugCopyReadyLogCount < 10) {
+            this._debugCopyReadyLogCount++;
+            Logger.info(
+                `${TERRAIN_STEP_LOG_TAG} [QTCommit] ready batch=${batchId} copies=${flushedCopies.length} ` +
+                `${readyParts.length ? `latency=${readyParts.slice(0, 6).join(', ')}` : 'latency=none'}`
+            );
+        }
+    }
+
+    _debugMarkFailedCopies(flushedCopies, batchId) {
+        for (const copy of flushedCopies) {
+            const state = this._debugCopyStateByLayer.get(copy.layer);
+            if (!state) continue;
+            state.state = 'failed';
+            state.batchId = batchId;
+        }
+        Logger.warn(
+            `${TERRAIN_STEP_LOG_TAG} [QTCommit] copy fence failed batch=${batchId} copies=${flushedCopies.length}`
+        );
+    }
+
+    async _debugVerifyCopiedLayers(flushedCopies, batchId) {
+        if (this._debugCopyVerifyLogCount >= 4) {
+            return;
+        }
+
+        const coords = [
+            { x: 0, y: 0 },
+            { x: Math.max(0, Math.floor(this.tileTextureSize / 2)), y: Math.max(0, Math.floor(this.tileTextureSize / 2)) },
+            { x: Math.max(0, this.tileTextureSize - 1), y: Math.max(0, this.tileTextureSize - 1) }
+        ];
+
+        for (const copy of flushedCopies) {
+            if (this._debugCopyVerifyLogCount >= 4) {
+                return;
+            }
+            const state = this._debugCopyStateByLayer.get(copy.layer);
+            if (!state?.sourceTextures) {
+                continue;
+            }
+
+            const summaries = [];
+            for (const type of ['height', 'tile', 'splatData']) {
+                const sourceTex = state.sourceTextures[type];
+                if (!sourceTex || !this.arrayPool?.textures?.get(type)) {
+                    continue;
+                }
+                const format = sourceTex._gpuFormat || this.textureFormats[type] || 'rgba32float';
+                const sourceSamples = await this._debugReadTextureTexels(sourceTex, format, coords);
+                const arraySamples = await this.debugReadArrayLayerTexels(type, copy.layer, coords);
+                const comparison = compareTexelSampleSets(sourceSamples?.texels, arraySamples?.texels, format);
+                summaries.push(
+                    `${type}=${comparison.mismatchCount > 0 ? `mismatch(${comparison.mismatchCount}/${comparison.total})` : 'match'} ` +
+                    `zeroSrc=${comparison.zeroSourceCount}/${comparison.total} ` +
+                    `zeroDst=${comparison.zeroDestCount}/${comparison.total}` +
+                    `${comparison.firstMismatch ? ` first=${comparison.firstMismatch}` : ''}`
+                );
+            }
+
+            Logger.info(
+                `${TERRAIN_STEP_LOG_TAG} [QTCommit] verify batch=${batchId} key=${state.key} layer=${copy.layer} ` +
+                `${summaries.length ? summaries.join(' | ') : 'no-comparable-types'}`
+            );
+            state.sourceTextures = null;
+            this._debugCopyVerifyLogCount++;
+        }
+    }
+
     _destroyGeneratedTextures(textures) {
         const list = [];
         for (const type of Object.keys(textures)) {
@@ -1701,4 +2033,65 @@ markTilesVisible(tiles) {
             this._pendingCopyTextures.push(list);
         }
     }
+}
+
+function compareTexelSampleSets(sourceTexels, destTexels, format) {
+    const src = Array.isArray(sourceTexels) ? sourceTexels : [];
+    const dst = Array.isArray(destTexels) ? destTexels : [];
+    const total = Math.max(Math.min(src.length, dst.length), 0);
+    let mismatchCount = 0;
+    let zeroSourceCount = 0;
+    let zeroDestCount = 0;
+    let firstMismatch = '';
+
+    for (let i = 0; i < total; i++) {
+        const sourceValues = Array.isArray(src[i]?.values) ? src[i].values : [];
+        const destValues = Array.isArray(dst[i]?.values) ? dst[i].values : [];
+        if (isZeroTexelValue(sourceValues)) zeroSourceCount++;
+        if (isZeroTexelValue(destValues)) zeroDestCount++;
+        if (texelValuesDiffer(sourceValues, destValues, format)) {
+            mismatchCount++;
+            if (!firstMismatch) {
+                firstMismatch =
+                    `(${src[i]?.x ?? '?'},${src[i]?.y ?? '?'}) ` +
+                    `src=${formatTexelValues(sourceValues)} dst=${formatTexelValues(destValues)}`;
+            }
+        }
+    }
+
+    return {
+        total,
+        mismatchCount,
+        zeroSourceCount,
+        zeroDestCount,
+        firstMismatch
+    };
+}
+
+function isZeroTexelValue(values) {
+    if (!Array.isArray(values) || values.length === 0) return true;
+    for (const value of values) {
+        if (Math.abs(value) > 1e-6) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function texelValuesDiffer(sourceValues, destValues, format) {
+    const maxLen = Math.max(sourceValues?.length ?? 0, destValues?.length ?? 0);
+    const tolerance = format && format.includes('float') ? 1e-4 : 1 / 255 + 1e-6;
+    for (let i = 0; i < maxLen; i++) {
+        const src = Number.isFinite(sourceValues?.[i]) ? sourceValues[i] : 0;
+        const dst = Number.isFinite(destValues?.[i]) ? destValues[i] : 0;
+        if (Math.abs(src - dst) > tolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function formatTexelValues(values) {
+    if (!Array.isArray(values)) return '[]';
+    return `[${values.map((value) => Number.isFinite(value) ? value.toFixed(4) : 'nan').join(',')}]`;
 }

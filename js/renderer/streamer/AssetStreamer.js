@@ -444,6 +444,8 @@ export class AssetStreamer {
                 faceSize,
                 seed:            this.engineConfig.seed,
                 gcCellWorldSize: gcCellM,
+                tileLayerLookup: (face, depth, x, y) =>
+                    this.tileStreamer?.getLoadedLayer?.(face, depth, x, y) ?? null,
                 textureFormats:  this.tileStreamer?.textureFormats,
                 aoConfig:        this.engineConfig?.terrainAO,
                 logDispatches:   true,
@@ -453,6 +455,10 @@ export class AssetStreamer {
                 this.tileStreamer.setExternalArrayTexture(
                     'terrainAO', this._aoBaker.getAOTextureWrapper()
                 );
+                const loaded = this.tileStreamer.getLoadedTiles?.() || [];
+                for (const t of loaded) {
+                    this._aoBaker.enqueueBake(t.face, t.depth, t.x, t.y, t.layer);
+                }
             }
         }
 
@@ -1336,6 +1342,19 @@ _drainAOCommits() {
 
     for (const c of commits) {
         this._aoBaker.enqueueBake(c.face, c.depth, c.x, c.y, c.layer);
+
+        // Re-bake same-depth neighbors so they pick up this tile's layer
+        // for cross-tile AO sampling.
+        const offsets = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
+        const gridSize = 1 << c.depth;
+        for (const [dx, dy] of offsets) {
+            const nx = c.x + dx, ny = c.y + dy;
+            if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
+            const nLayer = this.tileStreamer?.getLoadedLayer?.(c.face, c.depth, nx, ny);
+            if (nLayer != null && nLayer >= 0) {
+                this._aoBaker.enqueueBake(c.face, c.depth, nx, ny, nLayer);
+            }
+        }
     }
 }
 

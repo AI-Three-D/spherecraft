@@ -614,18 +614,7 @@ fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
     );
     // r32float is unfilterable on most hardware — manual bilinear.
     // The mask is low-frequency so this is the only filter it needs.
-    let ao = clamp(sampleRGBA32FBilinear(terrainAOMask, uv, layer).r, 0.0, 1.0);
-
-    // Terrain AO is baked per tile, so cross-border occluders can produce
-    // visibly cut masks at quadtree edges. Fade AO back to neutral near the
-    // tile border to suppress those seams.
-    let tileTexSize = vec2<f32>(textureDimensions(terrainAOMask)) * max(input.vAtlasScale, 0.000001);
-    let borderTexels = 4.0;
-    let borderUv = borderTexels / max(min(tileTexSize.x, tileTexSize.y), 1.0);
-    let edgeDist = min(min(input.vUv.x, 1.0 - input.vUv.x), min(input.vUv.y, 1.0 - input.vUv.y));
-    let interiorWeight = smoothstep(borderUv, borderUv * 2.5, edgeDist);
-
-    return mix(1.0, ao, interiorWeight);
+    return clamp(sampleRGBA32FBilinear(terrainAOMask, uv, layer).r, 0.0, 1.0);
 }
 ` : `
 fn sampleTerrainAO(_input: FragmentInput, _layer: i32) -> f32 {

@@ -74,7 +74,41 @@ struct BakeTile {
     tileX: u32,
     tileY: u32,
     layer: u32,
-    _p0: u32, _p1: u32, _p2: u32,
+    uvBiasX: f32,
+    uvBiasY: f32,
+    uvScale: f32,
+    leftLayer: u32,
+    leftBiasX: f32,
+    leftBiasY: f32,
+    leftScale: f32,
+    rightLayer: u32,
+    rightBiasX: f32,
+    rightBiasY: f32,
+    rightScale: f32,
+    bottomLayer: u32,
+    bottomBiasX: f32,
+    bottomBiasY: f32,
+    bottomScale: f32,
+    topLayer: u32,
+    topBiasX: f32,
+    topBiasY: f32,
+    topScale: f32,
+    bottomLeftLayer: u32,
+    bottomLeftBiasX: f32,
+    bottomLeftBiasY: f32,
+    bottomLeftScale: f32,
+    bottomRightLayer: u32,
+    bottomRightBiasX: f32,
+    bottomRightBiasY: f32,
+    bottomRightScale: f32,
+    topLeftLayer: u32,
+    topLeftBiasX: f32,
+    topLeftBiasY: f32,
+    topLeftScale: f32,
+    topRightLayer: u32,
+    topRightBiasX: f32,
+    topRightBiasY: f32,
+    topRightScale: f32,
 }
 
 @group(0) @binding(0) var<uniform>             P:          BakeParams;
@@ -109,24 +143,78 @@ fn pcg2F(seed: u32) -> vec2<f32> {
 // nearest edge texel. The scatter eligibility is derived from world-
 // continuous climate data, so edge values are a close proxy for the
 // neighbour's — this avoids a hash-table lookup per tree per texel.
-fn sampleElig(faceU: f32, faceV: f32, layer: i32,
-              uMin: f32, vMin: f32, uvSize: f32) -> f32 {
-    let ru = clamp((faceU - uMin) / uvSize, 0.0, 1.0);
-    let rv = clamp((faceV - vMin) / uvSize, 0.0, 1.0);
-    let sz = vec2<i32>(textureDimensions(scatterTex));
-    let mc = sz - vec2<i32>(1);
-    let c  = clamp(vec2<i32>(vec2<f32>(ru, rv) * vec2<f32>(sz)), vec2<i32>(0), mc);
-    return textureLoad(scatterTex, c, layer, 0).r;
+const INVALID_LAYER: u32 = 0xFFFFFFFFu;
+
+struct ResolvedLayer {
+    uMin: f32,
+    vMin: f32,
+    layer: u32,
+    uvBiasX: f32,
+    uvBiasY: f32,
+    uvScale: f32,
 }
 
-fn sampleTileId(faceU: f32, faceV: f32, layer: i32,
+fn resolveLayerAndOrigin(
+    faceU: f32, faceV: f32,
+    bt: BakeTile,
+    uMin: f32, vMin: f32, uvSize: f32
+) -> ResolvedLayer {
+    let uMax = uMin + uvSize;
+    let vMax = vMin + uvSize;
+    let dx = select(select(0, -1, faceU < uMin), 1, faceU >= uMax);
+    let dy = select(select(0, -1, faceV < vMin), 1, faceV >= vMax);
+
+    var layer = bt.layer;
+    var bX = bt.uvBiasX;
+    var bY = bt.uvBiasY;
+    var sc = bt.uvScale;
+
+    if (dx == -1 && dy == 0) { layer = bt.leftLayer; bX = bt.leftBiasX; bY = bt.leftBiasY; sc = bt.leftScale; }
+    if (dx == 1 && dy == 0) { layer = bt.rightLayer; bX = bt.rightBiasX; bY = bt.rightBiasY; sc = bt.rightScale; }
+    if (dx == 0 && dy == -1) { layer = bt.bottomLayer; bX = bt.bottomBiasX; bY = bt.bottomBiasY; sc = bt.bottomScale; }
+    if (dx == 0 && dy == 1) { layer = bt.topLayer; bX = bt.topBiasX; bY = bt.topBiasY; sc = bt.topScale; }
+    if (dx == -1 && dy == -1) { layer = bt.bottomLeftLayer; bX = bt.bottomLeftBiasX; bY = bt.bottomLeftBiasY; sc = bt.bottomLeftScale; }
+    if (dx == 1 && dy == -1) { layer = bt.bottomRightLayer; bX = bt.bottomRightBiasX; bY = bt.bottomRightBiasY; sc = bt.bottomRightScale; }
+    if (dx == -1 && dy == 1) { layer = bt.topLeftLayer; bX = bt.topLeftBiasX; bY = bt.topLeftBiasY; sc = bt.topLeftScale; }
+    if (dx == 1 && dy == 1) { layer = bt.topRightLayer; bX = bt.topRightBiasX; bY = bt.topRightBiasY; sc = bt.topRightScale; }
+
+    // If neighbor is missing, fall back to current tile and clamp.
+    if (layer == INVALID_LAYER) {
+        layer = bt.layer;
+        bX = bt.uvBiasX;
+        bY = bt.uvBiasY;
+        sc = bt.uvScale;
+    }
+
+    let uN = uMin + f32(dx) * uvSize;
+    let vN = vMin + f32(dy) * uvSize;
+    return ResolvedLayer(uN, vN, layer, bX, bY, sc);
+}
+
+fn sampleElig(faceU: f32, faceV: f32, bt: BakeTile,
+              uMin: f32, vMin: f32, uvSize: f32) -> f32 {
+    let info = resolveLayerAndOrigin(faceU, faceV, bt, uMin, vMin, uvSize);
+    let ru = clamp((faceU - info.uMin) / uvSize, 0.0, 1.0);
+    let rv = clamp((faceV - info.vMin) / uvSize, 0.0, 1.0);
+    let texU = info.uvBiasX + ru * info.uvScale;
+    let texV = info.uvBiasY + rv * info.uvScale;
+    let sz = vec2<i32>(textureDimensions(scatterTex));
+    let mc = sz - vec2<i32>(1);
+    let c  = clamp(vec2<i32>(vec2<f32>(texU, texV) * vec2<f32>(sz)), vec2<i32>(0), mc);
+    return textureLoad(scatterTex, c, i32(info.layer), 0).r;
+}
+
+fn sampleTileId(faceU: f32, faceV: f32, bt: BakeTile,
                 uMin: f32, vMin: f32, uvSize: f32) -> u32 {
-    let ru = clamp((faceU - uMin) / uvSize, 0.0, 1.0);
-    let rv = clamp((faceV - vMin) / uvSize, 0.0, 1.0);
+    let info = resolveLayerAndOrigin(faceU, faceV, bt, uMin, vMin, uvSize);
+    let ru = clamp((faceU - info.uMin) / uvSize, 0.0, 1.0);
+    let rv = clamp((faceV - info.vMin) / uvSize, 0.0, 1.0);
+    let texU = info.uvBiasX + ru * info.uvScale;
+    let texV = info.uvBiasY + rv * info.uvScale;
     let sz = vec2<i32>(textureDimensions(tileTex));
     let mc = sz - vec2<i32>(1);
-    let c  = clamp(vec2<i32>(vec2<f32>(ru, rv) * vec2<f32>(sz)), vec2<i32>(0), mc);
-    let r  = textureLoad(tileTex, c, layer, 0).r;
+    let c  = clamp(vec2<i32>(vec2<f32>(texU, texV) * vec2<f32>(sz)), vec2<i32>(0), mc);
+    let r  = textureLoad(tileTex, c, i32(info.layer), 0).r;
     return u32(select(r * 255.0, r, r > 1.0) + 0.5);
 }
 
@@ -144,7 +232,7 @@ fn accum(occ: f32, contribution: f32) -> f32 {
 
 fn accumTrees(
     faceU: f32, faceV: f32,
-    face: u32, layer: i32,
+    face: u32, bt: BakeTile,
     uMin: f32, vMin: f32, uvSize: f32,
     occIn: f32
 ) -> f32 {
@@ -193,7 +281,7 @@ fn accumTrees(
             let tFaceV = (f32(cy) + 0.5 + off.y) / treeCellScale;
 
             // eligibility gate
-            let elig = sampleElig(tFaceU, tFaceV, layer, uMin, vMin, uvSize);
+            let elig = sampleElig(tFaceU, tFaceV, bt, uMin, vMin, uvSize);
             if (elig < 0.1) { continue; }
 
             // density thin
@@ -220,7 +308,7 @@ fn accumTrees(
 
 fn accumGC(
     faceU: f32, faceV: f32,
-    face: u32, layer: i32,
+    face: u32, bt: BakeTile,
     uMin: f32, vMin: f32, uvSize: f32,
     occIn: f32
 ) -> f32 {
@@ -250,7 +338,7 @@ fn accumGC(
         let gFaceV = (f32(gy) + j.y) / gcScale;
 
         // reject water / empty
-        let tid = sampleTileId(gFaceU, gFaceV, layer, uMin, vMin, uvSize);
+        let tid = sampleTileId(gFaceU, gFaceV, bt, uMin, vMin, uvSize);
         if (tid == 0u) { continue; }
 
         let dU = gFaceU - faceU;
@@ -272,7 +360,6 @@ fn bake(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.z >= P.tileCount) { return; }
 
     let bt       = bakeTiles[gid.z];
-    let layer    = i32(bt.layer);
     let gridSize = f32(1u << bt.depth);
     let uvSize   = 1.0 / gridSize;
     let uMin     = f32(bt.tileX) / gridSize;
@@ -284,27 +371,19 @@ fn bake(@builtin(global_invocation_id) gid: vec3<u32>) {
     let faceU = uMin + tu * uvSize;
     let faceV = vMin + tv * uvSize;
 
-    // Early-out: if this tile is so coarse that one AO texel covers more
-    // ground than a tree's footprint, AO is below the representable
-    // frequency. Write neutral 1.0 and move on. Keeps the mask valid for
-    // fallback sampling without wasting cycles on meaningless work.
     let tileWorldM = P.faceSize / gridSize;
     let texelM     = tileWorldM / f32(AO_RES);
-    if (texelM > P.treeRadiusM * 2.0) {
-        textureStore(aoOut, vec2<i32>(gid.xy), layer, vec4<f32>(1.0, 0.0, 0.0, 0.0));
-        return;
-    }
 
     var occ: f32 = 0.0;
 
-    occ = accumTrees(faceU, faceV, bt.face, layer, uMin, vMin, uvSize, occ);
+    occ = accumTrees(faceU, faceV, bt.face, bt, uMin, vMin, uvSize, occ);
 
     if (P.gcEnable != 0u && texelM <= P.gcRadiusM * 2.0) {
-        occ = accumGC(faceU, faceV, bt.face, layer, uMin, vMin, uvSize, occ);
+        occ = accumGC(faceU, faceV, bt.face, bt, uMin, vMin, uvSize, occ);
     }
 
     let ao = max(1.0 - occ, P.aoFloor);
-    textureStore(aoOut, vec2<i32>(gid.xy), layer, vec4<f32>(ao, 0.0, 0.0, 0.0));
+    textureStore(aoOut, vec2<i32>(gid.xy), i32(bt.layer), vec4<f32>(ao, 0.0, 0.0, 0.0));
 }
 `;
 }

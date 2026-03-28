@@ -215,19 +215,7 @@ fn computeEdgeSnappedUV(uv: vec2<f32>, selfLOD: i32, neighborLODs: vec4<f32>) ->
     if (onBottom && lodBottom > maxNeighborLOD) { maxNeighborLOD = lodBottom; edgeAxis = 1; edgeValue = 0.0; }
     if (onTop && lodTop > maxNeighborLOD) { maxNeighborLOD = lodTop; edgeAxis = 1; edgeValue = 1.0; }
 
-    var snappedUV = uv;
-    if (edgeAxis >= 0 && maxNeighborLOD > selfLOD) {
-        let coarseSegments = SEGMENTS_PER_LOD[clamp(maxNeighborLOD, 0, 6)];
-        let coarseStep = 1.0 / max(coarseSegments, 1.0);
-        if (edgeAxis == 0) {
-            snappedUV = vec2<f32>(edgeValue, round(uv.y / coarseStep) * coarseStep);
-        } else {
-            snappedUV = vec2<f32>(round(uv.x / coarseStep) * coarseStep, edgeValue);
-        }
-        snappedUV = clamp(snappedUV, vec2<f32>(0.0), vec2<f32>(1.0));
-    }
-
-    return SnapResult(snappedUV, maxNeighborLOD, edgeAxis, edgeValue);
+    return SnapResult(uv, maxNeighborLOD, edgeAxis, edgeValue);
 }
 
 fn sanitizeNeighborLODs(raw: vec4<f32>, selfLOD: i32) -> vec4<f32> {
@@ -391,7 +379,12 @@ fn sampleStitchedHeight(localUV: vec2<f32>, edgeAxis: i32, edgeValue: f32, sampl
     }
 
     let segments = SEGMENTS_PER_LOD[clamp(sampleLOD, 0, 6)];
-    let step = 1.0 / max(segments, 1.0);
+    var stepScale = 1.0;
+    if (DEBUG_STITCH_STEP_FIX) {
+        let lodDiff = max(sampleLOD - selfLOD, 0);
+        stepScale = exp2(f32(lodDiff));
+    }
+    let step = stepScale / max(segments, 1.0);
     var t = localUV.y;
     if (edgeAxis == 1) {
         t = localUV.x;
@@ -412,8 +405,8 @@ fn sampleStitchedHeight(localUV: vec2<f32>, edgeAxis: i32, edgeValue: f32, sampl
         uv1 = vec2<f32>(t1, edgeValue);
     }
 
-    let h0 = sampleHeight(uv0, atlasOffset, atlasScale, sampleLOD, selfLOD, layer);
-    let h1 = sampleHeight(uv1, atlasOffset, atlasScale, sampleLOD, selfLOD, layer);
+    let h0 = sampleHeightNearest(uv0, atlasOffset, atlasScale, sampleLOD, layer);
+    let h1 = sampleHeightNearest(uv1, atlasOffset, atlasScale, sampleLOD, layer);
     return mix(h0, h1, w);
 }
 
@@ -443,7 +436,6 @@ fn main(input: VertexInput${instanceParam}) -> VertexOutput {
 ${instancingBlock}
     }
     let finalUV = input.uv;
-    var positionUV = finalUV;
     var sampleLOD = selfLOD;
     var height: f32 = 0.0;
     var debugEdge: vec4<f32> = vec4<f32>(0.0);
@@ -459,7 +451,6 @@ ${instancingBlock}
     // Stitch heights on edges when adjacent chunk uses a coarser LOD.
     if (useInstancing) {
         let snap = computeEdgeSnappedUV(finalUV, selfLOD, neighborLODs);
-        positionUV = snap.uv;
         sampleLOD = snap.sampleLOD;
         edgeAxis = snap.edgeAxis;
         edgeValue = snap.edgeValue;
@@ -493,7 +484,7 @@ ${instancingBlock}
     var displacement = 0.0;
 
     // Spherical mode
-    let faceUV = chunkLocation + positionUV * chunkSizeUVLocal;
+    let faceUV = chunkLocation + finalUV * chunkSizeUVLocal;
     let cubePoint = getCubePoint(chunkFace, faceUV);
     var sphereDir = normalize(cubePoint);
     sphereDirOut = sphereDir;
@@ -528,7 +519,7 @@ ${instancingBlock}
     output.vDebugEdge = debugEdge;
     output.vDebugSample = debugSample;
     let faceSizeWorld = uniforms.planetRadius * 2.0;
-    var worldPos2D = chunkOffset + positionUV * uniforms.chunkSize;
+    var worldPos2D = chunkOffset + finalUV * uniforms.chunkSize;
     if (chunkFace >= 0) {
         worldPos2D = faceUV * faceSizeWorld;
     }

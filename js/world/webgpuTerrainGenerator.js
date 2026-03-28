@@ -1,11 +1,16 @@
 // js/world/webgpuTerrainGenerator.js
 
 import { createSplatComputeShader } from './shaders/webgpu/splatCompute.wgsl.js';
+import { TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../types.js';
 
 import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
     
 import { Logger } from '../config/Logger.js';
 import { createAdvancedTerrainComputeShader } from './shaders/webgpu/advancedTerrainCompute.wgsl.js';
+
+const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
+const SPLAT_STEP_LOG_TAG = '[SplatStep]';
+const SPLAT_STEP_PREFIX = `${TERRAIN_STEP_LOG_TAG} ${SPLAT_STEP_LOG_TAG}`;
 
 export class WebGPUTerrainGenerator {
     constructor(device, seed, chunkSize, macroConfig, splatConfig, textureCache, options = {}) {
@@ -362,6 +367,19 @@ export class WebGPUTerrainGenerator {
         const innerSize = Math.max(1, splatPass.textureSize | 0);
         const padding = this._computeSplatPaddingTexels();
         const paddedSize = innerSize + padding * 2;
+        const shouldPrimeSplat = (this._quadtreeSplatPrimeCount ?? 0) < 3;
+        const shouldRunProbePasses = (this._quadtreeSplatProbePassCount ?? 0) < 3;
+        const shouldCaptureValidationError = shouldRunProbePasses && typeof this.device.pushErrorScope === 'function';
+        const splatPrimePattern = [17, 34, 51, 68];
+        if (shouldPrimeSplat) {
+            this._quadtreeSplatPrimeCount = (this._quadtreeSplatPrimeCount ?? 0) + 1;
+            this._fillTextureRGBA8Unorm(
+                splatPass.splatTex,
+                innerSize,
+                innerSize,
+                splatPrimePattern
+            );
+        }
 
         if (this._quadtreePaddedSplatLogCount === undefined) {
             this._quadtreePaddedSplatLogCount = 0;
@@ -369,21 +387,28 @@ export class WebGPUTerrainGenerator {
         if (this._quadtreePaddedSplatLogCount < 4) {
             this._quadtreePaddedSplatLogCount++;
             Logger.info(
-                `[SplatDebug] padded quadtree splat: inner=${innerSize}, ` +
+                `${SPLAT_STEP_PREFIX} [SplatDebug] padded quadtree splat: inner=${innerSize}, ` +
                 `padding=${padding}, padded=${paddedSize}, kernel=${this.splatKernelSize}`
             );
         }
 
-        const uvOffset = -padding / (Math.max(chunkGridSize, 1) * Math.max(innerSize - 1, 1));
         const paddedTileMap = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
-
-        const scratchView = this._fillTerrainUniformScratch(
-            chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face
-        );
-        scratchView.setInt32(48, 2, true);
-        scratchView.setFloat32(64, uvOffset, true);
-        scratchView.setFloat32(68, uvOffset, true);
-        this.device.queue.writeBuffer(this.terrainUniformBuffer, 0, this._terrainUniformScratch);
+        let debugProbeTextures = null;
+        if (shouldRunProbePasses) {
+            this._quadtreeSplatProbePassCount = (this._quadtreeSplatProbePassCount ?? 0) + 1;
+            debugProbeTextures = {
+                constantWrite: this.createGPUTexture(innerSize, innerSize, 'rgba8unorm'),
+                tileEcho: this.createGPUTexture(innerSize, innerSize, 'rgba8unorm'),
+                categoryEcho: this.createGPUTexture(innerSize, innerSize, 'rgba8unorm')
+            };
+        }
+        const padTileParams = new Uint32Array([
+            padding >>> 0,
+            innerSize >>> 0,
+            innerSize >>> 0,
+            0
+        ]);
+        this.device.queue.writeBuffer(this._padTileUniformBuffer, 0, padTileParams);
 
         const splatUniformData = new ArrayBuffer(32);
         const splatView = new DataView(splatUniformData);
@@ -397,24 +422,38 @@ export class WebGPUTerrainGenerator {
         splatView.setInt32(28, 0, true);
         this.device.queue.writeBuffer(this.splatUniformBuffer, 0, splatUniformData);
 
-        const { pipeline: tilePipeline, bindGroupLayout: tileBindGroupLayout } =
-            this._getTerrainPipelineForFormat('rgba8unorm');
+        const { pipeline: padTilePipeline, bindGroupLayout: padTileBindGroupLayout } =
+            this._getPadTilePipelineForFormat(splatPass.tileFormat || 'r8unorm');
         const { pipeline: splatPipeline, bindGroupLayout: splatBindGroupLayout } =
             this._getSplatPipelineForFormats(
                 splatPass.heightFormat || 'r32float',
                 'rgba8unorm'
             );
+        const constantProbePipeline = debugProbeTextures
+            ? this._getSplatDebugProbePipeline('constantWrite')
+            : null;
+        const tileEchoProbePipeline = debugProbeTextures
+            ? this._getSplatDebugProbePipeline('tileEcho')
+            : null;
+        const categoryEchoProbePipeline = debugProbeTextures
+            ? this._getSplatDebugProbePipeline('categoryEcho')
+            : null;
+
+        if (shouldCaptureValidationError) {
+            this.device.pushErrorScope('validation');
+        }
 
         const enc = this.device.createCommandEncoder({ label: 'PaddedQuadtreeSplat' });
 
         {
-            const pass = enc.beginComputePass({ label: 'GeneratePaddedTileMap' });
-            pass.setPipeline(tilePipeline);
+            const pass = enc.beginComputePass({ label: 'PadSourceTileMap' });
+            pass.setPipeline(padTilePipeline);
             pass.setBindGroup(0, this.device.createBindGroup({
-                layout: tileBindGroupLayout,
+                layout: padTileBindGroupLayout,
                 entries: [
-                    { binding: 0, resource: { buffer: this.terrainUniformBuffer } },
-                    { binding: 1, resource: paddedTileMap.createView() }
+                    { binding: 0, resource: { buffer: this._padTileUniformBuffer } },
+                    { binding: 1, resource: splatPass.tileTex.createView() },
+                    { binding: 2, resource: paddedTileMap.createView() }
                 ]
             }));
             pass.dispatchWorkgroups(
@@ -443,11 +482,94 @@ export class WebGPUTerrainGenerator {
             pass.end();
         }
 
-        this.device.queue.submit([enc.finish()]);
+        if (debugProbeTextures) {
+            {
+                const pass = enc.beginComputePass({ label: 'DebugSplatConstantWrite' });
+                pass.setPipeline(constantProbePipeline.pipeline);
+                pass.setBindGroup(0, this.device.createBindGroup({
+                    layout: constantProbePipeline.bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: debugProbeTextures.constantWrite.createView() }
+                    ]
+                }));
+                pass.dispatchWorkgroups(
+                    Math.ceil(innerSize / 8),
+                    Math.ceil(innerSize / 8)
+                );
+                pass.end();
+            }
 
-        this.device.queue.onSubmittedWorkDone()
-            .then(() => {
+            {
+                const pass = enc.beginComputePass({ label: 'DebugSplatTileEcho' });
+                pass.setPipeline(tileEchoProbePipeline.pipeline);
+                pass.setBindGroup(0, this.device.createBindGroup({
+                    layout: tileEchoProbePipeline.bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: this._padTileUniformBuffer } },
+                        { binding: 1, resource: paddedTileMap.createView() },
+                        { binding: 2, resource: debugProbeTextures.tileEcho.createView() }
+                    ]
+                }));
+                pass.dispatchWorkgroups(
+                    Math.ceil(innerSize / 8),
+                    Math.ceil(innerSize / 8)
+                );
+                pass.end();
+            }
+
+            {
+                const pass = enc.beginComputePass({ label: 'DebugSplatCategoryEcho' });
+                pass.setPipeline(categoryEchoProbePipeline.pipeline);
+                pass.setBindGroup(0, this.device.createBindGroup({
+                    layout: categoryEchoProbePipeline.bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: this._padTileUniformBuffer } },
+                        { binding: 1, resource: paddedTileMap.createView() },
+                        { binding: 2, resource: debugProbeTextures.categoryEcho.createView() }
+                    ]
+                }));
+                pass.dispatchWorkgroups(
+                    Math.ceil(innerSize / 8),
+                    Math.ceil(innerSize / 8)
+                );
+                pass.end();
+            }
+        }
+
+        this.device.queue.submit([enc.finish()]);
+        const validationErrorPromise = shouldCaptureValidationError
+            ? this.device.popErrorScope().catch(() => null)
+            : Promise.resolve(null);
+
+        Promise.all([
+            this.device.queue.onSubmittedWorkDone().catch(() => null),
+            validationErrorPromise
+        ])
+            .then(async ([, validationError]) => {
+                try {
+                    await this._debugAnalyzeQuadtreeSplatPass(
+                        splatPass,
+                        paddedTileMap,
+                        innerSize,
+                        paddedSize,
+                        padding,
+                        chunkCoordX,
+                        chunkCoordY,
+                        chunkGridSize,
+                        face,
+                        shouldPrimeSplat ? splatPrimePattern : null,
+                        debugProbeTextures,
+                        validationError
+                    );
+                } catch (err) {
+                    Logger.warn(`${SPLAT_STEP_PREFIX} [SplatDebug] quadtree splat diagnostics failed: ${err?.message || err}`);
+                }
                 try { paddedTileMap.destroy(); } catch (_) {}
+                if (debugProbeTextures) {
+                    try { debugProbeTextures.constantWrite.destroy(); } catch (_) {}
+                    try { debugProbeTextures.tileEcho.destroy(); } catch (_) {}
+                    try { debugProbeTextures.categoryEcho.destroy(); } catch (_) {}
+                }
             })
             .catch(() => {});
     }
@@ -633,6 +755,26 @@ export class WebGPUTerrainGenerator {
             label: 'Splat Compute',
             code: splatShaderCode
         });
+        if (typeof this.splatShaderModule.getCompilationInfo === 'function') {
+            this.splatShaderModule.getCompilationInfo()
+                .then((info) => {
+                    const messages = Array.isArray(info?.messages) ? info.messages : [];
+                    if (messages.length === 0) {
+                        Logger.info(`${SPLAT_STEP_PREFIX} [SplatDebug] shader compilation info: no messages`);
+                        return;
+                    }
+                    for (const msg of messages.slice(0, 12)) {
+                        Logger.warn(
+                            `${SPLAT_STEP_PREFIX} [SplatDebug] shader compilation ${msg.type || 'info'} ` +
+                            `line=${msg.lineNum ?? '?'} pos=${msg.linePos ?? '?'} len=${msg.length ?? '?'}: ${msg.message}`
+                        );
+                    }
+                    if (messages.length > 12) {
+                        Logger.warn(`${SPLAT_STEP_PREFIX} [SplatDebug] shader compilation messages truncated: ${messages.length}`);
+                    }
+                })
+                .catch(() => {});
+        }
 
         // ── Uniform buffers ───────────────────────────────────────
         this.terrainUniformBuffer = this.device.createBuffer({
@@ -765,6 +907,13 @@ export class WebGPUTerrainGenerator {
                 bindGroupLayout: this.splatBindGroupLayout
             }
         );
+        this._padTilePipelineCache = new Map();
+        this._splatDebugProbePipelineCache = new Map();
+        this._padTileUniformBuffer = this.device.createBuffer({
+            label: 'PadTile-Params',
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
         this._r8ResolvePipelineCache = new Map();
         this._r8ResolveScratchBuffer = null;
         this._r8ResolveScratchSize = 0;
@@ -931,6 +1080,225 @@ export class WebGPUTerrainGenerator {
         if (!this._splatPipelineCache) this._splatPipelineCache = new Map();
         const record = { pipeline, bindGroupLayout };
         this._splatPipelineCache.set(cacheKey, record);
+        return record;
+    }
+
+    _getPadTilePipelineForFormat(tileFormat = 'r8unorm') {
+        const sampleType = gpuFormatSampleType(tileFormat || 'r8unorm');
+        const cacheKey = `${tileFormat || 'r8unorm'}|${sampleType}`;
+        const cached = this._padTilePipelineCache?.get(cacheKey);
+        if (cached) return cached;
+
+        const shaderModule = this.device.createShaderModule({
+            label: `PadTile (${cacheKey})`,
+            code: /* wgsl */`
+struct PadTileParams {
+    padding: u32,
+    sourceWidth: u32,
+    sourceHeight: u32,
+    _pad0: u32,
+};
+
+@group(0) @binding(0) var<uniform> params: PadTileParams;
+@group(0) @binding(1) var sourceTileTex: texture_2d<f32>;
+@group(0) @binding(2) var paddedTileTex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let outSize = textureDimensions(paddedTileTex);
+    if (global_id.x >= outSize.x || global_id.y >= outSize.y) {
+        return;
+    }
+
+    let sourceSize = vec2<i32>(
+        i32(max(params.sourceWidth, 1u)),
+        i32(max(params.sourceHeight, 1u))
+    );
+    let srcCoord = clamp(
+        vec2<i32>(global_id.xy) - vec2<i32>(i32(params.padding)),
+        vec2<i32>(0),
+        sourceSize - vec2<i32>(1)
+    );
+    let sample = textureLoad(sourceTileTex, srcCoord, 0);
+    textureStore(
+        paddedTileTex,
+        vec2<i32>(global_id.xy),
+        vec4<f32>(sample.r, 0.0, 0.0, 1.0)
+    );
+}
+`
+        });
+
+        const bindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: sampleType, viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d' } }
+            ]
+        });
+
+        const pipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [bindGroupLayout]
+            }),
+            compute: { module: shaderModule, entryPoint: 'main' }
+        });
+
+        const record = { pipeline, bindGroupLayout };
+        this._padTilePipelineCache.set(cacheKey, record);
+        return record;
+    }
+
+    _getSplatDebugProbePipeline(mode = 'constantWrite') {
+        const cacheKey = mode || 'constantWrite';
+        const cached = this._splatDebugProbePipelineCache?.get(cacheKey);
+        if (cached) return cached;
+
+        const categoryCount = TILE_CATEGORIES.length;
+        const tileCategoryWGSL = buildTileCategoryLookupWGSL();
+        const representativeLines = ['fn categoryRepresentativeTileId(categoryId: u32) -> u32 {'];
+        for (const category of TILE_CATEGORIES) {
+            representativeLines.push(
+                `    if (categoryId == ${category.id}u) { return ${category.ranges[0][0]}u; } // ${category.name}`
+            );
+        }
+        representativeLines.push('    return 255u;');
+        representativeLines.push('}');
+        const categoryRepresentativeWGSL = representativeLines.join('\n');
+
+        let code = '';
+        let bindGroupLayout = null;
+
+        if (mode === 'constantWrite') {
+            code = /* wgsl */`
+@group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let outSize = textureDimensions(outTex);
+    if (global_id.x >= outSize.x || global_id.y >= outSize.y) {
+        return;
+    }
+    textureStore(outTex, vec2<i32>(global_id.xy), vec4<f32>(1.0, 0.0, 0.0, 1.0));
+}
+`;
+            bindGroupLayout = this.device.createBindGroupLayout({
+                entries: [
+                    {
+                        binding: 0,
+                        visibility: GPUShaderStage.COMPUTE,
+                        storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d' }
+                    }
+                ]
+            });
+        } else {
+            code = /* wgsl */`
+struct ProbeParams {
+    padding: u32,
+    innerWidth: u32,
+    innerHeight: u32,
+    _pad0: u32,
+};
+
+@group(0) @binding(0) var<uniform> params: ProbeParams;
+@group(0) @binding(1) var tileMap: texture_2d<f32>;
+@group(0) @binding(2) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+const INVALID_TILE_ID: u32 = 255u;
+const INVALID_CATEGORY_ID: u32 = 255u;
+const CATEGORY_SCORE_COUNT: u32 = ${categoryCount}u;
+
+fn decodeTileIdRaw(tileSample: vec4<f32>) -> u32 {
+    let rawR = tileSample.r;
+    let tileIdF = select(rawR * 255.0, rawR, rawR > 1.0);
+    return u32(tileIdF + 0.5);
+}
+
+${tileCategoryWGSL}
+
+${categoryRepresentativeWGSL}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let outSize = textureDimensions(outTex);
+    if (global_id.x >= outSize.x || global_id.y >= outSize.y) {
+        return;
+    }
+
+    let tileMapSize = textureDimensions(tileMap);
+    let maxCoord = vec2<i32>(tileMapSize) - vec2<i32>(1);
+    let paddedInset = vec2<u32>(params.padding);
+    let innerTileMapSize = max(tileMapSize - paddedInset * 2u, vec2<u32>(1u));
+    let sourcePos =
+        vec2<f32>(paddedInset)
+        +
+        (vec2<f32>(global_id.xy) + vec2<f32>(0.5))
+        * vec2<f32>(innerTileMapSize)
+        / vec2<f32>(outSize);
+    let centerCoord = clamp(vec2<i32>(floor(sourcePos)), vec2<i32>(0), maxCoord);
+    let sample = textureLoad(tileMap, centerCoord, 0);
+    let tileId = decodeTileIdRaw(sample);
+`;
+            if (mode === 'tileEcho') {
+                code += /* wgsl */`
+    textureStore(
+        outTex,
+        vec2<i32>(global_id.xy),
+        vec4<f32>(sample.r, sample.r, 1.0, 1.0)
+    );
+}
+`;
+            } else {
+                code += /* wgsl */`
+    let categoryId = tileCategory(tileId);
+    var categoryRepresentative = INVALID_TILE_ID;
+    if (categoryId < CATEGORY_SCORE_COUNT) {
+        categoryRepresentative = categoryRepresentativeTileId(categoryId);
+    }
+    let categoryEncoded = select(0.0, f32(categoryId) / 255.0, categoryId < CATEGORY_SCORE_COUNT);
+    let representativeEncoded = select(
+        0.0,
+        f32(categoryRepresentative) / 255.0,
+        categoryRepresentative < INVALID_TILE_ID
+    );
+    textureStore(
+        outTex,
+        vec2<i32>(global_id.xy),
+        vec4<f32>(representativeEncoded, categoryEncoded, 1.0, 1.0)
+    );
+}
+`;
+            }
+
+            bindGroupLayout = this.device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                    { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
+                    {
+                        binding: 2,
+                        visibility: GPUShaderStage.COMPUTE,
+                        storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d' }
+                    }
+                ]
+            });
+        }
+
+        const shaderModule = this.device.createShaderModule({
+            label: `SplatDebugProbe (${cacheKey})`,
+            code
+        });
+        const pipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [bindGroupLayout]
+            }),
+            compute: { module: shaderModule, entryPoint: 'main' }
+        });
+
+        const record = { pipeline, bindGroupLayout };
+        this._splatDebugProbePipelineCache.set(cacheKey, record);
         return record;
     }
 
@@ -1947,6 +2315,175 @@ this.device.queue.submit([enc.finish()]);
         }
     }
 
+    async _debugAnalyzeQuadtreeSplatPass(
+        splatPass,
+        paddedTileGpuTex,
+        innerSize,
+        paddedSize,
+        padding,
+        chunkCoordX,
+        chunkCoordY,
+        chunkGridSize,
+        face,
+        splatPrimePattern = null,
+        debugProbeTextures = null,
+        validationError = null
+    ) {
+        if (this._quadtreeSplatDiagCount === undefined) {
+            this._quadtreeSplatDiagCount = 0;
+        }
+        if (this._quadtreeSplatDiagCount >= 3) {
+            return;
+        }
+        this._quadtreeSplatDiagCount++;
+
+        const sourceTile = await this._readTileTextureBytes(
+            splatPass.tileTex,
+            splatPass.tileFormat || 'r8unorm',
+            0,
+            0,
+            innerSize,
+            innerSize
+        );
+        const paddedTileRaw = await this.readTextureWindowRGBA8Unorm(
+            paddedTileGpuTex,
+            0,
+            0,
+            paddedSize,
+            paddedSize
+        );
+        const splatData = await this.readTextureWindowRGBA8Unorm(
+            splatPass.splatTex,
+            0,
+            0,
+            innerSize,
+            innerSize
+        );
+
+        let mismatchCount = 0;
+        const mismatchSamples = [];
+        const paddedInnerTile = new Uint8Array(innerSize * innerSize);
+        for (let y = 0; y < innerSize; y++) {
+            for (let x = 0; x < innerSize; x++) {
+                const srcIdx = y * innerSize + x;
+                const padIdx = ((y + padding) * paddedSize + (x + padding)) * 4;
+                const paddedValue = paddedTileRaw[padIdx];
+                paddedInnerTile[srcIdx] = paddedValue;
+                if (paddedValue !== sourceTile[srcIdx]) {
+                    mismatchCount++;
+                    if (mismatchSamples.length < 6) {
+                        mismatchSamples.push(
+                            `(${x},${y}) src=${sourceTile[srcIdx]} pad=${paddedValue}`
+                        );
+                    }
+                }
+            }
+        }
+
+        const sourceCategories = summarizeTileCategoryHistogram(sourceTile);
+        const paddedCategories = summarizeTileCategoryHistogram(paddedInnerTile);
+        const splatSummary = summarizeSplatData(splatData, innerSize);
+        const emulatedSplatData = emulateSplatOutputFromPaddedTile(
+            paddedTileRaw,
+            paddedSize,
+            innerSize,
+            padding,
+            this.splatKernelSize
+        );
+        const emulatedSummary = summarizeSplatData(emulatedSplatData, innerSize);
+        const compareSummary = compareSplatOutputs(
+            splatData,
+            emulatedSplatData,
+            innerSize,
+            splatPrimePattern
+        );
+        let constantWriteProbeSummary = null;
+        let tileEchoProbeSummary = null;
+        let categoryEchoProbeSummary = null;
+        if (debugProbeTextures) {
+            const constantWriteBytes = await this.readTextureWindowRGBA8Unorm(
+                debugProbeTextures.constantWrite,
+                0,
+                0,
+                innerSize,
+                innerSize
+            );
+            const tileEchoBytes = await this.readTextureWindowRGBA8Unorm(
+                debugProbeTextures.tileEcho,
+                0,
+                0,
+                innerSize,
+                innerSize
+            );
+            const categoryEchoBytes = await this.readTextureWindowRGBA8Unorm(
+                debugProbeTextures.categoryEcho,
+                0,
+                0,
+                innerSize,
+                innerSize
+            );
+            constantWriteProbeSummary = summarizeRGBA8Pixels(constantWriteBytes);
+            tileEchoProbeSummary = summarizeRGBA8Pixels(tileEchoBytes);
+            categoryEchoProbeSummary = summarizeRGBA8Pixels(categoryEchoBytes);
+        }
+
+        Logger.info(
+            `${SPLAT_STEP_PREFIX} [SplatDebug] Quadtree tile f${face} d≈${Math.round(Math.log2(Math.max(chunkGridSize, 1)))} ` +
+            `coord=(${chunkCoordX},${chunkCoordY}) inner=${innerSize} padded=${paddedSize} padding=${padding}`
+        );
+        Logger.info(
+            `${SPLAT_STEP_PREFIX} [SplatDebug]   source categories: ${formatCategorySummary(sourceCategories)}`
+        );
+        Logger.info(
+            `${SPLAT_STEP_PREFIX} [SplatDebug]   padded-inner categories: ${formatCategorySummary(paddedCategories)}`
+        );
+        Logger.info(
+            `${SPLAT_STEP_PREFIX} [SplatDebug]   padded-inner mismatches=${mismatchCount}/${innerSize * innerSize}` +
+            `${mismatchSamples.length ? ` samples=${mismatchSamples.join(' ; ')}` : ''}`
+        );
+        Logger.info(
+            `${SPLAT_STEP_PREFIX} [SplatDebug]   splat pairs: ${formatPairSummary(splatSummary.topPairs)} ` +
+            `boundary=${splatSummary.boundaryPct.toFixed(1)}% ` +
+            `stable4=${splatSummary.stable4Pct.toFixed(1)}% ` +
+            `weight=[${splatSummary.weightMin.toFixed(3)}, ${splatSummary.weightMax.toFixed(3)}] ` +
+            `avg=${splatSummary.weightMean.toFixed(3)}`
+        );
+        Logger.info(
+            `${SPLAT_STEP_PREFIX} [SplatDebug]   emulated pairs: ${formatPairSummary(emulatedSummary.topPairs)} ` +
+            `boundary=${emulatedSummary.boundaryPct.toFixed(1)}% ` +
+            `stable4=${emulatedSummary.stable4Pct.toFixed(1)}% ` +
+            `weight=[${emulatedSummary.weightMin.toFixed(3)}, ${emulatedSummary.weightMax.toFixed(3)}] ` +
+            `avg=${emulatedSummary.weightMean.toFixed(3)}`
+        );
+        Logger.info(
+            `${SPLAT_STEP_PREFIX} [SplatDebug]   compare: sentinel=${compareSummary.sentinelCount}/${compareSummary.totalPixels} ` +
+            `zero=${compareSummary.zeroCount}/${compareSummary.totalPixels} ` +
+            `fallback=${compareSummary.fallbackCount}/${compareSummary.totalPixels} ` +
+            `mismatch=${compareSummary.mismatchCount}/${compareSummary.totalPixels}` +
+            `${compareSummary.samples.length ? ` samples=${compareSummary.samples.join(' ; ')}` : ''}`
+        );
+        if (constantWriteProbeSummary) {
+            Logger.info(
+                `${SPLAT_STEP_PREFIX} [SplatDebug]   probe constant: ${formatRGBA8PixelSummary(constantWriteProbeSummary)}`
+            );
+        }
+        if (tileEchoProbeSummary) {
+            Logger.info(
+                `${SPLAT_STEP_PREFIX} [SplatDebug]   probe tile-echo: ${formatRGBA8PixelSummary(tileEchoProbeSummary)}`
+            );
+        }
+        if (categoryEchoProbeSummary) {
+            Logger.info(
+                `${SPLAT_STEP_PREFIX} [SplatDebug]   probe category-echo: ${formatRGBA8PixelSummary(categoryEchoProbeSummary)}`
+            );
+        }
+        if (validationError) {
+            Logger.warn(
+                `${SPLAT_STEP_PREFIX} [SplatDebug]   validation error: ${validationError.message || validationError}`
+            );
+        }
+    }
+
     async extractChunkDataFromAtlas(atlasKey, chunkX, chunkY, config, face = null) {
         const lod = atlasKey?.lod ?? 0;
         const heightAtlasData =
@@ -2101,6 +2638,53 @@ this.device.queue.submit([enc.finish()]);
         readBuffer.unmap();
         readBuffer.destroy();
         return result;
+    }
+
+    async _readTileTextureBytes(gpuTex, format, offsetX, offsetY, width, height) {
+        if ((format || 'r8unorm') === 'rgba8unorm') {
+            const rgba = await this.readTextureWindowRGBA8Unorm(
+                gpuTex,
+                offsetX,
+                offsetY,
+                width,
+                height
+            );
+            const result = new Uint8Array(width * height);
+            for (let i = 0; i < result.length; i++) {
+                result[i] = rgba[i * 4];
+            }
+            return result;
+        }
+        return this.readTextureWindowR8Unorm(gpuTex, offsetX, offsetY, width, height);
+    }
+
+    _fillTextureRGBA8Unorm(gpuTex, width, height, rgba) {
+        const bytesPerPixel = 4;
+        const rowStride = Math.ceil((width * bytesPerPixel) / 256) * 256;
+        const bufferSize = rowStride * height;
+        const upload = new Uint8Array(bufferSize);
+        const r = rgba?.[0] ?? 0;
+        const g = rgba?.[1] ?? 0;
+        const b = rgba?.[2] ?? 0;
+        const a = rgba?.[3] ?? 0;
+
+        for (let y = 0; y < height; y++) {
+            const rowOffset = y * rowStride;
+            for (let x = 0; x < width; x++) {
+                const i = rowOffset + x * 4;
+                upload[i] = r;
+                upload[i + 1] = g;
+                upload[i + 2] = b;
+                upload[i + 3] = a;
+            }
+        }
+
+        this.device.queue.writeTexture(
+            { texture: gpuTex },
+            upload,
+            { offset: 0, bytesPerRow: rowStride, rowsPerImage: height },
+            { width, height, depthOrArrayLayers: 1 }
+        );
     }
 
     async readTextureWindow(gpuTex, offsetX, offsetY, width, height) {
@@ -2262,6 +2846,370 @@ function requireObject(value, name) {
         throw new Error(`WebGPUTerrainGenerator missing required object: ${name}`);
     }
     return value;
+}
+
+function tileCategoryIndex(tileId) {
+    for (let i = 0; i < TILE_CATEGORIES.length; i++) {
+        const category = TILE_CATEGORIES[i];
+        for (const [lo, hi] of category.ranges) {
+            if (tileId >= lo && tileId <= hi) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+function summarizeTileCategoryHistogram(tileBytes) {
+    const counts = new Array(TILE_CATEGORIES.length).fill(0);
+    let unknown = 0;
+    for (let i = 0; i < tileBytes.length; i++) {
+        const idx = tileCategoryIndex(tileBytes[i]);
+        if (idx >= 0) counts[idx]++;
+        else unknown++;
+    }
+    const total = Math.max(tileBytes.length, 1);
+    const summary = [];
+    for (let i = 0; i < counts.length; i++) {
+        if (counts[i] <= 0) continue;
+        summary.push({
+            name: TILE_CATEGORIES[i].name,
+            count: counts[i],
+            pct: (counts[i] * 100) / total
+        });
+    }
+    if (unknown > 0) {
+        summary.push({ name: 'UNKNOWN', count: unknown, pct: (unknown * 100) / total });
+    }
+    summary.sort((a, b) => b.count - a.count);
+    return summary;
+}
+
+function formatCategorySummary(summary, limit = 6) {
+    if (!Array.isArray(summary) || summary.length === 0) {
+        return 'none';
+    }
+    return summary
+        .slice(0, limit)
+        .map((entry) => `${entry.name}:${entry.pct.toFixed(1)}%`)
+        .join(', ');
+}
+
+function summarizeSplatData(splatBytes, size) {
+    let boundaryCount = 0;
+    let weightMin = Infinity;
+    let weightMax = -Infinity;
+    let weightSum = 0;
+    const pairCounts = new Map();
+
+    for (let i = 0; i < splatBytes.length; i += 4) {
+        const a = splatBytes[i];
+        const b = splatBytes[i + 1];
+        const weight = splatBytes[i + 2] / 255;
+        const boundary = splatBytes[i + 3] > 127;
+        if (boundary) boundaryCount++;
+        weightMin = Math.min(weightMin, weight);
+        weightMax = Math.max(weightMax, weight);
+        weightSum += weight;
+        const key = `${a}/${b}`;
+        pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+    }
+
+    let stable4Count = 0;
+    let stable4Total = 0;
+    if (size > 1) {
+        for (let y = 0; y < size - 1; y++) {
+            for (let x = 0; x < size - 1; x++) {
+                const idx00 = (y * size + x) * 4;
+                const idx10 = (y * size + x + 1) * 4;
+                const idx01 = ((y + 1) * size + x) * 4;
+                const idx11 = ((y + 1) * size + x + 1) * 4;
+                const a0 = splatBytes[idx00];
+                const b0 = splatBytes[idx00 + 1];
+                const stable =
+                    splatBytes[idx10] === a0 && splatBytes[idx10 + 1] === b0 &&
+                    splatBytes[idx01] === a0 && splatBytes[idx01 + 1] === b0 &&
+                    splatBytes[idx11] === a0 && splatBytes[idx11 + 1] === b0;
+                stable4Total++;
+                if (stable) stable4Count++;
+            }
+        }
+    }
+
+    const totalPixels = Math.max(1, splatBytes.length / 4);
+    const topPairs = [...pairCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([pair, count]) => ({
+            pair,
+            pct: (count * 100) / totalPixels
+        }));
+
+    return {
+        topPairs,
+        boundaryPct: (boundaryCount * 100) / totalPixels,
+        stable4Pct: stable4Total > 0 ? (stable4Count * 100) / stable4Total : 0,
+        weightMin: Number.isFinite(weightMin) ? weightMin : 0,
+        weightMax: Number.isFinite(weightMax) ? weightMax : 0,
+        weightMean: weightSum / totalPixels
+    };
+}
+
+function formatPairSummary(pairs) {
+    if (!Array.isArray(pairs) || pairs.length === 0) {
+        return 'none';
+    }
+    return pairs
+        .map((entry) => `${entry.pair}:${entry.pct.toFixed(1)}%`)
+        .join(', ');
+}
+
+function summarizeRGBA8Pixels(rgbaBytes) {
+    const totalPixels = Math.max(1, rgbaBytes.length / 4);
+    let zeroPixels = 0;
+    const pixelCounts = new Map();
+
+    for (let i = 0; i < rgbaBytes.length; i += 4) {
+        const r = rgbaBytes[i];
+        const g = rgbaBytes[i + 1];
+        const b = rgbaBytes[i + 2];
+        const a = rgbaBytes[i + 3];
+        if (r === 0 && g === 0 && b === 0 && a === 0) {
+            zeroPixels++;
+        }
+        const key = `${r}/${g}/${b}/${a}`;
+        pixelCounts.set(key, (pixelCounts.get(key) || 0) + 1);
+    }
+
+    const topPixels = [...pixelCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([pixel, count]) => ({
+            pixel,
+            pct: (count * 100) / totalPixels
+        }));
+
+    return {
+        totalPixels,
+        zeroPixels,
+        topPixels
+    };
+}
+
+function formatRGBA8PixelSummary(summary) {
+    if (!summary) {
+        return 'none';
+    }
+    const topPixels = Array.isArray(summary.topPixels) && summary.topPixels.length > 0
+        ? summary.topPixels
+            .map((entry) => `${entry.pixel}:${entry.pct.toFixed(1)}%`)
+            .join(', ')
+        : 'none';
+    return `zero=${summary.zeroPixels}/${summary.totalPixels} top=${topPixels}`;
+}
+
+function emulateSplatOutputFromPaddedTile(paddedTileRaw, paddedSize, innerSize, padding, kernelSize) {
+    const output = new Uint8Array(innerSize * innerSize * 4);
+    const kernelRadius = Math.max(0.5, 0.5 * Math.max(kernelSize, 1));
+    const scoreCount = TILE_CATEGORIES.length;
+
+    for (let y = 0; y < innerSize; y++) {
+        for (let x = 0; x < innerSize; x++) {
+            const sourcePosX = padding + ((x + 0.5) * innerSize) / Math.max(innerSize, 1);
+            const sourcePosY = padding + ((y + 0.5) * innerSize) / Math.max(innerSize, 1);
+            const minX = Math.max(0, Math.floor(sourcePosX - kernelRadius));
+            const maxX = Math.min(paddedSize - 1, Math.ceil(sourcePosX + kernelRadius) - 1);
+            const minY = Math.max(0, Math.floor(sourcePosY - kernelRadius));
+            const maxY = Math.min(paddedSize - 1, Math.ceil(sourcePosY + kernelRadius) - 1);
+            const centerX = clampInt(Math.floor(sourcePosX), 0, paddedSize - 1);
+            const centerY = clampInt(Math.floor(sourcePosY), 0, paddedSize - 1);
+            const centerTileId = paddedTileRaw[(centerY * paddedSize + centerX) * 4];
+
+            const categoryScores = new Array(scoreCount).fill(0);
+            for (let sy = minY; sy <= maxY; sy++) {
+                for (let sx = minX; sx <= maxX; sx++) {
+                    const weight = radialKernelWeightJS(
+                        sourcePosX,
+                        sourcePosY,
+                        sx + 0.5,
+                        sy + 0.5,
+                        kernelRadius
+                    );
+                    if (weight <= 0) continue;
+                    const tileId = paddedTileRaw[(sy * paddedSize + sx) * 4];
+                    const categoryId = tileCategoryIndex(tileId);
+                    if (categoryId < 0) continue;
+                    categoryScores[categoryId] += weight;
+                }
+            }
+
+            let top0Category = -1;
+            let top1Category = -1;
+            let top0Score = 0;
+            let top1Score = 0;
+            for (let categoryId = 0; categoryId < categoryScores.length; categoryId++) {
+                const score = categoryScores[categoryId];
+                if (score <= 0) continue;
+                if (
+                    score > top0Score ||
+                    (score === top0Score && (top0Category < 0 || categoryId < top0Category))
+                ) {
+                    top1Category = top0Category;
+                    top1Score = top0Score;
+                    top0Category = categoryId;
+                    top0Score = score;
+                } else if (
+                    score > top1Score ||
+                    (score === top1Score && (top1Category < 0 || categoryId < top1Category))
+                ) {
+                    top1Category = categoryId;
+                    top1Score = score;
+                }
+            }
+
+            const outIdx = (y * innerSize + x) * 4;
+            if (top0Category < 0 || top0Score <= 1e-5) {
+                output[outIdx] = 0;
+                output[outIdx + 1] = 0;
+                output[outIdx + 2] = 255;
+                output[outIdx + 3] = 0;
+                continue;
+            }
+
+            const top0Representative = categoryRepresentativeTileIdJS(top0Category);
+            const top1Representative = categoryRepresentativeTileIdJS(top1Category);
+            const centerCategory = tileCategoryIndex(centerTileId);
+            const interiorTileId =
+                centerCategory >= 0 && centerCategory === top0Category
+                    ? centerTileId
+                    : top0Representative;
+
+            if (top1Category < 0 || top1Score <= 1e-5) {
+                output[outIdx] = interiorTileId;
+                output[outIdx + 1] = interiorTileId;
+                output[outIdx + 2] = 255;
+                output[outIdx + 3] = 0;
+                continue;
+            }
+
+            const topPairSum = top0Score + top1Score;
+            if (topPairSum <= 1e-5) {
+                output[outIdx] = interiorTileId;
+                output[outIdx + 1] = interiorTileId;
+                output[outIdx + 2] = 255;
+                output[outIdx + 3] = 0;
+                continue;
+            }
+
+            let biomeA = top0Representative;
+            let biomeB = top1Representative;
+            let weightOfBiomeA = top0Score / topPairSum;
+            if (top1Representative < top0Representative) {
+                biomeA = top1Representative;
+                biomeB = top0Representative;
+                weightOfBiomeA = top1Score / topPairSum;
+            }
+
+            output[outIdx] = biomeA;
+            output[outIdx + 1] = biomeB;
+            output[outIdx + 2] = clampByte(Math.round(clamp01(weightOfBiomeA) * 255));
+            output[outIdx + 3] = 255;
+        }
+    }
+
+    return output;
+}
+
+function compareSplatOutputs(actual, expected, innerSize, sentinelPattern = null) {
+    let mismatchCount = 0;
+    let sentinelCount = 0;
+    let zeroCount = 0;
+    let fallbackCount = 0;
+    const samples = [];
+    const totalPixels = Math.max(1, actual.length / 4);
+
+    for (let i = 0; i < actual.length; i += 4) {
+        const pixelIndex = i / 4;
+        const x = pixelIndex % innerSize;
+        const y = Math.floor(pixelIndex / innerSize);
+        const isSentinel =
+            Array.isArray(sentinelPattern) &&
+            actual[i] === sentinelPattern[0] &&
+            actual[i + 1] === sentinelPattern[1] &&
+            actual[i + 2] === sentinelPattern[2] &&
+            actual[i + 3] === sentinelPattern[3];
+        if (isSentinel) sentinelCount++;
+        if (
+            actual[i] === 0 &&
+            actual[i + 1] === 0 &&
+            actual[i + 2] === 0 &&
+            actual[i + 3] === 0
+        ) {
+            zeroCount++;
+        }
+        if (
+            actual[i] === 0 &&
+            actual[i + 1] === 0 &&
+            actual[i + 2] === 255 &&
+            actual[i + 3] === 0
+        ) {
+            fallbackCount++;
+        }
+
+        const mismatch =
+            actual[i] !== expected[i] ||
+            actual[i + 1] !== expected[i + 1] ||
+            actual[i + 2] !== expected[i + 2] ||
+            actual[i + 3] !== expected[i + 3];
+        if (mismatch) {
+            mismatchCount++;
+            if (samples.length < 6) {
+                samples.push(
+                    `(${x},${y}) act=${actual[i]}/${actual[i + 1]}/${actual[i + 2]}/${actual[i + 3]} ` +
+                    `exp=${expected[i]}/${expected[i + 1]}/${expected[i + 2]}/${expected[i + 3]}`
+                );
+            }
+        }
+    }
+
+    return {
+        totalPixels,
+        mismatchCount,
+        sentinelCount,
+        zeroCount,
+        fallbackCount,
+        samples
+    };
+}
+
+function radialKernelWeightJS(cx, cy, sx, sy, radius) {
+    if (!(radius > 0)) return 0;
+    const dx = cx - sx;
+    const dy = cy - sy;
+    const distanceToSample = Math.sqrt(dx * dx + dy * dy);
+    if (distanceToSample >= radius) return 0;
+    const normalized = distanceToSample / radius;
+    const falloff = 1 - normalized * normalized;
+    return falloff * falloff;
+}
+
+function categoryRepresentativeTileIdJS(categoryId) {
+    if (!(categoryId >= 0 && categoryId < TILE_CATEGORIES.length)) {
+        return 255;
+    }
+    return TILE_CATEGORIES[categoryId]?.ranges?.[0]?.[0] ?? 255;
+}
+
+function clampInt(value, lo, hi) {
+    return Math.max(lo, Math.min(hi, value));
+}
+
+function clamp01(value) {
+    return Math.max(0, Math.min(1, value));
+}
+
+function clampByte(value) {
+    return clampInt(value | 0, 0, 255);
 }
 
 function requireNumber(value, name) {
