@@ -172,6 +172,11 @@ fn computeNormalSlopeFlat(wx: f32, wy: f32) -> NormalSlope {
     return ns;
 }
 
+fn computeStableNormalSlopeSphere(face: i32, u: f32, v: f32) -> NormalSlope {
+    let stableStep = 1.0 / 8192.0;
+    return computeNormalSlopeSphere(face, u, v, stableStep, stableStep);
+}
+
 ${hasHeightBindings ? `
 fn sampleHeightAt(coord: vec2<i32>) -> f32 {
     return textureLoad(heightMap, coord, 0).r;
@@ -183,7 +188,7 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
     let wy = dir.z;
 
     let baseH = calculateTerrainHeight(wx, wy, uniforms.seed, dir);
-    let ns = computeNormalSlopeSphere(face, u, v, du, dv);
+    let ns = computeStableNormalSlopeSphere(face, u, v);
     let slope = ns.slope;
 
     var tileType: u32 = determineTileType(baseH, slope, wx, wy, dir, uniforms.seed);
@@ -648,7 +653,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let h = sampleHeightAt(coordC);
     var slope: f32 = 0.0;
     if (uniforms.face >= 0) {
-        let ns = computeNormalSlopeFromHeightMapSphere(uniforms.face, u, v, du, dv, coordC);
+        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
         slope = ns.slope;
     } else {
         let ns = computeNormalSlopeFromHeightMapFlat(coordC);
@@ -658,7 +663,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
     var slope: f32 = 0.0;
     if (uniforms.face >= 0) {
-        let ns = computeNormalSlopeSphere(uniforms.face, u, v, du, dv);
+        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
         slope = ns.slope;
     } else {
         let ns = computeNormalSlopeFlat(wx, wy);
@@ -703,7 +708,7 @@ else if (uniforms.outputType == 4) {
 
     var slope: f32 = 0.0;
     if (uniforms.face >= 0) {
-        let ns = computeNormalSlopeFromHeightMapSphere(uniforms.face, u, v, du, dv, coordC);
+        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
         slope = ns.slope;
     } else {
         let ns = computeNormalSlopeFromHeightMapFlat(coordC);

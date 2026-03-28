@@ -162,13 +162,13 @@ export function createEngineConfig() {
       tileHashCapacity: 8192 * 4,
       visibleTableCapacity: 2048,
       feedbackCapacity: 4096,
-      lodErrorThreshold: 512,//512,  //512,
+      lodErrorThreshold:  512,  //512,
       workgroupSize: 128,
       enableFrustumCulling: true,
       // Horizon culling hides tiles below the geometric horizon.
       enableHorizonCulling: true,
       horizonCulling: {
-        groundCos: -0.0,
+        groundCos: 1.0,
         blendScale: 1.25
       },
       // Faster readbacks keep residency/fallback decisions in sync while

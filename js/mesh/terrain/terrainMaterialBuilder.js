@@ -63,6 +63,7 @@ export class TerrainMaterialBuilder {
             const useStorageBufferInstancing = requireBool(opts.useStorageBufferInstancing, 'useStorageBufferInstancing');
             const chunksPerFace = requireInt(opts.chunksPerFace, 'chunksPerFace', 1);
             const lodSegments = opts.lodSegments ?? null;
+            const useTransitionTopology = opts.useTransitionTopology === true;
             const transmittanceLUT = opts.transmittanceLUT ?? null;
             const aerialPerspectiveEnabled = requireNumber(opts.aerialPerspectiveEnabled, 'aerialPerspectiveEnabled');
             const debugMode = Number.isFinite(opts.debugMode) ? Math.floor(opts.debugMode) : 0;
@@ -176,6 +177,7 @@ export class TerrainMaterialBuilder {
                 instanced: enableInstancing,
                 useArrayTextures,
                 lodSegments,
+                useTransitionTopology,
                 useStorageBuffer,
                 debugMode: debugVertexMode
             });

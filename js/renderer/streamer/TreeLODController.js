@@ -67,9 +67,9 @@ export class TreeLODController {
 
         this.birchLadder = config.birchLadder ?? {
             l0: { cards:  1, w: 0.25, h: 0.35 },
-            l1: { cards:  1, w: 0.25, h: 0.35 },
-            l2: { cards: 20, w: 0.3, h: 0.42 },
-            l3: { cards: 10, w: 0.36, h: 0.504 },
+            l1: { cards:  1, w: 1.55, h: 1.7 },
+            l2: { cards: 20, w: 4.75, h: 4.9 },
+            l3: { cards: 10, w: 0.6, h: 0.504 },
         };
         this.birchTransition = config.birchTransition ?? {
             nearDistance: 20.0,
@@ -77,8 +77,8 @@ export class TreeLODController {
             nearLeaves: 4000,
             nearW: 0.36,
             nearH: 0.54,
-            midW: 0.28,
-            midH: 0.42,
+            midW: 0.55,
+            midH: 0.825,
         };
 
         this.genericLeafCounts = this._padCounts(

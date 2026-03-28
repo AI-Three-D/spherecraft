@@ -1990,6 +1990,7 @@ export class QuadtreeTileManager {
 
             const summary = this._logManualRuntimeSummary(tiles);
             await this._runManualTileAudit(tiles);
+            await this._runCrossFaceVisibleSeamDiagnostics(tiles);
             await this._diagnosticSnapshot(tiles);
             await this._runStitchingDiagnostics();
 
@@ -2773,7 +2774,11 @@ export class QuadtreeTileManager {
             );
         }
 
-        worstPairs.sort((a, b) => b.metrics.currentNormMax - a.metrics.currentNormMax);
+        worstPairs.sort((a, b) => {
+            const aScore = Math.max(a.metrics.currentNormMax, a.metrics.intendedNormMax);
+            const bScore = Math.max(b.metrics.currentNormMax, b.metrics.intendedNormMax);
+            return bScore - aScore;
+        });
         const worstLogs = [];
         for (const item of worstPairs.slice(0, 4)) {
             const aAddr = getInstanceGridAddress(item.pair.a);
@@ -2885,9 +2890,13 @@ export class QuadtreeTileManager {
         if (!item?.pair) return;
         this._deepSeamDiagTick = (this._deepSeamDiagTick ?? 0) + 1;
         const currentMeters = item.metrics.currentNormMax * heightScaleMeters;
+        const intendedMeters = item.metrics.intendedNormMax * heightScaleMeters;
+        const forceForManualSnapshot = this._manualDiagState?.running === true;
         const shouldRun =
-            currentMeters >= 5.0 &&
-            (item.pair.key !== this._lastDeepSeamKey || (this._deepSeamDiagTick % 6) === 0);
+            forceForManualSnapshot || (
+                Math.max(currentMeters, intendedMeters) >= 5.0 &&
+                (item.pair.key !== this._lastDeepSeamKey || (this._deepSeamDiagTick % 6) === 0)
+            );
         if (!shouldRun) {
             return;
         }
@@ -2922,6 +2931,97 @@ export class QuadtreeTileManager {
         const freshHeightSplit = await this._debugCompareFreshBaseVsFinal(item.pair, denseTs, heightScaleMeters);
         if (freshHeightSplit) {
             Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTSeam] fresh-height-split ${freshHeightSplit}`);
+        }
+
+        const sharedVertexAudit = await this._debugAuditSharedSeamVertices(item, heightScaleMeters);
+        if (sharedVertexAudit) {
+            Logger.warn(`${TERRAIN_STEP_LOG_TAG} [QTSeam] shared-vertices ${sharedVertexAudit}`);
+        }
+    }
+
+    async _runCrossFaceVisibleSeamDiagnostics(tiles) {
+        const tileAddrs = [];
+        const visibleByFace = new Map();
+        const visibleExact = new Set();
+        for (const tile of Array.isArray(tiles) ? tiles : []) {
+            const addr = normalizeTileAddressLike(tile);
+            if (!addr) continue;
+            tileAddrs.push(addr);
+            visibleExact.add(tileAddrKeyJS(addr));
+            let list = visibleByFace.get(addr.face);
+            if (!list) {
+                list = [];
+                visibleByFace.set(addr.face, list);
+            }
+            list.push(addr);
+        }
+        if (tileAddrs.length === 0) {
+            return;
+        }
+
+        const sameDepth = new Set();
+        const fineToCoarse = new Set();
+        const coarseToFine = new Set();
+        const missing = new Set();
+        const samples = [];
+
+        for (const addr of tileAddrs) {
+            for (const side of ['left', 'right', 'bottom', 'top']) {
+                const wrapped = getWrappedCrossFaceNeighbor(addr, side);
+                if (!wrapped) continue;
+
+                const wrappedKey = tileAddrKeyJS(wrapped);
+                if (visibleExact.has(wrappedKey)) {
+                    sameDepth.add(makeOrderedPairKey(tileAddrKeyJS(addr), wrappedKey));
+                    continue;
+                }
+
+                const ancestor = findVisibleAncestorTile(wrapped, visibleExact);
+                if (ancestor) {
+                    const pairKey = makeOrderedPairKey(tileAddrKeyJS(addr), tileAddrKeyJS(ancestor));
+                    fineToCoarse.add(pairKey);
+                    if (samples.length < 10) {
+                        samples.push(
+                            `fine->coarse f${addr.face}:d${addr.depth}:${addr.x},${addr.y}:${side} ` +
+                            `wrapped=f${wrapped.face}:d${wrapped.depth}:${wrapped.x},${wrapped.y} ` +
+                            `owner=f${ancestor.face}:d${ancestor.depth}:${ancestor.x},${ancestor.y}`
+                        );
+                    }
+                    continue;
+                }
+
+                const descendants = findVisibleDescendantTiles(wrapped, visibleByFace.get(wrapped.face) ?? []);
+                if (descendants.length > 0) {
+                    const target = descendants[0];
+                    const pairKey = makeOrderedPairKey(tileAddrKeyJS(addr), tileAddrKeyJS(target));
+                    coarseToFine.add(pairKey);
+                    if (samples.length < 10) {
+                        samples.push(
+                            `coarse->fine f${addr.face}:d${addr.depth}:${addr.x},${addr.y}:${side} ` +
+                            `wrapped=f${wrapped.face}:d${wrapped.depth}:${wrapped.x},${wrapped.y} ` +
+                            `child=f${target.face}:d${target.depth}:${target.x},${target.y}`
+                        );
+                    }
+                    continue;
+                }
+
+                const pairKey = `${tileAddrKeyJS(addr)}:${side}->${wrapped.face}`;
+                missing.add(pairKey);
+                if (samples.length < 10) {
+                    samples.push(
+                        `missing f${addr.face}:d${addr.depth}:${addr.x},${addr.y}:${side} ` +
+                        `wrapped=f${wrapped.face}:d${wrapped.depth}:${wrapped.x},${wrapped.y}`
+                    );
+                }
+            }
+        }
+
+        Logger.warn(
+            `${TERRAIN_MANUAL_TAG} cross-face sameDepth=${sameDepth.size} ` +
+            `fineToCoarse=${fineToCoarse.size} coarseToFine=${coarseToFine.size} missing=${missing.size}`
+        );
+        if (samples.length > 0) {
+            Logger.warn(`${TERRAIN_MANUAL_TAG} cross-face samples ${samples.join(' ; ')}`);
         }
     }
 
@@ -3036,11 +3136,11 @@ export class QuadtreeTileManager {
         );
     }
 
-    async _debugCompareFreshBaseVsFinal(pair, tValues, heightScaleMeters) {
+    async _collectFreshBaseFinalSeamMetrics(pair, tValues) {
         const tileStreamer = this.tileStreamer;
         const tileGenerator = tileStreamer?.tileGenerator;
         if (!tileGenerator?.generateDiagnosticTile) {
-            return '';
+            return null;
         }
 
         const freshByTarget = new Map();
@@ -3051,7 +3151,7 @@ export class QuadtreeTileManager {
         try {
             for (const target of targets) {
                 const addr = getInstanceGridAddress(target.inst);
-                if (!addr) return '';
+                if (!addr) return null;
                 const tileAddr = new TileAddress(addr.face, addr.depth, addr.x, addr.y);
                 const textures = await tileGenerator.generateDiagnosticTile(tileAddr, {
                     includeBaseHeight: true
@@ -3095,29 +3195,82 @@ export class QuadtreeTileManager {
                 }
             });
             if (!baseMetrics && !finalMetrics) {
-                return '';
+                return null;
             }
 
-            const baseMaxMeters = (baseMetrics?.normMax ?? 0) * heightScaleMeters;
-            const baseAvgMeters = (baseMetrics?.normAvg ?? 0) * heightScaleMeters;
-            const finalMaxMeters = (finalMetrics?.normMax ?? 0) * heightScaleMeters;
-            const finalAvgMeters = (finalMetrics?.normAvg ?? 0) * heightScaleMeters;
-            const amplifyMax = baseMaxMeters > 1e-6 ? (finalMaxMeters / baseMaxMeters) : 0;
-            const amplifyAvg = baseAvgMeters > 1e-6 ? (finalAvgMeters / baseAvgMeters) : 0;
-
-            return (
-                `a=${freshByTarget.get('a')?.key} b=${freshByTarget.get('b')?.key} ` +
-                `base[max=${(baseMetrics?.normMax ?? 0).toFixed(5)}/${baseMaxMeters.toFixed(2)}m ` +
-                `avg=${(baseMetrics?.normAvg ?? 0).toFixed(5)}/${baseAvgMeters.toFixed(2)}m] ` +
-                `final[max=${(finalMetrics?.normMax ?? 0).toFixed(5)}/${finalMaxMeters.toFixed(2)}m ` +
-                `avg=${(finalMetrics?.normAvg ?? 0).toFixed(5)}/${finalAvgMeters.toFixed(2)}m] ` +
-                `amplify[max=${amplifyMax.toFixed(2)}x avg=${amplifyAvg.toFixed(2)}x]`
-            );
+            return {
+                aKey: freshByTarget.get('a')?.key || '',
+                bKey: freshByTarget.get('b')?.key || '',
+                baseMetrics,
+                finalMetrics
+            };
         } finally {
             for (const entry of freshByTarget.values()) {
                 destroyWrappedTextures(entry?.textures);
             }
         }
+    }
+
+    async _debugCompareFreshBaseVsFinal(pair, tValues, heightScaleMeters) {
+        const result = await this._collectFreshBaseFinalSeamMetrics(pair, tValues);
+        if (!result) {
+            return '';
+        }
+
+        const {
+            aKey,
+            bKey,
+            baseMetrics,
+            finalMetrics
+        } = result;
+
+        const baseMaxMeters = (baseMetrics?.normMax ?? 0) * heightScaleMeters;
+        const baseAvgMeters = (baseMetrics?.normAvg ?? 0) * heightScaleMeters;
+        const finalMaxMeters = (finalMetrics?.normMax ?? 0) * heightScaleMeters;
+        const finalAvgMeters = (finalMetrics?.normAvg ?? 0) * heightScaleMeters;
+        const amplifyMax = baseMaxMeters > 1e-6 ? (finalMaxMeters / baseMaxMeters) : 0;
+        const amplifyAvg = baseAvgMeters > 1e-6 ? (finalMaxMeters / baseAvgMeters) : 0;
+
+        return (
+            `a=${aKey} b=${bKey} ` +
+            `base[max=${(baseMetrics?.normMax ?? 0).toFixed(5)}/${baseMaxMeters.toFixed(2)}m ` +
+            `avg=${(baseMetrics?.normAvg ?? 0).toFixed(5)}/${baseAvgMeters.toFixed(2)}m] ` +
+            `final[max=${(finalMetrics?.normMax ?? 0).toFixed(5)}/${finalMaxMeters.toFixed(2)}m ` +
+            `avg=${(finalMetrics?.normAvg ?? 0).toFixed(5)}/${finalAvgMeters.toFixed(2)}m] ` +
+            `amplify[max=${amplifyMax.toFixed(2)}x avg=${amplifyAvg.toFixed(2)}x]`
+        );
+    }
+
+    async _debugAuditSharedSeamVertices(item, heightScaleMeters) {
+        if (!item?.pair) {
+            return '';
+        }
+        const sharedTs = buildSharedVertexSamples(item.pair, item.className, this._diagLodSegments);
+        if (!Array.isArray(sharedTs) || sharedTs.length === 0) {
+            return '';
+        }
+
+        const currentMetrics = await this._sampleSeamPairMetrics(item.pair, sharedTs, new Map());
+        const freshMetrics = await this._collectFreshBaseFinalSeamMetrics(item.pair, sharedTs);
+        if (!currentMetrics && !freshMetrics) {
+            return '';
+        }
+
+        const currentMaxMeters = (currentMetrics?.currentNormMax ?? 0) * heightScaleMeters;
+        const baseMaxMeters = (freshMetrics?.baseMetrics?.normMax ?? 0) * heightScaleMeters;
+        const finalMaxMeters = (freshMetrics?.finalMetrics?.normMax ?? 0) * heightScaleMeters;
+        const cause = classifySharedVertexMismatchCause(currentMaxMeters, baseMaxMeters, finalMaxMeters);
+
+        return (
+            `class=${item.className} samples=${sharedTs.length} ` +
+            `current[max=${(currentMetrics?.currentNormMax ?? 0).toFixed(5)}/${currentMaxMeters.toFixed(2)}m ` +
+            `t=${(currentMetrics?.currentMaxT ?? 0).toFixed(3)}] ` +
+            `base[max=${(freshMetrics?.baseMetrics?.normMax ?? 0).toFixed(5)}/${baseMaxMeters.toFixed(2)}m ` +
+            `t=${(freshMetrics?.baseMetrics?.maxT ?? 0).toFixed(3)}] ` +
+            `final[max=${(freshMetrics?.finalMetrics?.normMax ?? 0).toFixed(5)}/${finalMaxMeters.toFixed(2)}m ` +
+            `t=${(freshMetrics?.finalMetrics?.maxT ?? 0).toFixed(3)}] ` +
+            `cause=${cause}`
+        );
     }
 
     async _sampleFreshTextureSeamMetrics(pair, tValues, sources) {
@@ -3408,6 +3561,29 @@ export class QuadtreeTileManager {
 
 function clamp01(v) {
     return Math.min(1, Math.max(0, v));
+}
+
+function normalizeTileAddressLike(tile) {
+    if (!tile) return null;
+    if (tile instanceof TileAddress) {
+        return tile;
+    }
+    const face = tile?.face;
+    const depth = tile?.depth;
+    const x = tile?.x;
+    const y = tile?.y;
+    if (![face, depth, x, y].every(Number.isInteger)) {
+        return null;
+    }
+    try {
+        return new TileAddress(face, depth, x, y);
+    } catch {
+        return null;
+    }
+}
+
+function tileAddrKeyJS(tile) {
+    return `${tile.face}:${tile.depth}:${tile.x}:${tile.y}`;
 }
 
 function getInstanceGridAddress(inst) {
@@ -3853,6 +4029,44 @@ function seamSampleLOD(inst, side, neighborLOD) {
     return selfLOD;
 }
 
+function getWrappedCrossFaceNeighbor(addr, side) {
+    if (!addr) return null;
+    const dx = side === 'left' ? -1 : (side === 'right' ? 1 : 0);
+    const dy = side === 'bottom' ? -1 : (side === 'top' ? 1 : 0);
+    const wrapped = wrapNeighborGridJS(addr.face, addr.depth, addr.x + dx, addr.y + dy);
+    if (!wrapped || wrapped.face === addr.face) {
+        return null;
+    }
+    return wrapped;
+}
+
+function findVisibleAncestorTile(tile, visibleExact) {
+    let cursor = normalizeTileAddressLike(tile);
+    while (cursor) {
+        if (visibleExact.has(tileAddrKeyJS(cursor))) {
+            return cursor;
+        }
+        cursor = cursor.parent;
+    }
+    return null;
+}
+
+function isDescendantTile(descendant, ancestor) {
+    if (!descendant || !ancestor) return false;
+    if (descendant.face !== ancestor.face) return false;
+    if (descendant.depth <= ancestor.depth) return false;
+    const shift = descendant.depth - ancestor.depth;
+    return (descendant.x >> shift) === ancestor.x && (descendant.y >> shift) === ancestor.y;
+}
+
+function findVisibleDescendantTiles(tile, candidates) {
+    const ancestor = normalizeTileAddressLike(tile);
+    if (!ancestor) return [];
+    return (Array.isArray(candidates) ? candidates : [])
+        .filter((candidate) => isDescendantTile(candidate, ancestor))
+        .sort((a, b) => a.depth - b.depth || a.y - b.y || a.x - b.x);
+}
+
 function collectSeamPairs(sampledInstances) {
     const instances = Array.isArray(sampledInstances) ? sampledInstances : [];
     const keyToInst = new Map();
@@ -3887,11 +4101,14 @@ function buildSameDepthSeamPairs(instances, keyToInst) {
         const addr = getInstanceGridAddress(inst);
         if (!addr) continue;
         const neighbors = [
-            { sideA: 'right', sideB: 'left', key: `${addr.face}:${addr.depth}:${addr.x + 1}:${addr.y}` },
-            { sideA: 'top', sideB: 'bottom', key: `${addr.face}:${addr.depth}:${addr.x}:${addr.y + 1}` }
+            { sideA: 'right', sideB: 'left', coord: wrapNeighborGridJS(addr.face, addr.depth, addr.x + 1, addr.y) },
+            { sideA: 'top', sideB: 'bottom', coord: wrapNeighborGridJS(addr.face, addr.depth, addr.x, addr.y + 1) }
         ];
         for (const n of neighbors) {
-            const other = keyToInst.get(n.key);
+            const otherKey = n?.coord
+                ? `${n.coord.face}:${n.coord.depth}:${n.coord.x}:${n.coord.y}`
+                : '';
+            const other = keyToInst.get(otherKey);
             if (!other) continue;
             const className = classifySameDepthSeam(inst, other, n.sideA, n.sideB);
             pairs.push({
@@ -3910,16 +4127,20 @@ function buildSameDepthSeamPairs(instances, keyToInst) {
 }
 
 function classifySameDepthSeam(a, b, sideA, sideB) {
+    const crossFace = (a?.face ?? -1) !== (b?.face ?? -1);
     const aFallback = isFallbackInstance(a);
     const bFallback = isFallbackInstance(b);
     if (!aFallback && !bFallback) {
-        return 'own-own:same-depth';
+        return crossFace ? 'own-own:same-depth:cross-face' : 'own-own:same-depth';
     }
     if (aFallback && bFallback) {
-        return 'fallback-fallback:same-depth';
+        return crossFace ? 'fallback-fallback:same-depth:cross-face' : 'fallback-fallback:same-depth';
     }
     const hasMask = seamHasEdgeMask(a, sideA) || seamHasEdgeMask(b, sideB);
-    return hasMask ? 'own-fallback:same-depth:mask' : 'own-fallback:same-depth:no-mask';
+    if (hasMask) {
+        return crossFace ? 'own-fallback:same-depth:mask:cross-face' : 'own-fallback:same-depth:mask';
+    }
+    return crossFace ? 'own-fallback:same-depth:no-mask:cross-face' : 'own-fallback:same-depth:no-mask';
 }
 
 function buildCoarseFineSeamPairs(instances, seen) {
@@ -3948,6 +4169,66 @@ function buildCoarseFineSeamPairs(instances, seen) {
         }
     }
     return pairs;
+}
+
+function wrapNeighborGridJS(face, depth, x, y) {
+    const gs = 1 << Math.max(0, depth);
+    const maxv = gs - 1;
+    if (x >= 0 && x < gs && y >= 0 && y < gs) {
+        return { face, depth, x, y };
+    }
+
+    let dir = -1;
+    if (x < 0) dir = 0;
+    else if (x >= gs) dir = 1;
+    else if (y < 0) dir = 2;
+    else if (y >= gs) dir = 3;
+
+    const cx = Math.max(0, Math.min(maxv, x));
+    const cy = Math.max(0, Math.min(maxv, y));
+
+    if (face === 0) {
+        if (dir === 0) return { face: 4, depth, x: maxv, y: cy };
+        if (dir === 1) return { face: 5, depth, x: 0, y: cy };
+        if (dir === 2) return { face: 3, depth, x: maxv, y: cx };
+        if (dir === 3) return { face: 2, depth, x: maxv, y: maxv - cx };
+    }
+    if (face === 1) {
+        if (dir === 0) return { face: 5, depth, x: maxv, y: cy };
+        if (dir === 1) return { face: 4, depth, x: 0, y: cy };
+        if (dir === 2) return { face: 3, depth, x: 0, y: maxv - cx };
+        if (dir === 3) return { face: 2, depth, x: 0, y: cx };
+    }
+    if (face === 2) {
+        if (dir === 0) return { face: 1, depth, x: cy, y: 0 };
+        if (dir === 1) return { face: 0, depth, x: maxv - cy, y: maxv };
+        if (dir === 2) return { face: 4, depth, x: cx, y: maxv };
+        if (dir === 3) return { face: 5, depth, x: maxv - cx, y: 0 };
+    }
+    if (face === 3) {
+        if (dir === 0) return { face: 1, depth, x: maxv - cy, y: maxv };
+        if (dir === 1) return { face: 0, depth, x: cy, y: 0 };
+        if (dir === 2) return { face: 5, depth, x: maxv - cx, y: maxv };
+        if (dir === 3) return { face: 4, depth, x: cx, y: 0 };
+    }
+    if (face === 4) {
+        if (dir === 0) return { face: 1, depth, x: maxv, y: cy };
+        if (dir === 1) return { face: 0, depth, x: 0, y: cy };
+        if (dir === 2) return { face: 3, depth, x: cx, y: maxv };
+        if (dir === 3) return { face: 2, depth, x: cx, y: 0 };
+    }
+    if (face === 5) {
+        if (dir === 0) return { face: 0, depth, x: maxv, y: cy };
+        if (dir === 1) return { face: 1, depth, x: 0, y: cy };
+        if (dir === 2) return { face: 3, depth, x: maxv - cx, y: maxv };
+        if (dir === 3) return { face: 2, depth, x: maxv - cx, y: 0 };
+    }
+    return {
+        face,
+        depth,
+        x: Math.max(0, Math.min(maxv, x)),
+        y: Math.max(0, Math.min(maxv, y))
+    };
 }
 
 function findCoveringNeighborForSeam(inst, side, instances) {
@@ -4075,6 +4356,36 @@ function collectInstDiagnosticCoords(inst, side, tValues, texSize) {
         addFootprint(edgeSideLocalUV(side, t));
     }
     return uniqueTexelCoords(coords);
+}
+
+function buildSharedVertexSamples(pair, className, lodSegments) {
+    if (!pair?.a || !pair?.b) {
+        return [];
+    }
+    let lod = Math.max(pair.a?.lod ?? 0, pair.b?.lod ?? 0);
+    if (className !== 'coarse-fine:stitched') {
+        lod = pair.a?.lod ?? pair.b?.lod ?? lod;
+    }
+    const segments = Math.max(1, Math.floor(getDiagSegmentsForLod(lod, lodSegments)));
+    const samples = [];
+    for (let i = 0; i <= segments; i++) {
+        samples.push(i / segments);
+    }
+    return samples;
+}
+
+function classifySharedVertexMismatchCause(currentMaxMeters, baseMaxMeters, finalMaxMeters) {
+    const significantMeters = 0.5;
+    if (baseMaxMeters >= significantMeters) {
+        return 'shared-base-mismatch';
+    }
+    if (finalMaxMeters >= significantMeters) {
+        return 'shared-final-mismatch';
+    }
+    if (currentMaxMeters >= significantMeters) {
+        return 'shared-runtime-mismatch';
+    }
+    return 'no-large-shared-vertex-mismatch';
 }
 
 function summarizeTexelComparison(liveTexels, freshTexels, format) {

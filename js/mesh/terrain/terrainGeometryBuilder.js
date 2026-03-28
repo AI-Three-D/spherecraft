@@ -36,20 +36,23 @@ export class TerrainGeometryBuilder {
         const subdivisionMap = options.subdivisions || this.DEFAULT_SUBDIVISIONS;
         const clampedLOD = Math.min(Math.max(lodLevel, 0), 6);
         const segments = subdivisionMap[clampedLOD] || 4;
+        const transitionBaseSegments = this._resolveTransitionBaseSegments(subdivisionMap);
+        const useTransitionTopology = options.useTransitionTopology !== false && transitionBaseSegments > 0;
+        const buildSegments = useTransitionTopology ? transitionBaseSegments : segments;
 
         if (useHeightTexture) {
-            return this.buildFlatGrid(chunkData, segments, lodLevel);
+            return this.buildFlatGrid(chunkData, buildSegments, lodLevel, { useTransitionTopology });
         }
-        return this.buildFromHeightmap(chunkData, segments, lodLevel);
+        return this.buildFromHeightmap(chunkData, buildSegments, lodLevel, { useTransitionTopology });
     }
 
     /**
      * Simple heightmap builder: displaces Y using chunkData.heights if present,
      * otherwise falls back to flat grid.
      */
-    static buildFromHeightmap(chunkData, segments, lodLevel) {
+    static buildFromHeightmap(chunkData, segments, lodLevel, options = {}) {
         if (!chunkData?.heights) {
-            return this.buildFlatGrid(chunkData, segments, lodLevel);
+            return this.buildFlatGrid(chunkData, segments, lodLevel, options);
         }
 
         const geometry = new Geometry();
@@ -84,11 +87,18 @@ export class TerrainGeometryBuilder {
         geometry.setAttribute('position', positions, 3);
         geometry.setAttribute('normal', normals, 3);
         geometry.setAttribute('uv', uvs, 2);
-        const indices = this._buildGridIndices(segments);
+        const indices = options.useTransitionTopology
+            ? this._buildTransitionIndices(segments, lodLevel)
+            : this._buildGridIndices(segments);
 
         geometry.setIndex(indices);
         geometry.computeBoundingSphere();
-        geometry.userData = { lodLevel, segments, vertexCount: geometry.attributes.get('position').count };
+        geometry.userData = {
+            lodLevel,
+            segments,
+            topology: options.useTransitionTopology ? 'transition' : 'grid',
+            vertexCount: geometry.attributes.get('position').count
+        };
         return geometry;
     }
 
@@ -97,7 +107,7 @@ export class TerrainGeometryBuilder {
         return Number.isFinite(stride) && stride > 0 ? Math.floor(stride) : chunkData.size + 1;
     }
     
-    static buildFlatGrid(chunkData, segments, lodLevel) {
+    static buildFlatGrid(chunkData, segments, lodLevel, options = {}) {
         const geometry = new Geometry();
         const chunkSize = chunkData.size;
         const vertCount = (segments + 1) * (segments + 1);
@@ -125,12 +135,42 @@ export class TerrainGeometryBuilder {
         geometry.setAttribute('position', positions, 3);
         geometry.setAttribute('normal', normals, 3);
         geometry.setAttribute('uv', uvs, 2);
-        const indices = this._buildGridIndices(segments);
+        const indices = options.useTransitionTopology
+            ? this._buildTransitionIndices(segments, lodLevel)
+            : this._buildGridIndices(segments);
 
         geometry.setIndex(indices);
         geometry.computeBoundingSphere();
-        geometry.userData = { lodLevel, segments, vertexCount: geometry.attributes.get('position').count };
+        geometry.userData = {
+            lodLevel,
+            segments,
+            topology: options.useTransitionTopology ? 'transition' : 'grid',
+            vertexCount: geometry.attributes.get('position').count
+        };
         return geometry;
+    }
+
+    static _resolveTransitionBaseSegments(subdivisionMap) {
+        const values = Object.values(subdivisionMap || {})
+            .map((value) => Math.max(0, Math.floor(Number(value) || 0)))
+            .filter((value) => value > 0);
+        return values.length > 0 ? Math.max(...values) : 0;
+    }
+
+    static _buildTransitionIndices(segments, lodLevel) {
+        const size = Math.max(2, Math.floor(segments));
+        const intLod = Math.max(0, Math.floor(lodLevel));
+        if ((size & (size - 1)) !== 0) {
+            return this._buildGridIndices(size);
+        }
+        if (intLod <= 0) {
+            return this._buildGridIndices(size);
+        }
+        const maxStep = Math.min(1 << intLod, size);
+        if (maxStep <= 1 || (maxStep & (maxStep - 1)) !== 0 || (size % maxStep) !== 0) {
+            return this._buildGridIndices(size);
+        }
+        return new Uint32Array(this._buildAdaptiveTransitionIndices(size, maxStep));
     }
     
     static _buildGridIndices(segments) {
@@ -148,5 +188,141 @@ export class TerrainGeometryBuilder {
             }
         }
         return indices;
+    }
+
+    static _buildAdaptiveTransitionIndices(size, maxStep) {
+        const cells = this._buildAdaptiveCells(size, maxStep);
+        const occupancy = this._buildCellOccupancy(size, cells);
+        return this._triangulateAdaptiveCells(size, cells, occupancy);
+    }
+
+    static _buildAdaptiveCells(size, maxStep) {
+        const cells = [];
+
+        const visit = (x, z, cellSize) => {
+            const inset = Math.min(x, z, size - (x + cellSize), size - (z + cellSize));
+            if (cellSize <= 1 || (cellSize <= maxStep && inset >= cellSize)) {
+                cells.push({ x, z, size: cellSize });
+                return;
+            }
+            const half = cellSize >> 1;
+            if (half < 1) {
+                cells.push({ x, z, size: cellSize });
+                return;
+            }
+            visit(x, z, half);
+            visit(x + half, z, half);
+            visit(x, z + half, half);
+            visit(x + half, z + half, half);
+        };
+
+        visit(0, 0, size);
+        return cells;
+    }
+
+    static _buildCellOccupancy(size, cells) {
+        const occupancy = new Int32Array(size * size);
+        occupancy.fill(-1);
+        for (let index = 0; index < cells.length; index++) {
+            const cell = cells[index];
+            for (let z = cell.z; z < cell.z + cell.size; z++) {
+                const rowOffset = z * size;
+                for (let x = cell.x; x < cell.x + cell.size; x++) {
+                    occupancy[rowOffset + x] = index;
+                }
+            }
+        }
+        return occupancy;
+    }
+
+    static _triangulateAdaptiveCells(size, cells, occupancy) {
+        const indices = [];
+        const verts = size + 1;
+        const vertexId = (x, z) => z * verts + x;
+
+        for (const cell of cells) {
+            const x0 = cell.x;
+            const z0 = cell.z;
+            const step = cell.size;
+            const x1 = x0 + step;
+            const z1 = z0 + step;
+
+            if (step <= 1) {
+                const v00 = vertexId(x0, z0);
+                const v01 = vertexId(x0, z1);
+                const v10 = vertexId(x1, z0);
+                const v11 = vertexId(x1, z1);
+                indices.push(v00, v01, v10);
+                indices.push(v10, v01, v11);
+                continue;
+            }
+
+            const topOffsets = this._getAdaptiveEdgeOffsets(size, occupancy, cell, 'top');
+            const rightOffsets = this._getAdaptiveEdgeOffsets(size, occupancy, cell, 'right');
+            const bottomOffsets = this._getAdaptiveEdgeOffsets(size, occupancy, cell, 'bottom');
+            const leftOffsets = this._getAdaptiveEdgeOffsets(size, occupancy, cell, 'left');
+            const half = step >> 1;
+            const center = vertexId(x0 + half, z0 + half);
+
+            const boundary = [vertexId(x0, z0)];
+            for (const offset of topOffsets) boundary.push(vertexId(x0 + offset, z0));
+            boundary.push(vertexId(x1, z0));
+            for (const offset of rightOffsets) boundary.push(vertexId(x1, z0 + offset));
+            boundary.push(vertexId(x1, z1));
+            for (let i = bottomOffsets.length - 1; i >= 0; i--) {
+                boundary.push(vertexId(x0 + bottomOffsets[i], z1));
+            }
+            boundary.push(vertexId(x0, z1));
+            for (let i = leftOffsets.length - 1; i >= 0; i--) {
+                boundary.push(vertexId(x0, z0 + leftOffsets[i]));
+            }
+
+            for (let i = 0; i < boundary.length; i++) {
+                const current = boundary[i];
+                const next = boundary[(i + 1) % boundary.length];
+                indices.push(center, next, current);
+            }
+        }
+
+        return indices;
+    }
+
+    static _getAdaptiveEdgeOffsets(size, occupancy, cell, direction) {
+        let sampleX = cell.x;
+        let sampleZ = cell.z;
+        let count = cell.size;
+        let strideX = 1;
+        let strideZ = 0;
+
+        if (direction === 'top') {
+            if (cell.z === 0) return [];
+            sampleZ = cell.z - 1;
+        } else if (direction === 'bottom') {
+            if (cell.z + cell.size >= size) return [];
+            sampleZ = cell.z + cell.size;
+        } else if (direction === 'left') {
+            if (cell.x === 0) return [];
+            sampleX = cell.x - 1;
+            strideX = 0;
+            strideZ = 1;
+        } else if (direction === 'right') {
+            if (cell.x + cell.size >= size) return [];
+            sampleX = cell.x + cell.size;
+            strideX = 0;
+            strideZ = 1;
+        }
+
+        const offsets = [];
+        let previous = occupancy[sampleZ * size + sampleX];
+        for (let i = 1; i < count; i++) {
+            const x = sampleX + i * strideX;
+            const z = sampleZ + i * strideZ;
+            const current = occupancy[z * size + x];
+            if (current !== previous) {
+                offsets.push(i);
+                previous = current;
+            }
+        }
+        return offsets;
     }
 }

@@ -191,6 +191,7 @@ export class QuadtreeTerrainRenderer {
         const environmentState = this.uniformManager?.currentEnvironmentState || {};
         const lodSegments = this._lodSegments;
         const subdivisions = TerrainGeometryBuilder.buildSubdivisionMap(this.engineConfig.chunkSegments);
+        const useTransitionTopology = true;
         const debugConfig = this.engineConfig?.debug || {};
 
 
@@ -202,7 +203,7 @@ export class QuadtreeTerrainRenderer {
                 0,
                 lod,
                 true,
-                { subdivisions }
+                { subdivisions, useTransitionTopology }
             );
             if (!geometry) continue;
             this._geometries.set(lod, geometry);
@@ -252,6 +253,7 @@ export class QuadtreeTerrainRenderer {
                 lodSegments: lodSegments,
                 debugMode: debugConfig.terrainFragmentDebugMode ?? 0,
                 debugVertexMode: debugConfig.terrainVertexDebugMode ?? 0,
+                useTransitionTopology,
                         // === BLEND MODE LOOKUP TABLES (new) ===
                 // Both are built by TileTransitionTableBuilder.
                 // Callers that have not yet integrated the builder can pass null;

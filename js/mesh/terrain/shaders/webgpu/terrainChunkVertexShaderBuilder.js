@@ -3,6 +3,7 @@ export function buildTerrainChunkVertexShader(options = {}) {
     const instanced = options.instanced === true;
     const useArrayTextures = options.useArrayTextures === true;
     const useStorageBuffer = options.useStorageBuffer === true;
+    const useTransitionTopology = options.useTransitionTopology === true;
     const debugMode = Number.isFinite(options.debugMode) ? Math.floor(options.debugMode) : 0;
     const defaultSegments = [128, 64, 32, 16, 8, 4, 2];
     const lodSegments = Array.isArray(options.lodSegments) ? options.lodSegments : defaultSegments;
@@ -90,6 +91,7 @@ const DEBUG_VERTEX_MODE : i32 = ${debugMode};
 const DEBUG_SAMPLE_SCALE : f32 = 20.0;
 const DEBUG_SAMPLE_FIX : bool = true;
 const DEBUG_STITCH_STEP_FIX : bool = true;
+const USE_TRANSITION_TOPOLOGY : bool = ${useTransitionTopology ? 'true' : 'false'};
 const MAX_MORPH_DISTANCE : f32 = 1e9;
 const SEGMENTS_PER_LOD : array<f32, 7> = array<f32, 7>(${segmentLiteral});
 const MAX_LOD : f32 = 6.0;
@@ -173,6 +175,13 @@ struct SnapResult {
     sampleLOD: i32,
     edgeAxis: i32,
     edgeValue: f32,
+}
+
+struct StitchedPositionResult {
+    worldPosition: vec3<f32>,
+    sphereDir: vec3<f32>,
+    height: f32,
+    applied: u32,
 }
 
 ${useArrayTextures ? `
@@ -417,6 +426,62 @@ fn sampleStitchedHeight(localUV: vec2<f32>, edgeAxis: i32, edgeValue: f32, sampl
     return mix(h0, h1, w);
 }
 
+fn computeStitchedPosition(
+    localUV: vec2<f32>,
+    edgeAxis: i32,
+    edgeValue: f32,
+    sampleLOD: i32,
+    selfLOD: i32,
+    chunkFace: i32,
+    chunkLocation: vec2<f32>,
+    chunkSizeUVLocal: f32,
+    atlasOffset: vec2<f32>,
+    atlasScale: f32,
+    layer: i32,
+    heightMultiplier: f32
+) -> StitchedPositionResult {
+    if (edgeAxis < 0 || sampleLOD <= selfLOD) {
+        return StitchedPositionResult(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0, 0u);
+    }
+
+    let segments = SEGMENTS_PER_LOD[clamp(sampleLOD, 0, 6)];
+    let step = 1.0 / max(segments, 1.0);
+    var t = localUV.y;
+    if (edgeAxis == 1) {
+        t = localUV.x;
+    }
+
+    let t0 = floor(t / step) * step;
+    let t1 = min(t0 + step, 1.0);
+    let denom = max(t1 - t0, 0.000001);
+    let w = clamp((t - t0) / denom, 0.0, 1.0);
+
+    var uv0 = localUV;
+    var uv1 = localUV;
+    if (edgeAxis == 0) {
+        uv0 = vec2<f32>(edgeValue, t0);
+        uv1 = vec2<f32>(edgeValue, t1);
+    } else {
+        uv0 = vec2<f32>(t0, edgeValue);
+        uv1 = vec2<f32>(t1, edgeValue);
+    }
+
+    let h0 = sampleHeight(uv0, atlasOffset, atlasScale, sampleLOD, selfLOD, layer);
+    let h1 = sampleHeight(uv1, atlasOffset, atlasScale, sampleLOD, selfLOD, layer);
+
+    let faceUV0 = chunkLocation + uv0 * chunkSizeUVLocal;
+    let faceUV1 = chunkLocation + uv1 * chunkSizeUVLocal;
+    let dir0 = normalize(getCubePoint(chunkFace, faceUV0));
+    let dir1 = normalize(getCubePoint(chunkFace, faceUV1));
+    let p0 = uniforms.planetOrigin + dir0 * (uniforms.planetRadius + h0 * heightMultiplier);
+    let p1 = uniforms.planetOrigin + dir1 * (uniforms.planetRadius + h1 * heightMultiplier);
+    let worldPosition = mix(p0, p1, w);
+    let sphereDir = normalize(worldPosition - uniforms.planetOrigin);
+    let height = mix(h0, h1, w);
+
+    return StitchedPositionResult(worldPosition, sphereDir, height, 1u);
+}
+
 @vertex
 fn main(input: VertexInput${instanceParam}) -> VertexOutput {
     var output: VertexOutput;
@@ -457,9 +522,8 @@ ${instancingBlock}
     }
 
     // Stitch heights on edges when adjacent chunk uses a coarser LOD.
-    if (useInstancing) {
+    if (useInstancing && !USE_TRANSITION_TOPOLOGY) {
         let snap = computeEdgeSnappedUV(finalUV, selfLOD, neighborLODs);
-        positionUV = snap.uv;
         sampleLOD = snap.sampleLOD;
         edgeAxis = snap.edgeAxis;
         edgeValue = snap.edgeValue;
@@ -512,6 +576,34 @@ ${instancingBlock}
     displacement = height * heightMultiplier;
     if (DEBUG_VERTEX_MODE == 1) {
         displacement = 0.0;
+    }
+
+    if (useInstancing && !USE_TRANSITION_TOPOLOGY) {
+        let stitched = computeStitchedPosition(
+            finalUV,
+            edgeAxis,
+            edgeValue,
+            sampleLOD,
+            selfLOD,
+            chunkFace,
+            chunkLocation,
+            chunkSizeUVLocal,
+            atlasOffset,
+            atlasScale,
+            heightLayer,
+            heightMultiplier
+        );
+        if (stitched.applied != 0u) {
+            height = stitched.height;
+            displacement = height * heightMultiplier;
+            worldPosition = stitched.worldPosition;
+            sphereDir = stitched.sphereDir;
+            sphereDirOut = sphereDir;
+            normal = sphereDir;
+            if (DEBUG_VERTEX_MODE == 1) {
+                displacement = 0.0;
+            }
+        }
     }
 
     output.vWorldPosition = worldPosition;

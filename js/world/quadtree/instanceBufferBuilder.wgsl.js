@@ -185,6 +185,33 @@ fn computeGeomLOD(depth : u32) -> u32 {
     return u32(clamped);
 }
 
+fn findLoadedSourceDepth(face : u32, depth : u32, x : u32, y : u32) -> u32 {
+    var d = depth;
+    var tx = x;
+    var ty = y;
+    loop {
+        let layer = lookupLoaded(face, d, tx, ty);
+        if (layer != EMPTY_KEY) {
+            return d;
+        }
+        if (d == 0u) {
+            break;
+        }
+        tx = tx >> 1u;
+        ty = ty >> 1u;
+        d = d - 1u;
+    }
+    return depth;
+}
+
+fn findRenderedDataLOD(face : u32, depth : u32, x : u32, y : u32, coverDepth : u32) -> u32 {
+    let shift = depth - coverDepth;
+    let coverX = select(x, x >> shift, shift > 0u);
+    let coverY = select(y, y >> shift, shift > 0u);
+    let dataDepth = findLoadedSourceDepth(face, coverDepth, coverX, coverY);
+    return computeGeomLOD(dataDepth);
+}
+
 fn packNeighborLODs(left : u32, right : u32, bottom : u32, top : u32) -> vec2<u32> {
     let l = min(left, 15u);
     let r = min(right, 15u);
@@ -423,10 +450,10 @@ if (tid == 0u) {
         let bottomDepth = bottomDiag.x;
         let topDepth = topDiag.x;
 
-        let leftLOD = computeGeomLOD(leftDepth);
-        let rightLOD = computeGeomLOD(rightDepth);
-        let bottomLOD = computeGeomLOD(bottomDepth);
-        let topLOD = computeGeomLOD(topDepth);
+        let leftLOD = findRenderedDataLOD(leftCoord.x, depth, leftCoord.y, leftCoord.z, leftDepth);
+        let rightLOD = findRenderedDataLOD(rightCoord.x, depth, rightCoord.y, rightCoord.z, rightDepth);
+        let bottomLOD = findRenderedDataLOD(bottomCoord.x, depth, bottomCoord.y, bottomCoord.z, bottomDepth);
+        let topLOD = findRenderedDataLOD(topCoord.x, depth, topCoord.y, topCoord.z, topDepth);
 
         let neighborPacked = packNeighborLODs(leftLOD, rightLOD, bottomLOD, topLOD);
         let edgeMask = computeEdgeMask(geomLOD, leftLOD, rightLOD, bottomLOD, topLOD);
