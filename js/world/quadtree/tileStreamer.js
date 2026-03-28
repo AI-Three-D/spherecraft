@@ -478,9 +478,13 @@ export class TileStreamer {
         this._protectedKeys = new Set();
 
         // ── Dirty-slot tracking for incremental hash uploads ────────────
-        // Each element is a slot index into hashTable.entries.
+        // Pure inserts can safely upload touched slots only. Any removal can
+        // rehash a whole probe cluster, so evictions request a full upload on
+        // the next flush instead of trying to mirror the cluster mutation
+        // slot-by-slot.
         this._dirtySlots = new Set();
         this._dirtySortBuffer = null;  // Created in initialize()
+        this._needsFullHashUpload = false;
 
         this._feedbackReadbackInterval = options.feedbackReadbackInterval ?? 1;
         this._feedbackRingSize = Math.max(1, options.feedbackReadbackRingSize ?? 3);
@@ -663,6 +667,7 @@ drainScatterCommitQueue() {
         if (this.hashTable) {
             this.hashTable.clear();
             this._dirtySlots.clear();
+            this._needsFullHashUpload = false;
             this._uploadFullHashTable();
         }
 
@@ -796,7 +801,7 @@ drainScatterCommitQueue() {
             }
         }
 
-        if (this._dirtySlots.size > 0) {
+        if (this._needsFullHashUpload || this._dirtySlots.size > 0) {
             this._uploadDirtyHashSlots();
         }
 
@@ -1160,42 +1165,8 @@ _evictTile(key) {
         }
     
         const slot = this.hashTable.remove(info.keyLo, info.keyHi);
-        
-        // NEW: Track all affected slots during rehash
-        const affectedSlots = new Set();
         if (slot >= 0) {
-            affectedSlots.add(slot);
-            this._dirtySlots.add(slot);
-            
-            // Walk the ENTIRE potential cluster, not just until empty
-            let idx = (slot + 1) & this.hashTable.mask;
-            let rehashCount = 0;
-            for (let i = 0; i < this.hashTable.capacity; i++) {
-                const base = idx * 4;
-                const hi = this.hashTable.entries[base + 1];
-                if (hi === 0xFFFFFFFF) break;
-                
-                // Check if this entry WOULD hash to a slot <= the evicted slot
-                const lo = this.hashTable.entries[base];
-                const naturalSlot = this.hashTable.hash(lo, hi);
-                
-                // Entry needs rehash if its natural slot is at or before the gap
-                const needsRehash = this._slotInRange(naturalSlot, slot, idx);
-                if (needsRehash) {
-                    affectedSlots.add(idx);
-                    this._dirtySlots.add(idx);
-                    rehashCount++;
-                }
-                idx = (idx + 1) & this.hashTable.mask;
-            }
-            
-            // NEW: Log rehash scope
-            if (rehashCount > 0 && this._evictLogCount < 50) {
-                Logger.warn(
-                    `[QT-Stitch-Evict] Rehash affected ${rehashCount} slots, ` +
-                    `dirtyAfter=${this._dirtySlots.size}`
-                );
-            }
+            this._needsFullHashUpload = true;
         }
     
         this._tileInfo.delete(key);
@@ -1491,20 +1462,12 @@ markTilesVisible(tiles) {
     }
 }
 
-    // Helper: Check if slot is in circular range [start, end)
-    _slotInRange(slot, start, end) {
-        if (start <= end) {
-            return slot >= start && slot < end;
-        }
-        // Wrapped around
-        return slot >= start || slot < end;
-    }
     _uploadDirtyHashSlots() {
         const buffer = this.quadtreeGPU?.getLoadedTileTableBuffer?.();
         if (!buffer) return;
     
         const dirtyCount = this._dirtySlots.size;
-        if (dirtyCount === 0) return;
+        if (!this._needsFullHashUpload && dirtyCount === 0) return;
     
         // NEW: Log upload statistics
         if (!this._uploadStats) {
@@ -1515,13 +1478,14 @@ markTilesVisible(tiles) {
     
         const FULL_UPLOAD_THRESHOLD = this.hashTable.capacity * 0.25;
     
-        if (dirtyCount > FULL_UPLOAD_THRESHOLD) {
+        if (this._needsFullHashUpload || dirtyCount > FULL_UPLOAD_THRESHOLD) {
             this._uploadStats.full++;
             
             // NEW: Log when falling back to full upload
             if (this._uploadStats.full % 10 === 1) {
+                const reason = this._needsFullHashUpload ? 'rehash' : 'dirty-threshold';
                 Logger.warn(
-                    `[QT-Stitch-Hash] Full upload triggered: dirty=${dirtyCount}/${this.hashTable.capacity} ` +
+                    `[QT-Stitch-Hash] Full upload triggered (${reason}): dirty=${dirtyCount}/${this.hashTable.capacity} ` +
                     `(${(dirtyCount / this.hashTable.capacity * 100).toFixed(1)}%) ` +
                     `fullUploads=${this._uploadStats.full}/${this._uploadStats.total}`
                 );
@@ -1529,6 +1493,7 @@ markTilesVisible(tiles) {
             
             this.device.queue.writeBuffer(buffer, 0, this.hashTable.entries);
             this._dirtySlots.clear();
+            this._needsFullHashUpload = false;
             return;
         }
     
@@ -1600,6 +1565,7 @@ markTilesVisible(tiles) {
         this.device.queue.writeBuffer(buffer, 0, this.hashTable.entries);
 
         this._dirtySlots.clear();
+        this._needsFullHashUpload = false;
 
         this.quadtreeGPU._createInstanceBindGroup();
     }
