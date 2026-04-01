@@ -121,7 +121,9 @@ fn makeKeyHi(face : u32, depth : u32) -> u32 {
     return (depth & 0xFFFFu) | (face << 16u);
 }
 fn hashKey(keyLo : u32, keyHi : u32, mask : u32) -> u32 {
-    let h = keyLo * 1664525u + keyHi * 1013904223u;
+    let kl = keyLo ^ (keyLo >> 16u);
+    let kh = keyHi ^ (keyHi >> 16u);
+    let h = (kl * 0x9E3779B1u) ^ (kh * 0x85EBCA77u);
     return h & mask;
 }
 fn insertVisible(face : u32, depth : u32, x : u32, y : u32) {

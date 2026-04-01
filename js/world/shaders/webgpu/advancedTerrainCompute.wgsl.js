@@ -502,49 +502,63 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var output = vec4<f32>(0.0, 0.0, 0.0, 1.0);
 
-    if (uniforms.outputType == 0) {
-        var h: f32;
-        if (uniforms.debugMode == 1) {
-            h = unitDir.y * 0.5;
-        } else if (uniforms.debugMode == 2) {
-            h = u - 0.5;
-        } else if (uniforms.debugMode == 3) {
-            h = v - 0.5;
-        } else if (uniforms.debugMode == 4) {
-            h = perlin3D(unitDir * 100.0, uniforms.seed) * 0.3;
-        } else if (uniforms.debugMode == 5) {
-            h = fract(u * 512.0) * 0.3;
-        } else if (uniforms.debugMode == 6) {
-            h = fract(v * 512.0) * 0.3;
-        } else if (uniforms.debugMode == 7) {
-            let chunkSizePx = vec2<f32>(f32(max(uniforms.chunkSize, 1)));
-            let localPixel = pixelCoord - floor(pixelCoord / chunkSizePx) * chunkSizePx;
-            if (localPixel.x < 1.5 || localPixel.y < 1.5) {
-                h = 0.4;
-            } else {
-                h = 0.0;
-            }
-        } else if (uniforms.debugMode == 8) {
-            let profile = getTerrainProfile();
-            h = getContinentalMask(wx, wy, unitDir, uniforms.seed, profile) * 0.5;
-        } else if (uniforms.debugMode == 9) {
-            let profile = getTerrainProfile();
-            h = rarityMaskAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050, RARITY_RARE, profile.rareBoost) * 0.4;
-        } else if (uniforms.debugMode == 10) {
-            h = cellShapeAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 0.9, uniforms.seed + 2070, 0.5) * 0.4;
-        } else if (uniforms.debugMode == 11) {
-            let profile = getTerrainProfile();
-            h = rarityMaskAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 1.1, uniforms.seed + 2600, RARITY_VERY_RARE, profile.rareBoost) * 0.4;
-        } else if (uniforms.debugMode == 12) {
-            h = cellShapeAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 0.8, uniforms.seed + 2620, 0.28) * 0.4;
-        } else if (uniforms.debugMode == 13) {
-            h = cellRandomAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050) * 0.4;
-        } else {
-            h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
-        }
-        output = vec4<f32>(h, 0.0, 0.0, 1.0);
+if (uniforms.outputType == 0) {
+    var h: f32;
+    var stableSlope: f32 = 0.0;
 
-    } else if (uniforms.outputType == 1) {
+    if (uniforms.debugMode == 1) {
+        h = unitDir.y * 0.5;
+    } else if (uniforms.debugMode == 2) {
+        h = u - 0.5;
+    } else if (uniforms.debugMode == 3) {
+        h = v - 0.5;
+    } else if (uniforms.debugMode == 4) {
+        h = perlin3D(unitDir * 100.0, uniforms.seed) * 0.3;
+    } else if (uniforms.debugMode == 5) {
+        h = fract(u * 512.0) * 0.3;
+    } else if (uniforms.debugMode == 6) {
+        h = fract(v * 512.0) * 0.3;
+    } else if (uniforms.debugMode == 7) {
+        let chunkSizePx = vec2<f32>(f32(max(uniforms.chunkSize, 1)));
+        let localPixel = pixelCoord - floor(pixelCoord / chunkSizePx) * chunkSizePx;
+        if (localPixel.x < 1.5 || localPixel.y < 1.5) {
+            h = 0.4;
+        } else {
+            h = 0.0;
+        }
+    } else if (uniforms.debugMode == 8) {
+        let profile = getTerrainProfile();
+        h = getContinentalMask(wx, wy, unitDir, uniforms.seed, profile) * 0.5;
+    } else if (uniforms.debugMode == 9) {
+        let profile = getTerrainProfile();
+        h = rarityMaskAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050, RARITY_RARE, profile.rareBoost) * 0.4;
+    } else if (uniforms.debugMode == 10) {
+        h = cellShapeAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 0.9, uniforms.seed + 2070, 0.5) * 0.4;
+    } else if (uniforms.debugMode == 11) {
+        let profile = getTerrainProfile();
+        h = rarityMaskAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 1.1, uniforms.seed + 2600, RARITY_VERY_RARE, profile.rareBoost) * 0.4;
+    } else if (uniforms.debugMode == 12) {
+        h = cellShapeAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 0.8, uniforms.seed + 2620, 0.28) * 0.4;
+    } else if (uniforms.debugMode == 13) {
+        h = cellRandomAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050) * 0.4;
+    } else {
+        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
+
+        // ── Compute LOD-stable slope ONCE here ───────────────────────
+        // Passes 2 (tile) and 4 (micro) read this from heightBase.g
+        // instead of each calling calculateTerrainHeight 4× for finite
+        // differences. This is the single biggest win in the pipeline.
+        if (uniforms.face >= 0) {
+            let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
+            stableSlope = ns.slope;
+        } else {
+            let ns = computeNormalSlopeFlat(wx, wy);
+            stableSlope = ns.slope;
+        }
+    }
+    output = vec4<f32>(h, stableSlope, 0.0, 1.0);
+
+}  else if (uniforms.outputType == 1) {
         ${hasHeightBindings ? `
         let coordC = vec2<i32>(global_id.xy);
         var ns: NormalSlope;
@@ -650,15 +664,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     ${hasHeightBindings ? `
     let coordC = vec2<i32>(global_id.xy);
-    let h = sampleHeightAt(coordC);
-    var slope: f32 = 0.0;
-    if (uniforms.face >= 0) {
-        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
-        slope = ns.slope;
-    } else {
-        let ns = computeNormalSlopeFromHeightMapFlat(coordC);
-        slope = ns.slope;
-    }
+    // heightMap here is heightBase: .r = height, .g = cached stable slope.
+    // Was: computeStableNormalSlopeSphere → 4× calculateTerrainHeight per pixel.
+    let heightSample = textureLoad(heightMap, coordC, 0);
+    let h = heightSample.r;
+    let slope = heightSample.g;
     ` : `
     let h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
     var slope: f32 = 0.0;
@@ -702,18 +712,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 ${hasTileBindings ? `
 else if (uniforms.outputType == 4) {
     let coordC = vec2<i32>(global_id.xy);
-    let baseH = sampleHeightAt(coordC);
+    // heightMap here is heightBase: .r = base height, .g = cached stable slope.
+    // Was: computeStableNormalSlopeSphere → 4× calculateTerrainHeight per pixel.
+    let heightSample = textureLoad(heightMap, coordC, 0);
+    let baseH = heightSample.r;
+    let slope = heightSample.g;
     let tileSample = textureLoad(tileMap, coordC, 0);
     let tileId = decodeTileId(tileSample);
-
-    var slope: f32 = 0.0;
-    if (uniforms.face >= 0) {
-        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
-        slope = ns.slope;
-    } else {
-        let ns = computeNormalSlopeFromHeightMapFlat(coordC);
-        slope = ns.slope;
-    }
 
     let profile = getTerrainProfile();
     var dispMeters = DISP_MICRO_GENERIC;

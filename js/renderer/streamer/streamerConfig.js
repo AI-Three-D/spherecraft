@@ -265,7 +265,11 @@ export const QUALITY_PRESETS = {
 export const TERRAIN_AO_CONFIG = {
     enabled: true,
     resolution: 64,
-    maxBakesPerFrame: 8,
+    // 24 instead of 8: AO bakes cascade (each new tile re-bakes up to 8
+    // neighbors), so a burst of 20 forest tiles queues ~180 AO bakes.
+    // At 8/frame that stalls for 22+ frames; 24/frame brings it to ~7.
+    maxBakesPerFrame: 24,
+    logDispatches: false,
     aoFloor: 0.30,
     // Lower bound for AO-applied ambient in terrain shading.
     // Helps prevent terrain from going near-black at night while
@@ -308,7 +312,8 @@ export const TERRAIN_AO_CONFIG = {
 export const GROUND_FIELD_BAKE_CONFIG = {
     enabled: false,
     resolution: 32,
-    maxBakesPerFrame: 8,
+    maxBakesPerFrame: 16,
+    logDispatches: false,
     runtimeScatterOversample: 1,
     channels: [
         {
@@ -337,17 +342,17 @@ export const GROUND_FIELD_BAKE_CONFIG = {
 export const GROUND_PROP_BAKE_CONFIG = {
     enabled: true,
     perLayerCapacity: 1024,
-    maxBakesPerFrame: 8,
+    maxBakesPerFrame: 16,
     maxScatterTileWorldSize: 32,
     scatterCellOversample: 2,
-    logDispatches: true,
+    logDispatches: false,
 };
 
 export const TREE_SOURCE_BAKE_CONFIG = {
     enabled: true,
     perLayerCapacity: 1024,
-    maxBakesPerFrame: 8,
-    logDispatches: true,
+    maxBakesPerFrame: 16,
+    logDispatches: false,
 };
 
 export const ASSET_SELF_OCCLUSION = {

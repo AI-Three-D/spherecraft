@@ -94,6 +94,37 @@ export class Frontend {
         return this.backendType;
     }
 
+    setActorManager(mgr) { this._actorManager = mgr; }
+
+    _getRenderViewportSize() {
+        const viewport = this.backend?._viewport;
+        const width = viewport?.width || this.canvas?.width || 0;
+        const height = viewport?.height || this.canvas?.height || 0;
+        return { width, height };
+    }
+
+    _dispatchActorCompute(encoder) {
+        if (!this._actorManager) return;
+
+        const click = this._actorManager._pendingScreenClick;
+        if (click) {
+            const viewport = this._getRenderViewportSize();
+            if (viewport.width > 0 && viewport.height > 0) {
+                this._actorManager.handleScreenClick(
+                    click.x,
+                    click.y,
+                    this.camera,
+                    viewport.width,
+                    viewport.height,
+                    encoder
+                );
+                this._actorManager._pendingScreenClick = null;
+            }
+        }
+
+        this._actorManager.dispatchCompute(encoder);
+    }
+
     isGPUQuadtreeActive() {
     
         return this.backendType === 'webgpu' &&
@@ -730,6 +761,7 @@ async loadGLB(url, options = {}) {
 
         if (this.backendType === 'webgpu') {
             this.backend.submitCommands();
+            this._actorManager?.resolveReadback();
             if (this.quadtreeTileManager?.resolveFeedbackReadback) {
                 this.quadtreeTileManager.resolveFeedbackReadback();
             }
@@ -850,11 +882,33 @@ async loadGLB(url, options = {}) {
                 
                 if (this.assetStreamer) {
                     this.backend.endRenderPassForCompute();
-                    // Use the SAME command encoder as the quadtree traversal
                     const encoder = this.backend.getCommandEncoder();
                     this.assetStreamer.update(encoder, this.camera);
+
+                    // Dispatch pending click raycast
+                    if (this._actorManager?._pendingClick) {
+                        // _pendingClick is set by GameEngine's click handler
+                        // We need access to it — GameEngine sets it on the actorManager
+                    }
+
+                    this._dispatchActorCompute(encoder);
+
                     this.backend.resumeRenderPass();
                     this.assetStreamer.render(this.camera, viewMatrix, projectionMatrix);
+
+                    // Render destination marker during active render pass
+                    if (this._actorManager?.destinationMarker?.active) {
+                        this._actorManager.renderOverlays(
+                            this.backend._renderPassEncoder,
+                            this.camera,
+                            this._lastDeltaTime
+                        );
+                    }
+                } else if (this._actorManager) {
+                    this.backend.endRenderPassForCompute();
+                    const encoder = this.backend.getCommandEncoder();
+                    this._dispatchActorCompute(encoder);
+                    this.backend.resumeRenderPass();
                 }   
                 if (this.skinnedMeshRenderer?.isReady()) {
                     this.skinnedMeshRenderer.update(this._lastDeltaTime);

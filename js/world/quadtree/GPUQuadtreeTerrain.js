@@ -678,7 +678,11 @@ class QuadtreeDiagSnapshot {
 
 export class QuadtreeTileManager {
     constructor(options = {}) {
-
+        this._prevCameraPos = null;
+        this._prevFrameTime = 0;
+        this._lodSpeedScale = 1.0;
+        this._lodSpeedScaleTarget = 1.0;
+        this._adaptiveLodConfig = null;
         this.backend = options.backend || null;
         this.device = this.backend?.device || null;
         this.engineConfig = options.engineConfig || null;
@@ -729,6 +733,12 @@ export class QuadtreeTileManager {
         this._profileFpsSamples = 0;
         this._profileLastTime = 0;
         this._profileLogInterval = 60; // log FPS every 60 frames
+
+        // ── Predictive streaming state ───────────────────────────────
+        // Raw velocity is written by _updateAdaptiveLodScale and read here.
+        this._rawCamVelocity = null;
+        // EMA-smoothed velocity (world units / second).
+        this._predictState = { smoothVelX: 0, smoothVelY: 0, smoothVelZ: 0 };
     }
 
     async initialize() {
@@ -745,6 +755,22 @@ export class QuadtreeTileManager {
 
 
         const qt = this.engineConfig.gpuQuadtree;
+        const al = qt.adaptiveLod || {};
+        this._adaptiveLodConfig = {
+            enabled: al.enabled !== false,
+            // no adaptation below this speed
+            speedFloorMps: al.speedFloorMps ?? 150,
+            // each +speedRefMps over the floor adds +1.0 to the scale
+            speedRefMps: al.speedRefMps ?? 600,
+            maxScale: al.maxScale ?? 3.0,
+            // asymmetric smoothing: ramp up fast (protect GPU),
+            // ease down slow (avoid request burst on deceleration)
+            smoothUp: al.smoothUp ?? 0.15,
+            smoothDown: al.smoothDown ?? 0.03,
+            // hold elevated scale while GPU still has a backlog
+            holdWhenGpuBacklogged: al.holdWhenGpuBacklogged !== false
+        };
+
         this._diagInterval = qt.diagnosticSnapshotIntervalFrames ?? 0;
         const planetRadius = this.planetConfig.radius;
         const planetOrigin = this.planetConfig.origin;
@@ -777,7 +803,8 @@ export class QuadtreeTileManager {
             enableFrustumCulling: qt.enableFrustumCulling,
             enableHorizonCulling: qt.enableHorizonCulling,
             horizonGroundCos: qt.horizonCulling?.groundCos,
-            horizonBlendScale: qt.horizonCulling?.blendScale
+            horizonBlendScale: qt.horizonCulling?.blendScale,
+            logStats: qt.logStats === true
         });
 
         await this.quadtreeGPU.initialize();
@@ -807,15 +834,204 @@ export class QuadtreeTileManager {
               textureFormats,
               enableSplat: true,
               enableTileCacheBridge: false,
-              // ── NEW: ring-buffered feedback readback ──
               feedbackReadbackInterval: qt.feedbackReadbackInterval,
-              feedbackReadbackRingSize: qt.feedbackReadbackRingSize
+              feedbackReadbackRingSize: qt.feedbackReadbackRingSize,
+              gpuBackpressureLimit: qt.gpuBackpressureLimit ?? 4,   // NEW
+              logStats: qt.logStats === true
           }
       );
         await this.tileStreamer.initialize();
 
         this._initialized = true;
         Logger.info('[QuadtreeTileManager] Initialized');
+    }
+
+    _updateAdaptiveLodScale(camera) {
+        const cfg = this._adaptiveLodConfig;
+        if (!cfg?.enabled || !camera?.position) {
+            this._lodSpeedScale = 1.0;
+            return;
+        }
+
+        const now = performance.now();
+        const pos = camera.position;
+
+        if (this._prevCameraPos && this._prevFrameTime > 0) {
+            const dt = (now - this._prevFrameTime) / 1000;
+            // Ignore degenerate dt: first frame, long pause, tab switch.
+            if (dt > 0.001 && dt < 0.5) {
+                const dx = pos.x - this._prevCameraPos.x;
+                const dy = pos.y - this._prevCameraPos.y;
+                const dz = pos.z - this._prevCameraPos.z;
+                const speed = Math.hypot(dx, dy, dz) / dt;
+
+                // Store raw velocity for predictive streaming.
+                this._rawCamVelocity = { x: dx / dt, y: dy / dt, z: dz / dt };
+
+                const excess = Math.max(0, speed - cfg.speedFloorMps);
+                const rawScale = 1.0 + excess / Math.max(cfg.speedRefMps, 1);
+                this._lodSpeedScaleTarget = Math.min(rawScale, cfg.maxScale);
+            }
+        }
+
+        // Smooth toward target. Asymmetric: fast up, slow down.
+        const delta = this._lodSpeedScaleTarget - this._lodSpeedScale;
+        let smooth = delta > 0 ? cfg.smoothUp : cfg.smoothDown;
+
+        // Don't lower the scale while the GPU is still digesting.
+        // Otherwise deceleration triggers an immediate request burst
+        // right when the queue is deepest.
+        if (cfg.holdWhenGpuBacklogged && delta < 0) {
+            const gpuInFlight =
+                this.tileStreamer?.tileGenerator?._gpuFencesInFlight ?? 0;
+            const gpuLimit = this.tileStreamer?._gpuBackpressureLimit ?? 4;
+            if (gpuInFlight >= gpuLimit) {
+                smooth = 0;
+            }
+        }
+
+        this._lodSpeedScale = Math.max(1.0, this._lodSpeedScale + delta * smooth);
+
+        this._prevCameraPos = { x: pos.x, y: pos.y, z: pos.z };
+        this._prevFrameTime = now;
+    }
+
+    // ── Predictive tile streaming ────────────────────────────────────────────
+    //
+    // Each frame, extrapolates the camera position forward along its
+    // EMA-smoothed velocity and pre-queues tiles at the predicted location
+    // before the GPU feedback pipeline would discover them.
+    //
+    // Design constraints:
+    //   - Conservative: look-ahead time scales with speed, capped at 1.5 s.
+    //   - Responsive: EMA alpha of 0.15 gives ~7-frame (115 ms) response,
+    //     fast enough to track airplane-speed turns (several seconds).
+    //   - Safe: tiles already loaded or generating are skipped; the
+    //     generation queue handles priority and deduplication.
+    //
+    // Controlled by engineConfig.gpuQuadtree.predictiveStreaming.enabled.
+    _updatePredictiveStreaming(camera) {
+        const cfg = this.engineConfig?.gpuQuadtree?.predictiveStreaming;
+        if (!cfg?.enabled) return;
+        if (!camera?.position) return;
+        if (!this.tileStreamer?.hashTable || !this.tileStreamer?.tileGenerator) return;
+        if (!this.quadtreeGPU) return;
+
+        const pos = camera.position;
+        const ps  = this._predictState;
+
+        // ── 1. Smooth velocity ───────────────────────────────────────
+        // Raw velocity is written by _updateAdaptiveLodScale (same frame,
+        // runs just before this method).  If the camera hasn't moved yet,
+        // keep the previous smoothed value.
+        const rawVx = this._rawCamVelocity?.x ?? 0;
+        const rawVy = this._rawCamVelocity?.y ?? 0;
+        const rawVz = this._rawCamVelocity?.z ?? 0;
+
+        const alpha = cfg.velocitySmoothAlpha ?? 0.15;
+        ps.smoothVelX += alpha * (rawVx - ps.smoothVelX);
+        ps.smoothVelY += alpha * (rawVy - ps.smoothVelY);
+        ps.smoothVelZ += alpha * (rawVz - ps.smoothVelZ);
+
+        const speed = Math.hypot(ps.smoothVelX, ps.smoothVelY, ps.smoothVelZ);
+        if (speed < (cfg.speedThresholdMps ?? 50)) return;
+
+        // ── 2. Compute predicted world position ──────────────────────
+        const lookAheadMax   = cfg.lookAheadTimeMaxSec  ?? 1.5;
+        const lookAheadScale = cfg.lookAheadSpeedScale  ?? 0.0025;
+        const lookAheadSec   = Math.min(speed * lookAheadScale, lookAheadMax);
+
+        const predX = pos.x + ps.smoothVelX * lookAheadSec;
+        const predY = pos.y + ps.smoothVelY * lookAheadSec;
+        const predZ = pos.z + ps.smoothVelZ * lookAheadSec;
+
+        // ── 3. Map predicted position → face + tile UV ───────────────
+        // Inline sphereToCube: normalize the direction from planet origin,
+        // then project onto the dominant cube face (same math as
+        // CubeSphereCoords.sphereToCube / worldPositionToFaceUV).
+        const originX = this.planetConfig?.origin?.x ?? 0;
+        const originY = this.planetConfig?.origin?.y ?? 0;
+        const originZ = this.planetConfig?.origin?.z ?? 0;
+        const relX = predX - originX;
+        const relY = predY - originY;
+        const relZ = predZ - originZ;
+
+        const len = Math.hypot(relX, relY, relZ);
+        if (len < 1e-10) return;
+        const nx = relX / len, ny = relY / len, nz = relZ / len;
+
+        const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+        let face, cubeU, cubeV;
+        if (ax >= ay && ax >= az) {
+            // Face 0 (+X) or 1 (-X)
+            face = nx > 0 ? 0 : 1;
+            const s = 1 / ax;
+            cubeU = nx > 0 ? -nz * s : nz * s;
+            cubeV = ny * s;
+        } else if (ay >= ax && ay >= az) {
+            // Face 2 (+Y) or 3 (-Y)
+            face = ny > 0 ? 2 : 3;
+            const s = 1 / ay;
+            cubeU = nx * s;
+            cubeV = ny > 0 ? -nz * s : nz * s;
+        } else {
+            // Face 4 (+Z) or 5 (-Z)
+            face = nz > 0 ? 4 : 5;
+            const s = 1 / az;
+            cubeU = nz > 0 ? nx * s : -nx * s;
+            cubeV = ny * s;
+        }
+
+        // Cube UV in [-1, 1] → tile UV in [0, 1] (matches TileAddress.fromFaceUV)
+        const tileU = (cubeU + 1) * 0.5;
+        const tileV = (cubeV + 1) * 0.5;
+
+        // ── 4. Queue tiles at each depth in the configured range ─────
+        //
+        // Neighbor radius shrinks with depth so the queued world-space
+        // footprint stays roughly constant across LOD levels.  At the
+        // coarsest depth we use neighborRadiusCoarse (default 4 → 9×9);
+        // each extra level halves the radius because tiles are half the size.
+        //   radius(d) = max(1, round(radiusCoarse / 2^(d - depthMin)))
+        // Example (depthMin=4, coarse=4):
+        //   depth 4 → 4  (9×9 — wide frustum sweep)
+        //   depth 6 → 1  (3×3)
+        //   depth 8+ → 1
+
+        const maxDepth     = this.quadtreeGPU.maxDepth;
+        const depthMin     = Math.min(cfg.depthMin         ?? 4,  maxDepth);
+        const depthMax     = Math.min(cfg.depthMax         ?? 11, maxDepth);
+        const radiusCoarse = cfg.neighborRadiusCoarse ?? (cfg.neighborRadius ?? 4);
+
+        const hashTable    = this.tileStreamer.hashTable;
+        const tileGenerator = this.tileStreamer.tileGenerator;
+
+        for (let depth = depthMin; depth <= depthMax; depth++) {
+            const gs = 1 << depth;
+            const centerX = Math.max(0, Math.min(gs - 1, Math.floor(tileU * gs)));
+            const centerY = Math.max(0, Math.min(gs - 1, Math.floor(tileV * gs)));
+
+            const neighborRadius = Math.max(1, Math.round(radiusCoarse / Math.pow(2, depth - depthMin)));
+
+            for (let dy = -neighborRadius; dy <= neighborRadius; dy++) {
+                for (let dx = -neighborRadius; dx <= neighborRadius; dx++) {
+                    const tx = centerX + dx;
+                    const ty = centerY + dy;
+                    if (tx < 0 || tx >= gs || ty < 0 || ty >= gs) continue;
+
+                    // Skip if the tile is already resident in the GPU pool.
+                    const keyLo = hashTable.makeKeyLo(tx, ty);
+                    const keyHi = hashTable.makeKeyHi(face, depth);
+                    if (hashTable.findSlot(keyLo, keyHi) >= 0) continue;
+
+                    // Skip if generation is already in progress.
+                    const addr = new TileAddress(face, depth, tx, ty);
+                    if (tileGenerator.isGenerating(addr)) continue;
+
+                    this.tileStreamer._queueTile(addr);
+                }
+            }
+        }
     }
 
     toggleManualDiagnosticSnapshot(reason = 'manual') {
@@ -1078,11 +1294,15 @@ export class QuadtreeTileManager {
             this.tileStreamer.tickGeneration();
         }
 
+        this._updateAdaptiveLodScale(camera);
+        this._updatePredictiveStreaming(camera);
+
         // ── (B) Uniform update ───────────────────────────────────────
         if (!frozen || !dp.freezeUniforms) {
+            const baseThreshold = this.engineConfig.gpuQuadtree.lodErrorThreshold;
             this.quadtreeGPU.updateUniforms(camera, {
                 screenHeight: this.backend.canvas?.height || 1080,
-                lodErrorThreshold: this.engineConfig.gpuQuadtree.lodErrorThreshold
+                lodErrorThreshold: baseThreshold * this._lodSpeedScale
             });
         }
 
@@ -2041,12 +2261,30 @@ export class QuadtreeTileManager {
         const dirtySlots = this.tileStreamer?._dirtySlots?.size ?? 0;
         const poolUsed = this.tileStreamer?._tileInfo?.size ?? 0;
         const poolTotal = this.tileStreamer?.tilePoolSize ?? 0;
+        const pressure = this.tileStreamer?.consumePressureWindow?.() ?? null;
+        const gpuInFlight = this.tileStreamer?.tileGenerator?._gpuFencesInFlight ?? 0;
+        const lodScale = this._lodSpeedScale;
+        const prevPending = this._lastLightDiagPendingGen;
+        const pendingDelta = Number.isFinite(prevPending) ? (queuePending - prevPending) : 0;
+        this._lastLightDiagPendingGen = queuePending;
+        const pendingDeltaStr = pendingDelta > 0 ? `+${pendingDelta}` : `${pendingDelta}`;
 
         Logger.info(
             `${TERRAIN_STEP_LOG_TAG} [QTLight] pool=${poolUsed}/${poolTotal} ` +
-            `pendingGen=${queuePending} activeGen=${queueActive} pendingCopies=${pendingCopies} dirtySlots=${dirtySlots}` +
-            `${visible ? ` visible=${visible.totalVisible} resident=${visible.residentVisible} fallback=${visible.fallbackVisible} ownNotReady=${visible.ownVisibleNotReady} fallbackNotReady=${visible.fallbackVisibleNotReady}` : ''}`
+            `pendingGen=${queuePending}(${pendingDeltaStr}) activeGen=${queueActive} ` +
+            `pendingCopies=${pendingCopies} dirtySlots=${dirtySlots} ` +
+            `gpuInFlight=${gpuInFlight} lodScale=${lodScale.toFixed(2)}` +
+            `${pressure ? ` bpSkips=${pressure.gpuBackpressureSkips} started=${pressure.tilesStarted} gpuMax=${pressure.gpuFencesMax} commits=${pressure.commits} staleStarts=${pressure.staleStarts.stale}/${pressure.staleStarts.started} feedbackReadbacks=${pressure.feedback.readbacks} minFree=${pressure.minFreeLayers ?? 'n/a'} queueRejected=${pressure.queueRejected} queueDropped=${pressure.queueDropped}` : ''}` +
+            `${visible ? ` visible=${visible.totalVisible} resident=${visible.residentVisible} fallback=${visible.fallbackVisible}` : ''}`
         );
+
+        if (pressure && (pressure.requestLatency.total > 0 || pressure.staleStarts.started > 0)) {
+            Logger.info(
+                `${TERRAIN_STEP_LOG_TAG} [QTLight] requestLatency=${pressure.requestLatency.summary} ` +
+                `latencyMax=${pressure.requestLatency.maxMs.toFixed(0)}ms ` +
+                `startVisible=${pressure.staleStarts.visible} startAncestor=${pressure.staleStarts.ancestor} startUnknown=${pressure.staleStarts.unknown}`
+            );
+        }
     }
   
     async _maybeReadbackVisibleTiles() {
@@ -2125,6 +2363,7 @@ export class QuadtreeTileManager {
     }
 
     _shouldRunStitchDiag() {
+        return false;
         const cfg = this.engineConfig?.gpuQuadtree;
         if (!cfg?.diagnosticsEnabled) return false;
         const interval = cfg.diagnosticsIntervalFrames ?? 0;

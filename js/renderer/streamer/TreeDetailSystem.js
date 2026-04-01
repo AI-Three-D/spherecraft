@@ -1,6 +1,4 @@
 // js/renderer/streamer/TreeDetailSystem.js
-//
-// UPDATED - Adds close tree tracking compute pass
 
 import { Logger } from '../../config/Logger.js';
 import { getSpeciesRegistry } from './species/SpeciesRegistry.js';

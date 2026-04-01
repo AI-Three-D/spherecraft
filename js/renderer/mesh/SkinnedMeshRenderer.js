@@ -350,6 +350,11 @@ export class SkinnedMeshRenderer {
             ss.playing   = true;
         }
     }
+    setAnimationSpeed(instance, speed = 1) {
+        for (const [, ss] of instance._skinStates) {
+            ss.speed = speed;
+        }
+    }
     stopAnimation(instance) {
         for (const [, ss] of instance._skinStates) {
             ss.playing = false;

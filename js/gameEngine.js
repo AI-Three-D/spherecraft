@@ -81,14 +81,18 @@ export class GameEngine {
     }
 
     toggleCameraMode() {
-        this.cameraMode = this.cameraMode === 'manual' ? 'follow' : 'manual';
-
-        if (this.cameraMode === 'follow') {
+        const modes = this.actorManager ? ['manual', 'character'] : ['manual', 'follow'];
+        const i = modes.indexOf(this.cameraMode);
+        this.cameraMode = modes[(i + 1) % modes.length];
+        if (this.cameraMode === 'character') {
+            this.actorManager?.cameraController?.snap();
+        } else if (this.cameraMode === 'follow') {
             this.camera.follow(this.spaceship);
             this.camera.resetOrbit();
         } else {
             this.camera.unfollow();
         }
+        Logger.info(`[GameEngine] Camera mode: ${this.cameraMode}`);
     }
 
     _cycleCirrusQuality() {
@@ -107,6 +111,55 @@ export class GameEngine {
         }
 
         Logger.info(`[Clouds] Cirrus quality: ${next}`);
+    }
+
+    _computeSpawn() {
+        const spawnConfig = this.gameDataConfig?.spawn;
+        if (!spawnConfig) {
+            return { x: 0, y: 0, z: 0 };
+        }
+
+        let spawnX = spawnConfig.defaultX;
+        let spawnY = spawnConfig.defaultY;
+        let spawnZ = spawnConfig.defaultZ;
+
+        if (!this.planetConfig) {
+            return { x: spawnX, y: spawnY, z: spawnZ };
+        }
+
+        const spawnHeight = spawnConfig.height;
+        const radius = this.planetConfig.radius;
+        const origin = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
+
+        if (
+            spawnConfig.spawnOnSunSide &&
+            this.starSystem &&
+            this.starSystem.currentBody &&
+            this.starSystem.primaryStar
+        ) {
+            this.starSystem.update(0);
+
+            const starInfo = this.starSystem.currentBody.getStarDirection(
+                this.starSystem.primaryStar,
+                origin
+            );
+            const sunDir = starInfo?.direction;
+
+            if (sunDir) {
+                const spawnRadius = radius + spawnHeight;
+                return {
+                    x: origin.x + sunDir.x * spawnRadius,
+                    y: origin.y + sunDir.y * spawnRadius,
+                    z: origin.z + sunDir.z * spawnRadius,
+                };
+            }
+        }
+
+        return {
+            x: origin.x,
+            y: origin.y + radius + spawnHeight,
+            z: origin.z,
+        };
     }
 
     updateManualCamera(deltaTime, keys, mouseDelta) {
@@ -359,6 +412,13 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         }
 
         window.addEventListener('keydown', (e) => {
+            if (e.key === 'b') {
+                const cc = this.actorManager?.cameraController;
+                if (cc) {
+                    cc.setSnapBackMode(!cc.snapBackOnRelease);
+                    Logger.info(`[GameEngine] Camera snap-back: ${cc.snapBackOnRelease}`);
+                }
+            }
             if (e.key === 'v') {
                 this.toggleCameraMode();
             }
@@ -398,34 +458,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.inputManager.start();
         this.isGameActive = true;
 
-        // Calculate spawn position from configuration
-        const spawnConfig = this.gameDataConfig.spawn;
-        let spawnX = spawnConfig.defaultX;
-        let spawnY = spawnConfig.defaultY;
-        let spawnZ = spawnConfig.defaultZ;
-
-        if (this.planetConfig) {
-            const spawnHeight = spawnConfig.height;
-            const radius = this.planetConfig.radius;
-
-            if (spawnConfig.spawnOnSunSide && this.starSystem && this.starSystem.currentBody && this.starSystem.primaryStar) {
-                this.starSystem.update(0);
-
-                const starInfo = this.starSystem.currentBody.getStarDirection(
-                    this.starSystem.primaryStar,
-                    { x: 0, y: 0, z: 0 }
-                );
-
-                const sunDir = starInfo.direction;
-                spawnX = sunDir.x * (radius + spawnHeight);
-                spawnY = sunDir.y * (radius + spawnHeight);
-                spawnZ = sunDir.z * (radius + spawnHeight);
-            } else {
-                spawnX = 0;
-                spawnY = radius + spawnHeight;
-                spawnZ = 0;
-            }
-        }
+        const { x: spawnX, y: spawnY, z: spawnZ } = this._computeSpawn();
 
         this.spaceship.reset(spawnX, spawnY, spawnZ);
         this.camera.follow(this.spaceship);
@@ -433,33 +466,64 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.inputManager.start();
         this.isGameActive = true;
 
-        {
-            const offset = new THREE.Vector3().subVectors(
-                new THREE.Vector3(spawnX, spawnY, spawnZ),
-                new THREE.Vector3(
-                    this.planetConfig.origin.x,
-                    this.planetConfig.origin.y,
-                    this.planetConfig.origin.z
-                )
-            ).normalize();
-            const modelPos = new THREE.Vector3(
-                spawnX - offset.x * 10,
-                spawnY - offset.y * 10,
-                spawnZ - offset.z * 10
+
+        if (this.renderer?.isGPUQuadtreeActive()) {
+            const { ActorManager } = await import('./actors/ActorManager.js');
+
+            const assetStreamer = this.renderer.assetStreamer || null;
+            let treeDetailSystem = null;
+            if (assetStreamer) {
+                treeDetailSystem =
+                    (typeof assetStreamer.getTreeDetailSystem === 'function'
+                        ? assetStreamer.getTreeDetailSystem()
+                        : assetStreamer._treeDetailSystem) || null;
+            }
+            if (treeDetailSystem) {
+                Logger.info(`[GameEngine] TreeDetailSystem found — maxCloseTrees=${treeDetailSystem.maxCloseTrees}`);
+            } else {
+                Logger.warn('[GameEngine] TreeDetailSystem NOT found — tree collision/nav disabled');
+            }
+
+            this.actorManager = new ActorManager({
+                device: this.renderer.backend.device,
+                backend: this.renderer.backend,
+                planetConfig: this.planetConfig,
+                quadtreeGPU: this.renderer.quadtreeTileManager?.quadtreeGPU,
+                tileStreamer: this.renderer.quadtreeTileManager?.tileStreamer,
+                engineConfig: this.engineConfig,
+                skinnedMeshRenderer: this.renderer.skinnedMeshRenderer,
+                assetStreamer: assetStreamer,
+                treeDetailSystem: treeDetailSystem,
+            });
+            await this.actorManager.initialize();
+            await this.actorManager.createPlayer(
+                '/assets/wizard8.glb',
+                { x: spawnX, y: spawnY, z: spawnZ },
+                1.0
             );
-        
-            this.renderer.loadGLB('/assets/test-wiz.glb', {
-                position: modelPos,
-                scale: 100.0
-            }).then(inst => {
-                if (!inst) return;
-                this._glbTestInstance = inst;
-                // Auto-play first animation if present
-                if (inst.asset.animations.length > 0) {
-                    this.renderer.playGLBAnimation(inst, 0, { speed: 1.0 });
-                    Logger.info(`[GameEngine] Playing animation "${inst.asset.animations[0].name}"`);
-                }
-            }).catch(e => Logger.warn(`[GameEngine] GLB load failed: ${e.message}`));
+            this.renderer.setActorManager(this.actorManager);
+            this.cameraMode = 'character';
+
+            // Wire click-to-move input
+            this.canvas.addEventListener('click', (e) => {
+                if (this.cameraMode !== 'character') return;
+                if (!this.actorManager) return;
+                this.actorManager._pendingScreenClick = {
+                    x: e.offsetX * (window.devicePixelRatio || 1),
+                    y: e.offsetY * (window.devicePixelRatio || 1),
+                };
+            });
+            try {
+                const { NPCManager } = await import('./actors/NPCManager.js');
+                const { DEFAULT_NPC_SPAWN_CONFIG } = await import('./actors/NPCSpawnConfig.js');
+
+                const npcManager = new NPCManager(this.actorManager, DEFAULT_NPC_SPAWN_CONFIG);
+                await npcManager.initialize();
+                this.actorManager.setNPCManager(npcManager);
+                Logger.info('[GameEngine] NPC spawning system initialized');
+            } catch (e) {
+                Logger.warn(`[GameEngine] NPC system init failed: ${e?.message || e}`);
+            }
         }
         Logger.info('[GameEngine] Initialization complete');
     }
@@ -527,7 +591,30 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.altitudeZoneManager.update(cameraRenderPos, deltaTime);
         }
 
-        if (this.cameraMode === 'manual') {
+        if (this.cameraMode === 'character' && this.actorManager) {
+            const inputState = {
+                keys, mouseDelta,
+                isLeftDragging: this.inputManager.isLeftDragging(),
+                isRightDragging: this.inputManager.isRightDragging(),
+                clickTarget: null,
+            };
+            this.actorManager.update(deltaTime, inputState);
+        
+            const camState = this.actorManager.getCameraState(
+                deltaTime,
+                inputState.isLeftDragging,
+                mouseDelta,
+                wheelDelta
+            );
+            if (camState) {
+                this.camera.position.x = camState.position.x;
+                this.camera.position.y = camState.position.y;
+                this.camera.position.z = camState.position.z;
+                this.camera.target.x = camState.target.x;
+                this.camera.target.y = camState.target.y;
+                this.camera.target.z = camState.target.z;
+            }
+        } else if (this.cameraMode === 'manual') {
             this.updateManualCamera(deltaTime, keys, mouseDelta);
         } else {
             this.altitudeController.update(deltaTime, keys);
@@ -555,7 +642,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         // NOTE: Weather/Environment updates are now driven by the Frontend's WeatherController
         // during the render pass. We do NOT call environmentState.update() here anymore.
-
+        if (this.actorManager) {
+            this.actorManager.processNPCSpawns().catch((e) => {
+                Logger.warn(`[GameEngine] NPC spawn processing failed: ${e?.message || e}`);
+            });
+        }
         this.updateUI();
     }
 
@@ -612,8 +703,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     resetGame() {
-        const spawnConfig = this.gameDataConfig.spawn;
-        this.spaceship.reset(spawnConfig.defaultX, spawnConfig.defaultY, spawnConfig.defaultZ);
+        const { x, y, z } = this._computeSpawn();
+        this.spaceship.reset(x, y, z);
         this.ui.hideCrashScreen();
     }
 
@@ -631,8 +722,17 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             fps: this._fps,
             cameraMode: this.cameraMode,
             shipState: shipState,
-            zoneInfo: zoneInfo
+            zoneInfo: zoneInfo,
+            playerStatus: this.actorManager?.getPlayerCombatState?.() ?? null,
         });
+    }
+
+    debugSpawnGoblinGroup(options = {}) {
+        const ok = this.actorManager?.npcManager?.requestDebugSpawnNearPlayer?.(options) === true;
+        if (!ok) {
+            Logger.warn('[GameEngine] Debug goblin spawn is disabled or unavailable');
+        }
+        return ok;
     }
 
     teleportToLatLon(latDeg, lonDeg, options = {}) {

@@ -62,9 +62,8 @@ export class WebGPUTerrainGenerator {
         gpuHeightBase, gpuHeight, gpuNormal, gpuTile, gpuMacro,
         chunkCoordX, chunkCoordY, chunkSizeTex, chunkGridSize,
         face, textureSize,
-        formats = {}   // per-type output format map; absent types use rgba32float
+        formats = {}
     }) {
-        // ── Debug logging (unchanged body) ─────────────────────────
         if (this._lodPassLogCount === undefined) this._lodPassLogCount = 0;
         if (this._lodPassLogCount < 3) {
             this._lodPassLogCount++;
@@ -94,31 +93,30 @@ export class WebGPUTerrainGenerator {
             );
         }
 
-        // ── 1. Fill common uniforms once, patch outputType per pass ─
         const scratchView = this._fillTerrainUniformScratch(
             chunkCoordX, chunkCoordY, chunkSizeTex, chunkGridSize, face
         );
-
+    
         const fmt = (name) => formats[name] || 'rgba32float';
         const heightFmt = fmt('height');
-        const tileFmt = fmt('tile');
-
-        // Each pass carries its own output format so mixed-format atlases work.
+        const tileFmt   = fmt('tile');
+    
+        // heightBase is scratch and now carries stable slope in G — force rgba32float.
+        // (The final height texture keeps whatever format the pool wants.)
+        const heightBaseFmt = 'rgba32float';
+    
         const passes = [
-            { type: 0, outTex: gpuHeightBase, format: heightFmt },
-            { type: 2, outTex: gpuTile,   format: tileFmt,   heightTex: gpuHeightBase, heightFormat: heightFmt },
-            { type: 4, outTex: gpuHeight, format: heightFmt, heightTex: gpuHeightBase, tileTex: gpuTile, heightFormat: heightFmt, tileFormat: tileFmt },
-            { type: 1, outTex: gpuNormal, format: fmt('normal'), heightTex: gpuHeight, heightFormat: heightFmt },
+            { type: 0, outTex: gpuHeightBase, format: heightBaseFmt },
+            { type: 2, outTex: gpuTile,   format: tileFmt,
+              heightTex: gpuHeightBase, heightFormat: heightBaseFmt },
+            { type: 4, outTex: gpuHeight, format: heightFmt,
+              heightTex: gpuHeightBase, tileTex: gpuTile,
+              heightFormat: heightBaseFmt, tileFormat: tileFmt },
+            { type: 1, outTex: gpuNormal, format: fmt('normal'),
+              heightTex: gpuHeight, heightFormat: heightFmt },
             { type: 3, outTex: gpuMacro,  format: fmt('macro') }
         ];
-
-        for (let i = 0; i < passes.length; i++) {
-            scratchView.setInt32(48, passes[i].type, true);
-            this.device.queue.writeBuffer(
-                this._batchTerrainUniforms[i], 0,
-                this._terrainUniformScratch
-            );
-        }
+    
 
         // ── 2. Encode all passes into one command buffer ───────────
         const enc = this.device.createCommandEncoder({
@@ -1599,7 +1597,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Staging textures: format now per-type (was hardcoded rgba32float).
         const gpuHeight    = this.createGPUTexture(textureSize, textureSize, fmt('height'));
-        const gpuHeightBase = this.createGPUTexture(textureSize, textureSize, fmt('height'));
+        const gpuHeightBase = this.createGPUTexture(textureSize, textureSize, 'rgba32float');
         const gpuNormal    = this.createGPUTexture(textureSize, textureSize, fmt('normal'));
         const gpuTile      = this.createGPUTexture(textureSize, textureSize, fmt('tile'));
         const gpuMacro     = this.createGPUTexture(textureSize, textureSize, fmt('macro'));

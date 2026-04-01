@@ -78,6 +78,7 @@ export class TileCache {
         this._destructionDelayFrames = 3;
 
         // ── Logging ───────────────────────────────────────────────────────────
+        this._logStatsEnabled = options.logStats === true;
         this._logFrame    = 0;
         this._logInterval = 180;  // frames between periodic stat logs
 
@@ -245,6 +246,7 @@ export class TileCache {
      */
     tick() {
         this.processDeferredDestructions();
+        if (!this._logStatsEnabled) return;
 
         this._logFrame++;
         if (this._logFrame >= this._logInterval) {

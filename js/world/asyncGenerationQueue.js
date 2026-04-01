@@ -4,7 +4,8 @@ export class AsyncGenerationQueue {
         maxPerFrame = 10,
         timeBudgetMs = 20,
         maxQueueSize = 4096,
-        minStartIntervalMs = 0
+        minStartIntervalMs = 0,
+        shouldDrop = null          // NEW: (entry) => boolean
     } = {}) {
         this.pending = new Map();
         this.queue = [];
@@ -15,6 +16,8 @@ export class AsyncGenerationQueue {
         this.maxQueueSize = maxQueueSize;
         this.minStartIntervalMs = minStartIntervalMs;
         this._lastStartTime = -Infinity;
+        this._shouldDrop = shouldDrop;  // NEW
+        this.droppedCount = 0;          // NEW: diagnostic counter
     }
 
     request(key, priority, task, canStart = null) {
@@ -74,7 +77,33 @@ export class AsyncGenerationQueue {
         return queued.length;
     }
 
+    /** Reset the diagnostic drop counter and return its previous value. */
+    consumeDroppedCount() {                // NEW
+        const count = this.droppedCount;
+        this.droppedCount = 0;
+        return count;
+    }
+
     tick() {
+        // ── Phase 1: bulk prune stale entries ──────────────────────────
+        // This runs BEFORE the start loop so dropped entries never consume
+        // a start slot or time budget.
+        if (this._shouldDrop && this.queue.length > 0) {
+            let writeIdx = 0;
+            for (let readIdx = 0; readIdx < this.queue.length; readIdx++) {
+                const entry = this.queue[readIdx];
+                if (!entry.started && this._shouldDrop(entry)) {
+                    this.pending.delete(entry.key);
+                    entry.resolve(false);
+                    this.droppedCount++;
+                    continue;
+                }
+                this.queue[writeIdx++] = entry;
+            }
+            this.queue.length = writeIdx;
+        }
+
+        // ── Phase 2: start tasks (unchanged logic) ────────────────────
         const start = performance.now();
         let spawned = 0;
         let deferrals = 0;

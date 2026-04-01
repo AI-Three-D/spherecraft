@@ -86,6 +86,9 @@ export class TileGenerator {
             throw new Error('TileGenerator: terrainGenerator is required');
         }
 
+        this._gpuFencesInFlight = 0;
+this._maxGpuFencesObserved = 0;
+
         this.terrainGen   = terrainGenerator;
         this.textureSize  = options.textureSize     ?? 1024;
         this.requiredTypes = options.requiredTypes  ?? ['height', 'normal', 'tile'];
@@ -110,10 +113,16 @@ export class TileGenerator {
             byDepth:        new Map()  // depth -> { count, totalMs }
         };
 
+        this._logStatsEnabled = options.logStats === true;
         this._logFrame    = 0;
         this._logInterval = 300;  // frames between stat logs
     }
 
+    consumeMaxGpuFences() {
+        const max = this._maxGpuFencesObserved;
+        this._maxGpuFencesObserved = this._gpuFencesInFlight;
+        return max;
+    }
     /**
      * Generate all required textures for a tile.
      * Returns a cached promise if generation is already in progress.
@@ -197,6 +206,7 @@ export class TileGenerator {
      * Call once per frame for periodic logging.
      */
     tick() {
+        if (!this._logStatsEnabled) return;
         this._logFrame++;
         if (this._logFrame >= this._logInterval) {
             this._logFrame = 0;
@@ -235,7 +245,7 @@ export class TileGenerator {
     
         if (needsBaseHeight) {
             gpuHeightBase = this._createGPUTexture(
-                this.textureSize, this.textureSize, heightFormat);
+                this.textureSize, this.textureSize, 'rgba32float');
         }
         if (needsTile) {
             tileTarget = this.terrainGen.createStorageBackedOutputTarget(
@@ -261,7 +271,7 @@ export class TileGenerator {
             terrainPasses.push({
                 outputType: 0,
                 texture: gpuHeightBase,
-                format: heightFormat,
+                format: 'rgba32float',
                 textureSize: this.textureSize
             });
         }
@@ -272,7 +282,7 @@ export class TileGenerator {
                 format: tileTarget.storageFormat,
                 textureSize: this.textureSize,
                 heightTexture: gpuHeightBase,
-                heightTextureFormat: heightFormat,
+                heightTextureFormat: 'rgba32float',
                 resolveToTexture: tileTarget.requiresResolve ? gpuTile : null,
                 resolveToFormat: tileTarget.requiresResolve ? tileTarget.finalFormat : null
             });
@@ -285,7 +295,7 @@ export class TileGenerator {
                 textureSize: this.textureSize,
                 heightTexture: gpuHeightBase,
                 tileTexture: gpuTile,
-                heightTextureFormat: heightFormat,
+                heightTextureFormat: 'rgba32float',
                 tileTextureFormat: tileFormat
             });
         }
@@ -389,6 +399,11 @@ export class TileGenerator {
             splatPass
         });
 
+        this._gpuFencesInFlight++;
+        if (this._gpuFencesInFlight > this._maxGpuFencesObserved) {
+            this._maxGpuFencesObserved = this._gpuFencesInFlight;
+        }
+
         const temporaryTextures = [];
         if (gpuHeightBase && !includeBaseHeight) {
             temporaryTextures.push(gpuHeightBase);
@@ -402,21 +417,25 @@ export class TileGenerator {
         if (climateTarget?.requiresResolve) {
             temporaryTextures.push(climateTarget.storageTexture);
         }
-        // These textures are still referenced by the submitted command buffer.
-        // Destroy them only after the queue finishes; immediate destroy can
-        // corrupt the tile/tile+height dependent passes.
+
         const queue = this.terrainGen?.device?.queue;
+        const releaseFence = () => {
+            this._gpuFencesInFlight = Math.max(0, this._gpuFencesInFlight - 1);
+        };
         if (queue?.onSubmittedWorkDone) {
             queue.onSubmittedWorkDone()
                 .then(() => {
+                    releaseFence();
                     for (const tempTex of temporaryTextures) {
                         if (!tempTex) continue;
                         try { tempTex.destroy(); } catch {}
                     }
                 })
-                .catch(() => {});
+                .catch(releaseFence);
+        } else {
+            releaseFence();
         }
-    
+
         // ── Wrap GPU textures ─────────────────────────────────────
         if (this.requiredTypes.includes('height') && gpuHeight) {
             textures.height = this._wrapGPUTexture(

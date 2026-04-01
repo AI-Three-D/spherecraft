@@ -120,6 +120,29 @@ export function createEngineConfig() {
       updateIntervalMs: 250
     },
 
+    player: {
+      baseMoveSpeed: 4.0,
+      sprintMultiplier: 1.7,
+      staminaMax: 100,
+      staminaRegenPerSec: 5.5,
+      staminaSprintDrainPerSec: 16,
+      staminaTemperaturePenaltyMax: 3.5,
+      sprintResumeThreshold: 12,
+      hungerMax: 100,
+      hungerDrainPerSec: 0.08,
+      temperatureMin: 0,
+      temperatureMax: 100,
+      temperatureNeutral: 50,
+      temperatureRecoverPerSec: 0.6,
+      temperatureColdWarn: 35,
+      temperatureColdDanger: 20,
+      temperatureHotWarn: 65,
+      temperatureHotDanger: 80,
+      exhaustedAnimationSpeed: 1.0,
+      exhaustedFallbackDurationSec: 1.6,
+      exhaustedRegenMultiplier: 2.5
+    },
+
     camera: {
       fov: 75,
       near: 0.1,
@@ -129,6 +152,19 @@ export function createEngineConfig() {
       lookAtSmoothing: 0.15,
       lookAheadDistance: 10,
       lookAheadHeight: 2,
+      characterFollow: {
+        followHeight: 6,
+        followDistance: 5,
+        walkFollowPitchDeg: 30,
+        walkPitchApproachSpeed: 0.8,
+        stopPitchApproachSpeed: 0.4,
+        stopPitchReturnFraction: 0.2,
+        snapBackOnRelease: true,
+        snapBackSpeed: 3.0,
+        orbitSensitivity: 0.005,
+        smoothing: 8.0,
+        maxTotalPitchDeg: 75
+      },
       dynamicFarPlane: {
         enabled: true,
         minMeters: 2000,
@@ -157,13 +193,35 @@ export function createEngineConfig() {
       minTileSizeMeters: 128,
       maxVisibleTiles: 2048,//2048,
       queueCapacity: 131072,
-      tilePoolSize: 1024,
+      tilePoolSize: 2048,           // was 1024 — halves eviction pressure at high speed
+      tileHashCapacity: 8192 * 4,   // keep (already 2× pool, which is fine)
+      feedbackReadbackInterval: 1,  // was 2 — halves feedback latency
+      visibleReadbackInterval: 2, 
+      
       tilePoolMaxBytes: 512 * 1024 * 1024 * 4,
-      tileHashCapacity: 8192 * 4,
+
       visibleTableCapacity: 2048,
       feedbackCapacity: 4096,
       lodErrorThreshold:  512,  //512,
       workgroupSize: 128,
+
+      // 8 instead of 4: allows more tile generations to be in-flight
+      // simultaneously, cutting burst latency roughly in half.
+      gpuBackpressureLimit: 8,
+
+      // ── Speed-adaptive LOD ────────────────────────────────────
+      // Scales lodErrorThreshold with camera speed. Higher threshold
+      // → shallower subdivision → fewer tile requests.
+      adaptiveLod: {
+          enabled: true,
+          speedFloorMps: 150,   // no adaptation below this speed
+          speedRefMps: 600,     // each +600 m/s over floor → +1.0 scale
+          maxScale: 3.0,        // cap: threshold never > 3× base
+          smoothUp: 0.15,       // speeding up: respond in ~7 frames
+          smoothDown: 0.03,     // slowing: ease back over ~30 frames
+          holdWhenGpuBacklogged: true
+      },
+
       enableFrustumCulling: true,
       // Horizon culling hides tiles below the geometric horizon.
       enableHorizonCulling: true,
@@ -171,10 +229,7 @@ export function createEngineConfig() {
         groundCos: 1.0,
         blendScale: 1.25
       },
-      // Faster readbacks keep residency/fallback decisions in sync while
-      // moving quickly, reducing stale-parent rendering and eviction churn.
-      visibleReadbackInterval: 4,
-      feedbackReadbackInterval: 2,
+
       visibleReadbackMax: 8192,
       textureFormats: {
         height: 'r32float',
@@ -185,6 +240,48 @@ export function createEngineConfig() {
         splatData: 'rgba8unorm',
         scatter: 'r8unorm'
       },
+      // ── Predictive tile streaming ─────────────────────────────────
+      // Pre-queues tiles in the direction of camera movement so they are
+      // ready before the GPU feedback pipeline discovers them.
+      //
+      // Neighborhood sizing: the neighbor radius is not fixed — it shrinks
+      // as depth increases so that the queued world-space footprint stays
+      // roughly constant across LOD levels.  At coarse depths (few tiles
+      // cover the whole frustum) a radius of 4-5 is needed; at fine depths
+      // radius 1-2 is sufficient.  The runtime computes:
+      //   radius(depth) = round(neighborRadiusCoarse * 2^(depthMin-depth))
+      // clamped to [1, neighborRadiusCoarse].
+      predictiveStreaming: {
+          enabled: true,
+
+          // Minimum speed before any prefetching is done (m/s).
+          speedThresholdMps: 50,
+
+          // Maximum look-ahead time (seconds).
+          // At 600 m/s: 1.5 s × 600 = 900 m ahead.
+          lookAheadTimeMaxSec: 1.5,
+
+          // lookAheadSec = speed × this, clamped to lookAheadTimeMaxSec.
+          // 0.0025: at 600 m/s → 1.5 s, at 300 m/s → 0.75 s.
+          lookAheadSpeedScale: 0.0025,
+
+          // EMA weight for velocity smoothing (~7-frame / 115 ms response).
+          // Tracks airplane-speed turns (several seconds) without jitter.
+          velocitySmoothAlpha: 0.15,
+
+          // Tile neighborhood radius at the coarsest prefetch depth.
+          // Shrinks automatically for deeper (finer) depths so the queued
+          // world-space footprint stays roughly constant.
+          // 4 → 9×9 patch at depthMin covers a wide frustum sweep.
+          neighborRadiusCoarse: 4,
+
+          // Quadtree depth range to prefetch.
+          // depthMax is clamped to quadtreeGPU.maxDepth at runtime.
+          // Using maxDepth-2 as default so we don't over-queue leaf tiles.
+          depthMin: 4,
+          depthMax: 11,
+      },
+
       debugProfile: {
         enabled:          false,    // flip to true to activate
         warmupFrames:     300,      // run normally for this many frames first
@@ -201,12 +298,15 @@ export function createEngineConfig() {
       diagnosticsSampleInstances: 64,
       // Enable heavy per-readback snapshot logging (includes ScatterDebug).
       diagnosticSnapshotIntervalFrames: 0,
+      logStats: false,
     },
     generationQueue: {
       maxConcurrentTasks: 32,
+      // 16 instead of 8: a burst of 50 tiles entering the frustum at once
+      // now takes 3 frames to fully start instead of 6.
       maxStartsPerFrame: 16,
-      timeBudgetMs: 12,
-      maxQueueSize: 4096,
+      timeBudgetMs: 8,
+      maxQueueSize: 1024,
       minStartIntervalMs: 0
     },
  

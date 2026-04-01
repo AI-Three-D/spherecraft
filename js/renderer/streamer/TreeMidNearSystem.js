@@ -29,6 +29,7 @@ export class TreeMidNearSystem {
     constructor(device, assetStreamer, config = {}) {
         this.device   = device;
         this.streamer = assetStreamer;
+        this._debugReadbackEnabled = this.streamer?._debugReadbackEnabled === true;
 
         this.lodController = config.lodController;
         if (!this.lodController) {
@@ -948,6 +949,7 @@ export class TreeMidNearSystem {
     }
 
     _kickDebugReadback() {
+        if (!this._debugReadbackEnabled) return;
         if (!this._debugReadbackBuffer || this._debugReadPending) return;
         this._debugReadPending = true;
         this._debugReadbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
@@ -1189,7 +1191,7 @@ export class TreeMidNearSystem {
         // 1) encode GPU copy in one frame
         // 2) map/read in a later frame
         // This avoids submitting commands that touch a mapped buffer.
-        if (!this._debugReadPending) {
+        if (this._debugReadbackEnabled && !this._debugReadPending) {
             if (this._debugReadQueued) {
                 this._kickDebugReadback();
                 this._debugReadQueued = false;

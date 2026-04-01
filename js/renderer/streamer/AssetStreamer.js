@@ -16,6 +16,8 @@
 //   assetStreamer.update(encoder, camera);
 //   backend.resumeRenderPass();
 //   assetStreamer.render(camera, viewMatrix, projectionMatrix);
+import { TreeMidSystem } from './TreeMidSystem.js';
+import { TREE_TIER_FLAGS, validateTierRanges } from './treeTierConfig.js';
 import { TEXTURE_LAYER_MAPPING } from './archetype/archetypeDefinitions.js';
 import { LeafMaskBaker } from './LeafMaskBaker.js';
 import { Logger } from '../../config/Logger.js';
@@ -144,7 +146,9 @@ export class AssetStreamer {
         });
 
         this.enableLeafRendering = options.enableLeafRendering !== false;
-
+        this._debugConfig = options.debug || {};
+        this._debugReadbackEnabled = this._debugConfig.readback === true;
+        this._treeMidSystem = null; 
         // ═══ INC 1: ArchetypeRegistry replaces AssetRegistry ═══════════════
         // ArchetypeRegistry EXTENDS AssetRegistry and passes legacy defs to
         // super(). Every downstream consumer (AssetSelectionBuffer,
@@ -238,8 +242,8 @@ export class AssetStreamer {
             counterBuffer: null,
             bindGroup: null,
         };
-        this._producerDebugEnabled = true;
-        this._producerDebugInterval = 120;
+        this._producerDebugEnabled = this._debugReadbackEnabled;
+        this._producerDebugInterval = Math.max(1, this._debugConfig.interval ?? 120);
         this._producerDebugQueued = false;
         this._producerDebugPending = false;
         this._producerDebugHasGroundPropSnapshot = false;
@@ -448,7 +452,7 @@ export class AssetStreamer {
                     this.tileStreamer?.getLoadedLayer?.(face, depth, x, y) ?? null,
                 textureFormats:  this.tileStreamer?.textureFormats,
                 aoConfig:        this.engineConfig?.terrainAO,
-                logDispatches:   true,
+                logDispatches:   TERRAIN_AO_CONFIG.logDispatches !== true ? false : true,
             });
             this._aoBaker.initialize();
             if (this._aoBaker.enabled) {
@@ -462,7 +466,7 @@ export class AssetStreamer {
             }
         }
 
-        if (GROUND_FIELD_BAKE_CONFIG.enabled) {
+        if (false) { //GROUND_FIELD_BAKE_CONFIG.enabled) {
             this._groundFieldBaker = new GroundFieldBaker(this.device, {
                 assetRegistry: this._assetRegistry,
                 tilePoolSize: this.tileStreamer.tilePoolSize,
@@ -470,7 +474,7 @@ export class AssetStreamer {
                 textureFormats: this.tileStreamer?.textureFormats,
                 seed: this.engineConfig.seed,
                 fieldConfig: this.engineConfig?.groundFieldBake,
-                logDispatches: true,
+                logDispatches: GROUND_FIELD_BAKE_CONFIG.logDispatches !== true ? false : true,
             });
             this._groundFieldBaker.initialize();
             if (this._groundFieldBaker.enabled) {
@@ -493,11 +497,34 @@ export class AssetStreamer {
         this._leafMaskBaker = new LeafMaskBaker(this.device);
         await this._leafMaskBaker.initialize();
 
+// ═══ Tree mid-tier systems ═══════════════════════════════════════════════
+// Validate tier ranges against near-tier's actual end.
+const tierWarnings = validateTierRanges(this._lodController.detailRange);
+for (const w of tierWarnings) Logger.warn(`${this._logTag} ${w}`);
+
+// Legacy mid-near: built but only run if the flag is set.
+this._treeMidNearSystem = new TreeMidNearSystem(this.device, this, {
+    lodController: this._lodController,
+});
+await this._treeMidNearSystem.initialize();
+if (!TREE_TIER_FLAGS.keepLegacyMidNear) {
+    this._treeMidNearSystem.setEnabled(false);
+    Logger.info(`${this._logTag} Legacy TreeMidNearSystem disabled (TREE_TIER_FLAGS.keepLegacyMidNear=false)`);
+}
+
+// New hull-only mid tier.
+if (TREE_TIER_FLAGS.useMidTier) {
+    this._treeMidSystem = new TreeMidSystem(this.device, this, {
+        lodController: this._lodController,
+    });
+    await this._treeMidSystem.initialize();
+}
+/*
         this._treeMidNearSystem = new TreeMidNearSystem(this.device, this, {
             lodController: this._lodController,
         });
         await this._treeMidNearSystem.initialize();
-
+*/
         this._branchRenderer = new BranchRenderer(this.device, this, {
             lodController:      this._lodController,
             enableBranchWind:   false,
@@ -538,6 +565,11 @@ export class AssetStreamer {
         );
         Logger.info(`${this._logTag} Legacy climate scatter disabled; using baked field/prop/tree sources`);
         this._bakedAssetTileCache?.logSummary(`${this._logTag} Bake cache`);
+    }
+
+    /** @returns {TreeDetailSystem|null} */
+    getTreeDetailSystem() {
+        return this._treeDetailSystem || null;
     }
 
     _buildScatterGroups() {
@@ -1063,6 +1095,7 @@ export class AssetStreamer {
     }
 
     dispose() {
+        this._treeMidSystem?.dispose();
         this._scatterDispatchArgsBuffer?.destroy();
         this._scatterDispatchArgsBuffer = null;
         this._scatterDispatchPipeline   = null;
@@ -1310,13 +1343,17 @@ update(commandEncoder, camera) {
         pass.end();
     }
     this._queueProducerDebugReadback(commandEncoder);
-
+/*
     if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
     if (this._treeMidNearSystem) this._treeMidNearSystem.update(commandEncoder, camera);
     if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
     if (this._leafStreamer && this.enableLeafRendering) {
         this._leafStreamer.update(commandEncoder, camera);
-    }
+    }*/
+        if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
+       // if (this._treeMidNearSystem) this._treeMidNearSystem.update(commandEncoder, camera); 
+        if (this._treeMidSystem)     this._treeMidSystem.update(commandEncoder, camera);    
+        if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
 
     this._dispatchAOBakes(commandEncoder);
 
@@ -1359,13 +1396,13 @@ _drainAOCommits() {
 }
 
 _drainScatterGroupCommits() {
-    const stagedCommits = Array.isArray(this._deferredScatterCommits)
-        ? this._deferredScatterCommits
-        : [];
-    const incomingCommits = this.tileStreamer.drainScatterCommitQueue?.() ?? [];
-    this._deferredScatterCommits = Array.isArray(incomingCommits) ? incomingCommits : [];
-
-    const commits = stagedCommits;
+    // Process commits from the current frame immediately (no 1-frame deferral).
+    // Previously this deferred one frame to avoid bind group churn, but that
+    // added a guaranteed 16 ms latency to every tile commit. The bake
+    // dispatches triggered here are enqueued, not immediately submitted, so
+    // there is no read-while-rendering hazard.
+    this._deferredScatterCommits = [];
+    const commits = this.tileStreamer.drainScatterCommitQueue?.() ?? [];
     if (!commits || commits.length === 0) return;
 
     this._bakedAssetTileCache?.applyCommitBatch(commits);
@@ -2053,11 +2090,16 @@ getGroundFieldTexture() {
             encoder.setIndexBuffer(geo.indexBuffer, 'uint16');
             encoder.drawIndexedIndirect(this._pool.indirectBuffer, this._pool.getIndirectOffset(bd.band));
         }
-
+/*
         if (this._branchRenderer)    this._branchRenderer.render(encoder);
         if (this._treeMidNearSystem) this._treeMidNearSystem.render(encoder);
         if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(encoder);
         if (this._treeDetailSystem)  this._treeDetailSystem.render(encoder, camera, viewMatrix, projectionMatrix);
+*/
+if (this._branchRenderer)    this._branchRenderer.render(encoder);
+//if (this._treeMidNearSystem) this._treeMidNearSystem.render(encoder);  
+if (this._treeMidSystem)     this._treeMidSystem.render(encoder);    
+if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(encoder);
 
         const lodTest = this._treeDetailSystem?.getLeafLODTestSuite();
         if (lodTest?.isLocked()) lodTest.renderOverlay(encoder);

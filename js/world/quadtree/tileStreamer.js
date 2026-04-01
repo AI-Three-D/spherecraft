@@ -30,10 +30,12 @@ class FeedbackDedupeSet {
     }
 
     _hash(keyLo, keyHi) {
-        const h = (Math.imul(keyLo, 1664525) + Math.imul(keyHi, 1013904223)) >>> 0;
+        // XOR-fold so high-16 fields (y, face) reach low bits before the multiply
+        const kl = (keyLo ^ (keyLo >>> 16)) >>> 0;
+        const kh = (keyHi ^ (keyHi >>> 16)) >>> 0;
+        const h = (Math.imul(kl, 0x9E3779B1) ^ Math.imul(kh, 0x85EBCA77)) >>> 0;
         return h & this.mask;
     }
-
     /** Returns true if the key was newly inserted, false if it already existed. */
     insert(face, depth, x, y) {
         const keyLo = (x & 0xFFFF) | ((y & 0xFFFF) << 16);
@@ -89,6 +91,43 @@ import {
 import { Logger } from '../../config/Logger.js';
 
 const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
+const REQUEST_LATENCY_BUCKET_LIMITS_MS = [50, 100, 200, 500, 1000, Infinity];
+const REQUEST_LATENCY_BUCKET_LABELS = ['<50', '50-100', '100-200', '200-500', '500-1000', '1000+'];
+
+function createRequestLatencyWindow() {
+    return {
+        total: 0,
+        maxMs: 0,
+        buckets: REQUEST_LATENCY_BUCKET_LABELS.map(() => 0)
+    };
+}
+
+function createStaleStartWindow() {
+    return {
+        started: 0,
+        stale: 0,
+        visible: 0,
+        ancestor: 0,
+        unknown: 0
+    };
+}
+
+function createFeedbackWindow() {
+    return {
+        readbacks: 0,
+        raw: 0,
+        unique: 0
+    };
+}
+
+function formatRequestLatencyWindow(window) {
+    if (!window || window.total <= 0) {
+        return 'none';
+    }
+    return REQUEST_LATENCY_BUCKET_LABELS
+        .map((label, index) => `${label}:${window.buckets[index]}`)
+        .join(' ');
+}
 
 function nextPow2(value) {
     let v = Math.max(1, Math.floor(value));
@@ -361,7 +400,10 @@ class TileHashTable {
     } 
 
     hash(keyLo, keyHi) {
-        const h = (Math.imul(keyLo, 1664525) + Math.imul(keyHi, 1013904223)) >>> 0;
+        // XOR-fold so high-16 fields (y, face) reach low bits before the multiply
+        const kl = (keyLo ^ (keyLo >>> 16)) >>> 0;
+        const kh = (keyHi ^ (keyHi >>> 16)) >>> 0;
+        const h = (Math.imul(kl, 0x9E3779B1) ^ Math.imul(kh, 0x85EBCA77)) >>> 0;
         return h & this.mask;
     }
 
@@ -394,7 +436,7 @@ class TileHashTable {
         return -1;
     }
 
-    remove(keyLo, keyHi) {
+    remove(keyLo, keyHi, touchedSlots = null) {
         const slot = this.findSlot(keyLo, keyHi);
         if (slot < 0) return -1;
 
@@ -403,6 +445,7 @@ class TileHashTable {
         this.entries[emptyBase + 1] = 0xFFFFFFFF;
         this.entries[emptyBase + 2] = 0xFFFFFFFF;
         this.entries[emptyBase + 3] = 0xFFFFFFFF;
+        if (touchedSlots) touchedSlots.push(slot);
 
         // Rehash the cluster that follows
         let idx = (slot + 1) & this.mask;
@@ -416,7 +459,9 @@ class TileHashTable {
             this.entries[base + 1] = 0xFFFFFFFF;
             this.entries[base + 2] = 0xFFFFFFFF;
             this.entries[base + 3] = 0xFFFFFFFF;
-            this.insert(lo, hi, layer);
+            if (touchedSlots) touchedSlots.push(idx);
+            const newSlot = this.insert(lo, hi, layer);
+            if (touchedSlots && newSlot >= 0) touchedSlots.push(newSlot);
             idx = (idx + 1) & this.mask;
         }
 
@@ -429,6 +474,9 @@ class TileHashTable {
 export class TileStreamer {
 
     constructor(device, terrainGenerator, quadtreeGPU, options = {}) {
+        this._gpuBackpressureLimit = options.gpuBackpressureLimit ?? 4;
+        this._gpuBackpressureSkipCount = 0;
+        this._tilesStartedWindowCount = 0;
         this.device = device;
         this._aoCommitQueue = [];
         this._scatterCommitQueue = [];
@@ -450,6 +498,8 @@ export class TileStreamer {
         this.tileHashCapacity  = options.tileHashCapacity  ?? (this.tilePoolSize * 2);
         this.maxFeedback       = options.maxFeedback       ?? 4096;
         this.queueConfig       = options.queueConfig       ?? {};
+        this._logStatsEnabled  = options.logStats === true;
+        this._debugReadbacksEnabled = this._logStatsEnabled;
 
         const maxLayers = this.device.limits?.maxTextureArrayLayers ?? this.tilePoolSize;
         let layerSetBytes = 0;
@@ -494,6 +544,10 @@ export class TileStreamer {
 
 
         this._feedbackDedupeSet = null;  // Created in initialize()
+        this._requestFreshness = new Map();
+        this._freshnessSkipThresholdMs = 200;
+        this._freshnessMinDepth = 5;
+
 
         this._pendingDestructions   = [];
         this._destructionDelayFrames = 3;
@@ -507,15 +561,40 @@ export class TileStreamer {
         this._debugCopyVerifyCaptureCount = 0;
         this._debugVisibleCopyLogCount = 0;
         this._lastCopyVisibilitySummary = null;
-
         this._generationQueue = new AsyncGenerationQueue({
             maxInFlight:     options.queueConfig?.maxConcurrentTasks  ?? 12,
             maxPerFrame:     options.queueConfig?.maxStartsPerFrame   ?? 6,
             timeBudgetMs:    options.queueConfig?.timeBudgetMs        ?? 6,
             maxQueueSize:    options.queueConfig?.maxQueueSize        ?? 2048,
-            minStartIntervalMs: options.queueConfig?.minStartIntervalMs ?? 0
+            minStartIntervalMs: options.queueConfig?.minStartIntervalMs ?? 0,
+            shouldDrop: (entry) => {
+                // Never drop coarse tiles — they serve as fallbacks
+                // Parse depth from key format "f{face}:d{depth}:{x},{y}"
+                const dIdx = entry.key.indexOf(':d');
+                if (dIdx >= 0) {
+                    const colonAfterD = entry.key.indexOf(':', dIdx + 2);
+                    const depth = parseInt(entry.key.substring(dIdx + 2, colonAfterD > 0 ? colonAfterD : undefined), 10);
+                    if (Number.isFinite(depth) && depth < this._freshnessMinDepth) {
+                        return false;
+                    }
+                }
+                const lastSeen = this._requestFreshness.get(entry.key);
+                if (!Number.isFinite(lastSeen)) {
+                    // Never appeared in feedback — was queued by seed or parent-walk.
+                    // Keep it if it's young enough (just queued).
+                    return (performance.now() - entry.enqueuedAt) > this._freshnessSkipThresholdMs;
+                }
+                return (performance.now() - lastSeen) > this._freshnessSkipThresholdMs;
+            }
         });
         this._generationEpoch = 0;
+        this._requestTimestamps = new Map();
+        this._requestLatencyWindow = createRequestLatencyWindow();
+        this._staleStartWindow = createStaleStartWindow();
+        this._feedbackWindow = createFeedbackWindow();
+        this._commitWindowCount = 0;
+        this._queueRejectWindowCount = 0;
+        this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
     }
     /**
  * Register an externally-owned array texture to be returned alongside the
@@ -557,9 +636,14 @@ drainScatterCommitQueue() {
             this.device, this.tileTextureSize, this.tilePoolSize,
             this.requiredTypes, this.textureFormats
         );
+        this._recordPoolHeadroom();
 
         if (this.enableTileCacheBridge) {
-            this.tileCache = new TileCache({ maxBytes: Number.MAX_SAFE_INTEGER, requiredTypes: this.requiredTypes });
+            this.tileCache = new TileCache({
+                maxBytes: Number.MAX_SAFE_INTEGER,
+                requiredTypes: this.requiredTypes,
+                logStats: this._logStatsEnabled
+            });
         }
 
         this.hashTable = new TileHashTable(
@@ -572,7 +656,8 @@ drainScatterCommitQueue() {
             textureSize:    this.tileTextureSize,
             requiredTypes:  this.requiredTypes,
             textureFormats: this.textureFormats,
-            enableSplat:    this.enableSplat
+            enableSplat:    this.enableSplat,
+            logStats:       this._logStatsEnabled
         });
 
         this._seedRootTiles();
@@ -633,6 +718,8 @@ drainScatterCommitQueue() {
     }
 
     resetTiles({ reseedRootTiles = true } = {}) {
+        this._requestFreshness.clear();
+this._freshnessSkipCount = 0;
         this._generationEpoch++;
         this._generationQueue.clearPending?.(null);
 
@@ -663,6 +750,13 @@ drainScatterCommitQueue() {
         this._recentlyExitedKeys?.clear?.();
         this._recentEvictions?.clear?.();
         this._feedbackDedupeSet?.clear?.();
+        this._requestTimestamps.clear();
+        this._requestLatencyWindow = createRequestLatencyWindow();
+        this._staleStartWindow = createStaleStartWindow();
+        this._feedbackWindow = createFeedbackWindow();
+        this._commitWindowCount = 0;
+        this._queueRejectWindowCount = 0;
+        this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
 
         if (this.hashTable) {
             this.hashTable.clear();
@@ -670,6 +764,8 @@ drainScatterCommitQueue() {
             this._needsFullHashUpload = false;
             this._uploadFullHashTable();
         }
+
+        this._recordPoolHeadroom();
 
         if (reseedRootTiles) {
             this._seedRootTiles();
@@ -680,6 +776,15 @@ drainScatterCommitQueue() {
     tickFlush() {
         if (!this._evictFeedbackFrame) this._evictFeedbackFrame = 0;
         this._evictFeedbackFrame++;
+        if (!this._requestFreshness) this._requestFreshness = new Map();
+
+        if (this._requestFreshness.size > 2048) {
+            const cutoff = performance.now() - 2000;
+            for (const [k, t] of this._requestFreshness) {
+                if (t < cutoff) this._requestFreshness.delete(k);
+            }
+        }
+
         if (this._evictFeedbackFrame % 300 === 0 && this._evictFeedbackStats?.count > 0) {
             const s = this._evictFeedbackStats;
             Logger.warn(
@@ -772,9 +877,11 @@ drainScatterCommitQueue() {
                 const batchId = ++this._debugCopyBatchId;
                 this._debugMarkSubmittedCopies(flushedCopies, batchId);
                 copyFencePromise = this.device.queue.onSubmittedWorkDone()
-                    .then(async () => {
+                    .then(() => {
                         this._debugMarkReadyCopies(flushedCopies, batchId);
-                        await this._debugVerifyCopiedLayers(flushedCopies, batchId);
+                        if (this._debugReadbacksEnabled) {
+                            return this._debugVerifyCopiedLayers(flushedCopies, batchId);
+                        }
                     })
                     .catch(() => {
                         this._debugMarkFailedCopies(flushedCopies, batchId);
@@ -822,10 +929,29 @@ drainScatterCommitQueue() {
             }
         }
     }
-
-    /** Start new tile generation tasks from the queue. */
     tickGeneration() {
-        this._generationQueue.tick();
+        // Bound outstanding GPU generation work. Each tile is ~9 ms GPU;
+        // without this, movement bursts push the command queue 30+ frames
+        // deep and latency spirals to 500+ ms. Budget is the headroom
+        // between the limit and the current in-flight fence count.
+        const gpuInFlight = this.tileGenerator?._gpuFencesInFlight ?? 0;
+        const budget = Math.max(0, this._gpuBackpressureLimit - gpuInFlight);
+
+        if (budget === 0) {
+            this._gpuBackpressureSkipCount++;
+            this.tileGenerator?.tick?.();
+            return;
+        }
+
+        // Cap this frame's starts at min(configured max, GPU budget).
+        // maxPerFrame is restored immediately so config inspection
+        // elsewhere still sees the real value.
+        const savedMaxPerFrame = this._generationQueue.maxPerFrame;
+        this._generationQueue.maxPerFrame = Math.min(savedMaxPerFrame, budget);
+        const spawned = this._generationQueue.tick() || 0;
+        this._generationQueue.maxPerFrame = savedMaxPerFrame;
+
+        this._tilesStartedWindowCount += spawned;
         this.tileGenerator?.tick?.();
     }
 
@@ -899,19 +1025,26 @@ drainScatterCommitQueue() {
                 const base = i * 4;
                 this._feedbackDedupeSet.insert(data[base], data[base + 1], data[base + 2], data[base + 3]);
             }
+            this._feedbackWindow.readbacks++;
+            this._feedbackWindow.raw += count;
+            this._feedbackWindow.unique += this._feedbackDedupeSet.count;
 
             slot.feedbackStaging.unmap();
             slot.state = 'idle';
 
             // Process unique tiles (no string allocation)
             this._feedbackDedupeSet.forEach((face, depth, x, y) => {
+                const key = this._makeKey(face, depth, x, y);
+                
+                // Update freshness regardless of whether tile is loaded/generating
+                this._requestFreshness.set(key, performance.now());
+                
                 const keyLo = this.hashTable.makeKeyLo(x, y);
                 const keyHi = this.hashTable.makeKeyHi(face, depth);
                 const slot = this.hashTable.findSlot(keyLo, keyHi);
-                if (slot >= 0) return; // Already loaded
+                if (slot >= 0) return;
             
-                // NEW: Check if this requested tile was recently evicted
-                const key = this._makeKey(face, depth, x, y);
+
                 if (this._recentEvictions?.has(key)) {
                     const evInfo = this._recentEvictions.get(key);
                     const ageMs = performance.now() - evInfo.evictedAt;
@@ -975,27 +1108,26 @@ drainScatterCommitQueue() {
             slot.state = 'idle';
         }
     }
-
     _queueMissingParentsNumeric() {
-        // Iterate the dedupe set and queue parents up to depth 3
         this._feedbackDedupeSet.forEach((face, depth, x, y) => {
             let d = depth;
             let px = x;
             let py = y;
-
+    
             while (d > 3) {
                 d--;
                 px >>>= 1;
                 py >>>= 1;
-
-                // Check if parent is already loaded (numeric lookup)
+    
+                // Refresh parent freshness (child demand implies parent demand)
+                this._requestFreshness.set(this._makeKey(face, d, px, py), performance.now());
+    
                 const keyLo = this.hashTable.makeKeyLo(px, py);
                 const keyHi = this.hashTable.makeKeyHi(face, d);
                 if (this.hashTable.findSlot(keyLo, keyHi) >= 0) break;
-
-                // Check if already in dedupe set (avoid re-queueing)
+    
                 if (!this._feedbackDedupeSet.insert(face, d, px, py)) break;
-
+    
                 const addr = new TileAddress(face, d, px, py);
                 if (!this.tileGenerator.isGenerating(addr)) {
                     this._queueTile(addr);
@@ -1003,22 +1135,69 @@ drainScatterCommitQueue() {
             }
         });
     }
-    // ── Tile lifecycle ──────────────────────────────────────────────────────
 
     _queueTile(tileAddr) {
         const key = tileAddr.toString();
+        if (!this._requestTimestamps.has(key)) {
+            this._requestTimestamps.set(key, performance.now());
+        }
+        
+        // Depth component: coarser = higher base priority (fallback safety)
         const depthPriority = 100000 - tileAddr.depth * 500;
+        
+        // Camera-distance component: approximate screen importance
+        // Tiles nearer to camera get priority boost up to 5000
+        let distanceBias = 0;
+        if (this._lastVisibleTilesList && this._lastVisibleKeySet?.has(key)) {
+            distanceBias = 3000; // Currently visible = high priority
+        } else if (this._requestFreshness.has(key)) {
+            // Recently in feedback = moderate priority
+            const age = performance.now() - this._requestFreshness.get(key);
+            distanceBias = Math.max(0, 2000 - age * 10); // decays over 200ms
+        }
+        
+        const priority = depthPriority + distanceBias;
+        
         const generationEpoch = this._generationEpoch;
-        this._generationQueue.request(key, depthPriority, async () => {
-            const textures = await this.tileGenerator.generateTile(tileAddr);
-            if (generationEpoch !== this._generationEpoch) {
-                this._destroyGeneratedTextures(textures);
-                return false;
+        const request = this._generationQueue.request(key, priority, async () => {
+    
+            const demandState = this._describeTileDemandState(tileAddr, key);
+            this._staleStartWindow.started++;
+            if (!demandState.relevant) {
+                this._staleStartWindow.stale++;
+            } else if (demandState.reason === 'visible') {
+                this._staleStartWindow.visible++;
+            } else if (demandState.reason === 'ancestor') {
+                this._staleStartWindow.ancestor++;
+            } else {
+                this._staleStartWindow.unknown++;
             }
-            await this._commitTile(tileAddr, textures);
-            return true;
+         
+
+            try {
+                const textures = await this.tileGenerator.generateTile(tileAddr);
+                if (generationEpoch !== this._generationEpoch) {
+                    this._requestTimestamps.delete(key);
+                    this._destroyGeneratedTextures(textures);
+                    return false;
+                }
+                const committed = await this._commitTile(tileAddr, textures);
+                if (!committed) {
+                    this._requestTimestamps.delete(key);
+                }
+                
+                return committed;
+            } catch (error) {
+                this._requestTimestamps.delete(key);
+                throw error;
+            }
         });
+        if (request === null) {
+            this._queueRejectWindowCount++;
+            this._requestTimestamps.delete(key);
+        }
     }
+
 
  // In _evictTile(), add age and visibility logging:
 _evictTile(key) {
@@ -1164,36 +1343,47 @@ _evictTile(key) {
             );
         }
     
-        const slot = this.hashTable.remove(info.keyLo, info.keyHi);
-        if (slot >= 0) {
-            this._needsFullHashUpload = true;
+        const touchedSlots = [];
+        this.hashTable.remove(info.keyLo, info.keyHi, touchedSlots);
+        for (const s of touchedSlots) {
+            this._dirtySlots.add(s);
         }
+
     
         this._tileInfo.delete(key);
         this._layerToKey.delete(info.layer);
         this._debugCopyStateByLayer.delete(info.layer);
         this.arrayPool.releaseLayer(info.layer);
+        this._recordPoolHeadroom();
     }
 
 
 async _commitTile(tileAddr, textures) {
-    if (!this.arrayPool) { this._destroyGeneratedTextures(textures); return; }
+    if (!this.arrayPool) {
+        this._destroyGeneratedTextures(textures);
+        return false;
+    }
 
     const key = tileAddr.toString();
-    if (this._tileInfo.has(key)) { this._destroyGeneratedTextures(textures); return; }
+    if (this._tileInfo.has(key)) {
+        this._destroyGeneratedTextures(textures);
+        return false;
+    }
 
     let layer = this.arrayPool.allocateLayer();
+    this._recordPoolHeadroom();
     if (layer === null) {
         const evictedKey = this._selectEvictionCandidate();
         if (evictedKey) {
             this._evictTile(evictedKey);
             layer = this.arrayPool.allocateLayer();
+            this._recordPoolHeadroom();
         }
     }
     if (layer === null) {
         Logger.warn('[TileStreamer] Pool full, cannot allocate layer');
         this._destroyGeneratedTextures(textures);
-        return;
+        return false;
     }
 
     this.arrayPool.queueCopyToLayer(textures, layer);
@@ -1207,11 +1397,19 @@ async _commitTile(tileAddr, textures) {
         Logger.warn('[TileStreamer] Hash insert failed');
         this._debugCopyStateByLayer.delete(layer);
         this.arrayPool.releaseLayer(layer);
-        return;
+        this._recordPoolHeadroom();
+        return false;
     }
 
     this._tileInfo.set(key, {
-        layer, depth: tileAddr.depth, keyLo, keyHi, slot,
+        layer,
+        face: tileAddr.face,
+        depth: tileAddr.depth,
+        x: tileAddr.x,
+        y: tileAddr.y,
+        keyLo,
+        keyHi,
+        slot,
         lastUsed: performance.now()
     });
     this._layerToKey.set(layer, key);
@@ -1223,9 +1421,12 @@ async _commitTile(tileAddr, textures) {
     this._commitLagStats.commits++;
     if (!this._commitsSinceLastFlush) this._commitsSinceLastFlush = 0;
     this._commitsSinceLastFlush++;
+    this._commitWindowCount++;
+    const requestedAt = this._requestTimestamps.get(key);
+    if (Number.isFinite(requestedAt)) {
+        this._recordRequestLatency(key, performance.now() - requestedAt);
+    }
 
-    // Push BEFORE the tile-cache bridge so even if the bridge throws,
-    // the AO queue is consistent with what actually made it into the pool.
     this._aoCommitQueue.push({
         face: tileAddr.face, depth: tileAddr.depth,
         x: tileAddr.x, y: tileAddr.y, layer,
@@ -1243,6 +1444,8 @@ async _commitTile(tileAddr, textures) {
             }
         }
     }
+    this._requestFreshness.delete(key);
+    return true;
 }
 
     _selectEvictionCandidate() {
@@ -1574,6 +1777,132 @@ markTilesVisible(tiles) {
 
     _makeKey(face, depth, x, y) {
         return `f${face}:d${depth}:${x},${y}`;
+    }
+
+    _recordPoolHeadroom() {
+        const freeLayers = this.arrayPool?.freeLayers?.length;
+        if (Number.isFinite(freeLayers)) {
+            this._minFreeLayersSinceLog = Math.min(this._minFreeLayersSinceLog, freeLayers);
+        }
+    }
+
+    _recordRequestLatency(key, latencyMs) {
+        const requestedAt = this._requestTimestamps.get(key);
+        if (!Number.isFinite(requestedAt) || !Number.isFinite(latencyMs)) {
+            this._requestTimestamps.delete(key);
+            return;
+        }
+
+        const window = this._requestLatencyWindow;
+        window.total++;
+        window.maxMs = Math.max(window.maxMs, latencyMs);
+        let bucketIndex = REQUEST_LATENCY_BUCKET_LIMITS_MS.length - 1;
+        for (let i = 0; i < REQUEST_LATENCY_BUCKET_LIMITS_MS.length; i++) {
+            if (latencyMs < REQUEST_LATENCY_BUCKET_LIMITS_MS[i]) {
+                bucketIndex = i;
+                break;
+            }
+        }
+        window.buckets[bucketIndex]++;
+        this._requestTimestamps.delete(key);
+    }
+
+    _describeTileDemandState(tileAddr, key = tileAddr?.toString?.()) {
+        if (!tileAddr || !this._lastVisibleKeySet || !this._lastVisibleTilesList) {
+            return { relevant: true, reason: 'unknown' };
+        }
+
+        if (key && this._lastVisibleKeySet.has(key)) {
+            return { relevant: true, reason: 'visible' };
+        }
+
+        for (const visibleTile of this._lastVisibleTilesList) {
+            if (!visibleTile || visibleTile.face !== tileAddr.face || visibleTile.depth < tileAddr.depth) {
+                continue;
+            }
+
+            let depth = visibleTile.depth;
+            let x = visibleTile.x;
+            let y = visibleTile.y;
+            while (depth > tileAddr.depth) {
+                depth--;
+                x >>= 1;
+                y >>= 1;
+            }
+
+            if (depth === tileAddr.depth && x === tileAddr.x && y === tileAddr.y) {
+                return { relevant: true, reason: 'ancestor' };
+            }
+        }
+        let d = tileAddr.depth;
+        let px = tileAddr.x;
+        let py = tileAddr.y;
+        while (d > 0) {
+            d--;
+            px >>= 1;
+            py >>= 1;
+            if (this._lastVisibleKeySet.has(this._makeKey(tileAddr.face, d, px, py))) {
+                return { relevant: true, reason: 'descendant' };
+            }
+        }
+        
+        return { relevant: false, reason: 'stale' };
+    }
+
+    consumePressureWindow() {
+        const minFreeLayers = Number.isFinite(this._minFreeLayersSinceLog)
+            ? this._minFreeLayersSinceLog
+            : (this.arrayPool?.freeLayers?.length ?? null);
+        const requestLatency = {
+            total: this._requestLatencyWindow.total,
+            maxMs: this._requestLatencyWindow.maxMs,
+            buckets: [...this._requestLatencyWindow.buckets],
+            labels: [...REQUEST_LATENCY_BUCKET_LABELS],
+            summary: formatRequestLatencyWindow(this._requestLatencyWindow)
+        };
+        const staleStarts = { ...this._staleStartWindow };
+        const feedback = { ...this._feedbackWindow };
+        const commits = this._commitWindowCount;
+        const queueRejected = this._queueRejectWindowCount;
+ 
+        const queueDropped = this._generationQueue.consumeDroppedCount();
+
+        this._requestLatencyWindow = createRequestLatencyWindow();
+        this._staleStartWindow = createStaleStartWindow();
+        this._feedbackWindow = createFeedbackWindow();
+        this._commitWindowCount = 0;
+        this._queueRejectWindowCount = 0;
+        this._freshnessSkipCount = 0;
+        this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
+        this._recordPoolHeadroom();
+
+        const gpuBackpressureSkips = this._gpuBackpressureSkipCount;
+        const tilesStarted = this._tilesStartedWindowCount;
+        const gpuFencesMax = this.tileGenerator?.consumeMaxGpuFences?.() ?? 0;
+
+        this._requestLatencyWindow = createRequestLatencyWindow();
+        this._staleStartWindow = createStaleStartWindow();
+        this._feedbackWindow = createFeedbackWindow();
+        this._commitWindowCount = 0;
+        this._queueRejectWindowCount = 0;
+        this._freshnessSkipCount = 0;
+        this._gpuBackpressureSkipCount = 0;
+        this._tilesStartedWindowCount = 0;
+        this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
+        this._recordPoolHeadroom();
+
+        return {
+            requestLatency,
+            staleStarts,
+            feedback,
+            commits,
+            queueRejected,
+            queueDropped,
+            minFreeLayers,
+            gpuBackpressureSkips,
+            tilesStarted,
+            gpuFencesMax
+        };
     }
 
     getLoadedLayer(face, depth, x, y) {
@@ -1910,8 +2239,9 @@ markTilesVisible(tiles) {
     }
 
     _debugRegisterQueuedCopy(tileAddr, layer, textures) {
+        return;
         const types = Object.keys(textures || {}).filter((type) => textures[type]?._gpuTexture?.texture);
-        const captureSources = this._debugCopyVerifyCaptureCount < 4;
+        const captureSources = this._debugReadbacksEnabled && this._debugCopyVerifyCaptureCount < 4;
         if (captureSources) {
             this._debugCopyVerifyCaptureCount++;
         }
@@ -1932,7 +2262,7 @@ markTilesVisible(tiles) {
             sourceTextures: captureSources ? { ...textures } : null
         });
 
-        if (this._debugCopyQueueLogCount < 12) {
+        if (this._logStatsEnabled && this._debugCopyQueueLogCount < 12) {
             this._debugCopyQueueLogCount++;
             Logger.info(
                 `${TERRAIN_STEP_LOG_TAG} [QTCommit] queued key=${tileAddr.toString()} layer=${layer} ` +
@@ -1953,7 +2283,7 @@ markTilesVisible(tiles) {
             layerParts.push(`L${copy.layer}:${state.key}`);
         }
 
-        if (this._debugCopyFlushLogCount < 10) {
+        if (this._logStatsEnabled && this._debugCopyFlushLogCount < 10) {
             this._debugCopyFlushLogCount++;
             Logger.info(
                 `${TERRAIN_STEP_LOG_TAG} [QTCommit] flush batch=${batchId} copies=${flushedCopies.length} ` +
@@ -1975,7 +2305,7 @@ markTilesVisible(tiles) {
             readyParts.push(`L${copy.layer}:${state.copyLatencyMs.toFixed(1)}ms`);
         }
 
-        if (this._debugCopyReadyLogCount < 10) {
+        if (this._logStatsEnabled && this._debugCopyReadyLogCount < 10) {
             this._debugCopyReadyLogCount++;
             Logger.info(
                 `${TERRAIN_STEP_LOG_TAG} [QTCommit] ready batch=${batchId} copies=${flushedCopies.length} ` +
@@ -1997,6 +2327,9 @@ markTilesVisible(tiles) {
     }
 
     async _debugVerifyCopiedLayers(flushedCopies, batchId) {
+        if (!this._debugReadbacksEnabled) {
+            return;
+        }
         if (this._debugCopyVerifyLogCount >= 4) {
             return;
         }

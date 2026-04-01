@@ -97,6 +97,45 @@ export class EngineConfig {
       updateIntervalMs: requireInt(ui.updateIntervalMs, 'ui.updateIntervalMs', 1)
     };
 
+    const player = requireObject(options.player ?? {}, 'player');
+    this.player = {
+      baseMoveSpeed: requireNumber(player.baseMoveSpeed ?? 4.0, 'player.baseMoveSpeed'),
+      sprintMultiplier: requireNumber(player.sprintMultiplier ?? 1.75, 'player.sprintMultiplier'),
+      staminaMax: requireNumber(player.staminaMax ?? 100, 'player.staminaMax'),
+      staminaRegenPerSec: requireNumber(player.staminaRegenPerSec ?? 6, 'player.staminaRegenPerSec'),
+      staminaSprintDrainPerSec: requireNumber(player.staminaSprintDrainPerSec ?? 18, 'player.staminaSprintDrainPerSec'),
+      staminaTemperaturePenaltyMax: requireNumber(
+        player.staminaTemperaturePenaltyMax ?? 3.25,
+        'player.staminaTemperaturePenaltyMax'
+      ),
+      sprintResumeThreshold: requireNumber(player.sprintResumeThreshold ?? 12, 'player.sprintResumeThreshold'),
+      hungerMax: requireNumber(player.hungerMax ?? 100, 'player.hungerMax'),
+      hungerDrainPerSec: requireNumber(player.hungerDrainPerSec ?? 0.2, 'player.hungerDrainPerSec'),
+      temperatureMin: requireNumber(player.temperatureMin ?? 0, 'player.temperatureMin'),
+      temperatureMax: requireNumber(player.temperatureMax ?? 100, 'player.temperatureMax'),
+      temperatureNeutral: requireNumber(player.temperatureNeutral ?? 50, 'player.temperatureNeutral'),
+      temperatureRecoverPerSec: requireNumber(
+        player.temperatureRecoverPerSec ?? 1.0,
+        'player.temperatureRecoverPerSec'
+      ),
+      temperatureColdWarn: requireNumber(player.temperatureColdWarn ?? 35, 'player.temperatureColdWarn'),
+      temperatureColdDanger: requireNumber(player.temperatureColdDanger ?? 20, 'player.temperatureColdDanger'),
+      temperatureHotWarn: requireNumber(player.temperatureHotWarn ?? 65, 'player.temperatureHotWarn'),
+      temperatureHotDanger: requireNumber(player.temperatureHotDanger ?? 80, 'player.temperatureHotDanger'),
+      exhaustedAnimationSpeed: requireNumber(
+        player.exhaustedAnimationSpeed ?? 1.0,
+        'player.exhaustedAnimationSpeed'
+      ),
+      exhaustedFallbackDurationSec: requireNumber(
+        player.exhaustedFallbackDurationSec ?? 1.6,
+        'player.exhaustedFallbackDurationSec'
+      ),
+      exhaustedRegenMultiplier: requireNumber(
+        player.exhaustedRegenMultiplier ?? 2.5,
+        'player.exhaustedRegenMultiplier'
+      )
+    };
+
     // ==================== CAMERA ====================
     const camera = requireObject(options.camera, 'camera');
     this.camera = {
@@ -108,6 +147,40 @@ export class EngineConfig {
       lookAtSmoothing: requireNumber(camera.lookAtSmoothing, 'camera.lookAtSmoothing'),
       lookAheadDistance: requireNumber(camera.lookAheadDistance, 'camera.lookAheadDistance'),
       lookAheadHeight: requireNumber(camera.lookAheadHeight, 'camera.lookAheadHeight'),
+      characterFollow: (() => {
+        const follow = camera.characterFollow || {};
+        return {
+          followHeight: requireNumber(follow.followHeight ?? 6, 'camera.characterFollow.followHeight'),
+          followDistance: requireNumber(follow.followDistance ?? 5, 'camera.characterFollow.followDistance'),
+          walkFollowPitchDeg: requireNumber(follow.walkFollowPitchDeg ?? 30, 'camera.characterFollow.walkFollowPitchDeg'),
+          walkPitchApproachSpeed: requireNumber(
+            follow.walkPitchApproachSpeed ?? 0.8,
+            'camera.characterFollow.walkPitchApproachSpeed'
+          ),
+          stopPitchApproachSpeed: requireNumber(
+            follow.stopPitchApproachSpeed ?? 0.4,
+            'camera.characterFollow.stopPitchApproachSpeed'
+          ),
+          stopPitchReturnFraction: requireNumber(
+            follow.stopPitchReturnFraction ?? 0.2,
+            'camera.characterFollow.stopPitchReturnFraction'
+          ),
+          snapBackOnRelease: requireBool(
+            follow.snapBackOnRelease ?? true,
+            'camera.characterFollow.snapBackOnRelease'
+          ),
+          snapBackSpeed: requireNumber(follow.snapBackSpeed ?? 3.0, 'camera.characterFollow.snapBackSpeed'),
+          orbitSensitivity: requireNumber(
+            follow.orbitSensitivity ?? 0.005,
+            'camera.characterFollow.orbitSensitivity'
+          ),
+          smoothing: requireNumber(follow.smoothing ?? 8.0, 'camera.characterFollow.smoothing'),
+          maxTotalPitchDeg: requireNumber(
+            follow.maxTotalPitchDeg ?? 75,
+            'camera.characterFollow.maxTotalPitchDeg'
+          )
+        };
+      })(),
       dynamicFarPlane: (() => {
         const dyn = camera.dynamicFarPlane || {};
         return {
@@ -218,6 +291,10 @@ export class EngineConfig {
         gpuQuadtree.diagnosticSnapshotIntervalFrames ?? 0,
         'gpuQuadtree.diagnosticSnapshotIntervalFrames',
         0
+      ),
+      logStats: requireBool(
+        gpuQuadtree.logStats ?? false,
+        'gpuQuadtree.logStats'
       ),
       diagnosticsSampleInstances: requireInt(
         gpuQuadtree.diagnosticsSampleInstances ?? 64,

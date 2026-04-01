@@ -207,6 +207,7 @@ this._instanceStageBytes = 0;
         this._lastVisibleCount  = 0;
         this._frameCount        = 0;
         this._logInterval       = 120;
+        this._logStatsEnabled   = config.logStats === true;
         this._debugReadPending  = false;
 
         // ── Visible table epoch (avoids per-frame GPU clear) ────────────
@@ -1069,6 +1070,7 @@ _logTraversalSeeds(seeds, tag = "QT-Seeds") {
 
     tick() {
         if (!this._initialized) return;
+        if (!this._logStatsEnabled) return;
         if (this._frameCount % this._logInterval === 0 && this._frameCount > 0) {
             this._logStats();
         }
