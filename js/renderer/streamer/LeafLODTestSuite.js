@@ -52,6 +52,7 @@ export class LeafLODTestSuite {
         // CPU-side cache (updated from GPU readback while locked)
         this._lockedCurrentBand = -1;
         this._lockedTreeFound   = false;
+        this._requestSummaryReset = new Uint32Array(4);
 
         // ── Buffers ──────────────────────────────────────────────────
         this._lockedTreeBuffer  = null; // locked tree seed+position
@@ -65,6 +66,7 @@ export class LeafLODTestSuite {
         this._overlayLeafBuffer    = null;
         this._overlayCounterBuffer = null;
         this._overlayDrawArgsBuffer = null;
+        this._requestSummaryBuffer = null;
 
         // Diagnostic leaf rendering
         this._refLeafBuffer       = null;
@@ -156,6 +158,7 @@ export class LeafLODTestSuite {
         d(this._overlayStatusBuffer); d(this._overlayStatusReadbackBuffer);
         d(this._overlayLeafBuffer); d(this._overlayCounterBuffer);
         d(this._overlayDrawArgsBuffer);
+        d(this._requestSummaryBuffer);
         d(this._refLeafBuffer); d(this._testLeafBuffer);
         d(this._refCounterBuffer); d(this._testCounterBuffer);
         d(this._refDrawArgsBuffer); d(this._testDrawArgsBuffer);
@@ -198,6 +201,8 @@ export class LeafLODTestSuite {
         this._overlayLeafBuffer    = mkBuf('LODTest-OvLeaves',  leafBytes, STG|VTX|CPY);
         this._overlayCounterBuffer = mkBuf('LODTest-OvCounter', 256, STG|CPY|CPYS);
         this._overlayDrawArgsBuffer= mkBuf('LODTest-OvDrawArgs',256, STG|IND|CPY);
+        this._requestSummaryBuffer = mkBuf('LODTest-RequestSummary', 256, STG|CPY);
+        g.queue.writeBuffer(this._requestSummaryBuffer, 0, this._requestSummaryReset);
 
         this._refLeafBuffer     = mkBuf('LODTest-RefLeaves',  leafBytes, STG|VTX|CPY);
         this._testLeafBuffer    = mkBuf('LODTest-TestLeaves', leafBytes, STG|VTX|CPY);
@@ -373,6 +378,7 @@ fn main(){
                 {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},
                 {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
                 {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
+                {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},
             ]});
         this._scatterPipeline = this.device.createComputePipeline({label:'LODTest-Scatter',
             layout:this.device.createPipelineLayout({bindGroupLayouts:[this._scatterBGL]}),
@@ -600,6 +606,7 @@ const CONNECTOR_COLOR:vec3<f32>=vec3<f32>(0.14,0.09,0.05);
                 {binding:4,resource:{buffer:ctrBuf}},
                 {binding:5,resource:{buffer:ab}},
                 {binding:6,resource:{buffer:tib}},
+                {binding:7,resource:{buffer:this._requestSummaryBuffer}},
             ]});
         this._overlayScatterBG = mk(this._overlayTreeBuffer,this._overlayLeafBuffer,
             this._overlayCounterBuffer,'LODTest-OvScatterBG');

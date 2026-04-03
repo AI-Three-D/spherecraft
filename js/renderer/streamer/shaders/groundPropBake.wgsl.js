@@ -133,24 +133,59 @@ fn getCubePoint(face: u32, u: f32, v: f32) -> vec3<f32> {
     }
 }
 
-fn computeSlopeFromHeight(coord: vec2<i32>, layer: i32, depth: u32) -> f32 {
-    let n = computeTangentNormalFromHeight(coord, layer, depth);
+fn sampleScalarBilinear(tex: texture_2d_array<f32>, uv: vec2<f32>, layer: i32) -> f32 {
+    let size = vec2<i32>(textureDimensions(tex));
+    let maxCoord = size - vec2<i32>(1, 1);
+    let sizeF = vec2<f32>(size);
+    let halfTexel = 0.5 / sizeF;
+    let clampedUv = clamp(uv, halfTexel, vec2<f32>(1.0) - halfTexel);
+    let samplePos = clampedUv * sizeF - vec2<f32>(0.5, 0.5);
+    let basePos = floor(samplePos);
+    let frac = samplePos - basePos;
+    let c0 = clamp(vec2<i32>(basePos), vec2<i32>(0), maxCoord);
+    let c1 = min(c0 + vec2<i32>(1, 1), maxCoord);
+    let h00 = textureLoad(tex, c0, layer, 0).r;
+    let h10 = textureLoad(tex, vec2<i32>(c1.x, c0.y), layer, 0).r;
+    let h01 = textureLoad(tex, vec2<i32>(c0.x, c1.y), layer, 0).r;
+    let h11 = textureLoad(tex, c1, layer, 0).r;
+    let hx0 = mix(h00, h10, frac.x);
+    let hx1 = mix(h01, h11, frac.x);
+    return mix(hx0, hx1, frac.y);
+}
+
+fn sampleVec4Bilinear(tex: texture_2d_array<f32>, uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    let size = vec2<i32>(textureDimensions(tex));
+    let maxCoord = size - vec2<i32>(1, 1);
+    let sizeF = vec2<f32>(size);
+    let halfTexel = 0.5 / sizeF;
+    let clampedUv = clamp(uv, halfTexel, vec2<f32>(1.0) - halfTexel);
+    let samplePos = clampedUv * sizeF - vec2<f32>(0.5, 0.5);
+    let basePos = floor(samplePos);
+    let frac = samplePos - basePos;
+    let c0 = clamp(vec2<i32>(basePos), vec2<i32>(0), maxCoord);
+    let c1 = min(c0 + vec2<i32>(1, 1), maxCoord);
+    let v00 = textureLoad(tex, c0, layer, 0);
+    let v10 = textureLoad(tex, vec2<i32>(c1.x, c0.y), layer, 0);
+    let v01 = textureLoad(tex, vec2<i32>(c0.x, c1.y), layer, 0);
+    let v11 = textureLoad(tex, c1, layer, 0);
+    let vx0 = mix(v00, v10, frac.x);
+    let vx1 = mix(v01, v11, frac.x);
+    return mix(vx0, vx1, frac.y);
+}
+
+fn computeSlopeFromHeight(uv: vec2<f32>, layer: i32, depth: u32) -> f32 {
+    let n = computeTangentNormalFromHeight(uv, layer, depth);
     return clamp(1.0 - n.z, 0.0, 1.0);
 }
 
-fn computeTangentNormalFromHeight(coord: vec2<i32>, layer: i32, depth: u32) -> vec3<f32> {
+fn computeTangentNormalFromHeight(uv: vec2<f32>, layer: i32, depth: u32) -> vec3<f32> {
     let hSize = vec2<i32>(textureDimensions(heightTex));
-    let maxCoord = hSize - vec2<i32>(1, 1);
+    let texelUv = 1.0 / vec2<f32>(hSize);
 
-    let cL = clamp(coord + vec2<i32>(-1, 0), vec2<i32>(0), maxCoord);
-    let cR = clamp(coord + vec2<i32>( 1, 0), vec2<i32>(0), maxCoord);
-    let cD = clamp(coord + vec2<i32>( 0,-1), vec2<i32>(0), maxCoord);
-    let cU = clamp(coord + vec2<i32>( 0, 1), vec2<i32>(0), maxCoord);
-
-    let hL = textureLoad(heightTex, cL, layer, 0).r;
-    let hR = textureLoad(heightTex, cR, layer, 0).r;
-    let hD = textureLoad(heightTex, cD, layer, 0).r;
-    let hU = textureLoad(heightTex, cU, layer, 0).r;
+    let hL = sampleScalarBilinear(heightTex, uv - vec2<f32>(texelUv.x, 0.0), layer);
+    let hR = sampleScalarBilinear(heightTex, uv + vec2<f32>(texelUv.x, 0.0), layer);
+    let hD = sampleScalarBilinear(heightTex, uv - vec2<f32>(0.0, texelUv.y), layer);
+    let hU = sampleScalarBilinear(heightTex, uv + vec2<f32>(0.0, texelUv.y), layer);
 
     let gridSize = f32(1u << depth);
     let tileWorldSize = params.faceSize / gridSize;
@@ -283,17 +318,13 @@ fn main(
         let tileIdF = select(rawTile * 255.0, rawTile, rawTile > 1.0);
         let tileId = u32(tileIdF + 0.5);
 
-        let hSize = vec2<i32>(textureDimensions(heightTex));
-        let hCoord = clamp(vec2<i32>(texUv * vec2<f32>(hSize)), vec2<i32>(0), hSize - vec2<i32>(1));
-        let heightSample = textureLoad(heightTex, hCoord, i32(td.layer), 0).r;
+        let heightSample = sampleScalarBilinear(heightTex, texUv, i32(td.layer));
 
         let climate = sampleClimate(i32(td.layer), texUv);
         let elevation = clamp(heightSample * 0.5 + 0.5, 0.0, 1.0);
-        let slope = computeSlopeFromHeight(hCoord, i32(td.layer), td.depth);
+        let slope = computeSlopeFromHeight(texUv, i32(td.layer), td.depth);
 
-        let nSize = vec2<i32>(textureDimensions(normalTex));
-        let nCoord = clamp(vec2<i32>(texUv * vec2<f32>(nSize)), vec2<i32>(0), nSize - vec2<i32>(1));
-        let nSample = textureLoad(normalTex, nCoord, i32(td.layer), 0);
+        let nSample = sampleVec4Bilinear(normalTex, texUv, i32(td.layer));
         let tangentNormal = hemiOctDecode(nSample.rg * 2.0 - vec2<f32>(1.0, 1.0));
 
         let assetIdx = selectAsset(

@@ -497,9 +497,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             });
             await this.actorManager.initialize();
             await this.actorManager.createPlayer(
-                '/assets/wizard8.glb',
-                { x: spawnX, y: spawnY, z: spawnZ },
-                1.0
+                '/assets/characters/player.char.json',
+                { x: spawnX, y: spawnY, z: spawnZ }
             );
             this.renderer.setActorManager(this.actorManager);
             this.cameraMode = 'character';

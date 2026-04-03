@@ -1,0 +1,40 @@
+{
+  "glb": "../wizard8.glb",
+  "yawOffsetDeg": 0,
+
+  "rootMotion": {
+    "nodeName": "mixamorig:Hips",
+    "mask": { "x": true, "y": false, "z": true }
+  },
+
+  "blendDefaults": { "in": 0.15, "out": 0.12 },
+
+  "animations": {
+    "IDLE":              { "clip": "Idling",          "loop": true,  "blendIn": 0.20 },
+    "WALKING":           { "clip": "Walking",         "loop": true                   },
+    "RUNNING":           { "clip": "Running",         "loop": true                   },
+    "UNSTEADY_WALK":     { "clip": "Tired_walk",      "loop": true                   },
+
+    "DEAD":              { "clip": "Dying",           "loop": false, "blendIn": 0.08 },
+    "EXHAUSTED":         { "clip": "Exhausted",       "loop": false                  },
+    "FALLING":           { "clip": "Falling",         "loop": false, "blendIn": 0.05 },
+    "FREE_FALLING":      { "clip": "Free_falling",    "loop": true                   },
+    "GETTING_UP":        { "clip": "Getting_up",      "loop": false                  },
+
+    "HIT_FROM_FRONT_1":  { "clip": "Hit_from_front1", "loop": false, "blendIn": 0.05 },
+    "HIT_FROM_FRONT_3":  { "clip": "Hit_from_front3", "loop": false, "blendIn": 0.05 },
+    "HIT_FROM_SIDE":     { "clip": "Hit_from_side",   "loop": false, "blendIn": 0.05 },
+
+    "LOOKING_TORCH":     { "clip": "Looking_torch",   "loop": true                   },
+    "PICKING_UP":        { "clip": "Picking_up",      "loop": false                  },
+    "SITTING":           { "clip": "Sitting",         "loop": true                   },
+    "SLEEPING":          { "clip": "Sleeping",        "loop": true                   },
+    "DRINKING":          { "clip": "Drinking",        "loop": true                   },
+    "CROUCH_TORCH_WALK": { "clip": "Crouch_torch_1",  "loop": true                   },
+
+    "SKILL":             { "clip": "Attacking",       "loop": false                  },
+    "SPELL_CAST":        { "clip": "Spell1",          "loop": false                  },
+    "ATTACK_LIGHT":      { "clip": "Punching",        "loop": false                  },
+    "ATTACK_HEAVY":      { "clip": "Power_attack",    "loop": false                  }
+  }
+}

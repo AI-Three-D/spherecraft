@@ -7,6 +7,7 @@
 
 import { Logger } from '../../config/Logger.js';
 
+import { buildLeafBudgetPrepassShader } from './shaders/leafBudgetPrepass.wgsl.js';
 import { buildLeafScatterDetailedShader } from './shaders/leafScatterDetailed.wgsl.js';
 import { buildLeafVertexShader, buildLeafFragmentShader } from './shaders/leafRender.wgsl.js';
 import {  buildLeafDrawArgsShader } from './shaders/leafScatterDetailed.wgsl.js';
@@ -29,6 +30,7 @@ export class LeafStreamer {
      */
     constructor(device, assetStreamer, config = {}) {
         this._counterReset = new Uint32Array([0]);
+        this._requestSummaryReset = new Uint32Array(4);
         this.device   = device;
         this.streamer = assetStreamer;
         this.propTextureManager = config.propTextureManager || assetStreamer?.propTextureManager || null;
@@ -59,12 +61,18 @@ export class LeafStreamer {
         this.birchTemplateCount = Math.max(0, config.birchTemplateCount ?? 0);
 
         this._leafMaskBaker = config.leafMaskBaker ?? null;
+        this._budgetReadbackEnabled = true;
 
         // GPU resources (unchanged)
         this._leafBuffer     = null;
         this._counterBuffer  = null;
         this._indirectBuffer = null;
         this._paramBuffer    = null;
+        this._requestSummaryBuffer = null;
+        this._budgetReadbackBuffer = null;
+        this._budgetReadbackQueued = false;
+        this._budgetReadbackPending = false;
+        this._budgetLogSamples = 0;
 
         this._quadPosBuffer  = null;
         this._quadNormBuffer = null;
@@ -76,6 +84,10 @@ export class LeafStreamer {
         this._scatterBGL = null;
         this._scatterBG = null;
         this._scatterBGDirty = true;
+        this._prepassPipeline = null;
+        this._prepassBGL = null;
+        this._prepassBG = null;
+        this._prepassBGDirty = true;
 
         this._drawArgsPipeline = null;
         this._drawArgsBGL = null;
@@ -110,6 +122,7 @@ export class LeafStreamer {
 
         this._createBuffers();
         this._createLeafQuad();
+        this._createPrepassPipeline();
         this._createScatterPipeline();
         this._createDrawArgsPipeline();
         this._createRenderPipeline();
@@ -121,7 +134,7 @@ export class LeafStreamer {
             `[LeafStreamer] Initialized (baked-mask, indirect-dispatch): ` +
             `maxLeaves=${this.maxLeaves}, maxCloseTrees=${this.maxCloseTrees}, ` +
             `generic=[${cfg.l0Leaves}/${cfg.l1Leaves}/${cfg.l2Leaves}] ` +
-            `birch=[${cfg.birchL0Leaves}/${cfg.birchL1Leaves}/${cfg.birchL2Leaves}]`
+            `birchCards=${cfg.birchCloseCards}->${cfg.birchSettledCards}`
         );
     }
     _createBuffers() {
@@ -149,6 +162,12 @@ export class LeafStreamer {
             label: 'Leaf-Params',
             size: 256,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        this._requestSummaryBuffer = this.device.createBuffer({
+            label: 'Leaf-RequestSummary',
+            size: 256,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
         });
     }
     _createLeafQuad() {
@@ -188,6 +207,30 @@ export class LeafStreamer {
         this._quadIdxBuffer = ib;
         this._quadIdxCount = 6;
     }
+    _createPrepassPipeline() {
+        const code = buildLeafBudgetPrepassShader({
+            ...this.lodController.getLeafScatterShaderConfig(),
+        });
+
+        const mod = this.device.createShaderModule({ label: 'LeafBudgetPrepass-SM', code });
+
+        this._prepassBGL = this.device.createBindGroupLayout({
+            label: 'LeafBudgetPrepass-BGL',
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+            ],
+        });
+
+        this._prepassPipeline = this.device.createComputePipeline({
+            label: 'LeafBudgetPrepass-Pipeline',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this._prepassBGL] }),
+            compute: { module: mod, entryPoint: 'main' },
+        });
+    }
     _createScatterPipeline() {
         const code = buildLeafScatterDetailedShader({
             workgroupSize: this._workgroupSize,
@@ -207,6 +250,7 @@ export class LeafStreamer {
                 { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
                 { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
             ],
         });
     
@@ -411,10 +455,39 @@ export class LeafStreamer {
                 { binding: 4, resource: { buffer: this._counterBuffer } },
                 { binding: 5, resource: { buffer: anchorBuffer } },
                 { binding: 6, resource: { buffer: templateInfoBuffer } },
+                { binding: 7, resource: { buffer: this._requestSummaryBuffer } },
             ]
         });
 
         this._scatterBGDirty = false;
+    }
+
+    _maybeRebuildPrepassBG() {
+        if (!this._prepassBGDirty) return;
+
+        const tds = this.streamer._treeDetailSystem;
+        if (!tds) return;
+
+        const closeTreeBuffer = tds.getCloseTreeBuffer();
+        const closeTreeCountBuffer = tds.getCloseTreeCountBuffer();
+        if (!closeTreeBuffer || !closeTreeCountBuffer) return;
+
+        const templateLib = this.streamer._templateLibrary;
+        const templateInfoBuffer = templateLib?.getTemplateInfoBuffer?.();
+        if (!templateInfoBuffer) return;
+
+        this._prepassBG = this.device.createBindGroup({
+            layout: this._prepassBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this._paramBuffer } },
+                { binding: 1, resource: { buffer: closeTreeBuffer } },
+                { binding: 2, resource: { buffer: closeTreeCountBuffer } },
+                { binding: 3, resource: { buffer: this._requestSummaryBuffer } },
+                { binding: 4, resource: { buffer: templateInfoBuffer } },
+            ],
+        });
+
+        this._prepassBGDirty = false;
     }
 
     _maybeRebuildDrawArgsBG() {
@@ -504,6 +577,7 @@ export class LeafStreamer {
     update(commandEncoder, camera) {
         if (!this._initialized) return;
         this._frameCount++;
+        this._kickBudgetReadback();
     
         const tds = this.streamer._treeDetailSystem;
         if (!tds || !tds.isReady()) return;
@@ -512,12 +586,22 @@ export class LeafStreamer {
         if (!dispatchArgs) return;
     
         this._updateParams(camera);
+        this._maybeRebuildPrepassBG();
         this._maybeRebuildScatterBG();
         this._maybeRebuildDrawArgsBG();
     
-        if (!this._scatterBG || !this._drawArgsBG) return;
+        if (!this._prepassBG || !this._scatterBG || !this._drawArgsBG) return;
     
         this.device.queue.writeBuffer(this._counterBuffer, 0, this._counterReset);
+        this.device.queue.writeBuffer(this._requestSummaryBuffer, 0, this._requestSummaryReset);
+
+        {
+            const pass = commandEncoder.beginComputePass({ label: 'LeafBudgetPrepass' });
+            pass.setPipeline(this._prepassPipeline);
+            pass.setBindGroup(0, this._prepassBG);
+            pass.dispatchWorkgroupsIndirect(dispatchArgs, 0);
+            pass.end();
+        }
     
         // ── Scatter: one workgroup per close tree ───────────────────────
         {
@@ -535,6 +619,8 @@ export class LeafStreamer {
             pass.dispatchWorkgroups(1);
             pass.end();
         }
+
+        this._queueBudgetReadback(commandEncoder);
     }
     render(renderPassEncoder) {
         if (!this._initialized) return;
@@ -579,11 +665,82 @@ export class LeafStreamer {
         this._renderBGsDirty = true;
     }
 
+    _ensureBudgetReadbackBuffer() {
+        if (this._budgetReadbackBuffer) return;
+        this._budgetReadbackBuffer = this.device.createBuffer({
+            label: 'Leaf-BudgetReadback',
+            size: 256,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+    }
+
+    _queueBudgetReadback(commandEncoder) {
+        if (!commandEncoder || this._budgetReadbackQueued || this._budgetReadbackPending) return;
+        const shouldSample = this._frameCount === 60 || (this._frameCount % 240) === 0;
+        if (!shouldSample) return;
+
+        this._ensureBudgetReadbackBuffer();
+        if (!this._budgetReadbackBuffer) return;
+
+        commandEncoder.copyBufferToBuffer(
+            this._requestSummaryBuffer,
+            0,
+            this._budgetReadbackBuffer,
+            0,
+            16
+        );
+        commandEncoder.copyBufferToBuffer(
+            this._counterBuffer,
+            0,
+            this._budgetReadbackBuffer,
+            16,
+            4
+        );
+        this._budgetReadbackQueued = true;
+    }
+
+    _kickBudgetReadback() {
+        if (!this._budgetReadbackEnabled) return;
+        if (!this._budgetReadbackQueued || this._budgetReadbackPending || !this._budgetReadbackBuffer) return;
+
+        this._budgetReadbackPending = true;
+        this._budgetReadbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
+            const data = new Uint32Array(this._budgetReadbackBuffer.getMappedRange(0, 20).slice(0));
+            const requested = data[0] >>> 0;
+            const foliageTrees = data[1] >>> 0;
+            const maxPerTree = data[2] >>> 0;
+            const treeCount = data[3] >>> 0;
+            const emitted = data[4] >>> 0;
+            const scale = Math.min(1.0, this.maxLeaves / Math.max(1, requested));
+
+            this._lastLeafCount = emitted;
+            this._budgetLogSamples++;
+            if (requested > this.maxLeaves || emitted >= this.maxLeaves || this._budgetLogSamples <= 2) {
+                Logger.info(
+                    `[LeafStreamer] budget trees=${treeCount} foliageTrees=${foliageTrees} ` +
+                    `requested=${requested} emitted=${emitted}/${this.maxLeaves} ` +
+                    `maxTree=${maxPerTree} scale=${scale.toFixed(3)}`
+                );
+            }
+
+            this._budgetReadbackBuffer.unmap();
+            this._budgetReadbackQueued = false;
+            this._budgetReadbackPending = false;
+        }).catch((err) => {
+            Logger.warn(`[LeafStreamer] budget readback failed: ${err?.message || err}`);
+            try { this._budgetReadbackBuffer?.unmap(); } catch (_) {}
+            this._budgetReadbackQueued = false;
+            this._budgetReadbackPending = false;
+        });
+    }
+
     dispose() {
         this._leafBuffer?.destroy();
         this._counterBuffer?.destroy();
         this._indirectBuffer?.destroy();
         this._paramBuffer?.destroy();
+        this._requestSummaryBuffer?.destroy();
+        this._budgetReadbackBuffer?.destroy();
         this._drawArgsBuffer?.destroy();
         this._quadPosBuffer?.destroy();
         this._quadNormBuffer?.destroy();

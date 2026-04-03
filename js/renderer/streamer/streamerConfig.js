@@ -225,6 +225,7 @@ export const QUALITY_PRESETS = {
         scatterCellOversample: 1,
         scatterInterval: 2,
         scatterMinMove: 1.0,
+        scatterMinTurnAngleDeg: 1.5,
         scatterWorkgroupSize: 64,
     },
     medium: {
@@ -241,6 +242,7 @@ export const QUALITY_PRESETS = {
         scatterCellOversample: 2,
         scatterInterval: 2,
         scatterMinMove: 1.0,
+        scatterMinTurnAngleDeg: 1.5,
         scatterWorkgroupSize: 64,
     },
     high: {
@@ -257,6 +259,7 @@ export const QUALITY_PRESETS = {
         scatterCellOversample: 2,
         scatterInterval: 2,
         scatterMinMove: 1.0,
+        scatterMinTurnAngleDeg: 1.5,
         scatterWorkgroupSize: 128,
     },
 };

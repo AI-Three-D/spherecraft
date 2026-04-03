@@ -17,7 +17,8 @@
 //   backend.resumeRenderPass();
 //   assetStreamer.render(camera, viewMatrix, projectionMatrix);
 import { TreeMidSystem } from './TreeMidSystem.js';
-import { TREE_TIER_FLAGS, validateTierRanges } from './treeTierConfig.js';
+import { ClusterTreeSystem } from './ClusterTreeSystem.js';
+import { validateTierRanges } from './treeTierConfig.js';
 import { TEXTURE_LAYER_MAPPING } from './archetype/archetypeDefinitions.js';
 import { LeafMaskBaker } from './LeafMaskBaker.js';
 import { Logger } from '../../config/Logger.js';
@@ -78,6 +79,24 @@ import { TerrainAOBaker } from './TerrainAOBaker.js';
 
 const FIELD_LAYER_META_U32_STRIDE = 8;
 
+function applyResolvedTreeAssetConfig(definitions, treeConfig) {
+    const treeLodDistances = treeConfig?._derived?.treeAssetLodDistances;
+    const treeDensities = treeConfig?._derived?.treeAssetDensities;
+
+    if (!Array.isArray(definitions) || !Array.isArray(treeLodDistances) || !Array.isArray(treeDensities)) {
+        return definitions;
+    }
+
+    return definitions.map((def) => {
+        if (!def || def.category !== 'tree') return def;
+        return {
+            ...def,
+            lodDistances: [...treeLodDistances],
+            densities: [...treeDensities],
+        };
+    });
+}
+
 export class AssetStreamer {
     /**
      * @param {object} options
@@ -91,11 +110,13 @@ export class AssetStreamer {
      * @param {string}     [options.quality='medium']
      */
     constructor(options = {}) {
+        this._treeConfig = this.engineConfig?.trees || {};
         this._treeMidNearSystem = null;
         this._aoBaker = null;
         this._groundFieldBaker = null;
         this._groundPropCache = null;
         this._treeSourceCache = null;
+        this._clusterTreeSystem = null;
         this._templateLibrary = null;
         this._branchRenderer = null;
         this._assetBakePolicy = null;
@@ -111,41 +132,49 @@ export class AssetStreamer {
         this._leafMaskBaker = null;
         this._quality = options.quality || 'medium';
         this._qualityConfig = QUALITY_PRESETS[this._quality] || QUALITY_PRESETS.medium;
-        const rawBands = options.treeDetailBands;
-        let leafBands = undefined;
-        if (Array.isArray(rawBands)) {
-            if (rawBands.length > 0 && typeof rawBands[0] === 'object') {
-                leafBands = rawBands;
-            } else {
-                leafBands = rawBands.map((end, i, ends) => ({
-                    start: i === 0 ? 0 : ends[i - 1] * 0.85,
-                    end,
-                }));
-            }
-        } else if (rawBands && typeof rawBands === 'object') {
-            const legacyEnds = [rawBands.l0, rawBands.l1, rawBands.l2]
-                .filter(v => Number.isFinite(v));
-            if (legacyEnds.length > 0) {
-                leafBands = legacyEnds.map((end, i, ends) => ({
-                    start: i === 0 ? 0 : ends[i - 1] * 0.85,
-                    end,
-                }));
-            }
-        }
 
-        this._lodController = new TreeLODController({
-            leafBands,
-            maxCloseTrees:        options.maxCloseTrees,
-            maxBranchDetailLevel: options.maxBranchDetailLevel ?? 3,
-            maxTotalLeaves:       options.maxTotalLeaves,
-        });
+        this._treeConfig = this.engineConfig?.trees || {};
+const tc       = this._treeConfig;
+const tcFlags  = tc.flags    || {};
+const tcNear   = tc.nearTier || {};
+
+this._useMidTier        = tcFlags.useMidTier        ?? true;
+this._keepLegacyMidNear = tcFlags.keepLegacyMidNear ?? false;
+this.enableLeafRendering =
+    tcFlags.enableLeafRendering ?? (options.enableLeafRendering !== false);
+
+// Still honour explicit constructor override for debug tooling,
+// but primary source is engineConfig.
+const leafBandsFromOptions = (() => {
+    const rawBands = options.treeDetailBands;
+    if (Array.isArray(rawBands)) {
+        if (rawBands.length > 0 && typeof rawBands[0] === 'object') return rawBands;
+        return rawBands.map((end, i, ends) => ({
+            start: i === 0 ? 0 : ends[i - 1] * 0.85,
+            end,
+        }));
+    }
+    return undefined;
+})();
+
+this._lodController = new TreeLODController({
+    leafBands:            leafBandsFromOptions ?? tcNear.leafBands,
+    maxCloseTrees:        options.maxCloseTrees ?? tcNear.maxCloseTrees,
+    maxBranchDetailLevel: options.maxBranchDetailLevel ?? tcNear.maxBranchDetailLevel,
+    maxTotalLeaves:       options.maxTotalLeaves ?? tcNear.maxTotalLeaves,
+    branchLODBands:       tcNear.branchLODBands,
+    branchFadeMargin:     tcNear.branchFadeMargin,
+    birch:                tcNear.birch,
+    leafCounts:           tcNear.leafCounts,
+    leafSizeScale:        tcNear.leafSizeScale,
+    leafFadeStartRatio:   tcNear.leafFadeStartRatio,
+});
 
         Object.defineProperty(this, 'treeDetailBands', {
             get: () => this._lodController.getLegacyBands(),
             configurable: true,
         });
 
-        this.enableLeafRendering = options.enableLeafRendering !== false;
         this._debugConfig = options.debug || {};
         this._debugReadbackEnabled = this._debugConfig.readback === true;
         this._treeMidSystem = null; 
@@ -162,7 +191,10 @@ export class AssetStreamer {
         // validated (throws if tree_standard ≠ index 0 or variant 0 ≠ tree),
         // and queryable via getAllArchetypes() / getAllVariants() — but
         // nothing in the render path reads it until Increment 2.
-        this._assetDefinitions = options.assetDefinitions || DEFAULT_ASSET_DEFINITIONS;
+        this._assetDefinitions = applyResolvedTreeAssetConfig(
+            options.assetDefinitions || DEFAULT_ASSET_DEFINITIONS,
+            this._treeConfig
+        );
         this._assetRegistry = new ArchetypeRegistry(                    // ◄── INC 1
             this._assetDefinitions,
             options.archetypeDefinitions || ARCHETYPE_DEFINITIONS        // ◄── INC 1
@@ -242,7 +274,7 @@ export class AssetStreamer {
             counterBuffer: null,
             bindGroup: null,
         };
-        this._producerDebugEnabled = this._debugReadbackEnabled;
+        this._producerDebugEnabled = true;
         this._producerDebugInterval = Math.max(1, this._debugConfig.interval ?? 120);
         this._producerDebugQueued = false;
         this._producerDebugPending = false;
@@ -310,6 +342,7 @@ export class AssetStreamer {
         this._frameCount = 0;
         this._lastScatterFrame = -1;
         this._lastScatterPosition = null;
+        this._lastScatterDirection = null;
         this._forceScatter = true;
         // Transitional mode: tree visuals are handled by tree sub-pipelines
         // (detail now, mid/far later). Skip all scatter-tree draw bands.
@@ -398,9 +431,15 @@ export class AssetStreamer {
             this._treeSourceCache = new TreeSourceCache(this.device, {
                 assetRegistry: this._assetRegistry,
                 tilePoolSize: this.tileStreamer.tilePoolSize,
-                treeConfig: this.engineConfig?.treeSourceBake,
+                treeConfig: this.engineConfig?.trees?.sourceBake,
             });
             this._treeSourceCache.initialize(this._bakedAssetTileCache);
+        }
+        if (this._treeConfig?.farTreeTier || this._treeConfig?.clusterTier) {
+            this._clusterTreeSystem = new ClusterTreeSystem(this.device, this, {
+                treeConfig: this._treeConfig,
+            });
+            await this._clusterTreeSystem.initialize(this._bakedAssetTileCache);
         }
         this._createScatterGroupMaskResources();
         this._seedScatterGroupPolicyMasks();
@@ -487,64 +526,66 @@ export class AssetStreamer {
         }
 
         // ═══ Tree sub-systems — unchanged; they read pool bands 0-4 ═════════
+        const tcNear  = this._treeConfig.nearTier || {};
+        const tcFlags = this._treeConfig.flags    || {};
+
         this._treeDetailSystem = new TreeDetailSystem(this.device, this, {
             lodController:    this._lodController,
-            maxTotalLeaves:   600000,
-            maxTotalClusters: 50000,
+            maxTotalLeaves:   tcNear.maxTotalLeaves   ?? 600000,
+            maxTotalClusters: tcNear.maxTotalClusters ?? 50000,
+            debugReadback:    this._debugReadbackEnabled,
         });
         await this._treeDetailSystem.initialize();
 
         this._leafMaskBaker = new LeafMaskBaker(this.device);
         await this._leafMaskBaker.initialize();
 
-// ═══ Tree mid-tier systems ═══════════════════════════════════════════════
-// Validate tier ranges against near-tier's actual end.
-const tierWarnings = validateTierRanges(this._lodController.detailRange);
+
+
+// ═══ Tree mid-tier systems ═══════════════════════════════════════════
+const tierRanges = this._treeConfig.tierRanges || {};
+const tierWarnings = validateTierRanges(
+    this._lodController.detailRange,
+    tierRanges                                   // ← now takes ranges as arg
+);
 for (const w of tierWarnings) Logger.warn(`${this._logTag} ${w}`);
 
-// Legacy mid-near: built but only run if the flag is set.
+// Legacy mid-near: built but only active when flag is set
 this._treeMidNearSystem = new TreeMidNearSystem(this.device, this, {
     lodController: this._lodController,
 });
-await this._treeMidNearSystem.initialize();
-if (!TREE_TIER_FLAGS.keepLegacyMidNear) {
-    this._treeMidNearSystem.setEnabled(false);
-    Logger.info(`${this._logTag} Legacy TreeMidNearSystem disabled (TREE_TIER_FLAGS.keepLegacyMidNear=false)`);
-}
 
-// New hull-only mid tier.
-if (TREE_TIER_FLAGS.useMidTier) {
+
+// New hull-only mid tier
+if (this._useMidTier) {                          // ← was TREE_TIER_FLAGS.useMidTier
     this._treeMidSystem = new TreeMidSystem(this.device, this, {
         lodController: this._lodController,
+        tierRange:     tierRanges.mid,           // ← NEW: pass range config
+        midConfig:     this._treeConfig.midTier, // ← NEW: pass hull/trunk config
+        speciesProfiles: this._treeConfig.speciesProfiles,
     });
     await this._treeMidSystem.initialize();
 }
-/*
-        this._treeMidNearSystem = new TreeMidNearSystem(this.device, this, {
-            lodController: this._lodController,
-        });
-        await this._treeMidNearSystem.initialize();
-*/
-        this._branchRenderer = new BranchRenderer(this.device, this, {
-            lodController:      this._lodController,
-            enableBranchWind:   false,
-            propTextureManager: this.propTextureManager,
-        });
-        await this._branchRenderer.initialize(this._templateLibrary);
 
-        this._leafStreamer = new LeafStreamer(this.device, this, {
-            lodController:            this._lodController,
-            leafMaskBaker:            this._leafMaskBaker,
-            leafAlbedoTextureManager: this.leafAlbedoTextureManager,
-            leafNormalTextureManager: this.leafNormalTextureManager,
-            enableLeafAlbedoTexture:  true,
-            enableLeafNormalTexture:  true,
-            birchTemplateStart: this._templateLibrary?.getTypeStartIndex('birch') ?? 0xFFFFFFFF,
-            birchTemplateCount: this._templateLibrary?.getVariants('birch')?.length ?? 0,
-            enableLeafWind: false,
-        });
-        await this._leafStreamer.initialize();
-        this._verifyTreeBandAlignment();
+this._branchRenderer = new BranchRenderer(this.device, this, {
+    lodController:      this._lodController,
+    enableBranchWind:   tcFlags.enableBranchWind ?? false,
+    propTextureManager: this.propTextureManager,
+});
+await this._branchRenderer.initialize(this._templateLibrary);
+
+this._leafStreamer = new LeafStreamer(this.device, this, {
+    lodController:            this._lodController,
+    leafMaskBaker:            this._leafMaskBaker,
+    leafAlbedoTextureManager: this.leafAlbedoTextureManager,
+    leafNormalTextureManager: this.leafNormalTextureManager,
+    enableLeafAlbedoTexture:  true,
+    enableLeafNormalTexture:  true,
+    birchTemplateStart: this._templateLibrary?.getTypeStartIndex('birch') ?? 0xFFFFFFFF,
+    birchTemplateCount: this._templateLibrary?.getVariants('birch')?.length ?? 0,
+    enableLeafWind: tcFlags.enableLeafWind ?? false,
+});
+await this._leafStreamer.initialize();
 
         this._initialized = true;
         Logger.info(
@@ -1176,6 +1217,7 @@ if (TREE_TIER_FLAGS.useMidTier) {
         this._groundFieldBaker?.dispose();
         this._groundPropCache?.dispose();
         this._treeSourceCache?.dispose();
+        this._clusterTreeSystem?.dispose();
         this._pool?.dispose();
         this._treeDetailSystem?.dispose();
         this._branchRenderer?.dispose();
@@ -1225,6 +1267,7 @@ if (TREE_TIER_FLAGS.useMidTier) {
         this._groundFieldBaker = null;
         this._groundPropCache = null;
         this._treeSourceCache = null;
+        this._clusterTreeSystem = null;
         this._aoBaker = null;
         this._initialized = false;
     }
@@ -1243,6 +1286,7 @@ update(commandEncoder, camera) {
         this._bakedAssetTileCache?.syncFromTileStreamer(this.tileStreamer);
         this._groundPropCache?.syncFromTileCache(this._bakedAssetTileCache, false);
         this._treeSourceCache?.syncFromTileCache(this._bakedAssetTileCache, false);
+        this._clusterTreeSystem?.syncFromTileCache(this._bakedAssetTileCache, false);
         this._seedScatterGroupPolicyMasks();
         this._forceScatter = true;
     }
@@ -1270,6 +1314,7 @@ update(commandEncoder, camera) {
 
     this._drainAOCommits();
     this._drainScatterGroupCommits();
+    this._treeSourceCache?.refreshVisibleOwnerLayers(this.tileStreamer);
     this._dispatchScatterGroupMaskBakes(commandEncoder);
     const bakedGroundFieldThisFrame = this._dispatchGroundFieldBakes(commandEncoder);
     const bakedGroundPropsThisFrame = this._dispatchGroundPropBakes(commandEncoder);
@@ -1280,6 +1325,13 @@ update(commandEncoder, camera) {
     }
 
     if (!bakeDrivenScatter && !this._shouldUpdateScatter(camera)) {
+        if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
+        if (this._treeMidSystem)     this._treeMidSystem.update(commandEncoder, camera);
+        if (this._clusterTreeSystem) this._clusterTreeSystem.update(commandEncoder, camera);
+        if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
+        if (this._leafStreamer && this.enableLeafRendering) {
+            this._leafStreamer.update(commandEncoder, camera);
+        }
         this._dispatchAOBakes(commandEncoder);
         return;
     }
@@ -1347,13 +1399,15 @@ update(commandEncoder, camera) {
     if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
     if (this._treeMidNearSystem) this._treeMidNearSystem.update(commandEncoder, camera);
     if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
-    if (this._leafStreamer && this.enableLeafRendering) {
-        this._leafStreamer.update(commandEncoder, camera);
-    }*/
+*/
         if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
        // if (this._treeMidNearSystem) this._treeMidNearSystem.update(commandEncoder, camera); 
         if (this._treeMidSystem)     this._treeMidSystem.update(commandEncoder, camera);    
+        if (this._clusterTreeSystem) this._clusterTreeSystem.update(commandEncoder, camera);
         if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
+        if (this._leafStreamer && this.enableLeafRendering) {
+            this._leafStreamer.update(commandEncoder, camera);
+        }
 
     this._dispatchAOBakes(commandEncoder);
 
@@ -1363,6 +1417,7 @@ update(commandEncoder, camera) {
             x: camera.position.x, y: camera.position.y, z: camera.position.z,
         };
     }
+    this._lastScatterDirection = this._getCameraForward(camera);
     this._forceScatter = false;
 }
 
@@ -1408,6 +1463,7 @@ _drainScatterGroupCommits() {
     this._bakedAssetTileCache?.applyCommitBatch(commits);
     this._groundPropCache?.applyCommitBatch(this._bakedAssetTileCache);
     this._treeSourceCache?.applyCommitBatch(this._bakedAssetTileCache);
+    this._clusterTreeSystem?.applyCommitBatch(this._bakedAssetTileCache);
     this._scatterGroupActivityDirty = true;
     this._fieldActivityDirty = true;
     this._enqueueGroundFieldBakeBatch(commits);
@@ -1807,6 +1863,7 @@ _dispatchTreeSourceBakes(commandEncoder) {
     pass.setBindGroup(0, this._treeSourceBakeBindGroup);
     pass.dispatchWorkgroups(batch.length);
     pass.end();
+    this._treeSourceCache.markBakeBatchSubmitted(batch);
     return true;
 }
 
@@ -1990,6 +2047,28 @@ getGroundFieldTexture() {
                 archetypeTotals.set(key, (archetypeTotals.get(key) ?? 0) + (poolData[bd.band] >>> 0));
             }
 
+            const treeBandBase = CAT_TREES * LODS_PER_CATEGORY;
+            const treeBandParts = [];
+            let treeRawTotal = 0;
+            let treeCapTotal = 0;
+            let treeOverflowTotal = 0;
+            let treeMaxOverflowBand = -1;
+            let treeMaxOverflowCount = 0;
+            for (let lod = 0; lod < LODS_PER_CATEGORY; lod++) {
+                const band = treeBandBase + lod;
+                const raw = poolData[band] >>> 0;
+                const cap = this._pool?.getBandCapacity(band) ?? 0;
+                const overflow = Math.max(0, raw - cap);
+                treeRawTotal += raw;
+                treeCapTotal += cap;
+                treeOverflowTotal += overflow;
+                if (overflow > treeMaxOverflowCount) {
+                    treeMaxOverflowCount = overflow;
+                    treeMaxOverflowBand = band;
+                }
+                treeBandParts.push(`b${band}=${raw}/${cap}`);
+            }
+
             let fieldLayerCount = 0;
             if (this._fieldRenderMasksCPU) {
                 for (let i = 0; i < this._fieldRenderMasksCPU.length; i++) {
@@ -2028,6 +2107,22 @@ getGroundFieldTexture() {
                 if (nonTreePoolTotal === 0 || shouldProbeGrass) {
                     this._kickProducerTextureProbe();
                 }
+            }
+
+            const shouldLogTrees =
+                treeOverflowTotal > 0 ||
+                treeRawTotal === 0 ||
+                (this._frameCount % (this._producerDebugInterval * 2)) === 0;
+
+            if (true || shouldLogTrees) {
+                Logger.info(
+                    `${this._logTag} [TreePool] ` +
+                    `${treeBandParts.join(' ')} ` +
+                    `total=${treeRawTotal}/${treeCapTotal} ` +
+                    `overflow=${treeOverflowTotal}` +
+                    (treeMaxOverflowBand >= 0 ? ` maxOverflowBand=${treeMaxOverflowBand}` : '') +
+                    ` sourceLayers=${this._treeSourceCache?.activeLayerCount ?? 0}`
+                );
             }
 
             this._producerDebugPoolReadbackBuffer.unmap();
@@ -2099,6 +2194,7 @@ getGroundFieldTexture() {
 if (this._branchRenderer)    this._branchRenderer.render(encoder);
 //if (this._treeMidNearSystem) this._treeMidNearSystem.render(encoder);  
 if (this._treeMidSystem)     this._treeMidSystem.render(encoder);    
+if (this._clusterTreeSystem) this._clusterTreeSystem.render(encoder, camera, viewMatrix, projectionMatrix);
 if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(encoder);
 
         const lodTest = this._treeDetailSystem?.getLeafLODTestSuite();
@@ -2683,20 +2779,24 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
                 { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
             ]
         });
+        const tcScatter    = this._treeConfig.scatter    || {};
+        const tcBillboards = this._treeConfig.billboards || {};
+
+        const treeVisibility = this._treeConfig._derived?.gatherCullRadius
+            ?? (this._treeConfig.tierRanges?.mid?.end ?? 800);
 
         const bakeModule = this.device.createShaderModule({
             label: 'TreeSource-BakeShader',
             code: buildTreeSourceBakeShader({
                 workgroupSize: this._scatterWorkgroupSize || (this._qualityConfig.scatterWorkgroupSize ?? 64),
                 perLayerCapacity: this._treeSourceCache.perLayerCapacity,
-                treeCellSize: TREE_CELL_SIZE,
-                treeMaxPerCell: TREE_MAX_PER_CELL,
-                treeClusterProbability: TREE_CLUSTER_PROBABILITY,
-                treeJitterScale: TREE_JITTER_SCALE,
-                treeDensityScale: TREE_DENSITY_SCALE,
+                treeCellSize:           tcScatter.cellSize           ?? 16.0,
+                treeMaxPerCell:         tcScatter.maxPerCell         ?? 4,
+                treeClusterProbability: tcScatter.clusterProbability ?? 0.95,
+                treeJitterScale:        tcScatter.jitterScale        ?? 0.85,
+                treeDensityScale:       tcScatter.densityScale       ?? 1.0,
             }),
         });
-
         this._treeSourceBakePipeline = this.device.createComputePipeline({
             label: 'TreeSource-BakePipeline',
             layout: this.device.createPipelineLayout({
@@ -2719,7 +2819,6 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
                 { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
             ]
         });
-
         const gatherModule = this.device.createShaderModule({
             label: 'TreeSource-GatherShader',
             code: buildTreeSourceGatherShader({
@@ -2727,7 +2826,7 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
                 totalBands: this._totalBands,
                 lodsPerCategory: LODS_PER_CATEGORY,
                 perLayerCapacity: this._treeSourceCache.perLayerCapacity,
-                treeVisibility: TREE_VISIBILITY,
+                treeVisibility,
             }),
         });
 
@@ -2794,24 +2893,33 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
             }
         }
 
+        const tcBillboards = this._treeConfig.billboards || {};
+        const treeLodDistances = this._treeConfig._derived?.treeAssetLodDistances
+            || this._treeConfig.scatter?.lodDistances
+            || [20, 100, 150, 380, 500];
+        const treeVisibility = treeLodDistances[treeLodDistances.length - 1];
+
+const treeFadeStart = treeVisibility * (tcBillboards.fadeStartRatio ?? 0.7);
+const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
+
+
         const vsSource = buildAssetVertexShader({
             windMaxDistance:       30,
             windFadeDistance:      10,
             lodsPerArchetype:      LODS_PER_CATEGORY,            // all archetypes have lodCount=5
-            treeBillboardLodStart: TREE_BILLBOARD_LOD_START,
+            treeBillboardLodStart: tcBillboards.lodStart ?? 3,
             archetypeFlags:        this._archetypeFlags,
         });
 
         const maxDist       = this._assetRegistry?.maxDistance ?? 800;
-        const treeFadeStart = TREE_VISIBILITY * TREE_FADE_START_RATIO;
-        const treeFadeEnd   = TREE_VISIBILITY * TREE_FADE_END_RATIO;
+
 
         const fragConfig = {
             fadeStart:        maxDist * 0.75,
             fadeEnd:          maxDist * 0.95,
             treeFadeStart,
             treeFadeEnd,
-            treeFarBand:      TREE_BILLBOARD_LOD_END,            // still band 4 (tree LOD 4)
+            treeFarBand: tcBillboards.lodEnd ?? 4,        // still band 4 (tree LOD 4)
             totalBands:       this._totalBands,
             lodsPerArchetype: LODS_PER_CATEGORY,
             archetypeFlags:   this._archetypeFlags,
@@ -3354,13 +3462,25 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
                 this._treeMidNearSystem.rebuildPipelines(options);
             }
         }
+    _getCameraForward(camera) {
+        if (!camera?.position || !camera?.target) return null;
+        const dx = camera.target.x - camera.position.x;
+        const dy = camera.target.y - camera.position.y;
+        const dz = camera.target.z - camera.position.z;
+        const lenSq = dx * dx + dy * dy + dz * dz;
+        if (lenSq <= 1e-8) return null;
+        const invLen = 1.0 / Math.sqrt(lenSq);
+        return { x: dx * invLen, y: dy * invLen, z: dz * invLen };
+    }
+
     _shouldUpdateScatter(camera) {
         if (this._forceScatter) return true;
     
         const interval = this._qualityConfig.scatterInterval ?? 2;
         const minMove = this._qualityConfig.scatterMinMove ?? 0.0;
+        const minTurnAngleDeg = this._qualityConfig.scatterMinTurnAngleDeg ?? 1.5;
     
-        if (interval <= 1 && minMove <= 0.0) return true;
+        if (interval <= 1 && minMove <= 0.0 && minTurnAngleDeg <= 0.0) return true;
     
         const frameDelta = this._lastScatterFrame < 0
             ? interval
@@ -3372,6 +3492,24 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
             const dy = camera.position.y - this._lastScatterPosition.y;
             const dz = camera.position.z - this._lastScatterPosition.z;
             if ((dx * dx + dy * dy + dz * dz) >= (minMove * minMove)) {
+                return true;
+            }
+        }
+
+        if (minTurnAngleDeg > 0.0) {
+            const currentForward = this._getCameraForward(camera);
+            const previousForward = this._lastScatterDirection;
+            if (currentForward && previousForward) {
+                const dot =
+                    currentForward.x * previousForward.x +
+                    currentForward.y * previousForward.y +
+                    currentForward.z * previousForward.z;
+                const clampedDot = Math.max(-1.0, Math.min(1.0, dot));
+                const angleDeg = Math.acos(clampedDot) * (180.0 / Math.PI);
+                if (angleDeg >= minTurnAngleDeg) {
+                    return true;
+                }
+            } else if (currentForward || previousForward) {
                 return true;
             }
         }

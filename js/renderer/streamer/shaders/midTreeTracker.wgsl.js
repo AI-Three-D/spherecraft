@@ -16,6 +16,7 @@ export function buildMidTreeTrackerShader(config = {}) {
     const MAX_TREES = config.maxTrees ?? 12000;
     const ASSET_COUNT = config.assetCount ?? 0;
     const MAX_ANCHORS_FOR_BOUNDS = config.maxAnchorsForBounds ?? 32;
+    const END_DENSITY_SCALE = Math.max(0.0, Math.min(1.0, config.endDensityScale ?? 1.0));
 
     const srcBandIds = Array.isArray(config.treeSourceBandIds) && config.treeSourceBandIds.length > 0
         ? config.treeSourceBandIds : [0];
@@ -42,6 +43,7 @@ const WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;
 const MAX_MID_TREES: u32 = ${MAX_TREES}u;
 const ASSET_COUNT: u32 = ${ASSET_COUNT}u;
 const MAX_ANCHORS_FOR_BOUNDS: u32 = ${MAX_ANCHORS_FOR_BOUNDS}u;
+const END_DENSITY_SCALE: f32 = ${fmt(END_DENSITY_SCALE)};
 
 const SOURCE_BAND_COUNT: u32 = ${SOURCE_BAND_COUNT}u;
 const SOURCE_BAND_IDS:   array<u32, SOURCE_BAND_COUNT> = array<u32, SOURCE_BAND_COUNT>(${srcBandIds.map(v => `${v >>> 0}u`).join(', ')});
@@ -141,7 +143,7 @@ fn getSpeciesFoliageColor(speciesIndex: u32, variation: f32) -> vec3<f32> {
     switch (speciesIndex) {
         case 0u: { base = vec3<f32>(0.05, 0.15, 0.05); tip = vec3<f32>(0.08, 0.25, 0.08); }
         case 1u: { base = vec3<f32>(0.08, 0.18, 0.06); tip = vec3<f32>(0.12, 0.28, 0.10); }
-        case 2u: { base = vec3<f32>(0.15, 0.35, 0.10); tip = vec3<f32>(0.25, 0.50, 0.15); }
+        case 2u: { base = vec3<f32>(0.11, 0.27, 0.09); tip = vec3<f32>(0.18, 0.38, 0.13); }
         case 3u: { base = vec3<f32>(0.12, 0.28, 0.08); tip = vec3<f32>(0.20, 0.42, 0.12); }
         case 4u: { base = vec3<f32>(0.10, 0.22, 0.06); tip = vec3<f32>(0.18, 0.35, 0.12); }
         case 5u: { base = vec3<f32>(0.08, 0.20, 0.05); tip = vec3<f32>(0.15, 0.32, 0.10); }
@@ -185,17 +187,35 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (dist < params.rangeStart || dist > params.rangeEnd) { return; }
 
-    let slot = atomicAdd(&midTreeCount[0], 1u);
-    if (slot >= MAX_MID_TREES) { return; }
-
-    // ── Species + seed ───────────────────────────────────────────────────
+    // ── Stable seed ──────────────────────────────────────────────────────
+    // Reused by density thinning and per-tree variation. Must be stable
+    // across frames so the retained subset does not shimmer.
     let posSeed = pcg3(
         bitcast<u32>(tree.posX),
         bitcast<u32>(tree.posY),
         bitcast<u32>(tree.posZ)
     );
+    let bakedSourceHash = bitcast<u32>(tree._pad0);
+    let stableSeed = select(posSeed ^ 0xB5297A4Du, bakedSourceHash, bakedSourceHash != 0u);
+
+    // ── Optional distance thinning ──────────────────────────────────────
+    // 1.0 = keep all trees. Lower values linearly reduce the retained
+    // density toward the far end of the mid tier. Stable hash keeps the
+    // dropped subset fixed in world space.
+    if (END_DENSITY_SCALE < 0.9999) {
+        let rangeSpan = max(params.rangeEnd - params.rangeStart, 1.0);
+        let thinT = clamp((dist - params.rangeStart) / rangeSpan, 0.0, 1.0);
+        let keepProb = mix(1.0, END_DENSITY_SCALE, thinT);
+        let keepHash = pcgF(stableSeed ^ 0xA341316Cu);
+        if (keepHash > keepProb) { return; }
+    }
+
+    let slot = atomicAdd(&midTreeCount[0], 1u);
+    if (slot >= MAX_MID_TREES) { return; }
+
+    // ── Species + seed ───────────────────────────────────────────────────
     let speciesIdx = selectSpeciesForAsset(tree.tileTypeId);
-    let colorVar = pcgF(posSeed ^ 0x12345678u);
+    let colorVar = pcgF(stableSeed ^ 0x12345678u);
     let foliageColor = getSpeciesFoliageColor(speciesIdx, colorVar);
 
     // ── Tier fade ────────────────────────────────────────────────────────
@@ -213,13 +233,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var hullAnchorCount: u32 = 0u;
 
     if (params.birchTemplateStart != 0xFFFFFFFFu && params.birchTemplateCount > 0u) {
-        let variantLocal = pcg(posSeed) % params.birchTemplateCount;
+        let variantLocal = pcg(stableSeed) % params.birchTemplateCount;
         templateIndex = params.birchTemplateStart + variantLocal;
         let info = templateInfos[templateIndex];
 
-        // Use medium anchor tier for bounds — it's the stable silhouette
-        // tier. Fine anchors are numerous and noisy; coarse is too sparse.
-        if (info.mediumCount > 0u) {
+        let nearMidThreshold = params.rangeStart + params.fadeInWidth + 140.0;
+
+        // Closer mid-tier birches need the fine tier to retain the
+        // split/lacy crown structure visible in the near trees. Farther
+        // out we can fall back to medium anchors for stability.
+        if (dist < nearMidThreshold && info.fineCount > 0u) {
+            hullAnchorStart = info.anchorStart + info.fineStart;
+            hullAnchorCount = info.fineCount;
+        } else if (info.mediumCount > 0u) {
             hullAnchorStart = info.anchorStart + info.mediumStart;
             hullAnchorCount = info.mediumCount;
         } else if (info.coarseCount > 0u) {
@@ -282,7 +308,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     midTrees[slot] = MidTreeInfo(
         treePos.x, treePos.y, treePos.z, tree.rotation,
         tree.width, tree.height, tree.width, dist,
-        speciesIdx, posSeed, templateIndex, bitcast<u32>(tierFade),
+        speciesIdx, stableSeed, templateIndex, bitcast<u32>(tierFade),
         foliageColor.r, foliageColor.g, foliageColor.b, 1.0,
         hullAnchorStart, hullAnchorCount, 0u, 0u,
         canopyCenter.x, canopyCenter.y, canopyCenter.z, 0.0,

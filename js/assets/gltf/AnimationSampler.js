@@ -7,12 +7,13 @@ export class AnimationSampler {
      */
     static sample(animation, time) {
         const out = new Map();
-        const t = animation.duration > 0 ? time % animation.duration : 0;
-
+        // No wrap here. _sampleChannel clamps past either end to the
+        // boundary keyframe, which is what a held one-shot needs.
+        // Looping is the caller's responsibility.
         for (const ch of animation.channels) {
             if (ch.targetNodeIndex < 0) continue;
             if (!out.has(ch.targetNodeIndex)) out.set(ch.targetNodeIndex, {});
-            out.get(ch.targetNodeIndex)[ch.targetPath] = this._sampleChannel(ch, t);
+            out.get(ch.targetNodeIndex)[ch.targetPath] = this._sampleChannel(ch, time);
         }
         return out;
     }

@@ -7,7 +7,8 @@
 //   • Canopy bounds precomputed in tracker (once/tree) not VS (once/vertex).
 //     This is the 18× perf win.
 //   • NO per-fragment anchor density loop. Noise-only porosity.
-//   • No sub-bands. Single distance range with fade in/out.
+//   • Mid tier still uses a single range, but the hull FS now has a
+//     near/far sub-band treatment for coverage and breakup.
 //   • Config from treeTierConfig.js, not TreeLODController's mid-near glob.
 //
 // Pipeline:
@@ -36,10 +37,38 @@ import {
 const MID_TREE_BYTES = 128;
 const TRUNK_INSTANCE_BYTES = 48;   // matches mid-near trunk layout — reuse scatter logic inline
 
+function resolveMidTierConfig(midConfigOverride) {
+    const base = JSON.parse(JSON.stringify(MID_TIER_CONFIG));
+    const override = midConfigOverride || {};
+    return {
+        ...base,
+        ...override,
+        hull: {
+            ...base.hull,
+            ...(override.hull || {}),
+        },
+        hullFrag: {
+            ...base.hullFrag,
+            ...(override.hullFrag || {}),
+        },
+        trunk: {
+            ...base.trunk,
+            ...(override.trunk || {}),
+        },
+    };
+}
+
 export class TreeMidSystem {
     constructor(device, assetStreamer, config = {}) {
         this.device = device;
         this.streamer = assetStreamer;
+        this._configOverride = {
+            tierRange: config.tierRange ? { ...config.tierRange } : null,
+            midConfig: config.midConfig ? JSON.parse(JSON.stringify(config.midConfig)) : null,
+            speciesProfiles: config.speciesProfiles
+                ? JSON.parse(JSON.stringify(config.speciesProfiles))
+                : null,
+        };
 
         // lodController is only used for detailRange (near-tier boundary)
         // to compute the crossfade overlap. All mid-tier config comes
@@ -50,8 +79,15 @@ export class TreeMidSystem {
         }
 
         // Snapshot config at construction. rebuildPipelines() re-reads.
-        this._range = { ...TREE_TIER_RANGES.mid };
-        this._cfg = JSON.parse(JSON.stringify(MID_TIER_CONFIG)); // deep copy for hot-reload safety
+        this._range = {
+            ...TREE_TIER_RANGES.mid,
+            ...(this._configOverride.tierRange || {}),
+        };
+        this._cfg = resolveMidTierConfig(this._configOverride.midConfig);
+        this._speciesProfiles = {
+            ...JSON.parse(JSON.stringify(SPECIES_CANOPY_PROFILES)),
+            ...(this._configOverride.speciesProfiles || {}),
+        };
         this.maxTrees = this._cfg.maxTrees;
 
         // ── GPU resources ──────────────────────────────────────────────────
@@ -101,6 +137,9 @@ export class TreeMidSystem {
         this._enabled = true;
         this._frameCount = 0;
         this._countReset = new Uint32Array([0]);
+        this._countReadbackBuffer = null;
+        this._countReadbackQueued = false;
+        this._countReadbackPending = false;
     }
 
     async initialize() {
@@ -123,6 +162,7 @@ export class TreeMidSystem {
             `[TreeMidSystem] Initialized: range=[${r.start}..${r.end}]m ` +
             `fadeIn=${r.fadeInWidth}m fadeOut=${r.fadeOutWidth}m ` +
             `maxTrees=${this.maxTrees} ` +
+            `endDensity=${Number(this._cfg.endDensityScale ?? 1.0).toFixed(2)} ` +
             `hull=${this._cfg.hull.lonSegments}×${this._cfg.hull.latSegments} ` +
             `vsAnchors=${this._cfg.hull.vsAnchorSamples}`
         );
@@ -136,8 +176,15 @@ export class TreeMidSystem {
         if (!this._initialized) return;
 
         // Re-read config module (caller may have mutated it).
-        this._range = { ...TREE_TIER_RANGES.mid };
-        this._cfg = JSON.parse(JSON.stringify(MID_TIER_CONFIG));
+        this._range = {
+            ...TREE_TIER_RANGES.mid,
+            ...(this._configOverride.tierRange || {}),
+        };
+        this._cfg = resolveMidTierConfig(this._configOverride.midConfig);
+        this._speciesProfiles = {
+            ...JSON.parse(JSON.stringify(SPECIES_CANOPY_PROFILES)),
+            ...(this._configOverride.speciesProfiles || {}),
+        };
 
         if (options.rebuildGeometry) {
             for (const geo of [this._hullGeo, this._trunkGeo]) {
@@ -326,6 +373,7 @@ export class TreeMidSystem {
         const code = buildMidTreeTrackerShader({
             workgroupSize: this._workgroupSize,
             maxTrees: this.maxTrees,
+            endDensityScale: this._cfg.endDensityScale,
             assetCount: this._assetSpeciesCount,
             treeSourceBandIds: this._sourceBands.map(b => b.band),
             treeSourceBandBases: this._sourceBands.map(b => b.base),
@@ -335,9 +383,10 @@ export class TreeMidSystem {
             fadeInWidth: this._range.fadeInWidth,
             fadeOutWidth: this._range.fadeOutWidth,
             // Tracker reads up to this many anchors for bounds. Bounds
-            // stabilize with ~24 samples even for dense templates.
+            // closer birch mid trees use fine anchors, so raise the sample
+            // budget enough to preserve crown breakup in the hull bounds.
             maxAnchorsForBounds: 32,
-            speciesProfiles: SPECIES_CANOPY_PROFILES,
+            speciesProfiles: this._speciesProfiles,
         });
 
         const mod = this.device.createShaderModule({ label: 'MidTracker-SM', code });
@@ -526,24 +575,30 @@ export class TreeMidSystem {
                     vsAnchorSamples: this._cfg.hull.vsAnchorSamples,
                     inflation: this._cfg.hull.inflation,
                     shrinkWrap: this._cfg.hull.shrinkWrap,
+                    gapShrink: this._cfg.hull.gapShrink,
                     verticalBias: this._cfg.hull.verticalBias,
                     topShrinkStart: this._cfg.hull.topShrinkStart,
                     topShrinkStrength: this._cfg.hull.topShrinkStrength,
+                    lumpNearScale: this._cfg.hull.lumpNearScale,
+                    lumpFarScale: this._cfg.hull.lumpFarScale,
+                    lumpNearDistance: this._cfg.hull.lumpNearDistance,
+                    lumpFarDistance: this._cfg.hull.lumpFarDistance,
                 }),
             });
             const fsMod = this.device.createShaderModule({
                 label: 'MidHull-FS',
                 code: buildMidHullFragmentShader({
                     ...fadeBounds,
+                    // Spread the whole hullFrag block. New Tier 1 fields
+                    // (baseCoverageNear/Far, subband*, macroGap*, edge*, bottomBreak)
+                    // flow through automatically. Legacy `baseCoverage` still
+                    // works via the fallback in the shader builder.
+                    ...this._cfg.hullFrag,
+                    // Keep this last — depends on runtime texture availability,
+                    // not config. Must not be overridable by hullFrag.
                     enableCanopyTexture: hasTex,
-                    baseCoverage: this._cfg.hullFrag.baseCoverage,
-                    coverageNoiseAmp: this._cfg.hullFrag.coverageNoiseAmp,
-                    coverageNoiseScale: this._cfg.hullFrag.coverageNoiseScale,
-                    bumpStrength: this._cfg.hullFrag.bumpStrength,
-                    brightness: this._cfg.hullFrag.brightness,
                 }),
             });
-
             const g0 = this.device.createBindGroupLayout({
                 label: 'MidHull-G0',
                 entries: [
@@ -710,6 +765,7 @@ export class TreeMidSystem {
         if (this._sourceBands.length === 0) return;
 
         this._frameCount++;
+        this._kickCountReadback();
         this._updateTrackerParams(camera);
         this._maybeRebuildTrackerBG();
         this._maybeRebuildTrackerDispatchArgsBG();
@@ -744,6 +800,8 @@ export class TreeMidSystem {
             pass.dispatchWorkgroups(1);
             pass.end();
         }
+
+        this._queueCountReadback(commandEncoder);
     }
 
     render(encoder) {
@@ -775,12 +833,58 @@ export class TreeMidSystem {
     setEnabled(enabled) { this._enabled = enabled; }
     isReady() { return this._initialized && this._enabled; }
 
+    _ensureCountReadbackBuffer() {
+        if (this._countReadbackBuffer) return;
+        this._countReadbackBuffer = this.device.createBuffer({
+            label: 'MidTree-CountReadback',
+            size: 256,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+    }
+
+    _queueCountReadback(commandEncoder) {
+        if (!commandEncoder || this._countReadbackQueued || this._countReadbackPending) return;
+        const shouldSample = this._frameCount === 60 || (this._frameCount % 240) === 0;
+        if (!shouldSample) return;
+
+        this._ensureCountReadbackBuffer();
+        if (!this._countReadbackBuffer) return;
+
+        commandEncoder.copyBufferToBuffer(
+            this._treeCountBuffer,
+            0,
+            this._countReadbackBuffer,
+            0,
+            4
+        );
+        this._countReadbackQueued = true;
+    }
+
+    _kickCountReadback() {
+        if (!this._countReadbackQueued || this._countReadbackPending || !this._countReadbackBuffer) return;
+
+        this._countReadbackPending = true;
+        this._countReadbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
+            const data = new Uint32Array(this._countReadbackBuffer.getMappedRange(0, 4).slice(0));
+            const count = data[0] >>> 0;
+            Logger.info(`[TreeMidSystem] tracked=${count}/${this.maxTrees}`);
+            this._countReadbackBuffer.unmap();
+            this._countReadbackQueued = false;
+            this._countReadbackPending = false;
+        }).catch((err) => {
+            Logger.warn(`[TreeMidSystem] count readback failed: ${err?.message || err}`);
+            try { this._countReadbackBuffer?.unmap(); } catch (_) {}
+            this._countReadbackQueued = false;
+            this._countReadbackPending = false;
+        });
+    }
+
     dispose() {
         this._texBaker?.dispose();
         for (const b of [
             this._treeBuffer, this._treeCountBuffer, this._trackerParamBuffer,
             this._assetSpeciesBuffer, this._trackerDispatchArgsBuffer,
-            this._trunkIndirectBuffer, this._hullIndirectBuffer,
+            this._trunkIndirectBuffer, this._hullIndirectBuffer, this._countReadbackBuffer,
         ]) b?.destroy();
         for (const geo of [this._hullGeo, this._trunkGeo]) {
             if (!geo) continue;

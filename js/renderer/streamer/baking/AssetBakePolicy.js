@@ -51,8 +51,10 @@ const ARCHETYPE_PROFILE_OVERRIDES = Object.freeze({
     tree_standard: {
         preserveRuntime: true,
         allowCluster: true,
-        allowCoverage: true,
-        fixedIndividualDistance: 450.0,
+        // Trees now use one simplified grove tier past the individual-tree
+        // path. Keep coverage disabled so we never fall back to the old
+        // tile-scale patch/blob representation.
+        allowCoverage: false,
         fixedClusterDistance: 8000.0,
         fixedCoverageDistance: 25000.0,
     },
@@ -429,11 +431,37 @@ export class AssetBakePolicy {
     }
 
     _buildArchetypeMetadata() {
+        const treeSourceRange = this.engineConfig?.trees?._derived?.sourceNominalRange;
+        const clusterNominalEnd = this.engineConfig?.trees?._derived?.clusterNominalEnd;
+        const farNominalEnd = this.engineConfig?.trees?._derived?.farNominalEnd;
+
         const archetypes = this.assetRegistry.getAllArchetypes?.() || [];
         for (const archetype of archetypes) {
             if (!archetype) continue;
 
-            const profile = mergeProfile(DEFAULT_PROFILE, ARCHETYPE_PROFILE_OVERRIDES[archetype.name]);
+            let profile = mergeProfile(DEFAULT_PROFILE, ARCHETYPE_PROFILE_OVERRIDES[archetype.name]);
+            if (archetype.name === 'tree_standard' && Number.isFinite(treeSourceRange)) {
+                profile = { ...profile, fixedIndividualDistance: treeSourceRange };
+            }
+            if (archetype.name === 'tree_standard' && Number.isFinite(clusterNominalEnd)) {
+                profile = {
+                    ...profile,
+                    fixedClusterDistance: Math.max(
+                        treeSourceRange ?? 0,
+                        clusterNominalEnd
+                    ),
+                };
+            }
+            if (archetype.name === 'tree_standard' && Number.isFinite(farNominalEnd)) {
+                profile = {
+                    ...profile,
+                    fixedCoverageDistance: Math.max(
+                        clusterNominalEnd ?? 0,
+                        farNominalEnd
+                    ),
+                };
+            }
+
             const variants = (this.assetRegistry.getAllVariants?.() || [])
                 .filter(variant => variant?.archetype?.index === archetype.index);
             const variantMeta = variants

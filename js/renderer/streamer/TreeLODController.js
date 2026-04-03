@@ -62,34 +62,40 @@ export class TreeLODController {
         this.leafFadeStart = this.detailRange * leafRatio;
 
         this.maxTotalLeaves = config.maxTotalLeaves ?? 600_000;
-        this.leafSizeMin    = config.leafSizeMin ?? 0.05;
-        this.leafSizeMax    = config.leafSizeMax ?? 0.25;
+        this.leafSizeMin = 0.05;
+        this.leafSizeMax = 0.25;
+        this.leafSizeScale = Array.isArray(config.leafSizeScale)
+            ? [...config.leafSizeScale]
+            : [1.0, 1.36, 2.0, 2.0];
 
-        this.birchLadder = config.birchLadder ?? {
-            l0: { cards:  1, w: 0.25, h: 0.35 },
-            l1: { cards:  1, w: 1.55, h: 1.7 },
-            l2: { cards: 20, w: 4.75, h: 4.9 },
-            l3: { cards: 10, w: 0.6, h: 0.504 },
-        };
-        this.birchTransition = config.birchTransition ?? {
+        this.birch = {
             nearDistance: 20.0,
-            fadeDistance: 80.0,
-            nearLeaves: 4000,
-            nearW: 0.36,
-            nearH: 0.54,
-            midW: 0.55,
-            midH: 0.825,
+            fadeDistance: this.detailRange,
+            closeSize: 0.36,
+            settledSize: 0.55,
+            aspect: 1.5,
+            closeLeaves: 4000,
+            closeCardsPerAnchor: 10,
+            settledCardsPerAnchor: 1,
+            closeW: 0.36,
+            closeH: 0.54,
+            settledW: 0.55,
+            settledH: 0.825,
+            ...(config.birch || {}),
+        };
+
+        const leafCounts = config.leafCounts ?? {
+            generic: [6000, 3000, 1500, 1500],
+            [SPECIES_SPRUCE]: [3000, 1500, 700, 700],
+            [SPECIES_PINE]: [3000, 1500, 700, 700],
         };
 
         this.genericLeafCounts = this._padCounts(
-            config.genericLeafCounts ?? [6000, 3000, 1500]
+            leafCounts.generic ?? [6000, 3000, 1500, 1500]
         );
         this.speciesLeafCounts = {};
-        const inCounts = config.speciesLeafCounts ?? {
-            [SPECIES_SPRUCE]: [3000, 1500, 700],
-            [SPECIES_PINE]:   [3000, 1500, 700],
-        };
-        for (const [k, v] of Object.entries(inCounts)) {
+        for (const [k, v] of Object.entries(leafCounts)) {
+            if (k === 'generic') continue;
             this.speciesLeafCounts[k] = this._padCounts(v);
         }
 
@@ -466,28 +472,25 @@ export class TreeLODController {
 
     getLeafScatterShaderConfig() {
         const spruce = this.getLeafCounts(SPECIES_SPRUCE);
-        const bl = this.birchLadder;
-        const bt = this.birchTransition;
+        const birch = this.birch;
         return {
             maxCloseTrees: this.maxCloseTrees,
             maxLeaves:     this.maxTotalLeaves,
-            birchL0Cards: bl.l0.cards, birchL0W: bl.l0.w,     birchL0H: bl.l0.h,
-            birchL1Cards: bl.l1.cards, birchL1W: bl.l1.w,     birchL1H: bl.l1.h,
-            birchL2Cards: bl.l2.cards, birchL2W: bl.l2.w,     birchL2H: bl.l2.h,
-            birchL3Cards: bl.l3.cards, birchL3W: bl.l3.w,     birchL3H: bl.l3.h,
-            birchNearDistance: bt.nearDistance,
-            birchFadeDistance: bt.fadeDistance,
-            birchNearLeaves: bt.nearLeaves,
-            birchNearW: bt.nearW,
-            birchNearH: bt.nearH,
-            birchMidW: bt.midW,
-            birchMidH: bt.midH,
             l0Leaves: this.genericLeafCounts[0],
             l1Leaves: this.genericLeafCounts[1],
             l2Leaves: this.genericLeafCounts[2],
             spruceL0Leaves: spruce[0],
             spruceL1Leaves: spruce[1],
             spruceL2Leaves: spruce[2],
+            birchNearDistance: birch.nearDistance,
+            birchFadeDistance: birch.fadeDistance,
+            birchCloseLeaves: birch.closeLeaves,
+            birchCloseCards: birch.closeCardsPerAnchor,
+            birchSettledCards: birch.settledCardsPerAnchor,
+            birchCloseW: birch.closeW,
+            birchCloseH: birch.closeH,
+            birchSettledW: birch.settledW,
+            birchSettledH: birch.settledH,
         };
     }
 

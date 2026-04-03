@@ -9,6 +9,29 @@
 //
 // The hull FS has NO anchor loop. Porosity is noise-only. At 200m+
 // anchor-cluster density is below the Nyquist limit anyway.
+//
+// ── TIER 1 PASS (hull FS only) ──────────────────────────────────────────
+// Attacks "too solid, too uniform" without touching the tracker or VS:
+//   • Sub-band split: near (~180–450m) vs far (~450–1000m). Near gets
+//     lower base coverage and heavier noise treatment. Far stays close
+//     to the old look — tiny trees alias if too porous.
+//   • Macro-gap noise: very-low-freq noise carving large holes, faking
+//     anchor-sparse regions without reading anchor data.
+//   • Noise-modulated edge erosion: the threshold where side-thinning
+//     kicks in is itself noisy → irregular silhouette boundary instead
+//     of a uniform ring. Plus a separate "rim bite" term at the very edge.
+//   • Bottom breakup: ragged lowest-branch zone.
+//   • Drive-by fix: sideFacing now uses planet-relative up instead of
+//     world-Y (was wrong anywhere except the equator).
+//
+// ── TIER 3 PASS (hull VS) ──────────────────────────────────────────────
+// Cheap silhouette fidelity:
+//   • Gap-aware anchor support lets the hull SHRINK where no sampled
+//     anchors support the current azimuth instead of only ever expanding.
+//     This pulls in unsupported sectors and reduces floating leaf blobs
+//     at the horizon.
+//   • Distance-scaled silhouette noise keeps near-mid trees more broken
+//     up, then eases toward the simpler far silhouette automatically.
 
 const MID_TREE_INFO_WGSL = /* wgsl */`
 struct MidTreeInfo {
@@ -24,11 +47,15 @@ struct MidTreeInfo {
 `;
 
 const DITHER_WGSL = /* wgsl */`
-// Spatial hash dither. Stable in screen space, no temporal shimmer
-// (unlike Bayer which can alias with geometry edges at certain distances).
-fn ditherDiscard(fragCoord: vec4<f32>, fade: f32) -> bool {
-    let px = vec2<u32>(fragCoord.xy);
-    var s = px.x * 1664525u + px.y * 1013904223u + 747796405u;
+// World-space hash dither for tier transitions. This keeps the fade pattern
+// attached to the tree instead of the screen, which is much more stable while
+// the camera moves through the near↔mid overlap.
+fn ditherDiscard(worldPos: vec3<f32>, fade: f32) -> bool {
+    let cell = vec3<i32>(floor(worldPos * 10.0));
+    var s = bitcast<u32>(cell.x) * 1664525u
+          + bitcast<u32>(cell.y) * 1013904223u
+          + bitcast<u32>(cell.z) * 2246822519u
+          + 747796405u;
     s = (s ^ (s >> 16u)) * 2246822519u;
     s = s ^ (s >> 13u);
     let n = f32(s & 0x00FFFFFFu) / 16777216.0;
@@ -88,6 +115,7 @@ struct VertexOutput {
     @location(2) vHeight: f32,
     @location(3) vDist: f32,
     @location(4) @interpolate(flat) vTierFade: f32,
+    @location(5) vWorldPos: vec3<f32>,
 }
 
 fn getSpeciesBarkColor(s: u32) -> vec3<f32> {
@@ -137,6 +165,7 @@ fn main(input: VertexInput, @builtin(instance_index) instIdx: u32) -> VertexOutp
     out.vHeight = input.uv.y;
     out.vDist = length(viewPos.xyz);
     out.vTierFade = bitcast<f32>(tree.tierFadeBits);
+    out.vWorldPos = worldPos;
     return out;
 }
 `;
@@ -156,12 +185,12 @@ const FADE_OUT_END:   f32 = ${fmt(config.fadeOutEnd ?? 600)};
 const TRUNK_FADE_END: f32 = ${fmt(config.trunkFadeEnd ?? 400)};
 
 struct FragInput {
-    @builtin(position) fragCoord: vec4<f32>,
     @location(0) vNormal: vec3<f32>,
     @location(1) @interpolate(flat) vSpecies: u32,
     @location(2) vHeight: f32,
     @location(3) vDist: f32,
     @location(4) @interpolate(flat) vTierFade: f32,
+    @location(5) vWorldPos: vec3<f32>,
 }
 
 @group(1) @binding(0) var<uniform> fragUniforms: MidFragUniforms;
@@ -180,11 +209,10 @@ fn getSpeciesBarkColor(s: u32) -> vec3<f32> {
 
 @fragment
 fn main(in: FragInput) -> @location(0) vec4<f32> {
-    let tierIn  = smoothstep(FADE_IN_START, FADE_IN_END, in.vDist);
-    let tierOut = 1.0 - smoothstep(FADE_OUT_START, FADE_OUT_END, in.vDist);
     let trunkOut = 1.0 - smoothstep(TRUNK_FADE_END * 0.75, TRUNK_FADE_END, in.vDist);
-    let fade = tierIn * tierOut * trunkOut;
-    if (ditherDiscard(in.fragCoord, fade)) { discard; }
+    let fade = clamp(in.vTierFade * trunkOut, 0.0, 1.0);
+    if (fade <= 0.0) { discard; }
+    if (fade < 0.999 && ditherDiscard(in.vWorldPos, fade)) { discard; }
 
     let N = normalize(in.vNormal);
     let L = normalize(fragUniforms.lightDirection);
@@ -224,13 +252,16 @@ export function buildMidHullVertexShader(config = {}) {
     // Anchor support loop is only emitted if samples > 0. Pure ellipsoid
     // is a valid (and cheapest) configuration.
     const anchorSupportBlock = VS_ANCHOR_SAMPLES > 0 ? /* wgsl */`
-    // ── Residual anchor support ─────────────────────────────────────────
+    // ── Residual anchor support with gap-aware shrink ──────────────────
     // Bounds are already computed. This pass adds per-direction
     // lumpiness by checking which anchors extend furthest in the
-    // current vertex's direction. Only ${VS_ANCHOR_SAMPLES} reads.
+    // current vertex's direction, but it also tracks how much support
+    // exists in that azimuth. Unsupported sectors shrink instead of
+    // remaining a full ellipsoid. Only ${VS_ANCHOR_SAMPLES} reads.
     let srcCount = tree.anchorCount;
     if (srcCount > 0u) {
         var supportRad: f32 = 0.0;
+        var supportDensity: f32 = 0.0;
         let sampleCount = min(srcCount, ${VS_ANCHOR_SAMPLES}u);
         for (var i = 0u; i < sampleCount; i++) {
             var off = i;
@@ -243,10 +274,16 @@ export function buildMidHullVertexShader(config = {}) {
                 let crossFrac = sqrt(max(0.0, 1.0 - (dy * dy) / (spreadY * spreadY)));
                 let spreadR = clamp(a.spread * (tree.scaleX + tree.scaleZ) * 0.5, 0.05, 2.0);
                 let rel = vec2<f32>(lp.x - centre.x, lp.z - centre.z);
-                supportRad = max(supportRad, dot(rel, dirXZ) + spreadR * crossFrac);
+                let along = dot(rel, dirXZ);
+                if (along > -spreadR * 0.3) {
+                    supportRad = max(supportRad, along + spreadR * crossFrac);
+                    supportDensity += crossFrac * max(a.density, 0.0);
+                }
             }
         }
-        finalRad = mix(finalRad, max(finalRad, supportRad), HULL_SHRINK_WRAP);
+        let supportNorm = clamp(supportDensity / (f32(sampleCount) * 0.12), 0.0, 1.0);
+        let gapShrink = mix(HULL_GAP_SHRINK, 1.0, supportNorm);
+        finalRad = mix(finalRad * gapShrink, max(finalRad, supportRad), HULL_SHRINK_WRAP);
     }
     ` : `// VS_ANCHOR_SAMPLES = 0: pure ellipsoid, no anchor reads.`;
 
@@ -262,9 +299,14 @@ struct AnchorPoint {
 
 const HULL_INFLATION:    f32 = ${fmt(config.inflation, 0.95)};
 const HULL_SHRINK_WRAP:  f32 = ${fmt(config.shrinkWrap, 0.55)};
+const HULL_GAP_SHRINK:   f32 = ${fmt(config.gapShrink, 0.68)};
 const HULL_VERT_BIAS:    f32 = ${fmt(config.verticalBias, 1.15)};
 const TOP_SHRINK_START:  f32 = ${fmt(config.topShrinkStart, 0.60)};
 const TOP_SHRINK_STRENGTH: f32 = ${fmt(config.topShrinkStrength, 0.35)};
+const LUMP_NEAR_SCALE:   f32 = ${fmt(config.lumpNearScale, 1.8)};
+const LUMP_FAR_SCALE:    f32 = ${fmt(config.lumpFarScale, 1.0)};
+const LUMP_NEAR_DIST:    f32 = ${fmt(config.lumpNearDistance, 250.0)};
+const LUMP_FAR_DIST:     f32 = ${fmt(config.lumpFarDistance, 550.0)};
 
 @group(0) @binding(0) var<uniform>       uniforms: MidUniforms;
 @group(0) @binding(1) var<storage, read> trees: array<MidTreeInfo>;
@@ -324,6 +366,23 @@ fn main(input: VertexInput, @builtin(instance_index) instIdx: u32) -> VertexOutp
     let dirLen = length(input.position.xz);
     if (dirLen > 1e-5) { dirXZ = input.position.xz / dirLen; }
 
+    let seedF = f32(tree.variantSeed & 65535u) * (1.0 / 65535.0);
+    let azNoise = sin(
+        dirXZ.x * (6.0 + seedF * 3.0) +
+        dirXZ.y * (5.0 + seedF * 2.0) +
+        seedF * 6.2831853
+    );
+    let azNoise2 = sin(
+        dirXZ.x * (11.0 + seedF * 5.0) -
+        dirXZ.y * (9.0 + seedF * 4.0) +
+        seedF * 12.5663706
+    );
+    let lumpScale = mix(
+        LUMP_NEAR_SCALE,
+        LUMP_FAR_SCALE,
+        smoothstep(LUMP_NEAR_DIST, LUMP_FAR_DIST, tree.distanceToCamera)
+    );
+
     // Base ellipsoid radius at this height. Cosine profile = smooth
     // dome top and bottom.
     let vertT = abs(yN - 0.5) * 2.0;  // 0 at equator, 1 at poles
@@ -335,12 +394,21 @@ fn main(input: VertexInput, @builtin(instance_index) instIdx: u32) -> VertexOutp
     // Top taper: prevents mushroom dome on tall canopies.
     let topT = smoothstep(TOP_SHRINK_START, 0.98, yN);
     finalRad = finalRad * (1.0 - topT * TOP_SHRINK_STRENGTH);
+    let shoulderBand = 1.0 - smoothstep(0.68, 1.0, yN);
+    let sideLump = 1.0
+                 + azNoise * 0.08 * shoulderBand * lumpScale
+                 + azNoise2 * 0.04 * shoulderBand * lumpScale;
+    finalRad = finalRad * max(sideLump, 0.72);
+
+    let crownLift = smoothstep(0.50, 0.92, yN) * azNoise * extent.y * 0.05 * lumpScale;
+    let crownBreak = smoothstep(0.72, 1.0, yN) * azNoise2 * extent.y * 0.035 * lumpScale;
+    let targetYShaped = targetY + crownLift + crownBreak;
 
     finalRad = max(finalRad, 0.02);  // degenerate safety
 
     let deformedLocal = vec3<f32>(
         centre.x + dirXZ.x * finalRad,
-        targetY,
+        targetYShaped,
         centre.z + dirXZ.y * finalRad
     );
 
@@ -378,21 +446,31 @@ export function buildMidHullFragmentShader(config = {}) {
     const fmt = (v) => Number(v).toFixed(3);
     const hasTex = config.enableCanopyTexture === true;
 
+    // ── Backward-compat config resolution ──────────────────────────────
+    // Old configs have a single `baseCoverage`. If only that is present,
+    // both near and far resolve to the same value → sub-band gradient
+    // is a no-op and old behaviour is preserved.
+    const baseCoverageNear = config.baseCoverageNear ?? config.baseCoverage ?? 0.56;
+    const baseCoverageFar  = config.baseCoverageFar  ?? config.baseCoverage ?? 0.74;
+
     const texBinds = hasTex ? /* wgsl */`
 @group(1) @binding(1) var canopyTex:  texture_2d_array<f32>;
 @group(1) @binding(2) var canopySamp: sampler;
 ` : '';
 
+    // Note: uses `N` (normalized once, early) rather than re-normalizing.
     const albedoBlock = hasTex ? /* wgsl */`
     // Triplanar sample, layer 0 (generic leafy noise from MidNearTextureBaker).
     let lp = in.vLocalPos * 1.2;
-    let w = abs(normalize(in.vNormal)) + vec3<f32>(0.001);
+    let w = abs(N) + vec3<f32>(0.001);
     let wn = w / (w.x + w.y + w.z);
     let tx = textureSample(canopyTex, canopySamp, lp.yz, 0).rgb;
     let ty = textureSample(canopyTex, canopySamp, lp.xz, 0).rgb;
     let tz = textureSample(canopyTex, canopySamp, lp.xy, 0).rgb;
     let texTri = tx * wn.x + ty * wn.y + tz * wn.z;
     albedo = mix(albedo * 0.4, texTri * 1.6, 0.85);
+    let texLum = dot(texTri, vec3<f32>(0.299, 0.587, 0.114));
+    coverage = coverage + (texLum - 0.5) * 0.24;
 ` : /* wgsl */`
     // No texture: procedural value noise for albedo breakup.
     let p = in.vLocalPos * 2.2;
@@ -410,11 +488,49 @@ const FADE_IN_END:    f32 = ${fmt(config.fadeInEnd ?? 220)};
 const FADE_OUT_START: f32 = ${fmt(config.fadeOutStart ?? 520)};
 const FADE_OUT_END:   f32 = ${fmt(config.fadeOutEnd ?? 600)};
 
-const BASE_COVERAGE:     f32 = ${fmt(config.baseCoverage ?? 0.72)};
+// ── [TIER 1] Sub-band split ───────────────────────────────────────────────
+// Near sub-band (close half of mid-tier) gets lower coverage and stronger
+// noise treatment. Far sub-band eases back toward the old look — at 800m
+// a tree is ~20px tall and aggressive porosity just aliases.
+//
+// subBandT: 0 in near sub-band, 1 in far sub-band.
+// nearWeight: multiplier for near-only effects (1.0 near → ~0.35 far).
+// Set SUBBAND_FAR_DAMP = 0.0 to disable all sub-band damping.
+const BASE_COVERAGE_NEAR: f32 = ${fmt(baseCoverageNear)};
+const BASE_COVERAGE_FAR:  f32 = ${fmt(baseCoverageFar)};
+const SUBBAND_SPLIT:      f32 = ${fmt(config.subbandSplit ?? 450)};
+const SUBBAND_BLEND:      f32 = ${fmt(config.subbandBlend ?? 120)};
+const SUBBAND_FAR_DAMP:   f32 = ${fmt(config.subbandFarDamp ?? 0.65)};
+
 const COV_NOISE_AMP:     f32 = ${fmt(config.coverageNoiseAmp ?? 0.25)};
 const COV_NOISE_SCALE:   f32 = ${fmt(config.coverageNoiseScale ?? 2.8)};
 const BUMP_STRENGTH:     f32 = ${fmt(config.bumpStrength ?? 0.12)};
 const BRIGHTNESS:        f32 = ${fmt(config.brightness ?? 1.05)};
+
+// ── [TIER 1] Macro-gap noise ──────────────────────────────────────────────
+// Very low frequency (~1 cycle per canopy). Carves a few large holes and
+// rare dense clumps — fakes the "no anchors here" / "anchor cluster here"
+// look without touching the anchor buffer. Asymmetric remap: gaps are
+// more prominent than bumps because real canopies read that way.
+const MACRO_GAP_SCALE:    f32 = ${fmt(config.macroGapScale ?? 0.55)};
+const MACRO_GAP_STRENGTH: f32 = ${fmt(config.macroGapStrength ?? 0.22)};
+
+// ── [TIER 1] Noise-modulated edge erosion ─────────────────────────────────
+// Old path: erosion kicks in at a fixed sideFacing threshold (0.58) →
+// perfectly uniform ring of thinning. New path: the threshold itself is
+// noisy (varies per-fragment by EDGE_NOISE_AMP) so the boundary is
+// irregular. Plus a separate rim-bite term that chews the very outer
+// silhouette edge regardless.
+const EDGE_START_BASE: f32 = ${fmt(config.edgeStartBase ?? 0.40)};
+const EDGE_NOISE_AMP:  f32 = ${fmt(config.edgeNoiseAmp  ?? 0.22)};
+const EDGE_BASE_THIN:  f32 = ${fmt(config.edgeBaseThin  ?? 0.12)};
+const EDGE_RIM_BOOST:  f32 = ${fmt(config.edgeRimBoost  ?? 0.14)};
+
+// ── [TIER 1] Bottom breakup ───────────────────────────────────────────────
+// Near-tier trees have visible lowest branches sticking out. The hull's
+// bottom rim should be ragged, not a smooth dome. Noise-driven so each
+// tree has a different ragged profile.
+const BOTTOM_BREAK: f32 = ${fmt(config.bottomBreak ?? 0.14)};
 
 struct FragInput {
     @builtin(position) fragCoord: vec4<f32>,
@@ -445,10 +561,26 @@ fn noise3(p: vec3<f32>) -> f32 {
 
 @fragment
 fn main(in: FragInput) -> @location(0) vec4<f32> {
-    // ── Tier fade ────────────────────────────────────────────────────────
-    let fadeIn  = smoothstep(FADE_IN_START, FADE_IN_END, in.vDist);
-    let fadeOut = 1.0 - smoothstep(FADE_OUT_START, FADE_OUT_END, in.vDist);
-    let tierFade = fadeIn * fadeOut;
+    // Use the per-tree fade resolved by the tracker so the whole tree fades
+    // coherently instead of changing coverage across front/back fragments.
+    let tierFade = clamp(in.vTierFade, 0.0, 1.0);
+    if (tierFade <= 0.0) { discard; }
+
+    // ── Common setup ─────────────────────────────────────────────────────
+    // N and upN are used by multiple blocks below; compute once.
+    // [TIER 1 FIX] upN replaces the old world-Y assumption for sideFacing.
+    // World-Y was only correct near the planet's equator — at poles it
+    // pointed sideways. dot(N, upN) is the correct planet-relative test.
+    let seedF = f32(in.vSeed & 65535u) * (1.0 / 65535.0);
+    let seedOff = vec3<f32>(seedF * 11.3 + 0.7, seedF * 7.9 + 1.3, seedF * 13.7 + 2.1);
+    let N = normalize(in.vNormal);
+    let upN = normalize(in.vWorldPos - hullUniforms.planetOrigin);
+
+    // ── [TIER 1] Sub-band weighting ──────────────────────────────────────
+    let subBandT = smoothstep(SUBBAND_SPLIT - SUBBAND_BLEND,
+                              SUBBAND_SPLIT + SUBBAND_BLEND, in.vDist);
+    let nearWeight = 1.0 - subBandT * SUBBAND_FAR_DAMP;
+    let baseCov = mix(BASE_COVERAGE_NEAR, BASE_COVERAGE_FAR, subBandT);
 
     // ── Porosity: noise-driven coverage mask in LOCAL space ──────────────
     // This is the whole FS-side trick. Instead of per-fragment anchor
@@ -458,37 +590,89 @@ fn main(in: FragInput) -> @location(0) vec4<f32> {
     // Coverage noise is camera-independent (local-space eval) so the
     // porosity pattern is glued to the tree, not the screen. Walking
     // around a tree doesn't change which bits are cut out.
-    let seedF = f32(in.vSeed & 65535u) * (1.0 / 65535.0);
-    let seedOff = vec3<f32>(seedF * 11.3 + 0.7, seedF * 7.9 + 1.3, seedF * 13.7 + 2.1);
+    let covP = in.vLocalPos * COV_NOISE_SCALE + seedOff;
+    let covNoise = noise3(covP);
+    let covNoiseHi = noise3(covP * 2.4 + vec3<f32>(3.7, 5.1, 1.9));
+    var coverage = baseCov + (covNoise - 0.5) * COV_NOISE_AMP;
+    coverage = coverage + (covNoiseHi - 0.5) * COV_NOISE_AMP * 0.45;
 
-    let covNoise = noise3(in.vLocalPos * COV_NOISE_SCALE + seedOff);
-    var coverage = BASE_COVERAGE + (covNoise - 0.5) * COV_NOISE_AMP;
+    // ── [TIER 1] Macro-gap noise ─────────────────────────────────────────
+    // Much lower frequency than covP — a single macro cycle spans most
+    // of a canopy. The asymmetric remap makes low noise values carve
+    // a large gap while high values give only a small density bump.
+    // This reads as "sparse region between anchor clumps" from a distance.
+    // Fades with nearWeight: at 800m the gaps would just look like noise.
+    let macroP = in.vLocalPos * MACRO_GAP_SCALE + seedOff * 0.4;
+    let macroN = noise3(macroP);
+    let macroGap  = smoothstep(0.35, 0.05, macroN);   // 0 most of the time, 1 in rare low spots
+    let macroBump = smoothstep(0.80, 0.98, macroN);   // 0 most of the time, 1 in rare high spots
+    coverage = coverage
+             - macroGap  * MACRO_GAP_STRENGTH * nearWeight
+             + macroBump * MACRO_GAP_STRENGTH * 0.35;
 
-    // Height modulation: denser at mid-canopy, sparser at top/bottom.
+    // ── Height modulation: denser at mid-canopy, sparser at top/bottom ───
     // This is what real canopies look like from a distance — the
     // mid-belt has the most leaf mass.
     let heightMod = 1.0 - pow(abs(in.vLocalHeight - 0.55) * 2.0, 1.8) * 0.35;
     coverage = coverage * heightMod;
+    let crownThin = smoothstep(0.72, 1.0, in.vLocalHeight);
+    coverage = coverage - crownThin * 0.12;
 
-    // Side-view boost: looking at the horizon, a canopy silhouette
-    // should be mostly opaque (you're looking through more leaf depth).
-    // Looking down from above, it can be more porous.
+    // ── [TIER 1] Bottom breakup ──────────────────────────────────────────
+    // Vertical frequency in the noise input gives ragged-branch-tip
+    // variation rather than a smooth fade. bottomT gates it to the
+    // lowest ~20% of the canopy so it doesn't bleed upward.
+    let bottomT = 1.0 - smoothstep(0.02, 0.22, in.vLocalHeight);
+    let bottomN = noise3(vec3<f32>(in.vLocalPos.xz * 2.2, in.vLocalHeight * 6.0) + seedOff * 0.8);
+    coverage = coverage - bottomT * (BOTTOM_BREAK * 0.4 + bottomN * BOTTOM_BREAK) * nearWeight;
+
+    // ── [TIER 1] Noise-modulated edge erosion + rim bite ─────────────────
+    // sideFacing: 0 at top/bottom of canopy, 1 at equator (looking at
+    // the "side" of the blob). Uses planet-relative up, not world Y.
+    //
+    // edgeN drives two things:
+    //   1. Where erosion STARTS (edgeStart) — this is the big one. A
+    //      per-fragment noisy threshold means the erosion boundary is
+    //      itself irregular. Some azimuthal slices start eroding at
+    //      sideFacing=0.40, others at 0.62. The canopy's side profile
+    //      becomes jagged instead of a smooth ring.
+    //   2. Rim bite intensity — noise-modulated so the very outer edge
+    //      has variable chunks taken out.
+    //
+    // Higher vertical freq (4.2×) in edgeNoiseP gives vertical bands
+    // of varying erosion → the silhouette edge has vertical texture.
+    let upDot = dot(N, upN);
+    let sideFacing = sqrt(max(0.0, 1.0 - upDot * upDot));
+
+    let edgeNoiseP = vec3<f32>(in.vLocalPos.x * 1.7,
+                               in.vLocalHeight * 4.2,
+                               in.vLocalPos.z * 1.7) + seedOff * 1.3;
+    let edgeN = noise3(edgeNoiseP);
+    let edgeStart = EDGE_START_BASE + edgeN * EDGE_NOISE_AMP;
+    let edgeErode = smoothstep(edgeStart, 0.97, sideFacing);
+    let rimBite = smoothstep(0.88, 0.99, sideFacing);
+    coverage = coverage
+             - edgeErode * (EDGE_BASE_THIN + (1.0 - covNoise) * 0.10)
+             - rimBite   * EDGE_RIM_BOOST  * (0.5 + edgeN * 0.5);
+
+    // ── Side-view boost ──────────────────────────────────────────────────
+    // Looking at the horizon, a canopy silhouette should be mostly
+    // opaque (you're looking through more leaf depth). Looking down
+    // from above, it can be more porous. Reuses upN.
     let V = normalize(hullUniforms.cameraPosition - in.vWorldPos);
-    let upN = normalize(in.vWorldPos - hullUniforms.planetOrigin);
     let sideView = 1.0 - abs(dot(V, upN));       // 0 = top-down, 1 = horizontal
     coverage = coverage + sideView * 0.12;
 
-    coverage = clamp(coverage, 0.15, 0.95);
+    coverage = clamp(coverage, 0.10, 0.93);
 
-    // Combine tier fade and coverage, discard via local-space hash.
+    // ── Combine tier fade and coverage, discard via local-space hash ─────
     // The hash is evaluated at higher frequency than the coverage noise
     // so the discard pattern is fine-grained.
-    let discardNoise = noise3(in.vLocalPos * 18.0 + seedOff * 2.0);
+    let discardNoise = noise3(in.vLocalPos * 18.0 + seedOff * 2.0) * 0.65
+                     + noise3(in.vLocalPos * 33.0 + seedOff * 4.0) * 0.35;
     if (discardNoise > tierFade * coverage) { discard; }
 
     // ── Lighting ─────────────────────────────────────────────────────────
-    let N = normalize(in.vNormal);
-
     // Cheap pseudo-bump in tangent frame.
     var t1 = cross(N, vec3<f32>(0.0, 1.0, 0.0));
     if (dot(t1, t1) < 1e-6) { t1 = cross(N, vec3<f32>(1.0, 0.0, 0.0)); }

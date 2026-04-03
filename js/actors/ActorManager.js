@@ -1,6 +1,4 @@
 // js/actors/ActorManager.js
-//
-// UPDATED — integrates NavigationController for click-to-move pathfinding.
 
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js';
 import { Logger } from '../config/Logger.js';
@@ -9,9 +7,8 @@ import { CharacterController } from './CharacterController.js';
 import { CharacterCameraController } from './CharacterCameraController.js';
 import { ActorGPUBuffers } from './ActorGPUBuffers.js';
 import { MovementResolverPipeline } from './MovementResolverPipeline.js';
-import { AnimationSampler } from '../assets/gltf/AnimationSampler.js';
-
-
+import { AnimationPlayer } from '../assets/gltf/AnimationPlayer.js';
+import { CharacterDescriptor } from './config/CharacterDescriptor.js';
 // Navigation imports
 import { TerrainRaycaster } from './nav/TerrainRaycaster.js';
 import { ObjectPicker } from './nav/ObjectPicker.js';
@@ -19,15 +16,14 @@ import { LocalPathfinder } from './nav/LocalPathfinder.js';
 import { NavigationController } from './nav/NavigationController.js';
 import { DestinationMarker } from './nav/DestinationMarker.js';
 import {
-    ActorType,
-    MovementState,
-    AnimationId,
+    ActorType, MovementState, AnimationId,
+    AnimationPolicy, DEFAULT_ANIMATION_POLICY,
     IntentFlags,
-    ANIMATION_NAME_PATTERNS
 } from './ActorState.js';
 
 export class ActorManager {
     constructor(options) {
+        this._modelCache = new Map();  
         this.treeDetailSystem = options.treeDetailSystem;
         this.device = options.device;
         this.planetConfig = options.planetConfig;
@@ -119,47 +115,52 @@ export class ActorManager {
         this._npcManager = npcManager;
     }
 
-
-    async createPlayer(glbUrl, spawnPos, modelScale = 1.0) {
+    async createPlayer(charDescriptorUrl, spawnPos) {
+        const { GLTFLoader } = await import('../assets/gltf/GLTFLoader.js');
+        const loader = new GLTFLoader({ verbose: false });
+    
+        const desc = await CharacterDescriptor.load(charDescriptorUrl, loader, this._modelCache);
+        const model = desc.model;
+    
         const actor = new CharacterActor({
             name: 'Player',
-            modelScale,
-            moveSpeed: this.engineConfig?.player?.baseMoveSpeed ?? 4.0,
-            maxSlopeDeg: 45,
-            health: 100,
-            maxHealth: 100,
-            stamina: this.engineConfig?.player?.staminaMax ?? 100,
-            maxStamina: this.engineConfig?.player?.staminaMax ?? 100,
-            hunger: this.engineConfig?.player?.hungerMax ?? 100,
-            maxHunger: this.engineConfig?.player?.hungerMax ?? 100,
-            temperature: this.engineConfig?.player?.temperatureNeutral ?? 50,
-            minTemperature: this.engineConfig?.player?.temperatureMin ?? 0,
-            maxTemperature: this.engineConfig?.player?.temperatureMax ?? 100,
+            modelScale:       desc.scale,
+            modelYawOffset:   model.yawOffset,
+            moveSpeed:        desc.moveSpeed,
+            sprintMultiplier: desc.sprintMultiplier,
+            collisionRadius:  desc.collisionRadius,
+            maxSlopeDeg:      desc.maxSlopeDeg,
+            health:           desc.health,
+            maxHealth:        desc.maxHealth,
+            // engineConfig-sourced vitals stay the same:
+            stamina:            this.engineConfig?.player?.staminaMax ?? 100,
+            maxStamina:         this.engineConfig?.player?.staminaMax ?? 100,
+            hunger:             this.engineConfig?.player?.hungerMax ?? 100,
+            maxHunger:          this.engineConfig?.player?.hungerMax ?? 100,
+            temperature:        this.engineConfig?.player?.temperatureNeutral ?? 50,
+            minTemperature:     this.engineConfig?.player?.temperatureMin ?? 0,
+            maxTemperature:     this.engineConfig?.player?.temperatureMax ?? 100,
             temperatureNeutral: this.engineConfig?.player?.temperatureNeutral ?? 50,
-            sprintMultiplier: this.engineConfig?.player?.sprintMultiplier ?? 1.75,
             statusText: 'Ready',
         });
         actor.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
-
-        const { GLTFLoader } = await import('../assets/gltf/GLTFLoader.js');
-        const loader = new GLTFLoader({ verbose: false });
-        const asset = await loader.loadFromURL(glbUrl);
-
-        this._buildAnimationMap(actor, asset);
-
+    
+        actor.modelDescriptor = model;
+        actor.animPlayer = new AnimationPlayer(model.asset, model);
+    
         const wm = this._buildWorldMatrix(actor);
-        actor.renderInstance = await this.skinnedMeshRenderer.addInstance(asset, wm);
-
+        actor.renderInstance = await this.skinnedMeshRenderer.addInstance(model.asset, wm);
+    
         actor.gpuSlot = this._actors.length;
         this._actors.push(actor);
         this._buffers.activeCount = this._actors.length;
         this._buffers.seedState(actor.gpuSlot, spawnPos.x, spawnPos.y, spawnPos.z, 0);
-
+    
         this._playerActor = actor;
         this._playerController = new CharacterController(actor);
-
+    
         this._syncLocomotionAnimation(actor);
-        Logger.info(`[ActorManager] Player created, ${actor.animationMap.size} anims mapped`);
+        Logger.info(`[ActorManager] Player created (${model.glbUrl})`);
         return actor;
     }
 
@@ -289,68 +290,54 @@ export class ActorManager {
         this._buffers.beginReadback(encoder);
     }
 
-       /**
-     * Create an NPC actor from a pre-loaded GLTF asset.
-     * Called by NPCManager during spawn processing.
-     *
-     * @param {object}  asset      Parsed GLTF asset (from GLTFLoader)
-     * @param {string}  npcTypeId  Registry key (e.g. 'goblin')
-     * @param {{x,y,z}} spawnPos   Approximate world position (GPU will snap to terrain)
-     * @param {object}  [options]  CharacterActor constructor overrides + NPC metadata
-     * @returns {Promise<CharacterActor|null>}
-     */
-       async createNPC(asset, npcTypeId, spawnPos, options = {}) {
-        if (this._actors.length >= this._buffers.maxActors) {
-            Logger.warn('[ActorManager] Max actor slots reached, cannot spawn NPC');
-            return null;
-        }
 
-        const actor = new CharacterActor({
-            type: ActorType.NPC,
-            name: options.name || `${npcTypeId}-${this._actors.length}`,
-            modelScale:      options.modelScale ?? 1.0,
-            moveSpeed:       options.moveSpeed ?? 3.0,
-            locomotionRunThresholdMultiplier:
-                options.locomotionRunThresholdMultiplier ?? 1.15,
-            maxSlopeDeg:     options.maxSlopeDeg ?? 45,
-            collisionRadius: options.collisionRadius ?? 0.3,
-            health:          options.health ?? 100,
-            maxHealth:       options.maxHealth ?? 100,
-            hostility:       options.hostility ?? 0.0,
-            braveness:       options.braveness ?? 0.5,
-            npcTypeId,
-            groupId:         options.groupId ?? 0,
-            variant:         options.variant ?? null,
-            isBoss:          options.isBoss ?? false,
-        });
-
-        actor.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
-
-        // Random initial facing for visual variety
-        actor.facingYaw = Math.random() * Math.PI * 2 - Math.PI;
-
-        this._buildAnimationMap(actor, asset);
-
-        const wm = this._buildWorldMatrix(actor);
-        actor.renderInstance = await this.skinnedMeshRenderer.addInstance(asset, wm);
-
-        actor.gpuSlot = this._actors.length;
-        this._actors.push(actor);
-        this._buffers.activeCount = this._actors.length;
-        this._buffers.seedState(
-            actor.gpuSlot,
-            spawnPos.x, spawnPos.y, spawnPos.z,
-            actor.facingYaw
-        );
-
-        this._syncLocomotionAnimation(actor);
-
-        Logger.info(
-            `[ActorManager] NPC "${actor.name}" (${options.variant ?? 'default'}) ` +
-            `created at slot ${actor.gpuSlot}, scale=${actor.modelScale.toFixed(2)}`
-        );
-        return actor;
+async createNPC(charDesc, npcTypeId, spawnPos, options = {}) {
+    if (this._actors.length >= this._buffers.maxActors) {
+        Logger.warn('[ActorManager] Max actor slots reached, cannot spawn NPC');
+        return null;
     }
+    const model = charDesc.model;
+
+    const actor = new CharacterActor({
+        type: ActorType.NPC,
+        name: options.name || `${npcTypeId}-${this._actors.length}`,
+        modelScale:      options.modelScale      ?? charDesc.scale,
+        modelYawOffset:  model.yawOffset,
+        moveSpeed:       options.moveSpeed       ?? charDesc.moveSpeed,
+        maxSlopeDeg:     options.maxSlopeDeg     ?? charDesc.maxSlopeDeg,
+        collisionRadius: options.collisionRadius ?? charDesc.collisionRadius,
+        health:          options.health          ?? charDesc.health,
+        maxHealth:       options.maxHealth       ?? charDesc.maxHealth,
+        locomotionRunThresholdMultiplier:
+            options.locomotionRunThresholdMultiplier ?? 1.15,
+        // NPC-specific — no charDesc default:
+        hostility:       options.hostility ?? 0.0,
+        braveness:       options.braveness ?? 0.5,
+        npcTypeId,
+        groupId:         options.groupId ?? 0,
+        variant:         options.variant ?? null,
+        isBoss:          options.isBoss  ?? false,
+    });
+    actor.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
+    actor.facingYaw = Math.random() * Math.PI * 2 - Math.PI;
+
+    actor.modelDescriptor = model;
+    actor.animPlayer = new AnimationPlayer(model.asset, model);
+
+    const wm = this._buildWorldMatrix(actor);
+    actor.renderInstance = await this.skinnedMeshRenderer.addInstance(model.asset, wm);
+
+    actor.gpuSlot = this._actors.length;
+    this._actors.push(actor);
+    this._buffers.activeCount = this._actors.length;
+    this._buffers.seedState(actor.gpuSlot, spawnPos.x, spawnPos.y, spawnPos.z, actor.facingYaw);
+
+    this._syncLocomotionAnimation(actor);
+    Logger.info(
+        `[ActorManager] NPC "${actor.name}" slot ${actor.gpuSlot}, scale=${actor.modelScale.toFixed(2)}`
+    );
+    return actor;
+}
 
     /**
      * Remove an actor (player or NPC) and free its GPU slot.
@@ -406,10 +393,7 @@ export class ActorManager {
             for (let i = 0; i < results.length && i < this._actors.length; i++) {
                 const a = this._actors[i];
                 const r = results[i];
-                if (a.animationAction?.animId === AnimationId.EXHAUSTED
-                    && a.animationAction?.lockMovement === true) {
-                    continue;
-                }
+
                 const prevPos = { x: a.position.x, y: a.position.y, z: a.position.z };
                 a.position.x = r.x;
                 a.position.y = r.y;
@@ -483,33 +467,54 @@ export class ActorManager {
     }
 
     beginActionAnimation(actor, animId, options = {}) {
-        if (!actor?.renderInstance) return false;
-
-        const speed = options.speed ?? 1.0;
-        const clipDuration = this._getAnimationDuration(actor, animId);
-        if (!(clipDuration > 0)) {
+        if (!actor?.animPlayer) return false;
+        const clip = actor.modelDescriptor?.clip(animId);
+        if (!clip) return false;
+    
+        // Resolve policy: explicit option > per-anim default > INTERRUPTIBLE
+        const policy = options.policy
+            ?? DEFAULT_ANIMATION_POLICY[animId]
+            ?? AnimationPolicy.INTERRUPTIBLE;
+    
+        // TERMINAL state is permanent — nothing interrupts it.
+        if (actor.animationAction?.policy === AnimationPolicy.TERMINAL) return false;
+    
+        // COMMITTED actions must finish before another non-TERMINAL anim starts.
+        if (actor.animationAction?.policy === AnimationPolicy.COMMITTED
+            && actor.animationAction?.state === 'playing'
+            && policy !== AnimationPolicy.TERMINAL) {
             return false;
         }
-
-        const realDuration = clipDuration / Math.max(Math.abs(speed), 1e-4);
+    
+        const speed = options.speed ?? 1.0;
+        const realDuration = clip.anim.duration / Math.max(Math.abs(speed), 1e-4);
+        const isTerminal = policy === AnimationPolicy.TERMINAL;
+    
         actor.animationAction = {
             animId,
+            policy,
             state: 'playing',
             elapsed: 0,
             duration: realDuration,
             speed,
-            lockMovement: options.lockMovement ?? true,
-            holdLastFrame: options.holdLastFrame ?? false,
+            // lockMovement: COMMITTED and TERMINAL lock movement
+            lockMovement: options.lockMovement
+                ?? (policy === AnimationPolicy.COMMITTED || isTerminal),
+            // holdLastFrame: only TERMINAL holds
+            holdLastFrame: options.holdLastFrame ?? isTerminal,
         };
-
-        this._playAnimation(actor, animId, {
+    
+        actor.animPlayer.play(animId, {
             speed,
+            loop: false,
+            force: true,
             startTime: options.startTime ?? 0,
-            forceRestart: true,
+            blendTime: options.blendTime,
         });
+        actor.currentAnimation = animId;
+        actor.currentAnimationSpeed = speed;
         return true;
     }
-
     damageActor(actor, amount, options = {}) {
         if (!actor || actor.isDown || !(amount > 0)) {
             return { applied: false, defeated: !!actor?.isDown, health: actor?.health ?? 0 };
@@ -533,8 +538,7 @@ export class ActorManager {
 
             this.beginActionAnimation(actor, AnimationId.DEAD, {
                 speed: options.deathAnimationSpeed ?? 1.0,
-                holdLastFrame: true,
-                lockMovement: true,
+                policy: AnimationPolicy.TERMINAL,  
             });
         } else if (actor === this._playerActor) {
             this._triggerHitReaction(actor, amount, options.heavy === true);
@@ -646,44 +650,6 @@ export class ActorManager {
         return this._playerActor?.isDown === true;
     }
 
-    // ── private ──────────────────────────────────────────────────────
-    _buildAnimationMap(actor, asset) {
-        const idName = {};
-        for (const [k, v] of Object.entries(AnimationId)) idName[v] = k;
-
-        Logger.info(`[ActorManager] GLB contains ${asset.animations.length} animation(s):`);
-        for (let i = 0; i < asset.animations.length; i++) {
-            const name = asset.animations[i].name || '';
-            const dur = asset.animations[i].duration.toFixed(2);
-            let matchedAs = null;
-            for (const pat of ANIMATION_NAME_PATTERNS) {
-                if (pat.re.test(name)) {
-                    if (!actor.animationMap.has(pat.id)) {
-                        actor.animationMap.set(pat.id, i);
-                        matchedAs = idName[pat.id];
-                    } else {
-                        matchedAs = `${idName[pat.id]} (already mapped, skipped)`;
-                    }
-                    break;
-                }
-            }
-            Logger.info(
-                `[ActorManager]   [${i}] "${name}" (${dur}s) → ${matchedAs ?? 'UNMATCHED'}`
-            );
-        }
-
-        Logger.info('[ActorManager] Resolved animation map:');
-        for (const [id, idx] of actor.animationMap) {
-            Logger.info(
-                `[ActorManager]   ${idName[id]} = glb[${idx}] "${asset.animations[idx].name}"`
-            );
-        }
-
-        if (!actor.animationMap.has(AnimationId.IDLE))
-            Logger.warn('[ActorManager] No IDLE animation matched!');
-        if (!actor.animationMap.has(AnimationId.WALKING))
-            Logger.warn('[ActorManager] No WALKING animation matched!');
-    }
 
     _updatePlayerVitals(dt) {
         const actor = this._playerActor;
@@ -832,25 +798,6 @@ export class ActorManager {
         return { key: 'neutral', severity: 'normal', intensity: 0 };
     }
 
-    _playAnimation(actor, animId, options = {}) {
-        if (!actor.renderInstance) return;
-        const glbIdx = actor.animationMap.get(animId);
-        if (glbIdx === undefined) return;
-        const speed = options.speed ?? 1.0;
-        if (!options.forceRestart && actor.currentAnimation === animId) {
-            if (Math.abs((actor.currentAnimationSpeed ?? 1.0) - speed) > 1e-3) {
-                this.skinnedMeshRenderer.setAnimationSpeed?.(actor.renderInstance, speed);
-                actor.currentAnimationSpeed = speed;
-            }
-            return;
-        }
-        this.skinnedMeshRenderer.playAnimation(actor.renderInstance, glbIdx, {
-            speed,
-            startTime: options.startTime ?? 0,
-        });
-        actor.currentAnimation = animId;
-        actor.currentAnimationSpeed = speed;
-    }
 
     _resolveActorIntent(actor, controller, playerCanAct) {
         if (!actor || this._isMovementLocked(actor)) {
@@ -872,203 +819,142 @@ export class ActorManager {
             speed: actor.moveSpeed,
         };
     }
-
     _updateAnimationActions(dt) {
         for (const actor of this._actors) {
-            const action = actor.animationAction;
-            if (!action || action.state !== 'playing') continue;
-
-            const prevElapsed = action.elapsed;
-            action.elapsed += dt;
-            this._applyActionRootMotion(actor, action, prevElapsed, action.elapsed);
-            if (action.elapsed + 1e-5 < action.duration) continue;
-
-            if (action.holdLastFrame) {
-                action.state = 'holding';
-                const clipDuration = this._getAnimationDuration(actor, action.animId);
-                this._playAnimation(actor, action.animId, {
-                    speed: 0,
-                    startTime: Math.max(0, clipDuration - (1 / 60)),
-                    forceRestart: true,
-                });
-                continue;
+            if (!actor.animPlayer) continue;
+    
+            const { pose, finished } = actor.animPlayer.tick(dt);
+    
+            if (actor.renderInstance) {
+                this.skinnedMeshRenderer.setInstancePose(actor.renderInstance, pose);
             }
-
-            actor.animationAction = null;
-            if (!actor.isDown && actor.pendingAnimationAction) {
-                const next = actor.pendingAnimationAction;
-                actor.pendingAnimationAction = null;
-                this.beginActionAnimation(actor, next.animId, { lockMovement: next.lockMovement ?? false });
-            } else {
-                this._syncLocomotionAnimation(actor);
+    
+            if (finished && actor.animationAction?.state === 'playing') {
+                this._onActionFinished(actor);
             }
         }
     }
-
-    _applyActionRootMotion(actor, action, prevElapsed, nextElapsed) {
-        if (action?.animId !== AnimationId.EXHAUSTED) return;
-        if (!actor?.renderInstance?.asset) return;
-
-        const glbIdx = actor.animationMap.get(action.animId);
-        const anim = glbIdx === undefined
-            ? null
-            : actor.renderInstance.asset.animations?.[glbIdx];
-        if (!anim || !(anim.duration > 0)) return;
-
-        const channel = this._getRootMotionChannel(actor.renderInstance.asset, anim);
-        if (!channel) return;
-
-        const t0 = _clamp(prevElapsed * (action.speed ?? 1.0), 0, anim.duration);
-        const t1 = _clamp(nextElapsed * (action.speed ?? 1.0), 0, anim.duration);
-        const p0 = AnimationSampler._sampleChannel(channel, t0);
-        const p1 = AnimationSampler._sampleChannel(channel, t1);
-        if (!p0 || !p1) return;
-
-        const dx = (p1[0] - p0[0]) * (actor.modelScale ?? 1);
-        const dz = (p1[2] - p0[2]) * (actor.modelScale ?? 1);
+    _onActionFinished(actor) {
+        const action = actor.animationAction;
+        if (!action) return;
+    
+        // TERMINAL: hold last frame, no further transitions ever.
+        if (action.policy === AnimationPolicy.TERMINAL) {
+            action.state = 'holding';
+            return;
+        }
+    
+        // COMMITTED with holdLastFrame (e.g. a custom hold): hold, don't chain.
+        if (action.holdLastFrame) {
+            action.state = 'holding';
+            return;
+        }
+    
+        actor.animationAction = null;
+    
+        if (!actor.isDown && actor.pendingAnimationAction) {
+            const next = actor.pendingAnimationAction;
+            actor.pendingAnimationAction = null;
+            this.beginActionAnimation(actor, next.animId, {
+                lockMovement: next.lockMovement ?? false,
+            });
+        } else {
+            this._syncLocomotionAnimation(actor);
+        }
+    }
+    
+    _applyRootDelta(actor, delta) {
+        const scale = actor.modelScale ?? 1;
+        const dx = delta[0] * scale;
+        const dz = delta[2] * scale;
+        // delta[1] ignored — terrain height is GPU's job.
         if (Math.abs(dx) < 1e-5 && Math.abs(dz) < 1e-5) return;
-
-        const o = this.planetConfig.origin;
-        const radialDistance = Math.hypot(
-            actor.position.x - o.x,
-            actor.position.y - o.y,
-            actor.position.z - o.z
-        );
-        const up = new THREE.Vector3(
-            actor.position.x - o.x,
-            actor.position.y - o.y,
-            actor.position.z - o.z
-        ).normalize();
-        const ref = Math.abs(up.y) > 0.99
-            ? new THREE.Vector3(0, 0, 1)
-            : new THREE.Vector3(0, 1, 0);
+    
+        const o = this.planetConfig.origin, p = actor.position;
+        const radial = Math.hypot(p.x-o.x, p.y-o.y, p.z-o.z);
+        const up = new THREE.Vector3(p.x-o.x, p.y-o.y, p.z-o.z).normalize();
+        const ref = Math.abs(up.y) > 0.99 ? new THREE.Vector3(0,0,1) : new THREE.Vector3(0,1,0);
         const right = new THREE.Vector3().crossVectors(up, ref).normalize();
         const fwd = new THREE.Vector3().crossVectors(right, up);
-        const visualYaw = actor.facingYaw + (actor.modelYawOffset ?? 0);
-        const c = Math.cos(visualYaw);
-        const s = Math.sin(visualYaw);
-        const rightRot = new THREE.Vector3(
-            right.x * c - fwd.x * s,
-            right.y * c - fwd.y * s,
-            right.z * c - fwd.z * s
-        );
-        const fwdRot = new THREE.Vector3(
-            right.x * s + fwd.x * c,
-            right.y * s + fwd.y * c,
-            right.z * s + fwd.z * c
-        );
-        const moved = new THREE.Vector3(
-            actor.position.x,
-            actor.position.y,
-            actor.position.z
-        )
-            .addScaledVector(rightRot, dx)
-            .addScaledVector(fwdRot, dz);
-
-        const movedDir = new THREE.Vector3(
-            moved.x - o.x,
-            moved.y - o.y,
-            moved.z - o.z
-        ).normalize();
-        actor.position.x = o.x + movedDir.x * radialDistance;
-        actor.position.y = o.y + movedDir.y * radialDistance;
-        actor.position.z = o.z + movedDir.z * radialDistance;
-
-        this._buffers.seedState(
-            actor.gpuSlot,
-            actor.position.x,
-            actor.position.y,
-            actor.position.z,
-            actor.facingYaw
-        );
+    
+        const yaw = actor.facingYaw + (actor.modelYawOffset ?? 0);
+        const c = Math.cos(yaw), s = Math.sin(yaw);
+        // Model +X → tangent-right, +Z → tangent-forward, rotated by facing.
+        const wdx = (right.x*c - fwd.x*s)*dx + (right.x*s + fwd.x*c)*dz;
+        const wdy = (right.y*c - fwd.y*s)*dx + (right.y*s + fwd.y*c)*dz;
+        const wdz = (right.z*c - fwd.z*s)*dx + (right.z*s + fwd.z*c)*dz;
+    
+        // Reproject onto sphere at same radial distance. The resolver will
+        // terrain-snap on the next dispatch; we hold CPU-authoritative
+        // position for the duration of the locked action (readback skipped).
+        const nx = p.x+wdx-o.x, ny = p.y+wdy-o.y, nz = p.z+wdz-o.z;
+        const nl = Math.hypot(nx,ny,nz) || 1;
+        actor.position.x = o.x + nx/nl * radial;
+        actor.position.y = o.y + ny/nl * radial;
+        actor.position.z = o.z + nz/nl * radial;
+    
+        this._buffers.seedState(actor.gpuSlot,
+            actor.position.x, actor.position.y, actor.position.z, actor.facingYaw);
+    
         if (actor.renderInstance) {
             const wm = this._buildWorldMatrix(actor);
             this.skinnedMeshRenderer.setInstanceTransform(actor.renderInstance, wm);
         }
     }
-
-    _getRootMotionChannel(asset, animation) {
-        if (!animation) return null;
-        if (animation._rootMotionChannel !== undefined) {
-            return animation._rootMotionChannel;
-        }
-
-        let best = null;
-        let bestDepth = Number.POSITIVE_INFINITY;
-        let bestDispSq = -1;
-        for (const ch of animation.channels) {
-            if (ch.targetPath !== 'translation' || ch.targetNodeIndex < 0) continue;
-            const node = asset?.nodes?.[ch.targetNodeIndex];
-            let depth = 0;
-            let cursor = node;
-            while (cursor && cursor.parentIndex >= 0 && depth < 64) {
-                depth++;
-                cursor = asset.nodes[cursor.parentIndex];
-            }
-            const values = ch.values;
-            const last = values ? values.length - 3 : -1;
-            const dispSq = last >= 0
-                ? ((values[last] - values[0]) ** 2 + (values[last + 2] - values[2]) ** 2)
-                : 0;
-            if (depth < bestDepth || (depth === bestDepth && dispSq > bestDispSq)) {
-                best = ch;
-                bestDepth = depth;
-                bestDispSq = dispSq;
-            }
-        }
-
-        animation._rootMotionChannel = best || null;
-        return animation._rootMotionChannel;
+    
+    _shouldApplyRootDelta(actor) {
+        // Action animations: CPU-authoritative position (resolver gets NONE intent).
+        // Locomotion: GPU-authoritative, discard the delta.
+        return actor.animationAction?.lockMovement === true;
     }
+
 
     _syncLocomotionAnimation(actor) {
-        if (!actor || this._isLocomotionAnimationLocked(actor)) return;
-
-        const locomotion = this._resolveLocomotionPlayback(actor);
-        this._playAnimation(actor, locomotion.animId, {
-            speed: locomotion.speed,
-        });
+        if (!actor?.animPlayer || this._isLocomotionAnimationLocked(actor)) return;
+        const loco = this._resolveLocomotionPlayback(actor);
+        actor.animPlayer.play(loco.animId, { speed: loco.speed, loop: true });
+        actor.currentAnimation = loco.animId;
+        actor.currentAnimationSpeed = loco.speed;
     }
-
+    
     _isMovementLocked(actor) {
-        return actor?.isDown === true
-            || actor?.animationAction?.lockMovement === true;
+        const action = actor?.animationAction;
+        if (!action) return actor?.isDown === true;
+        if (actor?.isDown) return true;
+        if (action.lockMovement && action.state === 'playing') return true;
+        if (action.policy === AnimationPolicy.TERMINAL) return true;
+        return false;
     }
 
     _isLocomotionAnimationLocked(actor) {
         const action = actor?.animationAction;
-        return actor?.isDown === true
-            || action?.state === 'playing'
-            || action?.state === 'holding';
-    }
-
-    _getAnimationDuration(actor, animId) {
-        const glbIdx = actor?.animationMap?.get(animId);
-        if (glbIdx === undefined) return 0;
-        return actor?.renderInstance?.asset?.animations?.[glbIdx]?.duration ?? 0;
+        if (!action) return false;
+        if (actor?.isDown) return true;
+        if (action.state === 'playing') return true;
+        // TERMINAL holds forever — locomotion must never override it.
+        if (action.state === 'holding' && action.policy === AnimationPolicy.TERMINAL) return true;
+        return false;
     }
 
     _resolveLocomotionPlayback(actor) {
         if (actor?.movementState !== MovementState.WALKING) {
             return { animId: AnimationId.IDLE, speed: 1.0 };
         }
-
+    
         const baseSpeed = Math.max(actor?.baseMoveSpeed ?? 0, 0.1);
         const moveSpeed = Math.max(actor?.moveSpeed ?? baseSpeed, 0);
         const runThresholdMultiplier = Math.max(
-            actor?.locomotionRunThresholdMultiplier ?? 1.15,
-            1.01
+            actor?.locomotionRunThresholdMultiplier ?? 1.15, 1.01
         );
         const runThresholdSpeed = baseSpeed * runThresholdMultiplier;
-        const hasRunAnimation = actor?.animationMap?.has(AnimationId.RUNNING) === true;
-
-        if (hasRunAnimation && moveSpeed >= runThresholdSpeed) {
+        const hasRun = actor?.modelDescriptor?.has(AnimationId.RUNNING) === true;
+    
+        if (hasRun && moveSpeed >= runThresholdSpeed) {
             return {
                 animId: AnimationId.RUNNING,
                 speed: _clamp(moveSpeed / runThresholdSpeed, 0.92, 1.35),
             };
         }
-
         return {
             animId: AnimationId.WALKING,
             speed: _clamp(moveSpeed / baseSpeed, 0.75, 1.25),

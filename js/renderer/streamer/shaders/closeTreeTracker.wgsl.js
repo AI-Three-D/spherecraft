@@ -47,6 +47,7 @@ struct TrackerParams {
     _pad0:          u32,
     bandStarts:     vec4<f32>,   // [L0, L1, L2, L3] start distances
     bandEnds:       vec4<f32>,   // [L0, L1, L2, L3] end distances
+    viewProjection: mat4x4<f32>,
 }
 
 struct AssetInstance {
@@ -94,6 +95,33 @@ fn pcg3(a: u32, b: u32, c: u32) -> u32 { return pcg(pcg2(a, b) ^ (c * 2654435761
 fn selectSpeciesForAsset(assetIdx: u32) -> u32 {
     if (assetIdx < ASSET_COUNT) { return assetSpeciesMap[assetIdx]; }
     return 4u;
+}
+
+fn getRow(m: mat4x4<f32>, r: u32) -> vec4<f32> {
+    return vec4<f32>(m[0][r], m[1][r], m[2][r], m[3][r]);
+}
+
+fn isTreeCulled(worldPos: vec3<f32>, radius: f32) -> bool {
+    let row0 = getRow(params.viewProjection, 0u);
+    let row1 = getRow(params.viewProjection, 1u);
+    let row2 = getRow(params.viewProjection, 2u);
+    let row3 = getRow(params.viewProjection, 3u);
+
+    let planes = array<vec4<f32>, 6>(
+        row3 + row0, row3 - row0,
+        row3 + row1, row3 - row1,
+        row3 + row2, row3 - row2
+    );
+
+    for (var i = 0u; i < 6u; i++) {
+        let p = planes[i];
+        let nLen = length(p.xyz);
+        if (nLen < 1e-4) { continue; }
+        if ((dot(p.xyz, worldPos) + p.w) / nLen < -radius) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ── Band assignment with overlap blend ───────────────────────────────────
@@ -211,6 +239,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (dist > params.detailRange) { return; }
 
+    let cullRadius = max(tree.width * 0.8, tree.height * 0.6);
+    if (isTreeCulled(treePos + trunkUp * (tree.height * 0.5), cullRadius)) { return; }
+
     let slot = atomicAdd(&closeTreeCount[0], 1u);
     if (slot >= MAX_CLOSE_TREES) { return; }
 
@@ -220,27 +251,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         bitcast<u32>(tree.posZ)
     );
 
+    let bakedSourceHash = bitcast<u32>(tree._pad0);
+    let stableSeed = select(posSeed ^ 0xB5297A4Du, bakedSourceHash, bakedSourceHash != 0u);
     let speciesIdx = selectSpeciesForAsset(tree.tileTypeId);
-    let colorVar = pcgF(posSeed ^ 0x12345678u);
-    let barkVar  = pcgF(posSeed ^ 0x87654321u);
-    let ageVar   = pcgF(posSeed ^ 0xDEADBEEFu);
+    let colorVar = pcgF(stableSeed ^ 0x12345678u);
+    let barkVar  = pcgF(stableSeed ^ 0x87654321u);
+    let ageVar   = pcgF(stableSeed ^ 0xDEADBEEFu);
 
     // ── Band + blend in one pass ────────────────────────────────────
     let band = assignBand(dist);
 
     let foliageColor = getSpeciesFoliageColor(speciesIdx, colorVar);
     let barkColor    = getSpeciesBarkColor(speciesIdx, barkVar);
-    let windPhase    = pcgF(posSeed ^ 0xCAFEBABEu) * 6.2831853;
+    let windPhase    = pcgF(stableSeed ^ 0xCAFEBABEu) * 6.2831853;
 
     closeTrees[slot] = CloseTreeInfo(
         treePos.x, treePos.y, treePos.z, tree.rotation,
         tree.width, tree.height, tree.width, dist,
-        speciesIdx, posSeed, band.level, SOURCE_BAND_BASES[bandSlot] + localIdx,
+        speciesIdx, stableSeed, band.level, SOURCE_BAND_BASES[bandSlot] + localIdx,
         foliageColor.r, foliageColor.g, foliageColor.b, foliageColor.a,
         barkColor.r, barkColor.g, barkColor.b, barkColor.a,
         0u, 0u, 0u, 0u,                          // leafStart/Count set by scatter writeback
         windPhase, 0.8 + ageVar * 0.2, 0.3 + ageVar * 0.7, tree.tileTypeId,
-        band.blend, 0.0, 0.0, 0.0                // bandBlend + reserved
+        band.blend, bitcast<f32>(stableSeed), 0.0, 0.0
     );
 }
 `;

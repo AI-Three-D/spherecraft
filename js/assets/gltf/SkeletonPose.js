@@ -1,6 +1,8 @@
 // js/assets/gltf/SkeletonPose.js
 
 export class SkeletonPose {
+
+    
     /**
      * @param {GLTFAsset} asset
      * @param {GLTFSkeleton} skeleton
@@ -8,11 +10,12 @@ export class SkeletonPose {
      * @param {Map|null} overrides    — from AnimationSampler.sample()
      * @returns {Float32Array}  jointCount × 16 floats (column‑major mat4 per joint)
      */
+    
     static compute(asset, skeleton, meshNodeIndex, overrides) {
         const nc = asset.nodes.length;
         const globals = new Array(nc);
         const I = _identity();
-
+    
         const walk = (idx, parent) => {
             const local = _localMat(asset.nodes[idx], overrides?.get(idx));
             const g = _mul(parent, local);
@@ -21,11 +24,18 @@ export class SkeletonPose {
         };
         for (const r of asset.rootNodes) walk(r, I);
         for (let i = 0; i < nc; i++) if (!globals[i]) walk(i, I);
-
-        const invMesh = _invert(globals[meshNodeIndex] || I);
+    
+        // Use the BIND-POSE mesh node matrix (no animation overrides) so that
+        // animated scale on the mesh node or its ancestors does not compound
+        // with the visual world matrix built by ActorManager._buildWorldMatrix.
+        // If the mesh node is animated (e.g. pelvis Y-translation), that motion
+        // should show up only in the bones, not in the inverse-mesh factor.
+        const bindMeshGlobal = _bindGlobal(asset, meshNodeIndex);
+        const invMesh = _invert(bindMeshGlobal);
+    
         const jc = skeleton.jointCount;
         const out = new Float32Array(jc * 16);
-
+    
         for (let j = 0; j < jc; j++) {
             const jg = globals[skeleton.jointNodeIndices[j]] || I;
             const ibm = skeleton.inverseBindMatrices.subarray(j * 16, j * 16 + 16);
@@ -35,9 +45,22 @@ export class SkeletonPose {
         return out;
     }
 }
-
-/* ── column‑major mat4 helpers ─────────────────────────────────── */
-
+function _bindGlobal(asset, nodeIndex) {
+    if (!asset._bindGlobals) {
+        const nc = asset.nodes.length;
+        const bg = new Array(nc);
+        const I = _identity();
+        const walk = (idx, parent) => {
+            const local = _localMat(asset.nodes[idx], null);  // null = no overrides
+            bg[idx] = _mul(parent, local);
+            for (const c of asset.nodes[idx].childIndices) walk(c, bg[idx]);
+        };
+        for (const r of asset.rootNodes) walk(r, I);
+        for (let i = 0; i < nc; i++) if (!bg[i]) walk(i, I);
+        asset._bindGlobals = bg;
+    }
+    return asset._bindGlobals[nodeIndex] || _identity();
+}
 function _identity() {
     const m = new Float32Array(16);
     m[0] = m[5] = m[10] = m[15] = 1;

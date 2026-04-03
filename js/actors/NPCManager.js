@@ -46,26 +46,31 @@ export class NPCManager {
 
     async initialize() {
         const { GLTFLoader } = await import('../assets/gltf/GLTFLoader.js');
+        const { CharacterDescriptor } = await import('./config/CharacterDescriptor.js');
         const loader = new GLTFLoader({ verbose: false });
-
+    
+        // Share model cache with ActorManager so player & NPCs using the
+        // same .glb load it once.
+        const modelCache = this._actorManager._modelCache;
+    
         for (const [typeId, typeDef] of Object.entries(this._config.npcTypes)) {
             try {
-                const asset = await loader.loadFromURL(typeDef.glbUrl);
-                this._assetCache.set(typeId, asset);
+                const desc = await CharacterDescriptor.load(
+                    typeDef.characterDescriptorUrl, loader, modelCache
+                );
+                this._assetCache.set(typeId, desc);   // now stores CharacterDescriptor
                 Logger.info(
                     `[NPCManager] Loaded "${typeId}" — ` +
-                    `${asset.animations.length} animation(s), ` +
-                    `${asset.meshes?.length ?? '?'} mesh(es)`
+                    `${desc.model.asset.animations.length} animation(s)`
                 );
             } catch (e) {
                 Logger.warn(`[NPCManager] Failed to load "${typeId}": ${e.message}`);
             }
         }
-
+    
         this._initialized = true;
         Logger.info(`[NPCManager] Initialized, ${this._assetCache.size} NPC type(s) cached`);
     }
-
     update(dt, playerActor) {
         if (!this._initialized || !playerActor?.position) return;
 
@@ -520,43 +525,44 @@ export class NPCManager {
 
     async _executeSpawn(req) {
         const typeDef = this._config.npcTypes[req.typeId];
-        const asset = this._assetCache.get(req.typeId);
-        if (!typeDef || !asset) return;
-
+        const charDesc = this._assetCache.get(req.typeId);
+        if (!typeDef || !charDesc) return;
+    
         for (let i = 0; i < req.positions.length; i++) {
             if (this._npcs.length >= this._config.spawnRules.maxActiveNPCs) break;
-
+    
             const variantName = req.variants[i];
             const isBoss = req.bossMask[i];
             const variantDef = typeDef.variants.find((v) => v.name === variantName)
                 || typeDef.variants[0];
-            const scale = typeDef.baseScale * variantDef.scaleMultiplier;
-
+            const scaleMul = variantDef.scaleMultiplier;
+    
             try {
                 const actor = await this._actorManager.createNPC(
-                    asset,
+                    charDesc,
                     req.typeId,
                     req.positions[i],
                     {
-                        modelScale: scale,
-                        moveSpeed: typeDef.moveSpeed,
-                        locomotionRunThresholdMultiplier:
-                            typeDef.ai?.runAnimationThresholdMultiplier,
-                        health: isBoss ? typeDef.health * 3 : typeDef.health,
-                        maxHealth: isBoss ? typeDef.maxHealth * 3 : typeDef.maxHealth,
+                        // Variant scales the descriptor defaults:
+                        modelScale:      charDesc.scale * scaleMul,
+                        collisionRadius: charDesc.collisionRadius * scaleMul,
+                        // Boss HP buff:
+                        health:    isBoss ? charDesc.maxHealth * 3 : charDesc.health,
+                        maxHealth: isBoss ? charDesc.maxHealth * 3 : charDesc.maxHealth,
+                        // NPC-only gameplay params from spawn config:
                         hostility: typeDef.hostility,
                         braveness: typeDef.braveness,
-                        maxSlopeDeg: typeDef.maxSlopeDeg ?? 45,
-                        collisionRadius: (typeDef.collisionRadius ?? 0.3) * variantDef.scaleMultiplier,
-                        npcTypeId: req.typeId,
+                        locomotionRunThresholdMultiplier:
+                            typeDef.ai?.runAnimationThresholdMultiplier,
+                        // Metadata:
                         groupId: req.groupId,
                         variant: variantName,
                         isBoss,
                     }
                 );
-
+    
                 if (!actor) continue;
-
+    
                 actor.statusText = 'Hunting';
                 this._npcs.push({
                     actor,
@@ -584,7 +590,7 @@ export class NPCManager {
                 );
             }
         }
-
+    
         Logger.info(
             `[NPCManager] Spawned group #${req.groupId}: ` +
             `${req.positions.length} ${req.typeId}(s), ` +

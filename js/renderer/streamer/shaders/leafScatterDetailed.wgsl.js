@@ -1,14 +1,18 @@
 // js/renderer/streamer/shaders/leafScatterDetailed.wgsl.js
 //
-// Changes vs previous version:
-//   • B_L2_W, B_L2_H, B_L3_W, B_L3_H extracted from config (fixed sizes).
-//   • Card size section: L2/L3 now use fixed sizes, not spread * multiplier.
-//     Spread-based sizing produced cards up to ~1 m wide — far too large and
-//     visually inconsistent with L0/L1. All bands now share the same leaf
-//     dimensions for a stable perceived leaf size across the full LOD range.
-//   • birchL2Cards/birchL3Cards are now much higher (20/10 vs 2/1) to
-//     compensate for the smaller per-card area and maintain canopy density.
-//   • buildLeafDrawArgsShader is unchanged.
+// Current config path:
+//   runtimeConfigs -> treeConfigResolver -> AssetStreamer -> TreeLODController
+//   -> LeafStreamer -> this shader builder.
+//
+// The authoritative near-tier birch config is the compact runtime shape:
+//   birch: {
+//     nearDistance, closeLeaves,
+//     closeCardsPerAnchor, settledCardsPerAnchor,
+//     closeW/H, settledW/H
+//   }
+//
+// Keep compatibility fallbacks for older call sites that still pass the
+// previous birchL0/birchNear/birchMid field names.
 
 export function buildLeafScatterDetailedShader(config = {}) {
     const fmtF = (v, fallback) => {
@@ -28,29 +32,15 @@ export function buildLeafScatterDetailedShader(config = {}) {
     const SPRUCE_L1  = config.spruceL1Leaves ?? 1500;
     const SPRUCE_L2  = config.spruceL2Leaves ?? 700;
 
-    const B_L0_CARDS = config.birchL0Cards ?? 3;
-    const B_L0_W     = config.birchL0W     ?? 0.070;
-    const B_L0_H     = config.birchL0H     ?? 0.103;
-    const B_L1_CARDS = config.birchL1Cards ?? 2;
-    const B_L1_W     = config.birchL1W     ?? 0.070;
-    const B_L1_H     = config.birchL1H     ?? 0.103;
-    const B_L2_CARDS = config.birchL2Cards ?? 20;
-    // ── FIX: L2/L3 use the same fixed size as L0/L1 ──────────────────────
-    // Previously these were wMul/hMul multiplied against spread (runtime),
-    // which produced cards up to ~1 m wide. Now fixed absolute sizes in
-    // metres, matching L0/L1 for visual consistency.
-    const B_L2_W     = config.birchL2W     ?? 0.070;
-    const B_L2_H     = config.birchL2H     ?? 0.103;
-    const B_L3_CARDS = config.birchL3Cards ?? 10;
-    const B_L3_W     = config.birchL3W     ?? 0.070;
-    const B_L3_H     = config.birchL3H     ?? 0.103;
     const B_NEAR_DISTANCE = config.birchNearDistance ?? 20.0;
     const B_FADE_DISTANCE = config.birchFadeDistance ?? 80.0;
-    const B_NEAR_LEAVES   = config.birchNearLeaves   ?? 6000;
-    const B_NEAR_W        = config.birchNearW        ?? 0.24;
-    const B_NEAR_H        = config.birchNearH        ?? 0.36;
-    const B_MID_W         = config.birchMidW         ?? 0.28;
-    const B_MID_H         = config.birchMidH         ?? 0.42;
+    const B_CLOSE_LEAVES  = config.birchCloseLeaves  ?? config.birchNearLeaves ?? 4000;
+    const B_CLOSE_CARDS   = config.birchCloseCards   ?? 10;
+    const B_SETTLED_CARDS = config.birchSettledCards ?? config.birchL0Cards ?? 1;
+    const B_CLOSE_W       = config.birchCloseW       ?? config.birchNearW ?? 0.36;
+    const B_CLOSE_H       = config.birchCloseH       ?? config.birchNearH ?? 0.54;
+    const B_SETTLED_W     = config.birchSettledW     ?? config.birchMidW ?? 0.55;
+    const B_SETTLED_H     = config.birchSettledH     ?? config.birchMidH ?? 0.825;
 
     return /* wgsl */`
 
@@ -65,25 +55,15 @@ const SPRUCE_L0: u32 = ${SPRUCE_L0}u;
 const SPRUCE_L1: u32 = ${SPRUCE_L1}u;
 const SPRUCE_L2: u32 = ${SPRUCE_L2}u;
 
-const BIRCH_L0_CARDS: u32 = ${B_L0_CARDS}u;
-const BIRCH_L0_W:     f32 = ${B_L0_W};
-const BIRCH_L0_H:     f32 = ${B_L0_H};
-const BIRCH_L1_CARDS: u32 = ${B_L1_CARDS}u;
-const BIRCH_L1_W:     f32 = ${B_L1_W};
-const BIRCH_L1_H:     f32 = ${B_L1_H};
-const BIRCH_L2_CARDS: u32 = ${B_L2_CARDS}u;
-const BIRCH_L2_W:     f32 = ${B_L2_W};
-const BIRCH_L2_H:     f32 = ${B_L2_H};
-const BIRCH_L3_CARDS: u32 = ${B_L3_CARDS}u;
-const BIRCH_L3_W:     f32 = ${B_L3_W};
-const BIRCH_L3_H:     f32 = ${B_L3_H};
 const BIRCH_NEAR_DISTANCE: f32 = ${fmtF(B_NEAR_DISTANCE, 20.0)};
 const BIRCH_FADE_DISTANCE: f32 = ${fmtF(B_FADE_DISTANCE, 80.0)};
-const BIRCH_NEAR_LEAVES:   f32 = ${fmtF(B_NEAR_LEAVES, 6000.0)};
-const BIRCH_NEAR_W:        f32 = ${fmtF(B_NEAR_W, 0.24)};
-const BIRCH_NEAR_H:        f32 = ${fmtF(B_NEAR_H, 0.36)};
-const BIRCH_MID_W:         f32 = ${fmtF(B_MID_W, 0.28)};
-const BIRCH_MID_H:         f32 = ${fmtF(B_MID_H, 0.42)};
+const BIRCH_CLOSE_LEAVES:  f32 = ${fmtF(B_CLOSE_LEAVES, 4000.0)};
+const BIRCH_CLOSE_CARDS:   f32 = ${fmtF(B_CLOSE_CARDS, 10.0)};
+const BIRCH_SETTLED_CARDS: u32 = ${B_SETTLED_CARDS}u;
+const BIRCH_CLOSE_W:       f32 = ${fmtF(B_CLOSE_W, 0.36)};
+const BIRCH_CLOSE_H:       f32 = ${fmtF(B_CLOSE_H, 0.54)};
+const BIRCH_SETTLED_W:     f32 = ${fmtF(B_SETTLED_W, 0.55)};
+const BIRCH_SETTLED_H:     f32 = ${fmtF(B_SETTLED_H, 0.825)};
 
 // ── Structs ──────────────────────────────────────────────────────────────
 
@@ -139,6 +119,7 @@ struct TemplateInfo {
 
 @group(0) @binding(5) var<storage, read>       anchors: array<AnchorPoint>;
 @group(0) @binding(6) var<storage, read>       templateInfos: array<TemplateInfo>;
+@group(0) @binding(7) var<storage, read>       leafRequestSummary: array<u32>;
 
 
 // ── PCG ──────────────────────────────────────────────────────────────────
@@ -321,18 +302,18 @@ fn main(
             // Continuous per-anchor card density: denser near camera, then
             // smoothly settles to the baseline by nearDistance.
             let nearT = smoothstep(0.0, BIRCH_NEAR_DISTANCE, tree.distanceToCamera);
-            let cardsF = mix(10.0, f32(BIRCH_L0_CARDS), nearT);
+            let cardsF = mix(BIRCH_CLOSE_CARDS, f32(BIRCH_SETTLED_CARDS), nearT);
             birchCardsThis = max(1u, u32(round(cardsF)));
             birchCardsNext = birchCardsThis;
 
             birchCrossTier = false;
             let baseLeaves = max(1u, birchTierCount * birchCardsThis);
             let dist = tree.distanceToCamera;
-            let nearBlend = smoothstep(0.0, BIRCH_NEAR_DISTANCE, dist);
-            let farFade = 1.0 - smoothstep(BIRCH_NEAR_DISTANCE, BIRCH_FADE_DISTANCE, dist);
-            let desiredNear = mix(BIRCH_NEAR_LEAVES, f32(baseLeaves), nearBlend);
-
-            let desired = desiredNear * farFade * tree.health;
+            let settleDistance = max(BIRCH_NEAR_DISTANCE + 0.001, BIRCH_FADE_DISTANCE);
+            // Birch should settle from dense close-up leaves to the baseline
+            // anchor canopy, not fade out to zero before the near tier ends.
+            let settleT = smoothstep(0.0, settleDistance, dist);
+            let desired = mix(BIRCH_CLOSE_LEAVES, f32(baseLeaves), settleT) * tree.health;
             targetLeaves = u32(clamp(round(desired), 0.0, f32(MAX_LEAVES)));
         }
 
@@ -359,6 +340,18 @@ fn main(
             default: { targetLeaves = L2_LEAVES; }
         }
         targetLeaves = u32(f32(targetLeaves) * tree.health);
+    }
+
+    let requestedTotal = max(1u, leafRequestSummary[0]);
+    let leafBudgetScale = min(1.0, f32(MAX_LEAVES) / f32(requestedTotal));
+    if (targetLeaves > 0u && leafBudgetScale < 0.9999) {
+        let scaled = u32(floor(f32(targetLeaves) * leafBudgetScale));
+        if (spruceHierarchical) {
+            let cpg = max(spruceCardsPerAnchor, 1u);
+            targetLeaves = (scaled / cpg) * cpg;
+        } else {
+            targetLeaves = scaled;
+        }
     }
 
     // Clear per-tree tracking (no longer meaningful with global packing)
@@ -527,8 +520,8 @@ fn main(
                 // 0..20m: interpolate from compact close-up leaves to the
                 // target mid size. >20m: hold size; 20..80m density fades out.
                 let nearSizeT = smoothstep(0.0, BIRCH_NEAR_DISTANCE, tree.distanceToCamera);
-                let sizeW = mix(BIRCH_NEAR_W, BIRCH_MID_W, nearSizeT);
-                let sizeH = mix(BIRCH_NEAR_H, BIRCH_MID_H, nearSizeT);
+                let sizeW = mix(BIRCH_CLOSE_W, BIRCH_SETTLED_W, nearSizeT);
+                let sizeH = mix(BIRCH_CLOSE_H, BIRCH_SETTLED_H, nearSizeT);
                 let sizeSeed = pcg3(clusterSeed, cardIdx, 0xD1F75000u);
                 let sizeVar = 0.85 + pcgF(sizeSeed) * 0.30;
                 cardW = sizeW * sizeVar;

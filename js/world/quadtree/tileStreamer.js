@@ -1910,6 +1910,10 @@ markTilesVisible(tiles) {
         return info?.layer ?? null;
     }
 
+    getLastVisibleTiles() {
+        return Array.isArray(this._lastVisibleTilesList) ? this._lastVisibleTilesList : null;
+    }
+
     getLayerDebugInfo(layer) {
         if (layer === null || layer === undefined) return null;
         return {

@@ -7,7 +7,7 @@
 // Migration status:
 //   [DONE] Mid tier (new hull-only system)
 //   [TODO] Near tier (leafBands, birchLadder — still in TreeLODController)
-//   [TODO] Far / Cluster tiers (not yet implemented)
+//   [DONE] Coarse far tier (cluster producer + packed low-res hull trees)
 //
 // All distances in meters. All fade widths are the FULL width of the
 // crossfade zone (so fadeIn runs from start to start+fadeWidth).
@@ -16,24 +16,27 @@
 // TIER RANGES
 // ═════════════════════════════════════════════════════════════════════════
 //
-// The gap between near.end (80m) and mid.start (180m) is INTENTIONAL during
-// development — it will close once near tier is extended in Task 3. For now
-// you can set mid.start lower (e.g. 60) to see continuous coverage, but
-// hulls will look bad at that range (which is the whole point of the redesign).
+// Default fallback ranges mirror the runtime tree config: the near tier
+// extends to 220m and crossfades into the mid tier over an 80m window.
 
 export const TREE_TIER_RANGES = {
     near: {
         start: 0,
-        end: 80,            // TODO Task 3: extend to ~220
-        fadeOutWidth: 15,   // near fades out over [end-width, end]
+        end: 220,
+        fadeOutWidth: 80,   // near fades out over [140, 220]
     },
     mid: {
-        start: 180,         // where hulls start looking acceptable
-        end: 600,
-        fadeInWidth: 40,    // overlap with near: [start, start+width]
-        fadeOutWidth: 80,   // overlap with far tier (future)
+        start: 140,
+        end: 1500,
+        fadeInWidth: 80,    // overlap with near: [140, 220]
+        fadeOutWidth: 300,
     },
-    // far, cluster: future
+    farTrees: {
+        start: 800,
+        end: 2000,
+        fadeInWidth: 400,
+        fadeOutWidth: 300,
+    },
 };
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -44,7 +47,12 @@ export const MID_TIER_CONFIG = {
     // ── Budget ─────────────────────────────────────────────────────────────
     // At 180–600m the visible shell is an annulus of ~1M m². At forest
     // density of ~0.01 trees/m² that's ~10k trees. Budget 12k for safety.
-    maxTrees: 12000,
+    maxTrees: 20000,
+
+    // Stable distance thinning in the tracker. 1.0 = no thinning.
+    // Values below 1.0 linearly taper the retained density toward the
+    // far end of the mid tier.
+    endDensityScale: 1.0,
 
     // ── Hull geometry ──────────────────────────────────────────────────────
     // 16×10 = 160 verts, ~280 tris. At 200m a 15m tree is ~14 pixels wide;
@@ -75,14 +83,30 @@ export const MID_TIER_CONFIG = {
         // Top-cap taper to avoid the "mushroom dome" look.
         topShrinkStart: 0.60,
         topShrinkStrength: 0.35,
+
+        // Gap-aware support shrink. With weak anchor support in the
+        // current azimuth, the hull is allowed to pull inward instead of
+        // only ever expanding to the furthest sampled anchor.
+        gapShrink: 0.68,
+
+        // Nearer mid-tier trees get stronger silhouette breakup; farther
+        // ones ease back toward a simpler shell where the detail is not
+        // screen-resolvable.
+        lumpNearScale: 1.8,
+        lumpFarScale: 1.0,
+        lumpNearDistance: 250,
+        lumpFarDistance: 550,
     },
 
     // ── Hull fragment ──────────────────────────────────────────────────────
     hullFrag: {
-        // Porosity target. 1.0 = fully opaque blob, 0.5 = ~50% coverage.
-        // Lower values let the background show through, which at distance
-        // reads as "leafy" without actual leaf cards.
-        baseCoverage: 0.72,
+        // Near sub-band is intentionally sparser; far sub-band stays
+        // denser to avoid aliasing in the horizon line.
+        baseCoverageNear: 0.56,
+        baseCoverageFar: 0.74,
+        subbandSplit: 450,
+        subbandBlend: 120,
+        subbandFarDamp: 0.65,
 
         // How much porosity varies over the surface. 0 = uniform, 1 = full
         // noise modulation (some patches dense, some sparse).
@@ -96,6 +120,19 @@ export const MID_TIER_CONFIG = {
 
         // Overall brightness multiplier (canopy albedo tends dark).
         brightness: 1.05,
+
+        // Low-frequency canopy gaps that fake missing anchor support.
+        macroGapScale: 0.55,
+        macroGapStrength: 0.22,
+
+        // Noise-driven side erosion so silhouettes do not thin uniformly.
+        edgeStartBase: 0.40,
+        edgeNoiseAmp: 0.22,
+        edgeBaseThin: 0.12,
+        edgeRimBoost: 0.14,
+
+        // Ragged lowest-branch breakup.
+        bottomBreak: 0.14,
     },
 
     // ── Trunk ──────────────────────────────────────────────────────────────
@@ -157,29 +194,36 @@ export const TREE_TIER_FLAGS = {
 // Validation helper — call from TreeLODController or AssetStreamer init.
 // ═════════════════════════════════════════════════════════════════════════
 
-export function validateTierRanges(nearEnd) {
+export function validateTierRanges(nearEnd, tierRanges) {
     const warnings = [];
-    const r = TREE_TIER_RANGES;
+    // Fall back to module constants if not passed (grace period)
+    const r = tierRanges || TREE_TIER_RANGES;
+    const mid = r.mid || TREE_TIER_RANGES.mid;
+    const near = r.near || TREE_TIER_RANGES.near;
 
-    const nearFadeStart = nearEnd - r.near.fadeOutWidth;
-    const midFadeEnd = r.mid.start + r.mid.fadeInWidth;
+    const nearFadeStart = nearEnd - (near.fadeOutWidth ?? 20);
+    const midFadeEnd = mid.start + (mid.fadeInWidth ?? 40);
 
-    if (r.mid.start > nearEnd) {
+    // ── Check near tier's REAL end (leafBands[last].end) against
+    //    tierRanges.near.end — these must agree or config is confused.
+    if (Number.isFinite(near.end) && Math.abs(near.end - nearEnd) > 5) {
         warnings.push(
-            `Gap between near tier (ends ${nearEnd}m) and mid tier ` +
-            `(starts ${r.mid.start}m). Trees will vanish in [${nearEnd}, ${r.mid.start}]m. ` +
-            `This is expected until Task 3 extends the near tier.`
-        );
-    } else if (midFadeEnd < nearFadeStart) {
-        warnings.push(
-            `Mid tier fully fades in (${midFadeEnd}m) before near tier ` +
-            `starts fading out (${nearFadeStart}m). Double-draw zone is ` +
-            `[${midFadeEnd}, ${nearFadeStart}]m — wider than necessary.`
+            `tierRanges.near.end (${near.end}m) ≠ actual leaf cutoff ` +
+            `(leafBands[last].end = ${nearEnd}m). ` +
+            `Change nearTier.leafBands[3].end, not tierRanges.near.end.`
         );
     }
 
-    if (r.mid.fadeInWidth < 20) {
-        warnings.push(`Mid tier fadeInWidth=${r.mid.fadeInWidth}m is narrow; expect visible pop.`);
+    if (mid.start > nearEnd) {
+        warnings.push(
+            `Gap between near tier (leaves end at ${nearEnd}m) and mid tier ` +
+            `(hulls start at ${mid.start}m). Trees vanish in [${nearEnd}, ${mid.start}]m.`
+        );
+    } else if (midFadeEnd < nearFadeStart) {
+        warnings.push(
+            `Mid tier fully faded in (${midFadeEnd}m) before near starts fading out ` +
+            `(${nearFadeStart}m). Double-draw zone is wider than necessary.`
+        );
     }
 
     return warnings;

@@ -1,0 +1,20 @@
+{
+    "glb": "../goblin2.glb",
+    "yawOffsetDeg": 0,
+
+    "rootMotion": {
+      "nodeName": "mixamorig:Hips",
+      "mask": { "x": true, "y": false, "z": true }
+    },
+  
+    "blendDefaults": { "in": 0.12, "out": 0.10 },
+  
+    "animations": {
+      "IDLE":         { "clip": "Idling",       "loop": true,  "blendIn": 0.18 },
+      "WALKING":      { "clip": "Walking",      "loop": true                   },
+      "RUNNING":      { "clip": "Running",      "loop": true                   },
+      "DEAD":         { "clip": "Dying",        "loop": false, "blendIn": 0.08 },
+      "ATTACK_LIGHT": { "clip": "Punching",     "loop": false, "blendIn": 0.06 },
+      "ATTACK_HEAVY": { "clip": "Power_attack", "loop": false, "blendIn": 0.06 }
+    }
+  }

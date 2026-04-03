@@ -15,6 +15,7 @@ export class CharacterActor {
         this.type = options.type ?? ActorType.PLAYER;
         this.name = options.name ?? '';
 
+
         // Physical params
         this.modelScale = options.modelScale ?? 1.0;
         this.modelYawOffset = options.modelYawOffset ?? 0;
@@ -57,7 +58,9 @@ export class CharacterActor {
         // Animation
         this.currentAnimation = -1;
         this.currentAnimationSpeed = 1.0;
-        this.animationMap = new Map();   // AnimationId → glb anim index
+        this.animPlayer = null;         // AnimationPlayer — owned per actor
+        this.modelDescriptor = null;    // ModelDescriptor — shared across actors
+  
         this.animationAction = null;
         this.locomotionRunThresholdMultiplier =
             options.locomotionRunThresholdMultiplier ?? 1.15;

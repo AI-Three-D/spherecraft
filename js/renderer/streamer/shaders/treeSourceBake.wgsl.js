@@ -297,12 +297,14 @@ fn main(
         let cj = pcgF(subSeed ^ 0x7E95761Eu);
         let col = mix(def.baseColor, def.tipColor, cj);
 
+        let sourceHash = pcg3(cellSeed, subIdx, 0x31415926u);
+
         bakedInstances[layerBase + idx] = AssetInstance(
             worldPos.x, worldPos.y, worldPos.z,
             rot, w, h,
             assetIdx, 0u,
             col.x, col.y, col.z, 1.0,
-            sphereDir.x, sphereDir.y, sphereDir.z, 0.0
+            sphereDir.x, sphereDir.y, sphereDir.z, bitcast<f32>(sourceHash)
         );
     }
 }

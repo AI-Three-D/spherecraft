@@ -64,6 +64,11 @@ export class SkinnedMeshRenderer {
         );
         return inst;
     }
+
+    setInstancePose(instance, pose) {
+        instance._externalPose = pose;
+    }
+
     removeInstance(inst) {
         const i = this._instances.indexOf(inst);
         if (i === -1) return;
@@ -114,6 +119,46 @@ export class SkinnedMeshRenderer {
             }
         }
     }
+
+
+    /** 
+ * Apply a pre-blended pose (from ActorAnimationController.currentPose)
+ * to the render instance's joint matrices.
+ *
+ * @param {object}     instance    - render instance from addInstance()
+ * @param {import('../assets/gltf/GLTFModel.js').GLTFAsset} asset
+ * @param {Float32Array} pose      - nodeCount × 10 floats (TRS per node)
+ */
+applyPose(instance, asset, pose) {
+    if (!instance || !asset || !pose) return;
+
+    // Build override map from the flat pose array so SkeletonPose.compute
+    // can consume it without modification.
+    const nodeCount = asset.nodes.length;
+    if (pose.length < nodeCount * 10) {
+        Logger.warn(
+            `[SkinnedMeshRenderer] applyPose ignored for "${asset.name}": ` +
+            `pose length ${pose.length} < expected ${nodeCount * 10}`
+        );
+        return;
+    }
+    const overrides = new Map();
+
+    for (let i = 0; i < nodeCount; i++) {
+        const base = i * 10; // POSE_FLOATS_PER_NODE
+        overrides.set(i, {
+            translation: [pose[base],     pose[base + 1], pose[base + 2]],
+            rotation:    [pose[base + 3], pose[base + 4],
+                          pose[base + 5], pose[base + 6]],
+            scale:       [pose[base + 7], pose[base + 8], pose[base + 9]],
+        });
+    }
+
+    // Reuse existing joint matrix upload path.
+    this._updateJointMatrices(instance, asset, overrides);
+}
+
+
     dispose() {
         for (const inst of this._instances) {
             for (const d of inst.draws) this._destroyDraw(d);
@@ -323,25 +368,35 @@ export class SkinnedMeshRenderer {
         return a;
     }
 
-    update(deltaTime) {
-        for (const inst of this._instances) {
-            for (const [, ss] of inst._skinStates) {
-                if (!ss.playing || ss.animIndex < 0) continue;
-                const anim = inst.asset.animations[ss.animIndex];
-                if (!anim || anim.duration <= 0) continue;
-    
-                ss.time += deltaTime * ss.speed;
-                if (ss.time > anim.duration) ss.time %= anim.duration;
-    
-                const overrides = AnimationSampler.sample(anim, ss.time);
-                const jm = SkeletonPose.compute(
-                    inst.asset, ss.skeleton, ss.meshNodeIndex, overrides
-                );
-                ss.jointMatrices = jm;
-                this.device.queue.writeBuffer(ss.gpuBuffer, 0, jm);
-            }
+update(deltaTime) {
+    for (const inst of this._instances) {
+        // External pose (from AnimationPlayer) takes priority.
+        // This is the normal path for all actors; the legacy branch
+        // below survives only for ad-hoc loadGLB() test instances.
+        if (inst._externalPose) {
+            this._updateJointMatrices(inst, inst.asset, inst._externalPose);
+            continue;
+        }
+
+        // Legacy internal sampling — kept for Frontend.loadGLB() etc.
+        for (const [, ss] of inst._skinStates) {
+            if (!ss.playing || ss.animIndex < 0) continue;
+            const anim = inst.asset.animations[ss.animIndex];
+            if (!anim || anim.duration <= 0) continue;
+
+            ss.time += deltaTime * ss.speed;
+            if (ss.time > anim.duration) ss.time %= anim.duration;
+
+            const overrides = AnimationSampler.sample(anim, ss.time);
+            const jm = SkeletonPose.compute(
+                inst.asset, ss.skeleton, ss.meshNodeIndex, overrides
+            );
+            ss.jointMatrices = jm;
+            this.device.queue.writeBuffer(ss.gpuBuffer, 0, jm);
         }
     }
+}
+
     playAnimation(instance, animIndex, options = {}) {
         for (const [, ss] of instance._skinStates) {
             ss.animIndex = animIndex;
@@ -358,6 +413,21 @@ export class SkinnedMeshRenderer {
     stopAnimation(instance) {
         for (const [, ss] of instance._skinStates) {
             ss.playing = false;
+        }
+    }
+
+    _updateJointMatrices(instance, asset, overrides = null) {
+        if (!instance?._skinStates?.size) return;
+
+        for (const [, ss] of instance._skinStates) {
+            const jm = SkeletonPose.compute(
+                asset,
+                ss.skeleton,
+                ss.meshNodeIndex,
+                overrides
+            );
+            ss.jointMatrices = jm;
+            this.device.queue.writeBuffer(ss.gpuBuffer, 0, jm);
         }
     }
 

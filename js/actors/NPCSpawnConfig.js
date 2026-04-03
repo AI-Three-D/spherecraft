@@ -3,6 +3,7 @@
 // Default configuration for NPC spawning rules.
 // Game state and area-specific overrides can merge on top of these defaults.
 
+
 import { AnimationId } from './ActorState.js';
 import { TILE_TYPES } from '../types.js';
 
@@ -10,19 +11,18 @@ export const DEFAULT_NPC_SPAWN_CONFIG = Object.freeze({
 
     npcTypes: {
         goblin: {
-            glbUrl: '/assets/goblin2.glb',
-            baseScale: 1.8,                    // small goblin ≈ half wizard height
+            characterDescriptorUrl: '/assets/characters/goblin.char.json',
+
+            // Variant scales the descriptor's base scale/radius.
             variants: [
                 { name: 'small', scaleMultiplier: 0.6, spawnWeight: 0.85 },
                 { name: 'chief', scaleMultiplier: 0.9, spawnWeight: 0.15 },
             ],
-            moveSpeed: 2.8,
-            health: 50,
-            maxHealth: 50,
+
+            // NPC-only — not in descriptor:
             hostility: 0.7,
             braveness: 0.3,
-            maxSlopeDeg: 50,
-            collisionRadius: 0.3,
+
             ai: {
                 observeDistance: { min: 30, max: 42 },
                 observeHoldSec: { min: 0.35, max: 0.8 },
@@ -43,6 +43,7 @@ export const DEFAULT_NPC_SPAWN_CONFIG = Object.freeze({
                 maxConcurrentAttackersPerGroup: 3,
                 spawnAttackDelaySec: { min: 0.15, max: 0.45 },
             },
+
             attackProfiles: {
                 small: {
                     animationId: AnimationId.ATTACK_LIGHT,
@@ -85,7 +86,7 @@ export const DEFAULT_NPC_SPAWN_CONFIG = Object.freeze({
         maxActiveNPCs: 12,
         groupSize: { min: 2, max: 5 },
         maxBossesPerGroup: 1,
-        bossMinGroupSize: 3,                   // boss only in groups ≥ this
+        bossMinGroupSize: 3,
         bossChance: 0.2,
         spreadRadius: 18,
         spawnSearchAttempts: 6,

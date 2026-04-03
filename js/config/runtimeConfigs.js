@@ -27,7 +27,7 @@ function  buildLodPoolConfig(baseChunkSize, worldCoverage, maxLODLevels, slotsBy
     };
   }
 
-  return poolConfig; 
+  return poolConfig;
 }
 function nextPow2(n) {
   let p = 1;
@@ -98,8 +98,8 @@ export function createEngineConfig() {
         }
       },
       terrainShader: {
-        aerialFadeStartMeters: 400, 
-        aerialFadeEndMeters: 600,  
+        aerialFadeStartMeters: 400,
+        aerialFadeEndMeters: 600,
         fullMaxLOD: 0,
         nearMaxLOD: 2,
         midMaxLOD: 4,
@@ -196,8 +196,8 @@ export function createEngineConfig() {
       tilePoolSize: 2048,           // was 1024 — halves eviction pressure at high speed
       tileHashCapacity: 8192 * 4,   // keep (already 2× pool, which is fine)
       feedbackReadbackInterval: 1,  // was 2 — halves feedback latency
-      visibleReadbackInterval: 2, 
-      
+      visibleReadbackInterval: 2,
+
       tilePoolMaxBytes: 512 * 1024 * 1024 * 4,
 
       visibleTableCapacity: 2048,
@@ -309,7 +309,318 @@ export function createEngineConfig() {
       maxQueueSize: 1024,
       minStartIntervalMs: 0
     },
- 
+
+    trees: {
+      flags: {
+          useMidTier: true,
+          keepLegacyMidNear: false,
+          enableLeafRendering: true,
+          enableLeafWind: false,
+          enableBranchWind: false,
+      },
+
+      // ═══════════════════════════════════════════════════════════════
+      //  TIER RANGES — master distance bands
+      // ═══════════════════════════════════════════════════════════════
+      //  Individual-tree tiers (near + mid) share one source pipeline.
+      //  The coarse far-tree tier reuses the old cluster producer, but it
+      //  renders packed low-res canopy hulls instead of blob coverage.
+      //
+      //  Everything under nearTier.* derives its outer cutoff from near.end.
+      //  Tree LOD distances and quotas are derived from these ranges.
+      tierRanges: {
+          // Near tier now runs 20m farther and crossfades with the mid hull
+          // across an 80m handoff window [140, 220].
+          near:    { start: 0,    end: 220,  fadeOutWidth: 80 },
+          mid:     { start: 140,  end: 1500, fadeInWidth: 80,  fadeOutWidth: 300 },
+          farTrees:{ start: 800,  end: 2000, fadeInWidth: 400, fadeOutWidth: 300 },
+          // Legacy tree far patch tier disabled. Tree rendering now stops
+          // at the simplified far hull tier instead of switching to blobs.
+          far:     { start: 0,    end: 0,    fadeInWidth: 0,   fadeOutWidth: 0 },
+      },
+
+      // ── Individual-tree source baking range (nominal tile distance) ───
+      // null → auto-derived from the actual gather radius, not a separate
+      // hand-tuned distance ladder.
+      sourceNominalRange: null,
+
+      // ── Master tree density ───────────────────────────────────────────
+      // Single source of truth for practical tree density. The resolver
+      // converts this into:
+      //   - source-bake densityScale
+      //   - tree LOD distances
+      //   - per-LOD legacy densities
+      //   - near / mid / foliage quotas
+      density: {
+          maxTreesPerSquareMeter: 0.0072,
+      },
+
+      // ── Individual-tree scatter (feeds near + mid ONLY) ──────────────
+      // These are the low-level bake-pattern controls only. Runtime LOD
+      // bands, densities, and quotas are derived from `density` plus the
+      // tier ranges above.
+      scatter: {
+          cellSize: 16.0,
+          maxPerCell: 4,
+          clusterProbability: 0.95,
+          jitterScale: 0.85,
+      },
+
+      sourceBake: {
+          enabled: true,
+          perLayerCapacity: 1024,
+          maxBakesPerFrame: 16,
+          logDispatches: false,
+      },
+
+      billboards: {
+          lodStart: 3, lodEnd: 4,
+          fadeStartRatio: 0.7, fadeEndRatio: 1.0,
+      },
+
+      // ─── Near tier ────────────────────────────────────────────────────
+      // null budgets are auto-derived from `density`.
+      nearTier: {
+          maxCloseTrees: null,
+          maxTotalLeaves: null,
+          maxTotalClusters: 10000000,
+
+          maxBranchDetailLevel: 3,
+          branchLODBands: [{ distance: 50, maxLevel: 4 }],
+          branchTerminalLevel: 2,
+          branchFadeMargin: null,
+
+          leafBands: [
+              { start:  0, end:  8 },
+              { start:  7, end: 20 },
+              { start: 19, end: 30 },
+              { start: 25 },
+          ],
+          // 220m range with an 80m fade window means the near leaf fade
+          // starts at 140m so the handoff matches the mid-tier fade-in.
+          leafFadeStartRatio: 140 / 220,
+
+          leafCounts: {
+              generic: [6000, 3000, 1500, 1500],
+              0:       [3000, 1500,  700,  700],
+              1:       [3000, 1500,  700,  700],
+          },
+          leafSizeScale: [1.0, 1.36, 2.0, 2.0],
+
+          birch: {
+              nearDistance: 20.0,
+              closeSize: 0.36, settledSize: 0.55, aspect: 1.5,
+              closeLeaves: 4000,
+              closeCardsPerAnchor: 10,
+              settledCardsPerAnchor: 1,
+          },
+      },
+
+      // ─── Mid tier ─────────────────────────────────────────────────────
+      midTier: {
+          maxTrees: null,
+          // 1.0 = no distance thinning. 0.5 = keep about half as many
+          // trees by the far end of the mid tier, with a linear ramp.
+          endDensityScale: 0.1,
+          hull: {
+              lonSegments: 12, latSegments: 8,
+              vsAnchorSamples: 8, inflation: 0.95, shrinkWrap: 0.55,
+              verticalBias: 1.15, topShrinkStart: 0.60, topShrinkStrength: 0.35,
+              gapShrink: 0.68,
+              lumpNearScale: 1.8,
+              lumpFarScale: 1.0,
+              lumpNearDistance: 250,
+              lumpFarDistance: 550,
+          },
+          hullFrag: {
+            // ── [TIER 1] Sub-band coverage ────────────────────────────────
+            // Near sub-band (~180–450m) gets noticeably lower base coverage
+            // — this is the single biggest "too solid" fix. Far sub-band
+            // (~450–1000m) stays close to the old 0.72: tiny trees at 800m
+            // alias if they're too porous.
+            //
+            // Backward compat: if you revert to a single `baseCoverage` field,
+            // the shader builder treats both near and far as that value and
+            // the sub-band gradient becomes a no-op.
+            baseCoverageNear: 0.56,
+            baseCoverageFar:  0.74,
+            subbandSplit: 450,         // m; centre of the near→far transition
+            subbandBlend: 120,         // m; width of the transition
+            subbandFarDamp: 0.65,      // how much to damp near-only effects at far (0 = no damping)
+
+            // Existing noise/lighting knobs — unchanged.
+            coverageNoiseAmp: 0.25,
+            coverageNoiseScale: 2.8,
+            bumpStrength: 0.12,
+            brightness: 1.05,
+
+            // ── [TIER 1] Macro-gap noise ──────────────────────────────────
+            // Very low frequency holes faking anchor-sparse regions. One
+            // cycle is roughly canopy-sized at the default scale. Set
+            // strength = 0 to disable.
+            macroGapScale: 0.55,
+            macroGapStrength: 0.22,
+
+            // ── [TIER 1] Noise-modulated edge erosion ─────────────────────
+            // Erosion threshold varies per-fragment: [edgeStartBase,
+            // edgeStartBase + edgeNoiseAmp]. Old fixed behaviour ≈
+            // { edgeStartBase: 0.58, edgeNoiseAmp: 0.0, edgeBaseThin: 0.05 }.
+            // Lower base = erosion reaches deeper into the canopy; higher
+            // amp = more irregular silhouette boundary.
+            edgeStartBase: 0.40,
+            edgeNoiseAmp:  0.22,
+            edgeBaseThin:  0.12,
+            edgeRimBoost:  0.14,       // extra bite at the very rim
+
+            // ── [TIER 1] Bottom breakup ───────────────────────────────────
+            // Ragged lowest-branch zone. Set to 0 to disable.
+            bottomBreak: 0.14,
+        },
+          trunk: {
+              visibleHeightFrac: 0.38, baseRadiusFrac: 0.025,
+              taperTop: 0.60, fadeEnd: 400,
+          },
+      },
+      // Coarse far-tree tier. Internally this still reuses the cluster
+      // producer/cache, but each instance now draws packed low-res canopy
+      // hulls instead of terrain-scale grove blobs.
+      farTreeTier: {
+        maxInstances: 48000,
+        densityMatchScale: 1.0,
+        endDensityScale: 1.0,
+
+        // ── Which tiles get far-hull instances ─────────────────────
+        // Nominal tile-distance gate (same units as sourceNominalRange).
+        // null → auto-derived from tierRanges.farTrees.
+        //   start: farTrees.start × 0.8  (pre-bake before reaching range)
+        //   end:   farTrees.end   × 1.5  (cover subdivision latency)
+        sourceNominalRange: { start: null, end: null },
+
+        // ── Bake grid: LOD-scaled ─────────────────────────────────
+        // gridDim × gridDim cells per tile. One cell becomes one far-tree
+        // instance, and each instance can pack several low-res hull trees.
+        // Keep this materially denser than the old blob settings.
+        bake: {
+            gridByTileSize: [
+                { tileSize:  128, gridDim: 12 },  //  11m cells
+                { tileSize:  256, gridDim: 12 },  //  21m cells
+                { tileSize:  512, gridDim: 12 },  //  43m cells
+                { tileSize: 1024, gridDim: 10 },  // 102m cells
+                { tileSize: 2048, gridDim:  8 },  // 256m cells
+                { tileSize: 4096, gridDim:  6 },  // 683m cells
+            ],
+            minGridDim: 5,
+            maxGridDim: 12,
+
+            // Forest eligibility (coarse re-evaluation; same logic as
+            // fine scatter, sampled at cell positions)
+            maxAltitude: 2200.0,
+            maxSlope:    0.65,
+            minDensity:  0.05,   // keep sparse far hulls from collapsing into holes
+
+            // When a tile has individual-tree scatter already baked
+            // (RUNTIME_TREE representation), sample that eligibility
+            // signal and weight far-hull emission by it. Biases far trees
+            // toward the same high-density regions as mid-tier trees.
+            // Tiles without scatter data fall back to pure eligibility.
+            useEligibilityWeighting: true,
+            eligibilityWeight: 0.6,   // 0 = ignore, 1 = full gate
+
+            // Placement and packing controls for the baked far instances.
+            jitterScale: 0.72,
+            neighborhoodRadius: 1.6,
+            gradientNudge: 0.08,
+            canopyFootprintMinScale: 0.90,
+            canopyFootprintMaxScale: 1.14,
+            groupRadiusMinFrac: 0.12,
+            groupRadiusMaxFrac: 0.24,
+
+            perLayerCapacity: 160,
+            maxBakesPerFrame: 8,
+        },
+
+        // ── Hull geometry ─────────────────────────────────────────
+        // Same hull builder as the mid tier, but lower resolution and a
+        // much simpler shader. Several separate trees can be packed into a
+        // single far instance.
+        hull: {
+            lonSegments: 8,
+            latSegments: 5,
+            maxPackedTrees: 4,
+
+            // Silhouette blend endpoints (lerp by coniferFrac)
+            coniferTopSharpness: 0.65,   // 0=dome, 1=perfect cone
+            coniferTaper:        0.35,   // base narrowing
+            deciduousSpread:     0.18,   // mid-height bulge
+
+            // Canopy sits on an implied trunk. Fraction of total height
+            // that is trunk (invisible — just an offset).
+            trunkHeightFrac:  0.10,
+            sideLobeAmp: 0.16,
+        },
+
+        frag: {
+            baseCoverage:       0.74,
+            coverageNoiseScale: 1.6,
+            coverageNoiseAmp:   0.18,
+            edgeThin:           0.10,
+            topThin:            0.08,
+            bottomThin:         0.06,
+            // Packed-tree density modulates coverage: sparse groups
+            // read more porous, dense groups hold together.
+            densityToCoverage:  0.18,
+        },
+
+        // Tree size derivation. Height varies with altitude; width
+        // derived from height × species ratio.
+        heightRange: { min: 8.0, max: 22.0 },
+        widthToHeightRatio: { conifer: 0.25, deciduous: 0.45 },
+    },
+
+    // ─── Patch tier: one volumetric instance per tile ─────────────────
+    // At 2.5–12km, individual clusters are sub-pixel. The patch tier
+    // renders forest as a terrain-following shell: tile geometry
+    // extruded upward by local canopy height, masked by forest coverage.
+    //
+    // Source: per-tile statistics baked during terrain generation
+    // (parallel to LayerMeta). No separate cache — stats are tiny.
+    //
+    // Render: separate pipeline from cluster. Tessellated shell over
+    // tile; VS extrudes by coverage × height; FS discards below
+    // coverage threshold. Terrain-following → no altitude issues.
+    //
+    // Implementation deferred — this section defines what stats the
+    // terrain gen pass needs to produce so we can wire it later.
+    patchTier: {
+        maxPatches: 512,
+
+        // Per-tile stats (baked alongside terrain, stored in/near LayerMeta)
+        statsSchema: {
+            forestCoverage:   'f32',   // fraction [0,1] of tile with trees
+            coniferFraction:  'f32',   // shape/color blend
+            meanCanopyHeight: 'f32',   // extrusion amplitude
+            // Coarse coverage grid for shell masking. 8×8 = 64 texels.
+            // Packed into a small per-tile texture or storage array.
+            coverageGridRes:  8,
+        },
+
+        shell: {
+            // Shell tessellation over tile footprint
+            tessSegments: 16,
+            // Silhouette softening at forest edges
+            edgeFadeWidthFrac: 0.1,
+        },
+    },
+      speciesProfiles: {
+          0: { heightFracStart: 0.08, heightFracEnd: 0.98, radialFrac: 0.22, label: 'spruce', conical: true },
+          1: { heightFracStart: 0.12, heightFracEnd: 0.98, radialFrac: 0.20, label: 'pine',   conical: true },
+          2: { heightFracStart: 0.32, heightFracEnd: 0.98, radialFrac: 0.26, label: 'birch' },
+          3: { heightFracStart: 0.25, heightFracEnd: 0.92, radialFrac: 0.30, label: 'alder' },
+          4: { heightFracStart: 0.20, heightFracEnd: 0.95, radialFrac: 0.42, label: 'oak' },
+          5: { heightFracStart: 0.22, heightFracEnd: 0.96, radialFrac: 0.38, label: 'beech' },
+          default: { heightFracStart: 0.28, heightFracEnd: 0.95, radialFrac: 0.32, label: 'generic' },
+      },
+  },
     lodAtlas: {
       worldCoverage,
       baseTextureSize: 128,

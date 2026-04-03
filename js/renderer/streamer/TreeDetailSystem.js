@@ -3,6 +3,7 @@
 import { Logger } from '../../config/Logger.js';
 import { getSpeciesRegistry } from './species/SpeciesRegistry.js';
 import { buildCloseTreeTrackerShader } from './shaders/closeTreeTracker.wgsl.js';
+import { buildCloseTreeDedupShader } from './shaders/closeTreeDedup.wgsl.js';
 import { LODS_PER_CATEGORY, CAT_TREES } from './streamerConfig.js';
 import { LeafLODTestSuite } from './LeafLODTestSuite.js';
 const CLOSE_TREE_BYTES = 128;  // Per CloseTreeInfo struct
@@ -32,16 +33,21 @@ export class TreeDetailSystem {
 
         // Preallocated counter reset
         this._countReset = new Uint32Array([0]);
+        this._dedupStatsReset = new Uint32Array(4);
 
         this._leafLODTestSuite = null;
         this._testSuiteEnabled = false;
+        this._debugReadbackEnabled = config.debugReadback === true;
         this.maxCloseTrees    = this.lodController.maxCloseTrees;
         this.maxTotalLeaves   = config.maxTotalLeaves   ?? 600_000;
         this.maxTotalClusters = config.maxTotalClusters ??  50_000;
 
         // GPU buffers
+        this._trackedCloseTreeBuffer = null;
+        this._trackedCloseTreeCountBuffer = null;
         this._closeTreeBuffer        = null;
         this._closeTreeCountBuffer   = null;
+        this._dedupStatsBuffer       = null;
         this._trackerParamBuffer     = null;
         this._assetSpeciesBuffer     = null;
         this._assetSpeciesCount      = 0;
@@ -51,6 +57,13 @@ export class TreeDetailSystem {
         this._trackerBGL        = null;
         this._trackerBG         = null;
         this._trackerBGDirty    = true;
+        this._dedupPipeline     = null;
+        this._dedupBGL          = null;
+        this._dedupBG           = null;
+        this._dedupBGDirty      = true;
+        this._dedupReadbackBuffer = null;
+        this._dedupReadbackQueued = false;
+        this._dedupReadbackPending = false;
         this._trackerWorkgroups = 0;
         this._sourceBands       = [];
         this._sourceCapacity    = 0;
@@ -75,6 +88,7 @@ export class TreeDetailSystem {
         this._createBuffers();
         this._buildSourceBands();
         this._createTrackerPipeline();
+        this._createDedupPipeline();
         this._createTrackerDispatchArgsPipeline();   
         this._createDispatchArgsPipeline();
 
@@ -91,6 +105,7 @@ export class TreeDetailSystem {
             `maxTrees=${this.maxCloseTrees}, ` +
             `range=${this.lodController.detailRange}m, ` +
             `bands=[${bands.join('/')}]m, ` +
+            `dedup=sourceHash+fallback, ` +
             `sourceBands=${this._sourceBands.map(b => b.band).join('/')}, ` +
             `dispatch=${this._trackerWorkgroups} wgs`
         );
@@ -191,6 +206,18 @@ export class TreeDetailSystem {
     }
 
     _createBuffers() {
+        this._trackedCloseTreeBuffer = this.device.createBuffer({
+            label: 'TreeDetail-TrackedCloseTrees',
+            size: Math.max(256, this.maxCloseTrees * CLOSE_TREE_BYTES),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+        });
+
+        this._trackedCloseTreeCountBuffer = this.device.createBuffer({
+            label: 'TreeDetail-TrackedCloseTreeCount',
+            size: 256,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+        });
+
         this._closeTreeBuffer = this.device.createBuffer({
             label: 'TreeDetail-CloseTrees',
             size: Math.max(256, this.maxCloseTrees * CLOSE_TREE_BYTES),
@@ -199,6 +226,12 @@ export class TreeDetailSystem {
 
         this._closeTreeCountBuffer = this.device.createBuffer({
             label: 'TreeDetail-CloseTreeCount',
+            size: 256,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+        });
+
+        this._dedupStatsBuffer = this.device.createBuffer({
+            label: 'TreeDetail-DedupStats',
             size: 256,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
         });
@@ -365,19 +398,48 @@ export class TreeDetailSystem {
         });
     }
 
+    _createDedupPipeline() {
+        const code = buildCloseTreeDedupShader({
+            maxCloseTrees: this.maxCloseTrees,
+        });
+
+        const mod = this.device.createShaderModule({
+            label: 'CloseTreeDedup-SM',
+            code,
+        });
+
+        this._dedupBGL = this.device.createBindGroupLayout({
+            label: 'CloseTreeDedup-BGL',
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+            ],
+        });
+
+        this._dedupPipeline = this.device.createComputePipeline({
+            label: 'CloseTreeDedup-Pipeline',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this._dedupBGL] }),
+            compute: { module: mod, entryPoint: 'main' },
+        });
+    }
+
     _updateTrackerParams(camera) {
         const s    = this.streamer;
         const cam  = s.uniformManager?.camera?.position || camera?.position || { x: 0, y: 0, z: 0 };
         const pc   = s.planetConfig;
         const lc   = this.lodController;
     
-        // 20 words = 80 bytes. Layout must match TrackerParams in the shader.
+        // 36 words = 144 bytes. Layout must match TrackerParams in the shader.
         //   [0-3]   cameraPosition.xyz + detailRange
         //   [4-7]   planetOrigin.xyz + planetRadius
         //   [8-11]  time (f32) + reserved u32/u32/u32
         //   [12-15] bandStarts (vec4)
         //   [16-19] bandEnds   (vec4)
-        const data = new Float32Array(20);
+        //   [20-35] viewProjection matrix
+        const data = new Float32Array(36);
         const u32  = new Uint32Array(data.buffer);
     
         data[0] = cam.x;
@@ -399,6 +461,26 @@ export class TreeDetailSystem {
         // vec4-packed; shader indexes with runtime u32.
         data.set(lc.leafBandStarts, 12);
         data.set(lc.leafBandEnds,   16);
+
+        if (camera?.matrixWorldInverse?.elements && camera?.projectionMatrix?.elements) {
+            const v = camera.matrixWorldInverse.elements;
+            const p = camera.projectionMatrix.elements;
+            for (let c = 0; c < 4; c++) {
+                for (let r = 0; r < 4; r++) {
+                    let sum = 0;
+                    for (let k = 0; k < 4; k++) {
+                        sum += p[r + k * 4] * v[k + c * 4];
+                    }
+                    data[20 + c * 4 + r] = sum;
+                }
+            }
+        } else {
+            for (let i = 20; i < 36; i++) data[i] = 0;
+            data[20] = 1;
+            data[25] = 1;
+            data[30] = 1;
+            data[35] = 1;
+        }
     
         this.device.queue.writeBuffer(this._trackerParamBuffer, 0, data);
     }
@@ -415,27 +497,47 @@ export class TreeDetailSystem {
                 { binding: 0, resource: { buffer: this._trackerParamBuffer } },
                 { binding: 1, resource: { buffer: pool.instanceBuffer } },
                 { binding: 2, resource: { buffer: pool.indirectBuffer } },
-                { binding: 3, resource: { buffer: this._closeTreeBuffer } },
-                { binding: 4, resource: { buffer: this._closeTreeCountBuffer } },
+                { binding: 3, resource: { buffer: this._trackedCloseTreeBuffer } },
+                { binding: 4, resource: { buffer: this._trackedCloseTreeCountBuffer } },
                 { binding: 5, resource: { buffer: this._assetSpeciesBuffer } },
             ]
         });
 
         this._trackerBGDirty = false;
     }
+    _maybeRebuildDedupBG() {
+        if (!this._dedupBGDirty) return;
+
+        this._dedupBG = this.device.createBindGroup({
+            layout: this._dedupBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this._trackedCloseTreeBuffer } },
+                { binding: 1, resource: { buffer: this._trackedCloseTreeCountBuffer } },
+                { binding: 2, resource: { buffer: this._closeTreeBuffer } },
+                { binding: 3, resource: { buffer: this._closeTreeCountBuffer } },
+                { binding: 4, resource: { buffer: this._dedupStatsBuffer } },
+            ],
+        });
+
+        this._dedupBGDirty = false;
+    }
     update(commandEncoder, camera) {
         if (!this._initialized || !this._enabled) return;
         if (this._sourceBands.length === 0) return;
 
         this._frameCount++;
+        this._kickDedupStatsReadback();
 
         this._updateTrackerParams(camera);
         this._maybeRebuildTrackerBG();
+        this._maybeRebuildDedupBG();
         this._maybeRebuildTrackerDispatchArgsBG();
 
-        if (!this._trackerBG || !this._trackerDispatchArgsBG) return;
+        if (!this._trackerBG || !this._dedupBG || !this._trackerDispatchArgsBG) return;
 
+        this.device.queue.writeBuffer(this._trackedCloseTreeCountBuffer, 0, this._countReset);
         this.device.queue.writeBuffer(this._closeTreeCountBuffer, 0, this._countReset);
+        this.device.queue.writeBuffer(this._dedupStatsBuffer, 0, this._dedupStatsReset);
 
         // ── Build tracker dispatch args from LIVE band counts ───────────
         // Scatter wrote treeIndirectArgs earlier in this encoder; those
@@ -457,6 +559,14 @@ export class TreeDetailSystem {
             pass.end();
         }
 
+        {
+            const pass = commandEncoder.beginComputePass({ label: 'CloseTreeDedup' });
+            pass.setPipeline(this._dedupPipeline);
+            pass.setBindGroup(0, this._dedupBG);
+            pass.dispatchWorkgroups(1);
+            pass.end();
+        }
+
         // ── Leaf dispatch-args builder (unchanged) ──────────────────────
         {
             const pass = commandEncoder.beginComputePass({ label: 'LeafDispatchArgs' });
@@ -465,6 +575,8 @@ export class TreeDetailSystem {
             pass.dispatchWorkgroups(1);
             pass.end();
         }
+
+        this._queueDedupStatsReadback(commandEncoder);
 
         if (this._leafLODTestSuite?.isActive()) {
             this._leafLODTestSuite.update(commandEncoder, camera);
@@ -510,12 +622,69 @@ export class TreeDetailSystem {
         };
     }
 
+    _queueDedupStatsReadback(commandEncoder) {
+        if (!this._debugReadbackEnabled || !commandEncoder) return;
+        if (this._dedupReadbackQueued || this._dedupReadbackPending) return;
+        if ((this._frameCount % 240) !== 0) return;
+
+        this._ensureDedupReadbackBuffer();
+        if (!this._dedupReadbackBuffer) return;
+
+        commandEncoder.copyBufferToBuffer(
+            this._dedupStatsBuffer,
+            0,
+            this._dedupReadbackBuffer,
+            0,
+            16
+        );
+        this._dedupReadbackQueued = true;
+    }
+
+    _ensureDedupReadbackBuffer() {
+        if (this._dedupReadbackBuffer) return;
+        this._dedupReadbackBuffer = this.device.createBuffer({
+            label: 'TreeDetail-DedupReadback',
+            size: 256,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+    }
+
+    _kickDedupStatsReadback() {
+        if (!this._dedupReadbackQueued || this._dedupReadbackPending || !this._dedupReadbackBuffer) return;
+
+        this._dedupReadbackPending = true;
+        this._dedupReadbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
+            const data = new Uint32Array(this._dedupReadbackBuffer.getMappedRange(0, 16).slice(0));
+            const raw = data[0] >>> 0;
+            const unique = data[1] >>> 0;
+            const duplicates = data[2] >>> 0;
+
+            Logger.info(
+                `[TreeDetailSystem] dedup raw=${raw} unique=${unique} duplicates=${duplicates}`
+            );
+
+            this._lastCloseTreeCount = unique;
+            this._dedupReadbackBuffer.unmap();
+            this._dedupReadbackQueued = false;
+            this._dedupReadbackPending = false;
+        }).catch((err) => {
+            Logger.warn(`[TreeDetailSystem] dedup readback failed: ${err?.message || err}`);
+            try { this._dedupReadbackBuffer?.unmap(); } catch (_) {}
+            this._dedupReadbackQueued = false;
+            this._dedupReadbackPending = false;
+        });
+    }
+
     dispose() {
         this._trackerDispatchArgsBuffer?.destroy();
         this._leafLODTestSuite?.dispose();
         this._leafLODTestSuite?.dispose();
+        this._trackedCloseTreeBuffer?.destroy();
+        this._trackedCloseTreeCountBuffer?.destroy();
         this._closeTreeBuffer?.destroy();
         this._closeTreeCountBuffer?.destroy();
+        this._dedupStatsBuffer?.destroy();
+        this._dedupReadbackBuffer?.destroy();
         this._trackerParamBuffer?.destroy();
         this._leafDispatchArgsBuffer?.destroy();
         this._assetSpeciesBuffer?.destroy();
