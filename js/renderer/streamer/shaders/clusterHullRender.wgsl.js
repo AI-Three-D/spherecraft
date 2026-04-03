@@ -6,13 +6,10 @@ export function buildClusterHullRenderShaders(config = {}) {
     const TRUNK_FRAC = config.trunkHeightFrac ?? 0.10;
     const MAX_PACKED_TREES = Math.max(1, Math.floor(config.maxPackedTrees ?? config.packedCanopies ?? 4));
 
-    const FRAG_BASE_COV = config.baseCoverage ?? config.fragBaseCoverage ?? 0.74;
-    const FRAG_NOISE_SC = config.coverageNoiseScale ?? config.fragNoiseScale ?? 1.6;
-    const FRAG_NOISE_AMP = config.coverageNoiseAmp ?? config.fragNoiseAmp ?? 0.18;
-    const FRAG_DENS_TO_COV = config.densityToCoverage ?? config.fragDensityToCoverage ?? 0.18;
-    const FRAG_EDGE_THIN = config.edgeThin ?? 0.10;
-    const FRAG_TOP_THIN = config.topThin ?? 0.08;
-    const FRAG_BOTTOM_THIN = config.bottomThin ?? 0.06;
+    const FRAG_AMBIENT = config.ambient ?? 0.34;
+    const FRAG_SUN_STRENGTH = config.sunStrength ?? 0.60;
+    const FRAG_TOP_TINT = config.topTint ?? 0.08;
+    const FRAG_DIST_DESAT = config.distDesat ?? 0.10;
 
     const fmt = (value) => Number(value).toFixed(4);
 
@@ -50,29 +47,6 @@ fn pcgF(v: u32) -> f32 {
 
 fn dirFromAngle(angle: f32) -> vec2<f32> {
     return vec2<f32>(cos(angle), sin(angle));
-}
-
-fn rotate2(v: vec2<f32>, angle: f32) -> vec2<f32> {
-    let c = cos(angle);
-    let s = sin(angle);
-    return vec2<f32>(v.x * c - v.y * s, v.x * s + v.y * c);
-}
-
-fn hash2(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-fn noise2(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    return mix(
-        mix(hash2(i + vec2<f32>(0.0, 0.0)), hash2(i + vec2<f32>(1.0, 0.0)), u.x),
-        mix(hash2(i + vec2<f32>(0.0, 1.0)), hash2(i + vec2<f32>(1.0, 1.0)), u.x),
-        u.y
-    );
 }
 
 fn packedTreeCount(inst: ClusterTreeRender) -> u32 {
@@ -129,11 +103,9 @@ struct VSOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) worldNormal: vec3<f32>,
     @location(1) foliageColor: vec3<f32>,
-    @location(2) @interpolate(flat) seed: u32,
-    @location(3) localPos: vec3<f32>,
-    @location(4) shapeData: vec4<f32>,
-    @location(5) distToCam: f32,
-    @location(6) @interpolate(flat) activeTree: f32,
+    @location(2) topBlend: f32,
+    @location(3) distToCam: f32,
+    @location(4) @interpolate(flat) activeTree: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: RenderParams;
@@ -228,9 +200,7 @@ fn vsMain(in: VSIn, @builtin(instance_index) instanceIndex: u32) -> VSOut {
     out.clip = params.viewProjection * vec4<f32>(worldPos, 1.0);
     out.worldNormal = worldN;
     out.foliageColor = vec3<f32>(inst.foliageR, inst.foliageG, inst.foliageB);
-    out.seed = treeSeed;
-    out.localPos = treeOnlyLocal;
-    out.shapeData = vec4<f32>(treeFootprint, treeHeight, inst.density, inst.tierFade);
+    out.topBlend = clamp(yNorm + shoulderBand * 0.12, 0.0, 1.0);
     out.distToCam = inst.distToCam;
     out.activeTree = activeTree;
     return out;
@@ -240,23 +210,18 @@ fn vsMain(in: VSIn, @builtin(instance_index) instanceIndex: u32) -> VSOut {
     const fs = /* wgsl */`
 ${shared}
 
-const BASE_COVERAGE: f32 = ${fmt(FRAG_BASE_COV)};
-const NOISE_SCALE: f32 = ${fmt(FRAG_NOISE_SC)};
-const NOISE_AMP: f32 = ${fmt(FRAG_NOISE_AMP)};
-const DENS_TO_COV: f32 = ${fmt(FRAG_DENS_TO_COV)};
-const EDGE_THIN: f32 = ${fmt(FRAG_EDGE_THIN)};
-const TOP_THIN: f32 = ${fmt(FRAG_TOP_THIN)};
-const BOTTOM_THIN: f32 = ${fmt(FRAG_BOTTOM_THIN)};
+const AMBIENT: f32 = ${fmt(FRAG_AMBIENT)};
+const SUN_STRENGTH: f32 = ${fmt(FRAG_SUN_STRENGTH)};
+const TOP_TINT: f32 = ${fmt(FRAG_TOP_TINT)};
+const DIST_DESAT: f32 = ${fmt(FRAG_DIST_DESAT)};
 
 struct FSIn {
     @builtin(position) fragCoord: vec4<f32>,
     @location(0) worldNormal: vec3<f32>,
     @location(1) foliageColor: vec3<f32>,
-    @location(2) @interpolate(flat) seed: u32,
-    @location(3) localPos: vec3<f32>,
-    @location(4) shapeData: vec4<f32>,
-    @location(5) distToCam: f32,
-    @location(6) @interpolate(flat) activeTree: f32,
+    @location(2) topBlend: f32,
+    @location(3) distToCam: f32,
+    @location(4) @interpolate(flat) activeTree: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: RenderParams;
@@ -267,51 +232,15 @@ fn fsMain(in: FSIn) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let footprint = max(in.shapeData.x, 0.001);
-    let height = max(in.shapeData.y, 0.001);
-    let density = clamp(in.shapeData.z, 0.0, 1.0);
-    let tierFade = clamp(in.shapeData.w, 0.0, 1.0);
-
-    let canopyHeight = height * (1.0 - TRUNK_FRAC);
-    let trunkHeight = height * TRUNK_FRAC;
-    let localXZ = in.localPos.xz / footprint;
-    let radialLen = length(localXZ);
-    if (radialLen > 1.08) {
-        discard;
-    }
-    let yNorm = clamp((in.localPos.y - trunkHeight) / max(canopyHeight, 0.001), 0.0, 1.0);
-
-    let verticalMask = 1.0 - pow(abs(yNorm - 0.56) * 2.0, 1.62) * 0.30;
-    let rimThin = smoothstep(0.74, 1.02, radialLen);
-    let topThin = smoothstep(0.80, 1.0, yNorm);
-    let bottomThin = 1.0 - smoothstep(0.04, 0.20, yNorm);
-    let densityCoverage = (density - 0.5) * DENS_TO_COV;
-
-    let seedOffset = vec2<f32>(pcgF(in.seed) * 50.0, pcgF(pcg(in.seed)) * 50.0);
-    let noiseCoord = localXZ * NOISE_SCALE + vec2<f32>(yNorm * 0.36, yNorm * 0.22) + seedOffset;
-    let coverageNoise = (noise2(noiseCoord) - 0.5) * NOISE_AMP;
-    var coverage = (BASE_COVERAGE + densityCoverage + coverageNoise) * verticalMask;
-    coverage = coverage - rimThin * EDGE_THIN;
-    coverage = coverage - topThin * TOP_THIN;
-    coverage = coverage - bottomThin * BOTTOM_THIN;
-    coverage = coverage + (1.0 - rimThin) * 0.05;
-    coverage = clamp(coverage, 0.05, 0.95);
-
-    let discardNoise = noise2(localXZ * 7.0 + vec2<f32>(yNorm * 4.0, yNorm * 3.0) + seedOffset * 0.5);
-    if (discardNoise > coverage * tierFade) {
-        discard;
-    }
-
     let N = normalize(in.worldNormal);
     let L = normalize(params.sunDirection);
     let wrapped = max(0.0, (dot(N, L) + 0.28) / 1.28);
 
-    var lit = in.foliageColor * (0.30 + wrapped * 0.62);
-    let topTint = mix(0.92, 1.04, smoothstep(0.35, 0.95, yNorm));
-    lit = lit * topTint;
+    var lit = in.foliageColor * (AMBIENT + wrapped * SUN_STRENGTH);
+    lit = lit * mix(0.94, 1.0 + TOP_TINT, in.topBlend);
 
     let luma = dot(lit, vec3<f32>(0.299, 0.587, 0.114));
-    let distDesat = smoothstep(900.0, 7000.0, in.distToCam) * 0.12;
+    let distDesat = smoothstep(900.0, 7000.0, in.distToCam) * DIST_DESAT;
     lit = mix(lit, vec3<f32>(luma), distDesat);
 
     return vec4<f32>(lit, 1.0);

@@ -335,12 +335,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     let expectedTrees = cellWorldSize * cellWorldSize * TARGET_TREE_DENSITY * mix(0.45, 1.25, density);
     let packedCount = clamp(u32(floor(expectedTrees + 0.5)), 1u, MAX_PACKED_TREES);
+    let packT = f32(packedCount - 1u) / max(f32(MAX_PACKED_TREES - 1u), 1.0);
+    let desiredGroupRadius = cellWorldSize * mix(GROUP_RADIUS_MIN_FRAC, GROUP_RADIUS_MAX_FRAC, density);
+    // All packed trees share the same sampled ground point. If they spread
+    // too far across a sloped cell, the outer trees visibly float. Keep the
+    // spread tied to canopy size, not the whole cell footprint.
+    let groundedGroupRadius = footprint * mix(0.35, 1.05, packT);
     let groupRadius = select(
         0.0,
         clamp(
-            cellWorldSize * mix(GROUP_RADIUS_MIN_FRAC, GROUP_RADIUS_MAX_FRAC, density),
-            footprint * 1.25,
-            cellWorldSize * 0.45
+            min(desiredGroupRadius, groundedGroupRadius),
+            footprint * 0.25,
+            footprint * 1.10
         ),
         packedCount > 1u
     );

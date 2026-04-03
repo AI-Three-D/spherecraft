@@ -485,7 +485,7 @@ export function createEngineConfig() {
       // producer/cache, but each instance now draws packed low-res canopy
       // hulls instead of terrain-scale grove blobs.
       farTreeTier: {
-        maxInstances: 48000,
+        maxInstances: 120000,
         densityMatchScale: 1.0,
         endDensityScale: 1.0,
 
@@ -532,8 +532,8 @@ export function createEngineConfig() {
             gradientNudge: 0.08,
             canopyFootprintMinScale: 0.90,
             canopyFootprintMaxScale: 1.14,
-            groupRadiusMinFrac: 0.12,
-            groupRadiusMaxFrac: 0.24,
+            groupRadiusMinFrac: 0.05,
+            groupRadiusMaxFrac: 0.10,
 
             perLayerCapacity: 160,
             maxBakesPerFrame: 8,
@@ -544,8 +544,8 @@ export function createEngineConfig() {
         // much simpler shader. Several separate trees can be packed into a
         // single far instance.
         hull: {
-            lonSegments: 8,
-            latSegments: 5,
+            lonSegments: 6,
+            latSegments: 4,
             maxPackedTrees: 4,
 
             // Silhouette blend endpoints (lerp by coniferFrac)
@@ -560,15 +560,10 @@ export function createEngineConfig() {
         },
 
         frag: {
-            baseCoverage:       0.74,
-            coverageNoiseScale: 1.6,
-            coverageNoiseAmp:   0.18,
-            edgeThin:           0.10,
-            topThin:            0.08,
-            bottomThin:         0.06,
-            // Packed-tree density modulates coverage: sparse groups
-            // read more porous, dense groups hold together.
-            densityToCoverage:  0.18,
+            ambient:     0.34,
+            sunStrength: 0.60,
+            topTint:     0.08,
+            distDesat:   0.10,
         },
 
         // Tree size derivation. Height varies with altitude; width
