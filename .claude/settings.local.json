@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/okkokauhanen/work/DATrain/3d/HIGH_PRIO/other/spherecraft/js -name *Test* -o -name *test* -o -name *Debug* -o -name *debug*)",
+      "Bash(grep -r from.*config/textures /Users/okkokauhanen/work/DATrain/3d/HIGH_PRIO/other/spherecraft/js --include=*.js)",
+      "Bash(grep -r from.*planet /Users/okkokauhanen/work/DATrain/3d/HIGH_PRIO/other/spherecraft/js/renderer --include=*.js)"
+    ]
+  }
+}
