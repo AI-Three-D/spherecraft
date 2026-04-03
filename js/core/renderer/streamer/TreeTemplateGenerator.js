@@ -13,8 +13,8 @@ import {
     scale3 as scale,
     lerp3 as lerp,
     cross3
-} from '../utils/vector3.js';
-import { SeededRandom } from '../utils/SeededRandom.js';
+} from '../../../shared/math/vector3.js';
+import { SeededRandom } from '../../../shared/math/SeededRandom.js';
 
 /**
  * Get a perpendicular vector to the given direction.
@@ -44,7 +44,8 @@ export class TreeTemplateGenerator {
                 config.treeType,
                 i,
                 seed,
-                config.params
+                config.params,
+                config.birchGenerator
             );
             templates.push(template);
         }
@@ -55,7 +56,7 @@ export class TreeTemplateGenerator {
     /**
      * Generate a single tree template.
      */
-    static generateSingle(treeType, variantIndex, seed, params) {
+    static generateSingle(treeType, variantIndex, seed, params, birchGenerator) {
         const rng = new SeededRandom(seed);
 
         // Select generator based on tree type
@@ -65,7 +66,7 @@ export class TreeTemplateGenerator {
                 return this._generateDeciduous(treeType, variantIndex, rng, params);
             case 'birch':
             case 'deciduous':
-                return this._generateBirchHierarchical(treeType, variantIndex, seed, params);
+                return this._generateBirchHierarchical(treeType, variantIndex, seed, params, birchGenerator);
             case 'eucalyptus':
             case 'deciduous_tall':
                 return this._generateEucalyptus(treeType, variantIndex, rng, params);
@@ -75,8 +76,8 @@ export class TreeTemplateGenerator {
                 return this._generateGenericTree(treeType, variantIndex, rng, params);
         }
     }
-    static _generateBirchHierarchical(treeType, variantIndex, seed, params = {}) {
-        const result = BranchSystem.generateBirch(seed, params);
+    static _generateBirchHierarchical(treeType, variantIndex, seed, params = {}, birchGenerator) {
+        const result = BranchSystem.generateBirch(seed, params, birchGenerator);
     
         // Birch anchors are emitted pre-sorted by tier with positional
         // childStart/Count indices. Sorting would corrupt those indices.

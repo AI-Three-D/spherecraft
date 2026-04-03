@@ -1,7 +1,7 @@
 // js/world/baseWorldGenerator.js
 // Phase 3: Atlas generation integration
 
-import { DataTextureConfig } from '../../templates/configs/dataTextureConfiguration.js';
+import { DataTextureConfig } from './dataTextureConfiguration.js';
 import { TextureAtlasKey } from './textureAtlasKey.js';
 
 export class BaseWorldGenerator {

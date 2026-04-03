@@ -3,10 +3,16 @@ import { Geometry } from './resources/geometry.js';
 import { Material } from './resources/material.js';
 import { RenderTarget } from './resources/renderTarget.js';
 import { TextureFormat } from './resources/texture.js';
-import { NightSkyGameConfig, getNightSkyDetailPreset, NightSkyDetailLevel } from '../../templates/configs/nightSkyConfig.js';
-
 export class SkyRenderer {
     constructor(backend, atmosphereLUT, options = {}) {
+        if (!options.nightSkyTheme) {
+            throw new Error('SkyRenderer requires options.nightSkyTheme (NightSkyGameConfig, getNightSkyDetailPreset, NightSkyDetailLevel)');
+        }
+        this._nightSkyTheme = options.nightSkyTheme;
+        this.NightSkyGameConfig = options.nightSkyTheme.NightSkyGameConfig;
+        this.getNightSkyDetailPreset = options.nightSkyTheme.getNightSkyDetailPreset;
+        this.NightSkyDetailLevel = options.nightSkyTheme.NightSkyDetailLevel;
+
         this.backend = backend;
         this.atmosphereLUT = atmosphereLUT;
         this.enabled = true;
@@ -14,19 +20,19 @@ export class SkyRenderer {
         this.initialized = false;
         this.skyMaterial = null;
         this.fullscreenGeometry = null;
-        
+
         // Time tracking for animations
         this._time = 0;
         this._lastFrameTime = performance.now();
-        
+
         // Night sky configuration
-        this._nightSkyConfig = options.nightSkyConfig instanceof NightSkyGameConfig
+        this._nightSkyConfig = options.nightSkyConfig instanceof this.NightSkyGameConfig
             ? options.nightSkyConfig
-            : new NightSkyGameConfig(options.nightSkyConfig || {});
-        
+            : new this.NightSkyGameConfig(options.nightSkyConfig || {});
+
         // Detail level from engine config
-        this._detailLevel = options.detailLevel || NightSkyDetailLevel.MEDIUM;
-        this._detailPreset = getNightSkyDetailPreset(this._detailLevel);
+        this._detailLevel = options.detailLevel || this.NightSkyDetailLevel.MEDIUM;
+        this._detailPreset = this.getNightSkyDetailPreset(this._detailLevel);
         
         // Altitude threshold for LOD switching (meters)
         // LOD 0 = ground (less detail), LOD 1 = space (more detail)
@@ -45,9 +51,9 @@ export class SkyRenderer {
      * Update night sky configuration at runtime.
      */
     setNightSkyConfig(config) {
-        this._nightSkyConfig = config instanceof NightSkyGameConfig
+        this._nightSkyConfig = config instanceof this.NightSkyGameConfig
             ? config
-            : new NightSkyGameConfig(config || {});
+            : new this.NightSkyGameConfig(config || {});
     }
 
     /**
@@ -55,7 +61,7 @@ export class SkyRenderer {
      */
     setDetailLevel(level) {
         this._detailLevel = level;
-        this._detailPreset = getNightSkyDetailPreset(level);
+        this._detailPreset = this.getNightSkyDetailPreset(level);
     }
 
     /**

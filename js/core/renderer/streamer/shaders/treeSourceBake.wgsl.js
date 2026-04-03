@@ -14,7 +14,10 @@ export function buildTreeSourceBakeShader(config = {}) {
     const TREE_DENSITY_SCALE = Number.isFinite(config.treeDensityScale)
         ? Math.max(0.0, config.treeDensityScale)
         : 1.0;
-    const assetSelectionWGSL = buildAssetSelectionWGSL({});
+    const assetSelectionWGSL = buildAssetSelectionWGSL({
+        assetDefFloats: config.assetDefFloats,
+        lodsPerCategory: config.lodsPerCategory,
+    });
 
     return /* wgsl */`
 const WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;

@@ -3,7 +3,7 @@
 // Ferns are built from a handful of curved frond cards. The detailed frond
 // silhouette comes from the albedo texture alpha, not from zig-zag geometry.
 
-import { AssetGeometryBuilder } from '../../AssetGeometryBuilder.js';
+import { AssetGeometryBuilder } from '../../../../core/renderer/streamer/AssetGeometryBuilder.js';
 
 export class FernGeometryBuilder {
 

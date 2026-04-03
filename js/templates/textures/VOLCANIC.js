@@ -1,4 +1,4 @@
-import { TILE_TYPES } from '../../shared/types.js';
+import { TILE_TYPES } from '../configs/tileTypes.js';
 import { TEXTURE_LEVELS } from '../configs/TileConfig.js';
 import { sameForAllSeasons, withSeed } from './reusable/shared.js';
 import { VOLCANIC_MICRO_A, VOLCANIC_MICRO_B, VOLCANIC_MACRO } from './reusable/volcanicTextures.js';

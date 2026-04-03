@@ -2,7 +2,7 @@
 
 import { TextureAtlasManager } from '../core/texture/TextureManager.js';
 import { TEXTURE_LEVELS, SEASONS, TILE_CONFIG } from '../texture/TileConfig.js';
-import { TILE_TYPES } from '../shared/types.js';
+import { TILE_TYPES } from '../templates/configs/tileTypes.js';
 
 // Test configuration that matches between file-based and procedural
 export const TEST_CONFIG = {

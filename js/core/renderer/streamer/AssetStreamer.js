@@ -18,15 +18,11 @@
 //   assetStreamer.render(camera, viewMatrix, projectionMatrix);
 import { TreeMidSystem } from './TreeMidSystem.js';
 import { ClusterTreeSystem } from './ClusterTreeSystem.js';
-import { validateTierRanges } from './treeTierConfig.js';
-import { TEXTURE_LAYER_MAPPING } from './archetype/archetypeDefinitions.js';
 import { LeafMaskBaker } from './LeafMaskBaker.js';
 import { Logger } from '../../../shared/Logger.js';
 import { AssetInstancePool } from './AssetInstancePool.js';
 import { ArchetypeRegistry } from './archetype/ArchetypeRegistry.js';
-import { ARCHETYPE_DEFINITIONS } from './archetype/archetypeDefinitions.js';
 import { AssetSelectionBuffer } from './AssetSelectionBuffer.js';
-import { DEFAULT_ASSET_DEFINITIONS } from './AssetDefinitions.js';
 import { buildGroundPropBakeShader } from './shaders/groundPropBake.wgsl.js';
 import { buildGroundPropGatherShader } from './shaders/groundPropGather.wgsl.js';
 import { buildTreeSourceBakeShader } from './shaders/treeSourceBake.wgsl.js';
@@ -37,14 +33,12 @@ import { buildAssetVertexShader } from './shaders/assetVertex.wgsl.js';
 import { buildAssetFragmentShader } from './shaders/assetFragment.wgsl.js';
 import { LeafStreamer } from './LeafStreamer.js';
 import { TreeDetailSystem } from './TreeDetailSystem.js';
-import { getSpeciesRegistry } from './species/SpeciesRegistry.js';
 import { TreeTemplateLibrary } from './TreeTemplateLibrary.js';
 import { TreeTrunkGeometryBuilder } from './TreeTrunkGeometryBuilder.js';
 import { BranchRenderer } from './BranchRenderer.js';
 import { TreeLODController } from './TreeLODController.js';
 import { TreeMidNearSystem } from './TreeMidNearSystem.js';
 import { GeometryFactory } from './archetype/GeometryFactory.js';
-import { ASSET_SELF_OCCLUSION } from './streamerConfig.js';
 import { PlacementDensityBuffer } from './archetype/PlacementDensityBuffer.js';
 import { AssetBakePolicy, ASSET_BAKE_REPRESENTATION } from './baking/AssetBakePolicy.js';
 import { BakedAssetTileCache } from './baking/BakedAssetTileCache.js';
@@ -52,29 +46,6 @@ import { GroundFieldBaker } from './GroundFieldBaker.js';
 import { GroundPropCache } from './GroundPropCache.js';
 import { TreeSourceCache } from './TreeSourceCache.js';
 import { gpuFormatSampleType } from '../resources/texture.js';
-import {
-    ENABLE_SCATTER_DENSITY_GROUPS,
-    ENABLE_SCATTER_ELIGIBILITY_GATE,
-    LODS_PER_CATEGORY,
-    QUALITY_PRESETS,
-    SCATTER_DENSITY_GROUPS,
-    SCATTER_POLICY_GROUPS,
-    CAT_TREES,
-    TREE_VISIBILITY,
-    TREE_FADE_START_RATIO,
-    TREE_FADE_END_RATIO,
-    TREE_BILLBOARD_LOD_START,
-    TREE_BILLBOARD_LOD_END,
-    TREE_DENSITY_SCALE,
-    TREE_CELL_SIZE,
-    TREE_MAX_PER_CELL,
-    TREE_CLUSTER_PROBABILITY,
-    TREE_JITTER_SCALE,
-    TERRAIN_AO_CONFIG,
-    GROUND_FIELD_BAKE_CONFIG,
-    GROUND_PROP_BAKE_CONFIG,
-    TREE_SOURCE_BAKE_CONFIG,
-} from './streamerConfig.js';
 import { TerrainAOBaker } from './TerrainAOBaker.js';
 
 const FIELD_LAYER_META_U32_STRIDE = 8;
@@ -110,6 +81,38 @@ export class AssetStreamer {
      * @param {string}     [options.quality='medium']
      */
     constructor(options = {}) {
+        if (!options.streamerTheme) {
+            throw new Error('AssetStreamer requires options.streamerTheme');
+        }
+        this._streamerTheme = options.streamerTheme;
+        this.validateTierRanges = options.streamerTheme.validateTierRanges;
+        this.TEXTURE_LAYER_MAPPING = options.streamerTheme.TEXTURE_LAYER_MAPPING;
+        this.ARCHETYPE_DEFINITIONS = options.streamerTheme.ARCHETYPE_DEFINITIONS;
+        this.DEFAULT_ASSET_DEFINITIONS = options.streamerTheme.DEFAULT_ASSET_DEFINITIONS;
+        this.getSpeciesRegistry = options.streamerTheme.getSpeciesRegistry;
+        this.ASSET_SELF_OCCLUSION = options.streamerTheme.ASSET_SELF_OCCLUSION;
+        this.ENABLE_SCATTER_DENSITY_GROUPS = options.streamerTheme.ENABLE_SCATTER_DENSITY_GROUPS;
+        this.ENABLE_SCATTER_ELIGIBILITY_GATE = options.streamerTheme.ENABLE_SCATTER_ELIGIBILITY_GATE;
+        this.LODS_PER_CATEGORY = options.streamerTheme.LODS_PER_CATEGORY;
+        this.ASSET_DEF_FLOATS = options.streamerTheme.ASSET_DEF_FLOATS;
+        this.QUALITY_PRESETS = options.streamerTheme.QUALITY_PRESETS;
+        this.SCATTER_DENSITY_GROUPS = options.streamerTheme.SCATTER_DENSITY_GROUPS;
+        this.SCATTER_POLICY_GROUPS = options.streamerTheme.SCATTER_POLICY_GROUPS;
+        this.CAT_TREES = options.streamerTheme.CAT_TREES;
+        this.TREE_VISIBILITY = options.streamerTheme.TREE_VISIBILITY;
+        this.TREE_FADE_START_RATIO = options.streamerTheme.TREE_FADE_START_RATIO;
+        this.TREE_FADE_END_RATIO = options.streamerTheme.TREE_FADE_END_RATIO;
+        this.TREE_BILLBOARD_LOD_START = options.streamerTheme.TREE_BILLBOARD_LOD_START;
+        this.TREE_BILLBOARD_LOD_END = options.streamerTheme.TREE_BILLBOARD_LOD_END;
+        this.TREE_DENSITY_SCALE = options.streamerTheme.TREE_DENSITY_SCALE;
+        this.TREE_CELL_SIZE = options.streamerTheme.TREE_CELL_SIZE;
+        this.TREE_MAX_PER_CELL = options.streamerTheme.TREE_MAX_PER_CELL;
+        this.TREE_CLUSTER_PROBABILITY = options.streamerTheme.TREE_CLUSTER_PROBABILITY;
+        this.TREE_JITTER_SCALE = options.streamerTheme.TREE_JITTER_SCALE;
+        this.TERRAIN_AO_CONFIG = options.streamerTheme.TERRAIN_AO_CONFIG;
+        this.GROUND_FIELD_BAKE_CONFIG = options.streamerTheme.GROUND_FIELD_BAKE_CONFIG;
+        this.GROUND_PROP_BAKE_CONFIG = options.streamerTheme.GROUND_PROP_BAKE_CONFIG;
+        this.TREE_SOURCE_BAKE_CONFIG = options.streamerTheme.TREE_SOURCE_BAKE_CONFIG;
         this._treeConfig = this.engineConfig?.trees || {};
         this._treeMidNearSystem = null;
         this._aoBaker = null;
@@ -131,7 +134,7 @@ export class AssetStreamer {
 
         this._leafMaskBaker = null;
         this._quality = options.quality || 'medium';
-        this._qualityConfig = QUALITY_PRESETS[this._quality] || QUALITY_PRESETS.medium;
+        this._qualityConfig = this.QUALITY_PRESETS[this._quality] || this.QUALITY_PRESETS.medium;
 
         this._treeConfig = this.engineConfig?.trees || {};
 const tc       = this._treeConfig;
@@ -192,12 +195,13 @@ this._lodController = new TreeLODController({
         // and queryable via getAllArchetypes() / getAllVariants() — but
         // nothing in the render path reads it until Increment 2.
         this._assetDefinitions = applyResolvedTreeAssetConfig(
-            options.assetDefinitions || DEFAULT_ASSET_DEFINITIONS,
+            options.assetDefinitions || this.DEFAULT_ASSET_DEFINITIONS,
             this._treeConfig
         );
         this._assetRegistry = new ArchetypeRegistry(                    // ◄── INC 1
             this._assetDefinitions,
-            options.archetypeDefinitions || ARCHETYPE_DEFINITIONS        // ◄── INC 1
+            options.archetypeDefinitions || this.ARCHETYPE_DEFINITIONS,        // ◄── INC 1
+            this._streamerTheme
         );
         this._assetSelectionBuffer = null;
 
@@ -310,8 +314,8 @@ this._lodController = new TreeLODController({
         this._scatterGroupPendingLayers = new Set();
         this._tileTypeScatterGroupMaskBuffer = null;
         this._scatterTreeTileMapKey = 'tree';
-        this._enableScatterDensityGroups = ENABLE_SCATTER_DENSITY_GROUPS === true;
-        this._enableScatterEligibilityGate = ENABLE_SCATTER_ELIGIBILITY_GATE !== false;
+        this._enableScatterDensityGroups = this.ENABLE_SCATTER_DENSITY_GROUPS === true;
+        this._enableScatterEligibilityGate = this.ENABLE_SCATTER_ELIGIBILITY_GATE !== false;
         this._scatterGroundEligibilityBit = 0;
 
         // ── Indirect-args builder pipeline ────────────────────────────────
@@ -389,12 +393,13 @@ this._lodController = new TreeLODController({
             0
         );
         this._assetSelectionBuffer = new AssetSelectionBuffer(this.device, this._assetRegistry, {
-            tileMapDescriptors: this._buildScatterTileMapDescriptors()
+            tileMapDescriptors: this._buildScatterTileMapDescriptors(),
+            streamerTheme: this._streamerTheme,
         });
         if (this.propTextureManager?.isReady()) {
             this._assetRegistry.assignTextureLayerIndices(
                 this.propTextureManager,
-                TEXTURE_LAYER_MAPPING
+                this.TEXTURE_LAYER_MAPPING
             );
         } else {
             Logger.warn(
@@ -418,20 +423,22 @@ this._lodController = new TreeLODController({
         });
         this._bakedAssetTileCache = new BakedAssetTileCache(this._assetBakePolicy);
         this._bakedAssetTileCache.syncFromTileStreamer(this.tileStreamer);
-        if (GROUND_PROP_BAKE_CONFIG.enabled) {
+        if (this.GROUND_PROP_BAKE_CONFIG.enabled) {
             this._groundPropCache = new GroundPropCache(this.device, {
                 assetRegistry: this._assetRegistry,
                 tilePoolSize: this.tileStreamer.tilePoolSize,
                 fieldArchetypeIndices: this._fieldArchetypeIndexSet,
                 propConfig: this.engineConfig?.groundPropBake,
+                streamerTheme: this._streamerTheme,
             });
             this._groundPropCache.initialize(this._bakedAssetTileCache);
         }
-        if (TREE_SOURCE_BAKE_CONFIG.enabled) {
+        if (this.TREE_SOURCE_BAKE_CONFIG.enabled) {
             this._treeSourceCache = new TreeSourceCache(this.device, {
                 assetRegistry: this._assetRegistry,
                 tilePoolSize: this.tileStreamer.tilePoolSize,
                 treeConfig: this.engineConfig?.trees?.sourceBake,
+                streamerTheme: this._streamerTheme,
             });
             this._treeSourceCache.initialize(this._bakedAssetTileCache);
         }
@@ -448,10 +455,11 @@ this._lodController = new TreeLODController({
         }
 
         // ═══ Template library (before geometry building) ═══════════════════
-        this._speciesRegistry = getSpeciesRegistry();
+        this._speciesRegistry = this.getSpeciesRegistry();
         this._templateLibrary = new TreeTemplateLibrary({
             variantsPerType: 4,
             baseSeed: this.engineConfig.seed ?? 12345,
+            birchGenerator: this._streamerTheme.BirchBranchGenerator,
         });
         const treeTypes = this._getActiveTreeTypes();
         this._templateLibrary.generateTemplates(treeTypes);
@@ -470,7 +478,7 @@ this._lodController = new TreeLODController({
         this._createRenderPipeline();
 
         // ═══ Terrain AO baker ═══════════════════════════════════════════════
-        if (TERRAIN_AO_CONFIG.enabled) {
+        if (this.TERRAIN_AO_CONFIG.enabled) {
             const maxWS   = this._qualityConfig.maxScatterTileWorldSize ?? 48;
             const maxDens = this._assetRegistry?.maxDensity ?? 0.000001;
             const over    = Math.max(1, this._qualityConfig.scatterCellOversample ?? 1);
@@ -491,7 +499,8 @@ this._lodController = new TreeLODController({
                     this.tileStreamer?.getLoadedLayer?.(face, depth, x, y) ?? null,
                 textureFormats:  this.tileStreamer?.textureFormats,
                 aoConfig:        this.engineConfig?.terrainAO,
-                logDispatches:   TERRAIN_AO_CONFIG.logDispatches !== true ? false : true,
+                logDispatches:   this.TERRAIN_AO_CONFIG.logDispatches !== true ? false : true,
+                streamerTheme:   this._streamerTheme,
             });
             this._aoBaker.initialize();
             if (this._aoBaker.enabled) {
@@ -505,7 +514,7 @@ this._lodController = new TreeLODController({
             }
         }
 
-        if (false) { //GROUND_FIELD_BAKE_CONFIG.enabled) {
+        if (false) { //this.GROUND_FIELD_BAKE_CONFIG.enabled) {
             this._groundFieldBaker = new GroundFieldBaker(this.device, {
                 assetRegistry: this._assetRegistry,
                 tilePoolSize: this.tileStreamer.tilePoolSize,
@@ -513,7 +522,8 @@ this._lodController = new TreeLODController({
                 textureFormats: this.tileStreamer?.textureFormats,
                 seed: this.engineConfig.seed,
                 fieldConfig: this.engineConfig?.groundFieldBake,
-                logDispatches: GROUND_FIELD_BAKE_CONFIG.logDispatches !== true ? false : true,
+                logDispatches: this.GROUND_FIELD_BAKE_CONFIG.logDispatches !== true ? false : true,
+                streamerTheme: this._streamerTheme,
             });
             this._groundFieldBaker.initialize();
             if (this._groundFieldBaker.enabled) {
@@ -544,7 +554,7 @@ this._lodController = new TreeLODController({
 
 // ═══ Tree mid-tier systems ═══════════════════════════════════════════
 const tierRanges = this._treeConfig.tierRanges || {};
-const tierWarnings = validateTierRanges(
+const tierWarnings = this.validateTierRanges(
     this._lodController.detailRange,
     tierRanges                                   // ← now takes ranges as arg
 );
@@ -601,7 +611,7 @@ await this._leafStreamer.initialize();
             `(quality=${this._quality}, bands=${this._totalBands}, ` +
             `archetypes=${this._assetRegistry.archetypeCount}, ` +
             `detailBands=[${this._lodController.detailBands.join('/')}]m` +
-            `${this._aoBaker?.enabled ? `, AO=${TERRAIN_AO_CONFIG.resolution}px` : ''}` +
+            `${this._aoBaker?.enabled ? `, AO=${this.TERRAIN_AO_CONFIG.resolution}px` : ''}` +
             `${this._groundFieldBaker?.enabled ? `, field=${this._groundFieldBaker.resolution}px` : ''})`
         );
         Logger.info(`${this._logTag} Legacy climate scatter disabled; using baked field/prop/tree sources`);
@@ -614,7 +624,7 @@ await this._leafStreamer.initialize();
     }
 
     _buildScatterGroups() {
-        const runtimeDefs = [...SCATTER_DENSITY_GROUPS]
+        const runtimeDefs = [...this.SCATTER_DENSITY_GROUPS]
             .sort((a, b) => b.minDensity - a.minDensity)
             .map((def) => ({
                 key: `runtime-${def.name}`,
@@ -630,7 +640,7 @@ await this._leafStreamer.initialize();
             }));
         const runtimeDefsByName = new Map(runtimeDefs.map((group) => [group.name, group]));
 
-        const policyDefs = (Array.isArray(SCATTER_POLICY_GROUPS) ? SCATTER_POLICY_GROUPS : [])
+        const policyDefs = (Array.isArray(this.SCATTER_POLICY_GROUPS) ? this.SCATTER_POLICY_GROUPS : [])
             .map((def) => {
                 const archetypeName = def?.archetypeName;
                 const archetype = archetypeName
@@ -669,8 +679,8 @@ await this._leafStreamer.initialize();
             policyDefs.map((group) => [group.maskArchetypeName, group])
         );
 
-        const fieldChannels = Array.isArray(GROUND_FIELD_BAKE_CONFIG.channels)
-            ? GROUND_FIELD_BAKE_CONFIG.channels
+        const fieldChannels = Array.isArray(this.GROUND_FIELD_BAKE_CONFIG.channels)
+            ? this.GROUND_FIELD_BAKE_CONFIG.channels
             : [];
         const fieldDefs = fieldChannels
             .map((channel, channelIndex) => {
@@ -763,7 +773,7 @@ await this._leafStreamer.initialize();
             includeVariant: (variant) => variant?.archetype?.index === 0
         }];
 
-        if (GROUND_PROP_BAKE_CONFIG.enabled) {
+        if (this.GROUND_PROP_BAKE_CONFIG.enabled) {
             descriptors.push({
                 key: this._groundPropTileMapKey,
                 includeVariant: (variant) => this._isBakedGroundPropVariant(variant),
@@ -1080,7 +1090,7 @@ await this._leafStreamer.initialize();
             }
     
             const maxClose = this._lodController.maxCloseTrees;
-            const band0Cap = this._pool?.getBandCapacity(CAT_TREES * LODS_PER_CATEGORY) ?? 0;
+            const band0Cap = this._pool?.getBandCapacity(this.CAT_TREES * this.LODS_PER_CATEGORY) ?? 0;
             if (band0Cap > maxClose) {
                 Logger.info(
                     `${this._logTag} Note: band 0 capacity (${band0Cap}) > ` +
@@ -2047,14 +2057,14 @@ getGroundFieldTexture() {
                 archetypeTotals.set(key, (archetypeTotals.get(key) ?? 0) + (poolData[bd.band] >>> 0));
             }
 
-            const treeBandBase = CAT_TREES * LODS_PER_CATEGORY;
+            const treeBandBase = this.CAT_TREES * this.LODS_PER_CATEGORY;
             const treeBandParts = [];
             let treeRawTotal = 0;
             let treeCapTotal = 0;
             let treeOverflowTotal = 0;
             let treeMaxOverflowBand = -1;
             let treeMaxOverflowCount = 0;
-            for (let lod = 0; lod < LODS_PER_CATEGORY; lod++) {
+            for (let lod = 0; lod < this.LODS_PER_CATEGORY; lod++) {
                 const band = treeBandBase + lod;
                 const raw = poolData[band] >>> 0;
                 const cap = this._pool?.getBandCapacity(band) ?? 0;
@@ -2321,7 +2331,7 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
                 const all = TreeTrunkGeometryBuilder.buildFromTemplate(
                     repTpl, { trunkRadialSegments: 10, branchRadialSegments: 6 }
                 );
-                treeLODs = all.slice(0, LODS_PER_CATEGORY);
+                treeLODs = all.slice(0, this.LODS_PER_CATEGORY);
                 Logger.info(
                     `${this._logTag} Tree geometry from template "${repTpl.id}" — ` +
                     `LOD0: ${treeLODs[0]?.indices?.length / 3 | 0} tris`
@@ -2334,7 +2344,16 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
         // One geometry per band. GeometryFactory dispatches by builder key.
         // Inactive archetypes (rock, fern, …) get degenerate meshes — their
         // bands exist in the indirect buffer but instanceCount stays 0.
-        const ctx = { treeLODs };
+        const ctx = {
+            treeLODs,
+            builders: {
+                RockGeometryBuilder: this._streamerTheme.RockGeometryBuilder,
+                FernGeometryBuilder: this._streamerTheme.FernGeometryBuilder,
+                SansevieriaGeometryBuilder: this._streamerTheme.SansevieriaGeometryBuilder,
+                MushroomGeometryBuilder: this._streamerTheme.MushroomGeometryBuilder,
+                DeadwoodGeometryBuilder: this._streamerTheme.DeadwoodGeometryBuilder,
+            },
+        };
         this._geometries = [];
         this._lodIndexCounts = [];
 
@@ -2677,7 +2696,8 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
             label: 'GroundProp-BakeShader',
             code: buildGroundPropBakeShader({
                 workgroupSize: this._scatterWorkgroupSize || (this._qualityConfig.scatterWorkgroupSize ?? 64),
-                lodsPerCategory: LODS_PER_CATEGORY,
+                lodsPerCategory: this.LODS_PER_CATEGORY,
+                assetDefFloats: this.ASSET_DEF_FLOATS,
                 maxScatterTileWorldSize: this._groundPropCache.maxScatterTileWorldSize,
                 scatterCellOversample: this._groundPropCache.scatterCellOversample,
                 maxDensity,
@@ -2718,7 +2738,8 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
             code: buildGroundPropGatherShader({
                 workgroupSize: this._scatterWorkgroupSize || (this._qualityConfig.scatterWorkgroupSize ?? 64),
                 totalBands: this._totalBands,
-                lodsPerCategory: LODS_PER_CATEGORY,
+                lodsPerCategory: this.LODS_PER_CATEGORY,
+                assetDefFloats: this.ASSET_DEF_FLOATS,
                 maxScatterDistance,
                 perLayerCapacity: this._groundPropCache.perLayerCapacity,
             }),
@@ -2790,6 +2811,8 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
             code: buildTreeSourceBakeShader({
                 workgroupSize: this._scatterWorkgroupSize || (this._qualityConfig.scatterWorkgroupSize ?? 64),
                 perLayerCapacity: this._treeSourceCache.perLayerCapacity,
+                lodsPerCategory: this.LODS_PER_CATEGORY,
+                assetDefFloats: this.ASSET_DEF_FLOATS,
                 treeCellSize:           tcScatter.cellSize           ?? 16.0,
                 treeMaxPerCell:         tcScatter.maxPerCell         ?? 4,
                 treeClusterProbability: tcScatter.clusterProbability ?? 0.95,
@@ -2824,7 +2847,8 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
             code: buildTreeSourceGatherShader({
                 workgroupSize: this._scatterWorkgroupSize || (this._qualityConfig.scatterWorkgroupSize ?? 64),
                 totalBands: this._totalBands,
-                lodsPerCategory: LODS_PER_CATEGORY,
+                lodsPerCategory: this.LODS_PER_CATEGORY,
+                assetDefFloats: this.ASSET_DEF_FLOATS,
                 perLayerCapacity: this._treeSourceCache.perLayerCapacity,
                 treeVisibility,
             }),
@@ -2869,7 +2893,7 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
 
 
         // ── Build per-band self-occlusion parameters ─────────────────
-        const soConfig = ASSET_SELF_OCCLUSION || {};
+        const soConfig = this.ASSET_SELF_OCCLUSION || {};
         const perBandSO = [];
 
         if (soConfig.enabled !== false) {
@@ -2906,7 +2930,7 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
         const vsSource = buildAssetVertexShader({
             windMaxDistance:       30,
             windFadeDistance:      10,
-            lodsPerArchetype:      LODS_PER_CATEGORY,            // all archetypes have lodCount=5
+            lodsPerArchetype:      this.LODS_PER_CATEGORY,            // all archetypes have lodCount=5
             treeBillboardLodStart: tcBillboards.lodStart ?? 3,
             archetypeFlags:        this._archetypeFlags,
         });
@@ -2921,7 +2945,7 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
             treeFadeEnd,
             treeFarBand: tcBillboards.lodEnd ?? 4,        // still band 4 (tree LOD 4)
             totalBands:       this._totalBands,
-            lodsPerArchetype: LODS_PER_CATEGORY,
+            lodsPerArchetype: this.LODS_PER_CATEGORY,
             archetypeFlags:   this._archetypeFlags,
             selfOcclusion: {
                 enabled:         soConfig.enabled !== false,

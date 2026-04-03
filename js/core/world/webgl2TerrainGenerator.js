@@ -6,7 +6,7 @@ import { Geometry } from '../renderer/resources/geometry.js';
 import { Material } from '../renderer/resources/material.js';
 import { terrainVertexShader, terrainFragmentShader } from './shaders/webgl2/terrainCompute.glsl.js';
 import { splatVertexShader, splatFragmentShader } from './shaders/webgl2/splatCompute.glsl.js';
-import { TILE_TYPES } from '../../shared/types.js';
+import { TILE_TYPES } from '../../templates/configs/tileTypes.js';
 
 export class WebGL2TerrainGenerator {
     constructor(backend, seed, chunkSize, macroConfig, splatConfig, textureCache, options = {}) {

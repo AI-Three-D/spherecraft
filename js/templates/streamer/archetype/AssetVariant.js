@@ -99,7 +99,7 @@ export class AssetVariant {
         this._overlayOnly = def._overlayOnly === true;
 
         // ── Resolved refs (populated by ArchetypeRegistry) ──────────────
-        /** @type {import('./RenderArchetype.js').RenderArchetype|null} */
+        /** @type {import('../../../core/renderer/streamer/archetype/RenderArchetype.js').RenderArchetype|null} */
         this.archetype = null;
         /** @type {import('./PlacementFamily.js').PlacementFamily|null} */
         this.family = null;

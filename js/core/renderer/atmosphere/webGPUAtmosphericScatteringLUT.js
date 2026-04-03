@@ -107,7 +107,8 @@ export class WebGPUAtmosphericScatteringLUT extends AtmosphericScatteringLUT {
     }
     
     async _loadTransmittanceShader() {
-        const response = await fetch('./js/renderer/atmosphere/shaders/webgpu/transmittanceLUT.wgsl');
+        const url = new URL('./shaders/webgpu/transmittanceLUT.wgsl', import.meta.url);
+        const response = await fetch(url);
         if (!response.ok) {
             return this._getEmbeddedTransmittanceShader();
         }
@@ -115,7 +116,8 @@ export class WebGPUAtmosphericScatteringLUT extends AtmosphericScatteringLUT {
     }
 
     async _loadMultiScatterShader() {
-        const response = await fetch('./js/renderer/atmosphere/shaders/webgpu/multiScatterLUT.wgsl');
+        const url = new URL('./shaders/webgpu/multiScatterLUT.wgsl', import.meta.url);
+        const response = await fetch(url);
         if (!response.ok) {
             return this._getEmbeddedMultiScatterShader();
         }

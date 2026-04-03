@@ -13,7 +13,7 @@
 //
 // uvRegionSplit = 0.8 for both (goes in variant record slot [38]).
 
-import { AssetGeometryBuilder } from '../../AssetGeometryBuilder.js';
+import { AssetGeometryBuilder } from '../../../../core/renderer/streamer/AssetGeometryBuilder.js';
 
 const UV_SPLIT = 0.8;
 

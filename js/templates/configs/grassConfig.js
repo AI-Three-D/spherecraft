@@ -1,5 +1,5 @@
 // js/config/grassConfig.js
-import { TILE_TYPES } from '../../shared/types.js';
+import { TILE_TYPES } from './tileTypes.js';
 
 const BASE_GRASS = {
     color: { base: [0.2, 0.45, 0.1], tip: [0.35, 0.6, 0.15] },

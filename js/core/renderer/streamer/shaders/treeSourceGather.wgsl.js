@@ -8,7 +8,10 @@ export function buildTreeSourceGatherShader(config = {}) {
     const TREE_VISIBILITY = Number.isFinite(config.treeVisibility)
         ? Math.max(1.0, config.treeVisibility)
         : 500.0;
-    const assetSelectionWGSL = buildAssetSelectionWGSL({});
+    const assetSelectionWGSL = buildAssetSelectionWGSL({
+        assetDefFloats: config.assetDefFloats,
+        lodsPerCategory: LODS_PER_CATEGORY,
+    });
 
     return /* wgsl */`
 const WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;

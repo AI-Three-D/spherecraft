@@ -1,28 +1,170 @@
-// js/gameEngine.js
+// js/wizard_game/gameEngine.js
 
-import { Frontend } from './renderer/frontend/frontend.js';
-import { Camera } from './Camera.js';
-import { GameTime } from '../wizard_game/gameTime.js';
-import { EnvironmentState } from './environment/EnvironmentState.js';
+import { Frontend } from '../core/renderer/frontend/frontend.js';
+import { Camera } from '../core/Camera.js';
+import { GameTime } from './gameTime.js';
+import { EnvironmentState } from '../core/environment/EnvironmentState.js';
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js';
-import { TextureAtlasManager } from './texture/TextureManager.js';
-import { Spaceship } from '../wizard_game/game/spaceShip.js';
-import { SpaceshipModel } from '../wizard_game/game/spaceShipModel.js';
-import { AltitudeController } from '../wizard_game/game/altitudeController.js';
-import { GameInputManager } from '../wizard_game/GameInputManager.js';
-import { TextureCache } from './texture/textureCache.js';
-import { AltitudeZoneManager } from './planet/altitudeZoneManager.js';
+import { TextureAtlasManager } from '../core/texture/TextureManager.js';
+import { Spaceship } from './game/spaceShip.js';
+import { SpaceshipModel } from './game/spaceShipModel.js';
+import { AltitudeController } from './game/altitudeController.js';
+import { GameInputManager } from './GameInputManager.js';
+import { TextureCache } from '../core/texture/textureCache.js';
+import { AltitudeZoneManager } from '../core/planet/altitudeZoneManager.js';
 import { PlanetConfig } from '../templates/configs/planetConfig.js';
-import { SphericalChunkMapper } from './planet/sphericalChunkMapper.js';
-import { StarSystem } from './celestial/StarSystem.js';
-import { EngineConfig } from './EngineConfig.js';
-import { GameDataConfig } from '../wizard_game/GameDataConfig.js';
+import { SphericalChunkMapper } from '../core/planet/sphericalChunkMapper.js';
+import { StarSystem } from '../core/celestial/StarSystem.js';
+import { EngineConfig } from '../core/EngineConfig.js';
+import { GameDataConfig } from './GameDataConfig.js';
 import { Logger } from '../shared/Logger.js';
-import { GameUI } from '../wizard_game/ui/GameUI.js';
-import { WebGPUTerrainGenerator } from './world/webgpuTerrainGenerator.js';
-import { ProceduralTextureGenerator } from './texture/webgpu/textureGenerator.js';
-import { PropTextureManager } from './texture/PropTextureManager.js';
-import { PropMaterialFactory } from './renderer/streamer/species/PropMaterialFactory.js';
+import { GameUI } from './ui/GameUI.js';
+import { WebGPUTerrainGenerator } from '../core/world/webgpuTerrainGenerator.js';
+import { ProceduralTextureGenerator } from '../core/texture/webgpu/textureGenerator.js';
+import { PropTextureManager } from '../core/texture/PropTextureManager.js';
+import { PropMaterialFactory } from '../core/renderer/streamer/species/PropMaterialFactory.js';
+import { getCloudLayers } from '../templates/clouds/cloudTypeDefinitions.js';
+import {
+    TEXTURE_LEVELS,
+    ATLAS_CONFIG,
+    TextureConfigHelper,
+    SEASONS,
+    TILE_CONFIG
+} from '../templates/configs/TileConfig.js';
+import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
+import { NightSkyGameConfig, getNightSkyDetailPreset, NightSkyDetailLevel } from '../templates/configs/nightSkyConfig.js';
+import { TILE_TYPES, TILE_CATEGORIES, NUM_TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../templates/configs/tileTypes.js';
+import { createTerrainCommon } from '../templates/terrain-shaders/terrainCommon.wgsl.js';
+import { createSurfaceCommon } from '../templates/terrain-shaders/surfaceCommon.wgsl.js';
+import { createTerrainFeatureContinents } from '../templates/terrain-shaders/features/featureContinents.wgsl.js';
+import { createTerrainFeaturePlains } from '../templates/terrain-shaders/features/featurePlains.wgsl.js';
+import { createTerrainFeatureHills } from '../templates/terrain-shaders/features/featureHills.wgsl.js';
+import { createTerrainFeatureMountains } from '../templates/terrain-shaders/features/featureMountains.wgsl.js';
+import { createTerrainFeatureCanyons } from '../templates/terrain-shaders/features/featureCanyons.wgsl.js';
+import { createTerrainFeatureLoneHills } from '../templates/terrain-shaders/features/featureLoneHills.wgsl.js';
+import { createTerrainFeatureMicro } from '../templates/terrain-shaders/features/featureMicro.wgsl.js';
+import { createTerrainFeatureMesoDetail } from '../templates/terrain-shaders/features/featureMesoDetail.wgsl.js';
+import { createTerrainFeatureHighlands } from '../templates/terrain-shaders/features/featureHighlands.wgsl.js';
+import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
+import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
+import {
+    validateTierRanges,
+    TREE_TIER_RANGES,
+    MID_TIER_CONFIG,
+    SPECIES_CANOPY_PROFILES,
+} from '../templates/streamer/treeTierConfig.js';
+import { TEXTURE_LAYER_MAPPING, ARCHETYPE_DEFINITIONS } from '../templates/streamer/archetype/archetypeDefinitions.js';
+import { DEFAULT_ASSET_DEFINITIONS } from '../templates/streamer/AssetDefinitions.js';
+import { getSpeciesRegistry } from '../templates/streamer/species/SpeciesRegistry.js';
+import { PlacementFamily } from '../templates/streamer/archetype/PlacementFamily.js';
+import { AssetVariant } from '../templates/streamer/archetype/AssetVariant.js';
+import { RockGeometryBuilder } from '../templates/streamer/archetype/geometry/RockGeometryBuilder.js';
+import { FernGeometryBuilder } from '../templates/streamer/archetype/geometry/FernGeometryBuilder.js';
+import { SansevieriaGeometryBuilder } from '../templates/streamer/archetype/geometry/SansevieriaGeometryBuilder.js';
+import { MushroomGeometryBuilder } from '../templates/streamer/archetype/geometry/MushroomGeometryBuilder.js';
+import { DeadwoodGeometryBuilder } from '../templates/streamer/archetype/geometry/DeadwoodGeometryBuilder.js';
+import { BirchBranchGenerator } from '../templates/streamer/branch/species/BirchBranchGenerator.js';
+import {
+    ASSET_SELF_OCCLUSION,
+    ASSET_DEF_FLOATS,
+    ENABLE_SCATTER_DENSITY_GROUPS,
+    ENABLE_SCATTER_ELIGIBILITY_GATE,
+    LODS_PER_CATEGORY,
+    QUALITY_PRESETS,
+    SCATTER_DENSITY_GROUPS,
+    SCATTER_POLICY_GROUPS,
+    CAT_TREES,
+    TREE_VISIBILITY,
+    TREE_FADE_START_RATIO,
+    TREE_FADE_END_RATIO,
+    TREE_BILLBOARD_LOD_START,
+    TREE_BILLBOARD_LOD_END,
+    TREE_DENSITY_SCALE,
+    TREE_CELL_SIZE,
+    TREE_MAX_PER_CELL,
+    TREE_CLUSTER_PROBABILITY,
+    TREE_JITTER_SCALE,
+    TERRAIN_AO_CONFIG,
+    GROUND_FIELD_BAKE_CONFIG,
+    GROUND_PROP_BAKE_CONFIG,
+    TREE_SOURCE_BAKE_CONFIG,
+} from '../templates/streamer/streamerConfig.js';
+
+const STREAMER_THEME = {
+    validateTierRanges,
+    TREE_TIER_RANGES,
+    MID_TIER_CONFIG,
+    SPECIES_CANOPY_PROFILES,
+    TEXTURE_LAYER_MAPPING,
+    ARCHETYPE_DEFINITIONS,
+    DEFAULT_ASSET_DEFINITIONS,
+    getSpeciesRegistry,
+    PlacementFamily,
+    AssetVariant,
+    RockGeometryBuilder,
+    FernGeometryBuilder,
+    SansevieriaGeometryBuilder,
+    MushroomGeometryBuilder,
+    DeadwoodGeometryBuilder,
+    BirchBranchGenerator,
+    ASSET_SELF_OCCLUSION,
+    ASSET_DEF_FLOATS,
+    ENABLE_SCATTER_DENSITY_GROUPS,
+    ENABLE_SCATTER_ELIGIBILITY_GATE,
+    LODS_PER_CATEGORY,
+    QUALITY_PRESETS,
+    SCATTER_DENSITY_GROUPS,
+    SCATTER_POLICY_GROUPS,
+    CAT_TREES,
+    TREE_VISIBILITY,
+    TREE_FADE_START_RATIO,
+    TREE_FADE_END_RATIO,
+    TREE_BILLBOARD_LOD_START,
+    TREE_BILLBOARD_LOD_END,
+    TREE_DENSITY_SCALE,
+    TREE_CELL_SIZE,
+    TREE_MAX_PER_CELL,
+    TREE_CLUSTER_PROBABILITY,
+    TREE_JITTER_SCALE,
+    TERRAIN_AO_CONFIG,
+    GROUND_FIELD_BAKE_CONFIG,
+    GROUND_PROP_BAKE_CONFIG,
+    TREE_SOURCE_BAKE_CONFIG,
+};
+
+const NIGHT_SKY_THEME = {
+    NightSkyGameConfig,
+    getNightSkyDetailPreset,
+    NightSkyDetailLevel,
+};
+
+const TERRAIN_SHADER_BUNDLE = {
+    createTerrainCommon,
+    createSurfaceCommon,
+    createTerrainFeatureContinents,
+    createTerrainFeaturePlains,
+    createTerrainFeatureHills,
+    createTerrainFeatureMountains,
+    createTerrainFeatureCanyons,
+    createTerrainFeatureLoneHills,
+    createTerrainFeatureMicro,
+    createTerrainFeatureMesoDetail,
+    createTerrainFeatureHighlands,
+    baseGenerators: {
+        earthLike: {
+            constants: createEarthlikeConstants,
+            base: createEarthlikeBase,
+        },
+    },
+};
+
+const TERRAIN_THEME = {
+    TILE_TYPES,
+    TILE_CATEGORIES,
+    NUM_TILE_CATEGORIES,
+    buildTileCategoryLookupWGSL,
+    terrainShaderBundle: TERRAIN_SHADER_BUNDLE,
+};
 
 function updateCanvasResolution(canvas) {
     const displayWidth = canvas.clientWidth;
@@ -263,10 +405,16 @@ export class GameEngine {
             backendType: backendType,
             lodDistances: this.engineConfig.lod.distancesMeters,
             engineConfig: this.engineConfig,
-            gpuQuadtree: this.engineConfig.gpuQuadtree
+            gpuQuadtree: this.engineConfig.gpuQuadtree,
+            streamerTheme: STREAMER_THEME,
+            nightSkyTheme: NIGHT_SKY_THEME,
+            terrainTheme: TERRAIN_THEME,
         });
         await this.renderer.initialize(this.planetConfig, this.sphericalMapper, {
-            weatherConfig: this.engineConfig.weather
+            weatherConfig: {
+                ...(this.engineConfig.weather || {}),
+                cloudLayerProvider: getCloudLayers
+            }
         });
 
         const actualApiName = this.renderer.getBackendType();
@@ -282,7 +430,16 @@ this.proceduralTextureGenerator = new ProceduralTextureGenerator(gpuDevice, 128,
 await this.proceduralTextureGenerator.initialize();
 
 // ── Terrain texture atlas ─────────────────────────────────────────────
-this.textureManager = new TextureAtlasManager(false, gpuDevice, this.proceduralTextureGenerator);
+this.textureManager = new TextureAtlasManager(false, gpuDevice, this.proceduralTextureGenerator, {
+    TILE_CONFIG,
+    TEXTURE_LEVELS,
+    ATLAS_CONFIG,
+    TEXTURE_CONFIG,
+    TextureConfigHelper,
+    SEASONS,
+    TILE_LAYER_HEIGHTS,
+    TILE_TRANSITION_RULES
+});
 this.textureManager.backend = this.renderer.backend;
 this.renderer.textureManager = this.textureManager;
 
@@ -304,7 +461,8 @@ this.propTextureManager = new PropTextureManager({
 });
 
 const propDefinitions = PropMaterialFactory.buildAllPropDefinitions({
-    baseSeed: this.engineConfig.seed ?? 12345
+    baseSeed: this.engineConfig.seed ?? 12345,
+    getSpeciesRegistry: STREAMER_THEME.getSpeciesRegistry,
 });
 await this.propTextureManager.buildPropAtlas(propDefinitions);
 
@@ -361,6 +519,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.textureCache,
             {
                 planetConfig: this.planetConfig,
+                terrainTheme: TERRAIN_THEME,
             }
 
         );
@@ -468,7 +627,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
 
         if (this.renderer?.isGPUQuadtreeActive()) {
-            const { ActorManager } = await import('../wizard_game/actors/ActorManager.js');
+            const { ActorManager } = await import('./actors/ActorManager.js');
 
             const assetStreamer = this.renderer.assetStreamer || null;
             let treeDetailSystem = null;
@@ -513,8 +672,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 };
             });
             try {
-                const { NPCManager } = await import('../wizard_game/actors/NPCManager.js');
-                const { DEFAULT_NPC_SPAWN_CONFIG } = await import('../wizard_game/actors/NPCSpawnConfig.js');
+                const { NPCManager } = await import('./actors/NPCManager.js');
+                const { DEFAULT_NPC_SPAWN_CONFIG } = await import('./actors/NPCSpawnConfig.js');
 
                 const npcManager = new NPCManager(this.actorManager, DEFAULT_NPC_SPAWN_CONFIG);
                 await npcManager.initialize();

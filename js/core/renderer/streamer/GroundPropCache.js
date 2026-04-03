@@ -1,5 +1,4 @@
 import { Logger } from '../../../shared/Logger.js';
-import { GROUND_PROP_BAKE_CONFIG } from './streamerConfig.js';
 import { ASSET_BAKE_REPRESENTATION } from './baking/AssetBakePolicy.js';
 
 const ACTIVE_PROP_FLAG = 1;
@@ -11,13 +10,19 @@ function clampInt(value, minValue, maxValue) {
 
 export class GroundPropCache {
     constructor(device, opts = {}) {
+        if (!opts.streamerTheme) {
+            throw new Error('[GroundPropCache] requires opts.streamerTheme');
+        }
+        this._streamerTheme = opts.streamerTheme;
+        this.GROUND_PROP_BAKE_CONFIG = opts.streamerTheme.GROUND_PROP_BAKE_CONFIG;
+
         this.device = device;
         this._logTag = '[GroundPropCache]';
         this._assetRegistry = opts.assetRegistry || null;
         this._tilePoolSize = Math.max(1, opts.tilePoolSize | 0);
         this._fieldArchetypeIndices = new Set(opts.fieldArchetypeIndices || []);
 
-        const cfg = { ...GROUND_PROP_BAKE_CONFIG, ...(opts.propConfig || {}) };
+        const cfg = { ...this.GROUND_PROP_BAKE_CONFIG, ...(opts.propConfig || {}) };
         this._cfg = {
             enabled: cfg.enabled !== false,
             perLayerCapacity: clampInt(cfg.perLayerCapacity ?? 1024, 32, 16384),

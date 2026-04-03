@@ -1,6 +1,6 @@
 // js/config/tileTransitionConfig.js
 
-import { TILE_TYPES } from "../../shared/types.js";
+import { TILE_TYPES } from "./tileTypes.js";
 
 export const TILE_TRANSITION_RULES = [
 

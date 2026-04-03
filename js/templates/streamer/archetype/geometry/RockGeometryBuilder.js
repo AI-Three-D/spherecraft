@@ -7,7 +7,7 @@
 // Normals are recomputed post-displacement via face-averaging — the
 // analytical sphere normals would be visibly wrong on a lumpy surface.
 
-import { AssetGeometryBuilder } from '../../AssetGeometryBuilder.js';
+import { AssetGeometryBuilder } from '../../../../core/renderer/streamer/AssetGeometryBuilder.js';
 
 export class RockGeometryBuilder {
 

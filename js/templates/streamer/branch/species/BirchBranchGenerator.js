@@ -27,9 +27,9 @@ import {
     rotateAxis3 as v3RotateAxis,
     bezier3 as v3Bezier,
     perp3 as v3Perp
-} from '../../../utils/vector3.js';
-import { SeededRandom } from '../../../utils/SeededRandom.js';
-import { Logger } from '../../../../../shared/Logger.js';
+} from '../../../../shared/math/vector3.js';
+import { SeededRandom } from '../../../../shared/math/SeededRandom.js';
+import { Logger } from '../../../../shared/Logger.js';
 /*
 export const BIRCH_DROOPER_DEFAULTS = Object.freeze({
     drooperCountMin: 4,

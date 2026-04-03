@@ -31,9 +31,6 @@
 import { AssetRegistry } from '../AssetRegistry.js';
 import { Logger } from '../../../../shared/Logger.js';
 import { RenderArchetype } from './RenderArchetype.js';
-import { PlacementFamily } from './PlacementFamily.js';
-import { AssetVariant } from './AssetVariant.js';
-import { ASSET_DEF_FLOATS } from '../streamerConfig.js';
 const TAG = '[ArchetypeRegistry]';
 
 export class ArchetypeRegistry extends AssetRegistry {
@@ -47,12 +44,17 @@ export class ArchetypeRegistry extends AssetRegistry {
      * @param {object[]} config.variants
      * @param {object}   config.legacyMigration
      */
-    constructor(legacyDefinitions, config) {
-        super(legacyDefinitions);
+    constructor(legacyDefinitions, config, streamerTheme) {
+        super(legacyDefinitions, streamerTheme);
 
         if (!config) {
             throw new Error(`${TAG} archetype config is required`);
         }
+        if (!streamerTheme) {
+            throw new Error(`${TAG} streamerTheme is required`);
+        }
+        this.PlacementFamily = streamerTheme.PlacementFamily;
+        this.AssetVariant = streamerTheme.AssetVariant;
 
         /** @type {Map<string, RenderArchetype>} */
         this._archetypes = new Map();
@@ -232,12 +234,12 @@ export class ArchetypeRegistry extends AssetRegistry {
          */
         buildVariantDefBuffer() {
             const n = this._variantsByIndex.length;
-            const data = new Float32Array(n * ASSET_DEF_FLOATS);
-    
+            const data = new Float32Array(n * this.ASSET_DEF_FLOATS);
+
             for (let i = 0; i < n; i++) {
                 const v = this._variantsByIndex[i];
                 if (!v) continue;  // gap — leave zeros
-                data.set(v.toGPUData(), i * ASSET_DEF_FLOATS);
+                data.set(v.toGPUData(), i * this.ASSET_DEF_FLOATS);
             }
     
             return data;
@@ -303,7 +305,7 @@ export class ArchetypeRegistry extends AssetRegistry {
                 Logger.warn(`${TAG} duplicate family "${def.name}" — keeping first`);
                 continue;
             }
-            const fam = new PlacementFamily(def);
+            const fam = new this.PlacementFamily(def);
             if (this._familiesByIndex[fam.index]) {
                 throw new Error(
                     `${TAG} family index collision at ${fam.index}: ` +
@@ -342,7 +344,7 @@ export class ArchetypeRegistry extends AssetRegistry {
                 continue;
             }
 
-            const variant = new AssetVariant({
+            const variant = new this.AssetVariant({
                 name:      la.id,
                 index:     i,
                 archetype: archName,
@@ -400,7 +402,7 @@ export class ArchetypeRegistry extends AssetRegistry {
                 );
             }
 
-            const variant = new AssetVariant({ ...def, index });
+            const variant = new this.AssetVariant({ ...def, index });
             this._variants.set(variant.name, variant);
             this._variantsByIndex[index] = variant;
 

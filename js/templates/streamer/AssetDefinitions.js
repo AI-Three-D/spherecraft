@@ -1,6 +1,6 @@
 // js/renderer/streamer/assetDefinitions.js
 
-import { TILE_TYPES } from '../../../shared/types.js';
+import { TILE_TYPES } from '../configs/tileTypes.js';
 import { TREE_DENSITIES, TREE_LOD_DISTANCES } from './streamerConfig.js';
 
 export const FOREST_TILES = [

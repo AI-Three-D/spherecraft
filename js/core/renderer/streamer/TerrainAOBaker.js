@@ -15,14 +15,6 @@
 import { Logger } from '../../../shared/Logger.js';
 import { Texture, TextureFormat, TextureFilter, TextureWrap, gpuFormatSampleType } from '../resources/texture.js';
 import { buildTerrainAOBakeShader } from './shaders/terrainAOBake.wgsl.js';
-import {
-    TREE_CELL_SIZE,
-    TREE_MAX_PER_CELL,
-    TREE_CLUSTER_PROBABILITY,
-    TREE_JITTER_SCALE,
-    TREE_DENSITY_SCALE,
-    TERRAIN_AO_CONFIG,
-} from './streamerConfig.js';
 
 export class TerrainAOBaker {
     /**
@@ -33,9 +25,20 @@ export class TerrainAOBaker {
      * @param {number}    opts.faceSize       — world metres across one cube face
      * @param {number}    opts.seed           — engine seed (MUST match scatter)
      * @param {number}    opts.gcCellWorldSize — scatter GC cell size in metres
-     * @param {object}    [opts.aoConfig]     — overrides TERRAIN_AO_CONFIG
+     * @param {object}    [opts.aoConfig]     — overrides this.TERRAIN_AO_CONFIG
      */
     constructor(device, opts = {}) {
+        if (!opts.streamerTheme) {
+            throw new Error('[TerrainAOBaker] requires opts.streamerTheme');
+        }
+        this._streamerTheme = opts.streamerTheme;
+        this.TERRAIN_AO_CONFIG = opts.streamerTheme.TERRAIN_AO_CONFIG;
+        this.TREE_CELL_SIZE = opts.streamerTheme.TREE_CELL_SIZE;
+        this.TREE_MAX_PER_CELL = opts.streamerTheme.TREE_MAX_PER_CELL;
+        this.TREE_CLUSTER_PROBABILITY = opts.streamerTheme.TREE_CLUSTER_PROBABILITY;
+        this.TREE_JITTER_SCALE = opts.streamerTheme.TREE_JITTER_SCALE;
+        this.TREE_DENSITY_SCALE = opts.streamerTheme.TREE_DENSITY_SCALE;
+
         this.device       = device;
         this._logTag      = '[TerrainAOBaker]';
         this._tilePoolSize = opts.tilePoolSize;
@@ -48,9 +51,9 @@ export class TerrainAOBaker {
             ? opts.tileLayerLookup
             : null;
 
-        const c = { ...TERRAIN_AO_CONFIG, ...(opts.aoConfig || {}) };
-        const tree = { ...TERRAIN_AO_CONFIG.tree, ...(c.tree || {}) };
-        const gc   = { ...TERRAIN_AO_CONFIG.groundCover, ...(c.groundCover || {}) };
+        const c = { ...this.TERRAIN_AO_CONFIG, ...(opts.aoConfig || {}) };
+        const tree = { ...this.TERRAIN_AO_CONFIG.tree, ...(c.tree || {}) };
+        const gc   = { ...this.TERRAIN_AO_CONFIG.groundCover, ...(c.groundCover || {}) };
 
         this._cfg = {
             enabled:          c.enabled !== false,
@@ -276,11 +279,11 @@ update(encoder, scatterGPU, tileGPU) {
         const code = buildTerrainAOBakeShader({
             aoResolution:           this._cfg.resolution,
             maxBatchSize:           this._maxBatch,
-            treeCellSize:           TREE_CELL_SIZE,
-            treeMaxPerCell:         TREE_MAX_PER_CELL,
-            treeClusterProbability: TREE_CLUSTER_PROBABILITY,
-            treeJitterScale:        TREE_JITTER_SCALE,
-            treeDensityScale:       TREE_DENSITY_SCALE,
+            treeCellSize:           this.TREE_CELL_SIZE,
+            treeMaxPerCell:         this.TREE_MAX_PER_CELL,
+            treeClusterProbability: this.TREE_CLUSTER_PROBABILITY,
+            treeJitterScale:        this.TREE_JITTER_SCALE,
+            treeDensityScale:       this.TREE_DENSITY_SCALE,
             treeCellSearchRadius:   this._cfg.treeSearch,
             gcCellSearchRadius:     this._cfg.gcSearch,
         });

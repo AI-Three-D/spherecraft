@@ -6,6 +6,7 @@ import { TILE_CONFIG } from '../templates/configs/TileConfig.js';
 import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 import { GRASS_QUALITY_LEVELS, GRASS_TYPES } from '../templates/configs/grassConfig.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
+import { resolveTreeConfig } from '../templates/configs/treeConfigResolver.js';
 
 const ATLAS_TEXTURE_TYPES = ['height', 'normal', 'tile', 'splatData', 'macro'];
 
@@ -310,7 +311,7 @@ export function createEngineConfig() {
       minStartIntervalMs: 0
     },
 
-    trees: {
+    trees: resolveTreeConfig({
       flags: {
           useMidTier: true,
           keepLegacyMidNear: false,
@@ -615,7 +616,7 @@ export function createEngineConfig() {
           5: { heightFracStart: 0.22, heightFracEnd: 0.96, radialFrac: 0.38, label: 'beech' },
           default: { heightFracStart: 0.28, heightFracEnd: 0.95, radialFrac: 0.32, label: 'generic' },
       },
-  },
+  }),
     lodAtlas: {
       worldCoverage,
       baseTextureSize: 128,

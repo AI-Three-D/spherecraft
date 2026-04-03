@@ -5,7 +5,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 // Inc 3: Exported tile type collections for archetypeDefinitions.js
 // ═══════════════════════════════════════════════════════════════════════
-import { TILE_TYPES } from '../../../shared/types.js';
+import { TILE_TYPES } from '../configs/tileTypes.js';
 
 export { FOREST_TILES };
 

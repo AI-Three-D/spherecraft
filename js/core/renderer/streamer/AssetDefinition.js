@@ -15,30 +15,27 @@
  * @property {[number, number]} height - [min, max] in meters
  */
 
-import { ASSET_DEF_FLOATS, LODS_PER_CATEGORY } from './streamerConfig.js';
-import { ASSET_SELF_OCCLUSION } from './streamerConfig.js';
-
 const DEFAULT_LOD_DISTANCES = [100, 300, 800];
 const DEFAULT_DENSITIES = [0.01, 0.005, 0.001];
 
-function normalizeDistances(values) {
+function normalizeDistances(values, lodsPerCategory) {
     const out = Array.isArray(values) ? values.slice() : [];
     if (out.length === 0) out.push(DEFAULT_LOD_DISTANCES[0]);
-    while (out.length < LODS_PER_CATEGORY) {
+    while (out.length < lodsPerCategory) {
         const last = out[out.length - 1];
         out.push(last + 1);
     }
-    if (out.length > LODS_PER_CATEGORY) out.length = LODS_PER_CATEGORY;
+    if (out.length > lodsPerCategory) out.length = lodsPerCategory;
     return out;
 }
 
-function normalizeDensities(values) {
+function normalizeDensities(values, lodsPerCategory) {
     const out = Array.isArray(values) ? values.slice() : [];
     if (out.length === 0) out.push(DEFAULT_DENSITIES[0]);
-    while (out.length < LODS_PER_CATEGORY) {
+    while (out.length < lodsPerCategory) {
         out.push(0.0);
     }
-    if (out.length > LODS_PER_CATEGORY) out.length = LODS_PER_CATEGORY;
+    if (out.length > lodsPerCategory) out.length = lodsPerCategory;
     return out;
 }
 
@@ -60,7 +57,15 @@ export class AssetDefinition {
      * @param {[number, number, number]} def.tipColor - [r, g, b] tip/highlight tint (0-1)
      * @param {number} [def.priority] - Selection priority when multiple assets match (higher = preferred)
      */
-    constructor(def) {
+    constructor(def, streamerTheme) {
+        if (!streamerTheme) {
+            throw new Error('AssetDefinition requires streamerTheme');
+        }
+        this._streamerTheme = streamerTheme;
+        this.LODS_PER_CATEGORY = streamerTheme.LODS_PER_CATEGORY;
+        this.ASSET_DEF_FLOATS = streamerTheme.ASSET_DEF_FLOATS;
+        this.ASSET_SELF_OCCLUSION = streamerTheme.ASSET_SELF_OCCLUSION;
+
         // Required fields
         if (!def.id) throw new Error('AssetDefinition requires id');
         if (!def.category) throw new Error('AssetDefinition requires category');
@@ -89,8 +94,8 @@ export class AssetDefinition {
         // LOD configuration
         const baseDistances = def.lodDistances || DEFAULT_LOD_DISTANCES;
         const baseDensities = def.densities || DEFAULT_DENSITIES;
-        this.lodDistances = normalizeDistances(baseDistances);
-        this.densities = normalizeDensities(baseDensities);
+        this.lodDistances = normalizeDistances(baseDistances, this.LODS_PER_CATEGORY);
+        this.densities = normalizeDensities(baseDensities, this.LODS_PER_CATEGORY);
 
         // Size
         this.sizeRange = {
@@ -105,7 +110,7 @@ export class AssetDefinition {
         // Selection priority (higher = more likely when multiple match)
         this.priority = def.priority ?? 1.0;
 
-        const soGlobal = ASSET_SELF_OCCLUSION;
+        const soGlobal = this.ASSET_SELF_OCCLUSION;
         const soCategoryKey = this._getSelfOcclusionCategoryKey();
         const soCategory = soGlobal[soCategoryKey] || soGlobal.default;
         const soAsset = def.selfOcclusion || {};
@@ -128,7 +133,7 @@ export class AssetDefinition {
      */
         _getSelfOcclusionCategoryKey() {
             // Check if there's a direct match by asset id first
-            if (ASSET_SELF_OCCLUSION[this.id]) return this.id;
+            if (this.ASSET_SELF_OCCLUSION[this.id]) return this.id;
     
             // Map category to config key
             switch (this.category) {
@@ -262,7 +267,7 @@ export class AssetDefinition {
      * @returns {Float32Array}
      */
     toGPUData(geometryIndex = 0) {
-        const data = new Float32Array(ASSET_DEF_FLOATS);
+        const data = new Float32Array(this.ASSET_DEF_FLOATS);
         
         // Climate ranges
         data[0] = this.climateRange.temperature[0];
@@ -291,14 +296,14 @@ export class AssetDefinition {
         data[17] = this.tipColor[2];
 
         let offset = 18;
-        for (let i = 0; i < LODS_PER_CATEGORY; i++) {
+        for (let i = 0; i < this.LODS_PER_CATEGORY; i++) {
             data[offset + i] = this.lodDistances[i];
         }
-        offset += LODS_PER_CATEGORY;
-        for (let i = 0; i < LODS_PER_CATEGORY; i++) {
+        offset += this.LODS_PER_CATEGORY;
+        for (let i = 0; i < this.LODS_PER_CATEGORY; i++) {
             data[offset + i] = this.densities[i];
         }
-        offset += LODS_PER_CATEGORY;
+        offset += this.LODS_PER_CATEGORY;
 
         // Indices and priority
         data[offset] = this._categoryIndex;

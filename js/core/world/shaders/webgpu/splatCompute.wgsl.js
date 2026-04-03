@@ -1,10 +1,8 @@
 // js/world/shaders/webgpu/splatCompute.wgsl.js
 
-import { TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../../../../shared/types.js';
-
-function buildCategoryRepresentativeTileIdWGSL() {
+function buildCategoryRepresentativeTileIdWGSL(tileCategories) {
     const lines = ['fn categoryRepresentativeTileId(categoryId: u32) -> u32 {'];
-    for (const category of TILE_CATEGORIES) {
+    for (const category of tileCategories) {
         const representative = category.ranges[0][0];
         lines.push(
             `    if (categoryId == ${category.id}u) { return ${representative}u; } // ${category.name}`
@@ -15,10 +13,17 @@ function buildCategoryRepresentativeTileIdWGSL() {
     return lines.join('\n');
 }
 
-export function createSplatComputeShader() {
-    const categoryScoreCount = TILE_CATEGORIES.length;
-    const tileCategoryWGSL = buildTileCategoryLookupWGSL();
-    const categoryRepresentativeWGSL = buildCategoryRepresentativeTileIdWGSL();
+export function createSplatComputeShader(options = {}) {
+    if (!options.tileCategories) {
+        throw new Error('createSplatComputeShader requires options.tileCategories');
+    }
+    if (!options.buildTileCategoryLookupWGSL) {
+        throw new Error('createSplatComputeShader requires options.buildTileCategoryLookupWGSL');
+    }
+    const tileCategories = options.tileCategories;
+    const categoryScoreCount = tileCategories.length;
+    const tileCategoryWGSL = options.buildTileCategoryLookupWGSL();
+    const categoryRepresentativeWGSL = buildCategoryRepresentativeTileIdWGSL(tileCategories);
     return /* wgsl */`
 struct Uniforms {
     chunkCoord: vec2<i32>,

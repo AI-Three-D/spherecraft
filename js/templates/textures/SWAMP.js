@@ -1,4 +1,4 @@
-import { TILE_TYPES } from '../../shared/types.js';
+import { TILE_TYPES } from '../configs/tileTypes.js';
 import { TEXTURE_LEVELS } from '../configs/TileConfig.js';
 import { sameForAllSeasons, withSeed } from './reusable/shared.js';
 import { SWAMP_MICRO_A, SWAMP_MICRO_B, SWAMP_MACRO } from './reusable/swampTextures.js';

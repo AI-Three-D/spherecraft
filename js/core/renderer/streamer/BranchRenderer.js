@@ -12,7 +12,6 @@ import {
     buildBranchFragmentShader,
     buildBranchSortAndIndirectShader
 } from './shaders/branchRender.wgsl.js';
-import { ASSET_SELF_OCCLUSION } from './streamerConfig.js';
 
 
 export class BranchRenderer {
@@ -20,6 +19,12 @@ export class BranchRenderer {
         this.propTextureManager = config.propTextureManager || null;
         this.device   = device;
         this.streamer = streamer;
+        const streamerTheme = streamer?._streamerTheme;
+        if (!streamerTheme) {
+            throw new Error('[BranchRenderer] requires streamer with _streamerTheme');
+        }
+        this._streamerTheme = streamerTheme;
+        this.ASSET_SELF_OCCLUSION = streamerTheme.ASSET_SELF_OCCLUSION;
 
         this.lodController = config.lodController;
         if (!this.lodController) {
@@ -281,7 +286,7 @@ export class BranchRenderer {
 
         const soConfig = this.streamer?._assetRegistry?.getAllAssets?.()
             ?.find(a => a.category === 'tree')?.selfOcclusion || {};
-        const globalSO = ASSET_SELF_OCCLUSION || {};
+        const globalSO = this.ASSET_SELF_OCCLUSION || {};
 
         // ── Pass branch LOD config to the vertex shader ───────────────────
         const branchLODConfig = this.lodController.getBranchLODShaderConfig();

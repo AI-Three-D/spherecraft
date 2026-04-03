@@ -5,13 +5,20 @@
 
 import { AssetDefinition } from './AssetDefinition.js';
 import { Logger } from '../../../shared/Logger.js';
-import { ASSET_DEF_FLOATS, LODS_PER_CATEGORY } from './streamerConfig.js';
 
 export class AssetRegistry {
     /**
      * @param {object[]} definitions - Array of raw asset definition objects
+     * @param {object} streamerTheme - Theme bundle providing template constants
      */
-    constructor(definitions = []) {
+    constructor(definitions = [], streamerTheme) {
+        if (!streamerTheme) {
+            throw new Error('AssetRegistry requires streamerTheme');
+        }
+        this._streamerTheme = streamerTheme;
+        this.ASSET_DEF_FLOATS = streamerTheme.ASSET_DEF_FLOATS;
+        this.LODS_PER_CATEGORY = streamerTheme.LODS_PER_CATEGORY;
+
         /** @type {Map<string, AssetDefinition>} */
         this._byId = new Map();
 
@@ -48,7 +55,7 @@ export class AssetRegistry {
      * @param {object|AssetDefinition} def 
      */
     register(def) {
-        const asset = def instanceof AssetDefinition ? def : new AssetDefinition(def);
+        const asset = def instanceof AssetDefinition ? def : new AssetDefinition(def, this._streamerTheme);
 
         if (this._byId.has(asset.id)) {
             Logger.warn(`[AssetRegistry] Duplicate asset id: ${asset.id}`);
@@ -237,7 +244,7 @@ export class AssetRegistry {
      */
     buildAssetDefBuffer() {
         const assets = this.getAllAssets();
-        const floatsPerAsset = ASSET_DEF_FLOATS;
+        const floatsPerAsset = this.ASSET_DEF_FLOATS;
         const data = new Float32Array(assets.length * floatsPerAsset);
 
         for (let i = 0; i < assets.length; i++) {
@@ -283,11 +290,11 @@ export class AssetRegistry {
             }
 
             // Check LOD distances are increasing
-            if (asset.lodDistances.length !== LODS_PER_CATEGORY) {
-                warnings.push(`${asset.id}: LOD distance count should be ${LODS_PER_CATEGORY}`);
+            if (asset.lodDistances.length !== this.LODS_PER_CATEGORY) {
+                warnings.push(`${asset.id}: LOD distance count should be ${this.LODS_PER_CATEGORY}`);
             }
-            if (asset.densities.length !== LODS_PER_CATEGORY) {
-                warnings.push(`${asset.id}: density count should be ${LODS_PER_CATEGORY}`);
+            if (asset.densities.length !== this.LODS_PER_CATEGORY) {
+                warnings.push(`${asset.id}: density count should be ${this.LODS_PER_CATEGORY}`);
             }
             for (let i = 1; i < asset.lodDistances.length; i++) {
                 if (asset.lodDistances[i] <= asset.lodDistances[i - 1]) {

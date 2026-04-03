@@ -15,7 +15,10 @@ export function buildAssetFieldScatterShader(config = {}) {
         : 1.0;
     const FIXED_GRID_RES = FIELD_RESOLUTION * SCATTER_CELL_OVERSAMPLE;
     const MAX_CANDIDATES_PER_TILE = FIXED_GRID_RES * FIXED_GRID_RES;
-    const assetSelectionWGSL = buildAssetSelectionWGSL({});
+    const assetSelectionWGSL = buildAssetSelectionWGSL({
+        assetDefFloats: config.assetDefFloats,
+        lodsPerCategory: LODS_PER_CATEGORY,
+    });
 
     return /* wgsl */`
 const WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;

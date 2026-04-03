@@ -51,7 +51,7 @@ export class PlacementFamily {
             ? { min: def.slopeRange.min ?? 0, max: def.slopeRange.max ?? 1 }
             : null;
 
-        /** @type {import('./RenderArchetype.js').RenderArchetype|null} Resolved post-build. */
+        /** @type {import('../../../core/renderer/streamer/archetype/RenderArchetype.js').RenderArchetype|null} Resolved post-build. */
         this.archetype = null;
     }
 }

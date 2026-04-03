@@ -1,5 +1,4 @@
 import { Logger } from '../../../shared/Logger.js';
-import { TREE_SOURCE_BAKE_CONFIG } from './streamerConfig.js';
 import { ASSET_BAKE_REPRESENTATION } from './baking/AssetBakePolicy.js';
 
 const ACTIVE_TREE_FLAG = 1;
@@ -11,12 +10,18 @@ function clampInt(value, minValue, maxValue) {
 
 export class TreeSourceCache {
     constructor(device, opts = {}) {
+        if (!opts.streamerTheme) {
+            throw new Error('[TreeSourceCache] requires opts.streamerTheme');
+        }
+        this._streamerTheme = opts.streamerTheme;
+        this.TREE_SOURCE_BAKE_CONFIG = opts.streamerTheme.TREE_SOURCE_BAKE_CONFIG;
+
         this.device = device;
         this._logTag = '[TreeSourceCache]';
         this._assetRegistry = opts.assetRegistry || null;
         this._tilePoolSize = Math.max(1, opts.tilePoolSize | 0);
 
-        const cfg = { ...TREE_SOURCE_BAKE_CONFIG, ...(opts.treeConfig || {}) };
+        const cfg = { ...this.TREE_SOURCE_BAKE_CONFIG, ...(opts.treeConfig || {}) };
         this._cfg = {
             enabled: cfg.enabled !== false,
             perLayerCapacity: clampInt(cfg.perLayerCapacity ?? 1024, 32, 8192),

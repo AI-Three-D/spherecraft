@@ -5,7 +5,7 @@
 
 
 import { AnimationId } from './ActorState.js';
-import { TILE_TYPES } from '../../shared/types.js';
+import { TILE_TYPES } from '../../templates/configs/tileTypes.js';
 
 export const DEFAULT_NPC_SPAWN_CONFIG = Object.freeze({
 

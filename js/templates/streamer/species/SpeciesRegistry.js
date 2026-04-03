@@ -3,7 +3,7 @@
 // Central registry for all tree and plant species.
 // Species define visual characteristics, climate preferences, and LOD parameters.
 
-import { Logger } from '../../../../shared/Logger.js';
+import { Logger } from '../../../shared/Logger.js';
 
 /**
  * @typedef {object} TreeSpeciesDefinition

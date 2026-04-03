@@ -11,6 +11,18 @@ import { Logger } from '../../../shared/Logger.js';
 
 export class QuadtreeTerrainRenderer {
     constructor(options = {}) {
+        if (!options.terrainAODefaults) {
+            throw new Error('QuadtreeTerrainRenderer requires options.terrainAODefaults');
+        }
+        if (!options.groundFieldDefaults) {
+            throw new Error('QuadtreeTerrainRenderer requires options.groundFieldDefaults');
+        }
+        if (!Array.isArray(options.tileCategories)) {
+            throw new Error('QuadtreeTerrainRenderer requires options.tileCategories');
+        }
+        this.terrainAODefaults = options.terrainAODefaults;
+        this.groundFieldDefaults = options.groundFieldDefaults;
+        this.tileCategories = options.tileCategories;
         this.backend = options.backend || null;
         this.tileManager = options.tileManager || null;
         this.engineConfig = options.engineConfig || null;
@@ -210,6 +222,9 @@ export class QuadtreeTerrainRenderer {
             this._lodIndexCounts[lod] = geometry.index?.count || 0;
 
             const material = await TerrainMaterialBuilder.create({
+                terrainAODefaults: this.terrainAODefaults,
+                groundFieldDefaults: this.groundFieldDefaults,
+                tileCategories: this.tileCategories,
                 backend: this.backend,
                 atlasTextures,
                 lookupTables,

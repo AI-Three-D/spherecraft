@@ -3,7 +3,6 @@
 import { getAerialPerspectiveWGSL } from '../../../../renderer/atmosphere/shaders/aerialPerspectiveCommon.js';
 import { getProceduralDetailWGSL } from './prroceduralDetailNoise.wgsl.js';
 import { getClusteredLightingWGSL } from '../../../../lighting/shaders/clusteredLighting.wgsl.js';
-import { TILE_CATEGORIES } from '../../../../../shared/types.js';
 
 const blendModeBlock = /* wgsl */`
 // ============================================================================
@@ -480,6 +479,10 @@ fn computeShadow(worldPos: vec3<f32>, viewPos: vec3<f32>, worldNormal: vec3<f32>
 `;
 
 export function buildTerrainChunkFragmentShader(options = {}) {
+    if (!options.tileCategories) {
+        throw new Error('buildTerrainChunkFragmentShader requires options.tileCategories');
+    }
+    const tileCategories = options.tileCategories;
     const normalTextureFilterable = options.normalTextureFilterable === true;
 
     const enableTerrainAO = options.enableTerrainAO !== false;  
@@ -693,7 +696,7 @@ const GRASS_SHADOW_STRENGTH: f32 = ${grassShadowStrength.toFixed(3)};
     const textureCanonicalTileIdWGSL = `
 fn canonicalTextureTileId(tileId: f32) -> f32 {
     let t = clamp(i32(round(tileId)), 0, 255);
-${TILE_CATEGORIES.map((category) => {
+${tileCategories.map((category) => {
         const canonicalTileId = category.ranges[0][0];
         return category.ranges
             .map(([minTileId, maxTileId]) =>

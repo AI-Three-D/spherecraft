@@ -1,29 +1,30 @@
 // js/world/shaders/webgpu/advancedTerrainCompute.wgsl.js
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
-import { createTerrainCommon } from "./terrain/terrainCommon.wgsl.js";
-import { createSurfaceCommon } from "./terrain/surfaceCommon.wgsl.js";
-
-import { createTerrainFeatureContinents } from "./terrain/features/featureContinents.wgsl.js";
-import { createTerrainFeaturePlains } from "./terrain/features/featurePlains.wgsl.js";
-import { createTerrainFeatureHills } from "./terrain/features/featureHills.wgsl.js";
-import { createTerrainFeatureMountains } from "./terrain/features/featureMountains.wgsl.js";
-import { createTerrainFeatureCanyons } from "./terrain/features/featureCanyons.wgsl.js";
-import { createTerrainFeatureLoneHills } from "./terrain/features/featureLoneHills.wgsl.js";
-import { createTerrainFeatureMicro } from "./terrain/features/featureMicro.wgsl.js";
-import { createTerrainFeatureMesoDetail } from "./terrain/features/featureMesoDetail.wgsl.js";
-import { createTerrainFeatureHighlands } from "./terrain/features/featureHighlands.wgsl.js";
-import { createEarthlikeConstants, createEarthlikeBase } from "./terrain/base/earthLikeBase.wgsl.js";
-
-const BASE_GENERATORS = {
-  earthLike: {
-    constants: createEarthlikeConstants,
-    base: createEarthlikeBase
-  }
-};
 
 export function createAdvancedTerrainComputeShader(options = {}) {
+  const shaderBundle = options?.terrainShaderBundle;
+  if (!shaderBundle) {
+    throw new Error('createAdvancedTerrainComputeShader requires options.terrainShaderBundle');
+  }
+  const baseGenerators = shaderBundle.baseGenerators;
+  if (!baseGenerators) {
+    throw new Error('createAdvancedTerrainComputeShader requires options.terrainShaderBundle.baseGenerators');
+  }
   const baseId = options?.baseGenerator ?? 'earthLike';
-  const base = BASE_GENERATORS[baseId] ?? BASE_GENERATORS.earthLike;
+  const base = baseGenerators[baseId] ?? baseGenerators.earthLike;
+  const {
+    createTerrainCommon,
+    createSurfaceCommon,
+    createTerrainFeatureContinents,
+    createTerrainFeaturePlains,
+    createTerrainFeatureHills,
+    createTerrainFeatureMountains,
+    createTerrainFeatureCanyons,
+    createTerrainFeatureLoneHills,
+    createTerrainFeatureMicro,
+    createTerrainFeatureMesoDetail,
+    createTerrainFeatureHighlands,
+  } = shaderBundle;
   const outputFormat = options?.outputFormat ?? 'rgba32float';
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;

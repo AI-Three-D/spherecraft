@@ -5,11 +5,6 @@
 // module.
 
 import { AssetGeometryBuilder } from '../AssetGeometryBuilder.js';
-import { RockGeometryBuilder } from './geometry/RockGeometryBuilder.js';
-import { FernGeometryBuilder } from './geometry/FernGeometryBuilder.js';
-import { SansevieriaGeometryBuilder } from './geometry/SansevieriaGeometryBuilder.js';
-import { MushroomGeometryBuilder } from './geometry/MushroomGeometryBuilder.js';
-import { DeadwoodGeometryBuilder } from './geometry/DeadwoodGeometryBuilder.js';
 import { Logger } from '../../../../shared/Logger.js';
 
 const TAG = '[GeometryFactory]';
@@ -34,9 +29,15 @@ export class GeometryFactory {
      *        geometry depends on the template library (seeded, per-run)
      *        so it can't be a static import — AssetStreamer builds it
      *        once in _buildGeometries and hands it in.
+     * @param {object} [ctx.builders]
+     *        Template-provided geometry builder classes:
+     *        { RockGeometryBuilder, FernGeometryBuilder,
+     *          SansevieriaGeometryBuilder, MushroomGeometryBuilder,
+     *          DeadwoodGeometryBuilder }
      * @returns {{positions, normals, uvs, indices, indexCount?}}
      */
     static build(builderKey, lod, ctx = {}) {
+        const builders = ctx.builders || {};
         switch (builderKey) {
             case 'tree':
                 // Tree scatter-draw is suppressed anyway, but build it so
@@ -50,22 +51,22 @@ export class GeometryFactory {
 
             // ── Inc 3: new asset geometry ──────────────────────────────
             case 'rock':
-                return RockGeometryBuilder.buildRock(lod);
+                return builders.RockGeometryBuilder.buildRock(lod);
 
             case 'fern':
-                return FernGeometryBuilder.buildFern(lod);
+                return builders.FernGeometryBuilder.buildFern(lod);
 
             case 'sansevieria':
-                return SansevieriaGeometryBuilder.buildSansevieria(lod);
+                return builders.SansevieriaGeometryBuilder.buildSansevieria(lod);
 
             case 'mushroom':
-                return MushroomGeometryBuilder.buildMushroom(lod);
+                return builders.MushroomGeometryBuilder.buildMushroom(lod);
 
             case 'log':
-                return DeadwoodGeometryBuilder.buildLog(lod);
+                return builders.DeadwoodGeometryBuilder.buildLog(lod);
 
             case 'stump':
-                return DeadwoodGeometryBuilder.buildStump(lod);
+                return builders.DeadwoodGeometryBuilder.buildStump(lod);
 
             default:
                 Logger.warn(`${TAG} unknown builder "${builderKey}" — using empty mesh`);

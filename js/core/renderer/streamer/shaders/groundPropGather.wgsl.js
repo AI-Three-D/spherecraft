@@ -8,7 +8,10 @@ export function buildGroundPropGatherShader(config = {}) {
         ? config.maxScatterDistance
         : 12000.0;
     const PER_LAYER_CAPACITY = Math.max(1, Math.floor(config.perLayerCapacity ?? 1024));
-    const assetSelectionWGSL = buildAssetSelectionWGSL({});
+    const assetSelectionWGSL = buildAssetSelectionWGSL({
+        assetDefFloats: config.assetDefFloats,
+        lodsPerCategory: LODS_PER_CATEGORY,
+    });
 
     return /* wgsl */`
 const WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;

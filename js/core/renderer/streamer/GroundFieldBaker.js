@@ -1,12 +1,17 @@
 import { Logger } from '../../../shared/Logger.js';
 import { Texture, TextureFormat, TextureFilter, TextureWrap, gpuFormatSampleType } from '../resources/texture.js';
 import { buildGroundFieldBakeShader } from './shaders/groundFieldBake.wgsl.js';
-import { GROUND_FIELD_BAKE_CONFIG } from './streamerConfig.js';
 
 const ACTIVE_FIELD_FLAG = 1;
 
 export class GroundFieldBaker {
     constructor(device, opts = {}) {
+        if (!opts.streamerTheme) {
+            throw new Error('[GroundFieldBaker] requires opts.streamerTheme');
+        }
+        this._streamerTheme = opts.streamerTheme;
+        this.GROUND_FIELD_BAKE_CONFIG = opts.streamerTheme.GROUND_FIELD_BAKE_CONFIG;
+
         this.device = device;
         this._logTag = '[GroundFieldBaker]';
         this._assetRegistry = opts.assetRegistry || null;
@@ -32,7 +37,7 @@ export class GroundFieldBaker {
         this._queue = [];
         this._initialized = false;
 
-        const cfg = { ...GROUND_FIELD_BAKE_CONFIG, ...(opts.fieldConfig || {}) };
+        const cfg = { ...this.GROUND_FIELD_BAKE_CONFIG, ...(opts.fieldConfig || {}) };
         const configuredChannels = Array.isArray(cfg.channels) ? cfg.channels.slice(0, 2) : [];
         this._cfg = {
             enabled: cfg.enabled !== false,

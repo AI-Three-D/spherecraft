@@ -15,7 +15,7 @@
 //   record floats [28] and [30]) and the density LUT. APPEND ONLY.
 
 import { CollisionClass, makeBlockMask } from './CollisionClasses.js';
-import { TILE_TYPES } from '../../../../shared/types.js';
+import { TILE_TYPES } from '../../configs/tileTypes.js';
 import {
     FOREST_TILES,
 } from '../streamerConfig.js';

@@ -7,7 +7,6 @@
 // ProceduralTextureGenerator. The PropTextureManager consumes these
 // to build a texture-2d-array atlas.
 
-import { getSpeciesRegistry } from './SpeciesRegistry.js';
 import { Logger } from '../../../../shared/Logger.js';
 
 /**
@@ -1056,7 +1055,10 @@ export class PropMaterialFactory {
      */
     static buildAllBarkDefinitions(options = {}) {
         const baseSeed = options.baseSeed ?? 42000;
-        const registry = getSpeciesRegistry();
+        if (typeof options.getSpeciesRegistry !== 'function') {
+            throw new Error('PropMaterialFactory.buildAllBarkDefinitions requires options.getSpeciesRegistry');
+        }
+        const registry = options.getSpeciesRegistry();
         const allSpecies = registry.getAllSpecies();
         const definitions = [];
 
@@ -1133,7 +1135,10 @@ export class PropMaterialFactory {
      * @param {number} [seed=42000]
      * @returns {PropTextureDefinition|null}
      */
-    static buildBarkDefinition(speciesId, seed = 42000) {
+    static buildBarkDefinition(speciesId, seed = 42000, getSpeciesRegistry) {
+        if (typeof getSpeciesRegistry !== 'function') {
+            throw new Error('PropMaterialFactory.buildBarkDefinition requires getSpeciesRegistry');
+        }
         const builder = BARK_BUILDERS[speciesId] || defaultBarkLayers;
         const registry = getSpeciesRegistry();
         const species = registry.getSpecies(speciesId);
@@ -1174,9 +1179,12 @@ export class PropMaterialFactory {
         static buildAllPropDefinitions(options = {}) {
             const baseSeed = options.baseSeed ?? 42000;
             const defs = [];
-    
+
             // Bark for all tree species (birch, spruce, oak, palm, …)
-            defs.push(...PropMaterialFactory.buildAllBarkDefinitions({ baseSeed }));
+            defs.push(...PropMaterialFactory.buildAllBarkDefinitions({
+                baseSeed,
+                getSpeciesRegistry: options.getSpeciesRegistry,
+            }));
     
             // Asset surfaces — one each
             defs.push({ id: 'rock_granite',          label: 'Granite Surface',

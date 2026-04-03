@@ -1,7 +1,6 @@
 // js/world/webgpuTerrainGenerator.js
 
 import { createSplatComputeShader } from './shaders/webgpu/splatCompute.wgsl.js';
-import { TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../../shared/types.js';
 
 import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
     
@@ -14,6 +13,17 @@ const SPLAT_STEP_PREFIX = `${TERRAIN_STEP_LOG_TAG} ${SPLAT_STEP_LOG_TAG}`;
 
 export class WebGPUTerrainGenerator {
     constructor(device, seed, chunkSize, macroConfig, splatConfig, textureCache, options = {}) {
+        if (!options.terrainTheme) {
+            throw new Error('WebGPUTerrainGenerator requires options.terrainTheme (TILE_CATEGORIES, buildTileCategoryLookupWGSL, terrainShaderBundle)');
+        }
+        if (!options.terrainTheme.terrainShaderBundle) {
+            throw new Error('WebGPUTerrainGenerator requires options.terrainTheme.terrainShaderBundle');
+        }
+        this.terrainTheme = options.terrainTheme;
+        this.tileCategories = options.terrainTheme.TILE_CATEGORIES;
+        this.buildTileCategoryLookupWGSL = options.terrainTheme.buildTileCategoryLookupWGSL;
+        this.terrainShaderBundle = options.terrainTheme.terrainShaderBundle;
+
         this.debugMode = 0;
 
         this.device = requireObject(device, 'device');
@@ -719,7 +729,8 @@ export class WebGPUTerrainGenerator {
 
         // ── Standard terrain shader (base height / macro) ─────────
         const terrainShaderCode = createAdvancedTerrainComputeShader({
-            baseGenerator: this.baseGenerator
+            baseGenerator: this.baseGenerator,
+            terrainShaderBundle: this.terrainShaderBundle,
         });
         this.terrainShaderModule = this.device.createShaderModule({
             label: 'Advanced Terrain Compute',
@@ -729,7 +740,8 @@ export class WebGPUTerrainGenerator {
         // ── Height-input terrain shader (normal + tile from height) ─
         const heightInputShaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
-            hasHeightBindings: true
+            hasHeightBindings: true,
+            terrainShaderBundle: this.terrainShaderBundle,
         });
         this.heightInputShaderModule = this.device.createShaderModule({
             label: 'Height Input Terrain Compute',
@@ -740,7 +752,8 @@ export class WebGPUTerrainGenerator {
         const microShaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
             hasHeightBindings: true,
-            hasTileBindings: true
+            hasTileBindings: true,
+            terrainShaderBundle: this.terrainShaderBundle,
         });
         this.microShaderModule = this.device.createShaderModule({
             label: 'Micro Terrain Compute',
@@ -748,7 +761,10 @@ export class WebGPUTerrainGenerator {
         });
 
         // ── Splat shader ──────────────────────────────────────────
-        const splatShaderCode = createSplatComputeShader();
+        const splatShaderCode = createSplatComputeShader({
+            tileCategories: this.tileCategories,
+            buildTileCategoryLookupWGSL: this.buildTileCategoryLookupWGSL,
+        });
         this.splatShaderModule = this.device.createShaderModule({
             label: 'Splat Compute',
             code: splatShaderCode
@@ -950,7 +966,8 @@ export class WebGPUTerrainGenerator {
         const shaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
             outputFormat: fmt,
-            hasHeightBindings: true
+            hasHeightBindings: true,
+            terrainShaderBundle: this.terrainShaderBundle,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Height Input Terrain Compute (${fmt})`,
@@ -1003,7 +1020,8 @@ export class WebGPUTerrainGenerator {
             baseGenerator: this.baseGenerator,
             outputFormat: fmt,
             hasHeightBindings: true,
-            hasTileBindings: true
+            hasTileBindings: true,
+            terrainShaderBundle: this.terrainShaderBundle,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Micro Terrain Compute (${fmt})`,
@@ -1155,10 +1173,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         const cached = this._splatDebugProbePipelineCache?.get(cacheKey);
         if (cached) return cached;
 
-        const categoryCount = TILE_CATEGORIES.length;
-        const tileCategoryWGSL = buildTileCategoryLookupWGSL();
+        const categoryCount = this.tileCategories.length;
+        const tileCategoryWGSL = this.buildTileCategoryLookupWGSL();
         const representativeLines = ['fn categoryRepresentativeTileId(categoryId: u32) -> u32 {'];
-        for (const category of TILE_CATEGORIES) {
+        for (const category of this.tileCategories) {
             representativeLines.push(
                 `    if (categoryId == ${category.id}u) { return ${category.ranges[0][0]}u; } // ${category.name}`
             );
@@ -2378,15 +2396,16 @@ this.device.queue.submit([enc.finish()]);
             }
         }
 
-        const sourceCategories = summarizeTileCategoryHistogram(sourceTile);
-        const paddedCategories = summarizeTileCategoryHistogram(paddedInnerTile);
+        const sourceCategories = summarizeTileCategoryHistogram(sourceTile, this.tileCategories);
+        const paddedCategories = summarizeTileCategoryHistogram(paddedInnerTile, this.tileCategories);
         const splatSummary = summarizeSplatData(splatData, innerSize);
         const emulatedSplatData = emulateSplatOutputFromPaddedTile(
             paddedTileRaw,
             paddedSize,
             innerSize,
             padding,
-            this.splatKernelSize
+            this.splatKernelSize,
+            this.tileCategories
         );
         const emulatedSummary = summarizeSplatData(emulatedSplatData, innerSize);
         const compareSummary = compareSplatOutputs(
@@ -2802,7 +2821,8 @@ this.device.queue.submit([enc.finish()]);
 
         const shaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
-            outputFormat: fmt
+            outputFormat: fmt,
+            terrainShaderBundle: this.terrainShaderBundle,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Terrain Compute (${fmt})`,
@@ -2846,9 +2866,9 @@ function requireObject(value, name) {
     return value;
 }
 
-function tileCategoryIndex(tileId) {
-    for (let i = 0; i < TILE_CATEGORIES.length; i++) {
-        const category = TILE_CATEGORIES[i];
+function tileCategoryIndex(tileId, tileCategories) {
+    for (let i = 0; i < tileCategories.length; i++) {
+        const category = tileCategories[i];
         for (const [lo, hi] of category.ranges) {
             if (tileId >= lo && tileId <= hi) {
                 return i;
@@ -2858,11 +2878,11 @@ function tileCategoryIndex(tileId) {
     return -1;
 }
 
-function summarizeTileCategoryHistogram(tileBytes) {
-    const counts = new Array(TILE_CATEGORIES.length).fill(0);
+function summarizeTileCategoryHistogram(tileBytes, tileCategories) {
+    const counts = new Array(tileCategories.length).fill(0);
     let unknown = 0;
     for (let i = 0; i < tileBytes.length; i++) {
-        const idx = tileCategoryIndex(tileBytes[i]);
+        const idx = tileCategoryIndex(tileBytes[i], tileCategories);
         if (idx >= 0) counts[idx]++;
         else unknown++;
     }
@@ -2871,7 +2891,7 @@ function summarizeTileCategoryHistogram(tileBytes) {
     for (let i = 0; i < counts.length; i++) {
         if (counts[i] <= 0) continue;
         summary.push({
-            name: TILE_CATEGORIES[i].name,
+            name: tileCategories[i].name,
             count: counts[i],
             pct: (counts[i] * 100) / total
         });
@@ -3006,10 +3026,10 @@ function formatRGBA8PixelSummary(summary) {
     return `zero=${summary.zeroPixels}/${summary.totalPixels} top=${topPixels}`;
 }
 
-function emulateSplatOutputFromPaddedTile(paddedTileRaw, paddedSize, innerSize, padding, kernelSize) {
+function emulateSplatOutputFromPaddedTile(paddedTileRaw, paddedSize, innerSize, padding, kernelSize, tileCategories) {
     const output = new Uint8Array(innerSize * innerSize * 4);
     const kernelRadius = Math.max(0.5, 0.5 * Math.max(kernelSize, 1));
-    const scoreCount = TILE_CATEGORIES.length;
+    const scoreCount = tileCategories.length;
 
     for (let y = 0; y < innerSize; y++) {
         for (let x = 0; x < innerSize; x++) {
@@ -3035,7 +3055,7 @@ function emulateSplatOutputFromPaddedTile(paddedTileRaw, paddedSize, innerSize, 
                     );
                     if (weight <= 0) continue;
                     const tileId = paddedTileRaw[(sy * paddedSize + sx) * 4];
-                    const categoryId = tileCategoryIndex(tileId);
+                    const categoryId = tileCategoryIndex(tileId, tileCategories);
                     if (categoryId < 0) continue;
                     categoryScores[categoryId] += weight;
                 }
@@ -3074,9 +3094,9 @@ function emulateSplatOutputFromPaddedTile(paddedTileRaw, paddedSize, innerSize, 
                 continue;
             }
 
-            const top0Representative = categoryRepresentativeTileIdJS(top0Category);
-            const top1Representative = categoryRepresentativeTileIdJS(top1Category);
-            const centerCategory = tileCategoryIndex(centerTileId);
+            const top0Representative = categoryRepresentativeTileIdJS(top0Category, tileCategories);
+            const top1Representative = categoryRepresentativeTileIdJS(top1Category, tileCategories);
+            const centerCategory = tileCategoryIndex(centerTileId, tileCategories);
             const interiorTileId =
                 centerCategory >= 0 && centerCategory === top0Category
                     ? centerTileId
@@ -3191,11 +3211,11 @@ function radialKernelWeightJS(cx, cy, sx, sy, radius) {
     return falloff * falloff;
 }
 
-function categoryRepresentativeTileIdJS(categoryId) {
-    if (!(categoryId >= 0 && categoryId < TILE_CATEGORIES.length)) {
+function categoryRepresentativeTileIdJS(categoryId, tileCategories) {
+    if (!(categoryId >= 0 && categoryId < tileCategories.length)) {
         return 255;
     }
-    return TILE_CATEGORIES[categoryId]?.ranges?.[0]?.[0] ?? 255;
+    return tileCategories[categoryId]?.ranges?.[0]?.[0] ?? 255;
 }
 
 function clampInt(value, lo, hi) {

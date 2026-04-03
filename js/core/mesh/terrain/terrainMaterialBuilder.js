@@ -1,7 +1,6 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js';
 import { Material } from '../../renderer/resources/material.js';
 import { requireBool, requireInt, requireNumber, requireObject } from '../../../shared/requireUtil.js';
-import { TERRAIN_AO_CONFIG, GROUND_FIELD_BAKE_CONFIG } from '../../renderer/streamer/streamerConfig.js';
 
 export class TerrainMaterialBuilder {
     static _shaderBuilders = new Map();
@@ -68,6 +67,12 @@ export class TerrainMaterialBuilder {
             const aerialPerspectiveEnabled = requireNumber(opts.aerialPerspectiveEnabled, 'aerialPerspectiveEnabled');
             const debugMode = Number.isFinite(opts.debugMode) ? Math.floor(opts.debugMode) : 0;
             const debugVertexMode = Number.isFinite(opts.debugVertexMode) ? Math.floor(opts.debugVertexMode) : 0;
+            const terrainAODefaults = requireObject(opts.terrainAODefaults, 'terrainAODefaults');
+            const groundFieldDefaults = requireObject(opts.groundFieldDefaults, 'groundFieldDefaults');
+            const tileCategories = opts.tileCategories;
+            if (!Array.isArray(tileCategories)) {
+                throw new Error('TerrainMaterialBuilder.create requires opts.tileCategories');
+            }
 
             let apiName = 'webgl2';
             if (backend && typeof backend.getAPIName === 'function') {
@@ -91,7 +96,7 @@ export class TerrainMaterialBuilder {
             const engineAO = planetConfig?.engineConfig?.terrainAO ?? null;
             const planetAO = planetConfig?.terrainAO ?? null;
             const terrainAOConfig = {
-                ...TERRAIN_AO_CONFIG,
+                ...terrainAODefaults,
                 ...(engineAO || {}),
                 ...(planetAO || {}),
             };
@@ -99,11 +104,11 @@ export class TerrainMaterialBuilder {
             const enableTerrainAO = terrainAOConfig.enabled ?? true;
             const engineGroundField = planetConfig?.engineConfig?.groundFieldBake ?? null;
             const groundFieldConfig = {
-                ...GROUND_FIELD_BAKE_CONFIG,
+                ...groundFieldDefaults,
                 ...(engineGroundField || {}),
             };
             const groundFieldFallbackConfig = {
-                ...(GROUND_FIELD_BAKE_CONFIG.terrainFallback || {}),
+                ...(groundFieldDefaults.terrainFallback || {}),
                 ...((groundFieldConfig.terrainFallback) || {}),
             };
             const enableGroundField =
@@ -154,6 +159,7 @@ export class TerrainMaterialBuilder {
 
 
             const shaderOptions = {
+                tileCategories,
                 maxLightIndices: 8192,
                 useArrayTextures,
                 grassTileTypeIds: uniqueGrassTileTypeIds,

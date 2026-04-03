@@ -22,10 +22,8 @@
 //     2. Hull (one indirect draw)
 
 import { Logger } from '../../../shared/Logger.js';
-import { LODS_PER_CATEGORY, CAT_TREES } from './streamerConfig.js';
 import { MidNearGeometryBuilder } from './MidNearGeometryBuilder.js';
 import { MidNearTextureBaker } from './MidNearTextureBaker.js';
-import { TREE_TIER_RANGES, MID_TIER_CONFIG, SPECIES_CANOPY_PROFILES } from './treeTierConfig.js';
 import { buildMidTreeTrackerShader } from './shaders/midTreeTracker.wgsl.js';
 import {
     buildMidTrunkVertexShader,
@@ -37,8 +35,8 @@ import {
 const MID_TREE_BYTES = 128;
 const TRUNK_INSTANCE_BYTES = 48;   // matches mid-near trunk layout — reuse scatter logic inline
 
-function resolveMidTierConfig(midConfigOverride) {
-    const base = JSON.parse(JSON.stringify(MID_TIER_CONFIG));
+function resolveMidTierConfig(midConfigOverride, midTierConfig) {
+    const base = JSON.parse(JSON.stringify(midTierConfig));
     const override = midConfigOverride || {};
     return {
         ...base,
@@ -62,6 +60,16 @@ export class TreeMidSystem {
     constructor(device, assetStreamer, config = {}) {
         this.device = device;
         this.streamer = assetStreamer;
+        const streamerTheme = assetStreamer?._streamerTheme;
+        if (!streamerTheme) {
+            throw new Error('[TreeMidSystem] requires assetStreamer with _streamerTheme');
+        }
+        this._streamerTheme = streamerTheme;
+        this.LODS_PER_CATEGORY = streamerTheme.LODS_PER_CATEGORY;
+        this.CAT_TREES = streamerTheme.CAT_TREES;
+        this.TREE_TIER_RANGES = streamerTheme.TREE_TIER_RANGES;
+        this.MID_TIER_CONFIG = streamerTheme.MID_TIER_CONFIG;
+        this.SPECIES_CANOPY_PROFILES = streamerTheme.SPECIES_CANOPY_PROFILES;
         this._configOverride = {
             tierRange: config.tierRange ? { ...config.tierRange } : null,
             midConfig: config.midConfig ? JSON.parse(JSON.stringify(config.midConfig)) : null,
@@ -80,12 +88,12 @@ export class TreeMidSystem {
 
         // Snapshot config at construction. rebuildPipelines() re-reads.
         this._range = {
-            ...TREE_TIER_RANGES.mid,
+            ...this.TREE_TIER_RANGES.mid,
             ...(this._configOverride.tierRange || {}),
         };
-        this._cfg = resolveMidTierConfig(this._configOverride.midConfig);
+        this._cfg = resolveMidTierConfig(this._configOverride.midConfig, this.MID_TIER_CONFIG);
         this._speciesProfiles = {
-            ...JSON.parse(JSON.stringify(SPECIES_CANOPY_PROFILES)),
+            ...JSON.parse(JSON.stringify(this.SPECIES_CANOPY_PROFILES)),
             ...(this._configOverride.speciesProfiles || {}),
         };
         this.maxTrees = this._cfg.maxTrees;
@@ -177,12 +185,12 @@ export class TreeMidSystem {
 
         // Re-read config module (caller may have mutated it).
         this._range = {
-            ...TREE_TIER_RANGES.mid,
+            ...this.TREE_TIER_RANGES.mid,
             ...(this._configOverride.tierRange || {}),
         };
-        this._cfg = resolveMidTierConfig(this._configOverride.midConfig);
+        this._cfg = resolveMidTierConfig(this._configOverride.midConfig, this.MID_TIER_CONFIG);
         this._speciesProfiles = {
-            ...JSON.parse(JSON.stringify(SPECIES_CANOPY_PROFILES)),
+            ...JSON.parse(JSON.stringify(this.SPECIES_CANOPY_PROFILES)),
             ...(this._configOverride.speciesProfiles || {}),
         };
 
@@ -255,8 +263,8 @@ export class TreeMidSystem {
         this._sourceBands = [];
         if (!pool) return;
 
-        const treeBandBase = CAT_TREES * LODS_PER_CATEGORY;
-        for (let lod = 0; lod < LODS_PER_CATEGORY; lod++) {
+        const treeBandBase = this.CAT_TREES * this.LODS_PER_CATEGORY;
+        for (let lod = 0; lod < this.LODS_PER_CATEGORY; lod++) {
             const band = treeBandBase + lod;
             const capacity = pool.getBandCapacity(band) >>> 0;
             if (capacity === 0) continue;

@@ -1,10 +1,13 @@
 import { createWeatherComputeShader } from './shaders/weatherCompute.wgsl.js';
-import { getCloudTypesForWeather, getCloudLayers } from '../clouds/cloudTypeDefinitions.js';
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js';
 
 export class WeatherController {
     constructor(backend, config = {}) {
         this.backend = backend;
+        if (typeof config.cloudLayerProvider !== 'function') {
+            throw new Error('WeatherController requires config.cloudLayerProvider function');
+        }
+        this._cloudLayerProvider = config.cloudLayerProvider;
         this.config = {
             enabled: config.enabled ?? true,
             resolution: config.resolution ?? 128,
@@ -260,7 +263,7 @@ export class WeatherController {
                 verticalStretch: 2.6, worleyInfluence: 0.25, edgeSoftness: 0.95, extinction: 0.012, albedo: 0.95
             }];
         }
-        return getCloudLayers(envState.currentWeather, envState.weatherIntensity, atmosphereHeight);
+        return this._cloudLayerProvider(envState.currentWeather, envState.weatherIntensity, atmosphereHeight);
     }
 
     _getIntensityForWeather(weather) {

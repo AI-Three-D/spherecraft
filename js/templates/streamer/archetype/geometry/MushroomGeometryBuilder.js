@@ -11,7 +11,7 @@
 // the stem and droops a hair below the stem junction before curving up
 // into a dome. This is what makes it read as "mushroom" vs "lamp post".
 
-import { AssetGeometryBuilder } from '../../AssetGeometryBuilder.js';
+import { AssetGeometryBuilder } from '../../../../core/renderer/streamer/AssetGeometryBuilder.js';
 
 const UV_SPLIT = 0.4;
 

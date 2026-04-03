@@ -2,7 +2,7 @@
 // Identifies a specific atlas by grid coordinates
 // Key format uses config.textureSize for the suffix (dynamic, not hardcoded)
 
-import { DataTextureConfig } from '../../templates/configs/dataTextureConfiguration.js';
+import { DataTextureConfig } from './dataTextureConfiguration.js';
 
 
 export class TextureAtlasKey {

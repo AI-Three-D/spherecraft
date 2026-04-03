@@ -1,4 +1,4 @@
-import { TILE_TYPES } from '../../shared/types.js';
+import { TILE_TYPES } from '../configs/tileTypes.js';
 import { TEXTURE_LEVELS } from '../configs/TileConfig.js';
 import { sameForAllSeasons, withSeed } from './reusable/shared.js';
 import { MUD_MICRO_A, MUD_MICRO_B, MUD_MACRO } from './reusable/mudTextures.js';

@@ -1,13 +1,11 @@
 // js/config/EngineConfig.js
-import { DataTextureConfig } from '../templates/configs/dataTextureConfiguration.js';
+import { DataTextureConfig } from './world/dataTextureConfiguration.js';
 import { requireBool, requireInt, requireIntArray, requireLogLevel, requireNumber, requireNumberArray, requireObject } from '../shared/requireUtil.js';
-
-import { resolveTreeConfig } from '../templates/configs/treeConfigResolver.js';
 
 export class EngineConfig {
   constructor(options = {}) {
 
-    this.trees = resolveTreeConfig(options.trees);
+    this.trees = options.trees;
     this.logLevel = requireLogLevel(options.logLevel, 'logLevel');
     this.seed = requireInt(options.seed, 'seed', 0);
     const nightSky = options.nightSky || {};

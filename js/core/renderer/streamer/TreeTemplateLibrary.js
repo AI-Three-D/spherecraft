@@ -24,6 +24,10 @@ export class TreeTemplateLibrary {
      * @param {number} [options.baseSeed=12345] - Seed for generation
      */
     constructor(options = {}) {
+        if (!options.birchGenerator) {
+            throw new Error('TreeTemplateLibrary requires options.birchGenerator');
+        }
+        this._birchGenerator = options.birchGenerator;
         this.variantsPerType = options.variantsPerType ?? 4;
         this.baseSeed = options.baseSeed ?? 12345;
         
@@ -68,7 +72,8 @@ export class TreeTemplateLibrary {
                 treeType,
                 variantCount: this.variantsPerType,
                 baseSeed: seed,
-                params: typeParams
+                params: typeParams,
+                birchGenerator: this._birchGenerator,
             });
             
             this._typeStartIndex.set(treeType, this._allTemplates.length);

@@ -1,15 +1,19 @@
-import { TEXTURE_CONFIG } from "../../../templates/configs/atlasConfig.js";
-import { SEASONS } from "../../../templates/configs/TileConfig.js";
 import { proceduralNoiseShader } from "./shaders/proceduralNoise.wgsl.js";
 
 
-export function getAllProceduralVariantsForLevel(level) {
+export function getAllProceduralVariantsForLevel(level, textureConfig, seasons) {
+    if (!textureConfig) {
+        throw new Error('getAllProceduralVariantsForLevel requires textureConfig');
+    }
+    if (!seasons) {
+        throw new Error('getAllProceduralVariantsForLevel requires seasons');
+    }
     const variants = [];
 
-    for (const entry of TEXTURE_CONFIG) {
+    for (const entry of textureConfig) {
         if (!entry.textures?.base) continue;
 
-        for (const season of Object.values(SEASONS)) {
+        for (const season of Object.values(seasons)) {
             const seasonCfg = entry.textures.base[season];
             if (!seasonCfg || !seasonCfg[level]) continue;
 

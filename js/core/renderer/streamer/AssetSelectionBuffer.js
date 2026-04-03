@@ -4,7 +4,6 @@
 // Uploads asset definitions and tile-to-asset mappings for shader access.
 
 import { Logger } from '../../../shared/Logger.js';
-import { ASSET_DEF_FLOATS, LODS_PER_CATEGORY } from './streamerConfig.js';
 
 /**
  * GPU buffer layout for asset definitions.
@@ -19,7 +18,6 @@ import { ASSET_DEF_FLOATS, LODS_PER_CATEGORY } from './streamerConfig.js';
  *   [...]:   densities (LODS_PER_CATEGORY)
  *   [...]:   categoryIndex, priority, geometryTypeIndex, _pad
  */
-const FLOATS_PER_ASSET = ASSET_DEF_FLOATS;
 
 /**
  * GPU buffer layout for tile-to-asset mapping.
@@ -36,6 +34,12 @@ export class AssetSelectionBuffer {
      * @param {import('./AssetRegistry.js').AssetRegistry} registry
      */
     constructor(device, registry, options = {}) {
+        if (!options.streamerTheme) {
+            throw new Error('AssetSelectionBuffer requires options.streamerTheme');
+        }
+        this._streamerTheme = options.streamerTheme;
+        this.ASSET_DEF_FLOATS = options.streamerTheme.ASSET_DEF_FLOATS;
+
         this.device = device;
         this.registry = registry;
         this._tileMapDescriptors = Array.isArray(options.tileMapDescriptors)
@@ -120,7 +124,7 @@ export class AssetSelectionBuffer {
             this._assetCount,
             this._maxTileType,
             MAX_ASSETS_PER_TILE,
-            FLOATS_PER_ASSET
+            this.ASSET_DEF_FLOATS
         ]);
 
         this._configBuffer = this.device.createBuffer({
@@ -189,8 +193,15 @@ export class AssetSelectionBuffer {
  * @returns {string} WGSL code
  */
 export function buildAssetSelectionWGSL(config = {}) {
+    if (config.assetDefFloats == null) {
+        throw new Error('buildAssetSelectionWGSL requires config.assetDefFloats');
+    }
+    if (config.lodsPerCategory == null) {
+        throw new Error('buildAssetSelectionWGSL requires config.lodsPerCategory');
+    }
     const maxAssetsPerTile = MAX_ASSETS_PER_TILE;
-    const floatsPerAsset = FLOATS_PER_ASSET;
+    const floatsPerAsset = config.assetDefFloats;
+    const LODS_PER_CATEGORY = config.lodsPerCategory;
 
     return /* wgsl */`
 // ═══════════════════════════════════════════════════════════════════════════

@@ -1,6 +1,4 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js';
-import { TEXTURE_LEVELS, ATLAS_CONFIG, TextureConfigHelper, SEASONS, TILE_CONFIG } from '../../templates/configs/TileConfig.js';
-import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../../templates/configs/tileTransitionConfig.js';
 
 import { Texture, TextureFormat, TextureFilter, TextureWrap } from '../renderer/resources/texture.js';
 import { TileTransitionTableBuilder } from '../world/tileTransitionTableBuilder.js'
@@ -32,20 +30,31 @@ function getLayerConfigHash(layers) {
 }
 
 export class TextureAtlasManager {
-    constructor(enableDebug = false, gpuDevice = null, proceduralTextureGenerator = null) {
+    constructor(enableDebug = false, gpuDevice = null, proceduralTextureGenerator = null, tileTheme = null) {
+        if (!tileTheme) {
+            throw new Error('TextureAtlasManager requires tileTheme (TILE_CONFIG, TEXTURE_LEVELS, ATLAS_CONFIG, TEXTURE_CONFIG, TextureConfigHelper, SEASONS, TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES)');
+        }
+        this.TILE_CONFIG = tileTheme.TILE_CONFIG;
+        this.TEXTURE_LEVELS = tileTheme.TEXTURE_LEVELS;
+        this.ATLAS_CONFIG = tileTheme.ATLAS_CONFIG;
+        this.TEXTURE_CONFIG = tileTheme.TEXTURE_CONFIG;
+        this.TextureConfigHelper = tileTheme.TextureConfigHelper;
+        this.SEASONS = tileTheme.SEASONS;
+        this.TILE_LAYER_HEIGHTS = tileTheme.TILE_LAYER_HEIGHTS;
+        this.TILE_TRANSITION_RULES = tileTheme.TILE_TRANSITION_RULES;
         this.gpuDevice = gpuDevice;
         this.proceduralTextureGenerator = proceduralTextureGenerator;
         this._backend = null;
         this._busy = false;
         this.atlases = new Map();
         this.textureLoader = new THREE.TextureLoader();
-        this.currentSeason = SEASONS.SUMMER;
+        this.currentSeason = this.SEASONS.SUMMER;
         this.PADDING = 32;
     
         this._uvCache = new Map();
         this._initialized = false;
     
-        Object.values(TEXTURE_LEVELS).forEach(level => {
+        Object.values(this.TEXTURE_LEVELS).forEach(level => {
             this.atlases.set(level, {
                 texture: null,
                 canvas: null,
@@ -57,9 +66,9 @@ export class TextureAtlasManager {
         });
     
         this.loaded = false;
-        window.SEASONS = SEASONS;
+        window.SEASONS = this.SEASONS;
         window.ATLAS = this;
-        window.TEXTURE_LEVELS = TEXTURE_LEVELS;
+        window.TEXTURE_LEVELS = this.TEXTURE_LEVELS;
     
         this.lookupTables = {
             tileTypeLookup: null,
@@ -116,7 +125,7 @@ export class TextureAtlasManager {
 
     async _getAllProceduralVariants(level) {
         const module = await this._loadTextureGeneratorModule();
-        return module.getAllProceduralVariantsForLevel(level);
+        return module.getAllProceduralVariantsForLevel(level, this.TEXTURE_CONFIG, this.SEASONS);
     }
 
     initializeLookupTables() {
@@ -132,17 +141,17 @@ export class TextureAtlasManager {
         const maxMacroVariants = 8;
 
         const seasons = [
-            SEASONS.SPRING,
-            SEASONS.SUMMER,
-            SEASONS.AUTUMN,
-            SEASONS.WINTER
+            this.SEASONS.SPRING,
+            this.SEASONS.SUMMER,
+            this.SEASONS.AUTUMN,
+            this.SEASONS.WINTER
         ];
 
         const transitionBuilder = new TileTransitionTableBuilder(this.gpuDevice);
         const { blendModeTable, tileLayerHeights: layerHeightsTex } =
             transitionBuilder.build({
-                tileTransitionRules: TILE_TRANSITION_RULES,
-                tileLayerHeights: TILE_LAYER_HEIGHTS,
+                tileTransitionRules: this.TILE_TRANSITION_RULES,
+                tileLayerHeights: this.TILE_LAYER_HEIGHTS,
             });
         this.lookupTables.blendModeTable = blendModeTable;
         this.lookupTables.tileLayerHeights = layerHeightsTex;
@@ -150,14 +159,14 @@ export class TextureAtlasManager {
         this.lookupTables.tileTypeLookup = this._buildTileTypeLookup(
             maxTileTypes,
             maxMicroVariants,
-            TEXTURE_LEVELS.MICRO,
+            this.TEXTURE_LEVELS.MICRO,
             seasons
         );
 
         this.lookupTables.macroTileTypeLookup = this._buildTileTypeLookup(
             maxTileTypes,
             maxMacroVariants,
-            TEXTURE_LEVELS.MACRO,
+            this.TEXTURE_LEVELS.MACRO,
             seasons
         );
 
@@ -288,7 +297,7 @@ export class TextureAtlasManager {
 
         for (let s = 0; s < numSeasons; s++) {
             for (let t = 0; t < maxTileTypes; t++) {
-                const varCount = this.getNumVariants(t, seasons[s], TEXTURE_LEVELS.MICRO) || 1;
+                const varCount = this.getNumVariants(t, seasons[s], this.TEXTURE_LEVELS.MICRO) || 1;
                 numVariants[s * maxTileTypes + t] = varCount;
             }
         }
@@ -471,7 +480,7 @@ export class TextureAtlasManager {
     async initializeAtlases(procedural = false) {
         // Sequential — the shared generator is stateful and cannot be used
         // concurrently across atlas levels.
-        for (const level of Object.values(TEXTURE_LEVELS)) {
+        for (const level of Object.values(this.TEXTURE_LEVELS)) {
             if (procedural) {
                 await this.createProceduralAtlas(level);
             } else {
@@ -495,11 +504,11 @@ export class TextureAtlasManager {
         this.loaded = true;
     }
     async createProceduralAtlas(level) {
-        const config = ATLAS_CONFIG[level];
+        const config = this.ATLAS_CONFIG[level];
         const atlas = this.atlases.get(level);
-        const hasTransparent = (level === TEXTURE_LEVELS.MICRO);
+        const hasTransparent = (level === this.TEXTURE_LEVELS.MICRO);
     
-        const variants = getAllProceduralVariantsForLevel(level);
+        const variants = getAllProceduralVariantsForLevel(level, this.TEXTURE_CONFIG, this.SEASONS);
         if (!variants || variants.length === 0) return null;
     
         const gen = this.proceduralTextureGenerator;
@@ -620,11 +629,11 @@ export class TextureAtlasManager {
     }
     
     async createAtlas(level) {
-        const config = ATLAS_CONFIG[level];
+        const config = this.ATLAS_CONFIG[level];
         const atlas = this.atlases.get(level);
-        const allTexturePaths = TextureConfigHelper.getAllTexturesForLevel(level);
+        const allTexturePaths = this.TextureConfigHelper.getAllTexturesForLevel(level);
     
-        const hasTransparent = (level === TEXTURE_LEVELS.MICRO);
+        const hasTransparent = (level === this.TEXTURE_LEVELS.MICRO);
         const startIndex = hasTransparent ? 1 : 0;
         const totalLayers = allTexturePaths.length + startIndex;
         const textureSize = config.textureSize;
@@ -676,9 +685,9 @@ export class TextureAtlasManager {
         }
     
         // Seasonal map
-        for (const tileConfig of TILE_CONFIG) {
-            for (const season of Object.values(SEASONS)) {
-                const textures = TextureConfigHelper.getTexturesForSeason(tileConfig.id, season, level);
+        for (const tileConfig of this.TILE_CONFIG) {
+            for (const season of Object.values(this.SEASONS)) {
+                const textures = this.TextureConfigHelper.getTexturesForSeason(tileConfig.id, season, level);
                 for (let variant = 0; variant < textures.length; variant++) {
                     const texturePath = textures[variant];
                     const key = `${tileConfig.id}:${season}:${variant}`;
@@ -764,10 +773,10 @@ export class TextureAtlasManager {
         return texture;
     }
     async createAtlas(level) {
-        const config = ATLAS_CONFIG[level];
+        const config = this.ATLAS_CONFIG[level];
         const atlas = this.atlases.get(level);
 
-        const allTextures = TextureConfigHelper.getAllTexturesForLevel(level);
+        const allTextures = this.TextureConfigHelper.getAllTexturesForLevel(level);
         atlas.layout = this.calculateLayout(allTextures.length, config.atlasSize, config.textureSize);
 
         atlas.layout.padding = this.PADDING;
@@ -777,7 +786,7 @@ export class TextureAtlasManager {
         atlas.canvas.height = atlas.layout.atlasSize;
         atlas.context = atlas.canvas.getContext('2d');
 
-        if (level === TEXTURE_LEVELS.MICRO) {
+        if (level === this.TEXTURE_LEVELS.MICRO) {
             atlas.context.fillStyle = '#888888';
             atlas.context.fillRect(0, 0, atlas.canvas.width, atlas.canvas.height);
         }
@@ -826,7 +835,7 @@ export class TextureAtlasManager {
 
     async loadTexturesForLevel(level) {
         const atlas = this.atlases.get(level);
-        const allTexturePaths = TextureConfigHelper.getAllTexturesForLevel(level);
+        const allTexturePaths = this.TextureConfigHelper.getAllTexturesForLevel(level);
 
         let currentIndex = 0;
 
@@ -848,9 +857,9 @@ export class TextureAtlasManager {
             }
         }
 
-        for (const tileConfig of TILE_CONFIG) {
-            for (const season of Object.values(SEASONS)) {
-                const textures = TextureConfigHelper.getTexturesForSeason(tileConfig.id, season, level);
+        for (const tileConfig of this.TILE_CONFIG) {
+            for (const season of Object.values(this.SEASONS)) {
+                const textures = this.TextureConfigHelper.getTexturesForSeason(tileConfig.id, season, level);
                 for (let variant = 0; variant < textures.length; variant++) {
                     const texturePath = textures[variant];
                     const key = `${tileConfig.id}:${season}:${variant}`;
@@ -929,7 +938,7 @@ export class TextureAtlasManager {
     }
 
     getNextSeason(currentSeason) {
-        const seasons = Object.values(SEASONS);
+        const seasons = Object.values(this.SEASONS);
         const currentIndex = seasons.indexOf(currentSeason);
         return seasons[(currentIndex + 1) % seasons.length];
     }
@@ -979,13 +988,13 @@ export class TextureAtlasManager {
     }
 
     getPropAtlasTexture() {
-        return this.getAtlasTexture(TEXTURE_LEVELS.PROP);
+        return this.getAtlasTexture(this.TEXTURE_LEVELS.PROP);
     }
 
     getPropUV(propType) {
-        const path = TextureConfigHelper.getPropTexturePath(propType);
+        const path = this.TextureConfigHelper.getPropTexturePath(propType);
         if (!path) return null;
-        return this.getTextureUV(TEXTURE_LEVELS.PROP, path);
+        return this.getTextureUV(this.TEXTURE_LEVELS.PROP, path);
     }
 
     cleanup() {

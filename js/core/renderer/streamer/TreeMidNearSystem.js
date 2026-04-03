@@ -1,7 +1,6 @@
 // js/renderer/streamer/TreeMidNearSystem.js
 
 import { Logger } from '../../../shared/Logger.js';
-import { LODS_PER_CATEGORY, CAT_TREES } from './streamerConfig.js';
 import { MidNearGeometryBuilder } from './MidNearGeometryBuilder.js';
 import { MidNearTextureBaker, MIDNEAR_IMPOSTOR_VARIANTS, MIDNEAR_CANOPY_LAYERS } from './MidNearTextureBaker.js';
 import { BIRCH_MASK_VARIANTS } from './LeafMaskBaker.js';
@@ -29,6 +28,13 @@ export class TreeMidNearSystem {
     constructor(device, assetStreamer, config = {}) {
         this.device   = device;
         this.streamer = assetStreamer;
+        const streamerTheme = assetStreamer?._streamerTheme;
+        if (!streamerTheme) {
+            throw new Error('[TreeMidNearSystem] requires assetStreamer with _streamerTheme');
+        }
+        this._streamerTheme = streamerTheme;
+        this.LODS_PER_CATEGORY = streamerTheme.LODS_PER_CATEGORY;
+        this.CAT_TREES = streamerTheme.CAT_TREES;
         this._debugReadbackEnabled = this.streamer?._debugReadbackEnabled === true;
 
         this.lodController = config.lodController;
@@ -253,8 +259,8 @@ export class TreeMidNearSystem {
         this._sourceCapacity = 0;
         if (!pool) return;
 
-        const treeBandBase = CAT_TREES * LODS_PER_CATEGORY;
-        for (let lod = 0; lod < LODS_PER_CATEGORY; lod++) {
+        const treeBandBase = this.CAT_TREES * this.LODS_PER_CATEGORY;
+        for (let lod = 0; lod < this.LODS_PER_CATEGORY; lod++) {
             const band = treeBandBase + lod;
             const capacity = pool.getBandCapacity(band) >>> 0;
             if (capacity === 0) continue;

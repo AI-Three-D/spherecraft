@@ -153,9 +153,9 @@
     <!-- Game modules -->
     <script type="module">
         import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js';
-        import { GameEngine } from './js/core/gameEngine.js';
-        import { createEngineConfig, createGameDataConfig } from './js/wizard_game/runtimeConfigs.js';
-        import { CubeSphereCoords } from './js/core/planet/cubeSphereCoords.js';
+        import { GameEngine } from './gameEngine.js';
+        import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
+        import { CubeSphereCoords } from '../core/planet/cubeSphereCoords.js';
         window.qtDiag = window.qtDiag || {
             help() {
                 console.log('window.qtDiag is loaded, but the engine diagnostics are not bound yet.');

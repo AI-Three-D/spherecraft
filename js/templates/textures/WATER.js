@@ -1,4 +1,4 @@
-import { TILE_TYPES } from '../../shared/types.js';
+import { TILE_TYPES } from '../configs/tileTypes.js';
 import { TEXTURE_LEVELS } from '../configs/TileConfig.js';
 import { sameForAllSeasons, withSeed } from './reusable/shared.js';
 import { WATER_MICRO_A, WATER_MACRO } from './reusable/waterTextures.js';

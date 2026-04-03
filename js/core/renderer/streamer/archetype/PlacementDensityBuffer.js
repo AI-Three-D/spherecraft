@@ -21,7 +21,7 @@ import { Logger } from '../../../../shared/Logger.js';
 export class PlacementDensityBuffer {
     /**
      * @param {GPUDevice} device
-     * @param {import('./PlacementFamily.js').PlacementFamily[]} families
+     * @param {import('../../../../templates/streamer/archetype/PlacementFamily.js').PlacementFamily[]} families
      *        Dense by index — registry validation guarantees no gaps.
      * @param {number} tileTypeCount
      *        maxTileType + 1. Row stride in the flat buffer.

@@ -25,6 +25,9 @@ export class Frontend {
         this.backend = null;
         this.backendType = requireString(options.backendType, 'backendType');
         this.engineConfig = options.engineConfig || null;
+        this._streamerTheme = options.streamerTheme || null;
+        this._nightSkyTheme = options.nightSkyTheme || null;
+        this._terrainTheme = options.terrainTheme || null;
         this.gpuQuadtreeConfig = options.gpuQuadtree || this.engineConfig?.gpuQuadtree || null;
         this.gpuQuadtreeEnabled = this.gpuQuadtreeConfig?.enabled === true;
         this.quadtreeTileManager = null;
@@ -173,7 +176,10 @@ export class Frontend {
                 planetConfig: this.planetConfig,
                 textureManager: this.textureManager,
                 uniformManager: this.uniformManager,
-                terrainGenerator: terrainGenerator
+                terrainGenerator: terrainGenerator,
+                terrainAODefaults: this._streamerTheme.TERRAIN_AO_CONFIG,
+                groundFieldDefaults: this._streamerTheme.GROUND_FIELD_BAKE_CONFIG,
+                tileCategories: this._terrainTheme.TILE_CATEGORIES,
             });
             
             // Asset streamer: modular multi-category GPU scatter system
@@ -188,7 +194,8 @@ export class Frontend {
                     planetConfig:   this.planetConfig,
                     engineConfig:   this.engineConfig,
                     uniformManager: this.uniformManager,
-                    propTextureManager: this.propTextureManager, 
+                    streamerTheme:  this._streamerTheme,
+                    propTextureManager: this.propTextureManager,
                     leafAlbedoTextureManager: this.leafAlbedoTextureManager,
                     leafNormalTextureManager: this.leafNormalTextureManager,
                     quality:        'medium',
@@ -383,7 +390,8 @@ export class Frontend {
             const { SkyRenderer } = await import('../SkyRenderer.js');
             const spaceLODThreshold = 1000;
             this.skyRenderer = new SkyRenderer(this.backend, this.atmosphereLUT, {
-                spaceLODThreshold
+                spaceLODThreshold,
+                nightSkyTheme: this._nightSkyTheme,
             });
             await this.skyRenderer.initialize();
         }

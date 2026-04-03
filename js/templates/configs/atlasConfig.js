@@ -1,5 +1,5 @@
 
-import { TILE_CATEGORIES } from '../../shared/types.js';
+import { TILE_CATEGORIES } from './tileTypes.js';
 import WATER_TILES from '../textures/WATER.js';
 
 import GRASS_TILES from '../textures/GRASS.js';

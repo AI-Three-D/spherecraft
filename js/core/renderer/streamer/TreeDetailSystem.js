@@ -1,10 +1,8 @@
 // js/renderer/streamer/TreeDetailSystem.js
 
 import { Logger } from '../../../shared/Logger.js';
-import { getSpeciesRegistry } from './species/SpeciesRegistry.js';
 import { buildCloseTreeTrackerShader } from './shaders/closeTreeTracker.wgsl.js';
 import { buildCloseTreeDedupShader } from './shaders/closeTreeDedup.wgsl.js';
-import { LODS_PER_CATEGORY, CAT_TREES } from './streamerConfig.js';
 import { LeafLODTestSuite } from '../../../tools/LeafLODTestSuite.js';
 const CLOSE_TREE_BYTES = 128;  // Per CloseTreeInfo struct
 
@@ -17,7 +15,14 @@ export class TreeDetailSystem {
     constructor(device, assetStreamer, config = {}) {
         this.device = device;
         this.streamer = assetStreamer;
-        this.speciesRegistry = getSpeciesRegistry();
+        const streamerTheme = assetStreamer?._streamerTheme;
+        if (!streamerTheme) {
+            throw new Error('[TreeDetailSystem] requires assetStreamer with _streamerTheme');
+        }
+        this._streamerTheme = streamerTheme;
+        this.LODS_PER_CATEGORY = streamerTheme.LODS_PER_CATEGORY;
+        this.CAT_TREES = streamerTheme.CAT_TREES;
+        this.speciesRegistry = streamerTheme.getSpeciesRegistry();
 
         // All distances and caps flow from here now.
         this.lodController = config.lodController;
@@ -144,8 +149,8 @@ export class TreeDetailSystem {
         this._sourceBands = [];
         if (!pool) return;
 
-        const treeBandBase = CAT_TREES * LODS_PER_CATEGORY;
-        for (let lod = 0; lod < LODS_PER_CATEGORY; lod++) {
+        const treeBandBase = this.CAT_TREES * this.LODS_PER_CATEGORY;
+        for (let lod = 0; lod < this.LODS_PER_CATEGORY; lod++) {
             const band = treeBandBase + lod;
             const capacity = pool.getBandCapacity(band) >>> 0;
             if (capacity === 0) continue;

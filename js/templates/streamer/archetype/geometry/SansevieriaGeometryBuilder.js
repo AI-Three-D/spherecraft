@@ -4,7 +4,7 @@
 // rosette. Leaves stay thick, upright, and sword-like rather than trying
 // to mimic compound fern fronds.
 
-import { AssetGeometryBuilder } from '../../AssetGeometryBuilder.js';
+import { AssetGeometryBuilder } from '../../../../core/renderer/streamer/AssetGeometryBuilder.js';
 
 export class SansevieriaGeometryBuilder {
 
