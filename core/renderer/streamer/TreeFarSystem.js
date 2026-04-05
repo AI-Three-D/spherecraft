@@ -26,11 +26,10 @@ import { MidNearGeometryBuilder } from './MidNearGeometryBuilder.js';
 import { MidNearTextureBaker } from './MidNearTextureBaker.js';
 import { buildMidTreeTrackerShader } from './shaders/midTreeTracker.wgsl.js';
 import {
-    buildMidTrunkVertexShader,
-    buildMidTrunkFragmentShader,
-    buildMidHullVertexShader,
-    buildMidHullFragmentShader,
-} from './shaders/midTreeRender.wgsl.js';
+
+    buildFarHullVertexShader,
+    buildFarHullFragmentShader,
+} from './shaders/farTreeRender.wgsl.js';
 
 const MID_TREE_BYTES = 128;
 const TRUNK_INSTANCE_BYTES = 48;   // matches mid-near trunk layout — reuse scatter logic inline
@@ -49,6 +48,46 @@ function resolveMidTierConfig(midConfigOverride, midTierConfig) {
             ...base.hullFrag,
             ...(override.hullFrag || {}),
         },
+    };
+}
+
+function buildPackedCanopyGeometry(baseHull, canopyCount) {
+    const copies = Math.max(1, canopyCount | 0);
+    const positionsPerCopy = baseHull.positions.length;
+    const normalsPerCopy = baseHull.normals.length;
+    const uvsPerCopy = baseHull.uvs.length;
+    const vertsPerCopy = positionsPerCopy / 3;
+    const idxPerCopy = baseHull.indices.length;
+
+    const positions = new Float32Array(positionsPerCopy * copies);
+    const normals = new Float32Array(normalsPerCopy * copies);
+    const uvs = new Float32Array(uvsPerCopy * copies);
+    const canopyIds = new Float32Array(vertsPerCopy * copies);
+    const indices = new Uint16Array(idxPerCopy * copies);
+
+    for (let copy = 0; copy < copies; copy++) {
+        positions.set(baseHull.positions, copy * positionsPerCopy);
+        normals.set(baseHull.normals, copy * normalsPerCopy);
+        uvs.set(baseHull.uvs, copy * uvsPerCopy);
+
+        const vertBase = copy * vertsPerCopy;
+        for (let v = 0; v < vertsPerCopy; v++) {
+            canopyIds[vertBase + v] = copy;
+        }
+
+        const idxBase = copy * idxPerCopy;
+        for (let i = 0; i < idxPerCopy; i++) {
+            indices[idxBase + i] = baseHull.indices[i] + vertBase;
+        }
+    }
+
+    return {
+        positions,
+        normals,
+        uvs,
+        canopyIds,
+        indices,
+        indexCount: indices.length,
     };
 }
 
@@ -92,6 +131,7 @@ export class TreeFarSystem {
             ...JSON.parse(JSON.stringify(this.SPECIES_CANOPY_PROFILES)),
             ...(this._configOverride.speciesProfiles || {}),
         };
+        this._applyFarOverrides();
         this.maxTrees = this._cfg.maxTrees;
         // Far clone starts from mid-tier logic but should be much cheaper.
         // Keep the producer/tracker path the same; only simplify render cost.
@@ -110,6 +150,11 @@ export class TreeFarSystem {
             verticalBias: 1.05,
             topShrinkStart: 0.72,
             topShrinkStrength: 0.18,
+            
+        };
+        this._cfg.hull = {
+            maxPackedTrees: 4,
+            ...this._cfg.hull,
         };
 
         this._cfg.hullFrag = {
@@ -331,10 +376,16 @@ export class TreeFarSystem {
     _buildGeometry() {
         const h = this._cfg.hull;
 
-        const hull = MidNearGeometryBuilder.buildCanopyHull(h.lonSegments, h.latSegments);
+        const baseHull = MidNearGeometryBuilder.buildCanopyHull(h.lonSegments, h.latSegments);
+        const packedHull = buildPackedCanopyGeometry(
+            baseHull,
+            Math.max(1, h.maxPackedTrees ?? 4)
+        );
+
         const mkVB = (data, label) => {
             const b = this.device.createBuffer({
-                label, size: Math.max(16, data.byteLength),
+                label,
+                size: Math.max(16, data.byteLength),
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
                 mappedAtCreation: true,
             });
@@ -342,10 +393,12 @@ export class TreeFarSystem {
             b.unmap();
             return b;
         };
+
         const mkIB = (data, label) => {
             const aligned = Math.ceil(data.byteLength / 4) * 4;
             const b = this.device.createBuffer({
-                label, size: Math.max(16, aligned),
+                label,
+                size: Math.max(16, aligned),
                 usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
                 mappedAtCreation: true,
             });
@@ -355,11 +408,12 @@ export class TreeFarSystem {
         };
 
         this._hullGeo = {
-            posBuffer: mkVB(hull.positions, 'MidHull-Pos'),
-            normBuffer: mkVB(hull.normals, 'MidHull-Norm'),
-            uvBuffer: mkVB(hull.uvs, 'MidHull-UV'),
-            idxBuffer: mkIB(hull.indices, 'MidHull-Idx'),
-            idxCount: hull.indexCount,
+            posBuffer: mkVB(packedHull.positions, 'FarHull-Pos'),
+            normBuffer: mkVB(packedHull.normals, 'FarHull-Norm'),
+            uvBuffer: mkVB(packedHull.uvs, 'FarHull-UV'),
+            canopyIdBuffer: mkVB(packedHull.canopyIds, 'FarHull-CanopyId'),
+            idxBuffer: mkIB(packedHull.indices, 'FarHull-Idx'),
+            idxCount: packedHull.indexCount,
         };
     }
 
@@ -505,6 +559,47 @@ export class TreeFarSystem {
             ],
         });
     }
+    _applyFarOverrides() {
+        this._cfg.hull = {
+            ...this._cfg.hull,
+            lonSegments: Math.min(this._cfg.hull.lonSegments ?? 12, 6),
+            latSegments: Math.min(this._cfg.hull.latSegments ?? 8, 4),
+            vsAnchorSamples: Math.min(this._cfg.hull.vsAnchorSamples ?? 8, 2),
+            lumpNearScale: 0.35,
+            lumpFarScale: 0.15,
+            lumpNearDistance: 600.0,
+            lumpFarDistance: 1400.0,
+            inflation: 0.92,
+            shrinkWrap: 0.30,
+            gapShrink: 0.82,
+            verticalBias: 1.05,
+            topShrinkStart: 0.72,
+            topShrinkStrength: 0.18,
+        };
+
+        this._cfg.hull = {
+            maxPackedTrees: 4,
+            ...this._cfg.hull,
+        };
+
+        this._cfg.hullFrag = {
+            ...this._cfg.hullFrag,
+            baseCoverageNear: 0.78,
+            baseCoverageFar: 0.88,
+            subbandSplit: 900.0,
+            subbandBlend: 240.0,
+            subbandFarDamp: 0.85,
+            coverageNoiseAmp: 0.10,
+            coverageNoiseScale: 1.6,
+            macroGapStrength: 0.06,
+            edgeNoiseAmp: 0.06,
+            edgeBaseThin: 0.04,
+            edgeRimBoost: 0.04,
+            bottomBreak: 0.03,
+            bumpStrength: 0.05,
+            brightness: 1.0,
+        };
+    }
 
     _createRenderPipelines() {
         const hasTex = this._texBaker?.isReady() === true;
@@ -524,45 +619,26 @@ export class TreeFarSystem {
             { arrayStride: 12, stepMode: 'vertex', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] },
             { arrayStride: 12, stepMode: 'vertex', attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x3' }] },
             { arrayStride: 8,  stepMode: 'vertex', attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x2' }] },
+            { arrayStride: 4,  stepMode: 'vertex', attributes: [{ shaderLocation: 3, offset: 0, format: 'float32' }] },
         ];
 
         // ── Hull ───────────────────────────────────────────────────────────
         {
-            let farHullVS = buildMidHullVertexShader({
-                vsAnchorSamples: this._cfg.hull.vsAnchorSamples,
-                inflation: this._cfg.hull.inflation,
-                shrinkWrap: this._cfg.hull.shrinkWrap,
-                gapShrink: this._cfg.hull.gapShrink,
-                verticalBias: this._cfg.hull.verticalBias,
-                topShrinkStart: this._cfg.hull.topShrinkStart,
-                topShrinkStrength: this._cfg.hull.topShrinkStrength,
-                lumpNearScale: this._cfg.hull.lumpNearScale,
-                lumpFarScale: this._cfg.hull.lumpFarScale,
-                lumpNearDistance: this._cfg.hull.lumpNearDistance,
-                lumpFarDistance: this._cfg.hull.lumpFarDistance,
+            const farHullVS = buildFarHullVertexShader({
+                maxPackedTrees: this._cfg.hull.maxPackedTrees,
             });
-
-            // DEBUG: force far-tier canopy color to magenta
-            farHullVS = farHullVS.replace(
-                'out.vColor = vec3<f32>(tree.foliageR, tree.foliageG, tree.foliageB);',
-                'out.vColor = vec3<f32>(1.0, 0.0, 1.0);'
-            );
 
             const vsMod = this.device.createShaderModule({
                 label: 'FarHull-VS',
                 code: farHullVS,
             });
 
-            let farHullFS = buildMidHullFragmentShader({
+            const farHullFS = buildFarHullFragmentShader({
                 ...fadeBounds,
                 ...this._cfg.hullFrag,
                 enableCanopyTexture: hasTex,
+                debugMagenta: true,
             });
-
-            farHullFS = farHullFS.replace(
-                'return vec4<f32>(color, 1.0);',
-                'color = mix(color, vec3<f32>(1.0, 0.0, 1.0), 0.85);\n    return vec4<f32>(color, 1.0);'
-            );
 
             const fsMod = this.device.createShaderModule({
                 label: 'FarHull-FS',
@@ -570,13 +646,14 @@ export class TreeFarSystem {
             });
 
             const g0 = this.device.createBindGroupLayout({
-                label: 'MidHull-G0',
+                label: 'FarHull-G0',
                 entries: [
                     { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                    { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } }, // trees
-                    { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // anchors (VS only)
+                    { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                    { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
                 ],
             });
+
             const g1Entries = [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
             ];
@@ -586,11 +663,16 @@ export class TreeFarSystem {
                     { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 );
             }
-            const g1 = this.device.createBindGroupLayout({ label: 'MidHull-G1', entries: g1Entries });
+
+            const g1 = this.device.createBindGroupLayout({
+                label: 'FarHull-G1',
+                entries: g1Entries
+            });
+
             this._hullBGLs = [g0, g1];
 
             this._hullPipeline = this.device.createRenderPipeline({
-                label: 'MidHull-Pipeline',
+                label: 'FarHull-Pipeline',
                 layout: this.device.createPipelineLayout({ bindGroupLayouts: this._hullBGLs }),
                 vertex: { module: vsMod, entryPoint: 'main', buffers: vertexBuffers },
                 fragment: { module: fsMod, entryPoint: 'main', targets: [{ format: canvasFormat }] },
@@ -768,6 +850,7 @@ export class TreeFarSystem {
         encoder.setVertexBuffer(0, this._hullGeo.posBuffer);
         encoder.setVertexBuffer(1, this._hullGeo.normBuffer);
         encoder.setVertexBuffer(2, this._hullGeo.uvBuffer);
+        encoder.setVertexBuffer(3, this._hullGeo.canopyIdBuffer);
         encoder.setIndexBuffer(this._hullGeo.idxBuffer, 'uint16');
         encoder.drawIndexedIndirect(this._hullIndirectBuffer, 0);
     }
@@ -833,6 +916,7 @@ export class TreeFarSystem {
             geo.posBuffer?.destroy();
             geo.normBuffer?.destroy();
             geo.uvBuffer?.destroy();
+            geo.canopyIdBuffer?.destroy();
             geo.idxBuffer?.destroy();
         }        
         this._initialized = false;
