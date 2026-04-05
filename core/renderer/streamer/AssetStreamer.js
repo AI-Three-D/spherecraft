@@ -47,6 +47,7 @@ import { GroundPropCache } from './GroundPropCache.js';
 import { TreeSourceCache } from './TreeSourceCache.js';
 import { gpuFormatSampleType } from '../resources/texture.js';
 import { TerrainAOBaker } from './TerrainAOBaker.js';
+import { TreeFarSystem } from './TreeFarSystem.js';
 
 const FIELD_LAYER_META_U32_STRIDE = 8;
 
@@ -143,6 +144,10 @@ const tcNear   = tc.nearTier || {};
 
 this._useMidTier        = tcFlags.useMidTier        ?? true;
 this._keepLegacyMidNear = tcFlags.keepLegacyMidNear ?? false;
+
+this._useFarTierClone   = tcFlags.useFarTierClone   ?? true;
+this._useClusterFarTier = tcFlags.useClusterFarTier ?? false;
+
 this.enableLeafRendering =
     tcFlags.enableLeafRendering ?? (options.enableLeafRendering !== false);
 
@@ -181,6 +186,7 @@ this._lodController = new TreeLODController({
         this._debugConfig = options.debug || {};
         this._debugReadbackEnabled = this._debugConfig.readback === true;
         this._treeMidSystem = null; 
+        this._treeFarSystem = null;
         // ═══ INC 1: ArchetypeRegistry replaces AssetRegistry ═══════════════
         // ArchetypeRegistry EXTENDS AssetRegistry and passes legacy defs to
         // super(). Every downstream consumer (AssetSelectionBuffer,
@@ -442,7 +448,7 @@ this._lodController = new TreeLODController({
             });
             this._treeSourceCache.initialize(this._bakedAssetTileCache);
         }
-        if (this._treeConfig?.farTreeTier || this._treeConfig?.clusterTier) {
+        if (this._useClusterFarTier && (this._treeConfig?.farTreeTier || this._treeConfig?.clusterTier)) {
             this._clusterTreeSystem = new ClusterTreeSystem(this.device, this, {
                 treeConfig: this._treeConfig,
             });
@@ -575,6 +581,23 @@ if (this._useMidTier) {                          // ← was TREE_TIER_FLAGS.useM
         speciesProfiles: this._treeConfig.speciesProfiles,
     });
     await this._treeMidSystem.initialize();
+}
+
+if (this._useFarTierClone) {
+    const farTierCloneConfig = {
+        ...(this._treeConfig.midTier || {}),
+        maxTrees: this._treeConfig?.farTreeTier?.maxInstances
+            ?? this._treeConfig?.midTier?.maxTrees
+            ?? 24000,
+    };
+
+    this._treeFarSystem = new TreeFarSystem(this.device, this, {
+        lodController: this._lodController,
+        tierRange: tierRanges.farTrees,
+        midConfig: farTierCloneConfig,
+        speciesProfiles: this._treeConfig.speciesProfiles,
+    });
+    await this._treeFarSystem.initialize();
 }
 
 this._branchRenderer = new BranchRenderer(this.device, this, {
@@ -1146,6 +1169,7 @@ await this._leafStreamer.initialize();
     }
 
     dispose() {
+        this._treeFarSystem?.dispose();
         this._treeMidSystem?.dispose();
         this._scatterDispatchArgsBuffer?.destroy();
         this._scatterDispatchArgsBuffer = null;
@@ -1279,7 +1303,9 @@ await this._leafStreamer.initialize();
         this._treeSourceCache = null;
         this._clusterTreeSystem = null;
         this._aoBaker = null;
+        this._treeFarSystem = null;
         this._initialized = false;
+        
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -1337,6 +1363,7 @@ update(commandEncoder, camera) {
     if (!bakeDrivenScatter && !this._shouldUpdateScatter(camera)) {
         if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
         if (this._treeMidSystem)     this._treeMidSystem.update(commandEncoder, camera);
+        if (this._treeFarSystem)     this._treeFarSystem.update(commandEncoder, camera);
         if (this._clusterTreeSystem) this._clusterTreeSystem.update(commandEncoder, camera);
         if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
         if (this._leafStreamer && this.enableLeafRendering) {
@@ -2204,6 +2231,7 @@ getGroundFieldTexture() {
 if (this._branchRenderer)    this._branchRenderer.render(encoder);
 //if (this._treeMidNearSystem) this._treeMidNearSystem.render(encoder);  
 if (this._treeMidSystem)     this._treeMidSystem.render(encoder);    
+if (this._treeFarSystem)     this._treeFarSystem.render(encoder);
 if (this._clusterTreeSystem) this._clusterTreeSystem.render(encoder, camera, viewMatrix, projectionMatrix);
 if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(encoder);
 

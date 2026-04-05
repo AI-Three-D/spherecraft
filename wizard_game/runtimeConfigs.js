@@ -315,6 +315,8 @@ export function createEngineConfig() {
       flags: {
           useMidTier: true,
           keepLegacyMidNear: false,
+          useFarTierClone: true,
+          useClusterFarTier: false,
           enableLeafRendering: true,
           enableLeafWind: false,
           enableBranchWind: false,
