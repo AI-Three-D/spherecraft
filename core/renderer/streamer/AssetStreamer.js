@@ -16,6 +16,8 @@
 //   assetStreamer.update(encoder, camera);
 //   backend.resumeRenderPass();
 //   assetStreamer.render(camera, viewMatrix, projectionMatrix);
+import { buildFarTreeBakeShader } from './shaders/farTreeBake.wgsl.js';
+import { FarTreeSourceCache } from './FarTreeSourceCache.js';
 import { TreeMidSystem } from './TreeMidSystem.js';
 import { ClusterTreeSystem } from './ClusterTreeSystem.js';
 import { LeafMaskBaker } from './LeafMaskBaker.js';
@@ -120,6 +122,8 @@ export class AssetStreamer {
         this._groundFieldBaker = null;
         this._groundPropCache = null;
         this._treeSourceCache = null;
+        this._farTreeSourceCache = null;
+
         this._clusterTreeSystem = null;
         this._templateLibrary = null;
         this._branchRenderer = null;
@@ -284,6 +288,18 @@ this._lodController = new TreeLODController({
             counterBuffer: null,
             bindGroup: null,
         };
+        this._farTreeBakePipeline = null;
+        this._farTreeBakeBindGroupLayout = null;
+        this._farTreeBakeBindGroup = null;
+        this._farTreeBakeParamBuffer = null;
+        this._farTreeBakeTileBuffer = null;
+        this._farTreeBakeBindGroupCache = {
+            heightTex: null,
+            tileTex: null,
+            scatterTex: null,
+            instanceBuffer: null,
+            bindGroup: null,
+        };
         this._producerDebugEnabled = true;
         this._producerDebugInterval = Math.max(1, this._debugConfig.interval ?? 120);
         this._producerDebugQueued = false;
@@ -429,6 +445,17 @@ this._lodController = new TreeLODController({
         });
         this._bakedAssetTileCache = new BakedAssetTileCache(this._assetBakePolicy);
         this._bakedAssetTileCache.syncFromTileStreamer(this.tileStreamer);
+
+        if (this._useFarTierClone) {
+            console.log("Initializing FarTreeSourceCache (clone-based far tier)");
+            this._farTreeSourceCache = new FarTreeSourceCache(this.device, {
+                assetRegistry: this._assetRegistry,
+                tilePoolSize: this.tileStreamer.tilePoolSize,
+                farTreeConfig: this.engineConfig?.trees?.farTreeTier?.bake,
+            });
+            this._farTreeSourceCache.initialize(this._bakedAssetTileCache);
+        }
+
         if (this.GROUND_PROP_BAKE_CONFIG.enabled) {
             this._groundPropCache = new GroundPropCache(this.device, {
                 assetRegistry: this._assetRegistry,
@@ -483,6 +510,7 @@ this._lodController = new TreeLODController({
         }
         this._createRenderPipeline();
 
+        this._createFarTreeBakePipeline();
         // ═══ Terrain AO baker ═══════════════════════════════════════════════
         if (this.TERRAIN_AO_CONFIG.enabled) {
             const maxWS   = this._qualityConfig.maxScatterTileWorldSize ?? 48;
@@ -641,6 +669,127 @@ await this._leafStreamer.initialize();
         this._bakedAssetTileCache?.logSummary(`${this._logTag} Bake cache`);
     }
 
+    _createFarTreeBakePipeline() {
+        if (!this._farTreeSourceCache?.enabled) {
+            this._farTreeBakePipeline = null;
+            this._farTreeBakeBindGroupLayout = null;
+            return;
+        }
+    
+        const heightSampleType = gpuFormatSampleType(
+            this.tileStreamer?.textureFormats?.height || 'r32float'
+        );
+        const tileSampleType = gpuFormatSampleType(
+            this.tileStreamer?.textureFormats?.tile || 'r32float'
+        );
+        const scatterSampleType = gpuFormatSampleType(
+            this.tileStreamer?.textureFormats?.scatter || 'r32float'
+        );
+    
+        const bakeBatchSize = this._farTreeSourceCache.maxBakesPerFrame;
+    
+        this._farTreeBakeParamBuffer = this.device.createBuffer({
+            label: 'FarTree-BakeParams',
+            size: 256,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+    
+        this._farTreeBakeTileBuffer = this.device.createBuffer({
+            label: 'FarTree-BakeTiles',
+            size: Math.max(256, bakeBatchSize * 8 * Uint32Array.BYTES_PER_ELEMENT),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+    
+        this._farTreeBakeBindGroupLayout = this.device.createBindGroupLayout({
+            label: 'FarTree-BakeLayout',
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: heightSampleType, viewDimension: '2d-array' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: tileSampleType, viewDimension: '2d-array' } },
+                { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: scatterSampleType, viewDimension: '2d-array' } },
+                { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ]
+        });
+    
+        const module = this.device.createShaderModule({
+            label: 'FarTree-BakeShader',
+            code: buildFarTreeBakeShader({
+                workgroupSize: this._scatterWorkgroupSize || (this._qualityConfig.scatterWorkgroupSize ?? 64),
+                perLayerCapacity: this._farTreeSourceCache.perLayerCapacity,
+                lodsPerCategory: this.LODS_PER_CATEGORY,
+                assetDefFloats: this.ASSET_DEF_FLOATS,
+                treeCellSize: this._treeConfig.scatter?.cellSize ?? 16.0,
+                treeMaxPerCell: this._treeConfig.scatter?.maxPerCell ?? 4,
+                treeClusterProbability: this._treeConfig.scatter?.clusterProbability ?? 0.95,
+                treeJitterScale: this._treeConfig.scatter?.jitterScale ?? 0.85,
+                treeDensityScale: this._treeConfig.scatter?.densityScale ?? 1.0,
+            }),
+        });
+    
+        this._farTreeBakePipeline = this.device.createComputePipeline({
+            label: 'FarTree-BakePipeline',
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this._farTreeBakeBindGroupLayout]
+            }),
+            compute: { module, entryPoint: 'main' }
+        });
+    }
+
+    _maybeRebuildFarTreeBakeBindGroup() {
+        if (!this._farTreeBakePipeline || !this._farTreeBakeBindGroupLayout || !this._farTreeSourceCache?.enabled) {
+            return;
+        }
+    
+        const arrayTextures = this.tileStreamer.getArrayTextures();
+        const heightGPU = arrayTextures?.height?._gpuTexture?.texture;
+        const tileGPU = arrayTextures?.tile?._gpuTexture?.texture;
+        const scatterGPU = arrayTextures?.scatter?._gpuTexture?.texture;
+        if (!heightGPU || !tileGPU || !scatterGPU) return;
+        if (!this._assetSelectionBuffer?.isReady?.()) return;
+    
+        const instanceBuffer = this._farTreeSourceCache.instanceBuffer;
+    
+        if (
+            this._farTreeBakeBindGroupCache.heightTex === heightGPU &&
+            this._farTreeBakeBindGroupCache.tileTex === tileGPU &&
+            this._farTreeBakeBindGroupCache.scatterTex === scatterGPU &&
+            this._farTreeBakeBindGroupCache.instanceBuffer === instanceBuffer &&
+            this._farTreeBakeBindGroupCache.bindGroup
+        ) {
+            this._farTreeBakeBindGroup = this._farTreeBakeBindGroupCache.bindGroup;
+            return;
+        }
+    
+        const tileMapBuffer = this._assetSelectionBuffer.getTileMapBuffer(this._scatterTreeTileMapKey);
+        if (!tileMapBuffer) return;
+    
+        this._farTreeBakeBindGroup = this.device.createBindGroup({
+            layout: this._farTreeBakeBindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: this._farTreeBakeParamBuffer } },
+                { binding: 1, resource: { buffer: this._farTreeBakeTileBuffer } },
+                { binding: 2, resource: { buffer: instanceBuffer } },
+                { binding: 3, resource: { buffer: this._farTreeSourceCache.counterBuffer } },
+                { binding: 4, resource: heightGPU.createView({ dimension: '2d-array' }) },
+                { binding: 5, resource: tileGPU.createView({ dimension: '2d-array' }) },
+                { binding: 6, resource: scatterGPU.createView({ dimension: '2d-array' }) },
+                { binding: 7, resource: { buffer: this._assetSelectionBuffer.getAssetDefBuffer() } },
+                { binding: 8, resource: { buffer: tileMapBuffer } },
+                { binding: 9, resource: { buffer: this._assetSelectionBuffer.getConfigBuffer() } },
+            ]
+        });
+    
+        this._farTreeBakeBindGroupCache.heightTex = heightGPU;
+        this._farTreeBakeBindGroupCache.tileTex = tileGPU;
+        this._farTreeBakeBindGroupCache.scatterTex = scatterGPU;
+        this._farTreeBakeBindGroupCache.instanceBuffer = instanceBuffer;
+        this._farTreeBakeBindGroupCache.bindGroup = this._farTreeBakeBindGroup;
+    }
     /** @returns {TreeDetailSystem|null} */
     getTreeDetailSystem() {
         return this._treeDetailSystem || null;
@@ -1169,6 +1318,7 @@ await this._leafStreamer.initialize();
     }
 
     dispose() {
+        
         this._treeFarSystem?.dispose();
         this._treeMidSystem?.dispose();
         this._scatterDispatchArgsBuffer?.destroy();
@@ -1250,6 +1400,7 @@ await this._leafStreamer.initialize();
         this._aoBaker?.dispose();    
         this._groundFieldBaker?.dispose();
         this._groundPropCache?.dispose();
+        this._farTreeSourceCache?.dispose();
         this._treeSourceCache?.dispose();
         this._clusterTreeSystem?.dispose();
         this._pool?.dispose();
@@ -1300,6 +1451,7 @@ await this._leafStreamer.initialize();
         this._assetBakePolicy = null;
         this._groundFieldBaker = null;
         this._groundPropCache = null;
+        this._farTreeSourceCache = null;
         this._treeSourceCache = null;
         this._clusterTreeSystem = null;
         this._aoBaker = null;
@@ -1308,20 +1460,70 @@ await this._leafStreamer.initialize();
         
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // Per-frame: compute (scatter + indirect)
-    // ──────────────────────────────────────────────────────────────────────
 
 
-
+    _dispatchFarTreeBakes(commandEncoder) {
+        if (!this._farTreeSourceCache?.enabled) return false;
+        if (!this._farTreeBakePipeline || !this._farTreeBakeBindGroup) return false;
+        if (this._farTreeSourceCache.pendingBakes === 0) return false;
+    
+        const batch = this._farTreeSourceCache.popBakeBatch();
+        if (!batch || batch.length === 0) return false;
+    
+        const data = new Uint32Array(batch.length * 8);
+        for (let i = 0; i < batch.length; i++) {
+            const offset = i * 8;
+            const tile = batch[i];
+            data[offset + 0] = tile.face >>> 0;
+            data[offset + 1] = tile.depth >>> 0;
+            data[offset + 2] = tile.tileX >>> 0;
+            data[offset + 3] = tile.tileY >>> 0;
+            data[offset + 4] = tile.layer >>> 0;
+            data[offset + 5] = tile.flags >>> 0;
+            data[offset + 6] = 0;
+            data[offset + 7] = 0;
+        }
+        this.device.queue.writeBuffer(this._farTreeBakeTileBuffer, 0, data);
+    
+        const paramData = new ArrayBuffer(256);
+        const f32 = new Float32Array(paramData);
+        const u32 = new Uint32Array(paramData);
+        f32[0] = this.planetConfig.origin?.x ?? 0;
+        f32[1] = this.planetConfig.origin?.y ?? 0;
+        f32[2] = this.planetConfig.origin?.z ?? 0;
+        f32[3] = this.planetConfig.radius ?? 0;
+        f32[4] = this.planetConfig.heightScale ?? this.planetConfig.maxHeight ?? 0;
+        f32[5] = this.quadtreeGPU?.faceSize ?? (this.planetConfig.radius * 2);
+        u32[6] = this.engineConfig.seed >>> 0;
+        u32[7] = batch.length >>> 0;
+        this.device.queue.writeBuffer(this._farTreeBakeParamBuffer, 0, paramData);
+    
+        const pass = commandEncoder.beginComputePass({ label: 'FarTree-Bake' });
+        pass.setPipeline(this._farTreeBakePipeline);
+        pass.setBindGroup(0, this._farTreeBakeBindGroup);
+        pass.dispatchWorkgroups(batch.length);
+        pass.end();
+    
+        this._farTreeSourceCache.markBakeBatchSubmitted(batch);
+        return true;
+    }
 update(commandEncoder, camera) {
     if (!this._initialized) return;
     this._frameCount++;
 
+    if ((this._frameCount % 120) === 0 && this._farTreeSourceCache) {
+        Logger.info(
+            `${this._logTag} [FarCache] ` +
+            `selected=${this._farTreeSourceCache.activeLayerCount} ` +
+            `resident=${this._farTreeSourceCache.totalActiveLayerCount} ` +
+            `pending=${this._farTreeSourceCache.pendingBakes}`
+        );
+    }
     if ((this._frameCount % 120) === 1) {
         this._bakedAssetTileCache?.syncFromTileStreamer(this.tileStreamer);
         this._groundPropCache?.syncFromTileCache(this._bakedAssetTileCache, false);
         this._treeSourceCache?.syncFromTileCache(this._bakedAssetTileCache, false);
+        this._farTreeSourceCache?.syncFromTileCache(this._bakedAssetTileCache, false);
         this._clusterTreeSystem?.syncFromTileCache(this._bakedAssetTileCache, false);
         this._seedScatterGroupPolicyMasks();
         this._forceScatter = true;
@@ -1334,6 +1536,7 @@ update(commandEncoder, camera) {
     this._maybeRebuildTreeSourceBakeBindGroup();
     this._maybeRebuildTreeSourceGatherBindGroup();
     this._maybeRebuildIndirectBindGroup();
+    this._maybeRebuildFarTreeBakeBindGroup();
 
     const runtimeScatterReady = this._scatterPipelines.length === 0
         || this._scatterPipelines.every(pass => pass.bindGroup);
@@ -1351,11 +1554,19 @@ update(commandEncoder, camera) {
     this._drainAOCommits();
     this._drainScatterGroupCommits();
     this._treeSourceCache?.refreshVisibleOwnerLayers(this.tileStreamer);
+    this._farTreeSourceCache?.refreshVisibleOwnerLayers(this.tileStreamer);
     this._dispatchScatterGroupMaskBakes(commandEncoder);
     const bakedGroundFieldThisFrame = this._dispatchGroundFieldBakes(commandEncoder);
     const bakedGroundPropsThisFrame = this._dispatchGroundPropBakes(commandEncoder);
     const bakedTreesThisFrame = this._dispatchTreeSourceBakes(commandEncoder);
-    const bakeDrivenScatter = bakedGroundFieldThisFrame || bakedGroundPropsThisFrame || bakedTreesThisFrame;
+    const bakedFarTreesThisFrame = this._dispatchFarTreeBakes(commandEncoder);
+    
+    const bakeDrivenScatter =
+        bakedGroundFieldThisFrame ||
+        bakedGroundPropsThisFrame ||
+        bakedTreesThisFrame ||
+        bakedFarTreesThisFrame;
+
     if (bakeDrivenScatter) {
         this._forceScatter = true;
     }
@@ -1500,6 +1711,7 @@ _drainScatterGroupCommits() {
     this._bakedAssetTileCache?.applyCommitBatch(commits);
     this._groundPropCache?.applyCommitBatch(this._bakedAssetTileCache);
     this._treeSourceCache?.applyCommitBatch(this._bakedAssetTileCache);
+    this._farTreeSourceCache?.applyCommitBatch(this._bakedAssetTileCache);
     this._clusterTreeSystem?.applyCommitBatch(this._bakedAssetTileCache);
     this._scatterGroupActivityDirty = true;
     this._fieldActivityDirty = true;
