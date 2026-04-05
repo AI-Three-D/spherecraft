@@ -335,8 +335,8 @@ export function createEngineConfig() {
           // Near tier now runs 20m farther and crossfades with the mid hull
           // across an 80m handoff window [140, 220].
           near:    { start: 0,    end: 220,  fadeOutWidth: 80 },
-          mid:     { start: 140,  end: 1500, fadeInWidth: 80,  fadeOutWidth: 300 },
-          farTrees:{ start: 800,  end: 2000, fadeInWidth: 400, fadeOutWidth: 300 },
+          mid:     { start: 140,  end: 700, fadeInWidth: 80,  fadeOutWidth: 320 },
+          farTrees:{ start: 500,  end: 4000, fadeInWidth: 200, fadeOutWidth: 300 },
           // Legacy tree far patch tier disabled. Tree rendering now stops
           // at the simplified far hull tier instead of switching to blobs.
           far:     { start: 0,    end: 0,    fadeInWidth: 0,   fadeOutWidth: 0 },

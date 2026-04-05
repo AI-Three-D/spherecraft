@@ -167,29 +167,18 @@ export class FarTreeSourceCache {
         }
     }
 
-    refreshVisibleOwnerLayers(tileStreamer) {
+    refreshVisibleOwnerLayers(_tileStreamer) {
         if (!this._initialized) return;
         this._selectionFrame++;
 
-
-        const visibleTiles =
-            tileStreamer?.getLastVisibleTiles?.()
-            ?? tileStreamer?._lastVisibleTilesList
-            ?? null;
-
         let selectedCount = 0;
-        let exactReadyOwners = 0;
-        let exactPendingOwners = 0;
-        let fallbackReadyOwners = 0;
-        let fallbackPendingOwners = 0;
         let retainedOwners = 0;
         let residentReadyFill = 0;
-        let usedVisibleOwners = false;
 
         const nextLayers = new Uint32Array(this._tilePoolSize);
         const seenLayers = new Set();
 
-        const tryPush = (layer, mode, extendRetention = true) => {
+        const tryPush = (layer, extendRetention = true) => {
             if (!Number.isFinite(layer) || layer < 0 || layer >= this._tilePoolSize) return false;
             const record = this._records[layer] ?? null;
             if (!record?.active || !this._isLayerReady(layer) || seenLayers.has(layer)) return false;
@@ -201,54 +190,20 @@ export class FarTreeSourceCache {
                 this._layerRetainUntil[layer] = this._selectionFrame + this._cfg.selectionHoldFrames;
             }
 
-            if (mode === 'exact') exactReadyOwners++;
-            else if (mode === 'fallback') fallbackReadyOwners++;
-            else if (mode === 'retained') retainedOwners++;
-
             return true;
         };
 
-        if (Array.isArray(visibleTiles) && visibleTiles.length > 0 && typeof tileStreamer?.getLoadedLayer === 'function') {
-            usedVisibleOwners = true;
-
-            for (const tile of visibleTiles) {
-                if (!tile) continue;
-
-                const exactLayer = tileStreamer.getLoadedLayer(tile.face, tile.depth, tile.x, tile.y);
-                if (this._isLayerActive(exactLayer)) {
-                    if (tryPush(exactLayer, 'exact')) continue;
-                    exactPendingOwners++;
-                }
-
-                let depth = tile.depth;
-                let x = tile.x;
-                let y = tile.y;
-                while (depth > 0) {
-                    depth--;
-                    x >>= 1;
-                    y >>= 1;
-                    const fallbackLayer = tileStreamer.getLoadedLayer(tile.face, depth, x, y);
-                    if (!this._isLayerActive(fallbackLayer)) continue;
-                    if (tryPush(fallbackLayer, 'fallback')) break;
-                    fallbackPendingOwners++;
-                }
-            }
-        }
-
-        if (selectedCount === 0) {
-            usedVisibleOwners = false;
-            selectedCount = this._appendReadyResidentLayers(nextLayers, selectedCount, seenLayers);
-        }
-
-        if (this._cfg.selectionHoldFrames > 0 && this._activeLayerCount > 0 && selectedCount < this._tilePoolSize) {
+        // Carry forward previously selected layers that are still within their hold window.
+        if (this._cfg.selectionHoldFrames > 0 && this._activeLayerCount > 0) {
             const previousLayers = this._activeLayersCPU.subarray(0, this._activeLayerCount);
             for (let i = 0; i < previousLayers.length && selectedCount < this._tilePoolSize; i++) {
                 const layer = previousLayers[i] >>> 0;
                 if (this._layerRetainUntil[layer] < this._selectionFrame) continue;
-                tryPush(layer, 'retained', false);
+                if (tryPush(layer, false)) retainedOwners++;
             }
         }
 
+        // Fill remaining slots from all ready resident layers (distance-stable).
         const selectedBeforeResidentFill = selectedCount;
         selectedCount = this._appendReadyResidentLayers(nextLayers, selectedCount, seenLayers);
         residentReadyFill = selectedCount - selectedBeforeResidentFill;
@@ -271,11 +226,8 @@ export class FarTreeSourceCache {
         }
 
         this._visibleOwnerRefreshCount++;
-        const mode = usedVisibleOwners ? 'stableResidentFromVisible' : 'stableResident';
         const logLine =
-            `${mode} selected=${selectedCount}/${this._allActiveLayerCount} ` +
-            `exactReady=${exactReadyOwners} exactPending=${exactPendingOwners} ` +
-            `fallbackReady=${fallbackReadyOwners} fallbackPending=${fallbackPendingOwners} ` +
+            `distResident selected=${selectedCount}/${this._allActiveLayerCount} ` +
             `retained=${retainedOwners} residentFill=${residentReadyFill} ` +
             `pendingBakes=${this.pendingBakes}`;
 
