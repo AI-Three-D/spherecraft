@@ -49,10 +49,6 @@ function resolveMidTierConfig(midConfigOverride, midTierConfig) {
             ...base.hullFrag,
             ...(override.hullFrag || {}),
         },
-        trunk: {
-            ...base.trunk,
-            ...(override.trunk || {}),
-        },
     };
 }
 
@@ -97,6 +93,42 @@ export class TreeFarSystem {
             ...(this._configOverride.speciesProfiles || {}),
         };
         this.maxTrees = this._cfg.maxTrees;
+        // Far clone starts from mid-tier logic but should be much cheaper.
+        // Keep the producer/tracker path the same; only simplify render cost.
+        this._cfg.hull = {
+            ...this._cfg.hull,
+            lonSegments: Math.min(this._cfg.hull.lonSegments ?? 12, 6),
+            latSegments: Math.min(this._cfg.hull.latSegments ?? 8, 4),
+            vsAnchorSamples: Math.min(this._cfg.hull.vsAnchorSamples ?? 8, 2),
+            lumpNearScale: 0.35,
+            lumpFarScale: 0.15,
+            lumpNearDistance: 600.0,
+            lumpFarDistance: 1400.0,
+            inflation: 0.92,
+            shrinkWrap: 0.30,
+            gapShrink: 0.82,
+            verticalBias: 1.05,
+            topShrinkStart: 0.72,
+            topShrinkStrength: 0.18,
+        };
+
+        this._cfg.hullFrag = {
+            ...this._cfg.hullFrag,
+            baseCoverageNear: 0.78,
+            baseCoverageFar: 0.88,
+            subbandSplit: 900.0,
+            subbandBlend: 240.0,
+            subbandFarDamp: 0.85,
+            coverageNoiseAmp: 0.10,
+            coverageNoiseScale: 1.6,
+            macroGapStrength: 0.06,
+            edgeNoiseAmp: 0.06,
+            edgeBaseThin: 0.04,
+            edgeRimBoost: 0.04,
+            bottomBreak: 0.03,
+            bumpStrength: 0.05,
+            brightness: 1.0,
+        };
 
         // ── GPU resources ──────────────────────────────────────────────────
         this._treeBuffer = null;
@@ -106,11 +138,9 @@ export class TreeFarSystem {
         this._assetSpeciesCount = 0;
 
         this._trackerDispatchArgsBuffer = null;
-        this._trunkIndirectBuffer = null;
         this._hullIndirectBuffer = null;
 
         this._hullGeo = null;
-        this._trunkGeo = null;
         this._texBaker = null;
 
         // ── Pipelines ──────────────────────────────────────────────────────
@@ -126,11 +156,6 @@ export class TreeFarSystem {
 
         this._indirectPipeline = null;
         this._indirectBG = null;
-
-        this._trunkPipeline = null;
-        this._trunkBGLs = [];
-        this._trunkBGs = [];
-        this._trunkBGsDirty = true;
 
         this._hullPipeline = null;
         this._hullBGLs = [];
@@ -195,15 +220,14 @@ export class TreeFarSystem {
         };
 
         if (options.rebuildGeometry) {
-            for (const geo of [this._hullGeo, this._trunkGeo]) {
-                if (!geo) continue;
+            const geo = this._hullGeo;
+            if (geo) {
                 geo.posBuffer?.destroy();
                 geo.normBuffer?.destroy();
                 geo.uvBuffer?.destroy();
                 geo.idxBuffer?.destroy();
             }
             this._hullGeo = null;
-            this._trunkGeo = null;
             this._buildGeometry();
         }
 
@@ -214,7 +238,6 @@ export class TreeFarSystem {
 
         this._trackerBGDirty = true;
         this._trackerDispatchArgsBGDirty = true;
-        this._trunkBGsDirty = true;
         this._hullBGsDirty = true;
 
         Logger.info(`[TreeFarSystem] Pipelines rebuilt${options.rebuildGeometry ? ' (with geometry)' : ''}`);
@@ -298,12 +321,6 @@ export class TreeFarSystem {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
         });
 
-        this._trunkIndirectBuffer = this.device.createBuffer({
-            label: 'Mid-TrunkIndirect',
-            size: Math.max(256, 5 * 4),
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-        });
-
         this._hullIndirectBuffer = this.device.createBuffer({
             label: 'Mid-HullIndirect',
             size: Math.max(256, 5 * 4),
@@ -313,14 +330,8 @@ export class TreeFarSystem {
 
     _buildGeometry() {
         const h = this._cfg.hull;
-        const t = this._cfg.trunk;
 
         const hull = MidNearGeometryBuilder.buildCanopyHull(h.lonSegments, h.latSegments);
-        const trunk = MidNearGeometryBuilder.buildTrunkCylinder({
-            taperTop: t.taperTop,
-            embedFrac: 0.08,
-        });
-
         const mkVB = (data, label) => {
             const b = this.device.createBuffer({
                 label, size: Math.max(16, data.byteLength),
@@ -349,14 +360,6 @@ export class TreeFarSystem {
             uvBuffer: mkVB(hull.uvs, 'MidHull-UV'),
             idxBuffer: mkIB(hull.indices, 'MidHull-Idx'),
             idxCount: hull.indexCount,
-        };
-
-        this._trunkGeo = {
-            posBuffer: mkVB(trunk.positions, 'MidTrunk-Pos'),
-            normBuffer: mkVB(trunk.normals, 'MidTrunk-Norm'),
-            uvBuffer: mkVB(trunk.uvs, 'MidTrunk-UV'),
-            idxBuffer: mkIB(trunk.indices, 'MidTrunk-Idx'),
-            idxCount: trunk.indexCount,
         };
     }
 
@@ -465,22 +468,14 @@ export class TreeFarSystem {
     _createIndirectPipeline() {
         const code = /* wgsl */`
             const HULL_INDEX_COUNT: u32 = ${this._hullGeo.idxCount}u;
-            const TRUNK_INDEX_COUNT: u32 = ${this._trunkGeo.idxCount}u;
             const MAX_TREES: u32 = ${this.maxTrees}u;
 
             @group(0) @binding(0) var<storage, read>       treeCount: array<u32>;
-            @group(0) @binding(1) var<storage, read_write> trunkIndirect: array<u32>;
-            @group(0) @binding(2) var<storage, read_write> hullIndirect: array<u32>;
+            @group(0) @binding(1) var<storage, read_write> hullIndirect: array<u32>;
 
             @compute @workgroup_size(1)
             fn main() {
                 let tc = min(treeCount[0], MAX_TREES);
-
-                trunkIndirect[0] = TRUNK_INDEX_COUNT;
-                trunkIndirect[1] = tc;
-                trunkIndirect[2] = 0u;
-                trunkIndirect[3] = 0u;
-                trunkIndirect[4] = 0u;
 
                 hullIndirect[0] = HULL_INDEX_COUNT;
                 hullIndirect[1] = tc;
@@ -489,26 +484,24 @@ export class TreeFarSystem {
                 hullIndirect[4] = 0u;
             }
         `;
-        const mod = this.device.createShaderModule({ label: 'MidIndirect-SM', code });
+        const mod = this.device.createShaderModule({ label: 'FarIndirect-SM', code });
         const bgl = this.device.createBindGroupLayout({
-            label: 'MidIndirect-BGL',
+            label: 'FarIndirect-BGL',
             entries: [
                 { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
             ],
         });
         this._indirectPipeline = this.device.createComputePipeline({
-            label: 'MidIndirect-Pipeline',
+            label: 'FarIndirect-Pipeline',
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
             compute: { module: mod, entryPoint: 'main' },
         });
         this._indirectBG = this.device.createBindGroup({
-            label: 'MidIndirect-BG', layout: bgl,
+            label: 'FarIndirect-BG', layout: bgl,
             entries: [
                 { binding: 0, resource: { buffer: this._treeCountBuffer } },
-                { binding: 1, resource: { buffer: this._trunkIndirectBuffer } },
-                { binding: 2, resource: { buffer: this._hullIndirectBuffer } },
+                { binding: 1, resource: { buffer: this._hullIndirectBuffer } },
             ],
         });
     }
@@ -533,80 +526,49 @@ export class TreeFarSystem {
             { arrayStride: 8,  stepMode: 'vertex', attributes: [{ shaderLocation: 2, offset: 0, format: 'float32x2' }] },
         ];
 
-        // ── Trunk ──────────────────────────────────────────────────────────
-        {
-            const vsMod = this.device.createShaderModule({
-                label: 'MidTrunk-VS',
-                code: buildMidTrunkVertexShader({
-                    visibleHeightFrac: this._cfg.trunk.visibleHeightFrac,
-                    baseRadiusFrac: this._cfg.trunk.baseRadiusFrac,
-                }),
-            });
-            const fsMod = this.device.createShaderModule({
-                label: 'MidTrunk-FS',
-                code: buildMidTrunkFragmentShader({
-                    ...fadeBounds,
-                    trunkFadeEnd: this._cfg.trunk.fadeEnd,
-                }),
-            });
-
-            const g0 = this.device.createBindGroupLayout({
-                label: 'MidTrunk-G0',
-                entries: [
-                    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-                    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-                ],
-            });
-            const g1 = this.device.createBindGroupLayout({
-                label: 'MidTrunk-G1',
-                entries: [
-                    { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                ],
-            });
-            this._trunkBGLs = [g0, g1];
-
-            this._trunkPipeline = this.device.createRenderPipeline({
-                label: 'MidTrunk-Pipeline',
-                layout: this.device.createPipelineLayout({ bindGroupLayouts: this._trunkBGLs }),
-                vertex: { module: vsMod, entryPoint: 'main', buffers: vertexBuffers },
-                fragment: { module: fsMod, entryPoint: 'main', targets: [{ format: canvasFormat }] },
-                primitive: triListCCWBack,
-                depthStencil: depthLess,
-            });
-        }
-
         // ── Hull ───────────────────────────────────────────────────────────
         {
+            let farHullVS = buildMidHullVertexShader({
+                vsAnchorSamples: this._cfg.hull.vsAnchorSamples,
+                inflation: this._cfg.hull.inflation,
+                shrinkWrap: this._cfg.hull.shrinkWrap,
+                gapShrink: this._cfg.hull.gapShrink,
+                verticalBias: this._cfg.hull.verticalBias,
+                topShrinkStart: this._cfg.hull.topShrinkStart,
+                topShrinkStrength: this._cfg.hull.topShrinkStrength,
+                lumpNearScale: this._cfg.hull.lumpNearScale,
+                lumpFarScale: this._cfg.hull.lumpFarScale,
+                lumpNearDistance: this._cfg.hull.lumpNearDistance,
+                lumpFarDistance: this._cfg.hull.lumpFarDistance,
+            });
+
+            // DEBUG: force far-tier canopy color to magenta
+            farHullVS = farHullVS.replace(
+                'out.vColor = vec3<f32>(tree.foliageR, tree.foliageG, tree.foliageB);',
+                'out.vColor = vec3<f32>(1.0, 0.0, 1.0);'
+            );
+
             const vsMod = this.device.createShaderModule({
-                label: 'MidHull-VS',
-                code: buildMidHullVertexShader({
-                    vsAnchorSamples: this._cfg.hull.vsAnchorSamples,
-                    inflation: this._cfg.hull.inflation,
-                    shrinkWrap: this._cfg.hull.shrinkWrap,
-                    gapShrink: this._cfg.hull.gapShrink,
-                    verticalBias: this._cfg.hull.verticalBias,
-                    topShrinkStart: this._cfg.hull.topShrinkStart,
-                    topShrinkStrength: this._cfg.hull.topShrinkStrength,
-                    lumpNearScale: this._cfg.hull.lumpNearScale,
-                    lumpFarScale: this._cfg.hull.lumpFarScale,
-                    lumpNearDistance: this._cfg.hull.lumpNearDistance,
-                    lumpFarDistance: this._cfg.hull.lumpFarDistance,
-                }),
+                label: 'FarHull-VS',
+                code: farHullVS,
             });
+
+            let farHullFS = buildMidHullFragmentShader({
+                ...fadeBounds,
+                ...this._cfg.hullFrag,
+                enableCanopyTexture: hasTex,
+            });
+
+            farHullFS = farHullFS.replace(
+                'return vec4<f32>(color, 1.0);',
+                'color = mix(color, vec3<f32>(1.0, 0.0, 1.0), 0.85);\n    return vec4<f32>(color, 1.0);'
+            );
+
             const fsMod = this.device.createShaderModule({
-                label: 'MidHull-FS',
-                code: buildMidHullFragmentShader({
-                    ...fadeBounds,
-                    // Spread the whole hullFrag block. New Tier 1 fields
-                    // (baseCoverageNear/Far, subband*, macroGap*, edge*, bottomBreak)
-                    // flow through automatically. Legacy `baseCoverage` still
-                    // works via the fallback in the shader builder.
-                    ...this._cfg.hullFrag,
-                    // Keep this last — depends on runtime texture availability,
-                    // not config. Must not be overridable by hullFrag.
-                    enableCanopyTexture: hasTex,
-                }),
+                label: 'FarHull-FS',
+                code: farHullFS,
             });
+
             const g0 = this.device.createBindGroupLayout({
                 label: 'MidHull-G0',
                 entries: [
@@ -715,27 +677,9 @@ export class TreeFarSystem {
     }
 
     _maybeRebuildRenderBGs() {
-        if (!this._trunkBGsDirty && !this._hullBGsDirty) return;
+        if (!this._hullBGsDirty) return;
         const s = this.streamer;
         if (!s._uniformBuffer || !s._fragUniformBuffer) return;
-
-        if (this._trunkBGsDirty) {
-            this._trunkBGs = [
-                this.device.createBindGroup({
-                    layout: this._trunkBGLs[0],
-                    entries: [
-                        { binding: 0, resource: { buffer: s._uniformBuffer } },
-                        { binding: 1, resource: { buffer: this._treeBuffer } },
-                    ],
-                }),
-                this.device.createBindGroup({
-                    layout: this._trunkBGLs[1],
-                    entries: [{ binding: 0, resource: { buffer: s._fragUniformBuffer } }],
-                }),
-            ];
-            this._trunkBGsDirty = false;
-        }
-
         if (this._hullBGsDirty) {
             const templateLib = this.streamer._templateLibrary;
             const anchorBuffer = templateLib?.getAnchorBuffer?.();
@@ -802,7 +746,7 @@ export class TreeFarSystem {
 
         // Pass 3: indirect draw args
         {
-            const pass = commandEncoder.beginComputePass({ label: 'MidIndirect' });
+            const pass = commandEncoder.beginComputePass({ label: 'FarIndirect' });
             pass.setPipeline(this._indirectPipeline);
             pass.setBindGroup(0, this._indirectBG);
             pass.dispatchWorkgroups(1);
@@ -816,17 +760,7 @@ export class TreeFarSystem {
         if (!this._initialized || !this._enabled || !encoder) return;
 
         this._maybeRebuildRenderBGs();
-        if (this._trunkBGs.length === 0 || this._hullBGs.length === 0) return;
-
-        // Trunk before hull: hull occludes upper trunk via depth.
-        encoder.setPipeline(this._trunkPipeline);
-        encoder.setBindGroup(0, this._trunkBGs[0]);
-        encoder.setBindGroup(1, this._trunkBGs[1]);
-        encoder.setVertexBuffer(0, this._trunkGeo.posBuffer);
-        encoder.setVertexBuffer(1, this._trunkGeo.normBuffer);
-        encoder.setVertexBuffer(2, this._trunkGeo.uvBuffer);
-        encoder.setIndexBuffer(this._trunkGeo.idxBuffer, 'uint16');
-        encoder.drawIndexedIndirect(this._trunkIndirectBuffer, 0);
+        if (this._hullBGs.length === 0) return;
 
         encoder.setPipeline(this._hullPipeline);
         encoder.setBindGroup(0, this._hullBGs[0]);
@@ -892,15 +826,15 @@ export class TreeFarSystem {
         for (const b of [
             this._treeBuffer, this._treeCountBuffer, this._trackerParamBuffer,
             this._assetSpeciesBuffer, this._trackerDispatchArgsBuffer,
-            this._trunkIndirectBuffer, this._hullIndirectBuffer, this._countReadbackBuffer,
+            this._hullIndirectBuffer, this._countReadbackBuffer,
         ]) b?.destroy();
-        for (const geo of [this._hullGeo, this._trunkGeo]) {
-            if (!geo) continue;
+        const geo = this._hullGeo;
+        if (geo) {
             geo.posBuffer?.destroy();
             geo.normBuffer?.destroy();
             geo.uvBuffer?.destroy();
             geo.idxBuffer?.destroy();
-        }
+        }        
         this._initialized = false;
     }
 }
