@@ -14,6 +14,10 @@ import {
 
 const FAR_TREE_RENDER_BYTES = 80;
 
+// Set to true to enable all far-tier diagnostic logging.
+const FAR_TREE_DBG_ENABLED = false;
+const farDbg = (msg) => { if (FAR_TREE_DBG_ENABLED) Logger.warn(`[TreeFarSystem] ${msg}`); };
+
 
 function resolveMidTierConfig(midConfigOverride, midTierConfig) {
     const base = JSON.parse(JSON.stringify(midTierConfig));
@@ -198,9 +202,8 @@ export class TreeFarSystem {
     async initialize() {
         if (this._initialized) return;
 
-        // ── DBG: initialize entry ───────────────────────────────────────────
-        Logger.warn(
-            `[TreeFarSystem] initialize START — ` +
+        farDbg(
+            `initialize START — ` +
             `range=${JSON.stringify(this._range)} ` +
             `maxTrees=${this.maxTrees} ` +
             `hull=${this._cfg.hull.lonSegments}×${this._cfg.hull.latSegments} ` +
@@ -209,30 +212,29 @@ export class TreeFarSystem {
             `farSourceCache.enabled=${this.streamer._farTreeSourceCache?.enabled} ` +
             `farSourceCache.initialized=${this.streamer._farTreeSourceCache?._initialized}`
         );
-        // ───────────────────────────────────────────────────────────────────
 
         this._sourceCache = this.streamer._farTreeSourceCache;
 
         this._createBuffers();
-        Logger.warn(`[TreeFarSystem] initialize: buffers created — treeBuffer=${!!this._treeBuffer} treeCountBuffer=${!!this._treeCountBuffer} indirectBuffer=${!!this._hullIndirectBuffer}`);
+        farDbg(`initialize: buffers created — treeBuffer=${!!this._treeBuffer} treeCountBuffer=${!!this._treeCountBuffer} indirectBuffer=${!!this._hullIndirectBuffer}`);
 
         this._buildGeometry();
-        Logger.warn(`[TreeFarSystem] initialize: geometry built — idxCount=${this._hullGeo?.idxCount} posBuffer=${!!this._hullGeo?.posBuffer}`);
+        farDbg(`initialize: geometry built — idxCount=${this._hullGeo?.idxCount} posBuffer=${!!this._hullGeo?.posBuffer}`);
 
         await this._bakeTextures();
-        Logger.warn(`[TreeFarSystem] initialize: textures baked — texBaker.isReady=${this._texBaker?.isReady?.()}`);
+        farDbg(`initialize: textures baked — texBaker.isReady=${this._texBaker?.isReady?.()}`);
 
         this._createGatherPipeline();
-        Logger.warn(`[TreeFarSystem] initialize: gather pipeline=${!!this._gatherPipeline} BGL=${!!this._gatherBGL}`);
+        farDbg(`initialize: gather pipeline=${!!this._gatherPipeline} BGL=${!!this._gatherBGL}`);
 
         this._createIndirectPipeline();
-        Logger.warn(`[TreeFarSystem] initialize: indirect pipeline=${!!this._indirectPipeline} BG=${!!this._indirectBG}`);
+        farDbg(`initialize: indirect pipeline=${!!this._indirectPipeline} BG=${!!this._indirectBG}`);
 
         this._createRenderPipelines();
-        Logger.warn(`[TreeFarSystem] initialize: hull render pipeline=${!!this._hullPipeline} hasTex=${this._hasTex}`);
+        farDbg(`initialize: hull render pipeline=${!!this._hullPipeline} hasTex=${this._hasTex}`);
 
         this._initialized = true;
-        Logger.warn(`[TreeFarSystem] initialize COMPLETE`);
+        farDbg(`initialize COMPLETE`);
     }
 
     rebuildPipelines(options = {}) {
@@ -281,23 +283,21 @@ export class TreeFarSystem {
     }
 
     _createGatherPipeline() {
-        // ── DBG ─────────────────────────────────────────────────────────────
-        Logger.warn(
-            `[TreeFarSystem] _createGatherPipeline — ` +
+        farDbg(
+            `_createGatherPipeline — ` +
             `sourceCache=${!!this._sourceCache} ` +
             `sourceCache.enabled=${this._sourceCache?.enabled} ` +
             `sourceCache.initialized=${this._sourceCache?._initialized} ` +
             `sourceCache.perLayerCapacity=${this._sourceCache?.perLayerCapacity}`
         );
-        // ───────────────────────────────────────────────────────────────────
         if (!this._sourceCache?.enabled) {
-            Logger.warn(`[TreeFarSystem] _createGatherPipeline: SKIPPED — sourceCache not enabled`);
+            farDbg(`_createGatherPipeline: SKIPPED — sourceCache not enabled`);
             this._gatherPipeline = null;
             this._gatherBGL = null;
             this._gatherBG = null;
             return;
         }
-        Logger.warn(`[TreeFarSystem] _createGatherPipeline: creating gather pipeline (perLayerCapacity=${this._sourceCache.perLayerCapacity})`);
+        farDbg(`_createGatherPipeline: creating pipeline (perLayerCapacity=${this._sourceCache.perLayerCapacity})`);
     
         const WORKGROUP_SIZE = 64;
     
@@ -787,25 +787,20 @@ export class TreeFarSystem {
 
 
     _maybeRebuildRenderBGs() {
-        // ── DBG ─────────────────────────────────────────────────────────────
-        if (this._hullBGsDirty) {
+        if (FAR_TREE_DBG_ENABLED && this._hullBGsDirty) {
             const s = this.streamer;
             const templateLib = s._templateLibrary;
             const anchorBuffer = templateLib?.getAnchorBuffer?.();
-            const texView = this._hasTex ? this._texBaker?.getTextureView?.() : '(tex disabled)';
-            const sampler = this._hasTex ? this._texBaker?.getSampler?.() : '(tex disabled)';
-            Logger.warn(
-                `[TreeFarSystem] _maybeRebuildRenderBGs — ` +
+            farDbg(
+                `_maybeRebuildRenderBGs — ` +
                 `uniformBuffer=${!!s._uniformBuffer} fragUniformBuffer=${!!s._fragUniformBuffer} ` +
                 `templateLib=${!!templateLib} anchorBuffer=${!!anchorBuffer} ` +
-                `hasTex=${this._hasTex} texView=${!!texView} sampler=${!!sampler} ` +
-                `hullBGLs.length=${this._hullBGLs.length} treeBuffer=${!!this._treeBuffer}`
+                `hasTex=${this._hasTex} hullBGLs.length=${this._hullBGLs.length} treeBuffer=${!!this._treeBuffer}`
             );
             if (!anchorBuffer) {
-                Logger.warn(`[TreeFarSystem] _maybeRebuildRenderBGs: BLOCKED — anchorBuffer is null (templateLibrary may not have uploaded GPU data yet)`);
+                farDbg(`_maybeRebuildRenderBGs: BLOCKED — anchorBuffer null (templateLibrary GPU upload not done yet)`);
             }
         }
-        // ───────────────────────────────────────────────────────────────────
         if (!this._hullBGsDirty) return;
         const s = this.streamer;
         if (!s._uniformBuffer || !s._fragUniformBuffer) return;
@@ -838,10 +833,9 @@ export class TreeFarSystem {
     }
 
     _maybeRebuildGatherBindGroup() {
-        // ── DBG ─────────────────────────────────────────────────────────────
-        if (this._gatherBGDirty) {
-            Logger.warn(
-                `[TreeFarSystem] _maybeRebuildGatherBindGroup — dirty=true ` +
+        if (FAR_TREE_DBG_ENABLED && this._gatherBGDirty) {
+            farDbg(
+                `_maybeRebuildGatherBindGroup — dirty=true ` +
                 `sourceCache.enabled=${this._sourceCache?.enabled} ` +
                 `gatherBGL=${!!this._gatherBGL} ` +
                 `gatherParamBuffer=${!!this._gatherParamBuffer} ` +
@@ -851,10 +845,9 @@ export class TreeFarSystem {
                 `treeBuffer=${!!this._treeBuffer} treeCountBuffer=${!!this._treeCountBuffer}`
             );
         }
-        // ───────────────────────────────────────────────────────────────────
         if (!this._gatherBGDirty) return;
         if (!this._sourceCache?.enabled) {
-            Logger.warn(`[TreeFarSystem] _maybeRebuildGatherBindGroup: BLOCKED — sourceCache not enabled`);
+            farDbg(`_maybeRebuildGatherBindGroup: BLOCKED — sourceCache not enabled`);
             return;
         }
 
@@ -875,38 +868,35 @@ export class TreeFarSystem {
     update(commandEncoder, camera) {
         this._frameCount++;
 
-        // ── DBG: full update state every N frames ────────────────────────────
-        const dbgLog = this._frameCount === 1 || this._frameCount === 2 || this._frameCount === 10 || (this._frameCount % 120) === 0;
-        if (dbgLog) {
-            const sc = this._sourceCache;
-            const camPos = this.streamer?.uniformManager?.camera?.position || camera?.position;
-            const r = this._range || {};
-            const fadeInEnd = (r.start ?? 0) + (r.fadeInWidth ?? 0);
-            const fadeOutStart = (r.end ?? 0) - (r.fadeOutWidth ?? 0);
-            Logger.warn(
-                `[TreeFarSystem] UPDATE frame=${this._frameCount} ──────────────────────\n` +
-                `  initialized=${this._initialized} enabled=${this._enabled}\n` +
-                `  range: start=${r.start} end=${r.end} fadeIn=[${r.start}..${fadeInEnd}] fadeOut=[${fadeOutStart}..${r.end}]\n` +
-                `  maxTrees=${this.maxTrees}\n` +
-                `  sourceCache: ${sc ? `enabled=${sc.enabled} initialized=${sc._initialized} activeLayerCount=${sc.activeLayerCount} allActiveLayers=${sc.totalActiveLayerCount} pendingBakes=${sc.pendingBakes}` : 'NULL'}\n` +
-                `  pipelines: gatherPipeline=${!!this._gatherPipeline} gatherBGL=${!!this._gatherBGL} gatherBG=${!!this._gatherBG} gatherBGDirty=${this._gatherBGDirty}\n` +
-                `  pipelines: indirectPipeline=${!!this._indirectPipeline} indirectBG=${!!this._indirectBG}\n` +
-                `  buffers: treeBuffer=${!!this._treeBuffer} treeCountBuffer=${!!this._treeCountBuffer} gatherParamBuffer=${!!this._gatherParamBuffer} hullIndirectBuffer=${!!this._hullIndirectBuffer}\n` +
-                `  camera: ${camPos ? `x=${camPos.x?.toFixed(1)} y=${camPos.y?.toFixed(1)} z=${camPos.z?.toFixed(1)}` : 'NULL'}`
-            );
+        if (FAR_TREE_DBG_ENABLED) {
+            const dbgLog = this._frameCount === 1 || this._frameCount === 2 || this._frameCount === 10 || (this._frameCount % 120) === 0;
+            if (dbgLog) {
+                const sc = this._sourceCache;
+                const camPos = this.streamer?.uniformManager?.camera?.position || camera?.position;
+                const r = this._range || {};
+                farDbg(
+                    `UPDATE frame=${this._frameCount}\n` +
+                    `  initialized=${this._initialized} enabled=${this._enabled}\n` +
+                    `  range: start=${r.start} end=${r.end} fadeInWidth=${r.fadeInWidth} fadeOutWidth=${r.fadeOutWidth}\n` +
+                    `  maxTrees=${this.maxTrees}\n` +
+                    `  sourceCache: ${sc ? `enabled=${sc.enabled} initialized=${sc._initialized} activeLayerCount=${sc.activeLayerCount} allActiveLayers=${sc.totalActiveLayerCount} pendingBakes=${sc.pendingBakes}` : 'NULL'}\n` +
+                    `  pipelines: gatherPipeline=${!!this._gatherPipeline} gatherBG=${!!this._gatherBG} gatherBGDirty=${this._gatherBGDirty} indirectPipeline=${!!this._indirectPipeline} indirectBG=${!!this._indirectBG}\n` +
+                    `  buffers: treeBuffer=${!!this._treeBuffer} treeCountBuffer=${!!this._treeCountBuffer} gatherParamBuffer=${!!this._gatherParamBuffer} hullIndirectBuffer=${!!this._hullIndirectBuffer}\n` +
+                    `  camera: ${camPos ? `x=${camPos.x?.toFixed(1)} y=${camPos.y?.toFixed(1)} z=${camPos.z?.toFixed(1)}` : 'NULL'}`
+                );
+            }
         }
-        // ───────────────────────────────────────────────────────────────────
 
         if (!this._initialized || !this._enabled || !this._sourceCache?.enabled) {
-            if (dbgLog) Logger.warn(`[TreeFarSystem] UPDATE: early exit — initialized=${this._initialized} enabled=${this._enabled} sourceCache.enabled=${this._sourceCache?.enabled}`);
+            farDbg(`UPDATE: early exit — initialized=${this._initialized} enabled=${this._enabled} sourceCache.enabled=${this._sourceCache?.enabled}`);
             return;
         }
 
         this._updateGatherParams(camera);
         this._maybeRebuildGatherBindGroup();
         if (!this._gatherPipeline || !this._gatherBG || !this._indirectPipeline || !this._indirectBG) {
-            if (dbgLog) Logger.warn(
-                `[TreeFarSystem] UPDATE: BLOCKED — ` +
+            farDbg(
+                `UPDATE: BLOCKED — ` +
                 `gatherPipeline=${!!this._gatherPipeline} gatherBG=${!!this._gatherBG} ` +
                 `indirectPipeline=${!!this._indirectPipeline} indirectBG=${!!this._indirectBG}`
             );
@@ -916,14 +906,14 @@ export class TreeFarSystem {
 
         const layerCount = this._sourceCache.activeLayerCount;
         if (layerCount > 0) {
-            if (dbgLog) Logger.warn(`[TreeFarSystem] UPDATE: dispatching gather — workgroups=${layerCount}`);
+            farDbg(`UPDATE: dispatching gather — workgroups=${layerCount}`);
             const pass = commandEncoder.beginComputePass({ label: 'FarTree-Gather' });
             pass.setPipeline(this._gatherPipeline);
             pass.setBindGroup(0, this._gatherBG);
             pass.dispatchWorkgroups(layerCount);
             pass.end();
         } else {
-            if (dbgLog) Logger.warn(`[TreeFarSystem] UPDATE: ⚠ activeLayerCount=0 — gather skipped, trees=0`);
+            farDbg(`UPDATE: activeLayerCount=0 — gather skipped, trees=0`);
         }
 
         {
@@ -934,34 +924,35 @@ export class TreeFarSystem {
             pass.end();
         }
 
-        // ── DBG: GPU readback — kick existing, queue new ─────────────────────
-        this._queueCountReadback(commandEncoder);
-        this._kickCountReadback();
-        // ───────────────────────────────────────────────────────────────────
+        if (FAR_TREE_DBG_ENABLED) {
+            // Kick first, then queue — kick resolves the previous pending map
+            // before we try to copy into the buffer again this frame.
+            this._kickCountReadback();
+            this._queueCountReadback(commandEncoder);
+        }
     }
 
     render(encoder) {
-        // ── DBG: full render state every N frames ────────────────────────────
-        const dbgRenderLog = this._frameCount === 1 || this._frameCount === 2 || this._frameCount === 10 || (this._frameCount % 120) === 0;
-        if (dbgRenderLog) {
-            const s = this.streamer;
-            const anchorBuffer = s._templateLibrary?.getAnchorBuffer?.();
-            const geo = this._hullGeo;
-            Logger.warn(
-                `[TreeFarSystem] RENDER frame=${this._frameCount} ──────────────────────\n` +
-                `  initialized=${this._initialized} enabled=${this._enabled} encoder=${!!encoder}\n` +
-                `  hullPipeline=${!!this._hullPipeline} hullGeo=${!!geo}\n` +
-                `  geo: idxCount=${geo?.idxCount} posBuffer=${!!geo?.posBuffer} normBuffer=${!!geo?.normBuffer} uvBuffer=${!!geo?.uvBuffer} canopyIdBuffer=${!!geo?.canopyIdBuffer} idxBuffer=${!!geo?.idxBuffer}\n` +
-                `  hullBGs.length=${this._hullBGs.length} hullBGsDirty=${this._hullBGsDirty} hullBGLs.length=${this._hullBGLs.length}\n` +
-                `  streamer: uniformBuffer=${!!s._uniformBuffer} fragUniformBuffer=${!!s._fragUniformBuffer}\n` +
-                `  anchorBuffer=${!!anchorBuffer} hasTex=${this._hasTex}\n` +
-                `  hullIndirectBuffer=${!!this._hullIndirectBuffer}`
-            );
-            if (this._hullBGs.length === 0 && this._hullBGsDirty) {
-                Logger.warn(`[TreeFarSystem] RENDER: ⚠ hullBGs empty — _maybeRebuildRenderBGs is blocked (check anchorBuffer / uniformBuffer above)`);
+        if (FAR_TREE_DBG_ENABLED) {
+            const dbgRenderLog = this._frameCount === 1 || this._frameCount === 2 || this._frameCount === 10 || (this._frameCount % 120) === 0;
+            if (dbgRenderLog) {
+                const s = this.streamer;
+                const anchorBuffer = s._templateLibrary?.getAnchorBuffer?.();
+                const geo = this._hullGeo;
+                farDbg(
+                    `RENDER frame=${this._frameCount}\n` +
+                    `  initialized=${this._initialized} enabled=${this._enabled} encoder=${!!encoder}\n` +
+                    `  hullPipeline=${!!this._hullPipeline} hullGeo=${!!geo}\n` +
+                    `  geo: idxCount=${geo?.idxCount} posBuffer=${!!geo?.posBuffer} normBuffer=${!!geo?.normBuffer} uvBuffer=${!!geo?.uvBuffer} canopyIdBuffer=${!!geo?.canopyIdBuffer} idxBuffer=${!!geo?.idxBuffer}\n` +
+                    `  hullBGs.length=${this._hullBGs.length} hullBGsDirty=${this._hullBGsDirty} hullBGLs.length=${this._hullBGLs.length}\n` +
+                    `  streamer: uniformBuffer=${!!s._uniformBuffer} fragUniformBuffer=${!!s._fragUniformBuffer}\n` +
+                    `  anchorBuffer=${!!anchorBuffer} hasTex=${this._hasTex} hullIndirectBuffer=${!!this._hullIndirectBuffer}`
+                );
+                if (this._hullBGs.length === 0 && this._hullBGsDirty) {
+                    farDbg(`RENDER: hullBGs empty — _maybeRebuildRenderBGs blocked (anchorBuffer=${!!anchorBuffer} uniformBuffer=${!!s._uniformBuffer})`);
+                }
             }
         }
-        // ───────────────────────────────────────────────────────────────────
         if (!this._initialized || !this._enabled || !encoder) return;
         if (!this._hullPipeline || !this._hullGeo) return;
         this._maybeRebuildRenderBGs();
@@ -992,9 +983,7 @@ export class TreeFarSystem {
 
     _queueCountReadback(commandEncoder) {
         if (!commandEncoder || this._countReadbackQueued || this._countReadbackPending) return;
-        // ── DBG: sample more frequently while investigating ──────────────────
         const shouldSample = this._frameCount === 5 || this._frameCount === 30 || this._frameCount === 60 || (this._frameCount % 120) === 0;
-        // ───────────────────────────────────────────────────────────────────
         if (!shouldSample) return;
 
         this._ensureCountReadbackBuffer();
@@ -1017,20 +1006,18 @@ export class TreeFarSystem {
         this._countReadbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
             const data = new Uint32Array(this._countReadbackBuffer.getMappedRange(0, 4).slice(0));
             const count = data[0] >>> 0;
-            // ── DBG ──────────────────────────────────────────────────────────
             const sc = this._sourceCache;
-            Logger.warn(
-                `[TreeFarSystem] GPU READBACK frame=${this._frameCount} — ` +
+            farDbg(
+                `GPU READBACK frame=${this._frameCount} — ` +
                 `gatheredTrees=${count}/${this.maxTrees} ` +
-                `(${count === 0 ? '⚠ ZERO — nothing rendered' : 'OK'}) ` +
+                `(${count === 0 ? 'ZERO — nothing rendered' : 'OK'}) ` +
                 `activeLayers=${sc?.activeLayerCount ?? 'N/A'} allLayers=${sc?.totalActiveLayerCount ?? 'N/A'}`
             );
-            // ─────────────────────────────────────────────────────────────────
             this._countReadbackBuffer.unmap();
             this._countReadbackQueued = false;
             this._countReadbackPending = false;
         }).catch((err) => {
-            Logger.warn(`[TreeFarSystem] count readback failed: ${err?.message || err}`);
+            farDbg(`GPU READBACK failed: ${err?.message || err}`);
             try { this._countReadbackBuffer?.unmap(); } catch (_) {}
             this._countReadbackQueued = false;
             this._countReadbackPending = false;

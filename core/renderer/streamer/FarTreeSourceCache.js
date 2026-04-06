@@ -7,19 +7,15 @@ const LAYER_META_U32_STRIDE = 8;
 const FAR_TREE_INSTANCE_STRIDE = 64; // same coarse stride as cluster instances
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FAR TREE DBG — centralised diagnostic helper
-// All far-tier instrumentation goes through this so it can be stripped later.
+// FAR TREE DBG — set FAR_TREE_DBG_ENABLED = true to activate all logging
 // ═══════════════════════════════════════════════════════════════════════════
+const FAR_TREE_DBG_ENABLED = false;
 const FAR_DBG = {
-    // Log every N frames (for repeated per-frame logs)
     FRAME_INTERVAL: 120,
-    // How many individual entries to dump in _rebuildState before switching to summary
     ENTRY_DUMP_LIMIT: 8,
-    // Print a full readiness table of all layers every N refreshes
     REFRESH_TABLE_INTERVAL: 60,
-    warn(msg)  { Logger.warn(`[FAR-DBG] ${msg}`);  },
-    info(msg)  { Logger.info(`[FAR-DBG] ${msg}`);  },
-    group(tag) { return `[FAR-DBG:${tag}]`; },
+    warn(msg)  { if (FAR_TREE_DBG_ENABLED) Logger.warn(`[TreeFarSystem] ${msg}`);  },
+    info(msg)  { if (FAR_TREE_DBG_ENABLED) Logger.info(`[TreeFarSystem] ${msg}`);  },
 };
 
 export class FarTreeSourceCache {
