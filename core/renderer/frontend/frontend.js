@@ -459,6 +459,9 @@ export class Frontend {
             if (this.planetConfig) {
                 this.particleSystem.setPlanetConfig(this.planetConfig);
             }
+            if (this.lightManager) {
+                this.particleSystem.setLightManager(this.lightManager);
+            }
         }
 
         await this._maybeInitGPUShadows();

@@ -103,11 +103,10 @@ fn spawnParticle(index: u32) -> Particle {
     let ly    = mix(td.spawnHeightMin, td.spawnHeightMax, rand01(index, 13u));
     let localOffset = basis * vec3<f32>(lx, ly, lz);
 
-    // Initial velocity in local space, then rotate into world. "Up" is +Y in
-    // local space.
-    let lvx = randRange(index, 21u, -0.15, 0.15);
-    let lvy = randRange(index, 22u,  0.2, 0.6) + td.upwardBias * 0.3;
-    let lvz = randRange(index, 23u, -0.15, 0.15);
+    // Initial velocity in local space using per-type ranges, then rotate into world.
+    let lvx = randRange(index, 21u, td.velXMin, td.velXMax);
+    let lvy = randRange(index, 22u, td.velYMin, td.velYMax);
+    let lvz = randRange(index, 23u, td.velZMin, td.velZMax);
     let localVel = basis * vec3<f32>(lvx, lvy, lvz);
 
     let life = randRange(index, 31u, td.lifeMin, td.lifeMax);

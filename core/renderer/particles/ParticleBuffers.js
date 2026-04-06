@@ -15,12 +15,11 @@ import {
     PARTICLE_TYPES,
     PARTICLE_TYPE_CAPACITY,
     PARTICLE_FLAGS,
-    PARTICLE_BLEND,
 } from './ParticleTypes.js';
 
 // ─── GPU-visible struct sizes (bytes) ───────────────────────────────
 export const PARTICLE_STRIDE      = 64;   // matches WGSL Particle
-export const TYPE_DEF_STRIDE      = 96;   // matches WGSL ParticleTypeDef
+export const TYPE_DEF_STRIDE      = 128;  // matches WGSL ParticleTypeDef (8 vec4s)
 export const GLOBALS_UBO_SIZE     = 256;  // padded: mat4 (64) + 6*vec4 (96) = 160 -> 256
 export const INDIRECT_ARGS_SIZE   = 16;   // 4 u32
 export const SPAWN_SCRATCH_SIZE   = 16;   // 1 atomic + pad
@@ -129,13 +128,26 @@ export class ParticleBuffers {
         this._spawnScratchResetTemplate = new Uint32Array([0, 0, 0, 0]);
     }
 
-    // Called each frame before the sim dispatch. Clears the GPU-written
-    // counters so the next pass starts from zero.
-    resetPerFrameCounters() {
+    // Reset only the live-list indirect draw counters. Called ONCE per frame,
+    // before any emitter dispatches, via CPU-side writeBuffer.
+    resetLiveLists() {
         const q = this.device.queue;
         q.writeBuffer(this.indirectAdditive, 0, this._indirectResetTemplate);
         q.writeBuffer(this.indirectAlpha,    0, this._indirectResetTemplate);
-        q.writeBuffer(this.spawnScratch,     0, this._spawnScratchResetTemplate);
+    }
+
+    // Reset the spawn-scratch atomic in the GPU command stream so that each
+    // emitter dispatch gets a fresh claim counter regardless of execution order.
+    // Must be called with the command encoder BEFORE each emitter's dispatch.
+    clearSpawnScratch(commandEncoder) {
+        commandEncoder.clearBuffer(this.spawnScratch, 0, SPAWN_SCRATCH_SIZE);
+    }
+
+    // Legacy single-emitter helper kept for backward compatibility.
+    resetPerFrameCounters() {
+        this.resetLiveLists();
+        const q = this.device.queue;
+        q.writeBuffer(this.spawnScratch, 0, this._spawnScratchResetTemplate);
     }
 
     // Returns { read, write } for this frame's ping-pong orientation.
@@ -154,7 +166,7 @@ export class ParticleBuffers {
         const f32 = new Float32Array(buf);
         const u32 = new Uint32Array(buf);
 
-        for (const [name, id] of Object.entries(PARTICLE_TYPES)) {
+        for (const [/* name */, id] of Object.entries(PARTICLE_TYPES)) {
             const entry = config[id];
             if (!entry) continue;
 
@@ -190,13 +202,38 @@ export class ParticleBuffers {
             if (entry.flags?.stretchAlongVel) flags |= PARTICLE_FLAGS.STRETCH_VEL;
             if (entry.flags?.rotate)          flags |= PARTICLE_FLAGS.ROTATE;
             u32[base + 23] = flags;
+
+            // vec4 #6 — initial velocity ranges (X and Y)
+            f32[base + 24] = entry.velocity?.x?.[0] ?? -0.1;
+            f32[base + 25] = entry.velocity?.x?.[1] ??  0.1;
+            f32[base + 26] = entry.velocity?.y?.[0] ??  0.1;
+            f32[base + 27] = entry.velocity?.y?.[1] ??  0.5;
+
+            // vec4 #7 — initial velocity range (Z) + padding
+            f32[base + 28] = entry.velocity?.z?.[0] ?? -0.1;
+            f32[base + 29] = entry.velocity?.z?.[1] ??  0.1;
+            f32[base + 30] = 0;
+            f32[base + 31] = 0;
         }
 
         this.device.queue.writeBuffer(this.typeDefUBO, 0, buf);
     }
 
+    // Creates a per-emitter globals UBO (256 B) with its own staging arrays.
+    // Store the returned object on the emitter; pass it as `target` to writeGlobals.
+    createEmitterGlobalsTarget(label = 'emitter') {
+        const ubo = this.device.createBuffer({
+            label: `ParticleGlobalsUBO-${label}`,
+            size: GLOBALS_UBO_SIZE,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        const staging = new ArrayBuffer(GLOBALS_UBO_SIZE);
+        return { ubo, f32: new Float32Array(staging), u32: new Uint32Array(staging) };
+    }
+
     // Writes a prepared globals block for the current frame.
-    // `emitter` is an object with cumulative weights precomputed.
+    // `target` is an optional { ubo, f32, u32 } created by createEmitterGlobalsTarget.
+    // When omitted, writes to the shared globalsUBO.
     writeGlobals({
         viewProjMatrix,
         cameraRight, cameraUp,
@@ -209,9 +246,10 @@ export class ParticleBuffers {
         activeTypeCount,
         debugMode = 0,
         localUp = [0, 1, 0],
-    }) {
-        const f32 = this._globalsF32;
-        const u32 = this._globalsU32;
+    }, target = null) {
+        const f32 = target ? target.f32 : this._globalsF32;
+        const u32 = target ? target.u32 : this._globalsU32;
+        const ubo = target ? target.ubo : this.globalsUBO;
 
         // mat4 view*proj (column-major, 16 floats)
         f32.set(viewProjMatrix, GLOBALS_OFFSETS.viewProj / 4);
@@ -259,7 +297,7 @@ export class ParticleBuffers {
         f32[GLOBALS_OFFSETS.localUp / 4 + 2] = localUp[2];
         f32[GLOBALS_OFFSETS._pad6   / 4]     = 0;
 
-        this.device.queue.writeBuffer(this.globalsUBO, 0, this._globalsStaging);
+        this.device.queue.writeBuffer(ubo, 0, f32.buffer);
     }
 
     dispose() {

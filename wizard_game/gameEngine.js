@@ -671,7 +671,14 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                         snapSettleFrames: 30,
                     }
                 );
-                Logger.info('[GameEngine] Campfire emitter registered at spawn');
+                this.renderer.particleSystem.addCampfireCoals(
+                    { x: spawnX, y: spawnY, z: spawnZ },
+                    {
+                        getActor: () => actorManager?.playerActor,
+                        snapSettleFrames: 30,
+                    }
+                );
+                Logger.info('[GameEngine] Campfire + coal emitters registered at spawn');
             }
 
             // Wire click-to-move input

@@ -50,6 +50,16 @@ struct ParticleTypeDef {
     spawnHeightMin:f32,
     spawnHeightMax:f32,
     typeFlags:     u32,   // per-type flags (stretch, rotate, additive, ...)
+    // vec4 #6 — initial velocity ranges (X and Y axes)
+    velXMin:       f32,
+    velXMax:       f32,
+    velYMin:       f32,
+    velYMax:       f32,
+    // vec4 #7 — initial velocity range (Z axis) + padding
+    velZMin:       f32,
+    velZMax:       f32,
+    _pad7a:        f32,
+    _pad7b:        f32,
 };
 
 // ─────────────────────────────────────────────────────────────────

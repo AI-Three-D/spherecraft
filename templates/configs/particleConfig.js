@@ -55,17 +55,17 @@ export const PARTICLE_CONFIG = {
 
     [PARTICLE_TYPES.FLAME]: {
         blend: 'additive',
-        lifetime: { min: 0.35, max: 0.70 },
+        lifetime: { min: 0.40, max: 0.80 },
         size: { start: 0.07, end: 0.02 },
         velocity: {
-            x: [-0.12, 0.12],
-            y: [ 1.20, 1.80],
-            z: [-0.12, 0.12],
+            x: [-0.30, 0.30],   // moderate outward spread
+            y: [ 0.15, 0.45],   // gentle initial upward push
+            z: [-0.30, 0.30],
         },
         gravity: 0.0,
-        drag: 0.5,           // low drag so they accelerate upwards
-        upwardBias: 2.2,
-        lateralNoise: 0.8,   // flicker
+        drag: 1.8,           // stronger drag keeps them from rocketing
+        upwardBias: 0.9,     // gentle steady rise
+        lateralNoise: 0.35,  // subtle flicker, not violent
         spawnOffset: {
             radius: 0.10,
             heightMin: 0.05,
@@ -81,8 +81,8 @@ export const PARTICLE_CONFIG = {
 
     [PARTICLE_TYPES.SMOKE]: {
         blend: 'alpha',
-        lifetime: { min: 2.50, max: 4.50 },
-        size: { start: 0.10, end: 0.35 },   // grows -> billowing
+        lifetime: { min: 1.50, max: 2.50 },
+        size: { start: 0.06, end: 0.18 },   // grows -> billowing
         velocity: {
             x: [-0.04, 0.04],
             y: [ 0.30, 0.55],
@@ -98,33 +98,97 @@ export const PARTICLE_CONFIG = {
             heightMax: 0.70,
         },
         // Near-black -> dark grey -> light grey -> transparent.
-        colorStart: [0.08, 0.08, 0.08, 0.55],
-        colorMid:   [0.25, 0.25, 0.25, 0.35],
+        colorStart: [0.08, 0.08, 0.08, 0.18],
+        colorMid:   [0.25, 0.25, 0.25, 0.10],
         colorEnd:   [0.55, 0.55, 0.55, 0.0],
         // Note: rotate flag is a no-op with the current radially-symmetric
         // soft-disc fragment; re-enable when we add a non-symmetric texture.
         flags: { stretchAlongVel: false, rotate: false },
+        spawnWeight: 0.01,
+    },
+
+    [PARTICLE_TYPES.EMBER]: {
+        blend: 'additive',
+        lifetime: { min: 0.6, max: 1.8 },
+        size: { start: 0.035, end: 0.008 },
+        velocity: {
+            x: [-0.55, 0.55],   // fly outward in all directions
+            y: [ 0.60, 1.80],   // launched upward
+            z: [-0.55, 0.55],
+        },
+        gravity: 0.0,
+        drag: 0.8,
+        upwardBias: 0.6,
+        lateralNoise: 0.5,      // small random drift
+        spawnOffset: {
+            radius: 0.08,
+            heightMin: 0.10,
+            heightMax: 0.25,
+        },
+        // Bright white-orange -> orange -> deep red -> transparent.
+        colorStart: [1.00, 0.85, 0.40, 1.0],
+        colorMid:   [1.00, 0.35, 0.02, 0.7],
+        colorEnd:   [0.30, 0.02, 0.00, 0.0],
+        flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 0.05,
+    },
+
+    [PARTICLE_TYPES.COAL]: {
+        blend: 'additive',
+        lifetime: { min: 1.20, max: 2.40 },
+        size: { start: 0.035, end: 0.025 },
+        velocity: {
+            x: [-0.01, 0.01],   // essentially stationary
+            y: [ 0.00, 0.01],
+            z: [-0.01, 0.01],
+        },
+        gravity: 0.0,
+        drag: 10.0,             // immediately kills any velocity
+        upwardBias: 0.0,
+        lateralNoise: 0.0,
+        spawnOffset: {
+            radius: 0.18,       // spread across the coal bed
+            heightMin: 0.00,
+            heightMax: 0.04,
+        },
+        // Deep red -> orange glow -> dim red -> transparent (one "pulse" per life).
+        colorStart: [0.80, 0.10, 0.00, 0.7],
+        colorMid:   [1.00, 0.45, 0.05, 0.9],
+        colorEnd:   [0.40, 0.04, 0.00, 0.0],
+        flags: { stretchAlongVel: false, rotate: false },
+        spawnWeight: 1.0,
     },
 };
 
-// Per-emitter presets. Campfire uses the three types above with type-specific
-// spawn weights. Later we'll add more presets (torch, coal pile, etc.).
+// Per-emitter presets.
 export const PARTICLE_EMITTER_PRESETS = {
     campfire: {
+        // 4 types = vec4 limit per emitter. COAL uses campfire_coals.
         types: [
             PARTICLE_TYPES.FIRE_CORE,
             PARTICLE_TYPES.FLAME,
             PARTICLE_TYPES.SMOKE,
+            PARTICLE_TYPES.EMBER,
         ],
-        // Weights override the per-type default spawnWeight for this emitter.
         weights: {
-            [PARTICLE_TYPES.FIRE_CORE]: 0.55,
-            [PARTICLE_TYPES.FLAME]:     0.40,
-            [PARTICLE_TYPES.SMOKE]:     0.05,
+            [PARTICLE_TYPES.FIRE_CORE]: 0.50,
+            [PARTICLE_TYPES.FLAME]:     0.44,
+            [PARTICLE_TYPES.SMOKE]:     0.01,
+            [PARTICLE_TYPES.EMBER]:     0.05,
         },
         spawnBudgetPerFrame: 32,     // ~1900 spawns/sec at 60 Hz
-        distanceCutoff: 1000.0,      // metres; beyond this, emission stops
+        distanceCutoff: 1000.0,
+    },
+
+    campfire_coals: {
+        types: [
+            PARTICLE_TYPES.COAL,
+        ],
+        weights: {
+            [PARTICLE_TYPES.COAL]: 1.0,
+        },
+        spawnBudgetPerFrame: 3,      // ~180 coal glows/sec at 60 Hz — sparse
+        distanceCutoff: 500.0,
     },
 };
 

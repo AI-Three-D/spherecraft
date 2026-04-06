@@ -10,7 +10,7 @@
 //   5. render(renderPassEncoder) — per-frame draw
 //   6. dispose()
 
-import { Matrix4 } from '../../../shared/math/index.js';
+import { Matrix4, Vector3 } from '../../../shared/math/index.js';
 import { ParticleBuffers } from './ParticleBuffers.js';
 import { ParticleSimulationPass } from './ParticleSimulationPass.js';
 import { ParticleRenderPass } from './ParticleRenderPass.js';
@@ -20,6 +20,7 @@ import {
     PARTICLE_CONFIG,
     PARTICLE_GLOBALS,
 } from '../../../templates/configs/particleConfig.js';
+import { LightType } from '../../lighting/lightManager.js';
 
 export class ParticleSystem {
     constructor({
@@ -54,6 +55,14 @@ export class ParticleSystem {
         // Planet origin used to compute the local "up" direction at the
         // emitter. Set via setPlanetConfig(); falls back to (0,0,0).
         this._planetOrigin = { x: 0, y: 0, z: 0 };
+
+        // Optional light manager for campfire point lights.
+        this._lightManager = null;
+    }
+
+    // Call this after the frontend's lightManager is ready.
+    setLightManager(lightManager) {
+        this._lightManager = lightManager;
     }
 
     setPlanetConfig(planetConfig) {
@@ -108,7 +117,25 @@ export class ParticleSystem {
         emitter._snapSettleFrames = overrides.snapSettleFrames ?? 10;
         emitter._needsActorSnap = !!emitter._snapToActorFn;
 
-        this.emitters.push(emitter);
+        // Attach a dynamic point light if a light manager is available.
+        emitter._pointLight = null;
+        emitter._baseLightIntensity = overrides.lightIntensity ?? 2.5;
+        emitter._lightPhase = Math.random() * Math.PI * 2; // random flicker phase
+        if (this._lightManager) {
+            const lm = this._lightManager;
+            const pos = new Vector3(emitter.position.x, emitter.position.y + 0.3, emitter.position.z);
+            emitter._pointLight = lm.addLight(LightType.POINT, {
+                position: pos,
+                color:     { r: 1.0, g: 0.45, b: 0.08 },  // warm fire orange
+                intensity: emitter._baseLightIntensity,
+                radius:    overrides.lightRadius ?? 10.0,
+                decay:     2.0,
+                dynamic:   true,
+                name:      'campfire_light',
+            });
+        }
+
+        this._registerEmitter(emitter);
         // eslint-disable-next-line no-console
         console.log(
             `[ParticleSystem] addCampfire at (${emitter.position.x.toFixed(2)}, ` +
@@ -118,6 +145,36 @@ export class ParticleSystem {
             `types=[${emitter.typeIds.join(',')}] cumWeights=[${emitter.typeWeightsCumulative.join(',')}]`
         );
         return emitter;
+    }
+
+    // Add the ground-level coal bed emitter for a campfire.
+    // Accepts the same snap options as addCampfire() so it follows the
+    // actor's ground-snapped position.
+    addCampfireCoals(worldPos, overrides = {}) {
+        const emitter = new ParticleEmitter({
+            position: worldPos,
+            preset: 'campfire_coals',
+            overrides,
+        });
+        emitter._pointLight = null;
+        emitter._snapToActorFn = typeof overrides.getActor === 'function'
+            ? overrides.getActor
+            : null;
+        emitter._snapSettleFrames = overrides.snapSettleFrames ?? 10;
+        emitter._needsActorSnap = !!emitter._snapToActorFn;
+        this._registerEmitter(emitter);
+        return emitter;
+    }
+
+    // Allocates per-emitter GPU resources (own globalsUBO + bind group pair)
+    // and pushes the emitter into the active list.
+    _registerEmitter(emitter) {
+        // Each emitter needs its own globals UBO so that multiple emitters
+        // dispatching in the same command buffer don't clobber each other's
+        // per-frame data (all writeBuffer calls execute before any dispatch).
+        emitter._globalsTarget = this.buffers.createEmitterGlobalsTarget(emitter.preset);
+        emitter._bindGroups   = this.simPass.createEmitterBindGroups(emitter._globalsTarget.ubo);
+        this.emitters.push(emitter);
     }
 
     // Runs the sim compute pass. `commandEncoder` must be a valid WebGPU
@@ -130,112 +187,133 @@ export class ParticleSystem {
         this._elapsedTime += dt;
         this._frameCount++;
 
-        // Phase-3 scope: a single emitter per frame. When multi-emitter
-        // arrives, we'll loop here and dispatch once per emitter (each with
-        // its own globals UBO upload) before swapping ping-pong.
-        const emitter = this.emitters[0];
-
-        // Deferred "snap to actor" placement. The GPU movement resolver
-        // ground-snaps the player every frame, but only writes the result
-        // back after a few frames. We wait `_snapSettleFrames` frames, then
-        // copy the actor's (now terrain-snapped) position as the emitter's
-        // permanent world position.
-        if (emitter._needsActorSnap) {
-            if (emitter._snapWaitFrames === undefined) {
-                emitter._snapWaitFrames = 0;
-            }
-            emitter._snapWaitFrames++;
-            if (emitter._snapWaitFrames >= emitter._snapSettleFrames) {
-                const actor = emitter._snapToActorFn();
-                const p = actor?.position;
-                if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
-                    emitter.position.x = p.x;
-                    emitter.position.y = p.y;
-                    emitter.position.z = p.z;
-                    emitter._needsActorSnap = false;
-                    // eslint-disable-next-line no-console
-                    console.log(
-                        `[ParticleSystem] snapped campfire to actor position ` +
-                        `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
-                        `after ${emitter._snapWaitFrames} frames`
-                    );
-                }
-                // If actor isn't ready yet, keep waiting; the emitter stays
-                // at its placeholder position for one more frame.
-            }
-        }
-
-        // LOD cutoff: drop spawn rate to zero beyond distance cutoff.
-        // Also skip spawning while the emitter is still waiting to be snapped
-        // to its actor position, so we don't litter particles at the
-        // placeholder world coord.
-        const cam = camera.position;
-        const dx = cam.x - emitter.position.x;
-        const dy = cam.y - emitter.position.y;
-        const dz = cam.z - emitter.position.z;
-        const distSq = dx * dx + dy * dy + dz * dz;
-        const cutoffSq = emitter.distanceCutoff * emitter.distanceCutoff;
-        let spawnBudget = (distSq > cutoffSq) ? 0 : emitter.spawnBudgetPerFrame;
-        if (emitter._needsActorSnap) {
-            spawnBudget = 0;
-        }
-
-        // Compute cameraRight / cameraUp from row 0 / row 1 of the view
-        // matrix (matrixWorldInverse is column-major, so row 0 = te[0], te[4], te[8]).
+        // Per-frame camera constants shared across all emitter dispatches.
         const te = camera.matrixWorldInverse.elements;
         const cameraRight = [te[0], te[4], te[8]];
         const cameraUp    = [te[1], te[5], te[9]];
-
-        // viewProj = projection * view
         this._viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
         const viewProjArr = this._viewProj.elements;
+        const cam = camera.position;
 
-        // Compute local "up" at the emitter (normalized vector from planet
-        // origin to emitter). Falls back to world +Y if origin and emitter
-        // coincide.
-        const ux = emitter.position.x - this._planetOrigin.x;
-        const uy = emitter.position.y - this._planetOrigin.y;
-        const uz = emitter.position.z - this._planetOrigin.z;
-        const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
-        const localUp = (ulen > 1e-6)
-            ? [ux / ulen, uy / ulen, uz / ulen]
-            : [0, 1, 0];
+        // Reset the live-list indirect draw counters ONCE per frame (CPU-side).
+        // The spawn scratch is reset per-emitter INSIDE the command stream via
+        // commandEncoder.clearBuffer() so each dispatch gets its own fresh counter.
+        this.buffers.resetLiveLists();
 
-        // Write globals UBO.
-        this.buffers.writeGlobals({
-            viewProjMatrix: viewProjArr,
-            cameraRight, cameraUp,
-            dt, time: this._elapsedTime,
-            emitterPos: [emitter.position.x, emitter.position.y, emitter.position.z],
-            spawnBudget,
-            typeWeightsCumulative: emitter.getShaderTypeWeightsCumulative(),
-            typeIds: emitter.getShaderTypeIds(),
-            rngSeed: (emitter.baseSeed + this._frameCount * 2654435761) >>> 0,
-            activeTypeCount: emitter.getActiveTypeCount(),
-            debugMode: this.debugMode,
-            localUp,
-        });
-
-        // Reset GPU-written counters for this frame.
-        this.buffers.resetPerFrameCounters();
-
-        // Dispatch the sim compute pass.
-        this.simPass.dispatch(commandEncoder);
-
-        // ── instrumentation: every 300 frames (~5 s), log distance + budget.
-        if ((this._frameCount % 300) === 0) {
-            const dist = Math.sqrt(distSq);
-            // eslint-disable-next-line no-console
-            console.log(
-                `[ParticleSystem] frame=${this._frameCount} ` +
-                `cam=(${cam.x.toFixed(1)},${cam.y.toFixed(1)},${cam.z.toFixed(1)}) ` +
-                `emit=(${emitter.position.x.toFixed(1)},${emitter.position.y.toFixed(1)},${emitter.position.z.toFixed(1)}) ` +
-                `dist=${dist.toFixed(1)}m budget=${spawnBudget}`
-            );
+        // The render pass reads viewProj/cameraRight/cameraUp from the SHARED
+        // globalsUBO (b.globalsUBO). Per-emitter dispatches write to their own
+        // UBOs, so we must update the shared one once per frame for rendering.
+        // (We reuse emitters[0]'s data — camera values are identical across emitters.)
+        {
+            const e0 = this.emitters[0];
+            const ux = e0.position.x - this._planetOrigin.x;
+            const uy = e0.position.y - this._planetOrigin.y;
+            const uz = e0.position.z - this._planetOrigin.z;
+            const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
+            this.buffers.writeGlobals({
+                viewProjMatrix: viewProjArr,
+                cameraRight, cameraUp,
+                dt, time: this._elapsedTime,
+                emitterPos:   [e0.position.x, e0.position.y, e0.position.z],
+                spawnBudget:  0,
+                typeWeightsCumulative: e0.getShaderTypeWeightsCumulative(),
+                typeIds:      e0.getShaderTypeIds(),
+                rngSeed:      0,
+                activeTypeCount: e0.getActiveTypeCount(),
+                debugMode:    this.debugMode,
+                localUp: (ulen > 1e-6) ? [ux / ulen, uy / ulen, uz / ulen] : [0, 1, 0],
+            }); // no target → writes to shared globalsUBO used by the render pass
         }
 
-        // Advance ping-pong so next frame reads from the buffer we just wrote.
-        this.buffers.advancePingPong();
+        // Dispatch once per emitter. All emitters share the same particle pool;
+        // ping-pong swaps only once at the end of the frame.
+        for (const emitter of this.emitters) {
+            // Deferred actor-snap placement.
+            if (emitter._needsActorSnap) {
+                if (emitter._snapWaitFrames === undefined) emitter._snapWaitFrames = 0;
+                emitter._snapWaitFrames++;
+                if (emitter._snapWaitFrames >= emitter._snapSettleFrames) {
+                    const actor = emitter._snapToActorFn?.();
+                    const p = actor?.position;
+                    if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
+                        emitter.position.x = p.x;
+                        emitter.position.y = p.y;
+                        emitter.position.z = p.z;
+                        emitter._needsActorSnap = false;
+                        // eslint-disable-next-line no-console
+                        console.log(
+                            `[ParticleSystem] snapped to actor ` +
+                            `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
+                            `after ${emitter._snapWaitFrames} frames`
+                        );
+                    }
+                }
+            }
+
+            // Update campfire point light position and flicker.
+            if (emitter._pointLight) {
+                const pl = emitter._pointLight;
+                const flicker = 0.82 + 0.18 * Math.sin(this._elapsedTime * 9.1  + emitter._lightPhase)
+                                     + 0.06 * Math.sin(this._elapsedTime * 23.7 + emitter._lightPhase * 1.3);
+                pl.intensity = emitter._baseLightIntensity * flicker;
+                pl.position.x = emitter.position.x;
+                pl.position.y = emitter.position.y + 0.3;
+                pl.position.z = emitter.position.z;
+            }
+
+            // LOD cutoff.
+            const dx = cam.x - emitter.position.x;
+            const dy = cam.y - emitter.position.y;
+            const dz = cam.z - emitter.position.z;
+            const distSq = dx * dx + dy * dy + dz * dz;
+            const cutoffSq = emitter.distanceCutoff * emitter.distanceCutoff;
+            const spawnBudget = (distSq > cutoffSq || emitter._needsActorSnap)
+                ? 0 : emitter.spawnBudgetPerFrame;
+
+            // Local "up" at this emitter's world position.
+            const ux = emitter.position.x - this._planetOrigin.x;
+            const uy = emitter.position.y - this._planetOrigin.y;
+            const uz = emitter.position.z - this._planetOrigin.z;
+            const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
+            const localUp = (ulen > 1e-6) ? [ux / ulen, uy / ulen, uz / ulen] : [0, 1, 0];
+
+            // Write this emitter's globals into its own dedicated UBO so that
+            // multiple writeBuffer calls in the same frame don't clobber each other.
+            this.buffers.writeGlobals({
+                viewProjMatrix: viewProjArr,
+                cameraRight, cameraUp,
+                dt, time: this._elapsedTime,
+                emitterPos: [emitter.position.x, emitter.position.y, emitter.position.z],
+                spawnBudget,
+                typeWeightsCumulative: emitter.getShaderTypeWeightsCumulative(),
+                typeIds: emitter.getShaderTypeIds(),
+                rngSeed: (emitter.baseSeed + this._frameCount * 2654435761) >>> 0,
+                activeTypeCount: emitter.getActiveTypeCount(),
+                debugMode: this.debugMode,
+                localUp,
+            }, emitter._globalsTarget);
+
+            // Reset spawn-scratch in the GPU command stream so each emitter
+            // starts its own claim counter from zero.
+            this.buffers.clearSpawnScratch(commandEncoder);
+
+            // Dispatch using this emitter's own bind groups (which reference
+            // its own globalsUBO at binding 0).
+            this.simPass.dispatch(commandEncoder, emitter._bindGroups);
+
+            // Advance ping-pong AFTER each dispatch so the next emitter reads
+            // from the buffer this one just wrote — chaining A→B→A rather than
+            // both dispatches clobbering the same write buffer.
+            this.buffers.advancePingPong();
+
+            if ((this._frameCount % 300) === 0) {
+                // eslint-disable-next-line no-console
+                console.log(
+                    `[ParticleSystem] frame=${this._frameCount} preset=${emitter.preset} ` +
+                    `dist=${Math.sqrt(distSq).toFixed(1)}m budget=${spawnBudget}`
+                );
+            }
+        }
     }
 
     // Issues the two indirect draw calls inside an already-active render pass.
@@ -257,6 +335,9 @@ export class ParticleSystem {
     }
 
     dispose() {
+        for (const emitter of this.emitters) {
+            emitter._globalsTarget?.ubo?.destroy();
+        }
         this.simPass?.dispose();
         this.renderPass?.dispose();
         this.buffers?.dispose();

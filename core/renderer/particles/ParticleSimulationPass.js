@@ -60,12 +60,22 @@ export class ParticleSimulationPass {
     }
 
     _rebuildBindGroups() {
+        // Build the default bind groups using the shared globalsUBO.
+        const { ab, ba } = this.createEmitterBindGroups(this.buffers.globalsUBO);
+        this.bindGroupAB = ab;
+        this.bindGroupBA = ba;
+    }
+
+    // Creates a { ab, ba } bind-group pair that uses the given per-emitter
+    // globalsUBO for binding 0. Call once per emitter at registration time.
+    createEmitterBindGroups(globalsUBO) {
         const b = this.buffers;
-        const makeBindGroup = (readBuf, writeBuf, label) => this.device.createBindGroup({
-            label,
+        const label = globalsUBO.label ?? 'emitter';
+        const make = (readBuf, writeBuf, suffix) => this.device.createBindGroup({
+            label: `ParticleSim-BG-${label}-${suffix}`,
             layout: this.bindGroupLayout,
             entries: [
-                { binding: 0, resource: { buffer: b.globalsUBO } },
+                { binding: 0, resource: { buffer: globalsUBO } },
                 { binding: 1, resource: { buffer: b.typeDefUBO } },
                 { binding: 2, resource: { buffer: readBuf } },
                 { binding: 3, resource: { buffer: writeBuf } },
@@ -76,16 +86,18 @@ export class ParticleSimulationPass {
                 { binding: 8, resource: { buffer: b.spawnScratch } },
             ],
         });
-
-        this.bindGroupAB = makeBindGroup(b.particlesA, b.particlesB, 'ParticleSim-BG-AB');
-        this.bindGroupBA = makeBindGroup(b.particlesB, b.particlesA, 'ParticleSim-BG-BA');
+        return {
+            ab: make(b.particlesA, b.particlesB, 'AB'),
+            ba: make(b.particlesB, b.particlesA, 'BA'),
+        };
     }
 
-    dispatch(commandEncoder) {
+    // `bindGroups` is an optional { ab, ba } pair. When omitted the shared
+    // default bind groups (globalsUBO) are used.
+    dispatch(commandEncoder, bindGroups) {
         const { read } = this.buffers.getPingPong();
-        const bindGroup = (read === this.buffers.particlesA)
-            ? this.bindGroupAB
-            : this.bindGroupBA;
+        const bg = bindGroups ?? { ab: this.bindGroupAB, ba: this.bindGroupBA };
+        const bindGroup = (read === this.buffers.particlesA) ? bg.ab : bg.ba;
 
         const pass = commandEncoder.beginComputePass({ label: 'ParticleSim' });
         pass.setPipeline(this.pipeline);
