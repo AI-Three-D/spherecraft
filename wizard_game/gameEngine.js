@@ -658,6 +658,22 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.renderer.setActorManager(this.actorManager);
             this.cameraMode = 'character';
 
+            // Place a persistent campfire at the player's ground-snapped
+            // position. The initial worldPos is a placeholder; the particle
+            // system calls getActor() ~10 frames after registration to copy
+            // the GPU-ground-snapped position.
+            if (this.renderer.particleSystem) {
+                const actorManager = this.actorManager;
+                this.renderer.particleSystem.addCampfire(
+                    { x: spawnX, y: spawnY, z: spawnZ },
+                    {
+                        getActor: () => actorManager?.playerActor,
+                        snapSettleFrames: 30,
+                    }
+                );
+                Logger.info('[GameEngine] Campfire emitter registered at spawn');
+            }
+
             // Wire click-to-move input
             this.canvas.addEventListener('click', (e) => {
                 if (this.cameraMode !== 'character') return;

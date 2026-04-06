@@ -86,8 +86,10 @@ export class Frontend {
             ? Math.max(1, Math.floor(options.validationScopeInterval))
             : 120;
         this._lastDeltaTime = 0;
+
+        this.particleSystem = null;
     }
-    
+
     getBackend() {
         return this.backend;
     }
@@ -443,6 +445,20 @@ export class Frontend {
             );
         } else {
             this.clusterLightBuffers = null;
+        }
+
+        if (this.backend?.device) {
+            const { ParticleSystem } = await import('../particles/ParticleSystem.js');
+            this.particleSystem = new ParticleSystem({
+                device: this.backend.device,
+                backend: this.backend,
+                colorFormat: this.backend.format,
+                depthFormat: 'depth24plus',
+            });
+            await this.particleSystem.initialize();
+            if (this.planetConfig) {
+                this.particleSystem.setPlanetConfig(this.planetConfig);
+            }
         }
 
         await this._maybeInitGPUShadows();
@@ -883,6 +899,10 @@ async loadGLB(url, options = {}) {
 
                     this._dispatchActorCompute(encoder);
 
+                    if (this.particleSystem) {
+                        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
+                    }
+
                     this.backend.resumeRenderPass();
                     this.assetStreamer.render(this.camera, viewMatrix, projectionMatrix);
 
@@ -898,11 +918,25 @@ async loadGLB(url, options = {}) {
                     this.backend.endRenderPassForCompute();
                     const encoder = this.backend.getCommandEncoder();
                     this._dispatchActorCompute(encoder);
+                    if (this.particleSystem) {
+                        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
+                    }
                     this.backend.resumeRenderPass();
-                }   
+                } else if (this.particleSystem) {
+                    this.backend.endRenderPassForCompute();
+                    const encoder = this.backend.getCommandEncoder();
+                    this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
+                    this.backend.resumeRenderPass();
+                }
                 if (this.skinnedMeshRenderer?.isReady()) {
                     this.skinnedMeshRenderer.update(this._lastDeltaTime);
                     this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
+                }
+
+                // Particles draw after opaque terrain + assets + skinned meshes,
+                // still inside the main color render pass (before post-processing).
+                if (this.particleSystem && this.backend._renderPassEncoder) {
+                    this.particleSystem.render(this.backend._renderPassEncoder);
                 }
                 
             }
@@ -967,6 +1001,10 @@ this.skinnedMeshRenderer = null;
         if (this.assetStreamer) {
             this.assetStreamer.dispose();
             this.assetStreamer = null;
+        }
+        if (this.particleSystem) {
+            this.particleSystem.dispose();
+            this.particleSystem = null;
         }
         this.lightManager.cleanup();
         this.shadowRenderer.cleanup();
