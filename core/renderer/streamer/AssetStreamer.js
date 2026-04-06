@@ -625,7 +625,20 @@ if (this._useFarTierClone) {
         midConfig: farTierCloneConfig,
         speciesProfiles: this._treeConfig.speciesProfiles,
     });
+    console.warn(
+        `[AssetStreamer] TreeFarSystem constructed — ` +
+        `farTierCloneConfig=${JSON.stringify({ maxTrees: farTierCloneConfig.maxTrees })} ` +
+        `tierRanges.farTrees=${JSON.stringify(tierRanges.farTrees)} ` +
+        `_farTreeSourceCache=${!!this._farTreeSourceCache} ` +
+        `_farTreeSourceCache.enabled=${this._farTreeSourceCache?.enabled} ` +
+        `_farTreeSourceCache.initialized=${this._farTreeSourceCache?._initialized} ` +
+        `_farTreeBakePipeline=${!!this._farTreeBakePipeline}`
+    );
     await this._treeFarSystem.initialize();
+    console.warn(
+        `[AssetStreamer] TreeFarSystem.initialize() done — ` +
+        `treeFarSystem.isReady=${this._treeFarSystem?.isReady?.()}`
+    );
 }
 
 this._branchRenderer = new BranchRenderer(this.device, this, {
@@ -670,11 +683,22 @@ await this._leafStreamer.initialize();
     }
 
     _createFarTreeBakePipeline() {
+        // ── DBG ─────────────────────────────────────────────────────────────
+        console.warn(
+            `[AssetStreamer] _createFarTreeBakePipeline — ` +
+            `farTreeSourceCache=${!!this._farTreeSourceCache} ` +
+            `farTreeSourceCache.enabled=${this._farTreeSourceCache?.enabled} ` +
+            `farTreeSourceCache.initialized=${this._farTreeSourceCache?._initialized} ` +
+            `useFarTierClone=${this._useFarTierClone}`
+        );
+        // ───────────────────────────────────────────────────────────────────
         if (!this._farTreeSourceCache?.enabled) {
+            console.warn(`[AssetStreamer] _createFarTreeBakePipeline: SKIPPED — farTreeSourceCache not enabled`);
             this._farTreeBakePipeline = null;
             this._farTreeBakeBindGroupLayout = null;
             return;
         }
+        console.warn(`[AssetStreamer] _createFarTreeBakePipeline: creating bake pipeline`);
     
         const heightSampleType = gpuFormatSampleType(
             this.tileStreamer?.textureFormats?.height || 'r32float'
@@ -741,10 +765,34 @@ await this._leafStreamer.initialize();
     }
 
     _maybeRebuildFarTreeBakeBindGroup() {
+        // ── DBG: log every call until bind group is built ────────────────────
+        if (!this._farTreeBakeBindGroup) {
+            const arrayTextures = this.tileStreamer.getArrayTextures();
+            const heightGPU = arrayTextures?.height?._gpuTexture?.texture;
+            const tileGPU   = arrayTextures?.tile?._gpuTexture?.texture;
+            const scatterGPU = arrayTextures?.scatter?._gpuTexture?.texture;
+            const selBufReady = this._assetSelectionBuffer?.isReady?.();
+            const tileMapKey = this._scatterTreeTileMapKey;
+            const tileMapBuf = selBufReady ? this._assetSelectionBuffer.getTileMapBuffer(tileMapKey) : null;
+            if (!this._dbg_farBakeBGLogCount) this._dbg_farBakeBGLogCount = 0;
+            this._dbg_farBakeBGLogCount++;
+            if (this._dbg_farBakeBGLogCount <= 5 || (this._dbg_farBakeBGLogCount % 120) === 0) {
+                console.warn(
+                    `[AssetStreamer] _maybeRebuildFarTreeBakeBindGroup #${this._dbg_farBakeBGLogCount} — ` +
+                    `bakePipeline=${!!this._farTreeBakePipeline} bakeLayout=${!!this._farTreeBakeBindGroupLayout} ` +
+                    `cacheEnabled=${!!this._farTreeSourceCache?.enabled}\n` +
+                    `  textures: height=${!!heightGPU} tile=${!!tileGPU} scatter=${!!scatterGPU}\n` +
+                    `  selectionBuffer: ready=${selBufReady} tileMapKey=${tileMapKey} tileMapBuf=${!!tileMapBuf}\n` +
+                    `  instanceBuffer=${!!this._farTreeSourceCache?.instanceBuffer} ` +
+                    `counterBuffer=${!!this._farTreeSourceCache?.counterBuffer}`
+                );
+            }
+        }
+        // ───────────────────────────────────────────────────────────────────
         if (!this._farTreeBakePipeline || !this._farTreeBakeBindGroupLayout || !this._farTreeSourceCache?.enabled) {
             return;
         }
-    
+
         const arrayTextures = this.tileStreamer.getArrayTextures();
         const heightGPU = arrayTextures?.height?._gpuTexture?.texture;
         const tileGPU = arrayTextures?.tile?._gpuTexture?.texture;
@@ -1463,9 +1511,34 @@ await this._leafStreamer.initialize();
 
 
     _dispatchFarTreeBakes(commandEncoder) {
+        // ── DBG: log every call ──────────────────────────────────────────────
+        if (!this._dbg_farDispatchCallCount) this._dbg_farDispatchCallCount = 0;
+        this._dbg_farDispatchCallCount++;
+        const logDispatch = this._dbg_farDispatchCallCount <= 5 || (this._dbg_farDispatchCallCount % 120) === 0;
+        if (logDispatch) {
+            const sc = this._farTreeSourceCache;
+            console.warn(
+                `[AssetStreamer] _dispatchFarTreeBakes #${this._dbg_farDispatchCallCount} — ` +
+                `cacheEnabled=${sc?.enabled} ` +
+                `bakePipeline=${!!this._farTreeBakePipeline} bakeBG=${!!this._farTreeBakeBindGroup} ` +
+                `pendingBakes=${sc?.pendingBakes ?? 'N/A'} ` +
+                `allActiveLayers=${sc?.totalActiveLayerCount ?? 'N/A'}`
+            );
+        }
+        // ───────────────────────────────────────────────────────────────────
         if (!this._farTreeSourceCache?.enabled) return false;
-        if (!this._farTreeBakePipeline || !this._farTreeBakeBindGroup) return false;
+        if (!this._farTreeBakePipeline || !this._farTreeBakeBindGroup) {
+            if (!this._dbg_farDispatchNoPipelineLogged) {
+                this._dbg_farDispatchNoPipelineLogged = true;
+                console.warn(
+                    `[AssetStreamer] _dispatchFarTreeBakes: BLOCKED — ` +
+                    `pipeline=${!!this._farTreeBakePipeline} BG=${!!this._farTreeBakeBindGroup}`
+                );
+            }
+            return false;
+        }
         if (this._farTreeSourceCache.pendingBakes === 0) return false;
+        console.warn(`[AssetStreamer] _dispatchFarTreeBakes: FIRING batch — pending=${this._farTreeSourceCache.pendingBakes}`);
     
         const batch = this._farTreeSourceCache.popBakeBatch();
         if (!batch || batch.length === 0) return false;
@@ -1651,6 +1724,7 @@ update(commandEncoder, camera) {
         if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
        // if (this._treeMidNearSystem) this._treeMidNearSystem.update(commandEncoder, camera); 
         if (this._treeMidSystem)     this._treeMidSystem.update(commandEncoder, camera);    
+        if (this._treeFarSystem)     this._treeFarSystem.update(commandEncoder, camera);   
         if (this._clusterTreeSystem) this._clusterTreeSystem.update(commandEncoder, camera);
         if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
         if (this._leafStreamer && this.enableLeafRendering) {

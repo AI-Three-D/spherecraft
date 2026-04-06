@@ -210,13 +210,16 @@ export class ClusterSourceCache {
 
     _entryHasBakeableTrees(entry) {
         if (!entry) return false;
-        if (entry.treeRepresentation !== ASSET_BAKE_REPRESENTATION.CLUSTER) {
+        const rep = entry.treeRepresentation;
+        if (
+            rep !== ASSET_BAKE_REPRESENTATION.CLUSTER &&
+            rep !== ASSET_BAKE_REPRESENTATION.RUNTIME_TREE
+        ) {
             return false;
         }
         const treeArchetype = this._assetRegistry.getArchetypeByIndex?.(0);
         return !!treeArchetype?.isActive;
     }
-
     _recordsEqual(a, b) {
         if (a === b) return true;
         if (!a || !b) return false;

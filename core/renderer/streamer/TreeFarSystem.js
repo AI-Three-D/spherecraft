@@ -1,38 +1,19 @@
 // js/renderer/streamer/TreeFarSystem.js
 //
-// Hull-only mid-distance tree tier. Replaces TreeMidNearSystem.
-//
-// Key differences from TreeMidNearSystem:
-//   • NO impostors. Trunk + hull only.
-//   • Canopy bounds precomputed in tracker (once/tree) not VS (once/vertex).
-//     This is the 18× perf win.
-//   • NO per-fragment anchor density loop. Noise-only porosity.
-//   • Mid tier still uses a single range, but the hull FS now has a
-//     near/far sub-band treatment for coverage and breakup.
-//   • Config from treeTierConfig.js, not TreeLODController's mid-near glob.
-//
-// Pipeline:
-//   Compute:
-//     1. Tracker dispatch args (reads live pool counts)
-//     2. Tracker: filter by range, resolve species→template, read anchors,
-//        compute canopy bounds, write MidTreeInfo (128B/tree)
-//     3. Indirect builder: [hullIndexCount, treeCount, ...] + trunk equivalent
-//   Render:
-//     1. Trunk (one indirect draw)
-//     2. Hull (one indirect draw)
+// Hull-only Far-distance tree tier. Replaces TreeMidNearSystem.
 
 import { Logger } from '../../../shared/Logger.js';
 import { MidNearGeometryBuilder } from './MidNearGeometryBuilder.js';
 import { MidNearTextureBaker } from './MidNearTextureBaker.js';
-import { buildMidTreeTrackerShader } from './shaders/midTreeTracker.wgsl.js';
+
 import {
 
     buildFarHullVertexShader,
     buildFarHullFragmentShader,
 } from './shaders/farTreeRender.wgsl.js';
 
-const MID_TREE_BYTES = 128;
-const TRUNK_INSTANCE_BYTES = 48;   // matches mid-near trunk layout — reuse scatter logic inline
+const FAR_TREE_RENDER_BYTES = 80;
+
 
 function resolveMidTierConfig(midConfigOverride, midTierConfig) {
     const base = JSON.parse(JSON.stringify(midTierConfig));
@@ -113,8 +94,9 @@ export class TreeFarSystem {
                 : null,
         };
 
+        
         // lodController is only used for detailRange (near-tier boundary)
-        // to compute the crossfade overlap. All mid-tier config comes
+        // to compute the crossfade overlap. All Far-tier config comes
         // from treeTierConfig.js.
         this.lodController = config.lodController;
         if (!this.lodController) {
@@ -133,7 +115,7 @@ export class TreeFarSystem {
         };
         this._applyFarOverrides();
         this.maxTrees = this._cfg.maxTrees;
-        // Far clone starts from mid-tier logic but should be much cheaper.
+        // Far clone starts from Far-tier logic but should be much cheaper.
         // Keep the producer/tracker path the same; only simplify render cost.
         this._cfg.hull = {
             ...this._cfg.hull,
@@ -178,26 +160,21 @@ export class TreeFarSystem {
         // ── GPU resources ──────────────────────────────────────────────────
         this._treeBuffer = null;
         this._treeCountBuffer = null;
-        this._trackerParamBuffer = null;
-        this._assetSpeciesBuffer = null;
+
         this._assetSpeciesCount = 0;
 
-        this._trackerDispatchArgsBuffer = null;
         this._hullIndirectBuffer = null;
 
         this._hullGeo = null;
         this._texBaker = null;
 
-        // ── Pipelines ──────────────────────────────────────────────────────
-        this._trackerPipeline = null;
-        this._trackerBGL = null;
-        this._trackerBG = null;
-        this._trackerBGDirty = true;
+        this._gatherParamBuffer = null;
+        this._gatherPipeline = null;
+        this._gatherBGL = null;
+        this._gatherBG = null;
+        this._gatherBGDirty = true;
 
-        this._trackerDispatchArgsPipeline = null;
-        this._trackerDispatchArgsBGL = null;
-        this._trackerDispatchArgsBG = null;
-        this._trackerDispatchArgsBGDirty = true;
+        this._sourceCache = null;
 
         this._indirectPipeline = null;
         this._indirectBG = null;
@@ -208,166 +185,377 @@ export class TreeFarSystem {
         this._hullBGsDirty = true;
 
         // ── Source bands (tree pool LOD slices we scan) ────────────────────
-        this._sourceBands = [];
-        this._workgroupSize = 256;
 
-        this._initialized = false;
+   
         this._enabled = true;
         this._frameCount = 0;
         this._countReset = new Uint32Array([0]);
         this._countReadbackBuffer = null;
         this._countReadbackQueued = false;
         this._countReadbackPending = false;
+        this._initialized = false;
     }
-
     async initialize() {
         if (this._initialized) return;
 
-        this._buildAssetSpeciesMap();
-        this._buildSourceBands();
+        // ── DBG: initialize entry ───────────────────────────────────────────
+        Logger.warn(
+            `[TreeFarSystem] initialize START — ` +
+            `range=${JSON.stringify(this._range)} ` +
+            `maxTrees=${this.maxTrees} ` +
+            `hull=${this._cfg.hull.lonSegments}×${this._cfg.hull.latSegments} ` +
+            `maxPackedTrees=${this._cfg.hull.maxPackedTrees} ` +
+            `streamer._farTreeSourceCache=${!!this.streamer._farTreeSourceCache} ` +
+            `farSourceCache.enabled=${this.streamer._farTreeSourceCache?.enabled} ` +
+            `farSourceCache.initialized=${this.streamer._farTreeSourceCache?._initialized}`
+        );
+        // ───────────────────────────────────────────────────────────────────
+
+        this._sourceCache = this.streamer._farTreeSourceCache;
+
         this._createBuffers();
+        Logger.warn(`[TreeFarSystem] initialize: buffers created — treeBuffer=${!!this._treeBuffer} treeCountBuffer=${!!this._treeCountBuffer} indirectBuffer=${!!this._hullIndirectBuffer}`);
+
         this._buildGeometry();
+        Logger.warn(`[TreeFarSystem] initialize: geometry built — idxCount=${this._hullGeo?.idxCount} posBuffer=${!!this._hullGeo?.posBuffer}`);
+
         await this._bakeTextures();
-        this._createTrackerPipeline();
-        this._createTrackerDispatchArgsPipeline();
+        Logger.warn(`[TreeFarSystem] initialize: textures baked — texBaker.isReady=${this._texBaker?.isReady?.()}`);
+
+        this._createGatherPipeline();
+        Logger.warn(`[TreeFarSystem] initialize: gather pipeline=${!!this._gatherPipeline} BGL=${!!this._gatherBGL}`);
+
         this._createIndirectPipeline();
+        Logger.warn(`[TreeFarSystem] initialize: indirect pipeline=${!!this._indirectPipeline} BG=${!!this._indirectBG}`);
+
         this._createRenderPipelines();
+        Logger.warn(`[TreeFarSystem] initialize: hull render pipeline=${!!this._hullPipeline} hasTex=${this._hasTex}`);
 
         this._initialized = true;
-
-        const r = this._range;
-        Logger.info(
-            `[TreeFarSystem] Initialized: range=[${r.start}..${r.end}]m ` +
-            `fadeIn=${r.fadeInWidth}m fadeOut=${r.fadeOutWidth}m ` +
-            `maxTrees=${this.maxTrees} ` +
-            `endDensity=${Number(this._cfg.endDensityScale ?? 1.0).toFixed(2)} ` +
-            `hull=${this._cfg.hull.lonSegments}×${this._cfg.hull.latSegments} ` +
-            `vsAnchors=${this._cfg.hull.vsAnchorSamples}`
-        );
+        Logger.warn(`[TreeFarSystem] initialize COMPLETE`);
     }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Hot-reload for Task 3 tuning
-    // ═══════════════════════════════════════════════════════════════════════
 
     rebuildPipelines(options = {}) {
         if (!this._initialized) return;
-
-        // Re-read config module (caller may have mutated it).
         this._range = {
-                ...(this.TREE_TIER_RANGES.farTrees || this.TREE_TIER_RANGES.mid),
-                ...(this._configOverride.tierRange || {}),
+            ...(this.TREE_TIER_RANGES.farTrees || this.TREE_TIER_RANGES.mid),
+            ...(this._configOverride.tierRange || {}),
         };
         this._cfg = resolveMidTierConfig(this._configOverride.midConfig, this.MID_TIER_CONFIG);
         this._speciesProfiles = {
             ...JSON.parse(JSON.stringify(this.SPECIES_CANOPY_PROFILES)),
             ...(this._configOverride.speciesProfiles || {}),
         };
-
+        this._applyFarOverrides();
+        this.maxTrees = this._cfg.maxTrees;
         if (options.rebuildGeometry) {
             const geo = this._hullGeo;
             if (geo) {
                 geo.posBuffer?.destroy();
                 geo.normBuffer?.destroy();
                 geo.uvBuffer?.destroy();
+                geo.canopyIdBuffer?.destroy();
                 geo.idxBuffer?.destroy();
             }
             this._hullGeo = null;
             this._buildGeometry();
         }
-
-        this._createTrackerPipeline();
-        this._createTrackerDispatchArgsPipeline();
+    
+        this._sourceCache = this.streamer._farTreeSourceCache;
+    
+        this._gatherPipeline = null;
+        this._gatherBGL = null;
+        this._gatherBG = null;
+        this._gatherBGDirty = true;
+    
+        this._indirectPipeline = null;
+        this._indirectBG = null;
+    
+        this._createGatherPipeline();
         this._createIndirectPipeline();
         this._createRenderPipelines();
-
-        this._trackerBGDirty = true;
-        this._trackerDispatchArgsBGDirty = true;
+    
         this._hullBGsDirty = true;
-
+    
         Logger.info(`[TreeFarSystem] Pipelines rebuilt${options.rebuildGeometry ? ' (with geometry)' : ''}`);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Setup
-    // ═══════════════════════════════════════════════════════════════════════
-
-    _buildAssetSpeciesMap() {
-        // Same mapping logic as TreeMidNearSystem / TreeDetailSystem.
-        // TODO: lift this into a shared helper — third copy of this code.
-        const registry = this.streamer?._assetRegistry;
-        const assets = registry?.getAllAssets?.() || [];
-        this._assetSpeciesCount = assets.length;
-        if (this._assetSpeciesCount === 0) return;
-
-        const map = new Uint32Array(this._assetSpeciesCount);
-        for (let i = 0; i < assets.length; i++) {
-            const asset = assets[i];
-            const id = (asset?.id || '').toLowerCase();
-            const geom = (asset?.geometryType || '').toLowerCase();
-            let species = 2;
-            if (id.includes('birch')) species = 2;
-            else if (id.includes('alder')) species = 3;
-            else if (id.includes('oak')) species = 4;
-            else if (id.includes('beech')) species = 5;
-            else if (id.includes('spruce')) species = 0;
-            else if (id.includes('pine')) species = 1;
-            else if (geom === 'conifer') species = 0;
-            else if (geom === 'deciduous_broad') species = 4;
-            else if (geom === 'deciduous') species = 2;
-            map[i] = species;
+    _createGatherPipeline() {
+        // ── DBG ─────────────────────────────────────────────────────────────
+        Logger.warn(
+            `[TreeFarSystem] _createGatherPipeline — ` +
+            `sourceCache=${!!this._sourceCache} ` +
+            `sourceCache.enabled=${this._sourceCache?.enabled} ` +
+            `sourceCache.initialized=${this._sourceCache?._initialized} ` +
+            `sourceCache.perLayerCapacity=${this._sourceCache?.perLayerCapacity}`
+        );
+        // ───────────────────────────────────────────────────────────────────
+        if (!this._sourceCache?.enabled) {
+            Logger.warn(`[TreeFarSystem] _createGatherPipeline: SKIPPED — sourceCache not enabled`);
+            this._gatherPipeline = null;
+            this._gatherBGL = null;
+            this._gatherBG = null;
+            return;
         }
+        Logger.warn(`[TreeFarSystem] _createGatherPipeline: creating gather pipeline (perLayerCapacity=${this._sourceCache.perLayerCapacity})`);
+    
+        const WORKGROUP_SIZE = 64;
+    
+        const code = /* wgsl */`
+    struct GatherParams {
+        cameraPosition : vec3<f32>,
+        maxTrees       : u32,
+    
+        fadeInStart    : f32,
+        fadeInEnd      : f32,
+        fadeOutStart   : f32,
+        fadeOutEnd     : f32,
+    };
+    
+    struct FarTreeSource {
+        // 64 B baked record from FarTreeSourceCache
+        worldPosX      : f32,
+        worldPosY      : f32,
+        worldPosZ      : f32,
+        rotation       : f32,
+    
+        canopyCenterX  : f32,
+        canopyCenterY  : f32,
+        canopyCenterZ  : f32,
+        packedCount    : f32,
+    
+        canopyExtentX  : f32,
+        canopyExtentY  : f32,
+        canopyExtentZ  : f32,
+        scale          : f32,
+    
+        foliageR       : f32,
+        foliageG       : f32,
+        foliageB       : f32,
+        seedF          : f32,
+    };
+    
+    struct FarTreeRender {
+        // Row 0
+        worldPosX      : f32,
+        worldPosY      : f32,
+        worldPosZ      : f32,
+        rotation       : f32,
+    
+        // Row 1
+        canopyCenterX  : f32,
+        canopyCenterY  : f32,
+        canopyCenterZ  : f32,
+        packedCount    : f32,
+    
+        // Row 2
+        canopyExtentX  : f32,
+        canopyExtentY  : f32,
+        canopyExtentZ  : f32,
+        scale          : f32,
+    
+        // Row 3
+        foliageR       : f32,
+        foliageG       : f32,
+        foliageB       : f32,
+        seedF          : f32,
+    
+        // Row 4
+        distToCam      : f32,
+        tierFade       : f32,
+        groupRadius    : f32,
+        _pad0          : f32,
+    };
+    
+    struct Counter {
+        value : atomic<u32>,
+    };
+    
+    @group(0) @binding(0) var<uniform> gatherParams : GatherParams;
+    @group(0) @binding(1) var<storage, read> activeLayers : array<u32>;
+    @group(0) @binding(2) var<storage, read> sourceTrees : array<FarTreeSource>;
+    @group(0) @binding(3) var<storage, read> sourceCounts : array<u32>;
+    @group(0) @binding(4) var<storage, read_write> renderTrees : array<FarTreeRender>;
+    @group(0) @binding(5) var<storage, read_write> renderCount : Counter;
 
-        this._assetSpeciesBuffer = this.device.createBuffer({
-            label: 'Mid-AssetSpeciesMap',
-            size: Math.max(256, map.byteLength),
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    fn saturate(x: f32) -> f32 {
+        return clamp(x, 0.0, 1.0);
+    }
+    
+    fn safeFade(startD: f32, endD: f32, d: f32) -> f32 {
+        let span = max(endD - startD, 0.0001);
+        return saturate((d - startD) / span);
+    }
+    
+    fn computeTierFade(d: f32) -> f32 {
+        let fadeIn = safeFade(gatherParams.fadeInStart, gatherParams.fadeInEnd, d);
+        let fadeOut = 1.0 - safeFade(gatherParams.fadeOutStart, gatherParams.fadeOutEnd, d);
+        return saturate(fadeIn * fadeOut);
+    }
+    
+    fn computeGroupRadius(extentX: f32, extentZ: f32, packedCountF: f32, scale: f32) -> f32 {
+        let packedCount = max(u32(packedCountF + 0.5), 1u);
+        if (packedCount <= 1u) {
+            return 0.0;
+        }
+    
+        let canopyRadius = max(extentX, extentZ);
+        let scaleRadius = max(scale, 0.0) * 0.35;
+        return max(canopyRadius * 0.9, scaleRadius);
+    }
+    
+    @compute @workgroup_size(${WORKGROUP_SIZE})
+    fn main(
+        @builtin(workgroup_id) workgroupId : vec3<u32>,
+        @builtin(local_invocation_id) localId : vec3<u32>
+    ) {
+        let activeIdx = workgroupId.x;
+        let layer = activeLayers[activeIdx];
+        let srcCount = sourceCounts[layer];
+        if (srcCount == 0u) {
+            return;
+        }
+    
+        let layerBase = layer * ${this._sourceCache.perLayerCapacity}u;
+    
+        var i = localId.x;
+        loop {
+            if (i >= srcCount) {
+                break;
+            }
+    
+            let src = sourceTrees[layerBase + i];
+            let worldPos = vec3<f32>(src.worldPosX, src.worldPosY, src.worldPosZ);
+            let dist = distance(worldPos, gatherParams.cameraPosition);
+            let tierFade = computeTierFade(dist);
+    
+            if (tierFade > 0.0001) {
+                let dstIndex = atomicAdd(&renderCount.value, 1u);
+                if (dstIndex < gatherParams.maxTrees) {
+                    var dst : FarTreeRender;
+    
+                    dst.worldPosX = src.worldPosX;
+                    dst.worldPosY = src.worldPosY;
+                    dst.worldPosZ = src.worldPosZ;
+                    dst.rotation = src.rotation;
+    
+                    dst.canopyCenterX = src.canopyCenterX;
+                    dst.canopyCenterY = src.canopyCenterY;
+                    dst.canopyCenterZ = src.canopyCenterZ;
+                    dst.packedCount = src.packedCount;
+    
+                    dst.canopyExtentX = src.canopyExtentX;
+                    dst.canopyExtentY = src.canopyExtentY;
+                    dst.canopyExtentZ = src.canopyExtentZ;
+                    dst.scale = src.scale;
+    
+                    dst.foliageR = src.foliageR;
+                    dst.foliageG = src.foliageG;
+                    dst.foliageB = src.foliageB;
+                    dst.seedF = src.seedF;
+    
+                    dst.distToCam = dist;
+                    dst.tierFade = tierFade;
+                    dst.groupRadius = computeGroupRadius(
+                        src.canopyExtentX,
+                        src.canopyExtentZ,
+                        src.packedCount,
+                        src.scale
+                    );
+                    dst._pad0 = 0.0;
+    
+                    renderTrees[dstIndex] = dst;
+                }
+            }
+    
+            i += ${WORKGROUP_SIZE}u;
+        }
+    }
+    `;
+    
+        const mod = this.device.createShaderModule({
+            label: 'FarTree-Gather-SM',
+            code,
         });
-        this.device.queue.writeBuffer(this._assetSpeciesBuffer, 0, map);
+    
+        this._gatherBGL = this.device.createBindGroupLayout({
+            label: 'FarTree-Gather-BGL',
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+            ],
+        });
+    
+        this._gatherPipeline = this.device.createComputePipeline({
+            label: 'FarTree-Gather-Pipeline',
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this._gatherBGL],
+            }),
+            compute: {
+                module: mod,
+                entryPoint: 'main',
+            },
+        });
+    
+        this._gatherBGDirty = true;
     }
 
-    _buildSourceBands() {
-        const pool = this.streamer._pool;
-        this._sourceBands = [];
-        if (!pool) return;
-
-        const treeBandBase = this.CAT_TREES * this.LODS_PER_CATEGORY;
-        for (let lod = 0; lod < this.LODS_PER_CATEGORY; lod++) {
-            const band = treeBandBase + lod;
-            const capacity = pool.getBandCapacity(band) >>> 0;
-            if (capacity === 0) continue;
-            const base = pool.getBandBase(band) >>> 0;
-            this._sourceBands.push({ band, base, capacity });
-        }
+    _updateGatherParams(camera) {
+        if (!this._gatherParamBuffer) return;
+    
+        const camPos =
+            this.streamer?.uniformManager?.camera?.position ||
+            camera?.position || { x: 0, y: 0, z: 0 };
+    
+        const r = this._range || {};
+        const fadeInStart = Number.isFinite(r.start) ? r.start : 0.0;
+        const fadeInEnd = fadeInStart + Math.max(0.0001, r.fadeInWidth ?? 0.0);
+        const fadeOutEnd = Number.isFinite(r.end) ? r.end : 1e9;
+        const fadeOutStart = fadeOutEnd - Math.max(0.0001, r.fadeOutWidth ?? 0.0);
+    
+        const data = new ArrayBuffer(32);
+        const f32 = new Float32Array(data);
+        const u32 = new Uint32Array(data);
+    
+        f32[0] = camPos.x ?? 0;
+        f32[1] = camPos.y ?? 0;
+        f32[2] = camPos.z ?? 0;
+        u32[3] = this.maxTrees >>> 0;
+    
+        f32[4] = fadeInStart;
+        f32[5] = fadeInEnd;
+        f32[6] = fadeOutStart;
+        f32[7] = fadeOutEnd;
+    
+        this.device.queue.writeBuffer(this._gatherParamBuffer, 0, data);
     }
+
 
     _createBuffers() {
         this._treeBuffer = this.device.createBuffer({
-            label: 'Mid-Trees',
-            size: Math.max(256, this.maxTrees * MID_TREE_BYTES),
+            label: 'Far-Trees',
+            size: Math.max(256, this.maxTrees * FAR_TREE_RENDER_BYTES),
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
         });
-
+    
         this._treeCountBuffer = this.device.createBuffer({
-            label: 'Mid-TreeCount',
+            label: 'Far-TreeCount',
             size: 256,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
         });
-
-        this._trackerParamBuffer = this.device.createBuffer({
-            label: 'Mid-TrackerParams',
+    
+        this._gatherParamBuffer = this.device.createBuffer({
+            label: 'FarTree-GatherParams',
             size: 256,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
-
-        this._trackerDispatchArgsBuffer = this.device.createBuffer({
-            label: 'Mid-TrackerDispatchArgs',
-            size: 16,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
-        });
-
+    
         this._hullIndirectBuffer = this.device.createBuffer({
-            label: 'Mid-HullIndirect',
+            label: 'Far-HullIndirect',
             size: Math.max(256, 5 * 4),
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
         });
@@ -418,7 +606,7 @@ export class TreeFarSystem {
     }
 
     async _bakeTextures() {
-        // Reuse the mid-near texture baker for now. Its canopy layer 0
+        // Reuse the Far-near texture baker for now. Its canopy layer 0
         // is a generic leafy noise texture which works fine for the hull FS.
         const procGen = this.streamer?.propTextureManager?.proceduralTextureGenerator ?? null;
         this._texBaker = new MidNearTextureBaker(this.device, procGen, {
@@ -432,105 +620,17 @@ export class TreeFarSystem {
     // Pipeline creation
     // ═══════════════════════════════════════════════════════════════════════
 
-    _createTrackerPipeline() {
-        // Tracker does the heavy lifting: species resolve, template lookup,
-        // anchor iteration for bounds. One thread per LIVE pool instance.
-        const code = buildMidTreeTrackerShader({
-            workgroupSize: this._workgroupSize,
-            maxTrees: this.maxTrees,
-            endDensityScale: this._cfg.endDensityScale,
-            assetCount: this._assetSpeciesCount,
-            treeSourceBandIds: this._sourceBands.map(b => b.band),
-            treeSourceBandBases: this._sourceBands.map(b => b.base),
-            treeSourceBandCaps: this._sourceBands.map(b => b.capacity),
-            rangeStart: this._range.start,
-            rangeEnd: this._range.end,
-            fadeInWidth: this._range.fadeInWidth,
-            fadeOutWidth: this._range.fadeOutWidth,
-            // Tracker reads up to this many anchors for bounds. Bounds
-            // closer birch mid trees use fine anchors, so raise the sample
-            // budget enough to preserve crown breakup in the hull bounds.
-            maxAnchorsForBounds: 32,
-            speciesProfiles: this._speciesProfiles,
-        });
-
-        const mod = this.device.createShaderModule({ label: 'MidTracker-SM', code });
-
-        this._trackerBGL = this.device.createBindGroupLayout({
-            label: 'MidTracker-BGL',
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // pool instances
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // pool indirect (live counts)
-                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },           // out: trees
-                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },           // out: count
-                { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // species map
-                { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // anchors
-                { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // template infos
-            ],
-        });
-
-        this._trackerPipeline = this.device.createComputePipeline({
-            label: 'MidTracker-Pipeline',
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this._trackerBGL] }),
-            compute: { module: mod, entryPoint: 'main' },
-        });
-    }
-
-    _createTrackerDispatchArgsPipeline() {
-        const bandIds = this._sourceBands.map(b => b.band);
-        if (bandIds.length === 0) return;
-
-        const code = /* wgsl */`
-            const SOURCE_BAND_COUNT: u32 = ${bandIds.length}u;
-            const WORKGROUP_SIZE: u32 = ${this._workgroupSize}u;
-            const SOURCE_BAND_IDS: array<u32, SOURCE_BAND_COUNT> =
-                array<u32, SOURCE_BAND_COUNT>(${bandIds.map(v => `${v >>> 0}u`).join(', ')});
-
-            @group(0) @binding(0) var<storage, read>       treeIndirectArgs: array<u32>;
-            @group(0) @binding(1) var<storage, read_write> dispatchArgs: array<u32>;
-
-            @compute @workgroup_size(1)
-            fn main() {
-                var total: u32 = 0u;
-                for (var b = 0u; b < SOURCE_BAND_COUNT; b++) {
-                    total += treeIndirectArgs[SOURCE_BAND_IDS[b] * 5u + 1u];
-                }
-                dispatchArgs[0] = (total + WORKGROUP_SIZE - 1u) / WORKGROUP_SIZE;
-                dispatchArgs[1] = 1u;
-                dispatchArgs[2] = 1u;
-            }
-        `;
-
-        const mod = this.device.createShaderModule({ label: 'Mid-TrackerDispatchArgs-SM', code });
-
-        this._trackerDispatchArgsBGL = this.device.createBindGroupLayout({
-            label: 'Mid-TrackerDispatchArgs-BGL',
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-            ],
-        });
-
-        this._trackerDispatchArgsPipeline = this.device.createComputePipeline({
-            label: 'Mid-TrackerDispatchArgs-Pipeline',
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this._trackerDispatchArgsBGL] }),
-            compute: { module: mod, entryPoint: 'main' },
-        });
-    }
-
     _createIndirectPipeline() {
         const code = /* wgsl */`
             const HULL_INDEX_COUNT: u32 = ${this._hullGeo.idxCount}u;
             const MAX_TREES: u32 = ${this.maxTrees}u;
 
-            @group(0) @binding(0) var<storage, read>       treeCount: array<u32>;
+            @group(0) @binding(0) var<storage, read> treeCount: array<u32>;
             @group(0) @binding(1) var<storage, read_write> hullIndirect: array<u32>;
 
             @compute @workgroup_size(1)
             fn main() {
                 let tc = min(treeCount[0], MAX_TREES);
-
                 hullIndirect[0] = HULL_INDEX_COUNT;
                 hullIndirect[1] = tc;
                 hullIndirect[2] = 0u;
@@ -684,81 +784,28 @@ export class TreeFarSystem {
         this._hasTex = hasTex;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Per-frame updates
-    // ═══════════════════════════════════════════════════════════════════════
 
-    _updateTrackerParams(camera) {
-        const s = this.streamer;
-        const cam = s.uniformManager?.camera?.position || camera?.position || { x: 0, y: 0, z: 0 };
-        const pc = s.planetConfig;
-
-        const birchStart = s._templateLibrary?.getTypeStartIndex('birch') ?? 0xFFFFFFFF;
-        const birchCount = s._templateLibrary?.getVariants('birch')?.length ?? 0;
-
-        // 16 floats = 64 bytes. Layout:
-        //   [0-2] cameraPos  [3] rangeStart
-        //   [4-6] planetOrigin [7] planetRadius
-        //   [8] rangeEnd  [9] fadeInWidth  [10] fadeOutWidth
-        //   [11-12] (u32) birchTemplateStart/Count  [13-15] reserved
-        const data = new Float32Array(16);
-        const u32 = new Uint32Array(data.buffer);
-        data[0] = cam.x; data[1] = cam.y; data[2] = cam.z;
-        data[3] = this._range.start;
-        data[4] = pc.origin.x; data[5] = pc.origin.y; data[6] = pc.origin.z;
-        data[7] = pc.radius;
-        data[8] = this._range.end;
-        data[9] = this._range.fadeInWidth;
-        data[10] = this._range.fadeOutWidth;
-        u32[11] = birchStart >>> 0;
-        u32[12] = birchCount >>> 0;
-
-        this.device.queue.writeBuffer(this._trackerParamBuffer, 0, data);
-    }
-
-    _maybeRebuildTrackerBG() {
-        if (!this._trackerBGDirty) return;
-        const pool = this.streamer._pool;
-        if (!pool || !this._assetSpeciesBuffer) return;
-
-        const templateLib = this.streamer._templateLibrary;
-        const anchorBuffer = templateLib?.getAnchorBuffer?.();
-        const templateInfoBuffer = templateLib?.getTemplateInfoBuffer?.();
-        if (!anchorBuffer || !templateInfoBuffer) return;
-
-        this._trackerBG = this.device.createBindGroup({
-            layout: this._trackerBGL,
-            entries: [
-                { binding: 0, resource: { buffer: this._trackerParamBuffer } },
-                { binding: 1, resource: { buffer: pool.instanceBuffer } },
-                { binding: 2, resource: { buffer: pool.indirectBuffer } },
-                { binding: 3, resource: { buffer: this._treeBuffer } },
-                { binding: 4, resource: { buffer: this._treeCountBuffer } },
-                { binding: 5, resource: { buffer: this._assetSpeciesBuffer } },
-                { binding: 6, resource: { buffer: anchorBuffer } },
-                { binding: 7, resource: { buffer: templateInfoBuffer } },
-            ],
-        });
-        this._trackerBGDirty = false;
-    }
-
-    _maybeRebuildTrackerDispatchArgsBG() {
-        if (!this._trackerDispatchArgsBGDirty || !this._trackerDispatchArgsBGL) return;
-        const pool = this.streamer._pool;
-        if (!pool?.indirectBuffer) return;
-
-        this._trackerDispatchArgsBG = this.device.createBindGroup({
-            label: 'Mid-TrackerDispatchArgs-BG',
-            layout: this._trackerDispatchArgsBGL,
-            entries: [
-                { binding: 0, resource: { buffer: pool.indirectBuffer } },
-                { binding: 1, resource: { buffer: this._trackerDispatchArgsBuffer } },
-            ],
-        });
-        this._trackerDispatchArgsBGDirty = false;
-    }
 
     _maybeRebuildRenderBGs() {
+        // ── DBG ─────────────────────────────────────────────────────────────
+        if (this._hullBGsDirty) {
+            const s = this.streamer;
+            const templateLib = s._templateLibrary;
+            const anchorBuffer = templateLib?.getAnchorBuffer?.();
+            const texView = this._hasTex ? this._texBaker?.getTextureView?.() : '(tex disabled)';
+            const sampler = this._hasTex ? this._texBaker?.getSampler?.() : '(tex disabled)';
+            Logger.warn(
+                `[TreeFarSystem] _maybeRebuildRenderBGs — ` +
+                `uniformBuffer=${!!s._uniformBuffer} fragUniformBuffer=${!!s._fragUniformBuffer} ` +
+                `templateLib=${!!templateLib} anchorBuffer=${!!anchorBuffer} ` +
+                `hasTex=${this._hasTex} texView=${!!texView} sampler=${!!sampler} ` +
+                `hullBGLs.length=${this._hullBGLs.length} treeBuffer=${!!this._treeBuffer}`
+            );
+            if (!anchorBuffer) {
+                Logger.warn(`[TreeFarSystem] _maybeRebuildRenderBGs: BLOCKED — anchorBuffer is null (templateLibrary may not have uploaded GPU data yet)`);
+            }
+        }
+        // ───────────────────────────────────────────────────────────────────
         if (!this._hullBGsDirty) return;
         const s = this.streamer;
         if (!s._uniformBuffer || !s._fragUniformBuffer) return;
@@ -790,57 +837,133 @@ export class TreeFarSystem {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Update / render
-    // ═══════════════════════════════════════════════════════════════════════
+    _maybeRebuildGatherBindGroup() {
+        // ── DBG ─────────────────────────────────────────────────────────────
+        if (this._gatherBGDirty) {
+            Logger.warn(
+                `[TreeFarSystem] _maybeRebuildGatherBindGroup — dirty=true ` +
+                `sourceCache.enabled=${this._sourceCache?.enabled} ` +
+                `gatherBGL=${!!this._gatherBGL} ` +
+                `gatherParamBuffer=${!!this._gatherParamBuffer} ` +
+                `sourceCache.activeLayerBuffer=${!!this._sourceCache?.activeLayerBuffer} ` +
+                `sourceCache.instanceBuffer=${!!this._sourceCache?.instanceBuffer} ` +
+                `sourceCache.counterBuffer=${!!this._sourceCache?.counterBuffer} ` +
+                `treeBuffer=${!!this._treeBuffer} treeCountBuffer=${!!this._treeCountBuffer}`
+            );
+        }
+        // ───────────────────────────────────────────────────────────────────
+        if (!this._gatherBGDirty) return;
+        if (!this._sourceCache?.enabled) {
+            Logger.warn(`[TreeFarSystem] _maybeRebuildGatherBindGroup: BLOCKED — sourceCache not enabled`);
+            return;
+        }
 
+        this._gatherBG = this.device.createBindGroup({
+            layout: this._gatherBGL,
+            entries: [
+                { binding: 0, resource: { buffer: this._gatherParamBuffer } },
+                { binding: 1, resource: { buffer: this._sourceCache.activeLayerBuffer } },
+                { binding: 2, resource: { buffer: this._sourceCache.instanceBuffer } },
+                { binding: 3, resource: { buffer: this._sourceCache.counterBuffer } },
+                { binding: 4, resource: { buffer: this._treeBuffer } },
+                { binding: 5, resource: { buffer: this._treeCountBuffer } },
+            ],
+        });
+    
+        this._gatherBGDirty = false;
+    }
     update(commandEncoder, camera) {
-        if (!this._initialized || !this._enabled) return;
-        if (this._sourceBands.length === 0) return;
-
         this._frameCount++;
-        this._kickCountReadback();
-        this._updateTrackerParams(camera);
-        this._maybeRebuildTrackerBG();
-        this._maybeRebuildTrackerDispatchArgsBG();
 
-        if (!this._trackerBG || !this._trackerDispatchArgsBG) return;
+        // ── DBG: full update state every N frames ────────────────────────────
+        const dbgLog = this._frameCount === 1 || this._frameCount === 2 || this._frameCount === 10 || (this._frameCount % 120) === 0;
+        if (dbgLog) {
+            const sc = this._sourceCache;
+            const camPos = this.streamer?.uniformManager?.camera?.position || camera?.position;
+            const r = this._range || {};
+            const fadeInEnd = (r.start ?? 0) + (r.fadeInWidth ?? 0);
+            const fadeOutStart = (r.end ?? 0) - (r.fadeOutWidth ?? 0);
+            Logger.warn(
+                `[TreeFarSystem] UPDATE frame=${this._frameCount} ──────────────────────\n` +
+                `  initialized=${this._initialized} enabled=${this._enabled}\n` +
+                `  range: start=${r.start} end=${r.end} fadeIn=[${r.start}..${fadeInEnd}] fadeOut=[${fadeOutStart}..${r.end}]\n` +
+                `  maxTrees=${this.maxTrees}\n` +
+                `  sourceCache: ${sc ? `enabled=${sc.enabled} initialized=${sc._initialized} activeLayerCount=${sc.activeLayerCount} allActiveLayers=${sc.totalActiveLayerCount} pendingBakes=${sc.pendingBakes}` : 'NULL'}\n` +
+                `  pipelines: gatherPipeline=${!!this._gatherPipeline} gatherBGL=${!!this._gatherBGL} gatherBG=${!!this._gatherBG} gatherBGDirty=${this._gatherBGDirty}\n` +
+                `  pipelines: indirectPipeline=${!!this._indirectPipeline} indirectBG=${!!this._indirectBG}\n` +
+                `  buffers: treeBuffer=${!!this._treeBuffer} treeCountBuffer=${!!this._treeCountBuffer} gatherParamBuffer=${!!this._gatherParamBuffer} hullIndirectBuffer=${!!this._hullIndirectBuffer}\n` +
+                `  camera: ${camPos ? `x=${camPos.x?.toFixed(1)} y=${camPos.y?.toFixed(1)} z=${camPos.z?.toFixed(1)}` : 'NULL'}`
+            );
+        }
+        // ───────────────────────────────────────────────────────────────────
 
+        if (!this._initialized || !this._enabled || !this._sourceCache?.enabled) {
+            if (dbgLog) Logger.warn(`[TreeFarSystem] UPDATE: early exit — initialized=${this._initialized} enabled=${this._enabled} sourceCache.enabled=${this._sourceCache?.enabled}`);
+            return;
+        }
+
+        this._updateGatherParams(camera);
+        this._maybeRebuildGatherBindGroup();
+        if (!this._gatherPipeline || !this._gatherBG || !this._indirectPipeline || !this._indirectBG) {
+            if (dbgLog) Logger.warn(
+                `[TreeFarSystem] UPDATE: BLOCKED — ` +
+                `gatherPipeline=${!!this._gatherPipeline} gatherBG=${!!this._gatherBG} ` +
+                `indirectPipeline=${!!this._indirectPipeline} indirectBG=${!!this._indirectBG}`
+            );
+            return;
+        }
         this.device.queue.writeBuffer(this._treeCountBuffer, 0, this._countReset);
 
-        // Pass 1: build tracker dispatch args from live pool counts
-        {
-            const pass = commandEncoder.beginComputePass({ label: 'MidTrackerDispatchArgs' });
-            pass.setPipeline(this._trackerDispatchArgsPipeline);
-            pass.setBindGroup(0, this._trackerDispatchArgsBG);
-            pass.dispatchWorkgroups(1);
+        const layerCount = this._sourceCache.activeLayerCount;
+        if (layerCount > 0) {
+            if (dbgLog) Logger.warn(`[TreeFarSystem] UPDATE: dispatching gather — workgroups=${layerCount}`);
+            const pass = commandEncoder.beginComputePass({ label: 'FarTree-Gather' });
+            pass.setPipeline(this._gatherPipeline);
+            pass.setBindGroup(0, this._gatherBG);
+            pass.dispatchWorkgroups(layerCount);
             pass.end();
+        } else {
+            if (dbgLog) Logger.warn(`[TreeFarSystem] UPDATE: ⚠ activeLayerCount=0 — gather skipped, trees=0`);
         }
 
-        // Pass 2: tracker — filter + species + template + bounds, all in one
         {
-            const pass = commandEncoder.beginComputePass({ label: 'MidTracker' });
-            pass.setPipeline(this._trackerPipeline);
-            pass.setBindGroup(0, this._trackerBG);
-            pass.dispatchWorkgroupsIndirect(this._trackerDispatchArgsBuffer, 0);
-            pass.end();
-        }
-
-        // Pass 3: indirect draw args
-        {
-            const pass = commandEncoder.beginComputePass({ label: 'FarIndirect' });
+            const pass = commandEncoder.beginComputePass({ label: 'FarTree-Indirect' });
             pass.setPipeline(this._indirectPipeline);
             pass.setBindGroup(0, this._indirectBG);
             pass.dispatchWorkgroups(1);
             pass.end();
         }
 
+        // ── DBG: GPU readback — kick existing, queue new ─────────────────────
         this._queueCountReadback(commandEncoder);
+        this._kickCountReadback();
+        // ───────────────────────────────────────────────────────────────────
     }
 
     render(encoder) {
+        // ── DBG: full render state every N frames ────────────────────────────
+        const dbgRenderLog = this._frameCount === 1 || this._frameCount === 2 || this._frameCount === 10 || (this._frameCount % 120) === 0;
+        if (dbgRenderLog) {
+            const s = this.streamer;
+            const anchorBuffer = s._templateLibrary?.getAnchorBuffer?.();
+            const geo = this._hullGeo;
+            Logger.warn(
+                `[TreeFarSystem] RENDER frame=${this._frameCount} ──────────────────────\n` +
+                `  initialized=${this._initialized} enabled=${this._enabled} encoder=${!!encoder}\n` +
+                `  hullPipeline=${!!this._hullPipeline} hullGeo=${!!geo}\n` +
+                `  geo: idxCount=${geo?.idxCount} posBuffer=${!!geo?.posBuffer} normBuffer=${!!geo?.normBuffer} uvBuffer=${!!geo?.uvBuffer} canopyIdBuffer=${!!geo?.canopyIdBuffer} idxBuffer=${!!geo?.idxBuffer}\n` +
+                `  hullBGs.length=${this._hullBGs.length} hullBGsDirty=${this._hullBGsDirty} hullBGLs.length=${this._hullBGLs.length}\n` +
+                `  streamer: uniformBuffer=${!!s._uniformBuffer} fragUniformBuffer=${!!s._fragUniformBuffer}\n` +
+                `  anchorBuffer=${!!anchorBuffer} hasTex=${this._hasTex}\n` +
+                `  hullIndirectBuffer=${!!this._hullIndirectBuffer}`
+            );
+            if (this._hullBGs.length === 0 && this._hullBGsDirty) {
+                Logger.warn(`[TreeFarSystem] RENDER: ⚠ hullBGs empty — _maybeRebuildRenderBGs is blocked (check anchorBuffer / uniformBuffer above)`);
+            }
+        }
+        // ───────────────────────────────────────────────────────────────────
         if (!this._initialized || !this._enabled || !encoder) return;
-
+        if (!this._hullPipeline || !this._hullGeo) return;
         this._maybeRebuildRenderBGs();
         if (this._hullBGs.length === 0) return;
 
@@ -861,7 +984,7 @@ export class TreeFarSystem {
     _ensureCountReadbackBuffer() {
         if (this._countReadbackBuffer) return;
         this._countReadbackBuffer = this.device.createBuffer({
-            label: 'MidTree-CountReadback',
+            label: 'FarTree-CountReadback',
             size: 256,
             usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
         });
@@ -869,7 +992,9 @@ export class TreeFarSystem {
 
     _queueCountReadback(commandEncoder) {
         if (!commandEncoder || this._countReadbackQueued || this._countReadbackPending) return;
-        const shouldSample = this._frameCount === 60 || (this._frameCount % 240) === 0;
+        // ── DBG: sample more frequently while investigating ──────────────────
+        const shouldSample = this._frameCount === 5 || this._frameCount === 30 || this._frameCount === 60 || (this._frameCount % 120) === 0;
+        // ───────────────────────────────────────────────────────────────────
         if (!shouldSample) return;
 
         this._ensureCountReadbackBuffer();
@@ -892,7 +1017,15 @@ export class TreeFarSystem {
         this._countReadbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
             const data = new Uint32Array(this._countReadbackBuffer.getMappedRange(0, 4).slice(0));
             const count = data[0] >>> 0;
-            Logger.info(`[TreeFarSystem] tracked=${count}/${this.maxTrees}`);
+            // ── DBG ──────────────────────────────────────────────────────────
+            const sc = this._sourceCache;
+            Logger.warn(
+                `[TreeFarSystem] GPU READBACK frame=${this._frameCount} — ` +
+                `gatheredTrees=${count}/${this.maxTrees} ` +
+                `(${count === 0 ? '⚠ ZERO — nothing rendered' : 'OK'}) ` +
+                `activeLayers=${sc?.activeLayerCount ?? 'N/A'} allLayers=${sc?.totalActiveLayerCount ?? 'N/A'}`
+            );
+            // ─────────────────────────────────────────────────────────────────
             this._countReadbackBuffer.unmap();
             this._countReadbackQueued = false;
             this._countReadbackPending = false;
@@ -907,8 +1040,8 @@ export class TreeFarSystem {
     dispose() {
         this._texBaker?.dispose();
         for (const b of [
-            this._treeBuffer, this._treeCountBuffer, this._trackerParamBuffer,
-            this._assetSpeciesBuffer, this._trackerDispatchArgsBuffer,
+            this._treeBuffer, this._treeCountBuffer, 
+    
             this._hullIndirectBuffer, this._countReadbackBuffer,
         ]) b?.destroy();
         const geo = this._hullGeo;

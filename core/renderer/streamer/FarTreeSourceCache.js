@@ -6,6 +6,22 @@ const ACTIVE_FAR_TREE_FLAG = 1;
 const LAYER_META_U32_STRIDE = 8;
 const FAR_TREE_INSTANCE_STRIDE = 64; // same coarse stride as cluster instances
 
+// ═══════════════════════════════════════════════════════════════════════════
+// FAR TREE DBG — centralised diagnostic helper
+// All far-tier instrumentation goes through this so it can be stripped later.
+// ═══════════════════════════════════════════════════════════════════════════
+const FAR_DBG = {
+    // Log every N frames (for repeated per-frame logs)
+    FRAME_INTERVAL: 120,
+    // How many individual entries to dump in _rebuildState before switching to summary
+    ENTRY_DUMP_LIMIT: 8,
+    // Print a full readiness table of all layers every N refreshes
+    REFRESH_TABLE_INTERVAL: 60,
+    warn(msg)  { Logger.warn(`[FAR-DBG] ${msg}`);  },
+    info(msg)  { Logger.info(`[FAR-DBG] ${msg}`);  },
+    group(tag) { return `[FAR-DBG:${tag}]`; },
+};
+
 export class FarTreeSourceCache {
     constructor(device, opts = {}) {
         this.device = device;
@@ -21,6 +37,16 @@ export class FarTreeSourceCache {
             selectionHoldFrames: clampInt(cfg.selectionHoldFrames ?? 12, 0, 120),
             logDispatches: cfg.logDispatches === true,
         };
+
+        // ── DBG: constructor ────────────────────────────────────────────────
+        FAR_DBG.warn(
+            `FarTreeSourceCache CONSTRUCTED — enabled=${this._cfg.enabled} ` +
+            `tilePoolSize=${this._tilePoolSize} perLayerCapacity=${this._cfg.perLayerCapacity} ` +
+            `maxBakesPerFrame=${this._cfg.maxBakesPerFrame} selectionHoldFrames=${this._cfg.selectionHoldFrames} ` +
+            `assetRegistry=${!!opts.assetRegistry} ` +
+            `rawFarTreeConfig=${JSON.stringify(opts.farTreeConfig ?? null)}`
+        );
+        // ───────────────────────────────────────────────────────────────────
 
         this._queue = [];
         this._queuedLayers = new Set();
@@ -65,6 +91,13 @@ export class FarTreeSourceCache {
     get activeLayerBuffer() { return this._activeLayerBuffer; }
 
     initialize(tileCache) {
+        // ── DBG: initialize entry ───────────────────────────────────────────
+        FAR_DBG.warn(
+            `FarTreeSourceCache.initialize called — already=${this._initialized} ` +
+            `enabled=${this._cfg.enabled} tileCacheProvided=${!!tileCache} ` +
+            `tileCacheEntryCount=${tileCache?.getEntries?.()?.length ?? 'N/A'}`
+        );
+        // ───────────────────────────────────────────────────────────────────
         if (this._initialized || !this._cfg.enabled) return;
         if (!this._assetRegistry) {
             Logger.warn(`${this._logTag} missing assetRegistry; disabling`);
@@ -106,6 +139,19 @@ export class FarTreeSourceCache {
         const memMB =
             (this._tilePoolSize * this._cfg.perLayerCapacity * FAR_TREE_INSTANCE_STRIDE) / (1024 * 1024);
 
+        // ── DBG: initialize result ──────────────────────────────────────────
+        FAR_DBG.warn(
+            `FarTreeSourceCache.initialize COMPLETE — ` +
+            `instanceBuffer=${!!this._instanceBuffer} (${(this._instanceBuffer?.size ?? 0) / 1024}kB) ` +
+            `counterBuffer=${!!this._counterBuffer} layerMetaBuffer=${!!this._layerMetaBuffer} ` +
+            `activeLayerBuffer=${!!this._activeLayerBuffer} ` +
+            `totalMem=${memMB.toFixed(2)}MB ` +
+            `afterSync_allActiveLayers=${this._allActiveLayerCount} ` +
+            `afterSync_selectedLayers=${this._activeLayerCount} ` +
+            `afterSync_pendingBakes=${this._queue.length}`
+        );
+        // ───────────────────────────────────────────────────────────────────
+
         Logger.info(
             `${this._logTag} ready — cap=${this._cfg.perLayerCapacity}/layer ` +
             `layers=${this._tilePoolSize} mem=${memMB.toFixed(2)}MB`
@@ -125,7 +171,16 @@ export class FarTreeSourceCache {
     }
 
     syncFromTileCache(tileCache, enqueueAll = false) {
-        if (!this._initialized) return;
+        // ── DBG ─────────────────────────────────────────────────────────────
+        if (!this._initialized) {
+            FAR_DBG.warn(`syncFromTileCache called but NOT initialized — skipping`);
+            return;
+        }
+        FAR_DBG.warn(
+            `syncFromTileCache called — enqueueAll=${enqueueAll} ` +
+            `tileCacheEntries=${tileCache?.getEntries?.()?.length ?? 'N/A'}`
+        );
+        // ───────────────────────────────────────────────────────────────────
         this._rebuildState(tileCache, enqueueAll);
     }
 
@@ -141,12 +196,21 @@ export class FarTreeSourceCache {
         for (const item of batch) {
             this._queuedLayers.delete(item.layer);
         }
+        // ── DBG ─────────────────────────────────────────────────────────────
+        FAR_DBG.warn(
+            `popBakeBatch — popped=${batch.length} limit=${limit} ` +
+            `remainingQueue=${this._queue.length} ` +
+            `layers=[${batch.map(b => b.layer).join(',')}]`
+        );
+        // ───────────────────────────────────────────────────────────────────
         return batch;
     }
 
     markBakeBatchSubmitted(batch) {
         if (!Array.isArray(batch) || batch.length === 0) return;
-
+        // ── DBG ─────────────────────────────────────────────────────────────
+        const results = [];
+        // ───────────────────────────────────────────────────────────────────
         for (const item of batch) {
             if (!item) continue;
             const layer = item.layer >>> 0;
@@ -156,6 +220,9 @@ export class FarTreeSourceCache {
                 if (!this._records[layer]?.active) {
                     this._layerReadyVersions[layer] = 0;
                 }
+                // ── DBG ─────────────────────────────────────────────────────
+                results.push(`layer=${layer}:INACTIVE_FLAG`);
+                // ───────────────────────────────────────────────────────────
                 continue;
             }
 
@@ -163,8 +230,18 @@ export class FarTreeSourceCache {
             const record = this._records[layer];
             if (record?.active && (record.version >>> 0) === version) {
                 this._layerReadyVersions[layer] = version;
+                // ── DBG ─────────────────────────────────────────────────────
+                results.push(`layer=${layer}:READY(v${version})`);
+                // ───────────────────────────────────────────────────────────
+            } else {
+                // ── DBG ─────────────────────────────────────────────────────
+                results.push(`layer=${layer}:VERSION_MISMATCH(submitted=${version} record=${record?.version ?? 'null'} active=${record?.active})`);
+                // ───────────────────────────────────────────────────────────
             }
         }
+        // ── DBG ─────────────────────────────────────────────────────────────
+        FAR_DBG.warn(`markBakeBatchSubmitted — ${results.join(' | ')}`);
+        // ───────────────────────────────────────────────────────────────────
     }
 
     refreshVisibleOwnerLayers(_tileStreamer) {
@@ -174,14 +251,47 @@ export class FarTreeSourceCache {
         let selectedCount = 0;
         let retainedOwners = 0;
         let residentReadyFill = 0;
+        // ── DBG: per-layer readiness breakdown ──────────────────────────────
+        const dbgRefresh = (this._visibleOwnerRefreshCount % FAR_DBG.REFRESH_TABLE_INTERVAL) === 0;
+        if (dbgRefresh) {
+            const layerDetails = [];
+            for (let li = 0; li < this._allActiveLayerCount; li++) {
+                const l = this._allActiveLayersCPU[li];
+                const rec = this._records[l];
+                const ready = this._isLayerReady(l);
+                const layerVer = this._layerVersions[l];
+                const readyVer = this._layerReadyVersions[l];
+                const retainUntil = this._layerRetainUntil[l];
+                layerDetails.push(
+                    `L${l}(active=${rec?.active} ready=${ready} ` +
+                    `ver=${layerVer} readyVer=${readyVer} ` +
+                    `retainUntil=${retainUntil} selFrame=${this._selectionFrame} ` +
+                    `depth=${rec?.depth ?? '?'} tile=${rec?.tileX ?? '?'},${rec?.tileY ?? '?'})`
+                );
+            }
+            FAR_DBG.warn(
+                `refreshVisibleOwnerLayers #${this._visibleOwnerRefreshCount} — ` +
+                `allActiveLayers=${this._allActiveLayerCount} pendingBakes=${this._queue.length}\n  ` +
+                (layerDetails.length > 0 ? layerDetails.join('\n  ') : '(no resident layers)')
+            );
+        }
+        // ───────────────────────────────────────────────────────────────────
 
         const nextLayers = new Uint32Array(this._tilePoolSize);
         const seenLayers = new Set();
+        // ── DBG: tryPush rejection tracking ─────────────────────────────────
+        const dbgRejections = dbgRefresh ? [] : null;
+        // ───────────────────────────────────────────────────────────────────
 
         const tryPush = (layer, extendRetention = true) => {
-            if (!Number.isFinite(layer) || layer < 0 || layer >= this._tilePoolSize) return false;
+            if (!Number.isFinite(layer) || layer < 0 || layer >= this._tilePoolSize) {
+                dbgRejections?.push(`L${layer}:INVALID`);
+                return false;
+            }
             const record = this._records[layer] ?? null;
-            if (!record?.active || !this._isLayerReady(layer) || seenLayers.has(layer)) return false;
+            if (!record?.active) { dbgRejections?.push(`L${layer}:NOT_ACTIVE`); return false; }
+            if (!this._isLayerReady(layer)) { dbgRejections?.push(`L${layer}:NOT_READY(ver=${this._layerVersions[layer]} readyVer=${this._layerReadyVersions[layer]})`); return false; }
+            if (seenLayers.has(layer)) { dbgRejections?.push(`L${layer}:DUPLICATE`); return false; }
 
             seenLayers.add(layer);
             nextLayers[selectedCount++] = layer >>> 0;
@@ -225,6 +335,16 @@ export class FarTreeSourceCache {
             this.device.queue.writeBuffer(this._activeLayerBuffer, 0, this._activeLayersCPU);
         }
 
+        // ── DBG: result ──────────────────────────────────────────────────────
+        if (dbgRefresh) {
+            FAR_DBG.warn(
+                `refreshVisibleOwnerLayers result — selected=${selectedCount} ` +
+                `retained=${retainedOwners} residentFill=${residentReadyFill} changed=${changed} ` +
+                `rejections=[${dbgRejections.join(' | ')}]`
+            );
+        }
+        // ───────────────────────────────────────────────────────────────────
+
         this._visibleOwnerRefreshCount++;
         const logLine =
             `distResident selected=${selectedCount}/${this._allActiveLayerCount} ` +
@@ -246,6 +366,45 @@ export class FarTreeSourceCache {
         const entries = tileCache?.getEntries?.() ?? [];
         const layersToClear = [];
         let activeCount = 0;
+
+        // ── DBG: _rebuildState ───────────────────────────────────────────────
+        if (!this._dbg_rebuildCount) this._dbg_rebuildCount = 0;
+        this._dbg_rebuildCount++;
+        const logThisRebuild = this._dbg_rebuildCount <= 5 || (this._dbg_rebuildCount % 120) === 0;
+        if (logThisRebuild) {
+            const repCounts = {};
+            const entryDetails = [];
+            let nullEntries = 0;
+            let layerOutOfRange = 0;
+            let entryTotal = 0;
+            for (const e of entries) {
+                if (!e) { nullEntries++; continue; }
+                entryTotal++;
+                const r = e.treeRepresentation ?? '(undef)';
+                repCounts[r] = (repCounts[r] ?? 0) + 1;
+                if (entryDetails.length < FAR_DBG.ENTRY_DUMP_LIMIT) {
+                    entryDetails.push(
+                        `{layer=${e.layer} face=${e.face} depth=${e.depth} ` +
+                        `tile=${e.x},${e.y} rep=${r} ` +
+                        `nomDist=${e.nominalDistance?.toFixed(0) ?? '?'} ` +
+                        `tileWorldSize=${e.tileWorldSize?.toFixed(0) ?? '?'}}`
+                    );
+                }
+                if ((e.layer >>> 0) >= this._tilePoolSize) layerOutOfRange++;
+            }
+            FAR_DBG.warn(
+                `_rebuildState #${this._dbg_rebuildCount} enqueueAll=${enqueueAll} — ` +
+                `totalEntries=${entryTotal} nullEntries=${nullEntries} layerOutOfRange=${layerOutOfRange} ` +
+                `repBreakdown=${JSON.stringify(repCounts)}`
+            );
+            if (entryDetails.length > 0) {
+                FAR_DBG.warn(`  first ${entryDetails.length} entries: ${entryDetails.join(' ')}`);
+            }
+            if (entryTotal === 0) {
+                FAR_DBG.warn(`  ⚠ NO ENTRIES — tileCache has nothing; upstream tile pipeline may not be running`);
+            }
+        }
+        // ───────────────────────────────────────────────────────────────────
 
         for (const entry of entries) {
             if (!entry) continue;
@@ -313,6 +472,16 @@ export class FarTreeSourceCache {
         this._allActiveLayersCPU = nextAllActiveLayers;
         this._allActiveLayerCount = activeCount;
 
+        // ── DBG: post-rebuild summary ────────────────────────────────────────
+        if (logThisRebuild) {
+            FAR_DBG.warn(
+                `_rebuildState #${this._dbg_rebuildCount} RESULT — ` +
+                `activeCount=${activeCount} layersToClear=${layersToClear.length} ` +
+                `queueLength=${this._queue.length} queuedLayerSet=${this._queuedLayers.size}`
+            );
+        }
+        // ───────────────────────────────────────────────────────────────────
+
         // Preserve previous selected layers if still resident/active.
         const preservedActiveLayers = new Uint32Array(this._tilePoolSize);
         let preservedActiveCount = 0;
@@ -368,9 +537,60 @@ export class FarTreeSourceCache {
 
     _entryHasBakeableTrees(entry) {
         if (!entry) return false;
-        if (entry.treeRepresentation !== ASSET_BAKE_REPRESENTATION.CLUSTER) return false;
+
+        // ── DBG: track every representation we ever see ──────────────────────
+        if (!this._dbg_repSeen) {
+            this._dbg_repSeen = new Map();   // rep → count
+            this._dbg_rejReasons = new Map(); // reason → count
+            this._dbg_firstArchetypeLog = false;
+        }
+        const rep = entry.treeRepresentation ?? '(undefined)';
+        this._dbg_repSeen.set(rep, (this._dbg_repSeen.get(rep) ?? 0) + 1);
+
+        // On the very first call, also inspect the archetype registry fully
+        if (!this._dbg_firstArchetypeLog) {
+            this._dbg_firstArchetypeLog = true;
+            setTimeout(() => {
+                // Dump all archetypes
+                const archetypes = [];
+                for (let ai = 0; ai < 32; ai++) {
+                    const a = this._assetRegistry.getArchetypeByIndex?.(ai);
+                    if (!a) break;
+                    archetypes.push(`[${ai}] id=${a.id ?? '?'} isActive=${a.isActive} category=${a.category ?? '?'}`);
+                }
+                FAR_DBG.warn(
+                    `_entryHasBakeableTrees — archetype dump (${archetypes.length} found):\n  ` +
+                    (archetypes.length ? archetypes.join('\n  ') : '(none)')
+                );
+                // Dump all representation counts seen so far
+                const repSummary = [...this._dbg_repSeen.entries()].map(([k, v]) => `${k}:${v}`).join(', ');
+                FAR_DBG.warn(`_entryHasBakeableTrees — representation counts so far: ${repSummary}`);
+                FAR_DBG.warn(
+                    `_entryHasBakeableTrees — CLUSTER value="${ASSET_BAKE_REPRESENTATION.CLUSTER}" ` +
+                    `RUNTIME_TREE value="${ASSET_BAKE_REPRESENTATION.RUNTIME_TREE}"`
+                );
+            }, 200);
+        }
+        // ───────────────────────────────────────────────────────────────────
+
+        if (entry.treeRepresentation !== ASSET_BAKE_REPRESENTATION.CLUSTER) {
+            const reason = `rep_mismatch:${rep}`;
+            this._dbg_rejReasons.set(reason, (this._dbg_rejReasons.get(reason) ?? 0) + 1);
+            return false;
+        }
         const treeArchetype = this._assetRegistry.getArchetypeByIndex?.(0);
-        return !!treeArchetype?.isActive;
+        if (!treeArchetype?.isActive) {
+            this._dbg_rejReasons.set('archetype_inactive', (this._dbg_rejReasons.get('archetype_inactive') ?? 0) + 1);
+            return false;
+        }
+        return true;
+    }
+
+    // ── DBG: call this from console to see current rejection summary
+    _dbgRejectionSummary() {
+        const repSummary = [...(this._dbg_repSeen?.entries() ?? [])].map(([k, v]) => `${k}:${v}`).join(', ');
+        const rejSummary = [...(this._dbg_rejReasons?.entries() ?? [])].map(([k, v]) => `${k}:${v}`).join(', ');
+        FAR_DBG.warn(`REJECTION SUMMARY — reps seen: {${repSummary}} | rejection reasons: {${rejSummary}}`);
     }
 
     _recordsEqual(a, b) {

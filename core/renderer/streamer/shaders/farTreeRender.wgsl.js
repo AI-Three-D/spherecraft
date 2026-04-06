@@ -18,20 +18,30 @@ struct MidUniforms {
     windSpeed:        f32,
 };
 
-struct MidTreeInfo {
+//
+// Flat far-tier render instance.
+// Produced by the far gather/compact pass from baked FarTreeSourceCache data.
+//
+struct FarTreeRender {
+    // Row 0
     worldPosX: f32, worldPosY: f32, worldPosZ: f32, rotation: f32,
-    scaleX: f32, scaleY: f32, scaleZ: f32, distanceToCamera: f32,
-    speciesIndex: u32, variantSeed: u32, templateIndex: u32, tierFadeBits: u32,
-    foliageR: f32, foliageG: f32, foliageB: f32, foliageA: f32,
-    anchorStart: u32, anchorCount: u32, _r40: u32, _r41: u32,
-    canopyCenterX: f32, canopyCenterY: f32, canopyCenterZ: f32, _r5: f32,
-    canopyExtentX: f32, canopyExtentY: f32, canopyExtentZ: f32, _r6: f32,
-    _r70: f32, _r71: f32, _r72: f32, _r73: f32,
+
+    // Row 1
+    canopyCenterX: f32, canopyCenterY: f32, canopyCenterZ: f32, packedCount: f32,
+
+    // Row 2
+    canopyExtentX: f32, canopyExtentY: f32, canopyExtentZ: f32, scale: f32,
+
+    // Row 3
+    foliageR: f32, foliageG: f32, foliageB: f32, seedF: f32,
+
+    // Row 4
+    distToCam: f32, tierFade: f32, groupRadius: f32, _pad0: f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: MidUniforms;
-@group(0) @binding(1) var<storage, read> trees: array<MidTreeInfo>;
-// Kept for bind-group compatibility with TreeFarSystem.
+@group(0) @binding(1) var<storage, read> trees: array<FarTreeRender>;
+// Kept for bind-group compatibility with TreeFarSystem / existing layout.
 @group(0) @binding(2) var<storage, read> anchors: array<u32>;
 
 struct VertexInput {
@@ -52,6 +62,7 @@ struct VertexOutput {
     @location(6) @interpolate(flat) vSeed: u32,
     @location(7) vWorldPos: vec3<f32>,
 };
+
 fn pcg(v: u32) -> u32 {
     var s = v * 747796405u + 2891336453u;
     let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
@@ -62,39 +73,42 @@ fn pcgF(v: u32) -> f32 {
     return f32(pcg(v)) / 4294967296.0;
 }
 
-fn dirFromAngle(angle: f32) -> vec2<f32> {
-    return vec2<f32>(cos(angle), sin(angle));
+fn hashCombine(a: u32, b: u32) -> u32 {
+    return pcg(a ^ (b * 374761393u + 668265263u));
 }
 
-fn packedTreeOffset(seed: u32, treeIndex: u32, treeCount: u32, radius: f32) -> vec2<f32> {
-    if (treeCount <= 1u || radius <= 0.001) {
+fn packedTreeOffset(seed: u32, treeIndex: u32, packedCount: u32, groupRadius: f32) -> vec2<f32> {
+    if (packedCount <= 1u || groupRadius <= 0.0001) {
         return vec2<f32>(0.0, 0.0);
     }
 
-    let baseAngle = pcgF(seed ^ 0x13579BDFu) * 6.2831853;
-    let jitter = (pcgF(seed ^ (treeIndex * 0x9E3779B9u + 0x7F4A7C15u)) - 0.5) * 0.35;
+    let packedSeed = hashCombine(seed, treeIndex + 17u);
 
-    if (treeCount >= 4u && treeIndex == 0u) {
-        return vec2<f32>(0.0, 0.0);
-    }
+    // Stable angle per packed tree.
+    let angle = pcgF(hashCombine(packedSeed, 1u)) * 6.28318530718;
 
-    if (treeCount >= 4u) {
-        let around = f32(treeIndex - 1u) * (6.2831853 / 3.0) + baseAngle;
-        return dirFromAngle(around + jitter) * radius;
-    }
+    // Radius grows with tree index so copies do not collapse to the same point.
+    let indexFrac = clamp(f32(treeIndex) / max(f32(packedCount - 1u), 1.0), 0.0, 1.0);
 
-    let ringAngle = baseAngle + f32(treeIndex) * (6.2831853 / f32(treeCount)) + jitter;
-    return dirFromAngle(ringAngle) * radius * 0.72;
+    // Add some radial jitter but keep the first tree close to center.
+    let radialJitter = mix(0.55, 1.0, pcgF(hashCombine(packedSeed, 2u)));
+    let radialFrac = indexFrac * radialJitter;
+
+    let r = groupRadius * radialFrac;
+    return vec2<f32>(cos(angle), sin(angle)) * r;
 }
 
 @vertex
 fn main(input: VertexInput, @builtin(instance_index) instIdx: u32) -> VertexOutput {
     var out: VertexOutput;
-    let tree = trees[instIdx];
 
+    let tree = trees[instIdx];
     let treePos = vec3<f32>(tree.worldPosX, tree.worldPosY, tree.worldPosZ);
+
+    // Planet-relative "up" for spherical terrain.
     let sphereDir = normalize(treePos - uniforms.planetOrigin);
 
+    // Robust tangent frame.
     var refDir = vec3<f32>(0.0, 1.0, 0.0);
     if (abs(dot(sphereDir, refDir)) > 0.99) {
         refDir = vec3<f32>(1.0, 0.0, 0.0);
@@ -108,19 +122,29 @@ fn main(input: VertexInput, @builtin(instance_index) instIdx: u32) -> VertexOutp
     let rotT =  tangent * cosR + bitangent * sinR;
     let rotB = -tangent * sinR + bitangent * cosR;
 
-    let centre = vec3<f32>(tree.canopyCenterX, tree.canopyCenterY, tree.canopyCenterZ);
+    let centre = vec3<f32>(
+        tree.canopyCenterX,
+        tree.canopyCenterY,
+        tree.canopyCenterZ
+    );
+
     let extent = vec3<f32>(
         max(tree.canopyExtentX, 0.05),
         max(tree.canopyExtentY, 0.05),
         max(tree.canopyExtentZ, 0.05)
     );
 
-    let packedCount = ${MAX_PACKED_TREES}u;
+    let packedCount = clamp(
+        u32(max(tree.packedCount, 1.0) + 0.5),
+        1u,
+        ${MAX_PACKED_TREES}u
+    );
     let treeIndex = min(u32(input.canopyId + 0.5), packedCount - 1u);
 
-    let groupRadius = max(tree.scaleX * 0.22, 0.4);
-    let packedOffsetXZ = packedTreeOffset(tree.variantSeed, treeIndex, packedCount, groupRadius);
+    let seed = bitcast<u32>(tree.seedF);
+    let packedOffsetXZ = packedTreeOffset(seed, treeIndex, packedCount, max(tree.groupRadius, 0.0));
 
+    // Outer trees become slightly smaller for a softer grouped silhouette.
     let packedScale = mix(
         1.0,
         0.72,
@@ -150,11 +174,11 @@ fn main(input: VertexInput, @builtin(instance_index) instIdx: u32) -> VertexOutp
     out.clipPos = uniforms.projectionMatrix * viewPos;
     out.vNormal = worldNormal;
     out.vColor = vec3<f32>(tree.foliageR, tree.foliageG, tree.foliageB);
-    out.vDist = length(viewPos.xyz);
+    out.vDist = select(length(viewPos.xyz), tree.distToCam, tree.distToCam > 0.0);
     out.vLocalHeight = input.position.y * 0.5 + 0.5;
     out.vLocalPos = deformedLocal;
-    out.vTierFade = bitcast<f32>(tree.tierFadeBits);
-    out.vSeed = tree.variantSeed;
+    out.vTierFade = clamp(tree.tierFade, 0.0, 1.0);
+    out.vSeed = seed;
     out.vWorldPos = worldPos;
     return out;
 }
