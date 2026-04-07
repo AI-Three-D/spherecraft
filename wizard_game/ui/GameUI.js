@@ -58,17 +58,22 @@ export class GameUI {
         const ui = document.createElement('div');
         ui.id = 'game-ui';
         ui.style.cssText = `
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            width: min(380px, calc(100vw - 20px));
-            display: flex;
-            flex-direction: column;
-            align-items: stretch;
-            gap: 10px;
-            pointer-events: none;
-            z-index: 100;
-        `;
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        width: min(380px, calc(100vw - 20px));
+        max-height: calc(100vh - 20px);
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+        pointer-events: auto;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+        z-index: 100;
+    `;
 
         const hudContent = document.createElement('div');
         hudContent.style.cssText = 'pointer-events: none;';
@@ -135,22 +140,28 @@ export class GameUI {
         const debugControls = document.createElement('div');
         debugControls.id = 'debug-controls';
         debugControls.style.cssText = `
-            display: none;
-            pointer-events: auto;
-            color: white;
-            font-family: Georgia, "Times New Roman", serif;
-            font-size: 12px;
-            background:
-                linear-gradient(180deg, rgba(80, 126, 149, 0.22), rgba(8, 18, 28, 0.84)),
-                rgba(4, 10, 18, 0.82);
-            padding: 12px;
-            border-radius: 18px;
-            border: 1px solid rgba(170, 220, 242, 0.28);
-            box-shadow:
-                inset 0 1px 0 rgba(255,255,255,0.15),
-                0 16px 40px rgba(0,0,0,0.28);
-            z-index: 100;
-        `;
+        display: block;
+        pointer-events: auto;
+        color: white;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 12px;
+        background:
+            linear-gradient(180deg, rgba(80, 126, 149, 0.22), rgba(8, 18, 28, 0.84)),
+            rgba(4, 10, 18, 0.82);
+        padding: 12px;
+        border-radius: 18px;
+        border: 1px solid rgba(170, 220, 242, 0.28);
+        box-shadow:
+            inset 0 1px 0 rgba(255,255,255,0.15),
+            0 16px 40px rgba(0,0,0,0.28);
+        z-index: 1000;
+        max-width: min(380px, calc(100vw - 20px));
+        max-height: calc(100vh - 80px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+    `;
         debugControls.innerHTML = this._getDebugControlsHTML();
         this.uiElement?.appendChild(debugControls);
         this.debugControls = debugControls;

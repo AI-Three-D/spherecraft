@@ -522,7 +522,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
         ? Math.max(0, Math.floor(terrainShaderConfig.aerialMaxLod))
         : 2;
     const normalMapMaxLod = Number.isFinite(terrainShaderConfig.normalMapMaxLod)
-        ? Math.max(0, Math.floor(terrainShaderConfig.normalMapMaxLod))
+        ? Math.max(-1, Math.floor(terrainShaderConfig.normalMapMaxLod))
         : 2;
     const altitudeNormalMinMeters = Number.isFinite(terrainShaderConfig.altitudeNormalMinMeters)
         ? Math.max(0, terrainShaderConfig.altitudeNormalMinMeters)
@@ -1861,8 +1861,8 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     }
     // Debug 16: terrain AO mask (white=no AO, dark=occluded)
     if (debugMode == 16) {
-        let ao = sampleTerrainAO(input, layer);
-        return vec4<f32>(ao, ao, ao, 1.0);
+     /*   let ao = sampleTerrainAO(input, layer);
+        return vec4<f32>(ao, ao, ao, 1.0);*/
     }
     if (debugMode == 2) {
         let splat = sampleSplatData(input, layer);
@@ -2044,11 +2044,11 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
 
     // 16 — Raw AO mask, bilinear, through the normal atlas-UV transform.
     //      This is what the lighting code actually samples. Dark = occluded.
-    if (debugMode == 16) {
-        let ao = sampleTerrainAO(input, layer);
-        return vec4<f32>(ao, ao, ao, 1.0);
-    }
-
+if (debugMode == 16) {
+ /*   let ao = sampleTerrainAO(input, layer);
+    let occ = clamp((1.0 - ao) * 12.0, 0.0, 1.0);
+    return vec4<f32>(occ, 1.0 - occ, 0.0, 1.0);*/
+}
     // 17 — Occlusion amount, 5× amplified, false-coloured.
     //      Green = no darkening. Red = heavy darkening. Use this when
     //      mode 16 "looks white but maybe not quite" — it'll make 2%
@@ -2071,12 +2071,14 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     //      "not bound at all". The 1×1 dummy shows near-black (~0.004).
     //      A real 64×64 mask shows grey (~0.25). 128×128 shows ~0.5.
     if (debugMode == 19) {
+    /*
         if (!ENABLE_TERRAIN_AO) {
             return vec4<f32>(0.0, 0.0, 0.0, 1.0);
         }
         let dims = textureDimensions(terrainAOMask);
         let v = f32(dims.x) / 256.0;
         return vec4<f32>(v, v, v, 1.0);
+        */
     }
 
     // 20 — Raw AO, nearest-neighbour, NO atlas transform.
@@ -2084,14 +2086,14 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     //      UV bias/scale is wrong for this tile. (Only diverges from 16
     //      on fallback tiles where uvScale < 1.)
     if (debugMode == 20) {
-        if (!ENABLE_TERRAIN_AO) {
+   /*     if (!ENABLE_TERRAIN_AO) {
             return vec4<f32>(0.0, 0.0, 0.0, 1.0);
         }
         let dims = vec2<i32>(textureDimensions(terrainAOMask));
         let mc = dims - vec2<i32>(1);
         let c  = clamp(vec2<i32>(input.vUv * vec2<f32>(dims)), vec2<i32>(0), mc);
         let ao = textureLoad(terrainAOMask, c, layer, 0).r;
-        return vec4<f32>(ao, ao, ao, 1.0);
+        return vec4<f32>(ao, ao, ao, 1.0);  */
     }
 
     // 21 — Compile-time AO enable state for THIS pipeline variant.

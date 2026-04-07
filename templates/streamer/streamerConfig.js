@@ -287,8 +287,8 @@ export const TERRAIN_AO_CONFIG = {
     // mask is, because ambient is a tiny fraction of total light.
     //
   
-    ambientStrength: 1.9,
-    directStrength:  1.5,
+    ambientStrength: 0.0,
+    directStrength:  0.0,
 
     // Old single-knob field kept for backward compat with the
     // terrainAOStrength uniform slot; now only used as a master dial

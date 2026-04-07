@@ -365,9 +365,18 @@ fn bake(@builtin(global_invocation_id) gid: vec3<u32>) {
     let uMin     = f32(bt.tileX) / gridSize;
     let vMin     = f32(bt.tileY) / gridSize;
 
-    // texel → face UV (centre-of-texel)
-    let tu = (f32(gid.x) + 0.5) / f32(AO_RES);
-    let tv = (f32(gid.y) + 0.5) / f32(AO_RES);
+    // texel → face UV.
+    // Border texels (k=0 and k=AO_RES-1) are placed at the exact tile
+    // boundary (tu=0 / tu=1) rather than the usual centre-of-texel offset.
+    // Adjacent tiles then share the same world position for their facing
+    // border texels, so the smoothstep distance is identical and no seam
+    // is baked in. Interior texels keep the standard centre-of-texel mapping.
+    var tu = (f32(gid.x) + 0.5) / f32(AO_RES);
+    if (gid.x == 0u)           { tu = 0.0; }
+    if (gid.x == AO_RES - 1u) { tu = 1.0; }
+    var tv = (f32(gid.y) + 0.5) / f32(AO_RES);
+    if (gid.y == 0u)           { tv = 0.0; }
+    if (gid.y == AO_RES - 1u) { tv = 1.0; }
     let faceU = uMin + tu * uvSize;
     let faceV = vMin + tv * uvSize;
 

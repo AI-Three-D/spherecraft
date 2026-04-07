@@ -62,7 +62,7 @@ export class PlanetConfig {
     this.tileConfig = requireObject(options.tileConfig, 'tileConfig');
     this.atlasConfig = requireObject(options.atlasConfig, 'atlasConfig');
     this.grassConfig = requireObject(options.grassConfig, 'grassConfig');
-    this.macroTileSpan = options.macroTileSpan ?? 4;
+    this.macroTileSpan = options.macroTileSpan ?? 16;
     this.macroMaxLOD = options.macroMaxLOD ?? 0;
     this.terrainGeneration = requireObject(options.terrainGeneration, 'terrainGeneration');
 

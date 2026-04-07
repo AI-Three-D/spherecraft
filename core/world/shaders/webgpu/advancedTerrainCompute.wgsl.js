@@ -266,11 +266,13 @@ fn computeNormalSlopeFromHeightMapSphere(
     // chunks, creating a 1-pixel-wide normal discontinuity (visible as seams
     // under point lights). The base height is smooth enough that ±1 ULP in
     // u/v causes no perceptible gradient error.
+    /*
     if (coordC.x == maxC.x) { hR = sampleBaseHeightProcedural(face, uR, v); }
     if (coordC.x == 0) { hL = sampleBaseHeightProcedural(face, uL, v); }
     if (coordC.y == maxC.y) { hU = sampleBaseHeightProcedural(face, u, vU); }
     if (coordC.y == 0) { hD = sampleBaseHeightProcedural(face, u, vD); }
 
+    */
     let nd = normalDisplacementScale();
     let pR = dirR * (1.0 + hR * nd);
     let pL = dirL * (1.0 + hL * nd);

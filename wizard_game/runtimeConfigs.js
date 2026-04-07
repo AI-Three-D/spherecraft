@@ -110,7 +110,7 @@ export function createEngineConfig() {
         macroStartLod: 2,
         clusteredMaxLod: 1,
         aerialMaxLod: 2,
-        normalMapMaxLod: 2,
+        normalMapMaxLod: 3,
         altitudeNormalMinMeters: 8000,
         altitudeShadowMinMeters: 12000,
         shadowDistanceMaxMeters: 1000
@@ -726,7 +726,7 @@ export function createGameDataConfig() {
             qualityLevels: GRASS_QUALITY_LEVELS,
             terrainShadowStrength: 0.18
           },
-          macroTileSpan: 4,   // macro texture covers 16x16 micro tiles (macroScale = 1/macroTileSpan)
+          macroTileSpan: 16,   // macro texture covers 16x16 micro tiles (macroScale = 1/macroTileSpan)
           macroMaxLOD: 3,     // upper LOD bound for macro overlay (lower bound in rendering.terrainShader.macroStartLod)
           // ── Tile transition blend rules ──────────────────────────────────────
           // Each entry selects which blend algorithm to use when two tile types

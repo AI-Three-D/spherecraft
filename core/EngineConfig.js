@@ -56,7 +56,7 @@ export class EngineConfig {
         macroStartLod: requireInt(terrainShader.macroStartLod ?? 2, 'rendering.terrainShader.macroStartLod', 0),
         clusteredMaxLod: requireInt(terrainShader.clusteredMaxLod ?? 1, 'rendering.terrainShader.clusteredMaxLod', 0),
         aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 2, 'rendering.terrainShader.aerialMaxLod', 0),
-        normalMapMaxLod: requireInt(terrainShader.normalMapMaxLod ?? 2, 'rendering.terrainShader.normalMapMaxLod', 0),
+        normalMapMaxLod: requireInt(terrainShader.normalMapMaxLod ?? 2, 'rendering.terrainShader.normalMapMaxLod', -1),
         altitudeNormalMinMeters: requireNumber(terrainShader.altitudeNormalMinMeters ?? 8000, 'rendering.terrainShader.altitudeNormalMinMeters'),
         altitudeShadowMinMeters: requireNumber(terrainShader.altitudeShadowMinMeters ?? 12000, 'rendering.terrainShader.altitudeShadowMinMeters'),
         shadowDistanceMaxMeters: requireNumber(terrainShader.shadowDistanceMaxMeters ?? 1000, 'rendering.terrainShader.shadowDistanceMaxMeters')
