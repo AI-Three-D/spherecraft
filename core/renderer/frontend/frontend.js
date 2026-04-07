@@ -539,10 +539,28 @@ async loadGLB(url, options = {}) {
     const worldMatrix = this._computeGLBWorldMatrix(options);
     return await this.skinnedMeshRenderer.addInstance(asset, worldMatrix);
 }
-    updateLighting(starSystem) {
-        this._updateGlobalLighting(starSystem);
-        this._updateClusteredLighting();
+
+
+_preparePerFrameLightingAndParticles(encoder) {
+    // 1) Let particles update their attached point lights first.
+    if (this.particleSystem) {
+        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
     }
+
+    // 2) Upload the latest light list after particle lights have moved/flickered.
+    if (this.clusterGrid && this.lightManager && this.clusterLightBuffers) {
+        this.clusterGrid.updateFromCamera(this.camera);
+        this.clusterLightBuffers.setCamera(this.camera);
+        this.clusterLightBuffers.upload(this.lightManager);
+        this._pushClusterBuffersToMaterials();
+
+        // 3) Build cluster → light lists for this exact frame.
+        this.clusterLightBuffers.dispatchCompute(encoder);
+    }
+}
+updateLighting(starSystem) {
+    this._updateGlobalLighting(starSystem);
+}
     
     _updateGlobalLighting(starSystem) {
         this.lightingController.update(
@@ -593,14 +611,22 @@ async loadGLB(url, options = {}) {
     }
     _updateClusteredLighting() {
         if (!this.clusterGrid || !this.lightManager) return;
-    
+
         this.clusterGrid.updateFromCamera(this.camera);
-    
+
         if (!this.clusterLightBuffers) return;
-    
+
         this.clusterLightBuffers.setCamera(this.camera);
         this.clusterLightBuffers.upload(this.lightManager);
         this._pushClusterBuffersToMaterials();
+    }
+
+    // Dispatches the GPU cluster-assignment compute pass.
+    // Must be called with a command encoder OUTSIDE any active render pass,
+    // after _updateClusteredLighting() has uploaded the light data for this frame.
+    _dispatchClusterLighting(encoder) {
+        if (!this.clusterLightBuffers) return;
+        this.clusterLightBuffers.dispatchCompute(encoder);
     }
     _pushClusterBuffersToMaterials() {
         const buf = this.clusterLightBuffers;
@@ -852,28 +878,19 @@ async loadGLB(url, options = {}) {
             this.backend.endRenderPassForCompute();
             const encoder = this.backend.getCommandEncoder();
             
-            // Dispatch clustered light assignment compute
-            if (this.clusterLightBuffers) {
-                this.clusterLightBuffers.dispatchCompute(encoder);
-            }
-
+            // Update particle-attached lights first, then upload/assign clustered lights.
+            this._preparePerFrameLightingAndParticles(encoder);
+            
             // === SHADOW PASSES ===
             if (this.gpuShadowRenderer?.isReady) {
-                // Update cascade matrices based on camera and sun
                 this.gpuShadowRenderer.updateCascadeParams(this.camera, encoder);
-                
-                // Cull visible tiles into shadow instance buffer
                 this.gpuShadowRenderer.cullAndBuildIndirect(encoder);
-                
-                // Render depth to shadow maps
                 this.gpuShadowRenderer.renderShadowPasses(encoder);
             }
-
+            
             this.quadtreeTileManager.update(this.camera, encoder);
             this.backend.resumeRenderPass();
             
-            // Pass shadow renderer to terrain for bind group creation
-    
             this.quadtreeTerrainRenderer.render(this.camera, viewMatrix, projectionMatrix);
 
                 if (this.globalOceanRenderer?.isReady?.()) {
@@ -893,23 +910,12 @@ async loadGLB(url, options = {}) {
                     this.backend.endRenderPassForCompute();
                     const encoder = this.backend.getCommandEncoder();
                     this.assetStreamer.update(encoder, this.camera);
-
-                    // Dispatch pending click raycast
-                    if (this._actorManager?._pendingClick) {
-                        // _pendingClick is set by GameEngine's click handler
-                        // We need access to it — GameEngine sets it on the actorManager
-                    }
-
+                
                     this._dispatchActorCompute(encoder);
-
-                    if (this.particleSystem) {
-                        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
-                    }
-
+                
                     this.backend.resumeRenderPass();
                     this.assetStreamer.render(this.camera, viewMatrix, projectionMatrix);
-
-                    // Render destination marker during active render pass
+                
                     if (this._actorManager?.destinationMarker?.active) {
                         this._actorManager.renderOverlays(
                             this.backend._renderPassEncoder,
@@ -921,16 +927,10 @@ async loadGLB(url, options = {}) {
                     this.backend.endRenderPassForCompute();
                     const encoder = this.backend.getCommandEncoder();
                     this._dispatchActorCompute(encoder);
-                    if (this.particleSystem) {
-                        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
-                    }
                     this.backend.resumeRenderPass();
-                } else if (this.particleSystem) {
-                    this.backend.endRenderPassForCompute();
-                    const encoder = this.backend.getCommandEncoder();
-                    this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
-                    this.backend.resumeRenderPass();
-                }
+                }   
+
+                
                 if (this.skinnedMeshRenderer?.isReady()) {
                     this.skinnedMeshRenderer.update(this._lastDeltaTime);
                     this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
@@ -941,7 +941,7 @@ async loadGLB(url, options = {}) {
                 if (this.particleSystem && this.backend._renderPassEncoder) {
                     this.particleSystem.render(this.backend._renderPassEncoder);
                 }
-                
+     
             }
             return;
         }

@@ -118,21 +118,67 @@ export class ParticleSystem {
         emitter._needsActorSnap = !!emitter._snapToActorFn;
 
         // Attach a dynamic point light if a light manager is available.
-        emitter._pointLight = null;
-        emitter._baseLightIntensity = overrides.lightIntensity ?? 2.5;
+        emitter._pointLights = [];
+        emitter._baseLightIntensity = overrides.lightIntensity ?? 18.0;
         emitter._lightPhase = Math.random() * Math.PI * 2; // random flicker phase
         if (this._lightManager) {
             const lm = this._lightManager;
             const pos = new Vector3(emitter.position.x, emitter.position.y + 0.3, emitter.position.z);
-            emitter._pointLight = lm.addLight(LightType.POINT, {
-                position: pos,
-                color:     { r: 1.0, g: 0.45, b: 0.08 },  // warm fire orange
-                intensity: emitter._baseLightIntensity,
-                radius:    overrides.lightRadius ?? 10.0,
-                decay:     2.0,
-                dynamic:   true,
-                name:      'campfire_light',
-            });
+// Attach dynamic point lights if a light manager is available.
+emitter._pointLights = [];
+emitter._baseLightIntensity = overrides.lightIntensity ?? 110.0;
+emitter._lightPhase = Math.random() * Math.PI * 2;
+
+if (this._lightManager) {
+    const lm = this._lightManager;
+    const px = emitter.position.x;
+    const py = emitter.position.y;
+    const pz = emitter.position.z;
+
+    // 0) Main flame core
+    emitter._pointLights.push(lm.addLight(LightType.POINT, {
+        position: new Vector3(px, py + 1.35, pz),
+        color:     { r: 1.00, g: 0.58, b: 0.20 },
+        intensity: emitter._baseLightIntensity,
+        radius:    overrides.lightRadius ?? 18.0,
+        decay:     0.018,
+        dynamic:   true,
+        name:      'campfire_light_core',
+    }));
+
+    // 1) Ember / coal glow
+    emitter._pointLights.push(lm.addLight(LightType.POINT, {
+        position: new Vector3(px - 0.20, py + 0.30, pz + 0.12),
+        color:     { r: 1.00, g: 0.28, b: 0.08 },
+        intensity: emitter._baseLightIntensity * 0.30,
+        radius:    8.5,
+        decay:     0.028,
+        dynamic:   true,
+        name:      'campfire_light_embers',
+    }));
+
+    // 2) Secondary warm lobe
+    emitter._pointLights.push(lm.addLight(LightType.POINT, {
+        position: new Vector3(px + 0.28, py + 1.60, pz - 0.08),
+        color:     { r: 1.00, g: 0.72, b: 0.30 },
+        intensity: emitter._baseLightIntensity * 0.22,
+        radius:    11.0,
+        decay:     0.022,
+        dynamic:   true,
+        name:      'campfire_light_secondary',
+    }));
+
+    // 3) High fill light: broad + dim, to fake bounced ambient firelight
+    emitter._pointLights.push(lm.addLight(LightType.POINT, {
+        position: new Vector3(px, py + 4.5, pz),
+        color:     { r: 1.00, g: 0.66, b: 0.32 },
+        intensity: emitter._baseLightIntensity * 0.18,
+        radius:    28.0,
+        decay:     0.010,
+        dynamic:   true,
+        name:      'campfire_light_fill',
+    }));
+}
         }
 
         this._registerEmitter(emitter);
@@ -229,38 +275,110 @@ export class ParticleSystem {
         // ping-pong swaps only once at the end of the frame.
         for (const emitter of this.emitters) {
             // Deferred actor-snap placement.
-            if (emitter._needsActorSnap) {
-                if (emitter._snapWaitFrames === undefined) emitter._snapWaitFrames = 0;
-                emitter._snapWaitFrames++;
-                if (emitter._snapWaitFrames >= emitter._snapSettleFrames) {
-                    const actor = emitter._snapToActorFn?.();
-                    const p = actor?.position;
-                    if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
-                        emitter.position.x = p.x;
-                        emitter.position.y = p.y;
-                        emitter.position.z = p.z;
-                        emitter._needsActorSnap = false;
-                        // eslint-disable-next-line no-console
-                        console.log(
-                            `[ParticleSystem] snapped to actor ` +
-                            `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
-                            `after ${emitter._snapWaitFrames} frames`
-                        );
+            // After the initial snap we keep reading the actor's Y every frame so
+            // that when fine-LOD terrain loads and the player height jumps the
+            // emitter (and its point light) follow immediately instead of being
+            // stranded underground.
+            if (emitter._snapToActorFn) {
+                if (emitter._needsActorSnap) {
+                    if (emitter._snapWaitFrames === undefined) emitter._snapWaitFrames = 0;
+                    emitter._snapWaitFrames++;
+                    if (emitter._snapWaitFrames >= emitter._snapSettleFrames) {
+                        const actor = emitter._snapToActorFn?.();
+                        const p = actor?.position;
+                        if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
+                            emitter.position.x = p.x;
+                            emitter.position.y = p.y;
+                            emitter.position.z = p.z;
+                            emitter._needsActorSnap = false;
+                            // eslint-disable-next-line no-console
+                            console.log(
+                                `[ParticleSystem] snapped to actor ` +
+                                `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
+                                `after ${emitter._snapWaitFrames} frames`
+                            );
+                        }
+                    }
+                } else {
+                    //Hacky way to keep the emitter (and its point light) following the actor after snap, so they don't get stranded underground when the player height jumps due to fine-LOD terrain streaming in.
+                    if (emitter._postSnapFollowFrames === undefined) {
+                        emitter._postSnapFollowFrames = 45;
+                    }
+                
+                    if (emitter._postSnapFollowFrames > 0) {
+                        const actor = emitter._snapToActorFn?.();
+                        const p = actor?.position;
+                        if (
+                            p &&
+                            Number.isFinite(p.x) &&
+                            Number.isFinite(p.y) &&
+                            Number.isFinite(p.z)
+                        ) {
+                            emitter.position.x = p.x;
+                            emitter.position.y = p.y;
+                            emitter.position.z = p.z;
+                        }
+                        emitter._postSnapFollowFrames--;
                     }
                 }
             }
 
             // Update campfire point light position and flicker.
-            if (emitter._pointLight) {
-                const pl = emitter._pointLight;
-                const flicker = 0.82 + 0.18 * Math.sin(this._elapsedTime * 9.1  + emitter._lightPhase)
-                                     + 0.06 * Math.sin(this._elapsedTime * 23.7 + emitter._lightPhase * 1.3);
-                pl.intensity = emitter._baseLightIntensity * flicker;
-                pl.position.x = emitter.position.x;
-                pl.position.y = emitter.position.y + 0.3;
-                pl.position.z = emitter.position.z;
+            if (Array.isArray(emitter._pointLights) && emitter._pointLights.length >= 4) {
+                const t = this._elapsedTime;
+                const phase = emitter._lightPhase;
+                const base = emitter._baseLightIntensity;
+            
+                const core = emitter._pointLights[0];
+                const embers = emitter._pointLights[1];
+                const secondary = emitter._pointLights[2];
+                const fill = emitter._pointLights[3];
+            
+                const coreFlicker =
+                    0.90 +
+                    0.14 * Math.sin(t * 8.5 + phase) +
+                    0.06 * Math.sin(t * 20.0 + phase * 1.6) +
+                    0.03 * Math.sin(t * 34.0 + phase * 0.7);
+            
+                const emberFlicker =
+                    0.84 +
+                    0.08 * Math.sin(t * 3.5 + phase * 0.8) +
+                    0.04 * Math.sin(t * 8.0 + phase * 1.9);
+            
+                const secondaryFlicker =
+                    0.82 +
+                    0.10 * Math.sin(t * 5.5 + phase * 1.2) +
+                    0.04 * Math.sin(t * 13.0 + phase * 2.0);
+            
+                const fillFlicker =
+                    0.97 +
+                    0.03 * Math.sin(t * 2.0 + phase * 0.5);
+            
+                // Core
+                core.intensity = base * coreFlicker;
+                core.position.x = emitter.position.x;
+                core.position.y = emitter.position.y + 1.2;
+                core.position.z = emitter.position.z;
+            
+                // Ember bed, almost centered
+                embers.intensity = base * 0.22 * emberFlicker;
+                embers.position.x = emitter.position.x;
+                embers.position.y = emitter.position.y + 0.35;
+                embers.position.z = emitter.position.z;
+            
+                // Secondary flame lobe, vertical only
+                secondary.intensity = base * 0.18 * secondaryFlicker;
+                secondary.position.x = emitter.position.x;
+                secondary.position.y = emitter.position.y + 2.0;
+                secondary.position.z = emitter.position.z;
+            
+                // Broad dim fill to fake bounced firelight
+                fill.intensity = base * 0.14 * fillFlicker;
+                fill.position.x = emitter.position.x;
+                fill.position.y = emitter.position.y + 4.5;
+                fill.position.z = emitter.position.z;
             }
-
+            
             // LOD cutoff.
             const dx = cam.x - emitter.position.x;
             const dy = cam.y - emitter.position.y;

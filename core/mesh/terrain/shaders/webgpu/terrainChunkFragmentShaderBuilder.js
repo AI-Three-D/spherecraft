@@ -550,7 +550,7 @@ if (enableSplat && lod <= splatBlendMaxLod) {
     const enableNearToMidFade = lod === nearMaxLod;
     const enableMacroOverlay = lod >= macroStartLod;
     const usePointSampling = false;//lod >= pointSampleLodStart;
-    const enableClusteredLights = lod <= clusteredMaxLod;
+    const enableClusteredLights = true;//lod <= clusteredMaxLod;
     const enableAerialPerspective = lod <= aerialMaxLod;
     const enablePointSplat = false;
     

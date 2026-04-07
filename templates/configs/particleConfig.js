@@ -82,20 +82,20 @@ export const PARTICLE_CONFIG = {
     [PARTICLE_TYPES.SMOKE]: {
         blend: 'alpha',
         lifetime: { min: 1.50, max: 2.50 },
-        size: { start: 0.06, end: 0.18 },   // grows -> billowing
+        size: { start: 0.08, end: 0.22 },   // grows -> billowing
         velocity: {
-            x: [-0.04, 0.04],
-            y: [ 0.30, 0.55],
-            z: [-0.04, 0.04],
+            x: [-0.14, 0.14],
+            y: [ 0.25, 0.45],
+            z: [-0.14, 0.14],
         },
-        gravity: -0.10,       // very slight negative gravity (float effect)
-        drag: 1.2,            // strong drag
-        upwardBias: 0.25,
-        lateralNoise: 0.10,
+        gravity: -0.08,
+        drag: 1.2,
+        upwardBias: 0.20,
+        lateralNoise: 0.12,
         spawnOffset: {
-            radius: 0.05,
-            heightMin: 0.50,
-            heightMax: 0.70,
+            radius: 0.18,    // wider base so puffs spread out
+            heightMin: 0.40,
+            heightMax: 0.60,
         },
         // Near-black -> dark grey -> light grey -> transparent.
         colorStart: [0.08, 0.08, 0.08, 0.18],
@@ -109,21 +109,21 @@ export const PARTICLE_CONFIG = {
 
     [PARTICLE_TYPES.EMBER]: {
         blend: 'additive',
-        lifetime: { min: 0.6, max: 1.8 },
-        size: { start: 0.035, end: 0.008 },
+        lifetime: { min: 0.8, max: 2.0 },
+        size: { start: 0.030, end: 0.006 },
         velocity: {
-            x: [-0.55, 0.55],   // fly outward in all directions
-            y: [ 0.60, 1.80],   // launched upward
-            z: [-0.55, 0.55],
+            x: [-0.25, 0.25],
+            y: [ 0.25, 0.65],
+            z: [-0.25, 0.25],
         },
         gravity: 0.0,
-        drag: 0.8,
-        upwardBias: 0.6,
-        lateralNoise: 0.5,      // small random drift
+        drag: 2.0,
+        upwardBias: 0.3,
+        lateralNoise: 0.2,
         spawnOffset: {
-            radius: 0.08,
-            heightMin: 0.10,
-            heightMax: 0.25,
+            radius: 0.20,    // wide base — embers fly from all sides of the fire
+            heightMin: 0.02,
+            heightMax: 0.20,
         },
         // Bright white-orange -> orange -> deep red -> transparent.
         colorStart: [1.00, 0.85, 0.40, 1.0],
@@ -174,7 +174,7 @@ export const PARTICLE_EMITTER_PRESETS = {
             [PARTICLE_TYPES.FIRE_CORE]: 0.50,
             [PARTICLE_TYPES.FLAME]:     0.44,
             [PARTICLE_TYPES.SMOKE]:     0.01,
-            [PARTICLE_TYPES.EMBER]:     0.05,
+            [PARTICLE_TYPES.EMBER]:     0.02,
         },
         spawnBudgetPerFrame: 32,     // ~1900 spawns/sec at 60 Hz
         distanceCutoff: 1000.0,

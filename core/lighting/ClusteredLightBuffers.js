@@ -120,6 +120,30 @@ export class ClusteredLightBuffers {
             this.lightBuffer, 0,
             d.buffer, 0, count * LIGHT_STRIDE_F32 * 4
         );
+        if (!this._debugFrame) this._debugFrame = 0;
+/*this._debugFrame++;
+
+if ((this._debugFrame % 120) === 0) {
+    console.log(
+        '[ClusteredLightBuffers]',
+        'numLights=', this.numLights,
+        'near=', g.nearPlane,
+        'far=', g.farPlane,
+        'dims=', g.gridSizeX, g.gridSizeY, g.gridSizeZ,
+        'invTanX=', invTanX.toFixed(4),
+        'invTanY=', invTanY.toFixed(4)
+    );
+}
+if (count > 0) {
+    const L = lights[0];
+    console.log(
+        '[ClusteredLightBuffers:firstLight]',
+        'type=', L.type,
+        'pos=', L.position.x.toFixed(2), L.position.y.toFixed(2), L.position.z.toFixed(2),
+        'radius=', L.radius,
+        'intensity=', L.intensity
+    );
+}else console.log('[ClusteredLightBuffers] no lights to upload');*/
     }
 
     _uploadClusterDataCPU(counts, offsets, indices) {

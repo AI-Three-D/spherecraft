@@ -132,18 +132,14 @@ fn evaluateClusteredLights(
     albedo:   vec3<f32>
 ) -> vec3<f32> {
     var total = vec3<f32>(0.0);
-    if (clParams.numLights < 0.5) { return total; }
+    let numL = u32(clParams.numLights);
+    if (numL == 0u) { return total; }
 
-    let ci = cl_getClusterIndex(viewPos);
-    if (ci < 0) { return total; }
-
-    let cluster = clClusters[u32(ci)];
-    let count   = min(cluster.lightCount, u32(clParams.maxPerCluster));
-
-    for (var i = 0u; i < count; i++) {
-        let li = clIndices[cluster.lightOffset + i];
-        if (li >= u32(clParams.numLights)) { continue; }
-        let L = clLights[li];
+    // Brute-force: iterate all lights directly (no cluster lookup).
+    // Correct for small light counts (1-4 campfires). Avoids any cluster
+    // assignment / index-buffer correctness issues.
+    for (var i = 0u; i < numL; i++) {
+        let L = clLights[i];
         if      (L.lightType < 0.5) { /* directional: handled by sun */ }
         else if (L.lightType < 1.5) { total += cl_pointLight(L, worldPos, normal, albedo); }
         else if (L.lightType < 2.5) { total += cl_spotLight (L, worldPos, normal, albedo); }
