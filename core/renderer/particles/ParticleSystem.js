@@ -119,14 +119,11 @@ export class ParticleSystem {
 
         // Attach a dynamic point light if a light manager is available.
         emitter._pointLights = [];
-        emitter._baseLightIntensity = overrides.lightIntensity ?? 18.0;
-        emitter._lightPhase = Math.random() * Math.PI * 2; // random flicker phase
         if (this._lightManager) {
             const lm = this._lightManager;
             const pos = new Vector3(emitter.position.x, emitter.position.y + 0.3, emitter.position.z);
 // Attach dynamic point lights if a light manager is available.
-emitter._pointLights = [];
-emitter._baseLightIntensity = overrides.lightIntensity ?? 110.0;
+emitter._baseLightIntensity = overrides.lightIntensity ?? 5.0;
 emitter._lightPhase = Math.random() * Math.PI * 2;
 
 if (this._lightManager) {
@@ -135,44 +132,43 @@ if (this._lightManager) {
     const py = emitter.position.y;
     const pz = emitter.position.z;
 
-    // 0) Main flame core
-    emitter._pointLights.push(lm.addLight(LightType.POINT, {
-        position: new Vector3(px, py + 1.35, pz),
-        color:     { r: 1.00, g: 0.58, b: 0.20 },
-        intensity: emitter._baseLightIntensity,
-        radius:    overrides.lightRadius ?? 18.0,
-        decay:     0.018,
-        dynamic:   true,
-        name:      'campfire_light_core',
-    }));
+// Main bright flame core
+emitter._pointLights.push(lm.addLight(LightType.POINT, {
+    position: new Vector3(px, py, pz),
+    color:     { r: 1.00, g: 0.62, b: 0.22 },
+    intensity: emitter._baseLightIntensity,
+    radius:    overrides.lightRadius ?? 6.0,
+    decay:     0.032,
+    dynamic:   true,
+    name:      'campfire_light_core',
+}));
 
-    // 1) Ember / coal glow
-    emitter._pointLights.push(lm.addLight(LightType.POINT, {
-        position: new Vector3(px - 0.20, py + 0.30, pz + 0.12),
-        color:     { r: 1.00, g: 0.28, b: 0.08 },
-        intensity: emitter._baseLightIntensity * 0.30,
-        radius:    8.5,
-        decay:     0.028,
-        dynamic:   true,
-        name:      'campfire_light_embers',
-    }));
+// Ember bed / coal glow
+emitter._pointLights.push(lm.addLight(LightType.POINT, {
+    position: new Vector3(px, py, pz),
+    color:     { r: 1.00, g: 0.30, b: 0.08 },
+    intensity: emitter._baseLightIntensity * 0.6,
+    radius:    5.0,
+    decay:     0.022,
+    dynamic:   true,
+    name:      'campfire_light_embers',
+}));
 
-    // 2) Secondary warm lobe
-    emitter._pointLights.push(lm.addLight(LightType.POINT, {
-        position: new Vector3(px + 0.28, py + 1.60, pz - 0.08),
-        color:     { r: 1.00, g: 0.72, b: 0.30 },
-        intensity: emitter._baseLightIntensity * 0.22,
-        radius:    11.0,
-        decay:     0.022,
-        dynamic:   true,
-        name:      'campfire_light_secondary',
-    }));
-
+// Secondary light above the flame,
+emitter._pointLights.push(lm.addLight(LightType.POINT, {
+    position: new Vector3(px, py, pz),
+    color:     { r: 1.00, g: 0.72, b: 0.30 },
+    intensity: emitter._baseLightIntensity * 0.3,
+    radius:    12.0,
+    decay:     0.018,
+    dynamic:   true,
+    name:      'campfire_light_secondary',
+}));
     // 3) High fill light: broad + dim, to fake bounced ambient firelight
     emitter._pointLights.push(lm.addLight(LightType.POINT, {
-        position: new Vector3(px, py + 4.5, pz),
+        position: new Vector3(px, py, pz),
         color:     { r: 1.00, g: 0.66, b: 0.32 },
-        intensity: emitter._baseLightIntensity * 0.18,
+        intensity: emitter._baseLightIntensity * 0.2,
         radius:    28.0,
         decay:     0.010,
         dynamic:   true,
@@ -323,78 +319,79 @@ if (this._lightManager) {
                 }
             }
 
-            // Update campfire point light position and flicker.
-            if (Array.isArray(emitter._pointLights) && emitter._pointLights.length >= 4) {
-                const t = this._elapsedTime;
-                const phase = emitter._lightPhase;
-                const base = emitter._baseLightIntensity;
-            
-                const core = emitter._pointLights[0];
-                const embers = emitter._pointLights[1];
-                const secondary = emitter._pointLights[2];
-                const fill = emitter._pointLights[3];
-            
-                const coreFlicker =
-                    0.90 +
-                    0.14 * Math.sin(t * 8.5 + phase) +
-                    0.06 * Math.sin(t * 20.0 + phase * 1.6) +
-                    0.03 * Math.sin(t * 34.0 + phase * 0.7);
-            
-                const emberFlicker =
-                    0.84 +
-                    0.08 * Math.sin(t * 3.5 + phase * 0.8) +
-                    0.04 * Math.sin(t * 8.0 + phase * 1.9);
-            
-                const secondaryFlicker =
-                    0.82 +
-                    0.10 * Math.sin(t * 5.5 + phase * 1.2) +
-                    0.04 * Math.sin(t * 13.0 + phase * 2.0);
-            
-                const fillFlicker =
-                    0.97 +
-                    0.03 * Math.sin(t * 2.0 + phase * 0.5);
-            
-                // Core
-                core.intensity = base * coreFlicker;
-                core.position.x = emitter.position.x;
-                core.position.y = emitter.position.y + 1.2;
-                core.position.z = emitter.position.z;
-            
-                // Ember bed, almost centered
-                embers.intensity = base * 0.22 * emberFlicker;
-                embers.position.x = emitter.position.x;
-                embers.position.y = emitter.position.y + 0.35;
-                embers.position.z = emitter.position.z;
-            
-                // Secondary flame lobe, vertical only
-                secondary.intensity = base * 0.18 * secondaryFlicker;
-                secondary.position.x = emitter.position.x;
-                secondary.position.y = emitter.position.y + 2.0;
-                secondary.position.z = emitter.position.z;
-            
-                // Broad dim fill to fake bounced firelight
-                fill.intensity = base * 0.14 * fillFlicker;
-                fill.position.x = emitter.position.x;
-                fill.position.y = emitter.position.y + 4.5;
-                fill.position.z = emitter.position.z;
-            }
-            
-            // LOD cutoff.
-            const dx = cam.x - emitter.position.x;
-            const dy = cam.y - emitter.position.y;
-            const dz = cam.z - emitter.position.z;
-            const distSq = dx * dx + dy * dy + dz * dz;
-            const cutoffSq = emitter.distanceCutoff * emitter.distanceCutoff;
-            const spawnBudget = (distSq > cutoffSq || emitter._needsActorSnap)
-                ? 0 : emitter.spawnBudgetPerFrame;
 
-            // Local "up" at this emitter's world position.
-            const ux = emitter.position.x - this._planetOrigin.x;
-            const uy = emitter.position.y - this._planetOrigin.y;
-            const uz = emitter.position.z - this._planetOrigin.z;
-            const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
-            const localUp = (ulen > 1e-6) ? [ux / ulen, uy / ulen, uz / ulen] : [0, 1, 0];
 
+// LOD cutoff.
+const dx = cam.x - emitter.position.x;
+const dy = cam.y - emitter.position.y;
+const dz = cam.z - emitter.position.z;
+const distSq = dx * dx + dy * dy + dz * dz;
+const cutoffSq = emitter.distanceCutoff * emitter.distanceCutoff;
+const spawnBudget = (distSq > cutoffSq || emitter._needsActorSnap)
+    ? 0 : emitter.spawnBudgetPerFrame;
+
+// Local "up" at this emitter's world position.
+// Compute this BEFORE updating the point lights.
+const ux = emitter.position.x - this._planetOrigin.x;
+const uy = emitter.position.y - this._planetOrigin.y;
+const uz = emitter.position.z - this._planetOrigin.z;
+const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
+const localUp = (ulen > 1e-6) ? [ux / ulen, uy / ulen, uz / ulen] : [0, 1, 0];
+
+// Update campfire point light positions and flicker.
+if (Array.isArray(emitter._pointLights) && emitter._pointLights.length >= 4) {
+    const t = this._elapsedTime;
+    const phase = emitter._lightPhase;
+    const base = emitter._baseLightIntensity;
+
+    const core = emitter._pointLights[0];
+    const embers = emitter._pointLights[1];
+    const secondary = emitter._pointLights[2];
+    const fill = emitter._pointLights[3];
+
+    const coreFlicker =
+        0.88 +
+        0.16 * Math.sin(t * 8.7 + phase) +
+        0.07 * Math.sin(t * 21.3 + phase * 1.7) +
+        0.04 * Math.sin(t * 37.0 + phase * 0.6);
+
+    const emberFlicker =
+        0.84 +
+        0.08 * Math.sin(t * 3.8 + phase * 0.7) +
+        0.04 * Math.sin(t * 9.2 + phase * 1.9);
+
+    const secondaryFlicker =
+        0.80 +
+        0.10 * Math.sin(t * 5.5 + phase * 1.2) +
+        0.04 * Math.sin(t * 13.0 + phase * 2.0);
+
+    const fillFlicker =
+        0.97 + 0.03 * Math.sin(t * 2.0 + phase * 0.5);
+
+    const upx = localUp[0];
+    const upy = localUp[1];
+    const upz = localUp[2];
+
+    core.intensity = base * coreFlicker;
+    core.position.x = emitter.position.x + upx * 1.2;
+    core.position.y = emitter.position.y + upy * 1.2;
+    core.position.z = emitter.position.z + upz * 1.2;
+
+    embers.intensity = base * 0.22 * emberFlicker;
+    embers.position.x = emitter.position.x + upx * 0.35;
+    embers.position.y = emitter.position.y + upy * 0.35;
+    embers.position.z = emitter.position.z + upz * 0.35;
+
+    secondary.intensity = base * 0.16 * secondaryFlicker;
+    secondary.position.x = emitter.position.x + upx * 2.0;
+    secondary.position.y = emitter.position.y + upy * 2.0;
+    secondary.position.z = emitter.position.z + upz * 2.0;
+
+    fill.intensity = base * 0.10 * fillFlicker;
+    fill.position.x = emitter.position.x + upx * 4.5;
+    fill.position.y = emitter.position.y + upy * 4.5;
+    fill.position.z = emitter.position.z + upz * 4.5;
+}
             // Write this emitter's globals into its own dedicated UBO so that
             // multiple writeBuffer calls in the same frame don't clobber each other.
             this.buffers.writeGlobals({
