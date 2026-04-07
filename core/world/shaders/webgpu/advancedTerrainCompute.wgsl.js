@@ -217,6 +217,21 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
     return softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
 }
 
+// Stable base-height-only boundary sampler.
+// Used at chunk texture edges instead of sampleMicroHeightProcedural to avoid
+// cross-chunk normal seams. The micro-detail FBM is sensitive to sub-ULP UV
+// differences that arise from the two different float-arithmetic paths each
+// neighboring chunk uses to compute the same boundary UV. Using only the
+// low-frequency base height (no micro) eliminates that sensitivity: the base
+// functions vary slowly enough that ±1 ULP in u/v causes no perceptible error.
+fn sampleBaseHeightProcedural(face: i32, u: f32, v: f32) -> f32 {
+    let dir = getSpherePoint(face, u, v);
+    let wx = dir.x;
+    let wy = dir.z;
+    let baseH = calculateTerrainHeight(wx, wy, uniforms.seed, dir);
+    return softClampHeight(baseH, -1.1, 1.8, 0.25);
+}
+
 fn computeNormalSlopeFromHeightMapSphere(
     face: i32, u: f32, v: f32, du: f32, dv: f32,
     coordC: vec2<i32>
@@ -245,10 +260,16 @@ fn computeNormalSlopeFromHeightMapSphere(
     var hU = sampleHeightAt(coordU);
     var hD = sampleHeightAt(coordD);
 
-    if (coordC.x == maxC.x) { hR = sampleMicroHeightProcedural(face, uR, v, du, dv); }
-    if (coordC.x == 0) { hL = sampleMicroHeightProcedural(face, uL, v, du, dv); }
-    if (coordC.y == maxC.y) { hU = sampleMicroHeightProcedural(face, u, vU, du, dv); }
-    if (coordC.y == 0) { hD = sampleMicroHeightProcedural(face, u, vD, du, dv); }
+    // At texture boundaries use the low-frequency base height rather than the
+    // full micro-height procedural. The micro FBM is sensitive to sub-ULP UV
+    // differences that arise from different float-arithmetic paths in adjacent
+    // chunks, creating a 1-pixel-wide normal discontinuity (visible as seams
+    // under point lights). The base height is smooth enough that ±1 ULP in
+    // u/v causes no perceptible gradient error.
+    if (coordC.x == maxC.x) { hR = sampleBaseHeightProcedural(face, uR, v); }
+    if (coordC.x == 0) { hL = sampleBaseHeightProcedural(face, uL, v); }
+    if (coordC.y == maxC.y) { hU = sampleBaseHeightProcedural(face, u, vU); }
+    if (coordC.y == 0) { hD = sampleBaseHeightProcedural(face, u, vD); }
 
     let nd = normalDisplacementScale();
     let pR = dirR * (1.0 + hR * nd);

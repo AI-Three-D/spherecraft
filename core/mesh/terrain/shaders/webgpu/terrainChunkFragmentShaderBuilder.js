@@ -1236,7 +1236,7 @@ fn calculateNormal(input: FragmentInput, layer: i32) -> vec3<f32> {
 fn sampleSlope(input: FragmentInput, layer: i32) -> f32 {
     let uv = applyChunkAtlasUV(input.vUv, normalTexture, input.vAtlasOffset, input.vAtlasScale);
     ${normalTextureFilterable
-        ? `return textureSample(normalTexture, chunkLinearSampler, uv, layer).b;`
+        ? `return textureSampleLevel(normalTexture, chunkLinearSampler, uv, layer, 0.0).b;`
         : `return sampleRGBA32FBilinear(normalTexture, uv, layer).b;`
     }
 }
