@@ -21,6 +21,7 @@ import {
     PARTICLE_GLOBALS,
 } from '../../../templates/configs/particleConfig.js';
 import { LightType } from '../../lighting/lightManager.js';
+import { FireflySwarm } from './FireflySwarm.js';
 
 export class ParticleSystem {
     constructor({
@@ -58,6 +59,11 @@ export class ParticleSystem {
 
         // Optional light manager for campfire point lights.
         this._lightManager = null;
+
+        // Active firefly swarm (only one allowed at a time).
+        this._fireflySwarm = null;
+        this._fireflyEmitter = null;
+        this._fireflyLight = null;
     }
 
     // Call this after the frontend's lightManager is ready.
@@ -208,6 +214,59 @@ emitter._pointLights.push(lm.addLight(LightType.POINT, {
         return emitter;
     }
 
+    // Creates a firefly swarm at the given position. Only one swarm can
+    // be active at a time. The swarm runs Boids on CPU and emits tiny
+    // bright particles that bloom.
+    addFireflySwarm(worldPos, overrides = {}) {
+        if (this._fireflySwarm) {
+            console.warn('[ParticleSystem] Only one firefly swarm at a time.');
+            return null;
+        }
+
+        const swarm = new FireflySwarm({
+            position: worldPos,
+            swarmSize: overrides.swarmSize ?? 7,
+            planetOrigin: this._planetOrigin,
+        });
+        this._fireflySwarm = swarm;
+
+        const emitter = new ParticleEmitter({
+            position: worldPos,
+            preset: 'firefly_swarm',
+            overrides,
+        });
+        this._fireflyEmitter = emitter;
+        this._registerEmitter(emitter);
+
+        // Attach a dim point light at the swarm centroid.
+        if (this._lightManager) {
+            this._fireflyLight = this._lightManager.addLight(LightType.POINT, {
+                position: new Vector3(worldPos.x, worldPos.y + 2.5, worldPos.z),
+                color: { r: 0.65, g: 0.85, b: 0.30 },
+                intensity: 0.0,  // starts off — modulated per-frame
+                radius: 8.0,
+                decay: 0.02,
+                dynamic: true,
+                name: 'firefly_swarm_light',
+            });
+        }
+
+        console.log(
+            `[ParticleSystem] addFireflySwarm at (${worldPos.x.toFixed(2)}, ` +
+            `${worldPos.y.toFixed(2)}, ${worldPos.z.toFixed(2)}) ` +
+            `size=${swarm.swarmSize}`
+        );
+        return swarm;
+    }
+
+    // Sets the time-of-day glow factor for the firefly swarm.
+    // Call this from the game loop with the current light level.
+    setFireflyTimeOfDay(lightLevel) {
+        if (this._fireflySwarm) {
+            this._fireflySwarm.timeOfDayGlow = FireflySwarm.computeTimeOfDayGlow(lightLevel);
+        }
+    }
+
     // Allocates per-emitter GPU resources (own globalsUBO + bind group pair)
     // and pushes the emitter into the active list.
     _registerEmitter(emitter) {
@@ -265,6 +324,31 @@ emitter._pointLights.push(lm.addLight(LightType.POINT, {
                 debugMode:    this.debugMode,
                 localUp: (ulen > 1e-6) ? [ux / ulen, uy / ulen, uz / ulen] : [0, 1, 0],
             }); // no target → writes to shared globalsUBO used by the render pass
+        }
+
+        // Update firefly swarm Boids and position the firefly emitter.
+        if (this._fireflySwarm && this._fireflyEmitter) {
+            this._fireflySwarm.update(dt);
+            // Move the emitter to the next firefly's position.
+            const ffPos = this._fireflySwarm.getNextEmitPosition();
+            this._fireflyEmitter.position.x = ffPos.x;
+            this._fireflyEmitter.position.y = ffPos.y;
+            this._fireflyEmitter.position.z = ffPos.z;
+
+            // Update the point light at the swarm centroid.
+            if (this._fireflyLight) {
+                const c = this._fireflySwarm.centroid;
+                this._fireflyLight.position.x = c.x;
+                this._fireflyLight.position.y = c.y;
+                this._fireflyLight.position.z = c.z;
+                // Dim light intensity modulated by average glow.
+                let avgGlow = 0;
+                for (let fi = 0; fi < this._fireflySwarm.swarmSize; fi++) {
+                    avgGlow += this._fireflySwarm.getGlowIntensity(fi);
+                }
+                avgGlow /= this._fireflySwarm.swarmSize;
+                this._fireflyLight.intensity = avgGlow * 1.5;
+            }
         }
 
         // Dispatch once per emitter. All emitters share the same particle pool;

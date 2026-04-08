@@ -96,7 +96,7 @@ export class DestinationMarker {
             fragment: {
                 module: mod, entryPoint: 'fs',
                 targets: [{
-                    format: this.backend.format,
+                    format: this.backend.sceneFormat || this.backend.format,
                     blend: {
                         color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
                         alpha: { srcFactor: 'one',       dstFactor: 'one-minus-src-alpha', operation: 'add' },

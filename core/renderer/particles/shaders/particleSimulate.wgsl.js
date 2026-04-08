@@ -186,6 +186,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let age01 = clamp(1.0 - p.lifetime / max(p.maxLifetime, 0.0001), 0.0, 1.0);
         p.size = mix(td.sizeStart, td.sizeEnd, age01);
         p.color = sampleGradient(td, age01);
+        // Apply HDR emissive multiplier (values > 1.0 bloom via postprocessing).
+        if (td.emissive > 1.0) {
+            p.color = vec4<f32>(p.color.rgb * td.emissive, p.color.a);
+        }
 
         // Debug override: oversized magenta blobs visible from anywhere.
         if (globals.debugMode == 1u) {

@@ -13,6 +13,8 @@ import { WeatherController } from '../environment/WeatherController.js';
 import { QuadtreeTileManager } from '../../world/quadtree/GPUQuadtreeTerrain.js';
 
 import { QuadtreeTerrainRenderer } from '../terrain/QuadtreeTerrainRenderer.js';
+import { PostProcessingPipeline, HDR_FORMAT } from '../postprocessing/PostProcessingPipeline.js';
+import { HeatHazeEmitter } from '../particles/HeatHazeEmitter.js';
 import {  requireMaxFinite, requireNumber, requireNumberArray, requireObject } from '../../../shared/requireUtil.js';
 export class Frontend {
     constructor(canvas, options = {}) {
@@ -88,6 +90,8 @@ export class Frontend {
         this._lastDeltaTime = 0;
 
         this.particleSystem = null;
+        this.postProcessing = null;
+        this.heatHazeEmitter = null;
     }
 
     getBackend() {
@@ -95,6 +99,13 @@ export class Frontend {
     }
 
     setActorManager(mgr) { this._actorManager = mgr; }
+
+    // Registers a world position as a heat distortion source (e.g. campfire).
+    addHeatSource(position) {
+        if (this.heatHazeEmitter) {
+            this.heatHazeEmitter.addSource(position);
+        }
+    }
 
     _getRenderViewportSize() {
         const viewport = this.backend?._viewport;
@@ -339,6 +350,9 @@ export class Frontend {
 
         this.backend = new WebGPUBackend(this.canvas);
         await this.backend.initialize();
+        // Set HDR scene format immediately so all renderers compile
+        // their pipelines against rgba16float, not the canvas format.
+        this.backend.sceneFormat = HDR_FORMAT;
 
         if (this.backend && this.backend._pipelineCache) {
             this.backend._pipelineCache.clear();
@@ -448,11 +462,24 @@ export class Frontend {
         }
 
         if (this.backend?.device) {
+            // Initialize HDR postprocessing pipeline.
+            const vp = this.backend._viewport;
+            this.postProcessing = new PostProcessingPipeline(this.backend.device, {
+                width: vp.width,
+                height: vp.height,
+                outputFormat: this.backend.format,
+            });
+            this.postProcessing.initialize();
+
+            // Heat haze distortion emitter (renders into the distortion map).
+            this.heatHazeEmitter = new HeatHazeEmitter(this.backend.device, {});
+            this.heatHazeEmitter.initialize();
+
             const { ParticleSystem } = await import('../particles/ParticleSystem.js');
             this.particleSystem = new ParticleSystem({
                 device: this.backend.device,
                 backend: this.backend,
-                colorFormat: this.backend.format,
+                colorFormat: HDR_FORMAT,
                 depthFormat: 'depth24plus',
             });
             await this.particleSystem.initialize();
@@ -726,9 +753,14 @@ updateLighting(starSystem) {
             });
         }
 
-        this.backend.setRenderTarget(null);
-        this.backend.setClearColor(0.0, 0.0, 0.0, 1.0);
-        this.backend.clear(true, true, false);
+        // Route scene rendering through HDR postprocessing target.
+        if (this.postProcessing) {
+            this.postProcessing.beginScenePass(this.backend);
+        } else {
+            this.backend.setRenderTarget(null);
+            this.backend.setClearColor(0.0, 0.0, 0.0, 1.0);
+            this.backend.clear(true, true, false);
+        }
 
         let sunDiskFade = 1.0;
         if (this.starRenderer && starSystem?.primaryStar && starSystem.currentBody) {
@@ -795,6 +827,42 @@ updateLighting(starSystem) {
             this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
         }
 
+        // Execute HDR postprocessing chain (bloom, distortion, tone mapping).
+        if (this.postProcessing) {
+            const dp = this.postProcessing.distortionPass;
+            let hazeRendered = false;
+
+            // Render heat haze distortion sources before postprocessing.
+            if (this.heatHazeEmitter && dp && this.heatHazeEmitter._sources.length > 0) {
+                this.backend._endCurrentRenderPass();
+                this.backend._ensureCommandEncoder();
+                const enc = this.backend._commandEncoder;
+
+                this.heatHazeEmitter.update(this._lastDeltaTime || 0);
+
+                if (this.heatHazeEmitter._particles.length > 0) {
+                    dp.clearDistortionMap(enc);
+
+                    const te = this.camera.matrixWorldInverse.elements;
+                    const cameraRight = [te[0], te[4], te[8]];
+                    const cameraUp = [te[1], te[5], te[9]];
+                    const vpMat = new Matrix4();
+                    vpMat.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+
+                    this.heatHazeEmitter.render(
+                        enc,
+                        dp.getDistortionMapView(),
+                        vpMat.elements,
+                        cameraRight,
+                        cameraUp
+                    );
+                    hazeRendered = true;
+                }
+            }
+
+            if (dp) dp.hasActiveSources = hazeRendered;
+            this.postProcessing.execute(this.backend);
+        }
 
         this.backend.submitCommands();
         this._actorManager?.resolveReadback();
@@ -959,6 +1027,7 @@ updateLighting(starSystem) {
         this.camera.aspect = width / height;
         this._updateCameraMatrices();
         this.backend.setViewport(0, 0, width, height);
+        this.postProcessing?.handleResize(width, height);
     }
 
     async switchPlanet(planetConfig) {

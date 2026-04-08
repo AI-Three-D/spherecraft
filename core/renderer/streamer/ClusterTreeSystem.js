@@ -400,7 +400,7 @@ fn main() {
         });
         const vsModule = this.device.createShaderModule({ label: 'ClusterTree-HullVS', code: shaders.vs });
         const fsModule = this.device.createShaderModule({ label: 'ClusterTree-HullFS', code: shaders.fs });
-        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        const canvasFormat = this.streamer?.backend?.sceneFormat || navigator.gpu.getPreferredCanvasFormat();
 
         this._renderBindGroupLayouts = [
             this.device.createBindGroupLayout({

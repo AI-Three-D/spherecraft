@@ -745,7 +745,7 @@ update(deltaTime) {
             { arrayStride: 16, attributes: [{ shaderLocation: 4, offset: 0, format: 'float32x4' }] },
         ];
     
-        const frag  = { module, entryPoint: 'fs', targets: [{ format: this.backend.format }] };
+        const frag  = { module, entryPoint: 'fs', targets: [{ format: this.backend.sceneFormat || this.backend.format }] };
         const depth = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
     
         const mk = (ep, bufs, cull) => dev.createRenderPipeline({

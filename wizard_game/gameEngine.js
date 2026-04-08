@@ -679,6 +679,16 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                     }
                 );
                 Logger.info('[GameEngine] Campfire + coal emitters registered at spawn');
+
+                // Register campfire as a heat distortion source.
+                this.renderer.addHeatSource({ x: spawnX, y: spawnY, z: spawnZ });
+
+                // Spawn a firefly swarm near the campfire (offset to the side).
+                this.renderer.particleSystem.addFireflySwarm(
+                    { x: spawnX + 5, y: spawnY, z: spawnZ + 5 },
+                    { swarmSize: 7 }
+                );
+                Logger.info('[GameEngine] Firefly swarm registered near campfire');
             }
 
             // Wire click-to-move input
@@ -752,6 +762,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         this.gameTime.update();
         this._syncStarSystemTimeScale();
+
+        // Update firefly glow based on time of day.
+        if (this.renderer?.particleSystem) {
+            this.renderer.particleSystem.setFireflyTimeOfDay(this.gameTime.getLightLevel());
+        }
 
         if (this.starSystem) {
             this.starSystem.update(deltaTime);

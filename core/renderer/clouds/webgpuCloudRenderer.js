@@ -70,7 +70,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         this.cirrusTarget = new RenderTarget(tw, th, {
             colorCount: 1,
             depthBuffer: true,
-            format: this.backend.format || 'rgba8unorm'
+            format: this.backend.sceneFormat || this.backend.format || 'rgba8unorm'
         });
     }
 
@@ -650,7 +650,7 @@ setVolumetricEnabled(enabled) {
             this.volumetricPass = null;
         }
 
-        this.renderFormat = this.backend.format || 'rgba8unorm';
+        this.renderFormat = this.backend.sceneFormat || this.backend.format || 'rgba8unorm';
         this.historyTargets = [null, null];
         this.historyPing = 0;
         this.historyValid = false;

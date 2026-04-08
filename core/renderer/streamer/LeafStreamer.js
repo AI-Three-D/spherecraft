@@ -376,7 +376,7 @@ export class LeafStreamer {
         this._renderBGLs = [group0, group1];
         this._hasLeafAlbedoTexture = hasLeafAlbedoTexture;
         this._hasLeafNormalTexture = hasLeafNormalTexture;
-        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        const canvasFormat = this.streamer?.backend?.sceneFormat || navigator.gpu.getPreferredCanvasFormat();
 
         this._renderPipeline = this.device.createRenderPipeline({
             label: 'Leaf-RenderPipeline',

@@ -3347,7 +3347,7 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
         this._renderBindGroupLayouts = [group0Layout, group1Layout, group2ShadowLayout, group3Layout];
         this._noShadowBindGroupLayouts = [group0Layout, group1Layout, group2NoShadowLayout, group3Layout];
 
-        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        const canvasFormat = this.backend?.sceneFormat || navigator.gpu.getPreferredCanvasFormat();
 
         const depthState = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
 

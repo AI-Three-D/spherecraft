@@ -175,6 +175,7 @@ export class GameUI {
         this._bindTerrainDebugControls();
         this._bindSurfaceControls();
         this._bindTeleportControls();
+        this._createPostProcessPanel();
     }
 
     /**
@@ -728,6 +729,144 @@ export class GameUI {
         if (this.crashScreen) {
             this.crashScreen.style.display = 'none';
         }
+    }
+
+    _createPostProcessPanel() {
+        const panel = document.createElement('div');
+        panel.style.cssText = `
+            pointer-events: auto;
+            color: white;
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 12px;
+            background:
+                linear-gradient(180deg, rgba(80, 100, 60, 0.22), rgba(8, 18, 10, 0.84)),
+                rgba(4, 10, 8, 0.82);
+            padding: 12px;
+            border-radius: 18px;
+            border: 1px solid rgba(170, 220, 180, 0.28);
+            box-shadow:
+                inset 0 1px 0 rgba(255,255,255,0.15),
+                0 16px 40px rgba(0,0,0,0.28);
+            margin-top: 8px;
+        `;
+
+        const header = document.createElement('div');
+        header.style.cssText = 'cursor:pointer; letter-spacing:0.08em; margin-bottom:6px; user-select:none;';
+        header.innerHTML = '<strong>POST-PROCESSING</strong> <span style="opacity:0.5">[click to toggle]</span>';
+        panel.appendChild(header);
+
+        const body = document.createElement('div');
+        body.style.display = 'block';
+        panel.appendChild(body);
+
+        header.addEventListener('click', () => {
+            body.style.display = body.style.display === 'none' ? 'block' : 'none';
+        });
+
+        const mkSlider = (label, min, max, step, initial, onChange) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
+            const lbl = document.createElement('span');
+            lbl.style.cssText = 'width:100px; flex-shrink:0; font-size:11px;';
+            lbl.textContent = label;
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = min; slider.max = max; slider.step = step;
+            slider.value = initial;
+            slider.style.cssText = 'flex:1; accent-color:#8cb870;';
+            const val = document.createElement('span');
+            val.style.cssText = 'width:44px; text-align:right; font-size:11px; font-family:monospace;';
+            val.textContent = Number(initial).toFixed(2);
+            slider.addEventListener('input', () => {
+                const v = parseFloat(slider.value);
+                val.textContent = v.toFixed(2);
+                onChange(v);
+            });
+            row.appendChild(lbl);
+            row.appendChild(slider);
+            row.appendChild(val);
+            body.appendChild(row);
+            return slider;
+        };
+
+        const mkToggle = (label, initial, onChange) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox'; cb.checked = initial;
+            cb.style.cssText = 'accent-color:#8cb870;';
+            const lbl = document.createElement('span');
+            lbl.style.cssText = 'font-size:11px;';
+            lbl.textContent = label;
+            cb.addEventListener('change', () => onChange(cb.checked));
+            row.appendChild(cb);
+            row.appendChild(lbl);
+            body.appendChild(row);
+            return cb;
+        };
+
+        const tryBind = () => {
+            const pp = this.engine?.renderer?.postProcessing;
+            if (!pp) { setTimeout(tryBind, 500); return; }
+
+            // Tone mapping
+            mkSlider('Exposure', 0.1, 5.0, 0.05, pp.exposure, v => { pp.exposure = v; });
+
+            // Bloom
+            const bloom = pp.bloomPass;
+            if (bloom) {
+                const sep = document.createElement('div');
+                sep.style.cssText = 'margin:8px 0 4px; opacity:0.5; font-size:10px; letter-spacing:0.1em;';
+                sep.textContent = 'BLOOM';
+                body.appendChild(sep);
+
+                mkSlider('Threshold', 0.0, 5.0, 0.1, bloom.threshold, v => { bloom.threshold = v; });
+                mkSlider('Knee', 0.0, 1.0, 0.05, bloom.knee, v => { bloom.knee = v; });
+                mkSlider('Intensity', 0.0, 1.0, 0.01, bloom.intensity, v => { bloom.intensity = v; });
+                mkSlider('Blend Factor', 0.0, 1.0, 0.05, bloom.blendFactor, v => { bloom.blendFactor = v; });
+            }
+
+            // Distortion
+            const dist = pp.distortionPass;
+            if (dist) {
+                const sep = document.createElement('div');
+                sep.style.cssText = 'margin:8px 0 4px; opacity:0.5; font-size:10px; letter-spacing:0.1em;';
+                sep.textContent = 'DISTORTION';
+                body.appendChild(sep);
+
+                mkToggle('Enable Distortion', dist.enabled, v => { dist.enabled = v; });
+                mkSlider('Strength', 0.0, 5.0, 0.1, dist.strength, v => { dist.strength = v; });
+            }
+
+            // Heat haze
+            const haze = this.engine?.renderer?.heatHazeEmitter;
+            if (haze) {
+                const sep = document.createElement('div');
+                sep.style.cssText = 'margin:8px 0 4px; opacity:0.5; font-size:10px; letter-spacing:0.1em;';
+                sep.textContent = 'HEAT HAZE';
+                body.appendChild(sep);
+
+                mkSlider('Amplitude', 0.0, 0.02, 0.001, haze.amplitude, v => { haze.amplitude = v; });
+                mkSlider('Frequency', 1.0, 30.0, 1.0, haze.frequency, v => { haze.frequency = v; });
+                mkSlider('Speed', 0.5, 10.0, 0.5, haze.speed, v => { haze.speed = v; });
+            }
+
+            // Particle emissive
+            const sep2 = document.createElement('div');
+            sep2.style.cssText = 'margin:8px 0 4px; opacity:0.5; font-size:10px; letter-spacing:0.1em;';
+            sep2.textContent = 'CAMPFIRE EMISSIVE';
+            body.appendChild(sep2);
+
+            const note = document.createElement('div');
+            note.style.cssText = 'font-size:10px; opacity:0.6; margin-bottom:4px;';
+            note.textContent = 'Requires particle system re-init to take effect.';
+            body.appendChild(note);
+        };
+
+        tryBind();
+
+        this.uiElement?.appendChild(panel);
+        this._postProcessPanel = panel;
     }
 
     destroy() {

@@ -12,9 +12,18 @@ export class WebGPUBackend extends Backend {
         this.adapter = null;
         this.context = null;
         this.format = null;
+        // When postprocessing is active, scene geometry renders to an HDR
+        // off-screen target. Set this to override the format used for
+        // material pipeline compilation (falls back to this.format).
+        this.sceneFormat = null;
         this.supportsIndirectFirstInstance = null;
 
         this._currentRenderTarget = null;
+        // When set, setRenderTarget(null) falls back to this instead of
+        // the swap chain. Used by the postprocessing pipeline so that
+        // renderers calling setRenderTarget(null) to "return to screen"
+        // actually return to the HDR off-screen target.
+        this._defaultRenderTarget = null;
         this._currentPipeline = null;
         this._currentBindGroups = new Map();
         this._commandEncoder = null;
@@ -1028,7 +1037,7 @@ compileShader(material) {
         material.fragmentShader.substring(0, 200));
 
     const arrayFlag = material.defines?.USE_TEXTURE_ARRAYS ? 'arr' : '2d';
-    const fmtFlag = material.targetFormat || '';
+    const fmtFlag = material.targetFormat || this.sceneFormat || '';
 
     // Chunk texture formats affect the bind group layout sampleTypes.
     // Two terrain materials differing only in normal format must get
@@ -1092,7 +1101,7 @@ compileShader(material) {
             module: fragmentModule,
                 entryPoint: 'main',
                 targets: [{
-                format: material.targetFormat || this.format,
+                format: material.targetFormat || this.sceneFormat || this.format,
                     blend: material.transparent ? (
                     material.blending === 'premultiplied' ? {
                         color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -2343,7 +2352,9 @@ setRenderTarget(rt) {
         if (!rt._gpuRenderTarget || rt._needsSetup) this.createRenderTarget(rt);
         this._currentRenderTarget = rt;
     } else {
-        this._currentRenderTarget = null;
+        // When a default render target is set (e.g. HDR postprocessing),
+        // "return to screen" actually returns to the off-screen HDR target.
+        this._currentRenderTarget = this._defaultRenderTarget || null;
     }
 }
 // Add this new method to expose the depth texture view

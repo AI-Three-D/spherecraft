@@ -353,7 +353,7 @@ export class BranchRenderer {
         this._renderBGLs = [group0, group1];
         this._hasBarkTexture = hasBarkTexture;
 
-        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        const canvasFormat = this.streamer?.backend?.sceneFormat || navigator.gpu.getPreferredCanvasFormat();
 
         this._renderPipeline = this.device.createRenderPipeline({
             label: 'Branch-RenderPipeline',

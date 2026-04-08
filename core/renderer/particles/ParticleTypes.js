@@ -18,9 +18,10 @@ export const PARTICLE_TYPES = Object.freeze({
     SMOKE:     2,
     EMBER:     3,
     COAL:      4,
+    FIREFLY:   5,
 });
 
-export const PARTICLE_TYPE_COUNT = 5;
+export const PARTICLE_TYPE_COUNT = 6;
 
 // Upper bound on how many type slots the GPU buffer reserves. Keeps the
 // shader's fixed-size `array<ParticleTypeDef, N>` stable while still giving

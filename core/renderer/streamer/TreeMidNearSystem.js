@@ -677,7 +677,7 @@ export class TreeMidNearSystem {
             fadeOutEnd:   mc.fadeOutEnd,
         };
         const hasTex = this._texBaker?.isReady() === true;
-        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        const canvasFormat = this.streamer?.backend?.sceneFormat || navigator.gpu.getPreferredCanvasFormat();
 
         // Helper for standard group0 (uniform + storage read)
         const mkGroup0 = (label) => this.device.createBindGroupLayout({

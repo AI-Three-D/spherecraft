@@ -515,7 +515,7 @@ export class TreeMidSystem {
 
     _createRenderPipelines() {
         const hasTex = this._texBaker?.isReady() === true;
-        const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        const canvasFormat = this.streamer?.backend?.sceneFormat || navigator.gpu.getPreferredCanvasFormat();
 
         const r = this._range;
         const fadeBounds = {

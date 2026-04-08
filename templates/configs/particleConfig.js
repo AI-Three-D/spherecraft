@@ -49,6 +49,7 @@ export const PARTICLE_CONFIG = {
         colorStart: [1.00, 0.92, 0.55, 0.95],
         colorMid:   [1.00, 0.45, 0.08, 0.7],
         colorEnd:   [0.50, 0.08, 0.00, 0.0],
+        emissive: 1.6,   // Keep a visible glow without blowing out the bloom chain
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 0.55,
     },
@@ -75,6 +76,7 @@ export const PARTICLE_CONFIG = {
         colorStart: [1.00, 0.90, 0.55, 0.9],
         colorMid:   [1.00, 0.40, 0.05, 0.6],
         colorEnd:   [0.35, 0.02, 0.00, 0.0],
+        emissive: 1.35,  // Softer HDR lift so bloom stays close to the flame core
         flags: { stretchAlongVel: true, rotate: false },
         spawnWeight: 0.40,
     },
@@ -129,6 +131,7 @@ export const PARTICLE_CONFIG = {
         colorStart: [1.00, 0.85, 0.40, 1.0],
         colorMid:   [1.00, 0.35, 0.02, 0.7],
         colorEnd:   [0.30, 0.02, 0.00, 0.0],
+        emissive: 1.15,  // Embers should sparkle, not flood the frame
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 0.05,
     },
@@ -155,6 +158,34 @@ export const PARTICLE_CONFIG = {
         colorStart: [0.80, 0.10, 0.00, 0.7],
         colorMid:   [1.00, 0.45, 0.05, 0.9],
         colorEnd:   [0.40, 0.04, 0.00, 0.0],
+        emissive: 1.0,   // Coal bed stays visible but no longer forces bloom
+        flags: { stretchAlongVel: false, rotate: false },
+        spawnWeight: 1.0,
+    },
+
+    [PARTICLE_TYPES.FIREFLY]: {
+        blend: 'additive',
+        lifetime: { min: 0.04, max: 0.08 },   // very short — swarm re-emits each frame
+        size: { start: 0.025, end: 0.020 },    // pinprick dot
+        velocity: {
+            x: [-0.01, 0.01],
+            y: [ 0.00, 0.01],
+            z: [-0.01, 0.01],
+        },
+        gravity: 0.0,
+        drag: 20.0,            // essentially stationary after spawn
+        upwardBias: 0.0,
+        lateralNoise: 0.0,
+        spawnOffset: {
+            radius: 0.02,
+            heightMin: 0.0,
+            heightMax: 0.02,
+        },
+        // Grey dot at base, but emissive multiplier makes it glow yellow-green.
+        colorStart: [0.70, 0.85, 0.35, 0.9],
+        colorMid:   [0.65, 0.80, 0.30, 0.7],
+        colorEnd:   [0.50, 0.60, 0.20, 0.0],
+        emissive: 2.5,   // Keep the swarm readable without giant green halos
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 1.0,
     },
@@ -188,6 +219,17 @@ export const PARTICLE_EMITTER_PRESETS = {
             [PARTICLE_TYPES.COAL]: 1.0,
         },
         spawnBudgetPerFrame: 3,      // ~180 coal glows/sec at 60 Hz — sparse
+        distanceCutoff: 500.0,
+    },
+
+    firefly_swarm: {
+        types: [
+            PARTICLE_TYPES.FIREFLY,
+        ],
+        weights: {
+            [PARTICLE_TYPES.FIREFLY]: 1.0,
+        },
+        spawnBudgetPerFrame: 2,      // 1-2 per frame per firefly position
         distanceCutoff: 500.0,
     },
 };
