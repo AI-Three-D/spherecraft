@@ -98,6 +98,13 @@ export function createEngineConfig() {
           moonNormalizationIntensity: 0.15
         }
       },
+      distortion: {
+        sourceCutoffs: {
+          // Third-person character camera sits about 7.8 m from the player by default.
+          campfire: 10.0,
+          shockwave: 200.0
+        }
+      },
       terrainShader: {
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
@@ -118,7 +125,19 @@ export function createEngineConfig() {
     },
 
     ui: {
-      updateIntervalMs: 250
+      updateIntervalMs: 250,
+      initialLoad: {
+        enabled: true,
+        minOverlayMs: 1800,
+        maxWaitMs: 14000,
+        stableFramesRequired: 16,
+        residentVisibleRatio: 0.94,
+        exactVisibleRatio: 0.62,
+        minVisibleTiles: 64,
+        maxPendingGenerations: 20,
+        maxActiveGenerations: 6,
+        maxPendingCopies: 0
+      }
     },
 
     player: {

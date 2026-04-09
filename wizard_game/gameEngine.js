@@ -220,6 +220,8 @@ export class GameEngine {
         this._lastUIUpdate = 0;
         this._uiUpdateIntervalMs = this.engineConfig.ui.updateIntervalMs;
         this._renderInFlight = false;
+        this._initialLoadState = null;
+        this._cameraModeAfterInitialLoad = null;
     }
 
     toggleCameraMode() {
@@ -302,6 +304,145 @@ export class GameEngine {
             y: origin.y + radius + spawnHeight,
             z: origin.z,
         };
+    }
+
+    _createInitialLoadState() {
+        const config = this.engineConfig?.ui?.initialLoad ?? {};
+        const enabled = config.enabled !== false && this.renderer?.isGPUQuadtreeActive?.() === true;
+        const startedAt = performance.now();
+        return {
+            enabled,
+            active: enabled,
+            complete: !enabled,
+            phase: enabled ? 'warming-quadtree' : 'ready',
+            title: enabled ? 'Stabilizing the first terrain pass' : 'Ready',
+            detail: enabled ? 'Preparing the first resident quadtree shell.' : 'Ready',
+            progress: enabled ? 0.02 : 1,
+            startedAt,
+            finishedAt: enabled ? 0 : startedAt,
+            stableFrames: 0,
+            stableFramesRequired: Math.max(1, config.stableFramesRequired ?? 12),
+            revealStarted: false,
+            stats: null,
+        };
+    }
+
+    _setInitialLoadCameraHold() {
+        if (!this._initialLoadState?.active) return;
+        if (this.cameraMode === 'character') {
+            this._cameraModeAfterInitialLoad = 'character';
+            this.cameraMode = 'follow';
+            this.camera.follow(this.spaceship);
+            this.camera.resetOrbit?.();
+        }
+    }
+
+    _completeInitialLoad(finalDetail = 'Terrain ready.') {
+        if (!this._initialLoadState || this._initialLoadState.complete) return;
+        this._initialLoadState.active = false;
+        this._initialLoadState.complete = true;
+        this._initialLoadState.phase = 'ready';
+        this._initialLoadState.title = 'Planetfall ready';
+        this._initialLoadState.detail = finalDetail;
+        this._initialLoadState.progress = 1;
+        this._initialLoadState.finishedAt = performance.now();
+
+        if (this._cameraModeAfterInitialLoad) {
+            this.cameraMode = this._cameraModeAfterInitialLoad;
+            this._cameraModeAfterInitialLoad = null;
+            this.actorManager?.cameraController?.snap?.();
+        }
+    }
+
+    _tickInitialLoadState() {
+        const state = this._initialLoadState;
+        if (!state?.active) return state;
+
+        const config = this.engineConfig?.ui?.initialLoad ?? {};
+        const stats = this.renderer?.getInitialLoadStatus?.() ?? null;
+        state.stats = stats;
+
+        if (!stats?.hasVisibleReadback) {
+            state.phase = 'surveying';
+            state.title = 'Surveying the horizon';
+            state.detail = 'Waiting for the first quadtree visibility pass.';
+            state.progress = Math.max(state.progress, 0.08);
+        } else {
+            const visibleTarget = Math.max(1, Math.min(stats.visibleTiles, config.minVisibleTiles ?? 48));
+            const visibleCoverage = Math.min(1, stats.residentVisibleTiles / visibleTarget);
+            const exactCoverage = Math.min(
+                1,
+                stats.exactVisibleRatio / Math.max(0.0001, config.exactVisibleRatio ?? 0.55)
+            );
+            const queueBudget = Math.max(
+                1,
+                (config.maxPendingGenerations ?? 24) +
+                (config.maxActiveGenerations ?? 8) +
+                Math.max(1, config.maxPendingCopies ?? 0)
+            );
+            const queuePressure = Math.min(
+                1,
+                (stats.pendingGenerations + stats.activeGenerations + stats.pendingCopies) / queueBudget
+            );
+            const queueSettled = 1 - queuePressure;
+            const rawProgress = 0.12 + (visibleCoverage * 0.5) + (exactCoverage * 0.22) + (queueSettled * 0.16);
+            state.progress = Math.max(state.progress, Math.min(0.98, rawProgress));
+
+            const residentReady = stats.residentVisibleRatio >= (config.residentVisibleRatio ?? 0.92);
+            const exactReady = stats.exactVisibleRatio >= (config.exactVisibleRatio ?? 0.55);
+            const visibleReady = stats.visibleTiles >= (config.minVisibleTiles ?? 48);
+            const queueReady =
+                stats.pendingGenerations <= (config.maxPendingGenerations ?? 24) &&
+                stats.activeGenerations <= (config.maxActiveGenerations ?? 8) &&
+                stats.pendingCopies <= (config.maxPendingCopies ?? 0);
+
+            if (residentReady && exactReady && visibleReady && queueReady) {
+                state.stableFrames++;
+                state.phase = 'locking';
+                state.title = 'Locking terrain residency';
+                state.detail = `Holding ${state.stableFrames}/${state.stableFramesRequired} stable frames before reveal.`;
+                state.progress = Math.max(
+                    state.progress,
+                    0.9 + 0.08 * Math.min(1, state.stableFrames / state.stableFramesRequired)
+                );
+            } else {
+                state.stableFrames = 0;
+                if (stats.pendingGenerations + stats.activeGenerations > 0) {
+                    state.phase = 'streaming';
+                    state.title = 'Streaming terrain tiles';
+                    state.detail = `${stats.residentVisibleTiles}/${stats.visibleTiles} visible tiles resident, ${stats.pendingGenerations + stats.activeGenerations} generations in flight.`;
+                } else if (stats.exactVisibleRatio < (config.exactVisibleRatio ?? 0.55)) {
+                    state.phase = 'refining';
+                    state.title = 'Refining first-ring detail';
+                    state.detail = 'Replacing fallback ancestors with exact tiles.';
+                } else {
+                    state.phase = 'settling';
+                    state.title = 'Settling the first frame';
+                    state.detail = 'Waiting for copies and residency updates to finish.';
+                }
+            }
+        }
+
+        const elapsedMs = performance.now() - state.startedAt;
+        const minOverlayMs = Math.max(0, config.minOverlayMs ?? 0);
+        const maxWaitMs = Math.max(minOverlayMs + 1, config.maxWaitMs ?? 12000);
+        const stableReady = state.stableFrames >= state.stableFramesRequired;
+
+        if (stableReady && elapsedMs >= minOverlayMs) {
+            this._completeInitialLoad('Initial terrain residency is stable.');
+        } else if (elapsedMs >= maxWaitMs) {
+            this._completeInitialLoad('Initial load timed out; revealing with current terrain residency.');
+        }
+
+        return state;
+    }
+
+    getLoadingStatus() {
+        return this._tickInitialLoadState();
+    }
+
+    isInitialLoadComplete() {
+        return this.getLoadingStatus()?.complete !== false;
     }
 
     updateManualCamera(deltaTime, keys, mouseDelta) {
@@ -686,7 +827,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                     type: 'heatHaze',
                     position: { x: spawnX, y: spawnY, z: spawnZ },
                     getPosition: () => campfireEmitter?.position,
-                    distanceCutoff: 7.0,
+                    distanceCutoff: this.engineConfig.rendering?.distortion?.sourceCutoffs?.campfire ?? 10.0,
                 });
 
                 // Spawn a firefly swarm near the campfire (offset to the side).
@@ -718,6 +859,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 Logger.warn(`[GameEngine] NPC system init failed: ${e?.message || e}`);
             }
         }
+        this._initialLoadState = this._createInitialLoadState();
+        this._setInitialLoadCameraHold();
         Logger.info('[GameEngine] Initialization complete');
     }
 
@@ -744,6 +887,20 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         const keys = this.inputManager.getKeys();
         const mouseDelta = this.inputManager.getMouseDelta();
         const wheelDelta = this.inputManager.getWheelDelta();
+
+        if (!this.isInitialLoadComplete()) {
+            this._tickInitialLoadState();
+            this.gameState = {
+                time: performance.now(),
+                player: this.spaceship,
+                spaceship: this.spaceship,
+                objects: new Map(),
+                camera: this.camera,
+                altitudeZoneManager: this.altitudeZoneManager
+            };
+            this.updateUI();
+            return;
+        }
 
         if (this.inputManager.consumeKeyPress('KeyU')) {
             const result = this.renderer?.toggleTerrainManualDiagnosticSnapshot?.('key:u');

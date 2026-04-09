@@ -14,7 +14,17 @@
         body {
             overflow: hidden;
             background: #000;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: 'Trebuchet MS', 'Avenir Next', 'Segoe UI', sans-serif;
+            color: white;
+        }
+
+        :root {
+            --load-ink: #f4f6fb;
+            --load-muted: rgba(232, 240, 255, 0.72);
+            --load-accent: #91f0ff;
+            --load-accent-2: #ffde8a;
+            --load-panel: rgba(8, 14, 28, 0.72);
+            --load-panel-border: rgba(145, 240, 255, 0.22);
         }
         
         #gameCanvas {
@@ -70,22 +80,291 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background: linear-gradient(135deg, #1a1a2e 0%, #0f0f23 100%);
+            overflow: hidden;
             display: flex;
-            flex-direction: column;
             justify-content: center;
             align-items: center;
             z-index: 300;
-            color: white;
+            color: var(--load-ink);
+            background:
+                radial-gradient(circle at 20% 20%, rgba(71, 136, 255, 0.28), transparent 30%),
+                radial-gradient(circle at 80% 25%, rgba(255, 192, 124, 0.18), transparent 24%),
+                radial-gradient(circle at 50% 80%, rgba(91, 207, 255, 0.14), transparent 36%),
+                linear-gradient(135deg, #060913 0%, #0a1426 42%, #05070d 100%);
         }
-        
-        .loading-spinner {
-            width: 60px;
-            height: 60px;
-            border: 3px solid rgba(0, 255, 255, 0.2);
-            border-top-color: #00ffff;
+
+        #loading-screen::before,
+        #loading-screen::after {
+            content: '';
+            position: absolute;
+            inset: -20%;
+            pointer-events: none;
+        }
+
+        #loading-screen::before {
+            background:
+                radial-gradient(circle, rgba(255,255,255,0.8) 0 1px, transparent 1.5px) 0 0 / 120px 120px,
+                radial-gradient(circle, rgba(145,240,255,0.45) 0 1px, transparent 1.5px) 40px 70px / 180px 180px;
+            opacity: 0.45;
+            animation: drift-stars 18s linear infinite;
+        }
+
+        #loading-screen::after {
+            background:
+                conic-gradient(from 0deg, rgba(145, 240, 255, 0.18), transparent 35%, rgba(255, 222, 138, 0.16), transparent 68%, rgba(145, 240, 255, 0.18));
+            filter: blur(48px);
+            opacity: 0.55;
+            animation: pulse-veil 8s ease-in-out infinite;
+        }
+
+        @keyframes drift-stars {
+            from { transform: translate3d(0, 0, 0) scale(1); }
+            to { transform: translate3d(-80px, 40px, 0) scale(1.04); }
+        }
+
+        @keyframes pulse-veil {
+            0%, 100% { transform: scale(1); opacity: 0.42; }
+            50% { transform: scale(1.06); opacity: 0.62; }
+        }
+
+        .loading-shell {
+            position: relative;
+            width: min(680px, calc(100vw - 32px));
+            padding: 32px;
+            border-radius: 28px;
+            border: 1px solid var(--load-panel-border);
+            background:
+                linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)),
+                var(--load-panel);
+            backdrop-filter: blur(18px);
+            box-shadow:
+                0 30px 90px rgba(0, 0, 0, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.08);
+        }
+
+        .loading-orbit {
+            position: relative;
+            width: 180px;
+            height: 180px;
+            margin: 0 auto 28px auto;
+        }
+
+        .loading-orbit-ring,
+        .loading-orbit-ring::before,
+        .loading-orbit-ring::after {
+            position: absolute;
+            inset: 0;
             border-radius: 50%;
-            animation: spin 1s linear infinite;
+            content: '';
+        }
+
+        .loading-orbit-ring {
+            border: 1px solid rgba(145, 240, 255, 0.18);
+            box-shadow: inset 0 0 24px rgba(145, 240, 255, 0.08);
+        }
+
+        .loading-orbit-ring::before {
+            inset: 18px;
+            border: 1px dashed rgba(255, 222, 138, 0.22);
+            animation: spin 18s linear infinite;
+        }
+
+        .loading-orbit-ring::after {
+            inset: 38px;
+            border: 1px solid rgba(145, 240, 255, 0.1);
+            animation: spin-reverse 13s linear infinite;
+        }
+
+        @keyframes spin-reverse {
+            to { transform: rotate(-360deg); }
+        }
+
+        .loading-planet {
+            position: absolute;
+            inset: 46px;
+            border-radius: 50%;
+            background:
+                radial-gradient(circle at 32% 30%, rgba(255,255,255,0.86), rgba(255,255,255,0.08) 18%, transparent 19%),
+                radial-gradient(circle at 38% 36%, #7fd7ff 0%, #4b84cf 38%, #1a2a55 68%, #09101f 100%);
+            box-shadow:
+                inset -22px -24px 36px rgba(2, 7, 19, 0.72),
+                0 0 38px rgba(127, 215, 255, 0.22);
+            overflow: hidden;
+        }
+
+        .loading-planet::before {
+            content: '';
+            position: absolute;
+            inset: 12% -18% 36% -12%;
+            background: linear-gradient(90deg, rgba(255, 222, 138, 0.06), rgba(255,255,255,0.34), rgba(255, 222, 138, 0.08));
+            transform: rotate(-18deg);
+            filter: blur(8px);
+        }
+
+        .loading-planet::after {
+            content: '';
+            position: absolute;
+            inset: 18% 12%;
+            border-radius: 50%;
+            border: 1px solid rgba(255,255,255,0.1);
+            opacity: 0.5;
+        }
+
+        .loading-satellite {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 14px;
+            height: 14px;
+            margin: -7px;
+            border-radius: 50%;
+            background: radial-gradient(circle, #fff 0%, var(--load-accent) 55%, rgba(145, 240, 255, 0.1) 100%);
+            box-shadow: 0 0 22px rgba(145, 240, 255, 0.75);
+            transform-origin: 0 -76px;
+            animation: spin 4.5s linear infinite;
+        }
+
+        .loading-copy {
+            text-align: center;
+        }
+
+        .loading-kicker {
+            letter-spacing: 0.28em;
+            text-transform: uppercase;
+            font-size: 11px;
+            color: var(--load-accent-2);
+            margin-bottom: 10px;
+        }
+
+        .loading-title {
+            font-size: clamp(28px, 5vw, 48px);
+            line-height: 1;
+            letter-spacing: 0.02em;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .loading-text {
+            margin: 0 auto 10px auto;
+            max-width: 34ch;
+            font-size: 16px;
+            color: var(--load-muted);
+            min-height: 42px;
+        }
+
+        .loading-phase {
+            font-size: 13px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: rgba(145, 240, 255, 0.86);
+            margin-bottom: 18px;
+        }
+
+        .loading-progress {
+            width: min(440px, 100%);
+            margin: 0 auto 18px auto;
+        }
+
+        .loading-progress-track {
+            position: relative;
+            height: 12px;
+            border-radius: 999px;
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .loading-progress-fill {
+            position: absolute;
+            inset: 0 auto 0 0;
+            width: 0%;
+            border-radius: inherit;
+            background:
+                linear-gradient(90deg, rgba(145, 240, 255, 0.9), rgba(255, 222, 138, 0.92));
+            box-shadow: 0 0 24px rgba(145, 240, 255, 0.35);
+            transition: width 180ms ease;
+        }
+
+        .loading-progress-glow {
+            position: absolute;
+            inset: -60% auto -60% 0;
+            width: 120px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+            transform: translateX(-140px);
+            animation: sweep 1.8s linear infinite;
+            mix-blend-mode: screen;
+        }
+
+        @keyframes sweep {
+            to { transform: translateX(560px); }
+        }
+
+        .loading-progress-meta {
+            margin-top: 8px;
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            font-size: 12px;
+            color: rgba(244, 246, 251, 0.72);
+        }
+
+        .loading-stats {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .loading-stat {
+            padding: 12px 10px;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            text-align: left;
+        }
+
+        .loading-stat-label {
+            display: block;
+            font-size: 10px;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: rgba(244, 246, 251, 0.5);
+            margin-bottom: 6px;
+        }
+
+        .loading-stat-value {
+            display: block;
+            font-size: 18px;
+            color: var(--load-ink);
+        }
+
+        .loading-stat-sub {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: rgba(244, 246, 251, 0.56);
+        }
+
+        @media (max-width: 680px) {
+            .loading-shell {
+                padding: 22px 18px 18px 18px;
+                border-radius: 22px;
+            }
+
+            .loading-orbit {
+                width: 148px;
+                height: 148px;
+                margin-bottom: 20px;
+            }
+
+            .loading-progress-meta {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .loading-stats {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
         
         @keyframes spin {
@@ -128,8 +407,52 @@
     <canvas id="gameCanvas"></canvas>
     
     <div id="loading-screen">
-        <div class="loading-spinner"></div>
-        <div class="loading-text">Loading Terrain Engine...</div>
+        <div class="loading-shell">
+            <div class="loading-orbit">
+                <div class="loading-orbit-ring"></div>
+                <div class="loading-planet"></div>
+                <div class="loading-satellite"></div>
+            </div>
+            <div class="loading-copy">
+                <div class="loading-kicker">Spherecraft Arrival Sequence</div>
+                <div class="loading-title" id="loading-title">Booting World Engine</div>
+                <div class="loading-text" id="loading-text">Compiling terrain systems and preparing the first render pass.</div>
+                <div class="loading-phase" id="loading-phase">Starting</div>
+                <div class="loading-progress">
+                    <div class="loading-progress-track">
+                        <div class="loading-progress-fill" id="loading-progress-fill">
+                            <div class="loading-progress-glow"></div>
+                        </div>
+                    </div>
+                    <div class="loading-progress-meta">
+                        <span id="loading-progress-label">0%</span>
+                        <span id="loading-progress-detail">Waiting for startup.</span>
+                    </div>
+                </div>
+                <div class="loading-stats">
+                    <div class="loading-stat">
+                        <span class="loading-stat-label">Visible</span>
+                        <span class="loading-stat-value" id="loading-visible">0</span>
+                        <span class="loading-stat-sub">tiles in the first pass</span>
+                    </div>
+                    <div class="loading-stat">
+                        <span class="loading-stat-label">Resident</span>
+                        <span class="loading-stat-value" id="loading-resident">0%</span>
+                        <span class="loading-stat-sub">visible tile coverage</span>
+                    </div>
+                    <div class="loading-stat">
+                        <span class="loading-stat-label">Exact</span>
+                        <span class="loading-stat-value" id="loading-exact">0%</span>
+                        <span class="loading-stat-sub">non-fallback tiles</span>
+                    </div>
+                    <div class="loading-stat">
+                        <span class="loading-stat-label">Queue</span>
+                        <span class="loading-stat-value" id="loading-queue">0</span>
+                        <span class="loading-stat-sub">pending generations</span>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
     
     <div id="debug-panel">
@@ -1367,6 +1690,38 @@
         // Loading screen
         const loadingScreen = document.getElementById('loading-screen');
         const debugPanel = document.getElementById('debug-panel');
+        const loadingTitle = document.getElementById('loading-title');
+        const loadingText = document.getElementById('loading-text');
+        const loadingPhase = document.getElementById('loading-phase');
+        const loadingProgressFill = document.getElementById('loading-progress-fill');
+        const loadingProgressLabel = document.getElementById('loading-progress-label');
+        const loadingProgressDetail = document.getElementById('loading-progress-detail');
+        const loadingVisible = document.getElementById('loading-visible');
+        const loadingResident = document.getElementById('loading-resident');
+        const loadingExact = document.getElementById('loading-exact');
+        const loadingQueue = document.getElementById('loading-queue');
+
+        function formatPercent(value) {
+            const pct = Math.max(0, Math.min(100, Math.round((Number.isFinite(value) ? value : 0) * 100)));
+            return `${pct}%`;
+        }
+
+        function updateLoadingScreen(status) {
+            if (!status) return;
+            const stats = status.stats || {};
+            const progress = Math.max(0, Math.min(1, status.progress ?? 0));
+
+            loadingTitle.textContent = status.title || 'Preparing world';
+            loadingText.textContent = status.detail || 'Initializing terrain systems.';
+            loadingPhase.textContent = (status.phase || 'starting').replace(/-/g, ' ');
+            loadingProgressFill.style.width = `${(progress * 100).toFixed(1)}%`;
+            loadingProgressLabel.textContent = formatPercent(progress);
+            loadingProgressDetail.textContent = status.detail || 'Preparing terrain.';
+            loadingVisible.textContent = `${stats.visibleTiles ?? 0}`;
+            loadingResident.textContent = formatPercent(stats.residentVisibleRatio ?? 0);
+            loadingExact.textContent = formatPercent(stats.exactVisibleRatio ?? 0);
+            loadingQueue.textContent = `${(stats.pendingGenerations ?? 0) + (stats.activeGenerations ?? 0)}`;
+        }
         
         // Initialize game
         async function init() {
@@ -1374,18 +1729,12 @@
                 await gameEngine.start();
 
                 console.log('Game initialized');
-                
-                // Hide loading screen with fade
-                loadingScreen.style.transition = 'opacity 0.5s';
-                loadingScreen.style.opacity = '0';
-                setTimeout(() => {
-                    loadingScreen.style.display = 'none';
-                }, 500);
-                
+
                 // Start game loop
                 let lastTime = performance.now();
                 let frameCount = 0;
                 let fpsTime = 0;
+                let loadingHidden = false;
 
                 function gameLoop(currentTime) {
                     const deltaTime = (currentTime - lastTime) / 1000;
@@ -1407,6 +1756,20 @@
                     const clampedDelta = Math.min(deltaTime, 0.1);
                     gameEngine.update(clampedDelta);
                     gameEngine.render(clampedDelta);
+
+                    const loadingStatus = gameEngine.getLoadingStatus?.();
+                    if (loadingStatus && !loadingHidden) {
+                        updateLoadingScreen(loadingStatus);
+                        if (loadingStatus.complete) {
+                            loadingHidden = true;
+                            loadingScreen.style.transition = 'opacity 0.7s ease, visibility 0.7s ease';
+                            loadingScreen.style.opacity = '0';
+                            loadingScreen.style.visibility = 'hidden';
+                            setTimeout(() => {
+                                loadingScreen.style.display = 'none';
+                            }, 720);
+                        }
+                    }
                     
                     requestAnimationFrame(gameLoop);
                     

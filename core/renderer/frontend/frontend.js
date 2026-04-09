@@ -344,6 +344,10 @@ export class Frontend {
         return this.quadtreeTileManager?.isManualDiagnosticFrozen?.() === true;
     }
 
+    getInitialLoadStatus() {
+        return this.quadtreeTileManager?.getInitialLoadStatus?.() ?? null;
+    }
+
     async updateChunks(gameState, environmentState, deltaTime, planetConfig, sphericalMapper) {
         if (this.uniformManager) {
             this.uniformManager.currentEnvironmentState = environmentState;

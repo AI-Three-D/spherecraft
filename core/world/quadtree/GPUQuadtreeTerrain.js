@@ -1359,6 +1359,71 @@ export class QuadtreeTileManager {
         return this.tileStreamer.getArrayTextures();
     }
 
+    getInitialLoadStatus() {
+        const tileStreamer = this.tileStreamer;
+        const visibleTiles = Array.isArray(this._lastVisibleTiles) ? this._lastVisibleTiles : [];
+        const now = performance.now();
+
+        let residentVisibleTiles = 0;
+        let exactVisibleTiles = 0;
+        let ancestorVisibleTiles = 0;
+
+        if (tileStreamer && visibleTiles.length > 0) {
+            for (const tile of visibleTiles) {
+                if (!tile) continue;
+
+                const exactLayer = tileStreamer.getLoadedLayer(tile.face, tile.depth, tile.x, tile.y);
+                if (Number.isInteger(exactLayer) && exactLayer >= 0) {
+                    residentVisibleTiles++;
+                    exactVisibleTiles++;
+                    continue;
+                }
+
+                let depth = tile.depth;
+                let x = tile.x;
+                let y = tile.y;
+                while (depth > 0) {
+                    depth--;
+                    x >>= 1;
+                    y >>= 1;
+                    const ancestorLayer = tileStreamer.getLoadedLayer(tile.face, depth, x, y);
+                    if (Number.isInteger(ancestorLayer) && ancestorLayer >= 0) {
+                        residentVisibleTiles++;
+                        ancestorVisibleTiles++;
+                        break;
+                    }
+                }
+            }
+        }
+
+        const totalVisibleTiles = visibleTiles.length;
+        const generationQueue = tileStreamer?._generationQueue;
+        const pendingGenerations = generationQueue?.queue?.length ?? 0;
+        const activeGenerations = generationQueue?.active ?? 0;
+        const pendingCopies = tileStreamer?.arrayPool?._pendingCopies?.length ?? 0;
+        const loadedTiles = tileStreamer?._tileInfo?.size ?? 0;
+        const freeLayers = tileStreamer?.arrayPool?.freeLayers?.length ?? 0;
+        const lastVisibleReadbackTime = tileStreamer?._lastVisibleReadbackTime ?? 0;
+        const visibleReadbackAgeMs = lastVisibleReadbackTime > 0 ? Math.max(0, now - lastVisibleReadbackTime) : null;
+
+        return {
+            hasVisibleReadback: totalVisibleTiles > 0,
+            visibleTiles: totalVisibleTiles,
+            residentVisibleTiles,
+            exactVisibleTiles,
+            ancestorVisibleTiles,
+            residentVisibleRatio: totalVisibleTiles > 0 ? residentVisibleTiles / totalVisibleTiles : 0,
+            exactVisibleRatio: totalVisibleTiles > 0 ? exactVisibleTiles / totalVisibleTiles : 0,
+            loadedTiles,
+            freeLayers,
+            pendingGenerations,
+            activeGenerations,
+            pendingCopies,
+            dirtySlots: tileStreamer?._dirtySlots?.size ?? 0,
+            visibleReadbackAgeMs,
+        };
+    }
+
     // ── Readback / diagnostics ───────────────────────────────────────────
   
     async _diagnosticSnapshot(tiles) {

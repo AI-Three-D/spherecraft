@@ -35,6 +35,8 @@ export class EngineConfig {
     const terrainShader = rendering.terrainShader || {};
     const lighting = rendering.lighting || {};
     const ambient = lighting.ambient || {};
+    const distortion = rendering.distortion || {};
+    const sourceCutoffs = distortion.sourceCutoffs || {};
     this.rendering = {
       preferWebGPU: requireBool(rendering.preferWebGPU, 'rendering.preferWebGPU'),
       maxPoolSlots: requireInt(rendering.maxPoolSlots, 'rendering.maxPoolSlots', 1),
@@ -88,14 +90,57 @@ export class EngineConfig {
             'rendering.lighting.ambient.moonNormalizationIntensity'
           )
         }
+      },
+      distortion: {
+        sourceCutoffs: {
+          campfire: requireNumber(
+            sourceCutoffs.campfire ?? 10.0,
+            'rendering.distortion.sourceCutoffs.campfire'
+          ),
+          shockwave: requireNumber(
+            sourceCutoffs.shockwave ?? 200.0,
+            'rendering.distortion.sourceCutoffs.shockwave'
+          )
+        }
       }
     };
 
 
     // ==================== UI ====================
     const ui = requireObject(options.ui, 'ui');
+    const initialLoad = ui.initialLoad || {};
     this.ui = {
-      updateIntervalMs: requireInt(ui.updateIntervalMs, 'ui.updateIntervalMs', 1)
+      updateIntervalMs: requireInt(ui.updateIntervalMs, 'ui.updateIntervalMs', 1),
+      initialLoad: {
+        enabled: requireBool(initialLoad.enabled ?? true, 'ui.initialLoad.enabled'),
+        minOverlayMs: requireInt(initialLoad.minOverlayMs ?? 1500, 'ui.initialLoad.minOverlayMs', 0),
+        maxWaitMs: requireInt(initialLoad.maxWaitMs ?? 12000, 'ui.initialLoad.maxWaitMs', 1),
+        stableFramesRequired: requireInt(
+          initialLoad.stableFramesRequired ?? 12,
+          'ui.initialLoad.stableFramesRequired',
+          1
+        ),
+        residentVisibleRatio: requireNumber(
+          initialLoad.residentVisibleRatio ?? 0.92,
+          'ui.initialLoad.residentVisibleRatio'
+        ),
+        exactVisibleRatio: requireNumber(
+          initialLoad.exactVisibleRatio ?? 0.55,
+          'ui.initialLoad.exactVisibleRatio'
+        ),
+        minVisibleTiles: requireInt(initialLoad.minVisibleTiles ?? 48, 'ui.initialLoad.minVisibleTiles', 1),
+        maxPendingGenerations: requireInt(
+          initialLoad.maxPendingGenerations ?? 24,
+          'ui.initialLoad.maxPendingGenerations',
+          0
+        ),
+        maxActiveGenerations: requireInt(
+          initialLoad.maxActiveGenerations ?? 8,
+          'ui.initialLoad.maxActiveGenerations',
+          0
+        ),
+        maxPendingCopies: requireInt(initialLoad.maxPendingCopies ?? 0, 'ui.initialLoad.maxPendingCopies', 0)
+      }
     };
 
     const player = requireObject(options.player ?? {}, 'player');
