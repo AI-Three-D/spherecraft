@@ -853,25 +853,8 @@ updateLighting(starSystem) {
             this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
         }
 
-        if (this.postProcessing) {
-            this.postProcessing.beginBloomSourcePass(this.backend);
-
-            if (this.skinnedMeshRenderer?.isReady()) {
-                this.skinnedMeshRenderer.renderBloom(
-                    this.camera,
-                    this.camera.matrixWorldInverse,
-                    this.camera.projectionMatrix
-                );
-            }
-
-            if (this.particleSystem && this.backend._renderPassEncoder) {
-                this.particleSystem.renderBloom(this.backend._renderPassEncoder);
-            }
-        }
-
         // Execute HDR postprocessing chain (bloom, distortion, tone mapping).
         if (this.postProcessing) {
-            this.postProcessing.setFrameDeltaTime(this._lastDeltaTime || 0);
             const dp = this.postProcessing.distortionPass;
             let hazeRendered = false;
 

@@ -175,32 +175,12 @@ export class WorldConfigLoader {
             if (postprocessing.exposure != null) {
                 pp.exposure = postprocessing.exposure;
             }
-            if (postprocessing.autoExposure && pp.exposurePass) {
-                const ae = postprocessing.autoExposure;
-                if (ae.enabled != null) pp.autoExposureEnabled = ae.enabled;
-                if (ae.compensation != null) pp.exposurePass.exposureCompensation = ae.compensation;
-                if (ae.minExposure != null) pp.exposurePass.minExposure = ae.minExposure;
-                if (ae.maxExposure != null) pp.exposurePass.maxExposure = ae.maxExposure;
-                if (ae.speedUp != null) pp.exposurePass.speedUp = ae.speedUp;
-                if (ae.speedDown != null) pp.exposurePass.speedDown = ae.speedDown;
-                if (ae.middleGray != null) pp.exposurePass.middleGray = ae.middleGray;
-            }
             if (postprocessing.bloom) {
                 const b = postprocessing.bloom;
                 if (b.threshold   != null) pp.bloomPass.threshold   = b.threshold;
                 if (b.knee        != null) pp.bloomPass.knee        = b.knee;
                 if (b.intensity   != null) pp.bloomPass.intensity   = b.intensity;
                 if (b.blendFactor != null) pp.bloomPass.blendFactor = b.blendFactor;
-            }
-            if (postprocessing.tonemapping && pp.toneMappingPass) {
-                const t = postprocessing.tonemapping;
-                if (t.contrast != null) pp.toneMappingPass.contrast = t.contrast;
-                if (t.toe != null) pp.toneMappingPass.toe = t.toe;
-                if (t.shoulder != null) pp.toneMappingPass.shoulder = t.shoulder;
-                if (t.whitePoint != null) pp.toneMappingPass.whitePoint = t.whitePoint;
-                if (t.highlightSaturation != null) {
-                    pp.toneMappingPass.highlightSaturation = t.highlightSaturation;
-                }
             }
         }
 

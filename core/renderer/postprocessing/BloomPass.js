@@ -1,8 +1,7 @@
 // core/renderer/postprocessing/BloomPass.js
 //
-// Emissive-driven bloom: threshold extraction from a dedicated bloom source,
-// progressive downsample, progressive upsample, and additive composite back
-// into the HDR scene buffer.
+// Physically-motivated bloom: threshold extraction, progressive downsample,
+// progressive upsample, and additive composite back into the HDR buffer.
 //
 // Uses separate render passes for each mip level so we can read one mip
 // and write to another without read-write hazards.
@@ -21,7 +20,7 @@ export class BloomPass {
         this.height = height;
 
         // Tunable parameters.
-        this.threshold = 0.8;
+        this.threshold = 2.2;
         this.knee = 0.25;
         this.intensity = 0.06;
         this.blendFactor = 0.35;
@@ -208,16 +207,17 @@ export class BloomPass {
         this._createMipChain();
     }
 
-    // Runs the full bloom pass chain from a dedicated bloom source texture and
-    // composites the result into the HDR scene texture.
-    render(commandEncoder, sourceView, hdrView, sceneWidth, sceneHeight) {
+    // Runs the full bloom pass chain. `hdrView` is the HDR scene texture view.
+    // This method creates its own render passes via the command encoder.
+    // After this call, `hdrView`'s texture contents are modified (bloom composited in).
+    render(commandEncoder, hdrView, sceneWidth, sceneHeight) {
         if (!this._initialized || this._mipTextures.length === 0) return;
 
         const mipCount = this._mipTextures.length;
 
         // --- Downsample chain ---
         for (let i = 0; i < mipCount; i++) {
-            const srcView = (i === 0) ? sourceView : this._mipViews[i - 1];
+            const srcView = (i === 0) ? hdrView : this._mipViews[i - 1];
             const srcW = (i === 0) ? sceneWidth : this._mipSizes[i - 1][0];
             const srcH = (i === 0) ? sceneHeight : this._mipSizes[i - 1][1];
             const dstView = this._mipViews[i];

@@ -1,26 +1,10 @@
 {
   "_doc": "Post-processing parameters. All values here update in real-time — no world regeneration needed.",
   "exposure": 1.0,
-  "autoExposure": {
-    "enabled": true,
-    "compensation": 0.75,
-    "minExposure": 0.1,
-    "maxExposure": 16.0,
-    "speedUp": 3.5,
-    "speedDown": 5.0,
-    "middleGray": 0.22
-  },
   "bloom": {
-    "threshold":   0.8,
+    "threshold":   2.2,
     "knee":        0.25,
     "intensity":   0.06,
     "blendFactor": 0.35
-  },
-  "tonemapping": {
-    "contrast": 1.04,
-    "toe": 0.015,
-    "shoulder": 0.72,
-    "whitePoint": 4.0,
-    "highlightSaturation": 1.0
   }
 }

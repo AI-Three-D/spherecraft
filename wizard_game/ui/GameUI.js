@@ -37,34 +37,12 @@ export class GameUI {
             exposure: pp.exposure ?? 1.0,
         };
 
-        if (pp.exposurePass) {
-            data.autoExposure = {
-                enabled: pp.autoExposureEnabled === true,
-                compensation: pp.exposurePass.exposureCompensation,
-                minExposure: pp.exposurePass.minExposure,
-                maxExposure: pp.exposurePass.maxExposure,
-                speedUp: pp.exposurePass.speedUp,
-                speedDown: pp.exposurePass.speedDown,
-                middleGray: pp.exposurePass.middleGray,
-            };
-        }
-
         if (pp.bloomPass) {
             data.bloom = {
                 threshold: pp.bloomPass.threshold,
                 knee: pp.bloomPass.knee,
                 intensity: pp.bloomPass.intensity,
                 blendFactor: pp.bloomPass.blendFactor,
-            };
-        }
-
-        if (pp.toneMappingPass) {
-            data.tonemapping = {
-                contrast: pp.toneMappingPass.contrast,
-                toe: pp.toneMappingPass.toe,
-                shoulder: pp.toneMappingPass.shoulder,
-                whitePoint: pp.toneMappingPass.whitePoint,
-                highlightSaturation: pp.toneMappingPass.highlightSaturation,
             };
         }
 
@@ -907,41 +885,7 @@ export class GameUI {
             sep.textContent = 'TONE MAPPING';
             body.appendChild(sep);
 
-            const exposurePass = pp.exposurePass;
-            const tone = pp.toneMappingPass;
-            if (exposurePass) {
-                mkToggle('Auto Exposure', pp.autoExposureEnabled, v => { pp.autoExposureEnabled = v; });
-                mkSlider('Manual Exposure', 0.05, 12.0, 0.05, pp.exposure, v => { pp.exposure = v; });
-                mkSlider('Exposure Bias', -4.0, 4.0, 0.1, exposurePass.exposureCompensation, v => {
-                    exposurePass.exposureCompensation = v;
-                });
-                mkSlider('Middle Gray', 0.10, 0.40, 0.01, exposurePass.middleGray, v => {
-                    exposurePass.middleGray = v;
-                });
-                mkSlider('Min Exposure', 0.05, 4.0, 0.05, exposurePass.minExposure, v => {
-                    exposurePass.minExposure = Math.min(v, exposurePass.maxExposure);
-                });
-                mkSlider('Max Exposure', 0.1, 24.0, 0.1, exposurePass.maxExposure, v => {
-                    exposurePass.maxExposure = Math.max(v, exposurePass.minExposure);
-                });
-                mkSlider('Brighten Speed', 0.1, 10.0, 0.1, exposurePass.speedUp, v => {
-                    exposurePass.speedUp = v;
-                });
-                mkSlider('Darken Speed', 0.1, 10.0, 0.1, exposurePass.speedDown, v => {
-                    exposurePass.speedDown = v;
-                });
-            } else {
-                mkSlider('Exposure', 0.1, 5.0, 0.05, pp.exposure, v => { pp.exposure = v; });
-            }
-            if (tone) {
-                mkSlider('Contrast', 0.7, 1.5, 0.01, tone.contrast, v => { tone.contrast = v; });
-                mkSlider('Toe', 0.0, 0.25, 0.01, tone.toe, v => { tone.toe = v; });
-                mkSlider('Shoulder', 0.0, 1.0, 0.02, tone.shoulder, v => { tone.shoulder = v; });
-                mkSlider('White Point', 1.0, 12.0, 0.1, tone.whitePoint, v => { tone.whitePoint = v; });
-                mkSlider('Highlight Sat', 0.0, 1.25, 0.05, tone.highlightSaturation, v => {
-                    tone.highlightSaturation = v;
-                });
-            }
+            mkSlider('Exposure', 0.1, 5.0, 0.05, pp.exposure, v => { pp.exposure = v; });
 
             // Bloom
             const bloom = pp.bloomPass;

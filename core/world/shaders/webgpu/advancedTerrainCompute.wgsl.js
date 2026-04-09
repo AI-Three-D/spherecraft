@@ -261,18 +261,14 @@ fn computeNormalSlopeFromHeightMapSphere(
     var hD = sampleHeightAt(coordD);
 
     // At texture boundaries use the low-frequency base height rather than the
-    // full micro-height procedural. The micro FBM is sensitive to sub-ULP UV
-    // differences that arise from different float-arithmetic paths in adjacent
-    // chunks, creating a 1-pixel-wide normal discontinuity (visible as seams
-    // under point lights). The base height is smooth enough that ±1 ULP in
-    // u/v causes no perceptible gradient error.
-    /*
+    // streamed micro-height. Adjacent tiles generate the same border UVs via
+    // slightly different float paths, and the high-frequency micro term turns
+    // those tiny UV deltas into visible normal seams. The base height varies
+    // slowly enough that both tiles converge on the same edge gradient.
     if (coordC.x == maxC.x) { hR = sampleBaseHeightProcedural(face, uR, v); }
     if (coordC.x == 0) { hL = sampleBaseHeightProcedural(face, uL, v); }
     if (coordC.y == maxC.y) { hU = sampleBaseHeightProcedural(face, u, vU); }
     if (coordC.y == 0) { hD = sampleBaseHeightProcedural(face, u, vD); }
-
-    */
     let nd = normalDisplacementScale();
     let pR = dirR * (1.0 + hR * nd);
     let pL = dirL * (1.0 + hL * nd);
