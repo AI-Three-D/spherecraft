@@ -664,7 +664,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             // the GPU-ground-snapped position.
             if (this.renderer.particleSystem) {
                 const actorManager = this.actorManager;
-                this.renderer.particleSystem.addCampfire(
+                const campfireEmitter = this.renderer.particleSystem.addCampfire(
                     { x: spawnX, y: spawnY, z: spawnZ },
                     {
                         getActor: () => actorManager?.playerActor,
@@ -680,8 +680,13 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 );
                 Logger.info('[GameEngine] Campfire + coal emitters registered at spawn');
 
-                // Register campfire as a heat distortion source.
-                this.renderer.addHeatSource({ x: spawnX, y: spawnY, z: spawnZ });
+                // Register campfire as a tracked distortion source so the haze
+                // follows the same ground-snapped anchor as the fire itself.
+                this.renderer.addDistortionSource({
+                    type: 'heatHaze',
+                    position: { x: spawnX, y: spawnY, z: spawnZ },
+                    getPosition: () => campfireEmitter?.position,
+                });
 
                 // Spawn a firefly swarm near the campfire (offset to the side).
                 this.renderer.particleSystem.addFireflySwarm(

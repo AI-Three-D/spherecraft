@@ -100,11 +100,26 @@ export class Frontend {
 
     setActorManager(mgr) { this._actorManager = mgr; }
 
-    // Registers a world position as a heat distortion source (e.g. campfire).
-    addHeatSource(position) {
-        if (this.heatHazeEmitter) {
-            this.heatHazeEmitter.addSource(position);
+    addDistortionSource(options = {}) {
+        const type = options?.type ?? 'heatHaze';
+        if (type === 'heatHaze') {
+            return this.heatHazeEmitter?.addSource(options) ?? null;
         }
+        Logger.warn(`[Frontend] Unsupported distortion source type: ${type}`);
+        return null;
+    }
+
+    removeDistortionSource(sourceOrId) {
+        return this.heatHazeEmitter?.removeSource(sourceOrId) ?? false;
+    }
+
+    // Compatibility wrapper for simple static heat distortion sources.
+    addHeatSource(position, options = {}) {
+        return this.addDistortionSource({
+            type: 'heatHaze',
+            position,
+            ...options,
+        });
     }
 
     _getRenderViewportSize() {
@@ -473,7 +488,7 @@ export class Frontend {
 
             // Heat haze distortion emitter (renders into the distortion map).
             this.heatHazeEmitter = new HeatHazeEmitter(this.backend.device, {});
-            this.heatHazeEmitter.initialize();
+            this.heatHazeEmitter.initialize('depth24plus');
 
             const { ParticleSystem } = await import('../particles/ParticleSystem.js');
             this.particleSystem = new ParticleSystem({
@@ -838,14 +853,14 @@ updateLighting(starSystem) {
             let hazeRendered = false;
 
             // Render heat haze distortion sources before postprocessing.
-            if (this.heatHazeEmitter && dp && this.heatHazeEmitter._sources.length > 0) {
+            if (this.heatHazeEmitter && dp && this.heatHazeEmitter.hasSources()) {
                 this.backend._endCurrentRenderPass();
                 this.backend._ensureCommandEncoder();
                 const enc = this.backend._commandEncoder;
 
-                this.heatHazeEmitter.update(this._lastDeltaTime || 0);
+                this.heatHazeEmitter.update(this._lastDeltaTime || 0, this.planetConfig?.origin || null);
 
-                if (this.heatHazeEmitter._particles.length > 0) {
+                if (this.heatHazeEmitter.hasRenderableParticles()) {
                     dp.clearDistortionMap(enc);
 
                     const te = this.camera.matrixWorldInverse.elements;
@@ -857,9 +872,11 @@ updateLighting(starSystem) {
                     this.heatHazeEmitter.render(
                         enc,
                         dp.getDistortionMapView(),
+                        this.postProcessing.depthTextureView,
                         vpMat.elements,
                         cameraRight,
-                        cameraUp
+                        cameraUp,
+                        this.planetConfig?.origin || null
                     );
                     hazeRendered = true;
                 }

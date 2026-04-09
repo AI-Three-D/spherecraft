@@ -18,7 +18,7 @@ export class DistortionPass {
         this.height = height;
 
         this.strength = 0.2;
-        this.enabled = false;
+        this.enabled = true;
         this._hasActiveSources = false;
 
         // Distortion map (rg16float, same res as scene).

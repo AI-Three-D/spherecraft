@@ -763,6 +763,18 @@ export class GameUI {
             body.style.display = body.style.display === 'none' ? 'block' : 'none';
         });
 
+        const formatSliderValue = (value, step) => {
+            if (!Number.isFinite(value)) return String(value);
+            const stepText = String(step ?? '');
+            let decimals = 2;
+            if (stepText.includes('e-')) {
+                decimals = Math.max(2, Number(stepText.split('e-')[1]) || 2);
+            } else if (stepText.includes('.')) {
+                decimals = Math.max(2, stepText.split('.')[1].length);
+            }
+            return value.toFixed(Math.min(decimals, 4));
+        };
+
         const mkSlider = (label, min, max, step, initial, onChange) => {
             const row = document.createElement('div');
             row.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
@@ -776,10 +788,10 @@ export class GameUI {
             slider.style.cssText = 'flex:1; accent-color:#8cb870;';
             const val = document.createElement('span');
             val.style.cssText = 'width:44px; text-align:right; font-size:11px; font-family:monospace;';
-            val.textContent = Number(initial).toFixed(2);
+            val.textContent = formatSliderValue(Number(initial), step);
             slider.addEventListener('input', () => {
                 const v = parseFloat(slider.value);
-                val.textContent = v.toFixed(2);
+                val.textContent = formatSliderValue(v, step);
                 onChange(v);
             });
             row.appendChild(lbl);
