@@ -895,10 +895,10 @@ export class GameUI {
                 bloomSep.textContent = 'BLOOM';
                 body.appendChild(bloomSep);
 
-                mkSlider('Threshold', 0.0, 5.0, 0.1, bloom.threshold, v => { bloom.threshold = v; });
-                mkSlider('Knee', 0.0, 1.0, 0.05, bloom.knee, v => { bloom.knee = v; });
-                mkSlider('Intensity', 0.0, 1.0, 0.01, bloom.intensity, v => { bloom.intensity = v; });
-                mkSlider('Blend Factor', 0.0, 1.0, 0.05, bloom.blendFactor, v => { bloom.blendFactor = v; });
+                mkSlider('Threshold', 0.0, 2.0, 0.05, bloom.threshold, v => { bloom.threshold = v; });
+                mkSlider('Knee', 0.0, 0.5, 0.01, bloom.knee, v => { bloom.knee = v; });
+                mkSlider('Intensity', 0.0, 0.5, 0.01, bloom.intensity, v => { bloom.intensity = v; });
+                mkSlider('Blend Factor', 0.0, 0.5, 0.01, bloom.blendFactor, v => { bloom.blendFactor = v; });
             }
 
             // Distortion

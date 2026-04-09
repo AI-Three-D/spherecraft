@@ -11,7 +11,7 @@ import { buildBloomDownsampleWGSL } from './shaders/bloomDownsample.wgsl.js';
 import { buildBloomUpsampleWGSL } from './shaders/bloomUpsample.wgsl.js';
 import { buildBloomCompositeWGSL } from './shaders/bloomComposite.wgsl.js';
 
-const MAX_MIP_LEVELS = 4;
+const MAX_MIP_LEVELS = 3;
 
 export class BloomPass {
     constructor(device, { width, height }) {
@@ -20,10 +20,10 @@ export class BloomPass {
         this.height = height;
 
         // Tunable parameters.
-        this.threshold = 2.2;
-        this.knee = 0.25;
-        this.intensity = 0.06;
-        this.blendFactor = 0.35;
+        this.threshold = 0.6;
+        this.knee = 0.2;
+        this.intensity = 0.12;
+        this.blendFactor = 0.22;
 
         // GPU resources.
         this._mipTextures = [];      // One texture per mip, each with a single view.
@@ -36,8 +36,8 @@ export class BloomPass {
         this._downsampleBindGroupLayout = null;
         this._upsampleBindGroupLayout = null;
         this._compositeBindGroupLayout = null;
-        this._downsampleParamsBuffer = null;
-        this._upsampleParamsBuffer = null;
+        this._downsampleParamsBuffers = [];
+        this._upsampleParamsBuffers = [];
         this._compositeParamsBuffer = null;
         this._initialized = false;
     }
@@ -53,20 +53,22 @@ export class BloomPass {
         });
 
         // Downsample params: texelSize(2f), threshold(f), knee(f), isFirstPass(u32), pad(3u32) = 32 bytes
-        this._downsampleParamsBuffer = device.createBuffer({
-            label: 'Bloom-Downsample-Params',
+        this._downsampleParamsBuffers = Array.from({ length: MAX_MIP_LEVELS }, (_, index) => device.createBuffer({
+            label: `Bloom-Downsample-Params-${index}`,
             size: 32,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
+        }));
 
         // Upsample params: texelSize(2f), blendFactor(f), pad(f) = 16 bytes
-        this._upsampleParamsBuffer = device.createBuffer({
-            label: 'Bloom-Upsample-Params',
+        this._upsampleParamsBuffers = Array.from({ length: MAX_MIP_LEVELS }, (_, index) => device.createBuffer({
+            label: `Bloom-Upsample-Params-${index}`,
             size: 16,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
+        }));
 
-        // Composite params: intensity(f), pad(3f) = 16 bytes
+        // Composite reuses the upsample shader, but it needs its own params
+        // buffer so the final intensity write does not overwrite the
+        // progressive upsample state recorded earlier in the frame.
         this._compositeParamsBuffer = device.createBuffer({
             label: 'Bloom-Composite-Params',
             size: 16,
@@ -207,17 +209,16 @@ export class BloomPass {
         this._createMipChain();
     }
 
-    // Runs the full bloom pass chain. `hdrView` is the HDR scene texture view.
-    // This method creates its own render passes via the command encoder.
-    // After this call, `hdrView`'s texture contents are modified (bloom composited in).
-    render(commandEncoder, hdrView, sceneWidth, sceneHeight) {
+    // Runs the full bloom pass chain from a dedicated bloom source texture and
+    // composites the result into the HDR scene texture.
+    render(commandEncoder, sourceView, hdrView, sceneWidth, sceneHeight) {
         if (!this._initialized || this._mipTextures.length === 0) return;
 
         const mipCount = this._mipTextures.length;
 
         // --- Downsample chain ---
         for (let i = 0; i < mipCount; i++) {
-            const srcView = (i === 0) ? hdrView : this._mipViews[i - 1];
+            const srcView = (i === 0) ? sourceView : this._mipViews[i - 1];
             const srcW = (i === 0) ? sceneWidth : this._mipSizes[i - 1][0];
             const srcH = (i === 0) ? sceneHeight : this._mipSizes[i - 1][1];
             const dstView = this._mipViews[i];
@@ -232,14 +233,15 @@ export class BloomPass {
             dsF32[2] = this.threshold;
             dsF32[3] = this.knee;
             dsU32[4] = (i === 0) ? 1 : 0;  // isFirstPass
-            this.device.queue.writeBuffer(this._downsampleParamsBuffer, 0, dsData);
+            const dsParamsBuffer = this._downsampleParamsBuffers[i];
+            this.device.queue.writeBuffer(dsParamsBuffer, 0, dsData);
 
             const bg = this.device.createBindGroup({
                 layout: this._downsampleBindGroupLayout,
                 entries: [
                     { binding: 0, resource: srcView },
                     { binding: 1, resource: this._sampler },
-                    { binding: 2, resource: { buffer: this._downsampleParamsBuffer } },
+                    { binding: 2, resource: { buffer: dsParamsBuffer } },
                 ],
             });
 
@@ -269,14 +271,15 @@ export class BloomPass {
             const [dstW, dstH] = this._mipSizes[i];
 
             const usData = new Float32Array([1.0 / srcW, 1.0 / srcH, this.blendFactor, 0]);
-            this.device.queue.writeBuffer(this._upsampleParamsBuffer, 0, usData);
+            const usParamsBuffer = this._upsampleParamsBuffers[i];
+            this.device.queue.writeBuffer(usParamsBuffer, 0, usData);
 
             const bg = this.device.createBindGroup({
                 layout: this._upsampleBindGroupLayout,
                 entries: [
                     { binding: 0, resource: srcView },
                     { binding: 1, resource: this._sampler },
-                    { binding: 2, resource: { buffer: this._upsampleParamsBuffer } },
+                    { binding: 2, resource: { buffer: usParamsBuffer } },
                 ],
             });
 
@@ -303,15 +306,20 @@ export class BloomPass {
     // Composites bloom mip0 into the HDR texture using additive blending.
     // This is safe because mip0 is a separate texture from the HDR target.
     _compositeBloomIntoHDR(commandEncoder, hdrView, w, h) {
-        const usData = new Float32Array([1.0 / this._mipSizes[0][0], 1.0 / this._mipSizes[0][1], this.intensity, 0]);
-        this.device.queue.writeBuffer(this._upsampleParamsBuffer, 0, usData);
+        const compositeData = new Float32Array([
+            1.0 / this._mipSizes[0][0],
+            1.0 / this._mipSizes[0][1],
+            this.intensity,
+            0,
+        ]);
+        this.device.queue.writeBuffer(this._compositeParamsBuffer, 0, compositeData);
 
         const bg = this.device.createBindGroup({
             layout: this._upsampleBindGroupLayout,
             entries: [
                 { binding: 0, resource: this._mipViews[0] },
                 { binding: 1, resource: this._sampler },
-                { binding: 2, resource: { buffer: this._upsampleParamsBuffer } },
+                { binding: 2, resource: { buffer: this._compositeParamsBuffer } },
             ],
         });
 
@@ -331,9 +339,11 @@ export class BloomPass {
 
     dispose() {
         this._destroyMipChain();
-        this._downsampleParamsBuffer?.destroy();
-        this._upsampleParamsBuffer?.destroy();
+        for (const buffer of this._downsampleParamsBuffers) buffer?.destroy();
+        for (const buffer of this._upsampleParamsBuffers) buffer?.destroy();
         this._compositeParamsBuffer?.destroy();
+        this._downsampleParamsBuffers = [];
+        this._upsampleParamsBuffers = [];
         this._downsamplePipeline = null;
         this._upsamplePipeline = null;
         this._compositePipeline = null;

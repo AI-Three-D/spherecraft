@@ -23,21 +23,23 @@ struct BloomDownsampleParams {
 @group(0) @binding(1) var srcSampler: sampler;
 @group(0) @binding(2) var<uniform> params: BloomDownsampleParams;
 
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+fn bloomBrightness(c: vec3<f32>) -> f32 {
+    return max(max(c.r, c.g), c.b);
 }
 
 // Soft threshold with knee for smooth falloff.
 fn thresholdFilter(color: vec3<f32>, threshold: f32, knee: f32) -> vec3<f32> {
-    let lum = luminance(color);
-    let soft = lum - threshold + knee;
+    let brightness = bloomBrightness(color);
+    let soft = brightness - threshold + knee;
     let soft2 = clamp(soft, 0.0, 2.0 * knee);
+    let softContribution = (soft2 * soft2) / (4.0 * knee + 1e-6);
+    let hardContribution = brightness - threshold;
     let contribution = select(
-        (soft2 * soft2) / (4.0 * knee + 1e-6),
-        lum - threshold,
+        max(softContribution, hardContribution),
+        hardContribution,
         knee <= 0.0
     );
-    let weight = max(contribution, 0.0) / max(lum, 1e-6);
+    let weight = max(contribution, 0.0) / max(brightness, 1e-6);
     return color * weight;
 }
 

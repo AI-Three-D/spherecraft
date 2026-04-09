@@ -260,15 +260,25 @@ fn computeNormalSlopeFromHeightMapSphere(
     var hU = sampleHeightAt(coordU);
     var hD = sampleHeightAt(coordD);
 
-    // At texture boundaries use the low-frequency base height rather than the
-    // streamed micro-height. Adjacent tiles generate the same border UVs via
-    // slightly different float paths, and the high-frequency micro term turns
-    // those tiny UV deltas into visible normal seams. The base height varies
-    // slowly enough that both tiles converge on the same edge gradient.
-    if (coordC.x == maxC.x) { hR = sampleBaseHeightProcedural(face, uR, v); }
-    if (coordC.x == 0) { hL = sampleBaseHeightProcedural(face, uL, v); }
-    if (coordC.y == maxC.y) { hU = sampleBaseHeightProcedural(face, u, vU); }
-    if (coordC.y == 0) { hD = sampleBaseHeightProcedural(face, u, vD); }
+    // Near tile borders, fade the normal computation back to the low-frequency
+    // base height field. The stored micro-height is sensitive to tiny
+    // cross-tile UV differences, which shows up as lighting seams exactly on
+    // tile edges. A 2-texel band is enough to make the shared border normals
+    // agree while keeping interior detail intact.
+    let edgeDistX = min(coordC.x, maxC.x - coordC.x);
+    let edgeDistY = min(coordC.y, maxC.y - coordC.y);
+    let edgeDist = min(edgeDistX, edgeDistY);
+    if (edgeDist <= 2) {
+        let blendT = clamp(f32(edgeDist) / 2.0, 0.0, 1.0);
+        let bR = sampleBaseHeightProcedural(face, uR, v);
+        let bL = sampleBaseHeightProcedural(face, uL, v);
+        let bU = sampleBaseHeightProcedural(face, u, vU);
+        let bD = sampleBaseHeightProcedural(face, u, vD);
+        hR = mix(bR, hR, blendT);
+        hL = mix(bL, hL, blendT);
+        hU = mix(bU, hU, blendT);
+        hD = mix(bD, hD, blendT);
+    }
     let nd = normalDisplacementScale();
     let pR = dirR * (1.0 + hR * nd);
     let pL = dirL * (1.0 + hL * nd);
