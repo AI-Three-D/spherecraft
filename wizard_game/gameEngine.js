@@ -221,7 +221,6 @@ export class GameEngine {
         this._uiUpdateIntervalMs = this.engineConfig.ui.updateIntervalMs;
         this._renderInFlight = false;
         this._initialLoadState = null;
-        this._cameraModeAfterInitialLoad = null;
     }
 
     toggleCameraMode() {
@@ -327,16 +326,6 @@ export class GameEngine {
         };
     }
 
-    _setInitialLoadCameraHold() {
-        if (!this._initialLoadState?.active) return;
-        if (this.cameraMode === 'character') {
-            this._cameraModeAfterInitialLoad = 'character';
-            this.cameraMode = 'follow';
-            this.camera.follow(this.spaceship);
-            this.camera.resetOrbit?.();
-        }
-    }
-
     _completeInitialLoad(finalDetail = 'Terrain ready.') {
         if (!this._initialLoadState || this._initialLoadState.complete) return;
         this._initialLoadState.active = false;
@@ -346,12 +335,6 @@ export class GameEngine {
         this._initialLoadState.detail = finalDetail;
         this._initialLoadState.progress = 1;
         this._initialLoadState.finishedAt = performance.now();
-
-        if (this._cameraModeAfterInitialLoad) {
-            this.cameraMode = this._cameraModeAfterInitialLoad;
-            this._cameraModeAfterInitialLoad = null;
-            this.actorManager?.cameraController?.snap?.();
-        }
     }
 
     _tickInitialLoadState() {
@@ -860,7 +843,6 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             }
         }
         this._initialLoadState = this._createInitialLoadState();
-        this._setInitialLoadCameraHold();
         Logger.info('[GameEngine] Initialization complete');
     }
 
@@ -890,6 +872,47 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         if (!this.isInitialLoadComplete()) {
             this._tickInitialLoadState();
+            this.gameTime.update();
+            this._syncStarSystemTimeScale();
+            if (this.starSystem) {
+                this.starSystem.update(deltaTime);
+            }
+            this._syncStarSystemRotation();
+
+            if (this.altitudeZoneManager) {
+                this.altitudeZoneManager.update(
+                    new Vector3(this.camera.position.x, this.camera.position.y, this.camera.position.z),
+                    deltaTime
+                );
+            }
+
+            if (this.cameraMode === 'character' && this.actorManager) {
+                const neutralInputState = {
+                    keys: {},
+                    mouseDelta: { x: 0, y: 0 },
+                    isLeftDragging: false,
+                    isRightDragging: false,
+                    clickTarget: null,
+                };
+                this.actorManager.update(deltaTime, neutralInputState);
+                const camState = this.actorManager.getCameraState(
+                    deltaTime,
+                    false,
+                    neutralInputState.mouseDelta,
+                    0
+                );
+                if (camState) {
+                    this.camera.position.x = camState.position.x;
+                    this.camera.position.y = camState.position.y;
+                    this.camera.position.z = camState.position.z;
+                    this.camera.target.x = camState.target.x;
+                    this.camera.target.y = camState.target.y;
+                    this.camera.target.z = camState.target.z;
+                }
+            } else if (this.cameraMode === 'follow') {
+                this.camera.update();
+            }
+
             this.gameState = {
                 time: performance.now(),
                 player: this.spaceship,
