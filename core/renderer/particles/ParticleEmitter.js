@@ -4,8 +4,8 @@
 // etc. It holds its world anchor, the set of types it spawns, normalized
 // cumulative weights, and its per-frame spawn budget + LOD cutoff.
 //
-// The ParticleSystem writes the per-emitter parameters into the shared
-// globals UBO before each sim dispatch.
+// The ParticleSystem compacts active emitters into a per-frame spawn table
+// consumed by a single sim dispatch.
 
 import { PARTICLE_EMITTER_PRESETS, PARTICLE_CONFIG } from
     '../../../templates/configs/particleConfig.js';
@@ -59,6 +59,18 @@ export class ParticleEmitter {
             ?? presetDef.distanceCutoff
             ?? 200.0;
 
+        this.lodNearDistance = overrides.lodNearDistance
+            ?? presetDef.lodNearDistance
+            ?? Math.min(12.0, this.distanceCutoff);
+
+        this.lodFarDistance = overrides.lodFarDistance
+            ?? presetDef.lodFarDistance
+            ?? this.distanceCutoff;
+
+        this.lodMinScale = overrides.lodMinScale
+            ?? presetDef.lodMinScale
+            ?? 1.0;
+
         // Deterministic base seed derived from position. The system re-mixes
         // this with frame count when writing the globals UBO.
         this.baseSeed = ((Math.floor(this.position.x * 13.1) ^
@@ -83,5 +95,29 @@ export class ParticleEmitter {
 
     getActiveTypeCount() {
         return this.typeIds.length;
+    }
+
+    getSpawnBudgetForDistance(distance) {
+        if (!Number.isFinite(distance) || distance < 0) {
+            return this.spawnBudgetPerFrame;
+        }
+        if (distance >= this.distanceCutoff) {
+            return 0;
+        }
+
+        let scale = 1.0;
+        if (this.lodFarDistance > this.lodNearDistance && distance > this.lodNearDistance) {
+            const t = Math.min(
+                1.0,
+                (distance - this.lodNearDistance) / (this.lodFarDistance - this.lodNearDistance)
+            );
+            scale = 1.0 + (this.lodMinScale - 1.0) * t;
+        }
+
+        const budget = Math.round(this.spawnBudgetPerFrame * scale);
+        if (budget <= 0 && scale > 0 && this.spawnBudgetPerFrame > 0) {
+            return 1;
+        }
+        return Math.max(0, budget);
     }
 }

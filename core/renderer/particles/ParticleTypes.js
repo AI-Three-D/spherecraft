@@ -40,4 +40,5 @@ export const PARTICLE_FLAGS = Object.freeze({
     ADDITIVE:    1 << 1,  // 0 -> alpha blend, 1 -> additive blend
     STRETCH_VEL: 1 << 2,  // stretch billboard along velocity (teardrop flames)
     ROTATE:      1 << 3,  // apply in-plane rotation from Particle.rotation
+    BLOOM:       1 << 4,  // include in the authored-emissive bloom source pass
 });

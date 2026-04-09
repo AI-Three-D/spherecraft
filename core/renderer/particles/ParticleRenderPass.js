@@ -26,6 +26,8 @@ export class ParticleRenderPass {
         this.bindGroupAdditiveFromB = null;
         this.bindGroupAlphaFromA = null;
         this.bindGroupAlphaFromB = null;
+        this.bindGroupBloomFromA = null;
+        this.bindGroupBloomFromB = null;
     }
 
     initialize() {
@@ -141,6 +143,8 @@ export class ParticleRenderPass {
         this.bindGroupAdditiveFromB = make(b.particlesB, b.liveListAdditive, 'ParticleRender-Additive-B');
         this.bindGroupAlphaFromA    = make(b.particlesA, b.liveListAlpha,    'ParticleRender-Alpha-A');
         this.bindGroupAlphaFromB    = make(b.particlesB, b.liveListAlpha,    'ParticleRender-Alpha-B');
+        this.bindGroupBloomFromA    = make(b.particlesA, b.liveListBloom,    'ParticleRender-Bloom-A');
+        this.bindGroupBloomFromB    = make(b.particlesB, b.liveListBloom,    'ParticleRender-Bloom-B');
     }
 
     // `renderPassEncoder` must already be in a render pass for the main color
@@ -167,19 +171,13 @@ export class ParticleRenderPass {
     }
 
     renderBloom(renderPassEncoder, readBuffer) {
-        const bgAdd = (readBuffer === this.buffers.particlesA)
-            ? this.bindGroupAdditiveFromA
-            : this.bindGroupAdditiveFromB;
-        const bgAlpha = (readBuffer === this.buffers.particlesA)
-            ? this.bindGroupAlphaFromA
-            : this.bindGroupAlphaFromB;
+        const bgBloom = (readBuffer === this.buffers.particlesA)
+            ? this.bindGroupBloomFromA
+            : this.bindGroupBloomFromB;
 
         renderPassEncoder.setPipeline(this.pipelineBloom);
-        renderPassEncoder.setBindGroup(0, bgAdd);
-        renderPassEncoder.drawIndirect(this.buffers.indirectAdditive, 0);
-
-        renderPassEncoder.setBindGroup(0, bgAlpha);
-        renderPassEncoder.drawIndirect(this.buffers.indirectAlpha, 0);
+        renderPassEncoder.setBindGroup(0, bgBloom);
+        renderPassEncoder.drawIndirect(this.buffers.indirectBloom, 0);
     }
 
     dispose() {
@@ -191,5 +189,7 @@ export class ParticleRenderPass {
         this.bindGroupAdditiveFromB = null;
         this.bindGroupAlphaFromA = null;
         this.bindGroupAlphaFromB = null;
+        this.bindGroupBloomFromA = null;
+        this.bindGroupBloomFromB = null;
     }
 }

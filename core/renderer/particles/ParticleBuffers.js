@@ -4,9 +4,10 @@
 //   - particlesA / particlesB  (ping-pong storage buffers)
 //   - globalsUBO               (per-frame uniform)
 //   - typeDefUBO               (uploaded once from particleConfig)
-//   - indirectAdditive/Alpha   (GPU-written drawIndirect args)
-//   - liveListAdditive/Alpha   (slot indices published by sim)
+//   - indirectAdditive/Alpha/Bloom (GPU-written drawIndirect args)
+//   - liveListAdditive/Alpha/Bloom (slot indices published by sim)
 //   - spawnScratch             (atomic spawn claim counter)
+//   - emitterData              (per-frame compact emitter spawn table)
 //
 // Also exposes matching bind-group-layout slot sizes so the pass classes
 // can build their own layouts consistently.
@@ -20,25 +21,23 @@ import {
 // ─── GPU-visible struct sizes (bytes) ───────────────────────────────
 export const PARTICLE_STRIDE      = 64;   // matches WGSL Particle
 export const TYPE_DEF_STRIDE      = 128;  // matches WGSL ParticleTypeDef (8 vec4s)
-export const GLOBALS_UBO_SIZE     = 256;  // padded: mat4 (64) + 6*vec4 (96) = 160 -> 256
+export const EMITTER_DEF_STRIDE   = 80;   // matches WGSL EmitterSpawnDef (5 vec4s)
+export const EMITTER_CAPACITY     = 16;
+export const GLOBALS_UBO_SIZE     = 256;  // padded conservatively for uniform binding
 export const INDIRECT_ARGS_SIZE   = 16;   // 4 u32
 export const SPAWN_SCRATCH_SIZE   = 16;   // 1 atomic + pad
 
 // Offsets inside GLOBALS_UBO (byte offsets). Kept in one place so the JS
 // writer and the WGSL shader stay aligned.
 export const GLOBALS_OFFSETS = {
-    viewProj:              0,    // mat4x4<f32>
-    cameraRight_dt:        64,   // vec3 + f32
-    cameraUp_time:         80,
-    emitterPos_budget:     96,
-    typeWeightsCumulative: 112,  // vec4<f32>
-    typeIds:               128,  // vec4<u32>
-    rngSeed:               144,  // u32
-    maxParticles:          148,  // u32
-    activeTypeCount:       152,  // u32
-    debugMode:             156,  // u32 — 1 = oversized magenta debug particles
-    localUp:               160,  // vec3<f32> — emitter's local "up" on planet
-    _pad6:                 172,  // f32 — pad to 176
+    viewProj:                      0,    // mat4x4<f32>
+    cameraRight_dt:                64,   // vec3 + f32
+    cameraUp_time:                 80,
+    planetOrigin_totalSpawnBudget: 96,   // vec3 + u32
+    emitterCount:                  112,  // u32
+    maxParticles:                  116,  // u32
+    debugMode:                     120,  // u32 — 1 = oversized magenta debug particles
+    flatWorld:                     124,  // u32 — 1 = use +Y up instead of planet origin
 };
 
 export class ParticleBuffers {
@@ -102,6 +101,13 @@ export class ParticleBuffers {
                  | GPUBufferUsage.INDIRECT
                  | GPUBufferUsage.COPY_DST,
         });
+        this.indirectBloom = device.createBuffer({
+            label: 'ParticleIndirect-Bloom',
+            size: INDIRECT_ARGS_SIZE,
+            usage: GPUBufferUsage.STORAGE
+                 | GPUBufferUsage.INDIRECT
+                 | GPUBufferUsage.COPY_DST,
+        });
 
         // ── live-list index buffers (slot indices) ────────────────
         const liveListBytes = maxParticles * 4;
@@ -115,6 +121,11 @@ export class ParticleBuffers {
             size: liveListBytes,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
+        this.liveListBloom = device.createBuffer({
+            label: 'ParticleLiveList-Bloom',
+            size: liveListBytes,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
 
         // ── spawn scratch (atomic claim counter) ──────────────────
         this.spawnScratch = device.createBuffer({
@@ -123,22 +134,32 @@ export class ParticleBuffers {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
 
+        // ── per-frame emitter spawn table ─────────────────────────
+        this.emitterData = device.createBuffer({
+            label: 'ParticleEmitterData',
+            size: EMITTER_CAPACITY * EMITTER_DEF_STRIDE,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        this._emitterStaging = new ArrayBuffer(EMITTER_CAPACITY * EMITTER_DEF_STRIDE);
+        this._emitterF32 = new Float32Array(this._emitterStaging);
+        this._emitterU32 = new Uint32Array(this._emitterStaging);
+
         // Pre-built "reset" templates for indirect args + scratch.
         this._indirectResetTemplate = new Uint32Array([6, 0, 0, 0]);
         this._spawnScratchResetTemplate = new Uint32Array([0, 0, 0, 0]);
     }
 
-    // Reset only the live-list indirect draw counters. Called ONCE per frame,
-    // before any emitter dispatches, via CPU-side writeBuffer.
+    // Reset only the live-list indirect draw counters. Called once per frame
+    // before the single simulation dispatch.
     resetLiveLists() {
         const q = this.device.queue;
         q.writeBuffer(this.indirectAdditive, 0, this._indirectResetTemplate);
         q.writeBuffer(this.indirectAlpha,    0, this._indirectResetTemplate);
+        q.writeBuffer(this.indirectBloom,    0, this._indirectResetTemplate);
     }
 
-    // Reset the spawn-scratch atomic in the GPU command stream so that each
-    // emitter dispatch gets a fresh claim counter regardless of execution order.
-    // Must be called with the command encoder BEFORE each emitter's dispatch.
+    // Reset the spawn-scratch atomic in the GPU command stream before the
+    // per-frame simulation dispatch.
     clearSpawnScratch(commandEncoder) {
         commandEncoder.clearBuffer(this.spawnScratch, 0, SPAWN_SCRATCH_SIZE);
     }
@@ -201,6 +222,11 @@ export class ParticleBuffers {
             if (entry.blend === 'additive')   flags |= PARTICLE_FLAGS.ADDITIVE;
             if (entry.flags?.stretchAlongVel) flags |= PARTICLE_FLAGS.STRETCH_VEL;
             if (entry.flags?.rotate)          flags |= PARTICLE_FLAGS.ROTATE;
+            const defaultBloomWeight = entry.bloomWeight ??
+                (((entry.emissive ?? 1.0) > 1.0) ? 1.0 : 0.0);
+            const bloomEnabled = entry.bloomEnabled ?? entry.bloom ?? (defaultBloomWeight > 0);
+            const bloomWeight = bloomEnabled ? defaultBloomWeight : 0.0;
+            if (bloomWeight > 1e-5) flags |= PARTICLE_FLAGS.BLOOM;
             u32[base + 23] = flags;
 
             // vec4 #6 — initial velocity ranges (X and Y)
@@ -213,44 +239,64 @@ export class ParticleBuffers {
             f32[base + 28] = entry.velocity?.z?.[0] ?? -0.1;
             f32[base + 29] = entry.velocity?.z?.[1] ??  0.1;
             f32[base + 30] = entry.emissive ?? 1.0;
-            f32[base + 31] = entry.bloomWeight ??
-                (((entry.emissive ?? 1.0) > 1.0) ? 1.0 : 0.0);
+            f32[base + 31] = bloomWeight;
         }
 
         this.device.queue.writeBuffer(this.typeDefUBO, 0, buf);
     }
 
-    // Creates a per-emitter globals UBO (256 B) with its own staging arrays.
-    // Store the returned object on the emitter; pass it as `target` to writeGlobals.
-    createEmitterGlobalsTarget(label = 'emitter') {
-        const ubo = this.device.createBuffer({
-            label: `ParticleGlobalsUBO-${label}`,
-            size: GLOBALS_UBO_SIZE,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-        const staging = new ArrayBuffer(GLOBALS_UBO_SIZE);
-        return { ubo, f32: new Float32Array(staging), u32: new Uint32Array(staging) };
+    uploadEmitterData(emitters) {
+        this._emitterF32.fill(0);
+        this._emitterU32.fill(0);
+
+        const count = Math.min(emitters.length, EMITTER_CAPACITY);
+        for (let i = 0; i < count; i++) {
+            const emitter = emitters[i];
+            const base = (i * EMITTER_DEF_STRIDE) / 4;
+            const position = emitter.position ?? [0, 0, 0];
+            const weights = emitter.typeWeightsCumulative ?? [0, 0, 0, 0];
+            const typeIds = emitter.typeIds ?? [0, 0, 0, 0];
+            const localUp = emitter.localUp ?? [0, 1, 0];
+
+            this._emitterF32[base + 0] = position[0] ?? 0;
+            this._emitterF32[base + 1] = position[1] ?? 0;
+            this._emitterF32[base + 2] = position[2] ?? 0;
+            this._emitterU32[base + 3] = (emitter.spawnBudget ?? 0) >>> 0;
+
+            this._emitterF32[base + 4] = weights[0] ?? 0;
+            this._emitterF32[base + 5] = weights[1] ?? 0;
+            this._emitterF32[base + 6] = weights[2] ?? 0;
+            this._emitterF32[base + 7] = weights[3] ?? 0;
+
+            this._emitterU32[base + 8]  = (typeIds[0] ?? 0) >>> 0;
+            this._emitterU32[base + 9]  = (typeIds[1] ?? 0) >>> 0;
+            this._emitterU32[base + 10] = (typeIds[2] ?? 0) >>> 0;
+            this._emitterU32[base + 11] = (typeIds[3] ?? 0) >>> 0;
+
+            this._emitterU32[base + 12] = (emitter.rngSeed ?? 0) >>> 0;
+            this._emitterU32[base + 13] = (emitter.activeTypeCount ?? 0) >>> 0;
+
+            this._emitterF32[base + 16] = localUp[0] ?? 0;
+            this._emitterF32[base + 17] = localUp[1] ?? 1;
+            this._emitterF32[base + 18] = localUp[2] ?? 0;
+        }
+
+        this.device.queue.writeBuffer(this.emitterData, 0, this._emitterF32.buffer);
     }
 
     // Writes a prepared globals block for the current frame.
-    // `target` is an optional { ubo, f32, u32 } created by createEmitterGlobalsTarget.
-    // When omitted, writes to the shared globalsUBO.
     writeGlobals({
         viewProjMatrix,
         cameraRight, cameraUp,
         dt, time,
-        emitterPos,
-        spawnBudget,
-        typeWeightsCumulative,
-        typeIds,
-        rngSeed,
-        activeTypeCount,
+        planetOrigin = [0, 0, 0],
+        totalSpawnBudget = 0,
+        emitterCount = 0,
         debugMode = 0,
-        localUp = [0, 1, 0],
-    }, target = null) {
-        const f32 = target ? target.f32 : this._globalsF32;
-        const u32 = target ? target.u32 : this._globalsU32;
-        const ubo = target ? target.ubo : this.globalsUBO;
+        flatWorld = 0,
+    }) {
+        const f32 = this._globalsF32;
+        const u32 = this._globalsU32;
 
         // mat4 view*proj (column-major, 16 floats)
         f32.set(viewProjMatrix, GLOBALS_OFFSETS.viewProj / 4);
@@ -267,38 +313,18 @@ export class ParticleBuffers {
         f32[GLOBALS_OFFSETS.cameraUp_time / 4 + 2] = cameraUp[2];
         f32[GLOBALS_OFFSETS.cameraUp_time / 4 + 3] = time;
 
-        // emitterPos + spawnBudget (u32)
-        f32[GLOBALS_OFFSETS.emitterPos_budget / 4 + 0] = emitterPos[0];
-        f32[GLOBALS_OFFSETS.emitterPos_budget / 4 + 1] = emitterPos[1];
-        f32[GLOBALS_OFFSETS.emitterPos_budget / 4 + 2] = emitterPos[2];
-        u32[GLOBALS_OFFSETS.emitterPos_budget / 4 + 3] = spawnBudget >>> 0;
+        // planetOrigin + totalSpawnBudget
+        f32[GLOBALS_OFFSETS.planetOrigin_totalSpawnBudget / 4 + 0] = planetOrigin[0] ?? 0;
+        f32[GLOBALS_OFFSETS.planetOrigin_totalSpawnBudget / 4 + 1] = planetOrigin[1] ?? 0;
+        f32[GLOBALS_OFFSETS.planetOrigin_totalSpawnBudget / 4 + 2] = planetOrigin[2] ?? 0;
+        u32[GLOBALS_OFFSETS.planetOrigin_totalSpawnBudget / 4 + 3] = totalSpawnBudget >>> 0;
 
-        // cumulative weights vec4
-        const w = typeWeightsCumulative;
-        f32[GLOBALS_OFFSETS.typeWeightsCumulative / 4 + 0] = w[0] ?? 0;
-        f32[GLOBALS_OFFSETS.typeWeightsCumulative / 4 + 1] = w[1] ?? 0;
-        f32[GLOBALS_OFFSETS.typeWeightsCumulative / 4 + 2] = w[2] ?? 0;
-        f32[GLOBALS_OFFSETS.typeWeightsCumulative / 4 + 3] = w[3] ?? 0;
+        u32[GLOBALS_OFFSETS.emitterCount / 4] = emitterCount >>> 0;
+        u32[GLOBALS_OFFSETS.maxParticles / 4] = this.maxParticles >>> 0;
+        u32[GLOBALS_OFFSETS.debugMode / 4] = debugMode >>> 0;
+        u32[GLOBALS_OFFSETS.flatWorld / 4] = flatWorld >>> 0;
 
-        // type IDs vec4<u32>
-        u32[GLOBALS_OFFSETS.typeIds / 4 + 0] = (typeIds[0] ?? 0) >>> 0;
-        u32[GLOBALS_OFFSETS.typeIds / 4 + 1] = (typeIds[1] ?? 0) >>> 0;
-        u32[GLOBALS_OFFSETS.typeIds / 4 + 2] = (typeIds[2] ?? 0) >>> 0;
-        u32[GLOBALS_OFFSETS.typeIds / 4 + 3] = (typeIds[3] ?? 0) >>> 0;
-
-        // scalars
-        u32[GLOBALS_OFFSETS.rngSeed        / 4] = rngSeed >>> 0;
-        u32[GLOBALS_OFFSETS.maxParticles   / 4] = this.maxParticles >>> 0;
-        u32[GLOBALS_OFFSETS.activeTypeCount/ 4] = activeTypeCount >>> 0;
-        u32[GLOBALS_OFFSETS.debugMode      / 4] = debugMode >>> 0;
-
-        // localUp vec3
-        f32[GLOBALS_OFFSETS.localUp / 4 + 0] = localUp[0];
-        f32[GLOBALS_OFFSETS.localUp / 4 + 1] = localUp[1];
-        f32[GLOBALS_OFFSETS.localUp / 4 + 2] = localUp[2];
-        f32[GLOBALS_OFFSETS._pad6   / 4]     = 0;
-
-        this.device.queue.writeBuffer(ubo, 0, f32.buffer);
+        this.device.queue.writeBuffer(this.globalsUBO, 0, f32.buffer);
     }
 
     dispose() {
@@ -308,8 +334,11 @@ export class ParticleBuffers {
         this.typeDefUBO?.destroy();
         this.indirectAdditive?.destroy();
         this.indirectAlpha?.destroy();
+        this.indirectBloom?.destroy();
         this.liveListAdditive?.destroy();
         this.liveListAlpha?.destroy();
+        this.liveListBloom?.destroy();
         this.spawnScratch?.destroy();
+        this.emitterData?.destroy();
     }
 }

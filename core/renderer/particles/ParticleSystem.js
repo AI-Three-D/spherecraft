@@ -11,7 +11,7 @@
 //   6. dispose()
 
 import { Matrix4, Vector3 } from '../../../shared/math/index.js';
-import { ParticleBuffers } from './ParticleBuffers.js';
+import { EMITTER_CAPACITY, ParticleBuffers } from './ParticleBuffers.js';
 import { ParticleSimulationPass } from './ParticleSimulationPass.js';
 import { ParticleRenderPass } from './ParticleRenderPass.js';
 import { ParticleEmitter } from './ParticleEmitter.js';
@@ -64,6 +64,8 @@ export class ParticleSystem {
         this._fireflySwarm = null;
         this._fireflyEmitter = null;
         this._fireflyLight = null;
+        this._viewProj = new Matrix4();
+        this._loggedEmitterOverflow = false;
     }
 
     // Call this after the frontend's lightManager is ready.
@@ -76,9 +78,6 @@ export class ParticleSystem {
         if (o) {
             this._planetOrigin = { x: o.x ?? 0, y: o.y ?? 0, z: o.z ?? 0 };
         }
-
-        // Scratch matrix for view*proj each frame.
-        this._viewProj = new Matrix4();
     }
 
     async initialize() {
@@ -94,6 +93,7 @@ export class ParticleSystem {
         this.simPass = new ParticleSimulationPass(this.device, this.buffers, {
             workgroupSize: this.workgroupSize,
             typeCapacity: PARTICLE_TYPE_CAPACITY,
+            emitterCapacity: EMITTER_CAPACITY,
         });
         this.simPass.initialize();
 
@@ -123,64 +123,34 @@ export class ParticleSystem {
         emitter._snapSettleFrames = overrides.snapSettleFrames ?? 10;
         emitter._needsActorSnap = !!emitter._snapToActorFn;
 
-        // Attach a dynamic point light if a light manager is available.
         emitter._pointLights = [];
+        emitter._baseLightIntensity = overrides.lightIntensity ?? 5.0;
+        emitter._lightPhase = Math.random() * Math.PI * 2;
         if (this._lightManager) {
             const lm = this._lightManager;
-            const pos = new Vector3(emitter.position.x, emitter.position.y + 0.3, emitter.position.z);
-// Attach dynamic point lights if a light manager is available.
-emitter._baseLightIntensity = overrides.lightIntensity ?? 5.0;
-emitter._lightPhase = Math.random() * Math.PI * 2;
+            const px = emitter.position.x;
+            const py = emitter.position.y;
+            const pz = emitter.position.z;
 
-if (this._lightManager) {
-    const lm = this._lightManager;
-    const px = emitter.position.x;
-    const py = emitter.position.y;
-    const pz = emitter.position.z;
+            emitter._pointLights.push(lm.addLight(LightType.POINT, {
+                position: new Vector3(px, py, pz),
+                color: { r: 1.00, g: 0.62, b: 0.22 },
+                intensity: emitter._baseLightIntensity,
+                radius: overrides.lightRadius ?? 6.0,
+                decay: 0.032,
+                dynamic: true,
+                name: 'campfire_light_core',
+            }));
 
-// Main bright flame core
-emitter._pointLights.push(lm.addLight(LightType.POINT, {
-    position: new Vector3(px, py, pz),
-    color:     { r: 1.00, g: 0.62, b: 0.22 },
-    intensity: emitter._baseLightIntensity,
-    radius:    overrides.lightRadius ?? 6.0,
-    decay:     0.032,
-    dynamic:   true,
-    name:      'campfire_light_core',
-}));
-
-// Ember bed / coal glow
-emitter._pointLights.push(lm.addLight(LightType.POINT, {
-    position: new Vector3(px, py, pz),
-    color:     { r: 1.00, g: 0.30, b: 0.08 },
-    intensity: emitter._baseLightIntensity * 0.6,
-    radius:    5.0,
-    decay:     0.022,
-    dynamic:   true,
-    name:      'campfire_light_embers',
-}));
-
-// Secondary light above the flame,
-emitter._pointLights.push(lm.addLight(LightType.POINT, {
-    position: new Vector3(px, py, pz),
-    color:     { r: 1.00, g: 0.72, b: 0.30 },
-    intensity: emitter._baseLightIntensity * 0.3,
-    radius:    12.0,
-    decay:     0.018,
-    dynamic:   true,
-    name:      'campfire_light_secondary',
-}));
-    // 3) High fill light: broad + dim, to fake bounced ambient firelight
-    emitter._pointLights.push(lm.addLight(LightType.POINT, {
-        position: new Vector3(px, py, pz),
-        color:     { r: 1.00, g: 0.66, b: 0.32 },
-        intensity: emitter._baseLightIntensity * 0.2,
-        radius:    28.0,
-        decay:     0.010,
-        dynamic:   true,
-        name:      'campfire_light_fill',
-    }));
-}
+            emitter._pointLights.push(lm.addLight(LightType.POINT, {
+                position: new Vector3(px, py, pz),
+                color: { r: 1.00, g: 0.66, b: 0.32 },
+                intensity: emitter._baseLightIntensity * 0.18,
+                radius: overrides.fillLightRadius ?? 18.0,
+                decay: 0.012,
+                dynamic: true,
+                name: 'campfire_light_fill',
+            }));
         }
 
         this._registerEmitter(emitter);
@@ -216,7 +186,7 @@ emitter._pointLights.push(lm.addLight(LightType.POINT, {
 
     // Creates a firefly swarm at the given position. Only one swarm can
     // be active at a time. The swarm runs Boids on CPU and emits tiny
-    // bright particles that bloom.
+    // bright particles.
     addFireflySwarm(worldPos, overrides = {}) {
         if (this._fireflySwarm) {
             console.warn('[ParticleSystem] Only one firefly swarm at a time.');
@@ -267,19 +237,117 @@ emitter._pointLights.push(lm.addLight(LightType.POINT, {
         }
     }
 
-    // Allocates per-emitter GPU resources (own globalsUBO + bind group pair)
-    // and pushes the emitter into the active list.
     _registerEmitter(emitter) {
-        // Each emitter needs its own globals UBO so that multiple emitters
-        // dispatching in the same command buffer don't clobber each other's
-        // per-frame data (all writeBuffer calls execute before any dispatch).
-        emitter._globalsTarget = this.buffers.createEmitterGlobalsTarget(emitter.preset);
-        emitter._bindGroups   = this.simPass.createEmitterBindGroups(emitter._globalsTarget.ubo);
         this.emitters.push(emitter);
     }
 
-    // Runs the sim compute pass. `commandEncoder` must be a valid WebGPU
-    // command encoder outside any active render pass.
+    _updateEmitterSnap(emitter) {
+        if (!emitter._snapToActorFn) return;
+
+        if (emitter._needsActorSnap) {
+            if (emitter._snapWaitFrames === undefined) emitter._snapWaitFrames = 0;
+            emitter._snapWaitFrames++;
+            if (emitter._snapWaitFrames < emitter._snapSettleFrames) return;
+
+            const actor = emitter._snapToActorFn?.();
+            const p = actor?.position;
+            if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
+                emitter.position.x = p.x;
+                emitter.position.y = p.y;
+                emitter.position.z = p.z;
+                emitter._needsActorSnap = false;
+                // eslint-disable-next-line no-console
+                console.log(
+                    `[ParticleSystem] snapped to actor ` +
+                    `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
+                    `after ${emitter._snapWaitFrames} frames`
+                );
+            }
+            return;
+        }
+
+        if (emitter._postSnapFollowFrames === undefined) {
+            emitter._postSnapFollowFrames = 45;
+        }
+        if (emitter._postSnapFollowFrames <= 0) return;
+
+        const actor = emitter._snapToActorFn?.();
+        const p = actor?.position;
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
+            emitter.position.x = p.x;
+            emitter.position.y = p.y;
+            emitter.position.z = p.z;
+        }
+        emitter._postSnapFollowFrames--;
+    }
+
+    _computeEmitterLocalUp(emitter) {
+        const ux = emitter.position.x - this._planetOrigin.x;
+        const uy = emitter.position.y - this._planetOrigin.y;
+        const uz = emitter.position.z - this._planetOrigin.z;
+        const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
+        if (ulen > 1e-6) {
+            return [ux / ulen, uy / ulen, uz / ulen];
+        }
+        return [0, 1, 0];
+    }
+
+    _updateEmitterPointLights(emitter, localUp, enabled) {
+        if (!Array.isArray(emitter._pointLights) || emitter._pointLights.length < 2) return;
+
+        const [core, fill] = emitter._pointLights;
+        const upx = localUp[0];
+        const upy = localUp[1];
+        const upz = localUp[2];
+        const baseX = emitter.position.x;
+        const baseY = emitter.position.y;
+        const baseZ = emitter.position.z;
+
+        core.position.x = baseX + upx * 1.2;
+        core.position.y = baseY + upy * 1.2;
+        core.position.z = baseZ + upz * 1.2;
+
+        fill.position.x = baseX + upx * 3.6;
+        fill.position.y = baseY + upy * 3.6;
+        fill.position.z = baseZ + upz * 3.6;
+
+        if (!enabled) {
+            core.intensity = 0.0;
+            fill.intensity = 0.0;
+            return;
+        }
+
+        const t = this._elapsedTime;
+        const phase = emitter._lightPhase;
+        const base = emitter._baseLightIntensity;
+        const coreFlicker =
+            0.88 +
+            0.16 * Math.sin(t * 8.7 + phase) +
+            0.07 * Math.sin(t * 21.3 + phase * 1.7) +
+            0.04 * Math.sin(t * 37.0 + phase * 0.6);
+        const fillFlicker =
+            0.94 +
+            0.04 * Math.sin(t * 2.4 + phase * 0.5) +
+            0.02 * Math.sin(t * 5.1 + phase * 1.1);
+
+        core.intensity = base * coreFlicker;
+        fill.intensity = base * 0.18 * fillFlicker;
+    }
+
+    _buildEmitterSpawnEntry(emitter, spawnBudget, localUp) {
+        return {
+            position: [emitter.position.x, emitter.position.y, emitter.position.z],
+            spawnBudget,
+            typeWeightsCumulative: emitter.getShaderTypeWeightsCumulative(),
+            typeIds: emitter.getShaderTypeIds(),
+            rngSeed: (emitter.baseSeed + this._frameCount * 2654435761) >>> 0,
+            activeTypeCount: emitter.getActiveTypeCount(),
+            localUp,
+        };
+    }
+
+    // Runs the sim compute pass once per frame. `commandEncoder` must be a
+    // valid WebGPU command encoder outside any active render pass.
     update(commandEncoder, camera, deltaTime) {
         if (!this._initialized || !camera) return;
         if (this.emitters.length === 0) return;
@@ -288,60 +356,27 @@ emitter._pointLights.push(lm.addLight(LightType.POINT, {
         this._elapsedTime += dt;
         this._frameCount++;
 
-        // Per-frame camera constants shared across all emitter dispatches.
         const te = camera.matrixWorldInverse.elements;
         const cameraRight = [te[0], te[4], te[8]];
-        const cameraUp    = [te[1], te[5], te[9]];
+        const cameraUp = [te[1], te[5], te[9]];
         this._viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
         const viewProjArr = this._viewProj.elements;
         const cam = camera.position;
 
-        // Reset the live-list indirect draw counters ONCE per frame (CPU-side).
-        // The spawn scratch is reset per-emitter INSIDE the command stream via
-        // commandEncoder.clearBuffer() so each dispatch gets its own fresh counter.
         this.buffers.resetLiveLists();
 
-        // The render pass reads viewProj/cameraRight/cameraUp from the SHARED
-        // globalsUBO (b.globalsUBO). Per-emitter dispatches write to their own
-        // UBOs, so we must update the shared one once per frame for rendering.
-        // (We reuse emitters[0]'s data — camera values are identical across emitters.)
-        {
-            const e0 = this.emitters[0];
-            const ux = e0.position.x - this._planetOrigin.x;
-            const uy = e0.position.y - this._planetOrigin.y;
-            const uz = e0.position.z - this._planetOrigin.z;
-            const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
-            this.buffers.writeGlobals({
-                viewProjMatrix: viewProjArr,
-                cameraRight, cameraUp,
-                dt, time: this._elapsedTime,
-                emitterPos:   [e0.position.x, e0.position.y, e0.position.z],
-                spawnBudget:  0,
-                typeWeightsCumulative: e0.getShaderTypeWeightsCumulative(),
-                typeIds:      e0.getShaderTypeIds(),
-                rngSeed:      0,
-                activeTypeCount: e0.getActiveTypeCount(),
-                debugMode:    this.debugMode,
-                localUp: (ulen > 1e-6) ? [ux / ulen, uy / ulen, uz / ulen] : [0, 1, 0],
-            }); // no target → writes to shared globalsUBO used by the render pass
-        }
-
-        // Update firefly swarm Boids and position the firefly emitter.
         if (this._fireflySwarm && this._fireflyEmitter) {
             this._fireflySwarm.update(dt);
-            // Move the emitter to the next firefly's position.
             const ffPos = this._fireflySwarm.getNextEmitPosition();
             this._fireflyEmitter.position.x = ffPos.x;
             this._fireflyEmitter.position.y = ffPos.y;
             this._fireflyEmitter.position.z = ffPos.z;
 
-            // Update the point light at the swarm centroid.
             if (this._fireflyLight) {
                 const c = this._fireflySwarm.centroid;
                 this._fireflyLight.position.x = c.x;
                 this._fireflyLight.position.y = c.y;
                 this._fireflyLight.position.z = c.z;
-                // Dim light intensity modulated by average glow.
                 let avgGlow = 0;
                 for (let fi = 0; fi < this._fireflySwarm.swarmSize; fi++) {
                     avgGlow += this._fireflySwarm.getGlowIntensity(fi);
@@ -351,201 +386,103 @@ emitter._pointLights.push(lm.addLight(LightType.POINT, {
             }
         }
 
-        // Dispatch once per emitter. All emitters share the same particle pool;
-        // ping-pong swaps only once at the end of the frame.
+        const activeEmitters = [];
         for (const emitter of this.emitters) {
-            // Deferred actor-snap placement.
-            // After the initial snap we keep reading the actor's Y every frame so
-            // that when fine-LOD terrain loads and the player height jumps the
-            // emitter (and its point light) follow immediately instead of being
-            // stranded underground.
-            if (emitter._snapToActorFn) {
-                if (emitter._needsActorSnap) {
-                    if (emitter._snapWaitFrames === undefined) emitter._snapWaitFrames = 0;
-                    emitter._snapWaitFrames++;
-                    if (emitter._snapWaitFrames >= emitter._snapSettleFrames) {
-                        const actor = emitter._snapToActorFn?.();
-                        const p = actor?.position;
-                        if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
-                            emitter.position.x = p.x;
-                            emitter.position.y = p.y;
-                            emitter.position.z = p.z;
-                            emitter._needsActorSnap = false;
-                            // eslint-disable-next-line no-console
-                            console.log(
-                                `[ParticleSystem] snapped to actor ` +
-                                `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
-                                `after ${emitter._snapWaitFrames} frames`
-                            );
-                        }
-                    }
-                } else {
-                    //Hacky way to keep the emitter (and its point light) following the actor after snap, so they don't get stranded underground when the player height jumps due to fine-LOD terrain streaming in.
-                    if (emitter._postSnapFollowFrames === undefined) {
-                        emitter._postSnapFollowFrames = 45;
-                    }
-                
-                    if (emitter._postSnapFollowFrames > 0) {
-                        const actor = emitter._snapToActorFn?.();
-                        const p = actor?.position;
-                        if (
-                            p &&
-                            Number.isFinite(p.x) &&
-                            Number.isFinite(p.y) &&
-                            Number.isFinite(p.z)
-                        ) {
-                            emitter.position.x = p.x;
-                            emitter.position.y = p.y;
-                            emitter.position.z = p.z;
-                        }
-                        emitter._postSnapFollowFrames--;
-                    }
-                }
+            this._updateEmitterSnap(emitter);
+
+            const dx = cam.x - emitter.position.x;
+            const dy = cam.y - emitter.position.y;
+            const dz = cam.z - emitter.position.z;
+            const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            const localUp = this._computeEmitterLocalUp(emitter);
+            const spawnBudget = emitter._needsActorSnap
+                ? 0
+                : emitter.getSpawnBudgetForDistance(distance);
+
+            this._updateEmitterPointLights(
+                emitter,
+                localUp,
+                spawnBudget > 0 || distance < emitter.distanceCutoff
+            );
+
+            if (emitter === this._fireflyEmitter && this._fireflyLight) {
+                const lodScale = emitter.spawnBudgetPerFrame > 0
+                    ? spawnBudget / emitter.spawnBudgetPerFrame
+                    : 0;
+                this._fireflyLight.intensity *= lodScale;
             }
 
-
-
-// LOD cutoff.
-const dx = cam.x - emitter.position.x;
-const dy = cam.y - emitter.position.y;
-const dz = cam.z - emitter.position.z;
-const distSq = dx * dx + dy * dy + dz * dz;
-const cutoffSq = emitter.distanceCutoff * emitter.distanceCutoff;
-const spawnBudget = (distSq > cutoffSq || emitter._needsActorSnap)
-    ? 0 : emitter.spawnBudgetPerFrame;
-
-// Local "up" at this emitter's world position.
-// Compute this BEFORE updating the point lights.
-const ux = emitter.position.x - this._planetOrigin.x;
-const uy = emitter.position.y - this._planetOrigin.y;
-const uz = emitter.position.z - this._planetOrigin.z;
-const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
-const localUp = (ulen > 1e-6) ? [ux / ulen, uy / ulen, uz / ulen] : [0, 1, 0];
-
-// Update campfire point light positions and flicker.
-if (Array.isArray(emitter._pointLights) && emitter._pointLights.length >= 4) {
-    const t = this._elapsedTime;
-    const phase = emitter._lightPhase;
-    const base = emitter._baseLightIntensity;
-
-    const core = emitter._pointLights[0];
-    const embers = emitter._pointLights[1];
-    const secondary = emitter._pointLights[2];
-    const fill = emitter._pointLights[3];
-
-    const coreFlicker =
-        0.88 +
-        0.16 * Math.sin(t * 8.7 + phase) +
-        0.07 * Math.sin(t * 21.3 + phase * 1.7) +
-        0.04 * Math.sin(t * 37.0 + phase * 0.6);
-
-    const emberFlicker =
-        0.84 +
-        0.08 * Math.sin(t * 3.8 + phase * 0.7) +
-        0.04 * Math.sin(t * 9.2 + phase * 1.9);
-
-    const secondaryFlicker =
-        0.80 +
-        0.10 * Math.sin(t * 5.5 + phase * 1.2) +
-        0.04 * Math.sin(t * 13.0 + phase * 2.0);
-
-    const fillFlicker =
-        0.97 + 0.03 * Math.sin(t * 2.0 + phase * 0.5);
-
-    const upx = localUp[0];
-    const upy = localUp[1];
-    const upz = localUp[2];
-
-    core.intensity = base * coreFlicker;
-    core.position.x = emitter.position.x + upx * 1.2;
-    core.position.y = emitter.position.y + upy * 1.2;
-    core.position.z = emitter.position.z + upz * 1.2;
-
-    embers.intensity = base * 0.22 * emberFlicker;
-    embers.position.x = emitter.position.x + upx * 0.35;
-    embers.position.y = emitter.position.y + upy * 0.35;
-    embers.position.z = emitter.position.z + upz * 0.35;
-
-    secondary.intensity = base * 0.16 * secondaryFlicker;
-    secondary.position.x = emitter.position.x + upx * 2.0;
-    secondary.position.y = emitter.position.y + upy * 2.0;
-    secondary.position.z = emitter.position.z + upz * 2.0;
-
-    fill.intensity = base * 0.10 * fillFlicker;
-    fill.position.x = emitter.position.x + upx * 4.5;
-    fill.position.y = emitter.position.y + upy * 4.5;
-    fill.position.z = emitter.position.z + upz * 4.5;
-}
-            // Write this emitter's globals into its own dedicated UBO so that
-            // multiple writeBuffer calls in the same frame don't clobber each other.
-            this.buffers.writeGlobals({
-                viewProjMatrix: viewProjArr,
-                cameraRight, cameraUp,
-                dt, time: this._elapsedTime,
-                emitterPos: [emitter.position.x, emitter.position.y, emitter.position.z],
-                spawnBudget,
-                typeWeightsCumulative: emitter.getShaderTypeWeightsCumulative(),
-                typeIds: emitter.getShaderTypeIds(),
-                rngSeed: (emitter.baseSeed + this._frameCount * 2654435761) >>> 0,
-                activeTypeCount: emitter.getActiveTypeCount(),
-                debugMode: this.debugMode,
-                localUp,
-            }, emitter._globalsTarget);
-
-            // Reset spawn-scratch in the GPU command stream so each emitter
-            // starts its own claim counter from zero.
-            this.buffers.clearSpawnScratch(commandEncoder);
-
-            // Dispatch using this emitter's own bind groups (which reference
-            // its own globalsUBO at binding 0).
-            this.simPass.dispatch(commandEncoder, emitter._bindGroups);
-
-            // Advance ping-pong AFTER each dispatch so the next emitter reads
-            // from the buffer this one just wrote — chaining A→B→A rather than
-            // both dispatches clobbering the same write buffer.
-            this.buffers.advancePingPong();
+            if (spawnBudget > 0) {
+                activeEmitters.push(this._buildEmitterSpawnEntry(emitter, spawnBudget, localUp));
+            }
 
             if ((this._frameCount % 300) === 0) {
                 // eslint-disable-next-line no-console
                 console.log(
                     `[ParticleSystem] frame=${this._frameCount} preset=${emitter.preset} ` +
-                    `dist=${Math.sqrt(distSq).toFixed(1)}m budget=${spawnBudget}`
+                    `dist=${distance.toFixed(1)}m budget=${spawnBudget}`
                 );
             }
         }
+
+        if (activeEmitters.length > EMITTER_CAPACITY && !this._loggedEmitterOverflow) {
+            this._loggedEmitterOverflow = true;
+            console.warn(
+                `[ParticleSystem] active emitter count ${activeEmitters.length} exceeds ` +
+                `capacity ${EMITTER_CAPACITY}; extra emitters will not spawn until capacity frees up.`
+            );
+        }
+
+        const uploadedEmitters = activeEmitters.slice(0, EMITTER_CAPACITY);
+        const totalSpawnBudget = uploadedEmitters.reduce(
+            (sum, emitter) => sum + (emitter.spawnBudget || 0),
+            0
+        );
+
+        this.buffers.uploadEmitterData(uploadedEmitters);
+        this.buffers.writeGlobals({
+            viewProjMatrix: viewProjArr,
+            cameraRight,
+            cameraUp,
+            dt,
+            time: this._elapsedTime,
+            planetOrigin: [this._planetOrigin.x, this._planetOrigin.y, this._planetOrigin.z],
+            totalSpawnBudget,
+            emitterCount: uploadedEmitters.length,
+            debugMode: this.debugMode,
+            flatWorld: 0,
+        });
+        this.buffers.clearSpawnScratch(commandEncoder);
+        this.simPass.dispatch(commandEncoder);
+        this.buffers.advancePingPong();
     }
 
-    // Issues the two indirect draw calls inside an already-active render pass.
+    // Issues the indirect draw calls inside an already-active render pass.
     render(renderPassEncoder) {
         if (!this._initialized || !renderPassEncoder) return;
-        if (this.emitters.length === 0) return;
 
-        // The "current" particle buffer is the one the sim just WROTE to.
-        // advancePingPong() was called at the end of update(), so now
-        // getPingPong().read is the buffer we want to READ from during render.
         const { read } = this.buffers.getPingPong();
         this.renderPass.render(renderPassEncoder, read);
 
         if (!this._loggedFirstRender) {
             this._loggedFirstRender = true;
             // eslint-disable-next-line no-console
-            console.log(`[ParticleSystem] first render call issued (read=${read === this.buffers.particlesA ? 'A' : 'B'})`);
+            console.log(
+                `[ParticleSystem] first render call issued ` +
+                `(read=${read === this.buffers.particlesA ? 'A' : 'B'})`
+            );
         }
     }
 
     // Emits only authored emissive particle signal into the dedicated bloom source.
     renderBloom(renderPassEncoder) {
         if (!this._initialized || !renderPassEncoder) return;
-        if (this.emitters.length === 0) return;
 
         const { read } = this.buffers.getPingPong();
         this.renderPass.renderBloom(renderPassEncoder, read);
     }
 
     dispose() {
-        for (const emitter of this.emitters) {
-            emitter._globalsTarget?.ubo?.destroy();
-        }
         this.simPass?.dispose();
         this.renderPass?.dispose();
         this.buffers?.dispose();

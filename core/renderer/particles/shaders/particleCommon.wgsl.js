@@ -3,7 +3,7 @@
 // Shared WGSL struct definitions for the particle compute + render shaders.
 // All layouts are 16-byte aligned.
 
-export function buildParticleCommonWGSL({ typeCapacity = 8 } = {}) {
+export function buildParticleCommonWGSL({ typeCapacity = 8, emitterCapacity = 16 } = {}) {
     return /* wgsl */`
 
 // ─────────────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ struct Particle {
 };
 
 // ─────────────────────────────────────────────────────────────────
-// Per-type parameter block: 96 bytes (6 x vec4)
+// Per-type parameter block: 128 bytes (8 x vec4)
 // Uploaded once at init into a uniform buffer.
 // ─────────────────────────────────────────────────────────────────
 struct ParticleTypeDef {
@@ -63,7 +63,8 @@ struct ParticleTypeDef {
 };
 
 // ─────────────────────────────────────────────────────────────────
-// Per-frame globals: ~256 bytes, bound as uniform.
+// Per-frame globals. The render pass uses the camera data; the compute pass
+// additionally uses spawn budgets, emitter count, and planet origin.
 // ─────────────────────────────────────────────────────────────────
 struct ParticleGlobals {
     // view + projection for the render pass (compute ignores these, but
@@ -76,21 +77,28 @@ struct ParticleGlobals {
     cameraUp:     vec3<f32>,
     time:         f32,
     // vec4 #2
-    emitterPos:   vec3<f32>,
-    spawnBudget:  u32,
-    // vec4 #3 — up to 4 cumulative type weights for this emitter
-    typeWeightsCumulative: vec4<f32>,
-    // vec4 #4 — parallel array of type IDs (u32 packed in f32 slots is awkward,
-    // so we use a dedicated vec4<u32>)
-    typeIds:      vec4<u32>,
-    // vec4 #5
-    rngSeed:      u32,
+    planetOrigin: vec3<f32>,
+    totalSpawnBudget: u32,
+    // vec4 #3
+    emitterCount: u32,
     maxParticles: u32,
-    activeTypeCount: u32,
     debugMode:    u32,   // 0 = normal, 1 = oversized magenta blobs
-    // vec4 #6
-    localUp:      vec3<f32>,
-    _pad6:        f32,
+    flatWorld:    u32,   // 0 = spherical, 1 = use +Y as local up
+};
+
+// Per-emitter spawn parameters, uploaded once per frame into a shared storage
+// buffer and consumed only by the compute pass.
+struct EmitterSpawnDef {
+    position: vec3<f32>,
+    spawnBudget: u32,
+    typeWeightsCumulative: vec4<f32>,
+    typeIds: vec4<u32>,
+    rngSeed: u32,
+    activeTypeCount: u32,
+    _pad0: u32,
+    _pad1: u32,
+    localUp: vec3<f32>,
+    _pad2: f32,
 };
 
 // Indirect draw args layout matches GPUDrawIndirectParameters (non-indexed):
@@ -111,11 +119,13 @@ struct SpawnScratch {
 };
 
 const PARTICLE_TYPE_CAPACITY: u32 = ${typeCapacity}u;
+const PARTICLE_EMITTER_CAPACITY: u32 = ${emitterCapacity}u;
 
 // Flag bits (must match ParticleTypes.js PARTICLE_FLAGS).
 const FLAG_ALIVE:       u32 = 1u;
 const FLAG_ADDITIVE:    u32 = 2u;
 const FLAG_STRETCH_VEL: u32 = 4u;
 const FLAG_ROTATE:      u32 = 8u;
+const FLAG_BLOOM:       u32 = 16u;
 `;
 }

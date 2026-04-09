@@ -51,6 +51,7 @@ export const PARTICLE_CONFIG = {
         colorEnd:   [0.50, 0.08, 0.00, 0.0],
         emissive: 1.6,   // Keep a visible glow without blowing out the bloom chain
         bloomWeight: 1.0,
+        bloomEnabled: true,
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 0.55,
     },
@@ -79,6 +80,7 @@ export const PARTICLE_CONFIG = {
         colorEnd:   [0.35, 0.02, 0.00, 0.0],
         emissive: 1.35,  // Softer HDR lift so bloom stays close to the flame core
         bloomWeight: 1.0,
+        bloomEnabled: true,
         flags: { stretchAlongVel: true, rotate: false },
         spawnWeight: 0.40,
     },
@@ -105,6 +107,7 @@ export const PARTICLE_CONFIG = {
         colorStart: [0.08, 0.08, 0.08, 0.18],
         colorMid:   [0.25, 0.25, 0.25, 0.10],
         colorEnd:   [0.55, 0.55, 0.55, 0.0],
+        bloomEnabled: false,
         // Note: rotate flag is a no-op with the current radially-symmetric
         // soft-disc fragment; re-enable when we add a non-symmetric texture.
         flags: { stretchAlongVel: false, rotate: false },
@@ -135,6 +138,7 @@ export const PARTICLE_CONFIG = {
         colorEnd:   [0.30, 0.02, 0.00, 0.0],
         emissive: 1.15,  // Embers should sparkle, not flood the frame
         bloomWeight: 0.75,
+        bloomEnabled: false,
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 0.05,
     },
@@ -164,6 +168,7 @@ export const PARTICLE_CONFIG = {
         colorEnd:   [0.40, 0.04, 0.00, 0.0],
         
         emissive: 1.0,   // Coal bed stays visible but no longer forces bloom
+        bloomEnabled: false,
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 1.0,
     },
@@ -192,6 +197,7 @@ export const PARTICLE_CONFIG = {
         colorEnd:   [0.50, 0.60, 0.20, 0.0],
         emissive: 2.5,   // Keep the swarm readable without giant green halos
         bloomWeight: 1.0,
+        bloomEnabled: false,
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 1.0,
     },
@@ -214,7 +220,10 @@ export const PARTICLE_EMITTER_PRESETS = {
             [PARTICLE_TYPES.EMBER]:     0.02,
         },
         spawnBudgetPerFrame: 32,     // ~1900 spawns/sec at 60 Hz
-        distanceCutoff: 1000.0,
+        distanceCutoff: 80.0,
+        lodNearDistance: 10.0,
+        lodFarDistance: 35.0,
+        lodMinScale: 0.2,
     },
 
     campfire_coals: {
@@ -225,7 +234,10 @@ export const PARTICLE_EMITTER_PRESETS = {
             [PARTICLE_TYPES.COAL]: 1.0,
         },
         spawnBudgetPerFrame: 3,      // ~180 coal glows/sec at 60 Hz — sparse
-        distanceCutoff: 500.0,
+        distanceCutoff: 40.0,
+        lodNearDistance: 8.0,
+        lodFarDistance: 18.0,
+        lodMinScale: 0.0,
     },
 
     firefly_swarm: {
@@ -236,12 +248,15 @@ export const PARTICLE_EMITTER_PRESETS = {
             [PARTICLE_TYPES.FIREFLY]: 1.0,
         },
         spawnBudgetPerFrame: 2,      // 1-2 per frame per firefly position
-        distanceCutoff: 500.0,
+        distanceCutoff: 35.0,
+        lodNearDistance: 8.0,
+        lodFarDistance: 18.0,
+        lodMinScale: 0.0,
     },
 };
 
 // Global particle-system caps. Chosen conservatively for first bring-up.
 export const PARTICLE_GLOBALS = {
-    maxParticles: 8192,
+    maxParticles: 4096,
     workgroupSize: 64,
 };
