@@ -970,13 +970,12 @@ updateLighting(starSystem) {
         if (this.skinnedMeshRenderer) {
             this.skinnedMeshRenderer.setShadowRenderer(this.gpuShadowRenderer);
         }
-/*
         if (this.assetStreamer) {
             this.assetStreamer.setShadowRenderer(this.gpuShadowRenderer);
         }
         if (this.quadtreeTerrainRenderer) {
             this.quadtreeTerrainRenderer.setShadowRenderer(this.gpuShadowRenderer);
-        }*/
+        }
 /*
         if (this.assetStreamer) {
          //   this.assetStreamer.setShadowRenderer(this.gpuShadowRenderer);
