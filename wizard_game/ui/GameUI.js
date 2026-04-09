@@ -17,6 +17,60 @@ export class GameUI {
         this._midNearPanel = null;
     }
 
+    _downloadJSON(filename, data) {
+        const blob = new Blob([JSON.stringify(data, null, 2)], {
+            type: 'application/json'
+        });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+
+    _buildPostprocessingExportData() {
+        const pp = this.engine?.renderer?.postProcessing;
+        if (!pp) return null;
+
+        const data = {
+            _doc: 'Post-processing parameters. Exported from the in-game debug panel.',
+            exposure: pp.exposure ?? 1.0,
+        };
+
+        if (pp.exposurePass) {
+            data.autoExposure = {
+                enabled: pp.autoExposureEnabled === true,
+                compensation: pp.exposurePass.exposureCompensation,
+                minExposure: pp.exposurePass.minExposure,
+                maxExposure: pp.exposurePass.maxExposure,
+                speedUp: pp.exposurePass.speedUp,
+                speedDown: pp.exposurePass.speedDown,
+                middleGray: pp.exposurePass.middleGray,
+            };
+        }
+
+        if (pp.bloomPass) {
+            data.bloom = {
+                threshold: pp.bloomPass.threshold,
+                knee: pp.bloomPass.knee,
+                intensity: pp.bloomPass.intensity,
+                blendFactor: pp.bloomPass.blendFactor,
+            };
+        }
+
+        if (pp.toneMappingPass) {
+            data.tonemapping = {
+                contrast: pp.toneMappingPass.contrast,
+                toe: pp.toneMappingPass.toe,
+                shoulder: pp.toneMappingPass.shoulder,
+                whitePoint: pp.toneMappingPass.whitePoint,
+                highlightSaturation: pp.toneMappingPass.highlightSaturation,
+            };
+        }
+
+        return data;
+    }
+
     /**
      * Initialize all UI elements and attach them to the DOM.
      */
@@ -816,6 +870,32 @@ export class GameUI {
             body.appendChild(row);
             return cb;
         };
+
+        const exportRow = document.createElement('div');
+        exportRow.style.cssText = 'display:flex; justify-content:flex-end; margin:4px 0 8px;';
+        const exportBtn = document.createElement('button');
+        exportBtn.textContent = 'Export HDR JSON';
+        exportBtn.style.cssText = `
+            border: 1px solid rgba(170, 220, 180, 0.35);
+            border-radius: 999px;
+            padding: 6px 10px;
+            color: #eaf8df;
+            font-family: inherit;
+            font-size: 11px;
+            letter-spacing: 0.08em;
+            background:
+                linear-gradient(180deg, rgba(116, 164, 94, 0.32), rgba(18, 38, 18, 0.72)),
+                rgba(8, 16, 10, 0.78);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
+            cursor: pointer;
+        `;
+        exportBtn.addEventListener('click', () => {
+            const data = this._buildPostprocessingExportData();
+            if (!data) return;
+            this._downloadJSON('postprocessing.json', data);
+        });
+        exportRow.appendChild(exportBtn);
+        body.appendChild(exportRow);
 
         const tryBind = () => {
             const pp = this.engine?.renderer?.postProcessing;
