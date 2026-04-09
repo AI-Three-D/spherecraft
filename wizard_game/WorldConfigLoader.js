@@ -32,15 +32,16 @@ export class WorldConfigLoader {
     // ── Load ─────────────────────────────────────────────────────────────
 
     async load() {
-        const [terrain, planet, postprocessing] = await Promise.all([
+        const [terrain, planet, postprocessing, engine] = await Promise.all([
             this._fetchJSON('terrain.json'),
             this._fetchJSON('planet.json'),
             this._fetchJSON('postprocessing.json'),
+            this._fetchJSON('engine.json').catch(() => ({})),  // optional
         ]);
 
-        this.raw = { terrain, planet, postprocessing };
+        this.raw = { terrain, planet, postprocessing, engine };
 
-        const engineConfig  = this._buildEngineConfig(terrain, planet);
+        const engineConfig   = this._buildEngineConfig(terrain, planet, engine);
         const gameDataConfig = this._buildGameDataConfig(terrain, planet);
 
         return { engineConfig, gameDataConfig, postprocessing, raw: this.raw };
@@ -57,10 +58,42 @@ export class WorldConfigLoader {
 
     // ── Build EngineConfig ────────────────────────────────────────────────
 
-    _buildEngineConfig(terrain, planet) {
+    _buildEngineConfig(terrain, planet, engine = {}) {
         const base = createEngineConfig();
-        // Apply seed from terrain JSON
-        if (terrain.seed != null) base.seed = terrain.seed;
+        // Seed from terrain JSON
+        if (terrain?.seed != null) base.seed = terrain.seed;
+        // macroConfig
+        if (engine?.macroConfig) Object.assign(base.macroConfig, engine.macroConfig);
+        // nightSky
+        if (engine?.nightSky) Object.assign(base.nightSky ?? {}, engine.nightSky);
+        // camera
+        if (engine?.camera) {
+            const cam = base.manualCamera ?? {};
+            if (engine.camera.moveSpeed != null) cam.baseSpeed = engine.camera.moveSpeed;
+            if (engine.camera.maxBoost  != null) cam.maxBoost  = engine.camera.maxBoost;
+            base.manualCamera = cam;
+            const cam2 = base.camera ?? {};
+            if (engine.camera.fov  != null) cam2.fov  = engine.camera.fov;
+            if (engine.camera.near != null) cam2.near = engine.camera.near;
+            if (engine.camera.far  != null) cam2.far  = engine.camera.far;
+            base.camera = cam2;
+        }
+        // lighting ambient
+        if (engine?.lighting?.ambient) {
+            const a = base.rendering?.lighting?.ambient ?? {};
+            Object.assign(a, engine.lighting.ambient);
+        }
+        // terrainShader overrides
+        if (engine?.terrainShader) {
+            const ts = base.rendering?.terrainShader ?? {};
+            Object.assign(ts, engine.terrainShader);
+        }
+        // gpuQuadtree overrides
+        if (engine?.gpuQuadtree) {
+            const q = base.gpuQuadtree ?? {};
+            Object.assign(q, engine.gpuQuadtree);
+            base.gpuQuadtree = q;
+        }
         return base;
     }
 
@@ -151,7 +184,7 @@ export class WorldConfigLoader {
 
     /**
      * Download one of the three JSON config files via browser download.
-     * @param {'terrain'|'planet'|'postprocessing'} key
+     * @param {'terrain'|'planet'|'postprocessing'|'engine'} key
      * @param {object} [data]  Override data to export (defaults to this.raw[key])
      */
     exportJSON(key, data) {

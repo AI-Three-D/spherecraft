@@ -1,0 +1,55 @@
+{
+  "_doc": "Default terrain generation parameters. Copy this file to your game's world/ folder and edit. All parameters here require world regeneration when changed.",
+  "seed": 12345,
+  "maxTerrainHeight": 5000,
+  "noiseProfile": {
+    "baseBias":       1.0,
+    "mountainBias":   1.0,
+    "hillBias":       1.0,
+    "canyonBias":     1.0,
+    "rareBoost":      1.0,
+    "warpStrength":   1.0,
+    "ridgeSharpness": 1.0,
+    "microGain":      1.0
+  },
+  "continents": {
+    "enabled":           true,
+    "count":             5,
+    "averageSize":       0.28,
+    "coastalComplexity": 0.7
+  },
+  "tectonics": {
+    "enabled":              true,
+    "plateCount":           10,
+    "mountainBuildingRate": 1.0,
+    "riftValleyDepth":      0.5
+  },
+  "volcanism": {
+    "enabled":               true,
+    "plateBoundaryActivity": 0.7,
+    "hotspotDensity":        0.00001,
+    "averageHeight":         1200
+  },
+  "erosion": {
+    "enabled":       true,
+    "globalRate":    0.5,
+    "hydraulicRate": 0.6,
+    "thermalRate":   0.3
+  },
+  "impacts": {
+    "enabled":       true,
+    "craterDensity": 0.00005
+  },
+  "water": {
+    "hasOceans":         true,
+    "oceanLevel":        0.0,
+    "averageOceanDepth": 3700,
+    "visualDepthRange":  300
+  },
+  "surface": {
+    "rockCoverageMin": 0.05,
+    "rockCoverageMax": 0.85,
+    "rockSlopeStart":  0.35,
+    "rockSlopeFull":   0.70
+  }
+}

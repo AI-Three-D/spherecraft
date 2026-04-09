@@ -8,14 +8,12 @@ Read it before touching any file under `tools/studio/`.
 
 ## 1. What is Spherecraft Studio?
 
-Spherecraft Studio is an in-browser editor for Spherecraft — a WebGPU-based procedural
-world engine. The engine is **not Three.js**: it is a custom WebGPU renderer using WGSL
-shaders, running in the browser via the WebGPU API. The studio lives at
+Spherecraft Studio is an in-browser editor for Spherecraft — a WebGPU-based procedural world engine. The engine is **not Three.js**: it is a custom WebGPU renderer using WGSL shaders, running in the browser via the WebGPU API. The studio lives at
 `tools/studio/studio.html` and is separate from the game entry point
 (`wizard_game/standalone.html`).
 
 **Target user:** an indie developer iterating on a procedural web game. The goal is fast
-iteration — change a parameter, see the result in under a second — not AAA polish.
+iteration — change a parameter, see the result in under a second.
 
 ---
 
@@ -24,18 +22,62 @@ iteration — change a parameter, see the result in under a second — not AAA p
 ```
 tools/
 ├── studio/
-│   ├── studio.html          ← entry point (open this in the browser)
-│   ├── Studio.js            ← app shell: tab routing, view lifecycle, toast, FPS stats
-│   ├── StudioView.js        ← base class all views inherit from
+│   ├── studio.html              ← standalone entry (no game engine, stub world view)
+│   ├── studio.css               ← all shared CSS (linked from both studio.html + game studio.html)
+│   ├── studio-main.js           ← auto-start with no overrides (used by studio.html)
+│   ├── Studio.js                ← app shell: tab routing, view lifecycle, toast, FPS
+│   │                               export startStudio(options) and class Studio
+│   ├── StudioView.js            ← base class all views inherit from
+│   ├── StudioWorldEngine.js     ← lightweight world renderer (terrain + WASD cam, no game logic)
+│   │                               accepts engineConfig + gameDataConfig from caller
 │   └── views/
-│       ├── WorldView.js     ← world/terrain editor
-│       ├── ParticleView.js  ← particle emitter asset editor
-│       ├── GlbAssetView.js  ← GLB/GLTF asset viewer
-│       ├── TextureView.js   ← procedural texture generator
+│       ├── WorldView.js         ← default (stub): extends WorldViewBase, no engine attached
+│       ├── WorldViewBase.js     ← FULL world editor: param sliders, dirty tracking, regen button
+│       ├── ParticleView.js      ← particle emitter asset editor
+│       ├── GlbAssetView.js      ← GLB/GLTF asset viewer
+│       ├── TextureView.js       ← procedural texture generator
 │       ├── ProceduralMeshView.js ← procedural geometry authoring
-│       └── ProfilerView.js  ← GPU/CPU frame profiler
-└── studio-dev.md            ← this file
+│       └── ProfilerView.js      ← GPU/CPU frame profiler
+
+templates/
+└── world/                   ← DEFAULT world config templates (copy to a game's world/ folder)
+    ├── terrain.json         ← terrain generation params (all require regen)
+    ├── planet.json          ← planet / atmosphere / time / spawn
+    ├── postprocessing.json  ← exposure + bloom (all real-time)
+    └── engine.json          ← rendering quality, camera, macro config
+
+wizard_game/                 ← game folder (pattern for all future game folders)
+├── studio.html              ← LEAN entry: just links studio.css + imports studio-entry.js
+├── studio-entry.js          ← 3-line bootstrap: startStudio({ world: WorldEditorView })
+├── WorldEditorView.js       ← game-specific world view: creates StudioWorldEngine with themes
+├── WorldConfigLoader.js     ← loads world/*.json, builds engineConfig + gameDataConfig
+└── world/                   ← game-specific world config (edit these to tune the world)
+    ├── terrain.json
+    ├── planet.json
+    ├── postprocessing.json
+    └── engine.json
 ```
+
+### How the config pipeline works
+
+```
+wizard_game/world/*.json
+       │
+       ▼
+WorldConfigLoader.load()
+  │  applies JSON overrides on top of runtimeConfigs.js defaults
+  │  returns { engineConfig, gameDataConfig, postprocessing, raw }
+       │
+       ├──► StudioWorldEngine (studio world view)
+       │      terrain rendering + WASD camera, no game logic
+       │
+       └──► GameEngine (standalone.html, future: loads from JSON too)
+              full game with characters, inventory, etc.
+```
+
+Both the studio and the game consume the same JSON configs. The studio is responsible for
+editing and downloading them; the operator replaces the files in `world/` to make changes
+permanent. A future server-side save endpoint (`POST /save-world`) would make this seamless.
 
 Key engine files referenced by studio views:
 

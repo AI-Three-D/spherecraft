@@ -1,0 +1,36 @@
+{
+  "_doc": "Engine rendering quality and camera settings. Most require a restart to take effect. These are engine-level knobs — world content is in terrain.json and planet.json.",
+  "macroConfig": {
+    "biomeScale":  0.001,
+    "regionScale": 0.0005
+  },
+  "nightSky": {
+    "detailLevel": "low"
+  },
+  "camera": {
+    "fov":       75,
+    "near":      0.1,
+    "far":       150000,
+    "moveSpeed": 80,
+    "maxBoost":  160
+  },
+  "lighting": {
+    "ambient": {
+      "intensityMultiplier":        1.0,
+      "minIntensity":               0.95,
+      "maxIntensity":               1.6,
+      "sunContributionScale":       0.2,
+      "moonContributionScale":      0.35,
+      "moonNormalizationIntensity": 0.15
+    }
+  },
+  "terrainShader": {
+    "aerialFadeStartMeters": 400,
+    "aerialFadeEndMeters":   600
+  },
+  "gpuQuadtree": {
+    "lodErrorThreshold": 512,
+    "maxVisibleTiles":   2048,
+    "tilePoolSize":      2048
+  }
+}
