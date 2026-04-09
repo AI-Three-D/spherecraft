@@ -617,7 +617,7 @@ if (enableSplat && lod <= splatBlendMaxLod) {
     const groundFieldBindingDecl = enableGroundField
         ? `@group(1) @binding(6) var groundFieldMask: ${chunkTextureType};`
         : '';
-    const terrainAOCode = enableTerrainAO ? `
+    const terrainAOCode = enableTerrainAO ? (useArrayTextures ? `
 fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
     let uv = applyChunkAtlasUV(
         input.vUv, terrainAOMask,
@@ -628,6 +628,24 @@ fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
     return clamp(sampleRGBA32FBilinear(terrainAOMask, uv, layer).r, 0.0, 1.0);
 }
 ` : `
+fn sampleRGBA32FBilinear_2d(tex: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(tex));
+    let coord = uv * size - 0.5;
+    let base = floor(coord);
+    let f = fract(coord);
+    let maxCoord = vec2<i32>(textureDimensions(tex)) - vec2<i32>(1);
+    let c00 = textureLoad(tex, clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord), 0);
+    let c10 = textureLoad(tex, clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord), 0);
+    let c01 = textureLoad(tex, clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord), 0);
+    let c11 = textureLoad(tex, clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord), 0);
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
+    let texSize = vec2<f32>(textureDimensions(terrainAOMask));
+    let uv = applyChunkAtlasUV_2d(input.vUv, texSize, input.vAtlasOffset, input.vAtlasScale);
+    return clamp(sampleRGBA32FBilinear_2d(terrainAOMask, uv).r, 0.0, 1.0);
+}
+`) : `
 fn sampleTerrainAO(_input: FragmentInput, _layer: i32) -> f32 {
     return 1.0;
 }
