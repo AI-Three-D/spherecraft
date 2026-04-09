@@ -18,6 +18,7 @@ export class ModelDescriptor {
         this.asset = asset;
         this.glbUrl = json.glb;
         this.yawOffset = (json.yawOffsetDeg ?? 0) * Math.PI / 180;
+        this.rendering = json.rendering || {};
         this.blendDefaults = {
             in:  json.blendDefaults?.in  ?? 0.15,
             out: json.blendDefaults?.out ?? 0.15,

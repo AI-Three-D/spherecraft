@@ -155,9 +155,11 @@ export const PARTICLE_CONFIG = {
             heightMax: 0.04,
         },
         // Deep red -> orange glow -> dim red -> transparent (one "pulse" per life).
+  
         colorStart: [0.80, 0.10, 0.00, 0.7],
         colorMid:   [1.00, 0.45, 0.05, 0.9],
         colorEnd:   [0.40, 0.04, 0.00, 0.0],
+        
         emissive: 1.0,   // Coal bed stays visible but no longer forces bloom
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 1.0,

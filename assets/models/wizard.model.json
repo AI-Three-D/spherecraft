@@ -1,6 +1,27 @@
 {
   "glb": "../wizard8.glb",
   "yawOffsetDeg": 0,
+  "rendering": {
+    "materialTuning": {
+      "decodeBaseColorSRGB": true,
+      "decodeEmissiveSRGB": true,
+      "metallicScale": 0.03,
+      "metallicMax": 0.05,
+      "roughnessScale": 1.0,
+      "roughnessMin": 0.72,
+      "roughnessMax": 1.0,
+      "specularStrength": 0.14,
+      "ambientStrength": 0.52,
+      "sunStrength": 1.0,
+      "localLightStrength": 1.0,
+      "normalScaleMultiplier": 0.65
+    },
+    "shadows": {
+      "castCascaded": true,
+      "receiveCascaded": true,
+      "shadowStrength": 1.0
+    }
+  },
 
   "rootMotion": {
     "nodeName": "mixamorig:Hips",

@@ -508,6 +508,8 @@ export class Frontend {
             uniformManager: this.uniformManager,
         });
         await this.skinnedMeshRenderer.initialize();
+        this.skinnedMeshRenderer.setClusterLightBuffers(this.clusterLightBuffers);
+        this.skinnedMeshRenderer.setShadowRenderer(this.gpuShadowRenderer);
 
         return this;
     }
@@ -564,7 +566,7 @@ async loadGLB(url, options = {}) {
     const loader = new GLTFLoader({ verbose: true });
     const asset  = await loader.loadFromURL(url);
     const worldMatrix = this._computeGLBWorldMatrix(options);
-    return await this.skinnedMeshRenderer.addInstance(asset, worldMatrix);
+    return await this.skinnedMeshRenderer.addInstance(asset, worldMatrix, options);
 }
 
 
@@ -668,6 +670,9 @@ updateLighting(starSystem) {
         // Push to asset streamer
         if (this.assetStreamer) {
             this.assetStreamer.setClusterLightBuffers(buf);
+        }
+        if (this.skinnedMeshRenderer) {
+            this.skinnedMeshRenderer.setClusterLightBuffers(buf);
         }
     }
 
@@ -914,6 +919,9 @@ updateLighting(starSystem) {
             this.gpuShadowRenderer = null;
             return;
         }
+        if (this.skinnedMeshRenderer) {
+            this.skinnedMeshRenderer.setShadowRenderer(this.gpuShadowRenderer);
+        }
 /*
         if (this.assetStreamer) {
             this.assetStreamer.setShadowRenderer(this.gpuShadowRenderer);
@@ -1001,6 +1009,12 @@ updateLighting(starSystem) {
                 
                 if (this.skinnedMeshRenderer?.isReady()) {
                     this.skinnedMeshRenderer.update(this._lastDeltaTime);
+                    if (this.gpuShadowRenderer?.isReady) {
+                        this.backend.endRenderPassForCompute();
+                        const encoder = this.backend.getCommandEncoder();
+                        this.skinnedMeshRenderer.renderShadowPasses(encoder, this.gpuShadowRenderer);
+                        this.backend.resumeRenderPass();
+                    }
                     this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
                 }
 
