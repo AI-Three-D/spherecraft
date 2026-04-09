@@ -588,6 +588,14 @@ if (enableSplat && lod <= splatBlendMaxLod) {
     if (Number.isFinite(options.terrainAOAmbientFloor)) {
         terrainAOAmbientFloor = Math.min(1, Math.max(0, options.terrainAOAmbientFloor));
     }
+    let terrainAmbientScale = 1.3;
+    if (Number.isFinite(terrainShaderConfig.ambientScale)) {
+        terrainAmbientScale = Math.max(0, terrainShaderConfig.ambientScale);
+    }
+    let terrainSunWrap = 0.18;
+    if (Number.isFinite(terrainShaderConfig.sunWrap)) {
+        terrainSunWrap = Math.min(1, Math.max(0, terrainShaderConfig.sunWrap));
+    }
     let groundFieldTintStrength = 0.32;
     if (Number.isFinite(options.groundFieldTintStrength)) {
         groundFieldTintStrength = Math.min(1, Math.max(0, options.groundFieldTintStrength));
@@ -715,6 +723,8 @@ const NORMAL_TEXTURE_FILTERABLE: bool = ${normalTextureFilterable ? 'true' : 'fa
 const ENABLE_TERRAIN_AO: bool = ${enableTerrainAO ? 'true' : 'false'};
 const ENABLE_GROUND_FIELD: bool = ${enableGroundField ? 'true' : 'false'};
 const TERRAIN_AO_AMBIENT_FLOOR: f32 = ${terrainAOAmbientFloor.toFixed(3)};
+const TERRAIN_AMBIENT_SCALE: f32 = ${terrainAmbientScale.toFixed(3)};
+const TERRAIN_SUN_WRAP: f32 = ${terrainSunWrap.toFixed(3)};
 const GROUND_FIELD_TINT_STRENGTH: f32 = ${groundFieldTintStrength.toFixed(3)};
 const GROUND_FIELD_GRASS_TINT: vec3<f32> = vec3<f32>(
     ${groundFieldGrassTint[0].toFixed(3)},
@@ -2247,11 +2257,13 @@ if (debugMode == 16) {
             worldNormal = -worldNormal;
         }
         let lightDir = normalize(fragUniforms.lightDirection);
-        NdotL = max(dot(worldNormal, lightDir), 0.0);   // 0 on night side, positive on day side
+        let rawNdotL = dot(worldNormal, lightDir);
+        NdotL = max(rawNdotL, 0.0);   // 0 on night side, positive on day side
 
         if (ENABLE_LIGHTING) {
-            let ambient = fragUniforms.ambientColor * fragUniforms.ambientLightIntensity;
-            let sunDiffuse = fragUniforms.lightColor * fragUniforms.sunLightIntensity * NdotL;
+            let ambient = fragUniforms.ambientColor * fragUniforms.ambientLightIntensity * TERRAIN_AMBIENT_SCALE;
+            let wrappedNdotL = max((rawNdotL + TERRAIN_SUN_WRAP) / (1.0 + TERRAIN_SUN_WRAP), 0.0);
+            let sunDiffuse = fragUniforms.lightColor * fragUniforms.sunLightIntensity * wrappedNdotL;
 
             var clusteredLight = vec3<f32>(0.0);
             if (ENABLE_CLUSTERED_LIGHTS) {

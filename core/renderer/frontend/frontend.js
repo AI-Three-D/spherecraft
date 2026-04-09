@@ -26,6 +26,7 @@ export class Frontend {
         this.lightingController = new LightingController();
         this.backend = null;
         this.engineConfig = options.engineConfig || null;
+        this.lightingController.applyConfig(this.engineConfig?.rendering?.lighting?.sun);
         this._streamerTheme = options.streamerTheme || null;
         this._nightSkyTheme = options.nightSkyTheme || null;
         this._terrainTheme = options.terrainTheme || null;

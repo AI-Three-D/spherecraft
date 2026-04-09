@@ -91,21 +91,27 @@ export function createEngineConfig() {
         ambient: {
           // Global ambient tuning for all terrain/asset materials.
           intensityMultiplier: 1.0,
-          minIntensity: 0.015,
-          maxIntensity: 0.26,
-          sunContributionScale: 0.18,
-          moonContributionScale: 0.035,
+          minIntensity: 0.028,
+          maxIntensity: 0.30,
+          sunContributionScale: 0.22,
+          moonContributionScale: 0.05,
           moonNormalizationIntensity: 0.15
         },
+        sun: {
+          // Keep dawn/dusk readable for the neutral baseline without
+          // turning nights into a full-time blue fill light.
+          twilightStartDot: -0.14,
+          twilightEndDot: 0.04
+        },
         fog: {
-          densityMultiplier: 0.55,
-          maxBaseDensity: 0.0007,
+          densityMultiplier: 0.48,
+          maxBaseDensity: 0.0006,
           dayDensityScale: 1.0,
-          nightDensityScale: 0.35,
-          minBrightness: 0.03,
-          maxBrightness: 0.78,
+          nightDensityScale: 0.42,
+          minBrightness: 0.05,
+          maxBrightness: 0.82,
           moonBrightnessScale: 0.10,
-          sunTintStrength: 0.18
+          sunTintStrength: 0.12
         }
       },
       distortion: {
@@ -130,7 +136,9 @@ export function createEngineConfig() {
         normalMapMaxLod: 3,
         altitudeNormalMinMeters: 8000,
         altitudeShadowMinMeters: 12000,
-        shadowDistanceMaxMeters: 1000
+        shadowDistanceMaxMeters: 1000,
+        ambientScale: 1.3,
+        sunWrap: 0.18
       }
     },
 

@@ -83,6 +83,10 @@ export class WorldConfigLoader {
             const a = base.rendering?.lighting?.ambient ?? {};
             Object.assign(a, engine.lighting.ambient);
         }
+        if (engine?.lighting?.sun) {
+            const s = base.rendering?.lighting?.sun ?? {};
+            Object.assign(s, engine.lighting.sun);
+        }
         if (engine?.lighting?.fog) {
             const f = base.rendering?.lighting?.fog ?? {};
             Object.assign(f, engine.lighting.fog);
@@ -200,13 +204,21 @@ export class WorldConfigLoader {
             }
         }
 
-        const uniformManager = gameEngine?.renderer?.uniformManager;
+        const renderer = gameEngine?.renderer;
+        const uniformManager = renderer?.uniformManager;
+        const lightingController = renderer?.lightingController;
         if (uniformManager && engine?.lighting) {
             if (engine.lighting.ambient) {
                 uniformManager.applyAmbientConfig(engine.lighting.ambient);
             }
+            if (engine.lighting.sun && lightingController) {
+                lightingController.applyConfig(engine.lighting.sun);
+            }
             if (engine.lighting.fog) {
                 uniformManager.applyFogConfig(engine.lighting.fog);
+            }
+            if (lightingController) {
+                uniformManager.updateFromLightingController(lightingController);
             }
         }
 

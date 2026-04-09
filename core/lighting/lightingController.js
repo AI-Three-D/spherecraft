@@ -31,6 +31,26 @@ export class LightingController {
         
         // Moon light intensity multiplier (adjustable)
         this.moonBaseIntensity = 0.15; // Max intensity at full moon during night
+        this.sunTuning = {
+            twilightStartDot: -0.14,
+            twilightEndDot: 0.04,
+        };
+    }
+
+    applyConfig(config) {
+        if (!config || typeof config !== 'object') return;
+
+        if (Number.isFinite(config.twilightStartDot)) {
+            this.sunTuning.twilightStartDot = Math.max(-1.0, Math.min(1.0, config.twilightStartDot));
+        }
+        if (Number.isFinite(config.twilightEndDot)) {
+            this.sunTuning.twilightEndDot = Math.max(
+                this.sunTuning.twilightStartDot + 0.01,
+                Math.min(1.0, config.twilightEndDot)
+            );
+        }
+
+        this._cache.frameId = -1;
     }
 
     /**
@@ -145,11 +165,8 @@ export class LightingController {
         const upz = uz * invLen;
         const sunDotUp = upx * sunDirection.x + upy * sunDirection.y + upz * sunDirection.z;
 
-        // Twilight blend around horizon:
-        // -0.10 ≈ sun 6 deg below horizon (civil twilight).
-        // +0.02 keeps sunrise/sunset softly ramped.
-        const edge0 = -0.10;
-        const edge1 = 0.02;
+        const edge0 = this.sunTuning.twilightStartDot;
+        const edge1 = this.sunTuning.twilightEndDot;
         const t = Math.max(0, Math.min(1, (sunDotUp - edge0) / (edge1 - edge0)));
         return t * t * (3 - 2 * t);
     }

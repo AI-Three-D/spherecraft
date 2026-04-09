@@ -225,7 +225,9 @@ export class WorldViewBase extends StudioView {
         this._discardBtn   = null;
         this._keys         = {};
         this._mouseDelta   = { x: 0, y: 0 };
-        this._isPointerDown = false;
+        this._isLeftDragging = false;  // true while left mouse button is held
+        this._lastMouseX   = 0;
+        this._lastMouseY   = 0;
         this._loadError    = null;
     }
 
@@ -285,10 +287,10 @@ export class WorldViewBase extends StudioView {
 
     onUpdate(dt, _t) {
         if (!this._engine) return;
-        const md = { ...this._mouseDelta };
+        const md = { x: this._mouseDelta.x, y: this._mouseDelta.y };
         this._mouseDelta.x = 0;
         this._mouseDelta.y = 0;
-        this._engine.update(dt, this._keys, md, !!this._keys['Shift']);
+        this._engine.update(dt, this._keys, md, this._isLeftDragging, !!this._keys['Shift']);
         this._engine.render(dt);
     }
 
@@ -428,7 +430,7 @@ export class WorldViewBase extends StudioView {
         navInfo.innerHTML = '<b style="color:var(--text)">WASD</b> — fly<br>'
                           + '<b style="color:var(--text)">Q/E</b> — down/up<br>'
                           + '<b style="color:var(--text)">Shift</b> — boost<br>'
-                          + '<b style="color:var(--text)">Drag</b> — look';
+                          + '<b style="color:var(--text)">Left-drag</b> — look';
         navSec.appendChild(navInfo);
     }
 
@@ -490,26 +492,42 @@ export class WorldViewBase extends StudioView {
     // ── Input handling ────────────────────────────────────────────────
 
     _attachInputListeners(canvas) {
-        this._onKeyDown  = (e) => { this._keys[e.key] = true; };
-        this._onKeyUp    = (e) => { delete this._keys[e.key]; };
-        this._onMouseDown= (e) => {
-            if (e.button === 0) { this._isPointerDown = true; canvas.requestPointerLock?.(); }
-        };
-        this._onMouseUp  = (e) => {
-            if (e.button === 0) { this._isPointerDown = false; document.exitPointerLock?.(); }
-        };
-        this._onMouseMove= (e) => {
-            if (this._isPointerDown) {
-                this._mouseDelta.x += e.movementX ?? e.offsetX;
-                this._mouseDelta.y += e.movementY ?? e.offsetY;
+        this._onKeyDown   = (e) => { this._keys[e.key] = true; };
+        this._onKeyUp     = (e) => { delete this._keys[e.key]; };
+
+        this._onMouseDown = (e) => {
+            if (e.button === 0) {
+                this._isLeftDragging = true;
+                const rect = canvas.getBoundingClientRect();
+                this._lastMouseX = e.clientX - rect.left;
+                this._lastMouseY = e.clientY - rect.top;
+                this._mouseDelta.x = 0;
+                this._mouseDelta.y = 0;
             }
         };
 
-        window.addEventListener('keydown',   this._onKeyDown);
-        window.addEventListener('keyup',     this._onKeyUp);
-        canvas.addEventListener('mousedown', this._onMouseDown);
-        window.addEventListener('mouseup',   this._onMouseUp);
-        canvas.addEventListener('mousemove', this._onMouseMove);
+        this._onMouseUp = (e) => {
+            if (e.button === 0) this._isLeftDragging = false;
+        };
+
+        this._onMouseMove = (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            this._mouseDelta.x = x - this._lastMouseX;
+            this._mouseDelta.y = y - this._lastMouseY;
+            this._lastMouseX = x;
+            this._lastMouseY = y;
+        };
+
+        this._onContextMenu = (e) => e.preventDefault();
+
+        window.addEventListener('keydown',      this._onKeyDown);
+        window.addEventListener('keyup',        this._onKeyUp);
+        canvas.addEventListener('mousedown',    this._onMouseDown);
+        window.addEventListener('mouseup',      this._onMouseUp);
+        canvas.addEventListener('mousemove',    this._onMouseMove);
+        canvas.addEventListener('contextmenu',  this._onContextMenu);
     }
 
     _detachInputListeners() {
@@ -517,8 +535,9 @@ export class WorldViewBase extends StudioView {
         window.removeEventListener('keyup',   this._onKeyUp);
         const canvas = this._ctx?.canvas;
         if (canvas) {
-            canvas.removeEventListener('mousedown', this._onMouseDown);
-            canvas.removeEventListener('mousemove', this._onMouseMove);
+            canvas.removeEventListener('mousedown',   this._onMouseDown);
+            canvas.removeEventListener('mousemove',   this._onMouseMove);
+            canvas.removeEventListener('contextmenu', this._onContextMenu);
         }
         window.removeEventListener('mouseup', this._onMouseUp);
     }
