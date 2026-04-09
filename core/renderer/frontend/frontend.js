@@ -779,8 +779,11 @@ updateLighting(starSystem) {
             });
         }
 
+        const hasPostProcessing = !!this.postProcessing;
+        const postEffectsActive = !!(this.postProcessing && this.postProcessing.enabled !== false);
+
         // Route scene rendering through HDR postprocessing target.
-        if (this.postProcessing) {
+        if (hasPostProcessing) {
             this.postProcessing.beginScenePass(this.backend);
         } else {
             this.backend.setRenderTarget(null);
@@ -853,7 +856,7 @@ updateLighting(starSystem) {
             this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
         }
 
-        if (this.postProcessing) {
+        if (postEffectsActive) {
             this.postProcessing.beginBloomSourcePass(this.backend);
 
             if (this.skinnedMeshRenderer?.isReady()) {
@@ -870,12 +873,14 @@ updateLighting(starSystem) {
         }
 
         // Execute HDR postprocessing chain (bloom, distortion, tone mapping).
-        if (this.postProcessing) {
+        if (hasPostProcessing) {
             const dp = this.postProcessing.distortionPass;
             let hazeRendered = false;
 
             // Render heat haze distortion sources before postprocessing.
-            if (this.heatHazeEmitter && dp && this.heatHazeEmitter.hasSources(this.camera.position)) {
+            // Update first so callback-driven source positions are refreshed
+            // before any range culling happens inside the emitter.
+            if (postEffectsActive && this.heatHazeEmitter && dp) {
                 this.backend._endCurrentRenderPass();
                 this.backend._ensureCommandEncoder();
                 const enc = this.backend._commandEncoder;

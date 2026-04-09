@@ -16,7 +16,7 @@ export class ToneMappingPass {
         this.sampler = null;
         this.paramsBuffer = null;
 
-        this._exposure = 1.0;
+        this._exposure = 0.75;
         this._paramsDirty = true;
     }
 

@@ -36,6 +36,7 @@ const DEFAULT_SHADOW_TUNING = Object.freeze({
 const DEFAULT_BLOOM_TUNING = Object.freeze({
     enabled: true,
     bloomWeight: 1.0,
+    sourceScale: 4.0,
 });
 
 function finiteOr(value, fallback) {
@@ -569,6 +570,7 @@ export class SkinnedMeshRenderer {
             castShadow: shadowTuning.castCascaded,
             shadowStrength: shadowTuning.receiveCascaded ? shadowTuning.shadowStrength : 0,
             bloomWeight: bloomTuning.bloomWeight,
+            bloomSourceScale: bloomTuning.sourceScale,
         };
     }
 
@@ -768,6 +770,10 @@ export class SkinnedMeshRenderer {
         f[89] = d.decodeEmissiveSRGB;
         f[90] = d.shadowStrength;
         f[91] = d.bloomWeight;
+        f[92] = d.bloomSourceScale;
+        f[93] = 0;
+        f[94] = 0;
+        f[95] = 0;
     }
 
     _packShadowUbo(model) {
@@ -974,9 +980,16 @@ export class SkinnedMeshRenderer {
             0,
             16
         );
+        const sourceScale = clampNumber(
+            source.sourceScale ?? source.strength ?? source.sourceStrength,
+            DEFAULT_BLOOM_TUNING.sourceScale,
+            0,
+            32
+        );
 
         return {
             bloomWeight: enabled ? bloomWeight : 0,
+            sourceScale: enabled ? sourceScale : 0,
         };
     }
 
@@ -1047,6 +1060,7 @@ struct U {
     materialTuning0: vec4<f32>,
     materialTuning1: vec4<f32>,
     materialTuning2: vec4<f32>,
+    materialTuning3: vec4<f32>,
 };
 
 struct ClLight {
@@ -1440,7 +1454,7 @@ fn fs_bloom(i: VSOut) -> @location(0) vec4<f32> {
         emis *= decodeSRGB(eTex, u.materialTuning2.y);
     }
 
-    let bloom = emis * u.materialTuning2.w;
+    let bloom = emis * u.materialTuning2.w * u.materialTuning3.x;
     if (max(max(bloom.r, bloom.g), bloom.b) <= 1e-5) {
         discard;
     }

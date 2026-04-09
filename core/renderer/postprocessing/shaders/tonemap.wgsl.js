@@ -39,7 +39,7 @@ fn linearToSrgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_tonemap(in: FullscreenVsOut) -> @location(0) vec4<f32> {
-    let hdr = textureSample(hdrTexture, hdrSampler, in.uv).rgb;
+    let hdr = max(textureSample(hdrTexture, hdrSampler, in.uv).rgb, vec3<f32>(0.0));
 
     let exposed = hdr * params.exposure;
     let mapped  = acesTonemap(exposed);

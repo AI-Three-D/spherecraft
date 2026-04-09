@@ -34,15 +34,24 @@ export class GameUI {
 
         const data = {
             _doc: 'Post-processing parameters. Exported from the in-game debug panel.',
+            enabled: pp.enabled !== false,
             exposure: pp.exposure ?? 1.0,
         };
 
         if (pp.bloomPass) {
             data.bloom = {
+                enabled: pp.bloomPass.enabled !== false,
                 threshold: pp.bloomPass.threshold,
                 knee: pp.bloomPass.knee,
                 intensity: pp.bloomPass.intensity,
                 blendFactor: pp.bloomPass.blendFactor,
+            };
+        }
+
+        if (pp.distortionPass) {
+            data.distortion = {
+                enabled: pp.distortionPass.enabled !== false,
+                strength: pp.distortionPass.strength,
             };
         }
 
@@ -885,7 +894,8 @@ export class GameUI {
             sep.textContent = 'TONE MAPPING';
             body.appendChild(sep);
 
-            mkSlider('Exposure', 0.1, 5.0, 0.05, pp.exposure, v => { pp.exposure = v; });
+            mkToggle('Enable Post FX', pp.enabled !== false, v => { pp.enabled = v; });
+            mkSlider('Exposure', 0.25, 2.0, 0.05, pp.exposure, v => { pp.exposure = v; });
 
             // Bloom
             const bloom = pp.bloomPass;
@@ -895,10 +905,11 @@ export class GameUI {
                 bloomSep.textContent = 'BLOOM';
                 body.appendChild(bloomSep);
 
-                mkSlider('Threshold', 0.0, 2.0, 0.05, bloom.threshold, v => { bloom.threshold = v; });
+                mkToggle('Enable Bloom', bloom.enabled !== false, v => { bloom.enabled = v; });
+                mkSlider('Threshold', 0.25, 2.5, 0.05, bloom.threshold, v => { bloom.threshold = v; });
                 mkSlider('Knee', 0.0, 0.5, 0.01, bloom.knee, v => { bloom.knee = v; });
-                mkSlider('Intensity', 0.0, 0.5, 0.01, bloom.intensity, v => { bloom.intensity = v; });
-                mkSlider('Blend Factor', 0.0, 0.5, 0.01, bloom.blendFactor, v => { bloom.blendFactor = v; });
+                mkSlider('Intensity', 0.0, 0.8, 0.01, bloom.intensity, v => { bloom.intensity = v; });
+                mkSlider('Blend Factor', 0.35, 0.85, 0.01, bloom.blendFactor, v => { bloom.blendFactor = v; });
             }
 
             // Distortion

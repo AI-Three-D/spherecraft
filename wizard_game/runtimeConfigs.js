@@ -116,8 +116,9 @@ export function createEngineConfig() {
       },
       distortion: {
         sourceCutoffs: {
-          // Third-person character camera sits about 7.8 m from the player by default.
-          campfire: 10.0,
+          // Third-person camera starts around 7.8 m but zoom/orbit pushes the
+          // effective camera-to-fire distance higher, so 10 m was too brittle.
+          campfire: 30.0,
           shockwave: 200.0
         }
       },

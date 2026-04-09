@@ -7,7 +7,7 @@
 
 export class HeatHazeEmitter {
     constructor(device, {
-        maxParticles = 32,
+        maxParticles = 64,
         distortionFormat = 'rg16float',
     }) {
         this.device = device;
@@ -29,15 +29,15 @@ export class HeatHazeEmitter {
 
         // Tuned to be visible enough for campfire testing without becoming a
         // full-screen smear once the global distortion multiplier is raised.
-        this.amplitude = 0.005;
+        this.amplitude = 0.008;
         this.frequency = 10.0;
         this.speed = 2.0;
         this.riseSpeed = 0.8;
-        this.lifetime = 1.0;
-        this.spawnRate = 5;
-        this.baseWidth = 0.22;
-        this.baseHeight = 0.14;
-        this.heightOffset = 0.6;
+        this.lifetime = 1.35;
+        this.spawnRate = 12;
+        this.baseWidth = 0.42;
+        this.baseHeight = 0.28;
+        this.heightOffset = 0.9;
     }
 
     initialize(depthFormat = null) {

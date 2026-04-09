@@ -172,15 +172,24 @@ export class WorldConfigLoader {
         // ── Post-processing ──────────────────────────────────────────────
         const pp = gameEngine?.renderer?.postProcessing;
         if (pp && postprocessing) {
+            if (postprocessing.enabled != null) {
+                pp.enabled = !!postprocessing.enabled;
+            }
             if (postprocessing.exposure != null) {
                 pp.exposure = postprocessing.exposure;
             }
             if (postprocessing.bloom) {
                 const b = postprocessing.bloom;
+                if (b.enabled     != null) pp.bloomPass.enabled     = !!b.enabled;
                 if (b.threshold   != null) pp.bloomPass.threshold   = b.threshold;
                 if (b.knee        != null) pp.bloomPass.knee        = b.knee;
                 if (b.intensity   != null) pp.bloomPass.intensity   = b.intensity;
                 if (b.blendFactor != null) pp.bloomPass.blendFactor = b.blendFactor;
+            }
+            if (postprocessing.distortion && pp.distortionPass) {
+                const d = postprocessing.distortion;
+                if (d.enabled  != null) pp.distortionPass.enabled  = !!d.enabled;
+                if (d.strength != null) pp.distortionPass.strength = d.strength;
             }
         }
 

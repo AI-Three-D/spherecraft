@@ -1,10 +1,16 @@
 {
   "_comment": "Post-processing parameters. All settings here update in real-time (no regeneration needed).",
-  "exposure": 1.0,
+  "enabled": true,
+  "exposure": 0.75,
   "bloom": {
-    "threshold":   0.6,
-    "knee":        0.2,
-    "intensity":   0.12,
-    "blendFactor": 0.22
+    "enabled":     true,
+    "threshold":   1.0,
+    "knee":        0.25,
+    "intensity":   0.3,
+    "blendFactor": 0.65
+  },
+  "distortion": {
+    "enabled":  true,
+    "strength": 0.35
   }
 }

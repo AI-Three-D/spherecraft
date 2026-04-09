@@ -11,19 +11,20 @@ import { buildBloomDownsampleWGSL } from './shaders/bloomDownsample.wgsl.js';
 import { buildBloomUpsampleWGSL } from './shaders/bloomUpsample.wgsl.js';
 import { buildBloomCompositeWGSL } from './shaders/bloomComposite.wgsl.js';
 
-const MAX_MIP_LEVELS = 3;
+const MAX_MIP_LEVELS = 5;
 
 export class BloomPass {
     constructor(device, { width, height }) {
         this.device = device;
         this.width = width;
         this.height = height;
+        this.enabled = true;
 
         // Tunable parameters.
-        this.threshold = 0.6;
-        this.knee = 0.2;
-        this.intensity = 0.12;
-        this.blendFactor = 0.22;
+        this.threshold = 1.0;
+        this.knee = 0.25;
+        this.intensity = 0.3;
+        this.blendFactor = 0.65;
 
         // GPU resources.
         this._mipTextures = [];      // One texture per mip, each with a single view.
@@ -66,9 +67,8 @@ export class BloomPass {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         }));
 
-        // Composite reuses the upsample shader, but it needs its own params
-        // buffer so the final intensity write does not overwrite the
-        // progressive upsample state recorded earlier in the frame.
+        // Final composite has its own params buffer so the artist-facing
+        // intensity control stays independent from the internal upsample blend.
         this._compositeParamsBuffer = device.createBuffer({
             label: 'Bloom-Composite-Params',
             size: 16,
@@ -148,9 +148,8 @@ export class BloomPass {
             label: 'Bloom-Composite-BGL',
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
             ],
         });
 
@@ -166,7 +165,13 @@ export class BloomPass {
             fragment: {
                 module: compModule,
                 entryPoint: 'fs_composite',
-                targets: [{ format: HDR_FORMAT }],
+                targets: [{
+                    format: HDR_FORMAT,
+                    blend: {
+                        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    },
+                }],
             },
             primitive: { topology: 'triangle-list' },
         });
@@ -298,24 +303,16 @@ export class BloomPass {
         }
 
         // --- Composite bloom mip 0 back into the HDR scene ---
-        // The additive upsample pipeline reads from bloom mip0 (a separate
-        // texture) and blends into the HDR target. No copy needed.
         this._compositeBloomIntoHDR(commandEncoder, hdrView, sceneWidth, sceneHeight);
     }
 
     // Composites bloom mip0 into the HDR texture using additive blending.
-    // This is safe because mip0 is a separate texture from the HDR target.
     _compositeBloomIntoHDR(commandEncoder, hdrView, w, h) {
-        const compositeData = new Float32Array([
-            1.0 / this._mipSizes[0][0],
-            1.0 / this._mipSizes[0][1],
-            this.intensity,
-            0,
-        ]);
+        const compositeData = new Float32Array([this.intensity, 0, 0, 0]);
         this.device.queue.writeBuffer(this._compositeParamsBuffer, 0, compositeData);
 
         const bg = this.device.createBindGroup({
-            layout: this._upsampleBindGroupLayout,
+            layout: this._compositeBindGroupLayout,
             entries: [
                 { binding: 0, resource: this._mipViews[0] },
                 { binding: 1, resource: this._sampler },
@@ -331,7 +328,7 @@ export class BloomPass {
             }],
         });
         pass.setViewport(0, 0, w, h, 0, 1);
-        pass.setPipeline(this._upsamplePipeline);
+        pass.setPipeline(this._compositePipeline);
         pass.setBindGroup(0, bg);
         pass.draw(3);
         pass.end();

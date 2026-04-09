@@ -21,6 +21,10 @@ export class PostProcessingPipeline {
         this.width = width;
         this.height = height;
         this.outputFormat = outputFormat;
+        // Master toggle for optional post FX. The HDR scene target and final
+        // tone-map pass stay active because much of the renderer is compiled
+        // against the HDR scene format.
+        this.enabled = true;
 
         // HDR scene color + depth
         this.hdrTexture = null;
@@ -174,10 +178,9 @@ export class PostProcessingPipeline {
         backend._ensureCommandEncoder();
         const encoder = backend._commandEncoder;
 
-        // Run bloom (if enabled) — operates on the HDR texture in-place or
-        // produces a bloom texture that gets composited. The bloom input is a
-        // dedicated authored-emissive source, not the full HDR scene.
-        if (this.bloomPass) {
+        // Optional post FX. These can be skipped, but the final tone-map pass
+        // still runs because the renderer outputs into the HDR scene target.
+        if (this.enabled !== false && this.bloomPass?.enabled !== false) {
             this.bloomPass.render(
                 encoder,
                 this.bloomSourceTextureView,
@@ -187,8 +190,7 @@ export class PostProcessingPipeline {
             );
         }
 
-        // Run distortion (if enabled) — warps the HDR image. Added in iteration 4.
-        if (this.distortionPass) {
+        if (this.enabled !== false && this.distortionPass) {
             this.distortionPass.render(encoder, this.hdrTexture, this.hdrTextureView, this.width, this.height);
         }
 
