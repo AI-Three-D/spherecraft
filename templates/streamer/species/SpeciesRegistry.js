@@ -167,7 +167,7 @@ const DEFAULT_SPECIES = [
         geometryType: 'deciduous',
         climate: { temperature: [0.15, 0.45], precipitation: [0.4, 0.75] },
         size: {
-            trunk: { radiusBase: 0.15, radiusTop: 0.06, height: 0.45 },
+            trunk: { radiusBase: 0.55, radiusTop: 0.06, height: 0.45 },
             canopy: { radius: 0.3, heightStart: 0.35, heightEnd: 1.0 },
             heightRange: [15, 30]
         },
