@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spherecraft Studio</title>
+    <style>
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-deep:       #0a0b0f;
+            --bg-panel:      #111318;
+            --bg-panel-alt:  #161820;
+            --bg-hover:      #1c1f28;
+            --border:        rgba(255,255,255,0.07);
+            --border-bright: rgba(0,200,255,0.25);
+            --accent:        #00c8ff;
+            --accent-dim:    rgba(0,200,255,0.12);
+            --accent-active: rgba(0,200,255,0.22);
+            --text:          #d0d4e0;
+            --text-dim:      #666b7a;
+            --text-bright:   #eef0f6;
+            --tab-h:         40px;
+            --status-h:      24px;
+            --sidebar-w:     280px;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: var(--bg-deep);
+            color: var(--text);
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            font-size: 13px;
+        }
+
+        /* ── Layout ─────────────────────────────────────────────────── */
+
+        #studio-root {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* ── Top bar ─────────────────────────────────────────────────── */
+
+        #topbar {
+            display: flex;
+            align-items: center;
+            height: var(--tab-h);
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+            user-select: none;
+        }
+
+        #studio-wordmark {
+            padding: 0 16px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.12em;
+            color: var(--accent);
+            text-transform: uppercase;
+            white-space: nowrap;
+            border-right: 1px solid var(--border);
+            height: 100%;
+            display: flex;
+            align-items: center;
+            min-width: 160px;
+        }
+
+        #tab-bar {
+            display: flex;
+            align-items: stretch;
+            height: 100%;
+            flex: 1;
+            overflow-x: auto;
+            scrollbar-width: none;
+        }
+        #tab-bar::-webkit-scrollbar { display: none; }
+
+        .tab-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 16px;
+            height: 100%;
+            background: none;
+            border: none;
+            border-right: 1px solid var(--border);
+            color: var(--text-dim);
+            font-size: 12px;
+            font-family: inherit;
+            letter-spacing: 0.04em;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: color 0.15s, background 0.15s;
+            position: relative;
+        }
+        .tab-btn:hover {
+            color: var(--text);
+            background: var(--bg-hover);
+        }
+        .tab-btn.active {
+            color: var(--accent);
+            background: var(--accent-active);
+        }
+        .tab-btn.active::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--accent);
+        }
+
+        .tab-icon {
+            font-size: 14px;
+            line-height: 1;
+        }
+
+        /* ── Body (sidebar + viewport) ───────────────────────────────── */
+
+        #studio-body {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* ── Left sidebar ─────────────────────────────────────────────── */
+
+        #sidebar-left {
+            width: var(--sidebar-w);
+            min-width: var(--sidebar-w);
+            background: var(--bg-panel);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        .sidebar-header {
+            padding: 10px 12px 8px;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .sidebar-content {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+
+        /* ── Viewport ─────────────────────────────────────────────────── */
+
+        #viewport-wrap {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+            background: #060709;
+        }
+
+        #studio-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Placeholder shown when a view has no canvas content yet */
+        #viewport-placeholder {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            color: var(--text-dim);
+            font-size: 13px;
+            pointer-events: none;
+        }
+        #viewport-placeholder .placeholder-icon {
+            font-size: 48px;
+            opacity: 0.3;
+        }
+        #viewport-placeholder .placeholder-label {
+            opacity: 0.4;
+            letter-spacing: 0.06em;
+        }
+
+        /* ── Right sidebar ─────────────────────────────────────────────── */
+
+        #sidebar-right {
+            width: var(--sidebar-w);
+            min-width: var(--sidebar-w);
+            background: var(--bg-panel);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        /* ── Status bar ───────────────────────────────────────────────── */
+
+        #statusbar {
+            display: flex;
+            align-items: center;
+            height: var(--status-h);
+            background: var(--bg-panel);
+            border-top: 1px solid var(--border);
+            padding: 0 12px;
+            flex-shrink: 0;
+            gap: 16px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+        .status-item .label { color: var(--text-dim); }
+        .status-item .value { color: var(--text); font-variant-numeric: tabular-nums; }
+        .status-item.accent .value { color: var(--accent); }
+
+        #status-view-name {
+            margin-left: auto;
+            font-size: 11px;
+            color: var(--text-dim);
+            letter-spacing: 0.06em;
+        }
+
+        /* ── Shared panel components ─────────────────────────────────── */
+
+        .panel-section {
+            border-bottom: 1px solid var(--border);
+        }
+
+        .panel-section-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            cursor: pointer;
+            user-select: none;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+        }
+        .panel-section-head:hover { color: var(--text); }
+
+        .panel-section-head .arrow {
+            font-size: 9px;
+            transition: transform 0.15s;
+        }
+        .panel-section-head.collapsed .arrow { transform: rotate(-90deg); }
+
+        .panel-section-body {
+            padding: 4px 0 8px;
+        }
+        .panel-section-body.hidden { display: none; }
+
+        .param-row {
+            display: flex;
+            align-items: center;
+            padding: 3px 12px;
+            gap: 8px;
+        }
+        .param-row label {
+            flex: 0 0 100px;
+            font-size: 11px;
+            color: var(--text-dim);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .param-row input[type="range"] {
+            flex: 1;
+            accent-color: var(--accent);
+            cursor: pointer;
+        }
+        .param-row .param-value {
+            flex: 0 0 44px;
+            text-align: right;
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+            color: var(--text);
+        }
+
+        /* ── Notification toast ──────────────────────────────────────── */
+
+        #toast {
+            position: absolute;
+            bottom: calc(var(--status-h) + 12px);
+            left: 50%;
+            transform: translateX(-50%) translateY(8px);
+            background: var(--bg-panel-alt);
+            border: 1px solid var(--border-bright);
+            color: var(--text-bright);
+            font-size: 12px;
+            padding: 7px 16px;
+            border-radius: 4px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s, transform 0.2s;
+            z-index: 999;
+            white-space: nowrap;
+        }
+        #toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+    </style>
+</head>
+<body>
+    <div id="studio-root">
+
+        <!-- Top bar -->
+        <div id="topbar">
+            <div id="studio-wordmark">Spherecraft Studio</div>
+            <div id="tab-bar">
+                <!-- Injected by Studio.js -->
+            </div>
+        </div>
+
+        <!-- Main body -->
+        <div id="studio-body">
+
+            <!-- Left sidebar: view-specific controls -->
+            <div id="sidebar-left">
+                <div class="sidebar-header" id="sidebar-left-title">Controls</div>
+                <div class="sidebar-content" id="sidebar-left-content">
+                    <!-- Populated by active view -->
+                </div>
+            </div>
+
+            <!-- Center viewport -->
+            <div id="viewport-wrap">
+                <canvas id="studio-canvas"></canvas>
+                <div id="viewport-placeholder">
+                    <div class="placeholder-icon">⬡</div>
+                    <div class="placeholder-label">No viewport content</div>
+                </div>
+            </div>
+
+            <!-- Right sidebar: properties / inspector -->
+            <div id="sidebar-right">
+                <div class="sidebar-header" id="sidebar-right-title">Properties</div>
+                <div class="sidebar-content" id="sidebar-right-content">
+                    <!-- Populated by active view -->
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Status bar -->
+        <div id="statusbar">
+            <div class="status-item accent">
+                <span class="label">FPS</span>
+                <span class="value" id="stat-fps">—</span>
+            </div>
+            <div class="status-item">
+                <span class="label">Frame</span>
+                <span class="value" id="stat-frame">—</span>
+            </div>
+            <div class="status-item" id="stat-extra"></div>
+            <div id="status-view-name">—</div>
+        </div>
+
+    </div>
+
+    <!-- Toast notification -->
+    <div id="toast"></div>
+
+    <script type="module" src="./Studio.js"></script>
+</body>
+</html>
