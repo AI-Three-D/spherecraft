@@ -606,7 +606,6 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         dFade = 1. - smoothstep(${fadeStart.toFixed(1)}, ${fadeEnd.toFixed(1)}, input.vDistanceToCamera);
     }
 
-    color = color / (color + vec3(1.));
     return vec4(color, dFade * input.vColor.a * texAlpha);
 }
 `;

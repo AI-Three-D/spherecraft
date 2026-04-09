@@ -519,7 +519,6 @@ fn main(input: FragInput) -> @location(0) vec4<f32> {
 
     let fogFactor = 1.0 - exp(-input.vDist * fragUniforms.fogDensity);
     color = mix(color, fragUniforms.fogColor, clamp(fogFactor, 0.0, 1.0));
-    color = color / (color + vec3<f32>(1.0));
 
     let distFade = 1.0 - smoothstep(${fadeStart.toFixed(1)}, ${fadeEnd.toFixed(1)}, input.vDist);
     if (distFade < 0.01) { discard; }

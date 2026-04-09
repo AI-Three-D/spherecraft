@@ -119,9 +119,6 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     // Combine
     var color = ambient + diffuse + emissive;
     
-    // Simple tone mapping
-    color = color / (color + vec3<f32>(1.0));
-    
     return vec4<f32>(color, 1.0);
 }
 `;

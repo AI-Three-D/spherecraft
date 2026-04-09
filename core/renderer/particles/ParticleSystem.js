@@ -533,6 +533,15 @@ if (Array.isArray(emitter._pointLights) && emitter._pointLights.length >= 4) {
         }
     }
 
+    // Emits only authored emissive particle signal into the dedicated bloom source.
+    renderBloom(renderPassEncoder) {
+        if (!this._initialized || !renderPassEncoder) return;
+        if (this.emitters.length === 0) return;
+
+        const { read } = this.buffers.getPingPong();
+        this.renderPass.renderBloom(renderPassEncoder, read);
+    }
+
     dispose() {
         for (const emitter of this.emitters) {
             emitter._globalsTarget?.ubo?.destroy();

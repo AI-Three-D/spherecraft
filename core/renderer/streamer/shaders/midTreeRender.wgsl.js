@@ -234,7 +234,6 @@ fn main(in: FragInput) -> @location(0) vec4<f32> {
     var color = lit;
     let fog = 1.0 - exp(-in.vDist * fragUniforms.fogDensity);
     color = mix(color, fragUniforms.fogColor, clamp(fog, 0.0, 1.0));
-    color = color / (color + vec3<f32>(1.0));
 
     return vec4<f32>(color, 1.0);
 }
@@ -703,7 +702,6 @@ fn main(in: FragInput) -> @location(0) vec4<f32> {
     var color = lit * BRIGHTNESS;
     let fog = 1.0 - exp(-in.vDist * fragUniforms.fogDensity);
     color = mix(color, fragUniforms.fogColor, clamp(fog, 0.0, 1.0));
-    color = color / (color + vec3<f32>(1.0));
 
     return vec4<f32>(color, 1.0);
 }

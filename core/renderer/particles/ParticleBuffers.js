@@ -209,11 +209,12 @@ export class ParticleBuffers {
             f32[base + 26] = entry.velocity?.y?.[0] ??  0.1;
             f32[base + 27] = entry.velocity?.y?.[1] ??  0.5;
 
-            // vec4 #7 — initial velocity range (Z) + emissive
+            // vec4 #7 — initial velocity range (Z) + emissive/bloom controls
             f32[base + 28] = entry.velocity?.z?.[0] ?? -0.1;
             f32[base + 29] = entry.velocity?.z?.[1] ??  0.1;
             f32[base + 30] = entry.emissive ?? 1.0;
-            f32[base + 31] = 0;
+            f32[base + 31] = entry.bloomWeight ??
+                (((entry.emissive ?? 1.0) > 1.0) ? 1.0 : 0.0);
         }
 
         this.device.queue.writeBuffer(this.typeDefUBO, 0, buf);

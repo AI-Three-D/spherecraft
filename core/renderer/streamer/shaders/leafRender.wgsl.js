@@ -481,10 +481,9 @@ ${detailAlbedoBlock}
         color += albedo * fragUniforms.lightColor * (back * 0.12);
     }
 
-    // ── Fog + tonemap ─────────────────────────────────────────────────
+    // ── Fog only; final tone mapping happens in post ──────────────────
     let fog = 1.0 - exp(-input.vDistanceToCamera * fragUniforms.fogDensity);
     color   = mix(color, fragUniforms.fogColor, clamp(fog, 0.0, 1.0));
-    color   = color / (color + vec3<f32>(1.0));
 
     return vec4<f32>(color, 1.0);
 }

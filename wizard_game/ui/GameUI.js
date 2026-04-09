@@ -822,15 +822,54 @@ export class GameUI {
             if (!pp) { setTimeout(tryBind, 500); return; }
 
             // Tone mapping
-            mkSlider('Exposure', 0.1, 5.0, 0.05, pp.exposure, v => { pp.exposure = v; });
+            const sep = document.createElement('div');
+            sep.style.cssText = 'margin:8px 0 4px; opacity:0.5; font-size:10px; letter-spacing:0.1em;';
+            sep.textContent = 'TONE MAPPING';
+            body.appendChild(sep);
+
+            const exposurePass = pp.exposurePass;
+            const tone = pp.toneMappingPass;
+            if (exposurePass) {
+                mkToggle('Auto Exposure', pp.autoExposureEnabled, v => { pp.autoExposureEnabled = v; });
+                mkSlider('Manual Exposure', 0.05, 12.0, 0.05, pp.exposure, v => { pp.exposure = v; });
+                mkSlider('Exposure Bias', -4.0, 4.0, 0.1, exposurePass.exposureCompensation, v => {
+                    exposurePass.exposureCompensation = v;
+                });
+                mkSlider('Middle Gray', 0.10, 0.40, 0.01, exposurePass.middleGray, v => {
+                    exposurePass.middleGray = v;
+                });
+                mkSlider('Min Exposure', 0.05, 4.0, 0.05, exposurePass.minExposure, v => {
+                    exposurePass.minExposure = Math.min(v, exposurePass.maxExposure);
+                });
+                mkSlider('Max Exposure', 0.1, 24.0, 0.1, exposurePass.maxExposure, v => {
+                    exposurePass.maxExposure = Math.max(v, exposurePass.minExposure);
+                });
+                mkSlider('Brighten Speed', 0.1, 10.0, 0.1, exposurePass.speedUp, v => {
+                    exposurePass.speedUp = v;
+                });
+                mkSlider('Darken Speed', 0.1, 10.0, 0.1, exposurePass.speedDown, v => {
+                    exposurePass.speedDown = v;
+                });
+            } else {
+                mkSlider('Exposure', 0.1, 5.0, 0.05, pp.exposure, v => { pp.exposure = v; });
+            }
+            if (tone) {
+                mkSlider('Contrast', 0.7, 1.5, 0.01, tone.contrast, v => { tone.contrast = v; });
+                mkSlider('Toe', 0.0, 0.25, 0.01, tone.toe, v => { tone.toe = v; });
+                mkSlider('Shoulder', 0.0, 1.0, 0.02, tone.shoulder, v => { tone.shoulder = v; });
+                mkSlider('White Point', 1.0, 12.0, 0.1, tone.whitePoint, v => { tone.whitePoint = v; });
+                mkSlider('Highlight Sat', 0.0, 1.25, 0.05, tone.highlightSaturation, v => {
+                    tone.highlightSaturation = v;
+                });
+            }
 
             // Bloom
             const bloom = pp.bloomPass;
             if (bloom) {
-                const sep = document.createElement('div');
-                sep.style.cssText = 'margin:8px 0 4px; opacity:0.5; font-size:10px; letter-spacing:0.1em;';
-                sep.textContent = 'BLOOM';
-                body.appendChild(sep);
+                const bloomSep = document.createElement('div');
+                bloomSep.style.cssText = 'margin:8px 0 4px; opacity:0.5; font-size:10px; letter-spacing:0.1em;';
+                bloomSep.textContent = 'BLOOM';
+                body.appendChild(bloomSep);
 
                 mkSlider('Threshold', 0.0, 5.0, 0.1, bloom.threshold, v => { bloom.threshold = v; });
                 mkSlider('Knee', 0.0, 1.0, 0.05, bloom.knee, v => { bloom.knee = v; });

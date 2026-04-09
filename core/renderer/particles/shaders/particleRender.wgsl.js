@@ -20,11 +20,13 @@ ${common}
 @group(0) @binding(0) var<uniform>           globals  : ParticleGlobals;
 @group(0) @binding(1) var<storage, read>     particles: array<Particle>;
 @group(0) @binding(2) var<storage, read>     liveList : array<u32>;
+@group(0) @binding(3) var<uniform>           typeDefs : array<ParticleTypeDef, PARTICLE_TYPE_CAPACITY>;
 
 struct VsOut {
     @builtin(position) clipPos: vec4<f32>,
     @location(0)       uv:      vec2<f32>,
     @location(1)       color:   vec4<f32>,
+    @location(2) @interpolate(flat) ptype: u32,
 };
 
 // Six-vertex quad as a triangle list.
@@ -96,6 +98,7 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     // rotated corner so the soft edge follows the rotation as well.
     out.uv = corner * 0.5 + vec2<f32>(0.5, 0.5);
     out.color = p.color;
+    out.ptype = p.ptype;
     return out;
 }
 
@@ -108,6 +111,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 1 - smoothstep produces a soft round disc with a wide soft edge.
     let a = 1.0 - smoothstep(0.0, 1.0, d);
     return vec4<f32>(in.color.rgb, in.color.a * a);
+}
+
+@fragment
+fn fs_bloom(in: VsOut) -> @location(0) vec4<f32> {
+    let d = length(in.uv - vec2<f32>(0.5, 0.5)) * 2.0;
+    if (d >= 1.0) { discard; }
+
+    let bloomWeight = typeDefs[in.ptype].bloomWeight;
+    if (bloomWeight <= 0.0) { discard; }
+
+    let a = 1.0 - smoothstep(0.0, 1.0, d);
+    let bloomColor = in.color.rgb * bloomWeight;
+    if (max(max(bloomColor.r, bloomColor.g), bloomColor.b) <= 1e-5) { discard; }
+
+    return vec4<f32>(bloomColor, in.color.a * a);
 }
 `;
 }

@@ -20,6 +20,7 @@ export class ParticleRenderPass {
 
         this.pipelineAdditive = null;
         this.pipelineAlpha = null;
+        this.pipelineBloom = null;
         this.bindGroupLayout = null;
         this.bindGroupAdditiveFromA = null;
         this.bindGroupAdditiveFromB = null;
@@ -48,6 +49,11 @@ export class ParticleRenderPass {
                     binding: 2,
                     visibility: GPUShaderStage.VERTEX,
                     buffer: { type: 'read-only-storage' },
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    buffer: { type: 'uniform' },
                 },
             ],
         });
@@ -106,6 +112,15 @@ export class ParticleRenderPass {
             depthStencil,
         });
 
+        this.pipelineBloom = device.createRenderPipeline({
+            label: 'ParticleRender-Bloom',
+            layout: pipelineLayout,
+            vertex: { module, entryPoint: 'vs_main' },
+            fragment: { module, entryPoint: 'fs_bloom', targets: [additiveTarget] },
+            primitive,
+            depthStencil,
+        });
+
         this._rebuildBindGroups();
     }
 
@@ -118,6 +133,7 @@ export class ParticleRenderPass {
                 { binding: 0, resource: { buffer: b.globalsUBO } },
                 { binding: 1, resource: { buffer: particleBuf } },
                 { binding: 2, resource: { buffer: liveList } },
+                { binding: 3, resource: { buffer: b.typeDefUBO } },
             ],
         });
 
@@ -150,9 +166,26 @@ export class ParticleRenderPass {
         renderPassEncoder.drawIndirect(this.buffers.indirectAlpha, 0);
     }
 
+    renderBloom(renderPassEncoder, readBuffer) {
+        const bgAdd = (readBuffer === this.buffers.particlesA)
+            ? this.bindGroupAdditiveFromA
+            : this.bindGroupAdditiveFromB;
+        const bgAlpha = (readBuffer === this.buffers.particlesA)
+            ? this.bindGroupAlphaFromA
+            : this.bindGroupAlphaFromB;
+
+        renderPassEncoder.setPipeline(this.pipelineBloom);
+        renderPassEncoder.setBindGroup(0, bgAdd);
+        renderPassEncoder.drawIndirect(this.buffers.indirectAdditive, 0);
+
+        renderPassEncoder.setBindGroup(0, bgAlpha);
+        renderPassEncoder.drawIndirect(this.buffers.indirectAlpha, 0);
+    }
+
     dispose() {
         this.pipelineAdditive = null;
         this.pipelineAlpha = null;
+        this.pipelineBloom = null;
         this.bindGroupLayout = null;
         this.bindGroupAdditiveFromA = null;
         this.bindGroupAdditiveFromB = null;

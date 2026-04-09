@@ -26,7 +26,7 @@ export class UniformManager {
             moonLightIntensity: { value: 0.2 },
             moonLightDirection: { value: new Vector3(-0.5, 1.0, -0.3).normalize() },
             ambientLightColor: { value: new Color(0x404040) },
-            ambientLightIntensity: { value: 50.9 },
+            ambientLightIntensity: { value: 0.12 },
             skyAmbientColor: { value: new Color(0x87baff) },
             groundAmbientColor: { value: new Color(0x554630) },
             thunderLightIntensity: { value: 0.0 },
@@ -36,7 +36,7 @@ export class UniformManager {
             playerLightIntensity: { value: 0.0 },
             playerLightPosition: { value: new Vector3() },
             playerLightDistance: { value: 15.0 },
-            fogColor: { value: new Color(0xcccccc) },
+            fogColor: { value: new Color(0x6c7f96) },
             fogDensity: { value: 0.00005 },
             fogScaleHeight: { value: 1200 },
             weatherIntensity: { value: 0.0 },
@@ -81,16 +81,32 @@ export class UniformManager {
             baseDensity: 0.00005,
             density: 0.00005,
             scaleHeight: 1200,
-            color: { r: 0.7, g: 0.8, b: 1.0 }
+            color: new Color(0.7, 0.8, 1.0)
         };
         this._weatherFogMultiplier = 1.0;
+        this._currentLighting = {
+            sunIntensity: 1.0,
+            sunVisibility: 1.0,
+            sunColor: new Color(1, 1, 1),
+            moonIntensity: 0.0
+        };
         this.ambientTuning = {
             intensityMultiplier: 1.0,
-            minIntensity: 0.75,
-            maxIntensity: 1.5,
-            sunContributionScale: 0.2,
-            moonContributionScale: 0.2,
+            minIntensity: 0.015,
+            maxIntensity: 0.26,
+            sunContributionScale: 0.18,
+            moonContributionScale: 0.035,
             moonNormalizationIntensity: 0.15
+        };
+        this.fogTuning = {
+            densityMultiplier: 0.55,
+            maxBaseDensity: 0.0007,
+            dayDensityScale: 1.0,
+            nightDensityScale: 0.35,
+            minBrightness: 0.03,
+            maxBrightness: 0.78,
+            moonBrightnessScale: 0.10,
+            sunTintStrength: 0.18
         };
 
     }
@@ -110,6 +126,7 @@ export class UniformManager {
 
     updateFromLightingController(lightingController) {
         const lighting = lightingController.getAll();
+        this._currentLighting = lighting;
         
         // Primary directional light (sun)
         this.uniforms.sunLightDirection.value.copy(lighting.sunDirection);
@@ -137,6 +154,10 @@ export class UniformManager {
         if (this.uniforms.moonLightDirection) {
             this.uniforms.moonLightDirection.value.copy(lighting.moonDirection);
             this.uniforms.moonLightIntensity.value = lighting.moonIntensity;
+        }
+
+        if (this.currentPlanetConfig) {
+            this.updateFogParams(this.uniforms.viewerAltitude.value, this.currentPlanetConfig.atmosphereSettings);
         }
     }
 
@@ -192,15 +213,35 @@ export class UniformManager {
         const atmo = requireObject(atmosphereSettings, 'atmosphereSettings');
         const scaleHeight = requireNumber(atmo.scaleHeightMie, 'atmosphereSettings.scaleHeightMie');
         this.fogParams.scaleHeight = scaleHeight;
-        this.fogParams.density = this.fogParams.baseDensity * this._weatherFogMultiplier * Math.exp(-altitude / scaleHeight);
+        const lighting = this._currentLighting;
+        const sunLight = Math.min(1, Math.max(0, (lighting?.sunIntensity ?? 0.0) / 3.0));
+        const moonLight = Math.min(
+            1,
+            Math.max(
+                0,
+                (lighting?.moonIntensity ?? 0.0) / Math.max(1e-4, this.ambientTuning.moonNormalizationIntensity)
+            )
+        );
+        const densityLight = Math.max(sunLight, moonLight * 0.25);
+        const densityScale =
+            this.fogTuning.nightDensityScale +
+            (this.fogTuning.dayDensityScale - this.fogTuning.nightDensityScale) * densityLight;
+        this.fogParams.density =
+            this.fogParams.baseDensity *
+            this._weatherFogMultiplier *
+            densityScale *
+            Math.exp(-altitude / scaleHeight);
 
         this.uniforms.fogDensity.value = this.fogParams.density;
         this.uniforms.fogScaleHeight.value = this.fogParams.scaleHeight;
-        const baseColor = new Color(
-            this.fogParams.color.r,
-            this.fogParams.color.g,
-            this.fogParams.color.b
-        );
+        const baseColor = this.fogParams.color.clone();
+        const fogBrightnessLight = Math.max(sunLight, moonLight * this.fogTuning.moonBrightnessScale);
+        const fogBrightness =
+            this.fogTuning.minBrightness +
+            (this.fogTuning.maxBrightness - this.fogTuning.minBrightness) * fogBrightnessLight;
+        const sunTint = lighting?.sunColor?.isColor ? lighting.sunColor : new Color(1, 1, 1);
+        baseColor.lerp(sunTint, this.fogTuning.sunTintStrength * sunLight);
+        baseColor.multiplyScalar(fogBrightness);
         const atmoHeight = Math.max(
             1.0,
             requireNumber(atmo.atmosphereRadius, 'atmosphereSettings.atmosphereRadius') -
@@ -231,16 +272,18 @@ export class UniformManager {
         this.uniforms.atmosphereGroundAlbedo.value = atmo.groundAlbedo;
         this.uniforms.atmosphereSunIntensity.value = atmo.sunIntensity;
 
-        const mieBase = Math.max(2e-5, atmo.mieScattering * 2.0);
-        this.fogParams.baseDensity = Math.min(0.002, mieBase);
+        const mieBase = Math.max(1e-5, atmo.mieScattering * this.fogTuning.densityMultiplier);
+        this.fogParams.baseDensity = Math.min(this.fogTuning.maxBaseDensity, mieBase);
         this.fogParams.scaleHeight = atmo.scaleHeightMie;
         const rayleigh = atmo.rayleighScattering.clone();
         const maxR = Math.max(rayleigh.x, rayleigh.y, rayleigh.z, 1e-6);
         const rayleighColor = new Color(rayleigh.x / maxR, rayleigh.y / maxR, rayleigh.z / maxR);
-        rayleighColor.lerp(new Color(1, 1, 1), 0.2);
-        this.fogParams.color = { r: rayleighColor.r, g: rayleighColor.g, b: rayleighColor.b };
+        rayleighColor.lerp(new Color(1, 1, 1), 0.08);
+        this.fogParams.color.copy(rayleighColor);
 
         this._markUniformDirty('atmosphere');
+
+        this.updateFogParams(this.uniforms.viewerAltitude.value, atmo);
 
     }
 
@@ -320,6 +363,10 @@ export class UniformManager {
             environmentState.currentWeather,
             environmentState.weatherIntensity
         );
+
+        if (this.currentPlanetConfig) {
+            this.updateFogParams(this.uniforms.viewerAltitude.value, this.currentPlanetConfig.atmosphereSettings);
+        }
     }
 
     updateFromShadowRenderer(shadowData) {
@@ -379,6 +426,40 @@ export class UniformManager {
         }
         if (Number.isFinite(config.moonNormalizationIntensity)) {
             next.moonNormalizationIntensity = Math.max(1e-4, config.moonNormalizationIntensity);
+        }
+    }
+
+    applyFogConfig(config) {
+        if (!config || typeof config !== 'object') return;
+        const next = this.fogTuning;
+        if (Number.isFinite(config.densityMultiplier)) {
+            next.densityMultiplier = Math.max(0, config.densityMultiplier);
+        }
+        if (Number.isFinite(config.maxBaseDensity)) {
+            next.maxBaseDensity = Math.max(1e-6, config.maxBaseDensity);
+        }
+        if (Number.isFinite(config.dayDensityScale)) {
+            next.dayDensityScale = Math.max(0, config.dayDensityScale);
+        }
+        if (Number.isFinite(config.nightDensityScale)) {
+            next.nightDensityScale = Math.max(0, Math.min(next.dayDensityScale, config.nightDensityScale));
+        }
+        if (Number.isFinite(config.minBrightness)) {
+            next.minBrightness = Math.max(0, config.minBrightness);
+        }
+        if (Number.isFinite(config.maxBrightness)) {
+            next.maxBrightness = Math.max(next.minBrightness, config.maxBrightness);
+        }
+        if (Number.isFinite(config.moonBrightnessScale)) {
+            next.moonBrightnessScale = Math.max(0, config.moonBrightnessScale);
+        }
+        if (Number.isFinite(config.sunTintStrength)) {
+            next.sunTintStrength = Math.max(0, Math.min(1, config.sunTintStrength));
+        }
+
+        if (this.currentPlanetConfig) {
+            this.updateFromPlanetConfig(this.currentPlanetConfig);
+            this.updateFogParams(this.uniforms.viewerAltitude.value, this.currentPlanetConfig.atmosphereSettings);
         }
     }
 

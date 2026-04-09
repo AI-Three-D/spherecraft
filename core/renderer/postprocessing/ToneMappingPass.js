@@ -1,8 +1,8 @@
 // core/renderer/postprocessing/ToneMappingPass.js
 //
-// Full-screen pass that reads an HDR texture and writes ACES-tonemapped
-// sRGB output. Intended as the final pass in the postprocessing chain,
-// targeting the swap chain format.
+// Full-screen pass that reads an HDR texture and writes a configurable
+// filmic-tonemapped sRGB output. Intended as the final pass in the
+// postprocessing chain, targeting the swap chain format.
 
 import { buildTonemapWGSL } from './shaders/tonemap.wgsl.js';
 
@@ -17,6 +17,12 @@ export class ToneMappingPass {
         this.paramsBuffer = null;
 
         this._exposure = 1.0;
+        this._autoExposureEnabled = true;
+        this._contrast = 1.04;
+        this._toe = 0.015;
+        this._shoulder = 0.72;
+        this._whitePoint = 4.0;
+        this._highlightSaturation = 1.0;
         this._paramsDirty = true;
     }
 
@@ -24,6 +30,55 @@ export class ToneMappingPass {
     set exposure(v) {
         if (v !== this._exposure) {
             this._exposure = v;
+            this._paramsDirty = true;
+        }
+    }
+
+    get autoExposureEnabled() { return this._autoExposureEnabled; }
+    set autoExposureEnabled(v) {
+        const next = !!v;
+        if (next !== this._autoExposureEnabled) {
+            this._autoExposureEnabled = next;
+            this._paramsDirty = true;
+        }
+    }
+
+    get contrast() { return this._contrast; }
+    set contrast(v) {
+        if (Number.isFinite(v) && v !== this._contrast) {
+            this._contrast = v;
+            this._paramsDirty = true;
+        }
+    }
+
+    get toe() { return this._toe; }
+    set toe(v) {
+        if (Number.isFinite(v) && v !== this._toe) {
+            this._toe = v;
+            this._paramsDirty = true;
+        }
+    }
+
+    get shoulder() { return this._shoulder; }
+    set shoulder(v) {
+        if (Number.isFinite(v) && v !== this._shoulder) {
+            this._shoulder = v;
+            this._paramsDirty = true;
+        }
+    }
+
+    get whitePoint() { return this._whitePoint; }
+    set whitePoint(v) {
+        if (Number.isFinite(v) && v !== this._whitePoint) {
+            this._whitePoint = v;
+            this._paramsDirty = true;
+        }
+    }
+
+    get highlightSaturation() { return this._highlightSaturation; }
+    set highlightSaturation(v) {
+        if (Number.isFinite(v) && v !== this._highlightSaturation) {
+            this._highlightSaturation = v;
             this._paramsDirty = true;
         }
     }
@@ -40,7 +95,7 @@ export class ToneMappingPass {
 
         this.paramsBuffer = device.createBuffer({
             label: 'ToneMap-Params',
-            size: 16,
+            size: 32,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
         this._uploadParams();
@@ -50,7 +105,8 @@ export class ToneMappingPass {
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
             ],
         });
 
@@ -74,14 +130,15 @@ export class ToneMappingPass {
 
     // Call each frame before render(). `hdrTextureView` is the GPUTextureView
     // of the HDR scene color texture.
-    createBindGroup(hdrTextureView) {
+    createBindGroup(hdrTextureView, exposureTextureView) {
         return this.device.createBindGroup({
             label: 'ToneMap-BindGroup',
             layout: this.bindGroupLayout,
             entries: [
                 { binding: 0, resource: hdrTextureView },
                 { binding: 1, resource: this.sampler },
-                { binding: 2, resource: { buffer: this.paramsBuffer } },
+                { binding: 2, resource: exposureTextureView },
+                { binding: 3, resource: { buffer: this.paramsBuffer } },
             ],
         });
     }
@@ -95,7 +152,16 @@ export class ToneMappingPass {
     }
 
     _uploadParams() {
-        const data = new Float32Array([this._exposure, 0, 0, 0]);
+        const data = new Float32Array([
+            this._exposure,
+            this._autoExposureEnabled ? 1.0 : 0.0,
+            this._contrast,
+            this._toe,
+            this._shoulder,
+            this._whitePoint,
+            this._highlightSaturation,
+            0.0,
+        ]);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, data);
         this._paramsDirty = false;
     }

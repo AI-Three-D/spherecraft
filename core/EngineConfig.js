@@ -35,6 +35,7 @@ export class EngineConfig {
     const terrainShader = rendering.terrainShader || {};
     const lighting = rendering.lighting || {};
     const ambient = lighting.ambient || {};
+    const fog = lighting.fog || {};
     const distortion = rendering.distortion || {};
     const sourceCutoffs = distortion.sourceCutoffs || {};
     this.rendering = {
@@ -70,24 +71,58 @@ export class EngineConfig {
             'rendering.lighting.ambient.intensityMultiplier'
           ),
           minIntensity: requireNumber(
-            ambient.minIntensity ?? 0.75,
+            ambient.minIntensity ?? 0.015,
             'rendering.lighting.ambient.minIntensity'
           ),
           maxIntensity: requireNumber(
-            ambient.maxIntensity ?? 1.5,
+            ambient.maxIntensity ?? 0.26,
             'rendering.lighting.ambient.maxIntensity'
           ),
           sunContributionScale: requireNumber(
-            ambient.sunContributionScale ?? 0.2,
+            ambient.sunContributionScale ?? 0.18,
             'rendering.lighting.ambient.sunContributionScale'
           ),
           moonContributionScale: requireNumber(
-            ambient.moonContributionScale ?? 0.2,
+            ambient.moonContributionScale ?? 0.035,
             'rendering.lighting.ambient.moonContributionScale'
           ),
           moonNormalizationIntensity: requireNumber(
             ambient.moonNormalizationIntensity ?? 0.15,
             'rendering.lighting.ambient.moonNormalizationIntensity'
+          )
+        },
+        fog: {
+          densityMultiplier: requireNumber(
+            fog.densityMultiplier ?? 0.55,
+            'rendering.lighting.fog.densityMultiplier'
+          ),
+          maxBaseDensity: requireNumber(
+            fog.maxBaseDensity ?? 0.0007,
+            'rendering.lighting.fog.maxBaseDensity'
+          ),
+          dayDensityScale: requireNumber(
+            fog.dayDensityScale ?? 1.0,
+            'rendering.lighting.fog.dayDensityScale'
+          ),
+          nightDensityScale: requireNumber(
+            fog.nightDensityScale ?? 0.35,
+            'rendering.lighting.fog.nightDensityScale'
+          ),
+          minBrightness: requireNumber(
+            fog.minBrightness ?? 0.03,
+            'rendering.lighting.fog.minBrightness'
+          ),
+          maxBrightness: requireNumber(
+            fog.maxBrightness ?? 0.78,
+            'rendering.lighting.fog.maxBrightness'
+          ),
+          moonBrightnessScale: requireNumber(
+            fog.moonBrightnessScale ?? 0.10,
+            'rendering.lighting.fog.moonBrightnessScale'
+          ),
+          sunTintStrength: requireNumber(
+            fog.sunTintStrength ?? 0.18,
+            'rendering.lighting.fog.sunTintStrength'
           )
         }
       },

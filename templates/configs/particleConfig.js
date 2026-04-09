@@ -50,6 +50,7 @@ export const PARTICLE_CONFIG = {
         colorMid:   [1.00, 0.45, 0.08, 0.7],
         colorEnd:   [0.50, 0.08, 0.00, 0.0],
         emissive: 1.6,   // Keep a visible glow without blowing out the bloom chain
+        bloomWeight: 1.0,
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 0.55,
     },
@@ -77,6 +78,7 @@ export const PARTICLE_CONFIG = {
         colorMid:   [1.00, 0.40, 0.05, 0.6],
         colorEnd:   [0.35, 0.02, 0.00, 0.0],
         emissive: 1.35,  // Softer HDR lift so bloom stays close to the flame core
+        bloomWeight: 1.0,
         flags: { stretchAlongVel: true, rotate: false },
         spawnWeight: 0.40,
     },
@@ -132,6 +134,7 @@ export const PARTICLE_CONFIG = {
         colorMid:   [1.00, 0.35, 0.02, 0.7],
         colorEnd:   [0.30, 0.02, 0.00, 0.0],
         emissive: 1.15,  // Embers should sparkle, not flood the frame
+        bloomWeight: 0.75,
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 0.05,
     },
@@ -188,6 +191,7 @@ export const PARTICLE_CONFIG = {
         colorMid:   [0.65, 0.80, 0.30, 0.7],
         colorEnd:   [0.50, 0.60, 0.20, 0.0],
         emissive: 2.5,   // Keep the swarm readable without giant green halos
+        bloomWeight: 1.0,
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 1.0,
     },

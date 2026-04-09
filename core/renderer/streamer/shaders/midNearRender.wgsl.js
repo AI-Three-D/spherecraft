@@ -171,12 +171,11 @@ fn main(in: FragInput) -> @location(0) vec4<f32> {
       + fragUniforms.lightColor   * fragUniforms.lightIntensity   * NdotL  * baseAO
     );
     // Prevent bright "glow trunk" look in very low-light/night conditions.
-    let envLight = clamp(fragUniforms.ambientIntensity * 0.62 + fragUniforms.lightIntensity * 0.88, 0.20, 1.0);
+    let envLight = clamp(fragUniforms.ambientIntensity * 0.45 + fragUniforms.lightIntensity * 0.55, 0.03, 1.0);
 
     var color = lit * envLight;
     let fog = 1.0 - exp(-in.vDist * fragUniforms.fogDensity);
     color = mix(color, fragUniforms.fogColor, clamp(fog, 0.0, 1.0));
-    color = color / (color + vec3<f32>(1.0));
 
     return vec4<f32>(color, 1.0);
 }
@@ -719,7 +718,6 @@ ${texSample}
     var color = lit * CANOPY_BRIGHTNESS;
     let fog = 1.0 - exp(-in.vDist * fragUniforms.fogDensity);
     color = mix(color, fragUniforms.fogColor, clamp(fog, 0.0, 1.0));
-    color = color / (color + vec3<f32>(1.0));
 
     return vec4<f32>(color, 1.0);
 }
@@ -1046,7 +1044,6 @@ ${alphaBlock}
 
     let fog = 1.0 - exp(-in.vDist * fragUniforms.fogDensity);
     color = mix(color, fragUniforms.fogColor, clamp(fog, 0.0, 1.0));
-    color = color / (color + vec3<f32>(1.0));
 
     return vec4<f32>(color, 1.0);
 }

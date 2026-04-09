@@ -55,11 +55,11 @@ struct ParticleTypeDef {
     velXMax:       f32,
     velYMin:       f32,
     velYMax:       f32,
-    // vec4 #7 — initial velocity range (Z axis) + emissive multiplier
+    // vec4 #7 — initial velocity range (Z axis) + emissive/bloom controls
     velZMin:       f32,
     velZMax:       f32,
     emissive:      f32,   // HDR multiplier applied to color.rgb (1.0 = LDR)
-    _pad7b:        f32,
+    bloomWeight:   f32,   // authored weight for the emissive-only bloom pass
 };
 
 // ─────────────────────────────────────────────────────────────────

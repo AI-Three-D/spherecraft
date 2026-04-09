@@ -33,6 +33,11 @@ const DEFAULT_SHADOW_TUNING = Object.freeze({
     shadowStrength: 1.0,
 });
 
+const DEFAULT_BLOOM_TUNING = Object.freeze({
+    enabled: true,
+    bloomWeight: 1.0,
+});
+
 function finiteOr(value, fallback) {
     return Number.isFinite(value) ? value : fallback;
 }
@@ -57,6 +62,10 @@ export class SkinnedMeshRenderer {
         this._pipelineNoCull = null;
         this._pipelineSkinCull = null;
         this._pipelineSkinNoCull = null;
+        this._pipelineBloomCull = null;
+        this._pipelineBloomNoCull = null;
+        this._pipelineBloomSkinCull = null;
+        this._pipelineBloomSkinNoCull = null;
         this._shadowPipelineCull = null;
         this._shadowPipelineNoCull = null;
         this._shadowPipelineSkinCull = null;
@@ -130,6 +139,7 @@ export class SkinnedMeshRenderer {
             renderOptions: options || {},
             materialTuning: this._resolveMaterialTuning(options),
             shadowTuning: this._resolveShadowTuning(options),
+            bloomTuning: this._resolveBloomTuning(options),
         };
         await this._buildDraws(asset, inst);
         this._instances.push(inst);
@@ -189,6 +199,49 @@ export class SkinnedMeshRenderer {
                 pass.setBindGroup(1, d.matBindGroup);
                 pass.setBindGroup(2, d.skinBindGroup || this._dummyJointBG);
                 pass.setBindGroup(3, this._lightingBindGroup);
+
+                pass.setVertexBuffer(0, d.posBuf);
+                pass.setVertexBuffer(1, d.nrmBuf);
+                pass.setVertexBuffer(2, d.uvBuf);
+                if (d.isSkinned) {
+                    pass.setVertexBuffer(3, d.jointBuf);
+                    pass.setVertexBuffer(4, d.weightBuf);
+                }
+
+                if (d.idxBuf) {
+                    pass.setIndexBuffer(d.idxBuf, d.idxFmt);
+                    pass.drawIndexed(d.idxCount);
+                } else {
+                    pass.draw(d.vtxCount);
+                }
+            }
+        }
+    }
+
+    renderBloom(camera, viewMatrix, projectionMatrix) {
+        if (!this._ready || !this._instances.length) return;
+        const pass = this.backend._renderPassEncoder;
+        if (!pass) return;
+
+        const lighting = this._getLightingState();
+        const camPos = camera?.position;
+        let curPL = null;
+
+        for (const inst of this._instances) {
+            for (const d of inst.draws) {
+                if (!d.hasBloom) continue;
+                if (d.bloomPipeline !== curPL) {
+                    curPL = d.bloomPipeline;
+                    pass.setPipeline(curPL);
+                }
+
+                this._tmpModel.multiplyMatrices(inst.worldMatrix, d.nodeMatrix);
+                this._packUbo(this._tmpModel, viewMatrix, projectionMatrix, lighting, camPos, d);
+                this.device.queue.writeBuffer(d.ubo, 0, this._tmpUbo);
+
+                pass.setBindGroup(0, d.uboBindGroup);
+                pass.setBindGroup(1, d.matBindGroup);
+                pass.setBindGroup(2, d.skinBindGroup || this._dummyJointBG);
 
                 pass.setVertexBuffer(0, d.posBuf);
                 pass.setVertexBuffer(1, d.nrmBuf);
@@ -361,7 +414,8 @@ export class SkinnedMeshRenderer {
                         matBGs.get(mi),
                         skinState,
                         instance.materialTuning,
-                        instance.shadowTuning
+                        instance.shadowTuning,
+                        instance.bloomTuning
                     )
                 );
             }
@@ -402,7 +456,7 @@ export class SkinnedMeshRenderer {
         };
     }
 
-    _makeDraw(prim, nodeMatrix, asset, matInfo, skinState, materialTuning, shadowTuning) {
+    _makeDraw(prim, nodeMatrix, asset, matInfo, skinState, materialTuning, shadowTuning, bloomTuning) {
         const dev = this.device;
 
         const posBuf = this._vbuf(prim.positions);
@@ -462,12 +516,18 @@ export class SkinnedMeshRenderer {
         const pipeline = isSkinned
             ? (ds ? this._pipelineSkinNoCull : this._pipelineSkinCull)
             : (ds ? this._pipelineNoCull : this._pipelineCull);
+        const bloomPipeline = isSkinned
+            ? (ds ? this._pipelineBloomSkinNoCull : this._pipelineBloomSkinCull)
+            : (ds ? this._pipelineBloomNoCull : this._pipelineBloomCull);
         const shadowPipeline = isSkinned
             ? (ds ? this._shadowPipelineSkinNoCull : this._shadowPipelineSkinCull)
             : (ds ? this._shadowPipelineNoCull : this._shadowPipelineCull);
 
         const alphaMode = md?.alphaMode ?? 'OPAQUE';
         const alphaCutoff = alphaMode === 'MASK' ? (md?.alphaCutoff ?? 0.5) : 0;
+        const emissiveFactor = md?.emissiveFactor ?? [0, 0, 0];
+        const hasEmissiveFactor = emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0;
+        const hasBloom = bloomTuning.bloomWeight > 0 && (matInfo.hasEmis || hasEmissiveFactor);
 
         return {
             posBuf, nrmBuf, uvBuf, jointBuf, weightBuf,
@@ -477,6 +537,7 @@ export class SkinnedMeshRenderer {
             shadowUbo, shadowUboBindGroup,
             matBindGroup: matInfo.bindGroup,
             pipeline,
+            bloomPipeline,
             shadowPipeline,
             isSkinned,
             skinBindGroup: isSkinned ? skinState.bindGroup : null,
@@ -486,8 +547,9 @@ export class SkinnedMeshRenderer {
             roughness: md?.roughnessFactor ?? 1,
             normalScale: (md?.normalScale ?? 1) * materialTuning.normalScaleMultiplier,
             occStrength: md?.occlusionStrength ?? 1,
-            emissive: md?.emissiveFactor ?? [0, 0, 0],
+            emissive: emissiveFactor,
             alphaCutoff,
+            hasBloom,
             hasBase: matInfo.hasBase,
             hasNormal: matInfo.hasNormal,
             hasMR: matInfo.hasMR,
@@ -506,6 +568,7 @@ export class SkinnedMeshRenderer {
             localLightStrength: materialTuning.localLightStrength,
             castShadow: shadowTuning.castCascaded,
             shadowStrength: shadowTuning.receiveCascaded ? shadowTuning.shadowStrength : 0,
+            bloomWeight: bloomTuning.bloomWeight,
         };
     }
 
@@ -704,7 +767,7 @@ export class SkinnedMeshRenderer {
         f[88] = d.localLightStrength;
         f[89] = d.decodeEmissiveSRGB;
         f[90] = d.shadowStrength;
-        f[91] = 0;
+        f[91] = d.bloomWeight;
     }
 
     _packShadowUbo(model) {
@@ -894,6 +957,26 @@ export class SkinnedMeshRenderer {
             castCascaded: boolOr(source.castCascaded, DEFAULT_SHADOW_TUNING.castCascaded),
             receiveCascaded: boolOr(source.receiveCascaded, DEFAULT_SHADOW_TUNING.receiveCascaded),
             shadowStrength: clampNumber(source.shadowStrength, DEFAULT_SHADOW_TUNING.shadowStrength, 0, 1),
+        };
+    }
+
+    _resolveBloomTuning(options = {}) {
+        const source =
+            options.bloom ||
+            options.rendering?.bloom ||
+            options.modelDescriptor?.rendering?.bloom ||
+            {};
+
+        const enabled = boolOr(source.enabled, DEFAULT_BLOOM_TUNING.enabled);
+        const bloomWeight = clampNumber(
+            source.bloomWeight ?? source.weight,
+            DEFAULT_BLOOM_TUNING.bloomWeight,
+            0,
+            16
+        );
+
+        return {
+            bloomWeight: enabled ? bloomWeight : 0,
         };
     }
 
@@ -1335,6 +1418,34 @@ fn fs(i: VSOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     color += emis;
 
     return vec4<f32>(color, albedo.a);
+}
+
+@fragment
+fn fs_bloom(i: VSOut) -> @location(0) vec4<f32> {
+    var alpha = u.baseColor.a;
+    if (u.texFlags.x > 0.5) {
+        let tc = textureSample(tBase, samp, i.uv);
+        alpha = alpha * tc.a;
+    }
+
+    let cutoff = u.texFlags2.z;
+    if (cutoff > 0.0) {
+        let fw = fwidth(alpha) * 0.5;
+        if (alpha < cutoff - fw) { discard; }
+    }
+
+    var emis = u.emissiveNormalScale.xyz;
+    if (u.texFlags.w > 0.5) {
+        let eTex = textureSample(tEmis, samp, i.uv).rgb;
+        emis *= decodeSRGB(eTex, u.materialTuning2.y);
+    }
+
+    let bloom = emis * u.materialTuning2.w;
+    if (max(max(bloom.r, bloom.g), bloom.b) <= 1e-5) {
+        discard;
+    }
+
+    return vec4<f32>(bloom, alpha);
 }`;
 
         const shadowCode = /* wgsl */`
@@ -1490,6 +1601,9 @@ fn fs() {}
         const pLayout = dev.createPipelineLayout({
             bindGroupLayouts: [this._uboBGL, this._texBGL, this._jointBGL, this._lightingBGL],
         });
+        const bloomLayout = dev.createPipelineLayout({
+            bindGroupLayouts: [this._uboBGL, this._texBGL, this._jointBGL],
+        });
         const shadowLayout = dev.createPipelineLayout({
             bindGroupLayouts: [this._shadowDrawBGL, this._shadowCascadeBGL, this._jointBGL],
         });
@@ -1515,6 +1629,11 @@ fn fs() {}
             depthWriteEnabled: true,
             depthCompare: 'less',
         };
+        const bloomDepth = {
+            format: 'depth24plus',
+            depthWriteEnabled: false,
+            depthCompare: 'less-equal',
+        };
         const shadowDepth = {
             format: 'depth32float',
             depthWriteEnabled: true,
@@ -1529,6 +1648,18 @@ fn fs() {}
             primitive: { topology: 'triangle-list', cullMode: cull, frontFace: 'ccw' },
             depthStencil: depth,
         });
+        const mkBloom = (ep, bufs, cull) => dev.createRenderPipeline({
+            label: `SMR-Bloom-${ep}-${cull}`,
+            layout: bloomLayout,
+            vertex: { module, entryPoint: ep, buffers: bufs },
+            fragment: {
+                module,
+                entryPoint: 'fs_bloom',
+                targets: [{ format: this.backend.sceneFormat || this.backend.format }],
+            },
+            primitive: { topology: 'triangle-list', cullMode: cull, frontFace: 'ccw' },
+            depthStencil: bloomDepth,
+        });
         const mkShadow = (ep, bufs, cull) => dev.createRenderPipeline({
             label: `SMR-Shadow-${ep}-${cull}`,
             layout: shadowLayout,
@@ -1542,6 +1673,10 @@ fn fs() {}
         this._pipelineNoCull = mk('vs_static', staticBufs, 'none');
         this._pipelineSkinCull = mk('vs_skinned', skinnedBufs, 'back');
         this._pipelineSkinNoCull = mk('vs_skinned', skinnedBufs, 'none');
+        this._pipelineBloomCull = mkBloom('vs_static', staticBufs, 'back');
+        this._pipelineBloomNoCull = mkBloom('vs_static', staticBufs, 'none');
+        this._pipelineBloomSkinCull = mkBloom('vs_skinned', skinnedBufs, 'back');
+        this._pipelineBloomSkinNoCull = mkBloom('vs_skinned', skinnedBufs, 'none');
 
         this._shadowPipelineCull = mkShadow('vs_static', staticBufs, 'back');
         this._shadowPipelineNoCull = mkShadow('vs_static', staticBufs, 'none');

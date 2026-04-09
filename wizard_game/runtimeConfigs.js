@@ -91,11 +91,21 @@ export function createEngineConfig() {
         ambient: {
           // Global ambient tuning for all terrain/asset materials.
           intensityMultiplier: 1.0,
-          minIntensity: 0.95,
-          maxIntensity: 1.6,
-          sunContributionScale: 0.2,
-          moonContributionScale: 0.35,
+          minIntensity: 0.015,
+          maxIntensity: 0.26,
+          sunContributionScale: 0.18,
+          moonContributionScale: 0.035,
           moonNormalizationIntensity: 0.15
+        },
+        fog: {
+          densityMultiplier: 0.55,
+          maxBaseDensity: 0.0007,
+          dayDensityScale: 1.0,
+          nightDensityScale: 0.35,
+          minBrightness: 0.03,
+          maxBrightness: 0.78,
+          moonBrightnessScale: 0.10,
+          sunTintStrength: 0.18
         }
       },
       distortion: {

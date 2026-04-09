@@ -485,8 +485,8 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const tileCategories = options.tileCategories;
     const normalTextureFilterable = options.normalTextureFilterable === true;
 
-    const enableTerrainAO = options.enableTerrainAO !== false;  
-    const enableGroundField = options.enableGroundField === true;
+    const enableTerrainAO = false;//options.enableTerrainAO !== false;  
+    const enableGroundField =false;//options.enableGroundField === true;
     const maxLightIndices = options.maxLightIndices || 8192;
     const useArrayTextures = options.useArrayTextures === true;
     const aerialPerspectiveCode = getAerialPerspectiveWGSL();
