@@ -334,6 +334,8 @@ export class LeafStreamer {
             birchL2TexCount: this._leafAlbedoTexCount,
             birchL3TexBase: this._leafAlbedoTexBase,
             birchL3TexCount: this._leafAlbedoTexCount,
+            birchNormalTexBase: this._leafNormalTexBase,
+            birchNormalTexCount: this._leafNormalTexCount,
             // Feature gating:
             // veinLODThreshold=0  → veins only at band 0 (closest)
             // lightLODThreshold=1 → dir lighting at bands 0 and 1

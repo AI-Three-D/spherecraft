@@ -157,6 +157,8 @@ export function buildLeafFragmentShader(config = {}) {
     const B_L2_TEX_COUNT = config.birchL2TexCount ?? BIRCH_VARIANTS;
     const B_L3_TEX_BASE  = config.birchL3TexBase  ?? 0;
     const B_L3_TEX_COUNT = config.birchL3TexCount ?? BIRCH_VARIANTS;
+    const BIRCH_NORMAL_TEX_BASE  = config.birchNormalTexBase  ?? 0;
+    const BIRCH_NORMAL_TEX_COUNT = config.birchNormalTexCount ?? BIRCH_VARIANTS;
     const CONNECTOR_STRENGTH = config.connectorStrength ?? 0.32;
     const ORIENTATION_DEBUG  = config.enableOrientationDebug === true;
 
@@ -179,12 +181,12 @@ export function buildLeafFragmentShader(config = {}) {
 
     const detailAlbedoBlock = hasAlbedoTex ? `
         if (applyDetail) {
-            let variantIdx = min(u32(input.vCluster * f32(BIRCH_VARIANTS)), BIRCH_VARIANTS - 1u);
-            let albedoSample = textureSampleLevel(leafAlbedoTex, leafAlbedoSamp, input.vCardUV, i32(variantIdx), 0.0);
+            let albedoSample = textureSampleLevel(leafAlbedoTex, leafAlbedoSamp, input.vCardUV, i32(layer), 0.0);
             albedo = albedoSample.rgb;
             transmission = albedoSample.a;
 ${hasNormalTex ? `
-            let normalSample = textureSampleLevel(leafNormalTex, leafAlbedoSamp, input.vCardUV, i32(variantIdx), 0.0);
+            let normalLayer = BIRCH_NORMAL_TEX_BASE + min(birchVariantIdx, BIRCH_NORMAL_TEX_COUNT - 1u);
+            let normalSample = textureSampleLevel(leafNormalTex, leafAlbedoSamp, input.vCardUV, i32(normalLayer), 0.0);
             let tsNormal = normalSample.xyz * 2.0 - vec3<f32>(1.0);
             bumpNormal = normalize(
                 tangent * tsNormal.x +
@@ -241,6 +243,8 @@ const BIRCH_L2_TEX_BASE:  u32 = ${B_L2_TEX_BASE}u;
 const BIRCH_L2_TEX_COUNT: u32 = ${B_L2_TEX_COUNT}u;
 const BIRCH_L3_TEX_BASE:  u32 = ${B_L3_TEX_BASE}u;
 const BIRCH_L3_TEX_COUNT: u32 = ${B_L3_TEX_COUNT}u;
+const BIRCH_NORMAL_TEX_BASE:  u32 = ${BIRCH_NORMAL_TEX_BASE}u;
+const BIRCH_NORMAL_TEX_COUNT: u32 = ${BIRCH_NORMAL_TEX_COUNT}u;
 const CONNECTOR_STRENGTH: f32 = ${Number(CONNECTOR_STRENGTH).toFixed(3)};
 const ORIENTATION_DEBUG:  bool = ${ORIENTATION_DEBUG ? 'true' : 'false'};
 
@@ -370,7 +374,7 @@ fn computeLeafLighting(
                  * (front * 0.70 + back * sssMask * 0.35 * sssColor);
 
     // ── Ambient ───────────────────────────────────────────────────────
-    let ambient  = ambColor * ambInt * 0.78;
+    let ambient  = ambColor * max(ambInt, 0.035) * 0.92;
 
     // ── Specular (waxy cuticle, very tight highlight) ─────────────────
     // The cuticle on birch leaves produces a subtle specular sheen.
@@ -395,6 +399,7 @@ fn main(input: FragInput) -> @location(0) vec4<f32> {
 
     // ── Mask layer selection ──────────────────────────────────────────
     var layer: u32;
+    var birchVariantIdx: u32 = 0u;
     if (isConifer) {
         let idx = min(u32(input.vCluster * f32(SPRUCE_VARIANTS)), SPRUCE_VARIANTS - 1u);
         layer = SPRUCE_LAYER_OFFSET + idx;
@@ -407,6 +412,7 @@ fn main(input: FragInput) -> @location(0) vec4<f32> {
             default: { texBase = BIRCH_L3_TEX_BASE; texCount = BIRCH_L3_TEX_COUNT; }
         }
         let idx = min(u32(input.vCluster * f32(texCount)), texCount - 1u);
+        birchVariantIdx = idx;
         layer = texBase + idx;
     }
 
@@ -476,7 +482,7 @@ ${detailAlbedoBlock}
         let back    = max(-NdotL, 0.0);
         let diffuse = fragUniforms.lightColor * fragUniforms.lightIntensity
                     * (front * 0.60 + back * 0.30);
-        let ambient = fragUniforms.ambientColor * fragUniforms.ambientIntensity * 0.70;
+        let ambient = fragUniforms.ambientColor * max(fragUniforms.ambientIntensity, 0.035) * 0.84;
         color = albedo * (ambient + diffuse);
         color += albedo * fragUniforms.lightColor * (back * 0.12);
     }
