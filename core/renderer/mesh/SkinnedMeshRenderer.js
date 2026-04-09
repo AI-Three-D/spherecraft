@@ -21,7 +21,7 @@ const DEFAULT_MATERIAL_TUNING = Object.freeze({
     roughnessMin: 0.65,
     roughnessMax: 1.0,
     specularStrength: 0.16,
-    ambientStrength: 0.5,
+    ambientStrength: 0.35,
     sunStrength: 1.0,
     localLightStrength: 1.0,
     normalScaleMultiplier: 0.8,
@@ -771,9 +771,9 @@ export class SkinnedMeshRenderer {
         f[90] = d.shadowStrength;
         f[91] = d.bloomWeight;
         f[92] = d.bloomSourceScale;
-        f[93] = 0;
-        f[94] = 0;
-        f[95] = 0;
+        f[93] = lighting.planetCenter.x;
+        f[94] = lighting.planetCenter.y;
+        f[95] = lighting.planetCenter.z;
     }
 
     _packShadowUbo(model) {
@@ -926,6 +926,7 @@ export class SkinnedMeshRenderer {
             sunIntensity: finiteOr(uniforms?.sunLightIntensity?.value, 1.0),
             ambientColor,
             ambientIntensity: finiteOr(uniforms?.ambientLightIntensity?.value, 0.8),
+            planetCenter: uniforms?.planetCenter?.value || { x: 0, y: 0, z: 0 },
         };
     }
 
@@ -1346,6 +1347,18 @@ fn computeShadow(wp: vec3<f32>, vp: vec3<f32>, n: vec3<f32>) -> f32 {
     return mix(1.0, raw, u.materialTuning2.z);
 }
 
+fn computeLocalDayVisibility(wp: vec3<f32>, sunDir: vec3<f32>) -> f32 {
+    let rel = wp - u.materialTuning3.yzw;
+    let lenSq = dot(rel, rel);
+    if (lenSq < 1e-8) {
+        return 1.0;
+    }
+
+    let localUp = normalize(rel);
+    let sunDotUp = dot(localUp, sunDir);
+    return smoothstep(-0.14, 0.04, sunDotUp);
+}
+
 @fragment
 fn fs(i: VSOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     var albedo = u.baseColor;
@@ -1392,6 +1405,7 @@ fn fs(i: VSOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
     let viewPos = (u.view * vec4<f32>(i.wpos, 1.0)).xyz;
     let V = normalize(u.cameraRoughness.xyz - i.wpos);
     let L = normalize(u.sunMetallic.xyz);
+    let dayVisibility = computeLocalDayVisibility(i.wpos, L);
     let H = normalize(V + L);
     let NdL = max(dot(N, L), 0.0);
     let NdV = max(dot(N, V), 0.001);
@@ -1413,12 +1427,13 @@ fn fs(i: VSOut, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
 
     let shadowF = computeShadow(i.wpos, viewPos, N);
     let sunRadiance = u.sunColorIntensity.rgb * u.sunColorIntensity.w * u.materialTuning1.w;
-    let direct = (diffuse + spec) * NdL * shadowF * sunRadiance;
+    let direct = (diffuse + spec) * NdL * shadowF * sunRadiance * dayVisibility;
 
     let hemi = mix(0.55, 1.0, clamp(N.y * 0.5 + 0.5, 0.0, 1.0));
+    let ambientNightScale = mix(0.3, 1.0, dayVisibility);
     let ambient = albedo.rgb * ao
         * u.ambientColorIntensity.rgb
-        * (u.ambientColorIntensity.w * hemi * u.materialTuning1.z);
+        * (u.ambientColorIntensity.w * hemi * u.materialTuning1.z * ambientNightScale);
 
     let localLights = evalClustered(i.wpos, viewPos, N, albedo.rgb) * u.materialTuning2.x;
 
