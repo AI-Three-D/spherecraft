@@ -853,12 +853,16 @@ updateLighting(starSystem) {
             let hazeRendered = false;
 
             // Render heat haze distortion sources before postprocessing.
-            if (this.heatHazeEmitter && dp && this.heatHazeEmitter.hasSources()) {
+            if (this.heatHazeEmitter && dp && this.heatHazeEmitter.hasSources(this.camera.position)) {
                 this.backend._endCurrentRenderPass();
                 this.backend._ensureCommandEncoder();
                 const enc = this.backend._commandEncoder;
 
-                this.heatHazeEmitter.update(this._lastDeltaTime || 0, this.planetConfig?.origin || null);
+                this.heatHazeEmitter.update(
+                    this._lastDeltaTime || 0,
+                    this.planetConfig?.origin || null,
+                    this.camera.position
+                );
 
                 if (this.heatHazeEmitter.hasRenderableParticles()) {
                     dp.clearDistortionMap(enc);

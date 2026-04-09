@@ -1,0 +1,55 @@
+{
+  "_comment": "Terrain generation parameters for wizard_game world. All params here require world regeneration when changed.",
+  "seed": 12345,
+  "maxTerrainHeight": 5000,
+  "noiseProfile": {
+    "baseBias":      1.0,
+    "mountainBias":  1.0,
+    "hillBias":      1.0,
+    "canyonBias":    1.0,
+    "rareBoost":     1.0,
+    "warpStrength":  1.0,
+    "ridgeSharpness":1.0,
+    "microGain":     1.0
+  },
+  "continents": {
+    "enabled":           true,
+    "count":             4,
+    "averageSize":       0.25,
+    "coastalComplexity": 0.8
+  },
+  "tectonics": {
+    "enabled":              true,
+    "plateCount":           8,
+    "mountainBuildingRate": 1.2,
+    "riftValleyDepth":      0.7
+  },
+  "volcanism": {
+    "enabled":               true,
+    "plateBoundaryActivity": 0.7,
+    "hotspotDensity":        0.00002,
+    "averageHeight":         1200
+  },
+  "erosion": {
+    "enabled":       true,
+    "globalRate":    0.6,
+    "hydraulicRate": 0.7,
+    "thermalRate":   0.4
+  },
+  "impacts": {
+    "enabled":        true,
+    "craterDensity":  0.0002
+  },
+  "water": {
+    "hasOceans":        true,
+    "oceanLevel":       -0.01,
+    "averageOceanDepth":2000,
+    "visualDepthRange": 240
+  },
+  "surface": {
+    "rockCoverageMin": 0.02,
+    "rockCoverageMax": 0.85,
+    "rockSlopeStart":  0.35,
+    "rockSlopeFull":   0.75
+  }
+}

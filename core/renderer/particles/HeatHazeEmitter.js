@@ -138,15 +138,18 @@ export class HeatHazeEmitter {
         return true;
     }
 
-    hasSources() {
-        return this._sources.some((source) => source.enabled !== false);
+    hasSources(cameraPosition = null) {
+        if (!cameraPosition) {
+            return this._sources.some((source) => source.enabled !== false);
+        }
+        return this._sources.some((source) => source.enabled !== false && this._isSourceInRange(source, cameraPosition));
     }
 
     hasRenderableParticles() {
         return this._particles.length > 0;
     }
 
-    update(deltaTime, planetOrigin = null) {
+    update(deltaTime, planetOrigin = null, cameraPosition = null) {
         const dt = Math.min(deltaTime, 0.05);
         this._time += dt;
         this._syncSources(planetOrigin);
@@ -161,6 +164,7 @@ export class HeatHazeEmitter {
 
         for (const source of this._sources) {
             if (source.enabled === false) continue;
+            if (cameraPosition && !this._isSourceInRange(source, cameraPosition)) continue;
 
             const localUp = source.localUp || this._computeLocalUp(source.position, planetOrigin);
             const tangent = this._computeTangent(localUp);
@@ -384,6 +388,9 @@ fn fs_haze(in: VsOut) -> @location(0) vec2<f32> {
             id: descriptor.id ?? `heat-haze-${this._nextSourceId++}`,
             type: 'heatHaze',
             enabled: descriptor.enabled !== false,
+            distanceCutoff: Number.isFinite(descriptor.distanceCutoff)
+                ? Math.max(0, Number(descriptor.distanceCutoff))
+                : Infinity,
             position: { ...position },
             getPosition: typeof descriptor.getPosition === 'function'
                 ? descriptor.getPosition
@@ -458,6 +465,16 @@ fn fs_haze(in: VsOut) -> @location(0) vec2<f32> {
             y: a.z * b.x - a.x * b.z,
             z: a.x * b.y - a.y * b.x,
         };
+    }
+
+    _isSourceInRange(source, cameraPosition) {
+        if (!Number.isFinite(source?.distanceCutoff)) return true;
+        const camera = this._readVector3(cameraPosition);
+        if (!camera) return true;
+        const dx = source.position.x - camera.x;
+        const dy = source.position.y - camera.y;
+        const dz = source.position.z - camera.z;
+        return (dx * dx + dy * dy + dz * dz) <= source.distanceCutoff * source.distanceCutoff;
     }
 
     dispose() {

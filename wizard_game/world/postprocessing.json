@@ -1,0 +1,10 @@
+{
+  "_comment": "Post-processing parameters. All settings here update in real-time (no regeneration needed).",
+  "exposure": 1.0,
+  "bloom": {
+    "threshold":   2.2,
+    "knee":        0.25,
+    "intensity":   0.06,
+    "blendFactor": 0.35
+  }
+}

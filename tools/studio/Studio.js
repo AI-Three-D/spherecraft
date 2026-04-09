@@ -46,8 +46,13 @@ const TABS = [
  */
 
 // ── Studio ────────────────────────────────────────────────────────────────
-class Studio {
-    constructor() {
+export class Studio {
+    /**
+     * @param {Object} [options]
+     * @param {Object} [options.viewOverrides]  Map of tab id → View class, e.g. { world: WorldEditorView }
+     */
+    constructor(options = {}) {
+        this._viewOverrides = options.viewOverrides ?? {};
         /** @type {Map<string, StudioView>} */
         this._views = new Map();
         /** @type {StudioView|null} */
@@ -124,7 +129,8 @@ class Studio {
 
     _instantiateViews() {
         for (const tab of TABS) {
-            this._views.set(tab.id, new tab.View(tab.id));
+            const ViewClass = this._viewOverrides[tab.id] ?? tab.View;
+            this._views.set(tab.id, new ViewClass(tab.id));
         }
     }
 
@@ -222,10 +228,15 @@ class Studio {
     }
 }
 
-// ── Entry point ─────────────────────────────────────────────────────────────
-
-const studio = new Studio();
-studio.start().catch(console.error);
-
-// Expose for console debugging
-window._studio = studio;
+// ── Convenience factory ──────────────────────────────────────────────────────
+/**
+ * Create and start a Studio instance.
+ * @param {Object} [options]  Same options as the Studio constructor.
+ * @returns {Studio}
+ */
+export function startStudio(options = {}) {
+    const studio = new Studio(options);
+    studio.start().catch(console.error);
+    window._studio = studio;
+    return studio;
+}

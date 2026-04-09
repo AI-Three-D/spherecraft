@@ -686,6 +686,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                     type: 'heatHaze',
                     position: { x: spawnX, y: spawnY, z: spawnZ },
                     getPosition: () => campfireEmitter?.position,
+                    distanceCutoff: 7.0,
                 });
 
                 // Spawn a firefly swarm near the campfire (offset to the side).
