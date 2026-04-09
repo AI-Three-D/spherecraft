@@ -1010,6 +1010,11 @@ updateLighting(starSystem) {
                 this.gpuShadowRenderer.updateCascadeParams(this.camera, encoder);
                 this.gpuShadowRenderer.cullAndBuildIndirect(encoder);
                 this.gpuShadowRenderer.renderShadowPasses(encoder);
+                // Actor shadows must be written here so terrain/assets read them correctly
+                if (this.skinnedMeshRenderer?.isReady()) {
+                    this.skinnedMeshRenderer.update(this._lastDeltaTime);
+                    this.skinnedMeshRenderer.renderShadowPasses(encoder, this.gpuShadowRenderer);
+                }
             }
             
             this.quadtreeTileManager.update(this.camera, encoder);
@@ -1056,13 +1061,6 @@ updateLighting(starSystem) {
 
                 
                 if (this.skinnedMeshRenderer?.isReady()) {
-                    this.skinnedMeshRenderer.update(this._lastDeltaTime);
-                    if (this.gpuShadowRenderer?.isReady) {
-                        this.backend.endRenderPassForCompute();
-                        const encoder = this.backend.getCommandEncoder();
-                        this.skinnedMeshRenderer.renderShadowPasses(encoder, this.gpuShadowRenderer);
-                        this.backend.resumeRenderPass();
-                    }
                     this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
                 }
 
