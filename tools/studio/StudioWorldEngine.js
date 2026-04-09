@@ -194,25 +194,43 @@ export class StudioWorldEngine {
         });
         this.camera.setPlanetCenter({ x: origin.x, y: origin.y, z: origin.z });
 
-        // Place camera at spawn — explicit spawnConfig wins, otherwise use
-        // gameDataConfig.spawn (same defaults as the wizard game).
-        if (this._spawnConfig) {
-            const { position, target } = this._spawnConfig;
-            this.camera.setPosition(position.x, position.y, position.z);
-            if (target) {
-                this.camera.lookAt(target.x, target.y, target.z);
-            } else {
-                // Look horizontally toward +Z if no target given
-                this.camera.lookAt(position.x, position.y, position.z + 100);
-            }
+        // Place camera at spawn — explicit spawnConfig wins, otherwise mirror
+        // the wizard game's _computeSpawn() logic exactly.
+        const spawnPos = this._spawnConfig
+            ? this._spawnConfig.position
+            : this._computeSpawn(gameDataConfig.spawn, origin, radius);
+
+        this.camera.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
+
+        // Target: use explicit target or look toward the planet's horizon (+Z tangent)
+        if (this._spawnConfig?.target) {
+            this.camera.lookAt(
+                this._spawnConfig.target.x,
+                this._spawnConfig.target.y,
+                this._spawnConfig.target.z,
+            );
         } else {
-            const sp = gameDataConfig.spawn;
-            const sx = origin.x + (sp?.defaultX ?? 0);
-            const sy = origin.y + radius + (sp?.height ?? 800);
-            const sz = origin.z + (sp?.defaultZ ?? 0);
-            this.camera.setPosition(sx, sy, sz);
-            // Look toward the horizon (same horizontal plane, offset in +Z)
-            this.camera.lookAt(sx, sy, sz + 100);
+            // Build a tangent vector so the camera looks at the terrain, not into space
+            const toSurface = {
+                x: spawnPos.x - origin.x,
+                y: spawnPos.y - origin.y,
+                z: spawnPos.z - origin.z,
+            };
+            const len = Math.sqrt(toSurface.x**2 + toSurface.y**2 + toSurface.z**2) || 1;
+            const up = { x: toSurface.x/len, y: toSurface.y/len, z: toSurface.z/len };
+            // Pick a tangent direction perpendicular to up
+            const ref = Math.abs(up.y) < 0.9 ? { x:0, y:1, z:0 } : { x:1, y:0, z:0 };
+            const tangent = {
+                x: up.y*ref.z - up.z*ref.y,
+                y: up.z*ref.x - up.x*ref.z,
+                z: up.x*ref.y - up.y*ref.x,
+            };
+            const tlen = Math.sqrt(tangent.x**2 + tangent.y**2 + tangent.z**2) || 1;
+            this.camera.lookAt(
+                spawnPos.x + tangent.x/tlen * 200,
+                spawnPos.y + tangent.y/tlen * 200,
+                spawnPos.z + tangent.z/tlen * 200,
+            );
         }
 
         // Mirror initial position into _camPos for altitudeZoneManager
@@ -335,6 +353,43 @@ export class StudioWorldEngine {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Mirror of GameEngine._computeSpawn() — places the camera on the sun-facing
+     * side of the planet when spawnOnSunSide is true.
+     */
+    _computeSpawn(spawnConfig, origin, radius) {
+        const sp     = spawnConfig ?? {};
+        const height = sp.height  ?? 800;
+
+        if (
+            sp.spawnOnSunSide &&
+            this.starSystem?.currentBody &&
+            this.starSystem?.primaryStar
+        ) {
+            this.starSystem.update(0);
+            const starInfo = this.starSystem.currentBody.getStarDirection(
+                this.starSystem.primaryStar,
+                origin,
+            );
+            const sunDir = starInfo?.direction;
+            if (sunDir) {
+                const r = radius + height;
+                return {
+                    x: origin.x + sunDir.x * r,
+                    y: origin.y + sunDir.y * r,
+                    z: origin.z + sunDir.z * r,
+                };
+            }
+        }
+
+        // Fallback: same as gameEngine fallback
+        return {
+            x: origin.x + (sp.defaultX ?? 0),
+            y: origin.y + radius + height,
+            z: origin.z + (sp.defaultZ ?? 0),
+        };
+    }
 
     _updateCanvasSize() {
         const dpr = window.devicePixelRatio || 1;

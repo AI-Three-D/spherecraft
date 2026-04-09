@@ -25,6 +25,7 @@
   },
   "spawn": {
     "height":       800,
+    "spawnOnSunSide": true,
     "defaultX":     0,
     "defaultY":     800,
     "defaultZ":     800
