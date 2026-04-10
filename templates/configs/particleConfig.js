@@ -257,6 +257,6 @@ export const PARTICLE_EMITTER_PRESETS = {
 
 // Global particle-system caps. Chosen conservatively for first bring-up.
 export const PARTICLE_GLOBALS = {
-    maxParticles: 4096,
+    maxParticles: 2048,
     workgroupSize: 64,
 };

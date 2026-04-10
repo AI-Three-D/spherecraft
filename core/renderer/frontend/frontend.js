@@ -955,8 +955,8 @@ updateLighting(starSystem) {
                 geometries: this.quadtreeTerrainRenderer.geometries,
                 planetConfig: this.planetConfig,
                 uniformManager: this.uniformManager,
-                cascadeSplits: [50, 150, 400],
-                shadowMapSizes:  [2048, 2048, 1024],
+                cascadeSplits: [40, 110, 260],
+                shadowMapSizes:  [1536, 1024, 512],
                 shadowBias: 0.002,
                 normalBias: 0.5
             });

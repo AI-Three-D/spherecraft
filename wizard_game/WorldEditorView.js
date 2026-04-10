@@ -82,6 +82,8 @@ const NIGHT_SKY_THEME = { NightSkyGameConfig, getNightSkyDetailPreset, NightSkyD
 // ── WorldEditorView ───────────────────────────────────────────────────────────
 
 export class WorldEditorView extends WorldViewBase {
+    get showWorldSettingsPanel() { return false; }
+    get showWorldConfigSidebar() { return false; }
     get worldDir()     { return './world'; }
     get configLoader() { return new WorldConfigLoader(this.worldDir); }
 
