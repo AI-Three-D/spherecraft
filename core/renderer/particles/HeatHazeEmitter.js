@@ -29,10 +29,10 @@ export class HeatHazeEmitter {
 
         // Tuned to be visible enough for campfire testing without becoming a
         // full-screen smear once the global distortion multiplier is raised.
-        this.amplitude = 0.008;
-        this.frequency = 10.0;
+        this.amplitude = 0.001;
+        this.frequency = 25.0;
         this.speed = 2.0;
-        this.riseSpeed = 0.8;
+        this.riseSpeed = 1.0;
         this.lifetime = 1.35;
         this.spawnRate = 12;
         this.baseWidth = 0.42;
