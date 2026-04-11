@@ -70,6 +70,7 @@ export class ParticleSystem {
         this._fireflyFollowSideOffset = 0.0;
         this._fireflyFollowHeightOffset = 0.0;
         this._fireflyGlow = 1.0;
+        this._fireflyLightIntensity = 0.0;
         this._viewProj = new Matrix4();
         this._loggedEmitterOverflow = false;
     }
@@ -213,11 +214,16 @@ export class ParticleSystem {
         this._fireflyFollowSideOffset = overrides.followSideOffset ?? 2.0;
         this._fireflyFollowHeightOffset = overrides.followHeightOffset ?? 2.0;
 
-        this._fireflyEmitters = swarm.positions.map((position) => {
+        this._fireflyEmitters = swarm.positions.map((position, index) => {
+            const fireflySeed =
+                (((0x9E3779B9 * (index + 1)) ^ (0x85EBCA6B + index * 0xC2B2AE35)) >>> 0) || 1;
             const emitter = new ParticleEmitter({
                 position,
                 preset: 'firefly_swarm',
-                overrides,
+                overrides: {
+                    ...overrides,
+                    baseSeed: fireflySeed,
+                },
             });
             this._registerEmitter(emitter);
             return emitter;
@@ -442,12 +448,11 @@ export class ParticleSystem {
                 this._fireflyLight.position.x = c.x;
                 this._fireflyLight.position.y = c.y;
                 this._fireflyLight.position.z = c.z;
-                let avgGlow = 0;
-                for (let fi = 0; fi < this._fireflySwarm.swarmSize; fi++) {
-                    avgGlow += this._fireflySwarm.getGlowIntensity(fi);
-                }
-                avgGlow /= this._fireflySwarm.swarmSize;
-                this._fireflyLight.intensity = avgGlow * (2.5 * (4.0 / 3.0));
+                const targetIntensity = this._fireflyGlow * (2.5 * (4.0 / 3.0));
+                const lightBlend = 1.0 - Math.exp(-dt * 3.0);
+                this._fireflyLightIntensity +=
+                    (targetIntensity - this._fireflyLightIntensity) * lightBlend;
+                this._fireflyLight.intensity = this._fireflyLightIntensity;
             }
         }
 

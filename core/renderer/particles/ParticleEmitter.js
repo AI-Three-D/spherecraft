@@ -73,9 +73,10 @@ export class ParticleEmitter {
 
         // Deterministic base seed derived from position. The system re-mixes
         // this with frame count when writing the globals UBO.
-        this.baseSeed = ((Math.floor(this.position.x * 13.1) ^
-                           Math.floor(this.position.y * 17.7) ^
-                           Math.floor(this.position.z * 23.3)) >>> 0) || 1;
+        const derivedSeed = ((Math.floor(this.position.x * 13.1) ^
+                               Math.floor(this.position.y * 17.7) ^
+                               Math.floor(this.position.z * 23.3)) >>> 0) || 1;
+        this.baseSeed = (overrides.baseSeed >>> 0) || derivedSeed;
     }
 
     // Pads typeIds/weights to length 4 for the shader.

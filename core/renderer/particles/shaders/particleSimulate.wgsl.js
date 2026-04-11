@@ -163,6 +163,8 @@ fn spawnParticle(slot: u32, claim: u32) -> Particle {
     p.flags       = td.typeFlags | FLAG_ALIVE;
 
     if (typeId == ${fireflyTypeId}u) {
+        let stablePhase = hashToFloat(emitter.rngSeed ^ 0x9E3779B9u) * 6.2831853;
+        p.rotation = stablePhase;
         let fireflyGlow = clamp(globals.fireflyGlow, 0.0, 1.0);
         let visualGlow = pow(fireflyGlow, 4.0);
         let sizeScale = 0.18 + fireflyGlow * (1.8 - 0.18);
