@@ -11,7 +11,7 @@ export const DEFAULT_NPC_SPAWN_CONFIG = Object.freeze({
 
     npcTypes: {
         goblin: {
-            characterDescriptorUrl: '/assets/characters/goblin.char.json',
+            characterDescriptorUrl: '../assets/characters/goblin.char.json',
 
             // Variant scales the descriptor's base scale/radius.
             variants: [
