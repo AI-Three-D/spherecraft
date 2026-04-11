@@ -38,6 +38,7 @@ export const GLOBALS_OFFSETS = {
     maxParticles:                  116,  // u32
     debugMode:                     120,  // u32 — 1 = oversized magenta debug particles
     flatWorld:                     124,  // u32 — 1 = use +Y up instead of planet origin
+    fireflyGlow:                   128,  // f32 — daylight-relative firefly intensity scalar
 };
 
 export class ParticleBuffers {
@@ -294,6 +295,7 @@ export class ParticleBuffers {
         emitterCount = 0,
         debugMode = 0,
         flatWorld = 0,
+        fireflyGlow = 1.0,
     }) {
         const f32 = this._globalsF32;
         const u32 = this._globalsU32;
@@ -323,6 +325,7 @@ export class ParticleBuffers {
         u32[GLOBALS_OFFSETS.maxParticles / 4] = this.maxParticles >>> 0;
         u32[GLOBALS_OFFSETS.debugMode / 4] = debugMode >>> 0;
         u32[GLOBALS_OFFSETS.flatWorld / 4] = flatWorld >>> 0;
+        f32[GLOBALS_OFFSETS.fireflyGlow / 4] = fireflyGlow;
 
         this.device.queue.writeBuffer(this.globalsUBO, 0, f32.buffer);
     }

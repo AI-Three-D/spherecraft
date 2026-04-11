@@ -84,6 +84,9 @@ struct ParticleGlobals {
     maxParticles: u32,
     debugMode:    u32,   // 0 = normal, 1 = oversized magenta blobs
     flatWorld:    u32,   // 0 = spherical, 1 = use +Y as local up
+    // vec4 #4
+    fireflyGlow:  f32,
+    _pad3:        vec3<f32>,
 };
 
 // Per-emitter spawn parameters, uploaded once per frame into a shared storage

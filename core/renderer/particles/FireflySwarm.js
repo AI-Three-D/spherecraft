@@ -11,16 +11,16 @@
 import { Vector3 } from '../../../shared/math/index.js';
 
 const DEFAULT_SWARM_SIZE = 7;
-const BOID_SPEED_MIN = 0.15;
-const BOID_SPEED_MAX = 0.5;
-const BOID_SEPARATION_RADIUS = 1.2;
-const BOID_SEPARATION_WEIGHT = 0.8;
-const BOID_ALIGNMENT_WEIGHT = 0.05;
-const BOID_COHESION_WEIGHT = 0.02;
-const BOID_BOUNDARY_WEIGHT = 0.3;
-const BOID_WANDER_WEIGHT = 0.15;
-const BOID_BOUNDARY_RADIUS = 4.0;
-const BOID_HEIGHT_RANGE = [1.5, 4.0];  // height above spawn (local up)
+const BOID_SPEED_MIN = 0.4;
+const BOID_SPEED_MAX = 1.15;
+const BOID_SEPARATION_RADIUS = 0.82;
+const BOID_SEPARATION_WEIGHT = 0.34;
+const BOID_ALIGNMENT_WEIGHT = 0.08;
+const BOID_COHESION_WEIGHT = 0.12;
+const BOID_BOUNDARY_WEIGHT = 0.34;
+const BOID_WANDER_WEIGHT = 0.24;
+const BOID_BOUNDARY_RADIUS = 3.2;
+const BOID_HEIGHT_RANGE = [1.5, 3.4];  // height above spawn (local up)
 
 export class FireflySwarm {
     constructor({
@@ -51,19 +51,55 @@ export class FireflySwarm {
         this._initBoids();
     }
 
+    _computeLocalUpForPosition(position) {
+        const ux = position.x - this.planetOrigin.x;
+        const uy = position.y - this.planetOrigin.y;
+        const uz = position.z - this.planetOrigin.z;
+        const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
+        if (ulen > 1e-6) {
+            return { x: ux / ulen, y: uy / ulen, z: uz / ulen };
+        }
+        return { x: 0, y: 1, z: 0 };
+    }
+
+    _buildTangentBasis(up) {
+        let rx, ry, rz;
+        if (Math.abs(up.y) < 0.9) {
+            rx = 0; ry = 1; rz = 0;
+        } else {
+            rx = 1; ry = 0; rz = 0;
+        }
+
+        const tx = up.y * rz - up.z * ry;
+        const ty = up.z * rx - up.x * rz;
+        const tz = up.x * ry - up.y * rx;
+        const tlen = Math.sqrt(tx * tx + ty * ty + tz * tz);
+        const t1x = tx / tlen;
+        const t1y = ty / tlen;
+        const t1z = tz / tlen;
+        const t2x = up.y * t1z - up.z * t1y;
+        const t2y = up.z * t1x - up.x * t1z;
+        const t2z = up.x * t1y - up.y * t1x;
+        return {
+            tangentX: { x: t1x, y: t1y, z: t1z },
+            tangentZ: { x: t2x, y: t2y, z: t2z },
+        };
+    }
+
     _initBoids() {
         const ox = this.origin.x;
         const oy = this.origin.y;
         const oz = this.origin.z;
 
         // Compute local up at the origin.
-        const ux = ox - this.planetOrigin.x;
-        const uy = oy - this.planetOrigin.y;
-        const uz = oz - this.planetOrigin.z;
-        const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
-        this._localUp = ulen > 1e-6
-            ? { x: ux / ulen, y: uy / ulen, z: uz / ulen }
-            : { x: 0, y: 1, z: 0 };
+        this._localUp = this._computeLocalUpForPosition(this.origin);
+        const basis = this._buildTangentBasis(this._localUp);
+        const t1x = basis.tangentX.x;
+        const t1y = basis.tangentX.y;
+        const t1z = basis.tangentX.z;
+        const t2x = basis.tangentZ.x;
+        const t2y = basis.tangentZ.y;
+        const t2z = basis.tangentZ.z;
 
         for (let i = 0; i < this.swarmSize; i++) {
             const angle = Math.random() * Math.PI * 2;
@@ -72,24 +108,6 @@ export class FireflySwarm {
 
             // Scatter in a disc perpendicular to local up + height offset.
             const up = this._localUp;
-            // Build a rough tangent basis.
-            let rx, ry, rz;
-            if (Math.abs(up.y) < 0.9) {
-                rx = 0; ry = 1; rz = 0;
-            } else {
-                rx = 1; ry = 0; rz = 0;
-            }
-            // Cross product for tangent.
-            const tx = up.y * rz - up.z * ry;
-            const ty = up.z * rx - up.x * rz;
-            const tz = up.x * ry - up.y * rx;
-            const tlen = Math.sqrt(tx * tx + ty * ty + tz * tz);
-            const t1x = tx / tlen, t1y = ty / tlen, t1z = tz / tlen;
-            // Second tangent via cross.
-            const t2x = up.y * t1z - up.z * t1y;
-            const t2y = up.z * t1x - up.x * t1z;
-            const t2z = up.x * t1y - up.y * t1x;
-
             this.positions.push({
                 x: ox + t1x * Math.cos(angle) * r + t2x * Math.sin(angle) * r + up.x * h,
                 y: oy + t1y * Math.cos(angle) * r + t2y * Math.sin(angle) * r + up.y * h,
@@ -105,8 +123,31 @@ export class FireflySwarm {
             });
 
             this.phases.push(Math.random() * Math.PI * 2);
-            this.glowFactors.push(0.7 + Math.random() * 0.6); // 0.7-1.3
+            this.glowFactors.push(0.92 + Math.random() * 0.16); // 0.92-1.08
         }
+    }
+
+    setAnchorPosition(position) {
+        if (!position) return;
+
+        const dx = position.x - this.origin.x;
+        const dy = position.y - this.origin.y;
+        const dz = position.z - this.origin.z;
+        if (Math.abs(dx) < 1e-5 && Math.abs(dy) < 1e-5 && Math.abs(dz) < 1e-5) return;
+
+        this.origin.x = position.x;
+        this.origin.y = position.y;
+        this.origin.z = position.z;
+        this._localUp = this._computeLocalUpForPosition(this.origin);
+
+        for (let i = 0; i < this.positions.length; i++) {
+            this.positions[i].x += dx;
+            this.positions[i].y += dy;
+            this.positions[i].z += dz;
+        }
+        this.centroid.x += dx;
+        this.centroid.y += dy;
+        this.centroid.z += dz;
     }
 
     // Call once per frame. Returns the centroid position.
@@ -258,21 +299,17 @@ export class FireflySwarm {
     getGlowIntensity(index) {
         const phase = this.phases[index];
         const factor = this.glowFactors[index];
-        // Subtle pulsing.
-        const pulse = 0.7 + 0.3 * Math.sin(this._time * 2.5 + phase);
+        // Keep the glow mostly steady, with only a small breathing motion.
+        const pulse = 0.96 + 0.04 * Math.sin(this._time * 1.25 + phase);
         return pulse * factor * this.timeOfDayGlow;
     }
 
-    // Computes the time-of-day glow multiplier from a light level (0-1).
-    // lightLevel comes from GameTime.getLightLevel().
-    static computeTimeOfDayGlow(lightLevel) {
-        // Night (0.3): full glow 1.0
-        // Dawn/Dusk (0.5-0.6): moderate glow ~0.3-0.5
-        // Day (>=0.8): nearly off 0.02
-        if (lightLevel <= 0.3) return 1.0;
-        if (lightLevel >= 0.8) return 0.02;
-        // Smooth interpolation between night and day.
-        const t = (lightLevel - 0.3) / (0.8 - 0.3);
-        return 1.0 - t * 0.98; // 1.0 -> 0.02
+    // Computes the firefly glow multiplier from local daylight visibility.
+    // `daylightVisibility` is 0 at local night and 1 in full local daylight.
+    static computeTimeOfDayGlow(daylightVisibility) {
+        const daylight = Math.max(0.0, Math.min(1.0, daylightVisibility));
+        const darkness = 1.0 - daylight;
+        if (darkness <= 0.0) return 0.0002;
+        return Math.max(0.0002, Math.pow(darkness, 2.75));
     }
 }

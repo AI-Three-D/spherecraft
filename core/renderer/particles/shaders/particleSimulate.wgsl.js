@@ -9,6 +9,7 @@
 // (read and write) prevents in-flight data races.
 
 import { buildParticleCommonWGSL } from './particleCommon.wgsl.js';
+import { PARTICLE_TYPES } from '../ParticleTypes.js';
 
 export function buildParticleSimulateWGSL({
     workgroupSize = 64,
@@ -16,6 +17,7 @@ export function buildParticleSimulateWGSL({
     emitterCapacity = 16,
 } = {}) {
     const common = buildParticleCommonWGSL({ typeCapacity, emitterCapacity });
+    const fireflyTypeId = PARTICLE_TYPES.FIREFLY;
 
     return /* wgsl */`
 ${common}
@@ -160,6 +162,17 @@ fn spawnParticle(slot: u32, claim: u32) -> Particle {
     // Promote the type's persistent flags (additive/stretch/rotate) and mark alive.
     p.flags       = td.typeFlags | FLAG_ALIVE;
 
+    if (typeId == ${fireflyTypeId}u) {
+        let fireflyGlow = clamp(globals.fireflyGlow, 0.0, 1.0);
+        let visualGlow = pow(fireflyGlow, 4.0);
+        let sizeScale = 0.18 + fireflyGlow * (1.8 - 0.18);
+        p.size = p.size * sizeScale;
+        p.color = vec4<f32>(
+            p.color.rgb * visualGlow,
+            p.color.a * visualGlow
+        );
+    }
+
     if (globals.debugMode == 1u) {
         p.size  = 2.0;
         p.color = vec4<f32>(1.0, 0.0, 1.0, 1.0);
@@ -240,6 +253,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let age01 = clamp(1.0 - p.lifetime / max(p.maxLifetime, 0.0001), 0.0, 1.0);
         p.size = mix(td.sizeStart, td.sizeEnd, age01);
         p.color = sampleGradient(td, age01);
+        if (p.ptype == ${fireflyTypeId}u) {
+            let fireflyGlow = clamp(globals.fireflyGlow, 0.0, 1.0);
+            let visualGlow = pow(fireflyGlow, 2.2);
+            let sizeScale = 0.24 + fireflyGlow * (1.8 - 0.24);
+            p.size = p.size * sizeScale;
+            p.color = vec4<f32>(
+                p.color.rgb * visualGlow,
+                p.color.a * visualGlow
+            );
+        }
         // Apply HDR emissive multiplier (values > 1.0 bloom via postprocessing).
         if (td.emissive > 1.0) {
             p.color = vec4<f32>(p.color.rgb * td.emissive, p.color.a);

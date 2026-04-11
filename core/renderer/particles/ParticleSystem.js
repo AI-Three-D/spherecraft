@@ -62,8 +62,14 @@ export class ParticleSystem {
 
         // Active firefly swarm (only one allowed at a time).
         this._fireflySwarm = null;
-        this._fireflyEmitter = null;
+        this._fireflyEmitters = [];
         this._fireflyLight = null;
+        this._fireflyFollowActorFn = null;
+        this._fireflySnapSettleFrames = 0;
+        this._fireflyFollowWaitFrames = 0;
+        this._fireflyFollowSideOffset = 0.0;
+        this._fireflyFollowHeightOffset = 0.0;
+        this._fireflyGlow = 1.0;
         this._viewProj = new Matrix4();
         this._loggedEmitterOverflow = false;
     }
@@ -199,20 +205,29 @@ export class ParticleSystem {
             planetOrigin: this._planetOrigin,
         });
         this._fireflySwarm = swarm;
+        this._fireflyFollowActorFn = typeof overrides.getActor === 'function'
+            ? overrides.getActor
+            : null;
+        this._fireflySnapSettleFrames = Math.max(0, overrides.snapSettleFrames ?? 15);
+        this._fireflyFollowWaitFrames = 0;
+        this._fireflyFollowSideOffset = overrides.followSideOffset ?? 2.0;
+        this._fireflyFollowHeightOffset = overrides.followHeightOffset ?? 2.0;
 
-        const emitter = new ParticleEmitter({
-            position: worldPos,
-            preset: 'firefly_swarm',
-            overrides,
+        this._fireflyEmitters = swarm.positions.map((position) => {
+            const emitter = new ParticleEmitter({
+                position,
+                preset: 'firefly_swarm',
+                overrides,
+            });
+            this._registerEmitter(emitter);
+            return emitter;
         });
-        this._fireflyEmitter = emitter;
-        this._registerEmitter(emitter);
 
         // Attach a dim point light at the swarm centroid.
         if (this._lightManager) {
             this._fireflyLight = this._lightManager.addLight(LightType.POINT, {
                 position: new Vector3(worldPos.x, worldPos.y + 2.5, worldPos.z),
-                color: { r: 0.65, g: 0.85, b: 0.30 },
+                color: { r: 0.04, g: 1.00, b: 0.22 },
                 intensity: 0.0,  // starts off — modulated per-frame
                 radius: 8.0,
                 decay: 0.02,
@@ -229,11 +244,53 @@ export class ParticleSystem {
         return swarm;
     }
 
-    // Sets the time-of-day glow factor for the firefly swarm.
-    // Call this from the game loop with the current light level.
-    setFireflyTimeOfDay(lightLevel) {
+    _getFireflyFollowAnchor() {
+        const actor = this._fireflyFollowActorFn?.();
+        const p = actor?.position;
+        if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) {
+            return null;
+        }
+
+        this._fireflyFollowWaitFrames++;
+        if (this._fireflyFollowWaitFrames < this._fireflySnapSettleFrames) {
+            return null;
+        }
+
+        const ux = p.x - this._planetOrigin.x;
+        const uy = p.y - this._planetOrigin.y;
+        const uz = p.z - this._planetOrigin.z;
+        const ulen = Math.sqrt(ux * ux + uy * uy + uz * uz);
+        const up = ulen > 1e-6
+            ? { x: ux / ulen, y: uy / ulen, z: uz / ulen }
+            : { x: 0, y: 1, z: 0 };
+
+        let ref = { x: 0, y: 1, z: 0 };
+        if (Math.abs(up.y) > 0.9) {
+            ref = { x: 1, y: 0, z: 0 };
+        }
+
+        const tx = up.y * ref.z - up.z * ref.y;
+        const ty = up.z * ref.x - up.x * ref.z;
+        const tz = up.x * ref.y - up.y * ref.x;
+        const tlen = Math.sqrt(tx * tx + ty * ty + tz * tz);
+        const tangent = tlen > 1e-6
+            ? { x: tx / tlen, y: ty / tlen, z: tz / tlen }
+            : { x: 1, y: 0, z: 0 };
+
+        return {
+            x: p.x + tangent.x * this._fireflyFollowSideOffset + up.x * this._fireflyFollowHeightOffset,
+            y: p.y + tangent.y * this._fireflyFollowSideOffset + up.y * this._fireflyFollowHeightOffset,
+            z: p.z + tangent.z * this._fireflyFollowSideOffset + up.z * this._fireflyFollowHeightOffset,
+        };
+    }
+
+    // Sets the local daylight-driven glow factor for the firefly swarm.
+    // `daylightVisibility` is 0 at local night and 1 in full local daylight.
+    setFireflyTimeOfDay(daylightVisibility) {
         if (this._fireflySwarm) {
-            this._fireflySwarm.timeOfDayGlow = FireflySwarm.computeTimeOfDayGlow(lightLevel);
+            const glow = FireflySwarm.computeTimeOfDayGlow(daylightVisibility);
+            this._fireflySwarm.timeOfDayGlow = glow;
+            this._fireflyGlow = glow;
         }
     }
 
@@ -365,12 +422,20 @@ export class ParticleSystem {
 
         this.buffers.resetLiveLists();
 
-        if (this._fireflySwarm && this._fireflyEmitter) {
+        if (this._fireflySwarm && this._fireflyEmitters.length > 0) {
+            const followAnchor = this._getFireflyFollowAnchor();
+            if (followAnchor) {
+                this._fireflySwarm.setAnchorPosition(followAnchor);
+            }
             this._fireflySwarm.update(dt);
-            const ffPos = this._fireflySwarm.getNextEmitPosition();
-            this._fireflyEmitter.position.x = ffPos.x;
-            this._fireflyEmitter.position.y = ffPos.y;
-            this._fireflyEmitter.position.z = ffPos.z;
+            for (let i = 0; i < this._fireflyEmitters.length; i++) {
+                const emitter = this._fireflyEmitters[i];
+                const ffPos = this._fireflySwarm.positions[i];
+                if (!emitter || !ffPos) continue;
+                emitter.position.x = ffPos.x;
+                emitter.position.y = ffPos.y;
+                emitter.position.z = ffPos.z;
+            }
 
             if (this._fireflyLight) {
                 const c = this._fireflySwarm.centroid;
@@ -382,11 +447,13 @@ export class ParticleSystem {
                     avgGlow += this._fireflySwarm.getGlowIntensity(fi);
                 }
                 avgGlow /= this._fireflySwarm.swarmSize;
-                this._fireflyLight.intensity = avgGlow * 1.5;
+                this._fireflyLight.intensity = avgGlow * (2.5 * (4.0 / 3.0));
             }
         }
 
         const activeEmitters = [];
+        let fireflyLodScaleSum = 0.0;
+        let fireflyLodScaleCount = 0;
         for (const emitter of this.emitters) {
             this._updateEmitterSnap(emitter);
 
@@ -405,11 +472,12 @@ export class ParticleSystem {
                 spawnBudget > 0 || distance < emitter.distanceCutoff
             );
 
-            if (emitter === this._fireflyEmitter && this._fireflyLight) {
+            if (this._fireflyEmitters.includes(emitter) && this._fireflyLight) {
                 const lodScale = emitter.spawnBudgetPerFrame > 0
                     ? spawnBudget / emitter.spawnBudgetPerFrame
                     : 0;
-                this._fireflyLight.intensity *= lodScale;
+                fireflyLodScaleSum += lodScale;
+                fireflyLodScaleCount++;
             }
 
             if (spawnBudget > 0) {
@@ -423,6 +491,10 @@ export class ParticleSystem {
                     `dist=${distance.toFixed(1)}m budget=${spawnBudget}`
                 );
             }
+        }
+
+        if (this._fireflyLight && fireflyLodScaleCount > 0) {
+            this._fireflyLight.intensity *= fireflyLodScaleSum / fireflyLodScaleCount;
         }
 
         if (activeEmitters.length > EMITTER_CAPACITY && !this._loggedEmitterOverflow) {
@@ -451,6 +523,7 @@ export class ParticleSystem {
             emitterCount: uploadedEmitters.length,
             debugMode: this.debugMode,
             flatWorld: 0,
+            fireflyGlow: this._fireflyGlow,
         });
         this.buffers.clearSpawnScratch(commandEncoder);
         this.simPass.dispatch(commandEncoder);

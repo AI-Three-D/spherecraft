@@ -175,29 +175,29 @@ export const PARTICLE_CONFIG = {
 
     [PARTICLE_TYPES.FIREFLY]: {
         blend: 'additive',
-        lifetime: { min: 0.04, max: 0.08 },   // very short — swarm re-emits each frame
-        size: { start: 0.025, end: 0.020 },    // pinprick dot
+        lifetime: { min: 0.025, max: 0.045 }, // just enough to read as continuous without visible streaking
+        size: { start: 0.030, end: 0.023 },   // half-size mote, still visible through bloom
         velocity: {
-            x: [-0.01, 0.01],
-            y: [ 0.00, 0.01],
-            z: [-0.01, 0.01],
+            x: [0.0, 0.0],
+            y: [0.0, 0.0],
+            z: [0.0, 0.0],
         },
         gravity: 0.0,
-        drag: 20.0,            // essentially stationary after spawn
+        drag: 32.0,            // kill any residual motion immediately
         upwardBias: 0.0,
         lateralNoise: 0.0,
         spawnOffset: {
-            radius: 0.02,
+            radius: 0.0,
             heightMin: 0.0,
-            heightMax: 0.02,
+            heightMax: 0.0,
         },
-        // Grey dot at base, but emissive multiplier makes it glow yellow-green.
-        colorStart: [0.70, 0.85, 0.35, 0.9],
-        colorMid:   [0.65, 0.80, 0.30, 0.7],
-        colorEnd:   [0.50, 0.60, 0.20, 0.0],
-        emissive: 2.5,   // Keep the swarm readable without giant green halos
-        bloomWeight: 1.0,
-        bloomEnabled: false,
+        // Push the hue further into saturated spectral green.
+        colorStart: [0.06, 1.00, 0.32, 0.92],
+        colorMid:   [0.03, 0.82, 0.24, 0.78],
+        colorEnd:   [0.01, 0.20, 0.06, 0.0],
+        emissive: 4.2,
+        bloomWeight: 0.65,
+        bloomEnabled: true,
         flags: { stretchAlongVel: false, rotate: false },
         spawnWeight: 1.0,
     },
@@ -247,11 +247,11 @@ export const PARTICLE_EMITTER_PRESETS = {
         weights: {
             [PARTICLE_TYPES.FIREFLY]: 1.0,
         },
-        spawnBudgetPerFrame: 2,      // 1-2 per frame per firefly position
-        distanceCutoff: 35.0,
-        lodNearDistance: 8.0,
-        lodFarDistance: 18.0,
-        lodMinScale: 0.0,
+        spawnBudgetPerFrame: 3,      // one emitter per firefly no longer needs dense effect-style spawning
+        distanceCutoff: 80.0,
+        lodNearDistance: 18.0,
+        lodFarDistance: 40.0,
+        lodMinScale: 0.35,
     },
 };
 

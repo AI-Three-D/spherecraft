@@ -104,12 +104,11 @@ fn vs_main(@builtin(vertex_index) vid: u32,
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Soft round falloff. Smoothstep gives a much softer edge than 1-d^2.
-    // d=0 at center, d=1 at the inscribed circle, d>1 outside (clipped).
+    // Keep a bright core, but let the glow decay gradually across the sprite.
     let d = length(in.uv - vec2<f32>(0.5, 0.5)) * 2.0;
     if (d >= 1.0) { discard; }
-    // 1 - smoothstep produces a soft round disc with a wide soft edge.
-    let a = 1.0 - smoothstep(0.0, 1.0, d);
+    let radial = clamp(1.0 - d, 0.0, 1.0);
+    let a = pow(radial, 0.7);
     return vec4<f32>(in.color.rgb, in.color.a * a);
 }
 
@@ -121,7 +120,8 @@ fn fs_bloom(in: VsOut) -> @location(0) vec4<f32> {
     let bloomWeight = typeDefs[in.ptype].bloomWeight;
     if (bloomWeight <= 0.0) { discard; }
 
-    let a = 1.0 - smoothstep(0.0, 1.0, d);
+    let radial = clamp(1.0 - d, 0.0, 1.0);
+    let a = pow(radial, 0.28);
     let bloomColor = in.color.rgb * bloomWeight;
     if (max(max(bloomColor.r, bloomColor.g), bloomColor.b) <= 1e-5) { discard; }
 

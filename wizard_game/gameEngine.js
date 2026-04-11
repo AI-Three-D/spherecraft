@@ -813,12 +813,18 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                     distanceCutoff: this.engineConfig.rendering?.distortion?.sourceCutoffs?.campfire ?? 10.0,
                 });
 
-                // Spawn a firefly swarm near the campfire (offset to the side).
+                // Keep a visible firefly swarm near the player for verification.
                 this.renderer.particleSystem.addFireflySwarm(
-                    { x: spawnX + 5, y: spawnY, z: spawnZ + 5 },
-                    { swarmSize: 7 }
+                    { x: spawnX + 2, y: spawnY + 2, z: spawnZ + 2 },
+                    {
+                        swarmSize: 10,
+                        getActor: () => actorManager?.playerActor,
+                        snapSettleFrames: 30,
+                        followSideOffset: 2.5,
+                        followHeightOffset: 2.0,
+                    }
                 );
-                Logger.info('[GameEngine] Firefly swarm registered near campfire');
+                Logger.info('[GameEngine] Firefly swarm registered near player');
             }
 
             // Wire click-to-move input
@@ -949,15 +955,58 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.gameTime.update();
         this._syncStarSystemTimeScale();
 
-        // Update firefly glow based on time of day.
-        if (this.renderer?.particleSystem) {
-            this.renderer.particleSystem.setFireflyTimeOfDay(this.gameTime.getLightLevel());
-        }
-
         if (this.starSystem) {
             this.starSystem.update(deltaTime);
         }
         this._syncStarSystemRotation();
+
+        // Update firefly glow from local sun visibility at the player/camera
+        // position after the star system has been advanced for this frame.
+        if (this.renderer?.particleSystem) {
+            let daylightVisibility = 1.0;
+            const samplePosition =
+                this.actorManager?.playerActor?.position ||
+                this.camera?.position ||
+                null;
+
+            if (
+                samplePosition &&
+                this.starSystem?.currentBody &&
+                this.starSystem?.primaryStar &&
+                this.planetConfig?.origin
+            ) {
+                const starInfo = this.starSystem.currentBody.getStarDirection(
+                    this.starSystem.primaryStar,
+                    this.planetConfig.origin
+                );
+                const sunDir = starInfo?.direction;
+                if (sunDir) {
+                    const ox = this.planetConfig.origin.x || 0;
+                    const oy = this.planetConfig.origin.y || 0;
+                    const oz = this.planetConfig.origin.z || 0;
+                    const ux = (samplePosition.x || 0) - ox;
+                    const uy = (samplePosition.y || 0) - oy;
+                    const uz = (samplePosition.z || 0) - oz;
+                    const lenSq = ux * ux + uy * uy + uz * uz;
+                    if (lenSq > 1e-8) {
+                        const invLen = 1.0 / Math.sqrt(lenSq);
+                        const upx = ux * invLen;
+                        const upy = uy * invLen;
+                        const upz = uz * invLen;
+                        const sunDotUp = upx * sunDir.x + upy * sunDir.y + upz * sunDir.z;
+                        const daylightStartDot = -0.18;
+                        const daylightFullDot = 0.28;
+                        const t = Math.max(
+                            0,
+                            Math.min(1, (sunDotUp - daylightStartDot) / (daylightFullDot - daylightStartDot))
+                        );
+                        daylightVisibility = t * t * (3 - 2 * t);
+                    }
+                }
+            }
+
+            this.renderer.particleSystem.setFireflyTimeOfDay(daylightVisibility);
+        }
 
         const cameraRenderPos = new Vector3(
             this.camera.position.x,
