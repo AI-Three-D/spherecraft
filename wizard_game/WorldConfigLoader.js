@@ -17,7 +17,6 @@
  */
 
 import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
-import { TerrainGenerationConfig } from '../templates/configs/terrainGenerationConfig.js';
 
 export class WorldConfigLoader {
     /**

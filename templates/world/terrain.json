@@ -1,7 +1,6 @@
 {
   "_doc": "Default terrain generation parameters. Copy this file to your game's world/ folder and edit. All parameters here require world regeneration when changed.",
   "seed": 12345,
-  "maxTerrainHeight": 5000,
   "noiseProfile": {
     "baseBias":       1.0,
     "mountainBias":   1.0,
@@ -44,7 +43,8 @@
     "hasOceans":         true,
     "oceanLevel":        0.0,
     "averageOceanDepth": 3700,
-    "visualDepthRange":  300
+    "visualDepthRange":  300,
+    "waveHeight":        1.5
   },
   "surface": {
     "rockCoverageMin": 0.05,

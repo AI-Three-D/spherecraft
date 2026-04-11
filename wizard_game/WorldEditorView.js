@@ -82,10 +82,56 @@ const NIGHT_SKY_THEME = { NightSkyGameConfig, getNightSkyDetailPreset, NightSkyD
 // ── WorldEditorView ───────────────────────────────────────────────────────────
 
 export class WorldEditorView extends WorldViewBase {
-    get showWorldSettingsPanel() { return false; }
-    get showWorldConfigSidebar() { return false; }
     get worldDir()     { return './world'; }
     get configLoader() { return new WorldConfigLoader(this.worldDir); }
+
+    _buildLeftSidebar(container, _raw) {
+        this._buildPlanningSection(
+            container,
+            'Climate',
+            'TODO: add UI for defining world climate zones. These will be used by the world generation system to determine biomes etc.'
+        );
+        this._buildPlanningSection(
+            container,
+            'Geology',
+            'TODO: add UI for editing world config terrain params such as height scale, noise settings, and feature frequencies.'
+        );
+        this._buildPlanningSection(
+            container,
+            'Biomes',
+            'TODO: ...?'
+        );
+        this._buildPlanningSection(
+            container,
+            'Rendering',
+            'TODO: high-level runtime knobs such as ambient occlusion strength, macro texture span, and postprocessing.'
+        );
+    }
+    _buildRightSidebar(container) {
+        this._buildPlanningSection(
+            container,
+            'TODO',
+            'Replace placeholders in the left sidebar with actual UI for editing world config, and add more sections as needed. See the WorldEditorView checklist in the project wiki for details.'
+        );
+
+        const navSec = this._addSection(container, 'Navigation', true);
+        const navInfo = document.createElement('div');
+        navInfo.style.cssText = 'padding:6px 12px; font-size:11px; color:var(--text-dim); line-height:1.7;';
+        navInfo.innerHTML = '<b style="color:var(--text)">WASD</b> — fly<br>'
+                          + '<b style="color:var(--text)">Q/E</b> — down/up<br>'
+                          + '<b style="color:var(--text)">Shift</b> — boost<br>'
+                          + '<b style="color:var(--text)">Left-drag</b> — look';
+        navSec.appendChild(navInfo);
+    }
+
+    _buildPlanningSection(container, title, text) {
+        const body = this._addSection(container, title, true);
+        const msg = document.createElement('div');
+        msg.style.cssText = 'padding:10px 12px; color:var(--text-dim); font-size:11px; line-height:1.6;';
+        msg.textContent = text;
+        body.appendChild(msg);
+        return body;
+    }
 
     async createEngine(canvas, engineConfig, gameDataConfig) {
         const engine = new StudioWorldEngine(canvas, {

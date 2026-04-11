@@ -36,10 +36,6 @@ export class TerrainGenerationConfig {
             enabled: options.continents?.enabled ?? true,
             count: options.continents?.count ?? 7,
             averageSize: options.continents?.averageSize ?? 0.3, // 0-1, fraction of surface
-            minSize: options.continents?.minSize ?? 0.05,
-            maxSize: options.continents?.maxSize ?? 0.45,
-            seedPoints: options.continents?.seedPoints ?? 'random', // 'random' or array of {x,y,z}
-            shelfWidth: options.continents?.shelfWidth ?? 0.02, // continental shelf as fraction
             coastalComplexity: options.continents?.coastalComplexity ?? 0.7 // 0-1, fractal dimension
         };
 
@@ -47,13 +43,8 @@ export class TerrainGenerationConfig {
         this.tectonics = {
             enabled: options.tectonics?.enabled ?? true,
             plateCount: options.tectonics?.plateCount ?? 12,
-            plateMovementSpeed: options.tectonics?.plateMovementSpeed ?? 0.00001, // rad/year
-            convergentBoundaries: options.tectonics?.convergentBoundaries ?? 0.4, // ratio
-            divergentBoundaries: options.tectonics?.divergentBoundaries ?? 0.3,
-            transformBoundaries: options.tectonics?.transformBoundaries ?? 0.3,
             mountainBuildingRate: options.tectonics?.mountainBuildingRate ?? 1.0,
-            riftValleyDepth: options.tectonics?.riftValleyDepth ?? 0.5,
-            subductionAngle: options.tectonics?.subductionAngle ?? 45 // degrees
+            riftValleyDepth: options.tectonics?.riftValleyDepth ?? 0.5
         };
 
         // Volcanic activity
@@ -61,28 +52,13 @@ export class TerrainGenerationConfig {
             enabled: options.volcanism?.enabled ?? true,
             hotspotDensity: options.volcanism?.hotspotDensity ?? 0.00001, // per sq km
             plateBoundaryActivity: options.volcanism?.plateBoundaryActivity ?? 0.8, // 0-1
-            hotspotIntensity: options.volcanism?.hotspotIntensity ?? 0.6,
-            volcanoTypes: options.volcanism?.volcanoTypes ?? {
-                shield: 0.3,      // Hawaii-style
-                stratovolcano: 0.5, // Mt. Fuji-style
-                cinder: 0.2       // Small cones
-            },
-            averageHeight: options.volcanism?.averageHeight ?? 1500, // meters
-            lavaFlowDistance: options.volcanism?.lavaFlowDistance ?? 50, // km
-            ashfallRadius: options.volcanism?.ashfallRadius ?? 100 // km
+            averageHeight: options.volcanism?.averageHeight ?? 1500 // meters
         };
 
         // Impact craters
         this.impacts = {
             enabled: options.impacts?.enabled ?? true,
-            craterDensity: options.impacts?.craterDensity ?? 0.00005, // per sq km
-            sizeDistribution: options.impacts?.sizeDistribution ?? 'powerLaw',
-            minDiameter: options.impacts?.minDiameter ?? 0.1, // km
-            maxDiameter: options.impacts?.maxDiameter ?? 200, // km
-            depthDiameterRatio: options.impacts?.depthDiameterRatio ?? 0.2,
-            rimHeightRatio: options.impacts?.rimHeightRatio ?? 0.04,
-            ageVariation: options.impacts?.ageVariation ?? true,
-            erosionRate: options.impacts?.erosionRate ?? 0.7 // how much craters erode
+            craterDensity: options.impacts?.craterDensity ?? 0.00005 // per sq km
         };
 
         // Erosion parameters
@@ -90,13 +66,7 @@ export class TerrainGenerationConfig {
             enabled: options.erosion?.enabled ?? true,
             globalRate: options.erosion?.globalRate ?? 0.5, // 0-1 scale
             thermalRate: options.erosion?.thermalRate ?? 0.3, // slope-based
-            hydraulicRate: options.erosion?.hydraulicRate ?? 0.6, // water-based
-            glacialRate: options.erosion?.glacialRate ?? 0.8, // ice-based
-            coastalRate: options.erosion?.coastalRate ?? 0.5, // wave action
-            windRate: options.erosion?.windRate ?? 0.2, // aeolian
-            rainfallPattern: options.erosion?.rainfallPattern ?? 'latitudeBased',
-            sedimentCapacity: options.erosion?.sedimentCapacity ?? 0.4,
-            depositionRate: options.erosion?.depositionRate ?? 0.3
+            hydraulicRate: options.erosion?.hydraulicRate ?? 0.6 // water-based
         };
 
         this.climate = {
@@ -147,14 +117,9 @@ export class TerrainGenerationConfig {
                     precipitationMax: 1.0   // Rainforest
                 }
             ],
-            
-            noiseVariation: options.climate?.noiseVariation ?? 0.2,
-            seasonalVariation: options.climate?.seasonalVariation ?? true,
-            prevailingWinds: options.climate?.prevailingWinds ?? true,
-            
+
             // Precipitation noise scales
-            precipitationScale: options.climate?.precipitationScale ?? 14.0,  // ~14km regions (less regular banding)
-            precipitationOctaves: options.climate?.precipitationOctaves ?? 3
+            precipitationScale: options.climate?.precipitationScale ?? 14.0  // ~14km regions (less regular banding)
         };
         // Water configuration
         this.water = {
@@ -169,47 +134,7 @@ export class TerrainGenerationConfig {
             // artistic scattering/absorption length and is not used by terrain generation.
             // If omitted, the renderer derives a reasonable value from `averageOceanDepth`.
             visualDepthRange: options.water?.visualDepthRange ?? null,
-            maxOceanDepth: options.water?.maxOceanDepth ?? 11000, // Mariana Trench-like
-            tidalRange: options.water?.tidalRange ?? 2.0, // meters
-            waveHeight: options.water?.waveHeight ?? 1.5, // average meters
-            riverDensity: options.water?.riverDensity ?? 0.001, // per sq km
-            lakeProbability: options.water?.lakeProbability ?? 0.1, // in suitable depressions
-            groundwaterLevel: options.water?.groundwaterLevel ?? -10 // meters below surface
-        };
-
-        // Mineral composition
-        this.minerals = {
-            enabled: options.minerals?.enabled ?? true,
-            layers: options.minerals?.layers ?? [
-                { name: 'sedimentary', maxDepth: 1000, types: ['limestone', 'sandstone', 'shale'] },
-                { name: 'metamorphic', maxDepth: 5000, types: ['marble', 'quartzite', 'slate'] },
-                { name: 'igneous', maxDepth: 50000, types: ['granite', 'basalt', 'obsidian'] }
-            ],
-            oreVeins: options.minerals?.oreVeins ?? {
-                density: 0.0001, // per cubic km
-                types: ['iron', 'copper', 'gold', 'silver'],
-                clusterSize: 10 // km
-            },
-            surfaceDeposits: options.minerals?.surfaceDeposits ?? true
-        };
-
-        // Biome distribution
-        this.biomes = {
-            enabled: options.biomes?.enabled ?? true,
-            temperatureBands: options.biomes?.temperatureBands ?? true,
-            moistureGradient: options.biomes?.moistureGradient ?? true,
-            altitudeZones: options.biomes?.altitudeZones ?? true,
-            transitionWidth: options.biomes?.transitionWidth ?? 0.1, // fraction for smooth transitions
-            microBiomes: options.biomes?.microBiomes ?? true // oases, alpine meadows, etc.
-        };
-
-        // Advanced features
-        this.advanced = {
-            caveSystem: options.advanced?.caveSystem ?? false,
-            underwaterFeatures: options.advanced?.underwaterFeatures ?? true,
-            polarIceCaps: options.advanced?.polarIceCaps ?? true,
-            desertification: options.advanced?.desertification ?? true,
-            karstTopography: options.advanced?.karstTopography ?? false
+            waveHeight: options.water?.waveHeight ?? 1.5 // average meters
         };
     }
 
@@ -253,7 +178,7 @@ export class TerrainGenerationConfig {
                 this.water.hasOceans ? 1.0 : 0.0,
                 this.water.oceanLevel,
                 this.water.averageOceanDepth,
-                this.water.tidalRange
+                this.water.waveHeight
             ],
             
 
@@ -358,13 +283,6 @@ export class TerrainGenerationConfig {
             errors.push('Plate count must be between 1 and 50');
         }
         
-        const boundarySum = this.tectonics.convergentBoundaries + 
-                           this.tectonics.divergentBoundaries + 
-                           this.tectonics.transformBoundaries;
-        if (Math.abs(boundarySum - 1.0) > 0.01) {
-            errors.push('Tectonic boundary ratios must sum to 1.0');
-        }
-        
         return errors;
     }
 
@@ -388,7 +306,7 @@ export class TerrainGenerationConfig {
                 hotspotDensity: 0.00005 // Olympus Mons type
             },
             water: { hasOceans: false },
-            erosion: { windRate: 0.8, hydraulicRate: 0.1 }, // mostly wind erosion
+            erosion: { hydraulicRate: 0.1 },
             impacts: { craterDensity: 0.001 } // heavily cratered
         });
     }
@@ -400,7 +318,7 @@ export class TerrainGenerationConfig {
             volcanism: { enabled: false },
             water: { hasOceans: false },
             erosion: { enabled: false },
-            impacts: { craterDensity: 0.01, erosionRate: 0.1 }, // many preserved craters
+            impacts: { craterDensity: 0.01 }, // many preserved craters
             climate: { enabled: false }
         });
     }

@@ -1,7 +1,6 @@
 {
   "_comment": "Terrain generation parameters for wizard_game world. All params here require world regeneration when changed.",
   "seed": 12345,
-  "maxTerrainHeight": 5000,
   "noiseProfile": {
     "baseBias":      1.0,
     "mountainBias":  1.0,
@@ -44,7 +43,8 @@
     "hasOceans":        true,
     "oceanLevel":       -0.01,
     "averageOceanDepth":2000,
-    "visualDepthRange": 240
+    "visualDepthRange": 240,
+    "waveHeight":       1.5
   },
   "surface": {
     "rockCoverageMin": 0.02,

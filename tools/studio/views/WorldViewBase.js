@@ -195,8 +195,6 @@ const PARAMS = [
 
 export class WorldViewBase extends StudioView {
     get usesCanvas() { return true; }
-    get showWorldSettingsPanel() { return true; }
-    get showWorldConfigSidebar() { return true; }
 
     /** Override: return a URL string for the world config folder, e.g. './world' */
     get worldDir() { return null; }
@@ -237,8 +235,8 @@ export class WorldViewBase extends StudioView {
 
     async onInit(context) {
         this._ctx = context;
-        context.sidebarLeftTitle.textContent  = this.showWorldSettingsPanel ? 'World Editor' : 'World';
-        context.sidebarRightTitle.textContent = this.showWorldConfigSidebar ? 'Export / Import' : 'Navigation';
+        context.sidebarLeftTitle.textContent  = 'World Editor';
+        context.sidebarRightTitle.textContent = 'Export / Import';
         this._buildRightSidebar(context.sidebarRight);
 
         if (!this.configLoader) {
@@ -253,11 +251,7 @@ export class WorldViewBase extends StudioView {
             this._raw     = raw;
             this._regenRaw = this._snapshotRegenParams(raw);
 
-            if (this.showWorldSettingsPanel) {
-                this._buildLeftSidebar(context.sidebarLeft, raw);
-            } else {
-                this._buildReadOnlyLeftSidebar(context.sidebarLeft);
-            }
+            this._buildLeftSidebar(context.sidebarLeft, raw);
 
             // Start engine
             const placeholder = document.getElementById('viewport-placeholder');
@@ -345,14 +339,6 @@ export class WorldViewBase extends StudioView {
         body.appendChild(msg);
     }
 
-    _buildReadOnlyLeftSidebar(container) {
-        const body = this._addSection(container, 'Read Only', true);
-        const msg = document.createElement('div');
-        msg.style.cssText = 'padding:10px 12px; color:var(--text-dim); font-size:11px; line-height:1.6;';
-        msg.textContent = 'This world currently runs from hard-coded and file-backed configuration only. Studio-side parameter editing is disabled.';
-        body.appendChild(msg);
-    }
-
     _addWorldSlider(body, param, raw) {
         const row = document.createElement('div');
         row.className = 'param-row';
@@ -423,22 +409,20 @@ export class WorldViewBase extends StudioView {
     // ── Right sidebar — export / import ──────────────────────────────
 
     _buildRightSidebar(container) {
-        if (this.showWorldConfigSidebar) {
-            const saveSec = this._addSection(container, 'Save World Config');
-            this._addButton(saveSec, 'Download terrain.json',       () => this._loader?.exportJSON('terrain', this._raw?.terrain));
-            this._addButton(saveSec, 'Download planet.json',        () => this._loader?.exportJSON('planet', this._raw?.planet));
-            this._addButton(saveSec, 'Download postprocessing.json',() => this._loader?.exportJSON('postprocessing', this._raw?.postprocessing));
-            this._addButton(saveSec, 'Download engine.json',        () => this._loader?.exportJSON('engine', this._raw?.engine));
+        const saveSec = this._addSection(container, 'Save World Config');
+        this._addButton(saveSec, 'Download terrain.json',       () => this._loader?.exportJSON('terrain', this._raw?.terrain));
+        this._addButton(saveSec, 'Download planet.json',        () => this._loader?.exportJSON('planet', this._raw?.planet));
+        this._addButton(saveSec, 'Download postprocessing.json',() => this._loader?.exportJSON('postprocessing', this._raw?.postprocessing));
+        this._addButton(saveSec, 'Download engine.json',        () => this._loader?.exportJSON('engine', this._raw?.engine));
 
-            const info = document.createElement('div');
-            info.style.cssText = 'padding:8px 12px; font-size:10px; color:var(--text-dim); line-height:1.6;';
-            info.textContent   = 'Download then replace the file in your world/ folder to make changes permanent.';
-            saveSec.appendChild(info);
+        const info = document.createElement('div');
+        info.style.cssText = 'padding:8px 12px; font-size:10px; color:var(--text-dim); line-height:1.6;';
+        info.textContent   = 'Download then replace the file in your world/ folder to make changes permanent.';
+        saveSec.appendChild(info);
 
-            const loadSec = this._addSection(container, 'Load World Config', false);
-            this._addButton(loadSec, 'Load terrain.json…',       () => this._loadFile('terrain'));
-            this._addButton(loadSec, 'Load postprocessing.json…',() => this._loadFile('postprocessing'));
-        }
+        const loadSec = this._addSection(container, 'Load World Config', false);
+        this._addButton(loadSec, 'Load terrain.json…',       () => this._loadFile('terrain'));
+        this._addButton(loadSec, 'Load postprocessing.json…',() => this._loadFile('postprocessing'));
 
         const navSec = this._addSection(container, 'Navigation', true);
         const navInfo = document.createElement('div');
@@ -476,11 +460,7 @@ export class WorldViewBase extends StudioView {
         this._updateDirtyUI();
         // Rebuild the sidebar to show reverted values
         this._ctx.sidebarLeft.innerHTML = '';
-        if (this.showWorldSettingsPanel) {
-            this._buildLeftSidebar(this._ctx.sidebarLeft, this._raw);
-        } else {
-            this._buildReadOnlyLeftSidebar(this._ctx.sidebarLeft);
-        }
+        this._buildLeftSidebar(this._ctx.sidebarLeft, this._raw);
         this.toast('Regen changes discarded');
     }
 
@@ -586,11 +566,7 @@ export class WorldViewBase extends StudioView {
                 if (this._raw) {
                     this._raw[key] = data;
                     this._ctx.sidebarLeft.innerHTML = '';
-                    if (this.showWorldSettingsPanel) {
-                        this._buildLeftSidebar(this._ctx.sidebarLeft, this._raw);
-                    } else {
-                        this._buildReadOnlyLeftSidebar(this._ctx.sidebarLeft);
-                    }
+                    this._buildLeftSidebar(this._ctx.sidebarLeft, this._raw);
                     if (key === 'postprocessing') this._applyRealtime();
                     this.toast(`Loaded ${file.name}`);
                 }
