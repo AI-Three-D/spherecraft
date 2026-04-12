@@ -3,7 +3,7 @@
 import { createSplatComputeShader } from './shaders/webgpu/splatCompute.wgsl.js';
 
 import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
-    
+
 import { Logger } from '../../shared/Logger.js';
 import { clamp01, clampInt, clampByte } from '../../shared/math/index.js';
 import { createAdvancedTerrainComputeShader } from './shaders/webgpu/advancedTerrainCompute.wgsl.js';
@@ -107,15 +107,15 @@ export class WebGPUTerrainGenerator {
         const scratchView = this._fillTerrainUniformScratch(
             chunkCoordX, chunkCoordY, chunkSizeTex, chunkGridSize, face
         );
-    
+
         const fmt = (name) => formats[name] || 'rgba32float';
         const heightFmt = fmt('height');
         const tileFmt   = fmt('tile');
-    
+
         // heightBase is scratch and now carries stable slope in G — force rgba32float.
         // (The final height texture keeps whatever format the pool wants.)
         const heightBaseFmt = 'rgba32float';
-    
+
         const passes = [
             { type: 0, outTex: gpuHeightBase, format: heightBaseFmt },
             { type: 2, outTex: gpuTile,   format: tileFmt,
@@ -127,7 +127,7 @@ export class WebGPUTerrainGenerator {
               heightTex: gpuHeight, heightFormat: heightFmt },
             { type: 3, outTex: gpuMacro,  format: fmt('macro') }
         ];
-    
+
 
         // ── 2. Encode all passes into one command buffer ───────────
         const enc = this.device.createCommandEncoder({
@@ -376,6 +376,11 @@ export class WebGPUTerrainGenerator {
         const innerSize = Math.max(1, splatPass.textureSize | 0);
         const padding = this._computeSplatPaddingTexels();
         const paddedSize = innerSize + padding * 2;
+        const splatIndexTex = splatPass.splatIndexTex;
+        if (!splatIndexTex) {
+            throw new Error('Splat pass requires splatIndexTex for top-4 sparse splat output');
+        }
+
         const shouldPrimeSplat = (this._quadtreeSplatPrimeCount ?? 0) < 3;
         const shouldRunProbePasses = (this._quadtreeSplatProbePassCount ?? 0) < 3;
         const shouldCaptureValidationError = shouldRunProbePasses && typeof this.device.pushErrorScope === 'function';
@@ -387,6 +392,12 @@ export class WebGPUTerrainGenerator {
                 innerSize,
                 innerSize,
                 splatPrimePattern
+            );
+            this._fillTextureRGBA8Unorm(
+                splatIndexTex,
+                innerSize,
+                innerSize,
+                [255, 255, 255, 255]
             );
         }
 
@@ -481,7 +492,8 @@ export class WebGPUTerrainGenerator {
                     { binding: 0, resource: { buffer: this.splatUniformBuffer } },
                     { binding: 1, resource: splatPass.heightTex.createView() },
                     { binding: 2, resource: paddedTileMap.createView() },
-                    { binding: 3, resource: splatPass.splatTex.createView() }
+                    { binding: 3, resource: splatPass.splatTex.createView() },
+                    { binding: 4, resource: splatIndexTex.createView() }
                 ]
             }));
             pass.dispatchWorkgroups(
@@ -490,6 +502,7 @@ export class WebGPUTerrainGenerator {
             );
             pass.end();
         }
+
 
         if (debugProbeTextures) {
             {
@@ -701,7 +714,7 @@ export class WebGPUTerrainGenerator {
             Logger.info(`WebGPUTerrainGenerator: small planet mode enabled (radius ${radiusM} < ${this.smallPlanetRadiusThreshold})`);
         }
     }
-    
+
     setDebugMode(mode) {
         this.debugMode = mode;
     }
@@ -905,6 +918,10 @@ export class WebGPUTerrainGenerator {
                 { binding: 3, visibility: GPUShaderStage.COMPUTE,
                   storageTexture: { access: 'write-only',
                                     format: 'rgba8unorm',
+                                    viewDimension: '2d' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE,
+                  storageTexture: { access: 'write-only',
+                                    format: 'rgba8unorm',
                                     viewDimension: '2d' } }
             ]
         });
@@ -977,15 +994,28 @@ export class WebGPUTerrainGenerator {
 
         const bindGroupLayout = this.device.createBindGroupLayout({
             entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE,
-                  buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE,
-                  storageTexture: { access: 'write-only',
-                                    format: fmt,
-                                    viewDimension: '2d' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE,
-                  texture: { sampleType: gpuFormatSampleType(inputFmt),
-                             viewDimension: '2d' } }
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'uniform' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: fmt,
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType(inputFmt),
+                        viewDimension: '2d'
+                    }
+                }
             ]
         });
 
@@ -996,7 +1026,9 @@ export class WebGPUTerrainGenerator {
             compute: { module: shaderModule, entryPoint: 'main' }
         });
 
-        if (!this._heightInputPipelineCache) this._heightInputPipelineCache = new Map();
+        if (!this._heightInputPipelineCache) {
+            this._heightInputPipelineCache = new Map();
+        }
         const record = { pipeline, bindGroupLayout };
         this._heightInputPipelineCache.set(cacheKey, record);
         return record;
@@ -1072,18 +1104,45 @@ export class WebGPUTerrainGenerator {
     
         const bindGroupLayout = this.device.createBindGroupLayout({
             entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE,
-                  buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE,
-                  texture: { sampleType: gpuFormatSampleType(hFmt),
-                             viewDimension: '2d' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE,
-                  texture: { sampleType: gpuFormatSampleType(tFmt),
-                             viewDimension: '2d' } },
-                { binding: 3, visibility: GPUShaderStage.COMPUTE,
-                  storageTexture: { access: 'write-only',
-                                    format: 'rgba8unorm',
-                                    viewDimension: '2d' } }
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'uniform' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType(hFmt),
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType(tFmt),
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: 'rgba8unorm',
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: 'rgba8unorm',
+                        viewDimension: '2d'
+                    }
+                }
             ]
         });
     
@@ -1094,12 +1153,13 @@ export class WebGPUTerrainGenerator {
             compute: { module: this.splatShaderModule, entryPoint: 'main' }
         });
     
-        if (!this._splatPipelineCache) this._splatPipelineCache = new Map();
+        if (!this._splatPipelineCache) {
+            this._splatPipelineCache = new Map();
+        }
         const record = { pipeline, bindGroupLayout };
         this._splatPipelineCache.set(cacheKey, record);
         return record;
     }
-
     _getPadTilePipelineForFormat(tileFormat = 'r8unorm') {
         const sampleType = gpuFormatSampleType(tileFormat || 'r8unorm');
         const cacheKey = `${tileFormat || 'r8unorm'}|${sampleType}`;
@@ -1522,7 +1582,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const tileSize = textureSize;
         const splatSize = textureSize;
         const bytesPerPixel = 16;
-        const total = (heightNormalSize**2 + heightNormalSize**2 + tileSize**2 + splatSize**2 + splatSize**2) * bytesPerPixel;
+        const total = (heightNormalSize**2 + heightNormalSize**2 + tileSize**2 + splatSize**2 + splatSize**2 + splatSize**2) * bytesPerPixel;
         
         return { total, totalMB: (total / 1024 / 1024).toFixed(2) };
     }
@@ -1545,6 +1605,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const gpuTile   = this.getOrCreateAtlasTexture(atlasKey, 'tile',   textureSize);
         const gpuHeightBase = this.createGPUTexture(textureSize, textureSize, 'rgba32float');
         let gpuSplatData = null;
+        let gpuSplatIndex = null;
 
         await this.runTerrainPassAtlas(gpuHeightBase, atlasChunkX, atlasChunkY,
             faceIndex, 0, textureSize, textureSize, chunkSizeTex, config.gridSize);
@@ -1564,13 +1625,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (true) {
             gpuSplatData = this.getOrCreateAtlasTexture(
                 atlasKey, 'splat', config.splatSize);
-            await this.runSplatPassAtlas(gpuHeight, gpuTile, gpuSplatData,
-                atlasChunkX, atlasChunkY, config.splatSize, config.splatSize,
-                chunkSizeTex, 'r32float', 'r32float');
+            gpuSplatIndex = this.getOrCreateAtlasTexture(
+                atlasKey, 'splatIndex', config.splatSize);
+            await this.runSplatPassAtlas(
+                gpuHeight,
+                gpuTile,
+                gpuSplatData,
+                gpuSplatIndex,
+                atlasChunkX,
+                atlasChunkY,
+                config.splatSize,
+                config.splatSize,
+                chunkSizeTex,
+                'r32float',
+                'r32float'
+            );
         }
 
-        return { height: gpuHeight, normal: gpuNormal, tile: gpuTile,
-                 splatData: gpuSplatData };
+        return {
+            height: gpuHeight,
+            normal: gpuNormal,
+            tile: gpuTile,
+            splatData: gpuSplatData,
+            splatIndex: gpuSplatIndex
+        };
     }
 
     async generateLODAtlasTextures(atlasKey, config) {
@@ -1591,7 +1669,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Per-type formats. Staging textures and pool layers must agree
         // because we copyTextureToTexture between them.
         const atlasFormats = config.atlasTextureFormats || {};
-        const fmt = (name) => atlasFormats[name] || 'rgba32float';
+        const fmt = (name) => {
+            if (name === 'splatIndex') return atlasFormats.splatIndex || 'rgba8unorm';
+            return atlasFormats[name] || 'rgba32float';
+        };
 
         if (this._atlasGenLogCount === undefined) this._atlasGenLogCount = 0;
 
@@ -1621,6 +1702,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const gpuTile      = this.createGPUTexture(textureSize, textureSize, fmt('tile'));
         const gpuMacro     = this.createGPUTexture(textureSize, textureSize, fmt('macro'));
         const gpuSplatData = this.createGPUTexture(textureSize, textureSize, fmt('splatData'));
+        const gpuSplatIndex = this.createGPUTexture(textureSize, textureSize, fmt('splatIndex'));
 
         const chunkSizeTex  = Math.max(1, Math.floor(textureSize / chunksPerAtlas));
         const chunkCoordX   = atlasKey.atlasX * chunksPerAtlas;
@@ -1663,9 +1745,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        await this.runLODSplatPass(gpuHeight, gpuTile, gpuSplatData,
-            worldOriginX, worldOriginY, config.worldCoverage,
-            textureSize, atlasKey.lod, fmt('height'), fmt('tile'));
+        await this.runLODSplatPass(
+            gpuHeight,
+            gpuTile,
+            gpuSplatData,
+            gpuSplatIndex,
+            worldOriginX,
+            worldOriginY,
+            config.worldCoverage,
+            textureSize,
+            atlasKey.lod,
+            fmt('height'),
+            fmt('tile')
+        );
 
         // Wrap with per-type formats.
         const textures = {
@@ -1673,7 +1765,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             normal:    this.wrapGPUTexture(gpuNormal,    textureSize, textureSize, fmt('normal')),
             tile:      this.wrapGPUTexture(gpuTile,      textureSize, textureSize, fmt('tile')),
             macro:     this.wrapGPUTexture(gpuMacro,     textureSize, textureSize, fmt('macro')),
-            splatData: this.wrapGPUTexture(gpuSplatData, textureSize, textureSize, fmt('splatData'))
+            splatData: this.wrapGPUTexture(gpuSplatData, textureSize, textureSize, fmt('splatData')),
+            splatIndex: this.wrapGPUTexture(gpuSplatIndex, textureSize, textureSize, fmt('splatIndex'), true)
         };
 
         await this._debugLogAtlasStats(atlasKey, {
@@ -1737,8 +1830,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             );
             this.device.queue.submit([encoder.finish()]);
             if (!pool.wrapper) {
-                const useNearest = (type === 'height' || type === 'tile'
-                                    || type === 'splatData');
+                const useNearest = (type === 'height' || type === 'tile' || type === 'splatData' || type === 'splatIndex');
                 const filterable = gpuFormatIsFilterable(arrayFormat);
                 const effectiveNearest = useNearest || !filterable;
                 const filter = effectiveNearest
@@ -1773,13 +1865,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             };
         };
-        uploadToArray('height',    textures.height);
-        uploadToArray('normal',    textures.normal);
-        uploadToArray('tile',      textures.tile);
-        uploadToArray('macro',     textures.macro);
-        uploadToArray('splatData', textures.splatData);
-        const textureTypes =
-            ['height', 'normal', 'tile', 'macro', 'splatData'];
+        uploadToArray('height',     textures.height);
+        uploadToArray('normal',     textures.normal);
+        uploadToArray('tile',       textures.tile);
+        uploadToArray('macro',      textures.macro);
+        uploadToArray('splatData',  textures.splatData);
+        uploadToArray('splatIndex', textures.splatIndex);
+
+        const textureTypes = ['height', 'normal', 'tile', 'macro', 'splatData', 'splatIndex'];
         if (useTextureCachePool && pooledAllocation) {
             const encoder = this.device.createCommandEncoder();
             const layer = pooledAllocation.layer;
@@ -1796,11 +1889,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     [copySize, copySize, 1]
                 );
             };
-            copyToPool('height',    textures.height);
-            copyToPool('normal',    textures.normal);
-            copyToPool('tile',      textures.tile);
-            copyToPool('macro',     textures.macro);
-            copyToPool('splatData', textures.splatData);
+            copyToPool('height',     textures.height);
+            copyToPool('normal',     textures.normal);
+            copyToPool('tile',       textures.tile);
+            copyToPool('macro',      textures.macro);
+            copyToPool('splatData',  textures.splatData);
+            copyToPool('splatIndex', textures.splatIndex);
             this.device.queue.submit([encoder.finish()]);
 
             for (const type of textureTypes) {
@@ -2098,7 +2192,7 @@ pass.end();
 this.device.queue.submit([enc.finish()]);
 }
     
-    async runSplatPassAtlas(hTex, tTex, splatDataTex, atlasChunkX, atlasChunkY, w, h, chunkSize, heightFormat = 'r32float', tileFormat = 'r32float') {
+async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, atlasChunkY, w, h, chunkSize, heightFormat = 'r32float', tileFormat = 'r32float') {
         const data = new ArrayBuffer(32);
         const v = new DataView(data);
         v.setInt32(0, 0, true);   // chunkCoord.x — atlas-local
@@ -2123,7 +2217,8 @@ this.device.queue.submit([enc.finish()]);
                 { binding: 0, resource: { buffer: this.splatUniformBuffer } },
                 { binding: 1, resource: hTex.createView() },
                 { binding: 2, resource: tTex.createView() },
-                { binding: 3, resource: splatDataTex.createView() }
+                { binding: 3, resource: splatDataTex.createView() },
+                { binding: 4, resource: splatIndexTex.createView() }
             ]
         }));
         
@@ -2132,7 +2227,7 @@ this.device.queue.submit([enc.finish()]);
         this.device.queue.submit([enc.finish()]);
     }
 
-    async runLODSplatPass(hTex, tTex, splatDataTex, worldOriginX, worldOriginY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
+    async runLODSplatPass(hTex, tTex, splatDataTex, splatIndexTex, worldOriginX, worldOriginY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
         const chunksPerAtlas = Math.max(1, Math.floor(worldCoverage / this.chunkSize));
         const chunkSizeTex = Math.max(1, Math.floor(textureSize / chunksPerAtlas));
     
@@ -2197,7 +2292,8 @@ this.device.queue.submit([enc.finish()]);
                 { binding: 0, resource: { buffer: this.splatUniformBuffer } },
                 { binding: 1, resource: hTex.createView() },
                 { binding: 2, resource: tTex.createView() },
-                { binding: 3, resource: splatDataTex.createView() }
+                { binding: 3, resource: splatDataTex.createView() },
+                { binding: 4, resource: splatIndexTex.createView() }
             ]
         }));
     

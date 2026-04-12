@@ -72,6 +72,16 @@ function readTexel(dv, offset, format) {
     }
 }
 
+const DEFAULT_TEXTURE_FORMATS = {
+    height: 'r32float',
+    normal: 'rgba32float',
+    tile: 'r8unorm',
+    macro: 'rgba8unorm',
+    splatData: 'rgba8unorm',
+    splatIndex: 'rgba8unorm',
+    scatter: 'r8unorm'
+};
+
 export class TileGenerator {
     /**
      * @param {WebGPUTerrainGenerator} terrainGenerator  The compute-shader generator
@@ -94,13 +104,9 @@ this._maxGpuFencesObserved = 0;
         this.requiredTypes = options.requiredTypes  ?? ['height', 'normal', 'tile'];
         this.enableSplat  = options.enableSplat     ?? this.requiredTypes.includes('splatData');
         this.splatKernelSize = options.splatKernelSize ?? 3;
-        this.textureFormats = options.textureFormats ?? {
-            height: 'r32float',
-            normal: 'rgba32float',
-            tile: 'r8unorm',
-            macro: 'rgba8unorm',
-            splatData: 'rgba8unorm',   // was 'rgba32float'
-            scatter: 'r8unorm'
+        this.textureFormats = {
+            ...DEFAULT_TEXTURE_FORMATS,
+            ...(options.textureFormats || {})
         };
 
         // Track in-progress generations to avoid duplicate requests
@@ -361,32 +367,38 @@ this._maxGpuFencesObserved = 0;
             });
         }
     
-        // ── Prepare splat pass (needs height + tile as inputs) ────
-        let splatPass = null;
-        let gpuSplatData = null;
-    
-        if (this.enableSplat && this.requiredTypes.includes('splatData')) {
-            const splatFormat = this.textureFormats.splatData || 'rgba32float';
-            gpuSplatData = this._createGPUTexture(
-                this.textureSize, this.textureSize, splatFormat);
+// ── Prepare splat pass (needs height + tile as inputs) ────
+let splatPass = null;
+let gpuSplatData = null;
+let gpuSplatIndex = null;
 
-            if (gpuHeight && gpuTile) {
-                const chunksPerAtlas = Math.max(1,
-                    Math.floor(this.textureSize / this.terrainGen.chunkSize));
-                const splatChunkSizeTex = Math.max(1,
-                    Math.floor(this.textureSize / chunksPerAtlas));
+if (this.enableSplat && this.requiredTypes.includes('splatData')) {
+    const splatFormat = this.textureFormats.splatData || 'rgba8unorm';
+    const splatIndexFormat = this.textureFormats.splatIndex || 'rgba8unorm';
 
-                splatPass = {
-                    heightTex: gpuHeight,
-                    tileTex: gpuTile,
-                    heightFormat,
-                    tileFormat,
-                    splatTex: gpuSplatData,
-                    textureSize: this.textureSize,
-                    chunkSizeTex: splatChunkSizeTex
-                };
-            }
-        }
+    gpuSplatData = this._createGPUTexture(
+        this.textureSize, this.textureSize, splatFormat);
+    gpuSplatIndex = this._createGPUTexture(
+        this.textureSize, this.textureSize, splatIndexFormat);
+
+    if (gpuHeight && gpuTile) {
+        const chunksPerAtlas = Math.max(1,
+            Math.floor(this.textureSize / this.terrainGen.chunkSize));
+        const splatChunkSizeTex = Math.max(1,
+            Math.floor(this.textureSize / chunksPerAtlas));
+
+        splatPass = {
+            heightTex: gpuHeight,
+            tileTex: gpuTile,
+            heightFormat,
+            tileFormat,
+            splatTex: gpuSplatData,
+            splatIndexTex: gpuSplatIndex,
+            textureSize: this.textureSize,
+            chunkSizeTex: splatChunkSizeTex
+        };
+    }
+}
     
         // ── Run all passes in a single GPU submission ─────────────
         this.terrainGen.runBatchedTilePasses({
@@ -457,11 +469,17 @@ this._maxGpuFencesObserved = 0;
             textures.macro = this._wrapGPUTexture(
                 gpuMacro, this.textureSize, macroFormat, false);
         }
-        if (gpuSplatData) {
-            const splatFormat = this.textureFormats.splatData || 'rgba32float';
+        if (this.requiredTypes.includes('splatData') && gpuSplatData) {
             textures.splatData = this._wrapGPUTexture(
-                gpuSplatData, this.textureSize, splatFormat, false);
+                gpuSplatData, this.textureSize, this.textureFormats.splatData || 'rgba8unorm', true
+            );
         }
+        if (this.requiredTypes.includes('splatData') && gpuSplatIndex) {
+            textures.splatIndex = this._wrapGPUTexture(
+                gpuSplatIndex, this.textureSize, this.textureFormats.splatIndex || 'rgba8unorm', true
+            );
+        }
+
         if (gpuScatter) {
             textures.scatter = this._wrapGPUTexture(
                 gpuScatter, this.textureSize, scatterFormat, true);

@@ -235,8 +235,8 @@ export class ParticleSystem {
                 position: new Vector3(worldPos.x, worldPos.y + 2.5, worldPos.z),
                 color: { r: 0.04, g: 1.00, b: 0.22 },
                 intensity: 0.0,  // starts off — modulated per-frame
-                radius: 8.0,
-                decay: 0.02,
+                radius: 6.0,
+                decay: 0.04,
                 dynamic: true,
                 name: 'firefly_swarm_light',
             });
@@ -448,7 +448,7 @@ export class ParticleSystem {
                 this._fireflyLight.position.x = c.x;
                 this._fireflyLight.position.y = c.y;
                 this._fireflyLight.position.z = c.z;
-                const targetIntensity = this._fireflyGlow * (2.5 * (4.0 / 3.0));
+                const targetIntensity = this._fireflyGlow * 1.5;
                 const lightBlend = 1.0 - Math.exp(-dt * 3.0);
                 this._fireflyLightIntensity +=
                     (targetIntensity - this._fireflyLightIntensity) * lightBlend;

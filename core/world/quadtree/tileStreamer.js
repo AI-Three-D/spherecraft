@@ -188,6 +188,16 @@ function readTexel(dv, offset, format) {
     }
 }
 
+const DEFAULT_TEXTURE_FORMATS = {
+    height: 'r32float',
+    normal: 'rgba32float',
+    tile: 'r8unorm',
+    macro: 'rgba8unorm',
+    splatData: 'rgba8unorm',
+    splatIndex: 'rgba8unorm',
+    scatter: 'r8unorm'
+};
+
 
 class TileArrayPool {
     constructor(device, tileSize, capacity, types, formats, mipTypes = null) {
@@ -212,7 +222,11 @@ class TileArrayPool {
         }
 
         const wantsNearestByType = (type) =>
-            type === 'height' || type === 'tile' || type === 'scatter';
+            type === 'height' ||
+            type === 'tile' ||
+            type === 'scatter' ||
+            type === 'splatData' ||
+            type === 'splatIndex';
 
         const fullMipCount = Math.floor(Math.log2(tileSize)) + 1;
 
@@ -487,9 +501,13 @@ export class TileStreamer {
         this.tileTextureSize = options.tileTextureSize ?? 1024;
         this.requiredTypes   = options.requiredTypes   ?? ['height', 'normal', 'tile'];
         this.enableSplat     = options.enableSplat     ?? this.requiredTypes.includes('splatData');
-        this.textureFormats  = options.textureFormats  ?? {
-            height: 'r32float', normal: 'rgba32float', tile: 'r8unorm',
-            macro: 'rgba8unorm', splatData: 'rgba8unorm', scatter: 'r8unorm'  // was 'rgba32float'
+        this.streamedTypes = this.requiredTypes.slice();
+        if (this.enableSplat && this.streamedTypes.includes('splatData') && !this.streamedTypes.includes('splatIndex')) {
+            this.streamedTypes.push('splatIndex');
+        }
+        this.textureFormats  = {
+            ...DEFAULT_TEXTURE_FORMATS,
+            ...(options.textureFormats || {})
         };
         this.tilePoolSize      = options.tilePoolSize      ?? 2048;
         this.maxPoolBytes      = Number.isFinite(options.maxPoolBytes)
@@ -503,7 +521,7 @@ export class TileStreamer {
 
         const maxLayers = this.device.limits?.maxTextureArrayLayers ?? this.tilePoolSize;
         let layerSetBytes = 0;
-        for (const type of this.requiredTypes) {
+        for (const type of this.streamedTypes) {
             const format = this.textureFormats[type] || 'rgba32float';
             layerSetBytes += this.tileTextureSize * this.tileTextureSize *
                              gpuFormatBytesPerTexel(format);
@@ -633,15 +651,18 @@ drainScatterCommitQueue() {
         }
 
         this.arrayPool = new TileArrayPool(
-            this.device, this.tileTextureSize, this.tilePoolSize,
-            this.requiredTypes, this.textureFormats
+            this.device,
+            this.tileTextureSize,
+            this.tilePoolSize,
+            this.streamedTypes,
+            this.textureFormats
         );
         this._recordPoolHeadroom();
 
         if (this.enableTileCacheBridge) {
             this.tileCache = new TileCache({
                 maxBytes: Number.MAX_SAFE_INTEGER,
-                requiredTypes: this.requiredTypes,
+                requiredTypes: this.streamedTypes,
                 logStats: this._logStatsEnabled
             });
         }
@@ -654,12 +675,11 @@ drainScatterCommitQueue() {
 
         this.tileGenerator = new TileGenerator(this.terrainGenerator, {
             textureSize:    this.tileTextureSize,
-            requiredTypes:  this.requiredTypes,
+            requiredTypes:  this.streamedTypes,
             textureFormats: this.textureFormats,
             enableSplat:    this.enableSplat,
             logStats:       this._logStatsEnabled
         });
-
         this._seedRootTiles();
         this._createFeedbackRing();
         // Create reusable dedupe set for feedback processing (allocation-free)

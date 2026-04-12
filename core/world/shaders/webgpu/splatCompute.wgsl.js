@@ -20,10 +20,12 @@ export function createSplatComputeShader(options = {}) {
     if (!options.buildTileCategoryLookupWGSL) {
         throw new Error('createSplatComputeShader requires options.buildTileCategoryLookupWGSL');
     }
+
     const tileCategories = options.tileCategories;
     const categoryScoreCount = tileCategories.length;
     const tileCategoryWGSL = options.buildTileCategoryLookupWGSL();
     const categoryRepresentativeWGSL = buildCategoryRepresentativeTileIdWGSL(tileCategories);
+
     return /* wgsl */`
 struct Uniforms {
     chunkCoord: vec2<i32>,
@@ -38,7 +40,12 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var heightMap: texture_2d<f32>;
 @group(0) @binding(2) var tileMap: texture_2d<f32>;
-@group(0) @binding(3) var splatDataTexture: texture_storage_2d<rgba8unorm, write>;
+
+// Top-4 sparse splat payload:
+//   splatWeightTexture  = normalized weights of the top 4 categories
+//   splatIndexTexture   = representative tile IDs for those top 4 categories
+@group(0) @binding(3) var splatWeightTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(4) var splatIndexTexture:  texture_storage_2d<rgba8unorm, write>;
 
 const INVALID_TILE_ID: u32 = 255u;
 const INVALID_CATEGORY_ID: u32 = 255u;
@@ -51,6 +58,10 @@ fn validTile(tileId: u32) -> bool {
 
 fn validCategory(categoryId: u32) -> bool {
     return categoryId < CATEGORY_SCORE_COUNT;
+}
+
+fn encodeTileId(tileId: u32) -> f32 {
+    return select(1.0, f32(tileId) / 255.0, validTile(tileId));
 }
 
 fn decodeTileIdRaw(tileSample: vec4<f32>) -> u32 {
@@ -73,9 +84,54 @@ fn radialKernelWeight(distanceToSample: f32, radius: f32) -> f32 {
     return falloff * falloff;
 }
 
+fn insertTop4(
+    categoryId: u32,
+    score: f32,
+    topIds: ptr<function, array<u32, 4>>,
+    topScores: ptr<function, array<f32, 4>>
+) {
+    if (!validCategory(categoryId) || score <= SCORE_EPSILON) {
+        return;
+    }
+
+    // Merge duplicate if present.
+    for (var i = 0; i < 4; i = i + 1) {
+        if ((*topIds)[i] == categoryId) {
+            (*topScores)[i] = max((*topScores)[i], score);
+            return;
+        }
+    }
+
+    // Find insertion point.
+    var insertAt = -1;
+    for (var i = 0; i < 4; i = i + 1) {
+        let existingId = (*topIds)[i];
+        let existingScore = (*topScores)[i];
+        if (
+            score > existingScore ||
+            (score == existingScore && (!validCategory(existingId) || categoryId < existingId))
+        ) {
+            insertAt = i;
+            break;
+        }
+    }
+
+    if (insertAt < 0) {
+        return;
+    }
+
+    for (var i = 3; i > insertAt; i = i - 1) {
+        (*topIds)[i] = (*topIds)[i - 1];
+        (*topScores)[i] = (*topScores)[i - 1];
+    }
+
+    (*topIds)[insertAt] = categoryId;
+    (*topScores)[insertAt] = score;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let splatTexSize = textureDimensions(splatDataTexture);
+    let splatTexSize = textureDimensions(splatWeightTexture);
     if (global_id.x >= splatTexSize.x || global_id.y >= splatTexSize.y) {
         return;
     }
@@ -86,11 +142,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let paddedInset = vec2<u32>(inputPadding);
     let innerTileMapSize = max(tileMapSize - paddedInset * 2u, vec2<u32>(1u));
 
-    // Interpret the existing kernel size config as a diameter in source texels.
-    // Stage 1 uses the resulting radius directly for the local accumulation field.
     let kernelRadius = max(0.5, 0.5 * f32(max(uniforms.kernelSize, 1)));
 
-    // Map the splat texel center into source-tile texel-center space.
     let sourcePos =
         vec2<f32>(paddedInset)
         +
@@ -102,7 +155,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let maxX = min(maxCoord.x, i32(ceil(sourcePos.x + kernelRadius)) - 1);
     let minY = max(0, i32(floor(sourcePos.y - kernelRadius)));
     let maxY = min(maxCoord.y, i32(ceil(sourcePos.y + kernelRadius)) - 1);
-
     let centerCoord = clamp(
         vec2<i32>(floor(sourcePos)),
         vec2<i32>(0),
@@ -137,85 +189,119 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    var top0Category: u32 = INVALID_CATEGORY_ID;
-    var top1Category: u32 = INVALID_CATEGORY_ID;
-    var top0Score: f32 = 0.0;
-    var top1Score: f32 = 0.0;
+    let centerCategory = select(INVALID_CATEGORY_ID, tileCategory(centerTileId), validTile(centerTileId));
+
+    var topCategories: array<u32, 4> = array<u32, 4>(
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID
+    );
+    var topScores: array<f32, 4> = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
 
     for (var categoryId = 0u; categoryId < CATEGORY_SCORE_COUNT; categoryId = categoryId + 1u) {
-        let score = categoryScores[categoryId];
-        if (score <= 0.0) {
+        insertTop4(categoryId, categoryScores[categoryId], &topCategories, &topScores);
+    }
+
+    if (!validCategory(topCategories[0]) || topScores[0] <= SCORE_EPSILON) {
+        let fallbackTileId = select(INVALID_TILE_ID, centerTileId, validTile(centerTileId));
+        textureStore(
+            splatWeightTexture,
+            vec2<i32>(global_id.xy),
+            vec4<f32>(1.0, 0.0, 0.0, 0.0)
+        );
+        textureStore(
+            splatIndexTexture,
+            vec2<i32>(global_id.xy),
+            vec4<f32>(encodeTileId(fallbackTileId), 1.0, 1.0, 1.0)
+        );
+        return;
+    }
+
+    var outputTileIds: array<u32, 4> = array<u32, 4>(
+        INVALID_TILE_ID,
+        INVALID_TILE_ID,
+        INVALID_TILE_ID,
+        INVALID_TILE_ID
+    );
+    var outputWeights: array<f32, 4> = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+    var totalScore: f32 = 0.0;
+
+    for (var i = 0; i < 4; i = i + 1) {
+        let categoryId = topCategories[i];
+        let score = topScores[i];
+        if (!validCategory(categoryId) || score <= SCORE_EPSILON) {
             continue;
         }
+        totalScore = totalScore + score;
+        let representativeTileId = categoryRepresentativeTileId(categoryId);
+        outputTileIds[i] = representativeTileId;
+    }
 
-        if (score > top0Score || (score == top0Score && categoryId < top0Category)) {
-            top1Category = top0Category;
-            top1Score = top0Score;
-            top0Category = categoryId;
-            top0Score = score;
-        } else if (score > top1Score || (score == top1Score && categoryId < top1Category)) {
-            top1Category = categoryId;
-            top1Score = score;
+    if (totalScore <= SCORE_EPSILON) {
+        let fallbackTileId = select(INVALID_TILE_ID, centerTileId, validTile(centerTileId));
+        textureStore(
+            splatWeightTexture,
+            vec2<i32>(global_id.xy),
+            vec4<f32>(1.0, 0.0, 0.0, 0.0)
+        );
+        textureStore(
+            splatIndexTexture,
+            vec2<i32>(global_id.xy),
+            vec4<f32>(encodeTileId(fallbackTileId), 1.0, 1.0, 1.0)
+        );
+        return;
+    }
+
+    for (var i = 0; i < 4; i = i + 1) {
+        if (!validTile(outputTileIds[i])) {
+            continue;
         }
+        outputWeights[i] = topScores[i] / totalScore;
     }
 
-    if (!validCategory(top0Category) || top0Score <= SCORE_EPSILON) {
-        textureStore(
-            splatDataTexture,
-            vec2<i32>(global_id.xy),
-            vec4<f32>(0.0, 0.0, 1.0, 0.0)
-        );
-        return;
-    }
-
-    let top0Representative = categoryRepresentativeTileId(top0Category);
-    let top1Representative = categoryRepresentativeTileId(top1Category);
-    let centerCategory = select(INVALID_CATEGORY_ID, tileCategory(centerTileId), validTile(centerTileId));
-    let interiorTileId = select(
-        top0Representative,
-        centerTileId,
-        validCategory(centerCategory) && centerCategory == top0Category
-    );
-
-    if (!validCategory(top1Category) || top1Score <= SCORE_EPSILON) {
-        let encoded = f32(interiorTileId) / 255.0;
-        textureStore(
-            splatDataTexture,
-            vec2<i32>(global_id.xy),
-            vec4<f32>(encoded, encoded, 1.0, 0.0)
-        );
-        return;
-    }
-
-    let topPairSum = top0Score + top1Score;
-    if (topPairSum <= SCORE_EPSILON) {
-        let encoded = f32(interiorTileId) / 255.0;
-        textureStore(
-            splatDataTexture,
-            vec2<i32>(global_id.xy),
-            vec4<f32>(encoded, encoded, 1.0, 0.0)
-        );
-        return;
-    }
-
-    var biomeA = top0Representative;
-    var biomeB = top1Representative;
-    var weightOfBiomeA = top0Score / topPairSum;
-
-    if (top1Representative < top0Representative) {
-        biomeA = top1Representative;
-        biomeB = top0Representative;
-        weightOfBiomeA = top1Score / topPairSum;
+    // Sort slots by tile ID (ascending) so that adjacent texels always
+    // store the same categories in the same slots, regardless of which
+    // category dominates at each texel.  This mirrors the old pair-blend
+    // system's biomeA/biomeB sorting and is required for the fragment
+    // shader's bilinear consistency check to work reliably across the
+    // entire transition zone — not just within the dominant-category side.
+    for (var i: i32 = 0; i < 3; i = i + 1) {
+        for (var j: i32 = i + 1; j < 4; j = j + 1) {
+            let vi = validTile(outputTileIds[i]);
+            let vj = validTile(outputTileIds[j]);
+            let shouldSwap = (vj && !vi) ||
+                             (vi && vj && outputTileIds[j] < outputTileIds[i]);
+            if (shouldSwap) {
+                let tmpId     = outputTileIds[i];
+                let tmpWeight = outputWeights[i];
+                outputTileIds[i]  = outputTileIds[j];
+                outputWeights[i]  = outputWeights[j];
+                outputTileIds[j]  = tmpId;
+                outputWeights[j]  = tmpWeight;
+            }
+        }
     }
 
     textureStore(
-        splatDataTexture,
+        splatWeightTexture,
         vec2<i32>(global_id.xy),
         vec4<f32>(
-            f32(biomeA) / 255.0,
-            f32(biomeB) / 255.0,
-            clamp(weightOfBiomeA, 0.0, 1.0),
-            1.0
+            outputWeights[0],
+            outputWeights[1],
+            outputWeights[2],
+            outputWeights[3]
+        )
+    );
+
+    textureStore(
+        splatIndexTexture,
+        vec2<i32>(global_id.xy),
+        vec4<f32>(
+            encodeTileId(outputTileIds[0]),
+            encodeTileId(outputTileIds[1]),
+            encodeTileId(outputTileIds[2]),
+            encodeTileId(outputTileIds[3])
         )
     );
 }

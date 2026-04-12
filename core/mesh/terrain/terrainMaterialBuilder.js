@@ -75,6 +75,7 @@ export class TerrainMaterialBuilder {
                 cachedTextures.normal,
                 cachedTextures.tile,
                 cachedTextures.splatData,
+                cachedTextures.splatIndex,
                 cachedTextures.macro
             ];
             const presentTextures = textureList.filter(Boolean);
@@ -105,11 +106,12 @@ export class TerrainMaterialBuilder {
                 tex?._gpuFormat ?? tex?._gpuTexture?.format ?? 'rgba32float';
     
             const chunkTextureFormats = {
-                height:    readGpuFormat(cachedTextures.height),
-                normal:    readGpuFormat(cachedTextures.normal),
-                tile:      readGpuFormat(cachedTextures.tile),
-                splatData: readGpuFormat(cachedTextures.splatData),
-                macro:     readGpuFormat(cachedTextures.macro),
+                height:     readGpuFormat(cachedTextures.height),
+                normal:     readGpuFormat(cachedTextures.normal),
+                tile:       readGpuFormat(cachedTextures.tile),
+                splatData:  readGpuFormat(cachedTextures.splatData),
+                splatIndex: readGpuFormat(cachedTextures.splatIndex),
+                macro:      readGpuFormat(cachedTextures.macro),
             };
 
             if (enableTerrainAO) {
@@ -254,14 +256,13 @@ export class TerrainMaterialBuilder {
             enableMacroLayer: { value: 1.0 },
             enableClusteredLights: { value: 1.0 },
             useInstancing: { value: enableInstancing ? 1.0 : 0.0 },
-
-            // === CHUNK TEXTURES ===
-            heightTexture: { value: cachedTextures.height },
-            normalTexture: { value: cachedTextures.normal },
-            tileTexture: { value: cachedTextures.tile },
-            splatDataMap: { value: cachedTextures.splatData },
-            macroMaskTexture: { value: cachedTextures.macro },
-
+// === CHUNK TEXTURES ===
+heightTexture: { value: cachedTextures.height },
+normalTexture: { value: cachedTextures.normal },
+tileTexture: { value: cachedTextures.tile },
+splatDataMap: { value: cachedTextures.splatData },
+splatIndexMap: { value: cachedTextures.splatIndex },
+macroMaskTexture: { value: cachedTextures.macro },
             // === LOOKUP TABLES ===
             tileTypeLookup: { value: lookupTables.tileTypeLookup },
             macroTileTypeLookup: { value: lookupTables.macroTileTypeLookup },
