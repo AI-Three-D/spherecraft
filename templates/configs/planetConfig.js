@@ -2,6 +2,50 @@
 import { Vector3 } from '../../shared/math/index.js';
 import { PlanetAtmosphereSettings } from './planetAtmosphereSettings.js';
 import { requireBool, requireInt, requireNumber, requireObject, requireString } from '../../shared/requireUtil.js';
+
+function createDefaultWorldAuthoringRuntime() {
+  return {
+    biomes: [],
+    biomeIds: [],
+    biomeIndexById: {},
+    assetProfiles: [],
+    summary: {
+      biomeCount: 0,
+      assetProfileCount: 0,
+      unresolvedTileRefCount: 0,
+      unknownAssetBiomeRefCount: 0,
+    },
+    warnings: {
+      unresolvedTileRefs: [],
+      unknownAssetBiomeRefs: [],
+    },
+  };
+}
+
+function cloneWorldAuthoringRuntime(value) {
+  const fallback = createDefaultWorldAuthoringRuntime();
+  const runtime = value && typeof value === 'object' ? value : fallback;
+  const warnings = runtime.warnings && typeof runtime.warnings === 'object'
+    ? runtime.warnings
+    : fallback.warnings;
+
+  return {
+    biomes: Array.isArray(runtime.biomes) ? runtime.biomes.slice() : [],
+    biomeIds: Array.isArray(runtime.biomeIds) ? runtime.biomeIds.slice() : [],
+    biomeIndexById: runtime.biomeIndexById && typeof runtime.biomeIndexById === 'object'
+      ? { ...runtime.biomeIndexById }
+      : {},
+    assetProfiles: Array.isArray(runtime.assetProfiles) ? runtime.assetProfiles.slice() : [],
+    summary: {
+      ...fallback.summary,
+      ...(runtime.summary && typeof runtime.summary === 'object' ? runtime.summary : {}),
+    },
+    warnings: {
+      unresolvedTileRefs: Array.isArray(warnings.unresolvedTileRefs) ? warnings.unresolvedTileRefs.slice() : [],
+      unknownAssetBiomeRefs: Array.isArray(warnings.unknownAssetBiomeRefs) ? warnings.unknownAssetBiomeRefs.slice() : [],
+    },
+  };
+}
 /**
  * PlanetConfig
  * -----------
@@ -64,6 +108,13 @@ export class PlanetConfig {
     this.grassConfig = requireObject(options.grassConfig, 'grassConfig');
     this.macroTileSpan = options.macroTileSpan ?? 16;
     this.macroMaxLOD = options.macroMaxLOD ?? 0;
+    this.worldAuthoring = cloneWorldAuthoringRuntime(options.worldAuthoring);
+    this.biomeDefinitions = Array.isArray(options.biomeDefinitions)
+      ? options.biomeDefinitions.slice()
+      : this.worldAuthoring.biomes.slice();
+    this.assetProfiles = Array.isArray(options.assetProfiles)
+      ? options.assetProfiles.slice()
+      : this.worldAuthoring.assetProfiles.slice();
     this.terrainGeneration = requireObject(options.terrainGeneration, 'terrainGeneration');
 
     // Cloud options (atmosphere-relative altitudes)

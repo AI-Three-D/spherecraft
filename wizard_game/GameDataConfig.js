@@ -116,6 +116,9 @@ export class GameDataConfig {
       grassConfig: planet.grassConfig,
       macroTileSpan: planet.macroTileSpan,
       macroMaxLOD: planet.macroMaxLOD,
+      worldAuthoring: planet.worldAuthoring,
+      biomeDefinitions: planet.biomeDefinitions,
+      assetProfiles: planet.assetProfiles,
 
       // terrain generation config
       terrainGeneration: planet.terrain,
