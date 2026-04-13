@@ -1,5 +1,6 @@
 // js/world/shaders/webgpu/advancedTerrainCompute.wgsl.js
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
+import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
 
 export function createAdvancedTerrainComputeShader(options = {}) {
   const shaderBundle = options?.terrainShaderBundle;
@@ -28,6 +29,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const outputFormat = options?.outputFormat ?? 'rgba32float';
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;
+  const maxBiomes = options?.maxBiomes ?? 16;
 
   return [
     base.constants(),
@@ -77,10 +79,13 @@ struct Uniforms {
     climateZone4Extra: vec4<f32>,
 };
 
+${createBiomeScoringWGSL({ maxBiomes })}
+
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var outputTexture: texture_storage_2d<${outputFormat}, write>;
 ${hasHeightBindings ? '@group(0) @binding(2) var heightMap: texture_2d<f32>;' : ''}
 ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
+@group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
 
 fn getSpherePoint(face: i32, u: f32, v: f32) -> vec3<f32> {
     var cubePos: vec3<f32>;

@@ -1,6 +1,7 @@
 // js/world/webgpuTerrainGenerator.js
 
 import { createSplatComputeShader } from './shaders/webgpu/splatCompute.wgsl.js';
+import { getPackedBiomeUniformByteSize, packBiomeUniformData } from './biomeRuntime.js';
 
 import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
 
@@ -11,6 +12,7 @@ import { createAdvancedTerrainComputeShader } from './shaders/webgpu/advancedTer
 const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
 const SPLAT_STEP_LOG_TAG = '[SplatStep]';
 const SPLAT_STEP_PREFIX = `${TERRAIN_STEP_LOG_TAG} ${SPLAT_STEP_LOG_TAG}`;
+const DEFAULT_GPU_BIOME_FALLBACK_TILE_ID = 10;
 
 export class WebGPUTerrainGenerator {
     constructor(device, seed, chunkSize, macroConfig, splatConfig, textureCache, options = {}) {
@@ -42,6 +44,7 @@ export class WebGPUTerrainGenerator {
         this.arrayPools = new Map();
         this.useTextureArrays = true;
         this.maxArrayBytesPerType = 512 * 1024 * 1024;
+        this.maxGpuBiomes = Math.max(1, requireInt(options.maxGpuBiomes ?? 16, 'maxGpuBiomes', 1));
         
         this.detailScale = 0.08;
         this.ridgeScale = 0.02;
@@ -65,6 +68,10 @@ export class WebGPUTerrainGenerator {
         
         this.debugMode = 0;
         this._logUniformsOnNextPass = false;
+        this._packedBiomeUniforms = null;
+        this.biomeUniformBuffer = null;
+        this.biomeBindGroupLayout = null;
+        this.biomeBindGroup = null;
     }
 
 
@@ -184,6 +191,7 @@ export class WebGPUTerrainGenerator {
                 layout: bindGroupLayout,
                 entries
             }));
+            this._setTerrainBiomeBindGroup(pass);
             pass.dispatchWorkgroups(wgX, wgY);
             pass.end();
         }
@@ -662,6 +670,7 @@ export class WebGPUTerrainGenerator {
             const pass = enc.beginComputePass();
             pass.setPipeline(pipeline);
             pass.setBindGroup(0, this.device.createBindGroup({ layout: bindGroupLayout, entries }));
+            this._setTerrainBiomeBindGroup(pass);
             pass.dispatchWorkgroups(
                 Math.ceil(tp.textureSize / 8),
                 Math.ceil(tp.textureSize / 8)
@@ -698,6 +707,9 @@ export class WebGPUTerrainGenerator {
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
         this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');
+        // The packed data is cached here even before the GPU buffer exists.
+        // initializePipelines uploads it once biomeUniformBuffer is allocated.
+        this._refreshPackedBiomeUniforms();
         const radiusM = this.worldScale;
         const continentsEnabled = this.terrainConfig?.continents?.enabled ?? true;
         this._useSmallPlanetMode = radiusM < this.smallPlanetRadiusThreshold;
@@ -744,6 +756,7 @@ export class WebGPUTerrainGenerator {
         // ── Standard terrain shader (base height / macro) ─────────
         const terrainShaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
         });
         this.terrainShaderModule = this.device.createShaderModule({
@@ -755,6 +768,7 @@ export class WebGPUTerrainGenerator {
         const heightInputShaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
             hasHeightBindings: true,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
         });
         this.heightInputShaderModule = this.device.createShaderModule({
@@ -767,6 +781,7 @@ export class WebGPUTerrainGenerator {
             baseGenerator: this.baseGenerator,
             hasHeightBindings: true,
             hasTileBindings: true,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
         });
         this.microShaderModule = this.device.createShaderModule({
@@ -813,6 +828,26 @@ export class WebGPUTerrainGenerator {
             size: 32,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
+        this.biomeUniformBuffer = this.device.createBuffer({
+            size: getPackedBiomeUniformByteSize(this.maxGpuBiomes),
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this.biomeBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'uniform' }
+                }
+            ]
+        });
+        this.biomeBindGroup = this.device.createBindGroup({
+            layout: this.biomeBindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: this.biomeUniformBuffer } }
+            ]
+        });
+        this._uploadPackedBiomeUniforms();
 
         // ── Standard terrain bind group layout (bindings 0,1) ──────
         this.terrainBindGroupLayout = this.device.createBindGroupLayout({
@@ -827,7 +862,7 @@ export class WebGPUTerrainGenerator {
         });
         this.terrainPipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [this.terrainBindGroupLayout]
+                bindGroupLayouts: [this.terrainBindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: this.terrainShaderModule, entryPoint: 'main' }
         });
@@ -848,7 +883,7 @@ export class WebGPUTerrainGenerator {
         });
         this.heightInputPipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [this.heightInputBindGroupLayout]
+                bindGroupLayouts: [this.heightInputBindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: this.heightInputShaderModule, entryPoint: 'main' }
         });
@@ -872,7 +907,7 @@ export class WebGPUTerrainGenerator {
         });
         this.microPipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [this.microBindGroupLayout]
+                bindGroupLayouts: [this.microBindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: this.microShaderModule, entryPoint: 'main' }
         });
@@ -985,6 +1020,7 @@ export class WebGPUTerrainGenerator {
             baseGenerator: this.baseGenerator,
             outputFormat: fmt,
             hasHeightBindings: true,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
         });
         const shaderModule = this.device.createShaderModule({
@@ -1021,7 +1057,7 @@ export class WebGPUTerrainGenerator {
 
         const pipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [bindGroupLayout]
+                bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: shaderModule, entryPoint: 'main' }
         });
@@ -1054,6 +1090,7 @@ export class WebGPUTerrainGenerator {
             outputFormat: fmt,
             hasHeightBindings: true,
             hasTileBindings: true,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
         });
         const shaderModule = this.device.createShaderModule({
@@ -1080,7 +1117,7 @@ export class WebGPUTerrainGenerator {
 
         const pipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [bindGroupLayout]
+                bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: shaderModule, entryPoint: 'main' }
         });
@@ -2025,6 +2062,7 @@ resource: { buffer: this.terrainUniformBuffer } },
 { binding: 3, resource: tileTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 } else if (isHeightInputPass) {
 const { pipeline, bindGroupLayout } =
 this._getHeightInputPipelineForFormat('rgba32float', 'r32float');
@@ -2038,6 +2076,7 @@ resource: { buffer: this.terrainUniformBuffer } },
 { binding: 2, resource: heightTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 } else {
 pass.setPipeline(this.terrainPipeline);
 pass.setBindGroup(0, this.device.createBindGroup({
@@ -2048,6 +2087,7 @@ resource: { buffer: this.terrainUniformBuffer } },
 { binding: 1, resource: outTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 }
 
 pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
@@ -2158,6 +2198,7 @@ entries: [
 { binding: 3, resource: tileTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 } else if (isHeightInputPass) {
 const { pipeline, bindGroupLayout } =
 this._getHeightInputPipelineForFormat(outputFormat);
@@ -2171,6 +2212,7 @@ entries: [
 { binding: 2, resource: heightTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 } else {
 const { pipeline, bindGroupLayout } =
 this._getTerrainPipelineForFormat(outputFormat);
@@ -2183,6 +2225,7 @@ entries: [
 { binding: 1, resource: outTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 }
 
 pass.dispatchWorkgroups(
@@ -2919,6 +2962,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         const shaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
             outputFormat: fmt,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
         });
         const shaderModule = this.device.createShaderModule({
@@ -2938,7 +2982,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         });
 
         const pipeline = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout] }),
             compute: { module: shaderModule, entryPoint: 'main' }
         });
 
@@ -2952,6 +2996,44 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
 
     _mapTextureFormat(formatOverride) {
         return gpuFormatToWrapperFormat(formatOverride);
+    }
+
+    _setTerrainBiomeBindGroup(pass) {
+        if (pass && this.biomeBindGroup) {
+            pass.setBindGroup(1, this.biomeBindGroup);
+        }
+    }
+
+    _refreshPackedBiomeUniforms() {
+        this._packedBiomeUniforms = packBiomeUniformData(
+            this.planetConfig?.worldAuthoring,
+            this.seed,
+            {
+                maxBiomes: this.maxGpuBiomes,
+                fallbackTileId: DEFAULT_GPU_BIOME_FALLBACK_TILE_ID,
+            }
+        );
+
+        const packed = this._packedBiomeUniforms;
+        if (packed.biomeCount > 0 || packed.truncatedBiomeCount > 0) {
+            Logger.info(
+                `[BiomeRuntime] Packed ${packed.biomeCount}/${this.maxGpuBiomes} biome defs ` +
+                `for terrain compute upload`
+            );
+        }
+        if (packed.truncatedBiomeCount > 0) {
+            Logger.warn(
+                `[BiomeRuntime] Truncated ${packed.truncatedBiomeCount} biome defs ` +
+                `to fit MAX_BIOMES=${this.maxGpuBiomes}`
+            );
+        }
+
+        this._uploadPackedBiomeUniforms();
+    }
+
+    _uploadPackedBiomeUniforms() {
+        if (!this.biomeUniformBuffer || !this._packedBiomeUniforms?.data) return;
+        this.device.queue.writeBuffer(this.biomeUniformBuffer, 0, this._packedBiomeUniforms.data);
     }
 
 }
