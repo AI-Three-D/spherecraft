@@ -2,25 +2,7 @@
 import { Vector3 } from '../../shared/math/index.js';
 import { PlanetAtmosphereSettings } from './planetAtmosphereSettings.js';
 import { requireBool, requireInt, requireNumber, requireObject, requireString } from '../../shared/requireUtil.js';
-
-function createDefaultWorldAuthoringRuntime() {
-  return {
-    biomes: [],
-    biomeIds: [],
-    biomeIndexById: {},
-    assetProfiles: [],
-    summary: {
-      biomeCount: 0,
-      assetProfileCount: 0,
-      unresolvedTileRefCount: 0,
-      unknownAssetBiomeRefCount: 0,
-    },
-    warnings: {
-      unresolvedTileRefs: [],
-      unknownAssetBiomeRefs: [],
-    },
-  };
-}
+import { createDefaultWorldAuthoringRuntime } from '../../core/world/biomeRuntime.js';
 
 function cloneWorldAuthoringRuntime(value) {
   const fallback = createDefaultWorldAuthoringRuntime();
@@ -30,6 +12,8 @@ function cloneWorldAuthoringRuntime(value) {
     : fallback.warnings;
 
   return {
+    // Shallow copies are intentional here: runtime consumers treat biome/profile
+    // objects as immutable config records and only replace whole arrays.
     biomes: Array.isArray(runtime.biomes) ? runtime.biomes.slice() : [],
     biomeIds: Array.isArray(runtime.biomeIds) ? runtime.biomeIds.slice() : [],
     biomeIndexById: runtime.biomeIndexById && typeof runtime.biomeIndexById === 'object'

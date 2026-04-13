@@ -44,6 +44,28 @@ const DEFAULT_REGIONAL_VARIATION = Object.freeze({
     seedOffset: 0,
 });
 
+const VALID_NOISE_TYPES = new Set(['simplex', 'perlin', 'fbm', 'ridged_fbm']);
+const MAX_BIOME_BASE_WEIGHT = 16.0;
+
+export function createDefaultWorldAuthoringRuntime() {
+    return {
+        biomes: [],
+        biomeIds: [],
+        biomeIndexById: {},
+        assetProfiles: [],
+        summary: {
+            biomeCount: 0,
+            assetProfileCount: 0,
+            unresolvedTileRefCount: 0,
+            unknownAssetBiomeRefCount: 0,
+        },
+        warnings: {
+            unresolvedTileRefs: [],
+            unknownAssetBiomeRefs: [],
+        },
+    };
+}
+
 function clampNumber(value, fallback, min = -Infinity, max = Infinity) {
     const numeric = Number.isFinite(value) ? value : fallback;
     return Math.max(min, Math.min(max, numeric));
@@ -60,9 +82,9 @@ function normalizePreference(value) {
     }
 }
 
-function normalizeSignalRule(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation) {
-    const minValue = clampNumber(rule.min, fallback.min, 0.0, 1.0);
-    const maxValue = clampNumber(rule.max, fallback.max, 0.0, 1.0);
+function normalizeSignalRule(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation, bounds = {}) {
+    const minValue = clampNumber(rule.min, fallback.min, bounds.min, bounds.max);
+    const maxValue = clampNumber(rule.max, fallback.max, bounds.min, bounds.max);
     const orderedMin = Math.min(minValue, maxValue);
     const orderedMax = Math.max(minValue, maxValue);
 
@@ -77,10 +99,19 @@ function normalizeSignalRule(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevatio
     };
 }
 
-function normalizeRegionalVariation(regionalVariation = {}) {
-    const noiseType = typeof regionalVariation.noiseType === 'string'
-        ? regionalVariation.noiseType
+function normalizeRegionalVariation(regionalVariation = {}, biomeId = 'unknown') {
+    const requestedNoiseType = typeof regionalVariation.noiseType === 'string'
+        ? regionalVariation.noiseType.trim().toLowerCase()
+        : '';
+    const noiseType = VALID_NOISE_TYPES.has(requestedNoiseType)
+        ? requestedNoiseType
         : DEFAULT_REGIONAL_VARIATION.noiseType;
+    if (requestedNoiseType && !VALID_NOISE_TYPES.has(requestedNoiseType)) {
+        console.warn(
+            `[BiomeRuntime] Biome "${biomeId}" requested unknown noise type ` +
+            `"${regionalVariation.noiseType}". Falling back to "${DEFAULT_REGIONAL_VARIATION.noiseType}".`
+        );
+    }
 
     return {
         noiseType,
@@ -138,7 +169,7 @@ function normalizeBiomeDefinitions(rawBiomeDocument = {}, tileTypes = {}) {
             tags: Array.isArray(biome.tags)
                 ? biome.tags.filter((tag) => typeof tag === 'string' && tag.trim()).map((tag) => tag.trim())
                 : [],
-            baseWeight: clampNumber(biome.baseWeight, 1.0, 0.0, 16.0),
+            baseWeight: clampNumber(biome.baseWeight, 1.0, 0.0, MAX_BIOME_BASE_WEIGHT),
             tileRef: {
                 micro: microTileName,
                 macro: macroTileName,
@@ -148,12 +179,28 @@ function normalizeBiomeDefinitions(rawBiomeDocument = {}, tileTypes = {}) {
                 macro: macroTileId,
             },
             signals: {
-                elevation: normalizeSignalRule(biome?.signals?.elevation, DEFAULT_SIGNAL_RULES.elevation),
-                humidity: normalizeSignalRule(biome?.signals?.humidity, DEFAULT_SIGNAL_RULES.humidity),
-                temperature: normalizeSignalRule(biome?.signals?.temperature, DEFAULT_SIGNAL_RULES.temperature),
-                slope: normalizeSignalRule(biome?.signals?.slope, DEFAULT_SIGNAL_RULES.slope),
+                elevation: normalizeSignalRule(
+                    biome?.signals?.elevation,
+                    DEFAULT_SIGNAL_RULES.elevation,
+                    { min: -Infinity, max: Infinity }
+                ),
+                humidity: normalizeSignalRule(
+                    biome?.signals?.humidity,
+                    DEFAULT_SIGNAL_RULES.humidity,
+                    { min: 0.0, max: 1.0 }
+                ),
+                temperature: normalizeSignalRule(
+                    biome?.signals?.temperature,
+                    DEFAULT_SIGNAL_RULES.temperature,
+                    { min: 0.0, max: 1.0 }
+                ),
+                slope: normalizeSignalRule(
+                    biome?.signals?.slope,
+                    DEFAULT_SIGNAL_RULES.slope,
+                    { min: 0.0, max: 1.0 }
+                ),
             },
-            regionalVariation: normalizeRegionalVariation(biome.regionalVariation),
+            regionalVariation: normalizeRegionalVariation(biome.regionalVariation, biomeId),
         });
     }
 
@@ -193,7 +240,7 @@ function normalizeAssetProfiles(rawAssetDocument = {}, biomeIds = []) {
                 : profileId,
             biomeIds: normalizedBiomeIds,
             archetypeRef: typeof profile.archetypeRef === 'string' ? profile.archetypeRef.trim() : '',
-            density: clampNumber(profile.density, 0.5, 0.0, 16.0),
+            density: clampNumber(profile.density, 0.5, 0.0, MAX_BIOME_BASE_WEIGHT),
             probability: clampNumber(profile.probability, 0.5, 0.0, 1.0),
             variation: clampNumber(profile.variation, 0.3, 0.0, 1.0),
         });

@@ -58,7 +58,6 @@ export class WorldConfigLoader {
             summary.unknownAssetBiomeRefCount > 0
         );
         if (shouldLogWorldAuthoring) {
-            const summary = worldAuthoring.summary;
             console.info(
                 `[WorldConfigLoader] world authoring ready: ` +
                 `${summary.biomeCount} biomes, ${summary.assetProfileCount} asset profiles`
@@ -80,7 +79,7 @@ export class WorldConfigLoader {
         const resp = await fetch(url);
         if (!resp.ok) throw new Error(`WorldConfigLoader: failed to fetch ${url} (${resp.status})`);
         const text = await resp.text();
-        // Strip single-line _comment keys before parsing (JSON5-lite)
+        // `_comment` keys are left intact; downstream builders ignore them.
         return JSON.parse(text);
     }
 
@@ -145,7 +144,7 @@ export class WorldConfigLoader {
 
     // ── Build GameDataConfig ──────────────────────────────────────────────
 
-    _buildGameDataConfig(terrain, planet, textures, biomes = this.raw?.biomes, assets = this.raw?.assets) {
+    _buildGameDataConfig(terrain, planet, textures, biomes = { biomes: [] }, assets = { profiles: [] }) {
         const base = createGameDataConfig();
 
         // The base factory returns a GameDataConfig whose planet list we patch.
