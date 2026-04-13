@@ -99,6 +99,13 @@ export class TerrainMaterialBuilder {
             };
 
             const enableTerrainAO = terrainAOConfig.enabled ?? true;
+            const macroLayerEnabled = terrainShaderConfig?.enableMacroLayer === false ? 0.0 : 1.0;
+            const macroBlendStrength = Number.isFinite(terrainShaderConfig?.macroBlend)
+                ? Math.max(0, Math.min(1, terrainShaderConfig.macroBlend))
+                : 0.7;
+            const macroNoiseWeight = Number.isFinite(terrainShaderConfig?.macroNoiseWeight)
+                ? Math.max(0, terrainShaderConfig.macroNoiseWeight)
+                : 0.3;
             const engineGroundField = planetConfig?.engineConfig?.groundFieldBake ?? null;
             const groundFieldConfig = {
                 ...groundFieldDefaults,
@@ -265,7 +272,7 @@ export class TerrainMaterialBuilder {
             macroLODBias: { value: 0.0 },
             detailFade: { value: 1.0 },
             enableSplatLayer: { value: 1.0 },
-            enableMacroLayer: { value: 1.0 },
+            enableMacroLayer: { value: macroLayerEnabled },
             enableClusteredLights: { value: 1.0 },
             useInstancing: { value: enableInstancing ? 1.0 : 0.0 },
 // === CHUNK TEXTURES ===
@@ -299,9 +306,10 @@ macroMaskTexture: { value: cachedTextures.macro },
             // === MATERIAL SETTINGS ===
             macroScale: { value: 1.0 / Math.max(1, planetConfig.macroTileSpan ?? 4) },
             macroMaxLOD: { value: planetConfig.macroMaxLOD ?? 0 },
-            level2Blend: { value: 0.0},
-            macroNoiseWeight: { value: 0.3 },
+            level2Blend: { value: macroBlendStrength },
+            macroNoiseWeight: { value: macroNoiseWeight },
             terrainDebugMode: { value: debugMode },
+            terrainLayerViewMode: { value: 0 },
             
             tileScale: { value: 1.0 },
             isFeature: { value: 0.0 },

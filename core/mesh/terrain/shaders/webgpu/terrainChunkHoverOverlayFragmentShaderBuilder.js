@@ -55,7 +55,7 @@ struct FragmentUniforms {
     fogColor: vec3<f32>,
     macroNoiseWeight: f32,
     terrainDebugMode: i32,
-    _debugPad0: i32,
+    terrainLayerViewMode: i32,
     _debugPad1: i32,
     _debugPad2: i32,
 

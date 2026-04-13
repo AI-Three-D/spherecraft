@@ -515,6 +515,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const macroStartLod = Number.isFinite(terrainShaderConfig.macroStartLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.macroStartLod))
         : 2;
+    const forceMacroOverlay = terrainShaderConfig.forceMacroOverlay === true;
     const clusteredMaxLod = Number.isFinite(terrainShaderConfig.clusteredMaxLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.clusteredMaxLod))
         : 1;
@@ -548,7 +549,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
         splatTier = 1;
     }
     const enableNearToMidFade = lod === nearMaxLod;
-    const enableMacroOverlay = lod >= macroStartLod;
+    const enableMacroOverlay = forceMacroOverlay || lod >= macroStartLod;
     const usePointSampling = false;//lod >= pointSampleLodStart;
     const enableClusteredLights = true;//lod <= clusteredMaxLod;
     const enableAerialPerspective = lod <= aerialMaxLod;
@@ -821,7 +822,7 @@ struct FragmentUniforms {
     fogColor: vec3<f32>,
     macroNoiseWeight: f32,
     terrainDebugMode: i32,
-    _debugPad0: i32,
+    terrainLayerViewMode: i32,
     _debugPad1: i32,
     _debugPad2: i32,
 };
@@ -1939,6 +1940,7 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let activeSeason = select(fragUniforms.nextSeason, fragUniforms.currentSeason, fragUniforms.seasonTransition < 0.5);
     let layer = i32(round(input.vLayer));
     let debugMode = fragUniforms.terrainDebugMode;
+    let layerViewMode = fragUniforms.terrainLayerViewMode;
 
     let segDims = vec2<f32>(fragUniforms.chunkWidth, fragUniforms.chunkHeight);
     let ddx_vUv = dpdx(input.vUv) * segDims;
@@ -2286,15 +2288,21 @@ if (debugMode == 16) {
     let microPatternStyle = getMicroPatternStyle(dominantTileId);
     var baseColor = microSample.rgb;
 
-    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD) {
+    let macroForcedVisible = layerViewMode == 2;
+    let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
+    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
         var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
         if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
             let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);
             let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
             macroColor = mix(macroColor, detailedMacro, macroFade);
         }
-        let macroStrength = computeMacroBlendStrength(input, layer, 1.0);
-        baseColor = mix(baseColor, macroColor, macroStrength);
+        if (macroForcedVisible) {
+            baseColor = macroColor;
+        } else if (layerViewMode != 1) {
+            let macroStrength = computeMacroBlendStrength(input, layer, 1.0);
+            baseColor = mix(baseColor, macroColor, macroStrength);
+        }
     }
 
     if (ENABLE_GROUND_FIELD) {

@@ -39,6 +39,7 @@ export class QuadtreeTerrainRenderer {
         this._initialized = false;
         this._directDrawArgs = null;
         this._directDrawPending = false;
+        this._terrainLayerViewMode = 0;
         this._terrainHoverOverlay = {
             face: -1,
             flags: 0,
@@ -103,6 +104,23 @@ export class QuadtreeTerrainRenderer {
         };
         copyRect(this._terrainHoverOverlay.microRect, next.microRect);
         copyRect(this._terrainHoverOverlay.macroRect, next.macroRect);
+    }
+
+    setTerrainLayerViewMode(mode = 0) {
+        if (typeof mode === 'string') {
+            if (mode === 'micro') {
+                this._terrainLayerViewMode = 1;
+                return;
+            }
+            if (mode === 'macro') {
+                this._terrainLayerViewMode = 2;
+                return;
+            }
+            this._terrainLayerViewMode = 0;
+            return;
+        }
+        const numericMode = Number.isFinite(mode) ? Math.max(0, Math.min(2, Math.trunc(mode))) : 0;
+        this._terrainLayerViewMode = numericMode;
     }
 
     render(camera, viewMatrix, projectionMatrix) {
@@ -400,6 +418,9 @@ export class QuadtreeTerrainRenderer {
         if (mat.uniforms.geometryLOD) mat.uniforms.geometryLOD.value = lodLevel;
         if (mat.uniforms.lodLevel) mat.uniforms.lodLevel.value = lodLevel;
         if (mat.uniforms.useInstancing) mat.uniforms.useInstancing.value = 1.0;
+        if (mat.uniforms.terrainLayerViewMode) {
+            mat.uniforms.terrainLayerViewMode.value = this._terrainLayerViewMode;
+        }
         if (mat.uniforms.terrainHoverFace) {
             mat.uniforms.terrainHoverFace.value = this._terrainHoverOverlay.face;
         }

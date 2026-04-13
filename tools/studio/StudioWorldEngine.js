@@ -94,6 +94,13 @@ export class StudioWorldEngine {
         this._boostMult  = 1;
         this._boostRate  = 8;
         this._terrainMaterialRefreshTimer = null;
+
+        if (!this.engineConfig.rendering) this.engineConfig.rendering = {};
+        this.engineConfig.rendering.terrainShader = {
+            ...(this.engineConfig.rendering.terrainShader || {}),
+            // Studio needs runtime layer switching without rebuilding materials.
+            forceMacroOverlay: true,
+        };
     }
 
     // ── Initialization ────────────────────────────────────────────────
@@ -552,6 +559,10 @@ export class StudioWorldEngine {
 
     setTerrainHoverOverlay(overlay) {
         this.renderer?.quadtreeTerrainRenderer?.setTerrainHoverOverlay?.(overlay ?? null);
+    }
+
+    setTerrainLayerViewMode(mode = 0) {
+        this.renderer?.quadtreeTerrainRenderer?.setTerrainLayerViewMode?.(mode ?? 0);
     }
 
     /**

@@ -144,6 +144,7 @@ export class WorldAuthoringView extends WorldViewBase {
     async onInit(context) {
         await super.onInit(context);
         this._createOverlays();
+        this._applyTerrainLayerViewMode();
         this._attachEditorListeners(context.canvas);
     }
 
@@ -1107,6 +1108,8 @@ export class WorldAuthoringView extends WorldViewBase {
 
             // Apply realtime params
             this._applyRealtime();
+            this._applyTerrainLayerViewMode();
+            this._updateHoverLayerOverlays();
 
             // Update snapshot
             this._regenRaw = this._snapshotRegenParams(this._raw);
@@ -1194,10 +1197,21 @@ export class WorldAuthoringView extends WorldViewBase {
 
     _removeOverlays() {
         this._engine?.setTerrainHoverOverlay?.(null);
+        this._engine?.setTerrainLayerViewMode?.('both');
         for (const el of Object.values(this._overlayEls)) {
             el?.remove();
         }
         this._overlayEls = {};
+    }
+
+    _getTerrainLayerViewMode() {
+        if (this._hoverLayerVisibility.micro && this._hoverLayerVisibility.macro) return 'both';
+        if (this._hoverLayerVisibility.macro) return 'macro';
+        return 'micro';
+    }
+
+    _applyTerrainLayerViewMode() {
+        this._engine?.setTerrainLayerViewMode?.(this._getTerrainLayerViewMode());
     }
 
     _toggleHoverLayerVisibility(layerKey) {
@@ -1216,6 +1230,7 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._hoverLayerVisibility = nextVisibility;
         this._syncHoverLayerButtons();
+        this._applyTerrainLayerViewMode();
         this._updateHoverLayerOverlays();
     }
 

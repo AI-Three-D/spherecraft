@@ -2077,7 +2077,7 @@ _packFragmentUniforms(uniforms) {
     f32[54] = fogCol?.b ?? 1.0;
     f32[55] = uniforms.macroNoiseWeight?.value ?? 0.5;
     i32[56] = uniforms.terrainDebugMode?.value ?? 0;
-    i32[57] = 0;
+    i32[57] = uniforms.terrainLayerViewMode?.value ?? 0;
     i32[58] = 0;
     i32[59] = 0;
 
