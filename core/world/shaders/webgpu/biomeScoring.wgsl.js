@@ -40,7 +40,7 @@ struct BiomeSignalRule {
 struct BiomeDef {
     baseWeight:    f32,
     tileId:        u32,     // TILE_TYPES integer for this biome
-    noiseType:     u32,     // 0=simplex, 1=perlin, 2=fbm, 3=ridged_fbm
+    noiseType:     u32,     // Reserved for future multi-mode biome noise selection.
     noiseScale:    f32,
     noiseStrength: f32,
     seedOffset:    u32,
@@ -123,18 +123,30 @@ fn scoreBiomeEnv(
 
 // ── Deterministic seeded hash ───────────────────────────────────────
 
-fn biomeHash(x: f32, y: f32, seed: u32) -> f32 {
-    var h = seed + u32(x * 73856.09375) + u32(y * 19349.66211);
+fn biomeHashFromCells(cellX: i32, cellY: i32, seed: u32) -> f32 {
+    var h = seed;
+    h ^= bitcast<u32>(cellX) * 0x27d4eb2du;
+    h ^= bitcast<u32>(cellY) * 0x165667b1u;
+    h = ((h >> 15u) ^ h) * 0x85ebca6bu;
+    h = ((h >> 13u) ^ h) * 0xc2b2ae35u;
     h = ((h >> 16u) ^ h) * 0x45d9f3bu;
     h = ((h >> 16u) ^ h) * 0x45d9f3bu;
     h = (h >> 16u) ^ h;
     return f32(h & 0x7FFFFFFFu) / f32(0x7FFFFFFF);
 }
 
+fn biomeSelectionHash(wx: f32, wy: f32, seed: u32) -> f32 {
+    let cellX = i32(floor(wx * 0.125));
+    let cellY = i32(floor(wy * 0.125));
+    return biomeHashFromCells(cellX, cellY, seed + 99999u);
+}
+
 // ── Regional variation noise (simple value noise) ───────────────────
 
 fn biomeRegionalNoise(wx: f32, wy: f32, def: BiomeDef, seed: u32) -> f32 {
     if (def.noiseStrength <= 0.0) { return 0.0; }
+    // noiseType is packed already so the JS/WGSL buffer layout stays stable.
+    // This increment still uses the same value-noise path for all authored modes.
 
     let sx = wx * def.noiseScale;
     let sy = wy * def.noiseScale;
@@ -145,10 +157,10 @@ fn biomeRegionalNoise(wx: f32, wy: f32, def: BiomeDef, seed: u32) -> f32 {
     let fx = sx - floor(sx);
     let fy = sy - floor(sy);
 
-    let n00 = biomeHash(f32(ix), f32(iy), s) * 2.0 - 1.0;
-    let n10 = biomeHash(f32(ix + 1), f32(iy), s) * 2.0 - 1.0;
-    let n01 = biomeHash(f32(ix), f32(iy + 1), s) * 2.0 - 1.0;
-    let n11 = biomeHash(f32(ix + 1), f32(iy + 1), s) * 2.0 - 1.0;
+    let n00 = biomeHashFromCells(ix, iy, s) * 2.0 - 1.0;
+    let n10 = biomeHashFromCells(ix + 1, iy, s) * 2.0 - 1.0;
+    let n01 = biomeHashFromCells(ix, iy + 1, s) * 2.0 - 1.0;
+    let n11 = biomeHashFromCells(ix + 1, iy + 1, s) * 2.0 - 1.0;
 
     let u = fx * fx * (3.0 - 2.0 * fx);
     let v = fy * fy * (3.0 - 2.0 * fy);
@@ -193,7 +205,7 @@ fn selectBiomeFromDefs(
 
     if (totalScore <= 0.0 || count == 0u) { return result; }
 
-    let r = biomeHash(wx * 137.0, wy * 311.0, seed + 99999u);
+    let r = biomeSelectionHash(wx, wy, seed);
     var cumulative = 0.0;
 
     for (var i = 0u; i < count; i++) {
