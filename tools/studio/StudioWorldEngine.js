@@ -120,6 +120,20 @@ export class StudioWorldEngine {
             activePlanet.id
         );
         this.planetConfig = new PlanetConfig({ ...planetOptions, engineConfig });
+        const worldAuthoringSummary = this.planetConfig?.worldAuthoring?.summary;
+        const shouldLogWorldAuthoring = !!worldAuthoringSummary && (
+            worldAuthoringSummary.biomeCount > 0 ||
+            worldAuthoringSummary.assetProfileCount > 0 ||
+            worldAuthoringSummary.unresolvedTileRefCount > 0 ||
+            worldAuthoringSummary.unknownAssetBiomeRefCount > 0
+        );
+        if (shouldLogWorldAuthoring) {
+            console.info(
+                `[StudioWorldEngine] Planet "${this.planetConfig.name}" authoring: ` +
+                `${worldAuthoringSummary.biomeCount} biomes, ` +
+                `${worldAuthoringSummary.assetProfileCount} asset profiles`
+            );
+        }
         this.altitudeZoneManager = new AltitudeZoneManager(this.planetConfig);
         this.planetConfig.altitudeZoneManager = this.altitudeZoneManager;
         this.sphericalMapper = new SphericalChunkMapper(this.planetConfig);

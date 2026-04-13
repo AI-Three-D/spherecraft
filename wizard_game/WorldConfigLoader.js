@@ -18,6 +18,8 @@
 
 import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
 import { buildWorldTextureConfig } from './WorldTextureOverrides.js';
+import { TILE_TYPES } from '../templates/configs/tileTypes.js';
+import { buildWorldAuthoringRuntime } from '../core/world/biomeRuntime.js';
 
 export class WorldConfigLoader {
     /**
@@ -45,7 +47,29 @@ export class WorldConfigLoader {
         this.raw = { terrain, planet, postprocessing, engine, textures, biomes, assets };
 
         const engineConfig   = this._buildEngineConfig(terrain, planet, engine);
-        const gameDataConfig = this._buildGameDataConfig(terrain, planet, textures);
+        const gameDataConfig = this._buildGameDataConfig(terrain, planet, textures, biomes, assets);
+
+        const worldAuthoring = gameDataConfig?.planets?.[0]?.worldAuthoring ?? null;
+        const summary = worldAuthoring?.summary ?? null;
+        const shouldLogWorldAuthoring = !!summary && (
+            summary.biomeCount > 0 ||
+            summary.assetProfileCount > 0 ||
+            summary.unresolvedTileRefCount > 0 ||
+            summary.unknownAssetBiomeRefCount > 0
+        );
+        if (shouldLogWorldAuthoring) {
+            console.info(
+                `[WorldConfigLoader] world authoring ready: ` +
+                `${summary.biomeCount} biomes, ${summary.assetProfileCount} asset profiles`
+            );
+            if (summary.unresolvedTileRefCount > 0 || summary.unknownAssetBiomeRefCount > 0) {
+                console.warn(
+                    `[WorldConfigLoader] authoring warnings: ` +
+                    `${summary.unresolvedTileRefCount} unresolved tile refs, ` +
+                    `${summary.unknownAssetBiomeRefCount} unknown asset biome refs`
+                );
+            }
+        }
 
         return { engineConfig, gameDataConfig, postprocessing, raw: this.raw };
     }
@@ -55,7 +79,7 @@ export class WorldConfigLoader {
         const resp = await fetch(url);
         if (!resp.ok) throw new Error(`WorldConfigLoader: failed to fetch ${url} (${resp.status})`);
         const text = await resp.text();
-        // Strip single-line _comment keys before parsing (JSON5-lite)
+        // `_comment` keys are left intact; downstream builders ignore them.
         return JSON.parse(text);
     }
 
@@ -120,12 +144,21 @@ export class WorldConfigLoader {
 
     // ── Build GameDataConfig ──────────────────────────────────────────────
 
-    _buildGameDataConfig(terrain, planet, textures) {
+    _buildGameDataConfig(terrain, planet, textures, biomes = { biomes: [] }, assets = { profiles: [] }) {
         const base = createGameDataConfig();
 
         // The base factory returns a GameDataConfig whose planet list we patch.
         const activePlanet = base.planets[0];
         if (!activePlanet) return base;
+
+        const worldAuthoring = buildWorldAuthoringRuntime(
+            biomes ?? { biomes: [] },
+            assets ?? { profiles: [] },
+            { tileTypes: TILE_TYPES }
+        );
+        activePlanet.worldAuthoring = worldAuthoring;
+        activePlanet.biomeDefinitions = worldAuthoring.biomes;
+        activePlanet.assetProfiles = worldAuthoring.assetProfiles;
 
         // ── Terrain ──────────────────────────────────────────────────────
         const t = activePlanet.terrain;

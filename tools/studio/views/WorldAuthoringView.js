@@ -135,7 +135,13 @@ export class WorldAuthoringView extends WorldViewBase {
         loader.raw = raw;
         return {
             engineConfig: loader._buildEngineConfig(raw.terrain, raw.planet, raw.engine),
-            gameDataConfig: loader._buildGameDataConfig(raw.terrain, raw.planet, raw.textures),
+            gameDataConfig: loader._buildGameDataConfig(
+                raw.terrain,
+                raw.planet,
+                raw.textures,
+                raw.biomes,
+                raw.assets
+            ),
         };
     }
 
