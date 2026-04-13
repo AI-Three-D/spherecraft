@@ -1,4 +1,4 @@
-import { Vector2, Vector3 } from '../../../shared/math/index.js';
+import { Vector2, Vector3, Vector4 } from '../../../shared/math/index.js';
 import { Material } from '../../renderer/resources/material.js';
 import { requireBool, requireInt, requireNumber, requireObject } from '../../../shared/requireUtil.js';
 
@@ -12,14 +12,18 @@ export class TerrainMaterialBuilder {
         try {
             const vertex = await import('./shaders/webgpu/terrainChunkVertexShaderBuilder.js');
             const fragment = await import('./shaders/webgpu/terrainChunkFragmentShaderBuilder.js');
+            const overlay = await import('./shaders/webgpu/terrainChunkHoverOverlayFragmentShaderBuilder.js');
 
-            if (!vertex.buildTerrainChunkVertexShader || !fragment.buildTerrainChunkFragmentShader) {
+            if (!vertex.buildTerrainChunkVertexShader ||
+                !fragment.buildTerrainChunkFragmentShader ||
+                !overlay.buildTerrainChunkHoverOverlayFragmentShader) {
                 throw new Error('WebGPU shader builders missing export functions');
             }
 
             this._shaderBuilders = {
                 buildTerrainChunkVertexShader: vertex.buildTerrainChunkVertexShader,
-                buildTerrainChunkFragmentShader: fragment.buildTerrainChunkFragmentShader
+                buildTerrainChunkFragmentShader: fragment.buildTerrainChunkFragmentShader,
+                buildTerrainChunkHoverOverlayFragmentShader: overlay.buildTerrainChunkHoverOverlayFragmentShader,
             };
         } catch (e) {
             throw new Error(`Cannot load WebGPU shaders: ${e.message}`);
@@ -28,9 +32,15 @@ export class TerrainMaterialBuilder {
         return this._shaderBuilders;
     }
 
+    static async create(options) {
+        return this._createMaterial(options, false);
+    }
 
-        static async create(options) {
-            
+    static async createHoverOverlay(options) {
+        return this._createMaterial(options, true);
+    }
+
+    static async _createMaterial(options, overlayPass = false) {
             const opts = requireObject(options, 'options');
             const backend = requireObject(opts.backend, 'backend');
             const atlasTextures = requireObject(opts.atlasTextures, 'atlasTextures');
@@ -175,7 +185,9 @@ export class TerrainMaterialBuilder {
                 useStorageBuffer,
                 debugMode: debugVertexMode
             });
-            const fragmentShader = builders.buildTerrainChunkFragmentShader(shaderOptions);
+            const fragmentShader = overlayPass
+                ? builders.buildTerrainChunkHoverOverlayFragmentShader(shaderOptions)
+                : builders.buildTerrainChunkFragmentShader(shaderOptions);
 
             const isSpherical = faceIndex >= 0 && faceIndex <= 5;
             const chunkSizeUV = 1.0 / faceSize;
@@ -328,6 +340,15 @@ macroMaskTexture: { value: cachedTextures.macro },
             atlasUVScale: { value: uvTransform?.scale || 1.0 },
         };
 
+        if (overlayPass) {
+            uniforms.terrainHoverFace = { value: -1 };
+            uniforms.terrainHoverFlags = { value: 0 };
+            uniforms.terrainHoverMicroRect = { value: new Vector4(0, 0, 0, 0) };
+            uniforms.terrainHoverMacroRect = { value: new Vector4(0, 0, 0, 0) };
+            uniforms.terrainHoverMicroColor = { value: new Vector4(1.0, 0.42, 0.42, 1.5) };
+            uniforms.terrainHoverMacroColor = { value: new Vector4(0.42, 0.64, 1.0, 2.0) };
+        }
+
         // =============================================
         // Clone global uniforms from UniformManager
         // =============================================
@@ -390,7 +411,7 @@ macroMaskTexture: { value: cachedTextures.macro },
         }
 
         const material = new Material({
-            name: 'TerrainMaterial',
+            name: overlayPass ? 'TerrainHoverOverlayMaterial' : 'TerrainMaterial',
             vertexShader: vertexShader,
             fragmentShader: fragmentShader,
             uniforms,
@@ -398,7 +419,9 @@ macroMaskTexture: { value: cachedTextures.macro },
             storageBuffers: useStorageBuffer ? { chunkInstances: null } : null,
             side: 'back',
             depthTest: true,
-            depthWrite: true,
+            depthWrite: overlayPass ? false : true,
+            depthCompare: overlayPass ? 'less-equal' : 'less',
+            transparent: overlayPass,
             isInstanced: true,
             vertexLayout: vertexLayout,
         });

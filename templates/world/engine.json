@@ -40,9 +40,12 @@
   },
   "terrainShader": {
     "aerialFadeStartMeters": 400,
-    "aerialFadeEndMeters":   600,
-    "ambientScale":          1.3,
-    "sunWrap":               0.18
+    "aerialFadeEndMeters":   600
+  },
+  "terrainAO": {
+    "sampleStrength": 1.0,
+    "directStrength": 0.7,
+    "ambientFloor":   0.65
   },
   "gpuQuadtree": {
     "lodErrorThreshold": 512,

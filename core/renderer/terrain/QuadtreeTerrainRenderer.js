@@ -4,7 +4,7 @@
 // Pure rendering concern: builds geometries/materials, consumes
 // instance + indirect buffers from the tile manager, issues draw calls.
 
-import { Matrix4 } from '../../../shared/math/index.js';
+import { Matrix4, Vector4 } from '../../../shared/math/index.js';
 import { TerrainGeometryBuilder } from '../../mesh/terrain/terrainGeometryBuilder.js';
 import { TerrainMaterialBuilder } from '../../mesh/terrain/terrainMaterialBuilder.js';
 import { Logger } from '../../../shared/Logger.js';
@@ -32,12 +32,21 @@ export class QuadtreeTerrainRenderer {
         this._atmosphereLUT = null;
         this._geometries = new Map();
         this._materials = new Map();
+        this._overlayMaterials = new Map();
         this._lodIndexCounts = [];
         this._lodSegments = null;
         this._maxGeomLOD = 0;
         this._initialized = false;
         this._directDrawArgs = null;
         this._directDrawPending = false;
+        this._terrainHoverOverlay = {
+            face: -1,
+            flags: 0,
+            microRect: new Vector4(0, 0, 0, 0),
+            macroRect: new Vector4(0, 0, 0, 0),
+            microColor: new Vector4(1.0, 0.42, 0.42, 1.5),
+            macroColor: new Vector4(0.42, 0.64, 1.0, 2.0),
+        };
     }
 
     async initialize() {
@@ -71,6 +80,31 @@ export class QuadtreeTerrainRenderer {
         this._atmosphereLUT = lut || null;
     }
 
+    setTerrainHoverOverlay(overlay = null) {
+        const next = overlay && typeof overlay === 'object' ? overlay : {};
+        const flags =
+            (next.microRect ? 1 : 0) |
+            (next.macroRect ? 2 : 0);
+
+        this._terrainHoverOverlay.face = Number.isInteger(next.face) ? next.face : -1;
+        this._terrainHoverOverlay.flags = this._terrainHoverOverlay.face >= 0 ? flags : 0;
+
+        const copyRect = (target, rect) => {
+            if (!rect) {
+                target.set(0, 0, 0, 0);
+                return;
+            }
+            target.set(
+                rect.minX ?? rect.minU01 ?? 0,
+                rect.minY ?? rect.minV01 ?? 0,
+                rect.maxX ?? rect.maxU01 ?? 0,
+                rect.maxY ?? rect.maxV01 ?? 0
+            );
+        };
+        copyRect(this._terrainHoverOverlay.microRect, next.microRect);
+        copyRect(this._terrainHoverOverlay.macroRect, next.macroRect);
+    }
+
     render(camera, viewMatrix, projectionMatrix) {
         if (!this._initialized || !this.tileManager?.isReady()) return;
     
@@ -84,6 +118,9 @@ export class QuadtreeTerrainRenderer {
 
         const instanceBuffer = this.tileManager.getInstanceBuffer();
         const indirectBuffer = this.tileManager.getIndirectArgsBuffer();
+        const overlayEnabled =
+            this._terrainHoverOverlay.face >= 0 &&
+            this._terrainHoverOverlay.flags !== 0;
         const debugConfig = this.engineConfig?.debug || {};
         const supportsIndirectFirstInstance = this.backend?.supportsIndirectFirstInstance !== false;
         const forceDirectDraw = debugConfig.terrainForceDirectDraw === true || !supportsIndirectFirstInstance;
@@ -175,6 +212,20 @@ export class QuadtreeTerrainRenderer {
             }*/
 
             this.backend.drawIndexedIndirect(geo, mat, indirectBuffer, offset);
+
+            if (!overlayEnabled) {
+                continue;
+            }
+
+            const overlayMat = this._overlayMaterials.get(lod);
+            if (!overlayMat) {
+                continue;
+            }
+
+            if (!overlayMat.storageBuffers) overlayMat.storageBuffers = {};
+            overlayMat.storageBuffers.chunkInstances = instanceBuffer;
+            this._applyMaterialUniforms(overlayMat, camera, viewMatrix, projectionMatrix, lod);
+            this.backend.drawIndexedIndirect(geo, overlayMat, indirectBuffer, offset);
         }
     }
     setShadowRenderer(renderer) {
@@ -187,7 +238,13 @@ export class QuadtreeTerrainRenderer {
                 this.backend?.destroyMaterial?.(mat);
             } catch (_) {}
         }
+        for (const mat of this._overlayMaterials.values()) {
+            try {
+                this.backend?.destroyMaterial?.(mat);
+            } catch (_) {}
+        }
         this._materials.clear();
+        this._overlayMaterials.clear();
         await this._buildGeometriesAndMaterials();
     }
     async _buildGeometriesAndMaterials() {
@@ -281,6 +338,45 @@ export class QuadtreeTerrainRenderer {
             if (material) {
                 this._materials.set(lod, material);
             }
+
+            const overlayMaterial = await TerrainMaterialBuilder.createHoverOverlay({
+                terrainAODefaults: this.terrainAODefaults,
+                groundFieldDefaults: this.groundFieldDefaults,
+                tileCategories: this.tileCategories,
+                backend: this.backend,
+                atlasTextures,
+                lookupTables,
+                cachedTextures,
+                chunkOffsetX: 0,
+                chunkOffsetZ: 0,
+                chunkSize: this.engineConfig.chunkSizeMeters,
+                environmentState,
+                uniformManager: this.uniformManager,
+                faceIndex: 0,
+                faceU: 0,
+                faceV: 0,
+                faceSize: faceSize,
+                planetConfig: pConfig,
+                useAtlasMode: true,
+                uvTransform: { offsetX: 0, offsetY: 0, scale: 1 },
+                heightScale,
+                terrainShaderConfig: this.engineConfig?.rendering?.terrainShader ?? null,
+                transmittanceLUT: this._atmosphereLUT?.transmittanceLUT || null,
+                aerialPerspectiveEnabled: pConfig.hasAtmosphere ? 1.0 : 0.0,
+                enableInstancing: true,
+                useStorageBufferInstancing: true,
+                lod: lod,
+                chunksPerFace: faceSize,
+                lodSegments: lodSegments,
+                debugMode: 0,
+                debugVertexMode: debugConfig.terrainVertexDebugMode ?? 0,
+                useTransitionTopology,
+                blendModeTable: { value: lookupTables.blendModeTable ?? null },
+                tileLayerHeights: { value: lookupTables.tileLayerHeights ?? null },
+            });
+            if (overlayMaterial) {
+                this._overlayMaterials.set(lod, overlayMaterial);
+            }
         }
         Logger.info(`[QTR] Built ${this._geometries.size} LOD geometries, lodIndexCounts=[${this._lodIndexCounts.join(', ')}]`);
     }
@@ -304,6 +400,24 @@ export class QuadtreeTerrainRenderer {
         if (mat.uniforms.geometryLOD) mat.uniforms.geometryLOD.value = lodLevel;
         if (mat.uniforms.lodLevel) mat.uniforms.lodLevel.value = lodLevel;
         if (mat.uniforms.useInstancing) mat.uniforms.useInstancing.value = 1.0;
+        if (mat.uniforms.terrainHoverFace) {
+            mat.uniforms.terrainHoverFace.value = this._terrainHoverOverlay.face;
+        }
+        if (mat.uniforms.terrainHoverFlags) {
+            mat.uniforms.terrainHoverFlags.value = this._terrainHoverOverlay.flags;
+        }
+        if (mat.uniforms.terrainHoverMicroRect) {
+            mat.uniforms.terrainHoverMicroRect.value.copy(this._terrainHoverOverlay.microRect);
+        }
+        if (mat.uniforms.terrainHoverMacroRect) {
+            mat.uniforms.terrainHoverMacroRect.value.copy(this._terrainHoverOverlay.macroRect);
+        }
+        if (mat.uniforms.terrainHoverMicroColor) {
+            mat.uniforms.terrainHoverMicroColor.value.copy(this._terrainHoverOverlay.microColor);
+        }
+        if (mat.uniforms.terrainHoverMacroColor) {
+            mat.uniforms.terrainHoverMacroColor.value.copy(this._terrainHoverOverlay.macroColor);
+        }
 
         const u = this.uniformManager?.uniforms;
         if (!u) return;

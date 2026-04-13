@@ -1,9 +1,10 @@
 /**
- * WorldViewBase — full-featured world editor view.
+ * WorldViewBase — base world-config editor view.
  *
- * Subclass this to attach a real world engine. The base class handles all
- * sidebar UI, parameter management, dirty tracking, and JSON save/load.
- * Subclasses only need to implement `createEngine()` and `worldDir`.
+ * Subclass this to attach a real world engine. The base class handles the
+ * shared config sidebar, parameter management, dirty tracking, and JSON
+ * save/load. For the richer hover/texture-authoring workflow, subclass
+ * `WorldAuthoringView` instead.
  *
  * To create a game-specific world view:
  *
@@ -211,6 +212,9 @@ export class WorldViewBase extends StudioView {
      */
     // eslint-disable-next-line no-unused-vars
     async createEngine(canvas, engineConfig, gameDataConfig) { return null; }
+
+    // eslint-disable-next-line no-unused-vars
+    async _afterWorldFileLoaded(key) {}
 
     // ── Internal state ────────────────────────────────────────────────
 
@@ -446,9 +450,17 @@ export class WorldViewBase extends StudioView {
     }
 
     _snapshotRegenParams(raw) {
-        // Deep clone only the regen-relevant parts
+        // Deep clone the regen-relevant parts (terrain, planet regen fields, engine regen fields, biomes)
         return JSON.parse(JSON.stringify({
             terrain: raw.terrain,
+            planet: {
+                atmosphereHeightRatio: raw.planet?.atmosphereHeightRatio,
+                maxTerrainHeight: raw.planet?.maxTerrainHeight,
+            },
+            engine: {
+                macroConfig: raw.engine?.macroConfig,
+            },
+            biomes: raw.biomes,
         }));
     }
 
@@ -456,6 +468,18 @@ export class WorldViewBase extends StudioView {
         if (!this._dirty || !this._regenRaw) return;
         // Restore regen params from snapshot
         Object.assign(this._raw.terrain, JSON.parse(JSON.stringify(this._regenRaw.terrain)));
+        if (this._regenRaw.planet) {
+            if (this._regenRaw.planet.atmosphereHeightRatio != null)
+                this._raw.planet.atmosphereHeightRatio = this._regenRaw.planet.atmosphereHeightRatio;
+            if (this._regenRaw.planet.maxTerrainHeight != null)
+                this._raw.planet.maxTerrainHeight = this._regenRaw.planet.maxTerrainHeight;
+        }
+        if (this._regenRaw.engine?.macroConfig) {
+            this._raw.engine.macroConfig = JSON.parse(JSON.stringify(this._regenRaw.engine.macroConfig));
+        }
+        if (this._regenRaw.biomes) {
+            this._raw.biomes = JSON.parse(JSON.stringify(this._regenRaw.biomes));
+        }
         this._dirty = false;
         this._updateDirtyUI();
         // Rebuild the sidebar to show reverted values
@@ -567,7 +591,11 @@ export class WorldViewBase extends StudioView {
                     this._raw[key] = data;
                     this._ctx.sidebarLeft.innerHTML = '';
                     this._buildLeftSidebar(this._ctx.sidebarLeft, this._raw);
-                    if (key === 'postprocessing') this._applyRealtime();
+                    await this._afterWorldFileLoaded(key);
+                    this._applyRealtime();
+                    this._regenRaw = this._snapshotRegenParams(this._raw);
+                    this._dirty = false;
+                    this._updateDirtyUI();
                     this.toast(`Loaded ${file.name}`);
                 }
             } catch (e) {

@@ -468,6 +468,7 @@
     <!-- Game modules -->
     <script type="module">
         import { GameEngine } from './gameEngine.js';
+        import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
         import { CubeSphereCoords } from '../core/planet/cubeSphereCoords.js';
         window.qtDiag = window.qtDiag || {
@@ -475,10 +476,8 @@
                 console.log('window.qtDiag is loaded, but the engine diagnostics are not bound yet.');
             }
         };
-        const engineConfig = createEngineConfig();
-        const gameDataConfig = createGameDataConfig();
-        const gameEngine = new GameEngine('gameCanvas', engineConfig, gameDataConfig);
-        window.gameEngine = gameEngine;
+        let gameEngine = null;
+        let worldConfigLoader = null;
         let debugMode = false;
 
         function installQuadtreeDiagnostics(engine) {
@@ -1726,7 +1725,31 @@
         // Initialize game
         async function init() {
             try {
+                let engineConfig = createEngineConfig();
+                let gameDataConfig = createGameDataConfig();
+                let worldRaw = null;
+
+                try {
+                    worldConfigLoader = new WorldConfigLoader('./world');
+                    const loaded = await worldConfigLoader.load();
+                    engineConfig = loaded.engineConfig;
+                    gameDataConfig = loaded.gameDataConfig;
+                    worldRaw = loaded.raw;
+                } catch (loaderError) {
+                    console.warn('[Standalone] Falling back to runtime configs:', loaderError);
+                    worldConfigLoader = null;
+                }
+
+                gameEngine = new GameEngine('gameCanvas', engineConfig, gameDataConfig);
+                window.gameEngine = gameEngine;
+                installQuadtreeDiagnostics(gameEngine);
                 await gameEngine.start();
+                worldConfigLoader?.applyRealtime(
+                    gameEngine,
+                    worldRaw?.postprocessing,
+                    worldRaw?.planet,
+                    worldRaw?.engine
+                );
 
                 console.log('Game initialized');
 

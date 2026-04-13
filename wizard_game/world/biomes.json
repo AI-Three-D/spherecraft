@@ -1,0 +1,221 @@
+{
+  "_comment": "Biome definitions for world generation. Each biome has signal rules for environment-based selection.",
+  "biomes": [
+    {
+      "id": "grass",
+      "displayName": "Grassland",
+      "tileRef": {
+        "micro": "GRASS_SHORT_1",
+        "macro": "GRASS_SHORT_1"
+      },
+      "tags": ["temperate", "open"],
+      "baseWeight": 1.0,
+      "signals": {
+        "elevation": {
+          "min": -0.5,
+          "max": 0.6,
+          "transitionWidth": 0.1,
+          "preference": "low",
+          "ditherScale": 0.02,
+          "ditherStrength": 0.1,
+          "weight": 0.3
+        },
+        "humidity": {
+          "min": 0.25,
+          "max": 0.8,
+          "transitionWidth": 0.1,
+          "preference": "mid",
+          "ditherScale": 0.015,
+          "ditherStrength": 0.08,
+          "weight": 0.4
+        },
+        "temperature": {
+          "min": 0.25,
+          "max": 0.75,
+          "transitionWidth": 0.08,
+          "preference": "mid",
+          "ditherScale": 0.02,
+          "ditherStrength": 0.06,
+          "weight": 0.2
+        },
+        "slope": {
+          "min": 0.0,
+          "max": 0.5,
+          "transitionWidth": 0.1,
+          "preference": "low",
+          "ditherScale": 0.01,
+          "ditherStrength": 0.05,
+          "weight": 0.1
+        }
+      },
+      "regionalVariation": {
+        "noiseType": "simplex",
+        "noiseScale": 0.001,
+        "noiseStrength": 0.15,
+        "seedOffset": 100
+      }
+    },
+    {
+      "id": "forest",
+      "displayName": "Forest",
+      "tileRef": {
+        "micro": "FOREST_DENSE_SINGLE_1",
+        "macro": "FOREST_DENSE_SINGLE_1"
+      },
+      "tags": ["temperate", "woodland"],
+      "baseWeight": 0.8,
+      "signals": {
+        "elevation": {
+          "min": -0.3,
+          "max": 0.55,
+          "transitionWidth": 0.1,
+          "preference": "low",
+          "ditherScale": 0.02,
+          "ditherStrength": 0.1,
+          "weight": 0.2
+        },
+        "humidity": {
+          "min": 0.45,
+          "max": 1.0,
+          "transitionWidth": 0.1,
+          "preference": "high",
+          "ditherScale": 0.015,
+          "ditherStrength": 0.1,
+          "weight": 0.4
+        },
+        "temperature": {
+          "min": 0.2,
+          "max": 0.7,
+          "transitionWidth": 0.08,
+          "preference": "mid",
+          "ditherScale": 0.02,
+          "ditherStrength": 0.06,
+          "weight": 0.3
+        },
+        "slope": {
+          "min": 0.0,
+          "max": 0.45,
+          "transitionWidth": 0.1,
+          "preference": "low",
+          "ditherScale": 0.01,
+          "ditherStrength": 0.05,
+          "weight": 0.1
+        }
+      },
+      "regionalVariation": {
+        "noiseType": "fbm",
+        "noiseScale": 0.0008,
+        "noiseStrength": 0.2,
+        "seedOffset": 200
+      }
+    },
+    {
+      "id": "desert",
+      "displayName": "Desert",
+      "tileRef": {
+        "micro": "DESERT_DRY_1",
+        "macro": "DESERT_DRY_1"
+      },
+      "tags": ["arid", "hot"],
+      "baseWeight": 0.7,
+      "signals": {
+        "elevation": {
+          "min": -0.3,
+          "max": 0.5,
+          "transitionWidth": 0.1,
+          "preference": "low",
+          "ditherScale": 0.02,
+          "ditherStrength": 0.1,
+          "weight": 0.15
+        },
+        "humidity": {
+          "min": 0.0,
+          "max": 0.3,
+          "transitionWidth": 0.08,
+          "preference": "low",
+          "ditherScale": 0.015,
+          "ditherStrength": 0.1,
+          "weight": 0.45
+        },
+        "temperature": {
+          "min": 0.5,
+          "max": 1.0,
+          "transitionWidth": 0.1,
+          "preference": "high",
+          "ditherScale": 0.02,
+          "ditherStrength": 0.08,
+          "weight": 0.3
+        },
+        "slope": {
+          "min": 0.0,
+          "max": 0.6,
+          "transitionWidth": 0.15,
+          "preference": "low",
+          "ditherScale": 0.01,
+          "ditherStrength": 0.05,
+          "weight": 0.1
+        }
+      },
+      "regionalVariation": {
+        "noiseType": "simplex",
+        "noiseScale": 0.0012,
+        "noiseStrength": 0.18,
+        "seedOffset": 300
+      }
+    },
+    {
+      "id": "ice",
+      "displayName": "Ice & Snow",
+      "tileRef": {
+        "micro": "SNOW_FRESH_1",
+        "macro": "SNOW_FRESH_1"
+      },
+      "tags": ["cold", "polar"],
+      "baseWeight": 0.6,
+      "signals": {
+        "elevation": {
+          "min": 0.2,
+          "max": 1.0,
+          "transitionWidth": 0.15,
+          "preference": "high",
+          "ditherScale": 0.02,
+          "ditherStrength": 0.12,
+          "weight": 0.3
+        },
+        "humidity": {
+          "min": 0.0,
+          "max": 1.0,
+          "transitionWidth": 0.1,
+          "preference": "mid",
+          "ditherScale": 0.015,
+          "ditherStrength": 0.05,
+          "weight": 0.1
+        },
+        "temperature": {
+          "min": 0.0,
+          "max": 0.3,
+          "transitionWidth": 0.08,
+          "preference": "low",
+          "ditherScale": 0.02,
+          "ditherStrength": 0.08,
+          "weight": 0.5
+        },
+        "slope": {
+          "min": 0.0,
+          "max": 0.7,
+          "transitionWidth": 0.15,
+          "preference": "mid",
+          "ditherScale": 0.01,
+          "ditherStrength": 0.05,
+          "weight": 0.1
+        }
+      },
+      "regionalVariation": {
+        "noiseType": "ridged_fbm",
+        "noiseScale": 0.0006,
+        "noiseStrength": 0.15,
+        "seedOffset": 400
+      }
+    }
+  ]
+}

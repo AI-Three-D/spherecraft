@@ -551,10 +551,10 @@ await this.proceduralTextureGenerator.initialize();
 
 // ── Terrain texture atlas ─────────────────────────────────────────────
 this.textureManager = new TextureAtlasManager(false, gpuDevice, this.proceduralTextureGenerator, {
-    TILE_CONFIG,
+    TILE_CONFIG: this.planetConfig.tileConfig || TILE_CONFIG,
     TEXTURE_LEVELS,
     ATLAS_CONFIG,
-    TEXTURE_CONFIG,
+    TEXTURE_CONFIG: this.planetConfig.atlasConfig || TEXTURE_CONFIG,
     TextureConfigHelper,
     SEASONS,
     TILE_LAYER_HEIGHTS,

@@ -2081,6 +2081,35 @@ _packFragmentUniforms(uniforms) {
     i32[58] = 0;
     i32[59] = 0;
 
+    i32[60] = uniforms.terrainHoverFace?.value ?? -1;
+    i32[61] = uniforms.terrainHoverFlags?.value ?? 0;
+    f32[62] = 0.0;
+    f32[63] = 0.0;
+
+    const microRect = uniforms.terrainHoverMicroRect?.value;
+    f32[64] = microRect?.x ?? 0.0;
+    f32[65] = microRect?.y ?? 0.0;
+    f32[66] = microRect?.z ?? 0.0;
+    f32[67] = microRect?.w ?? 0.0;
+
+    const macroRect = uniforms.terrainHoverMacroRect?.value;
+    f32[68] = macroRect?.x ?? 0.0;
+    f32[69] = macroRect?.y ?? 0.0;
+    f32[70] = macroRect?.z ?? 0.0;
+    f32[71] = macroRect?.w ?? 0.0;
+
+    const microColor = uniforms.terrainHoverMicroColor?.value;
+    f32[72] = microColor?.x ?? 1.0;
+    f32[73] = microColor?.y ?? 0.42;
+    f32[74] = microColor?.z ?? 0.42;
+    f32[75] = microColor?.w ?? 1.5;
+
+    const macroColor = uniforms.terrainHoverMacroColor?.value;
+    f32[76] = macroColor?.x ?? 0.42;
+    f32[77] = macroColor?.y ?? 0.64;
+    f32[78] = macroColor?.z ?? 1.0;
+    f32[79] = macroColor?.w ?? 2.0;
+
     return f32;
 }
 _packDebugUniforms(uniforms) {

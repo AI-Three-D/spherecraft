@@ -17,6 +17,7 @@
  */
 
 import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
+import { buildWorldTextureConfig } from './WorldTextureOverrides.js';
 
 export class WorldConfigLoader {
     /**
@@ -31,17 +32,20 @@ export class WorldConfigLoader {
     // ── Load ─────────────────────────────────────────────────────────────
 
     async load() {
-        const [terrain, planet, postprocessing, engine] = await Promise.all([
+        const [terrain, planet, postprocessing, engine, textures, biomes, assets] = await Promise.all([
             this._fetchJSON('terrain.json'),
             this._fetchJSON('planet.json'),
             this._fetchJSON('postprocessing.json'),
-            this._fetchJSON('engine.json').catch(() => ({})),  // optional
+            this._fetchJSON('engine.json').catch(() => ({})),
+            this._fetchJSON('textures.json').catch(() => ({ overrides: {} })),
+            this._fetchJSON('biomes.json').catch(() => ({ biomes: [] })),
+            this._fetchJSON('assets.json').catch(() => ({ profiles: [] })),
         ]);
 
-        this.raw = { terrain, planet, postprocessing, engine };
+        this.raw = { terrain, planet, postprocessing, engine, textures, biomes, assets };
 
         const engineConfig   = this._buildEngineConfig(terrain, planet, engine);
-        const gameDataConfig = this._buildGameDataConfig(terrain, planet);
+        const gameDataConfig = this._buildGameDataConfig(terrain, planet, textures);
 
         return { engineConfig, gameDataConfig, postprocessing, raw: this.raw };
     }
@@ -95,6 +99,16 @@ export class WorldConfigLoader {
             const ts = base.rendering?.terrainShader ?? {};
             Object.assign(ts, engine.terrainShader);
         }
+        if (engine?.terrainAO) {
+            const ao = base.terrainAO ?? {};
+            Object.assign(ao, engine.terrainAO);
+            base.terrainAO = ao;
+        }
+        if (Number.isFinite(engine?.terrainShader?.ambientScale) && !Number.isFinite(base.terrainAO?.sampleStrength)) {
+            const ao = base.terrainAO ?? {};
+            ao.sampleStrength = Math.max(0, Math.min(1, engine.terrainShader.ambientScale / 1.3));
+            base.terrainAO = ao;
+        }
         // gpuQuadtree overrides
         if (engine?.gpuQuadtree) {
             const q = base.gpuQuadtree ?? {};
@@ -106,7 +120,7 @@ export class WorldConfigLoader {
 
     // ── Build GameDataConfig ──────────────────────────────────────────────
 
-    _buildGameDataConfig(terrain, planet) {
+    _buildGameDataConfig(terrain, planet, textures) {
         const base = createGameDataConfig();
 
         // The base factory returns a GameDataConfig whose planet list we patch.
@@ -140,6 +154,8 @@ export class WorldConfigLoader {
                 base.starSystem.sunIntensity = planet.starSystem.sunIntensity;
             }
         }
+
+        activePlanet.atlasConfig = buildWorldTextureConfig(textures, activePlanet.atlasConfig);
 
         // ── Time / spawn ─────────────────────────────────────────────────
         if (planet?.time) {
