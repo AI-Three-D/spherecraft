@@ -407,7 +407,64 @@ fn determineTileTypeAdvanced(
 }
 
 
-fn determineTileType(
+fn authoredBiomeTileVariantBase(tileId: u32) -> u32 {
+    let validTileId = validateTileType(tileId);
+
+    if (validTileId == SURFACE_WATER) {
+        return SURFACE_WATER;
+    }
+    if (isGrassTile(validTileId)) {
+        return SURFACE_GRASS_MIN + ((validTileId - SURFACE_GRASS_MIN) / 4u) * 4u;
+    }
+    if (isSandTile(validTileId)) {
+        return SURFACE_SAND_MIN + ((validTileId - SURFACE_SAND_MIN) / 4u) * 4u;
+    }
+    if (isRockTile(validTileId)) {
+        return SURFACE_ROCK_MIN + ((validTileId - SURFACE_ROCK_MIN) / 4u) * 4u;
+    }
+    if (isTundraTile(validTileId)) {
+        return SURFACE_TUNDRA_MIN + ((validTileId - SURFACE_TUNDRA_MIN) / 4u) * 4u;
+    }
+    if (isForestFloorTile(validTileId)) {
+        if (validTileId >= SURFACE_FOREST_TROPICAL_MIN) {
+            return SURFACE_FOREST_TROPICAL_MIN + ((validTileId - SURFACE_FOREST_TROPICAL_MIN) / 4u) * 4u;
+        }
+        return SURFACE_FOREST_FLOOR_MIN + ((validTileId - SURFACE_FOREST_FLOOR_MIN) / 4u) * 4u;
+    }
+    if (isSwampTile(validTileId)) {
+        return SURFACE_SWAMP_MIN + ((validTileId - SURFACE_SWAMP_MIN) / 4u) * 4u;
+    }
+    if (isDirtTile(validTileId)) {
+        return SURFACE_DIRT_MIN + ((validTileId - SURFACE_DIRT_MIN) / 4u) * 4u;
+    }
+    if (isMudTile(validTileId)) {
+        return SURFACE_MUD_MIN + ((validTileId - SURFACE_MUD_MIN) / 4u) * 4u;
+    }
+    if (isSnowTile(validTileId)) {
+        return SURFACE_SNOW_MIN + ((validTileId - SURFACE_SNOW_MIN) / 4u) * 4u;
+    }
+    if (isDesertTile(validTileId)) {
+        return SURFACE_DESERT_MIN + ((validTileId - SURFACE_DESERT_MIN) / 4u) * 4u;
+    }
+    if (isVolcanicTile(validTileId)) {
+        return SURFACE_VOLCANIC_MIN + ((validTileId - SURFACE_VOLCANIC_MIN) / 4u) * 4u;
+    }
+
+    return SURFACE_GRASS_BASE;
+}
+
+fn resolveAuthoredBiomeTileType(
+    tileId: u32,
+    variant: u32
+) -> u32 {
+    let baseTile = authoredBiomeTileVariantBase(tileId);
+    if (baseTile == SURFACE_WATER) {
+        return SURFACE_WATER;
+    }
+    return validateTileType(baseTile + variant);
+}
+
+fn determineTileTypeFallback(
     h: f32, slope: f32, wx: f32, wy: f32,
     unitDir: vec3<f32>, seed: i32
 ) -> u32 {
@@ -419,6 +476,47 @@ fn determineTileType(
 
     let weights = computeSurfaceWeights(slope, h, wx, wy, unitDir, seed);
     return resolveTileTypeFromWeights(weights, wx, wy, unitDir, seed, h, slope);
+}
+
+fn determineTileType(
+    h: f32, slope: f32, wx: f32, wy: f32,
+    unitDir: vec3<f32>, seed: i32
+) -> u32 {
+    let oceanLevel = uniforms.waterParams.y;
+
+    if (h <= oceanLevel) {
+        return SURFACE_WATER;
+    }
+
+    if (biomeConfigUniforms.biomeCount == 0u) {
+        return determineTileTypeFallback(h, slope, wx, wy, unitDir, seed);
+    }
+
+    let climate = getClimate(wx, wy, unitDir, h, seed);
+    let biome = selectBiomeFromDefs(
+        h,
+        climate.precipitation,
+        climate.temperature,
+        slope,
+        wx,
+        wy,
+        biomeConfigUniforms
+    );
+    if (biome.score <= 0.0) {
+        return determineTileTypeFallback(h, slope, wx, wy, unitDir, seed);
+    }
+
+    let variant = selectTileVariant(wx, wy, unitDir, seed);
+    let rockNoise = (fbmAuto(wx, wy, unitDir, 0.12, 2, seed + 7310, 2.0, 0.5) + 1.0) * 0.5;
+    let rockSlope = smoothstep(0.48, 0.80, slope);
+    let highland = smoothstep(oceanLevel + 0.04, oceanLevel + 0.20, h);
+    let rockMask = rockSlope * mix(0.65, 1.0, highland) * mix(0.8, 1.05, rockNoise);
+    let rockThreshold = select(0.72, 0.88, isSnowTile(biome.tileId));
+    if (rockMask > rockThreshold) {
+        return validateTileType(SURFACE_ROCK_BASE + variant);
+    }
+
+    return resolveAuthoredBiomeTileType(biome.tileId, variant);
 }
 
 fn debugForcedTileType() -> u32 {
