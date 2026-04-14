@@ -214,6 +214,7 @@ export class StudioWorldEngine {
                 this._terrainRaycaster.initialize();
                 this._biomeQuery = new BiomeQuery(gpuDevice, ts);
                 this._biomeQuery.initialize();
+                console.info('[StudioWorldEngine] Biome hover query is sampling tile/height/normal/climate textures');
             }
         } catch (e) {
             console.warn('[StudioWorldEngine] Could not init terrain raycaster/biome query:', e.message);

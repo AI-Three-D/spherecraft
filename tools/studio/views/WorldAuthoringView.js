@@ -1423,6 +1423,12 @@ export class WorldAuthoringView extends WorldViewBase {
             tileY: result.tileY,
             localU: result.localU,
             localV: result.localV,
+            signals: {
+                elevation: result.elevation,
+                humidity: result.humidity,
+                temperature: result.temperature,
+                slope: result.slope,
+            },
         };
         this._hoverBorderGeometryCache.clear();
         this._hoverBorderGeometryRequests.clear();
@@ -1441,37 +1447,18 @@ export class WorldAuthoringView extends WorldViewBase {
         const info = this._hoverInfo;
         if (!info) return;
 
-        // Run biome diagnostics if biome definitions are available
-        const biomeDefs = this._raw?.biomes?.biomes;
+        const biomeDefs = this._getActiveBiomeDefinitions();
         let biomeResult = null;
-        if (biomeDefs && biomeDefs.length > 0 && this._hitPosition) {
-            // We use tile ID info as proxy signals (real climate signals would need
-            // additional GPU readback; this approximation uses elevation from hit pos)
-            const engine = this._engine;
-            const pc = engine?.planetConfig;
-            if (pc) {
-                const o = pc.origin || { x: 0, y: 0, z: 0 };
-                const hp = this._hitPosition;
-                const dist = Math.sqrt((hp.x - o.x) ** 2 + (hp.y - o.y) ** 2 + (hp.z - o.z) ** 2);
-                const elevation = Math.max(0, Math.min(1, (dist - pc.radius) / (pc.heightScale || 5000)));
-                // Approximate signals from position
-                const dir = {
-                    x: (hp.x - o.x) / dist,
-                    y: (hp.y - o.y) / dist,
-                    z: (hp.z - o.z) / dist,
-                };
-                const latitude = Math.abs(dir.y);
-                const temperature = Math.max(0, Math.min(1, 1 - latitude * 1.3 - elevation * 0.3));
-                const humidity = Math.max(0, Math.min(1, 0.5 + Math.sin(dir.x * 3 + dir.z * 2) * 0.3 - elevation * 0.2));
-                // Slope approximation from tile depth
-                const slope = Math.max(0, Math.min(1, (info.depth > 8 ? 0.3 : 0.1)));
-
-                const signals = { elevation, humidity, temperature, slope };
-                const seed = this._raw?.terrain?.seed ?? 12345;
-                biomeResult = selectBiome(biomeDefs, signals, hp.x, hp.z, seed);
-                info.signals = signals;
-                info.biomeResult = biomeResult;
-            }
+        if (biomeDefs.length > 0 && this._hitPosition && info.signals) {
+            const sampleCoords = this._getBiomeSelectionCoords(this._hitPosition);
+            biomeResult = selectBiome(
+                biomeDefs,
+                info.signals,
+                sampleCoords.x,
+                sampleCoords.y,
+                this._getBiomeSelectionSeed()
+            );
+            info.biomeResult = biomeResult;
         }
 
         // Update hover info bar
@@ -1514,9 +1501,9 @@ export class WorldAuthoringView extends WorldViewBase {
         html += `<div class="diag-row"><span class="diag-label">Slope</span><span class="diag-value">${sigs.slope.toFixed(3)}</span></div>`;
 
         // Score breakdown
-        if (biomeResult.scores) {
+        if (Array.isArray(biomeResult.rankedScores) && biomeResult.rankedScores.length > 0) {
             html += '<div style="margin-top:4px; border-top:1px solid var(--border); padding-top:4px;">';
-            for (const entry of biomeResult.scores.slice(0, 4)) {
+            for (const entry of biomeResult.rankedScores.slice(0, 4)) {
                 const pct = (entry.probability * 100).toFixed(1);
                 html += `<div class="diag-row"><span class="diag-label">${entry.biome.id}</span><span class="diag-value">${pct}%</span></div>`;
             }
@@ -1525,6 +1512,37 @@ export class WorldAuthoringView extends WorldViewBase {
 
         diagEl.innerHTML = html;
         diagEl.classList.add('visible');
+    }
+
+    _getActiveBiomeDefinitions() {
+        const runtimeBiomes = this._engine?.planetConfig?.worldAuthoring?.biomes;
+        if (Array.isArray(runtimeBiomes) && runtimeBiomes.length > 0) {
+            // Use the GPU-loaded runtime biomes so diagnostics match what terrain actually rendered.
+            // This can diverge from raw authored edits until Regenerate World is pressed.
+            return runtimeBiomes;
+        }
+        const rawBiomes = this._raw?.biomes?.biomes;
+        return Array.isArray(rawBiomes) ? rawBiomes : [];
+    }
+
+    _getBiomeSelectionSeed() {
+        const engineSeed = this._engine?.engineConfig?.seed;
+        if (Number.isInteger(engineSeed)) return engineSeed;
+        const rawSeed = this._raw?.terrain?.seed;
+        return Number.isInteger(rawSeed) ? rawSeed : 12345;
+    }
+
+    _getBiomeSelectionCoords(worldPos) {
+        const planetConfig = this._engine?.planetConfig;
+        const origin = planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
+        const dx = (worldPos?.x ?? 0) - origin.x;
+        const dy = (worldPos?.y ?? 0) - origin.y;
+        const dz = (worldPos?.z ?? 0) - origin.z;
+        const invLen = 1 / Math.max(1e-6, Math.hypot(dx, dy, dz));
+        return {
+            x: dx * invLen,
+            y: dz * invLen,
+        };
     }
 
     _showTileBorder(el, info, layer) {

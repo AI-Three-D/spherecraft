@@ -54,6 +54,7 @@ export function scoreSignal(value, rule) {
 /**
  * Compute a biome's environmental suitability from all its defined signals.
  * @param {object} signals       { elevation, humidity, temperature, slope } — sampled values
+ *                               (Studio hover uses baked climate precipitation as humidity)
  * @param {object} biomeSignals  The biome's signal rules from biomes.json
  * @returns {number}             Normalized suitability score 0..1
  */
@@ -76,19 +77,37 @@ export function computeEnvironmentalScore(signals, biomeSignals) {
     return totalWeight > 0 ? weightedSum / totalWeight : 1.0;
 }
 
+function toUint32(value) {
+    return value >>> 0;
+}
+
+function hashStep(value, multiplier) {
+    return Math.imul(value >>> 0, multiplier >>> 0) >>> 0;
+}
+
 /**
- * Simple seeded hash for deterministic selection.
- * @param {number} x
- * @param {number} y
+ * Deterministic biome hash mirrored from biomeScoring.wgsl.js.
+ * @param {number} cellX
+ * @param {number} cellY
  * @param {number} seed
  * @returns {number} 0..1
  */
-export function seededHash(x, y, seed) {
-    let h = seed + Math.floor(x * 73856093) + Math.floor(y * 19349663);
-    h = ((h >>> 16) ^ h) * 0x45d9f3b | 0;
-    h = ((h >>> 16) ^ h) * 0x45d9f3b | 0;
-    h = (h >>> 16) ^ h;
-    return (h & 0x7FFFFFFF) / 0x7FFFFFFF;
+export function seededHash(cellX, cellY, seed) {
+    let h = toUint32(seed);
+    h ^= hashStep(toUint32(Math.trunc(cellX)), 0x27d4eb2d);
+    h ^= hashStep(toUint32(Math.trunc(cellY)), 0x165667b1);
+    h = hashStep(((h >>> 15) ^ h) >>> 0, 0x85ebca6b);
+    h = hashStep(((h >>> 13) ^ h) >>> 0, 0xc2b2ae35);
+    h = hashStep(((h >>> 16) ^ h) >>> 0, 0x45d9f3b);
+    h = hashStep(((h >>> 16) ^ h) >>> 0, 0x45d9f3b);
+    h = ((h >>> 16) ^ h) >>> 0;
+    return (h & 0x7fffffff) / 0x7fffffff;
+}
+
+function biomeSelectionHash(worldX, worldY, seed) {
+    const cellX = Math.floor(worldX * 0.125);
+    const cellY = Math.floor(worldY * 0.125);
+    return seededHash(cellX, cellY, toUint32(toUint32(seed) + 99999));
 }
 
 /**
@@ -112,10 +131,11 @@ export function regionalNoise(x, y, rv, seed) {
     const fx = sx - ix;
     const fy = sy - iy;
 
-    const n00 = seededHash(ix, iy, seed + seedOff) * 2 - 1;
-    const n10 = seededHash(ix + 1, iy, seed + seedOff) * 2 - 1;
-    const n01 = seededHash(ix, iy + 1, seed + seedOff) * 2 - 1;
-    const n11 = seededHash(ix + 1, iy + 1, seed + seedOff) * 2 - 1;
+    const noiseSeed = toUint32(toUint32(seed) + toUint32(seedOff));
+    const n00 = seededHash(ix, iy, noiseSeed) * 2 - 1;
+    const n10 = seededHash(ix + 1, iy, noiseSeed) * 2 - 1;
+    const n01 = seededHash(ix, iy + 1, noiseSeed) * 2 - 1;
+    const n11 = seededHash(ix + 1, iy + 1, noiseSeed) * 2 - 1;
 
     // Bilinear interpolation with smoothstep
     const u = fx * fx * (3 - 2 * fx);
@@ -131,8 +151,8 @@ export function regionalNoise(x, y, rv, seed) {
  *
  * @param {Array<object>} biomeDefs   Array of biome definitions from biomes.json
  * @param {object} signals            { elevation, humidity, temperature, slope }
- * @param {number} worldX             World X position
- * @param {number} worldY             World Y position
+ * @param {number} worldX             Terrain sample X coordinate (sphere: unitDir.x, flat: world x)
+ * @param {number} worldY             Terrain sample Y coordinate (sphere: unitDir.z, flat: world y)
  * @param {number} seed               World seed
  * @returns {Array<{biome: object, envScore: number, regionalFactor: number, finalScore: number, probability: number}>}
  */
@@ -158,9 +178,6 @@ export function scoreBiomes(biomeDefs, signals, worldX, worldY, seed) {
         }
     }
 
-    // Sort by probability descending
-    scores.sort((a, b) => b.probability - a.probability);
-
     return scores;
 }
 
@@ -169,25 +186,37 @@ export function scoreBiomes(biomeDefs, signals, worldX, worldY, seed) {
  *
  * @param {Array<object>} biomeDefs
  * @param {object} signals
- * @param {number} worldX
- * @param {number} worldY
+ * @param {number} worldX             Terrain sample X coordinate (sphere: unitDir.x, flat: world x)
+ * @param {number} worldY             Terrain sample Y coordinate (sphere: unitDir.z, flat: world y)
  * @param {number} seed
- * @returns {{ biome: object, scores: Array<object> } | null}
+ * @returns {{ biome: object, scores: Array<object>, rankedScores: Array<object>, score: number } | null}
  */
 export function selectBiome(biomeDefs, signals, worldX, worldY, seed) {
     const scores = scoreBiomes(biomeDefs, signals, worldX, worldY, seed);
     if (scores.length === 0) return null;
 
-    // Deterministic selection from probability distribution
-    const r = seededHash(worldX * 137, worldY * 311, seed + 99999);
+    const rankedScores = scores.slice().sort((a, b) => b.probability - a.probability);
+    const r = biomeSelectionHash(worldX, worldY, seed);
     let cumulative = 0;
     for (const entry of scores) {
         cumulative += entry.probability;
         if (r <= cumulative) {
-            return { biome: entry.biome, scores };
+            return {
+                biome: entry.biome,
+                scores,
+                rankedScores,
+                score: entry.probability,
+            };
         }
     }
 
-    // Fallback to highest probability
-    return { biome: scores[0].biome, scores };
+    const bestEntry = scores.reduce((best, entry) => (
+        entry.finalScore > best.finalScore ? entry : best
+    ), scores[0]);
+    return {
+        biome: bestEntry.biome,
+        scores,
+        rankedScores,
+        score: bestEntry.probability,
+    };
 }

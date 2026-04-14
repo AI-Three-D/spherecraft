@@ -1,11 +1,10 @@
 /**
- * BiomeQuery — GPU compute shader that samples the tile type ID
- * at an arbitrary world-space position using the quadtree tile textures.
+ * BiomeQuery — GPU compute shader that samples terrain generation outputs
+ * at an arbitrary world-space position using resident quadtree tile textures.
  *
  * This is a general-purpose utility: given a 3D position on the planet
- * surface, it returns the TILE_TYPES integer stored in the tile texture
- * at that location. Reusable for hover inspection, biome diagnostics,
- * asset placement queries, etc.
+ * surface, it returns the TILE_TYPES integer plus the generated biome
+ * selection signals already baked into the live tile set.
  *
  * Usage:
  *   const query = new BiomeQuery(device, tileStreamer);
@@ -14,7 +13,7 @@
  *   query.dispatch(encoder, worldPos, planetConfig, quadtreeGPU, textures, hashBuf);
  *   // after submit:
  *   const result = await query.resolve();
- *   // result = { tileId: 42, face: 0, u: 0.5, v: 0.5 } or null
+ *   // result = { tileId: 42, elevation: 0.08, humidity: 0.51, temperature: 0.64, slope: 0.12, ... } or null
  */
 
 import { gpuFormatSampleType } from '../renderer/resources/texture.js';
@@ -37,10 +36,15 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform>              params:    Params;
-@group(0) @binding(1) var                       tileTex:   texture_2d_array<f32>;
-@group(0) @binding(2) var<storage, read>        hashTable: array<u32>;
-@group(0) @binding(3) var<storage, read_write>  result:    array<u32>;
-// result layout: [tileId, face, depth, tileX, tileY, localU*1000, localV*1000, valid]
+@group(0) @binding(1) var                       tileTex:    texture_2d_array<f32>;
+@group(0) @binding(2) var                       heightTex:  texture_2d_array<f32>;
+@group(0) @binding(3) var                       normalTex:  texture_2d_array<f32>;
+@group(0) @binding(4) var                       climateTex: texture_2d_array<f32>;
+@group(0) @binding(5) var<storage, read>        hashTable:  array<u32>;
+@group(0) @binding(6) var<storage, read_write>  result:     array<u32>;
+// result layout:
+// [tileId, face, depth, tileX, tileY, localU*1000, localV*1000, valid,
+//  elevationBits, temperatureBits, humidityBits, slopeBits]
 
 const MAX_PROBE: u32 = 64u;
 
@@ -103,6 +107,10 @@ fn main() {
     var localU = 0u;
     var localV = 0u;
     var valid = 0u;
+    var elevation = 0.0;
+    var temperature = 0.0;
+    var humidity = 0.0;
+    var slope = 0.0;
 
     var d = params.maxDepth;
     loop {
@@ -117,6 +125,9 @@ fn main() {
             let px = clamp(i32(lu * f32(texSize - 1) + 0.5), 0, texSize - 1);
             let py = clamp(i32(lv * f32(texSize - 1) + 0.5), 0, texSize - 1);
             let rawR = textureLoad(tileTex, vec2<i32>(px, py), layer, 0).r;
+            let sampledHeight = textureLoad(heightTex, vec2<i32>(px, py), layer, 0).r;
+            let sampledNormal = textureLoad(normalTex, vec2<i32>(px, py), layer, 0);
+            let sampledClimate = textureLoad(climateTex, vec2<i32>(px, py), layer, 0);
             let tileIdF = select(rawR * 255.0, rawR, rawR > 1.0);
             tileId = u32(tileIdF + 0.5);
             foundDepth = d;
@@ -124,6 +135,10 @@ fn main() {
             foundTileY = ty;
             localU = u32(lu * 1000.0);
             localV = u32(lv * 1000.0);
+            elevation = sampledHeight;
+            temperature = sampledClimate.r;
+            humidity = sampledClimate.g;
+            slope = sampledNormal.b;
             valid = 1u;
             break;
         }
@@ -139,6 +154,10 @@ fn main() {
     result[5] = localU;
     result[6] = localV;
     result[7] = valid;
+    result[8] = bitcast<u32>(elevation);
+    result[9] = bitcast<u32>(temperature);
+    result[10] = bitcast<u32>(humidity);
+    result[11] = bitcast<u32>(slope);
 }
 `;
 }
@@ -159,6 +178,7 @@ export class BiomeQuery {
         this._readbackBuffer = null;
         this._readbackState = 'idle';
         this._initialized = false;
+        this._lastMissingResourceKey = '';
     }
 
     initialize() {
@@ -169,6 +189,9 @@ export class BiomeQuery {
 
         const formats = this._tileStreamer?.textureFormats ?? {};
         const tileSampleType = gpuFormatSampleType(formats.tile || 'r8unorm');
+        const heightSampleType = gpuFormatSampleType(formats.height || 'r32float');
+        const normalSampleType = gpuFormatSampleType(formats.normal || 'rgba8unorm');
+        const climateSampleType = gpuFormatSampleType(formats.climate || 'rgba8unorm');
 
         this._bgl = this.device.createBindGroupLayout({
             label: 'BiomeQuery-BGL',
@@ -178,8 +201,14 @@ export class BiomeQuery {
                 { binding: 1, visibility: GPUShaderStage.COMPUTE,
                   texture: { sampleType: tileSampleType, viewDimension: '2d-array' } },
                 { binding: 2, visibility: GPUShaderStage.COMPUTE,
-                  buffer: { type: 'read-only-storage' } },
+                  texture: { sampleType: heightSampleType, viewDimension: '2d-array' } },
                 { binding: 3, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: normalSampleType, viewDimension: '2d-array' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: climateSampleType, viewDimension: '2d-array' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'read-only-storage' } },
+                { binding: 6, visibility: GPUShaderStage.COMPUTE,
                   buffer: { type: 'storage' } },
             ],
         });
@@ -217,7 +246,7 @@ export class BiomeQuery {
      * @param {{x:number,y:number,z:number}} worldPos  Hit point on terrain surface
      * @param {object} planetConfig
      * @param {object} quadtreeGPU  Quadtree GPU state
-     * @param {object} textures  { tile } texture arrays
+     * @param {object} textures  { tile, height, normal, climate } texture arrays
      * @param {GPUBuffer} hashBuf
      * @returns {boolean} true if dispatch succeeded
      */
@@ -252,21 +281,23 @@ export class BiomeQuery {
         pass.dispatchWorkgroups(1);
         pass.end();
 
-        encoder.copyBufferToBuffer(this._resultBuffer, 0, this._readbackBuffer, 0, 32);
+        encoder.copyBufferToBuffer(this._resultBuffer, 0, this._readbackBuffer, 0, 64);
         this._readbackState = 'copied';
         return true;
     }
 
     /**
      * Resolve the last dispatched query.
-     * @returns {Promise<{tileId:number, face:number, depth:number, tileX:number, tileY:number}|null>}
+     * @returns {Promise<{tileId:number, face:number, depth:number, tileX:number, tileY:number, elevation:number, temperature:number, humidity:number, slope:number}|null>}
      */
     resolve() {
         if (this._readbackState !== 'copied') return Promise.resolve(null);
 
         this._readbackState = 'mapping';
         return this._readbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
-            const u = new Uint32Array(this._readbackBuffer.getMappedRange(0, 32));
+            const range = this._readbackBuffer.getMappedRange(0, 64);
+            const u = new Uint32Array(range);
+            const f = new Float32Array(range);
             const valid = u[7] > 0;
             const result = valid ? {
                 tileId: u[0],
@@ -276,6 +307,10 @@ export class BiomeQuery {
                 tileY:  u[4],
                 localU: u[5] / 1000,
                 localV: u[6] / 1000,
+                elevation: f[8],
+                temperature: f[9],
+                humidity: f[10],
+                slope: f[11],
             } : null;
             this._readbackBuffer.unmap();
             this._readbackState = 'idle';
@@ -288,11 +323,27 @@ export class BiomeQuery {
 
     _rebuildBG(textures, hashBuf) {
         const tView = this._getTextureView(textures?.tile);
+        const hView = this._getTextureView(textures?.height);
+        const nView = this._getTextureView(textures?.normal);
+        const cView = this._getTextureView(textures?.climate);
         const resolvedHashBuf = this._getGPUBuffer(hashBuf);
-        if (!tView || !resolvedHashBuf) {
+        if (!tView || !hView || !nView || !cView || !resolvedHashBuf) {
+            const missing = [];
+            if (!tView) missing.push('tile');
+            if (!hView) missing.push('height');
+            if (!nView) missing.push('normal');
+            if (!cView) missing.push('climate');
+            if (!resolvedHashBuf) missing.push('hashTable');
+            const missingKey = missing.join(',');
+            if (missingKey && missingKey !== this._lastMissingResourceKey) {
+                console.warn(`[BiomeQuery] Hover diagnostics waiting for resident query resources: ${missingKey}`);
+                this._lastMissingResourceKey = missingKey;
+            }
             this._bg = null;
             return;
         }
+
+        this._lastMissingResourceKey = '';
 
         this._bg = this.device.createBindGroup({
             label: 'BiomeQuery-BG',
@@ -300,8 +351,11 @@ export class BiomeQuery {
             entries: [
                 { binding: 0, resource: { buffer: this._paramsBuffer } },
                 { binding: 1, resource: tView },
-                { binding: 2, resource: { buffer: resolvedHashBuf } },
-                { binding: 3, resource: { buffer: this._resultBuffer } },
+                { binding: 2, resource: hView },
+                { binding: 3, resource: nView },
+                { binding: 4, resource: cView },
+                { binding: 5, resource: { buffer: resolvedHashBuf } },
+                { binding: 6, resource: { buffer: this._resultBuffer } },
             ],
         });
     }
