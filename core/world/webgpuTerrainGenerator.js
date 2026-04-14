@@ -707,9 +707,6 @@ export class WebGPUTerrainGenerator {
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
         this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');
-        // The packed data is cached here even before the GPU buffer exists.
-        // initializePipelines uploads it once biomeUniformBuffer is allocated.
-        this._refreshPackedBiomeUniforms();
         const radiusM = this.worldScale;
         const continentsEnabled = this.terrainConfig?.continents?.enabled ?? true;
         this._useSmallPlanetMode = radiusM < this.smallPlanetRadiusThreshold;
@@ -720,6 +717,9 @@ export class WebGPUTerrainGenerator {
         this.noiseReferenceRadiusM = radiusM >= 50000
             ? Math.min(baseReference, radiusM * 1.5)
             : baseReference;
+        // The packed data is cached here even before the GPU buffer exists.
+        // initializePipelines uploads it once biomeUniformBuffer is allocated.
+        this._refreshPackedBiomeUniforms();
         Logger.info(`WebGPUTerrainGenerator: Set worldScale to planet radius ${this.worldScale}`);
         Logger.info(`WebGPUTerrainGenerator: noiseReferenceRadiusM ${this.noiseReferenceRadiusM}`);
         if (this._useSmallPlanetMode) {

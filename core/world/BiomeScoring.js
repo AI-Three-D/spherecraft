@@ -16,19 +16,34 @@
  * Compute the score for a single signal rule.
  * @param {number} value   Sampled signal value (0..1)
  * @param {object} rule    { min, max, transitionWidth, preference, weight }
+ * @param {number} [worldX] Biome-space X coordinate for edge dithering
+ * @param {number} [worldY] Biome-space Y coordinate for edge dithering
+ * @param {number} [seed]   Stable seed for edge dithering
  * @returns {number}       Score in 0..1
  */
-export function scoreSignal(value, rule) {
+export function scoreSignal(value, rule, worldX = 0, worldY = 0, seed = 0) {
     if (!rule) return 1.0;
 
-    const { min, max, transitionWidth = 0.1, preference = 'mid' } = rule;
+    const {
+        min,
+        max,
+        transitionWidth = 0.1,
+        preference = 'mid',
+        ditherScale = 0,
+        ditherStrength = 0,
+    } = rule;
+    const tw = Math.max(transitionWidth, 0.001);
+    let edgeValue = value;
+    if (ditherScale > 0 && ditherStrength > 0) {
+        edgeValue += sampleValueNoise(worldX, worldY, ditherScale, seed) * tw * ditherStrength;
+    }
 
     // Core band membership with soft transitions
     let band;
-    if (value < min) {
-        band = Math.max(0, 1 - (min - value) / Math.max(transitionWidth, 0.001));
-    } else if (value > max) {
-        band = Math.max(0, 1 - (value - max) / Math.max(transitionWidth, 0.001));
+    if (edgeValue < min) {
+        band = Math.max(0, 1 - (min - edgeValue) / tw);
+    } else if (edgeValue > max) {
+        band = Math.max(0, 1 - (edgeValue - max) / tw);
     } else {
         band = 1.0;
     }
@@ -56,26 +71,40 @@ export function scoreSignal(value, rule) {
  * @param {object} signals       { elevation, humidity, temperature, slope } — sampled values
  *                               (Studio hover uses baked climate precipitation as humidity)
  * @param {object} biomeSignals  The biome's signal rules from biomes.json
+ * @param {number} [worldX]      Biome-space X coordinate for edge dithering
+ * @param {number} [worldY]      Biome-space Y coordinate for edge dithering
+ * @param {number} [seed]        World seed
+ * @param {number} [biomeSeedOffset]  Stable per-biome offset used by authored dither
  * @returns {number}             Normalized suitability score 0..1
  */
-export function computeEnvironmentalScore(signals, biomeSignals) {
+export function computeEnvironmentalScore(
+    signals,
+    biomeSignals,
+    worldX = 0,
+    worldY = 0,
+    seed = 0,
+    biomeSeedOffset = 0
+) {
     if (!biomeSignals) return 1.0;
 
-    let totalWeight = 0;
-    let weightedSum = 0;
+    const baseSeed = toUint32(toUint32(seed) + toUint32(biomeSeedOffset));
+    const elevation = scoreSignalContribution('elevation', signals, biomeSignals, worldX, worldY, baseSeed);
+    const humidity = scoreSignalContribution('humidity', signals, biomeSignals, worldX, worldY, baseSeed);
+    const temperature = scoreSignalContribution('temperature', signals, biomeSignals, worldX, worldY, baseSeed);
+    const slope = scoreSignalContribution('slope', signals, biomeSignals, worldX, worldY, baseSeed);
 
-    for (const [key, rule] of Object.entries(biomeSignals)) {
-        const value = signals[key];
-        if (value == null || !rule) continue;
-
-        const w = rule.weight ?? 1.0;
-        const s = scoreSignal(value, rule);
-        weightedSum += s * w;
-        totalWeight += w;
-    }
+    const weightedSum = elevation.weighted + humidity.weighted + temperature.weighted + slope.weighted;
+    const totalWeight = elevation.weight + humidity.weight + temperature.weight + slope.weight;
 
     return totalWeight > 0 ? weightedSum / totalWeight : 1.0;
 }
+
+const SIGNAL_DITHER_SEED_OFFSETS = Object.freeze({
+    elevation: 101,
+    humidity: 211,
+    temperature: 307,
+    slope: 401,
+});
 
 function toUint32(value) {
     return value >>> 0;
@@ -110,6 +139,41 @@ function biomeSelectionHash(worldX, worldY, seed) {
     return seededHash(cellX, cellY, toUint32(toUint32(seed) + 99999));
 }
 
+function sampleValueNoise(x, y, scale, seed) {
+    if (!(scale > 0)) return 0;
+
+    const sx = x * scale;
+    const sy = y * scale;
+    const ix = Math.floor(sx);
+    const iy = Math.floor(sy);
+    const fx = sx - ix;
+    const fy = sy - iy;
+
+    const n00 = seededHash(ix, iy, seed) * 2 - 1;
+    const n10 = seededHash(ix + 1, iy, seed) * 2 - 1;
+    const n01 = seededHash(ix, iy + 1, seed) * 2 - 1;
+    const n11 = seededHash(ix + 1, iy + 1, seed) * 2 - 1;
+
+    const u = fx * fx * (3 - 2 * fx);
+    const v = fy * fy * (3 - 2 * fy);
+    const x0 = n00 * (1 - u) + n10 * u;
+    const x1 = n01 * (1 - u) + n11 * u;
+    return x0 * (1 - v) + x1 * v;
+}
+
+function scoreSignalContribution(key, signals, biomeSignals, worldX, worldY, baseSeed) {
+    const rule = biomeSignals?.[key];
+    const value = signals?.[key];
+    if (value == null || !rule) {
+        return { weighted: 0, weight: 0 };
+    }
+
+    const weight = rule.weight ?? 1.0;
+    const ditherSeed = toUint32(baseSeed + (SIGNAL_DITHER_SEED_OFFSETS[key] ?? 0));
+    const score = scoreSignal(value, rule, worldX, worldY, ditherSeed);
+    return { weighted: score * weight, weight };
+}
+
 /**
  * Simple noise approximation for regional variation (JS side).
  * Uses a low-frequency hash-based noise.
@@ -122,28 +186,9 @@ function biomeSelectionHash(worldX, worldY, seed) {
 export function regionalNoise(x, y, rv, seed) {
     if (!rv || rv.noiseStrength === 0) return 0;
     const scale = rv.noiseScale ?? 0.001;
-    const sx = x * scale;
-    const sy = y * scale;
     const seedOff = rv.seedOffset ?? 0;
-    // Simple value noise approximation
-    const ix = Math.floor(sx);
-    const iy = Math.floor(sy);
-    const fx = sx - ix;
-    const fy = sy - iy;
-
     const noiseSeed = toUint32(toUint32(seed) + toUint32(seedOff));
-    const n00 = seededHash(ix, iy, noiseSeed) * 2 - 1;
-    const n10 = seededHash(ix + 1, iy, noiseSeed) * 2 - 1;
-    const n01 = seededHash(ix, iy + 1, noiseSeed) * 2 - 1;
-    const n11 = seededHash(ix + 1, iy + 1, noiseSeed) * 2 - 1;
-
-    // Bilinear interpolation with smoothstep
-    const u = fx * fx * (3 - 2 * fx);
-    const v = fy * fy * (3 - 2 * fy);
-
-    const x0 = n00 * (1 - u) + n10 * u;
-    const x1 = n01 * (1 - u) + n11 * u;
-    return x0 * (1 - v) + x1 * v;
+    return sampleValueNoise(x, y, scale, noiseSeed);
 }
 
 /**
@@ -160,7 +205,14 @@ export function scoreBiomes(biomeDefs, signals, worldX, worldY, seed) {
     if (!biomeDefs || biomeDefs.length === 0) return [];
 
     const scores = biomeDefs.map(biome => {
-        const envScore = computeEnvironmentalScore(signals, biome.signals);
+        const envScore = computeEnvironmentalScore(
+            signals,
+            biome.signals,
+            worldX,
+            worldY,
+            seed,
+            biome?.regionalVariation?.seedOffset ?? 0
+        );
         const rv = biome.regionalVariation;
         const noise = regionalNoise(worldX, worldY, rv, seed);
         const regionalFactor = 1 + noise * (rv?.noiseStrength ?? 0);
