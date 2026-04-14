@@ -1517,6 +1517,8 @@ export class WorldAuthoringView extends WorldViewBase {
     _getActiveBiomeDefinitions() {
         const runtimeBiomes = this._engine?.planetConfig?.worldAuthoring?.biomes;
         if (Array.isArray(runtimeBiomes) && runtimeBiomes.length > 0) {
+            // Use the GPU-loaded runtime biomes so diagnostics match what terrain actually rendered.
+            // This can diverge from raw authored edits until Regenerate World is pressed.
             return runtimeBiomes;
         }
         const rawBiomes = this._raw?.biomes?.biomes;

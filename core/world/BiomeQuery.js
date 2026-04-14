@@ -178,6 +178,7 @@ export class BiomeQuery {
         this._readbackBuffer = null;
         this._readbackState = 'idle';
         this._initialized = false;
+        this._lastMissingResourceKey = '';
     }
 
     initialize() {
@@ -327,9 +328,22 @@ export class BiomeQuery {
         const cView = this._getTextureView(textures?.climate);
         const resolvedHashBuf = this._getGPUBuffer(hashBuf);
         if (!tView || !hView || !nView || !cView || !resolvedHashBuf) {
+            const missing = [];
+            if (!tView) missing.push('tile');
+            if (!hView) missing.push('height');
+            if (!nView) missing.push('normal');
+            if (!cView) missing.push('climate');
+            if (!resolvedHashBuf) missing.push('hashTable');
+            const missingKey = missing.join(',');
+            if (missingKey && missingKey !== this._lastMissingResourceKey) {
+                console.warn(`[BiomeQuery] Hover diagnostics waiting for resident query resources: ${missingKey}`);
+                this._lastMissingResourceKey = missingKey;
+            }
             this._bg = null;
             return;
         }
+
+        this._lastMissingResourceKey = '';
 
         this._bg = this.device.createBindGroup({
             label: 'BiomeQuery-BG',
