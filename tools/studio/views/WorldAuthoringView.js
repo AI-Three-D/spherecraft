@@ -1564,6 +1564,8 @@ export class WorldAuthoringView extends WorldViewBase {
 
         const configuredReference = planetConfig?.terrainGeneration?.noiseReferenceRadiusM;
         const baseReference = Number.isFinite(configuredReference) ? configuredReference : radiusM;
+        // Match terrain generator behavior. The clamp only activates for pathological
+        // configs that push noiseReferenceRadiusM above 1.5x planet radius.
         return radiusM >= 50000
             ? Math.min(baseReference, radiusM * 1.5)
             : baseReference;

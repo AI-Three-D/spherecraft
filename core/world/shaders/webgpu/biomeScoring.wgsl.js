@@ -25,6 +25,10 @@ export function createBiomeScoringWGSL(options = {}) {
 // ── Biome definition structs (populated from uniform buffer) ────────
 
 const MAX_BIOMES: u32 = ${maxBiomes}u;
+const SIGNAL_DITHER_SEED_ELEVATION: u32 = 101u;
+const SIGNAL_DITHER_SEED_HUMIDITY: u32 = 211u;
+const SIGNAL_DITHER_SEED_TEMPERATURE: u32 = 307u;
+const SIGNAL_DITHER_SEED_SLOPE: u32 = 401u;
 
 struct BiomeSignalRule {
     min_val:          f32,
@@ -62,15 +66,42 @@ struct BiomeUniforms {
 
 // ── Signal scoring ──────────────────────────────────────────────────
 
-fn scoreBiomeSignal(value: f32, rule: BiomeSignalRule) -> f32 {
+fn biomeValueNoise(wx: f32, wy: f32, scale: f32, seed: u32) -> f32 {
+    if (scale <= 0.0) { return 0.0; }
+
+    let sx = wx * scale;
+    let sy = wy * scale;
+    let ix = i32(floor(sx));
+    let iy = i32(floor(sy));
+    let fx = sx - floor(sx);
+    let fy = sy - floor(sy);
+
+    let n00 = biomeHashFromCells(ix, iy, seed) * 2.0 - 1.0;
+    let n10 = biomeHashFromCells(ix + 1, iy, seed) * 2.0 - 1.0;
+    let n01 = biomeHashFromCells(ix, iy + 1, seed) * 2.0 - 1.0;
+    let n11 = biomeHashFromCells(ix + 1, iy + 1, seed) * 2.0 - 1.0;
+
+    let u = fx * fx * (3.0 - 2.0 * fx);
+    let v = fy * fy * (3.0 - 2.0 * fy);
+    let x0 = mix(n00, n10, u);
+    let x1 = mix(n01, n11, u);
+    return mix(x0, x1, v);
+}
+
+fn scoreBiomeSignal(value: f32, rule: BiomeSignalRule, wx: f32, wy: f32, seed: u32) -> f32 {
     if (rule.weight <= 0.0) { return 1.0; }
 
     let tw = max(rule.transitionWidth, 0.001);
+    var edgeValue = value;
+    if (rule.ditherScale > 0.0 && rule.ditherStrength > 0.0) {
+        edgeValue += biomeValueNoise(wx, wy, rule.ditherScale, seed) * tw * rule.ditherStrength;
+    }
+
     var band: f32;
-    if (value < rule.min_val) {
-        band = max(0.0, 1.0 - (rule.min_val - value) / tw);
-    } else if (value > rule.max_val) {
-        band = max(0.0, 1.0 - (value - rule.max_val) / tw);
+    if (edgeValue < rule.min_val) {
+        band = max(0.0, 1.0 - (rule.min_val - edgeValue) / tw);
+    } else if (edgeValue > rule.max_val) {
+        band = max(0.0, 1.0 - (edgeValue - rule.max_val) / tw);
     } else {
         band = 1.0;
     }
@@ -96,24 +127,25 @@ fn scoreBiomeSignal(value: f32, rule: BiomeSignalRule) -> f32 {
 
 fn scoreBiomeEnv(
     elevation: f32, humidity: f32, temperature: f32, slope: f32,
-    def: BiomeDef
+    def: BiomeDef, wx: f32, wy: f32, seed: u32
 ) -> f32 {
     var totalWeight = 0.0;
     var weightedSum = 0.0;
+    let biomeSeed = seed + def.seedOffset;
 
-    let se = scoreBiomeSignal(elevation, def.elevation);
+    let se = scoreBiomeSignal(elevation, def.elevation, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_ELEVATION);
     weightedSum += se * def.elevation.weight;
     totalWeight += def.elevation.weight;
 
-    let sh = scoreBiomeSignal(humidity, def.humidity);
+    let sh = scoreBiomeSignal(humidity, def.humidity, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_HUMIDITY);
     weightedSum += sh * def.humidity.weight;
     totalWeight += def.humidity.weight;
 
-    let st = scoreBiomeSignal(temperature, def.temperature);
+    let st = scoreBiomeSignal(temperature, def.temperature, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_TEMPERATURE);
     weightedSum += st * def.temperature.weight;
     totalWeight += def.temperature.weight;
 
-    let ss = scoreBiomeSignal(slope, def.slope);
+    let ss = scoreBiomeSignal(slope, def.slope, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_SLOPE);
     weightedSum += ss * def.slope.weight;
     totalWeight += def.slope.weight;
 
@@ -148,26 +180,8 @@ fn biomeRegionalNoise(wx: f32, wy: f32, def: BiomeDef, seed: u32) -> f32 {
     // noiseType is packed already so the JS/WGSL buffer layout stays stable.
     // This increment still uses the same value-noise path for all authored modes.
 
-    let sx = wx * def.noiseScale;
-    let sy = wy * def.noiseScale;
     let s = seed + def.seedOffset;
-
-    let ix = i32(floor(sx));
-    let iy = i32(floor(sy));
-    let fx = sx - floor(sx);
-    let fy = sy - floor(sy);
-
-    let n00 = biomeHashFromCells(ix, iy, s) * 2.0 - 1.0;
-    let n10 = biomeHashFromCells(ix + 1, iy, s) * 2.0 - 1.0;
-    let n01 = biomeHashFromCells(ix, iy + 1, s) * 2.0 - 1.0;
-    let n11 = biomeHashFromCells(ix + 1, iy + 1, s) * 2.0 - 1.0;
-
-    let u = fx * fx * (3.0 - 2.0 * fx);
-    let v = fy * fy * (3.0 - 2.0 * fy);
-
-    let x0 = mix(n00, n10, u);
-    let x1 = mix(n01, n11, u);
-    return mix(x0, x1, v);
+    return biomeValueNoise(wx, wy, def.noiseScale, s);
 }
 
 // ── Full biome selection ────────────────────────────────────────────
@@ -190,7 +204,7 @@ fn selectBiomeFromDefs(
 
     for (var i = 0u; i < count; i++) {
         let def = biomeUniforms.biomes[i];
-        let envScore = scoreBiomeEnv(elevation, humidity, temperature, slope, def);
+        let envScore = scoreBiomeEnv(elevation, humidity, temperature, slope, def, wx, wy, seed);
         let noise = biomeRegionalNoise(wx, wy, def, seed);
         let regional = max(0.0, 1.0 + noise * def.noiseStrength);
         let final_score = envScore * def.baseWeight * regional;
