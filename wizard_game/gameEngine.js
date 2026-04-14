@@ -209,7 +209,7 @@ export class GameEngine {
         this.textureCache = new TextureCache();
 
         // UI manager
-        this.ui = new GameUI();
+        this.ui = this._createGameUI();
 
         window.gameEngine = this;
 
@@ -748,6 +748,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         if (this.renderer?.isGPUQuadtreeActive()) {
             const { ActorManager } = await import('./actors/ActorManager.js');
+            this._actorManagerCtor = { ActorManager };
 
             const assetStreamer = this.renderer.assetStreamer || null;
             let treeDetailSystem = null;
@@ -763,7 +764,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 Logger.warn('[GameEngine] TreeDetailSystem NOT found — tree collision/nav disabled');
             }
 
-            this.actorManager = new ActorManager({
+            this.actorManager = this._createActorManager({
                 device: this.renderer.backend.device,
                 backend: this.renderer.backend,
                 planetConfig: this.planetConfig,
@@ -771,12 +772,15 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 tileStreamer: this.renderer.quadtreeTileManager?.tileStreamer,
                 engineConfig: this.engineConfig,
                 skinnedMeshRenderer: this.renderer.skinnedMeshRenderer,
+                genericMeshRenderer: this.renderer.genericMeshRenderer,
                 assetStreamer: assetStreamer,
                 treeDetailSystem: treeDetailSystem,
             });
             await this.actorManager.initialize();
+            const playerCharacterUrl = this.gameDataConfig?.playerCharacterUrl
+                ?? '../assets/characters/player.char.json';
             await this.actorManager.createPlayer(
-                '../assets/characters/player.char.json',
+                playerCharacterUrl,
                 { x: spawnX, y: spawnY, z: spawnZ }
             );
             this.renderer.setActorManager(this.actorManager);
@@ -786,46 +790,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             // position. The initial worldPos is a placeholder; the particle
             // system calls getActor() ~10 frames after registration to copy
             // the GPU-ground-snapped position.
-            if (this.renderer.particleSystem) {
-                const actorManager = this.actorManager;
-                const campfireEmitter = this.renderer.particleSystem.addCampfire(
-                    { x: spawnX, y: spawnY, z: spawnZ },
-                    {
-                        getActor: () => actorManager?.playerActor,
-                        snapSettleFrames: 30,
-                    }
-                );
-                this.renderer.particleSystem.addCampfireCoals(
-                    { x: spawnX, y: spawnY, z: spawnZ },
-                    {
-                        getActor: () => actorManager?.playerActor,
-                        snapSettleFrames: 30,
-                    }
-                );
-                Logger.info('[GameEngine] Campfire + coal emitters registered at spawn');
-
-                // Register campfire as a tracked distortion source so the haze
-                // follows the same ground-snapped anchor as the fire itself.
-                this.renderer.addDistortionSource({
-                    type: 'heatHaze',
-                    position: { x: spawnX, y: spawnY, z: spawnZ },
-                    getPosition: () => campfireEmitter?.position,
-                    distanceCutoff: this.engineConfig.rendering?.distortion?.sourceCutoffs?.campfire ?? 10.0,
-                });
-
-                // Keep a visible firefly swarm near the player for verification.
-                this.renderer.particleSystem.addFireflySwarm(
-                    { x: spawnX + 2, y: spawnY + 2, z: spawnZ + 2 },
-                    {
-                        swarmSize: 10,
-                        getActor: () => actorManager?.playerActor,
-                        snapSettleFrames: 30,
-                        followSideOffset: 2.5,
-                        followHeightOffset: 2.0,
-                    }
-                );
-                Logger.info('[GameEngine] Firefly swarm registered near player');
-            }
+            this._registerAmbiance({ spawnX, spawnY, spawnZ });
 
             // Wire click-to-move input
             this.canvas.addEventListener('click', (e) => {
@@ -836,17 +801,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                     y: e.offsetY * (window.devicePixelRatio || 1),
                 };
             });
-            try {
-                const { NPCManager } = await import('./actors/NPCManager.js');
-                const { DEFAULT_NPC_SPAWN_CONFIG } = await import('./actors/NPCSpawnConfig.js');
-
-                const npcManager = new NPCManager(this.actorManager, DEFAULT_NPC_SPAWN_CONFIG);
-                await npcManager.initialize();
-                this.actorManager.setNPCManager(npcManager);
-                Logger.info('[GameEngine] NPC spawning system initialized');
-            } catch (e) {
-                Logger.warn(`[GameEngine] NPC system init failed: ${e?.message || e}`);
-            }
+            await this._registerNPCs();
         }
         this._initialLoadState = this._createInitialLoadState();
         Logger.info('[GameEngine] Initialization complete');
@@ -1282,6 +1237,82 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         if (!this.planetConfig) {
             return;
         }
+    }
+
+    // ── Game-specific overridable hooks ────────────────────────────────
+    // These exist so subclasses (platform_game, future games) can opt out
+    // of wizard_game ambiance without forking the entire engine shell.
+
+    /** Build the HUD. Subclasses return their own UI implementation. */
+    _createGameUI() {
+        return new GameUI();
+    }
+
+    /**
+     * Register per-spawn ambient effects (campfire, fireflies, distortion).
+     * Wizard_game default: the campfire + firefly package the player needs
+     * to survive the night. Subclasses can override to return a no-op.
+     */
+    _registerAmbiance({ spawnX, spawnY, spawnZ }) {
+        if (!this.renderer?.particleSystem) return;
+        const actorManager = this.actorManager;
+        const campfireEmitter = this.renderer.particleSystem.addCampfire(
+            { x: spawnX, y: spawnY, z: spawnZ },
+            { getActor: () => actorManager?.playerActor, snapSettleFrames: 30 }
+        );
+        this.renderer.particleSystem.addCampfireCoals(
+            { x: spawnX, y: spawnY, z: spawnZ },
+            { getActor: () => actorManager?.playerActor, snapSettleFrames: 30 }
+        );
+        Logger.info('[GameEngine] Campfire + coal emitters registered at spawn');
+
+        this.renderer.addDistortionSource({
+            type: 'heatHaze',
+            position: { x: spawnX, y: spawnY, z: spawnZ },
+            getPosition: () => campfireEmitter?.position,
+            distanceCutoff: this.engineConfig.rendering?.distortion?.sourceCutoffs?.campfire ?? 10.0,
+        });
+
+        this.renderer.particleSystem.addFireflySwarm(
+            { x: spawnX + 2, y: spawnY + 2, z: spawnZ + 2 },
+            {
+                swarmSize: 10,
+                getActor: () => actorManager?.playerActor,
+                snapSettleFrames: 30,
+                followSideOffset: 2.5,
+                followHeightOffset: 2.0,
+            }
+        );
+        Logger.info('[GameEngine] Firefly swarm registered near player');
+    }
+
+    /** Register NPC manager. Subclasses can override to skip or plug in their own. */
+    async _registerNPCs() {
+        try {
+            const { NPCManager } = await import('./actors/NPCManager.js');
+            const { DEFAULT_NPC_SPAWN_CONFIG } = await import('./actors/NPCSpawnConfig.js');
+            const npcManager = new NPCManager(this.actorManager, DEFAULT_NPC_SPAWN_CONFIG);
+            await npcManager.initialize();
+            this.actorManager.setNPCManager(npcManager);
+            Logger.info('[GameEngine] NPC spawning system initialized');
+        } catch (e) {
+            Logger.warn(`[GameEngine] NPC system init failed: ${e?.message || e}`);
+        }
+    }
+
+    /**
+     * Overridable hook — subclasses (e.g. platform_game) return a custom
+     * ActorManager (with their own player controller + rendering).
+     * Must be synchronous; gets all the wiring as an options object.
+     */
+    _createActorManager(options) {
+        const { ActorManager } = this._actorManagerCtor ?? {};
+        if (!ActorManager) {
+            // The default path dynamically imports ActorManager above and
+            // captures the ctor here before this hook is called.
+            throw new Error('_createActorManager: no ActorManager ctor captured');
+        }
+        return new ActorManager(options);
     }
 }
 

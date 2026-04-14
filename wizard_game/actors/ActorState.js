@@ -71,4 +71,7 @@ export const DEFAULT_ANIMATION_POLICY = Object.freeze({
 export const IntentFlags = Object.freeze({
     NONE: 0, MOVE_FORWARD: 1, MOVE_BACKWARD: 2,
     MOVE_LEFT: 4, MOVE_RIGHT: 8, MOVE_TO_TARGET: 16,
+    // Edge-triggered impulse intents. Consumed by the GPU resolver and
+    // cleared on the CPU each frame (writer is responsible).
+    JUMP: 32,
 });

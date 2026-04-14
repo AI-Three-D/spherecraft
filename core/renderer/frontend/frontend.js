@@ -843,7 +843,9 @@ updateLighting(starSystem) {
             );
         }
 
-        if (this.genericMeshRenderer) {
+        // GPU-quadtree path renders generic meshes INSIDE renderTerrain so
+        // they share the terrain render pass. Avoid a double draw here.
+        if (this.genericMeshRenderer && !this.isGPUQuadtreeActive()) {
             this.genericMeshRenderer.update(this.camera.position, deltaTime);
             this.genericMeshRenderer.render(
                 this.camera.matrixWorldInverse,
@@ -1061,6 +1063,16 @@ updateLighting(starSystem) {
                 
                 if (this.skinnedMeshRenderer?.isReady()) {
                     this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
+                }
+
+                // Generic meshes (game-specific primitive actors like the
+                // platform_game ball and cloud platforms) must render in
+                // the same render pass as terrain and assets, otherwise
+                // they fall outside the active color/depth attachment in
+                // GPU-quadtree mode.
+                if (this.genericMeshRenderer) {
+                    this.genericMeshRenderer.update(this.camera.position, this._lastDeltaTime || 0);
+                    this.genericMeshRenderer.render(viewMatrix, projectionMatrix);
                 }
 
                 // Particles draw after opaque terrain + assets + skinned meshes,
