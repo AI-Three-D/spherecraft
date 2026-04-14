@@ -1533,16 +1533,40 @@ export class WorldAuthoringView extends WorldViewBase {
     }
 
     _getBiomeSelectionCoords(worldPos) {
-        const planetConfig = this._engine?.planetConfig;
+        const engine = this._engine;
+        const planetConfig = engine?.planetConfig;
         const origin = planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
         const dx = (worldPos?.x ?? 0) - origin.x;
         const dy = (worldPos?.y ?? 0) - origin.y;
         const dz = (worldPos?.z ?? 0) - origin.z;
-        const invLen = 1 / Math.max(1e-6, Math.hypot(dx, dy, dz));
+        const refRadius = this._getBiomeSpatialReferenceRadius();
+        if (!Number.isFinite(refRadius) || refRadius <= 0) {
+            return { x: worldPos?.x ?? 0, y: worldPos?.z ?? 0 };
+        }
+        const invLen = refRadius / Math.max(1e-6, Math.hypot(dx, dy, dz));
         return {
             x: dx * invLen,
             y: dz * invLen,
         };
+    }
+
+    _getBiomeSpatialReferenceRadius() {
+        const generatorRadius = this._engine?.terrainGenerator?.noiseReferenceRadiusM;
+        if (Number.isFinite(generatorRadius) && generatorRadius > 0) {
+            return generatorRadius;
+        }
+
+        const planetConfig = this._engine?.planetConfig;
+        const radiusM = Number.isFinite(planetConfig?.radius) ? planetConfig.radius : null;
+        if (!Number.isFinite(radiusM) || radiusM <= 0) {
+            return null;
+        }
+
+        const configuredReference = planetConfig?.terrainGeneration?.noiseReferenceRadiusM;
+        const baseReference = Number.isFinite(configuredReference) ? configuredReference : radiusM;
+        return radiusM >= 50000
+            ? Math.min(baseReference, radiusM * 1.5)
+            : baseReference;
     }
 
     _showTileBorder(el, info, layer) {

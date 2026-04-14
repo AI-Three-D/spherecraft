@@ -480,6 +480,21 @@ fn determineTileTypeFallback(
     return resolveTileTypeFromWeights(weights, wx, wy, unitDir, seed, h, slope);
 }
 
+fn authoredBiomeSpatialCoords(
+    wx: f32, wy: f32, unitDir: vec3<f32>
+) -> vec2<f32> {
+    if (uniforms.face < 0) {
+        return vec2<f32>(wx, wy);
+    }
+
+    // Feed authored biome scoring with planet-scale metric coordinates instead of
+    // near-unit sphere axes, otherwise the deterministic selector collapses into a
+    // handful of global cells on large planets.
+    let refRadiusM = max(noiseReferenceRadiusM(), 1.0);
+    let metricPos = unitDir * refRadiusM;
+    return vec2<f32>(metricPos.x, metricPos.z);
+}
+
 fn determineTileType(
     h: f32, slope: f32, wx: f32, wy: f32,
     unitDir: vec3<f32>, seed: i32
@@ -495,13 +510,14 @@ fn determineTileType(
     }
 
     let climate = getClimate(wx, wy, unitDir, h, seed);
+    let biomeSpatial = authoredBiomeSpatialCoords(wx, wy, unitDir);
     let biome = selectBiomeFromDefs(
         h,
         climate.precipitation,
         climate.temperature,
         slope,
-        wx,
-        wy,
+        biomeSpatial.x,
+        biomeSpatial.y,
         biomeConfigUniforms
     );
     if (biome.score <= 0.0) {

@@ -3026,6 +3026,10 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
                 '[BiomeRuntime] Terrain compute is using authored biome selection ' +
                 'with legacy TILE_TYPES fallback'
             );
+            Logger.info(
+                `[BiomeRuntime] Authored biome stochasticity is sampling metric space ` +
+                `(noiseReferenceRadiusM=${this.noiseReferenceRadiusM})`
+            );
         }
         if (packed.truncatedBiomeCount > 0) {
             Logger.warn(
