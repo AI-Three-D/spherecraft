@@ -113,8 +113,8 @@ function biomeSelectionHash(worldX, worldY, seed) {
 /**
  * Simple noise approximation for regional variation (JS side).
  * Uses a low-frequency hash-based noise.
- * @param {number} x      World X
- * @param {number} y      World Y
+ * @param {number} x      Biome-space X coordinate
+ * @param {number} y      Biome-space Y coordinate
  * @param {object} rv     Regional variation config { noiseScale, noiseStrength, seedOffset }
  * @param {number} seed   World seed
  * @returns {number}       -1..1
@@ -151,8 +151,8 @@ export function regionalNoise(x, y, rv, seed) {
  *
  * @param {Array<object>} biomeDefs   Array of biome definitions from biomes.json
  * @param {object} signals            { elevation, humidity, temperature, slope }
- * @param {number} worldX             Terrain sample X coordinate (sphere: unitDir.x, flat: world x)
- * @param {number} worldY             Terrain sample Y coordinate (sphere: unitDir.z, flat: world y)
+ * @param {number} worldX             Terrain sample X coordinate (sphere: unitDir.x * noiseReferenceRadiusM, flat: world x)
+ * @param {number} worldY             Terrain sample Y coordinate (sphere: unitDir.z * noiseReferenceRadiusM, flat: world y)
  * @param {number} seed               World seed
  * @returns {Array<{biome: object, envScore: number, regionalFactor: number, finalScore: number, probability: number}>}
  */
@@ -186,8 +186,8 @@ export function scoreBiomes(biomeDefs, signals, worldX, worldY, seed) {
  *
  * @param {Array<object>} biomeDefs
  * @param {object} signals
- * @param {number} worldX             Terrain sample X coordinate (sphere: unitDir.x, flat: world x)
- * @param {number} worldY             Terrain sample Y coordinate (sphere: unitDir.z, flat: world y)
+ * @param {number} worldX             Terrain sample X coordinate (sphere: unitDir.x * noiseReferenceRadiusM, flat: world x)
+ * @param {number} worldY             Terrain sample Y coordinate (sphere: unitDir.z * noiseReferenceRadiusM, flat: world y)
  * @param {number} seed
  * @returns {{ biome: object, scores: Array<object>, rankedScores: Array<object>, score: number } | null}
  */
