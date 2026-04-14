@@ -1,3 +1,5 @@
+import { Logger } from '../../shared/Logger.js';
+
 const ARCHETYPE_PROFILE_TARGETS = Object.freeze({
     tree: Object.freeze({
         legacyAssetIds: ['birch'],
@@ -132,6 +134,7 @@ function applyVariantProfile(definition, profileRuntime) {
 function applyFamilyProfile(definition, profileRuntime) {
     definition.tileTypes = profileRuntime.tileTypes.slice();
     definition.climateRange = cloneValue(profileRuntime.climateRange);
+    definition.elevationRange = profileRuntime.elevationRange.slice();
     definition.slopeRange = {
         min: profileRuntime.slopeRange[0],
         max: profileRuntime.slopeRange[1],
@@ -267,18 +270,33 @@ export function buildStreamerAuthoringRuntime(worldAuthoring = null, options = {
             const definition = assetDefById.get(assetId);
             if (definition) {
                 applyVariantProfile(definition, profileRuntime);
+            } else {
+                Logger.warn(
+                    `[AssetAuthoring] Missing legacy asset definition "${assetId}" ` +
+                    `for archetypeRef "${group.archetypeRef}"`
+                );
             }
         }
         for (const familyName of targets.familyNames) {
             const definition = familyByName.get(familyName);
             if (definition) {
                 applyFamilyProfile(definition, profileRuntime);
+            } else {
+                Logger.warn(
+                    `[AssetAuthoring] Missing streamer family "${familyName}" ` +
+                    `for archetypeRef "${group.archetypeRef}"`
+                );
             }
         }
         for (const variantName of targets.variantNames) {
             const definition = variantByName.get(variantName);
             if (definition) {
                 applyVariantProfile(definition, profileRuntime);
+            } else {
+                Logger.warn(
+                    `[AssetAuthoring] Missing streamer variant "${variantName}" ` +
+                    `for archetypeRef "${group.archetypeRef}"`
+                );
             }
         }
 
