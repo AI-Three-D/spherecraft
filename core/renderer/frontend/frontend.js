@@ -11,6 +11,7 @@ import { LightingController } from '../../lighting/lightingController.js';
 import { Logger} from '../../../shared/Logger.js'
 import { WeatherController } from '../environment/WeatherController.js';
 import { QuadtreeTileManager } from '../../world/quadtree/GPUQuadtreeTerrain.js';
+import { buildStreamerAuthoringRuntime } from '../../world/streamerAuthoringRuntime.js';
 
 import { QuadtreeTerrainRenderer } from '../terrain/QuadtreeTerrainRenderer.js';
 import { PostProcessingPipeline, HDR_FORMAT } from '../postprocessing/PostProcessingPipeline.js';
@@ -209,6 +210,27 @@ export class Frontend {
             // (trees, ground cover, plants — replaces single-purpose GrassRenderer)
             try {
                 const { AssetStreamer } = await import('../streamer/AssetStreamer.js');
+                const streamerAuthoringRuntime = buildStreamerAuthoringRuntime(
+                    this.planetConfig?.worldAuthoring,
+                    {
+                        assetDefinitions: this._streamerTheme.DEFAULT_ASSET_DEFINITIONS,
+                        archetypeDefinitions: this._streamerTheme.ARCHETYPE_DEFINITIONS,
+                        tileCategories: this._terrainTheme?.TILE_CATEGORIES,
+                    }
+                );
+                if (streamerAuthoringRuntime.summary.appliedProfileCount > 0) {
+                    Logger.info(
+                        `[AssetAuthoring] Applied ${streamerAuthoringRuntime.summary.appliedProfileCount}/` +
+                        `${streamerAuthoringRuntime.summary.profileCount} authored asset profiles ` +
+                        'to streamer placement'
+                    );
+                }
+                if (streamerAuthoringRuntime.summary.unsupportedProfileCount > 0) {
+                    Logger.warn(
+                        `[AssetAuthoring] ${streamerAuthoringRuntime.summary.unsupportedProfileCount} ` +
+                        'asset profiles use unsupported archetype refs'
+                    );
+                }
                 this.assetStreamer = new AssetStreamer({
                     device:         this.backend.device,
                     backend:        this.backend,
@@ -218,6 +240,8 @@ export class Frontend {
                     engineConfig:   this.engineConfig,
                     uniformManager: this.uniformManager,
                     streamerTheme:  this._streamerTheme,
+                    assetDefinitions: streamerAuthoringRuntime.assetDefinitions,
+                    archetypeDefinitions: streamerAuthoringRuntime.archetypeDefinitions,
                     propTextureManager: this.propTextureManager,
                     leafAlbedoTextureManager: this.leafAlbedoTextureManager,
                     leafNormalTextureManager: this.leafNormalTextureManager,
