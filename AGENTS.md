@@ -1,112 +1,194 @@
-# AGENTS: Procedural planet, GPU quadtree, and WebGPU renderer
-Short map of the current code so agents can jump to the right place and make safe changes.
+# AGENTS.md
 
-## Runtime & Entry
-- Launch via `wizard_game/standalone.html` and serve with `python3 server.py`.
-- `wizard_game/standalone.html` contains the active inline module bootstrap.
-- That bootstrap builds `EngineConfig`/`GameDataConfig`, constructs `GameEngine`, and installs `window.qtDiag` GPU quadtree diagnostics helpers.
+This repository uses a task-folder-based autonomous workflow.
 
-## Core Loop (`wizard_game/gameEngine.js`)
-- Owns canvas setup, config validation, timekeeping, camera mode, input, UI, and high-level bootstrapping.
-- Builds the active planet (`PlanetConfig`), star system (`StarSystem`), altitude zoning (`AltitudeZoneManager`), chunk mapping (`SphericalChunkMapper`), and environment snapshot (`EnvironmentState`).
-- Creates shared GPU resources used across systems:
-  - `Frontend` renderer
-  - `WebGPUTerrainGenerator`
-  - terrain/prop/leaf texture atlases
-  - spaceship, camera, and gameplay controllers
-- Update loop advances gameplay/time/camera/UI.
-- Render loop delegates environment, terrain, atmosphere, water, clouds, and asset rendering to `Frontend`.
+## Roles
 
-## Rendering Stack
-- `core/renderer/frontend/frontend.js` is the orchestration layer for rendering and render-adjacent simulation.
-- Current main path is WebGPU via `core/renderer/backend/webgpuBackend.js`.
-- `Frontend` coordinates:
-  - lighting uniforms and clustered lighting
-  - sky/moon/atmosphere setup
-  - weather simulation and environment interpolation
-  - GPU quadtree terrain
-  - global ocean rendering
-  - cloud rendering
-  - GLTF/generic mesh rendering
-  - streamed vegetation/props via `renderer/streamer`
-- `core/renderer/terrain/QuadtreeTerrainRenderer.js` is the terrain draw path. It consumes buffers from the quadtree tile manager and owns terrain materials/geometries.
+- **Codex** is the implementer.
+- **Claude Code** is the reviewer and architect.
+- The local Python orchestrator (`orchestrate.py`) is the turn-taking controller.
 
-## World & Terrain Generation (`core/world`)
-- Terrain generation is compute-driven in `core/world/webgpuTerrainGenerator.js`.
-- GPU terrain shaders live under `core/world/shaders/webgpu`.
-- The active terrain streaming path is the GPU quadtree under `core/world/quadtree`:
-  - `GPUQuadtreeTerrain.js` is the tile manager/streaming coordinator
-  - `QuadtreeGPU.js` handles traversal/selection buffers
-  - `tileStreamer.js` manages tile residency, array textures, and generation queue integration
-  - `tileCache.js`, `tileAddress.js`, and `tileGenerator.js` support addressing/caching/generation
-- Keep the split clear:
-  - world/quadtree = tile visibility, residency, streaming, GPU data management
-  - renderer/terrain = geometry, materials, and draw calls
-- `core/world/features` contains terrain feature placement logic used for biome/feature decisions.
+Codex must not decide on its own to skip review gates, skip validation, or begin future increments.
 
-## Planet & Coordinates (`core/planet`)
-- `PlanetConfig` in `templates/configs/planetConfig.js` stores radius, atmosphere, terrain scaling, chunk sizing, origins, and cloud band radii.
-- `SphericalChunkMapper` maps world positions to cube-face chunk/tile addresses.
-- `AltitudeZoneManager` tracks surface vs orbital zones and drives altitude-based behavior.
-- Cube-sphere helpers live in `cubeSphereFace.js`, `cubeSphereCoords.js`, and related address utilities.
+## Standard execution path
 
-## Environment, Time & Lighting
-- `core/environment/EnvironmentState.js` is now a lightweight mutable snapshot for weather, wind, cloud coverage/layers, fog, and water state.
-- `core/renderer/environment/WeatherController.js` drives the live environment update logic and GPU weather simulation.
-- `wizard_game/gameTime.js` controls day progression.
-- `core/celestial/StarSystem.js` drives sun/moon/body directions and can sync to game-time day length.
-- `core/lighting/lightingController.js` computes lighting directions and writes results into `UniformManager`.
-- Clustered lighting lives in `core/lighting`.
+When the user asks to run a substantial task autonomously:
 
-## Atmosphere, Sky, Clouds & Water
-- Atmosphere implementations live in `core/renderer/atmosphere`; `Frontend` wires the active LUTs/renderers into terrain and sky.
-- `core/renderer/SkyRenderer.js` and `core/renderer/MoonRenderer.js` handle sky dome and moon rendering.
-- `core/renderer/clouds` contains the cloud stack:
-  - `cloudRenderer.js` is the shared abstraction/uniform logic
-  - `webgpuCloudRenderer.js` is the main active volumetric path
-  - `cloudNoiseGenerator.js` builds cloud noise resources
-  - `cloudTypeDefinitions.js` and `cloudLayerDefinition.js` define weather-driven cloud layering
-- Water is handled by `core/renderer/water/globalOceanRenderer.js` on the GPU quadtree path.
+1. Infer a short stable task slug.
+2. Create `tasks/<task-slug>/` if it does not exist.
+3. Write the raw request to `tasks/<task-slug>/task.md`.
+4. Use the orchestrator as the canonical entry point.
 
-## Assets, Meshes & Streaming
-- GLTF loading lives under `shared/gltf`.
-- Generic mesh rendering is handled by `core/renderer/genericMeshRenderer.js` and `core/renderer/mesh`.
-- Terrain mesh generation helpers are under `core/mesh/terrain`.
-- The vegetation/prop system lives in `core/renderer/streamer`:
-  - `AssetStreamer` is the main orchestrator
-  - it handles baked/scattered asset placement, LOD, geometry atlases, and mid/near rendering paths
-- Texture atlas builders/managers live in `core/texture`.
+Canonical command:
 
-## Gameplay & UI
-- `wizard_game/GameInputManager.js` handles keys/mouse input.
-- `wizard_game/game` contains spaceship, altitude control, and gameplay-side controllers.
-- `wizard_game/ui/GameUI.js` owns HUD/debug panels, including terrain debug mode controls and mid/near asset debug UI.
+```bash
+python orchestrate.py prep-and-run --task "<raw task>"
+```
 
-## Config Knobs (`templates/configs`)
-- `wizard_game/runtimeConfigs.js` is the main assembly point for `EngineConfig` and `GameDataConfig`.
-- Prefer adding/changing knobs in config classes instead of hardcoding values in runtime systems.
-- Important config domains include:
-  - rendering and lighting
-  - GPU quadtree limits/budgets
-  - terrain generation and splat settings
-  - camera/manual camera
-  - planet presets and atmosphere settings
-  - texture/tile/transition settings
+If the task folder already exists and the task should continue, use the existing folder and resume through the orchestrator commands instead of inventing a parallel workflow.
 
-## Diagnostics & Debugging
-- `window.qtDiag` in the browser console exposes GPU quadtree inspection helpers from the inline module in `wizard_game/standalone.html`.
-- Terrain debug mode is split between:
-  - generator debug modes in `WebGPUTerrainGenerator`
-  - fragment debug modes in the terrain renderer/material path
-- `GameUI` exposes debug controls for terrain modes, surface tuning, teleporting, and mid/near asset debugging.
+## Task folder contract
 
-## General Instructions For Agents
-- Keep changes config-driven: prefer editing `wizard_game/runtimeConfigs.js`, `EngineConfig`, `GameDataConfig`, and planet config builders over sprinkling constants.
-- Run locally with `python3 server.py` and open `wizard_game/standalone.html`; browser console logging is a primary debug channel.
-- The supported main path is WebGPU-first. There are still legacy `webgl2` files in the tree, but do not assume they are the active architecture unless the code path clearly uses them.
-- Preserve the world/render split:
-  - world modules decide data, generation, residency, and selection
-  - renderer modules decide materials, passes, and draw calls
-- Do NOT use the question mark operator for conditional statements in WebGPU shaders. It is incorrect syntax.
-- Be careful with WGSL uniform control flow and bind group layout assumptions; these are common failure points.
-- Do not revert unrelated user changes in this repo.
+Each autonomous task lives under:
+
+```text
+tasks/<task-slug>/
+```
+
+Expected files:
+
+- `task.md` — raw user request
+- `refined-task.md` — tightened brief after viability analysis
+- `plan.json` — staged implementation plan
+- `plan-review.json` — reviewer decision on the plan
+- `current-increment.json` — current increment spec
+- `codex-handoff.json` — implementer summary for review
+- `claude-review.json` — reviewer decision on the increment
+- `state.json` — orchestrator state
+- `run.log` — append-only progress log
+
+## Intake and viability analysis
+
+Before unattended implementation:
+
+- tighten the task into a short concrete brief
+- identify missing requirements
+- ask only the minimum clarifying questions needed to proceed safely
+- recommend a validation strategy based on the prompt and repo shape
+
+Good reasons to pause for clarification:
+
+- acceptance criteria are unclear
+- UI expectations are vague and no screenshot or mockup target exists
+- migration / rollout / backward-compatibility impact is ambiguous
+- there are multiple plausible architectural approaches with materially different outcomes
+
+## Planning rules
+
+The plan must be broken into small, reviewable increments.
+
+Each increment should have:
+
+- a stable `id`
+- a short title
+- one clear goal
+- narrow scope
+- explicit validation steps
+- explicit done conditions
+
+Avoid increments that combine multiple architectural shifts at once.
+
+## Implementation rules
+
+When implementing an increment:
+
+- implement only the current approved increment
+- do not start future increments
+- preserve the invariants from the plan and review files
+- stop after producing the handoff summary
+- record what changed, what was validated, and any remaining risks
+
+If reviewer feedback conflicts with prior invariants or the task brief, stop and mark the work blocked instead of improvising.
+
+## Review-gate rules
+
+No increment is complete until the reviewer marks it approved.
+
+Valid review outcomes:
+
+- `approved`
+- `changes_requested`
+- `blocked`
+
+If the reviewer requests changes:
+
+- apply only those fixes needed for the current increment
+- do not silently broaden scope
+- re-run the minimum relevant validation
+
+## Validation policy
+
+Choose validation based on the task type.
+
+### Business logic / backend changes
+
+Prefer:
+
+- unit tests
+- integration tests when available
+- type checking / linting when already configured
+
+### API-related changes
+
+Prefer:
+
+- unit or integration tests
+- API smoke tests (`curl`, repo scripts, or existing API test commands)
+- log inspection for local server responses when relevant
+
+### UI-related changes
+
+Prefer:
+
+- browser-driven checks when the repo already supports them
+- screenshot comparison when practical
+- console log inspection for runtime errors
+- accessibility checks if the task touches interaction, semantics, or form behavior
+
+For UI tasks, a strong default is:
+
+1. capture a before-state screenshot when useful
+2. implement the increment
+3. capture an after-state screenshot
+4. compare against the task brief or expected behavior
+5. explain any mismatch before declaring success
+
+### Console and runtime observation
+
+If a local app or test server is started, inspect:
+
+- build output
+- browser console errors
+- server logs
+- failing test output
+
+Do not claim success while obvious runtime errors remain unresolved.
+
+## Tooling expectations
+
+Use existing repo tools first.
+
+Examples:
+
+- package scripts from `package.json`
+- existing test runners
+- Playwright / Cypress if already present
+- Storybook if already present
+- repo-local lint / typecheck commands
+
+Do not add large new toolchains just to satisfy validation unless the task explicitly asks for it.
+
+## Git behavior
+
+Preferred pattern:
+
+- one branch per increment during autonomous execution
+- small commits
+- descriptive commit messages
+
+Do not merge without an explicit approved review result.
+
+## Communication style
+
+Handoffs must be factual and concise.
+
+Implementation handoffs should include:
+
+- increment id
+- summary of changes
+- files changed
+- tests run and outcomes
+- risks
+- open questions
+
+Never hide uncertainty.
