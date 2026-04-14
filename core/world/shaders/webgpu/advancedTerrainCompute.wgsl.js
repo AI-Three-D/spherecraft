@@ -450,6 +450,8 @@ fn authoredBiomeTileVariantBase(tileId: u32) -> u32 {
         return SURFACE_VOLCANIC_MIN + ((validTileId - SURFACE_VOLCANIC_MIN) / 4u) * 4u;
     }
 
+    // Unknown tile category falls back to grass. If this trips for authored data,
+    // check that the biome tileId resolves into one of the recognized TILE_TYPES ranges.
     return SURFACE_GRASS_BASE;
 }
 
@@ -503,6 +505,8 @@ fn determineTileType(
         biomeConfigUniforms
     );
     if (biome.score <= 0.0) {
+        // This re-enters the legacy path, which currently re-evaluates climate inside
+        // computeSurfaceWeights(). Keep that in mind if authored biomes become sparse.
         return determineTileTypeFallback(h, slope, wx, wy, unitDir, seed);
     }
 
