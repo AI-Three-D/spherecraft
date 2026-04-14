@@ -3021,6 +3021,12 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
                 `for terrain compute upload`
             );
         }
+        if (packed.biomeCount > 0) {
+            Logger.info(
+                '[BiomeRuntime] Terrain compute is using authored biome selection ' +
+                'with legacy TILE_TYPES fallback'
+            );
+        }
         if (packed.truncatedBiomeCount > 0) {
             Logger.warn(
                 `[BiomeRuntime] Truncated ${packed.truncatedBiomeCount} biome defs ` +
