@@ -1333,6 +1333,23 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
         buildAccumulatedTop4(&accumIds, &accumWeights, accumCount, &topIds, &topWeights);
     }
 
+    // Re-sort by weight descending so slot 0 is always the dominant tile.
+    // The bilinear path inherits tile-ID-ascending order from the compute shader;
+    // the fallback path is already weight-sorted but this is a no-op for it.
+    // Both paths must agree on slot semantics before the shading code uses .x/.y.
+    for (var si: i32 = 0; si < 3; si += 1) {
+        for (var sj: i32 = si + 1; sj < 4; sj += 1) {
+            let validI = topIds[si] < 255;
+            let validJ = topIds[sj] < 255;
+            let doSwap = (validJ && !validI) ||
+                         (validI && validJ && topWeights[sj] > topWeights[si]);
+            if (doSwap) {
+                let tmpId = topIds[si]; topIds[si] = topIds[sj]; topIds[sj] = tmpId;
+                let tmpW  = topWeights[si]; topWeights[si] = topWeights[sj]; topWeights[sj] = tmpW;
+            }
+        }
+    }
+
     let topSum = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
     if (topSum <= 0.0001) {
         let centerSum = max(centerWeights.x + centerWeights.y + centerWeights.z + centerWeights.w, 0.0001);

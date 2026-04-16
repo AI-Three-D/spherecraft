@@ -2376,7 +2376,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
                 const type1 = splatData[i];
                 const type2 = splatData[i + 1];
                 const weight = splatData[i + 2] / 255;
-                const hasBoundary = splatData[i + 3] > 127;
+                const hasBoundary =  splatData[i + 3] > 127;
 
                 if (!hasBoundary && weight > 0.999 && type1 === type2) {
                     zeroCount++;
