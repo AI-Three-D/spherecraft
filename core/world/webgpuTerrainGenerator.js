@@ -422,6 +422,8 @@ export class WebGPUTerrainGenerator {
                 categoryEcho: this.createGPUTexture(innerSize, innerSize, 'rgba8unorm')
             };
         }
+        // _padTileUniformBuffer is still used by debug probe passes (tileEcho/categoryEcho)
+        // when debugProbeTextures is active — keep the write unconditionally as it is cheap.
         const padTileParams = new Uint32Array([
             padding >>> 0,
             innerSize >>> 0,
@@ -442,8 +444,30 @@ export class WebGPUTerrainGenerator {
         splatView.setInt32(28, 0, true);
         this.device.queue.writeBuffer(this.splatUniformBuffer, 0, splatUniformData);
 
-        const { pipeline: padTilePipeline, bindGroupLayout: padTileBindGroupLayout } =
-            this._getPadTilePipelineForFormat(splatPass.tileFormat || 'r8unorm');
+        // Build the padded tileMap by running the terrain generation shader over
+        // the extended region (innerSize + padding on each side) instead of
+        // edge-replicating the tile's own border.  The uvOffset shifts the
+        // pixel→faceUV mapping so that pixel `padding` maps to the tile origin
+        // and pixels 0..(padding-1) map to the genuine neighbouring tile area.
+        const uvShift = -padding / Math.max(innerSize - 1, 1) / Math.max(chunkGridSize, 1);
+        this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
+        {
+            const v = new DataView(this._terrainUniformScratch);
+            v.setInt32(48, 2, true);        // outputType = 2 (tile IDs)
+            v.setFloat32(64, uvShift, true); // uvOffset.x
+            v.setFloat32(68, uvShift, true); // uvOffset.y
+        }
+        if (!this._paddedTileGenUniformBuffer) {
+            this._paddedTileGenUniformBuffer = this.device.createBuffer({
+                label: 'PaddedTileGenUniform',
+                size: this._terrainUniformScratch.byteLength,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+        }
+        this.device.queue.writeBuffer(this._paddedTileGenUniformBuffer, 0, this._terrainUniformScratch);
+
+        const { pipeline: tileGenPipeline, bindGroupLayout: tileGenBindGroupLayout } =
+            this._getTerrainPipelineForFormat('rgba8unorm');
         const { pipeline: splatPipeline, bindGroupLayout: splatBindGroupLayout } =
             this._getSplatPipelineForFormats(
                 splatPass.heightFormat || 'r32float',
@@ -466,14 +490,13 @@ export class WebGPUTerrainGenerator {
         const enc = this.device.createCommandEncoder({ label: 'PaddedQuadtreeSplat' });
 
         {
-            const pass = enc.beginComputePass({ label: 'PadSourceTileMap' });
-            pass.setPipeline(padTilePipeline);
+            const pass = enc.beginComputePass({ label: 'GenPaddedTileMap' });
+            pass.setPipeline(tileGenPipeline);
             pass.setBindGroup(0, this.device.createBindGroup({
-                layout: padTileBindGroupLayout,
+                layout: tileGenBindGroupLayout,
                 entries: [
-                    { binding: 0, resource: { buffer: this._padTileUniformBuffer } },
-                    { binding: 1, resource: splatPass.tileTex.createView() },
-                    { binding: 2, resource: paddedTileMap.createView() }
+                    { binding: 0, resource: { buffer: this._paddedTileGenUniformBuffer } },
+                    { binding: 1, resource: paddedTileMap.createView() }
                 ]
             }));
             pass.dispatchWorkgroups(
