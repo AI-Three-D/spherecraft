@@ -1049,6 +1049,70 @@ struct SplatData {
     bilinearValid: bool,
 };
 
+
+fn sortTop4ByTileId(
+    topIds: ptr<function, array<i32, 4>>,
+    topWeights: ptr<function, array<f32, 4>>
+) {
+    for (var i: i32 = 0; i < 3; i += 1) {
+        for (var j: i32 = i + 1; j < 4; j += 1) {
+            let vi = (*topIds)[i] < 255;
+            let vj = (*topIds)[j] < 255;
+            let doSwap =
+                (vj && !vi) ||
+                (vi && vj && (*topIds)[j] < (*topIds)[i]);
+
+            if (doSwap) {
+                let tmpId = (*topIds)[i];
+                (*topIds)[i] = (*topIds)[j];
+                (*topIds)[j] = tmpId;
+
+                let tmpW = (*topWeights)[i];
+                (*topWeights)[i] = (*topWeights)[j];
+                (*topWeights)[j] = tmpW;
+            }
+        }
+    }
+}
+
+fn splatDominantWeight(splat: SplatData) -> f32 {
+    return max(
+        max(splat.weights.x, splat.weights.y),
+        max(splat.weights.z, splat.weights.w)
+    );
+}
+
+fn splatDominantTileId(splat: SplatData) -> f32 {
+    var bestId = splat.tileIds.x;
+    var bestW  = splat.weights.x;
+
+    if (splat.weights.y > bestW || (abs(splat.weights.y - bestW) <= 0.0001 && splat.tileIds.y < bestId)) {
+        bestW = splat.weights.y;
+        bestId = splat.tileIds.y;
+    }
+    if (splat.weights.z > bestW || (abs(splat.weights.z - bestW) <= 0.0001 && splat.tileIds.z < bestId)) {
+        bestW = splat.weights.z;
+        bestId = splat.tileIds.z;
+    }
+    if (splat.weights.w > bestW || (abs(splat.weights.w - bestW) <= 0.0001 && splat.tileIds.w < bestId)) {
+        bestW = splat.weights.w;
+        bestId = splat.tileIds.w;
+    }
+
+    return bestId;
+}
+
+fn splatHasMeaningfulBlend(splat: SplatData) -> bool {
+    let dominant = splatDominantWeight(splat);
+    let rest = 1.0 - dominant;
+    return rest > 0.03;
+}
+
+fn splatChannelUsable(tileId: f32, weight: f32) -> bool {
+    return tileId >= 0.0 && tileId < 255.0 && weight > 0.03;
+}
+
+
 fn grassHash(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
     p3 = p3 + dot(p3, p3.yzx + 33.33);
@@ -1261,10 +1325,8 @@ fn splatActiveCount(splat: SplatData) -> i32 {
 }
 
 fn splatPrimaryWeight(splat: SplatData, _local: vec2<f32>) -> f32 {
-    let total = max(splatWeightSum(splat), 0.0001);
-    return clamp(splat.weights.x / total, 0.0, 1.0);
+    return splatDominantWeight(splat);
 }
-
 fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
@@ -1282,16 +1344,20 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
     let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
     let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
+
     let centerWeights = loadSplatWeights(centerCoord, layer);
     let centerIds = loadSplatIndices(centerCoord, layer);
+
     let weights00 = loadSplatWeights(c00, layer);
     let weights10 = loadSplatWeights(c10, layer);
     let weights01 = loadSplatWeights(c01, layer);
     let weights11 = loadSplatWeights(c11, layer);
+
     let ids00 = loadSplatIndices(c00, layer);
     let ids10 = loadSplatIndices(c10, layer);
     let ids01 = loadSplatIndices(c01, layer);
     let ids11 = loadSplatIndices(c11, layer);
+
     let bilinearValid =
         splatIdSetsMatch(ids00, ids10) &&
         splatIdSetsMatch(ids00, ids01) &&
@@ -1310,6 +1376,7 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
             vec4<f32>(0.0),
             vec4<f32>(1.0)
         );
+
         topIds = array<i32, 4>(ids00.x, ids00.y, ids00.z, ids00.w);
         topWeights = array<f32, 4>(
             blendedWeights.x,
@@ -1318,9 +1385,6 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
             blendedWeights.w
         );
     } else {
-        // Corner slot layouts disagree.  Accumulate the actual weighted corner
-        // mixtures instead of snapping to the center texel; the old snap left
-        // visible square "ghost borders" at the mixed→pure transition edge.
         var accumIds: array<i32, 16>;
         var accumWeights: array<f32, 16>;
         var accumCount: i32 = 0;
@@ -1331,24 +1395,11 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
         accumulateLoadedCornerMixture(ids11, weights11, f.x * f.y,                 &accumIds, &accumWeights, &accumCount);
 
         buildAccumulatedTop4(&accumIds, &accumWeights, accumCount, &topIds, &topWeights);
-    }
 
-    // Re-sort by weight descending so slot 0 is always the dominant tile.
-    // The bilinear path inherits tile-ID-ascending order from the compute shader;
-    // the fallback path is already weight-sorted but this is a no-op for it.
-    // Both paths must agree on slot semantics before the shading code uses .x/.y.
-    for (var si: i32 = 0; si < 3; si += 1) {
-        for (var sj: i32 = si + 1; sj < 4; sj += 1) {
-            let validI = topIds[si] < 255;
-            let validJ = topIds[sj] < 255;
-            let doSwap = (validJ && !validI) ||
-                         (validI && validJ && topWeights[sj] > topWeights[si]);
-            if (doSwap) {
-                let tmpId = topIds[si]; topIds[si] = topIds[sj]; topIds[sj] = tmpId;
-                let tmpW  = topWeights[si]; topWeights[si] = topWeights[sj]; topWeights[sj] = tmpW;
-            }
-        }
+
     }
+                // Important: restore stable channel identity after fallback.
+                sortTop4ByTileId(&topIds, &topWeights);
 
     let topSum = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
     if (topSum <= 0.0001) {
@@ -1382,14 +1433,16 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
         topWeights[2],
         topWeights[3]
     );
+
     let total = splatWeightSum(result);
     if (total > 0.0001) {
         result.weights = result.weights / total;
     } else {
         result.weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
     }
+
     result.cellLocal = fract(uv * splatTexSize);
-    result.hasBoundary = splatActiveCount(result) > 1;
+    result.hasBoundary = splatHasMeaningfulBlend(result);
     result.bilinearValid = bilinearValid;
     return result;
 }
@@ -1776,7 +1829,6 @@ fn computeNearToMidDetailFade(input: FragmentInput) -> f32 {
     let fadeEnd = max(fragUniforms.chunkWidth * NEAR_TO_MID_FADE_END_CHUNKS, fadeStart + 0.001);
     return 1.0 - smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
 }
-
 fn sampleMicroTextureWithSplat(
     input: FragmentInput,
     activeSeason: i32,
@@ -1787,45 +1839,109 @@ fn sampleMicroTextureWithSplat(
 ) -> vec4<f32> {
     let worldTileCoord = floor(input.vWorldPos);
     let local = fract(input.vWorldPos);
-    let activeCount = splatActiveCount(splat);
 
-    if (!splat.hasBoundary || activeCount <= 1) {
+    let dominantId = splatDominantTileId(splat);
+    let dominantW = splatDominantWeight(splat);
+
+    // Cheap fast path for almost-pure texels.
+    if (!splat.hasBoundary || dominantW > 0.97) {
         return sampleTileColor(
-            splat.tileIds.x, worldTileCoord, local,
+            dominantId, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
         );
     }
 
-    let top2Sum = max(splat.weights.x + splat.weights.y, 0.0001);
-    let primaryWeight = clamp(splat.weights.x / top2Sum, 0.0, 1.0);
-    if (primaryWeight > 0.995) {
-        return sampleTileColor(
+    // If advanced blending ever comes back, keep the old pairwise path there.
+    if (USE_ADVANCED_BLEND) {
+        var bestI: i32 = 0;
+        var secondI: i32 = 1;
+
+        let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+        let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+
+        if (ws[1] > ws[bestI]) { bestI = 1; }
+        if (ws[2] > ws[bestI]) { bestI = 2; }
+        if (ws[3] > ws[bestI]) { bestI = 3; }
+
+        secondI = select(1, 0, bestI == 1);
+        if (secondI == bestI) { secondI = 2; }
+        if (secondI == bestI) { secondI = 3; }
+
+        for (var i: i32 = 0; i < 4; i += 1) {
+            if (i == bestI) { continue; }
+            if (ws[i] > ws[secondI]) { secondI = i; }
+        }
+
+        let top2Sum = max(ws[bestI] + ws[secondI], 0.0001);
+        let w1 = ws[bestI] / top2Sum;
+        let w2 = ws[secondI] / top2Sum;
+
+        let color1 = sampleTileColor(
+            ids[bestI], worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        let color2 = sampleTileColor(
+            ids[secondI], worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+
+        return blendTileColorsSplat(
+            color1, color2,
+            w1, w2,
+            ids[bestI], ids[secondI],
+            input.vWorldPos
+        );
+    }
+
+    // Current live path: stable weighted multi-way blend.
+    var accum = vec4<f32>(0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let c = sampleTileColor(
             splat.tileIds.x, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
         );
+        accum = accum + c * splat.weights.x;
+        sum = sum + splat.weights.x;
     }
-    if (primaryWeight < 0.005) {
-        return sampleTileColor(
+
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let c = sampleTileColor(
             splat.tileIds.y, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
         );
+        accum = accum + c * splat.weights.y;
+        sum = sum + splat.weights.y;
     }
-    let color1 = sampleTileColor(
-        splat.tileIds.x, worldTileCoord, local,
-        activeSeason, ddx_vUv, ddy_vUv
-    );
-    let color2 = sampleTileColor(
-        splat.tileIds.y, worldTileCoord, local,
-        activeSeason, ddx_vUv, ddy_vUv
-    );
-    return blendTileColorsSplat(
-        color1, color2,
-        primaryWeight, 1.0 - primaryWeight,
-        splat.tileIds.x, splat.tileIds.y,
-        input.vWorldPos
-    );
-}
 
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let c = sampleTileColor(
+            splat.tileIds.z, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let c = sampleTileColor(
+            splat.tileIds.w, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return sampleTileColor(
+            dominantId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+    }
+
+    return accum / sum;
+}
 fn normalizeMacroTileId(tileId: f32) -> f32 {
     return select(tileId, tileId - 100.0, tileId >= 100.0);
 }
@@ -1850,7 +1966,6 @@ fn sampleMacroTileColorBilinear(
 
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
-
 fn sampleMacroOverlaySplat(
     input: FragmentInput,
     activeSeason: i32,
@@ -1862,25 +1977,68 @@ fn sampleMacroOverlaySplat(
     let local = fract(macroWorld);
     let ddx_uv = dpdx(macroWorld);
     let ddy_uv = dpdy(macroWorld);
-    let activeCount = splatActiveCount(splat);
 
-    if (!splat.hasBoundary || activeCount <= 1) {
+    let dominantId = splatDominantTileId(splat);
+    let dominantW = splatDominantWeight(splat);
+
+    if (!splat.hasBoundary || dominantW > 0.97) {
         return sampleMacroOverlaySimplePrepared(
             macroWorld,
             local,
             activeSeason,
             ddx_uv,
             ddy_uv,
-            splat.tileIds.x
+            dominantId
         );
     }
 
-    let top2Sum = max(splat.weights.x + splat.weights.y, 0.0001);
-    let w1 = splat.weights.x / top2Sum;
-    let w2 = splat.weights.y / top2Sum;
-    let primary = sampleMacroTileColorBilinear(splat.tileIds.x, macroWorld, local, activeSeason, ddx_uv, ddy_uv);
-    let secondary = sampleMacroTileColorBilinear(splat.tileIds.y, macroWorld, local, activeSeason, ddx_uv, ddy_uv);
-    return primary * w1 + secondary * w2;
+    var accum = vec3<f32>(0.0, 0.0, 0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.x, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.x;
+        sum = sum + splat.weights.x;
+    }
+
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.y, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.y;
+        sum = sum + splat.weights.y;
+    }
+
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.z, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.w, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return sampleMacroOverlaySimplePrepared(
+            macroWorld,
+            local,
+            activeSeason,
+            ddx_uv,
+            ddy_uv,
+            dominantId
+        );
+    }
+
+    return accum / sum;
 }
 
 fn sampleMacroOverlaySimplePrepared(
@@ -2279,7 +2437,7 @@ if (debugMode == 16) {
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
         );
         microSample = detailedMicro;
-        dominantTileId = splatResult.tileIds.x;
+       dominantTileId = splatDominantTileId(splatResult); 
 
         if (ENABLE_NEAR_TO_MID_FADE && nearToMidDetailFade < 0.999) {
             let coarseMicro = sampleTileColor(
@@ -2287,7 +2445,7 @@ if (debugMode == 16) {
                 activeSeason, ddx_vUv, ddy_vUv
             );
             microSample = mix(coarseMicro, detailedMicro, nearToMidDetailFade);
-            dominantTileId = select(fallbackTileId, splatResult.tileIds.x, nearToMidDetailFade > 0.5);
+dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearToMidDetailFade > 0.5);
         }
     } else {
         microSample = sampleTileColor(
