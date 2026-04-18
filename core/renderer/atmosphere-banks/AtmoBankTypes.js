@@ -15,3 +15,5 @@ export const ATMO_INDIRECT_SIZE    = 16;
 export const ATMO_SCRATCH_SIZE     = 16;
 export const ATMO_FLAG_ALIVE       = 1;
 export const ATMO_WORKGROUP_SIZE   = 64;
+export const ATMO_VOLUME_SLICE_COUNT = 5;
+export const ATMO_VERTICES_PER_PARTICLE = ATMO_VOLUME_SLICE_COUNT * 6;

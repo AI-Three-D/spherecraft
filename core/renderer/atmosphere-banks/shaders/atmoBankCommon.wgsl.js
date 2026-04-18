@@ -24,6 +24,9 @@ struct AtmoGlobals {
     planetOrigin: vec3<f32>, emitterCount: u32,
     maxParticles: u32, windDirX: f32, windDirY: f32, windSpeed: f32,
     maxRenderDist: f32, nearPlane: f32, farPlane: f32, _pad0: f32,
+    sunDirection: vec3<f32>, sunVisibility: f32,
+    sunColor: vec3<f32>, ambientIntensity: f32,
+    ambientColor: vec3<f32>, moonIntensity: f32,
 };
 
 struct AtmoEmitterDef {
@@ -32,6 +35,13 @@ struct AtmoEmitterDef {
     rngSeed: u32, _pad0: u32, _pad1: u32, _pad2: u32,
     _pad3: vec4<f32>,
     _pad4: vec4<f32>,
+};
+
+struct AtmoEmitterCounter {
+    count: atomic<u32>,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 
 struct AtmoDrawIndirect {

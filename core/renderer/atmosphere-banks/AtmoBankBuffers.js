@@ -2,6 +2,7 @@ import {
     ATMO_BANK_TYPES, ATMO_TYPE_CAPACITY, ATMO_EMITTER_CAPACITY,
     ATMO_MAX_PARTICLES, ATMO_PARTICLE_STRIDE, ATMO_TYPE_DEF_STRIDE,
     ATMO_EMITTER_STRIDE, ATMO_GLOBALS_SIZE, ATMO_INDIRECT_SIZE, ATMO_SCRATCH_SIZE,
+    ATMO_VERTICES_PER_PARTICLE,
 } from './AtmoBankTypes.js';
 
 const GLOBALS_OFFSETS = {
@@ -17,6 +18,9 @@ const GLOBALS_OFFSETS = {
     maxRenderDist:      144,
     nearPlane:          148,
     farPlane:           152,
+    sunDirection_visibility: 160,
+    sunColor_ambient:        176,
+    ambientColor_moon:       192,
 };
 
 export class AtmoBankBuffers {
@@ -68,10 +72,16 @@ export class AtmoBankBuffers {
             label: 'AtmoBankEmitters', size: ATMO_EMITTER_CAPACITY * ATMO_EMITTER_STRIDE,
             usage: STOR,
         });
+        this.emitterCounter = device.createBuffer({
+            label: 'AtmoBankEmitterCounter',
+            size: 16,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
         this._eF32 = new Float32Array(ATMO_EMITTER_CAPACITY * ATMO_EMITTER_STRIDE / 4);
         this._eU32 = new Uint32Array(this._eF32.buffer);
+        this._emitterCounterData = new Uint32Array(4);
 
-        this._indirectReset = new Uint32Array([6, 0, 0, 0]);
+        this._indirectReset = new Uint32Array([ATMO_VERTICES_PER_PARTICLE, 0, 0, 0]);
     }
 
     resetLiveList() {
@@ -132,12 +142,19 @@ export class AtmoBankBuffers {
             this._eU32[b + 8] = (em.rngSeed ?? 0) >>> 0;
         }
         this.device.queue.writeBuffer(this.emitterData, 0, this._eF32.buffer);
+        this._emitterCounterData[0] = count >>> 0;
+        this._emitterCounterData[1] = 0;
+        this._emitterCounterData[2] = 0;
+        this._emitterCounterData[3] = 0;
+        this.device.queue.writeBuffer(this.emitterCounter, 0, this._emitterCounterData);
     }
 
     writeGlobals({
         viewProjMatrix, cameraRight, cameraUp, cameraPos,
         dt, time, planetOrigin, totalSpawnBudget, emitterCount,
         windDirection, windSpeed, maxRenderDist, near, far,
+        sunDirection, sunVisibility, sunColor,
+        ambientColor, ambientIntensity, moonIntensity,
     }) {
         const f = this._gF32;
         const u = this._gU32;
@@ -165,12 +182,30 @@ export class AtmoBankBuffers {
         f[GLOBALS_OFFSETS.nearPlane / 4]    = near ?? 0.5;
         f[GLOBALS_OFFSETS.farPlane / 4]     = far ?? 100000;
 
+        const sd = GLOBALS_OFFSETS.sunDirection_visibility / 4;
+        f[sd] = sunDirection?.[0] ?? 0.5;
+        f[sd+1] = sunDirection?.[1] ?? 1.0;
+        f[sd+2] = sunDirection?.[2] ?? 0.3;
+        f[sd+3] = sunVisibility ?? 1.0;
+
+        const sc = GLOBALS_OFFSETS.sunColor_ambient / 4;
+        f[sc] = sunColor?.[0] ?? 1.0;
+        f[sc+1] = sunColor?.[1] ?? 1.0;
+        f[sc+2] = sunColor?.[2] ?? 1.0;
+        f[sc+3] = ambientIntensity ?? 0.12;
+
+        const ac = GLOBALS_OFFSETS.ambientColor_moon / 4;
+        f[ac] = ambientColor?.[0] ?? 0.35;
+        f[ac+1] = ambientColor?.[1] ?? 0.38;
+        f[ac+2] = ambientColor?.[2] ?? 0.45;
+        f[ac+3] = moonIntensity ?? 0.0;
+
         this.device.queue.writeBuffer(this.globalsUBO, 0, f.buffer);
     }
 
     dispose() {
         for (const k of ['particlesA','particlesB','globalsUBO','typeDefUBO',
-                          'indirect','liveList','spawnScratch','emitterData']) {
+                          'indirect','liveList','spawnScratch','emitterData','emitterCounter']) {
             this[k]?.destroy();
         }
     }

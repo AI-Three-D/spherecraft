@@ -18,6 +18,7 @@ ${common}
 @group(0) @binding(5)  var<storage, read_write> liveList     : array<u32>;
 @group(0) @binding(6)  var<storage, read_write> spawnScratch : AtmoSpawnScratch;
 @group(0) @binding(7)  var<storage, read>       emitters     : array<AtmoEmitterDef, ATMO_EMITTER_CAPACITY>;
+@group(0) @binding(8)  var<storage, read_write> emitterCounter : AtmoEmitterCounter;
 
 fn hash1u(x: u32) -> u32 {
     var v = x;
@@ -57,19 +58,31 @@ fn resolveLocalUp(position: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0, 1.0, 0.0);
 }
 
-fn selectEmitterIndex(claim: u32) -> u32 {
+struct EmitterSelection {
+    idx: u32,
+    valid: u32,
+};
+
+fn selectEmitterIndex(claim: u32, emitterCount: u32) -> EmitterSelection {
     var accum = 0u;
+    var selection: EmitterSelection;
+    selection.idx = 0u;
+    selection.valid = 0u;
+
     for (var idx = 0u; idx < ATMO_EMITTER_CAPACITY; idx++) {
-        if (idx >= globals.emitterCount) { break; }
+        if (idx >= emitterCount) { break; }
         let nextAccum = accum + emitters[idx].spawnBudget;
-        if (claim < nextAccum) { return idx; }
+        if (claim < nextAccum) {
+            selection.idx = idx;
+            selection.valid = 1u;
+            return selection;
+        }
         accum = nextAccum;
     }
-    return 0u;
+    return selection;
 }
 
-fn spawnParticle(slot: u32, claim: u32) -> AtmoParticle {
-    let emIdx = selectEmitterIndex(claim);
+fn spawnParticle(slot: u32, claim: u32, emIdx: u32) -> AtmoParticle {
     let emitter = emitters[emIdx];
     let seedBase = slot ^ (claim * 7919u) ^ emitter.rngSeed;
     let td = typeDefs[emitter.typeId];
@@ -81,7 +94,17 @@ fn spawnParticle(slot: u32, claim: u32) -> AtmoParticle {
     let spawnRadius = mix(td.sizeMin * 0.3, td.sizeMax * 0.5, r);
     let lx = cos(angle) * spawnRadius;
     let lz = sin(angle) * spawnRadius;
-    let ly = randRange(seedBase, 13u, emitter.rngSeed, -td.sizeMin * 0.1, td.sizeMax * 0.15);
+    var minUp = td.sizeMin * 0.02;
+    var maxUp = td.sizeMax * 0.10;
+    if (emitter.typeId == 1u) {
+        minUp = td.sizeMin * 0.02;
+        maxUp = td.sizeMax * 0.08;
+    }
+    if (emitter.typeId == 2u) {
+        minUp = td.sizeMin * 0.05;
+        maxUp = td.sizeMax * 0.14;
+    }
+    let ly = randRange(seedBase, 13u, emitter.rngSeed, minUp, maxUp);
     let localOffset = basis * vec3<f32>(lx, ly, lz);
 
     let windX = globals.windDirX * globals.windSpeed * td.windResponse;
@@ -147,10 +170,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             p.flags = 0u;
         }
     } else {
-        if (globals.totalSpawnBudget > 0u && globals.emitterCount > 0u) {
+        let emitterCount = min(atomicLoad(&emitterCounter.count), ATMO_EMITTER_CAPACITY);
+        if (emitterCount > 0u) {
             let claim = atomicAdd(&spawnScratch.claimed, 1u);
-            if (claim < globals.totalSpawnBudget) {
-                p = spawnParticle(i, claim);
+            let selection = selectEmitterIndex(claim, emitterCount);
+            if (selection.valid != 0u) {
+                p = spawnParticle(i, claim, selection.idx);
                 let idx = atomicAdd(&indirect.instanceCount, 1u);
                 liveList[idx] = i;
             } else {

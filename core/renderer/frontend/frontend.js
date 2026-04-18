@@ -521,6 +521,13 @@ export class Frontend {
                 depthFormat: 'depth24plus',
             });
             await this.atmoBankSystem.initialize();
+            if (this.quadtreeTileManager?.tileStreamer) {
+                this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
+                Logger.info('[AtmoBank] GPU tile streamer linked');
+            }
+            if (typeof window !== 'undefined') {
+                window.atmoBankDiag = () => this.atmoBankSystem?.getDiagnostics?.() ?? null;
+            }
         }
 
         await this._maybeInitGPUShadows();
@@ -940,7 +947,6 @@ updateLighting(starSystem) {
         }
 
         this.backend.submitCommands();
-        this.atmoBankSystem?.beginPostSubmitReadback?.();
         this._actorManager?.resolveReadback();
         if (this.quadtreeTileManager?.resolveFeedbackReadback) {
             this.quadtreeTileManager.resolveFeedbackReadback();
@@ -1132,7 +1138,8 @@ updateLighting(starSystem) {
                     const abEnc = this.backend.getCommandEncoder();
                     this.atmoBankSystem.update(
                         abEnc, this.camera, this._lastDeltaTime || 0,
-                        this._currentEnvironmentState, this.planetConfig
+                        this._currentEnvironmentState, this.planetConfig,
+                        this.lightingController, this.uniformManager
                     );
                     this.atmoBankSystem.setDepthTexture(this.postProcessing?.depthTextureView);
                     this._renderAtmoBanksDepthReadOnly(abEnc);

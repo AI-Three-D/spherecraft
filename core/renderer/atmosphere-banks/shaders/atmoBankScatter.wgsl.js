@@ -150,25 +150,25 @@ fn main(
     if (camDist > 2000.0) { return; }
 
     let slope = sampleSlope(texUv, layer);
-    let weatherMod = max(0.15, params.fogDensity + params.weatherIntensity * 0.3);
+    let weatherMod = max(0.32, clamp(params.fogDensity * 1.6 + params.weatherIntensity * 0.45, 0.0, 1.25));
     let roll = hashToFloat(cellHash ^ 0x12345678u);
 
     var typeId = 0xFFFFFFFFu;
     var budget = 2u;
 
     if (isForestTile(tileId) && slope < 0.25) {
-        let prob = 0.12 * weatherMod;
-        if (roll < f32(prob)) {
+        let prob = 0.26 * weatherMod;
+        if (roll < prob) {
             typeId = TYPE_FOG_POCKET;
-            budget = 3u;
+            budget = 4u;
         }
     }
 
     if (typeId == 0xFFFFFFFFu && isSwampTile(tileId)) {
-        let prob = 0.15 * weatherMod;
-        if (roll < f32(prob)) {
+        let prob = 0.32 * weatherMod;
+        if (roll < prob) {
             typeId = TYPE_FOG_POCKET;
-            budget = 3u;
+            budget = 4u;
         }
     }
 
@@ -182,18 +182,18 @@ fn main(
         let depression = avgNeighbor - elevation;
 
         if (depression > 3.0) {
-            let prob = 0.08 * weatherMod * min(depression / 10.0, 1.0);
-            if (roll < f32(prob)) {
+            let prob = 0.18 * weatherMod * min(depression / 10.0, 1.0);
+            if (roll < prob) {
                 typeId = TYPE_VALLEY_MIST;
-                budget = 2u;
+                budget = 3u;
             }
         }
     }
 
     if (typeId == 0xFFFFFFFFu && elevation > params.heightScale * 0.55 && slope < 0.3) {
         let altFactor = clamp((elevation - params.heightScale * 0.55) / (params.heightScale * 0.2), 0.0, 1.0);
-        let prob = 0.06 * weatherMod * altFactor;
-        if (roll < f32(prob)) {
+        let prob = 0.10 * weatherMod * altFactor;
+        if (roll < prob) {
             typeId = TYPE_LOW_CLOUD;
             budget = 2u;
         }

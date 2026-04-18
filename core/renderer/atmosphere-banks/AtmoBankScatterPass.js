@@ -4,8 +4,8 @@ import { ATMO_EMITTER_CAPACITY, ATMO_EMITTER_STRIDE } from './AtmoBankTypes.js';
 const COUNTER_SIZE = 16;
 const LAYER_META_STRIDE = 32;
 const MAX_LAYERS = 256;
-const SCATTER_INTERVAL = 60;
-const CAMERA_MOVE_THRESHOLD = 100;
+const SCATTER_INTERVAL = 150;
+const CAMERA_MOVE_THRESHOLD = 250;
 
 export class AtmoBankScatterPass {
     constructor(device, tileStreamer) {
@@ -18,46 +18,38 @@ export class AtmoBankScatterPass {
 
         this._emitterOutputBuf = null;
         this._counterBuf = null;
-        this._readbackBuf = null;
         this._paramBuf = null;
         this._activeLayerBuf = null;
         this._layerMetaBuf = null;
 
-        this._cachedEmitters = [];
         this._framesSinceScatter = SCATTER_INTERVAL;
         this._lastCamX = 0;
         this._lastCamY = 0;
         this._lastCamZ = 0;
-        this._readbackPending = false;
-        this._readbackMapStarted = false;
-        this._readbackReady = false;
-        this._readbackGeneration = 0;
         this._textureViewsValid = false;
         this._heightView = null;
         this._tileView = null;
         this._normalView = null;
+        this._lastDispatchInfo = {
+            dispatched: false,
+            reason: 'not-initialized',
+        };
         this._initialized = false;
     }
 
     initialize() {
         const device = this.device;
         const STOR = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
-        const readbackSize = ATMO_EMITTER_CAPACITY * ATMO_EMITTER_STRIDE + COUNTER_SIZE;
 
         this._emitterOutputBuf = device.createBuffer({
             label: 'AtmoScatter-EmitterOutput',
             size: ATMO_EMITTER_CAPACITY * ATMO_EMITTER_STRIDE,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
         this._counterBuf = device.createBuffer({
             label: 'AtmoScatter-Counter',
             size: COUNTER_SIZE,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-        });
-        this._readbackBuf = device.createBuffer({
-            label: 'AtmoScatter-Readback',
-            size: readbackSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
         this._paramBuf = device.createBuffer({
             label: 'AtmoScatter-Params', size: 64,
@@ -96,7 +88,40 @@ export class AtmoBankScatterPass {
             },
         });
 
+        device.queue.writeBuffer(this._counterBuf, 0, new Uint32Array(4));
         this._initialized = true;
+    }
+
+    getEmitterBuffer() {
+        return this._emitterOutputBuf;
+    }
+
+    getCounterBuffer() {
+        return this._counterBuf;
+    }
+
+    getDiagnostics() {
+        return {
+            initialized: this._initialized,
+            hasTileStreamer: !!this.tileStreamer,
+            hasBindGroup: !!this._bindGroup,
+            textureViewsValid: this._textureViewsValid,
+            framesSinceScatter: this._framesSinceScatter,
+            lastDispatch: this._lastDispatchInfo,
+        };
+    }
+
+    _textureState() {
+        const textures = this.tileStreamer?.getArrayTextures?.();
+        const heightView = textures?.height?._gpuTexture?.view;
+        const tileView = textures?.tile?._gpuTexture?.view;
+        const normalView = textures?.normal?._gpuTexture?.view;
+        return {
+            hasTextures: !!textures,
+            hasHeightView: !!heightView,
+            hasTileView: !!tileView,
+            hasNormalView: !!normalView,
+        };
     }
 
     _ensureBindGroup() {
@@ -139,7 +164,7 @@ export class AtmoBankScatterPass {
     }
 
     shouldDispatch(camera) {
-        if (!this._initialized || this._readbackPending) return false;
+        if (!this._initialized) return false;
         this._framesSinceScatter++;
         if (this._framesSinceScatter < SCATTER_INTERVAL) {
             const dx = camera.position.x - this._lastCamX;
@@ -198,11 +223,28 @@ export class AtmoBankScatterPass {
     }
 
     dispatch(commandEncoder, camera, planetConfig, environmentState) {
-        if (!this._initialized || this._readbackPending) return false;
-        if (!this._ensureBindGroup()) return false;
+        if (!this._initialized) {
+            this._lastDispatchInfo = { dispatched: false, reason: 'not-initialized' };
+            return false;
+        }
+        if (!this._ensureBindGroup()) {
+            this._lastDispatchInfo = {
+                dispatched: false,
+                reason: 'missing-array-texture-view',
+                textures: this._textureState(),
+            };
+            return false;
+        }
 
         const tileInfo = this.tileStreamer._tileInfo;
-        if (!tileInfo || tileInfo.size === 0) return false;
+        if (!tileInfo || tileInfo.size === 0) {
+            this._lastDispatchInfo = {
+                dispatched: false,
+                reason: 'no-resident-tile-info',
+                tileInfoSize: tileInfo?.size ?? 0,
+            };
+            return false;
+        }
 
         const activeLayers = new Uint32Array(MAX_LAYERS);
         const layerMeta = new Uint32Array(MAX_LAYERS * (LAYER_META_STRIDE / 4));
@@ -240,7 +282,14 @@ export class AtmoBankScatterPass {
             layerCount++;
         }
 
-        if (layerCount === 0) return false;
+        if (layerCount === 0) {
+            this._lastDispatchInfo = {
+                dispatched: false,
+                reason: 'no-resident-array-layers',
+                tileInfoSize: tileInfo.size,
+            };
+            return false;
+        }
 
         const origin = planetConfig?.origin || { x: 0, y: 0, z: 0 };
         const paramData = new Float32Array(16);
@@ -271,90 +320,26 @@ export class AtmoBankScatterPass {
         pass.dispatchWorkgroups(layerCount);
         pass.end();
 
-        const emSize = ATMO_EMITTER_CAPACITY * ATMO_EMITTER_STRIDE;
-        commandEncoder.copyBufferToBuffer(this._counterBuf, 0, this._readbackBuf, 0, COUNTER_SIZE);
-        commandEncoder.copyBufferToBuffer(this._emitterOutputBuf, 0, this._readbackBuf, COUNTER_SIZE, emSize);
-
-        this._readbackPending = true;
-        this._readbackMapStarted = false;
-        this._readbackReady = false;
-        this._readbackGeneration++;
         this._framesSinceScatter = 0;
         this._lastCamX = camera.position.x;
         this._lastCamY = camera.position.y;
         this._lastCamZ = camera.position.z;
+        this._lastDispatchInfo = {
+            dispatched: true,
+            reason: 'ok',
+            layerCount,
+            tileInfoSize: tileInfo.size,
+            weatherIntensity: environmentState?.weatherIntensity ?? 0.3,
+            fogDensity: environmentState?.fogDensity ?? 0.3,
+        };
         return true;
     }
 
-    beginReadbackAfterSubmit() {
-        if (!this._initialized ||
-            !this._readbackPending ||
-            this._readbackMapStarted ||
-            this._readbackReady ||
-            !this._readbackBuf) {
-            return;
-        }
-
-        this._readbackMapStarted = true;
-        const generation = this._readbackGeneration;
-        this._readbackBuf.mapAsync(GPUMapMode.READ).then(() => {
-            if (generation !== this._readbackGeneration) return;
-            this._readbackReady = true;
-        }).catch(() => {
-            if (generation !== this._readbackGeneration) return;
-            this._readbackPending = false;
-            this._readbackMapStarted = false;
-            this._readbackReady = false;
-        });
-    }
-
-    resolveReadback() {
-        if (!this._readbackReady) return null;
-
-        const mapped = this._readbackBuf.getMappedRange();
-        const counterView = new Uint32Array(mapped, 0, 4);
-        const count = Math.min(counterView[0], ATMO_EMITTER_CAPACITY);
-
-        const emitters = [];
-        const emView = new Float32Array(mapped, COUNTER_SIZE);
-        const emU32  = new Uint32Array(mapped, COUNTER_SIZE);
-        const stride = ATMO_EMITTER_STRIDE / 4;
-
-        for (let i = 0; i < count; i++) {
-            const b = i * stride;
-            emitters.push({
-                position: [emView[b], emView[b + 1], emView[b + 2]],
-                spawnBudget: emU32[b + 3],
-                localUp: [emView[b + 4], emView[b + 5], emView[b + 6]],
-                typeId: emU32[b + 7],
-                rngSeed: emU32[b + 8],
-            });
-        }
-
-        this._readbackBuf.unmap();
-        this._readbackPending = false;
-        this._readbackMapStarted = false;
-        this._readbackReady = false;
-        this._cachedEmitters = emitters;
-        return emitters;
-    }
-
-    getEmitters() {
-        return this._cachedEmitters;
-    }
-
     dispose() {
-        this._readbackGeneration++;
-        if (this._readbackReady) {
-            try { this._readbackBuf?.unmap(); } catch {}
-        }
-        for (const k of ['_emitterOutputBuf','_counterBuf','_readbackBuf',
-                          '_paramBuf','_activeLayerBuf','_layerMetaBuf']) {
+        for (const k of ['_emitterOutputBuf','_counterBuf','_paramBuf',
+                          '_activeLayerBuf','_layerMetaBuf']) {
             this[k]?.destroy();
         }
-        this._readbackPending = false;
-        this._readbackMapStarted = false;
-        this._readbackReady = false;
         this._initialized = false;
     }
 }

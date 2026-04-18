@@ -1,5 +1,5 @@
 import { buildAtmoBankRenderWGSL } from './shaders/atmoBankRender.wgsl.js';
-import { ATMO_TYPE_CAPACITY } from './AtmoBankTypes.js';
+import { ATMO_TYPE_CAPACITY, ATMO_VOLUME_SLICE_COUNT } from './AtmoBankTypes.js';
 
 export class AtmoBankRenderPass {
     constructor(device, buffers, { colorFormat, depthFormat = 'depth24plus' }) {
@@ -20,6 +20,10 @@ export class AtmoBankRenderPass {
         this._depthView = null;
         this._noiseSampler = null;
         this._textureBGDirty = true;
+        this._lastRenderInfo = {
+            rendered: false,
+            reason: 'not-initialized',
+        };
     }
 
     initialize() {
@@ -45,7 +49,10 @@ export class AtmoBankRenderPass {
             ],
         });
 
-        const src = buildAtmoBankRenderWGSL({ typeCapacity: ATMO_TYPE_CAPACITY });
+        const src = buildAtmoBankRenderWGSL({
+            typeCapacity: ATMO_TYPE_CAPACITY,
+            sliceCount: ATMO_VOLUME_SLICE_COUNT,
+        });
         const module = device.createShaderModule({ label: 'AtmoBankRender-Shader', code: src });
 
         this.pipeline = device.createRenderPipeline({
@@ -113,8 +120,31 @@ export class AtmoBankRenderPass {
         }
     }
 
+    getDiagnostics() {
+        return {
+            hasPipeline: !!this.pipeline,
+            hasBufferBG: !!this._bufferBG_A && !!this._bufferBG_B,
+            hasTextureBG: !!this._textureBG,
+            textureBGDirty: this._textureBGDirty,
+            hasNoiseBase: !!this._noiseBaseView,
+            hasNoiseDetail: !!this._noiseDetailView,
+            hasDepth: !!this._depthView,
+            lastRender: this._lastRenderInfo,
+        };
+    }
+
     _rebuildTextureBG() {
-        if (!this._noiseBaseView || !this._noiseDetailView || !this._depthView || !this._noiseSampler) return false;
+        if (!this._noiseBaseView || !this._noiseDetailView || !this._depthView || !this._noiseSampler) {
+            this._lastRenderInfo = {
+                rendered: false,
+                reason: 'missing-render-resource',
+                hasNoiseBase: !!this._noiseBaseView,
+                hasNoiseDetail: !!this._noiseDetailView,
+                hasDepth: !!this._depthView,
+                hasSampler: !!this._noiseSampler,
+            };
+            return false;
+        }
         this._textureBG = this.device.createBindGroup({
             label: 'AtmoBankRender-TexBG',
             layout: this._textureBGL,
@@ -133,7 +163,13 @@ export class AtmoBankRenderPass {
         if (this._textureBGDirty) {
             if (!this._rebuildTextureBG()) return;
         }
-        if (!this._textureBG) return;
+        if (!this._textureBG) {
+            this._lastRenderInfo = {
+                rendered: false,
+                reason: 'missing-texture-bind-group',
+            };
+            return;
+        }
 
         const bufBG = (readBuffer === this.buffers.particlesA) ? this._bufferBG_A : this._bufferBG_B;
 
@@ -141,6 +177,11 @@ export class AtmoBankRenderPass {
         renderPassEncoder.setBindGroup(0, bufBG);
         renderPassEncoder.setBindGroup(1, this._textureBG);
         renderPassEncoder.drawIndirect(this.buffers.indirect, 0);
+        this._lastRenderInfo = {
+            rendered: true,
+            reason: 'draw-indirect-submitted',
+            readBuffer: readBuffer?.label || null,
+        };
     }
 
     dispose() {
