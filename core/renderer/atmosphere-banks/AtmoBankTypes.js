@@ -5,8 +5,8 @@ export const ATMO_BANK_TYPES = Object.freeze({
 });
 
 export const ATMO_TYPE_CAPACITY    = 4;
-export const ATMO_EMITTER_CAPACITY = 32;
-export const ATMO_MAX_PARTICLES    = 256;
+export const ATMO_EMITTER_CAPACITY = 64;
+export const ATMO_MAX_PARTICLES    = 384;
 export const ATMO_PARTICLE_STRIDE  = 96;
 export const ATMO_TYPE_DEF_STRIDE  = 64;
 export const ATMO_EMITTER_STRIDE   = 80;

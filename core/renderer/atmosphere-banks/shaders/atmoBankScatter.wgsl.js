@@ -157,18 +157,18 @@ fn main(
     var budget = 2u;
 
     if (isForestTile(tileId) && slope < 0.25) {
-        let prob = 0.26 * weatherMod;
+        let prob = 0.38 * weatherMod;
         if (roll < prob) {
             typeId = TYPE_FOG_POCKET;
-            budget = 4u;
+            budget = 5u;
         }
     }
 
     if (typeId == 0xFFFFFFFFu && isSwampTile(tileId)) {
-        let prob = 0.32 * weatherMod;
+        let prob = 0.45 * weatherMod;
         if (roll < prob) {
             typeId = TYPE_FOG_POCKET;
-            budget = 4u;
+            budget = 5u;
         }
     }
 
@@ -182,20 +182,20 @@ fn main(
         let depression = avgNeighbor - elevation;
 
         if (depression > 3.0) {
-            let prob = 0.18 * weatherMod * min(depression / 10.0, 1.0);
+            let prob = 0.28 * weatherMod * min(depression / 10.0, 1.0);
             if (roll < prob) {
                 typeId = TYPE_VALLEY_MIST;
-                budget = 3u;
+                budget = 4u;
             }
         }
     }
 
     if (typeId == 0xFFFFFFFFu && elevation > params.heightScale * 0.55 && slope < 0.3) {
         let altFactor = clamp((elevation - params.heightScale * 0.55) / (params.heightScale * 0.2), 0.0, 1.0);
-        let prob = 0.10 * weatherMod * altFactor;
+        let prob = 0.14 * weatherMod * altFactor;
         if (roll < prob) {
             typeId = TYPE_LOW_CLOUD;
-            budget = 2u;
+            budget = 3u;
         }
     }
 
