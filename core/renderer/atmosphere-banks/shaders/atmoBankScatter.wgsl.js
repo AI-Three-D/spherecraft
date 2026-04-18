@@ -80,10 +80,14 @@ fn sampleTileType(uv: vec2<f32>, layer: i32) -> u32 {
 }
 
 fn sampleSlope(uv: vec2<f32>, layer: i32) -> f32 {
-    let dims = vec2<i32>(textureDimensions(normalTex));
-    let coord = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
-    let n = textureLoad(normalTex, coord, layer, 0).xyz;
-    return clamp(1.0 - abs(n.z), 0.0, 1.0);
+    let dims = vec2<i32>(textureDimensions(heightTex));
+    let texel = 1.0 / vec2<f32>(dims);
+    let hL = sampleHeight(vec2<f32>(max(uv.x - texel.x, 0.0), uv.y), layer) * params.heightScale;
+    let hR = sampleHeight(vec2<f32>(min(uv.x + texel.x, 1.0), uv.y), layer) * params.heightScale;
+    let hD = sampleHeight(vec2<f32>(uv.x, max(uv.y - texel.y, 0.0)), layer) * params.heightScale;
+    let hU = sampleHeight(vec2<f32>(uv.x, min(uv.y + texel.y, 1.0)), layer) * params.heightScale;
+    let relief = max(abs(hR - hL), abs(hU - hD));
+    return clamp(relief * 0.02, 0.0, 1.0);
 }
 
 fn isForestTile(tileId: u32) -> bool {
@@ -169,7 +173,7 @@ fn main(
     }
 
     if (typeId == 0xFFFFFFFFu && slope < 0.15) {
-        let texelSize = tileUVSize / f32(GRID_RES);
+        let texelSize = 1.0 / f32(GRID_RES);
         let hL = sampleHeight(vec2<f32>(max(localU - texelSize * 3.0, 0.0), localV), layer) * params.heightScale;
         let hR = sampleHeight(vec2<f32>(min(localU + texelSize * 3.0, 1.0), localV), layer) * params.heightScale;
         let hD = sampleHeight(vec2<f32>(localU, max(localV - texelSize * 3.0, 0.0)), layer) * params.heightScale;

@@ -130,6 +130,11 @@ export class AtmoBankSystem {
         this.buffers.advancePingPong();
     }
 
+    beginPostSubmitReadback() {
+        if (!this._useGPUScatter || !this.scatterPass) return;
+        this.scatterPass.beginReadbackAfterSubmit();
+    }
+
     render(renderPassEncoder) {
         if (!this._initialized) return;
         const { read } = this.buffers.getPingPong();

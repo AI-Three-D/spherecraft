@@ -29,8 +29,13 @@ export class AtmoBankScatterPass {
         this._lastCamY = 0;
         this._lastCamZ = 0;
         this._readbackPending = false;
+        this._readbackMapStarted = false;
         this._readbackReady = false;
+        this._readbackGeneration = 0;
         this._textureViewsValid = false;
+        this._heightView = null;
+        this._tileView = null;
+        this._normalView = null;
         this._initialized = false;
     }
 
@@ -95,8 +100,6 @@ export class AtmoBankScatterPass {
     }
 
     _ensureBindGroup() {
-        if (this._textureViewsValid && this._bindGroup) return true;
-
         const textures = this.tileStreamer?.getArrayTextures?.();
         const heightWrap  = textures?.height;
         const tileWrap    = textures?.tile;
@@ -106,6 +109,13 @@ export class AtmoBankScatterPass {
         const tileView    = tileWrap?._gpuTexture?.view;
         const normalView  = normalWrap?._gpuTexture?.view;
         if (!heightView || !tileView || !normalView) return false;
+
+        if (this._bindGroup &&
+            this._heightView === heightView &&
+            this._tileView === tileView &&
+            this._normalView === normalView) {
+            return true;
+        }
 
         this._bindGroup = this.device.createBindGroup({
             label: 'AtmoScatter-BG',
@@ -121,11 +131,15 @@ export class AtmoBankScatterPass {
                 { binding: 7, resource: normalView },
             ],
         });
+        this._heightView = heightView;
+        this._tileView = tileView;
+        this._normalView = normalView;
         this._textureViewsValid = true;
         return true;
     }
 
     shouldDispatch(camera) {
+        if (!this._initialized || this._readbackPending) return false;
         this._framesSinceScatter++;
         if (this._framesSinceScatter < SCATTER_INTERVAL) {
             const dx = camera.position.x - this._lastCamX;
@@ -138,20 +152,83 @@ export class AtmoBankScatterPass {
         return true;
     }
 
+    _cubePoint(face, u, v) {
+        const s = u * 2 - 1;
+        const t = v * 2 - 1;
+        switch (face >>> 0) {
+            case 0: return [ 1,  t, -s];
+            case 1: return [-1,  t,  s];
+            case 2: return [ s,  1, -t];
+            case 3: return [ s, -1,  t];
+            case 4: return [ s,  t,  1];
+            default: return [-s,  t, -1];
+        }
+    }
+
+    _estimateTileDistanceSq(info, camera, planetConfig) {
+        const depth = Math.max(0, info.depth ?? 0);
+        const grid = Math.max(1, 2 ** depth);
+        const u = ((info.x ?? 0) + 0.5) / grid;
+        const v = ((info.y ?? 0) + 0.5) / grid;
+        const p = this._cubePoint(info.face ?? 0, u, v);
+        const invLen = 1 / Math.max(Math.hypot(p[0], p[1], p[2]), 1e-6);
+        const origin = planetConfig?.origin || { x: 0, y: 0, z: 0 };
+        const radius = (planetConfig?.radius || 100000) + (planetConfig?.heightScale || 2000) * 0.25;
+        const wx = origin.x + p[0] * invLen * radius;
+        const wy = origin.y + p[1] * invLen * radius;
+        const wz = origin.z + p[2] * invLen * radius;
+        const dx = wx - camera.position.x;
+        const dy = wy - camera.position.y;
+        const dz = wz - camera.position.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    _stableSeed(planetConfig) {
+        const raw = planetConfig?.seed ?? planetConfig?.terrainSeed ?? planetConfig?.terrain?.seed;
+        if (Number.isFinite(raw)) return raw >>> 0;
+        if (typeof raw === 'string') {
+            let h = 2166136261 >>> 0;
+            for (let i = 0; i < raw.length; i++) {
+                h ^= raw.charCodeAt(i);
+                h = Math.imul(h, 16777619) >>> 0;
+            }
+            return h || 0x9E3779B9;
+        }
+        return 0x9E3779B9;
+    }
+
     dispatch(commandEncoder, camera, planetConfig, environmentState) {
-        if (!this._initialized || this._readbackPending) return;
-        if (!this._ensureBindGroup()) return;
+        if (!this._initialized || this._readbackPending) return false;
+        if (!this._ensureBindGroup()) return false;
 
         const tileInfo = this.tileStreamer._tileInfo;
-        if (!tileInfo || tileInfo.size === 0) return;
+        if (!tileInfo || tileInfo.size === 0) return false;
 
         const activeLayers = new Uint32Array(MAX_LAYERS);
         const layerMeta = new Uint32Array(MAX_LAYERS * (LAYER_META_STRIDE / 4));
-        let layerCount = 0;
+        const layers = [];
 
         for (const info of tileInfo.values()) {
-            if (layerCount >= MAX_LAYERS) break;
             if (info.layer == null) continue;
+            layers.push({
+                info,
+                distSq: this._estimateTileDistanceSq(info, camera, planetConfig),
+            });
+        }
+
+        layers.sort((a, b) =>
+            (a.distSq - b.distSq) ||
+            ((a.info.face ?? 0) - (b.info.face ?? 0)) ||
+            ((b.info.depth ?? 0) - (a.info.depth ?? 0)) ||
+            ((a.info.x ?? 0) - (b.info.x ?? 0)) ||
+            ((a.info.y ?? 0) - (b.info.y ?? 0)) ||
+            ((a.info.layer ?? 0) - (b.info.layer ?? 0))
+        );
+
+        let layerCount = 0;
+
+        for (const { info } of layers) {
+            if (layerCount >= MAX_LAYERS) break;
             activeLayers[layerCount] = layerCount;
             const b = layerCount * (LAYER_META_STRIDE / 4);
             layerMeta[b + 0] = info.face;
@@ -163,7 +240,7 @@ export class AtmoBankScatterPass {
             layerCount++;
         }
 
-        if (layerCount === 0) return;
+        if (layerCount === 0) return false;
 
         const origin = planetConfig?.origin || { x: 0, y: 0, z: 0 };
         const paramData = new Float32Array(16);
@@ -179,7 +256,7 @@ export class AtmoBankScatterPass {
         paramData[8] = planetConfig?.heightScale || 2000;
         paramData[9] = environmentState?.weatherIntensity ?? 0.3;
         paramData[10] = environmentState?.fogDensity ?? 0.3;
-        paramU32[11] = (performance.now() * 1000) >>> 0;
+        paramU32[11] = this._stableSeed(planetConfig);
 
         const q = this.device.queue;
         q.writeBuffer(this._paramBuf, 0, paramData);
@@ -199,16 +276,35 @@ export class AtmoBankScatterPass {
         commandEncoder.copyBufferToBuffer(this._emitterOutputBuf, 0, this._readbackBuf, COUNTER_SIZE, emSize);
 
         this._readbackPending = true;
+        this._readbackMapStarted = false;
         this._readbackReady = false;
+        this._readbackGeneration++;
         this._framesSinceScatter = 0;
         this._lastCamX = camera.position.x;
         this._lastCamY = camera.position.y;
         this._lastCamZ = camera.position.z;
+        return true;
+    }
 
+    beginReadbackAfterSubmit() {
+        if (!this._initialized ||
+            !this._readbackPending ||
+            this._readbackMapStarted ||
+            this._readbackReady ||
+            !this._readbackBuf) {
+            return;
+        }
+
+        this._readbackMapStarted = true;
+        const generation = this._readbackGeneration;
         this._readbackBuf.mapAsync(GPUMapMode.READ).then(() => {
+            if (generation !== this._readbackGeneration) return;
             this._readbackReady = true;
         }).catch(() => {
+            if (generation !== this._readbackGeneration) return;
             this._readbackPending = false;
+            this._readbackMapStarted = false;
+            this._readbackReady = false;
         });
     }
 
@@ -237,6 +333,7 @@ export class AtmoBankScatterPass {
 
         this._readbackBuf.unmap();
         this._readbackPending = false;
+        this._readbackMapStarted = false;
         this._readbackReady = false;
         this._cachedEmitters = emitters;
         return emitters;
@@ -247,10 +344,17 @@ export class AtmoBankScatterPass {
     }
 
     dispose() {
+        this._readbackGeneration++;
+        if (this._readbackReady) {
+            try { this._readbackBuf?.unmap(); } catch {}
+        }
         for (const k of ['_emitterOutputBuf','_counterBuf','_readbackBuf',
                           '_paramBuf','_activeLayerBuf','_layerMetaBuf']) {
             this[k]?.destroy();
         }
+        this._readbackPending = false;
+        this._readbackMapStarted = false;
+        this._readbackReady = false;
         this._initialized = false;
     }
 }

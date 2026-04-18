@@ -940,6 +940,7 @@ updateLighting(starSystem) {
         }
 
         this.backend.submitCommands();
+        this.atmoBankSystem?.beginPostSubmitReadback?.();
         this._actorManager?.resolveReadback();
         if (this.quadtreeTileManager?.resolveFeedbackReadback) {
             this.quadtreeTileManager.resolveFeedbackReadback();
