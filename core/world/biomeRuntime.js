@@ -111,6 +111,69 @@ function normalizePreference(value) {
     }
 }
 
+function normalizeArchetypeRef(value) {
+    return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function signalCenter(biome, signalKey, fallback = 0.5) {
+    const rule = biome?.signals?.[signalKey];
+    if (!rule) return fallback;
+    const minValue = Number.isFinite(rule.min) ? rule.min : fallback;
+    const maxValue = Number.isFinite(rule.max) ? rule.max : fallback;
+    return clampNumber((minValue + maxValue) * 0.5, fallback, 0.0, 1.0);
+}
+
+function biomeTextIncludes(biome, needles) {
+    const haystack = [
+        biome?.id,
+        biome?.displayName,
+        ...(Array.isArray(biome?.tags) ? biome.tags : []),
+    ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    return needles.some((needle) => haystack.includes(needle));
+}
+
+function biomeTreeSuitabilityBias(biome) {
+    const humidity = signalCenter(biome, 'humidity', 0.5);
+    const woodland = biomeTextIncludes(biome, ['forest', 'woodland', 'jungle', 'rainforest']);
+    const arid = biomeTextIncludes(biome, ['arid', 'desert']) || humidity < 0.25;
+    if (woodland) return 1.0;
+    return clampNumber(0.28 + humidity * 0.24 - (arid ? 0.15 : 0.0), 0.28, 0.18, 1.0);
+}
+
+function computeBiomeTreeWeights(biomes = [], assetProfiles = []) {
+    const rawWeights = new Map();
+    let maxRawWeight = 0.0;
+
+    for (const profile of assetProfiles) {
+        if (normalizeArchetypeRef(profile?.archetypeRef) !== 'tree') continue;
+        const density = Math.max(0.0, Number.isFinite(profile?.density) ? profile.density : 0.5);
+        const probability = Math.max(0.0, Number.isFinite(profile?.probability) ? profile.probability : 0.5);
+        const weight = density * probability;
+        const biomeIds = Array.isArray(profile?.biomeIds) ? profile.biomeIds : [];
+        for (const biomeId of biomeIds) {
+            if (typeof biomeId !== 'string' || !biomeId) continue;
+            const nextWeight = (rawWeights.get(biomeId) ?? 0.0) + weight;
+            rawWeights.set(biomeId, nextWeight);
+            maxRawWeight = Math.max(maxRawWeight, nextWeight);
+        }
+    }
+
+    const normalizedWeights = new Map();
+    if (maxRawWeight <= 0.0) return normalizedWeights;
+    for (const biome of biomes) {
+        const rawWeight = rawWeights.get(biome?.id) ?? 0.0;
+        if (rawWeight <= 0.0) continue;
+        normalizedWeights.set(
+            biome.id,
+            clampNumber((rawWeight / maxRawWeight) * biomeTreeSuitabilityBias(biome), 0.0, 0.0, 1.0)
+        );
+    }
+    return normalizedWeights;
+}
+
 function normalizeSignalRule(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation, bounds = {}) {
     const minValue = clampNumber(rule.min, fallback.min, bounds.min, bounds.max);
     const maxValue = clampNumber(rule.max, fallback.max, bounds.min, bounds.max);
@@ -317,6 +380,10 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
     const maxBiomes = Math.max(0, Math.trunc(options.maxBiomes ?? 16));
     const fallbackTileId = Number.isInteger(options.fallbackTileId) ? options.fallbackTileId : 10;
     const sourceBiomes = Array.isArray(worldAuthoring?.biomes) ? worldAuthoring.biomes : [];
+    const treeWeightsByBiomeId = computeBiomeTreeWeights(
+        sourceBiomes,
+        Array.isArray(worldAuthoring?.assetProfiles) ? worldAuthoring.assetProfiles : []
+    );
     const biomeCount = Math.min(sourceBiomes.length, maxBiomes);
     const data = new ArrayBuffer(getPackedBiomeUniformByteSize(maxBiomes));
     const view = new DataView(data);
@@ -331,6 +398,7 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
         const biomeOffset = GPU_BIOME_UNIFORM_HEADER_BYTES + index * GPU_BIOME_DEF_SIZE_BYTES;
         const tileId = Number.isInteger(biome?.tileIds?.micro) ? biome.tileIds.micro : fallbackTileId;
         const regionalVariation = biome.regionalVariation ?? {};
+        const treeWeight = treeWeightsByBiomeId.get(biome.id) ?? 0.0;
 
         view.setFloat32(biomeOffset + 0, clampNumber(biome.baseWeight, 1.0, 0.0, MAX_BIOME_BASE_WEIGHT), true);
         view.setUint32(biomeOffset + 4, tileId >>> 0, true);
@@ -338,7 +406,7 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
         view.setFloat32(biomeOffset + 12, clampNumber(regionalVariation.noiseScale, DEFAULT_REGIONAL_VARIATION.noiseScale, 0.0, 1.0), true);
         view.setFloat32(biomeOffset + 16, clampNumber(regionalVariation.noiseStrength, DEFAULT_REGIONAL_VARIATION.noiseStrength, 0.0, 1.0), true);
         view.setUint32(biomeOffset + 20, Math.trunc(clampNumber(regionalVariation.seedOffset, 0, 0, 0x7fffffff)) >>> 0, true);
-        view.setFloat32(biomeOffset + 24, 0.0, true);
+        view.setFloat32(biomeOffset + 24, treeWeight, true);
         view.setFloat32(biomeOffset + 28, 0.0, true);
 
         writeSignalRule(view, biomeOffset + 32, biome?.signals?.elevation, DEFAULT_SIGNAL_RULES.elevation);
@@ -353,6 +421,10 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
         maxBiomes,
         truncatedBiomeCount: Math.max(0, sourceBiomes.length - biomeCount),
         biomeIds: sourceBiomes.slice(0, biomeCount).map((biome) => biome.id ?? 'unknown'),
+        treeWeightedBiomeCount: sourceBiomes
+            .slice(0, biomeCount)
+            .filter((biome) => (treeWeightsByBiomeId.get(biome.id) ?? 0.0) > 0.0)
+            .length,
     };
 }
 
