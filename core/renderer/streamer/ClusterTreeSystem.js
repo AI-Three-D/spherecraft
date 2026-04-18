@@ -8,7 +8,30 @@ import { buildClusterTreeGatherShader } from './shaders/clusterTreeGather.wgsl.j
 import { buildClusterHullRenderShaders } from './shaders/clusterHullRender.wgsl.js';
 
 const CLUSTER_RENDER_STRIDE = 64;
+const CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS = 8;
 const ZERO_MAT4_ELEMENTS = new Float32Array(16);
+
+function normalizeClusterTreeTileMetadata(source) {
+    const sourceData = source?.data instanceof Float32Array ? source.data : null;
+    const validSource = sourceData &&
+        sourceData.length >= CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS &&
+        sourceData.length % CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS === 0;
+    if (!validSource) {
+        return {
+            data: new Float32Array(CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS),
+            tileCount: 1,
+            authoredTileCount: 0,
+            treeProfileCount: 0,
+        };
+    }
+
+    return {
+        data: sourceData,
+        tileCount: Math.floor(sourceData.length / CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS),
+        authoredTileCount: Math.max(0, Math.trunc(source.authoredTileCount ?? 0)),
+        treeProfileCount: Math.max(0, Math.trunc(source.treeProfileCount ?? 0)),
+    };
+}
 
 function roundTileWorldSize(value) {
     if (!Number.isFinite(value) || value <= 0) return 128;
@@ -163,6 +186,8 @@ export class ClusterTreeSystem {
         this._renderParamBuffer = null;
         this._bakeParamBuffer = null;
         this._drawIndirectBuffer = null;
+        this._tileMetadata = normalizeClusterTreeTileMetadata(config.clusterTreeTileMetadata);
+        this._tileMetadataBuffer = null;
 
         this._bakePipeline = null;
         this._bakeBindGroupLayout = null;
@@ -211,7 +236,8 @@ export class ClusterTreeSystem {
 
         Logger.info(
             `${this._logTag} ready — farTier=[${this._tierRange.start},${this._tierRange.end}]m ` +
-            `cap=${this._cfg.maxInstances}`
+            `cap=${this._cfg.maxInstances} tileMeta=${this._tileMetadata.authoredTileCount}/` +
+            `${this._tileMetadata.tileCount}`
         );
     }
 
@@ -254,6 +280,12 @@ export class ClusterTreeSystem {
             size: Math.max(256, 5 * Uint32Array.BYTES_PER_ELEMENT),
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
         });
+        this._tileMetadataBuffer = this.device.createBuffer({
+            label: 'ClusterTree-TileBiomeMetadata',
+            size: Math.max(256, this._tileMetadata.data.byteLength),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(this._tileMetadataBuffer, 0, this._tileMetadata.data);
         this.device.queue.writeBuffer(this._drawIndirectBuffer, 0, this._zeroDraw);
     }
 
@@ -305,6 +337,7 @@ export class ClusterTreeSystem {
                 { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: scatterSampleType, viewDimension: '2d' } },
                 { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
                 { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
             ],
         });
 
@@ -531,6 +564,7 @@ fn main() {
                     { binding: 3, resource: gpu.scatter.createView({ dimension: '2d', baseArrayLayer: tile.layer, arrayLayerCount: 1 }) },
                     { binding: 4, resource: { buffer: this._sourceCache.instanceBuffer } },
                     { binding: 5, resource: { buffer: this._sourceCache.counterBuffer } },
+                    { binding: 6, resource: { buffer: this._tileMetadataBuffer } },
                 ],
             });
 
@@ -692,6 +726,7 @@ fn main() {
             this._renderParamBuffer,
             this._bakeParamBuffer,
             this._drawIndirectBuffer,
+            this._tileMetadataBuffer,
         ]) {
             buffer?.destroy();
         }
@@ -712,6 +747,7 @@ fn main() {
         this._renderParamBuffer = null;
         this._bakeParamBuffer = null;
         this._drawIndirectBuffer = null;
+        this._tileMetadataBuffer = null;
         this._geometry = null;
         this._initialized = false;
     }

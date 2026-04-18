@@ -65,12 +65,20 @@ struct ClusterTree {
     groupRadius: f32, packedCount: f32, _r0: f32, _r1: f32,
 }
 
+struct TileBiomeMeta {
+    weight: f32,
+    conifer: f32,
+    foliage: vec3<f32>,
+    authored: f32,
+}
+
 @group(0) @binding(0) var<uniform> params: BakeParams;
 @group(0) @binding(1) var heightTex: texture_2d<f32>;
 @group(0) @binding(2) var tileTex: texture_2d<f32>;
 @group(0) @binding(3) var scatterTex: texture_2d<f32>;
 @group(0) @binding(4) var<storage, read_write> clusterOut: array<ClusterTree>;
 @group(0) @binding(5) var<storage, read_write> clusterCount: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read> tileBiomeMeta: array<vec4<f32>>;
 
 fn pcg(v: u32) -> u32 {
     var s = v * 747796405u + 2891336453u;
@@ -196,72 +204,46 @@ fn tileUVToWorld(uv: vec2<f32>, heightNorm: f32) -> vec3<f32> {
     return origin + dir * (params.planetRadius + elevation);
 }
 
-fn isForestTile(tileId: u32) -> bool {
-    return (
-        (tileId >= 66u && tileId <= 81u) ||
-        (tileId >= 142u && tileId <= 149u) ||
-        (tileId >= 158u && tileId <= 165u)
-    );
+fn defaultTileBiomeMeta() -> TileBiomeMeta {
+    var meta: TileBiomeMeta;
+    meta.weight = 0.08;
+    meta.conifer = 0.45;
+    meta.foliage = vec3<f32>(0.12, 0.24, 0.08);
+    meta.authored = 0.0;
+    return meta;
 }
 
-fn isWetBroadleafTile(tileId: u32) -> bool {
-    return (
-        (tileId >= 82u && tileId <= 93u) ||
-        (tileId >= 142u && tileId <= 149u)
-    );
-}
-
-fn isSingleForestTile(tileId: u32) -> bool {
-    return tileId >= 66u && tileId <= 73u;
-}
-
-fn isMixedForestTile(tileId: u32) -> bool {
-    return tileId >= 74u && tileId <= 81u;
-}
-
-fn isDesertTreeTile(tileId: u32) -> bool {
-    return tileId >= 158u && tileId <= 165u;
-}
-
-fn tileForestWeight(tileId: u32) -> f32 {
-    if (isForestTile(tileId)) { return 1.0; }
-    if (tileId >= 82u && tileId <= 93u) { return 0.75; }
-    if (tileId >= 10u && tileId <= 29u) { return 0.25; }
-    if (tileId >= 94u && tileId <= 117u) { return 0.15; }
-    if (tileId >= 54u && tileId <= 65u) { return 0.10; }
-    if (tileId >= 30u && tileId <= 41u) { return 0.05; }
-    if (tileId >= 150u && tileId <= 157u) { return 0.04; }
-    return 0.08;
-}
-
-fn estimateConiferFraction(tileId: u32, altitudeNorm: f32) -> f32 {
-    var conifer = mix(0.25, 0.75, altitudeNorm);
-    if (isWetBroadleafTile(tileId)) {
-        conifer = 0.08;
-    } else if (isDesertTreeTile(tileId)) {
-        conifer = 0.14;
-    } else if (isSingleForestTile(tileId)) {
-        conifer = mix(0.55, 0.90, altitudeNorm);
-    } else if (isMixedForestTile(tileId)) {
-        conifer = mix(0.35, 0.68, altitudeNorm);
-    } else if (tileId >= 54u && tileId <= 65u) {
-        conifer = 0.88;
+fn loadTileBiomeMeta(tileId: u32) -> TileBiomeMeta {
+    let vecCount = arrayLength(&tileBiomeMeta);
+    let baseIndex = tileId * 2u;
+    if (baseIndex + 1u >= vecCount) {
+        return defaultTileBiomeMeta();
     }
-    return clamp(conifer, 0.02, 0.98);
+
+    let row0 = tileBiomeMeta[baseIndex];
+    let row1 = tileBiomeMeta[baseIndex + 1u];
+    if (row1.y < 0.5) {
+        return defaultTileBiomeMeta();
+    }
+
+    var meta: TileBiomeMeta;
+    meta.weight = clamp(row0.x, 0.0, 1.0);
+    meta.conifer = clamp(row0.y, 0.02, 0.98);
+    meta.foliage = clamp(vec3<f32>(row0.z, row0.w, row1.x), vec3<f32>(0.0), vec3<f32>(1.0));
+    meta.authored = row1.y;
+    return meta;
 }
 
-fn estimateFoliage(tileId: u32, coniferFrac: f32, density: f32, seed: u32) -> vec3<f32> {
+fn estimateConiferFraction(meta: TileBiomeMeta, altitudeNorm: f32) -> f32 {
+    let alpinePush = smoothstep(0.35, 0.9, altitudeNorm) * 0.22;
+    return clamp(meta.conifer + alpinePush, 0.02, 0.98);
+}
+
+fn estimateFoliage(meta: TileBiomeMeta, coniferFrac: f32, density: f32, seed: u32) -> vec3<f32> {
     let lush = mix(0.35, 0.85, clamp(density, 0.0, 1.0));
     let coniferBase = mix(vec3<f32>(0.05, 0.15, 0.05), vec3<f32>(0.10, 0.24, 0.09), lush);
-    let decidBase = mix(vec3<f32>(0.10, 0.22, 0.06), vec3<f32>(0.18, 0.35, 0.12), lush);
-    var base = mix(decidBase, coniferBase, coniferFrac);
-    if (isWetBroadleafTile(tileId)) {
-        base = mix(vec3<f32>(0.10, 0.26, 0.08), vec3<f32>(0.16, 0.38, 0.12), lush);
-    } else if (isDesertTreeTile(tileId)) {
-        base = mix(vec3<f32>(0.12, 0.20, 0.08), vec3<f32>(0.18, 0.28, 0.12), lush);
-    } else if (!isForestTile(tileId)) {
-        base = mix(vec3<f32>(0.09, 0.19, 0.06), vec3<f32>(0.15, 0.28, 0.10), lush);
-    }
+    let decidBase = mix(meta.foliage * 0.75, meta.foliage * 1.25, lush);
+    let base = mix(decidBase, coniferBase, coniferFrac);
     let colorVar = (pcgF(seed ^ 0x9E3779B9u) - 0.5) * 0.05;
     return vec3<f32>(
         clamp(base.r + colorVar * 0.45, 0.02, 0.32),
@@ -312,13 +294,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (slope > params.maxSlope) { return; }
 
     let tileId = sampleTileType(uvNudged);
-    let tileWeight = tileForestWeight(tileId);
+    let tileMeta = loadTileBiomeMeta(tileId);
+    let tileWeight = tileMeta.weight;
     let weightedTile = max(0.55, tileWeight);
     let density = densityScatter * mix(1.0, weightedTile, clamp(params.eligibilityWeight, 0.0, 1.0));
     if (density < params.minDensity) { return; }
 
     let altitudeNorm = clamp(altitude / max(params.maxAltitude, 1.0), 0.0, 1.0);
-    let coniferFrac = estimateConiferFraction(tileId, altitudeNorm);
+    let coniferFrac = estimateConiferFraction(tileMeta, altitudeNorm);
 
     let heightBase = mix(params.heightMax, params.heightMin, altitudeNorm * 0.55);
     let heightVar = mix(0.90, 1.20, pcgF(pcg4(cellSeed, 2u, 0u, 0u)));
@@ -353,7 +336,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let worldPos = tileUVToWorld(uvNudged, heightNorm);
     let rotation = pcgF(pcg4(cellSeed, 4u, 0u, 0u)) * 6.2831853;
-    let foliage = estimateFoliage(tileId, coniferFrac, density, cellSeed);
+    let foliage = estimateFoliage(tileMeta, coniferFrac, density, cellSeed);
 
     let slot = atomicAdd(&clusterCount[params.layerIndex], 1u);
     if (slot >= PER_LAYER_CAPACITY) { return; }
