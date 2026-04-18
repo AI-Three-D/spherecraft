@@ -58,7 +58,7 @@ struct BiomeDef {
     noiseScale:    f32,
     noiseStrength: f32,
     seedOffset:    u32,
-    _pad0:         f32,
+    treeWeight:    f32,     // Authored tree asset profile weight for eligibility bakes.
     _pad1:         f32,
     elevation:     BiomeSignalRule,
     humidity:      BiomeSignalRule,
@@ -332,8 +332,9 @@ fn biomeRegionalNoise(wx: f32, wy: f32, def: BiomeDef, seed: u32) -> f32 {
 // ── Full biome selection ────────────────────────────────────────────
 
 struct BiomeResult {
-    tileId: u32,
-    score:  f32,
+    tileId:     u32,
+    score:      f32,
+    treeWeight: f32,
 };
 
 fn selectBiomeFromDefs(
@@ -361,6 +362,7 @@ fn selectBiomeFromDefs(
     var result: BiomeResult;
     result.tileId = 10u; // fallback: GRASS_SHORT_1
     result.score = 0.0;
+    result.treeWeight = 0.0;
 
     if (totalScore <= 0.0 || count == 0u) { return result; }
 
@@ -373,6 +375,7 @@ fn selectBiomeFromDefs(
         if (r <= cumulative) {
             result.tileId = biomeUniforms.biomes[i].tileId;
             result.score = prob;
+            result.treeWeight = biomeUniforms.biomes[i].treeWeight;
             return result;
         }
     }
@@ -388,6 +391,7 @@ fn selectBiomeFromDefs(
     }
     result.tileId = biomeUniforms.biomes[bestIdx].tileId;
     result.score = scores[bestIdx] / totalScore;
+    result.treeWeight = biomeUniforms.biomes[bestIdx].treeWeight;
     return result;
 }
 `;

@@ -3037,6 +3037,12 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             Logger.info(
                 `[BiomeRuntime] Authored biome regional noise modes: ${activeNoiseModes.join(', ')}`
             );
+            if (packed.treeWeightedBiomeCount > 0) {
+                Logger.info(
+                    `[BiomeRuntime] Authored tree eligibility weights active for ` +
+                    `${packed.treeWeightedBiomeCount}/${packed.biomeCount} biomes`
+                );
+            }
         }
         if (packed.truncatedBiomeCount > 0) {
             Logger.warn(

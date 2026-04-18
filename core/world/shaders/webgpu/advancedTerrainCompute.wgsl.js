@@ -539,6 +539,54 @@ fn determineTileType(
     return resolveAuthoredBiomeTileType(biome.tileId, variant);
 }
 
+fn legacyTreeTileEligibility(tileId: u32) -> f32 {
+    if (isForestFloorTile(tileId)) {
+        return 1.0;
+    }
+    if (isGrassTile(tileId)) {
+        return 0.001;
+    }
+    if (isDirtTile(tileId)) {
+        return 0.0002;
+    }
+    return 0.0;
+}
+
+fn legacyClimateTreeEligibility(
+    h: f32, wx: f32, wy: f32, unitDir: vec3<f32>, seed: i32
+) -> f32 {
+    let climate = getClimate(wx, wy, unitDir, h, seed);
+    let coldFade = smoothstep(-0.3, 0.0, climate.temperature);
+    let dryFade = smoothstep(0.05, 0.25, climate.precipitation);
+    let desertFade = 1.0 - smoothstep(0.7, 0.9, climate.temperature)
+                         * (1.0 - smoothstep(0.0, 0.15, climate.precipitation));
+    return coldFade * dryFade * desertFade;
+}
+
+fn authoredTreeEligibility(
+    h: f32, slope: f32, wx: f32, wy: f32, unitDir: vec3<f32>, seed: i32
+) -> f32 {
+    if (biomeConfigUniforms.biomeCount == 0u) {
+        return -1.0;
+    }
+
+    let climate = getClimate(wx, wy, unitDir, h, seed);
+    let biomeSpatial = authoredBiomeSpatialCoords(wx, wy, unitDir);
+    let biome = selectBiomeFromDefs(
+        h,
+        climate.precipitation,
+        climate.temperature,
+        slope,
+        biomeSpatial.x,
+        biomeSpatial.y,
+        biomeConfigUniforms
+    );
+    if (biome.score <= 0.0) {
+        return -1.0;
+    }
+    return clamp(biome.treeWeight, 0.0, 1.0);
+}
+
 fn debugForcedTileType() -> u32 {
     if (uniforms.debugMode == 20) { return SURFACE_GRASS_BASE; }
     if (uniforms.debugMode == 21) { return SURFACE_SAND_BASE; }
@@ -924,25 +972,15 @@ else if (uniforms.outputType == 5) {
     }
 
     if (eligibility > 0.0) {
-        var tileEligible: f32 = 0.0;
-        if (isForestFloorTile(tileId)) {
-            tileEligible = 1.0;
-        } else if (isGrassTile(tileId)) {
-            tileEligible = 0.001;
-        } else if (isDirtTile(tileId)) {
-            tileEligible = 0.0002;
+        let authoredEligibility = authoredTreeEligibility(h, slope, wx, wy, unitDir, uniforms.seed);
+        if (authoredEligibility >= 0.0) {
+            eligibility *= authoredEligibility;
+        } else {
+            eligibility *= legacyTreeTileEligibility(tileId);
+            if (eligibility > 0.0) {
+                eligibility *= legacyClimateTreeEligibility(h, wx, wy, unitDir, uniforms.seed);
+            }
         }
-        eligibility *= tileEligible;
-    }
-
-    if (eligibility > 0.0) {
-        let climate = getClimate(wx, wy, unitDir, h, uniforms.seed);
-        let coldFade = smoothstep(-0.3, 0.0, climate.temperature);
-        let dryFade = smoothstep(0.05, 0.25, climate.precipitation);
-        let desertFade = 1.0 - smoothstep(0.7, 0.9, climate.temperature)
-                             * (1.0 - smoothstep(0.0, 0.15,
-                                      climate.precipitation));
-        eligibility *= coldFade * dryFade * desertFade;
     }
 
     if (eligibility > 0.0) {
