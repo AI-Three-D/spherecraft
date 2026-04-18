@@ -212,6 +212,7 @@ this._lodController = new TreeLODController({
             options.assetDefinitions || this.DEFAULT_ASSET_DEFINITIONS,
             this._treeConfig
         );
+        this._clusterTreeTileMetadata = options.clusterTreeTileMetadata ?? null;
         this._assetRegistry = new ArchetypeRegistry(                    // ◄── INC 1
             this._assetDefinitions,
             options.archetypeDefinitions || this.ARCHETYPE_DEFINITIONS,        // ◄── INC 1
@@ -482,6 +483,7 @@ this._lodController = new TreeLODController({
         if (this._useClusterFarTier && (this._treeConfig?.farTreeTier || this._treeConfig?.clusterTier)) {
             this._clusterTreeSystem = new ClusterTreeSystem(this.device, this, {
                 treeConfig: this._treeConfig,
+                clusterTreeTileMetadata: this._clusterTreeTileMetadata,
             });
             await this._clusterTreeSystem.initialize(this._bakedAssetTileCache);
         }

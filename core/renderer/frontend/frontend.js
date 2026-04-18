@@ -225,6 +225,12 @@ export class Frontend {
                         'to streamer placement'
                     );
                 }
+                if (streamerAuthoringRuntime.summary.clusterTreeAuthoredTileCount > 0) {
+                    Logger.info(
+                        `[AssetAuthoring] Authored cluster tree metadata covers ` +
+                        `${streamerAuthoringRuntime.summary.clusterTreeAuthoredTileCount} tile types`
+                    );
+                }
                 if (streamerAuthoringRuntime.summary.unsupportedProfileCount > 0) {
                     Logger.warn(
                         `[AssetAuthoring] ${streamerAuthoringRuntime.summary.unsupportedProfileCount} ` +
@@ -242,6 +248,7 @@ export class Frontend {
                     streamerTheme:  this._streamerTheme,
                     assetDefinitions: streamerAuthoringRuntime.assetDefinitions,
                     archetypeDefinitions: streamerAuthoringRuntime.archetypeDefinitions,
+                    clusterTreeTileMetadata: streamerAuthoringRuntime.clusterTreeTileMetadata,
                     propTextureManager: this.propTextureManager,
                     leafAlbedoTextureManager: this.leafAlbedoTextureManager,
                     leafNormalTextureManager: this.leafNormalTextureManager,
