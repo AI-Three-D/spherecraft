@@ -1,3 +1,5 @@
+import { computeBiomeTreeWeights } from './biomeAuthoringDerived.js';
+
 const DEFAULT_SIGNAL_RULES = Object.freeze({
     elevation: Object.freeze({
         min: 0.0,
@@ -109,69 +111,6 @@ function normalizePreference(value) {
         default:
             return 'mid';
     }
-}
-
-function normalizeArchetypeRef(value) {
-    return typeof value === 'string' ? value.trim().toLowerCase() : '';
-}
-
-function signalCenter(biome, signalKey, fallback = 0.5) {
-    const rule = biome?.signals?.[signalKey];
-    if (!rule) return fallback;
-    const minValue = Number.isFinite(rule.min) ? rule.min : fallback;
-    const maxValue = Number.isFinite(rule.max) ? rule.max : fallback;
-    return clampNumber((minValue + maxValue) * 0.5, fallback, 0.0, 1.0);
-}
-
-function biomeTextIncludes(biome, needles) {
-    const haystack = [
-        biome?.id,
-        biome?.displayName,
-        ...(Array.isArray(biome?.tags) ? biome.tags : []),
-    ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-    return needles.some((needle) => haystack.includes(needle));
-}
-
-function biomeTreeSuitabilityBias(biome) {
-    const humidity = signalCenter(biome, 'humidity', 0.5);
-    const woodland = biomeTextIncludes(biome, ['forest', 'woodland', 'jungle', 'rainforest']);
-    const arid = biomeTextIncludes(biome, ['arid', 'desert']) || humidity < 0.25;
-    if (woodland) return 1.0;
-    return clampNumber(0.28 + humidity * 0.24 - (arid ? 0.15 : 0.0), 0.28, 0.18, 1.0);
-}
-
-function computeBiomeTreeWeights(biomes = [], assetProfiles = []) {
-    const rawWeights = new Map();
-    let maxRawWeight = 0.0;
-
-    for (const profile of assetProfiles) {
-        if (normalizeArchetypeRef(profile?.archetypeRef) !== 'tree') continue;
-        const density = Math.max(0.0, Number.isFinite(profile?.density) ? profile.density : 0.5);
-        const probability = Math.max(0.0, Number.isFinite(profile?.probability) ? profile.probability : 0.5);
-        const weight = density * probability;
-        const biomeIds = Array.isArray(profile?.biomeIds) ? profile.biomeIds : [];
-        for (const biomeId of biomeIds) {
-            if (typeof biomeId !== 'string' || !biomeId) continue;
-            const nextWeight = (rawWeights.get(biomeId) ?? 0.0) + weight;
-            rawWeights.set(biomeId, nextWeight);
-            maxRawWeight = Math.max(maxRawWeight, nextWeight);
-        }
-    }
-
-    const normalizedWeights = new Map();
-    if (maxRawWeight <= 0.0) return normalizedWeights;
-    for (const biome of biomes) {
-        const rawWeight = rawWeights.get(biome?.id) ?? 0.0;
-        if (rawWeight <= 0.0) continue;
-        normalizedWeights.set(
-            biome.id,
-            clampNumber((rawWeight / maxRawWeight) * biomeTreeSuitabilityBias(biome), 0.0, 0.0, 1.0)
-        );
-    }
-    return normalizedWeights;
 }
 
 function normalizeSignalRule(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation, bounds = {}) {
