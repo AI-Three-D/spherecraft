@@ -116,6 +116,7 @@ export class GameDataConfig {
       grassConfig: planet.grassConfig,
       macroTileSpan: planet.macroTileSpan,
       macroMaxLOD: planet.macroMaxLOD,
+      tileCatalog: planet.tileCatalog,
       worldAuthoring: planet.worldAuthoring,
       biomeDefinitions: planet.biomeDefinitions,
       assetProfiles: planet.assetProfiles,
@@ -208,6 +209,7 @@ class PlanetDataConfig {
     this.grassConfig = requireObject(options.grassConfig, `${prefix}.grassConfig`);
     this.macroTileSpan = options.macroTileSpan ?? 4;
     this.macroMaxLOD = options.macroMaxLOD ?? 0;
+    this.tileCatalog = options.tileCatalog ?? options.worldAuthoring?.tileCatalog ?? null;
 
     // Cloud options (optional with defaults) - altitudes as fractions of atmosphereHeight
     const cloudOpts = options.cloudOptions || {};

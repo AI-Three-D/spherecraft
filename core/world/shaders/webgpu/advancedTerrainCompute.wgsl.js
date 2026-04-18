@@ -451,7 +451,7 @@ fn authoredBiomeTileVariantBase(tileId: u32) -> u32 {
     }
 
     // Unknown tile category falls back to grass. If this trips for authored data,
-    // check that the biome tileId resolves into one of the recognized TILE_TYPES ranges.
+    // check that the biome tileId resolves into a recognized tile-catalog range.
     return SURFACE_GRASS_BASE;
 }
 

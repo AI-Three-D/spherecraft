@@ -774,7 +774,7 @@ export function createGameDataConfig() {
 
           // ── Per-tile layer heights ───────────────────────────────────────────
           // Used only by the step_overlay blend mode.  Each key is a tile type
-          // integer (from TILE_TYPES).  Value is a normalized height in [0, 1]
+          // integer (from the authored/default tile catalog). Value is a normalized height in [0, 1]
           // representing how far "above" ground level this surface visually sits.
           // Higher values make the tile appear to sit on top at transition edges.
           tileLayerHeights: TILE_LAYER_HEIGHTS,

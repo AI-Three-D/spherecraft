@@ -53,7 +53,7 @@ struct BiomeSignalRule {
 
 struct BiomeDef {
     baseWeight:    f32,
-    tileId:        u32,     // TILE_TYPES integer for this biome
+    tileId:        u32,     // authored tile-catalog integer for this biome
     noiseType:     u32,     // 0=simplex, 1=perlin, 2=fbm, 3=ridged_fbm
     noiseScale:    f32,
     noiseStrength: f32,

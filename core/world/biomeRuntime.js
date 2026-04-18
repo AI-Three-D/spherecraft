@@ -1,4 +1,5 @@
 import { computeBiomeTreeWeights } from './biomeAuthoringDerived.js';
+import { buildTileCatalogRuntime } from './tileCatalogRuntime.js';
 
 const DEFAULT_SIGNAL_RULES = Object.freeze({
     elevation: Object.freeze({
@@ -61,13 +62,18 @@ export function createDefaultWorldAuthoringRuntime() {
         summary: {
             biomeCount: 0,
             assetProfileCount: 0,
+            tileCatalogTileCount: 0,
+            tileCatalogCategoryCount: 0,
             unresolvedTileRefCount: 0,
             unknownAssetBiomeRefCount: 0,
+            tileCatalogWarningCount: 0,
         },
         warnings: {
             unresolvedTileRefs: [],
             unknownAssetBiomeRefs: [],
+            tileCatalog: buildTileCatalogRuntime().warnings,
         },
+        tileCatalog: buildTileCatalogRuntime(),
     };
 }
 
@@ -281,7 +287,22 @@ function normalizeAssetProfiles(rawAssetDocument = {}, biomeIds = []) {
 }
 
 export function buildWorldAuthoringRuntime(rawBiomeDocument = {}, rawAssetDocument = {}, options = {}) {
-    const tileTypes = options.tileTypes ?? {};
+    let tileCatalog = buildTileCatalogRuntime(
+        rawBiomeDocument?.tileCatalog,
+        { fallbackDocument: options.tileCatalog }
+    );
+    if (!(tileCatalog.summary?.tileCount > 0) && options.tileTypes && typeof options.tileTypes === 'object') {
+        tileCatalog = {
+            ...tileCatalog,
+            tileTypes: options.tileTypes,
+            tileNameById: Object.fromEntries(
+                Object.entries(options.tileTypes)
+                    .filter(([, id]) => Number.isInteger(id))
+                    .map(([name, id]) => [id, name])
+            ),
+        };
+    }
+    const tileTypes = tileCatalog.tileTypes ?? {};
     const biomeConfig = normalizeBiomeDefinitions(rawBiomeDocument, tileTypes);
     const assetConfig = normalizeAssetProfiles(
         rawAssetDocument,
@@ -301,13 +322,18 @@ export function buildWorldAuthoringRuntime(rawBiomeDocument = {}, rawAssetDocume
         summary: {
             biomeCount: biomeConfig.biomes.length,
             assetProfileCount: assetConfig.profiles.length,
+            tileCatalogTileCount: tileCatalog.summary?.tileCount ?? 0,
+            tileCatalogCategoryCount: tileCatalog.summary?.categoryCount ?? 0,
             unresolvedTileRefCount: biomeConfig.unresolvedTileRefs.length,
             unknownAssetBiomeRefCount: assetConfig.unknownBiomeRefs.length,
+            tileCatalogWarningCount: tileCatalog.summary?.warningCount ?? 0,
         },
         warnings: {
             unresolvedTileRefs: biomeConfig.unresolvedTileRefs,
             unknownAssetBiomeRefs: assetConfig.unknownBiomeRefs,
+            tileCatalog: tileCatalog.warnings,
         },
+        tileCatalog,
     };
 }
 

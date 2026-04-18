@@ -8,6 +8,7 @@
 
 import { WorldViewBase } from './WorldViewBase.js';
 import { selectBiome } from '../../../core/world/BiomeScoring.js';
+import { buildTileCatalogRuntime } from '../../../core/world/tileCatalogRuntime.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DEFAULT_TEXTURE_DIALOG_LAYER = Object.freeze({
@@ -124,7 +125,9 @@ export class WorldAuthoringView extends WorldViewBase {
     }
 
     _getTileName(tileId) {
-        return this.tileIdNameMap?.[tileId] || `TILE_${tileId}`;
+        const runtimeName = this._engine?.planetConfig?.tileCatalog?.tileNameById?.[tileId]
+            ?? this._engine?.planetConfig?.worldAuthoring?.tileCatalog?.tileNameById?.[tileId];
+        return runtimeName || this.tileIdNameMap?.[tileId] || `TILE_${tileId}`;
     }
 
     _createRegenConfigs(raw) {
@@ -171,6 +174,7 @@ export class WorldAuthoringView extends WorldViewBase {
         this._buildWorldSettingsSection(container, raw);
         this._buildTerrainNoiseSection(container, raw);
         this._buildRenderingSection(container, raw);
+        this._buildTileCatalogSection(container, raw);
         this._buildBiomesSection(container, raw);
         this._buildAssetsSection(container, raw);
         this._buildActionsSection(container);
@@ -519,6 +523,129 @@ export class WorldAuthoringView extends WorldViewBase {
         });
     }
 
+    // ── Authored tile catalog ────────────────────────────────────────
+
+    _ensureTileCatalog(raw = this._raw) {
+        if (!raw.biomes) raw.biomes = { biomes: [] };
+        if (!raw.biomes.tileCatalog || typeof raw.biomes.tileCatalog !== 'object') {
+            raw.biomes.tileCatalog = { tiles: [], categories: [] };
+        }
+        if (!Array.isArray(raw.biomes.tileCatalog.tiles)) raw.biomes.tileCatalog.tiles = [];
+        if (!Array.isArray(raw.biomes.tileCatalog.categories)) raw.biomes.tileCatalog.categories = [];
+        return raw.biomes.tileCatalog;
+    }
+
+    _getTileCatalogRuntime(raw = this._raw) {
+        const runtimeCatalog = this._engine?.planetConfig?.tileCatalog;
+        const rawCatalog = raw?.biomes?.tileCatalog;
+        const rawRuntime = buildTileCatalogRuntime(rawCatalog);
+        return rawRuntime.summary?.tileCount > 0 ? rawRuntime : runtimeCatalog;
+    }
+
+    _getTileCatalogNames(raw = this._raw) {
+        const runtime = this._getTileCatalogRuntime(raw);
+        return Array.isArray(runtime?.tiles)
+            ? runtime.tiles.map((tile) => tile.name).filter(Boolean)
+            : [];
+    }
+
+    _buildTileCatalogSection(container, raw) {
+        const body = this._addSection(container, 'Tile Catalog', false);
+        this._tileCatalogBody = body;
+        this._renderTileCatalogSection(raw);
+    }
+
+    _renderTileCatalogSection(raw = this._raw) {
+        const body = this._tileCatalogBody;
+        if (!body) return;
+        body.innerHTML = '';
+
+        const catalog = this._ensureTileCatalog(raw);
+        const runtime = buildTileCatalogRuntime(catalog);
+        const summary = document.createElement('div');
+        summary.style.cssText = 'padding:6px 12px; font-size:11px; color:var(--text-dim); line-height:1.5;';
+        summary.textContent = `${runtime.summary.tileCount} authored tile refs, ${runtime.summary.categoryCount} categories. ` +
+            'Tile IDs remain the compact GPU/material protocol; this catalog owns the editable name-to-ID mapping.';
+        body.appendChild(summary);
+
+        const list = document.createElement('div');
+        list.style.cssText = 'max-height:180px; overflow-y:auto; padding:0 8px 4px;';
+        body.appendChild(list);
+
+        const tiles = catalog.tiles;
+        for (let index = 0; index < tiles.length; index++) {
+            const tile = tiles[index] ?? {};
+            const row = document.createElement('div');
+            row.style.cssText = 'display:grid; grid-template-columns:1.6fr 64px 1fr 24px; gap:4px; align-items:center; padding:2px 0;';
+
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.className = 'param-value-input';
+            nameInput.value = tile.name ?? '';
+            nameInput.title = 'Stable tile name used by biome texture references.';
+            nameInput.addEventListener('change', () => {
+                tile.name = nameInput.value.trim().toUpperCase();
+                this._markBiomeDirty();
+                this._renderBiomeDetail((this._raw?.biomes?.biomes || [])[this._selectedBiomeIdx]);
+            });
+
+            const idInput = document.createElement('input');
+            idInput.type = 'number';
+            idInput.className = 'param-value-input';
+            idInput.min = 0;
+            idInput.max = 65535;
+            idInput.step = 1;
+            idInput.value = Number.isInteger(tile.id) ? tile.id : 0;
+            idInput.title = 'Numeric tile ID written into GPU tile textures.';
+            idInput.addEventListener('change', () => {
+                const value = Math.trunc(Number(idInput.value));
+                if (Number.isInteger(value) && value >= 0) {
+                    tile.id = value;
+                    this._markBiomeDirty();
+                }
+            });
+
+            const categoryInput = document.createElement('input');
+            categoryInput.type = 'text';
+            categoryInput.className = 'param-value-input';
+            categoryInput.value = tile.category ?? 'GRASS';
+            categoryInput.title = 'Material category used for splat/category blending.';
+            categoryInput.addEventListener('change', () => {
+                tile.category = categoryInput.value.trim().toUpperCase();
+                this._markBiomeDirty();
+            });
+
+            const remove = document.createElement('button');
+            remove.className = 'studio-btn';
+            remove.textContent = 'x';
+            remove.title = `Remove tile ref "${tile.name ?? index}"`;
+            remove.addEventListener('click', () => {
+                tiles.splice(index, 1);
+                this._markBiomeDirty();
+                this._renderTileCatalogSection(raw);
+            });
+
+            row.appendChild(nameInput);
+            row.appendChild(idInput);
+            row.appendChild(categoryInput);
+            row.appendChild(remove);
+            list.appendChild(row);
+        }
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'studio-btn';
+        addBtn.textContent = '+ Add Tile Ref';
+        addBtn.title = 'Add a tile name/ID mapping. Regenerate world to use it in terrain.';
+        addBtn.style.margin = '4px 8px 8px';
+        addBtn.addEventListener('click', () => {
+            const nextId = tiles.reduce((maxId, tile) => Number.isInteger(tile?.id) ? Math.max(maxId, tile.id) : maxId, 0) + 1;
+            tiles.push({ name: `TILE_${nextId}`, id: nextId, category: 'GRASS' });
+            this._markBiomeDirty();
+            this._renderTileCatalogSection(raw);
+        });
+        body.appendChild(addBtn);
+    }
+
     // ── M2-T2: Biome editor section ─────────────────────────────────
 
     _buildBiomesSection(container, raw) {
@@ -621,12 +748,12 @@ export class WorldAuthoringView extends WorldViewBase {
         texHead.textContent = 'Texture References';
         container.appendChild(texHead);
 
-        this._addTextInput(container, 'Micro', biome.tileRef?.micro || '', 'Micro texture tile name (e.g. GRASS_SHORT_1)', (v) => {
+        this._addTileRefInput(container, 'Micro', biome.tileRef?.micro || '', 'Micro texture tile name (e.g. GRASS_SHORT_1)', (v) => {
             if (!biome.tileRef) biome.tileRef = {};
             biome.tileRef.micro = v;
             this._markBiomeDirty();
         });
-        this._addTextInput(container, 'Macro', biome.tileRef?.macro || '', 'Macro texture tile name', (v) => {
+        this._addTileRefInput(container, 'Macro', biome.tileRef?.macro || '', 'Macro texture tile name', (v) => {
             if (!biome.tileRef) biome.tileRef = {};
             biome.tileRef.macro = v;
             this._markBiomeDirty();
@@ -755,6 +882,43 @@ export class WorldAuthoringView extends WorldViewBase {
         input.value = value;
         input.title = tooltip;
         input.addEventListener('change', () => onChange(input.value));
+
+        row.appendChild(lbl);
+        row.appendChild(input);
+        container.appendChild(row);
+    }
+
+    _addTileRefInput(container, label, value, tooltip, onChange) {
+        const row = document.createElement('div');
+        row.className = 'param-row';
+
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        lbl.title = tooltip;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'param-value-input';
+        input.style.cssText = 'grid-column: 2 / 4; text-align: left;';
+        input.value = value;
+        input.title = tooltip;
+
+        const tileNames = this._getTileCatalogNames();
+        if (tileNames.length > 0) {
+            const listId = `tile-ref-list-${label}-${Math.random().toString(36).slice(2)}`;
+            const dataList = document.createElement('datalist');
+            dataList.id = listId;
+            dataList.style.display = 'none';
+            for (const tileName of tileNames) {
+                const option = document.createElement('option');
+                option.value = tileName;
+                dataList.appendChild(option);
+            }
+            input.setAttribute('list', listId);
+            row.appendChild(dataList);
+        }
+
+        input.addEventListener('change', () => onChange(input.value.trim().toUpperCase()));
 
         row.appendChild(lbl);
         row.appendChild(input);

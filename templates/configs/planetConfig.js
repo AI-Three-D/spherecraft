@@ -27,7 +27,29 @@ function cloneWorldAuthoringRuntime(value) {
     warnings: {
       unresolvedTileRefs: Array.isArray(warnings.unresolvedTileRefs) ? warnings.unresolvedTileRefs.slice() : [],
       unknownAssetBiomeRefs: Array.isArray(warnings.unknownAssetBiomeRefs) ? warnings.unknownAssetBiomeRefs.slice() : [],
+      tileCatalog: warnings.tileCatalog && typeof warnings.tileCatalog === 'object' ? { ...warnings.tileCatalog } : {},
     },
+    tileCatalog: cloneTileCatalogRuntime(runtime.tileCatalog),
+  };
+}
+
+function cloneTileCatalogRuntime(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  return {
+    tiles: Array.isArray(value.tiles) ? value.tiles.map((tile) => ({ ...tile })) : [],
+    tileTypes: value.tileTypes && typeof value.tileTypes === 'object' ? { ...value.tileTypes } : {},
+    tileNameById: value.tileNameById && typeof value.tileNameById === 'object' ? { ...value.tileNameById } : {},
+    tileCategories: Array.isArray(value.tileCategories)
+      ? value.tileCategories.map((category) => ({
+          ...category,
+          ranges: Array.isArray(category.ranges) ? category.ranges.map((range) => range.slice()) : [],
+        }))
+      : [],
+    numTileCategories: Number.isInteger(value.numTileCategories) ? value.numTileCategories : 0,
+    summary: value.summary && typeof value.summary === 'object' ? { ...value.summary } : {},
+    warnings: value.warnings && typeof value.warnings === 'object' ? { ...value.warnings } : {},
   };
 }
 /**
@@ -93,6 +115,7 @@ export class PlanetConfig {
     this.macroTileSpan = options.macroTileSpan ?? 16;
     this.macroMaxLOD = options.macroMaxLOD ?? 0;
     this.worldAuthoring = cloneWorldAuthoringRuntime(options.worldAuthoring);
+    this.tileCatalog = cloneTileCatalogRuntime(options.tileCatalog) ?? cloneTileCatalogRuntime(this.worldAuthoring.tileCatalog);
     this.biomeDefinitions = Array.isArray(options.biomeDefinitions)
       ? options.biomeDefinitions.slice()
       : this.worldAuthoring.biomes.slice();

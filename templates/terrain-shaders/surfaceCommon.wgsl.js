@@ -8,7 +8,7 @@ export function createSurfaceCommon() {
   // Modular surface determination that parallels the terrain height system.
   // Each terrain feature contributes surface type weights which are blended.
 
-  // Surface type constants (matching TILE_TYPES in js/types.js)
+  // Surface type constants for the default tile catalog compatibility path.
   const SURFACE_WATER: u32 = 0u;
   const GRASS_SHORT_BASE: u32 = 10u;
   const GRASS_MEDIUM_BASE: u32 = 14u;
