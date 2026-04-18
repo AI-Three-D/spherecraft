@@ -105,6 +105,12 @@ const SIGNAL_DITHER_SEED_OFFSETS = Object.freeze({
     temperature: 307,
     slope: 401,
 });
+const SIMPLEX_F2 = 0.3660254037844386;
+const SIMPLEX_G2 = 0.21132486540518713;
+const BIOME_REGIONAL_OCTAVES = 3;
+const BIOME_NOISE_LACUNARITY = 2.0;
+const BIOME_NOISE_GAIN = 0.5;
+const BIOME_RIDGED_OFFSET = 1.0;
 
 function toUint32(value) {
     return value >>> 0;
@@ -114,6 +120,27 @@ function hashStep(value, multiplier) {
     return Math.imul(value >>> 0, multiplier >>> 0) >>> 0;
 }
 
+function clamp01(value) {
+    return Math.max(0, Math.min(1, value));
+}
+
+function clampSignedUnit(value) {
+    return Math.max(-1, Math.min(1, value));
+}
+
+function fadeQuintic(t) {
+    return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+function gradient2(hash, x, y) {
+    const g = hash & 7;
+    const u = g < 4 ? x : y;
+    const v = g < 4 ? y : x;
+    const su = (g & 1) === 0 ? u : -u;
+    const sv = (g & 2) === 0 ? v : -v;
+    return su + sv;
+}
+
 /**
  * Deterministic biome hash mirrored from biomeScoring.wgsl.js.
  * @param {number} cellX
@@ -121,7 +148,7 @@ function hashStep(value, multiplier) {
  * @param {number} seed
  * @returns {number} 0..1
  */
-export function seededHash(cellX, cellY, seed) {
+function seededHashUint(cellX, cellY, seed) {
     let h = toUint32(seed);
     h ^= hashStep(toUint32(Math.trunc(cellX)), 0x27d4eb2d);
     h ^= hashStep(toUint32(Math.trunc(cellY)), 0x165667b1);
@@ -129,7 +156,11 @@ export function seededHash(cellX, cellY, seed) {
     h = hashStep(((h >>> 13) ^ h) >>> 0, 0xc2b2ae35);
     h = hashStep(((h >>> 16) ^ h) >>> 0, 0x45d9f3b);
     h = hashStep(((h >>> 16) ^ h) >>> 0, 0x45d9f3b);
-    h = ((h >>> 16) ^ h) >>> 0;
+    return ((h >>> 16) ^ h) >>> 0;
+}
+
+export function seededHash(cellX, cellY, seed) {
+    const h = seededHashUint(cellX, cellY, seed);
     return (h & 0x7fffffff) / 0x7fffffff;
 }
 
@@ -158,7 +189,119 @@ function sampleValueNoise(x, y, scale, seed) {
     const v = fy * fy * (3 - 2 * fy);
     const x0 = n00 * (1 - u) + n10 * u;
     const x1 = n01 * (1 - u) + n11 * u;
-    return x0 * (1 - v) + x1 * v;
+    return clampSignedUnit(x0 * (1 - v) + x1 * v);
+}
+
+function samplePerlinNoise(x, y, scale, seed) {
+    if (!(scale > 0)) return 0;
+
+    const sx = x * scale;
+    const sy = y * scale;
+    const ix = Math.floor(sx);
+    const iy = Math.floor(sy);
+    const fx = sx - ix;
+    const fy = sy - iy;
+
+    const u = fadeQuintic(fx);
+    const v = fadeQuintic(fy);
+
+    const n00 = gradient2(seededHashUint(ix, iy, seed), fx, fy);
+    const n10 = gradient2(seededHashUint(ix + 1, iy, seed), fx - 1, fy);
+    const n01 = gradient2(seededHashUint(ix, iy + 1, seed), fx, fy - 1);
+    const n11 = gradient2(seededHashUint(ix + 1, iy + 1, seed), fx - 1, fy - 1);
+
+    const x0 = n00 * (1 - u) + n10 * u;
+    const x1 = n01 * (1 - u) + n11 * u;
+    return clampSignedUnit(x0 * (1 - v) + x1 * v);
+}
+
+function sampleSimplexNoise(x, y, scale, seed) {
+    if (!(scale > 0)) return 0;
+
+    const sx = x * scale;
+    const sy = y * scale;
+    const skew = (sx + sy) * SIMPLEX_F2;
+    const i = Math.floor(sx + skew);
+    const j = Math.floor(sy + skew);
+    const unskew = (i + j) * SIMPLEX_G2;
+    const x0 = sx - (i - unskew);
+    const y0 = sy - (j - unskew);
+    const i1 = x0 > y0 ? 1 : 0;
+    const j1 = x0 > y0 ? 0 : 1;
+    const x1 = x0 - i1 + SIMPLEX_G2;
+    const y1 = y0 - j1 + SIMPLEX_G2;
+    const x2 = x0 - 1 + 2 * SIMPLEX_G2;
+    const y2 = y0 - 1 + 2 * SIMPLEX_G2;
+
+    let n0 = 0;
+    let n1 = 0;
+    let n2 = 0;
+
+    let t0 = 0.5 - x0 * x0 - y0 * y0;
+    if (t0 > 0) {
+        t0 *= t0;
+        n0 = t0 * t0 * gradient2(seededHashUint(i, j, seed), x0, y0);
+    }
+
+    let t1 = 0.5 - x1 * x1 - y1 * y1;
+    if (t1 > 0) {
+        t1 *= t1;
+        n1 = t1 * t1 * gradient2(seededHashUint(i + i1, j + j1, seed), x1, y1);
+    }
+
+    let t2 = 0.5 - x2 * x2 - y2 * y2;
+    if (t2 > 0) {
+        t2 *= t2;
+        n2 = t2 * t2 * gradient2(seededHashUint(i + 1, j + 1, seed), x2, y2);
+    }
+
+    return clampSignedUnit((n0 + n1 + n2) * 70);
+}
+
+function sampleFbmNoise(x, y, scale, seed) {
+    if (!(scale > 0)) return 0;
+
+    let value = 0;
+    let amp = 1;
+    let freq = 1;
+    let sumAmp = 0;
+
+    // Keep authored regional variation cheap enough for per-biome O(n) scoring.
+    for (let octave = 0; octave < BIOME_REGIONAL_OCTAVES; octave++) {
+        value += samplePerlinNoise(x, y, scale * freq, toUint32(seed + octave)) * amp;
+        sumAmp += amp;
+        amp *= BIOME_NOISE_GAIN;
+        freq *= BIOME_NOISE_LACUNARITY;
+    }
+
+    return sumAmp > 0 ? clampSignedUnit(value / sumAmp) : 0;
+}
+
+function sampleRidgedFbmNoise(x, y, scale, seed) {
+    if (!(scale > 0)) return 0;
+
+    let value = 0;
+    let amplitude = 1;
+    let frequency = 1;
+    let weight = 1;
+    let sumAmp = 0;
+
+    for (let octave = 0; octave < BIOME_REGIONAL_OCTAVES; octave++) {
+        let signal = samplePerlinNoise(x, y, scale * frequency, toUint32(seed + octave));
+        signal = BIOME_RIDGED_OFFSET - Math.abs(signal);
+        signal *= signal;
+        signal *= weight;
+
+        weight = clamp01(signal * amplitude);
+        value += signal * amplitude;
+        sumAmp += amplitude;
+
+        amplitude *= BIOME_NOISE_GAIN;
+        frequency *= BIOME_NOISE_LACUNARITY;
+    }
+
+    const normalized = sumAmp > 0 ? clamp01(value / sumAmp) : 0;
+    return normalized * 2 - 1;
 }
 
 function scoreSignalContribution(key, signals, biomeSignals, worldX, worldY, baseSeed) {
@@ -175,8 +318,9 @@ function scoreSignalContribution(key, signals, biomeSignals, worldX, worldY, bas
 }
 
 /**
- * Simple noise approximation for regional variation (JS side).
- * Uses a low-frequency hash-based noise.
+ * Regional variation noise mirrored from biomeScoring.wgsl.js.
+ * simple/perlin use single-octave sampling; fbm/ridged_fbm are capped to
+ * a short octave chain so data-driven biome scoring stays lightweight.
  * @param {number} x      Biome-space X coordinate
  * @param {number} y      Biome-space Y coordinate
  * @param {object} rv     Regional variation config { noiseScale, noiseStrength, seedOffset }
@@ -188,7 +332,17 @@ export function regionalNoise(x, y, rv, seed) {
     const scale = rv.noiseScale ?? 0.001;
     const seedOff = rv.seedOffset ?? 0;
     const noiseSeed = toUint32(toUint32(seed) + toUint32(seedOff));
-    return sampleValueNoise(x, y, scale, noiseSeed);
+    switch (rv.noiseType) {
+        case 'perlin':
+            return samplePerlinNoise(x, y, scale, noiseSeed);
+        case 'fbm':
+            return sampleFbmNoise(x, y, scale, noiseSeed);
+        case 'ridged_fbm':
+            return sampleRidgedFbmNoise(x, y, scale, noiseSeed);
+        case 'simplex':
+        default:
+            return sampleSimplexNoise(x, y, scale, noiseSeed);
+    }
 }
 
 /**

@@ -3022,6 +3022,10 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             );
         }
         if (packed.biomeCount > 0) {
+            const activeNoiseModes = Array.from(new Set(
+                (this.planetConfig?.worldAuthoring?.biomes ?? [])
+                    .map((biome) => biome?.regionalVariation?.noiseType || 'simplex')
+            ));
             Logger.info(
                 '[BiomeRuntime] Terrain compute is using authored biome selection ' +
                 'with legacy TILE_TYPES fallback'
@@ -3029,6 +3033,9 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             Logger.info(
                 `[BiomeRuntime] Authored biome stochasticity is sampling metric space ` +
                 `(noiseReferenceRadiusM=${this.noiseReferenceRadiusM})`
+            );
+            Logger.info(
+                `[BiomeRuntime] Authored biome regional noise modes: ${activeNoiseModes.join(', ')}`
             );
         }
         if (packed.truncatedBiomeCount > 0) {
