@@ -39,6 +39,9 @@ export const GLOBALS_OFFSETS = {
     debugMode:                     120,  // u32 — 1 = oversized magenta debug particles
     flatWorld:                     124,  // u32 — 1 = use +Y up instead of planet origin
     fireflyGlow:                   128,  // f32 — daylight-relative firefly intensity scalar
+    windDirX:                      132,  // f32 — world-space wind direction X
+    windDirY:                      136,  // f32 — world-space wind direction Y (mapped from 2D)
+    windSpeed:                     140,  // f32 — wind speed (m/s)
 };
 
 export class ParticleBuffers {
@@ -223,6 +226,7 @@ export class ParticleBuffers {
             if (entry.blend === 'additive')   flags |= PARTICLE_FLAGS.ADDITIVE;
             if (entry.flags?.stretchAlongVel) flags |= PARTICLE_FLAGS.STRETCH_VEL;
             if (entry.flags?.rotate)          flags |= PARTICLE_FLAGS.ROTATE;
+            if (entry.flags?.leaf)            flags |= PARTICLE_FLAGS.LEAF;
             const defaultBloomWeight = entry.bloomWeight ??
                 (((entry.emissive ?? 1.0) > 1.0) ? 1.0 : 0.0);
             const bloomEnabled = entry.bloomEnabled ?? entry.bloom ?? (defaultBloomWeight > 0);
@@ -296,6 +300,8 @@ export class ParticleBuffers {
         debugMode = 0,
         flatWorld = 0,
         fireflyGlow = 1.0,
+        windDirection = [0, 0],
+        windSpeed = 0,
     }) {
         const f32 = this._globalsF32;
         const u32 = this._globalsU32;
@@ -326,6 +332,9 @@ export class ParticleBuffers {
         u32[GLOBALS_OFFSETS.debugMode / 4] = debugMode >>> 0;
         u32[GLOBALS_OFFSETS.flatWorld / 4] = flatWorld >>> 0;
         f32[GLOBALS_OFFSETS.fireflyGlow / 4] = fireflyGlow;
+        f32[GLOBALS_OFFSETS.windDirX / 4]   = windDirection[0] ?? 0;
+        f32[GLOBALS_OFFSETS.windDirY / 4]   = windDirection[1] ?? 0;
+        f32[GLOBALS_OFFSETS.windSpeed / 4]  = windSpeed;
 
         this.device.queue.writeBuffer(this.globalsUBO, 0, f32.buffer);
     }

@@ -19,9 +19,10 @@ export const PARTICLE_TYPES = Object.freeze({
     EMBER:     3,
     COAL:      4,
     FIREFLY:   5,
+    LEAF:      6,
 });
 
-export const PARTICLE_TYPE_COUNT = 6;
+export const PARTICLE_TYPE_COUNT = 7;
 
 // Upper bound on how many type slots the GPU buffer reserves. Keeps the
 // shader's fixed-size `array<ParticleTypeDef, N>` stable while still giving
@@ -41,4 +42,5 @@ export const PARTICLE_FLAGS = Object.freeze({
     STRETCH_VEL: 1 << 2,  // stretch billboard along velocity (teardrop flames)
     ROTATE:      1 << 3,  // apply in-plane rotation from Particle.rotation
     BLOOM:       1 << 4,  // include in the authored-emissive bloom source pass
+    LEAF:        1 << 5,  // wind-responsive leaf physics in compute shader
 });

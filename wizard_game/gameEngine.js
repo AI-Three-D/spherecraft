@@ -1284,6 +1284,20 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             }
         );
         Logger.info('[GameEngine] Firefly swarm registered near player');
+
+        const getActor = () => actorManager?.playerActor;
+        const leafOffsets = [
+            { tangent: 10, bitangent: 6 },
+            { tangent: -8, bitangent: 12 },
+            { tangent: 14, bitangent: -4 },
+        ];
+        for (const off of leafOffsets) {
+            this.renderer.particleSystem.addLeafEmitter(
+                { x: spawnX, y: spawnY, z: spawnZ },
+                { getActor, snapSettleFrames: 30, surfaceOffset: off }
+            );
+        }
+        Logger.info('[GameEngine] Leaf emitters registered (snap-to-actor + tangent offset)');
     }
 
     /** Register NPC manager. Subclasses can override to skip or plug in their own. */

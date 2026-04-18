@@ -10,9 +10,11 @@
 // branches here.
 
 import { buildParticleCommonWGSL } from './particleCommon.wgsl.js';
+import { PARTICLE_TYPES } from '../ParticleTypes.js';
 
 export function buildParticleRenderWGSL({ typeCapacity = 8 } = {}) {
     const common = buildParticleCommonWGSL({ typeCapacity });
+    const leafTypeId = PARTICLE_TYPES.LEAF;
 
     return /* wgsl */`
 ${common}
@@ -104,8 +106,18 @@ fn vs_main(@builtin(vertex_index) vid: u32,
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Keep a bright core, but let the glow decay gradually across the sprite.
-    let d = length(in.uv - vec2<f32>(0.5, 0.5)) * 2.0;
+    let center = in.uv - vec2<f32>(0.5, 0.5);
+
+    if (in.ptype == ${leafTypeId}u) {
+        let leafD = length(vec2<f32>(center.x * 1.6, center.y)) * 2.0;
+        if (leafD >= 1.0) { discard; }
+        let radial = clamp(1.0 - leafD, 0.0, 1.0);
+        let vein = 1.0 - smoothstep(0.0, 0.06, abs(center.x));
+        let a = pow(radial, 0.5) * (0.85 + 0.15 * vein);
+        return vec4<f32>(in.color.rgb, in.color.a * a);
+    }
+
+    let d = length(center) * 2.0;
     if (d >= 1.0) { discard; }
     let radial = clamp(1.0 - d, 0.0, 1.0);
     let a = pow(radial, 0.7);
