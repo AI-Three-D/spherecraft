@@ -2,73 +2,298 @@
 
 import { createClimateCommon } from './climateCommon.wgsl.js';
 
-export function createSurfaceCommon() {
+const DEFAULT_TILE_IDS = Object.freeze({
+    WATER_1: 0,
+    GRASS_SHORT_1: 10,
+    GRASS_MEDIUM_1: 14,
+    GRASS_TALL_1: 18,
+    GRASS_MEADOW_1: 22,
+    GRASS_FLOWER_FIELD_1: 26,
+    SAND_COARSE_1: 30,
+    ROCK_OUTCROP_1: 42,
+    TUNDRA_BARREN_1: 54,
+    TUNDRA_LICHEN_1: 58,
+    TUNDRA_MOSS_1: 62,
+    FOREST_DENSE_SINGLE_1: 66,
+    FOREST_SPARSE_SINGLE_1: 70,
+    FOREST_DENSE_MIXED_1: 74,
+    FOREST_SPARSE_MIXED_1: 78,
+    SWAMP_MARSH_1: 82,
+    DIRT_DRY_1: 94,
+    DIRT_LOAM_1: 98,
+    DIRT_CLAY_1: 102,
+    MUD_WET_1: 106,
+    MUD_SILT_1: 110,
+    MUD_PEAT_1: 114,
+    VOLCANIC_BASALT_1: 118,
+    SNOW_FRESH_1: 130,
+    SNOW_PACK_1: 134,
+    SNOW_ICE_1: 138,
+    FOREST_RAINFOREST_1: 142,
+    FOREST_JUNGLE_1: 146,
+    DESERT_DRY_1: 150,
+    DESERT_SEMI_ARID_1: 154,
+    DESERT_TREES_DRY_1: 158,
+    DESERT_TREES_SEMI_ARID_1: 162,
+});
+
+const DEFAULT_CATEGORY_RANGES = Object.freeze([
+    Object.freeze({ name: 'WATER', ranges: Object.freeze([Object.freeze([0, 3])]) }),
+    Object.freeze({ name: 'GRASS', ranges: Object.freeze([Object.freeze([10, 29])]) }),
+    Object.freeze({ name: 'SAND', ranges: Object.freeze([Object.freeze([30, 41])]) }),
+    Object.freeze({ name: 'ROCK', ranges: Object.freeze([Object.freeze([42, 53])]) }),
+    Object.freeze({ name: 'TUNDRA', ranges: Object.freeze([Object.freeze([54, 65])]) }),
+    Object.freeze({ name: 'FOREST', ranges: Object.freeze([Object.freeze([66, 81]), Object.freeze([142, 149])]) }),
+    Object.freeze({ name: 'SWAMP', ranges: Object.freeze([Object.freeze([82, 93])]) }),
+    Object.freeze({ name: 'DIRT', ranges: Object.freeze([Object.freeze([94, 105])]) }),
+    Object.freeze({ name: 'MUD', ranges: Object.freeze([Object.freeze([106, 117])]) }),
+    Object.freeze({ name: 'VOLCANIC', ranges: Object.freeze([Object.freeze([118, 129])]) }),
+    Object.freeze({ name: 'SNOW', ranges: Object.freeze([Object.freeze([130, 141])]) }),
+    Object.freeze({ name: 'DESERT', ranges: Object.freeze([Object.freeze([150, 165])]) }),
+]);
+
+function normalizeCategoryName(value) {
+    return typeof value === 'string'
+        ? value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_')
+        : '';
+}
+
+function normalizeRange(range) {
+    if (!Array.isArray(range) || range.length < 2) return null;
+    const low = Number.isFinite(range[0]) ? Math.max(0, Math.trunc(range[0])) : null;
+    const high = Number.isFinite(range[1]) ? Math.max(0, Math.trunc(range[1])) : null;
+    if (low == null || high == null) return null;
+    return [Math.min(low, high), Math.max(low, high)];
+}
+
+function normalizeTileCategories(tileCategories) {
+    const source = Array.isArray(tileCategories) && tileCategories.length > 0
+        ? tileCategories
+        : DEFAULT_CATEGORY_RANGES;
+    const out = [];
+
+    for (const category of source) {
+        const name = normalizeCategoryName(category?.name);
+        if (!name) continue;
+        const ranges = (Array.isArray(category?.ranges) ? category.ranges : [])
+            .map(normalizeRange)
+            .filter(Boolean)
+            .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        if (ranges.length === 0) continue;
+        out.push({ name, ranges });
+    }
+
+    return out.length > 0 ? out : DEFAULT_CATEGORY_RANGES;
+}
+
+function rangesForCategory(tileCategories, categoryName) {
+    const normalized = normalizeCategoryName(categoryName);
+    const ranges = [];
+    for (const category of tileCategories) {
+        if (category.name !== normalized) continue;
+        for (const range of category.ranges) {
+            ranges.push(range);
+        }
+    }
+    return ranges;
+}
+
+function tileIdInRanges(tileId, ranges) {
+    return ranges.some(([low, high]) => tileId >= low && tileId <= high);
+}
+
+function categoryRepresentative(tileCategories, categoryName, fallback) {
+    const ranges = rangesForCategory(tileCategories, categoryName);
+    if (ranges.length > 0) return ranges[0][0];
+    return fallback;
+}
+
+function tileIdForName(tileTypes, tileCategories, tileName, categoryName, fallback, fallbackCategories = []) {
+    const primaryRanges = rangesForCategory(tileCategories, categoryName);
+    const categoryOrder = [
+        categoryName,
+        ...fallbackCategories,
+    ].map(normalizeCategoryName).filter(Boolean);
+    const authored = tileTypes && Number.isInteger(tileTypes[tileName]) ? tileTypes[tileName] : null;
+    for (const candidateCategory of categoryOrder) {
+        if (authored != null && tileIdInRanges(authored, rangesForCategory(tileCategories, candidateCategory))) {
+            return authored;
+        }
+    }
+    if (tileIdInRanges(fallback, primaryRanges)) {
+        return fallback;
+    }
+    for (const candidateCategory of categoryOrder) {
+        const ranges = rangesForCategory(tileCategories, candidateCategory);
+        if (tileIdInRanges(fallback, ranges)) {
+            return fallback;
+        }
+        if (ranges.length > 0) {
+            return categoryRepresentative(tileCategories, candidateCategory, fallback);
+        }
+    }
+    return fallback;
+}
+
+function u32(value) {
+    return `${Math.max(0, Math.trunc(value))}u`;
+}
+
+function categoryPredicateWGSL(functionName, ranges) {
+    if (!Array.isArray(ranges) || ranges.length === 0) {
+        return `  fn ${functionName}(_tileType: u32) -> bool {\n      return false;\n  }`;
+    }
+    const checks = ranges
+        .map(([low, high]) => `(tileType >= ${u32(low)} && tileType <= ${u32(high)})`)
+        .join(' ||\n          ');
+    return `  fn ${functionName}(tileType: u32) -> bool {\n      return ${checks};\n  }`;
+}
+
+function allCategoryRanges(tileCategories) {
+    const ranges = [];
+    for (const category of tileCategories) {
+        for (const range of category.ranges) {
+            ranges.push({ category: category.name, low: range[0], high: range[1] });
+        }
+    }
+    return ranges.sort((a, b) => a.low - b.low || a.high - b.high);
+}
+
+function createCatalogRangeWGSL(tileCategories) {
+    const ranges = allCategoryRanges(tileCategories);
+    const isCatalogTileLines = [
+        '  fn isCatalogTile(tileType: u32) -> bool {',
+    ];
+    for (const range of ranges) {
+        isCatalogTileLines.push(
+            `      if (tileType >= ${u32(range.low)} && tileType <= ${u32(range.high)}) { return true; } // ${range.category}`
+        );
+    }
+    isCatalogTileLines.push('      return false;');
+    isCatalogTileLines.push('  }');
+
+    const quartetLines = [
+        '  fn surfaceCategoryQuartetBase(tileType: u32) -> u32 {',
+        '      if (isWaterTile(tileType)) { return SURFACE_WATER; }',
+    ];
+    const variantLines = [
+        '  fn resolveCatalogTileVariant(tileType: u32, variant: u32) -> u32 {',
+        '      let validTileId = validateTileType(tileType);',
+        '      if (validTileId == SURFACE_WATER) { return SURFACE_WATER; }',
+    ];
+    for (const range of ranges) {
+        if (range.category === 'WATER') continue;
+        quartetLines.push(
+            `      if (tileType >= ${u32(range.low)} && tileType <= ${u32(range.high)}) { ` +
+            `return ${u32(range.low)} + ((tileType - ${u32(range.low)}) / 4u) * 4u; } // ${range.category}`
+        );
+        variantLines.push(
+            `      if (validTileId >= ${u32(range.low)} && validTileId <= ${u32(range.high)}) {`
+        );
+        variantLines.push(
+            `          let baseTile = ${u32(range.low)} + ((validTileId - ${u32(range.low)}) / 4u) * 4u;`
+        );
+        variantLines.push(`          return validateTileType(min(baseTile + variant, ${u32(range.high)}));`);
+        variantLines.push('      }');
+    }
+    quartetLines.push('      return SURFACE_GRASS_BASE;');
+    quartetLines.push('  }');
+    variantLines.push('      return SURFACE_GRASS_BASE;');
+    variantLines.push('  }');
+
+    return [
+        isCatalogTileLines.join('\n'),
+        quartetLines.join('\n'),
+        variantLines.join('\n'),
+    ].join('\n\n');
+}
+
+function createSurfaceCatalogWGSL(options = {}) {
+    const tileCategories = normalizeTileCategories(options.tileCategories);
+    const tileTypes = options.tileTypes ?? {};
+    const tileId = (name, categoryName, fallback = DEFAULT_TILE_IDS[name], fallbackCategories = []) =>
+        tileIdForName(tileTypes, tileCategories, name, categoryName, fallback, fallbackCategories);
+    const grassFallbackCategories = [
+        'FOREST', 'DESERT', 'SNOW', 'ROCK', 'SAND', 'TUNDRA',
+        'DIRT', 'MUD', 'SWAMP', 'VOLCANIC', 'WATER',
+    ];
+
+    const waterBase = tileId('WATER_1', 'WATER', DEFAULT_TILE_IDS.WATER_1, grassFallbackCategories);
+    const grassShortBase = tileId('GRASS_SHORT_1', 'GRASS', DEFAULT_TILE_IDS.GRASS_SHORT_1, grassFallbackCategories);
+    const grassMediumBase = tileId('GRASS_MEDIUM_1', 'GRASS', DEFAULT_TILE_IDS.GRASS_MEDIUM_1, grassFallbackCategories);
+    const grassTallBase = tileId('GRASS_TALL_1', 'GRASS', DEFAULT_TILE_IDS.GRASS_TALL_1, grassFallbackCategories);
+    const grassMeadowBase = tileId('GRASS_MEADOW_1', 'GRASS', DEFAULT_TILE_IDS.GRASS_MEADOW_1, grassFallbackCategories);
+    const grassFlowerBase = tileId('GRASS_FLOWER_FIELD_1', 'GRASS', DEFAULT_TILE_IDS.GRASS_FLOWER_FIELD_1, grassFallbackCategories);
+    const sandBase = tileId('SAND_COARSE_1', 'SAND', DEFAULT_TILE_IDS.SAND_COARSE_1, ['DESERT', 'GRASS']);
+    const rockBase = tileId('ROCK_OUTCROP_1', 'ROCK', DEFAULT_TILE_IDS.ROCK_OUTCROP_1, ['VOLCANIC', 'DESERT', 'GRASS']);
+    const tundraBase = tileId('TUNDRA_BARREN_1', 'TUNDRA', DEFAULT_TILE_IDS.TUNDRA_BARREN_1, ['SNOW', 'GRASS']);
+    const tundraLichenBase = tileId('TUNDRA_LICHEN_1', 'TUNDRA', DEFAULT_TILE_IDS.TUNDRA_LICHEN_1, ['SNOW', 'GRASS']);
+    const tundraMossBase = tileId('TUNDRA_MOSS_1', 'TUNDRA', DEFAULT_TILE_IDS.TUNDRA_MOSS_1, ['SNOW', 'GRASS']);
+    const forestDenseSingleBase = tileId('FOREST_DENSE_SINGLE_1', 'FOREST');
+    const forestSparseSingleBase = tileId('FOREST_SPARSE_SINGLE_1', 'FOREST');
+    const forestDenseMixedBase = tileId('FOREST_DENSE_MIXED_1', 'FOREST');
+    const forestSparseMixedBase = tileId('FOREST_SPARSE_MIXED_1', 'FOREST');
+    const forestRainforestBase = tileId('FOREST_RAINFOREST_1', 'FOREST');
+    const forestJungleBase = tileId('FOREST_JUNGLE_1', 'FOREST');
+    const swampBase = tileId('SWAMP_MARSH_1', 'SWAMP', DEFAULT_TILE_IDS.SWAMP_MARSH_1, ['GRASS', 'FOREST']);
+    const dirtBase = tileId('DIRT_DRY_1', 'DIRT', DEFAULT_TILE_IDS.DIRT_DRY_1, ['GRASS']);
+    const dirtLoamBase = tileId('DIRT_LOAM_1', 'DIRT', DEFAULT_TILE_IDS.DIRT_LOAM_1, ['GRASS']);
+    const dirtClayBase = tileId('DIRT_CLAY_1', 'DIRT', DEFAULT_TILE_IDS.DIRT_CLAY_1, ['GRASS']);
+    const mudBase = tileId('MUD_WET_1', 'MUD', DEFAULT_TILE_IDS.MUD_WET_1, ['GRASS', 'FOREST']);
+    const mudSiltBase = tileId('MUD_SILT_1', 'MUD', DEFAULT_TILE_IDS.MUD_SILT_1, ['GRASS', 'FOREST']);
+    const mudPeatBase = tileId('MUD_PEAT_1', 'MUD', DEFAULT_TILE_IDS.MUD_PEAT_1, ['GRASS', 'FOREST']);
+    const volcanicBase = tileId('VOLCANIC_BASALT_1', 'VOLCANIC', DEFAULT_TILE_IDS.VOLCANIC_BASALT_1, ['ROCK']);
+    const snowFreshBase = tileId('SNOW_FRESH_1', 'SNOW', DEFAULT_TILE_IDS.SNOW_FRESH_1, ['TUNDRA', 'ROCK']);
+    const snowPackBase = tileId('SNOW_PACK_1', 'SNOW', DEFAULT_TILE_IDS.SNOW_PACK_1, ['TUNDRA', 'ROCK']);
+    const snowIceBase = tileId('SNOW_ICE_1', 'SNOW', DEFAULT_TILE_IDS.SNOW_ICE_1, ['TUNDRA', 'ROCK']);
+    const desertDryBase = tileId('DESERT_DRY_1', 'DESERT', DEFAULT_TILE_IDS.DESERT_DRY_1, ['SAND', 'GRASS']);
+    const desertSemiAridBase = tileId('DESERT_SEMI_ARID_1', 'DESERT', DEFAULT_TILE_IDS.DESERT_SEMI_ARID_1, ['SAND', 'GRASS']);
+    const desertTreesDryBase = tileId('DESERT_TREES_DRY_1', 'DESERT', DEFAULT_TILE_IDS.DESERT_TREES_DRY_1, ['SAND', 'GRASS']);
+    const desertTreesSemiAridBase = tileId('DESERT_TREES_SEMI_ARID_1', 'DESERT', DEFAULT_TILE_IDS.DESERT_TREES_SEMI_ARID_1, ['SAND', 'GRASS']);
+
     return `
   // ==================== Surface Type System ====================
   // Modular surface determination that parallels the terrain height system.
   // Each terrain feature contributes surface type weights which are blended.
 
-  // Surface type constants for the default tile catalog compatibility path.
-  const SURFACE_WATER: u32 = 0u;
-  const GRASS_SHORT_BASE: u32 = 10u;
-  const GRASS_MEDIUM_BASE: u32 = 14u;
-  const GRASS_TALL_BASE: u32 = 18u;
-  const GRASS_MEADOW_BASE: u32 = 22u;
-  const GRASS_FLOWER_FIELD_BASE: u32 = 26u;
+  // Surface constants generated from the active tile catalog. The named subtype
+  // constants are kept for legacy procedural fallback selection; category
+  // predicates and validation below are fully catalog-driven.
+  const SURFACE_WATER: u32 = ${u32(waterBase)};
+  const GRASS_SHORT_BASE: u32 = ${u32(grassShortBase)};
+  const GRASS_MEDIUM_BASE: u32 = ${u32(grassMediumBase)};
+  const GRASS_TALL_BASE: u32 = ${u32(grassTallBase)};
+  const GRASS_MEADOW_BASE: u32 = ${u32(grassMeadowBase)};
+  const GRASS_FLOWER_FIELD_BASE: u32 = ${u32(grassFlowerBase)};
   const SURFACE_GRASS_BASE: u32 = GRASS_SHORT_BASE;
-  const SURFACE_SAND_BASE: u32 = 30u;      // SAND_COARSE_1
-  const SURFACE_ROCK_BASE: u32 = 42u;      // ROCK_OUTCROP_1
-  const SURFACE_TUNDRA_BASE: u32 = 54u;    // TUNDRA_BARREN_1
-  const SURFACE_TUNDRA_LICHEN_BASE: u32 = 58u; // TUNDRA_LICHEN_1
-  const SURFACE_TUNDRA_MOSS_BASE: u32 = 62u;   // TUNDRA_MOSS_1
-  const FOREST_DENSE_SINGLE_BASE: u32 = 66u;
-  const FOREST_SPARSE_SINGLE_BASE: u32 = 70u;
-  const FOREST_DENSE_MIXED_BASE: u32 = 74u;
-  const FOREST_SPARSE_MIXED_BASE: u32 = 78u;
+  const SURFACE_SAND_BASE: u32 = ${u32(sandBase)};
+  const SURFACE_ROCK_BASE: u32 = ${u32(rockBase)};
+  const SURFACE_TUNDRA_BASE: u32 = ${u32(tundraBase)};
+  const SURFACE_TUNDRA_LICHEN_BASE: u32 = ${u32(tundraLichenBase)};
+  const SURFACE_TUNDRA_MOSS_BASE: u32 = ${u32(tundraMossBase)};
+  const FOREST_DENSE_SINGLE_BASE: u32 = ${u32(forestDenseSingleBase)};
+  const FOREST_SPARSE_SINGLE_BASE: u32 = ${u32(forestSparseSingleBase)};
+  const FOREST_DENSE_MIXED_BASE: u32 = ${u32(forestDenseMixedBase)};
+  const FOREST_SPARSE_MIXED_BASE: u32 = ${u32(forestSparseMixedBase)};
   const SURFACE_FOREST_FLOOR_BASE: u32 = FOREST_DENSE_MIXED_BASE;
-  const FOREST_RAINFOREST_BASE: u32 = 142u;
-  const FOREST_JUNGLE_BASE: u32 = 146u;
-  const SURFACE_SWAMP_BASE: u32 = 82u;     // SWAMP_MARSH_1
-  const SURFACE_DIRT_BASE: u32 = 94u;      // DIRT_DRY_1
-  const SURFACE_DIRT_LOAM_BASE: u32 = 98u; // DIRT_LOAM_1
-  const SURFACE_DIRT_CLAY_BASE: u32 = 102u; // DIRT_CLAY_1
-  const SURFACE_MUD_BASE: u32 = 106u;      // MUD_WET_1
-  const SURFACE_MUD_SILT_BASE: u32 = 110u; // MUD_SILT_1
-  const SURFACE_MUD_PEAT_BASE: u32 = 114u; // MUD_PEAT_1
-  const SURFACE_VOLCANIC_BASE: u32 = 118u; // VOLCANIC_BASALT_1
-  const SURFACE_SNOW_FRESH_BASE: u32 = 130u; // SNOW_FRESH_1
-  const SURFACE_SNOW_PACK_BASE: u32 = 134u;  // SNOW_PACK_1
-  const SURFACE_SNOW_ICE_BASE: u32 = 138u;   // SNOW_ICE_1
+  const FOREST_RAINFOREST_BASE: u32 = ${u32(forestRainforestBase)};
+  const FOREST_JUNGLE_BASE: u32 = ${u32(forestJungleBase)};
+  const SURFACE_SWAMP_BASE: u32 = ${u32(swampBase)};
+  const SURFACE_DIRT_BASE: u32 = ${u32(dirtBase)};
+  const SURFACE_DIRT_LOAM_BASE: u32 = ${u32(dirtLoamBase)};
+  const SURFACE_DIRT_CLAY_BASE: u32 = ${u32(dirtClayBase)};
+  const SURFACE_MUD_BASE: u32 = ${u32(mudBase)};
+  const SURFACE_MUD_SILT_BASE: u32 = ${u32(mudSiltBase)};
+  const SURFACE_MUD_PEAT_BASE: u32 = ${u32(mudPeatBase)};
+  const SURFACE_VOLCANIC_BASE: u32 = ${u32(volcanicBase)};
+  const SURFACE_SNOW_FRESH_BASE: u32 = ${u32(snowFreshBase)};
+  const SURFACE_SNOW_PACK_BASE: u32 = ${u32(snowPackBase)};
+  const SURFACE_SNOW_ICE_BASE: u32 = ${u32(snowIceBase)};
   const SURFACE_SNOW_BASE: u32 = SURFACE_SNOW_FRESH_BASE;
-  const SURFACE_DESERT_DRY_BASE: u32 = 150u; // DESERT_DRY_1
-  const SURFACE_DESERT_SEMI_ARID_BASE: u32 = 154u; // DESERT_SEMI_ARID_1
-  const SURFACE_DESERT_TREES_DRY_BASE: u32 = 158u; // DESERT_TREES_DRY_1
-  const SURFACE_DESERT_TREES_SEMI_ARID_BASE: u32 = 162u; // DESERT_TREES_SEMI_ARID_1
-
-  const SURFACE_GRASS_MIN: u32 = 10u;
-  const SURFACE_GRASS_MAX: u32 = 29u;
-  const SURFACE_SAND_MIN: u32 = 30u;
-  const SURFACE_SAND_MAX: u32 = 41u;
-  const SURFACE_ROCK_MIN: u32 = 42u;
-  const SURFACE_ROCK_MAX: u32 = 53u;
-  const SURFACE_TUNDRA_MIN: u32 = 54u;
-  const SURFACE_TUNDRA_MAX: u32 = 65u;
-  const SURFACE_FOREST_FLOOR_MIN: u32 = 66u;
-  const SURFACE_FOREST_FLOOR_MAX: u32 = 81u;
-  const SURFACE_FOREST_TROPICAL_MIN: u32 = 142u;
-  const SURFACE_FOREST_TROPICAL_MAX: u32 = 149u;
-  const SURFACE_SWAMP_MIN: u32 = 82u;
-  const SURFACE_SWAMP_MAX: u32 = 93u;
-  const SURFACE_DIRT_MIN: u32 = 94u;
-  const SURFACE_DIRT_MAX: u32 = 105u;
-  const SURFACE_MUD_MIN: u32 = 106u;
-  const SURFACE_MUD_MAX: u32 = 117u;
-  const SURFACE_VOLCANIC_MIN: u32 = 118u;
-  const SURFACE_VOLCANIC_MAX: u32 = 129u;
-  const SURFACE_SNOW_MIN: u32 = 130u;
-  const SURFACE_SNOW_MAX: u32 = 141u;
-  const SURFACE_DESERT_MIN: u32 = 150u;
-  const SURFACE_DESERT_MAX: u32 = 165u;
+  const SURFACE_DESERT_DRY_BASE: u32 = ${u32(desertDryBase)};
+  const SURFACE_DESERT_SEMI_ARID_BASE: u32 = ${u32(desertSemiAridBase)};
+  const SURFACE_DESERT_TREES_DRY_BASE: u32 = ${u32(desertTreesDryBase)};
+  const SURFACE_DESERT_TREES_SEMI_ARID_BASE: u32 = ${u32(desertTreesSemiAridBase)};
 
   // Surface weights structure - holds probability weights for each surface type
   struct SurfaceWeights {
@@ -84,51 +309,26 @@ export function createSurfaceCommon() {
       volcanic: f32,
   };
 
-  fn isGrassTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_GRASS_MIN && tileType <= SURFACE_GRASS_MAX;
-  }
+${categoryPredicateWGSL('isWaterTile', rangesForCategory(tileCategories, 'WATER'))}
+${categoryPredicateWGSL('isGrassTile', rangesForCategory(tileCategories, 'GRASS'))}
+${categoryPredicateWGSL('isSandTile', rangesForCategory(tileCategories, 'SAND'))}
+${categoryPredicateWGSL('isRockTile', rangesForCategory(tileCategories, 'ROCK'))}
+${categoryPredicateWGSL('isTundraTile', rangesForCategory(tileCategories, 'TUNDRA'))}
+${categoryPredicateWGSL('isForestFloorTile', rangesForCategory(tileCategories, 'FOREST'))}
+${categoryPredicateWGSL('isSwampTile', rangesForCategory(tileCategories, 'SWAMP'))}
+${categoryPredicateWGSL('isDirtTile', rangesForCategory(tileCategories, 'DIRT'))}
+${categoryPredicateWGSL('isMudTile', rangesForCategory(tileCategories, 'MUD'))}
+${categoryPredicateWGSL('isVolcanicTile', rangesForCategory(tileCategories, 'VOLCANIC'))}
+${categoryPredicateWGSL('isSnowTile', rangesForCategory(tileCategories, 'SNOW'))}
+${categoryPredicateWGSL('isDesertTile', rangesForCategory(tileCategories, 'DESERT'))}
 
-  fn isSandTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_SAND_MIN && tileType <= SURFACE_SAND_MAX;
-  }
+${createCatalogRangeWGSL(tileCategories)}
+`;
+}
 
-  fn isRockTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_ROCK_MIN && tileType <= SURFACE_ROCK_MAX;
-  }
-
-  fn isTundraTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_TUNDRA_MIN && tileType <= SURFACE_TUNDRA_MAX;
-  }
-
-  fn isForestFloorTile(tileType: u32) -> bool {
-      let temperate = tileType >= SURFACE_FOREST_FLOOR_MIN && tileType <= SURFACE_FOREST_FLOOR_MAX;
-      let tropical = tileType >= SURFACE_FOREST_TROPICAL_MIN && tileType <= SURFACE_FOREST_TROPICAL_MAX;
-      return temperate || tropical;
-  }
-
-  fn isSwampTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_SWAMP_MIN && tileType <= SURFACE_SWAMP_MAX;
-  }
-
-  fn isDirtTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_DIRT_MIN && tileType <= SURFACE_DIRT_MAX;
-  }
-
-  fn isMudTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_MUD_MIN && tileType <= SURFACE_MUD_MAX;
-  }
-
-  fn isVolcanicTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_VOLCANIC_MIN && tileType <= SURFACE_VOLCANIC_MAX;
-  }
-
-  fn isSnowTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_SNOW_MIN && tileType <= SURFACE_SNOW_MAX;
-  }
-
-  fn isDesertTile(tileType: u32) -> bool {
-      return tileType >= SURFACE_DESERT_MIN && tileType <= SURFACE_DESERT_MAX;
-  }
+export function createSurfaceCommon(options = {}) {
+    return `
+${createSurfaceCatalogWGSL(options)}
 
 ${createClimateCommon()}
 
@@ -1000,21 +1200,7 @@ fn computeSurfaceWeights(
   }
 
 fn validateTileType(tileType: u32) -> u32 {
-  //if (isForestFloorTile(tileType)) { return tileType; }
-  // return 94u;
-
-    if (tileType == SURFACE_WATER) { return tileType; }
-    if (isGrassTile(tileType)) { return tileType; }
-    if (isSandTile(tileType)) { return tileType; }
-    if (isRockTile(tileType)) { return tileType; }
-    if (isTundraTile(tileType)) { return tileType; }
-    if (isForestFloorTile(tileType)) { return tileType; }
-    if (isSwampTile(tileType)) { return tileType; }
-    if (isDirtTile(tileType)) { return tileType; }
-    if (isMudTile(tileType)) { return tileType; }
-    if (isSnowTile(tileType)) { return tileType; }
-    if (isDesertTile(tileType)) { return tileType; }
-    if (isVolcanicTile(tileType)) { return tileType; }
+    if (isCatalogTile(tileType)) { return tileType; }
     return SURFACE_GRASS_BASE;
 }
 

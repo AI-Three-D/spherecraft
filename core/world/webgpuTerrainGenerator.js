@@ -23,6 +23,7 @@ export class WebGPUTerrainGenerator {
             throw new Error('WebGPUTerrainGenerator requires options.terrainTheme.terrainShaderBundle');
         }
         this.terrainTheme = options.terrainTheme;
+        this.tileTypes = options.terrainTheme.TILE_TYPES ?? {};
         this.tileCategories = options.terrainTheme.TILE_CATEGORIES;
         this.buildTileCategoryLookupWGSL = options.terrainTheme.buildTileCategoryLookupWGSL;
         this.terrainShaderBundle = options.terrainTheme.terrainShaderBundle;
@@ -758,6 +759,8 @@ export class WebGPUTerrainGenerator {
             baseGenerator: this.baseGenerator,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.terrainShaderModule = this.device.createShaderModule({
             label: 'Advanced Terrain Compute',
@@ -770,6 +773,8 @@ export class WebGPUTerrainGenerator {
             hasHeightBindings: true,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.heightInputShaderModule = this.device.createShaderModule({
             label: 'Height Input Terrain Compute',
@@ -783,6 +788,8 @@ export class WebGPUTerrainGenerator {
             hasTileBindings: true,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.microShaderModule = this.device.createShaderModule({
             label: 'Micro Terrain Compute',
@@ -1022,6 +1029,8 @@ export class WebGPUTerrainGenerator {
             hasHeightBindings: true,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Height Input Terrain Compute (${fmt})`,
@@ -1092,6 +1101,8 @@ export class WebGPUTerrainGenerator {
             hasTileBindings: true,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Micro Terrain Compute (${fmt})`,
@@ -2964,6 +2975,8 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             outputFormat: fmt,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Terrain Compute (${fmt})`,
