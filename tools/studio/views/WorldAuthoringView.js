@@ -7,12 +7,12 @@
  */
 
 import { WorldViewBase } from './WorldViewBase.js';
+import { TEXTURE_LOOKUP_MAX_TILE_ID } from '../../../core/texture/tileTextureLimits.js';
 import { selectBiome } from '../../../core/world/BiomeScoring.js';
 import { buildTileCatalogRuntime } from '../../../core/world/tileCatalogRuntime.js';
 import { mergeCatalogRanges, normalizeCatalogName } from '../../../core/world/tileCatalogUtils.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const TEXTURE_TILE_ID_MAX = 255;
 const DEFAULT_TEXTURE_DIALOG_LAYER = Object.freeze({
     baseColor: '#808080',
     secondaryColor: '#808080',
@@ -654,14 +654,14 @@ export class WorldAuthoringView extends WorldViewBase {
             idInput.type = 'number';
             idInput.className = 'param-value-input';
             idInput.min = 0;
-            idInput.max = TEXTURE_TILE_ID_MAX;
+            idInput.max = TEXTURE_LOOKUP_MAX_TILE_ID;
             idInput.step = 1;
             idInput.value = Number.isInteger(tile.id) ? tile.id : 0;
-            idInput.title = `Numeric tile ID written into GPU tile textures. Texture lookup currently supports IDs 0-${TEXTURE_TILE_ID_MAX}.`;
+            idInput.title = `Numeric tile ID written into GPU tile textures. Texture lookup currently supports IDs 0-${TEXTURE_LOOKUP_MAX_TILE_ID}.`;
             idInput.addEventListener('change', () => {
                 const value = Math.trunc(Number(idInput.value));
                 if (Number.isInteger(value)) {
-                    tile.id = Math.max(0, Math.min(TEXTURE_TILE_ID_MAX, value));
+                    tile.id = Math.max(0, Math.min(TEXTURE_LOOKUP_MAX_TILE_ID, value));
                     idInput.value = tile.id;
                     this._markBiomeDirty();
                 }

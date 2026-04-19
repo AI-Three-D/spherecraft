@@ -1,5 +1,6 @@
 import { Texture, TextureFormat, TextureFilter, TextureWrap } from '../renderer/resources/texture.js';
 import { TileTransitionTableBuilder } from '../world/tileTransitionTableBuilder.js'
+import { TEXTURE_LOOKUP_TILE_COUNT } from './tileTextureLimits.js';
 import { getAllProceduralVariantsForLevel } from './webgpu/textureGenerator.js';
 
 function stableStringify(obj) {
@@ -98,7 +99,7 @@ export class TextureAtlasManager {
 
         
 
-        const maxTileTypes = 256;
+        const maxTileTypes = TEXTURE_LOOKUP_TILE_COUNT;
         const maxMicroVariants = 8;
         const maxMacroVariants = 8;
 
