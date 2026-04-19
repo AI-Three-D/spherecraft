@@ -1,6 +1,17 @@
 import { TILE_TYPES as DEFAULT_TILE_TYPES } from '../templates/configs/tileTypes.js';
 import { TEXTURE_CONFIG as BASE_TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 
+const TEXTURE_LOOKUP_MAX_TILE_ID = 255;
+const DEFAULT_SEASONS = Object.freeze(['Spring', 'Summer', 'Autumn', 'Winter']);
+const DEFAULT_AUTHORED_TEXTURE_LAYER = Object.freeze({
+    baseColor: '#808080',
+    secondaryColor: '#6f6f6f',
+    blendWeight: 0.45,
+    layers: Object.freeze([
+        Object.freeze({ type: 'fbm', scale: 1.0, amplitude: 1.0, seedOffset: 0 }),
+    ]),
+});
+
 function cloneValue(value) {
     if (Array.isArray(value)) {
         return value.map((entry) => cloneValue(entry));
@@ -311,6 +322,38 @@ function buildOverrideVariant(tileId, levelKey, override = {}) {
     return variant;
 }
 
+function getTextureSeasons(config) {
+    const seasons = new Set();
+    for (const entry of Array.isArray(config) ? config : []) {
+        const base = entry?.textures?.base;
+        if (!base || typeof base !== 'object') continue;
+        for (const season of Object.keys(base)) {
+            seasons.add(season);
+        }
+    }
+    return seasons.size > 0 ? Array.from(seasons) : DEFAULT_SEASONS.slice();
+}
+
+function createAuthoredTextureEntry(tileId, tileName, tileOverride = {}, seasons = DEFAULT_SEASONS) {
+    const microOverride = tileOverride.micro ?? tileOverride.macro ?? DEFAULT_AUTHORED_TEXTURE_LAYER;
+    const macroOverride = tileOverride.macro ?? tileOverride.micro ?? DEFAULT_AUTHORED_TEXTURE_LAYER;
+    const base = {};
+
+    for (const season of seasons) {
+        base[season] = {
+            micro: [buildOverrideVariant(tileId, 'micro', microOverride)],
+            macro: [buildOverrideVariant(tileId, 'macro', macroOverride)],
+        };
+    }
+
+    return {
+        id: tileId,
+        name: tileName,
+        authored: true,
+        textures: { base },
+    };
+}
+
 export function buildWorldTextureConfig(rawTextures, baseTextureConfig = BASE_TEXTURE_CONFIG, options = {}) {
     const config = cloneValue(baseTextureConfig);
     const tileTypes = options.tileTypes && typeof options.tileTypes === 'object'
@@ -321,21 +364,36 @@ export function buildWorldTextureConfig(rawTextures, baseTextureConfig = BASE_TE
         return config;
     }
 
+    const seasons = getTextureSeasons(config);
+    const skippedOutOfRange = [];
+
     for (const [tileName, tileOverride] of Object.entries(overrides)) {
         const tileId = tileTypes[tileName];
         if (!Number.isInteger(tileId) || !tileOverride || typeof tileOverride !== 'object') {
             continue;
         }
-
-        const entry = config.find((candidate) => candidate?.id === tileId);
-        if (!entry?.textures?.base) {
+        if (tileId < 0 || tileId > TEXTURE_LOOKUP_MAX_TILE_ID) {
+            skippedOutOfRange.push({ tileName, tileId });
             continue;
         }
 
-        for (const [season, seasonConfig] of Object.entries(entry.textures.base)) {
-            if (!seasonConfig || typeof seasonConfig !== 'object') {
-                continue;
+        let entry = config.find((candidate) => candidate?.id === tileId);
+        if (!entry) {
+            entry = createAuthoredTextureEntry(tileId, tileName, tileOverride, seasons);
+            config.push(entry);
+        } else {
+            entry.name = entry.name ?? tileName;
+            if (!entry.textures || typeof entry.textures !== 'object') entry.textures = {};
+            if (!entry.textures.base || typeof entry.textures.base !== 'object') {
+                entry.textures.base = {};
             }
+        }
+
+        for (const season of seasons) {
+            const seasonConfig = entry.textures.base[season] && typeof entry.textures.base[season] === 'object'
+                ? entry.textures.base[season]
+                : {};
+            entry.textures.base[season] = seasonConfig;
 
             if (tileOverride.micro) {
                 seasonConfig.micro = [buildOverrideVariant(tileId, 'micro', tileOverride.micro)];
@@ -344,6 +402,14 @@ export function buildWorldTextureConfig(rawTextures, baseTextureConfig = BASE_TE
                 seasonConfig.macro = [buildOverrideVariant(tileId, 'macro', tileOverride.macro)];
             }
         }
+    }
+
+    if (skippedOutOfRange.length > 0) {
+        console.warn(
+            `[WorldTextureOverrides] skipped ${skippedOutOfRange.length} texture override(s) with tile IDs outside ` +
+            `the 0-${TEXTURE_LOOKUP_MAX_TILE_ID} texture lookup range`,
+            skippedOutOfRange
+        );
     }
 
     return config;
