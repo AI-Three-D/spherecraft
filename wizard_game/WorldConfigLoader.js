@@ -72,6 +72,7 @@ export class WorldConfigLoader {
             summary.assetProfileCount > 0 ||
             summary.tileCatalogTileCount > 0 ||
             summary.unresolvedTileRefCount > 0 ||
+            summary.outOfTextureRangeTileRefCount > 0 ||
             summary.unknownAssetBiomeRefCount > 0 ||
             summary.tileCatalogWarningCount > 0
         );
@@ -83,12 +84,14 @@ export class WorldConfigLoader {
             );
             if (
                 summary.unresolvedTileRefCount > 0 ||
+                summary.outOfTextureRangeTileRefCount > 0 ||
                 summary.unknownAssetBiomeRefCount > 0 ||
                 summary.tileCatalogWarningCount > 0
             ) {
                 console.warn(
                     `[WorldConfigLoader] authoring warnings: ` +
                     `${summary.unresolvedTileRefCount} unresolved tile refs, ` +
+                    `${summary.outOfTextureRangeTileRefCount ?? 0} tile refs outside texture lookup range, ` +
                     `${summary.unknownAssetBiomeRefCount} unknown asset biome refs, ` +
                     `${summary.tileCatalogWarningCount ?? 0} tile catalog warnings`
                 );

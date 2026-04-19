@@ -497,6 +497,7 @@ export class GameEngine {
             worldAuthoringSummary.assetProfileCount > 0 ||
             worldAuthoringSummary.tileCatalogTileCount > 0 ||
             worldAuthoringSummary.unresolvedTileRefCount > 0 ||
+            worldAuthoringSummary.outOfTextureRangeTileRefCount > 0 ||
             worldAuthoringSummary.unknownAssetBiomeRefCount > 0 ||
             worldAuthoringSummary.tileCatalogWarningCount > 0
         );
