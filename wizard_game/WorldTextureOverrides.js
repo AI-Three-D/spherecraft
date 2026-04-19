@@ -11,6 +11,20 @@ const DEFAULT_AUTHORED_TEXTURE_LAYER = Object.freeze({
         Object.freeze({ type: 'fbm', scale: 1.0, amplitude: 1.0, seedOffset: 0 }),
     ]),
 });
+const CATEGORY_TEXTURE_FALLBACKS = Object.freeze({
+    WATER: Object.freeze({ baseColor: '#1f5d89', secondaryColor: '#63a7c7', blendWeight: 0.55 }),
+    GRASS: Object.freeze({ baseColor: '#3f6f32', secondaryColor: '#8cac52', blendWeight: 0.55 }),
+    FOREST: Object.freeze({ baseColor: '#2e4a2a', secondaryColor: '#6a5538', blendWeight: 0.45 }),
+    ROCK: Object.freeze({ baseColor: '#5d5d58', secondaryColor: '#8c8980', blendWeight: 0.35 }),
+    SNOW: Object.freeze({ baseColor: '#d9e4e8', secondaryColor: '#ffffff', blendWeight: 0.35 }),
+    DESERT: Object.freeze({ baseColor: '#b89253', secondaryColor: '#e0c27a', blendWeight: 0.45 }),
+    SAND: Object.freeze({ baseColor: '#b89253', secondaryColor: '#e0c27a', blendWeight: 0.45 }),
+    DIRT: Object.freeze({ baseColor: '#67492f', secondaryColor: '#95704a', blendWeight: 0.45 }),
+    MUD: Object.freeze({ baseColor: '#3e3029', secondaryColor: '#675044', blendWeight: 0.45 }),
+    TUNDRA: Object.freeze({ baseColor: '#687162', secondaryColor: '#a0a992', blendWeight: 0.4 }),
+    SWAMP: Object.freeze({ baseColor: '#36482f', secondaryColor: '#657243', blendWeight: 0.5 }),
+    VOLCANIC: Object.freeze({ baseColor: '#2d2c2b', secondaryColor: '#62544b', blendWeight: 0.35 }),
+});
 
 function cloneValue(value) {
     if (Array.isArray(value)) {
@@ -24,6 +38,13 @@ function cloneValue(value) {
         return result;
     }
     return value;
+}
+
+function normalizeCatalogName(value, fallback = '') {
+    const normalized = typeof value === 'string'
+        ? value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_')
+        : '';
+    return normalized || fallback;
 }
 
 function normalizeNoiseType(type) {
@@ -322,6 +343,15 @@ function buildOverrideVariant(tileId, levelKey, override = {}) {
     return variant;
 }
 
+function getCategoryTextureFallback(category) {
+    const key = normalizeCatalogName(category, '');
+    const fallback = CATEGORY_TEXTURE_FALLBACKS[key] ?? DEFAULT_AUTHORED_TEXTURE_LAYER;
+    return {
+        ...cloneValue(fallback),
+        layers: cloneValue(DEFAULT_AUTHORED_TEXTURE_LAYER.layers),
+    };
+}
+
 function getTextureSeasons(config) {
     const seasons = new Set();
     for (const entry of Array.isArray(config) ? config : []) {
@@ -334,9 +364,30 @@ function getTextureSeasons(config) {
     return seasons.size > 0 ? Array.from(seasons) : DEFAULT_SEASONS.slice();
 }
 
-function createAuthoredTextureEntry(tileId, tileName, tileOverride = {}, seasons = DEFAULT_SEASONS) {
-    const microOverride = tileOverride.micro ?? tileOverride.macro ?? DEFAULT_AUTHORED_TEXTURE_LAYER;
-    const macroOverride = tileOverride.macro ?? tileOverride.micro ?? DEFAULT_AUTHORED_TEXTURE_LAYER;
+function normalizeCatalogTiles(tileCatalog) {
+    const tiles = Array.isArray(tileCatalog?.tiles) ? tileCatalog.tiles : [];
+    const out = [];
+    const seen = new Set();
+
+    for (const source of tiles) {
+        const tileId = Math.trunc(Number(source?.tileId ?? source?.value ?? source?.id));
+        if (!Number.isFinite(tileId) || tileId < 0 || seen.has(tileId)) continue;
+        seen.add(tileId);
+        const rawName = source?.name ?? (typeof source?.id === 'string' ? source.id : null);
+        out.push({
+            id: tileId,
+            name: normalizeCatalogName(rawName, `TILE_${tileId}`),
+            category: normalizeCatalogName(source?.category, 'UNMAPPED'),
+        });
+    }
+
+    return out;
+}
+
+function createAuthoredTextureEntry(tileId, tileName, tileOverride = {}, seasons = DEFAULT_SEASONS, category = '') {
+    const categoryFallback = getCategoryTextureFallback(category);
+    const microOverride = tileOverride.micro ?? tileOverride.macro ?? categoryFallback;
+    const macroOverride = tileOverride.macro ?? tileOverride.micro ?? categoryFallback;
     const base = {};
 
     for (const season of seasons) {
@@ -349,23 +400,72 @@ function createAuthoredTextureEntry(tileId, tileName, tileOverride = {}, seasons
     return {
         id: tileId,
         name: tileName,
+        category,
         authored: true,
         textures: { base },
     };
 }
 
+function ensureTextureEntry(config, tileId, tileName, category, seasons) {
+    let entry = config.find((candidate) => candidate?.id === tileId);
+    const fallback = getCategoryTextureFallback(category);
+
+    if (!entry) {
+        entry = createAuthoredTextureEntry(tileId, tileName, { micro: fallback, macro: fallback }, seasons, category);
+        config.push(entry);
+        return entry;
+    }
+
+    entry.name = entry.name ?? tileName;
+    if (!entry.textures || typeof entry.textures !== 'object') entry.textures = {};
+    if (!entry.textures.base || typeof entry.textures.base !== 'object') {
+        entry.textures.base = {};
+    }
+
+    for (const season of seasons) {
+        const seasonConfig = entry.textures.base[season] && typeof entry.textures.base[season] === 'object'
+            ? entry.textures.base[season]
+            : {};
+        entry.textures.base[season] = seasonConfig;
+        if (!Array.isArray(seasonConfig.micro) || seasonConfig.micro.length === 0) {
+            seasonConfig.micro = [buildOverrideVariant(tileId, 'micro', fallback)];
+        }
+        if (!Array.isArray(seasonConfig.macro) || seasonConfig.macro.length === 0) {
+            seasonConfig.macro = [buildOverrideVariant(tileId, 'macro', fallback)];
+        }
+    }
+
+    return entry;
+}
+
 export function buildWorldTextureConfig(rawTextures, baseTextureConfig = BASE_TEXTURE_CONFIG, options = {}) {
     const config = cloneValue(baseTextureConfig);
-    const tileTypes = options.tileTypes && typeof options.tileTypes === 'object'
+    const tileCatalog = options.tileCatalog && typeof options.tileCatalog === 'object'
+        ? options.tileCatalog
+        : null;
+    const tileTypes = tileCatalog?.tileTypes && typeof tileCatalog.tileTypes === 'object'
+        ? tileCatalog.tileTypes
+        : (options.tileTypes && typeof options.tileTypes === 'object'
         ? options.tileTypes
-        : DEFAULT_TILE_TYPES;
-    const overrides = rawTextures?.overrides;
-    if (!overrides || typeof overrides !== 'object') {
+        : DEFAULT_TILE_TYPES);
+    const catalogTiles = normalizeCatalogTiles(tileCatalog);
+    const overrides = rawTextures?.overrides && typeof rawTextures.overrides === 'object'
+        ? rawTextures.overrides
+        : {};
+    if (catalogTiles.length === 0 && Object.keys(overrides).length === 0) {
         return config;
     }
 
     const seasons = getTextureSeasons(config);
     const skippedOutOfRange = [];
+
+    for (const tile of catalogTiles) {
+        if (tile.id > TEXTURE_LOOKUP_MAX_TILE_ID) {
+            skippedOutOfRange.push({ tileName: tile.name, tileId: tile.id, source: 'tileCatalog' });
+            continue;
+        }
+        ensureTextureEntry(config, tile.id, tile.name, tile.category, seasons);
+    }
 
     for (const [tileName, tileOverride] of Object.entries(overrides)) {
         const tileId = tileTypes[tileName];
@@ -373,20 +473,17 @@ export function buildWorldTextureConfig(rawTextures, baseTextureConfig = BASE_TE
             continue;
         }
         if (tileId < 0 || tileId > TEXTURE_LOOKUP_MAX_TILE_ID) {
-            skippedOutOfRange.push({ tileName, tileId });
+            skippedOutOfRange.push({ tileName, tileId, source: 'textures' });
             continue;
         }
 
+        const catalogTile = catalogTiles.find((tile) => tile.id === tileId || tile.name === tileName);
         let entry = config.find((candidate) => candidate?.id === tileId);
         if (!entry) {
-            entry = createAuthoredTextureEntry(tileId, tileName, tileOverride, seasons);
+            entry = createAuthoredTextureEntry(tileId, tileName, tileOverride, seasons, catalogTile?.category ?? '');
             config.push(entry);
         } else {
-            entry.name = entry.name ?? tileName;
-            if (!entry.textures || typeof entry.textures !== 'object') entry.textures = {};
-            if (!entry.textures.base || typeof entry.textures.base !== 'object') {
-                entry.textures.base = {};
-            }
+            entry = ensureTextureEntry(config, tileId, tileName, catalogTile?.category ?? '', seasons);
         }
 
         for (const season of seasons) {
@@ -406,7 +503,7 @@ export function buildWorldTextureConfig(rawTextures, baseTextureConfig = BASE_TE
 
     if (skippedOutOfRange.length > 0) {
         console.warn(
-            `[WorldTextureOverrides] skipped ${skippedOutOfRange.length} texture override(s) with tile IDs outside ` +
+            `[WorldTextureOverrides] skipped ${skippedOutOfRange.length} authored tile texture definition(s) with tile IDs outside ` +
             `the 0-${TEXTURE_LOOKUP_MAX_TILE_ID} texture lookup range`,
             skippedOutOfRange
         );
