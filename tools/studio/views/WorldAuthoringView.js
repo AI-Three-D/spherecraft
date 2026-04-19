@@ -525,6 +525,71 @@ export class WorldAuthoringView extends WorldViewBase {
 
     // ── Authored tile catalog ────────────────────────────────────────
 
+    _normalizeCatalogName(value, fallback = '') {
+        const normalized = typeof value === 'string'
+            ? value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_')
+            : '';
+        return normalized || fallback;
+    }
+
+    _formatCatalogRanges(ranges = []) {
+        return (Array.isArray(ranges) ? ranges : [])
+            .filter((range) => Array.isArray(range) && range.length >= 2)
+            .map(([low, high]) => {
+                const lo = Math.max(0, Math.trunc(Number(low)));
+                const hi = Math.max(0, Math.trunc(Number(high)));
+                if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+                const a = Math.min(lo, hi);
+                const b = Math.max(lo, hi);
+                return a === b ? `${a}` : `${a}-${b}`;
+            })
+            .filter(Boolean)
+            .join(', ');
+    }
+
+    _parseCatalogRanges(text) {
+        const ranges = [];
+        const parts = String(text ?? '').split(',').map((part) => part.trim()).filter(Boolean);
+        for (const part of parts) {
+            const match = part.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+            if (!match) return null;
+            const a = Math.trunc(Number(match[1]));
+            const b = Math.trunc(Number(match[2] ?? match[1]));
+            if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+            ranges.push([Math.min(a, b), Math.max(a, b)]);
+        }
+        return ranges;
+    }
+
+    _deriveCatalogCategoriesFromTiles(catalog) {
+        const rangesByCategory = new Map();
+        for (const tile of Array.isArray(catalog?.tiles) ? catalog.tiles : []) {
+            const id = Math.trunc(Number(tile?.id));
+            if (!Number.isFinite(id) || id < 0) continue;
+            const category = this._normalizeCatalogName(tile?.category, 'UNMAPPED');
+            if (!rangesByCategory.has(category)) rangesByCategory.set(category, []);
+            rangesByCategory.get(category).push([id, id]);
+        }
+
+        const mergeRanges = (ranges) => {
+            const sorted = ranges.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+            const merged = [];
+            for (const [low, high] of sorted) {
+                const last = merged[merged.length - 1];
+                if (last && low <= last[1] + 1) {
+                    last[1] = Math.max(last[1], high);
+                } else {
+                    merged.push([low, high]);
+                }
+            }
+            return merged;
+        };
+
+        return Array.from(rangesByCategory.entries())
+            .map(([name, ranges]) => ({ name, ranges: mergeRanges(ranges) }))
+            .sort((a, b) => (a.ranges[0]?.[0] ?? 0) - (b.ranges[0]?.[0] ?? 0) || a.name.localeCompare(b.name));
+    }
+
     _ensureTileCatalog(raw = this._raw) {
         if (!raw.biomes) raw.biomes = { biomes: [] };
         if (!raw.biomes.tileCatalog || typeof raw.biomes.tileCatalog !== 'object') {
@@ -568,6 +633,19 @@ export class WorldAuthoringView extends WorldViewBase {
             'Tile IDs remain the compact GPU/material protocol; this catalog owns the editable name-to-ID mapping.';
         body.appendChild(summary);
 
+        if ((runtime.summary?.warningCount ?? 0) > 0) {
+            const warning = document.createElement('div');
+            warning.style.cssText = 'padding:4px 12px 8px; font-size:10px; color:#ffb56b; line-height:1.5;';
+            warning.textContent =
+                `${runtime.summary.warningCount} catalog warning(s): check duplicate tile names/IDs or invalid ranges before regenerating.`;
+            body.appendChild(warning);
+        }
+
+        const tileHead = document.createElement('div');
+        tileHead.className = 'panel-subsection-head';
+        tileHead.textContent = 'Tile refs';
+        body.appendChild(tileHead);
+
         const list = document.createElement('div');
         list.style.cssText = 'max-height:180px; overflow-y:auto; padding:0 8px 4px;';
         body.appendChild(list);
@@ -584,7 +662,9 @@ export class WorldAuthoringView extends WorldViewBase {
             nameInput.value = tile.name ?? '';
             nameInput.title = 'Stable tile name used by biome texture references.';
             nameInput.addEventListener('change', () => {
-                tile.name = nameInput.value.trim().toUpperCase();
+                const fallbackId = Number.isInteger(tile.id) ? tile.id : index;
+                tile.name = this._normalizeCatalogName(nameInput.value, `TILE_${fallbackId}`);
+                nameInput.value = tile.name;
                 this._markBiomeDirty();
                 this._renderBiomeDetail((this._raw?.biomes?.biomes || [])[this._selectedBiomeIdx]);
             });
@@ -611,7 +691,7 @@ export class WorldAuthoringView extends WorldViewBase {
             categoryInput.value = tile.category ?? 'GRASS';
             categoryInput.title = 'Material category used for splat/category blending.';
             categoryInput.addEventListener('change', () => {
-                tile.category = categoryInput.value.trim().toUpperCase();
+                tile.category = this._normalizeCatalogName(categoryInput.value, 'GRASS');
                 this._markBiomeDirty();
             });
 
@@ -644,6 +724,99 @@ export class WorldAuthoringView extends WorldViewBase {
             this._renderTileCatalogSection(raw);
         });
         body.appendChild(addBtn);
+
+        const categoryHead = document.createElement('div');
+        categoryHead.className = 'panel-subsection-head';
+        categoryHead.textContent = 'Category ranges';
+        body.appendChild(categoryHead);
+
+        const categoryHelp = document.createElement('div');
+        categoryHelp.style.cssText = 'padding:2px 12px 6px; font-size:10px; color:var(--text-dim); line-height:1.5;';
+        categoryHelp.textContent = 'Ranges drive GPU category predicates. Use comma-separated entries like "10-29, 66-81".';
+        body.appendChild(categoryHelp);
+
+        const categories = catalog.categories;
+        const categoryList = document.createElement('div');
+        categoryList.style.cssText = 'max-height:150px; overflow-y:auto; padding:0 8px 4px;';
+        body.appendChild(categoryList);
+
+        for (let index = 0; index < categories.length; index++) {
+            const category = categories[index] ?? {};
+            const row = document.createElement('div');
+            row.style.cssText = 'display:grid; grid-template-columns:1fr 1.4fr 24px; gap:4px; align-items:center; padding:2px 0;';
+
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.className = 'param-value-input';
+            nameInput.value = category.name ?? '';
+            nameInput.title = 'Category name used by shader predicates and splat blending.';
+            nameInput.addEventListener('change', () => {
+                category.name = this._normalizeCatalogName(nameInput.value, `CATEGORY_${index + 1}`);
+                this._markBiomeDirty();
+                this._renderTileCatalogSection(raw);
+            });
+
+            const rangesInput = document.createElement('input');
+            rangesInput.type = 'text';
+            rangesInput.className = 'param-value-input';
+            rangesInput.value = this._formatCatalogRanges(category.ranges);
+            rangesInput.title = 'Comma-separated numeric ranges, for example: 10-29, 66-81.';
+            rangesInput.addEventListener('change', () => {
+                const parsed = this._parseCatalogRanges(rangesInput.value);
+                if (!parsed || parsed.length === 0) {
+                    rangesInput.value = this._formatCatalogRanges(category.ranges);
+                    this.toast('Invalid category range; use values like "10-29, 66-81"');
+                    return;
+                }
+                category.ranges = parsed;
+                this._markBiomeDirty();
+                this._renderTileCatalogSection(raw);
+            });
+
+            const remove = document.createElement('button');
+            remove.className = 'studio-btn';
+            remove.textContent = 'x';
+            remove.title = `Remove category "${category.name ?? index}"`;
+            remove.addEventListener('click', () => {
+                categories.splice(index, 1);
+                this._markBiomeDirty();
+                this._renderTileCatalogSection(raw);
+            });
+
+            row.appendChild(nameInput);
+            row.appendChild(rangesInput);
+            row.appendChild(remove);
+            categoryList.appendChild(row);
+        }
+
+        const categoryActions = document.createElement('div');
+        categoryActions.style.cssText = 'display:flex; flex-wrap:wrap; gap:6px; padding:4px 8px 8px;';
+
+        const addCategoryBtn = document.createElement('button');
+        addCategoryBtn.className = 'studio-btn';
+        addCategoryBtn.textContent = '+ Add Category';
+        addCategoryBtn.title = 'Add an explicit category range used by terrain shaders.';
+        addCategoryBtn.addEventListener('click', () => {
+            const nextId = tiles.reduce((maxId, tile) => Number.isInteger(tile?.id) ? Math.max(maxId, tile.id) : maxId, 0) + 1;
+            categories.push({ name: `CATEGORY_${categories.length + 1}`, ranges: [[nextId, nextId]] });
+            this._markBiomeDirty();
+            this._renderTileCatalogSection(raw);
+        });
+
+        const deriveBtn = document.createElement('button');
+        deriveBtn.className = 'studio-btn';
+        deriveBtn.textContent = 'Derive Ranges From Tiles';
+        deriveBtn.title = 'Replace explicit category ranges with merged contiguous ranges inferred from tile refs.';
+        deriveBtn.addEventListener('click', () => {
+            catalog.categories = this._deriveCatalogCategoriesFromTiles(catalog);
+            this._markBiomeDirty();
+            this._renderTileCatalogSection(raw);
+            this.toast('Tile catalog category ranges derived from tile refs');
+        });
+
+        categoryActions.appendChild(addCategoryBtn);
+        categoryActions.appendChild(deriveBtn);
+        body.appendChild(categoryActions);
     }
 
     // ── M2-T2: Biome editor section ─────────────────────────────────
