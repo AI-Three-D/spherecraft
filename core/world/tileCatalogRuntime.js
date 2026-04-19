@@ -1,42 +1,11 @@
-const DEFAULT_CATEGORY_NAME = 'UNMAPPED';
-const MAX_TILE_ID = 65535;
-
-function cloneValue(value) {
-    if (Array.isArray(value)) {
-        return value.map(cloneValue);
-    }
-    if (value && typeof value === 'object') {
-        const out = {};
-        for (const [key, nested] of Object.entries(value)) {
-            out[key] = cloneValue(nested);
-        }
-        return out;
-    }
-    return value;
-}
-
-function clampInt(value, fallback, min = 0, max = MAX_TILE_ID) {
-    const numeric = Number.isFinite(value) ? Math.trunc(value) : fallback;
-    return Math.max(min, Math.min(max, numeric));
-}
-
-function normalizeTileName(value) {
-    if (typeof value !== 'string') return '';
-    return value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
-}
-
-function normalizeCategoryName(value, fallback = DEFAULT_CATEGORY_NAME) {
-    const name = normalizeTileName(value);
-    return name || fallback;
-}
-
-function normalizeRange(range) {
-    if (!Array.isArray(range) || range.length < 2) return null;
-    const low = clampInt(range[0], NaN);
-    const high = clampInt(range[1], NaN);
-    if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
-    return [Math.min(low, high), Math.max(low, high)];
-}
+import {
+    clampCatalogTileId,
+    cloneCatalogValue,
+    mergeCatalogRanges,
+    normalizeCatalogCategoryName,
+    normalizeCatalogName,
+    normalizeCatalogRange,
+} from './tileCatalogUtils.js';
 
 function addRange(categoryRanges, categoryName, range) {
     if (!range) return;
@@ -44,25 +13,6 @@ function addRange(categoryRanges, categoryName, range) {
         categoryRanges.set(categoryName, []);
     }
     categoryRanges.get(categoryName).push(range);
-}
-
-function mergeRanges(ranges) {
-    if (!Array.isArray(ranges) || ranges.length === 0) return [];
-    const sorted = ranges
-        .filter(Boolean)
-        .map(([low, high]) => [low, high])
-        .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-
-    const merged = [];
-    for (const [low, high] of sorted) {
-        const last = merged[merged.length - 1];
-        if (last && low <= last[1] + 1) {
-            last[1] = Math.max(last[1], high);
-        } else {
-            merged.push([low, high]);
-        }
-    }
-    return merged;
 }
 
 function normalizeRawDocument(rawTileCatalog, fallbackDocument) {
@@ -114,8 +64,8 @@ export function buildTileCatalogRuntime(rawTileCatalog = {}, options = {}) {
 
     for (let index = 0; index < rawTiles.length; index++) {
         const source = rawTiles[index] ?? {};
-        const name = normalizeTileName(source.name ?? source.id);
-        const tileId = clampInt(source.tileId ?? source.value ?? source.id, NaN);
+        const name = normalizeCatalogName(source.name ?? source.id);
+        const tileId = clampCatalogTileId(source.tileId ?? source.value ?? source.id, NaN);
         if (!name || !Number.isFinite(tileId)) {
             warnings.invalidTiles.push({ index, name: source.name ?? source.id ?? null, tileId: source.tileId ?? source.id ?? null });
             continue;
@@ -129,7 +79,7 @@ export function buildTileCatalogRuntime(rawTileCatalog = {}, options = {}) {
             continue;
         }
 
-        const category = normalizeCategoryName(source.category);
+        const category = normalizeCatalogCategoryName(source.category);
         const tile = {
             name,
             id: tileId,
@@ -152,17 +102,17 @@ export function buildTileCatalogRuntime(rawTileCatalog = {}, options = {}) {
     const requestedRangesByName = new Map();
     for (let index = 0; index < rawCategories.length; index++) {
         const source = rawCategories[index] ?? {};
-        const name = normalizeCategoryName(source.name ?? source.id ?? `CATEGORY_${index}`);
+        const name = normalizeCatalogCategoryName(source.name ?? source.id ?? `CATEGORY_${index}`);
         if (!categoryOrder.includes(name)) {
             categoryOrder.push(name);
         }
         const ranges = Array.isArray(source.ranges) ? source.ranges : [];
         for (const range of ranges) {
-            const normalized = normalizeRange(range);
+            const normalized = normalizeCatalogRange(range);
             if (normalized) {
                 addRange(requestedRangesByName, name, normalized);
             } else {
-                warnings.invalidRanges.push({ category: name, range: cloneValue(range) });
+                warnings.invalidRanges.push({ category: name, range: cloneCatalogValue(range) });
             }
         }
     }
@@ -177,7 +127,7 @@ export function buildTileCatalogRuntime(rawTileCatalog = {}, options = {}) {
     for (const name of categoryOrder) {
         const requested = requestedRangesByName.get(name) ?? [];
         const inferred = categoryRanges.get(name) ?? [];
-        const ranges = mergeRanges([...requested, ...inferred]);
+        const ranges = mergeCatalogRanges([...requested, ...inferred]);
         if (ranges.length === 0) continue;
         tileCategories.push({
             id: tileCategories.length,

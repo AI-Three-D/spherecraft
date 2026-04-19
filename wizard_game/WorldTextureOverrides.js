@@ -1,5 +1,6 @@
 import { TILE_TYPES as DEFAULT_TILE_TYPES } from '../templates/configs/tileTypes.js';
 import { TEXTURE_CONFIG as BASE_TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
+import { normalizeCatalogName } from '../core/world/tileCatalogUtils.js';
 
 const TEXTURE_LOOKUP_MAX_TILE_ID = 255;
 const DEFAULT_SEASONS = Object.freeze(['Spring', 'Summer', 'Autumn', 'Winter']);
@@ -38,13 +39,6 @@ function cloneValue(value) {
         return result;
     }
     return value;
-}
-
-function normalizeCatalogName(value, fallback = '') {
-    const normalized = typeof value === 'string'
-        ? value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_')
-        : '';
-    return normalized || fallback;
 }
 
 function normalizeNoiseType(type) {
