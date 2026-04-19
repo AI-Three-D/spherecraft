@@ -9,6 +9,7 @@
 import { WorldViewBase } from './WorldViewBase.js';
 import { selectBiome } from '../../../core/world/BiomeScoring.js';
 import { buildTileCatalogRuntime } from '../../../core/world/tileCatalogRuntime.js';
+import { mergeCatalogRanges, normalizeCatalogName } from '../../../core/world/tileCatalogUtils.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const TEXTURE_TILE_ID_MAX = 255;
@@ -526,13 +527,6 @@ export class WorldAuthoringView extends WorldViewBase {
 
     // ── Authored tile catalog ────────────────────────────────────────
 
-    _normalizeCatalogName(value, fallback = '') {
-        const normalized = typeof value === 'string'
-            ? value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_')
-            : '';
-        return normalized || fallback;
-    }
-
     _formatCatalogRanges(ranges = []) {
         return (Array.isArray(ranges) ? ranges : [])
             .filter((range) => Array.isArray(range) && range.length >= 2)
@@ -567,27 +561,13 @@ export class WorldAuthoringView extends WorldViewBase {
         for (const tile of Array.isArray(catalog?.tiles) ? catalog.tiles : []) {
             const id = Math.trunc(Number(tile?.id));
             if (!Number.isFinite(id) || id < 0) continue;
-            const category = this._normalizeCatalogName(tile?.category, 'UNMAPPED');
+            const category = normalizeCatalogName(tile?.category, 'UNMAPPED');
             if (!rangesByCategory.has(category)) rangesByCategory.set(category, []);
             rangesByCategory.get(category).push([id, id]);
         }
 
-        const mergeRanges = (ranges) => {
-            const sorted = ranges.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-            const merged = [];
-            for (const [low, high] of sorted) {
-                const last = merged[merged.length - 1];
-                if (last && low <= last[1] + 1) {
-                    last[1] = Math.max(last[1], high);
-                } else {
-                    merged.push([low, high]);
-                }
-            }
-            return merged;
-        };
-
         return Array.from(rangesByCategory.entries())
-            .map(([name, ranges]) => ({ name, ranges: mergeRanges(ranges) }))
+            .map(([name, ranges]) => ({ name, ranges: mergeCatalogRanges(ranges) }))
             .sort((a, b) => (a.ranges[0]?.[0] ?? 0) - (b.ranges[0]?.[0] ?? 0) || a.name.localeCompare(b.name));
     }
 
@@ -664,7 +644,7 @@ export class WorldAuthoringView extends WorldViewBase {
             nameInput.title = 'Stable tile name used by biome texture references.';
             nameInput.addEventListener('change', () => {
                 const fallbackId = Number.isInteger(tile.id) ? tile.id : index;
-                tile.name = this._normalizeCatalogName(nameInput.value, `TILE_${fallbackId}`);
+                tile.name = normalizeCatalogName(nameInput.value, `TILE_${fallbackId}`);
                 nameInput.value = tile.name;
                 this._markBiomeDirty();
                 this._renderBiomeDetail((this._raw?.biomes?.biomes || [])[this._selectedBiomeIdx]);
@@ -693,7 +673,7 @@ export class WorldAuthoringView extends WorldViewBase {
             categoryInput.value = tile.category ?? 'GRASS';
             categoryInput.title = 'Material category used for splat/category blending.';
             categoryInput.addEventListener('change', () => {
-                tile.category = this._normalizeCatalogName(categoryInput.value, 'GRASS');
+                tile.category = normalizeCatalogName(categoryInput.value, 'GRASS');
                 this._markBiomeDirty();
             });
 
@@ -753,7 +733,7 @@ export class WorldAuthoringView extends WorldViewBase {
             nameInput.value = category.name ?? '';
             nameInput.title = 'Category name used by shader predicates and splat blending.';
             nameInput.addEventListener('change', () => {
-                category.name = this._normalizeCatalogName(nameInput.value, `CATEGORY_${index + 1}`);
+                category.name = normalizeCatalogName(nameInput.value, `CATEGORY_${index + 1}`);
                 this._markBiomeDirty();
                 this._renderTileCatalogSection(raw);
             });
