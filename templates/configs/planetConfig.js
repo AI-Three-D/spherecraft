@@ -26,6 +26,7 @@ function cloneWorldAuthoringRuntime(value) {
     },
     warnings: {
       unresolvedTileRefs: Array.isArray(warnings.unresolvedTileRefs) ? warnings.unresolvedTileRefs.slice() : [],
+      outOfTextureRangeTileRefs: Array.isArray(warnings.outOfTextureRangeTileRefs) ? warnings.outOfTextureRangeTileRefs.slice() : [],
       unknownAssetBiomeRefs: Array.isArray(warnings.unknownAssetBiomeRefs) ? warnings.unknownAssetBiomeRefs.slice() : [],
       tileCatalog: warnings.tileCatalog && typeof warnings.tileCatalog === 'object' ? { ...warnings.tileCatalog } : {},
     },

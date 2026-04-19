@@ -3048,6 +3048,13 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             Logger.info(
                 `[BiomeRuntime] Authored biome regional noise modes: ${activeNoiseModes.join(', ')}`
             );
+            if (packed.outOfTextureRangePackedTileCount > 0) {
+                Logger.warn(
+                    `[BiomeRuntime] Packed ${packed.outOfTextureRangePackedTileCount} biome tile ` +
+                    `ref(s) above the current texture lookup max ` +
+                    `${packed.textureLookupMaxTileId}; affected tile IDs may not render correctly`
+                );
+            }
             if (packed.treeWeightedBiomeCount > 0) {
                 Logger.info(
                     `[BiomeRuntime] Authored tree eligibility weights active for ` +
