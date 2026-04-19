@@ -173,6 +173,33 @@ export const PARTICLE_CONFIG = {
         spawnWeight: 1.0,
     },
 
+    [PARTICLE_TYPES.LEAF]: {
+        blend: 'alpha',
+        lifetime: { min: 4.0, max: 8.0 },
+        size: { start: 0.15, end: 0.08 },
+        velocity: {
+            x: [-0.3, 0.3],
+            y: [-0.15, -0.05],
+            z: [-0.3, 0.3],
+        },
+        gravity: 0.5,
+        drag: 3.0,
+        upwardBias: 0.15,
+        lateralNoise: 1.5,
+        spawnOffset: {
+            radius: 3.0,
+            heightMin: 2.0,
+            heightMax: 6.0,
+        },
+        colorStart: [0.55, 0.72, 0.18, 0.95],
+        colorMid:   [0.75, 0.55, 0.12, 0.90],
+        colorEnd:   [0.50, 0.30, 0.08, 0.0],
+        emissive: 1.0,
+        bloomEnabled: false,
+        flags: { stretchAlongVel: false, rotate: true, leaf: true },
+        spawnWeight: 1.0,
+    },
+
     [PARTICLE_TYPES.FIREFLY]: {
         blend: 'additive',
         lifetime: { min: 0.025, max: 0.045 }, // just enough to read as continuous without visible streaking
@@ -238,6 +265,20 @@ export const PARTICLE_EMITTER_PRESETS = {
         lodNearDistance: 8.0,
         lodFarDistance: 18.0,
         lodMinScale: 0.0,
+    },
+
+    leaf_fall: {
+        types: [
+            PARTICLE_TYPES.LEAF,
+        ],
+        weights: {
+            [PARTICLE_TYPES.LEAF]: 1.0,
+        },
+        spawnBudgetPerFrame: 6,
+        distanceCutoff: 80.0,
+        lodNearDistance: 20.0,
+        lodFarDistance: 60.0,
+        lodMinScale: 0.15,
     },
 
     firefly_swarm: {

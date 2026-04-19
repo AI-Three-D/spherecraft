@@ -86,7 +86,9 @@ struct ParticleGlobals {
     flatWorld:    u32,   // 0 = spherical, 1 = use +Y as local up
     // vec4 #4
     fireflyGlow:  f32,
-    _pad3:        vec3<f32>,
+    windDirX:     f32,
+    windDirY:     f32,
+    windSpeed:    f32,
 };
 
 // Per-emitter spawn parameters, uploaded once per frame into a shared storage
@@ -130,5 +132,6 @@ const FLAG_ADDITIVE:    u32 = 2u;
 const FLAG_STRETCH_VEL: u32 = 4u;
 const FLAG_ROTATE:      u32 = 8u;
 const FLAG_BLOOM:       u32 = 16u;
+const FLAG_LEAF:        u32 = 32u;
 `;
 }

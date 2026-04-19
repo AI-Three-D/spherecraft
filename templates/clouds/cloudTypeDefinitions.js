@@ -72,147 +72,6 @@ export const CloudTypes = {
         description: 'Thin veil, creates halos'
     },
 
-    // === MID CLOUDS ===
-
-    ALTOCUMULUS: {
-        name: 'altocumulus',
-        altitudeMin: 0.25,
-        cauliflower: 0.45, // baseline softer than now
-        altitudeMax: 0.55,
-        densityMultiplier: 0.5,
-        noiseScale: 1.2,              // Medium-sized patches
-        detailScale: 0.6,
-        verticalStretch: 0.4,
-        worleyInfluence: 0.7,         // Cellular, but softer than cirrocumulus
-        edgeSoftness: 0.5,
-        extinction: 0.04,
-        albedo: 0.9,
-        windSpeedMult: 1.2,
-        description: 'White/grey patches, larger than cirrocumulus'
-    },
-
-    ALTOSTRATUS: {
-        name: 'altostratus',
-        altitudeMin: 0.2,
-        altitudeMax: 0.5,
-        densityMultiplier: 0.6,
-        noiseScale: 4.0,              // Large uniform layer
-        detailScale: 1.5,
-        verticalStretch: 0.25,
-        worleyInfluence: 0.2,
-        edgeSoftness: 0.7,
-        extinction: 0.06,
-        albedo: 0.7,                  // Greyish
-        windSpeedMult: 1.0,
-        description: 'Grey/blue sheet, sun appears watery'
-    },
-
-    // === LOW CLOUDS ===
-
-    STRATOCUMULUS: {
-        name: 'stratocumulus',
-        altitudeMin: 0.05,
-        cauliflower: 0.25, // baseline softer than now
-        altitudeMax: 0.25,
-        densityMultiplier: 0.7,
-        noiseScale: 1.5,
-        detailScale: 0.7,
-        verticalStretch: 0.5,
-        worleyInfluence: 0.6,         // Lumpy patches
-        edgeSoftness: 0.4,
-        extinction: 0.05,
-        albedo: 0.85,
-        windSpeedMult: 0.8,
-        description: 'Lumpy grey/white layer with gaps'
-    },
-
-    STRATUS: {
-        name: 'stratus',
-        altitudeMin: 0.0,
-        altitudeMax: 0.15,
-        densityMultiplier: 0.5,
-        noiseScale: 6.0,              // Very uniform
-        detailScale: 2.0,
-        verticalStretch: 0.2,         // Flat layer
-        worleyInfluence: 0.1,         // Smooth, fog-like
-        edgeSoftness: 0.8,
-        extinction: 0.04,
-        albedo: 0.75,                 // Grey
-        windSpeedMult: 0.6,
-        description: 'Uniform grey layer, fog-like'
-    },
-
-    CUMULUS: {
-        name: 'cumulus',
-        altitudeMin: 0.05,
-        altitudeMax: 0.3,
-
-        noiseScale: 1.0,
-        detailScale: 0.9,
-        verticalStretch: 1.2,         // Taller than wide
-
-        densityMultiplier: 0.15,   // was 0.7
-        extinction: 0.022,         // was 0.035
-        edgeSoftness: 0.90,        // was 0.45
-        worleyInfluence: 0.35,     // was 0.9 (less “one big cell”)
-        cauliflower: 0.8, // baseline softer than now
-        albedo: 1.0,                  // Bright white
-        windSpeedMult: 1.0,
-        description: 'Fluffy fair-weather clouds'
-    },
-
-    CUMULUS_CONGESTUS: {
-        name: 'cumulus_congestus',
-        cauliflower: 0.65, // baseline softer than now
-        altitudeMin: 0.05,
-        altitudeMax: 0.5,
-        densityMultiplier: 0.9,
-        noiseScale: 1.2,
-        detailScale: 0.5,
-        verticalStretch: 2.0,         // Towering
-        worleyInfluence: 0.65,
-        edgeSoftness: 0.4,
-        extinction: 0.05,
-        albedo: 0.95,
-        windSpeedMult: 1.0,
-        description: 'Towering cumulus, may produce showers'
-    },
-
-    // === RAIN/STORM CLOUDS ===
-
-    NIMBOSTRATUS: {
-        name: 'nimbostratus',
-        altitudeMin: 0.0,
-        altitudeMax: 0.4,
-        densityMultiplier: 1.0,
-        noiseScale: 3.0,
-        detailScale: 1.0,
-        verticalStretch: 0.6,
-        worleyInfluence: 0.3,
-        edgeSoftness: 0.5,
-        extinction: 0.12,             // Dark
-        albedo: 0.5,                  // Dark grey
-        windSpeedMult: 0.8,
-        description: 'Thick dark grey rain cloud'
-    },
-
-    CUMULONIMBUS: {
-        name: 'cumulonimbus',
-        altitudeMin: 0.02,
-        cauliflower: 0.85, // baseline softer than now
-        altitudeMax: 0.95,            // Spans almost entire atmosphere
-        densityMultiplier: 1.2,
-        noiseScale: 1.5,
-        detailScale: 0.6,
-        verticalStretch: 3.0,         // Very tall towers
-        worleyInfluence: 0.85,        // Very cellular
-        edgeSoftness: 0.25,
-        extinction: 0.16,             // Very dark base
-        albedo: 0.4,                  // Dark
-        windSpeedMult: 1.2,
-        anvilTop: true,               // Has anvil-shaped top
-        description: 'Towering storm cloud with anvil'
-    }
 };
 
 /**
@@ -224,57 +83,23 @@ export function getCloudTypesForWeather(weather, intensity = 0.5) {
 
     switch (weather) {
         case 'clear':
-            return [
-                { type: CloudTypes.CIRRUS, coverage: 0.05 + i * 0.1 },
-                { type: CloudTypes.CUMULUS, coverage: 0.2 + i * 0.15 }
-            ];
-
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.05 + i * 0.1 }];
         case 'partly_cloudy':
-            return [
-                { type: CloudTypes.CIRRUS, coverage: 0.1 + i * 0.15 },
-                { type: CloudTypes.CUMULUS, coverage: 0.3 + i * 0.2 },
-            ];
-
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.1 + i * 0.15 }];
         case 'cloudy':
-            return [
-                { type: CloudTypes.CIRRUS, coverage: 0.2 + i * 0.2 },
-                { type: CloudTypes.CUMULUS, coverage: 0.3 + i * 0.2 },
-            ];
-
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.2 + i * 0.2 }];
         case 'overcast':
-            return [
-                { type: CloudTypes.CIRRUS, coverage: 0.25 + i * 0.2 },
-                { type: CloudTypes.CUMULUS, coverage: 0.3 + i * 0.2 },
-            ];
-
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.25 + i * 0.2 }];
         case 'rain':
-            return [
-                { type: CloudTypes.CIRRUS, coverage: 0.2 + i * 0.15 },
-                { type: CloudTypes.CUMULUS, coverage: 0.3 + i * 0.2 },
-            ];
-
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.2 + i * 0.15 }];
         case 'storm':
-            return [
-                { type: CloudTypes.CIRRUS, coverage: 0.18 + i * 0.15 },
-                { type: CloudTypes.CUMULUS, coverage: 0.3 + i * 0.2 },
-            ];
-
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.18 + i * 0.15 }];
         case 'foggy':
-            return [
-                { type: CloudTypes.CIRRUS, coverage: 0.1 + i * 0.1 },
-                { type: CloudTypes.CUMULUS, coverage: 0.3 + i * 0.2 },
-            ];
-
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.1 + i * 0.1 }];
         case 'snow':
-            return [
-                { type: CloudTypes.CIRRUS, coverage: 0.18 + i * 0.15 },
-                { type: CloudTypes.CUMULUS, coverage: 0.3 + i * 0.2 },
-            ];
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.18 + i * 0.15 }];
         default:
-            return [
-                { type: CloudTypes.CUMULUS, coverage: 0.35 },
-                { type: CloudTypes.CIRRUS, coverage: 0.45 }
-            ];
+            return [{ type: CloudTypes.CIRRUS, coverage: 0.25 }];
     }
 }
 

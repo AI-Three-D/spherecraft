@@ -93,8 +93,10 @@ export class Frontend {
         this._lastDeltaTime = 0;
 
         this.particleSystem = null;
+        this.atmoBankSystem = null;
         this.postProcessing = null;
         this.heatHazeEmitter = null;
+        this._currentEnvironmentState = null;
     }
 
     getBackend() {
@@ -342,8 +344,11 @@ export class Frontend {
             Logger.warn(`[Frontend] GPU quadtree init failed: ${error?.message || error}`);
             this.quadtreeTileManager = null;
             this.quadtreeTerrainRenderer = null;
-        }    
+        }
 
+        if (this.atmoBankSystem && this.quadtreeTileManager?.tileStreamer) {
+            this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
+        }
     }
 
     async setTerrainDebugMode(mode) {
@@ -463,10 +468,7 @@ export class Frontend {
         await this.moonRenderer.initialize();
         
         const cloudConfig = {
-            gridDimensions: { x: 32, y: 24, z: 32 },
             cloudAnisotropy: 0.75,
-            volumetricLayerMode: 'lowOnly',
-            cumulusEnabled: false,
             cirrusQuality: 'high'
         };
         const { WebGPUCloudRenderer } = await import('../clouds/webgpuCloudRenderer.js');
@@ -540,6 +542,22 @@ export class Frontend {
             }
             if (this.lightManager) {
                 this.particleSystem.setLightManager(this.lightManager);
+            }
+
+            const { AtmoBankSystem } = await import('../atmosphere-banks/AtmoBankSystem.js');
+            this.atmoBankSystem = new AtmoBankSystem({
+                device: this.backend.device,
+                backend: this.backend,
+                colorFormat: HDR_FORMAT,
+                depthFormat: 'depth24plus',
+            });
+            await this.atmoBankSystem.initialize();
+            if (this.quadtreeTileManager?.tileStreamer) {
+                this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
+                Logger.info('[AtmoBank] GPU tile streamer linked');
+            }
+            if (typeof window !== 'undefined') {
+                window.atmoBankDiag = () => this.atmoBankSystem?.getDiagnostics?.() ?? null;
             }
         }
 
@@ -625,7 +643,7 @@ async loadGLB(url, options = {}) {
 _preparePerFrameLightingAndParticles(encoder) {
     // 1) Let particles update their attached point lights first.
     if (this.particleSystem) {
-        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
+        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0, this._currentEnvironmentState);
     }
 
     // 2) Upload the latest light list after particle lights have moved/flickered.
@@ -731,9 +749,10 @@ updateLighting(starSystem) {
 
 
     async render(gameState, environmentState, deltaTime, planetConfig, sphericalMapper, starSystem) {
-        
+
         if (!this.textureManager?.loaded ) return;
         this._lastDeltaTime = Number.isFinite(deltaTime) ? deltaTime : 0;
+        this._currentEnvironmentState = environmentState;
         
         if (!this._renderDiagLastWall) this._renderDiagLastWall = performance.now();
         if (!this._renderDiagCount) this._renderDiagCount = 0;
@@ -874,7 +893,9 @@ updateLighting(starSystem) {
             );
         }
 
-        if (this.genericMeshRenderer) {
+        // GPU-quadtree path renders generic meshes INSIDE renderTerrain so
+        // they share the terrain render pass. Avoid a double draw here.
+        if (this.genericMeshRenderer && !this.isGPUQuadtreeActive()) {
             this.genericMeshRenderer.update(this.camera.position, deltaTime);
             this.genericMeshRenderer.render(
                 this.camera.matrixWorldInverse,
@@ -885,6 +906,14 @@ updateLighting(starSystem) {
         if (this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds) {
             this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
             this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
+
+            if (this.atmoBankSystem && this.cloudRenderer.noiseGenerator) {
+                const ng = this.cloudRenderer.noiseGenerator;
+                this.atmoBankSystem.setNoiseTextures(
+                    ng.getBaseTextureView(),
+                    ng.getDetailTextureView()
+                );
+            }
         }
 
         if (postEffectsActive) {
@@ -1021,6 +1050,31 @@ updateLighting(starSystem) {
         }*/
     }
 
+    _renderAtmoBanksDepthReadOnly(commandEncoder) {
+        if (!this.atmoBankSystem || !this.postProcessing) return;
+
+        const colorView = this.postProcessing.hdrTextureView;
+        const depthView = this.postProcessing.depthTextureView;
+        if (!colorView || !depthView) return;
+
+        const pass = commandEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: colorView,
+                loadOp: 'load',
+                storeOp: 'store',
+            }],
+            depthStencilAttachment: {
+                view: depthView,
+                depthReadOnly: true,
+            },
+        });
+
+        const vp = this.backend._viewport;
+        pass.setViewport(vp.x, vp.y, vp.width, vp.height, 0, 1);
+        this.atmoBankSystem.render(pass);
+        pass.end();
+    }
+
     renderTerrain() {
         const useGPUQuadtree = this.isGPUQuadtreeActive();
 
@@ -1094,12 +1148,35 @@ updateLighting(starSystem) {
                     this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
                 }
 
+                // Generic meshes (game-specific primitive actors like the
+                // platform_game ball and cloud platforms) must render in
+                // the same render pass as terrain and assets, otherwise
+                // they fall outside the active color/depth attachment in
+                // GPU-quadtree mode.
+                if (this.genericMeshRenderer) {
+                    this.genericMeshRenderer.update(this.camera.position, this._lastDeltaTime || 0);
+                    this.genericMeshRenderer.render(viewMatrix, projectionMatrix);
+                }
+
                 // Particles draw after opaque terrain + assets + skinned meshes,
                 // still inside the main color render pass (before post-processing).
                 if (this.particleSystem && this.backend._renderPassEncoder) {
                     this.particleSystem.render(this.backend._renderPassEncoder);
                 }
-     
+
+                if (this.atmoBankSystem) {
+                    this.backend.endRenderPassForCompute();
+                    const abEnc = this.backend.getCommandEncoder();
+                    this.atmoBankSystem.update(
+                        abEnc, this.camera, this._lastDeltaTime || 0,
+                        this._currentEnvironmentState, this.planetConfig,
+                        this.lightingController, this.uniformManager
+                    );
+                    this.atmoBankSystem.setDepthTexture(this.postProcessing?.depthTextureView);
+                    this._renderAtmoBanksDepthReadOnly(abEnc);
+                    this.backend.resumeRenderPass();
+                }
+
             }
             return;
         }
@@ -1167,6 +1244,10 @@ this.skinnedMeshRenderer = null;
         if (this.particleSystem) {
             this.particleSystem.dispose();
             this.particleSystem = null;
+        }
+        if (this.atmoBankSystem) {
+            this.atmoBankSystem.dispose();
+            this.atmoBankSystem = null;
         }
         this.lightManager.cleanup();
         this.shadowRenderer.cleanup();
