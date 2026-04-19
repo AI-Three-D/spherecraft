@@ -19,6 +19,13 @@ const DEFAULT_TEXTURE_DIALOG_LAYER = Object.freeze({
     blendWeight: 0.5,
     layers: [{ type: 'fbm', scale: 1.0, amplitude: 1.0, seedOffset: 0 }],
 });
+const BIOME_SIGNAL_VALUE_RANGES = Object.freeze({
+    // Elevation bands may include below-sea-level terrain; other authored signals are normalized.
+    elevation: Object.freeze({ min: -1, max: 1, step: 0.01, fallbackMin: 0, fallbackMax: 1 }),
+    humidity: Object.freeze({ min: 0, max: 1, step: 0.01, fallbackMin: 0, fallbackMax: 1 }),
+    temperature: Object.freeze({ min: 0, max: 1, step: 0.01, fallbackMin: 0, fallbackMax: 1 }),
+    slope: Object.freeze({ min: 0, max: 1, step: 0.01, fallbackMin: 0, fallbackMax: 1 }),
+});
 
 function clampTextureDialogBlend(value, fallback = 0.5) {
     const numeric = Number.isFinite(value) ? value : fallback;
@@ -970,8 +977,32 @@ export class WorldAuthoringView extends WorldViewBase {
             this._markBiomeDirty();
         };
 
-        this._addBiomeSlider(container, 'Min', 0, 1, 0.01, rule.min ?? 0, `Minimum ${signalName} value for this biome`, (v) => set('min', v));
-        this._addBiomeSlider(container, 'Max', 0, 1, 0.01, rule.max ?? 1, `Maximum ${signalName} value for this biome`, (v) => set('max', v));
+        const valueRange = BIOME_SIGNAL_VALUE_RANGES[signalName] ?? BIOME_SIGNAL_VALUE_RANGES.humidity;
+        const ruleMin = Number.isFinite(rule.min) ? rule.min : valueRange.fallbackMin;
+        const ruleMax = Number.isFinite(rule.max) ? rule.max : valueRange.fallbackMax;
+        const isUnboundedSignal = signalName === 'elevation';
+        const editorMin = isUnboundedSignal ? Math.min(valueRange.min, ruleMin, ruleMax) : valueRange.min;
+        const editorMax = isUnboundedSignal ? Math.max(valueRange.max, ruleMin, ruleMax) : valueRange.max;
+        this._addBiomeSlider(
+            container,
+            'Min',
+            editorMin,
+            editorMax,
+            valueRange.step,
+            ruleMin,
+            `Minimum ${signalName} value for this biome`,
+            (v) => set('min', v)
+        );
+        this._addBiomeSlider(
+            container,
+            'Max',
+            editorMin,
+            editorMax,
+            valueRange.step,
+            ruleMax,
+            `Maximum ${signalName} value for this biome`,
+            (v) => set('max', v)
+        );
         this._addBiomeSlider(container, 'Transition', 0, 0.5, 0.01, rule.transitionWidth ?? 0.1, 'Soft edge transition width', (v) => set('transitionWidth', v));
         this._addBiomeDropdown(container, 'Preference', ['low', 'mid', 'high'], rule.preference || 'mid',
             'Linear preference within the valid band', (v) => set('preference', v));
