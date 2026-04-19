@@ -12,7 +12,6 @@ import { createAdvancedTerrainComputeShader } from './shaders/webgpu/advancedTer
 const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
 const SPLAT_STEP_LOG_TAG = '[SplatStep]';
 const SPLAT_STEP_PREFIX = `${TERRAIN_STEP_LOG_TAG} ${SPLAT_STEP_LOG_TAG}`;
-const DEFAULT_GPU_BIOME_FALLBACK_TILE_ID = 10;
 
 export class WebGPUTerrainGenerator {
     constructor(device, seed, chunkSize, macroConfig, splatConfig, textureCache, options = {}) {
@@ -3023,7 +3022,6 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             this.seed,
             {
                 maxBiomes: this.maxGpuBiomes,
-                fallbackTileId: DEFAULT_GPU_BIOME_FALLBACK_TILE_ID,
             }
         );
 
@@ -3041,7 +3039,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             ));
             Logger.info(
                 '[BiomeRuntime] Terrain compute is using authored biome selection ' +
-                'with legacy tile-catalog fallback'
+                `with tile-catalog fallback tile ${packed.fallbackTileId}`
             );
             Logger.info(
                 `[BiomeRuntime] Authored biome stochasticity is sampling metric space ` +
