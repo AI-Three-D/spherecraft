@@ -1843,6 +1843,8 @@ export class WorldAuthoringView extends WorldViewBase {
         let html = '';
         if (biomeResult.biome) {
             html += `<div class="diag-biome">${biomeResult.biome.displayName}</div>`;
+        } else if (biomeResult.fallback) {
+            html += '<div class="diag-biome">No authored biome match</div>';
         }
 
         html += `<div class="diag-row"><span class="diag-label">Elevation</span><span class="diag-value">${sigs.elevation.toFixed(3)}</span></div>`;
