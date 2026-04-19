@@ -1,4 +1,4 @@
-import { TILE_TYPES } from '../templates/configs/tileTypes.js';
+import { TILE_TYPES as DEFAULT_TILE_TYPES } from '../templates/configs/tileTypes.js';
 import { TEXTURE_CONFIG as BASE_TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 
 function cloneValue(value) {
@@ -311,15 +311,18 @@ function buildOverrideVariant(tileId, levelKey, override = {}) {
     return variant;
 }
 
-export function buildWorldTextureConfig(rawTextures, baseTextureConfig = BASE_TEXTURE_CONFIG) {
+export function buildWorldTextureConfig(rawTextures, baseTextureConfig = BASE_TEXTURE_CONFIG, options = {}) {
     const config = cloneValue(baseTextureConfig);
+    const tileTypes = options.tileTypes && typeof options.tileTypes === 'object'
+        ? options.tileTypes
+        : DEFAULT_TILE_TYPES;
     const overrides = rawTextures?.overrides;
     if (!overrides || typeof overrides !== 'object') {
         return config;
     }
 
     for (const [tileName, tileOverride] of Object.entries(overrides)) {
-        const tileId = TILE_TYPES[tileName];
+        const tileId = tileTypes[tileName];
         if (!Number.isInteger(tileId) || !tileOverride || typeof tileOverride !== 'object') {
             continue;
         }

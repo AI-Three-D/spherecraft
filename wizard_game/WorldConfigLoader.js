@@ -18,8 +18,20 @@
 
 import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
 import { buildWorldTextureConfig } from './WorldTextureOverrides.js';
-import { TILE_TYPES } from '../templates/configs/tileTypes.js';
+import { DEFAULT_TILE_CATALOG } from '../templates/configs/defaultTileCatalog.js';
 import { buildWorldAuthoringRuntime } from '../core/world/biomeRuntime.js';
+
+function cloneJSONValue(value) {
+    if (Array.isArray(value)) {
+        return value.map(cloneJSONValue);
+    }
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [key, nested] of Object.entries(value)) out[key] = cloneJSONValue(nested);
+        return out;
+    }
+    return value;
+}
 
 export class WorldConfigLoader {
     /**
@@ -44,6 +56,10 @@ export class WorldConfigLoader {
             this._fetchJSON('assets.json').catch(() => ({ profiles: [] })),
         ]);
 
+        if (!biomes.tileCatalog) {
+            biomes.tileCatalog = cloneJSONValue(DEFAULT_TILE_CATALOG);
+        }
+
         this.raw = { terrain, planet, postprocessing, engine, textures, biomes, assets };
 
         const engineConfig   = this._buildEngineConfig(terrain, planet, engine);
@@ -54,19 +70,27 @@ export class WorldConfigLoader {
         const shouldLogWorldAuthoring = !!summary && (
             summary.biomeCount > 0 ||
             summary.assetProfileCount > 0 ||
+            summary.tileCatalogTileCount > 0 ||
             summary.unresolvedTileRefCount > 0 ||
-            summary.unknownAssetBiomeRefCount > 0
+            summary.unknownAssetBiomeRefCount > 0 ||
+            summary.tileCatalogWarningCount > 0
         );
         if (shouldLogWorldAuthoring) {
             console.info(
                 `[WorldConfigLoader] world authoring ready: ` +
-                `${summary.biomeCount} biomes, ${summary.assetProfileCount} asset profiles`
+                `${summary.biomeCount} biomes, ${summary.assetProfileCount} asset profiles, ` +
+                `${summary.tileCatalogTileCount ?? 0} tile refs`
             );
-            if (summary.unresolvedTileRefCount > 0 || summary.unknownAssetBiomeRefCount > 0) {
+            if (
+                summary.unresolvedTileRefCount > 0 ||
+                summary.unknownAssetBiomeRefCount > 0 ||
+                summary.tileCatalogWarningCount > 0
+            ) {
                 console.warn(
                     `[WorldConfigLoader] authoring warnings: ` +
                     `${summary.unresolvedTileRefCount} unresolved tile refs, ` +
-                    `${summary.unknownAssetBiomeRefCount} unknown asset biome refs`
+                    `${summary.unknownAssetBiomeRefCount} unknown asset biome refs, ` +
+                    `${summary.tileCatalogWarningCount ?? 0} tile catalog warnings`
                 );
             }
         }
@@ -151,12 +175,17 @@ export class WorldConfigLoader {
         const activePlanet = base.planets[0];
         if (!activePlanet) return base;
 
+        if (biomes && typeof biomes === 'object' && !biomes.tileCatalog) {
+            biomes.tileCatalog = cloneJSONValue(DEFAULT_TILE_CATALOG);
+        }
+
         const worldAuthoring = buildWorldAuthoringRuntime(
             biomes ?? { biomes: [] },
             assets ?? { profiles: [] },
-            { tileTypes: TILE_TYPES }
+            { tileCatalog: biomes?.tileCatalog ?? DEFAULT_TILE_CATALOG }
         );
         activePlanet.worldAuthoring = worldAuthoring;
+        activePlanet.tileCatalog = worldAuthoring.tileCatalog;
         activePlanet.biomeDefinitions = worldAuthoring.biomes;
         activePlanet.assetProfiles = worldAuthoring.assetProfiles;
 
@@ -188,7 +217,11 @@ export class WorldConfigLoader {
             }
         }
 
-        activePlanet.atlasConfig = buildWorldTextureConfig(textures, activePlanet.atlasConfig);
+        activePlanet.atlasConfig = buildWorldTextureConfig(
+            textures,
+            activePlanet.atlasConfig,
+            { tileTypes: worldAuthoring.tileCatalog?.tileTypes }
+        );
 
         // ── Time / spawn ─────────────────────────────────────────────────
         if (planet?.time) {

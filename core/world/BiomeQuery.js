@@ -3,7 +3,7 @@
  * at an arbitrary world-space position using resident quadtree tile textures.
  *
  * This is a general-purpose utility: given a 3D position on the planet
- * surface, it returns the TILE_TYPES integer plus the generated biome
+ * surface, it returns the tile-catalog integer plus the generated biome
  * selection signals already baked into the live tile set.
  *
  * Usage:

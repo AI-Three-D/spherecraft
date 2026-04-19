@@ -3028,7 +3028,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             ));
             Logger.info(
                 '[BiomeRuntime] Terrain compute is using authored biome selection ' +
-                'with legacy TILE_TYPES fallback'
+                'with legacy tile-catalog fallback'
             );
             Logger.info(
                 `[BiomeRuntime] Authored biome stochasticity is sampling metric space ` +

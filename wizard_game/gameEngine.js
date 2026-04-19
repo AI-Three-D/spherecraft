@@ -34,6 +34,7 @@ import {
 import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 import { NightSkyGameConfig, getNightSkyDetailPreset, NightSkyDetailLevel } from '../templates/configs/nightSkyConfig.js';
 import { TILE_TYPES, TILE_CATEGORIES, NUM_TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../templates/configs/tileTypes.js';
+import { createTerrainThemeForPlanet } from './TerrainThemeFactory.js';
 import { createTerrainCommon } from '../templates/terrain-shaders/terrainCommon.wgsl.js';
 import { createSurfaceCommon } from '../templates/terrain-shaders/surfaceCommon.wgsl.js';
 import { createTerrainFeatureContinents } from '../templates/terrain-shaders/features/featureContinents.wgsl.js';
@@ -488,19 +489,23 @@ export class GameEngine {
             ...planetOptions,
             engineConfig: this.engineConfig
         });
+        this.terrainTheme = createTerrainThemeForPlanet(TERRAIN_THEME, this.planetConfig);
 
         const worldAuthoringSummary = this.planetConfig?.worldAuthoring?.summary;
         const shouldLogWorldAuthoring = !!worldAuthoringSummary && (
             worldAuthoringSummary.biomeCount > 0 ||
             worldAuthoringSummary.assetProfileCount > 0 ||
+            worldAuthoringSummary.tileCatalogTileCount > 0 ||
             worldAuthoringSummary.unresolvedTileRefCount > 0 ||
-            worldAuthoringSummary.unknownAssetBiomeRefCount > 0
+            worldAuthoringSummary.unknownAssetBiomeRefCount > 0 ||
+            worldAuthoringSummary.tileCatalogWarningCount > 0
         );
         if (shouldLogWorldAuthoring) {
             Logger.info(
                 `[GameEngine] Planet "${this.planetConfig.name}" authoring: ` +
                 `${worldAuthoringSummary.biomeCount} biomes, ` +
-                `${worldAuthoringSummary.assetProfileCount} asset profiles`
+                `${worldAuthoringSummary.assetProfileCount} asset profiles, ` +
+                `${worldAuthoringSummary.tileCatalogTileCount ?? 0} tile refs`
             );
         }
 
@@ -544,7 +549,7 @@ export class GameEngine {
             gpuQuadtree: this.engineConfig.gpuQuadtree,
             streamerTheme: STREAMER_THEME,
             nightSkyTheme: NIGHT_SKY_THEME,
-            terrainTheme: TERRAIN_THEME,
+            terrainTheme: this.terrainTheme,
         });
         await this.renderer.initialize(this.planetConfig, this.sphericalMapper, {
             weatherConfig: {
@@ -654,7 +659,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.textureCache,
             {
                 planetConfig: this.planetConfig,
-                terrainTheme: TERRAIN_THEME,
+                terrainTheme: this.terrainTheme,
             }
 
         );
