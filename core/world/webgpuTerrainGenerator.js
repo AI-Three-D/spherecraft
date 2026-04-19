@@ -507,6 +507,7 @@ export class WebGPUTerrainGenerator {
                     { binding: 1, resource: paddedTileMap.createView() }
                 ]
             }));
+            this._setTerrainBiomeBindGroup(pass);
             pass.dispatchWorkgroups(
                 Math.ceil(paddedSize / 8),
                 Math.ceil(paddedSize / 8)
