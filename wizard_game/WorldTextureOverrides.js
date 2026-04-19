@@ -1,8 +1,8 @@
 import { TILE_TYPES as DEFAULT_TILE_TYPES } from '../templates/configs/tileTypes.js';
 import { TEXTURE_CONFIG as BASE_TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
+import { TEXTURE_LOOKUP_MAX_TILE_ID } from '../core/texture/tileTextureLimits.js';
 import { normalizeCatalogName } from '../core/world/tileCatalogUtils.js';
 
-const TEXTURE_LOOKUP_MAX_TILE_ID = 255;
 const DEFAULT_SEASONS = Object.freeze(['Spring', 'Summer', 'Autumn', 'Winter']);
 const DEFAULT_AUTHORED_TEXTURE_LAYER = Object.freeze({
     baseColor: '#808080',
