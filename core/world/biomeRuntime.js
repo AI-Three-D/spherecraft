@@ -1,5 +1,27 @@
 import { computeBiomeTreeWeights } from './biomeAuthoringDerived.js';
 import { buildTileCatalogRuntime } from './tileCatalogRuntime.js';
+import { MAX_TILE_ID } from './tileCatalogUtils.js';
+
+const DEFAULT_BIOME_FALLBACK_TILE_ID = 10;
+const BIOME_FALLBACK_TILE_NAMES = Object.freeze([
+    'GRASS_SHORT_1',
+    'GRASS_MEDIUM_1',
+    'GRASS_TALL_1',
+]);
+const BIOME_FALLBACK_CATEGORY_NAMES = Object.freeze([
+    'GRASS',
+    'FOREST',
+    'DESERT',
+    'SNOW',
+    'ROCK',
+    'SAND',
+    'TUNDRA',
+    'DIRT',
+    'MUD',
+    'SWAMP',
+    'VOLCANIC',
+    'WATER',
+]);
 
 const DEFAULT_SIGNAL_RULES = Object.freeze({
     elevation: Object.freeze({
@@ -163,6 +185,52 @@ function resolveTileId(tileTypes, tileName) {
     const trimmed = tileName.trim();
     if (!trimmed) return null;
     return Number.isInteger(tileTypes?.[trimmed]) ? tileTypes[trimmed] : null;
+}
+
+function isValidTileId(value) {
+    return Number.isInteger(value) && value >= 0 && value <= MAX_TILE_ID;
+}
+
+function firstTileIdForCategory(tileCatalog, categoryName) {
+    const categories = Array.isArray(tileCatalog?.tileCategories) ? tileCatalog.tileCategories : [];
+    for (const category of categories) {
+        if (category?.name !== categoryName) continue;
+        const ranges = Array.isArray(category.ranges) ? category.ranges : [];
+        for (const range of ranges) {
+            const tileId = Array.isArray(range) ? range[0] : null;
+            if (isValidTileId(tileId)) return tileId;
+        }
+    }
+    return null;
+}
+
+function firstCatalogTileId(tileCatalog) {
+    const tiles = Array.isArray(tileCatalog?.tiles) ? tileCatalog.tiles : [];
+    for (const tile of tiles) {
+        if (isValidTileId(tile?.id)) return tile.id;
+    }
+    return null;
+}
+
+function resolveBiomeFallbackTileId(worldAuthoring = {}, options = {}) {
+    if (isValidTileId(options.fallbackTileId)) {
+        return options.fallbackTileId;
+    }
+
+    const tileCatalog = worldAuthoring?.tileCatalog;
+    const tileTypes = tileCatalog?.tileTypes && typeof tileCatalog.tileTypes === 'object'
+        ? tileCatalog.tileTypes
+        : {};
+    for (const tileName of BIOME_FALLBACK_TILE_NAMES) {
+        const tileId = tileTypes[tileName];
+        if (isValidTileId(tileId)) return tileId;
+    }
+    for (const categoryName of BIOME_FALLBACK_CATEGORY_NAMES) {
+        const tileId = firstTileIdForCategory(tileCatalog, categoryName);
+        if (isValidTileId(tileId)) return tileId;
+    }
+
+    return firstCatalogTileId(tileCatalog) ?? DEFAULT_BIOME_FALLBACK_TILE_ID;
 }
 
 function pushTileWarning(target, biomeId, layerKey, tileName) {
@@ -343,7 +411,7 @@ export function getPackedBiomeUniformByteSize(maxBiomes = 16) {
 
 export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthoringRuntime(), worldSeed = 0, options = {}) {
     const maxBiomes = Math.max(0, Math.trunc(options.maxBiomes ?? 16));
-    const fallbackTileId = Number.isInteger(options.fallbackTileId) ? options.fallbackTileId : 10;
+    const fallbackTileId = resolveBiomeFallbackTileId(worldAuthoring, options);
     const sourceBiomes = Array.isArray(worldAuthoring?.biomes) ? worldAuthoring.biomes : [];
     const treeWeightsByBiomeId = computeBiomeTreeWeights(
         sourceBiomes,
@@ -384,6 +452,7 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
         data,
         biomeCount,
         maxBiomes,
+        fallbackTileId,
         truncatedBiomeCount: Math.max(0, sourceBiomes.length - biomeCount),
         biomeIds: sourceBiomes.slice(0, biomeCount).map((biome) => biome.id ?? 'unknown'),
         treeWeightedBiomeCount: sourceBiomes
