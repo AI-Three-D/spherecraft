@@ -106,7 +106,7 @@ export class WorldEditorView extends WorldAuthoringView {
     buildTextureConfig(rawTextures, baseTextureConfig = null) {
         const tileCatalog = buildTileCatalogRuntime(this._raw?.biomes?.tileCatalog);
         const options = tileCatalog.summary?.tileCount > 0
-            ? { tileTypes: tileCatalog.tileTypes }
+            ? { tileCatalog }
             : {};
         return baseTextureConfig == null
             ? buildWorldTextureConfig(rawTextures, undefined, options)

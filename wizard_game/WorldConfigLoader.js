@@ -220,7 +220,7 @@ export class WorldConfigLoader {
         activePlanet.atlasConfig = buildWorldTextureConfig(
             textures,
             activePlanet.atlasConfig,
-            { tileTypes: worldAuthoring.tileCatalog?.tileTypes }
+            { tileCatalog: worldAuthoring.tileCatalog }
         );
 
         // ── Time / spawn ─────────────────────────────────────────────────
