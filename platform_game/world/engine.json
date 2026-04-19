@@ -1,0 +1,52 @@
+{
+  "_comment": "Platform_game engine/rendering tuning. Cooler fog, longer aerial fade so distant snow peaks stay white and the planet curvature reads from cloud altitude.",
+  "macroConfig": {
+    "biomeScale":  0.001,
+    "regionScale": 0.0005
+  },
+  "nightSky": {
+    "detailLevel": "low"
+  },
+  "camera": {
+    "fov":       72,
+    "near":      0.1,
+    "far":       200000,
+    "moveSpeed": 80,
+    "maxBoost":  160
+  },
+  "lighting": {
+    "ambient": {
+      "intensityMultiplier":        1.0,
+      "minIntensity":               0.035,
+      "maxIntensity":               0.32,
+      "sunContributionScale":       0.22,
+      "moonContributionScale":      0.05,
+      "moonNormalizationIntensity": 0.15
+    },
+    "sun": {
+      "twilightStartDot": -0.14,
+      "twilightEndDot":   0.04
+    },
+    "fog": {
+      "densityMultiplier":  0.35,
+      "maxBaseDensity":     0.0005,
+      "dayDensityScale":    0.85,
+      "nightDensityScale":  0.42,
+      "minBrightness":      0.06,
+      "maxBrightness":      0.88,
+      "moonBrightnessScale":0.10,
+      "sunTintStrength":    0.06
+    }
+  },
+  "terrainShader": {
+    "aerialFadeStartMeters": 600,
+    "aerialFadeEndMeters":   1600,
+    "ambientScale":          1.3,
+    "sunWrap":               0.18
+  },
+  "gpuQuadtree": {
+    "lodErrorThreshold": 512,
+    "maxVisibleTiles":   2048,
+    "tilePoolSize":      2048
+  }
+}

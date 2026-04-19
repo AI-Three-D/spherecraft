@@ -239,7 +239,9 @@ export class ActorManager {
                 dt,
                 intent.target,
                 a.maxSlope,
-                a.collisionRadius
+                a.collisionRadius,
+                intent.jumpVelocity ?? 0,
+                intent.gravityScale ?? 1
             );
         }
         this._buffers.uploadIntents();
@@ -249,6 +251,9 @@ export class ActorManager {
             maxColliders: this.treeDetailSystem?.maxCloseTrees ?? 0,
             trunkRadiusScale: 0.08,
             trunkRadiusMin: 0.35,
+            gravity: this.engineConfig?.physics?.gravity ?? 9.81,
+            maxPlatforms: this.platformColliderSystem?.maxColliders ?? 0,
+            groundStickSpeed: this.engineConfig?.physics?.groundStickSpeed ?? 0.05,
         });
     }
 
@@ -269,9 +274,16 @@ export class ActorManager {
         const ctBuf  = this.treeDetailSystem?.getCloseTreeBuffer?.();
         const ctcBuf = this.treeDetailSystem?.getCloseTreeCountBuffer?.();
 
+        // Optional platform top-surface colliders. Games that provide
+        // a PlatformColliderSystem expose these buffers; otherwise the
+        // resolver falls back to dummies (zero-count).
+        const pcs = this.platformColliderSystem ?? null;
+        const cpBuf  = pcs?.getColliderBuffer?.() ?? null;
+        const cpcBuf = pcs?.getColliderCountBuffer?.() ?? null;
+
         this._resolver.dispatch(
             encoder, this._actors.length, this._buffers,
-            textures, hashBuf, ctBuf, ctcBuf
+            textures, hashBuf, ctBuf, ctcBuf, cpBuf, cpcBuf
         );
 
         // Dispatch pathfinder if navigation is active
@@ -403,6 +415,10 @@ async createNPC(charDesc, npcTypeId, spawnPos, options = {}) {
                 a.position.y = r.y;
                 a.position.z = r.z;
                 a.grounded = r.grounded;
+                a.vertVel = r.vertVel ?? 0;
+                a.airTime = r.airTime ?? 0;
+                a.altitude = r.altitude ?? 0;
+                a.lastImpactSpeed = r.lastImpactSpeed ?? 0;
 
                 const ms = Math.round(r.moveState);
                 const newState = ms === 1 ? MovementState.WALKING
@@ -804,15 +820,29 @@ async createNPC(charDesc, npcTypeId, spawnPos, options = {}) {
 
 
     _resolveActorIntent(actor, controller, playerCanAct) {
+        // Physics-capable actors carry these on the actor itself; legacy
+        // terrain-snap actors leave them undefined → gravityScale=0.
+        const jumpVelocity = actor?.jumpVelocity ?? 0;
+        const gravityScale = actor?.gravityScale ?? 0;
+
         if (!actor || this._isMovementLocked(actor)) {
-            return { flags: IntentFlags.NONE, target: null, speed: 0 };
+            return { flags: IntentFlags.NONE, target: null, speed: 0,
+                     jumpVelocity, gravityScale };
         }
 
         if (actor === this._playerActor) {
+            let flags = playerCanAct ? (controller?.intentFlags ?? IntentFlags.NONE) : IntentFlags.NONE;
+            // Edge-triggered jump: controller.consumeJumpRequest() clears
+            // the bit once it's been routed to the GPU this frame.
+            if (playerCanAct && controller?.consumeJumpRequest?.()) {
+                flags |= IntentFlags.JUMP;
+            }
             return {
-                flags: playerCanAct ? (controller?.intentFlags ?? IntentFlags.NONE) : IntentFlags.NONE,
+                flags,
                 target: actor.moveTarget,
                 speed: actor.moveSpeed,
+                jumpVelocity,
+                gravityScale,
             };
         }
 
@@ -821,6 +851,8 @@ async createNPC(charDesc, npcTypeId, spawnPos, options = {}) {
             flags,
             target: actor.moveTarget,
             speed: actor.moveSpeed,
+            jumpVelocity,
+            gravityScale,
         };
     }
     _updateAnimationActions(dt) {

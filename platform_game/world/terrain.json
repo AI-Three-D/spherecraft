@@ -1,0 +1,61 @@
+{
+  "_comment": "Terrain generation parameters for platform_game's cold, mountainous planet. Requires world regeneration when changed.",
+  "seed": 31415,
+  "noiseProfile": {
+    "baseBias":      1.0,
+    "mountainBias":  1.4,
+    "hillBias":      1.0,
+    "canyonBias":    1.1,
+    "rareBoost":     1.2,
+    "warpStrength":  1.1,
+    "ridgeSharpness":1.3,
+    "microGain":     1.0
+  },
+  "continents": {
+    "enabled":           true,
+    "count":             3,
+    "averageSize":       0.45,
+    "coastalComplexity": 0.7
+  },
+  "tectonics": {
+    "enabled":              true,
+    "plateCount":           10,
+    "mountainBuildingRate": 2.0,
+    "riftValleyDepth":      0.8
+  },
+  "volcanism": {
+    "enabled":               true,
+    "plateBoundaryActivity": 0.9,
+    "hotspotDensity":        0.00002,
+    "averageHeight":         2200
+  },
+  "erosion": {
+    "enabled":       true,
+    "globalRate":    0.5,
+    "hydraulicRate": 0.6,
+    "thermalRate":   0.5
+  },
+  "impacts": {
+    "enabled":        true,
+    "craterDensity":  0.0002
+  },
+  "water": {
+    "hasOceans":        true,
+    "oceanLevel":       -0.15,
+    "averageOceanDepth":2200,
+    "visualDepthRange": 260,
+    "waveHeight":       1.2
+  },
+  "surface": {
+    "rockCoverageMin": 0.05,
+    "rockCoverageMax": 0.90,
+    "rockSlopeStart":  0.25,
+    "rockSlopeFull":   0.65
+  },
+  "climate": {
+    "enabled":             true,
+    "baseTemperature":     -15,
+    "temperatureGradient": -8.0,
+    "precipitationScale":  14.0
+  }
+}
