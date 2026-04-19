@@ -2,6 +2,9 @@
 
 import { createClimateCommon } from './climateCommon.wgsl.js';
 
+// Local fallback copy of the default tile catalog subset used by this shader
+// generator when no authored catalog is supplied. Keep in sync with
+// templates/configs/defaultTileCatalog.js for legacy terrain compatibility.
 const DEFAULT_TILE_IDS = Object.freeze({
     WATER_1: 0,
     GRASS_SHORT_1: 10,
