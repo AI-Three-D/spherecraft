@@ -125,6 +125,16 @@ fn selectEmitterIndex(claim: u32) -> u32 {
     return selected;
 }
 
+fn remapSpawnClaim(slot: u32, claim: u32) -> u32 {
+    if (globals.totalSpawnBudget <= 1u) {
+        return 0u;
+    }
+
+    let frameSalt = u32(globals.time * 60.0) * 747796405u;
+    let mixed = hash1u(claim ^ (slot * 2246822519u) ^ frameSalt);
+    return mixed % globals.totalSpawnBudget;
+}
+
 fn spawnParticle(slot: u32, claim: u32) -> Particle {
     let emitter = emitters[selectEmitterIndex(claim)];
     let seedBase = slot ^ (claim * 7919u) ^ emitter.rngSeed;
@@ -163,9 +173,7 @@ fn spawnParticle(slot: u32, claim: u32) -> Particle {
     p.flags       = td.typeFlags | FLAG_ALIVE;
 
     if ((p.flags & FLAG_LEAF) != 0u) {
-        let emitterTint = vec3<f32>(emitter.tintR, emitter.tintG, emitter.tintB);
-        let tintStrength = select(0.0, 0.85, max(max(emitterTint.r, emitterTint.g), emitterTint.b) > 0.001);
-        p.color = vec4<f32>(mix(td.colorStart.rgb, emitterTint, tintStrength), td.colorStart.a);
+        p.color = td.colorStart;
     }
 
     if (typeId == ${fireflyTypeId}u) {
@@ -187,6 +195,9 @@ fn spawnParticle(slot: u32, claim: u32) -> Particle {
         // Force long lifetime so we don't have to wait for spawns.
         p.lifetime    = 30.0;
         p.maxLifetime = 30.0;
+    }
+    if (globals.debugMode == 2u && (p.flags & FLAG_LEAF) != 0u) {
+        p.color = vec4<f32>(0.05, 0.95, 1.0, 1.0);
     }
     return p;
 }
@@ -240,13 +251,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Constant upward bias along the local up axis
         p.velocity = p.velocity + up * (td.upwardBias * dt);
 
+        var refAxis = vec3<f32>(0.0, 0.0, 1.0);
+        if (abs(up.z) > 0.9) { refAxis = vec3<f32>(1.0, 0.0, 0.0); }
+        let tangentR = normalize(cross(up, refAxis));
+        let tangentF = cross(tangentR, up);
+
         // Lateral flicker (FLAME) — apply in the plane perpendicular to up.
         if (td.lateralNoise > 0.0) {
-            // Build two perpendicular axes in the tangent plane.
-            var refAxis = vec3<f32>(0.0, 0.0, 1.0);
-            if (abs(up.z) > 0.9) { refAxis = vec3<f32>(1.0, 0.0, 0.0); }
-            let tangentR = normalize(cross(up, refAxis));
-            let tangentF = cross(tangentR, up);
             let noiseSeed = p.ptype * 1664525u + 1013904223u;
             let timeSalt = u32(globals.time * 97.0);
             let nr = rand01(i, timeSalt + 1u, noiseSeed) * 2.0 - 1.0;
@@ -256,13 +267,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Wind-responsive leaf physics: coherent wind drift + sinusoidal flutter.
         if ((p.flags & FLAG_LEAF) != 0u) {
-            let windForce = vec3<f32>(globals.windDirX, 0.0, globals.windDirY) * globals.windSpeed * 0.3;
-            p.velocity = p.velocity + windForce * dt;
             let leafHash = hashToFloat(i * 3571u + 7919u);
-            let flutter = sin(globals.time * 2.3 + leafHash * 6.28) * 0.4;
-            let bob     = sin(globals.time * 1.7 + leafHash * 19.1) * 0.2;
-            p.velocity.x = p.velocity.x + flutter * dt;
-            p.velocity.y = p.velocity.y + bob * dt;
+            var wind2 = vec2<f32>(globals.windDirX, globals.windDirY);
+            if (length(wind2) < 0.001) {
+                wind2 = normalize(vec2<f32>(0.62, 0.38));
+            }
+            let baseWindSpeed = max(globals.windSpeed, 1.4);
+            let gustPeriod = 5.5;
+            let gustPhase = fract(globals.time / gustPeriod + leafHash * 3.7);
+            let gustPulse = smoothstep(0.02, 0.18, gustPhase) * (1.0 - smoothstep(0.18, 0.48, gustPhase));
+            let gustWobble = sin(globals.time * (4.0 + leafHash * 3.0) + leafHash * 19.1);
+            let windForce = vec3<f32>(wind2.x, 0.0, wind2.y) * (baseWindSpeed * (0.16 + gustPulse * 1.25));
+            let crossGust = vec3<f32>(-wind2.y, 0.0, wind2.x) * (gustWobble * gustPulse * 0.85);
+            p.velocity = p.velocity + (windForce + crossGust) * dt;
+
+            let flutter = sin(globals.time * 2.3 + leafHash * 6.28) * 0.16;
+            let bob     = sin(globals.time * 1.7 + leafHash * 19.1) * 0.08;
+            p.velocity = p.velocity + (tangentR * flutter + up * bob) * dt;
         }
 
         p.position = p.position + p.velocity * dt;
@@ -273,9 +294,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         p.size = mix(td.sizeStart, td.sizeEnd, age01);
         let gradientColor = sampleGradient(td, age01);
         if ((p.flags & FLAG_LEAF) != 0u) {
-            // Leaf-anchor emitters provide tree foliage RGB; keep that tint
-            // stable while still using the authored alpha fade.
-            p.color = vec4<f32>(p.color.rgb, gradientColor.a);
+            let warmLeaf = mix(td.colorStart.rgb, gradientColor.rgb, 0.45);
+            let leafAmbient = 0.18 + clamp(globals.leafLight, 0.0, 1.0) * 0.82;
+            p.color = vec4<f32>(warmLeaf * leafAmbient, max(gradientColor.a, 0.72));
         } else {
             p.color = gradientColor;
         }
@@ -299,10 +320,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             p.size  = 2.0;
             p.color = vec4<f32>(1.0, 0.0, 1.0, 1.0);
         }
+        if (globals.debugMode == 2u && (p.flags & FLAG_LEAF) != 0u) {
+            p.color = vec4<f32>(0.05, 0.95, 1.0, 1.0);
+        }
 
-        // Subtle rotation over lifetime for SMOKE.
         if ((p.flags & FLAG_ROTATE) != 0u) {
-            p.rotation = p.rotation + dt * 0.4;
+            if ((p.flags & FLAG_LEAF) != 0u) {
+                let leafSpinHash = hashToFloat(i * 9151u + 1237u);
+                let spinSign = select(-1.0, 1.0, leafSpinHash > 0.5);
+                let gustSpin = 1.0 + abs(sin(globals.time * 1.1 + leafSpinHash * 12.7)) * 2.8;
+                p.rotation = p.rotation + dt * spinSign * (0.8 + gustSpin);
+            } else {
+                p.rotation = p.rotation + dt * 0.4;
+            }
         }
 
         if (p.lifetime > 0.0) {
@@ -314,7 +344,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (globals.totalSpawnBudget > 0u && globals.emitterCount > 0u) {
             let claim = atomicAdd(&spawnScratch.claimed, 1u);
             if (claim < globals.totalSpawnBudget) {
-                p = spawnParticle(i, claim);
+                p = spawnParticle(i, remapSpawnClaim(i, claim));
                 publishLive(i, p.flags);
             } else {
                 killParticle(&p);

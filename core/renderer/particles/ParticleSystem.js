@@ -73,6 +73,7 @@ export class ParticleSystem {
         this._fireflyFollowSideOffset = 0.0;
         this._fireflyFollowHeightOffset = 0.0;
         this._fireflyGlow = 1.0;
+        this._leafLight = 1.0;
         this._fireflyLightIntensity = 0.0;
         this._viewProj = new Matrix4();
         this._loggedEmitterOverflow = false;
@@ -100,6 +101,11 @@ export class ParticleSystem {
         if (this._initialized && this.buffers) {
             this.buffers.uploadTypeDefs(this.authoringRuntime.particleConfig);
         }
+    }
+
+    setDebugMode(mode = 0) {
+        this.debugMode = Math.max(0, Math.trunc(mode) || 0);
+        return this.debugMode;
     }
 
     setLeafAnchorSource({ treeDetailSystem = null, templateLibrary = null, config = null } = {}) {
@@ -253,6 +259,9 @@ export class ParticleSystem {
         emitter._snapSettleFrames = overrides.snapSettleFrames ?? 10;
         emitter._needsActorSnap = !!emitter._snapToActorFn;
         emitter._leafSurfaceOffset = overrides.surfaceOffset || null;
+        emitter._leafHeightOffset = Number.isFinite(overrides.heightOffset)
+            ? overrides.heightOffset
+            : null;
         this._registerEmitter(emitter);
         return emitter;
     }
@@ -361,6 +370,7 @@ export class ParticleSystem {
     // Sets the local daylight-driven glow factor for the firefly swarm.
     // `daylightVisibility` is 0 at local night and 1 in full local daylight.
     setFireflyTimeOfDay(daylightVisibility) {
+        this._leafLight = Math.max(0.0, Math.min(1.0, daylightVisibility ?? 1.0));
         if (this._fireflySwarm) {
             const glow = FireflySwarm.computeTimeOfDayGlow(daylightVisibility);
             this._fireflySwarm.timeOfDayGlow = glow;
@@ -475,9 +485,7 @@ export class ParticleSystem {
                 emitter.position.y = p.y;
                 emitter.position.z = p.z;
 
-                if (emitter._leafSurfaceOffset) {
-                    this._applyTangentOffset(emitter, emitter._leafSurfaceOffset);
-                }
+                this._applyLeafActorOffsets(emitter);
 
                 emitter._needsActorSnap = false;
                 // eslint-disable-next-line no-console
@@ -501,8 +509,33 @@ export class ParticleSystem {
             emitter.position.x = p.x;
             emitter.position.y = p.y;
             emitter.position.z = p.z;
+            this._applyLeafActorOffsets(emitter);
         }
         emitter._postSnapFollowFrames--;
+    }
+
+    _applyLeafActorOffsets(emitter) {
+        if (emitter._leafHeightOffset != null) {
+            this._applyHeightOffset(emitter, emitter._leafHeightOffset);
+        }
+        if (emitter._leafSurfaceOffset) {
+            this._applyTangentOffset(emitter, emitter._leafSurfaceOffset);
+        }
+    }
+
+    _applyHeightOffset(emitter, heightOffset) {
+        if (!Number.isFinite(heightOffset) || heightOffset === 0) return;
+
+        const ox = emitter.position.x - this._planetOrigin.x;
+        const oy = emitter.position.y - this._planetOrigin.y;
+        const oz = emitter.position.z - this._planetOrigin.z;
+        const dist = Math.sqrt(ox * ox + oy * oy + oz * oz);
+        if (dist < 1) return;
+
+        const targetDist = Math.max(1, dist + heightOffset);
+        emitter.position.x = this._planetOrigin.x + (ox / dist) * targetDist;
+        emitter.position.y = this._planetOrigin.y + (oy / dist) * targetDist;
+        emitter.position.z = this._planetOrigin.z + (oz / dist) * targetDist;
     }
 
     _applyTangentOffset(emitter, offset) {
@@ -605,6 +638,36 @@ export class ParticleSystem {
         };
     }
 
+    getDiagnostics() {
+        const leafEmitters = this.emitters.filter((emitter) => emitter.preset === 'leaf_fall');
+        const managedLeafEmitters = leafEmitters.filter((emitter) => emitter._leafAnchorManaged);
+        return {
+            initialized: this._initialized,
+            debugMode: this.debugMode,
+            frameCount: this._frameCount,
+            elapsedTime: this._elapsedTime,
+            emitterCount: this.emitters.length,
+            leafEmitterCount: leafEmitters.length,
+            managedLeafEmitterCount: managedLeafEmitters.length,
+            leafAnchorSourceActive: !!this._leafAnchorSource,
+            leafAnchorRevision: this._leafAnchorRevision,
+            leafAnchorCandidateCount: this._leafAnchorSource?.candidates?.length ?? 0,
+            leafAnchorStats: this._leafAnchorSource?.lastStats ?? null,
+            leafAnchorConfig: this._leafAnchorSource?.config ?? null,
+            leafEmitters: leafEmitters.slice(0, 12).map((emitter) => ({
+                position: {
+                    x: emitter.position.x,
+                    y: emitter.position.y,
+                    z: emitter.position.z,
+                },
+                managed: !!emitter._leafAnchorManaged,
+                distanceCutoff: emitter.distanceCutoff,
+                spawnBudgetPerFrame: emitter.spawnBudgetPerFrame,
+                nextSpawnTime: emitter._nextLeafAnchorSpawnTime ?? null,
+            })),
+        };
+    }
+
     // Runs the sim compute pass once per frame. `commandEncoder` must be a
     // valid WebGPU command encoder outside any active render pass.
     update(commandEncoder, camera, deltaTime, environmentState) {
@@ -614,7 +677,7 @@ export class ParticleSystem {
         this._frameCount++;
 
         if (this._leafAnchorSource) {
-            this._leafAnchorSource.update(commandEncoder, this._elapsedTime);
+            this._leafAnchorSource.update(commandEncoder, this._elapsedTime, camera);
             this._syncLeafAnchorEmitters();
         }
 
@@ -734,6 +797,7 @@ export class ParticleSystem {
             debugMode: this.debugMode,
             flatWorld: 0,
             fireflyGlow: this._fireflyGlow,
+            leafLight: this._leafLight,
             windDirection: [windDir?.x ?? 0, windDir?.y ?? 0],
             windSpeed: windSpd,
         });

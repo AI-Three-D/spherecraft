@@ -2,32 +2,32 @@
   "_comment": "Data-driven particle authoring. Leaf fall samples detailed tree-template anchors at low cadence and emits sparse timed leaves.",
   "particleTypes": {
     "LEAF": {
-      "lifetime": { "min": 4.5, "max": 8.5 },
-      "size": { "start": 0.16, "end": 0.09 },
+      "lifetime": { "min": 10.0, "max": 18.0 },
+      "size": { "start": 0.14, "end": 0.08 },
       "velocity": {
         "x": [-0.20, 0.20],
         "y": [-0.12, -0.035],
         "z": [-0.20, 0.20]
       },
-      "gravity": 0.38,
-      "drag": 3.4,
-      "upwardBias": 0.08,
-      "lateralNoise": 1.05,
+      "gravity": 0.72,
+      "drag": 0.85,
+      "upwardBias": 0.0,
+      "lateralNoise": 0.55,
       "spawnOffset": {
-        "radius": 0.35,
-        "heightMin": -0.08,
-        "heightMax": 0.18
+        "radius": 0.45,
+        "heightMin": -0.15,
+        "heightMax": 0.2
       },
-      "colorStart": [0.34, 0.55, 0.16, 0.94],
-      "colorMid": [0.42, 0.58, 0.18, 0.86],
-      "colorEnd": [0.24, 0.30, 0.10, 0.0],
+      "colorStart": [0.44, 0.70, 0.22, 0.94],
+      "colorMid": [0.36, 0.58, 0.18, 0.86],
+      "colorEnd": [0.20, 0.30, 0.09, 0.0],
       "flags": { "rotate": true, "leaf": true }
     }
   },
   "emitterPresets": {
     "leaf_fall": {
       "spawnBudgetPerFrame": 2,
-      "distanceCutoff": 65.0,
+      "distanceCutoff": 90.0,
       "lodNearDistance": 16.0,
       "lodFarDistance": 50.0,
       "lodMinScale": 0.1
@@ -39,24 +39,20 @@
       "source": "detailed_leaf_anchors",
       "anchorSelection": {
         "source": "detailed_leaf_anchors",
-        "probability": 0.35,
+        "probability": 1.0,
         "maxAnchorsPerTree": 1,
-        "maxEmitters": 3,
-        "maxReadTrees": 64,
+        "maxEmitters": 80,
+        "maxReadTrees": 384,
         "refreshIntervalSeconds": 1.0,
-        "spawnIntervalSeconds": [1.0, 4.0],
+        "spawnIntervalSeconds": [1.0, 10.0],
         "spawnBudgetPerEvent": 1,
-        "distanceCutoff": 65.0,
-        "lodNearDistance": 16.0,
-        "lodFarDistance": 50.0,
+        "distanceCutoff": 90.0,
+        "lodNearDistance": 22.0,
+        "lodFarDistance": 75.0,
         "lodMinScale": 1.0,
         "pending": false
       },
-      "emitters": [
-        { "tangent": 10, "bitangent": 6, "spawnBudgetPerFrame": 2 },
-        { "tangent": -8, "bitangent": 12, "spawnBudgetPerFrame": 1 },
-        { "tangent": 14, "bitangent": -4, "spawnBudgetPerFrame": 1 }
-      ]
+      "emitters": []
     }
   }
 }

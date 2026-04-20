@@ -89,6 +89,11 @@ struct ParticleGlobals {
     windDirX:     f32,
     windDirY:     f32,
     windSpeed:    f32,
+    // vec4 #5
+    leafLight:    f32,
+    _pad5x:       f32,
+    _pad5y:       f32,
+    _pad5z:       f32,
 };
 
 // Per-emitter spawn parameters, uploaded once per frame into a shared storage

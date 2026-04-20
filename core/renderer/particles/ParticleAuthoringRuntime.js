@@ -180,6 +180,9 @@ function normalizeLeafFall(raw = {}) {
             .map((emitter) => ({
                 tangent: clampNumber(emitter?.tangent, 0, -1000, 1000),
                 bitangent: clampNumber(emitter?.bitangent, 0, -1000, 1000),
+                heightOffset: Number.isFinite(emitter?.heightOffset)
+                    ? clampNumber(emitter.heightOffset, 0, -1000, 1000)
+                    : undefined,
                 spawnBudgetPerFrame: Number.isFinite(emitter?.spawnBudgetPerFrame)
                     ? clampInt(emitter.spawnBudgetPerFrame, 1, 0, 128)
                     : undefined,
@@ -196,7 +199,7 @@ function normalizeLeafFall(raw = {}) {
             source: typeof anchorSelection.source === 'string' ? anchorSelection.source : fallback.anchorSelection.source,
             probability: clampNumber(anchorSelection.probability, fallback.anchorSelection.probability, 0, 1),
             maxAnchorsPerTree: clampInt(anchorSelection.maxAnchorsPerTree, fallback.anchorSelection.maxAnchorsPerTree, 0, 1024),
-            maxEmitters: clampInt(anchorSelection.maxEmitters, fallback.anchorSelection.maxEmitters, 0, 12),
+            maxEmitters: clampInt(anchorSelection.maxEmitters, fallback.anchorSelection.maxEmitters, 0, 128),
             maxReadTrees: clampInt(anchorSelection.maxReadTrees, fallback.anchorSelection.maxReadTrees, 1, 512),
             refreshIntervalSeconds: clampNumber(
                 anchorSelection.refreshIntervalSeconds,

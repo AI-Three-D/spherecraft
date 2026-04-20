@@ -47,6 +47,20 @@ fn quadCorner(vid: u32) -> vec2<f32> {
     return c;
 }
 
+fn hash1u(x: u32) -> u32 {
+    var v = x;
+    v = (v ^ 61u) ^ (v >> 16u);
+    v = v + (v << 3u);
+    v = v ^ (v >> 4u);
+    v = v * 0x27d4eb2du;
+    v = v ^ (v >> 15u);
+    return v;
+}
+
+fn hashToFloat(seed: u32) -> f32 {
+    return f32(hash1u(seed) & 0x00FFFFFFu) / f32(0x01000000u);
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32,
            @builtin(instance_index) iid: u32) -> VsOut {
@@ -69,6 +83,21 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     // Default: camera-aligned quad in world space.
     var axisX = globals.cameraRight * (corner.x * p.size);
     var axisY = globals.cameraUp    * (corner.y * p.size);
+
+    if (p.ptype == ${leafTypeId}u) {
+        let h = hashToFloat(slot * 3571u + 7919u);
+        let tumble = sin(globals.time * (2.2 + h * 3.4) + h * 18.85);
+        let edgeOn = 0.34 + abs(tumble) * 0.66;
+        let broadside = 0.82 + (1.0 - abs(tumble)) * 0.32;
+        axisX = axisX * broadside;
+        axisY = axisY * edgeOn;
+
+        let speed = length(p.velocity);
+        if (speed > 0.02) {
+            let driftDir = p.velocity / speed;
+            axisY = mix(axisY, driftDir * (corner.y * p.size * edgeOn), 0.28);
+        }
+    }
 
     // Velocity stretch (FLAME): replace Y axis with velocity direction,
     // elongating the billboard along motion.

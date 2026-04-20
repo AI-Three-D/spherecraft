@@ -1295,18 +1295,6 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             distanceCutoff: this.engineConfig.rendering?.distortion?.sourceCutoffs?.campfire ?? 10.0,
         });
 
-        this.renderer.particleSystem.addFireflySwarm(
-            { x: spawnX + 2, y: spawnY + 2, z: spawnZ + 2 },
-            {
-                swarmSize: 10,
-                getActor: () => actorManager?.playerActor,
-                snapSettleFrames: 30,
-                followSideOffset: 2.5,
-                followHeightOffset: 2.0,
-            }
-        );
-        Logger.info('[GameEngine] Firefly swarm registered near player');
-
         const leafFall = this.gameDataConfig.particleAuthoring?.ambientEmitters?.leafFall;
         const leafEmitters = leafFall?.enabled !== false && Array.isArray(leafFall?.emitters)
             ? leafFall.emitters
@@ -1337,6 +1325,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                         getActor,
                         snapSettleFrames: 30,
                         surfaceOffset: off,
+                        heightOffset: off.heightOffset,
                         spawnBudgetPerFrame: off.spawnBudgetPerFrame,
                     }
                 );
@@ -1348,6 +1337,18 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 `(${leafEmitters.length}, source=${leafFall?.source ?? 'spawn_offsets'})`
             );
         }
+
+        this.renderer.particleSystem.addFireflySwarm(
+            { x: spawnX + 2, y: spawnY + 2, z: spawnZ + 2 },
+            {
+                swarmSize: 10,
+                getActor: () => actorManager?.playerActor,
+                snapSettleFrames: 30,
+                followSideOffset: 2.5,
+                followHeightOffset: 2.0,
+            }
+        );
+        Logger.info('[GameEngine] Firefly swarm registered near player');
     }
 
     /** Register NPC manager. Subclasses can override to skip or plug in their own. */

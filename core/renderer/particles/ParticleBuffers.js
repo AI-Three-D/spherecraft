@@ -22,7 +22,7 @@ import {
 export const PARTICLE_STRIDE      = 64;   // matches WGSL Particle
 export const TYPE_DEF_STRIDE      = 128;  // matches WGSL ParticleTypeDef (8 vec4s)
 export const EMITTER_DEF_STRIDE   = 80;   // matches WGSL EmitterSpawnDef (5 vec4s)
-export const EMITTER_CAPACITY     = 16;
+export const EMITTER_CAPACITY     = 96;
 export const GLOBALS_UBO_SIZE     = 256;  // padded conservatively for uniform binding
 export const INDIRECT_ARGS_SIZE   = 16;   // 4 u32
 export const SPAWN_SCRATCH_SIZE   = 16;   // 1 atomic + pad
@@ -42,6 +42,7 @@ export const GLOBALS_OFFSETS = {
     windDirX:                      132,  // f32 — world-space wind direction X
     windDirY:                      136,  // f32 — world-space wind direction Y (mapped from 2D)
     windSpeed:                     140,  // f32 — wind speed (m/s)
+    leafLight:                     144,  // f32 — direct daylight visibility for non-emissive leaf particles
 };
 
 export class ParticleBuffers {
@@ -304,6 +305,7 @@ export class ParticleBuffers {
         debugMode = 0,
         flatWorld = 0,
         fireflyGlow = 1.0,
+        leafLight = 1.0,
         windDirection = [0, 0],
         windSpeed = 0,
     }) {
@@ -339,6 +341,7 @@ export class ParticleBuffers {
         f32[GLOBALS_OFFSETS.windDirX / 4]   = windDirection[0] ?? 0;
         f32[GLOBALS_OFFSETS.windDirY / 4]   = windDirection[1] ?? 0;
         f32[GLOBALS_OFFSETS.windSpeed / 4]  = windSpeed;
+        f32[GLOBALS_OFFSETS.leafLight / 4]  = leafLight;
 
         this.device.queue.writeBuffer(this.globalsUBO, 0, f32.buffer);
     }
