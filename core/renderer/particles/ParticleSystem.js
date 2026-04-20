@@ -17,11 +17,11 @@ import { ParticleRenderPass } from './ParticleRenderPass.js';
 import { ParticleEmitter } from './ParticleEmitter.js';
 import { PARTICLE_TYPE_CAPACITY } from './ParticleTypes.js';
 import {
-    PARTICLE_CONFIG,
     PARTICLE_GLOBALS,
 } from '../../../templates/configs/particleConfig.js';
 import { LightType } from '../../lighting/lightManager.js';
 import { FireflySwarm } from './FireflySwarm.js';
+import { buildParticleAuthoringRuntime } from './ParticleAuthoringRuntime.js';
 
 export class ParticleSystem {
     constructor({
@@ -31,6 +31,7 @@ export class ParticleSystem {
         depthFormat = 'depth24plus',
         maxParticles = PARTICLE_GLOBALS.maxParticles,
         workgroupSize = PARTICLE_GLOBALS.workgroupSize,
+        particleAuthoring = null,
     }) {
         this.device = device;
         this.backend = backend;
@@ -38,6 +39,7 @@ export class ParticleSystem {
         this.depthFormat = depthFormat;
         this.maxParticles = maxParticles;
         this.workgroupSize = workgroupSize;
+        this.authoringRuntime = buildParticleAuthoringRuntime(particleAuthoring ?? {});
 
         this.buffers = null;
         this.simPass = null;
@@ -95,7 +97,7 @@ export class ParticleSystem {
         this.buffers = new ParticleBuffers(this.device, {
             maxParticles: this.maxParticles,
         });
-        this.buffers.uploadTypeDefs(PARTICLE_CONFIG);
+        this.buffers.uploadTypeDefs(this.authoringRuntime.particleConfig);
 
         this.simPass = new ParticleSimulationPass(this.device, this.buffers, {
             workgroupSize: this.workgroupSize,
@@ -119,6 +121,8 @@ export class ParticleSystem {
             position: worldPos,
             preset: 'campfire',
             overrides,
+            particleConfig: this.authoringRuntime.particleConfig,
+            emitterPresets: this.authoringRuntime.emitterPresets,
         });
         // Deferred placement modes:
         //   snapToActor  — copy `getActor()` position once the actor has been
@@ -180,6 +184,8 @@ export class ParticleSystem {
             position: worldPos,
             preset: 'campfire_coals',
             overrides,
+            particleConfig: this.authoringRuntime.particleConfig,
+            emitterPresets: this.authoringRuntime.emitterPresets,
         });
         emitter._pointLight = null;
         emitter._snapToActorFn = typeof overrides.getActor === 'function'
@@ -196,6 +202,8 @@ export class ParticleSystem {
             position: worldPos,
             preset: 'leaf_fall',
             overrides,
+            particleConfig: this.authoringRuntime.particleConfig,
+            emitterPresets: this.authoringRuntime.emitterPresets,
         });
         emitter._snapToActorFn = typeof overrides.getActor === 'function'
             ? overrides.getActor
@@ -240,6 +248,8 @@ export class ParticleSystem {
                     ...overrides,
                     baseSeed: fireflySeed,
                 },
+                particleConfig: this.authoringRuntime.particleConfig,
+                emitterPresets: this.authoringRuntime.emitterPresets,
             });
             this._registerEmitter(emitter);
             return emitter;

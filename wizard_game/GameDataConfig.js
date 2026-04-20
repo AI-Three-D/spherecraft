@@ -1,5 +1,6 @@
 // js/config/GameDataConfig.js
 import { requireBool, requireInt, requireNumber, requireObject, requireString, requireArray } from '../shared/requireUtil.js';
+import { buildParticleAuthoringRuntime } from '../core/renderer/particles/ParticleAuthoringRuntime.js';
 /**
  * Game data configuration settings.
  * Contains star system + planet/gameplay definitions (planet-specific).
@@ -23,6 +24,7 @@ export class GameDataConfig {
       sunIntensity: requireNumber(starSystemOptions.sunIntensity, 'starSystem.sunIntensity'),
       planets: planetOptions.map((planet, index) => new PlanetDataConfig(planet, index))
     };
+    this.particleAuthoring = buildParticleAuthoringRuntime(options.particleAuthoring ?? {});
 
     // -------------------- Time --------------------
     const time = requireObject(options.time, 'time');

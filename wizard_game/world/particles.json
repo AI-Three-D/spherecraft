@@ -1,0 +1,53 @@
+{
+  "_comment": "Data-driven particle authoring. Leaf emitters are still spawn-relative this increment; anchorSelection documents the next detailed-leaf-anchor source.",
+  "particleTypes": {
+    "LEAF": {
+      "lifetime": { "min": 4.5, "max": 8.5 },
+      "size": { "start": 0.16, "end": 0.09 },
+      "velocity": {
+        "x": [-0.20, 0.20],
+        "y": [-0.12, -0.035],
+        "z": [-0.20, 0.20]
+      },
+      "gravity": 0.38,
+      "drag": 3.4,
+      "upwardBias": 0.08,
+      "lateralNoise": 1.05,
+      "spawnOffset": {
+        "radius": 1.6,
+        "heightMin": 3.0,
+        "heightMax": 5.8
+      },
+      "colorStart": [0.34, 0.55, 0.16, 0.94],
+      "colorMid": [0.42, 0.58, 0.18, 0.86],
+      "colorEnd": [0.24, 0.30, 0.10, 0.0],
+      "flags": { "rotate": true, "leaf": true }
+    }
+  },
+  "emitterPresets": {
+    "leaf_fall": {
+      "spawnBudgetPerFrame": 2,
+      "distanceCutoff": 65.0,
+      "lodNearDistance": 16.0,
+      "lodFarDistance": 50.0,
+      "lodMinScale": 0.1
+    }
+  },
+  "ambientEmitters": {
+    "leafFall": {
+      "enabled": true,
+      "source": "spawn_offsets",
+      "anchorSelection": {
+        "source": "detailed_leaf_anchors",
+        "probability": 0.08,
+        "maxAnchorsPerTree": 6,
+        "pending": true
+      },
+      "emitters": [
+        { "tangent": 10, "bitangent": 6, "spawnBudgetPerFrame": 2 },
+        { "tangent": -8, "bitangent": 12, "spawnBudgetPerFrame": 1 },
+        { "tangent": 14, "bitangent": -4, "spawnBudgetPerFrame": 1 }
+      ]
+    }
+  }
+}

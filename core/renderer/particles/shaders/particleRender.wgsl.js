@@ -109,11 +109,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let center = in.uv - vec2<f32>(0.5, 0.5);
 
     if (in.ptype == ${leafTypeId}u) {
-        let leafD = length(vec2<f32>(center.x * 1.6, center.y)) * 2.0;
-        if (leafD >= 1.0) { discard; }
-        let radial = clamp(1.0 - leafD, 0.0, 1.0);
-        let vein = 1.0 - smoothstep(0.0, 0.06, abs(center.x));
-        let a = pow(radial, 0.5) * (0.85 + 0.15 * vein);
+        let leafD = length(vec2<f32>(center.x * 2.45, center.y * 1.05)) * 2.0;
+        let tip = smoothstep(0.58, 0.18, abs(center.y));
+        let waist = smoothstep(0.50, 0.10, abs(center.x) * (1.2 + abs(center.y) * 2.4));
+        let mask = min(1.0 - leafD, min(tip, waist));
+        if (mask <= 0.0) { discard; }
+        let edge = smoothstep(0.0, 0.18, mask);
+        let vein = 1.0 - smoothstep(0.0, 0.035, abs(center.x));
+        let a = edge * (0.88 + 0.12 * vein);
         return vec4<f32>(in.color.rgb, in.color.a * a);
     }
 
