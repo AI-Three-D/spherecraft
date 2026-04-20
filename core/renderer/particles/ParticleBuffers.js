@@ -280,10 +280,14 @@ export class ParticleBuffers {
 
             this._emitterU32[base + 12] = (emitter.rngSeed ?? 0) >>> 0;
             this._emitterU32[base + 13] = (emitter.activeTypeCount ?? 0) >>> 0;
+            const tint = emitter.foliageColor ?? [0, 0, 0];
+            this._emitterF32[base + 14] = tint[0] ?? 0;
+            this._emitterF32[base + 15] = tint[1] ?? 0;
 
             this._emitterF32[base + 16] = localUp[0] ?? 0;
             this._emitterF32[base + 17] = localUp[1] ?? 1;
             this._emitterF32[base + 18] = localUp[2] ?? 0;
+            this._emitterF32[base + 19] = tint[2] ?? 0;
         }
 
         this.device.queue.writeBuffer(this.emitterData, 0, this._emitterF32.buffer);

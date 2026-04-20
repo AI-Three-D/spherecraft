@@ -169,6 +169,7 @@ export class StudioWorldEngine {
             streamerTheme:  this._streamerTheme,
             nightSkyTheme:  this._nightSkyTheme,
             terrainTheme:   this._runtimeTerrainTheme,
+            particleAuthoring: gameDataConfig.particleAuthoring,
         });
         await this.renderer.initialize(this.planetConfig, this.sphericalMapper, {
             weatherConfig: {

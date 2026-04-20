@@ -162,6 +162,12 @@ fn spawnParticle(slot: u32, claim: u32) -> Particle {
     // Promote the type's persistent flags (additive/stretch/rotate) and mark alive.
     p.flags       = td.typeFlags | FLAG_ALIVE;
 
+    if ((p.flags & FLAG_LEAF) != 0u) {
+        let emitterTint = vec3<f32>(emitter.tintR, emitter.tintG, emitter.tintB);
+        let tintStrength = select(0.0, 0.85, max(max(emitterTint.r, emitterTint.g), emitterTint.b) > 0.001);
+        p.color = vec4<f32>(mix(td.colorStart.rgb, emitterTint, tintStrength), td.colorStart.a);
+    }
+
     if (typeId == ${fireflyTypeId}u) {
         let stablePhase = hashToFloat(emitter.rngSeed ^ 0x9E3779B9u) * 6.2831853;
         p.rotation = stablePhase;
@@ -265,7 +271,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Age-based size and color
         let age01 = clamp(1.0 - p.lifetime / max(p.maxLifetime, 0.0001), 0.0, 1.0);
         p.size = mix(td.sizeStart, td.sizeEnd, age01);
-        p.color = sampleGradient(td, age01);
+        let gradientColor = sampleGradient(td, age01);
+        if ((p.flags & FLAG_LEAF) != 0u) {
+            // Leaf-anchor emitters provide tree foliage RGB; keep that tint
+            // stable while still using the authored alpha fade.
+            p.color = vec4<f32>(p.color.rgb, gradientColor.a);
+        } else {
+            p.color = gradientColor;
+        }
         if (p.ptype == ${fireflyTypeId}u) {
             let fireflyGlow = clamp(globals.fireflyGlow, 0.0, 1.0);
             let visualGlow = pow(fireflyGlow, 2.2);

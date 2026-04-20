@@ -22,6 +22,7 @@ import {
 import { LightType } from '../../lighting/lightManager.js';
 import { FireflySwarm } from './FireflySwarm.js';
 import { buildParticleAuthoringRuntime } from './ParticleAuthoringRuntime.js';
+import { LeafAnchorEmitterSource } from './LeafAnchorEmitterSource.js';
 
 export class ParticleSystem {
     constructor({
@@ -75,6 +76,10 @@ export class ParticleSystem {
         this._fireflyLightIntensity = 0.0;
         this._viewProj = new Matrix4();
         this._loggedEmitterOverflow = false;
+        this._leafAnchorSource = null;
+        this._leafAnchorEmitters = [];
+        this._leafAnchorRevision = -1;
+        this._leafAnchorConfig = null;
     }
 
     // Call this after the frontend's lightManager is ready.
@@ -86,7 +91,37 @@ export class ParticleSystem {
         const o = planetConfig?.origin;
         if (o) {
             this._planetOrigin = { x: o.x ?? 0, y: o.y ?? 0, z: o.z ?? 0 };
+            this._leafAnchorSource?.setPlanetOrigin?.(this._planetOrigin);
         }
+    }
+
+    setLeafAnchorSource({ treeDetailSystem = null, templateLibrary = null, config = null } = {}) {
+        this._leafAnchorSource?.dispose?.();
+        this._leafAnchorSource = null;
+        this._removeManagedLeafAnchorEmitters();
+
+        if (config?.source === 'spawn_offsets') {
+            return;
+        }
+        if (!treeDetailSystem || !templateLibrary) {
+            console.warn('[ParticleSystem] Leaf anchor source unavailable; falling-leaf anchors disabled');
+            return;
+        }
+
+        this._leafAnchorConfig = config ?? {};
+        this._leafAnchorSource = new LeafAnchorEmitterSource(this.device, {
+            treeDetailSystem,
+            templateLibrary,
+            config: this._leafAnchorConfig,
+            planetOrigin: this._planetOrigin,
+        });
+        this._leafAnchorRevision = -1;
+
+        console.info(
+            `[ParticleSystem] Leaf fall source=detailed_leaf_anchors ` +
+            `maxEmitters=${this._leafAnchorSource.config.maxEmitters} ` +
+            `interval=${this._leafAnchorSource.config.spawnIntervalSeconds.join('-')}s`
+        );
     }
 
     async initialize() {
@@ -330,6 +365,94 @@ export class ParticleSystem {
         this.emitters.push(emitter);
     }
 
+    _removeEmitter(emitter) {
+        const idx = this.emitters.indexOf(emitter);
+        if (idx >= 0) this.emitters.splice(idx, 1);
+    }
+
+    _removeManagedLeafAnchorEmitters() {
+        for (const emitter of this._leafAnchorEmitters) {
+            this._removeEmitter(emitter);
+        }
+        this._leafAnchorEmitters = [];
+    }
+
+    _syncLeafAnchorEmitters() {
+        if (!this._leafAnchorSource) return;
+        if (this._leafAnchorRevision === this._leafAnchorSource.revision) return;
+
+        this._leafAnchorRevision = this._leafAnchorSource.revision;
+        const config = this._leafAnchorSource.config;
+        const candidates = this._leafAnchorSource.candidates.slice(0, config.maxEmitters);
+
+        while (this._leafAnchorEmitters.length > candidates.length) {
+            const emitter = this._leafAnchorEmitters.pop();
+            this._removeEmitter(emitter);
+        }
+
+        for (let i = 0; i < candidates.length; i++) {
+            const candidate = candidates[i];
+            let emitter = this._leafAnchorEmitters[i];
+            if (!emitter) {
+                emitter = this.addLeafEmitter(candidate.position, {
+                    spawnBudgetPerFrame: candidate.spawnBudgetPerEvent,
+                    distanceCutoff: config.distanceCutoff,
+                    lodNearDistance: config.lodNearDistance,
+                    lodFarDistance: config.lodFarDistance,
+                    lodMinScale: config.lodMinScale,
+                    baseSeed: candidate.seed,
+                });
+                emitter._leafAnchorManaged = true;
+                this._leafAnchorEmitters[i] = emitter;
+            }
+
+            const seedChanged = emitter._leafAnchorSeed !== candidate.seed;
+            emitter.position.x = candidate.position.x;
+            emitter.position.y = candidate.position.y;
+            emitter.position.z = candidate.position.z;
+            emitter.baseSeed = candidate.seed >>> 0;
+            emitter.spawnBudgetPerFrame = candidate.spawnBudgetPerEvent;
+            emitter.distanceCutoff = config.distanceCutoff;
+            emitter.lodNearDistance = config.lodNearDistance;
+            emitter.lodFarDistance = config.lodFarDistance;
+            emitter.lodMinScale = config.lodMinScale;
+            emitter._leafAnchorManaged = true;
+            emitter._leafAnchorSeed = candidate.seed;
+            emitter._leafAnchorInterval = config.spawnIntervalSeconds.slice();
+            emitter._leafAnchorSpawnBudget = candidate.spawnBudgetPerEvent;
+            emitter._leafAnchorFoliageColor = candidate.foliageColor;
+            if (seedChanged || !Number.isFinite(emitter._nextLeafAnchorSpawnTime)) {
+                emitter._leafAnchorEventIndex = 0;
+                const spread = this._leafAnchorRandomInterval(emitter, 0);
+                emitter._nextLeafAnchorSpawnTime = this._elapsedTime + spread;
+            }
+        }
+    }
+
+    _leafAnchorRandomInterval(emitter, salt = 0) {
+        const range = Array.isArray(emitter._leafAnchorInterval)
+            ? emitter._leafAnchorInterval
+            : [1.0, 4.0];
+        const min = Math.min(range[0] ?? 1.0, range[1] ?? 4.0);
+        const max = Math.max(range[0] ?? 1.0, range[1] ?? 4.0);
+        let seed = (emitter.baseSeed ^ ((salt + 1) * 0x9E3779B9)) >>> 0;
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        const u = seed / 4294967296;
+        return min + (max - min) * u;
+    }
+
+    _getLeafAnchorSpawnBudget(emitter, distance) {
+        if (!emitter._leafAnchorManaged) return null;
+        if (emitter._needsActorSnap || distance >= emitter.distanceCutoff) return 0;
+        if (this._elapsedTime < (emitter._nextLeafAnchorSpawnTime ?? 0)) return 0;
+
+        const eventIndex = (emitter._leafAnchorEventIndex ?? 0) + 1;
+        emitter._leafAnchorEventIndex = eventIndex;
+        emitter._nextLeafAnchorSpawnTime =
+            this._elapsedTime + this._leafAnchorRandomInterval(emitter, eventIndex);
+        return Math.max(1, Math.trunc(emitter._leafAnchorSpawnBudget ?? 1));
+    }
+
     _updateEmitterSnap(emitter) {
         if (!emitter._snapToActorFn) return;
 
@@ -471,6 +594,7 @@ export class ParticleSystem {
             rngSeed: (emitter.baseSeed + this._frameCount * 2654435761) >>> 0,
             activeTypeCount: emitter.getActiveTypeCount(),
             localUp,
+            foliageColor: emitter._leafAnchorFoliageColor ?? null,
         };
     }
 
@@ -478,11 +602,16 @@ export class ParticleSystem {
     // valid WebGPU command encoder outside any active render pass.
     update(commandEncoder, camera, deltaTime, environmentState) {
         if (!this._initialized || !camera) return;
-        if (this.emitters.length === 0) return;
-
         const dt = Math.max(0, Math.min(deltaTime || 0, 0.1));
         this._elapsedTime += dt;
         this._frameCount++;
+
+        if (this._leafAnchorSource) {
+            this._leafAnchorSource.update(commandEncoder, this._elapsedTime);
+            this._syncLeafAnchorEmitters();
+        }
+
+        if (this.emitters.length === 0) return;
 
         const te = camera.matrixWorldInverse.elements;
         const cameraRight = [te[0], te[4], te[8]];
@@ -532,9 +661,10 @@ export class ParticleSystem {
             const dz = cam.z - emitter.position.z;
             const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
             const localUp = this._computeEmitterLocalUp(emitter);
-            const spawnBudget = emitter._needsActorSnap
-                ? 0
-                : emitter.getSpawnBudgetForDistance(distance);
+            const leafAnchorBudget = this._getLeafAnchorSpawnBudget(emitter, distance);
+            const spawnBudget = leafAnchorBudget != null
+                ? leafAnchorBudget
+                : (emitter._needsActorSnap ? 0 : emitter.getSpawnBudgetForDistance(distance));
 
             this._updateEmitterPointLights(
                 emitter,
@@ -631,9 +761,12 @@ export class ParticleSystem {
     }
 
     dispose() {
+        this._leafAnchorSource?.dispose?.();
         this.simPass?.dispose();
         this.renderPass?.dispose();
         this.buffers?.dispose();
+        this._leafAnchorSource = null;
+        this._leafAnchorEmitters = [];
         this.simPass = null;
         this.renderPass = null;
         this.buffers = null;
