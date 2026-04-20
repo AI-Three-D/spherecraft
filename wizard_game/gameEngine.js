@@ -1312,18 +1312,37 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             ? leafFall.emitters
             : [];
         const getActor = () => actorManager?.playerActor;
-        for (const off of leafEmitters) {
-            this.renderer.particleSystem.addLeafEmitter(
-                { x: spawnX, y: spawnY, z: spawnZ },
-                {
-                    getActor,
-                    snapSettleFrames: 30,
-                    surfaceOffset: off,
-                    spawnBudgetPerFrame: off.spawnBudgetPerFrame,
-                }
+        if (leafFall?.enabled !== false && leafFall?.source === 'detailed_leaf_anchors') {
+            const assetStreamer = this.renderer.assetStreamer || null;
+            const treeDetailSystem = assetStreamer?.getTreeDetailSystem?.()
+                ?? assetStreamer?._treeDetailSystem
+                ?? null;
+            const templateLibrary = assetStreamer?.getTreeTemplateLibrary?.()
+                ?? assetStreamer?._templateLibrary
+                ?? null;
+            this.renderer.particleSystem.setLeafAnchorSource({
+                treeDetailSystem,
+                templateLibrary,
+                config: leafFall.anchorSelection,
+            });
+            Logger.info(
+                `[GameEngine] Leaf fall registered from particle authoring ` +
+                `(source=detailed_leaf_anchors, maxEmitters=${leafFall.anchorSelection?.maxEmitters ?? 0})`
             );
+        } else {
+            for (const off of leafEmitters) {
+                this.renderer.particleSystem.addLeafEmitter(
+                    { x: spawnX, y: spawnY, z: spawnZ },
+                    {
+                        getActor,
+                        snapSettleFrames: 30,
+                        surfaceOffset: off,
+                        spawnBudgetPerFrame: off.spawnBudgetPerFrame,
+                    }
+                );
+            }
         }
-        if (leafEmitters.length > 0) {
+        if (leafFall?.source !== 'detailed_leaf_anchors' && leafEmitters.length > 0) {
             Logger.info(
                 `[GameEngine] Leaf emitters registered from particle authoring ` +
                 `(${leafEmitters.length}, source=${leafFall?.source ?? 'spawn_offsets'})`

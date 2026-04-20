@@ -10,8 +10,17 @@ const DEFAULT_LEAF_FALL_AUTHORING = Object.freeze({
     anchorSelection: Object.freeze({
         source: 'detailed_leaf_anchors',
         probability: 0.08,
-        maxAnchorsPerTree: 6,
-        pending: true,
+        maxAnchorsPerTree: 1,
+        maxEmitters: 3,
+        maxReadTrees: 48,
+        refreshIntervalSeconds: 1.0,
+        spawnIntervalSeconds: Object.freeze([1.0, 4.0]),
+        spawnBudgetPerEvent: 1,
+        distanceCutoff: 65.0,
+        lodNearDistance: 16.0,
+        lodFarDistance: 50.0,
+        lodMinScale: 1.0,
+        pending: false,
     }),
     emitters: Object.freeze([
         Object.freeze({ tangent: 10, bitangent: 6 }),
@@ -54,6 +63,13 @@ function normalizeRange(raw, fallback = [0, 0]) {
     if (!Array.isArray(raw)) return fallback.slice();
     const min = clampNumber(raw[0], fallback[0]);
     const max = clampNumber(raw[1], fallback[1]);
+    return [Math.min(min, max), Math.max(min, max)];
+}
+
+function normalizeSecondsRange(raw, fallback = [1, 4]) {
+    const source = Array.isArray(raw) ? raw : fallback;
+    const min = clampNumber(source?.[0], fallback[0], 0.05, 60);
+    const max = clampNumber(source?.[1], fallback[1], 0.05, 60);
     return [Math.min(min, max), Math.max(min, max)];
 }
 
@@ -180,7 +196,29 @@ function normalizeLeafFall(raw = {}) {
             source: typeof anchorSelection.source === 'string' ? anchorSelection.source : fallback.anchorSelection.source,
             probability: clampNumber(anchorSelection.probability, fallback.anchorSelection.probability, 0, 1),
             maxAnchorsPerTree: clampInt(anchorSelection.maxAnchorsPerTree, fallback.anchorSelection.maxAnchorsPerTree, 0, 1024),
-            pending: anchorSelection.pending !== false,
+            maxEmitters: clampInt(anchorSelection.maxEmitters, fallback.anchorSelection.maxEmitters, 0, 12),
+            maxReadTrees: clampInt(anchorSelection.maxReadTrees, fallback.anchorSelection.maxReadTrees, 1, 512),
+            refreshIntervalSeconds: clampNumber(
+                anchorSelection.refreshIntervalSeconds,
+                fallback.anchorSelection.refreshIntervalSeconds,
+                0.1,
+                30
+            ),
+            spawnIntervalSeconds: normalizeSecondsRange(
+                anchorSelection.spawnIntervalSeconds,
+                fallback.anchorSelection.spawnIntervalSeconds
+            ),
+            spawnBudgetPerEvent: clampInt(
+                anchorSelection.spawnBudgetPerEvent,
+                fallback.anchorSelection.spawnBudgetPerEvent,
+                1,
+                16
+            ),
+            distanceCutoff: clampNumber(anchorSelection.distanceCutoff, fallback.anchorSelection.distanceCutoff, 1, 500),
+            lodNearDistance: clampNumber(anchorSelection.lodNearDistance, fallback.anchorSelection.lodNearDistance, 0, 500),
+            lodFarDistance: clampNumber(anchorSelection.lodFarDistance, fallback.anchorSelection.lodFarDistance, 0, 500),
+            lodMinScale: clampNumber(anchorSelection.lodMinScale, fallback.anchorSelection.lodMinScale, 0, 1),
+            pending: anchorSelection.pending === true,
         },
         emitters: emitters.filter((emitter) =>
             Number.isFinite(emitter.tangent) && Number.isFinite(emitter.bitangent)
@@ -198,6 +236,11 @@ export function buildParticleAuthoringRuntime(rawDocument = {}) {
     const particleConfig = normalizeParticleTypes(rawTypes, warnings);
     const emitterPresets = normalizeEmitterPresets(rawEmitterPresets);
     const leafFall = normalizeLeafFall(raw.ambientEmitters?.leafFall ?? raw.leafFall);
+    const leafEmitterCount = leafFall.enabled
+        ? (leafFall.source === 'detailed_leaf_anchors'
+            ? leafFall.anchorSelection.maxEmitters
+            : leafFall.emitters.length)
+        : 0;
 
     return {
         particleConfig,
@@ -210,7 +253,8 @@ export function buildParticleAuthoringRuntime(rawDocument = {}) {
             emitterPresetOverrideCount: rawEmitterPresets && typeof rawEmitterPresets === 'object'
                 ? Object.keys(rawEmitterPresets).length
                 : 0,
-            leafEmitterCount: leafFall.enabled ? leafFall.emitters.length : 0,
+            leafEmitterCount,
+            leafSource: leafFall.source,
             warningCount: warnings.unknownParticleTypes.length,
         },
         warnings,

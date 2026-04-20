@@ -152,7 +152,9 @@ export class WorldAuthoringView extends WorldViewBase {
                 raw.planet,
                 raw.textures,
                 raw.biomes,
-                raw.assets
+                raw.assets,
+                raw.atmosphereBanks,
+                raw.particles
             ),
         };
     }
@@ -186,6 +188,7 @@ export class WorldAuthoringView extends WorldViewBase {
         this._buildTileCatalogSection(container, raw);
         this._buildBiomesSection(container, raw);
         this._buildAssetsSection(container, raw);
+        this._buildParticleAmbienceSection(container, raw);
         this._buildActionsSection(container);
     }
 
@@ -1332,6 +1335,103 @@ export class WorldAuthoringView extends WorldViewBase {
         this.toast(`Removed profile "${removed[0]?.id}"`);
     }
 
+    _ensureLeafFallConfig(raw) {
+        if (!raw.particles || typeof raw.particles !== 'object') raw.particles = {};
+        if (!raw.particles.ambientEmitters || typeof raw.particles.ambientEmitters !== 'object') {
+            raw.particles.ambientEmitters = {};
+        }
+        if (!raw.particles.ambientEmitters.leafFall || typeof raw.particles.ambientEmitters.leafFall !== 'object') {
+            raw.particles.ambientEmitters.leafFall = {};
+        }
+        const leafFall = raw.particles.ambientEmitters.leafFall;
+        if (!leafFall.anchorSelection || typeof leafFall.anchorSelection !== 'object') {
+            leafFall.anchorSelection = {};
+        }
+        if (!Array.isArray(leafFall.anchorSelection.spawnIntervalSeconds)) {
+            leafFall.anchorSelection.spawnIntervalSeconds = [1.0, 4.0];
+        }
+        return leafFall;
+    }
+
+    _buildParticleAmbienceSection(container, raw) {
+        const body = this._addSection(container, 'Particle Ambience', false);
+        const note = document.createElement('div');
+        note.style.cssText = 'padding:6px 12px; color:var(--text-dim); font-size:10px; line-height:1.5;';
+        note.textContent = 'Leaf fall uses detailed tree anchors after world regeneration.';
+        body.appendChild(note);
+
+        const leafFall = this._ensureLeafFallConfig(raw);
+        leafFall.source = leafFall.source || 'detailed_leaf_anchors';
+        leafFall.anchorSelection.source = leafFall.anchorSelection.source || 'detailed_leaf_anchors';
+
+        this._addEditorSlider(body, raw, {
+            label: 'Leaf Emitters', min: 0, max: 8, step: 1, needsRegen: true,
+            tooltip: 'Maximum active falling-leaf emitters sampled from nearby detailed tree anchors.\nWizard game also uses campfire/firefly emitters, so high values can hit the 16-emitter GPU cap.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.maxEmitters ?? 3,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                cfg.anchorSelection.maxEmitters = v;
+            },
+        });
+
+        this._addEditorSlider(body, raw, {
+            label: 'Tree Chance', min: 0, max: 1, step: 0.01, needsRegen: true,
+            tooltip: 'Chance that a nearby close tree contributes a leaf anchor during each low-cadence sample.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.probability ?? 0.35,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                cfg.anchorSelection.probability = v;
+            },
+        });
+
+        this._addEditorSlider(body, raw, {
+            label: 'Min Drop Sec', min: 0.25, max: 12, step: 0.25, needsRegen: true,
+            tooltip: 'Minimum seconds between leaf drops for each active anchor emitter.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.spawnIntervalSeconds?.[0] ?? 1.0,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                const max = Math.max(v, cfg.anchorSelection.spawnIntervalSeconds?.[1] ?? 4.0);
+                cfg.anchorSelection.spawnIntervalSeconds = [v, max];
+            },
+        });
+
+        this._addEditorSlider(body, raw, {
+            label: 'Max Drop Sec', min: 0.25, max: 12, step: 0.25, needsRegen: true,
+            tooltip: 'Maximum seconds between leaf drops for each active anchor emitter.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.spawnIntervalSeconds?.[1] ?? 4.0,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                const min = Math.min(v, cfg.anchorSelection.spawnIntervalSeconds?.[0] ?? 1.0);
+                cfg.anchorSelection.spawnIntervalSeconds = [min, v];
+            },
+        });
+
+        this._addEditorSlider(body, raw, {
+            label: 'Sample Sec', min: 0.25, max: 5, step: 0.25, needsRegen: true,
+            tooltip: 'Seconds between async close-tree readbacks used to refresh leaf anchor emitters.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.refreshIntervalSeconds ?? 1.0,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                cfg.anchorSelection.refreshIntervalSeconds = v;
+            },
+        });
+    }
+
     // ── Actions section ───────────────────────────────────────────────
 
     _buildActionsSection(container) {
@@ -1359,6 +1459,8 @@ export class WorldAuthoringView extends WorldViewBase {
         this._addButton(saveSec, 'Download textures.json',      () => this._loader?.exportJSON('textures', this._raw?.textures));
         this._addButton(saveSec, 'Download biomes.json',        () => this._loader?.exportJSON('biomes', this._raw?.biomes));
         this._addButton(saveSec, 'Download assets.json',        () => this._loader?.exportJSON('assets', this._raw?.assets));
+        this._addButton(saveSec, 'Download atmosphere_banks.json', () => this._loader?.exportJSON('atmosphere_banks', this._raw?.atmosphereBanks));
+        this._addButton(saveSec, 'Download particles.json',     () => this._loader?.exportJSON('particles', this._raw?.particles));
 
         const info = document.createElement('div');
         info.style.cssText = 'padding:8px 12px; font-size:10px; color:var(--text-dim); line-height:1.6;';
@@ -1373,6 +1475,8 @@ export class WorldAuthoringView extends WorldViewBase {
         this._addButton(loadSec, 'Load textures.json…',      () => this._loadFile('textures'));
         this._addButton(loadSec, 'Load biomes.json…',        () => this._loadFile('biomes'));
         this._addButton(loadSec, 'Load assets.json…',        () => this._loadFile('assets'));
+        this._addButton(loadSec, 'Load atmosphere_banks.json…', () => this._loadFile('atmosphereBanks'));
+        this._addButton(loadSec, 'Load particles.json…',     () => this._loadFile('particles'));
 
         const navSec = this._addSection(container, 'Navigation', true);
         const navInfo = document.createElement('div');

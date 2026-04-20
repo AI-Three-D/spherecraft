@@ -117,7 +117,8 @@ export class WorldConfigLoader {
                 `[WorldConfigLoader] particles ready: ` +
                 `${particleSummary.typeOverrideCount} type overrides, ` +
                 `${particleSummary.emitterPresetOverrideCount} emitter preset overrides, ` +
-                `${particleSummary.leafEmitterCount} leaf emitters`
+                `${particleSummary.leafEmitterCount} leaf emitters ` +
+                `(source=${particleSummary.leafSource ?? 'spawn_offsets'})`
             );
             if ((particleSummary.warningCount ?? 0) > 0) {
                 console.warn(`[WorldConfigLoader] particle warnings: ${particleSummary.warningCount}`);

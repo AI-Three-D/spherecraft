@@ -847,6 +847,10 @@ await this._leafStreamer.initialize();
         return this._treeDetailSystem || null;
     }
 
+    getTreeTemplateLibrary() {
+        return this._templateLibrary || null;
+    }
+
     _buildScatterGroups() {
         const runtimeDefs = [...this.SCATTER_DENSITY_GROUPS]
             .sort((a, b) => b.minDensity - a.minDensity)

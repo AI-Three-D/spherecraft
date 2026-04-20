@@ -1,5 +1,5 @@
 {
-  "_comment": "Data-driven particle authoring. Leaf emitters are still spawn-relative this increment; anchorSelection documents the next detailed-leaf-anchor source.",
+  "_comment": "Data-driven particle authoring. Leaf fall samples detailed tree-template anchors at low cadence and emits sparse timed leaves.",
   "particleTypes": {
     "LEAF": {
       "lifetime": { "min": 4.5, "max": 8.5 },
@@ -14,9 +14,9 @@
       "upwardBias": 0.08,
       "lateralNoise": 1.05,
       "spawnOffset": {
-        "radius": 1.6,
-        "heightMin": 3.0,
-        "heightMax": 5.8
+        "radius": 0.35,
+        "heightMin": -0.08,
+        "heightMax": 0.18
       },
       "colorStart": [0.34, 0.55, 0.16, 0.94],
       "colorMid": [0.42, 0.58, 0.18, 0.86],
@@ -36,12 +36,21 @@
   "ambientEmitters": {
     "leafFall": {
       "enabled": true,
-      "source": "spawn_offsets",
+      "source": "detailed_leaf_anchors",
       "anchorSelection": {
         "source": "detailed_leaf_anchors",
-        "probability": 0.08,
-        "maxAnchorsPerTree": 6,
-        "pending": true
+        "probability": 0.35,
+        "maxAnchorsPerTree": 1,
+        "maxEmitters": 3,
+        "maxReadTrees": 64,
+        "refreshIntervalSeconds": 1.0,
+        "spawnIntervalSeconds": [1.0, 4.0],
+        "spawnBudgetPerEvent": 1,
+        "distanceCutoff": 65.0,
+        "lodNearDistance": 16.0,
+        "lodFarDistance": 50.0,
+        "lodMinScale": 1.0,
+        "pending": false
       },
       "emitters": [
         { "tangent": 10, "bitangent": 6, "spawnBudgetPerFrame": 2 },

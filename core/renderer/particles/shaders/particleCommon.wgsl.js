@@ -100,10 +100,10 @@ struct EmitterSpawnDef {
     typeIds: vec4<u32>,
     rngSeed: u32,
     activeTypeCount: u32,
-    _pad0: u32,
-    _pad1: u32,
+    tintR: f32,
+    tintG: f32,
     localUp: vec3<f32>,
-    _pad2: f32,
+    tintB: f32,
 };
 
 // Indirect draw args layout matches GPUDrawIndirectParameters (non-indexed):
