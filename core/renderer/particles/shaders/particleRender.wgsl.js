@@ -15,6 +15,7 @@ import { PARTICLE_TYPES } from '../ParticleTypes.js';
 export function buildParticleRenderWGSL({ typeCapacity = 8 } = {}) {
     const common = buildParticleCommonWGSL({ typeCapacity });
     const leafTypeId = PARTICLE_TYPES.LEAF;
+    const rainDropTypeId = PARTICLE_TYPES.RAIN_DROP;
 
     return /* wgsl */`
 ${common}
@@ -116,8 +117,14 @@ fn vs_main(@builtin(vertex_index) vid: u32,
             } else {
                 sideRaw = cr;
             }
-            axisX = sideRaw * (corner.x * p.size);
-            axisY = velDir  * (corner.y * p.size * 1.6);
+            var stretchScale = 1.6;
+            var widthScale = 1.0;
+            if (p.ptype == ${rainDropTypeId}u) {
+                stretchScale = 18.0;
+                widthScale = 0.18;
+            }
+            axisX = sideRaw * (corner.x * p.size * widthScale);
+            axisY = velDir  * (corner.y * p.size * stretchScale);
         }
     }
 
@@ -147,6 +154,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let vein = 1.0 - smoothstep(0.0, 0.035, abs(center.x));
         let a = edge * (0.88 + 0.12 * vein);
         return vec4<f32>(in.color.rgb, in.color.a * a);
+    }
+
+    if (in.ptype == ${rainDropTypeId}u) {
+        let line = 1.0 - smoothstep(0.03, 0.46, abs(center.x));
+        let taper = smoothstep(0.50, 0.18, abs(center.y));
+        let core = pow(clamp(line * taper, 0.0, 1.0), 0.72);
+        if (core <= 0.01) { discard; }
+        return vec4<f32>(in.color.rgb, in.color.a * core);
     }
 
     let d = length(center) * 2.0;

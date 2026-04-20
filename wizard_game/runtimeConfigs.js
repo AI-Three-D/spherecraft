@@ -7,6 +7,7 @@ import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 import { GRASS_QUALITY_LEVELS, GRASS_TYPES } from '../templates/configs/grassConfig.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
 import { resolveTreeConfig } from '../templates/configs/treeConfigResolver.js';
+import { WEATHER_CONFIG } from '../templates/configs/weatherConfig.js';
 
 const ATLAS_TEXTURE_TYPES = ['height', 'normal', 'tile', 'splatData', 'macro'];
 
@@ -348,6 +349,7 @@ export function createEngineConfig() {
       maxQueueSize: 1024,
       minStartIntervalMs: 0
     },
+    weather: WEATHER_CONFIG,
 
     trees: resolveTreeConfig({
       flags: {

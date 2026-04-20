@@ -59,6 +59,8 @@ export class ParticleSystem {
         // Planet origin used to compute the local "up" direction at the
         // emitter. Set via setPlanetConfig(); falls back to (0,0,0).
         this._planetOrigin = { x: 0, y: 0, z: 0 };
+        this._planetRadius = 0;
+        this._atmosphereHeight = 0;
 
         // Optional light manager for campfire point lights.
         this._lightManager = null;
@@ -81,6 +83,8 @@ export class ParticleSystem {
         this._leafAnchorEmitters = [];
         this._leafAnchorRevision = -1;
         this._leafAnchorConfig = null;
+        this._weatherRainEmitter = null;
+        this._weatherRainIdleFrames = 0;
     }
 
     // Call this after the frontend's lightManager is ready.
@@ -94,6 +98,10 @@ export class ParticleSystem {
             this._planetOrigin = { x: o.x ?? 0, y: o.y ?? 0, z: o.z ?? 0 };
             this._leafAnchorSource?.setPlanetOrigin?.(this._planetOrigin);
         }
+        this._planetRadius = Number.isFinite(planetConfig?.radius) ? planetConfig.radius : 0;
+        this._atmosphereHeight = Number.isFinite(planetConfig?.atmosphereHeight)
+            ? planetConfig.atmosphereHeight
+            : 0;
     }
 
     setAuthoringRuntime(particleAuthoring) {
@@ -387,6 +395,76 @@ export class ParticleSystem {
         if (idx >= 0) this.emitters.splice(idx, 1);
     }
 
+    _computeCameraAltitude(camera) {
+        const p = camera?.position;
+        if (!p || !Number.isFinite(this._planetRadius) || this._planetRadius <= 0) return 0;
+        const dx = p.x - this._planetOrigin.x;
+        const dy = p.y - this._planetOrigin.y;
+        const dz = p.z - this._planetOrigin.z;
+        return Math.max(0, Math.sqrt(dx * dx + dy * dy + dz * dz) - this._planetRadius);
+    }
+
+    _syncWeatherRainEmitter(camera, environmentState) {
+        const rain = environmentState?.rainParticles;
+        const intensity = rain?.intensity ?? environmentState?.precipitationIntensity ?? 0;
+        const maxAltitude = Number.isFinite(rain?.maxCameraAltitude)
+            ? rain.maxCameraAltitude
+            : Math.max(12000, this._atmosphereHeight * 0.24);
+        const cameraAltitude = this._computeCameraAltitude(camera);
+        const enabled =
+            rain?.enabled === true &&
+            intensity > 0.02 &&
+            cameraAltitude <= maxAltitude;
+
+        if (!enabled) {
+            if (this._weatherRainEmitter) {
+                this._weatherRainEmitter.spawnBudgetPerFrame = 0;
+                this._weatherRainIdleFrames++;
+                if (camera?.position) {
+                    this._weatherRainEmitter.position.x = camera.position.x;
+                    this._weatherRainEmitter.position.y = camera.position.y;
+                    this._weatherRainEmitter.position.z = camera.position.z;
+                }
+                if (this._weatherRainIdleFrames > 120) {
+                    this._removeEmitter(this._weatherRainEmitter);
+                    this._weatherRainEmitter = null;
+                }
+            }
+            return;
+        }
+
+        this._weatherRainIdleFrames = 0;
+
+        if (!this._weatherRainEmitter) {
+            this._weatherRainEmitter = new ParticleEmitter({
+                position: camera.position,
+                preset: 'rain_shower',
+                overrides: {
+                    spawnBudgetPerFrame: rain.spawnBudgetPerFrame,
+                    distanceCutoff: rain.distanceCutoff,
+                    lodNearDistance: rain.lodNearDistance,
+                    lodFarDistance: rain.lodFarDistance,
+                    lodMinScale: rain.lodMinScale,
+                    baseSeed: 0xA17E5EED,
+                },
+                particleConfig: this.authoringRuntime.particleConfig,
+                emitterPresets: this.authoringRuntime.emitterPresets,
+            });
+            this._weatherRainEmitter._weatherManaged = true;
+            this._registerEmitter(this._weatherRainEmitter);
+        }
+
+        const emitter = this._weatherRainEmitter;
+        emitter.position.x = camera.position.x;
+        emitter.position.y = camera.position.y;
+        emitter.position.z = camera.position.z;
+        emitter.spawnBudgetPerFrame = Math.max(0, Math.trunc(rain.spawnBudgetPerFrame ?? 0));
+        emitter.distanceCutoff = rain.distanceCutoff ?? emitter.distanceCutoff;
+        emitter.lodNearDistance = rain.lodNearDistance ?? emitter.lodNearDistance;
+        emitter.lodFarDistance = rain.lodFarDistance ?? emitter.lodFarDistance;
+        emitter.lodMinScale = rain.lodMinScale ?? emitter.lodMinScale;
+    }
+
     _removeManagedLeafAnchorEmitters() {
         for (const emitter of this._leafAnchorEmitters) {
             this._removeEmitter(emitter);
@@ -676,6 +754,8 @@ export class ParticleSystem {
         this._elapsedTime += dt;
         this._frameCount++;
 
+        this._syncWeatherRainEmitter(camera, environmentState);
+
         if (this._leafAnchorSource) {
             this._leafAnchorSource.update(commandEncoder, this._elapsedTime, camera);
             this._syncLeafAnchorEmitters();
@@ -842,6 +922,8 @@ export class ParticleSystem {
         this.renderPass = null;
         this.buffers = null;
         this.emitters = [];
+        this._weatherRainEmitter = null;
+        this._weatherRainIdleFrames = 0;
         this._initialized = false;
     }
 }

@@ -2,6 +2,16 @@
 import { DataTextureConfig } from './world/dataTextureConfiguration.js';
 import { requireBool, requireInt, requireIntArray, requireLogLevel, requireNumber, requireNumberArray, requireObject } from '../shared/requireUtil.js';
 
+function clonePlainConfig(value) {
+  if (Array.isArray(value)) return value.map(clonePlainConfig);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [key, nested] of Object.entries(value)) out[key] = clonePlainConfig(nested);
+    return out;
+  }
+  return value;
+}
+
 export class EngineConfig {
   constructor(options = {}) {
 
@@ -29,6 +39,7 @@ export class EngineConfig {
     };
     this.splatConfig = requireObject(options.splatConfig, 'splatConfig');
     this.macroConfig = requireObject(options.macroConfig, 'macroConfig');
+    this.weather = clonePlainConfig(options.weather ?? {});
 
     // ==================== RENDERING ====================
     const rendering = requireObject(options.rendering, 'rendering');

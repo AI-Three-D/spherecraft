@@ -20,14 +20,15 @@ export const PARTICLE_TYPES = Object.freeze({
     COAL:      4,
     FIREFLY:   5,
     LEAF:      6,
+    RAIN_DROP: 7,
 });
 
-export const PARTICLE_TYPE_COUNT = 7;
+export const PARTICLE_TYPE_COUNT = 8;
 
 // Upper bound on how many type slots the GPU buffer reserves. Keeps the
 // shader's fixed-size `array<ParticleTypeDef, N>` stable while still giving
 // headroom for adding types without touching the shader.
-export const PARTICLE_TYPE_CAPACITY = 8;
+export const PARTICLE_TYPE_CAPACITY = 12;
 
 // Render blend modes. Each particle type is routed to exactly one of these.
 export const PARTICLE_BLEND = Object.freeze({

@@ -1,4 +1,99 @@
+import { WEATHER_CONFIG } from '../../../templates/configs/weatherConfig.js';
 import { createWeatherComputeShader } from './shaders/weatherCompute.wgsl.js';
+
+function cloneValue(value) {
+    if (Array.isArray(value)) return value.map(cloneValue);
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [key, nested] of Object.entries(value)) out[key] = cloneValue(nested);
+        return out;
+    }
+    return value;
+}
+
+function mergeConfig(base, override) {
+    const out = cloneValue(base);
+    if (!override || typeof override !== 'object') return out;
+    for (const [key, value] of Object.entries(override)) {
+        if (value && typeof value === 'object' && !Array.isArray(value) &&
+            out[key] && typeof out[key] === 'object' && !Array.isArray(out[key])) {
+            out[key] = mergeConfig(out[key], value);
+        } else {
+            out[key] = cloneValue(value);
+        }
+    }
+    return out;
+}
+
+function finiteNumber(value, fallback, min = -Infinity, max = Infinity) {
+    const n = Number.isFinite(value) ? value : fallback;
+    return Math.max(min, Math.min(max, n));
+}
+
+function normalizeWaterEffect(raw = {}) {
+    return {
+        waveHeight: finiteNumber(raw.waveHeight, 0.2, 0, 20),
+        windWaveScale: finiteNumber(raw.windWaveScale, 1.0, 0, 20),
+        precipitationWaveScale: finiteNumber(raw.precipitationWaveScale, 0.0, 0, 20),
+        waveFrequency: finiteNumber(raw.waveFrequency, 1.0, 0.05, 10),
+        windFrequencyScale: finiteNumber(raw.windFrequencyScale, 0.4, 0, 10),
+        precipitationFrequencyScale: finiteNumber(raw.precipitationFrequencyScale, 0.1, 0, 10),
+        foamIntensity: finiteNumber(raw.foamIntensity, 0.3, 0, 10),
+        windFoamScale: finiteNumber(raw.windFoamScale, 1.0, 0, 20),
+        precipitationFoamScale: finiteNumber(raw.precipitationFoamScale, 0.0, 0, 20),
+        foamDepthEnd: finiteNumber(raw.foamDepthEnd, 2.0, 0, 40),
+        foamDepthWeatherScale: finiteNumber(raw.foamDepthWeatherScale, 0.0, 0, 40),
+    };
+}
+
+function normalizeRainParticles(raw = {}, precipitationIntensity = 0) {
+    const hasRain = precipitationIntensity > 0.01;
+    return {
+        enabled: raw.enabled ?? hasRain,
+        spawnBudgetPerFrame: Math.max(0, Math.trunc(finiteNumber(raw.spawnBudgetPerFrame, hasRain ? 160 : 0, 0, 2048))),
+        distanceCutoff: finiteNumber(raw.distanceCutoff, 100, 1, 1000),
+        lodNearDistance: finiteNumber(raw.lodNearDistance, 24, 0, 1000),
+        lodFarDistance: finiteNumber(raw.lodFarDistance, 90, 0, 1000),
+        lodMinScale: finiteNumber(raw.lodMinScale, 0.35, 0, 1),
+        maxCameraAltitude: finiteNumber(raw.maxCameraAltitude, 25000, 1, 10000000),
+    };
+}
+
+function normalizeWeatherEffects(rawEffects = {}) {
+    const source = rawEffects && typeof rawEffects === 'object' ? rawEffects : {};
+    const effects = {};
+    for (const [name, raw] of Object.entries(source)) {
+        if (!raw || typeof raw !== 'object') continue;
+        const precipitation = finiteNumber(raw.precipitationIntensity, 0, 0, 1);
+        effects[name] = {
+            name,
+            weight: finiteNumber(raw.weight, 1, 0, 1000),
+            intensity: finiteNumber(raw.intensity, 0, 0, 1),
+            cloudCoverage: finiteNumber(raw.cloudCoverage, 0, 0, 1),
+            precipitationIntensity: precipitation,
+            fogDensity: finiteNumber(raw.fogDensity, 0, 0, 1),
+            fogMultiplier: finiteNumber(raw.fogMultiplier, 1, 0, 10),
+            water: normalizeWaterEffect(raw.water || {}),
+            rainParticles: normalizeRainParticles(raw.rainParticles || {}, precipitation),
+        };
+    }
+    return effects;
+}
+
+function blendNumber(a, b, t) {
+    return a + (b - a) * t;
+}
+
+function blendObjectNumbers(a = {}, b = {}, t = 1) {
+    const out = {};
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    for (const key of keys) {
+        const av = Number.isFinite(a[key]) ? a[key] : b[key];
+        const bv = Number.isFinite(b[key]) ? b[key] : av;
+        out[key] = blendNumber(av ?? 0, bv ?? 0, t);
+    }
+    return out;
+}
 
 export class WeatherController {
     constructor(backend, config = {}) {
@@ -6,32 +101,56 @@ export class WeatherController {
         if (typeof config.cloudLayerProvider !== 'function') {
             throw new Error('WeatherController requires config.cloudLayerProvider function');
         }
+
+        const aliasConfig = { ...config };
+        if (aliasConfig.weatherStates && !aliasConfig.effects) aliasConfig.effects = aliasConfig.weatherStates;
+        if (aliasConfig.states && !aliasConfig.effects) aliasConfig.effects = aliasConfig.states;
+        const merged = mergeConfig(WEATHER_CONFIG, aliasConfig);
+
         this._cloudLayerProvider = config.cloudLayerProvider;
         this.config = {
-            enabled: config.enabled ?? true,
-            resolution: config.resolution ?? 128,
-            updateHz: config.updateHz ?? 2,
-            windStrength: config.windStrength ?? 20.0,
-            advection: config.advection ?? 1.0,
-            diffusion: config.diffusion ?? 0.15,
-            precipitationRate: config.precipitationRate ?? 0.6,
-            evaporation: config.evaporation ?? 0.2,
-            noiseScale: config.noiseScale ?? 2.0
+            enabled: merged.enabled ?? true,
+            resolution: merged.resolution ?? 128,
+            updateHz: merged.updateHz ?? 2,
+            windStrength: merged.windStrength ?? 20.0,
+            advection: merged.advection ?? 1.0,
+            diffusion: merged.diffusion ?? 0.15,
+            precipitationRate: merged.precipitationRate ?? 0.6,
+            evaporation: merged.evaporation ?? 0.2,
+            noiseScale: merged.noiseScale ?? 2.0,
+            initialWeather: merged.initialWeather ?? 'clear',
+            transitionDurationSeconds: finiteNumber(merged.transitionDurationSeconds, 90, 0.1, 3600),
+            weatherChangeChancePerSecond: finiteNumber(merged.weatherChangeChancePerSecond, 0.06, 0, 10),
+            windChangeChancePerSecond: finiteNumber(merged.windChangeChancePerSecond, 0.30, 0, 10),
+            windSpeedRange: Array.isArray(merged.windSpeedRange)
+                ? [finiteNumber(merged.windSpeedRange[0], 2, 0, 1000), finiteNumber(merged.windSpeedRange[1], 22, 0, 1000)]
+                : [2, 22],
+            cloudLayerRefreshHz: finiteNumber(merged.cloudLayerRefreshHz, 1.0, 0.05, 60),
         };
+        if (this.config.windSpeedRange[0] > this.config.windSpeedRange[1]) {
+            this.config.windSpeedRange.reverse();
+        }
+
+        this.effects = normalizeWeatherEffects(merged.effects);
+        if (Object.keys(this.effects).length === 0) {
+            this.effects = normalizeWeatherEffects(WEATHER_CONFIG.effects);
+        }
 
         // --- Logic State ---
-        this._targetWeather = 'clear';
-        this._targetIntensity = 0.0;
-        this._targetCloudCoverage = 0.0;
-        this._startIntensity = 0.0;
-        this._startCloudCoverage = 0.0;
+        this._weatherKeys = Object.keys(this.effects);
+        this._targetWeather = this.effects[this.config.initialWeather]
+            ? this.config.initialWeather
+            : (this._weatherKeys[0] || 'clear');
         this._transitionProgress = 1.0;
-        this._transitionSpeed = 0.000185; // ~90 seconds at 60fps
+        this._startEffectSnapshot = this._createEffectSnapshot(this._targetWeather);
+        this._currentEffectSnapshot = this._createEffectSnapshot(this._targetWeather);
+        this._lastCloudLayerUpdateTime = -Infinity;
 
         // Wind Logic
         this._windAngle = 0.0;
         this._targetWindAngle = 0.0;
-        this._targetWindSpeed = 5.0;
+        this._targetWindSpeed = this.config.windSpeedRange[0] +
+            (this.config.windSpeedRange[1] - this.config.windSpeedRange[0]) * 0.2;
 
         // GPU Compute State
         this._initialized = false;
@@ -116,10 +235,8 @@ export class WeatherController {
     update(deltaTime, environmentState) {
         if (!this._initialized) return;
 
-        // 1. Run GPU Weather Simulation
         this._updateGPUSimulation(deltaTime);
 
-        // 2. Run Weather Logic (Transitions, Wind) and write to snapshot
         if (environmentState) {
             this._updateWeatherLogic(deltaTime, environmentState);
         }
@@ -127,7 +244,7 @@ export class WeatherController {
 
     _updateGPUSimulation(deltaTime) {
         if (!this.config.enabled) return;
-        
+
         this._time += deltaTime;
         this._accum += deltaTime;
         const interval = 1.0 / Math.max(this.config.updateHz, 0.1);
@@ -143,150 +260,211 @@ export class WeatherController {
     }
 
     _updateWeatherLogic(deltaTime, envState) {
-        // --- A. Random Weather Events ---
-        if (Math.random() < 0.001) { // Chance to change weather
+        if (this._transitionProgress >= 1.0 &&
+            Math.random() < this.config.weatherChangeChancePerSecond * deltaTime) {
             this._pickNewWeatherTarget(envState);
         }
-        if (Math.random() < 0.005) { // Chance to change wind
+        if (Math.random() < this.config.windChangeChancePerSecond * deltaTime) {
             this._pickNewWindTarget();
         }
 
-        // --- B. Interpolate Wind ---
-        const dtSec = 1.0 / 60.0; // Assume fixed step for stability
-        
-        // Smoothly rotate wind angle
+        this._updateWind(deltaTime, envState);
+
+        if (this._transitionProgress < 1.0) {
+            this._transitionProgress = Math.min(
+                1.0,
+                this._transitionProgress + deltaTime / this.config.transitionDurationSeconds
+            );
+        }
+
+        const targetEffect = this._createEffectSnapshot(this._targetWeather);
+        const blendT = this._smoothstep(this._transitionProgress);
+        const blendedEffect = this._blendEffectSnapshots(
+            this._startEffectSnapshot || targetEffect,
+            targetEffect,
+            blendT
+        );
+        this._currentEffectSnapshot = blendedEffect;
+
+        envState.weatherIntensity = blendedEffect.intensity;
+        envState.cloudCoverage = blendedEffect.cloudCoverage;
+        envState.precipitationIntensity = blendedEffect.precipitationIntensity;
+        envState.fogDensity = blendedEffect.fogDensity;
+        envState.weatherFogMultiplier = blendedEffect.fogMultiplier;
+        envState.weatherEffect = blendedEffect;
+        envState.rainParticles = this._resolveRainParticles(
+            blendedEffect.rainParticles,
+            blendedEffect.precipitationIntensity
+        );
+
+        if (this._transitionProgress > 0.5 || envState.currentWeather == null) {
+            envState.currentWeather = this._targetWeather;
+        }
+
+        this._updateWaterState(envState, deltaTime, blendedEffect);
+
+        const layerInterval = 1.0 / this.config.cloudLayerRefreshHz;
+        if (
+            envState.forceCirrusOnly ||
+            this._time - this._lastCloudLayerUpdateTime >= layerInterval ||
+            !Array.isArray(envState.cloudLayers) ||
+            envState.cloudLayers.length === 0
+        ) {
+            envState.cloudLayers = this._computeCloudLayers(envState);
+            this._lastCloudLayerUpdateTime = this._time;
+        }
+    }
+
+    _updateWind(deltaTime, envState) {
         let angDiff = this._targetWindAngle - this._windAngle;
         angDiff = ((angDiff + Math.PI) % (Math.PI * 2)) - Math.PI;
         const maxAngStep = 0.1 * deltaTime;
         if (Math.abs(angDiff) <= maxAngStep) this._windAngle = this._targetWindAngle;
         else this._windAngle += Math.sign(angDiff) * maxAngStep;
-        
-        // Smoothly change wind speed
+
         const speedDiff = this._targetWindSpeed - envState.windSpeed;
         const maxSpeedStep = 2.0 * deltaTime;
         if (Math.abs(speedDiff) <= maxSpeedStep) envState.windSpeed = this._targetWindSpeed;
         else envState.windSpeed += Math.sign(speedDiff) * maxSpeedStep;
-        envState.windSpeed = 1.0;
-        envState.windDirection.set(1.0, 0.0);//Math.cos(this._windAngle), Math.sin(this._windAngle));
 
-        // --- C. Interpolate Weather State ---
-        if (this._transitionProgress < 1.0) {
-            this._transitionProgress += this._transitionSpeed * (deltaTime * 60);
-            if (this._transitionProgress > 1.0) this._transitionProgress = 1.0;
-
-            const t = this._smoothstep(this._transitionProgress);
-
-            // Proper start→target lerp (not exponential smoothing)
-            envState.weatherIntensity = this._startIntensity + (this._targetIntensity - this._startIntensity) * t;
-            envState.cloudCoverage = this._startCloudCoverage + (this._targetCloudCoverage - this._startCloudCoverage) * t;
-
-            // Commit State Switch at 50%
-            if (this._transitionProgress > 0.5 && envState.currentWeather !== this._targetWeather) {
-                envState.currentWeather = this._targetWeather;
-            }
-        }
-
-        // --- D. Update Derived Visuals (Water, Layers) ---
-        this._updateWaterState(envState, deltaTime);
-        
-        // Only rebuild cloud layers occasionally to save CPU, unless forced
-        if (envState.forceCirrusOnly || Math.floor(this._time * 60) % 60 === 0) {
-            envState.cloudLayers = this._computeCloudLayers(envState);
-        }
+        envState.windDirection.set(Math.cos(this._windAngle), Math.sin(this._windAngle));
     }
 
-    _updateWaterState(envState, dt) {
-        // Break regularity by mixing wind speed with a slow sine wave
+    _updateWaterState(envState, dt, effect) {
+        const water = effect?.water || normalizeWaterEffect();
         const timeVar = Math.sin(this._time * 0.5);
-        
         const windFactor = Math.max(0, (envState.windSpeed - 2.0) / 25.0);
-        const stormFactor = envState.weatherIntensity;
+        const rainFactor = Math.max(0, effect?.precipitationIntensity ?? 0);
 
-        // Base Wave Height: 0.2m -> 2.5m (Storm)
-        let targetHeight = 0.2 + (windFactor * 1.0) + (stormFactor * 1.5);
-        targetHeight += timeVar * 0.1; // Breathing effect
-        
-        // Frequency: Lower in storms (big swells), Higher in light wind
-        // 1.2 (calm) -> 0.4 (storm)
-        let targetFreq = 1.2 - (windFactor * 0.5) - (stormFactor * 0.3);
+        let targetHeight =
+            water.waveHeight +
+            windFactor * water.windWaveScale +
+            rainFactor * water.precipitationWaveScale;
+        targetHeight += timeVar * 0.1;
+
+        let targetFreq =
+            water.waveFrequency -
+            windFactor * water.windFrequencyScale -
+            rainFactor * water.precipitationFrequencyScale;
         targetFreq += timeVar * 0.05;
 
-        // Foam: Relies heavily on wind
-        let targetFoam = 0.3 + (windFactor * 1.5) + (stormFactor * 0.5);
+        const targetFoam =
+            water.foamIntensity +
+            windFactor * water.windFoamScale +
+            rainFactor * water.precipitationFoamScale;
 
-        // Apply to state
-        envState.water.waveHeight = targetHeight;
-        envState.water.waveFrequency = targetFreq;
-        envState.water.foamIntensity = targetFoam;
-        
-        // Adjust color based on sky/weather (simple approximation)
-        // Darker in storms
-        if (envState.currentWeather === 'storm' || envState.currentWeather === 'rain') {
-             // Darken colors slightly by mixing? 
-             // For now, we rely on the Frontend setting the base "Deep" color
-             // and just adjusting the 'foamDepthEnd' to make water look more agitated
-             envState.water.foamDepthEnd = 2.0 + (targetHeight * 1.5);
-        } else {
-             envState.water.foamDepthEnd = 2.0;
-        }
+        envState.water.waveHeight = Math.max(0, targetHeight);
+        envState.water.waveFrequency = Math.max(0.05, targetFreq);
+        envState.water.foamIntensity = Math.max(0, targetFoam);
+        envState.water.foamDepthEnd =
+            water.foamDepthEnd + rainFactor * water.foamDepthWeatherScale + Math.max(0, targetHeight - 0.2) * 0.5;
     }
 
     _pickNewWeatherTarget(envState) {
-        const weathers = ['clear', 'partly_cloudy', 'cloudy', 'overcast', 'rain', 'storm', 'foggy'];
-        const next = weathers[Math.floor(Math.random() * weathers.length)];
+        const next = this._pickWeightedWeather();
+        if (!next || next === this._targetWeather) return;
 
-        if (next !== this._targetWeather) {
-            // Snapshot current values as transition starting point
-            this._startIntensity = envState.weatherIntensity;
-            this._startCloudCoverage = envState.cloudCoverage;
-            this._targetWeather = next;
-            this._targetIntensity = this._getIntensityForWeather(next);
-            this._targetCloudCoverage = this._getCoverageForWeather(next, this._targetIntensity);
-            this._transitionProgress = 0.0;
+        this._startEffectSnapshot = this._currentEffectSnapshot || this._snapshotEnvironment(envState);
+        this._targetWeather = next;
+        this._transitionProgress = 0.0;
+    }
+
+    _pickWeightedWeather() {
+        const candidates = this._weatherKeys
+            .map((name) => this.effects[name])
+            .filter((effect) => effect && effect.weight > 0);
+        if (candidates.length === 0) return this._targetWeather;
+
+        const total = candidates.reduce((sum, effect) => sum + effect.weight, 0);
+        let r = Math.random() * total;
+        for (const effect of candidates) {
+            r -= effect.weight;
+            if (r <= 0) return effect.name;
         }
+        return candidates[candidates.length - 1].name;
     }
 
     _pickNewWindTarget() {
+        const [minSpeed, maxSpeed] = this.config.windSpeedRange;
         this._targetWindAngle = Math.random() * Math.PI * 2;
-        this._targetWindSpeed = 2.0 + Math.random() * 20.0; // 2m/s to 22m/s
+        this._targetWindSpeed = minSpeed + Math.random() * (maxSpeed - minSpeed);
     }
 
     _computeCloudLayers(envState) {
         const atmosphereHeight = envState.planetConfig?.atmosphereHeight || 100000;
-        
+
         if (envState.forceCirrusOnly) {
-            // Simplified return for menu/special modes
             return [{
                 name: 'high', altMin: atmosphereHeight * 0.35, altMax: atmosphereHeight * 0.8,
-                coverage: 0.45, densityMultiplier: 0.16, noiseScale: 2.2, 
-                verticalStretch: 2.6, worleyInfluence: 0.25, edgeSoftness: 0.95, extinction: 0.012, albedo: 0.95
+                coverage: 0.45, densityMultiplier: 0.16, noiseScale: 2.2,
+                verticalStretch: 2.6, worleyInfluence: 0.25, edgeSoftness: 0.95,
+                extinction: 0.012, albedo: 0.95, precipitation: 0.0, darkness: 0.0
             }];
         }
         return this._cloudLayerProvider(envState.currentWeather, envState.weatherIntensity, atmosphereHeight);
     }
 
-    _getIntensityForWeather(weather) {
-        switch (weather) {
-            case 'clear': return 0.0;
-            case 'partly_cloudy': return 0.3;
-            case 'cloudy': return 0.5;
-            case 'overcast': return 0.7;
-            case 'rain': return 0.7;
-            case 'storm': return 0.9;
-            case 'foggy': return 0.4;
-            default: return 0.0;
-        }
+    _createEffectSnapshot(weather) {
+        const effect = this.effects[weather] || this.effects.clear || Object.values(this.effects)[0] || {
+            name: 'clear',
+            intensity: 0,
+            cloudCoverage: 0,
+            precipitationIntensity: 0,
+            fogDensity: 0,
+            fogMultiplier: 1,
+            water: normalizeWaterEffect(),
+            rainParticles: normalizeRainParticles({}, 0),
+        };
+        return {
+            name: effect.name,
+            intensity: effect.intensity,
+            cloudCoverage: effect.cloudCoverage,
+            precipitationIntensity: effect.precipitationIntensity,
+            fogDensity: effect.fogDensity,
+            fogMultiplier: effect.fogMultiplier,
+            water: { ...effect.water },
+            rainParticles: { ...effect.rainParticles },
+        };
     }
 
-    _getCoverageForWeather(weather, intensity) {
-        switch (weather) {
-            case 'clear': return 0.1;
-            case 'partly_cloudy': return 0.4;
-            case 'cloudy': return 0.6;
-            case 'overcast': return 0.9;
-            case 'storm': return 0.95;
-            default: return 0.3;
-        }
+    _snapshotEnvironment(envState) {
+        return {
+            name: envState.currentWeather || this._targetWeather,
+            intensity: envState.weatherIntensity ?? 0,
+            cloudCoverage: envState.cloudCoverage ?? 0,
+            precipitationIntensity: envState.precipitationIntensity ?? 0,
+            fogDensity: envState.fogDensity ?? 0,
+            fogMultiplier: envState.weatherFogMultiplier ?? 1,
+            water: { ...(this._currentEffectSnapshot?.water || normalizeWaterEffect()) },
+            rainParticles: { ...(envState.rainParticles || normalizeRainParticles({}, 0)) },
+        };
+    }
+
+    _blendEffectSnapshots(a, b, t) {
+        const rainParticles = b.rainParticles?.enabled
+            ? b.rainParticles
+            : (a.rainParticles?.enabled ? a.rainParticles : b.rainParticles);
+        return {
+            name: b.name,
+            intensity: blendNumber(a.intensity, b.intensity, t),
+            cloudCoverage: blendNumber(a.cloudCoverage, b.cloudCoverage, t),
+            precipitationIntensity: blendNumber(a.precipitationIntensity, b.precipitationIntensity, t),
+            fogDensity: blendNumber(a.fogDensity, b.fogDensity, t),
+            fogMultiplier: blendNumber(a.fogMultiplier, b.fogMultiplier, t),
+            water: blendObjectNumbers(a.water, b.water, t),
+            rainParticles: { ...rainParticles },
+        };
+    }
+
+    _resolveRainParticles(config, precipitationIntensity) {
+        const base = normalizeRainParticles(config || {}, precipitationIntensity);
+        const intensity = Math.max(0, Math.min(1, precipitationIntensity));
+        return {
+            ...base,
+            intensity,
+            enabled: base.enabled && intensity > 0.02 && base.spawnBudgetPerFrame > 0,
+            spawnBudgetPerFrame: Math.max(0, Math.round(base.spawnBudgetPerFrame * intensity)),
+        };
     }
 
     _smoothstep(t) {
@@ -312,7 +490,7 @@ export class WeatherController {
         view.setFloat32(40, this.config.evaporation, true);
         view.setFloat32(44, this.config.noiseScale, true);
         view.setInt32(48, 1337, true);
-        view.setFloat32(64, 0, true); // padding
+        view.setFloat32(64, 0, true);
 
         device.queue.writeBuffer(this._uniformBuffer, 0, data);
 
@@ -323,6 +501,18 @@ export class WeatherController {
         const workgroups = Math.ceil(size / 8);
         pass.dispatchWorkgroups(workgroups, workgroups, 6);
         pass.end();
+    }
+
+    setWeather(weatherName, immediate = false) {
+        if (!this.effects[weatherName]) return false;
+        this._startEffectSnapshot = this._currentEffectSnapshot || this._createEffectSnapshot(this._targetWeather);
+        this._targetWeather = weatherName;
+        this._transitionProgress = immediate ? 1.0 : 0.0;
+        if (immediate) {
+            this._currentEffectSnapshot = this._createEffectSnapshot(weatherName);
+            this._startEffectSnapshot = this._currentEffectSnapshot;
+        }
+        return true;
     }
 
     getCurrentView() { return this._weatherViews[this._currentIndex]; }

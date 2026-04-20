@@ -35,6 +35,25 @@ function cloneJSONValue(value) {
     return value;
 }
 
+function mergePlainConfig(target = {}, source = {}) {
+    if (!source || typeof source !== 'object') return target;
+    for (const [key, value] of Object.entries(source)) {
+        if (Array.isArray(value)) {
+            target[key] = value.map(cloneJSONValue);
+        } else if (value && typeof value === 'object') {
+            target[key] = mergePlainConfig(
+                target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])
+                    ? target[key]
+                    : {},
+                value
+            );
+        } else {
+            target[key] = value;
+        }
+    }
+    return target;
+}
+
 export class WorldConfigLoader {
     /**
      * @param {string} worldDir  URL base for the world folder, e.g. './world'
@@ -192,6 +211,9 @@ export class WorldConfigLoader {
             const q = base.gpuQuadtree ?? {};
             Object.assign(q, engine.gpuQuadtree);
             base.gpuQuadtree = q;
+        }
+        if (engine?.weather) {
+            base.weather = mergePlainConfig(base.weather ?? {}, engine.weather);
         }
         return base;
     }

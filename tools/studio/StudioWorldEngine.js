@@ -173,6 +173,7 @@ export class StudioWorldEngine {
         });
         await this.renderer.initialize(this.planetConfig, this.sphericalMapper, {
             weatherConfig: {
+                ...(engineConfig.weather || {}),
                 cloudLayerProvider: this._cloudLayerProvider ?? (() => [])
             }
         });

@@ -373,10 +373,12 @@ export class UniformManager {
             u.currentWeather.value = this._encodeWeather(environmentState.currentWeather);
         }
 
-        this._weatherFogMultiplier = this._getWeatherFogMultiplier(
-            environmentState.currentWeather,
-            environmentState.weatherIntensity
-        );
+        this._weatherFogMultiplier = Number.isFinite(environmentState.weatherFogMultiplier)
+            ? Math.max(0, environmentState.weatherFogMultiplier)
+            : this._getWeatherFogMultiplier(
+                environmentState.currentWeather,
+                environmentState.weatherIntensity
+            );
 
         if (this.currentPlanetConfig) {
             this.updateFogParams(this.uniforms.viewerAltitude.value, this.currentPlanetConfig.atmosphereSettings);

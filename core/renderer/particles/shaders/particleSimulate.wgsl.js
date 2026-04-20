@@ -18,6 +18,7 @@ export function buildParticleSimulateWGSL({
 } = {}) {
     const common = buildParticleCommonWGSL({ typeCapacity, emitterCapacity });
     const fireflyTypeId = PARTICLE_TYPES.FIREFLY;
+    const rainDropTypeId = PARTICLE_TYPES.RAIN_DROP;
 
     return /* wgsl */`
 ${common}
@@ -284,6 +285,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let flutter = sin(globals.time * 2.3 + leafHash * 6.28) * 0.16;
             let bob     = sin(globals.time * 1.7 + leafHash * 19.1) * 0.08;
             p.velocity = p.velocity + (tangentR * flutter + up * bob) * dt;
+        }
+
+        if (p.ptype == ${rainDropTypeId}u) {
+            var rainWind2 = vec2<f32>(globals.windDirX, globals.windDirY);
+            if (length(rainWind2) < 0.001) {
+                rainWind2 = normalize(vec2<f32>(0.62, 0.38));
+            }
+            let rainWind = vec3<f32>(rainWind2.x, 0.0, rainWind2.y) * (max(globals.windSpeed, 1.0) * 0.22);
+            p.velocity = p.velocity + rainWind * dt;
         }
 
         p.position = p.position + p.velocity * dt;
