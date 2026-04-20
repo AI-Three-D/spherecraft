@@ -441,7 +441,7 @@ export class WeatherController {
     }
 
     _blendEffectSnapshots(a, b, t) {
-        const rainParticles = b.rainParticles?.enabled
+        const rainParticles = (b.rainParticles?.enabled || t >= 0.98)
             ? b.rainParticles
             : (a.rainParticles?.enabled ? a.rainParticles : b.rainParticles);
         return {
