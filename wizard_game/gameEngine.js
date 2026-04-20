@@ -551,6 +551,7 @@ export class GameEngine {
             streamerTheme: STREAMER_THEME,
             nightSkyTheme: NIGHT_SKY_THEME,
             terrainTheme: this.terrainTheme,
+            particleAuthoring: this.gameDataConfig.particleAuthoring,
         });
         await this.renderer.initialize(this.planetConfig, this.sphericalMapper, {
             weatherConfig: {
@@ -1306,19 +1307,28 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         );
         Logger.info('[GameEngine] Firefly swarm registered near player');
 
+        const leafFall = this.gameDataConfig.particleAuthoring?.ambientEmitters?.leafFall;
+        const leafEmitters = leafFall?.enabled !== false && Array.isArray(leafFall?.emitters)
+            ? leafFall.emitters
+            : [];
         const getActor = () => actorManager?.playerActor;
-        const leafOffsets = [
-            { tangent: 10, bitangent: 6 },
-            { tangent: -8, bitangent: 12 },
-            { tangent: 14, bitangent: -4 },
-        ];
-        for (const off of leafOffsets) {
+        for (const off of leafEmitters) {
             this.renderer.particleSystem.addLeafEmitter(
                 { x: spawnX, y: spawnY, z: spawnZ },
-                { getActor, snapSettleFrames: 30, surfaceOffset: off }
+                {
+                    getActor,
+                    snapSettleFrames: 30,
+                    surfaceOffset: off,
+                    spawnBudgetPerFrame: off.spawnBudgetPerFrame,
+                }
             );
         }
-        Logger.info('[GameEngine] Leaf emitters registered (snap-to-actor + tangent offset)');
+        if (leafEmitters.length > 0) {
+            Logger.info(
+                `[GameEngine] Leaf emitters registered from particle authoring ` +
+                `(${leafEmitters.length}, source=${leafFall?.source ?? 'spawn_offsets'})`
+            );
+        }
     }
 
     /** Register NPC manager. Subclasses can override to skip or plug in their own. */

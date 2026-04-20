@@ -31,6 +31,7 @@ export class Frontend {
         this._streamerTheme = options.streamerTheme || null;
         this._nightSkyTheme = options.nightSkyTheme || null;
         this._terrainTheme = options.terrainTheme || null;
+        this._particleAuthoring = options.particleAuthoring || null;
         this.gpuQuadtreeConfig = options.gpuQuadtree || this.engineConfig?.gpuQuadtree || null;
         this.gpuQuadtreeEnabled = this.gpuQuadtreeConfig?.enabled === true;
         this.quadtreeTileManager = null;
@@ -535,6 +536,7 @@ export class Frontend {
                 backend: this.backend,
                 colorFormat: HDR_FORMAT,
                 depthFormat: 'depth24plus',
+                particleAuthoring: this._particleAuthoring,
             });
             await this.particleSystem.initialize();
             if (this.planetConfig) {
