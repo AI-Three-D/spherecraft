@@ -56,18 +56,6 @@ fn resolveLocalUp(position: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0, 1.0, 0.0);
 }
 
-fn verticalScaleForType(ptype: u32) -> f32 {
-    if (ptype == 2u) { return 0.18; }
-    if (ptype == 1u) { return 0.11; }
-    return 0.095;
-}
-
-fn horizontalScaleForType(ptype: u32) -> f32 {
-    if (ptype == 2u) { return 0.95; }
-    if (ptype == 1u) { return 0.84; }
-    return 1.05;
-}
-
 fn safeNormalize(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     let lenSq = dot(v, v);
     if (lenSq > 1e-8) { return v * inverseSqrt(lenSq); }
@@ -134,8 +122,8 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     let sliceWeight = (1.0 - abs(sliceT) * 0.25) * (1.08 / f32(ATMO_VOLUME_SLICE_COUNT));
 
     let radiusA = max(2.0, p.size);
-    let radiusB = max(2.0, p.size * horizontalScaleForType(p.ptype));
-    let halfHeight = max(1.5, p.size * verticalScaleForType(p.ptype));
+    let radiusB = max(2.0, p.size * max(td.horizontalScale, 0.05));
+    let halfHeight = max(1.5, p.size * max(td.verticalScale, 0.01));
     let volumeCenter = p.position + localUp * halfHeight;
 
     let viewRight = safeNormalize(globals.cameraRight, basis.a);

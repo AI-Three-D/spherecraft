@@ -243,15 +243,15 @@ export function packAtmoScatterRules(scatterRules = [], options = {}) {
         data[base + 8] = Number.isFinite(rule.probability) ? rule.probability : 0.25;
         data[base + 9] = Number.isFinite(rule.weatherWeight) ? rule.weatherWeight : 1;
         data[base + 10] = Number.isFinite(rule.fogWeight) ? rule.fogWeight : 1;
-        data[base + 11] = 0;
+        data[base + 11] = Number.isFinite(rule.weatherFloor) ? rule.weatherFloor : 0.32;
         data[base + 12] = elevation.min;
         data[base + 13] = elevation.max;
         data[base + 14] = slope.min;
         data[base + 15] = slope.max;
         data[base + 16] = shape.param0;
         data[base + 17] = shape.param1;
-        data[base + 18] = 0;
-        data[base + 19] = 0;
+        data[base + 18] = Number.isFinite(rule.altitudeOffset?.min) ? rule.altitudeOffset.min : 0;
+        data[base + 19] = Number.isFinite(rule.altitudeOffset?.max) ? rule.altitudeOffset.max : 0;
         count++;
     }
 

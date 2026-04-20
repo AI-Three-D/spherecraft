@@ -166,7 +166,7 @@ export class AtmoBankSystem {
         for (const emitter of emitters) {
             const typeDef = typeDefs[emitter.typeId];
             const maxSize = typeDef?.size?.max ?? 0;
-            if (maxSize < largeEmitterMinSize || emitter.typeId === ATMO_BANK_TYPES.LOW_CLOUD) continue;
+            if (maxSize < largeEmitterMinSize || emitter.typeId === ATMO_BANK_TYPES.LOW_CLOUD || emitter.typeId === ATMO_BANK_TYPES.PEAK_CLOUD) continue;
 
             const ex = emitter.position[0] ?? 0;
             const ey = emitter.position[1] ?? 0;

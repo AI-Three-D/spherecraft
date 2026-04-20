@@ -33,7 +33,10 @@
       "fadeNearStart": 20,
       "fadeFarStart": 1200,
       "fadeFarEnd": 2000,
-      "densityThreshold": 0.38
+      "densityThreshold": 0.38,
+      "altitudeOffset": { "min": 0, "max": 22 },
+      "verticalScale": 0.095,
+      "horizontalScale": 1.05
     },
     {
       "id": "fog_pocket",
@@ -49,7 +52,10 @@
       "fadeNearStart": 10,
       "fadeFarStart": 800,
       "fadeFarEnd": 1500,
-      "densityThreshold": 0.40
+      "densityThreshold": 0.40,
+      "altitudeOffset": { "min": 0.3, "max": 14 },
+      "verticalScale": 0.11,
+      "horizontalScale": 0.84
     },
     {
       "id": "low_cloud",
@@ -65,7 +71,29 @@
       "fadeNearStart": 30,
       "fadeFarStart": 1500,
       "fadeFarEnd": 2500,
-      "densityThreshold": 0.44
+      "densityThreshold": 0.44,
+      "altitudeOffset": { "min": 120, "max": 520 },
+      "verticalScale": 0.18,
+      "horizontalScale": 0.95
+    },
+    {
+      "id": "peak_cloud",
+      "type": "PEAK_CLOUD",
+      "displayName": "Peak Cloud",
+      "noiseScale": 0.004,
+      "noiseSpeed": 0.010,
+      "densityBase": 0.34,
+      "windResponse": 0.4,
+      "lifetime": { "min": 120, "max": 240 },
+      "size": { "min": 80, "max": 400 },
+      "color": [0.88, 0.90, 0.94, 0.18],
+      "fadeNearStart": 40,
+      "fadeFarStart": 1800,
+      "fadeFarEnd": 3000,
+      "densityThreshold": 0.36,
+      "altitudeOffset": { "min": 180, "max": 760 },
+      "verticalScale": 0.30,
+      "horizontalScale": 0.88
     }
   ],
   "scatterRules": [
@@ -95,23 +123,110 @@
       "probability": 0.22,
       "weatherWeight": 0.45,
       "fogWeight": 1.6,
+      "weatherFloor": 0.32,
       "spawnBudget": 3
     },
     {
-      "id": "mountain_low_cloud",
+      "_comment": "Sparse fair-weather wisps over open lowland/foothill grass. Budget stays at 1 to avoid broad overdraw.",
+      "id": "grass_lowland_cloud_wisps",
+      "type": "LOW_CLOUD",
+      "tileCategories": ["GRASS"],
+      "excludeTileCategories": ["WATER", "DESERT"],
+      "elevation": { "min": 0.16, "max": 0.52, "weight": 1.0 },
+      "slope": { "min": 0.0, "max": 0.22, "weight": 1.0 },
+      "probability": 0.028,
+      "weatherWeight": 0.75,
+      "fogWeight": 0.35,
+      "weatherFloor": 0.10,
+      "altitudeOffset": { "min": 150, "max": 430 },
+      "spawnBudget": 1
+    },
+    {
+      "_comment": "Low-mid cloud pockets around humid forested terrain, still sparse and terrain-filtered.",
+      "id": "forest_low_mid_cloud_pockets",
+      "type": "LOW_CLOUD",
+      "tileCategories": ["FOREST"],
+      "excludeTileCategories": ["WATER", "DESERT"],
+      "elevation": { "min": 0.18, "max": 0.58, "weight": 1.0 },
+      "slope": { "min": 0.0, "max": 0.28, "weight": 1.0 },
+      "probability": 0.022,
+      "weatherWeight": 0.90,
+      "fogWeight": 0.60,
+      "weatherFloor": 0.08,
+      "altitudeOffset": { "min": 220, "max": 560 },
+      "spawnBudget": 1
+    },
+    {
+      "_comment": "Mid-elevation broken patches over rock/snow shoulders without requiring peak terrain.",
+      "id": "rock_snow_mid_cloud_patches",
+      "type": "LOW_CLOUD",
+      "tileCategories": ["ROCK", "SNOW"],
+      "excludeTileCategories": ["WATER", "DESERT"],
+      "elevation": { "min": 0.34, "max": 0.72, "weight": 1.0 },
+      "slope": { "min": 0.0, "max": 0.42, "weight": 1.0 },
+      "probability": 0.018,
+      "weatherWeight": 0.70,
+      "fogWeight": 0.40,
+      "weatherFloor": 0.08,
+      "altitudeOffset": { "min": 260, "max": 640 },
+      "spawnBudget": 1
+    },
+    {
+      "_comment": "Lower mountain band — sparse wisps clinging to foothills",
+      "id": "mountain_cloud_lower",
       "type": "LOW_CLOUD",
       "excludeTileCategories": ["WATER", "DESERT"],
       "terrainShape": {
         "kind": "highland",
         "minElevationNormalized": 0.55,
-        "fadeElevationNormalized": 0.2
+        "fadeElevationNormalized": 0.12
       },
-      "elevation": { "min": 0.55, "max": 1.0, "weight": 1.0 },
-      "slope": { "min": 0.0, "max": 0.3, "weight": 1.0 },
-      "probability": 0.08,
-      "weatherWeight": 0.45,
-      "fogWeight": 1.6,
+      "elevation": { "min": 0.55, "max": 0.73, "weight": 1.0 },
+      "slope": { "min": 0.0, "max": 0.35, "weight": 1.0 },
+      "probability": 0.09,
+      "weatherWeight": 0.5,
+      "fogWeight": 1.2,
+      "weatherFloor": 0.16,
+      "altitudeOffset": { "min": 120, "max": 480 },
       "spawnBudget": 2
+    },
+    {
+      "_comment": "Upper mountain band — denser clouds wrapping mid-high slopes",
+      "id": "mountain_cloud_upper",
+      "type": "LOW_CLOUD",
+      "excludeTileCategories": ["WATER", "DESERT"],
+      "terrainShape": {
+        "kind": "highland",
+        "minElevationNormalized": 0.68,
+        "fadeElevationNormalized": 0.14
+      },
+      "elevation": { "min": 0.68, "max": 0.87, "weight": 1.0 },
+      "slope": { "min": 0.0, "max": 0.40, "weight": 1.0 },
+      "probability": 0.11,
+      "weatherWeight": 0.5,
+      "fogWeight": 1.2,
+      "weatherFloor": 0.16,
+      "altitudeOffset": { "min": 180, "max": 620 },
+      "spawnBudget": 2
+    },
+    {
+      "_comment": "Highest peaks only — large, light cap clouds that hang 10–45% of their size above the ridge; spawnBudget 3 naturally creates 2–3 staggered layers per emitter",
+      "id": "mountain_peak_cloud",
+      "type": "PEAK_CLOUD",
+      "excludeTileCategories": ["WATER", "DESERT"],
+      "terrainShape": {
+        "kind": "highland",
+        "minElevationNormalized": 0.75,
+        "fadeElevationNormalized": 0.12
+      },
+      "elevation": { "min": 0.75, "max": 1.0, "weight": 1.0 },
+      "slope": { "min": 0.0, "max": 0.50, "weight": 1.0 },
+      "probability": 0.13,
+      "weatherWeight": 0.5,
+      "fogWeight": 0.8,
+      "weatherFloor": 0.12,
+      "altitudeOffset": { "min": 240, "max": 840 },
+      "spawnBudget": 3
     }
   ]
 }

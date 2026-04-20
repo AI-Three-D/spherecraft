@@ -16,6 +16,9 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         fadeFarStart: 1200.0,
         fadeFarEnd: 2000.0,
         densityThreshold: 0.38,
+        altitudeOffset: Object.freeze({ min: 0.0, max: 22.0 }),
+        verticalScale: 0.095,
+        horizontalScale: 1.05,
     }),
     [ATMO_BANK_TYPES.FOG_POCKET]: Object.freeze({
         id: 'fog_pocket',
@@ -32,6 +35,9 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         fadeFarStart: 800.0,
         fadeFarEnd: 1500.0,
         densityThreshold: 0.40,
+        altitudeOffset: Object.freeze({ min: 0.3, max: 14.0 }),
+        verticalScale: 0.11,
+        horizontalScale: 0.84,
     }),
     [ATMO_BANK_TYPES.LOW_CLOUD]: Object.freeze({
         id: 'low_cloud',
@@ -48,6 +54,28 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         fadeFarStart: 1500.0,
         fadeFarEnd: 2500.0,
         densityThreshold: 0.44,
+        altitudeOffset: Object.freeze({ min: 120.0, max: 520.0 }),
+        verticalScale: 0.18,
+        horizontalScale: 0.95,
+    }),
+    [ATMO_BANK_TYPES.PEAK_CLOUD]: Object.freeze({
+        id: 'peak_cloud',
+        type: 'PEAK_CLOUD',
+        displayName: 'Peak Cloud',
+        noiseScale: 0.004,
+        noiseSpeed: 0.010,
+        densityBase: 0.34,
+        windResponse: 0.4,
+        lifetime: Object.freeze({ min: 120, max: 240 }),
+        size: Object.freeze({ min: 80, max: 400 }),
+        color: Object.freeze([0.88, 0.90, 0.94, 0.18]),
+        fadeNearStart: 40.0,
+        fadeFarStart: 1800.0,
+        fadeFarEnd: 3000.0,
+        densityThreshold: 0.36,
+        altitudeOffset: Object.freeze({ min: 180.0, max: 760.0 }),
+        verticalScale: 0.30,
+        horizontalScale: 0.88,
     }),
 });
 
@@ -149,6 +177,14 @@ function normalizeTypeDef(raw = {}, fallback = {}, typeId = 0) {
         fadeFarStart: clampNumber(raw.fadeFarStart, fallback.fadeFarStart ?? 1000, 0, 100000),
         fadeFarEnd: clampNumber(raw.fadeFarEnd, fallback.fadeFarEnd ?? 2000, 0, 100000),
         densityThreshold: clampNumber(raw.densityThreshold, fallback.densityThreshold ?? 0.35, 0, 1),
+        altitudeOffset: normalizeRange(
+            raw.altitudeOffset,
+            fallback.altitudeOffset ?? { min: 0, max: 0 },
+            0,
+            100000
+        ),
+        verticalScale: clampNumber(raw.verticalScale, fallback.verticalScale ?? 0.12, 0.01, 2),
+        horizontalScale: clampNumber(raw.horizontalScale, fallback.horizontalScale ?? 1.0, 0.05, 8),
     };
 }
 
@@ -241,6 +277,7 @@ function normalizeScatterRule(raw = {}, index = 0, warnings) {
         probability: clampNumber(raw.probability, 0.25, 0, 1),
         weatherWeight: clampNumber(raw.weatherWeight, 1, 0, 4),
         fogWeight: clampNumber(raw.fogWeight, 1, 0, 4),
+        weatherFloor: clampNumber(raw.weatherFloor, 0.32, 0, 1),
         tileCategories: Array.isArray(raw.tileCategories)
             ? raw.tileCategories.map((name) => normalizeName(name)).filter(Boolean)
             : [],
@@ -258,6 +295,7 @@ function normalizeScatterRule(raw = {}, index = 0, warnings) {
         terrainShape: raw.terrainShape && typeof raw.terrainShape === 'object'
             ? cloneValue(raw.terrainShape)
             : null,
+        altitudeOffset: normalizeOptionalSignalBand(raw.altitudeOffset),
     };
 }
 

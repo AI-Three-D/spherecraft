@@ -11,6 +11,7 @@ const CELLS_PER_TILE: u32 = GRID_RES * GRID_RES;
 const TYPE_VALLEY_MIST: u32 = 0u;
 const TYPE_FOG_POCKET:  u32 = 1u;
 const TYPE_LOW_CLOUD:   u32 = 2u;
+const TYPE_PEAK_CLOUD:  u32 = 3u;
 
 const RULE_HAS_TILE_CATEGORIES: u32 = 1u;
 const RULE_HAS_ELEVATION: u32 = 2u;
@@ -37,7 +38,7 @@ struct EmitterOut {
     posX: f32, posY: f32, posZ: f32, spawnBudget: u32,
     upX: f32, upY: f32, upZ: f32, typeId: u32,
     rngSeed: u32, _p0: u32, _p1: u32, _p2: u32,
-    _p3: f32, _p4: f32, _p5: f32, _p6: f32,
+    altitudeOffsetMin: f32, altitudeOffsetMax: f32, _p5: f32, _p6: f32,
     _p7: f32, _p8: f32, _p9: f32, _p10: f32,
 };
 
@@ -46,9 +47,9 @@ struct EmitterCounter { count: atomic<u32>, _p0: u32, _p1: u32, _p2: u32 };
 struct ScatterRule {
     typeId: u32, flags: u32, tileCategoryMask: u32, excludeCategoryMask: u32,
     spawnBudget: u32, shapeKind: u32, shapeRadiusTexels: u32, _p0: u32,
-    probability: f32, weatherWeight: f32, fogWeight: f32, _p1: f32,
+    probability: f32, weatherWeight: f32, fogWeight: f32, weatherFloor: f32,
     elevationMin: f32, elevationMax: f32, slopeMin: f32, slopeMax: f32,
-    shapeParam0: f32, shapeParam1: f32, _p2: f32, _p3: f32,
+    shapeParam0: f32, shapeParam1: f32, altitudeOffsetMin: f32, altitudeOffsetMax: f32,
 };
 
 struct SelectedRule {
@@ -56,6 +57,8 @@ struct SelectedRule {
     typeId: u32,
     spawnBudget: u32,
     rngSeed: u32,
+    altitudeOffsetMin: f32,
+    altitudeOffsetMax: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: ScatterParams;
@@ -178,6 +181,8 @@ fn noSelectedRule() -> SelectedRule {
     selected.typeId = 0u;
     selected.spawnBudget = 0u;
     selected.rngSeed = 0u;
+    selected.altitudeOffsetMin = 0.0;
+    selected.altitudeOffsetMax = 0.0;
     return selected;
 }
 
@@ -274,7 +279,7 @@ fn selectAuthoredRule(categoryId: u32, slope: f32, texUv: vec2<f32>, layer: i32,
             continue;
         }
 
-        let weatherMod = max(0.32, clamp(params.fogDensity * rule.fogWeight + params.weatherIntensity * rule.weatherWeight, 0.0, 1.25));
+        let weatherMod = max(rule.weatherFloor, clamp(params.fogDensity * rule.fogWeight + params.weatherIntensity * rule.weatherWeight, 0.0, 1.25));
         let prob = clamp(rule.probability * weatherMod * shapeFactor, 0.0, 1.0);
         let roll = hashToFloat(cellHash ^ hash1u(ruleIdx + 0x12345678u));
         if (roll < prob) {
@@ -282,6 +287,8 @@ fn selectAuthoredRule(categoryId: u32, slope: f32, texUv: vec2<f32>, layer: i32,
             selected.typeId = rule.typeId;
             selected.spawnBudget = rule.spawnBudget;
             selected.rngSeed = cellHash ^ hash1u(ruleIdx + 0x9E3779B9u);
+            selected.altitudeOffsetMin = rule.altitudeOffsetMin;
+            selected.altitudeOffsetMax = rule.altitudeOffsetMax;
             return selected;
         }
     }
@@ -356,6 +363,8 @@ fn main(
     em.upX = sphereDir.x; em.upY = sphereDir.y; em.upZ = sphereDir.z;
     em.typeId = selected.typeId;
     em.rngSeed = selected.rngSeed;
+    em.altitudeOffsetMin = selected.altitudeOffsetMin;
+    em.altitudeOffsetMax = selected.altitudeOffsetMax;
     emitterOutput[idx] = em;
 }
 `;

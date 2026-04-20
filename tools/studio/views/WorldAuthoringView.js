@@ -1468,11 +1468,11 @@ export class WorldAuthoringView extends WorldViewBase {
 
         // Type
         const typeRow = this._makeAtmoRuleRow('Type');
-        typeRow.title = 'The visual style of this atmosphere bank:\n• Valley Mist — thin ground-hugging mist that pools in low-lying areas and valleys\n• Fog Pocket — mid-level patchy fog that drifts across open terrain\n• Low Cloud — dense, opaque low-altitude cloud banks that hang above higher ground';
+        typeRow.title = 'The visual style of this atmosphere bank:\nValley Mist - thin ground-hugging mist that pools in low-lying areas and valleys\nFog Pocket - mid-level patchy fog that drifts across open terrain\nLow Cloud - dense, opaque low-altitude cloud banks that hang above terrain\nPeak Cloud - larger cap clouds above high ridges';
         const typeSel = document.createElement('select');
         typeSel.className = 'param-value-input';
         typeSel.style.flex = '1';
-        for (const t of ['VALLEY_MIST', 'FOG_POCKET', 'LOW_CLOUD']) {
+        for (const t of ['VALLEY_MIST', 'FOG_POCKET', 'LOW_CLOUD', 'PEAK_CLOUD']) {
             const opt = document.createElement('option');
             opt.value = t; opt.textContent = t.replace(/_/g, ' ');
             if ((rule.type ?? 'FOG_POCKET') === t) opt.selected = true;
@@ -1498,6 +1498,7 @@ export class WorldAuthoringView extends WorldViewBase {
             ['Probability', 'probability', 0, 1, 0.01, 0.25, 'Base chance this rule fires when its tile and elevation conditions are met.\n0 = never spawns; 0.25 = 1 in 4 matching cells gets a bank; 1 = always spawns.\nStart low (0.1–0.3) and increase until the effect looks right.'],
             ['Weather Wt', 'weatherWeight', 0, 4, 0.05, 1, 'Scales the spawn probability with current weather intensity.\n1 = spawn rate is unaffected by weather; 2 = twice as likely during stormy weather; 0 = never spawns regardless of weather.'],
             ['Fog Wt', 'fogWeight', 0, 4, 0.05, 1, 'Scales the spawn probability with the world\'s ambient fog density.\n1 = unaffected; 2 = twice as likely when it\'s foggy; 0 = never spawns in fog.'],
+            ['Weather Floor', 'weatherFloor', 0, 1, 0.01, 0.32, 'Minimum weather multiplier for this rule.\nLower values keep low/mid clouds rare in clear weather; higher values make them visible even when the weather system is calm.'],
             ['Spawn Budget', 'spawnBudget', 0, 32, 1, 3, 'How many emitters are placed per matched cell for this rule.\nHigher = denser, larger individual banks; lower = smaller, more subtle effects.\nOverrides the global "Base Budget" for this rule type only.'],
         ]) {
             this._addAtmoRuleSlider(content, label,
@@ -1529,6 +1530,8 @@ export class WorldAuthoringView extends WorldViewBase {
         // Slope band
         this._addAtmoRuleBandSliders(content, 'Slope', rule, 'slope', 0, 1, 0.01,
             'Restrict this rule to a range of terrain steepness.\n0 = completely flat, 1 = vertical cliff face.\nExample: 0 to 0.3 = only flat-to-gentle terrain (good for valley mist).\nLeave at full range (0 to 1) to match any slope.');
+        this._addAtmoRuleBandSliders(content, 'Altitude Offset', rule, 'altitudeOffset', 0, 2000, 10,
+            'Optional cloud altitude above the sampled terrain point, in meters.\nUse low values for mist and higher values for low/mid cloud banks.');
     }
 
     _makeAtmoRuleRow(label) {
