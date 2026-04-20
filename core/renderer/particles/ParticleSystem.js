@@ -95,6 +95,13 @@ export class ParticleSystem {
         }
     }
 
+    setAuthoringRuntime(particleAuthoring) {
+        this.authoringRuntime = buildParticleAuthoringRuntime(particleAuthoring ?? {});
+        if (this._initialized && this.buffers) {
+            this.buffers.uploadTypeDefs(this.authoringRuntime.particleConfig);
+        }
+    }
+
     setLeafAnchorSource({ treeDetailSystem = null, templateLibrary = null, config = null } = {}) {
         this._leafAnchorSource?.dispose?.();
         this._leafAnchorSource = null;

@@ -188,6 +188,7 @@ export class WorldAuthoringView extends WorldViewBase {
         this._buildTileCatalogSection(container, raw);
         this._buildBiomesSection(container, raw);
         this._buildAssetsSection(container, raw);
+        this._buildAtmoBankSection(container, raw);
         this._buildParticleAmbienceSection(container, raw);
         this._buildActionsSection(container);
     }
@@ -1333,6 +1334,253 @@ export class WorldAuthoringView extends WorldViewBase {
         this._renderAssetList(profiles);
         this._renderAssetDetail(profiles[this._selectedAssetIdx]);
         this.toast(`Removed profile "${removed[0]?.id}"`);
+    }
+
+    // ── Atmosphere Banks section ─────────────────────────────────────
+
+    _ensureAtmoBankConfig(raw) {
+        if (!raw.atmosphereBanks || typeof raw.atmosphereBanks !== 'object') raw.atmosphereBanks = {};
+        if (!raw.atmosphereBanks.placement || typeof raw.atmosphereBanks.placement !== 'object') {
+            raw.atmosphereBanks.placement = {};
+        }
+        if (!Array.isArray(raw.atmosphereBanks.scatterRules)) raw.atmosphereBanks.scatterRules = [];
+        return raw.atmosphereBanks;
+    }
+
+    _buildAtmoBankSection(container, raw) {
+        const body = this._addSection(container, 'Atmosphere Banks', false);
+        this._atmoBankBody = body;
+        this._renderAtmoBankSection(raw);
+    }
+
+    _renderAtmoBankSection(raw = this._raw) {
+        const body = this._atmoBankBody;
+        if (!body) return;
+        body.innerHTML = '';
+
+        const ab = this._ensureAtmoBankConfig(raw);
+
+        const placementHead = document.createElement('div');
+        placementHead.className = 'panel-subsection-head';
+        placementHead.textContent = 'Placement';
+        body.appendChild(placementHead);
+
+        for (const [label, key, min, max, step, fallback, tooltip] of [
+            ['Max Render Dist', 'maxRenderDist', 100, 5000, 100, 2000, 'Maximum camera distance at which banks are rendered (m).'],
+            ['Cell Size', 'cellSize', 50, 2000, 50, 400, 'Grid cell size used for bank placement (m).'],
+            ['Scan Radius', 'scanRadius', 1, 24, 1, 7, 'Number of grid cells scanned around the camera each scatter pass.'],
+            ['Spawn Prob', 'spawnProbability', 0, 1, 0.01, 0.35, 'Per-cell probability of spawning a bank.'],
+            ['Base Budget', 'baseSpawnBudget', 0, 16, 1, 3, 'Default emitter spawn budget per scatter event.'],
+        ]) {
+            this._addEditorSlider(body, raw, {
+                label, min, max, step, needsRegen: true, tooltip,
+                get: (r) => {
+                    const pl = this._ensureAtmoBankConfig(r).placement;
+                    return Number.isFinite(pl[key]) ? pl[key] : fallback;
+                },
+                set: (r, v) => { this._ensureAtmoBankConfig(r).placement[key] = v; },
+            });
+        }
+
+        const rulesHead = document.createElement('div');
+        rulesHead.style.cssText = 'padding:8px 12px 4px; font-size:11px; font-weight:600; color:var(--text); display:flex; justify-content:space-between; align-items:center;';
+        const rulesTitle = document.createElement('span');
+        rulesTitle.textContent = `Scatter Rules (${ab.scatterRules.length})`;
+        const addBtn = document.createElement('button');
+        addBtn.className = 'studio-btn';
+        addBtn.textContent = '+ Add Rule';
+        addBtn.addEventListener('click', () => {
+            this._ensureAtmoBankConfig(raw).scatterRules.push({
+                id: `rule_${ab.scatterRules.length + 1}`,
+                type: 'FOG_POCKET',
+                enabled: true,
+                probability: 0.25,
+                weatherWeight: 1.0,
+                fogWeight: 1.0,
+                spawnBudget: 3,
+                tileCategories: [],
+                excludeTileCategories: [],
+            });
+            this._renderAtmoBankSection(raw);
+            this._markBiomeDirty();
+        });
+        rulesHead.appendChild(rulesTitle);
+        rulesHead.appendChild(addBtn);
+        body.appendChild(rulesHead);
+
+        for (let i = 0; i < ab.scatterRules.length; i++) {
+            this._renderAtmoScatterRule(body, raw, ab, i);
+        }
+    }
+
+    _renderAtmoScatterRule(body, raw, ab, ruleIdx) {
+        const rule = ab.scatterRules[ruleIdx];
+        const panel = document.createElement('div');
+        panel.style.cssText = 'margin:3px 8px 4px; border:1px solid var(--border); border-radius:4px; overflow:hidden;';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; align-items:center; gap:6px; padding:5px 8px; background:var(--panel-bg2); cursor:pointer; user-select:none;';
+
+        const enabledCb = document.createElement('input');
+        enabledCb.type = 'checkbox';
+        enabledCb.checked = rule.enabled !== false;
+        enabledCb.title = 'Enable/disable this rule';
+        enabledCb.addEventListener('change', (e) => {
+            e.stopPropagation();
+            rule.enabled = enabledCb.checked;
+            this._markBiomeDirty();
+        });
+
+        const titleSpan = document.createElement('span');
+        titleSpan.style.cssText = 'flex:1; font-size:11px; font-weight:600;';
+        titleSpan.textContent = `${ruleIdx + 1}. ${rule.id ?? 'rule'} (${rule.type ?? '?'})`;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'studio-btn';
+        removeBtn.textContent = '✕';
+        removeBtn.style.cssText = 'padding:1px 6px; font-size:10px;';
+        removeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            ab.scatterRules.splice(ruleIdx, 1);
+            this._renderAtmoBankSection(raw);
+            this._markBiomeDirty();
+        });
+
+        const content = document.createElement('div');
+        content.style.cssText = 'padding:6px 8px 8px; display:none;';
+        header.addEventListener('click', () => {
+            content.style.display = content.style.display === 'none' ? 'block' : 'none';
+        });
+
+        header.appendChild(enabledCb);
+        header.appendChild(titleSpan);
+        header.appendChild(removeBtn);
+        panel.appendChild(header);
+        panel.appendChild(content);
+        body.appendChild(panel);
+
+        // Type
+        const typeRow = this._makeAtmoRuleRow('Type');
+        const typeSel = document.createElement('select');
+        typeSel.className = 'param-value-input';
+        typeSel.style.flex = '1';
+        for (const t of ['VALLEY_MIST', 'FOG_POCKET', 'LOW_CLOUD']) {
+            const opt = document.createElement('option');
+            opt.value = t; opt.textContent = t.replace(/_/g, ' ');
+            if ((rule.type ?? 'FOG_POCKET') === t) opt.selected = true;
+            typeSel.appendChild(opt);
+        }
+        typeSel.addEventListener('change', () => {
+            rule.type = typeSel.value;
+            titleSpan.textContent = `${ruleIdx + 1}. ${rule.id ?? 'rule'} (${rule.type})`;
+            this._markBiomeDirty();
+        });
+        typeRow.appendChild(typeSel);
+        content.appendChild(typeRow);
+
+        // ID
+        this._addAtmoRuleText(content, 'ID', rule.id ?? '', 'Stable rule identifier.', (v) => {
+            rule.id = v;
+            titleSpan.textContent = `${ruleIdx + 1}. ${v || 'rule'} (${rule.type ?? '?'})`;
+            this._markBiomeDirty();
+        });
+
+        // Numeric sliders
+        for (const [label, field, min, max, step, fallback, tooltip] of [
+            ['Probability', 'probability', 0, 1, 0.01, 0.25, 'Chance of spawning when conditions match (after weather modifier).'],
+            ['Weather Wt', 'weatherWeight', 0, 4, 0.05, 1, 'Multiplier applied from current weather intensity.'],
+            ['Fog Wt', 'fogWeight', 0, 4, 0.05, 1, 'Multiplier applied from current fog density.'],
+            ['Spawn Budget', 'spawnBudget', 0, 32, 1, 3, 'Number of emitters placed per matched cell.'],
+        ]) {
+            this._addAtmoRuleSlider(content, label,
+                min, max, step,
+                Number.isFinite(rule[field]) ? rule[field] : fallback,
+                tooltip,
+                (v) => { rule[field] = v; this._markBiomeDirty(); });
+        }
+
+        // Category filters
+        this._addAtmoRuleText(content, 'Include Cats',
+            Array.isArray(rule.tileCategories) ? rule.tileCategories.join(', ') : '',
+            'Comma-separated tile categories that trigger this rule (e.g. FOREST, GRASS). Empty = any.',
+            (v) => {
+                rule.tileCategories = v.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+                this._markBiomeDirty();
+            });
+        this._addAtmoRuleText(content, 'Exclude Cats',
+            Array.isArray(rule.excludeTileCategories) ? rule.excludeTileCategories.join(', ') : '',
+            'Categories that always prevent this rule from firing (e.g. WATER, DESERT).',
+            (v) => {
+                rule.excludeTileCategories = v.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+                this._markBiomeDirty();
+            });
+
+        // Elevation band
+        this._addAtmoRuleBandSliders(content, 'Elevation', rule, 'elevation', -1, 1, 0.01,
+            'Normalized elevation band [-1..1]. Empty/default disables the filter.');
+        // Slope band
+        this._addAtmoRuleBandSliders(content, 'Slope', rule, 'slope', 0, 1, 0.01,
+            'Normalized slope band [0..1]. Empty/default disables the filter.');
+    }
+
+    _makeAtmoRuleRow(label) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:6px; padding:2px 0;';
+        const lbl = document.createElement('span');
+        lbl.style.cssText = 'flex:0 0 96px; font-size:10px; color:var(--text-dim);';
+        lbl.textContent = label;
+        row.appendChild(lbl);
+        return row;
+    }
+
+    _addAtmoRuleText(body, label, value, tooltip, onChange) {
+        const row = this._makeAtmoRuleRow(label);
+        const input = document.createElement('input');
+        input.type = 'text'; input.className = 'param-value-input';
+        input.style.flex = '1'; input.value = value; input.title = tooltip ?? '';
+        input.addEventListener('change', () => onChange(input.value));
+        row.appendChild(input);
+        body.appendChild(row);
+    }
+
+    _addAtmoRuleSlider(body, label, min, max, step, value, tooltip, onChange) {
+        const row = this._makeAtmoRuleRow(label);
+        const slider = document.createElement('input');
+        slider.type = 'range'; slider.min = min; slider.max = max;
+        slider.step = step; slider.value = value; slider.style.flex = '1';
+        slider.title = tooltip ?? '';
+        const num = document.createElement('input');
+        num.type = 'number'; num.className = 'param-value-input';
+        num.min = min; num.max = max; num.step = step; num.value = value;
+        num.style.cssText = 'width:52px;';
+        const update = (v) => {
+            v = Math.max(min, Math.min(max, v));
+            slider.value = v; num.value = v;
+            onChange(v);
+        };
+        slider.addEventListener('input', () => update(parseFloat(slider.value)));
+        num.addEventListener('change', () => { const v = parseFloat(num.value); if (Number.isFinite(v)) update(v); });
+        row.appendChild(slider); row.appendChild(num);
+        body.appendChild(row);
+    }
+
+    _addAtmoRuleBandSliders(body, label, rule, key, min, max, step, tooltip) {
+        const head = document.createElement('div');
+        head.style.cssText = 'font-size:10px; color:var(--text-dim); padding:5px 0 2px; font-weight:600;';
+        head.textContent = `${label} band`;
+        head.title = tooltip ?? '';
+        body.appendChild(head);
+        const band = rule[key];
+        const getOrCreate = () => {
+            if (!rule[key] || typeof rule[key] !== 'object') rule[key] = { min, max };
+            return rule[key];
+        };
+        this._addAtmoRuleSlider(body, '  Min', min, max, step,
+            Number.isFinite(band?.min) ? band.min : min, '',
+            (v) => { getOrCreate().min = v; this._markBiomeDirty(); });
+        this._addAtmoRuleSlider(body, '  Max', min, max, step,
+            Number.isFinite(band?.max) ? band.max : max, '',
+            (v) => { getOrCreate().max = v; this._markBiomeDirty(); });
     }
 
     _ensureLeafFallConfig(raw) {

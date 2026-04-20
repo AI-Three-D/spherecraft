@@ -1214,6 +1214,7 @@ updateLighting(starSystem) {
                 planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
             biomeDefinitions: planetConfig?.biomeDefinitions ?? planetConfig?.worldAuthoring?.biomes,
         });
+        this.particleSystem?.setAuthoringRuntime?.(planetConfig?.particleAuthoring ?? null);
         if (this.atmosphereLUT) {
             this.atmosphereLUT.invalidate();
         }
