@@ -18,12 +18,16 @@ export class AtmoBankSystem {
         depthFormat = 'depth24plus',
         tileStreamer = null,
         atmoBankAuthoring = null,
+        tileCategories = null,
+        biomeDefinitions = null,
     }) {
         this.device = device;
         this.backend = backend;
         this.colorFormat = colorFormat;
         this.depthFormat = depthFormat;
         this.authoringRuntime = buildAtmoBankAuthoringRuntime(atmoBankAuthoring ?? {});
+        this._tileCategories = Array.isArray(tileCategories) ? tileCategories : [];
+        this._biomeDefinitions = Array.isArray(biomeDefinitions) ? biomeDefinitions : [];
 
         this.buffers = null;
         this.simPass = null;
@@ -43,13 +47,28 @@ export class AtmoBankSystem {
         };
     }
 
-    setAuthoringRuntime(atmoBankAuthoring = null) {
+    _scatterAuthoringOptions() {
+        return {
+            placement: this.authoringRuntime.placement,
+            scatterRules: this.authoringRuntime.scatterRules,
+            tileCategories: this._tileCategories,
+            biomeDefinitions: this._biomeDefinitions,
+        };
+    }
+
+    setAuthoringRuntime(atmoBankAuthoring = null, options = {}) {
         this.authoringRuntime = buildAtmoBankAuthoringRuntime(atmoBankAuthoring ?? {});
+        if (Array.isArray(options.tileCategories)) {
+            this._tileCategories = options.tileCategories;
+        }
+        if (Array.isArray(options.biomeDefinitions)) {
+            this._biomeDefinitions = options.biomeDefinitions;
+        }
         if (this.buffers) {
             this.buffers.uploadTypeDefs(this.authoringRuntime.typeDefs);
         }
         this.placement = new AtmoBankPlacement(this.authoringRuntime.placement);
-        this.scatterPass?.setPlacementConfig?.(this.authoringRuntime.placement);
+        this.scatterPass?.setAuthoringConfig?.(this._scatterAuthoringOptions());
     }
 
     async initialize() {
@@ -70,9 +89,11 @@ export class AtmoBankSystem {
         this.placement = new AtmoBankPlacement(this.authoringRuntime.placement);
 
         if (this._tileStreamer) {
-            this.scatterPass = new AtmoBankScatterPass(this.device, this._tileStreamer, {
-                placement: this.authoringRuntime.placement,
-            });
+            this.scatterPass = new AtmoBankScatterPass(
+                this.device,
+                this._tileStreamer,
+                this._scatterAuthoringOptions()
+            );
             this.scatterPass.initialize();
             this._useGPUScatter = true;
         }
@@ -83,9 +104,7 @@ export class AtmoBankSystem {
     setTileStreamer(tileStreamer) {
         if (this._tileStreamer || !tileStreamer) return;
         this._tileStreamer = tileStreamer;
-        this.scatterPass = new AtmoBankScatterPass(this.device, tileStreamer, {
-            placement: this.authoringRuntime.placement,
-        });
+        this.scatterPass = new AtmoBankScatterPass(this.device, tileStreamer, this._scatterAuthoringOptions());
         this.scatterPass.initialize();
         this._useGPUScatter = true;
     }

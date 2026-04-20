@@ -210,6 +210,9 @@ function normalizeScatterRule(raw = {}, index = 0, warnings) {
         tileCategories: Array.isArray(raw.tileCategories)
             ? raw.tileCategories.map((name) => normalizeName(name)).filter(Boolean)
             : [],
+        excludeTileCategories: Array.isArray(raw.excludeTileCategories)
+            ? raw.excludeTileCategories.map((name) => normalizeName(name)).filter(Boolean)
+            : [],
         biomeIds: Array.isArray(raw.biomeIds)
             ? raw.biomeIds.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim())
             : [],
