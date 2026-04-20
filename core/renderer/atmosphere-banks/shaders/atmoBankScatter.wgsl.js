@@ -12,7 +12,8 @@ const TYPE_LOW_CLOUD:   u32 = 2u;
 struct ScatterParams {
     cameraPos: vec3<f32>, maxEmitters: u32,
     planetOrigin: vec3<f32>, planetRadius: f32,
-    heightScale: f32, weatherIntensity: f32, fogDensity: f32, frameSeed: u32,
+    heightScale: f32, weatherIntensity: f32, fogDensity: f32, maxRenderDist: f32,
+    frameSeed: u32, _p0: u32, _p1: u32, _p2: u32,
 };
 
 struct LayerMeta {
@@ -147,7 +148,7 @@ fn main(
     let dy = worldPos.y - params.cameraPos.y;
     let dz = worldPos.z - params.cameraPos.z;
     let camDist = sqrt(dx * dx + dy * dy + dz * dz);
-    if (camDist > 2000.0) { return; }
+    if (camDist > params.maxRenderDist) { return; }
 
     let slope = sampleSlope(texUv, layer);
     let weatherMod = max(0.32, clamp(params.fogDensity * 1.6 + params.weatherIntensity * 0.45, 0.0, 1.25));

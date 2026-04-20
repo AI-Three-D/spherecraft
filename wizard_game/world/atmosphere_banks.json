@@ -1,0 +1,107 @@
+{
+  "_comment": "Data-driven atmospheric bank definitions. Type/placement data is active now; scatterRules are authored for the next shader-rule packing increment.",
+  "placement": {
+    "cellSize": 400,
+    "scanRadius": 7,
+    "maxRenderDist": 2000,
+    "baseSpawnBudget": 3,
+    "lodNearDistance": 200,
+    "lodFarDistance": 1500,
+    "lodMinScale": 0.1,
+    "distanceCutoff": 2000,
+    "spawnProbability": 0.35
+  },
+  "types": [
+    {
+      "id": "valley_mist",
+      "type": "VALLEY_MIST",
+      "displayName": "Valley Mist",
+      "noiseScale": 0.008,
+      "noiseSpeed": 0.02,
+      "densityBase": 0.72,
+      "windResponse": 0.1,
+      "lifetime": { "min": 60, "max": 120 },
+      "size": { "min": 28, "max": 260 },
+      "color": [0.75, 0.78, 0.82, 0.40],
+      "fadeNearStart": 20,
+      "fadeFarStart": 1200,
+      "fadeFarEnd": 2000,
+      "densityThreshold": 0.26
+    },
+    {
+      "id": "fog_pocket",
+      "type": "FOG_POCKET",
+      "displayName": "Fog Pocket",
+      "noiseScale": 0.02,
+      "noiseSpeed": 0.04,
+      "densityBase": 0.82,
+      "windResponse": 0.15,
+      "lifetime": { "min": 30, "max": 80 },
+      "size": { "min": 16, "max": 210 },
+      "color": [0.72, 0.75, 0.80, 0.44],
+      "fadeNearStart": 10,
+      "fadeFarStart": 800,
+      "fadeFarEnd": 1500,
+      "densityThreshold": 0.24
+    },
+    {
+      "id": "low_cloud",
+      "type": "LOW_CLOUD",
+      "displayName": "Low Cloud",
+      "noiseScale": 0.006,
+      "noiseSpeed": 0.015,
+      "densityBase": 0.62,
+      "windResponse": 0.3,
+      "lifetime": { "min": 90, "max": 180 },
+      "size": { "min": 46, "max": 360 },
+      "color": [0.82, 0.84, 0.88, 0.32],
+      "fadeNearStart": 30,
+      "fadeFarStart": 1500,
+      "fadeFarEnd": 2500,
+      "densityThreshold": 0.32
+    }
+  ],
+  "scatterRules": [
+    {
+      "id": "forest_fog_pockets",
+      "type": "FOG_POCKET",
+      "tileCategories": ["FOREST"],
+      "biomeTags": ["woodland"],
+      "slope": { "min": 0.0, "max": 0.25, "weight": 1.0 },
+      "probability": 0.38,
+      "weatherWeight": 0.45,
+      "fogWeight": 1.6,
+      "spawnBudget": 5
+    },
+    {
+      "id": "depression_valley_mist",
+      "type": "VALLEY_MIST",
+      "terrainShape": {
+        "kind": "depression",
+        "neighborRadiusTexels": 3,
+        "minDepthMeters": 3.0,
+        "maxDepthMeters": 10.0
+      },
+      "slope": { "min": 0.0, "max": 0.15, "weight": 1.0 },
+      "probability": 0.28,
+      "weatherWeight": 0.45,
+      "fogWeight": 1.6,
+      "spawnBudget": 4
+    },
+    {
+      "id": "mountain_low_cloud",
+      "type": "LOW_CLOUD",
+      "terrainShape": {
+        "kind": "highland",
+        "minElevationNormalized": 0.55,
+        "fadeElevationNormalized": 0.2
+      },
+      "elevation": { "min": 0.55, "max": 1.0, "weight": 1.0 },
+      "slope": { "min": 0.0, "max": 0.3, "weight": 1.0 },
+      "probability": 0.14,
+      "weatherWeight": 0.45,
+      "fogWeight": 1.6,
+      "spawnBudget": 3
+    }
+  ]
+}

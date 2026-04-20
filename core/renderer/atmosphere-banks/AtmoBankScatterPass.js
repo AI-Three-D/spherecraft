@@ -1,5 +1,6 @@
 import { buildAtmoBankScatterWGSL } from './shaders/atmoBankScatter.wgsl.js';
 import { ATMO_EMITTER_CAPACITY, ATMO_EMITTER_STRIDE } from './AtmoBankTypes.js';
+import { DEFAULT_ATMO_PLACEMENT_CONFIG } from './AtmoBankAuthoringRuntime.js';
 
 const COUNTER_SIZE = 16;
 const LAYER_META_STRIDE = 32;
@@ -8,9 +9,10 @@ const SCATTER_INTERVAL = 150;
 const CAMERA_MOVE_THRESHOLD = 250;
 
 export class AtmoBankScatterPass {
-    constructor(device, tileStreamer) {
+    constructor(device, tileStreamer, options = {}) {
         this.device = device;
         this.tileStreamer = tileStreamer;
+        this._placement = options.placement ?? DEFAULT_ATMO_PLACEMENT_CONFIG;
 
         this._pipeline = null;
         this._bgl = null;
@@ -98,6 +100,12 @@ export class AtmoBankScatterPass {
 
     getCounterBuffer() {
         return this._counterBuf;
+    }
+
+    setPlacementConfig(config = {}) {
+        this._placement = config && typeof config === 'object'
+            ? config
+            : DEFAULT_ATMO_PLACEMENT_CONFIG;
     }
 
     getDiagnostics() {
@@ -305,7 +313,8 @@ export class AtmoBankScatterPass {
         paramData[8] = planetConfig?.heightScale || 2000;
         paramData[9] = environmentState?.weatherIntensity ?? 0.3;
         paramData[10] = environmentState?.fogDensity ?? 0.3;
-        paramU32[11] = this._stableSeed(planetConfig);
+        paramData[11] = this._placement?.maxRenderDist ?? DEFAULT_ATMO_PLACEMENT_CONFIG.maxRenderDist;
+        paramU32[12] = this._stableSeed(planetConfig);
 
         const q = this.device.queue;
         q.writeBuffer(this._paramBuf, 0, paramData);
