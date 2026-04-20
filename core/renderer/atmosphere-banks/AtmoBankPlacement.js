@@ -1,17 +1,17 @@
 import { ATMO_BANK_TYPES, ATMO_EMITTER_CAPACITY } from './AtmoBankTypes.js';
-import { ATMO_PLACEMENT_CONFIG } from '../../../templates/configs/atmoBankConfig.js';
+import { DEFAULT_ATMO_PLACEMENT_CONFIG } from './AtmoBankAuthoringRuntime.js';
 
 export class AtmoBankPlacement {
     constructor(config = {}) {
-        this._cellSize        = config.cellSize        ?? ATMO_PLACEMENT_CONFIG.cellSize;
-        this._scanRadius      = config.scanRadius      ?? ATMO_PLACEMENT_CONFIG.scanRadius;
-        this._maxRenderDist   = config.maxRenderDist   ?? ATMO_PLACEMENT_CONFIG.maxRenderDist;
-        this._spawnBudget     = config.baseSpawnBudget  ?? ATMO_PLACEMENT_CONFIG.baseSpawnBudget;
-        this._lodNear         = config.lodNearDistance  ?? ATMO_PLACEMENT_CONFIG.lodNearDistance;
-        this._lodFar          = config.lodFarDistance   ?? ATMO_PLACEMENT_CONFIG.lodFarDistance;
-        this._lodMinScale     = config.lodMinScale      ?? ATMO_PLACEMENT_CONFIG.lodMinScale;
-        this._distCutoff      = config.distanceCutoff   ?? ATMO_PLACEMENT_CONFIG.distanceCutoff;
-        this._baseProb        = config.spawnProbability ?? ATMO_PLACEMENT_CONFIG.spawnProbability;
+        this._cellSize        = config.cellSize        ?? DEFAULT_ATMO_PLACEMENT_CONFIG.cellSize;
+        this._scanRadius      = config.scanRadius      ?? DEFAULT_ATMO_PLACEMENT_CONFIG.scanRadius;
+        this._maxRenderDist   = config.maxRenderDist   ?? DEFAULT_ATMO_PLACEMENT_CONFIG.maxRenderDist;
+        this._spawnBudget     = config.baseSpawnBudget  ?? DEFAULT_ATMO_PLACEMENT_CONFIG.baseSpawnBudget;
+        this._lodNear         = config.lodNearDistance  ?? DEFAULT_ATMO_PLACEMENT_CONFIG.lodNearDistance;
+        this._lodFar          = config.lodFarDistance   ?? DEFAULT_ATMO_PLACEMENT_CONFIG.lodFarDistance;
+        this._lodMinScale     = config.lodMinScale      ?? DEFAULT_ATMO_PLACEMENT_CONFIG.lodMinScale;
+        this._distCutoff      = config.distanceCutoff   ?? DEFAULT_ATMO_PLACEMENT_CONFIG.distanceCutoff;
+        this._baseProb        = config.spawnProbability ?? DEFAULT_ATMO_PLACEMENT_CONFIG.spawnProbability;
         this._emitters = [];
     }
 

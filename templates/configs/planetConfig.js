@@ -3,6 +3,7 @@ import { Vector3 } from '../../shared/math/index.js';
 import { PlanetAtmosphereSettings } from './planetAtmosphereSettings.js';
 import { requireBool, requireInt, requireNumber, requireObject, requireString } from '../../shared/requireUtil.js';
 import { createDefaultWorldAuthoringRuntime } from '../../core/world/biomeRuntime.js';
+import { cloneAtmoBankAuthoringRuntime } from '../../core/renderer/atmosphere-banks/AtmoBankAuthoringRuntime.js';
 
 function cloneWorldAuthoringRuntime(value) {
   const fallback = createDefaultWorldAuthoringRuntime();
@@ -123,6 +124,7 @@ export class PlanetConfig {
     this.assetProfiles = Array.isArray(options.assetProfiles)
       ? options.assetProfiles.slice()
       : this.worldAuthoring.assetProfiles.slice();
+    this.atmoBankAuthoring = cloneAtmoBankAuthoringRuntime(options.atmoBankAuthoring);
     this.terrainGeneration = requireObject(options.terrainGeneration, 'terrainGeneration');
 
     // Cloud options (atmosphere-relative altitudes)

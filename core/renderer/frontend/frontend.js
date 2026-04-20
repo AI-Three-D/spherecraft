@@ -550,6 +550,7 @@ export class Frontend {
                 backend: this.backend,
                 colorFormat: HDR_FORMAT,
                 depthFormat: 'depth24plus',
+                atmoBankAuthoring: this.planetConfig?.atmoBankAuthoring,
             });
             await this.atmoBankSystem.initialize();
             if (this.quadtreeTileManager?.tileStreamer) {
@@ -1198,10 +1199,12 @@ updateLighting(starSystem) {
     }
 
     async switchPlanet(planetConfig) {
+        this.planetConfig = planetConfig;
         this.atmosphereSettings = requireObject(
             planetConfig.atmosphereSettings,
             'planetConfig.atmosphereSettings'
         );
+        this.atmoBankSystem?.setAuthoringRuntime?.(planetConfig?.atmoBankAuthoring);
         if (this.atmosphereLUT) {
             this.atmosphereLUT.invalidate();
         }

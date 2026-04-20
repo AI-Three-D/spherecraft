@@ -120,6 +120,7 @@ export class GameDataConfig {
       worldAuthoring: planet.worldAuthoring,
       biomeDefinitions: planet.biomeDefinitions,
       assetProfiles: planet.assetProfiles,
+      atmoBankAuthoring: planet.atmoBankAuthoring,
 
       // terrain generation config
       terrainGeneration: planet.terrain,
@@ -210,6 +211,7 @@ class PlanetDataConfig {
     this.macroTileSpan = options.macroTileSpan ?? 4;
     this.macroMaxLOD = options.macroMaxLOD ?? 0;
     this.tileCatalog = options.tileCatalog ?? options.worldAuthoring?.tileCatalog ?? null;
+    this.atmoBankAuthoring = options.atmoBankAuthoring ?? null;
 
     // Cloud options (optional with defaults) - altitudes as fractions of atmosphereHeight
     const cloudOpts = options.cloudOptions || {};

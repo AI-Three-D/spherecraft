@@ -5,14 +5,25 @@ import { AtmoBankRenderPass } from './AtmoBankRenderPass.js';
 import { AtmoBankPlacement } from './AtmoBankPlacement.js';
 import { AtmoBankScatterPass } from './AtmoBankScatterPass.js';
 import { ATMO_EMITTER_CAPACITY } from './AtmoBankTypes.js';
-import { ATMO_BANK_CONFIG, ATMO_PLACEMENT_CONFIG } from '../../../templates/configs/atmoBankConfig.js';
+import {
+    buildAtmoBankAuthoringRuntime,
+    DEFAULT_ATMO_PLACEMENT_CONFIG,
+} from './AtmoBankAuthoringRuntime.js';
 
 export class AtmoBankSystem {
-    constructor({ device, backend, colorFormat, depthFormat = 'depth24plus', tileStreamer = null }) {
+    constructor({
+        device,
+        backend,
+        colorFormat,
+        depthFormat = 'depth24plus',
+        tileStreamer = null,
+        atmoBankAuthoring = null,
+    }) {
         this.device = device;
         this.backend = backend;
         this.colorFormat = colorFormat;
         this.depthFormat = depthFormat;
+        this.authoringRuntime = buildAtmoBankAuthoringRuntime(atmoBankAuthoring ?? {});
 
         this.buffers = null;
         this.simPass = null;
@@ -32,11 +43,20 @@ export class AtmoBankSystem {
         };
     }
 
+    setAuthoringRuntime(atmoBankAuthoring = null) {
+        this.authoringRuntime = buildAtmoBankAuthoringRuntime(atmoBankAuthoring ?? {});
+        if (this.buffers) {
+            this.buffers.uploadTypeDefs(this.authoringRuntime.typeDefs);
+        }
+        this.placement = new AtmoBankPlacement(this.authoringRuntime.placement);
+        this.scatterPass?.setPlacementConfig?.(this.authoringRuntime.placement);
+    }
+
     async initialize() {
         if (this._initialized) return;
 
         this.buffers = new AtmoBankBuffers(this.device);
-        this.buffers.uploadTypeDefs(ATMO_BANK_CONFIG);
+        this.buffers.uploadTypeDefs(this.authoringRuntime.typeDefs);
 
         this.simPass = new AtmoBankSimPass(this.device, this.buffers);
         this.simPass.initialize();
@@ -47,10 +67,12 @@ export class AtmoBankSystem {
         });
         this.renderPass.initialize();
 
-        this.placement = new AtmoBankPlacement();
+        this.placement = new AtmoBankPlacement(this.authoringRuntime.placement);
 
         if (this._tileStreamer) {
-            this.scatterPass = new AtmoBankScatterPass(this.device, this._tileStreamer);
+            this.scatterPass = new AtmoBankScatterPass(this.device, this._tileStreamer, {
+                placement: this.authoringRuntime.placement,
+            });
             this.scatterPass.initialize();
             this._useGPUScatter = true;
         }
@@ -61,7 +83,9 @@ export class AtmoBankSystem {
     setTileStreamer(tileStreamer) {
         if (this._tileStreamer || !tileStreamer) return;
         this._tileStreamer = tileStreamer;
-        this.scatterPass = new AtmoBankScatterPass(this.device, tileStreamer);
+        this.scatterPass = new AtmoBankScatterPass(this.device, tileStreamer, {
+            placement: this.authoringRuntime.placement,
+        });
         this.scatterPass.initialize();
         this._useGPUScatter = true;
     }
@@ -78,6 +102,7 @@ export class AtmoBankSystem {
         return {
             initialized: this._initialized,
             mode: this._useGPUScatter ? 'gpu-scatter' : 'cpu-placement',
+            authoring: this.authoringRuntime.summary,
             hasTileStreamer: !!this._tileStreamer,
             maxParticles: this.buffers?.maxParticles ?? 0,
             frameIndex: this.buffers?.frameIndex ?? 0,
@@ -171,7 +196,7 @@ export class AtmoBankSystem {
             emitterCount,
             windDirection: [windDir?.x ?? 0, windDir?.y ?? 0],
             windSpeed: environmentState?.windSpeed ?? 0,
-            maxRenderDist: ATMO_PLACEMENT_CONFIG.maxRenderDist,
+            maxRenderDist: this.authoringRuntime?.placement?.maxRenderDist ?? DEFAULT_ATMO_PLACEMENT_CONFIG.maxRenderDist,
             near: camera.near ?? 0.5,
             far: camera.far ?? 100000,
             sunDirection: [sunDir?.x ?? 0.5, sunDir?.y ?? 1.0, sunDir?.z ?? 0.3],

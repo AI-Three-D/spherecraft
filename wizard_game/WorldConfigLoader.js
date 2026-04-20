@@ -20,6 +20,7 @@ import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
 import { buildWorldTextureConfig } from './WorldTextureOverrides.js';
 import { DEFAULT_TILE_CATALOG } from '../templates/configs/defaultTileCatalog.js';
 import { buildWorldAuthoringRuntime } from '../core/world/biomeRuntime.js';
+import { buildAtmoBankAuthoringRuntime } from '../core/renderer/atmosphere-banks/AtmoBankAuthoringRuntime.js';
 
 function cloneJSONValue(value) {
     if (Array.isArray(value)) {
@@ -46,7 +47,7 @@ export class WorldConfigLoader {
     // ── Load ─────────────────────────────────────────────────────────────
 
     async load() {
-        const [terrain, planet, postprocessing, engine, textures, biomes, assets] = await Promise.all([
+        const [terrain, planet, postprocessing, engine, textures, biomes, assets, atmosphereBanks] = await Promise.all([
             this._fetchJSON('terrain.json'),
             this._fetchJSON('planet.json'),
             this._fetchJSON('postprocessing.json'),
@@ -54,16 +55,17 @@ export class WorldConfigLoader {
             this._fetchJSON('textures.json').catch(() => ({ overrides: {} })),
             this._fetchJSON('biomes.json').catch(() => ({ biomes: [] })),
             this._fetchJSON('assets.json').catch(() => ({ profiles: [] })),
+            this._fetchJSON('atmosphere_banks.json').catch(() => ({})),
         ]);
 
         if (!biomes.tileCatalog) {
             biomes.tileCatalog = cloneJSONValue(DEFAULT_TILE_CATALOG);
         }
 
-        this.raw = { terrain, planet, postprocessing, engine, textures, biomes, assets };
+        this.raw = { terrain, planet, postprocessing, engine, textures, biomes, assets, atmosphereBanks };
 
         const engineConfig   = this._buildEngineConfig(terrain, planet, engine);
-        const gameDataConfig = this._buildGameDataConfig(terrain, planet, textures, biomes, assets);
+        const gameDataConfig = this._buildGameDataConfig(terrain, planet, textures, biomes, assets, atmosphereBanks);
 
         const worldAuthoring = gameDataConfig?.planets?.[0]?.worldAuthoring ?? null;
         const summary = worldAuthoring?.summary ?? null;
@@ -95,6 +97,16 @@ export class WorldConfigLoader {
                     `${summary.unknownAssetBiomeRefCount} unknown asset biome refs, ` +
                     `${summary.tileCatalogWarningCount ?? 0} tile catalog warnings`
                 );
+            }
+        }
+        const atmoSummary = gameDataConfig?.planets?.[0]?.atmoBankAuthoring?.summary ?? null;
+        if (atmoSummary) {
+            console.info(
+                `[WorldConfigLoader] atmosphere banks ready: ` +
+                `${atmoSummary.typeCount} types, ${atmoSummary.scatterRuleCount} scatter rules`
+            );
+            if ((atmoSummary.warningCount ?? 0) > 0) {
+                console.warn(`[WorldConfigLoader] atmosphere bank warnings: ${atmoSummary.warningCount}`);
             }
         }
 
@@ -171,7 +183,7 @@ export class WorldConfigLoader {
 
     // ── Build GameDataConfig ──────────────────────────────────────────────
 
-    _buildGameDataConfig(terrain, planet, textures, biomes = { biomes: [] }, assets = { profiles: [] }) {
+    _buildGameDataConfig(terrain, planet, textures, biomes = { biomes: [] }, assets = { profiles: [] }, atmosphereBanks = {}) {
         const base = createGameDataConfig();
 
         // The base factory returns a GameDataConfig whose planet list we patch.
@@ -191,6 +203,7 @@ export class WorldConfigLoader {
         activePlanet.tileCatalog = worldAuthoring.tileCatalog;
         activePlanet.biomeDefinitions = worldAuthoring.biomes;
         activePlanet.assetProfiles = worldAuthoring.assetProfiles;
+        activePlanet.atmoBankAuthoring = buildAtmoBankAuthoringRuntime(atmosphereBanks ?? {});
 
         // ── Terrain ──────────────────────────────────────────────────────
         const t = activePlanet.terrain;
