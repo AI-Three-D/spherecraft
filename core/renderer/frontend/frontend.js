@@ -551,6 +551,9 @@ export class Frontend {
                 colorFormat: HDR_FORMAT,
                 depthFormat: 'depth24plus',
                 atmoBankAuthoring: this.planetConfig?.atmoBankAuthoring,
+                tileCategories: this.planetConfig?.tileCatalog?.tileCategories ??
+                    this.planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
+                biomeDefinitions: this.planetConfig?.biomeDefinitions ?? this.planetConfig?.worldAuthoring?.biomes,
             });
             await this.atmoBankSystem.initialize();
             if (this.quadtreeTileManager?.tileStreamer) {
@@ -1204,7 +1207,11 @@ updateLighting(starSystem) {
             planetConfig.atmosphereSettings,
             'planetConfig.atmosphereSettings'
         );
-        this.atmoBankSystem?.setAuthoringRuntime?.(planetConfig?.atmoBankAuthoring);
+        this.atmoBankSystem?.setAuthoringRuntime?.(planetConfig?.atmoBankAuthoring, {
+            tileCategories: planetConfig?.tileCatalog?.tileCategories ??
+                planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
+            biomeDefinitions: planetConfig?.biomeDefinitions ?? planetConfig?.worldAuthoring?.biomes,
+        });
         if (this.atmosphereLUT) {
             this.atmosphereLUT.invalidate();
         }

@@ -66,6 +66,7 @@
       "id": "forest_fog_pockets",
       "type": "FOG_POCKET",
       "tileCategories": ["FOREST"],
+      "excludeTileCategories": ["WATER", "DESERT"],
       "biomeTags": ["woodland"],
       "slope": { "min": 0.0, "max": 0.25, "weight": 1.0 },
       "probability": 0.38,
@@ -76,6 +77,7 @@
     {
       "id": "depression_valley_mist",
       "type": "VALLEY_MIST",
+      "excludeTileCategories": ["WATER", "DESERT"],
       "terrainShape": {
         "kind": "depression",
         "neighborRadiusTexels": 3,
@@ -91,6 +93,7 @@
     {
       "id": "mountain_low_cloud",
       "type": "LOW_CLOUD",
+      "excludeTileCategories": ["WATER", "DESERT"],
       "terrainShape": {
         "kind": "highland",
         "minElevationNormalized": 0.55,
