@@ -172,8 +172,8 @@ function updateCanvasResolution(canvas) {
     const displayHeight = canvas.clientHeight;
     const dpr = window.devicePixelRatio || 1;
 
-    const width = Math.floor(displayWidth * dpr);
-    const height = Math.floor(displayHeight * dpr);
+    const width = Math.max(1, Math.floor(displayWidth * dpr));
+    const height = Math.max(1, Math.floor(displayHeight * dpr));
 
     if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
@@ -221,6 +221,7 @@ export class GameEngine {
         this._lastUIUpdate = 0;
         this._uiUpdateIntervalMs = this.engineConfig.ui.updateIntervalMs;
         this._renderInFlight = false;
+        this._resizePending = false;
         this._initialLoadState = null;
     }
 
@@ -1076,6 +1077,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         if (!this.isGameActive) return;
         if (this._renderInFlight) return;
 
+        if (this._resizePending) {
+            this._resizePending = false;
+            this.handleResize();
+        }
+
         this._renderInFlight = true;
         const clampedDelta = Math.min(Math.max(Number.isFinite(deltaTime) ? deltaTime : 0, 0), 0.1);
         const terrainSnapshotFrozen = this.renderer?.isTerrainManualDiagnosticFrozen?.() === true;
@@ -1231,21 +1237,31 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     handleResize() {
+        if (this._renderInFlight) {
+            this._resizePending = true;
+            return;
+        }
+
         const result = updateCanvasResolution(this.canvas);
 
         if (result.changed) {
-            if (this.renderer && this.renderer.backend) {
-                this.renderer.backend.setViewport(0, 0, result.width, result.height);
-            }
+            this._applyResize(result.width, result.height);
+        }
+    }
 
-            if (this.camera) {
-                this.camera.aspect = result.width / result.height;
+    _applyResize(width, height) {
+        const safeWidth = Math.max(1, Math.floor(width));
+        const safeHeight = Math.max(1, Math.floor(height));
+        const aspect = safeWidth / safeHeight;
 
-                if (this.renderer && this.renderer.camera) {
-                    this.renderer.camera.aspect = result.width / result.height;
-                    this.renderer._updateCameraMatrices();
-                }
-            }
+        if (this.camera) {
+            this.camera.aspect = aspect;
+        }
+
+        if (this.renderer?.handleResize) {
+            this.renderer.handleResize(safeWidth, safeHeight);
+        } else if (this.renderer?.backend) {
+            this.renderer.backend.setViewport(0, 0, safeWidth, safeHeight);
         }
     }
 
