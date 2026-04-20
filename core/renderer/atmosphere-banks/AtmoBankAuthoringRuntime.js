@@ -7,15 +7,15 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         displayName: 'Valley Mist',
         noiseScale: 0.008,
         noiseSpeed: 0.02,
-        densityBase: 0.72,
+        densityBase: 0.54,
         windResponse: 0.1,
         lifetime: Object.freeze({ min: 60, max: 120 }),
-        size: Object.freeze({ min: 28, max: 260 }),
-        color: Object.freeze([0.75, 0.78, 0.82, 0.40]),
+        size: Object.freeze({ min: 24, max: 220 }),
+        color: Object.freeze([0.75, 0.78, 0.82, 0.32]),
         fadeNearStart: 20.0,
         fadeFarStart: 1200.0,
         fadeFarEnd: 2000.0,
-        densityThreshold: 0.26,
+        densityThreshold: 0.38,
     }),
     [ATMO_BANK_TYPES.FOG_POCKET]: Object.freeze({
         id: 'fog_pocket',
@@ -23,15 +23,15 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         displayName: 'Fog Pocket',
         noiseScale: 0.02,
         noiseSpeed: 0.04,
-        densityBase: 0.82,
+        densityBase: 0.58,
         windResponse: 0.15,
         lifetime: Object.freeze({ min: 30, max: 80 }),
-        size: Object.freeze({ min: 16, max: 210 }),
-        color: Object.freeze([0.72, 0.75, 0.80, 0.44]),
+        size: Object.freeze({ min: 14, max: 170 }),
+        color: Object.freeze([0.72, 0.75, 0.80, 0.34]),
         fadeNearStart: 10.0,
         fadeFarStart: 800.0,
         fadeFarEnd: 1500.0,
-        densityThreshold: 0.24,
+        densityThreshold: 0.40,
     }),
     [ATMO_BANK_TYPES.LOW_CLOUD]: Object.freeze({
         id: 'low_cloud',
@@ -39,28 +39,35 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         displayName: 'Low Cloud',
         noiseScale: 0.006,
         noiseSpeed: 0.015,
-        densityBase: 0.62,
+        densityBase: 0.46,
         windResponse: 0.3,
         lifetime: Object.freeze({ min: 90, max: 180 }),
-        size: Object.freeze({ min: 46, max: 360 }),
-        color: Object.freeze([0.82, 0.84, 0.88, 0.32]),
+        size: Object.freeze({ min: 40, max: 300 }),
+        color: Object.freeze([0.82, 0.84, 0.88, 0.24]),
         fadeNearStart: 30.0,
         fadeFarStart: 1500.0,
         fadeFarEnd: 2500.0,
-        densityThreshold: 0.32,
+        densityThreshold: 0.44,
     }),
 });
 
 export const DEFAULT_ATMO_PLACEMENT_CONFIG = Object.freeze({
     cellSize: 400,
     scanRadius: 7,
-    maxRenderDist: 2000,
-    baseSpawnBudget: 3,
+    maxRenderDist: 1600,
+    baseSpawnBudget: 2,
     lodNearDistance: 200,
     lodFarDistance: 1500,
     lodMinScale: 0.1,
-    distanceCutoff: 2000,
-    spawnProbability: 0.35,
+    distanceCutoff: 1600,
+    spawnProbability: 0.24,
+    localDistanceFog: Object.freeze({
+        enabled: true,
+        largeEmitterMinSize: 160,
+        densityBoost: 0.00016,
+        radiusScale: 0.92,
+        heightScale: 0.34,
+    }),
 });
 
 const ATMO_TYPE_BY_NAME = Object.freeze(Object.fromEntries(
@@ -181,6 +188,33 @@ function normalizePlacement(raw = {}, fallback = DEFAULT_ATMO_PLACEMENT_CONFIG) 
         lodMinScale: clampNumber(raw.lodMinScale, fallback.lodMinScale, 0, 1),
         distanceCutoff: clampNumber(raw.distanceCutoff, fallback.distanceCutoff, 1, 1000000),
         spawnProbability: clampNumber(raw.spawnProbability, fallback.spawnProbability, 0, 1),
+        localDistanceFog: {
+            enabled: raw.localDistanceFog?.enabled ?? fallback.localDistanceFog?.enabled ?? true,
+            largeEmitterMinSize: clampNumber(
+                raw.localDistanceFog?.largeEmitterMinSize,
+                fallback.localDistanceFog?.largeEmitterMinSize ?? 160,
+                1,
+                5000
+            ),
+            densityBoost: clampNumber(
+                raw.localDistanceFog?.densityBoost,
+                fallback.localDistanceFog?.densityBoost ?? 0.00016,
+                0,
+                0.01
+            ),
+            radiusScale: clampNumber(
+                raw.localDistanceFog?.radiusScale,
+                fallback.localDistanceFog?.radiusScale ?? 0.92,
+                0.1,
+                4
+            ),
+            heightScale: clampNumber(
+                raw.localDistanceFog?.heightScale,
+                fallback.localDistanceFog?.heightScale ?? 0.34,
+                0.05,
+                2
+            ),
+        },
     };
 }
 

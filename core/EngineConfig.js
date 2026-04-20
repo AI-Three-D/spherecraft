@@ -106,15 +106,15 @@ export class EngineConfig {
         },
         fog: {
           densityMultiplier: requireNumber(
-            fog.densityMultiplier ?? 0.48,
+            fog.densityMultiplier ?? 0.40,
             'rendering.lighting.fog.densityMultiplier'
           ),
           maxBaseDensity: requireNumber(
-            fog.maxBaseDensity ?? 0.0006,
+            fog.maxBaseDensity ?? 0.00055,
             'rendering.lighting.fog.maxBaseDensity'
           ),
           dayDensityScale: requireNumber(
-            fog.dayDensityScale ?? 1.0,
+            fog.dayDensityScale ?? 0.85,
             'rendering.lighting.fog.dayDensityScale'
           ),
           nightDensityScale: requireNumber(

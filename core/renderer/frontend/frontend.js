@@ -818,6 +818,15 @@ updateLighting(starSystem) {
             };
         }
 
+        if (this.uniformManager?.setLocalFogDensityBoost) {
+            const localFogBoost = this.atmoBankSystem?.estimateLocalDistanceFogBoost?.(
+                this.camera,
+                environmentState,
+                this.planetConfig
+            ) ?? 0;
+            this.uniformManager.setLocalFogDensityBoost(localFogBoost);
+        }
+
         // --- UPDATED OCEAN UPDATE LOGIC ---
         // Pass the computed values from environmentState directly to the renderer
         if (this.globalOceanRenderer && environmentState && environmentState.water) {

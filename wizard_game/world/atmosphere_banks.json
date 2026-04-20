@@ -3,13 +3,20 @@
   "placement": {
     "cellSize": 400,
     "scanRadius": 7,
-    "maxRenderDist": 2000,
-    "baseSpawnBudget": 3,
+    "maxRenderDist": 1600,
+    "baseSpawnBudget": 2,
     "lodNearDistance": 200,
     "lodFarDistance": 1500,
     "lodMinScale": 0.1,
-    "distanceCutoff": 2000,
-    "spawnProbability": 0.35
+    "distanceCutoff": 1600,
+    "spawnProbability": 0.24,
+    "localDistanceFog": {
+      "enabled": true,
+      "largeEmitterMinSize": 160,
+      "densityBoost": 0.00016,
+      "radiusScale": 0.92,
+      "heightScale": 0.34
+    }
   },
   "types": [
     {
@@ -18,15 +25,15 @@
       "displayName": "Valley Mist",
       "noiseScale": 0.008,
       "noiseSpeed": 0.02,
-      "densityBase": 0.72,
+      "densityBase": 0.54,
       "windResponse": 0.1,
       "lifetime": { "min": 60, "max": 120 },
-      "size": { "min": 28, "max": 260 },
-      "color": [0.75, 0.78, 0.82, 0.40],
+      "size": { "min": 24, "max": 220 },
+      "color": [0.75, 0.78, 0.82, 0.32],
       "fadeNearStart": 20,
       "fadeFarStart": 1200,
       "fadeFarEnd": 2000,
-      "densityThreshold": 0.26
+      "densityThreshold": 0.38
     },
     {
       "id": "fog_pocket",
@@ -34,15 +41,15 @@
       "displayName": "Fog Pocket",
       "noiseScale": 0.02,
       "noiseSpeed": 0.04,
-      "densityBase": 0.82,
+      "densityBase": 0.58,
       "windResponse": 0.15,
       "lifetime": { "min": 30, "max": 80 },
-      "size": { "min": 16, "max": 210 },
-      "color": [0.72, 0.75, 0.80, 0.44],
+      "size": { "min": 14, "max": 170 },
+      "color": [0.72, 0.75, 0.80, 0.34],
       "fadeNearStart": 10,
       "fadeFarStart": 800,
       "fadeFarEnd": 1500,
-      "densityThreshold": 0.24
+      "densityThreshold": 0.40
     },
     {
       "id": "low_cloud",
@@ -50,15 +57,15 @@
       "displayName": "Low Cloud",
       "noiseScale": 0.006,
       "noiseSpeed": 0.015,
-      "densityBase": 0.62,
+      "densityBase": 0.46,
       "windResponse": 0.3,
       "lifetime": { "min": 90, "max": 180 },
-      "size": { "min": 46, "max": 360 },
-      "color": [0.82, 0.84, 0.88, 0.32],
+      "size": { "min": 40, "max": 300 },
+      "color": [0.82, 0.84, 0.88, 0.24],
       "fadeNearStart": 30,
       "fadeFarStart": 1500,
       "fadeFarEnd": 2500,
-      "densityThreshold": 0.32
+      "densityThreshold": 0.44
     }
   ],
   "scatterRules": [
@@ -69,10 +76,10 @@
       "excludeTileCategories": ["WATER", "DESERT"],
       "biomeTags": ["woodland"],
       "slope": { "min": 0.0, "max": 0.25, "weight": 1.0 },
-      "probability": 0.38,
+      "probability": 0.26,
       "weatherWeight": 0.45,
       "fogWeight": 1.6,
-      "spawnBudget": 5
+      "spawnBudget": 3
     },
     {
       "id": "depression_valley_mist",
@@ -85,10 +92,10 @@
         "maxDepthMeters": 10.0
       },
       "slope": { "min": 0.0, "max": 0.15, "weight": 1.0 },
-      "probability": 0.28,
+      "probability": 0.22,
       "weatherWeight": 0.45,
       "fogWeight": 1.6,
-      "spawnBudget": 4
+      "spawnBudget": 3
     },
     {
       "id": "mountain_low_cloud",
@@ -101,10 +108,10 @@
       },
       "elevation": { "min": 0.55, "max": 1.0, "weight": 1.0 },
       "slope": { "min": 0.0, "max": 0.3, "weight": 1.0 },
-      "probability": 0.14,
+      "probability": 0.08,
       "weatherWeight": 0.45,
       "fogWeight": 1.6,
-      "spawnBudget": 3
+      "spawnBudget": 2
     }
   ]
 }

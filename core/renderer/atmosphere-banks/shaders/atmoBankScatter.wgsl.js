@@ -199,22 +199,22 @@ fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, eleva
     let roll = hashToFloat(cellHash ^ 0x12345678u);
 
     if (isForestTile(tileId) && slope < 0.25) {
-        let prob = 0.38 * weatherMod;
+        let prob = 0.26 * weatherMod;
         if (roll < prob) {
             selected.matched = 1u;
             selected.typeId = TYPE_FOG_POCKET;
-            selected.spawnBudget = 5u;
+            selected.spawnBudget = 3u;
             selected.rngSeed = cellHash;
             return selected;
         }
     }
 
     if (isSwampTile(tileId)) {
-        let prob = 0.45 * weatherMod;
+        let prob = 0.30 * weatherMod;
         if (roll < prob) {
             selected.matched = 1u;
             selected.typeId = TYPE_FOG_POCKET;
-            selected.spawnBudget = 5u;
+            selected.spawnBudget = 3u;
             selected.rngSeed = cellHash;
             return selected;
         }
@@ -230,11 +230,11 @@ fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, eleva
         let depression = avgNeighbor - elevation;
 
         if (depression > 3.0) {
-            let prob = 0.28 * weatherMod * min(depression / 10.0, 1.0);
+            let prob = 0.22 * weatherMod * min(depression / 10.0, 1.0);
             if (roll < prob) {
                 selected.matched = 1u;
                 selected.typeId = TYPE_VALLEY_MIST;
-                selected.spawnBudget = 4u;
+                selected.spawnBudget = 3u;
                 selected.rngSeed = cellHash;
                 return selected;
             }
@@ -243,11 +243,11 @@ fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, eleva
 
     if (normalizedHeight > 0.55 && slope < 0.3) {
         let altFactor = clamp((normalizedHeight - 0.55) / 0.2, 0.0, 1.0);
-        let prob = 0.14 * weatherMod * altFactor;
+        let prob = 0.08 * weatherMod * altFactor;
         if (roll < prob) {
             selected.matched = 1u;
             selected.typeId = TYPE_LOW_CLOUD;
-            selected.spawnBudget = 3u;
+            selected.spawnBudget = 2u;
             selected.rngSeed = cellHash;
             return selected;
         }

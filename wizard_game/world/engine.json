@@ -28,9 +28,9 @@
       "twilightEndDot": 0.04
     },
     "fog": {
-      "densityMultiplier": 0.48,
-      "maxBaseDensity": 0.0006,
-      "dayDensityScale": 1.0,
+      "densityMultiplier": 0.40,
+      "maxBaseDensity": 0.00055,
+      "dayDensityScale": 0.85,
       "nightDensityScale": 0.42,
       "minBrightness": 0.05,
       "maxBrightness": 0.82,

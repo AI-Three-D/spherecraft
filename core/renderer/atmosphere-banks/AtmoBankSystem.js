@@ -4,7 +4,7 @@ import { AtmoBankSimPass } from './AtmoBankSimPass.js';
 import { AtmoBankRenderPass } from './AtmoBankRenderPass.js';
 import { AtmoBankPlacement } from './AtmoBankPlacement.js';
 import { AtmoBankScatterPass } from './AtmoBankScatterPass.js';
-import { ATMO_EMITTER_CAPACITY } from './AtmoBankTypes.js';
+import { ATMO_BANK_TYPES, ATMO_EMITTER_CAPACITY } from './AtmoBankTypes.js';
 import {
     buildAtmoBankAuthoringRuntime,
     DEFAULT_ATMO_PLACEMENT_CONFIG,
@@ -146,6 +146,57 @@ export class AtmoBankSystem {
         this._diagFrame++;
         if ((this._diagFrame % 120) !== 0) return;
         console.info('[AtmoBankDiag]', this.getDiagnostics());
+    }
+
+    estimateLocalDistanceFogBoost(camera, environmentState, planetConfig) {
+        if (!camera || !planetConfig || !this.placement) return 0;
+
+        this.placement.update(camera, environmentState, planetConfig);
+        const emitters = this.placement.getEmitters();
+        const typeDefs = this.authoringRuntime?.typeDefs ?? {};
+        const localFog = this.authoringRuntime?.placement?.localDistanceFog ?? {};
+        if (localFog.enabled === false) return 0;
+        const largeEmitterMinSize = localFog.largeEmitterMinSize ?? 160;
+        const densityBoost = localFog.densityBoost ?? 0.00016;
+        const radiusScale = localFog.radiusScale ?? 0.92;
+        const heightScale = localFog.heightScale ?? 0.34;
+        const cam = camera.position;
+        let strongest = 0;
+
+        for (const emitter of emitters) {
+            const typeDef = typeDefs[emitter.typeId];
+            const maxSize = typeDef?.size?.max ?? 0;
+            if (maxSize < largeEmitterMinSize || emitter.typeId === ATMO_BANK_TYPES.LOW_CLOUD) continue;
+
+            const ex = emitter.position[0] ?? 0;
+            const ey = emitter.position[1] ?? 0;
+            const ez = emitter.position[2] ?? 0;
+            const ux = emitter.localUp[0] ?? 0;
+            const uy = emitter.localUp[1] ?? 1;
+            const uz = emitter.localUp[2] ?? 0;
+
+            const dx = cam.x - ex;
+            const dy = cam.y - ey;
+            const dz = cam.z - ez;
+            const vertical = dx * ux + dy * uy + dz * uz;
+            const horizontalSq = Math.max(0, dx * dx + dy * dy + dz * dz - vertical * vertical);
+            const horizontal = Math.sqrt(horizontalSq);
+
+            const radius = maxSize * radiusScale;
+            const height = Math.max(45, maxSize * heightScale);
+            if (horizontal > radius || vertical < -18 || vertical > height) continue;
+
+            const radial = 1 - this._smoothstep(radius * 0.45, radius, horizontal);
+            const verticalWeight = 1 - this._smoothstep(height * 0.55, height, Math.max(0, vertical));
+            strongest = Math.max(strongest, radial * verticalWeight);
+        }
+
+        return strongest * densityBoost;
+    }
+
+    _smoothstep(edge0, edge1, x) {
+        const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+        return t * t * (3 - 2 * t);
     }
 
     update(commandEncoder, camera, deltaTime, environmentState, planetConfig, lightingController = null, uniformManager = null) {
