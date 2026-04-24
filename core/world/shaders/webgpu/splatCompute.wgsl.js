@@ -34,7 +34,7 @@ struct Uniforms {
     splatDensity: i32,
     kernelSize: i32,
     inputPadding: i32,
-    _padding: i32,
+    chunkPaletteBorderTexels: i32,
     transitionSharpness: f32,
     transitionDominanceStart: f32,
     transitionDominanceEnd: f32,
@@ -43,6 +43,8 @@ struct Uniforms {
     transitionBreakupWarpScale: f32,
     transitionBreakupWarpStrength: f32,
     transitionBreakupStrength: f32,
+    chunkPaletteMinCoverage: f32,
+    _padding: vec3<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -54,6 +56,7 @@ struct Uniforms {
 //   splatIndexTexture   = representative tile IDs for those top 4 categories
 @group(0) @binding(3) var splatWeightTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(4) var splatIndexTexture:  texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(5) var splatPaletteTexture: texture_2d<f32>;
 
 const INVALID_TILE_ID: u32 = 255u;
 const INVALID_CATEGORY_ID: u32 = 255u;
@@ -135,6 +138,57 @@ fn insertTop4(
 
     (*topIds)[insertAt] = categoryId;
     (*topScores)[insertAt] = score;
+}
+
+fn paletteCategoryScore(categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>, tileId: u32) -> f32 {
+    if (!validTile(tileId)) {
+        return 0.0;
+    }
+    let categoryId = tileCategory(tileId);
+    if (!validCategory(categoryId)) {
+        return 0.0;
+    }
+    return (*categoryScores)[categoryId];
+}
+
+fn paletteContainsCategory(paletteTileIds: ptr<function, array<u32, 4>>, categoryId: u32) -> bool {
+    if (!validCategory(categoryId)) {
+        return false;
+    }
+    for (var i = 0; i < 4; i = i + 1) {
+        let tileId = (*paletteTileIds)[i];
+        if (!validTile(tileId)) {
+            continue;
+        }
+        if (tileCategory(tileId) == categoryId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn sortByWeightDescending(
+    tileIds: ptr<function, array<u32, 4>>,
+    weights: ptr<function, array<f32, 4>>
+) {
+    for (var i: i32 = 0; i < 3; i = i + 1) {
+        for (var j: i32 = i + 1; j < 4; j = j + 1) {
+            let wi = (*weights)[i];
+            let wj = (*weights)[j];
+            let vi = validTile((*tileIds)[i]);
+            let vj = validTile((*tileIds)[j]);
+            let shouldSwap = (vj && !vi) ||
+                             (vi && vj && (wj > wi || (wj == wi && (*tileIds)[j] < (*tileIds)[i])));
+            if (shouldSwap) {
+                let tmpId = (*tileIds)[i];
+                let tmpWeight = (*weights)[i];
+                (*tileIds)[i] = (*tileIds)[j];
+                (*weights)[i] = (*weights)[j];
+                (*tileIds)[j] = tmpId;
+                (*weights)[j] = tmpWeight;
+            }
+        }
+    }
 }
 
 fn applyBoundaryShaping(
@@ -326,6 +380,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var categoryIdx = 0u; categoryIdx < CATEGORY_SCORE_COUNT; categoryIdx = categoryIdx + 1u) {
         categoryScores[categoryIdx] = 0.0;
     }
+    var totalCategoryScore = 0.0;
 
     for (var y = minY; y <= maxY; y = y + 1) {
         for (var x = minX; x <= maxX; x = x + 1) {
@@ -346,6 +401,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
 
             categoryScores[categoryId] = categoryScores[categoryId] + weight;
+            totalCategoryScore = totalCategoryScore + weight;
         }
     }
 
@@ -386,16 +442,57 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
     var outputWeights: array<f32, 4> = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
     var totalScore: f32 = 0.0;
+    let chunkSize = max(uniforms.chunkSize, 1);
+    let paletteCoord = min(
+        vec2<i32>(global_id.xy) / chunkSize,
+        vec2<i32>(textureDimensions(splatPaletteTexture)) - vec2<i32>(1)
+    );
+    let paletteSample = textureLoad(splatPaletteTexture, paletteCoord, 0);
+    var paletteTileIds: array<u32, 4> = array<u32, 4>(
+        decodeTileIdRaw(vec4<f32>(paletteSample.x, 0.0, 0.0, 0.0)),
+        decodeTileIdRaw(vec4<f32>(paletteSample.y, 0.0, 0.0, 0.0)),
+        decodeTileIdRaw(vec4<f32>(paletteSample.z, 0.0, 0.0, 0.0)),
+        decodeTileIdRaw(vec4<f32>(paletteSample.w, 0.0, 0.0, 0.0))
+    );
 
+    var paletteScoreTotal = 0.0;
+    var paletteWeights: array<f32, 4> = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
     for (var i = 0; i < 4; i = i + 1) {
-        let categoryId = topCategories[i];
-        let score = topScores[i];
-        if (!validCategory(categoryId) || score <= SCORE_EPSILON) {
+        let tileId = paletteTileIds[i];
+        if (!validTile(tileId)) {
             continue;
         }
-        totalScore = totalScore + score;
-        let representativeTileId = categoryRepresentativeTileId(categoryId);
-        outputTileIds[i] = representativeTileId;
+        let score = paletteCategoryScore(&categoryScores, tileId);
+        paletteWeights[i] = score;
+        paletteScoreTotal = paletteScoreTotal + score;
+    }
+
+    let paletteCoverage = paletteScoreTotal / max(totalCategoryScore, SCORE_EPSILON);
+    let topCategoryCovered = paletteContainsCategory(&paletteTileIds, topCategories[0]);
+    let useChunkPalette =
+        paletteScoreTotal > SCORE_EPSILON &&
+        paletteCoverage >= uniforms.chunkPaletteMinCoverage &&
+        topCategoryCovered;
+
+    if (useChunkPalette) {
+        totalScore = paletteScoreTotal;
+        for (var i = 0; i < 4; i = i + 1) {
+            outputTileIds[i] = paletteTileIds[i];
+            outputWeights[i] = paletteWeights[i];
+        }
+        sortByWeightDescending(&outputTileIds, &outputWeights);
+    } else {
+        for (var i = 0; i < 4; i = i + 1) {
+            let categoryId = topCategories[i];
+            let score = topScores[i];
+            if (!validCategory(categoryId) || score <= SCORE_EPSILON) {
+                continue;
+            }
+            totalScore = totalScore + score;
+            let representativeTileId = categoryRepresentativeTileId(categoryId);
+            outputTileIds[i] = representativeTileId;
+            outputWeights[i] = score;
+        }
     }
 
     if (totalScore <= SCORE_EPSILON) {
@@ -417,7 +514,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if (!validTile(outputTileIds[i])) {
             continue;
         }
-        outputWeights[i] = topScores[i] / totalScore;
+        outputWeights[i] = outputWeights[i] / totalScore;
     }
 
     applyBoundaryShaping(&topCategories, centerCategory, &outputWeights);

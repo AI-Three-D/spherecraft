@@ -55,7 +55,10 @@ export class BaseWorldGenerator {
             transitionBreakupScale: 0.018,
             transitionBreakupWarpScale: 0.055,
             transitionBreakupWarpStrength: 0.65,
-            transitionBreakupStrength: 0.10
+            transitionBreakupStrength: 0.10,
+            chunkPaletteEnabled: true,
+            chunkPaletteMinCoverage: 0.9,
+            chunkPaletteBorderTexels: 2
         };
         
         this.modules = {

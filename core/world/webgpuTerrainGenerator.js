@@ -1,6 +1,7 @@
 // js/world/webgpuTerrainGenerator.js
 
 import { createSplatComputeShader } from './shaders/webgpu/splatCompute.wgsl.js';
+import { createSplatPaletteComputeShader } from './shaders/webgpu/splatPaletteCompute.wgsl.js';
 import { getPackedBiomeUniformByteSize, packBiomeUniformData } from './biomeRuntime.js';
 
 import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
@@ -95,6 +96,20 @@ export class WebGPUTerrainGenerator {
             requireNumber(
                 splat.transitionBreakupStrength ?? 0.10,
                 'splatConfig.transitionBreakupStrength'
+            )
+        );
+        this.splatChunkPaletteEnabled = splat.chunkPaletteEnabled !== false;
+        this.splatChunkPaletteMinCoverage = clamp01(
+            Number.isFinite(splat.chunkPaletteMinCoverage)
+                ? splat.chunkPaletteMinCoverage
+                : 0.9
+        );
+        this.splatChunkPaletteBorderTexels = Math.max(
+            0,
+            requireInt(
+                splat.chunkPaletteBorderTexels ?? 2,
+                'splatConfig.chunkPaletteBorderTexels',
+                0
             )
         );
         this.textureCache = requireObject(textureCache, 'textureCache');
@@ -370,6 +385,14 @@ export class WebGPUTerrainGenerator {
         return Math.ceil(kernelRadius) + 1;
     }
 
+    _getSplatPaletteDimensions(innerWidth, innerHeight, chunkSizeTex) {
+        const chunkSpan = Math.max(1, chunkSizeTex | 0);
+        return {
+            width: Math.max(1, Math.ceil(Math.max(1, innerWidth | 0) / chunkSpan)),
+            height: Math.max(1, Math.ceil(Math.max(1, innerHeight | 0) / chunkSpan))
+        };
+    }
+
     _fillTerrainUniformScratch(chunkCoordX, chunkCoordY, chunkSizeTex, chunkGridSize, face) {
         const buf = this._terrainUniformScratch;
         const v = new DataView(buf);
@@ -478,6 +501,16 @@ export class WebGPUTerrainGenerator {
         }
 
         const paddedTileMap = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
+        const paletteSize = this._getSplatPaletteDimensions(
+            innerSize,
+            innerSize,
+            splatPass.chunkSizeTex
+        );
+        const splatPaletteTex = this.createGPUTexture(
+            paletteSize.width,
+            paletteSize.height,
+            'rgba8unorm'
+        );
         let debugProbeTextures = null;
         if (shouldRunProbePasses) {
             this._quadtreeSplatProbePassCount = (this._quadtreeSplatProbePassCount ?? 0) + 1;
@@ -528,6 +561,8 @@ export class WebGPUTerrainGenerator {
 
         const { pipeline: tileGenPipeline, bindGroupLayout: tileGenBindGroupLayout } =
             this._getTerrainPipelineForFormat('rgba8unorm');
+        const { pipeline: splatPalettePipeline, bindGroupLayout: splatPaletteBindGroupLayout } =
+            this._getSplatPalettePipelineForFormat('rgba8unorm');
         const { pipeline: splatPipeline, bindGroupLayout: splatBindGroupLayout } =
             this._getSplatPipelineForFormats(
                 splatPass.heightFormat || 'r32float',
@@ -568,6 +603,21 @@ export class WebGPUTerrainGenerator {
         }
 
         {
+            const pass = enc.beginComputePass({ label: 'ComputePaddedSplatPalette' });
+            pass.setPipeline(splatPalettePipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: splatPaletteBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: paddedTileMap.createView() },
+                    { binding: 2, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            pass.dispatchWorkgroups(paletteSize.width, paletteSize.height);
+            pass.end();
+        }
+
+        {
             const pass = enc.beginComputePass({ label: 'ComputePaddedSplat' });
             pass.setPipeline(splatPipeline);
             pass.setBindGroup(0, this.device.createBindGroup({
@@ -577,7 +627,8 @@ export class WebGPUTerrainGenerator {
                     { binding: 1, resource: splatPass.heightTex.createView() },
                     { binding: 2, resource: paddedTileMap.createView() },
                     { binding: 3, resource: splatPass.splatTex.createView() },
-                    { binding: 4, resource: splatIndexTex.createView() }
+                    { binding: 4, resource: splatIndexTex.createView() },
+                    { binding: 5, resource: splatPaletteTex.createView() }
                 ]
             }));
             pass.dispatchWorkgroups(
@@ -671,6 +722,7 @@ export class WebGPUTerrainGenerator {
                     Logger.warn(`${SPLAT_STEP_PREFIX} [SplatDebug] quadtree splat diagnostics failed: ${err?.message || err}`);
                 }
                 try { paddedTileMap.destroy(); } catch (_) {}
+                try { splatPaletteTex.destroy(); } catch (_) {}
                 if (debugProbeTextures) {
                     try { debugProbeTextures.constantWrite.destroy(); } catch (_) {}
                     try { debugProbeTextures.tileEcho.destroy(); } catch (_) {}
@@ -783,7 +835,7 @@ export class WebGPUTerrainGenerator {
         chunkSizeTex,
         inputPadding = 0,
     }) {
-        const data = new ArrayBuffer(64);
+        const data = new ArrayBuffer(80);
         const view = new DataView(data);
         view.setInt32(0, chunkCoordX | 0, true);
         view.setInt32(4, chunkCoordY | 0, true);
@@ -792,7 +844,11 @@ export class WebGPUTerrainGenerator {
         view.setInt32(16, this.splatDensity, true);
         view.setInt32(20, this.splatKernelSize, true);
         view.setInt32(24, inputPadding | 0, true);
-        view.setInt32(28, 0, true);
+        view.setInt32(
+            28,
+            this.splatChunkPaletteEnabled ? (this.splatChunkPaletteBorderTexels | 0) : 0,
+            true
+        );
         view.setFloat32(32, this.splatTransitionSharpness, true);
         view.setFloat32(36, this.splatTransitionDominanceStart, true);
         view.setFloat32(40, this.splatTransitionDominanceEnd, true);
@@ -801,6 +857,14 @@ export class WebGPUTerrainGenerator {
         view.setFloat32(52, this.splatTransitionBreakupWarpScale, true);
         view.setFloat32(56, this.splatTransitionBreakupWarpStrength, true);
         view.setFloat32(60, this.splatTransitionBreakupStrength, true);
+        view.setFloat32(
+            64,
+            this.splatChunkPaletteEnabled ? this.splatChunkPaletteMinCoverage : 2.0,
+            true
+        );
+        view.setFloat32(68, 0.0, true);
+        view.setFloat32(72, 0.0, true);
+        view.setFloat32(76, 0.0, true);
         this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
     }
 
@@ -907,6 +971,14 @@ export class WebGPUTerrainGenerator {
             label: 'Splat Compute',
             code: splatShaderCode
         });
+        const splatPaletteShaderCode = createSplatPaletteComputeShader({
+            tileCategories: this.tileCategories,
+            buildTileCategoryLookupWGSL: this.buildTileCategoryLookupWGSL,
+        });
+        this.splatPaletteShaderModule = this.device.createShaderModule({
+            label: 'Splat Palette Compute',
+            code: splatPaletteShaderCode
+        });
         if (typeof this.splatShaderModule.getCompilationInfo === 'function') {
             this.splatShaderModule.getCompilationInfo()
                 .then((info) => {
@@ -934,7 +1006,7 @@ export class WebGPUTerrainGenerator {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         this.splatUniformBuffer = this.device.createBuffer({
-            size: 64,
+            size: 80,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         this.biomeUniformBuffer = this.device.createBuffer({
@@ -1066,7 +1138,10 @@ export class WebGPUTerrainGenerator {
                 { binding: 4, visibility: GPUShaderStage.COMPUTE,
                   storageTexture: { access: 'write-only',
                                     format: 'rgba8unorm',
-                                    viewDimension: '2d' } }
+                                    viewDimension: '2d' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: 'float',
+                             viewDimension: '2d' } }
             ]
         });
         this.splatPipeline = this.device.createComputePipeline({
@@ -1075,12 +1150,39 @@ export class WebGPUTerrainGenerator {
             }),
             compute: { module: this.splatShaderModule, entryPoint: 'main' }
         });
+        this.splatPaletteBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: 'unfilterable-float',
+                             viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  storageTexture: { access: 'write-only',
+                                    format: 'rgba8unorm',
+                                    viewDimension: '2d' } }
+            ]
+        });
+        this.splatPalettePipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.splatPaletteBindGroupLayout]
+            }),
+            compute: { module: this.splatPaletteShaderModule, entryPoint: 'main' }
+        });
         this._splatPipelineCache = new Map();
         this._splatPipelineCache.set(
             this._getSplatPipelineCacheKey('r32float', 'r32float'),
             {
                 pipeline: this.splatPipeline,
                 bindGroupLayout: this.splatBindGroupLayout
+            }
+        );
+        this._splatPalettePipelineCache = new Map();
+        this._splatPalettePipelineCache.set(
+            this._getSplatPalettePipelineCacheKey('r32float'),
+            {
+                pipeline: this.splatPalettePipeline,
+                bindGroupLayout: this.splatPaletteBindGroupLayout
             }
         );
         this._padTilePipelineCache = new Map();
@@ -1292,6 +1394,14 @@ export class WebGPUTerrainGenerator {
                         format: 'rgba8unorm',
                         viewDimension: '2d'
                     }
+                },
+                {
+                    binding: 5,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType('rgba8unorm'),
+                        viewDimension: '2d'
+                    }
                 }
             ]
         });
@@ -1308,6 +1418,58 @@ export class WebGPUTerrainGenerator {
         }
         const record = { pipeline, bindGroupLayout };
         this._splatPipelineCache.set(cacheKey, record);
+        return record;
+    }
+
+    _getSplatPalettePipelineCacheKey(tileFormat = 'r32float') {
+        return `t:${gpuFormatSampleType(tileFormat || 'r32float')}`;
+    }
+
+    _getSplatPalettePipelineForFormat(tileFormat = 'r32float') {
+        const tFmt = tileFormat || 'r32float';
+        const cacheKey = this._getSplatPalettePipelineCacheKey(tFmt);
+        const cached = this._splatPalettePipelineCache?.get(cacheKey);
+        if (cached) return cached;
+
+        const bindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'uniform' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType(tFmt),
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: 'rgba8unorm',
+                        viewDimension: '2d'
+                    }
+                }
+            ]
+        });
+
+        const pipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [bindGroupLayout]
+            }),
+            compute: { module: this.splatPaletteShaderModule, entryPoint: 'main' }
+        });
+
+        if (!this._splatPalettePipelineCache) {
+            this._splatPalettePipelineCache = new Map();
+        }
+        const record = { pipeline, bindGroupLayout };
+        this._splatPalettePipelineCache.set(cacheKey, record);
         return record;
     }
     _getPadTilePipelineForFormat(tileFormat = 'r8unorm') {
@@ -2353,25 +2515,53 @@ this.device.queue.submit([enc.finish()]);
             inputPadding: 0,
         });
 
+        const paletteSize = this._getSplatPaletteDimensions(w, h, chunkSize);
+        const splatPaletteTex = this.createGPUTexture(
+            paletteSize.width,
+            paletteSize.height,
+            'rgba8unorm'
+        );
+        const { pipeline: palettePipeline, bindGroupLayout: paletteBindGroupLayout } =
+            this._getSplatPalettePipelineForFormat(tileFormat);
         const { pipeline, bindGroupLayout } =
             this._getSplatPipelineForFormats(heightFormat, tileFormat);
         const enc = this.device.createCommandEncoder();
-        const pass = enc.beginComputePass();
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, this.device.createBindGroup({
-            layout: bindGroupLayout,
-            entries: [
-                { binding: 0, resource: { buffer: this.splatUniformBuffer } },
-                { binding: 1, resource: hTex.createView() },
-                { binding: 2, resource: tTex.createView() },
-                { binding: 3, resource: splatDataTex.createView() },
-                { binding: 4, resource: splatIndexTex.createView() }
-            ]
-        }));
-        
-        pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
-        pass.end();
+        {
+            const pass = enc.beginComputePass();
+            pass.setPipeline(palettePipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: paletteBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: tTex.createView() },
+                    { binding: 2, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            pass.dispatchWorkgroups(paletteSize.width, paletteSize.height);
+            pass.end();
+        }
+        {
+            const pass = enc.beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: hTex.createView() },
+                    { binding: 2, resource: tTex.createView() },
+                    { binding: 3, resource: splatDataTex.createView() },
+                    { binding: 4, resource: splatIndexTex.createView() },
+                    { binding: 5, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            
+            pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
+            pass.end();
+        }
         this.device.queue.submit([enc.finish()]);
+        this.device.queue.onSubmittedWorkDone()
+            .then(() => { try { splatPaletteTex.destroy(); } catch (_) {} })
+            .catch(() => {});
     }
 
     async runLODSplatPass(hTex, tTex, splatDataTex, splatIndexTex, chunkCoordX, chunkCoordY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
@@ -2420,29 +2610,57 @@ this.device.queue.submit([enc.finish()]);
             chunkSizeTex,
             inputPadding: 0,
         });
-    
+
+        const paletteSize = this._getSplatPaletteDimensions(textureSize, textureSize, chunkSizeTex);
+        const splatPaletteTex = this.createGPUTexture(
+            paletteSize.width,
+            paletteSize.height,
+            'rgba8unorm'
+        );
+        const { pipeline: palettePipeline, bindGroupLayout: paletteBindGroupLayout } =
+            this._getSplatPalettePipelineForFormat(tileFormat);
         const { pipeline, bindGroupLayout } =
             this._getSplatPipelineForFormats(heightFormat, tileFormat);
         const enc = this.device.createCommandEncoder();
-        const pass = enc.beginComputePass();
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, this.device.createBindGroup({
-            layout: bindGroupLayout,
-            entries: [
-                { binding: 0, resource: { buffer: this.splatUniformBuffer } },
-                { binding: 1, resource: hTex.createView() },
-                { binding: 2, resource: tTex.createView() },
-                { binding: 3, resource: splatDataTex.createView() },
-                { binding: 4, resource: splatIndexTex.createView() }
-            ]
-        }));
+        {
+            const pass = enc.beginComputePass();
+            pass.setPipeline(palettePipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: paletteBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: tTex.createView() },
+                    { binding: 2, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            pass.dispatchWorkgroups(paletteSize.width, paletteSize.height);
+            pass.end();
+        }
+        {
+            const pass = enc.beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: hTex.createView() },
+                    { binding: 2, resource: tTex.createView() },
+                    { binding: 3, resource: splatDataTex.createView() },
+                    { binding: 4, resource: splatIndexTex.createView() },
+                    { binding: 5, resource: splatPaletteTex.createView() }
+                ]
+            }));
     
-        // Dispatch must cover the full splat output texture, not just the tile map
-        const splatW = splatDataTex.width || textureSize;
-        const splatH = splatDataTex.height || textureSize;
-        pass.dispatchWorkgroups(Math.ceil(splatW / 8), Math.ceil(splatH / 8));
-        pass.end();
+            // Dispatch must cover the full splat output texture, not just the tile map
+            const splatW = splatDataTex.width || textureSize;
+            const splatH = splatDataTex.height || textureSize;
+            pass.dispatchWorkgroups(Math.ceil(splatW / 8), Math.ceil(splatH / 8));
+            pass.end();
+        }
         this.device.queue.submit([enc.finish()]);
+        this.device.queue.onSubmittedWorkDone()
+            .then(() => { try { splatPaletteTex.destroy(); } catch (_) {} })
+            .catch(() => {});
 
         // ──────────────────────────────────────────────────────────────
         // DIAGNOSTIC: Read back splat data and verify contents
