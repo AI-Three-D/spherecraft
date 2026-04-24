@@ -250,6 +250,11 @@ fn applyBoundaryBreakup(
     }
 
     weights = weights / total;
+    // This assumes channels 0 and 1 are still the dominant pair in score order.
+    // That is true at the current call site because breakup runs before the
+    // final tile-ID sort and because centerCategoryBias defaults to 0.0.
+    // If shaping starts reordering channels, this function needs to find the
+    // actual top-2 contributors dynamically.
     let top2Sum = weights.x + weights.y;
     if (top2Sum <= 0.0001) {
         return;

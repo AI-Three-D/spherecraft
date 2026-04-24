@@ -14,6 +14,9 @@ Current default posture:
 - transition shaping is enabled
 - center-category bias stays neutral by default (`0.0`) until visual A/B
   validation says otherwise
+- breakup currently uses chunk-texel coordinates for seam-safe continuity
+  across chunk boundaries; that means the pattern scale still varies by LOD
+  until the pass is moved to true world-space coordinates
 
 ### What the current image shows
 
