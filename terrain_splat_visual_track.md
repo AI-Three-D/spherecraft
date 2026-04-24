@@ -5,6 +5,7 @@
 Implemented on this branch:
 
 - generation-side boundary shaping in the splat compute pass
+- low-frequency top-two boundary breakup in the splat compute pass
 - shared splat uniform writer plumbing
 - config-driven micro variant rotation up to a chosen terrain LOD
 

@@ -79,6 +79,10 @@ export function createEngineConfig() {
       transitionDominanceStart: 0.55,
       transitionDominanceEnd: 0.9,
       centerCategoryBias: 0.0,
+      transitionBreakupScale: 0.018,
+      transitionBreakupWarpScale: 0.055,
+      transitionBreakupWarpStrength: 0.65,
+      transitionBreakupStrength: 0.10,
   },
     lod: {
       distancesMeters: lodDistancesMeters,

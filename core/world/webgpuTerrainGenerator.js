@@ -69,6 +69,34 @@ export class WebGPUTerrainGenerator {
                 'splatConfig.centerCategoryBias'
             )
         );
+        this.splatTransitionBreakupScale = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupScale ?? 0.018,
+                'splatConfig.transitionBreakupScale'
+            )
+        );
+        this.splatTransitionBreakupWarpScale = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupWarpScale ?? 0.055,
+                'splatConfig.transitionBreakupWarpScale'
+            )
+        );
+        this.splatTransitionBreakupWarpStrength = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupWarpStrength ?? 0.65,
+                'splatConfig.transitionBreakupWarpStrength'
+            )
+        );
+        this.splatTransitionBreakupStrength = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupStrength ?? 0.10,
+                'splatConfig.transitionBreakupStrength'
+            )
+        );
         this.textureCache = requireObject(textureCache, 'textureCache');
         this.arrayPools = new Map();
         this.useTextureArrays = true;
@@ -470,8 +498,8 @@ export class WebGPUTerrainGenerator {
         this.device.queue.writeBuffer(this._padTileUniformBuffer, 0, padTileParams);
 
         this._writeSplatUniformBuffer({
-            chunkCoordX: 0,
-            chunkCoordY: 0,
+            chunkCoordX,
+            chunkCoordY,
             chunkSizeTex: splatPass.chunkSizeTex,
             inputPadding: padding,
         });
@@ -755,7 +783,7 @@ export class WebGPUTerrainGenerator {
         chunkSizeTex,
         inputPadding = 0,
     }) {
-        const data = new ArrayBuffer(48);
+        const data = new ArrayBuffer(64);
         const view = new DataView(data);
         view.setInt32(0, chunkCoordX | 0, true);
         view.setInt32(4, chunkCoordY | 0, true);
@@ -769,6 +797,10 @@ export class WebGPUTerrainGenerator {
         view.setFloat32(36, this.splatTransitionDominanceStart, true);
         view.setFloat32(40, this.splatTransitionDominanceEnd, true);
         view.setFloat32(44, this.splatCenterCategoryBias, true);
+        view.setFloat32(48, this.splatTransitionBreakupScale, true);
+        view.setFloat32(52, this.splatTransitionBreakupWarpScale, true);
+        view.setFloat32(56, this.splatTransitionBreakupWarpStrength, true);
+        view.setFloat32(60, this.splatTransitionBreakupStrength, true);
         this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
     }
 
@@ -902,7 +934,7 @@ export class WebGPUTerrainGenerator {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         this.splatUniformBuffer = this.device.createBuffer({
-            size: 48,
+            size: 64,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         this.biomeUniformBuffer = this.device.createBuffer({
@@ -1810,9 +1842,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        const worldOriginX = atlasKey.atlasX * config.worldCoverage;
-        const worldOriginY = atlasKey.atlasY * config.worldCoverage;
-
         // Staging textures: format now per-type (was hardcoded rgba32float).
         const gpuHeight    = this.createGPUTexture(textureSize, textureSize, fmt('height'));
         const gpuHeightBase = this.createGPUTexture(textureSize, textureSize, 'rgba32float');
@@ -1868,8 +1897,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             gpuTile,
             gpuSplatData,
             gpuSplatIndex,
-            worldOriginX,
-            worldOriginY,
+            chunkCoordX,
+            chunkCoordY,
             config.worldCoverage,
             textureSize,
             atlasKey.lod,
@@ -2318,8 +2347,8 @@ this.device.queue.submit([enc.finish()]);
     
     async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, atlasChunkY, w, h, chunkSize, heightFormat = 'r32float', tileFormat = 'r32float') {
         this._writeSplatUniformBuffer({
-            chunkCoordX: 0,
-            chunkCoordY: 0,
+            chunkCoordX: atlasChunkX,
+            chunkCoordY: atlasChunkY,
             chunkSizeTex: chunkSize,
             inputPadding: 0,
         });
@@ -2345,7 +2374,7 @@ this.device.queue.submit([enc.finish()]);
         this.device.queue.submit([enc.finish()]);
     }
 
-    async runLODSplatPass(hTex, tTex, splatDataTex, splatIndexTex, worldOriginX, worldOriginY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
+    async runLODSplatPass(hTex, tTex, splatDataTex, splatIndexTex, chunkCoordX, chunkCoordY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
         const chunksPerAtlas = Math.max(1, Math.floor(worldCoverage / this.chunkSize));
         const chunkSizeTex = Math.max(1, Math.floor(textureSize / chunksPerAtlas));
     
@@ -2357,7 +2386,7 @@ this.device.queue.submit([enc.finish()]);
             this._splatPassLogCount++;
             Logger.info(`[SplatDebug] ═══════════════════════════════════════════════`);
             Logger.info(`[SplatDebug] runLODSplatPass #${this._splatPassLogCount}`);
-            Logger.info(`[SplatDebug]   worldOrigin=(${worldOriginX}, ${worldOriginY})`);
+            Logger.info(`[SplatDebug]   chunkCoord=(${chunkCoordX}, ${chunkCoordY})`);
             Logger.info(`[SplatDebug]   worldCoverage=${worldCoverage}`);
             Logger.info(`[SplatDebug]   this.chunkSize=${this.chunkSize}`);
             Logger.info(`[SplatDebug]   chunksPerAtlas=${chunksPerAtlas}`);
@@ -2385,10 +2414,9 @@ this.device.queue.submit([enc.finish()]);
             }
         }
     
-        // chunkCoord should be atlas-local (0,0), NOT world-space
         this._writeSplatUniformBuffer({
-            chunkCoordX: 0,
-            chunkCoordY: 0,
+            chunkCoordX,
+            chunkCoordY,
             chunkSizeTex,
             inputPadding: 0,
         });

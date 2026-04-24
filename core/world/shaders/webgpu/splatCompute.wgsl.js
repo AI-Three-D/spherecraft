@@ -39,6 +39,10 @@ struct Uniforms {
     transitionDominanceStart: f32,
     transitionDominanceEnd: f32,
     centerCategoryBias: f32,
+    transitionBreakupScale: f32,
+    transitionBreakupWarpScale: f32,
+    transitionBreakupWarpStrength: f32,
+    transitionBreakupStrength: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -187,6 +191,99 @@ fn applyBoundaryShaping(
     (*outputWeights)[3] = shaped.w;
 }
 
+fn noiseHash2(cell: vec2<i32>, salt: u32) -> f32 {
+    var h = bitcast<u32>(uniforms.seed) + salt;
+    h ^= bitcast<u32>(cell.x) * 0x27d4eb2du;
+    h ^= bitcast<u32>(cell.y) * 0x165667b1u;
+    h = ((h >> 15u) ^ h) * 0x85ebca6bu;
+    h = ((h >> 13u) ^ h) * 0xc2b2ae35u;
+    h = ((h >> 16u) ^ h) * 0x45d9f3bu;
+    h = ((h >> 16u) ^ h) * 0x45d9f3bu;
+    h = (h >> 16u) ^ h;
+    return f32(h & 0x7fffffffu) / f32(0x7fffffffu);
+}
+
+fn valueNoise2(p: vec2<f32>, salt: u32) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    let n00 = noiseHash2(i, salt) * 2.0 - 1.0;
+    let n10 = noiseHash2(i + vec2<i32>(1, 0), salt) * 2.0 - 1.0;
+    let n01 = noiseHash2(i + vec2<i32>(0, 1), salt) * 2.0 - 1.0;
+    let n11 = noiseHash2(i + vec2<i32>(1, 1), salt) * 2.0 - 1.0;
+    let u = f * f * (vec2<f32>(3.0) - 2.0 * f);
+    let x0 = mix(n00, n10, u.x);
+    let x1 = mix(n01, n11, u.x);
+    return mix(x0, x1, u.y);
+}
+
+fn breakupNoise(globalSplatPos: vec2<f32>) -> f32 {
+    let baseScale = max(uniforms.transitionBreakupScale, 0.00001);
+    let warpScale = max(uniforms.transitionBreakupWarpScale, 0.00001);
+    let warpDomain = globalSplatPos * warpScale;
+    let warp = vec2<f32>(
+        valueNoise2(warpDomain + vec2<f32>(17.0, 53.0), 101u),
+        valueNoise2(warpDomain + vec2<f32>(89.0, 29.0), 211u)
+    ) * uniforms.transitionBreakupWarpStrength;
+    let baseDomain = globalSplatPos * baseScale + warp;
+    let n0 = valueNoise2(baseDomain + vec2<f32>(13.0, 71.0), 307u);
+    let n1 = valueNoise2(baseDomain * 1.97 + vec2<f32>(41.0, 19.0), 401u);
+    return clamp(n0 * 0.7 + n1 * 0.3, -1.0, 1.0);
+}
+
+fn applyBoundaryBreakup(
+    globalSplatPos: vec2<f32>,
+    outputWeights: ptr<function, array<f32, 4>>
+) {
+    if (uniforms.transitionBreakupStrength <= SCORE_EPSILON) {
+        return;
+    }
+
+    var weights = vec4<f32>(
+        (*outputWeights)[0],
+        (*outputWeights)[1],
+        (*outputWeights)[2],
+        (*outputWeights)[3]
+    );
+    let total = weights.x + weights.y + weights.z + weights.w;
+    if (total <= SCORE_EPSILON) {
+        return;
+    }
+
+    weights = weights / total;
+    let top2Sum = weights.x + weights.y;
+    if (top2Sum <= 0.0001) {
+        return;
+    }
+
+    let top2Coverage = smoothstep(0.55, 0.9, top2Sum);
+    let pairDelta = abs(weights.x - weights.y) / top2Sum;
+    let boundaryMask = (1.0 - smoothstep(0.18, 0.62, pairDelta)) * top2Coverage;
+    if (boundaryMask <= SCORE_EPSILON) {
+        return;
+    }
+
+    let noise = breakupNoise(globalSplatPos);
+    let pairBalance = weights.x / top2Sum;
+    let shiftedBalance = clamp(
+        pairBalance + noise * uniforms.transitionBreakupStrength * boundaryMask,
+        0.0,
+        1.0
+    );
+    weights.x = shiftedBalance * top2Sum;
+    weights.y = (1.0 - shiftedBalance) * top2Sum;
+
+    let renorm = weights.x + weights.y + weights.z + weights.w;
+    if (renorm <= SCORE_EPSILON) {
+        return;
+    }
+
+    weights = weights / renorm;
+    (*outputWeights)[0] = weights.x;
+    (*outputWeights)[1] = weights.y;
+    (*outputWeights)[2] = weights.z;
+    (*outputWeights)[3] = weights.w;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let splatTexSize = textureDimensions(splatWeightTexture);
@@ -319,6 +416,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     applyBoundaryShaping(&topCategories, centerCategory, &outputWeights);
+    let globalSplatPos =
+        vec2<f32>(global_id.xy)
+        +
+        vec2<f32>(0.5)
+        +
+        vec2<f32>(uniforms.chunkCoord) * f32(uniforms.chunkSize);
+    applyBoundaryBreakup(globalSplatPos, &outputWeights);
 
     // Sort slots by tile ID (ascending) so that adjacent texels always
     // store the same categories in the same slots, regardless of which
