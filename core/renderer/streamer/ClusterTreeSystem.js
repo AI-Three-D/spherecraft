@@ -6,19 +6,19 @@ import { ClusterSourceCache, CLUSTER_SOURCE_FLAGS } from './ClusterSourceCache.j
 import { buildClusterTreeBakeShader } from './shaders/clusterTreeBake.wgsl.js';
 import { buildClusterTreeGatherShader } from './shaders/clusterTreeGather.wgsl.js';
 import { buildClusterHullRenderShaders } from './shaders/clusterHullRender.wgsl.js';
+import { CLUSTER_TREE_METADATA_STRIDE_FLOATS } from '../../world/biomeAuthoringDerived.js';
 
 const CLUSTER_RENDER_STRIDE = 64;
-const CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS = 8;
 const ZERO_MAT4_ELEMENTS = new Float32Array(16);
 
 function normalizeClusterTreeTileMetadata(source) {
     const sourceData = source?.data instanceof Float32Array ? source.data : null;
     const validSource = sourceData &&
-        sourceData.length >= CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS &&
-        sourceData.length % CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS === 0;
+        sourceData.length >= CLUSTER_TREE_METADATA_STRIDE_FLOATS &&
+        sourceData.length % CLUSTER_TREE_METADATA_STRIDE_FLOATS === 0;
     if (!validSource) {
         return {
-            data: new Float32Array(CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS),
+            data: new Float32Array(CLUSTER_TREE_METADATA_STRIDE_FLOATS),
             tileCount: 1,
             authoredTileCount: 0,
             treeProfileCount: 0,
@@ -27,7 +27,7 @@ function normalizeClusterTreeTileMetadata(source) {
 
     return {
         data: sourceData,
-        tileCount: Math.floor(sourceData.length / CLUSTER_TREE_TILE_METADATA_STRIDE_FLOATS),
+        tileCount: Math.floor(sourceData.length / CLUSTER_TREE_METADATA_STRIDE_FLOATS),
         authoredTileCount: Math.max(0, Math.trunc(source.authoredTileCount ?? 0)),
         treeProfileCount: Math.max(0, Math.trunc(source.treeProfileCount ?? 0)),
     };

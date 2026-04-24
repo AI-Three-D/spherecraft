@@ -1,5 +1,47 @@
 {
   "_comment": "Biome definitions for world generation. Each biome has signal rules for environment-based selection.",
+  "tileCatalog": {
+    "_comment": "Authored tile refs. Numeric IDs are still the compact GPU/material protocol; Studio owns the editable name-to-ID mapping.",
+    "tiles": [
+      { "name": "WATER_1", "id": 0, "category": "WATER" },
+      { "name": "WATER_2", "id": 1, "category": "WATER" },
+      { "name": "WATER_3", "id": 2, "category": "WATER" },
+      { "name": "WATER_4", "id": 3, "category": "WATER" },
+
+      { "name": "GRASS_SHORT_1", "id": 10, "category": "GRASS" },
+      { "name": "GRASS_SHORT_2", "id": 11, "category": "GRASS" },
+      { "name": "GRASS_SHORT_3", "id": 12, "category": "GRASS" },
+      { "name": "GRASS_SHORT_4", "id": 13, "category": "GRASS" },
+
+      { "name": "ROCK_OUTCROP_1", "id": 42, "category": "ROCK" },
+      { "name": "ROCK_OUTCROP_2", "id": 43, "category": "ROCK" },
+      { "name": "ROCK_OUTCROP_3", "id": 44, "category": "ROCK" },
+      { "name": "ROCK_OUTCROP_4", "id": 45, "category": "ROCK" },
+
+      { "name": "FOREST_DENSE_SINGLE_1", "id": 66, "category": "FOREST" },
+      { "name": "FOREST_DENSE_SINGLE_2", "id": 67, "category": "FOREST" },
+      { "name": "FOREST_DENSE_SINGLE_3", "id": 68, "category": "FOREST" },
+      { "name": "FOREST_DENSE_SINGLE_4", "id": 69, "category": "FOREST" },
+
+      { "name": "SNOW_FRESH_1", "id": 130, "category": "SNOW" },
+      { "name": "SNOW_FRESH_2", "id": 131, "category": "SNOW" },
+      { "name": "SNOW_FRESH_3", "id": 132, "category": "SNOW" },
+      { "name": "SNOW_FRESH_4", "id": 133, "category": "SNOW" },
+
+      { "name": "DESERT_DRY_1", "id": 150, "category": "DESERT" },
+      { "name": "DESERT_DRY_2", "id": 151, "category": "DESERT" },
+      { "name": "DESERT_DRY_3", "id": 152, "category": "DESERT" },
+      { "name": "DESERT_DRY_4", "id": 153, "category": "DESERT" }
+    ],
+    "categories": [
+      { "name": "WATER", "ranges": [[0, 3]] },
+      { "name": "GRASS", "ranges": [[10, 29]] },
+      { "name": "ROCK", "ranges": [[42, 53]] },
+      { "name": "FOREST", "ranges": [[66, 81], [142, 149]] },
+      { "name": "SNOW", "ranges": [[130, 141]] },
+      { "name": "DESERT", "ranges": [[150, 165]] }
+    ]
+  },
   "biomes": [
     {
       "id": "grass",

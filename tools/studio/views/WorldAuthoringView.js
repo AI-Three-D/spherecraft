@@ -7,7 +7,10 @@
  */
 
 import { WorldViewBase } from './WorldViewBase.js';
+import { TEXTURE_LOOKUP_MAX_TILE_ID } from '../../../core/texture/tileTextureLimits.js';
 import { selectBiome } from '../../../core/world/BiomeScoring.js';
+import { buildTileCatalogRuntime } from '../../../core/world/tileCatalogRuntime.js';
+import { mergeCatalogRanges, normalizeCatalogName } from '../../../core/world/tileCatalogUtils.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DEFAULT_TEXTURE_DIALOG_LAYER = Object.freeze({
@@ -15,6 +18,13 @@ const DEFAULT_TEXTURE_DIALOG_LAYER = Object.freeze({
     secondaryColor: '#808080',
     blendWeight: 0.5,
     layers: [{ type: 'fbm', scale: 1.0, amplitude: 1.0, seedOffset: 0 }],
+});
+const BIOME_SIGNAL_VALUE_RANGES = Object.freeze({
+    // Elevation bands may include below-sea-level terrain; other authored signals are normalized.
+    elevation: Object.freeze({ min: -1, max: 1, step: 0.01, fallbackMin: 0, fallbackMax: 1 }),
+    humidity: Object.freeze({ min: 0, max: 1, step: 0.01, fallbackMin: 0, fallbackMax: 1 }),
+    temperature: Object.freeze({ min: 0, max: 1, step: 0.01, fallbackMin: 0, fallbackMax: 1 }),
+    slope: Object.freeze({ min: 0, max: 1, step: 0.01, fallbackMin: 0, fallbackMax: 1 }),
 });
 
 function clampTextureDialogBlend(value, fallback = 0.5) {
@@ -124,7 +134,9 @@ export class WorldAuthoringView extends WorldViewBase {
     }
 
     _getTileName(tileId) {
-        return this.tileIdNameMap?.[tileId] || `TILE_${tileId}`;
+        const runtimeName = this._engine?.planetConfig?.tileCatalog?.tileNameById?.[tileId]
+            ?? this._engine?.planetConfig?.worldAuthoring?.tileCatalog?.tileNameById?.[tileId];
+        return runtimeName || this.tileIdNameMap?.[tileId] || `TILE_${tileId}`;
     }
 
     _createRegenConfigs(raw) {
@@ -140,7 +152,9 @@ export class WorldAuthoringView extends WorldViewBase {
                 raw.planet,
                 raw.textures,
                 raw.biomes,
-                raw.assets
+                raw.assets,
+                raw.atmosphereBanks,
+                raw.particles
             ),
         };
     }
@@ -171,8 +185,11 @@ export class WorldAuthoringView extends WorldViewBase {
         this._buildWorldSettingsSection(container, raw);
         this._buildTerrainNoiseSection(container, raw);
         this._buildRenderingSection(container, raw);
+        this._buildTileCatalogSection(container, raw);
         this._buildBiomesSection(container, raw);
         this._buildAssetsSection(container, raw);
+        this._buildAtmoBankSection(container, raw);
+        this._buildParticleAmbienceSection(container, raw);
         this._buildActionsSection(container);
     }
 
@@ -180,53 +197,54 @@ export class WorldAuthoringView extends WorldViewBase {
 
     _buildWorldSettingsSection(container, raw) {
         const body = this._addSection(container, 'World Settings', true);
+        this._addSectionNote(body, 'Top-level planet properties. "Seed" determines the entire shape of the world — every other value fine-tunes it.');
 
         this._addEditorSlider(body, raw, {
             label: 'Seed', min: 0, max: 99999, step: 1, needsRegen: true,
-            tooltip: 'World seed. Changing this creates an entirely different world.\nRequires world regeneration.',
+            tooltip: 'World seed — determines the unique shape, continent positions, and biome layout of this planet.\nEvery whole number produces a completely different world.\nRequires world regeneration.',
             get: r => r.terrain?.seed ?? 12345,
             set: (r, v) => { r.terrain.seed = v; },
         });
 
         this._addEditorSlider(body, raw, {
             label: 'Atmo Height', min: 0.05, max: 0.5, step: 0.01, needsRegen: true,
-            tooltip: 'Atmosphere height as fraction of planet radius.\nRequires world regeneration.',
+            tooltip: 'How tall the atmosphere shell appears above the surface.\nLow values look like a thin haze on the horizon; high values give a thick alien-atmosphere look from orbit.\nRequires world regeneration.',
             get: r => r.planet?.atmosphereHeightRatio ?? 0.2,
             set: (r, v) => { r.planet.atmosphereHeightRatio = v; },
         });
 
         const subHead = document.createElement('div');
         subHead.className = 'panel-subsection-head';
-        subHead.textContent = 'Atmospheric Scattering';
+        subHead.textContent = 'Sky & Atmosphere';
         body.appendChild(subHead);
 
         this._addEditorSlider(body, raw, {
             label: 'Visual Density', min: 0, max: 2, step: 0.01, needsRegen: false,
-            tooltip: 'Atmospheric haze density. Higher = thicker atmosphere.\nUpdates in real-time.',
+            tooltip: 'Overall thickness of the atmospheric haze.\n0 = clear alien sky, 1 = Earth-like, 2 = dense foggy atmosphere.\nUpdates in real-time.',
             get: r => r.planet?.atmosphereOptions?.visualDensity ?? 0.5,
             set: (r, v) => { r.planet.atmosphereOptions.visualDensity = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Sun Intensity', min: 1, max: 60, step: 0.5, needsRegen: false,
-            tooltip: 'Sun brightness multiplier.\nUpdates in real-time.',
+            tooltip: 'Brightness of the sun. Affects sky color, shadows, and terrain lighting.\nLow = overcast/distant star feel; high = harsh desert sun.\nUpdates in real-time.',
             get: r => r.planet?.atmosphereOptions?.sunIntensity ?? 20,
             set: (r, v) => { r.planet.atmosphereOptions.sunIntensity = v; },
         });
         this._addEditorSlider(body, raw, {
-            label: 'Mie Anisotropy', min: 0, max: 0.99, step: 0.01, needsRegen: false,
-            tooltip: 'Forward scattering (halo around sun). 0.76 = Earth-like.\nUpdates in real-time.',
+            label: 'Sun Halo Size', min: 0, max: 0.99, step: 0.01, needsRegen: false,
+            tooltip: 'How large and concentrated the bright glow around the sun appears.\n0 = no halo, 0.76 = Earth-like, 0.95+ = very large blinding halo.\nUpdates in real-time.',
             get: r => r.planet?.atmosphereOptions?.mieAnisotropy ?? 0.76,
             set: (r, v) => { r.planet.atmosphereOptions.mieAnisotropy = v; },
         });
         this._addEditorSlider(body, raw, {
-            label: 'Rayleigh Scale', min: 0.01, max: 0.5, step: 0.005, needsRegen: false,
-            tooltip: 'Rayleigh scattering scale height (fraction of atmosphere).\nUpdates in real-time.',
+            label: 'Sky Blueness', min: 0.01, max: 0.5, step: 0.005, needsRegen: false,
+            tooltip: 'How high the blue sky color extends above the horizon.\nLow = thin blue strip at the horizon; high = deep blue sky all the way up.\nUpdates in real-time.',
             get: r => r.planet?.atmosphereOptions?.scaleHeightRayleighRatio ?? 0.1,
             set: (r, v) => { r.planet.atmosphereOptions.scaleHeightRayleighRatio = v; },
         });
         this._addEditorSlider(body, raw, {
-            label: 'Mie Scale', min: 0.005, max: 0.1, step: 0.001, needsRegen: false,
-            tooltip: 'Mie scattering scale height (fraction of atmosphere).\nUpdates in real-time.',
+            label: 'Horizon Haze', min: 0.005, max: 0.1, step: 0.001, needsRegen: false,
+            tooltip: 'How tall the milky-white haze at the horizon extends.\nLow = crisp horizon; high = thick haze that climbs high into the sky.\nUpdates in real-time.',
             get: r => r.planet?.atmosphereOptions?.scaleHeightMieRatio ?? 0.015,
             set: (r, v) => { r.planet.atmosphereOptions.scaleHeightMieRatio = v; },
         });
@@ -236,6 +254,7 @@ export class WorldAuthoringView extends WorldViewBase {
 
     _buildTerrainNoiseSection(container, raw) {
         const body = this._addSection(container, 'Terrain Noise', false);
+        this._addSectionNote(body, 'Controls the overall shape and character of the terrain. All values are multipliers — 1.0 is the authored default. All settings require world regeneration.');
 
         // noiseProfile
         const noiseHead = document.createElement('div');
@@ -244,14 +263,14 @@ export class WorldAuthoringView extends WorldViewBase {
         body.appendChild(noiseHead);
 
         const np = [
-            { label: 'Base Bias', key: 'baseBias', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'Global height amplitude multiplier.' },
-            { label: 'Mountain Bias', key: 'mountainBias', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'Mountain feature prominence.' },
-            { label: 'Hill Bias', key: 'hillBias', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'Hill feature prominence.' },
-            { label: 'Canyon Bias', key: 'canyonBias', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'Canyon depth and frequency.' },
-            { label: 'Rare Boost', key: 'rareBoost', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'Strength of rare terrain features.' },
-            { label: 'Warp Strength', key: 'warpStrength', min: 0, max: 2, step: 0.05, def: 1.0, tip: 'Domain warping distortion.' },
-            { label: 'Ridge Sharpness', key: 'ridgeSharpness', min: 0, max: 2, step: 0.05, def: 1.0, tip: 'Mountain ridgeline sharpness.' },
-            { label: 'Micro Detail', key: 'microGain', min: 0, max: 2, step: 0.05, def: 1.0, tip: 'High-frequency surface detail.' },
+            { label: 'Base Bias', key: 'baseBias', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'Overall terrain height scale. Higher = taller mountains and deeper oceans. 0 = nearly flat planet.' },
+            { label: 'Mountain Bias', key: 'mountainBias', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'How tall and prominent the mountain ranges are. Raise this for dramatic Himalayan peaks; lower it for gentle rolling highlands.' },
+            { label: 'Hill Bias', key: 'hillBias', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'Prominence of mid-range hills and rolling terrain. Lower for mostly flat continents; raise for hilly countryside.' },
+            { label: 'Canyon Bias', key: 'canyonBias', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'How deep and frequent canyons and ravines are. Raise for dramatic chasms; lower to reduce slot canyons.' },
+            { label: 'Rare Boost', key: 'rareBoost', min: 0, max: 3, step: 0.05, def: 1.0, tip: 'Strength of unusual terrain features such as mesas, volcanic cones, and arches. Increase for more exotic landscapes.' },
+            { label: 'Warp Strength', key: 'warpStrength', min: 0, max: 2, step: 0.05, def: 1.0, tip: 'How organic and twisted the terrain looks. Low = geometric, symmetric features; high = swirling, squiggly coastlines and ridges.' },
+            { label: 'Ridge Sharpness', key: 'ridgeSharpness', min: 0, max: 2, step: 0.05, def: 1.0, tip: 'How knife-edged mountain ridgelines are. Low = rounded, smooth peaks; high = sharp, jagged alpine ridges.' },
+            { label: 'Micro Detail', key: 'microGain', min: 0, max: 2, step: 0.05, def: 1.0, tip: 'Fine surface texture and bumpiness at close range. Low = smooth terrain; high = rough, rocky surface feel.' },
         ];
         for (const p of np) {
             this._addEditorSlider(body, raw, {
@@ -270,19 +289,19 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._addEditorSlider(body, raw, {
             label: 'Count', min: 0, max: 12, step: 1, needsRegen: true,
-            tooltip: 'Number of continental landmasses.\nRequires world regeneration.',
+            tooltip: 'How many separate continental landmasses appear on the planet.\n0–1 = one giant pangaea; 4–6 = Earth-like; 10+ = archipelago of small continents.\nRequires world regeneration.',
             get: r => r.terrain?.continents?.count ?? 4,
             set: (r, v) => { r.terrain.continents.count = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Avg Size', min: 0.05, max: 0.7, step: 0.01, needsRegen: true,
-            tooltip: 'Average continent size fraction.\nRequires world regeneration.',
+            tooltip: 'Average size of each continent as a fraction of the planet surface.\n0.05 = small islands; 0.25 = Earth-like; 0.7 = nearly the whole surface is land.\nRequires world regeneration.',
             get: r => r.terrain?.continents?.averageSize ?? 0.25,
             set: (r, v) => { r.terrain.continents.averageSize = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Coastline', min: 0, max: 1, step: 0.01, needsRegen: true,
-            tooltip: 'Fractal coastline complexity.\nRequires world regeneration.',
+            tooltip: 'How jagged and irregular the coastlines are.\n0 = smooth, round blobs; 0.8 = realistic fjords and peninsulas; 1 = extremely fragmented coastline.\nRequires world regeneration.',
             get: r => r.terrain?.continents?.coastalComplexity ?? 0.8,
             set: (r, v) => { r.terrain.continents.coastalComplexity = v; },
         });
@@ -295,13 +314,13 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._addEditorSlider(body, raw, {
             label: 'Mountain Rate', min: 0, max: 3, step: 0.05, needsRegen: true,
-            tooltip: 'Tectonic mountain building rate.\nRequires world regeneration.',
+            tooltip: 'How aggressively mountain ranges form along continental boundaries.\nLow = gentle highlands; high = dramatic colliding plates with towering mountain chains.\nRequires world regeneration.',
             get: r => r.terrain?.tectonics?.mountainBuildingRate ?? 1.2,
             set: (r, v) => { r.terrain.tectonics.mountainBuildingRate = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Rift Depth', min: 0, max: 1, step: 0.01, needsRegen: true,
-            tooltip: 'Rift valley depth.\nRequires world regeneration.',
+            tooltip: 'How deep the valleys and trenches where plates pull apart are.\n0 = barely visible; 1 = dramatic sunken rift valleys cutting through the landscape.\nRequires world regeneration.',
             get: r => r.terrain?.tectonics?.riftValleyDepth ?? 0.7,
             set: (r, v) => { r.terrain.tectonics.riftValleyDepth = v; },
         });
@@ -314,19 +333,19 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._addEditorSlider(body, raw, {
             label: 'Global Rate', min: 0, max: 1, step: 0.01, needsRegen: true,
-            tooltip: 'Overall erosion intensity.\nRequires world regeneration.',
+            tooltip: 'Master erosion intensity that scales all erosion effects together.\n0 = raw tectonic terrain with sharp edges; 1 = heavily weathered, rounded landscape.\nRequires world regeneration.',
             get: r => r.terrain?.erosion?.globalRate ?? 0.6,
             set: (r, v) => { r.terrain.erosion.globalRate = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Hydraulic', min: 0, max: 1, step: 0.01, needsRegen: true,
-            tooltip: 'Water-driven erosion.\nRequires world regeneration.',
+            tooltip: 'How much rivers and rain carve channels into the terrain.\nLow = few river valleys; high = intricate drainage networks with river deltas and gorges.\nRequires world regeneration.',
             get: r => r.terrain?.erosion?.hydraulicRate ?? 0.7,
             set: (r, v) => { r.terrain.erosion.hydraulicRate = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Thermal', min: 0, max: 1, step: 0.01, needsRegen: true,
-            tooltip: 'Slope-driven erosion.\nRequires world regeneration.',
+            tooltip: 'How much loose material slides down steep slopes over time.\nLow = cliffs and sharp ledges; high = smooth, gentle angle transitions between flat and steep terrain.\nRequires world regeneration.',
             get: r => r.terrain?.erosion?.thermalRate ?? 0.4,
             set: (r, v) => { r.terrain.erosion.thermalRate = v; },
         });
@@ -339,13 +358,13 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._addEditorSlider(body, raw, {
             label: 'Ocean Level', min: -0.5, max: 0.5, step: 0.005, needsRegen: true,
-            tooltip: 'Normalised ocean surface height.\nRequires world regeneration.',
+            tooltip: 'How high the sea surface sits relative to the terrain.\nNegative = more land exposed; positive = more ocean covering the planet.\n0 ≈ 50% land coverage; -0.2 ≈ mostly land.\nRequires world regeneration.',
             get: r => r.terrain?.water?.oceanLevel ?? -0.01,
             set: (r, v) => { r.terrain.water.oceanLevel = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Visual Depth', min: 10, max: 2000, step: 10, needsRegen: false,
-            tooltip: 'Water visual scattering depth (m).\nUpdates in real-time.',
+            tooltip: 'How far into the water you can see before it becomes opaque.\nLow = murky tropical water; high = crystal-clear deep ocean with visible seafloor.\nUpdates in real-time.',
             get: r => r.terrain?.water?.visualDepthRange ?? 240,
             set: (r, v) => { r.terrain.water.visualDepthRange = v; },
         });
@@ -358,13 +377,13 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._addEditorSlider(body, raw, {
             label: 'Rock Slope Start', min: 0, max: 1, step: 0.01, needsRegen: true,
-            tooltip: 'Slope where rock begins to appear.\nRequires world regeneration.',
+            tooltip: 'The steepness at which rock and cliff texture begins to appear.\n0 = rock shows even on gentle slopes; 0.35 = only moderately steep terrain shows rock.\nRequires world regeneration.',
             get: r => r.terrain?.surface?.rockSlopeStart ?? 0.35,
             set: (r, v) => { r.terrain.surface.rockSlopeStart = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Rock Slope Full', min: 0, max: 1, step: 0.01, needsRegen: true,
-            tooltip: 'Slope where rock dominates.\nRequires world regeneration.',
+            tooltip: 'The steepness at which terrain is completely covered in bare rock with no soil or vegetation.\nMust be higher than "Rock Slope Start". Below this value, rock and soil blend together.\nRequires world regeneration.',
             get: r => r.terrain?.surface?.rockSlopeFull ?? 0.75,
             set: (r, v) => { r.terrain.surface.rockSlopeFull = v; },
         });
@@ -374,34 +393,35 @@ export class WorldAuthoringView extends WorldViewBase {
 
     _buildRenderingSection(container, raw) {
         const body = this._addSection(container, 'Rendering', false);
+        this._addSectionNote(body, 'Visual post-processing, lighting, and terrain shading. All settings update in real-time unless marked red.');
 
         // HDR
         const hdrHead = document.createElement('div');
         hdrHead.className = 'panel-subsection-head';
-        hdrHead.textContent = 'HDR';
+        hdrHead.textContent = 'Exposure & Bloom';
         body.appendChild(hdrHead);
 
         this._addEditorSlider(body, raw, {
             label: 'Exposure', min: 0.1, max: 3, step: 0.01, needsRegen: false,
-            tooltip: 'HDR exposure multiplier.\nUpdates in real-time.',
+            tooltip: 'Overall scene brightness.\nLow = dark and moody; high = overexposed and washed out. Start here if the world looks too dark or too bright.\nUpdates in real-time.',
             get: r => r.postprocessing?.exposure ?? 0.75,
             set: (r, v) => { r.postprocessing.exposure = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Bloom Thresh', min: 0.1, max: 8, step: 0.05, needsRegen: false,
-            tooltip: 'Brightness level where bloom begins.\nUpdates in real-time.',
+            tooltip: 'How bright a surface must be before it glows.\nLow = glow everywhere; high = only the sun and very bright surfaces glow.\nUpdates in real-time.',
             get: r => r.postprocessing?.bloom?.threshold ?? 1.0,
             set: (r, v) => { if (!r.postprocessing.bloom) r.postprocessing.bloom = {}; r.postprocessing.bloom.threshold = v; },
         });
         this._addEditorSlider(body, raw, {
-            label: 'Bloom Knee', min: 0, max: 1, step: 0.01, needsRegen: false,
-            tooltip: 'Bloom threshold smoothing width.\nUpdates in real-time.',
+            label: 'Bloom Softness', min: 0, max: 1, step: 0.01, needsRegen: false,
+            tooltip: 'How gradually the glow fades at the edge of the bloom threshold.\nLow = sharp glow cutoff; high = smooth, feathered bloom falloff.\nUpdates in real-time.',
             get: r => r.postprocessing?.bloom?.knee ?? 0.25,
             set: (r, v) => { if (!r.postprocessing.bloom) r.postprocessing.bloom = {}; r.postprocessing.bloom.knee = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Bloom Intensity', min: 0, max: 1, step: 0.005, needsRegen: false,
-            tooltip: 'Bloom composite strength.\nUpdates in real-time.',
+            tooltip: 'How strongly the bloom glow is blended over the scene.\n0 = no bloom; 1 = very heavy glow overlay.\nUpdates in real-time.',
             get: r => r.postprocessing?.bloom?.intensity ?? 0.3,
             set: (r, v) => { if (!r.postprocessing.bloom) r.postprocessing.bloom = {}; r.postprocessing.bloom.intensity = v; },
         });
@@ -409,18 +429,18 @@ export class WorldAuthoringView extends WorldViewBase {
         // Macro Coverage
         const macroHead = document.createElement('div');
         macroHead.className = 'panel-subsection-head';
-        macroHead.textContent = 'Macro Coverage';
+        macroHead.textContent = 'Biome Patch Size';
         body.appendChild(macroHead);
 
         this._addEditorSlider(body, raw, {
             label: 'Biome Scale', min: 0.0001, max: 0.01, step: 0.0001, needsRegen: true,
-            tooltip: 'Macro biome noise frequency.\nRequires world regeneration.',
+            tooltip: 'Controls how large the major biome patches are across the world.\nLow = continent-sized biomes; high = small, patchwork biomes that change frequently.\nRequires world regeneration.',
             get: r => r.engine?.macroConfig?.biomeScale ?? 0.001,
             set: (r, v) => { if (!r.engine.macroConfig) r.engine.macroConfig = {}; r.engine.macroConfig.biomeScale = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Region Scale', min: 0.00005, max: 0.005, step: 0.00005, needsRegen: true,
-            tooltip: 'Macro region noise frequency.\nRequires world regeneration.',
+            tooltip: 'Controls the size of regional variation patches within each biome.\nAffects how color, texture, and vegetation transitions between micro-regions.\nRequires world regeneration.',
             get: r => r.engine?.macroConfig?.regionScale ?? 0.0005,
             set: (r, v) => { if (!r.engine.macroConfig) r.engine.macroConfig = {}; r.engine.macroConfig.regionScale = v; },
         });
@@ -433,19 +453,19 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._addEditorSlider(body, raw, {
             label: 'Intensity', min: 0.1, max: 3, step: 0.05, needsRegen: false,
-            tooltip: 'Global ambient intensity multiplier.\nUpdates in real-time.',
+            tooltip: 'Overall brightness of shadows and the sky-lit side of surfaces.\nIncrease if shadows look too black or the world feels harsh; decrease for more dramatic contrast.\nUpdates in real-time.',
             get: r => r.engine?.lighting?.ambient?.intensityMultiplier ?? 1.0,
             set: (r, v) => { this._ensurePath(r, 'engine.lighting.ambient').intensityMultiplier = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Min Intensity', min: 0, max: 0.2, step: 0.002, needsRegen: false,
-            tooltip: 'Minimum ambient intensity (dark side).\nUpdates in real-time.',
+            tooltip: 'Minimum ambient brightness on the night/shadow side of the planet.\n0 = pitch black on the dark side; raise for a "moonlit" or always-visible look.\nUpdates in real-time.',
             get: r => r.engine?.lighting?.ambient?.minIntensity ?? 0.028,
             set: (r, v) => { this._ensurePath(r, 'engine.lighting.ambient').minIntensity = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Max Intensity', min: 0.05, max: 1, step: 0.01, needsRegen: false,
-            tooltip: 'Maximum ambient intensity (lit side).\nUpdates in real-time.',
+            tooltip: 'Maximum ambient brightness on the fully sun-lit side of the planet.\nAffects how bright open areas look in full sunlight independent of the sun intensity.\nUpdates in real-time.',
             get: r => r.engine?.lighting?.ambient?.maxIntensity ?? 0.30,
             set: (r, v) => { this._ensurePath(r, 'engine.lighting.ambient').maxIntensity = v; },
         });
@@ -458,25 +478,25 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._addEditorSlider(body, raw, {
             label: 'Density Mult', min: 0, max: 2, step: 0.01, needsRegen: false,
-            tooltip: 'Fog density multiplier.\nUpdates in real-time.',
+            tooltip: 'Master multiplier for all atmospheric fog in the world.\n0 = clear air; 1 = standard; 2 = very thick haze at distance.\nUpdates in real-time.',
             get: r => r.engine?.lighting?.fog?.densityMultiplier ?? 0.48,
             set: (r, v) => { this._ensurePath(r, 'engine.lighting.fog').densityMultiplier = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Max Base', min: 0, max: 0.005, step: 0.0001, needsRegen: false,
-            tooltip: 'Maximum base fog density.\nUpdates in real-time.',
+            tooltip: 'How thick the low-lying ground fog can get.\nLow = only distant haze; high = thick low fog that partially obscures nearby terrain.\nUpdates in real-time.',
             get: r => r.engine?.lighting?.fog?.maxBaseDensity ?? 0.0006,
             set: (r, v) => { this._ensurePath(r, 'engine.lighting.fog').maxBaseDensity = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Day Scale', min: 0, max: 3, step: 0.01, needsRegen: false,
-            tooltip: 'Fog density scale during daytime.\nUpdates in real-time.',
+            tooltip: 'How much fog is present during the day compared to the base density.\n0 = fog disappears in sunlight; 1 = same as base; 2+ = extra haze in daytime.\nUpdates in real-time.',
             get: r => r.engine?.lighting?.fog?.dayDensityScale ?? 1.0,
             set: (r, v) => { this._ensurePath(r, 'engine.lighting.fog').dayDensityScale = v; },
         });
         this._addEditorSlider(body, raw, {
             label: 'Night Scale', min: 0, max: 3, step: 0.01, needsRegen: false,
-            tooltip: 'Fog density scale at night.\nUpdates in real-time.',
+            tooltip: 'How much fog thickens at night relative to daytime.\nLow = clear nights; high = dense night fog for a mysterious atmosphere.\nUpdates in real-time.',
             get: r => r.engine?.lighting?.fog?.nightDensityScale ?? 0.42,
             set: (r, v) => { this._ensurePath(r, 'engine.lighting.fog').nightDensityScale = v; },
         });
@@ -484,39 +504,315 @@ export class WorldAuthoringView extends WorldViewBase {
         // AO / Terrain Shading
         const aoHead = document.createElement('div');
         aoHead.className = 'panel-subsection-head';
-        aoHead.textContent = 'AO / Terrain Shading';
+        aoHead.textContent = 'Shadow & Distance Haze';
         body.appendChild(aoHead);
 
         this._addEditorSlider(body, raw, {
-            label: 'AO Strength', min: 0, max: 1, step: 0.01, needsRegen: false,
-            tooltip: 'Master terrain ambient occlusion strength.\nUpdates in real-time.',
+            label: 'Shadow Depth', min: 0, max: 1, step: 0.01, needsRegen: false,
+            tooltip: 'How strongly terrain features cast soft shadows on themselves.\n0 = no self-shadowing; 1 = crevices, cliff bases, and overhangs are fully darkened.\nUpdates in real-time.',
             get: r => r.engine?.terrainAO?.sampleStrength ?? 1.0,
             set: (r, v) => { this._ensurePath(r, 'engine.terrainAO').sampleStrength = v; },
         });
         this._addEditorSlider(body, raw, {
-            label: 'AO Direct', min: 0, max: 1, step: 0.01, needsRegen: false,
-            tooltip: 'How much AO darkens direct sunlight.\nUpdates in real-time.',
+            label: 'Shadow on Sun', min: 0, max: 1, step: 0.01, needsRegen: false,
+            tooltip: 'How much terrain self-shadowing reduces direct sunlight in crevices.\nHigh = deep, inky cliff shadows; low = shadows only affect the ambient bounce light.\nUpdates in real-time.',
             get: r => r.engine?.terrainAO?.directStrength ?? 0.7,
             set: (r, v) => { this._ensurePath(r, 'engine.terrainAO').directStrength = v; },
         });
         this._addEditorSlider(body, raw, {
-            label: 'AO Floor', min: 0, max: 1, step: 0.01, needsRegen: false,
-            tooltip: 'Minimum ambient floor after terrain AO.\nUpdates in real-time.',
+            label: 'Shadow Floor', min: 0, max: 1, step: 0.01, needsRegen: false,
+            tooltip: 'Minimum brightness inside shadowed areas — prevents unrealistically pitch-black crevices.\nRaise if deep cliff faces look too dark; lower for more dramatic contrast.\nUpdates in real-time.',
             get: r => r.engine?.terrainAO?.ambientFloor ?? 0.65,
             set: (r, v) => { this._ensurePath(r, 'engine.terrainAO').ambientFloor = v; },
         });
         this._addEditorSlider(body, raw, {
-            label: 'Aerial Start (m)', min: 50, max: 2000, step: 10, needsRegen: false,
-            tooltip: 'Distance where aerial perspective fade begins.\nUpdates in real-time.',
+            label: 'Haze Start (m)', min: 50, max: 2000, step: 10, needsRegen: false,
+            tooltip: 'Distance from the camera where terrain starts to take on the sky\'s haze color.\nIncrease for crisp detail farther away; decrease for a hazier, more realistic atmosphere.\nUpdates in real-time.',
             get: r => r.engine?.terrainShader?.aerialFadeStartMeters ?? 400,
             set: (r, v) => { if (!r.engine.terrainShader) r.engine.terrainShader = {}; r.engine.terrainShader.aerialFadeStartMeters = v; },
         });
         this._addEditorSlider(body, raw, {
-            label: 'Aerial End (m)', min: 100, max: 5000, step: 10, needsRegen: false,
-            tooltip: 'Distance where aerial perspective fade completes.\nUpdates in real-time.',
+            label: 'Haze Full (m)', min: 100, max: 5000, step: 10, needsRegen: false,
+            tooltip: 'Distance at which distant terrain is completely blended into the sky haze color.\nMust be greater than "Haze Start". Increase for deeper visibility; decrease for thick local haze.\nUpdates in real-time.',
             get: r => r.engine?.terrainShader?.aerialFadeEndMeters ?? 600,
             set: (r, v) => { if (!r.engine.terrainShader) r.engine.terrainShader = {}; r.engine.terrainShader.aerialFadeEndMeters = v; },
         });
+    }
+
+    // ── Authored tile catalog ────────────────────────────────────────
+
+    _formatCatalogRanges(ranges = []) {
+        return (Array.isArray(ranges) ? ranges : [])
+            .filter((range) => Array.isArray(range) && range.length >= 2)
+            .map(([low, high]) => {
+                const lo = Math.max(0, Math.trunc(Number(low)));
+                const hi = Math.max(0, Math.trunc(Number(high)));
+                if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+                const a = Math.min(lo, hi);
+                const b = Math.max(lo, hi);
+                return a === b ? `${a}` : `${a}-${b}`;
+            })
+            .filter(Boolean)
+            .join(', ');
+    }
+
+    _parseCatalogRanges(text) {
+        const ranges = [];
+        const parts = String(text ?? '').split(',').map((part) => part.trim()).filter(Boolean);
+        for (const part of parts) {
+            const match = part.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+            if (!match) return null;
+            const a = Math.trunc(Number(match[1]));
+            const b = Math.trunc(Number(match[2] ?? match[1]));
+            if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+            ranges.push([Math.min(a, b), Math.max(a, b)]);
+        }
+        return ranges;
+    }
+
+    _deriveCatalogCategoriesFromTiles(catalog) {
+        const rangesByCategory = new Map();
+        for (const tile of Array.isArray(catalog?.tiles) ? catalog.tiles : []) {
+            const id = Math.trunc(Number(tile?.id));
+            if (!Number.isFinite(id) || id < 0) continue;
+            const category = normalizeCatalogName(tile?.category, 'UNMAPPED');
+            if (!rangesByCategory.has(category)) rangesByCategory.set(category, []);
+            rangesByCategory.get(category).push([id, id]);
+        }
+
+        return Array.from(rangesByCategory.entries())
+            .map(([name, ranges]) => ({ name, ranges: mergeCatalogRanges(ranges) }))
+            .sort((a, b) => (a.ranges[0]?.[0] ?? 0) - (b.ranges[0]?.[0] ?? 0) || a.name.localeCompare(b.name));
+    }
+
+    _ensureTileCatalog(raw = this._raw) {
+        if (!raw.biomes) raw.biomes = { biomes: [] };
+        if (!raw.biomes.tileCatalog || typeof raw.biomes.tileCatalog !== 'object') {
+            raw.biomes.tileCatalog = { tiles: [], categories: [] };
+        }
+        if (!Array.isArray(raw.biomes.tileCatalog.tiles)) raw.biomes.tileCatalog.tiles = [];
+        if (!Array.isArray(raw.biomes.tileCatalog.categories)) raw.biomes.tileCatalog.categories = [];
+        return raw.biomes.tileCatalog;
+    }
+
+    _getTileCatalogRuntime(raw = this._raw) {
+        const runtimeCatalog = this._engine?.planetConfig?.tileCatalog;
+        const rawCatalog = raw?.biomes?.tileCatalog;
+        const rawRuntime = buildTileCatalogRuntime(rawCatalog);
+        return rawRuntime.summary?.tileCount > 0 ? rawRuntime : runtimeCatalog;
+    }
+
+    _getTileCatalogNames(raw = this._raw) {
+        const runtime = this._getTileCatalogRuntime(raw);
+        return Array.isArray(runtime?.tiles)
+            ? runtime.tiles.map((tile) => tile.name).filter(Boolean)
+            : [];
+    }
+
+    _buildTileCatalogSection(container, raw) {
+        const body = this._addSection(container, 'Tile Catalog', false);
+        this._tileCatalogBody = body;
+        this._renderTileCatalogSection(raw);
+    }
+
+    _renderTileCatalogSection(raw = this._raw) {
+        const body = this._tileCatalogBody;
+        if (!body) return;
+        body.innerHTML = '';
+
+        const catalog = this._ensureTileCatalog(raw);
+        const runtime = buildTileCatalogRuntime(catalog);
+        const summary = document.createElement('div');
+        summary.style.cssText = 'padding:6px 12px; font-size:11px; color:var(--text-dim); line-height:1.5;';
+        summary.textContent = `${runtime.summary.tileCount} tiles, ${runtime.summary.categoryCount} categories defined. ` +
+            'Each tile maps a friendly name (e.g. "GRASS") to the numeric ID used by the terrain system. Categories group tiles for scatter rules and biome conditions.';
+        body.appendChild(summary);
+
+        if ((runtime.summary?.warningCount ?? 0) > 0) {
+            const warning = document.createElement('div');
+            warning.style.cssText = 'padding:4px 12px 8px; font-size:10px; color:#ffb56b; line-height:1.5;';
+            warning.textContent =
+                `${runtime.summary.warningCount} catalog warning(s): check duplicate tile names/IDs or invalid ranges before regenerating.`;
+            body.appendChild(warning);
+        }
+
+        const tileHead = document.createElement('div');
+        tileHead.className = 'panel-subsection-head';
+        tileHead.textContent = 'Tile Names';
+        body.appendChild(tileHead);
+
+        const list = document.createElement('div');
+        list.style.cssText = 'max-height:180px; overflow-y:auto; padding:0 8px 4px;';
+        body.appendChild(list);
+
+        const tiles = catalog.tiles;
+        for (let index = 0; index < tiles.length; index++) {
+            const tile = tiles[index] ?? {};
+            const row = document.createElement('div');
+            row.style.cssText = 'display:grid; grid-template-columns:1.6fr 64px 1fr 24px; gap:4px; align-items:center; padding:2px 0;';
+
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.className = 'param-value-input';
+            nameInput.value = tile.name ?? '';
+            nameInput.title = 'Stable tile name used by biome texture references.';
+            nameInput.addEventListener('change', () => {
+                const fallbackId = Number.isInteger(tile.id) ? tile.id : index;
+                tile.name = normalizeCatalogName(nameInput.value, `TILE_${fallbackId}`);
+                nameInput.value = tile.name;
+                this._markBiomeDirty();
+                this._renderBiomeDetail((this._raw?.biomes?.biomes || [])[this._selectedBiomeIdx]);
+            });
+
+            const idInput = document.createElement('input');
+            idInput.type = 'number';
+            idInput.className = 'param-value-input';
+            idInput.min = 0;
+            idInput.max = TEXTURE_LOOKUP_MAX_TILE_ID;
+            idInput.step = 1;
+            idInput.value = Number.isInteger(tile.id) ? tile.id : 0;
+            idInput.title = `The numeric ID that identifies this tile in the terrain system. Must match the ID used in your texture atlas. Valid range: 0–${TEXTURE_LOOKUP_MAX_TILE_ID}.`;
+            idInput.addEventListener('change', () => {
+                const value = Math.trunc(Number(idInput.value));
+                if (Number.isInteger(value)) {
+                    tile.id = Math.max(0, Math.min(TEXTURE_LOOKUP_MAX_TILE_ID, value));
+                    idInput.value = tile.id;
+                    this._markBiomeDirty();
+                }
+            });
+
+            const categoryInput = document.createElement('input');
+            categoryInput.type = 'text';
+            categoryInput.className = 'param-value-input';
+            categoryInput.value = tile.category ?? 'GRASS';
+            categoryInput.title = 'The category group this tile belongs to (e.g. GRASS, FOREST, WATER). Used by scatter rules and biome conditions to refer to groups of tiles.';
+            categoryInput.addEventListener('change', () => {
+                tile.category = normalizeCatalogName(categoryInput.value, 'GRASS');
+                this._markBiomeDirty();
+            });
+
+            const remove = document.createElement('button');
+            remove.className = 'studio-btn';
+            remove.textContent = 'x';
+            remove.title = `Remove tile ref "${tile.name ?? index}"`;
+            remove.addEventListener('click', () => {
+                tiles.splice(index, 1);
+                this._markBiomeDirty();
+                this._renderTileCatalogSection(raw);
+            });
+
+            row.appendChild(nameInput);
+            row.appendChild(idInput);
+            row.appendChild(categoryInput);
+            row.appendChild(remove);
+            list.appendChild(row);
+        }
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'studio-btn';
+        addBtn.textContent = '+ Add Tile Ref';
+        addBtn.title = 'Add a tile name/ID mapping. Regenerate world to use it in terrain.';
+        addBtn.style.margin = '4px 8px 8px';
+        addBtn.addEventListener('click', () => {
+            const nextId = tiles.reduce((maxId, tile) => Number.isInteger(tile?.id) ? Math.max(maxId, tile.id) : maxId, 0) + 1;
+            tiles.push({ name: `TILE_${nextId}`, id: nextId, category: 'GRASS' });
+            this._markBiomeDirty();
+            this._renderTileCatalogSection(raw);
+        });
+        body.appendChild(addBtn);
+
+        const categoryHead = document.createElement('div');
+        categoryHead.className = 'panel-subsection-head';
+        categoryHead.textContent = 'Categories';
+        body.appendChild(categoryHead);
+
+        const categoryHelp = document.createElement('div');
+        categoryHelp.style.cssText = 'padding:2px 12px 6px; font-size:10px; color:var(--text-dim); line-height:1.5;';
+        categoryHelp.textContent = 'Each category covers a range of tile IDs. Scatter rules and biome filters reference these category names. Use comma-separated ranges like "10-29, 66-81".';
+        body.appendChild(categoryHelp);
+
+        const categories = catalog.categories;
+        const categoryList = document.createElement('div');
+        categoryList.style.cssText = 'max-height:150px; overflow-y:auto; padding:0 8px 4px;';
+        body.appendChild(categoryList);
+
+        for (let index = 0; index < categories.length; index++) {
+            const category = categories[index] ?? {};
+            const row = document.createElement('div');
+            row.style.cssText = 'display:grid; grid-template-columns:1fr 1.4fr 24px; gap:4px; align-items:center; padding:2px 0;';
+
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.className = 'param-value-input';
+            nameInput.value = category.name ?? '';
+            nameInput.title = 'Category name used in scatter rules and biome conditions (e.g. FOREST, WATER, DESERT). Must be a single UPPERCASE word with no spaces.';
+            nameInput.addEventListener('change', () => {
+                category.name = normalizeCatalogName(nameInput.value, `CATEGORY_${index + 1}`);
+                this._markBiomeDirty();
+                this._renderTileCatalogSection(raw);
+            });
+
+            const rangesInput = document.createElement('input');
+            rangesInput.type = 'text';
+            rangesInput.className = 'param-value-input';
+            rangesInput.value = this._formatCatalogRanges(category.ranges);
+            rangesInput.title = 'Comma-separated numeric ranges, for example: 10-29, 66-81.';
+            rangesInput.addEventListener('change', () => {
+                const parsed = this._parseCatalogRanges(rangesInput.value);
+                if (!parsed || parsed.length === 0) {
+                    rangesInput.value = this._formatCatalogRanges(category.ranges);
+                    this.toast('Invalid category range; use values like "10-29, 66-81"');
+                    return;
+                }
+                category.ranges = parsed;
+                this._markBiomeDirty();
+                this._renderTileCatalogSection(raw);
+            });
+
+            const remove = document.createElement('button');
+            remove.className = 'studio-btn';
+            remove.textContent = 'x';
+            remove.title = `Remove category "${category.name ?? index}"`;
+            remove.addEventListener('click', () => {
+                categories.splice(index, 1);
+                this._markBiomeDirty();
+                this._renderTileCatalogSection(raw);
+            });
+
+            row.appendChild(nameInput);
+            row.appendChild(rangesInput);
+            row.appendChild(remove);
+            categoryList.appendChild(row);
+        }
+
+        const categoryActions = document.createElement('div');
+        categoryActions.style.cssText = 'display:flex; flex-wrap:wrap; gap:6px; padding:4px 8px 8px;';
+
+        const addCategoryBtn = document.createElement('button');
+        addCategoryBtn.className = 'studio-btn';
+        addCategoryBtn.textContent = '+ Add Category';
+        addCategoryBtn.title = 'Add a new tile category. Give it a name and assign the tile ID ranges it covers.';
+        addCategoryBtn.addEventListener('click', () => {
+            const nextId = tiles.reduce((maxId, tile) => Number.isInteger(tile?.id) ? Math.max(maxId, tile.id) : maxId, 0) + 1;
+            categories.push({ name: `CATEGORY_${categories.length + 1}`, ranges: [[nextId, nextId]] });
+            this._markBiomeDirty();
+            this._renderTileCatalogSection(raw);
+        });
+
+        const deriveBtn = document.createElement('button');
+        deriveBtn.className = 'studio-btn';
+        deriveBtn.textContent = 'Derive Ranges From Tiles';
+        deriveBtn.title = 'Replace explicit category ranges with merged contiguous ranges inferred from tile refs.';
+        deriveBtn.addEventListener('click', () => {
+            catalog.categories = this._deriveCatalogCategoriesFromTiles(catalog);
+            this._markBiomeDirty();
+            this._renderTileCatalogSection(raw);
+            this.toast('Tile catalog category ranges derived from tile refs');
+        });
+
+        categoryActions.appendChild(addCategoryBtn);
+        categoryActions.appendChild(deriveBtn);
+        body.appendChild(categoryActions);
     }
 
     // ── M2-T2: Biome editor section ─────────────────────────────────
@@ -525,6 +821,7 @@ export class WorldAuthoringView extends WorldViewBase {
         const body = this._addSection(container, 'Biomes', false);
         this._biomeEditorBody = body;
         this._selectedBiomeIdx = -1;
+        this._addSectionNote(body, 'Each biome defines what a region looks and feels like — textures, vegetation density, and terrain character. Select a biome below to edit its parameters. Click on the world map to see which biome is under the cursor.');
 
         const biomes = raw.biomes?.biomes || [];
 
@@ -621,12 +918,12 @@ export class WorldAuthoringView extends WorldViewBase {
         texHead.textContent = 'Texture References';
         container.appendChild(texHead);
 
-        this._addTextInput(container, 'Micro', biome.tileRef?.micro || '', 'Micro texture tile name (e.g. GRASS_SHORT_1)', (v) => {
+        this._addTileRefInput(container, 'Micro', biome.tileRef?.micro || '', 'Micro texture tile name (e.g. GRASS_SHORT_1)', (v) => {
             if (!biome.tileRef) biome.tileRef = {};
             biome.tileRef.micro = v;
             this._markBiomeDirty();
         });
-        this._addTextInput(container, 'Macro', biome.tileRef?.macro || '', 'Macro texture tile name', (v) => {
+        this._addTileRefInput(container, 'Macro', biome.tileRef?.macro || '', 'Macro texture tile name', (v) => {
             if (!biome.tileRef) biome.tileRef = {};
             biome.tileRef.macro = v;
             this._markBiomeDirty();
@@ -688,8 +985,32 @@ export class WorldAuthoringView extends WorldViewBase {
             this._markBiomeDirty();
         };
 
-        this._addBiomeSlider(container, 'Min', 0, 1, 0.01, rule.min ?? 0, `Minimum ${signalName} value for this biome`, (v) => set('min', v));
-        this._addBiomeSlider(container, 'Max', 0, 1, 0.01, rule.max ?? 1, `Maximum ${signalName} value for this biome`, (v) => set('max', v));
+        const valueRange = BIOME_SIGNAL_VALUE_RANGES[signalName] ?? BIOME_SIGNAL_VALUE_RANGES.humidity;
+        const ruleMin = Number.isFinite(rule.min) ? rule.min : valueRange.fallbackMin;
+        const ruleMax = Number.isFinite(rule.max) ? rule.max : valueRange.fallbackMax;
+        const isUnboundedSignal = signalName === 'elevation';
+        const editorMin = isUnboundedSignal ? Math.min(valueRange.min, ruleMin, ruleMax) : valueRange.min;
+        const editorMax = isUnboundedSignal ? Math.max(valueRange.max, ruleMin, ruleMax) : valueRange.max;
+        this._addBiomeSlider(
+            container,
+            'Min',
+            editorMin,
+            editorMax,
+            valueRange.step,
+            ruleMin,
+            `Minimum ${signalName} value for this biome`,
+            (v) => set('min', v)
+        );
+        this._addBiomeSlider(
+            container,
+            'Max',
+            editorMin,
+            editorMax,
+            valueRange.step,
+            ruleMax,
+            `Maximum ${signalName} value for this biome`,
+            (v) => set('max', v)
+        );
         this._addBiomeSlider(container, 'Transition', 0, 0.5, 0.01, rule.transitionWidth ?? 0.1, 'Soft edge transition width', (v) => set('transitionWidth', v));
         this._addBiomeDropdown(container, 'Preference', ['low', 'mid', 'high'], rule.preference || 'mid',
             'Linear preference within the valid band', (v) => set('preference', v));
@@ -755,6 +1076,43 @@ export class WorldAuthoringView extends WorldViewBase {
         input.value = value;
         input.title = tooltip;
         input.addEventListener('change', () => onChange(input.value));
+
+        row.appendChild(lbl);
+        row.appendChild(input);
+        container.appendChild(row);
+    }
+
+    _addTileRefInput(container, label, value, tooltip, onChange) {
+        const row = document.createElement('div');
+        row.className = 'param-row';
+
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        lbl.title = tooltip;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'param-value-input';
+        input.style.cssText = 'grid-column: 2 / 4; text-align: left;';
+        input.value = value;
+        input.title = tooltip;
+
+        const tileNames = this._getTileCatalogNames();
+        if (tileNames.length > 0) {
+            const listId = `tile-ref-list-${label}-${Math.random().toString(36).slice(2)}`;
+            const dataList = document.createElement('datalist');
+            dataList.id = listId;
+            dataList.style.display = 'none';
+            for (const tileName of tileNames) {
+                const option = document.createElement('option');
+                option.value = tileName;
+                dataList.appendChild(option);
+            }
+            input.setAttribute('list', listId);
+            row.appendChild(dataList);
+        }
+
+        input.addEventListener('change', () => onChange(input.value.trim().toUpperCase()));
 
         row.appendChild(lbl);
         row.appendChild(input);
@@ -836,6 +1194,7 @@ export class WorldAuthoringView extends WorldViewBase {
         const body = this._addSection(container, 'Assets', false);
         this._assetEditorBody = body;
         this._selectedAssetIdx = -1;
+        this._addSectionNote(body, 'Asset profiles control how trees, rocks, and other props are scattered across the terrain. Select a profile to adjust its placement density and variation. Requires world regeneration.');
 
         const profiles = raw.assets?.profiles || [];
 
@@ -982,6 +1341,353 @@ export class WorldAuthoringView extends WorldViewBase {
         this.toast(`Removed profile "${removed[0]?.id}"`);
     }
 
+    // ── Atmosphere Banks section ─────────────────────────────────────
+
+    _ensureAtmoBankConfig(raw) {
+        if (!raw.atmosphereBanks || typeof raw.atmosphereBanks !== 'object') raw.atmosphereBanks = {};
+        if (!raw.atmosphereBanks.placement || typeof raw.atmosphereBanks.placement !== 'object') {
+            raw.atmosphereBanks.placement = {};
+        }
+        if (!Array.isArray(raw.atmosphereBanks.scatterRules)) raw.atmosphereBanks.scatterRules = [];
+        return raw.atmosphereBanks;
+    }
+
+    _buildAtmoBankSection(container, raw) {
+        const body = this._addSection(container, 'Atmosphere Banks', false);
+        this._atmoBankBody = body;
+        this._renderAtmoBankSection(raw);
+    }
+
+    _renderAtmoBankSection(raw = this._raw) {
+        const body = this._atmoBankBody;
+        if (!body) return;
+        body.innerHTML = '';
+        this._addSectionNote(body, 'Atmosphere banks are volumetric cloud/mist effects placed around the world — valley mist, fog pockets, and low clouds. Use scatter rules to control where and how often they appear based on terrain type and elevation.');
+
+        const ab = this._ensureAtmoBankConfig(raw);
+
+        const placementHead = document.createElement('div');
+        placementHead.className = 'panel-subsection-head';
+        placementHead.textContent = 'Global Placement';
+        body.appendChild(placementHead);
+
+        for (const [label, key, min, max, step, fallback, tooltip] of [
+            ['Max Render Dist', 'maxRenderDist', 100, 5000, 100, 2000, 'How far from the camera atmosphere banks are visible.\nLow = only nearby effects; high = visible over the entire landscape.\n2000m is a good starting point.'],
+            ['Cell Size', 'cellSize', 50, 2000, 50, 400, 'The size of each placement grid cell in meters.\nSmaller cells = more frequent, smaller banks; larger cells = wider-spaced, larger effects.\nAffects how densely the world is covered.'],
+            ['Scan Radius', 'scanRadius', 1, 24, 1, 7, 'How many grid cells around the camera are evaluated for bank placement each update.\nIncrease for denser coverage at distance; decrease for a performance boost.'],
+            ['Spawn Prob', 'spawnProbability', 0, 1, 0.01, 0.35, 'The chance that a valid cell actually spawns an atmosphere bank.\n0 = none ever spawn; 0.35 = roughly 1 in 3 valid cells gets a bank; 1 = every valid cell spawns one.'],
+            ['Base Budget', 'baseSpawnBudget', 0, 16, 1, 3, 'Default number of emitters placed per bank.\nHigher = each bank is denser/larger; lower = smaller, more subtle effects.\nIndividual scatter rules can override this per rule type.'],
+        ]) {
+            this._addEditorSlider(body, raw, {
+                label, min, max, step, needsRegen: true, tooltip,
+                get: (r) => {
+                    const pl = this._ensureAtmoBankConfig(r).placement;
+                    return Number.isFinite(pl[key]) ? pl[key] : fallback;
+                },
+                set: (r, v) => { this._ensureAtmoBankConfig(r).placement[key] = v; },
+            });
+        }
+
+        const rulesHead = document.createElement('div');
+        rulesHead.style.cssText = 'padding:8px 12px 4px; font-size:11px; font-weight:600; color:var(--text); display:flex; justify-content:space-between; align-items:center;';
+        rulesHead.title = 'Scatter rules decide which type of atmosphere bank (valley mist, fog pocket, or low cloud) appears in each part of the world, and under what terrain/elevation conditions.';
+        const rulesTitle = document.createElement('span');
+        rulesTitle.textContent = `Scatter Rules (${ab.scatterRules.length})`;
+        const addBtn = document.createElement('button');
+        addBtn.className = 'studio-btn';
+        addBtn.textContent = '+ Add Rule';
+        addBtn.addEventListener('click', () => {
+            this._ensureAtmoBankConfig(raw).scatterRules.push({
+                id: `rule_${ab.scatterRules.length + 1}`,
+                type: 'FOG_POCKET',
+                enabled: true,
+                probability: 0.25,
+                weatherWeight: 1.0,
+                fogWeight: 1.0,
+                spawnBudget: 3,
+                tileCategories: [],
+                excludeTileCategories: [],
+            });
+            this._renderAtmoBankSection(raw);
+            this._markBiomeDirty();
+        });
+        rulesHead.appendChild(rulesTitle);
+        rulesHead.appendChild(addBtn);
+        body.appendChild(rulesHead);
+
+        for (let i = 0; i < ab.scatterRules.length; i++) {
+            this._renderAtmoScatterRule(body, raw, ab, i);
+        }
+    }
+
+    _renderAtmoScatterRule(body, raw, ab, ruleIdx) {
+        const rule = ab.scatterRules[ruleIdx];
+        const panel = document.createElement('div');
+        panel.style.cssText = 'margin:3px 8px 4px; border:1px solid var(--border); border-radius:4px; overflow:hidden;';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; align-items:center; gap:6px; padding:5px 8px; background:var(--panel-bg2); cursor:pointer; user-select:none;';
+
+        const enabledCb = document.createElement('input');
+        enabledCb.type = 'checkbox';
+        enabledCb.checked = rule.enabled !== false;
+        enabledCb.title = 'Enable/disable this rule';
+        enabledCb.addEventListener('change', (e) => {
+            e.stopPropagation();
+            rule.enabled = enabledCb.checked;
+            this._markBiomeDirty();
+        });
+
+        const titleSpan = document.createElement('span');
+        titleSpan.style.cssText = 'flex:1; font-size:11px; font-weight:600;';
+        titleSpan.textContent = `${ruleIdx + 1}. ${rule.id ?? 'rule'} (${rule.type ?? '?'})`;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'studio-btn';
+        removeBtn.textContent = '✕';
+        removeBtn.style.cssText = 'padding:1px 6px; font-size:10px;';
+        removeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            ab.scatterRules.splice(ruleIdx, 1);
+            this._renderAtmoBankSection(raw);
+            this._markBiomeDirty();
+        });
+
+        const content = document.createElement('div');
+        content.style.cssText = 'padding:6px 8px 8px; display:none;';
+        header.addEventListener('click', () => {
+            content.style.display = content.style.display === 'none' ? 'block' : 'none';
+        });
+
+        header.appendChild(enabledCb);
+        header.appendChild(titleSpan);
+        header.appendChild(removeBtn);
+        panel.appendChild(header);
+        panel.appendChild(content);
+        body.appendChild(panel);
+
+        // Type
+        const typeRow = this._makeAtmoRuleRow('Type');
+        typeRow.title = 'The visual style of this atmosphere bank:\nValley Mist - thin ground-hugging mist that pools in low-lying areas and valleys\nFog Pocket - mid-level patchy fog that drifts across open terrain\nLow Cloud - dense, opaque low-altitude cloud banks that hang above terrain\nPeak Cloud - larger cap clouds above high ridges';
+        const typeSel = document.createElement('select');
+        typeSel.className = 'param-value-input';
+        typeSel.style.flex = '1';
+        for (const t of ['VALLEY_MIST', 'FOG_POCKET', 'LOW_CLOUD', 'PEAK_CLOUD']) {
+            const opt = document.createElement('option');
+            opt.value = t; opt.textContent = t.replace(/_/g, ' ');
+            if ((rule.type ?? 'FOG_POCKET') === t) opt.selected = true;
+            typeSel.appendChild(opt);
+        }
+        typeSel.addEventListener('change', () => {
+            rule.type = typeSel.value;
+            titleSpan.textContent = `${ruleIdx + 1}. ${rule.id ?? 'rule'} (${rule.type})`;
+            this._markBiomeDirty();
+        });
+        typeRow.appendChild(typeSel);
+        content.appendChild(typeRow);
+
+        // ID
+        this._addAtmoRuleText(content, 'ID', rule.id ?? '', 'A unique name for this rule used in the config file (e.g. "forest_fog_pockets"). No spaces — use underscores. Changing this does not affect the visual result.', (v) => {
+            rule.id = v;
+            titleSpan.textContent = `${ruleIdx + 1}. ${v || 'rule'} (${rule.type ?? '?'})`;
+            this._markBiomeDirty();
+        });
+
+        // Numeric sliders
+        for (const [label, field, min, max, step, fallback, tooltip] of [
+            ['Probability', 'probability', 0, 1, 0.01, 0.25, 'Base chance this rule fires when its tile and elevation conditions are met.\n0 = never spawns; 0.25 = 1 in 4 matching cells gets a bank; 1 = always spawns.\nStart low (0.1–0.3) and increase until the effect looks right.'],
+            ['Weather Wt', 'weatherWeight', 0, 4, 0.05, 1, 'Scales the spawn probability with current weather intensity.\n1 = spawn rate is unaffected by weather; 2 = twice as likely during stormy weather; 0 = never spawns regardless of weather.'],
+            ['Fog Wt', 'fogWeight', 0, 4, 0.05, 1, 'Scales the spawn probability with the world\'s ambient fog density.\n1 = unaffected; 2 = twice as likely when it\'s foggy; 0 = never spawns in fog.'],
+            ['Weather Floor', 'weatherFloor', 0, 1, 0.01, 0.32, 'Minimum weather multiplier for this rule.\nLower values keep low/mid clouds rare in clear weather; higher values make them visible even when the weather system is calm.'],
+            ['Spawn Budget', 'spawnBudget', 0, 32, 1, 3, 'How many emitters are placed per matched cell for this rule.\nHigher = denser, larger individual banks; lower = smaller, more subtle effects.\nOverrides the global "Base Budget" for this rule type only.'],
+        ]) {
+            this._addAtmoRuleSlider(content, label,
+                min, max, step,
+                Number.isFinite(rule[field]) ? rule[field] : fallback,
+                tooltip,
+                (v) => { rule[field] = v; this._markBiomeDirty(); });
+        }
+
+        // Category filters
+        this._addAtmoRuleText(content, 'Tile Types',
+            Array.isArray(rule.tileCategories) ? rule.tileCategories.join(', ') : '',
+            'Comma-separated tile categories where this rule can fire (e.g. FOREST, GRASS).\nLeave empty to match any terrain type.\nCategory names must match ones defined in the Tile Catalog above.',
+            (v) => {
+                rule.tileCategories = v.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+                this._markBiomeDirty();
+            });
+        this._addAtmoRuleText(content, 'Exclude Types',
+            Array.isArray(rule.excludeTileCategories) ? rule.excludeTileCategories.join(', ') : '',
+            'Tile categories where this rule is always blocked, even if other conditions match.\nFor example: "WATER, DESERT" prevents mist from appearing over ocean or sand.\nCategory names must match the Tile Catalog.',
+            (v) => {
+                rule.excludeTileCategories = v.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+                this._markBiomeDirty();
+            });
+
+        // Elevation band
+        this._addAtmoRuleBandSliders(content, 'Elevation', rule, 'elevation', -1, 1, 0.01,
+            'Restrict this rule to a range of elevations.\n−1 = deepest ocean floor, 0 = sea level, 1 = highest mountain peak.\nExample: −0.1 to 0.15 = low coastal plains and shallow valleys only.\nLeave at full range (−1 to 1) to match any elevation.');
+        // Slope band
+        this._addAtmoRuleBandSliders(content, 'Slope', rule, 'slope', 0, 1, 0.01,
+            'Restrict this rule to a range of terrain steepness.\n0 = completely flat, 1 = vertical cliff face.\nExample: 0 to 0.3 = only flat-to-gentle terrain (good for valley mist).\nLeave at full range (0 to 1) to match any slope.');
+        this._addAtmoRuleBandSliders(content, 'Altitude Offset', rule, 'altitudeOffset', 0, 2000, 10,
+            'Optional cloud altitude above the sampled terrain point, in meters.\nUse low values for mist and higher values for low/mid cloud banks.');
+    }
+
+    _makeAtmoRuleRow(label) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:6px; padding:2px 0;';
+        const lbl = document.createElement('span');
+        lbl.style.cssText = 'flex:0 0 96px; font-size:10px; color:var(--text-dim);';
+        lbl.textContent = label;
+        row.appendChild(lbl);
+        return row;
+    }
+
+    _addAtmoRuleText(body, label, value, tooltip, onChange) {
+        const row = this._makeAtmoRuleRow(label);
+        const input = document.createElement('input');
+        input.type = 'text'; input.className = 'param-value-input';
+        input.style.flex = '1'; input.value = value; input.title = tooltip ?? '';
+        input.addEventListener('change', () => onChange(input.value));
+        row.appendChild(input);
+        body.appendChild(row);
+    }
+
+    _addAtmoRuleSlider(body, label, min, max, step, value, tooltip, onChange) {
+        const row = this._makeAtmoRuleRow(label);
+        const slider = document.createElement('input');
+        slider.type = 'range'; slider.min = min; slider.max = max;
+        slider.step = step; slider.value = value; slider.style.flex = '1';
+        slider.title = tooltip ?? '';
+        const num = document.createElement('input');
+        num.type = 'number'; num.className = 'param-value-input';
+        num.min = min; num.max = max; num.step = step; num.value = value;
+        num.style.cssText = 'width:52px;';
+        const update = (v) => {
+            v = Math.max(min, Math.min(max, v));
+            slider.value = v; num.value = v;
+            onChange(v);
+        };
+        slider.addEventListener('input', () => update(parseFloat(slider.value)));
+        num.addEventListener('change', () => { const v = parseFloat(num.value); if (Number.isFinite(v)) update(v); });
+        row.appendChild(slider); row.appendChild(num);
+        body.appendChild(row);
+    }
+
+    _addAtmoRuleBandSliders(body, label, rule, key, min, max, step, tooltip) {
+        const head = document.createElement('div');
+        head.style.cssText = 'font-size:10px; color:var(--text-dim); padding:5px 0 2px; font-weight:600;';
+        head.textContent = `${label} band`;
+        head.title = tooltip ?? '';
+        body.appendChild(head);
+        const band = rule[key];
+        const getOrCreate = () => {
+            if (!rule[key] || typeof rule[key] !== 'object') rule[key] = { min, max };
+            return rule[key];
+        };
+        this._addAtmoRuleSlider(body, '  Min', min, max, step,
+            Number.isFinite(band?.min) ? band.min : min, '',
+            (v) => { getOrCreate().min = v; this._markBiomeDirty(); });
+        this._addAtmoRuleSlider(body, '  Max', min, max, step,
+            Number.isFinite(band?.max) ? band.max : max, '',
+            (v) => { getOrCreate().max = v; this._markBiomeDirty(); });
+    }
+
+    _ensureLeafFallConfig(raw) {
+        if (!raw.particles || typeof raw.particles !== 'object') raw.particles = {};
+        if (!raw.particles.ambientEmitters || typeof raw.particles.ambientEmitters !== 'object') {
+            raw.particles.ambientEmitters = {};
+        }
+        if (!raw.particles.ambientEmitters.leafFall || typeof raw.particles.ambientEmitters.leafFall !== 'object') {
+            raw.particles.ambientEmitters.leafFall = {};
+        }
+        const leafFall = raw.particles.ambientEmitters.leafFall;
+        if (!leafFall.anchorSelection || typeof leafFall.anchorSelection !== 'object') {
+            leafFall.anchorSelection = {};
+        }
+        if (!Array.isArray(leafFall.anchorSelection.spawnIntervalSeconds)) {
+            leafFall.anchorSelection.spawnIntervalSeconds = [1.0, 4.0];
+        }
+        return leafFall;
+    }
+
+    _buildParticleAmbienceSection(container, raw) {
+        const body = this._addSection(container, 'Particle Ambience', false);
+        this._addSectionNote(body, 'Controls falling leaves and other ambient particle effects. Leaves fall from nearby trees and pick up the foliage color of the tree they come from. Regenerate the world to see updated leaf behavior.');
+
+        const leafFall = this._ensureLeafFallConfig(raw);
+        leafFall.source = leafFall.source || 'detailed_leaf_anchors';
+        leafFall.anchorSelection.source = leafFall.anchorSelection.source || 'detailed_leaf_anchors';
+
+        this._addEditorSlider(body, raw, {
+            label: 'Leaf Emitters', min: 0, max: 8, step: 1, needsRegen: true,
+            tooltip: 'Maximum number of trees that drop leaves simultaneously.\nEach active emitter represents one nearby tree shedding leaves.\n0 = no leaf fall; 3 = a few nearby trees; 8 = lush canopy effect.\nNote: campfires and fireflies also count toward the total, so keep this under 6 if using those effects.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.maxEmitters ?? 3,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                cfg.anchorSelection.maxEmitters = v;
+            },
+        });
+
+        this._addEditorSlider(body, raw, {
+            label: 'Tree Chance', min: 0, max: 1, step: 0.01, needsRegen: true,
+            tooltip: 'The probability that any given nearby tree is chosen as a leaf source.\n0 = no trees drop leaves; 0.35 = roughly 1 in 3 nearby trees sheds leaves; 1 = all nearby trees drop leaves.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.probability ?? 0.35,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                cfg.anchorSelection.probability = v;
+            },
+        });
+
+        this._addEditorSlider(body, raw, {
+            label: 'Min Drop Sec', min: 0.25, max: 12, step: 0.25, needsRegen: true,
+            tooltip: 'Minimum time between individual leaf drops from each active tree.\nLower = leaves fall more often; works together with "Max Drop Sec" to create natural variation.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.spawnIntervalSeconds?.[0] ?? 1.0,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                const max = Math.max(v, cfg.anchorSelection.spawnIntervalSeconds?.[1] ?? 4.0);
+                cfg.anchorSelection.spawnIntervalSeconds = [v, max];
+            },
+        });
+
+        this._addEditorSlider(body, raw, {
+            label: 'Max Drop Sec', min: 0.25, max: 12, step: 0.25, needsRegen: true,
+            tooltip: 'Maximum time between individual leaf drops from each active tree.\nMust be greater than "Min Drop Sec". A wider gap creates sporadic, natural-looking leaf fall.',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.spawnIntervalSeconds?.[1] ?? 4.0,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                const min = Math.min(v, cfg.anchorSelection.spawnIntervalSeconds?.[0] ?? 1.0);
+                cfg.anchorSelection.spawnIntervalSeconds = [min, v];
+            },
+        });
+
+        this._addEditorSlider(body, raw, {
+            label: 'Sample Sec', min: 0.25, max: 5, step: 0.25, needsRegen: true,
+            tooltip: 'How often the game looks for new nearby trees to use as leaf sources (in seconds).\nLow = anchor emitters switch to newly-close trees quickly; high = fewer updates, more stable (and lighter on performance).',
+            get: r => this._ensureLeafFallConfig(r).anchorSelection.refreshIntervalSeconds ?? 1.0,
+            set: (r, v) => {
+                const cfg = this._ensureLeafFallConfig(r);
+                cfg.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.source = 'detailed_leaf_anchors';
+                cfg.anchorSelection.pending = false;
+                cfg.anchorSelection.refreshIntervalSeconds = v;
+            },
+        });
+    }
+
     // ── Actions section ───────────────────────────────────────────────
 
     _buildActionsSection(container) {
@@ -989,11 +1695,11 @@ export class WorldAuthoringView extends WorldViewBase {
 
         this._regenBtn = this._addWorldButton(actionBody, '⬡ Regenerate World', () => {
             this._regenerate();
-        }, 'regen-btn', 'Generate the world with current settings.\nRequired after changing red-labelled parameters.');
+        }, 'regen-btn', 'Rebuild the entire world with your current settings.\nRequired whenever you change a parameter marked in red — those settings affect the terrain geometry, biome layout, or asset placement and cannot update live.\nThis may take a few seconds.');
 
         this._discardBtn = this._addWorldButton(actionBody, '↩ Discard Regen Changes', () => {
             this._discardRegenChanges();
-        }, 'discard-btn', 'Undo all changes that require world regeneration.\nReal-time changes (non-red) are kept.');
+        }, 'discard-btn', 'Undo all pending changes that require world regeneration, reverting them to the last regenerated state.\nReal-time changes (parameters NOT marked red) are kept as-is.');
 
         this._updateDirtyUI();
     }
@@ -1009,10 +1715,12 @@ export class WorldAuthoringView extends WorldViewBase {
         this._addButton(saveSec, 'Download textures.json',      () => this._loader?.exportJSON('textures', this._raw?.textures));
         this._addButton(saveSec, 'Download biomes.json',        () => this._loader?.exportJSON('biomes', this._raw?.biomes));
         this._addButton(saveSec, 'Download assets.json',        () => this._loader?.exportJSON('assets', this._raw?.assets));
+        this._addButton(saveSec, 'Download atmosphere_banks.json', () => this._loader?.exportJSON('atmosphere_banks', this._raw?.atmosphereBanks));
+        this._addButton(saveSec, 'Download particles.json',     () => this._loader?.exportJSON('particles', this._raw?.particles));
 
         const info = document.createElement('div');
         info.style.cssText = 'padding:8px 12px; font-size:10px; color:var(--text-dim); line-height:1.6;';
-        info.textContent = 'Download then replace the file in your world/ folder to make changes permanent.';
+        info.textContent = 'Download the files you changed, then replace the matching files in your world/ folder to make changes permanent. You only need to save the files you actually edited.';
         saveSec.appendChild(info);
 
         const loadSec = this._addSection(container, 'Load World Config', false);
@@ -1023,6 +1731,8 @@ export class WorldAuthoringView extends WorldViewBase {
         this._addButton(loadSec, 'Load textures.json…',      () => this._loadFile('textures'));
         this._addButton(loadSec, 'Load biomes.json…',        () => this._loadFile('biomes'));
         this._addButton(loadSec, 'Load assets.json…',        () => this._loadFile('assets'));
+        this._addButton(loadSec, 'Load atmosphere_banks.json…', () => this._loadFile('atmosphereBanks'));
+        this._addButton(loadSec, 'Load particles.json…',     () => this._loadFile('particles'));
 
         const navSec = this._addSection(container, 'Navigation', true);
         const navInfo = document.createElement('div');
@@ -1040,6 +1750,20 @@ export class WorldAuthoringView extends WorldViewBase {
 
     _addEditorSlider(body, raw, param) {
         this._addWorldSlider(body, param, raw);
+    }
+
+    _addSectionNote(body, text) {
+        const el = document.createElement('div');
+        el.style.cssText = 'padding:5px 12px 7px; font-size:10px; color:var(--text-dim); line-height:1.55;';
+        el.textContent = text;
+        body.appendChild(el);
+    }
+
+    _addSectionTip(body, text) {
+        const el = document.createElement('div');
+        el.style.cssText = 'margin:4px 8px 6px; padding:5px 8px; font-size:10px; color:var(--text); background:rgba(255,200,80,0.08); border-left:2px solid rgba(255,200,80,0.45); border-radius:0 3px 3px 0; line-height:1.55;';
+        el.textContent = text;
+        body.appendChild(el);
     }
 
     // ── Realtime application — override parent ────────────────────────
@@ -1493,6 +2217,8 @@ export class WorldAuthoringView extends WorldViewBase {
         let html = '';
         if (biomeResult.biome) {
             html += `<div class="diag-biome">${biomeResult.biome.displayName}</div>`;
+        } else if (biomeResult.fallback) {
+            html += '<div class="diag-biome">No authored biome match</div>';
         }
 
         html += `<div class="diag-row"><span class="diag-label">Elevation</span><span class="diag-value">${sigs.elevation.toFixed(3)}</span></div>`;

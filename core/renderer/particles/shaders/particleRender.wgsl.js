@@ -15,6 +15,7 @@ import { PARTICLE_TYPES } from '../ParticleTypes.js';
 export function buildParticleRenderWGSL({ typeCapacity = 8 } = {}) {
     const common = buildParticleCommonWGSL({ typeCapacity });
     const leafTypeId = PARTICLE_TYPES.LEAF;
+    const rainDropTypeId = PARTICLE_TYPES.RAIN_DROP;
 
     return /* wgsl */`
 ${common}
@@ -47,6 +48,20 @@ fn quadCorner(vid: u32) -> vec2<f32> {
     return c;
 }
 
+fn hash1u(x: u32) -> u32 {
+    var v = x;
+    v = (v ^ 61u) ^ (v >> 16u);
+    v = v + (v << 3u);
+    v = v ^ (v >> 4u);
+    v = v * 0x27d4eb2du;
+    v = v ^ (v >> 15u);
+    return v;
+}
+
+fn hashToFloat(seed: u32) -> f32 {
+    return f32(hash1u(seed) & 0x00FFFFFFu) / f32(0x01000000u);
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32,
            @builtin(instance_index) iid: u32) -> VsOut {
@@ -70,6 +85,21 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     var axisX = globals.cameraRight * (corner.x * p.size);
     var axisY = globals.cameraUp    * (corner.y * p.size);
 
+    if (p.ptype == ${leafTypeId}u) {
+        let h = hashToFloat(slot * 3571u + 7919u);
+        let tumble = sin(globals.time * (2.2 + h * 3.4) + h * 18.85);
+        let edgeOn = 0.34 + abs(tumble) * 0.66;
+        let broadside = 0.82 + (1.0 - abs(tumble)) * 0.32;
+        axisX = axisX * broadside;
+        axisY = axisY * edgeOn;
+
+        let speed = length(p.velocity);
+        if (speed > 0.02) {
+            let driftDir = p.velocity / speed;
+            axisY = mix(axisY, driftDir * (corner.y * p.size * edgeOn), 0.28);
+        }
+    }
+
     // Velocity stretch (FLAME): replace Y axis with velocity direction,
     // elongating the billboard along motion.
     if ((p.flags & FLAG_STRETCH_VEL) != 0u) {
@@ -87,8 +117,14 @@ fn vs_main(@builtin(vertex_index) vid: u32,
             } else {
                 sideRaw = cr;
             }
-            axisX = sideRaw * (corner.x * p.size);
-            axisY = velDir  * (corner.y * p.size * 1.6);
+            var stretchScale = 1.6;
+            var widthScale = 1.0;
+            if (p.ptype == ${rainDropTypeId}u) {
+                stretchScale = 18.0;
+                widthScale = 0.18;
+            }
+            axisX = sideRaw * (corner.x * p.size * widthScale);
+            axisY = velDir  * (corner.y * p.size * stretchScale);
         }
     }
 
@@ -109,12 +145,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let center = in.uv - vec2<f32>(0.5, 0.5);
 
     if (in.ptype == ${leafTypeId}u) {
-        let leafD = length(vec2<f32>(center.x * 1.6, center.y)) * 2.0;
-        if (leafD >= 1.0) { discard; }
-        let radial = clamp(1.0 - leafD, 0.0, 1.0);
-        let vein = 1.0 - smoothstep(0.0, 0.06, abs(center.x));
-        let a = pow(radial, 0.5) * (0.85 + 0.15 * vein);
+        let leafD = length(vec2<f32>(center.x * 2.45, center.y * 1.05)) * 2.0;
+        let tip = smoothstep(0.58, 0.18, abs(center.y));
+        let waist = smoothstep(0.50, 0.10, abs(center.x) * (1.2 + abs(center.y) * 2.4));
+        let mask = min(1.0 - leafD, min(tip, waist));
+        if (mask <= 0.0) { discard; }
+        let edge = smoothstep(0.0, 0.18, mask);
+        let vein = 1.0 - smoothstep(0.0, 0.035, abs(center.x));
+        let a = edge * (0.88 + 0.12 * vein);
         return vec4<f32>(in.color.rgb, in.color.a * a);
+    }
+
+    if (in.ptype == ${rainDropTypeId}u) {
+        let line = 1.0 - smoothstep(0.03, 0.46, abs(center.x));
+        let taper = smoothstep(0.50, 0.18, abs(center.y));
+        let core = pow(clamp(line * taper, 0.0, 1.0), 0.72);
+        if (core <= 0.01) { discard; }
+        return vec4<f32>(in.color.rgb, in.color.a * core);
     }
 
     let d = length(center) * 2.0;

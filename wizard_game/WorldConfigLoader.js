@@ -18,8 +18,41 @@
 
 import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
 import { buildWorldTextureConfig } from './WorldTextureOverrides.js';
-import { TILE_TYPES } from '../templates/configs/tileTypes.js';
+import { DEFAULT_TILE_CATALOG } from '../templates/configs/defaultTileCatalog.js';
 import { buildWorldAuthoringRuntime } from '../core/world/biomeRuntime.js';
+import { buildAtmoBankAuthoringRuntime } from '../core/renderer/atmosphere-banks/AtmoBankAuthoringRuntime.js';
+import { buildParticleAuthoringRuntime } from '../core/renderer/particles/ParticleAuthoringRuntime.js';
+
+function cloneJSONValue(value) {
+    if (Array.isArray(value)) {
+        return value.map(cloneJSONValue);
+    }
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [key, nested] of Object.entries(value)) out[key] = cloneJSONValue(nested);
+        return out;
+    }
+    return value;
+}
+
+function mergePlainConfig(target = {}, source = {}) {
+    if (!source || typeof source !== 'object') return target;
+    for (const [key, value] of Object.entries(source)) {
+        if (Array.isArray(value)) {
+            target[key] = value.map(cloneJSONValue);
+        } else if (value && typeof value === 'object') {
+            target[key] = mergePlainConfig(
+                target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])
+                    ? target[key]
+                    : {},
+                value
+            );
+        } else {
+            target[key] = value;
+        }
+    }
+    return target;
+}
 
 export class WorldConfigLoader {
     /**
@@ -34,7 +67,7 @@ export class WorldConfigLoader {
     // ── Load ─────────────────────────────────────────────────────────────
 
     async load() {
-        const [terrain, planet, postprocessing, engine, textures, biomes, assets] = await Promise.all([
+        const [terrain, planet, postprocessing, engine, textures, biomes, assets, atmosphereBanks, particles] = await Promise.all([
             this._fetchJSON('terrain.json'),
             this._fetchJSON('planet.json'),
             this._fetchJSON('postprocessing.json'),
@@ -42,32 +75,72 @@ export class WorldConfigLoader {
             this._fetchJSON('textures.json').catch(() => ({ overrides: {} })),
             this._fetchJSON('biomes.json').catch(() => ({ biomes: [] })),
             this._fetchJSON('assets.json').catch(() => ({ profiles: [] })),
+            this._fetchJSON('atmosphere_banks.json').catch(() => ({})),
+            this._fetchJSON('particles.json').catch(() => ({})),
         ]);
 
-        this.raw = { terrain, planet, postprocessing, engine, textures, biomes, assets };
+        if (!biomes.tileCatalog) {
+            biomes.tileCatalog = cloneJSONValue(DEFAULT_TILE_CATALOG);
+        }
+
+        this.raw = { terrain, planet, postprocessing, engine, textures, biomes, assets, atmosphereBanks, particles };
 
         const engineConfig   = this._buildEngineConfig(terrain, planet, engine);
-        const gameDataConfig = this._buildGameDataConfig(terrain, planet, textures, biomes, assets);
+        const gameDataConfig = this._buildGameDataConfig(terrain, planet, textures, biomes, assets, atmosphereBanks, particles);
 
         const worldAuthoring = gameDataConfig?.planets?.[0]?.worldAuthoring ?? null;
         const summary = worldAuthoring?.summary ?? null;
         const shouldLogWorldAuthoring = !!summary && (
             summary.biomeCount > 0 ||
             summary.assetProfileCount > 0 ||
+            summary.tileCatalogTileCount > 0 ||
             summary.unresolvedTileRefCount > 0 ||
-            summary.unknownAssetBiomeRefCount > 0
+            summary.outOfTextureRangeTileRefCount > 0 ||
+            summary.unknownAssetBiomeRefCount > 0 ||
+            summary.tileCatalogWarningCount > 0
         );
         if (shouldLogWorldAuthoring) {
             console.info(
                 `[WorldConfigLoader] world authoring ready: ` +
-                `${summary.biomeCount} biomes, ${summary.assetProfileCount} asset profiles`
+                `${summary.biomeCount} biomes, ${summary.assetProfileCount} asset profiles, ` +
+                `${summary.tileCatalogTileCount ?? 0} tile refs`
             );
-            if (summary.unresolvedTileRefCount > 0 || summary.unknownAssetBiomeRefCount > 0) {
+            if (
+                summary.unresolvedTileRefCount > 0 ||
+                summary.outOfTextureRangeTileRefCount > 0 ||
+                summary.unknownAssetBiomeRefCount > 0 ||
+                summary.tileCatalogWarningCount > 0
+            ) {
                 console.warn(
                     `[WorldConfigLoader] authoring warnings: ` +
                     `${summary.unresolvedTileRefCount} unresolved tile refs, ` +
-                    `${summary.unknownAssetBiomeRefCount} unknown asset biome refs`
+                    `${summary.outOfTextureRangeTileRefCount ?? 0} tile refs outside texture lookup range, ` +
+                    `${summary.unknownAssetBiomeRefCount} unknown asset biome refs, ` +
+                    `${summary.tileCatalogWarningCount ?? 0} tile catalog warnings`
                 );
+            }
+        }
+        const atmoSummary = gameDataConfig?.planets?.[0]?.atmoBankAuthoring?.summary ?? null;
+        if (atmoSummary) {
+            console.info(
+                `[WorldConfigLoader] atmosphere banks ready: ` +
+                `${atmoSummary.typeCount} types, ${atmoSummary.scatterRuleCount} scatter rules`
+            );
+            if ((atmoSummary.warningCount ?? 0) > 0) {
+                console.warn(`[WorldConfigLoader] atmosphere bank warnings: ${atmoSummary.warningCount}`);
+            }
+        }
+        const particleSummary = gameDataConfig?.particleAuthoring?.summary ?? null;
+        if (particleSummary) {
+            console.info(
+                `[WorldConfigLoader] particles ready: ` +
+                `${particleSummary.typeOverrideCount} type overrides, ` +
+                `${particleSummary.emitterPresetOverrideCount} emitter preset overrides, ` +
+                `${particleSummary.leafEmitterCount} leaf emitters ` +
+                `(source=${particleSummary.leafSource ?? 'spawn_offsets'})`
+            );
+            if ((particleSummary.warningCount ?? 0) > 0) {
+                console.warn(`[WorldConfigLoader] particle warnings: ${particleSummary.warningCount}`);
             }
         }
 
@@ -139,26 +212,44 @@ export class WorldConfigLoader {
             Object.assign(q, engine.gpuQuadtree);
             base.gpuQuadtree = q;
         }
+        if (engine?.weather) {
+            base.weather = mergePlainConfig(base.weather ?? {}, engine.weather);
+        }
         return base;
     }
 
     // ── Build GameDataConfig ──────────────────────────────────────────────
 
-    _buildGameDataConfig(terrain, planet, textures, biomes = { biomes: [] }, assets = { profiles: [] }) {
+    _buildGameDataConfig(
+        terrain,
+        planet,
+        textures,
+        biomes = { biomes: [] },
+        assets = { profiles: [] },
+        atmosphereBanks = {},
+        particles = {}
+    ) {
         const base = createGameDataConfig();
+        base.particleAuthoring = buildParticleAuthoringRuntime(particles ?? {});
 
         // The base factory returns a GameDataConfig whose planet list we patch.
         const activePlanet = base.planets[0];
         if (!activePlanet) return base;
 
+        if (biomes && typeof biomes === 'object' && !biomes.tileCatalog) {
+            biomes.tileCatalog = cloneJSONValue(DEFAULT_TILE_CATALOG);
+        }
+
         const worldAuthoring = buildWorldAuthoringRuntime(
             biomes ?? { biomes: [] },
             assets ?? { profiles: [] },
-            { tileTypes: TILE_TYPES }
+            { tileCatalog: biomes?.tileCatalog ?? DEFAULT_TILE_CATALOG }
         );
         activePlanet.worldAuthoring = worldAuthoring;
+        activePlanet.tileCatalog = worldAuthoring.tileCatalog;
         activePlanet.biomeDefinitions = worldAuthoring.biomes;
         activePlanet.assetProfiles = worldAuthoring.assetProfiles;
+        activePlanet.atmoBankAuthoring = buildAtmoBankAuthoringRuntime(atmosphereBanks ?? {});
 
         // ── Terrain ──────────────────────────────────────────────────────
         const t = activePlanet.terrain;
@@ -188,7 +279,11 @@ export class WorldConfigLoader {
             }
         }
 
-        activePlanet.atlasConfig = buildWorldTextureConfig(textures, activePlanet.atlasConfig);
+        activePlanet.atlasConfig = buildWorldTextureConfig(
+            textures,
+            activePlanet.atlasConfig,
+            { tileCatalog: worldAuthoring.tileCatalog }
+        );
 
         // ── Time / spawn ─────────────────────────────────────────────────
         if (planet?.time) {

@@ -1,5 +1,15 @@
 import { buildAtmoBankScatterWGSL } from './shaders/atmoBankScatter.wgsl.js';
-import { ATMO_EMITTER_CAPACITY, ATMO_EMITTER_STRIDE } from './AtmoBankTypes.js';
+import {
+    ATMO_EMITTER_CAPACITY,
+    ATMO_EMITTER_STRIDE,
+    ATMO_SCATTER_RULE_CAPACITY,
+    ATMO_SCATTER_RULE_STRIDE,
+} from './AtmoBankTypes.js';
+import { DEFAULT_ATMO_PLACEMENT_CONFIG } from './AtmoBankAuthoringRuntime.js';
+import {
+    getAtmoScatterRuleCategorySignature,
+    packAtmoScatterRules,
+} from './AtmoBankRulePacking.js';
 
 const COUNTER_SIZE = 16;
 const LAYER_META_STRIDE = 32;
@@ -8,9 +18,18 @@ const SCATTER_INTERVAL = 150;
 const CAMERA_MOVE_THRESHOLD = 250;
 
 export class AtmoBankScatterPass {
-    constructor(device, tileStreamer) {
+    constructor(device, tileStreamer, options = {}) {
         this.device = device;
         this.tileStreamer = tileStreamer;
+        this._placement = options.placement ?? DEFAULT_ATMO_PLACEMENT_CONFIG;
+        this._scatterRules = Array.isArray(options.scatterRules) ? options.scatterRules : [];
+        this._tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : [];
+        this._biomeDefinitions = Array.isArray(options.biomeDefinitions) ? options.biomeDefinitions : [];
+        this._tileCategorySignature = getAtmoScatterRuleCategorySignature(this._tileCategories);
+        this._packedRules = packAtmoScatterRules(this._scatterRules, {
+            tileCategories: this._tileCategories,
+            biomeDefinitions: this._biomeDefinitions,
+        });
 
         this._pipeline = null;
         this._bgl = null;
@@ -21,6 +40,7 @@ export class AtmoBankScatterPass {
         this._paramBuf = null;
         this._activeLayerBuf = null;
         this._layerMetaBuf = null;
+        this._ruleBuf = null;
 
         this._framesSinceScatter = SCATTER_INTERVAL;
         this._lastCamX = 0;
@@ -35,6 +55,26 @@ export class AtmoBankScatterPass {
             reason: 'not-initialized',
         };
         this._initialized = false;
+    }
+
+    _buildPipeline() {
+        const src = buildAtmoBankScatterWGSL({
+            maxEmitters: ATMO_EMITTER_CAPACITY,
+            tileCategories: this._tileCategories,
+        });
+        this._pipeline = this.device.createComputePipeline({
+            label: 'AtmoScatter-Pipeline',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this._bgl] }),
+            compute: {
+                module: this.device.createShaderModule({ label: 'AtmoScatter-Shader', code: src }),
+                entryPoint: 'main',
+            },
+        });
+    }
+
+    _uploadScatterRules() {
+        if (!this._ruleBuf) return;
+        this.device.queue.writeBuffer(this._ruleBuf, 0, this._packedRules.data);
     }
 
     initialize() {
@@ -63,6 +103,11 @@ export class AtmoBankScatterPass {
             label: 'AtmoScatter-LayerMeta', size: MAX_LAYERS * LAYER_META_STRIDE,
             usage: STOR,
         });
+        this._ruleBuf = device.createBuffer({
+            label: 'AtmoScatter-Rules',
+            size: ATMO_SCATTER_RULE_CAPACITY * ATMO_SCATTER_RULE_STRIDE,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
 
         this._bgl = device.createBindGroupLayout({
             label: 'AtmoScatter-BGL',
@@ -75,20 +120,14 @@ export class AtmoBankScatterPass {
                 { binding: 5, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 6, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 7, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
             ],
         });
 
-        const src = buildAtmoBankScatterWGSL({ maxEmitters: ATMO_EMITTER_CAPACITY });
-        this._pipeline = device.createComputePipeline({
-            label: 'AtmoScatter-Pipeline',
-            layout: device.createPipelineLayout({ bindGroupLayouts: [this._bgl] }),
-            compute: {
-                module: device.createShaderModule({ label: 'AtmoScatter-Shader', code: src }),
-                entryPoint: 'main',
-            },
-        });
+        this._buildPipeline();
 
         device.queue.writeBuffer(this._counterBuf, 0, new Uint32Array(4));
+        this._uploadScatterRules();
         this._initialized = true;
     }
 
@@ -100,6 +139,34 @@ export class AtmoBankScatterPass {
         return this._counterBuf;
     }
 
+    setPlacementConfig(config = {}) {
+        this._placement = config && typeof config === 'object'
+            ? config
+            : DEFAULT_ATMO_PLACEMENT_CONFIG;
+    }
+
+    setAuthoringConfig(options = {}) {
+        this._placement = options.placement && typeof options.placement === 'object'
+            ? options.placement
+            : DEFAULT_ATMO_PLACEMENT_CONFIG;
+        this._scatterRules = Array.isArray(options.scatterRules) ? options.scatterRules : [];
+        this._tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : [];
+        this._biomeDefinitions = Array.isArray(options.biomeDefinitions) ? options.biomeDefinitions : [];
+        const nextSignature = getAtmoScatterRuleCategorySignature(this._tileCategories);
+        const categoriesChanged = nextSignature !== this._tileCategorySignature;
+        this._tileCategorySignature = nextSignature;
+        this._packedRules = packAtmoScatterRules(this._scatterRules, {
+            tileCategories: this._tileCategories,
+            biomeDefinitions: this._biomeDefinitions,
+        });
+        if (!this._initialized) return;
+        if (categoriesChanged) {
+            this._buildPipeline();
+            this._bindGroup = null;
+        }
+        this._uploadScatterRules();
+    }
+
     getDiagnostics() {
         return {
             initialized: this._initialized,
@@ -107,6 +174,9 @@ export class AtmoBankScatterPass {
             hasBindGroup: !!this._bindGroup,
             textureViewsValid: this._textureViewsValid,
             framesSinceScatter: this._framesSinceScatter,
+            authoredRuleCount: this._packedRules.count,
+            tileCategoryCount: this._packedRules.tileCategoryCount,
+            ruleWarnings: this._packedRules.warnings,
             lastDispatch: this._lastDispatchInfo,
         };
     }
@@ -154,6 +224,7 @@ export class AtmoBankScatterPass {
                 { binding: 5, resource: heightView },
                 { binding: 6, resource: tileView },
                 { binding: 7, resource: normalView },
+                { binding: 8, resource: { buffer: this._ruleBuf } },
             ],
         });
         this._heightView = heightView;
@@ -305,7 +376,9 @@ export class AtmoBankScatterPass {
         paramData[8] = planetConfig?.heightScale || 2000;
         paramData[9] = environmentState?.weatherIntensity ?? 0.3;
         paramData[10] = environmentState?.fogDensity ?? 0.3;
-        paramU32[11] = this._stableSeed(planetConfig);
+        paramData[11] = this._placement?.maxRenderDist ?? DEFAULT_ATMO_PLACEMENT_CONFIG.maxRenderDist;
+        paramU32[12] = this._stableSeed(planetConfig);
+        paramU32[13] = this._packedRules.count >>> 0;
 
         const q = this.device.queue;
         q.writeBuffer(this._paramBuf, 0, paramData);
@@ -329,6 +402,7 @@ export class AtmoBankScatterPass {
             reason: 'ok',
             layerCount,
             tileInfoSize: tileInfo.size,
+            authoredRuleCount: this._packedRules.count,
             weatherIntensity: environmentState?.weatherIntensity ?? 0.3,
             fogDensity: environmentState?.fogDensity ?? 0.3,
         };
@@ -337,7 +411,7 @@ export class AtmoBankScatterPass {
 
     dispose() {
         for (const k of ['_emitterOutputBuf','_counterBuf','_paramBuf',
-                          '_activeLayerBuf','_layerMetaBuf']) {
+                          '_activeLayerBuf','_layerMetaBuf','_ruleBuf']) {
             this[k]?.destroy();
         }
         this._initialized = false;

@@ -120,6 +120,10 @@ export class AtmoBankBuffers {
             buf[b + 13] = e.fadeFarStart ?? 1000;
             buf[b + 14] = e.fadeFarEnd ?? 2000;
             buf[b + 15] = e.densityThreshold ?? 0.35;
+            buf[b + 16] = e.altitudeOffset?.min ?? 0;
+            buf[b + 17] = e.altitudeOffset?.max ?? 0;
+            buf[b + 18] = e.verticalScale ?? 0.12;
+            buf[b + 19] = e.horizontalScale ?? 1.0;
         }
         this.device.queue.writeBuffer(this.typeDefUBO, 0, buf);
     }
@@ -140,6 +144,8 @@ export class AtmoBankBuffers {
             this._eF32[b + 6] = em.localUp[2] ?? 0;
             this._eU32[b + 7] = (em.typeId ?? 0) >>> 0;
             this._eU32[b + 8] = (em.rngSeed ?? 0) >>> 0;
+            this._eF32[b + 12] = em.altitudeOffset?.min ?? 0;
+            this._eF32[b + 13] = em.altitudeOffset?.max ?? 0;
         }
         this.device.queue.writeBuffer(this.emitterData, 0, this._eF32.buffer);
         this._emitterCounterData[0] = count >>> 0;

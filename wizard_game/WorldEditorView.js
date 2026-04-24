@@ -11,6 +11,7 @@ import { StudioWorldEngine } from '../tools/studio/StudioWorldEngine.js';
 import { WorldConfigLoader } from './WorldConfigLoader.js';
 import { buildWorldTextureConfig, renderTexturePreviewToCanvas } from './WorldTextureOverrides.js';
 import { getCloudLayers } from '../templates/clouds/cloudTypeDefinitions.js';
+import { buildTileCatalogRuntime } from '../core/world/tileCatalogRuntime.js';
 
 import { createTerrainCommon } from '../templates/terrain-shaders/terrainCommon.wgsl.js';
 import { createSurfaceCommon } from '../templates/terrain-shaders/surfaceCommon.wgsl.js';
@@ -103,9 +104,13 @@ export class WorldEditorView extends WorldAuthoringView {
     }
 
     buildTextureConfig(rawTextures, baseTextureConfig = null) {
+        const tileCatalog = buildTileCatalogRuntime(this._raw?.biomes?.tileCatalog);
+        const options = tileCatalog.summary?.tileCount > 0
+            ? { tileCatalog }
+            : {};
         return baseTextureConfig == null
-            ? buildWorldTextureConfig(rawTextures)
-            : buildWorldTextureConfig(rawTextures, baseTextureConfig);
+            ? buildWorldTextureConfig(rawTextures, undefined, options)
+            : buildWorldTextureConfig(rawTextures, baseTextureConfig, options);
     }
 
     async renderTexturePreview(canvas, previewState) {

@@ -395,13 +395,24 @@ export function scoreBiomes(biomeDefs, signals, worldX, worldY, seed) {
  * @param {number} worldX             Terrain sample X coordinate (sphere: unitDir.x * noiseReferenceRadiusM, flat: world x)
  * @param {number} worldY             Terrain sample Y coordinate (sphere: unitDir.z * noiseReferenceRadiusM, flat: world y)
  * @param {number} seed
- * @returns {{ biome: object, scores: Array<object>, rankedScores: Array<object>, score: number } | null}
+ * @returns {{ biome: object | null, scores: Array<object>, rankedScores: Array<object>, score: number, fallback?: boolean } | null}
  */
 export function selectBiome(biomeDefs, signals, worldX, worldY, seed) {
     const scores = scoreBiomes(biomeDefs, signals, worldX, worldY, seed);
     if (scores.length === 0) return null;
 
     const rankedScores = scores.slice().sort((a, b) => b.probability - a.probability);
+    const totalScore = scores.reduce((sum, entry) => sum + entry.finalScore, 0);
+    if (!Number.isFinite(totalScore) || totalScore <= 0) {
+        return {
+            biome: null,
+            scores,
+            rankedScores,
+            score: 0,
+            fallback: true,
+        };
+    }
+
     const r = biomeSelectionHash(worldX, worldY, seed);
     let cumulative = 0;
     for (const entry of scores) {

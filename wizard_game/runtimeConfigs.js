@@ -7,6 +7,7 @@ import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 import { GRASS_QUALITY_LEVELS, GRASS_TYPES } from '../templates/configs/grassConfig.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
 import { resolveTreeConfig } from '../templates/configs/treeConfigResolver.js';
+import { WEATHER_CONFIG } from '../templates/configs/weatherConfig.js';
 
 const ATLAS_TEXTURE_TYPES = ['height', 'normal', 'tile', 'splatData', 'macro'];
 
@@ -104,9 +105,9 @@ export function createEngineConfig() {
           twilightEndDot: 0.04
         },
         fog: {
-          densityMultiplier: 0.48,
-          maxBaseDensity: 0.0006,
-          dayDensityScale: 1.0,
+          densityMultiplier: 0.40,
+          maxBaseDensity: 0.00055,
+          dayDensityScale: 0.85,
           nightDensityScale: 0.42,
           minBrightness: 0.05,
           maxBrightness: 0.82,
@@ -226,6 +227,20 @@ export function createEngineConfig() {
       terrainVertexDebugMode: 0,
       terrainForceDirectDraw: false,
     },
+
+    features: {
+      shadows:           true,
+      clusteredLighting: true,
+      treesNear:         true,   // individual trees with leaves/branches
+      treesMid:          true,   // hull trees (140–700 m)
+      treesFar:          true,   // coarse canopy hulls (500–4000 m)
+      streamedAssets:    true,   // all streamed ground cover, props, etc.
+      particles:         true,
+      actors:            true,   // wizard, goblins, skinned mesh actors
+      clouds:            true,    // WebGPUCloudRenderer (cirrus etc.)
+      skyEffects:        true,    // sky, stars, moon, atmo banks
+    },
+
     gpuQuadtree: {
       enabled: true,
       tileTextureSize: 128,
@@ -348,6 +363,7 @@ export function createEngineConfig() {
       maxQueueSize: 1024,
       minStartIntervalMs: 0
     },
+    weather: WEATHER_CONFIG,
 
     trees: resolveTreeConfig({
       flags: {
@@ -774,7 +790,7 @@ export function createGameDataConfig() {
 
           // ── Per-tile layer heights ───────────────────────────────────────────
           // Used only by the step_overlay blend mode.  Each key is a tile type
-          // integer (from TILE_TYPES).  Value is a normalized height in [0, 1]
+          // integer (from the authored/default tile catalog). Value is a normalized height in [0, 1]
           // representing how far "above" ground level this surface visually sits.
           // Higher values make the tile appear to sit on top at transition edges.
           tileLayerHeights: TILE_LAYER_HEIGHTS,

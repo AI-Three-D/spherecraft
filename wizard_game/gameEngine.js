@@ -34,6 +34,7 @@ import {
 import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 import { NightSkyGameConfig, getNightSkyDetailPreset, NightSkyDetailLevel } from '../templates/configs/nightSkyConfig.js';
 import { TILE_TYPES, TILE_CATEGORIES, NUM_TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../templates/configs/tileTypes.js';
+import { createTerrainThemeForPlanet } from './TerrainThemeFactory.js';
 import { createTerrainCommon } from '../templates/terrain-shaders/terrainCommon.wgsl.js';
 import { createSurfaceCommon } from '../templates/terrain-shaders/surfaceCommon.wgsl.js';
 import { createTerrainFeatureContinents } from '../templates/terrain-shaders/features/featureContinents.wgsl.js';
@@ -171,8 +172,8 @@ function updateCanvasResolution(canvas) {
     const displayHeight = canvas.clientHeight;
     const dpr = window.devicePixelRatio || 1;
 
-    const width = Math.floor(displayWidth * dpr);
-    const height = Math.floor(displayHeight * dpr);
+    const width = Math.max(1, Math.floor(displayWidth * dpr));
+    const height = Math.max(1, Math.floor(displayHeight * dpr));
 
     if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
@@ -220,6 +221,7 @@ export class GameEngine {
         this._lastUIUpdate = 0;
         this._uiUpdateIntervalMs = this.engineConfig.ui.updateIntervalMs;
         this._renderInFlight = false;
+        this._resizePending = false;
         this._initialLoadState = null;
     }
 
@@ -488,19 +490,24 @@ export class GameEngine {
             ...planetOptions,
             engineConfig: this.engineConfig
         });
+        this.terrainTheme = createTerrainThemeForPlanet(TERRAIN_THEME, this.planetConfig);
 
         const worldAuthoringSummary = this.planetConfig?.worldAuthoring?.summary;
         const shouldLogWorldAuthoring = !!worldAuthoringSummary && (
             worldAuthoringSummary.biomeCount > 0 ||
             worldAuthoringSummary.assetProfileCount > 0 ||
+            worldAuthoringSummary.tileCatalogTileCount > 0 ||
             worldAuthoringSummary.unresolvedTileRefCount > 0 ||
-            worldAuthoringSummary.unknownAssetBiomeRefCount > 0
+            worldAuthoringSummary.outOfTextureRangeTileRefCount > 0 ||
+            worldAuthoringSummary.unknownAssetBiomeRefCount > 0 ||
+            worldAuthoringSummary.tileCatalogWarningCount > 0
         );
         if (shouldLogWorldAuthoring) {
             Logger.info(
                 `[GameEngine] Planet "${this.planetConfig.name}" authoring: ` +
                 `${worldAuthoringSummary.biomeCount} biomes, ` +
-                `${worldAuthoringSummary.assetProfileCount} asset profiles`
+                `${worldAuthoringSummary.assetProfileCount} asset profiles, ` +
+                `${worldAuthoringSummary.tileCatalogTileCount ?? 0} tile refs`
             );
         }
 
@@ -544,7 +551,8 @@ export class GameEngine {
             gpuQuadtree: this.engineConfig.gpuQuadtree,
             streamerTheme: STREAMER_THEME,
             nightSkyTheme: NIGHT_SKY_THEME,
-            terrainTheme: TERRAIN_THEME,
+            terrainTheme: this.terrainTheme,
+            particleAuthoring: this.gameDataConfig.particleAuthoring,
         });
         await this.renderer.initialize(this.planetConfig, this.sphericalMapper, {
             weatherConfig: {
@@ -654,7 +662,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.textureCache,
             {
                 planetConfig: this.planetConfig,
-                terrainTheme: TERRAIN_THEME,
+                terrainTheme: this.terrainTheme,
             }
 
         );
@@ -1069,6 +1077,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         if (!this.isGameActive) return;
         if (this._renderInFlight) return;
 
+        if (this._resizePending) {
+            this._resizePending = false;
+            this.handleResize();
+        }
+
         this._renderInFlight = true;
         const clampedDelta = Math.min(Math.max(Number.isFinite(deltaTime) ? deltaTime : 0, 0), 0.1);
         const terrainSnapshotFrozen = this.renderer?.isTerrainManualDiagnosticFrozen?.() === true;
@@ -1224,21 +1237,31 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     handleResize() {
+        if (this._renderInFlight) {
+            this._resizePending = true;
+            return;
+        }
+
         const result = updateCanvasResolution(this.canvas);
 
         if (result.changed) {
-            if (this.renderer && this.renderer.backend) {
-                this.renderer.backend.setViewport(0, 0, result.width, result.height);
-            }
+            this._applyResize(result.width, result.height);
+        }
+    }
 
-            if (this.camera) {
-                this.camera.aspect = result.width / result.height;
+    _applyResize(width, height) {
+        const safeWidth = Math.max(1, Math.floor(width));
+        const safeHeight = Math.max(1, Math.floor(height));
+        const aspect = safeWidth / safeHeight;
 
-                if (this.renderer && this.renderer.camera) {
-                    this.renderer.camera.aspect = result.width / result.height;
-                    this.renderer._updateCameraMatrices();
-                }
-            }
+        if (this.camera) {
+            this.camera.aspect = aspect;
+        }
+
+        if (this.renderer?.handleResize) {
+            this.renderer.handleResize(safeWidth, safeHeight);
+        } else if (this.renderer?.backend) {
+            this.renderer.backend.setViewport(0, 0, safeWidth, safeHeight);
         }
     }
 
@@ -1288,6 +1311,49 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             distanceCutoff: this.engineConfig.rendering?.distortion?.sourceCutoffs?.campfire ?? 10.0,
         });
 
+        const leafFall = this.gameDataConfig.particleAuthoring?.ambientEmitters?.leafFall;
+        const leafEmitters = leafFall?.enabled !== false && Array.isArray(leafFall?.emitters)
+            ? leafFall.emitters
+            : [];
+        const getActor = () => actorManager?.playerActor;
+        if (leafFall?.enabled !== false && leafFall?.source === 'detailed_leaf_anchors') {
+            const assetStreamer = this.renderer.assetStreamer || null;
+            const treeDetailSystem = assetStreamer?.getTreeDetailSystem?.()
+                ?? assetStreamer?._treeDetailSystem
+                ?? null;
+            const templateLibrary = assetStreamer?.getTreeTemplateLibrary?.()
+                ?? assetStreamer?._templateLibrary
+                ?? null;
+            this.renderer.particleSystem.setLeafAnchorSource({
+                treeDetailSystem,
+                templateLibrary,
+                config: leafFall.anchorSelection,
+            });
+            Logger.info(
+                `[GameEngine] Leaf fall registered from particle authoring ` +
+                `(source=detailed_leaf_anchors, maxEmitters=${leafFall.anchorSelection?.maxEmitters ?? 0})`
+            );
+        } else {
+            for (const off of leafEmitters) {
+                this.renderer.particleSystem.addLeafEmitter(
+                    { x: spawnX, y: spawnY, z: spawnZ },
+                    {
+                        getActor,
+                        snapSettleFrames: 30,
+                        surfaceOffset: off,
+                        heightOffset: off.heightOffset,
+                        spawnBudgetPerFrame: off.spawnBudgetPerFrame,
+                    }
+                );
+            }
+        }
+        if (leafFall?.source !== 'detailed_leaf_anchors' && leafEmitters.length > 0) {
+            Logger.info(
+                `[GameEngine] Leaf emitters registered from particle authoring ` +
+                `(${leafEmitters.length}, source=${leafFall?.source ?? 'spawn_offsets'})`
+            );
+        }
+
         this.renderer.particleSystem.addFireflySwarm(
             { x: spawnX + 2, y: spawnY + 2, z: spawnZ + 2 },
             {
@@ -1299,20 +1365,6 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             }
         );
         Logger.info('[GameEngine] Firefly swarm registered near player');
-
-        const getActor = () => actorManager?.playerActor;
-        const leafOffsets = [
-            { tangent: 10, bitangent: 6 },
-            { tangent: -8, bitangent: 12 },
-            { tangent: 14, bitangent: -4 },
-        ];
-        for (const off of leafOffsets) {
-            this.renderer.particleSystem.addLeafEmitter(
-                { x: spawnX, y: spawnY, z: spawnZ },
-                { getActor, snapSettleFrames: 30, surfaceOffset: off }
-            );
-        }
-        Logger.info('[GameEngine] Leaf emitters registered (snap-to-actor + tangent offset)');
     }
 
     /** Register NPC manager. Subclasses can override to skip or plug in their own. */

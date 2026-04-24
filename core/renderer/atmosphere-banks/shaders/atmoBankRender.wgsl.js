@@ -56,18 +56,6 @@ fn resolveLocalUp(position: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0, 1.0, 0.0);
 }
 
-fn verticalScaleForType(ptype: u32) -> f32 {
-    if (ptype == 2u) { return 0.24; }
-    if (ptype == 1u) { return 0.16; }
-    return 0.13;
-}
-
-fn horizontalScaleForType(ptype: u32) -> f32 {
-    if (ptype == 2u) { return 0.95; }
-    if (ptype == 1u) { return 0.84; }
-    return 1.05;
-}
-
 fn safeNormalize(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     let lenSq = dot(v, v);
     if (lenSq > 1e-8) { return v * inverseSqrt(lenSq); }
@@ -131,11 +119,11 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     let sliceId = min(vid / 6u, ATMO_VOLUME_SLICE_COUNT - 1u);
     let denom = max(f32(ATMO_VOLUME_SLICE_COUNT - 1u), 1.0);
     let sliceT = (f32(sliceId) / denom) * 2.0 - 1.0;
-    let sliceWeight = (1.0 - abs(sliceT) * 0.35) * (1.28 / f32(ATMO_VOLUME_SLICE_COUNT));
+    let sliceWeight = (1.0 - abs(sliceT) * 0.25) * (1.08 / f32(ATMO_VOLUME_SLICE_COUNT));
 
     let radiusA = max(2.0, p.size);
-    let radiusB = max(2.0, p.size * horizontalScaleForType(p.ptype));
-    let halfHeight = max(1.5, p.size * verticalScaleForType(p.ptype));
+    let radiusB = max(2.0, p.size * max(td.horizontalScale, 0.05));
+    let halfHeight = max(1.5, p.size * max(td.verticalScale, 0.01));
     let volumeCenter = p.position + localUp * halfHeight;
 
     let viewRight = safeNormalize(globals.cameraRight, basis.a);
@@ -181,8 +169,9 @@ fn volumeShape(worldPos: vec3<f32>, center: vec3<f32>, phase: vec3<f32>,
     let ly = dot(offset, localUp) / max(halfHeight, 0.001);
     let d = sqrt(lx * lx + lz * lz + ly * ly);
     let ellipsoid = 1.0 - smoothstep(0.72, 1.0, d);
-    let floorFade = smoothstep(-1.0, -0.72, ly);
-    return clamp(ellipsoid * floorFade, 0.0, 1.0);
+    let floorFade = smoothstep(-1.0, -0.86, ly);
+    let topFade = 1.0 - smoothstep(0.50, 0.94, ly);
+    return clamp(ellipsoid * floorFade * topFade, 0.0, 1.0);
 }
 
 @fragment

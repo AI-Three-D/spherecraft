@@ -94,15 +94,15 @@ fn spawnParticle(slot: u32, claim: u32, emIdx: u32) -> AtmoParticle {
     let spawnRadius = mix(td.sizeMin * 0.3, td.sizeMax * 0.5, r);
     let lx = cos(angle) * spawnRadius;
     let lz = sin(angle) * spawnRadius;
-    var minUp = td.sizeMin * 0.02;
-    var maxUp = td.sizeMax * 0.10;
-    if (emitter.typeId == 1u) {
-        minUp = td.sizeMin * 0.02;
-        maxUp = td.sizeMax * 0.08;
+    var minUp = td.altitudeOffsetMin;
+    var maxUp = td.altitudeOffsetMax;
+    if (emitter.altitudeOffsetMax > emitter.altitudeOffsetMin) {
+        minUp = emitter.altitudeOffsetMin;
+        maxUp = emitter.altitudeOffsetMax;
     }
-    if (emitter.typeId == 2u) {
-        minUp = td.sizeMin * 0.05;
-        maxUp = td.sizeMax * 0.14;
+    if (maxUp <= minUp) {
+        minUp = td.sizeMin * 0.02;
+        maxUp = td.sizeMax * 0.10;
     }
     let ly = randRange(seedBase, 13u, emitter.rngSeed, minUp, maxUp);
     let localOffset = basis * vec3<f32>(lx, ly, lz);

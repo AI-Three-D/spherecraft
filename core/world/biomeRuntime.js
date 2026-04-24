@@ -1,3 +1,29 @@
+import { computeBiomeTreeWeights } from './biomeAuthoringDerived.js';
+import { TEXTURE_LOOKUP_MAX_TILE_ID } from '../texture/tileTextureLimits.js';
+import { buildTileCatalogRuntime } from './tileCatalogRuntime.js';
+import { MAX_TILE_ID } from './tileCatalogUtils.js';
+
+const DEFAULT_BIOME_FALLBACK_TILE_ID = 10;
+const BIOME_FALLBACK_TILE_NAMES = Object.freeze([
+    'GRASS_SHORT_1',
+    'GRASS_MEDIUM_1',
+    'GRASS_TALL_1',
+]);
+const BIOME_FALLBACK_CATEGORY_NAMES = Object.freeze([
+    'GRASS',
+    'FOREST',
+    'DESERT',
+    'SNOW',
+    'ROCK',
+    'SAND',
+    'TUNDRA',
+    'DIRT',
+    'MUD',
+    'SWAMP',
+    'VOLCANIC',
+    'WATER',
+]);
+
 const DEFAULT_SIGNAL_RULES = Object.freeze({
     elevation: Object.freeze({
         min: 0.0,
@@ -59,13 +85,20 @@ export function createDefaultWorldAuthoringRuntime() {
         summary: {
             biomeCount: 0,
             assetProfileCount: 0,
+            tileCatalogTileCount: 0,
+            tileCatalogCategoryCount: 0,
             unresolvedTileRefCount: 0,
+            outOfTextureRangeTileRefCount: 0,
             unknownAssetBiomeRefCount: 0,
+            tileCatalogWarningCount: 0,
         },
         warnings: {
             unresolvedTileRefs: [],
+            outOfTextureRangeTileRefs: [],
             unknownAssetBiomeRefs: [],
+            tileCatalog: buildTileCatalogRuntime().warnings,
         },
+        tileCatalog: buildTileCatalogRuntime(),
     };
 }
 
@@ -109,69 +142,6 @@ function normalizePreference(value) {
         default:
             return 'mid';
     }
-}
-
-function normalizeArchetypeRef(value) {
-    return typeof value === 'string' ? value.trim().toLowerCase() : '';
-}
-
-function signalCenter(biome, signalKey, fallback = 0.5) {
-    const rule = biome?.signals?.[signalKey];
-    if (!rule) return fallback;
-    const minValue = Number.isFinite(rule.min) ? rule.min : fallback;
-    const maxValue = Number.isFinite(rule.max) ? rule.max : fallback;
-    return clampNumber((minValue + maxValue) * 0.5, fallback, 0.0, 1.0);
-}
-
-function biomeTextIncludes(biome, needles) {
-    const haystack = [
-        biome?.id,
-        biome?.displayName,
-        ...(Array.isArray(biome?.tags) ? biome.tags : []),
-    ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-    return needles.some((needle) => haystack.includes(needle));
-}
-
-function biomeTreeSuitabilityBias(biome) {
-    const humidity = signalCenter(biome, 'humidity', 0.5);
-    const woodland = biomeTextIncludes(biome, ['forest', 'woodland', 'jungle', 'rainforest']);
-    const arid = biomeTextIncludes(biome, ['arid', 'desert']) || humidity < 0.25;
-    if (woodland) return 1.0;
-    return clampNumber(0.28 + humidity * 0.24 - (arid ? 0.15 : 0.0), 0.28, 0.18, 1.0);
-}
-
-function computeBiomeTreeWeights(biomes = [], assetProfiles = []) {
-    const rawWeights = new Map();
-    let maxRawWeight = 0.0;
-
-    for (const profile of assetProfiles) {
-        if (normalizeArchetypeRef(profile?.archetypeRef) !== 'tree') continue;
-        const density = Math.max(0.0, Number.isFinite(profile?.density) ? profile.density : 0.5);
-        const probability = Math.max(0.0, Number.isFinite(profile?.probability) ? profile.probability : 0.5);
-        const weight = density * probability;
-        const biomeIds = Array.isArray(profile?.biomeIds) ? profile.biomeIds : [];
-        for (const biomeId of biomeIds) {
-            if (typeof biomeId !== 'string' || !biomeId) continue;
-            const nextWeight = (rawWeights.get(biomeId) ?? 0.0) + weight;
-            rawWeights.set(biomeId, nextWeight);
-            maxRawWeight = Math.max(maxRawWeight, nextWeight);
-        }
-    }
-
-    const normalizedWeights = new Map();
-    if (maxRawWeight <= 0.0) return normalizedWeights;
-    for (const biome of biomes) {
-        const rawWeight = rawWeights.get(biome?.id) ?? 0.0;
-        if (rawWeight <= 0.0) continue;
-        normalizedWeights.set(
-            biome.id,
-            clampNumber((rawWeight / maxRawWeight) * biomeTreeSuitabilityBias(biome), 0.0, 0.0, 1.0)
-        );
-    }
-    return normalizedWeights;
 }
 
 function normalizeSignalRule(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation, bounds = {}) {
@@ -220,17 +190,65 @@ function resolveTileId(tileTypes, tileName) {
     return Number.isInteger(tileTypes?.[trimmed]) ? tileTypes[trimmed] : null;
 }
 
-function pushTileWarning(target, biomeId, layerKey, tileName) {
+function isValidTileId(value) {
+    return Number.isInteger(value) && value >= 0 && value <= MAX_TILE_ID;
+}
+
+function firstTileIdForCategory(tileCatalog, categoryName) {
+    const categories = Array.isArray(tileCatalog?.tileCategories) ? tileCatalog.tileCategories : [];
+    for (const category of categories) {
+        if (category?.name !== categoryName) continue;
+        const ranges = Array.isArray(category.ranges) ? category.ranges : [];
+        for (const range of ranges) {
+            const tileId = Array.isArray(range) ? range[0] : null;
+            if (isValidTileId(tileId)) return tileId;
+        }
+    }
+    return null;
+}
+
+function firstCatalogTileId(tileCatalog) {
+    const tiles = Array.isArray(tileCatalog?.tiles) ? tileCatalog.tiles : [];
+    for (const tile of tiles) {
+        if (isValidTileId(tile?.id)) return tile.id;
+    }
+    return null;
+}
+
+function resolveBiomeFallbackTileId(worldAuthoring = {}, options = {}) {
+    if (isValidTileId(options.fallbackTileId)) {
+        return options.fallbackTileId;
+    }
+
+    const tileCatalog = worldAuthoring?.tileCatalog;
+    const tileTypes = tileCatalog?.tileTypes && typeof tileCatalog.tileTypes === 'object'
+        ? tileCatalog.tileTypes
+        : {};
+    for (const tileName of BIOME_FALLBACK_TILE_NAMES) {
+        const tileId = tileTypes[tileName];
+        if (isValidTileId(tileId)) return tileId;
+    }
+    for (const categoryName of BIOME_FALLBACK_CATEGORY_NAMES) {
+        const tileId = firstTileIdForCategory(tileCatalog, categoryName);
+        if (isValidTileId(tileId)) return tileId;
+    }
+
+    return firstCatalogTileId(tileCatalog) ?? DEFAULT_BIOME_FALLBACK_TILE_ID;
+}
+
+function pushTileWarning(target, biomeId, layerKey, tileName, extras = {}) {
     target.push({
         biomeId,
         layer: layerKey,
         tileName: typeof tileName === 'string' ? tileName : null,
+        ...extras,
     });
 }
 
 function normalizeBiomeDefinitions(rawBiomeDocument = {}, tileTypes = {}) {
     const source = Array.isArray(rawBiomeDocument?.biomes) ? rawBiomeDocument.biomes : [];
     const unresolvedTileRefs = [];
+    const outOfTextureRangeTileRefs = [];
     const seenBiomeIds = new Set();
     const biomes = [];
 
@@ -252,6 +270,18 @@ function normalizeBiomeDefinitions(rawBiomeDocument = {}, tileTypes = {}) {
         const macroTileId = resolveTileId(tileTypes, macroTileName);
         if (microTileId == null) pushTileWarning(unresolvedTileRefs, biomeId, 'micro', microTileName);
         if (macroTileId == null) pushTileWarning(unresolvedTileRefs, biomeId, 'macro', macroTileName);
+        if (microTileId != null && microTileId > TEXTURE_LOOKUP_MAX_TILE_ID) {
+            pushTileWarning(outOfTextureRangeTileRefs, biomeId, 'micro', microTileName, {
+                tileId: microTileId,
+                maxTileId: TEXTURE_LOOKUP_MAX_TILE_ID,
+            });
+        }
+        if (macroTileId != null && macroTileId > TEXTURE_LOOKUP_MAX_TILE_ID) {
+            pushTileWarning(outOfTextureRangeTileRefs, biomeId, 'macro', macroTileName, {
+                tileId: macroTileId,
+                maxTileId: TEXTURE_LOOKUP_MAX_TILE_ID,
+            });
+        }
 
         biomes.push({
             id: biomeId,
@@ -296,7 +326,7 @@ function normalizeBiomeDefinitions(rawBiomeDocument = {}, tileTypes = {}) {
         });
     }
 
-    return { biomes, unresolvedTileRefs };
+    return { biomes, unresolvedTileRefs, outOfTextureRangeTileRefs };
 }
 
 function normalizeAssetProfiles(rawAssetDocument = {}, biomeIds = []) {
@@ -342,7 +372,22 @@ function normalizeAssetProfiles(rawAssetDocument = {}, biomeIds = []) {
 }
 
 export function buildWorldAuthoringRuntime(rawBiomeDocument = {}, rawAssetDocument = {}, options = {}) {
-    const tileTypes = options.tileTypes ?? {};
+    let tileCatalog = buildTileCatalogRuntime(
+        rawBiomeDocument?.tileCatalog,
+        { fallbackDocument: options.tileCatalog }
+    );
+    if (!(tileCatalog.summary?.tileCount > 0) && options.tileTypes && typeof options.tileTypes === 'object') {
+        tileCatalog = {
+            ...tileCatalog,
+            tileTypes: options.tileTypes,
+            tileNameById: Object.fromEntries(
+                Object.entries(options.tileTypes)
+                    .filter(([, id]) => Number.isInteger(id))
+                    .map(([name, id]) => [id, name])
+            ),
+        };
+    }
+    const tileTypes = tileCatalog.tileTypes ?? {};
     const biomeConfig = normalizeBiomeDefinitions(rawBiomeDocument, tileTypes);
     const assetConfig = normalizeAssetProfiles(
         rawAssetDocument,
@@ -362,13 +407,20 @@ export function buildWorldAuthoringRuntime(rawBiomeDocument = {}, rawAssetDocume
         summary: {
             biomeCount: biomeConfig.biomes.length,
             assetProfileCount: assetConfig.profiles.length,
+            tileCatalogTileCount: tileCatalog.summary?.tileCount ?? 0,
+            tileCatalogCategoryCount: tileCatalog.summary?.categoryCount ?? 0,
             unresolvedTileRefCount: biomeConfig.unresolvedTileRefs.length,
+            outOfTextureRangeTileRefCount: biomeConfig.outOfTextureRangeTileRefs.length,
             unknownAssetBiomeRefCount: assetConfig.unknownBiomeRefs.length,
+            tileCatalogWarningCount: tileCatalog.summary?.warningCount ?? 0,
         },
         warnings: {
             unresolvedTileRefs: biomeConfig.unresolvedTileRefs,
+            outOfTextureRangeTileRefs: biomeConfig.outOfTextureRangeTileRefs,
             unknownAssetBiomeRefs: assetConfig.unknownBiomeRefs,
+            tileCatalog: tileCatalog.warnings,
         },
+        tileCatalog,
     };
 }
 
@@ -378,7 +430,7 @@ export function getPackedBiomeUniformByteSize(maxBiomes = 16) {
 
 export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthoringRuntime(), worldSeed = 0, options = {}) {
     const maxBiomes = Math.max(0, Math.trunc(options.maxBiomes ?? 16));
-    const fallbackTileId = Number.isInteger(options.fallbackTileId) ? options.fallbackTileId : 10;
+    const fallbackTileId = resolveBiomeFallbackTileId(worldAuthoring, options);
     const sourceBiomes = Array.isArray(worldAuthoring?.biomes) ? worldAuthoring.biomes : [];
     const treeWeightsByBiomeId = computeBiomeTreeWeights(
         sourceBiomes,
@@ -393,10 +445,14 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
     view.setUint32(8, 0, true);
     view.setUint32(12, 0, true);
 
+    let outOfTextureRangePackedTileCount = 0;
     for (let index = 0; index < biomeCount; index++) {
         const biome = sourceBiomes[index] ?? {};
         const biomeOffset = GPU_BIOME_UNIFORM_HEADER_BYTES + index * GPU_BIOME_DEF_SIZE_BYTES;
         const tileId = Number.isInteger(biome?.tileIds?.micro) ? biome.tileIds.micro : fallbackTileId;
+        if (tileId > TEXTURE_LOOKUP_MAX_TILE_ID) {
+            outOfTextureRangePackedTileCount++;
+        }
         const regionalVariation = biome.regionalVariation ?? {};
         const treeWeight = treeWeightsByBiomeId.get(biome.id) ?? 0.0;
 
@@ -419,6 +475,9 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
         data,
         biomeCount,
         maxBiomes,
+        fallbackTileId,
+        outOfTextureRangePackedTileCount,
+        textureLookupMaxTileId: TEXTURE_LOOKUP_MAX_TILE_ID,
         truncatedBiomeCount: Math.max(0, sourceBiomes.length - biomeCount),
         biomeIds: sourceBiomes.slice(0, biomeCount).map((biome) => biome.id ?? 'unknown'),
         treeWeightedBiomeCount: sourceBiomes

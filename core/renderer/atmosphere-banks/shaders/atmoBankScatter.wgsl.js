@@ -1,4 +1,7 @@
-export function buildAtmoBankScatterWGSL({ maxEmitters = 32 } = {}) {
+import { buildTileCategoryLookupWGSLForCategories } from '../../../world/tileCatalogRuntime.js';
+
+export function buildAtmoBankScatterWGSL({ maxEmitters = 32, tileCategories = [] } = {}) {
+    const tileCategoryWGSL = buildTileCategoryLookupWGSLForCategories(tileCategories);
     return /* wgsl */`
 
 const MAX_EMITTERS: u32 = ${maxEmitters}u;
@@ -8,11 +11,22 @@ const CELLS_PER_TILE: u32 = GRID_RES * GRID_RES;
 const TYPE_VALLEY_MIST: u32 = 0u;
 const TYPE_FOG_POCKET:  u32 = 1u;
 const TYPE_LOW_CLOUD:   u32 = 2u;
+const TYPE_PEAK_CLOUD:  u32 = 3u;
+
+const RULE_HAS_TILE_CATEGORIES: u32 = 1u;
+const RULE_HAS_ELEVATION: u32 = 2u;
+const RULE_HAS_SLOPE: u32 = 4u;
+const RULE_HAS_TERRAIN_SHAPE: u32 = 8u;
+
+const SHAPE_NONE: u32 = 0u;
+const SHAPE_DEPRESSION: u32 = 1u;
+const SHAPE_HIGHLAND: u32 = 2u;
 
 struct ScatterParams {
     cameraPos: vec3<f32>, maxEmitters: u32,
     planetOrigin: vec3<f32>, planetRadius: f32,
-    heightScale: f32, weatherIntensity: f32, fogDensity: f32, frameSeed: u32,
+    heightScale: f32, weatherIntensity: f32, fogDensity: f32, maxRenderDist: f32,
+    frameSeed: u32, ruleCount: u32, _p1: u32, _p2: u32,
 };
 
 struct LayerMeta {
@@ -24,11 +38,28 @@ struct EmitterOut {
     posX: f32, posY: f32, posZ: f32, spawnBudget: u32,
     upX: f32, upY: f32, upZ: f32, typeId: u32,
     rngSeed: u32, _p0: u32, _p1: u32, _p2: u32,
-    _p3: f32, _p4: f32, _p5: f32, _p6: f32,
+    altitudeOffsetMin: f32, altitudeOffsetMax: f32, _p5: f32, _p6: f32,
     _p7: f32, _p8: f32, _p9: f32, _p10: f32,
 };
 
 struct EmitterCounter { count: atomic<u32>, _p0: u32, _p1: u32, _p2: u32 };
+
+struct ScatterRule {
+    typeId: u32, flags: u32, tileCategoryMask: u32, excludeCategoryMask: u32,
+    spawnBudget: u32, shapeKind: u32, shapeRadiusTexels: u32, _p0: u32,
+    probability: f32, weatherWeight: f32, fogWeight: f32, weatherFloor: f32,
+    elevationMin: f32, elevationMax: f32, slopeMin: f32, slopeMax: f32,
+    shapeParam0: f32, shapeParam1: f32, altitudeOffsetMin: f32, altitudeOffsetMax: f32,
+};
+
+struct SelectedRule {
+    matched: u32,
+    typeId: u32,
+    spawnBudget: u32,
+    rngSeed: u32,
+    altitudeOffsetMin: f32,
+    altitudeOffsetMax: f32,
+};
 
 @group(0) @binding(0) var<uniform> params: ScatterParams;
 @group(0) @binding(1) var<storage, read> activeLayers: array<u32>;
@@ -38,6 +69,7 @@ struct EmitterCounter { count: atomic<u32>, _p0: u32, _p1: u32, _p2: u32 };
 @group(0) @binding(5) var heightTex: texture_2d_array<f32>;
 @group(0) @binding(6) var tileTex: texture_2d_array<f32>;
 @group(0) @binding(7) var normalTex: texture_2d_array<f32>;
+@group(0) @binding(8) var<storage, read> scatterRules: array<ScatterRule>;
 
 fn hash1u(x: u32) -> u32 {
     var v = x;
@@ -90,6 +122,70 @@ fn sampleSlope(uv: vec2<f32>, layer: i32) -> f32 {
     return clamp(relief * 0.02, 0.0, 1.0);
 }
 
+${tileCategoryWGSL}
+
+fn categoryMaskContains(mask: u32, categoryId: u32) -> bool {
+    if (categoryId >= 32u) {
+        return false;
+    }
+    return (mask & (1u << categoryId)) != 0u;
+}
+
+fn ruleAllowsCategory(rule: ScatterRule, categoryId: u32) -> bool {
+    if (categoryMaskContains(rule.excludeCategoryMask, categoryId)) {
+        return false;
+    }
+    if ((rule.flags & RULE_HAS_TILE_CATEGORIES) != 0u) {
+        return categoryMaskContains(rule.tileCategoryMask, categoryId);
+    }
+    return true;
+}
+
+fn ruleAllowsBand(value: f32, minValue: f32, maxValue: f32) -> bool {
+    return value >= minValue && value <= maxValue;
+}
+
+fn sampleDepressionMeters(uv: vec2<f32>, layer: i32, elevation: f32, radiusTexels: u32) -> f32 {
+    let dims = vec2<i32>(textureDimensions(heightTex));
+    let maxCoord = dims - vec2<i32>(1);
+    let coord = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), maxCoord);
+    let r = i32(max(radiusTexels, 1u));
+    let hL = textureLoad(heightTex, clamp(coord + vec2<i32>(-r, 0), vec2<i32>(0), maxCoord), layer, 0).r * params.heightScale;
+    let hR = textureLoad(heightTex, clamp(coord + vec2<i32>( r, 0), vec2<i32>(0), maxCoord), layer, 0).r * params.heightScale;
+    let hD = textureLoad(heightTex, clamp(coord + vec2<i32>(0, -r), vec2<i32>(0), maxCoord), layer, 0).r * params.heightScale;
+    let hU = textureLoad(heightTex, clamp(coord + vec2<i32>(0,  r), vec2<i32>(0), maxCoord), layer, 0).r * params.heightScale;
+    let avgNeighbor = (hL + hR + hD + hU) * 0.25;
+    return avgNeighbor - elevation;
+}
+
+fn ruleShapeFactor(rule: ScatterRule, uv: vec2<f32>, layer: i32, normalizedHeight: f32, elevation: f32) -> f32 {
+    if (rule.shapeKind == SHAPE_NONE) {
+        return 1.0;
+    }
+    if (rule.shapeKind == SHAPE_DEPRESSION) {
+        let depression = sampleDepressionMeters(uv, layer, elevation, rule.shapeRadiusTexels);
+        if (depression <= rule.shapeParam0) {
+            return 0.0;
+        }
+        return clamp(depression / max(rule.shapeParam1, 0.001), 0.0, 1.0);
+    }
+    if (rule.shapeKind == SHAPE_HIGHLAND) {
+        return clamp((normalizedHeight - rule.shapeParam0) / max(rule.shapeParam1, 0.001), 0.0, 1.0);
+    }
+    return 0.0;
+}
+
+fn noSelectedRule() -> SelectedRule {
+    var selected: SelectedRule;
+    selected.matched = 0u;
+    selected.typeId = 0u;
+    selected.spawnBudget = 0u;
+    selected.rngSeed = 0u;
+    selected.altitudeOffsetMin = 0.0;
+    selected.altitudeOffsetMax = 0.0;
+    return selected;
+}
+
 fn isForestTile(tileId: u32) -> bool {
     return (tileId >= 66u && tileId <= 81u) || (tileId >= 142u && tileId <= 149u);
 }
@@ -100,6 +196,103 @@ fn isSwampTile(tileId: u32) -> bool {
 
 fn isWaterOrDesert(tileId: u32) -> bool {
     return (tileId <= 3u) || (tileId >= 30u && tileId <= 41u) || (tileId >= 150u && tileId <= 165u);
+}
+
+fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, elevation: f32, normalizedHeight: f32, cellHash: u32) -> SelectedRule {
+    var selected = noSelectedRule();
+    let weatherMod = max(0.32, clamp(params.fogDensity * 1.6 + params.weatherIntensity * 0.45, 0.0, 1.25));
+    let roll = hashToFloat(cellHash ^ 0x12345678u);
+
+    if (isForestTile(tileId) && slope < 0.25) {
+        let prob = 0.26 * weatherMod;
+        if (roll < prob) {
+            selected.matched = 1u;
+            selected.typeId = TYPE_FOG_POCKET;
+            selected.spawnBudget = 3u;
+            selected.rngSeed = cellHash;
+            return selected;
+        }
+    }
+
+    if (isSwampTile(tileId)) {
+        let prob = 0.30 * weatherMod;
+        if (roll < prob) {
+            selected.matched = 1u;
+            selected.typeId = TYPE_FOG_POCKET;
+            selected.spawnBudget = 3u;
+            selected.rngSeed = cellHash;
+            return selected;
+        }
+    }
+
+    if (slope < 0.15) {
+        let texelSize = 1.0 / f32(GRID_RES);
+        let hL = sampleHeight(vec2<f32>(max(texUv.x - texelSize * 3.0, 0.0), texUv.y), layer) * params.heightScale;
+        let hR = sampleHeight(vec2<f32>(min(texUv.x + texelSize * 3.0, 1.0), texUv.y), layer) * params.heightScale;
+        let hD = sampleHeight(vec2<f32>(texUv.x, max(texUv.y - texelSize * 3.0, 0.0)), layer) * params.heightScale;
+        let hU = sampleHeight(vec2<f32>(texUv.x, min(texUv.y + texelSize * 3.0, 1.0)), layer) * params.heightScale;
+        let avgNeighbor = (hL + hR + hD + hU) * 0.25;
+        let depression = avgNeighbor - elevation;
+
+        if (depression > 3.0) {
+            let prob = 0.22 * weatherMod * min(depression / 10.0, 1.0);
+            if (roll < prob) {
+                selected.matched = 1u;
+                selected.typeId = TYPE_VALLEY_MIST;
+                selected.spawnBudget = 3u;
+                selected.rngSeed = cellHash;
+                return selected;
+            }
+        }
+    }
+
+    if (normalizedHeight > 0.55 && slope < 0.3) {
+        let altFactor = clamp((normalizedHeight - 0.55) / 0.2, 0.0, 1.0);
+        let prob = 0.08 * weatherMod * altFactor;
+        if (roll < prob) {
+            selected.matched = 1u;
+            selected.typeId = TYPE_LOW_CLOUD;
+            selected.spawnBudget = 2u;
+            selected.rngSeed = cellHash;
+            return selected;
+        }
+    }
+
+    return selected;
+}
+
+fn selectAuthoredRule(categoryId: u32, slope: f32, texUv: vec2<f32>, layer: i32, elevation: f32, normalizedHeight: f32, cellHash: u32) -> SelectedRule {
+    var selected = noSelectedRule();
+    for (var ruleIdx = 0u; ruleIdx < params.ruleCount; ruleIdx = ruleIdx + 1u) {
+        let rule = scatterRules[ruleIdx];
+        if (!ruleAllowsCategory(rule, categoryId)) {
+            continue;
+        }
+        if ((rule.flags & RULE_HAS_ELEVATION) != 0u && !ruleAllowsBand(normalizedHeight, rule.elevationMin, rule.elevationMax)) {
+            continue;
+        }
+        if ((rule.flags & RULE_HAS_SLOPE) != 0u && !ruleAllowsBand(slope, rule.slopeMin, rule.slopeMax)) {
+            continue;
+        }
+        let shapeFactor = ruleShapeFactor(rule, texUv, layer, normalizedHeight, elevation);
+        if (shapeFactor <= 0.0) {
+            continue;
+        }
+
+        let weatherMod = max(rule.weatherFloor, clamp(params.fogDensity * rule.fogWeight + params.weatherIntensity * rule.weatherWeight, 0.0, 1.25));
+        let prob = clamp(rule.probability * weatherMod * shapeFactor, 0.0, 1.0);
+        let roll = hashToFloat(cellHash ^ hash1u(ruleIdx + 0x12345678u));
+        if (roll < prob) {
+            selected.matched = 1u;
+            selected.typeId = rule.typeId;
+            selected.spawnBudget = rule.spawnBudget;
+            selected.rngSeed = cellHash ^ hash1u(ruleIdx + 0x9E3779B9u);
+            selected.altitudeOffsetMin = rule.altitudeOffsetMin;
+            selected.altitudeOffsetMax = rule.altitudeOffsetMax;
+            return selected;
+        }
+    }
+    return selected;
 }
 
 @compute @workgroup_size(64)
@@ -136,8 +329,9 @@ fn main(
     let height = sampleHeight(texUv, layer);
     let elevation = height * params.heightScale;
     let tileId = sampleTileType(texUv, layer);
+    let categoryId = tileCategory(tileId);
 
-    if (isWaterOrDesert(tileId)) { return; }
+    if (params.ruleCount == 0u && isWaterOrDesert(tileId)) { return; }
 
     let cubePoint = getCubePoint(tileInfo.face, faceU, faceV);
     let sphereDir = normalize(cubePoint);
@@ -147,69 +341,30 @@ fn main(
     let dy = worldPos.y - params.cameraPos.y;
     let dz = worldPos.z - params.cameraPos.z;
     let camDist = sqrt(dx * dx + dy * dy + dz * dz);
-    if (camDist > 2000.0) { return; }
+    if (camDist > params.maxRenderDist) { return; }
 
     let slope = sampleSlope(texUv, layer);
-    let weatherMod = max(0.32, clamp(params.fogDensity * 1.6 + params.weatherIntensity * 0.45, 0.0, 1.25));
-    let roll = hashToFloat(cellHash ^ 0x12345678u);
 
-    var typeId = 0xFFFFFFFFu;
-    var budget = 2u;
-
-    if (isForestTile(tileId) && slope < 0.25) {
-        let prob = 0.38 * weatherMod;
-        if (roll < prob) {
-            typeId = TYPE_FOG_POCKET;
-            budget = 5u;
-        }
+    var selected = noSelectedRule();
+    if (params.ruleCount > 0u) {
+        selected = selectAuthoredRule(categoryId, slope, texUv, layer, elevation, height, cellHash);
+    } else {
+        selected = selectLegacyRule(tileId, slope, texUv, layer, elevation, height, cellHash);
     }
 
-    if (typeId == 0xFFFFFFFFu && isSwampTile(tileId)) {
-        let prob = 0.45 * weatherMod;
-        if (roll < prob) {
-            typeId = TYPE_FOG_POCKET;
-            budget = 5u;
-        }
-    }
-
-    if (typeId == 0xFFFFFFFFu && slope < 0.15) {
-        let texelSize = 1.0 / f32(GRID_RES);
-        let hL = sampleHeight(vec2<f32>(max(localU - texelSize * 3.0, 0.0), localV), layer) * params.heightScale;
-        let hR = sampleHeight(vec2<f32>(min(localU + texelSize * 3.0, 1.0), localV), layer) * params.heightScale;
-        let hD = sampleHeight(vec2<f32>(localU, max(localV - texelSize * 3.0, 0.0)), layer) * params.heightScale;
-        let hU = sampleHeight(vec2<f32>(localU, min(localV + texelSize * 3.0, 1.0)), layer) * params.heightScale;
-        let avgNeighbor = (hL + hR + hD + hU) * 0.25;
-        let depression = avgNeighbor - elevation;
-
-        if (depression > 3.0) {
-            let prob = 0.28 * weatherMod * min(depression / 10.0, 1.0);
-            if (roll < prob) {
-                typeId = TYPE_VALLEY_MIST;
-                budget = 4u;
-            }
-        }
-    }
-
-    if (typeId == 0xFFFFFFFFu && elevation > params.heightScale * 0.55 && slope < 0.3) {
-        let altFactor = clamp((elevation - params.heightScale * 0.55) / (params.heightScale * 0.2), 0.0, 1.0);
-        let prob = 0.14 * weatherMod * altFactor;
-        if (roll < prob) {
-            typeId = TYPE_LOW_CLOUD;
-            budget = 3u;
-        }
-    }
-
-    if (typeId == 0xFFFFFFFFu) { return; }
+    if (selected.matched == 0u) { return; }
 
     let idx = atomicAdd(&counter.count, 1u);
     if (idx >= MAX_EMITTERS) { return; }
 
     var em: EmitterOut;
     em.posX = worldPos.x; em.posY = worldPos.y; em.posZ = worldPos.z;
-    em.spawnBudget = budget;
+    em.spawnBudget = selected.spawnBudget;
     em.upX = sphereDir.x; em.upY = sphereDir.y; em.upZ = sphereDir.z;
-    em.typeId = typeId;
-    em.rngSeed = cellHash;
+    em.typeId = selected.typeId;
+    em.rngSeed = selected.rngSeed;
+    em.altitudeOffsetMin = selected.altitudeOffsetMin;
+    em.altitudeOffsetMax = selected.altitudeOffsetMax;
     emitterOutput[idx] = em;
 }
 `;

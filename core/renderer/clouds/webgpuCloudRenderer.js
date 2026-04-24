@@ -19,12 +19,15 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         this._lastTime = performance.now() / 1000;
         this.frameCount = 0;
 
-        this._defaultHighLayerParams = {
-            altMin: 0, altMax: 0, coverage: 0, densityMultiplier: 0.5,
+        this._defaultLayerParams = {
+            name: 'high', altMin: 0, altMax: 0, coverage: 0, densityMultiplier: 0.5,
             noiseScale: 1.0, verticalStretch: 1.0, worleyInfluence: 0.5,
-            edgeSoftness: 0.5, extinction: 0.05, albedo: 0.9, cauliflower: 0.35
+            edgeSoftness: 0.5, extinction: 0.05, albedo: 0.9, cauliflower: 0.35,
+            precipitation: 0.0, darkness: 0.0, layerKind: 0.0
         };
-        this._smoothedHighLayer = { ...this._defaultHighLayerParams };
+        this._smoothedLayers = new Map();
+        this._renderLayers = [];
+        this._layerParamContext = null;
 
         this.cirrusTarget = null;
         this.cirrusTargetWidth = 0;
@@ -127,20 +130,17 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         // Smooth wind
         const targetWindDir   = environmentState?.windDirection || new Vector2(1, 0);
         const targetWindSpeed = environmentState?.windSpeed || 5.0;
-        const lerpFactor = 0.05 * dt;
+        const lerpFactor = 1.0 - Math.exp(-dt * 1.8);
 
         this._smoothedWindSpeed += (targetWindSpeed - this._smoothedWindSpeed) * lerpFactor;
         this._smoothedWindDir.x += (targetWindDir.x - this._smoothedWindDir.x) * lerpFactor;
         this._smoothedWindDir.y += (targetWindDir.y - this._smoothedWindDir.y) * lerpFactor;
         this._smoothedWindDir.normalize();
 
-        // Smooth high (cirrus) layer from environment state
+        // Smooth every authored weather cloud layer. Layers are rendered
+        // highest-first so dense rain decks blend over thin high cloud.
         const cloudLayersArray = environmentState?.cloudLayers || [];
-        let highLayer = null;
-        for (const layer of cloudLayersArray) {
-            if (layer && layer.name === 'high') { highLayer = layer; break; }
-        }
-        this._smoothHighLayer(highLayer || this._defaultHighLayerParams, lerpFactor);
+        this._syncCloudLayers(cloudLayersArray, lerpFactor);
 
         // Accumulate wind offset
         this._windOffset.x += this._smoothedWindDir.x * this._smoothedWindSpeed * dt;
@@ -159,7 +159,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         mat[35] = 0.0;
         for (let j = 36; j < 64; j++) mat[j] = 0.0;
 
-        // --- Cirrus params ---
+        // --- Shared cloud param context ---
         const sunDir = (environmentState?.sunLightDirection ||
             uniformManager?.uniforms?.sunLightDirection?.value ||
             new Vector3(0, 1, 0)).clone().normalize();
@@ -172,22 +172,14 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         const baseTileSize = Math.max((cloudShellOuter - cloudShellInner) * 12.0, 8000.0);
         const time = (performance.now() / 1000) % 100000;
 
-        const hl = this._smoothedHighLayer;
-
-        const cp = this._cirrusParamData;
-        let i = 0;
-        // vec4 #0
-        cp[i++] = origin.x;  cp[i++] = origin.y;  cp[i++] = origin.z;  cp[i++] = planetRadius;
-        // vec4 #1
-        cp[i++] = sunDir.x;  cp[i++] = sunDir.y;  cp[i++] = sunDir.z;  cp[i++] = environmentState?.sunIntensity || 5.0;
-        // vec4 #2
-        cp[i++] = time;  cp[i++] = this.config.cloudAnisotropy;  cp[i++] = baseTileSize;  cp[i++] = 0.0;
-        // vec4 #3
-        cp[i++] = this._windOffset.x;  cp[i++] = this._windOffset.y;  cp[i++] = 0.0;  cp[i++] = 0.0;
-        // vec4 #4  — high layer geometry
-        cp[i++] = hl.altMin;  cp[i++] = hl.altMax;  cp[i++] = hl.coverage;  cp[i++] = hl.noiseScale;
-        // vec4 #5  — high layer shading
-        cp[i++] = hl.albedo;  cp[i++] = 0.0;  cp[i++] = 0.0;  cp[i++] = 0.0;
+        this._layerParamContext = {
+            origin,
+            planetRadius,
+            sunDir,
+            sunIntensity: environmentState?.sunIntensity || 5.0,
+            time,
+            baseTileSize,
+        };
 
         // --- Atmosphere params ---
         if (uniformManager && uniformManager.uniforms.atmosphereRadius) {
@@ -220,6 +212,13 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             }
         }
 
+        const cp = this._cirrusParamData;
+        if (this._renderLayers.length > 0) {
+            this._writeLayerParams(this._renderLayers[0]);
+        } else {
+            this._writeLayerParams(this._defaultLayerParams);
+        }
+
         // Push typed arrays into material uniforms.
         this.cirrusMaterial.uniforms.matrixUniforms.value   = mat;
         this.cirrusMaterial.uniforms.cirrusParams.value     = cp;
@@ -246,6 +245,9 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         if (!this.initialized || !this.cirrusMaterial || !this.noiseGenerator) return;
         if (!this.cirrusMaterial.uniforms.noiseBase.value) return;
 
+        const layers = this._renderLayers.filter((layer) => layer.coverage > 0.005 && layer.altMax > layer.altMin);
+        if (layers.length === 0) return;
+
         const settings    = this._cirrusQualitySettings || this._getCirrusQualitySettings();
         const renderScale = settings.renderScale ?? 1.0;
 
@@ -260,7 +262,10 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             this.backend.setRenderTarget(this.cirrusTarget);
             this.backend.setViewport(0, 0, tw, th);
             this.backend.clear(true, false);
-            this.backend.draw(this.fullscreenGeometry, this.cirrusMaterial);
+            for (const layer of layers) {
+                this._writeLayerParams(layer);
+                this.backend.draw(this.fullscreenGeometry, this.cirrusMaterial);
+            }
 
             this.backend.setRenderTarget(null);
             this.backend.setViewport(0, 0, fullWidth, fullHeight);
@@ -279,7 +284,10 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             return;
         }
 
-        this.backend.draw(this.fullscreenGeometry, this.cirrusMaterial);
+        for (const layer of layers) {
+            this._writeLayerParams(layer);
+            this.backend.draw(this.fullscreenGeometry, this.cirrusMaterial);
+        }
     }
 
     // ---------------------------------------------------------------
@@ -343,19 +351,99 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         });
     }
 
-    _smoothHighLayer(target, t) {
-        const c = this._smoothedHighLayer;
-        c.altMin           += (target.altMin           - c.altMin)           * t;
-        c.altMax           += (target.altMax           - c.altMax)           * t;
-        c.coverage         += (target.coverage         - c.coverage)         * t;
-        c.densityMultiplier += ((target.densityMultiplier || 0.5) - c.densityMultiplier) * t;
-        c.noiseScale       += ((target.noiseScale       || 1.0) - c.noiseScale)       * t;
-        c.verticalStretch  += ((target.verticalStretch  || 1.0) - c.verticalStretch)  * t;
-        c.worleyInfluence  += ((target.worleyInfluence  || 0.5) - c.worleyInfluence)  * t;
-        c.edgeSoftness     += ((target.edgeSoftness     || 0.5) - c.edgeSoftness)     * t;
-        c.extinction       += ((target.extinction       || 0.05) - c.extinction)       * t;
-        c.albedo           += ((target.albedo           || 0.9) - c.albedo)           * t;
-        c.cauliflower      += ((target.cauliflower      ?? 0.35) - (c.cauliflower ?? 0.35)) * t;
+    _syncCloudLayers(targetLayers, t) {
+        const seen = new Set();
+        for (const rawLayer of targetLayers) {
+            if (!rawLayer || rawLayer.coverage <= 0.001) continue;
+            const target = this._normalizeLayer(rawLayer);
+            const key = target.name || `layer_${seen.size}`;
+            seen.add(key);
+
+            let current = this._smoothedLayers.get(key);
+            if (!current) {
+                current = { ...target, coverage: 0.0 };
+                this._smoothedLayers.set(key, current);
+            }
+            this._smoothLayer(current, target, t);
+        }
+
+        for (const [key, current] of this._smoothedLayers.entries()) {
+            if (seen.has(key)) continue;
+            this._smoothLayer(current, { ...current, coverage: 0.0 }, t);
+            if (current.coverage < 0.002) {
+                this._smoothedLayers.delete(key);
+            }
+        }
+
+        this._renderLayers = Array.from(this._smoothedLayers.values())
+            .filter((layer) => layer.coverage > 0.002 && layer.altMax > layer.altMin)
+            .sort((a, b) => b.altMax - a.altMax);
+    }
+
+    _normalizeLayer(layer) {
+        const d = this._defaultLayerParams;
+        const name = layer.name || d.name;
+        return {
+            name,
+            altMin: Number.isFinite(layer.altMin) ? layer.altMin : d.altMin,
+            altMax: Number.isFinite(layer.altMax) ? layer.altMax : d.altMax,
+            coverage: Number.isFinite(layer.coverage) ? Math.max(0, Math.min(1, layer.coverage)) : d.coverage,
+            densityMultiplier: Number.isFinite(layer.densityMultiplier) ? layer.densityMultiplier : d.densityMultiplier,
+            noiseScale: Number.isFinite(layer.noiseScale) ? layer.noiseScale : d.noiseScale,
+            verticalStretch: Number.isFinite(layer.verticalStretch) ? layer.verticalStretch : d.verticalStretch,
+            worleyInfluence: Number.isFinite(layer.worleyInfluence) ? layer.worleyInfluence : d.worleyInfluence,
+            edgeSoftness: Number.isFinite(layer.edgeSoftness) ? layer.edgeSoftness : d.edgeSoftness,
+            extinction: Number.isFinite(layer.extinction) ? layer.extinction : d.extinction,
+            albedo: Number.isFinite(layer.albedo) ? layer.albedo : d.albedo,
+            cauliflower: Number.isFinite(layer.cauliflower) ? layer.cauliflower : d.cauliflower,
+            precipitation: Number.isFinite(layer.precipitation) ? layer.precipitation : d.precipitation,
+            darkness: Number.isFinite(layer.darkness) ? layer.darkness : d.darkness,
+            layerKind: this._layerKindForName(name),
+        };
+    }
+
+    _layerKindForName(name) {
+        if (name === 'low') return 2.0;
+        if (name === 'mid') return 1.0;
+        return 0.0;
+    }
+
+    _smoothLayer(current, target, t) {
+        current.name = target.name;
+        current.layerKind = target.layerKind;
+        current.altMin += (target.altMin - current.altMin) * t;
+        current.altMax += (target.altMax - current.altMax) * t;
+        current.coverage += (target.coverage - current.coverage) * t;
+        current.densityMultiplier += (target.densityMultiplier - current.densityMultiplier) * t;
+        current.noiseScale += (target.noiseScale - current.noiseScale) * t;
+        current.verticalStretch += (target.verticalStretch - current.verticalStretch) * t;
+        current.worleyInfluence += (target.worleyInfluence - current.worleyInfluence) * t;
+        current.edgeSoftness += (target.edgeSoftness - current.edgeSoftness) * t;
+        current.extinction += (target.extinction - current.extinction) * t;
+        current.albedo += (target.albedo - current.albedo) * t;
+        current.cauliflower += (target.cauliflower - current.cauliflower) * t;
+        current.precipitation += (target.precipitation - current.precipitation) * t;
+        current.darkness += (target.darkness - current.darkness) * t;
+    }
+
+    _writeLayerParams(layer) {
+        const ctx = this._layerParamContext || {};
+        const origin = ctx.origin || this.planetConfig?.origin || new Vector3(0, 0, 0);
+        const planetRadius = ctx.planetRadius || this.planetConfig?.radius || 2048;
+        const sunDir = ctx.sunDir || new Vector3(0, 1, 0);
+        const atmosphereHeight = this.planetConfig?.atmosphereHeight || planetRadius * 0.2;
+        const baseTileSize = ctx.baseTileSize || Math.max(atmosphereHeight * 0.12, 8000.0);
+        const cp = this._cirrusParamData;
+        let i = 0;
+
+        cp[i++] = origin.x;  cp[i++] = origin.y;  cp[i++] = origin.z;  cp[i++] = planetRadius;
+        cp[i++] = sunDir.x;  cp[i++] = sunDir.y;  cp[i++] = sunDir.z;  cp[i++] = ctx.sunIntensity || 5.0;
+        cp[i++] = ctx.time || 0.0;  cp[i++] = this.config.cloudAnisotropy;  cp[i++] = baseTileSize;  cp[i++] = 0.0;
+        cp[i++] = this._windOffset.x;  cp[i++] = this._windOffset.y;  cp[i++] = 0.0;  cp[i++] = 0.0;
+        cp[i++] = layer.altMin;  cp[i++] = layer.altMax;  cp[i++] = layer.coverage;  cp[i++] = layer.noiseScale;
+        cp[i++] = layer.albedo;  cp[i++] = layer.densityMultiplier;  cp[i++] = layer.verticalStretch;  cp[i++] = layer.worleyInfluence;
+        cp[i++] = layer.edgeSoftness;  cp[i++] = layer.extinction;  cp[i++] = layer.precipitation;  cp[i++] = layer.darkness;
+        cp[i++] = layer.layerKind;  cp[i++] = layer.cauliflower;  cp[i++] = 0.0;  cp[i++] = 0.0;
     }
 
     // ---------------------------------------------------------------
@@ -478,9 +566,19 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         noiseScale: f32,
 
         albedo: f32,
+        densityMultiplier: f32,
+        verticalStretch: f32,
+        worleyInfluence: f32,
+
+        edgeSoftness: f32,
+        extinction: f32,
+        precipitation: f32,
+        darkness: f32,
+
+        layerKind: f32,
+        cauliflower: f32,
         _pad3: f32,
         _pad4: f32,
-        _pad5: f32,
     };
 
     struct AtmosphereParams {
@@ -601,7 +699,8 @@ export class WebGPUCloudRenderer extends CloudRenderer {
 
         // ---- Noise sampling ----
         let nsScale  = max(cp.noiseScale, 0.1);
-        let tileSize = cp.baseTileSize * 5.0 / nsScale;
+        let denseLayer = clamp(cp.layerKind * 0.5, 0.0, 1.0);
+        let tileSize = cp.baseTileSize * mix(5.0, 1.8, denseLayer) / nsScale;
 
         let rel   = pos - cp.planetCenter;
         let upDir = normalize(rel);
@@ -619,7 +718,10 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         let across   = dot(rel, sideDir);
         let vertical = dot(rel, upDir);
 
-        let p = windDir * along * 4.0 + sideDir * across * 0.5 + upDir * vertical * 0.35;
+        let streakScale = mix(4.0, 1.15, denseLayer);
+        let sideScale = mix(0.5, 1.2, denseLayer);
+        let verticalScale = max(0.05, cp.verticalStretch * mix(0.35, 0.55, denseLayer));
+        let p = windDir * along * streakScale + sideDir * across * sideScale + upDir * vertical * verticalScale;
 
         let cirrusTime = cp.time * TIME_SCALE;
         let windDrift  = vec3<f32>(cp.windOffsetX * 0.0001, 0.0, cp.windOffsetY * 0.0001);
@@ -644,16 +746,20 @@ export class WebGPUCloudRenderer extends CloudRenderer {
 
         let ridge = 1.0 - abs(n1 * 2.0 - 1.0);
         let coverage = clamp(cp.coverage, 0.0, 1.0);
-        let coverageT = min(coverage, 0.65);
+        let coverageT = min(coverage, 0.82);
+        let worley = clamp(cp.worleyInfluence, 0.0, 1.0);
 
-        let ridgeInfluence = mix(0.7, 0.45, coverageT);
-        let fbm = n0 * (1.0 - ridgeInfluence) + ridge * ridgeInfluence + n2 * 0.12;
+        let ridgeInfluence = mix(mix(0.7, 0.45, coverageT), worley, denseLayer);
+        let cauliflowerMask = clamp(cp.cauliflower, 0.0, 1.0);
+        let fbm = n0 * (1.0 - ridgeInfluence) + ridge * ridgeInfluence + n2 * mix(0.12, 0.28, cauliflowerMask);
 
-        let thresh = mix(0.42, 0.18, coverageT);
-        var shape = smoothstep(thresh, 0.8, fbm);
+        let thresh = mix(0.42, 0.12, coverageT);
+        let softWidth = mix(0.18, 0.52, clamp(cp.edgeSoftness, 0.0, 1.0));
+        var shape = smoothstep(thresh, min(thresh + softWidth, 0.98), fbm);
         let ridgeMask = smoothstep(0.18, 0.85, ridge);
         let gapNoise  = smoothstep(0.12, 0.85, n2);
         shape *= mix(0.6, 1.0, ridgeMask) * mix(0.7, 1.0, gapNoise);
+        shape = mix(shape, max(shape, smoothstep(thresh - 0.08, thresh + 0.25, n0)), denseLayer * 0.45);
 
         // ---- Lighting ----
         let alt = getAltitude(pos);
@@ -665,13 +771,15 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         let cosAngle = dot(rayDir, sunDir);
         let phase    = ap_miePhase(cosAngle, cp.cloudAnisotropy);
         let intensity = mix(0.7, 1.2, phase);
-        let ambientCirrus = vec3<f32>(0.6, 0.65, 0.7);
+        let stormShade = clamp(cp.darkness + cp.precipitation * 0.28 + cp.extinction * 4.0, 0.0, 0.88);
+        let ambientCirrus = mix(vec3<f32>(0.6, 0.65, 0.7), vec3<f32>(0.22, 0.25, 0.30), stormShade);
 
         let sunBrightness = max(max(sunTrans.r, sunTrans.g), sunTrans.b);
         let neutralSunTrans = mix(vec3<f32>(sunBrightness), sunTrans, 0.35);
-        let color = max(neutralSunTrans, vec3<f32>(0.3)) * cp.albedo * intensity + ambientCirrus * 0.45;
+        let litColor = max(neutralSunTrans, vec3<f32>(0.22)) * cp.albedo * intensity;
+        let color = mix(litColor + ambientCirrus * 0.45, litColor * 0.36 + ambientCirrus * 0.78, stormShade);
 
-        var alpha = shape * coverage * 1.2;
+        var alpha = shape * coverage * (0.75 + clamp(cp.densityMultiplier, 0.0, 2.5) * 0.75);
 
         // ---- Horizon fade ----
         let camUp = normalize(rayOrigin - cp.planetCenter);
@@ -707,4 +815,4 @@ export class WebGPUCloudRenderer extends CloudRenderer {
     }
 }
 
-const CIRRUS_PARAM_FLOATS = 24;
+const CIRRUS_PARAM_FLOATS = 32;

@@ -1,5 +1,6 @@
 // js/config/GameDataConfig.js
 import { requireBool, requireInt, requireNumber, requireObject, requireString, requireArray } from '../shared/requireUtil.js';
+import { buildParticleAuthoringRuntime } from '../core/renderer/particles/ParticleAuthoringRuntime.js';
 /**
  * Game data configuration settings.
  * Contains star system + planet/gameplay definitions (planet-specific).
@@ -23,6 +24,7 @@ export class GameDataConfig {
       sunIntensity: requireNumber(starSystemOptions.sunIntensity, 'starSystem.sunIntensity'),
       planets: planetOptions.map((planet, index) => new PlanetDataConfig(planet, index))
     };
+    this.particleAuthoring = buildParticleAuthoringRuntime(options.particleAuthoring ?? {});
 
     // -------------------- Time --------------------
     const time = requireObject(options.time, 'time');
@@ -116,9 +118,11 @@ export class GameDataConfig {
       grassConfig: planet.grassConfig,
       macroTileSpan: planet.macroTileSpan,
       macroMaxLOD: planet.macroMaxLOD,
+      tileCatalog: planet.tileCatalog,
       worldAuthoring: planet.worldAuthoring,
       biomeDefinitions: planet.biomeDefinitions,
       assetProfiles: planet.assetProfiles,
+      atmoBankAuthoring: planet.atmoBankAuthoring,
 
       // terrain generation config
       terrainGeneration: planet.terrain,
@@ -208,6 +212,8 @@ class PlanetDataConfig {
     this.grassConfig = requireObject(options.grassConfig, `${prefix}.grassConfig`);
     this.macroTileSpan = options.macroTileSpan ?? 4;
     this.macroMaxLOD = options.macroMaxLOD ?? 0;
+    this.tileCatalog = options.tileCatalog ?? options.worldAuthoring?.tileCatalog ?? null;
+    this.atmoBankAuthoring = options.atmoBankAuthoring ?? null;
 
     // Cloud options (optional with defaults) - altitudes as fractions of atmosphereHeight
     const cloudOpts = options.cloudOptions || {};

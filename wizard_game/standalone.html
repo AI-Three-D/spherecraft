@@ -1643,6 +1643,18 @@
                 return result;
             }
 
+            function particles() {
+                const result = gameEngine?.renderer?.particleSystem?.getDiagnostics?.() ?? null;
+                console.info('[QT-MANUAL] particles', result);
+                return result;
+            }
+
+            function setParticleDebugMode(mode = 0) {
+                const result = gameEngine?.renderer?.particleSystem?.setDebugMode?.(mode | 0) ?? null;
+                console.info('[QT-MANUAL] particleDebugMode', result);
+                return result;
+            }
+
             Object.assign(window.qtDiag, {
                 help() {
                     console.log([
@@ -1660,6 +1672,8 @@
                         'window.qtDiag.findLocalHeightMismatchPairs()',
                         'window.qtDiag.findLocalGeometryOutliers()',
                         'window.qtDiag.manualSnapshot()',
+                        'window.qtDiag.particles()',
+                        'window.qtDiag.setParticleDebugMode(mode)',
                         'window.qtDiag.saveCapture()',
                         'window.qtDiag.setTerrainDebugMode(mode)',
                         'window.qtDiag.spawnGoblinGroup({ groupSize: 3 }) // disabled by default'
@@ -1677,6 +1691,8 @@
                 findLocalHeightMismatchPairs,
                 findLocalGeometryOutliers,
                 manualSnapshot,
+                particles,
+                setParticleDebugMode,
                 saveCapture,
                 setTerrainDebugMode,
                 spawnGoblinGroup(options = {}) {

@@ -1,4 +1,7 @@
 {
-  "_comment": "Terrain generation parameters for wizard_game world. All params here require world regeneration when changed."
-
+  "_comment": "Terrain generation parameters for wizard_game world. All params here require world regeneration when changed.",
+  "noiseProfile": {
+    "mountainBias": 2.65,
+    "hillBias": 2.3
+  }
 }

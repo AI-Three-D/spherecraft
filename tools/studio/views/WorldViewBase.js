@@ -450,7 +450,7 @@ export class WorldViewBase extends StudioView {
     }
 
     _snapshotRegenParams(raw) {
-        // Deep clone the regen-relevant parts (terrain, planet regen fields, engine regen fields, biomes)
+        // Deep clone the regen-relevant parts (terrain, planet regen fields, engine regen fields, world authoring)
         return JSON.parse(JSON.stringify({
             terrain: raw.terrain,
             planet: {
@@ -461,6 +461,9 @@ export class WorldViewBase extends StudioView {
                 macroConfig: raw.engine?.macroConfig,
             },
             biomes: raw.biomes,
+            assets: raw.assets,
+            atmosphereBanks: raw.atmosphereBanks,
+            particles: raw.particles,
         }));
     }
 
@@ -479,6 +482,15 @@ export class WorldViewBase extends StudioView {
         }
         if (this._regenRaw.biomes) {
             this._raw.biomes = JSON.parse(JSON.stringify(this._regenRaw.biomes));
+        }
+        if (this._regenRaw.assets) {
+            this._raw.assets = JSON.parse(JSON.stringify(this._regenRaw.assets));
+        }
+        if (this._regenRaw.atmosphereBanks) {
+            this._raw.atmosphereBanks = JSON.parse(JSON.stringify(this._regenRaw.atmosphereBanks));
+        }
+        if (this._regenRaw.particles) {
+            this._raw.particles = JSON.parse(JSON.stringify(this._regenRaw.particles));
         }
         this._dirty = false;
         this._updateDirtyUI();

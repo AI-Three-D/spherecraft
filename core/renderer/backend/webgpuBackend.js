@@ -481,8 +481,9 @@ export class WebGPUBackend extends Backend {
 
     _getOrCreateDummyStorageBuffer() {
         if (!this._dummyStorageBuffer) {
+            // 256 bytes: satisfies all pipeline minimum binding sizes (terrain needs ≥64).
             this._dummyStorageBuffer = this.device.createBuffer({
-                size: 16,
+                size: 256,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
             });
         }
@@ -1797,7 +1798,7 @@ _createTerrainBindGroups(material, uniforms, geometry) {
             chunkTextureNames.push('groundFieldMask');
         }
         const g1Key = this._buildTextureKey(uniforms, chunkTextureNames);
-        const g1CacheKey = `terrain_g1_${needArray ? 'arr' : '2d'}`;
+        const g1CacheKey = `terrain_g1_${needArray ? 'arr' : '2d'}_${g1Key}`;
         const g1ViewDimension = needArray ? '2d-array' : '2d';
         const g1Views = chunkTextureNames.map(name => getView(name, g1ViewDimension));
     let g1Record = geometryCache.get(g1CacheKey);

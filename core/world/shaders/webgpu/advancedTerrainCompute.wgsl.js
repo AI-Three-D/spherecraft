@@ -333,7 +333,10 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
 `,
     createNoiseLibrary(),
     createTerrainCommon(),
-    createSurfaceCommon(),
+    createSurfaceCommon({
+        tileCategories: options.tileCategories,
+        tileTypes: options.tileTypes,
+    }),
     createTerrainFeatureContinents(),
     createTerrainFeaturePlains(),
     createTerrainFeatureHills(),
@@ -345,9 +348,9 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureHighlands(),
     base.base(),
     `
-const WATER_1: u32 = 0u;
-const GRASS_SHORT_1: u32 = 10u;
-const ROCK_OUTCROP_1: u32 = 42u;
+const WATER_1: u32 = SURFACE_WATER;
+const GRASS_SHORT_1: u32 = SURFACE_GRASS_BASE;
+const ROCK_OUTCROP_1: u32 = SURFACE_ROCK_BASE;
 
 const DISP_MICRO_FOREST: f32 = 10.0;
 const DISP_MICRO_GRASS: f32 = 6.0;
@@ -407,63 +410,11 @@ fn determineTileTypeAdvanced(
 }
 
 
-fn authoredBiomeTileVariantBase(tileId: u32) -> u32 {
-    let validTileId = validateTileType(tileId);
-
-    if (validTileId == SURFACE_WATER) {
-        return SURFACE_WATER;
-    }
-    if (isGrassTile(validTileId)) {
-        return SURFACE_GRASS_MIN + ((validTileId - SURFACE_GRASS_MIN) / 4u) * 4u;
-    }
-    if (isSandTile(validTileId)) {
-        return SURFACE_SAND_MIN + ((validTileId - SURFACE_SAND_MIN) / 4u) * 4u;
-    }
-    if (isRockTile(validTileId)) {
-        return SURFACE_ROCK_MIN + ((validTileId - SURFACE_ROCK_MIN) / 4u) * 4u;
-    }
-    if (isTundraTile(validTileId)) {
-        return SURFACE_TUNDRA_MIN + ((validTileId - SURFACE_TUNDRA_MIN) / 4u) * 4u;
-    }
-    if (isForestFloorTile(validTileId)) {
-        if (validTileId >= SURFACE_FOREST_TROPICAL_MIN) {
-            return SURFACE_FOREST_TROPICAL_MIN + ((validTileId - SURFACE_FOREST_TROPICAL_MIN) / 4u) * 4u;
-        }
-        return SURFACE_FOREST_FLOOR_MIN + ((validTileId - SURFACE_FOREST_FLOOR_MIN) / 4u) * 4u;
-    }
-    if (isSwampTile(validTileId)) {
-        return SURFACE_SWAMP_MIN + ((validTileId - SURFACE_SWAMP_MIN) / 4u) * 4u;
-    }
-    if (isDirtTile(validTileId)) {
-        return SURFACE_DIRT_MIN + ((validTileId - SURFACE_DIRT_MIN) / 4u) * 4u;
-    }
-    if (isMudTile(validTileId)) {
-        return SURFACE_MUD_MIN + ((validTileId - SURFACE_MUD_MIN) / 4u) * 4u;
-    }
-    if (isSnowTile(validTileId)) {
-        return SURFACE_SNOW_MIN + ((validTileId - SURFACE_SNOW_MIN) / 4u) * 4u;
-    }
-    if (isDesertTile(validTileId)) {
-        return SURFACE_DESERT_MIN + ((validTileId - SURFACE_DESERT_MIN) / 4u) * 4u;
-    }
-    if (isVolcanicTile(validTileId)) {
-        return SURFACE_VOLCANIC_MIN + ((validTileId - SURFACE_VOLCANIC_MIN) / 4u) * 4u;
-    }
-
-    // Unknown tile category falls back to grass. If this trips for authored data,
-    // check that the biome tileId resolves into one of the recognized TILE_TYPES ranges.
-    return SURFACE_GRASS_BASE;
-}
-
 fn resolveAuthoredBiomeTileType(
     tileId: u32,
     variant: u32
 ) -> u32 {
-    let baseTile = authoredBiomeTileVariantBase(tileId);
-    if (baseTile == SURFACE_WATER) {
-        return SURFACE_WATER;
-    }
-    return validateTileType(baseTile + variant);
+    return resolveCatalogTileVariant(tileId, variant);
 }
 
 fn determineTileTypeFallback(

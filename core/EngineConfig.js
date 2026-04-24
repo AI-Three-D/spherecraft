@@ -2,6 +2,16 @@
 import { DataTextureConfig } from './world/dataTextureConfiguration.js';
 import { requireBool, requireInt, requireIntArray, requireLogLevel, requireNumber, requireNumberArray, requireObject } from '../shared/requireUtil.js';
 
+function clonePlainConfig(value) {
+  if (Array.isArray(value)) return value.map(clonePlainConfig);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [key, nested] of Object.entries(value)) out[key] = clonePlainConfig(nested);
+    return out;
+  }
+  return value;
+}
+
 export class EngineConfig {
   constructor(options = {}) {
 
@@ -29,6 +39,7 @@ export class EngineConfig {
     };
     this.splatConfig = requireObject(options.splatConfig, 'splatConfig');
     this.macroConfig = requireObject(options.macroConfig, 'macroConfig');
+    this.weather = clonePlainConfig(options.weather ?? {});
 
     // ==================== RENDERING ====================
     const rendering = requireObject(options.rendering, 'rendering');
@@ -106,15 +117,15 @@ export class EngineConfig {
         },
         fog: {
           densityMultiplier: requireNumber(
-            fog.densityMultiplier ?? 0.48,
+            fog.densityMultiplier ?? 0.40,
             'rendering.lighting.fog.densityMultiplier'
           ),
           maxBaseDensity: requireNumber(
-            fog.maxBaseDensity ?? 0.0006,
+            fog.maxBaseDensity ?? 0.00055,
             'rendering.lighting.fog.maxBaseDensity'
           ),
           dayDensityScale: requireNumber(
-            fog.dayDensityScale ?? 1.0,
+            fog.dayDensityScale ?? 0.85,
             'rendering.lighting.fog.dayDensityScale'
           ),
           nightDensityScale: requireNumber(
@@ -302,6 +313,23 @@ export class EngineConfig {
       disableQuadtree: requireBool(debug.disableQuadtree, 'debug.disableQuadtree'),
       terrainFragmentDebugMode: requireInt(debug.terrainFragmentDebugMode ?? 0, 'debug.terrainFragmentDebugMode', 0),
       terrainVertexDebugMode: requireInt(debug.terrainVertexDebugMode ?? 0, 'debug.terrainVertexDebugMode', 0)
+    };
+
+    // ==================== FEATURES ====================
+    // Toggle major rendering subsystems on/off for performance profiling.
+    // All default to true (fully enabled). Set to false to skip initialization.
+    const features = options.features || {};
+    this.features = {
+      shadows:          requireBool(features.shadows          ?? true, 'features.shadows'),
+      clusteredLighting:requireBool(features.clusteredLighting ?? true, 'features.clusteredLighting'),
+      treesNear:        requireBool(features.treesNear        ?? true, 'features.treesNear'),
+      treesMid:         requireBool(features.treesMid         ?? true, 'features.treesMid'),
+      treesFar:         requireBool(features.treesFar         ?? true, 'features.treesFar'),
+      streamedAssets:   requireBool(features.streamedAssets   ?? true, 'features.streamedAssets'),
+      particles:        requireBool(features.particles        ?? true, 'features.particles'),
+      actors:           requireBool(features.actors           ?? true, 'features.actors'),
+      clouds:           requireBool(features.clouds           ?? true, 'features.clouds'),
+      skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
     };
 
     // ==================== GENERATION QUEUE (ENGINE-WIDE) ====================

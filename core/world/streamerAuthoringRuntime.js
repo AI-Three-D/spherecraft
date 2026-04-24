@@ -1,4 +1,11 @@
 import { Logger } from '../../shared/Logger.js';
+import {
+    CLUSTER_TREE_DEFAULT_TILE_COUNT,
+    CLUSTER_TREE_METADATA_STRIDE_FLOATS,
+    collectTreeProfileWeights,
+    computeBiomeTreeProfileHint,
+    normalizeArchetypeRef,
+} from './biomeAuthoringDerived.js';
 
 const ARCHETYPE_PROFILE_TARGETS = Object.freeze({
     tree: Object.freeze({
@@ -32,8 +39,6 @@ const ARCHETYPE_PROFILE_TARGETS = Object.freeze({
         familyNames: ['forest_deadwood_stump'],
     }),
 });
-const CLUSTER_TREE_METADATA_STRIDE_FLOATS = 8;
-const CLUSTER_TREE_DEFAULT_TILE_COUNT = 256;
 
 function cloneValue(value) {
     if (Array.isArray(value)) {
@@ -47,10 +52,6 @@ function cloneValue(value) {
         return out;
     }
     return value;
-}
-
-function normalizeArchetypeRef(value) {
-    return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
 function computeTileQuartet(tileId, tileCategories = []) {
@@ -113,54 +114,6 @@ function unionSignalRange(biomes, signalKey, minClamp = 0.0, maxClamp = 1.0) {
     return [minValue, maxValue];
 }
 
-function clamp01(value, fallback = 0.0) {
-    const numeric = Number.isFinite(value) ? value : fallback;
-    return Math.max(0.0, Math.min(1.0, numeric));
-}
-
-function signalCenter(biome, signalKey, fallback = 0.5) {
-    const rule = biome?.signals?.[signalKey];
-    if (!rule) return fallback;
-    const minValue = Number.isFinite(rule.min) ? rule.min : fallback;
-    const maxValue = Number.isFinite(rule.max) ? rule.max : fallback;
-    return clamp01((minValue + maxValue) * 0.5, fallback);
-}
-
-function biomeTextIncludes(biome, needles) {
-    const haystack = [
-        biome?.id,
-        biome?.displayName,
-        ...(Array.isArray(biome?.tags) ? biome.tags : []),
-    ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-    return needles.some((needle) => haystack.includes(needle));
-}
-
-function collectTreeProfileWeights(assetProfiles = []) {
-    const weightsByBiomeId = new Map();
-    let treeProfileCount = 0;
-    let maxWeight = 0.0;
-
-    for (const profile of assetProfiles) {
-        if (normalizeArchetypeRef(profile?.archetypeRef) !== 'tree') continue;
-        treeProfileCount++;
-        const density = Math.max(0.0, Number.isFinite(profile?.density) ? profile.density : 0.5);
-        const probability = Math.max(0.0, Number.isFinite(profile?.probability) ? profile.probability : 0.5);
-        const profileWeight = density * probability;
-        const biomeIds = Array.isArray(profile?.biomeIds) ? profile.biomeIds : [];
-        for (const biomeId of biomeIds) {
-            if (typeof biomeId !== 'string' || !biomeId) continue;
-            const nextWeight = (weightsByBiomeId.get(biomeId) ?? 0.0) + profileWeight;
-            weightsByBiomeId.set(biomeId, nextWeight);
-            maxWeight = Math.max(maxWeight, nextWeight);
-        }
-    }
-
-    return { weightsByBiomeId, treeProfileCount, maxWeight };
-}
-
 function resolveMetadataTileCount(tileCategories, authoredTileIds) {
     let maxTileId = CLUSTER_TREE_DEFAULT_TILE_COUNT - 1;
     for (const category of tileCategories) {
@@ -177,42 +130,6 @@ function resolveMetadataTileCount(tileCategories, authoredTileIds) {
         }
     }
     return maxTileId + 1;
-}
-
-function computeClusterTreeBiomeHint(biome, rawTreeWeight, maxTreeWeight) {
-    const normalizedProfileWeight = maxTreeWeight > 0.0
-        ? clamp01(rawTreeWeight / maxTreeWeight, 0.0)
-        : 0.0;
-    const humidity = signalCenter(biome, 'humidity', 0.5);
-    const temperature = signalCenter(biome, 'temperature', 0.5);
-    const elevation = signalCenter(biome, 'elevation', 0.3);
-    const woodland = biomeTextIncludes(biome, ['forest', 'woodland', 'jungle', 'rainforest']);
-    const arid = biomeTextIncludes(biome, ['arid', 'desert']) || humidity < 0.25;
-    const cold = biomeTextIncludes(biome, ['cold', 'polar', 'snow', 'ice']) || temperature < 0.35;
-
-    const tileWeightBias = woodland
-        ? 1.0
-        : Math.max(0.18, 0.28 + humidity * 0.24 - (arid ? 0.15 : 0.0));
-    const tileWeight = clamp01(normalizedProfileWeight * tileWeightBias, 0.0);
-
-    const conifer = clamp01(
-        0.18 +
-        (1.0 - temperature) * 0.45 +
-        elevation * 0.25 +
-        (woodland ? 0.12 : 0.0) +
-        (cold ? 0.20 : 0.0) -
-        (arid ? 0.25 : 0.0) -
-        humidity * 0.05,
-        0.45
-    );
-
-    const foliage = [
-        clamp01(0.09 + humidity * 0.08 + temperature * 0.04 - (arid ? 0.03 : 0.0), 0.12),
-        clamp01(0.18 + humidity * 0.18 + temperature * 0.05 + (woodland ? 0.04 : 0.0) - (arid ? 0.08 : 0.0), 0.24),
-        clamp01(0.06 + humidity * 0.05 - (arid ? 0.02 : 0.0), 0.08),
-    ];
-
-    return { tileWeight, conifer, foliage };
 }
 
 function buildClusterTreeTileMetadata(worldAuthoring, tileCategories) {
@@ -232,7 +149,7 @@ function buildClusterTreeTileMetadata(worldAuthoring, tileCategories) {
             biome,
             rawTreeWeight,
             tileTypes,
-            hint: computeClusterTreeBiomeHint(biome, rawTreeWeight, maxWeight),
+            hint: computeBiomeTreeProfileHint(biome, rawTreeWeight, maxWeight),
         });
     }
 

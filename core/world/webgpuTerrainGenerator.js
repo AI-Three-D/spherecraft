@@ -12,7 +12,6 @@ import { createAdvancedTerrainComputeShader } from './shaders/webgpu/advancedTer
 const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
 const SPLAT_STEP_LOG_TAG = '[SplatStep]';
 const SPLAT_STEP_PREFIX = `${TERRAIN_STEP_LOG_TAG} ${SPLAT_STEP_LOG_TAG}`;
-const DEFAULT_GPU_BIOME_FALLBACK_TILE_ID = 10;
 
 export class WebGPUTerrainGenerator {
     constructor(device, seed, chunkSize, macroConfig, splatConfig, textureCache, options = {}) {
@@ -23,6 +22,7 @@ export class WebGPUTerrainGenerator {
             throw new Error('WebGPUTerrainGenerator requires options.terrainTheme.terrainShaderBundle');
         }
         this.terrainTheme = options.terrainTheme;
+        this.tileTypes = options.terrainTheme.TILE_TYPES ?? {};
         this.tileCategories = options.terrainTheme.TILE_CATEGORIES;
         this.buildTileCategoryLookupWGSL = options.terrainTheme.buildTileCategoryLookupWGSL;
         this.terrainShaderBundle = options.terrainTheme.terrainShaderBundle;
@@ -507,6 +507,7 @@ export class WebGPUTerrainGenerator {
                     { binding: 1, resource: paddedTileMap.createView() }
                 ]
             }));
+            this._setTerrainBiomeBindGroup(pass);
             pass.dispatchWorkgroups(
                 Math.ceil(paddedSize / 8),
                 Math.ceil(paddedSize / 8)
@@ -781,6 +782,8 @@ export class WebGPUTerrainGenerator {
             baseGenerator: this.baseGenerator,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.terrainShaderModule = this.device.createShaderModule({
             label: 'Advanced Terrain Compute',
@@ -793,6 +796,8 @@ export class WebGPUTerrainGenerator {
             hasHeightBindings: true,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.heightInputShaderModule = this.device.createShaderModule({
             label: 'Height Input Terrain Compute',
@@ -806,6 +811,8 @@ export class WebGPUTerrainGenerator {
             hasTileBindings: true,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.microShaderModule = this.device.createShaderModule({
             label: 'Micro Terrain Compute',
@@ -1045,6 +1052,8 @@ export class WebGPUTerrainGenerator {
             hasHeightBindings: true,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Height Input Terrain Compute (${fmt})`,
@@ -1115,6 +1124,8 @@ export class WebGPUTerrainGenerator {
             hasTileBindings: true,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Micro Terrain Compute (${fmt})`,
@@ -2987,6 +2998,8 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             outputFormat: fmt,
             maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Terrain Compute (${fmt})`,
@@ -3033,7 +3046,6 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             this.seed,
             {
                 maxBiomes: this.maxGpuBiomes,
-                fallbackTileId: DEFAULT_GPU_BIOME_FALLBACK_TILE_ID,
             }
         );
 
@@ -3051,7 +3063,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             ));
             Logger.info(
                 '[BiomeRuntime] Terrain compute is using authored biome selection ' +
-                'with legacy TILE_TYPES fallback'
+                `with tile-catalog fallback tile ${packed.fallbackTileId}`
             );
             Logger.info(
                 `[BiomeRuntime] Authored biome stochasticity is sampling metric space ` +
@@ -3060,6 +3072,13 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             Logger.info(
                 `[BiomeRuntime] Authored biome regional noise modes: ${activeNoiseModes.join(', ')}`
             );
+            if (packed.outOfTextureRangePackedTileCount > 0) {
+                Logger.warn(
+                    `[BiomeRuntime] Packed ${packed.outOfTextureRangePackedTileCount} biome tile ` +
+                    `ref(s) above the current texture lookup max ` +
+                    `${packed.textureLookupMaxTileId}; affected tile IDs may not render correctly`
+                );
+            }
             if (packed.treeWeightedBiomeCount > 0) {
                 Logger.info(
                     `[BiomeRuntime] Authored tree eligibility weights active for ` +

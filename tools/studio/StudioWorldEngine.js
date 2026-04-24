@@ -48,6 +48,7 @@ import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../../templates/confi
 import { WebGPUTerrainGenerator } from '../../core/world/webgpuTerrainGenerator.js';
 import { TerrainRaycaster }      from '../../wizard_game/actors/nav/TerrainRaycaster.js';
 import { BiomeQuery }            from '../../core/world/BiomeQuery.js';
+import { createTerrainThemeForPlanet } from '../../wizard_game/TerrainThemeFactory.js';
 
 export class StudioWorldEngine {
     /**
@@ -120,18 +121,23 @@ export class StudioWorldEngine {
             activePlanet.id
         );
         this.planetConfig = new PlanetConfig({ ...planetOptions, engineConfig });
+        this._runtimeTerrainTheme = createTerrainThemeForPlanet(this._terrainTheme, this.planetConfig);
         const worldAuthoringSummary = this.planetConfig?.worldAuthoring?.summary;
         const shouldLogWorldAuthoring = !!worldAuthoringSummary && (
             worldAuthoringSummary.biomeCount > 0 ||
             worldAuthoringSummary.assetProfileCount > 0 ||
+            worldAuthoringSummary.tileCatalogTileCount > 0 ||
             worldAuthoringSummary.unresolvedTileRefCount > 0 ||
-            worldAuthoringSummary.unknownAssetBiomeRefCount > 0
+            worldAuthoringSummary.outOfTextureRangeTileRefCount > 0 ||
+            worldAuthoringSummary.unknownAssetBiomeRefCount > 0 ||
+            worldAuthoringSummary.tileCatalogWarningCount > 0
         );
         if (shouldLogWorldAuthoring) {
             console.info(
                 `[StudioWorldEngine] Planet "${this.planetConfig.name}" authoring: ` +
                 `${worldAuthoringSummary.biomeCount} biomes, ` +
-                `${worldAuthoringSummary.assetProfileCount} asset profiles`
+                `${worldAuthoringSummary.assetProfileCount} asset profiles, ` +
+                `${worldAuthoringSummary.tileCatalogTileCount ?? 0} tile refs`
             );
         }
         this.altitudeZoneManager = new AltitudeZoneManager(this.planetConfig);
@@ -162,10 +168,12 @@ export class StudioWorldEngine {
             gpuQuadtree:    engineConfig.gpuQuadtree,
             streamerTheme:  this._streamerTheme,
             nightSkyTheme:  this._nightSkyTheme,
-            terrainTheme:   this._terrainTheme,
+            terrainTheme:   this._runtimeTerrainTheme,
+            particleAuthoring: gameDataConfig.particleAuthoring,
         });
         await this.renderer.initialize(this.planetConfig, this.sphericalMapper, {
             weatherConfig: {
+                ...(engineConfig.weather || {}),
                 cloudLayerProvider: this._cloudLayerProvider ?? (() => [])
             }
         });
@@ -194,7 +202,7 @@ export class StudioWorldEngine {
             engineConfig.macroConfig,
             engineConfig.splatConfig,
             this.textureCache,
-            { planetConfig: this.planetConfig, terrainTheme: this._terrainTheme }
+            { planetConfig: this.planetConfig, terrainTheme: this._runtimeTerrainTheme }
         );
         await this.terrainGenerator.initialize();
 
