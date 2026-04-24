@@ -534,10 +534,13 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const shadowMaxLod = Number.isFinite(terrainShaderConfig.shadowMaxLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.shadowMaxLod))
         : null;
+    const variantRotationMaxLod = Number.isFinite(terrainShaderConfig.variantRotationMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.variantRotationMaxLod))
+        : nearMaxLod;
     const useAdvancedBlend = false;
     const useVariantBlend = false;
 
-    const useVariantRotation = false;//lod <= fullMaxLod;
+    const useVariantRotation = variantRotationMaxLod >= 0 && lod <= variantRotationMaxLod;
     const enableSplat = lod <= nearMaxLod;
     const splatBlendMaxLod = Number.isFinite(terrainShaderConfig.splatBlendMaxLod)
     ? Math.max(0, Math.floor(terrainShaderConfig.splatBlendMaxLod))

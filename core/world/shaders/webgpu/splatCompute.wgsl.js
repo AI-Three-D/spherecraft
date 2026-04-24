@@ -35,6 +35,10 @@ struct Uniforms {
     kernelSize: i32,
     inputPadding: i32,
     _padding: i32,
+    transitionSharpness: f32,
+    transitionDominanceStart: f32,
+    transitionDominanceEnd: f32,
+    centerCategoryBias: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -127,6 +131,60 @@ fn insertTop4(
 
     (*topIds)[insertAt] = categoryId;
     (*topScores)[insertAt] = score;
+}
+
+fn applyBoundaryShaping(
+    topCategories: ptr<function, array<u32, 4>>,
+    centerCategory: u32,
+    outputWeights: ptr<function, array<f32, 4>>
+) {
+    var weights = vec4<f32>(
+        (*outputWeights)[0],
+        (*outputWeights)[1],
+        (*outputWeights)[2],
+        (*outputWeights)[3]
+    );
+    let total = weights.x + weights.y + weights.z + weights.w;
+    if (total <= SCORE_EPSILON) {
+        return;
+    }
+
+    weights = weights / total;
+
+    let dominance = max(max(weights.x, weights.y), max(weights.z, weights.w));
+    let start = clamp(uniforms.transitionDominanceStart, 0.0, 1.0);
+    let end = clamp(max(uniforms.transitionDominanceEnd, start + 0.001), 0.0, 1.0);
+    let boundaryFactor = 1.0 - smoothstep(start, end, dominance);
+    if (boundaryFactor <= SCORE_EPSILON) {
+        return;
+    }
+
+    let exponent = mix(1.0, max(uniforms.transitionSharpness, 1.0), boundaryFactor);
+    var shaped = vec4<f32>(
+        select(0.0, pow(max(weights.x, SCORE_EPSILON), exponent), weights.x > SCORE_EPSILON),
+        select(0.0, pow(max(weights.y, SCORE_EPSILON), exponent), weights.y > SCORE_EPSILON),
+        select(0.0, pow(max(weights.z, SCORE_EPSILON), exponent), weights.z > SCORE_EPSILON),
+        select(0.0, pow(max(weights.w, SCORE_EPSILON), exponent), weights.w > SCORE_EPSILON)
+    );
+
+    if (validCategory(centerCategory) && uniforms.centerCategoryBias > 0.0) {
+        let centerBoost = mix(1.0, 1.0 + uniforms.centerCategoryBias, boundaryFactor);
+        if ((*topCategories)[0] == centerCategory) { shaped.x = shaped.x * centerBoost; }
+        if ((*topCategories)[1] == centerCategory) { shaped.y = shaped.y * centerBoost; }
+        if ((*topCategories)[2] == centerCategory) { shaped.z = shaped.z * centerBoost; }
+        if ((*topCategories)[3] == centerCategory) { shaped.w = shaped.w * centerBoost; }
+    }
+
+    let shapedTotal = shaped.x + shaped.y + shaped.z + shaped.w;
+    if (shapedTotal <= SCORE_EPSILON) {
+        return;
+    }
+
+    shaped = shaped / shapedTotal;
+    (*outputWeights)[0] = shaped.x;
+    (*outputWeights)[1] = shaped.y;
+    (*outputWeights)[2] = shaped.z;
+    (*outputWeights)[3] = shaped.w;
 }
 
 @compute @workgroup_size(8, 8)
@@ -259,6 +317,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         outputWeights[i] = topScores[i] / totalScore;
     }
+
+    applyBoundaryShaping(&topCategories, centerCategory, &outputWeights);
 
     // Sort slots by tile ID (ascending) so that adjacent texels always
     // store the same categories in the same slots, regardless of which

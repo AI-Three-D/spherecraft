@@ -75,6 +75,10 @@ export function createEngineConfig() {
     splatConfig: {
       splatDensity: 8,
       splatKernelSize: 5,
+      transitionSharpness: 1.9,
+      transitionDominanceStart: 0.55,
+      transitionDominanceEnd: 0.9,
+      centerCategoryBias: 0.0,
   },
     lod: {
       distancesMeters: lodDistancesMeters,
@@ -133,6 +137,7 @@ export function createEngineConfig() {
         nearToMidFadeEndChunks: 4.0,
         pointSampleLodStart: 2,
         macroStartLod: 2,
+        variantRotationMaxLod: 2,
         clusteredMaxLod: 1,
         aerialMaxLod: 2,
         normalMapMaxLod: 3,

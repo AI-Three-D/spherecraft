@@ -40,6 +40,35 @@ export class WebGPUTerrainGenerator {
         const splat = requireObject(splatConfig, 'splatConfig');
         this.splatDensity = requireInt(splat.splatDensity, 'splatConfig.splatDensity', 1);
         this.splatKernelSize = requireInt(splat.splatKernelSize, 'splatConfig.splatKernelSize', 1);
+        this.splatTransitionSharpness = Math.max(
+            1.0,
+            requireNumber(
+                splat.transitionSharpness ?? 1.9,
+                'splatConfig.transitionSharpness'
+            )
+        );
+        this.splatTransitionDominanceStart = clamp01(
+            requireNumber(
+                splat.transitionDominanceStart ?? 0.55,
+                'splatConfig.transitionDominanceStart'
+            )
+        );
+        this.splatTransitionDominanceEnd = Math.max(
+            this.splatTransitionDominanceStart + 0.001,
+            clamp01(
+                requireNumber(
+                    splat.transitionDominanceEnd ?? 0.9,
+                    'splatConfig.transitionDominanceEnd'
+                )
+            )
+        );
+        this.splatCenterCategoryBias = Math.max(
+            0.0,
+            requireNumber(
+                splat.centerCategoryBias ?? 0.0,
+                'splatConfig.centerCategoryBias'
+            )
+        );
         this.textureCache = requireObject(textureCache, 'textureCache');
         this.arrayPools = new Map();
         this.useTextureArrays = true;
@@ -440,17 +469,12 @@ export class WebGPUTerrainGenerator {
         ]);
         this.device.queue.writeBuffer(this._padTileUniformBuffer, 0, padTileParams);
 
-        const splatUniformData = new ArrayBuffer(32);
-        const splatView = new DataView(splatUniformData);
-        splatView.setInt32(0, 0, true);
-        splatView.setInt32(4, 0, true);
-        splatView.setInt32(8, splatPass.chunkSizeTex, true);
-        splatView.setInt32(12, this.seed, true);
-        splatView.setInt32(16, this.splatDensity, true);
-        splatView.setInt32(20, this.splatKernelSize, true);
-        splatView.setInt32(24, padding, true);
-        splatView.setInt32(28, 0, true);
-        this.device.queue.writeBuffer(this.splatUniformBuffer, 0, splatUniformData);
+        this._writeSplatUniformBuffer({
+            chunkCoordX: 0,
+            chunkCoordY: 0,
+            chunkSizeTex: splatPass.chunkSizeTex,
+            inputPadding: padding,
+        });
 
         // Build the padded tileMap by running the terrain generation shader over
         // the extended region (innerSize + padding on each side) instead of
@@ -725,6 +749,29 @@ export class WebGPUTerrainGenerator {
         }
     }
 
+    _writeSplatUniformBuffer({
+        chunkCoordX = 0,
+        chunkCoordY = 0,
+        chunkSizeTex,
+        inputPadding = 0,
+    }) {
+        const data = new ArrayBuffer(48);
+        const view = new DataView(data);
+        view.setInt32(0, chunkCoordX | 0, true);
+        view.setInt32(4, chunkCoordY | 0, true);
+        view.setInt32(8, chunkSizeTex | 0, true);
+        view.setInt32(12, this.seed, true);
+        view.setInt32(16, this.splatDensity, true);
+        view.setInt32(20, this.splatKernelSize, true);
+        view.setInt32(24, inputPadding | 0, true);
+        view.setInt32(28, 0, true);
+        view.setFloat32(32, this.splatTransitionSharpness, true);
+        view.setFloat32(36, this.splatTransitionDominanceStart, true);
+        view.setFloat32(40, this.splatTransitionDominanceEnd, true);
+        view.setFloat32(44, this.splatCenterCategoryBias, true);
+        this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
+    }
+
     setPlanetConfig(config) {
         const planetConfig = requireObject(config, 'planetConfig');
         this.planetConfig = planetConfig;
@@ -855,7 +902,7 @@ export class WebGPUTerrainGenerator {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         this.splatUniformBuffer = this.device.createBuffer({
-            size: 32,
+            size: 48,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         this.biomeUniformBuffer = this.device.createBuffer({
@@ -2269,19 +2316,13 @@ pass.end();
 this.device.queue.submit([enc.finish()]);
 }
     
-async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, atlasChunkY, w, h, chunkSize, heightFormat = 'r32float', tileFormat = 'r32float') {
-        const data = new ArrayBuffer(32);
-        const v = new DataView(data);
-        v.setInt32(0, 0, true);   // chunkCoord.x — atlas-local
-        v.setInt32(4, 0, true);   // chunkCoord.y — atlas-local
-        v.setInt32(8, chunkSize, true);
-        v.setInt32(12, this.seed, true);
-        v.setInt32(16, this.splatDensity, true);
-        v.setInt32(20, this.splatKernelSize, true);
-        v.setInt32(24, 0, true);
-        v.setInt32(28, 0, true);
-
-        this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
+    async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, atlasChunkY, w, h, chunkSize, heightFormat = 'r32float', tileFormat = 'r32float') {
+        this._writeSplatUniformBuffer({
+            chunkCoordX: 0,
+            chunkCoordY: 0,
+            chunkSizeTex: chunkSize,
+            inputPadding: 0,
+        });
 
         const { pipeline, bindGroupLayout } =
             this._getSplatPipelineForFormats(heightFormat, tileFormat);
@@ -2345,18 +2386,12 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         }
     
         // chunkCoord should be atlas-local (0,0), NOT world-space
-        const data = new ArrayBuffer(32);
-        const v = new DataView(data);
-        v.setInt32(0, 0, true);    // chunkCoord.x - atlas-local origin
-        v.setInt32(4, 0, true);    // chunkCoord.y - atlas-local origin
-        v.setInt32(8, chunkSizeTex, true);
-        v.setInt32(12, this.seed, true);
-        v.setInt32(16, this.splatDensity, true);
-        v.setInt32(20, this.splatKernelSize, true);
-        v.setInt32(24, 0, true);
-        v.setInt32(28, 0, true);
-    
-        this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
+        this._writeSplatUniformBuffer({
+            chunkCoordX: 0,
+            chunkCoordY: 0,
+            chunkSizeTex,
+            inputPadding: 0,
+        });
     
         const { pipeline, bindGroupLayout } =
             this._getSplatPipelineForFormats(heightFormat, tileFormat);
