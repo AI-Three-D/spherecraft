@@ -613,7 +613,10 @@ export class WebGPUTerrainGenerator {
                     { binding: 2, resource: splatPaletteTex.createView() }
                 ]
             }));
-            pass.dispatchWorkgroups(paletteSize.width, paletteSize.height);
+            pass.dispatchWorkgroups(
+                Math.ceil(paletteSize.width / 8),
+                Math.ceil(paletteSize.height / 8)
+            );
             pass.end();
         }
 
@@ -2537,7 +2540,10 @@ this.device.queue.submit([enc.finish()]);
                     { binding: 2, resource: splatPaletteTex.createView() }
                 ]
             }));
-            pass.dispatchWorkgroups(paletteSize.width, paletteSize.height);
+            pass.dispatchWorkgroups(
+                Math.ceil(paletteSize.width / 8),
+                Math.ceil(paletteSize.height / 8)
+            );
             pass.end();
         }
         {
@@ -2633,7 +2639,10 @@ this.device.queue.submit([enc.finish()]);
                     { binding: 2, resource: splatPaletteTex.createView() }
                 ]
             }));
-            pass.dispatchWorkgroups(paletteSize.width, paletteSize.height);
+            pass.dispatchWorkgroups(
+                Math.ceil(paletteSize.width / 8),
+                Math.ceil(paletteSize.height / 8)
+            );
             pass.end();
         }
         {
