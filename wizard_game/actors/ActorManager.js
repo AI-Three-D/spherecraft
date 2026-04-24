@@ -149,10 +149,10 @@ export class ActorManager {
         actor.animPlayer = new AnimationPlayer(model.asset, model);
     
         const wm = this._buildWorldMatrix(actor);
-        actor.renderInstance = await this.skinnedMeshRenderer.addInstance(model.asset, wm, {
-            modelDescriptor: model,
-        });
-    
+        actor.renderInstance = this.skinnedMeshRenderer
+            ? await this.skinnedMeshRenderer.addInstance(model.asset, wm, { modelDescriptor: model })
+            : null;
+
         actor.gpuSlot = this._actors.length;
         this._actors.push(actor);
         this._buffers.activeCount = this._actors.length;
@@ -339,9 +339,9 @@ async createNPC(charDesc, npcTypeId, spawnPos, options = {}) {
     actor.animPlayer = new AnimationPlayer(model.asset, model);
 
     const wm = this._buildWorldMatrix(actor);
-    actor.renderInstance = await this.skinnedMeshRenderer.addInstance(model.asset, wm, {
-        modelDescriptor: model,
-    });
+    actor.renderInstance = this.skinnedMeshRenderer
+        ? await this.skinnedMeshRenderer.addInstance(model.asset, wm, { modelDescriptor: model })
+        : null;
 
     actor.gpuSlot = this._actors.length;
     this._actors.push(actor);

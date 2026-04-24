@@ -211,6 +211,9 @@ export class Frontend {
             
             // Asset streamer: modular multi-category GPU scatter system
             // (trees, ground cover, plants — replaces single-purpose GrassRenderer)
+            if (this.engineConfig?.features?.streamedAssets === false) {
+                Logger.info('[Frontend] Asset streamer disabled by features.streamedAssets');
+            } else
             try {
                 const { AssetStreamer } = await import('../streamer/AssetStreamer.js');
                 const streamerAuthoringRuntime = buildStreamerAuthoringRuntime(
@@ -277,7 +280,7 @@ export class Frontend {
             }
             await this.quadtreeTerrainRenderer.initialize();
 
-            await this._maybeInitGPUShadows();
+            if (this.engineConfig?.features?.shadows !== false) await this._maybeInitGPUShadows();
 
             if (this.masterChunkLoader?.setStreamingEnabled) {
                 this.masterChunkLoader.setStreamingEnabled(false);
@@ -451,35 +454,44 @@ export class Frontend {
                 this.masterChunkLoader.terrainMeshManager.setAtmosphereLUT(this.atmosphereLUT);
             }
 
-            const { SkyRenderer } = await import('../SkyRenderer.js');
-            const spaceLODThreshold = 1000;
-            this.skyRenderer = new SkyRenderer(this.backend, this.atmosphereLUT, {
-                spaceLODThreshold,
-                nightSkyTheme: this._nightSkyTheme,
-            });
-            await this.skyRenderer.initialize();
+            if (this.engineConfig?.features?.skyEffects !== false) {
+                const { SkyRenderer } = await import('../SkyRenderer.js');
+                const spaceLODThreshold = 1000;
+                this.skyRenderer = new SkyRenderer(this.backend, this.atmosphereLUT, {
+                    spaceLODThreshold,
+                    nightSkyTheme: this._nightSkyTheme,
+                });
+                await this.skyRenderer.initialize();
+            }
         }
 
-        const { StarRenderer } = await import('../starRenderer.js');
-        this.starRenderer = new StarRenderer(this.backend);
-        await this.starRenderer.initialize();
-        
-        const { MoonRenderer } = await import('../MoonRenderer.js');
-        this.moonRenderer = new MoonRenderer(this.backend);
-        await this.moonRenderer.initialize();
-        
-        const cloudConfig = {
-            cloudAnisotropy: 0.75,
-            cirrusQuality: 'high'
-        };
-        const { WebGPUCloudRenderer } = await import('../clouds/webgpuCloudRenderer.js');
-        this.cloudRenderer = new WebGPUCloudRenderer(this.backend, cloudConfig);
-        await this.cloudRenderer.initialize();
+        if (this.engineConfig?.features?.skyEffects !== false) {
+            const { StarRenderer } = await import('../starRenderer.js');
+            this.starRenderer = new StarRenderer(this.backend);
+            await this.starRenderer.initialize();
 
-        if (this.planetConfig) {
-            this.cloudRenderer.setPlanetConfig(this.planetConfig);
+            const { MoonRenderer } = await import('../MoonRenderer.js');
+            this.moonRenderer = new MoonRenderer(this.backend);
+            await this.moonRenderer.initialize();
+        } else {
+            Logger.info('[Frontend] Sky effects disabled by features.skyEffects');
         }
-        this.cloudRenderer.enabled = true;
+
+        if (this.engineConfig?.features?.clouds !== false) {
+            const cloudConfig = {
+                cloudAnisotropy: 0.75,
+                cirrusQuality: 'high'
+            };
+            const { WebGPUCloudRenderer } = await import('../clouds/webgpuCloudRenderer.js');
+            this.cloudRenderer = new WebGPUCloudRenderer(this.backend, cloudConfig);
+            await this.cloudRenderer.initialize();
+            if (this.planetConfig) {
+                this.cloudRenderer.setPlanetConfig(this.planetConfig);
+            }
+            this.cloudRenderer.enabled = true;
+        } else {
+            Logger.info('[Frontend] Clouds disabled by features.clouds');
+        }
 
         const weatherConfig = options.weatherConfig || {};
         this.weatherController = new WeatherController(this.backend, weatherConfig);
@@ -494,26 +506,28 @@ export class Frontend {
             );
             await this.aerialTest.initialize();
         }
-        this.clusterGrid = new ClusterGrid({
-            gridSizeX: 16, gridSizeY: 8, gridSizeZ: 24,
-            useLogarithmicDepth: true
-        });
-        
-        this.lightManager = new ClusteredLightManager(this.clusterGrid, {
-            maxLightsPerCluster: 32,
-            maxLightIndices: 8192
-        });
-        
-        if (this.backend?.device) {
-            const { ClusteredLightBuffers } =
-                await import('../../lighting/ClusteredLightBuffers.js');
-            this.clusterLightBuffers = new ClusteredLightBuffers(
-                this.backend.device,
-                this.clusterGrid,
-                128   // maxLights
-            );
+        if (this.engineConfig?.features?.clusteredLighting !== false) {
+            this.clusterGrid = new ClusterGrid({
+                gridSizeX: 16, gridSizeY: 8, gridSizeZ: 24,
+                useLogarithmicDepth: true
+            });
+            this.lightManager = new ClusteredLightManager(this.clusterGrid, {
+                maxLightsPerCluster: 32,
+                maxLightIndices: 8192
+            });
+            if (this.backend?.device) {
+                const { ClusteredLightBuffers } =
+                    await import('../../lighting/ClusteredLightBuffers.js');
+                this.clusterLightBuffers = new ClusteredLightBuffers(
+                    this.backend.device,
+                    this.clusterGrid,
+                    128   // maxLights
+                );
+            } else {
+                this.clusterLightBuffers = null;
+            }
         } else {
-            this.clusterLightBuffers = null;
+            Logger.info('[Frontend] Clustered lighting disabled by features.clusteredLighting');
         }
 
         if (this.backend?.device) {
@@ -530,44 +544,50 @@ export class Frontend {
             this.heatHazeEmitter = new HeatHazeEmitter(this.backend.device, {});
             this.heatHazeEmitter.initialize('depth24plus');
 
-            const { ParticleSystem } = await import('../particles/ParticleSystem.js');
-            this.particleSystem = new ParticleSystem({
-                device: this.backend.device,
-                backend: this.backend,
-                colorFormat: HDR_FORMAT,
-                depthFormat: 'depth24plus',
-                particleAuthoring: this._particleAuthoring,
-            });
-            await this.particleSystem.initialize();
-            if (this.planetConfig) {
-                this.particleSystem.setPlanetConfig(this.planetConfig);
-            }
-            if (this.lightManager) {
-                this.particleSystem.setLightManager(this.lightManager);
+            if (this.engineConfig?.features?.particles !== false) {
+                const { ParticleSystem } = await import('../particles/ParticleSystem.js');
+                this.particleSystem = new ParticleSystem({
+                    device: this.backend.device,
+                    backend: this.backend,
+                    colorFormat: HDR_FORMAT,
+                    depthFormat: 'depth24plus',
+                    particleAuthoring: this._particleAuthoring,
+                });
+                await this.particleSystem.initialize();
+                if (this.planetConfig) {
+                    this.particleSystem.setPlanetConfig(this.planetConfig);
+                }
+                if (this.lightManager) {
+                    this.particleSystem.setLightManager(this.lightManager);
+                }
+            } else {
+                Logger.info('[Frontend] Particles disabled by features.particles');
             }
 
-            const { AtmoBankSystem } = await import('../atmosphere-banks/AtmoBankSystem.js');
-            this.atmoBankSystem = new AtmoBankSystem({
-                device: this.backend.device,
-                backend: this.backend,
-                colorFormat: HDR_FORMAT,
-                depthFormat: 'depth24plus',
-                atmoBankAuthoring: this.planetConfig?.atmoBankAuthoring,
-                tileCategories: this.planetConfig?.tileCatalog?.tileCategories ??
-                    this.planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
-                biomeDefinitions: this.planetConfig?.biomeDefinitions ?? this.planetConfig?.worldAuthoring?.biomes,
-            });
-            await this.atmoBankSystem.initialize();
-            if (this.quadtreeTileManager?.tileStreamer) {
-                this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
-                Logger.info('[AtmoBank] GPU tile streamer linked');
-            }
-            if (typeof window !== 'undefined') {
-                window.atmoBankDiag = () => this.atmoBankSystem?.getDiagnostics?.() ?? null;
+            if (this.engineConfig?.features?.skyEffects !== false) {
+                const { AtmoBankSystem } = await import('../atmosphere-banks/AtmoBankSystem.js');
+                this.atmoBankSystem = new AtmoBankSystem({
+                    device: this.backend.device,
+                    backend: this.backend,
+                    colorFormat: HDR_FORMAT,
+                    depthFormat: 'depth24plus',
+                    atmoBankAuthoring: this.planetConfig?.atmoBankAuthoring,
+                    tileCategories: this.planetConfig?.tileCatalog?.tileCategories ??
+                        this.planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
+                    biomeDefinitions: this.planetConfig?.biomeDefinitions ?? this.planetConfig?.worldAuthoring?.biomes,
+                });
+                await this.atmoBankSystem.initialize();
+                if (this.quadtreeTileManager?.tileStreamer) {
+                    this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
+                    Logger.info('[AtmoBank] GPU tile streamer linked');
+                }
+                if (typeof window !== 'undefined') {
+                    window.atmoBankDiag = () => this.atmoBankSystem?.getDiagnostics?.() ?? null;
+                }
             }
         }
 
-        await this._maybeInitGPUShadows();
+        if (this.engineConfig?.features?.shadows !== false) await this._maybeInitGPUShadows();
 
         this.uniformManager.uniforms.ambientLightIntensity.value = 0.8;
         this.uniformManager.uniforms.ambientLightColor.value.set(0xffffff);
@@ -578,14 +598,18 @@ export class Frontend {
         this.uniformManager.uniforms.sunLightDirection.value.set(0.5, 1.0, 0.3).normalize();
 
 
-        const { SkinnedMeshRenderer } = await import('../mesh/SkinnedMeshRenderer.js');
-        this.skinnedMeshRenderer = new SkinnedMeshRenderer({
-            backend: this.backend,
-            uniformManager: this.uniformManager,
-        });
-        await this.skinnedMeshRenderer.initialize();
-        this.skinnedMeshRenderer.setClusterLightBuffers(this.clusterLightBuffers);
-        this.skinnedMeshRenderer.setShadowRenderer(this.gpuShadowRenderer);
+        if (this.engineConfig?.features?.actors !== false) {
+            const { SkinnedMeshRenderer } = await import('../mesh/SkinnedMeshRenderer.js');
+            this.skinnedMeshRenderer = new SkinnedMeshRenderer({
+                backend: this.backend,
+                uniformManager: this.uniformManager,
+            });
+            await this.skinnedMeshRenderer.initialize();
+            this.skinnedMeshRenderer.setClusterLightBuffers(this.clusterLightBuffers);
+            this.skinnedMeshRenderer.setShadowRenderer(this.gpuShadowRenderer);
+        } else {
+            Logger.info('[Frontend] Actors disabled by features.actors');
+        }
 
         return this;
     }
@@ -1104,14 +1128,17 @@ updateLighting(starSystem) {
             // Update particle-attached lights first, then upload/assign clustered lights.
             this._preparePerFrameLightingAndParticles(encoder);
             
+            // Always update actor joint/transform state before any rendering.
+            if (this.skinnedMeshRenderer?.isReady()) {
+                this.skinnedMeshRenderer.update(this._lastDeltaTime);
+            }
+
             // === SHADOW PASSES ===
             if (this.gpuShadowRenderer?.isReady) {
                 this.gpuShadowRenderer.updateCascadeParams(this.camera, encoder);
                 this.gpuShadowRenderer.cullAndBuildIndirect(encoder);
                 this.gpuShadowRenderer.renderShadowPasses(encoder);
-                // Actor shadows must be written here so terrain/assets read them correctly
                 if (this.skinnedMeshRenderer?.isReady()) {
-                    this.skinnedMeshRenderer.update(this._lastDeltaTime);
                     this.skinnedMeshRenderer.renderShadowPasses(encoder, this.gpuShadowRenderer);
                 }
             }

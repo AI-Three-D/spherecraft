@@ -319,6 +319,10 @@ export class QuadtreeTerrainRenderer {
                 heightScale,
                 terrainShaderConfig: (() => {
                     const baseConfig = this.engineConfig?.rendering?.terrainShader ?? null;
+                    if (this.engineConfig?.features?.shadows === false) {
+                        // Compile all LODs with SHADOW_MODE=0 — no shadow sampling at all.
+                        return { ...baseConfig, shadowMaxLod: -1 };
+                    }
                     const shadowDistanceMax = baseConfig?.shadowDistanceMaxMeters;
                     const distances = this.engineConfig?.lod?.distancesMeters ?? [];
                     if (!Number.isFinite(shadowDistanceMax)) {

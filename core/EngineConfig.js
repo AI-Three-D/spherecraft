@@ -315,6 +315,23 @@ export class EngineConfig {
       terrainVertexDebugMode: requireInt(debug.terrainVertexDebugMode ?? 0, 'debug.terrainVertexDebugMode', 0)
     };
 
+    // ==================== FEATURES ====================
+    // Toggle major rendering subsystems on/off for performance profiling.
+    // All default to true (fully enabled). Set to false to skip initialization.
+    const features = options.features || {};
+    this.features = {
+      shadows:          requireBool(features.shadows          ?? true, 'features.shadows'),
+      clusteredLighting:requireBool(features.clusteredLighting ?? true, 'features.clusteredLighting'),
+      treesNear:        requireBool(features.treesNear        ?? true, 'features.treesNear'),
+      treesMid:         requireBool(features.treesMid         ?? true, 'features.treesMid'),
+      treesFar:         requireBool(features.treesFar         ?? true, 'features.treesFar'),
+      streamedAssets:   requireBool(features.streamedAssets   ?? true, 'features.streamedAssets'),
+      particles:        requireBool(features.particles        ?? true, 'features.particles'),
+      actors:           requireBool(features.actors           ?? true, 'features.actors'),
+      clouds:           requireBool(features.clouds           ?? true, 'features.clouds'),
+      skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
+    };
+
     // ==================== GENERATION QUEUE (ENGINE-WIDE) ====================
     const generationQueue = requireObject(options.generationQueue, 'generationQueue');
     this.generationQueue = {

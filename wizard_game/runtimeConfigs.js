@@ -227,6 +227,20 @@ export function createEngineConfig() {
       terrainVertexDebugMode: 0,
       terrainForceDirectDraw: false,
     },
+
+    features: {
+      shadows:           true,
+      clusteredLighting: true,
+      treesNear:         true,   // individual trees with leaves/branches
+      treesMid:          true,   // hull trees (140–700 m)
+      treesFar:          true,   // coarse canopy hulls (500–4000 m)
+      streamedAssets:    true,   // all streamed ground cover, props, etc.
+      particles:         true,
+      actors:            true,   // wizard, goblins, skinned mesh actors
+      clouds:            true,    // WebGPUCloudRenderer (cirrus etc.)
+      skyEffects:        true,    // sky, stars, moon, atmo banks
+    },
+
     gpuQuadtree: {
       enabled: true,
       tileTextureSize: 128,
