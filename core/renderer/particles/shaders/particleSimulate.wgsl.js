@@ -248,6 +248,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             p.velocity = p.velocity + (tangentR * nr + tangentF * nf) * (td.lateralNoise * dt);
         }
 
+        // Wind-responsive leaf physics: coherent wind drift + sinusoidal flutter.
+        if ((p.flags & FLAG_LEAF) != 0u) {
+            let windForce = vec3<f32>(globals.windDirX, 0.0, globals.windDirY) * globals.windSpeed * 0.3;
+            p.velocity = p.velocity + windForce * dt;
+            let leafHash = hashToFloat(i * 3571u + 7919u);
+            let flutter = sin(globals.time * 2.3 + leafHash * 6.28) * 0.4;
+            let bob     = sin(globals.time * 1.7 + leafHash * 19.1) * 0.2;
+            p.velocity.x = p.velocity.x + flutter * dt;
+            p.velocity.y = p.velocity.y + bob * dt;
+        }
+
         p.position = p.position + p.velocity * dt;
         p.lifetime = p.lifetime - dt;
 

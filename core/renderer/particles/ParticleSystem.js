@@ -191,6 +191,22 @@ export class ParticleSystem {
         return emitter;
     }
 
+    addLeafEmitter(worldPos, overrides = {}) {
+        const emitter = new ParticleEmitter({
+            position: worldPos,
+            preset: 'leaf_fall',
+            overrides,
+        });
+        emitter._snapToActorFn = typeof overrides.getActor === 'function'
+            ? overrides.getActor
+            : null;
+        emitter._snapSettleFrames = overrides.snapSettleFrames ?? 10;
+        emitter._needsActorSnap = !!emitter._snapToActorFn;
+        emitter._leafSurfaceOffset = overrides.surfaceOffset || null;
+        this._registerEmitter(emitter);
+        return emitter;
+    }
+
     // Creates a firefly swarm at the given position. Only one swarm can
     // be active at a time. The swarm runs Boids on CPU and emits tiny
     // bright particles.
@@ -318,11 +334,16 @@ export class ParticleSystem {
                 emitter.position.x = p.x;
                 emitter.position.y = p.y;
                 emitter.position.z = p.z;
+
+                if (emitter._leafSurfaceOffset) {
+                    this._applyTangentOffset(emitter, emitter._leafSurfaceOffset);
+                }
+
                 emitter._needsActorSnap = false;
                 // eslint-disable-next-line no-console
                 console.log(
                     `[ParticleSystem] snapped to actor ` +
-                    `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
+                    `(${emitter.position.x.toFixed(2)}, ${emitter.position.y.toFixed(2)}, ${emitter.position.z.toFixed(2)}) ` +
                     `after ${emitter._snapWaitFrames} frames`
                 );
             }
@@ -342,6 +363,40 @@ export class ParticleSystem {
             emitter.position.z = p.z;
         }
         emitter._postSnapFollowFrames--;
+    }
+
+    _applyTangentOffset(emitter, offset) {
+        const ox = emitter.position.x - this._planetOrigin.x;
+        const oy = emitter.position.y - this._planetOrigin.y;
+        const oz = emitter.position.z - this._planetOrigin.z;
+        const dist = Math.sqrt(ox * ox + oy * oy + oz * oz);
+        if (dist < 1) return;
+
+        const upX = ox / dist, upY = oy / dist, upZ = oz / dist;
+
+        let rx = 0, ry = 1, rz = 0;
+        if (Math.abs(upY) > 0.9) { rx = 1; ry = 0; }
+        let tx = upY * rz - upZ * ry;
+        let ty = upZ * rx - upX * rz;
+        let tz = upX * ry - upY * rx;
+        const tlen = Math.sqrt(tx * tx + ty * ty + tz * tz);
+        tx /= tlen; ty /= tlen; tz /= tlen;
+
+        const bx = upY * tz - upZ * ty;
+        const by = upZ * tx - upX * tz;
+        const bz = upX * ty - upY * tx;
+
+        const px = emitter.position.x + tx * offset.tangent + bx * offset.bitangent;
+        const py = emitter.position.y + ty * offset.tangent + by * offset.bitangent;
+        const pz = emitter.position.z + tz * offset.tangent + bz * offset.bitangent;
+
+        const dx = px - this._planetOrigin.x;
+        const dy = py - this._planetOrigin.y;
+        const dz = pz - this._planetOrigin.z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        emitter.position.x = this._planetOrigin.x + (dx / d) * dist;
+        emitter.position.y = this._planetOrigin.y + (dy / d) * dist;
+        emitter.position.z = this._planetOrigin.z + (dz / d) * dist;
     }
 
     _computeEmitterLocalUp(emitter) {
@@ -411,7 +466,7 @@ export class ParticleSystem {
 
     // Runs the sim compute pass once per frame. `commandEncoder` must be a
     // valid WebGPU command encoder outside any active render pass.
-    update(commandEncoder, camera, deltaTime) {
+    update(commandEncoder, camera, deltaTime, environmentState) {
         if (!this._initialized || !camera) return;
         if (this.emitters.length === 0) return;
 
@@ -517,6 +572,9 @@ export class ParticleSystem {
         );
 
         this.buffers.uploadEmitterData(uploadedEmitters);
+        const windDir = environmentState?.windDirection;
+        const windSpd = environmentState?.windSpeed ?? 0;
+
         this.buffers.writeGlobals({
             viewProjMatrix: viewProjArr,
             cameraRight,
@@ -529,6 +587,8 @@ export class ParticleSystem {
             debugMode: this.debugMode,
             flatWorld: 0,
             fireflyGlow: this._fireflyGlow,
+            windDirection: [windDir?.x ?? 0, windDir?.y ?? 0],
+            windSpeed: windSpd,
         });
         this.buffers.clearSpawnScratch(commandEncoder);
         this.simPass.dispatch(commandEncoder);
