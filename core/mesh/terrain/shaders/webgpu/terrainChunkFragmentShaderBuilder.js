@@ -1561,24 +1561,36 @@ fn sampleZoneMaskSmooth(input: FragmentInput, layer: i32) -> f32 {
     return clamp(s.r, 0.0, 1.0);
 }
 
-fn calculateRotation(worldTileCoord: vec2<f32>, tileId: f32, season: i32, seed: f32) -> f32 {
+fn calculateRotationQuarter(worldTileCoord: vec2<f32>, tileId: f32, season: i32, seed: f32) -> i32 {
     let canonicalTileId = canonicalTextureTileId(tileId);
     let h = hash12(worldTileCoord + vec2<f32>(canonicalTileId * 0.17, seed + f32(season) * 0.19));
-    return floor(h * 4.0) * 1.5707963;
+    return clamp(i32(floor(h * 4.0)), 0, 3);
 }
 
-fn rotateUV(uv: vec2<f32>, angle: f32) -> vec2<f32> {
-    let centered = uv - 0.5;
-    let c = cos(angle);
-    let s = sin(angle);
-    let rotated = vec2<f32>(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
-    return rotated + 0.5;
+fn rotateUVQuarter(uv: vec2<f32>, quarterTurn: i32) -> vec2<f32> {
+    if (quarterTurn == 1) {
+        return vec2<f32>(1.0 - uv.y, uv.x);
+    }
+    if (quarterTurn == 2) {
+        return vec2<f32>(1.0 - uv.x, 1.0 - uv.y);
+    }
+    if (quarterTurn == 3) {
+        return vec2<f32>(uv.y, 1.0 - uv.x);
+    }
+    return uv;
 }
 
-fn rotateDeriv(v: vec2<f32>, angle: f32) -> vec2<f32> {
-    let c = cos(angle);
-    let s = sin(angle);
-    return vec2<f32>(v.x * c - v.y * s, v.x * s + v.y * c);
+fn rotateDerivQuarter(v: vec2<f32>, quarterTurn: i32) -> vec2<f32> {
+    if (quarterTurn == 1) {
+        return vec2<f32>(-v.y, v.x);
+    }
+    if (quarterTurn == 2) {
+        return vec2<f32>(-v.x, -v.y);
+    }
+    if (quarterTurn == 3) {
+        return vec2<f32>(v.y, -v.x);
+    }
+    return v;
 }
 
 // ----------------------------------------------------------------------------
@@ -1713,10 +1725,10 @@ fn sampleTileColor(
     var ddx_rot = ddx_vUv;
     var ddy_rot = ddy_vUv;
     if (USE_VARIANT_ROTATION) {
-        let r = calculateRotation(worldTileCoord, canonicalTileId, activeSeason, 9547.0);
-        rotatedLocal = rotateUV(localUV, r);
-        ddx_rot = rotateDeriv(ddx_vUv, r);
-        ddy_rot = rotateDeriv(ddy_vUv, r);
+        let r = calculateRotationQuarter(worldTileCoord, canonicalTileId, activeSeason, 9547.0);
+        rotatedLocal = rotateUVQuarter(localUV, r);
+        ddx_rot = rotateDerivQuarter(ddx_vUv, r);
+        ddy_rot = rotateDerivQuarter(ddy_vUv, r);
     }
     return sampleAtlasLayer(atlasLayer, rotatedLocal, ddx_rot, ddy_rot);
 }
@@ -1749,13 +1761,13 @@ fn sampleMacroTileColor(
     ddy_uv: vec2<f32>
 ) -> vec4<f32> {
     let canonicalTileId = canonicalTextureTileId(tileId);
-    let r = calculateRotation(worldTileCoord, canonicalTileId, activeSeason, 100.0);
+    let r = calculateRotationQuarter(worldTileCoord, canonicalTileId, activeSeason, 100.0);
 
     let macroLayer = lookupMacroTileLayer(canonicalTileId, activeSeason);
-    let rotatedLocal = rotateUV(localUV, r);
+    let rotatedLocal = rotateUVQuarter(localUV, r);
 
-    let ddx_rot = rotateDeriv(ddx_uv, r);
-    let ddy_rot = rotateDeriv(ddy_uv, r);
+    let ddx_rot = rotateDerivQuarter(ddx_uv, r);
+    let ddy_rot = rotateDerivQuarter(ddy_uv, r);
 
     return sampleMacroAtlasLayer(macroLayer, rotatedLocal, ddx_rot, ddy_rot);
 }
