@@ -520,7 +520,10 @@ export function buildTerrainChunkFragmentShader(options = {}) {
         : 2;
     const splatTop2MinWeight = Number.isFinite(terrainShaderConfig.splatTop2MinWeight)
         ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.splatTop2MinWeight))
-        : 0.9;
+        : 0.75;
+    const splatDominantMinWeight = Number.isFinite(terrainShaderConfig.splatDominantMinWeight)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.splatDominantMinWeight))
+        : 0.85;
     const forceMacroOverlay = terrainShaderConfig.forceMacroOverlay === true;
     const clusteredMaxLod = Number.isFinite(terrainShaderConfig.clusteredMaxLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.clusteredMaxLod))
@@ -745,6 +748,7 @@ const USE_ADVANCED_BLEND: bool = ${useAdvancedBlend ? 'true' : 'false'};
 const USE_VARIANT_BLEND: bool = ${useVariantBlend ? 'true' : 'false'};
 const USE_SPLAT_TOP2_FAST_PATH: bool = ${useSplatTop2FastPath ? 'true' : 'false'};
 const SPLAT_TOP2_MIN_WEIGHT: f32 = ${splatTop2MinWeight.toFixed(4)};
+const SPLAT_DOMINANT_MIN_WEIGHT: f32 = ${splatDominantMinWeight.toFixed(4)};
 const USE_VARIANT_ROTATION: bool = ${useVariantRotation ? 'true' : 'false'};
 const USE_POINT_SAMPLING: bool = ${usePointSampling ? 'true' : 'false'};
 const USE_POINT_SPLAT: bool = ${enablePointSplat ? 'true' : 'false'};
@@ -1897,7 +1901,7 @@ fn sampleMicroTextureWithSplat(
     let dominantW = splatDominantWeight(splat);
 
     // Cheap fast path for almost-pure texels.
-    if (!splat.hasBoundary || dominantW > 0.97) {
+    if (!splat.hasBoundary || dominantW >= SPLAT_DOMINANT_MIN_WEIGHT) {
         return sampleTileColor(
             dominantId, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
@@ -2057,7 +2061,7 @@ fn sampleMacroOverlaySplat(
     let dominantId = splatDominantTileId(splat);
     let dominantW = splatDominantWeight(splat);
 
-    if (!splat.hasBoundary || dominantW > 0.97) {
+    if (!splat.hasBoundary || dominantW >= SPLAT_DOMINANT_MIN_WEIGHT) {
         return sampleMacroOverlaySimplePrepared(
             macroWorld,
             local,
