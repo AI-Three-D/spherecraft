@@ -479,10 +479,6 @@ fn computeShadow(worldPos: vec3<f32>, viewPos: vec3<f32>, worldNormal: vec3<f32>
 `;
 
 export function buildTerrainChunkFragmentShader(options = {}) {
-    if (!options.tileCategories) {
-        throw new Error('buildTerrainChunkFragmentShader requires options.tileCategories');
-    }
-    const tileCategories = options.tileCategories;
     const normalTextureFilterable = options.normalTextureFilterable === true;
 
     const enableTerrainAO = options.enableTerrainAO !== false;
@@ -676,22 +672,6 @@ const GRASS_TILE_ID_COUNT: i32 = ${grassTileCount};
 const GRASS_TILE_IDS: array<i32, ${grassTileCount}> = array<i32, ${grassTileCount}>(${grassTileIds.join(', ')});
 const GRASS_SHADOW_STRENGTH: f32 = ${grassShadowStrength.toFixed(3)};
 `;
-    const textureCanonicalTileIdWGSL = `
-fn canonicalTextureTileId(tileId: f32) -> f32 {
-    let t = clamp(i32(round(tileId)), 0, 255);
-${tileCategories.map((category) => {
-        const canonicalTileId = category.ranges[0][0];
-        return category.ranges
-            .map(([minTileId, maxTileId]) =>
-                `    if (t >= ${minTileId} && t <= ${maxTileId}) { return ${canonicalTileId}.0; }`
-            )
-            .join('\n');
-    }).join('\n')}
-    return tileId;
-}
-`;
-
-
     return `
 const NORMAL_TEXTURE_FILTERABLE: bool = ${normalTextureFilterable ? 'true' : 'false'};
 
@@ -1541,8 +1521,6 @@ fn hash12(p: vec2<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-${textureCanonicalTileIdWGSL}
-
 // Sample the zone mask at the snapped tile center — used for micro variant selection
 // so that the variant is stable per tile.
 fn sampleChunkZoneMask(input: FragmentInput, layer: i32) -> f32 {
@@ -1561,8 +1539,8 @@ fn sampleZoneMaskSmooth(input: FragmentInput, layer: i32) -> f32 {
     return clamp(s.r, 0.0, 1.0);
 }
 
-fn calculateRotationQuarter(worldTileCoord: vec2<f32>, canonicalTileId: f32, season: i32, seed: f32) -> i32 {
-    let h = hash12(worldTileCoord + vec2<f32>(canonicalTileId * 0.17, seed + f32(season) * 0.19));
+fn calculateRotationQuarter(worldTileCoord: vec2<f32>, tileId: f32, season: i32, seed: f32) -> i32 {
+    let h = hash12(worldTileCoord + vec2<f32>(tileId * 0.17, seed + f32(season) * 0.19));
     return clamp(i32(floor(h * 4.0)), 0, 3);
 }
 
@@ -1661,25 +1639,29 @@ fn getMicroPatternStyle(tileId: f32) -> i32 {
 // Atlas layer lookup and sampling
 // ----------------------------------------------------------------------------
 
-// Legacy texture variants are deliberately bypassed in the terrain hot path.
-// The texture config collapses each tile/category to one canonical texture
-// layer because random neighboring variants are not edge-compatible. Keep the
-// cheap deterministic rotation below; add richer variety through world-space
-// detail or prebaked resolved colors instead of per-fragment variant fan-out.
-fn lookupCanonicalTileLayer(canonicalTileId: f32, season: i32) -> i32 {
+fn textureLookupRow(tileId: f32, rowCount: i32) -> i32 {
+    return clamp(i32(round(tileId)), 0, max(rowCount - 1, 0));
+}
+
+// Runtime texture variants are deliberately bypassed in the terrain hot path.
+// The config writes a collapsed canonical texture row for every generated tile
+// ID, so this lookup can use the tile ID directly without shader-side category
+// remapping. Keep cheap rotational variety; add richer variety through
+// world-space detail or prebaked resolved colors.
+fn lookupTileLayer(tileId: f32, season: i32) -> i32 {
     let lookupSize = vec2<i32>(textureDimensions(tileTypeLookup));
     let maxVariants = lookupSize.x / 4;
     let x = (season * maxVariants) % lookupSize.x;
-    let y = i32(canonicalTileId) % lookupSize.y;
+    let y = textureLookupRow(tileId, lookupSize.y);
     let sample = textureLoad(tileTypeLookup, vec2<i32>(x, y), 0);
     return i32(round(sample.r));
 }
 
-fn lookupCanonicalMacroTileLayer(canonicalTileId: f32, season: i32) -> i32 {
+fn lookupMacroTileLayer(tileId: f32, season: i32) -> i32 {
     let lookupSize = vec2<i32>(textureDimensions(macroTileTypeLookup));
     let maxVariants = lookupSize.x / 4;
     let x = (season * maxVariants) % lookupSize.x;
-    let y = i32(canonicalTileId) % lookupSize.y;
+    let y = textureLookupRow(tileId, lookupSize.y);
     let sample = textureLoad(macroTileTypeLookup, vec2<i32>(x, y), 0);
     return i32(round(sample.r));
 }
@@ -1716,13 +1698,12 @@ fn sampleTileColor(
     ddx_vUv: vec2<f32>,
     ddy_vUv: vec2<f32>
 ) -> vec4<f32> {
-    let canonicalTileId = canonicalTextureTileId(tileId);
-    var atlasLayer = lookupCanonicalTileLayer(canonicalTileId, activeSeason);
+    var atlasLayer = lookupTileLayer(tileId, activeSeason);
     var rotatedLocal = localUV;
     var ddx_rot = ddx_vUv;
     var ddy_rot = ddy_vUv;
     if (USE_VARIANT_ROTATION) {
-        let r = calculateRotationQuarter(worldTileCoord, canonicalTileId, activeSeason, 9547.0);
+        let r = calculateRotationQuarter(worldTileCoord, tileId, activeSeason, 9547.0);
         rotatedLocal = rotateUVQuarter(localUV, r);
         ddx_rot = rotateDerivQuarter(ddx_vUv, r);
         ddy_rot = rotateDerivQuarter(ddy_vUv, r);
@@ -1757,10 +1738,9 @@ fn sampleMacroTileColor(
     ddx_uv: vec2<f32>,
     ddy_uv: vec2<f32>
 ) -> vec4<f32> {
-    let canonicalTileId = canonicalTextureTileId(tileId);
-    let r = calculateRotationQuarter(worldTileCoord, canonicalTileId, activeSeason, 100.0);
+    let r = calculateRotationQuarter(worldTileCoord, tileId, activeSeason, 100.0);
 
-    let macroLayer = lookupCanonicalMacroTileLayer(canonicalTileId, activeSeason);
+    let macroLayer = lookupMacroTileLayer(tileId, activeSeason);
     let rotatedLocal = rotateUVQuarter(localUV, r);
 
     let ddx_rot = rotateDerivQuarter(ddx_uv, r);
