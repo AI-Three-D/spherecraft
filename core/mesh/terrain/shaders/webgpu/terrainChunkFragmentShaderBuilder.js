@@ -1255,6 +1255,17 @@ fn loadSplatWeights(coord: vec2<i32>, layer: i32) -> vec4<f32> {
     return clamp(textureLoad(splatDataMap, coord, layer, 0), vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
+fn sampleSplatWeightsFiltered(uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    return clamp(
+        ${useArrayTextures
+            ? 'textureSampleLevel(splatDataMap, chunkLinearSampler, uv, layer, 0.0)'
+            : 'textureSampleLevel(splatDataMap, chunkLinearSampler, uv, 0.0)'
+        },
+        vec4<f32>(0.0),
+        vec4<f32>(1.0)
+    );
+}
+
 fn loadSplatIndices(coord: vec2<i32>, layer: i32) -> vec4<i32> {
     let s = textureLoad(splatIndexMap, coord, layer, 0);
     return vec4<i32>(
@@ -1349,14 +1360,6 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
     let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
 
-    let centerWeights = loadSplatWeights(centerCoord, layer);
-    let centerIds = loadSplatIndices(centerCoord, layer);
-
-    let weights00 = loadSplatWeights(c00, layer);
-    let weights10 = loadSplatWeights(c10, layer);
-    let weights01 = loadSplatWeights(c01, layer);
-    let weights11 = loadSplatWeights(c11, layer);
-
     let ids00 = loadSplatIndices(c00, layer);
     let ids10 = loadSplatIndices(c10, layer);
     let ids01 = loadSplatIndices(c01, layer);
@@ -1371,15 +1374,7 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     var topWeights: array<f32, 4>;
 
     if (bilinearValid) {
-        let blendedWeights = clamp(
-            mix(
-                mix(weights00, weights10, f.x),
-                mix(weights01, weights11, f.x),
-                f.y
-            ),
-            vec4<f32>(0.0),
-            vec4<f32>(1.0)
-        );
+        let blendedWeights = sampleSplatWeightsFiltered(uv, layer);
 
         topIds = array<i32, 4>(ids00.x, ids00.y, ids00.z, ids00.w);
         topWeights = array<f32, 4>(
@@ -1389,6 +1384,11 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
             blendedWeights.w
         );
     } else {
+        let weights00 = loadSplatWeights(c00, layer);
+        let weights10 = loadSplatWeights(c10, layer);
+        let weights01 = loadSplatWeights(c01, layer);
+        let weights11 = loadSplatWeights(c11, layer);
+
         var accumIds: array<i32, 16>;
         var accumWeights: array<f32, 16>;
         var accumCount: i32 = 0;
@@ -1407,6 +1407,8 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
 
     let topSum = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
     if (topSum <= 0.0001) {
+        let centerWeights = loadSplatWeights(centerCoord, layer);
+        let centerIds = loadSplatIndices(centerCoord, layer);
         let centerSum = max(centerWeights.x + centerWeights.y + centerWeights.z + centerWeights.w, 0.0001);
         topIds = array<i32, 4>(centerIds.x, centerIds.y, centerIds.z, centerIds.w);
         topWeights = array<f32, 4>(
