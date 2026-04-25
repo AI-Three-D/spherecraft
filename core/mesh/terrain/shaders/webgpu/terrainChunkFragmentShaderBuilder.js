@@ -546,8 +546,6 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const variantRotationMaxLod = Number.isFinite(terrainShaderConfig.variantRotationMaxLod)
         ? Math.max(-1, Math.floor(terrainShaderConfig.variantRotationMaxLod))
         : nearMaxLod;
-    const useAdvancedBlend = false;
-    const useVariantBlend = false;
     const useSplatTop2FastPath = splatTop2MaxLod >= 0 && lod <= splatTop2MaxLod && splatTop2MinWeight < 0.9999;
 
     const useVariantRotation = variantRotationMaxLod >= 0 && lod <= variantRotationMaxLod;
@@ -673,35 +671,6 @@ fn applyGroundFieldFallback(baseColor: vec3<f32>, _input: FragmentInput, _layer:
     return baseColor;
 }
 `;
-    const blendModeConstants = useAdvancedBlend ? `
-const BLEND_SOFT:    i32 = 0;
-const BLEND_HARD:    i32 = 1;
-const STEP_OVERLAY:  i32 = 2;
-
-    ` : '';
-    const blendModeCode = useAdvancedBlend ? `
-${blendModeBlock}
-fn blendTileColorsSplat(
-    color1: vec4<f32>, color2: vec4<f32>,
-    w1: f32, w2: f32,
-    tileId1: f32, tileId2: f32,
-    worldPos: vec2<f32>
-) -> vec4<f32> {
-    return blendTileColors(color1, color2, w1, w2, tileId1, tileId2, worldPos);
-}
-` : `
-${blendModeBlockSimple}
-fn blendTileColorsSplat(
-    color1: vec4<f32>, color2: vec4<f32>,
-    w1: f32, w2: f32,
-    _tileId1: f32, _tileId2: f32,
-    _worldPos: vec2<f32>
-) -> vec4<f32> {
-    return blendTileColorsSimple(color1, color2, w1, w2);
-}
-`;
- 
-    
     const grassConstants = `
 const GRASS_TILE_ID_COUNT: i32 = ${grassTileCount};
 const GRASS_TILE_IDS: array<i32, ${grassTileCount}> = array<i32, ${grassTileCount}>(${grassTileIds.join(', ')});
@@ -744,8 +713,6 @@ const GROUND_FIELD_FERN_TINT: vec3<f32> = vec3<f32>(
 const DEBUG_EDGE_EPS: f32 = 0.02;
 const DEBUG_MAX_LOD: f32 = 6.0;
 const SHADER_LOD: i32 = ${lod};
-const USE_ADVANCED_BLEND: bool = ${useAdvancedBlend ? 'true' : 'false'};
-const USE_VARIANT_BLEND: bool = ${useVariantBlend ? 'true' : 'false'};
 const USE_SPLAT_TOP2_FAST_PATH: bool = ${useSplatTop2FastPath ? 'true' : 'false'};
 const SPLAT_TOP2_MIN_WEIGHT: f32 = ${splatTop2MinWeight.toFixed(4)};
 const SPLAT_DOMINANT_MIN_WEIGHT: f32 = ${splatDominantMinWeight.toFixed(4)};
@@ -777,7 +744,6 @@ const DEBUG_LOD_COLORS: array<vec3<f32>, 7> = array<vec3<f32>, 7>(
     vec3<f32>(1.0, 0.2, 0.5),
     vec3<f32>(0.8, 0.2, 1.0)
 );
-${blendModeConstants}
 
 
 ${grassConstants}
@@ -859,6 +825,8 @@ ${groundFieldBindingDecl}
 @group(2) @binding(1) var level2AtlasTexture: texture_2d_array<f32>;
 @group(2) @binding(2) var tileTypeLookup: texture_2d<f32>;
 @group(2) @binding(3) var macroTileTypeLookup: texture_2d<f32>;
+// Legacy binding retained to keep the atlas bind-group layout stable. The
+// terrain shader no longer reads runtime texture-variant counts.
 @group(2) @binding(4) var numVariantsTex: texture_2d<f32>;
 @group(2) @binding(5) var textureSampler: sampler;
 @group(2) @binding(6) var nearestSampler: sampler;
@@ -1575,14 +1543,6 @@ fn hash12(p: vec2<f32>) -> f32 {
 
 ${textureCanonicalTileIdWGSL}
 
-fn getNumVariants(tileId: f32, season: i32) -> i32 {
-    let canonicalTileId = canonicalTextureTileId(tileId);
-    let t = clamp(i32(canonicalTileId + 0.5), 0, 255);
-    let s = clamp(season, 0, 3);
-    let v = textureLoad(numVariantsTex, vec2<i32>(t, s), 0).r;
-    return max(1, i32(round(v * 255.0)));
-}
-
 // Sample the zone mask at the snapped tile center — used for micro variant selection
 // so that the variant is stable per tile.
 fn sampleChunkZoneMask(input: FragmentInput, layer: i32) -> f32 {
@@ -1690,21 +1650,26 @@ fn getMicroPatternStyle(tileId: f32) -> i32 {
 // Atlas layer lookup and sampling
 // ----------------------------------------------------------------------------
 
-fn lookupTileLayer(tileId: f32, season: i32, variantIdx: i32) -> i32 {
+// Legacy texture variants are deliberately bypassed in the terrain hot path.
+// The texture config collapses each tile/category to one canonical texture
+// layer because random neighboring variants are not edge-compatible. Keep the
+// cheap deterministic rotation below; add richer variety through world-space
+// detail or prebaked resolved colors instead of per-fragment variant fan-out.
+fn lookupTileLayer(tileId: f32, season: i32) -> i32 {
     let canonicalTileId = canonicalTextureTileId(tileId);
     let lookupSize = vec2<i32>(textureDimensions(tileTypeLookup));
     let maxVariants = lookupSize.x / 4;
-    let x = (season * maxVariants + (variantIdx % maxVariants)) % lookupSize.x;
+    let x = (season * maxVariants) % lookupSize.x;
     let y = i32(canonicalTileId) % lookupSize.y;
     let sample = textureLoad(tileTypeLookup, vec2<i32>(x, y), 0);
     return i32(round(sample.r));
 }
 
-fn lookupMacroTileLayer(tileId: f32, season: i32, variantIdx: i32) -> i32 {
+fn lookupMacroTileLayer(tileId: f32, season: i32) -> i32 {
     let canonicalTileId = canonicalTextureTileId(tileId);
     let lookupSize = vec2<i32>(textureDimensions(macroTileTypeLookup));
     let maxVariants = lookupSize.x / 4;
-    let x = (season * maxVariants + (variantIdx % maxVariants)) % lookupSize.x;
+    let x = (season * maxVariants) % lookupSize.x;
     let y = i32(canonicalTileId) % lookupSize.y;
     let sample = textureLoad(macroTileTypeLookup, vec2<i32>(x, y), 0);
     return i32(round(sample.r));
@@ -1734,28 +1699,6 @@ fn sampleMacroAtlasLayer(
     return textureSampleGrad(level2AtlasTexture, textureSampler, tileUv, layer, ddx_vUv, ddy_vUv);
 }
 
-fn sampleVariantAt(
-    tileId: f32,
-    tileCoord: vec2<f32>,
-    worldPos: vec2<f32>,
-    activeSeason: i32,
-    variantIdx: i32,
-    ddx_vUv: vec2<f32>,
-    ddy_vUv: vec2<f32>
-) -> vec4<f32> {
-    let localUV = fract(worldPos - tileCoord);
-    let r = calculateRotation(tileCoord, tileId, activeSeason, 9547.0);
-    let atlasLayer = lookupTileLayer(tileId, activeSeason, variantIdx);
-    let rotatedLocal = rotateUV(localUV, r);
-    let ddx_rot = rotateDeriv(ddx_vUv, r);
-    let ddy_rot = rotateDeriv(ddy_vUv, r);
-    return sampleAtlasLayer(atlasLayer, rotatedLocal, ddx_rot, ddy_rot);
-}
-
-fn getVariantAt(tileCoord: vec2<f32>, hashOffset: vec2<f32>, varCount: i32) -> i32 {
-    return clamp(i32(floor(hash12(tileCoord + hashOffset) * f32(varCount))), 0, varCount - 1);
-}
-
 fn sampleTileColor(
     tileId: f32,
     worldTileCoord: vec2<f32>,
@@ -1765,16 +1708,7 @@ fn sampleTileColor(
     ddy_vUv: vec2<f32>
 ) -> vec4<f32> {
     let canonicalTileId = canonicalTextureTileId(tileId);
-    let varCount = getNumVariants(canonicalTileId, activeSeason);
-    let hashOffset = vec2<f32>(canonicalTileId * 0.17, f32(activeSeason) * 0.31);
-
-    var currentVariant: i32 = 0;
-    if (varCount > 1) {
-        currentVariant = getVariantAt(worldTileCoord, hashOffset, varCount);
-    }
-
-    // Sample current tile
-    var atlasLayer = lookupTileLayer(canonicalTileId, activeSeason, currentVariant);
+    var atlasLayer = lookupTileLayer(canonicalTileId, activeSeason);
     var rotatedLocal = localUV;
     var ddx_rot = ddx_vUv;
     var ddy_rot = ddy_vUv;
@@ -1784,38 +1718,7 @@ fn sampleTileColor(
         ddx_rot = rotateDeriv(ddx_vUv, r);
         ddy_rot = rotateDeriv(ddy_vUv, r);
     }
-    var color = sampleAtlasLayer(atlasLayer, rotatedLocal, ddx_rot, ddy_rot);
-
-    if (!USE_VARIANT_BLEND || varCount <= 1) { return color; }
-
-    // Bilinear variant blending across tile boundaries.
-    // Shift by 0.5 so the blend straddles each tile edge.
-    let worldPos = worldTileCoord + localUV;
-    let p = worldPos - 0.5;
-    let base = floor(p);
-    let t = fract(p);
-    let blend = smoothstep(vec2<f32>(0.0), vec2<f32>(1.0), t);
-
-    let v00 = getVariantAt(base, hashOffset, varCount);
-    let v10 = getVariantAt(base + vec2<f32>(1.0, 0.0), hashOffset, varCount);
-    let v01 = getVariantAt(base + vec2<f32>(0.0, 1.0), hashOffset, varCount);
-    let v11 = getVariantAt(base + vec2<f32>(1.0, 1.0), hashOffset, varCount);
-
-    // Fast path: all 4 corners share the same variant — no blending needed
-    if (v00 == v10 && v10 == v01 && v01 == v11) {
-        return color;
-    }
-
-    // Sample each corner tile with its own rotation and variant
-    let c00 = sampleVariantAt(tileId, base, worldPos, activeSeason, v00, ddx_vUv, ddy_vUv);
-    let c10 = sampleVariantAt(tileId, base + vec2<f32>(1.0, 0.0), worldPos, activeSeason, v10, ddx_vUv, ddy_vUv);
-    let c01 = sampleVariantAt(tileId, base + vec2<f32>(0.0, 1.0), worldPos, activeSeason, v01, ddx_vUv, ddy_vUv);
-    let c11 = sampleVariantAt(tileId, base + vec2<f32>(1.0, 1.0), worldPos, activeSeason, v11, ddx_vUv, ddy_vUv);
-
-    // Bilinear interpolation
-    let c0 = mix(c00, c10, blend.x);
-    let c1 = mix(c01, c11, blend.x);
-    return mix(c0, c1, blend.y);
+    return sampleAtlasLayer(atlasLayer, rotatedLocal, ddx_rot, ddy_rot);
 }
 
 
@@ -1848,14 +1751,7 @@ fn sampleMacroTileColor(
     let canonicalTileId = canonicalTextureTileId(tileId);
     let r = calculateRotation(worldTileCoord, canonicalTileId, activeSeason, 100.0);
 
-    let varCount = getNumVariants(canonicalTileId, activeSeason);
-    var varIdx: i32 = 0;
-    if (varCount > 1) {
-        let h = hash12(worldTileCoord + vec2<f32>(canonicalTileId * 0.31, f32(activeSeason) * 0.53));
-        varIdx = clamp(i32(floor(h * f32(varCount))), 0, varCount - 1);
-    }
-
-    let macroLayer = lookupMacroTileLayer(canonicalTileId, activeSeason, varIdx);
+    let macroLayer = lookupMacroTileLayer(canonicalTileId, activeSeason);
     let rotatedLocal = rotateUV(localUV, r);
 
     let ddx_rot = rotateDeriv(ddx_uv, r);
@@ -1876,7 +1772,6 @@ fn sampleMicroTexture(
     let tileId = sampleChunkTileId(input, layer);
     return sampleTileColor(tileId, worldTileCoord, local, activeSeason, ddx_vUv, ddy_vUv);
 }
-${blendModeCode}
 
 fn computeNearToMidDetailFade(input: FragmentInput) -> f32 {
     if (!ENABLE_NEAR_TO_MID_FADE) {
@@ -1929,48 +1824,6 @@ fn sampleMicroTextureWithSplat(
             );
             return color1 * w1 + color2 * w2;
         }
-    }
-
-    // If advanced blending ever comes back, keep the old pairwise path there.
-    if (USE_ADVANCED_BLEND) {
-        var bestI: i32 = 0;
-        var secondI: i32 = 1;
-
-        let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
-        let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
-
-        if (ws[1] > ws[bestI]) { bestI = 1; }
-        if (ws[2] > ws[bestI]) { bestI = 2; }
-        if (ws[3] > ws[bestI]) { bestI = 3; }
-
-        secondI = select(1, 0, bestI == 1);
-        if (secondI == bestI) { secondI = 2; }
-        if (secondI == bestI) { secondI = 3; }
-
-        for (var i: i32 = 0; i < 4; i += 1) {
-            if (i == bestI) { continue; }
-            if (ws[i] > ws[secondI]) { secondI = i; }
-        }
-
-        let top2Sum = max(ws[bestI] + ws[secondI], 0.0001);
-        let w1 = ws[bestI] / top2Sum;
-        let w2 = ws[secondI] / top2Sum;
-
-        let color1 = sampleTileColor(
-            ids[bestI], worldTileCoord, local,
-            activeSeason, ddx_vUv, ddy_vUv
-        );
-        let color2 = sampleTileColor(
-            ids[secondI], worldTileCoord, local,
-            activeSeason, ddx_vUv, ddy_vUv
-        );
-
-        return blendTileColorsSplat(
-            color1, color2,
-            w1, w2,
-            ids[bestI], ids[secondI],
-            input.vWorldPos
-        );
     }
 
     // Current live path: stable weighted multi-way blend.

@@ -180,6 +180,9 @@ export class TextureAtlasManager {
     }
     
 
+    // Legacy duplicate: this earlier class method is overridden by the later
+    // _buildTileTypeLookup definition below. Do not add terrain variant logic
+    // here; active terrain rendering uses one canonical texture layer.
     _buildTileTypeLookup(maxTileTypes, maxVariants, level, seasons) {
         const numSeasons = seasons.length;
         const width = numSeasons * maxVariants;
@@ -681,9 +684,13 @@ export class TextureAtlasManager {
         return atlas.texture;
     }
     
-    // Lookup table now writes layer indices.  The RGBA32F format is kept for
-    // GPU compatibility but only .r is meaningful: it holds the layer index as
-    // a float (0.0, 1.0, 2.0, …).  The shader rounds it back to i32.
+    // Lookup table now writes layer indices. The RGBA32F format is kept for
+    // GPU compatibility but only .r is meaningful for the active renderer.
+    //
+    // Legacy note: runtime texture variants are intentionally not used for
+    // terrain. The authored config collapses variants to one canonical layer
+    // because independently generated variants are not edge-compatible with
+    // one another. The renderer may still rotate that single layer per tile.
     _buildTileTypeLookup(maxTileTypes, maxVariants, level, seasons) {
         const numSeasons = seasons.length;
         const width  = numSeasons * maxVariants;

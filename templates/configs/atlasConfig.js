@@ -97,6 +97,11 @@ function collapseTileVariantTextures(textureConfig) {
   });
 }
 
+// Runtime texture variants are intentionally collapsed to one canonical
+// texture per tile/category. Procedural textures are tileable with themselves,
+// but arbitrary variant-to-variant borders were never made edge-compatible.
+// Keep visual variety in the renderer to cheap rotation/world-space detail,
+// or do richer stochastic variation in a prebaked resolved-color path.
 export const TEXTURE_CONFIG = collapseTileVariantTextures(RAW_TEXTURE_CONFIG);
 
 export function getAllVariantsForTileLevel(tileType, level) {
