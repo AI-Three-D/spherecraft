@@ -195,6 +195,7 @@ const DEFAULT_TEXTURE_FORMATS = {
     macro: 'rgba8unorm',
     splatData: 'rgba8unorm',
     splatIndex: 'rgba8unorm',
+    splatValid: 'rgba8unorm',
     scatter: 'r8unorm'
 };
 
@@ -226,7 +227,8 @@ class TileArrayPool {
             type === 'tile' ||
             type === 'scatter' ||
             type === 'splatData' ||
-            type === 'splatIndex';
+            type === 'splatIndex' ||
+            type === 'splatValid';
 
         const fullMipCount = Math.floor(Math.log2(tileSize)) + 1;
 
@@ -504,6 +506,9 @@ export class TileStreamer {
         this.streamedTypes = this.requiredTypes.slice();
         if (this.enableSplat && this.streamedTypes.includes('splatData') && !this.streamedTypes.includes('splatIndex')) {
             this.streamedTypes.push('splatIndex');
+        }
+        if (this.enableSplat && this.streamedTypes.includes('splatData') && !this.streamedTypes.includes('splatValid')) {
+            this.streamedTypes.push('splatValid');
         }
         this.textureFormats  = {
             ...DEFAULT_TEXTURE_FORMATS,

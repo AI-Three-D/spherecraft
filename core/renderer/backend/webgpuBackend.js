@@ -79,6 +79,7 @@ export class WebGPUBackend extends Backend {
             'tileTexture',
             'splatDataMap',
             'splatIndexMap',
+            'splatValidMap',
             'macroMaskTexture',
         ];  
         
@@ -1048,7 +1049,7 @@ compileShader(material) {
     // Two terrain materials differing only in normal format must get
     // distinct pipelines.
     const chunkFmts = material._chunkTextureFormats || {};
-    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','macro','terrainAO','groundField']
+    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','splatValid','macro','terrainAO','groundField']
         .map(t => chunkFmts[t] || '')
         .join('|');
 
@@ -1261,7 +1262,7 @@ _createTerrainBindGroupLayouts(
 
     // Slot → texture type mapping (fixed order, matches shader bindings)
 // Slot → texture type mapping (fixed order, matches shader bindings)
-const slotTypes = ['height', 'normal', 'tile', 'splatData', 'splatIndex', 'macro'];
+const slotTypes = ['height', 'normal', 'tile', 'splatData', 'splatIndex', 'splatValid', 'macro'];
 const slotSampleType = (type) =>
     gpuFormatSampleType(chunkFormats[type] || 'rgba32float');
 
@@ -1288,22 +1289,24 @@ const slotSampleType = (type) =>
         { binding: 4, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: slotSampleType('splatIndex'), viewDimension: chunkViewDimension } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: slotSampleType('splatValid'), viewDimension: chunkViewDimension } },
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: slotSampleType('macro'),      viewDimension: chunkViewDimension } },
     ];
     if (includeTerrainAO) {
         group1Entries.push({
-            binding: 6, visibility: GPUShaderStage.FRAGMENT,
+            binding: 7, visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: slotSampleType('terrainAO'), viewDimension: chunkViewDimension }
         });
     } else if (includeGroundField) {
         group1Entries.push({
-            binding: 6, visibility: GPUShaderStage.FRAGMENT,
+            binding: 7, visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: slotSampleType('terrainAO'), viewDimension: chunkViewDimension }
         });
     }
     if (includeGroundField) {
         group1Entries.push({
-            binding: 7, visibility: GPUShaderStage.FRAGMENT,
+            binding: 8, visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: slotSampleType('groundField'), viewDimension: chunkViewDimension }
         });
     }

@@ -79,6 +79,7 @@ const DEFAULT_TEXTURE_FORMATS = {
     macro: 'rgba8unorm',
     splatData: 'rgba8unorm',
     splatIndex: 'rgba8unorm',
+    splatValid: 'rgba8unorm',
     scatter: 'r8unorm'
 };
 
@@ -371,15 +372,19 @@ this._maxGpuFencesObserved = 0;
 let splatPass = null;
 let gpuSplatData = null;
 let gpuSplatIndex = null;
+let gpuSplatValid = null;
 
 if (this.enableSplat && this.requiredTypes.includes('splatData')) {
     const splatFormat = this.textureFormats.splatData || 'rgba8unorm';
     const splatIndexFormat = this.textureFormats.splatIndex || 'rgba8unorm';
+    const splatValidFormat = this.textureFormats.splatValid || 'rgba8unorm';
 
     gpuSplatData = this._createGPUTexture(
         this.textureSize, this.textureSize, splatFormat);
     gpuSplatIndex = this._createGPUTexture(
         this.textureSize, this.textureSize, splatIndexFormat);
+    gpuSplatValid = this._createGPUTexture(
+        this.textureSize, this.textureSize, splatValidFormat);
 
     if (gpuHeight && gpuTile) {
         const chunksPerAtlas = Math.max(1,
@@ -394,6 +399,7 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
             tileFormat,
             splatTex: gpuSplatData,
             splatIndexTex: gpuSplatIndex,
+            splatValidTex: gpuSplatValid,
             textureSize: this.textureSize,
             chunkSizeTex: splatChunkSizeTex
         };
@@ -477,6 +483,11 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
         if (this.requiredTypes.includes('splatData') && gpuSplatIndex) {
             textures.splatIndex = this._wrapGPUTexture(
                 gpuSplatIndex, this.textureSize, this.textureFormats.splatIndex || 'rgba8unorm', true
+            );
+        }
+        if (this.requiredTypes.includes('splatValid') && gpuSplatValid) {
+            textures.splatValid = this._wrapGPUTexture(
+                gpuSplatValid, this.textureSize, this.textureFormats.splatValid || 'rgba8unorm', true
             );
         }
 

@@ -817,6 +817,7 @@ export class QuadtreeTileManager {
             tile:      'r8unorm',
             splatData: 'rgba8unorm',
             splatIndex: 'rgba8unorm',
+            splatValid: 'rgba8unorm',
             scatter:   'r8unorm',
             climate:   'rgba8unorm',
             ...(qt.textureFormats || {})

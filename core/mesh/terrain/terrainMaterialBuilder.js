@@ -86,6 +86,7 @@ export class TerrainMaterialBuilder {
                 cachedTextures.tile,
                 cachedTextures.splatData,
                 cachedTextures.splatIndex,
+                cachedTextures.splatValid,
                 cachedTextures.macro
             ];
             const presentTextures = textureList.filter(Boolean);
@@ -128,6 +129,9 @@ export class TerrainMaterialBuilder {
                 tile:       readGpuFormat(cachedTextures.tile),
                 splatData:  readGpuFormat(cachedTextures.splatData),
                 splatIndex: readGpuFormat(cachedTextures.splatIndex),
+                splatValid: cachedTextures.splatValid
+                    ? readGpuFormat(cachedTextures.splatValid)
+                    : 'rgba8unorm',
                 macro:      readGpuFormat(cachedTextures.macro),
             };
 
@@ -281,6 +285,7 @@ normalTexture: { value: cachedTextures.normal },
 tileTexture: { value: cachedTextures.tile },
 splatDataMap: { value: cachedTextures.splatData },
 splatIndexMap: { value: cachedTextures.splatIndex },
+splatValidMap: { value: cachedTextures.splatValid },
 macroMaskTexture: { value: cachedTextures.macro },
             // === LOOKUP TABLES ===
             tileTypeLookup: { value: lookupTables.tileTypeLookup },

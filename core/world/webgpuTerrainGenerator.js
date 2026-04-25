@@ -2,6 +2,7 @@
 
 import { createSplatComputeShader } from './shaders/webgpu/splatCompute.wgsl.js';
 import { createSplatPaletteComputeShader } from './shaders/webgpu/splatPaletteCompute.wgsl.js';
+import { createSplatValidityComputeShader } from './shaders/webgpu/splatValidityCompute.wgsl.js';
 import { getPackedBiomeUniformByteSize, packBiomeUniformData } from './biomeRuntime.js';
 
 import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
@@ -465,8 +466,12 @@ export class WebGPUTerrainGenerator {
         const padding = this._computeSplatPaddingTexels();
         const paddedSize = innerSize + padding * 2;
         const splatIndexTex = splatPass.splatIndexTex;
+        const splatValidTex = splatPass.splatValidTex;
         if (!splatIndexTex) {
             throw new Error('Splat pass requires splatIndexTex for top-4 sparse splat output');
+        }
+        if (!splatValidTex) {
+            throw new Error('Splat pass requires splatValidTex for bilinear-valid mask output');
         }
 
         const shouldPrimeSplat = (this._quadtreeSplatPrimeCount ?? 0) < 3;
@@ -486,6 +491,12 @@ export class WebGPUTerrainGenerator {
                 innerSize,
                 innerSize,
                 [255, 255, 255, 255]
+            );
+            this._fillTextureRGBA8Unorm(
+                splatValidTex,
+                innerSize,
+                innerSize,
+                [0, 0, 0, 255]
             );
         }
 
@@ -568,6 +579,8 @@ export class WebGPUTerrainGenerator {
                 splatPass.heightFormat || 'r32float',
                 'rgba8unorm'
             );
+        const { pipeline: splatValidityPipeline, bindGroupLayout: splatValidityBindGroupLayout } =
+            this._getSplatValidityPipelineForFormats('rgba8unorm', 'rgba8unorm');
         const constantProbePipeline = debugProbeTextures
             ? this._getSplatDebugProbePipeline('constantWrite')
             : null;
@@ -632,6 +645,23 @@ export class WebGPUTerrainGenerator {
                     { binding: 3, resource: splatPass.splatTex.createView() },
                     { binding: 4, resource: splatIndexTex.createView() },
                     { binding: 5, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            pass.dispatchWorkgroups(
+                Math.ceil(innerSize / 8),
+                Math.ceil(innerSize / 8)
+            );
+            pass.end();
+        }
+
+        {
+            const pass = enc.beginComputePass({ label: 'ComputePaddedSplatValidity' });
+            pass.setPipeline(splatValidityPipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: splatValidityBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: splatIndexTex.createView() },
+                    { binding: 1, resource: splatValidTex.createView() }
                 ]
             }));
             pass.dispatchWorkgroups(
@@ -982,6 +1012,11 @@ export class WebGPUTerrainGenerator {
             label: 'Splat Palette Compute',
             code: splatPaletteShaderCode
         });
+        const splatValidityShaderCode = createSplatValidityComputeShader();
+        this.splatValidityShaderModule = this.device.createShaderModule({
+            label: 'Splat Validity Compute',
+            code: splatValidityShaderCode
+        });
         if (typeof this.splatShaderModule.getCompilationInfo === 'function') {
             this.splatShaderModule.getCompilationInfo()
                 .then((info) => {
@@ -1172,6 +1207,33 @@ export class WebGPUTerrainGenerator {
             }),
             compute: { module: this.splatPaletteShaderModule, entryPoint: 'main' }
         });
+        this.splatValidityBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType('rgba8unorm'),
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: 'rgba8unorm',
+                        viewDimension: '2d'
+                    }
+                }
+            ]
+        });
+        this.splatValidityPipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.splatValidityBindGroupLayout]
+            }),
+            compute: { module: this.splatValidityShaderModule, entryPoint: 'main' }
+        });
         this._splatPipelineCache = new Map();
         this._splatPipelineCache.set(
             this._getSplatPipelineCacheKey('r32float', 'r32float'),
@@ -1186,6 +1248,14 @@ export class WebGPUTerrainGenerator {
             {
                 pipeline: this.splatPalettePipeline,
                 bindGroupLayout: this.splatPaletteBindGroupLayout
+            }
+        );
+        this._splatValidityPipelineCache = new Map();
+        this._splatValidityPipelineCache.set(
+            this._getSplatValidityPipelineCacheKey('rgba8unorm', 'rgba8unorm'),
+            {
+                pipeline: this.splatValidityPipeline,
+                bindGroupLayout: this.splatValidityBindGroupLayout
             }
         );
         this._padTilePipelineCache = new Map();
@@ -1473,6 +1543,54 @@ export class WebGPUTerrainGenerator {
         }
         const record = { pipeline, bindGroupLayout };
         this._splatPalettePipelineCache.set(cacheKey, record);
+        return record;
+    }
+
+    _getSplatValidityPipelineCacheKey(indexFormat = 'rgba8unorm', maskFormat = 'rgba8unorm') {
+        return `i:${gpuFormatSampleType(indexFormat || 'rgba8unorm')}|m:${maskFormat || 'rgba8unorm'}`;
+    }
+
+    _getSplatValidityPipelineForFormats(indexFormat = 'rgba8unorm', maskFormat = 'rgba8unorm') {
+        const iFmt = indexFormat || 'rgba8unorm';
+        const mFmt = maskFormat || 'rgba8unorm';
+        const cacheKey = this._getSplatValidityPipelineCacheKey(iFmt, mFmt);
+        const cached = this._splatValidityPipelineCache?.get(cacheKey);
+        if (cached) return cached;
+
+        const bindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType(iFmt),
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: mFmt,
+                        viewDimension: '2d'
+                    }
+                }
+            ]
+        });
+
+        const pipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [bindGroupLayout]
+            }),
+            compute: { module: this.splatValidityShaderModule, entryPoint: 'main' }
+        });
+
+        if (!this._splatValidityPipelineCache) {
+            this._splatValidityPipelineCache = new Map();
+        }
+        const record = { pipeline, bindGroupLayout };
+        this._splatValidityPipelineCache.set(cacheKey, record);
         return record;
     }
     _getPadTilePipelineForFormat(tileFormat = 'r8unorm') {

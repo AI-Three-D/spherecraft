@@ -608,10 +608,10 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const clusteredLightingCode = getClusteredLightingWGSL();
     const proceduralDetailCode = getProceduralDetailWGSL();
     const terrainAOBindingDecl = enableTerrainAO
-        ? `@group(1) @binding(6) var terrainAOMask: ${chunkTextureType};`
+        ? `@group(1) @binding(7) var terrainAOMask: ${chunkTextureType};`
         : '';
     const groundFieldBindingDecl = enableGroundField
-        ? `@group(1) @binding(7) var groundFieldMask: ${chunkTextureType};`
+        ? `@group(1) @binding(8) var groundFieldMask: ${chunkTextureType};`
         : '';
     const terrainAOCode = enableTerrainAO ? `
 fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
@@ -837,7 +837,8 @@ struct FragmentUniforms {
 @group(1) @binding(2) var tileTexture: ${chunkTextureType};
 @group(1) @binding(3) var splatDataMap: ${chunkTextureType};      // top-4 weights
 @group(1) @binding(4) var splatIndexMap: ${chunkTextureType};     // top-4 representative tile ids
-@group(1) @binding(5) var macroMaskTexture: ${chunkTextureType};
+@group(1) @binding(5) var splatValidMap: ${chunkTextureType};     // precomputed bilinear-valid mask
+@group(1) @binding(6) var macroMaskTexture: ${chunkTextureType};
 ${terrainAOBindingDecl}
 ${groundFieldBindingDecl}
 
@@ -1276,6 +1277,10 @@ fn loadSplatIndices(coord: vec2<i32>, layer: i32) -> vec4<i32> {
     );
 }
 
+fn loadSplatValidity(coord: vec2<i32>, layer: i32) -> bool {
+    return textureLoad(splatValidMap, coord, layer, 0).r > 0.5;
+}
+
 fn accumulateLoadedCornerMixture(
     ids4: vec4<i32>,
     weights4: vec4<f32>,
@@ -1359,21 +1364,13 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
     let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
     let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
-
-    let ids00 = loadSplatIndices(c00, layer);
-    let ids10 = loadSplatIndices(c10, layer);
-    let ids01 = loadSplatIndices(c01, layer);
-    let ids11 = loadSplatIndices(c11, layer);
-
-    let bilinearValid =
-        splatIdSetsMatch(ids00, ids10) &&
-        splatIdSetsMatch(ids00, ids01) &&
-        splatIdSetsMatch(ids00, ids11);
+    let bilinearValid = loadSplatValidity(c00, layer);
 
     var topIds: array<i32, 4>;
     var topWeights: array<f32, 4>;
 
     if (bilinearValid) {
+        let ids00 = loadSplatIndices(c00, layer);
         let blendedWeights = sampleSplatWeightsFiltered(uv, layer);
 
         topIds = array<i32, 4>(ids00.x, ids00.y, ids00.z, ids00.w);
@@ -1384,6 +1381,10 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
             blendedWeights.w
         );
     } else {
+        let ids00 = loadSplatIndices(c00, layer);
+        let ids10 = loadSplatIndices(c10, layer);
+        let ids01 = loadSplatIndices(c01, layer);
+        let ids11 = loadSplatIndices(c11, layer);
         let weights00 = loadSplatWeights(c00, layer);
         let weights10 = loadSplatWeights(c10, layer);
         let weights01 = loadSplatWeights(c01, layer);
