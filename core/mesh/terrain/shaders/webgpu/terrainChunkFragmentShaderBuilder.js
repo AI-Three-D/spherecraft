@@ -1399,10 +1399,13 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
 
         buildAccumulatedTop4(&accumIds, &accumWeights, accumCount, &topIds, &topWeights);
 
-
+        // The fallback combines mismatched bilinear corners and can build slots
+        // in accumulation order. Re-sort there so later blend logic sees stable
+        // channel identity. The bilinear-valid path already reads pre-sorted
+        // splatIndexMap channels from generation, so it deliberately skips this
+        // compare/swap network on the hot path.
+        sortTop4ByTileId(&topIds, &topWeights);
     }
-                // Important: restore stable channel identity after fallback.
-                sortTop4ByTileId(&topIds, &topWeights);
 
     let topSum = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
     if (topSum <= 0.0001) {
