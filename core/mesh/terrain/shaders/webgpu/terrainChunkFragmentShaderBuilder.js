@@ -515,6 +515,12 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const macroStartLod = Number.isFinite(terrainShaderConfig.macroStartLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.macroStartLod))
         : 2;
+    const splatTop2MaxLod = Number.isFinite(terrainShaderConfig.splatTop2MaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.splatTop2MaxLod))
+        : 2;
+    const splatTop2MinWeight = Number.isFinite(terrainShaderConfig.splatTop2MinWeight)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.splatTop2MinWeight))
+        : 0.9;
     const forceMacroOverlay = terrainShaderConfig.forceMacroOverlay === true;
     const clusteredMaxLod = Number.isFinite(terrainShaderConfig.clusteredMaxLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.clusteredMaxLod))
@@ -539,6 +545,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
         : nearMaxLod;
     const useAdvancedBlend = false;
     const useVariantBlend = false;
+    const useSplatTop2FastPath = splatTop2MaxLod >= 0 && lod <= splatTop2MaxLod && splatTop2MinWeight < 0.9999;
 
     const useVariantRotation = variantRotationMaxLod >= 0 && lod <= variantRotationMaxLod;
     const enableSplat = lod <= nearMaxLod;
@@ -736,6 +743,8 @@ const DEBUG_MAX_LOD: f32 = 6.0;
 const SHADER_LOD: i32 = ${lod};
 const USE_ADVANCED_BLEND: bool = ${useAdvancedBlend ? 'true' : 'false'};
 const USE_VARIANT_BLEND: bool = ${useVariantBlend ? 'true' : 'false'};
+const USE_SPLAT_TOP2_FAST_PATH: bool = ${useSplatTop2FastPath ? 'true' : 'false'};
+const SPLAT_TOP2_MIN_WEIGHT: f32 = ${splatTop2MinWeight.toFixed(4)};
 const USE_VARIANT_ROTATION: bool = ${useVariantRotation ? 'true' : 'false'};
 const USE_POINT_SAMPLING: bool = ${usePointSampling ? 'true' : 'false'};
 const USE_POINT_SPLAT: bool = ${enablePointSplat ? 'true' : 'false'};
@@ -1347,6 +1356,43 @@ fn splatActiveCount(splat: SplatData) -> i32 {
 fn splatPrimaryWeight(splat: SplatData, _local: vec2<f32>) -> f32 {
     return splatDominantWeight(splat);
 }
+
+fn findSplatTop2(
+    splat: SplatData,
+    bestI: ptr<function, i32>,
+    secondI: ptr<function, i32>,
+    top2Sum: ptr<function, f32>
+) -> bool {
+    let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+    let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+
+    var first = -1;
+    var second = -1;
+
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        if (!splatChannelUsable(ids[i], ws[i])) {
+            continue;
+        }
+        if (first < 0 || ws[i] > ws[first]) {
+            second = first;
+            first = i;
+            continue;
+        }
+        if (second < 0 || ws[i] > ws[second]) {
+            second = i;
+        }
+    }
+
+    if (first < 0 || second < 0) {
+        return false;
+    }
+
+    *bestI = first;
+    *secondI = second;
+    *top2Sum = ws[first] + ws[second];
+    return *top2Sum > 0.0001;
+}
+
 fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
@@ -1858,6 +1904,29 @@ fn sampleMicroTextureWithSplat(
         );
     }
 
+    if (USE_SPLAT_TOP2_FAST_PATH && splat.bilinearValid) {
+        var bestI: i32 = -1;
+        var secondI: i32 = -1;
+        var top2Sum = 0.0;
+        if (findSplatTop2(splat, &bestI, &secondI, &top2Sum) && top2Sum >= SPLAT_TOP2_MIN_WEIGHT) {
+            let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+            let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+            let invTop2 = 1.0 / max(top2Sum, 0.0001);
+            let w1 = ws[bestI] * invTop2;
+            let w2 = ws[secondI] * invTop2;
+
+            let color1 = sampleTileColor(
+                ids[bestI], worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            let color2 = sampleTileColor(
+                ids[secondI], worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            return color1 * w1 + color2 * w2;
+        }
+    }
+
     // If advanced blending ever comes back, keep the old pairwise path there.
     if (USE_ADVANCED_BLEND) {
         var bestI: i32 = 0;
@@ -1997,6 +2066,27 @@ fn sampleMacroOverlaySplat(
             ddy_uv,
             dominantId
         );
+    }
+
+    if (USE_SPLAT_TOP2_FAST_PATH && splat.bilinearValid) {
+        var bestI: i32 = -1;
+        var secondI: i32 = -1;
+        var top2Sum = 0.0;
+        if (findSplatTop2(splat, &bestI, &secondI, &top2Sum) && top2Sum >= SPLAT_TOP2_MIN_WEIGHT) {
+            let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+            let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+            let invTop2 = 1.0 / max(top2Sum, 0.0001);
+            let w1 = ws[bestI] * invTop2;
+            let w2 = ws[secondI] * invTop2;
+
+            let color1 = sampleMacroTileColorBilinear(
+                ids[bestI], macroWorld, local, activeSeason, ddx_uv, ddy_uv
+            );
+            let color2 = sampleMacroTileColorBilinear(
+                ids[secondI], macroWorld, local, activeSeason, ddx_uv, ddy_uv
+            );
+            return color1 * w1 + color2 * w2;
+        }
     }
 
     var accum = vec3<f32>(0.0, 0.0, 0.0);

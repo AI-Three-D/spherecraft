@@ -69,6 +69,8 @@ export class EngineConfig {
         ),
         pointSampleLodStart: requireInt(terrainShader.pointSampleLodStart ?? 2, 'rendering.terrainShader.pointSampleLodStart', 0),
         macroStartLod: requireInt(terrainShader.macroStartLod ?? 2, 'rendering.terrainShader.macroStartLod', 0),
+        splatTop2MaxLod: requireInt(terrainShader.splatTop2MaxLod ?? 2, 'rendering.terrainShader.splatTop2MaxLod', -1),
+        splatTop2MinWeight: requireNumber(terrainShader.splatTop2MinWeight ?? 0.9, 'rendering.terrainShader.splatTop2MinWeight'),
         variantRotationMaxLod: requireInt(terrainShader.variantRotationMaxLod ?? 2, 'rendering.terrainShader.variantRotationMaxLod', -1),
         clusteredMaxLod: requireInt(terrainShader.clusteredMaxLod ?? 1, 'rendering.terrainShader.clusteredMaxLod', 0),
         aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 2, 'rendering.terrainShader.aerialMaxLod', 0),
