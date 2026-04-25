@@ -1561,8 +1561,7 @@ fn sampleZoneMaskSmooth(input: FragmentInput, layer: i32) -> f32 {
     return clamp(s.r, 0.0, 1.0);
 }
 
-fn calculateRotationQuarter(worldTileCoord: vec2<f32>, tileId: f32, season: i32, seed: f32) -> i32 {
-    let canonicalTileId = canonicalTextureTileId(tileId);
+fn calculateRotationQuarter(worldTileCoord: vec2<f32>, canonicalTileId: f32, season: i32, seed: f32) -> i32 {
     let h = hash12(worldTileCoord + vec2<f32>(canonicalTileId * 0.17, seed + f32(season) * 0.19));
     return clamp(i32(floor(h * 4.0)), 0, 3);
 }
@@ -1667,8 +1666,7 @@ fn getMicroPatternStyle(tileId: f32) -> i32 {
 // layer because random neighboring variants are not edge-compatible. Keep the
 // cheap deterministic rotation below; add richer variety through world-space
 // detail or prebaked resolved colors instead of per-fragment variant fan-out.
-fn lookupTileLayer(tileId: f32, season: i32) -> i32 {
-    let canonicalTileId = canonicalTextureTileId(tileId);
+fn lookupCanonicalTileLayer(canonicalTileId: f32, season: i32) -> i32 {
     let lookupSize = vec2<i32>(textureDimensions(tileTypeLookup));
     let maxVariants = lookupSize.x / 4;
     let x = (season * maxVariants) % lookupSize.x;
@@ -1677,8 +1675,7 @@ fn lookupTileLayer(tileId: f32, season: i32) -> i32 {
     return i32(round(sample.r));
 }
 
-fn lookupMacroTileLayer(tileId: f32, season: i32) -> i32 {
-    let canonicalTileId = canonicalTextureTileId(tileId);
+fn lookupCanonicalMacroTileLayer(canonicalTileId: f32, season: i32) -> i32 {
     let lookupSize = vec2<i32>(textureDimensions(macroTileTypeLookup));
     let maxVariants = lookupSize.x / 4;
     let x = (season * maxVariants) % lookupSize.x;
@@ -1720,7 +1717,7 @@ fn sampleTileColor(
     ddy_vUv: vec2<f32>
 ) -> vec4<f32> {
     let canonicalTileId = canonicalTextureTileId(tileId);
-    var atlasLayer = lookupTileLayer(canonicalTileId, activeSeason);
+    var atlasLayer = lookupCanonicalTileLayer(canonicalTileId, activeSeason);
     var rotatedLocal = localUV;
     var ddx_rot = ddx_vUv;
     var ddy_rot = ddy_vUv;
@@ -1763,7 +1760,7 @@ fn sampleMacroTileColor(
     let canonicalTileId = canonicalTextureTileId(tileId);
     let r = calculateRotationQuarter(worldTileCoord, canonicalTileId, activeSeason, 100.0);
 
-    let macroLayer = lookupMacroTileLayer(canonicalTileId, activeSeason);
+    let macroLayer = lookupCanonicalMacroTileLayer(canonicalTileId, activeSeason);
     let rotatedLocal = rotateUVQuarter(localUV, r);
 
     let ddx_rot = rotateDerivQuarter(ddx_uv, r);
