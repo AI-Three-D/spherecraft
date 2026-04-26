@@ -318,7 +318,11 @@ export class WebGPUBackend extends Backend {
             mipmapFilter: 'linear',
             addressModeU: 'repeat',
             addressModeV: 'repeat',
-            addressModeW: 'repeat'
+            addressModeW: 'repeat',
+            // Terrain atlas samples are often viewed at grazing angles; a
+            // modest anisotropy level keeps near grass detail without forcing
+            // aggressively sharp mips that would shimmer while moving.
+            maxAnisotropy: 4
         }));
         this._samplerCache.set('linear', this.device.createSampler({
             magFilter: 'linear',

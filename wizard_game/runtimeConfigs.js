@@ -141,6 +141,7 @@ export function createEngineConfig() {
         nearToMidFadeEndChunks: 4.0,
         pointSampleLodStart: 2,
         macroStartLod: 99,
+        resolvedColorStartLod: 1,
         variantRotationMaxLod: 2,
         clusteredMaxLod: 1,
         aerialMaxLod: 2,
@@ -238,16 +239,16 @@ export function createEngineConfig() {
     },
 
     features: {
-      shadows:           true,
-      clusteredLighting: true,
+      shadows:           false,
+      clusteredLighting: false,
       treesNear:         true,   // individual trees with leaves/branches
-      treesMid:          true,   // hull trees (140–700 m)
-      treesFar:          true,   // coarse canopy hulls (500–4000 m)
+      treesMid:          false,   // hull trees (140–700 m)
+      treesFar:          false,   // coarse canopy hulls (500–4000 m)
       streamedAssets:    true,   // all streamed ground cover, props, etc.
-      particles:         true,
-      actors:            true,   // wizard, goblins, skinned mesh actors
-      clouds:            true,    // WebGPUCloudRenderer (cirrus etc.)
-      skyEffects:        true,    // sky, stars, moon, atmo banks
+      particles:         false,
+      actors:            false,   // wizard, goblins, skinned mesh actors
+      clouds:            false,    // WebGPUCloudRenderer (cirrus etc.)
+      skyEffects:        false,    // sky, stars, moon, atmo banks
     },
 
     gpuQuadtree: {
@@ -448,37 +449,42 @@ export function createEngineConfig() {
       // null budgets are auto-derived from `density`.
       nearTier: {
           maxCloseTrees: null,
-          maxTotalLeaves: null,
+          maxTotalLeaves: 180000,
           maxTotalClusters: 10000000,
 
-          maxBranchDetailLevel: 3,
-          branchLODBands: [{ distance: 50, maxLevel: 4 }],
-          branchTerminalLevel: 2,
+          maxBranchDetailLevel: 1,
+          branchLODBands: [
+              { distance: 32, maxLevel: 4 },
+              { distance: 70, maxLevel: 2 },
+          ],
+          branchTerminalLevel: 1,
           branchFadeMargin: null,
 
           leafBands: [
-              { start:  0, end:  8 },
-              { start:  7, end: 20 },
-              { start: 19, end: 30 },
-              { start: 25 },
+              { start:   0, end:  28 },
+              { start:  22, end:  72 },
+              { start:  58, end: 140 },
+              { start: 118 },
           ],
-          // 220m range with an 80m fade window means the near leaf fade
-          // starts at 140m so the handoff matches the mid-tier fade-in.
-          leafFadeStartRatio: 140 / 220,
+          leafFadeStartRatio: 0.86,
 
           leafCounts: {
-              generic: [6000, 3000, 1500, 1500],
-              0:       [3000, 1500,  700,  700],
-              1:       [3000, 1500,  700,  700],
+              generic: [2200, 900, 300, 80],
+              0:       [1400, 600, 180, 60],
+              1:       [1400, 600, 180, 60],
           },
           leafSizeScale: [1.0, 1.36, 2.0, 2.0],
 
           birch: {
-              nearDistance: 20.0,
+              nearDistance: 30.0,
               closeSize: 0.36, settledSize: 0.55, aspect: 1.5,
-              closeLeaves: 4000,
-              closeCardsPerAnchor: 10,
+              closeLeaves: 2600,
+              closeCardsPerAnchor: 4,
               settledCardsPerAnchor: 1,
+              l0SettledLeaves: 1000,
+              l1CardsPerAnchor: 4,
+              l2CardsPerAnchor: 2,
+              l3CardsPerAnchor: 2,
           },
       },
 

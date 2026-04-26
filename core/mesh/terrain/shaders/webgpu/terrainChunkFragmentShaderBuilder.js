@@ -543,9 +543,42 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const variantRotationMaxLod = Number.isFinite(terrainShaderConfig.variantRotationMaxLod)
         ? Math.max(-1, Math.floor(terrainShaderConfig.variantRotationMaxLod))
         : nearMaxLod;
+    // Mild negative mip bias for the live near atlas path; aggressive values shimmer while moving.
+    const nearMipSharpenMaxLod = Number.isFinite(terrainShaderConfig.nearMipSharpenMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.nearMipSharpenMaxLod))
+        : 0;
+    const nearMipSharpenScale = Number.isFinite(terrainShaderConfig.nearMipSharpenScale)
+        ? Math.min(1.0, Math.max(0.35, terrainShaderConfig.nearMipSharpenScale))
+        : 0.75;
+    const nearMipSharpenFadeStartMeters = Number.isFinite(terrainShaderConfig.nearMipSharpenFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.nearMipSharpenFadeStartMeters)
+        : 60.0;
+    const nearMipSharpenFadeEndMeters = Number.isFinite(terrainShaderConfig.nearMipSharpenFadeEndMeters)
+        ? Math.max(nearMipSharpenFadeStartMeters + 1.0, terrainShaderConfig.nearMipSharpenFadeEndMeters)
+        : 120.0;
+    const nearDetailMaxLod = Number.isFinite(terrainShaderConfig.nearDetailMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.nearDetailMaxLod))
+        : 1;
+    const nearDetailStrength = Number.isFinite(terrainShaderConfig.nearDetailStrength)
+        ? Math.min(0.18, Math.max(0.0, terrainShaderConfig.nearDetailStrength))
+        : 0.055;
+    const nearDetailScaleMeters = Number.isFinite(terrainShaderConfig.nearDetailScaleMeters)
+        ? Math.min(2.0, Math.max(0.08, terrainShaderConfig.nearDetailScaleMeters))
+        : 0.32;
+    const nearDetailFadeStartMeters = Number.isFinite(terrainShaderConfig.nearDetailFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.nearDetailFadeStartMeters)
+        : 45.0;
+    const nearDetailFadeEndMeters = Number.isFinite(terrainShaderConfig.nearDetailFadeEndMeters)
+        ? Math.max(nearDetailFadeStartMeters + 1.0, terrainShaderConfig.nearDetailFadeEndMeters)
+        : 80.0;
+    const nearDetailEnabled = terrainShaderConfig.nearDetailEnabled !== false &&
+        nearDetailMaxLod >= 0 &&
+        lod <= nearDetailMaxLod &&
+        nearDetailStrength > 0.0001;
     const useSplatTop2FastPath = splatTop2MaxLod >= 0 && lod <= splatTop2MaxLod && splatTop2MinWeight < 0.9999;
 
     const useVariantRotation = variantRotationMaxLod >= 0 && lod <= variantRotationMaxLod;
+    const enableNearMipSharpen = nearMipSharpenMaxLod >= 0 && lod <= nearMipSharpenMaxLod && nearMipSharpenScale < 0.9999;
     const enableSplat = lod <= nearMaxLod;
     const splatBlendMaxLod = Number.isFinite(terrainShaderConfig.splatBlendMaxLod)
     ? Math.max(0, Math.floor(terrainShaderConfig.splatBlendMaxLod))
@@ -714,6 +747,15 @@ const USE_SPLAT_TOP2_FAST_PATH: bool = ${useSplatTop2FastPath ? 'true' : 'false'
 const SPLAT_TOP2_MIN_WEIGHT: f32 = ${splatTop2MinWeight.toFixed(4)};
 const SPLAT_DOMINANT_MIN_WEIGHT: f32 = ${splatDominantMinWeight.toFixed(4)};
 const USE_VARIANT_ROTATION: bool = ${useVariantRotation ? 'true' : 'false'};
+const ENABLE_NEAR_MIP_SHARPEN: bool = ${enableNearMipSharpen ? 'true' : 'false'};
+const NEAR_MIP_SHARPEN_SCALE: f32 = ${nearMipSharpenScale.toFixed(4)};
+const NEAR_MIP_SHARPEN_FADE_START: f32 = ${nearMipSharpenFadeStartMeters.toFixed(1)};
+const NEAR_MIP_SHARPEN_FADE_END: f32 = ${nearMipSharpenFadeEndMeters.toFixed(1)};
+const ENABLE_NEAR_DETAIL: bool = ${nearDetailEnabled ? 'true' : 'false'};
+const NEAR_DETAIL_STRENGTH: f32 = ${nearDetailStrength.toFixed(4)};
+const NEAR_DETAIL_SCALE_METERS: f32 = ${nearDetailScaleMeters.toFixed(4)};
+const NEAR_DETAIL_FADE_START: f32 = ${nearDetailFadeStartMeters.toFixed(1)};
+const NEAR_DETAIL_FADE_END: f32 = ${nearDetailFadeEndMeters.toFixed(1)};
 const USE_POINT_SAMPLING: bool = ${usePointSampling ? 'true' : 'false'};
 const USE_POINT_SPLAT: bool = ${enablePointSplat ? 'true' : 'false'};
 const AP_FADE_START: f32 = ${apFadeStartMeters.toFixed(1)};
@@ -1659,6 +1701,44 @@ fn getMicroPatternStyle(tileId: f32) -> i32 {
     // Default for all others
     return 0; // General micro
 }
+
+fn nearDetailPatternCoord(worldPos: vec2<f32>, patternStyle: i32) -> vec2<f32> {
+    let scale = max(NEAR_DETAIL_SCALE_METERS, 0.01);
+    var p = worldPos / scale;
+    // Pattern styles are intentionally cheap coordinate transforms. The hash
+    // core stays shared so biome-specific detail can expand without adding new
+    // texture reads or divergent atlas paths.
+    if (patternStyle == 1) {
+        p = vec2<f32>(worldPos.x * 0.72 + worldPos.y * 0.16, worldPos.y * 1.55) / scale;
+    } else if (patternStyle == 2) {
+        p = vec2<f32>(worldPos.x * 0.48, worldPos.x * 0.10 + worldPos.y * 2.10) / scale;
+    } else if (patternStyle == 3) {
+        p = vec2<f32>(worldPos.x * 1.80 + worldPos.y * 0.22, worldPos.y * 0.62) / scale;
+    }
+    return p;
+}
+
+fn nearDetailGrain(worldPos: vec2<f32>, patternStyle: i32) -> f32 {
+    let p = nearDetailPatternCoord(worldPos + vec2<f32>(113.7, 271.9), patternStyle);
+    let coarse = hash12(floor(p));
+    let fine = hash12(floor(p * 2.07 + vec2<f32>(19.0, 73.0)));
+    return (coarse * 0.65 + fine * 0.35) * 2.0 - 1.0;
+}
+
+fn applyNearProceduralDetail(
+    color: vec3<f32>,
+    worldPos: vec2<f32>,
+    distanceToCamera: f32,
+    patternStyle: i32
+) -> vec3<f32> {
+    let fade = 1.0 - smoothstep(NEAR_DETAIL_FADE_START, NEAR_DETAIL_FADE_END, distanceToCamera);
+    if (fade <= 0.001) {
+        return color;
+    }
+    let grain = nearDetailGrain(worldPos, patternStyle);
+    let detail = 1.0 + grain * NEAR_DETAIL_STRENGTH * fade;
+    return clamp(color * detail, vec3<f32>(0.0), vec3<f32>(1.0));
+}
 // ----------------------------------------------------------------------------
 // Atlas layer lookup and sampling
 // ----------------------------------------------------------------------------
@@ -2084,8 +2164,18 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let layerViewMode = fragUniforms.terrainLayerViewMode;
 
     let segDims = vec2<f32>(fragUniforms.chunkWidth, fragUniforms.chunkHeight);
-    let ddx_vUv = dpdx(input.vUv) * segDims;
-    let ddy_vUv = dpdy(input.vUv) * segDims;
+    var ddx_vUv = dpdx(input.vUv) * segDims;
+    var ddy_vUv = dpdy(input.vUv) * segDims;
+    if (ENABLE_NEAR_MIP_SHARPEN) {
+        let sharpenFade = 1.0 - smoothstep(
+            NEAR_MIP_SHARPEN_FADE_START,
+            NEAR_MIP_SHARPEN_FADE_END,
+            input.vDistanceToCamera
+        );
+        let sharpenScale = mix(1.0, NEAR_MIP_SHARPEN_SCALE, sharpenFade);
+        ddx_vUv = ddx_vUv * sharpenScale;
+        ddy_vUv = ddy_vUv * sharpenScale;
+    }
 
     if (debugMode == 1) {
         let tileId = sampleChunkTileId(input, layer);
@@ -2453,6 +2543,9 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
 
     if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
+    }
+    if (ENABLE_NEAR_DETAIL) {
+        baseColor = applyNearProceduralDetail(baseColor, input.vWorldPos, input.vDistanceToCamera, microPatternStyle);
     }
 
     var finalColor = baseColor;
