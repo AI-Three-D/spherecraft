@@ -684,7 +684,8 @@ export class WebGPUTerrainGenerator {
                 chunkSizeTex: innerSize,
                 chunkGridSize,
                 face,
-                season: splatPass.resolvedColorSeason ?? 0
+                season: splatPass.resolvedColorSeason ?? 0,
+                atlasSampleLod: splatPass.resolvedColorAtlasSampleLod ?? 1.0
             });
             const pass = enc.beginComputePass({ label: 'ComputeResolvedTerrainColor' });
             pass.setPipeline(this.resolvedColorPipeline);
@@ -957,6 +958,7 @@ export class WebGPUTerrainGenerator {
         chunkGridSize = 1,
         face = 0,
         season = 0,
+        atlasSampleLod = 1.0,
     } = {}) {
         const data = new ArrayBuffer(64);
         const view = new DataView(data);
@@ -969,6 +971,7 @@ export class WebGPUTerrainGenerator {
         view.setInt32(24, season | 0, true);
         view.setInt32(28, 0, true);
         view.setFloat32(32, Number.isFinite(this.worldScale) ? this.worldScale : 1.0, true);
+        view.setFloat32(36, Math.max(0.0, atlasSampleLod), true);
         this.device.queue.writeBuffer(this.resolvedColorUniformBuffer, 0, data);
     }
 

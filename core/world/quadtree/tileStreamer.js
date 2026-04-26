@@ -685,6 +685,8 @@ drainScatterCommitQueue() {
             requiredTypes:  this.streamedTypes,
             textureFormats: this.textureFormats,
             textureManager: this.textureManager,
+            quadtreeMaxDepth: this.quadtreeGPU?.maxDepth,
+            maxGeomLOD: this.quadtreeGPU?.maxGeomLOD,
             enableSplat:    this.enableSplat,
             logStats:       this._logStatsEnabled
         });

@@ -2400,9 +2400,9 @@ if (debugMode == 16) {
     splatResult.bilinearValid = true;
     var dominantTileId = fallbackTileId;
     if (ENABLE_RESOLVED_COLOR) {
-        // Far-LOD prebake path: one chunk-local resolved color sample replaces
-        // runtime splat decoding plus repeated atlas sampling. Near LODs keep
-        // the live path so later procedural detail work can improve close views.
+        // Resolved-color path: one chunk-local prebaked color sample replaces
+        // runtime splat decoding plus repeated atlas sampling. Procedural detail
+        // can be layered on top later without bringing back atlas fan-out.
         microSample = sampleResolvedTerrainColor(input, layer);
     } else if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
         splatResult = sampleSplatData(input, layer);

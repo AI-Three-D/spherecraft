@@ -111,6 +111,12 @@ this._maxGpuFencesObserved = 0;
             ...DEFAULT_TEXTURE_FORMATS,
             ...(options.textureFormats || {})
         };
+        this.quadtreeMaxDepth = Number.isFinite(options.quadtreeMaxDepth)
+            ? Math.max(0, Math.floor(options.quadtreeMaxDepth))
+            : null;
+        this.maxGeomLOD = Number.isFinite(options.maxGeomLOD)
+            ? Math.max(0, Math.floor(options.maxGeomLOD))
+            : null;
 
         // Track in-progress generations to avoid duplicate requests
         this._inProgress = new Map();  // tileAddr.toString() -> Promise
@@ -403,6 +409,10 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
             Math.floor(this.textureSize / chunksPerAtlas));
         const atlasTexture = this.textureManager?.getAtlasTexture?.('micro')?._gpuTexture?.texture ?? null;
         const tileTypeLookup = this.textureManager?.getLookupTables?.()?.tileTypeLookup?._gpuTexture?.texture ?? null;
+        const geomLOD = this.quadtreeMaxDepth !== null
+            ? Math.max(0, Math.min(this.maxGeomLOD ?? 99, this.quadtreeMaxDepth - tileAddr.depth))
+            : 2;
+        const resolvedColorAtlasSampleLod = geomLOD <= 1 ? 0.0 : 1.0;
 
         splatPass = {
             heightTex: gpuHeight,
@@ -422,7 +432,10 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
             // Terrain fragment uniforms currently default to season index 0.
             // Keep the prebake on the same canonical season until runtime
             // terrain season transitions are wired through the renderer.
-            resolvedColorSeason: 0
+            resolvedColorSeason: 0,
+            // Near geometry LODs need the canonical tile sharpness; farther
+            // resolved tiles keep a small preblur to avoid distance shimmer.
+            resolvedColorAtlasSampleLod
         };
     }
 }

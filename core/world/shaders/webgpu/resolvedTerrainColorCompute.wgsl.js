@@ -11,7 +11,7 @@ struct Uniforms {
     _pad0: i32,
 
     worldScale: f32,
-    _pad1: f32,
+    atlasSampleLod: f32,
     _pad2: f32,
     _pad3: f32,
 };
@@ -24,8 +24,6 @@ struct Uniforms {
 @group(0) @binding(5) var atlasTexture: texture_2d_array<f32>;
 @group(0) @binding(6) var tileTypeLookup: texture_2d<f32>;
 @group(0) @binding(7) var atlasSampler: sampler;
-
-const RESOLVED_ATLAS_SAMPLE_LOD: f32 = 1.0;
 
 fn hash12(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
@@ -76,7 +74,7 @@ fn sampleTileColor(tileId: f32, worldTileCoord: vec2<f32>, localUV: vec2<f32>, s
     let atlasLayer = lookupTileLayer(tileId, season);
     let r = calculateRotationQuarter(worldTileCoord, tileId, season, 9547.0);
     let rotatedLocal = rotateUVQuarter(localUV, r);
-    return textureSampleLevel(atlasTexture, atlasSampler, rotatedLocal, atlasLayer, RESOLVED_ATLAS_SAMPLE_LOD).rgb;
+    return textureSampleLevel(atlasTexture, atlasSampler, rotatedLocal, atlasLayer, uniforms.atlasSampleLod).rgb;
 }
 
 fn splatChannelUsable(tileId: f32, weight: f32) -> bool {

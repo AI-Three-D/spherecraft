@@ -152,7 +152,7 @@ export class TerrainMaterialBuilder {
                 cachedTextures.normal?._isFilterable === true;
             const resolvedColorStartLod = Number.isFinite(terrainShaderConfig?.resolvedColorStartLod)
                 ? Math.floor(terrainShaderConfig.resolvedColorStartLod)
-                : 2;
+                : 0;
             const enableResolvedColor =
                 !overlayPass &&
                 terrainShaderConfig?.resolvedColorEnabled !== false &&

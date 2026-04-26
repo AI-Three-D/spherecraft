@@ -820,7 +820,7 @@ export class QuadtreeTileManager {
         const terrainShaderConfig = this.engineConfig?.rendering?.terrainShader ?? {};
         const resolvedColorStartLod = Number.isFinite(terrainShaderConfig.resolvedColorStartLod)
             ? Math.floor(terrainShaderConfig.resolvedColorStartLod)
-            : 2;
+            : 0;
         const hasResolvedColorInputs =
             !!this.textureManager?.getAtlasTexture?.('micro')?._gpuTexture?.texture &&
             !!this.textureManager?.getLookupTables?.()?.tileTypeLookup?._gpuTexture?.texture;
