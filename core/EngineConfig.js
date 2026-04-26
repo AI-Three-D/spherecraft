@@ -366,6 +366,58 @@ export class EngineConfig {
       feedbackCapacity: requireInt(gpuQuadtree.feedbackCapacity ?? 4096, 'gpuQuadtree.feedbackCapacity', 1),
       lodErrorThreshold: requireNumber(gpuQuadtree.lodErrorThreshold ?? 512, 'gpuQuadtree.lodErrorThreshold'),
       workgroupSize: requireInt(gpuQuadtree.workgroupSize ?? 64, 'gpuQuadtree.workgroupSize', 1),
+      adaptiveLod: (() => {
+        const al = gpuQuadtree.adaptiveLod || {};
+        return {
+          enabled: requireBool(al.enabled ?? true, 'gpuQuadtree.adaptiveLod.enabled'),
+          speedFloorMps: requireNumber(al.speedFloorMps ?? 150, 'gpuQuadtree.adaptiveLod.speedFloorMps'),
+          speedRefMps: requireNumber(al.speedRefMps ?? 600, 'gpuQuadtree.adaptiveLod.speedRefMps'),
+          maxScale: requireNumber(al.maxScale ?? 3.0, 'gpuQuadtree.adaptiveLod.maxScale'),
+          // Speed adaptation can still drive streaming diagnostics/prefetch, but
+          // visible traversal defaults to a stable threshold to avoid LOD popping
+          // while the camera moves. Raise this only for deliberate moving-quality
+          // degradation.
+          visibleSelectionMaxScale: requireNumber(
+            al.visibleSelectionMaxScale ?? 1.0,
+            'gpuQuadtree.adaptiveLod.visibleSelectionMaxScale'
+          ),
+          smoothUp: requireNumber(al.smoothUp ?? 0.15, 'gpuQuadtree.adaptiveLod.smoothUp'),
+          smoothDown: requireNumber(al.smoothDown ?? 0.03, 'gpuQuadtree.adaptiveLod.smoothDown'),
+          holdWhenGpuBacklogged: requireBool(
+            al.holdWhenGpuBacklogged ?? true,
+            'gpuQuadtree.adaptiveLod.holdWhenGpuBacklogged'
+          )
+        };
+      })(),
+      predictiveStreaming: (() => {
+        const ps = gpuQuadtree.predictiveStreaming || {};
+        return {
+          enabled: requireBool(ps.enabled ?? false, 'gpuQuadtree.predictiveStreaming.enabled'),
+          speedThresholdMps: requireNumber(
+            ps.speedThresholdMps ?? 50,
+            'gpuQuadtree.predictiveStreaming.speedThresholdMps'
+          ),
+          lookAheadTimeMaxSec: requireNumber(
+            ps.lookAheadTimeMaxSec ?? 1.5,
+            'gpuQuadtree.predictiveStreaming.lookAheadTimeMaxSec'
+          ),
+          lookAheadSpeedScale: requireNumber(
+            ps.lookAheadSpeedScale ?? 0.0025,
+            'gpuQuadtree.predictiveStreaming.lookAheadSpeedScale'
+          ),
+          velocitySmoothAlpha: requireNumber(
+            ps.velocitySmoothAlpha ?? 0.15,
+            'gpuQuadtree.predictiveStreaming.velocitySmoothAlpha'
+          ),
+          neighborRadiusCoarse: requireInt(
+            ps.neighborRadiusCoarse ?? ps.neighborRadius ?? 4,
+            'gpuQuadtree.predictiveStreaming.neighborRadiusCoarse',
+            0
+          ),
+          depthMin: requireInt(ps.depthMin ?? 4, 'gpuQuadtree.predictiveStreaming.depthMin', 0),
+          depthMax: requireInt(ps.depthMax ?? 11, 'gpuQuadtree.predictiveStreaming.depthMax', 0)
+        };
+      })(),
       enableFrustumCulling: requireBool(gpuQuadtree.enableFrustumCulling ?? true, 'gpuQuadtree.enableFrustumCulling'),
       enableHorizonCulling: requireBool(gpuQuadtree.enableHorizonCulling ?? true, 'gpuQuadtree.enableHorizonCulling'),
       horizonCulling: (() => {
