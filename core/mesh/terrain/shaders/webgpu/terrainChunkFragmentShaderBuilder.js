@@ -483,6 +483,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
 
     const enableTerrainAO = options.enableTerrainAO !== false;
     const enableGroundField = options.enableGroundField === true;
+    const enableResolvedColor = options.enableResolvedColor === true;
     const maxLightIndices = options.maxLightIndices || 8192;
     const useArrayTextures = options.useArrayTextures === true;
     const aerialPerspectiveCode = getAerialPerspectiveWGSL();
@@ -559,7 +560,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const enableMacroOverlay = forceMacroOverlay || lod >= macroStartLod;
     const usePointSampling = false;//lod >= pointSampleLodStart;
     const enableClusteredLights = true;//lod <= clusteredMaxLod;
-    const enableAerialPerspective = lod <= aerialMaxLod;
+    const enableAerialPerspective = lod <= aerialMaxLod || enableResolvedColor;
     const enablePointSplat = false;
     
     const enableNormalMap = lod <= normalMapMaxLod;
@@ -617,6 +618,22 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const groundFieldBindingDecl = enableGroundField
         ? `@group(1) @binding(8) var groundFieldMask: ${chunkTextureType};`
         : '';
+    const resolvedColorBindingDecl = enableResolvedColor
+        ? `@group(1) @binding(9) var resolvedColorTexture: ${chunkTextureType};`
+        : '';
+    const resolvedColorCode = enableResolvedColor ? `
+fn sampleResolvedTerrainColor(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    return ${useArrayTextures
+        ? 'textureSample(resolvedColorTexture, chunkLinearSampler, uv, layer)'
+        : 'textureSample(resolvedColorTexture, chunkLinearSampler, uv)'
+    };
+}
+` : `
+fn sampleResolvedTerrainColor(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+`;
     const terrainAOCode = enableTerrainAO ? `
 fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
     let uv = applyChunkAtlasUV(
@@ -708,6 +725,7 @@ const ENABLE_NEAR_TO_MID_FADE: bool = ${enableNearToMidFade ? 'true' : 'false'};
 const NEAR_TO_MID_FADE_START_CHUNKS: f32 = ${nearToMidFadeStartChunks.toFixed(2)};
 const NEAR_TO_MID_FADE_END_CHUNKS: f32 = ${nearToMidFadeEndChunks.toFixed(2)};
 const ENABLE_MACRO_OVERLAY: bool = ${enableMacroOverlay ? 'true' : 'false'};
+const ENABLE_RESOLVED_COLOR: bool = ${enableResolvedColor ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
 const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
 const ENABLE_NORMAL_MAP: bool = ${enableNormalMap ? 'true' : 'false'};
@@ -800,6 +818,7 @@ struct FragmentUniforms {
 @group(1) @binding(6) var macroMaskTexture: ${chunkTextureType};
 ${terrainAOBindingDecl}
 ${groundFieldBindingDecl}
+${resolvedColorBindingDecl}
 
 @group(2) @binding(0) var atlasTexture: texture_2d_array<f32>;
 @group(2) @binding(1) var level2AtlasTexture: texture_2d_array<f32>;
@@ -835,6 +854,8 @@ struct FragmentInput {
     @location(14) vDebugSample: vec4<f32>,
     @location(15) vFaceInfo: vec4<f32>,
 };
+
+${resolvedColorCode}
 
 // ----------------------------------------------------------------------------
 // Chunk-texture helpers
@@ -2378,7 +2399,12 @@ if (debugMode == 16) {
     splatResult.hasBoundary = false;
     splatResult.bilinearValid = true;
     var dominantTileId = fallbackTileId;
-    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+    if (ENABLE_RESOLVED_COLOR) {
+        // Far-LOD prebake path: one chunk-local resolved color sample replaces
+        // runtime splat decoding plus repeated atlas sampling. Near LODs keep
+        // the live path so later procedural detail work can improve close views.
+        microSample = sampleResolvedTerrainColor(input, layer);
+    } else if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
         splatResult = sampleSplatData(input, layer);
         let detailedMicro = sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
@@ -2410,7 +2436,7 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
 
     let macroForcedVisible = layerViewMode == 2;
     let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
-    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
+    if (!ENABLE_RESOLVED_COLOR && ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
         var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
         if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
             let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);

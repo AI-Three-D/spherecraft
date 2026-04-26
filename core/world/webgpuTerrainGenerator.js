@@ -3,6 +3,7 @@
 import { createSplatComputeShader } from './shaders/webgpu/splatCompute.wgsl.js';
 import { createSplatPaletteComputeShader } from './shaders/webgpu/splatPaletteCompute.wgsl.js';
 import { createSplatValidityComputeShader } from './shaders/webgpu/splatValidityCompute.wgsl.js';
+import { createResolvedTerrainColorComputeShader } from './shaders/webgpu/resolvedTerrainColorCompute.wgsl.js';
 import { getPackedBiomeUniformByteSize, packBiomeUniformData } from './biomeRuntime.js';
 
 import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
@@ -671,6 +672,54 @@ export class WebGPUTerrainGenerator {
             pass.end();
         }
 
+        if (
+            splatPass.resolvedColorTex &&
+            splatPass.tileTex &&
+            splatPass.atlasTexture &&
+            splatPass.tileTypeLookup
+        ) {
+            this._writeResolvedColorUniformBuffer({
+                chunkCoordX,
+                chunkCoordY,
+                chunkSizeTex: innerSize,
+                chunkGridSize,
+                face,
+                season: splatPass.resolvedColorSeason ?? 0
+            });
+            const pass = enc.beginComputePass({ label: 'ComputeResolvedTerrainColor' });
+            pass.setPipeline(this.resolvedColorPipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.resolvedColorBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.resolvedColorUniformBuffer } },
+                    { binding: 1, resource: splatPass.resolvedColorTex.createView() },
+                    { binding: 2, resource: splatPass.splatTex.createView() },
+                    { binding: 3, resource: splatIndexTex.createView() },
+                    { binding: 4, resource: splatPass.tileTex.createView() },
+                    { binding: 5, resource: splatPass.atlasTexture.createView({ dimension: '2d-array' }) },
+                    { binding: 6, resource: splatPass.tileTypeLookup.createView() },
+                    { binding: 7, resource: this.resolvedColorAtlasSampler }
+                ]
+            }));
+            pass.dispatchWorkgroups(
+                Math.ceil(innerSize / 8),
+                Math.ceil(innerSize / 8)
+            );
+            pass.end();
+
+            if (splatPass.resolvedColorResolveToTexture && splatPass.resolvedColorResolveToFormat) {
+                this.resolveTexture2D(
+                    enc,
+                    splatPass.resolvedColorTex,
+                    'rgba8unorm',
+                    splatPass.resolvedColorResolveToTexture,
+                    splatPass.resolvedColorResolveToFormat,
+                    innerSize,
+                    innerSize
+                );
+            }
+        }
+
 
         if (debugProbeTextures) {
             {
@@ -901,6 +950,28 @@ export class WebGPUTerrainGenerator {
         this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
     }
 
+    _writeResolvedColorUniformBuffer({
+        chunkCoordX = 0,
+        chunkCoordY = 0,
+        chunkSizeTex = 1,
+        chunkGridSize = 1,
+        face = 0,
+        season = 0,
+    } = {}) {
+        const data = new ArrayBuffer(64);
+        const view = new DataView(data);
+        view.setInt32(0, chunkCoordX | 0, true);
+        view.setInt32(4, chunkCoordY | 0, true);
+        view.setInt32(8, Math.max(1, chunkSizeTex | 0), true);
+        view.setInt32(12, Math.max(1, chunkGridSize | 0), true);
+        view.setInt32(16, this.seed | 0, true);
+        view.setInt32(20, face | 0, true);
+        view.setInt32(24, season | 0, true);
+        view.setInt32(28, 0, true);
+        view.setFloat32(32, Number.isFinite(this.worldScale) ? this.worldScale : 1.0, true);
+        this.device.queue.writeBuffer(this.resolvedColorUniformBuffer, 0, data);
+    }
+
     setPlanetConfig(config) {
         const planetConfig = requireObject(config, 'planetConfig');
         this.planetConfig = planetConfig;
@@ -1017,6 +1088,11 @@ export class WebGPUTerrainGenerator {
             label: 'Splat Validity Compute',
             code: splatValidityShaderCode
         });
+        const resolvedColorShaderCode = createResolvedTerrainColorComputeShader();
+        this.resolvedColorShaderModule = this.device.createShaderModule({
+            label: 'Resolved Terrain Color Compute',
+            code: resolvedColorShaderCode
+        });
         if (typeof this.splatShaderModule.getCompilationInfo === 'function') {
             this.splatShaderModule.getCompilationInfo()
                 .then((info) => {
@@ -1046,6 +1122,16 @@ export class WebGPUTerrainGenerator {
         this.splatUniformBuffer = this.device.createBuffer({
             size: 80,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this.resolvedColorUniformBuffer = this.device.createBuffer({
+            size: 64,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this.resolvedColorAtlasSampler = this.device.createSampler({
+            addressModeU: 'repeat',
+            addressModeV: 'repeat',
+            magFilter: 'linear',
+            minFilter: 'linear'
         });
         this.biomeUniformBuffer = this.device.createBuffer({
             size: getPackedBiomeUniformByteSize(this.maxGpuBiomes),
@@ -1233,6 +1319,39 @@ export class WebGPUTerrainGenerator {
                 bindGroupLayouts: [this.splatValidityBindGroupLayout]
             }),
             compute: { module: this.splatValidityShaderModule, entryPoint: 'main' }
+        });
+        this.resolvedColorBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  storageTexture: { access: 'write-only',
+                                    format: 'rgba8unorm',
+                                    viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: gpuFormatSampleType('rgba8unorm'),
+                             viewDimension: '2d' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: gpuFormatSampleType('rgba8unorm'),
+                             viewDimension: '2d' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: gpuFormatSampleType('r8unorm'),
+                             viewDimension: '2d' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: 'float',
+                             viewDimension: '2d-array' } },
+                { binding: 6, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: 'unfilterable-float',
+                             viewDimension: '2d' } },
+                { binding: 7, visibility: GPUShaderStage.COMPUTE,
+                  sampler: { type: 'filtering' } },
+            ]
+        });
+        this.resolvedColorPipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.resolvedColorBindGroupLayout]
+            }),
+            compute: { module: this.resolvedColorShaderModule, entryPoint: 'main' }
         });
         this._splatPipelineCache = new Map();
         this._splatPipelineCache.set(
@@ -1913,7 +2032,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             encoder.copyTextureToTexture(
                 { texture: sourceTexture },
                 { texture: destTexture },
-                [width, height, 1]
+                { width, height, depthOrArrayLayers: 1 }
             );
             return;
         }
@@ -1953,7 +2072,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         encoder.copyBufferToTexture(
             { buffer: scratch.buffer, bytesPerRow: scratch.bytesPerRow },
             { texture: destTexture },
-            [width, height, 1]
+            { width, height, depthOrArrayLayers: 1 }
         );
     }
 
@@ -2256,7 +2375,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             encoder.copyTextureToTexture(
                 { texture: sourceTex._gpuTexture.texture },
                 { texture: pool.texture, origin: { x: 0, y: 0, z: layer } },
-                [textureSize, textureSize, 1]
+                { width: textureSize, height: textureSize, depthOrArrayLayers: 1 }
             );
             this.device.queue.submit([encoder.finish()]);
             if (!pool.wrapper) {
@@ -2316,7 +2435,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     { texture: srcTex },
                     { texture: dstTex,
                       origin: { x: 0, y: 0, z: layer } },
-                    [copySize, copySize, 1]
+                    { width: copySize, height: copySize, depthOrArrayLayers: 1 }
                 );
             };
             copyToPool('height',     textures.height);
@@ -3149,7 +3268,7 @@ this.device.queue.submit([enc.finish()]);
         encoder.copyTextureToBuffer(
             { texture: gpuTex },
             { buffer: readBuffer, bytesPerRow: alignedBytesPerRow },
-            [textureWidth, textureHeight]
+            { width: textureWidth, height: textureHeight, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
         
@@ -3185,7 +3304,7 @@ this.device.queue.submit([enc.finish()]);
         encoder.copyTextureToBuffer(
             { texture: gpuTex, origin: { x: offsetX, y: offsetY, z: 0 } },
             { buffer: readBuffer, bytesPerRow: rowStride, rowsPerImage: height },
-            [width, height, 1]
+            { width, height, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
 
@@ -3217,7 +3336,7 @@ this.device.queue.submit([enc.finish()]);
         encoder.copyTextureToBuffer(
             { texture: gpuTex, origin: { x: offsetX, y: offsetY, z: 0 } },
             { buffer: readBuffer, bytesPerRow: rowStride, rowsPerImage: height },
-            [width, height, 1]
+            { width, height, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
 
@@ -3299,7 +3418,7 @@ this.device.queue.submit([enc.finish()]);
         encoder.copyTextureToBuffer(
             { texture: gpuTex, origin: { x: offsetX, y: offsetY, z: 0 } },
             { buffer: readBuffer, bytesPerRow: rowStride, rowsPerImage: height },
-            [width, height, 1]
+            { width, height, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
 

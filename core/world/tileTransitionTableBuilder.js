@@ -107,7 +107,7 @@ export class TileTransitionTableBuilder {
             { texture: gpuTexture },
             data,
             { bytesPerRow: SIZE * 4 },
-            [SIZE, SIZE, 1]
+            { width: SIZE, height: SIZE, depthOrArrayLayers: 1 }
         );
         return this._wrap(gpuTexture, SIZE, SIZE, 'rgba8unorm', TextureFormat.RGBA8);
     }
@@ -132,7 +132,7 @@ export class TileTransitionTableBuilder {
             { texture: gpuTexture },
             data,
             { bytesPerRow: 256 },
-            [SIZE, 1, 1]
+            { width: SIZE, height: 1, depthOrArrayLayers: 1 }
         );
         return this._wrap(gpuTexture, SIZE, 1, 'r8unorm', TextureFormat.R8);
     }

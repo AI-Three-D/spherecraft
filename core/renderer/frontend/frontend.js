@@ -191,6 +191,7 @@ export class Frontend {
                 engineConfig: this.engineConfig,
                 planetConfig: this.planetConfig,
                 terrainGenerator: terrainGenerator,
+                textureManager: this.textureManager,
             });
             await this.quadtreeTileManager.initialize();
            

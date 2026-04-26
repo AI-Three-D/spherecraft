@@ -196,6 +196,7 @@ const DEFAULT_TEXTURE_FORMATS = {
     splatData: 'rgba8unorm',
     splatIndex: 'rgba8unorm',
     splatValid: 'rgba8unorm',
+    resolvedColor: 'rgba8unorm',
     scatter: 'r8unorm'
 };
 
@@ -332,7 +333,7 @@ class TileArrayPool {
                 encoder.copyTextureToTexture(
                     { texture: src },
                     { texture: dst, origin: { x: 0, y: 0, z: layer } },
-                    [this.tileSize, this.tileSize, 1]
+                    { width: this.tileSize, height: this.tileSize, depthOrArrayLayers: 1 }
                 );
             }
         }
@@ -385,7 +386,7 @@ class TileArrayPool {
             encoder.copyTextureToTexture(
                 { texture: src },
                 { texture: dst, origin: { x: 0, y: 0, z: layer } },
-                [this.tileSize, this.tileSize, 1]
+                { width: this.tileSize, height: this.tileSize, depthOrArrayLayers: 1 }
             );
         }
         this.device.queue.submit([encoder.finish()]);
@@ -499,6 +500,7 @@ export class TileStreamer {
         this._externalArrayTextures = null;
         this.terrainGenerator = terrainGenerator;
         this.quadtreeGPU = quadtreeGPU;
+        this.textureManager = options.textureManager ?? null;
         this._lastVisibleTilesList = null;  
         this.tileTextureSize = options.tileTextureSize ?? 1024;
         this.requiredTypes   = options.requiredTypes   ?? ['height', 'normal', 'tile'];
@@ -682,6 +684,7 @@ drainScatterCommitQueue() {
             textureSize:    this.tileTextureSize,
             requiredTypes:  this.streamedTypes,
             textureFormats: this.textureFormats,
+            textureManager: this.textureManager,
             enableSplat:    this.enableSplat,
             logStats:       this._logStatsEnabled
         });
@@ -2060,7 +2063,7 @@ markTilesVisible(tiles) {
         encoder.copyTextureToBuffer(
             { texture: texture, origin: { x: 0, y: 0, z: layer } },
             { buffer: staging, bytesPerRow: bytesPerRow },
-            [size, size, 1]
+            { width: size, height: size, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
         await this.device.queue.onSubmittedWorkDone();
@@ -2150,7 +2153,7 @@ markTilesVisible(tiles) {
             encoder.copyTextureToBuffer(
                 { texture, origin: { x, y, z: layer } },
                 { buffer: staging, bytesPerRow },
-                [1, 1, 1]
+                { width: 1, height: 1, depthOrArrayLayers: 1 }
             );
             this.device.queue.submit([encoder.finish()]);
             await this.device.queue.onSubmittedWorkDone();
@@ -2206,7 +2209,7 @@ markTilesVisible(tiles) {
             encoder.copyTextureToBuffer(
                 { texture, origin: { x, y, z: layer ?? 0 } },
                 { buffer: staging, bytesPerRow },
-                [1, 1, 1]
+                { width: 1, height: 1, depthOrArrayLayers: 1 }
             );
             this.device.queue.submit([encoder.finish()]);
             await this.device.queue.onSubmittedWorkDone();
@@ -2246,7 +2249,7 @@ markTilesVisible(tiles) {
         encoder.copyTextureToBuffer(
             { texture, origin: { x: 0, y: 0, z: layer ?? 0 } },
             { buffer: staging, bytesPerRow },
-            [copyWidth, copyHeight, 1]
+            { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
         await this.device.queue.onSubmittedWorkDone();

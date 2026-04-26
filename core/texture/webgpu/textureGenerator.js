@@ -702,7 +702,7 @@ setSize(width, height) {
         commandEncoder.copyTextureToBuffer(
             { texture: this.outputTexture },
             { buffer: readBuffer, bytesPerRow: bytesPerRow },
-            [this.width, this.height]
+            { width: this.width, height: this.height, depthOrArrayLayers: 1 }
         );
 
         this.device.queue.submit([commandEncoder.finish()]);

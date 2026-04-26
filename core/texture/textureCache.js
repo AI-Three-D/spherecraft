@@ -60,7 +60,7 @@ class TextureArrayPool {
         encoder.copyTextureToTexture(
             { texture: src },
             { texture: this.texture, origin: { x: 0, y: 0, z: layer } },
-            [this.textureSize, this.textureSize, 1]
+            { width: this.textureSize, height: this.textureSize, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
     }

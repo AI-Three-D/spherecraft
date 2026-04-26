@@ -678,14 +678,14 @@ export class OrbitalTextureRenderer {
                 enc.copyTextureToTexture(
                     { texture: colorGPU },
                     { texture: colorArray, origin: { x: 0, y: 0, z: face } },
-                    [size, size, 1]
+                    { width: size, height: size, depthOrArrayLayers: 1 }
                 );
             }
             if (normalGPU) {
                 enc.copyTextureToTexture(
                     { texture: normalGPU },
                     { texture: normalArray, origin: { x: 0, y: 0, z: face } },
-                    [size, size, 1]
+                    { width: size, height: size, depthOrArrayLayers: 1 }
                 );
             }
         }

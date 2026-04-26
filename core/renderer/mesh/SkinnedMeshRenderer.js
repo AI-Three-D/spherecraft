@@ -834,7 +834,7 @@ export class SkinnedMeshRenderer {
                 this.device.queue.copyExternalImageToTexture(
                     { source: bmp },
                     { texture: tex },
-                    [bmp.width, bmp.height]
+                    { width: bmp.width, height: bmp.height, depthOrArrayLayers: 1 }
                 );
                 bmp.close();
                 map.set(i, { texture: tex, view: tex.createView() });
@@ -1732,7 +1732,7 @@ fn fs() {}
             { texture: this._whiteTexture },
             new Uint8Array([255, 255, 255, 255]),
             { bytesPerRow: 4 },
-            [1, 1]
+            { width: 1, height: 1, depthOrArrayLayers: 1 }
         );
         this._whiteTextureView = this._whiteTexture.createView();
 

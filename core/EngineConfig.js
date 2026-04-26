@@ -72,6 +72,8 @@ export class EngineConfig {
         splatTop2MaxLod: requireInt(terrainShader.splatTop2MaxLod ?? 2, 'rendering.terrainShader.splatTop2MaxLod', -1),
         splatTop2MinWeight: requireNumber(terrainShader.splatTop2MinWeight ?? 0.75, 'rendering.terrainShader.splatTop2MinWeight'),
         splatDominantMinWeight: requireNumber(terrainShader.splatDominantMinWeight ?? 0.85, 'rendering.terrainShader.splatDominantMinWeight'),
+        resolvedColorEnabled: requireBool(terrainShader.resolvedColorEnabled ?? true, 'rendering.terrainShader.resolvedColorEnabled'),
+        resolvedColorStartLod: requireInt(terrainShader.resolvedColorStartLod ?? 2, 'rendering.terrainShader.resolvedColorStartLod', -1),
         variantRotationMaxLod: requireInt(terrainShader.variantRotationMaxLod ?? 2, 'rendering.terrainShader.variantRotationMaxLod', -1),
         clusteredMaxLod: requireInt(terrainShader.clusteredMaxLod ?? 1, 'rendering.terrainShader.clusteredMaxLod', 0),
         aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 2, 'rendering.terrainShader.aerialMaxLod', 0),
@@ -400,6 +402,7 @@ export class EngineConfig {
           normal: tf.normal || 'rgba8unorm',
           tile: tf.tile || 'r8unorm',
           splatData: tf.splatData || 'rgba32float',
+          resolvedColor: tf.resolvedColor || 'rgba8unorm',
           macro: tf.macro || 'rgba8unorm',
           scatter: tf.scatter || 'r8unorm'
         };

@@ -87,7 +87,8 @@ export class TerrainMaterialBuilder {
                 cachedTextures.splatData,
                 cachedTextures.splatIndex,
                 cachedTextures.splatValid,
-                cachedTextures.macro
+                cachedTextures.macro,
+                cachedTextures.resolvedColor
             ];
             const presentTextures = textureList.filter(Boolean);
             const useArrayTextures = presentTextures.length > 0 && presentTextures.every(t => t?._isArray === true);
@@ -133,6 +134,7 @@ export class TerrainMaterialBuilder {
                     ? readGpuFormat(cachedTextures.splatValid)
                     : 'rgba8unorm',
                 macro:      readGpuFormat(cachedTextures.macro),
+                resolvedColor: readGpuFormat(cachedTextures.resolvedColor),
             };
 
             if (enableTerrainAO) {
@@ -148,6 +150,15 @@ export class TerrainMaterialBuilder {
             // shader falls back to the textureLoad path.
             const normalTextureFilterable =
                 cachedTextures.normal?._isFilterable === true;
+            const resolvedColorStartLod = Number.isFinite(terrainShaderConfig?.resolvedColorStartLod)
+                ? Math.floor(terrainShaderConfig.resolvedColorStartLod)
+                : 2;
+            const enableResolvedColor =
+                !overlayPass &&
+                terrainShaderConfig?.resolvedColorEnabled !== false &&
+                resolvedColorStartLod >= 0 &&
+                lod >= resolvedColorStartLod &&
+                cachedTextures.resolvedColor?._isArray === true;
 
 
             const grassConfig = planetConfig?.grassConfig ?? null;
@@ -186,6 +197,7 @@ export class TerrainMaterialBuilder {
                 // where the mask is below representable frequency anyway.
                 enableTerrainAO,
                 normalTextureFilterable,
+                enableResolvedColor,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
             const vertexShader = builders.buildTerrainChunkVertexShader({
@@ -231,6 +243,9 @@ export class TerrainMaterialBuilder {
             }
             if (enableGroundField) {
                 defines.USE_GROUND_FIELD = true;
+            }
+            if (enableResolvedColor) {
+                defines.USE_RESOLVED_COLOR = true;
             }
 
         // =============================================
@@ -287,6 +302,7 @@ splatDataMap: { value: cachedTextures.splatData },
 splatIndexMap: { value: cachedTextures.splatIndex },
 splatValidMap: { value: cachedTextures.splatValid },
 macroMaskTexture: { value: cachedTextures.macro },
+resolvedColorTexture: { value: cachedTextures.resolvedColor },
             // === LOOKUP TABLES ===
             tileTypeLookup: { value: lookupTables.tileTypeLookup },
             macroTileTypeLookup: { value: lookupTables.macroTileTypeLookup },

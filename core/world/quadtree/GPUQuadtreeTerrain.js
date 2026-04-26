@@ -689,6 +689,7 @@ export class QuadtreeTileManager {
         this.engineConfig = options.engineConfig || null;
         this.planetConfig = options.planetConfig || null;
         this.terrainGenerator = options.terrainGenerator || null;
+        this.textureManager = options.textureManager || null;
         this._initialized = false;
         this._maxGeomLOD = 14;
 
@@ -810,7 +811,21 @@ export class QuadtreeTileManager {
 
         await this.quadtreeGPU.initialize();
 
+        const terrainShaderConfig = this.engineConfig?.rendering?.terrainShader ?? {};
+        const resolvedColorStartLod = Number.isFinite(terrainShaderConfig.resolvedColorStartLod)
+            ? Math.floor(terrainShaderConfig.resolvedColorStartLod)
+            : 2;
+        const hasResolvedColorInputs =
+            !!this.textureManager?.getAtlasTexture?.('micro')?._gpuTexture?.texture &&
+            !!this.textureManager?.getLookupTables?.()?.tileTypeLookup?._gpuTexture?.texture;
+        const enableResolvedColor =
+            terrainShaderConfig.resolvedColorEnabled !== false &&
+            resolvedColorStartLod >= 0 &&
+            hasResolvedColorInputs;
         const requiredTypes = ['height', 'normal', 'tile', 'splatData', 'scatter', 'climate'];
+        if (enableResolvedColor) {
+            requiredTypes.push('resolvedColor');
+        }
         const textureFormats = {
             height:    'r32float',
             normal:    'rgba8unorm',
@@ -818,6 +833,7 @@ export class QuadtreeTileManager {
             splatData: 'rgba8unorm',
             splatIndex: 'rgba8unorm',
             splatValid: 'rgba8unorm',
+            resolvedColor: 'rgba8unorm',
             scatter:   'r8unorm',
             climate:   'rgba8unorm',
             ...(qt.textureFormats || {})
@@ -835,6 +851,7 @@ export class QuadtreeTileManager {
               queueConfig: this.engineConfig.generationQueue,
               requiredTypes,
               textureFormats,
+              textureManager: this.textureManager,
               enableSplat: true,
               enableTileCacheBridge: false,
               feedbackReadbackInterval: qt.feedbackReadbackInterval,
