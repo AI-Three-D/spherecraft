@@ -565,6 +565,12 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const nearDetailScaleMeters = Number.isFinite(terrainShaderConfig.nearDetailScaleMeters)
         ? Math.min(2.0, Math.max(0.08, terrainShaderConfig.nearDetailScaleMeters))
         : 0.32;
+    const nearDetailCreviceWidth = Number.isFinite(terrainShaderConfig.nearDetailCreviceWidth)
+        ? Math.min(0.14, Math.max(0.01, terrainShaderConfig.nearDetailCreviceWidth))
+        : 0.045;
+    const nearDetailCreviceCoverage = Number.isFinite(terrainShaderConfig.nearDetailCreviceCoverage)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.nearDetailCreviceCoverage))
+        : 0.38;
     const nearDetailFadeStartMeters = Number.isFinite(terrainShaderConfig.nearDetailFadeStartMeters)
         ? Math.max(0.0, terrainShaderConfig.nearDetailFadeStartMeters)
         : 45.0;
@@ -754,6 +760,8 @@ const NEAR_MIP_SHARPEN_FADE_END: f32 = ${nearMipSharpenFadeEndMeters.toFixed(1)}
 const ENABLE_NEAR_DETAIL: bool = ${nearDetailEnabled ? 'true' : 'false'};
 const NEAR_DETAIL_STRENGTH: f32 = ${nearDetailStrength.toFixed(4)};
 const NEAR_DETAIL_SCALE_METERS: f32 = ${nearDetailScaleMeters.toFixed(4)};
+const NEAR_DETAIL_CREVICE_WIDTH: f32 = ${nearDetailCreviceWidth.toFixed(4)};
+const NEAR_DETAIL_CREVICE_COVERAGE: f32 = ${nearDetailCreviceCoverage.toFixed(4)};
 const NEAR_DETAIL_FADE_START: f32 = ${nearDetailFadeStartMeters.toFixed(1)};
 const NEAR_DETAIL_FADE_END: f32 = ${nearDetailFadeEndMeters.toFixed(1)};
 const USE_POINT_SAMPLING: bool = ${usePointSampling ? 'true' : 'false'};
@@ -1704,7 +1712,10 @@ fn getMicroPatternStyle(tileId: f32) -> i32 {
 
 fn nearDetailPatternCoord(worldPos: vec2<f32>, patternStyle: i32) -> vec2<f32> {
     let scale = max(NEAR_DETAIL_SCALE_METERS, 0.01);
-    var p = worldPos / scale;
+    var p = vec2<f32>(
+        worldPos.x * 0.86 + worldPos.y * 0.31,
+        -worldPos.x * 0.23 + worldPos.y * 0.93
+    ) / scale;
     // Pattern styles are intentionally cheap coordinate transforms. The hash
     // core stays shared so biome-specific detail can expand without adding new
     // texture reads or divergent atlas paths.
@@ -1718,11 +1729,37 @@ fn nearDetailPatternCoord(worldPos: vec2<f32>, patternStyle: i32) -> vec2<f32> {
     return p;
 }
 
-fn nearDetailGrain(worldPos: vec2<f32>, patternStyle: i32) -> f32 {
+fn nearDetailCrevice(worldPos: vec2<f32>, patternStyle: i32) -> f32 {
     let p = nearDetailPatternCoord(worldPos + vec2<f32>(113.7, 271.9), patternStyle);
-    let coarse = hash12(floor(p));
-    let fine = hash12(floor(p * 2.07 + vec2<f32>(19.0, 73.0)));
-    return (coarse * 0.65 + fine * 0.35) * 2.0 - 1.0;
+    let cell = floor(p);
+    let local = fract(p) - vec2<f32>(0.5);
+
+    let activeHash = hash12(cell + vec2<f32>(5.0, 17.0));
+    let creviceCellMask = smoothstep(1.0 - NEAR_DETAIL_CREVICE_COVERAGE, 1.0, activeHash);
+
+    let orientHash = hash12(cell + vec2<f32>(23.0, 41.0));
+    var dir = vec2<f32>(1.0, 0.0);
+    if (orientHash > 0.25 && orientHash <= 0.5) {
+        dir = vec2<f32>(0.7071, 0.7071);
+    } else if (orientHash > 0.5 && orientHash <= 0.75) {
+        dir = vec2<f32>(0.0, 1.0);
+    } else if (orientHash > 0.75) {
+        dir = vec2<f32>(-0.7071, 0.7071);
+    }
+    let side = vec2<f32>(-dir.y, dir.x);
+
+    let offset = vec2<f32>(
+        hash12(cell + vec2<f32>(71.0, 13.0)) - 0.5,
+        hash12(cell + vec2<f32>(29.0, 97.0)) - 0.5
+    ) * 0.32;
+    let q = local - offset;
+    let distToLine = abs(dot(q, side));
+    let alongLine = abs(dot(q, dir));
+    let width = NEAR_DETAIL_CREVICE_WIDTH;
+    let line = 1.0 - smoothstep(width, width + 0.018, distToLine);
+    let segment = 1.0 - smoothstep(0.28, 0.48, alongLine);
+    let strengthHash = hash12(cell + vec2<f32>(131.0, 193.0));
+    return creviceCellMask * line * segment * mix(0.55, 1.0, strengthHash);
 }
 
 fn applyNearProceduralDetail(
@@ -1732,11 +1769,8 @@ fn applyNearProceduralDetail(
     patternStyle: i32
 ) -> vec3<f32> {
     let fade = 1.0 - smoothstep(NEAR_DETAIL_FADE_START, NEAR_DETAIL_FADE_END, distanceToCamera);
-    if (fade <= 0.001) {
-        return color;
-    }
-    let grain = nearDetailGrain(worldPos, patternStyle);
-    let detail = 1.0 + grain * NEAR_DETAIL_STRENGTH * fade;
+    let crevice = nearDetailCrevice(worldPos, patternStyle);
+    let detail = 1.0 - crevice * NEAR_DETAIL_STRENGTH * fade;
     return clamp(color * detail, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 // ----------------------------------------------------------------------------
@@ -2544,9 +2578,13 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
     if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
     }
-    if (ENABLE_NEAR_DETAIL) {
-        baseColor = applyNearProceduralDetail(baseColor, input.vWorldPos, input.vDistanceToCamera, microPatternStyle);
-    }
+    // NEAR PROCEDURAL DETAIL DISABLED FOR FPS A/B:
+    // This crevice/detail layer looked better but caused a large FPS drop on
+    // near terrain. Re-enable this block to test it again after optimizing or
+    // prebaking the detail path.
+    // if (ENABLE_NEAR_DETAIL) {
+    //     baseColor = applyNearProceduralDetail(baseColor, input.vWorldPos, input.vDistanceToCamera, microPatternStyle);
+    // }
 
     var finalColor = baseColor;
     var NdotL: f32 = 1.0;

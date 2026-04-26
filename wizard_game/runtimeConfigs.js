@@ -241,7 +241,7 @@ export function createEngineConfig() {
     features: {
       shadows:           false,
       clusteredLighting: false,
-      treesNear:         true,   // individual trees with leaves/branches
+      treesNear:         false,   // individual trees with leaves/branches
       treesMid:          false,   // hull trees (140–700 m)
       treesFar:          false,   // coarse canopy hulls (500–4000 m)
       streamedAssets:    true,   // all streamed ground cover, props, etc.
@@ -449,42 +449,46 @@ export function createEngineConfig() {
       // null budgets are auto-derived from `density`.
       nearTier: {
           maxCloseTrees: null,
-          maxTotalLeaves: 180000,
+          maxTotalLeaves: 360000,
           maxTotalClusters: 10000000,
 
-          maxBranchDetailLevel: 1,
+          maxBranchDetailLevel: 0,
+          branchGeometryLOD: 1,
+          branchTrunkRadialSegments: 6,
+          branchBranchRadialSegments: 4,
           branchLODBands: [
-              { distance: 32, maxLevel: 4 },
-              { distance: 70, maxLevel: 2 },
+              { distance: 20, maxLevel: 2 },
+              { distance: 36, maxLevel: 1 },
           ],
           branchTerminalLevel: 1,
-          branchFadeMargin: null,
+          branchFadeMargin: 8,
 
           leafBands: [
-              { start:   0, end:  28 },
-              { start:  22, end:  72 },
-              { start:  58, end: 140 },
-              { start: 118 },
+              { start:   0, end:  36 },
+              { start:  28, end:  82 },
+              { start:  66, end: 150 },
+              { start: 128 },
           ],
           leafFadeStartRatio: 0.86,
+          leafBandBudgetFractions: [0.42, 0.30, 0.18, 0.10],
 
           leafCounts: {
-              generic: [2200, 900, 300, 80],
-              0:       [1400, 600, 180, 60],
-              1:       [1400, 600, 180, 60],
+              generic: [5000, 1800, 600, 160],
+              0:       [2400, 900, 300, 100],
+              1:       [2400, 900, 300, 100],
           },
           leafSizeScale: [1.0, 1.36, 2.0, 2.0],
 
           birch: {
-              nearDistance: 30.0,
-              closeSize: 0.36, settledSize: 0.55, aspect: 1.5,
-              closeLeaves: 2600,
+              nearDistance: 55.0,
+              closeSize: 0.24, settledSize: 0.40, aspect: 1.5,
+              closeLeaves: 9000,
               closeCardsPerAnchor: 4,
               settledCardsPerAnchor: 1,
-              l0SettledLeaves: 1000,
-              l1CardsPerAnchor: 4,
-              l2CardsPerAnchor: 2,
-              l3CardsPerAnchor: 2,
+              l0SettledLeaves: 4500,
+              l1CardsPerAnchor: 16,
+              l2CardsPerAnchor: 10,
+              l3CardsPerAnchor: 6,
           },
       },
 
