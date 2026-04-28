@@ -89,11 +89,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let coord = vec2<i32>(global_id.xy);
-    let texelUV = (vec2<f32>(global_id.xy) + vec2<f32>(0.5)) / vec2<f32>(dims);
-    let faceUV = (vec2<f32>(uniforms.chunkCoord) + texelUV) / max(f32(uniforms.chunkGridSize), 1.0);
+    // Match terrain height/tile generation and runtime chunk sampling: texel i
+    // represents local position i / (N - 1), so chunk edges land on the exact
+    // shared face-UV boundary instead of half a texel inward.
+    let localUV = vec2<f32>(coord) / max(vec2<f32>(dims) - vec2<f32>(1.0), vec2<f32>(1.0));
+    let faceUV = (vec2<f32>(uniforms.chunkCoord) + localUV) / max(f32(uniforms.chunkGridSize), 1.0);
     let worldPos = faceUV * max(uniforms.worldScale, 1.0) * 2.0;
     let worldTileCoord = floor(worldPos);
-    let localUV = fract(worldPos);
+    let tileLocalUV = fract(worldPos);
     let season = clamp(uniforms.season, 0, 3);
 
     let weights = clamp(textureLoad(splatDataMap, coord, 0), vec4<f32>(0.0), vec4<f32>(1.0));
@@ -108,25 +111,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var color = vec3<f32>(0.0);
     var sum = 0.0;
     if (splatChannelUsable(ids.x, weights.x)) {
-        color += sampleTileColor(ids.x, worldTileCoord, localUV, season) * weights.x;
+        color += sampleTileColor(ids.x, worldTileCoord, tileLocalUV, season) * weights.x;
         sum += weights.x;
     }
     if (splatChannelUsable(ids.y, weights.y)) {
-        color += sampleTileColor(ids.y, worldTileCoord, localUV, season) * weights.y;
+        color += sampleTileColor(ids.y, worldTileCoord, tileLocalUV, season) * weights.y;
         sum += weights.y;
     }
     if (splatChannelUsable(ids.z, weights.z)) {
-        color += sampleTileColor(ids.z, worldTileCoord, localUV, season) * weights.z;
+        color += sampleTileColor(ids.z, worldTileCoord, tileLocalUV, season) * weights.z;
         sum += weights.z;
     }
     if (splatChannelUsable(ids.w, weights.w)) {
-        color += sampleTileColor(ids.w, worldTileCoord, localUV, season) * weights.w;
+        color += sampleTileColor(ids.w, worldTileCoord, tileLocalUV, season) * weights.w;
         sum += weights.w;
     }
 
     if (sum <= 0.0001) {
         let fallbackId = loadTileMapId(coord);
-        color = sampleTileColor(fallbackId, worldTileCoord, localUV, season);
+        color = sampleTileColor(fallbackId, worldTileCoord, tileLocalUV, season);
     } else {
         color = color / sum;
     }

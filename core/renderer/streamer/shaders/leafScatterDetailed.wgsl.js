@@ -31,12 +31,28 @@ export function buildLeafScatterDetailedShader(config = {}) {
     const SPRUCE_L0  = config.spruceL0Leaves ?? 3000;
     const SPRUCE_L1  = config.spruceL1Leaves ?? 1500;
     const SPRUCE_L2  = config.spruceL2Leaves ?? 700;
+    const budgetFractions = Array.isArray(config.leafBandBudgetFractions)
+        ? config.leafBandBudgetFractions
+        : [0.42, 0.30, 0.18, 0.10];
+    const budgetSum = budgetFractions.reduce((sum, v) => {
+        const n = Number(v);
+        return sum + (Number.isFinite(n) && n > 0 ? n : 0);
+    }, 0) || 1;
+    const leafBandBudgets = [0, 1, 2, 3].map(i => {
+        const n = Number(budgetFractions[i]);
+        const frac = Number.isFinite(n) && n > 0 ? n / budgetSum : 0;
+        return Math.max(1, Math.floor(MAX_LEAVES * frac));
+    });
 
     const B_NEAR_DISTANCE = config.birchNearDistance ?? 20.0;
     const B_FADE_DISTANCE = config.birchFadeDistance ?? 80.0;
     const B_CLOSE_LEAVES  = config.birchCloseLeaves  ?? config.birchNearLeaves ?? 4000;
     const B_CLOSE_CARDS   = config.birchCloseCards   ?? 10;
     const B_SETTLED_CARDS = config.birchSettledCards ?? config.birchL0Cards ?? 1;
+    const B_L0_SETTLED_LEAVES = config.birchL0SettledLeaves ?? 1200;
+    const B_L1_CARDS = config.birchL1Cards ?? 4;
+    const B_L2_CARDS = config.birchL2Cards ?? 2;
+    const B_L3_CARDS = config.birchL3Cards ?? 2;
     const B_CLOSE_W       = config.birchCloseW       ?? config.birchNearW ?? 0.36;
     const B_CLOSE_H       = config.birchCloseH       ?? config.birchNearH ?? 0.54;
     const B_SETTLED_W     = config.birchSettledW     ?? config.birchMidW ?? 0.55;
@@ -54,12 +70,19 @@ const L2_LEAVES: u32 = ${L2_LEAVES}u;
 const SPRUCE_L0: u32 = ${SPRUCE_L0}u;
 const SPRUCE_L1: u32 = ${SPRUCE_L1}u;
 const SPRUCE_L2: u32 = ${SPRUCE_L2}u;
+const LEAF_BAND_BUDGETS: array<u32, 4> = array<u32, 4>(
+    ${leafBandBudgets[0]}u, ${leafBandBudgets[1]}u, ${leafBandBudgets[2]}u, ${leafBandBudgets[3]}u
+);
 
 const BIRCH_NEAR_DISTANCE: f32 = ${fmtF(B_NEAR_DISTANCE, 20.0)};
 const BIRCH_FADE_DISTANCE: f32 = ${fmtF(B_FADE_DISTANCE, 80.0)};
 const BIRCH_CLOSE_LEAVES:  f32 = ${fmtF(B_CLOSE_LEAVES, 4000.0)};
 const BIRCH_CLOSE_CARDS:   f32 = ${fmtF(B_CLOSE_CARDS, 10.0)};
 const BIRCH_SETTLED_CARDS: u32 = ${B_SETTLED_CARDS}u;
+const BIRCH_L0_SETTLED_LEAVES: u32 = ${B_L0_SETTLED_LEAVES}u;
+const BIRCH_L1_CARDS: u32 = ${B_L1_CARDS}u;
+const BIRCH_L2_CARDS: u32 = ${B_L2_CARDS}u;
+const BIRCH_L3_CARDS: u32 = ${B_L3_CARDS}u;
 const BIRCH_CLOSE_W:       f32 = ${fmtF(B_CLOSE_W, 0.36)};
 const BIRCH_CLOSE_H:       f32 = ${fmtF(B_CLOSE_H, 0.54)};
 const BIRCH_SETTLED_W:     f32 = ${fmtF(B_SETTLED_W, 0.55)};
@@ -244,6 +267,51 @@ fn getLeafSize(speciesIndex: u32, variation: f32, detailLevel: u32) -> vec2<f32>
     return baseSize * (0.75 + variation * 0.5) * cs;
 }
 
+fn birchCountForBand(info: TemplateInfo, band: u32) -> u32 {
+    let fine = select(info.anchorCount, info.fineCount, info.fineCount > 0u);
+    let medium = select(fine, info.mediumCount, info.mediumCount > 0u);
+    let coarse = select(medium, info.coarseCount, info.coarseCount > 0u);
+    if (band == 0u) { return fine; }
+    if (band <= 2u) { return medium; }
+    return coarse;
+}
+
+fn birchStartForBand(info: TemplateInfo, band: u32) -> u32 {
+    if (band == 0u && info.fineCount > 0u) {
+        return info.anchorStart + info.fineStart;
+    }
+    if (band <= 2u && info.mediumCount > 0u) {
+        return info.anchorStart + info.mediumStart;
+    }
+    if (info.coarseCount > 0u) {
+        return info.anchorStart + info.coarseStart;
+    }
+    if (info.mediumCount > 0u) {
+        return info.anchorStart + info.mediumStart;
+    }
+    if (info.fineCount > 0u) {
+        return info.anchorStart + info.fineStart;
+    }
+    return info.anchorStart;
+}
+
+fn birchCardsForBand(band: u32) -> u32 {
+    if (band == 0u) { return 1u; }
+    if (band == 1u) { return max(1u, BIRCH_L1_CARDS); }
+    if (band == 2u) { return max(1u, BIRCH_L2_CARDS); }
+    return max(1u, BIRCH_L3_CARDS);
+}
+
+fn birchTargetForBand(info: TemplateInfo, band: u32, dist: f32) -> u32 {
+    let anchorCount = max(1u, birchCountForBand(info, band));
+    if (band == 0u) {
+        let settled = min(anchorCount, max(1u, BIRCH_L0_SETTLED_LEAVES));
+        let nearT = smoothstep(0.0, BIRCH_NEAR_DISTANCE, dist);
+        return max(1u, u32(round(mix(BIRCH_CLOSE_LEAVES, f32(settled), nearT))));
+    }
+    return max(1u, anchorCount * birchCardsForBand(band));
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -271,6 +339,11 @@ fn main(
     var birchCardsNext: u32 = 1u;
     var birchCrossTier = false;
     var birchAnchorBase: u32 = 0u;
+    var birchTemplateInfo = TemplateInfo(
+        0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u
+    );
 
     var spruceCardsPerAnchor: u32 = 1u;
     var spruceTemplateIndex: u32 = 0xFFFFFFFFu;
@@ -281,39 +354,23 @@ fn main(
 
         let variantLocal = pcg(tree.variantSeed) % params.birchTemplateCount;
         let info = templateInfos[params.birchTemplateStart + variantLocal];
+        birchTemplateInfo = info;
         birchAnchorBase = info.anchorStart;
 
         if (info.anchorCount > 0u) {
             birchLadder = true;
 
-            // Keep birch on the fine anchor tier across the full close range.
-            // Band-driven fine/medium switches were the main visual pop source.
-            if (info.fineCount > 0u) {
-                birchTierStart = info.anchorStart + info.fineStart;
-                birchTierCount = info.fineCount;
-            } else if (info.mediumCount > 0u) {
-                birchTierStart = info.anchorStart + info.mediumStart;
-                birchTierCount = info.mediumCount;
-            } else {
-                birchTierStart = info.anchorStart;
-                birchTierCount = info.anchorCount;
-            }
-
-            // Continuous per-anchor card density: denser near camera, then
-            // smoothly settles to the baseline by nearDistance.
-            let nearT = smoothstep(0.0, BIRCH_NEAR_DISTANCE, tree.distanceToCamera);
-            let cardsF = mix(BIRCH_CLOSE_CARDS, f32(BIRCH_SETTLED_CARDS), nearT);
-            birchCardsThis = max(1u, u32(round(cardsF)));
-            birchCardsNext = birchCardsThis;
-
+            let band = min(B, 3u);
+            let nextBand = min(band + 1u, 3u);
+            birchTierStart = birchStartForBand(info, band);
+            birchTierCount = birchCountForBand(info, band);
+            birchCardsThis = birchCardsForBand(band);
+            birchCardsNext = birchCardsForBand(nextBand);
             birchCrossTier = false;
-            let baseLeaves = max(1u, birchTierCount * birchCardsThis);
-            let dist = tree.distanceToCamera;
-            let settleDistance = max(BIRCH_NEAR_DISTANCE + 0.001, BIRCH_FADE_DISTANCE);
-            // Birch should settle from dense close-up leaves to the baseline
-            // anchor canopy, not fade out to zero before the near tier ends.
-            let settleT = smoothstep(0.0, settleDistance, dist);
-            let desired = mix(BIRCH_CLOSE_LEAVES, f32(baseLeaves), settleT) * tree.health;
+
+            let currentTarget = birchTargetForBand(info, band, tree.distanceToCamera);
+            let nextTarget = birchTargetForBand(info, nextBand, tree.distanceToCamera);
+            let desired = mix(f32(currentTarget), f32(nextTarget), F) * tree.health;
             targetLeaves = u32(clamp(round(desired), 0.0, f32(MAX_LEAVES)));
         }
 
@@ -342,8 +399,9 @@ fn main(
         targetLeaves = u32(f32(targetLeaves) * tree.health);
     }
 
-    let requestedTotal = max(1u, leafRequestSummary[0]);
-    let leafBudgetScale = min(1.0, f32(MAX_LEAVES) / f32(requestedTotal));
+    let budgetBand = min(B, 3u);
+    let requestedTotal = max(1u, leafRequestSummary[4u + budgetBand]);
+    let leafBudgetScale = min(1.0, f32(LEAF_BAND_BUDGETS[budgetBand]) / f32(requestedTotal));
     if (targetLeaves > 0u && leafBudgetScale < 0.9999) {
         let scaled = u32(floor(f32(targetLeaves) * leafBudgetScale));
         if (spruceHierarchical) {
@@ -395,18 +453,27 @@ fn main(
             if (birchLadder) {
                 useAnchors = true;
 
-                let cardsPerFamily = max(1u, birchCardsThis);
+                var selectedBand = min(B, 3u);
+                if (F > 0.0 && selectedBand < 3u) {
+                    let transitionSeed = pcg3(tree.variantSeed, i, 0x5AE75700u);
+                    if (pcgF(transitionSeed) < F) {
+                        selectedBand = selectedBand + 1u;
+                    }
+                }
+
+                let cardsPerFamily = max(1u, birchCardsForBand(selectedBand));
                 let familyBase = i / cardsPerFamily;
                 // Deterministic permutation over tier anchors to avoid visible
                 // "first-N" clumps when targetLeaves is below full coverage.
-                let tierN = max(1u, birchTierCount);
+                let tierStart = birchStartForBand(birchTemplateInfo, selectedBand);
+                let tierN = max(1u, birchCountForBand(birchTemplateInfo, selectedBand));
                 let familyId = (familyBase * 2654435761u + (tree.variantSeed ^ 0x9E3779B9u)) % tierN;
                 let familyCycle = familyBase / tierN;
                 cardIdx = i % cardsPerFamily;
                 clusterSeed = pcg3(tree.variantSeed, familyId ^ (familyCycle * 0x9E3779B9u), 0xB1A50000u);
 
 
-                let anchorIdx = birchTierStart + familyId;
+                let anchorIdx = tierStart + familyId;
                 let anchor = anchors[anchorIdx];
 
                 var emitPos = vec3<f32>(anchor.posX, anchor.posY, anchor.posZ);
@@ -436,14 +503,9 @@ fn main(
                             }
                         }
                     }
-                } else if (F > 0.0) {
-                    let useNext = pcgF(pcg2(tree.variantSeed ^ 0x5AE75700u, familyId)) < F;
-                    if (useNext) {
-                        emitBand = B + 1u;
-                        if (cardIdx >= birchCardsNext) { shouldSkip = true; }
-                    }
                 }
                 if (shouldSkip) { continue; }
+                emitBand = selectedBand;
 
 
                 localOffset = vec3<f32>(
@@ -524,19 +586,34 @@ fn main(
                 let sizeH = mix(BIRCH_CLOSE_H, BIRCH_SETTLED_H, nearSizeT);
                 let sizeSeed = pcg3(clusterSeed, cardIdx, 0xD1F75000u);
                 let sizeVar = 0.85 + pcgF(sizeSeed) * 0.30;
-                cardW = sizeW * sizeVar;
-                cardH = sizeH * sizeVar;
+                if (selectedBand == 0u) {
+                    cardW = sizeW * sizeVar;
+                    cardH = sizeH * sizeVar;
+                } else {
+                    let spreadX = emitSpread * max(tree.scaleX, tree.scaleZ);
+                    let spreadY = emitSpread * tree.scaleY;
+                    if (selectedBand == 1u) {
+                        cardW = clamp(spreadX * 1.35, 0.30, 1.05) * sizeVar;
+                        cardH = clamp(spreadY * 1.05, 0.45, 1.45) * sizeVar;
+                    } else if (selectedBand == 2u) {
+                        cardW = clamp(spreadX * 1.65, 0.45, 1.75) * sizeVar;
+                        cardH = clamp(spreadY * 1.25, 0.70, 2.35) * sizeVar;
+                    } else {
+                        cardW = clamp(spreadX * 2.00, 0.70, 2.80) * sizeVar;
+                        cardH = clamp(spreadY * 1.45, 0.95, 3.60) * sizeVar;
+                    }
+                }
 
                 // Tip clamp: only meaningful for fine-tier bands (L0/L1)
                 // where emitTipDist is the drooper arc-length to tip.
                 // At L2/L3 the fixed card size is already small enough
                 // that overshooting is not an issue.
-                if (emitBand <= 1u) {
+                if (selectedBand == 0u) {
                     let tipWorld = emitTipDist * tree.scaleY;
                     cardH = min(cardH, max(0.025, tipWorld * 1.3));
                 }
 
-                let activeCards = select(birchCardsThis, birchCardsNext, emitBand != B);
+                let activeCards = cardsPerFamily;
                 let cardPhase = f32(cardIdx) / max(f32(activeCards), 1.0);
                 let orientNear = 1.0 - smoothstep(0.0, 8.0, tree.distanceToCamera);
                 let azimuthSpan = mix(3.14159265, 6.2831853, orientNear);

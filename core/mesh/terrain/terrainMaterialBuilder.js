@@ -159,6 +159,17 @@ export class TerrainMaterialBuilder {
                 resolvedColorStartLod >= 0 &&
                 lod >= resolvedColorStartLod &&
                 cachedTextures.resolvedColor?._isArray === true;
+            const enableLod0ResolvedColor =
+                !overlayPass &&
+                terrainShaderConfig?.resolvedColorEnabled !== false &&
+                terrainShaderConfig?.lod0ResolvedColorEnabled === true &&
+                resolvedColorStartLod > 0 &&
+                lod === resolvedColorStartLod - 1 &&
+                cachedTextures.resolvedColor?._isArray === true;
+            const enableLodEdgeResolvedColor =
+                !overlayPass &&
+                terrainShaderConfig?.lodEdgeResolvedColorEnabled === true &&
+                cachedTextures.resolvedColor?._isArray === true;
 
 
             const grassConfig = planetConfig?.grassConfig ?? null;
@@ -198,6 +209,8 @@ export class TerrainMaterialBuilder {
                 enableTerrainAO,
                 normalTextureFilterable,
                 enableResolvedColor,
+                enableLod0ResolvedColor,
+                enableLodEdgeResolvedColor,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
             const vertexShader = builders.buildTerrainChunkVertexShader({
@@ -206,6 +219,8 @@ export class TerrainMaterialBuilder {
                 lodSegments,
                 useTransitionTopology,
                 useStorageBuffer,
+                lod,
+                terrainShaderConfig,
                 debugMode: debugVertexMode
             });
             const fragmentShader = overlayPass
@@ -244,7 +259,7 @@ export class TerrainMaterialBuilder {
             if (enableGroundField) {
                 defines.USE_GROUND_FIELD = true;
             }
-            if (enableResolvedColor) {
+            if (enableResolvedColor || enableLod0ResolvedColor || enableLodEdgeResolvedColor) {
                 defines.USE_RESOLVED_COLOR = true;
             }
 

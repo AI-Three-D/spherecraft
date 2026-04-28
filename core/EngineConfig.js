@@ -67,6 +67,39 @@ export class EngineConfig {
           terrainShader.nearToMidFadeEndChunks ?? 4.0,
           'rendering.terrainShader.nearToMidFadeEndChunks'
         ),
+        lodEdgeFadeEnabled: requireBool(
+          terrainShader.lodEdgeFadeEnabled ?? false,
+          'rendering.terrainShader.lodEdgeFadeEnabled'
+        ),
+        lodEdgeFadeMaxLod: requireInt(
+          terrainShader.lodEdgeFadeMaxLod ?? 4,
+          'rendering.terrainShader.lodEdgeFadeMaxLod',
+          -1
+        ),
+        lodEdgeFadeWidth: requireNumber(
+          terrainShader.lodEdgeFadeWidth ?? 0.04,
+          'rendering.terrainShader.lodEdgeFadeWidth'
+        ),
+        lodEdgeColorStrength: requireNumber(
+          terrainShader.lodEdgeColorStrength ?? 0.0,
+          'rendering.terrainShader.lodEdgeColorStrength'
+        ),
+        lodEdgeResolvedColorEnabled: requireBool(
+          terrainShader.lodEdgeResolvedColorEnabled ?? false,
+          'rendering.terrainShader.lodEdgeResolvedColorEnabled'
+        ),
+        lodEdgeAOStrength: requireNumber(
+          terrainShader.lodEdgeAOStrength ?? 1.0,
+          'rendering.terrainShader.lodEdgeAOStrength'
+        ),
+        lodEdgeNormalStrength: requireNumber(
+          terrainShader.lodEdgeNormalStrength ?? 1.0,
+          'rendering.terrainShader.lodEdgeNormalStrength'
+        ),
+        lodEdgeShadowStrength: requireNumber(
+          terrainShader.lodEdgeShadowStrength ?? 1.0,
+          'rendering.terrainShader.lodEdgeShadowStrength'
+        ),
         pointSampleLodStart: requireInt(terrainShader.pointSampleLodStart ?? 2, 'rendering.terrainShader.pointSampleLodStart', 0),
         macroStartLod: requireInt(terrainShader.macroStartLod ?? 2, 'rendering.terrainShader.macroStartLod', 0),
         splatTop2MaxLod: requireInt(terrainShader.splatTop2MaxLod ?? 2, 'rendering.terrainShader.splatTop2MaxLod', -1),
@@ -74,6 +107,18 @@ export class EngineConfig {
         splatDominantMinWeight: requireNumber(terrainShader.splatDominantMinWeight ?? 0.85, 'rendering.terrainShader.splatDominantMinWeight'),
         resolvedColorEnabled: requireBool(terrainShader.resolvedColorEnabled ?? true, 'rendering.terrainShader.resolvedColorEnabled'),
         resolvedColorStartLod: requireInt(terrainShader.resolvedColorStartLod ?? 0, 'rendering.terrainShader.resolvedColorStartLod', -1),
+        lod0ResolvedColorEnabled: requireBool(
+          terrainShader.lod0ResolvedColorEnabled ?? false,
+          'rendering.terrainShader.lod0ResolvedColorEnabled'
+        ),
+        lod0ResolvedColorFadeStartMeters: requireNumber(
+          terrainShader.lod0ResolvedColorFadeStartMeters ?? 8,
+          'rendering.terrainShader.lod0ResolvedColorFadeStartMeters'
+        ),
+        lod0ResolvedColorFadeEndMeters: requireNumber(
+          terrainShader.lod0ResolvedColorFadeEndMeters ?? 40,
+          'rendering.terrainShader.lod0ResolvedColorFadeEndMeters'
+        ),
         variantRotationMaxLod: requireInt(terrainShader.variantRotationMaxLod ?? 2, 'rendering.terrainShader.variantRotationMaxLod', -1),
         nearMipSharpenMaxLod: requireInt(terrainShader.nearMipSharpenMaxLod ?? 0, 'rendering.terrainShader.nearMipSharpenMaxLod', -1),
         nearMipSharpenScale: requireNumber(terrainShader.nearMipSharpenScale ?? 0.6, 'rendering.terrainShader.nearMipSharpenScale'),
@@ -88,7 +133,7 @@ export class EngineConfig {
         nearDetailFadeStartMeters: requireNumber(terrainShader.nearDetailFadeStartMeters ?? 45, 'rendering.terrainShader.nearDetailFadeStartMeters'),
         nearDetailFadeEndMeters: requireNumber(terrainShader.nearDetailFadeEndMeters ?? 80, 'rendering.terrainShader.nearDetailFadeEndMeters'),
         clusteredMaxLod: requireInt(terrainShader.clusteredMaxLod ?? 1, 'rendering.terrainShader.clusteredMaxLod', 0),
-        aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 2, 'rendering.terrainShader.aerialMaxLod', 0),
+        aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 6, 'rendering.terrainShader.aerialMaxLod', 0),
         normalMapMaxLod: requireInt(terrainShader.normalMapMaxLod ?? 2, 'rendering.terrainShader.normalMapMaxLod', -1),
         altitudeNormalMinMeters: requireNumber(terrainShader.altitudeNormalMinMeters ?? 8000, 'rendering.terrainShader.altitudeNormalMinMeters'),
         altitudeShadowMinMeters: requireNumber(terrainShader.altitudeShadowMinMeters ?? 12000, 'rendering.terrainShader.altitudeShadowMinMeters'),

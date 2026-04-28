@@ -5,6 +5,18 @@ export function buildTerrainChunkVertexShader(options = {}) {
     const useStorageBuffer = options.useStorageBuffer === true;
     const useTransitionTopology = options.useTransitionTopology === true;
     const debugMode = Number.isFinite(options.debugMode) ? Math.floor(options.debugMode) : 0;
+    const terrainShaderConfig = options.terrainShaderConfig || {};
+    const lod = Number.isFinite(options.lod) ? Math.max(0, Math.floor(options.lod)) : 0;
+    const lodEdgeFadeMaxLod = Number.isFinite(terrainShaderConfig.lodEdgeFadeMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.lodEdgeFadeMaxLod))
+        : 4;
+    const lodEdgeFadeWidth = Number.isFinite(terrainShaderConfig.lodEdgeFadeWidth)
+        ? Math.min(0.30, Math.max(0.001, terrainShaderConfig.lodEdgeFadeWidth))
+        : 0.04;
+    const enableLodEdgeFade =
+        terrainShaderConfig.lodEdgeFadeEnabled === true &&
+        lodEdgeFadeMaxLod >= 0 &&
+        lod <= lodEdgeFadeMaxLod;
     const defaultSegments = [128, 64, 32, 16, 8, 4, 2];
     const lodSegments = Array.isArray(options.lodSegments) ? options.lodSegments : defaultSegments;
     const segments = defaultSegments.map((value, index) => {
@@ -92,6 +104,8 @@ const DEBUG_SAMPLE_SCALE : f32 = 20.0;
 const DEBUG_SAMPLE_FIX : bool = true;
 const DEBUG_STITCH_STEP_FIX : bool = true;
 const USE_TRANSITION_TOPOLOGY : bool = ${useTransitionTopology ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_FADE : bool = ${enableLodEdgeFade ? 'true' : 'false'};
+const LOD_EDGE_FADE_WIDTH : f32 = ${lodEdgeFadeWidth.toFixed(4)};
 const MAX_MORPH_DISTANCE : f32 = 1e9;
 const SEGMENTS_PER_LOD : array<f32, 7> = array<f32, 7>(${segmentLiteral});
 const MAX_LOD : f32 = 6.0;
@@ -246,6 +260,47 @@ fn sanitizeNeighborLODs(raw: vec4<f32>, selfLOD: i32) -> vec4<f32> {
     let bottom = select(selfVal, raw.z, raw.z < 15.0);
     let top = select(selfVal, raw.w, raw.w < 15.0);
     return vec4<f32>(left, right, bottom, top);
+}
+
+fn computeLodEdgeFade(localUV: vec2<f32>, edgeMaskValue: f32) -> f32 {
+    if (!ENABLE_LOD_EDGE_FADE) {
+        return 1.0;
+    }
+
+    let mask = u32(clamp(edgeMaskValue, 0.0, 4095.0) + 0.5);
+    if (mask == 0u) {
+        return 1.0;
+    }
+
+    let width = max(LOD_EDGE_FADE_WIDTH, 0.0001);
+    var fade = 1.0;
+    // Coarser neighbor (fine chunk side): bits 1,2,4,8
+    if ((mask & 8u) != 0u) {
+        fade = min(fade, smoothstep(0.0, width, localUV.x));
+    }
+    if ((mask & 2u) != 0u) {
+        fade = min(fade, smoothstep(0.0, width, 1.0 - localUV.x));
+    }
+    if ((mask & 4u) != 0u) {
+        fade = min(fade, smoothstep(0.0, width, localUV.y));
+    }
+    if ((mask & 1u) != 0u) {
+        fade = min(fade, smoothstep(0.0, width, 1.0 - localUV.y));
+    }
+    // Finer neighbor (coarse chunk side): bits 16,32,64,128 — bilateral seam fix
+    if ((mask & 128u) != 0u) {
+        fade = min(fade, smoothstep(0.0, width, localUV.x));
+    }
+    if ((mask & 32u) != 0u) {
+        fade = min(fade, smoothstep(0.0, width, 1.0 - localUV.x));
+    }
+    if ((mask & 64u) != 0u) {
+        fade = min(fade, smoothstep(0.0, width, localUV.y));
+    }
+    if ((mask & 16u) != 0u) {
+        fade = min(fade, smoothstep(0.0, width, 1.0 - localUV.y));
+    }
+    return clamp(fade, 0.0, 1.0);
 }
 
 fn remapToTexelGrid(localUV: vec2<f32>, lod: i32) -> vec2<f32> {
@@ -544,11 +599,11 @@ ${instancingBlock}
         let neg = clamp(-delta * DEBUG_SAMPLE_SCALE, 0.0, 1.0);
         debugSample = vec4<f32>(pos, 0.0, neg, 1.0);
     } else {
-        let sizeRatio = uniforms.chunkSizeUV * uniforms.chunksPerFace;
+        let edgeFade = computeLodEdgeFade(finalUV, debugEdgeMask);
         debugEdge = rawNeighborLODs;
         let maskPack = clamp(debugEdgeMask, 0.0, 4095.0) / 4096.0;
         debugEdge.w = rawNeighborLODs.w + maskPack;
-        debugSample = vec4<f32>(f32(selfLOD), sizeRatio, debugAxis, debugSampleLod);
+        debugSample = vec4<f32>(f32(selfLOD), edgeFade, debugAxis, debugSampleLod);
     }
     var worldPosition: vec3<f32>;
     var normal: vec3<f32>;

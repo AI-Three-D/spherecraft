@@ -34,6 +34,9 @@ export class BranchRenderer {
 
         this.maxCloseTrees        = lc.maxCloseTrees;
         this.maxBranchDetailLevel = lc.maxBranchDetailLevel;
+        this.branchGeometryLOD    = lc.branchGeometryLOD ?? 0;
+        this.branchTrunkRadialSegments  = lc.branchTrunkRadialSegments ?? 10;
+        this.branchBranchRadialSegments = lc.branchBranchRadialSegments ?? 6;
         this.enableBranchWind     = config.enableBranchWind === true;
 
         this._variantCount = 0;
@@ -85,6 +88,7 @@ export class BranchRenderer {
         const totalTris = this._variantMeta.reduce((s, m) => s + m.indexCount / 3, 0);
         Logger.info(
             `[BranchRenderer] Initialized: ${this._variantCount} variants, ` +
+            `geometryLOD=${this.branchGeometryLOD}, ` +
             `${totalTris} total tris, ` +
             `max ${totalTris * this.maxCloseTrees} tris/frame`
         );
@@ -99,16 +103,18 @@ export class BranchRenderer {
             const variants = templateLibrary.getVariants(treeType);
             for (const template of variants) {
                 const lods = TreeTrunkGeometryBuilder.buildFromTemplate(template, {
-                    trunkRadialSegments: 10,
-                    branchRadialSegments: 6
+                    trunkRadialSegments: this.branchTrunkRadialSegments,
+                    branchRadialSegments: this.branchBranchRadialSegments
                 });
-                geoList.push(lods[0]);
+                const lodIndex = Math.min(this.branchGeometryLOD, Math.max(0, lods.length - 1));
+                geoList.push(lods[lodIndex] ?? lods[0]);
             }
         }
 
         if (geoList.length === 0) {
             const lods = TreeTrunkGeometryBuilder.buildDeciduousLODs();
-            this._packGeometries([lods[0]]);
+            const lodIndex = Math.min(this.branchGeometryLOD, Math.max(0, lods.length - 1));
+            this._packGeometries([lods[lodIndex] ?? lods[0]]);
             return;
         }
 

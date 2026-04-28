@@ -225,10 +225,16 @@ fn packNeighborLODs(left : u32, right : u32, bottom : u32, top : u32) -> vec2<u3
 
 fn computeEdgeMask(selfLOD : u32, left : u32, right : u32, bottom : u32, top : u32) -> u32 {
     var mask : u32 = 0u;
+    // Bits 1,2,4,8: neighbor is coarser → vertex stitching + fade (fine chunk side)
     if (left > selfLOD) { mask = mask | 8u; }
     if (right > selfLOD) { mask = mask | 2u; }
     if (bottom > selfLOD) { mask = mask | 4u; }
     if (top > selfLOD) { mask = mask | 1u; }
+    // Bits 16,32,64,128: neighbor is finer → fade only (coarse chunk side, bilateral seam fix)
+    if (left < selfLOD) { mask = mask | 128u; }
+    if (right < selfLOD) { mask = mask | 32u; }
+    if (bottom < selfLOD) { mask = mask | 64u; }
+    if (top < selfLOD) { mask = mask | 16u; }
     return mask;
 }
 

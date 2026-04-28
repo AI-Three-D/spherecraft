@@ -506,6 +506,31 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const nearToMidFadeEndChunks = Number.isFinite(terrainShaderConfig.nearToMidFadeEndChunks)
         ? Math.max(nearToMidFadeStartChunks + 0.01, terrainShaderConfig.nearToMidFadeEndChunks)
         : 4.0;
+    const lod0ResolvedColorFadeStartMeters = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.lod0ResolvedColorFadeStartMeters)
+        : 8.0;
+    const lod0ResolvedColorFadeEndMeters = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeEndMeters)
+        ? Math.max(lod0ResolvedColorFadeStartMeters + 1.0, terrainShaderConfig.lod0ResolvedColorFadeEndMeters)
+        : 40.0;
+    const lodEdgeFadeMaxLod = Number.isFinite(terrainShaderConfig.lodEdgeFadeMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.lodEdgeFadeMaxLod))
+        : 4;
+    const enableLodEdgeFade =
+        terrainShaderConfig.lodEdgeFadeEnabled === true &&
+        lodEdgeFadeMaxLod >= 0 &&
+        lod <= lodEdgeFadeMaxLod;
+    const lodEdgeColorStrength = Number.isFinite(terrainShaderConfig.lodEdgeColorStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeColorStrength))
+        : 0.0;
+    const lodEdgeAOStrength = Number.isFinite(terrainShaderConfig.lodEdgeAOStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeAOStrength))
+        : 1.0;
+    const lodEdgeNormalStrength = Number.isFinite(terrainShaderConfig.lodEdgeNormalStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeNormalStrength))
+        : 1.0;
+    const lodEdgeShadowStrength = Number.isFinite(terrainShaderConfig.lodEdgeShadowStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeShadowStrength))
+        : 1.0;
     const pointSampleLodStart = Number.isFinite(terrainShaderConfig.pointSampleLodStart)
         ? Math.max(0, Math.floor(terrainShaderConfig.pointSampleLodStart))
         : 2;
@@ -599,11 +624,18 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const enableMacroOverlay = forceMacroOverlay || lod >= macroStartLod;
     const usePointSampling = false;//lod >= pointSampleLodStart;
     const enableClusteredLights = true;//lod <= clusteredMaxLod;
-    const enableAerialPerspective = lod <= aerialMaxLod || enableResolvedColor;
+    const enableAerialPerspective = lod <= aerialMaxLod;
     const enablePointSplat = false;
     
     const enableNormalMap = lod <= normalMapMaxLod;
     const enableLighting = true;
+    const enableLod0ResolvedColor =
+        options.enableLod0ResolvedColor === true &&
+        !enableResolvedColor;
+    const enableLodEdgeResolvedColor =
+        options.enableLodEdgeResolvedColor === true &&
+        enableLodEdgeFade &&
+        !enableResolvedColor;
 
     const apFadeStartMeters = Number.isFinite(terrainShaderConfig.aerialFadeStartMeters)
         ? Math.max(0, terrainShaderConfig.aerialFadeStartMeters)
@@ -657,10 +689,11 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const groundFieldBindingDecl = enableGroundField
         ? `@group(1) @binding(8) var groundFieldMask: ${chunkTextureType};`
         : '';
-    const resolvedColorBindingDecl = enableResolvedColor
+    const includeResolvedColorBinding = enableResolvedColor || enableLod0ResolvedColor || enableLodEdgeResolvedColor;
+    const resolvedColorBindingDecl = includeResolvedColorBinding
         ? `@group(1) @binding(9) var resolvedColorTexture: ${chunkTextureType};`
         : '';
-    const resolvedColorCode = enableResolvedColor ? `
+    const resolvedColorCode = includeResolvedColorBinding ? `
 fn sampleResolvedTerrainColor(input: FragmentInput, layer: i32) -> vec4<f32> {
     let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
     return ${useArrayTextures
@@ -668,8 +701,20 @@ fn sampleResolvedTerrainColor(input: FragmentInput, layer: i32) -> vec4<f32> {
         : 'textureSample(resolvedColorTexture, chunkLinearSampler, uv)'
     };
 }
+
+fn sampleResolvedTerrainColorLevel(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    return ${useArrayTextures
+        ? 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, layer, 0.0)'
+        : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
+    };
+}
 ` : `
 fn sampleResolvedTerrainColor(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn sampleResolvedTerrainColorLevel(_input: FragmentInput, _layer: i32) -> vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
 `;
@@ -764,6 +809,15 @@ const NEAR_DETAIL_CREVICE_WIDTH: f32 = ${nearDetailCreviceWidth.toFixed(4)};
 const NEAR_DETAIL_CREVICE_COVERAGE: f32 = ${nearDetailCreviceCoverage.toFixed(4)};
 const NEAR_DETAIL_FADE_START: f32 = ${nearDetailFadeStartMeters.toFixed(1)};
 const NEAR_DETAIL_FADE_END: f32 = ${nearDetailFadeEndMeters.toFixed(1)};
+const ENABLE_LOD0_RESOLVED_COLOR: bool = ${enableLod0ResolvedColor ? 'true' : 'false'};
+const LOD0_RESOLVED_COLOR_FADE_START: f32 = ${lod0ResolvedColorFadeStartMeters.toFixed(1)};
+const LOD0_RESOLVED_COLOR_FADE_END: f32 = ${lod0ResolvedColorFadeEndMeters.toFixed(1)};
+const ENABLE_LOD_EDGE_FADE: bool = ${enableLodEdgeFade ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_RESOLVED_COLOR: bool = ${enableLodEdgeResolvedColor ? 'true' : 'false'};
+const LOD_EDGE_COLOR_STRENGTH: f32 = ${lodEdgeColorStrength.toFixed(4)};
+const LOD_EDGE_AO_STRENGTH: f32 = ${lodEdgeAOStrength.toFixed(4)};
+const LOD_EDGE_NORMAL_STRENGTH: f32 = ${lodEdgeNormalStrength.toFixed(4)};
+const LOD_EDGE_SHADOW_STRENGTH: f32 = ${lodEdgeShadowStrength.toFixed(4)};
 const USE_POINT_SAMPLING: bool = ${usePointSampling ? 'true' : 'false'};
 const USE_POINT_SPLAT: bool = ${enablePointSplat ? 'true' : 'false'};
 const AP_FADE_START: f32 = ${apFadeStartMeters.toFixed(1)};
@@ -1908,6 +1962,18 @@ fn computeNearToMidDetailFade(input: FragmentInput) -> f32 {
     let fadeEnd = max(fragUniforms.chunkWidth * NEAR_TO_MID_FADE_END_CHUNKS, fadeStart + 0.001);
     return 1.0 - smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
 }
+
+fn computeLod0ResolvedColorFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_LOD0_RESOLVED_COLOR) {
+        return 0.0;
+    }
+    return smoothstep(
+        LOD0_RESOLVED_COLOR_FADE_START,
+        LOD0_RESOLVED_COLOR_FADE_END,
+        input.vDistanceToCamera
+    );
+}
+
 fn sampleMicroTextureWithSplat(
     input: FragmentInput,
     activeSeason: i32,
@@ -2161,7 +2227,9 @@ fn computeMacroBlendStrength(
     layer: i32,
     macroAlpha: f32
 ) -> f32 {
-    let macroMask = sampleZoneMaskSmooth(input, layer);
+    // Use world-space noise instead of the per-chunk macroMaskTexture so the
+    // blend strength is continuous across chunk and LOD boundaries.
+    let macroMask = macroVariationNoise(input.vWorldPos);
     let flatBlend = smoothstep(0.15, 0.9, macroMask);
     let baseOpacity = clamp(fragUniforms.level2Blend, 0.0, 1.0);
     let alpha = clamp(macroAlpha, 0.0, 1.0);
@@ -2196,6 +2264,8 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let layer = i32(round(input.vLayer));
     let debugMode = fragUniforms.terrainDebugMode;
     let layerViewMode = fragUniforms.terrainLayerViewMode;
+    let lodEdgeFade = clamp(input.vDebugSample.y, 0.0, 1.0);
+    let lodEdgeAmount = select(0.0, 1.0 - lodEdgeFade, ENABLE_LOD_EDGE_FADE);
 
     let segDims = vec2<f32>(fragUniforms.chunkWidth, fragUniforms.chunkHeight);
     var ddx_vUv = dpdx(input.vUv) * segDims;
@@ -2398,6 +2468,9 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(mix(base, vec3<f32>(1.0), grid * 0.18), 1.0);
     }
+    if (debugMode == 35) {
+        return vec4<f32>(lodEdgeAmount, lodEdgeFade, 0.0, 1.0);
+    }
     if (debugMode == 99) {
         return vec4<f32>(1.0, 0.0, 1.0, 1.0);
     }
@@ -2511,6 +2584,7 @@ if (debugMode == 16) {
 
     var microSample: vec4<f32>;
     let nearToMidDetailFade = computeNearToMidDetailFade(input);
+    let lod0ResolvedColorFade = computeLod0ResolvedColorFade(input);
 
     let fallbackTileId = sampleChunkTileId(input, layer);
     let worldTileCoord = floor(input.vWorldPos);
@@ -2528,6 +2602,10 @@ if (debugMode == 16) {
         // runtime splat decoding plus repeated atlas sampling. Procedural detail
         // can be layered on top later without bringing back atlas fan-out.
         microSample = sampleResolvedTerrainColor(input, layer);
+    } else if (lod0ResolvedColorFade > 0.999) {
+        // This branch varies per fragment, so use explicit-level sampling.
+        // WGSL forbids derivative-taking textureSample in non-uniform control.
+        microSample = sampleResolvedTerrainColorLevel(input, layer);
     } else if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
         splatResult = sampleSplatData(input, layer);
         let detailedMicro = sampleMicroTextureWithSplat(
@@ -2558,11 +2636,16 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
     let microPatternStyle = getMicroPatternStyle(dominantTileId);
     var baseColor = microSample.rgb;
 
+    if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+        let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
+    }
+
     let macroForcedVisible = layerViewMode == 2;
     let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
-    if (!ENABLE_RESOLVED_COLOR && ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
+    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
         var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
-        if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+        if (!ENABLE_RESOLVED_COLOR && ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
             let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);
             let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
             macroColor = mix(macroColor, detailedMacro, macroFade);
@@ -2575,6 +2658,14 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
         }
     }
 
+    if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+        let resolvedEdgeColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        baseColor = mix(
+            baseColor,
+            resolvedEdgeColor,
+            clamp(lodEdgeAmount * LOD_EDGE_COLOR_STRENGTH, 0.0, 1.0)
+        );
+    }
     if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
     }
@@ -2592,6 +2683,13 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
         var worldNormal = normalize(input.vSphereDir);
         if (ENABLE_NORMAL_MAP) {
             worldNormal = calculateNormal(input, layer);
+            if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_NORMAL_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                worldNormal = normalize(mix(
+                    worldNormal,
+                    normalize(input.vSphereDir),
+                    clamp(lodEdgeAmount * LOD_EDGE_NORMAL_STRENGTH, 0.0, 1.0)
+                ));
+            }
         }
         if (dot(worldNormal, input.vSphereDir) < 0.0) {
             worldNormal = -worldNormal;
@@ -2624,11 +2722,21 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
                 let softShadow = smoothstep(0.0, shadowSoftness, rawShadow);
                 shadowFactor = mix(minShadow, 1.0, softShadow);
             }
+            if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_SHADOW_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                shadowFactor = mix(
+                    shadowFactor,
+                    1.0,
+                    clamp(lodEdgeAmount * LOD_EDGE_SHADOW_STRENGTH, 0.0, 1.0)
+                );
+            }
 
             var aoAmbient: f32 = 1.0;
             var aoDirect:  f32 = 1.0;
             if (ENABLE_TERRAIN_AO) {
-                let ao = sampleTerrainAO(input, layer);
+                var ao = sampleTerrainAO(input, layer);
+                if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_AO_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                    ao = mix(ao, 1.0, clamp(lodEdgeAmount * LOD_EDGE_AO_STRENGTH, 0.0, 1.0));
+                }
                 let master = clamp(fragUniforms.terrainAOStrength, 0.0, 1.0);
                 aoAmbient = max(TERRAIN_AO_AMBIENT_FLOOR, mix(1.0, ao, master));
                 aoDirect = mix(

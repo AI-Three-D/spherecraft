@@ -266,7 +266,7 @@ export const QUALITY_PRESETS = {
 
 
 export const TERRAIN_AO_CONFIG = {
-    enabled: true,
+    enabled: false,
     resolution: 64,
     // 24 instead of 8: AO bakes cascade (each new tile re-bakes up to 8
     // neighbors), so a burst of 20 forest tiles queues ~180 AO bakes.

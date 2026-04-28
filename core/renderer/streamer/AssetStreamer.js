@@ -179,12 +179,16 @@ this._lodController = new TreeLODController({
     leafBands:            leafBandsFromOptions ?? tcNear.leafBands,
     maxCloseTrees:        options.maxCloseTrees ?? tcNear.maxCloseTrees,
     maxBranchDetailLevel: options.maxBranchDetailLevel ?? tcNear.maxBranchDetailLevel,
+    branchGeometryLOD:    options.branchGeometryLOD ?? tcNear.branchGeometryLOD,
+    branchTrunkRadialSegments:  options.branchTrunkRadialSegments ?? tcNear.branchTrunkRadialSegments,
+    branchBranchRadialSegments: options.branchBranchRadialSegments ?? tcNear.branchBranchRadialSegments,
     maxTotalLeaves:       options.maxTotalLeaves ?? tcNear.maxTotalLeaves,
     branchLODBands:       tcNear.branchLODBands,
     branchFadeMargin:     tcNear.branchFadeMargin,
     birch:                tcNear.birch,
     leafCounts:           tcNear.leafCounts,
     leafSizeScale:        tcNear.leafSizeScale,
+    leafBandBudgetFractions: tcNear.leafBandBudgetFractions,
     leafFadeStartRatio:   tcNear.leafFadeStartRatio,
 });
 
