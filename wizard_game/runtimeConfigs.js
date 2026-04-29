@@ -151,14 +151,25 @@ export function createEngineConfig() {
         macroStartLod: 99,
         resolvedColorStartLod: 1,
         lod0ResolvedColorEnabled: true,
-        lod0ResolvedColorFadeStartMeters: 8,
-        lod0ResolvedColorFadeEndMeters: 40,
+        // LOD0 keeps the live atlas only for very close inspection. Beyond
+        // that, fade quickly into the prebaked color so near/mid terrain uses
+        // the same stable medium-scale texture character as LOD1.
+        lod0ResolvedColorFadeStartMeters: 3,
+        lod0ResolvedColorFadeEndMeters: 18,
+        nearMipSharpenMaxLod: -1,
         variantRotationMaxLod: 2,
         clusteredMaxLod: 1,
         // Geometry shader variants currently run through LOD6, so this keeps
         // aerial perspective capped while avoiding an in-view AP cutoff seam.
         aerialMaxLod: 6,
-        normalMapMaxLod: 3,
+        // Compile normals for farther LOD variants, but the shader samples
+        // them only inside an altitude-scaled distance radius. Ground-level
+        // cost stays bounded; aerial views keep directional terrain lighting.
+        normalMapMaxLod: 7,
+        normalMapDistanceBaseMeters: 4500,
+        normalMapDistanceAltitudeScaleMeters: 1000,
+        normalMapDistanceMaxMeters: 28000,
+        normalMapDistanceFadeMeters: 2500,
         altitudeNormalMinMeters: 8000,
         altitudeShadowMinMeters: 12000,
         shadowDistanceMaxMeters: 1000,

@@ -556,6 +556,18 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const normalMapMaxLod = Number.isFinite(terrainShaderConfig.normalMapMaxLod)
         ? Math.max(-1, Math.floor(terrainShaderConfig.normalMapMaxLod))
         : 2;
+    const normalMapDistanceBaseMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceBaseMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceBaseMeters)
+        : 4500.0;
+    const normalMapDistanceAltitudeScaleMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceAltitudeScaleMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceAltitudeScaleMeters)
+        : 1000.0;
+    const normalMapDistanceMaxMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceMaxMeters)
+        ? Math.max(normalMapDistanceBaseMeters, terrainShaderConfig.normalMapDistanceMaxMeters)
+        : 28000.0;
+    const normalMapDistanceFadeMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceFadeMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceFadeMeters)
+        : 2500.0;
     const altitudeNormalMinMeters = Number.isFinite(terrainShaderConfig.altitudeNormalMinMeters)
         ? Math.max(0, terrainShaderConfig.altitudeNormalMinMeters)
         : 8000;
@@ -835,6 +847,10 @@ const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'fa
 const ENABLE_NORMAL_MAP: bool = ${enableNormalMap ? 'true' : 'false'};
 const ENABLE_LIGHTING: bool = ${enableLighting ? 'true' : 'false'};
 const SHADOW_MODE: i32 = ${shadowMode};
+const NORMAL_MAP_DISTANCE_BASE: f32 = ${normalMapDistanceBaseMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_ALTITUDE_SCALE: f32 = ${normalMapDistanceAltitudeScaleMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_MAX: f32 = ${normalMapDistanceMaxMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_FADE: f32 = ${normalMapDistanceFadeMeters.toFixed(1)};
 const ALTITUDE_NORMAL_MIN: f32 = ${altitudeNormalMinMeters.toFixed(2)};
 const ALTITUDE_SHADOW_MIN: f32 = ${altitudeShadowMinMeters.toFixed(2)};
 const DEBUG_LOD_COLORS: array<vec3<f32>, 7> = array<vec3<f32>, 7>(
@@ -1974,6 +1990,20 @@ fn computeLod0ResolvedColorFade(input: FragmentInput) -> f32 {
     );
 }
 
+fn computeNormalMapBlend(input: FragmentInput) -> f32 {
+    if (!ENABLE_NORMAL_MAP) {
+        return 0.0;
+    }
+    let viewerAltitude = max(
+        0.0,
+        length(fragUniforms.cameraPosition - fragUniforms.planetCenter) - fragUniforms.atmospherePlanetRadius
+    );
+    let altitudeScale = 1.0 + viewerAltitude / NORMAL_MAP_DISTANCE_ALTITUDE_SCALE;
+    let normalDistance = min(NORMAL_MAP_DISTANCE_MAX, NORMAL_MAP_DISTANCE_BASE * altitudeScale);
+    let fadeEnd = normalDistance + NORMAL_MAP_DISTANCE_FADE;
+    return 1.0 - smoothstep(normalDistance, fadeEnd, input.vDistanceToCamera);
+}
+
 fn sampleMicroTextureWithSplat(
     input: FragmentInput,
     activeSeason: i32,
@@ -2541,8 +2571,10 @@ if (debugMode == 16) {
 
     if (debugMode == 22) {
         var worldNormal = normalize(input.vSphereDir);
-        if (ENABLE_NORMAL_MAP) {
-            worldNormal = calculateNormal(input, layer);
+        let normalMapBlend = computeNormalMapBlend(input);
+        if (normalMapBlend > 0.001) {
+            let detailNormal = calculateNormal(input, layer);
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
             if (dot(worldNormal, input.vSphereDir) < 0.0) { worldNormal = -worldNormal; }
         }
         let lightDir = normalize(fragUniforms.lightDirection);
@@ -2566,8 +2598,10 @@ if (debugMode == 16) {
 
     if (debugMode == 24) {
         var worldNormal = normalize(input.vSphereDir);
-        if (ENABLE_NORMAL_MAP) {
-            worldNormal = calculateNormal(input, layer);
+        let normalMapBlend = computeNormalMapBlend(input);
+        if (normalMapBlend > 0.001) {
+            let detailNormal = calculateNormal(input, layer);
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
             if (dot(worldNormal, input.vSphereDir) < 0.0) { worldNormal = -worldNormal; }
         }
         let lightDir = normalize(fragUniforms.lightDirection);
@@ -2681,15 +2715,17 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
     var NdotL: f32 = 1.0;
     if (ENABLE_LIGHTING || ENABLE_AERIAL_PERSPECTIVE) {
         var worldNormal = normalize(input.vSphereDir);
-        if (ENABLE_NORMAL_MAP) {
-            worldNormal = calculateNormal(input, layer);
+        let normalMapBlend = computeNormalMapBlend(input);
+        if (normalMapBlend > 0.001) {
+            var detailNormal = calculateNormal(input, layer);
             if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_NORMAL_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
-                worldNormal = normalize(mix(
-                    worldNormal,
+                detailNormal = normalize(mix(
+                    detailNormal,
                     normalize(input.vSphereDir),
                     clamp(lodEdgeAmount * LOD_EDGE_NORMAL_STRENGTH, 0.0, 1.0)
                 ));
             }
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
         }
         if (dot(worldNormal, input.vSphereDir) < 0.0) {
             worldNormal = -worldNormal;
