@@ -525,16 +525,21 @@ export class UniformManager {
 
     _updateAmbientFromAtmosphere(lighting) {
         const rayleigh = this.uniforms.atmosphereRayleighScattering?.value;
+        const nightSkyColor = new Color(0.25, 0.30, 0.45); // cool deep-blue for starlit nights
         const baseColor = rayleigh
-            ? new Color(
-                rayleigh.x,
-                rayleigh.y,
-                rayleigh.z
-            )
+            ? new Color(rayleigh.x, rayleigh.y, rayleigh.z)
             : new Color(0.4, 0.4, 0.5);
-        const maxC = Math.max(baseColor.r, baseColor.g, baseColor.b, 1e-6);
-        baseColor.multiplyScalar(1 / maxC);
-    
+        const maxC = Math.max(baseColor.r, baseColor.g, baseColor.b, 0);
+        if (maxC < 0.001) {
+            // Rayleigh scattering is essentially zero (no sun) — use night-sky tint
+            baseColor.copy(nightSkyColor);
+        } else {
+            baseColor.multiplyScalar(1 / maxC);
+            // Blend toward night-sky color as the Rayleigh signal fades out
+            const nightBlend = Math.max(0, 1 - maxC / 0.001);
+            if (nightBlend > 0) baseColor.lerp(nightSkyColor, nightBlend);
+        }
+
         const sunTint = lighting?.sunColor || new Color(1, 1, 1);
         baseColor.lerp(sunTint, 0.15);
 

@@ -2784,6 +2784,12 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
             finalColor = baseColor
                        * (ambient * aoAmbient + sunDiffuse * shadowFactor * aoDirect)
                        + clusteredLight;
+
+            // Night-visibility floor: ambient*AO*baseColor is too small to survive ACES
+            // tonemapping when the sun is below the horizon (pitch-black terrain).
+            // This albedo-scaled floor guarantees a minimum HDR signal (~0.045 for
+            // average grass) that maps to ~14% sRGB at exposure=0.75.
+            finalColor = max(finalColor, baseColor * 0.30);
         }
     }
 

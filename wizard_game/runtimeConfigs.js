@@ -100,10 +100,10 @@ export function createEngineConfig() {
         ambient: {
           // Global ambient tuning for all terrain/asset materials.
           intensityMultiplier: 1.0,
-          minIntensity: 0.028,
+          minIntensity: 0.08,
           maxIntensity: 0.30,
           sunContributionScale: 0.22,
-          moonContributionScale: 0.05,
+          moonContributionScale: 0.08,
           moonNormalizationIntensity: 0.15
         },
         sun: {
@@ -271,8 +271,8 @@ export function createEngineConfig() {
       streamedAssets:    true,   // all streamed ground cover, props, etc.
       particles:         false,
       actors:            false,   // wizard, goblins, skinned mesh actors
-      clouds:            false,    // WebGPUCloudRenderer (cirrus etc.)
-      skyEffects:        false,    // sky, stars, moon, atmo banks
+      clouds:            true,    // WebGPUCloudRenderer (cirrus etc.)
+      skyEffects:        true,    // sky, stars, moon, atmo banks
     },
 
     gpuQuadtree: {
