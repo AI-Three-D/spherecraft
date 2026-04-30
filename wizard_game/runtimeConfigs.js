@@ -147,7 +147,11 @@ export function createEngineConfig() {
         nearToMidFadeEndChunks: 4.0,
         lodEdgeFadeEnabled: false,
         lodEdgeFadeMaxLod: 4,
-        lodEdgeFadeWidth: 0.15,
+        // AO masks are baked per tile, so adjacent geometry LODs can expose
+        // different mask frequencies. Fade AO toward neutral only at cross-LOD
+        // borders; leave color, normals, and shadows on their normal paths.
+        lodEdgeAOFadeEnabled: true,
+        lodEdgeFadeWidth: 0.08,
         lodEdgeColorStrength: 0.0,
         lodEdgeResolvedColorEnabled: false,
         lodEdgeAOStrength: 1.0,
@@ -163,6 +167,12 @@ export function createEngineConfig() {
         // the same stable medium-scale texture character as LOD1.
         lod0ResolvedColorFadeStartMeters: 3,
         lod0ResolvedColorFadeEndMeters: 18,
+        // AO has the same near-vs-prebaked frequency mismatch as albedo.
+        // Fade LOD0 contact AO out over the same range so its tile-local
+        // darkening does not stop abruptly where LOD1 takes over.
+        lod0AOFadeEnabled: true,
+        lod0AOFadeStartMeters: 3,
+        lod0AOFadeEndMeters: 18,
         nearMipSharpenMaxLod: -1,
         variantRotationMaxLod: 2,
         clusteredMaxLod: 1,

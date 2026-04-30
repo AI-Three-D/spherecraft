@@ -73,6 +73,10 @@ export class EngineConfig {
           terrainShader.lodEdgeFadeEnabled ?? false,
           'rendering.terrainShader.lodEdgeFadeEnabled'
         ),
+        lodEdgeAOFadeEnabled: requireBool(
+          terrainShader.lodEdgeAOFadeEnabled ?? terrainShader.lodEdgeFadeEnabled ?? false,
+          'rendering.terrainShader.lodEdgeAOFadeEnabled'
+        ),
         lodEdgeFadeMaxLod: requireInt(
           terrainShader.lodEdgeFadeMaxLod ?? 4,
           'rendering.terrainShader.lodEdgeFadeMaxLod',
@@ -120,6 +124,18 @@ export class EngineConfig {
         lod0ResolvedColorFadeEndMeters: requireNumber(
           terrainShader.lod0ResolvedColorFadeEndMeters ?? 40,
           'rendering.terrainShader.lod0ResolvedColorFadeEndMeters'
+        ),
+        lod0AOFadeEnabled: requireBool(
+          terrainShader.lod0AOFadeEnabled ?? false,
+          'rendering.terrainShader.lod0AOFadeEnabled'
+        ),
+        lod0AOFadeStartMeters: requireNumber(
+          terrainShader.lod0AOFadeStartMeters ?? terrainShader.lod0ResolvedColorFadeStartMeters ?? 8,
+          'rendering.terrainShader.lod0AOFadeStartMeters'
+        ),
+        lod0AOFadeEndMeters: requireNumber(
+          terrainShader.lod0AOFadeEndMeters ?? terrainShader.lod0ResolvedColorFadeEndMeters ?? 40,
+          'rendering.terrainShader.lod0AOFadeEndMeters'
         ),
         variantRotationMaxLod: requireInt(terrainShader.variantRotationMaxLod ?? 2, 'rendering.terrainShader.variantRotationMaxLod', -1),
         nearMipSharpenMaxLod: requireInt(terrainShader.nearMipSharpenMaxLod ?? 0, 'rendering.terrainShader.nearMipSharpenMaxLod', -1),

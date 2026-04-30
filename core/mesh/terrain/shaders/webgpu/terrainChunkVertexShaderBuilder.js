@@ -14,7 +14,8 @@ export function buildTerrainChunkVertexShader(options = {}) {
         ? Math.min(0.30, Math.max(0.001, terrainShaderConfig.lodEdgeFadeWidth))
         : 0.04;
     const enableLodEdgeFade =
-        terrainShaderConfig.lodEdgeFadeEnabled === true &&
+        (terrainShaderConfig.lodEdgeFadeEnabled === true ||
+         terrainShaderConfig.lodEdgeAOFadeEnabled === true) &&
         lodEdgeFadeMaxLod >= 0 &&
         lod <= lodEdgeFadeMaxLod;
     const defaultSegments = [128, 64, 32, 16, 8, 4, 2];
