@@ -1247,7 +1247,7 @@ _createBindGroupLayouts(material) {
 
     const includeTerrainAO = !!material.defines?.USE_TERRAIN_AO;
     const includeGroundField = !!material.defines?.USE_GROUND_FIELD;
-    const includeResolvedColor = !!material.defines?.USE_RESOLVED_COLOR;
+    const includeResolvedColor = !!material.defines?.USE_RESOLVED_COLOR_TEXTURE || !!material.defines?.USE_RESOLVED_COLOR;
     // Full per-slot format map. Missing keys default to rgba32float.
     const chunkFormats = material._chunkTextureFormats || {};
     return this._createTerrainBindGroupLayouts(
@@ -1816,7 +1816,7 @@ _createTerrainBindGroups(material, uniforms, geometry) {
         if (material.defines?.USE_GROUND_FIELD) {
             chunkTextureBindings.push({ name: 'groundFieldMask', binding: 8 });
         }
-        if (material.defines?.USE_RESOLVED_COLOR) {
+        if (material.defines?.USE_RESOLVED_COLOR_TEXTURE || material.defines?.USE_RESOLVED_COLOR) {
             chunkTextureBindings.push({ name: 'resolvedColorTexture', binding: 9 });
         }
         const chunkTextureNames = chunkTextureBindings.map(entry => entry.name);

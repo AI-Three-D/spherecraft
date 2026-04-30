@@ -213,7 +213,7 @@ class TileArrayPool {
         this.freeLayers = [];
 
         // Which types get a mip chain. Default: any filterable type that
-        // isn't semantically discrete. In practice today: normal.
+        // isn't semantically discrete or already prebaked at chunk scale.
         // Caller can override explicitly.
         this.mipTypes = new Set(mipTypes || []);
         this.mipLevelCounts = new Map();   // type → mipLevelCount
@@ -230,6 +230,9 @@ class TileArrayPool {
             type === 'splatData' ||
             type === 'splatIndex' ||
             type === 'splatValid';
+        const neverMipmapByType = (type) =>
+            wantsNearestByType(type) ||
+            type === 'resolvedColor';
 
         const fullMipCount = Math.floor(Math.log2(tileSize)) + 1;
 
@@ -239,9 +242,11 @@ class TileArrayPool {
 
             // Auto-enable mips for filterable, non-discrete types when
             // caller didn't specify a mipTypes set.
+            const neverMipmap = neverMipmapByType(type);
+            if (neverMipmap) this.mipTypes.delete(type);
             const autoMip = mipTypes === null
-                && filterable && !wantsNearestByType(type);
-            const hasMips = autoMip || this.mipTypes.has(type);
+                && filterable && !neverMipmap;
+            const hasMips = !neverMipmap && (autoMip || this.mipTypes.has(type));
             const mipLevelCount = hasMips ? fullMipCount : 1;
             this.mipLevelCounts.set(type, mipLevelCount);
             if (hasMips) this.mipTypes.add(type);

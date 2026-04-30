@@ -484,6 +484,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const enableTerrainAO = options.enableTerrainAO !== false;
     const enableGroundField = options.enableGroundField === true;
     const enableResolvedColor = options.enableResolvedColor === true;
+    const enableResolvedColorDebugBinding = options.enableResolvedColorDebugBinding === true;
     const maxLightIndices = options.maxLightIndices || 8192;
     const useArrayTextures = options.useArrayTextures === true;
     const aerialPerspectiveCode = getAerialPerspectiveWGSL();
@@ -701,12 +702,24 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const groundFieldBindingDecl = enableGroundField
         ? `@group(1) @binding(8) var groundFieldMask: ${chunkTextureType};`
         : '';
-    const includeResolvedColorBinding = enableResolvedColor || enableLod0ResolvedColor || enableLodEdgeResolvedColor;
+    const includeResolvedColorBinding =
+        enableResolvedColor ||
+        enableLod0ResolvedColor ||
+        enableLodEdgeResolvedColor ||
+        enableResolvedColorDebugBinding;
     const resolvedColorBindingDecl = includeResolvedColorBinding
         ? `@group(1) @binding(9) var resolvedColorTexture: ${chunkTextureType};`
         : '';
     const resolvedColorCode = includeResolvedColorBinding ? `
 fn sampleResolvedTerrainColor(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    return ${useArrayTextures
+        ? 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, layer, 0.0)'
+        : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
+    };
+}
+
+fn sampleResolvedTerrainColorImplicit(input: FragmentInput, layer: i32) -> vec4<f32> {
     let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
     return ${useArrayTextures
         ? 'textureSample(resolvedColorTexture, chunkLinearSampler, uv, layer)'
@@ -721,12 +734,34 @@ fn sampleResolvedTerrainColorLevel(input: FragmentInput, layer: i32) -> vec4<f32
         : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
     };
 }
+
+fn sampleResolvedTerrainColorNearest(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    let texSize = vec2<i32>(textureDimensions(resolvedColorTexture));
+    let coord = clamp(
+        vec2<i32>(floor(uv * vec2<f32>(texSize))),
+        vec2<i32>(0),
+        texSize - vec2<i32>(1)
+    );
+    return ${useArrayTextures
+        ? 'textureLoad(resolvedColorTexture, coord, layer, 0)'
+        : 'textureLoad(resolvedColorTexture, coord, 0)'
+    };
+}
 ` : `
 fn sampleResolvedTerrainColor(_input: FragmentInput, _layer: i32) -> vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
 
+fn sampleResolvedTerrainColorImplicit(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
 fn sampleResolvedTerrainColorLevel(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn sampleResolvedTerrainColorNearest(_input: FragmentInput, _layer: i32) -> vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
 `;
@@ -842,6 +877,7 @@ const NEAR_TO_MID_FADE_START_CHUNKS: f32 = ${nearToMidFadeStartChunks.toFixed(2)
 const NEAR_TO_MID_FADE_END_CHUNKS: f32 = ${nearToMidFadeEndChunks.toFixed(2)};
 const ENABLE_MACRO_OVERLAY: bool = ${enableMacroOverlay ? 'true' : 'false'};
 const ENABLE_RESOLVED_COLOR: bool = ${enableResolvedColor ? 'true' : 'false'};
+const HAS_RESOLVED_COLOR_TEXTURE: bool = ${includeResolvedColorBinding ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
 const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
 const ENABLE_NORMAL_MAP: bool = ${enableNormalMap ? 'true' : 'false'};
@@ -2098,6 +2134,31 @@ fn sampleMicroTextureWithSplat(
 
     return accum / sum;
 }
+
+fn sampleDebugNonResolvedMicro(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32
+) -> vec3<f32> {
+    let fallbackTileId = sampleChunkTileId(input, layer);
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+
+    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+        let splat = sampleSplatData(input, layer);
+        return sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splat
+        ).rgb;
+    }
+
+    return sampleTileColor(
+        fallbackTileId, worldTileCoord, local,
+        activeSeason, ddx_vUv, ddy_vUv
+    ).rgb;
+}
+
 fn normalizeMacroTileId(tileId: f32) -> f32 {
     return select(tileId, tileId - 100.0, tileId >= 100.0);
 }
@@ -2501,6 +2562,61 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     if (debugMode == 35) {
         return vec4<f32>(lodEdgeAmount, lodEdgeFade, 0.0, 1.0);
     }
+    if (debugMode == 36) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColor(input, layer).rgb, 1.0);
+    }
+    if (debugMode == 37) {
+        let liveColor = sampleDebugNonResolvedMicro(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer
+        );
+        return vec4<f32>(liveColor, 1.0);
+    }
+    if (debugMode == 38) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let resolvedColor = sampleResolvedTerrainColor(input, layer).rgb;
+        let liveColor = sampleDebugNonResolvedMicro(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer
+        );
+        let delta = abs(resolvedColor - liveColor);
+        let heat = clamp(max(max(delta.r, delta.g), delta.b) * 5.0, 0.0, 1.0);
+        return vec4<f32>(heat, 1.0 - heat, 0.0, 1.0);
+    }
+    if (debugMode == 39) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let resolvedColor = sampleResolvedTerrainColor(input, layer).rgb;
+        let edgeDist = min(min(input.vUv.x, input.vUv.y), min(1.0 - input.vUv.x, 1.0 - input.vUv.y));
+        let grid = 1.0 - smoothstep(0.008, 0.025, edgeDist);
+        return vec4<f32>(mix(resolvedColor, vec3<f32>(1.0, 0.0, 1.0), grid * 0.65), 1.0);
+    }
+    if (debugMode == 40) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColorLevel(input, layer).rgb, 1.0);
+    }
+    if (debugMode == 41) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let implicitColor = sampleResolvedTerrainColorImplicit(input, layer).rgb;
+        let mip0Color = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        let delta = abs(implicitColor - mip0Color);
+        let heat = clamp(max(max(delta.r, delta.g), delta.b) * 8.0, 0.0, 1.0);
+        return vec4<f32>(heat, 1.0 - heat, 0.0, 1.0);
+    }
+    if (debugMode == 42) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColorNearest(input, layer).rgb, 1.0);
+    }
     if (debugMode == 99) {
         return vec4<f32>(1.0, 0.0, 1.0, 1.0);
     }
@@ -2674,6 +2790,9 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
         let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
         baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
     }
+    if (debugMode == 43) {
+        return vec4<f32>(baseColor, 1.0);
+    }
 
     let macroForcedVisible = layerViewMode == 2;
     let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
@@ -2691,6 +2810,9 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
             baseColor = mix(baseColor, macroColor, macroStrength);
         }
     }
+    if (debugMode == 44) {
+        return vec4<f32>(baseColor, 1.0);
+    }
 
     if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
         let resolvedEdgeColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
@@ -2702,6 +2824,9 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
     }
     if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
+    }
+    if (debugMode == 45) {
+        return vec4<f32>(baseColor, 1.0);
     }
     // NEAR PROCEDURAL DETAIL DISABLED FOR FPS A/B:
     // This crevice/detail layer looked better but caused a large FPS drop on

@@ -1201,7 +1201,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     _resolveTerrainDebugModes(mode) {
-        if (mode >= 25 && mode <= 34) {
+        if (mode >= 25 && mode <= 45) {
             return { generatorMode: 0, fragmentMode: mode };
         }
         if (mode === 0) {
@@ -1223,6 +1223,17 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             32: 'Splat Bilinear Valid',
             33: 'Fallback / Stitch Risk',
             34: 'Atlas Bleed Risk',
+            35: 'LOD Edge Fade',
+            36: 'Resolved Color',
+            37: 'Non-Resolved Color',
+            38: 'Resolved vs Non-Resolved',
+            39: 'Resolved Color + Chunk Grid',
+            40: 'Resolved Color Mip0',
+            41: 'Resolved Implicit vs Mip0',
+            42: 'Resolved Nearest Mip0',
+            43: 'Base Before Macro',
+            44: 'Base After Macro',
+            45: 'Final Albedo Before Lighting',
             99: 'Fragment Test'
         };
         return names[mode] ?? 'Debug';

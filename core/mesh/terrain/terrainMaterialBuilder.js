@@ -170,6 +170,9 @@ export class TerrainMaterialBuilder {
                 !overlayPass &&
                 terrainShaderConfig?.lodEdgeResolvedColorEnabled === true &&
                 cachedTextures.resolvedColor?._isArray === true;
+            const enableResolvedColorDebugBinding =
+                !overlayPass &&
+                cachedTextures.resolvedColor?._isArray === true;
 
 
             const grassConfig = planetConfig?.grassConfig ?? null;
@@ -211,6 +214,7 @@ export class TerrainMaterialBuilder {
                 enableResolvedColor,
                 enableLod0ResolvedColor,
                 enableLodEdgeResolvedColor,
+                enableResolvedColorDebugBinding,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
             const vertexShader = builders.buildTerrainChunkVertexShader({
@@ -261,6 +265,9 @@ export class TerrainMaterialBuilder {
             }
             if (enableResolvedColor || enableLod0ResolvedColor || enableLodEdgeResolvedColor) {
                 defines.USE_RESOLVED_COLOR = true;
+            }
+            if (enableResolvedColor || enableLod0ResolvedColor || enableLodEdgeResolvedColor || enableResolvedColorDebugBinding) {
+                defines.USE_RESOLVED_COLOR_TEXTURE = true;
             }
 
         // =============================================

@@ -149,6 +149,7 @@ export function createEngineConfig() {
         lodEdgeShadowStrength: 1.0,
         pointSampleLodStart: 2,
         macroStartLod: 99,
+        resolvedColorEnabled: true,
         resolvedColorStartLod: 1,
         lod0ResolvedColorEnabled: true,
         // LOD0 keeps the live atlas only for very close inspection. Beyond
