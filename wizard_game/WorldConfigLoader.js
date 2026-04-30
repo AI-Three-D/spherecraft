@@ -196,6 +196,18 @@ export class WorldConfigLoader {
             const ts = base.rendering?.terrainShader ?? {};
             Object.assign(ts, engine.terrainShader);
         }
+        if (engine?.atmoBankParticles) {
+            const atmo = base.rendering?.atmoBankParticles ?? {};
+            if (engine.atmoBankParticles.offscreen) {
+                atmo.offscreen = {
+                    ...(atmo.offscreen ?? {}),
+                    ...engine.atmoBankParticles.offscreen,
+                };
+            } else {
+                Object.assign(atmo, engine.atmoBankParticles);
+            }
+            base.rendering.atmoBankParticles = atmo;
+        }
         if (engine?.terrainAO) {
             const ao = base.terrainAO ?? {};
             Object.assign(ao, engine.terrainAO);
@@ -214,6 +226,11 @@ export class WorldConfigLoader {
         }
         if (engine?.weather) {
             base.weather = mergePlainConfig(base.weather ?? {}, engine.weather);
+        }
+        if (engine?.features) {
+            const features = base.features ?? {};
+            Object.assign(features, engine.features);
+            base.features = features;
         }
         return base;
     }

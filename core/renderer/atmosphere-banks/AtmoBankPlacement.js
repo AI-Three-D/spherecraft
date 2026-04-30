@@ -1,8 +1,12 @@
-import { ATMO_BANK_TYPES, ATMO_EMITTER_CAPACITY } from './AtmoBankTypes.js';
+import {
+    ATMO_BANK_TYPES,
+    ATMO_BANK_ALL_TYPE_MASK,
+    ATMO_EMITTER_CAPACITY,
+} from './AtmoBankTypes.js';
 import { DEFAULT_ATMO_PLACEMENT_CONFIG } from './AtmoBankAuthoringRuntime.js';
 
 export class AtmoBankPlacement {
-    constructor(config = {}) {
+    constructor(config = {}, options = {}) {
         this._cellSize        = config.cellSize        ?? DEFAULT_ATMO_PLACEMENT_CONFIG.cellSize;
         this._scanRadius      = config.scanRadius      ?? DEFAULT_ATMO_PLACEMENT_CONFIG.scanRadius;
         this._maxRenderDist   = config.maxRenderDist   ?? DEFAULT_ATMO_PLACEMENT_CONFIG.maxRenderDist;
@@ -12,11 +16,25 @@ export class AtmoBankPlacement {
         this._lodMinScale     = config.lodMinScale      ?? DEFAULT_ATMO_PLACEMENT_CONFIG.lodMinScale;
         this._distCutoff      = config.distanceCutoff   ?? DEFAULT_ATMO_PLACEMENT_CONFIG.distanceCutoff;
         this._baseProb        = config.spawnProbability ?? DEFAULT_ATMO_PLACEMENT_CONFIG.spawnProbability;
+        this._enabledTypeMask = Number.isInteger(options.enabledTypeMask)
+            ? options.enabledTypeMask
+            : ATMO_BANK_ALL_TYPE_MASK;
         this._emitters = [];
+    }
+
+    setEnabledTypeMask(mask = ATMO_BANK_ALL_TYPE_MASK) {
+        this._enabledTypeMask = Number.isInteger(mask) ? mask : ATMO_BANK_ALL_TYPE_MASK;
+        this._emitters.length = 0;
+    }
+
+    _typeEnabled(typeId) {
+        if (!Number.isInteger(typeId) || typeId < 0 || typeId >= 32) return false;
+        return (this._enabledTypeMask & (1 << typeId)) !== 0;
     }
 
     update(camera, environmentState, planetConfig) {
         this._emitters.length = 0;
+        if ((this._enabledTypeMask & ATMO_BANK_ALL_TYPE_MASK) === 0) return;
         if (!planetConfig?.origin || !planetConfig?.radius) return;
 
         const origin = planetConfig.origin;
@@ -92,6 +110,7 @@ export class AtmoBankPlacement {
                 let typeId = ATMO_BANK_TYPES.FOG_POCKET;
                 if (typeHash < 80) typeId = ATMO_BANK_TYPES.VALLEY_MIST;
                 else if (typeHash > 200) typeId = ATMO_BANK_TYPES.LOW_CLOUD;
+                if (!this._typeEnabled(typeId)) continue;
 
                 let budgetScale = 1.0;
                 if (camDist > this._lodNear && this._lodFar > this._lodNear) {

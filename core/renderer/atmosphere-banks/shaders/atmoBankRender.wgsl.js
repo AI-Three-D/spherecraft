@@ -14,6 +14,13 @@ const ATMO_VOLUME_SLICE_COUNT: u32 = ${volumeSliceCount}u;
 @group(0) @binding(2) var<storage, read> liveList  : array<u32>;
 @group(0) @binding(3) var<uniform>       typeDefs  : array<AtmoTypeDef, ATMO_TYPE_CAPACITY>;
 
+struct AtmoRenderParams {
+    targetSize: vec2<f32>,
+    sceneSize: vec2<f32>,
+};
+
+@group(0) @binding(4) var<uniform> renderParams: AtmoRenderParams;
+
 @group(1) @binding(0) var noiseBase:   texture_3d<f32>;
 @group(1) @binding(1) var noiseDetail: texture_3d<f32>;
 @group(1) @binding(2) var noiseSampler: sampler;
@@ -159,6 +166,17 @@ fn linearizeDepth(d: f32, near: f32, far: f32) -> f32 {
     return (near * far) / (far - d * (far - near));
 }
 
+fn sceneDepthCoord(fragmentPosition: vec2<f32>, depthDims: vec2<u32>) -> vec2<i32> {
+    let targetSize = max(renderParams.targetSize, vec2<f32>(1.0, 1.0));
+    let sceneSize = max(renderParams.sceneSize, vec2<f32>(1.0, 1.0));
+    let scenePosition = fragmentPosition * (sceneSize / targetSize);
+    return clamp(
+        vec2<i32>(scenePosition),
+        vec2<i32>(0),
+        vec2<i32>(depthDims) - vec2<i32>(1)
+    );
+}
+
 fn volumeShape(worldPos: vec3<f32>, center: vec3<f32>, phase: vec3<f32>,
                radiusA: f32, radiusB: f32, halfHeight: f32) -> f32 {
     let localUp = resolveLocalUp(center);
@@ -196,8 +214,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let density = smoothstep(in.densityThreshold, 1.0, noise) * shape;
 
     let depthDims = textureDimensions(depthTexture);
-    let depthUV = vec2<i32>(in.clipPos.xy);
-    let clampedCoord = clamp(depthUV, vec2<i32>(0), vec2<i32>(depthDims) - vec2<i32>(1));
+    let clampedCoord = sceneDepthCoord(in.clipPos.xy, depthDims);
     let sceneDepthRaw = textureLoad(depthTexture, clampedCoord, 0);
     let linearScene = linearizeDepth(sceneDepthRaw, globals.nearPlane, globals.farPlane);
     let linearFrag  = linearizeDepth(in.clipPos.z, globals.nearPlane, globals.farPlane);

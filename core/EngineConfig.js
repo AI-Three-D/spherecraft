@@ -50,6 +50,8 @@ export class EngineConfig {
     const fog = lighting.fog || {};
     const distortion = rendering.distortion || {};
     const sourceCutoffs = distortion.sourceCutoffs || {};
+    const atmoBankParticles = rendering.atmoBankParticles || {};
+    const atmoBankOffscreen = atmoBankParticles.offscreen || {};
     this.rendering = {
       preferWebGPU: requireBool(rendering.preferWebGPU, 'rendering.preferWebGPU'),
       maxPoolSlots: requireInt(rendering.maxPoolSlots, 'rendering.maxPoolSlots', 1),
@@ -224,6 +226,18 @@ export class EngineConfig {
             'rendering.distortion.sourceCutoffs.shockwave'
           )
         }
+      },
+      atmoBankParticles: {
+        offscreen: {
+          enabled: requireBool(
+            atmoBankOffscreen.enabled ?? true,
+            'rendering.atmoBankParticles.offscreen.enabled'
+          ),
+          resolutionScale: Math.max(0.25, Math.min(1.0, requireNumber(
+            atmoBankOffscreen.resolutionScale ?? 0.5,
+            'rendering.atmoBankParticles.offscreen.resolutionScale'
+          )))
+        }
       }
     };
 
@@ -392,6 +406,8 @@ export class EngineConfig {
       particles:        requireBool(features.particles        ?? true, 'features.particles'),
       actors:           requireBool(features.actors           ?? true, 'features.actors'),
       clouds:           requireBool(features.clouds           ?? true, 'features.clouds'),
+      cloudParticles:   requireBool(features.cloudParticles   ?? true, 'features.cloudParticles'),
+      fogParticles:     requireBool(features.fogParticles     ?? true, 'features.fogParticles'),
       skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
     };
 

@@ -131,6 +131,12 @@ export function createEngineConfig() {
           shockwave: 200.0
         }
       },
+      atmoBankParticles: {
+        offscreen: {
+          enabled: true,
+          resolutionScale: 0.5, // set to 0.25 for quarter-resolution
+        },
+      },
       terrainShader: {
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
@@ -270,10 +276,12 @@ export function createEngineConfig() {
       treesMid:          false,   // hull trees (140–700 m)
       treesFar:          false,   // coarse canopy hulls (500–4000 m)
       streamedAssets:    true,   // all streamed ground cover, props, etc.
-      particles:         false,
+      particles:         false,   // campfire/leaves/fireflies particle system
       actors:            false,   // wizard, goblins, skinned mesh actors
-      clouds:            true,    // WebGPUCloudRenderer (cirrus etc.)
-      skyEffects:        true,    // sky, stars, moon, atmo banks
+      clouds:            true,    // high/cirrus WebGPUCloudRenderer
+      cloudParticles:    false,   // low/peak atmospheric bank particle clouds
+      fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
+      skyEffects:        true,    // sky, stars, moon
     },
 
     gpuQuadtree: {

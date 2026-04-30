@@ -26,7 +26,7 @@ struct ScatterParams {
     cameraPos: vec3<f32>, maxEmitters: u32,
     planetOrigin: vec3<f32>, planetRadius: f32,
     heightScale: f32, weatherIntensity: f32, fogDensity: f32, maxRenderDist: f32,
-    frameSeed: u32, ruleCount: u32, _p1: u32, _p2: u32,
+    frameSeed: u32, ruleCount: u32, enabledTypeMask: u32, _p2: u32,
 };
 
 struct LayerMeta {
@@ -143,6 +143,13 @@ fn ruleAllowsCategory(rule: ScatterRule, categoryId: u32) -> bool {
 
 fn ruleAllowsBand(value: f32, minValue: f32, maxValue: f32) -> bool {
     return value >= minValue && value <= maxValue;
+}
+
+fn typeEnabled(typeId: u32) -> bool {
+    if (typeId >= 32u) {
+        return false;
+    }
+    return (params.enabledTypeMask & (1u << typeId)) != 0u;
 }
 
 fn sampleDepressionMeters(uv: vec2<f32>, layer: i32, elevation: f32, radiusTexels: u32) -> f32 {
@@ -265,6 +272,9 @@ fn selectAuthoredRule(categoryId: u32, slope: f32, texUv: vec2<f32>, layer: i32,
     var selected = noSelectedRule();
     for (var ruleIdx = 0u; ruleIdx < params.ruleCount; ruleIdx = ruleIdx + 1u) {
         let rule = scatterRules[ruleIdx];
+        if (!typeEnabled(rule.typeId)) {
+            continue;
+        }
         if (!ruleAllowsCategory(rule, categoryId)) {
             continue;
         }
@@ -353,6 +363,7 @@ fn main(
     }
 
     if (selected.matched == 0u) { return; }
+    if (!typeEnabled(selected.typeId)) { return; }
 
     let idx = atomicAdd(&counter.count, 1u);
     if (idx >= MAX_EMITTERS) { return; }

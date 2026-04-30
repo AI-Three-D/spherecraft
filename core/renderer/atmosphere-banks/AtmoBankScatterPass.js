@@ -1,5 +1,6 @@
 import { buildAtmoBankScatterWGSL } from './shaders/atmoBankScatter.wgsl.js';
 import {
+    ATMO_BANK_ALL_TYPE_MASK,
     ATMO_EMITTER_CAPACITY,
     ATMO_EMITTER_STRIDE,
     ATMO_SCATTER_RULE_CAPACITY,
@@ -25,6 +26,9 @@ export class AtmoBankScatterPass {
         this._scatterRules = Array.isArray(options.scatterRules) ? options.scatterRules : [];
         this._tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : [];
         this._biomeDefinitions = Array.isArray(options.biomeDefinitions) ? options.biomeDefinitions : [];
+        this._enabledTypeMask = Number.isInteger(options.enabledTypeMask)
+            ? options.enabledTypeMask
+            : ATMO_BANK_ALL_TYPE_MASK;
         this._tileCategorySignature = getAtmoScatterRuleCategorySignature(this._tileCategories);
         this._packedRules = packAtmoScatterRules(this._scatterRules, {
             tileCategories: this._tileCategories,
@@ -145,6 +149,11 @@ export class AtmoBankScatterPass {
             : DEFAULT_ATMO_PLACEMENT_CONFIG;
     }
 
+    setEnabledTypeMask(mask = ATMO_BANK_ALL_TYPE_MASK) {
+        this._enabledTypeMask = Number.isInteger(mask) ? mask : ATMO_BANK_ALL_TYPE_MASK;
+        this._framesSinceScatter = SCATTER_INTERVAL;
+    }
+
     setAuthoringConfig(options = {}) {
         this._placement = options.placement && typeof options.placement === 'object'
             ? options.placement
@@ -152,6 +161,9 @@ export class AtmoBankScatterPass {
         this._scatterRules = Array.isArray(options.scatterRules) ? options.scatterRules : [];
         this._tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : [];
         this._biomeDefinitions = Array.isArray(options.biomeDefinitions) ? options.biomeDefinitions : [];
+        if (Number.isInteger(options.enabledTypeMask)) {
+            this._enabledTypeMask = options.enabledTypeMask;
+        }
         const nextSignature = getAtmoScatterRuleCategorySignature(this._tileCategories);
         const categoriesChanged = nextSignature !== this._tileCategorySignature;
         this._tileCategorySignature = nextSignature;
@@ -175,6 +187,7 @@ export class AtmoBankScatterPass {
             textureViewsValid: this._textureViewsValid,
             framesSinceScatter: this._framesSinceScatter,
             authoredRuleCount: this._packedRules.count,
+            enabledTypeMask: this._enabledTypeMask,
             tileCategoryCount: this._packedRules.tileCategoryCount,
             ruleWarnings: this._packedRules.warnings,
             lastDispatch: this._lastDispatchInfo,
@@ -379,6 +392,7 @@ export class AtmoBankScatterPass {
         paramData[11] = this._placement?.maxRenderDist ?? DEFAULT_ATMO_PLACEMENT_CONFIG.maxRenderDist;
         paramU32[12] = this._stableSeed(planetConfig);
         paramU32[13] = this._packedRules.count >>> 0;
+        paramU32[14] = this._enabledTypeMask >>> 0;
 
         const q = this.device.queue;
         q.writeBuffer(this._paramBuf, 0, paramData);

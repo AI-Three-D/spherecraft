@@ -104,6 +104,20 @@ export class Frontend {
         return this.backend;
     }
 
+    _getAtmoBankFeatureFlags() {
+        const features = this.engineConfig?.features ?? {};
+        return {
+            cloudParticles: features.cloudParticles !== false,
+            fogParticles: features.fogParticles !== false,
+        };
+    }
+
+    _shouldInitializeAtmoBankSystem() {
+        if (this.engineConfig?.features?.skyEffects === false) return false;
+        const flags = this._getAtmoBankFeatureFlags();
+        return flags.cloudParticles || flags.fogParticles;
+    }
+
     setActorManager(mgr) { this._actorManager = mgr; }
 
     addDistortionSource(options = {}) {
@@ -565,7 +579,8 @@ export class Frontend {
                 Logger.info('[Frontend] Particles disabled by features.particles');
             }
 
-            if (this.engineConfig?.features?.skyEffects !== false) {
+            if (this._shouldInitializeAtmoBankSystem()) {
+                const atmoBankFeatureFlags = this._getAtmoBankFeatureFlags();
                 const { AtmoBankSystem } = await import('../atmosphere-banks/AtmoBankSystem.js');
                 this.atmoBankSystem = new AtmoBankSystem({
                     device: this.backend.device,
@@ -576,6 +591,8 @@ export class Frontend {
                     tileCategories: this.planetConfig?.tileCatalog?.tileCategories ??
                         this.planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
                     biomeDefinitions: this.planetConfig?.biomeDefinitions ?? this.planetConfig?.worldAuthoring?.biomes,
+                    featureFlags: atmoBankFeatureFlags,
+                    renderConfig: this.engineConfig?.rendering?.atmoBankParticles,
                 });
                 await this.atmoBankSystem.initialize();
                 if (this.quadtreeTileManager?.tileStreamer) {
@@ -585,6 +602,8 @@ export class Frontend {
                 if (typeof window !== 'undefined') {
                     window.atmoBankDiag = () => this.atmoBankSystem?.getDiagnostics?.() ?? null;
                 }
+            } else if (this.engineConfig?.features?.skyEffects !== false) {
+                Logger.info('[Frontend] Atmospheric bank particles disabled by features.cloudParticles/features.fogParticles');
             }
         }
 
@@ -1090,12 +1109,22 @@ updateLighting(starSystem) {
         }*/
     }
 
-    _renderAtmoBanksDepthReadOnly(commandEncoder) {
+    _renderAtmoBanks(commandEncoder) {
         if (!this.atmoBankSystem || !this.postProcessing) return;
 
         const colorView = this.postProcessing.hdrTextureView;
         const depthView = this.postProcessing.depthTextureView;
         if (!colorView || !depthView) return;
+
+        const vp = this.backend._viewport;
+        if (this.atmoBankSystem.renderOffscreen?.(commandEncoder, {
+            sceneColorView: colorView,
+            sceneDepthView: depthView,
+            sceneWidth: vp.width,
+            sceneHeight: vp.height,
+        })) {
+            return;
+        }
 
         const pass = commandEncoder.beginRenderPass({
             colorAttachments: [{
@@ -1109,9 +1138,13 @@ updateLighting(starSystem) {
             },
         });
 
-        const vp = this.backend._viewport;
         pass.setViewport(vp.x, vp.y, vp.width, vp.height, 0, 1);
-        this.atmoBankSystem.render(pass);
+        this.atmoBankSystem.render(pass, {
+            targetWidth: vp.width,
+            targetHeight: vp.height,
+            sceneWidth: vp.width,
+            sceneHeight: vp.height,
+        });
         pass.end();
     }
 
@@ -1216,7 +1249,7 @@ updateLighting(starSystem) {
                         this.lightingController, this.uniformManager
                     );
                     this.atmoBankSystem.setDepthTexture(this.postProcessing?.depthTextureView);
-                    this._renderAtmoBanksDepthReadOnly(abEnc);
+                    this._renderAtmoBanks(abEnc);
                     this.backend.resumeRenderPass();
                 }
 

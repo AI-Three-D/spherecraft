@@ -4,7 +4,13 @@ import { AtmoBankSimPass } from './AtmoBankSimPass.js';
 import { AtmoBankRenderPass } from './AtmoBankRenderPass.js';
 import { AtmoBankPlacement } from './AtmoBankPlacement.js';
 import { AtmoBankScatterPass } from './AtmoBankScatterPass.js';
-import { ATMO_BANK_TYPES, ATMO_EMITTER_CAPACITY } from './AtmoBankTypes.js';
+import {
+    ATMO_BANK_TYPES,
+    ATMO_BANK_ALL_TYPE_MASK,
+    ATMO_BANK_CLOUD_TYPE_MASK,
+    ATMO_BANK_FOG_TYPE_MASK,
+    ATMO_EMITTER_CAPACITY,
+} from './AtmoBankTypes.js';
 import {
     buildAtmoBankAuthoringRuntime,
     DEFAULT_ATMO_PLACEMENT_CONFIG,
@@ -20,14 +26,18 @@ export class AtmoBankSystem {
         atmoBankAuthoring = null,
         tileCategories = null,
         biomeDefinitions = null,
+        featureFlags = {},
+        renderConfig = {},
     }) {
         this.device = device;
         this.backend = backend;
         this.colorFormat = colorFormat;
         this.depthFormat = depthFormat;
+        this.renderConfig = renderConfig && typeof renderConfig === 'object' ? renderConfig : {};
         this.authoringRuntime = buildAtmoBankAuthoringRuntime(atmoBankAuthoring ?? {});
         this._tileCategories = Array.isArray(tileCategories) ? tileCategories : [];
         this._biomeDefinitions = Array.isArray(biomeDefinitions) ? biomeDefinitions : [];
+        this._enabledTypeMask = this._resolveEnabledTypeMask(featureFlags);
 
         this.buffers = null;
         this.simPass = null;
@@ -53,7 +63,34 @@ export class AtmoBankSystem {
             scatterRules: this.authoringRuntime.scatterRules,
             tileCategories: this._tileCategories,
             biomeDefinitions: this._biomeDefinitions,
+            enabledTypeMask: this._enabledTypeMask,
         };
+    }
+
+    _resolveEnabledTypeMask(featureFlags = {}) {
+        let mask = 0;
+        if (featureFlags?.fogParticles !== false) {
+            mask |= ATMO_BANK_FOG_TYPE_MASK;
+        }
+        if (featureFlags?.cloudParticles !== false) {
+            mask |= ATMO_BANK_CLOUD_TYPE_MASK;
+        }
+        return mask & ATMO_BANK_ALL_TYPE_MASK;
+    }
+
+    _featureDiagnostics() {
+        return {
+            cloudParticles: (this._enabledTypeMask & ATMO_BANK_CLOUD_TYPE_MASK) !== 0,
+            fogParticles: (this._enabledTypeMask & ATMO_BANK_FOG_TYPE_MASK) !== 0,
+            enabledTypeMask: this._enabledTypeMask,
+        };
+    }
+
+    setFeatureFlags(featureFlags = {}) {
+        this._enabledTypeMask = this._resolveEnabledTypeMask(featureFlags);
+        this.placement?.setEnabledTypeMask?.(this._enabledTypeMask);
+        this.scatterPass?.setEnabledTypeMask?.(this._enabledTypeMask);
+        this.scatterPass?.setAuthoringConfig?.(this._scatterAuthoringOptions());
     }
 
     setAuthoringRuntime(atmoBankAuthoring = null, options = {}) {
@@ -67,7 +104,9 @@ export class AtmoBankSystem {
         if (this.buffers) {
             this.buffers.uploadTypeDefs(this.authoringRuntime.typeDefs);
         }
-        this.placement = new AtmoBankPlacement(this.authoringRuntime.placement);
+        this.placement = new AtmoBankPlacement(this.authoringRuntime.placement, {
+            enabledTypeMask: this._enabledTypeMask,
+        });
         this.scatterPass?.setAuthoringConfig?.(this._scatterAuthoringOptions());
     }
 
@@ -83,10 +122,13 @@ export class AtmoBankSystem {
         this.renderPass = new AtmoBankRenderPass(this.device, this.buffers, {
             colorFormat: this.colorFormat,
             depthFormat: this.depthFormat,
+            renderConfig: this.renderConfig,
         });
         this.renderPass.initialize();
 
-        this.placement = new AtmoBankPlacement(this.authoringRuntime.placement);
+        this.placement = new AtmoBankPlacement(this.authoringRuntime.placement, {
+            enabledTypeMask: this._enabledTypeMask,
+        });
 
         if (this._tileStreamer) {
             this.scatterPass = new AtmoBankScatterPass(
@@ -121,6 +163,7 @@ export class AtmoBankSystem {
         return {
             initialized: this._initialized,
             mode: this._useGPUScatter ? 'gpu-scatter' : 'cpu-placement',
+            features: this._featureDiagnostics(),
             authoring: this.authoringRuntime.summary,
             hasTileStreamer: !!this._tileStreamer,
             maxParticles: this.buffers?.maxParticles ?? 0,
@@ -150,6 +193,7 @@ export class AtmoBankSystem {
 
     estimateLocalDistanceFogBoost(camera, environmentState, planetConfig) {
         if (!camera || !planetConfig || !this.placement) return 0;
+        if ((this._enabledTypeMask & ATMO_BANK_FOG_TYPE_MASK) === 0) return 0;
 
         this.placement.update(camera, environmentState, planetConfig);
         const emitters = this.placement.getEmitters();
@@ -204,6 +248,13 @@ export class AtmoBankSystem {
             this._lastUpdateInfo = {
                 updated: false,
                 reason: !this._initialized ? 'not-initialized' : 'missing-camera',
+            };
+            return;
+        }
+        if ((this._enabledTypeMask & ATMO_BANK_ALL_TYPE_MASK) === 0) {
+            this._lastUpdateInfo = {
+                updated: false,
+                reason: 'all-bank-types-disabled',
             };
             return;
         }
@@ -296,10 +347,16 @@ export class AtmoBankSystem {
         this._maybeLogDiagnostics();
     }
 
-    render(renderPassEncoder) {
+    render(renderPassEncoder, options = {}) {
         if (!this._initialized) return;
         const { read } = this.buffers.getPingPong();
-        this.renderPass.render(renderPassEncoder, read);
+        this.renderPass.render(renderPassEncoder, read, options);
+    }
+
+    renderOffscreen(commandEncoder, options = {}) {
+        if (!this._initialized) return false;
+        const { read } = this.buffers.getPingPong();
+        return this.renderPass.renderOffscreen(commandEncoder, read, options);
     }
 
     dispose() {
