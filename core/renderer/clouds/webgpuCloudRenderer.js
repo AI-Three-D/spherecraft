@@ -377,7 +377,16 @@ export class WebGPUCloudRenderer extends CloudRenderer {
 
         this._renderLayers = Array.from(this._smoothedLayers.values())
             .filter((layer) => layer.coverage > 0.002 && layer.altMax > layer.altMin)
+            .filter((layer) => this._layerEnabled(layer))
             .sort((a, b) => b.altMax - a.altMax);
+    }
+
+    _layerEnabled(layer) {
+        const name = `${layer?.name ?? ''}`.toLowerCase();
+        if (name === 'low') return this.config.lowClouds !== false;
+        if (name === 'mid') return this.config.midClouds !== false;
+        if (name === 'high') return this.config.highClouds !== false;
+        return true;
     }
 
     _normalizeLayer(layer) {

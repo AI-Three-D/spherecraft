@@ -15,6 +15,7 @@ struct AtmoTypeDef {
     color: vec4<f32>,
     fadeNearStart: f32, fadeFarStart: f32, fadeFarEnd: f32, densityThreshold: f32,
     altitudeOffsetMin: f32, altitudeOffsetMax: f32, verticalScale: f32, horizontalScale: f32,
+    heightMax: f32, centerLiftScale: f32, _padType0: f32, _padType1: f32,
 };
 
 struct AtmoGlobals {

@@ -493,9 +493,13 @@ export class Frontend {
         }
 
         if (this.engineConfig?.features?.clouds !== false) {
+            const features = this.engineConfig?.features ?? {};
             const cloudConfig = {
                 cloudAnisotropy: 0.75,
-                cirrusQuality: 'high'
+                cirrusQuality: 'high',
+                lowClouds: features.lowClouds !== false,
+                midClouds: features.midClouds !== false,
+                highClouds: features.highClouds !== false,
             };
             const { WebGPUCloudRenderer } = await import('../clouds/webgpuCloudRenderer.js');
             this.cloudRenderer = new WebGPUCloudRenderer(this.backend, cloudConfig);

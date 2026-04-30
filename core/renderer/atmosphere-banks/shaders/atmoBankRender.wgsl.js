@@ -130,8 +130,14 @@ fn vs_main(@builtin(vertex_index) vid: u32,
 
     let radiusA = max(2.0, p.size);
     let radiusB = max(2.0, p.size * max(td.horizontalScale, 0.05));
-    let halfHeight = max(1.5, p.size * max(td.verticalScale, 0.01));
-    let volumeCenter = p.position + localUp * halfHeight;
+    var halfHeight = max(1.5, p.size * max(td.verticalScale, 0.01));
+    let centerLiftScale = clamp(td.centerLiftScale, 0.0, 1.0);
+    if (td.heightMax > 0.0) {
+        let maxHalfHeight = max(1.5, td.heightMax / max(centerLiftScale + 1.0, 0.001));
+        halfHeight = min(halfHeight, maxHalfHeight);
+    }
+    let centerLift = halfHeight * centerLiftScale;
+    let volumeCenter = p.position + localUp * centerLift;
 
     let viewRight = safeNormalize(globals.cameraRight, basis.a);
     let viewUp = safeNormalize(globals.cameraUp, localUp);

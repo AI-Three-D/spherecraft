@@ -7,18 +7,20 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         displayName: 'Valley Mist',
         noiseScale: 0.008,
         noiseSpeed: 0.02,
-        densityBase: 0.54,
+        densityBase: 0.78,
         windResponse: 0.1,
         lifetime: Object.freeze({ min: 60, max: 120 }),
         size: Object.freeze({ min: 24, max: 220 }),
-        color: Object.freeze([0.75, 0.78, 0.82, 0.32]),
+        color: Object.freeze([0.75, 0.78, 0.82, 0.46]),
         fadeNearStart: 20.0,
         fadeFarStart: 1200.0,
         fadeFarEnd: 2000.0,
-        densityThreshold: 0.38,
-        altitudeOffset: Object.freeze({ min: 0.0, max: 22.0 }),
-        verticalScale: 0.095,
-        horizontalScale: 1.05,
+        densityThreshold: 0.26,
+        altitudeOffset: Object.freeze({ min: 0.0, max: 1.25 }),
+        verticalScale: 0.10,
+        horizontalScale: 1.20,
+        heightMax: 14.0,
+        centerLiftScale: 1.0,
     }),
     [ATMO_BANK_TYPES.FOG_POCKET]: Object.freeze({
         id: 'fog_pocket',
@@ -26,18 +28,20 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         displayName: 'Fog Pocket',
         noiseScale: 0.02,
         noiseSpeed: 0.04,
-        densityBase: 0.58,
+        densityBase: 0.82,
         windResponse: 0.15,
         lifetime: Object.freeze({ min: 30, max: 80 }),
         size: Object.freeze({ min: 14, max: 170 }),
-        color: Object.freeze([0.72, 0.75, 0.80, 0.34]),
+        color: Object.freeze([0.72, 0.75, 0.80, 0.50]),
         fadeNearStart: 10.0,
         fadeFarStart: 800.0,
         fadeFarEnd: 1500.0,
-        densityThreshold: 0.40,
-        altitudeOffset: Object.freeze({ min: 0.3, max: 14.0 }),
-        verticalScale: 0.11,
-        horizontalScale: 0.84,
+        densityThreshold: 0.28,
+        altitudeOffset: Object.freeze({ min: 0.0, max: 1.0 }),
+        verticalScale: 0.12,
+        horizontalScale: 1.05,
+        heightMax: 12.0,
+        centerLiftScale: 1.0,
     }),
     [ATMO_BANK_TYPES.LOW_CLOUD]: Object.freeze({
         id: 'low_cloud',
@@ -57,6 +61,8 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         altitudeOffset: Object.freeze({ min: 120.0, max: 520.0 }),
         verticalScale: 0.18,
         horizontalScale: 0.95,
+        heightMax: 0.0,
+        centerLiftScale: 1.0,
     }),
     [ATMO_BANK_TYPES.PEAK_CLOUD]: Object.freeze({
         id: 'peak_cloud',
@@ -76,6 +82,8 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         altitudeOffset: Object.freeze({ min: 180.0, max: 760.0 }),
         verticalScale: 0.30,
         horizontalScale: 0.88,
+        heightMax: 0.0,
+        centerLiftScale: 1.0,
     }),
 });
 
@@ -91,10 +99,12 @@ export const DEFAULT_ATMO_PLACEMENT_CONFIG = Object.freeze({
     spawnProbability: 0.24,
     localDistanceFog: Object.freeze({
         enabled: true,
-        largeEmitterMinSize: 160,
+        largeEmitterMinSize: 120,
         densityBoost: 0.00016,
         radiusScale: 0.92,
-        heightScale: 0.34,
+        heightScale: 0.10,
+        minHeight: 3.0,
+        heightMax: 14.0,
     }),
 });
 
@@ -185,6 +195,8 @@ function normalizeTypeDef(raw = {}, fallback = {}, typeId = 0) {
         ),
         verticalScale: clampNumber(raw.verticalScale, fallback.verticalScale ?? 0.12, 0.01, 2),
         horizontalScale: clampNumber(raw.horizontalScale, fallback.horizontalScale ?? 1.0, 0.05, 8),
+        heightMax: clampNumber(raw.heightMax, fallback.heightMax ?? 0, 0, 100000),
+        centerLiftScale: clampNumber(raw.centerLiftScale, fallback.centerLiftScale ?? 1.0, 0, 1),
     };
 }
 
@@ -249,6 +261,18 @@ function normalizePlacement(raw = {}, fallback = DEFAULT_ATMO_PLACEMENT_CONFIG) 
                 fallback.localDistanceFog?.heightScale ?? 0.34,
                 0.05,
                 2
+            ),
+            minHeight: clampNumber(
+                raw.localDistanceFog?.minHeight,
+                fallback.localDistanceFog?.minHeight ?? 4,
+                0,
+                5000
+            ),
+            heightMax: clampNumber(
+                raw.localDistanceFog?.heightMax,
+                fallback.localDistanceFog?.heightMax ?? 15,
+                0,
+                5000
             ),
         },
     };

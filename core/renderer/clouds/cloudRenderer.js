@@ -12,7 +12,10 @@ export class CloudRenderer {
 
         this.config = {
             cloudAnisotropy: config.cloudAnisotropy ?? 0.75,
-            cirrusQuality:   config.cirrusQuality   ?? 'high'
+            cirrusQuality:   config.cirrusQuality   ?? 'high',
+            lowClouds:       config.lowClouds       !== false,
+            midClouds:       config.midClouds       !== false,
+            highClouds:      config.highClouds      !== false,
         };
 
         this.noiseGenerator      = null;

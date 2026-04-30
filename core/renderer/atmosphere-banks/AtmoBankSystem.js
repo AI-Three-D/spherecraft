@@ -204,6 +204,8 @@ export class AtmoBankSystem {
         const densityBoost = localFog.densityBoost ?? 0.00016;
         const radiusScale = localFog.radiusScale ?? 0.92;
         const heightScale = localFog.heightScale ?? 0.34;
+        const minHeight = localFog.minHeight ?? 4;
+        const heightMax = localFog.heightMax ?? 15;
         const cam = camera.position;
         let strongest = 0;
 
@@ -227,8 +229,9 @@ export class AtmoBankSystem {
             const horizontal = Math.sqrt(horizontalSq);
 
             const radius = maxSize * radiusScale;
-            const height = Math.max(45, maxSize * heightScale);
-            if (horizontal > radius || vertical < -18 || vertical > height) continue;
+            const unclampedHeight = Math.max(minHeight, maxSize * heightScale);
+            const height = heightMax > 0 ? Math.min(heightMax, unclampedHeight) : unclampedHeight;
+            if (horizontal > radius || vertical < -3 || vertical > height) continue;
 
             const radial = 1 - this._smoothstep(radius * 0.45, radius, horizontal);
             const verticalWeight = 1 - this._smoothstep(height * 0.55, height, Math.max(0, vertical));

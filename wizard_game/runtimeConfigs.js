@@ -279,6 +279,9 @@ export function createEngineConfig() {
       particles:         false,   // campfire/leaves/fireflies particle system
       actors:            false,   // wizard, goblins, skinned mesh actors
       clouds:            true,    // high/cirrus WebGPUCloudRenderer
+      lowClouds:         false,   // low weather cloud shell
+      midClouds:         false,   // mid weather cloud shell
+      highClouds:        true,    // high cirrus/cirrostratus layers
       cloudParticles:    false,   // low/peak atmospheric bank particle clouds
       fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
       skyEffects:        true,    // sky, stars, moon

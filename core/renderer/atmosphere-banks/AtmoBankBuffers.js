@@ -124,6 +124,8 @@ export class AtmoBankBuffers {
             buf[b + 17] = e.altitudeOffset?.max ?? 0;
             buf[b + 18] = e.verticalScale ?? 0.12;
             buf[b + 19] = e.horizontalScale ?? 1.0;
+            buf[b + 20] = e.heightMax ?? 0;
+            buf[b + 21] = e.centerLiftScale ?? 1.0;
         }
         this.device.queue.writeBuffer(this.typeDefUBO, 0, buf);
     }
