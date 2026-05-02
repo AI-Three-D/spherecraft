@@ -143,7 +143,7 @@ sequenceDiagram
     participant TS as TileStreamer (CPU)
     participant TR as TerrainRenderer
     participant AS as AssetStreamer (vegetation)
-    participant PAR as ParticleSystem
+    participant PTCL as ParticleSystem
     participant ATM as Atmosphere / Clouds
     participant PP as PostProcessing
 
@@ -162,7 +162,7 @@ sequenceDiagram
     GE->>AS: draw vegetation
     Note over AS: far billboards → mid imposters<br/>→ near meshes → leaf geometry
 
-    GE->>PAR: simulate (compute) then render
+    GE->>PTCL: simulate (compute) then render
     GE->>ATM: sky + aerial perspective + cloud layers
     GE->>PP: tonemap → bloom → distortion → blit to swapchain
 ```
