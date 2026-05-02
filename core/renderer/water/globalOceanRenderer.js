@@ -130,6 +130,7 @@ export class GlobalOceanRenderer {
     _recordDiagnostics(safeDelta, prevTime) {
         const now = performance.now();
         return;
+        // eslint-disable-next-line no-unreachable
         const currentFrameId = this._diagFrameCount;
         if (this._diagFrameId === currentFrameId) {
             this._diagCallsThisFrame++;

@@ -804,12 +804,12 @@ export class WebGPUTerrainGenerator {
                 } catch (err) {
                     Logger.warn(`${SPLAT_STEP_PREFIX} [SplatDebug] quadtree splat diagnostics failed: ${err?.message || err}`);
                 }
-                try { paddedTileMap.destroy(); } catch (_) {}
-                try { splatPaletteTex.destroy(); } catch (_) {}
+                try { paddedTileMap.destroy(); } catch (_) { /* ignore cleanup failure */ }
+                try { splatPaletteTex.destroy(); } catch (_) { /* ignore cleanup failure */ }
                 if (debugProbeTextures) {
-                    try { debugProbeTextures.constantWrite.destroy(); } catch (_) {}
-                    try { debugProbeTextures.tileEcho.destroy(); } catch (_) {}
-                    try { debugProbeTextures.categoryEcho.destroy(); } catch (_) {}
+                    try { debugProbeTextures.constantWrite.destroy(); } catch (_) { /* ignore cleanup failure */ }
+                    try { debugProbeTextures.tileEcho.destroy(); } catch (_) { /* ignore cleanup failure */ }
+                    try { debugProbeTextures.categoryEcho.destroy(); } catch (_) { /* ignore cleanup failure */ }
                 }
             })
             .catch(() => {});
@@ -2177,25 +2177,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             faceIndex, 1, textureSize, textureSize, chunkSizeTex, config.gridSize,
             gpuHeight);
 
-        if (true) {
-            gpuSplatData = this.getOrCreateAtlasTexture(
-                atlasKey, 'splat', config.splatSize);
-            gpuSplatIndex = this.getOrCreateAtlasTexture(
-                atlasKey, 'splatIndex', config.splatSize);
-            await this.runSplatPassAtlas(
-                gpuHeight,
-                gpuTile,
-                gpuSplatData,
-                gpuSplatIndex,
-                atlasChunkX,
-                atlasChunkY,
-                config.splatSize,
-                config.splatSize,
-                chunkSizeTex,
-                'r32float',
-                'r32float'
-            );
-        }
+        gpuSplatData = this.getOrCreateAtlasTexture(
+            atlasKey, 'splat', config.splatSize);
+        gpuSplatIndex = this.getOrCreateAtlasTexture(
+            atlasKey, 'splatIndex', config.splatSize);
+        await this.runSplatPassAtlas(
+            gpuHeight,
+            gpuTile,
+            gpuSplatData,
+            gpuSplatIndex,
+            atlasChunkX,
+            atlasChunkY,
+            config.splatSize,
+            config.splatSize,
+            chunkSizeTex,
+            'r32float',
+            'r32float'
+        );
 
         return {
             height: gpuHeight,
@@ -2806,7 +2804,7 @@ this.device.queue.submit([enc.finish()]);
         }
         this.device.queue.submit([enc.finish()]);
         this.device.queue.onSubmittedWorkDone()
-            .then(() => { try { splatPaletteTex.destroy(); } catch (_) {} })
+            .then(() => { try { splatPaletteTex.destroy(); } catch (_) { /* ignore cleanup failure */ } })
             .catch(() => {});
     }
 
@@ -2908,7 +2906,7 @@ this.device.queue.submit([enc.finish()]);
         }
         this.device.queue.submit([enc.finish()]);
         this.device.queue.onSubmittedWorkDone()
-            .then(() => { try { splatPaletteTex.destroy(); } catch (_) {} })
+            .then(() => { try { splatPaletteTex.destroy(); } catch (_) { /* ignore cleanup failure */ } })
             .catch(() => {});
 
         // ──────────────────────────────────────────────────────────────

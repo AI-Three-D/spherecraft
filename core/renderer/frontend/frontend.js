@@ -1048,7 +1048,7 @@ updateLighting(starSystem) {
         if (doValidationScope) {
             const error = await this.backend.device.popErrorScope();
             if (error) {
-
+                // Error scopes are sampled here only to drain validation state.
             }
         }
     }

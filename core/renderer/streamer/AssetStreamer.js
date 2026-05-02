@@ -560,6 +560,7 @@ this._lodController = new TreeLODController({
             }
         }
 
+        // eslint-disable-next-line no-constant-condition
         if (false) { //this.GROUND_FIELD_BAKE_CONFIG.enabled) {
             this._groundFieldBaker = new GroundFieldBaker(this.device, {
                 assetRegistry: this._assetRegistry,
@@ -2451,21 +2452,14 @@ getGroundFieldTexture() {
                 }
             }
 
-            const shouldLogTrees =
-                treeOverflowTotal > 0 ||
-                treeRawTotal === 0 ||
-                (this._frameCount % (this._producerDebugInterval * 2)) === 0;
-
-            if (true || shouldLogTrees) {
-                Logger.info(
-                    `${this._logTag} [TreePool] ` +
-                    `${treeBandParts.join(' ')} ` +
-                    `total=${treeRawTotal}/${treeCapTotal} ` +
-                    `overflow=${treeOverflowTotal}` +
-                    (treeMaxOverflowBand >= 0 ? ` maxOverflowBand=${treeMaxOverflowBand}` : '') +
-                    ` sourceLayers=${this._treeSourceCache?.activeLayerCount ?? 0}`
-                );
-            }
+            Logger.info(
+                `${this._logTag} [TreePool] ` +
+                `${treeBandParts.join(' ')} ` +
+                `total=${treeRawTotal}/${treeCapTotal} ` +
+                `overflow=${treeOverflowTotal}` +
+                (treeMaxOverflowBand >= 0 ? ` maxOverflowBand=${treeMaxOverflowBand}` : '') +
+                ` sourceLayers=${this._treeSourceCache?.activeLayerCount ?? 0}`
+            );
 
             this._producerDebugPoolReadbackBuffer.unmap();
             if (this._producerDebugHasGroundPropSnapshot && this._producerDebugGroundPropReadbackBuffer) {
@@ -2476,8 +2470,8 @@ getGroundFieldTexture() {
             this._producerDebugHasGroundPropSnapshot = false;
         }).catch((err) => {
             Logger.warn(`${this._logTag} [BakeDiag] readback failed: ${err?.message || err}`);
-            try { this._producerDebugPoolReadbackBuffer?.unmap(); } catch (_) {}
-            try { this._producerDebugGroundPropReadbackBuffer?.unmap(); } catch (_) {}
+            try { this._producerDebugPoolReadbackBuffer?.unmap(); } catch (_) { /* ignore cleanup failure */ }
+            try { this._producerDebugGroundPropReadbackBuffer?.unmap(); } catch (_) { /* ignore cleanup failure */ }
             this._producerDebugQueued = false;
             this._producerDebugPending = false;
             this._producerDebugHasGroundPropSnapshot = false;

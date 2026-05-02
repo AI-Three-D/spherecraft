@@ -178,10 +178,6 @@ export class BaseWorldGenerator {
      * Stub atlas generation (for testing without actual GPU generation)
      */
     _generateAtlasStub(atlasKey) {
-        
-        for (const type of this.atlasConfig.atlasTextureTypes) {
-        }
-        
         return {
             atlasKey: atlasKey,
             stub: true

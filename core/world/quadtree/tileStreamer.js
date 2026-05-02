@@ -958,8 +958,8 @@ this._freshnessSkipCount = 0;
                 if (entry.framesRemaining > 0) continue;
                 this._pendingDestructions.splice(i, 1);
                 for (const tex of entry.textures) {
-                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch (_) {}
-                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch (_) {}
+                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch (_) { /* ignore cleanup failure */ }
+                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch (_) { /* ignore cleanup failure */ }
                 }
             }
         }
@@ -2279,6 +2279,7 @@ markTilesVisible(tiles) {
 
     _debugRegisterQueuedCopy(tileAddr, layer, textures) {
         return;
+        // eslint-disable-next-line no-unreachable
         const types = Object.keys(textures || {}).filter((type) => textures[type]?._gpuTexture?.texture);
         const captureSources = this._debugReadbacksEnabled && this._debugCopyVerifyCaptureCount < 4;
         if (captureSources) {
@@ -2423,8 +2424,8 @@ markTilesVisible(tiles) {
         if (list.length) {
             if (!this.arrayPool) {
                 for (const tex of list) {
-                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch (_) {}
-                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch (_) {}
+                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch (_) { /* ignore cleanup failure */ }
+                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch (_) { /* ignore cleanup failure */ }
                 }
                 return;
             }

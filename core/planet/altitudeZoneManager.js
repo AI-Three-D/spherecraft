@@ -83,9 +83,6 @@ export class AltitudeZoneManager {
         } else {
             this.currentZone = AltitudeZone.ORBITAL;
         }
-        
-        if (this.previousZone !== this.currentZone) {
-        }
     }
     
     _updateBlendFactors() {

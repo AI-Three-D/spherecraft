@@ -26,6 +26,7 @@ class QuadtreeDiagSnapshot {
   
     logVisibleSummary(tiles) {
       return;
+      // eslint-disable-next-line no-unreachable
       const total = tiles?.length ?? 0;
       if (total === 0) {
         this.log.info('[QT-Diag] Visible tiles: 0');
@@ -48,6 +49,7 @@ class QuadtreeDiagSnapshot {
 
     logVisibleHistograms(tiles) {
       return;
+      // eslint-disable-next-line no-unreachable
       const depthHist = {};
       const faceHist = {};
       for (const t of tiles) {
@@ -81,6 +83,7 @@ class QuadtreeDiagSnapshot {
 
     logVisibleDistanceStats(tiles, camera, planetConfig) {
       return;
+      // eslint-disable-next-line no-unreachable
       if (!tiles || tiles.length === 0) return;
       if (!camera?.position || !planetConfig) return;
 
@@ -119,6 +122,7 @@ class QuadtreeDiagSnapshot {
         };
       };
 
+      // eslint-disable-next-line no-unreachable
       let minDist = Infinity;
       let maxDist = -Infinity;
       let minTile = null;
@@ -242,6 +246,7 @@ class QuadtreeDiagSnapshot {
 
     logTraversalCounters(counters) {
       return;
+      // eslint-disable-next-line no-unreachable
       if (!counters) return;
       this.log.info(
         `[QT-Diag] Counters: queueA=${counters.queueA} queueB=${counters.queueB} ` +
@@ -251,6 +256,7 @@ class QuadtreeDiagSnapshot {
 
     logVisibleParentChildOverlaps(tiles, maxSamples = 8) {
       return;
+      // eslint-disable-next-line no-unreachable
       if (!tiles || tiles.length === 0) return;
       const key = (f, d, x, y) => `f${f}:d${d}:${x},${y}`;
       const set = new Set();
@@ -303,6 +309,7 @@ class QuadtreeDiagSnapshot {
 
     async logInstancePlacementCollisions(quadtreeGPU, meta, maxToCheck = 4096) {
       return;
+      // eslint-disable-next-line no-unreachable
       if (!quadtreeGPU || !meta?.lodArgs?.length) return;
 
       const quant = (v, scale = 1e6) => Math.round(v * scale);
@@ -376,6 +383,7 @@ class QuadtreeDiagSnapshot {
 
     async logInstanceFaceHistogram(quadtreeGPU, meta, maxToRead = 2048) {
       return;
+      // eslint-disable-next-line no-unreachable
       if (!quadtreeGPU || !meta?.lodArgs?.length) return;
 
       const total = meta.lodArgs.reduce((sum, a) => sum + (a.instanceCount || 0), 0);
@@ -413,6 +421,7 @@ class QuadtreeDiagSnapshot {
 
     logInstanceCoverageAndMismatch(tiles, instances, totalInstances, readCount) {
       return;
+      // eslint-disable-next-line no-unreachable
       if (!tiles || !instances || instances.length === 0) return;
 
       const visibleSet = new Set();
@@ -503,6 +512,7 @@ class QuadtreeDiagSnapshot {
 
     logInstanceLayerStats(instances, textures) {
       return;
+      // eslint-disable-next-line no-unreachable
       if (!instances || instances.length === 0) return;
 
       const getDepth = (tex) => {
@@ -513,6 +523,7 @@ class QuadtreeDiagSnapshot {
         return null;
       };
 
+      // eslint-disable-next-line no-unreachable
       const texInfo = {};
       if (textures) {
         for (const [name, tex] of Object.entries(textures)) {
@@ -561,6 +572,7 @@ class QuadtreeDiagSnapshot {
     // Coverage in quadtree coords (x/y range per face+depth). This tells you if traversal reaches “far”.
     logVisibleCoverage(tiles) {
       return;
+      // eslint-disable-next-line no-unreachable
       const byFaceDepth = new Map(); // key `${face}:${depth}` -> {minX,maxX,minY,maxY,count}
       for (const t of tiles) {
         const key = `${t.face}:${t.depth}`;
@@ -632,6 +644,7 @@ class QuadtreeDiagSnapshot {
   
     logMeta(meta) {
       return;
+      // eslint-disable-next-line no-unreachable
       const parts = meta.lodArgs.map(a =>
         `L${a.lod}: vis=${a.lodCountVisible} inst=${a.instanceCount} firstInst=${a.firstInstance} off=${a.lodOffset}`
       );
@@ -641,6 +654,7 @@ class QuadtreeDiagSnapshot {
   
     async logPerLodInstanceSamples(quadtreeGPU, meta, maxLODLevels, samplesPerLod = 3) {
       return;
+      // eslint-disable-next-line no-unreachable
       const refList = await quadtreeGPU.debugReadInstancesRange(0, 1, 1);
       const ref = refList.length ? refList[0] : null;
       const isSame = (a, b) => (
@@ -1751,6 +1765,7 @@ export class QuadtreeTileManager {
 
     _shouldLogDiag() {
       return false;
+        // eslint-disable-next-line no-unreachable
         const interval = this._diagInterval ?? 0;
         if (!Number.isFinite(interval) || interval <= 0) return false;
         this._diagFrame = (this._diagFrame + 1) % interval;
@@ -2462,6 +2477,7 @@ export class QuadtreeTileManager {
 
     _shouldRunStitchDiag() {
         return false;
+        // eslint-disable-next-line no-unreachable
         const cfg = this.engineConfig?.gpuQuadtree;
         if (!cfg?.diagnosticsEnabled) return false;
         const interval = cfg.diagnosticsIntervalFrames ?? 0;
@@ -4776,7 +4792,7 @@ function destroyWrappedTextures(textures) {
     if (!textures || typeof textures !== 'object') return;
     for (const tex of Object.values(textures)) {
         if (!tex) continue;
-        try { tex._gpuTexture?.texture?.destroy?.(); } catch {}
-        try { tex.dispose?.(); } catch {}
+        try { tex._gpuTexture?.texture?.destroy?.(); } catch { /* ignore cleanup failure */ }
+        try { tex.dispose?.(); } catch { /* ignore cleanup failure */ }
     }
 }

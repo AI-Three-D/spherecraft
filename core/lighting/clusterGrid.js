@@ -1,4 +1,5 @@
 import { Vector3, Vector4, MathUtils } from '../../shared/math/index.js';
+import { Texture, TextureFormat, TextureFilter, TextureWrap } from '../renderer/resources/texture.js';
 
 /**
  * Manages the 3D cluster grid for clustered forward rendering
@@ -194,45 +195,42 @@ export class ClusterGrid {
         };
     }
 
-buildClusterDataTexture() {
-    // Pack cluster data: 2 pixels per cluster
-    // Pixel 0: min.xyz, near_depth
-    // Pixel 1: max.xyz, far_depth
-    
-    const data = new Float32Array(this.totalClusters * 8);
-    
-    for (let i = 0; i < this.totalClusters; i++) {
-        const baseIdx = i * 6;
-        const texIdx = i * 8;
-        
-        // First pixel: min + near depth
-        data[texIdx + 0] = this.clusterAABBs[baseIdx + 0];
-        data[texIdx + 1] = this.clusterAABBs[baseIdx + 1];
-        data[texIdx + 2] = this.clusterAABBs[baseIdx + 2];
-        data[texIdx + 3] = this.clusterAABBs[baseIdx + 5]; // near Z
-        
-        // Second pixel: max + far depth  
-        data[texIdx + 4] = this.clusterAABBs[baseIdx + 3];
-        data[texIdx + 5] = this.clusterAABBs[baseIdx + 4];
-        data[texIdx + 6] = this.clusterAABBs[baseIdx + 5]; // far Z
-        data[texIdx + 7] = 0; // reserved
-    }
-    
+    buildClusterDataTexture() {
+        // Pack cluster data: 2 pixels per cluster
+        // Pixel 0: min.xyz, near_depth
+        // Pixel 1: max.xyz, far_depth
 
-    const texture = new Texture({
-        width: this.totalClusters * 2,
-        height: 1,
-        format: TextureFormat.RGBA32F,
-        minFilter: TextureFilter.NEAREST,
-        magFilter: TextureFilter.NEAREST,
-        wrapS: TextureWrap.CLAMP,
-        wrapT: TextureWrap.CLAMP,
-        generateMipmaps: false,
-        data: data
-    });
-    
-    return texture;
-}
+        const data = new Float32Array(this.totalClusters * 8);
+
+        for (let i = 0; i < this.totalClusters; i++) {
+            const baseIdx = i * 6;
+            const texIdx = i * 8;
+
+            // First pixel: min + near depth
+            data[texIdx + 0] = this.clusterAABBs[baseIdx + 0];
+            data[texIdx + 1] = this.clusterAABBs[baseIdx + 1];
+            data[texIdx + 2] = this.clusterAABBs[baseIdx + 2];
+            data[texIdx + 3] = this.clusterAABBs[baseIdx + 5]; // near Z
+
+            // Second pixel: max + far depth
+            data[texIdx + 4] = this.clusterAABBs[baseIdx + 3];
+            data[texIdx + 5] = this.clusterAABBs[baseIdx + 4];
+            data[texIdx + 6] = this.clusterAABBs[baseIdx + 5]; // far Z
+            data[texIdx + 7] = 0; // reserved
+        }
+
+        return new Texture({
+            width: this.totalClusters * 2,
+            height: 1,
+            format: TextureFormat.RGBA32F,
+            minFilter: TextureFilter.NEAREST,
+            magFilter: TextureFilter.NEAREST,
+            wrapS: TextureWrap.CLAMP,
+            wrapT: TextureWrap.CLAMP,
+            generateMipmaps: false,
+            data: data
+        });
+    }
     /**
      * Get memory usage stats
      */

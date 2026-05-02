@@ -243,7 +243,7 @@ async _withDebugReadbackLock(fn) {
   
     // destroy old pool
     for (const b of this._instanceStagePool) {
-      try { b.destroy(); } catch {}
+      try { b.destroy(); } catch { /* ignore cleanup failure */ }
     }
     this._instanceStagePool = [];
     this._instanceStageBytes = bytes;

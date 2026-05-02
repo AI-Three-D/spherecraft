@@ -143,8 +143,6 @@ export class TextureAtlasManager {
         // Only upload if backend is available
         if (this._backend) {
             this._uploadLookupTablesToGPU();
-        } else {
-            
         }
     }
     _uploadLookupTablesToGPU() {
@@ -179,84 +177,6 @@ export class TextureAtlasManager {
         
     }
     
-
-    // Legacy duplicate: this earlier class method is overridden by the later
-    // _buildTileTypeLookup definition below. Do not add terrain variant logic
-    // here; active terrain rendering uses one canonical texture layer.
-    _buildTileTypeLookup(maxTileTypes, maxVariants, level, seasons) {
-        const numSeasons = seasons.length;
-        const width = numSeasons * maxVariants;
-        const height = maxTileTypes;
-        const lookupData = new Float32Array(width * height * 4);
-        const atlas = this.atlases.get(level);
-        const isArrayAtlas = !!atlas?.texture?._isArray;
-
-        let successCount = 0;
-        let failCount = 0;
-        
-        for (let tileId = 0; tileId < maxTileTypes; tileId++) {
-            for (let s = 0; s < numSeasons; s++) {
-                const season = seasons[s];
-                const variantCount = this.getNumVariants(tileId, season, level);
-
-                for (let v = 0; v < maxVariants; v++) {
-                    const safeVar = Math.min(v, variantCount - 1);
-                    const x = s * maxVariants + v;
-                    const idx = (tileId * width + x) * 4;
-
-                    if (isArrayAtlas) {
-                        const key = `${tileId}:${season}:${safeVar}`;
-                        const layer = atlas?.seasonalTextureMap?.get(key);
-                        if (layer !== undefined) {
-                            lookupData[idx + 0] = layer;
-                            lookupData[idx + 1] = 0.0;
-                            lookupData[idx + 2] = 0.0;
-                            lookupData[idx + 3] = 0.0;
-                            successCount++;
-                        } else {
-                            lookupData[idx + 0] = 0.0;
-                            lookupData[idx + 1] = 0.0;
-                            lookupData[idx + 2] = 0.0;
-                            lookupData[idx + 3] = 0.0;
-                            failCount++;
-                        }
-                    } else {
-                        const uvs = this.getSeasonalTextureUV(tileId, season, safeVar, level);
-                        if (uvs) {
-                            lookupData[idx + 0] = uvs.u1;
-                            lookupData[idx + 1] = uvs.v1;
-                            lookupData[idx + 2] = uvs.u2;
-                            lookupData[idx + 3] = uvs.v2;
-                            successCount++;
-                        } else {
-                            lookupData[idx + 0] = 0.0;
-                            lookupData[idx + 1] = 0.0;
-                            lookupData[idx + 2] = 1.0;
-                            lookupData[idx + 3] = 1.0;
-                            failCount++;
-                        }
-                    }
-                }
-            }
-        }
-
-        
-        
-        const texture = new Texture({
-            width: width,
-            height: height,
-            format: TextureFormat.RGBA32F,
-            minFilter: TextureFilter.NEAREST,
-            magFilter: TextureFilter.NEAREST,
-            wrapS: TextureWrap.CLAMP,
-            wrapT: TextureWrap.CLAMP,
-            generateMipmaps: false,
-            data: lookupData
-        });
-
-        return texture;
-    }
-
     _buildNumVariantsTexture(maxTileTypes, seasons) {
         const numSeasons = seasons.length;
         const numVariants = new Uint8Array(maxTileTypes * numSeasons);
@@ -300,9 +220,6 @@ export class TextureAtlasManager {
         const paddedTextureSize = textureSize + (this.PADDING * 2);
         const maxTilesPerSide = Math.floor(atlasSize / paddedTextureSize);
         const maxTotalTiles = maxTilesPerSide * maxTilesPerSide;
-
-        if (numTextures > maxTotalTiles) {
-        }
 
         const tilesPerRow = maxTilesPerSide;
         const rows = Math.ceil(numTextures / tilesPerRow);
@@ -594,96 +511,6 @@ export class TextureAtlasManager {
         }
     }
     
-    async createAtlas(level) {
-        const config = this.ATLAS_CONFIG[level];
-        const atlas = this.atlases.get(level);
-        const allTexturePaths = this.TextureConfigHelper.getAllTexturesForLevel(level);
-    
-        const hasTransparent = (level === this.TEXTURE_LEVELS.MICRO);
-        const startIndex = hasTransparent ? 1 : 0;
-        const totalLayers = allTexturePaths.length + startIndex;
-        const textureSize = config.textureSize;
-        const bytesPerLayer = textureSize * textureSize * 4;
-    
-        const allLayerData = new Uint8Array(totalLayers * bytesPerLayer);
-    
-        // Layer 0: grey placeholder
-        if (hasTransparent) {
-            for (let i = 0; i < textureSize * textureSize; i++) {
-                allLayerData[i * 4 + 0] = 128;
-                allLayerData[i * 4 + 1] = 128;
-                allLayerData[i * 4 + 2] = 128;
-                allLayerData[i * 4 + 3] = 255;
-            }
-        }
-    
-        let currentIndex = startIndex;
-        for (const texturePath of allTexturePaths) {
-            if (currentIndex >= totalLayers) break;
-            try {
-                const img = await this.loadImage(texturePath);
-    
-                const tempCanvas = document.createElement('canvas');
-                tempCanvas.width  = textureSize;
-                tempCanvas.height = textureSize;
-                const tempCtx = tempCanvas.getContext('2d');
-                tempCtx.drawImage(img, 0, 0, textureSize, textureSize);
-                const imageData = tempCtx.getImageData(0, 0, textureSize, textureSize);
-    
-                const layerOffset = currentIndex * bytesPerLayer;
-                allLayerData.set(new Uint8Array(imageData.data.buffer), layerOffset);
-    
-                atlas.textureMap.set(texturePath, currentIndex);
-                currentIndex++;
-            } catch (error) {
-                // Fallback solid colour
-                const layerOffset = currentIndex * bytesPerLayer;
-                const r = Math.floor((currentIndex * 137.5) % 256);
-                for (let p = 0; p < textureSize * textureSize; p++) {
-                    allLayerData[layerOffset + p * 4 + 0] = r;
-                    allLayerData[layerOffset + p * 4 + 1] = 64;
-                    allLayerData[layerOffset + p * 4 + 2] = 64;
-                    allLayerData[layerOffset + p * 4 + 3] = 255;
-                }
-                atlas.textureMap.set(texturePath, currentIndex);
-                currentIndex++;
-            }
-        }
-    
-        // Seasonal map
-        for (const tileConfig of this.TILE_CONFIG) {
-            for (const season of Object.values(this.SEASONS)) {
-                const textures = this.TextureConfigHelper.getTexturesForSeason(tileConfig.id, season, level);
-                for (let variant = 0; variant < textures.length; variant++) {
-                    const texturePath = textures[variant];
-                    const key = `${tileConfig.id}:${season}:${variant}`;
-                    const index = atlas.textureMap.get(texturePath);
-                    atlas.seasonalTextureMap.set(key, index);
-                }
-            }
-        }
-    
-        atlas.texture = new Texture({
-            width: textureSize,
-            height: textureSize,
-            depth: totalLayers,
-            format: TextureFormat.RGBA8,
-            minFilter: TextureFilter.LINEAR_MIPMAP_LINEAR,
-            magFilter: TextureFilter.LINEAR,
-            wrapS: TextureWrap.REPEAT,
-            wrapT: TextureWrap.REPEAT,
-            generateMipmaps: true,
-            data: allLayerData,
-            _isArray: true
-        });
-    
-        if (this._backend) {
-            this._backend.createTexture(atlas.texture);
-        }
-    
-        return atlas.texture;
-    }
-    
     // Lookup table now writes layer indices. The RGBA32F format is kept for
     // GPU compatibility but only .r is meaningful for the active renderer.
     //
@@ -769,11 +596,7 @@ export class TextureAtlasManager {
         
         // CRITICAL: Use backend to upload
         if (this._backend) {
-            
             this._backend.createTexture(atlas.texture);
-            
-        } else {
-            
         }
         await this.loadTexturesForLevel(level);
         return atlas.texture;

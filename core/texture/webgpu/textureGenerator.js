@@ -507,7 +507,7 @@ setSize(width, height) {
         if (info.messages.length > 0) {
             for (const msg of info.messages) {
                 if (msg.type === 'error') {
-                    
+                    // Keep walking all messages; callers handle shader creation failures.
                 }
             }
         }
