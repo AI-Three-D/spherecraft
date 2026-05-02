@@ -22,7 +22,7 @@ import {
 export const PARTICLE_STRIDE      = 64;   // matches WGSL Particle
 export const TYPE_DEF_STRIDE      = 128;  // matches WGSL ParticleTypeDef (8 vec4s)
 export const EMITTER_DEF_STRIDE   = 80;   // matches WGSL EmitterSpawnDef (5 vec4s)
-export const EMITTER_CAPACITY     = 16;
+export const EMITTER_CAPACITY     = 96;
 export const GLOBALS_UBO_SIZE     = 256;  // padded conservatively for uniform binding
 export const INDIRECT_ARGS_SIZE   = 16;   // 4 u32
 export const SPAWN_SCRATCH_SIZE   = 16;   // 1 atomic + pad
@@ -39,6 +39,10 @@ export const GLOBALS_OFFSETS = {
     debugMode:                     120,  // u32 — 1 = oversized magenta debug particles
     flatWorld:                     124,  // u32 — 1 = use +Y up instead of planet origin
     fireflyGlow:                   128,  // f32 — daylight-relative firefly intensity scalar
+    windDirX:                      132,  // f32 — world-space wind direction X
+    windDirY:                      136,  // f32 — world-space wind direction Y (mapped from 2D)
+    windSpeed:                     140,  // f32 — wind speed (m/s)
+    leafLight:                     144,  // f32 — direct daylight visibility for non-emissive leaf particles
 };
 
 export class ParticleBuffers {
@@ -223,6 +227,7 @@ export class ParticleBuffers {
             if (entry.blend === 'additive')   flags |= PARTICLE_FLAGS.ADDITIVE;
             if (entry.flags?.stretchAlongVel) flags |= PARTICLE_FLAGS.STRETCH_VEL;
             if (entry.flags?.rotate)          flags |= PARTICLE_FLAGS.ROTATE;
+            if (entry.flags?.leaf)            flags |= PARTICLE_FLAGS.LEAF;
             const defaultBloomWeight = entry.bloomWeight ??
                 (((entry.emissive ?? 1.0) > 1.0) ? 1.0 : 0.0);
             const bloomEnabled = entry.bloomEnabled ?? entry.bloom ?? (defaultBloomWeight > 0);
@@ -276,10 +281,14 @@ export class ParticleBuffers {
 
             this._emitterU32[base + 12] = (emitter.rngSeed ?? 0) >>> 0;
             this._emitterU32[base + 13] = (emitter.activeTypeCount ?? 0) >>> 0;
+            const tint = emitter.foliageColor ?? [0, 0, 0];
+            this._emitterF32[base + 14] = tint[0] ?? 0;
+            this._emitterF32[base + 15] = tint[1] ?? 0;
 
             this._emitterF32[base + 16] = localUp[0] ?? 0;
             this._emitterF32[base + 17] = localUp[1] ?? 1;
             this._emitterF32[base + 18] = localUp[2] ?? 0;
+            this._emitterF32[base + 19] = tint[2] ?? 0;
         }
 
         this.device.queue.writeBuffer(this.emitterData, 0, this._emitterF32.buffer);
@@ -296,6 +305,9 @@ export class ParticleBuffers {
         debugMode = 0,
         flatWorld = 0,
         fireflyGlow = 1.0,
+        leafLight = 1.0,
+        windDirection = [0, 0],
+        windSpeed = 0,
     }) {
         const f32 = this._globalsF32;
         const u32 = this._globalsU32;
@@ -326,6 +338,10 @@ export class ParticleBuffers {
         u32[GLOBALS_OFFSETS.debugMode / 4] = debugMode >>> 0;
         u32[GLOBALS_OFFSETS.flatWorld / 4] = flatWorld >>> 0;
         f32[GLOBALS_OFFSETS.fireflyGlow / 4] = fireflyGlow;
+        f32[GLOBALS_OFFSETS.windDirX / 4]   = windDirection[0] ?? 0;
+        f32[GLOBALS_OFFSETS.windDirY / 4]   = windDirection[1] ?? 0;
+        f32[GLOBALS_OFFSETS.windSpeed / 4]  = windSpeed;
+        f32[GLOBALS_OFFSETS.leafLight / 4]  = leafLight;
 
         this.device.queue.writeBuffer(this.globalsUBO, 0, f32.buffer);
     }

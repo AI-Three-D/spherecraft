@@ -7,6 +7,7 @@ import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 import { GRASS_QUALITY_LEVELS, GRASS_TYPES } from '../templates/configs/grassConfig.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
 import { resolveTreeConfig } from '../templates/configs/treeConfigResolver.js';
+import { WEATHER_CONFIG } from '../templates/configs/weatherConfig.js';
 
 const ATLAS_TEXTURE_TYPES = ['height', 'normal', 'tile', 'splatData', 'macro'];
 
@@ -74,6 +75,14 @@ export function createEngineConfig() {
     splatConfig: {
       splatDensity: 8,
       splatKernelSize: 5,
+      transitionSharpness: 0.3, //1.9
+      transitionDominanceStart: 0.05,
+      transitionDominanceEnd: 0.9,
+      centerCategoryBias: 0.0,
+      transitionBreakupScale: 0.48,
+      transitionBreakupWarpScale: 0.155,
+      transitionBreakupWarpStrength: 0.65,
+      transitionBreakupStrength: 0.10,
   },
     lod: {
       distancesMeters: lodDistancesMeters,
@@ -91,10 +100,10 @@ export function createEngineConfig() {
         ambient: {
           // Global ambient tuning for all terrain/asset materials.
           intensityMultiplier: 1.0,
-          minIntensity: 0.028,
+          minIntensity: 0.08,
           maxIntensity: 0.30,
           sunContributionScale: 0.22,
-          moonContributionScale: 0.05,
+          moonContributionScale: 0.08,
           moonNormalizationIntensity: 0.15
         },
         sun: {
@@ -104,9 +113,9 @@ export function createEngineConfig() {
           twilightEndDot: 0.04
         },
         fog: {
-          densityMultiplier: 0.48,
-          maxBaseDensity: 0.0006,
-          dayDensityScale: 1.0,
+          densityMultiplier: 0.40,
+          maxBaseDensity: 0.00055,
+          dayDensityScale: 0.85,
           nightDensityScale: 0.42,
           minBrightness: 0.05,
           maxBrightness: 0.82,
@@ -122,6 +131,12 @@ export function createEngineConfig() {
           shockwave: 200.0
         }
       },
+      atmoBankParticles: {
+        offscreen: {
+          enabled: true,
+          resolutionScale: 0.5, // set to 0.25 for quarter-resolution
+        },
+      },
       terrainShader: {
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
@@ -130,11 +145,48 @@ export function createEngineConfig() {
         midMaxLOD: 4,
         nearToMidFadeStartChunks: 2.5,
         nearToMidFadeEndChunks: 4.0,
+        lodEdgeFadeEnabled: false,
+        lodEdgeFadeMaxLod: 4,
+        // AO masks are baked per tile, so adjacent geometry LODs can expose
+        // different mask frequencies. Fade AO toward neutral only at cross-LOD
+        // borders; leave color, normals, and shadows on their normal paths.
+        lodEdgeAOFadeEnabled: true,
+        lodEdgeFadeWidth: 0.08,
+        lodEdgeColorStrength: 0.0,
+        lodEdgeResolvedColorEnabled: false,
+        lodEdgeAOStrength: 1.0,
+        lodEdgeNormalStrength: 1.0,
+        lodEdgeShadowStrength: 1.0,
         pointSampleLodStart: 2,
-        macroStartLod: 2,
+        macroStartLod: 99,
+        resolvedColorEnabled: true,
+        resolvedColorStartLod: 1,
+        lod0ResolvedColorEnabled: true,
+        // LOD0 keeps the live atlas only for very close inspection. Beyond
+        // that, fade quickly into the prebaked color so near/mid terrain uses
+        // the same stable medium-scale texture character as LOD1.
+        lod0ResolvedColorFadeStartMeters: 3,
+        lod0ResolvedColorFadeEndMeters: 18,
+        // AO has the same near-vs-prebaked frequency mismatch as albedo.
+        // Fade LOD0 contact AO out over the same range so its tile-local
+        // darkening does not stop abruptly where LOD1 takes over.
+        lod0AOFadeEnabled: true,
+        lod0AOFadeStartMeters: 3,
+        lod0AOFadeEndMeters: 18,
+        nearMipSharpenMaxLod: -1,
+        variantRotationMaxLod: 2,
         clusteredMaxLod: 1,
-        aerialMaxLod: 2,
-        normalMapMaxLod: 3,
+        // Geometry shader variants currently run through LOD6, so this keeps
+        // aerial perspective capped while avoiding an in-view AP cutoff seam.
+        aerialMaxLod: 6,
+        // Compile normals for farther LOD variants, but the shader samples
+        // them only inside an altitude-scaled distance radius. Ground-level
+        // cost stays bounded; aerial views keep directional terrain lighting.
+        normalMapMaxLod: 7,
+        normalMapDistanceBaseMeters: 4500,
+        normalMapDistanceAltitudeScaleMeters: 1000,
+        normalMapDistanceMaxMeters: 28000,
+        normalMapDistanceFadeMeters: 2500,
         altitudeNormalMinMeters: 8000,
         altitudeShadowMinMeters: 12000,
         shadowDistanceMaxMeters: 1000,
@@ -226,6 +278,25 @@ export function createEngineConfig() {
       terrainVertexDebugMode: 0,
       terrainForceDirectDraw: false,
     },
+
+    features: {
+      shadows:           false,
+      clusteredLighting: false,
+      treesNear:         false,   // individual trees with leaves/branches
+      treesMid:          false,   // hull trees (140–700 m)
+      treesFar:          false,   // coarse canopy hulls (500–4000 m)
+      streamedAssets:    true,   // all streamed ground cover, props, etc.
+      particles:         false,   // campfire/leaves/fireflies particle system
+      actors:            false,   // wizard, goblins, skinned mesh actors
+      clouds:            true,    // high/cirrus WebGPUCloudRenderer
+      lowClouds:         false,   // low weather cloud shell
+      midClouds:         false,   // mid weather cloud shell
+      highClouds:        true,    // high cirrus/cirrostratus layers
+      cloudParticles:    false,   // low/peak atmospheric bank particle clouds
+      fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
+      skyEffects:        true,    // sky, stars, moon
+    },
+
     gpuQuadtree: {
       enabled: true,
       tileTextureSize: 128,
@@ -348,6 +419,7 @@ export function createEngineConfig() {
       maxQueueSize: 1024,
       minStartIntervalMs: 0
     },
+    weather: WEATHER_CONFIG,
 
     trees: resolveTreeConfig({
       flags: {
@@ -423,37 +495,46 @@ export function createEngineConfig() {
       // null budgets are auto-derived from `density`.
       nearTier: {
           maxCloseTrees: null,
-          maxTotalLeaves: null,
+          maxTotalLeaves: 360000,
           maxTotalClusters: 10000000,
 
-          maxBranchDetailLevel: 3,
-          branchLODBands: [{ distance: 50, maxLevel: 4 }],
-          branchTerminalLevel: 2,
-          branchFadeMargin: null,
+          maxBranchDetailLevel: 0,
+          branchGeometryLOD: 1,
+          branchTrunkRadialSegments: 6,
+          branchBranchRadialSegments: 4,
+          branchLODBands: [
+              { distance: 20, maxLevel: 2 },
+              { distance: 36, maxLevel: 1 },
+          ],
+          branchTerminalLevel: 1,
+          branchFadeMargin: 8,
 
           leafBands: [
-              { start:  0, end:  8 },
-              { start:  7, end: 20 },
-              { start: 19, end: 30 },
-              { start: 25 },
+              { start:   0, end:  36 },
+              { start:  28, end:  82 },
+              { start:  66, end: 150 },
+              { start: 128 },
           ],
-          // 220m range with an 80m fade window means the near leaf fade
-          // starts at 140m so the handoff matches the mid-tier fade-in.
-          leafFadeStartRatio: 140 / 220,
+          leafFadeStartRatio: 0.86,
+          leafBandBudgetFractions: [0.42, 0.30, 0.18, 0.10],
 
           leafCounts: {
-              generic: [6000, 3000, 1500, 1500],
-              0:       [3000, 1500,  700,  700],
-              1:       [3000, 1500,  700,  700],
+              generic: [5000, 1800, 600, 160],
+              0:       [2400, 900, 300, 100],
+              1:       [2400, 900, 300, 100],
           },
           leafSizeScale: [1.0, 1.36, 2.0, 2.0],
 
           birch: {
-              nearDistance: 20.0,
-              closeSize: 0.36, settledSize: 0.55, aspect: 1.5,
-              closeLeaves: 4000,
-              closeCardsPerAnchor: 10,
+              nearDistance: 55.0,
+              closeSize: 0.24, settledSize: 0.40, aspect: 1.5,
+              closeLeaves: 9000,
+              closeCardsPerAnchor: 4,
               settledCardsPerAnchor: 1,
+              l0SettledLeaves: 4500,
+              l1CardsPerAnchor: 16,
+              l2CardsPerAnchor: 10,
+              l3CardsPerAnchor: 6,
           },
       },
 
@@ -774,7 +855,7 @@ export function createGameDataConfig() {
 
           // ── Per-tile layer heights ───────────────────────────────────────────
           // Used only by the step_overlay blend mode.  Each key is a tile type
-          // integer (from TILE_TYPES).  Value is a normalized height in [0, 1]
+          // integer (from the authored/default tile catalog). Value is a normalized height in [0, 1]
           // representing how far "above" ground level this surface visually sits.
           // Higher values make the tile appear to sit on top at transition edges.
           tileLayerHeights: TILE_LAYER_HEIGHTS,

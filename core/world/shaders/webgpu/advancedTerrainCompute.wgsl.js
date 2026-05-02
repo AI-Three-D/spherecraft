@@ -1,5 +1,6 @@
 // js/world/shaders/webgpu/advancedTerrainCompute.wgsl.js
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
+import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
 
 export function createAdvancedTerrainComputeShader(options = {}) {
   const shaderBundle = options?.terrainShaderBundle;
@@ -28,6 +29,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const outputFormat = options?.outputFormat ?? 'rgba32float';
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;
+  const maxBiomes = options?.maxBiomes ?? 16;
 
   return [
     base.constants(),
@@ -77,10 +79,13 @@ struct Uniforms {
     climateZone4Extra: vec4<f32>,
 };
 
+${createBiomeScoringWGSL({ maxBiomes })}
+
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var outputTexture: texture_storage_2d<${outputFormat}, write>;
 ${hasHeightBindings ? '@group(0) @binding(2) var heightMap: texture_2d<f32>;' : ''}
 ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
+@group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
 
 fn getSpherePoint(face: i32, u: f32, v: f32) -> vec3<f32> {
     var cubePos: vec3<f32>;
@@ -328,7 +333,10 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
 `,
     createNoiseLibrary(),
     createTerrainCommon(),
-    createSurfaceCommon(),
+    createSurfaceCommon({
+        tileCategories: options.tileCategories,
+        tileTypes: options.tileTypes,
+    }),
     createTerrainFeatureContinents(),
     createTerrainFeaturePlains(),
     createTerrainFeatureHills(),
@@ -340,9 +348,9 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureHighlands(),
     base.base(),
     `
-const WATER_1: u32 = 0u;
-const GRASS_SHORT_1: u32 = 10u;
-const ROCK_OUTCROP_1: u32 = 42u;
+const WATER_1: u32 = SURFACE_WATER;
+const GRASS_SHORT_1: u32 = SURFACE_GRASS_BASE;
+const ROCK_OUTCROP_1: u32 = SURFACE_ROCK_BASE;
 
 const DISP_MICRO_FOREST: f32 = 10.0;
 const DISP_MICRO_GRASS: f32 = 6.0;
@@ -402,7 +410,14 @@ fn determineTileTypeAdvanced(
 }
 
 
-fn determineTileType(
+fn resolveAuthoredBiomeTileType(
+    tileId: u32,
+    variant: u32
+) -> u32 {
+    return resolveCatalogTileVariant(tileId, variant);
+}
+
+fn determineTileTypeFallback(
     h: f32, slope: f32, wx: f32, wy: f32,
     unitDir: vec3<f32>, seed: i32
 ) -> u32 {
@@ -414,6 +429,113 @@ fn determineTileType(
 
     let weights = computeSurfaceWeights(slope, h, wx, wy, unitDir, seed);
     return resolveTileTypeFromWeights(weights, wx, wy, unitDir, seed, h, slope);
+}
+
+fn authoredBiomeSpatialCoords(
+    wx: f32, wy: f32, unitDir: vec3<f32>
+) -> vec2<f32> {
+    if (uniforms.face < 0) {
+        return vec2<f32>(wx, wy);
+    }
+
+    // Feed authored biome scoring with planet-scale metric coordinates instead of
+    // near-unit sphere axes, otherwise the deterministic selector collapses into a
+    // handful of global cells on large planets.
+    let refRadiusM = max(noiseReferenceRadiusM(), 1.0);
+    let metricPos = unitDir * refRadiusM;
+    return vec2<f32>(metricPos.x, metricPos.z);
+}
+
+fn determineTileType(
+    h: f32, slope: f32, wx: f32, wy: f32,
+    unitDir: vec3<f32>, seed: i32
+) -> u32 {
+    let oceanLevel = uniforms.waterParams.y;
+
+    if (h <= oceanLevel) {
+        return SURFACE_WATER;
+    }
+
+    if (biomeConfigUniforms.biomeCount == 0u) {
+        return determineTileTypeFallback(h, slope, wx, wy, unitDir, seed);
+    }
+
+    let climate = getClimate(wx, wy, unitDir, h, seed);
+    let biomeSpatial = authoredBiomeSpatialCoords(wx, wy, unitDir);
+    let biome = selectBiomeFromDefs(
+        h,
+        climate.precipitation,
+        climate.temperature,
+        slope,
+        biomeSpatial.x,
+        biomeSpatial.y,
+        biomeConfigUniforms
+    );
+    if (biome.score <= 0.0) {
+        // This re-enters the legacy path, which currently re-evaluates climate inside
+        // computeSurfaceWeights(). Keep that in mind if authored biomes become sparse.
+        return determineTileTypeFallback(h, slope, wx, wy, unitDir, seed);
+    }
+
+    let variant = selectTileVariant(wx, wy, unitDir, seed);
+    let rockNoise = (fbmAuto(wx, wy, unitDir, 0.12, 2, seed + 7310, 2.0, 0.5) + 1.0) * 0.5;
+    let rockSlope = smoothstep(0.48, 0.80, slope);
+    let highland = smoothstep(oceanLevel + 0.04, oceanLevel + 0.20, h);
+    let rockMask = rockSlope * mix(0.65, 1.0, highland) * mix(0.8, 1.05, rockNoise);
+    let rockThreshold = select(0.72, 0.88, isSnowTile(biome.tileId));
+    if (rockMask > rockThreshold) {
+        return validateTileType(SURFACE_ROCK_BASE + variant);
+    }
+
+    return resolveAuthoredBiomeTileType(biome.tileId, variant);
+}
+
+fn legacyTreeTileEligibility(tileId: u32) -> f32 {
+    if (isForestFloorTile(tileId)) {
+        return 1.0;
+    }
+    if (isGrassTile(tileId)) {
+        return 0.001;
+    }
+    if (isDirtTile(tileId)) {
+        return 0.0002;
+    }
+    return 0.0;
+}
+
+fn legacyClimateTreeEligibility(
+    h: f32, wx: f32, wy: f32, unitDir: vec3<f32>, seed: i32
+) -> f32 {
+    let climate = getClimate(wx, wy, unitDir, h, seed);
+    let coldFade = smoothstep(-0.3, 0.0, climate.temperature);
+    let dryFade = smoothstep(0.05, 0.25, climate.precipitation);
+    let desertFade = 1.0 - smoothstep(0.7, 0.9, climate.temperature)
+                         * (1.0 - smoothstep(0.0, 0.15, climate.precipitation));
+    return coldFade * dryFade * desertFade;
+}
+
+fn authoredTreeEligibility(
+    h: f32, slope: f32, wx: f32, wy: f32, unitDir: vec3<f32>, seed: i32
+) -> f32 {
+    if (biomeConfigUniforms.biomeCount == 0u) {
+        return -1.0;
+    }
+
+    let climate = getClimate(wx, wy, unitDir, h, seed);
+    let biomeSpatial = authoredBiomeSpatialCoords(wx, wy, unitDir);
+    let biome = selectBiomeFromDefs(
+        h,
+        climate.precipitation,
+        climate.temperature,
+        slope,
+        biomeSpatial.x,
+        biomeSpatial.y,
+        biomeConfigUniforms
+    );
+    if (biome.score <= 0.0) {
+        return -1.0;
+    }
+    return clamp(biome.treeWeight, 0.0, 1.0);
 }
 
 fn debugForcedTileType() -> u32 {
@@ -801,25 +923,15 @@ else if (uniforms.outputType == 5) {
     }
 
     if (eligibility > 0.0) {
-        var tileEligible: f32 = 0.0;
-        if (isForestFloorTile(tileId)) {
-            tileEligible = 1.0;
-        } else if (isGrassTile(tileId)) {
-            tileEligible = 0.001;
-        } else if (isDirtTile(tileId)) {
-            tileEligible = 0.0002;
+        let authoredEligibility = authoredTreeEligibility(h, slope, wx, wy, unitDir, uniforms.seed);
+        if (authoredEligibility >= 0.0) {
+            eligibility *= authoredEligibility;
+        } else {
+            eligibility *= legacyTreeTileEligibility(tileId);
+            if (eligibility > 0.0) {
+                eligibility *= legacyClimateTreeEligibility(h, wx, wy, unitDir, uniforms.seed);
+            }
         }
-        eligibility *= tileEligible;
-    }
-
-    if (eligibility > 0.0) {
-        let climate = getClimate(wx, wy, unitDir, h, uniforms.seed);
-        let coldFade = smoothstep(-0.3, 0.0, climate.temperature);
-        let dryFade = smoothstep(0.05, 0.25, climate.precipitation);
-        let desertFade = 1.0 - smoothstep(0.7, 0.9, climate.temperature)
-                             * (1.0 - smoothstep(0.0, 0.15,
-                                      climate.precipitation));
-        eligibility *= coldFade * dryFade * desertFade;
     }
 
     if (eligibility > 0.0) {

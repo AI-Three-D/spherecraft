@@ -1,0 +1,3 @@
+{
+  "_comment": "Editable texture overrides for biome tile types. Layered on top of the JS template definitions. Each entry keys by tile name."
+}

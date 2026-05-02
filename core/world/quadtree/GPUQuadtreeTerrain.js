@@ -689,6 +689,7 @@ export class QuadtreeTileManager {
         this.engineConfig = options.engineConfig || null;
         this.planetConfig = options.planetConfig || null;
         this.terrainGenerator = options.terrainGenerator || null;
+        this.textureManager = options.textureManager || null;
         this._initialized = false;
         this._maxGeomLOD = 14;
 
@@ -738,6 +739,7 @@ export class QuadtreeTileManager {
         // ── Predictive streaming state ───────────────────────────────
         // Raw velocity is written by _updateAdaptiveLodScale and read here.
         this._rawCamVelocity = null;
+        this._lodVisibleScale = 1.0;
         // EMA-smoothed velocity (world units / second).
         this._predictState = { smoothVelX: 0, smoothVelY: 0, smoothVelZ: 0 };
     }
@@ -764,6 +766,11 @@ export class QuadtreeTileManager {
             // each +speedRefMps over the floor adds +1.0 to the scale
             speedRefMps: al.speedRefMps ?? 600,
             maxScale: al.maxScale ?? 3.0,
+            // Keep visible traversal stable by default. Scaling the traversal
+            // threshold with speed makes fine/coarse leaves pop while moving.
+            // The full speed scale is still tracked for diagnostics and
+            // predictive streaming.
+            visibleSelectionMaxScale: Math.max(1.0, al.visibleSelectionMaxScale ?? 1.0),
             // asymmetric smoothing: ramp up fast (protect GPU),
             // ease down slow (avoid request burst on deceleration)
             smoothUp: al.smoothUp ?? 0.15,
@@ -810,13 +817,29 @@ export class QuadtreeTileManager {
 
         await this.quadtreeGPU.initialize();
 
+        const terrainShaderConfig = this.engineConfig?.rendering?.terrainShader ?? {};
+        const resolvedColorStartLod = Number.isFinite(terrainShaderConfig.resolvedColorStartLod)
+            ? Math.floor(terrainShaderConfig.resolvedColorStartLod)
+            : 0;
+        const hasResolvedColorInputs =
+            !!this.textureManager?.getAtlasTexture?.('micro')?._gpuTexture?.texture &&
+            !!this.textureManager?.getLookupTables?.()?.tileTypeLookup?._gpuTexture?.texture;
+        const enableResolvedColor =
+            terrainShaderConfig.resolvedColorEnabled !== false &&
+            resolvedColorStartLod >= 0 &&
+            hasResolvedColorInputs;
         const requiredTypes = ['height', 'normal', 'tile', 'splatData', 'scatter', 'climate'];
+        if (enableResolvedColor) {
+            requiredTypes.push('resolvedColor');
+        }
         const textureFormats = {
             height:    'r32float',
             normal:    'rgba8unorm',
             tile:      'r8unorm',
             splatData: 'rgba8unorm',
             splatIndex: 'rgba8unorm',
+            splatValid: 'rgba8unorm',
+            resolvedColor: 'rgba8unorm',
             scatter:   'r8unorm',
             climate:   'rgba8unorm',
             ...(qt.textureFormats || {})
@@ -834,6 +857,7 @@ export class QuadtreeTileManager {
               queueConfig: this.engineConfig.generationQueue,
               requiredTypes,
               textureFormats,
+              textureManager: this.textureManager,
               enableSplat: true,
               enableTileCacheBridge: false,
               feedbackReadbackInterval: qt.feedbackReadbackInterval,
@@ -852,6 +876,7 @@ export class QuadtreeTileManager {
         const cfg = this._adaptiveLodConfig;
         if (!cfg?.enabled || !camera?.position) {
             this._lodSpeedScale = 1.0;
+            this._lodVisibleScale = 1.0;
             return;
         }
 
@@ -893,6 +918,7 @@ export class QuadtreeTileManager {
         }
 
         this._lodSpeedScale = Math.max(1.0, this._lodSpeedScale + delta * smooth);
+        this._lodVisibleScale = Math.min(this._lodSpeedScale, cfg.visibleSelectionMaxScale);
 
         this._prevCameraPos = { x: pos.x, y: pos.y, z: pos.z };
         this._prevFrameTime = now;
@@ -1302,9 +1328,12 @@ export class QuadtreeTileManager {
         // ── (B) Uniform update ───────────────────────────────────────
         if (!frozen || !dp.freezeUniforms) {
             const baseThreshold = this.engineConfig.gpuQuadtree.lodErrorThreshold;
+            const visibleLodScale = Number.isFinite(this._lodVisibleScale)
+                ? this._lodVisibleScale
+                : this._lodSpeedScale;
             this.quadtreeGPU.updateUniforms(camera, {
                 screenHeight: this.backend.canvas?.height || 1080,
-                lodErrorThreshold: baseThreshold * this._lodSpeedScale
+                lodErrorThreshold: baseThreshold * visibleLodScale
             });
         }
 
@@ -2331,6 +2360,7 @@ export class QuadtreeTileManager {
         const pressure = this.tileStreamer?.consumePressureWindow?.() ?? null;
         const gpuInFlight = this.tileStreamer?.tileGenerator?._gpuFencesInFlight ?? 0;
         const lodScale = this._lodSpeedScale;
+        const lodVisibleScale = this._lodVisibleScale;
         const prevPending = this._lastLightDiagPendingGen;
         const pendingDelta = Number.isFinite(prevPending) ? (queuePending - prevPending) : 0;
         this._lastLightDiagPendingGen = queuePending;
@@ -2340,7 +2370,8 @@ export class QuadtreeTileManager {
             `${TERRAIN_STEP_LOG_TAG} [QTLight] pool=${poolUsed}/${poolTotal} ` +
             `pendingGen=${queuePending}(${pendingDeltaStr}) activeGen=${queueActive} ` +
             `pendingCopies=${pendingCopies} dirtySlots=${dirtySlots} ` +
-            `gpuInFlight=${gpuInFlight} lodScale=${lodScale.toFixed(2)}` +
+            `gpuInFlight=${gpuInFlight} lodScale=${lodScale.toFixed(2)} ` +
+            `visibleScale=${lodVisibleScale.toFixed(2)}` +
             `${pressure ? ` bpSkips=${pressure.gpuBackpressureSkips} started=${pressure.tilesStarted} gpuMax=${pressure.gpuFencesMax} commits=${pressure.commits} staleStarts=${pressure.staleStarts.stale}/${pressure.staleStarts.started} feedbackReadbacks=${pressure.feedback.readbacks} minFree=${pressure.minFreeLayers ?? 'n/a'} queueRejected=${pressure.queueRejected} queueDropped=${pressure.queueDropped}` : ''}` +
             `${visible ? ` visible=${visible.totalVisible} resident=${visible.residentVisible} fallback=${visible.fallbackVisible}` : ''}`
         );

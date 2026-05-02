@@ -150,14 +150,16 @@ const tc       = this._treeConfig;
 const tcFlags  = tc.flags    || {};
 const tcNear   = tc.nearTier || {};
 
-this._useMidTier        = tcFlags.useMidTier        ?? true;
+const featureFlags = options.engineConfig?.features || {};
+this._enableNearTier    = featureFlags.treesNear    ?? true;
+this._useMidTier        = (featureFlags.treesMid    ?? true) && (tcFlags.useMidTier        ?? true);
 this._keepLegacyMidNear = tcFlags.keepLegacyMidNear ?? false;
 
-this._useFarTierClone   = tcFlags.useFarTierClone   ?? true;
+this._useFarTierClone   = (featureFlags.treesFar    ?? true) && (tcFlags.useFarTierClone   ?? true);
 this._useClusterFarTier = tcFlags.useClusterFarTier ?? false;
 
 this.enableLeafRendering =
-    tcFlags.enableLeafRendering ?? (options.enableLeafRendering !== false);
+    this._enableNearTier && (tcFlags.enableLeafRendering ?? (options.enableLeafRendering !== false));
 
 // Still honour explicit constructor override for debug tooling,
 // but primary source is engineConfig.
@@ -177,12 +179,16 @@ this._lodController = new TreeLODController({
     leafBands:            leafBandsFromOptions ?? tcNear.leafBands,
     maxCloseTrees:        options.maxCloseTrees ?? tcNear.maxCloseTrees,
     maxBranchDetailLevel: options.maxBranchDetailLevel ?? tcNear.maxBranchDetailLevel,
+    branchGeometryLOD:    options.branchGeometryLOD ?? tcNear.branchGeometryLOD,
+    branchTrunkRadialSegments:  options.branchTrunkRadialSegments ?? tcNear.branchTrunkRadialSegments,
+    branchBranchRadialSegments: options.branchBranchRadialSegments ?? tcNear.branchBranchRadialSegments,
     maxTotalLeaves:       options.maxTotalLeaves ?? tcNear.maxTotalLeaves,
     branchLODBands:       tcNear.branchLODBands,
     branchFadeMargin:     tcNear.branchFadeMargin,
     birch:                tcNear.birch,
     leafCounts:           tcNear.leafCounts,
     leafSizeScale:        tcNear.leafSizeScale,
+    leafBandBudgetFractions: tcNear.leafBandBudgetFractions,
     leafFadeStartRatio:   tcNear.leafFadeStartRatio,
 });
 
@@ -212,6 +218,7 @@ this._lodController = new TreeLODController({
             options.assetDefinitions || this.DEFAULT_ASSET_DEFINITIONS,
             this._treeConfig
         );
+        this._clusterTreeTileMetadata = options.clusterTreeTileMetadata ?? null;
         this._assetRegistry = new ArchetypeRegistry(                    // ◄── INC 1
             this._assetDefinitions,
             options.archetypeDefinitions || this.ARCHETYPE_DEFINITIONS,        // ◄── INC 1
@@ -482,6 +489,7 @@ this._lodController = new TreeLODController({
         if (this._useClusterFarTier && (this._treeConfig?.farTreeTier || this._treeConfig?.clusterTier)) {
             this._clusterTreeSystem = new ClusterTreeSystem(this.device, this, {
                 treeConfig: this._treeConfig,
+                clusterTreeTileMetadata: this._clusterTreeTileMetadata,
             });
             await this._clusterTreeSystem.initialize(this._bakedAssetTileCache);
         }
@@ -577,16 +585,19 @@ this._lodController = new TreeLODController({
         const tcNear  = this._treeConfig.nearTier || {};
         const tcFlags = this._treeConfig.flags    || {};
 
-        this._treeDetailSystem = new TreeDetailSystem(this.device, this, {
-            lodController:    this._lodController,
-            maxTotalLeaves:   tcNear.maxTotalLeaves   ?? 600000,
-            maxTotalClusters: tcNear.maxTotalClusters ?? 50000,
-            debugReadback:    this._debugReadbackEnabled,
-        });
-        await this._treeDetailSystem.initialize();
-
-        this._leafMaskBaker = new LeafMaskBaker(this.device);
-        await this._leafMaskBaker.initialize();
+        if (this._enableNearTier) {
+            this._treeDetailSystem = new TreeDetailSystem(this.device, this, {
+                lodController:    this._lodController,
+                maxTotalLeaves:   tcNear.maxTotalLeaves   ?? 600000,
+                maxTotalClusters: tcNear.maxTotalClusters ?? 50000,
+                debugReadback:    this._debugReadbackEnabled,
+            });
+            await this._treeDetailSystem.initialize();
+            this._leafMaskBaker = new LeafMaskBaker(this.device);
+            await this._leafMaskBaker.initialize();
+        } else {
+            Logger.info(`${this._logTag} Near tier disabled by features.treesNear`);
+        }
 
 
 
@@ -645,25 +656,27 @@ if (this._useFarTierClone) {
     );
 }
 
-this._branchRenderer = new BranchRenderer(this.device, this, {
-    lodController:      this._lodController,
-    enableBranchWind:   tcFlags.enableBranchWind ?? false,
-    propTextureManager: this.propTextureManager,
-});
-await this._branchRenderer.initialize(this._templateLibrary);
+if (this._enableNearTier) {
+    this._branchRenderer = new BranchRenderer(this.device, this, {
+        lodController:      this._lodController,
+        enableBranchWind:   tcFlags.enableBranchWind ?? false,
+        propTextureManager: this.propTextureManager,
+    });
+    await this._branchRenderer.initialize(this._templateLibrary);
 
-this._leafStreamer = new LeafStreamer(this.device, this, {
-    lodController:            this._lodController,
-    leafMaskBaker:            this._leafMaskBaker,
-    leafAlbedoTextureManager: this.leafAlbedoTextureManager,
-    leafNormalTextureManager: this.leafNormalTextureManager,
-    enableLeafAlbedoTexture:  true,
-    enableLeafNormalTexture:  true,
-    birchTemplateStart: this._templateLibrary?.getTypeStartIndex('birch') ?? 0xFFFFFFFF,
-    birchTemplateCount: this._templateLibrary?.getVariants('birch')?.length ?? 0,
-    enableLeafWind: tcFlags.enableLeafWind ?? false,
-});
-await this._leafStreamer.initialize();
+    this._leafStreamer = new LeafStreamer(this.device, this, {
+        lodController:            this._lodController,
+        leafMaskBaker:            this._leafMaskBaker,
+        leafAlbedoTextureManager: this.leafAlbedoTextureManager,
+        leafNormalTextureManager: this.leafNormalTextureManager,
+        enableLeafAlbedoTexture:  true,
+        enableLeafNormalTexture:  true,
+        birchTemplateStart: this._templateLibrary?.getTypeStartIndex('birch') ?? 0xFFFFFFFF,
+        birchTemplateCount: this._templateLibrary?.getVariants('birch')?.length ?? 0,
+        enableLeafWind: tcFlags.enableLeafWind ?? false,
+    });
+    await this._leafStreamer.initialize();
+}
 
         this._initialized = true;
         Logger.info(
@@ -843,6 +856,10 @@ await this._leafStreamer.initialize();
     /** @returns {TreeDetailSystem|null} */
     getTreeDetailSystem() {
         return this._treeDetailSystem || null;
+    }
+
+    getTreeTemplateLibrary() {
+        return this._templateLibrary || null;
     }
 
     _buildScatterGroups() {

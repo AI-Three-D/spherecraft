@@ -2,6 +2,16 @@
 import { DataTextureConfig } from './world/dataTextureConfiguration.js';
 import { requireBool, requireInt, requireIntArray, requireLogLevel, requireNumber, requireNumberArray, requireObject } from '../shared/requireUtil.js';
 
+function clonePlainConfig(value) {
+  if (Array.isArray(value)) return value.map(clonePlainConfig);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [key, nested] of Object.entries(value)) out[key] = clonePlainConfig(nested);
+    return out;
+  }
+  return value;
+}
+
 export class EngineConfig {
   constructor(options = {}) {
 
@@ -29,6 +39,7 @@ export class EngineConfig {
     };
     this.splatConfig = requireObject(options.splatConfig, 'splatConfig');
     this.macroConfig = requireObject(options.macroConfig, 'macroConfig');
+    this.weather = clonePlainConfig(options.weather ?? {});
 
     // ==================== RENDERING ====================
     const rendering = requireObject(options.rendering, 'rendering');
@@ -39,6 +50,8 @@ export class EngineConfig {
     const fog = lighting.fog || {};
     const distortion = rendering.distortion || {};
     const sourceCutoffs = distortion.sourceCutoffs || {};
+    const atmoBankParticles = rendering.atmoBankParticles || {};
+    const atmoBankOffscreen = atmoBankParticles.offscreen || {};
     this.rendering = {
       preferWebGPU: requireBool(rendering.preferWebGPU, 'rendering.preferWebGPU'),
       maxPoolSlots: requireInt(rendering.maxPoolSlots, 'rendering.maxPoolSlots', 1),
@@ -56,10 +69,89 @@ export class EngineConfig {
           terrainShader.nearToMidFadeEndChunks ?? 4.0,
           'rendering.terrainShader.nearToMidFadeEndChunks'
         ),
+        lodEdgeFadeEnabled: requireBool(
+          terrainShader.lodEdgeFadeEnabled ?? false,
+          'rendering.terrainShader.lodEdgeFadeEnabled'
+        ),
+        lodEdgeAOFadeEnabled: requireBool(
+          terrainShader.lodEdgeAOFadeEnabled ?? terrainShader.lodEdgeFadeEnabled ?? false,
+          'rendering.terrainShader.lodEdgeAOFadeEnabled'
+        ),
+        lodEdgeFadeMaxLod: requireInt(
+          terrainShader.lodEdgeFadeMaxLod ?? 4,
+          'rendering.terrainShader.lodEdgeFadeMaxLod',
+          -1
+        ),
+        lodEdgeFadeWidth: requireNumber(
+          terrainShader.lodEdgeFadeWidth ?? 0.04,
+          'rendering.terrainShader.lodEdgeFadeWidth'
+        ),
+        lodEdgeColorStrength: requireNumber(
+          terrainShader.lodEdgeColorStrength ?? 0.0,
+          'rendering.terrainShader.lodEdgeColorStrength'
+        ),
+        lodEdgeResolvedColorEnabled: requireBool(
+          terrainShader.lodEdgeResolvedColorEnabled ?? false,
+          'rendering.terrainShader.lodEdgeResolvedColorEnabled'
+        ),
+        lodEdgeAOStrength: requireNumber(
+          terrainShader.lodEdgeAOStrength ?? 1.0,
+          'rendering.terrainShader.lodEdgeAOStrength'
+        ),
+        lodEdgeNormalStrength: requireNumber(
+          terrainShader.lodEdgeNormalStrength ?? 1.0,
+          'rendering.terrainShader.lodEdgeNormalStrength'
+        ),
+        lodEdgeShadowStrength: requireNumber(
+          terrainShader.lodEdgeShadowStrength ?? 1.0,
+          'rendering.terrainShader.lodEdgeShadowStrength'
+        ),
         pointSampleLodStart: requireInt(terrainShader.pointSampleLodStart ?? 2, 'rendering.terrainShader.pointSampleLodStart', 0),
         macroStartLod: requireInt(terrainShader.macroStartLod ?? 2, 'rendering.terrainShader.macroStartLod', 0),
+        splatTop2MaxLod: requireInt(terrainShader.splatTop2MaxLod ?? 2, 'rendering.terrainShader.splatTop2MaxLod', -1),
+        splatTop2MinWeight: requireNumber(terrainShader.splatTop2MinWeight ?? 0.75, 'rendering.terrainShader.splatTop2MinWeight'),
+        splatDominantMinWeight: requireNumber(terrainShader.splatDominantMinWeight ?? 0.85, 'rendering.terrainShader.splatDominantMinWeight'),
+        resolvedColorEnabled: requireBool(terrainShader.resolvedColorEnabled ?? true, 'rendering.terrainShader.resolvedColorEnabled'),
+        resolvedColorStartLod: requireInt(terrainShader.resolvedColorStartLod ?? 0, 'rendering.terrainShader.resolvedColorStartLod', -1),
+        lod0ResolvedColorEnabled: requireBool(
+          terrainShader.lod0ResolvedColorEnabled ?? false,
+          'rendering.terrainShader.lod0ResolvedColorEnabled'
+        ),
+        lod0ResolvedColorFadeStartMeters: requireNumber(
+          terrainShader.lod0ResolvedColorFadeStartMeters ?? 8,
+          'rendering.terrainShader.lod0ResolvedColorFadeStartMeters'
+        ),
+        lod0ResolvedColorFadeEndMeters: requireNumber(
+          terrainShader.lod0ResolvedColorFadeEndMeters ?? 40,
+          'rendering.terrainShader.lod0ResolvedColorFadeEndMeters'
+        ),
+        lod0AOFadeEnabled: requireBool(
+          terrainShader.lod0AOFadeEnabled ?? false,
+          'rendering.terrainShader.lod0AOFadeEnabled'
+        ),
+        lod0AOFadeStartMeters: requireNumber(
+          terrainShader.lod0AOFadeStartMeters ?? terrainShader.lod0ResolvedColorFadeStartMeters ?? 8,
+          'rendering.terrainShader.lod0AOFadeStartMeters'
+        ),
+        lod0AOFadeEndMeters: requireNumber(
+          terrainShader.lod0AOFadeEndMeters ?? terrainShader.lod0ResolvedColorFadeEndMeters ?? 40,
+          'rendering.terrainShader.lod0AOFadeEndMeters'
+        ),
+        variantRotationMaxLod: requireInt(terrainShader.variantRotationMaxLod ?? 2, 'rendering.terrainShader.variantRotationMaxLod', -1),
+        nearMipSharpenMaxLod: requireInt(terrainShader.nearMipSharpenMaxLod ?? 0, 'rendering.terrainShader.nearMipSharpenMaxLod', -1),
+        nearMipSharpenScale: requireNumber(terrainShader.nearMipSharpenScale ?? 0.6, 'rendering.terrainShader.nearMipSharpenScale'),
+        nearMipSharpenFadeStartMeters: requireNumber(terrainShader.nearMipSharpenFadeStartMeters ?? 60, 'rendering.terrainShader.nearMipSharpenFadeStartMeters'),
+        nearMipSharpenFadeEndMeters: requireNumber(terrainShader.nearMipSharpenFadeEndMeters ?? 120, 'rendering.terrainShader.nearMipSharpenFadeEndMeters'),
+        nearDetailEnabled: requireBool(terrainShader.nearDetailEnabled ?? true, 'rendering.terrainShader.nearDetailEnabled'),
+        nearDetailMaxLod: requireInt(terrainShader.nearDetailMaxLod ?? 1, 'rendering.terrainShader.nearDetailMaxLod', -1),
+        nearDetailStrength: requireNumber(terrainShader.nearDetailStrength ?? 0.085, 'rendering.terrainShader.nearDetailStrength'),
+        nearDetailScaleMeters: requireNumber(terrainShader.nearDetailScaleMeters ?? 0.32, 'rendering.terrainShader.nearDetailScaleMeters'),
+        nearDetailCreviceWidth: requireNumber(terrainShader.nearDetailCreviceWidth ?? 0.045, 'rendering.terrainShader.nearDetailCreviceWidth'),
+        nearDetailCreviceCoverage: requireNumber(terrainShader.nearDetailCreviceCoverage ?? 0.38, 'rendering.terrainShader.nearDetailCreviceCoverage'),
+        nearDetailFadeStartMeters: requireNumber(terrainShader.nearDetailFadeStartMeters ?? 45, 'rendering.terrainShader.nearDetailFadeStartMeters'),
+        nearDetailFadeEndMeters: requireNumber(terrainShader.nearDetailFadeEndMeters ?? 80, 'rendering.terrainShader.nearDetailFadeEndMeters'),
         clusteredMaxLod: requireInt(terrainShader.clusteredMaxLod ?? 1, 'rendering.terrainShader.clusteredMaxLod', 0),
-        aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 2, 'rendering.terrainShader.aerialMaxLod', 0),
+        aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 6, 'rendering.terrainShader.aerialMaxLod', 0),
         normalMapMaxLod: requireInt(terrainShader.normalMapMaxLod ?? 2, 'rendering.terrainShader.normalMapMaxLod', -1),
         altitudeNormalMinMeters: requireNumber(terrainShader.altitudeNormalMinMeters ?? 8000, 'rendering.terrainShader.altitudeNormalMinMeters'),
         altitudeShadowMinMeters: requireNumber(terrainShader.altitudeShadowMinMeters ?? 12000, 'rendering.terrainShader.altitudeShadowMinMeters'),
@@ -106,15 +198,15 @@ export class EngineConfig {
         },
         fog: {
           densityMultiplier: requireNumber(
-            fog.densityMultiplier ?? 0.48,
+            fog.densityMultiplier ?? 0.40,
             'rendering.lighting.fog.densityMultiplier'
           ),
           maxBaseDensity: requireNumber(
-            fog.maxBaseDensity ?? 0.0006,
+            fog.maxBaseDensity ?? 0.00055,
             'rendering.lighting.fog.maxBaseDensity'
           ),
           dayDensityScale: requireNumber(
-            fog.dayDensityScale ?? 1.0,
+            fog.dayDensityScale ?? 0.85,
             'rendering.lighting.fog.dayDensityScale'
           ),
           nightDensityScale: requireNumber(
@@ -149,6 +241,18 @@ export class EngineConfig {
             sourceCutoffs.shockwave ?? 200.0,
             'rendering.distortion.sourceCutoffs.shockwave'
           )
+        }
+      },
+      atmoBankParticles: {
+        offscreen: {
+          enabled: requireBool(
+            atmoBankOffscreen.enabled ?? true,
+            'rendering.atmoBankParticles.offscreen.enabled'
+          ),
+          resolutionScale: Math.max(0.25, Math.min(1.0, requireNumber(
+            atmoBankOffscreen.resolutionScale ?? 0.5,
+            'rendering.atmoBankParticles.offscreen.resolutionScale'
+          )))
         }
       }
     };
@@ -304,6 +408,28 @@ export class EngineConfig {
       terrainVertexDebugMode: requireInt(debug.terrainVertexDebugMode ?? 0, 'debug.terrainVertexDebugMode', 0)
     };
 
+    // ==================== FEATURES ====================
+    // Toggle major rendering subsystems on/off for performance profiling.
+    // All default to true (fully enabled). Set to false to skip initialization.
+    const features = options.features || {};
+    this.features = {
+      shadows:          requireBool(features.shadows          ?? true, 'features.shadows'),
+      clusteredLighting:requireBool(features.clusteredLighting ?? true, 'features.clusteredLighting'),
+      treesNear:        requireBool(features.treesNear        ?? true, 'features.treesNear'),
+      treesMid:         requireBool(features.treesMid         ?? true, 'features.treesMid'),
+      treesFar:         requireBool(features.treesFar         ?? true, 'features.treesFar'),
+      streamedAssets:   requireBool(features.streamedAssets   ?? true, 'features.streamedAssets'),
+      particles:        requireBool(features.particles        ?? true, 'features.particles'),
+      actors:           requireBool(features.actors           ?? true, 'features.actors'),
+      clouds:           requireBool(features.clouds           ?? true, 'features.clouds'),
+      lowClouds:        requireBool(features.lowClouds        ?? true, 'features.lowClouds'),
+      midClouds:        requireBool(features.midClouds        ?? true, 'features.midClouds'),
+      highClouds:       requireBool(features.highClouds       ?? true, 'features.highClouds'),
+      cloudParticles:   requireBool(features.cloudParticles   ?? true, 'features.cloudParticles'),
+      fogParticles:     requireBool(features.fogParticles     ?? true, 'features.fogParticles'),
+      skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
+    };
+
     // ==================== GENERATION QUEUE (ENGINE-WIDE) ====================
     const generationQueue = requireObject(options.generationQueue, 'generationQueue');
     this.generationQueue = {
@@ -332,6 +458,58 @@ export class EngineConfig {
       feedbackCapacity: requireInt(gpuQuadtree.feedbackCapacity ?? 4096, 'gpuQuadtree.feedbackCapacity', 1),
       lodErrorThreshold: requireNumber(gpuQuadtree.lodErrorThreshold ?? 512, 'gpuQuadtree.lodErrorThreshold'),
       workgroupSize: requireInt(gpuQuadtree.workgroupSize ?? 64, 'gpuQuadtree.workgroupSize', 1),
+      adaptiveLod: (() => {
+        const al = gpuQuadtree.adaptiveLod || {};
+        return {
+          enabled: requireBool(al.enabled ?? true, 'gpuQuadtree.adaptiveLod.enabled'),
+          speedFloorMps: requireNumber(al.speedFloorMps ?? 150, 'gpuQuadtree.adaptiveLod.speedFloorMps'),
+          speedRefMps: requireNumber(al.speedRefMps ?? 600, 'gpuQuadtree.adaptiveLod.speedRefMps'),
+          maxScale: requireNumber(al.maxScale ?? 3.0, 'gpuQuadtree.adaptiveLod.maxScale'),
+          // Speed adaptation can still drive streaming diagnostics/prefetch, but
+          // visible traversal defaults to a stable threshold to avoid LOD popping
+          // while the camera moves. Raise this only for deliberate moving-quality
+          // degradation.
+          visibleSelectionMaxScale: requireNumber(
+            al.visibleSelectionMaxScale ?? 1.0,
+            'gpuQuadtree.adaptiveLod.visibleSelectionMaxScale'
+          ),
+          smoothUp: requireNumber(al.smoothUp ?? 0.15, 'gpuQuadtree.adaptiveLod.smoothUp'),
+          smoothDown: requireNumber(al.smoothDown ?? 0.03, 'gpuQuadtree.adaptiveLod.smoothDown'),
+          holdWhenGpuBacklogged: requireBool(
+            al.holdWhenGpuBacklogged ?? true,
+            'gpuQuadtree.adaptiveLod.holdWhenGpuBacklogged'
+          )
+        };
+      })(),
+      predictiveStreaming: (() => {
+        const ps = gpuQuadtree.predictiveStreaming || {};
+        return {
+          enabled: requireBool(ps.enabled ?? false, 'gpuQuadtree.predictiveStreaming.enabled'),
+          speedThresholdMps: requireNumber(
+            ps.speedThresholdMps ?? 50,
+            'gpuQuadtree.predictiveStreaming.speedThresholdMps'
+          ),
+          lookAheadTimeMaxSec: requireNumber(
+            ps.lookAheadTimeMaxSec ?? 1.5,
+            'gpuQuadtree.predictiveStreaming.lookAheadTimeMaxSec'
+          ),
+          lookAheadSpeedScale: requireNumber(
+            ps.lookAheadSpeedScale ?? 0.0025,
+            'gpuQuadtree.predictiveStreaming.lookAheadSpeedScale'
+          ),
+          velocitySmoothAlpha: requireNumber(
+            ps.velocitySmoothAlpha ?? 0.15,
+            'gpuQuadtree.predictiveStreaming.velocitySmoothAlpha'
+          ),
+          neighborRadiusCoarse: requireInt(
+            ps.neighborRadiusCoarse ?? ps.neighborRadius ?? 4,
+            'gpuQuadtree.predictiveStreaming.neighborRadiusCoarse',
+            0
+          ),
+          depthMin: requireInt(ps.depthMin ?? 4, 'gpuQuadtree.predictiveStreaming.depthMin', 0),
+          depthMax: requireInt(ps.depthMax ?? 11, 'gpuQuadtree.predictiveStreaming.depthMax', 0)
+        };
+      })(),
       enableFrustumCulling: requireBool(gpuQuadtree.enableFrustumCulling ?? true, 'gpuQuadtree.enableFrustumCulling'),
       enableHorizonCulling: requireBool(gpuQuadtree.enableHorizonCulling ?? true, 'gpuQuadtree.enableHorizonCulling'),
       horizonCulling: (() => {
@@ -368,6 +546,7 @@ export class EngineConfig {
           normal: tf.normal || 'rgba8unorm',
           tile: tf.tile || 'r8unorm',
           splatData: tf.splatData || 'rgba32float',
+          resolvedColor: tf.resolvedColor || 'rgba8unorm',
           macro: tf.macro || 'rgba8unorm',
           scatter: tf.scatter || 'r8unorm'
         };

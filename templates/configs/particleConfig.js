@@ -173,6 +173,60 @@ export const PARTICLE_CONFIG = {
         spawnWeight: 1.0,
     },
 
+    [PARTICLE_TYPES.LEAF]: {
+        blend: 'alpha',
+        lifetime: { min: 4.0, max: 8.0 },
+        size: { start: 0.15, end: 0.08 },
+        velocity: {
+            x: [-0.3, 0.3],
+            y: [-0.15, -0.05],
+            z: [-0.3, 0.3],
+        },
+        gravity: 0.5,
+        drag: 3.0,
+        upwardBias: 0.15,
+        lateralNoise: 1.5,
+        spawnOffset: {
+            radius: 3.0,
+            heightMin: 2.0,
+            heightMax: 6.0,
+        },
+        colorStart: [0.34, 0.55, 0.16, 0.94],
+        colorMid:   [0.42, 0.58, 0.18, 0.86],
+        colorEnd:   [0.24, 0.30, 0.10, 0.0],
+        emissive: 1.0,
+        bloomEnabled: false,
+        flags: { stretchAlongVel: false, rotate: true, leaf: true },
+        spawnWeight: 1.0,
+    },
+
+    [PARTICLE_TYPES.RAIN_DROP]: {
+        blend: 'alpha',
+        lifetime: { min: 0.45, max: 0.75 },
+        size: { start: 0.035, end: 0.020 },
+        velocity: {
+            x: [-1.1, 1.1],
+            y: [-34.0, -24.0],
+            z: [-1.1, 1.1],
+        },
+        gravity: 0.0,
+        drag: 0.04,
+        upwardBias: 0.0,
+        lateralNoise: 0.08,
+        spawnOffset: {
+            radius: 34.0,
+            heightMin: 10.0,
+            heightMax: 30.0,
+        },
+        colorStart: [0.58, 0.68, 0.82, 0.46],
+        colorMid:   [0.70, 0.80, 0.92, 0.34],
+        colorEnd:   [0.44, 0.54, 0.68, 0.0],
+        emissive: 1.0,
+        bloomEnabled: false,
+        flags: { stretchAlongVel: true, rotate: false },
+        spawnWeight: 1.0,
+    },
+
     [PARTICLE_TYPES.FIREFLY]: {
         blend: 'additive',
         lifetime: { min: 0.025, max: 0.045 }, // just enough to read as continuous without visible streaking
@@ -240,6 +294,20 @@ export const PARTICLE_EMITTER_PRESETS = {
         lodMinScale: 0.0,
     },
 
+    leaf_fall: {
+        types: [
+            PARTICLE_TYPES.LEAF,
+        ],
+        weights: {
+            [PARTICLE_TYPES.LEAF]: 1.0,
+        },
+        spawnBudgetPerFrame: 6,
+        distanceCutoff: 80.0,
+        lodNearDistance: 20.0,
+        lodFarDistance: 60.0,
+        lodMinScale: 0.15,
+    },
+
     firefly_swarm: {
         types: [
             PARTICLE_TYPES.FIREFLY,
@@ -253,10 +321,24 @@ export const PARTICLE_EMITTER_PRESETS = {
         lodFarDistance: 40.0,
         lodMinScale: 0.35,
     },
+
+    rain_shower: {
+        types: [
+            PARTICLE_TYPES.RAIN_DROP,
+        ],
+        weights: {
+            [PARTICLE_TYPES.RAIN_DROP]: 1.0,
+        },
+        spawnBudgetPerFrame: 220,
+        distanceCutoff: 110.0,
+        lodNearDistance: 22.0,
+        lodFarDistance: 95.0,
+        lodMinScale: 0.38,
+    },
 };
 
 // Global particle-system caps. Chosen conservatively for first bring-up.
 export const PARTICLE_GLOBALS = {
-    maxParticles: 2048,
+    maxParticles: 4096,
     workgroupSize: 64,
 };

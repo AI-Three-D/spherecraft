@@ -30,7 +30,7 @@ export class LeafStreamer {
      */
     constructor(device, assetStreamer, config = {}) {
         this._counterReset = new Uint32Array([0]);
-        this._requestSummaryReset = new Uint32Array(4);
+        this._requestSummaryReset = new Uint32Array(8);
         this.device   = device;
         this.streamer = assetStreamer;
         this.propTextureManager = config.propTextureManager || assetStreamer?.propTextureManager || null;
@@ -134,7 +134,8 @@ export class LeafStreamer {
             `[LeafStreamer] Initialized (baked-mask, indirect-dispatch): ` +
             `maxLeaves=${this.maxLeaves}, maxCloseTrees=${this.maxCloseTrees}, ` +
             `generic=[${cfg.l0Leaves}/${cfg.l1Leaves}/${cfg.l2Leaves}] ` +
-            `birchCards=${cfg.birchCloseCards}->${cfg.birchSettledCards}`
+            `birch=${cfg.birchCloseLeaves}->${cfg.birchL0SettledLeaves} ` +
+            `bands=[${(cfg.leafBandBudgetFractions || []).map(v => v.toFixed(2)).join('/')}]`
         );
     }
     _createBuffers() {
@@ -689,13 +690,13 @@ export class LeafStreamer {
             0,
             this._budgetReadbackBuffer,
             0,
-            16
+            32
         );
         commandEncoder.copyBufferToBuffer(
             this._counterBuffer,
             0,
             this._budgetReadbackBuffer,
-            16,
+            32,
             4
         );
         this._budgetReadbackQueued = true;
@@ -707,12 +708,16 @@ export class LeafStreamer {
 
         this._budgetReadbackPending = true;
         this._budgetReadbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
-            const data = new Uint32Array(this._budgetReadbackBuffer.getMappedRange(0, 20).slice(0));
+            const data = new Uint32Array(this._budgetReadbackBuffer.getMappedRange(0, 36).slice(0));
             const requested = data[0] >>> 0;
             const foliageTrees = data[1] >>> 0;
             const maxPerTree = data[2] >>> 0;
             const treeCount = data[3] >>> 0;
-            const emitted = data[4] >>> 0;
+            const band0 = data[4] >>> 0;
+            const band1 = data[5] >>> 0;
+            const band2 = data[6] >>> 0;
+            const band3 = data[7] >>> 0;
+            const emitted = data[8] >>> 0;
             const scale = Math.min(1.0, this.maxLeaves / Math.max(1, requested));
 
             this._lastLeafCount = emitted;
@@ -721,7 +726,8 @@ export class LeafStreamer {
                 Logger.info(
                     `[LeafStreamer] budget trees=${treeCount} foliageTrees=${foliageTrees} ` +
                     `requested=${requested} emitted=${emitted}/${this.maxLeaves} ` +
-                    `maxTree=${maxPerTree} scale=${scale.toFixed(3)}`
+                    `maxTree=${maxPerTree} scale=${scale.toFixed(3)} ` +
+                    `bands=[${band0}/${band1}/${band2}/${band3}]`
                 );
             }
 

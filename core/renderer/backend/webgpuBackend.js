@@ -79,6 +79,7 @@ export class WebGPUBackend extends Backend {
             'tileTexture',
             'splatDataMap',
             'splatIndexMap',
+            'splatValidMap',
             'macroMaskTexture',
         ];  
         
@@ -317,7 +318,11 @@ export class WebGPUBackend extends Backend {
             mipmapFilter: 'linear',
             addressModeU: 'repeat',
             addressModeV: 'repeat',
-            addressModeW: 'repeat'
+            addressModeW: 'repeat',
+            // Terrain atlas samples are often viewed at grazing angles; a
+            // modest anisotropy level keeps near grass detail without forcing
+            // aggressively sharp mips that would shimmer while moving.
+            maxAnisotropy: 4
         }));
         this._samplerCache.set('linear', this.device.createSampler({
             magFilter: 'linear',
@@ -398,7 +403,7 @@ export class WebGPUBackend extends Backend {
                 { texture: this._dummyTexture },
             data,
                 { bytesPerRow: bytesPerRow },
-                [1, 1]
+                { width: 1, height: 1, depthOrArrayLayers: 1 }
             );
         }
         if (!this._dummyTextureView) {
@@ -426,7 +431,7 @@ export class WebGPUBackend extends Backend {
                 { texture: this._dummyArrayTexture },
             data,
                 { bytesPerRow: bytesPerRow },
-                [1, 1, 1]
+                { width: 1, height: 1, depthOrArrayLayers: 1 }
             );
         }
         if (!this._dummyArrayTextureView) {
@@ -450,7 +455,7 @@ export class WebGPUBackend extends Backend {
                 { texture: this._dummy3DTexture },
             data,
                 { bytesPerRow: bytesPerRow },
-                [1, 1, 1]
+                { width: 1, height: 1, depthOrArrayLayers: 1 }
             );
         }
         if (!this._dummy3DTextureView) {
@@ -481,8 +486,9 @@ export class WebGPUBackend extends Backend {
 
     _getOrCreateDummyStorageBuffer() {
         if (!this._dummyStorageBuffer) {
+            // 256 bytes: satisfies all pipeline minimum binding sizes (terrain needs ≥64).
             this._dummyStorageBuffer = this.device.createBuffer({
-                size: 16,
+                size: 256,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
             });
         }
@@ -541,7 +547,7 @@ export class WebGPUBackend extends Backend {
                         { texture: gpuTexture, origin: { x: 0, y: 0, z: layer } },
                         data,
                         { bytesPerRow },
-                        [texture.width, texture.height, 1]
+                        { width: texture.width, height: texture.height, depthOrArrayLayers: 1 }
                     );
                 }
             } else {
@@ -552,14 +558,14 @@ export class WebGPUBackend extends Backend {
                     { texture: gpuTexture, mipLevel: 0 },
                     data,
                     { bytesPerRow },
-                    [texture.width, texture.height, depth]
+                    { width: texture.width, height: texture.height, depthOrArrayLayers: depth }
                 );
             }
         } else if (texture.image) {
             this.device.queue.copyExternalImageToTexture(
                 { source: texture.image },
                 { texture: gpuTexture, mipLevel: 0 },
-                [texture.width, texture.height, depth]
+                { width: texture.width, height: texture.height, depthOrArrayLayers: depth }
             );
         }
     
@@ -732,7 +738,7 @@ updateTexture(texture) {
                     { texture: texture._gpuTexture.texture, origin: { x: 0, y: 0, z: layer } },
                     data,
                     { bytesPerRow },
-                    [texture.width, texture.height, 1]
+                    { width: texture.width, height: texture.height, depthOrArrayLayers: 1 }
                 );
             }
         } else {
@@ -743,7 +749,7 @@ updateTexture(texture) {
                 { texture: texture._gpuTexture.texture, mipLevel: 0 },
                 data,
                 { bytesPerRow },
-                [texture.width, texture.height, depth]
+                { width: texture.width, height: texture.height, depthOrArrayLayers: depth }
             );
         }
 
@@ -1025,7 +1031,7 @@ compileShader(material) {
     const materialType = (material.name || 'unknown').toLowerCase().trim();
     const baseType = materialType.replace(/[0-9_-]/g, '');
 
-    const layoutVersion = materialType.includes('terrain') ? 'v18' : 'v1';
+    const layoutVersion = materialType.includes('terrain') ? 'v19' : 'v1';
     const layoutKeyRaw = material.vertexLayout ?
         JSON.stringify(material.vertexLayout.map(l => ({
             stride: l.arrayStride,
@@ -1037,8 +1043,11 @@ compileShader(material) {
         ? `${layoutKeyRaw}_v${layoutVersion}`
         : layoutKeyRaw;
 
-    const shaderHash = this._hashCode(material.vertexShader.substring(0, 200) +
-        material.fragmentShader.substring(0, 200));
+    // Terrain shader builders emit compile-time LOD feature branches well past
+    // the first few hundred characters. Hash the full sources so LOD-specific
+    // bindings, such as resolved far-terrain color, cannot accidentally reuse
+    // a pipeline layout from another terrain variant.
+    const shaderHash = this._hashCode(`${material.vertexShader}\n${material.fragmentShader}`);
 
     const arrayFlag = material.defines?.USE_TEXTURE_ARRAYS ? 'arr' : '2d';
     const fmtFlag = material.targetFormat || this.sceneFormat || '';
@@ -1047,7 +1056,7 @@ compileShader(material) {
     // Two terrain materials differing only in normal format must get
     // distinct pipelines.
     const chunkFmts = material._chunkTextureFormats || {};
-    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','macro','terrainAO','groundField']
+    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','splatValid','macro','terrainAO','groundField','resolvedColor']
         .map(t => chunkFmts[t] || '')
         .join('|');
 
@@ -1238,12 +1247,14 @@ _createBindGroupLayouts(material) {
 
     const includeTerrainAO = !!material.defines?.USE_TERRAIN_AO;
     const includeGroundField = !!material.defines?.USE_GROUND_FIELD;
+    const includeResolvedColor = !!material.defines?.USE_RESOLVED_COLOR_TEXTURE || !!material.defines?.USE_RESOLVED_COLOR;
     // Full per-slot format map. Missing keys default to rgba32float.
     const chunkFormats = material._chunkTextureFormats || {};
     return this._createTerrainBindGroupLayouts(
         useArrayTextures,
         includeTerrainAO,
         includeGroundField,
+        includeResolvedColor,
         chunkFormats
     );
 }
@@ -1253,6 +1264,7 @@ _createTerrainBindGroupLayouts(
     useArrayTextures = false,
     includeTerrainAO = false,
     includeGroundField = false,
+    includeResolvedColor = false,
     chunkFormats = {}
 ) {
     const layouts = [];
@@ -1260,7 +1272,7 @@ _createTerrainBindGroupLayouts(
 
     // Slot → texture type mapping (fixed order, matches shader bindings)
 // Slot → texture type mapping (fixed order, matches shader bindings)
-const slotTypes = ['height', 'normal', 'tile', 'splatData', 'splatIndex', 'macro'];
+const slotTypes = ['height', 'normal', 'tile', 'splatData', 'splatIndex', 'splatValid', 'macro'];
 const slotSampleType = (type) =>
     gpuFormatSampleType(chunkFormats[type] || 'rgba32float');
 
@@ -1287,23 +1299,31 @@ const slotSampleType = (type) =>
         { binding: 4, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: slotSampleType('splatIndex'), viewDimension: chunkViewDimension } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: slotSampleType('splatValid'), viewDimension: chunkViewDimension } },
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: slotSampleType('macro'),      viewDimension: chunkViewDimension } },
     ];
     if (includeTerrainAO) {
         group1Entries.push({
-            binding: 6, visibility: GPUShaderStage.FRAGMENT,
+            binding: 7, visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: slotSampleType('terrainAO'), viewDimension: chunkViewDimension }
         });
     } else if (includeGroundField) {
         group1Entries.push({
-            binding: 6, visibility: GPUShaderStage.FRAGMENT,
+            binding: 7, visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: slotSampleType('terrainAO'), viewDimension: chunkViewDimension }
         });
     }
     if (includeGroundField) {
         group1Entries.push({
-            binding: 7, visibility: GPUShaderStage.FRAGMENT,
+            binding: 8, visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: slotSampleType('groundField'), viewDimension: chunkViewDimension }
+        });
+    }
+    if (includeResolvedColor) {
+        group1Entries.push({
+            binding: 9, visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: slotSampleType('resolvedColor'), viewDimension: chunkViewDimension }
         });
     }
     layouts.push(this.device.createBindGroupLayout({ entries: group1Entries }));
@@ -1789,15 +1809,19 @@ _createTerrainBindGroups(material, uniforms, geometry) {
     
     groups.push(g0Record.group);
 
-        const chunkTextureNames = [...this._chunkTextureNames];
+        const chunkTextureBindings = this._chunkTextureNames.map((name, index) => ({ name, binding: index }));
         if (material.defines?.USE_TERRAIN_AO || material.defines?.USE_GROUND_FIELD) {
-            chunkTextureNames.push('terrainAOMask');
+            chunkTextureBindings.push({ name: 'terrainAOMask', binding: 7 });
         }
         if (material.defines?.USE_GROUND_FIELD) {
-            chunkTextureNames.push('groundFieldMask');
+            chunkTextureBindings.push({ name: 'groundFieldMask', binding: 8 });
         }
+        if (material.defines?.USE_RESOLVED_COLOR_TEXTURE || material.defines?.USE_RESOLVED_COLOR) {
+            chunkTextureBindings.push({ name: 'resolvedColorTexture', binding: 9 });
+        }
+        const chunkTextureNames = chunkTextureBindings.map(entry => entry.name);
         const g1Key = this._buildTextureKey(uniforms, chunkTextureNames);
-        const g1CacheKey = `terrain_g1_${needArray ? 'arr' : '2d'}`;
+        const g1CacheKey = `terrain_g1_${needArray ? 'arr' : '2d'}_${g1Key}`;
         const g1ViewDimension = needArray ? '2d-array' : '2d';
         const g1Views = chunkTextureNames.map(name => getView(name, g1ViewDimension));
     let g1Record = geometryCache.get(g1CacheKey);
@@ -1806,7 +1830,10 @@ _createTerrainBindGroups(material, uniforms, geometry) {
     const shouldLogNewQt = !this._newQtTerrainBindLog || g1ViewsChanged || !g1Record;
 
     if (!g1Record || g1Record.key !== g1Key || g1ViewsChanged || g1PipelineChanged) {
-            const entries = g1Views.map((view, i) => ({ binding: i, resource: view }));
+            const entries = g1Views.map((view, i) => ({
+                binding: chunkTextureBindings[i].binding,
+                resource: view
+            }));
             const group = this.device.createBindGroup({
             layout: material._gpuPipeline.bindGroupLayouts[1],
             entries
@@ -2077,9 +2104,38 @@ _packFragmentUniforms(uniforms) {
     f32[54] = fogCol?.b ?? 1.0;
     f32[55] = uniforms.macroNoiseWeight?.value ?? 0.5;
     i32[56] = uniforms.terrainDebugMode?.value ?? 0;
-    i32[57] = 0;
+    i32[57] = uniforms.terrainLayerViewMode?.value ?? 0;
     i32[58] = 0;
     i32[59] = 0;
+
+    i32[60] = uniforms.terrainHoverFace?.value ?? -1;
+    i32[61] = uniforms.terrainHoverFlags?.value ?? 0;
+    f32[62] = 0.0;
+    f32[63] = 0.0;
+
+    const microRect = uniforms.terrainHoverMicroRect?.value;
+    f32[64] = microRect?.x ?? 0.0;
+    f32[65] = microRect?.y ?? 0.0;
+    f32[66] = microRect?.z ?? 0.0;
+    f32[67] = microRect?.w ?? 0.0;
+
+    const macroRect = uniforms.terrainHoverMacroRect?.value;
+    f32[68] = macroRect?.x ?? 0.0;
+    f32[69] = macroRect?.y ?? 0.0;
+    f32[70] = macroRect?.z ?? 0.0;
+    f32[71] = macroRect?.w ?? 0.0;
+
+    const microColor = uniforms.terrainHoverMicroColor?.value;
+    f32[72] = microColor?.x ?? 1.0;
+    f32[73] = microColor?.y ?? 0.42;
+    f32[74] = microColor?.z ?? 0.42;
+    f32[75] = microColor?.w ?? 1.5;
+
+    const macroColor = uniforms.terrainHoverMacroColor?.value;
+    f32[76] = macroColor?.x ?? 0.42;
+    f32[77] = macroColor?.y ?? 0.64;
+    f32[78] = macroColor?.z ?? 1.0;
+    f32[79] = macroColor?.w ?? 2.0;
 
     return f32;
 }

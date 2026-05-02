@@ -79,6 +79,8 @@ const DEFAULT_TEXTURE_FORMATS = {
     macro: 'rgba8unorm',
     splatData: 'rgba8unorm',
     splatIndex: 'rgba8unorm',
+    splatValid: 'rgba8unorm',
+    resolvedColor: 'rgba8unorm',
     scatter: 'r8unorm'
 };
 
@@ -102,12 +104,19 @@ this._maxGpuFencesObserved = 0;
         this.terrainGen   = terrainGenerator;
         this.textureSize  = options.textureSize     ?? 1024;
         this.requiredTypes = options.requiredTypes  ?? ['height', 'normal', 'tile'];
+        this.textureManager = options.textureManager ?? null;
         this.enableSplat  = options.enableSplat     ?? this.requiredTypes.includes('splatData');
         this.splatKernelSize = options.splatKernelSize ?? 3;
         this.textureFormats = {
             ...DEFAULT_TEXTURE_FORMATS,
             ...(options.textureFormats || {})
         };
+        this.quadtreeMaxDepth = Number.isFinite(options.quadtreeMaxDepth)
+            ? Math.max(0, Math.floor(options.quadtreeMaxDepth))
+            : null;
+        this.maxGeomLOD = Number.isFinite(options.maxGeomLOD)
+            ? Math.max(0, Math.floor(options.maxGeomLOD))
+            : null;
 
         // Track in-progress generations to avoid duplicate requests
         this._inProgress = new Map();  // tileAddr.toString() -> Promise
@@ -371,21 +380,39 @@ this._maxGpuFencesObserved = 0;
 let splatPass = null;
 let gpuSplatData = null;
 let gpuSplatIndex = null;
+let gpuSplatValid = null;
+let gpuResolvedColor = null;
+let resolvedColorTarget = null;
 
 if (this.enableSplat && this.requiredTypes.includes('splatData')) {
     const splatFormat = this.textureFormats.splatData || 'rgba8unorm';
     const splatIndexFormat = this.textureFormats.splatIndex || 'rgba8unorm';
+    const splatValidFormat = this.textureFormats.splatValid || 'rgba8unorm';
 
     gpuSplatData = this._createGPUTexture(
         this.textureSize, this.textureSize, splatFormat);
     gpuSplatIndex = this._createGPUTexture(
         this.textureSize, this.textureSize, splatIndexFormat);
+    gpuSplatValid = this._createGPUTexture(
+        this.textureSize, this.textureSize, splatValidFormat);
+    if (this.requiredTypes.includes('resolvedColor')) {
+        const resolvedColorFormat = this.textureFormats.resolvedColor || 'rgba8unorm';
+        resolvedColorTarget = this.terrainGen.createStorageBackedOutputTarget(
+            this.textureSize, this.textureSize, resolvedColorFormat);
+        gpuResolvedColor = resolvedColorTarget.finalTexture;
+    }
 
     if (gpuHeight && gpuTile) {
         const chunksPerAtlas = Math.max(1,
             Math.floor(this.textureSize / this.terrainGen.chunkSize));
         const splatChunkSizeTex = Math.max(1,
             Math.floor(this.textureSize / chunksPerAtlas));
+        const atlasTexture = this.textureManager?.getAtlasTexture?.('micro')?._gpuTexture?.texture ?? null;
+        const tileTypeLookup = this.textureManager?.getLookupTables?.()?.tileTypeLookup?._gpuTexture?.texture ?? null;
+        const geomLOD = this.quadtreeMaxDepth !== null
+            ? Math.max(0, Math.min(this.maxGeomLOD ?? 99, this.quadtreeMaxDepth - tileAddr.depth))
+            : 2;
+        const resolvedColorAtlasSampleLod = geomLOD <= 1 ? 0.0 : 1.0;
 
         splatPass = {
             heightTex: gpuHeight,
@@ -394,8 +421,21 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
             tileFormat,
             splatTex: gpuSplatData,
             splatIndexTex: gpuSplatIndex,
+            splatValidTex: gpuSplatValid,
             textureSize: this.textureSize,
-            chunkSizeTex: splatChunkSizeTex
+            chunkSizeTex: splatChunkSizeTex,
+            resolvedColorTex: resolvedColorTarget?.storageTexture ?? null,
+            resolvedColorResolveToTexture: resolvedColorTarget?.requiresResolve ? gpuResolvedColor : null,
+            resolvedColorResolveToFormat: resolvedColorTarget?.requiresResolve ? resolvedColorTarget.finalFormat : null,
+            atlasTexture,
+            tileTypeLookup,
+            // Terrain fragment uniforms currently default to season index 0.
+            // Keep the prebake on the same canonical season until runtime
+            // terrain season transitions are wired through the renderer.
+            resolvedColorSeason: 0,
+            // Near geometry LODs need the canonical tile sharpness; farther
+            // resolved tiles keep a small preblur to avoid distance shimmer.
+            resolvedColorAtlasSampleLod
         };
     }
 }
@@ -428,6 +468,9 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
         }
         if (climateTarget?.requiresResolve) {
             temporaryTextures.push(climateTarget.storageTexture);
+        }
+        if (resolvedColorTarget?.requiresResolve) {
+            temporaryTextures.push(resolvedColorTarget.storageTexture);
         }
 
         const queue = this.terrainGen?.device?.queue;
@@ -477,6 +520,16 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
         if (this.requiredTypes.includes('splatData') && gpuSplatIndex) {
             textures.splatIndex = this._wrapGPUTexture(
                 gpuSplatIndex, this.textureSize, this.textureFormats.splatIndex || 'rgba8unorm', true
+            );
+        }
+        if (this.requiredTypes.includes('splatValid') && gpuSplatValid) {
+            textures.splatValid = this._wrapGPUTexture(
+                gpuSplatValid, this.textureSize, this.textureFormats.splatValid || 'rgba8unorm', true
+            );
+        }
+        if (this.requiredTypes.includes('resolvedColor') && gpuResolvedColor) {
+            textures.resolvedColor = this._wrapGPUTexture(
+                gpuResolvedColor, this.textureSize, this.textureFormats.resolvedColor || 'rgba8unorm', false
             );
         }
 
@@ -543,7 +596,7 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
         encoder.copyTextureToBuffer(
             { texture: gpuTex, origin: { x: 0, y: 0, z: 0 } },
             { buffer: staging, bytesPerRow: bytesPerRow },
-            [size, size, 1]
+            { width: size, height: size, depthOrArrayLayers: 1 }
         );
         device.queue.submit([encoder.finish()]);
         await device.queue.onSubmittedWorkDone();

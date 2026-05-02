@@ -169,7 +169,7 @@ export class DistortionPass {
         commandEncoder.copyTextureToTexture(
             { texture: this._scratchTexture },
             { texture: hdrTexture },
-            [sceneWidth, sceneHeight]
+            { width: sceneWidth, height: sceneHeight, depthOrArrayLayers: 1 }
         );
     }
 

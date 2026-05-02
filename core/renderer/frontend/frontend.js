@@ -11,6 +11,7 @@ import { LightingController } from '../../lighting/lightingController.js';
 import { Logger} from '../../../shared/Logger.js'
 import { WeatherController } from '../environment/WeatherController.js';
 import { QuadtreeTileManager } from '../../world/quadtree/GPUQuadtreeTerrain.js';
+import { buildStreamerAuthoringRuntime } from '../../world/streamerAuthoringRuntime.js';
 
 import { QuadtreeTerrainRenderer } from '../terrain/QuadtreeTerrainRenderer.js';
 import { PostProcessingPipeline, HDR_FORMAT } from '../postprocessing/PostProcessingPipeline.js';
@@ -30,6 +31,7 @@ export class Frontend {
         this._streamerTheme = options.streamerTheme || null;
         this._nightSkyTheme = options.nightSkyTheme || null;
         this._terrainTheme = options.terrainTheme || null;
+        this._particleAuthoring = options.particleAuthoring || null;
         this.gpuQuadtreeConfig = options.gpuQuadtree || this.engineConfig?.gpuQuadtree || null;
         this.gpuQuadtreeEnabled = this.gpuQuadtreeConfig?.enabled === true;
         this.quadtreeTileManager = null;
@@ -92,12 +94,28 @@ export class Frontend {
         this._lastDeltaTime = 0;
 
         this.particleSystem = null;
+        this.atmoBankSystem = null;
         this.postProcessing = null;
         this.heatHazeEmitter = null;
+        this._currentEnvironmentState = null;
     }
 
     getBackend() {
         return this.backend;
+    }
+
+    _getAtmoBankFeatureFlags() {
+        const features = this.engineConfig?.features ?? {};
+        return {
+            cloudParticles: features.cloudParticles !== false,
+            fogParticles: features.fogParticles !== false,
+        };
+    }
+
+    _shouldInitializeAtmoBankSystem() {
+        if (this.engineConfig?.features?.skyEffects === false) return false;
+        const flags = this._getAtmoBankFeatureFlags();
+        return flags.cloudParticles || flags.fogParticles;
     }
 
     setActorManager(mgr) { this._actorManager = mgr; }
@@ -187,6 +205,7 @@ export class Frontend {
                 engineConfig: this.engineConfig,
                 planetConfig: this.planetConfig,
                 terrainGenerator: terrainGenerator,
+                textureManager: this.textureManager,
             });
             await this.quadtreeTileManager.initialize();
            
@@ -207,8 +226,38 @@ export class Frontend {
             
             // Asset streamer: modular multi-category GPU scatter system
             // (trees, ground cover, plants — replaces single-purpose GrassRenderer)
+            if (this.engineConfig?.features?.streamedAssets === false) {
+                Logger.info('[Frontend] Asset streamer disabled by features.streamedAssets');
+            } else
             try {
                 const { AssetStreamer } = await import('../streamer/AssetStreamer.js');
+                const streamerAuthoringRuntime = buildStreamerAuthoringRuntime(
+                    this.planetConfig?.worldAuthoring,
+                    {
+                        assetDefinitions: this._streamerTheme.DEFAULT_ASSET_DEFINITIONS,
+                        archetypeDefinitions: this._streamerTheme.ARCHETYPE_DEFINITIONS,
+                        tileCategories: this._terrainTheme?.TILE_CATEGORIES,
+                    }
+                );
+                if (streamerAuthoringRuntime.summary.appliedProfileCount > 0) {
+                    Logger.info(
+                        `[AssetAuthoring] Applied ${streamerAuthoringRuntime.summary.appliedProfileCount}/` +
+                        `${streamerAuthoringRuntime.summary.profileCount} authored asset profiles ` +
+                        'to streamer placement'
+                    );
+                }
+                if (streamerAuthoringRuntime.summary.clusterTreeAuthoredTileCount > 0) {
+                    Logger.info(
+                        `[AssetAuthoring] Authored cluster tree metadata covers ` +
+                        `${streamerAuthoringRuntime.summary.clusterTreeAuthoredTileCount} tile types`
+                    );
+                }
+                if (streamerAuthoringRuntime.summary.unsupportedProfileCount > 0) {
+                    Logger.warn(
+                        `[AssetAuthoring] ${streamerAuthoringRuntime.summary.unsupportedProfileCount} ` +
+                        'asset profiles use unsupported archetype refs'
+                    );
+                }
                 this.assetStreamer = new AssetStreamer({
                     device:         this.backend.device,
                     backend:        this.backend,
@@ -218,6 +267,9 @@ export class Frontend {
                     engineConfig:   this.engineConfig,
                     uniformManager: this.uniformManager,
                     streamerTheme:  this._streamerTheme,
+                    assetDefinitions: streamerAuthoringRuntime.assetDefinitions,
+                    archetypeDefinitions: streamerAuthoringRuntime.archetypeDefinitions,
+                    clusterTreeTileMetadata: streamerAuthoringRuntime.clusterTreeTileMetadata,
                     propTextureManager: this.propTextureManager,
                     leafAlbedoTextureManager: this.leafAlbedoTextureManager,
                     leafNormalTextureManager: this.leafNormalTextureManager,
@@ -243,7 +295,7 @@ export class Frontend {
             }
             await this.quadtreeTerrainRenderer.initialize();
 
-            await this._maybeInitGPUShadows();
+            if (this.engineConfig?.features?.shadows !== false) await this._maybeInitGPUShadows();
 
             if (this.masterChunkLoader?.setStreamingEnabled) {
                 this.masterChunkLoader.setStreamingEnabled(false);
@@ -311,8 +363,11 @@ export class Frontend {
             Logger.warn(`[Frontend] GPU quadtree init failed: ${error?.message || error}`);
             this.quadtreeTileManager = null;
             this.quadtreeTerrainRenderer = null;
-        }    
+        }
 
+        if (this.atmoBankSystem && this.quadtreeTileManager?.tileStreamer) {
+            this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
+        }
     }
 
     async setTerrainDebugMode(mode) {
@@ -414,38 +469,48 @@ export class Frontend {
                 this.masterChunkLoader.terrainMeshManager.setAtmosphereLUT(this.atmosphereLUT);
             }
 
-            const { SkyRenderer } = await import('../SkyRenderer.js');
-            const spaceLODThreshold = 1000;
-            this.skyRenderer = new SkyRenderer(this.backend, this.atmosphereLUT, {
-                spaceLODThreshold,
-                nightSkyTheme: this._nightSkyTheme,
-            });
-            await this.skyRenderer.initialize();
+            if (this.engineConfig?.features?.skyEffects !== false) {
+                const { SkyRenderer } = await import('../SkyRenderer.js');
+                const spaceLODThreshold = 1000;
+                this.skyRenderer = new SkyRenderer(this.backend, this.atmosphereLUT, {
+                    spaceLODThreshold,
+                    nightSkyTheme: this._nightSkyTheme,
+                });
+                await this.skyRenderer.initialize();
+            }
         }
 
-        const { StarRenderer } = await import('../starRenderer.js');
-        this.starRenderer = new StarRenderer(this.backend);
-        await this.starRenderer.initialize();
-        
-        const { MoonRenderer } = await import('../MoonRenderer.js');
-        this.moonRenderer = new MoonRenderer(this.backend);
-        await this.moonRenderer.initialize();
-        
-        const cloudConfig = {
-            gridDimensions: { x: 32, y: 24, z: 32 },
-            cloudAnisotropy: 0.75,
-            volumetricLayerMode: 'lowOnly',
-            cumulusEnabled: false,
-            cirrusQuality: 'high'
-        };
-        const { WebGPUCloudRenderer } = await import('../clouds/webgpuCloudRenderer.js');
-        this.cloudRenderer = new WebGPUCloudRenderer(this.backend, cloudConfig);
-        await this.cloudRenderer.initialize();
+        if (this.engineConfig?.features?.skyEffects !== false) {
+            const { StarRenderer } = await import('../starRenderer.js');
+            this.starRenderer = new StarRenderer(this.backend);
+            await this.starRenderer.initialize();
 
-        if (this.planetConfig) {
-            this.cloudRenderer.setPlanetConfig(this.planetConfig);
+            const { MoonRenderer } = await import('../MoonRenderer.js');
+            this.moonRenderer = new MoonRenderer(this.backend);
+            await this.moonRenderer.initialize();
+        } else {
+            Logger.info('[Frontend] Sky effects disabled by features.skyEffects');
         }
-        this.cloudRenderer.enabled = true;
+
+        if (this.engineConfig?.features?.clouds !== false) {
+            const features = this.engineConfig?.features ?? {};
+            const cloudConfig = {
+                cloudAnisotropy: 0.75,
+                cirrusQuality: 'high',
+                lowClouds: features.lowClouds !== false,
+                midClouds: features.midClouds !== false,
+                highClouds: features.highClouds !== false,
+            };
+            const { WebGPUCloudRenderer } = await import('../clouds/webgpuCloudRenderer.js');
+            this.cloudRenderer = new WebGPUCloudRenderer(this.backend, cloudConfig);
+            await this.cloudRenderer.initialize();
+            if (this.planetConfig) {
+                this.cloudRenderer.setPlanetConfig(this.planetConfig);
+            }
+            this.cloudRenderer.enabled = true;
+        } else {
+            Logger.info('[Frontend] Clouds disabled by features.clouds');
+        }
 
         const weatherConfig = options.weatherConfig || {};
         this.weatherController = new WeatherController(this.backend, weatherConfig);
@@ -460,26 +525,28 @@ export class Frontend {
             );
             await this.aerialTest.initialize();
         }
-        this.clusterGrid = new ClusterGrid({
-            gridSizeX: 16, gridSizeY: 8, gridSizeZ: 24,
-            useLogarithmicDepth: true
-        });
-        
-        this.lightManager = new ClusteredLightManager(this.clusterGrid, {
-            maxLightsPerCluster: 32,
-            maxLightIndices: 8192
-        });
-        
-        if (this.backend?.device) {
-            const { ClusteredLightBuffers } =
-                await import('../../lighting/ClusteredLightBuffers.js');
-            this.clusterLightBuffers = new ClusteredLightBuffers(
-                this.backend.device,
-                this.clusterGrid,
-                128   // maxLights
-            );
+        if (this.engineConfig?.features?.clusteredLighting !== false) {
+            this.clusterGrid = new ClusterGrid({
+                gridSizeX: 16, gridSizeY: 8, gridSizeZ: 24,
+                useLogarithmicDepth: true
+            });
+            this.lightManager = new ClusteredLightManager(this.clusterGrid, {
+                maxLightsPerCluster: 32,
+                maxLightIndices: 8192
+            });
+            if (this.backend?.device) {
+                const { ClusteredLightBuffers } =
+                    await import('../../lighting/ClusteredLightBuffers.js');
+                this.clusterLightBuffers = new ClusteredLightBuffers(
+                    this.backend.device,
+                    this.clusterGrid,
+                    128   // maxLights
+                );
+            } else {
+                this.clusterLightBuffers = null;
+            }
         } else {
-            this.clusterLightBuffers = null;
+            Logger.info('[Frontend] Clustered lighting disabled by features.clusteredLighting');
         }
 
         if (this.backend?.device) {
@@ -496,23 +563,55 @@ export class Frontend {
             this.heatHazeEmitter = new HeatHazeEmitter(this.backend.device, {});
             this.heatHazeEmitter.initialize('depth24plus');
 
-            const { ParticleSystem } = await import('../particles/ParticleSystem.js');
-            this.particleSystem = new ParticleSystem({
-                device: this.backend.device,
-                backend: this.backend,
-                colorFormat: HDR_FORMAT,
-                depthFormat: 'depth24plus',
-            });
-            await this.particleSystem.initialize();
-            if (this.planetConfig) {
-                this.particleSystem.setPlanetConfig(this.planetConfig);
+            if (this.engineConfig?.features?.particles !== false) {
+                const { ParticleSystem } = await import('../particles/ParticleSystem.js');
+                this.particleSystem = new ParticleSystem({
+                    device: this.backend.device,
+                    backend: this.backend,
+                    colorFormat: HDR_FORMAT,
+                    depthFormat: 'depth24plus',
+                    particleAuthoring: this._particleAuthoring,
+                });
+                await this.particleSystem.initialize();
+                if (this.planetConfig) {
+                    this.particleSystem.setPlanetConfig(this.planetConfig);
+                }
+                if (this.lightManager) {
+                    this.particleSystem.setLightManager(this.lightManager);
+                }
+            } else {
+                Logger.info('[Frontend] Particles disabled by features.particles');
             }
-            if (this.lightManager) {
-                this.particleSystem.setLightManager(this.lightManager);
+
+            if (this._shouldInitializeAtmoBankSystem()) {
+                const atmoBankFeatureFlags = this._getAtmoBankFeatureFlags();
+                const { AtmoBankSystem } = await import('../atmosphere-banks/AtmoBankSystem.js');
+                this.atmoBankSystem = new AtmoBankSystem({
+                    device: this.backend.device,
+                    backend: this.backend,
+                    colorFormat: HDR_FORMAT,
+                    depthFormat: 'depth24plus',
+                    atmoBankAuthoring: this.planetConfig?.atmoBankAuthoring,
+                    tileCategories: this.planetConfig?.tileCatalog?.tileCategories ??
+                        this.planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
+                    biomeDefinitions: this.planetConfig?.biomeDefinitions ?? this.planetConfig?.worldAuthoring?.biomes,
+                    featureFlags: atmoBankFeatureFlags,
+                    renderConfig: this.engineConfig?.rendering?.atmoBankParticles,
+                });
+                await this.atmoBankSystem.initialize();
+                if (this.quadtreeTileManager?.tileStreamer) {
+                    this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
+                    Logger.info('[AtmoBank] GPU tile streamer linked');
+                }
+                if (typeof window !== 'undefined') {
+                    window.atmoBankDiag = () => this.atmoBankSystem?.getDiagnostics?.() ?? null;
+                }
+            } else if (this.engineConfig?.features?.skyEffects !== false) {
+                Logger.info('[Frontend] Atmospheric bank particles disabled by features.cloudParticles/features.fogParticles');
             }
         }
 
-        await this._maybeInitGPUShadows();
+        if (this.engineConfig?.features?.shadows !== false) await this._maybeInitGPUShadows();
 
         this.uniformManager.uniforms.ambientLightIntensity.value = 0.8;
         this.uniformManager.uniforms.ambientLightColor.value.set(0xffffff);
@@ -523,14 +622,18 @@ export class Frontend {
         this.uniformManager.uniforms.sunLightDirection.value.set(0.5, 1.0, 0.3).normalize();
 
 
-        const { SkinnedMeshRenderer } = await import('../mesh/SkinnedMeshRenderer.js');
-        this.skinnedMeshRenderer = new SkinnedMeshRenderer({
-            backend: this.backend,
-            uniformManager: this.uniformManager,
-        });
-        await this.skinnedMeshRenderer.initialize();
-        this.skinnedMeshRenderer.setClusterLightBuffers(this.clusterLightBuffers);
-        this.skinnedMeshRenderer.setShadowRenderer(this.gpuShadowRenderer);
+        if (this.engineConfig?.features?.actors !== false) {
+            const { SkinnedMeshRenderer } = await import('../mesh/SkinnedMeshRenderer.js');
+            this.skinnedMeshRenderer = new SkinnedMeshRenderer({
+                backend: this.backend,
+                uniformManager: this.uniformManager,
+            });
+            await this.skinnedMeshRenderer.initialize();
+            this.skinnedMeshRenderer.setClusterLightBuffers(this.clusterLightBuffers);
+            this.skinnedMeshRenderer.setShadowRenderer(this.gpuShadowRenderer);
+        } else {
+            Logger.info('[Frontend] Actors disabled by features.actors');
+        }
 
         return this;
     }
@@ -594,7 +697,7 @@ async loadGLB(url, options = {}) {
 _preparePerFrameLightingAndParticles(encoder) {
     // 1) Let particles update their attached point lights first.
     if (this.particleSystem) {
-        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0);
+        this.particleSystem.update(encoder, this.camera, this._lastDeltaTime || 0, this._currentEnvironmentState);
     }
 
     // 2) Upload the latest light list after particle lights have moved/flickered.
@@ -700,9 +803,10 @@ updateLighting(starSystem) {
 
 
     async render(gameState, environmentState, deltaTime, planetConfig, sphericalMapper, starSystem) {
-        
+
         if (!this.textureManager?.loaded ) return;
         this._lastDeltaTime = Number.isFinite(deltaTime) ? deltaTime : 0;
+        this._currentEnvironmentState = environmentState;
         
         if (!this._renderDiagLastWall) this._renderDiagLastWall = performance.now();
         if (!this._renderDiagCount) this._renderDiagCount = 0;
@@ -760,6 +864,15 @@ updateLighting(starSystem) {
                 blend: this.weatherController.getBlend(),
                 resolution: this.weatherController.getResolution()
             };
+        }
+
+        if (this.uniformManager?.setLocalFogDensityBoost) {
+            const localFogBoost = this.atmoBankSystem?.estimateLocalDistanceFogBoost?.(
+                this.camera,
+                environmentState,
+                this.planetConfig
+            ) ?? 0;
+            this.uniformManager.setLocalFogDensityBoost(localFogBoost);
         }
 
         // --- UPDATED OCEAN UPDATE LOGIC ---
@@ -843,7 +956,9 @@ updateLighting(starSystem) {
             );
         }
 
-        if (this.genericMeshRenderer) {
+        // GPU-quadtree path renders generic meshes INSIDE renderTerrain so
+        // they share the terrain render pass. Avoid a double draw here.
+        if (this.genericMeshRenderer && !this.isGPUQuadtreeActive()) {
             this.genericMeshRenderer.update(this.camera.position, deltaTime);
             this.genericMeshRenderer.render(
                 this.camera.matrixWorldInverse,
@@ -854,6 +969,14 @@ updateLighting(starSystem) {
         if (this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds) {
             this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
             this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
+
+            if (this.atmoBankSystem && this.cloudRenderer.noiseGenerator) {
+                const ng = this.cloudRenderer.noiseGenerator;
+                this.atmoBankSystem.setNoiseTextures(
+                    ng.getBaseTextureView(),
+                    ng.getDetailTextureView()
+                );
+            }
         }
 
         if (postEffectsActive) {
@@ -990,6 +1113,45 @@ updateLighting(starSystem) {
         }*/
     }
 
+    _renderAtmoBanks(commandEncoder) {
+        if (!this.atmoBankSystem || !this.postProcessing) return;
+
+        const colorView = this.postProcessing.hdrTextureView;
+        const depthView = this.postProcessing.depthTextureView;
+        if (!colorView || !depthView) return;
+
+        const vp = this.backend._viewport;
+        if (this.atmoBankSystem.renderOffscreen?.(commandEncoder, {
+            sceneColorView: colorView,
+            sceneDepthView: depthView,
+            sceneWidth: vp.width,
+            sceneHeight: vp.height,
+        })) {
+            return;
+        }
+
+        const pass = commandEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: colorView,
+                loadOp: 'load',
+                storeOp: 'store',
+            }],
+            depthStencilAttachment: {
+                view: depthView,
+                depthReadOnly: true,
+            },
+        });
+
+        pass.setViewport(vp.x, vp.y, vp.width, vp.height, 0, 1);
+        this.atmoBankSystem.render(pass, {
+            targetWidth: vp.width,
+            targetHeight: vp.height,
+            sceneWidth: vp.width,
+            sceneHeight: vp.height,
+        });
+        pass.end();
+    }
+
     renderTerrain() {
         const useGPUQuadtree = this.isGPUQuadtreeActive();
 
@@ -1004,14 +1166,17 @@ updateLighting(starSystem) {
             // Update particle-attached lights first, then upload/assign clustered lights.
             this._preparePerFrameLightingAndParticles(encoder);
             
+            // Always update actor joint/transform state before any rendering.
+            if (this.skinnedMeshRenderer?.isReady()) {
+                this.skinnedMeshRenderer.update(this._lastDeltaTime);
+            }
+
             // === SHADOW PASSES ===
             if (this.gpuShadowRenderer?.isReady) {
                 this.gpuShadowRenderer.updateCascadeParams(this.camera, encoder);
                 this.gpuShadowRenderer.cullAndBuildIndirect(encoder);
                 this.gpuShadowRenderer.renderShadowPasses(encoder);
-                // Actor shadows must be written here so terrain/assets read them correctly
                 if (this.skinnedMeshRenderer?.isReady()) {
-                    this.skinnedMeshRenderer.update(this._lastDeltaTime);
                     this.skinnedMeshRenderer.renderShadowPasses(encoder, this.gpuShadowRenderer);
                 }
             }
@@ -1063,12 +1228,35 @@ updateLighting(starSystem) {
                     this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
                 }
 
+                // Generic meshes (game-specific primitive actors like the
+                // platform_game ball and cloud platforms) must render in
+                // the same render pass as terrain and assets, otherwise
+                // they fall outside the active color/depth attachment in
+                // GPU-quadtree mode.
+                if (this.genericMeshRenderer) {
+                    this.genericMeshRenderer.update(this.camera.position, this._lastDeltaTime || 0);
+                    this.genericMeshRenderer.render(viewMatrix, projectionMatrix);
+                }
+
                 // Particles draw after opaque terrain + assets + skinned meshes,
                 // still inside the main color render pass (before post-processing).
                 if (this.particleSystem && this.backend._renderPassEncoder) {
                     this.particleSystem.render(this.backend._renderPassEncoder);
                 }
-     
+
+                if (this.atmoBankSystem) {
+                    this.backend.endRenderPassForCompute();
+                    const abEnc = this.backend.getCommandEncoder();
+                    this.atmoBankSystem.update(
+                        abEnc, this.camera, this._lastDeltaTime || 0,
+                        this._currentEnvironmentState, this.planetConfig,
+                        this.lightingController, this.uniformManager
+                    );
+                    this.atmoBankSystem.setDepthTexture(this.postProcessing?.depthTextureView);
+                    this._renderAtmoBanks(abEnc);
+                    this.backend.resumeRenderPass();
+                }
+
             }
             return;
         }
@@ -1090,10 +1278,17 @@ updateLighting(starSystem) {
     }
 
     async switchPlanet(planetConfig) {
+        this.planetConfig = planetConfig;
         this.atmosphereSettings = requireObject(
             planetConfig.atmosphereSettings,
             'planetConfig.atmosphereSettings'
         );
+        this.atmoBankSystem?.setAuthoringRuntime?.(planetConfig?.atmoBankAuthoring, {
+            tileCategories: planetConfig?.tileCatalog?.tileCategories ??
+                planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
+            biomeDefinitions: planetConfig?.biomeDefinitions ?? planetConfig?.worldAuthoring?.biomes,
+        });
+        this.particleSystem?.setAuthoringRuntime?.(planetConfig?.particleAuthoring ?? null);
         if (this.atmosphereLUT) {
             this.atmosphereLUT.invalidate();
         }
@@ -1136,6 +1331,10 @@ this.skinnedMeshRenderer = null;
         if (this.particleSystem) {
             this.particleSystem.dispose();
             this.particleSystem = null;
+        }
+        if (this.atmoBankSystem) {
+            this.atmoBankSystem.dispose();
+            this.atmoBankSystem = null;
         }
         this.lightManager.cleanup();
         this.shadowRenderer.cleanup();

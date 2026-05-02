@@ -1,6 +1,10 @@
 // js/world/webgpuTerrainGenerator.js
 
 import { createSplatComputeShader } from './shaders/webgpu/splatCompute.wgsl.js';
+import { createSplatPaletteComputeShader } from './shaders/webgpu/splatPaletteCompute.wgsl.js';
+import { createSplatValidityComputeShader } from './shaders/webgpu/splatValidityCompute.wgsl.js';
+import { createResolvedTerrainColorComputeShader } from './shaders/webgpu/resolvedTerrainColorCompute.wgsl.js';
+import { getPackedBiomeUniformByteSize, packBiomeUniformData } from './biomeRuntime.js';
 
 import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
 
@@ -21,6 +25,7 @@ export class WebGPUTerrainGenerator {
             throw new Error('WebGPUTerrainGenerator requires options.terrainTheme.terrainShaderBundle');
         }
         this.terrainTheme = options.terrainTheme;
+        this.tileTypes = options.terrainTheme.TILE_TYPES ?? {};
         this.tileCategories = options.terrainTheme.TILE_CATEGORIES;
         this.buildTileCategoryLookupWGSL = options.terrainTheme.buildTileCategoryLookupWGSL;
         this.terrainShaderBundle = options.terrainTheme.terrainShaderBundle;
@@ -38,10 +43,82 @@ export class WebGPUTerrainGenerator {
         const splat = requireObject(splatConfig, 'splatConfig');
         this.splatDensity = requireInt(splat.splatDensity, 'splatConfig.splatDensity', 1);
         this.splatKernelSize = requireInt(splat.splatKernelSize, 'splatConfig.splatKernelSize', 1);
+        this.splatTransitionSharpness = Math.max(
+            1.0,
+            requireNumber(
+                splat.transitionSharpness ?? 1.9,
+                'splatConfig.transitionSharpness'
+            )
+        );
+        this.splatTransitionDominanceStart = clamp01(
+            requireNumber(
+                splat.transitionDominanceStart ?? 0.55,
+                'splatConfig.transitionDominanceStart'
+            )
+        );
+        this.splatTransitionDominanceEnd = Math.max(
+            this.splatTransitionDominanceStart + 0.001,
+            clamp01(
+                requireNumber(
+                    splat.transitionDominanceEnd ?? 0.9,
+                    'splatConfig.transitionDominanceEnd'
+                )
+            )
+        );
+        this.splatCenterCategoryBias = Math.max(
+            0.0,
+            requireNumber(
+                splat.centerCategoryBias ?? 0.0,
+                'splatConfig.centerCategoryBias'
+            )
+        );
+        this.splatTransitionBreakupScale = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupScale ?? 0.018,
+                'splatConfig.transitionBreakupScale'
+            )
+        );
+        this.splatTransitionBreakupWarpScale = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupWarpScale ?? 0.055,
+                'splatConfig.transitionBreakupWarpScale'
+            )
+        );
+        this.splatTransitionBreakupWarpStrength = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupWarpStrength ?? 0.65,
+                'splatConfig.transitionBreakupWarpStrength'
+            )
+        );
+        this.splatTransitionBreakupStrength = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupStrength ?? 0.10,
+                'splatConfig.transitionBreakupStrength'
+            )
+        );
+        this.splatChunkPaletteEnabled = splat.chunkPaletteEnabled !== false;
+        this.splatChunkPaletteMinCoverage = clamp01(
+            Number.isFinite(splat.chunkPaletteMinCoverage)
+                ? splat.chunkPaletteMinCoverage
+                : 0.9
+        );
+        this.splatChunkPaletteBorderTexels = Math.max(
+            0,
+            requireInt(
+                splat.chunkPaletteBorderTexels ?? 2,
+                'splatConfig.chunkPaletteBorderTexels',
+                0
+            )
+        );
         this.textureCache = requireObject(textureCache, 'textureCache');
         this.arrayPools = new Map();
         this.useTextureArrays = true;
         this.maxArrayBytesPerType = 512 * 1024 * 1024;
+        this.maxGpuBiomes = Math.max(1, requireInt(options.maxGpuBiomes ?? 16, 'maxGpuBiomes', 1));
         
         this.detailScale = 0.08;
         this.ridgeScale = 0.02;
@@ -65,6 +142,10 @@ export class WebGPUTerrainGenerator {
         
         this.debugMode = 0;
         this._logUniformsOnNextPass = false;
+        this._packedBiomeUniforms = null;
+        this.biomeUniformBuffer = null;
+        this.biomeBindGroupLayout = null;
+        this.biomeBindGroup = null;
     }
 
 
@@ -184,6 +265,7 @@ export class WebGPUTerrainGenerator {
                 layout: bindGroupLayout,
                 entries
             }));
+            this._setTerrainBiomeBindGroup(pass);
             pass.dispatchWorkgroups(wgX, wgY);
             pass.end();
         }
@@ -305,6 +387,14 @@ export class WebGPUTerrainGenerator {
         return Math.ceil(kernelRadius) + 1;
     }
 
+    _getSplatPaletteDimensions(innerWidth, innerHeight, chunkSizeTex) {
+        const chunkSpan = Math.max(1, chunkSizeTex | 0);
+        return {
+            width: Math.max(1, Math.ceil(Math.max(1, innerWidth | 0) / chunkSpan)),
+            height: Math.max(1, Math.ceil(Math.max(1, innerHeight | 0) / chunkSpan))
+        };
+    }
+
     _fillTerrainUniformScratch(chunkCoordX, chunkCoordY, chunkSizeTex, chunkGridSize, face) {
         const buf = this._terrainUniformScratch;
         const v = new DataView(buf);
@@ -377,8 +467,12 @@ export class WebGPUTerrainGenerator {
         const padding = this._computeSplatPaddingTexels();
         const paddedSize = innerSize + padding * 2;
         const splatIndexTex = splatPass.splatIndexTex;
+        const splatValidTex = splatPass.splatValidTex;
         if (!splatIndexTex) {
             throw new Error('Splat pass requires splatIndexTex for top-4 sparse splat output');
+        }
+        if (!splatValidTex) {
+            throw new Error('Splat pass requires splatValidTex for bilinear-valid mask output');
         }
 
         const shouldPrimeSplat = (this._quadtreeSplatPrimeCount ?? 0) < 3;
@@ -399,6 +493,12 @@ export class WebGPUTerrainGenerator {
                 innerSize,
                 [255, 255, 255, 255]
             );
+            this._fillTextureRGBA8Unorm(
+                splatValidTex,
+                innerSize,
+                innerSize,
+                [0, 0, 0, 255]
+            );
         }
 
         if (this._quadtreePaddedSplatLogCount === undefined) {
@@ -413,6 +513,16 @@ export class WebGPUTerrainGenerator {
         }
 
         const paddedTileMap = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
+        const paletteSize = this._getSplatPaletteDimensions(
+            innerSize,
+            innerSize,
+            splatPass.chunkSizeTex
+        );
+        const splatPaletteTex = this.createGPUTexture(
+            paletteSize.width,
+            paletteSize.height,
+            'rgba8unorm'
+        );
         let debugProbeTextures = null;
         if (shouldRunProbePasses) {
             this._quadtreeSplatProbePassCount = (this._quadtreeSplatProbePassCount ?? 0) + 1;
@@ -422,6 +532,8 @@ export class WebGPUTerrainGenerator {
                 categoryEcho: this.createGPUTexture(innerSize, innerSize, 'rgba8unorm')
             };
         }
+        // _padTileUniformBuffer is still used by debug probe passes (tileEcho/categoryEcho)
+        // when debugProbeTextures is active — keep the write unconditionally as it is cheap.
         const padTileParams = new Uint32Array([
             padding >>> 0,
             innerSize >>> 0,
@@ -430,25 +542,46 @@ export class WebGPUTerrainGenerator {
         ]);
         this.device.queue.writeBuffer(this._padTileUniformBuffer, 0, padTileParams);
 
-        const splatUniformData = new ArrayBuffer(32);
-        const splatView = new DataView(splatUniformData);
-        splatView.setInt32(0, 0, true);
-        splatView.setInt32(4, 0, true);
-        splatView.setInt32(8, splatPass.chunkSizeTex, true);
-        splatView.setInt32(12, this.seed, true);
-        splatView.setInt32(16, this.splatDensity, true);
-        splatView.setInt32(20, this.splatKernelSize, true);
-        splatView.setInt32(24, padding, true);
-        splatView.setInt32(28, 0, true);
-        this.device.queue.writeBuffer(this.splatUniformBuffer, 0, splatUniformData);
+        this._writeSplatUniformBuffer({
+            chunkCoordX,
+            chunkCoordY,
+            chunkSizeTex: splatPass.chunkSizeTex,
+            inputPadding: padding,
+        });
 
-        const { pipeline: padTilePipeline, bindGroupLayout: padTileBindGroupLayout } =
-            this._getPadTilePipelineForFormat(splatPass.tileFormat || 'r8unorm');
+        // Build the padded tileMap by running the terrain generation shader over
+        // the extended region (innerSize + padding on each side) instead of
+        // edge-replicating the tile's own border.  The uvOffset shifts the
+        // pixel→faceUV mapping so that pixel `padding` maps to the tile origin
+        // and pixels 0..(padding-1) map to the genuine neighbouring tile area.
+        const uvShift = -padding / Math.max(innerSize - 1, 1) / Math.max(chunkGridSize, 1);
+        this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
+        {
+            const v = new DataView(this._terrainUniformScratch);
+            v.setInt32(48, 2, true);        // outputType = 2 (tile IDs)
+            v.setFloat32(64, uvShift, true); // uvOffset.x
+            v.setFloat32(68, uvShift, true); // uvOffset.y
+        }
+        if (!this._paddedTileGenUniformBuffer) {
+            this._paddedTileGenUniformBuffer = this.device.createBuffer({
+                label: 'PaddedTileGenUniform',
+                size: this._terrainUniformScratch.byteLength,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+        }
+        this.device.queue.writeBuffer(this._paddedTileGenUniformBuffer, 0, this._terrainUniformScratch);
+
+        const { pipeline: tileGenPipeline, bindGroupLayout: tileGenBindGroupLayout } =
+            this._getTerrainPipelineForFormat('rgba8unorm');
+        const { pipeline: splatPalettePipeline, bindGroupLayout: splatPaletteBindGroupLayout } =
+            this._getSplatPalettePipelineForFormat('rgba8unorm');
         const { pipeline: splatPipeline, bindGroupLayout: splatBindGroupLayout } =
             this._getSplatPipelineForFormats(
                 splatPass.heightFormat || 'r32float',
                 'rgba8unorm'
             );
+        const { pipeline: splatValidityPipeline, bindGroupLayout: splatValidityBindGroupLayout } =
+            this._getSplatValidityPipelineForFormats('rgba8unorm', 'rgba8unorm');
         const constantProbePipeline = debugProbeTextures
             ? this._getSplatDebugProbePipeline('constantWrite')
             : null;
@@ -466,19 +599,37 @@ export class WebGPUTerrainGenerator {
         const enc = this.device.createCommandEncoder({ label: 'PaddedQuadtreeSplat' });
 
         {
-            const pass = enc.beginComputePass({ label: 'PadSourceTileMap' });
-            pass.setPipeline(padTilePipeline);
+            const pass = enc.beginComputePass({ label: 'GenPaddedTileMap' });
+            pass.setPipeline(tileGenPipeline);
             pass.setBindGroup(0, this.device.createBindGroup({
-                layout: padTileBindGroupLayout,
+                layout: tileGenBindGroupLayout,
                 entries: [
-                    { binding: 0, resource: { buffer: this._padTileUniformBuffer } },
-                    { binding: 1, resource: splatPass.tileTex.createView() },
-                    { binding: 2, resource: paddedTileMap.createView() }
+                    { binding: 0, resource: { buffer: this._paddedTileGenUniformBuffer } },
+                    { binding: 1, resource: paddedTileMap.createView() }
                 ]
             }));
+            this._setTerrainBiomeBindGroup(pass);
             pass.dispatchWorkgroups(
                 Math.ceil(paddedSize / 8),
                 Math.ceil(paddedSize / 8)
+            );
+            pass.end();
+        }
+
+        {
+            const pass = enc.beginComputePass({ label: 'ComputePaddedSplatPalette' });
+            pass.setPipeline(splatPalettePipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: splatPaletteBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: paddedTileMap.createView() },
+                    { binding: 2, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            pass.dispatchWorkgroups(
+                Math.ceil(paletteSize.width / 8),
+                Math.ceil(paletteSize.height / 8)
             );
             pass.end();
         }
@@ -493,7 +644,8 @@ export class WebGPUTerrainGenerator {
                     { binding: 1, resource: splatPass.heightTex.createView() },
                     { binding: 2, resource: paddedTileMap.createView() },
                     { binding: 3, resource: splatPass.splatTex.createView() },
-                    { binding: 4, resource: splatIndexTex.createView() }
+                    { binding: 4, resource: splatIndexTex.createView() },
+                    { binding: 5, resource: splatPaletteTex.createView() }
                 ]
             }));
             pass.dispatchWorkgroups(
@@ -501,6 +653,72 @@ export class WebGPUTerrainGenerator {
                 Math.ceil(innerSize / 8)
             );
             pass.end();
+        }
+
+        {
+            const pass = enc.beginComputePass({ label: 'ComputePaddedSplatValidity' });
+            pass.setPipeline(splatValidityPipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: splatValidityBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: splatIndexTex.createView() },
+                    { binding: 1, resource: splatValidTex.createView() }
+                ]
+            }));
+            pass.dispatchWorkgroups(
+                Math.ceil(innerSize / 8),
+                Math.ceil(innerSize / 8)
+            );
+            pass.end();
+        }
+
+        if (
+            splatPass.resolvedColorTex &&
+            splatPass.tileTex &&
+            splatPass.atlasTexture &&
+            splatPass.tileTypeLookup
+        ) {
+            this._writeResolvedColorUniformBuffer({
+                chunkCoordX,
+                chunkCoordY,
+                chunkSizeTex: innerSize,
+                chunkGridSize,
+                face,
+                season: splatPass.resolvedColorSeason ?? 0,
+                atlasSampleLod: splatPass.resolvedColorAtlasSampleLod ?? 1.0
+            });
+            const pass = enc.beginComputePass({ label: 'ComputeResolvedTerrainColor' });
+            pass.setPipeline(this.resolvedColorPipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: this.resolvedColorBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.resolvedColorUniformBuffer } },
+                    { binding: 1, resource: splatPass.resolvedColorTex.createView() },
+                    { binding: 2, resource: splatPass.splatTex.createView() },
+                    { binding: 3, resource: splatIndexTex.createView() },
+                    { binding: 4, resource: splatPass.tileTex.createView() },
+                    { binding: 5, resource: splatPass.atlasTexture.createView({ dimension: '2d-array' }) },
+                    { binding: 6, resource: splatPass.tileTypeLookup.createView() },
+                    { binding: 7, resource: this.resolvedColorAtlasSampler }
+                ]
+            }));
+            pass.dispatchWorkgroups(
+                Math.ceil(innerSize / 8),
+                Math.ceil(innerSize / 8)
+            );
+            pass.end();
+
+            if (splatPass.resolvedColorResolveToTexture && splatPass.resolvedColorResolveToFormat) {
+                this.resolveTexture2D(
+                    enc,
+                    splatPass.resolvedColorTex,
+                    'rgba8unorm',
+                    splatPass.resolvedColorResolveToTexture,
+                    splatPass.resolvedColorResolveToFormat,
+                    innerSize,
+                    innerSize
+                );
+            }
         }
 
 
@@ -587,6 +805,7 @@ export class WebGPUTerrainGenerator {
                     Logger.warn(`${SPLAT_STEP_PREFIX} [SplatDebug] quadtree splat diagnostics failed: ${err?.message || err}`);
                 }
                 try { paddedTileMap.destroy(); } catch (_) {}
+                try { splatPaletteTex.destroy(); } catch (_) {}
                 if (debugProbeTextures) {
                     try { debugProbeTextures.constantWrite.destroy(); } catch (_) {}
                     try { debugProbeTextures.tileEcho.destroy(); } catch (_) {}
@@ -662,6 +881,7 @@ export class WebGPUTerrainGenerator {
             const pass = enc.beginComputePass();
             pass.setPipeline(pipeline);
             pass.setBindGroup(0, this.device.createBindGroup({ layout: bindGroupLayout, entries }));
+            this._setTerrainBiomeBindGroup(pass);
             pass.dispatchWorkgroups(
                 Math.ceil(tp.textureSize / 8),
                 Math.ceil(tp.textureSize / 8)
@@ -692,6 +912,69 @@ export class WebGPUTerrainGenerator {
         }
     }
 
+    _writeSplatUniformBuffer({
+        chunkCoordX = 0,
+        chunkCoordY = 0,
+        chunkSizeTex,
+        inputPadding = 0,
+    }) {
+        const data = new ArrayBuffer(80);
+        const view = new DataView(data);
+        view.setInt32(0, chunkCoordX | 0, true);
+        view.setInt32(4, chunkCoordY | 0, true);
+        view.setInt32(8, chunkSizeTex | 0, true);
+        view.setInt32(12, this.seed, true);
+        view.setInt32(16, this.splatDensity, true);
+        view.setInt32(20, this.splatKernelSize, true);
+        view.setInt32(24, inputPadding | 0, true);
+        view.setInt32(
+            28,
+            this.splatChunkPaletteEnabled ? (this.splatChunkPaletteBorderTexels | 0) : 0,
+            true
+        );
+        view.setFloat32(32, this.splatTransitionSharpness, true);
+        view.setFloat32(36, this.splatTransitionDominanceStart, true);
+        view.setFloat32(40, this.splatTransitionDominanceEnd, true);
+        view.setFloat32(44, this.splatCenterCategoryBias, true);
+        view.setFloat32(48, this.splatTransitionBreakupScale, true);
+        view.setFloat32(52, this.splatTransitionBreakupWarpScale, true);
+        view.setFloat32(56, this.splatTransitionBreakupWarpStrength, true);
+        view.setFloat32(60, this.splatTransitionBreakupStrength, true);
+        view.setFloat32(
+            64,
+            this.splatChunkPaletteEnabled ? this.splatChunkPaletteMinCoverage : 2.0,
+            true
+        );
+        view.setFloat32(68, 0.0, true);
+        view.setFloat32(72, 0.0, true);
+        view.setFloat32(76, 0.0, true);
+        this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
+    }
+
+    _writeResolvedColorUniformBuffer({
+        chunkCoordX = 0,
+        chunkCoordY = 0,
+        chunkSizeTex = 1,
+        chunkGridSize = 1,
+        face = 0,
+        season = 0,
+        atlasSampleLod = 1.0,
+    } = {}) {
+        const data = new ArrayBuffer(64);
+        const view = new DataView(data);
+        view.setInt32(0, chunkCoordX | 0, true);
+        view.setInt32(4, chunkCoordY | 0, true);
+        view.setInt32(8, Math.max(1, chunkSizeTex | 0), true);
+        view.setInt32(12, Math.max(1, chunkGridSize | 0), true);
+        view.setInt32(16, this.seed | 0, true);
+        view.setInt32(20, face | 0, true);
+        view.setInt32(24, season | 0, true);
+        view.setInt32(28, 0, true);
+        view.setFloat32(32, Number.isFinite(this.worldScale) ? this.worldScale : 1.0, true);
+        view.setFloat32(36, Math.max(0.0, atlasSampleLod), true);
+        this.device.queue.writeBuffer(this.resolvedColorUniformBuffer, 0, data);
+    }
+
     setPlanetConfig(config) {
         const planetConfig = requireObject(config, 'planetConfig');
         this.planetConfig = planetConfig;
@@ -708,6 +991,9 @@ export class WebGPUTerrainGenerator {
         this.noiseReferenceRadiusM = radiusM >= 50000
             ? Math.min(baseReference, radiusM * 1.5)
             : baseReference;
+        // The packed data is cached here even before the GPU buffer exists.
+        // initializePipelines uploads it once biomeUniformBuffer is allocated.
+        this._refreshPackedBiomeUniforms();
         Logger.info(`WebGPUTerrainGenerator: Set worldScale to planet radius ${this.worldScale}`);
         Logger.info(`WebGPUTerrainGenerator: noiseReferenceRadiusM ${this.noiseReferenceRadiusM}`);
         if (this._useSmallPlanetMode) {
@@ -744,7 +1030,10 @@ export class WebGPUTerrainGenerator {
         // ── Standard terrain shader (base height / macro) ─────────
         const terrainShaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.terrainShaderModule = this.device.createShaderModule({
             label: 'Advanced Terrain Compute',
@@ -755,7 +1044,10 @@ export class WebGPUTerrainGenerator {
         const heightInputShaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
             hasHeightBindings: true,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.heightInputShaderModule = this.device.createShaderModule({
             label: 'Height Input Terrain Compute',
@@ -767,7 +1059,10 @@ export class WebGPUTerrainGenerator {
             baseGenerator: this.baseGenerator,
             hasHeightBindings: true,
             hasTileBindings: true,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         this.microShaderModule = this.device.createShaderModule({
             label: 'Micro Terrain Compute',
@@ -782,6 +1077,24 @@ export class WebGPUTerrainGenerator {
         this.splatShaderModule = this.device.createShaderModule({
             label: 'Splat Compute',
             code: splatShaderCode
+        });
+        const splatPaletteShaderCode = createSplatPaletteComputeShader({
+            tileCategories: this.tileCategories,
+            buildTileCategoryLookupWGSL: this.buildTileCategoryLookupWGSL,
+        });
+        this.splatPaletteShaderModule = this.device.createShaderModule({
+            label: 'Splat Palette Compute',
+            code: splatPaletteShaderCode
+        });
+        const splatValidityShaderCode = createSplatValidityComputeShader();
+        this.splatValidityShaderModule = this.device.createShaderModule({
+            label: 'Splat Validity Compute',
+            code: splatValidityShaderCode
+        });
+        const resolvedColorShaderCode = createResolvedTerrainColorComputeShader();
+        this.resolvedColorShaderModule = this.device.createShaderModule({
+            label: 'Resolved Terrain Color Compute',
+            code: resolvedColorShaderCode
         });
         if (typeof this.splatShaderModule.getCompilationInfo === 'function') {
             this.splatShaderModule.getCompilationInfo()
@@ -810,9 +1123,39 @@ export class WebGPUTerrainGenerator {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         this.splatUniformBuffer = this.device.createBuffer({
-            size: 32,
+            size: 80,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
+        this.resolvedColorUniformBuffer = this.device.createBuffer({
+            size: 64,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this.resolvedColorAtlasSampler = this.device.createSampler({
+            addressModeU: 'repeat',
+            addressModeV: 'repeat',
+            magFilter: 'linear',
+            minFilter: 'linear'
+        });
+        this.biomeUniformBuffer = this.device.createBuffer({
+            size: getPackedBiomeUniformByteSize(this.maxGpuBiomes),
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this.biomeBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'uniform' }
+                }
+            ]
+        });
+        this.biomeBindGroup = this.device.createBindGroup({
+            layout: this.biomeBindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: this.biomeUniformBuffer } }
+            ]
+        });
+        this._uploadPackedBiomeUniforms();
 
         // ── Standard terrain bind group layout (bindings 0,1) ──────
         this.terrainBindGroupLayout = this.device.createBindGroupLayout({
@@ -827,7 +1170,7 @@ export class WebGPUTerrainGenerator {
         });
         this.terrainPipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [this.terrainBindGroupLayout]
+                bindGroupLayouts: [this.terrainBindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: this.terrainShaderModule, entryPoint: 'main' }
         });
@@ -848,7 +1191,7 @@ export class WebGPUTerrainGenerator {
         });
         this.heightInputPipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [this.heightInputBindGroupLayout]
+                bindGroupLayouts: [this.heightInputBindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: this.heightInputShaderModule, entryPoint: 'main' }
         });
@@ -872,7 +1215,7 @@ export class WebGPUTerrainGenerator {
         });
         this.microPipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [this.microBindGroupLayout]
+                bindGroupLayouts: [this.microBindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: this.microShaderModule, entryPoint: 'main' }
         });
@@ -922,7 +1265,10 @@ export class WebGPUTerrainGenerator {
                 { binding: 4, visibility: GPUShaderStage.COMPUTE,
                   storageTexture: { access: 'write-only',
                                     format: 'rgba8unorm',
-                                    viewDimension: '2d' } }
+                                    viewDimension: '2d' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: 'float',
+                             viewDimension: '2d' } }
             ]
         });
         this.splatPipeline = this.device.createComputePipeline({
@@ -931,12 +1277,107 @@ export class WebGPUTerrainGenerator {
             }),
             compute: { module: this.splatShaderModule, entryPoint: 'main' }
         });
+        this.splatPaletteBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: 'unfilterable-float',
+                             viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  storageTexture: { access: 'write-only',
+                                    format: 'rgba8unorm',
+                                    viewDimension: '2d' } }
+            ]
+        });
+        this.splatPalettePipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.splatPaletteBindGroupLayout]
+            }),
+            compute: { module: this.splatPaletteShaderModule, entryPoint: 'main' }
+        });
+        this.splatValidityBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType('rgba8unorm'),
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: 'rgba8unorm',
+                        viewDimension: '2d'
+                    }
+                }
+            ]
+        });
+        this.splatValidityPipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.splatValidityBindGroupLayout]
+            }),
+            compute: { module: this.splatValidityShaderModule, entryPoint: 'main' }
+        });
+        this.resolvedColorBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE,
+                  buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                  storageTexture: { access: 'write-only',
+                                    format: 'rgba8unorm',
+                                    viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: gpuFormatSampleType('rgba8unorm'),
+                             viewDimension: '2d' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: gpuFormatSampleType('rgba8unorm'),
+                             viewDimension: '2d' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: gpuFormatSampleType('r8unorm'),
+                             viewDimension: '2d' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: 'float',
+                             viewDimension: '2d-array' } },
+                { binding: 6, visibility: GPUShaderStage.COMPUTE,
+                  texture: { sampleType: 'unfilterable-float',
+                             viewDimension: '2d' } },
+                { binding: 7, visibility: GPUShaderStage.COMPUTE,
+                  sampler: { type: 'filtering' } },
+            ]
+        });
+        this.resolvedColorPipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [this.resolvedColorBindGroupLayout]
+            }),
+            compute: { module: this.resolvedColorShaderModule, entryPoint: 'main' }
+        });
         this._splatPipelineCache = new Map();
         this._splatPipelineCache.set(
             this._getSplatPipelineCacheKey('r32float', 'r32float'),
             {
                 pipeline: this.splatPipeline,
                 bindGroupLayout: this.splatBindGroupLayout
+            }
+        );
+        this._splatPalettePipelineCache = new Map();
+        this._splatPalettePipelineCache.set(
+            this._getSplatPalettePipelineCacheKey('r32float'),
+            {
+                pipeline: this.splatPalettePipeline,
+                bindGroupLayout: this.splatPaletteBindGroupLayout
+            }
+        );
+        this._splatValidityPipelineCache = new Map();
+        this._splatValidityPipelineCache.set(
+            this._getSplatValidityPipelineCacheKey('rgba8unorm', 'rgba8unorm'),
+            {
+                pipeline: this.splatValidityPipeline,
+                bindGroupLayout: this.splatValidityBindGroupLayout
             }
         );
         this._padTilePipelineCache = new Map();
@@ -985,7 +1426,10 @@ export class WebGPUTerrainGenerator {
             baseGenerator: this.baseGenerator,
             outputFormat: fmt,
             hasHeightBindings: true,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Height Input Terrain Compute (${fmt})`,
@@ -1021,7 +1465,7 @@ export class WebGPUTerrainGenerator {
 
         const pipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [bindGroupLayout]
+                bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: shaderModule, entryPoint: 'main' }
         });
@@ -1054,7 +1498,10 @@ export class WebGPUTerrainGenerator {
             outputFormat: fmt,
             hasHeightBindings: true,
             hasTileBindings: true,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Micro Terrain Compute (${fmt})`,
@@ -1080,7 +1527,7 @@ export class WebGPUTerrainGenerator {
 
         const pipeline = this.device.createComputePipeline({
             layout: this.device.createPipelineLayout({
-                bindGroupLayouts: [bindGroupLayout]
+                bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout]
             }),
             compute: { module: shaderModule, entryPoint: 'main' }
         });
@@ -1142,6 +1589,14 @@ export class WebGPUTerrainGenerator {
                         format: 'rgba8unorm',
                         viewDimension: '2d'
                     }
+                },
+                {
+                    binding: 5,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType('rgba8unorm'),
+                        viewDimension: '2d'
+                    }
                 }
             ]
         });
@@ -1158,6 +1613,106 @@ export class WebGPUTerrainGenerator {
         }
         const record = { pipeline, bindGroupLayout };
         this._splatPipelineCache.set(cacheKey, record);
+        return record;
+    }
+
+    _getSplatPalettePipelineCacheKey(tileFormat = 'r32float') {
+        return `t:${gpuFormatSampleType(tileFormat || 'r32float')}`;
+    }
+
+    _getSplatPalettePipelineForFormat(tileFormat = 'r32float') {
+        const tFmt = tileFormat || 'r32float';
+        const cacheKey = this._getSplatPalettePipelineCacheKey(tFmt);
+        const cached = this._splatPalettePipelineCache?.get(cacheKey);
+        if (cached) return cached;
+
+        const bindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'uniform' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType(tFmt),
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: 'rgba8unorm',
+                        viewDimension: '2d'
+                    }
+                }
+            ]
+        });
+
+        const pipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [bindGroupLayout]
+            }),
+            compute: { module: this.splatPaletteShaderModule, entryPoint: 'main' }
+        });
+
+        if (!this._splatPalettePipelineCache) {
+            this._splatPalettePipelineCache = new Map();
+        }
+        const record = { pipeline, bindGroupLayout };
+        this._splatPalettePipelineCache.set(cacheKey, record);
+        return record;
+    }
+
+    _getSplatValidityPipelineCacheKey(indexFormat = 'rgba8unorm', maskFormat = 'rgba8unorm') {
+        return `i:${gpuFormatSampleType(indexFormat || 'rgba8unorm')}|m:${maskFormat || 'rgba8unorm'}`;
+    }
+
+    _getSplatValidityPipelineForFormats(indexFormat = 'rgba8unorm', maskFormat = 'rgba8unorm') {
+        const iFmt = indexFormat || 'rgba8unorm';
+        const mFmt = maskFormat || 'rgba8unorm';
+        const cacheKey = this._getSplatValidityPipelineCacheKey(iFmt, mFmt);
+        const cached = this._splatValidityPipelineCache?.get(cacheKey);
+        if (cached) return cached;
+
+        const bindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: gpuFormatSampleType(iFmt),
+                        viewDimension: '2d'
+                    }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: 'write-only',
+                        format: mFmt,
+                        viewDimension: '2d'
+                    }
+                }
+            ]
+        });
+
+        const pipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+                bindGroupLayouts: [bindGroupLayout]
+            }),
+            compute: { module: this.splatValidityShaderModule, entryPoint: 'main' }
+        });
+
+        if (!this._splatValidityPipelineCache) {
+            this._splatValidityPipelineCache = new Map();
+        }
+        const record = { pipeline, bindGroupLayout };
+        this._splatValidityPipelineCache.set(cacheKey, record);
         return record;
     }
     _getPadTilePipelineForFormat(tileFormat = 'r8unorm') {
@@ -1480,7 +2035,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             encoder.copyTextureToTexture(
                 { texture: sourceTexture },
                 { texture: destTexture },
-                [width, height, 1]
+                { width, height, depthOrArrayLayers: 1 }
             );
             return;
         }
@@ -1520,7 +2075,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         encoder.copyBufferToTexture(
             { buffer: scratch.buffer, bytesPerRow: scratch.bytesPerRow },
             { texture: destTexture },
-            [width, height, 1]
+            { width, height, depthOrArrayLayers: 1 }
         );
     }
 
@@ -1692,9 +2247,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        const worldOriginX = atlasKey.atlasX * config.worldCoverage;
-        const worldOriginY = atlasKey.atlasY * config.worldCoverage;
-
         // Staging textures: format now per-type (was hardcoded rgba32float).
         const gpuHeight    = this.createGPUTexture(textureSize, textureSize, fmt('height'));
         const gpuHeightBase = this.createGPUTexture(textureSize, textureSize, 'rgba32float');
@@ -1750,8 +2302,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             gpuTile,
             gpuSplatData,
             gpuSplatIndex,
-            worldOriginX,
-            worldOriginY,
+            chunkCoordX,
+            chunkCoordY,
             config.worldCoverage,
             textureSize,
             atlasKey.lod,
@@ -1826,7 +2378,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             encoder.copyTextureToTexture(
                 { texture: sourceTex._gpuTexture.texture },
                 { texture: pool.texture, origin: { x: 0, y: 0, z: layer } },
-                [textureSize, textureSize, 1]
+                { width: textureSize, height: textureSize, depthOrArrayLayers: 1 }
             );
             this.device.queue.submit([encoder.finish()]);
             if (!pool.wrapper) {
@@ -1886,7 +2438,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     { texture: srcTex },
                     { texture: dstTex,
                       origin: { x: 0, y: 0, z: layer } },
-                    [copySize, copySize, 1]
+                    { width: copySize, height: copySize, depthOrArrayLayers: 1 }
                 );
             };
             copyToPool('height',     textures.height);
@@ -2025,6 +2577,7 @@ resource: { buffer: this.terrainUniformBuffer } },
 { binding: 3, resource: tileTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 } else if (isHeightInputPass) {
 const { pipeline, bindGroupLayout } =
 this._getHeightInputPipelineForFormat('rgba32float', 'r32float');
@@ -2038,6 +2591,7 @@ resource: { buffer: this.terrainUniformBuffer } },
 { binding: 2, resource: heightTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 } else {
 pass.setPipeline(this.terrainPipeline);
 pass.setBindGroup(0, this.device.createBindGroup({
@@ -2048,6 +2602,7 @@ resource: { buffer: this.terrainUniformBuffer } },
 { binding: 1, resource: outTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 }
 
 pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
@@ -2158,6 +2713,7 @@ entries: [
 { binding: 3, resource: tileTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 } else if (isHeightInputPass) {
 const { pipeline, bindGroupLayout } =
 this._getHeightInputPipelineForFormat(outputFormat);
@@ -2171,6 +2727,7 @@ entries: [
 { binding: 2, resource: heightTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 } else {
 const { pipeline, bindGroupLayout } =
 this._getTerrainPipelineForFormat(outputFormat);
@@ -2183,6 +2740,7 @@ entries: [
 { binding: 1, resource: outTex.createView() }
 ]
 }));
+this._setTerrainBiomeBindGroup(pass);
 }
 
 pass.dispatchWorkgroups(
@@ -2192,42 +2750,67 @@ pass.end();
 this.device.queue.submit([enc.finish()]);
 }
     
-async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, atlasChunkY, w, h, chunkSize, heightFormat = 'r32float', tileFormat = 'r32float') {
-        const data = new ArrayBuffer(32);
-        const v = new DataView(data);
-        v.setInt32(0, 0, true);   // chunkCoord.x — atlas-local
-        v.setInt32(4, 0, true);   // chunkCoord.y — atlas-local
-        v.setInt32(8, chunkSize, true);
-        v.setInt32(12, this.seed, true);
-        v.setInt32(16, this.splatDensity, true);
-        v.setInt32(20, this.splatKernelSize, true);
-        v.setInt32(24, 0, true);
-        v.setInt32(28, 0, true);
+    async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, atlasChunkY, w, h, chunkSize, heightFormat = 'r32float', tileFormat = 'r32float') {
+        this._writeSplatUniformBuffer({
+            chunkCoordX: atlasChunkX,
+            chunkCoordY: atlasChunkY,
+            chunkSizeTex: chunkSize,
+            inputPadding: 0,
+        });
 
-        this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
-
+        const paletteSize = this._getSplatPaletteDimensions(w, h, chunkSize);
+        const splatPaletteTex = this.createGPUTexture(
+            paletteSize.width,
+            paletteSize.height,
+            'rgba8unorm'
+        );
+        const { pipeline: palettePipeline, bindGroupLayout: paletteBindGroupLayout } =
+            this._getSplatPalettePipelineForFormat(tileFormat);
         const { pipeline, bindGroupLayout } =
             this._getSplatPipelineForFormats(heightFormat, tileFormat);
         const enc = this.device.createCommandEncoder();
-        const pass = enc.beginComputePass();
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, this.device.createBindGroup({
-            layout: bindGroupLayout,
-            entries: [
-                { binding: 0, resource: { buffer: this.splatUniformBuffer } },
-                { binding: 1, resource: hTex.createView() },
-                { binding: 2, resource: tTex.createView() },
-                { binding: 3, resource: splatDataTex.createView() },
-                { binding: 4, resource: splatIndexTex.createView() }
-            ]
-        }));
-        
-        pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
-        pass.end();
+        {
+            const pass = enc.beginComputePass();
+            pass.setPipeline(palettePipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: paletteBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: tTex.createView() },
+                    { binding: 2, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            pass.dispatchWorkgroups(
+                Math.ceil(paletteSize.width / 8),
+                Math.ceil(paletteSize.height / 8)
+            );
+            pass.end();
+        }
+        {
+            const pass = enc.beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: hTex.createView() },
+                    { binding: 2, resource: tTex.createView() },
+                    { binding: 3, resource: splatDataTex.createView() },
+                    { binding: 4, resource: splatIndexTex.createView() },
+                    { binding: 5, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            
+            pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
+            pass.end();
+        }
         this.device.queue.submit([enc.finish()]);
+        this.device.queue.onSubmittedWorkDone()
+            .then(() => { try { splatPaletteTex.destroy(); } catch (_) {} })
+            .catch(() => {});
     }
 
-    async runLODSplatPass(hTex, tTex, splatDataTex, splatIndexTex, worldOriginX, worldOriginY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
+    async runLODSplatPass(hTex, tTex, splatDataTex, splatIndexTex, chunkCoordX, chunkCoordY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
         const chunksPerAtlas = Math.max(1, Math.floor(worldCoverage / this.chunkSize));
         const chunkSizeTex = Math.max(1, Math.floor(textureSize / chunksPerAtlas));
     
@@ -2239,7 +2822,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             this._splatPassLogCount++;
             Logger.info(`[SplatDebug] ═══════════════════════════════════════════════`);
             Logger.info(`[SplatDebug] runLODSplatPass #${this._splatPassLogCount}`);
-            Logger.info(`[SplatDebug]   worldOrigin=(${worldOriginX}, ${worldOriginY})`);
+            Logger.info(`[SplatDebug]   chunkCoord=(${chunkCoordX}, ${chunkCoordY})`);
             Logger.info(`[SplatDebug]   worldCoverage=${worldCoverage}`);
             Logger.info(`[SplatDebug]   this.chunkSize=${this.chunkSize}`);
             Logger.info(`[SplatDebug]   chunksPerAtlas=${chunksPerAtlas}`);
@@ -2267,42 +2850,66 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
             }
         }
     
-        // chunkCoord should be atlas-local (0,0), NOT world-space
-        const data = new ArrayBuffer(32);
-        const v = new DataView(data);
-        v.setInt32(0, 0, true);    // chunkCoord.x - atlas-local origin
-        v.setInt32(4, 0, true);    // chunkCoord.y - atlas-local origin
-        v.setInt32(8, chunkSizeTex, true);
-        v.setInt32(12, this.seed, true);
-        v.setInt32(16, this.splatDensity, true);
-        v.setInt32(20, this.splatKernelSize, true);
-        v.setInt32(24, 0, true);
-        v.setInt32(28, 0, true);
-    
-        this.device.queue.writeBuffer(this.splatUniformBuffer, 0, data);
-    
+        this._writeSplatUniformBuffer({
+            chunkCoordX,
+            chunkCoordY,
+            chunkSizeTex,
+            inputPadding: 0,
+        });
+
+        const paletteSize = this._getSplatPaletteDimensions(textureSize, textureSize, chunkSizeTex);
+        const splatPaletteTex = this.createGPUTexture(
+            paletteSize.width,
+            paletteSize.height,
+            'rgba8unorm'
+        );
+        const { pipeline: palettePipeline, bindGroupLayout: paletteBindGroupLayout } =
+            this._getSplatPalettePipelineForFormat(tileFormat);
         const { pipeline, bindGroupLayout } =
             this._getSplatPipelineForFormats(heightFormat, tileFormat);
         const enc = this.device.createCommandEncoder();
-        const pass = enc.beginComputePass();
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, this.device.createBindGroup({
-            layout: bindGroupLayout,
-            entries: [
-                { binding: 0, resource: { buffer: this.splatUniformBuffer } },
-                { binding: 1, resource: hTex.createView() },
-                { binding: 2, resource: tTex.createView() },
-                { binding: 3, resource: splatDataTex.createView() },
-                { binding: 4, resource: splatIndexTex.createView() }
-            ]
-        }));
+        {
+            const pass = enc.beginComputePass();
+            pass.setPipeline(palettePipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: paletteBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: tTex.createView() },
+                    { binding: 2, resource: splatPaletteTex.createView() }
+                ]
+            }));
+            pass.dispatchWorkgroups(
+                Math.ceil(paletteSize.width / 8),
+                Math.ceil(paletteSize.height / 8)
+            );
+            pass.end();
+        }
+        {
+            const pass = enc.beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                    { binding: 1, resource: hTex.createView() },
+                    { binding: 2, resource: tTex.createView() },
+                    { binding: 3, resource: splatDataTex.createView() },
+                    { binding: 4, resource: splatIndexTex.createView() },
+                    { binding: 5, resource: splatPaletteTex.createView() }
+                ]
+            }));
     
-        // Dispatch must cover the full splat output texture, not just the tile map
-        const splatW = splatDataTex.width || textureSize;
-        const splatH = splatDataTex.height || textureSize;
-        pass.dispatchWorkgroups(Math.ceil(splatW / 8), Math.ceil(splatH / 8));
-        pass.end();
+            // Dispatch must cover the full splat output texture, not just the tile map
+            const splatW = splatDataTex.width || textureSize;
+            const splatH = splatDataTex.height || textureSize;
+            pass.dispatchWorkgroups(Math.ceil(splatW / 8), Math.ceil(splatH / 8));
+            pass.end();
+        }
         this.device.queue.submit([enc.finish()]);
+        this.device.queue.onSubmittedWorkDone()
+            .then(() => { try { splatPaletteTex.destroy(); } catch (_) {} })
+            .catch(() => {});
 
         // ──────────────────────────────────────────────────────────────
         // DIAGNOSTIC: Read back splat data and verify contents
@@ -2353,7 +2960,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
                 const type1 = splatData[i];
                 const type2 = splatData[i + 1];
                 const weight = splatData[i + 2] / 255;
-                const hasBoundary = splatData[i + 3] > 127;
+                const hasBoundary =  splatData[i + 3] > 127;
 
                 if (!hasBoundary && weight > 0.999 && type1 === type2) {
                     zeroCount++;
@@ -2664,7 +3271,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         encoder.copyTextureToBuffer(
             { texture: gpuTex },
             { buffer: readBuffer, bytesPerRow: alignedBytesPerRow },
-            [textureWidth, textureHeight]
+            { width: textureWidth, height: textureHeight, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
         
@@ -2700,7 +3307,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         encoder.copyTextureToBuffer(
             { texture: gpuTex, origin: { x: offsetX, y: offsetY, z: 0 } },
             { buffer: readBuffer, bytesPerRow: rowStride, rowsPerImage: height },
-            [width, height, 1]
+            { width, height, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
 
@@ -2732,7 +3339,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         encoder.copyTextureToBuffer(
             { texture: gpuTex, origin: { x: offsetX, y: offsetY, z: 0 } },
             { buffer: readBuffer, bytesPerRow: rowStride, rowsPerImage: height },
-            [width, height, 1]
+            { width, height, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
 
@@ -2814,7 +3421,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         encoder.copyTextureToBuffer(
             { texture: gpuTex, origin: { x: offsetX, y: offsetY, z: 0 } },
             { buffer: readBuffer, bytesPerRow: rowStride, rowsPerImage: height },
-            [width, height, 1]
+            { width, height, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
 
@@ -2919,7 +3526,10 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         const shaderCode = createAdvancedTerrainComputeShader({
             baseGenerator: this.baseGenerator,
             outputFormat: fmt,
+            maxBiomes: this.maxGpuBiomes,
             terrainShaderBundle: this.terrainShaderBundle,
+            tileCategories: this.tileCategories,
+            tileTypes: this.tileTypes,
         });
         const shaderModule = this.device.createShaderModule({
             label: `Terrain Compute (${fmt})`,
@@ -2938,7 +3548,7 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
         });
 
         const pipeline = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout] }),
             compute: { module: shaderModule, entryPoint: 'main' }
         });
 
@@ -2952,6 +3562,73 @@ async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, at
 
     _mapTextureFormat(formatOverride) {
         return gpuFormatToWrapperFormat(formatOverride);
+    }
+
+    _setTerrainBiomeBindGroup(pass) {
+        if (pass && this.biomeBindGroup) {
+            pass.setBindGroup(1, this.biomeBindGroup);
+        }
+    }
+
+    _refreshPackedBiomeUniforms() {
+        this._packedBiomeUniforms = packBiomeUniformData(
+            this.planetConfig?.worldAuthoring,
+            this.seed,
+            {
+                maxBiomes: this.maxGpuBiomes,
+            }
+        );
+
+        const packed = this._packedBiomeUniforms;
+        if (packed.biomeCount > 0 || packed.truncatedBiomeCount > 0) {
+            Logger.info(
+                `[BiomeRuntime] Packed ${packed.biomeCount}/${this.maxGpuBiomes} biome defs ` +
+                `for terrain compute upload`
+            );
+        }
+        if (packed.biomeCount > 0) {
+            const activeNoiseModes = Array.from(new Set(
+                (this.planetConfig?.worldAuthoring?.biomes ?? [])
+                    .map((biome) => biome?.regionalVariation?.noiseType || 'simplex')
+            ));
+            Logger.info(
+                '[BiomeRuntime] Terrain compute is using authored biome selection ' +
+                `with tile-catalog fallback tile ${packed.fallbackTileId}`
+            );
+            Logger.info(
+                `[BiomeRuntime] Authored biome stochasticity is sampling metric space ` +
+                `(noiseReferenceRadiusM=${this.noiseReferenceRadiusM})`
+            );
+            Logger.info(
+                `[BiomeRuntime] Authored biome regional noise modes: ${activeNoiseModes.join(', ')}`
+            );
+            if (packed.outOfTextureRangePackedTileCount > 0) {
+                Logger.warn(
+                    `[BiomeRuntime] Packed ${packed.outOfTextureRangePackedTileCount} biome tile ` +
+                    `ref(s) above the current texture lookup max ` +
+                    `${packed.textureLookupMaxTileId}; affected tile IDs may not render correctly`
+                );
+            }
+            if (packed.treeWeightedBiomeCount > 0) {
+                Logger.info(
+                    `[BiomeRuntime] Authored tree eligibility weights active for ` +
+                    `${packed.treeWeightedBiomeCount}/${packed.biomeCount} biomes`
+                );
+            }
+        }
+        if (packed.truncatedBiomeCount > 0) {
+            Logger.warn(
+                `[BiomeRuntime] Truncated ${packed.truncatedBiomeCount} biome defs ` +
+                `to fit MAX_BIOMES=${this.maxGpuBiomes}`
+            );
+        }
+
+        this._uploadPackedBiomeUniforms();
+    }
+
+    _uploadPackedBiomeUniforms() {
+        if (!this.biomeUniformBuffer || !this._packedBiomeUniforms?.data) return;
+        this.device.queue.writeBuffer(this.biomeUniformBuffer, 0, this._packedBiomeUniforms.data);
     }
 
 }

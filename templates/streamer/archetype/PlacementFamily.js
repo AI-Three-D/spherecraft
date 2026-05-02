@@ -28,6 +28,7 @@ export class PlacementFamily {
      *        Float32Array[familyCount × maxTileTypeId] by
      *        PlacementDensityBuffer (Inc 5). Absent keys default to 1.0.
      * @param {{temperature:[number,number], precipitation:[number,number]}} [def.climateRange]
+     * @param {{min:number, max:number}|[number, number]} [def.elevationRange]
      * @param {{min:number, max:number}} [def.slopeRange]
      */
     constructor(def) {
@@ -46,6 +47,12 @@ export class PlacementFamily {
             temperature:   [...(def.climateRange.temperature   ?? [0, 1])],
             precipitation: [...(def.climateRange.precipitation ?? [0, 1])],
         } : null;
+
+        this.elevationRange = Array.isArray(def.elevationRange)
+            ? { min: def.elevationRange[0] ?? 0, max: def.elevationRange[1] ?? 1 }
+            : (def.elevationRange
+                ? { min: def.elevationRange.min ?? 0, max: def.elevationRange.max ?? 1 }
+                : null);
 
         this.slopeRange = def.slopeRange
             ? { min: def.slopeRange.min ?? 0, max: def.slopeRange.max ?? 1 }

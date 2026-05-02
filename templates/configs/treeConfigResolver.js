@@ -242,6 +242,10 @@ function resolveBirch(rawBirch, nearEnd) {
         closeLeaves: rawBirch.closeLeaves ?? 4000,
         closeCardsPerAnchor: rawBirch.closeCardsPerAnchor ?? 10,
         settledCardsPerAnchor: rawBirch.settledCardsPerAnchor ?? 1,
+        l0SettledLeaves: rawBirch.l0SettledLeaves ?? 1200,
+        l1CardsPerAnchor: rawBirch.l1CardsPerAnchor ?? 4,
+        l2CardsPerAnchor: rawBirch.l2CardsPerAnchor ?? 2,
+        l3CardsPerAnchor: rawBirch.l3CardsPerAnchor ?? 2,
         fadeDistance: nearEnd,
         closeW: closeSize,
         closeH: closeSize * aspect,
@@ -451,14 +455,17 @@ function logSummary(r) {
         `treeDensities=[${d.treeAssetDensities.map(v => v.toFixed(5)).join(', ')}]`
     );
     Logger.info(
-        `${TAG}   branches: ${r.nearTier.branchLODBands.map(x => `${x.distance}m@L${x.maxLevel}`).join(' -> ')}`
+        `${TAG}   branches: ${r.nearTier.branchLODBands.map(x => `${x.distance}m@L${x.maxLevel}`).join(' -> ')} ` +
+        `meshLOD=${r.nearTier.branchGeometryLOD ?? 0}`
     );
     Logger.info(
         `${TAG}   leafBands: ${r.nearTier.leafBands.map(x => `[${x.start},${x.end}]`).join(' ')}`
     );
     Logger.info(
         `${TAG}   birch: size ${b.closeSize}->${b.settledSize} over ${b.nearDistance}m ` +
-        `(aspect ${b.aspect}), count ${b.closeLeaves}->anchorsx${b.settledCardsPerAnchor} over ${b.fadeDistance}m`
+        `(aspect ${b.aspect}), cards L0 ${b.closeLeaves}->${b.l0SettledLeaves}, ` +
+        `L1 anchorsx${b.l1CardsPerAnchor}, L2 anchorsx${b.l2CardsPerAnchor}, ` +
+        `L3 anchorsx${b.l3CardsPerAnchor} over ${b.fadeDistance}m`
     );
 }
 

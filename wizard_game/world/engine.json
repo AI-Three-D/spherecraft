@@ -28,9 +28,9 @@
       "twilightEndDot": 0.04
     },
     "fog": {
-      "densityMultiplier": 0.48,
-      "maxBaseDensity": 0.0006,
-      "dayDensityScale": 1.0,
+      "densityMultiplier": 0.40,
+      "maxBaseDensity": 0.00055,
+      "dayDensityScale": 0.85,
       "nightDensityScale": 0.42,
       "minBrightness": 0.05,
       "maxBrightness": 0.82,
@@ -40,9 +40,12 @@
   },
   "terrainShader": {
     "aerialFadeStartMeters": 400,
-    "aerialFadeEndMeters":   600,
-    "ambientScale": 1.3,
-    "sunWrap": 0.18
+    "aerialFadeEndMeters":   600
+  },
+  "terrainAO": {
+    "sampleStrength": 1.0,
+    "directStrength": 0.7,
+    "ambientFloor": 0.65
   },
   "gpuQuadtree": {
     "lodErrorThreshold": 512,

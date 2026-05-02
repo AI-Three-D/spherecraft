@@ -43,6 +43,9 @@ export class TreeLODController {
             ]
         );
         this.branchLODBandCount = this.branchLODBands.length;
+        this.branchGeometryLOD = Math.max(0, Math.min(5, Math.floor(config.branchGeometryLOD ?? 0)));
+        this.branchTrunkRadialSegments = Math.max(4, Math.floor(config.branchTrunkRadialSegments ?? 10));
+        this.branchBranchRadialSegments = Math.max(3, Math.floor(config.branchBranchRadialSegments ?? 6));
 
         this.branchLODDistances = new Float32Array(4);
         this.branchLODMaxLevels = new Float32Array(4);
@@ -67,6 +70,9 @@ export class TreeLODController {
         this.leafSizeScale = Array.isArray(config.leafSizeScale)
             ? [...config.leafSizeScale]
             : [1.0, 1.36, 2.0, 2.0];
+        this.leafBandBudgetFractions = this._normalizeBudgetFractions(
+            config.leafBandBudgetFractions ?? [0.42, 0.30, 0.18, 0.10]
+        );
 
         this.birch = {
             nearDistance: 20.0,
@@ -77,6 +83,10 @@ export class TreeLODController {
             closeLeaves: 4000,
             closeCardsPerAnchor: 10,
             settledCardsPerAnchor: 1,
+            l0SettledLeaves: 1200,
+            l1CardsPerAnchor: 4,
+            l2CardsPerAnchor: 2,
+            l3CardsPerAnchor: 2,
             closeW: 0.36,
             closeH: 0.54,
             settledW: 0.55,
@@ -446,6 +456,21 @@ export class TreeLODController {
         return out;
     }
 
+    _normalizeBudgetFractions(raw) {
+        const src = Array.isArray(raw) ? raw : [];
+        const out = [];
+        for (let i = 0; i < 4; i++) {
+            const v = Number(src[i]);
+            out.push(Number.isFinite(v) && v > 0 ? v : 0);
+        }
+        let sum = out.reduce((a, b) => a + b, 0);
+        if (sum <= 0) {
+            out[0] = 0.42; out[1] = 0.30; out[2] = 0.18; out[3] = 0.10;
+            sum = 1.0;
+        }
+        return out.map(v => v / sum);
+    }
+
     getBranchCutoff() {
         return this.detailBands[this.maxBranchDetailLevel];
     }
@@ -482,11 +507,16 @@ export class TreeLODController {
             spruceL0Leaves: spruce[0],
             spruceL1Leaves: spruce[1],
             spruceL2Leaves: spruce[2],
+            leafBandBudgetFractions: this.leafBandBudgetFractions,
             birchNearDistance: birch.nearDistance,
             birchFadeDistance: birch.fadeDistance,
             birchCloseLeaves: birch.closeLeaves,
             birchCloseCards: birch.closeCardsPerAnchor,
             birchSettledCards: birch.settledCardsPerAnchor,
+            birchL0SettledLeaves: birch.l0SettledLeaves,
+            birchL1Cards: birch.l1CardsPerAnchor,
+            birchL2Cards: birch.l2CardsPerAnchor,
+            birchL3Cards: birch.l3CardsPerAnchor,
             birchCloseW: birch.closeW,
             birchCloseH: birch.closeH,
             birchSettledW: birch.settledW,

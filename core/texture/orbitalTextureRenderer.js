@@ -1,4 +1,5 @@
 import { Texture, TextureFormat, TextureFilter } from '../renderer/resources/texture.js';
+import { TEXTURE_LOOKUP_TILE_COUNT } from './tileTextureLimits.js';
 
 /**
  * Renders final orbital planet textures by compositing:
@@ -215,7 +216,7 @@ export class OrbitalTextureRenderer {
             return null;
         }
 
-        const maxTileTypes = 256;
+        const maxTileTypes = TEXTURE_LOOKUP_TILE_COUNT;
         const numSeasons = 4;
 
         return await this._computeTileAverageColorsGPU(atlasTexture, maxTileTypes, numSeasons);
@@ -677,14 +678,14 @@ export class OrbitalTextureRenderer {
                 enc.copyTextureToTexture(
                     { texture: colorGPU },
                     { texture: colorArray, origin: { x: 0, y: 0, z: face } },
-                    [size, size, 1]
+                    { width: size, height: size, depthOrArrayLayers: 1 }
                 );
             }
             if (normalGPU) {
                 enc.copyTextureToTexture(
                     { texture: normalGPU },
                     { texture: normalArray, origin: { x: 0, y: 0, z: face } },
-                    [size, size, 1]
+                    { width: size, height: size, depthOrArrayLayers: 1 }
                 );
             }
         }

@@ -1,0 +1,35 @@
+name: LLM PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Needed to post review comments
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  llm-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    # Skip draft PRs — uncomment to enable reviews on drafts
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Review PR with LLM
+        run: node .github/scripts/llm-review.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Primary: Gemini 2.0 Flash (free tier).
+          # Create this secret at: Settings > Secrets > Actions > New repository secret
+          # Get a key at: https://aistudio.google.com/app/apikey
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}

@@ -72,7 +72,7 @@ export class TerrainGenerationConfig {
         this.climate = {
             enabled: options.climate?.enabled ?? true,
             temperatureGradient: options.climate?.temperatureGradient ?? -6.5, // °C per 1000m
-            baseTemperature: 30.0,//options.climate?.baseTemperature ?? 15, // °C at sea level equator
+            baseTemperature: options.climate?.baseTemperature ?? 30.0, // °C at sea level equator
             
             // Temperature bands with precipitation ranges
             zones: options.climate?.zones ?? [

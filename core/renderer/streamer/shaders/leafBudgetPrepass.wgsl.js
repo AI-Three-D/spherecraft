@@ -18,6 +18,10 @@ export function buildLeafBudgetPrepassShader(config = {}) {
     const B_CLOSE_LEAVES  = config.birchCloseLeaves  ?? config.birchNearLeaves ?? 4000;
     const B_CLOSE_CARDS   = config.birchCloseCards   ?? 10;
     const B_SETTLED_CARDS = config.birchSettledCards ?? config.birchL0Cards ?? 1;
+    const B_L0_SETTLED_LEAVES = config.birchL0SettledLeaves ?? 1200;
+    const B_L1_CARDS = config.birchL1Cards ?? 4;
+    const B_L2_CARDS = config.birchL2Cards ?? 2;
+    const B_L3_CARDS = config.birchL3Cards ?? 2;
 
     return /* wgsl */`
 const MAX_CLOSE_TREES: u32 = ${MAX_CLOSE_TREES}u;
@@ -34,6 +38,10 @@ const BIRCH_FADE_DISTANCE: f32 = ${fmtF(B_FADE_DISTANCE, 80.0)};
 const BIRCH_CLOSE_LEAVES:  f32 = ${fmtF(B_CLOSE_LEAVES, 4000.0)};
 const BIRCH_CLOSE_CARDS:   f32 = ${fmtF(B_CLOSE_CARDS, 10.0)};
 const BIRCH_SETTLED_CARDS: u32 = ${B_SETTLED_CARDS}u;
+const BIRCH_L0_SETTLED_LEAVES: u32 = ${B_L0_SETTLED_LEAVES}u;
+const BIRCH_L1_CARDS: u32 = ${B_L1_CARDS}u;
+const BIRCH_L2_CARDS: u32 = ${B_L2_CARDS}u;
+const BIRCH_L3_CARDS: u32 = ${B_L3_CARDS}u;
 
 struct LeafParams {
     cameraPosition: vec3<f32>, time: f32,
@@ -75,6 +83,32 @@ fn pcg(v: u32) -> u32 {
     return (w >> 22u) ^ w;
 }
 
+fn birchCountForBand(info: TemplateInfo, band: u32) -> u32 {
+    let fine = select(info.anchorCount, info.fineCount, info.fineCount > 0u);
+    let medium = select(fine, info.mediumCount, info.mediumCount > 0u);
+    let coarse = select(medium, info.coarseCount, info.coarseCount > 0u);
+    if (band == 0u) { return fine; }
+    if (band <= 2u) { return medium; }
+    return coarse;
+}
+
+fn birchCardsForBand(band: u32) -> u32 {
+    if (band == 0u) { return 1u; }
+    if (band == 1u) { return max(1u, BIRCH_L1_CARDS); }
+    if (band == 2u) { return max(1u, BIRCH_L2_CARDS); }
+    return max(1u, BIRCH_L3_CARDS);
+}
+
+fn birchTargetForBand(info: TemplateInfo, band: u32, dist: f32) -> u32 {
+    let anchorCount = max(1u, birchCountForBand(info, band));
+    if (band == 0u) {
+        let settled = min(anchorCount, max(1u, BIRCH_L0_SETTLED_LEAVES));
+        let nearT = smoothstep(0.0, BIRCH_NEAR_DISTANCE, dist);
+        return max(1u, u32(round(mix(BIRCH_CLOSE_LEAVES, f32(settled), nearT))));
+    }
+    return max(1u, anchorCount * birchCardsForBand(band));
+}
+
 fn computeTargetLeaves(tree: CloseTreeInfo) -> u32 {
     let B = tree.detailLevel;
     let isSpruce  = (tree.speciesIndex == 0u) || (tree.speciesIndex == 1u);
@@ -91,20 +125,11 @@ fn computeTargetLeaves(tree: CloseTreeInfo) -> u32 {
         let info = templateInfos[params.birchTemplateStart + variantLocal];
 
         if (info.anchorCount > 0u) {
-            var birchTierCount: u32 = info.anchorCount;
-            if (info.fineCount > 0u) {
-                birchTierCount = info.fineCount;
-            } else if (info.mediumCount > 0u) {
-                birchTierCount = info.mediumCount;
-            }
-
-            let nearT = smoothstep(0.0, BIRCH_NEAR_DISTANCE, tree.distanceToCamera);
-            let cardsF = mix(BIRCH_CLOSE_CARDS, f32(BIRCH_SETTLED_CARDS), nearT);
-            let birchCardsThis = max(1u, u32(round(cardsF)));
-            let baseLeaves = max(1u, birchTierCount * birchCardsThis);
-            let settleDistance = max(BIRCH_NEAR_DISTANCE + 0.001, BIRCH_FADE_DISTANCE);
-            let settleT = smoothstep(0.0, settleDistance, tree.distanceToCamera);
-            let desired = mix(BIRCH_CLOSE_LEAVES, f32(baseLeaves), settleT) * tree.health;
+            let band = min(B, 3u);
+            let nextBand = min(band + 1u, 3u);
+            let currentTarget = birchTargetForBand(info, band, tree.distanceToCamera);
+            let nextTarget = birchTargetForBand(info, nextBand, tree.distanceToCamera);
+            let desired = mix(f32(currentTarget), f32(nextTarget), tree.bandBlend) * tree.health;
             targetLeaves = u32(clamp(round(desired), 0.0, 4294967295.0));
         }
 
@@ -152,6 +177,7 @@ fn main(@builtin(workgroup_id) wgId: vec3<u32>) {
     atomicAdd(&leafRequestSummary[0], targetLeaves);
     atomicAdd(&leafRequestSummary[1], 1u);
     atomicMax(&leafRequestSummary[2], targetLeaves);
+    atomicAdd(&leafRequestSummary[4u + min(closeTrees[treeIdx].detailLevel, 3u)], targetLeaves);
 }
 `;
 }

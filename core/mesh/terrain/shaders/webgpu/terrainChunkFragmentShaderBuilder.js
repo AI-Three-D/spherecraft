@@ -479,14 +479,12 @@ fn computeShadow(worldPos: vec3<f32>, viewPos: vec3<f32>, worldNormal: vec3<f32>
 `;
 
 export function buildTerrainChunkFragmentShader(options = {}) {
-    if (!options.tileCategories) {
-        throw new Error('buildTerrainChunkFragmentShader requires options.tileCategories');
-    }
-    const tileCategories = options.tileCategories;
     const normalTextureFilterable = options.normalTextureFilterable === true;
 
     const enableTerrainAO = options.enableTerrainAO !== false;
     const enableGroundField = options.enableGroundField === true;
+    const enableResolvedColor = options.enableResolvedColor === true;
+    const enableResolvedColorDebugBinding = options.enableResolvedColorDebugBinding === true;
     const maxLightIndices = options.maxLightIndices || 8192;
     const useArrayTextures = options.useArrayTextures === true;
     const aerialPerspectiveCode = getAerialPerspectiveWGSL();
@@ -509,12 +507,62 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const nearToMidFadeEndChunks = Number.isFinite(terrainShaderConfig.nearToMidFadeEndChunks)
         ? Math.max(nearToMidFadeStartChunks + 0.01, terrainShaderConfig.nearToMidFadeEndChunks)
         : 4.0;
+    const lod0ResolvedColorFadeStartMeters = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.lod0ResolvedColorFadeStartMeters)
+        : 8.0;
+    const lod0ResolvedColorFadeEndMeters = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeEndMeters)
+        ? Math.max(lod0ResolvedColorFadeStartMeters + 1.0, terrainShaderConfig.lod0ResolvedColorFadeEndMeters)
+        : 40.0;
+    const enableLod0AOFade =
+        terrainShaderConfig.lod0AOFadeEnabled === true &&
+        lod === 0;
+    const lod0AOFadeStartMeters = Number.isFinite(terrainShaderConfig.lod0AOFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.lod0AOFadeStartMeters)
+        : lod0ResolvedColorFadeStartMeters;
+    const lod0AOFadeEndMeters = Number.isFinite(terrainShaderConfig.lod0AOFadeEndMeters)
+        ? Math.max(lod0AOFadeStartMeters + 1.0, terrainShaderConfig.lod0AOFadeEndMeters)
+        : lod0ResolvedColorFadeEndMeters;
+    const lodEdgeFadeMaxLod = Number.isFinite(terrainShaderConfig.lodEdgeFadeMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.lodEdgeFadeMaxLod))
+        : 4;
+    const enableLodEdgeFade =
+        terrainShaderConfig.lodEdgeFadeEnabled === true &&
+        lodEdgeFadeMaxLod >= 0 &&
+        lod <= lodEdgeFadeMaxLod;
+    const enableLodEdgeAOFade =
+        (terrainShaderConfig.lodEdgeAOFadeEnabled === true ||
+         terrainShaderConfig.lodEdgeFadeEnabled === true) &&
+        lodEdgeFadeMaxLod >= 0 &&
+        lod <= lodEdgeFadeMaxLod;
+    const enableAnyLodEdgeFade = enableLodEdgeFade || enableLodEdgeAOFade;
+    const lodEdgeColorStrength = Number.isFinite(terrainShaderConfig.lodEdgeColorStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeColorStrength))
+        : 0.0;
+    const lodEdgeAOStrength = Number.isFinite(terrainShaderConfig.lodEdgeAOStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeAOStrength))
+        : 1.0;
+    const lodEdgeNormalStrength = Number.isFinite(terrainShaderConfig.lodEdgeNormalStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeNormalStrength))
+        : 1.0;
+    const lodEdgeShadowStrength = Number.isFinite(terrainShaderConfig.lodEdgeShadowStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeShadowStrength))
+        : 1.0;
     const pointSampleLodStart = Number.isFinite(terrainShaderConfig.pointSampleLodStart)
         ? Math.max(0, Math.floor(terrainShaderConfig.pointSampleLodStart))
         : 2;
     const macroStartLod = Number.isFinite(terrainShaderConfig.macroStartLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.macroStartLod))
         : 2;
+    const splatTop2MaxLod = Number.isFinite(terrainShaderConfig.splatTop2MaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.splatTop2MaxLod))
+        : 2;
+    const splatTop2MinWeight = Number.isFinite(terrainShaderConfig.splatTop2MinWeight)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.splatTop2MinWeight))
+        : 0.75;
+    const splatDominantMinWeight = Number.isFinite(terrainShaderConfig.splatDominantMinWeight)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.splatDominantMinWeight))
+        : 0.85;
+    const forceMacroOverlay = terrainShaderConfig.forceMacroOverlay === true;
     const clusteredMaxLod = Number.isFinite(terrainShaderConfig.clusteredMaxLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.clusteredMaxLod))
         : 1;
@@ -524,6 +572,18 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const normalMapMaxLod = Number.isFinite(terrainShaderConfig.normalMapMaxLod)
         ? Math.max(-1, Math.floor(terrainShaderConfig.normalMapMaxLod))
         : 2;
+    const normalMapDistanceBaseMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceBaseMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceBaseMeters)
+        : 4500.0;
+    const normalMapDistanceAltitudeScaleMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceAltitudeScaleMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceAltitudeScaleMeters)
+        : 1000.0;
+    const normalMapDistanceMaxMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceMaxMeters)
+        ? Math.max(normalMapDistanceBaseMeters, terrainShaderConfig.normalMapDistanceMaxMeters)
+        : 28000.0;
+    const normalMapDistanceFadeMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceFadeMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceFadeMeters)
+        : 2500.0;
     const altitudeNormalMinMeters = Number.isFinite(terrainShaderConfig.altitudeNormalMinMeters)
         ? Math.max(0, terrainShaderConfig.altitudeNormalMinMeters)
         : 8000;
@@ -533,10 +593,51 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const shadowMaxLod = Number.isFinite(terrainShaderConfig.shadowMaxLod)
         ? Math.max(0, Math.floor(terrainShaderConfig.shadowMaxLod))
         : null;
-    const useAdvancedBlend = false;
-    const useVariantBlend = false;
+    const variantRotationMaxLod = Number.isFinite(terrainShaderConfig.variantRotationMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.variantRotationMaxLod))
+        : nearMaxLod;
+    // Mild negative mip bias for the live near atlas path; aggressive values shimmer while moving.
+    const nearMipSharpenMaxLod = Number.isFinite(terrainShaderConfig.nearMipSharpenMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.nearMipSharpenMaxLod))
+        : 0;
+    const nearMipSharpenScale = Number.isFinite(terrainShaderConfig.nearMipSharpenScale)
+        ? Math.min(1.0, Math.max(0.35, terrainShaderConfig.nearMipSharpenScale))
+        : 0.75;
+    const nearMipSharpenFadeStartMeters = Number.isFinite(terrainShaderConfig.nearMipSharpenFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.nearMipSharpenFadeStartMeters)
+        : 60.0;
+    const nearMipSharpenFadeEndMeters = Number.isFinite(terrainShaderConfig.nearMipSharpenFadeEndMeters)
+        ? Math.max(nearMipSharpenFadeStartMeters + 1.0, terrainShaderConfig.nearMipSharpenFadeEndMeters)
+        : 120.0;
+    const nearDetailMaxLod = Number.isFinite(terrainShaderConfig.nearDetailMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.nearDetailMaxLod))
+        : 1;
+    const nearDetailStrength = Number.isFinite(terrainShaderConfig.nearDetailStrength)
+        ? Math.min(0.18, Math.max(0.0, terrainShaderConfig.nearDetailStrength))
+        : 0.055;
+    const nearDetailScaleMeters = Number.isFinite(terrainShaderConfig.nearDetailScaleMeters)
+        ? Math.min(2.0, Math.max(0.08, terrainShaderConfig.nearDetailScaleMeters))
+        : 0.32;
+    const nearDetailCreviceWidth = Number.isFinite(terrainShaderConfig.nearDetailCreviceWidth)
+        ? Math.min(0.14, Math.max(0.01, terrainShaderConfig.nearDetailCreviceWidth))
+        : 0.045;
+    const nearDetailCreviceCoverage = Number.isFinite(terrainShaderConfig.nearDetailCreviceCoverage)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.nearDetailCreviceCoverage))
+        : 0.38;
+    const nearDetailFadeStartMeters = Number.isFinite(terrainShaderConfig.nearDetailFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.nearDetailFadeStartMeters)
+        : 45.0;
+    const nearDetailFadeEndMeters = Number.isFinite(terrainShaderConfig.nearDetailFadeEndMeters)
+        ? Math.max(nearDetailFadeStartMeters + 1.0, terrainShaderConfig.nearDetailFadeEndMeters)
+        : 80.0;
+    const nearDetailEnabled = terrainShaderConfig.nearDetailEnabled !== false &&
+        nearDetailMaxLod >= 0 &&
+        lod <= nearDetailMaxLod &&
+        nearDetailStrength > 0.0001;
+    const useSplatTop2FastPath = splatTop2MaxLod >= 0 && lod <= splatTop2MaxLod && splatTop2MinWeight < 0.9999;
 
-    const useVariantRotation = false;//lod <= fullMaxLod;
+    const useVariantRotation = variantRotationMaxLod >= 0 && lod <= variantRotationMaxLod;
+    const enableNearMipSharpen = nearMipSharpenMaxLod >= 0 && lod <= nearMipSharpenMaxLod && nearMipSharpenScale < 0.9999;
     const enableSplat = lod <= nearMaxLod;
     const splatBlendMaxLod = Number.isFinite(terrainShaderConfig.splatBlendMaxLod)
     ? Math.max(0, Math.floor(terrainShaderConfig.splatBlendMaxLod))
@@ -548,7 +649,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
         splatTier = 1;
     }
     const enableNearToMidFade = lod === nearMaxLod;
-    const enableMacroOverlay = lod >= macroStartLod;
+    const enableMacroOverlay = forceMacroOverlay || lod >= macroStartLod;
     const usePointSampling = false;//lod >= pointSampleLodStart;
     const enableClusteredLights = true;//lod <= clusteredMaxLod;
     const enableAerialPerspective = lod <= aerialMaxLod;
@@ -556,6 +657,13 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     
     const enableNormalMap = lod <= normalMapMaxLod;
     const enableLighting = true;
+    const enableLod0ResolvedColor =
+        options.enableLod0ResolvedColor === true &&
+        !enableResolvedColor;
+    const enableLodEdgeResolvedColor =
+        options.enableLodEdgeResolvedColor === true &&
+        enableLodEdgeFade &&
+        !enableResolvedColor;
 
     const apFadeStartMeters = Number.isFinite(terrainShaderConfig.aerialFadeStartMeters)
         ? Math.max(0, terrainShaderConfig.aerialFadeStartMeters)
@@ -604,11 +712,74 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const clusteredLightingCode = getClusteredLightingWGSL();
     const proceduralDetailCode = getProceduralDetailWGSL();
     const terrainAOBindingDecl = enableTerrainAO
-        ? `@group(1) @binding(6) var terrainAOMask: ${chunkTextureType};`
+        ? `@group(1) @binding(7) var terrainAOMask: ${chunkTextureType};`
         : '';
     const groundFieldBindingDecl = enableGroundField
-        ? `@group(1) @binding(7) var groundFieldMask: ${chunkTextureType};`
+        ? `@group(1) @binding(8) var groundFieldMask: ${chunkTextureType};`
         : '';
+    const includeResolvedColorBinding =
+        enableResolvedColor ||
+        enableLod0ResolvedColor ||
+        enableLodEdgeResolvedColor ||
+        enableResolvedColorDebugBinding;
+    const resolvedColorBindingDecl = includeResolvedColorBinding
+        ? `@group(1) @binding(9) var resolvedColorTexture: ${chunkTextureType};`
+        : '';
+    const resolvedColorCode = includeResolvedColorBinding ? `
+fn sampleResolvedTerrainColor(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    return ${useArrayTextures
+        ? 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, layer, 0.0)'
+        : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
+    };
+}
+
+fn sampleResolvedTerrainColorImplicit(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    return ${useArrayTextures
+        ? 'textureSample(resolvedColorTexture, chunkLinearSampler, uv, layer)'
+        : 'textureSample(resolvedColorTexture, chunkLinearSampler, uv)'
+    };
+}
+
+fn sampleResolvedTerrainColorLevel(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    return ${useArrayTextures
+        ? 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, layer, 0.0)'
+        : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
+    };
+}
+
+fn sampleResolvedTerrainColorNearest(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    let texSize = vec2<i32>(textureDimensions(resolvedColorTexture));
+    let coord = clamp(
+        vec2<i32>(floor(uv * vec2<f32>(texSize))),
+        vec2<i32>(0),
+        texSize - vec2<i32>(1)
+    );
+    return ${useArrayTextures
+        ? 'textureLoad(resolvedColorTexture, coord, layer, 0)'
+        : 'textureLoad(resolvedColorTexture, coord, 0)'
+    };
+}
+` : `
+fn sampleResolvedTerrainColor(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn sampleResolvedTerrainColorImplicit(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn sampleResolvedTerrainColorLevel(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn sampleResolvedTerrainColorNearest(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+`;
     const terrainAOCode = enableTerrainAO ? `
 fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
     let uv = applyChunkAtlasUV(
@@ -659,56 +830,11 @@ fn applyGroundFieldFallback(baseColor: vec3<f32>, _input: FragmentInput, _layer:
     return baseColor;
 }
 `;
-    const blendModeConstants = useAdvancedBlend ? `
-const BLEND_SOFT:    i32 = 0;
-const BLEND_HARD:    i32 = 1;
-const STEP_OVERLAY:  i32 = 2;
-
-    ` : '';
-    const blendModeCode = useAdvancedBlend ? `
-${blendModeBlock}
-fn blendTileColorsSplat(
-    color1: vec4<f32>, color2: vec4<f32>,
-    w1: f32, w2: f32,
-    tileId1: f32, tileId2: f32,
-    worldPos: vec2<f32>
-) -> vec4<f32> {
-    return blendTileColors(color1, color2, w1, w2, tileId1, tileId2, worldPos);
-}
-` : `
-${blendModeBlockSimple}
-fn blendTileColorsSplat(
-    color1: vec4<f32>, color2: vec4<f32>,
-    w1: f32, w2: f32,
-    _tileId1: f32, _tileId2: f32,
-    _worldPos: vec2<f32>
-) -> vec4<f32> {
-    return blendTileColorsSimple(color1, color2, w1, w2);
-}
-`;
- 
-    
     const grassConstants = `
 const GRASS_TILE_ID_COUNT: i32 = ${grassTileCount};
 const GRASS_TILE_IDS: array<i32, ${grassTileCount}> = array<i32, ${grassTileCount}>(${grassTileIds.join(', ')});
 const GRASS_SHADOW_STRENGTH: f32 = ${grassShadowStrength.toFixed(3)};
 `;
-    const textureCanonicalTileIdWGSL = `
-fn canonicalTextureTileId(tileId: f32) -> f32 {
-    let t = clamp(i32(round(tileId)), 0, 255);
-${tileCategories.map((category) => {
-        const canonicalTileId = category.ranges[0][0];
-        return category.ranges
-            .map(([minTileId, maxTileId]) =>
-                `    if (t >= ${minTileId} && t <= ${maxTileId}) { return ${canonicalTileId}.0; }`
-            )
-            .join('\n');
-    }).join('\n')}
-    return tileId;
-}
-`;
-
-
     return `
 const NORMAL_TEXTURE_FILTERABLE: bool = ${normalTextureFilterable ? 'true' : 'false'};
 
@@ -730,9 +856,35 @@ const GROUND_FIELD_FERN_TINT: vec3<f32> = vec3<f32>(
 const DEBUG_EDGE_EPS: f32 = 0.02;
 const DEBUG_MAX_LOD: f32 = 6.0;
 const SHADER_LOD: i32 = ${lod};
-const USE_ADVANCED_BLEND: bool = ${useAdvancedBlend ? 'true' : 'false'};
-const USE_VARIANT_BLEND: bool = ${useVariantBlend ? 'true' : 'false'};
+const USE_SPLAT_TOP2_FAST_PATH: bool = ${useSplatTop2FastPath ? 'true' : 'false'};
+const SPLAT_TOP2_MIN_WEIGHT: f32 = ${splatTop2MinWeight.toFixed(4)};
+const SPLAT_DOMINANT_MIN_WEIGHT: f32 = ${splatDominantMinWeight.toFixed(4)};
 const USE_VARIANT_ROTATION: bool = ${useVariantRotation ? 'true' : 'false'};
+const ENABLE_NEAR_MIP_SHARPEN: bool = ${enableNearMipSharpen ? 'true' : 'false'};
+const NEAR_MIP_SHARPEN_SCALE: f32 = ${nearMipSharpenScale.toFixed(4)};
+const NEAR_MIP_SHARPEN_FADE_START: f32 = ${nearMipSharpenFadeStartMeters.toFixed(1)};
+const NEAR_MIP_SHARPEN_FADE_END: f32 = ${nearMipSharpenFadeEndMeters.toFixed(1)};
+const ENABLE_NEAR_DETAIL: bool = ${nearDetailEnabled ? 'true' : 'false'};
+const NEAR_DETAIL_STRENGTH: f32 = ${nearDetailStrength.toFixed(4)};
+const NEAR_DETAIL_SCALE_METERS: f32 = ${nearDetailScaleMeters.toFixed(4)};
+const NEAR_DETAIL_CREVICE_WIDTH: f32 = ${nearDetailCreviceWidth.toFixed(4)};
+const NEAR_DETAIL_CREVICE_COVERAGE: f32 = ${nearDetailCreviceCoverage.toFixed(4)};
+const NEAR_DETAIL_FADE_START: f32 = ${nearDetailFadeStartMeters.toFixed(1)};
+const NEAR_DETAIL_FADE_END: f32 = ${nearDetailFadeEndMeters.toFixed(1)};
+const ENABLE_LOD0_RESOLVED_COLOR: bool = ${enableLod0ResolvedColor ? 'true' : 'false'};
+const LOD0_RESOLVED_COLOR_FADE_START: f32 = ${lod0ResolvedColorFadeStartMeters.toFixed(1)};
+const LOD0_RESOLVED_COLOR_FADE_END: f32 = ${lod0ResolvedColorFadeEndMeters.toFixed(1)};
+const ENABLE_LOD0_AO_FADE: bool = ${enableLod0AOFade ? 'true' : 'false'};
+const LOD0_AO_FADE_START: f32 = ${lod0AOFadeStartMeters.toFixed(1)};
+const LOD0_AO_FADE_END: f32 = ${lod0AOFadeEndMeters.toFixed(1)};
+const ENABLE_ANY_LOD_EDGE_FADE: bool = ${enableAnyLodEdgeFade ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_FADE: bool = ${enableLodEdgeFade ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_AO_FADE: bool = ${enableLodEdgeAOFade ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_RESOLVED_COLOR: bool = ${enableLodEdgeResolvedColor ? 'true' : 'false'};
+const LOD_EDGE_COLOR_STRENGTH: f32 = ${lodEdgeColorStrength.toFixed(4)};
+const LOD_EDGE_AO_STRENGTH: f32 = ${lodEdgeAOStrength.toFixed(4)};
+const LOD_EDGE_NORMAL_STRENGTH: f32 = ${lodEdgeNormalStrength.toFixed(4)};
+const LOD_EDGE_SHADOW_STRENGTH: f32 = ${lodEdgeShadowStrength.toFixed(4)};
 const USE_POINT_SAMPLING: bool = ${usePointSampling ? 'true' : 'false'};
 const USE_POINT_SPLAT: bool = ${enablePointSplat ? 'true' : 'false'};
 const AP_FADE_START: f32 = ${apFadeStartMeters.toFixed(1)};
@@ -744,11 +896,17 @@ const ENABLE_NEAR_TO_MID_FADE: bool = ${enableNearToMidFade ? 'true' : 'false'};
 const NEAR_TO_MID_FADE_START_CHUNKS: f32 = ${nearToMidFadeStartChunks.toFixed(2)};
 const NEAR_TO_MID_FADE_END_CHUNKS: f32 = ${nearToMidFadeEndChunks.toFixed(2)};
 const ENABLE_MACRO_OVERLAY: bool = ${enableMacroOverlay ? 'true' : 'false'};
+const ENABLE_RESOLVED_COLOR: bool = ${enableResolvedColor ? 'true' : 'false'};
+const HAS_RESOLVED_COLOR_TEXTURE: bool = ${includeResolvedColorBinding ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
 const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
 const ENABLE_NORMAL_MAP: bool = ${enableNormalMap ? 'true' : 'false'};
 const ENABLE_LIGHTING: bool = ${enableLighting ? 'true' : 'false'};
 const SHADOW_MODE: i32 = ${shadowMode};
+const NORMAL_MAP_DISTANCE_BASE: f32 = ${normalMapDistanceBaseMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_ALTITUDE_SCALE: f32 = ${normalMapDistanceAltitudeScaleMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_MAX: f32 = ${normalMapDistanceMaxMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_FADE: f32 = ${normalMapDistanceFadeMeters.toFixed(1)};
 const ALTITUDE_NORMAL_MIN: f32 = ${altitudeNormalMinMeters.toFixed(2)};
 const ALTITUDE_SHADOW_MIN: f32 = ${altitudeShadowMinMeters.toFixed(2)};
 const DEBUG_LOD_COLORS: array<vec3<f32>, 7> = array<vec3<f32>, 7>(
@@ -760,7 +918,6 @@ const DEBUG_LOD_COLORS: array<vec3<f32>, 7> = array<vec3<f32>, 7>(
     vec3<f32>(1.0, 0.2, 0.5),
     vec3<f32>(0.8, 0.2, 1.0)
 );
-${blendModeConstants}
 
 
 ${grassConstants}
@@ -821,7 +978,7 @@ struct FragmentUniforms {
     fogColor: vec3<f32>,
     macroNoiseWeight: f32,
     terrainDebugMode: i32,
-    _debugPad0: i32,
+    terrainLayerViewMode: i32,
     _debugPad1: i32,
     _debugPad2: i32,
 };
@@ -833,14 +990,18 @@ struct FragmentUniforms {
 @group(1) @binding(2) var tileTexture: ${chunkTextureType};
 @group(1) @binding(3) var splatDataMap: ${chunkTextureType};      // top-4 weights
 @group(1) @binding(4) var splatIndexMap: ${chunkTextureType};     // top-4 representative tile ids
-@group(1) @binding(5) var macroMaskTexture: ${chunkTextureType};
+@group(1) @binding(5) var splatValidMap: ${chunkTextureType};     // precomputed bilinear-valid mask
+@group(1) @binding(6) var macroMaskTexture: ${chunkTextureType};
 ${terrainAOBindingDecl}
 ${groundFieldBindingDecl}
+${resolvedColorBindingDecl}
 
 @group(2) @binding(0) var atlasTexture: texture_2d_array<f32>;
 @group(2) @binding(1) var level2AtlasTexture: texture_2d_array<f32>;
 @group(2) @binding(2) var tileTypeLookup: texture_2d<f32>;
 @group(2) @binding(3) var macroTileTypeLookup: texture_2d<f32>;
+// Legacy binding retained to keep the atlas bind-group layout stable. The
+// terrain shader no longer reads runtime texture-variant counts.
 @group(2) @binding(4) var numVariantsTex: texture_2d<f32>;
 @group(2) @binding(5) var textureSampler: sampler;
 @group(2) @binding(6) var nearestSampler: sampler;
@@ -869,6 +1030,8 @@ struct FragmentInput {
     @location(14) vDebugSample: vec4<f32>,
     @location(15) vFaceInfo: vec4<f32>,
 };
+
+${resolvedColorCode}
 
 // ----------------------------------------------------------------------------
 // Chunk-texture helpers
@@ -1049,6 +1212,70 @@ struct SplatData {
     bilinearValid: bool,
 };
 
+
+fn sortTop4ByTileId(
+    topIds: ptr<function, array<i32, 4>>,
+    topWeights: ptr<function, array<f32, 4>>
+) {
+    for (var i: i32 = 0; i < 3; i += 1) {
+        for (var j: i32 = i + 1; j < 4; j += 1) {
+            let vi = (*topIds)[i] < 255;
+            let vj = (*topIds)[j] < 255;
+            let doSwap =
+                (vj && !vi) ||
+                (vi && vj && (*topIds)[j] < (*topIds)[i]);
+
+            if (doSwap) {
+                let tmpId = (*topIds)[i];
+                (*topIds)[i] = (*topIds)[j];
+                (*topIds)[j] = tmpId;
+
+                let tmpW = (*topWeights)[i];
+                (*topWeights)[i] = (*topWeights)[j];
+                (*topWeights)[j] = tmpW;
+            }
+        }
+    }
+}
+
+fn splatDominantWeight(splat: SplatData) -> f32 {
+    return max(
+        max(splat.weights.x, splat.weights.y),
+        max(splat.weights.z, splat.weights.w)
+    );
+}
+
+fn splatDominantTileId(splat: SplatData) -> f32 {
+    var bestId = splat.tileIds.x;
+    var bestW  = splat.weights.x;
+
+    if (splat.weights.y > bestW || (abs(splat.weights.y - bestW) <= 0.0001 && splat.tileIds.y < bestId)) {
+        bestW = splat.weights.y;
+        bestId = splat.tileIds.y;
+    }
+    if (splat.weights.z > bestW || (abs(splat.weights.z - bestW) <= 0.0001 && splat.tileIds.z < bestId)) {
+        bestW = splat.weights.z;
+        bestId = splat.tileIds.z;
+    }
+    if (splat.weights.w > bestW || (abs(splat.weights.w - bestW) <= 0.0001 && splat.tileIds.w < bestId)) {
+        bestW = splat.weights.w;
+        bestId = splat.tileIds.w;
+    }
+
+    return bestId;
+}
+
+fn splatHasMeaningfulBlend(splat: SplatData) -> bool {
+    let dominant = splatDominantWeight(splat);
+    let rest = 1.0 - dominant;
+    return rest > 0.03;
+}
+
+fn splatChannelUsable(tileId: f32, weight: f32) -> bool {
+    return tileId >= 0.0 && tileId < 255.0 && weight > 0.03;
+}
+
+
 fn grassHash(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
     p3 = p3 + dot(p3, p3.yzx + 33.33);
@@ -1187,6 +1414,17 @@ fn loadSplatWeights(coord: vec2<i32>, layer: i32) -> vec4<f32> {
     return clamp(textureLoad(splatDataMap, coord, layer, 0), vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
+fn sampleSplatWeightsFiltered(uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    return clamp(
+        ${useArrayTextures
+            ? 'textureSampleLevel(splatDataMap, chunkLinearSampler, uv, layer, 0.0)'
+            : 'textureSampleLevel(splatDataMap, chunkLinearSampler, uv, 0.0)'
+        },
+        vec4<f32>(0.0),
+        vec4<f32>(1.0)
+    );
+}
+
 fn loadSplatIndices(coord: vec2<i32>, layer: i32) -> vec4<i32> {
     let s = textureLoad(splatIndexMap, coord, layer, 0);
     return vec4<i32>(
@@ -1195,6 +1433,10 @@ fn loadSplatIndices(coord: vec2<i32>, layer: i32) -> vec4<i32> {
         decodeSplatTileId(s.b),
         decodeSplatTileId(s.a)
     );
+}
+
+fn loadSplatValidity(coord: vec2<i32>, layer: i32) -> bool {
+    return textureLoad(splatValidMap, coord, layer, 0).r > 0.5;
 }
 
 fn accumulateLoadedCornerMixture(
@@ -1261,8 +1503,43 @@ fn splatActiveCount(splat: SplatData) -> i32 {
 }
 
 fn splatPrimaryWeight(splat: SplatData, _local: vec2<f32>) -> f32 {
-    let total = max(splatWeightSum(splat), 0.0001);
-    return clamp(splat.weights.x / total, 0.0, 1.0);
+    return splatDominantWeight(splat);
+}
+
+fn findSplatTop2(
+    splat: SplatData,
+    bestI: ptr<function, i32>,
+    secondI: ptr<function, i32>,
+    top2Sum: ptr<function, f32>
+) -> bool {
+    let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+    let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+
+    var first = -1;
+    var second = -1;
+
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        if (!splatChannelUsable(ids[i], ws[i])) {
+            continue;
+        }
+        if (first < 0 || ws[i] > ws[first]) {
+            second = first;
+            first = i;
+            continue;
+        }
+        if (second < 0 || ws[i] > ws[second]) {
+            second = i;
+        }
+    }
+
+    if (first < 0 || second < 0) {
+        return false;
+    }
+
+    *bestI = first;
+    *secondI = second;
+    *top2Sum = ws[first] + ws[second];
+    return *top2Sum > 0.0001;
 }
 
 fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
@@ -1282,34 +1559,15 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
     let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
     let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
-    let centerWeights = loadSplatWeights(centerCoord, layer);
-    let centerIds = loadSplatIndices(centerCoord, layer);
-    let weights00 = loadSplatWeights(c00, layer);
-    let weights10 = loadSplatWeights(c10, layer);
-    let weights01 = loadSplatWeights(c01, layer);
-    let weights11 = loadSplatWeights(c11, layer);
-    let ids00 = loadSplatIndices(c00, layer);
-    let ids10 = loadSplatIndices(c10, layer);
-    let ids01 = loadSplatIndices(c01, layer);
-    let ids11 = loadSplatIndices(c11, layer);
-    let bilinearValid =
-        splatIdSetsMatch(ids00, ids10) &&
-        splatIdSetsMatch(ids00, ids01) &&
-        splatIdSetsMatch(ids00, ids11);
+    let bilinearValid = loadSplatValidity(c00, layer);
 
     var topIds: array<i32, 4>;
     var topWeights: array<f32, 4>;
 
     if (bilinearValid) {
-        let blendedWeights = clamp(
-            mix(
-                mix(weights00, weights10, f.x),
-                mix(weights01, weights11, f.x),
-                f.y
-            ),
-            vec4<f32>(0.0),
-            vec4<f32>(1.0)
-        );
+        let ids00 = loadSplatIndices(c00, layer);
+        let blendedWeights = sampleSplatWeightsFiltered(uv, layer);
+
         topIds = array<i32, 4>(ids00.x, ids00.y, ids00.z, ids00.w);
         topWeights = array<f32, 4>(
             blendedWeights.x,
@@ -1318,9 +1576,15 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
             blendedWeights.w
         );
     } else {
-        // Corner slot layouts disagree.  Accumulate the actual weighted corner
-        // mixtures instead of snapping to the center texel; the old snap left
-        // visible square "ghost borders" at the mixed→pure transition edge.
+        let ids00 = loadSplatIndices(c00, layer);
+        let ids10 = loadSplatIndices(c10, layer);
+        let ids01 = loadSplatIndices(c01, layer);
+        let ids11 = loadSplatIndices(c11, layer);
+        let weights00 = loadSplatWeights(c00, layer);
+        let weights10 = loadSplatWeights(c10, layer);
+        let weights01 = loadSplatWeights(c01, layer);
+        let weights11 = loadSplatWeights(c11, layer);
+
         var accumIds: array<i32, 16>;
         var accumWeights: array<f32, 16>;
         var accumCount: i32 = 0;
@@ -1331,10 +1595,19 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
         accumulateLoadedCornerMixture(ids11, weights11, f.x * f.y,                 &accumIds, &accumWeights, &accumCount);
 
         buildAccumulatedTop4(&accumIds, &accumWeights, accumCount, &topIds, &topWeights);
+
+        // The fallback combines mismatched bilinear corners and can build slots
+        // in accumulation order. Re-sort there so later blend logic sees stable
+        // channel identity. The bilinear-valid path already reads pre-sorted
+        // splatIndexMap channels from generation, so it deliberately skips this
+        // compare/swap network on the hot path.
+        sortTop4ByTileId(&topIds, &topWeights);
     }
 
     let topSum = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
     if (topSum <= 0.0001) {
+        let centerWeights = loadSplatWeights(centerCoord, layer);
+        let centerIds = loadSplatIndices(centerCoord, layer);
         let centerSum = max(centerWeights.x + centerWeights.y + centerWeights.z + centerWeights.w, 0.0001);
         topIds = array<i32, 4>(centerIds.x, centerIds.y, centerIds.z, centerIds.w);
         topWeights = array<f32, 4>(
@@ -1365,14 +1638,16 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
         topWeights[2],
         topWeights[3]
     );
+
     let total = splatWeightSum(result);
     if (total > 0.0001) {
         result.weights = result.weights / total;
     } else {
         result.weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
     }
+
     result.cellLocal = fract(uv * splatTexSize);
-    result.hasBoundary = splatActiveCount(result) > 1;
+    result.hasBoundary = splatHasMeaningfulBlend(result);
     result.bilinearValid = bilinearValid;
     return result;
 }
@@ -1446,16 +1721,6 @@ fn hash12(p: vec2<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-${textureCanonicalTileIdWGSL}
-
-fn getNumVariants(tileId: f32, season: i32) -> i32 {
-    let canonicalTileId = canonicalTextureTileId(tileId);
-    let t = clamp(i32(canonicalTileId + 0.5), 0, 255);
-    let s = clamp(season, 0, 3);
-    let v = textureLoad(numVariantsTex, vec2<i32>(t, s), 0).r;
-    return max(1, i32(round(v * 255.0)));
-}
-
 // Sample the zone mask at the snapped tile center — used for micro variant selection
 // so that the variant is stable per tile.
 fn sampleChunkZoneMask(input: FragmentInput, layer: i32) -> f32 {
@@ -1474,24 +1739,35 @@ fn sampleZoneMaskSmooth(input: FragmentInput, layer: i32) -> f32 {
     return clamp(s.r, 0.0, 1.0);
 }
 
-fn calculateRotation(worldTileCoord: vec2<f32>, tileId: f32, season: i32, seed: f32) -> f32 {
-    let canonicalTileId = canonicalTextureTileId(tileId);
-    let h = hash12(worldTileCoord + vec2<f32>(canonicalTileId * 0.17, seed + f32(season) * 0.19));
-    return floor(h * 4.0) * 1.5707963;
+fn calculateRotationQuarter(worldTileCoord: vec2<f32>, tileId: f32, season: i32, seed: f32) -> i32 {
+    let h = hash12(worldTileCoord + vec2<f32>(tileId * 0.17, seed + f32(season) * 0.19));
+    return clamp(i32(floor(h * 4.0)), 0, 3);
 }
 
-fn rotateUV(uv: vec2<f32>, angle: f32) -> vec2<f32> {
-    let centered = uv - 0.5;
-    let c = cos(angle);
-    let s = sin(angle);
-    let rotated = vec2<f32>(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
-    return rotated + 0.5;
+fn rotateUVQuarter(uv: vec2<f32>, quarterTurn: i32) -> vec2<f32> {
+    if (quarterTurn == 1) {
+        return vec2<f32>(1.0 - uv.y, uv.x);
+    }
+    if (quarterTurn == 2) {
+        return vec2<f32>(1.0 - uv.x, 1.0 - uv.y);
+    }
+    if (quarterTurn == 3) {
+        return vec2<f32>(uv.y, 1.0 - uv.x);
+    }
+    return uv;
 }
 
-fn rotateDeriv(v: vec2<f32>, angle: f32) -> vec2<f32> {
-    let c = cos(angle);
-    let s = sin(angle);
-    return vec2<f32>(v.x * c - v.y * s, v.x * s + v.y * c);
+fn rotateDerivQuarter(v: vec2<f32>, quarterTurn: i32) -> vec2<f32> {
+    if (quarterTurn == 1) {
+        return vec2<f32>(-v.y, v.x);
+    }
+    if (quarterTurn == 2) {
+        return vec2<f32>(-v.x, -v.y);
+    }
+    if (quarterTurn == 3) {
+        return vec2<f32>(v.y, -v.x);
+    }
+    return v;
 }
 
 // ----------------------------------------------------------------------------
@@ -1559,26 +1835,97 @@ fn getMicroPatternStyle(tileId: f32) -> i32 {
     // Default for all others
     return 0; // General micro
 }
+
+fn nearDetailPatternCoord(worldPos: vec2<f32>, patternStyle: i32) -> vec2<f32> {
+    let scale = max(NEAR_DETAIL_SCALE_METERS, 0.01);
+    var p = vec2<f32>(
+        worldPos.x * 0.86 + worldPos.y * 0.31,
+        -worldPos.x * 0.23 + worldPos.y * 0.93
+    ) / scale;
+    // Pattern styles are intentionally cheap coordinate transforms. The hash
+    // core stays shared so biome-specific detail can expand without adding new
+    // texture reads or divergent atlas paths.
+    if (patternStyle == 1) {
+        p = vec2<f32>(worldPos.x * 0.72 + worldPos.y * 0.16, worldPos.y * 1.55) / scale;
+    } else if (patternStyle == 2) {
+        p = vec2<f32>(worldPos.x * 0.48, worldPos.x * 0.10 + worldPos.y * 2.10) / scale;
+    } else if (patternStyle == 3) {
+        p = vec2<f32>(worldPos.x * 1.80 + worldPos.y * 0.22, worldPos.y * 0.62) / scale;
+    }
+    return p;
+}
+
+fn nearDetailCrevice(worldPos: vec2<f32>, patternStyle: i32) -> f32 {
+    let p = nearDetailPatternCoord(worldPos + vec2<f32>(113.7, 271.9), patternStyle);
+    let cell = floor(p);
+    let local = fract(p) - vec2<f32>(0.5);
+
+    let activeHash = hash12(cell + vec2<f32>(5.0, 17.0));
+    let creviceCellMask = smoothstep(1.0 - NEAR_DETAIL_CREVICE_COVERAGE, 1.0, activeHash);
+
+    let orientHash = hash12(cell + vec2<f32>(23.0, 41.0));
+    var dir = vec2<f32>(1.0, 0.0);
+    if (orientHash > 0.25 && orientHash <= 0.5) {
+        dir = vec2<f32>(0.7071, 0.7071);
+    } else if (orientHash > 0.5 && orientHash <= 0.75) {
+        dir = vec2<f32>(0.0, 1.0);
+    } else if (orientHash > 0.75) {
+        dir = vec2<f32>(-0.7071, 0.7071);
+    }
+    let side = vec2<f32>(-dir.y, dir.x);
+
+    let offset = vec2<f32>(
+        hash12(cell + vec2<f32>(71.0, 13.0)) - 0.5,
+        hash12(cell + vec2<f32>(29.0, 97.0)) - 0.5
+    ) * 0.32;
+    let q = local - offset;
+    let distToLine = abs(dot(q, side));
+    let alongLine = abs(dot(q, dir));
+    let width = NEAR_DETAIL_CREVICE_WIDTH;
+    let line = 1.0 - smoothstep(width, width + 0.018, distToLine);
+    let segment = 1.0 - smoothstep(0.28, 0.48, alongLine);
+    let strengthHash = hash12(cell + vec2<f32>(131.0, 193.0));
+    return creviceCellMask * line * segment * mix(0.55, 1.0, strengthHash);
+}
+
+fn applyNearProceduralDetail(
+    color: vec3<f32>,
+    worldPos: vec2<f32>,
+    distanceToCamera: f32,
+    patternStyle: i32
+) -> vec3<f32> {
+    let fade = 1.0 - smoothstep(NEAR_DETAIL_FADE_START, NEAR_DETAIL_FADE_END, distanceToCamera);
+    let crevice = nearDetailCrevice(worldPos, patternStyle);
+    let detail = 1.0 - crevice * NEAR_DETAIL_STRENGTH * fade;
+    return clamp(color * detail, vec3<f32>(0.0), vec3<f32>(1.0));
+}
 // ----------------------------------------------------------------------------
 // Atlas layer lookup and sampling
 // ----------------------------------------------------------------------------
 
-fn lookupTileLayer(tileId: f32, season: i32, variantIdx: i32) -> i32 {
-    let canonicalTileId = canonicalTextureTileId(tileId);
+fn textureLookupRow(tileId: f32, rowCount: i32) -> i32 {
+    return clamp(i32(round(tileId)), 0, max(rowCount - 1, 0));
+}
+
+// Runtime texture variants are deliberately bypassed in the terrain hot path.
+// The config writes a collapsed canonical texture row for every generated tile
+// ID, so this lookup can use the tile ID directly without shader-side category
+// remapping. Keep cheap rotational variety; add richer variety through
+// world-space detail or prebaked resolved colors.
+fn lookupTileLayer(tileId: f32, season: i32) -> i32 {
     let lookupSize = vec2<i32>(textureDimensions(tileTypeLookup));
     let maxVariants = lookupSize.x / 4;
-    let x = (season * maxVariants + (variantIdx % maxVariants)) % lookupSize.x;
-    let y = i32(canonicalTileId) % lookupSize.y;
+    let x = (season * maxVariants) % lookupSize.x;
+    let y = textureLookupRow(tileId, lookupSize.y);
     let sample = textureLoad(tileTypeLookup, vec2<i32>(x, y), 0);
     return i32(round(sample.r));
 }
 
-fn lookupMacroTileLayer(tileId: f32, season: i32, variantIdx: i32) -> i32 {
-    let canonicalTileId = canonicalTextureTileId(tileId);
+fn lookupMacroTileLayer(tileId: f32, season: i32) -> i32 {
     let lookupSize = vec2<i32>(textureDimensions(macroTileTypeLookup));
     let maxVariants = lookupSize.x / 4;
-    let x = (season * maxVariants + (variantIdx % maxVariants)) % lookupSize.x;
-    let y = i32(canonicalTileId) % lookupSize.y;
+    let x = (season * maxVariants) % lookupSize.x;
+    let y = textureLookupRow(tileId, lookupSize.y);
     let sample = textureLoad(macroTileTypeLookup, vec2<i32>(x, y), 0);
     return i32(round(sample.r));
 }
@@ -1607,28 +1954,6 @@ fn sampleMacroAtlasLayer(
     return textureSampleGrad(level2AtlasTexture, textureSampler, tileUv, layer, ddx_vUv, ddy_vUv);
 }
 
-fn sampleVariantAt(
-    tileId: f32,
-    tileCoord: vec2<f32>,
-    worldPos: vec2<f32>,
-    activeSeason: i32,
-    variantIdx: i32,
-    ddx_vUv: vec2<f32>,
-    ddy_vUv: vec2<f32>
-) -> vec4<f32> {
-    let localUV = fract(worldPos - tileCoord);
-    let r = calculateRotation(tileCoord, tileId, activeSeason, 9547.0);
-    let atlasLayer = lookupTileLayer(tileId, activeSeason, variantIdx);
-    let rotatedLocal = rotateUV(localUV, r);
-    let ddx_rot = rotateDeriv(ddx_vUv, r);
-    let ddy_rot = rotateDeriv(ddy_vUv, r);
-    return sampleAtlasLayer(atlasLayer, rotatedLocal, ddx_rot, ddy_rot);
-}
-
-fn getVariantAt(tileCoord: vec2<f32>, hashOffset: vec2<f32>, varCount: i32) -> i32 {
-    return clamp(i32(floor(hash12(tileCoord + hashOffset) * f32(varCount))), 0, varCount - 1);
-}
-
 fn sampleTileColor(
     tileId: f32,
     worldTileCoord: vec2<f32>,
@@ -1637,58 +1962,17 @@ fn sampleTileColor(
     ddx_vUv: vec2<f32>,
     ddy_vUv: vec2<f32>
 ) -> vec4<f32> {
-    let canonicalTileId = canonicalTextureTileId(tileId);
-    let varCount = getNumVariants(canonicalTileId, activeSeason);
-    let hashOffset = vec2<f32>(canonicalTileId * 0.17, f32(activeSeason) * 0.31);
-
-    var currentVariant: i32 = 0;
-    if (varCount > 1) {
-        currentVariant = getVariantAt(worldTileCoord, hashOffset, varCount);
-    }
-
-    // Sample current tile
-    var atlasLayer = lookupTileLayer(canonicalTileId, activeSeason, currentVariant);
+    var atlasLayer = lookupTileLayer(tileId, activeSeason);
     var rotatedLocal = localUV;
     var ddx_rot = ddx_vUv;
     var ddy_rot = ddy_vUv;
     if (USE_VARIANT_ROTATION) {
-        let r = calculateRotation(worldTileCoord, canonicalTileId, activeSeason, 9547.0);
-        rotatedLocal = rotateUV(localUV, r);
-        ddx_rot = rotateDeriv(ddx_vUv, r);
-        ddy_rot = rotateDeriv(ddy_vUv, r);
+        let r = calculateRotationQuarter(worldTileCoord, tileId, activeSeason, 9547.0);
+        rotatedLocal = rotateUVQuarter(localUV, r);
+        ddx_rot = rotateDerivQuarter(ddx_vUv, r);
+        ddy_rot = rotateDerivQuarter(ddy_vUv, r);
     }
-    var color = sampleAtlasLayer(atlasLayer, rotatedLocal, ddx_rot, ddy_rot);
-
-    if (!USE_VARIANT_BLEND || varCount <= 1) { return color; }
-
-    // Bilinear variant blending across tile boundaries.
-    // Shift by 0.5 so the blend straddles each tile edge.
-    let worldPos = worldTileCoord + localUV;
-    let p = worldPos - 0.5;
-    let base = floor(p);
-    let t = fract(p);
-    let blend = smoothstep(vec2<f32>(0.0), vec2<f32>(1.0), t);
-
-    let v00 = getVariantAt(base, hashOffset, varCount);
-    let v10 = getVariantAt(base + vec2<f32>(1.0, 0.0), hashOffset, varCount);
-    let v01 = getVariantAt(base + vec2<f32>(0.0, 1.0), hashOffset, varCount);
-    let v11 = getVariantAt(base + vec2<f32>(1.0, 1.0), hashOffset, varCount);
-
-    // Fast path: all 4 corners share the same variant — no blending needed
-    if (v00 == v10 && v10 == v01 && v01 == v11) {
-        return color;
-    }
-
-    // Sample each corner tile with its own rotation and variant
-    let c00 = sampleVariantAt(tileId, base, worldPos, activeSeason, v00, ddx_vUv, ddy_vUv);
-    let c10 = sampleVariantAt(tileId, base + vec2<f32>(1.0, 0.0), worldPos, activeSeason, v10, ddx_vUv, ddy_vUv);
-    let c01 = sampleVariantAt(tileId, base + vec2<f32>(0.0, 1.0), worldPos, activeSeason, v01, ddx_vUv, ddy_vUv);
-    let c11 = sampleVariantAt(tileId, base + vec2<f32>(1.0, 1.0), worldPos, activeSeason, v11, ddx_vUv, ddy_vUv);
-
-    // Bilinear interpolation
-    let c0 = mix(c00, c10, blend.x);
-    let c1 = mix(c01, c11, blend.x);
-    return mix(c0, c1, blend.y);
+    return sampleAtlasLayer(atlasLayer, rotatedLocal, ddx_rot, ddy_rot);
 }
 
 
@@ -1718,21 +2002,13 @@ fn sampleMacroTileColor(
     ddx_uv: vec2<f32>,
     ddy_uv: vec2<f32>
 ) -> vec4<f32> {
-    let canonicalTileId = canonicalTextureTileId(tileId);
-    let r = calculateRotation(worldTileCoord, canonicalTileId, activeSeason, 100.0);
+    let r = calculateRotationQuarter(worldTileCoord, tileId, activeSeason, 100.0);
 
-    let varCount = getNumVariants(canonicalTileId, activeSeason);
-    var varIdx: i32 = 0;
-    if (varCount > 1) {
-        let h = hash12(worldTileCoord + vec2<f32>(canonicalTileId * 0.31, f32(activeSeason) * 0.53));
-        varIdx = clamp(i32(floor(h * f32(varCount))), 0, varCount - 1);
-    }
+    let macroLayer = lookupMacroTileLayer(tileId, activeSeason);
+    let rotatedLocal = rotateUVQuarter(localUV, r);
 
-    let macroLayer = lookupMacroTileLayer(canonicalTileId, activeSeason, varIdx);
-    let rotatedLocal = rotateUV(localUV, r);
-
-    let ddx_rot = rotateDeriv(ddx_uv, r);
-    let ddy_rot = rotateDeriv(ddy_uv, r);
+    let ddx_rot = rotateDerivQuarter(ddx_uv, r);
+    let ddy_rot = rotateDerivQuarter(ddy_uv, r);
 
     return sampleMacroAtlasLayer(macroLayer, rotatedLocal, ddx_rot, ddy_rot);
 }
@@ -1749,7 +2025,6 @@ fn sampleMicroTexture(
     let tileId = sampleChunkTileId(input, layer);
     return sampleTileColor(tileId, worldTileCoord, local, activeSeason, ddx_vUv, ddy_vUv);
 }
-${blendModeCode}
 
 fn computeNearToMidDetailFade(input: FragmentInput) -> f32 {
     if (!ENABLE_NEAR_TO_MID_FADE) {
@@ -1758,6 +2033,42 @@ fn computeNearToMidDetailFade(input: FragmentInput) -> f32 {
     let fadeStart = max(fragUniforms.chunkWidth * NEAR_TO_MID_FADE_START_CHUNKS, 0.0);
     let fadeEnd = max(fragUniforms.chunkWidth * NEAR_TO_MID_FADE_END_CHUNKS, fadeStart + 0.001);
     return 1.0 - smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
+}
+
+fn computeLod0ResolvedColorFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_LOD0_RESOLVED_COLOR) {
+        return 0.0;
+    }
+    return smoothstep(
+        LOD0_RESOLVED_COLOR_FADE_START,
+        LOD0_RESOLVED_COLOR_FADE_END,
+        input.vDistanceToCamera
+    );
+}
+
+fn computeLod0AOFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_LOD0_AO_FADE) {
+        return 0.0;
+    }
+    return smoothstep(
+        LOD0_AO_FADE_START,
+        LOD0_AO_FADE_END,
+        input.vDistanceToCamera
+    );
+}
+
+fn computeNormalMapBlend(input: FragmentInput) -> f32 {
+    if (!ENABLE_NORMAL_MAP) {
+        return 0.0;
+    }
+    let viewerAltitude = max(
+        0.0,
+        length(fragUniforms.cameraPosition - fragUniforms.planetCenter) - fragUniforms.atmospherePlanetRadius
+    );
+    let altitudeScale = 1.0 + viewerAltitude / NORMAL_MAP_DISTANCE_ALTITUDE_SCALE;
+    let normalDistance = min(NORMAL_MAP_DISTANCE_MAX, NORMAL_MAP_DISTANCE_BASE * altitudeScale);
+    let fadeEnd = normalDistance + NORMAL_MAP_DISTANCE_FADE;
+    return 1.0 - smoothstep(normalDistance, fadeEnd, input.vDistanceToCamera);
 }
 
 fn sampleMicroTextureWithSplat(
@@ -1770,43 +2081,113 @@ fn sampleMicroTextureWithSplat(
 ) -> vec4<f32> {
     let worldTileCoord = floor(input.vWorldPos);
     let local = fract(input.vWorldPos);
-    let activeCount = splatActiveCount(splat);
 
-    if (!splat.hasBoundary || activeCount <= 1) {
+    let dominantId = splatDominantTileId(splat);
+    let dominantW = splatDominantWeight(splat);
+
+    // Cheap fast path for almost-pure texels.
+    if (!splat.hasBoundary || dominantW >= SPLAT_DOMINANT_MIN_WEIGHT) {
         return sampleTileColor(
-            splat.tileIds.x, worldTileCoord, local,
+            dominantId, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
         );
     }
 
-    let top2Sum = max(splat.weights.x + splat.weights.y, 0.0001);
-    let primaryWeight = clamp(splat.weights.x / top2Sum, 0.0, 1.0);
-    if (primaryWeight > 0.995) {
-        return sampleTileColor(
+    if (USE_SPLAT_TOP2_FAST_PATH && splat.bilinearValid) {
+        var bestI: i32 = -1;
+        var secondI: i32 = -1;
+        var top2Sum = 0.0;
+        if (findSplatTop2(splat, &bestI, &secondI, &top2Sum) && top2Sum >= SPLAT_TOP2_MIN_WEIGHT) {
+            let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+            let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+            let invTop2 = 1.0 / max(top2Sum, 0.0001);
+            let w1 = ws[bestI] * invTop2;
+            let w2 = ws[secondI] * invTop2;
+
+            let color1 = sampleTileColor(
+                ids[bestI], worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            let color2 = sampleTileColor(
+                ids[secondI], worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            return color1 * w1 + color2 * w2;
+        }
+    }
+
+    // Current live path: stable weighted multi-way blend.
+    var accum = vec4<f32>(0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let c = sampleTileColor(
             splat.tileIds.x, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
         );
+        accum = accum + c * splat.weights.x;
+        sum = sum + splat.weights.x;
     }
-    if (primaryWeight < 0.005) {
-        return sampleTileColor(
+
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let c = sampleTileColor(
             splat.tileIds.y, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
         );
+        accum = accum + c * splat.weights.y;
+        sum = sum + splat.weights.y;
     }
-    let color1 = sampleTileColor(
-        splat.tileIds.x, worldTileCoord, local,
+
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let c = sampleTileColor(
+            splat.tileIds.z, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let c = sampleTileColor(
+            splat.tileIds.w, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return sampleTileColor(
+            dominantId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+    }
+
+    return accum / sum;
+}
+
+fn sampleDebugNonResolvedMicro(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32
+) -> vec3<f32> {
+    let fallbackTileId = sampleChunkTileId(input, layer);
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+
+    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+        let splat = sampleSplatData(input, layer);
+        return sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splat
+        ).rgb;
+    }
+
+    return sampleTileColor(
+        fallbackTileId, worldTileCoord, local,
         activeSeason, ddx_vUv, ddy_vUv
-    );
-    let color2 = sampleTileColor(
-        splat.tileIds.y, worldTileCoord, local,
-        activeSeason, ddx_vUv, ddy_vUv
-    );
-    return blendTileColorsSplat(
-        color1, color2,
-        primaryWeight, 1.0 - primaryWeight,
-        splat.tileIds.x, splat.tileIds.y,
-        input.vWorldPos
-    );
+    ).rgb;
 }
 
 fn normalizeMacroTileId(tileId: f32) -> f32 {
@@ -1833,7 +2214,6 @@ fn sampleMacroTileColorBilinear(
 
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
-
 fn sampleMacroOverlaySplat(
     input: FragmentInput,
     activeSeason: i32,
@@ -1845,25 +2225,89 @@ fn sampleMacroOverlaySplat(
     let local = fract(macroWorld);
     let ddx_uv = dpdx(macroWorld);
     let ddy_uv = dpdy(macroWorld);
-    let activeCount = splatActiveCount(splat);
 
-    if (!splat.hasBoundary || activeCount <= 1) {
+    let dominantId = splatDominantTileId(splat);
+    let dominantW = splatDominantWeight(splat);
+
+    if (!splat.hasBoundary || dominantW >= SPLAT_DOMINANT_MIN_WEIGHT) {
         return sampleMacroOverlaySimplePrepared(
             macroWorld,
             local,
             activeSeason,
             ddx_uv,
             ddy_uv,
-            splat.tileIds.x
+            dominantId
         );
     }
 
-    let top2Sum = max(splat.weights.x + splat.weights.y, 0.0001);
-    let w1 = splat.weights.x / top2Sum;
-    let w2 = splat.weights.y / top2Sum;
-    let primary = sampleMacroTileColorBilinear(splat.tileIds.x, macroWorld, local, activeSeason, ddx_uv, ddy_uv);
-    let secondary = sampleMacroTileColorBilinear(splat.tileIds.y, macroWorld, local, activeSeason, ddx_uv, ddy_uv);
-    return primary * w1 + secondary * w2;
+    if (USE_SPLAT_TOP2_FAST_PATH && splat.bilinearValid) {
+        var bestI: i32 = -1;
+        var secondI: i32 = -1;
+        var top2Sum = 0.0;
+        if (findSplatTop2(splat, &bestI, &secondI, &top2Sum) && top2Sum >= SPLAT_TOP2_MIN_WEIGHT) {
+            let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+            let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+            let invTop2 = 1.0 / max(top2Sum, 0.0001);
+            let w1 = ws[bestI] * invTop2;
+            let w2 = ws[secondI] * invTop2;
+
+            let color1 = sampleMacroTileColorBilinear(
+                ids[bestI], macroWorld, local, activeSeason, ddx_uv, ddy_uv
+            );
+            let color2 = sampleMacroTileColorBilinear(
+                ids[secondI], macroWorld, local, activeSeason, ddx_uv, ddy_uv
+            );
+            return color1 * w1 + color2 * w2;
+        }
+    }
+
+    var accum = vec3<f32>(0.0, 0.0, 0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.x, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.x;
+        sum = sum + splat.weights.x;
+    }
+
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.y, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.y;
+        sum = sum + splat.weights.y;
+    }
+
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.z, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.w, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return sampleMacroOverlaySimplePrepared(
+            macroWorld,
+            local,
+            activeSeason,
+            ddx_uv,
+            ddy_uv,
+            dominantId
+        );
+    }
+
+    return accum / sum;
 }
 
 fn sampleMacroOverlaySimplePrepared(
@@ -1905,7 +2349,9 @@ fn computeMacroBlendStrength(
     layer: i32,
     macroAlpha: f32
 ) -> f32 {
-    let macroMask = sampleZoneMaskSmooth(input, layer);
+    // Use world-space noise instead of the per-chunk macroMaskTexture so the
+    // blend strength is continuous across chunk and LOD boundaries.
+    let macroMask = macroVariationNoise(input.vWorldPos);
     let flatBlend = smoothstep(0.15, 0.9, macroMask);
     let baseOpacity = clamp(fragUniforms.level2Blend, 0.0, 1.0);
     let alpha = clamp(macroAlpha, 0.0, 1.0);
@@ -1939,10 +2385,23 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let activeSeason = select(fragUniforms.nextSeason, fragUniforms.currentSeason, fragUniforms.seasonTransition < 0.5);
     let layer = i32(round(input.vLayer));
     let debugMode = fragUniforms.terrainDebugMode;
+    let layerViewMode = fragUniforms.terrainLayerViewMode;
+    let lodEdgeFade = clamp(input.vDebugSample.y, 0.0, 1.0);
+    let lodEdgeAmount = select(0.0, 1.0 - lodEdgeFade, ENABLE_ANY_LOD_EDGE_FADE);
 
     let segDims = vec2<f32>(fragUniforms.chunkWidth, fragUniforms.chunkHeight);
-    let ddx_vUv = dpdx(input.vUv) * segDims;
-    let ddy_vUv = dpdy(input.vUv) * segDims;
+    var ddx_vUv = dpdx(input.vUv) * segDims;
+    var ddy_vUv = dpdy(input.vUv) * segDims;
+    if (ENABLE_NEAR_MIP_SHARPEN) {
+        let sharpenFade = 1.0 - smoothstep(
+            NEAR_MIP_SHARPEN_FADE_START,
+            NEAR_MIP_SHARPEN_FADE_END,
+            input.vDistanceToCamera
+        );
+        let sharpenScale = mix(1.0, NEAR_MIP_SHARPEN_SCALE, sharpenFade);
+        ddx_vUv = ddx_vUv * sharpenScale;
+        ddy_vUv = ddy_vUv * sharpenScale;
+    }
 
     if (debugMode == 1) {
         let tileId = sampleChunkTileId(input, layer);
@@ -2131,6 +2590,64 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(mix(base, vec3<f32>(1.0), grid * 0.18), 1.0);
     }
+    if (debugMode == 35) {
+        return vec4<f32>(lodEdgeAmount, lodEdgeFade, 0.0, 1.0);
+    }
+    if (debugMode == 36) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColor(input, layer).rgb, 1.0);
+    }
+    if (debugMode == 37) {
+        let liveColor = sampleDebugNonResolvedMicro(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer
+        );
+        return vec4<f32>(liveColor, 1.0);
+    }
+    if (debugMode == 38) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let resolvedColor = sampleResolvedTerrainColor(input, layer).rgb;
+        let liveColor = sampleDebugNonResolvedMicro(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer
+        );
+        let delta = abs(resolvedColor - liveColor);
+        let heat = clamp(max(max(delta.r, delta.g), delta.b) * 5.0, 0.0, 1.0);
+        return vec4<f32>(heat, 1.0 - heat, 0.0, 1.0);
+    }
+    if (debugMode == 39) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let resolvedColor = sampleResolvedTerrainColor(input, layer).rgb;
+        let edgeDist = min(min(input.vUv.x, input.vUv.y), min(1.0 - input.vUv.x, 1.0 - input.vUv.y));
+        let grid = 1.0 - smoothstep(0.008, 0.025, edgeDist);
+        return vec4<f32>(mix(resolvedColor, vec3<f32>(1.0, 0.0, 1.0), grid * 0.65), 1.0);
+    }
+    if (debugMode == 40) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColorLevel(input, layer).rgb, 1.0);
+    }
+    if (debugMode == 41) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let implicitColor = sampleResolvedTerrainColorImplicit(input, layer).rgb;
+        let mip0Color = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        let delta = abs(implicitColor - mip0Color);
+        let heat = clamp(max(max(delta.r, delta.g), delta.b) * 8.0, 0.0, 1.0);
+        return vec4<f32>(heat, 1.0 - heat, 0.0, 1.0);
+    }
+    if (debugMode == 42) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColorNearest(input, layer).rgb, 1.0);
+    }
     if (debugMode == 99) {
         return vec4<f32>(1.0, 0.0, 1.0, 1.0);
     }
@@ -2201,8 +2718,10 @@ if (debugMode == 16) {
 
     if (debugMode == 22) {
         var worldNormal = normalize(input.vSphereDir);
-        if (ENABLE_NORMAL_MAP) {
-            worldNormal = calculateNormal(input, layer);
+        let normalMapBlend = computeNormalMapBlend(input);
+        if (normalMapBlend > 0.001) {
+            let detailNormal = calculateNormal(input, layer);
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
             if (dot(worldNormal, input.vSphereDir) < 0.0) { worldNormal = -worldNormal; }
         }
         let lightDir = normalize(fragUniforms.lightDirection);
@@ -2226,8 +2745,10 @@ if (debugMode == 16) {
 
     if (debugMode == 24) {
         var worldNormal = normalize(input.vSphereDir);
-        if (ENABLE_NORMAL_MAP) {
-            worldNormal = calculateNormal(input, layer);
+        let normalMapBlend = computeNormalMapBlend(input);
+        if (normalMapBlend > 0.001) {
+            let detailNormal = calculateNormal(input, layer);
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
             if (dot(worldNormal, input.vSphereDir) < 0.0) { worldNormal = -worldNormal; }
         }
         let lightDir = normalize(fragUniforms.lightDirection);
@@ -2244,6 +2765,8 @@ if (debugMode == 16) {
 
     var microSample: vec4<f32>;
     let nearToMidDetailFade = computeNearToMidDetailFade(input);
+    let lod0ResolvedColorFade = computeLod0ResolvedColorFade(input);
+    let lod0AOFade = computeLod0AOFade(input);
 
     let fallbackTileId = sampleChunkTileId(input, layer);
     let worldTileCoord = floor(input.vWorldPos);
@@ -2256,13 +2779,22 @@ if (debugMode == 16) {
     splatResult.hasBoundary = false;
     splatResult.bilinearValid = true;
     var dominantTileId = fallbackTileId;
-    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+    if (ENABLE_RESOLVED_COLOR) {
+        // Resolved-color path: one chunk-local prebaked color sample replaces
+        // runtime splat decoding plus repeated atlas sampling. Procedural detail
+        // can be layered on top later without bringing back atlas fan-out.
+        microSample = sampleResolvedTerrainColor(input, layer);
+    } else if (lod0ResolvedColorFade > 0.999) {
+        // This branch varies per fragment, so use explicit-level sampling.
+        // WGSL forbids derivative-taking textureSample in non-uniform control.
+        microSample = sampleResolvedTerrainColorLevel(input, layer);
+    } else if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
         splatResult = sampleSplatData(input, layer);
         let detailedMicro = sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
         );
         microSample = detailedMicro;
-        dominantTileId = splatResult.tileIds.x;
+       dominantTileId = splatDominantTileId(splatResult); 
 
         if (ENABLE_NEAR_TO_MID_FADE && nearToMidDetailFade < 0.999) {
             let coarseMicro = sampleTileColor(
@@ -2270,7 +2802,7 @@ if (debugMode == 16) {
                 activeSeason, ddx_vUv, ddy_vUv
             );
             microSample = mix(coarseMicro, detailedMicro, nearToMidDetailFade);
-            dominantTileId = select(fallbackTileId, splatResult.tileIds.x, nearToMidDetailFade > 0.5);
+dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearToMidDetailFade > 0.5);
         }
     } else {
         microSample = sampleTileColor(
@@ -2286,27 +2818,71 @@ if (debugMode == 16) {
     let microPatternStyle = getMicroPatternStyle(dominantTileId);
     var baseColor = microSample.rgb;
 
-    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD) {
+    if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+        let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
+    }
+    if (debugMode == 43) {
+        return vec4<f32>(baseColor, 1.0);
+    }
+
+    let macroForcedVisible = layerViewMode == 2;
+    let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
+    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
         var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
-        if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+        if (!ENABLE_RESOLVED_COLOR && ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
             let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);
             let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
             macroColor = mix(macroColor, detailedMacro, macroFade);
         }
-        let macroStrength = computeMacroBlendStrength(input, layer, 1.0);
-        baseColor = mix(baseColor, macroColor, macroStrength);
+        if (macroForcedVisible) {
+            baseColor = macroColor;
+        } else if (layerViewMode != 1) {
+            let macroStrength = computeMacroBlendStrength(input, layer, 1.0);
+            baseColor = mix(baseColor, macroColor, macroStrength);
+        }
+    }
+    if (debugMode == 44) {
+        return vec4<f32>(baseColor, 1.0);
     }
 
+    if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+        let resolvedEdgeColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        baseColor = mix(
+            baseColor,
+            resolvedEdgeColor,
+            clamp(lodEdgeAmount * LOD_EDGE_COLOR_STRENGTH, 0.0, 1.0)
+        );
+    }
     if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
     }
+    if (debugMode == 45) {
+        return vec4<f32>(baseColor, 1.0);
+    }
+    // NEAR PROCEDURAL DETAIL DISABLED FOR FPS A/B:
+    // This crevice/detail layer looked better but caused a large FPS drop on
+    // near terrain. Re-enable this block to test it again after optimizing or
+    // prebaking the detail path.
+    // if (ENABLE_NEAR_DETAIL) {
+    //     baseColor = applyNearProceduralDetail(baseColor, input.vWorldPos, input.vDistanceToCamera, microPatternStyle);
+    // }
 
     var finalColor = baseColor;
     var NdotL: f32 = 1.0;
     if (ENABLE_LIGHTING || ENABLE_AERIAL_PERSPECTIVE) {
         var worldNormal = normalize(input.vSphereDir);
-        if (ENABLE_NORMAL_MAP) {
-            worldNormal = calculateNormal(input, layer);
+        let normalMapBlend = computeNormalMapBlend(input);
+        if (normalMapBlend > 0.001) {
+            var detailNormal = calculateNormal(input, layer);
+            if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_NORMAL_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                detailNormal = normalize(mix(
+                    detailNormal,
+                    normalize(input.vSphereDir),
+                    clamp(lodEdgeAmount * LOD_EDGE_NORMAL_STRENGTH, 0.0, 1.0)
+                ));
+            }
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
         }
         if (dot(worldNormal, input.vSphereDir) < 0.0) {
             worldNormal = -worldNormal;
@@ -2339,11 +2915,28 @@ if (debugMode == 16) {
                 let softShadow = smoothstep(0.0, shadowSoftness, rawShadow);
                 shadowFactor = mix(minShadow, 1.0, softShadow);
             }
+            if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_SHADOW_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                shadowFactor = mix(
+                    shadowFactor,
+                    1.0,
+                    clamp(lodEdgeAmount * LOD_EDGE_SHADOW_STRENGTH, 0.0, 1.0)
+                );
+            }
 
             var aoAmbient: f32 = 1.0;
             var aoDirect:  f32 = 1.0;
             if (ENABLE_TERRAIN_AO) {
-                let ao = sampleTerrainAO(input, layer);
+                var ao = sampleTerrainAO(input, layer);
+                var aoNeutralFade = lod0AOFade;
+                if (ENABLE_LOD_EDGE_AO_FADE && LOD_EDGE_AO_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                    aoNeutralFade = max(
+                        aoNeutralFade,
+                        clamp(lodEdgeAmount * LOD_EDGE_AO_STRENGTH, 0.0, 1.0)
+                    );
+                }
+                if (aoNeutralFade > 0.0001) {
+                    ao = mix(ao, 1.0, clamp(aoNeutralFade, 0.0, 1.0));
+                }
                 let master = clamp(fragUniforms.terrainAOStrength, 0.0, 1.0);
                 aoAmbient = max(TERRAIN_AO_AMBIENT_FLOOR, mix(1.0, ao, master));
                 aoDirect = mix(
@@ -2355,6 +2948,12 @@ if (debugMode == 16) {
             finalColor = baseColor
                        * (ambient * aoAmbient + sunDiffuse * shadowFactor * aoDirect)
                        + clusteredLight;
+
+            // Night-visibility floor: ambient*AO*baseColor is too small to survive ACES
+            // tonemapping when the sun is below the horizon (pitch-black terrain).
+            // This albedo-scaled floor guarantees a minimum HDR signal (~0.045 for
+            // average grass) that maps to ~14% sRGB at exposure=0.75.
+            finalColor = max(finalColor, baseColor * 0.30);
         }
     }
 

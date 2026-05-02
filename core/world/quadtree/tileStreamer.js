@@ -195,6 +195,8 @@ const DEFAULT_TEXTURE_FORMATS = {
     macro: 'rgba8unorm',
     splatData: 'rgba8unorm',
     splatIndex: 'rgba8unorm',
+    splatValid: 'rgba8unorm',
+    resolvedColor: 'rgba8unorm',
     scatter: 'r8unorm'
 };
 
@@ -211,7 +213,7 @@ class TileArrayPool {
         this.freeLayers = [];
 
         // Which types get a mip chain. Default: any filterable type that
-        // isn't semantically discrete. In practice today: normal.
+        // isn't semantically discrete or already prebaked at chunk scale.
         // Caller can override explicitly.
         this.mipTypes = new Set(mipTypes || []);
         this.mipLevelCounts = new Map();   // type → mipLevelCount
@@ -226,7 +228,11 @@ class TileArrayPool {
             type === 'tile' ||
             type === 'scatter' ||
             type === 'splatData' ||
-            type === 'splatIndex';
+            type === 'splatIndex' ||
+            type === 'splatValid';
+        const neverMipmapByType = (type) =>
+            wantsNearestByType(type) ||
+            type === 'resolvedColor';
 
         const fullMipCount = Math.floor(Math.log2(tileSize)) + 1;
 
@@ -236,9 +242,11 @@ class TileArrayPool {
 
             // Auto-enable mips for filterable, non-discrete types when
             // caller didn't specify a mipTypes set.
+            const neverMipmap = neverMipmapByType(type);
+            if (neverMipmap) this.mipTypes.delete(type);
             const autoMip = mipTypes === null
-                && filterable && !wantsNearestByType(type);
-            const hasMips = autoMip || this.mipTypes.has(type);
+                && filterable && !neverMipmap;
+            const hasMips = !neverMipmap && (autoMip || this.mipTypes.has(type));
             const mipLevelCount = hasMips ? fullMipCount : 1;
             this.mipLevelCounts.set(type, mipLevelCount);
             if (hasMips) this.mipTypes.add(type);
@@ -330,7 +338,7 @@ class TileArrayPool {
                 encoder.copyTextureToTexture(
                     { texture: src },
                     { texture: dst, origin: { x: 0, y: 0, z: layer } },
-                    [this.tileSize, this.tileSize, 1]
+                    { width: this.tileSize, height: this.tileSize, depthOrArrayLayers: 1 }
                 );
             }
         }
@@ -383,7 +391,7 @@ class TileArrayPool {
             encoder.copyTextureToTexture(
                 { texture: src },
                 { texture: dst, origin: { x: 0, y: 0, z: layer } },
-                [this.tileSize, this.tileSize, 1]
+                { width: this.tileSize, height: this.tileSize, depthOrArrayLayers: 1 }
             );
         }
         this.device.queue.submit([encoder.finish()]);
@@ -497,6 +505,7 @@ export class TileStreamer {
         this._externalArrayTextures = null;
         this.terrainGenerator = terrainGenerator;
         this.quadtreeGPU = quadtreeGPU;
+        this.textureManager = options.textureManager ?? null;
         this._lastVisibleTilesList = null;  
         this.tileTextureSize = options.tileTextureSize ?? 1024;
         this.requiredTypes   = options.requiredTypes   ?? ['height', 'normal', 'tile'];
@@ -504,6 +513,9 @@ export class TileStreamer {
         this.streamedTypes = this.requiredTypes.slice();
         if (this.enableSplat && this.streamedTypes.includes('splatData') && !this.streamedTypes.includes('splatIndex')) {
             this.streamedTypes.push('splatIndex');
+        }
+        if (this.enableSplat && this.streamedTypes.includes('splatData') && !this.streamedTypes.includes('splatValid')) {
+            this.streamedTypes.push('splatValid');
         }
         this.textureFormats  = {
             ...DEFAULT_TEXTURE_FORMATS,
@@ -677,6 +689,9 @@ drainScatterCommitQueue() {
             textureSize:    this.tileTextureSize,
             requiredTypes:  this.streamedTypes,
             textureFormats: this.textureFormats,
+            textureManager: this.textureManager,
+            quadtreeMaxDepth: this.quadtreeGPU?.maxDepth,
+            maxGeomLOD: this.quadtreeGPU?.maxGeomLOD,
             enableSplat:    this.enableSplat,
             logStats:       this._logStatsEnabled
         });
@@ -2055,7 +2070,7 @@ markTilesVisible(tiles) {
         encoder.copyTextureToBuffer(
             { texture: texture, origin: { x: 0, y: 0, z: layer } },
             { buffer: staging, bytesPerRow: bytesPerRow },
-            [size, size, 1]
+            { width: size, height: size, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
         await this.device.queue.onSubmittedWorkDone();
@@ -2145,7 +2160,7 @@ markTilesVisible(tiles) {
             encoder.copyTextureToBuffer(
                 { texture, origin: { x, y, z: layer } },
                 { buffer: staging, bytesPerRow },
-                [1, 1, 1]
+                { width: 1, height: 1, depthOrArrayLayers: 1 }
             );
             this.device.queue.submit([encoder.finish()]);
             await this.device.queue.onSubmittedWorkDone();
@@ -2201,7 +2216,7 @@ markTilesVisible(tiles) {
             encoder.copyTextureToBuffer(
                 { texture, origin: { x, y, z: layer ?? 0 } },
                 { buffer: staging, bytesPerRow },
-                [1, 1, 1]
+                { width: 1, height: 1, depthOrArrayLayers: 1 }
             );
             this.device.queue.submit([encoder.finish()]);
             await this.device.queue.onSubmittedWorkDone();
@@ -2241,7 +2256,7 @@ markTilesVisible(tiles) {
         encoder.copyTextureToBuffer(
             { texture, origin: { x: 0, y: 0, z: layer ?? 0 } },
             { buffer: staging, bytesPerRow },
-            [copyWidth, copyHeight, 1]
+            { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 }
         );
         this.device.queue.submit([encoder.finish()]);
         await this.device.queue.onSubmittedWorkDone();

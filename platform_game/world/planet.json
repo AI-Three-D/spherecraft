@@ -1,0 +1,38 @@
+{
+  "_comment": "Platform_game planet & star system. atmosphereOptions update in real-time; other fields require regeneration.",
+  "name": "Frostspire",
+  "maxTerrainHeight": 8000,
+  "hasAtmosphere": true,
+  "atmosphereHeightRatio": 0.2,
+  "atmosphereOptions": {
+    "scaleHeightRayleighRatio": 0.1,
+    "scaleHeightMieRatio":      0.015,
+    "mieAnisotropy":            0.76,
+    "visualDensity":            0.45,
+    "sunIntensity":             18.0
+  },
+  "altitudeZones": {
+    "surface":    2500,
+    "low":        25000,
+    "transition": 100000,
+    "orbital":    400000
+  },
+  "macroTileSpan": 16,
+  "macroMaxLOD":   3,
+  "starSystem": {
+    "sunIntensity": 18,
+    "timeScale":    10
+  },
+  "spawn": {
+    "height":         2200,
+    "spawnOnSunSide": true,
+    "defaultX":       0,
+    "defaultY":       2200,
+    "defaultZ":       2200
+  },
+  "time": {
+    "dayDurationMs": 120000,
+    "startDay":      320,
+    "startHour":     9
+  }
+}

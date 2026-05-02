@@ -47,7 +47,18 @@ export class BaseWorldGenerator {
         
         this.splatConfig = {
             splatDensity: 4,
-            splatKernelSize: 5
+            splatKernelSize: 5,
+            transitionSharpness: 1.9,
+            transitionDominanceStart: 0.55,
+            transitionDominanceEnd: 0.9,
+            centerCategoryBias: 0.0,
+            transitionBreakupScale: 0.018,
+            transitionBreakupWarpScale: 0.055,
+            transitionBreakupWarpStrength: 0.65,
+            transitionBreakupStrength: 0.10,
+            chunkPaletteEnabled: true,
+            chunkPaletteMinCoverage: 0.9,
+            chunkPaletteBorderTexels: 2
         };
         
         this.modules = {

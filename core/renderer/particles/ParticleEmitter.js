@@ -7,12 +7,20 @@
 // The ParticleSystem compacts active emitters into a per-frame spawn table
 // consumed by a single sim dispatch.
 
-import { PARTICLE_EMITTER_PRESETS, PARTICLE_CONFIG } from
-    '../../../templates/configs/particleConfig.js';
+import {
+    PARTICLE_CONFIG,
+    PARTICLE_EMITTER_PRESETS,
+} from '../../../templates/configs/particleConfig.js';
 
 export class ParticleEmitter {
-    constructor({ position, preset = 'campfire', overrides = {} }) {
-        const presetDef = PARTICLE_EMITTER_PRESETS[preset];
+    constructor({
+        position,
+        preset = 'campfire',
+        overrides = {},
+        particleConfig = PARTICLE_CONFIG,
+        emitterPresets = PARTICLE_EMITTER_PRESETS,
+    }) {
+        const presetDef = emitterPresets[preset];
         if (!presetDef) {
             throw new Error(`ParticleEmitter: unknown preset "${preset}"`);
         }
@@ -33,7 +41,7 @@ export class ParticleEmitter {
         const rawWeights = this.typeIds.map((id) => {
             const fromPreset = presetDef.weights?.[id];
             if (typeof fromPreset === 'number') return fromPreset;
-            return PARTICLE_CONFIG[id]?.spawnWeight ?? 1.0;
+            return particleConfig[id]?.spawnWeight ?? 1.0;
         });
 
         const totalWeight = rawWeights.reduce((s, v) => s + v, 0) || 1.0;

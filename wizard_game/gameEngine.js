@@ -34,6 +34,7 @@ import {
 import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
 import { NightSkyGameConfig, getNightSkyDetailPreset, NightSkyDetailLevel } from '../templates/configs/nightSkyConfig.js';
 import { TILE_TYPES, TILE_CATEGORIES, NUM_TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../templates/configs/tileTypes.js';
+import { createTerrainThemeForPlanet } from './TerrainThemeFactory.js';
 import { createTerrainCommon } from '../templates/terrain-shaders/terrainCommon.wgsl.js';
 import { createSurfaceCommon } from '../templates/terrain-shaders/surfaceCommon.wgsl.js';
 import { createTerrainFeatureContinents } from '../templates/terrain-shaders/features/featureContinents.wgsl.js';
@@ -171,8 +172,8 @@ function updateCanvasResolution(canvas) {
     const displayHeight = canvas.clientHeight;
     const dpr = window.devicePixelRatio || 1;
 
-    const width = Math.floor(displayWidth * dpr);
-    const height = Math.floor(displayHeight * dpr);
+    const width = Math.max(1, Math.floor(displayWidth * dpr));
+    const height = Math.max(1, Math.floor(displayHeight * dpr));
 
     if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
@@ -209,7 +210,7 @@ export class GameEngine {
         this.textureCache = new TextureCache();
 
         // UI manager
-        this.ui = new GameUI();
+        this.ui = this._createGameUI();
 
         window.gameEngine = this;
 
@@ -220,6 +221,7 @@ export class GameEngine {
         this._lastUIUpdate = 0;
         this._uiUpdateIntervalMs = this.engineConfig.ui.updateIntervalMs;
         this._renderInFlight = false;
+        this._resizePending = false;
         this._initialLoadState = null;
     }
 
@@ -488,6 +490,26 @@ export class GameEngine {
             ...planetOptions,
             engineConfig: this.engineConfig
         });
+        this.terrainTheme = createTerrainThemeForPlanet(TERRAIN_THEME, this.planetConfig);
+
+        const worldAuthoringSummary = this.planetConfig?.worldAuthoring?.summary;
+        const shouldLogWorldAuthoring = !!worldAuthoringSummary && (
+            worldAuthoringSummary.biomeCount > 0 ||
+            worldAuthoringSummary.assetProfileCount > 0 ||
+            worldAuthoringSummary.tileCatalogTileCount > 0 ||
+            worldAuthoringSummary.unresolvedTileRefCount > 0 ||
+            worldAuthoringSummary.outOfTextureRangeTileRefCount > 0 ||
+            worldAuthoringSummary.unknownAssetBiomeRefCount > 0 ||
+            worldAuthoringSummary.tileCatalogWarningCount > 0
+        );
+        if (shouldLogWorldAuthoring) {
+            Logger.info(
+                `[GameEngine] Planet "${this.planetConfig.name}" authoring: ` +
+                `${worldAuthoringSummary.biomeCount} biomes, ` +
+                `${worldAuthoringSummary.assetProfileCount} asset profiles, ` +
+                `${worldAuthoringSummary.tileCatalogTileCount ?? 0} tile refs`
+            );
+        }
 
         this.altitudeZoneManager = new AltitudeZoneManager(this.planetConfig);
         this.planetConfig.altitudeZoneManager = this.altitudeZoneManager;
@@ -529,7 +551,8 @@ export class GameEngine {
             gpuQuadtree: this.engineConfig.gpuQuadtree,
             streamerTheme: STREAMER_THEME,
             nightSkyTheme: NIGHT_SKY_THEME,
-            terrainTheme: TERRAIN_THEME,
+            terrainTheme: this.terrainTheme,
+            particleAuthoring: this.gameDataConfig.particleAuthoring,
         });
         await this.renderer.initialize(this.planetConfig, this.sphericalMapper, {
             weatherConfig: {
@@ -551,10 +574,10 @@ await this.proceduralTextureGenerator.initialize();
 
 // ── Terrain texture atlas ─────────────────────────────────────────────
 this.textureManager = new TextureAtlasManager(false, gpuDevice, this.proceduralTextureGenerator, {
-    TILE_CONFIG,
+    TILE_CONFIG: this.planetConfig.tileConfig || TILE_CONFIG,
     TEXTURE_LEVELS,
     ATLAS_CONFIG,
-    TEXTURE_CONFIG,
+    TEXTURE_CONFIG: this.planetConfig.atlasConfig || TEXTURE_CONFIG,
     TextureConfigHelper,
     SEASONS,
     TILE_LAYER_HEIGHTS,
@@ -639,7 +662,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.textureCache,
             {
                 planetConfig: this.planetConfig,
-                terrainTheme: TERRAIN_THEME,
+                terrainTheme: this.terrainTheme,
             }
 
         );
@@ -748,6 +771,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         if (this.renderer?.isGPUQuadtreeActive()) {
             const { ActorManager } = await import('./actors/ActorManager.js');
+            this._actorManagerCtor = { ActorManager };
 
             const assetStreamer = this.renderer.assetStreamer || null;
             let treeDetailSystem = null;
@@ -763,7 +787,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 Logger.warn('[GameEngine] TreeDetailSystem NOT found — tree collision/nav disabled');
             }
 
-            this.actorManager = new ActorManager({
+            this.actorManager = this._createActorManager({
                 device: this.renderer.backend.device,
                 backend: this.renderer.backend,
                 planetConfig: this.planetConfig,
@@ -771,12 +795,15 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 tileStreamer: this.renderer.quadtreeTileManager?.tileStreamer,
                 engineConfig: this.engineConfig,
                 skinnedMeshRenderer: this.renderer.skinnedMeshRenderer,
+                genericMeshRenderer: this.renderer.genericMeshRenderer,
                 assetStreamer: assetStreamer,
                 treeDetailSystem: treeDetailSystem,
             });
             await this.actorManager.initialize();
+            const playerCharacterUrl = this.gameDataConfig?.playerCharacterUrl
+                ?? '../assets/characters/player.char.json';
             await this.actorManager.createPlayer(
-                '../assets/characters/player.char.json',
+                playerCharacterUrl,
                 { x: spawnX, y: spawnY, z: spawnZ }
             );
             this.renderer.setActorManager(this.actorManager);
@@ -786,46 +813,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             // position. The initial worldPos is a placeholder; the particle
             // system calls getActor() ~10 frames after registration to copy
             // the GPU-ground-snapped position.
-            if (this.renderer.particleSystem) {
-                const actorManager = this.actorManager;
-                const campfireEmitter = this.renderer.particleSystem.addCampfire(
-                    { x: spawnX, y: spawnY, z: spawnZ },
-                    {
-                        getActor: () => actorManager?.playerActor,
-                        snapSettleFrames: 30,
-                    }
-                );
-                this.renderer.particleSystem.addCampfireCoals(
-                    { x: spawnX, y: spawnY, z: spawnZ },
-                    {
-                        getActor: () => actorManager?.playerActor,
-                        snapSettleFrames: 30,
-                    }
-                );
-                Logger.info('[GameEngine] Campfire + coal emitters registered at spawn');
-
-                // Register campfire as a tracked distortion source so the haze
-                // follows the same ground-snapped anchor as the fire itself.
-                this.renderer.addDistortionSource({
-                    type: 'heatHaze',
-                    position: { x: spawnX, y: spawnY, z: spawnZ },
-                    getPosition: () => campfireEmitter?.position,
-                    distanceCutoff: this.engineConfig.rendering?.distortion?.sourceCutoffs?.campfire ?? 10.0,
-                });
-
-                // Keep a visible firefly swarm near the player for verification.
-                this.renderer.particleSystem.addFireflySwarm(
-                    { x: spawnX + 2, y: spawnY + 2, z: spawnZ + 2 },
-                    {
-                        swarmSize: 10,
-                        getActor: () => actorManager?.playerActor,
-                        snapSettleFrames: 30,
-                        followSideOffset: 2.5,
-                        followHeightOffset: 2.0,
-                    }
-                );
-                Logger.info('[GameEngine] Firefly swarm registered near player');
-            }
+            this._registerAmbiance({ spawnX, spawnY, spawnZ });
 
             // Wire click-to-move input
             this.canvas.addEventListener('click', (e) => {
@@ -836,17 +824,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                     y: e.offsetY * (window.devicePixelRatio || 1),
                 };
             });
-            try {
-                const { NPCManager } = await import('./actors/NPCManager.js');
-                const { DEFAULT_NPC_SPAWN_CONFIG } = await import('./actors/NPCSpawnConfig.js');
-
-                const npcManager = new NPCManager(this.actorManager, DEFAULT_NPC_SPAWN_CONFIG);
-                await npcManager.initialize();
-                this.actorManager.setNPCManager(npcManager);
-                Logger.info('[GameEngine] NPC spawning system initialized');
-            } catch (e) {
-                Logger.warn(`[GameEngine] NPC system init failed: ${e?.message || e}`);
-            }
+            await this._registerNPCs();
         }
         this._initialLoadState = this._createInitialLoadState();
         Logger.info('[GameEngine] Initialization complete');
@@ -1099,6 +1077,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         if (!this.isGameActive) return;
         if (this._renderInFlight) return;
 
+        if (this._resizePending) {
+            this._resizePending = false;
+            this.handleResize();
+        }
+
         this._renderInFlight = true;
         const clampedDelta = Math.min(Math.max(Number.isFinite(deltaTime) ? deltaTime : 0, 0), 0.1);
         const terrainSnapshotFrozen = this.renderer?.isTerrainManualDiagnosticFrozen?.() === true;
@@ -1218,7 +1201,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     _resolveTerrainDebugModes(mode) {
-        if (mode >= 25 && mode <= 34) {
+        if (mode >= 25 && mode <= 45) {
             return { generatorMode: 0, fragmentMode: mode };
         }
         if (mode === 0) {
@@ -1240,6 +1223,17 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             32: 'Splat Bilinear Valid',
             33: 'Fallback / Stitch Risk',
             34: 'Atlas Bleed Risk',
+            35: 'LOD Edge Fade',
+            36: 'Resolved Color',
+            37: 'Non-Resolved Color',
+            38: 'Resolved vs Non-Resolved',
+            39: 'Resolved Color + Chunk Grid',
+            40: 'Resolved Color Mip0',
+            41: 'Resolved Implicit vs Mip0',
+            42: 'Resolved Nearest Mip0',
+            43: 'Base Before Macro',
+            44: 'Base After Macro',
+            45: 'Final Albedo Before Lighting',
             99: 'Fragment Test'
         };
         return names[mode] ?? 'Debug';
@@ -1254,21 +1248,31 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     handleResize() {
+        if (this._renderInFlight) {
+            this._resizePending = true;
+            return;
+        }
+
         const result = updateCanvasResolution(this.canvas);
 
         if (result.changed) {
-            if (this.renderer && this.renderer.backend) {
-                this.renderer.backend.setViewport(0, 0, result.width, result.height);
-            }
+            this._applyResize(result.width, result.height);
+        }
+    }
 
-            if (this.camera) {
-                this.camera.aspect = result.width / result.height;
+    _applyResize(width, height) {
+        const safeWidth = Math.max(1, Math.floor(width));
+        const safeHeight = Math.max(1, Math.floor(height));
+        const aspect = safeWidth / safeHeight;
 
-                if (this.renderer && this.renderer.camera) {
-                    this.renderer.camera.aspect = result.width / result.height;
-                    this.renderer._updateCameraMatrices();
-                }
-            }
+        if (this.camera) {
+            this.camera.aspect = aspect;
+        }
+
+        if (this.renderer?.handleResize) {
+            this.renderer.handleResize(safeWidth, safeHeight);
+        } else if (this.renderer?.backend) {
+            this.renderer.backend.setViewport(0, 0, safeWidth, safeHeight);
         }
     }
 
@@ -1282,6 +1286,125 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         if (!this.planetConfig) {
             return;
         }
+    }
+
+    // ── Game-specific overridable hooks ────────────────────────────────
+    // These exist so subclasses (platform_game, future games) can opt out
+    // of wizard_game ambiance without forking the entire engine shell.
+
+    /** Build the HUD. Subclasses return their own UI implementation. */
+    _createGameUI() {
+        return new GameUI();
+    }
+
+    /**
+     * Register per-spawn ambient effects (campfire, fireflies, distortion).
+     * Wizard_game default: the campfire + firefly package the player needs
+     * to survive the night. Subclasses can override to return a no-op.
+     */
+    _registerAmbiance({ spawnX, spawnY, spawnZ }) {
+        if (!this.renderer?.particleSystem) return;
+        const actorManager = this.actorManager;
+        const campfireEmitter = this.renderer.particleSystem.addCampfire(
+            { x: spawnX, y: spawnY, z: spawnZ },
+            { getActor: () => actorManager?.playerActor, snapSettleFrames: 30 }
+        );
+        this.renderer.particleSystem.addCampfireCoals(
+            { x: spawnX, y: spawnY, z: spawnZ },
+            { getActor: () => actorManager?.playerActor, snapSettleFrames: 30 }
+        );
+        Logger.info('[GameEngine] Campfire + coal emitters registered at spawn');
+
+        this.renderer.addDistortionSource({
+            type: 'heatHaze',
+            position: { x: spawnX, y: spawnY, z: spawnZ },
+            getPosition: () => campfireEmitter?.position,
+            distanceCutoff: this.engineConfig.rendering?.distortion?.sourceCutoffs?.campfire ?? 10.0,
+        });
+
+        const leafFall = this.gameDataConfig.particleAuthoring?.ambientEmitters?.leafFall;
+        const leafEmitters = leafFall?.enabled !== false && Array.isArray(leafFall?.emitters)
+            ? leafFall.emitters
+            : [];
+        const getActor = () => actorManager?.playerActor;
+        if (leafFall?.enabled !== false && leafFall?.source === 'detailed_leaf_anchors') {
+            const assetStreamer = this.renderer.assetStreamer || null;
+            const treeDetailSystem = assetStreamer?.getTreeDetailSystem?.()
+                ?? assetStreamer?._treeDetailSystem
+                ?? null;
+            const templateLibrary = assetStreamer?.getTreeTemplateLibrary?.()
+                ?? assetStreamer?._templateLibrary
+                ?? null;
+            this.renderer.particleSystem.setLeafAnchorSource({
+                treeDetailSystem,
+                templateLibrary,
+                config: leafFall.anchorSelection,
+            });
+            Logger.info(
+                `[GameEngine] Leaf fall registered from particle authoring ` +
+                `(source=detailed_leaf_anchors, maxEmitters=${leafFall.anchorSelection?.maxEmitters ?? 0})`
+            );
+        } else {
+            for (const off of leafEmitters) {
+                this.renderer.particleSystem.addLeafEmitter(
+                    { x: spawnX, y: spawnY, z: spawnZ },
+                    {
+                        getActor,
+                        snapSettleFrames: 30,
+                        surfaceOffset: off,
+                        heightOffset: off.heightOffset,
+                        spawnBudgetPerFrame: off.spawnBudgetPerFrame,
+                    }
+                );
+            }
+        }
+        if (leafFall?.source !== 'detailed_leaf_anchors' && leafEmitters.length > 0) {
+            Logger.info(
+                `[GameEngine] Leaf emitters registered from particle authoring ` +
+                `(${leafEmitters.length}, source=${leafFall?.source ?? 'spawn_offsets'})`
+            );
+        }
+
+        this.renderer.particleSystem.addFireflySwarm(
+            { x: spawnX + 2, y: spawnY + 2, z: spawnZ + 2 },
+            {
+                swarmSize: 10,
+                getActor: () => actorManager?.playerActor,
+                snapSettleFrames: 30,
+                followSideOffset: 2.5,
+                followHeightOffset: 2.0,
+            }
+        );
+        Logger.info('[GameEngine] Firefly swarm registered near player');
+    }
+
+    /** Register NPC manager. Subclasses can override to skip or plug in their own. */
+    async _registerNPCs() {
+        try {
+            const { NPCManager } = await import('./actors/NPCManager.js');
+            const { DEFAULT_NPC_SPAWN_CONFIG } = await import('./actors/NPCSpawnConfig.js');
+            const npcManager = new NPCManager(this.actorManager, DEFAULT_NPC_SPAWN_CONFIG);
+            await npcManager.initialize();
+            this.actorManager.setNPCManager(npcManager);
+            Logger.info('[GameEngine] NPC spawning system initialized');
+        } catch (e) {
+            Logger.warn(`[GameEngine] NPC system init failed: ${e?.message || e}`);
+        }
+    }
+
+    /**
+     * Overridable hook — subclasses (e.g. platform_game) return a custom
+     * ActorManager (with their own player controller + rendering).
+     * Must be synchronous; gets all the wiring as an options object.
+     */
+    _createActorManager(options) {
+        const { ActorManager } = this._actorManagerCtor ?? {};
+        if (!ActorManager) {
+            // The default path dynamically imports ActorManager above and
+            // captures the ctor here before this hook is called.
+            throw new Error('_createActorManager: no ActorManager ctor captured');
+        }
+        return new ActorManager(options);
     }
 }
 

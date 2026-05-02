@@ -83,6 +83,7 @@ export class UniformManager {
             scaleHeight: 1200,
             color: new Color(0.7, 0.8, 1.0)
         };
+        this._localFogDensityBoost = 0.0;
         this._weatherFogMultiplier = 1.0;
         this._currentLighting = {
             sunIntensity: 1.0,
@@ -99,9 +100,9 @@ export class UniformManager {
             moonNormalizationIntensity: 0.15
         };
         this.fogTuning = {
-            densityMultiplier: 0.55,
-            maxBaseDensity: 0.0007,
-            dayDensityScale: 1.0,
+            densityMultiplier: 0.40,
+            maxBaseDensity: 0.00055,
+            dayDensityScale: 0.85,
             nightDensityScale: 0.35,
             minBrightness: 0.03,
             maxBrightness: 0.78,
@@ -226,11 +227,15 @@ export class UniformManager {
         const densityScale =
             this.fogTuning.nightDensityScale +
             (this.fogTuning.dayDensityScale - this.fogTuning.nightDensityScale) * densityLight;
-        this.fogParams.density =
+        const atmosphericDensity =
             this.fogParams.baseDensity *
             this._weatherFogMultiplier *
             densityScale *
             Math.exp(-altitude / scaleHeight);
+        this.fogParams.density = Math.min(
+            this.fogTuning.maxBaseDensity,
+            atmosphericDensity + this._localFogDensityBoost
+        );
 
         this.uniforms.fogDensity.value = this.fogParams.density;
         this.uniforms.fogScaleHeight.value = this.fogParams.scaleHeight;
@@ -250,6 +255,15 @@ export class UniformManager {
         const fade = Math.min(1, altitude / atmoHeight);
         baseColor.lerp(new Color(0, 0, 0), fade);
         this.uniforms.fogColor.value.copy(baseColor);
+    }
+
+    setLocalFogDensityBoost(boost = 0) {
+        const next = Math.max(0, Number.isFinite(boost) ? boost : 0);
+        if (Math.abs(next - this._localFogDensityBoost) < 1e-7) return;
+        this._localFogDensityBoost = next;
+        if (this.currentPlanetConfig) {
+            this.updateFogParams(this.uniforms.viewerAltitude.value, this.currentPlanetConfig.atmosphereSettings);
+        }
     }
 
     updateFromPlanetConfig(planetConfig) {
@@ -359,10 +373,12 @@ export class UniformManager {
             u.currentWeather.value = this._encodeWeather(environmentState.currentWeather);
         }
 
-        this._weatherFogMultiplier = this._getWeatherFogMultiplier(
-            environmentState.currentWeather,
-            environmentState.weatherIntensity
-        );
+        this._weatherFogMultiplier = Number.isFinite(environmentState.weatherFogMultiplier)
+            ? Math.max(0, environmentState.weatherFogMultiplier)
+            : this._getWeatherFogMultiplier(
+                environmentState.currentWeather,
+                environmentState.weatherIntensity
+            );
 
         if (this.currentPlanetConfig) {
             this.updateFogParams(this.uniforms.viewerAltitude.value, this.currentPlanetConfig.atmosphereSettings);
@@ -509,16 +525,21 @@ export class UniformManager {
 
     _updateAmbientFromAtmosphere(lighting) {
         const rayleigh = this.uniforms.atmosphereRayleighScattering?.value;
+        const nightSkyColor = new Color(0.25, 0.30, 0.45); // cool deep-blue for starlit nights
         const baseColor = rayleigh
-            ? new Color(
-                rayleigh.x,
-                rayleigh.y,
-                rayleigh.z
-            )
+            ? new Color(rayleigh.x, rayleigh.y, rayleigh.z)
             : new Color(0.4, 0.4, 0.5);
-        const maxC = Math.max(baseColor.r, baseColor.g, baseColor.b, 1e-6);
-        baseColor.multiplyScalar(1 / maxC);
-    
+        const maxC = Math.max(baseColor.r, baseColor.g, baseColor.b, 0);
+        if (maxC < 0.001) {
+            // Rayleigh scattering is essentially zero (no sun) — use night-sky tint
+            baseColor.copy(nightSkyColor);
+        } else {
+            baseColor.multiplyScalar(1 / maxC);
+            // Blend toward night-sky color as the Rayleigh signal fades out
+            const nightBlend = Math.max(0, 1 - maxC / 0.001);
+            if (nightBlend > 0) baseColor.lerp(nightSkyColor, nightBlend);
+        }
+
         const sunTint = lighting?.sunColor || new Color(1, 1, 1);
         baseColor.lerp(sunTint, 0.15);
 

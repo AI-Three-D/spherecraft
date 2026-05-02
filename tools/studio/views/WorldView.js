@@ -5,7 +5,7 @@
  * parameter sliders is shown, but the viewport is empty. This is useful for
  * inspecting / editing world JSON configs without running the engine.
  *
- * For a live-rendering world view, see wizard_game/WorldEditorView.js.
+ * For a live-rendering authoring view, subclass WorldAuthoringView.
  */
 
 import { WorldViewBase } from './WorldViewBase.js';

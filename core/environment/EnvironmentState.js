@@ -13,6 +13,14 @@ export class EnvironmentState {
         // 'clear', 'partly_cloudy', 'cloudy', 'overcast', 'rain', 'storm', 'foggy'
         this.currentWeather = 'clear'; 
         this.weatherIntensity = 0.0; // 0.0 to 1.0
+        this.precipitationIntensity = 0.0;
+        this.weatherFogMultiplier = 1.0;
+        this.weatherEffect = null;
+        this.rainParticles = {
+            enabled: false,
+            intensity: 0.0,
+            spawnBudgetPerFrame: 0
+        };
         
         // --- Visual State ---
         this.cloudCoverage = 0.0;

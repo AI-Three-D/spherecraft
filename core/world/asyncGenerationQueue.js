@@ -5,7 +5,7 @@ export class AsyncGenerationQueue {
         timeBudgetMs = 20,
         maxQueueSize = 4096,
         minStartIntervalMs = 0,
-        shouldDrop = null          // NEW: (entry) => boolean
+        shouldDrop = null
     } = {}) {
         this.pending = new Map();
         this.queue = [];
@@ -16,8 +16,8 @@ export class AsyncGenerationQueue {
         this.maxQueueSize = maxQueueSize;
         this.minStartIntervalMs = minStartIntervalMs;
         this._lastStartTime = -Infinity;
-        this._shouldDrop = shouldDrop;  // NEW
-        this.droppedCount = 0;          // NEW: diagnostic counter
+        this._shouldDrop = shouldDrop;
+        this.droppedCount = 0;
     }
 
     request(key, priority, task, canStart = null) {

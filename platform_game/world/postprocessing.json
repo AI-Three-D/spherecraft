@@ -1,0 +1,16 @@
+{
+  "_comment": "Platform_game post-processing. All settings here update in real-time.",
+  "enabled": true,
+  "exposure": 0.78,
+  "bloom": {
+    "enabled":     true,
+    "threshold":   1.0,
+    "knee":        0.25,
+    "intensity":   0.32,
+    "blendFactor": 0.65
+  },
+  "distortion": {
+    "enabled":  true,
+    "strength": 0.25
+  }
+}

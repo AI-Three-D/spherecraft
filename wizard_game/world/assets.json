@@ -1,0 +1,41 @@
+{
+  "_comment": "Asset distribution profiles linked to biome definitions. References template-backed archetype/species definitions.",
+  "profiles": [
+    {
+      "id": "temperate-trees",
+      "displayName": "Temperate Trees",
+      "biomeIds": ["grass", "forest"],
+      "archetypeRef": "tree",
+      "density": 0.8,
+      "probability": 0.9,
+      "variation": 0.3
+    },
+    {
+      "id": "forest-undergrowth",
+      "displayName": "Forest Undergrowth",
+      "biomeIds": ["forest"],
+      "archetypeRef": "fern",
+      "density": 0.6,
+      "probability": 0.7,
+      "variation": 0.4
+    },
+    {
+      "id": "desert-rocks",
+      "displayName": "Desert Rocks",
+      "biomeIds": ["desert"],
+      "archetypeRef": "rock",
+      "density": 0.3,
+      "probability": 0.5,
+      "variation": 0.5
+    },
+    {
+      "id": "grassland-flowers",
+      "displayName": "Grassland Flowers",
+      "biomeIds": ["grass"],
+      "archetypeRef": "mushroom",
+      "density": 0.2,
+      "probability": 0.4,
+      "variation": 0.6
+    }
+  ]
+}
