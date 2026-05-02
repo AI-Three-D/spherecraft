@@ -29,7 +29,7 @@ function getLayerConfigHash(layers) {
 }
 
 export class TextureAtlasManager {
-    constructor(enableDebug = false, gpuDevice = null, proceduralTextureGenerator = null, tileTheme = null) {
+    constructor(_enableDebug = false, gpuDevice = null, proceduralTextureGenerator = null, tileTheme = null) {
         if (!tileTheme) {
             throw new Error('TextureAtlasManager requires tileTheme (TILE_CONFIG, TEXTURE_LEVELS, ATLAS_CONFIG, TEXTURE_CONFIG, TextureConfigHelper, SEASONS, TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES)');
         }
@@ -273,7 +273,7 @@ export class TextureAtlasManager {
         ctx.fillRect(x + textureSize, y + textureSize, padding, padding);
     }
 
-    addTextureToAtlas(level, image, index, texturePath = null) {
+    addTextureToAtlas(level, image, index, _texturePath = null) {
         const atlas = this.atlases.get(level);
         const layout = atlas.layout;
         const padding = layout.padding !== undefined ? layout.padding : this.PADDING;
@@ -293,7 +293,7 @@ export class TextureAtlasManager {
         this.extendPadding(atlas.context, x, y, layout.textureSize, padding);
     }
 
-    createPlaceholderTexture(level, index, texturePath) {
+    createPlaceholderTexture(level, index, _texturePath) {
         const atlas = this.atlases.get(level);
         const layout = atlas.layout;
 
@@ -352,7 +352,7 @@ export class TextureAtlasManager {
     }
 
     updateSeasonData(gameTime) {
-        const [daysUntilNext, newSeason] = gameTime.getRunningSeasonInfo();
+        const [, newSeason] = gameTime.getRunningSeasonInfo();
 
         if (this.currentSeason !== newSeason) {
             this.currentSeason = newSeason;
@@ -399,85 +399,39 @@ export class TextureAtlasManager {
             throw new Error('[TextureAtlasManager] proceduralTextureGenerator not injected');
         }
     
-        // Deduplicate by layer-config hash
-        const hashToUniqueIndex = new Map();
-        const uniqueVariants = [];
-        const variantIndexToUniqueIndex = new Map();
         const startIndex = hasTransparent ? 1 : 0;
-    
-        for (let i = 0; i < variants.length; i++) {
-            const variant = variants[i];
-            const hash = getLayerConfigHash(variant.layers);
-            let uniqueIdx = hashToUniqueIndex.get(hash);
-            if (uniqueIdx === undefined) {
-                uniqueIdx = uniqueVariants.length + startIndex;
-                hashToUniqueIndex.set(hash, uniqueIdx);
-                uniqueVariants.push({
-                    hash,
-                    layers: variant.layers,
-                    firstTileType: variant.tileType,
-                    firstSeason: variant.season,
-                    firstVariant: variant.variant
-                });
-            }
-            variantIndexToUniqueIndex.set(i, uniqueIdx);
-        }
+        const { uniqueVariants, variantIndexToUniqueIndex } =
+            this._dedupeProceduralVariants(variants, startIndex);
     
         const textureSize = config.proceduralTextureSize || config.textureSize;
         const totalLayers = uniqueVariants.length + startIndex;
         const bytesPerLayer = textureSize * textureSize * 4; // RGBA8
         const allLayerData = new Uint8Array(totalLayers * bytesPerLayer);
     
-        // Layer 0: solid grey placeholder (transparent tile stand-in)
         if (hasTransparent) {
-            for (let i = 0; i < textureSize * textureSize; i++) {
-                allLayerData[i * 4 + 0] = 128;
-                allLayerData[i * 4 + 1] = 128;
-                allLayerData[i * 4 + 2] = 128;
-                allLayerData[i * 4 + 3] = 255;
-            }
+            this._fillTransparentPlaceholderLayer(allLayerData, textureSize);
         }
     
-        // Size the shared generator once for this atlas level.
-        gen.setSize(textureSize, textureSize);
-        if (config.seamless && typeof gen.configureSeamless === 'function') {
-            gen.configureSeamless(config.seamless);
-        }
+        this._configureProceduralGenerator(gen, config, textureSize);
     
-        // Generate each unique variant into its layer slot.
         for (let i = 0; i < uniqueVariants.length; i++) {
             const atlasIndex = i + startIndex;
             const layerOffset = atlasIndex * bytesPerLayer;
             try {
-                const layers = uniqueVariants[i].layers;
-                if (!Array.isArray(layers)) {
-                    this._fillProceduralFallback(allLayerData, layerOffset, textureSize, atlasIndex);
-                    continue;
-                }
-    
-                gen.clearLayers();
-                layers.forEach(layerConfig => gen.addLayer(layerConfig));
-                const textureCanvas = await gen.generate();
-    
-                // Copy canvas pixels into the layer buffer.
-                const copyCanvas = document.createElement('canvas');
-                copyCanvas.width = textureSize;
-                copyCanvas.height = textureSize;
-                const copyCtx = copyCanvas.getContext('2d');
-                copyCtx.drawImage(textureCanvas, 0, 0);
-                const imageData = copyCtx.getImageData(0, 0, textureSize, textureSize);
-                allLayerData.set(new Uint8Array(imageData.data.buffer), layerOffset);
-            } catch (error) {
+                await this._writeProceduralVariantLayer(
+                    gen,
+                    uniqueVariants[i].layers,
+                    allLayerData,
+                    layerOffset,
+                    textureSize,
+                    atlasIndex
+                );
+            } catch {
                 this._fillProceduralFallback(allLayerData, layerOffset, textureSize, atlasIndex);
             }
         }
     
-        // Seasonal map: key → layer index
-        for (let i = 0; i < variants.length; i++) {
-            const { tileType, season, variant } = variants[i];
-            const key = `${tileType}:${season}:${variant}`;
-            atlas.seasonalTextureMap.set(key, variantIndexToUniqueIndex.get(i));
-        }
+        this._populateSeasonalTextureMap(atlas, variants, variantIndexToUniqueIndex);
     
         // Create array texture — each layer is independent, mipmaps per layer.
         atlas.texture = new Texture({
@@ -499,6 +453,75 @@ export class TextureAtlasManager {
         }
     
         return atlas.texture;
+    }
+
+    _dedupeProceduralVariants(variants, startIndex) {
+        const hashToUniqueIndex = new Map();
+        const uniqueVariants = [];
+        const variantIndexToUniqueIndex = new Map();
+
+        for (let i = 0; i < variants.length; i++) {
+            const variant = variants[i];
+            const hash = getLayerConfigHash(variant.layers);
+            let uniqueIdx = hashToUniqueIndex.get(hash);
+            if (uniqueIdx === undefined) {
+                uniqueIdx = uniqueVariants.length + startIndex;
+                hashToUniqueIndex.set(hash, uniqueIdx);
+                uniqueVariants.push({
+                    hash,
+                    layers: variant.layers,
+                    firstTileType: variant.tileType,
+                    firstSeason: variant.season,
+                    firstVariant: variant.variant
+                });
+            }
+            variantIndexToUniqueIndex.set(i, uniqueIdx);
+        }
+
+        return { uniqueVariants, variantIndexToUniqueIndex };
+    }
+
+    _fillTransparentPlaceholderLayer(buffer, textureSize) {
+        for (let i = 0; i < textureSize * textureSize; i++) {
+            buffer[i * 4 + 0] = 128;
+            buffer[i * 4 + 1] = 128;
+            buffer[i * 4 + 2] = 128;
+            buffer[i * 4 + 3] = 255;
+        }
+    }
+
+    _configureProceduralGenerator(generator, config, textureSize) {
+        generator.setSize(textureSize, textureSize);
+        if (config.seamless && typeof generator.configureSeamless === 'function') {
+            generator.configureSeamless(config.seamless);
+        }
+    }
+
+    async _writeProceduralVariantLayer(generator, layers, buffer, layerOffset, textureSize, atlasIndex) {
+        if (!Array.isArray(layers)) {
+            this._fillProceduralFallback(buffer, layerOffset, textureSize, atlasIndex);
+            return;
+        }
+
+        generator.clearLayers();
+        layers.forEach(layerConfig => generator.addLayer(layerConfig));
+        const textureCanvas = await generator.generate();
+
+        const copyCanvas = document.createElement('canvas');
+        copyCanvas.width = textureSize;
+        copyCanvas.height = textureSize;
+        const copyCtx = copyCanvas.getContext('2d');
+        copyCtx.drawImage(textureCanvas, 0, 0);
+        const imageData = copyCtx.getImageData(0, 0, textureSize, textureSize);
+        buffer.set(new Uint8Array(imageData.data.buffer), layerOffset);
+    }
+
+    _populateSeasonalTextureMap(atlas, variants, variantIndexToUniqueIndex) {
+        for (let i = 0; i < variants.length; i++) {
+            const { tileType, season, variant } = variants[i];
+            const key = `${tileType}:${season}:${variant}`;
+            atlas.seasonalTextureMap.set(key, variantIndexToUniqueIndex.get(i));
+        }
     }
     
     _fillProceduralFallback(buffer, offset, size, index) {
@@ -642,8 +665,7 @@ export class TextureAtlasManager {
                 this.addTextureToAtlas(level, img, currentIndex, texturePath);
                 atlas.textureMap.set(texturePath, currentIndex);
                 currentIndex++;
-            } catch (error) {
-                
+            } catch {
                 this.createPlaceholderTexture(level, currentIndex, texturePath);
                 atlas.textureMap.set(texturePath, currentIndex);
                 currentIndex++;

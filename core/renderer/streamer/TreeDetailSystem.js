@@ -670,7 +670,7 @@ export class TreeDetailSystem {
             this._dedupReadbackPending = false;
         }).catch((err) => {
             Logger.warn(`[TreeDetailSystem] dedup readback failed: ${err?.message || err}`);
-            try { this._dedupReadbackBuffer?.unmap(); } catch (_) { /* ignore cleanup failure */ }
+            try { this._dedupReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
             this._dedupReadbackQueued = false;
             this._dedupReadbackPending = false;
         });

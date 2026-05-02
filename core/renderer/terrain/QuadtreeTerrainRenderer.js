@@ -254,12 +254,12 @@ export class QuadtreeTerrainRenderer {
         for (const mat of this._materials.values()) {
             try {
                 this.backend?.destroyMaterial?.(mat);
-            } catch (_) { /* ignore cleanup failure */ }
+            } catch { /* ignore cleanup failure */ }
         }
         for (const mat of this._overlayMaterials.values()) {
             try {
                 this.backend?.destroyMaterial?.(mat);
-            } catch (_) { /* ignore cleanup failure */ }
+            } catch { /* ignore cleanup failure */ }
         }
         this._materials.clear();
         this._overlayMaterials.clear();

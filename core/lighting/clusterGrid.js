@@ -69,7 +69,7 @@ export class ClusterGrid {
         }
     }
     
-    buildClusterAABBs(camera) {
+    buildClusterAABBs(_camera) {
         const tanHalfFov = Math.tan(MathUtils.degToRad(this.fieldOfView * 0.5));
         
         for (let z = 0; z < this.gridSizeZ; z++) {

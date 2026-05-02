@@ -975,7 +975,7 @@ _logTraversalSeeds(seeds, tag = "QT-Seeds") {
         let count;
         try {
             count = await this.readVisibleTileCount();
-        } catch (e) {
+        } catch {
             this._debugReadPending = false;
             return [];
         }

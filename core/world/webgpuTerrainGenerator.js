@@ -6,7 +6,7 @@ import { createSplatValidityComputeShader } from './shaders/webgpu/splatValidity
 import { createResolvedTerrainColorComputeShader } from './shaders/webgpu/resolvedTerrainColorCompute.wgsl.js';
 import { getPackedBiomeUniformByteSize, packBiomeUniformData } from './biomeRuntime.js';
 
-import { Texture, TextureFormat, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
+import { Texture, TextureFilter, gpuFormatIsFilterable, gpuFormatBytesPerTexel, gpuFormatToWrapperFormat, gpuFormatSampleType } from '../renderer/resources/texture.js';
 
 import { Logger } from '../../shared/Logger.js';
 import { clamp01, clampInt, clampByte } from '../../shared/math/index.js';
@@ -804,12 +804,12 @@ export class WebGPUTerrainGenerator {
                 } catch (err) {
                     Logger.warn(`${SPLAT_STEP_PREFIX} [SplatDebug] quadtree splat diagnostics failed: ${err?.message || err}`);
                 }
-                try { paddedTileMap.destroy(); } catch (_) { /* ignore cleanup failure */ }
-                try { splatPaletteTex.destroy(); } catch (_) { /* ignore cleanup failure */ }
+                try { paddedTileMap.destroy(); } catch { /* ignore cleanup failure */ }
+                try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ }
                 if (debugProbeTextures) {
-                    try { debugProbeTextures.constantWrite.destroy(); } catch (_) { /* ignore cleanup failure */ }
-                    try { debugProbeTextures.tileEcho.destroy(); } catch (_) { /* ignore cleanup failure */ }
-                    try { debugProbeTextures.categoryEcho.destroy(); } catch (_) { /* ignore cleanup failure */ }
+                    try { debugProbeTextures.constantWrite.destroy(); } catch { /* ignore cleanup failure */ }
+                    try { debugProbeTextures.tileEcho.destroy(); } catch { /* ignore cleanup failure */ }
+                    try { debugProbeTextures.categoryEcho.destroy(); } catch { /* ignore cleanup failure */ }
                 }
             })
             .catch(() => {});
@@ -2804,7 +2804,7 @@ this.device.queue.submit([enc.finish()]);
         }
         this.device.queue.submit([enc.finish()]);
         this.device.queue.onSubmittedWorkDone()
-            .then(() => { try { splatPaletteTex.destroy(); } catch (_) { /* ignore cleanup failure */ } })
+            .then(() => { try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ } })
             .catch(() => {});
     }
 
@@ -2906,7 +2906,7 @@ this.device.queue.submit([enc.finish()]);
         }
         this.device.queue.submit([enc.finish()]);
         this.device.queue.onSubmittedWorkDone()
-            .then(() => { try { splatPaletteTex.destroy(); } catch (_) { /* ignore cleanup failure */ } })
+            .then(() => { try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ } })
             .catch(() => {});
 
         // ──────────────────────────────────────────────────────────────

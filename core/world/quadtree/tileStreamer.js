@@ -958,8 +958,8 @@ this._freshnessSkipCount = 0;
                 if (entry.framesRemaining > 0) continue;
                 this._pendingDestructions.splice(i, 1);
                 for (const tex of entry.textures) {
-                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch (_) { /* ignore cleanup failure */ }
-                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch (_) { /* ignore cleanup failure */ }
+                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch { /* ignore cleanup failure */ }
+                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch { /* ignore cleanup failure */ }
                 }
             }
         }
@@ -1139,7 +1139,7 @@ this._freshnessSkipCount = 0;
             // but this is a much smaller set and not per-tile)
             this._queueMissingParentsNumeric();
 
-        } catch (e) {
+        } catch {
             slot.state = 'idle';
         }
     }
@@ -2424,8 +2424,8 @@ markTilesVisible(tiles) {
         if (list.length) {
             if (!this.arrayPool) {
                 for (const tex of list) {
-                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch (_) { /* ignore cleanup failure */ }
-                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch (_) { /* ignore cleanup failure */ }
+                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch { /* ignore cleanup failure */ }
+                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch { /* ignore cleanup failure */ }
                 }
                 return;
             }

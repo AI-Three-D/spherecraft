@@ -2470,8 +2470,8 @@ getGroundFieldTexture() {
             this._producerDebugHasGroundPropSnapshot = false;
         }).catch((err) => {
             Logger.warn(`${this._logTag} [BakeDiag] readback failed: ${err?.message || err}`);
-            try { this._producerDebugPoolReadbackBuffer?.unmap(); } catch (_) { /* ignore cleanup failure */ }
-            try { this._producerDebugGroundPropReadbackBuffer?.unmap(); } catch (_) { /* ignore cleanup failure */ }
+            try { this._producerDebugPoolReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
+            try { this._producerDebugGroundPropReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
             this._producerDebugQueued = false;
             this._producerDebugPending = false;
             this._producerDebugHasGroundPropSnapshot = false;

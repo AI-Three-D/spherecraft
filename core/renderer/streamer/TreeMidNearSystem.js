@@ -979,7 +979,7 @@ export class TreeMidNearSystem {
             this._debugReadPending = false;
         }).catch((err) => {
             Logger.warn(`[Impostor][TreeMidNearSystem] Debug readback failed: ${err?.message || err}`);
-            try { this._debugReadbackBuffer.unmap(); } catch (_) { /* ignore cleanup failure */ }
+            try { this._debugReadbackBuffer.unmap(); } catch { /* ignore cleanup failure */ }
             this._debugReadPending = false;
         });
     }

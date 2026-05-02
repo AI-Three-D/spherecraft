@@ -261,7 +261,7 @@ export class LeafAnchorEmitterSource {
             this._pending = false;
         }).catch((err) => {
             Logger.warn(`[ParticleSystem] Leaf anchor readback failed: ${err?.message || err}`);
-            try { this._readbackBuffer?.unmap(); } catch (_) { /* already unmapped */ }
+            try { this._readbackBuffer?.unmap(); } catch { /* already unmapped */ }
             this._queued = false;
             this._pending = false;
         });

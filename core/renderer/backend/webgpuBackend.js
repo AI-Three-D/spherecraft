@@ -2,7 +2,7 @@
 // backend/webgpuBackend.js
 
 import { Backend } from './backend.js';
-import { TextureFormat, TextureFilter, TextureWrap, Texture } from '../resources/texture.js';
+import { TextureFormat } from '../resources/texture.js';
 import { Logger } from '../../../shared/Logger.js';
 import { gpuFormatSampleType } from '../resources/texture.js';
 export class WebGPUBackend extends Backend {
@@ -1513,7 +1513,7 @@ _createBindGroupsFromSpec(material, uniforms) {
                 if (!tex._gpuTexture[viewKey]) {
                     try {
                         tex._gpuTexture[viewKey] = tex._gpuTexture.texture.createView({ dimension: viewDimension });
-                    } catch (_) { /* ignore cleanup failure */ }
+                    } catch { /* ignore cleanup failure */ }
                 }
                 view = tex._gpuTexture[viewKey];
             }
@@ -1619,7 +1619,7 @@ _createOrbitalSphereBindGroups(material, uniforms) {
         if (!planetTex._gpuTexture._view_2d) {
             try {
                 planetTex._gpuTexture._view_2d = planetTex._gpuTexture.texture.createView({ dimension: '2d' });
-            } catch (e) { /* ignore optional failure */ }
+            } catch { /* ignore optional failure */ }
         }
         colorTextureView = planetTex._gpuTexture._view_2d;
     }
@@ -1632,7 +1632,7 @@ _createOrbitalSphereBindGroups(material, uniforms) {
         if (!normalTex._gpuTexture._view_2d) {
             try {
                 normalTex._gpuTexture._view_2d = normalTex._gpuTexture.texture.createView({ dimension: '2d' });
-            } catch (e) { /* ignore optional failure */ }
+            } catch { /* ignore optional failure */ }
         }
         normalTextureView = normalTex._gpuTexture._view_2d;
     }
@@ -1773,7 +1773,7 @@ _createTerrainBindGroups(material, uniforms, geometry) {
                         viewDesc.arrayLayerCount = 1;
                     }
                     tex._gpuTexture[viewKey] = tex._gpuTexture.texture.createView(viewDesc);
-                } catch (_) { /* ignore cleanup failure */ }
+                } catch { /* ignore cleanup failure */ }
             }
             if (tex._gpuTexture[viewKey]) return tex._gpuTexture[viewKey];
         }

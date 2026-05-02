@@ -1018,7 +1018,7 @@ export class TreeFarSystem {
             this._countReadbackPending = false;
         }).catch((err) => {
             farDbg(`GPU READBACK failed: ${err?.message || err}`);
-            try { this._countReadbackBuffer?.unmap(); } catch (_) { /* ignore cleanup failure */ }
+            try { this._countReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
             this._countReadbackQueued = false;
             this._countReadbackPending = false;
         });

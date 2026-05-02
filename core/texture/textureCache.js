@@ -3,8 +3,7 @@
 import { TextureAtlasKey } from '../world/textureAtlasKey.js';
 import { LODTextureAtlasKey } from '../world/lodTextureAtlasKey.js';
 import { gpuFormatIsFilterable, gpuFormatToWrapperFormat } from '../renderer/resources/texture.js';
-import { Texture, TextureFormat, TextureFilter } from '../renderer/resources/texture.js';
-import { MipmapGenerator } from './MipmapGenerator.js';
+import { Texture, TextureFilter } from '../renderer/resources/texture.js';
 class TextureArrayPool {
     constructor(device, slots, textureSize, format = 'rgba32float', type = null) {
         
@@ -67,7 +66,7 @@ class TextureArrayPool {
 
     destroy() {
         if (this.texture) {
-            try { this.texture.destroy(); } catch (_) { /* ignore cleanup failure */ }
+            try { this.texture.destroy(); } catch { /* ignore cleanup failure */ }
         }
         this.texture = null;
         this.wrapper = null;
@@ -330,7 +329,7 @@ export class TextureCache {
                     if (item.texture?.dispose) {
                         item.texture.dispose();
                     }
-                } catch (e) { /* ignore optional failure */ }
+                } catch { /* ignore optional failure */ }
             } else {
                 remaining.push(item);
             }
@@ -544,7 +543,7 @@ export class TextureCache {
             this.currentSizeBytes -= old.sizeBytes;
 
             if (old.arrayInfo?.release && !old.arrayInfo?.isPooled) {
-                try { old.arrayInfo.release(); } catch (_) { /* ignore cleanup failure */ }
+                try { old.arrayInfo.release(); } catch { /* ignore cleanup failure */ }
             }
 
             // Avoid destroying shared array textures (other slices may be in use)
@@ -1037,7 +1036,7 @@ export class TextureCache {
             const isSharedArray = entry.texture?._isArray && entry.arrayInfo;
 
             if (entry.arrayInfo?.release && !entry.arrayInfo?.isPooled) {
-                try { entry.arrayInfo.release(); } catch (_) { /* ignore cleanup failure */ }
+                try { entry.arrayInfo.release(); } catch { /* ignore cleanup failure */ }
             }
 
             if (!isSharedArray) {
@@ -1078,7 +1077,7 @@ export class TextureCache {
         for (const entry of this.cache.values()) {
             const isPooled = entry.arrayInfo?.isPooled;
             if (entry.arrayInfo?.release && !isPooled) {
-                try { entry.arrayInfo.release(); } catch (_) { /* ignore cleanup failure */ }
+                try { entry.arrayInfo.release(); } catch { /* ignore cleanup failure */ }
             }
 
             const isSharedArray = entry.texture?._isArray && entry.arrayInfo;
