@@ -1,0 +1,53 @@
+name: Static Analysis
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  eslint:
+    name: ESLint (reviewdog)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run ESLint via reviewdog
+        uses: reviewdog/action-eslint@v1
+        with:
+          # github-pr-review posts inline comments on the diff.
+          # Falls back to github-check for pushes to main (no PR context).
+          reporter: ${{ github.event_name == 'pull_request' && 'github-pr-review' || 'github-check' }}
+          eslint_flags: "."
+          fail_on_error: false
+        env:
+          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        # passWithNoTests is set in vitest.config.mjs — this won't fail when no tests exist yet
+        run: npm test

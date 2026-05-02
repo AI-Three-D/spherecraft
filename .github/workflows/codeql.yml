@@ -1,0 +1,35 @@
+name: CodeQL Security Analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Run weekly to catch newly discovered vulnerabilities in unchanged code
+  schedule:
+    - cron: "30 5 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+          # Use the security-and-quality query suite for broader coverage
+          queries: security-and-quality
+
+      # No build step needed for JavaScript — CodeQL scans source directly
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
