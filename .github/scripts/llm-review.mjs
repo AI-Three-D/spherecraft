@@ -2,7 +2,7 @@
 /**
  * LLM-based PR code review with inline diff comments.
  * Primary:  Gemini (free tier) — set GEMINI_API_KEY + optionally GEMINI_MODEL
- * Fallback: GitHub Models (gpt-4o-mini) — requires PAT with models:read as GH_MODELS_TOKEN
+ * Fallback: GitHub Models (gpt-4o)      — requires PAT with models:read as GH_MODELS_TOKEN
  */
 
 import { execSync } from "child_process";
@@ -18,6 +18,9 @@ const {
 } = process.env;
 
 const MAX_DIFF_CHARS = 80_000;
+// gpt-4o on GitHub Models has an ~8k total token budget; keep the diff small enough
+// to leave room for the prompt template and the output.
+const MAX_DIFF_CHARS_GH_MODELS = 18_000;
 
 function getDiff() {
   try {
@@ -133,7 +136,7 @@ async function callGitHubModels(prompt) {
       Authorization: `Bearer ${GH_MODELS_TOKEN}`,
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       messages: [
         {
           role: "system",
@@ -218,9 +221,9 @@ async function main() {
 
   if (GEMINI_API_KEY) {
     try {
-      console.log("Calling Gemini 2.0 Flash...");
+      console.log(`Calling Gemini (${GEMINI_MODEL})...`);
       rawResponse = await callGemini(prompt);
-      model = "Gemini 2.0 Flash";
+      model = `Gemini · ${GEMINI_MODEL}`;
     } catch (err) {
       console.warn(`Gemini failed (${err.message}) — falling back to GitHub Models.`);
     }
@@ -230,9 +233,12 @@ async function main() {
 
   if (!rawResponse) {
     try {
-      console.log("Calling GitHub Models (gpt-4o-mini)...");
-      rawResponse = await callGitHubModels(prompt);
-      model = "GitHub Models · gpt-4o-mini";
+      console.log("Calling GitHub Models (gpt-4o)...");
+      const ghDiff = diff.length > MAX_DIFF_CHARS_GH_MODELS
+        ? diff.slice(0, MAX_DIFF_CHARS_GH_MODELS) + "\n\n[diff truncated for token limit]"
+        : diff;
+      rawResponse = await callGitHubModels(buildPrompt(ghDiff));
+      model = "GitHub Models · gpt-4o";
     } catch (err) {
       console.error(`GitHub Models also failed: ${err.message}`);
       process.exit(1);
