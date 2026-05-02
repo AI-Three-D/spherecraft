@@ -4,11 +4,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-# Needed to post review comments
 permissions:
   contents: read
   pull-requests: write
-  models: read
 
 jobs:
   llm-review:
@@ -27,10 +25,16 @@ jobs:
         run: node .github/scripts/llm-review.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Primary: Gemini 2.0 Flash (free tier).
-          # Create this secret at: Settings > Secrets > Actions > New repository secret
-          # Get a key at: https://aistudio.google.com/app/apikey
+          # Primary: Gemini free tier.
+          # Get a key at: https://aistudio.google.com/app/apikey (use a project with no billing)
+          # Add as: Settings > Secrets > Actions > GEMINI_API_KEY
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # If gemini-2.0-flash has no free-tier quota in your region, try gemini-1.5-flash
+          GEMINI_MODEL: gemini-1.5-flash
+          # Fallback: GitHub Models (gpt-4o-mini).
+          # Requires a PAT with models:read scope — github.com/settings/tokens
+          # Add as: Settings > Secrets > Actions > GH_MODELS_TOKEN
+          GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
