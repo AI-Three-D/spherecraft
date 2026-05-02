@@ -404,123 +404,131 @@ export class QuadtreeTerrainRenderer {
     }
 
     _applyMaterialUniforms(mat, camera, viewMatrix, projectionMatrix, lodLevel = 0) {
-        if (!mat.uniforms.viewMatrix) mat.uniforms.viewMatrix = { value: new Matrix4() };
-        if (!mat.uniforms.projectionMatrix) mat.uniforms.projectionMatrix = { value: new Matrix4() };
-        if (!mat.uniforms.modelMatrix) mat.uniforms.modelMatrix = { value: new Matrix4() };
-        if (mat.uniforms.cameraPosition && camera?.position) {
-            mat.uniforms.cameraPosition.value.copy(camera.position);
-        }
-           // Shadow renderer reference for bind group creation
-    if (!mat.uniforms._shadowRenderer) {
-        mat.uniforms._shadowRenderer = { value: null };
-    }
-    // This gets picked up by _createTerrainBindGroups in the backend
-    mat.uniforms._shadowRenderer.value = this._shadowRenderer || null;
-        mat.uniforms.viewMatrix.value.copy(viewMatrix);
-        mat.uniforms.projectionMatrix.value.copy(projectionMatrix);
-        mat.uniforms.modelMatrix.value.identity();
-        if (mat.uniforms.geometryLOD) mat.uniforms.geometryLOD.value = lodLevel;
-        if (mat.uniforms.lodLevel) mat.uniforms.lodLevel.value = lodLevel;
-        if (mat.uniforms.useInstancing) mat.uniforms.useInstancing.value = 1.0;
-        if (mat.uniforms.terrainLayerViewMode) {
-            mat.uniforms.terrainLayerViewMode.value = this._terrainLayerViewMode;
-        }
-        if (mat.uniforms.terrainHoverFace) {
-            mat.uniforms.terrainHoverFace.value = this._terrainHoverOverlay.face;
-        }
-        if (mat.uniforms.terrainHoverFlags) {
-            mat.uniforms.terrainHoverFlags.value = this._terrainHoverOverlay.flags;
-        }
-        if (mat.uniforms.terrainHoverMicroRect) {
-            mat.uniforms.terrainHoverMicroRect.value.copy(this._terrainHoverOverlay.microRect);
-        }
-        if (mat.uniforms.terrainHoverMacroRect) {
-            mat.uniforms.terrainHoverMacroRect.value.copy(this._terrainHoverOverlay.macroRect);
-        }
-        if (mat.uniforms.terrainHoverMicroColor) {
-            mat.uniforms.terrainHoverMicroColor.value.copy(this._terrainHoverOverlay.microColor);
-        }
-        if (mat.uniforms.terrainHoverMacroColor) {
-            mat.uniforms.terrainHoverMacroColor.value.copy(this._terrainHoverOverlay.macroColor);
-        }
+        const uniforms = mat.uniforms;
+        this._ensureMaterialFrameUniforms(uniforms);
+        this._applyFrameUniforms(uniforms, camera, viewMatrix, projectionMatrix, lodLevel);
+        this._applyTerrainHoverUniforms(uniforms);
 
         const u = this.uniformManager?.uniforms;
         if (!u) return;
 
-        if (mat.uniforms.sunLightDirection && u.sunLightDirection) {
-            mat.uniforms.sunLightDirection.value.copy(u.sunLightDirection.value);
-        }
-        if (mat.uniforms.sunLightColor && u.sunLightColor) {
-            mat.uniforms.sunLightColor.value.copy(u.sunLightColor.value);
-        }
-        if (mat.uniforms.sunLightIntensity && u.sunLightIntensity) {
-            mat.uniforms.sunLightIntensity.value = u.sunLightIntensity.value;
-        }
-        if (mat.uniforms.ambientLightColor && u.ambientLightColor) {
-            mat.uniforms.ambientLightColor.value.copy(u.ambientLightColor.value);
-        }
-        if (mat.uniforms.ambientLightIntensity && u.ambientLightIntensity) {
-            mat.uniforms.ambientLightIntensity.value = u.ambientLightIntensity.value;
-        }
-        if (mat.uniforms.fogColor && u.fogColor) {
-            mat.uniforms.fogColor.value.copy(u.fogColor.value);
-        }
-        if (mat.uniforms.fogDensity && u.fogDensity) {
-            mat.uniforms.fogDensity.value = u.fogDensity.value;
-        }
-        if (mat.uniforms.weatherIntensity && u.weatherIntensity) {
-            mat.uniforms.weatherIntensity.value = u.weatherIntensity.value;
-        }
-        if (mat.uniforms.currentWeather && u.currentWeather) {
-            mat.uniforms.currentWeather.value = u.currentWeather.value;
-        }
-
-            // ── Atmosphere / aerial-perspective uniforms ────────────────────────────
-    // These must be refreshed every frame so the LUT-based fog path sees
-    // current values (LUT may have been recomputed, camera altitude changes
-    // fog density, planet-switch invalidates all coefficients).
-    if (mat.uniforms.aerialPerspectiveEnabled && u.aerialPerspectiveEnabled) {
-        mat.uniforms.aerialPerspectiveEnabled.value = u.aerialPerspectiveEnabled.value;
-    }
-    if (mat.uniforms.planetCenter && u.planetCenter) {
-        mat.uniforms.planetCenter.value.copy(u.planetCenter.value);
-    }
-    if (mat.uniforms.atmospherePlanetRadius && u.atmospherePlanetRadius) {
-        mat.uniforms.atmospherePlanetRadius.value = u.atmospherePlanetRadius.value;
-    }
-    if (mat.uniforms.atmosphereRadius && u.atmosphereRadius) {
-        mat.uniforms.atmosphereRadius.value = u.atmosphereRadius.value;
-    }
-    if (mat.uniforms.atmosphereScaleHeightRayleigh && u.atmosphereScaleHeightRayleigh) {
-        mat.uniforms.atmosphereScaleHeightRayleigh.value = u.atmosphereScaleHeightRayleigh.value;
-    }
-    if (mat.uniforms.atmosphereScaleHeightMie && u.atmosphereScaleHeightMie) {
-        mat.uniforms.atmosphereScaleHeightMie.value = u.atmosphereScaleHeightMie.value;
-    }
-    if (mat.uniforms.atmosphereRayleighScattering && u.atmosphereRayleighScattering) {
-        mat.uniforms.atmosphereRayleighScattering.value
-            .copy(u.atmosphereRayleighScattering.value);
-    }
-    if (mat.uniforms.atmosphereMieScattering && u.atmosphereMieScattering) {
-        mat.uniforms.atmosphereMieScattering.value = u.atmosphereMieScattering.value;
-    }
-    if (mat.uniforms.atmosphereMieAnisotropy && u.atmosphereMieAnisotropy) {
-        mat.uniforms.atmosphereMieAnisotropy.value = u.atmosphereMieAnisotropy.value;
-    }
-    if (mat.uniforms.atmosphereSunIntensity && u.atmosphereSunIntensity) {
-        mat.uniforms.atmosphereSunIntensity.value = u.atmosphereSunIntensity.value;
-    }
-    // Transmittance LUT — the Texture object reference can change after a
-    // planet switch or after the first compute() call completes.
-    if (mat.uniforms.transmittanceLUT && u.transmittanceLUT?.value) {
-        mat.uniforms.transmittanceLUT.value = u.transmittanceLUT.value;
+        this._applyLightingUniforms(uniforms, u);
+        this._applyWeatherUniforms(uniforms, u);
+        this._applyAtmosphereUniforms(uniforms, u);
+        this._applyWeatherUniforms(uniforms, u);
     }
 
-    if (mat.uniforms.weatherIntensity && u.weatherIntensity) {
-        mat.uniforms.weatherIntensity.value = u.weatherIntensity.value;
+    _ensureMaterialFrameUniforms(uniforms) {
+        if (!uniforms.viewMatrix) uniforms.viewMatrix = { value: new Matrix4() };
+        if (!uniforms.projectionMatrix) uniforms.projectionMatrix = { value: new Matrix4() };
+        if (!uniforms.modelMatrix) uniforms.modelMatrix = { value: new Matrix4() };
+        if (!uniforms._shadowRenderer) uniforms._shadowRenderer = { value: null };
     }
-    if (mat.uniforms.currentWeather && u.currentWeather) {
-        mat.uniforms.currentWeather.value = u.currentWeather.value;
+
+    _applyFrameUniforms(uniforms, camera, viewMatrix, projectionMatrix, lodLevel) {
+        if (uniforms.cameraPosition && camera?.position) {
+            uniforms.cameraPosition.value.copy(camera.position);
+        }
+        uniforms._shadowRenderer.value = this._shadowRenderer || null;
+        uniforms.viewMatrix.value.copy(viewMatrix);
+        uniforms.projectionMatrix.value.copy(projectionMatrix);
+        uniforms.modelMatrix.value.identity();
+        if (uniforms.geometryLOD) uniforms.geometryLOD.value = lodLevel;
+        if (uniforms.lodLevel) uniforms.lodLevel.value = lodLevel;
+        if (uniforms.useInstancing) uniforms.useInstancing.value = 1.0;
+        if (uniforms.terrainLayerViewMode) {
+            uniforms.terrainLayerViewMode.value = this._terrainLayerViewMode;
+        }
     }
+
+    _applyTerrainHoverUniforms(uniforms) {
+        if (uniforms.terrainHoverFace) {
+            uniforms.terrainHoverFace.value = this._terrainHoverOverlay.face;
+        }
+        if (uniforms.terrainHoverFlags) {
+            uniforms.terrainHoverFlags.value = this._terrainHoverOverlay.flags;
+        }
+        if (uniforms.terrainHoverMicroRect) {
+            uniforms.terrainHoverMicroRect.value.copy(this._terrainHoverOverlay.microRect);
+        }
+        if (uniforms.terrainHoverMacroRect) {
+            uniforms.terrainHoverMacroRect.value.copy(this._terrainHoverOverlay.macroRect);
+        }
+        if (uniforms.terrainHoverMicroColor) {
+            uniforms.terrainHoverMicroColor.value.copy(this._terrainHoverOverlay.microColor);
+        }
+        if (uniforms.terrainHoverMacroColor) {
+            uniforms.terrainHoverMacroColor.value.copy(this._terrainHoverOverlay.macroColor);
+        }
+    }
+
+    _applyLightingUniforms(uniforms, sourceUniforms) {
+        if (uniforms.sunLightDirection && sourceUniforms.sunLightDirection) {
+            uniforms.sunLightDirection.value.copy(sourceUniforms.sunLightDirection.value);
+        }
+        if (uniforms.sunLightColor && sourceUniforms.sunLightColor) {
+            uniforms.sunLightColor.value.copy(sourceUniforms.sunLightColor.value);
+        }
+        if (uniforms.sunLightIntensity && sourceUniforms.sunLightIntensity) {
+            uniforms.sunLightIntensity.value = sourceUniforms.sunLightIntensity.value;
+        }
+        if (uniforms.ambientLightColor && sourceUniforms.ambientLightColor) {
+            uniforms.ambientLightColor.value.copy(sourceUniforms.ambientLightColor.value);
+        }
+        if (uniforms.ambientLightIntensity && sourceUniforms.ambientLightIntensity) {
+            uniforms.ambientLightIntensity.value = sourceUniforms.ambientLightIntensity.value;
+        }
+        if (uniforms.fogColor && sourceUniforms.fogColor) {
+            uniforms.fogColor.value.copy(sourceUniforms.fogColor.value);
+        }
+        if (uniforms.fogDensity && sourceUniforms.fogDensity) {
+            uniforms.fogDensity.value = sourceUniforms.fogDensity.value;
+        }
+    }
+
+    _applyWeatherUniforms(uniforms, sourceUniforms) {
+        if (uniforms.weatherIntensity && sourceUniforms.weatherIntensity) {
+            uniforms.weatherIntensity.value = sourceUniforms.weatherIntensity.value;
+        }
+        if (uniforms.currentWeather && sourceUniforms.currentWeather) {
+            uniforms.currentWeather.value = sourceUniforms.currentWeather.value;
+        }
+    }
+
+    _applyAtmosphereUniforms(uniforms, sourceUniforms) {
+        if (uniforms.aerialPerspectiveEnabled && sourceUniforms.aerialPerspectiveEnabled) {
+            uniforms.aerialPerspectiveEnabled.value = sourceUniforms.aerialPerspectiveEnabled.value;
+        }
+        if (uniforms.planetCenter && sourceUniforms.planetCenter) {
+            uniforms.planetCenter.value.copy(sourceUniforms.planetCenter.value);
+        }
+        if (uniforms.atmospherePlanetRadius && sourceUniforms.atmospherePlanetRadius) {
+            uniforms.atmospherePlanetRadius.value = sourceUniforms.atmospherePlanetRadius.value;
+        }
+        if (uniforms.atmosphereRadius && sourceUniforms.atmosphereRadius) {
+            uniforms.atmosphereRadius.value = sourceUniforms.atmosphereRadius.value;
+        }
+        if (uniforms.atmosphereScaleHeightRayleigh && sourceUniforms.atmosphereScaleHeightRayleigh) {
+            uniforms.atmosphereScaleHeightRayleigh.value = sourceUniforms.atmosphereScaleHeightRayleigh.value;
+        }
+        if (uniforms.atmosphereScaleHeightMie && sourceUniforms.atmosphereScaleHeightMie) {
+            uniforms.atmosphereScaleHeightMie.value = sourceUniforms.atmosphereScaleHeightMie.value;
+        }
+        if (uniforms.atmosphereRayleighScattering && sourceUniforms.atmosphereRayleighScattering) {
+            uniforms.atmosphereRayleighScattering.value
+                .copy(sourceUniforms.atmosphereRayleighScattering.value);
+        }
+        if (uniforms.atmosphereMieScattering && sourceUniforms.atmosphereMieScattering) {
+            uniforms.atmosphereMieScattering.value = sourceUniforms.atmosphereMieScattering.value;
+        }
+        if (uniforms.atmosphereMieAnisotropy && sourceUniforms.atmosphereMieAnisotropy) {
+            uniforms.atmosphereMieAnisotropy.value = sourceUniforms.atmosphereMieAnisotropy.value;
+        }
+        if (uniforms.atmosphereSunIntensity && sourceUniforms.atmosphereSunIntensity) {
+            uniforms.atmosphereSunIntensity.value = sourceUniforms.atmosphereSunIntensity.value;
+        }
+        if (uniforms.transmittanceLUT && sourceUniforms.transmittanceLUT?.value) {
+            uniforms.transmittanceLUT.value = sourceUniforms.transmittanceLUT.value;
+        }
     }
 }
