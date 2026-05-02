@@ -31,3 +31,11 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+      - name: Upload review instructions for agent consumption
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-instructions-pr${{ github.event.pull_request.number }}
+          path: ai-review-output/review-instructions.md
+          if-no-files-found: ignore
