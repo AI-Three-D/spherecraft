@@ -74,234 +74,171 @@ npm test
 
 ## Architecture
 
-> Diagrams below use PlantUML. Render them with the [PlantUML VS Code extension](https://marketplace.visualstudio.com/items?itemName=jebbs.plantuml) or paste into [plantuml.com/plantuml](https://www.plantuml.com/plantuml/uml/).
-
 ### High-level components
 
-```plantuml
-@startuml
-skinparam componentStyle rectangle
-skinparam backgroundColor #FAFAFA
-skinparam component {
-  BackgroundColor #E8F4FD
-  BorderColor #2980B9
-  FontColor #1A252F
-}
-skinparam package {
-  BackgroundColor #EAF7EA
-  BorderColor #27AE60
-}
-skinparam arrow {
-  Color #555555
-}
+```mermaid
+graph TB
+    subgraph Games["Games"]
+        WG["WizardGame\nwizard_game/"]
+        PG["PlatformGame\nplatform_game/"]
+    end
 
-package "Games" {
-  [WizardGame\n(wizard_game/)] as WG
-  [PlatformGame\n(platform_game/)] as PG
-}
+    subgraph Core["Engine Core"]
+        GE["GameEngine (base)"]
+        FE["Frontend\nrender orchestrator"]
+        BE["WebGPUBackend\ndevice / buffers"]
+        CAM["Camera"]
+        CFG["EngineConfig"]
+    end
 
-package "Engine Core" {
-  [GameEngine\n(base)] as GE
-  [Frontend\n(renderer orchestrator)] as FE
-  [WebGPUBackend\n(device / buffers)] as BE
-  [Camera] as CAM
-  [EngineConfig] as CFG
-}
+    subgraph WorldGen["World Generation"]
+        QT["QuadtreeGPU\nGPU LOD traversal"]
+        TS["TileStreamer\nfeedback loop"]
+        TG["WebGPUTerrainGenerator\ncompute shaders"]
+        AQ["AsyncGenerationQueue"]
+        TC["TileCache\nGPU array textures"]
+    end
 
-package "World Generation" {
-  [WebGPUTerrainGenerator\n(compute shaders)] as TG
-  [AsyncGenerationQueue] as AQ
-  [TileStreamer\n(feedback loop)] as TS
-  [QuadtreeGPU\n(GPU LOD traversal)] as QT
-  [TileCache\n(GPU array textures)] as TC
-}
+    subgraph Rendering["Rendering Subsystems"]
+        TR["QuadtreeTerrainRenderer"]
+        AS["AssetStreamer\nvegetation LOD"]
+        PS["ParticleSystem"]
+        LM["ClusteredLightManager"]
+        SH["GPUCascadedShadowRenderer"]
+        ATM["AtmosphereRenderer"]
+        CL["CloudRenderer"]
+        PP["PostProcessingPipeline"]
+    end
 
-package "Rendering Subsystems" {
-  [QuadtreeTerrainRenderer] as TR
-  [AssetStreamer\n(vegetation LOD)] as AS
-  [ParticleSystem] as PS
-  [ClusteredLightManager] as LM
-  [GPUCascadedShadowRenderer] as SH
-  [AtmosphereRenderer] as ATM
-  [CloudRenderer] as CL
-  [PostProcessingPipeline] as PP
-}
-
-WG --> GE
-PG --> GE
-GE --> FE
-GE --> CFG
-FE --> BE
-FE --> CAM
-FE --> TR
-FE --> AS
-FE --> PS
-FE --> LM
-FE --> SH
-FE --> ATM
-FE --> CL
-FE --> PP
-FE --> QT
-QT --> TS
-TS --> TG
-TG --> AQ
-AQ --> TC
-TC --> TR
-
-@enduml
+    WG --> GE
+    PG --> GE
+    GE --> FE
+    GE --> CFG
+    FE --> BE
+    FE --> CAM
+    FE --> TR
+    FE --> AS
+    FE --> PS
+    FE --> LM
+    FE --> SH
+    FE --> ATM
+    FE --> CL
+    FE --> PP
+    FE --> QT
+    QT --> TS
+    TS --> TG
+    TG --> AQ
+    AQ --> TC
+    TC --> TR
 ```
 
 ---
 
 ### Per-frame render pipeline
 
-```plantuml
-@startuml
-skinparam sequenceArrowThickness 1.5
-skinparam sequenceBoxBackgroundColor #EBF5FB
-skinparam sequenceLifeLineBorderColor #2980B9
-skinparam backgroundColor #FAFAFA
-skinparam noteBorderColor #F39C12
-skinparam noteBackgroundColor #FEF9E7
+```mermaid
+sequenceDiagram
+    participant GE as GameEngine
+    participant QT as QuadtreeGPU (compute)
+    participant TS as TileStreamer (CPU)
+    participant TR as TerrainRenderer
+    participant AS as AssetStreamer (vegetation)
+    participant PTCL as ParticleSystem
+    participant ATM as Atmosphere / Clouds
+    participant PP as PostProcessing
 
-participant "GameEngine" as GE
-participant "QuadtreeGPU\n(compute)" as QT
-participant "TileStreamer\n(CPU)" as TS
-participant "TerrainRenderer" as TR
-participant "AssetStreamer\n(vegetation)" as AS
-participant "ParticleSystem" as PAR
-participant "Atmosphere /\nClouds" as ATM
-participant "PostProcessing" as PP
+    GE->>QT: traversal compute (camera pos, LOD thresholds)
+    QT-->>TS: feedback buffer — tiles needed this frame
 
-GE -> QT : submit traversal compute\n(camera pos, LOD thresholds)
-QT --> TS : feedback buffer\n(tiles needed this frame)
+    TS->>TS: deduplicate requests (FeedbackDedupeSet)
+    TS->>TS: schedule missing tiles (AsyncGenerationQueue)
+    Note over TS: heightfield · splat · normals<br/>all generated via compute shaders
 
-TS -> TS : deduplicate tile requests\n(FeedbackDedupeSet)
-TS -> TS : schedule missing tiles\n(AsyncGenerationQueue)
-note right of TS : terrain heightfield, splat,\nnormals — all compute shaders
+    TS->>TR: update GPU residency hash table (dirty slots only)
 
-TS -> TR : update GPU residency\nhash table (dirty slots only)
+    GE->>TR: draw terrain — indirect instanced per LOD
+    Note over TR: one indirect draw call per geometry LOD
 
-GE -> TR : draw terrain\n(indirect instanced per LOD)
-note right of TR : one draw call per geometry LOD\ninstance data from tile manager
+    GE->>AS: draw vegetation
+    Note over AS: far billboards → mid imposters<br/>→ near meshes → leaf geometry
 
-GE -> AS : draw vegetation
-note right of AS : far billboards → mid imposters\n→ near meshes → leaf geometry\n(4 LOD tiers, all GPU-driven)
-
-GE -> PAR : simulate (compute)\nthen render
-GE -> ATM : sky + aerial perspective\n+ cloud layers
-GE -> PP : tonemap → bloom → distortion\n→ blit to swapchain
-
-@enduml
+    GE->>PTCL: simulate (compute) then render
+    GE->>ATM: sky + aerial perspective + cloud layers
+    GE->>PP: tonemap → bloom → distortion → blit to swapchain
 ```
 
 ---
 
 ### Terrain generation pipeline
 
-```plantuml
-@startuml
-skinparam activityBackgroundColor #EBF5FB
-skinparam activityBorderColor #2980B9
-skinparam backgroundColor #FAFAFA
-skinparam arrowColor #555555
-skinparam noteBackgroundColor #FEF9E7
-skinparam noteBorderColor #F39C12
+```mermaid
+flowchart TB
+    subgraph cpu1["CPU"]
+        A["Tile request\nface · depth · x · y"]
+        B["AsyncGenerationQueue\nschedule within frame budget"]
+        A --> B
+    end
 
-|CPU|
-start
-:Tile request arrives\n(face, depth, x, y);
-:AsyncGenerationQueue\nschedules within frame budget;
+    subgraph gpu["GPU Compute"]
+        C["advancedTerrainCompute.wgsl\nHeightfield — FBm · ridges · biome blend · water clamp\nout: r32float height texture"]
+        D["Normal computation\nSobel filter on heightfield\nout: rgba8unorm normal texture"]
+        E["splatCompute.wgsl\nTexture layer selection — biome influence · tile category\ntransition sharpness · breakup noise\nout: splat indices + weights"]
+        F["splatPaletteCompute.wgsl\nPer-chunk palette optimisation\ndominant tile selection · index remapping"]
+        G["splatValidityCompute.wgsl\nMark valid splat entries"]
+        H{"Pre-bake\ncolors?"}
+        I["resolvedTerrainColorCompute.wgsl\nAtlas sampling + AO bake"]
+        C --> D --> E --> F --> G --> H
+        H -- yes --> I
+    end
 
-|GPU Compute|
-:advancedTerrainCompute.wgsl\n**Heightfield generation**\n──────────────────────\nFBm noise + ridge features\nbiome elevation blending\nwater-level clamp;
-note right: output: r32float height texture
+    subgraph cpu2["CPU"]
+        J["Upload to TileCache array layers\nheight · normal · splat"]
+        K["Update GPU residency hash table\ndirty slots only"]
+        L["Tile marked resident"]
+        J --> K --> L
+    end
 
-:Normal computation\n──────────────────────\nSobel filter on heightfield;
-note right: output: rgba8unorm normal texture
-
-:splatCompute.wgsl\n**Texture layer selection**\n──────────────────────\nbiome influence scoring\ntile category per pixel\ntransition sharpness + breakup noise;
-note right: output: splat indices + weights
-
-:splatPaletteCompute.wgsl\n**Per-chunk palette optimisation**\n──────────────────────\ndominant tile selection\npalette index remapping;
-
-:splatValidityCompute.wgsl\nMark valid splat entries;
-
-fork
-  :resolvedTerrainColorCompute.wgsl\n(optional pre-baked color)\nAtlas sampling + AO bake;
-fork again
-  :Upload directly to\nTileCache array layers\n(height / normal / splat);
-end fork
-
-|CPU|
-:Update GPU residency hash table\n(dirty slots only);
-:TileStreamer marks tile as resident;
-stop
-
-@enduml
+    B --> C
+    H -- no --> J
+    I --> J
 ```
 
 ---
 
 ### Vegetation LOD chain
 
-```plantuml
-@startuml
-skinparam componentStyle rectangle
-skinparam backgroundColor #FAFAFA
-skinparam component {
-  BackgroundColor #EAF7EA
-  BorderColor #27AE60
-}
-skinparam package {
-  BorderColor #888888
-  BackgroundColor #F8F8F8
-}
-skinparam arrow {
-  Color #555555
-}
-skinparam note {
-  BackgroundColor #FEF9E7
-  BorderColor #F39C12
-}
+```mermaid
+graph LR
+    subgraph FAR["FAR — 2 km+"]
+        TTG["TreeTemplateGenerator\nproced. branching"]
+        FARB["Billboard quads\nrotated to camera"]
+        TTG --> FARB
+    end
 
-package "AssetStreamer  (GPU-driven, all 4 tiers)" {
+    subgraph MID["MID — 100 m to 2 km"]
+        AOB["TerrainAOBaker\nbaked ambient occlusion"]
+        MIDM["MidNearGeometryBuilder\nstylised cone meshes"]
+        AOB --> MIDM
+    end
 
-  package "FAR  (> ~2 km)" {
-    [TreeTemplateGenerator\nproced. branching] as TTG
-    [Billboard quads\n(rotated to camera)] as FAR
-    TTG --> FAR
-  }
+    subgraph NEAR_LOD["NEAR — 10 to 100 m"]
+        NTB["MidNearTextureBaker\ndetailed bark variants"]
+        NEARM["Normal-mapped mesh\nseasonal variation"]
+        NTB --> NEARM
+    end
 
-  package "MID  (~100 m – 2 km)" {
-    [MidNearGeometryBuilder\nstylised cone meshes] as MID
-    [TerrainAOBaker\nbaked ambient occlusion] as AO
-    AO --> MID
-  }
+    subgraph LEAF["LEAF — 0 to 10 m"]
+        LMB["LeafMaskBaker\nsilhouette atlas per species"]
+        LBP["leafBudgetPrepass.wgsl\ncount leaves in view"]
+        LSC["leafScatterDetailed.wgsl\nplace leaf geometry"]
+        LRND["leafRender.wgsl\nbillboard quads + mask"]
+        LMB --> LRND
+        LBP --> LSC --> LRND
+    end
 
-  package "NEAR  (~10 m – 100 m)" {
-    [MidNearTextureBaker\ndetailed bark / variants] as NT
-    [Skinned mesh\nnormal-mapped] as NEAR
-    NT --> NEAR
-  }
-
-  package "LEAF  (< ~10 m)" {
-    [LeafMaskBaker\nsilhouette atlas per species] as LMB
-    [leafBudgetPrepass.wgsl\ncount leaves in view] as LBP
-    [leafScatterDetailed.wgsl\nplace leaf geometry] as LSC
-    [leafRender.wgsl\nbillboard quads + mask] as LRND
-    LMB --> LRND
-    LBP --> LSC
-    LSC --> LRND
-  }
-}
-
-note bottom of FAR  : TreeSourceCache\nper-species templates
-note bottom of MID  : PlacementFamily\nbiome eligibility rules
-note bottom of NEAR : seasonal variation\nLeafAnchorEmitter source
-note bottom of LRND : wind animation\nleaf pollen particles
-
-@enduml
+    FARB -->|"closer"| MIDM
+    MIDM -->|"closer"| NEARM
+    NEARM -->|"closer"| LRND
 ```
 
 ---
