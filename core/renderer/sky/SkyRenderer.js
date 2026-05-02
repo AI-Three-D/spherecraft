@@ -1,8 +1,8 @@
-import { Vector3, Matrix4, Color } from '../../shared/math/index.js';
-import { Geometry } from './resources/geometry.js';
-import { Material } from './resources/material.js';
-import { RenderTarget } from './resources/renderTarget.js';
-import { TextureFormat } from './resources/texture.js';
+import { Vector3, Matrix4, Color } from '../../../shared/math/index.js';
+import { Geometry } from '../resources/geometry.js';
+import { Material } from '../resources/material.js';
+import { RenderTarget } from '../resources/renderTarget.js';
+import { TextureFormat } from '../resources/texture.js';
 export class SkyRenderer {
     constructor(backend, atmosphereLUT, options = {}) {
         if (!options.nightSkyTheme) {

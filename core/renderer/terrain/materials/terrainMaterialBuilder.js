@@ -1,6 +1,6 @@
-import { Vector2, Vector3, Vector4 } from '../../../shared/math/index.js';
-import { Material } from '../../renderer/resources/material.js';
-import { requireBool, requireInt, requireNumber, requireObject } from '../../../shared/requireUtil.js';
+import { Vector2, Vector3, Vector4 } from '../../../../shared/math/index.js';
+import { Material } from '../../resources/material.js';
+import { requireBool, requireInt, requireNumber, requireObject } from '../../../../shared/requireUtil.js';
 
 export class TerrainMaterialBuilder {
     static _shaderBuilders = null;
@@ -10,9 +10,9 @@ export class TerrainMaterialBuilder {
             return this._shaderBuilders;
         }
         try {
-            const vertex = await import('./shaders/webgpu/terrainChunkVertexShaderBuilder.js');
-            const fragment = await import('./shaders/webgpu/terrainChunkFragmentShaderBuilder.js');
-            const overlay = await import('./shaders/webgpu/terrainChunkHoverOverlayFragmentShaderBuilder.js');
+            const vertex = await import('../shaders/webgpu/terrainChunkVertexShaderBuilder.js');
+            const fragment = await import('../shaders/webgpu/terrainChunkFragmentShaderBuilder.js');
+            const overlay = await import('../shaders/webgpu/terrainChunkHoverOverlayFragmentShaderBuilder.js');
 
             if (!vertex.buildTerrainChunkVertexShader ||
                 !fragment.buildTerrainChunkFragmentShader ||

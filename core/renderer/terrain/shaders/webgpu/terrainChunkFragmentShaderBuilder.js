@@ -1,4 +1,4 @@
-// js/mesh/terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js
+// js/renderer/terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js
 
 import { getAerialPerspectiveWGSL } from '../../../../renderer/atmosphere/shaders/aerialPerspectiveCommon.js';
 import { getProceduralDetailWGSL } from './prroceduralDetailNoise.wgsl.js';

@@ -1,4 +1,4 @@
-import { Geometry } from '../../renderer/resources/geometry.js';
+import { Geometry } from '../../resources/geometry.js';
 
 /**
  * Utility class for building primitive geometries

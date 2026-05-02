@@ -9,7 +9,7 @@
 import { QuadtreeGPU } from './QuadtreeGPU.js';
 import { TileStreamer } from './tileStreamer.js';
 import { TileAddress } from './tileAddress.js';
-import { TerrainGeometryBuilder } from '../../mesh/terrain/terrainGeometryBuilder.js';
+import { TerrainGeometryBuilder } from '../../renderer/terrain/geometry/terrainGeometryBuilder.js';
 import { Logger } from '../../../shared/Logger.js';
 import { clamp01, clampInt } from '../../../shared/math/index.js';
 

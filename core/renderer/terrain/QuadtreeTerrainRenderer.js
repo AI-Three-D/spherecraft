@@ -5,8 +5,8 @@
 // instance + indirect buffers from the tile manager, issues draw calls.
 
 import { Matrix4, Vector4 } from '../../../shared/math/index.js';
-import { TerrainGeometryBuilder } from '../../mesh/terrain/terrainGeometryBuilder.js';
-import { TerrainMaterialBuilder } from '../../mesh/terrain/terrainMaterialBuilder.js';
+import { TerrainGeometryBuilder } from './geometry/terrainGeometryBuilder.js';
+import { TerrainMaterialBuilder } from './materials/terrainMaterialBuilder.js';
 import { Logger } from '../../../shared/Logger.js';
 
 export class QuadtreeTerrainRenderer {

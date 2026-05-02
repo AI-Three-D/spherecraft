@@ -1,4 +1,4 @@
-// js/mesh/terrain/shaders/webgpu/proceduralDetailNoise.js
+// js/renderer/terrain/shaders/webgpu/proceduralDetailNoise.js
 //
 // Procedural detail noise functions for terrain.
 // Patterns are continuous across tile boundaries (world-space based).
