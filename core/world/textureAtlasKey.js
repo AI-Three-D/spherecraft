@@ -143,6 +143,7 @@ export class TextureAtlasKey {
         
         // Warn if config doesnt match parsed texture size
         if (resolvedConfig.textureSize !== texSize) {
+            // Parsed key remains authoritative for atlas coordinates.
         }
         
         return new TextureAtlasKey(atlasX, atlasY, face, resolvedConfig);
@@ -154,6 +155,7 @@ export class TextureAtlasKey {
     getChunkUVTransform(chunkX, chunkY) {
         // Verify chunk is in this atlas
         if (!this.containsChunk(chunkX, chunkY)) {
+            // Return a relative transform even when caller asks outside bounds.
         }
         
         return this.config.getChunkUVTransform(chunkX, chunkY);

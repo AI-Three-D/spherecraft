@@ -736,7 +736,7 @@ export class LeafStreamer {
             this._budgetReadbackPending = false;
         }).catch((err) => {
             Logger.warn(`[LeafStreamer] budget readback failed: ${err?.message || err}`);
-            try { this._budgetReadbackBuffer?.unmap(); } catch (_) {}
+            try { this._budgetReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
             this._budgetReadbackQueued = false;
             this._budgetReadbackPending = false;
         });

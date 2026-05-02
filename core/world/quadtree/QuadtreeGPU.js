@@ -243,7 +243,7 @@ async _withDebugReadbackLock(fn) {
   
     // destroy old pool
     for (const b of this._instanceStagePool) {
-      try { b.destroy(); } catch {}
+      try { b.destroy(); } catch { /* ignore cleanup failure */ }
     }
     this._instanceStagePool = [];
     this._instanceStageBytes = bytes;
@@ -975,7 +975,7 @@ _logTraversalSeeds(seeds, tag = "QT-Seeds") {
         let count;
         try {
             count = await this.readVisibleTileCount();
-        } catch (e) {
+        } catch {
             this._debugReadPending = false;
             return [];
         }

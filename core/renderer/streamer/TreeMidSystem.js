@@ -881,7 +881,7 @@ export class TreeMidSystem {
             this._countReadbackPending = false;
         }).catch((err) => {
             Logger.warn(`[TreeMidSystem] count readback failed: ${err?.message || err}`);
-            try { this._countReadbackBuffer?.unmap(); } catch (_) {}
+            try { this._countReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
             this._countReadbackQueued = false;
             this._countReadbackPending = false;
         });

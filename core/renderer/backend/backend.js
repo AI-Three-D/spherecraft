@@ -235,7 +235,7 @@ export class Backend {
                     uploaded++;
                 }
             } catch (error) {
-                
+                // Keep uploading the remaining textures if one texture fails.
             }
         }
         

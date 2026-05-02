@@ -483,7 +483,7 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
                     releaseFence();
                     for (const tempTex of temporaryTextures) {
                         if (!tempTex) continue;
-                        try { tempTex.destroy(); } catch {}
+                        try { tempTex.destroy(); } catch { /* ignore cleanup failure */ }
                     }
                 })
                 .catch(releaseFence);

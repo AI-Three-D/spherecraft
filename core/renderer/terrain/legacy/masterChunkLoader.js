@@ -1,5 +1,5 @@
 
-import { requireNumber, requireObject, requireInt } from '../../shared/requireUtil.js';
+import { requireNumber, requireObject, requireInt } from '../../../../shared/requireUtil.js';
 export class MasterChunkLoader {
 
     constructor(backend) {

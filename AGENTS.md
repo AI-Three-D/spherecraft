@@ -60,7 +60,7 @@ Short map of the current code so agents can jump to the right place and make saf
 
 ## Atmosphere, Sky, Clouds & Water
 - Atmosphere implementations live in `core/renderer/atmosphere`; `Frontend` wires the active LUTs/renderers into terrain and sky.
-- `core/renderer/SkyRenderer.js` and `core/renderer/MoonRenderer.js` handle sky dome and moon rendering.
+- `core/renderer/sky/SkyRenderer.js` and `core/renderer/sky/MoonRenderer.js` handle sky dome and moon rendering.
 - `core/renderer/clouds` contains the cloud stack:
   - `cloudRenderer.js` is the shared abstraction/uniform logic
   - `webgpuCloudRenderer.js` is the main active volumetric path
@@ -70,8 +70,8 @@ Short map of the current code so agents can jump to the right place and make saf
 
 ## Assets, Meshes & Streaming
 - GLTF loading lives under `shared/gltf`.
-- Generic mesh rendering is handled by `core/renderer/genericMeshRenderer.js` and `core/renderer/mesh`.
-- Terrain mesh generation helpers are under `core/mesh/terrain`.
+- Generic mesh rendering is handled by `core/renderer/mesh/genericMeshRenderer.js` and `core/renderer/mesh`.
+- Terrain renderer geometry/material helpers are under `core/renderer/terrain`.
 - The vegetation/prop system lives in `core/renderer/streamer`:
   - `AssetStreamer` is the main orchestrator
   - it handles baked/scattered asset placement, LOD, geometry atlases, and mid/near rendering paths

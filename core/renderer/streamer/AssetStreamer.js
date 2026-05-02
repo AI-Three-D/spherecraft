@@ -51,10 +51,6 @@ import { gpuFormatSampleType } from '../resources/texture.js';
 import { TerrainAOBaker } from './TerrainAOBaker.js';
 import { TreeFarSystem } from './TreeFarSystem.js';
 
-// Set to true to enable far-tier diagnostic logging in AssetStreamer.
-const FAR_TREE_DBG_ENABLED = false;
-const farDbgAs = (msg) => { if (FAR_TREE_DBG_ENABLED) Logger.warn(`[TreeFarSystem] ${msg}`); };
-
 const FIELD_LAYER_META_U32_STRIDE = 8;
 
 function applyResolvedTreeAssetConfig(definitions, treeConfig) {
@@ -146,51 +142,51 @@ export class AssetStreamer {
         this._qualityConfig = this.QUALITY_PRESETS[this._quality] || this.QUALITY_PRESETS.medium;
 
         this._treeConfig = this.engineConfig?.trees || {};
-const tc       = this._treeConfig;
-const tcFlags  = tc.flags    || {};
-const tcNear   = tc.nearTier || {};
+        const tc       = this._treeConfig;
+        const tcFlags  = tc.flags    || {};
+        const tcNear   = tc.nearTier || {};
 
-const featureFlags = options.engineConfig?.features || {};
-this._enableNearTier    = featureFlags.treesNear    ?? true;
-this._useMidTier        = (featureFlags.treesMid    ?? true) && (tcFlags.useMidTier        ?? true);
-this._keepLegacyMidNear = tcFlags.keepLegacyMidNear ?? false;
+        const featureFlags = options.engineConfig?.features || {};
+        this._enableNearTier    = featureFlags.treesNear    ?? true;
+        this._useMidTier        = (featureFlags.treesMid    ?? true) && (tcFlags.useMidTier        ?? true);
+        this._keepLegacyMidNear = tcFlags.keepLegacyMidNear ?? false;
 
-this._useFarTierClone   = (featureFlags.treesFar    ?? true) && (tcFlags.useFarTierClone   ?? true);
-this._useClusterFarTier = tcFlags.useClusterFarTier ?? false;
+        this._useFarTierClone   = (featureFlags.treesFar    ?? true) && (tcFlags.useFarTierClone   ?? true);
+        this._useClusterFarTier = tcFlags.useClusterFarTier ?? false;
 
-this.enableLeafRendering =
-    this._enableNearTier && (tcFlags.enableLeafRendering ?? (options.enableLeafRendering !== false));
+        this.enableLeafRendering =
+            this._enableNearTier && (tcFlags.enableLeafRendering ?? (options.enableLeafRendering !== false));
 
-// Still honour explicit constructor override for debug tooling,
-// but primary source is engineConfig.
-const leafBandsFromOptions = (() => {
-    const rawBands = options.treeDetailBands;
-    if (Array.isArray(rawBands)) {
-        if (rawBands.length > 0 && typeof rawBands[0] === 'object') return rawBands;
-        return rawBands.map((end, i, ends) => ({
-            start: i === 0 ? 0 : ends[i - 1] * 0.85,
-            end,
-        }));
-    }
-    return undefined;
-})();
+        // Still honour explicit constructor override for debug tooling,
+        // but primary source is engineConfig.
+        const leafBandsFromOptions = (() => {
+            const rawBands = options.treeDetailBands;
+            if (Array.isArray(rawBands)) {
+                if (rawBands.length > 0 && typeof rawBands[0] === 'object') return rawBands;
+                return rawBands.map((end, i, ends) => ({
+                    start: i === 0 ? 0 : ends[i - 1] * 0.85,
+                    end,
+                }));
+            }
+            return undefined;
+        })();
 
-this._lodController = new TreeLODController({
-    leafBands:            leafBandsFromOptions ?? tcNear.leafBands,
-    maxCloseTrees:        options.maxCloseTrees ?? tcNear.maxCloseTrees,
-    maxBranchDetailLevel: options.maxBranchDetailLevel ?? tcNear.maxBranchDetailLevel,
-    branchGeometryLOD:    options.branchGeometryLOD ?? tcNear.branchGeometryLOD,
-    branchTrunkRadialSegments:  options.branchTrunkRadialSegments ?? tcNear.branchTrunkRadialSegments,
-    branchBranchRadialSegments: options.branchBranchRadialSegments ?? tcNear.branchBranchRadialSegments,
-    maxTotalLeaves:       options.maxTotalLeaves ?? tcNear.maxTotalLeaves,
-    branchLODBands:       tcNear.branchLODBands,
-    branchFadeMargin:     tcNear.branchFadeMargin,
-    birch:                tcNear.birch,
-    leafCounts:           tcNear.leafCounts,
-    leafSizeScale:        tcNear.leafSizeScale,
-    leafBandBudgetFractions: tcNear.leafBandBudgetFractions,
-    leafFadeStartRatio:   tcNear.leafFadeStartRatio,
-});
+        this._lodController = new TreeLODController({
+            leafBands:            leafBandsFromOptions ?? tcNear.leafBands,
+            maxCloseTrees:        options.maxCloseTrees ?? tcNear.maxCloseTrees,
+            maxBranchDetailLevel: options.maxBranchDetailLevel ?? tcNear.maxBranchDetailLevel,
+            branchGeometryLOD:    options.branchGeometryLOD ?? tcNear.branchGeometryLOD,
+            branchTrunkRadialSegments:  options.branchTrunkRadialSegments ?? tcNear.branchTrunkRadialSegments,
+            branchBranchRadialSegments: options.branchBranchRadialSegments ?? tcNear.branchBranchRadialSegments,
+            maxTotalLeaves:       options.maxTotalLeaves ?? tcNear.maxTotalLeaves,
+            branchLODBands:       tcNear.branchLODBands,
+            branchFadeMargin:     tcNear.branchFadeMargin,
+            birch:                tcNear.birch,
+            leafCounts:           tcNear.leafCounts,
+            leafSizeScale:        tcNear.leafSizeScale,
+            leafBandBudgetFractions: tcNear.leafBandBudgetFractions,
+            leafFadeStartRatio:   tcNear.leafFadeStartRatio,
+        });
 
         Object.defineProperty(this, 'treeDetailBands', {
             get: () => this._lodController.getLegacyBands(),
@@ -201,34 +197,20 @@ this._lodController = new TreeLODController({
         this._debugReadbackEnabled = this._debugConfig.readback === true;
         this._treeMidSystem = null; 
         this._treeFarSystem = null;
-        // ═══ INC 1: ArchetypeRegistry replaces AssetRegistry ═══════════════
-        // ArchetypeRegistry EXTENDS AssetRegistry and passes legacy defs to
-        // super(). Every downstream consumer (AssetSelectionBuffer,
-        // TreeDetailSystem, BranchRenderer, TreeMidNearSystem, and this
-        // class's own _verifyTreeBandAlignment / _getActiveTreeTypes /
-        // _createRenderPipeline / _updateScatterParams) sees the same
-        // AssetDefinition objects via inherited getAllAssets() /
-        // maxDensity / maxDistance / buildAssetDefBuffer / buildTileAssetMap.
-        //
-        // The new archetype/family/variant model is built alongside,
-        // validated (throws if tree_standard ≠ index 0 or variant 0 ≠ tree),
-        // and queryable via getAllArchetypes() / getAllVariants() — but
-        // nothing in the render path reads it until Increment 2.
         this._assetDefinitions = applyResolvedTreeAssetConfig(
             options.assetDefinitions || this.DEFAULT_ASSET_DEFINITIONS,
             this._treeConfig
         );
         this._clusterTreeTileMetadata = options.clusterTreeTileMetadata ?? null;
-        this._assetRegistry = new ArchetypeRegistry(                    // ◄── INC 1
+        this._assetRegistry = new ArchetypeRegistry(
             this._assetDefinitions,
-            options.archetypeDefinitions || this.ARCHETYPE_DEFINITIONS,        // ◄── INC 1
+            options.archetypeDefinitions || this.ARCHETYPE_DEFINITIONS,
             this._streamerTheme
         );
         this._assetSelectionBuffer = null;
 
         this._treeDetailSystem = null;
         this._speciesRegistry = null;
-
 
         this._pool = null;
         this._geometries = [];           // [band] => { positionBuffer, normalBuffer, uvBuffer, indexBuffer, indexCount }
@@ -311,14 +293,6 @@ this._lodController = new TreeLODController({
             instanceBuffer: null,
             bindGroup: null,
         };
-        this._producerDebugEnabled = true;
-        this._producerDebugInterval = Math.max(1, this._debugConfig.interval ?? 120);
-        this._producerDebugQueued = false;
-        this._producerDebugPending = false;
-        this._producerDebugHasGroundPropSnapshot = false;
-        this._producerDebugPoolReadbackBuffer = null;
-        this._producerDebugGroundPropReadbackBuffer = null;
-        this._producerTextureProbePending = false;
         this._groundPropTileMapKey = 'baked-ground-props';
         this._fieldArchetypeIndexSet = new Set();
         this._scatterGroups = [];
@@ -395,7 +369,6 @@ this._lodController = new TreeLODController({
     async initialize() {
         if (this._initialized) return;
 
-        // ═══ INC 2: band layout computed from archetypes + quality budget ══
         // bandDescriptors drives the pool AND the render loop AND shader
         // constants. Stored on `this` so render() can iterate it without
         // re-querying the registry.
@@ -499,7 +472,6 @@ this._lodController = new TreeLODController({
             this._seedScatterGroupPendingLayers();
         }
 
-        // ═══ Template library (before geometry building) ═══════════════════
         this._speciesRegistry = this.getSpeciesRegistry();
         this._templateLibrary = new TreeTemplateLibrary({
             variantsPerType: 4,
@@ -523,7 +495,6 @@ this._lodController = new TreeLODController({
         this._createRenderPipeline();
 
         this._createFarTreeBakePipeline();
-        // ═══ Terrain AO baker ═══════════════════════════════════════════════
         if (this.TERRAIN_AO_CONFIG.enabled) {
             const maxWS   = this._qualityConfig.maxScatterTileWorldSize ?? 48;
             const maxDens = this._assetRegistry?.maxDensity ?? 0.000001;
@@ -560,6 +531,7 @@ this._lodController = new TreeLODController({
             }
         }
 
+        // eslint-disable-next-line no-constant-condition
         if (false) { //this.GROUND_FIELD_BAKE_CONFIG.enabled) {
             this._groundFieldBaker = new GroundFieldBaker(this.device, {
                 assetRegistry: this._assetRegistry,
@@ -581,7 +553,6 @@ this._lodController = new TreeLODController({
             }
         }
 
-        // ═══ Tree sub-systems — unchanged; they read pool bands 0-4 ═════════
         const tcNear  = this._treeConfig.nearTier || {};
         const tcFlags = this._treeConfig.flags    || {};
 
@@ -599,84 +570,67 @@ this._lodController = new TreeLODController({
             Logger.info(`${this._logTag} Near tier disabled by features.treesNear`);
         }
 
+        const tierRanges = this._treeConfig.tierRanges || {};
+        const tierWarnings = this.validateTierRanges(
+            this._lodController.detailRange,
+            tierRanges                                   // ← now takes ranges as arg
+        );
+        for (const w of tierWarnings) Logger.warn(`${this._logTag} ${w}`);
 
+        // Legacy mid-near: built but only active when flag is set
+        this._treeMidNearSystem = new TreeMidNearSystem(this.device, this, {
+            lodController: this._lodController,
+        });
 
-// ═══ Tree mid-tier systems ═══════════════════════════════════════════
-const tierRanges = this._treeConfig.tierRanges || {};
-const tierWarnings = this.validateTierRanges(
-    this._lodController.detailRange,
-    tierRanges                                   // ← now takes ranges as arg
-);
-for (const w of tierWarnings) Logger.warn(`${this._logTag} ${w}`);
+        // New hull-only mid tier
+        if (this._useMidTier) {
+            this._treeMidSystem = new TreeMidSystem(this.device, this, {
+                lodController: this._lodController,
+                tierRange:     tierRanges.mid,           // ← NEW: pass range config
+                midConfig:     this._treeConfig.midTier, // ← NEW: pass hull/trunk config
+                speciesProfiles: this._treeConfig.speciesProfiles,
+            });
+            await this._treeMidSystem.initialize();
+        }
 
-// Legacy mid-near: built but only active when flag is set
-this._treeMidNearSystem = new TreeMidNearSystem(this.device, this, {
-    lodController: this._lodController,
-});
+        if (this._useFarTierClone) {
+            const farTierCloneConfig = {
+                ...(this._treeConfig.midTier || {}),
+                maxTrees: this._treeConfig?.farTreeTier?.maxInstances
+                    ?? this._treeConfig?.midTier?.maxTrees
+                    ?? 24000,
+            };
 
+            this._treeFarSystem = new TreeFarSystem(this.device, this, {
+                lodController: this._lodController,
+                tierRange: tierRanges.farTrees,
+                midConfig: farTierCloneConfig,
+                speciesProfiles: this._treeConfig.speciesProfiles,
+            });
+            await this._treeFarSystem.initialize();
+        }
 
-// New hull-only mid tier
-if (this._useMidTier) {                          // ← was TREE_TIER_FLAGS.useMidTier
-    this._treeMidSystem = new TreeMidSystem(this.device, this, {
-        lodController: this._lodController,
-        tierRange:     tierRanges.mid,           // ← NEW: pass range config
-        midConfig:     this._treeConfig.midTier, // ← NEW: pass hull/trunk config
-        speciesProfiles: this._treeConfig.speciesProfiles,
-    });
-    await this._treeMidSystem.initialize();
-}
+        if (this._enableNearTier) {
+            this._branchRenderer = new BranchRenderer(this.device, this, {
+                lodController:      this._lodController,
+                enableBranchWind:   tcFlags.enableBranchWind ?? false,
+                propTextureManager: this.propTextureManager,
+            });
+            await this._branchRenderer.initialize(this._templateLibrary);
 
-if (this._useFarTierClone) {
-    const farTierCloneConfig = {
-        ...(this._treeConfig.midTier || {}),
-        maxTrees: this._treeConfig?.farTreeTier?.maxInstances
-            ?? this._treeConfig?.midTier?.maxTrees
-            ?? 24000,
-    };
-
-    this._treeFarSystem = new TreeFarSystem(this.device, this, {
-        lodController: this._lodController,
-        tierRange: tierRanges.farTrees,
-        midConfig: farTierCloneConfig,
-        speciesProfiles: this._treeConfig.speciesProfiles,
-    });
-    farDbgAs(
-        `TreeFarSystem constructed — ` +
-        `farTierCloneConfig=${JSON.stringify({ maxTrees: farTierCloneConfig.maxTrees })} ` +
-        `tierRanges.farTrees=${JSON.stringify(tierRanges.farTrees)} ` +
-        `_farTreeSourceCache=${!!this._farTreeSourceCache} ` +
-        `_farTreeSourceCache.enabled=${this._farTreeSourceCache?.enabled} ` +
-        `_farTreeSourceCache.initialized=${this._farTreeSourceCache?._initialized} ` +
-        `_farTreeBakePipeline=${!!this._farTreeBakePipeline}`
-    );
-    await this._treeFarSystem.initialize();
-    farDbgAs(
-        `TreeFarSystem.initialize() done — ` +
-        `treeFarSystem.isReady=${this._treeFarSystem?.isReady?.()}`
-    );
-}
-
-if (this._enableNearTier) {
-    this._branchRenderer = new BranchRenderer(this.device, this, {
-        lodController:      this._lodController,
-        enableBranchWind:   tcFlags.enableBranchWind ?? false,
-        propTextureManager: this.propTextureManager,
-    });
-    await this._branchRenderer.initialize(this._templateLibrary);
-
-    this._leafStreamer = new LeafStreamer(this.device, this, {
-        lodController:            this._lodController,
-        leafMaskBaker:            this._leafMaskBaker,
-        leafAlbedoTextureManager: this.leafAlbedoTextureManager,
-        leafNormalTextureManager: this.leafNormalTextureManager,
-        enableLeafAlbedoTexture:  true,
-        enableLeafNormalTexture:  true,
-        birchTemplateStart: this._templateLibrary?.getTypeStartIndex('birch') ?? 0xFFFFFFFF,
-        birchTemplateCount: this._templateLibrary?.getVariants('birch')?.length ?? 0,
-        enableLeafWind: tcFlags.enableLeafWind ?? false,
-    });
-    await this._leafStreamer.initialize();
-}
+            this._leafStreamer = new LeafStreamer(this.device, this, {
+                lodController:            this._lodController,
+                leafMaskBaker:            this._leafMaskBaker,
+                leafAlbedoTextureManager: this.leafAlbedoTextureManager,
+                leafNormalTextureManager: this.leafNormalTextureManager,
+                enableLeafAlbedoTexture:  true,
+                enableLeafNormalTexture:  true,
+                birchTemplateStart: this._templateLibrary?.getTypeStartIndex('birch') ?? 0xFFFFFFFF,
+                birchTemplateCount: this._templateLibrary?.getVariants('birch')?.length ?? 0,
+                enableLeafWind: tcFlags.enableLeafWind ?? false,
+            });
+            await this._leafStreamer.initialize();
+        }
 
         this._initialized = true;
         Logger.info(
@@ -700,20 +654,11 @@ if (this._enableNearTier) {
     }
 
     _createFarTreeBakePipeline() {
-        farDbgAs(
-            `_createFarTreeBakePipeline — ` +
-            `farTreeSourceCache=${!!this._farTreeSourceCache} ` +
-            `farTreeSourceCache.enabled=${this._farTreeSourceCache?.enabled} ` +
-            `farTreeSourceCache.initialized=${this._farTreeSourceCache?._initialized} ` +
-            `useFarTierClone=${this._useFarTierClone}`
-        );
         if (!this._farTreeSourceCache?.enabled) {
-            farDbgAs(`_createFarTreeBakePipeline: SKIPPED — farTreeSourceCache not enabled`);
             this._farTreeBakePipeline = null;
             this._farTreeBakeBindGroupLayout = null;
             return;
         }
-        farDbgAs(`_createFarTreeBakePipeline: creating bake pipeline`);
     
         const heightSampleType = gpuFormatSampleType(
             this.tileStreamer?.textureFormats?.height || 'r32float'
@@ -780,30 +725,6 @@ if (this._enableNearTier) {
     }
 
     _maybeRebuildFarTreeBakeBindGroup() {
-        // ── DBG: log every call until bind group is built ────────────────────
-        if (FAR_TREE_DBG_ENABLED && !this._farTreeBakeBindGroup) {
-            const arrayTextures = this.tileStreamer.getArrayTextures();
-            const heightGPU = arrayTextures?.height?._gpuTexture?.texture;
-            const tileGPU   = arrayTextures?.tile?._gpuTexture?.texture;
-            const scatterGPU = arrayTextures?.scatter?._gpuTexture?.texture;
-            const selBufReady = this._assetSelectionBuffer?.isReady?.();
-            const tileMapKey = this._scatterTreeTileMapKey;
-            const tileMapBuf = selBufReady ? this._assetSelectionBuffer.getTileMapBuffer(tileMapKey) : null;
-            if (!this._dbg_farBakeBGLogCount) this._dbg_farBakeBGLogCount = 0;
-            this._dbg_farBakeBGLogCount++;
-            if (this._dbg_farBakeBGLogCount <= 5 || (this._dbg_farBakeBGLogCount % 120) === 0) {
-                farDbgAs(
-                    `_maybeRebuildFarTreeBakeBindGroup #${this._dbg_farBakeBGLogCount} — ` +
-                    `bakePipeline=${!!this._farTreeBakePipeline} bakeLayout=${!!this._farTreeBakeBindGroupLayout} ` +
-                    `cacheEnabled=${!!this._farTreeSourceCache?.enabled}\n` +
-                    `  textures: height=${!!heightGPU} tile=${!!tileGPU} scatter=${!!scatterGPU}\n` +
-                    `  selectionBuffer: ready=${selBufReady} tileMapKey=${tileMapKey} tileMapBuf=${!!tileMapBuf}\n` +
-                    `  instanceBuffer=${!!this._farTreeSourceCache?.instanceBuffer} ` +
-                    `counterBuffer=${!!this._farTreeSourceCache?.counterBuffer}`
-                );
-            }
-        }
-        // ───────────────────────────────────────────────────────────────────
         if (!this._farTreeBakePipeline || !this._farTreeBakeBindGroupLayout || !this._farTreeSourceCache?.enabled) {
             return;
         }
@@ -1452,13 +1373,6 @@ if (this._enableNearTier) {
             counterBuffer: null,
             bindGroup: null,
         };
-        this._producerDebugPoolReadbackBuffer?.destroy();
-        this._producerDebugGroundPropReadbackBuffer?.destroy();
-        this._producerDebugPoolReadbackBuffer = null;
-        this._producerDebugGroundPropReadbackBuffer = null;
-        this._producerDebugQueued = false;
-        this._producerDebugPending = false;
-        this._producerDebugHasGroundPropSnapshot = false;
         this._scatterGroupMaskBakePipeline = null;
         this._scatterGroupMaskBakeBindGroupLayout = null;
         this._scatterGroupMaskBakeBindGroup = null;
@@ -1527,37 +1441,12 @@ if (this._enableNearTier) {
         
     }
 
-
-
     _dispatchFarTreeBakes(commandEncoder) {
-        if (FAR_TREE_DBG_ENABLED) {
-            if (!this._dbg_farDispatchCallCount) this._dbg_farDispatchCallCount = 0;
-            this._dbg_farDispatchCallCount++;
-            const logDispatch = this._dbg_farDispatchCallCount <= 5 || (this._dbg_farDispatchCallCount % 120) === 0;
-            if (logDispatch) {
-                const sc = this._farTreeSourceCache;
-                farDbgAs(
-                    `_dispatchFarTreeBakes #${this._dbg_farDispatchCallCount} — ` +
-                    `cacheEnabled=${sc?.enabled} ` +
-                    `bakePipeline=${!!this._farTreeBakePipeline} bakeBG=${!!this._farTreeBakeBindGroup} ` +
-                    `pendingBakes=${sc?.pendingBakes ?? 'N/A'} ` +
-                    `allActiveLayers=${sc?.totalActiveLayerCount ?? 'N/A'}`
-                );
-            }
-        }
         if (!this._farTreeSourceCache?.enabled) return false;
         if (!this._farTreeBakePipeline || !this._farTreeBakeBindGroup) {
-            if (FAR_TREE_DBG_ENABLED && !this._dbg_farDispatchNoPipelineLogged) {
-                this._dbg_farDispatchNoPipelineLogged = true;
-                farDbgAs(
-                    `_dispatchFarTreeBakes: BLOCKED — ` +
-                    `pipeline=${!!this._farTreeBakePipeline} BG=${!!this._farTreeBakeBindGroup}`
-                );
-            }
             return false;
         }
         if (this._farTreeSourceCache.pendingBakes === 0) return false;
-        farDbgAs(`_dispatchFarTreeBakes: FIRING batch — pending=${this._farTreeSourceCache.pendingBakes}`);
     
         const batch = this._farTreeSourceCache.popBakeBatch();
         if (!batch || batch.length === 0) return false;
@@ -1599,71 +1488,141 @@ if (this._enableNearTier) {
         this._farTreeSourceCache.markBakeBatchSubmitted(batch);
         return true;
     }
-update(commandEncoder, camera) {
-    if (!this._initialized) return;
-    this._frameCount++;
+    update(commandEncoder, camera) {
+        if (!this._initialized) return;
+        this._frameCount++;
 
-    if ((this._frameCount % 120) === 0 && this._farTreeSourceCache) {
-        Logger.info(
-            `${this._logTag} [FarCache] ` +
-            `selected=${this._farTreeSourceCache.activeLayerCount} ` +
-            `resident=${this._farTreeSourceCache.totalActiveLayerCount} ` +
-            `pending=${this._farTreeSourceCache.pendingBakes}`
-        );
-    }
-    if ((this._frameCount % 120) === 1) {
-        this._bakedAssetTileCache?.syncFromTileStreamer(this.tileStreamer);
-        this._groundPropCache?.syncFromTileCache(this._bakedAssetTileCache, false);
-        this._treeSourceCache?.syncFromTileCache(this._bakedAssetTileCache, false);
-        this._farTreeSourceCache?.syncFromTileCache(this._bakedAssetTileCache, false);
-        this._clusterTreeSystem?.syncFromTileCache(this._bakedAssetTileCache, false);
-        this._seedScatterGroupPolicyMasks();
-        this._forceScatter = true;
-    }
+        if ((this._frameCount % 120) === 0 && this._farTreeSourceCache) {
+            Logger.info(
+                `${this._logTag} [FarCache] ` +
+                `selected=${this._farTreeSourceCache.activeLayerCount} ` +
+                `resident=${this._farTreeSourceCache.totalActiveLayerCount} ` +
+                `pending=${this._farTreeSourceCache.pendingBakes}`
+            );
+        }
+        if ((this._frameCount % 120) === 1) {
+            this._bakedAssetTileCache?.syncFromTileStreamer(this.tileStreamer);
+            this._groundPropCache?.syncFromTileCache(this._bakedAssetTileCache, false);
+            this._treeSourceCache?.syncFromTileCache(this._bakedAssetTileCache, false);
+            this._farTreeSourceCache?.syncFromTileCache(this._bakedAssetTileCache, false);
+            this._clusterTreeSystem?.syncFromTileCache(this._bakedAssetTileCache, false);
+            this._seedScatterGroupPolicyMasks();
+            this._forceScatter = true;
+        }
 
-    this._maybeRebuildScatterBindGroups();
-    this._maybeRebuildFieldScatterBindGroups();
-    this._maybeRebuildGroundPropBakeBindGroup();
-    this._maybeRebuildGroundPropGatherBindGroup();
-    this._maybeRebuildTreeSourceBakeBindGroup();
-    this._maybeRebuildTreeSourceGatherBindGroup();
-    this._maybeRebuildIndirectBindGroup();
-    this._maybeRebuildFarTreeBakeBindGroup();
+        this._maybeRebuildScatterBindGroups();
+        this._maybeRebuildFieldScatterBindGroups();
+        this._maybeRebuildGroundPropBakeBindGroup();
+        this._maybeRebuildGroundPropGatherBindGroup();
+        this._maybeRebuildTreeSourceBakeBindGroup();
+        this._maybeRebuildTreeSourceGatherBindGroup();
+        this._maybeRebuildIndirectBindGroup();
+        this._maybeRebuildFarTreeBakeBindGroup();
 
-    const runtimeScatterReady = this._scatterPipelines.length === 0
-        || this._scatterPipelines.every(pass => pass.bindGroup);
-    const fieldScatterReady = this._fieldScatterPipelines.every(pass => pass.bindGroup);
-    const groundPropReady = !this._groundPropCache?.enabled
-        || (this._groundPropBakeBindGroup && this._groundPropGatherBindGroup);
-    const treeSourceReady = !this._treeSourceCache?.enabled
-        || (this._treeSourceBakeBindGroup && this._treeSourceGatherBindGroup);
-    if (!runtimeScatterReady || !fieldScatterReady || !groundPropReady || !treeSourceReady || !this._indirectBindGroup) {
-        // Zero indirect args so stale draw counts don't execute.
-        this.device.queue.writeBuffer(this._pool.indirectBuffer, 0, this._indirectZeros);
-        return;
-    }
+        const runtimeScatterReady = this._scatterPipelines.length === 0
+            || this._scatterPipelines.every(pass => pass.bindGroup);
+        const fieldScatterReady = this._fieldScatterPipelines.every(pass => pass.bindGroup);
+        const groundPropReady = !this._groundPropCache?.enabled
+            || (this._groundPropBakeBindGroup && this._groundPropGatherBindGroup);
+        const treeSourceReady = !this._treeSourceCache?.enabled
+            || (this._treeSourceBakeBindGroup && this._treeSourceGatherBindGroup);
+        if (!runtimeScatterReady || !fieldScatterReady || !groundPropReady || !treeSourceReady || !this._indirectBindGroup) {
+            // Zero indirect args so stale draw counts don't execute.
+            this.device.queue.writeBuffer(this._pool.indirectBuffer, 0, this._indirectZeros);
+            return;
+        }
 
-    this._drainAOCommits();
-    this._drainScatterGroupCommits();
-    this._treeSourceCache?.refreshVisibleOwnerLayers(this.tileStreamer);
-    this._farTreeSourceCache?.refreshVisibleOwnerLayers(this.tileStreamer);
-    this._dispatchScatterGroupMaskBakes(commandEncoder);
-    const bakedGroundFieldThisFrame = this._dispatchGroundFieldBakes(commandEncoder);
-    const bakedGroundPropsThisFrame = this._dispatchGroundPropBakes(commandEncoder);
-    const bakedTreesThisFrame = this._dispatchTreeSourceBakes(commandEncoder);
-    const bakedFarTreesThisFrame = this._dispatchFarTreeBakes(commandEncoder);
-    
-    const bakeDrivenScatter =
-        bakedGroundFieldThisFrame ||
-        bakedGroundPropsThisFrame ||
-        bakedTreesThisFrame ||
-        bakedFarTreesThisFrame;
+        this._drainAOCommits();
+        this._drainScatterGroupCommits();
+        this._treeSourceCache?.refreshVisibleOwnerLayers(this.tileStreamer);
+        this._farTreeSourceCache?.refreshVisibleOwnerLayers(this.tileStreamer);
+        this._dispatchScatterGroupMaskBakes(commandEncoder);
+        const bakedGroundFieldThisFrame = this._dispatchGroundFieldBakes(commandEncoder);
+        const bakedGroundPropsThisFrame = this._dispatchGroundPropBakes(commandEncoder);
+        const bakedTreesThisFrame = this._dispatchTreeSourceBakes(commandEncoder);
+        const bakedFarTreesThisFrame = this._dispatchFarTreeBakes(commandEncoder);
 
-    if (bakeDrivenScatter) {
-        this._forceScatter = true;
-    }
+        const bakeDrivenScatter =
+            bakedGroundFieldThisFrame ||
+            bakedGroundPropsThisFrame ||
+            bakedTreesThisFrame ||
+            bakedFarTreesThisFrame;
 
-    if (!bakeDrivenScatter && !this._shouldUpdateScatter(camera)) {
+        if (bakeDrivenScatter) {
+            this._forceScatter = true;
+        }
+
+        if (!bakeDrivenScatter && !this._shouldUpdateScatter(camera)) {
+            if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
+            if (this._treeMidSystem)     this._treeMidSystem.update(commandEncoder, camera);
+            if (this._treeFarSystem)     this._treeFarSystem.update(commandEncoder, camera);
+            if (this._clusterTreeSystem) this._clusterTreeSystem.update(commandEncoder, camera);
+            if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
+            if (this._leafStreamer && this.enableLeafRendering) {
+                this._leafStreamer.update(commandEncoder, camera);
+            }
+            this._dispatchAOBakes(commandEncoder);
+            return;
+        }
+
+        this._updateScatterParams(camera);
+        this._updateClimateUniforms();
+        this._pool.resetCounters();
+        this._refreshActiveScatterGroupBits();
+        this._refreshActiveFieldBits();
+
+        if (this._scatterPipelines.length > 0) {
+            const fillPass = commandEncoder.beginComputePass({ label: 'AssetScatterDispatchFill' });
+            fillPass.setPipeline(this._scatterDispatchPipeline);
+            fillPass.setBindGroup(0, this._scatterDispatchBindGroup);
+            fillPass.dispatchWorkgroups(1);
+            fillPass.end();
+        }
+        {
+            for (const fieldPass of this._fieldScatterPipelines) {
+                if (!this._shouldDispatchFieldScatterPass(fieldPass)) continue;
+                const pass = commandEncoder.beginComputePass({ label: `AssetFieldScatter-${fieldPass.label}` });
+                pass.setPipeline(fieldPass.pipeline);
+                pass.setBindGroup(0, fieldPass.bindGroup);
+                pass.dispatchWorkgroups(this._fieldActiveLayerCount);
+                pass.end();
+            }
+        }
+        {
+            for (const scatterPass of this._scatterPipelines) {
+                if (!this._shouldDispatchScatterPass(scatterPass)) continue;
+                const pass = commandEncoder.beginComputePass({ label: `AssetScatter-${scatterPass.label}` });
+                pass.setPipeline(scatterPass.pipeline);
+                pass.setBindGroup(0, scatterPass.bindGroup);
+                pass.dispatchWorkgroupsIndirect(this._scatterDispatchArgsBuffer, 0);
+                pass.end();
+            }
+        }
+        {
+            if (this._shouldDispatchTreeSourceGather()) {
+                const pass = commandEncoder.beginComputePass({ label: 'TreeSource-Gather' });
+                pass.setPipeline(this._treeSourceGatherPipeline);
+                pass.setBindGroup(0, this._treeSourceGatherBindGroup);
+                pass.dispatchWorkgroups(this._treeSourceCache.activeLayerCount);
+                pass.end();
+            }
+        }
+        {
+            if (this._shouldDispatchGroundPropGather()) {
+                const pass = commandEncoder.beginComputePass({ label: 'GroundProp-Gather' });
+                pass.setPipeline(this._groundPropGatherPipeline);
+                pass.setBindGroup(0, this._groundPropGatherBindGroup);
+                pass.dispatchWorkgroups(this._groundPropCache.activeLayerCount);
+                pass.end();
+            }
+        }
+        {
+            const pass = commandEncoder.beginComputePass({ label: 'AssetIndirectBuilder' });
+            pass.setPipeline(this._indirectPipeline);
+            pass.setBindGroup(0, this._indirectBindGroup);
+            pass.dispatchWorkgroups(1);
+            pass.end();
+        }
         if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
         if (this._treeMidSystem)     this._treeMidSystem.update(commandEncoder, camera);
         if (this._treeFarSystem)     this._treeFarSystem.update(commandEncoder, camera);
@@ -1672,159 +1631,82 @@ update(commandEncoder, camera) {
         if (this._leafStreamer && this.enableLeafRendering) {
             this._leafStreamer.update(commandEncoder, camera);
         }
+
         this._dispatchAOBakes(commandEncoder);
-        return;
-    }
 
-    this._updateScatterParams(camera);
-    this._updateClimateUniforms();
-    this._pool.resetCounters();
-    this._refreshActiveScatterGroupBits();
-    this._refreshActiveFieldBits();
-
-    if (this._scatterPipelines.length > 0) {
-        const fillPass = commandEncoder.beginComputePass({ label: 'AssetScatterDispatchFill' });
-        fillPass.setPipeline(this._scatterDispatchPipeline);
-        fillPass.setBindGroup(0, this._scatterDispatchBindGroup);
-        fillPass.dispatchWorkgroups(1);
-        fillPass.end();
-    }
-    {
-        for (const fieldPass of this._fieldScatterPipelines) {
-            if (!this._shouldDispatchFieldScatterPass(fieldPass)) continue;
-            const pass = commandEncoder.beginComputePass({ label: `AssetFieldScatter-${fieldPass.label}` });
-            pass.setPipeline(fieldPass.pipeline);
-            pass.setBindGroup(0, fieldPass.bindGroup);
-            pass.dispatchWorkgroups(this._fieldActiveLayerCount);
-            pass.end();
+        this._lastScatterFrame = this._frameCount;
+        if (camera?.position) {
+            this._lastScatterPosition = {
+                x: camera.position.x, y: camera.position.y, z: camera.position.z,
+            };
         }
+        this._lastScatterDirection = this._getCameraForward(camera);
+        this._forceScatter = false;
     }
-    {
-        for (const scatterPass of this._scatterPipelines) {
-            if (!this._shouldDispatchScatterPass(scatterPass)) continue;
-            const pass = commandEncoder.beginComputePass({ label: `AssetScatter-${scatterPass.label}` });
-            pass.setPipeline(scatterPass.pipeline);
-            pass.setBindGroup(0, scatterPass.bindGroup);
-            pass.dispatchWorkgroupsIndirect(this._scatterDispatchArgsBuffer, 0);
-            pass.end();
-        }
-    }
-    {
-        if (this._shouldDispatchTreeSourceGather()) {
-            const pass = commandEncoder.beginComputePass({ label: 'TreeSource-Gather' });
-            pass.setPipeline(this._treeSourceGatherPipeline);
-            pass.setBindGroup(0, this._treeSourceGatherBindGroup);
-            pass.dispatchWorkgroups(this._treeSourceCache.activeLayerCount);
-            pass.end();
-        }
-    }
-    {
-        if (this._shouldDispatchGroundPropGather()) {
-            const pass = commandEncoder.beginComputePass({ label: 'GroundProp-Gather' });
-            pass.setPipeline(this._groundPropGatherPipeline);
-            pass.setBindGroup(0, this._groundPropGatherBindGroup);
-            pass.dispatchWorkgroups(this._groundPropCache.activeLayerCount);
-            pass.end();
-        }
-    }
-    {
-        const pass = commandEncoder.beginComputePass({ label: 'AssetIndirectBuilder' });
-        pass.setPipeline(this._indirectPipeline);
-        pass.setBindGroup(0, this._indirectBindGroup);
-        pass.dispatchWorkgroups(1);
-        pass.end();
-    }
-    this._queueProducerDebugReadback(commandEncoder);
-/*
-    if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
-    if (this._treeMidNearSystem) this._treeMidNearSystem.update(commandEncoder, camera);
-    if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
-*/
-        if (this._treeDetailSystem)  this._treeDetailSystem.update(commandEncoder, camera);
-       // if (this._treeMidNearSystem) this._treeMidNearSystem.update(commandEncoder, camera); 
-        if (this._treeMidSystem)     this._treeMidSystem.update(commandEncoder, camera);    
-        if (this._treeFarSystem)     this._treeFarSystem.update(commandEncoder, camera);   
-        if (this._clusterTreeSystem) this._clusterTreeSystem.update(commandEncoder, camera);
-        if (this._branchRenderer)    this._branchRenderer.update(commandEncoder, camera);
-        if (this._leafStreamer && this.enableLeafRendering) {
-            this._leafStreamer.update(commandEncoder, camera);
-        }
 
-    this._dispatchAOBakes(commandEncoder);
+    /**
+     * Pull newly-committed tiles from TileStreamer and push them into the
+     * AO bake queue. The queue is deduped by layer in the baker so eviction
+     * + re-commit to the same layer doesn't produce stale bakes.
+     */
+    _drainAOCommits() {
+        if (!this._aoBaker?.enabled) return;
 
-    this._lastScatterFrame = this._frameCount;
-    if (camera?.position) {
-        this._lastScatterPosition = {
-            x: camera.position.x, y: camera.position.y, z: camera.position.z,
-        };
-    }
-    this._lastScatterDirection = this._getCameraForward(camera);
-    this._forceScatter = false;
-}
+        const commits = this.tileStreamer.drainAOCommitQueue?.();
+        if (!commits || commits.length === 0) return;
 
-/**
- * Pull newly-committed tiles from TileStreamer and push them into the
- * AO bake queue. The queue is deduped by layer in the baker so eviction
- * + re-commit to the same layer doesn't produce stale bakes.
- */
-_drainAOCommits() {
-    if (!this._aoBaker?.enabled) return;
+        for (const c of commits) {
+            this._aoBaker.enqueueBake(c.face, c.depth, c.x, c.y, c.layer);
 
-    const commits = this.tileStreamer.drainAOCommitQueue?.();
-    if (!commits || commits.length === 0) return;
-
-    for (const c of commits) {
-        this._aoBaker.enqueueBake(c.face, c.depth, c.x, c.y, c.layer);
-
-        // Re-bake same-depth neighbors so they pick up this tile's layer
-        // for cross-tile AO sampling.
-        const offsets = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
-        const gridSize = 1 << c.depth;
-        for (const [dx, dy] of offsets) {
-            const nx = c.x + dx, ny = c.y + dy;
-            if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
-            const nLayer = this.tileStreamer?.getLoadedLayer?.(c.face, c.depth, nx, ny);
-            if (nLayer != null && nLayer >= 0) {
-                this._aoBaker.enqueueBake(c.face, c.depth, nx, ny, nLayer);
+            // Re-bake same-depth neighbors so they pick up this tile's layer
+            // for cross-tile AO sampling.
+            const offsets = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
+            const gridSize = 1 << c.depth;
+            for (const [dx, dy] of offsets) {
+                const nx = c.x + dx, ny = c.y + dy;
+                if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
+                const nLayer = this.tileStreamer?.getLoadedLayer?.(c.face, c.depth, nx, ny);
+                if (nLayer != null && nLayer >= 0) {
+                    this._aoBaker.enqueueBake(c.face, c.depth, nx, ny, nLayer);
+                }
             }
         }
     }
-}
 
-_drainScatterGroupCommits() {
-    // Process commits from the current frame immediately (no 1-frame deferral).
-    // Previously this deferred one frame to avoid bind group churn, but that
-    // added a guaranteed 16 ms latency to every tile commit. The bake
-    // dispatches triggered here are enqueued, not immediately submitted, so
-    // there is no read-while-rendering hazard.
-    this._deferredScatterCommits = [];
-    const commits = this.tileStreamer.drainScatterCommitQueue?.() ?? [];
-    if (!commits || commits.length === 0) return;
+    _drainScatterGroupCommits() {
+        // Process commits from the current frame immediately (no 1-frame deferral).
+        // Previously this deferred one frame to avoid bind group churn, but that
+        // added a guaranteed 16 ms latency to every tile commit. The bake
+        // dispatches triggered here are enqueued, not immediately submitted, so
+        // there is no read-while-rendering hazard.
+        this._deferredScatterCommits = [];
+        const commits = this.tileStreamer.drainScatterCommitQueue?.() ?? [];
+        if (!commits || commits.length === 0) return;
 
-    this._bakedAssetTileCache?.applyCommitBatch(commits);
-    this._groundPropCache?.applyCommitBatch(this._bakedAssetTileCache);
-    this._treeSourceCache?.applyCommitBatch(this._bakedAssetTileCache);
-    this._farTreeSourceCache?.applyCommitBatch(this._bakedAssetTileCache);
-    this._clusterTreeSystem?.applyCommitBatch(this._bakedAssetTileCache);
-    this._scatterGroupActivityDirty = true;
-    this._fieldActivityDirty = true;
-    this._enqueueGroundFieldBakeBatch(commits);
-    for (const commit of commits) {
-        const entry = this._bakedAssetTileCache?.getLayerEntry?.(commit.layer);
-        if (!entry) continue;
-        this._updateScatterGroupPolicyForEntry(entry);
+        this._bakedAssetTileCache?.applyCommitBatch(commits);
+        this._groundPropCache?.applyCommitBatch(this._bakedAssetTileCache);
+        this._treeSourceCache?.applyCommitBatch(this._bakedAssetTileCache);
+        this._farTreeSourceCache?.applyCommitBatch(this._bakedAssetTileCache);
+        this._clusterTreeSystem?.applyCommitBatch(this._bakedAssetTileCache);
+        this._scatterGroupActivityDirty = true;
+        this._fieldActivityDirty = true;
+        this._enqueueGroundFieldBakeBatch(commits);
+        for (const commit of commits) {
+            const entry = this._bakedAssetTileCache?.getLayerEntry?.(commit.layer);
+            if (!entry) continue;
+            this._updateScatterGroupPolicyForEntry(entry);
+        }
+
+        if (!this._enableScatterEligibilityGate || !this._hasLegacyRuntimeGroundScatter()) {
+            return;
+        }
+
+        for (const commit of commits) {
+            this._scatterGroupPendingLayers.add(commit.layer);
+        }
+
+        this._forceScatter = true;
     }
-
-    if (!this._enableScatterEligibilityGate || !this._hasLegacyRuntimeGroundScatter()) {
-        return;
-    }
-
-    for (const commit of commits) {
-        this._scatterGroupPendingLayers.add(commit.layer);
-    }
-
-    this._forceScatter = true;
-}
 
     _seedGroundFieldBakes() {
         if (!this._groundFieldBaker?.enabled) return;
@@ -1842,21 +1724,21 @@ _drainScatterGroupCommits() {
         if (!this._groundFieldBaker?.enabled) return;
         for (const commit of commits) {
             const entry = this._bakedAssetTileCache?.getLayerEntry?.(commit.layer);
-        if (!entry) continue;
-        this._enqueueGroundFieldBakeForEntry(entry);
+            if (!entry) continue;
+            this._enqueueGroundFieldBakeForEntry(entry);
+        }
     }
-}
 
-_enqueueGroundFieldBakeForEntry(entry) {
-    if (!this._groundFieldBaker?.enabled || !entry) return;
-    const hasFieldArchetype = this._computeFieldRenderMask(entry) !== 0;
-    this._groundFieldBaker.enqueueBake(
-        entry.face,
-        entry.depth,
-        entry.x,
-        entry.y,
-        entry.layer,
-        hasFieldArchetype
+    _enqueueGroundFieldBakeForEntry(entry) {
+        if (!this._groundFieldBaker?.enabled || !entry) return;
+        const hasFieldArchetype = this._computeFieldRenderMask(entry) !== 0;
+        this._groundFieldBaker.enqueueBake(
+            entry.face,
+            entry.depth,
+            entry.x,
+            entry.y,
+            entry.layer,
+            hasFieldArchetype
         );
     }
 
@@ -2067,160 +1949,160 @@ _enqueueGroundFieldBakeForEntry(entry) {
         }
     }
 
-_dispatchScatterGroupMaskBakes(commandEncoder) {
-    if (!this._hasLegacyRuntimeGroundScatter()) return;
-    if (!this._scatterGroupMaskBakePipeline || !this._scatterGroupMaskBakeBindGroup) return;
-    if (this._scatterGroupPendingLayers.size === 0) return;
+    _dispatchScatterGroupMaskBakes(commandEncoder) {
+        if (!this._hasLegacyRuntimeGroundScatter()) return;
+        if (!this._scatterGroupMaskBakePipeline || !this._scatterGroupMaskBakeBindGroup) return;
+        if (this._scatterGroupPendingLayers.size === 0) return;
 
-    const pendingLayers = Uint32Array.from(this._scatterGroupPendingLayers);
-    this._scatterGroupPendingLayers.clear();
+        const pendingLayers = Uint32Array.from(this._scatterGroupPendingLayers);
+        this._scatterGroupPendingLayers.clear();
 
-    this.device.queue.writeBuffer(this._scatterGroupPendingLayersBuffer, 0, pendingLayers);
-    this.device.queue.writeBuffer(
-        this._scatterGroupMaskBakeConfigBuffer,
-        0,
-        new Uint32Array([pendingLayers.length, this._assetSelectionBuffer.maxTileType, 0, 0])
-    );
+        this.device.queue.writeBuffer(this._scatterGroupPendingLayersBuffer, 0, pendingLayers);
+        this.device.queue.writeBuffer(
+            this._scatterGroupMaskBakeConfigBuffer,
+            0,
+            new Uint32Array([pendingLayers.length, this._assetSelectionBuffer.maxTileType, 0, 0])
+        );
 
-    const pass = commandEncoder.beginComputePass({ label: 'AssetScatterGroupMaskBake' });
-    pass.setPipeline(this._scatterGroupMaskBakePipeline);
-    pass.setBindGroup(0, this._scatterGroupMaskBakeBindGroup);
-    pass.dispatchWorkgroups(pendingLayers.length);
-    pass.end();
-}
-
-/**
- * Dispatch queued AO bakes. Needs the scatter + tile textures for the
- * bake bind group; those are the same GPU textures the scatter pass uses
- * so we just pull them from the tile streamer.
- */
-_dispatchAOBakes(commandEncoder) {
-    if (!this._aoBaker?.enabled) return;
-    if (this._aoBaker.pendingBakes === 0) return;
-
-    const arr = this.tileStreamer.getArrayTextures();
-    const scatterGPU = arr?.scatter?._gpuTexture?.texture;
-    const tileGPU    = arr?.tile?._gpuTexture?.texture;
-
-    this._aoBaker.update(commandEncoder, scatterGPU, tileGPU);
-}
-
-_dispatchGroundFieldBakes(commandEncoder) {
-    if (!this._groundFieldBaker?.enabled) return false;
-    if (this._groundFieldBaker.pendingBakes === 0) return false;
-
-    const arr = this.tileStreamer.getArrayTextures();
-    const climateGPU = arr?.climate?._gpuTexture?.texture;
-    const tileGPU = arr?.tile?._gpuTexture?.texture;
-    if (!climateGPU || !tileGPU) return false;
-
-    this._groundFieldBaker.update(commandEncoder, climateGPU, tileGPU);
-    return true;
-}
-
-_dispatchGroundPropBakes(commandEncoder) {
-    if (!this._groundPropCache?.enabled) return false;
-    if (!this._groundPropBakePipeline || !this._groundPropBakeBindGroup) return false;
-    if (this._groundPropCache.pendingBakes === 0) return false;
-
-    const batch = this._groundPropCache.popBakeBatch();
-    if (!batch || batch.length === 0) return false;
-
-    const data = new Uint32Array(batch.length * 8);
-    for (let i = 0; i < batch.length; i++) {
-        const offset = i * 8;
-        const tile = batch[i];
-        data[offset + 0] = tile.face >>> 0;
-        data[offset + 1] = tile.depth >>> 0;
-        data[offset + 2] = tile.tileX >>> 0;
-        data[offset + 3] = tile.tileY >>> 0;
-        data[offset + 4] = tile.layer >>> 0;
-        data[offset + 5] = tile.flags >>> 0;
-        data[offset + 6] = 0;
-        data[offset + 7] = 0;
+        const pass = commandEncoder.beginComputePass({ label: 'AssetScatterGroupMaskBake' });
+        pass.setPipeline(this._scatterGroupMaskBakePipeline);
+        pass.setBindGroup(0, this._scatterGroupMaskBakeBindGroup);
+        pass.dispatchWorkgroups(pendingLayers.length);
+        pass.end();
     }
-    this.device.queue.writeBuffer(this._groundPropBakeTileBuffer, 0, data);
 
-    const paramData = new ArrayBuffer(256);
-    const f32 = new Float32Array(paramData);
-    const u32 = new Uint32Array(paramData);
-    f32[0] = this.planetConfig.origin?.x ?? 0;
-    f32[1] = this.planetConfig.origin?.y ?? 0;
-    f32[2] = this.planetConfig.origin?.z ?? 0;
-    // Matches the existing ScatterParams packing used successfully elsewhere:
-    // vec3 + scalar share one 16-byte block.
-    f32[3] = this.planetConfig.radius ?? 0;
-    f32[4] = this.planetConfig.heightScale ?? this.planetConfig.maxHeight ?? 0;
-    f32[5] = this.quadtreeGPU?.faceSize ?? (this.planetConfig.radius * 2);
-    u32[6] = this.engineConfig.seed >>> 0;
-    u32[7] = batch.length >>> 0;
-    this.device.queue.writeBuffer(this._groundPropBakeParamBuffer, 0, paramData);
+    /**
+     * Dispatch queued AO bakes. Needs the scatter + tile textures for the
+     * bake bind group; those are the same GPU textures the scatter pass uses
+     * so we just pull them from the tile streamer.
+     */
+    _dispatchAOBakes(commandEncoder) {
+        if (!this._aoBaker?.enabled) return;
+        if (this._aoBaker.pendingBakes === 0) return;
 
-    const pass = commandEncoder.beginComputePass({ label: 'GroundProp-Bake' });
-    pass.setPipeline(this._groundPropBakePipeline);
-    pass.setBindGroup(0, this._groundPropBakeBindGroup);
-    pass.dispatchWorkgroups(batch.length);
-    pass.end();
-    return true;
-}
+        const arr = this.tileStreamer.getArrayTextures();
+        const scatterGPU = arr?.scatter?._gpuTexture?.texture;
+        const tileGPU    = arr?.tile?._gpuTexture?.texture;
 
-_dispatchTreeSourceBakes(commandEncoder) {
-    if (!this._treeSourceCache?.enabled) return false;
-    if (!this._treeSourceBakePipeline || !this._treeSourceBakeBindGroup) return false;
-    if (this._treeSourceCache.pendingBakes === 0) return false;
-
-    const batch = this._treeSourceCache.popBakeBatch();
-    if (!batch || batch.length === 0) return false;
-
-    const data = new Uint32Array(batch.length * 8);
-    for (let i = 0; i < batch.length; i++) {
-        const offset = i * 8;
-        const tile = batch[i];
-        data[offset + 0] = tile.face >>> 0;
-        data[offset + 1] = tile.depth >>> 0;
-        data[offset + 2] = tile.tileX >>> 0;
-        data[offset + 3] = tile.tileY >>> 0;
-        data[offset + 4] = tile.layer >>> 0;
-        data[offset + 5] = tile.flags >>> 0;
-        data[offset + 6] = 0;
-        data[offset + 7] = 0;
+        this._aoBaker.update(commandEncoder, scatterGPU, tileGPU);
     }
-    this.device.queue.writeBuffer(this._treeSourceBakeTileBuffer, 0, data);
 
-    const paramData = new ArrayBuffer(256);
-    const f32 = new Float32Array(paramData);
-    const u32 = new Uint32Array(paramData);
-    f32[0] = this.planetConfig.origin?.x ?? 0;
-    f32[1] = this.planetConfig.origin?.y ?? 0;
-    f32[2] = this.planetConfig.origin?.z ?? 0;
-    f32[3] = this.planetConfig.radius ?? 0;
-    f32[4] = this.planetConfig.heightScale ?? this.planetConfig.maxHeight ?? 0;
-    f32[5] = this.quadtreeGPU?.faceSize ?? (this.planetConfig.radius * 2);
-    u32[6] = this.engineConfig.seed >>> 0;
-    u32[7] = batch.length >>> 0;
-    this.device.queue.writeBuffer(this._treeSourceBakeParamBuffer, 0, paramData);
+    _dispatchGroundFieldBakes(commandEncoder) {
+        if (!this._groundFieldBaker?.enabled) return false;
+        if (this._groundFieldBaker.pendingBakes === 0) return false;
 
-    const pass = commandEncoder.beginComputePass({ label: 'TreeSource-Bake' });
-    pass.setPipeline(this._treeSourceBakePipeline);
-    pass.setBindGroup(0, this._treeSourceBakeBindGroup);
-    pass.dispatchWorkgroups(batch.length);
-    pass.end();
-    this._treeSourceCache.markBakeBatchSubmitted(batch);
-    return true;
-}
+        const arr = this.tileStreamer.getArrayTextures();
+        const climateGPU = arr?.climate?._gpuTexture?.texture;
+        const tileGPU = arr?.tile?._gpuTexture?.texture;
+        if (!climateGPU || !tileGPU) return false;
 
-/**
- * Exposed for asset self-occlusion later: asset shaders can sample this
- * same mask at their instance's face-UV to darken leaves/bark under
- * neighbouring canopies.
- */
-getTerrainAOTexture() {
-    return this._aoBaker?.getAOTextureWrapper() ?? null;
-}
+        this._groundFieldBaker.update(commandEncoder, climateGPU, tileGPU);
+        return true;
+    }
 
-getGroundFieldTexture() {
-    return this._groundFieldBaker?.getFieldTextureWrapper() ?? null;
-}
+    _dispatchGroundPropBakes(commandEncoder) {
+        if (!this._groundPropCache?.enabled) return false;
+        if (!this._groundPropBakePipeline || !this._groundPropBakeBindGroup) return false;
+        if (this._groundPropCache.pendingBakes === 0) return false;
+
+        const batch = this._groundPropCache.popBakeBatch();
+        if (!batch || batch.length === 0) return false;
+
+        const data = new Uint32Array(batch.length * 8);
+        for (let i = 0; i < batch.length; i++) {
+            const offset = i * 8;
+            const tile = batch[i];
+            data[offset + 0] = tile.face >>> 0;
+            data[offset + 1] = tile.depth >>> 0;
+            data[offset + 2] = tile.tileX >>> 0;
+            data[offset + 3] = tile.tileY >>> 0;
+            data[offset + 4] = tile.layer >>> 0;
+            data[offset + 5] = tile.flags >>> 0;
+            data[offset + 6] = 0;
+            data[offset + 7] = 0;
+        }
+        this.device.queue.writeBuffer(this._groundPropBakeTileBuffer, 0, data);
+
+        const paramData = new ArrayBuffer(256);
+        const f32 = new Float32Array(paramData);
+        const u32 = new Uint32Array(paramData);
+        f32[0] = this.planetConfig.origin?.x ?? 0;
+        f32[1] = this.planetConfig.origin?.y ?? 0;
+        f32[2] = this.planetConfig.origin?.z ?? 0;
+        // Matches the existing ScatterParams packing used successfully elsewhere:
+        // vec3 + scalar share one 16-byte block.
+        f32[3] = this.planetConfig.radius ?? 0;
+        f32[4] = this.planetConfig.heightScale ?? this.planetConfig.maxHeight ?? 0;
+        f32[5] = this.quadtreeGPU?.faceSize ?? (this.planetConfig.radius * 2);
+        u32[6] = this.engineConfig.seed >>> 0;
+        u32[7] = batch.length >>> 0;
+        this.device.queue.writeBuffer(this._groundPropBakeParamBuffer, 0, paramData);
+
+        const pass = commandEncoder.beginComputePass({ label: 'GroundProp-Bake' });
+        pass.setPipeline(this._groundPropBakePipeline);
+        pass.setBindGroup(0, this._groundPropBakeBindGroup);
+        pass.dispatchWorkgroups(batch.length);
+        pass.end();
+        return true;
+    }
+
+    _dispatchTreeSourceBakes(commandEncoder) {
+        if (!this._treeSourceCache?.enabled) return false;
+        if (!this._treeSourceBakePipeline || !this._treeSourceBakeBindGroup) return false;
+        if (this._treeSourceCache.pendingBakes === 0) return false;
+
+        const batch = this._treeSourceCache.popBakeBatch();
+        if (!batch || batch.length === 0) return false;
+
+        const data = new Uint32Array(batch.length * 8);
+        for (let i = 0; i < batch.length; i++) {
+            const offset = i * 8;
+            const tile = batch[i];
+            data[offset + 0] = tile.face >>> 0;
+            data[offset + 1] = tile.depth >>> 0;
+            data[offset + 2] = tile.tileX >>> 0;
+            data[offset + 3] = tile.tileY >>> 0;
+            data[offset + 4] = tile.layer >>> 0;
+            data[offset + 5] = tile.flags >>> 0;
+            data[offset + 6] = 0;
+            data[offset + 7] = 0;
+        }
+        this.device.queue.writeBuffer(this._treeSourceBakeTileBuffer, 0, data);
+
+        const paramData = new ArrayBuffer(256);
+        const f32 = new Float32Array(paramData);
+        const u32 = new Uint32Array(paramData);
+        f32[0] = this.planetConfig.origin?.x ?? 0;
+        f32[1] = this.planetConfig.origin?.y ?? 0;
+        f32[2] = this.planetConfig.origin?.z ?? 0;
+        f32[3] = this.planetConfig.radius ?? 0;
+        f32[4] = this.planetConfig.heightScale ?? this.planetConfig.maxHeight ?? 0;
+        f32[5] = this.quadtreeGPU?.faceSize ?? (this.planetConfig.radius * 2);
+        u32[6] = this.engineConfig.seed >>> 0;
+        u32[7] = batch.length >>> 0;
+        this.device.queue.writeBuffer(this._treeSourceBakeParamBuffer, 0, paramData);
+
+        const pass = commandEncoder.beginComputePass({ label: 'TreeSource-Bake' });
+        pass.setPipeline(this._treeSourceBakePipeline);
+        pass.setBindGroup(0, this._treeSourceBakeBindGroup);
+        pass.dispatchWorkgroups(batch.length);
+        pass.end();
+        this._treeSourceCache.markBakeBatchSubmitted(batch);
+        return true;
+    }
+
+    /**
+     * Exposed for asset self-occlusion later: asset shaders can sample this
+     * same mask at their instance's face-UV to darken leaves/bark under
+     * neighbouring canopies.
+     */
+    getTerrainAOTexture() {
+        return this._aoBaker?.getAOTextureWrapper() ?? null;
+    }
+
+    getGroundFieldTexture() {
+        return this._groundFieldBaker?.getFieldTextureWrapper() ?? null;
+    }
 
     _refreshActiveScatterGroupBits() {
         if (!this._hasLegacyRuntimeGroundScatter()) {
@@ -2285,205 +2167,6 @@ getGroundFieldTexture() {
         );
     }
 
-    _queueProducerDebugReadback(commandEncoder) {
-        if (!this._producerDebugEnabled || !commandEncoder || !this._pool?.counterBuffer) return;
-        if (this._producerDebugPending) return;
-
-        if (this._producerDebugQueued) {
-            this._kickProducerDebugReadback();
-            return;
-        }
-
-        if ((this._frameCount % this._producerDebugInterval) !== 0) return;
-
-        this._ensureProducerDebugReadbackBuffers();
-        if (!this._producerDebugPoolReadbackBuffer) return;
-
-        const poolBytes = Math.max(4, this._totalBands * Uint32Array.BYTES_PER_ELEMENT);
-        commandEncoder.copyBufferToBuffer(
-            this._pool.counterBuffer,
-            0,
-            this._producerDebugPoolReadbackBuffer,
-            0,
-            poolBytes
-        );
-
-        this._producerDebugHasGroundPropSnapshot = false;
-        if (
-            this._groundPropCache?.enabled &&
-            this._groundPropCache.counterBuffer &&
-            this._producerDebugGroundPropReadbackBuffer
-        ) {
-            const propBytes = Math.max(
-                4,
-                (this.tileStreamer?.tilePoolSize ?? 1) * Uint32Array.BYTES_PER_ELEMENT
-            );
-            commandEncoder.copyBufferToBuffer(
-                this._groundPropCache.counterBuffer,
-                0,
-                this._producerDebugGroundPropReadbackBuffer,
-                0,
-                propBytes
-            );
-            this._producerDebugHasGroundPropSnapshot = true;
-        }
-
-        this._producerDebugQueued = true;
-    }
-
-    _ensureProducerDebugReadbackBuffers() {
-        if (!this._producerDebugPoolReadbackBuffer) {
-            this._producerDebugPoolReadbackBuffer = this.device.createBuffer({
-                label: 'AssetStreamer-ProducerDebug-Pool',
-                size: Math.max(256, this._totalBands * Uint32Array.BYTES_PER_ELEMENT),
-                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-            });
-        }
-        if (this._groundPropCache?.enabled && !this._producerDebugGroundPropReadbackBuffer) {
-            this._producerDebugGroundPropReadbackBuffer = this.device.createBuffer({
-                label: 'AssetStreamer-ProducerDebug-GroundProp',
-                size: Math.max(
-                    256,
-                    (this.tileStreamer?.tilePoolSize ?? 1) * Uint32Array.BYTES_PER_ELEMENT
-                ),
-                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-            });
-        }
-    }
-
-    _kickProducerDebugReadback() {
-        if (!this._producerDebugQueued || this._producerDebugPending || !this._producerDebugPoolReadbackBuffer) {
-            return;
-        }
-
-        const mapPromises = [this._producerDebugPoolReadbackBuffer.mapAsync(GPUMapMode.READ)];
-        if (this._producerDebugHasGroundPropSnapshot && this._producerDebugGroundPropReadbackBuffer) {
-            mapPromises.push(this._producerDebugGroundPropReadbackBuffer.mapAsync(GPUMapMode.READ));
-        }
-
-        this._producerDebugPending = true;
-        Promise.all(mapPromises).then(() => {
-            const poolBytes = Math.max(4, this._totalBands * Uint32Array.BYTES_PER_ELEMENT);
-            const poolData = new Uint32Array(
-                this._producerDebugPoolReadbackBuffer.getMappedRange(0, poolBytes).slice(0)
-            );
-
-            let groundPropSum = 0;
-            if (this._producerDebugHasGroundPropSnapshot && this._producerDebugGroundPropReadbackBuffer) {
-                const propBytes = Math.max(
-                    4,
-                    (this.tileStreamer?.tilePoolSize ?? 1) * Uint32Array.BYTES_PER_ELEMENT
-                );
-                const propData = new Uint32Array(
-                    this._producerDebugGroundPropReadbackBuffer.getMappedRange(0, propBytes).slice(0)
-                );
-                for (let i = 0; i < propData.length; i++) {
-                    groundPropSum += propData[i] >>> 0;
-                }
-            }
-
-            const archetypeTotals = new Map();
-            for (const bd of this._bandDescriptors ?? []) {
-                if (!bd) continue;
-                const key = bd.archetypeName || `band${bd.band}`;
-                archetypeTotals.set(key, (archetypeTotals.get(key) ?? 0) + (poolData[bd.band] >>> 0));
-            }
-
-            const treeBandBase = this.CAT_TREES * this.LODS_PER_CATEGORY;
-            const treeBandParts = [];
-            let treeRawTotal = 0;
-            let treeCapTotal = 0;
-            let treeOverflowTotal = 0;
-            let treeMaxOverflowBand = -1;
-            let treeMaxOverflowCount = 0;
-            for (let lod = 0; lod < this.LODS_PER_CATEGORY; lod++) {
-                const band = treeBandBase + lod;
-                const raw = poolData[band] >>> 0;
-                const cap = this._pool?.getBandCapacity(band) ?? 0;
-                const overflow = Math.max(0, raw - cap);
-                treeRawTotal += raw;
-                treeCapTotal += cap;
-                treeOverflowTotal += overflow;
-                if (overflow > treeMaxOverflowCount) {
-                    treeMaxOverflowCount = overflow;
-                    treeMaxOverflowBand = band;
-                }
-                treeBandParts.push(`b${band}=${raw}/${cap}`);
-            }
-
-            let fieldLayerCount = 0;
-            if (this._fieldRenderMasksCPU) {
-                for (let i = 0; i < this._fieldRenderMasksCPU.length; i++) {
-                    if (this._fieldRenderMasksCPU[i] !== 0) fieldLayerCount++;
-                }
-            }
-
-            const grass = archetypeTotals.get('grass_tuft') ?? 0;
-            const rocks = archetypeTotals.get('rock_small') ?? 0;
-            const fern = archetypeTotals.get('fern') ?? 0;
-            const mushroom = archetypeTotals.get('mushroom_capped') ?? 0;
-            const logs = archetypeTotals.get('fallen_log') ?? 0;
-            const stumps = archetypeTotals.get('tree_stump') ?? 0;
-            const nonTreePoolTotal = grass + rocks + fern + mushroom + logs + stumps;
-
-            const shouldProbeGrass = grass === 0 && fieldLayerCount > 0;
-            const shouldLog =
-                nonTreePoolTotal === 0 ||
-                shouldProbeGrass ||
-                groundPropSum > 0 ||
-                (this._frameCount % (this._producerDebugInterval * 2)) === 0;
-
-            if (shouldLog) {
-                Logger.warn(
-                    `${this._logTag} [BakeDiag] pool(` +
-                    `grass=${grass} rock=${rocks} fern=${fern} ` +
-                    `mushroom=${mushroom} log=${logs} stump=${stumps}) ` +
-                    `fieldLayers=${fieldLayerCount} activeFieldLayers=${this._fieldActiveLayerCount} ` +
-                    `fieldBits=0x${this._fieldActiveBits.toString(16)} ` +
-                    `propLayers=${this._groundPropCache?.activeLayerCount ?? 0} ` +
-                    `bakedPropInstances=${groundPropSum} ` +
-                    `pendingField=${this._groundFieldBaker?.pendingBakes ?? 0} ` +
-                    `pendingProp=${this._groundPropCache?.pendingBakes ?? 0}`
-                );
-
-                if (nonTreePoolTotal === 0 || shouldProbeGrass) {
-                    this._kickProducerTextureProbe();
-                }
-            }
-
-            const shouldLogTrees =
-                treeOverflowTotal > 0 ||
-                treeRawTotal === 0 ||
-                (this._frameCount % (this._producerDebugInterval * 2)) === 0;
-
-            if (true || shouldLogTrees) {
-                Logger.info(
-                    `${this._logTag} [TreePool] ` +
-                    `${treeBandParts.join(' ')} ` +
-                    `total=${treeRawTotal}/${treeCapTotal} ` +
-                    `overflow=${treeOverflowTotal}` +
-                    (treeMaxOverflowBand >= 0 ? ` maxOverflowBand=${treeMaxOverflowBand}` : '') +
-                    ` sourceLayers=${this._treeSourceCache?.activeLayerCount ?? 0}`
-                );
-            }
-
-            this._producerDebugPoolReadbackBuffer.unmap();
-            if (this._producerDebugHasGroundPropSnapshot && this._producerDebugGroundPropReadbackBuffer) {
-                this._producerDebugGroundPropReadbackBuffer.unmap();
-            }
-            this._producerDebugQueued = false;
-            this._producerDebugPending = false;
-            this._producerDebugHasGroundPropSnapshot = false;
-        }).catch((err) => {
-            Logger.warn(`${this._logTag} [BakeDiag] readback failed: ${err?.message || err}`);
-            try { this._producerDebugPoolReadbackBuffer?.unmap(); } catch (_) {}
-            try { this._producerDebugGroundPropReadbackBuffer?.unmap(); } catch (_) {}
-            this._producerDebugQueued = false;
-            this._producerDebugPending = false;
-            this._producerDebugHasGroundPropSnapshot = false;
-        });
-    }
-
     // ──────────────────────────────────────────────────────────────────────
     // Per-frame: render (TOTAL_BANDS indirect indexed draws)
     // ──────────────────────────────────────────────────────────────────────
@@ -2497,11 +2180,6 @@ getGroundFieldTexture() {
         const encoder = this.backend._renderPassEncoder;
         let currentPipeline = null;
 
-        // ═══ INC 2: bandDescriptor-driven loop ═════════════════════════════
-        // Replaces `for band < TOTAL_BANDS` + category-range suppression.
-        // `isExternal` subsumes `_suppressAllTreeScatter` — tree_standard
-        // has pipelineKey='externalPipeline', so its 5 bands skip here.
-        // `capacity === 0` short-circuits all the Inc-3-pending archetypes.
         for (const bd of this._bandDescriptors) {
             if (bd.isExternal)      continue;
             if (bd.capacity === 0)  continue;
@@ -2527,18 +2205,11 @@ getGroundFieldTexture() {
             encoder.setIndexBuffer(geo.indexBuffer, 'uint16');
             encoder.drawIndexedIndirect(this._pool.indirectBuffer, this._pool.getIndirectOffset(bd.band));
         }
-/*
         if (this._branchRenderer)    this._branchRenderer.render(encoder);
-        if (this._treeMidNearSystem) this._treeMidNearSystem.render(encoder);
+        if (this._treeMidSystem)     this._treeMidSystem.render(encoder);
+        if (this._treeFarSystem)     this._treeFarSystem.render(encoder);
+        if (this._clusterTreeSystem) this._clusterTreeSystem.render(encoder, camera, viewMatrix, projectionMatrix);
         if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(encoder);
-        if (this._treeDetailSystem)  this._treeDetailSystem.render(encoder, camera, viewMatrix, projectionMatrix);
-*/
-if (this._branchRenderer)    this._branchRenderer.render(encoder);
-//if (this._treeMidNearSystem) this._treeMidNearSystem.render(encoder);  
-if (this._treeMidSystem)     this._treeMidSystem.render(encoder);    
-if (this._treeFarSystem)     this._treeFarSystem.render(encoder);
-if (this._clusterTreeSystem) this._clusterTreeSystem.render(encoder, camera, viewMatrix, projectionMatrix);
-if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(encoder);
 
         const lodTest = this._treeDetailSystem?.getLeafLODTestSuite();
         if (lodTest?.isLocked()) lodTest.renderOverlay(encoder);
@@ -2550,103 +2221,7 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
         }
     }
 
-    _kickProducerTextureProbe() {
-        if (this._producerTextureProbePending) return;
-        if (!this.tileStreamer?.debugReadArrayLayerStats) return;
-
-        let fieldLayer = -1;
-        if (this._fieldRenderMasksCPU) {
-            for (let i = 0; i < this._fieldRenderMasksCPU.length; i++) {
-                if (this._fieldRenderMasksCPU[i] !== 0) {
-                    fieldLayer = i;
-                    break;
-                }
-            }
-        }
-
-        let propLayer = -1;
-        const propRecords = this._groundPropCache?._records ?? null;
-        if (propRecords) {
-            for (let i = 0; i < propRecords.length; i++) {
-                if (propRecords[i]?.active) {
-                    propLayer = i;
-                    break;
-                }
-            }
-        }
-
-        if (fieldLayer < 0 && propLayer < 0) return;
-
-        const fieldEntry = fieldLayer >= 0
-            ? this._bakedAssetTileCache?.getLayerEntry?.(fieldLayer) ?? null
-            : null;
-        const propEntry = propLayer >= 0
-            ? this._bakedAssetTileCache?.getLayerEntry?.(propLayer) ?? null
-            : null;
-
-        const describeEntry = (entry, layer) => {
-            if (!entry) return `layer=${layer}`;
-            return `layer=${layer} f${entry.face} d${entry.depth} (${entry.x},${entry.y})`;
-        };
-        const fmtStats = (stats) => {
-            if (!stats) return 'n/a';
-            const mean = Array.isArray(stats.mean)
-                ? stats.mean.map(v => Number.isFinite(v) ? v.toFixed(3) : 'nan').join(',')
-                : 'n/a';
-            const max = Array.isArray(stats.max)
-                ? stats.max.map(v => Number.isFinite(v) ? v.toFixed(3) : 'nan').join(',')
-                : 'n/a';
-            const zero = Number.isFinite(stats.zeroCount) ? stats.zeroCount : 'n/a';
-            return `mean=[${mean}] max=[${max}] zero=${zero}`;
-        };
-
-        this._producerTextureProbePending = true;
-        Promise.all([
-            fieldLayer >= 0 ? this.tileStreamer.debugReadArrayLayerStats('groundField', fieldLayer, 8) : Promise.resolve(null),
-            fieldLayer >= 0 ? this.tileStreamer.debugReadArrayLayerStats('climate', fieldLayer, 8) : Promise.resolve(null),
-            fieldLayer >= 0 ? this.tileStreamer.debugReadArrayLayerStats('tile', fieldLayer, 8) : Promise.resolve(null),
-            propLayer >= 0 ? this.tileStreamer.debugReadArrayLayerStats('climate', propLayer, 8) : Promise.resolve(null),
-            propLayer >= 0 ? this.tileStreamer.debugReadArrayLayerStats('tile', propLayer, 8) : Promise.resolve(null),
-        ]).then(([fieldStats, fieldClimate, fieldTile, propClimate, propTile]) => {
-            if (fieldLayer >= 0) {
-                Logger.warn(
-                    `${this._logTag} [BakeProbe] field ${describeEntry(fieldEntry, fieldLayer)} ` +
-                    `field=${fmtStats(fieldStats)} climate=${fmtStats(fieldClimate)} tile=${fmtStats(fieldTile)}`
-                );
-            }
-            if (propLayer >= 0) {
-                Logger.warn(
-                    `${this._logTag} [BakeProbe] prop ${describeEntry(propEntry, propLayer)} ` +
-                    `climate=${fmtStats(propClimate)} tile=${fmtStats(propTile)}`
-                );
-            }
-        }).catch((err) => {
-            Logger.warn(`${this._logTag} [BakeProbe] failed: ${err?.message || err}`);
-        }).finally(() => {
-            this._producerTextureProbePending = false;
-        });
-    }
-    triggerLODTestKey() {
-        this._treeDetailSystem?.getLeafLODTestSuite()?.handleKeyPress();
-    }
-    triggerLODTestCapture() {
-        this._treeDetailSystem?.triggerLODTestCapture();
-    }
-    
-    setLeafLODTestEnabled(enabled) {
-        if (this._treeDetailSystem) {
-            this._treeDetailSystem.setTestSuiteEnabled(enabled);
-        }
-    }
-
-    setMidNearRenderingEnabled(enabled) {
-        this._treeMidNearSystem?.setEnabled(enabled !== false);
-    }
-    isLeafLODTestEnabled() {
-        return this._treeDetailSystem?.isTestSuiteEnabled() ?? false;
-    }
     _buildGeometries() {
-        // ═══ Tree template LODs (same as before, just extracted inline) ════
         let treeLODs = null;
         if (this._templateLibrary?.templateCount > 0) {
             let repTpl = null;
@@ -2673,7 +2248,6 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
             }
         }
 
-        // ═══ INC 2: archetype-driven build ═════════════════════════════════
         // One geometry per band. GeometryFactory dispatches by builder key.
         // Inactive archetypes (rock, fern, …) get degenerate meshes — their
         // bands exist in the indirect buffer but instanceCount stays 0.
@@ -3196,7 +2770,6 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
         });
     }
 
-
     _createIndirectPipeline() {
         const shaderSource = buildAssetIndirectShader({ totalBands: this._totalBands });
         const module = this.device.createShaderModule({
@@ -3224,29 +2797,25 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
     }
     _createRenderPipeline() {
 
-
         // ── Build per-band self-occlusion parameters ─────────────────
         const soConfig = this.ASSET_SELF_OCCLUSION || {};
-        const perBandSO = [];
+        let perBandSO = [];
 
         if (soConfig.enabled !== false) {
-
             // Build a map from band index to the dominant asset's self-occlusion config.
             // For simplicity, use the first asset that maps to each category.
-            const perBandSO = new Array(this._totalBands);
-            if (soConfig.enabled !== false) {
-                const variants = this._assetRegistry.getAllVariants();
-                const def = soConfig.default || {};
-                for (const bd of this._bandDescriptors) {
-                    const repVariant = variants.find(v => v?.archetypeName === bd.archetypeName);
-                    const so = repVariant?.selfOcclusion ?? def;
-                    perBandSO[bd.band] = {
-                        gradientWidth:    so.gradientWidth    ?? def.gradientWidth    ?? 0.10,
-                        strengthMul:      so.strengthMul      ?? def.strengthMul      ?? 0.7,
-                        terrainEmbedding: so.terrainEmbedding ?? def.terrainEmbedding ?? 0.02,
-                        darkening:        so.darkening        ?? def.darkening        ?? 0.30,
-                    };
-                }
+            perBandSO = new Array(this._totalBands);
+            const variants = this._assetRegistry.getAllVariants();
+            const def = soConfig.default || {};
+            for (const bd of this._bandDescriptors) {
+                const repVariant = variants.find(v => v?.archetypeName === bd.archetypeName);
+                const so = repVariant?.selfOcclusion ?? def;
+                perBandSO[bd.band] = {
+                    gradientWidth:    so.gradientWidth    ?? def.gradientWidth    ?? 0.10,
+                    strengthMul:      so.strengthMul      ?? def.strengthMul      ?? 0.7,
+                    terrainEmbedding: so.terrainEmbedding ?? def.terrainEmbedding ?? 0.02,
+                    darkening:        so.darkening        ?? def.darkening        ?? 0.30,
+                };
             }
         }
 
@@ -3256,9 +2825,8 @@ if (this._leafStreamer && this.enableLeafRendering) this._leafStreamer.render(en
             || [20, 100, 150, 380, 500];
         const treeVisibility = treeLodDistances[treeLodDistances.length - 1];
 
-const treeFadeStart = treeVisibility * (tcBillboards.fadeStartRatio ?? 0.7);
-const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
-
+        const treeFadeStart = treeVisibility * (tcBillboards.fadeStartRatio ?? 0.7);
+        const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
 
         const vsSource = buildAssetVertexShader({
             windMaxDistance:       30,
@@ -3269,7 +2837,6 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
         });
 
         const maxDist       = this._assetRegistry?.maxDistance ?? 800;
-
 
         const fragConfig = {
             fadeStart:        maxDist * 0.75,
@@ -3792,13 +3359,10 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
         this._forceScatter = true;
     }
 
-        /**
-     * Get the live LOD controller (for debug panels).
-     * @returns {TreeLODController}
-     */
-        getLODController() {
-            return this._lodController;
-        }
+
+    getLODController() {
+        return this._lodController;
+    }
 
     getAssetBakePolicy() {
         return this._assetBakePolicy;
@@ -3808,17 +3372,18 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
         return this._bakedAssetTileCache;
     }
     
-        /**
-         * Hot-reload mid-near pipelines after LOD controller config changes.
-         * Called by the debug panel.
-         * @param {object} [options]
-         * @param {boolean} [options.rebuildGeometry=false]
-         */
-        rebuildMidNearPipelines(options = {}) {
-            if (this._treeMidNearSystem) {
-                this._treeMidNearSystem.rebuildPipelines(options);
-            }
+    /**
+     * Hot-reload mid-near pipelines after LOD controller config changes.
+     * Called by the debug panel.
+     * @param {object} [options]
+     * @param {boolean} [options.rebuildGeometry=false]
+     */
+    rebuildMidNearPipelines(options = {}) {
+        if (this._treeMidNearSystem) {
+            this._treeMidNearSystem.rebuildPipelines(options);
         }
+    }
+    
     _getCameraForward(camera) {
         if (!camera?.position || !camera?.target) return null;
         const dx = camera.target.x - camera.position.x;
@@ -3970,13 +3535,9 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
                 addressModeV: 'repeat',
             });
         }
-
-        // Prefer the real atlas; fall back to a 1×1×1 dummy so the
-        // pipeline binds cleanly even if the manager isn't wired yet.
         let propView;
         if (this.propTextureManager?.isReady()) {
             const tex = this.propTextureManager.getPropTexture();
-            // PropTextureManager wraps the GPU texture; unwrap for view.
             propView = tex._gpuTexture.texture.createView({
                 dimension: '2d-array',
             });
@@ -3995,8 +3556,6 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
             });
         }
 
-        // Same buffer the scatter shader reads — already has STORAGE usage.
-        // If getAssetDefBuffer() returns a wrapper, adjust to ._gpuBuffer.
         const defBuffer = this._assetSelectionBuffer.getAssetDefBuffer();
 
         this._renderBindGroup3 = this.device.createBindGroup({
@@ -4014,7 +3573,6 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
         this._lastBindGroupKey = combinedKey;
     }
 
-    // Add dummy depth texture helper:
     _getOrCreateDummyDepthTextureView() {
         if (!this._dummyDepthTexture) {
             this._dummyDepthTexture = this.device.createTexture({
@@ -4024,7 +3582,6 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
                 usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
             });
             this._dummyDepthTextureView = this._dummyDepthTexture.createView();
-            // Clear to 1.0
             const enc = this.device.createCommandEncoder();
             enc.beginRenderPass({
                 colorAttachments: [],
@@ -4053,16 +3610,13 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
         return this._defaultComparisonSampler;
     }
 
-    // Add setter for shadow renderer:
     setShadowRenderer(renderer) {
         if (this._shadowRenderer !== renderer) {
             this._shadowRenderer = renderer;
             this._renderBindGroupsBuilt = false;
         }
     }
-    // ──────────────────────────────────────────────────────────────────────
-    // Helpers
-    // ──────────────────────────────────────────────────────────────────────
+
     _getOrCreateDummyStorageBuffer() {
         if (!this._dummyStorageBuffer) {
             this._dummyStorageBuffer = this.device.createBuffer({
@@ -4087,7 +3641,7 @@ const treeFadeEnd   = treeVisibility * (tcBillboards.fadeEndRatio   ?? 1.0);
     setClusterLightBuffers(buffers) {
         if (this._clusterLightBuffers !== buffers) {
             this._clusterLightBuffers = buffers;
-            this._renderBindGroupsBuilt = false; // Force rebuild
+            this._renderBindGroupsBuilt = false;
         }
     }
     _getMaxTileWorldSize() {

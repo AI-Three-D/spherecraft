@@ -8,7 +8,7 @@
 // extend movementResolver.wgsl with a platform-collider buffer.
 
 import { Vector3, Matrix4 } from '../../shared/math/index.js';
-import { BaseModel } from '../../core/mesh/model/baseModel.js';
+import { BaseModel } from '../../core/renderer/mesh/model/baseModel.js';
 import { Geometry } from '../../core/renderer/resources/geometry.js';
 import { Material } from '../../core/renderer/resources/material.js';
 import { getGenericMeshShaders } from '../../core/renderer/shaders/genericMeshShaders.js';

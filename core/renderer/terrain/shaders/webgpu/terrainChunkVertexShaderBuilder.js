@@ -1,4 +1,4 @@
-//js//mesh/terrain/shaders/webgpu/terrainChunkVertexShaderBuilder.js
+// js/renderer/terrain/shaders/webgpu/terrainChunkVertexShaderBuilder.js
 export function buildTerrainChunkVertexShader(options = {}) {
     const instanced = options.instanced === true;
     const useArrayTextures = options.useArrayTextures === true;

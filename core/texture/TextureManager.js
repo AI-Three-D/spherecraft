@@ -29,7 +29,7 @@ function getLayerConfigHash(layers) {
 }
 
 export class TextureAtlasManager {
-    constructor(enableDebug = false, gpuDevice = null, proceduralTextureGenerator = null, tileTheme = null) {
+    constructor(_enableDebug = false, gpuDevice = null, proceduralTextureGenerator = null, tileTheme = null) {
         if (!tileTheme) {
             throw new Error('TextureAtlasManager requires tileTheme (TILE_CONFIG, TEXTURE_LEVELS, ATLAS_CONFIG, TEXTURE_CONFIG, TextureConfigHelper, SEASONS, TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES)');
         }
@@ -143,8 +143,6 @@ export class TextureAtlasManager {
         // Only upload if backend is available
         if (this._backend) {
             this._uploadLookupTablesToGPU();
-        } else {
-            
         }
     }
     _uploadLookupTablesToGPU() {
@@ -179,84 +177,6 @@ export class TextureAtlasManager {
         
     }
     
-
-    // Legacy duplicate: this earlier class method is overridden by the later
-    // _buildTileTypeLookup definition below. Do not add terrain variant logic
-    // here; active terrain rendering uses one canonical texture layer.
-    _buildTileTypeLookup(maxTileTypes, maxVariants, level, seasons) {
-        const numSeasons = seasons.length;
-        const width = numSeasons * maxVariants;
-        const height = maxTileTypes;
-        const lookupData = new Float32Array(width * height * 4);
-        const atlas = this.atlases.get(level);
-        const isArrayAtlas = !!atlas?.texture?._isArray;
-
-        let successCount = 0;
-        let failCount = 0;
-        
-        for (let tileId = 0; tileId < maxTileTypes; tileId++) {
-            for (let s = 0; s < numSeasons; s++) {
-                const season = seasons[s];
-                const variantCount = this.getNumVariants(tileId, season, level);
-
-                for (let v = 0; v < maxVariants; v++) {
-                    const safeVar = Math.min(v, variantCount - 1);
-                    const x = s * maxVariants + v;
-                    const idx = (tileId * width + x) * 4;
-
-                    if (isArrayAtlas) {
-                        const key = `${tileId}:${season}:${safeVar}`;
-                        const layer = atlas?.seasonalTextureMap?.get(key);
-                        if (layer !== undefined) {
-                            lookupData[idx + 0] = layer;
-                            lookupData[idx + 1] = 0.0;
-                            lookupData[idx + 2] = 0.0;
-                            lookupData[idx + 3] = 0.0;
-                            successCount++;
-                        } else {
-                            lookupData[idx + 0] = 0.0;
-                            lookupData[idx + 1] = 0.0;
-                            lookupData[idx + 2] = 0.0;
-                            lookupData[idx + 3] = 0.0;
-                            failCount++;
-                        }
-                    } else {
-                        const uvs = this.getSeasonalTextureUV(tileId, season, safeVar, level);
-                        if (uvs) {
-                            lookupData[idx + 0] = uvs.u1;
-                            lookupData[idx + 1] = uvs.v1;
-                            lookupData[idx + 2] = uvs.u2;
-                            lookupData[idx + 3] = uvs.v2;
-                            successCount++;
-                        } else {
-                            lookupData[idx + 0] = 0.0;
-                            lookupData[idx + 1] = 0.0;
-                            lookupData[idx + 2] = 1.0;
-                            lookupData[idx + 3] = 1.0;
-                            failCount++;
-                        }
-                    }
-                }
-            }
-        }
-
-        
-        
-        const texture = new Texture({
-            width: width,
-            height: height,
-            format: TextureFormat.RGBA32F,
-            minFilter: TextureFilter.NEAREST,
-            magFilter: TextureFilter.NEAREST,
-            wrapS: TextureWrap.CLAMP,
-            wrapT: TextureWrap.CLAMP,
-            generateMipmaps: false,
-            data: lookupData
-        });
-
-        return texture;
-    }
-
     _buildNumVariantsTexture(maxTileTypes, seasons) {
         const numSeasons = seasons.length;
         const numVariants = new Uint8Array(maxTileTypes * numSeasons);
@@ -300,9 +220,6 @@ export class TextureAtlasManager {
         const paddedTextureSize = textureSize + (this.PADDING * 2);
         const maxTilesPerSide = Math.floor(atlasSize / paddedTextureSize);
         const maxTotalTiles = maxTilesPerSide * maxTilesPerSide;
-
-        if (numTextures > maxTotalTiles) {
-        }
 
         const tilesPerRow = maxTilesPerSide;
         const rows = Math.ceil(numTextures / tilesPerRow);
@@ -356,7 +273,7 @@ export class TextureAtlasManager {
         ctx.fillRect(x + textureSize, y + textureSize, padding, padding);
     }
 
-    addTextureToAtlas(level, image, index, texturePath = null) {
+    addTextureToAtlas(level, image, index, _texturePath = null) {
         const atlas = this.atlases.get(level);
         const layout = atlas.layout;
         const padding = layout.padding !== undefined ? layout.padding : this.PADDING;
@@ -376,7 +293,7 @@ export class TextureAtlasManager {
         this.extendPadding(atlas.context, x, y, layout.textureSize, padding);
     }
 
-    createPlaceholderTexture(level, index, texturePath) {
+    createPlaceholderTexture(level, index, _texturePath) {
         const atlas = this.atlases.get(level);
         const layout = atlas.layout;
 
@@ -435,7 +352,7 @@ export class TextureAtlasManager {
     }
 
     updateSeasonData(gameTime) {
-        const [daysUntilNext, newSeason] = gameTime.getRunningSeasonInfo();
+        const [, newSeason] = gameTime.getRunningSeasonInfo();
 
         if (this.currentSeason !== newSeason) {
             this.currentSeason = newSeason;
@@ -482,85 +399,39 @@ export class TextureAtlasManager {
             throw new Error('[TextureAtlasManager] proceduralTextureGenerator not injected');
         }
     
-        // Deduplicate by layer-config hash
-        const hashToUniqueIndex = new Map();
-        const uniqueVariants = [];
-        const variantIndexToUniqueIndex = new Map();
         const startIndex = hasTransparent ? 1 : 0;
-    
-        for (let i = 0; i < variants.length; i++) {
-            const variant = variants[i];
-            const hash = getLayerConfigHash(variant.layers);
-            let uniqueIdx = hashToUniqueIndex.get(hash);
-            if (uniqueIdx === undefined) {
-                uniqueIdx = uniqueVariants.length + startIndex;
-                hashToUniqueIndex.set(hash, uniqueIdx);
-                uniqueVariants.push({
-                    hash,
-                    layers: variant.layers,
-                    firstTileType: variant.tileType,
-                    firstSeason: variant.season,
-                    firstVariant: variant.variant
-                });
-            }
-            variantIndexToUniqueIndex.set(i, uniqueIdx);
-        }
+        const { uniqueVariants, variantIndexToUniqueIndex } =
+            this._dedupeProceduralVariants(variants, startIndex);
     
         const textureSize = config.proceduralTextureSize || config.textureSize;
         const totalLayers = uniqueVariants.length + startIndex;
         const bytesPerLayer = textureSize * textureSize * 4; // RGBA8
         const allLayerData = new Uint8Array(totalLayers * bytesPerLayer);
     
-        // Layer 0: solid grey placeholder (transparent tile stand-in)
         if (hasTransparent) {
-            for (let i = 0; i < textureSize * textureSize; i++) {
-                allLayerData[i * 4 + 0] = 128;
-                allLayerData[i * 4 + 1] = 128;
-                allLayerData[i * 4 + 2] = 128;
-                allLayerData[i * 4 + 3] = 255;
-            }
+            this._fillTransparentPlaceholderLayer(allLayerData, textureSize);
         }
     
-        // Size the shared generator once for this atlas level.
-        gen.setSize(textureSize, textureSize);
-        if (config.seamless && typeof gen.configureSeamless === 'function') {
-            gen.configureSeamless(config.seamless);
-        }
+        this._configureProceduralGenerator(gen, config, textureSize);
     
-        // Generate each unique variant into its layer slot.
         for (let i = 0; i < uniqueVariants.length; i++) {
             const atlasIndex = i + startIndex;
             const layerOffset = atlasIndex * bytesPerLayer;
             try {
-                const layers = uniqueVariants[i].layers;
-                if (!Array.isArray(layers)) {
-                    this._fillProceduralFallback(allLayerData, layerOffset, textureSize, atlasIndex);
-                    continue;
-                }
-    
-                gen.clearLayers();
-                layers.forEach(layerConfig => gen.addLayer(layerConfig));
-                const textureCanvas = await gen.generate();
-    
-                // Copy canvas pixels into the layer buffer.
-                const copyCanvas = document.createElement('canvas');
-                copyCanvas.width = textureSize;
-                copyCanvas.height = textureSize;
-                const copyCtx = copyCanvas.getContext('2d');
-                copyCtx.drawImage(textureCanvas, 0, 0);
-                const imageData = copyCtx.getImageData(0, 0, textureSize, textureSize);
-                allLayerData.set(new Uint8Array(imageData.data.buffer), layerOffset);
-            } catch (error) {
+                await this._writeProceduralVariantLayer(
+                    gen,
+                    uniqueVariants[i].layers,
+                    allLayerData,
+                    layerOffset,
+                    textureSize,
+                    atlasIndex
+                );
+            } catch {
                 this._fillProceduralFallback(allLayerData, layerOffset, textureSize, atlasIndex);
             }
         }
     
-        // Seasonal map: key → layer index
-        for (let i = 0; i < variants.length; i++) {
-            const { tileType, season, variant } = variants[i];
-            const key = `${tileType}:${season}:${variant}`;
-            atlas.seasonalTextureMap.set(key, variantIndexToUniqueIndex.get(i));
-        }
+        this._populateSeasonalTextureMap(atlas, variants, variantIndexToUniqueIndex);
     
         // Create array texture — each layer is independent, mipmaps per layer.
         atlas.texture = new Texture({
@@ -583,6 +454,75 @@ export class TextureAtlasManager {
     
         return atlas.texture;
     }
+
+    _dedupeProceduralVariants(variants, startIndex) {
+        const hashToUniqueIndex = new Map();
+        const uniqueVariants = [];
+        const variantIndexToUniqueIndex = new Map();
+
+        for (let i = 0; i < variants.length; i++) {
+            const variant = variants[i];
+            const hash = getLayerConfigHash(variant.layers);
+            let uniqueIdx = hashToUniqueIndex.get(hash);
+            if (uniqueIdx === undefined) {
+                uniqueIdx = uniqueVariants.length + startIndex;
+                hashToUniqueIndex.set(hash, uniqueIdx);
+                uniqueVariants.push({
+                    hash,
+                    layers: variant.layers,
+                    firstTileType: variant.tileType,
+                    firstSeason: variant.season,
+                    firstVariant: variant.variant
+                });
+            }
+            variantIndexToUniqueIndex.set(i, uniqueIdx);
+        }
+
+        return { uniqueVariants, variantIndexToUniqueIndex };
+    }
+
+    _fillTransparentPlaceholderLayer(buffer, textureSize) {
+        for (let i = 0; i < textureSize * textureSize; i++) {
+            buffer[i * 4 + 0] = 128;
+            buffer[i * 4 + 1] = 128;
+            buffer[i * 4 + 2] = 128;
+            buffer[i * 4 + 3] = 255;
+        }
+    }
+
+    _configureProceduralGenerator(generator, config, textureSize) {
+        generator.setSize(textureSize, textureSize);
+        if (config.seamless && typeof generator.configureSeamless === 'function') {
+            generator.configureSeamless(config.seamless);
+        }
+    }
+
+    async _writeProceduralVariantLayer(generator, layers, buffer, layerOffset, textureSize, atlasIndex) {
+        if (!Array.isArray(layers)) {
+            this._fillProceduralFallback(buffer, layerOffset, textureSize, atlasIndex);
+            return;
+        }
+
+        generator.clearLayers();
+        layers.forEach(layerConfig => generator.addLayer(layerConfig));
+        const textureCanvas = await generator.generate();
+
+        const copyCanvas = document.createElement('canvas');
+        copyCanvas.width = textureSize;
+        copyCanvas.height = textureSize;
+        const copyCtx = copyCanvas.getContext('2d');
+        copyCtx.drawImage(textureCanvas, 0, 0);
+        const imageData = copyCtx.getImageData(0, 0, textureSize, textureSize);
+        buffer.set(new Uint8Array(imageData.data.buffer), layerOffset);
+    }
+
+    _populateSeasonalTextureMap(atlas, variants, variantIndexToUniqueIndex) {
+        for (let i = 0; i < variants.length; i++) {
+            const { tileType, season, variant } = variants[i];
+            const key = `${tileType}:${season}:${variant}`;
+            atlas.seasonalTextureMap.set(key, variantIndexToUniqueIndex.get(i));
+        }
+    }
     
     _fillProceduralFallback(buffer, offset, size, index) {
         const r = Math.floor((index * 137.5) % 256);
@@ -592,96 +532,6 @@ export class TextureAtlasManager {
             buffer[offset + p * 4 + 2] = 64;
             buffer[offset + p * 4 + 3] = 255;
         }
-    }
-    
-    async createAtlas(level) {
-        const config = this.ATLAS_CONFIG[level];
-        const atlas = this.atlases.get(level);
-        const allTexturePaths = this.TextureConfigHelper.getAllTexturesForLevel(level);
-    
-        const hasTransparent = (level === this.TEXTURE_LEVELS.MICRO);
-        const startIndex = hasTransparent ? 1 : 0;
-        const totalLayers = allTexturePaths.length + startIndex;
-        const textureSize = config.textureSize;
-        const bytesPerLayer = textureSize * textureSize * 4;
-    
-        const allLayerData = new Uint8Array(totalLayers * bytesPerLayer);
-    
-        // Layer 0: grey placeholder
-        if (hasTransparent) {
-            for (let i = 0; i < textureSize * textureSize; i++) {
-                allLayerData[i * 4 + 0] = 128;
-                allLayerData[i * 4 + 1] = 128;
-                allLayerData[i * 4 + 2] = 128;
-                allLayerData[i * 4 + 3] = 255;
-            }
-        }
-    
-        let currentIndex = startIndex;
-        for (const texturePath of allTexturePaths) {
-            if (currentIndex >= totalLayers) break;
-            try {
-                const img = await this.loadImage(texturePath);
-    
-                const tempCanvas = document.createElement('canvas');
-                tempCanvas.width  = textureSize;
-                tempCanvas.height = textureSize;
-                const tempCtx = tempCanvas.getContext('2d');
-                tempCtx.drawImage(img, 0, 0, textureSize, textureSize);
-                const imageData = tempCtx.getImageData(0, 0, textureSize, textureSize);
-    
-                const layerOffset = currentIndex * bytesPerLayer;
-                allLayerData.set(new Uint8Array(imageData.data.buffer), layerOffset);
-    
-                atlas.textureMap.set(texturePath, currentIndex);
-                currentIndex++;
-            } catch (error) {
-                // Fallback solid colour
-                const layerOffset = currentIndex * bytesPerLayer;
-                const r = Math.floor((currentIndex * 137.5) % 256);
-                for (let p = 0; p < textureSize * textureSize; p++) {
-                    allLayerData[layerOffset + p * 4 + 0] = r;
-                    allLayerData[layerOffset + p * 4 + 1] = 64;
-                    allLayerData[layerOffset + p * 4 + 2] = 64;
-                    allLayerData[layerOffset + p * 4 + 3] = 255;
-                }
-                atlas.textureMap.set(texturePath, currentIndex);
-                currentIndex++;
-            }
-        }
-    
-        // Seasonal map
-        for (const tileConfig of this.TILE_CONFIG) {
-            for (const season of Object.values(this.SEASONS)) {
-                const textures = this.TextureConfigHelper.getTexturesForSeason(tileConfig.id, season, level);
-                for (let variant = 0; variant < textures.length; variant++) {
-                    const texturePath = textures[variant];
-                    const key = `${tileConfig.id}:${season}:${variant}`;
-                    const index = atlas.textureMap.get(texturePath);
-                    atlas.seasonalTextureMap.set(key, index);
-                }
-            }
-        }
-    
-        atlas.texture = new Texture({
-            width: textureSize,
-            height: textureSize,
-            depth: totalLayers,
-            format: TextureFormat.RGBA8,
-            minFilter: TextureFilter.LINEAR_MIPMAP_LINEAR,
-            magFilter: TextureFilter.LINEAR,
-            wrapS: TextureWrap.REPEAT,
-            wrapT: TextureWrap.REPEAT,
-            generateMipmaps: true,
-            data: allLayerData,
-            _isArray: true
-        });
-    
-        if (this._backend) {
-            this._backend.createTexture(atlas.texture);
-        }
-    
-        return atlas.texture;
     }
     
     // Lookup table now writes layer indices. The RGBA32F format is kept for
@@ -769,11 +619,7 @@ export class TextureAtlasManager {
         
         // CRITICAL: Use backend to upload
         if (this._backend) {
-            
             this._backend.createTexture(atlas.texture);
-            
-        } else {
-            
         }
         await this.loadTexturesForLevel(level);
         return atlas.texture;
@@ -819,8 +665,7 @@ export class TextureAtlasManager {
                 this.addTextureToAtlas(level, img, currentIndex, texturePath);
                 atlas.textureMap.set(texturePath, currentIndex);
                 currentIndex++;
-            } catch (error) {
-                
+            } catch {
                 this.createPlaceholderTexture(level, currentIndex, texturePath);
                 atlas.textureMap.set(texturePath, currentIndex);
                 currentIndex++;

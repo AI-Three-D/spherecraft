@@ -1,7 +1,7 @@
-// js/modules/mesh/model/baseModel.js
-import { Vector3, Quaternion, Matrix4, Euler } from '../../../shared/math/index.js';
-import { Geometry } from '../../renderer/resources/geometry.js';
-import { Material } from '../../renderer/resources/material.js';
+// js/renderer/mesh/model/baseModel.js
+import { Vector3, Quaternion, Matrix4, Euler } from '../../../../shared/math/index.js';
+import { Geometry } from '../../resources/geometry.js';
+import { Material } from '../../resources/material.js';
 
 /**
  * Base class for all renderable 3D models.
