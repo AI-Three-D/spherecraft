@@ -2364,118 +2364,158 @@ getGroundFieldTexture() {
 
         this._producerDebugPending = true;
         Promise.all(mapPromises).then(() => {
-            const poolBytes = Math.max(4, this._totalBands * Uint32Array.BYTES_PER_ELEMENT);
-            const poolData = new Uint32Array(
-                this._producerDebugPoolReadbackBuffer.getMappedRange(0, poolBytes).slice(0)
-            );
-
-            let groundPropSum = 0;
-            if (this._producerDebugHasGroundPropSnapshot && this._producerDebugGroundPropReadbackBuffer) {
-                const propBytes = Math.max(
-                    4,
-                    (this.tileStreamer?.tilePoolSize ?? 1) * Uint32Array.BYTES_PER_ELEMENT
-                );
-                const propData = new Uint32Array(
-                    this._producerDebugGroundPropReadbackBuffer.getMappedRange(0, propBytes).slice(0)
-                );
-                for (let i = 0; i < propData.length; i++) {
-                    groundPropSum += propData[i] >>> 0;
-                }
-            }
-
-            const archetypeTotals = new Map();
-            for (const bd of this._bandDescriptors ?? []) {
-                if (!bd) continue;
-                const key = bd.archetypeName || `band${bd.band}`;
-                archetypeTotals.set(key, (archetypeTotals.get(key) ?? 0) + (poolData[bd.band] >>> 0));
-            }
-
-            const treeBandBase = this.CAT_TREES * this.LODS_PER_CATEGORY;
-            const treeBandParts = [];
-            let treeRawTotal = 0;
-            let treeCapTotal = 0;
-            let treeOverflowTotal = 0;
-            let treeMaxOverflowBand = -1;
-            let treeMaxOverflowCount = 0;
-            for (let lod = 0; lod < this.LODS_PER_CATEGORY; lod++) {
-                const band = treeBandBase + lod;
-                const raw = poolData[band] >>> 0;
-                const cap = this._pool?.getBandCapacity(band) ?? 0;
-                const overflow = Math.max(0, raw - cap);
-                treeRawTotal += raw;
-                treeCapTotal += cap;
-                treeOverflowTotal += overflow;
-                if (overflow > treeMaxOverflowCount) {
-                    treeMaxOverflowCount = overflow;
-                    treeMaxOverflowBand = band;
-                }
-                treeBandParts.push(`b${band}=${raw}/${cap}`);
-            }
-
-            let fieldLayerCount = 0;
-            if (this._fieldRenderMasksCPU) {
-                for (let i = 0; i < this._fieldRenderMasksCPU.length; i++) {
-                    if (this._fieldRenderMasksCPU[i] !== 0) fieldLayerCount++;
-                }
-            }
-
-            const grass = archetypeTotals.get('grass_tuft') ?? 0;
-            const rocks = archetypeTotals.get('rock_small') ?? 0;
-            const fern = archetypeTotals.get('fern') ?? 0;
-            const mushroom = archetypeTotals.get('mushroom_capped') ?? 0;
-            const logs = archetypeTotals.get('fallen_log') ?? 0;
-            const stumps = archetypeTotals.get('tree_stump') ?? 0;
-            const nonTreePoolTotal = grass + rocks + fern + mushroom + logs + stumps;
-
-            const shouldProbeGrass = grass === 0 && fieldLayerCount > 0;
-            const shouldLog =
-                nonTreePoolTotal === 0 ||
-                shouldProbeGrass ||
-                groundPropSum > 0 ||
-                (this._frameCount % (this._producerDebugInterval * 2)) === 0;
-
-            if (shouldLog) {
-                Logger.warn(
-                    `${this._logTag} [BakeDiag] pool(` +
-                    `grass=${grass} rock=${rocks} fern=${fern} ` +
-                    `mushroom=${mushroom} log=${logs} stump=${stumps}) ` +
-                    `fieldLayers=${fieldLayerCount} activeFieldLayers=${this._fieldActiveLayerCount} ` +
-                    `fieldBits=0x${this._fieldActiveBits.toString(16)} ` +
-                    `propLayers=${this._groundPropCache?.activeLayerCount ?? 0} ` +
-                    `bakedPropInstances=${groundPropSum} ` +
-                    `pendingField=${this._groundFieldBaker?.pendingBakes ?? 0} ` +
-                    `pendingProp=${this._groundPropCache?.pendingBakes ?? 0}`
-                );
-
-                if (nonTreePoolTotal === 0 || shouldProbeGrass) {
-                    this._kickProducerTextureProbe();
-                }
-            }
-
-            Logger.info(
-                `${this._logTag} [TreePool] ` +
-                `${treeBandParts.join(' ')} ` +
-                `total=${treeRawTotal}/${treeCapTotal} ` +
-                `overflow=${treeOverflowTotal}` +
-                (treeMaxOverflowBand >= 0 ? ` maxOverflowBand=${treeMaxOverflowBand}` : '') +
-                ` sourceLayers=${this._treeSourceCache?.activeLayerCount ?? 0}`
-            );
-
-            this._producerDebugPoolReadbackBuffer.unmap();
-            if (this._producerDebugHasGroundPropSnapshot && this._producerDebugGroundPropReadbackBuffer) {
-                this._producerDebugGroundPropReadbackBuffer.unmap();
-            }
-            this._producerDebugQueued = false;
-            this._producerDebugPending = false;
-            this._producerDebugHasGroundPropSnapshot = false;
+            this._handleProducerDebugReadback();
         }).catch((err) => {
-            Logger.warn(`${this._logTag} [BakeDiag] readback failed: ${err?.message || err}`);
-            try { this._producerDebugPoolReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
-            try { this._producerDebugGroundPropReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
-            this._producerDebugQueued = false;
-            this._producerDebugPending = false;
-            this._producerDebugHasGroundPropSnapshot = false;
+            this._handleProducerDebugReadbackFailure(err);
         });
+    }
+
+    _handleProducerDebugReadback() {
+        const poolData = this._readProducerDebugPoolData();
+        const groundPropSum = this._readProducerDebugGroundPropSum();
+        const archetypeTotals = this._buildProducerDebugArchetypeTotals(poolData);
+        const treeSummary = this._buildTreePoolDebugSummary(poolData);
+        const fieldLayerCount = this._countFieldRenderLayers();
+
+        this._logProducerDebugPoolSummary(archetypeTotals, fieldLayerCount, groundPropSum);
+        this._logTreePoolSummary(treeSummary);
+        this._unmapProducerDebugBuffers();
+        this._resetProducerDebugReadbackState();
+    }
+
+    _readProducerDebugPoolData() {
+        const poolBytes = Math.max(4, this._totalBands * Uint32Array.BYTES_PER_ELEMENT);
+        return new Uint32Array(
+            this._producerDebugPoolReadbackBuffer.getMappedRange(0, poolBytes).slice(0)
+        );
+    }
+
+    _readProducerDebugGroundPropSum() {
+        if (!this._producerDebugHasGroundPropSnapshot || !this._producerDebugGroundPropReadbackBuffer) {
+            return 0;
+        }
+
+        const propBytes = Math.max(
+            4,
+            (this.tileStreamer?.tilePoolSize ?? 1) * Uint32Array.BYTES_PER_ELEMENT
+        );
+        const propData = new Uint32Array(
+            this._producerDebugGroundPropReadbackBuffer.getMappedRange(0, propBytes).slice(0)
+        );
+        let groundPropSum = 0;
+        for (let i = 0; i < propData.length; i++) {
+            groundPropSum += propData[i] >>> 0;
+        }
+        return groundPropSum;
+    }
+
+    _buildProducerDebugArchetypeTotals(poolData) {
+        const archetypeTotals = new Map();
+        for (const bd of this._bandDescriptors ?? []) {
+            if (!bd) continue;
+            const key = bd.archetypeName || `band${bd.band}`;
+            archetypeTotals.set(key, (archetypeTotals.get(key) ?? 0) + (poolData[bd.band] >>> 0));
+        }
+        return archetypeTotals;
+    }
+
+    _buildTreePoolDebugSummary(poolData) {
+        const treeBandBase = this.CAT_TREES * this.LODS_PER_CATEGORY;
+        const bandParts = [];
+        let rawTotal = 0;
+        let capTotal = 0;
+        let overflowTotal = 0;
+        let maxOverflowBand = -1;
+        let maxOverflowCount = 0;
+        for (let lod = 0; lod < this.LODS_PER_CATEGORY; lod++) {
+            const band = treeBandBase + lod;
+            const raw = poolData[band] >>> 0;
+            const cap = this._pool?.getBandCapacity(band) ?? 0;
+            const overflow = Math.max(0, raw - cap);
+            rawTotal += raw;
+            capTotal += cap;
+            overflowTotal += overflow;
+            if (overflow > maxOverflowCount) {
+                maxOverflowCount = overflow;
+                maxOverflowBand = band;
+            }
+            bandParts.push(`b${band}=${raw}/${cap}`);
+        }
+        return { bandParts, rawTotal, capTotal, overflowTotal, maxOverflowBand };
+    }
+
+    _countFieldRenderLayers() {
+        let fieldLayerCount = 0;
+        if (this._fieldRenderMasksCPU) {
+            for (let i = 0; i < this._fieldRenderMasksCPU.length; i++) {
+                if (this._fieldRenderMasksCPU[i] !== 0) fieldLayerCount++;
+            }
+        }
+        return fieldLayerCount;
+    }
+
+    _logProducerDebugPoolSummary(archetypeTotals, fieldLayerCount, groundPropSum) {
+        const grass = archetypeTotals.get('grass_tuft') ?? 0;
+        const rocks = archetypeTotals.get('rock_small') ?? 0;
+        const fern = archetypeTotals.get('fern') ?? 0;
+        const mushroom = archetypeTotals.get('mushroom_capped') ?? 0;
+        const logs = archetypeTotals.get('fallen_log') ?? 0;
+        const stumps = archetypeTotals.get('tree_stump') ?? 0;
+        const nonTreePoolTotal = grass + rocks + fern + mushroom + logs + stumps;
+        const shouldProbeGrass = grass === 0 && fieldLayerCount > 0;
+        const shouldLog =
+            nonTreePoolTotal === 0 ||
+            shouldProbeGrass ||
+            groundPropSum > 0 ||
+            (this._frameCount % (this._producerDebugInterval * 2)) === 0;
+        if (!shouldLog) return;
+
+        Logger.warn(
+            `${this._logTag} [BakeDiag] pool(` +
+            `grass=${grass} rock=${rocks} fern=${fern} ` +
+            `mushroom=${mushroom} log=${logs} stump=${stumps}) ` +
+            `fieldLayers=${fieldLayerCount} activeFieldLayers=${this._fieldActiveLayerCount} ` +
+            `fieldBits=0x${this._fieldActiveBits.toString(16)} ` +
+            `propLayers=${this._groundPropCache?.activeLayerCount ?? 0} ` +
+            `bakedPropInstances=${groundPropSum} ` +
+            `pendingField=${this._groundFieldBaker?.pendingBakes ?? 0} ` +
+            `pendingProp=${this._groundPropCache?.pendingBakes ?? 0}`
+        );
+
+        if (nonTreePoolTotal === 0 || shouldProbeGrass) {
+            this._kickProducerTextureProbe();
+        }
+    }
+
+    _logTreePoolSummary(summary) {
+        Logger.info(
+            `${this._logTag} [TreePool] ` +
+            `${summary.bandParts.join(' ')} ` +
+            `total=${summary.rawTotal}/${summary.capTotal} ` +
+            `overflow=${summary.overflowTotal}` +
+            (summary.maxOverflowBand >= 0 ? ` maxOverflowBand=${summary.maxOverflowBand}` : '') +
+            ` sourceLayers=${this._treeSourceCache?.activeLayerCount ?? 0}`
+        );
+    }
+
+    _unmapProducerDebugBuffers() {
+        this._producerDebugPoolReadbackBuffer.unmap();
+        if (this._producerDebugHasGroundPropSnapshot && this._producerDebugGroundPropReadbackBuffer) {
+            this._producerDebugGroundPropReadbackBuffer.unmap();
+        }
+    }
+
+    _handleProducerDebugReadbackFailure(err) {
+        Logger.warn(`${this._logTag} [BakeDiag] readback failed: ${err?.message || err}`);
+        try { this._producerDebugPoolReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
+        try { this._producerDebugGroundPropReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
+        this._resetProducerDebugReadbackState();
+    }
+
+    _resetProducerDebugReadbackState() {
+        this._producerDebugQueued = false;
+        this._producerDebugPending = false;
+        this._producerDebugHasGroundPropSnapshot = false;
     }
 
     // ──────────────────────────────────────────────────────────────────────

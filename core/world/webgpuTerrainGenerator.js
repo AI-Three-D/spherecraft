@@ -821,86 +821,20 @@ export class WebGPUTerrainGenerator {
             chunkGridSize, face, terrainPasses, splatPass
         } = config;
 
-        // 1. Fill common terrain uniforms once
-        const scratchView = this._fillTerrainUniformScratch(
-            chunkCoordX, chunkCoordY, chunkSizeTex, chunkGridSize, face
+        this._writeBatchedTerrainUniforms(
+            terrainPasses,
+            chunkCoordX,
+            chunkCoordY,
+            chunkSizeTex,
+            chunkGridSize,
+            face
         );
-
-        for (let i = 0; i < terrainPasses.length; i++) {
-            scratchView.setInt32(48, terrainPasses[i].outputType, true);
-            this.device.queue.writeBuffer(
-                this._batchTerrainUniforms[i], 0,
-                this._terrainUniformScratch
-            );
-        }
-
-        // 3. Encode all terrain passes
         const enc = this.device.createCommandEncoder({ label: 'TerrainBatch' });
-
         for (let i = 0; i < terrainPasses.length; i++) {
-            const tp = terrainPasses[i];
-
-            const isMicroPass =
-                (tp.outputType === 4 || tp.outputType === 5 || tp.outputType === 6)
-                && tp.heightTexture && tp.tileTexture;
-            const isHeightInputPass =
-                !isMicroPass
-                && (tp.outputType === 1 || tp.outputType === 2)
-                && tp.heightTexture;
-
-            let pipeline, bindGroupLayout, entries;
-
-            if (isMicroPass) {
-                ({ pipeline, bindGroupLayout } =
-                    this._getMicroPipelineForFormat(
-                        tp.format, tp.heightTextureFormat, tp.tileTextureFormat));
-                entries = [
-                    { binding: 0, resource: { buffer: this._batchTerrainUniforms[i] } },
-                    { binding: 1, resource: tp.texture.createView() },
-                    { binding: 2, resource: tp.heightTexture.createView() },
-                    { binding: 3, resource: tp.tileTexture.createView() }
-                ];
-            } else if (isHeightInputPass) {
-                ({ pipeline, bindGroupLayout } =
-                    this._getHeightInputPipelineForFormat(
-                        tp.format, tp.heightTextureFormat));
-                entries = [
-                    { binding: 0, resource: { buffer: this._batchTerrainUniforms[i] } },
-                    { binding: 1, resource: tp.texture.createView() },
-                    { binding: 2, resource: tp.heightTexture.createView() }
-                ];
-            } else {
-                ({ pipeline, bindGroupLayout } =
-                    this._getTerrainPipelineForFormat(tp.format));
-                entries = [
-                    { binding: 0, resource: { buffer: this._batchTerrainUniforms[i] } },
-                    { binding: 1, resource: tp.texture.createView() }
-                ];
-            }
-
-            const pass = enc.beginComputePass();
-            pass.setPipeline(pipeline);
-            pass.setBindGroup(0, this.device.createBindGroup({ layout: bindGroupLayout, entries }));
-            this._setTerrainBiomeBindGroup(pass);
-            pass.dispatchWorkgroups(
-                Math.ceil(tp.textureSize / 8),
-                Math.ceil(tp.textureSize / 8)
-            );
-            pass.end();
-
-            if (tp.resolveToTexture && tp.resolveToFormat) {
-                this.resolveTexture2D(
-                    enc, tp.texture, tp.format,
-                    tp.resolveToTexture, tp.resolveToFormat,
-                    tp.textureSize, tp.textureSize
-                );
-            }
+            this._encodeBatchedTerrainPass(enc, terrainPasses[i], this._batchTerrainUniforms[i]);
         }
-
-        // 4. Submit terrain passes before splat generation.
         this.device.queue.submit([enc.finish()]);
 
-        // 5. Bilinear splat compute with small-kernel search fallback.
         if (splatPass) {
             this._runPaddedQuadtreeSplatPass(
                 splatPass,
@@ -910,6 +844,109 @@ export class WebGPUTerrainGenerator {
                 face
             );
         }
+    }
+
+    _writeBatchedTerrainUniforms(terrainPasses, chunkCoordX, chunkCoordY, chunkSizeTex, chunkGridSize, face) {
+        const scratchView = this._fillTerrainUniformScratch(
+            chunkCoordX,
+            chunkCoordY,
+            chunkSizeTex,
+            chunkGridSize,
+            face
+        );
+
+        for (let i = 0; i < terrainPasses.length; i++) {
+            scratchView.setInt32(48, terrainPasses[i].outputType, true);
+            this.device.queue.writeBuffer(
+                this._batchTerrainUniforms[i],
+                0,
+                this._terrainUniformScratch
+            );
+        }
+    }
+
+    _encodeBatchedTerrainPass(enc, terrainPass, uniformBuffer) {
+        const { pipeline, bindGroupLayout, entries } =
+            this._createBatchedTerrainPassResources(terrainPass, uniformBuffer);
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, this.device.createBindGroup({ layout: bindGroupLayout, entries }));
+        this._setTerrainBiomeBindGroup(pass);
+        pass.dispatchWorkgroups(
+            Math.ceil(terrainPass.textureSize / 8),
+            Math.ceil(terrainPass.textureSize / 8)
+        );
+        pass.end();
+
+        if (terrainPass.resolveToTexture && terrainPass.resolveToFormat) {
+            this.resolveTexture2D(
+                enc,
+                terrainPass.texture,
+                terrainPass.format,
+                terrainPass.resolveToTexture,
+                terrainPass.resolveToFormat,
+                terrainPass.textureSize,
+                terrainPass.textureSize
+            );
+        }
+    }
+
+    _createBatchedTerrainPassResources(terrainPass, uniformBuffer) {
+        if (this._isMicroTerrainPass(terrainPass)) {
+            const { pipeline, bindGroupLayout } = this._getMicroPipelineForFormat(
+                terrainPass.format,
+                terrainPass.heightTextureFormat,
+                terrainPass.tileTextureFormat
+            );
+            return {
+                pipeline,
+                bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: uniformBuffer } },
+                    { binding: 1, resource: terrainPass.texture.createView() },
+                    { binding: 2, resource: terrainPass.heightTexture.createView() },
+                    { binding: 3, resource: terrainPass.tileTexture.createView() }
+                ]
+            };
+        }
+
+        if (this._isHeightInputTerrainPass(terrainPass)) {
+            const { pipeline, bindGroupLayout } = this._getHeightInputPipelineForFormat(
+                terrainPass.format,
+                terrainPass.heightTextureFormat
+            );
+            return {
+                pipeline,
+                bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: uniformBuffer } },
+                    { binding: 1, resource: terrainPass.texture.createView() },
+                    { binding: 2, resource: terrainPass.heightTexture.createView() }
+                ]
+            };
+        }
+
+        const { pipeline, bindGroupLayout } = this._getTerrainPipelineForFormat(terrainPass.format);
+        return {
+            pipeline,
+            bindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: 1, resource: terrainPass.texture.createView() }
+            ]
+        };
+    }
+
+    _isMicroTerrainPass(terrainPass) {
+        return (terrainPass.outputType === 4 || terrainPass.outputType === 5 || terrainPass.outputType === 6)
+            && terrainPass.heightTexture
+            && terrainPass.tileTexture;
+    }
+
+    _isHeightInputTerrainPass(terrainPass) {
+        return !this._isMicroTerrainPass(terrainPass)
+            && (terrainPass.outputType === 1 || terrainPass.outputType === 2)
+            && terrainPass.heightTexture;
     }
 
     _writeSplatUniformBuffer({
@@ -2811,42 +2848,18 @@ this.device.queue.submit([enc.finish()]);
     async runLODSplatPass(hTex, tTex, splatDataTex, splatIndexTex, chunkCoordX, chunkCoordY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
         const chunksPerAtlas = Math.max(1, Math.floor(worldCoverage / this.chunkSize));
         const chunkSizeTex = Math.max(1, Math.floor(textureSize / chunksPerAtlas));
-    
-        // ──────────────────────────────────────────────────────────────
-        // DIAGNOSTIC: Log splat pass parameters
-        // ──────────────────────────────────────────────────────────────
-        if (this._splatPassLogCount === undefined) this._splatPassLogCount = 0;
-        if (this._splatPassLogCount < 5) {
-            this._splatPassLogCount++;
-            Logger.info(`[SplatDebug] ═══════════════════════════════════════════════`);
-            Logger.info(`[SplatDebug] runLODSplatPass #${this._splatPassLogCount}`);
-            Logger.info(`[SplatDebug]   chunkCoord=(${chunkCoordX}, ${chunkCoordY})`);
-            Logger.info(`[SplatDebug]   worldCoverage=${worldCoverage}`);
-            Logger.info(`[SplatDebug]   this.chunkSize=${this.chunkSize}`);
-            Logger.info(`[SplatDebug]   chunksPerAtlas=${chunksPerAtlas}`);
-            Logger.info(`[SplatDebug]   chunkSizeTex=${chunkSizeTex}`);
-            Logger.info(`[SplatDebug]   textureSize=${textureSize}`);
-            Logger.info(`[SplatDebug]   lod=${lod}`);
-            Logger.info(`[SplatDebug]   splatDensity=${this.splatDensity}`);
-            Logger.info(`[SplatDebug]   splatKernelSize=${this.splatKernelSize}`);
-            Logger.info(`[SplatDebug]   heightTex size=${hTex.width}x${hTex.height}`);
-            Logger.info(`[SplatDebug]   tileTex size=${tTex.width}x${tTex.height}`);
-            Logger.info(`[SplatDebug]   splatOutTex size=${splatDataTex.width}x${splatDataTex.height}`);
-            
-            // Critical check: is chunkSizeTex == textureSize? 
-            // If so, useAtlas in shader will be FALSE, and UV math changes completely
-            const useAtlasExpected = (textureSize > chunkSizeTex);
-            Logger.info(`[SplatDebug]   shader useAtlas will be: ${useAtlasExpected}`);
-            Logger.info(`[SplatDebug]   perChunkDim = chunkSizeTex * splatDensity = ${chunkSizeTex * this.splatDensity}`);
-            
-            if (chunkSizeTex >= textureSize) {
-                Logger.warn(`[SplatDebug]   ⚠️ chunkSizeTex >= textureSize! Only 1 chunk in atlas.`);
-                Logger.warn(`[SplatDebug]   ⚠️ Shader will treat entire texture as single chunk.`);
-            }
-            if (chunkSizeTex < 2) {
-                Logger.warn(`[SplatDebug]   ⚠️ chunkSizeTex < 2! Tile sampling will collapse.`);
-            }
-        }
+        this._logLODSplatPass({
+            hTex,
+            tTex,
+            splatDataTex,
+            chunkCoordX,
+            chunkCoordY,
+            worldCoverage,
+            textureSize,
+            lod,
+            chunksPerAtlas,
+            chunkSizeTex
+        });
     
         this._writeSplatUniformBuffer({
             chunkCoordX,
@@ -2866,67 +2879,128 @@ this.device.queue.submit([enc.finish()]);
         const { pipeline, bindGroupLayout } =
             this._getSplatPipelineForFormats(heightFormat, tileFormat);
         const enc = this.device.createCommandEncoder();
-        {
-            const pass = enc.beginComputePass();
-            pass.setPipeline(palettePipeline);
-            pass.setBindGroup(0, this.device.createBindGroup({
-                layout: paletteBindGroupLayout,
-                entries: [
-                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
-                    { binding: 1, resource: tTex.createView() },
-                    { binding: 2, resource: splatPaletteTex.createView() }
-                ]
-            }));
-            pass.dispatchWorkgroups(
-                Math.ceil(paletteSize.width / 8),
-                Math.ceil(paletteSize.height / 8)
-            );
-            pass.end();
-        }
-        {
-            const pass = enc.beginComputePass();
-            pass.setPipeline(pipeline);
-            pass.setBindGroup(0, this.device.createBindGroup({
-                layout: bindGroupLayout,
-                entries: [
-                    { binding: 0, resource: { buffer: this.splatUniformBuffer } },
-                    { binding: 1, resource: hTex.createView() },
-                    { binding: 2, resource: tTex.createView() },
-                    { binding: 3, resource: splatDataTex.createView() },
-                    { binding: 4, resource: splatIndexTex.createView() },
-                    { binding: 5, resource: splatPaletteTex.createView() }
-                ]
-            }));
-    
-            // Dispatch must cover the full splat output texture, not just the tile map
-            const splatW = splatDataTex.width || textureSize;
-            const splatH = splatDataTex.height || textureSize;
-            pass.dispatchWorkgroups(Math.ceil(splatW / 8), Math.ceil(splatH / 8));
-            pass.end();
-        }
+        this._encodeSplatPalettePass(enc, palettePipeline, paletteBindGroupLayout, tTex, splatPaletteTex, paletteSize);
+        this._encodeLODSplatPass(
+            enc,
+            pipeline,
+            bindGroupLayout,
+            hTex,
+            tTex,
+            splatDataTex,
+            splatIndexTex,
+            splatPaletteTex,
+            textureSize
+        );
         this.device.queue.submit([enc.finish()]);
-        this.device.queue.onSubmittedWorkDone()
-            .then(() => { try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ } })
-            .catch(() => {});
+        this._destroyTextureAfterSubmittedWork(splatPaletteTex);
 
-        // ──────────────────────────────────────────────────────────────
-        // DIAGNOSTIC: Read back splat data and verify contents
-        // ──────────────────────────────────────────────────────────────
+        await this._maybeValidateSplatOutput(splatDataTex, tTex, textureSize, chunkSizeTex);
+    }
+
+    _logLODSplatPass({
+        hTex,
+        tTex,
+        splatDataTex,
+        chunkCoordX,
+        chunkCoordY,
+        worldCoverage,
+        textureSize,
+        lod,
+        chunksPerAtlas,
+        chunkSizeTex
+    }) {
+        if (this._splatPassLogCount === undefined) this._splatPassLogCount = 0;
+        if (this._splatPassLogCount >= 5) return;
+
+        this._splatPassLogCount++;
+        Logger.info(`[SplatDebug] ═══════════════════════════════════════════════`);
+        Logger.info(`[SplatDebug] runLODSplatPass #${this._splatPassLogCount}`);
+        Logger.info(`[SplatDebug]   chunkCoord=(${chunkCoordX}, ${chunkCoordY})`);
+        Logger.info(`[SplatDebug]   worldCoverage=${worldCoverage}`);
+        Logger.info(`[SplatDebug]   this.chunkSize=${this.chunkSize}`);
+        Logger.info(`[SplatDebug]   chunksPerAtlas=${chunksPerAtlas}`);
+        Logger.info(`[SplatDebug]   chunkSizeTex=${chunkSizeTex}`);
+        Logger.info(`[SplatDebug]   textureSize=${textureSize}`);
+        Logger.info(`[SplatDebug]   lod=${lod}`);
+        Logger.info(`[SplatDebug]   splatDensity=${this.splatDensity}`);
+        Logger.info(`[SplatDebug]   splatKernelSize=${this.splatKernelSize}`);
+        Logger.info(`[SplatDebug]   heightTex size=${hTex.width}x${hTex.height}`);
+        Logger.info(`[SplatDebug]   tileTex size=${tTex.width}x${tTex.height}`);
+        Logger.info(`[SplatDebug]   splatOutTex size=${splatDataTex.width}x${splatDataTex.height}`);
+
+        const useAtlasExpected = textureSize > chunkSizeTex;
+        Logger.info(`[SplatDebug]   shader useAtlas will be: ${useAtlasExpected}`);
+        Logger.info(`[SplatDebug]   perChunkDim = chunkSizeTex * splatDensity = ${chunkSizeTex * this.splatDensity}`);
+
+        if (chunkSizeTex >= textureSize) {
+            Logger.warn(`[SplatDebug]   ⚠️ chunkSizeTex >= textureSize! Only 1 chunk in atlas.`);
+            Logger.warn(`[SplatDebug]   ⚠️ Shader will treat entire texture as single chunk.`);
+        }
+        if (chunkSizeTex < 2) {
+            Logger.warn(`[SplatDebug]   ⚠️ chunkSizeTex < 2! Tile sampling will collapse.`);
+        }
+    }
+
+    _encodeSplatPalettePass(enc, pipeline, bindGroupLayout, tileTexture, splatPaletteTex, paletteSize) {
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, this.device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                { binding: 1, resource: tileTexture.createView() },
+                { binding: 2, resource: splatPaletteTex.createView() }
+            ]
+        }));
+        pass.dispatchWorkgroups(
+            Math.ceil(paletteSize.width / 8),
+            Math.ceil(paletteSize.height / 8)
+        );
+        pass.end();
+    }
+
+    _encodeLODSplatPass(enc, pipeline, bindGroupLayout, heightTex, tileTex, splatDataTex, splatIndexTex, splatPaletteTex, textureSize) {
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, this.device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: this.splatUniformBuffer } },
+                { binding: 1, resource: heightTex.createView() },
+                { binding: 2, resource: tileTex.createView() },
+                { binding: 3, resource: splatDataTex.createView() },
+                { binding: 4, resource: splatIndexTex.createView() },
+                { binding: 5, resource: splatPaletteTex.createView() }
+            ]
+        }));
+        const splatW = splatDataTex.width || textureSize;
+        const splatH = splatDataTex.height || textureSize;
+        pass.dispatchWorkgroups(Math.ceil(splatW / 8), Math.ceil(splatH / 8));
+        pass.end();
+    }
+
+    _destroyTextureAfterSubmittedWork(texture) {
+        this.device.queue.onSubmittedWorkDone()
+            .then(() => { try { texture.destroy(); } catch { /* ignore cleanup failure */ } })
+            .catch(() => {});
+    }
+
+    async _maybeValidateSplatOutput(splatDataTex, tileTex, textureSize, chunkSizeTex) {
         if (this._splatReadbackCount === undefined) this._splatReadbackCount = 0;
-        if (this._splatReadbackCount < 3) {
-            this._splatReadbackCount++;
-            try {
-                await this._debugValidateSplatOutput(splatDataTex, tTex, textureSize, chunkSizeTex);
-            } catch (err) {
-                Logger.warn(`[SplatDebug] Readback failed: ${err.message || err}`);
-            }
+        if (this._splatReadbackCount >= 3) return;
+
+        this._splatReadbackCount++;
+        try {
+            await this._debugValidateSplatOutput(splatDataTex, tileTex, textureSize, chunkSizeTex);
+        } catch (err) {
+            Logger.warn(`[SplatDebug] Readback failed: ${err.message || err}`);
         }
     }
     
     /**
      * Read back splat and tile textures to verify the compute shader produced valid data.
      */
-    async _debugValidateSplatOutput(splatGpuTex, tileGpuTex, textureSize, chunkSizeTex) {
+    async _debugValidateSplatOutput(splatGpuTex, tileGpuTex, textureSize, _chunkSizeTex) {
         const sampleSize = Math.min(64, textureSize);
         const regions = [
             { x: 0, y: 0, label: 'top-left' },
@@ -2939,98 +3013,25 @@ this.device.queue.submit([enc.finish()]);
         ];
     
         for (const region of regions) {
-            const splatData = await this.readTextureWindowRGBA8Unorm(
-                splatGpuTex, region.x, region.y, sampleSize, sampleSize
-            );
-            const tileData = await this.readTextureWindowR8Unorm(
-                tileGpuTex, region.x, region.y, sampleSize, sampleSize
-            );
-    
-            let zeroCount = 0;
-            let validCount = 0;
-            let boundaryCount = 0;
-            let primaryMin = Infinity, primaryMax = -Infinity;
-            let type1Set = new Set();
-            let type2Set = new Set();
-            let splatSamples = [];
-    
-            for (let i = 0; i < splatData.length; i += 4) {
-                const type1 = splatData[i];
-                const type2 = splatData[i + 1];
-                const weight = splatData[i + 2] / 255;
-                const hasBoundary =  splatData[i + 3] > 127;
-
-                if (!hasBoundary && weight > 0.999 && type1 === type2) {
-                    zeroCount++;
-                } else {
-                    validCount++;
-                    if (hasBoundary) boundaryCount++;
-                    primaryMin = Math.min(primaryMin, weight);
-                    primaryMax = Math.max(primaryMax, weight);
-                    type1Set.add(type1);
-                    type2Set.add(type2);
-                }
-    
-                if (splatSamples.length < 5) {
-                    splatSamples.push({
-                        type1,
-                        type2,
-                        hasBoundary,
-                        weight
-                    });
-                }
-            }
-    
-            let tileTypeSet = new Set();
-            let tileSamples = [];
-            for (let i = 0; i < tileData.length; i += 1) {
-                const tileId = tileData[i];
-                tileTypeSet.add(tileId);
-                if (tileSamples.length < 5) {
-                    tileSamples.push({ raw: tileId, decoded: tileId });
-                }
-            }
-    
-            const totalPixels = sampleSize * sampleSize;
-            const zeroPercent = ((zeroCount / totalPixels) * 100).toFixed(1);
-    /*
-            Logger.info(`[SplatDebug] ── Region: ${region.label} (${region.x},${region.y}) ${sampleSize}x${sampleSize} ──`);
-            Logger.info(`[SplatDebug]   Splat: ${validCount} valid, ${zeroCount} zero (${zeroPercent}% empty)`);
-    
-            if (validCount > 0) {
-                Logger.info(`[SplatDebug]   primary range: [${primaryMin.toFixed(4)}, ${primaryMax.toFixed(4)}]`);
-                Logger.info(`[SplatDebug]   boundary texels: ${boundaryCount}`);
-                Logger.info(`[SplatDebug]   type1 values: {${[...type1Set].sort((a,b)=>a-b).join(', ')}}`);
-                Logger.info(`[SplatDebug]   type2 values: {${[...type2Set].sort((a,b)=>a-b).join(', ')}}`);
-            } else {
-                Logger.warn(`[SplatDebug]   ⚠️ ALL PIXELS ARE ZERO — splat compute produced no data!`);
-            }
-    
-            Logger.info(`[SplatDebug]   Tile types in region: {${[...tileTypeSet].sort((a,b)=>a-b).join(', ')}}`);
-            Logger.info(`[SplatDebug]   Sample splat pixels:`);
-            for (const s of splatSamples) {
-                Logger.info(
-                    `[SplatDebug]     type1=${s.type1} type2=${s.type2} boundary=${s.hasBoundary} ` +
-                    `weight=${s.weight.toFixed(3)}`
-                );
-            }
-            Logger.info(`[SplatDebug]   Sample tile pixels:`);
-            for (const t of tileSamples) {
-                Logger.info(`[SplatDebug]     raw=${t.raw} decoded=${t.decoded}`);
-            }
-    
-            // ── Critical diagnostics ──
-            if (validCount > 0 && type1Set.size === 1 && type2Set.size <= 1) {
-                const onlyType = [...type1Set][0];
-                Logger.warn(`[SplatDebug]   ⚠️ Splat has only ONE tile type (${onlyType}) — no blending possible`);
-                Logger.warn(`[SplatDebug]   ⚠️ This suggests tile map sampling is collapsed to one texel`);
-            }
-    
-            if (tileTypeSet.size <= 1) {
-                Logger.warn(`[SplatDebug]   ⚠️ Tile map has only ${tileTypeSet.size} type(s) in this region`);
-                Logger.warn(`[SplatDebug]   ⚠️ Splat blending requires tile boundaries — check terrain generation`);
-            }*/
+            await this._readSplatDebugRegion(splatGpuTex, tileGpuTex, region, sampleSize);
         }
+    }
+
+    async _readSplatDebugRegion(splatGpuTex, tileGpuTex, region, sampleSize) {
+        await this.readTextureWindowRGBA8Unorm(
+            splatGpuTex,
+            region.x,
+            region.y,
+            sampleSize,
+            sampleSize
+        );
+        await this.readTextureWindowR8Unorm(
+            tileGpuTex,
+            region.x,
+            region.y,
+            sampleSize,
+            sampleSize
+        );
     }
 
     async _debugAnalyzeQuadtreeSplatPass(
