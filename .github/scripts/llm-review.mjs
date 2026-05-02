@@ -1,13 +1,21 @@
 #!/usr/bin/env node
 /**
  * LLM-based PR code review with inline diff comments.
- * Primary:  Gemini 2.0 Flash (free tier) — set GEMINI_API_KEY secret
- * Fallback: GitHub Models (gpt-4o-mini)  — uses GITHUB_TOKEN, no extra secret
+ * Primary:  Gemini (free tier) — set GEMINI_API_KEY + optionally GEMINI_MODEL
+ * Fallback: GitHub Models (gpt-4o-mini) — requires PAT with models:read as GH_MODELS_TOKEN
  */
 
 import { execSync } from "child_process";
 
-const { GITHUB_TOKEN, GEMINI_API_KEY, PR_NUMBER, REPO, HEAD_SHA } = process.env;
+const {
+  GITHUB_TOKEN,
+  GH_MODELS_TOKEN, // PAT with models:read scope — needed for GitHub Models fallback
+  GEMINI_API_KEY,
+  GEMINI_MODEL = "gemini-2.0-flash", // override via workflow env var if quota issues
+  PR_NUMBER,
+  REPO,
+  HEAD_SHA,
+} = process.env;
 
 const MAX_DIFF_CHARS = 80_000;
 
@@ -97,7 +105,7 @@ function extractJSON(text) {
 }
 
 async function callGemini(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -122,7 +130,7 @@ async function callGitHubModels(prompt) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Authorization: `Bearer ${GH_MODELS_TOKEN}`,
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
