@@ -1268,11 +1268,11 @@ fn splatDominantTileId(splat: SplatData) -> f32 {
 fn splatHasMeaningfulBlend(splat: SplatData) -> bool {
     let dominant = splatDominantWeight(splat);
     let rest = 1.0 - dominant;
-    return rest > 0.03;
+    return rest > 0.001;
 }
 
 fn splatChannelUsable(tileId: f32, weight: f32) -> bool {
-    return tileId >= 0.0 && tileId < 255.0 && weight > 0.03;
+    return tileId >= 0.0 && tileId < 255.0 && weight > 0.001;
 }
 
 
@@ -2778,37 +2778,79 @@ if (debugMode == 16) {
     splatResult.cellLocal = vec2<f32>(0.0, 0.0);
     splatResult.hasBoundary = false;
     splatResult.bilinearValid = true;
+    var hasLiveSplat = false;
     var dominantTileId = fallbackTileId;
+    // 0=raw-tile, 1=lod0-fade-prebake, 2=lod-prebake, 3=live-splat  (for mode 46)
+    var microColorPath: i32 = 0;
+
+    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+        splatResult = sampleSplatData(input, layer);
+        hasLiveSplat = true;
+        dominantTileId = splatDominantTileId(splatResult);
+    }
+
     if (ENABLE_RESOLVED_COLOR) {
         // Resolved-color path: one chunk-local prebaked color sample replaces
         // runtime splat decoding plus repeated atlas sampling. Procedural detail
         // can be layered on top later without bringing back atlas fan-out.
         microSample = sampleResolvedTerrainColor(input, layer);
+        microColorPath = 2;
     } else if (lod0ResolvedColorFade > 0.999) {
         // This branch varies per fragment, so use explicit-level sampling.
         // WGSL forbids derivative-taking textureSample in non-uniform control.
         microSample = sampleResolvedTerrainColorLevel(input, layer);
-    } else if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
-        splatResult = sampleSplatData(input, layer);
-        let detailedMicro = sampleMicroTextureWithSplat(
+        microColorPath = 1;
+    } else if (hasLiveSplat) {
+        microSample = sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
         );
-        microSample = detailedMicro;
-       dominantTileId = splatDominantTileId(splatResult); 
-
-        if (ENABLE_NEAR_TO_MID_FADE && nearToMidDetailFade < 0.999) {
-            let coarseMicro = sampleTileColor(
-                fallbackTileId, worldTileCoord, local,
-                activeSeason, ddx_vUv, ddy_vUv
-            );
-            microSample = mix(coarseMicro, detailedMicro, nearToMidDetailFade);
-dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearToMidDetailFade > 0.5);
-        }
+        microColorPath = 3;
     } else {
         microSample = sampleTileColor(
             fallbackTileId, worldTileCoord, local,
             activeSeason, ddx_vUv, ddy_vUv
         );
+        microColorPath = 0;
+    }
+
+    // ── Debug mode 46: path diagnostic ──────────────────────────────────────
+    // Shows which micro-color branch ran and whether splat blending is active.
+    //
+    // Color key (read before lighting/AO):
+    //   RED    (1,0,0)          ENABLE_RESOLVED_COLOR prebake (compile-time LOD gate)
+    //   YELLOW (1,1,0)          lod0 distance-fade prebake (> fadeEnd from camera)
+    //   BLUE   (0,0,1)          raw tile fallback — ENABLE_SPLAT=false for this LOD
+    //                           or enableSplatLayer uniform=0
+    //   BRIGHT GREEN (0,1,0)    live splat AND hasBoundary=true  (blend zone active)
+    //   DARK GREEN   (0,.35,0)  live splat AND hasBoundary=false (pure dominant, may
+    //                           indicate threshold cutoff suppressed blending)
+    //   +cyan tint on greens    bilinearValid=true (hardware bilinear weight path)
+    //   +blue tint on all       brightness encodes geometryLOD (dim=LOD0, bright=LOD6)
+    if (debugMode == 46) {
+        // path 0 = raw-tile (blue);  1 = lod0-fade prebake (yellow);
+        // path 2 = LOD prebake (red); 3 = live splat (green shades)
+        var pathColor = vec3<f32>(0.0);
+        if (microColorPath == 0) {
+            pathColor = vec3<f32>(0.02, 0.08, 0.95);   // saturated blue
+        }
+        if (microColorPath == 1) {
+            pathColor = vec3<f32>(0.95, 0.88, 0.02);   // saturated yellow
+        }
+        if (microColorPath == 2) {
+            pathColor = vec3<f32>(0.95, 0.04, 0.02);   // saturated red
+        }
+        if (microColorPath == 3) {
+            // Bright green = hasBoundary (blend zone active)
+            // Dark green   = pure dominant (possible threshold suppression)
+            // Cyan tint    = bilinearValid (hardware bilinear weight path)
+            let gBright = select(0.35, 0.95, splatResult.hasBoundary);
+            let cyanTint = select(0.0, 0.35, splatResult.bilinearValid);
+            pathColor = vec3<f32>(cyanTint, gBright, cyanTint);
+        }
+        // Subtle LOD brightness offset: dim=LOD0, brighter=farther LODs.
+        let lodFraction = clamp(f32(fragUniforms.geometryLOD) / 6.0, 0.0, 1.0);
+        pathColor = mix(pathColor, vec3<f32>(1.0), lodFraction * 0.18);
+        return vec4<f32>(pathColor, 1.0);
     }
 
     if (microSample.a < 0.0) {
@@ -2830,7 +2872,7 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
     let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
     if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
         var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
-        if (!ENABLE_RESOLVED_COLOR && ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+        if (!ENABLE_RESOLVED_COLOR && hasLiveSplat) {
             let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);
             let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
             macroColor = mix(macroColor, detailedMacro, macroFade);
@@ -2928,6 +2970,13 @@ dominantTileId = select(fallbackTileId, splatDominantTileId(splatResult), nearTo
             if (ENABLE_TERRAIN_AO) {
                 var ao = sampleTerrainAO(input, layer);
                 var aoNeutralFade = lod0AOFade;
+                if (hasLiveSplat && splatResult.hasBoundary) {
+                    let transitionWeight = 1.0 - splatDominantWeight(splatResult);
+                    aoNeutralFade = max(
+                        aoNeutralFade,
+                        smoothstep(0.005, 0.20, transitionWeight)
+                    );
+                }
                 if (ENABLE_LOD_EDGE_AO_FADE && LOD_EDGE_AO_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
                     aoNeutralFade = max(
                         aoNeutralFade,

@@ -74,8 +74,10 @@ export function createEngineConfig() {
     vertexSpacingMeters,
     splatConfig: {
       splatDensity: 8,
-      splatKernelSize: 5,
-      transitionSharpness: 0.3, //1.9
+      splatKernelSize: 17,
+      // Keep category weights linear. Width should come from the kernel, not
+      // from boosting minority categories into visible halos.
+      transitionSharpness: 1.0,
       transitionDominanceStart: 0.05,
       transitionDominanceEnd: 0.9,
       centerCategoryBias: 0.0,
@@ -83,6 +85,7 @@ export function createEngineConfig() {
       transitionBreakupWarpScale: 0.155,
       transitionBreakupWarpStrength: 0.65,
       transitionBreakupStrength: 0.10,
+      chunkPaletteEnabled: false,
   },
     lod: {
       distancesMeters: lodDistancesMeters,
@@ -141,7 +144,7 @@ export function createEngineConfig() {
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
         fullMaxLOD: 0,
-        nearMaxLOD: 2,
+        nearMaxLOD: 4,
         midMaxLOD: 4,
         nearToMidFadeStartChunks: 2.5,
         nearToMidFadeEndChunks: 4.0,
@@ -160,19 +163,23 @@ export function createEngineConfig() {
         pointSampleLodStart: 2,
         macroStartLod: 99,
         resolvedColorEnabled: true,
-        resolvedColorStartLod: 1,
-        lod0ResolvedColorEnabled: true,
-        // LOD0 keeps the live atlas only for very close inspection. Beyond
-        // that, fade quickly into the prebaked color so near/mid terrain uses
-        // the same stable medium-scale texture character as LOD1.
-        lod0ResolvedColorFadeStartMeters: 3,
-        lod0ResolvedColorFadeEndMeters: 18,
+        resolvedColorStartLod: 5,
+        // Keep close and mid geometry on live category splats. The prebaked
+        // resolved-color path is only for far terrain; nearer use exposes
+        // hard category-mask contours because the prebake does not currently
+        // reproduce the fragment shader's live splat reconstruction.
+        lod0ResolvedColorEnabled: false,
+        lod0ResolvedColorFadeStartMeters: 128,
+        lod0ResolvedColorFadeEndMeters: 256,
         // AO has the same near-vs-prebaked frequency mismatch as albedo.
         // Fade LOD0 contact AO out over the same range so its tile-local
         // darkening does not stop abruptly where LOD1 takes over.
         lod0AOFadeEnabled: true,
-        lod0AOFadeStartMeters: 3,
-        lod0AOFadeEndMeters: 18,
+        lod0AOFadeStartMeters: 128,
+        lod0AOFadeEndMeters: 256,
+        splatBlendMaxLod: 4,
+        splatTop2MaxLod: -1,
+        splatDominantMinWeight: 1.0,
         nearMipSharpenMaxLod: -1,
         variantRotationMaxLod: 2,
         clusteredMaxLod: 1,

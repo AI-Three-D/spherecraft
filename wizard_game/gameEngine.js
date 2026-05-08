@@ -1201,7 +1201,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     _resolveTerrainDebugModes(mode) {
-        if (mode >= 25 && mode <= 45) {
+        if (mode >= 25 && mode <= 46) {
             return { generatorMode: 0, fragmentMode: mode };
         }
         if (mode === 0) {
@@ -1234,6 +1234,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             43: 'Base Before Macro',
             44: 'Base After Macro',
             45: 'Final Albedo Before Lighting',
+            46: 'Path Diagnostic (splat/prebake/raw)',
             99: 'Fragment Test'
         };
         return names[mode] ?? 'Debug';

@@ -78,7 +78,7 @@ fn sampleTileColor(tileId: f32, worldTileCoord: vec2<f32>, localUV: vec2<f32>, s
 }
 
 fn splatChannelUsable(tileId: f32, weight: f32) -> bool {
-    return tileId >= 0.0 && tileId < 255.0 && weight > 0.03;
+    return tileId >= 0.0 && tileId < 255.0 && weight > 0.001;
 }
 
 @compute @workgroup_size(8, 8)
