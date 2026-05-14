@@ -2188,22 +2188,58 @@ markTilesVisible(tiles) {
         };
     }
 
+    _debugArrayTextureSource(type) {
+        if (!this.arrayPool) return null;
+
+        const poolTexture = this.arrayPool.textures.get(type);
+        if (poolTexture) {
+            return {
+                texture: poolTexture,
+                format: this.textureFormats[type] || this.arrayPool.formats?.[type] || 'rgba32float',
+            };
+        }
+
+        const external = this._externalArrayTextures?.[type];
+        const externalTexture = external?._gpuTexture?.texture;
+        if (!externalTexture) return null;
+
+        return {
+            texture: external,
+            format: external?._gpuTexture?.format
+                || external?._gpuFormat
+                || this.textureFormats[type]
+                || this.arrayPool.formats?.[type]
+                || 'rgba32float',
+        };
+    }
+
+    _debugTextureDimensions(textureLike) {
+        return {
+            width: Math.max(1, Math.floor(textureLike?.width ?? this.tileTextureSize)),
+            height: Math.max(1, Math.floor(textureLike?.height ?? this.tileTextureSize)),
+        };
+    }
+
     async debugReadArrayLayerTexels(type, layer, texelCoords = []) {
-        if (!this.arrayPool || layer === null || layer === undefined) return null;
-        const texture = this.arrayPool.textures.get(type);
+        if (layer === null || layer === undefined) return null;
+        const source = this._debugArrayTextureSource(type);
+        if (!source) return null;
+
+        const textureLike = source.texture;
+        const texture = textureLike?._gpuTexture?.texture || textureLike;
+        const { format } = source;
         if (!texture) return null;
 
-        const format = this.textureFormats[type] || this.arrayPool.formats?.[type] || 'rgba32float';
         const texelBytes = gpuFormatBytesPerTexel(format);
         if (!Number.isFinite(texelBytes) || texelBytes <= 0) return null;
 
         const coords = Array.isArray(texelCoords) ? texelCoords : [];
-        const size = this.tileTextureSize;
+        const { width, height } = this._debugTextureDimensions(textureLike);
         const results = [];
 
         for (const coord of coords) {
-            const x = Math.max(0, Math.min(size - 1, Math.floor(coord?.x ?? 0)));
-            const y = Math.max(0, Math.min(size - 1, Math.floor(coord?.y ?? 0)));
+            const x = Math.max(0, Math.min(width - 1, Math.floor(coord?.x ?? 0)));
+            const y = Math.max(0, Math.min(height - 1, Math.floor(coord?.y ?? 0)));
             const bytesPerRow = 256;
             const bufferSize = bytesPerRow;
 
@@ -2240,15 +2276,15 @@ markTilesVisible(tiles) {
     }
 
     async debugReadArrayLayerBuffer(type, layer, width = null, height = null) {
-        if (!this.arrayPool || layer === null || layer === undefined) return null;
-        const texture = this.arrayPool.textures.get(type);
-        if (!texture) return null;
+        if (layer === null || layer === undefined) return null;
+        const source = this._debugArrayTextureSource(type);
+        if (!source) return null;
 
-        const format = this.textureFormats[type] || this.arrayPool.formats?.[type] || 'rgba32float';
-        return this._debugReadTextureBuffer(texture, format, width, height, layer);
+        return this._debugReadTextureBuffer(source.texture, source.format, width, height, layer);
     }
 
     async _debugReadTextureTexels(textureLike, format, texelCoords = [], layer = null) {
+        const { width, height } = this._debugTextureDimensions(textureLike);
         const texture = textureLike?._gpuTexture?.texture || textureLike;
         if (!texture) return null;
 
@@ -2256,12 +2292,11 @@ markTilesVisible(tiles) {
         if (!Number.isFinite(texelBytes) || texelBytes <= 0) return null;
 
         const coords = Array.isArray(texelCoords) ? texelCoords : [];
-        const size = this.tileTextureSize;
         const results = [];
 
         for (const coord of coords) {
-            const x = Math.max(0, Math.min(size - 1, Math.floor(coord?.x ?? 0)));
-            const y = Math.max(0, Math.min(size - 1, Math.floor(coord?.y ?? 0)));
+            const x = Math.max(0, Math.min(width - 1, Math.floor(coord?.x ?? 0)));
+            const y = Math.max(0, Math.min(height - 1, Math.floor(coord?.y ?? 0)));
             const bytesPerRow = 256;
             const staging = this.device.createBuffer({
                 size: bytesPerRow,
@@ -2292,14 +2327,15 @@ markTilesVisible(tiles) {
     }
 
     async _debugReadTextureBuffer(textureLike, format, width = null, height = null, layer = null) {
+        const dimensions = this._debugTextureDimensions(textureLike);
         const texture = textureLike?._gpuTexture?.texture || textureLike;
         if (!texture) return null;
 
         const texelBytes = gpuFormatBytesPerTexel(format);
         if (!Number.isFinite(texelBytes) || texelBytes <= 0) return null;
 
-        const copyWidth = Math.max(1, Math.min(this.tileTextureSize, Math.floor(width ?? this.tileTextureSize)));
-        const copyHeight = Math.max(1, Math.min(this.tileTextureSize, Math.floor(height ?? this.tileTextureSize)));
+        const copyWidth = Math.max(1, Math.min(dimensions.width, Math.floor(width ?? dimensions.width)));
+        const copyHeight = Math.max(1, Math.min(dimensions.height, Math.floor(height ?? dimensions.height)));
         const bytesPerRow = alignTo(copyWidth * texelBytes, 256);
         const bufferSize = bytesPerRow * copyHeight;
 

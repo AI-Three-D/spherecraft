@@ -256,6 +256,12 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                                             viewDimension: '2d' } },
                         { binding: 5, visibility: GPUShaderStage.COMPUTE,
                           texture: { sampleType: 'float',
+                                     viewDimension: '2d' } },
+                        { binding: 6, visibility: GPUShaderStage.COMPUTE,
+                          texture: { sampleType: gpuFormatSampleType('rgba8unorm'),
+                                     viewDimension: '2d' } },
+                        { binding: 7, visibility: GPUShaderStage.COMPUTE,
+                          texture: { sampleType: gpuFormatSampleType('rgba8unorm'),
                                      viewDimension: '2d' } }
                     ]
                 });
@@ -275,6 +281,12 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                         { binding: 2, visibility: GPUShaderStage.COMPUTE,
                           storageTexture: { access: 'write-only',
                                             format: 'rgba8unorm',
+                                            viewDimension: '2d' } },
+                        { binding: 3, visibility: GPUShaderStage.COMPUTE,
+                          texture: { sampleType: gpuFormatSampleType('rgba8unorm'),
+                                     viewDimension: '2d' } },
+                        { binding: 4, visibility: GPUShaderStage.COMPUTE,
+                          texture: { sampleType: gpuFormatSampleType('rgba8unorm'),
                                             viewDimension: '2d' } }
                     ]
                 });
@@ -386,7 +398,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
 
                 // ── Batched tile generation resources ─────────────────────
                 this._batchTerrainUniforms = [];
-                for (let i = 0; i < 6; i++) {
+                for (let i = 0; i < 8; i++) {
                     this._batchTerrainUniforms.push(this.device.createBuffer({
                         label: `TerrainBatchUniform-${i}`,
                         size: 512,
@@ -579,6 +591,22 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                                 sampleType: gpuFormatSampleType('rgba8unorm'),
                                 viewDimension: '2d'
                             }
+                        },
+                        {
+                            binding: 6,
+                            visibility: GPUShaderStage.COMPUTE,
+                            texture: {
+                                sampleType: gpuFormatSampleType('rgba8unorm'),
+                                viewDimension: '2d'
+                            }
+                        },
+                        {
+                            binding: 7,
+                            visibility: GPUShaderStage.COMPUTE,
+                            texture: {
+                                sampleType: gpuFormatSampleType('rgba8unorm'),
+                                viewDimension: '2d'
+                            }
                         }
                     ]
                 });
@@ -629,6 +657,22 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                             storageTexture: {
                                 access: 'write-only',
                                 format: 'rgba8unorm',
+                                viewDimension: '2d'
+                            }
+                        },
+                        {
+                            binding: 3,
+                            visibility: GPUShaderStage.COMPUTE,
+                            texture: {
+                                sampleType: gpuFormatSampleType('rgba8unorm'),
+                                viewDimension: '2d'
+                            }
+                        },
+                        {
+                            binding: 4,
+                            visibility: GPUShaderStage.COMPUTE,
+                            texture: {
+                                sampleType: gpuFormatSampleType('rgba8unorm'),
                                 viewDimension: '2d'
                             }
                         }

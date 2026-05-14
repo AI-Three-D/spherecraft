@@ -37,7 +37,9 @@ struct Params {
 @group(0) @binding(2) var                       normalTex: texture_2d_array<f32>;
 @group(0) @binding(3) var<storage, read>        hashTable: array<u32>;
 @group(0) @binding(4) var<storage, read_write>  result:    array<f32>;
-// result layout: [hit(0/1), x, y, z, distance, normalX, normalY, normalZ]
+// result layout:
+// [hit(0/1), x, y, z, distance, normalX, normalY, normalZ,
+//  face, depth, tileX, tileY, layer, localU, localV, heightMeters]
 
 fn hashKey(keyLo: u32, keyHi: u32) -> u32 {
     let kl = keyLo ^ (keyLo >> 16u);
@@ -82,7 +84,31 @@ fn dirToFaceUV(d: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(f32(face), s * 0.5 + 0.5, t * 0.5 + 0.5);
 }
 
-fn sampleHeight(worldPos: vec3<f32>) -> f32 {
+struct HeightSample {
+    height: f32,
+    layer: i32,
+    face: u32,
+    depth: u32,
+    tileX: u32,
+    tileY: u32,
+    localUV: vec2<f32>,
+}
+
+fn emptyHeightSample(worldPos: vec3<f32>) -> HeightSample {
+    let dir = normalize(worldPos - params.origin);
+    let fuv = dirToFaceUV(dir);
+    return HeightSample(
+        0.0,
+        -1,
+        u32(fuv.x),
+        0u,
+        0u,
+        0u,
+        vec2<f32>(clamp(fuv.y, 0.0, 1.0), clamp(fuv.z, 0.0, 1.0))
+    );
+}
+
+fn sampleHeight(worldPos: vec3<f32>) -> HeightSample {
     let dir = normalize(worldPos - params.origin);
     let fuv = dirToFaceUV(dir);
     let face = u32(fuv.x);
@@ -100,14 +126,34 @@ fn sampleHeight(worldPos: vec3<f32>) -> f32 {
             let tileSize = 1.0 / f32(grid);
             let lu = (u - f32(tx) * tileSize) / tileSize;
             let lv = (v - f32(ty) * tileSize) / tileSize;
-            let px = clamp(i32(lu * f32(texSize - 1) + 0.5), 0, texSize - 1);
-            let py = clamp(i32(lv * f32(texSize - 1) + 0.5), 0, texSize - 1);
-            return textureLoad(heightTex, vec2<i32>(px, py), layer, 0).r * params.heightScale;
+            let coord = vec2<f32>(clamp(lu, 0.0, 1.0), clamp(lv, 0.0, 1.0)) * f32(max(texSize - 1, 1));
+            let base = vec2<i32>(floor(coord));
+            let frac = coord - vec2<f32>(base);
+            let maxCoord = vec2<i32>(texSize - 1);
+            let c00 = clamp(base, vec2<i32>(0), maxCoord);
+            let c10 = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), maxCoord);
+            let c01 = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), maxCoord);
+            let c11 = clamp(base + vec2<i32>(1, 1), vec2<i32>(0), maxCoord);
+            let h00 = textureLoad(heightTex, c00, layer, 0).r;
+            let h10 = textureLoad(heightTex, c10, layer, 0).r;
+            let h01 = textureLoad(heightTex, c01, layer, 0).r;
+            let h11 = textureLoad(heightTex, c11, layer, 0).r;
+            let h0 = mix(h00, h10, frac.x);
+            let h1 = mix(h01, h11, frac.x);
+            return HeightSample(
+                mix(h0, h1, frac.y) * params.heightScale,
+                layer,
+                face,
+                d,
+                tx,
+                ty,
+                vec2<f32>(clamp(lu, 0.0, 1.0), clamp(lv, 0.0, 1.0))
+            );
         }
         if (d == 0u) { break; }
         d = d - 1u;
     }
-    return 0.0;
+    return emptyHeightSample(worldPos);
 }
 
 @compute @workgroup_size(1)
@@ -120,6 +166,7 @@ fn main() {
     var hit = false;
     var hitPos = vec3<f32>(0.0);
     var hitDist = 0.0;
+    var hitSample = emptyHeightSample(ro);
 
     // Coarse march
     let coarseStep = maxDist / f32(MAX_STEPS);
@@ -129,7 +176,8 @@ fn main() {
     for (var i = 0u; i < MAX_STEPS; i++) {
         let t = f32(i) * coarseStep;
         let p = ro + rd * t;
-        let surfR = params.radius + sampleHeight(p);
+        let pSample = sampleHeight(p);
+        let surfR = params.radius + pSample.height;
         let sampleR = length(p - params.origin);
         let above = sampleR >= surfR;
 
@@ -140,7 +188,8 @@ fn main() {
             for (var j = 0u; j < 8u; j++) {
                 let mid = (lo + hi) * 0.5;
                 let mp = ro + rd * mid;
-                let mSurfR = params.radius + sampleHeight(mp);
+                let mSample = sampleHeight(mp);
+                let mSurfR = params.radius + mSample.height;
                 let mR = length(mp - params.origin);
                 if (mR >= mSurfR) { lo = mid; } else { hi = mid; }
             }
@@ -148,8 +197,9 @@ fn main() {
             hitPos = ro + rd * hitDist;
             // Snap to surface
             let hUp = normalize(hitPos - params.origin);
-            let hH = sampleHeight(hitPos);
-            hitPos = params.origin + hUp * (params.radius + hH);
+            hitSample = sampleHeight(hitPos);
+            hitPos = params.origin + hUp * (params.radius + hitSample.height);
+            hitSample = sampleHeight(hitPos);
             hit = true;
             break;
         }
@@ -167,6 +217,14 @@ fn main() {
     result[5] = nUp.x;
     result[6] = nUp.y;
     result[7] = nUp.z;
+    result[8] = f32(hitSample.face);
+    result[9] = f32(hitSample.depth);
+    result[10] = f32(hitSample.tileX);
+    result[11] = f32(hitSample.tileY);
+    result[12] = f32(hitSample.layer);
+    result[13] = hitSample.localUV.x;
+    result[14] = hitSample.localUV.y;
+    result[15] = hitSample.height;
 }
 `;
 }
@@ -293,7 +351,7 @@ export class TerrainRaycaster {
         pass.dispatchWorkgroups(1);
         pass.end();
 
-        encoder.copyBufferToBuffer(this._resultBuffer, 0, this._readbackBuffer, 0, 32);
+        encoder.copyBufferToBuffer(this._resultBuffer, 0, this._readbackBuffer, 0, 64);
         this._readbackState = 'copied';
         return true;
     }
@@ -306,13 +364,22 @@ export class TerrainRaycaster {
 
         this._readbackState = 'mapping';
         return this._readbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
-            const f = new Float32Array(this._readbackBuffer.getMappedRange(0, 32));
+            const f = new Float32Array(this._readbackBuffer.getMappedRange(0, 64));
             const hit = f[0] > 0.5;
             const result = hit ? {
                 hit: true,
                 position: { x: f[1], y: f[2], z: f[3] },
                 distance: f[4],
                 normal: { x: f[5], y: f[6], z: f[7] },
+                lookup: {
+                    face: Math.round(f[8]),
+                    depth: Math.round(f[9]),
+                    x: Math.round(f[10]),
+                    y: Math.round(f[11]),
+                    layer: Math.round(f[12]),
+                    localUV: { x: f[13], y: f[14] },
+                    height: f[15],
+                },
             } : { hit: false, position: null, distance: -1, normal: null };
             this._readbackBuffer.unmap();
             this._readbackState = 'idle';

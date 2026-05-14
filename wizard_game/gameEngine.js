@@ -1201,7 +1201,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     _resolveTerrainDebugModes(mode) {
-        if (mode >= 25 && mode <= 46) {
+        if (mode >= 25 && mode <= 89) {
             return { generatorMode: 0, fragmentMode: mode };
         }
         if (mode === 0) {
@@ -1235,6 +1235,45 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             44: 'Base After Macro',
             45: 'Final Albedo Before Lighting',
             46: 'Path Diagnostic (splat/prebake/raw)',
+            47: 'Splat Category Blend',
+            48: 'Splat Reconstruction Delta',
+            49: 'Stored Splat Texel Blend',
+            50: 'Stored Splat Minority Heat',
+            51: 'Forced Fast Splat Blend',
+            52: 'Forced Union Splat Blend',
+            53: 'Tile vs Splat Dominant',
+            54: 'Splat ID-Slot Validity',
+            55: 'Prod vs Union Weight Delta',
+            56: 'Prod vs Union Material Delta',
+            57: 'Fast vs Union Weight Delta',
+            58: 'Fast vs Union Material Delta',
+            59: 'Splat ID-Set Mismatch Type',
+            60: 'Splat Dominant Verdict',
+            61: 'Production Full Material',
+            62: 'Union Full Material',
+            63: 'Forced Fast Full Material',
+            64: 'Stored Splat Full Material',
+            65: 'Production Shortcut Delta',
+            66: 'Validity Texture Agreement',
+            67: 'Delta Branch Attribution',
+            68: 'Union Minority Luma Effect',
+            69: 'Union vs Raw Tile Delta',
+            70: 'Splat Reconstruction Verdict',
+            71: 'Pre-Fog Lit Color',
+            72: 'Normal Lighting Delta',
+            73: 'Lit No Shadow/AO',
+            74: 'Shadow Factor Heat',
+            75: 'AO Factor Heat',
+            76: 'Raw AO Mask Heat',
+            77: 'Post-Fade AO Heat',
+            78: 'AO Neutral Fade',
+            79: 'Splat AO Fade',
+            80: 'LOD Edge AO Fade',
+            81: 'Aerial/Fog Delta Heat',
+            82: 'Lighting Delta Heat',
+            87: 'Union Fallback Only',
+            88: 'Union Fast Only',
+            89: 'BilinearValid Branch Map',
             99: 'Fragment Test'
         };
         return names[mode] ?? 'Debug';

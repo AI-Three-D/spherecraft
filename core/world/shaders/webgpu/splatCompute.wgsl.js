@@ -44,7 +44,7 @@ struct Uniforms {
     transitionBreakupWarpStrength: f32,
     transitionBreakupStrength: f32,
     chunkPaletteMinCoverage: f32,
-    _pad0: f32,
+    slotSupportExpansionTexels: f32,
     _pad1: f32,
     _pad2: f32,
 }
@@ -59,6 +59,8 @@ struct Uniforms {
 @group(0) @binding(3) var splatWeightTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(4) var splatIndexTexture:  texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(5) var splatPaletteTexture: texture_2d<f32>;
+@group(0) @binding(6) var smoothSplatWeightSource: texture_2d<f32>;
+@group(0) @binding(7) var smoothSplatIndexSource: texture_2d<f32>;
 
 const INVALID_TILE_ID: u32 = 255u;
 const INVALID_CATEGORY_ID: u32 = 255u;
@@ -81,6 +83,28 @@ fn decodeTileIdRaw(tileSample: vec4<f32>) -> u32 {
     let rawR = tileSample.r;
     let tileIdF = select(rawR * 255.0, rawR, rawR > 1.0);
     return u32(tileIdF + 0.5);
+}
+
+fn decodeSplatSourceTileId(encoded: f32) -> u32 {
+    return u32(floor(encoded * 255.0 + 0.5));
+}
+
+fn loadSmoothSplatSourceWeights(coord: vec2<i32>) -> vec4<f32> {
+    return clamp(
+        textureLoad(smoothSplatWeightSource, coord, 0),
+        vec4<f32>(0.0),
+        vec4<f32>(1.0)
+    );
+}
+
+fn loadSmoothSplatSourceTileIds(coord: vec2<i32>) -> vec4<u32> {
+    let encoded = textureLoad(smoothSplatIndexSource, coord, 0);
+    return vec4<u32>(
+        decodeSplatSourceTileId(encoded.x),
+        decodeSplatSourceTileId(encoded.y),
+        decodeSplatSourceTileId(encoded.z),
+        decodeSplatSourceTileId(encoded.w)
+    );
 }
 
 ${tileCategoryWGSL}
@@ -167,6 +191,157 @@ fn paletteContainsCategory(paletteTileIds: ptr<function, array<u32, 4>>, categor
         }
     }
     return false;
+}
+
+fn addSplatCategoryScore(
+    categoryId: u32,
+    score: f32,
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>,
+    totalScore: ptr<function, f32>
+) {
+    if (!validCategory(categoryId) || score <= SCORE_EPSILON) {
+        return;
+    }
+
+    (*categoryScores)[categoryId] = (*categoryScores)[categoryId] + score;
+    *totalScore = *totalScore + score;
+}
+
+fn addSplatTileScore(
+    tileId: u32,
+    score: f32,
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>,
+    totalScore: ptr<function, f32>
+) -> bool {
+    if (!validTile(tileId) || score <= SCORE_EPSILON) {
+        return false;
+    }
+
+    let categoryId = tileCategory(tileId);
+    if (!validCategory(categoryId)) {
+        return false;
+    }
+
+    addSplatCategoryScore(categoryId, score, categoryScores, totalScore);
+    return true;
+}
+
+fn accumulateSmoothSourceCategories(
+    coord: vec2<i32>,
+    kernelWeight: f32,
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>,
+    totalScore: ptr<function, f32>
+) {
+    if (kernelWeight <= SCORE_EPSILON) {
+        return;
+    }
+
+    let sourceWeights = loadSmoothSplatSourceWeights(coord);
+    let sourceTileIds = loadSmoothSplatSourceTileIds(coord);
+    var sourceTotal = 0.0;
+
+    if (sourceWeights.x > SCORE_EPSILON && validTile(sourceTileIds.x)) {
+        let score = sourceWeights.x * kernelWeight;
+        if (addSplatTileScore(sourceTileIds.x, score, categoryScores, totalScore)) {
+            sourceTotal = sourceTotal + sourceWeights.x;
+        }
+    }
+    if (sourceWeights.y > SCORE_EPSILON && validTile(sourceTileIds.y)) {
+        let score = sourceWeights.y * kernelWeight;
+        if (addSplatTileScore(sourceTileIds.y, score, categoryScores, totalScore)) {
+            sourceTotal = sourceTotal + sourceWeights.y;
+        }
+    }
+    if (sourceWeights.z > SCORE_EPSILON && validTile(sourceTileIds.z)) {
+        let score = sourceWeights.z * kernelWeight;
+        if (addSplatTileScore(sourceTileIds.z, score, categoryScores, totalScore)) {
+            sourceTotal = sourceTotal + sourceWeights.z;
+        }
+    }
+    if (sourceWeights.w > SCORE_EPSILON && validTile(sourceTileIds.w)) {
+        let score = sourceWeights.w * kernelWeight;
+        if (addSplatTileScore(sourceTileIds.w, score, categoryScores, totalScore)) {
+            sourceTotal = sourceTotal + sourceWeights.w;
+        }
+    }
+
+    if (sourceTotal <= SCORE_EPSILON) {
+        let fallbackTileId = decodeTileIdRaw(textureLoad(tileMap, coord, 0));
+        _ = addSplatTileScore(fallbackTileId, kernelWeight, categoryScores, totalScore);
+    }
+}
+
+fn dominantSmoothSourceCategory(coord: vec2<i32>, fallbackTileId: u32) -> u32 {
+    let sourceWeights = loadSmoothSplatSourceWeights(coord);
+    let sourceTileIds = loadSmoothSplatSourceTileIds(coord);
+    var bestTileId = fallbackTileId;
+    var bestWeight = 0.0;
+
+    if (sourceWeights.x > bestWeight && validTile(sourceTileIds.x) && validCategory(tileCategory(sourceTileIds.x))) {
+        bestTileId = sourceTileIds.x;
+        bestWeight = sourceWeights.x;
+    }
+    if (sourceWeights.y > bestWeight && validTile(sourceTileIds.y) && validCategory(tileCategory(sourceTileIds.y))) {
+        bestTileId = sourceTileIds.y;
+        bestWeight = sourceWeights.y;
+    }
+    if (sourceWeights.z > bestWeight && validTile(sourceTileIds.z) && validCategory(tileCategory(sourceTileIds.z))) {
+        bestTileId = sourceTileIds.z;
+        bestWeight = sourceWeights.z;
+    }
+    if (sourceWeights.w > bestWeight && validTile(sourceTileIds.w) && validCategory(tileCategory(sourceTileIds.w))) {
+        bestTileId = sourceTileIds.w;
+        bestWeight = sourceWeights.w;
+    }
+
+    if (!validTile(bestTileId)) {
+        return INVALID_CATEGORY_ID;
+    }
+    let bestCategory = tileCategory(bestTileId);
+    if (!validCategory(bestCategory)) {
+        return INVALID_CATEGORY_ID;
+    }
+    return bestCategory;
+}
+
+fn categoryInSlots(slotCategoryIds: ptr<function, array<u32, 4>>, categoryId: u32) -> bool {
+    if (!validCategory(categoryId)) {
+        return false;
+    }
+
+    for (var i = 0; i < 4; i = i + 1) {
+        if ((*slotCategoryIds)[i] == categoryId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn appendZeroWeightSlotCategory(
+    categoryId: u32,
+    slotCategoryIds: ptr<function, array<u32, 4>>,
+    tileIds: ptr<function, array<u32, 4>>,
+    weights: ptr<function, array<f32, 4>>
+) {
+    if (!validCategory(categoryId) || categoryInSlots(slotCategoryIds, categoryId)) {
+        return;
+    }
+
+    for (var i = 0; i < 4; i = i + 1) {
+        if (validCategory((*slotCategoryIds)[i])) {
+            continue;
+        }
+
+        let representativeTileId = categoryRepresentativeTileId(categoryId);
+        if (!validTile(representativeTileId)) {
+            return;
+        }
+
+        (*slotCategoryIds)[i] = categoryId;
+        (*tileIds)[i] = representativeTileId;
+        (*weights)[i] = 0.0;
+        return;
+    }
 }
 
 fn sortByWeightDescending(
@@ -392,22 +567,52 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 continue;
             }
 
-            let tileId = decodeTileIdRaw(textureLoad(tileMap, vec2<i32>(x, y), 0));
-            if (!validTile(tileId)) {
-                continue;
-            }
-
-            let categoryId = tileCategory(tileId);
-            if (!validCategory(categoryId)) {
-                continue;
-            }
-
-            categoryScores[categoryId] = categoryScores[categoryId] + weight;
-            totalCategoryScore = totalCategoryScore + weight;
+            accumulateSmoothSourceCategories(
+                vec2<i32>(x, y),
+                weight,
+                &categoryScores,
+                &totalCategoryScore
+            );
         }
     }
 
-    let centerCategory = select(INVALID_CATEGORY_ID, tileCategory(centerTileId), validTile(centerTileId));
+    // The visible weight field stays local to kernelRadius.  The ID slot field
+    // gets a small support halo so adjacent splat texels can agree on the same
+    // material IDs before a neighbor's weight becomes visible.
+    let slotSupportRadius = kernelRadius + max(0.0, uniforms.slotSupportExpansionTexels);
+    let slotMinX = max(0, i32(floor(sourcePos.x - slotSupportRadius)));
+    let slotMaxX = min(maxCoord.x, i32(ceil(sourcePos.x + slotSupportRadius)) - 1);
+    let slotMinY = max(0, i32(floor(sourcePos.y - slotSupportRadius)));
+    let slotMaxY = min(maxCoord.y, i32(ceil(sourcePos.y + slotSupportRadius)) - 1);
+    var slotCategoryScores: array<f32, CATEGORY_SCORE_COUNT>;
+    for (var categoryIdx = 0u; categoryIdx < CATEGORY_SCORE_COUNT; categoryIdx = categoryIdx + 1u) {
+        slotCategoryScores[categoryIdx] = categoryScores[categoryIdx];
+    }
+
+    for (var y = slotMinY; y <= slotMaxY; y = y + 1) {
+        for (var x = slotMinX; x <= slotMaxX; x = x + 1) {
+            let samplePos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
+            let sampleDistance = distance(sourcePos, samplePos);
+            if (sampleDistance <= kernelRadius) {
+                continue;
+            }
+
+            let weight = radialKernelWeight(sampleDistance, slotSupportRadius);
+            if (weight <= 0.0) {
+                continue;
+            }
+
+            var ignoredTotal = 0.0;
+            accumulateSmoothSourceCategories(
+                vec2<i32>(x, y),
+                weight,
+                &slotCategoryScores,
+                &ignoredTotal
+            );
+        }
+    }
+
+    let centerCategory = dominantSmoothSourceCategory(centerCoord, centerTileId);
 
     var topCategories: array<u32, 4> = array<u32, 4>(
         INVALID_CATEGORY_ID,
@@ -419,6 +624,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     for (var categoryId = 0u; categoryId < CATEGORY_SCORE_COUNT; categoryId = categoryId + 1u) {
         insertTop4(categoryId, categoryScores[categoryId], &topCategories, &topScores);
+    }
+
+    var slotSupportCategories: array<u32, 4> = array<u32, 4>(
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID
+    );
+    var slotSupportScores: array<f32, 4> = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+
+    for (var categoryId = 0u; categoryId < CATEGORY_SCORE_COUNT; categoryId = categoryId + 1u) {
+        insertTop4(categoryId, slotCategoryScores[categoryId], &slotSupportCategories, &slotSupportScores);
     }
 
     if (!validCategory(topCategories[0]) || topScores[0] <= SCORE_EPSILON) {
@@ -441,6 +658,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         INVALID_TILE_ID,
         INVALID_TILE_ID,
         INVALID_TILE_ID
+    );
+    var outputCategoryIds: array<u32, 4> = array<u32, 4>(
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID
     );
     var outputWeights: array<f32, 4> = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
     var totalScore: f32 = 0.0;
@@ -481,6 +704,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var i = 0; i < 4; i = i + 1) {
             outputTileIds[i] = paletteTileIds[i];
             outputWeights[i] = paletteWeights[i];
+            if (validTile(paletteTileIds[i])) {
+                outputCategoryIds[i] = tileCategory(paletteTileIds[i]);
+            }
         }
         sortByWeightDescending(&outputTileIds, &outputWeights);
     } else {
@@ -493,7 +719,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             totalScore = totalScore + score;
             let representativeTileId = categoryRepresentativeTileId(categoryId);
             outputTileIds[i] = representativeTileId;
+            outputCategoryIds[i] = categoryId;
             outputWeights[i] = score;
+        }
+
+        for (var i = 0; i < 4; i = i + 1) {
+            appendZeroWeightSlotCategory(
+                slotSupportCategories[i],
+                &outputCategoryIds,
+                &outputTileIds,
+                &outputWeights
+            );
         }
     }
 

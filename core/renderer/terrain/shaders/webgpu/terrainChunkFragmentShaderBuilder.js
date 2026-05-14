@@ -368,9 +368,12 @@ fn getShadowCascadeVP(cascade: i32) -> mat4x4<f32> {
 }
 
 fn sampleShadowMap(cascade: i32, uv: vec2<f32>, compareDepth: f32) -> f32 {
-    let s0 = textureSampleCompare(shadowCascade0, shadowSampler, uv, compareDepth);
-    let s1 = textureSampleCompare(shadowCascade1, shadowSampler, uv, compareDepth);
-    let s2 = textureSampleCompare(shadowCascade2, shadowSampler, uv, compareDepth);
+    // Use the explicit-level compare variant so debug-mode branches earlier in
+    // the terrain fragment shader do not violate WGSL's uniform-control rule
+    // for implicit shadow comparisons.
+    let s0 = textureSampleCompareLevel(shadowCascade0, shadowSampler, uv, compareDepth);
+    let s1 = textureSampleCompareLevel(shadowCascade1, shadowSampler, uv, compareDepth);
+    let s2 = textureSampleCompareLevel(shadowCascade2, shadowSampler, uv, compareDepth);
     return select(select(s2, s1, cascade == 1), s0, cascade == 0);
 }
     fn sampleCascadePCF(
@@ -1502,6 +1505,70 @@ fn splatActiveCount(splat: SplatData) -> i32 {
     return count;
 }
 
+fn splatCategoryBlendColor(splat: SplatData) -> vec3<f32> {
+    var accum = vec3<f32>(0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let cat = debugTileCategory(splat.tileIds.x);
+        accum = accum + debugCategoryColor(cat) * splat.weights.x;
+        sum = sum + splat.weights.x;
+    }
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let cat = debugTileCategory(splat.tileIds.y);
+        accum = accum + debugCategoryColor(cat) * splat.weights.y;
+        sum = sum + splat.weights.y;
+    }
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let cat = debugTileCategory(splat.tileIds.z);
+        accum = accum + debugCategoryColor(cat) * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let cat = debugTileCategory(splat.tileIds.w);
+        accum = accum + debugCategoryColor(cat) * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return debugCategoryColor(debugTileCategory(splatDominantTileId(splat)));
+    }
+    return accum / sum;
+}
+
+fn maxAbsVec3(v: vec3<f32>) -> f32 {
+    let a = abs(v);
+    return max(max(a.x, a.y), a.z);
+}
+
+fn buildSplatDataFromRaw(
+    ids: vec4<i32>,
+    rawWeights: vec4<f32>,
+    cellLocal: vec2<f32>,
+    bilinearValid: bool
+) -> SplatData {
+    var weights = clamp(rawWeights, vec4<f32>(0.0), vec4<f32>(1.0));
+    let total = weights.x + weights.y + weights.z + weights.w;
+    if (total > 0.0001) {
+        weights = weights / total;
+    } else {
+        weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    }
+
+    var result: SplatData;
+    result.tileIds = vec4<f32>(
+        f32(ids.x),
+        f32(ids.y),
+        f32(ids.z),
+        f32(ids.w)
+    );
+    result.weights = weights;
+    result.cellLocal = cellLocal;
+    result.hasBoundary = splatHasMeaningfulBlend(result);
+    result.bilinearValid = bilinearValid;
+    return result;
+}
+
 fn splatPrimaryWeight(splat: SplatData, _local: vec2<f32>) -> f32 {
     return splatDominantWeight(splat);
 }
@@ -1559,13 +1626,23 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
     let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
     let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
-    let bilinearValid = loadSplatValidity(c00, layer);
+
+    // Runtime ID-set check replaces the precomputed splatValidMap, which had
+    // clamping bugs at chunk edges and could be stale relative to the current
+    // splatIndexMap. Fast path only runs when all 4 footprint corners have
+    // identical ordered ID sets — same condition splatValidityCompute intended.
+    let ids00 = loadSplatIndices(c00, layer);
+    let ids10 = loadSplatIndices(c10, layer);
+    let ids01 = loadSplatIndices(c01, layer);
+    let ids11 = loadSplatIndices(c11, layer);
+    let bilinearValid = splatIdSetsMatch(ids00, ids10) &&
+                        splatIdSetsMatch(ids00, ids01) &&
+                        splatIdSetsMatch(ids00, ids11);
 
     var topIds: array<i32, 4>;
     var topWeights: array<f32, 4>;
 
     if (bilinearValid) {
-        let ids00 = loadSplatIndices(c00, layer);
         let blendedWeights = sampleSplatWeightsFiltered(uv, layer);
 
         topIds = array<i32, 4>(ids00.x, ids00.y, ids00.z, ids00.w);
@@ -1576,10 +1653,7 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
             blendedWeights.w
         );
     } else {
-        let ids00 = loadSplatIndices(c00, layer);
-        let ids10 = loadSplatIndices(c10, layer);
-        let ids01 = loadSplatIndices(c01, layer);
-        let ids11 = loadSplatIndices(c11, layer);
+        // IDs for all 4 corners already loaded above for the validity check.
         let weights00 = loadSplatWeights(c00, layer);
         let weights10 = loadSplatWeights(c10, layer);
         let weights01 = loadSplatWeights(c01, layer);
@@ -1650,6 +1724,300 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     result.hasBoundary = splatHasMeaningfulBlend(result);
     result.bilinearValid = bilinearValid;
     return result;
+}
+
+fn sampleSplatDataUnionReference(input: FragmentInput, layer: i32) -> SplatData {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let centerCoord = clamp(
+        vec2<i32>(floor(uv * splatTexSize)),
+        vec2<i32>(0),
+        vec2<i32>(splatTexSize) - vec2<i32>(1)
+    );
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let f = fract(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+
+    let c00 = clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord);
+    let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
+    let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
+    let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
+
+    let ids00 = loadSplatIndices(c00, layer);
+    let ids10 = loadSplatIndices(c10, layer);
+    let ids01 = loadSplatIndices(c01, layer);
+    let ids11 = loadSplatIndices(c11, layer);
+    let weights00 = loadSplatWeights(c00, layer);
+    let weights10 = loadSplatWeights(c10, layer);
+    let weights01 = loadSplatWeights(c01, layer);
+    let weights11 = loadSplatWeights(c11, layer);
+
+    var accumIds: array<i32, 16>;
+    var accumWeights: array<f32, 16>;
+    var accumCount: i32 = 0;
+
+    accumulateLoadedCornerMixture(ids00, weights00, (1.0 - f.x) * (1.0 - f.y), &accumIds, &accumWeights, &accumCount);
+    accumulateLoadedCornerMixture(ids10, weights10, f.x * (1.0 - f.y),         &accumIds, &accumWeights, &accumCount);
+    accumulateLoadedCornerMixture(ids01, weights01, (1.0 - f.x) * f.y,         &accumIds, &accumWeights, &accumCount);
+    accumulateLoadedCornerMixture(ids11, weights11, f.x * f.y,                 &accumIds, &accumWeights, &accumCount);
+
+    var topIds: array<i32, 4>;
+    var topWeights: array<f32, 4>;
+    buildAccumulatedTop4(&accumIds, &accumWeights, accumCount, &topIds, &topWeights);
+    sortTop4ByTileId(&topIds, &topWeights);
+
+    let topSum = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
+    if (topSum <= 0.0001) {
+        let centerWeights = loadSplatWeights(centerCoord, layer);
+        let centerIds = loadSplatIndices(centerCoord, layer);
+        let centerSum = max(centerWeights.x + centerWeights.y + centerWeights.z + centerWeights.w, 0.0001);
+        topIds = array<i32, 4>(centerIds.x, centerIds.y, centerIds.z, centerIds.w);
+        topWeights = array<f32, 4>(
+            centerWeights.x / centerSum,
+            centerWeights.y / centerSum,
+            centerWeights.z / centerSum,
+            centerWeights.w / centerSum
+        );
+    } else {
+        topWeights = array<f32, 4>(
+            topWeights[0] / topSum,
+            topWeights[1] / topSum,
+            topWeights[2] / topSum,
+            topWeights[3] / topSum
+        );
+    }
+
+    var result: SplatData;
+    result.tileIds = vec4<f32>(
+        f32(topIds[0]),
+        f32(topIds[1]),
+        f32(topIds[2]),
+        f32(topIds[3])
+    );
+    result.weights = vec4<f32>(
+        topWeights[0],
+        topWeights[1],
+        topWeights[2],
+        topWeights[3]
+    );
+
+    let total = splatWeightSum(result);
+    if (total > 0.0001) {
+        result.weights = result.weights / total;
+    } else {
+        result.weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    }
+
+    result.cellLocal = fract(uv * splatTexSize);
+    result.hasBoundary = splatHasMeaningfulBlend(result);
+    result.bilinearValid = splatIdSetsMatch(ids00, ids10) &&
+                           splatIdSetsMatch(ids00, ids01) &&
+                           splatIdSetsMatch(ids00, ids11);
+    return result;
+}
+
+fn sampleStoredSplatTexel(input: FragmentInput, layer: i32) -> SplatData {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = clamp(
+        vec2<i32>(floor(uv * splatTexSize)),
+        vec2<i32>(0),
+        vec2<i32>(splatTexSize) - vec2<i32>(1)
+    );
+    return buildSplatDataFromRaw(
+        loadSplatIndices(coord, layer),
+        loadSplatWeights(coord, layer),
+        fract(uv * splatTexSize),
+        loadSplatValidity(coord, layer)
+    );
+}
+
+fn sampleSplatDataFastReference(input: FragmentInput, layer: i32) -> SplatData {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+    let c00 = clamp(vec2<i32>(base), vec2<i32>(0), maxCoord);
+
+    return buildSplatDataFromRaw(
+        loadSplatIndices(c00, layer),
+        sampleSplatWeightsFiltered(uv, layer),
+        fract(uv * splatTexSize),
+        loadSplatValidity(c00, layer)
+    );
+}
+
+fn splatFootprintPrecomputedValid(input: FragmentInput, layer: i32) -> bool {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+    let c00 = clamp(vec2<i32>(base), vec2<i32>(0), maxCoord);
+    return loadSplatValidity(c00, layer);
+}
+
+fn splatFootprintRuntimeOrderedValid(input: FragmentInput, layer: i32) -> bool {
+    return splatCornerMismatchFactor(input, layer) <= 0.0001;
+}
+
+fn luma709(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn splatGridAmount(input: FragmentInput) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+    let gridCell = fract(uv * splatSize);
+    let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
+    return 1.0 - smoothstep(0.018, 0.045, edgeDist);
+}
+
+fn splatCornerMismatchFactor(input: FragmentInput, layer: i32) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+
+    let c00 = clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord);
+    let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
+    let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
+    let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
+
+    let ids00 = loadSplatIndices(c00, layer);
+    let ids10 = loadSplatIndices(c10, layer);
+    let ids01 = loadSplatIndices(c01, layer);
+    let ids11 = loadSplatIndices(c11, layer);
+
+    var mismatches = 0.0;
+    if (!splatIdSetsMatch(ids00, ids10)) { mismatches = mismatches + 1.0; }
+    if (!splatIdSetsMatch(ids00, ids01)) { mismatches = mismatches + 1.0; }
+    if (!splatIdSetsMatch(ids00, ids11)) { mismatches = mismatches + 1.0; }
+    return mismatches / 3.0;
+}
+
+fn splatIntIdValid(id: i32) -> bool {
+    return id >= 0 && id < 255;
+}
+
+fn splatFloatIdValid(id: f32) -> bool {
+    return splatIntIdValid(i32(floor(id + 0.5)));
+}
+
+fn splatFloatIdsEqual(a: f32, b: f32) -> bool {
+    return i32(floor(a + 0.5)) == i32(floor(b + 0.5));
+}
+
+fn splatContainsFloatId(splat: SplatData, id: f32) -> bool {
+    if (!splatFloatIdValid(id)) { return false; }
+    var found = false;
+    if (splatFloatIdValid(splat.tileIds.x) && splatFloatIdsEqual(splat.tileIds.x, id)) { found = true; }
+    if (splatFloatIdValid(splat.tileIds.y) && splatFloatIdsEqual(splat.tileIds.y, id)) { found = true; }
+    if (splatFloatIdValid(splat.tileIds.z) && splatFloatIdsEqual(splat.tileIds.z, id)) { found = true; }
+    if (splatFloatIdValid(splat.tileIds.w) && splatFloatIdsEqual(splat.tileIds.w, id)) { found = true; }
+    return found;
+}
+
+fn splatWeightForFloatId(splat: SplatData, id: f32) -> f32 {
+    if (!splatFloatIdValid(id)) { return 0.0; }
+    var w = 0.0;
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x) && splatFloatIdsEqual(splat.tileIds.x, id)) {
+        w = w + splat.weights.x;
+    }
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y) && splatFloatIdsEqual(splat.tileIds.y, id)) {
+        w = w + splat.weights.y;
+    }
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z) && splatFloatIdsEqual(splat.tileIds.z, id)) {
+        w = w + splat.weights.z;
+    }
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w) && splatFloatIdsEqual(splat.tileIds.w, id)) {
+        w = w + splat.weights.w;
+    }
+    return w;
+}
+
+fn splatIdAwareWeightDelta(a: SplatData, b: SplatData) -> f32 {
+    var delta = 0.0;
+
+    if (splatChannelUsable(a.tileIds.x, a.weights.x)) {
+        delta = delta + abs(a.weights.x - splatWeightForFloatId(b, a.tileIds.x));
+    }
+    if (splatChannelUsable(a.tileIds.y, a.weights.y)) {
+        delta = delta + abs(a.weights.y - splatWeightForFloatId(b, a.tileIds.y));
+    }
+    if (splatChannelUsable(a.tileIds.z, a.weights.z)) {
+        delta = delta + abs(a.weights.z - splatWeightForFloatId(b, a.tileIds.z));
+    }
+    if (splatChannelUsable(a.tileIds.w, a.weights.w)) {
+        delta = delta + abs(a.weights.w - splatWeightForFloatId(b, a.tileIds.w));
+    }
+
+    if (splatChannelUsable(b.tileIds.x, b.weights.x) && !splatContainsFloatId(a, b.tileIds.x)) {
+        delta = delta + b.weights.x;
+    }
+    if (splatChannelUsable(b.tileIds.y, b.weights.y) && !splatContainsFloatId(a, b.tileIds.y)) {
+        delta = delta + b.weights.y;
+    }
+    if (splatChannelUsable(b.tileIds.z, b.weights.z) && !splatContainsFloatId(a, b.tileIds.z)) {
+        delta = delta + b.weights.z;
+    }
+    if (splatChannelUsable(b.tileIds.w, b.weights.w) && !splatContainsFloatId(a, b.tileIds.w)) {
+        delta = delta + b.weights.w;
+    }
+
+    // L1 distance between normalized mixtures ranges from 0 to 2.
+    return clamp(delta * 0.5, 0.0, 1.0);
+}
+
+fn splatDominantCategoryDiff(a: SplatData, b: SplatData) -> f32 {
+    let ca = debugTileCategory(splatDominantTileId(a));
+    let cb = debugTileCategory(splatDominantTileId(b));
+    return select(0.0, 1.0, ca != cb);
+}
+
+fn splatIdSetContains(ids: vec4<i32>, id: i32) -> bool {
+    if (!splatIntIdValid(id)) { return false; }
+    return ids.x == id || ids.y == id || ids.z == id || ids.w == id;
+}
+
+fn splatIdSetsEquivalent(a: vec4<i32>, b: vec4<i32>) -> bool {
+    var ok = true;
+    if (splatIntIdValid(a.x) && !splatIdSetContains(b, a.x)) { ok = false; }
+    if (splatIntIdValid(a.y) && !splatIdSetContains(b, a.y)) { ok = false; }
+    if (splatIntIdValid(a.z) && !splatIdSetContains(b, a.z)) { ok = false; }
+    if (splatIntIdValid(a.w) && !splatIdSetContains(b, a.w)) { ok = false; }
+    if (splatIntIdValid(b.x) && !splatIdSetContains(a, b.x)) { ok = false; }
+    if (splatIntIdValid(b.y) && !splatIdSetContains(a, b.y)) { ok = false; }
+    if (splatIntIdValid(b.z) && !splatIdSetContains(a, b.z)) { ok = false; }
+    if (splatIntIdValid(b.w) && !splatIdSetContains(a, b.w)) { ok = false; }
+    return ok;
+}
+
+fn splatCornerUnorderedMismatchFactor(input: FragmentInput, layer: i32) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+
+    let c00 = clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord);
+    let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
+    let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
+    let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
+
+    let ids00 = loadSplatIndices(c00, layer);
+    let ids10 = loadSplatIndices(c10, layer);
+    let ids01 = loadSplatIndices(c01, layer);
+    let ids11 = loadSplatIndices(c11, layer);
+
+    var mismatches = 0.0;
+    if (!splatIdSetsEquivalent(ids00, ids10)) { mismatches = mismatches + 1.0; }
+    if (!splatIdSetsEquivalent(ids00, ids01)) { mismatches = mismatches + 1.0; }
+    if (!splatIdSetsEquivalent(ids00, ids11)) { mismatches = mismatches + 1.0; }
+    return mismatches / 3.0;
 }
 
 fn buildSphericalTBN(sphereDir: vec3<f32>) -> mat3x3<f32> {
@@ -2117,6 +2485,67 @@ fn sampleMicroTextureWithSplat(
     }
 
     // Current live path: stable weighted multi-way blend.
+    var accum = vec4<f32>(0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let c = sampleTileColor(
+            splat.tileIds.x, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.x;
+        sum = sum + splat.weights.x;
+    }
+
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let c = sampleTileColor(
+            splat.tileIds.y, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.y;
+        sum = sum + splat.weights.y;
+    }
+
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let c = sampleTileColor(
+            splat.tileIds.z, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let c = sampleTileColor(
+            splat.tileIds.w, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return sampleTileColor(
+            dominantId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+    }
+
+    return accum / sum;
+}
+
+fn sampleMicroTextureWithSplatFull(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32,
+    splat: SplatData
+) -> vec4<f32> {
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+    let dominantId = splatDominantTileId(splat);
+
     var accum = vec4<f32>(0.0);
     var sum = 0.0;
 
@@ -2824,7 +3253,8 @@ if (debugMode == 16) {
     //   BRIGHT GREEN (0,1,0)    live splat AND hasBoundary=true  (blend zone active)
     //   DARK GREEN   (0,.35,0)  live splat AND hasBoundary=false (pure dominant, may
     //                           indicate threshold cutoff suppressed blending)
-    //   +cyan tint on greens    bilinearValid=true (hardware bilinear weight path)
+    //   +cyan tint on greens    bilinearValid=true (neighboring ID slots match;
+    //                           renderer can use hardware-filtered weights)
     //   +blue tint on all       brightness encodes geometryLOD (dim=LOD0, bright=LOD6)
     if (debugMode == 46) {
         // path 0 = raw-tile (blue);  1 = lod0-fade prebake (yellow);
@@ -2842,7 +3272,7 @@ if (debugMode == 16) {
         if (microColorPath == 3) {
             // Bright green = hasBoundary (blend zone active)
             // Dark green   = pure dominant (possible threshold suppression)
-            // Cyan tint    = bilinearValid (hardware bilinear weight path)
+            // Cyan tint    = bilinearValid (neighboring ID slots match)
             let gBright = select(0.35, 0.95, splatResult.hasBoundary);
             let cyanTint = select(0.0, 0.35, splatResult.bilinearValid);
             pathColor = vec3<f32>(cyanTint, gBright, cyanTint);
@@ -2853,8 +3283,486 @@ if (debugMode == 16) {
         return vec4<f32>(pathColor, 1.0);
     }
 
+    if (debugMode == 47) {
+        let splatColor = splatCategoryBlendColor(splatResult);
+        return vec4<f32>(splatColor, 1.0);
+    }
+
+    if (debugMode == 48) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let productionColor = splatCategoryBlendColor(splatResult);
+        let unionColor = splatCategoryBlendColor(unionSplat);
+        let reconstructionDelta = maxAbsVec3(productionColor - unionColor);
+        let heat = clamp(reconstructionDelta * 8.0, 0.0, 1.0);
+
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+        let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+        let gridCell = fract(uv * splatSize);
+        let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
+        let grid = 1.0 - smoothstep(0.018, 0.045, edgeDist);
+
+        var base = vec3<f32>(0.03, 0.04, 0.05);
+        if (splatResult.hasBoundary) {
+            base = vec3<f32>(0.02, 0.18, 0.05);
+        }
+        if (!splatResult.bilinearValid) {
+            base = vec3<f32>(0.02, 0.08, 0.45);
+        }
+        let heatColor = mix(vec3<f32>(0.08, 0.0, 0.10), vec3<f32>(1.0, 0.05, 0.0), heat);
+        var outColor = mix(base, heatColor, heat);
+        outColor = mix(outColor, vec3<f32>(0.0, 0.65, 1.0), grid * 0.25);
+        return vec4<f32>(outColor, 1.0);
+    }
+
+    // ── Debug mode 49: stored splat texel category blend ────────────────────
+    // Nearest raw splatData/splatIndex texel, no bilinear filtering, no union,
+    // no validity branch. If the rim is visible here, it is already baked into
+    // the generated splat payload.
+    if (debugMode == 49) {
+        let storedSplat = sampleStoredSplatTexel(input, layer);
+        let storedColor = splatCategoryBlendColor(storedSplat);
+        let grid = splatGridAmount(input);
+        return vec4<f32>(mix(storedColor, vec3<f32>(1.0), grid * 0.22), 1.0);
+    }
+
+    // ── Debug mode 50: stored splat minority-weight heat ────────────────────
+    // Green = pure dominant material. Yellow/red = meaningful secondary
+    // material exists in the stored texel. This isolates stored weights from
+    // texture atlas colors.
+    if (debugMode == 50) {
+        let storedSplat = sampleStoredSplatTexel(input, layer);
+        let minority = clamp(1.0 - splatDominantWeight(storedSplat), 0.0, 1.0);
+        let heat = clamp(minority * 8.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.55, 0.04), vec3<f32>(1.0, 0.05, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 51: forced fast-path category blend ──────────────────────
+    // Uses c00 IDs plus hardware-filtered weights regardless of splatValidMap.
+    // Compare with 52. If 51 shows a rim and 52 does not, channel identity /
+    // fast-path reconstruction is the problem.
+    if (debugMode == 51) {
+        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let fastColor = splatCategoryBlendColor(fastSplat);
+        let grid = splatGridAmount(input);
+        return vec4<f32>(mix(fastColor, vec3<f32>(0.0, 0.65, 1.0), grid * 0.18), 1.0);
+    }
+
+    // ── Debug mode 52: forced union-reference category blend ────────────────
+    // Always reconstructs the 2x2 footprint manually. If 49 and 52 both show
+    // the same rim, the source/generator payload is the likely cause. If only
+    // 52 differs, sparse top-four reconstruction is losing information.
+    if (debugMode == 52) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionColor = splatCategoryBlendColor(unionSplat);
+        let grid = splatGridAmount(input);
+        return vec4<f32>(mix(unionColor, vec3<f32>(0.0, 0.65, 1.0), grid * 0.18), 1.0);
+    }
+
+    // ── Debug mode 53: raw tile category vs generated splat dominant ────────
+    // Base color is the current discrete tile category. Magenta overlay means
+    // the nearest stored splat texel's dominant category disagrees with that
+    // discrete tile. This checks whether the splat contour tracks the tile
+    // source field rather than material sampling or lighting.
+    if (debugMode == 53) {
+        let tileId = sampleChunkTileId(input, layer);
+        let tileCat = debugTileCategory(tileId);
+        let storedSplat = sampleStoredSplatTexel(input, layer);
+        let splatCat = debugTileCategory(splatDominantTileId(storedSplat));
+        let mismatch = select(0.0, 1.0, tileCat != splatCat);
+        let grid = splatGridAmount(input);
+        var color = debugCategoryColor(tileCat);
+        color = mix(color, vec3<f32>(1.0, 0.0, 1.0), mismatch * 0.78);
+        color = mix(color, vec3<f32>(1.0), grid * 0.16);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 54: splat ID-slot validity / 2x2 mismatch ────────────────
+    // Green = splatValidMap true for this footprint. Red = ordered ID set
+    // mismatches among the 2x2 footprint. If this contour matches the rim but
+    // modes 49/52 do not, validity/slot stability is still suspect.
+    if (debugMode == 54) {
+        let mismatch = splatCornerMismatchFactor(input, layer);
+        let valid = select(0.0, 1.0, splatFootprintPrecomputedValid(input, layer));
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(mismatch, valid, 1.0 - valid);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 55: production vs union weight delta ────────────────────
+    // ID-aware L1 distance between the production splat payload and the
+    // always-union reference. Red on the visual rim means normal rendering is
+    // using different material weights than the union reconstruction.
+    if (debugMode == 55) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let delta = splatIdAwareWeightDelta(splatResult, unionSplat);
+        let heat = clamp(delta * 10.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 56: production vs union material delta ──────────────────
+    // Same comparison as 55, but after exact all-channel tile texture sampling.
+    // This is closest to the visible pre-lighting albedo consequence.
+    if (debugMode == 56) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let productionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let delta = maxAbsVec3(productionColor - unionColor);
+        let heat = clamp(delta * 12.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 57: forced fast vs union weight delta ───────────────────
+    // Isolates the unsafe hardware-filtered-channel assumption, independent of
+    // whether production currently chose the fast or fallback branch.
+    if (debugMode == 57) {
+        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let delta = splatIdAwareWeightDelta(fastSplat, unionSplat);
+        let heat = clamp(delta * 10.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 58: forced fast vs union material delta ─────────────────
+    // Actual material-color consequence of the fast-path assumption.
+    if (debugMode == 58) {
+        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let fastColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, fastSplat
+        ).rgb;
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let delta = maxAbsVec3(fastColor - unionColor);
+        let heat = clamp(delta * 12.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 59: ordered vs unordered ID-set mismatch ────────────────
+    // Green = ordered 2x2 ID slots match. Yellow = same unordered ID set but
+    // different slot order. Red = actual neighboring top-4 ID set changes.
+    if (debugMode == 59) {
+        let orderedMismatch = splatCornerMismatchFactor(input, layer);
+        let unorderedMismatch = splatCornerUnorderedMismatchFactor(input, layer);
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(0.0, 0.85, 0.08);
+        if (orderedMismatch > 0.001 && unorderedMismatch <= 0.001) {
+            color = vec3<f32>(1.0, 0.82, 0.02);
+        }
+        if (unorderedMismatch > 0.001) {
+            color = mix(vec3<f32>(0.35, 0.0, 0.04), vec3<f32>(1.0, 0.0, 0.0), clamp(unorderedMismatch, 0.0, 1.0));
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 60: dominant category reconstruction verdict ────────────
+    // Red = production dominant category differs from union reference.
+    // Green = forced fast dominant category differs from union reference.
+    // Yellow = both differ. Black/dim = dominant category agrees.
+    if (debugMode == 60) {
+        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let productionDiff = splatDominantCategoryDiff(splatResult, unionSplat);
+        let fastDiff = splatDominantCategoryDiff(fastSplat, unionSplat);
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(productionDiff, fastDiff, 0.05 * max(productionDiff, fastDiff));
+        color = max(color, vec3<f32>(0.02, 0.02, 0.025));
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 61: production full material albedo ─────────────────────
+    // Actual atlas material sampling from the production splat reconstruction,
+    // but with pure-dominant and top-2 shortcuts disabled. Compare with 43.
+    if (debugMode == 61) {
+        if (!hasLiveSplat) {
+            return vec4<f32>(0.02, 0.08, 0.95, 1.0);
+        }
+        let color = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 62: union-reference full material albedo ────────────────
+    // Actual atlas material sampling from always-union 2x2 reconstruction.
+    // If the rim is absent here but present in 43/61, the production
+    // reconstruction path is the cause. If the rim is still present here, it is
+    // in the stored splat payload plus real material colors.
+    if (debugMode == 62) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let color = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 63: forced-fast full material albedo ────────────────────
+    // Actual atlas material sampling from c00 IDs plus hardware-filtered
+    // weights. This renders the fast-path assumption directly.
+    if (debugMode == 63) {
+        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let color = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, fastSplat
+        ).rgb;
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 64: nearest stored splat full material albedo ───────────
+    // Actual atlas material sampling from the nearest stored splat texel, with
+    // no bilinear filtering, no union, and no validity branch.
+    if (debugMode == 64) {
+        let storedSplat = sampleStoredSplatTexel(input, layer);
+        let color = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, storedSplat
+        ).rgb;
+        let grid = splatGridAmount(input);
+        return vec4<f32>(mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.16), 1.0);
+    }
+
+    // ── Debug mode 65: production shortcut material delta ─────────────────
+    // Heat = current production material sampling (pure/top2 shortcuts enabled)
+    // minus exact all-channel material sampling of the same production splat.
+    // Hot pixels identify sampleMicroTextureWithSplat() shortcut artifacts.
+    if (debugMode == 65) {
+        if (!hasLiveSplat) {
+            return vec4<f32>(0.02, 0.08, 0.95, 1.0);
+        }
+        let shortcutColor = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let fullColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let delta = maxAbsVec3(shortcutColor - fullColor);
+        let heat = clamp(delta * 16.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 66: precomputed vs runtime validity agreement ──────────
+    // Green = both valid. Blue = both invalid. Red = splatValidMap says valid
+    // but the fragment's actual 2x2 IDs do not match. Yellow = splatValidMap
+    // says invalid but the runtime 2x2 IDs match.
+    if (debugMode == 66) {
+        let precomputed = splatFootprintPrecomputedValid(input, layer);
+        let runtime = splatFootprintRuntimeOrderedValid(input, layer);
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(0.0, 0.85, 0.08);
+        if (!precomputed && !runtime) {
+            color = vec3<f32>(0.02, 0.08, 0.95);
+        }
+        if (precomputed && !runtime) {
+            color = vec3<f32>(1.0, 0.0, 0.0);
+        }
+        if (!precomputed && runtime) {
+            color = vec3<f32>(1.0, 0.85, 0.0);
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.16);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 67: production-vs-union delta branch attribution ───────
+    // Red heat = production differs from union while production used the fast
+    // path. Blue heat = production differs from union while production used the
+    // fallback path. Blue heat should be near-zero; if not, fallback and union
+    // are not equivalent.
+    if (debugMode == 67) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let productionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let heat = clamp(maxAbsVec3(productionColor - unionColor) * 12.0, 0.0, 1.0);
+        let fastBranch = splatResult.bilinearValid;
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(0.02, 0.03, 0.06);
+        if (fastBranch) {
+            color = mix(color, vec3<f32>(1.0, 0.04, 0.0), heat);
+        } else {
+            color = mix(color, vec3<f32>(0.0, 0.18, 1.0), heat);
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 68: union minority material darkening/brightening ───────
+    // Shows the actual luminance effect of all non-dominant channels in the
+    // always-union reference. Red = union blend is darker than pure dominant;
+    // cyan = union blend is brighter than pure dominant.
+    if (debugMode == 68) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let dominantColor = sampleTileColor(
+            splatDominantTileId(unionSplat),
+            worldTileCoord,
+            local,
+            activeSeason,
+            ddx_vUv,
+            ddy_vUv
+        ).rgb;
+        let signedDelta = luma709(dominantColor) - luma709(unionColor);
+        let heat = clamp(abs(signedDelta) * 12.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        if (signedDelta < 0.0) {
+            color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 69: union vs raw discrete tile material delta ───────────
+    // Heat = actual material difference between the always-union splat blend
+    // and the raw center tile. Hot pixels mean the stored splat payload is
+    // intentionally mixing materials there, independent of production branch.
+    if (debugMode == 69) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let rawColor = sampleTileColor(
+            fallbackTileId,
+            worldTileCoord,
+            local,
+            activeSeason,
+            ddx_vUv,
+            ddy_vUv
+        ).rgb;
+        let heat = clamp(maxAbsVec3(unionColor - rawColor) * 10.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 70: splat reconstruction verdict ───────────────────────
+    // Categorical version of the production/union/forced-fast comparison.
+    //
+    // Black/dim = production and union agree.
+    // Red       = production fast path differs from union, dominant category same.
+    // Yellow    = production fast path differs from union, dominant category differs.
+    // Blue      = production fallback differs from union, dominant category same.
+    // Magenta   = production fallback differs from union, dominant category differs.
+    // Cyan      = production matches union, but forced-fast differs. This explains
+    //             forced-fast-only artifacts such as mode 63 without blaming
+    //             production.
+    // Green     = production matches union, but forced-fast dominant category differs.
+    if (debugMode == 70) {
+        if (!hasLiveSplat) {
+            return vec4<f32>(0.02, 0.08, 0.95, 1.0);
+        }
+
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let productionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let fastColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, fastSplat
+        ).rgb;
+
+        let productionDelta = maxAbsVec3(productionColor - unionColor);
+        let fastDelta = maxAbsVec3(fastColor - unionColor);
+        let threshold = 0.01;
+        let productionHot = productionDelta > threshold;
+        let fastHot = fastDelta > threshold;
+        let productionDominantDiff = splatDominantCategoryDiff(splatResult, unionSplat) > 0.5;
+        let fastDominantDiff = splatDominantCategoryDiff(fastSplat, unionSplat) > 0.5;
+        let grid = splatGridAmount(input);
+
+        var color = vec3<f32>(0.02, 0.03, 0.06);
+        if (productionHot) {
+            if (splatResult.bilinearValid) {
+                color = vec3<f32>(1.0, 0.04, 0.0);
+                if (productionDominantDiff) {
+                    color = vec3<f32>(1.0, 0.85, 0.0);
+                }
+            } else {
+                color = vec3<f32>(0.0, 0.18, 1.0);
+                if (productionDominantDiff) {
+                    color = vec3<f32>(1.0, 0.0, 1.0);
+                }
+            }
+        } else if (fastHot) {
+            color = vec3<f32>(0.0, 0.82, 1.0);
+            if (fastDominantDiff) {
+                color = vec3<f32>(0.0, 1.0, 0.24);
+            }
+        }
+
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.16);
+        return vec4<f32>(color, 1.0);
+    }
+
     if (microSample.a < 0.0) {
         discard;
+    }
+
+    // ── Debug mode 86: exact current micro vs forced-union micro delta ─────
+    // This uses the same shortcut-capable material sampling as normal mode 43,
+    // not the full all-channel sampler used by modes 56/67. Red heat means the
+    // current production fast branch differs from union; blue heat means the
+    // fallback branch differs from union. A clean 86 with a visible 43 rim means
+    // the source is after the micro material sample.
+    if (debugMode == 86) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionMicro = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let delta = maxAbsVec3(microSample.rgb - unionMicro);
+        let heat = clamp(delta * 16.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(0.02, 0.03, 0.06);
+        if (splatResult.bilinearValid) {
+            color = mix(color, vec3<f32>(1.0, 0.04, 0.0), heat);
+        } else {
+            color = mix(color, vec3<f32>(0.0, 0.18, 1.0), heat);
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 89: bilinearValid branch map ────────────────────────────
+    // Green = fast path (bilinearValid true, hardware-filtered weights).
+    // Red   = fallback path (bilinearValid false, manual 4-corner accumulation).
+    // Overlay this against mode 43/37 to check whether the visible rim boundary
+    // aligns exactly with the bilinearValid==false region.
+    if (debugMode == 89) {
+        let grid = splatGridAmount(input);
+        var color = select(vec3<f32>(0.65, 0.10, 0.06), vec3<f32>(0.08, 0.55, 0.12), splatResult.bilinearValid);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.16);
+        return vec4<f32>(color, 1.0);
     }
 
     let microPatternStyle = getMicroPatternStyle(dominantTileId);
@@ -2863,6 +3771,43 @@ if (debugMode == 16) {
     if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
         let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
         baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
+    }
+    if (debugMode == 84) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        var unionBase = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+            let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+            unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
+        }
+        return vec4<f32>(unionBase, 1.0);
+    }
+    // ── Debug modes 87/88: branch isolation ──────────────────────────────
+    // sampleMicroTextureWithSplat uses derivative-based texture sampling, so it
+    // cannot be called inside non-uniform control flow (conditioned on bilinearValid).
+    // Both modes compute union micro unconditionally, then select with the non-uniform
+    // bilinearValid flag as a data operation rather than a control-flow branch.
+    //
+    // Mode 87: union for fallback pixels, production for fast pixels.
+    //   If the rim disappears vs mode 43, the fallback accumulation path is the source.
+    //   If the rim persists, look at the fast path.
+    // Mode 88: union for fast pixels, production for fallback pixels.
+    //   If the rim disappears vs mode 43, hardware-filtered weights differ from manual
+    //   accumulation at the boundary — the method-switch seam hypothesis confirmed.
+    if (debugMode == 87 || debugMode == 88) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        var unionBase = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+            let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+            unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
+        }
+        // Mode 87: swap union in for fallback (!bilinearValid) pixels.
+        // Mode 88: swap union in for fast (bilinearValid) pixels.
+        let useUnion = select(splatResult.bilinearValid, !splatResult.bilinearValid, debugMode == 87);
+        return vec4<f32>(select(baseColor, unionBase, useUnion), 1.0);
     }
     if (debugMode == 43) {
         return vec4<f32>(baseColor, 1.0);
@@ -2899,6 +3844,43 @@ if (debugMode == 16) {
     if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
     }
+    if (debugMode == 85) {
+        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionDominantTileId = splatDominantTileId(unionSplat);
+        var unionBase = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+            let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+            unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
+        }
+        if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
+            var unionMacroColor = sampleMacroOverlaySimple(input, activeSeason, unionDominantTileId);
+            if (!ENABLE_RESOLVED_COLOR) {
+                let detailedUnionMacro = sampleMacroOverlaySplat(input, activeSeason, layer, unionSplat);
+                let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
+                unionMacroColor = mix(unionMacroColor, detailedUnionMacro, macroFade);
+            }
+            if (macroForcedVisible) {
+                unionBase = unionMacroColor;
+            } else if (layerViewMode != 1) {
+                let macroStrength = computeMacroBlendStrength(input, layer, 1.0);
+                unionBase = mix(unionBase, unionMacroColor, macroStrength);
+            }
+        }
+        if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+            let resolvedEdgeColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+            unionBase = mix(
+                unionBase,
+                resolvedEdgeColor,
+                clamp(lodEdgeAmount * LOD_EDGE_COLOR_STRENGTH, 0.0, 1.0)
+            );
+        }
+        if (ENABLE_GROUND_FIELD) {
+            unionBase = applyGroundFieldFallback(unionBase, input, layer);
+        }
+        return vec4<f32>(unionBase, 1.0);
+    }
     if (debugMode == 45) {
         return vec4<f32>(baseColor, 1.0);
     }
@@ -2931,6 +3913,12 @@ if (debugMode == 16) {
         }
         let lightDir = normalize(fragUniforms.lightDirection);
         NdotL = max(dot(worldNormal, lightDir), 0.0);
+        if (debugMode == 72) {
+            let sphereNdotL = max(dot(normalize(input.vSphereDir), lightDir), 0.0);
+            let heat = clamp(abs(NdotL - sphereNdotL) * 10.0, 0.0, 1.0);
+            let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+            return vec4<f32>(color, 1.0);
+        }
 
         if (ENABLE_LIGHTING) {
             let ambient = fragUniforms.ambientColor * fragUniforms.ambientLightIntensity;
@@ -2964,27 +3952,66 @@ if (debugMode == 16) {
                     clamp(lodEdgeAmount * LOD_EDGE_SHADOW_STRENGTH, 0.0, 1.0)
                 );
             }
+            if (debugMode == 73) {
+                let litNoShadowAo = baseColor * (ambient + sunDiffuse) + clusteredLight;
+                return vec4<f32>(litNoShadowAo, 1.0);
+            }
+            if (debugMode == 74) {
+                let heat = clamp((1.0 - shadowFactor) * 3.0, 0.0, 1.0);
+                let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                return vec4<f32>(color, 1.0);
+            }
 
             var aoAmbient: f32 = 1.0;
             var aoDirect:  f32 = 1.0;
             if (ENABLE_TERRAIN_AO) {
-                var ao = sampleTerrainAO(input, layer);
+                let rawAO = sampleTerrainAO(input, layer);
+                var ao = rawAO;
                 var aoNeutralFade = lod0AOFade;
+                var splatAOTransitionFade = 0.0;
                 if (hasLiveSplat && splatResult.hasBoundary) {
                     let transitionWeight = 1.0 - splatDominantWeight(splatResult);
+                    splatAOTransitionFade = smoothstep(0.005, 0.20, transitionWeight);
                     aoNeutralFade = max(
                         aoNeutralFade,
-                        smoothstep(0.005, 0.20, transitionWeight)
+                        splatAOTransitionFade
                     );
                 }
+                var lodEdgeAOFade = 0.0;
                 if (ENABLE_LOD_EDGE_AO_FADE && LOD_EDGE_AO_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                    lodEdgeAOFade = clamp(lodEdgeAmount * LOD_EDGE_AO_STRENGTH, 0.0, 1.0);
                     aoNeutralFade = max(
                         aoNeutralFade,
-                        clamp(lodEdgeAmount * LOD_EDGE_AO_STRENGTH, 0.0, 1.0)
+                        lodEdgeAOFade
                     );
                 }
                 if (aoNeutralFade > 0.0001) {
                     ao = mix(ao, 1.0, clamp(aoNeutralFade, 0.0, 1.0));
+                }
+                if (debugMode == 76) {
+                    let heat = clamp((1.0 - rawAO) * 4.0, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                if (debugMode == 77) {
+                    let heat = clamp((1.0 - ao) * 4.0, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                if (debugMode == 78) {
+                    let heat = clamp(aoNeutralFade, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                if (debugMode == 79) {
+                    let heat = clamp(splatAOTransitionFade, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                if (debugMode == 80) {
+                    let heat = clamp(lodEdgeAOFade, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+                    return vec4<f32>(color, 1.0);
                 }
                 let master = clamp(fragUniforms.terrainAOStrength, 0.0, 1.0);
                 aoAmbient = max(TERRAIN_AO_AMBIENT_FLOOR, mix(1.0, ao, master));
@@ -2992,6 +4019,12 @@ if (debugMode == 16) {
                     1.0, ao,
                     clamp(fragUniforms.terrainAODirectStrength, 0.0, 1.0) * master
                 );
+            }
+            if (debugMode == 75) {
+                let aoAttenuation = max(1.0 - aoAmbient, 1.0 - aoDirect);
+                let heat = clamp(aoAttenuation * 4.0, 0.0, 1.0);
+                let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                return vec4<f32>(color, 1.0);
             }
         
             finalColor = baseColor
@@ -3003,6 +4036,14 @@ if (debugMode == 16) {
             // This albedo-scaled floor guarantees a minimum HDR signal (~0.045 for
             // average grass) that maps to ~14% sRGB at exposure=0.75.
             finalColor = max(finalColor, baseColor * 0.30);
+            if (debugMode == 71) {
+                return vec4<f32>(finalColor, 1.0);
+            }
+            if (debugMode == 82) {
+                let heat = clamp(maxAbsVec3(finalColor - baseColor) * 5.0, 0.0, 1.0);
+                let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                return vec4<f32>(color, 1.0);
+            }
         }
     }
 
@@ -3035,6 +4076,12 @@ if (debugMode == 16) {
     } else {
         let fogFactor = (1.0 - exp(-input.vDistanceToCamera * fragUniforms.fogDensity));
         foggedColor = mix(finalColor, fragUniforms.fogColor, clamp(fogFactor, 0.0, 1.0));
+    }
+
+    if (debugMode == 81) {
+        let heat = clamp(maxAbsVec3(foggedColor - finalColor) * 5.0, 0.0, 1.0);
+        let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+        return vec4<f32>(color, 1.0);
     }
 
     return vec4<f32>(foggedColor, 1.0);

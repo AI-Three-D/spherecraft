@@ -48,6 +48,7 @@ export class BaseWorldGenerator {
         this.splatConfig = {
             splatDensity: 4,
             splatKernelSize: 5,
+            slotSupportExpansionTexels: 1.5,
             transitionSharpness: 1.9,
             transitionDominanceStart: 0.55,
             transitionDominanceEnd: 0.9,

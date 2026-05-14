@@ -43,6 +43,7 @@
     "aerialFadeEndMeters":   600
   },
   "terrainAO": {
+    "enabled": false,
     "sampleStrength": 1.0,
     "directStrength": 0.7,
     "ambientFloor": 0.65

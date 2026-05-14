@@ -74,9 +74,12 @@ export function createEngineConfig() {
     vertexSpacingMeters,
     splatConfig: {
       splatDensity: 8,
-      splatKernelSize: 17,
-      // Keep category weights linear. Width should come from the kernel, not
-      // from boosting minority categories into visible halos.
+      // Keep the live splat kernel local enough that 1-4 tile authored
+      // grass/sand islands remain visible instead of being averaged away.
+      splatKernelSize: 5,
+      // Stabilize sparse material ID slots across the 2x2 bilinear footprint
+      // without widening the visible blend weights.
+      slotSupportExpansionTexels: 1.5,
       transitionSharpness: 1.0,
       transitionDominanceStart: 0.05,
       transitionDominanceEnd: 0.9,

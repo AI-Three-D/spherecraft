@@ -36,6 +36,13 @@ export class WebGPUTerrainGenerator {
         const splat = requireObject(splatConfig, 'splatConfig');
         this.splatDensity = requireInt(splat.splatDensity, 'splatConfig.splatDensity', 1);
         this.splatKernelSize = requireInt(splat.splatKernelSize, 'splatConfig.splatKernelSize', 1);
+        this.splatSlotSupportExpansionTexels = Math.max(
+            0.0,
+            requireNumber(
+                splat.slotSupportExpansionTexels ?? 1.5,
+                'splatConfig.slotSupportExpansionTexels'
+            )
+        );
         this.splatTransitionSharpness = Math.max(
             1.0,
             requireNumber(
