@@ -78,25 +78,25 @@ Latest visual mode sweep:
 - Mode `85` looks like mode `84`.
 - Mode `86` shows a purple-gradient background with dark blue contours on both rim sites.
 
-Current diagnosis:
+Current diagnosis — RESOLVED to root cause:
 
-- The faint rim is confirmed in the production pre-lighting albedo/material path, and force-union reconstruction removes it.
-- It is not explained by resolved color, nearest stored splat, always-union material, union minority luma, raw center tile delta, production material shortcuts, or forced-fast debug behavior.
-- The corrected raycast click data is valid but landed on fallback/union footprints with `productionUnionDelta == 0`; this does not clear neighboring/subpixel production fast-path footprints visible in the screen image.
-- The best current target is production live splat reconstruction/material sampling in `sampleSplatData()` and `sampleMicroTextureWithSplat()`. The force-union result proves that changing only production reconstruction to union removes the faint rim.
-- Mode `86` being dark blue rather than red means the current-vs-union micro delta is rim-aligned on pixels classified by `splatResult.bilinearValid == false`, or at least not on the red fast-branch classification path. This weakens the earlier "ordered-valid fast branch only" hypothesis for the faint rim and raises the priority of fallback/union material equivalence at actual screen pixels.
+The faint rim is a **method-switch seam** at the `bilinearValid` boundary in `sampleSplatData()`. This is now confirmed by branch-isolation modes `87`/`88`/`89` (see "Branch Isolation Round" section for full evidence and analysis).
 
-Next decisive step:
+Key facts:
+- Mode `89` shows both rim sites are in the `bilinearValid == false` (fallback) region (red on green map).
+- Mode `87` (union for fallback pixels): rim persists — fallback and union are byte-identical, no difference.
+- Mode `88` (union for fast-path pixels): faint rim completely absent — the fast path is the seam source.
+- The seam is the visual contrast between fast-path pixels (hardware `textureSampleLevel`) and adjacent fallback pixels (manual 4-corner `textureLoad` accumulation). When mode `88` makes all pixels use manual accumulation, the contrast disappears.
+- AO is an amplifier only. Do not chase AO until the base seam is fixed.
+- The more prominent right-side rim: mode `88` shows a staircase there, but it reads as the Class A stored dominant-category flip, not the faint Class B rim. These are different mechanisms.
 
-- Do not repeat the full screenshot/mode/click sweep.
-- Use the new force-union debug modes as already run:
-  - prior `43`: faint rim present.
-  - prior `45`: faint rim present.
-  - `84`: faint rim removed.
-  - `85`: faint rim removed, matching `84`.
-  - `86`: rim-aligned dark blue contours on both rim sites.
-- Mode `83` is not currently used.
-- The next code target should be why production micro sampling differs from union on mode-`86` blue contours even though the clicked fallback footprint reported `productionUnionDelta == 0`. Focus on exact shader-vs-readback parity for the visible pixels and fallback/union material equivalence before returning to generation or AO.
+Next work — pick ONE of these options and implement it after measuring:
+
+1. **Check generation first (zero shader cost)**: verify whether `splatCompute` stores exactly unit-sum weights. If stored texels don't sum to 1.0, hardware bilinear and manual accumulation normalize from different raw sums, which is the seam source. Fix in `splatCompute` weight storage if that's the case.
+2. **Replace fast path weights with manual bilinear**: in `sampleSplatData()` fast branch (line ~1646), replace `sampleSplatWeightsFiltered(uv, layer)` with explicit 4-corner `loadSplatWeights` + manual bilinear math (identical to what the fallback/union path does). This eliminates the method switch. Cost: 3 extra `textureLoad` calls per fragment for the bilinear-valid majority of terrain. Measure FPS before/after.
+3. **Transition zone blending**: keep the hardware fast path but, within N texels of a `bilinearValid == false` neighbor, blend toward the manual result. Preserves fast-path savings for interior terrain. More complex to implement.
+
+Do not implement option 2 or 3 without a FPS benchmark first. The fast path (`sampleSplatWeightsFiltered`) was a deliberate optimization.
 
 ## Concepts
 
@@ -351,33 +351,44 @@ Interpretation of this pass:
 - This creates a tension with the earlier readback: clicked points had `productionUnionDelta == 0`, yet mode `84` removes the faint rim and mode `86` shows rim-aligned blue contours. The raycast accuracy is now good enough that this should not be treated as a sphere-pick failure. The likely explanation is that the single clicked fallback footprint did not cover the exact screen pixels/derivative state that forms the visible contour, or the CPU readback is not mirroring the shader material path exactly.
 - The current pinpointed target is production live splat reconstruction and material sampling parity, specifically `sampleSplatData()` as consumed by `sampleMicroTextureWithSplat()`. Given the blue mode-`86` result, prioritize fallback/union equivalence at actual visible pixels before assuming an ordered-valid fast-branch-only bug.
 
-## Next Decisive Step
+## Branch Isolation Round — Modes 87/88/89 (decisive)
 
-More screenshots are now lower value than one controlled code experiment. That experiment is now implemented as debug modes `84`-`86`.
+Three new diagnostic modes were added to isolate which reconstruction branch produces the faint rim.
 
-New force-union modes:
+New modes (routing range extended to `25..89`):
 
-- `84`: force-union base micro color. Compare against mode `43`.
-- `85`: force-union pre-lighting albedo. Compare against mode `45`.
-- `86`: exact current normal micro sample versus force-union micro sample. Red heat means current production fast branch differs from union; blue heat means current fallback branch differs from union.
-- Runtime routing note: these modes must remain fragment-only. `GameEngine._resolveTerrainDebugModes()` maps modes `25..86` to `generatorMode=0`, `fragmentMode=mode` so selecting them does not regenerate tiles through terrain-generator debug mode.
+- `87`: union reconstruction for fallback pixels only (`bilinearValid == false`); fast-path pixels keep production output. Compare to mode `43`.
+- `88`: union reconstruction for fast-path pixels only (`bilinearValid == true`); fallback pixels keep production output. Compare to mode `43`.
+- `89`: binary branch map. Green = fast path (`bilinearValid == true`, hardware-filtered weights). Red = fallback path (`bilinearValid == false`, manual 4-corner accumulation). No terrain color; compare shape against mode `43`/`37`.
 
-Expected result:
+Implementation note: `sampleMicroTextureWithSplat` uses derivative-based texture sampling, so it cannot be called inside non-uniform control flow conditioned on `bilinearValid`. Modes `87`/`88` therefore compute `sampleSplatDataUnionReference` and `sampleMicroTextureWithSplat` unconditionally for all pixels, then use a `select()` data operation to choose between production and union output. This avoids non-uniform branching at the cost of running both paths per fragment in those debug modes.
 
-- If the faint rim disappears in `84` and `85` while still present in `43` and `45`, the cause is confirmed as production reconstruction.
-- If mode `86` lights the faint rim red, the ordered-valid fast branch is the target. If it lights blue, fallback/reference equivalence is broken.
-- If the faint rim remains even in `84`/`85`, then the mode-`62` comparison is not isolating the same path as normal rendering and the next target becomes derivative/UV/material sampling state around `sampleMicroTextureWithSplatFull()` or later non-splat material steps.
-- Based on the current mode split, the first outcome is the stronger prediction.
+Actual results:
 
-Actual result:
+- Mode `89`: both rim sites are fully **red** — both the faint and the more prominent rim are located in the `bilinearValid == false` (fallback/manual-accumulation) region.
+- Mode `87` (union for fallback): looks essentially identical to mode `0`, slightly darker overall. The faint rim **persists**. Replacing fallback pixels with union does not remove the seam. This is expected because production fallback and union use byte-for-byte identical accumulation code.
+- Mode `88` (union for fast): the faint rim is **completely absent**. A staircase transition appears at the old site of the more prominent rim, but it reads as the stored dominant-category Class A seam, not the faint rim. The faint rim (Class B) is entirely gone.
 
-- `84` removes the faint red-arrow rim.
-- `85` looks like `84`.
-- The more prominent rim site still has a stair-step border in `84`/`85`, but it no longer reads as the same rim.
-- `86` shows dark blue contours on both rim sites, so the current-vs-union micro delta is rim-aligned and classified as fallback/invalid branch rather than fast-branch red.
-- Conclusion: the faint rim is confirmed to be a production-vs-union material/reconstruction issue, not AO, fog, resolved color, nearest stored material, or forced-fast debug behavior. The immediate implementation target is shader fallback/union parity and exact material sampling around those contours.
+Confirmed conclusion:
 
-The cyan mode-`70` grains have already been clicked in the same faint-seam location. Do not spend more time trying to re-click them unless mode `70` starts showing red, yellow, blue, or magenta instead of cyan/green. Cyan/green means forced-fast-only divergence, not a normal production cause.
+The faint rim is a **method-switch seam** at the boundary of the `bilinearValid == false` region. The seam is not inside the fallback pixels themselves. It is the visual contrast between:
+
+- **Fast-path pixels** (bilinearValid true, adjacent to the boundary): use `sampleSplatWeightsFiltered` — a single `textureSampleLevel` with hardware bilinear filtering.
+- **Fallback pixels** (bilinearValid false, at the boundary): use explicit 4-corner `textureLoad` calls accumulated through ID-keyed buckets (`accumulateLoadedCornerMixture` → `buildAccumulatedTop4` → `sortTop4ByTileId`).
+
+These two paths have a structurally different relationship to the stored weight data. When stored texel weights do not sum to exactly 1.0, hardware bilinear averages non-unit sums and then the normalization step divides by a different denominator than the manual accumulation path. The seam is wherever the method switches. Mode `88` removes it by making all pixels use manual accumulation, eliminating the method switch.
+
+The slight global darkening in mode `87` confirms manual accumulation is systematically slightly darker than hardware bilinear filtering across the whole terrain, not just at the boundary. The boundary is where this per-pixel systematic difference becomes a visible seam.
+
+The direct weight precision difference (hardware bilinear 8-bit blend factors) alone is too small (~0.002 per channel) to explain a visible seam. The more likely mechanism is the non-unit stored weight normalization divergence described above, but the exact magnitude is not yet measured.
+
+**Performance note**: `sampleSplatWeightsFiltered` is one `textureSampleLevel`. The fallback uses 4 × `textureLoad`. The fast path was a deliberate optimization saving 3 memory operations per fragment for the majority (valid zone) of terrain. The FPS gain from this optimization has not been re-measured. Do not remove or replace the fast path without a before/after FPS comparison. The fix options are:
+
+1. Replace `sampleSplatWeightsFiltered` with explicit 4-corner loads + manual bilinear in the fast path (same math as fallback). Correct and simple, but regresses the 3-read saving for all valid terrain fragments.
+2. Keep the fast path but blend the result toward the manual accumulation within N texels of the bilinear-valid boundary (transition zone smoothing). More complex, preserves the fast-path savings for interior pixels.
+3. Address at generation: ensure `splatCompute` stores exactly unit-sum weights per texel, so hardware bilinear and manual bilinear produce the same normalized result. If the stored sums are already ~1.0 everywhere, this is ruled out and the mechanism must be something else.
+
+Option 3 is zero shader cost if it applies. Check `splatCompute` output weight sums before implementing option 1 or 2.
 
 Readback gap to resolve:
 
@@ -507,9 +518,10 @@ The key evidence is alignment: determine whether `terrainAOGrid` / `terrainAOAtt
 - `84`: force-union base micro color, comparable to mode `43`.
 - `85`: force-union pre-lighting albedo, comparable to mode `45`.
 - `86`: exact current normal micro sample versus force-union micro sample, with red for fast-branch delta and blue for fallback-branch delta.
-- `87`: branch isolation — union reconstruction for fallback pixels only; fast-path pixels keep production output. Compare to mode `43`. If the rim disappears here but not in `43`, the fallback path is the seam source. If it persists, look at the fast path.
-- `88`: branch isolation — union reconstruction for fast-path pixels only; fallback pixels keep production output. Compare to mode `43`. If the rim disappears here but not in `43`, hardware-filtered weights differ from manual accumulation at the boundary (method-switch seam hypothesis confirmed).
-- `89`: binary map of the bilinearValid branch assignment. Green = fast path (bilinearValid true). Red = fallback path (bilinearValid false). Overlay against mode `43`/`37` to check whether the visible rim boundary exactly tracks the bilinearValid==false region.
+- `87`: branch isolation — union for fallback pixels, production for fast pixels. Rim persists (confirmed). Fallback and union are code-identical, no difference.
+- `88`: branch isolation — union for fast pixels, production for fallback pixels. Faint rim absent (confirmed). Fast-path hardware bilinear is the seam source.
+- `89`: binary branch map. Green = bilinearValid true (fast path). Red = bilinearValid false (fallback). Both rim sites are red (confirmed).
+- Routing: `GameEngine._resolveTerrainDebugModes()` maps modes `25..89` to `generatorMode=0, fragmentMode=mode`. Modes `83` (unused) and above are fragment-only and do not trigger tile regeneration.
 
 ## New Diagnostic: Mode 70
 

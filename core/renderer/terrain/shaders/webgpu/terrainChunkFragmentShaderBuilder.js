@@ -1643,14 +1643,25 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
     var topWeights: array<f32, 4>;
 
     if (bilinearValid) {
-        let blendedWeights = sampleSplatWeightsFiltered(uv, layer);
-
+        // All 4 corners share the same ordered ID set. Use explicit corner loads
+        // with manual bilinear to match the fallback path numerically. The previous
+        // sampleSplatWeightsFiltered (hardware textureSampleLevel) produced a
+        // systematic per-pixel difference from the manual accumulation path, causing
+        // a visible seam at the bilinearValid boundary (confirmed by mode 88).
+        let weights00 = loadSplatWeights(c00, layer);
+        let weights10 = loadSplatWeights(c10, layer);
+        let weights01 = loadSplatWeights(c01, layer);
+        let weights11 = loadSplatWeights(c11, layer);
+        let w00 = (1.0 - f.x) * (1.0 - f.y);
+        let w10 = f.x * (1.0 - f.y);
+        let w01 = (1.0 - f.x) * f.y;
+        let w11 = f.x * f.y;
         topIds = array<i32, 4>(ids00.x, ids00.y, ids00.z, ids00.w);
         topWeights = array<f32, 4>(
-            blendedWeights.x,
-            blendedWeights.y,
-            blendedWeights.z,
-            blendedWeights.w
+            weights00.x*w00 + weights10.x*w10 + weights01.x*w01 + weights11.x*w11,
+            weights00.y*w00 + weights10.y*w10 + weights01.y*w01 + weights11.y*w11,
+            weights00.z*w00 + weights10.z*w10 + weights01.z*w01 + weights11.z*w11,
+            weights00.w*w00 + weights10.w*w10 + weights01.w*w01 + weights11.w*w11,
         );
     } else {
         // IDs for all 4 corners already loaded above for the validity check.
