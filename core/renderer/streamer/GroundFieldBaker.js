@@ -275,7 +275,9 @@ export class GroundFieldBaker {
             size: [res, res, this._tilePoolSize],
             format: 'rgba8unorm',
             dimension: '2d',
-            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+            usage: GPUTextureUsage.STORAGE_BINDING
+                | GPUTextureUsage.TEXTURE_BINDING
+                | GPUTextureUsage.COPY_SRC,
         });
 
         const wrapper = new Texture({

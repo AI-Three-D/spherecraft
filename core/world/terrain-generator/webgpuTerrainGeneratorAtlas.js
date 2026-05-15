@@ -43,6 +43,8 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                 const gpuNormal = this.getOrCreateAtlasTexture(atlasKey, 'normal', textureSize);
                 const gpuTile   = this.getOrCreateAtlasTexture(atlasKey, 'tile',   textureSize);
                 const gpuHeightBase = this.createGPUTexture(textureSize, textureSize, 'rgba32float');
+                const gpuSmoothSplatData = this.createGPUTexture(textureSize, textureSize, 'rgba8unorm');
+                const gpuSmoothSplatIndex = this.createGPUTexture(textureSize, textureSize, 'rgba8unorm');
                 let gpuSplatData = null;
                 let gpuSplatIndex = null;
 
@@ -61,6 +63,14 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                     faceIndex, 1, textureSize, textureSize, chunkSizeTex, config.gridSize,
                     gpuHeight);
 
+                await this.runTerrainPassAtlas(gpuSmoothSplatData, atlasChunkX, atlasChunkY,
+                    faceIndex, 7, textureSize, textureSize, chunkSizeTex, config.gridSize,
+                    gpuHeightBase);
+
+                await this.runTerrainPassAtlas(gpuSmoothSplatIndex, atlasChunkX, atlasChunkY,
+                    faceIndex, 8, textureSize, textureSize, chunkSizeTex, config.gridSize,
+                    gpuHeightBase);
+
                 gpuSplatData = this.getOrCreateAtlasTexture(
                     atlasKey, 'splat', config.splatSize);
                 gpuSplatIndex = this.getOrCreateAtlasTexture(
@@ -76,7 +86,9 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                     config.splatSize,
                     chunkSizeTex,
                     'r32float',
-                    'r32float'
+                    'r32float',
+                    gpuSmoothSplatData,
+                    gpuSmoothSplatIndex
                 );
 
                 return {
@@ -137,6 +149,8 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                 const gpuMacro     = this.createGPUTexture(textureSize, textureSize, fmt('macro'));
                 const gpuSplatData = this.createGPUTexture(textureSize, textureSize, fmt('splatData'));
                 const gpuSplatIndex = this.createGPUTexture(textureSize, textureSize, fmt('splatIndex'));
+                const gpuSmoothSplatData = this.createGPUTexture(textureSize, textureSize, 'rgba8unorm');
+                const gpuSmoothSplatIndex = this.createGPUTexture(textureSize, textureSize, 'rgba8unorm');
 
                 const chunkSizeTex  = Math.max(1, Math.floor(textureSize / chunksPerAtlas));
                 const chunkCoordX   = atlasKey.atlasX * chunksPerAtlas;
@@ -145,6 +159,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
 
                 this._runBatchedLODTerrainPasses({
                     gpuHeightBase, gpuHeight, gpuNormal, gpuTile, gpuMacro,
+                    gpuSmoothSplatData, gpuSmoothSplatIndex,
                     chunkCoordX, chunkCoordY, chunkSizeTex, chunkGridSize,
                     face: atlasKey.face,
                     textureSize,
@@ -190,7 +205,9 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                     textureSize,
                     atlasKey.lod,
                     fmt('height'),
-                    fmt('tile')
+                    fmt('tile'),
+                    gpuSmoothSplatData,
+                    gpuSmoothSplatIndex
                 );
 
                 // Wrap with per-type formats.
@@ -436,9 +453,10 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         const pass = enc.beginComputePass();
 
         // ── Select pipeline based on required inputs ──
+        const outputFormat = (type === 7 || type === 8) ? 'rgba8unorm' : 'rgba32float';
         const isMicroPass = (type === 4 || type === 5 || type === 6) && heightTex && tileTex;
         const isHeightInputPass =
-            !isMicroPass && (type === 1 || type === 2) && heightTex;
+            !isMicroPass && (type === 1 || type === 2 || type === 7 || type === 8) && heightTex;
 
         if (isMicroPass) {
         const { pipeline, bindGroupLayout } =
@@ -457,7 +475,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         this._setTerrainBiomeBindGroup(pass);
         } else if (isHeightInputPass) {
         const { pipeline, bindGroupLayout } =
-        this._getHeightInputPipelineForFormat('rgba32float', 'r32float');
+        this._getHeightInputPipelineForFormat(outputFormat, 'r32float');
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, this.device.createBindGroup({
         layout: bindGroupLayout,
@@ -470,9 +488,11 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         }));
         this._setTerrainBiomeBindGroup(pass);
         } else {
-        pass.setPipeline(this.terrainPipeline);
+        const { pipeline, bindGroupLayout } =
+        this._getTerrainPipelineForFormat(outputFormat);
+        pass.setPipeline(pipeline);
         pass.setBindGroup(0, this.device.createBindGroup({
-        layout: this.terrainBindGroupLayout,
+        layout: bindGroupLayout,
         entries: [
         { binding: 0,
         resource: { buffer: this.terrainUniformBuffer } },
@@ -570,7 +590,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         // ── Select pipeline based on required inputs ──
         const isMicroPass = (type === 4 || type === 5 || type === 6) && heightTex && tileTex;
         const isHeightInputPass =
-            !isMicroPass && (type === 1 || type === 2) && heightTex;
+            !isMicroPass && (type === 1 || type === 2 || type === 7 || type === 8) && heightTex;
 
         if (isMicroPass) {
         const { pipeline, bindGroupLayout } =
@@ -623,7 +643,16 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         this.device.queue.submit([enc.finish()]);
         },
 
-        async runSplatPassAtlas(hTex, tTex, splatDataTex, splatIndexTex, atlasChunkX, atlasChunkY, w, h, chunkSize, heightFormat = 'r32float', tileFormat = 'r32float') {
+        async runSplatPassAtlas(
+                hTex, tTex, splatDataTex, splatIndexTex,
+                atlasChunkX, atlasChunkY, w, h, chunkSize,
+                heightFormat = 'r32float', tileFormat = 'r32float',
+                smoothSplatDataTex = null, smoothSplatIndexTex = null
+            ) {
+                if (!smoothSplatDataTex || !smoothSplatIndexTex) {
+                    throw new Error('runSplatPassAtlas requires smooth splat source textures');
+                }
+
                 this._writeSplatUniformBuffer({
                     chunkCoordX: atlasChunkX,
                     chunkCoordY: atlasChunkY,
@@ -650,7 +679,9 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                         entries: [
                             { binding: 0, resource: { buffer: this.splatUniformBuffer } },
                             { binding: 1, resource: tTex.createView() },
-                            { binding: 2, resource: splatPaletteTex.createView() }
+                            { binding: 2, resource: splatPaletteTex.createView() },
+                            { binding: 3, resource: smoothSplatDataTex.createView() },
+                            { binding: 4, resource: smoothSplatIndexTex.createView() }
                         ]
                     }));
                     pass.dispatchWorkgroups(
@@ -670,7 +701,9 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                             { binding: 2, resource: tTex.createView() },
                             { binding: 3, resource: splatDataTex.createView() },
                             { binding: 4, resource: splatIndexTex.createView() },
-                            { binding: 5, resource: splatPaletteTex.createView() }
+                            { binding: 5, resource: splatPaletteTex.createView() },
+                            { binding: 6, resource: smoothSplatDataTex.createView() },
+                            { binding: 7, resource: smoothSplatIndexTex.createView() }
                         ]
                     }));
                     
@@ -679,11 +712,24 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                 }
                 this.device.queue.submit([enc.finish()]);
                 this.device.queue.onSubmittedWorkDone()
-                    .then(() => { try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ } })
+                    .then(() => {
+                        try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ }
+                        try { smoothSplatDataTex?.destroy(); } catch { /* ignore cleanup failure */ }
+                        try { smoothSplatIndexTex?.destroy(); } catch { /* ignore cleanup failure */ }
+                    })
                     .catch(() => {});
             },
 
-        async runLODSplatPass(hTex, tTex, splatDataTex, splatIndexTex, chunkCoordX, chunkCoordY, worldCoverage, textureSize, lod, heightFormat = 'r32float', tileFormat = 'r32float') {
+        async runLODSplatPass(
+                hTex, tTex, splatDataTex, splatIndexTex,
+                chunkCoordX, chunkCoordY, worldCoverage, textureSize, lod,
+                heightFormat = 'r32float', tileFormat = 'r32float',
+                smoothSplatDataTex = null, smoothSplatIndexTex = null
+            ) {
+                if (!smoothSplatDataTex || !smoothSplatIndexTex) {
+                    throw new Error('runLODSplatPass requires smooth splat source textures');
+                }
+
                 const chunksPerAtlas = Math.max(1, Math.floor(worldCoverage / this.chunkSize));
                 const chunkSizeTex = Math.max(1, Math.floor(textureSize / chunksPerAtlas));
                 this._logLODSplatPass({
@@ -717,7 +763,16 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                 const { pipeline, bindGroupLayout } =
                     this._getSplatPipelineForFormats(heightFormat, tileFormat);
                 const enc = this.device.createCommandEncoder();
-                this._encodeSplatPalettePass(enc, palettePipeline, paletteBindGroupLayout, tTex, splatPaletteTex, paletteSize);
+                this._encodeSplatPalettePass(
+                    enc,
+                    palettePipeline,
+                    paletteBindGroupLayout,
+                    tTex,
+                    splatPaletteTex,
+                    paletteSize,
+                    smoothSplatDataTex,
+                    smoothSplatIndexTex
+                );
                 this._encodeLODSplatPass(
                     enc,
                     pipeline,
@@ -727,10 +782,14 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                     splatDataTex,
                     splatIndexTex,
                     splatPaletteTex,
+                    smoothSplatDataTex,
+                    smoothSplatIndexTex,
                     textureSize
                 );
                 this.device.queue.submit([enc.finish()]);
                 this._destroyTextureAfterSubmittedWork(splatPaletteTex);
+                this._destroyTextureAfterSubmittedWork(smoothSplatDataTex);
+                this._destroyTextureAfterSubmittedWork(smoothSplatIndexTex);
 
                 await this._maybeValidateSplatOutput(splatDataTex, tTex, textureSize, chunkSizeTex);
             },
@@ -779,7 +838,16 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                 }
             },
 
-        _encodeSplatPalettePass(enc, pipeline, bindGroupLayout, tileTexture, splatPaletteTex, paletteSize) {
+        _encodeSplatPalettePass(
+                enc,
+                pipeline,
+                bindGroupLayout,
+                tileTexture,
+                splatPaletteTex,
+                paletteSize,
+                smoothSplatDataTex = null,
+                smoothSplatIndexTex = null
+            ) {
                 const pass = enc.beginComputePass();
                 pass.setPipeline(pipeline);
                 pass.setBindGroup(0, this.device.createBindGroup({
@@ -787,7 +855,9 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                     entries: [
                         { binding: 0, resource: { buffer: this.splatUniformBuffer } },
                         { binding: 1, resource: tileTexture.createView() },
-                        { binding: 2, resource: splatPaletteTex.createView() }
+                        { binding: 2, resource: splatPaletteTex.createView() },
+                        { binding: 3, resource: smoothSplatDataTex.createView() },
+                        { binding: 4, resource: smoothSplatIndexTex.createView() }
                     ]
                 }));
                 pass.dispatchWorkgroups(
@@ -797,7 +867,19 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                 pass.end();
             },
 
-        _encodeLODSplatPass(enc, pipeline, bindGroupLayout, heightTex, tileTex, splatDataTex, splatIndexTex, splatPaletteTex, textureSize) {
+        _encodeLODSplatPass(
+                enc,
+                pipeline,
+                bindGroupLayout,
+                heightTex,
+                tileTex,
+                splatDataTex,
+                splatIndexTex,
+                splatPaletteTex,
+                smoothSplatDataTex,
+                smoothSplatIndexTex,
+                textureSize
+            ) {
                 const pass = enc.beginComputePass();
                 pass.setPipeline(pipeline);
                 pass.setBindGroup(0, this.device.createBindGroup({
@@ -808,7 +890,9 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
                         { binding: 2, resource: tileTex.createView() },
                         { binding: 3, resource: splatDataTex.createView() },
                         { binding: 4, resource: splatIndexTex.createView() },
-                        { binding: 5, resource: splatPaletteTex.createView() }
+                        { binding: 5, resource: splatPaletteTex.createView() },
+                        { binding: 6, resource: smoothSplatDataTex.createView() },
+                        { binding: 7, resource: smoothSplatIndexTex.createView() }
                     ]
                 }));
                 const splatW = splatDataTex.width || textureSize;
@@ -818,6 +902,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
             },
 
         _destroyTextureAfterSubmittedWork(texture) {
+                if (!texture) return;
                 this.device.queue.onSubmittedWorkDone()
                     .then(() => { try { texture.destroy(); } catch { /* ignore cleanup failure */ } })
                     .catch(() => {});

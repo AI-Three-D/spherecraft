@@ -94,6 +94,22 @@ export class EngineConfig {
           terrainShader.lodEdgeResolvedColorEnabled ?? false,
           'rendering.terrainShader.lodEdgeResolvedColorEnabled'
         ),
+        enableMacroLayer: requireBool(
+          terrainShader.enableMacroLayer ?? true,
+          'rendering.terrainShader.enableMacroLayer'
+        ),
+        forceMacroOverlay: requireBool(
+          terrainShader.forceMacroOverlay ?? false,
+          'rendering.terrainShader.forceMacroOverlay'
+        ),
+        macroBlend: requireNumber(
+          terrainShader.macroBlend ?? 0.7,
+          'rendering.terrainShader.macroBlend'
+        ),
+        macroNoiseWeight: requireNumber(
+          terrainShader.macroNoiseWeight ?? 0.3,
+          'rendering.terrainShader.macroNoiseWeight'
+        ),
         lodEdgeAOStrength: requireNumber(
           terrainShader.lodEdgeAOStrength ?? 1.0,
           'rendering.terrainShader.lodEdgeAOStrength'

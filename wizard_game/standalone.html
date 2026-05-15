@@ -470,7 +470,10 @@
         import { GameEngine } from './gameEngine.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
+        import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
+        import { TerrainRaycaster } from './actors/nav/TerrainRaycaster.js';
         import { CubeSphereCoords } from '../core/planet/cubeSphereCoords.js';
+        import { TILE_CATEGORIES } from '../templates/configs/tileTypes.js';
         window.qtDiag = window.qtDiag || {
             help() {
                 console.log('window.qtDiag is loaded, but the engine diagnostics are not bound yet.');
@@ -481,6 +484,9 @@
         let debugMode = false;
 
         function installQuadtreeDiagnostics(engine) {
+            let activeSplatPickClickHandler = null;
+            let diagnosticTerrainRaycaster = null;
+
             function getTileManager() {
                 return engine?.renderer?.quadtreeTileManager ?? null;
             }
@@ -495,6 +501,14 @@
 
             function getTerrainDebugMode() {
                 return engine?.engineConfig?.debug?.terrainFragmentDebugMode ?? 0;
+            }
+
+            function getCanvas() {
+                return engine?.canvas ?? document.getElementById('gameCanvas') ?? null;
+            }
+
+            function getRenderCamera() {
+                return engine?.renderer?.camera ?? engine?.camera ?? null;
             }
 
             function buildTileChain(face, depth, x, y, includeParents = true) {
@@ -727,6 +741,1900 @@
                 if (ancestor.depth > child.depth) return false;
                 const shift = child.depth - ancestor.depth;
                 return (child.x >> shift) === ancestor.x && (child.y >> shift) === ancestor.y;
+            }
+
+            function normalizeDiagnosticTileCall(faceOrTile, depth, x, y, options = {}) {
+                if (faceOrTile && typeof faceOrTile === 'object') {
+                    const opts = depth && typeof depth === 'object' ? depth : options;
+                    return { tile: normalizeTileArg(faceOrTile, null, null, null), options: opts || {} };
+                }
+                if (y && typeof y === 'object') {
+                    return {
+                        tile: normalizeTileArg(faceOrTile, depth, x, 0),
+                        options: y
+                    };
+                }
+                return {
+                    tile: normalizeTileArg(faceOrTile, depth, x, y),
+                    options: options || {}
+                };
+            }
+
+            function clampInt(value, min, max) {
+                return Math.max(min, Math.min(max, Math.floor(Number(value) || 0)));
+            }
+
+            function roundForLog(value, places = 6) {
+                if (!Number.isFinite(value)) return value;
+                const scale = 10 ** places;
+                return Math.round(value * scale) / scale;
+            }
+
+            function parseVec2(value, fallback = { x: 0, y: 0 }) {
+                if (Array.isArray(value)) {
+                    return {
+                        x: Number.isFinite(value[0]) ? Number(value[0]) : fallback.x,
+                        y: Number.isFinite(value[1]) ? Number(value[1]) : fallback.y
+                    };
+                }
+                if (value && typeof value === 'object') {
+                    return {
+                        x: Number.isFinite(value.x) ? Number(value.x) : fallback.x,
+                        y: Number.isFinite(value.y) ? Number(value.y) : fallback.y
+                    };
+                }
+                return { ...fallback };
+            }
+
+            function decodeSplatId(encoded) {
+                if (!Number.isFinite(encoded)) return 255;
+                return Math.max(0, Math.min(255, Math.floor(encoded * 255 + 0.5)));
+            }
+
+            function splatIdValid(id) {
+                return Number.isFinite(id) && id >= 0 && id < 255;
+            }
+
+            function splatEntryValid(id, weight) {
+                return splatIdValid(id) && Number.isFinite(weight) && weight > 0.0001;
+            }
+
+            function splatChannelUsable(id, weight) {
+                return splatIdValid(id) && Number.isFinite(weight) && weight > 0.001;
+            }
+
+            function categoryForTileId(tileId) {
+                const id = Math.round(Number(tileId));
+                if (!Number.isFinite(id)) return { id: -1, name: 'invalid' };
+                for (const category of TILE_CATEGORIES) {
+                    for (const range of category.ranges || []) {
+                        if (id >= range[0] && id <= range[1]) {
+                            return { id: category.id, name: category.name };
+                        }
+                    }
+                }
+                return { id: -1, name: 'invalid' };
+            }
+
+            function orderedIdsMatch(a, b) {
+                return a.length === b.length && a.every((id, index) => id === b[index]);
+            }
+
+            function normalizeSplatPayload(payload) {
+                const weights = payload.weights.map(v => Math.max(0, Math.min(1, Number(v) || 0)));
+                const total = weights.reduce((sum, v) => sum + v, 0);
+                return {
+                    ids: payload.ids.slice(0, 4),
+                    weights: total > 0.0001
+                        ? weights.map(v => v / total)
+                        : [1, 0, 0, 0],
+                    bilinearValid: !!payload.bilinearValid
+                };
+            }
+
+            function dominantSplatEntry(payload) {
+                let bestIndex = 0;
+                for (let i = 1; i < 4; i++) {
+                    const w = payload.weights[i] ?? 0;
+                    const bestW = payload.weights[bestIndex] ?? 0;
+                    const id = payload.ids[i] ?? 255;
+                    const bestId = payload.ids[bestIndex] ?? 255;
+                    if (w > bestW || (Math.abs(w - bestW) <= 0.0001 && id < bestId)) {
+                        bestIndex = i;
+                    }
+                }
+                const id = payload.ids[bestIndex] ?? 255;
+                const category = categoryForTileId(id);
+                return {
+                    slot: bestIndex,
+                    id,
+                    weight: payload.weights[bestIndex] ?? 0,
+                    categoryId: category.id,
+                    categoryName: category.name
+                };
+            }
+
+            function weightForSplatId(payload, id) {
+                if (!splatIdValid(id)) return 0;
+                let weight = 0;
+                for (let i = 0; i < 4; i++) {
+                    if (splatChannelUsable(payload.ids[i], payload.weights[i]) && payload.ids[i] === id) {
+                        weight += payload.weights[i];
+                    }
+                }
+                return weight;
+            }
+
+            function splatContainsId(payload, id) {
+                if (!splatIdValid(id)) return false;
+                return payload.ids.some(candidate => candidate === id);
+            }
+
+            function splatIdAwareWeightDelta(a, b) {
+                let delta = 0;
+                for (let i = 0; i < 4; i++) {
+                    if (splatChannelUsable(a.ids[i], a.weights[i])) {
+                        delta += Math.abs(a.weights[i] - weightForSplatId(b, a.ids[i]));
+                    }
+                }
+                for (let i = 0; i < 4; i++) {
+                    if (splatChannelUsable(b.ids[i], b.weights[i]) && !splatContainsId(a, b.ids[i])) {
+                        delta += b.weights[i];
+                    }
+                }
+                return Math.max(0, Math.min(1, delta * 0.5));
+            }
+
+            function insertTop4Accum(id, weight, ids, weights) {
+                if (!splatEntryValid(id, weight)) return;
+                let insertAt = -1;
+                for (let i = 0; i < 4; i++) {
+                    const existingId = ids[i];
+                    const existingWeight = weights[i];
+                    if (
+                        weight > existingWeight ||
+                        (weight === existingWeight && (!splatEntryValid(existingId, existingWeight) || id < existingId))
+                    ) {
+                        insertAt = i;
+                        break;
+                    }
+                }
+                if (insertAt < 0) return;
+                for (let i = 3; i > insertAt; i--) {
+                    ids[i] = ids[i - 1];
+                    weights[i] = weights[i - 1];
+                }
+                ids[insertAt] = id;
+                weights[insertAt] = weight;
+            }
+
+            function sortTop4ByTileId(ids, weights) {
+                for (let i = 0; i < 3; i++) {
+                    for (let j = i + 1; j < 4; j++) {
+                        const vi = splatIdValid(ids[i]);
+                        const vj = splatIdValid(ids[j]);
+                        if ((vj && !vi) || (vi && vj && ids[j] < ids[i])) {
+                            const tmpId = ids[i];
+                            const tmpWeight = weights[i];
+                            ids[i] = ids[j];
+                            weights[i] = weights[j];
+                            ids[j] = tmpId;
+                            weights[j] = tmpWeight;
+                        }
+                    }
+                }
+            }
+
+            function buildUnionPayloadFromCorners(corners, f) {
+                const accum = new Map();
+                const scales = [
+                    (1 - f.x) * (1 - f.y),
+                    f.x * (1 - f.y),
+                    (1 - f.x) * f.y,
+                    f.x * f.y
+                ];
+                for (let cornerIndex = 0; cornerIndex < corners.length; cornerIndex++) {
+                    const corner = corners[cornerIndex];
+                    const scale = scales[cornerIndex];
+                    for (let i = 0; i < 4; i++) {
+                        const id = corner.ids[i];
+                        const weight = corner.weights[i] * scale;
+                        if (!splatEntryValid(id, weight)) continue;
+                        accum.set(id, (accum.get(id) || 0) + weight);
+                    }
+                }
+
+                const ids = [255, 255, 255, 255];
+                const weights = [0, 0, 0, 0];
+                for (const [id, weight] of accum.entries()) {
+                    insertTop4Accum(id, weight, ids, weights);
+                }
+                const topSum = weights.reduce((sum, v) => sum + v, 0);
+                if (topSum > 0.0001) {
+                    for (let i = 0; i < 4; i++) weights[i] /= topSum;
+                }
+                sortTop4ByTileId(ids, weights);
+                return normalizeSplatPayload({ ids, weights, bilinearValid: corners[0]?.valid ?? false });
+            }
+
+            function buildFastPayloadFromCorners(corners, f) {
+                const weights = [];
+                for (let i = 0; i < 4; i++) {
+                    const w00 = corners[0].weights[i] ?? 0;
+                    const w10 = corners[1].weights[i] ?? 0;
+                    const w01 = corners[2].weights[i] ?? 0;
+                    const w11 = corners[3].weights[i] ?? 0;
+                    const wx0 = w00 * (1 - f.x) + w10 * f.x;
+                    const wx1 = w01 * (1 - f.x) + w11 * f.x;
+                    weights[i] = wx0 * (1 - f.y) + wx1 * f.y;
+                }
+                return normalizeSplatPayload({
+                    ids: corners[0].ids.slice(0, 4),
+                    weights,
+                    bilinearValid: corners[0]?.valid ?? false
+                });
+            }
+
+            function summarizePayload(name, payload) {
+                const dominant = dominantSplatEntry(payload);
+                return {
+                    name,
+                    ids: payload.ids.join(','),
+                    weights: payload.weights.map(v => roundForLog(v, 4)).join(','),
+                    dominantId: dominant.id,
+                    dominantWeight: roundForLog(dominant.weight, 4),
+                    dominantCategory: dominant.categoryName,
+                    dominantCategoryId: dominant.categoryId,
+                    bilinearValid: payload.bilinearValid
+                };
+            }
+
+            function analyzeSplatFootprint(corners, f) {
+                const runtimeOrderedValid =
+                    orderedIdsMatch(corners[0].ids, corners[1].ids) &&
+                    orderedIdsMatch(corners[0].ids, corners[2].ids) &&
+                    orderedIdsMatch(corners[0].ids, corners[3].ids);
+                const precomputedValid = !!corners[0].valid;
+                const fast = buildFastPayloadFromCorners(corners, f);
+                const union = buildUnionPayloadFromCorners(corners, f);
+                const production = runtimeOrderedValid ? fast : union;
+                const productionUnionDelta = splatIdAwareWeightDelta(production, union);
+                const fastUnionDelta = splatIdAwareWeightDelta(fast, union);
+                const productionDominant = dominantSplatEntry(production);
+                const unionDominant = dominantSplatEntry(union);
+                const fastDominant = dominantSplatEntry(fast);
+                const productionDominantCategoryDiff = productionDominant.categoryId !== unionDominant.categoryId;
+                const fastDominantCategoryDiff = fastDominant.categoryId !== unionDominant.categoryId;
+                let verdict = 'production_matches_union';
+                if (productionUnionDelta > 0.001 && runtimeOrderedValid) {
+                    verdict = 'production_fast_differs_from_union';
+                } else if (productionUnionDelta > 0.001) {
+                    verdict = 'production_fallback_differs_from_union';
+                } else if (!runtimeOrderedValid && fastUnionDelta > 0.001) {
+                    verdict = 'forced_fast_only_differs_from_union';
+                } else if (runtimeOrderedValid) {
+                    verdict = 'fast_path_safe_for_this_footprint';
+                }
+                return {
+                    runtimeOrderedValid,
+                    precomputedValid,
+                    validityDisagrees: runtimeOrderedValid !== precomputedValid,
+                    f: { x: roundForLog(f.x), y: roundForLog(f.y) },
+                    productionUnionDelta: roundForLog(productionUnionDelta),
+                    fastUnionDelta: roundForLog(fastUnionDelta),
+                    productionDominantCategoryDiff,
+                    fastDominantCategoryDiff,
+                    verdict,
+                    payloads: {
+                        fast,
+                        union,
+                        production
+                    },
+                    summaryRows: [
+                        summarizePayload('production', production),
+                        summarizePayload('union', union),
+                        summarizePayload('forcedFast', fast)
+                    ]
+                };
+            }
+
+            function resolveSplatSource(tile, tileStreamer, options) {
+                const exact = tileStreamer.debugLookup(tile.face, tile.depth, tile.x, tile.y);
+                const ancestor = !exact?.found && options.allowAncestor !== false
+                    ? findNearestResidentAncestor(tile, tileStreamer)
+                    : null;
+                const source = exact?.found
+                    ? { face: tile.face, depth: tile.depth, x: tile.x, y: tile.y, layer: exact.layer, exact: true }
+                    : ancestor
+                        ? { ...ancestor, exact: false }
+                        : null;
+                return { exact, source };
+            }
+
+            function mapTileUvToSource(tile, source, uv) {
+                if (!source || source.depth === tile.depth) return uv;
+                const shift = tile.depth - source.depth;
+                const scale = 1 << shift;
+                return {
+                    x: ((tile.x - (source.x << shift)) + uv.x) / scale,
+                    y: ((tile.y - (source.y << shift)) + uv.y) / scale
+                };
+            }
+
+            function normalizedFaceUVFromWorld(worldPos) {
+                const planetConfig = engine?.planetConfig ?? null;
+                const origin = planetConfig?.origin ?? null;
+                const radius = planetConfig?.radius ?? null;
+                if (!worldPos || !origin || !Number.isFinite(radius)) return null;
+                const relativePos = {
+                    x: Number(worldPos.x ?? 0) - Number(origin.x ?? 0),
+                    y: Number(worldPos.y ?? 0) - Number(origin.y ?? 0),
+                    z: Number(worldPos.z ?? 0) - Number(origin.z ?? 0),
+                    length() {
+                        return Math.hypot(this.x, this.y, this.z);
+                    },
+                    clone() {
+                        return {
+                            x: this.x,
+                            y: this.y,
+                            z: this.z,
+                            normalize() {
+                                const len = Math.hypot(this.x, this.y, this.z) || 1;
+                                this.x /= len;
+                                this.y /= len;
+                                this.z /= len;
+                                return this;
+                            }
+                        };
+                    }
+                };
+                const projected = CubeSphereCoords.worldPositionToFaceUV(relativePos, radius);
+                return {
+                    face: projected.face | 0,
+                    u: (projected.u + 1) * 0.5,
+                    v: (projected.v + 1) * 0.5,
+                    altitude: projected.altitude
+                };
+            }
+
+            function instanceDepth(inst) {
+                if (!inst || !Number.isFinite(inst.chunkSizeUV) || inst.chunkSizeUV <= 0) return -1;
+                return Math.round(Math.log2(1 / inst.chunkSizeUV));
+            }
+
+            function instanceContainsFaceUV(inst, faceUV, epsilon = 1e-6) {
+                if (!inst || !faceUV || inst.face !== faceUV.face) return false;
+                const minU = inst.chunkLocation?.x ?? 0;
+                const minV = inst.chunkLocation?.y ?? 0;
+                const size = inst.chunkSizeUV ?? 0;
+                if (!Number.isFinite(size) || size <= 0) return false;
+                return faceUV.u >= minU - epsilon &&
+                    faceUV.u <= minU + size + epsilon &&
+                    faceUV.v >= minV - epsilon &&
+                    faceUV.v <= minV + size + epsilon;
+            }
+
+            function localUvForInstance(inst, faceUV) {
+                const size = Math.max(inst?.chunkSizeUV ?? 0, 1e-12);
+                return {
+                    x: Math.max(0, Math.min(1, ((faceUV?.u ?? 0) - (inst?.chunkLocation?.x ?? 0)) / size)),
+                    y: Math.max(0, Math.min(1, ((faceUV?.v ?? 0) - (inst?.chunkLocation?.y ?? 0)) / size))
+                };
+            }
+
+            function shaderSourceUvForInstance(inst, localUV) {
+                return {
+                    x: (inst?.uvOffset?.x ?? 0) + Math.max(0, Math.min(1, localUV?.x ?? 0)) * (inst?.uvScale ?? 1),
+                    y: (inst?.uvOffset?.y ?? 0) + Math.max(0, Math.min(1, localUV?.y ?? 0)) * (inst?.uvScale ?? 1)
+                };
+            }
+
+            function shaderSplatCoordFromSourceUv(sourceUv, size) {
+                const maxIdx = Math.max((size | 0) - 1, 1);
+                const coord = {
+                    x: Math.max(0, Math.min(1, sourceUv?.x ?? 0)) * maxIdx,
+                    y: Math.max(0, Math.min(1, sourceUv?.y ?? 0)) * maxIdx
+                };
+                const base = {
+                    x: Math.floor(coord.x),
+                    y: Math.floor(coord.y)
+                };
+                return {
+                    sourceUv,
+                    coord,
+                    base,
+                    f: {
+                        x: coord.x - base.x,
+                        y: coord.y - base.y
+                    }
+                };
+            }
+
+            async function readVisibleTerrainInstances(options = {}) {
+                const quadtreeGPU = getQuadtreeGPU();
+                const tileManager = getTileManager();
+                if (!quadtreeGPU || !tileManager) return { args: [], instances: [] };
+                const rawArgs = await tileManager.debugReadIndirectArgs?.();
+                const args = Array.isArray(rawArgs) ? rawArgs : [];
+                const totalInstances = args.reduce((sum, item) => sum + (item.instanceCount || 0), 0);
+                const maxInstances = Number.isFinite(options.maxInstances)
+                    ? Math.max(1, Math.floor(options.maxInstances))
+                    : totalInstances;
+                const readCount = Math.min(totalInstances, maxInstances);
+                const instances = readCount > 0
+                    ? await quadtreeGPU.debugReadInstancesRange?.(0, totalInstances, readCount)
+                    : [];
+                return { args, instances: Array.isArray(instances) ? instances : [], totalInstances, readCount };
+            }
+
+            function findVisibleInstanceForFaceUV(faceUV, instances) {
+                let best = null;
+                for (const inst of instances || []) {
+                    if (!instanceContainsFaceUV(inst, faceUV)) continue;
+                    const depth = instanceDepth(inst);
+                    if (!best || depth > best.depth || (depth === best.depth && (inst.uvScale ?? 0) > (best.inst.uvScale ?? 0))) {
+                        best = { inst, depth };
+                    }
+                }
+                return best?.inst ?? null;
+            }
+
+            function nearestRaySphereIntersection(ray, center, radius) {
+                if (!ray || !center || !Number.isFinite(radius) || radius <= 0) return null;
+                const ox = ray.origin.x - center.x;
+                const oy = ray.origin.y - center.y;
+                const oz = ray.origin.z - center.z;
+                const dx = ray.dir.x;
+                const dy = ray.dir.y;
+                const dz = ray.dir.z;
+                const a = dx * dx + dy * dy + dz * dz;
+                const b = 2 * (ox * dx + oy * dy + oz * dz);
+                const c = ox * ox + oy * oy + oz * oz - radius * radius;
+                const disc = b * b - 4 * a * c;
+                if (disc < 0 || Math.abs(a) < 1e-12) return null;
+                const root = Math.sqrt(disc);
+                const t0 = (-b - root) / (2 * a);
+                const t1 = (-b + root) / (2 * a);
+                if (t0 > 0.001) return t0;
+                if (t1 > 0.001) return t1;
+                return null;
+            }
+
+            function closestRaySphereIntersection(ray, center, radius, referenceT) {
+                if (!ray || !center || !Number.isFinite(radius) || radius <= 0) return null;
+                const ox = ray.origin.x - center.x;
+                const oy = ray.origin.y - center.y;
+                const oz = ray.origin.z - center.z;
+                const dx = ray.dir.x;
+                const dy = ray.dir.y;
+                const dz = ray.dir.z;
+                const a = dx * dx + dy * dy + dz * dz;
+                const b = 2 * (ox * dx + oy * dy + oz * dz);
+                const c = ox * ox + oy * oy + oz * oz - radius * radius;
+                const disc = b * b - 4 * a * c;
+                if (disc < 0 || Math.abs(a) < 1e-12) return null;
+                const root = Math.sqrt(disc);
+                const candidates = [
+                    (-b - root) / (2 * a),
+                    (-b + root) / (2 * a)
+                ].filter(v => Number.isFinite(v) && v > 0.001);
+                if (candidates.length === 0) return null;
+                if (!Number.isFinite(referenceT)) return Math.min(...candidates);
+                return candidates.reduce((best, candidate) => (
+                    Math.abs(candidate - referenceT) < Math.abs(best - referenceT) ? candidate : best
+                ), candidates[0]);
+            }
+
+            function getTerrainRaycastResources() {
+                const tileStreamer = getTileStreamer();
+                const quadtreeGPU = getQuadtreeGPU();
+                const backend = engine?.renderer?.backend ?? null;
+                const device = backend?.device ?? null;
+                const textures = tileStreamer?.getArrayTextures?.() ?? getTileManager()?.getArrayTextures?.() ?? {};
+                const hashBuffer =
+                    quadtreeGPU?.getLoadedTileTableBuffer?.()
+                    || tileStreamer?.quadtreeGPU?.getLoadedTileTableBuffer?.()
+                    || null;
+                return { device, tileStreamer, quadtreeGPU, textures, hashBuffer };
+            }
+
+            function getDiagnosticTerrainRaycaster(tileStreamer) {
+                const device = engine?.renderer?.backend?.device ?? null;
+                if (!device || !tileStreamer) return null;
+                if (!diagnosticTerrainRaycaster || diagnosticTerrainRaycaster._tileStreamer !== tileStreamer) {
+                    diagnosticTerrainRaycaster?.dispose?.();
+                    diagnosticTerrainRaycaster = new TerrainRaycaster(device, tileStreamer);
+                    diagnosticTerrainRaycaster.initialize();
+                }
+                return diagnosticTerrainRaycaster;
+            }
+
+            function estimateTerrainRaycastMaxDist(ray, center, radius, heightScale, camera, options = {}) {
+                if (Number.isFinite(options.maxDist)) {
+                    return Math.max(1, Number(options.maxDist));
+                }
+                const terrainMargin = Math.max(1, Math.abs(Number(heightScale) || 0) * 4, radius * 0.002);
+                const baseT = nearestRaySphereIntersection(ray, center, radius);
+                const outerT = nearestRaySphereIntersection(ray, center, radius + terrainMargin);
+                const expectedT = Number.isFinite(baseT) ? baseT : outerT;
+                const cameraFar = Number(camera?.far);
+                const farLimit = Number.isFinite(cameraFar) && cameraFar > 1 ? cameraFar : radius * 4;
+                if (Number.isFinite(expectedT)) {
+                    return Math.max(1, Math.min(farLimit, expectedT + terrainMargin * 2));
+                }
+                return Math.max(1, Math.min(farLimit, Math.max(radius * 2, terrainMargin * 8)));
+            }
+
+            function summarizeTerrainRaycastHit(hit) {
+                if (!hit) return null;
+                if (!hit.hit) {
+                    return { hit: false, distance: hit.distance ?? -1 };
+                }
+                return {
+                    hit: true,
+                    position: {
+                        x: roundForLog(hit.position?.x),
+                        y: roundForLog(hit.position?.y),
+                        z: roundForLog(hit.position?.z)
+                    },
+                    distance: roundForLog(hit.distance),
+                    normal: {
+                        x: roundForLog(hit.normal?.x),
+                        y: roundForLog(hit.normal?.y),
+                        z: roundForLog(hit.normal?.z)
+                    },
+                    lookup: hit.lookup ? {
+                        face: hit.lookup.face,
+                        depth: hit.lookup.depth,
+                        x: hit.lookup.x,
+                        y: hit.lookup.y,
+                        layer: hit.lookup.layer,
+                        localUV: {
+                            x: roundForLog(hit.lookup.localUV?.x),
+                            y: roundForLog(hit.lookup.localUV?.y)
+                        },
+                        height: roundForLog(hit.lookup.height)
+                    } : null
+                };
+            }
+
+            async function runDiagnosticTerrainRaycast(ray, center, radius, heightScale, camera, options = {}) {
+                const resources = getTerrainRaycastResources();
+                const missing = [];
+                if (!resources.device) missing.push('device');
+                if (!resources.tileStreamer) missing.push('tileStreamer');
+                if (!resources.quadtreeGPU) missing.push('quadtreeGPU');
+                if (!resources.textures?.height) missing.push('heightTexture');
+                if (!resources.textures?.normal) missing.push('normalTexture');
+                if (!resources.hashBuffer) missing.push('loadedTileTable');
+                if (missing.length > 0) {
+                    return { available: false, method: 'terrain-raycast', error: 'resources_unavailable', missing };
+                }
+
+                const raycaster = getDiagnosticTerrainRaycaster(resources.tileStreamer);
+                if (!raycaster) {
+                    return { available: false, method: 'terrain-raycast', error: 'raycaster_unavailable' };
+                }
+
+                const maxDist = estimateTerrainRaycastMaxDist(ray, center, radius, heightScale, camera, options);
+                const encoder = resources.device.createCommandEncoder({ label: 'QT-Diag Terrain Pick' });
+                const dispatched = raycaster.dispatch(
+                    encoder,
+                    ray,
+                    engine.planetConfig,
+                    resources.quadtreeGPU,
+                    resources.textures,
+                    resources.hashBuffer,
+                    maxDist
+                );
+                if (dispatched !== true) {
+                    return {
+                        available: false,
+                        method: 'terrain-raycast',
+                        error: 'dispatch_failed_or_busy',
+                        maxDist: roundForLog(maxDist)
+                    };
+                }
+
+                resources.device.queue.submit([encoder.finish()]);
+                const hit = await raycaster.resolveHit();
+                return {
+                    available: true,
+                    method: 'terrain-raycast',
+                    maxDist: roundForLog(maxDist),
+                    hit: summarizeTerrainRaycastHit(hit),
+                    rawHit: hit
+                };
+            }
+
+            function resolveCanvasPoint(screenX, screenY, options = {}) {
+                const canvas = getCanvas();
+                if (!canvas) return null;
+                const rect = canvas.getBoundingClientRect();
+                let clientX = Number(screenX);
+                let clientY = Number(screenY);
+                if (options.center === true || !Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+                    clientX = rect.left + rect.width * 0.5;
+                    clientY = rect.top + rect.height * 0.5;
+                } else if (options.canvas === true) {
+                    clientX = rect.left + clientX * (rect.width / Math.max(canvas.width, 1));
+                    clientY = rect.top + clientY * (rect.height / Math.max(canvas.height, 1));
+                }
+                const cssX = clientX - rect.left;
+                const cssY = clientY - rect.top;
+                const canvasX = cssX * (canvas.width / Math.max(rect.width, 1));
+                const canvasY = cssY * (canvas.height / Math.max(rect.height, 1));
+                return {
+                    canvas,
+                    client: { x: roundForLog(clientX, 2), y: roundForLog(clientY, 2) },
+                    css: { x: roundForLog(cssX, 2), y: roundForLog(cssY, 2) },
+                    framebuffer: { x: roundForLog(canvasX, 2), y: roundForLog(canvasY, 2) },
+                    size: { cssWidth: rect.width, cssHeight: rect.height, width: canvas.width, height: canvas.height }
+                };
+            }
+
+            function resolveSplatFootprintCoords(tile, source, size, options) {
+                const explicitF = options.f !== undefined ? parseVec2(options.f, { x: 0.5, y: 0.5 }) : null;
+                if (options.base !== undefined) {
+                    const base = parseVec2(options.base, { x: 0, y: 0 });
+                    const f = explicitF || { x: 0.5, y: 0.5 };
+                    return {
+                        mode: 'base',
+                        uv: null,
+                        coord: { x: base.x + f.x, y: base.y + f.y },
+                        base: { x: Math.floor(base.x), y: Math.floor(base.y) },
+                        f
+                    };
+                }
+                if (options.texel !== undefined) {
+                    const texel = parseVec2(options.texel, { x: 0, y: 0 });
+                    const uv = {
+                        x: (Math.floor(texel.x) + 0.5) / size,
+                        y: (Math.floor(texel.y) + 0.5) / size
+                    };
+                    const coord = { x: uv.x * size - 0.5, y: uv.y * size - 0.5 };
+                    return {
+                        mode: 'texel-center',
+                        uv,
+                        coord,
+                        base: { x: Math.floor(coord.x), y: Math.floor(coord.y) },
+                        f: explicitF || { x: coord.x - Math.floor(coord.x), y: coord.y - Math.floor(coord.y) }
+                    };
+                }
+
+                const rawUv = parseVec2(options.uv ?? options.localUV ?? options.vUv, { x: 0.5, y: 0.5 });
+                const sourceUv = mapTileUvToSource(tile, source, rawUv);
+                const coord = { x: sourceUv.x * size - 0.5, y: sourceUv.y * size - 0.5 };
+                const base = { x: Math.floor(coord.x), y: Math.floor(coord.y) };
+                return {
+                    mode: 'uv',
+                    uv: sourceUv,
+                    coord,
+                    base,
+                    f: explicitF || { x: coord.x - base.x, y: coord.y - base.y }
+                };
+            }
+
+            function readRGBA8BufferTexel(readback, x, y) {
+                if (!readback?.buffer) return [0, 0, 0, 0];
+                const dv = new DataView(readback.buffer);
+                const offset = y * readback.bytesPerRow + x * readback.texelBytes;
+                if (readback.format === 'rgba8unorm') {
+                    return [
+                        dv.getUint8(offset) / 255,
+                        dv.getUint8(offset + 1) / 255,
+                        dv.getUint8(offset + 2) / 255,
+                        dv.getUint8(offset + 3) / 255
+                    ];
+                }
+                if (readback.format === 'r8unorm') {
+                    return [dv.getUint8(offset) / 255, 0, 0, 0];
+                }
+                if (readback.format === 'r32float') {
+                    return [dv.getFloat32(offset, true), 0, 0, 0];
+                }
+                return [
+                    dv.getFloat32(offset, true),
+                    dv.getFloat32(offset + 4, true),
+                    dv.getFloat32(offset + 8, true),
+                    dv.getFloat32(offset + 12, true)
+                ];
+            }
+
+            function buildCornerFromValues(label, coord, indexValues, dataValues, validValues) {
+                return {
+                    label,
+                    coord,
+                    ids: indexValues.slice(0, 4).map(decodeSplatId),
+                    weights: dataValues.slice(0, 4).map(v => Math.max(0, Math.min(1, Number(v) || 0))),
+                    valid: (validValues?.[0] ?? 0) > 0.5
+                };
+            }
+
+            async function sampleHeightForInstanceLocalUv(inst, localUV) {
+                const tileStreamer = getTileStreamer();
+                if (!tileStreamer?.debugReadArrayLayerTexels || !inst) return null;
+                const size = tileStreamer.tileTextureSize || 128;
+                const chunkSizeF = Math.max(size * (inst.uvScale ?? 1), 1);
+                const chunkSizeI = Math.max(1, Math.floor(chunkSizeF + 0.5));
+                const maxLocalI = Math.max(chunkSizeI - 1, 1);
+                const localCoord = {
+                    x: Math.max(0, Math.min(1, localUV?.x ?? 0)) * maxLocalI,
+                    y: Math.max(0, Math.min(1, localUV?.y ?? 0)) * maxLocalI
+                };
+                const baseCoordI = {
+                    x: Math.floor((inst.uvOffset?.x ?? 0) * size + 0.5),
+                    y: Math.floor((inst.uvOffset?.y ?? 0) * size + 0.5)
+                };
+                const coord = {
+                    x: baseCoordI.x + localCoord.x,
+                    y: baseCoordI.y + localCoord.y
+                };
+                const base = {
+                    x: Math.floor(coord.x),
+                    y: Math.floor(coord.y)
+                };
+                const f = {
+                    x: coord.x - base.x,
+                    y: coord.y - base.y
+                };
+                const maxCoord = {
+                    x: Math.min(baseCoordI.x + maxLocalI, size - 1),
+                    y: Math.min(baseCoordI.y + maxLocalI, size - 1)
+                };
+                const points = [
+                    { name: 'h00', x: clampInt(base.x, baseCoordI.x, maxCoord.x), y: clampInt(base.y, baseCoordI.y, maxCoord.y) },
+                    { name: 'h10', x: clampInt(base.x + 1, baseCoordI.x, maxCoord.x), y: clampInt(base.y, baseCoordI.y, maxCoord.y) },
+                    { name: 'h01', x: clampInt(base.x, baseCoordI.x, maxCoord.x), y: clampInt(base.y + 1, baseCoordI.y, maxCoord.y) },
+                    { name: 'h11', x: clampInt(base.x + 1, baseCoordI.x, maxCoord.x), y: clampInt(base.y + 1, baseCoordI.y, maxCoord.y) }
+                ];
+                const readback = await tileStreamer.debugReadArrayLayerTexels('height', inst.layer, points);
+                const values = points.map((_, index) => Number(readback?.texels?.[index]?.values?.[0] ?? 0));
+                const h0 = values[0] * (1 - f.x) + values[1] * f.x;
+                const h1 = values[2] * (1 - f.x) + values[3] * f.x;
+                return {
+                    height: h0 * (1 - f.y) + h1 * f.y,
+                    coord: { x: roundForLog(coord.x), y: roundForLog(coord.y) },
+                    base,
+                    f: { x: roundForLog(f.x), y: roundForLog(f.y) },
+                    texels: points.map((point, index) => ({
+                        name: point.name,
+                        x: point.x,
+                        y: point.y,
+                        height: roundForLog(values[index])
+                    }))
+                };
+            }
+
+            async function resolveScreenTerrainPick(screenX, screenY, options = {}) {
+                const point = resolveCanvasPoint(screenX, screenY, options);
+                const camera = getRenderCamera();
+                const planetConfig = engine?.planetConfig ?? null;
+                const origin = planetConfig?.origin ?? null;
+                const radius = planetConfig?.radius ?? null;
+                if (!point || !camera?.projectionMatrix || !camera?.matrixWorldInverse || !origin || !Number.isFinite(radius)) {
+                    return { point, error: 'camera_or_planet_unavailable' };
+                }
+
+                const castRay = ScreenRaycaster.cast(
+                    point.framebuffer.x,
+                    point.framebuffer.y,
+                    camera,
+                    point.size.width,
+                    point.size.height
+                );
+                const ray = {
+                    origin: {
+                        x: Number(camera.position?.x ?? castRay.origin.x),
+                        y: Number(camera.position?.y ?? castRay.origin.y),
+                        z: Number(camera.position?.z ?? castRay.origin.z)
+                    },
+                    dir: castRay.dir
+                };
+                const center = {
+                    x: Number(origin.x ?? 0),
+                    y: Number(origin.y ?? 0),
+                    z: Number(origin.z ?? 0)
+                };
+                const heightScale = Number(planetConfig.heightScale ?? planetConfig.maxTerrainHeight ?? 0) || 0;
+                const visible = await readVisibleTerrainInstances(options);
+                let faceUV = null;
+                let inst = null;
+                let localUV = null;
+                let world = null;
+                let heightSample = null;
+                let usedRadius = radius;
+                const trace = [];
+                const requestedPickMethod = String(options.pickMethod ?? options.method ?? 'terrain').toLowerCase();
+                const terrainRaycastRequested = requestedPickMethod !== 'sphere' && requestedPickMethod !== 'legacy';
+                let pickMethod = 'sphere-refine';
+                let terrainRaycast = null;
+
+                if (terrainRaycastRequested) {
+                    terrainRaycast = await runDiagnosticTerrainRaycast(ray, center, radius, heightScale, camera, options);
+                    if (terrainRaycast?.hit?.hit && terrainRaycast.rawHit?.position) {
+                        world = {
+                            x: terrainRaycast.rawHit.position.x,
+                            y: terrainRaycast.rawHit.position.y,
+                            z: terrainRaycast.rawHit.position.z
+                        };
+                        faceUV = normalizedFaceUVFromWorld(world);
+                        inst = findVisibleInstanceForFaceUV(faceUV, visible.instances);
+                        if (faceUV && inst) {
+                            let renderedT = Number(terrainRaycast.rawHit.distance);
+                            const refineIterations = options.renderedRefine === false
+                                ? 1
+                                : Math.max(1, Math.min(4, Math.floor(options.renderedRefineIterations ?? 2)));
+                            pickMethod = 'terrain-raycast';
+                            for (let i = 0; i < refineIterations; i++) {
+                                localUV = localUvForInstance(inst, faceUV);
+                                heightSample = await sampleHeightForInstanceLocalUv(inst, localUV);
+                                usedRadius = radius + (heightSample?.height ?? 0) * heightScale;
+                                const nextT = closestRaySphereIntersection(ray, center, usedRadius, renderedT);
+                                const jumpRatio = Number.isFinite(nextT) ? Math.abs(nextT - renderedT) / Math.max(Math.abs(renderedT), 1) : Number.POSITIVE_INFINITY;
+                                const farSideJump = Number.isFinite(nextT) && nextT > Math.max(renderedT * 4, renderedT + Math.max(heightScale, 1000));
+                                trace.push({
+                                    iteration: i,
+                                    method: pickMethod,
+                                    distance: roundForLog(renderedT),
+                                    nextT: roundForLog(nextT),
+                                    farSideJump,
+                                    face: faceUV.face,
+                                    u: roundForLog(faceUV.u),
+                                    v: roundForLog(faceUV.v),
+                                    depth: instanceDepth(inst),
+                                    layer: inst.layer,
+                                    raycastLookup: terrainRaycast.hit.lookup,
+                                    renderedLayerMatchesRaycast: terrainRaycast.hit.lookup?.layer === inst.layer,
+                                    height: roundForLog(heightSample?.height),
+                                    radius: roundForLog(usedRadius)
+                                });
+                                if (!Number.isFinite(nextT) || farSideJump || jumpRatio > 2 || Math.abs(nextT - renderedT) < 0.05) break;
+                                const nextWorld = {
+                                    x: ray.origin.x + ray.dir.x * nextT,
+                                    y: ray.origin.y + ray.dir.y * nextT,
+                                    z: ray.origin.z + ray.dir.z * nextT
+                                };
+                                const nextFaceUV = normalizedFaceUVFromWorld(nextWorld);
+                                const nextInst = findVisibleInstanceForFaceUV(nextFaceUV, visible.instances);
+                                if (!nextFaceUV || !nextInst) break;
+                                world = nextWorld;
+                                faceUV = nextFaceUV;
+                                inst = nextInst;
+                                renderedT = nextT;
+                            }
+                            localUV = localUvForInstance(inst, faceUV);
+                            heightSample = await sampleHeightForInstanceLocalUv(inst, localUV);
+                            usedRadius = radius + (heightSample?.height ?? 0) * heightScale;
+                        } else {
+                            trace.push({
+                                iteration: 0,
+                                method: 'terrain-raycast',
+                                distance: terrainRaycast.hit.distance,
+                                foundInstance: false,
+                                faceUV,
+                                raycastLookup: terrainRaycast.hit.lookup
+                            });
+                            world = null;
+                            faceUV = null;
+                            inst = null;
+                            localUV = null;
+                        }
+                    } else {
+                        trace.push({
+                            iteration: 0,
+                            method: 'terrain-raycast',
+                            available: terrainRaycast?.available ?? false,
+                            hit: terrainRaycast?.hit?.hit ?? false,
+                            error: terrainRaycast?.error ?? null,
+                            missing: terrainRaycast?.missing ?? null,
+                            maxDist: terrainRaycast?.maxDist ?? null
+                        });
+                    }
+                }
+
+                if (options.requireTerrainRaycast === true && pickMethod !== 'terrain-raycast') {
+                    return {
+                        point,
+                        ray,
+                        terrainRaycast,
+                        visible: { totalInstances: visible.totalInstances, readCount: visible.readCount },
+                        trace,
+                        error: 'terrain_raycast_pick_failed'
+                    };
+                }
+
+                if (!world || !faceUV || !inst || !localUV) {
+                    let t = nearestRaySphereIntersection(ray, center, radius);
+                    if (!Number.isFinite(t)) {
+                        t = nearestRaySphereIntersection(ray, center, radius + Math.max(heightScale * 2, 1));
+                    }
+                    if (!Number.isFinite(t)) {
+                        return { point, ray, terrainRaycast, trace, error: 'ray_missed_planet_sphere' };
+                    }
+
+                    const iterations = options.refineHeight === false ? 1 : Math.max(1, Math.min(8, Math.floor(options.iterations ?? 4)));
+                    pickMethod = 'sphere-refine';
+                    for (let i = 0; i < iterations; i++) {
+                        world = {
+                            x: ray.origin.x + ray.dir.x * t,
+                            y: ray.origin.y + ray.dir.y * t,
+                            z: ray.origin.z + ray.dir.z * t
+                        };
+                        faceUV = normalizedFaceUVFromWorld(world);
+                        inst = findVisibleInstanceForFaceUV(faceUV, visible.instances);
+                        if (!faceUV || !inst) {
+                            trace.push({ iteration: i, method: pickMethod, t: roundForLog(t), foundInstance: false, faceUV });
+                            break;
+                        }
+                        localUV = localUvForInstance(inst, faceUV);
+                        heightSample = await sampleHeightForInstanceLocalUv(inst, localUV);
+                        usedRadius = radius + (heightSample?.height ?? 0) * heightScale;
+                        const nextT = closestRaySphereIntersection(ray, center, usedRadius, t);
+                        const jumpRatio = Number.isFinite(nextT) ? Math.abs(nextT - t) / Math.max(Math.abs(t), 1) : Number.POSITIVE_INFINITY;
+                        const farSideJump = Number.isFinite(nextT) && nextT > Math.max(t * 4, t + Math.max(heightScale, 1000));
+                        trace.push({
+                            iteration: i,
+                            method: pickMethod,
+                            t: roundForLog(t),
+                            nextT: roundForLog(nextT),
+                            farSideJump,
+                            face: faceUV.face,
+                            u: roundForLog(faceUV.u),
+                            v: roundForLog(faceUV.v),
+                            depth: instanceDepth(inst),
+                            layer: inst.layer,
+                            height: roundForLog(heightSample?.height),
+                            radius: roundForLog(usedRadius)
+                        });
+                        if (!Number.isFinite(nextT) || farSideJump || jumpRatio > 2 || Math.abs(nextT - t) < 0.05) break;
+                        t = nextT;
+                    }
+                }
+
+                if (!world || !faceUV || !inst || !localUV) {
+                    return { point, ray, terrainRaycast, visible: { totalInstances: visible.totalInstances, readCount: visible.readCount }, trace, error: 'visible_instance_not_found_at_pick' };
+                }
+
+                const tile = deriveTileCoordsFromInstance(inst);
+                const sourceUv = shaderSourceUvForInstance(inst, localUV);
+                const size = getTileStreamer()?.tileTextureSize || 128;
+                const splatCoord = shaderSplatCoordFromSourceUv(sourceUv, size);
+                return {
+                    point,
+                    ray: {
+                        origin: {
+                            x: roundForLog(ray.origin.x),
+                            y: roundForLog(ray.origin.y),
+                            z: roundForLog(ray.origin.z)
+                        },
+                        dir: {
+                            x: roundForLog(ray.dir.x),
+                            y: roundForLog(ray.dir.y),
+                            z: roundForLog(ray.dir.z)
+                        }
+                    },
+                    world: {
+                        x: roundForLog(world.x),
+                        y: roundForLog(world.y),
+                        z: roundForLog(world.z)
+                    },
+                    faceUV: {
+                        face: faceUV.face,
+                        u: roundForLog(faceUV.u),
+                        v: roundForLog(faceUV.v),
+                        altitude: roundForLog(faceUV.altitude)
+                    },
+                    instance: {
+                        face: inst.face,
+                        depth: instanceDepth(inst),
+                        tile,
+                        layer: inst.layer,
+                        lod: inst.lod,
+                        chunkLocation: {
+                            x: roundForLog(inst.chunkLocation?.x),
+                            y: roundForLog(inst.chunkLocation?.y)
+                        },
+                        chunkSizeUV: roundForLog(inst.chunkSizeUV),
+                        uvOffset: {
+                            x: roundForLog(inst.uvOffset?.x),
+                            y: roundForLog(inst.uvOffset?.y)
+                        },
+                        uvScale: roundForLog(inst.uvScale),
+                        edgeMask: inst.edgeMask
+                    },
+                    localUV: {
+                        x: roundForLog(localUV.x),
+                        y: roundForLog(localUV.y)
+                    },
+                    sourceUv: {
+                        x: roundForLog(sourceUv.x),
+                        y: roundForLog(sourceUv.y)
+                    },
+                    splatCoord: {
+                        coord: {
+                            x: roundForLog(splatCoord.coord.x),
+                            y: roundForLog(splatCoord.coord.y)
+                        },
+                        base: splatCoord.base,
+                        f: {
+                            x: roundForLog(splatCoord.f.x),
+                            y: roundForLog(splatCoord.f.y)
+                        }
+                    },
+                    heightSample,
+                    terrainRadius: roundForLog(usedRadius),
+                    pickMethod,
+                    terrainRaycast,
+                    visible: {
+                        totalInstances: visible.totalInstances,
+                        readCount: visible.readCount
+                    },
+                    trace
+                };
+            }
+
+            async function splatFootprint(faceOrTile, depth, x, y, options = {}) {
+                const { tile, options: opts } = normalizeDiagnosticTileCall(faceOrTile, depth, x, y, options);
+                const tileStreamer = getTileStreamer();
+                if (!tileStreamer?.debugReadArrayLayerTexels) {
+                    console.warn('[QT-SPLAT] splatFootprint: tile streamer/readback unavailable');
+                    return null;
+                }
+                const { source } = resolveSplatSource(tile, tileStreamer, opts);
+                if (!source) {
+                    const result = { tile, source: null, error: 'tile_not_resident' };
+                    console.warn('[QT-SPLAT] splatFootprint', result);
+                    return result;
+                }
+
+                const size = tileStreamer.tileTextureSize || 128;
+                const resolved = resolveSplatFootprintCoords(tile, source, size, opts);
+                const maxCoord = size - 1;
+                const base = {
+                    x: clampInt(resolved.base.x, 0, maxCoord),
+                    y: clampInt(resolved.base.y, 0, maxCoord)
+                };
+                const points = [
+                    { name: 'c00', x: base.x, y: base.y },
+                    { name: 'c10', x: clampInt(base.x + 1, 0, maxCoord), y: base.y },
+                    { name: 'c01', x: base.x, y: clampInt(base.y + 1, 0, maxCoord) },
+                    { name: 'c11', x: clampInt(base.x + 1, 0, maxCoord), y: clampInt(base.y + 1, 0, maxCoord) }
+                ];
+
+                const [splatData, splatIndex, splatValid] = await Promise.all([
+                    tileStreamer.debugReadArrayLayerTexels('splatData', source.layer, points),
+                    tileStreamer.debugReadArrayLayerTexels('splatIndex', source.layer, points),
+                    tileStreamer.debugReadArrayLayerTexels('splatValid', source.layer, points)
+                ]);
+                const corners = points.map((point, index) => buildCornerFromValues(
+                    point.name,
+                    { x: point.x, y: point.y },
+                    splatIndex?.texels?.[index]?.values || [1, 1, 1, 1],
+                    splatData?.texels?.[index]?.values || [0, 0, 0, 0],
+                    splatValid?.texels?.[index]?.values || [0, 0, 0, 1]
+                ));
+                const f = {
+                    x: Math.max(0, Math.min(1, resolved.f.x)),
+                    y: Math.max(0, Math.min(1, resolved.f.y))
+                };
+                const analysis = analyzeSplatFootprint(corners, f);
+                const cornerRows = corners.map(corner => ({
+                    corner: corner.label,
+                    x: corner.coord.x,
+                    y: corner.coord.y,
+                    ids: corner.ids.join(','),
+                    weights: corner.weights.map(v => roundForLog(v, 4)).join(','),
+                    validTexel: corner.valid
+                }));
+                const result = {
+                    tile,
+                    source,
+                    size,
+                    mode: resolved.mode,
+                    base,
+                    f: analysis.f,
+                    uv: resolved.uv
+                        ? { x: roundForLog(resolved.uv.x), y: roundForLog(resolved.uv.y) }
+                        : null,
+                    coord: { x: roundForLog(resolved.coord.x), y: roundForLog(resolved.coord.y) },
+                    cornerRows,
+                    ...analysis
+                };
+                if (opts.log !== false) {
+                    console.groupCollapsed(`[QT-SPLAT] splatFootprint f${tile.face}:d${tile.depth}:${tile.x},${tile.y} base=${base.x},${base.y}`);
+                    console.table(cornerRows);
+                    console.table(analysis.summaryRows);
+                    console.log('[QT-SPLAT] raw', result);
+                    console.groupEnd();
+                }
+                return result;
+            }
+
+            async function findSplatFootprints(faceOrTile, depth, x, y, options = {}) {
+                const { tile, options: opts } = normalizeDiagnosticTileCall(faceOrTile, depth, x, y, options);
+                const tileStreamer = getTileStreamer();
+                if (!tileStreamer?.debugReadArrayLayerBuffer) {
+                    console.warn('[QT-SPLAT] findSplatFootprints: tile streamer/readback unavailable');
+                    return null;
+                }
+                const { source } = resolveSplatSource(tile, tileStreamer, opts);
+                if (!source) {
+                    const result = { tile, source: null, candidates: [], error: 'tile_not_resident' };
+                    console.warn('[QT-SPLAT] findSplatFootprints', result);
+                    return result;
+                }
+                const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.floor(opts.limit)) : 24;
+                const stride = Number.isFinite(opts.stride) ? Math.max(1, Math.floor(opts.stride)) : 1;
+                const minDelta = Number.isFinite(opts.minDelta) ? Math.max(0, opts.minDelta) : 0.01;
+                const f = opts.f !== undefined ? parseVec2(opts.f, { x: 0.5, y: 0.5 }) : { x: 0.5, y: 0.5 };
+
+                const [splatData, splatIndex, splatValid] = await Promise.all([
+                    tileStreamer.debugReadArrayLayerBuffer('splatData', source.layer),
+                    tileStreamer.debugReadArrayLayerBuffer('splatIndex', source.layer),
+                    tileStreamer.debugReadArrayLayerBuffer('splatValid', source.layer)
+                ]);
+                const width = Math.min(splatData?.width || 0, splatIndex?.width || 0, splatValid?.width || 0);
+                const height = Math.min(splatData?.height || 0, splatIndex?.height || 0, splatValid?.height || 0);
+                const candidates = [];
+                for (let yy = 0; yy < height - 1; yy += stride) {
+                    for (let xx = 0; xx < width - 1; xx += stride) {
+                        const points = [
+                            { name: 'c00', x: xx, y: yy },
+                            { name: 'c10', x: xx + 1, y: yy },
+                            { name: 'c01', x: xx, y: yy + 1 },
+                            { name: 'c11', x: xx + 1, y: yy + 1 }
+                        ];
+                        const corners = points.map(point => buildCornerFromValues(
+                            point.name,
+                            { x: point.x, y: point.y },
+                            readRGBA8BufferTexel(splatIndex, point.x, point.y),
+                            readRGBA8BufferTexel(splatData, point.x, point.y),
+                            readRGBA8BufferTexel(splatValid, point.x, point.y)
+                        ));
+                        const analysis = analyzeSplatFootprint(corners, f);
+                        const interesting =
+                            analysis.productionUnionDelta > minDelta ||
+                            analysis.fastUnionDelta > minDelta ||
+                            analysis.validityDisagrees;
+                        if (!interesting) continue;
+                        candidates.push({
+                            base: { x: xx, y: yy },
+                            f: analysis.f,
+                            verdict: analysis.verdict,
+                            runtimeOrderedValid: analysis.runtimeOrderedValid,
+                            precomputedValid: analysis.precomputedValid,
+                            validityDisagrees: analysis.validityDisagrees,
+                            productionUnionDelta: analysis.productionUnionDelta,
+                            fastUnionDelta: analysis.fastUnionDelta,
+                            productionDominantCategoryDiff: analysis.productionDominantCategoryDiff,
+                            fastDominantCategoryDiff: analysis.fastDominantCategoryDiff,
+                            c00Ids: corners[0].ids.join(','),
+                            c00Weights: corners[0].weights.map(v => roundForLog(v, 4)).join(','),
+                            unionDominant: dominantSplatEntry(analysis.payloads.union),
+                            forcedFastDominant: dominantSplatEntry(analysis.payloads.fast)
+                        });
+                    }
+                }
+                candidates.sort((a, b) => {
+                    const scoreA = a.productionUnionDelta * 4 + a.fastUnionDelta + (a.validityDisagrees ? 0.25 : 0);
+                    const scoreB = b.productionUnionDelta * 4 + b.fastUnionDelta + (b.validityDisagrees ? 0.25 : 0);
+                    return scoreB - scoreA;
+                });
+                const result = {
+                    tile,
+                    source,
+                    f: { x: roundForLog(f.x), y: roundForLog(f.y) },
+                    scanned: { width, height, stride, minDelta },
+                    candidates: candidates.slice(0, limit)
+                };
+                console.groupCollapsed(`[QT-SPLAT] findSplatFootprints f${tile.face}:d${tile.depth}:${tile.x},${tile.y}`);
+                console.table(result.candidates);
+                console.log('[QT-SPLAT] raw', result);
+                console.groupEnd();
+                return result;
+            }
+
+            async function pickTerrainAtScreen(screenX, screenY, options = {}) {
+                const pick = await resolveScreenTerrainPick(screenX, screenY, options);
+                const label = pick?.error
+                    ? `[QT-PICK] failed method=${pick?.pickMethod ?? options.pickMethod ?? options.method ?? 'terrain'}`
+                    : `[QT-PICK] screen=(${pick.point.client.x},${pick.point.client.y}) method=${pick.pickMethod} ` +
+                        `f${pick.instance.tile.face}:d${pick.instance.tile.depth}:${pick.instance.tile.x},${pick.instance.tile.y}`;
+                console.groupCollapsed(label);
+                console.log('[QT-PICK] raw', pick);
+                console.groupEnd();
+                return pick;
+            }
+
+            function pickTerrainAtCenter(options = {}) {
+                return pickTerrainAtScreen(null, null, { ...options, center: true });
+            }
+
+            function pickTerrainOnClick(options = {}) {
+                const canvas = getCanvas();
+                if (!canvas) {
+                    console.warn('[QT-PICK] canvas unavailable');
+                    return false;
+                }
+                if (activeSplatPickClickHandler) {
+                    canvas.removeEventListener('click', activeSplatPickClickHandler, true);
+                    activeSplatPickClickHandler = null;
+                }
+                const once = options.once !== false;
+                activeSplatPickClickHandler = async (event) => {
+                    if (once && activeSplatPickClickHandler) {
+                        canvas.removeEventListener('click', activeSplatPickClickHandler, true);
+                        activeSplatPickClickHandler = null;
+                    }
+                    await pickTerrainAtScreen(event.clientX, event.clientY, options);
+                };
+                canvas.addEventListener('click', activeSplatPickClickHandler, true);
+                console.info('[QT-PICK] click picker armed', { once, method: options.pickMethod ?? options.method ?? 'terrain' });
+                return true;
+            }
+
+            async function pickSplatAtScreen(screenX, screenY, options = {}) {
+                const pick = await resolveScreenTerrainPick(screenX, screenY, options);
+                if (pick?.error) {
+                    console.warn('[QT-SPLAT-PICK] pick failed', pick);
+                    return pick;
+                }
+                const footprint = await splatFootprint(
+                    pick.instance.tile,
+                    {
+                        base: pick.splatCoord.base,
+                        f: pick.splatCoord.f,
+                        log: false,
+                        allowAncestor: options.allowAncestor
+                    }
+                );
+                const sourceLayerMatchesRendered = footprint?.source?.layer === pick.instance.layer;
+                const terrainRaycastLayerMatchesRendered = pick.terrainRaycast?.hit?.lookup?.layer === pick.instance.layer;
+                const result = {
+                    tag: 'QT-SPLAT-PICK',
+                    debugMode: getTerrainDebugMode(),
+                    pick,
+                    sourceLayerMatchesRendered,
+                    terrainRaycastLayerMatchesRendered,
+                    footprint,
+                    conclusion: {
+                        verdict: footprint?.verdict ?? 'unavailable',
+                        productionUnionDelta: footprint?.productionUnionDelta ?? null,
+                        fastUnionDelta: footprint?.fastUnionDelta ?? null,
+                        productionMatchesUnion: footprint?.productionUnionDelta === 0,
+                        runtimeOrderedValid: footprint?.runtimeOrderedValid ?? null,
+                        precomputedValid: footprint?.precomputedValid ?? null,
+                        validityDisagrees: footprint?.validityDisagrees ?? null,
+                        productionDominantCategoryDiff: footprint?.productionDominantCategoryDiff ?? null,
+                        fastDominantCategoryDiff: footprint?.fastDominantCategoryDiff ?? null
+                    }
+                };
+                const labelTile = pick.instance.tile;
+                console.groupCollapsed(
+                    `[QT-SPLAT-PICK] screen=(${pick.point.client.x},${pick.point.client.y}) ` +
+                    `f${labelTile.face}:d${labelTile.depth}:${labelTile.x},${labelTile.y} ` +
+                    `base=${pick.splatCoord.base.x},${pick.splatCoord.base.y} method=${pick.pickMethod} ` +
+                    `verdict=${result.conclusion.verdict}`
+                );
+                console.table([{
+                    debugMode: result.debugMode,
+                    pickMethod: pick.pickMethod,
+                    clientX: pick.point.client.x,
+                    clientY: pick.point.client.y,
+                    face: labelTile.face,
+                    depth: labelTile.depth,
+                    tileX: labelTile.x,
+                    tileY: labelTile.y,
+                    layer: pick.instance.layer,
+                    sourceLayer: footprint?.source?.layer ?? null,
+                    sourceLayerMatchesRendered,
+                    terrainRaycastLayer: pick.terrainRaycast?.hit?.lookup?.layer ?? null,
+                    terrainRaycastLayerMatchesRendered,
+                    localU: pick.localUV.x,
+                    localV: pick.localUV.y,
+                    sourceU: pick.sourceUv.x,
+                    sourceV: pick.sourceUv.y,
+                    baseX: pick.splatCoord.base.x,
+                    baseY: pick.splatCoord.base.y,
+                    fX: pick.splatCoord.f.x,
+                    fY: pick.splatCoord.f.y,
+                    verdict: result.conclusion.verdict,
+                    productionUnionDelta: result.conclusion.productionUnionDelta,
+                    fastUnionDelta: result.conclusion.fastUnionDelta
+                }]);
+                if (footprint?.cornerRows) console.table(footprint.cornerRows);
+                if (footprint?.summaryRows) console.table(footprint.summaryRows);
+                console.log('[QT-SPLAT-PICK] raw', result);
+                console.groupEnd();
+                return result;
+            }
+
+            function pickSplatAtCenter(options = {}) {
+                return pickSplatAtScreen(null, null, { ...options, center: true });
+            }
+
+            function pickSplatOnClick(options = {}) {
+                const canvas = getCanvas();
+                if (!canvas) {
+                    console.warn('[QT-SPLAT-PICK] canvas unavailable');
+                    return false;
+                }
+                if (activeSplatPickClickHandler) {
+                    canvas.removeEventListener('click', activeSplatPickClickHandler, true);
+                    activeSplatPickClickHandler = null;
+                }
+                const once = options.once !== false;
+                activeSplatPickClickHandler = async (event) => {
+                    if (once && activeSplatPickClickHandler) {
+                        canvas.removeEventListener('click', activeSplatPickClickHandler, true);
+                        activeSplatPickClickHandler = null;
+                    }
+                    await pickSplatAtScreen(event.clientX, event.clientY, options);
+                };
+                canvas.addEventListener('click', activeSplatPickClickHandler, true);
+                console.info('[QT-SPLAT-PICK] click picker armed', { once, tag: 'QT-SPLAT-PICK' });
+                return true;
+            }
+
+            async function readArrayLayerBufferOptional(tileStreamer, type, layer) {
+                try {
+                    const readback = await tileStreamer?.debugReadArrayLayerBuffer?.(type, layer);
+                    if (!readback?.buffer) {
+                        return { type, layer, available: false, error: 'texture_unavailable' };
+                    }
+                    return { ...readback, available: true };
+                } catch (error) {
+                    return {
+                        type,
+                        layer,
+                        available: false,
+                        error: error?.message || String(error)
+                    };
+                }
+            }
+
+            function readBufferTexelOr(bufferReadback, x, y, fallback = [0, 0, 0, 0]) {
+                if (!bufferReadback?.available || !bufferReadback?.buffer) return fallback;
+                const width = Math.max(1, bufferReadback.width || 1);
+                const height = Math.max(1, bufferReadback.height || 1);
+                const xx = clampInt(x, 0, width - 1);
+                const yy = clampInt(y, 0, height - 1);
+                return readRGBA8BufferTexel(bufferReadback, xx, yy);
+            }
+
+            function mapSourceTexelToReadback(bufferReadback, sourceSize, x, y) {
+                const width = Math.max(1, bufferReadback?.width || 1);
+                const height = Math.max(1, bufferReadback?.height || 1);
+                const size = Math.max(1, Math.floor(sourceSize || Math.max(width, height)));
+                const sx = clampInt(x, 0, size - 1);
+                const sy = clampInt(y, 0, size - 1);
+                return {
+                    x: clampInt(Math.floor(((sx + 0.5) / size) * width), 0, width - 1),
+                    y: clampInt(Math.floor(((sy + 0.5) / size) * height), 0, height - 1),
+                    width,
+                    height
+                };
+            }
+
+            function readMappedBufferTexelOr(bufferReadback, sourceSize, x, y, fallback = [0, 0, 0, 0]) {
+                if (!bufferReadback?.available || !bufferReadback?.buffer) return fallback;
+                const coord = mapSourceTexelToReadback(bufferReadback, sourceSize, x, y);
+                return readRGBA8BufferTexel(bufferReadback, coord.x, coord.y);
+            }
+
+            function generationHistogramKey(id) {
+                const category = categoryForTileId(id);
+                return `${category.name}:${id}`;
+            }
+
+            function incrementHistogram(histogram, key, amount = 1) {
+                histogram.set(key, (histogram.get(key) || 0) + amount);
+            }
+
+            function histogramRows(histogram) {
+                return Array.from(histogram.entries())
+                    .map(([key, count]) => ({ key, count }))
+                    .sort((a, b) => b.count - a.count || String(a.key).localeCompare(String(b.key)));
+            }
+
+            function categorySymbol(categoryName) {
+                const name = String(categoryName || '').toUpperCase();
+                if (name === 'GRASS') return 'G';
+                if (name === 'FOREST') return 'F';
+                if (name === 'DESERT') return 'D';
+                if (name === 'ROCK') return 'R';
+                if (name === 'SNOW') return 'S';
+                if (name === 'WATER') return 'W';
+                return '?';
+            }
+
+            function makeWeightStats() {
+                return { samples: 0, nonZero: 0, sum: 0, min: Infinity, max: -Infinity };
+            }
+
+            function makeScalarStats() {
+                return { samples: 0, valid: 0, sum: 0, min: Infinity, max: -Infinity };
+            }
+
+            function addScalarStat(stats, value) {
+                stats.samples++;
+                if (!Number.isFinite(value)) return;
+                stats.valid++;
+                stats.sum += value;
+                stats.min = Math.min(stats.min, value);
+                stats.max = Math.max(stats.max, value);
+            }
+
+            function scalarStatsRow(stats) {
+                return {
+                    samples: stats.samples,
+                    valid: stats.valid,
+                    mean: roundForLog(stats.valid ? stats.sum / stats.valid : 0, 4),
+                    min: roundForLog(Number.isFinite(stats.min) ? stats.min : 0, 4),
+                    max: roundForLog(Number.isFinite(stats.max) ? stats.max : 0, 4)
+                };
+            }
+
+            function addWeightStat(statsById, id, weight) {
+                if (!splatIdValid(id)) return;
+                const key = String(id);
+                const stats = statsById.get(key) || makeWeightStats();
+                stats.samples++;
+                stats.sum += weight;
+                if (weight > 0.0001) stats.nonZero++;
+                stats.min = Math.min(stats.min, weight);
+                stats.max = Math.max(stats.max, weight);
+                statsById.set(key, stats);
+            }
+
+            function weightStatsRows(statsById) {
+                return Array.from(statsById.entries())
+                    .map(([key, stats]) => {
+                        const id = Number(key);
+                        const category = categoryForTileId(id);
+                        return {
+                            id,
+                            category: category.name,
+                            samples: stats.samples,
+                            nonZero: stats.nonZero,
+                            mean: roundForLog(stats.samples ? stats.sum / stats.samples : 0, 4),
+                            min: roundForLog(Number.isFinite(stats.min) ? stats.min : 0, 4),
+                            max: roundForLog(Number.isFinite(stats.max) ? stats.max : 0, 4)
+                        };
+                    })
+                    .sort((a, b) => b.mean - a.mean || a.id - b.id);
+            }
+
+            function formatGridCell(row) {
+                const symbol = categorySymbol(row.dominantCategory);
+                return `${symbol}${row.dominantId}:${row.dominantWeight.toFixed(2)}`;
+            }
+
+            function formatTileGridCell(row) {
+                const symbol = categorySymbol(row.tileCategory);
+                return `${symbol}${row.tileId}`;
+            }
+
+            function makeGrid(rows, formatter) {
+                const byY = new Map();
+                for (const row of rows) {
+                    if (!byY.has(row.y)) byY.set(row.y, []);
+                    byY.get(row.y).push(row);
+                }
+                return Array.from(byY.entries())
+                    .sort((a, b) => a[0] - b[0])
+                    .map(([y, rowItems]) => {
+                        rowItems.sort((a, b) => a.x - b.x);
+                        return `${String(y).padStart(3, ' ')}: ${rowItems.map(formatter).join(' ')}`;
+                    });
+            }
+
+            function makeWeightGrid(rows, id) {
+                const byY = new Map();
+                for (const row of rows) {
+                    if (!byY.has(row.y)) byY.set(row.y, []);
+                    byY.get(row.y).push(row);
+                }
+                return Array.from(byY.entries())
+                    .sort((a, b) => a[0] - b[0])
+                    .map(([y, rowItems]) => {
+                        rowItems.sort((a, b) => a.x - b.x);
+                        return `${String(y).padStart(3, ' ')}: ${rowItems
+                            .map(row => (row.weightsById[String(id)] ?? 0).toFixed(2))
+                            .join(' ')}`;
+                    });
+            }
+
+            function makeScalarGrid(rows, formatter) {
+                const byY = new Map();
+                for (const row of rows) {
+                    if (!byY.has(row.y)) byY.set(row.y, []);
+                    byY.get(row.y).push(row);
+                }
+                return Array.from(byY.entries())
+                    .sort((a, b) => a[0] - b[0])
+                    .map(([y, rowItems]) => {
+                        rowItems.sort((a, b) => a.x - b.x);
+                        return `${String(y).padStart(3, ' ')}: ${rowItems.map(formatter).join(' ')}`;
+                    });
+            }
+
+            function formatMaybeScalar(value, digits = 2) {
+                return Number.isFinite(value) ? value.toFixed(digits) : '--';
+            }
+
+            function luma709RGB(values) {
+                return values[0] * 0.2126 + values[1] * 0.7152 + values[2] * 0.0722;
+            }
+
+            function uniqueSplatIdsFromPayloads(...payloads) {
+                const ids = [];
+                for (const payload of payloads) {
+                    for (const id of payload?.ids || []) {
+                        if (splatIdValid(id) && !ids.includes(id)) ids.push(id);
+                    }
+                }
+                return ids;
+            }
+
+            function summarizeGenerationWindowRows(rows, footprint, options = {}) {
+                const tileHistogram = new Map();
+                const dominantHistogram = new Map();
+                const validHistogram = new Map();
+                const statsById = new Map();
+                const aoStats = makeScalarStats();
+                const aoAttenuationStats = makeScalarStats();
+                const groundFieldStats = makeScalarStats();
+                const resolvedLumaStats = makeScalarStats();
+                for (const row of rows) {
+                    incrementHistogram(tileHistogram, generationHistogramKey(row.tileId));
+                    incrementHistogram(dominantHistogram, generationHistogramKey(row.dominantId));
+                    incrementHistogram(validHistogram, row.validTexel ? 'valid' : 'invalid');
+                    for (const [id, weight] of Object.entries(row.weightsById)) {
+                        addWeightStat(statsById, Number(id), weight);
+                    }
+                    addScalarStat(aoStats, row.terrainAO?.raw);
+                    addScalarStat(aoAttenuationStats, row.terrainAO?.attenuation);
+                    addScalarStat(groundFieldStats, row.groundField?.max);
+                    addScalarStat(resolvedLumaStats, row.resolvedColor?.luma);
+                }
+                const maxWeightGridIds = Math.max(1, Math.min(8, Math.floor(options.maxWeightGridIds ?? 4)));
+                const weightGridIds = uniqueSplatIdsFromPayloads(
+                    footprint?.payloads?.production,
+                    footprint?.payloads?.union,
+                    footprint?.payloads?.fast
+                ).slice(0, maxWeightGridIds);
+                const weightGrids = {};
+                for (const id of weightGridIds) {
+                    weightGrids[`${categoryForTileId(id).name}:${id}`] = makeWeightGrid(rows, id);
+                }
+                return {
+                    counts: {
+                        samples: rows.length,
+                        valid: rows.filter(row => row.validTexel).length,
+                        invalid: rows.filter(row => !row.validTexel).length
+                    },
+                    tileHistogram: histogramRows(tileHistogram),
+                    storedDominantHistogram: histogramRows(dominantHistogram),
+                    storedValidityHistogram: histogramRows(validHistogram),
+                    storedWeightStatsById: weightStatsRows(statsById),
+                    storedDominantGrid: makeGrid(rows, formatGridCell),
+                    tileGrid: makeGrid(rows, formatTileGridCell),
+                    terrainAOStats: scalarStatsRow(aoStats),
+                    terrainAOAttenuationStats: scalarStatsRow(aoAttenuationStats),
+                    groundFieldMaxStats: scalarStatsRow(groundFieldStats),
+                    resolvedColorLumaStats: scalarStatsRow(resolvedLumaStats),
+                    terrainAOGrid: makeScalarGrid(rows, row => formatMaybeScalar(row.terrainAO?.raw)),
+                    terrainAOAttenuationGrid: makeScalarGrid(rows, row => formatMaybeScalar(row.terrainAO?.attenuation)),
+                    groundFieldMaxGrid: makeScalarGrid(rows, row => formatMaybeScalar(row.groundField?.max)),
+                    resolvedColorLumaGrid: makeScalarGrid(rows, row => formatMaybeScalar(row.resolvedColor?.luma)),
+                    weightGrids
+                };
+            }
+
+            function buildGenerationWindowRows(points, buffers, sourceSize) {
+                return points.map(point => {
+                    const splatIndexValues = readBufferTexelOr(buffers.splatIndex, point.x, point.y, [1, 1, 1, 1]);
+                    const splatDataValues = readBufferTexelOr(buffers.splatData, point.x, point.y, [0, 0, 0, 0]);
+                    const validValues = readBufferTexelOr(buffers.splatValid, point.x, point.y, [0, 0, 0, 1]);
+                    const corner = buildCornerFromValues('stored', { x: point.x, y: point.y }, splatIndexValues, splatDataValues, validValues);
+                    const dominant = dominantSplatEntry({
+                        ids: corner.ids,
+                        weights: corner.weights,
+                        bilinearValid: corner.valid
+                    });
+                    const tileId = decodeSplatId(readBufferTexelOr(buffers.tile, point.x, point.y, [1, 0, 0, 0])[0]);
+                    const tileCategory = categoryForTileId(tileId);
+                    const climate = readBufferTexelOr(buffers.climate, point.x, point.y, [0, 0, 0, 1]);
+                    const terrainAOAvailable = !!buffers.terrainAO?.available;
+                    const terrainAOCoord = terrainAOAvailable
+                        ? mapSourceTexelToReadback(buffers.terrainAO, sourceSize, point.x, point.y)
+                        : null;
+                    const terrainAOValue = terrainAOAvailable
+                        ? readMappedBufferTexelOr(buffers.terrainAO, sourceSize, point.x, point.y, [NaN, 0, 0, 0])[0]
+                        : NaN;
+                    const groundFieldAvailable = !!buffers.groundField?.available;
+                    const groundFieldCoord = groundFieldAvailable
+                        ? mapSourceTexelToReadback(buffers.groundField, sourceSize, point.x, point.y)
+                        : null;
+                    const groundField = groundFieldAvailable
+                        ? readMappedBufferTexelOr(buffers.groundField, sourceSize, point.x, point.y, [NaN, NaN, NaN, NaN])
+                        : [NaN, NaN, NaN, NaN];
+                    const resolvedColorAvailable = !!buffers.resolvedColor?.available;
+                    const resolvedColor = resolvedColorAvailable
+                        ? readBufferTexelOr(buffers.resolvedColor, point.x, point.y, [NaN, NaN, NaN, NaN])
+                        : [NaN, NaN, NaN, NaN];
+                    const weightsById = {};
+                    for (let i = 0; i < 4; i++) {
+                        const id = corner.ids[i];
+                        if (splatIdValid(id)) {
+                            weightsById[String(id)] = (weightsById[String(id)] || 0) + corner.weights[i];
+                        }
+                    }
+                    return {
+                        x: point.x,
+                        y: point.y,
+                        dx: point.dx,
+                        dy: point.dy,
+                        tileId,
+                        tileCategory: tileCategory.name,
+                        ids: corner.ids.join(','),
+                        weights: corner.weights.map(v => roundForLog(v, 4)).join(','),
+                        weightsById,
+                        weightSum: roundForLog(corner.weights.reduce((sum, value) => sum + value, 0), 4),
+                        validTexel: corner.valid,
+                        dominantId: dominant.id,
+                        dominantCategory: dominant.categoryName,
+                        dominantWeight: roundForLog(dominant.weight, 4),
+                        height: roundForLog(readBufferTexelOr(buffers.height, point.x, point.y, [0, 0, 0, 0])[0], 6),
+                        climate: {
+                            temperature: roundForLog(climate[0], 4),
+                            precipitation: roundForLog(climate[1], 4),
+                            vegetation: roundForLog(climate[2], 4)
+                        },
+                        terrainAO: {
+                            available: terrainAOAvailable,
+                            sample: terrainAOCoord,
+                            raw: roundForLog(terrainAOValue, 4),
+                            attenuation: roundForLog(Number.isFinite(terrainAOValue) ? 1 - terrainAOValue : NaN, 4)
+                        },
+                        groundField: {
+                            available: groundFieldAvailable,
+                            sample: groundFieldCoord,
+                            grass: roundForLog(groundField[0], 4),
+                            fern: roundForLog(groundField[1], 4),
+                            max: roundForLog(Math.max(groundField[0], groundField[1]), 4)
+                        },
+                        resolvedColor: {
+                            available: resolvedColorAvailable,
+                            rgb: resolvedColor.slice(0, 3).map(value => roundForLog(value, 4)),
+                            luma: roundForLog(luma709RGB(resolvedColor), 4)
+                        }
+                    };
+                });
+            }
+
+            async function splatGenerationWindow(faceOrTile, depth, x, y, options = {}) {
+                const { tile, options: opts } = normalizeDiagnosticTileCall(faceOrTile, depth, x, y, options);
+                const tileStreamer = getTileStreamer();
+                if (!tileStreamer?.debugReadArrayLayerBuffer) {
+                    console.warn('[QT-SPLAT-GEN] splatGenerationWindow: tile streamer/readback unavailable');
+                    return null;
+                }
+
+                const footprint = await splatFootprint(tile, {
+                    ...opts,
+                    log: false
+                });
+                if (!footprint?.source) {
+                    const result = {
+                        tag: 'QT-SPLAT-GEN',
+                        tile,
+                        source: footprint?.source ?? null,
+                        error: footprint?.error ?? 'tile_not_resident'
+                    };
+                    console.warn('[QT-SPLAT-GEN] splatGenerationWindow', result);
+                    return result;
+                }
+
+                const size = footprint.size || tileStreamer.tileTextureSize || 128;
+                const maxCoord = Math.max(0, size - 1);
+                const radius = Math.max(1, Math.min(32, Math.floor(opts.radius ?? 6)));
+                const base = {
+                    x: clampInt(footprint.base?.x ?? 0, 0, maxCoord),
+                    y: clampInt(footprint.base?.y ?? 0, 0, maxCoord)
+                };
+                const points = [];
+                for (let yy = base.y - radius; yy <= base.y + radius; yy++) {
+                    for (let xx = base.x - radius; xx <= base.x + radius; xx++) {
+                        const px = clampInt(xx, 0, maxCoord);
+                        const py = clampInt(yy, 0, maxCoord);
+                        if (points.some(point => point.x === px && point.y === py)) continue;
+                        points.push({ x: px, y: py, dx: px - base.x, dy: py - base.y });
+                    }
+                }
+
+                const bufferTypes = [
+                    'splatData',
+                    'splatIndex',
+                    'splatValid',
+                    'tile',
+                    'height',
+                    'climate',
+                    'terrainAO',
+                    'groundField',
+                    'resolvedColor'
+                ];
+                const bufferPairs = await Promise.all(bufferTypes.map(async type => [
+                    type,
+                    await readArrayLayerBufferOptional(tileStreamer, type, footprint.source.layer)
+                ]));
+                const buffers = Object.fromEntries(bufferPairs);
+                const rows = buildGenerationWindowRows(points, buffers, size);
+                const summary = summarizeGenerationWindowRows(rows, footprint, opts);
+                const centerRow = rows.filter(row => row.y === base.y).sort((a, b) => a.x - b.x);
+                const centerColumn = rows.filter(row => row.x === base.x).sort((a, b) => a.y - b.y);
+                const footprintBox = rows
+                    .filter(row => row.x >= base.x && row.x <= base.x + 1 && row.y >= base.y && row.y <= base.y + 1)
+                    .sort((a, b) => a.y - b.y || a.x - b.x);
+                const result = {
+                    tag: 'QT-SPLAT-GEN',
+                    debugMode: getTerrainDebugMode(),
+                    tile,
+                    source: footprint.source,
+                    size,
+                    radius,
+                    base,
+                    f: footprint.f,
+                    coord: footprint.coord,
+                    footprint,
+                    bufferAvailability: Object.fromEntries(bufferTypes.map(type => [
+                        type,
+                        {
+                            available: !!buffers[type]?.available,
+                            format: buffers[type]?.format ?? null,
+                            width: buffers[type]?.width ?? null,
+                            height: buffers[type]?.height ?? null,
+                            error: buffers[type]?.error ?? null
+                        }
+                    ])),
+                    summary,
+                    centerRow,
+                    centerColumn,
+                    footprintBox,
+                    rows,
+                    note: 'Reads resident stored splatData/splatIndex/splatValid plus resident tile/height/climate textures, and copy-readable terrainAO/groundField/resolvedColor textures when present. Lower-resolution auxiliary textures are sampled by mapping the splat texel center into their texture size. The transient advancedTerrainCompute outputType 7/8 smooth source is not resident in the tile array textures.'
+                };
+
+                if (opts.log !== false) {
+                    console.groupCollapsed(
+                        `[QT-SPLAT-GEN] f${tile.face}:d${tile.depth}:${tile.x},${tile.y} ` +
+                        `base=${base.x},${base.y} radius=${radius}`
+                    );
+                    console.table(footprint.summaryRows || []);
+                    console.table(summary.storedWeightStatsById);
+                    console.table(centerRow);
+                    console.table(centerColumn);
+                    console.log('[QT-SPLAT-GEN] dominant grid', summary.storedDominantGrid);
+                    console.log('[QT-SPLAT-GEN] tile grid', summary.tileGrid);
+                    console.log('[QT-SPLAT-GEN] raw', result);
+                    console.groupEnd();
+                }
+                return result;
+            }
+
+            async function pickSplatGenerationAtScreen(screenX, screenY, options = {}) {
+                const pick = await resolveScreenTerrainPick(screenX, screenY, options);
+                if (pick?.error) {
+                    const result = { tag: 'QT-SPLAT-GEN', debugMode: getTerrainDebugMode(), pick };
+                    console.warn('[QT-SPLAT-GEN] pick failed', result);
+                    return result;
+                }
+                const generation = await splatGenerationWindow(
+                    pick.instance.tile,
+                    {
+                        ...options,
+                        base: pick.splatCoord.base,
+                        f: pick.splatCoord.f,
+                        log: false
+                    }
+                );
+                const sourceLayerMatchesRendered = generation?.source?.layer === pick.instance.layer;
+                const terrainRaycastLayerMatchesRendered = pick.terrainRaycast?.hit?.lookup?.layer === pick.instance.layer;
+                const result = {
+                    tag: 'QT-SPLAT-GEN',
+                    debugMode: getTerrainDebugMode(),
+                    pick,
+                    sourceLayerMatchesRendered,
+                    terrainRaycastLayerMatchesRendered,
+                    generation,
+                    conclusion: {
+                        sourceLayerMatchesRendered,
+                        terrainRaycastLayerMatchesRendered,
+                        productionUnionDelta: generation?.footprint?.productionUnionDelta ?? null,
+                        productionMatchesUnion: generation?.footprint?.productionUnionDelta === 0,
+                        footprintVerdict: generation?.footprint?.verdict ?? 'unavailable',
+                        dominantGrid: generation?.summary?.storedDominantGrid ?? null,
+                        tileGrid: generation?.summary?.tileGrid ?? null,
+                        terrainAOGrid: generation?.summary?.terrainAOGrid ?? null,
+                        terrainAOAttenuationGrid: generation?.summary?.terrainAOAttenuationGrid ?? null,
+                        groundFieldMaxGrid: generation?.summary?.groundFieldMaxGrid ?? null,
+                        resolvedColorLumaGrid: generation?.summary?.resolvedColorLumaGrid ?? null
+                    }
+                };
+                const labelTile = pick.instance.tile;
+                console.groupCollapsed(
+                    `[QT-SPLAT-GEN] screen=(${pick.point.client.x},${pick.point.client.y}) ` +
+                    `f${labelTile.face}:d${labelTile.depth}:${labelTile.x},${labelTile.y} ` +
+                    `base=${pick.splatCoord.base.x},${pick.splatCoord.base.y} method=${pick.pickMethod} radius=${generation?.radius ?? null}`
+                );
+                console.table([{
+                    debugMode: result.debugMode,
+                    pickMethod: pick.pickMethod,
+                    clientX: pick.point.client.x,
+                    clientY: pick.point.client.y,
+                    face: labelTile.face,
+                    depth: labelTile.depth,
+                    tileX: labelTile.x,
+                    tileY: labelTile.y,
+                    layer: pick.instance.layer,
+                    sourceLayer: generation?.source?.layer ?? null,
+                    sourceLayerMatchesRendered,
+                    terrainRaycastLayer: pick.terrainRaycast?.hit?.lookup?.layer ?? null,
+                    terrainRaycastLayerMatchesRendered,
+                    baseX: pick.splatCoord.base.x,
+                    baseY: pick.splatCoord.base.y,
+                    fX: pick.splatCoord.f.x,
+                    fY: pick.splatCoord.f.y,
+                    radius: generation?.radius ?? null,
+                    footprintVerdict: result.conclusion.footprintVerdict,
+                    productionUnionDelta: result.conclusion.productionUnionDelta
+                }]);
+                console.table(generation?.footprint?.summaryRows || []);
+                console.table(generation?.summary?.storedWeightStatsById || []);
+                console.table(generation?.centerRow || []);
+                console.table(generation?.centerColumn || []);
+                console.log('[QT-SPLAT-GEN] dominant grid', generation?.summary?.storedDominantGrid ?? null);
+                console.log('[QT-SPLAT-GEN] tile grid', generation?.summary?.tileGrid ?? null);
+                console.log('[QT-SPLAT-GEN] terrain AO grid', generation?.summary?.terrainAOGrid ?? null);
+                console.log('[QT-SPLAT-GEN] terrain AO attenuation grid', generation?.summary?.terrainAOAttenuationGrid ?? null);
+                console.log('[QT-SPLAT-GEN] ground field max grid', generation?.summary?.groundFieldMaxGrid ?? null);
+                console.log('[QT-SPLAT-GEN] resolved color luma grid', generation?.summary?.resolvedColorLumaGrid ?? null);
+                console.log('[QT-SPLAT-GEN] raw', result);
+                console.groupEnd();
+                return result;
+            }
+
+            function pickSplatGenerationAtCenter(options = {}) {
+                return pickSplatGenerationAtScreen(null, null, { ...options, center: true });
+            }
+
+            function pickSplatGenerationOnClick(options = {}) {
+                const canvas = getCanvas();
+                if (!canvas) {
+                    console.warn('[QT-SPLAT-GEN] canvas unavailable');
+                    return false;
+                }
+                if (activeSplatPickClickHandler) {
+                    canvas.removeEventListener('click', activeSplatPickClickHandler, true);
+                    activeSplatPickClickHandler = null;
+                }
+                const once = options.once !== false;
+                activeSplatPickClickHandler = async (event) => {
+                    if (once && activeSplatPickClickHandler) {
+                        canvas.removeEventListener('click', activeSplatPickClickHandler, true);
+                        activeSplatPickClickHandler = null;
+                    }
+                    await pickSplatGenerationAtScreen(event.clientX, event.clientY, options);
+                };
+                canvas.addEventListener('click', activeSplatPickClickHandler, true);
+                console.info('[QT-SPLAT-GEN] click picker armed', {
+                    once,
+                    radius: Math.max(1, Math.min(32, Math.floor(options.radius ?? 6))),
+                    tag: 'QT-SPLAT-GEN'
+                });
+                return true;
             }
 
             async function heightSignature(faceOrTile, depth, x, y, options = {}) {
@@ -1658,10 +3566,22 @@
             Object.assign(window.qtDiag, {
                 help() {
                     console.log([
-                        'Filter tag: QT-MANUAL',
+                        'Filter tags: QT-MANUAL, QT-SPLAT, QT-SPLAT-PICK, QT-SPLAT-GEN',
                         'window.qtDiag.status()',
                         'window.qtDiag.sampleInstances(64)',
                         'window.qtDiag.inspectTile(face, depth, x, y)',
+                        'window.qtDiag.splatFootprint(face, depth, x, y, { base: { x, y }, f: { x: 0.5, y: 0.5 } })',
+                        'window.qtDiag.findSplatFootprints(face, depth, x, y, { limit: 24 })',
+                        'window.qtDiag.pickTerrainOnClick() // terrain raycast by default',
+                        'window.qtDiag.pickTerrainAtCenter()',
+                        'window.qtDiag.pickTerrainAtScreen(clientX, clientY)',
+                        'window.qtDiag.pickSplatOnClick()',
+                        'window.qtDiag.pickSplatAtCenter()',
+                        'window.qtDiag.pickSplatAtScreen(clientX, clientY)',
+                        'window.qtDiag.pickSplatGenerationOnClick({ radius: 6 }) // use { pickMethod: "sphere" } for legacy fallback',
+                        'window.qtDiag.pickSplatGenerationAtCenter({ radius: 6 })',
+                        'window.qtDiag.pickSplatGenerationAtScreen(clientX, clientY, { radius: 6 })',
+                        'window.qtDiag.splatGenerationWindow(face, depth, x, y, { base: { x, y }, f: { x: 0.5, y: 0.5 }, radius: 6 })',
                         'window.qtDiag.coverage(face, depth, x, y)',
                         'window.qtDiag.heightSignature(face, depth, x, y)',
                         'window.qtDiag.inspectTile({ face, depth, x, y }, null, null, null, { includeParents: true, sampleSize: 8 })',
@@ -1682,6 +3602,18 @@
                 status,
                 sampleInstances,
                 inspectTile,
+                splatFootprint,
+                findSplatFootprints,
+                pickTerrainAtScreen,
+                pickTerrainAtCenter,
+                pickTerrainOnClick,
+                pickSplatAtScreen,
+                pickSplatAtCenter,
+                pickSplatOnClick,
+                splatGenerationWindow,
+                pickSplatGenerationAtScreen,
+                pickSplatGenerationAtCenter,
+                pickSplatGenerationOnClick,
                 heightSignature,
                 coverage,
                 capture,

@@ -74,15 +74,29 @@ export function createEngineConfig() {
     vertexSpacingMeters,
     splatConfig: {
       splatDensity: 8,
-      splatKernelSize: 5,
-      transitionSharpness: 0.3, //1.9
+      // Keep the live splat kernel local enough that 1-4 tile authored
+      // grass/sand islands remain visible instead of being averaged away.
+      splatKernelSize: 1,
+      // Stabilize sparse material ID slots across the 2x2 bilinear footprint
+      // without widening the visible blend weights.
+      slotSupportExpansionTexels: 1.5,
+      transitionSharpness: 4.5,
       transitionDominanceStart: 0.05,
-      transitionDominanceEnd: 0.9,
+      transitionDominanceEnd: 0.75,
       centerCategoryBias: 0.0,
       transitionBreakupScale: 0.48,
       transitionBreakupWarpScale: 0.155,
       transitionBreakupWarpStrength: 0.65,
       transitionBreakupStrength: 0.10,
+      sourceMinorityCutoff: 0.18,
+      sourceMinorityFade: 0.10,
+      sourceWinnerSnapStart: 0.51,
+      sourceWinnerSnapEnd: 0.58,
+      // Performance-first splat representation: splatData stores fixed
+      // ORGANIC/MINERAL/SOIL_ARID/COLD weights. The renderer can use one
+      // hardware-filtered RGBA weight sample with no splatIndex reads.
+      fixedMaterialFamiliesEnabled: true,
+      chunkPaletteEnabled: false,
   },
     lod: {
       distancesMeters: lodDistancesMeters,
@@ -141,7 +155,7 @@ export function createEngineConfig() {
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
         fullMaxLOD: 0,
-        nearMaxLOD: 2,
+        nearMaxLOD: 4,
         midMaxLOD: 4,
         nearToMidFadeStartChunks: 2.5,
         nearToMidFadeEndChunks: 4.0,
@@ -157,22 +171,28 @@ export function createEngineConfig() {
         lodEdgeAOStrength: 1.0,
         lodEdgeNormalStrength: 1.0,
         lodEdgeShadowStrength: 1.0,
+        enableMacroLayer: false,
+        forceMacroOverlay: false,
         pointSampleLodStart: 2,
         macroStartLod: 99,
         resolvedColorEnabled: true,
-        resolvedColorStartLod: 1,
-        lod0ResolvedColorEnabled: true,
-        // LOD0 keeps the live atlas only for very close inspection. Beyond
-        // that, fade quickly into the prebaked color so near/mid terrain uses
-        // the same stable medium-scale texture character as LOD1.
-        lod0ResolvedColorFadeStartMeters: 3,
-        lod0ResolvedColorFadeEndMeters: 18,
+        resolvedColorStartLod: 5,
+        // Keep close and mid geometry on live category splats. The prebaked
+        // resolved-color path is only for far terrain; nearer use exposes
+        // hard category-mask contours because the prebake does not currently
+        // reproduce the fragment shader's live splat reconstruction.
+        lod0ResolvedColorEnabled: false,
+        lod0ResolvedColorFadeStartMeters: 128,
+        lod0ResolvedColorFadeEndMeters: 256,
         // AO has the same near-vs-prebaked frequency mismatch as albedo.
         // Fade LOD0 contact AO out over the same range so its tile-local
         // darkening does not stop abruptly where LOD1 takes over.
         lod0AOFadeEnabled: true,
-        lod0AOFadeStartMeters: 3,
-        lod0AOFadeEndMeters: 18,
+        lod0AOFadeStartMeters: 128,
+        lod0AOFadeEndMeters: 256,
+        splatBlendMaxLod: 4,
+        splatTop2MaxLod: -1,
+        splatDominantMinWeight: 1.0,
         nearMipSharpenMaxLod: -1,
         variantRotationMaxLod: 2,
         clusteredMaxLod: 1,
@@ -859,6 +879,9 @@ export function createGameDataConfig() {
           // representing how far "above" ground level this surface visually sits.
           // Higher values make the tile appear to sit on top at transition edges.
           tileLayerHeights: TILE_LAYER_HEIGHTS,
+          terrainAO: {
+            enabled: true,
+          },
         }
       ]
     },

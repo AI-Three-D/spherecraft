@@ -225,7 +225,8 @@ update(encoder, scatterGPU, tileGPU) {
             format: 'r32float',
             dimension: '2d',
             usage: GPUTextureUsage.STORAGE_BINDING
-                 | GPUTextureUsage.TEXTURE_BINDING,
+                 | GPUTextureUsage.TEXTURE_BINDING
+                 | GPUTextureUsage.COPY_SRC,
         });
 
         // Wrapper so the terrain material sees it like any other pool texture.

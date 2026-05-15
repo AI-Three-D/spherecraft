@@ -36,6 +36,13 @@ export class WebGPUTerrainGenerator {
         const splat = requireObject(splatConfig, 'splatConfig');
         this.splatDensity = requireInt(splat.splatDensity, 'splatConfig.splatDensity', 1);
         this.splatKernelSize = requireInt(splat.splatKernelSize, 'splatConfig.splatKernelSize', 1);
+        this.splatSlotSupportExpansionTexels = Math.max(
+            0.0,
+            requireNumber(
+                splat.slotSupportExpansionTexels ?? 1.5,
+                'splatConfig.slotSupportExpansionTexels'
+            )
+        );
         this.splatTransitionSharpness = Math.max(
             1.0,
             requireNumber(
@@ -93,6 +100,35 @@ export class WebGPUTerrainGenerator {
                 'splatConfig.transitionBreakupStrength'
             )
         );
+        this.authoredSplatSourceMinProbability = clamp01(
+            requireNumber(
+                splat.sourceMinorityCutoff ?? 0.18,
+                'splatConfig.sourceMinorityCutoff'
+            )
+        );
+        this.authoredSplatSourceMinProbabilityFade = Math.max(
+            0.001,
+            requireNumber(
+                splat.sourceMinorityFade ?? 0.10,
+                'splatConfig.sourceMinorityFade'
+            )
+        );
+        this.authoredSplatSourceWinnerSnapStart = clamp01(
+            requireNumber(
+                splat.sourceWinnerSnapStart ?? 0.55,
+                'splatConfig.sourceWinnerSnapStart'
+            )
+        );
+        this.authoredSplatSourceWinnerSnapEnd = Math.max(
+            this.authoredSplatSourceWinnerSnapStart + 0.001,
+            clamp01(
+                requireNumber(
+                    splat.sourceWinnerSnapEnd ?? 0.70,
+                    'splatConfig.sourceWinnerSnapEnd'
+                )
+            )
+        );
+        this.splatFixedMaterialFamiliesEnabled = splat.fixedMaterialFamiliesEnabled === true;
         this.splatChunkPaletteEnabled = splat.chunkPaletteEnabled !== false;
         this.splatChunkPaletteMinCoverage = clamp01(
             Number.isFinite(splat.chunkPaletteMinCoverage)
