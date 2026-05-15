@@ -120,6 +120,8 @@ export class TerrainMaterialBuilder {
             const enableGroundField =
                 groundFieldFallbackConfig.enabled !== false &&
                 cachedTextures.groundField?._isArray === true;
+            const fixedMaterialFamiliesEnabled =
+                planetConfig?.engineConfig?.splatConfig?.fixedMaterialFamiliesEnabled === true;
 
             const readGpuFormat = (tex) =>
                 tex?._gpuFormat ?? tex?._gpuTexture?.format ?? 'rgba32float';
@@ -215,6 +217,7 @@ export class TerrainMaterialBuilder {
                 enableLod0ResolvedColor,
                 enableLodEdgeResolvedColor,
                 enableResolvedColorDebugBinding,
+                fixedMaterialFamiliesEnabled,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
             const vertexShader = builders.buildTerrainChunkVertexShader({

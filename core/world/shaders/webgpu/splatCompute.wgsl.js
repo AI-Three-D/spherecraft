@@ -1,5 +1,7 @@
 // js/world/shaders/webgpu/splatCompute.wgsl.js
 
+import { buildFixedMaterialFamilyComputeWGSL } from '../../materialFamilies.js';
+
 function buildCategoryRepresentativeTileIdWGSL(tileCategories) {
     const lines = ['fn categoryRepresentativeTileId(categoryId: u32) -> u32 {'];
     for (const category of tileCategories) {
@@ -25,6 +27,8 @@ export function createSplatComputeShader(options = {}) {
     const categoryScoreCount = tileCategories.length;
     const tileCategoryWGSL = options.buildTileCategoryLookupWGSL();
     const categoryRepresentativeWGSL = buildCategoryRepresentativeTileIdWGSL(tileCategories);
+    const fixedMaterialFamilyWGSL = buildFixedMaterialFamilyComputeWGSL(tileCategories);
+    const useFixedMaterialFamilies = options.fixedMaterialFamiliesEnabled === true;
 
     return /* wgsl */`
 struct Uniforms {
@@ -66,6 +70,7 @@ const INVALID_TILE_ID: u32 = 255u;
 const INVALID_CATEGORY_ID: u32 = 255u;
 const CATEGORY_SCORE_COUNT: u32 = ${categoryScoreCount}u;
 const SCORE_EPSILON: f32 = 1e-5;
+const USE_FIXED_MATERIAL_FAMILIES: bool = ${useFixedMaterialFamilies ? 'true' : 'false'};
 
 fn validTile(tileId: u32) -> bool {
     return tileId < INVALID_TILE_ID;
@@ -110,6 +115,8 @@ fn loadSmoothSplatSourceTileIds(coord: vec2<i32>) -> vec4<u32> {
 ${tileCategoryWGSL}
 
 ${categoryRepresentativeWGSL}
+
+${fixedMaterialFamilyWGSL}
 
 fn radialKernelWeight(distanceToSample: f32, radius: f32) -> f32 {
     if (radius <= 0.0 || distanceToSample >= radius) {
@@ -520,6 +527,84 @@ fn applyBoundaryBreakup(
     (*outputWeights)[3] = weights.w;
 }
 
+fn addFixedMaterialFamilyScore(categoryId: u32, score: f32, weights: ptr<function, vec4<f32>>) {
+    if (!validCategory(categoryId) || score <= SCORE_EPSILON) {
+        return;
+    }
+    let familyId = fixedMaterialFamilyForCategory(categoryId);
+    if (familyId == 0u) { (*weights).x = (*weights).x + score; }
+    if (familyId == 1u) { (*weights).y = (*weights).y + score; }
+    if (familyId == 2u) { (*weights).z = (*weights).z + score; }
+    if (familyId == 3u) { (*weights).w = (*weights).w + score; }
+}
+
+fn sharpenFixedMaterialFamilyWeights(weightsIn: vec4<f32>) -> vec4<f32> {
+    let total = weightsIn.x + weightsIn.y + weightsIn.z + weightsIn.w;
+    if (total <= SCORE_EPSILON) {
+        return vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    }
+
+    let weights = weightsIn / total;
+    let dominance = max(max(weights.x, weights.y), max(weights.z, weights.w));
+    let start = clamp(uniforms.transitionDominanceStart, 0.0, 1.0);
+    let end = clamp(max(uniforms.transitionDominanceEnd, start + 0.001), 0.0, 1.0);
+    let boundaryFactor = 1.0 - smoothstep(start, end, dominance);
+    if (boundaryFactor <= SCORE_EPSILON) {
+        return weights;
+    }
+
+    let exponent = mix(1.0, max(uniforms.transitionSharpness, 1.0), boundaryFactor);
+    let shaped = vec4<f32>(
+        select(0.0, pow(max(weights.x, SCORE_EPSILON), exponent), weights.x > SCORE_EPSILON),
+        select(0.0, pow(max(weights.y, SCORE_EPSILON), exponent), weights.y > SCORE_EPSILON),
+        select(0.0, pow(max(weights.z, SCORE_EPSILON), exponent), weights.z > SCORE_EPSILON),
+        select(0.0, pow(max(weights.w, SCORE_EPSILON), exponent), weights.w > SCORE_EPSILON)
+    );
+    let shapedTotal = shaped.x + shaped.y + shaped.z + shaped.w;
+    if (shapedTotal <= SCORE_EPSILON) {
+        return weights;
+    }
+    return shaped / shapedTotal;
+}
+
+fn fixedMaterialFamilyWeights(
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>,
+    centerCategory: u32
+) -> vec4<f32> {
+    var weights = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+
+    for (var categoryId = 0u; categoryId < CATEGORY_SCORE_COUNT; categoryId = categoryId + 1u) {
+        addFixedMaterialFamilyScore(categoryId, (*categoryScores)[categoryId], &weights);
+    }
+
+    let total = weights.x + weights.y + weights.z + weights.w;
+    if (total <= SCORE_EPSILON) {
+        let familyId = fixedMaterialFamilyForCategory(centerCategory);
+        if (familyId == 1u) { return vec4<f32>(0.0, 1.0, 0.0, 0.0); }
+        if (familyId == 2u) { return vec4<f32>(0.0, 0.0, 1.0, 0.0); }
+        if (familyId == 3u) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+        return vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    }
+
+    return weights / total;
+}
+
+fn storeFixedMaterialFamilySplat(coord: vec2<i32>, weights: vec4<f32>) {
+    let total = weights.x + weights.y + weights.z + weights.w;
+    let normalized = select(vec4<f32>(1.0, 0.0, 0.0, 0.0), weights / max(total, SCORE_EPSILON), total > SCORE_EPSILON);
+    textureStore(splatWeightTexture, coord, clamp(normalized, vec4<f32>(0.0), vec4<f32>(1.0)));
+    textureStore(
+        splatIndexTexture,
+        coord,
+        vec4<f32>(
+            encodeTileId(fixedMaterialFamilyTileId(0u)),
+            encodeTileId(fixedMaterialFamilyTileId(1u)),
+            encodeTileId(fixedMaterialFamilyTileId(2u)),
+            encodeTileId(fixedMaterialFamilyTileId(3u))
+        )
+    );
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let splatTexSize = textureDimensions(splatWeightTexture);
@@ -613,6 +698,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let centerCategory = dominantSmoothSourceCategory(centerCoord, centerTileId);
+
+    if (USE_FIXED_MATERIAL_FAMILIES) {
+        let fixedWeights = fixedMaterialFamilyWeights(&categoryScores, centerCategory);
+        storeFixedMaterialFamilySplat(vec2<i32>(global_id.xy), fixedWeights);
+        return;
+    }
 
     var topCategories: array<u32, 4> = array<u32, 4>(
         INVALID_CATEGORY_ID,

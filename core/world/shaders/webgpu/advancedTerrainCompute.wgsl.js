@@ -35,6 +35,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;
   const maxBiomes = options?.maxBiomes ?? 16;
+  const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
     Math.min(1.0, Number.isFinite(options?.authoredSplatSourceMinProbability)
@@ -120,6 +121,7 @@ const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY: f32 = ${wgslFloat(authoredSplatSour
 const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY_FADE: f32 = ${wgslFloat(authoredSplatSourceMinProbabilityFade, 0.10)};
 const AUTHORED_SPLAT_SOURCE_WINNER_SNAP_START: f32 = ${wgslFloat(authoredSplatSourceWinnerSnapStart, 0.55)};
 const AUTHORED_SPLAT_SOURCE_WINNER_SNAP_END: f32 = ${wgslFloat(authoredSplatSourceWinnerSnapEnd, 0.70)};
+const USE_FIXED_MATERIAL_FAMILY_SPLATS: bool = ${useFixedMaterialFamilySplats ? 'true' : 'false'};
 
 fn getSpherePoint(face: i32, u: f32, v: f32) -> vec3<f32> {
     var cubePos: vec3<f32>;
@@ -786,12 +788,16 @@ fn computeAuthoredSmoothSplatPayload(
     var smoothScores: array<f32, MAX_BIOMES>;
     for (var i = 0u; i < count; i = i + 1u) {
         let probability = scores[i] / totalScore;
-        var sourceGate = authoredSmoothSourceGate(probability, topProbability);
-        if (i == topIndex) {
-            sourceGate = 1.0;
+        if (USE_FIXED_MATERIAL_FAMILY_SPLATS) {
+            smoothScores[i] = probability;
+        } else {
+            var sourceGate = authoredSmoothSourceGate(probability, topProbability);
+            if (i == topIndex) {
+                sourceGate = 1.0;
+            }
+            let biomeHalfWidth = biomeConfigUniforms.biomes[i].blendHalfWidth;
+            smoothScores[i] = authoredSmoothSharpenedScore(probability, biomeHalfWidth) * sourceGate;
         }
-        let biomeHalfWidth = biomeConfigUniforms.biomes[i].blendHalfWidth;
-        smoothScores[i] = authoredSmoothSharpenedScore(probability, biomeHalfWidth) * sourceGate;
     }
 
     for (var i = 0u; i < count; i = i + 1u) {

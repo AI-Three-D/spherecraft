@@ -92,6 +92,10 @@ export function createEngineConfig() {
       sourceMinorityFade: 0.10,
       sourceWinnerSnapStart: 0.51,
       sourceWinnerSnapEnd: 0.58,
+      // Performance-first splat representation: splatData stores fixed
+      // ORGANIC/MINERAL/SOIL_ARID/COLD weights. The renderer can use one
+      // hardware-filtered RGBA weight sample with no splatIndex reads.
+      fixedMaterialFamiliesEnabled: true,
       chunkPaletteEnabled: false,
   },
     lod: {

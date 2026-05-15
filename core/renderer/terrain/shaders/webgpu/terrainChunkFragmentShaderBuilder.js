@@ -3,6 +3,7 @@
 import { getAerialPerspectiveWGSL } from '../../../../renderer/atmosphere/shaders/aerialPerspectiveCommon.js';
 import { getProceduralDetailWGSL } from './prroceduralDetailNoise.wgsl.js';
 import { getClusteredLightingWGSL } from '../../../../lighting/shaders/clusteredLighting.wgsl.js';
+import { buildFixedMaterialFamilyFragmentWGSL } from '../../../../world/materialFamilies.js';
 
 const blendModeBlock = /* wgsl */`
 // ============================================================================
@@ -495,6 +496,8 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const debugMode =  Number.isFinite(options.debugMode) ? Math.floor(options.debugMode) : 0;
     const lod = Number.isFinite(options.lod) ? Math.max(0, Math.floor(options.lod)) : 0;
     const terrainShaderConfig = options.terrainShaderConfig || {};
+    const fixedMaterialFamiliesEnabled = options.fixedMaterialFamiliesEnabled === true;
+    const fixedMaterialFamilyWGSL = buildFixedMaterialFamilyFragmentWGSL(options.tileCategories || []);
     const fullMaxLod = Number.isFinite(terrainShaderConfig.fullMaxLOD)
         ? Math.max(0, Math.floor(terrainShaderConfig.fullMaxLOD))
         : 0;
@@ -894,6 +897,7 @@ const AP_FADE_START: f32 = ${apFadeStartMeters.toFixed(1)};
 const AP_FADE_END: f32 = ${apFadeEndMeters.toFixed(1)};
 
 const ENABLE_SPLAT: bool = ${enableSplat ? 'true' : 'false'};
+const USE_FIXED_MATERIAL_FAMILIES: bool = ${fixedMaterialFamiliesEnabled ? 'true' : 'false'};
 const SPLAT_TIER: i32 = ${splatTier};
 const ENABLE_NEAR_TO_MID_FADE: bool = ${enableNearToMidFade ? 'true' : 'false'};
 const NEAR_TO_MID_FADE_START_CHUNKS: f32 = ${nearToMidFadeStartChunks.toFixed(2)};
@@ -924,6 +928,7 @@ const DEBUG_LOD_COLORS: array<vec3<f32>, 7> = array<vec3<f32>, 7>(
 
 
 ${grassConstants}
+${fixedMaterialFamilyWGSL}
 ${aerialPerspectiveCode}
 ${clusteredLightingCode}
 struct FragmentUniforms {
@@ -1442,6 +1447,22 @@ fn loadSplatValidity(coord: vec2<i32>, layer: i32) -> bool {
     return textureLoad(splatValidMap, coord, layer, 0).r > 0.5;
 }
 
+fn sampleFixedMaterialFamilyData(input: FragmentInput, layer: i32) -> SplatData {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    var weights = sampleSplatWeightsFiltered(uv, layer);
+    let total = weights.x + weights.y + weights.z + weights.w;
+    weights = select(vec4<f32>(1.0, 0.0, 0.0, 0.0), weights / max(total, 0.0001), total > 0.0001);
+
+    var result: SplatData;
+    result.tileIds = FIXED_MATERIAL_FAMILY_TILE_IDS;
+    result.weights = weights;
+    result.cellLocal = fract(uv * splatTexSize);
+    result.hasBoundary = splatHasMeaningfulBlend(result);
+    result.bilinearValid = true;
+    return result;
+}
+
 fn accumulateLoadedCornerMixture(
     ids4: vec4<i32>,
     weights4: vec4<f32>,
@@ -1610,6 +1631,10 @@ fn findSplatTop2(
 }
 
 fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
+    if (USE_FIXED_MATERIAL_FAMILIES) {
+        return sampleFixedMaterialFamilyData(input, layer);
+    }
+
     let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     let centerCoord = clamp(
@@ -2606,6 +2631,52 @@ fn sampleMicroTextureWithSplatFull(
     return accum / sum;
 }
 
+fn sampleMicroTextureWithFixedMaterialFamilies(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32,
+    splat: SplatData
+) -> vec4<f32> {
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+    let dominantId = splatDominantTileId(splat);
+    let dominantW = splatDominantWeight(splat);
+
+    if (!splat.hasBoundary || dominantW >= SPLAT_DOMINANT_MIN_WEIGHT) {
+        return sampleTileColor(
+            dominantId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+    }
+
+    var bestI: i32 = -1;
+    var secondI: i32 = -1;
+    var top2Sum = 0.0;
+    if (USE_SPLAT_TOP2_FAST_PATH && findSplatTop2(splat, &bestI, &secondI, &top2Sum) && top2Sum >= SPLAT_TOP2_MIN_WEIGHT) {
+        let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+        let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+        let invTop2 = 1.0 / max(top2Sum, 0.0001);
+        let w1 = ws[bestI] * invTop2;
+        let w2 = ws[secondI] * invTop2;
+
+        let color1 = sampleTileColor(
+            ids[bestI], worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        let color2 = sampleTileColor(
+            ids[secondI], worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        return color1 * w1 + color2 * w2;
+    }
+
+    return sampleMicroTextureWithSplatFull(
+        input, activeSeason, ddx_vUv, ddy_vUv, layer, splat
+    );
+}
+
 fn sampleDebugNonResolvedMicro(
     input: FragmentInput,
     activeSeason: i32,
@@ -3241,9 +3312,15 @@ if (debugMode == 16) {
         microSample = sampleResolvedTerrainColorLevel(input, layer);
         microColorPath = 1;
     } else if (hasLiveSplat) {
-        microSample = sampleMicroTextureWithSplat(
-            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
-        );
+        if (USE_FIXED_MATERIAL_FAMILIES) {
+            microSample = sampleMicroTextureWithFixedMaterialFamilies(
+                input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+            );
+        } else {
+            microSample = sampleMicroTextureWithSplat(
+                input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+            );
+        }
         microColorPath = 3;
     } else {
         microSample = sampleTileColor(

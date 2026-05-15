@@ -45,6 +45,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 const splatShaderCode = createSplatComputeShader({
                     tileCategories: this.tileCategories,
                     buildTileCategoryLookupWGSL: this.buildTileCategoryLookupWGSL,
+                    fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                 });
                 this.splatShaderModule = this.device.createShaderModule({
                     label: 'Splat Compute',
@@ -403,6 +404,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     authoredSplatSourceMinProbabilityFade: this.authoredSplatSourceMinProbabilityFade,
                     authoredSplatSourceWinnerSnapStart: this.authoredSplatSourceWinnerSnapStart,
                     authoredSplatSourceWinnerSnapEnd: this.authoredSplatSourceWinnerSnapEnd,
+                    fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                     ...extra,
                 };
             },

@@ -128,6 +128,7 @@ export class WebGPUTerrainGenerator {
                 )
             )
         );
+        this.splatFixedMaterialFamiliesEnabled = splat.fixedMaterialFamiliesEnabled === true;
         this.splatChunkPaletteEnabled = splat.chunkPaletteEnabled !== false;
         this.splatChunkPaletteMinCoverage = clamp01(
             Number.isFinite(splat.chunkPaletteMinCoverage)
