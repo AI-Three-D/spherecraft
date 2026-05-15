@@ -76,11 +76,11 @@ export function createEngineConfig() {
       splatDensity: 8,
       // Keep the live splat kernel local enough that 1-4 tile authored
       // grass/sand islands remain visible instead of being averaged away.
-      splatKernelSize: 5,
+      splatKernelSize: 1,
       // Stabilize sparse material ID slots across the 2x2 bilinear footprint
       // without widening the visible blend weights.
       slotSupportExpansionTexels: 1.5,
-      transitionSharpness: 1.0,
+      transitionSharpness: 2.5,
       transitionDominanceStart: 0.05,
       transitionDominanceEnd: 0.9,
       centerCategoryBias: 0.0,
@@ -88,6 +88,10 @@ export function createEngineConfig() {
       transitionBreakupWarpScale: 0.155,
       transitionBreakupWarpStrength: 0.65,
       transitionBreakupStrength: 0.10,
+      sourceMinorityCutoff: 0.18,
+      sourceMinorityFade: 0.10,
+      sourceWinnerSnapStart: 0.55,
+      sourceWinnerSnapEnd: 0.70,
       chunkPaletteEnabled: false,
   },
     lod: {
@@ -163,6 +167,8 @@ export function createEngineConfig() {
         lodEdgeAOStrength: 1.0,
         lodEdgeNormalStrength: 1.0,
         lodEdgeShadowStrength: 1.0,
+        enableMacroLayer: false,
+        forceMacroOverlay: false,
         pointSampleLodStart: 2,
         macroStartLod: 99,
         resolvedColorEnabled: true,
@@ -869,6 +875,9 @@ export function createGameDataConfig() {
           // representing how far "above" ground level this surface visually sits.
           // Higher values make the tile appear to sit on top at transition edges.
           tileLayerHeights: TILE_LAYER_HEIGHTS,
+          terrainAO: {
+            enabled: false,
+          },
         }
       ]
     },

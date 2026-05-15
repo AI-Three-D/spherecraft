@@ -37,6 +37,10 @@ const BIOME_REGIONAL_OCTAVES: i32 = 3;
 const BIOME_NOISE_LACUNARITY: f32 = 2.0;
 const BIOME_NOISE_GAIN: f32 = 0.5;
 const BIOME_RIDGED_OFFSET: f32 = 1.0;
+const BIOME_SIGNAL_GATE_DEAD_BAND: f32 = 0.08;
+const BIOME_SIGNAL_GATE_FULL_BAND: f32 = 0.88;
+const BIOME_SIGNAL_GATE_STRENGTH: f32 = 3.0;
+const BIOME_SIGNAL_PREFERENCE_FULL_BAND: f32 = 0.35;
 const SIMPLEX_F2: f32 = 0.3660254037844386;
 const SIMPLEX_G2: f32 = 0.21132486540518713;
 
@@ -222,7 +226,7 @@ fn biomeRidgedFbmNoise(wx: f32, wy: f32, scale: f32, seed: u32) -> f32 {
     return normalized * 2.0 - 1.0;
 }
 
-fn scoreBiomeSignal(value: f32, rule: BiomeSignalRule, wx: f32, wy: f32, seed: u32) -> f32 {
+fn scoreBiomeSignalBand(value: f32, rule: BiomeSignalRule, wx: f32, wy: f32, seed: u32) -> f32 {
     if (rule.weight <= 0.0) { return 1.0; }
 
     let tw = max(rule.transitionWidth, 0.001);
@@ -240,21 +244,54 @@ fn scoreBiomeSignal(value: f32, rule: BiomeSignalRule, wx: f32, wy: f32, seed: u
         band = 1.0;
     }
 
+    return clamp(band, 0.0, 1.0);
+}
+
+fn scoreBiomeSignalPreference(value: f32, rule: BiomeSignalRule) -> f32 {
+    if (rule.weight <= 0.0) { return 1.0; }
+
     let range = rule.max_val - rule.min_val;
     var pref = 1.0;
     if (range > 0.001) {
         let t = clamp((value - rule.min_val) / range, 0.0, 1.0);
         if (rule.preference < 0.25) {
             // low preference
-            pref = 1.0 - t * 0.5;
+            pref = 1.0 - smoothstep(BIOME_SIGNAL_PREFERENCE_FULL_BAND, 1.0, t);
         } else if (rule.preference > 0.75) {
             // high preference
-            pref = 0.5 + t * 0.5;
+            pref = smoothstep(0.0, 1.0 - BIOME_SIGNAL_PREFERENCE_FULL_BAND, t);
         }
         // mid: flat 1.0
     }
 
+    return clamp(pref, 0.0, 1.0);
+}
+
+fn scoreBiomeSignal(value: f32, rule: BiomeSignalRule, wx: f32, wy: f32, seed: u32) -> f32 {
+    let band = scoreBiomeSignalBand(value, rule, wx, wy, seed);
+    let pref = scoreBiomeSignalPreference(value, rule);
     return band * pref;
+}
+
+fn biomeSignalGate(band: f32, weight: f32, totalWeight: f32) -> f32 {
+    if (weight <= 0.0 || totalWeight <= 0.0) {
+        return 1.0;
+    }
+
+    let shapedBand = smoothstep(
+        BIOME_SIGNAL_GATE_DEAD_BAND,
+        BIOME_SIGNAL_GATE_FULL_BAND,
+        clamp(band, 0.0, 1.0)
+    );
+    if (shapedBand <= 0.0) {
+        return 0.0;
+    }
+
+    let exponent = (weight / totalWeight) * BIOME_SIGNAL_GATE_STRENGTH;
+    if (exponent <= 0.0) {
+        return 1.0;
+    }
+    return pow(shapedBand, exponent);
 }
 
 // ── Environmental suitability ───────────────────────────────────────
@@ -267,24 +304,34 @@ fn scoreBiomeEnv(
     var weightedSum = 0.0;
     let biomeSeed = seed + def.seedOffset;
 
-    let se = scoreBiomeSignal(elevation, def.elevation, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_ELEVATION);
+    let seBand = scoreBiomeSignalBand(elevation, def.elevation, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_ELEVATION);
+    let se = seBand * scoreBiomeSignalPreference(elevation, def.elevation);
     weightedSum += se * def.elevation.weight;
     totalWeight += def.elevation.weight;
 
-    let sh = scoreBiomeSignal(humidity, def.humidity, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_HUMIDITY);
+    let shBand = scoreBiomeSignalBand(humidity, def.humidity, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_HUMIDITY);
+    let sh = shBand * scoreBiomeSignalPreference(humidity, def.humidity);
     weightedSum += sh * def.humidity.weight;
     totalWeight += def.humidity.weight;
 
-    let st = scoreBiomeSignal(temperature, def.temperature, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_TEMPERATURE);
+    let stBand = scoreBiomeSignalBand(temperature, def.temperature, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_TEMPERATURE);
+    let st = stBand * scoreBiomeSignalPreference(temperature, def.temperature);
     weightedSum += st * def.temperature.weight;
     totalWeight += def.temperature.weight;
 
-    let ss = scoreBiomeSignal(slope, def.slope, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_SLOPE);
+    let ssBand = scoreBiomeSignalBand(slope, def.slope, wx, wy, biomeSeed + SIGNAL_DITHER_SEED_SLOPE);
+    let ss = ssBand * scoreBiomeSignalPreference(slope, def.slope);
     weightedSum += ss * def.slope.weight;
     totalWeight += def.slope.weight;
 
     if (totalWeight <= 0.0) { return 1.0; }
-    return weightedSum / totalWeight;
+    let averageScore = weightedSum / totalWeight;
+    let gate =
+        biomeSignalGate(seBand, def.elevation.weight, totalWeight) *
+        biomeSignalGate(shBand, def.humidity.weight, totalWeight) *
+        biomeSignalGate(stBand, def.temperature.weight, totalWeight) *
+        biomeSignalGate(ssBand, def.slope.weight, totalWeight);
+    return averageScore * gate;
 }
 
 // ── Deterministic seeded hash ───────────────────────────────────────

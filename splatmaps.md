@@ -15,6 +15,14 @@ Current visible problems:
   - **More prominent rim**: stronger, more AO-dependent, and shows a mode-`63` sand-colored forced-fast artifact.
 - AO is an amplifier for at least one rim, not the sole source. A faint non-AO base seam can remain with `terrainAO.enabled = false`.
 
+2026-05-15 biome-transition follow-up:
+
+- The `textureGather` micro-optimization was tried and reverted because it brought the rims back. Keep the working valid-branch path as explicit 4-corner `textureLoad` + manual bilinear unless gather ordering is re-tested with a dedicated GPU readback.
+- Wide sand/grass blends are already present before fog/aerial perspective. Fog/aerial perspective cannot be the source of the 50m+ material blend, but it can hide or reduce a sharp albedo rim in normal mode by adding smooth inscatter and reducing contrast.
+- Modes `44`-`48` are diagnostic views, not the same visual pipeline as normal mode: `44`/`45` return unlit/unfogged albedo, `46` is false-color path attribution, `47` is category-color splat blend, and `48` is reconstruction-delta heat. A rim in these modes means the contour exists in material/splat data or diagnostics; absence in normal mode means later lighting/fog/tonemapping can hide it, not create it.
+- Current transition work adds human-readable `transitionMeters` to biome signal rules. The packer converts it with `macroConfig.biomeScale` (`transitionWidth = transitionMeters * biomeScale`), so at `biomeScale = 0.001`, `transitionMeters: 12` packs as `transitionWidth: 0.012`.
+- Fixed a bug in the new score gate: the gate must use raw band membership (`seBand`, `shBand`, etc.), not preference-shaped scores (`se`, `sh`, etc.). Preference should rank a valid biome; it should not become an extra hard exclusion gate.
+
 Latest click/readback status:
 
 - `results.txt` clicked the faint red-arrow rim.
@@ -90,13 +98,11 @@ Key facts:
 - AO is an amplifier only. Do not chase AO until the base seam is fixed.
 - The more prominent right-side rim: mode `88` shows a staircase there, but it reads as the Class A stored dominant-category flip, not the faint Class B rim. These are different mechanisms.
 
-Next work — pick ONE of these options and implement it after measuring:
+Active code status:
 
-1. **Check generation first (zero shader cost)**: verify whether `splatCompute` stores exactly unit-sum weights. If stored texels don't sum to 1.0, hardware bilinear and manual accumulation normalize from different raw sums, which is the seam source. Fix in `splatCompute` weight storage if that's the case.
-2. **Replace fast path weights with manual bilinear**: in `sampleSplatData()` fast branch (line ~1646), replace `sampleSplatWeightsFiltered(uv, layer)` with explicit 4-corner `loadSplatWeights` + manual bilinear math (identical to what the fallback/union path does). This eliminates the method switch. Cost: 3 extra `textureLoad` calls per fragment for the bilinear-valid majority of terrain. Measure FPS before/after.
-3. **Transition zone blending**: keep the hardware fast path but, within N texels of a `bilinearValid == false` neighbor, blend toward the manual result. Preserves fast-path savings for interior terrain. More complex to implement.
-
-Do not implement option 2 or 3 without a FPS benchmark first. The fast path (`sampleSplatWeightsFiltered`) was a deliberate optimization.
+- The working fix is active: `sampleSplatData()` uses explicit 4-corner `loadSplatWeights` + manual bilinear math even when `bilinearValid == true`. This removes the method-switch seam by making the valid and fallback paths numerically consistent.
+- The attempted `textureGather` micro-optimization is not active. It brought the rims back and should not be retried without a dedicated gather-order/edge-behavior test.
+- Remaining wide sand/grass gradients are a separate generation/source-shaping problem, not the old hardware-filtered-weight method-switch bug.
 
 ## Concepts
 
@@ -122,10 +128,10 @@ Production `sampleSplatData()`:
 - Computes the 2x2 bilinear footprint from `uv * splatTexSize - 0.5`.
 - Loads IDs for `c00`, `c10`, `c01`, and `c11`.
 - Sets `bilinearValid` from a runtime ordered ID-set comparison across all four corners.
-- Uses fast reconstruction only when `bilinearValid == true`.
+- Uses manual 4-corner bilinear weights when `bilinearValid == true` and all IDs match.
 - Uses manual four-corner union accumulation when `bilinearValid == false`.
 
-Fast reconstruction uses `c00` IDs plus hardware-filtered weight channels. Fallback reconstruction accumulates all four corners by tile ID, keeps top 4 by accumulated weight, normalizes, then sorts by tile ID.
+The valid branch uses `c00` IDs plus explicit 4-corner manually filtered weight channels. Fallback reconstruction accumulates all four corners by tile ID, keeps top 4 by accumulated weight, normalizes, then sorts by tile ID.
 
 `sampleMicroTextureWithSplat()` then samples actual tile atlas colors from the reconstructed splat payload. With the current config, top-2 fast material sampling is disabled and the pure-dominant shortcut only applies at weight `>= 1.0`.
 
@@ -382,13 +388,7 @@ The slight global darkening in mode `87` confirms manual accumulation is systema
 
 The direct weight precision difference (hardware bilinear 8-bit blend factors) alone is too small (~0.002 per channel) to explain a visible seam. The more likely mechanism is the non-unit stored weight normalization divergence described above, but the exact magnitude is not yet measured.
 
-**Performance note**: `sampleSplatWeightsFiltered` is one `textureSampleLevel`. The fallback uses 4 × `textureLoad`. The fast path was a deliberate optimization saving 3 memory operations per fragment for the majority (valid zone) of terrain. The FPS gain from this optimization has not been re-measured. Do not remove or replace the fast path without a before/after FPS comparison. The fix options are:
-
-1. Replace `sampleSplatWeightsFiltered` with explicit 4-corner loads + manual bilinear in the fast path (same math as fallback). Correct and simple, but regresses the 3-read saving for all valid terrain fragments.
-2. Keep the fast path but blend the result toward the manual accumulation within N texels of the bilinear-valid boundary (transition zone smoothing). More complex, preserves the fast-path savings for interior pixels.
-3. Address at generation: ensure `splatCompute` stores exactly unit-sum weights per texel, so hardware bilinear and manual bilinear produce the same normalized result. If the stored sums are already ~1.0 everywhere, this is ruled out and the mechanism must be something else.
-
-Option 3 is zero shader cost if it applies. Check `splatCompute` output weight sums before implementing option 1 or 2.
+**Performance note**: `sampleSplatWeightsFiltered` was one `textureSampleLevel`. The active fix uses 4 × `textureLoad` in the formerly valid branch, so it costs 3 extra splat-weight texture operations for those pixels. This is the known working version. The `textureGather` replacement was tested and reverted because it reintroduced rims.
 
 Readback gap to resolve:
 

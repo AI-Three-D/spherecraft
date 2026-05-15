@@ -16,42 +16,26 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         async initializePipelines() {
 
                 // ── Standard terrain shader (base height / macro) ─────────
-                const terrainShaderCode = createAdvancedTerrainComputeShader({
-                    baseGenerator: this.baseGenerator,
-                    maxBiomes: this.maxGpuBiomes,
-                    terrainShaderBundle: this.terrainShaderBundle,
-                    tileCategories: this.tileCategories,
-                    tileTypes: this.tileTypes,
-                });
+                const terrainShaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions());
                 this.terrainShaderModule = this.device.createShaderModule({
                     label: 'Advanced Terrain Compute',
                     code: terrainShaderCode
                 });
 
                 // ── Height-input terrain shader (normal + tile from height) ─
-                const heightInputShaderCode = createAdvancedTerrainComputeShader({
-                    baseGenerator: this.baseGenerator,
+                const heightInputShaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
                     hasHeightBindings: true,
-                    maxBiomes: this.maxGpuBiomes,
-                    terrainShaderBundle: this.terrainShaderBundle,
-                    tileCategories: this.tileCategories,
-                    tileTypes: this.tileTypes,
-                });
+                }));
                 this.heightInputShaderModule = this.device.createShaderModule({
                     label: 'Height Input Terrain Compute',
                     code: heightInputShaderCode
                 });
 
                 // ── Micro terrain shader (height + tile inputs) ────────────
-                const microShaderCode = createAdvancedTerrainComputeShader({
-                    baseGenerator: this.baseGenerator,
+                const microShaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
                     hasHeightBindings: true,
                     hasTileBindings: true,
-                    maxBiomes: this.maxGpuBiomes,
-                    terrainShaderBundle: this.terrainShaderBundle,
-                    tileCategories: this.tileCategories,
-                    tileTypes: this.tileTypes,
-                });
+                }));
                 this.microShaderModule = this.device.createShaderModule({
                     label: 'Micro Terrain Compute',
                     code: microShaderCode
@@ -408,6 +392,21 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 this._terrainUniformScratch = new ArrayBuffer(512);
             },
 
+        _getAdvancedTerrainShaderOptions(extra = {}) {
+                return {
+                    baseGenerator: this.baseGenerator,
+                    maxBiomes: this.maxGpuBiomes,
+                    terrainShaderBundle: this.terrainShaderBundle,
+                    tileCategories: this.tileCategories,
+                    tileTypes: this.tileTypes,
+                    authoredSplatSourceMinProbability: this.authoredSplatSourceMinProbability,
+                    authoredSplatSourceMinProbabilityFade: this.authoredSplatSourceMinProbabilityFade,
+                    authoredSplatSourceWinnerSnapStart: this.authoredSplatSourceWinnerSnapStart,
+                    authoredSplatSourceWinnerSnapEnd: this.authoredSplatSourceWinnerSnapEnd,
+                    ...extra,
+                };
+            },
+
         _getHeightInputPipelineCacheKey(format, heightFormat = 'r32float') {
                 return `${format || 'rgba32float'}|h:${gpuFormatSampleType(heightFormat || 'r32float')}`;
             },
@@ -419,15 +418,10 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 const cached = this._heightInputPipelineCache?.get(cacheKey);
                 if (cached) return cached;
 
-                const shaderCode = createAdvancedTerrainComputeShader({
-                    baseGenerator: this.baseGenerator,
+                const shaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
                     outputFormat: fmt,
                     hasHeightBindings: true,
-                    maxBiomes: this.maxGpuBiomes,
-                    terrainShaderBundle: this.terrainShaderBundle,
-                    tileCategories: this.tileCategories,
-                    tileTypes: this.tileTypes,
-                });
+                }));
                 const shaderModule = this.device.createShaderModule({
                     label: `Height Input Terrain Compute (${fmt})`,
                     code: shaderCode
@@ -487,16 +481,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 const cached = this._microPipelineCache?.get(cacheKey);
                 if (cached) return cached;
 
-                const shaderCode = createAdvancedTerrainComputeShader({
-                    baseGenerator: this.baseGenerator,
+                const shaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
                     outputFormat: fmt,
                     hasHeightBindings: true,
                     hasTileBindings: true,
-                    maxBiomes: this.maxGpuBiomes,
-                    terrainShaderBundle: this.terrainShaderBundle,
-                    tileCategories: this.tileCategories,
-                    tileTypes: this.tileTypes,
-                });
+                }));
                 const shaderModule = this.device.createShaderModule({
                     label: `Micro Terrain Compute (${fmt})`,
                     code: shaderCode
@@ -1163,14 +1152,9 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 const cached = this._terrainPipelineCache?.get(fmt);
                 if (cached) return cached;
 
-                const shaderCode = createAdvancedTerrainComputeShader({
-                    baseGenerator: this.baseGenerator,
+                const shaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
                     outputFormat: fmt,
-                    maxBiomes: this.maxGpuBiomes,
-                    terrainShaderBundle: this.terrainShaderBundle,
-                    tileCategories: this.tileCategories,
-                    tileTypes: this.tileTypes,
-                });
+                }));
                 const shaderModule = this.device.createShaderModule({
                     label: `Terrain Compute (${fmt})`,
                     code: shaderCode
@@ -1216,6 +1200,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     this.seed,
                     {
                         maxBiomes: this.maxGpuBiomes,
+                        biomeScale: this.macroConfig?.biomeScale,
                     }
                 );
 

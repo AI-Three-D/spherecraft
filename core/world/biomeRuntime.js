@@ -144,6 +144,21 @@ function normalizePreference(value) {
     }
 }
 
+function normalizeTransitionMeters(value) {
+    if (!Number.isFinite(value)) return null;
+    return clampNumber(value, 0, 0.0, 100000.0);
+}
+
+function resolvePackedTransitionWidth(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation, options = {}) {
+    const authoredWidth = clampNumber(rule.transitionWidth, fallback.transitionWidth, 0.001, 1.0);
+    const meters = Number.isFinite(rule.transitionMeters) ? rule.transitionMeters : null;
+    const biomeScale = Math.abs(Number.isFinite(options.biomeScale) ? options.biomeScale : 0);
+    if (meters != null && meters > 0 && biomeScale > 0) {
+        return clampNumber(meters * biomeScale, authoredWidth, 0.001, 1.0);
+    }
+    return authoredWidth;
+}
+
 function normalizeSignalRule(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation, bounds = {}) {
     const minValue = clampNumber(rule.min, fallback.min, bounds.min, bounds.max);
     const maxValue = clampNumber(rule.max, fallback.max, bounds.min, bounds.max);
@@ -154,6 +169,7 @@ function normalizeSignalRule(rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevatio
         min: orderedMin,
         max: orderedMax,
         transitionWidth: clampNumber(rule.transitionWidth, fallback.transitionWidth, 0.001, 1.0),
+        transitionMeters: normalizeTransitionMeters(rule.transitionMeters),
         preference: normalizePreference(rule.preference ?? fallback.preference),
         ditherScale: clampNumber(rule.ditherScale, fallback.ditherScale, 0.0, 1.0),
         ditherStrength: clampNumber(rule.ditherStrength, fallback.ditherStrength, 0.0, 1.0),
@@ -465,10 +481,10 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
         view.setFloat32(biomeOffset + 24, treeWeight, true);
         view.setFloat32(biomeOffset + 28, 0.0, true);
 
-        writeSignalRule(view, biomeOffset + 32, biome?.signals?.elevation, DEFAULT_SIGNAL_RULES.elevation);
-        writeSignalRule(view, biomeOffset + 64, biome?.signals?.humidity, DEFAULT_SIGNAL_RULES.humidity);
-        writeSignalRule(view, biomeOffset + 96, biome?.signals?.temperature, DEFAULT_SIGNAL_RULES.temperature);
-        writeSignalRule(view, biomeOffset + 128, biome?.signals?.slope, DEFAULT_SIGNAL_RULES.slope);
+        writeSignalRule(view, biomeOffset + 32, biome?.signals?.elevation, DEFAULT_SIGNAL_RULES.elevation, options);
+        writeSignalRule(view, biomeOffset + 64, biome?.signals?.humidity, DEFAULT_SIGNAL_RULES.humidity, options);
+        writeSignalRule(view, biomeOffset + 96, biome?.signals?.temperature, DEFAULT_SIGNAL_RULES.temperature, options);
+        writeSignalRule(view, biomeOffset + 128, biome?.signals?.slope, DEFAULT_SIGNAL_RULES.slope, options);
     }
 
     return {
@@ -487,11 +503,11 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
     };
 }
 
-function writeSignalRule(view, offset, rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation) {
+function writeSignalRule(view, offset, rule = {}, fallback = DEFAULT_SIGNAL_RULES.elevation, options = {}) {
     const normalizedRule = {
         min: Number.isFinite(rule.min) ? rule.min : fallback.min,
         max: Number.isFinite(rule.max) ? rule.max : fallback.max,
-        transitionWidth: clampNumber(rule.transitionWidth, fallback.transitionWidth, 0.001, 1.0),
+        transitionWidth: resolvePackedTransitionWidth(rule, fallback, options),
         preference: normalizePreference(rule.preference ?? fallback.preference),
         ditherScale: clampNumber(rule.ditherScale, fallback.ditherScale, 0.0, 1.0),
         ditherStrength: clampNumber(rule.ditherStrength, fallback.ditherStrength, 0.0, 1.0),

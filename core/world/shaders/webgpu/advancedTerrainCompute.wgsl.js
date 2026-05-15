@@ -2,6 +2,11 @@
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
 
+function wgslFloat(value, fallback) {
+  const n = Number.isFinite(value) ? value : fallback;
+  return Number(n).toFixed(6);
+}
+
 export function createAdvancedTerrainComputeShader(options = {}) {
   const shaderBundle = options?.terrainShaderBundle;
   if (!shaderBundle) {
@@ -30,6 +35,30 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;
   const maxBiomes = options?.maxBiomes ?? 16;
+  const authoredSplatSourceMinProbability = Math.max(
+    0.0,
+    Math.min(1.0, Number.isFinite(options?.authoredSplatSourceMinProbability)
+      ? options.authoredSplatSourceMinProbability
+      : 0.18)
+  );
+  const authoredSplatSourceMinProbabilityFade = Math.max(
+    0.001,
+    Number.isFinite(options?.authoredSplatSourceMinProbabilityFade)
+      ? options.authoredSplatSourceMinProbabilityFade
+      : 0.10
+  );
+  const authoredSplatSourceWinnerSnapStart = Math.max(
+    0.0,
+    Math.min(1.0, Number.isFinite(options?.authoredSplatSourceWinnerSnapStart)
+      ? options.authoredSplatSourceWinnerSnapStart
+      : 0.55)
+  );
+  const authoredSplatSourceWinnerSnapEnd = Math.max(
+    authoredSplatSourceWinnerSnapStart + 0.001,
+    Math.min(1.0, Number.isFinite(options?.authoredSplatSourceWinnerSnapEnd)
+      ? options.authoredSplatSourceWinnerSnapEnd
+      : 0.70)
+  );
 
   return [
     base.constants(),
@@ -86,6 +115,11 @@ ${createBiomeScoringWGSL({ maxBiomes })}
 ${hasHeightBindings ? '@group(0) @binding(2) var heightMap: texture_2d<f32>;' : ''}
 ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
 @group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
+
+const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY: f32 = ${wgslFloat(authoredSplatSourceMinProbability, 0.18)};
+const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY_FADE: f32 = ${wgslFloat(authoredSplatSourceMinProbabilityFade, 0.10)};
+const AUTHORED_SPLAT_SOURCE_WINNER_SNAP_START: f32 = ${wgslFloat(authoredSplatSourceWinnerSnapStart, 0.55)};
+const AUTHORED_SPLAT_SOURCE_WINNER_SNAP_END: f32 = ${wgslFloat(authoredSplatSourceWinnerSnapEnd, 0.70)};
 
 fn getSpherePoint(face: i32, u: f32, v: f32) -> vec3<f32> {
     var cubePos: vec3<f32>;
@@ -573,6 +607,25 @@ fn authoredSmoothSharpenedScore(probability: f32) -> f32 {
     return p2 * p2;
 }
 
+fn authoredSmoothSourceGate(probability: f32, topProbability: f32) -> f32 {
+    let p = clamp(probability, 0.0, 1.0);
+    let floorEnd = min(
+        1.0,
+        AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY + max(AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY_FADE, 0.001)
+    );
+    let floorGate = smoothstep(AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY, floorEnd, p);
+
+    let winnerSnap = smoothstep(
+        AUTHORED_SPLAT_SOURCE_WINNER_SNAP_START,
+        AUTHORED_SPLAT_SOURCE_WINNER_SNAP_END,
+        clamp(topProbability, 0.0, 1.0)
+    );
+    let loserDistance = clamp((topProbability - p) / max(topProbability, 0.0001), 0.0, 1.0);
+    let loserGate = 1.0 - winnerSnap * smoothstep(0.20, 0.55, loserDistance);
+
+    return clamp(floorGate * loserGate, 0.0, 1.0);
+}
+
 fn encodeSmoothSplatTileId(tileId: u32) -> f32 {
     if (tileId >= 255u) {
         return 1.0;
@@ -714,13 +767,27 @@ fn computeAuthoredSmoothSplatPayload(
         return payload;
     }
 
+    var topProbability = 0.0;
+    var topIndex = 0u;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let probability = scores[i] / totalScore;
+        if (probability > topProbability) {
+            topProbability = probability;
+            topIndex = i;
+        }
+    }
+
     // Use only continuous sharpened scores — no per-cell stochastic selection
     // and no minority floor boost. Both introduced discrete spatial boundaries
     // at the biomeSelectionHash cell scale (8m) that appeared as blocky rims.
     var smoothScores: array<f32, MAX_BIOMES>;
     for (var i = 0u; i < count; i = i + 1u) {
         let probability = scores[i] / totalScore;
-        smoothScores[i] = authoredSmoothSharpenedScore(probability);
+        var sourceGate = authoredSmoothSourceGate(probability, topProbability);
+        if (i == topIndex) {
+            sourceGate = 1.0;
+        }
+        smoothScores[i] = authoredSmoothSharpenedScore(probability) * sourceGate;
     }
 
     for (var i = 0u; i < count; i = i + 1u) {
