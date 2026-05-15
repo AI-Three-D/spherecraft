@@ -479,7 +479,9 @@ export function packBiomeUniformData(worldAuthoring = createDefaultWorldAuthorin
         view.setFloat32(biomeOffset + 16, clampNumber(regionalVariation.noiseStrength, DEFAULT_REGIONAL_VARIATION.noiseStrength, 0.0, 1.0), true);
         view.setUint32(biomeOffset + 20, Math.trunc(clampNumber(regionalVariation.seedOffset, 0, 0, 0x7fffffff)) >>> 0, true);
         view.setFloat32(biomeOffset + 24, treeWeight, true);
-        view.setFloat32(biomeOffset + 28, 0.0, true);
+        const bw = biome.blendWidth;
+        const blendHalfWidth = (Number.isFinite(bw) && bw > 0) ? Math.min(bw, 0.5) : 0.12;
+        view.setFloat32(biomeOffset + 28, blendHalfWidth, true);
 
         writeSignalRule(view, biomeOffset + 32, biome?.signals?.elevation, DEFAULT_SIGNAL_RULES.elevation, options);
         writeSignalRule(view, biomeOffset + 64, biome?.signals?.humidity, DEFAULT_SIGNAL_RULES.humidity, options);

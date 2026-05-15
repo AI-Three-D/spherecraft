@@ -601,10 +601,13 @@ fn smoothSplatRepresentativeTileId(weightIndex: u32) -> u32 {
     return 255u;
 }
 
-fn authoredSmoothSharpenedScore(probability: f32) -> f32 {
-    let p = clamp(probability, 0.0, 1.0);
-    let p2 = p * p;
-    return p2 * p2;
+fn authoredSmoothSharpenedScore(probability: f32, halfWidth: f32) -> f32 {
+    // Smoothstep over the probability range [0.5 - halfWidth, 0.5 + halfWidth].
+    // Output is exactly 0 below the low edge and exactly 1 above the high edge.
+    // halfWidth = 0.03 is snappy, 0.20 is gradual.
+    // Biomes with isolated small patches need wider halfWidth to survive at low probability.
+    let hw = clamp(halfWidth, 0.005, 0.5);
+    return smoothstep(0.5 - hw, 0.5 + hw, clamp(probability, 0.0, 1.0));
 }
 
 fn authoredSmoothSourceGate(probability: f32, topProbability: f32) -> f32 {
@@ -787,7 +790,8 @@ fn computeAuthoredSmoothSplatPayload(
         if (i == topIndex) {
             sourceGate = 1.0;
         }
-        smoothScores[i] = authoredSmoothSharpenedScore(probability) * sourceGate;
+        let biomeHalfWidth = biomeConfigUniforms.biomes[i].blendHalfWidth;
+        smoothScores[i] = authoredSmoothSharpenedScore(probability, biomeHalfWidth) * sourceGate;
     }
 
     for (var i = 0u; i < count; i = i + 1u) {

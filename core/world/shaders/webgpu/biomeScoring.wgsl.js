@@ -62,8 +62,8 @@ struct BiomeDef {
     noiseScale:    f32,
     noiseStrength: f32,
     seedOffset:    u32,
-    treeWeight:    f32,     // Authored tree asset profile weight for eligibility bakes.
-    _pad1:         f32,
+    treeWeight:         f32,   // Authored tree asset profile weight for eligibility bakes.
+    blendHalfWidth:     f32,   // Smoothstep half-width in probability space. Packed from biomes.json blendWidth. Lower = snappier (0.03 ≈ snappy, 0.20 = gradual). Biomes with small patches need wider values to survive at lower probability.
     elevation:     BiomeSignalRule,
     humidity:      BiomeSignalRule,
     temperature:   BiomeSignalRule,

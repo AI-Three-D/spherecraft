@@ -52,6 +52,7 @@
       },
       "tags": ["temperate", "open"],
       "baseWeight": 1.0,
+      "blendWidth": 0.2,
       "signals": {
         "elevation": {
           "min": -0.5,
@@ -108,6 +109,7 @@
       },
       "tags": ["temperate", "woodland"],
       "baseWeight": 0.8,
+      "blendWidth": 0.08,
       "signals": {
         "elevation": {
           "min": -0.3,
@@ -164,6 +166,7 @@
       },
       "tags": ["arid", "hot"],
       "baseWeight": 0.7,
+      "blendWidth": 0.06,
       "signals": {
         "elevation": {
           "min": -0.3,
@@ -219,6 +222,7 @@
         "macro": "SNOW_FRESH_1"
       },
       "tags": ["cold", "polar"],
+      "blendWidth": 0.06,
       "baseWeight": 0.6,
       "signals": {
         "elevation": {

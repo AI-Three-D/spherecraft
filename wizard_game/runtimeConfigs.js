@@ -80,9 +80,9 @@ export function createEngineConfig() {
       // Stabilize sparse material ID slots across the 2x2 bilinear footprint
       // without widening the visible blend weights.
       slotSupportExpansionTexels: 1.5,
-      transitionSharpness: 2.5,
+      transitionSharpness: 4.5,
       transitionDominanceStart: 0.05,
-      transitionDominanceEnd: 0.9,
+      transitionDominanceEnd: 0.75,
       centerCategoryBias: 0.0,
       transitionBreakupScale: 0.48,
       transitionBreakupWarpScale: 0.155,
@@ -90,8 +90,8 @@ export function createEngineConfig() {
       transitionBreakupStrength: 0.10,
       sourceMinorityCutoff: 0.18,
       sourceMinorityFade: 0.10,
-      sourceWinnerSnapStart: 0.55,
-      sourceWinnerSnapEnd: 0.70,
+      sourceWinnerSnapStart: 0.51,
+      sourceWinnerSnapEnd: 0.58,
       chunkPaletteEnabled: false,
   },
     lod: {
@@ -876,7 +876,7 @@ export function createGameDataConfig() {
           // Higher values make the tile appear to sit on top at transition edges.
           tileLayerHeights: TILE_LAYER_HEIGHTS,
           terrainAO: {
-            enabled: false,
+            enabled: true,
           },
         }
       ]
