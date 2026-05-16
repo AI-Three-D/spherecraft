@@ -126,16 +126,12 @@ export class TreeDetailSystem {
         }
     }
 
-        /**
+    /**
      * Trigger a single LOD test capture. Called from GameEngine on key press.
      */
-        triggerLODTestCapture() {
-            this._leafLODTestSuite?.triggerCapture();
-        }
-    
-        getLeafLODTestSuite() {
-            return this._leafLODTestSuite;
-        }
+    triggerLODTestCapture() {
+        this._leafLODTestSuite?.triggerCapture();
+    }
 
     isTestSuiteEnabled() {
         return this._testSuiteEnabled;
@@ -674,7 +670,7 @@ export class TreeDetailSystem {
             this._dedupReadbackPending = false;
         }).catch((err) => {
             Logger.warn(`[TreeDetailSystem] dedup readback failed: ${err?.message || err}`);
-            try { this._dedupReadbackBuffer?.unmap(); } catch (_) {}
+            try { this._dedupReadbackBuffer?.unmap(); } catch { /* ignore cleanup failure */ }
             this._dedupReadbackQueued = false;
             this._dedupReadbackPending = false;
         });

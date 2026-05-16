@@ -1,4 +1,4 @@
-export { Geometry } from './Geometry.js';
-export { Texture, TextureFormat, TextureFilter, TextureWrap } from './Texture.js';
-export { Material } from './Material.js';
-export { RenderTarget } from './RenderTarget.js';
+export { Geometry } from './geometry.js';
+export { Texture, TextureFormat, TextureFilter, TextureWrap } from './texture.js';
+export { Material } from './material.js';
+export { RenderTarget } from './renderTarget.js';

@@ -316,7 +316,5 @@ export class AssetDefinition {
         data[offset + 7] = this.selfOcclusion.darkening;
 
         return data;
-        
-        return data;
     }
 }

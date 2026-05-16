@@ -21,14 +21,13 @@
  * @param {number} [seed]   Stable seed for edge dithering
  * @returns {number}       Score in 0..1
  */
-export function scoreSignal(value, rule, worldX = 0, worldY = 0, seed = 0) {
+export function scoreSignalBand(value, rule, worldX = 0, worldY = 0, seed = 0) {
     if (!rule) return 1.0;
 
     const {
         min,
         max,
         transitionWidth = 0.1,
-        preference = 'mid',
         ditherScale = 0,
         ditherStrength = 0,
     } = rule;
@@ -48,21 +47,41 @@ export function scoreSignal(value, rule, worldX = 0, worldY = 0, seed = 0) {
         band = 1.0;
     }
 
+    return clamp01(band);
+}
+
+function scoreSignalPreference(value, rule) {
+    if (!rule) return 1.0;
+
+    const {
+        min,
+        max,
+        preference = 'mid',
+    } = rule;
+
     // Linear preference curve within the band
     let pref = 1.0;
     if (preference === 'low') {
         const range = max - min;
         if (range > 0.001) {
-            pref = 1 - Math.max(0, Math.min(1, (value - min) / range)) * 0.5;
+            const t = clamp01((value - min) / range);
+            pref = 1 - smoothstep(BIOME_SIGNAL_PREFERENCE_FULL_BAND, 1, t);
         }
     } else if (preference === 'high') {
         const range = max - min;
         if (range > 0.001) {
-            pref = 0.5 + Math.max(0, Math.min(1, (value - min) / range)) * 0.5;
+            const t = clamp01((value - min) / range);
+            pref = smoothstep(0, 1 - BIOME_SIGNAL_PREFERENCE_FULL_BAND, t);
         }
     }
     // 'mid' = flat 1.0
 
+    return clamp01(pref);
+}
+
+export function scoreSignal(value, rule, worldX = 0, worldY = 0, seed = 0) {
+    const band = scoreSignalBand(value, rule, worldX, worldY, seed);
+    const pref = scoreSignalPreference(value, rule);
     return band * pref;
 }
 
@@ -93,10 +112,18 @@ export function computeEnvironmentalScore(
     const temperature = scoreSignalContribution('temperature', signals, biomeSignals, worldX, worldY, baseSeed);
     const slope = scoreSignalContribution('slope', signals, biomeSignals, worldX, worldY, baseSeed);
 
-    const weightedSum = elevation.weighted + humidity.weighted + temperature.weighted + slope.weighted;
     const totalWeight = elevation.weight + humidity.weight + temperature.weight + slope.weight;
+    if (totalWeight <= 0) return 1.0;
 
-    return totalWeight > 0 ? weightedSum / totalWeight : 1.0;
+    const weightedSum = elevation.weighted + humidity.weighted + temperature.weighted + slope.weighted;
+    const averageScore = weightedSum / totalWeight;
+    const gate =
+        signalGate(elevation.band, elevation.weight, totalWeight) *
+        signalGate(humidity.band, humidity.weight, totalWeight) *
+        signalGate(temperature.band, temperature.weight, totalWeight) *
+        signalGate(slope.band, slope.weight, totalWeight);
+
+    return averageScore * gate;
 }
 
 const SIGNAL_DITHER_SEED_OFFSETS = Object.freeze({
@@ -111,6 +138,10 @@ const BIOME_REGIONAL_OCTAVES = 3;
 const BIOME_NOISE_LACUNARITY = 2.0;
 const BIOME_NOISE_GAIN = 0.5;
 const BIOME_RIDGED_OFFSET = 1.0;
+const BIOME_SIGNAL_GATE_DEAD_BAND = 0.08;
+const BIOME_SIGNAL_GATE_FULL_BAND = 0.88;
+const BIOME_SIGNAL_GATE_STRENGTH = 3.0;
+const BIOME_SIGNAL_PREFERENCE_FULL_BAND = 0.35;
 
 function toUint32(value) {
     return value >>> 0;
@@ -122,6 +153,26 @@ function hashStep(value, multiplier) {
 
 function clamp01(value) {
     return Math.max(0, Math.min(1, value));
+}
+
+function smoothstep(edge0, edge1, x) {
+    if (edge0 === edge1) return x < edge0 ? 0 : 1;
+    const t = clamp01((x - edge0) / (edge1 - edge0));
+    return t * t * (3 - 2 * t);
+}
+
+function signalGate(band, weight, totalWeight) {
+    if (!(weight > 0) || !(totalWeight > 0)) return 1.0;
+
+    const shapedBand = smoothstep(
+        BIOME_SIGNAL_GATE_DEAD_BAND,
+        BIOME_SIGNAL_GATE_FULL_BAND,
+        clamp01(band)
+    );
+    if (shapedBand <= 0) return 0.0;
+
+    const exponent = (weight / totalWeight) * BIOME_SIGNAL_GATE_STRENGTH;
+    return exponent > 0 ? Math.pow(shapedBand, exponent) : 1.0;
 }
 
 function clampSignedUnit(value) {
@@ -313,8 +364,9 @@ function scoreSignalContribution(key, signals, biomeSignals, worldX, worldY, bas
 
     const weight = rule.weight ?? 1.0;
     const ditherSeed = toUint32(baseSeed + (SIGNAL_DITHER_SEED_OFFSETS[key] ?? 0));
-    const score = scoreSignal(value, rule, worldX, worldY, ditherSeed);
-    return { weighted: score * weight, weight };
+    const band = scoreSignalBand(value, rule, worldX, worldY, ditherSeed);
+    const score = band * scoreSignalPreference(value, rule);
+    return { band, score, weighted: score * weight, weight };
 }
 
 /**

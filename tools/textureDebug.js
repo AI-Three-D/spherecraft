@@ -209,7 +209,7 @@ export async function downloadCpuAndGpuAtlases(options = {}) {
       delayBetweenDownloadsMs = 150
     } = options;
   
-    try {
+    {
       const gpuAtlasMgr = new TextureAtlasManager();
       await gpuAtlasMgr.initializeAtlases(true, false);
 
@@ -281,8 +281,6 @@ export async function downloadCpuAndGpuAtlases(options = {}) {
       // Return atlas managers for further inspection
       return { gpuAtlasMgr };
   
-    } catch (err) {
-      throw err;
     }
   }
 

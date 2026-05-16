@@ -176,8 +176,8 @@ export class ActorGPUBuffers {
                     slot.buffer.unmap();
                     slot.state = 'idle';
                     callback(out);
-                } catch (e) {
-                    try { slot.buffer.unmap(); } catch (_) {}
+                } catch {
+                    try { slot.buffer.unmap(); } catch { /* already unmapped */ }
                     slot.state = 'idle';
                 }
             }).catch(() => { slot.state = 'idle'; });

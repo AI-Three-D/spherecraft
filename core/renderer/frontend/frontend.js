@@ -6,7 +6,7 @@ import { UniformManager } from '../../lighting/uniformManager.js';
 import { ClusteredLightManager } from '../../lighting/clusteredLightManager.js';
 import { ClusterGrid } from '../../lighting/clusterGrid.js';
 
-import { GenericMeshRenderer } from '../genericMeshRenderer.js';
+import { GenericMeshRenderer } from '../mesh/genericMeshRenderer.js';
 import { LightingController } from '../../lighting/lightingController.js';
 import { Logger} from '../../../shared/Logger.js'
 import { WeatherController } from '../environment/WeatherController.js';
@@ -470,7 +470,7 @@ export class Frontend {
             }
 
             if (this.engineConfig?.features?.skyEffects !== false) {
-                const { SkyRenderer } = await import('../SkyRenderer.js');
+                const { SkyRenderer } = await import('../sky/SkyRenderer.js');
                 const spaceLODThreshold = 1000;
                 this.skyRenderer = new SkyRenderer(this.backend, this.atmosphereLUT, {
                     spaceLODThreshold,
@@ -481,11 +481,11 @@ export class Frontend {
         }
 
         if (this.engineConfig?.features?.skyEffects !== false) {
-            const { StarRenderer } = await import('../starRenderer.js');
+            const { StarRenderer } = await import('../sky/StarRenderer.js');
             this.starRenderer = new StarRenderer(this.backend);
             await this.starRenderer.initialize();
 
-            const { MoonRenderer } = await import('../MoonRenderer.js');
+            const { MoonRenderer } = await import('../sky/MoonRenderer.js');
             this.moonRenderer = new MoonRenderer(this.backend);
             await this.moonRenderer.initialize();
         } else {
@@ -1048,7 +1048,7 @@ updateLighting(starSystem) {
         if (doValidationScope) {
             const error = await this.backend.device.popErrorScope();
             if (error) {
-
+                // Error scopes are sampled here only to drain validation state.
             }
         }
     }

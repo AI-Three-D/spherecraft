@@ -388,10 +388,10 @@ export class TileCache {
             if (texture._gpuTexture && texture._gpuTexture.texture) {
                 texture._gpuTexture.texture.destroy();
             }
-        } catch (_) { /* ignore — may already be destroyed */ }
+        } catch { /* ignore - may already be destroyed */ }
         try {
             if (typeof texture.dispose === 'function') texture.dispose();
-        } catch (_) { /* ignore */ }
+        } catch { /* ignore */ }
     }
 
     /**

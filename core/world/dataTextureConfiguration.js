@@ -77,6 +77,7 @@ export class DataTextureConfig {
         // Sanity check
         if (localX < 0 || localX >= this.chunksPerAxis || 
             localY < 0 || localY >= this.chunksPerAxis) {
+            // Keep returning computed coordinates; callers perform validation.
         }
         
         return { localX, localY };

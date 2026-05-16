@@ -2,6 +2,11 @@
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
 
+function wgslFloat(value, fallback) {
+  const n = Number.isFinite(value) ? value : fallback;
+  return Number(n).toFixed(6);
+}
+
 export function createAdvancedTerrainComputeShader(options = {}) {
   const shaderBundle = options?.terrainShaderBundle;
   if (!shaderBundle) {
@@ -30,6 +35,31 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;
   const maxBiomes = options?.maxBiomes ?? 16;
+  const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
+  const authoredSplatSourceMinProbability = Math.max(
+    0.0,
+    Math.min(1.0, Number.isFinite(options?.authoredSplatSourceMinProbability)
+      ? options.authoredSplatSourceMinProbability
+      : 0.18)
+  );
+  const authoredSplatSourceMinProbabilityFade = Math.max(
+    0.001,
+    Number.isFinite(options?.authoredSplatSourceMinProbabilityFade)
+      ? options.authoredSplatSourceMinProbabilityFade
+      : 0.10
+  );
+  const authoredSplatSourceWinnerSnapStart = Math.max(
+    0.0,
+    Math.min(1.0, Number.isFinite(options?.authoredSplatSourceWinnerSnapStart)
+      ? options.authoredSplatSourceWinnerSnapStart
+      : 0.55)
+  );
+  const authoredSplatSourceWinnerSnapEnd = Math.max(
+    authoredSplatSourceWinnerSnapStart + 0.001,
+    Math.min(1.0, Number.isFinite(options?.authoredSplatSourceWinnerSnapEnd)
+      ? options.authoredSplatSourceWinnerSnapEnd
+      : 0.70)
+  );
 
   return [
     base.constants(),
@@ -86,6 +116,12 @@ ${createBiomeScoringWGSL({ maxBiomes })}
 ${hasHeightBindings ? '@group(0) @binding(2) var heightMap: texture_2d<f32>;' : ''}
 ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
 @group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
+
+const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY: f32 = ${wgslFloat(authoredSplatSourceMinProbability, 0.18)};
+const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY_FADE: f32 = ${wgslFloat(authoredSplatSourceMinProbabilityFade, 0.10)};
+const AUTHORED_SPLAT_SOURCE_WINNER_SNAP_START: f32 = ${wgslFloat(authoredSplatSourceWinnerSnapStart, 0.55)};
+const AUTHORED_SPLAT_SOURCE_WINNER_SNAP_END: f32 = ${wgslFloat(authoredSplatSourceWinnerSnapEnd, 0.70)};
+const USE_FIXED_MATERIAL_FAMILY_SPLATS: bool = ${useFixedMaterialFamilySplats ? 'true' : 'false'};
 
 fn getSpherePoint(face: i32, u: f32, v: f32) -> vec3<f32> {
     var cubePos: vec3<f32>;
@@ -546,6 +582,235 @@ fn debugForcedTileType() -> u32 {
     return 0xffffffffu;
 }
 
+const SMOOTH_SPLAT_WEIGHT_COUNT: u32 = 10u;
+const AUTHORED_SMOOTH_MINORITY_FLOOR_MAX: f32 = 0.34;
+const AUTHORED_SMOOTH_MINORITY_FLOOR_START: f32 = 0.12;
+const AUTHORED_SMOOTH_MINORITY_FLOOR_FULL: f32 = 0.28;
+const AUTHORED_SMOOTH_MINORITY_TIE_FADE_START: f32 = 0.36;
+const AUTHORED_SMOOTH_MINORITY_TIE_FADE_END: f32 = 0.46;
+
+fn smoothSplatRepresentativeTileId(weightIndex: u32) -> u32 {
+    if (weightIndex == 0u) { return SURFACE_GRASS_BASE; }
+    if (weightIndex == 1u) { return SURFACE_FOREST_FLOOR_BASE; }
+    if (weightIndex == 2u) { return SURFACE_ROCK_BASE; }
+    if (weightIndex == 3u) { return SURFACE_SAND_BASE; }
+    if (weightIndex == 4u) { return SURFACE_DIRT_BASE; }
+    if (weightIndex == 5u) { return SURFACE_SNOW_BASE; }
+    if (weightIndex == 6u) { return SURFACE_TUNDRA_BASE; }
+    if (weightIndex == 7u) { return SURFACE_MUD_BASE; }
+    if (weightIndex == 8u) { return SURFACE_SWAMP_BASE; }
+    if (weightIndex == 9u) { return SURFACE_VOLCANIC_BASE; }
+    return 255u;
+}
+
+fn authoredSmoothSharpenedScore(probability: f32, halfWidth: f32) -> f32 {
+    // Smoothstep over the probability range [0.5 - halfWidth, 0.5 + halfWidth].
+    // Output is exactly 0 below the low edge and exactly 1 above the high edge.
+    // halfWidth = 0.03 is snappy, 0.20 is gradual.
+    // Biomes with isolated small patches need wider halfWidth to survive at low probability.
+    let hw = clamp(halfWidth, 0.005, 0.5);
+    return smoothstep(0.5 - hw, 0.5 + hw, clamp(probability, 0.0, 1.0));
+}
+
+fn authoredSmoothSourceGate(probability: f32, topProbability: f32) -> f32 {
+    let p = clamp(probability, 0.0, 1.0);
+    let floorEnd = min(
+        1.0,
+        AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY + max(AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY_FADE, 0.001)
+    );
+    let floorGate = smoothstep(AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY, floorEnd, p);
+
+    let winnerSnap = smoothstep(
+        AUTHORED_SPLAT_SOURCE_WINNER_SNAP_START,
+        AUTHORED_SPLAT_SOURCE_WINNER_SNAP_END,
+        clamp(topProbability, 0.0, 1.0)
+    );
+    let loserDistance = clamp((topProbability - p) / max(topProbability, 0.0001), 0.0, 1.0);
+    let loserGate = 1.0 - winnerSnap * smoothstep(0.20, 0.55, loserDistance);
+
+    return clamp(floorGate * loserGate, 0.0, 1.0);
+}
+
+fn encodeSmoothSplatTileId(tileId: u32) -> f32 {
+    if (tileId >= 255u) {
+        return 1.0;
+    }
+    return f32(tileId) / 255.0;
+}
+
+fn insertSmoothSplatTop4(
+    weightIndex: u32,
+    weight: f32,
+    topIndices: ptr<function, array<u32, 4>>,
+    topWeights: ptr<function, array<f32, 4>>
+) {
+    if (weight <= 0.00001) {
+        return;
+    }
+
+    var insertAt = 4u;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let currentWeight = (*topWeights)[i];
+        let currentIndex = (*topIndices)[i];
+        if (
+            weight > currentWeight ||
+            (abs(weight - currentWeight) <= 0.000001 && weightIndex < currentIndex)
+        ) {
+            insertAt = i;
+            break;
+        }
+    }
+    if (insertAt >= 4u) {
+        return;
+    }
+
+    var i = 3u;
+    loop {
+        if (i <= insertAt) {
+            break;
+        }
+        (*topWeights)[i] = (*topWeights)[i - 1u];
+        (*topIndices)[i] = (*topIndices)[i - 1u];
+        i = i - 1u;
+    }
+    (*topWeights)[insertAt] = weight;
+    (*topIndices)[insertAt] = weightIndex;
+}
+
+struct SmoothSplatPayload {
+    tileIds: array<u32, 4>,
+    weights: array<f32, 4>,
+};
+
+fn insertSmoothSplatTileTop4(
+    tileId: u32,
+    weight: f32,
+    payload: ptr<function, SmoothSplatPayload>
+) {
+    if (weight <= 0.00001 || !isCatalogTile(tileId)) {
+        return;
+    }
+
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        if ((*payload).tileIds[i] == tileId) {
+            (*payload).weights[i] = (*payload).weights[i] + weight;
+            return;
+        }
+    }
+
+    var insertAt = 4u;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let currentWeight = (*payload).weights[i];
+        let currentTileId = (*payload).tileIds[i];
+        if (
+            weight > currentWeight ||
+            (abs(weight - currentWeight) <= 0.000001 && tileId < currentTileId)
+        ) {
+            insertAt = i;
+            break;
+        }
+    }
+    if (insertAt >= 4u) {
+        return;
+    }
+
+    var i = 3u;
+    loop {
+        if (i <= insertAt) {
+            break;
+        }
+        (*payload).weights[i] = (*payload).weights[i - 1u];
+        (*payload).tileIds[i] = (*payload).tileIds[i - 1u];
+        i = i - 1u;
+    }
+    (*payload).weights[insertAt] = weight;
+    (*payload).tileIds[insertAt] = tileId;
+}
+
+fn computeAuthoredSmoothSplatPayload(
+    slope: f32,
+    elevation: f32,
+    wx: f32, wy: f32, unitDir: vec3<f32>,
+    seed: i32
+) -> SmoothSplatPayload {
+    var payload = SmoothSplatPayload(
+        array<u32, 4>(255u, 255u, 255u, 255u),
+        array<f32, 4>(0.0, 0.0, 0.0, 0.0)
+    );
+
+    let count = min(biomeConfigUniforms.biomeCount, MAX_BIOMES);
+    if (count == 0u) {
+        return payload;
+    }
+
+    let climate = getClimate(wx, wy, unitDir, elevation, seed);
+    let biomeSpatial = authoredBiomeSpatialCoords(wx, wy, unitDir);
+    let biomeSeed = biomeConfigUniforms.worldSeed;
+    var scores: array<f32, MAX_BIOMES>;
+    var totalScore = 0.0;
+
+    for (var i = 0u; i < count; i = i + 1u) {
+        let def = biomeConfigUniforms.biomes[i];
+        let envScore = scoreBiomeEnv(
+            elevation,
+            climate.precipitation,
+            climate.temperature,
+            slope,
+            def,
+            biomeSpatial.x,
+            biomeSpatial.y,
+            biomeSeed
+        );
+        let noise = biomeRegionalNoise(biomeSpatial.x, biomeSpatial.y, def, biomeSeed);
+        let regional = max(0.0, 1.0 + noise * def.noiseStrength);
+        let score = envScore * def.baseWeight * regional;
+        scores[i] = score;
+        totalScore = totalScore + score;
+    }
+
+    if (totalScore <= 0.00001) {
+        return payload;
+    }
+
+    var topProbability = 0.0;
+    var topIndex = 0u;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let probability = scores[i] / totalScore;
+        if (probability > topProbability) {
+            topProbability = probability;
+            topIndex = i;
+        }
+    }
+
+    // Use only continuous sharpened scores — no per-cell stochastic selection
+    // and no minority floor boost. Both introduced discrete spatial boundaries
+    // at the biomeSelectionHash cell scale (8m) that appeared as blocky rims.
+    var smoothScores: array<f32, MAX_BIOMES>;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let probability = scores[i] / totalScore;
+        if (USE_FIXED_MATERIAL_FAMILY_SPLATS) {
+            smoothScores[i] = probability;
+        } else {
+            var sourceGate = authoredSmoothSourceGate(probability, topProbability);
+            if (i == topIndex) {
+                sourceGate = 1.0;
+            }
+            let biomeHalfWidth = biomeConfigUniforms.biomes[i].blendHalfWidth;
+            smoothScores[i] = authoredSmoothSharpenedScore(probability, biomeHalfWidth) * sourceGate;
+        }
+    }
+
+    for (var i = 0u; i < count; i = i + 1u) {
+        insertSmoothSplatTileTop4(
+            biomeConfigUniforms.biomes[i].tileId,
+            smoothScores[i],
+            &payload
+        );
+    }
+
+    return payload;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let texSize = textureDimensions(outputTexture);
@@ -564,7 +829,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     if (uniforms.face >= 0) {
         if (uniforms.chunkSize <= 0) {
-            if (uniforms.chunkGridSize > 1 && uniforms.outputType != 2 && uniforms.outputType != 4) {
+            if (
+                uniforms.chunkGridSize > 1 &&
+                uniforms.outputType != 2 &&
+                uniforms.outputType != 4 &&
+                uniforms.outputType != 7 &&
+                uniforms.outputType != 8
+            ) {
                 let texSize = textureDimensions(outputTexture);
                 let totalChunks = f32(max(uniforms.chunkGridSize, 1));
 
@@ -859,6 +1130,114 @@ if (uniforms.outputType == 0) {
 
     output = vec4<f32>(f32(tileType) / 255.0, 0.0, 0.0, 1.0);
 
+}
+
+else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
+    let oceanLevel = uniforms.waterParams.y;
+
+    ${hasHeightBindings ? `
+    let coordC = vec2<i32>(global_id.xy);
+    let heightSample = textureLoad(heightMap, coordC, 0);
+    let h = heightSample.r;
+    let slope = heightSample.g;
+    ` : `
+    let h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
+    var slope: f32 = 0.0;
+    if (uniforms.face >= 0) {
+        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
+        slope = ns.slope;
+    } else {
+        let ns = computeNormalSlopeFlat(wx, wy);
+        slope = ns.slope;
+    }
+    `}
+
+    if (h <= oceanLevel) {
+        if (uniforms.outputType == 7) {
+            output = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+        } else {
+            output = vec4<f32>(
+                encodeSmoothSplatTileId(SURFACE_WATER),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u)
+            );
+        }
+    } else if (biomeConfigUniforms.biomeCount > 0u) {
+        let payload = computeAuthoredSmoothSplatPayload(slope, h, wx, wy, unitDir, uniforms.seed);
+        let totalTop = payload.weights[0] + payload.weights[1] + payload.weights[2] + payload.weights[3];
+
+        if (totalTop <= 0.00001) {
+            if (uniforms.outputType == 7) {
+                output = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+            } else {
+                output = vec4<f32>(
+                    encodeSmoothSplatTileId(255u),
+                    encodeSmoothSplatTileId(255u),
+                    encodeSmoothSplatTileId(255u),
+                    encodeSmoothSplatTileId(255u)
+                );
+            }
+        } else if (uniforms.outputType == 7) {
+            output = vec4<f32>(
+                payload.weights[0] / totalTop,
+                payload.weights[1] / totalTop,
+                payload.weights[2] / totalTop,
+                payload.weights[3] / totalTop
+            );
+        } else {
+            output = vec4<f32>(
+                encodeSmoothSplatTileId(payload.tileIds[0]),
+                encodeSmoothSplatTileId(payload.tileIds[1]),
+                encodeSmoothSplatTileId(payload.tileIds[2]),
+                encodeSmoothSplatTileId(payload.tileIds[3])
+            );
+        }
+    } else {
+        let weights = normalizeSurfaceWeights(
+            computeSmoothSplatWeights(slope, h, wx, wy, unitDir, uniforms.seed)
+        );
+
+        var topIndices = array<u32, 4>(
+            0xffffffffu,
+            0xffffffffu,
+            0xffffffffu,
+            0xffffffffu
+        );
+        var topWeights = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+
+        for (var i = 0u; i < SMOOTH_SPLAT_WEIGHT_COUNT; i = i + 1u) {
+            insertSmoothSplatTop4(i, surfaceWeightAt(weights, i), &topIndices, &topWeights);
+        }
+
+        let totalTop = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
+        if (totalTop <= 0.00001) {
+            if (uniforms.outputType == 7) {
+                output = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+            } else {
+                output = vec4<f32>(
+                    encodeSmoothSplatTileId(SURFACE_GRASS_BASE),
+                    encodeSmoothSplatTileId(255u),
+                    encodeSmoothSplatTileId(255u),
+                    encodeSmoothSplatTileId(255u)
+                );
+            }
+        } else if (uniforms.outputType == 7) {
+            output = vec4<f32>(
+                topWeights[0] / totalTop,
+                topWeights[1] / totalTop,
+                topWeights[2] / totalTop,
+                topWeights[3] / totalTop
+            );
+        } else {
+            output = vec4<f32>(
+                encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[0])),
+                encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[1])),
+                encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[2])),
+                encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[3]))
+            );
+        }
+    }
 }
 
 ${hasTileBindings ? `

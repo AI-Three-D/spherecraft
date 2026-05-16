@@ -2,7 +2,7 @@
 // backend/webgpuBackend.js
 
 import { Backend } from './backend.js';
-import { TextureFormat, TextureFilter, TextureWrap, Texture } from '../resources/texture.js';
+import { TextureFormat } from '../resources/texture.js';
 import { Logger } from '../../../shared/Logger.js';
 import { gpuFormatSampleType } from '../resources/texture.js';
 export class WebGPUBackend extends Backend {
@@ -1513,7 +1513,7 @@ _createBindGroupsFromSpec(material, uniforms) {
                 if (!tex._gpuTexture[viewKey]) {
                     try {
                         tex._gpuTexture[viewKey] = tex._gpuTexture.texture.createView({ dimension: viewDimension });
-                    } catch (_) {}
+                    } catch { /* ignore cleanup failure */ }
                 }
                 view = tex._gpuTexture[viewKey];
             }
@@ -1619,7 +1619,7 @@ _createOrbitalSphereBindGroups(material, uniforms) {
         if (!planetTex._gpuTexture._view_2d) {
             try {
                 planetTex._gpuTexture._view_2d = planetTex._gpuTexture.texture.createView({ dimension: '2d' });
-            } catch (e) {}
+            } catch { /* ignore optional failure */ }
         }
         colorTextureView = planetTex._gpuTexture._view_2d;
     }
@@ -1632,7 +1632,7 @@ _createOrbitalSphereBindGroups(material, uniforms) {
         if (!normalTex._gpuTexture._view_2d) {
             try {
                 normalTex._gpuTexture._view_2d = normalTex._gpuTexture.texture.createView({ dimension: '2d' });
-            } catch (e) {}
+            } catch { /* ignore optional failure */ }
         }
         normalTextureView = normalTex._gpuTexture._view_2d;
     }
@@ -1773,7 +1773,7 @@ _createTerrainBindGroups(material, uniforms, geometry) {
                         viewDesc.arrayLayerCount = 1;
                     }
                     tex._gpuTexture[viewKey] = tex._gpuTexture.texture.createView(viewDesc);
-                } catch (_) {}
+                } catch { /* ignore cleanup failure */ }
             }
             if (tex._gpuTexture[viewKey]) return tex._gpuTexture[viewKey];
         }
@@ -2180,8 +2180,6 @@ _ensureTexturesUploaded(uniforms) {
 
     if (tex._needsUpload && (tex.data || tex.image)) {
         this.updateTexture(tex);
-    } else if (!tex._gpuTexture) {
-
     }
         };
 
@@ -2667,8 +2665,7 @@ _getTextureFormat(fmt) {
         [TextureFormat.DEPTH32F]: 'depth32float',
         'rgba16float': 'rgba16float',
         'rgba16f': 'rgba16float',
-        'rgba32uint': 'rgba32uint',                // NEW: passthrough
-        'bgra8unorm': 'bgra8unorm'
+        'rgba32uint': 'rgba32uint'                 // NEW: passthrough
     };
     return map[key] || 'rgba8unorm';
 }

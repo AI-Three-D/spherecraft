@@ -3,8 +3,7 @@
 import { TextureAtlasKey } from '../world/textureAtlasKey.js';
 import { LODTextureAtlasKey } from '../world/lodTextureAtlasKey.js';
 import { gpuFormatIsFilterable, gpuFormatToWrapperFormat } from '../renderer/resources/texture.js';
-import { Texture, TextureFormat, TextureFilter } from '../renderer/resources/texture.js';
-import { MipmapGenerator } from './MipmapGenerator.js';
+import { Texture, TextureFilter } from '../renderer/resources/texture.js';
 class TextureArrayPool {
     constructor(device, slots, textureSize, format = 'rgba32float', type = null) {
         
@@ -67,7 +66,7 @@ class TextureArrayPool {
 
     destroy() {
         if (this.texture) {
-            try { this.texture.destroy(); } catch (_) {}
+            try { this.texture.destroy(); } catch { /* ignore cleanup failure */ }
         }
         this.texture = null;
         this.wrapper = null;
@@ -330,7 +329,7 @@ export class TextureCache {
                     if (item.texture?.dispose) {
                         item.texture.dispose();
                     }
-                } catch (e) {}
+                } catch { /* ignore optional failure */ }
             } else {
                 remaining.push(item);
             }
@@ -544,7 +543,7 @@ export class TextureCache {
             this.currentSizeBytes -= old.sizeBytes;
 
             if (old.arrayInfo?.release && !old.arrayInfo?.isPooled) {
-                try { old.arrayInfo.release(); } catch (_) {}
+                try { old.arrayInfo.release(); } catch { /* ignore cleanup failure */ }
             }
 
             // Avoid destroying shared array textures (other slices may be in use)
@@ -691,11 +690,12 @@ export class TextureCache {
         
         // Warn if adding very large texture
         if (sizeBytes > 100 * 1024 * 1024) {
+            // Large texture warning hook intentionally quiet by default.
         }
         
         // Check if this single texture exceeds budget
         if (sizeBytes > this.maxSizeBytes * 0.5) {
-            
+            // Oversized texture warning hook intentionally quiet by default.
         }
         
         // Determine if this is an atlas key
@@ -877,7 +877,7 @@ export class TextureCache {
             
             // If no chunks using this atlas, it becomes eligible for eviction
             if (this.atlasUsage.get(atlasKeyStr).size === 0) {
-                
+                // Atlas usage bookkeeping is retained for diagnostics.
             }
         }
     }
@@ -894,7 +894,7 @@ export class TextureCache {
         if (this.atlasUsage.has(atlasKeyStr)) {
             this.atlasUsage.get(atlasKeyStr).delete(chunkKeyStr);
             if (this.atlasUsage.get(atlasKeyStr).size === 0) {
-                
+                // Atlas usage bookkeeping is retained for diagnostics.
             }
         }
     }
@@ -1020,6 +1020,7 @@ export class TextureCache {
             
             // Warn about evicting GPU-only textures
             if (entry.isGPUOnly) {
+                // GPU-only eviction warning hook intentionally quiet by default.
             }
             
             // Warn about evicting atlas with active chunks
@@ -1027,7 +1028,7 @@ export class TextureCache {
                 const atlasKeyStr = entry.atlasKey.toString();
                 const activeChunks = this.atlasUsage.get(atlasKeyStr);
                 if (activeChunks && activeChunks.size > 0) {
-                    
+                    // Active-atlas eviction warning hook intentionally quiet by default.
                 }
             }
             
@@ -1035,7 +1036,7 @@ export class TextureCache {
             const isSharedArray = entry.texture?._isArray && entry.arrayInfo;
 
             if (entry.arrayInfo?.release && !entry.arrayInfo?.isPooled) {
-                try { entry.arrayInfo.release(); } catch (_) {}
+                try { entry.arrayInfo.release(); } catch { /* ignore cleanup failure */ }
             }
 
             if (!isSharedArray) {
@@ -1076,7 +1077,7 @@ export class TextureCache {
         for (const entry of this.cache.values()) {
             const isPooled = entry.arrayInfo?.isPooled;
             if (entry.arrayInfo?.release && !isPooled) {
-                try { entry.arrayInfo.release(); } catch (_) {}
+                try { entry.arrayInfo.release(); } catch { /* ignore cleanup failure */ }
             }
 
             const isSharedArray = entry.texture?._isArray && entry.arrayInfo;

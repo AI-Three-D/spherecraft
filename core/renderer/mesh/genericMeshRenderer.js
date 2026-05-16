@@ -1,6 +1,6 @@
-// js/renderer/genericMeshRenderer.js
-import { Vector3, Matrix4 } from '../../shared/math/index.js';
-import { BaseModel } from '../mesh/model/baseModel.js';
+// js/renderer/mesh/genericMeshRenderer.js
+import { Vector3, Matrix4 } from '../../../shared/math/index.js';
+import { BaseModel } from './model/baseModel.js';
 
 /**
  * Renders generic meshes (vehicles, objects, etc.) using the WebGPU backend.

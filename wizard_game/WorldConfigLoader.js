@@ -164,6 +164,9 @@ export class WorldConfigLoader {
         if (terrain?.seed != null) base.seed = terrain.seed;
         // macroConfig
         if (engine?.macroConfig) Object.assign(base.macroConfig, engine.macroConfig);
+        if (engine?.splatConfig) {
+            base.splatConfig = mergePlainConfig(base.splatConfig ?? {}, engine.splatConfig);
+        }
         // nightSky
         if (engine?.nightSky) Object.assign(base.nightSky ?? {}, engine.nightSky);
         // camera

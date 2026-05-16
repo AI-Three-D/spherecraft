@@ -42,7 +42,7 @@ struct Uniforms {
     transitionBreakupWarpStrength: f32,
     transitionBreakupStrength: f32,
     chunkPaletteMinCoverage: f32,
-    _pad0: f32,
+    slotSupportExpansionTexels: f32,
     _pad1: f32,
     _pad2: f32,
 }
@@ -50,6 +50,8 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var tileMap: texture_2d<f32>;
 @group(0) @binding(2) var paletteTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var smoothSplatWeightSource: texture_2d<f32>;
+@group(0) @binding(4) var smoothSplatIndexSource: texture_2d<f32>;
 
 const INVALID_TILE_ID: u32 = 255u;
 const INVALID_CATEGORY_ID: u32 = 255u;
@@ -72,6 +74,28 @@ fn decodeTileIdRaw(tileSample: vec4<f32>) -> u32 {
     let rawR = tileSample.r;
     let tileIdF = select(rawR * 255.0, rawR, rawR > 1.0);
     return u32(tileIdF + 0.5);
+}
+
+fn decodeSplatSourceTileId(encoded: f32) -> u32 {
+    return u32(floor(encoded * 255.0 + 0.5));
+}
+
+fn loadSmoothSplatSourceWeights(coord: vec2<i32>) -> vec4<f32> {
+    return clamp(
+        textureLoad(smoothSplatWeightSource, coord, 0),
+        vec4<f32>(0.0),
+        vec4<f32>(1.0)
+    );
+}
+
+fn loadSmoothSplatSourceTileIds(coord: vec2<i32>) -> vec4<u32> {
+    let encoded = textureLoad(smoothSplatIndexSource, coord, 0);
+    return vec4<u32>(
+        decodeSplatSourceTileId(encoded.x),
+        decodeSplatSourceTileId(encoded.y),
+        decodeSplatSourceTileId(encoded.z),
+        decodeSplatSourceTileId(encoded.w)
+    );
 }
 
 ${tileCategoryWGSL}
@@ -121,6 +145,71 @@ fn insertTop4(
     (*topScores)[insertAt] = score;
 }
 
+fn addPaletteCategoryScore(
+    categoryId: u32,
+    score: f32,
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>
+) {
+    if (!validCategory(categoryId) || score <= SCORE_EPSILON) {
+        return;
+    }
+
+    (*categoryScores)[categoryId] = (*categoryScores)[categoryId] + score;
+}
+
+fn addPaletteTileScore(
+    tileId: u32,
+    score: f32,
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>
+) -> bool {
+    if (!validTile(tileId) || score <= SCORE_EPSILON) {
+        return false;
+    }
+
+    let categoryId = tileCategory(tileId);
+    if (!validCategory(categoryId)) {
+        return false;
+    }
+
+    addPaletteCategoryScore(categoryId, score, categoryScores);
+    return true;
+}
+
+fn accumulatePaletteSmoothSourceCategories(
+    coord: vec2<i32>,
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>
+) {
+    let sourceWeights = loadSmoothSplatSourceWeights(coord);
+    let sourceTileIds = loadSmoothSplatSourceTileIds(coord);
+    var sourceTotal = 0.0;
+
+    if (sourceWeights.x > SCORE_EPSILON && validTile(sourceTileIds.x)) {
+        if (addPaletteTileScore(sourceTileIds.x, sourceWeights.x, categoryScores)) {
+            sourceTotal = sourceTotal + sourceWeights.x;
+        }
+    }
+    if (sourceWeights.y > SCORE_EPSILON && validTile(sourceTileIds.y)) {
+        if (addPaletteTileScore(sourceTileIds.y, sourceWeights.y, categoryScores)) {
+            sourceTotal = sourceTotal + sourceWeights.y;
+        }
+    }
+    if (sourceWeights.z > SCORE_EPSILON && validTile(sourceTileIds.z)) {
+        if (addPaletteTileScore(sourceTileIds.z, sourceWeights.z, categoryScores)) {
+            sourceTotal = sourceTotal + sourceWeights.z;
+        }
+    }
+    if (sourceWeights.w > SCORE_EPSILON && validTile(sourceTileIds.w)) {
+        if (addPaletteTileScore(sourceTileIds.w, sourceWeights.w, categoryScores)) {
+            sourceTotal = sourceTotal + sourceWeights.w;
+        }
+    }
+
+    if (sourceTotal <= SCORE_EPSILON) {
+        let fallbackTileId = decodeTileIdRaw(textureLoad(tileMap, coord, 0));
+        _ = addPaletteTileScore(fallbackTileId, 1.0, categoryScores);
+    }
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let paletteSize = textureDimensions(paletteTexture);
@@ -165,15 +254,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     for (var y = sampleMin.y; y <= sampleMax.y; y = y + 1) {
         for (var x = sampleMin.x; x <= sampleMax.x; x = x + 1) {
-            let tileId = decodeTileIdRaw(textureLoad(tileMap, vec2<i32>(x, y), 0));
-            if (!validTile(tileId)) {
-                continue;
-            }
-            let categoryId = tileCategory(tileId);
-            if (!validCategory(categoryId)) {
-                continue;
-            }
-            categoryScores[categoryId] = categoryScores[categoryId] + 1.0;
+            accumulatePaletteSmoothSourceCategories(vec2<i32>(x, y), &categoryScores);
         }
     }
 

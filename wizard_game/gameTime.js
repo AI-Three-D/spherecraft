@@ -45,7 +45,7 @@ export class GameTime {
     }
 
     update() {
-        const elapsed = Date.now() - this.dayStartTime;
+        const elapsed = 10000;//Date.now() - this.dayStartTime;
         const daysPassed = Math.floor(elapsed / this.dayDurationMs);
         this.currentDay = this.startDay + daysPassed;
         const dayProgress = (elapsed % this.dayDurationMs) / this.dayDurationMs;

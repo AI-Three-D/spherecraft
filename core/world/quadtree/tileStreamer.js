@@ -809,78 +809,101 @@ this._freshnessSkipCount = 0;
 
     /** Flush completed work: texture copies, hash uploads, deferred destructions. */
     tickFlush() {
+        this._advanceFlushStatsFrame();
+        this._pruneRequestFreshness();
+        this._logEvictFeedbackStats();
+        this._logPipelineRaceStats();
+        this._logFallbackEvictStats();
+        this._recordCommitLagStats();
+        this._flushArrayPoolCopies();
+
+        if (this._needsFullHashUpload || this._dirtySlots.size > 0) {
+            this._uploadDirtyHashSlots();
+        }
+
+        this.tileCache?.tick?.();
+        this._destroyDeferredTextures();
+    }
+
+    _advanceFlushStatsFrame() {
         if (!this._evictFeedbackFrame) this._evictFeedbackFrame = 0;
         this._evictFeedbackFrame++;
-        if (!this._requestFreshness) this._requestFreshness = new Map();
-
-        if (this._requestFreshness.size > 2048) {
-            const cutoff = performance.now() - 2000;
-            for (const [k, t] of this._requestFreshness) {
-                if (t < cutoff) this._requestFreshness.delete(k);
-            }
-        }
-
-        if (this._evictFeedbackFrame % 300 === 0 && this._evictFeedbackStats?.count > 0) {
-            const s = this._evictFeedbackStats;
-            Logger.warn(
-                `[QT-Stitch-EvictFeedback] Summary: evict→feedback events=${s.count} ` +
-                `avgAgeMs=${(s.totalAgeMs / s.count).toFixed(0)} ` +
-                `minMs=${s.minAgeMs.toFixed(0)} maxMs=${s.maxAgeMs.toFixed(0)}`
-            );
-            // Reset for next window
-            this._evictFeedbackStats = { count: 0, totalAgeMs: 0, minAgeMs: Infinity, maxAgeMs: 0 };
-        }
-        // H1: Pipeline race periodic stats
         if (!this._pipelineRaceStatsFrame) this._pipelineRaceStatsFrame = 0;
         this._pipelineRaceStatsFrame++;
-        if (this._pipelineRaceStatsFrame % 300 === 0 && this._pipelineRaceStats?.total > 0) {
-            const s = this._pipelineRaceStats;
-            const pctSame = ((s.sameFrame / s.total) * 100).toFixed(1);
-            const pctNext = ((s.nextFrame / s.total) * 100).toFixed(1);
-            const depthStr = Object.entries(s.byDepth)
-                .sort((a, b) => +a[0] - +b[0])
-                .map(([d, c]) => `d${d}:${c}`)
-                .join(' ');
-            Logger.warn(
-                `[QT-Pipeline-Stats] evict→feedback total=${s.total} ` +
-                `sameFrame(<50ms)=${s.sameFrame}(${pctSame}%) ` +
-                `nextFrame(50-200ms)=${s.nextFrame}(${pctNext}%) ` +
-                `delayed(>200ms)=${s.delayed} ` +
-                `byDepth=[${depthStr}]`
-            );
-            this._pipelineRaceStats = {
-                total: 0, sameFrame: 0, nextFrame: 0, delayed: 0, byDepth: {}
-            };
-        }
+        if (!this._requestFreshness) this._requestFreshness = new Map();
+    }
 
-        if (this._fallbackEvictStats && this._fallbackEvictStats.total > 0) {
-            if (!this._fallbackStatsFrame) this._fallbackStatsFrame = 0;
-            this._fallbackStatsFrame++;
-            
-            if (this._fallbackStatsFrame % 300 === 0) {
-                const s = this._fallbackEvictStats;
-                const pctWithDeps = ((s.withDependents / s.total) * 100).toFixed(1);
-                const avgDeps = s.withDependents > 0 
-                    ? (s.totalDependents / s.withDependents).toFixed(1) 
-                    : '0';
-                
-                Logger.warn(
-                    `[QT-FallbackEvict-Stats] evictions=${s.total} ` +
-                    `withFallbackDependents=${s.withDependents} (${pctWithDeps}%) ` +
-                    `avgDependentsWhenPresent=${avgDeps} maxDependents=${s.maxDependents}`
-                );
-                
-                // Reset for next window
-                this._fallbackEvictStats = { 
-                    total: 0, 
-                    withDependents: 0, 
-                    totalDependents: 0,
-                    maxDependents: 0 
-                };
-            }
+    _pruneRequestFreshness() {
+        if (this._requestFreshness.size <= 2048) return;
+
+        const cutoff = performance.now() - 2000;
+        for (const [key, timestamp] of this._requestFreshness) {
+            if (timestamp < cutoff) this._requestFreshness.delete(key);
         }
-        // H4: Log commits that arrived since last flush (these tiles were
-        // CPU-committed but GPU-invisible for at least one full frame)
+    }
+
+    _logEvictFeedbackStats() {
+        if (this._evictFeedbackFrame % 300 !== 0) return;
+        if (!this._evictFeedbackStats || this._evictFeedbackStats.count <= 0) return;
+
+        const s = this._evictFeedbackStats;
+        Logger.warn(
+            `[QT-Stitch-EvictFeedback] Summary: evict→feedback events=${s.count} ` +
+            `avgAgeMs=${(s.totalAgeMs / s.count).toFixed(0)} ` +
+            `minMs=${s.minAgeMs.toFixed(0)} maxMs=${s.maxAgeMs.toFixed(0)}`
+        );
+        this._evictFeedbackStats = { count: 0, totalAgeMs: 0, minAgeMs: Infinity, maxAgeMs: 0 };
+    }
+
+    _logPipelineRaceStats() {
+        if (this._pipelineRaceStatsFrame % 300 !== 0) return;
+        if (!this._pipelineRaceStats || this._pipelineRaceStats.total <= 0) return;
+
+        const s = this._pipelineRaceStats;
+        const pctSame = ((s.sameFrame / s.total) * 100).toFixed(1);
+        const pctNext = ((s.nextFrame / s.total) * 100).toFixed(1);
+        const depthStr = Object.entries(s.byDepth)
+            .sort((a, b) => +a[0] - +b[0])
+            .map(([d, c]) => `d${d}:${c}`)
+            .join(' ');
+        Logger.warn(
+            `[QT-Pipeline-Stats] evict→feedback total=${s.total} ` +
+            `sameFrame(<50ms)=${s.sameFrame}(${pctSame}%) ` +
+            `nextFrame(50-200ms)=${s.nextFrame}(${pctNext}%) ` +
+            `delayed(>200ms)=${s.delayed} ` +
+            `byDepth=[${depthStr}]`
+        );
+        this._pipelineRaceStats = {
+            total: 0, sameFrame: 0, nextFrame: 0, delayed: 0, byDepth: {}
+        };
+    }
+
+    _logFallbackEvictStats() {
+        if (!this._fallbackEvictStats || this._fallbackEvictStats.total <= 0) return;
+
+        if (!this._fallbackStatsFrame) this._fallbackStatsFrame = 0;
+        this._fallbackStatsFrame++;
+        if (this._fallbackStatsFrame % 300 !== 0) return;
+
+        const s = this._fallbackEvictStats;
+        const pctWithDeps = ((s.withDependents / s.total) * 100).toFixed(1);
+        const avgDeps = s.withDependents > 0
+            ? (s.totalDependents / s.withDependents).toFixed(1)
+            : '0';
+        Logger.warn(
+            `[QT-FallbackEvict-Stats] evictions=${s.total} ` +
+            `withFallbackDependents=${s.withDependents} (${pctWithDeps}%) ` +
+            `avgDependentsWhenPresent=${avgDeps} maxDependents=${s.maxDependents}`
+        );
+        this._fallbackEvictStats = {
+            total: 0,
+            withDependents: 0,
+            totalDependents: 0,
+            maxDependents: 0
+        };
+    }
+
+    _recordCommitLagStats() {
         if (this._commitsSinceLastFlush > 0) {
             if (!this._commitLagStats) {
                 this._commitLagStats = { commits: 0, pendingAtFlush: 0, maxPendingAtFlush: 0 };
@@ -891,76 +914,74 @@ this._freshnessSkipCount = 0;
             );
             this._commitsSinceLastFlush = 0;
         }
-        if (this._pipelineRaceStatsFrame % 300 === 0 && this._commitLagStats?.commits > 0) {
-            const cl = this._commitLagStats;
-            Logger.warn(
-                `[QT-Pipeline-GenLag] commits=${cl.commits} ` +
-                `pendingAtFlush=${cl.pendingAtFlush} ` +
-                `maxPendingPerFlush=${cl.maxPendingAtFlush} ` +
-                `(each was GPU-invisible for ≥1 frame)`
-            );
-            this._commitLagStats = { commits: 0, pendingAtFlush: 0, maxPendingAtFlush: 0 };
+
+        if (this._pipelineRaceStatsFrame % 300 !== 0) return;
+        if (!this._commitLagStats || this._commitLagStats.commits <= 0) return;
+
+        const cl = this._commitLagStats;
+        Logger.warn(
+            `[QT-Pipeline-GenLag] commits=${cl.commits} ` +
+            `pendingAtFlush=${cl.pendingAtFlush} ` +
+            `maxPendingPerFlush=${cl.maxPendingAtFlush} ` +
+            `(each was GPU-invisible for ≥1 frame)`
+        );
+        this._commitLagStats = { commits: 0, pendingAtFlush: 0, maxPendingAtFlush: 0 };
+    }
+
+    _flushArrayPoolCopies() {
+        if (!this.arrayPool) return;
+
+        const flushedCopies = Array.isArray(this.arrayPool._pendingCopies)
+            ? this.arrayPool._pendingCopies.slice()
+            : [];
+        const copyCount = this.arrayPool.flushPendingCopies();
+        let copyFencePromise = null;
+        if (copyCount > 0) {
+            const batchId = ++this._debugCopyBatchId;
+            this._debugMarkSubmittedCopies(flushedCopies, batchId);
+            copyFencePromise = this.device.queue.onSubmittedWorkDone()
+                .then(() => {
+                    this._debugMarkReadyCopies(flushedCopies, batchId);
+                    if (this._debugReadbacksEnabled) {
+                        return this._debugVerifyCopiedLayers(flushedCopies, batchId);
+                    }
+                })
+                .catch(() => {
+                    this._debugMarkFailedCopies(flushedCopies, batchId);
+                });
         }
+        if (copyCount <= 0 || this._pendingCopyTextures.length === 0) return;
 
-        if (this.arrayPool) {
-            const flushedCopies = Array.isArray(this.arrayPool._pendingCopies)
-                ? this.arrayPool._pendingCopies.slice()
-                : [];
-            const copyCount = this.arrayPool.flushPendingCopies();
-            let copyFencePromise = null;
-            if (copyCount > 0) {
-                const batchId = ++this._debugCopyBatchId;
-                this._debugMarkSubmittedCopies(flushedCopies, batchId);
-                copyFencePromise = this.device.queue.onSubmittedWorkDone()
-                    .then(() => {
-                        this._debugMarkReadyCopies(flushedCopies, batchId);
-                        if (this._debugReadbacksEnabled) {
-                            return this._debugVerifyCopiedLayers(flushedCopies, batchId);
-                        }
-                    })
-                    .catch(() => {
-                        this._debugMarkFailedCopies(flushedCopies, batchId);
-                    });
-            }
-            if (copyCount > 0 && this._pendingCopyTextures.length > 0) {
-                const textures = this._pendingCopyTextures.flat();
-                this._pendingCopyTextures.length = 0;
-
-                const entry = {
-                    textures,
-                    framesRemaining: this._destructionDelayFrames,
-                    fenceResolved: false
-                };
-                const resolveFence = () => { entry.fenceResolved = true; };
-                if (copyFencePromise) {
-                    copyFencePromise.then(resolveFence).catch(resolveFence);
-                } else {
-                    this.device.queue.onSubmittedWorkDone()
-                        .then(resolveFence)
-                        .catch(resolveFence);
-                }
-                this._pendingDestructions.push(entry);
-            }
+        const textures = this._pendingCopyTextures.flat();
+        this._pendingCopyTextures.length = 0;
+        const entry = {
+            textures,
+            framesRemaining: this._destructionDelayFrames,
+            fenceResolved: false
+        };
+        const resolveFence = () => { entry.fenceResolved = true; };
+        if (copyFencePromise) {
+            copyFencePromise.then(resolveFence).catch(resolveFence);
+        } else {
+            this.device.queue.onSubmittedWorkDone()
+                .then(resolveFence)
+                .catch(resolveFence);
         }
+        this._pendingDestructions.push(entry);
+    }
 
-        if (this._needsFullHashUpload || this._dirtySlots.size > 0) {
-            this._uploadDirtyHashSlots();
-        }
+    _destroyDeferredTextures() {
+        if (this._pendingDestructions.length === 0) return;
 
-        this.tileCache?.tick?.();
-
-        // Deferred texture destructions
-        if (this._pendingDestructions.length > 0) {
-            for (let i = this._pendingDestructions.length - 1; i >= 0; i--) {
-                const entry = this._pendingDestructions[i];
-                if (entry.fenceResolved === false) continue;
-                entry.framesRemaining--;
-                if (entry.framesRemaining > 0) continue;
-                this._pendingDestructions.splice(i, 1);
-                for (const tex of entry.textures) {
-                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch (_) {}
-                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch (_) {}
-                }
+        for (let i = this._pendingDestructions.length - 1; i >= 0; i--) {
+            const entry = this._pendingDestructions[i];
+            if (entry.fenceResolved === false) continue;
+            entry.framesRemaining--;
+            if (entry.framesRemaining > 0) continue;
+            this._pendingDestructions.splice(i, 1);
+            for (const tex of entry.textures) {
+                try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch { /* ignore cleanup failure */ }
+                try { if (typeof tex.dispose === 'function') tex.dispose(); } catch { /* ignore cleanup failure */ }
             }
         }
     }
@@ -1041,11 +1062,7 @@ this._freshnessSkipCount = 0;
     }
     _processFeedbackSlot(slot) {
         try {
-            const countView = new Uint32Array(slot.metaStaging.getMappedRange());
-            let count = countView[0] || 0;
-            slot.metaStaging.unmap();
-
-            if (count > this.maxFeedback) count = this.maxFeedback;
+            const count = this._readFeedbackCount(slot);
             if (count === 0) {
                 slot.feedbackStaging.unmap();
                 slot.state = 'idle';
@@ -1053,94 +1070,110 @@ this._freshnessSkipCount = 0;
             }
 
             const data = new Uint32Array(slot.feedbackStaging.getMappedRange(0, count * 16));
-
-            // Deduplicate using allocation-free hash set
-            this._feedbackDedupeSet.clear();
-            for (let i = 0; i < count; i++) {
-                const base = i * 4;
-                this._feedbackDedupeSet.insert(data[base], data[base + 1], data[base + 2], data[base + 3]);
-            }
-            this._feedbackWindow.readbacks++;
-            this._feedbackWindow.raw += count;
-            this._feedbackWindow.unique += this._feedbackDedupeSet.count;
-
+            this._dedupeFeedbackData(data, count);
             slot.feedbackStaging.unmap();
             slot.state = 'idle';
 
-            // Process unique tiles (no string allocation)
             this._feedbackDedupeSet.forEach((face, depth, x, y) => {
-                const key = this._makeKey(face, depth, x, y);
-                
-                // Update freshness regardless of whether tile is loaded/generating
-                this._requestFreshness.set(key, performance.now());
-                
-                const keyLo = this.hashTable.makeKeyLo(x, y);
-                const keyHi = this.hashTable.makeKeyHi(face, depth);
-                const slot = this.hashTable.findSlot(keyLo, keyHi);
-                if (slot >= 0) return;
-            
-
-                if (this._recentEvictions?.has(key)) {
-                    const evInfo = this._recentEvictions.get(key);
-                    const ageMs = performance.now() - evInfo.evictedAt;
-
-                    if (!this._evictFeedbackStats) {
-                        this._evictFeedbackStats = { count: 0, totalAgeMs: 0, minAgeMs: Infinity, maxAgeMs: 0 };
-                    }
-                    this._evictFeedbackStats.count++;
-                    this._evictFeedbackStats.totalAgeMs += ageMs;
-                    this._evictFeedbackStats.minAgeMs = Math.min(this._evictFeedbackStats.minAgeMs, ageMs);
-                    this._evictFeedbackStats.maxAgeMs = Math.max(this._evictFeedbackStats.maxAgeMs, ageMs);
-
-                    // H1: Frame-pipeline race classification
-                    if (!this._pipelineRaceStats) {
-                        this._pipelineRaceStats = {
-                            total: 0, sameFrame: 0, nextFrame: 0, delayed: 0, byDepth: {}
-                        };
-                    }
-                    this._pipelineRaceStats.total++;
-                    if (ageMs < 50) this._pipelineRaceStats.sameFrame++;
-                    else if (ageMs < 200) this._pipelineRaceStats.nextFrame++;
-                    else this._pipelineRaceStats.delayed++;
-
-                    const d = evInfo.depth;
-                    this._pipelineRaceStats.byDepth[d] =
-                        (this._pipelineRaceStats.byDepth[d] || 0) + 1;
-
-                    // Log individual same-frame events (< 50ms = under 3 frames at 60fps)
-                    if (ageMs < 50) {
-                        if (!this._pipelineRaceLogCount) this._pipelineRaceLogCount = 0;
-                        if (this._pipelineRaceLogCount < 20) {
-                            this._pipelineRaceLogCount++;
-                            Logger.warn(
-                                `[QT-Pipeline-SameFrame] key=${key} depth=${d} ` +
-                                `ageMs=${ageMs.toFixed(1)} (evicted and re-requested within one frame)`
-                            );
-                        }
-                    }
-
-                    // Log first occurrences and periodic summaries
-                    if (!this._evictFeedbackLogCount) this._evictFeedbackLogCount = 0;
-                    if (this._evictFeedbackLogCount < 20) {
-                        this._evictFeedbackLogCount++;
-                        Logger.warn(
-                            `[QT-EvictFeedback] Evicted tile immediately re-requested: ` +
-                            `${key} depth=${depth} ageMs=${ageMs.toFixed(0)} ` +
-                            `(eviction count so far: ${this._evictFeedbackStats.count})`
-                        );
-                    }
-                }
-            
-                const addr = new TileAddress(face, depth, x, y);
-                if (this.tileGenerator.isGenerating(addr)) return;
-                this._queueTile(addr);
+                this._processFeedbackAddress(face, depth, x, y);
             });
-            // Queue missing parents (still needs string keys for _tileInfo lookup,
-            // but this is a much smaller set and not per-tile)
             this._queueMissingParentsNumeric();
 
-        } catch (e) {
+        } catch {
             slot.state = 'idle';
+        }
+    }
+
+    _readFeedbackCount(slot) {
+        const countView = new Uint32Array(slot.metaStaging.getMappedRange());
+        const count = Math.min(countView[0] || 0, this.maxFeedback);
+        slot.metaStaging.unmap();
+        return count;
+    }
+
+    _dedupeFeedbackData(data, count) {
+        this._feedbackDedupeSet.clear();
+        for (let i = 0; i < count; i++) {
+            const base = i * 4;
+            this._feedbackDedupeSet.insert(data[base], data[base + 1], data[base + 2], data[base + 3]);
+        }
+        this._feedbackWindow.readbacks++;
+        this._feedbackWindow.raw += count;
+        this._feedbackWindow.unique += this._feedbackDedupeSet.count;
+    }
+
+    _processFeedbackAddress(face, depth, x, y) {
+        const key = this._makeKey(face, depth, x, y);
+        this._requestFreshness.set(key, performance.now());
+
+        const keyLo = this.hashTable.makeKeyLo(x, y);
+        const keyHi = this.hashTable.makeKeyHi(face, depth);
+        const hashSlot = this.hashTable.findSlot(keyLo, keyHi);
+        if (hashSlot >= 0) return;
+
+        if (this._recentEvictions?.has(key)) {
+            this._recordEvictFeedback(key, depth);
+        }
+
+        const addr = new TileAddress(face, depth, x, y);
+        if (this.tileGenerator.isGenerating(addr)) return;
+        this._queueTile(addr);
+    }
+
+    _recordEvictFeedback(key, depth) {
+        const evInfo = this._recentEvictions.get(key);
+        const ageMs = performance.now() - evInfo.evictedAt;
+        this._recordEvictFeedbackStats(ageMs);
+        this._recordPipelineRaceStats(evInfo, ageMs);
+        this._logImmediateEvictFeedback(key, depth, evInfo.depth, ageMs);
+    }
+
+    _recordEvictFeedbackStats(ageMs) {
+        if (!this._evictFeedbackStats) {
+            this._evictFeedbackStats = { count: 0, totalAgeMs: 0, minAgeMs: Infinity, maxAgeMs: 0 };
+        }
+        this._evictFeedbackStats.count++;
+        this._evictFeedbackStats.totalAgeMs += ageMs;
+        this._evictFeedbackStats.minAgeMs = Math.min(this._evictFeedbackStats.minAgeMs, ageMs);
+        this._evictFeedbackStats.maxAgeMs = Math.max(this._evictFeedbackStats.maxAgeMs, ageMs);
+    }
+
+    _recordPipelineRaceStats(evInfo, ageMs) {
+        if (!this._pipelineRaceStats) {
+            this._pipelineRaceStats = {
+                total: 0, sameFrame: 0, nextFrame: 0, delayed: 0, byDepth: {}
+            };
+        }
+        this._pipelineRaceStats.total++;
+        if (ageMs < 50) this._pipelineRaceStats.sameFrame++;
+        else if (ageMs < 200) this._pipelineRaceStats.nextFrame++;
+        else this._pipelineRaceStats.delayed++;
+
+        const depth = evInfo.depth;
+        this._pipelineRaceStats.byDepth[depth] =
+            (this._pipelineRaceStats.byDepth[depth] || 0) + 1;
+    }
+
+    _logImmediateEvictFeedback(key, depth, evictedDepth, ageMs) {
+        if (ageMs < 50) {
+            if (!this._pipelineRaceLogCount) this._pipelineRaceLogCount = 0;
+            if (this._pipelineRaceLogCount < 20) {
+                this._pipelineRaceLogCount++;
+                Logger.warn(
+                    `[QT-Pipeline-SameFrame] key=${key} depth=${evictedDepth} ` +
+                    `ageMs=${ageMs.toFixed(1)} (evicted and re-requested within one frame)`
+                );
+            }
+        }
+
+        if (!this._evictFeedbackLogCount) this._evictFeedbackLogCount = 0;
+        if (this._evictFeedbackLogCount < 20) {
+            this._evictFeedbackLogCount++;
+            Logger.warn(
+                `[QT-EvictFeedback] Evicted tile immediately re-requested: ` +
+                `${key} depth=${depth} ageMs=${ageMs.toFixed(0)} ` +
+                `(eviction count so far: ${this._evictFeedbackStats.count})`
+            );
         }
     }
     _queueMissingParentsNumeric() {
@@ -2060,7 +2093,35 @@ markTilesVisible(tiles) {
         const size = Math.max(1, Math.min(sampleSize, this.tileTextureSize));
         const bytesPerRow = alignTo(size * texelBytes, 256);
         const bufferSize = bytesPerRow * size;
+        const { staging, buffer } = await this._readArrayLayerSample(
+            texture,
+            layer,
+            size,
+            bytesPerRow,
+            bufferSize
+        );
 
+        const stats = this._summarizeArrayLayerStats(
+            new DataView(buffer),
+            format,
+            size,
+            bytesPerRow,
+            texelBytes,
+            threshold
+        );
+        staging.unmap();
+        staging.destroy();
+
+        return {
+            type,
+            layer,
+            format,
+            size,
+            ...stats
+        };
+    }
+
+    async _readArrayLayerSample(texture, layer, size, bytesPerRow, bufferSize) {
         const staging = this.device.createBuffer({
             size: bufferSize,
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
@@ -2076,8 +2137,10 @@ markTilesVisible(tiles) {
         await this.device.queue.onSubmittedWorkDone();
 
         await staging.mapAsync(GPUMapMode.READ);
-        const buffer = staging.getMappedRange();
-        const dv = new DataView(buffer);
+        return { staging, buffer: staging.getMappedRange() };
+    }
+
+    _summarizeArrayLayerStats(dataView, format, size, bytesPerRow, texelBytes, threshold) {
         const channels = format.startsWith('rgba') ? 4 : 1;
         const min = new Array(channels).fill(Infinity);
         const max = new Array(channels).fill(-Infinity);
@@ -2091,7 +2154,7 @@ markTilesVisible(tiles) {
             const rowStart = y * bytesPerRow;
             for (let x = 0; x < size; x++) {
                 const offset = rowStart + x * texelBytes;
-                const values = readTexel(dv, offset, format);
+                const values = readTexel(dataView, offset, format);
                 count++;
                 for (let c = 0; c < channels; c++) {
                     const v = values[c];
@@ -2108,19 +2171,12 @@ markTilesVisible(tiles) {
             }
         }
 
-        staging.unmap();
-        staging.destroy();
-
         const mean = sum.map(v => (count ? v / count : 0));
         for (let c = 0; c < channels; c++) {
             if (!Number.isFinite(min[c])) { min[c] = 0; max[c] = 0; }
         }
 
         return {
-            type,
-            layer,
-            format,
-            size,
             channels,
             min,
             max,
@@ -2132,22 +2188,58 @@ markTilesVisible(tiles) {
         };
     }
 
+    _debugArrayTextureSource(type) {
+        if (!this.arrayPool) return null;
+
+        const poolTexture = this.arrayPool.textures.get(type);
+        if (poolTexture) {
+            return {
+                texture: poolTexture,
+                format: this.textureFormats[type] || this.arrayPool.formats?.[type] || 'rgba32float',
+            };
+        }
+
+        const external = this._externalArrayTextures?.[type];
+        const externalTexture = external?._gpuTexture?.texture;
+        if (!externalTexture) return null;
+
+        return {
+            texture: external,
+            format: external?._gpuTexture?.format
+                || external?._gpuFormat
+                || this.textureFormats[type]
+                || this.arrayPool.formats?.[type]
+                || 'rgba32float',
+        };
+    }
+
+    _debugTextureDimensions(textureLike) {
+        return {
+            width: Math.max(1, Math.floor(textureLike?.width ?? this.tileTextureSize)),
+            height: Math.max(1, Math.floor(textureLike?.height ?? this.tileTextureSize)),
+        };
+    }
+
     async debugReadArrayLayerTexels(type, layer, texelCoords = []) {
-        if (!this.arrayPool || layer === null || layer === undefined) return null;
-        const texture = this.arrayPool.textures.get(type);
+        if (layer === null || layer === undefined) return null;
+        const source = this._debugArrayTextureSource(type);
+        if (!source) return null;
+
+        const textureLike = source.texture;
+        const texture = textureLike?._gpuTexture?.texture || textureLike;
+        const { format } = source;
         if (!texture) return null;
 
-        const format = this.textureFormats[type] || this.arrayPool.formats?.[type] || 'rgba32float';
         const texelBytes = gpuFormatBytesPerTexel(format);
         if (!Number.isFinite(texelBytes) || texelBytes <= 0) return null;
 
         const coords = Array.isArray(texelCoords) ? texelCoords : [];
-        const size = this.tileTextureSize;
+        const { width, height } = this._debugTextureDimensions(textureLike);
         const results = [];
 
         for (const coord of coords) {
-            const x = Math.max(0, Math.min(size - 1, Math.floor(coord?.x ?? 0)));
-            const y = Math.max(0, Math.min(size - 1, Math.floor(coord?.y ?? 0)));
+            const x = Math.max(0, Math.min(width - 1, Math.floor(coord?.x ?? 0)));
+            const y = Math.max(0, Math.min(height - 1, Math.floor(coord?.y ?? 0)));
             const bytesPerRow = 256;
             const bufferSize = bytesPerRow;
 
@@ -2184,15 +2276,15 @@ markTilesVisible(tiles) {
     }
 
     async debugReadArrayLayerBuffer(type, layer, width = null, height = null) {
-        if (!this.arrayPool || layer === null || layer === undefined) return null;
-        const texture = this.arrayPool.textures.get(type);
-        if (!texture) return null;
+        if (layer === null || layer === undefined) return null;
+        const source = this._debugArrayTextureSource(type);
+        if (!source) return null;
 
-        const format = this.textureFormats[type] || this.arrayPool.formats?.[type] || 'rgba32float';
-        return this._debugReadTextureBuffer(texture, format, width, height, layer);
+        return this._debugReadTextureBuffer(source.texture, source.format, width, height, layer);
     }
 
     async _debugReadTextureTexels(textureLike, format, texelCoords = [], layer = null) {
+        const { width, height } = this._debugTextureDimensions(textureLike);
         const texture = textureLike?._gpuTexture?.texture || textureLike;
         if (!texture) return null;
 
@@ -2200,12 +2292,11 @@ markTilesVisible(tiles) {
         if (!Number.isFinite(texelBytes) || texelBytes <= 0) return null;
 
         const coords = Array.isArray(texelCoords) ? texelCoords : [];
-        const size = this.tileTextureSize;
         const results = [];
 
         for (const coord of coords) {
-            const x = Math.max(0, Math.min(size - 1, Math.floor(coord?.x ?? 0)));
-            const y = Math.max(0, Math.min(size - 1, Math.floor(coord?.y ?? 0)));
+            const x = Math.max(0, Math.min(width - 1, Math.floor(coord?.x ?? 0)));
+            const y = Math.max(0, Math.min(height - 1, Math.floor(coord?.y ?? 0)));
             const bytesPerRow = 256;
             const staging = this.device.createBuffer({
                 size: bytesPerRow,
@@ -2236,14 +2327,15 @@ markTilesVisible(tiles) {
     }
 
     async _debugReadTextureBuffer(textureLike, format, width = null, height = null, layer = null) {
+        const dimensions = this._debugTextureDimensions(textureLike);
         const texture = textureLike?._gpuTexture?.texture || textureLike;
         if (!texture) return null;
 
         const texelBytes = gpuFormatBytesPerTexel(format);
         if (!Number.isFinite(texelBytes) || texelBytes <= 0) return null;
 
-        const copyWidth = Math.max(1, Math.min(this.tileTextureSize, Math.floor(width ?? this.tileTextureSize)));
-        const copyHeight = Math.max(1, Math.min(this.tileTextureSize, Math.floor(height ?? this.tileTextureSize)));
+        const copyWidth = Math.max(1, Math.min(dimensions.width, Math.floor(width ?? dimensions.width)));
+        const copyHeight = Math.max(1, Math.min(dimensions.height, Math.floor(height ?? dimensions.height)));
         const bytesPerRow = alignTo(copyWidth * texelBytes, 256);
         const bufferSize = bytesPerRow * copyHeight;
 
@@ -2279,6 +2371,7 @@ markTilesVisible(tiles) {
 
     _debugRegisterQueuedCopy(tileAddr, layer, textures) {
         return;
+        // eslint-disable-next-line no-unreachable
         const types = Object.keys(textures || {}).filter((type) => textures[type]?._gpuTexture?.texture);
         const captureSources = this._debugReadbacksEnabled && this._debugCopyVerifyCaptureCount < 4;
         if (captureSources) {
@@ -2423,8 +2516,8 @@ markTilesVisible(tiles) {
         if (list.length) {
             if (!this.arrayPool) {
                 for (const tex of list) {
-                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch (_) {}
-                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch (_) {}
+                    try { if (tex?._gpuTexture?.texture) tex._gpuTexture.texture.destroy(); } catch { /* ignore cleanup failure */ }
+                    try { if (typeof tex.dispose === 'function') tex.dispose(); } catch { /* ignore cleanup failure */ }
                 }
                 return;
             }

@@ -48,6 +48,7 @@ export class BaseWorldGenerator {
         this.splatConfig = {
             splatDensity: 4,
             splatKernelSize: 5,
+            slotSupportExpansionTexels: 1.5,
             transitionSharpness: 1.9,
             transitionDominanceStart: 0.55,
             transitionDominanceEnd: 0.9,
@@ -178,10 +179,6 @@ export class BaseWorldGenerator {
      * Stub atlas generation (for testing without actual GPU generation)
      */
     _generateAtlasStub(atlasKey) {
-        
-        for (const type of this.atlasConfig.atlasTextureTypes) {
-        }
-        
         return {
             atlasKey: atlasKey,
             stub: true

@@ -1,8 +1,8 @@
-// js/renderer/MoonRenderer.js
+// js/renderer/sky/MoonRenderer.js
 
-import { Vector3, Matrix4, Color } from '../../shared/math/index.js';
-import { Geometry } from './resources/geometry.js';
-import { Material } from './resources/material.js';
+import { Vector3, Matrix4, Color } from '../../../shared/math/index.js';
+import { Geometry } from '../resources/geometry.js';
+import { Material } from '../resources/material.js';
 
 /**
  * MoonRenderer - Renders the moon disc in the sky with proper phase illumination.

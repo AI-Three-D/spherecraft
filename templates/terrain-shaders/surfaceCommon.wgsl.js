@@ -433,9 +433,9 @@ fn computeWarmBiomeWeights(
     w.dirt = eDirt * inv;
     w.grass = eGrass * inv;
 
-    // Keep a bit of dirt in the transition band (prevents grass/sand hard cuts).
-    let dirtBoost = trans * 0.15;
-    w.dirt += dirtBoost;
+    // Do not force a dedicated dirt material into every sand/grass transition.
+    // The splat pass already provides the visual blend; a thin generated dirt
+    // band becomes a dark blocky rim after category splatting.
     let s0 = max(w.sand + w.dirt + w.grass, 0.0001);
     w.sand /= s0;
     w.dirt /= s0;
@@ -543,10 +543,11 @@ fn selectSecondaryClimateSurface(climate: ClimateInfo) -> u32 {
 }
 
 // Sand climate transition: sand -> dirt -> grass with noisy, varying width.
-fn computeSandTransitionWeights(
+fn computeSandTransitionWeightsInternal(
     climate: ClimateInfo,
     wx: f32, wy: f32, unitDir: vec3<f32>,
-    seed: i32
+    seed: i32,
+    smoothSplatSource: bool
 ) -> SurfaceWeights {
     var w = zeroSurfaceWeights();
 
@@ -575,7 +576,7 @@ fn computeSandTransitionWeights(
     let d8 = metricCellNoise01(wx, wy, unitDir, 0.125, seed + 6430);
     let cellDither = (d1 * 0.40 + d2 * 0.26 + d4 * 0.20 + d8 * 0.14) - 0.5;
     let fbmDither = fbmAuto(wx, wy, unitDir, 0.015, 3, seed + 6435, 2.0, 0.5) * 0.5;
-    let tileDither = mix(cellDither, fbmDither, 0.35);
+    let tileDither = select(mix(cellDither, fbmDither, 0.35), fbmDither, smoothSplatSource);
 
     let m = clamp(p + edgeNoise + tileDither * mix(0.12, 0.30, band), 0.0, 1.0);
 
@@ -595,7 +596,7 @@ fn computeSandTransitionWeights(
     let grassPatch = (fbmAuto(wx, wy, unitDir, 0.35, 2, seed + 6220, 2.0, 0.5) + 1.0) * 0.5;
     let microPatch = (fbmAuto(wx, wy, unitDir, 0.05, 2, seed + 6230, 2.0, 0.5) + 1.0) * 0.5;
     let nanoPatch  = (fbmAuto(wx, wy, unitDir, 0.01, 2, seed + 6240, 2.0, 0.5) + 1.0) * 0.5;
-    let cluster = tileClusterNoise01(wx, wy, unitDir, seed + 6250);
+    let cluster = select(tileClusterNoise01(wx, wy, unitDir, seed + 6250), 0.5, smoothSplatSource);
 
     let sandMod = mix(0.6, 1.5, sandPatch) * mix(0.8, 1.25, microPatch) * mix(0.85, 1.15, nanoPatch) * mix(0.9, 1.1, cluster);
     let dirtMod = mix(0.4, 1.1, dirtPatch) * mix(0.7, 1.15, microPatch) * mix(0.85, 1.10, nanoPatch) * mix(0.9, 1.1, cluster);
@@ -605,12 +606,10 @@ fn computeSandTransitionWeights(
     var dirtW2 = dirtW * dirtMod;
     var grassW2 = grassW * grassMod;
 
-    // Keep dirt strictly as a thin edge between sand and grass.
-    let edgeCore = min(sandW2, grassW2);
-    let edgeGate = smoothstep(0.18, 0.35, edgeCore);
-    let edgeBalance = 1.0 - smoothstep(0.25, 0.55, abs(sandW2 - grassW2));
-    let edgeDither = smoothstep(0.40, 0.70, tileClusterNoise01(wx, wy, unitDir, seed + 6260));
-    dirtW2 = edgeGate * edgeBalance * edgeDither * 0.12;
+    // Do not synthesize a narrow dirt outline at the sand/grass boundary.
+    // Dirt can still appear from broader dirt-field logic later in
+    // computeSurfaceWeights(), but it should not be an edge artifact.
+    dirtW2 = 0.0;
 
     // Temperature + moisture gates: boost sand in hot/dry climates.
     let t = climate.temperature;
@@ -629,6 +628,22 @@ fn computeSandTransitionWeights(
     w.dirt = dirtW2;
     w.grass = grassW2;
     return normalizeSurfaceWeights(w);
+}
+
+fn computeSandTransitionWeights(
+    climate: ClimateInfo,
+    wx: f32, wy: f32, unitDir: vec3<f32>,
+    seed: i32
+) -> SurfaceWeights {
+    return computeSandTransitionWeightsInternal(climate, wx, wy, unitDir, seed, false);
+}
+
+fn computeSmoothSandTransitionWeights(
+    climate: ClimateInfo,
+    wx: f32, wy: f32, unitDir: vec3<f32>,
+    seed: i32
+) -> SurfaceWeights {
+    return computeSandTransitionWeightsInternal(climate, wx, wy, unitDir, seed, true);
 }
 
 // Desert = climate sand with very low precipitation.
@@ -979,11 +994,12 @@ fn isDesertClimate(climate: ClimateInfo) -> bool {
 
   // ==================== Main surface weight calculation ====================
   // Main surface weight calculation - climate-driven grass/dirt/sand + forest floor.
-fn computeSurfaceWeights(
+fn computeSurfaceWeightsInternal(
     slope: f32,
     elevation: f32,
     wx: f32, wy: f32, unitDir: vec3<f32>,
-    seed: i32
+    seed: i32,
+    smoothSplatSource: bool
 ) -> SurfaceWeights {
     let climate = getClimate(wx, wy, unitDir, elevation, seed);
     let p = climate.precipitation;
@@ -993,7 +1009,7 @@ fn computeSurfaceWeights(
     let t = clamp(tBase + tNoiseLarge * 0.08 + tNoiseMid * 0.05, 0.0, 1.0);
 
     // Warm transition (sand ↔ dirt ↔ grass) driven by precipitation.
-    var warm = computeSandTransitionWeights(climate, wx, wy, unitDir, seed);
+    var warm = computeSandTransitionWeightsInternal(climate, wx, wy, unitDir, seed, smoothSplatSource);
 
     // Cool transition: keep dirt out of cool climates (narrow dirt only near sand).
     var cool = zeroSurfaceWeights();
@@ -1072,7 +1088,7 @@ fn computeSurfaceWeights(
     let forestSmall = fbmAuto(wx, wy, unitDir, 0.12, 2, seed + 7230, 2.0, 0.5);
     let forestTiny = fbmAuto(wx, wy, unitDir, 0.04, 2, seed + 7240, 2.0, 0.5);
     // Tile-level dither for ragged edges
-    let forestDither = tileClusterNoise01(wx, wy, unitDir, seed + 7250);
+    let forestDither = select(tileClusterNoise01(wx, wy, unitDir, seed + 7250), 0.5, smoothSplatSource);
 
     // Combine scales: big forests dominate, with detail breaking up edges.
     let forestNoise = forestHuge * 0.22 +
@@ -1151,6 +1167,24 @@ fn computeSurfaceWeights(
     mixed.dirt = max(mixed.dirt, dirtAmount);
 
     return normalizeSurfaceWeights(mixed);
+}
+
+fn computeSurfaceWeights(
+    slope: f32,
+    elevation: f32,
+    wx: f32, wy: f32, unitDir: vec3<f32>,
+    seed: i32
+) -> SurfaceWeights {
+    return computeSurfaceWeightsInternal(slope, elevation, wx, wy, unitDir, seed, false);
+}
+
+fn computeSmoothSplatWeights(
+    slope: f32,
+    elevation: f32,
+    wx: f32, wy: f32, unitDir: vec3<f32>,
+    seed: i32
+) -> SurfaceWeights {
+    return computeSurfaceWeightsInternal(slope, elevation, wx, wy, unitDir, seed, true);
 }
 
   // Choose forest floor category: single vs mixed, dense vs sparse.

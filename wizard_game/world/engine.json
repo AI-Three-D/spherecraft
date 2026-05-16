@@ -4,6 +4,24 @@
     "biomeScale":  0.001,
     "regionScale": 0.0005
   },
+  "splatConfig": {
+    "splatDensity": 8,
+    "splatKernelSize": 1,
+    "slotSupportExpansionTexels": 1.5,
+    "transitionSharpness": 2.5,
+    "transitionDominanceStart": 0.05,
+    "transitionDominanceEnd": 0.9,
+    "centerCategoryBias": 0.0,
+    "transitionBreakupScale": 0.48,
+    "transitionBreakupWarpScale": 0.155,
+    "transitionBreakupWarpStrength": 0.65,
+    "transitionBreakupStrength": 0.10,
+    "sourceMinorityCutoff": 0.18,
+    "sourceMinorityFade": 0.10,
+    "sourceWinnerSnapStart": 0.55,
+    "sourceWinnerSnapEnd": 0.70,
+    "chunkPaletteEnabled": false
+  },
   "nightSky": {
     "detailLevel": "low"
   },
@@ -43,6 +61,7 @@
     "aerialFadeEndMeters":   600
   },
   "terrainAO": {
+    "enabled": false,
     "sampleStrength": 1.0,
     "directStrength": 0.7,
     "ambientFloor": 0.65

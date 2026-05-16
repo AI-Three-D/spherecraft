@@ -1,5 +1,5 @@
-// js/mesh/terrain/terrainGeometryBuilder.js
-import { Geometry } from '../../renderer/resources/geometry.js';
+// js/renderer/terrain/geometry/terrainGeometryBuilder.js
+import { Geometry } from '../../resources/geometry.js';
 
 export class TerrainGeometryBuilder {
     

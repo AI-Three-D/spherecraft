@@ -1,6 +1,6 @@
-import { Vector3, Matrix4, Quaternion, Color } from '../../shared/math/index.js';
-import { Geometry } from './resources/geometry.js';
-import { Material } from './resources/material.js';
+import { Vector3, Matrix4, Quaternion, Color } from '../../../shared/math/index.js';
+import { Geometry } from '../resources/geometry.js';
+import { Material } from '../resources/material.js';
 
 export class StarRenderer {
     constructor(backend) {

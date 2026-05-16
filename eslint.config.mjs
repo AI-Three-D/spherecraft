@@ -3,7 +3,7 @@ import globals from "globals";
 
 export default [
   {
-    ignores: ["node_modules/", "assets/"],
+    ignores: ["node_modules/", "assets/", "server.py"],
   },
   {
     files: ["**/*.js", "**/*.mjs"],
@@ -39,7 +39,7 @@ export default [
   },
   {
     // Node.js scripts (CI, config files)
-    files: [".github/scripts/**/*.mjs", "*.config.mjs", "server.py"],
+    files: [".github/scripts/**/*.mjs", "*.config.mjs"],
     languageOptions: {
       globals: {
         ...globals.node,
