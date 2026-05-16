@@ -1,5 +1,5 @@
 {
-  "_comment": "Data-driven atmospheric bank definitions. Type/placement data is active now; scatterRules are authored for the next shader-rule packing increment.",
+  "_comment": "Forest fog pockets and valley mist only. Low/peak atmospheric-bank clouds are intentionally not authored for this world.",
   "placement": {
     "cellSize": 400,
     "scanRadius": 7,
@@ -62,48 +62,6 @@
       "horizontalScale": 1.05,
       "heightMax": 12,
       "centerLiftScale": 1.0
-    },
-    {
-      "id": "low_cloud",
-      "type": "LOW_CLOUD",
-      "displayName": "Low Cloud",
-      "noiseScale": 0.006,
-      "noiseSpeed": 0.015,
-      "densityBase": 0.62,
-      "windResponse": 0.3,
-      "lifetime": { "min": 90, "max": 180 },
-      "size": { "min": 40, "max": 300 },
-      "color": [0.82, 0.84, 0.88, 0.34],
-      "fadeNearStart": 30,
-      "fadeFarStart": 1500,
-      "fadeFarEnd": 2500,
-      "densityThreshold": 0.38,
-      "altitudeOffset": { "min": 120, "max": 520 },
-      "verticalScale": 0.18,
-      "horizontalScale": 0.95,
-      "heightMax": 0,
-      "centerLiftScale": 1
-    },
-    {
-      "id": "peak_cloud",
-      "type": "PEAK_CLOUD",
-      "displayName": "Peak Cloud",
-      "noiseScale": 0.004,
-      "noiseSpeed": 0.010,
-      "densityBase": 0.52,
-      "windResponse": 0.4,
-      "lifetime": { "min": 120, "max": 240 },
-      "size": { "min": 80, "max": 400 },
-      "color": [0.88, 0.90, 0.94, 0.30],
-      "fadeNearStart": 40,
-      "fadeFarStart": 1800,
-      "fadeFarEnd": 3000,
-      "densityThreshold": 0.32,
-      "altitudeOffset": { "min": 180, "max": 760 },
-      "verticalScale": 0.30,
-      "horizontalScale": 0.88,
-      "heightMax": 0,
-      "centerLiftScale": 1
     }
   ],
   "scatterRules": [
@@ -121,21 +79,6 @@
       "spawnBudget": 4
     },
     {
-      "_comment": "Visible ground-hugging mist on common grass/forest lowlands. Kept short by the VALLEY_MIST heightMax cap.",
-      "id": "lowland_ground_mist",
-      "type": "VALLEY_MIST",
-      "tileCategories": ["GRASS", "FOREST"],
-      "excludeTileCategories": ["WATER", "DESERT"],
-      "elevation": { "min": 0.04, "max": 0.52, "weight": 1.0 },
-      "slope": { "min": 0.0, "max": 0.24, "weight": 1.0 },
-      "probability": 0.18,
-      "weatherWeight": 0.35,
-      "fogWeight": 1.4,
-      "weatherFloor": 0.36,
-      "altitudeOffset": { "min": 0, "max": 1.25 },
-      "spawnBudget": 2
-    },
-    {
       "id": "depression_valley_mist",
       "type": "VALLEY_MIST",
       "excludeTileCategories": ["WATER", "DESERT"],
@@ -151,108 +94,6 @@
       "fogWeight": 1.6,
       "weatherFloor": 0.32,
       "spawnBudget": 4
-    },
-    {
-      "_comment": "Sparse fair-weather wisps over open lowland/foothill grass. Budget stays at 1 to avoid broad overdraw.",
-      "id": "grass_lowland_cloud_wisps",
-      "type": "LOW_CLOUD",
-      "tileCategories": ["GRASS"],
-      "excludeTileCategories": ["WATER", "DESERT"],
-      "elevation": { "min": 0.08, "max": 0.46, "weight": 1.0 },
-      "slope": { "min": 0.0, "max": 0.30, "weight": 1.0 },
-      "probability": 0.055,
-      "weatherWeight": 0.75,
-      "fogWeight": 0.35,
-      "weatherFloor": 0.28,
-      "altitudeOffset": { "min": 110, "max": 360 },
-      "spawnBudget": 1
-    },
-    {
-      "_comment": "Low-mid cloud pockets around humid forested terrain, still sparse and terrain-filtered.",
-      "id": "forest_low_mid_cloud_pockets",
-      "type": "LOW_CLOUD",
-      "tileCategories": ["FOREST"],
-      "excludeTileCategories": ["WATER", "DESERT"],
-      "elevation": { "min": 0.10, "max": 0.54, "weight": 1.0 },
-      "slope": { "min": 0.0, "max": 0.34, "weight": 1.0 },
-      "probability": 0.045,
-      "weatherWeight": 0.90,
-      "fogWeight": 0.60,
-      "weatherFloor": 0.25,
-      "altitudeOffset": { "min": 140, "max": 450 },
-      "spawnBudget": 1
-    },
-    {
-      "_comment": "Mid-elevation broken patches over rock/snow shoulders without requiring peak terrain.",
-      "id": "rock_snow_mid_cloud_patches",
-      "type": "LOW_CLOUD",
-      "tileCategories": ["ROCK", "SNOW"],
-      "excludeTileCategories": ["WATER", "DESERT"],
-      "elevation": { "min": 0.22, "max": 0.68, "weight": 1.0 },
-      "slope": { "min": 0.0, "max": 0.50, "weight": 1.0 },
-      "probability": 0.040,
-      "weatherWeight": 0.70,
-      "fogWeight": 0.40,
-      "weatherFloor": 0.22,
-      "altitudeOffset": { "min": 180, "max": 560 },
-      "spawnBudget": 1
-    },
-    {
-      "_comment": "Lower mountain band — sparse wisps clinging to foothills",
-      "id": "mountain_cloud_lower",
-      "type": "LOW_CLOUD",
-      "excludeTileCategories": ["WATER", "DESERT"],
-      "terrainShape": {
-        "kind": "highland",
-        "minElevationNormalized": 0.34,
-        "fadeElevationNormalized": 0.18
-      },
-      "elevation": { "min": 0.30, "max": 0.62, "weight": 1.0 },
-      "slope": { "min": 0.0, "max": 0.42, "weight": 1.0 },
-      "probability": 0.13,
-      "weatherWeight": 0.5,
-      "fogWeight": 1.2,
-      "weatherFloor": 0.32,
-      "altitudeOffset": { "min": 100, "max": 420 },
-      "spawnBudget": 2
-    },
-    {
-      "_comment": "Upper mountain band — denser clouds wrapping mid-high slopes",
-      "id": "mountain_cloud_upper",
-      "type": "LOW_CLOUD",
-      "excludeTileCategories": ["WATER", "DESERT"],
-      "terrainShape": {
-        "kind": "highland",
-        "minElevationNormalized": 0.46,
-        "fadeElevationNormalized": 0.20
-      },
-      "elevation": { "min": 0.42, "max": 0.78, "weight": 1.0 },
-      "slope": { "min": 0.0, "max": 0.48, "weight": 1.0 },
-      "probability": 0.15,
-      "weatherWeight": 0.5,
-      "fogWeight": 1.2,
-      "weatherFloor": 0.30,
-      "altitudeOffset": { "min": 150, "max": 560 },
-      "spawnBudget": 2
-    },
-    {
-      "_comment": "Highest local highlands — large, light cap clouds with absolute altitude offsets above the ridge; spawnBudget 3 naturally creates 2–3 staggered layers per emitter",
-      "id": "mountain_peak_cloud",
-      "type": "PEAK_CLOUD",
-      "excludeTileCategories": ["WATER", "DESERT"],
-      "terrainShape": {
-        "kind": "highland",
-        "minElevationNormalized": 0.56,
-        "fadeElevationNormalized": 0.18
-      },
-      "elevation": { "min": 0.52, "max": 1.0, "weight": 1.0 },
-      "slope": { "min": 0.0, "max": 0.58, "weight": 1.0 },
-      "probability": 0.17,
-      "weatherWeight": 0.5,
-      "fogWeight": 0.8,
-      "weatherFloor": 0.28,
-      "altitudeOffset": { "min": 190, "max": 760 },
-      "spawnBudget": 3
     }
   ]
 }
