@@ -42,6 +42,7 @@ struct VsOut {
     @location(11) @interpolate(flat) radiusB: f32,
     @location(12) @interpolate(flat) halfHeight: f32,
     @location(13) @interpolate(flat) sliceWeight: f32,
+    @location(14) @interpolate(flat) camDist: f32,
 };
 
 fn quadCorner(vid: u32) -> vec2<f32> {
@@ -123,10 +124,8 @@ fn vs_main(@builtin(vertex_index) vid: u32,
 
     let localUp = resolveLocalUp(p.position);
     let basis = stableTangentBasis(localUp, p.noisePhase);
-    let sliceId = min(vid / 6u, ATMO_VOLUME_SLICE_COUNT - 1u);
-    let denom = max(f32(ATMO_VOLUME_SLICE_COUNT - 1u), 1.0);
-    let sliceT = (f32(sliceId) / denom) * 2.0 - 1.0;
-    let sliceWeight = (1.0 - abs(sliceT) * 0.25) * (1.08 / f32(ATMO_VOLUME_SLICE_COUNT));
+    let sliceT = 0.0;
+    let sliceWeight = 1.0;
 
     let radiusA = max(2.0, p.size);
     let radiusB = max(2.0, p.size * max(td.horizontalScale, 0.05));
@@ -165,6 +164,7 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     out.radiusB         = radiusB;
     out.halfHeight      = halfHeight;
     out.sliceWeight     = sliceWeight;
+    out.camDist         = length(volumeCenter - globals.cameraPos);
     return out;
 }
 
@@ -198,37 +198,84 @@ fn volumeShape(worldPos: vec3<f32>, center: vec3<f32>, phase: vec3<f32>,
     return clamp(ellipsoid * floorFade * topFade, 0.0, 1.0);
 }
 
+// Exact ellipsoid intersection — avoids wasted steps in the sphere-overestimate zone.
+// Returns t-values in original ray space; scale 1.15 pads for the smoothstep edge.
+fn rayEllipsoidIntersect(ro: vec3<f32>, rd: vec3<f32>, center: vec3<f32>,
+                          phase: vec3<f32>, rA: f32, rB: f32, hH: f32) -> vec2<f32> {
+    let localUp = resolveLocalUp(center);
+    let basis   = stableTangentBasis(localUp, phase);
+    let oc      = ro - center;
+    let sA = rA * 1.15;  let sH = hH * 1.15;  let sB = rB * 1.15;
+    let oc_s = vec3<f32>(dot(oc, basis.a) / sA, dot(oc, localUp) / sH, dot(oc, basis.b) / sB);
+    let rd_s = vec3<f32>(dot(rd, basis.a) / sA, dot(rd, localUp) / sH, dot(rd, basis.b) / sB);
+    let A    = dot(rd_s, rd_s);
+    let B    = dot(oc_s, rd_s);
+    let C    = dot(oc_s, oc_s) - 1.0;
+    let disc = B * B - A * C;
+    if (disc < 0.0) { return vec2<f32>(-1.0, -1.0); }
+    let sq = sqrt(disc);
+    return vec2<f32>((-B - sq) / A, (-B + sq) / A);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let shape = volumeShape(
-        in.worldPos,
-        in.particleCenter,
-        in.noisePhase,
-        in.radiusA,
-        in.radiusB,
-        in.halfHeight
-    );
-    if (shape <= 0.001) { discard; }
+    // Distance-gated step count — flat varying so no intra-instance divergence.
+    var steps: i32 = 2;
+    if      (in.camDist < 40.0)  { steps = 6; }
+    else if (in.camDist < 80.0)  { steps = 5; }
+    else if (in.camDist < 200.0) { steps = 4; }
 
-    let noiseCoord = in.worldPos * in.noiseScale + in.noisePhase +
-                     vec3<f32>(globals.time * in.noiseSpeed, 0.0, globals.time * in.noiseSpeed * 0.7);
+    let ro  = globals.cameraPos;
+    let rd  = normalize(in.worldPos - ro);
+    // Exact ellipsoid bounds — every step lands inside the actual volume.
+    let hit = rayEllipsoidIntersect(ro, rd, in.particleCenter, in.noisePhase,
+                                    in.radiusA, in.radiusB, in.halfHeight);
+    if (hit.y < 0.0 || hit.x > hit.y) { discard; }
 
-    let n1 = textureSampleLevel(noiseBase, noiseSampler, fract(noiseCoord), 0.0).r;
-    let n2 = textureSampleLevel(noiseDetail, noiseSampler, fract(noiseCoord * 2.7 + vec3<f32>(0.3, 0.7, 0.1)), 1.0).r;
-    let noise = n1 * 0.7 + n2 * 0.3;
+    let tStart   = max(hit.x, 0.001);
+    let tEnd     = hit.y;
+    let stepSize = (tEnd - tStart) / f32(steps);
 
-    let density = smoothstep(in.densityThreshold, 1.0, noise) * shape;
+    var accumulated = 0.0;
+    for (var i: i32 = 0; i < 6; i++) {
+        if (i >= steps) { break; }
+        // Centred sampling within each step interval — no jitter needed.
+        let t  = tStart + (f32(i) + 0.5) * stepSize;
+        let wp = ro + rd * t;
 
-    let depthDims = textureDimensions(depthTexture);
+        let shape = volumeShape(wp, in.particleCenter, in.noisePhase,
+                                in.radiusA, in.radiusB, in.halfHeight);
+        if (shape < 0.01) { continue; }
+
+        let noiseCoord = wp * in.noiseScale + in.noisePhase +
+            vec3<f32>(globals.time * in.noiseSpeed, 0.0, globals.time * in.noiseSpeed * 0.7);
+        let n1 = textureSampleLevel(noiseBase, noiseSampler, fract(noiseCoord), 0.0).r;
+        // Skip detail noise for far particles — saves one texture fetch per step.
+        var noise = n1;
+        if (in.camDist < 200.0) {
+            let n2 = textureSampleLevel(noiseDetail, noiseSampler,
+                fract(noiseCoord * 2.7 + vec3<f32>(0.3, 0.7, 0.1)), 1.0).r;
+            noise = n1 * 0.7 + n2 * 0.3;
+        }
+
+        let density = smoothstep(in.densityThreshold, 1.0, noise) * shape;
+        // Normalise by step count so opacity is independent of particle size.
+        accumulated += density / f32(steps);
+        if (accumulated > 0.95) { break; }
+    }
+
+    if (accumulated < 0.003) { discard; }
+
+    let depthDims    = textureDimensions(depthTexture);
     let clampedCoord = sceneDepthCoord(in.clipPos.xy, depthDims);
     let sceneDepthRaw = textureLoad(depthTexture, clampedCoord, 0);
-    let linearScene = linearizeDepth(sceneDepthRaw, globals.nearPlane, globals.farPlane);
-    let linearFrag  = linearizeDepth(in.clipPos.z, globals.nearPlane, globals.farPlane);
-    let softDist = max(in.particleSize * 0.30, 14.0);
-    let depthBias = max(in.particleSize * 0.05, 1.25);
-    let depthFade = clamp((linearScene - linearFrag + depthBias) / softDist, 0.0, 1.0);
+    let linearScene  = linearizeDepth(sceneDepthRaw, globals.nearPlane, globals.farPlane);
+    let linearFrag   = linearizeDepth(in.clipPos.z,  globals.nearPlane, globals.farPlane);
+    let softDist     = max(in.particleSize * 0.30, 14.0);
+    let depthBias    = max(in.particleSize * 0.05,  1.25);
+    let depthFade    = clamp((linearScene - linearFrag + depthBias) / softDist, 0.0, 1.0);
 
-    let alpha = density * depthFade * in.opacity * in.color.a * in.sliceWeight;
+    let alpha    = clamp(accumulated, 0.0, 1.0) * depthFade * in.opacity * in.color.a;
     if (alpha < 0.003) { discard; }
     let litColor = in.color.rgb * resolveFogLighting(in.particleCenter);
     return vec4<f32>(litColor * alpha, alpha);

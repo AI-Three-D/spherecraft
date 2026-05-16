@@ -37,5 +37,5 @@ export const ATMO_SCATTER_RULE_CAPACITY = 16;
 export const ATMO_SCATTER_RULE_STRIDE   = 80;
 export const ATMO_FLAG_ALIVE       = 1;
 export const ATMO_WORKGROUP_SIZE   = 64;
-export const ATMO_VOLUME_SLICE_COUNT = 3;
+export const ATMO_VOLUME_SLICE_COUNT = 1;
 export const ATMO_VERTICES_PER_PARTICLE = ATMO_VOLUME_SLICE_COUNT * 6;
