@@ -67,8 +67,18 @@
     "ambientFloor": 0.65
   },
   "gpuQuadtree": {
-    "lodErrorThreshold": 512,
-    "maxVisibleTiles":   2048,
-    "tilePoolSize":      2048
+    "lodErrorThreshold":       512,
+    "maxVisibleTiles":         2048,
+    "tilePoolSize":            2048,
+    "visibleReadbackInterval": 2
+  },
+  "ui": {
+    "initialLoad": {
+      "exactVisibleRatio":      0.9,
+      "residentVisibleRatio":   0.95,
+      "maxPendingGenerations":  6,
+      "maxActiveGenerations":   2,
+      "stableFramesRequired":   20
+    }
   }
 }

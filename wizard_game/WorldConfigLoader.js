@@ -235,6 +235,12 @@ export class WorldConfigLoader {
             Object.assign(features, engine.features);
             base.features = features;
         }
+        if (engine?.ui?.initialLoad) {
+            Object.assign(base.ui.initialLoad, engine.ui.initialLoad);
+        }
+        if (engine?.ui?.updateIntervalMs != null) {
+            base.ui.updateIntervalMs = engine.ui.updateIntervalMs;
+        }
         return base;
     }
 

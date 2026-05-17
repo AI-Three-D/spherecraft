@@ -220,13 +220,13 @@ export function createEngineConfig() {
       initialLoad: {
         enabled: true,
         minOverlayMs: 1800,
-        maxWaitMs: 14000,
-        stableFramesRequired: 16,
-        residentVisibleRatio: 0.94,
-        exactVisibleRatio: 0.62,
+        maxWaitMs: 18000,
+        stableFramesRequired: 45,
+        residentVisibleRatio: 0.97,
+        exactVisibleRatio: 0.92,
         minVisibleTiles: 64,
-        maxPendingGenerations: 20,
-        maxActiveGenerations: 6,
+        maxPendingGenerations: 4,
+        maxActiveGenerations: 2,
         maxPendingCopies: 0
       }
     },
