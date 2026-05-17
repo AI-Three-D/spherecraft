@@ -242,7 +242,7 @@ fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, eleva
         let depression = avgNeighbor - elevation;
 
         if (depression > 3.0) {
-            let prob = 0.22 * weatherMod * min(depression / 10.0, 1.0);
+            let prob = 0.06 * weatherMod * min(depression / 10.0, 1.0);
             if (roll < prob) {
                 selected.matched = 1u;
                 selected.typeId = TYPE_VALLEY_MIST;
