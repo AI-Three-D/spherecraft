@@ -91,7 +91,11 @@ fn spawnParticle(slot: u32, claim: u32, emIdx: u32) -> AtmoParticle {
 
     let angle = rand01(seedBase, 11u, emitter.rngSeed) * 6.2831853;
     let r = sqrt(rand01(seedBase, 12u, emitter.rngSeed));
-    let spawnRadius = mix(td.sizeMin * 0.3, td.sizeMax * 0.5, r);
+    // Each emitter owns a random patch radius (20–80 m). Particles are placed
+    // uniformly across the full disk (sqrt(r) gives uniform area distribution).
+    // This turns each emitter into a fog patch of variable size and density.
+    let patchRadius = mix(1.0, 40.0, hashToFloat(emitter.rngSeed ^ 0xFACE1234u));
+    let spawnRadius = r * patchRadius;
     let lx = cos(angle) * spawnRadius;
     let lz = sin(angle) * spawnRadius;
     var minUp = td.altitudeOffsetMin;

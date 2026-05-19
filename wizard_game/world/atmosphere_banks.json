@@ -1,10 +1,10 @@
 {
   "_comment": "Forest fog pockets and valley mist only. Low/peak atmospheric-bank clouds are intentionally not authored for this world.",
   "placement": {
-    "cellSize": 400,
+    "cellSize": 12, 
     "scanRadius": 7,
     "maxRenderDist": 1600,
-    "baseSpawnBudget": 2,
+    "baseSpawnBudget": 200,
     "lodNearDistance": 200,
     "lodFarDistance": 1500,
     "lodMinScale": 0.1,
@@ -25,22 +25,22 @@
       "id": "valley_mist",
       "type": "VALLEY_MIST",
       "displayName": "Valley Mist",
-      "noiseScale": 0.010,
+      "noiseScale": 0.08,
       "noiseSpeed": 0.004,
       "densityBase": 0.78,
       "windResponse": 0.0,
       "lifetime": { "min": 60, "max": 120 },
-      "size": { "min": 5, "max": 12 },
-      "color": [0.75, 0.78, 0.82, 0.28],
+      "size": { "min": 8, "max": 18 },
+      "color": [0.75, 0.78, 0.82, 0.125],
       "fadeNearStart": 20,
       "fadeFarStart": 1200,
       "fadeFarEnd": 2000,
-      "densityThreshold": 0.44,
-      "altitudeOffset": { "min": 0, "max": 1.25 },
+      "densityThreshold": 0.56,
+      "altitudeOffset": { "min": 2.0, "max": 3.5 },
       "verticalScale": 1.0,
       "horizontalScale": 1.0,
-      "heightMax": 0,
-      "centerLiftScale": 0.8
+      "heightMax": 14,
+      "centerLiftScale": 1.0
     },
     {
       "id": "fog_pocket",
@@ -52,7 +52,7 @@
       "windResponse": 0.0,
       "lifetime": { "min": 30, "max": 80 },
       "size": { "min": 4, "max": 10 },
-      "color": [0.72, 0.75, 0.80, 0.30],
+      "color": [0.72, 0.75, 0.80, 0.25],
       "fadeNearStart": 10,
       "fadeFarStart": 800,
       "fadeFarEnd": 1500,
@@ -73,11 +73,11 @@
       "biomeTags": ["woodland"],
       "slope": { "min": 0.0, "max": 0.25, "weight": 1.0 },
       "elevation": { "min": 0.0, "max": 0.14 },
-      "probability": 0.65,
+      "probability": 0.95,
       "weatherWeight": 0.45,
-      "fogWeight": 1.6,
+      "fogWeight": 0.3,
       "weatherFloor": 0.30,
-      "spawnBudget": 8
+      "spawnBudget": 600
     },
     {
       "id": "depression_valley_mist",
@@ -86,16 +86,16 @@
       "terrainShape": {
         "kind": "depression",
         "neighborRadiusTexels": 3,
-        "minDepthMeters": 3.0,
+        "minDepthMeters": 1.0,
         "maxDepthMeters": 10.0
       },
       "slope": { "min": 0.0, "max": 0.15, "weight": 1.0 },
       "elevation": { "min": 0.0, "max": 0.14 },
-      "probability": 0.65,
+      "probability": 0.90,
       "weatherWeight": 0.45,
-      "fogWeight": 1.6,
+      "fogWeight": 0.3,
       "weatherFloor": 0.32,
-      "spawnBudget": 8
+      "spawnBudget": 600
     }
   ]
 }

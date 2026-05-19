@@ -193,10 +193,10 @@ fn volumeShape(worldPos: vec3<f32>, center: vec3<f32>, phase: vec3<f32>,
     let ly = dot(offset, localUp) / max(halfHeight, 0.001);
     let d = sqrt(lx * lx + lz * lz + ly * ly);
     let sphere = 1.0 - smoothstep(0.72, 1.0, d);
-    // Fade the top portion in world-space so fog doesn't extend high above terrain.
-    // At small particle sizes (5-10 m) this world-space fade has negligible view-rotation artifact.
-    let topFade = 1.0 - smoothstep(0.3, 1.0, ly);
-    return clamp(sphere * topFade, 0.0, 1.0);
+    // World-space fades — negligible rotation artifact at 5-10 m particle scale.
+    let topFade   = 1.0 - smoothstep(0.3, 1.0, ly);   // fades above ~30% height
+    let floorFade = smoothstep(-1.0, -0.9, ly);        // soft dissolve at sphere bottom only
+    return clamp(sphere * topFade * floorFade, 0.0, 1.0);
 }
 
 @fragment
@@ -221,8 +221,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sceneDepthRaw = textureLoad(depthTexture, clampedCoord, 0);
     let linearScene   = linearizeDepth(sceneDepthRaw, globals.nearPlane, globals.farPlane);
     let linearFrag    = linearizeDepth(in.clipPos.z,  globals.nearPlane, globals.farPlane);
-    // Hard discard when fog is clearly behind terrain (underground from camera's view).
-    if (linearScene < linearFrag - 0.5) { discard; }
+    // Discard fog fragments that are behind the terrain surface.
+    // Tight threshold handles height-texture LOD mismatch between scatter and renderer.
+    if (linearScene < linearFrag - 0.1) { discard; }
     // Soft fade at the terrain surface intersection.
     let softDist  = max(in.particleSize * 0.4, 4.0);
     let depthFade = clamp((linearScene - linearFrag + in.particleSize * 0.3) / softDist, 0.0, 1.0);
