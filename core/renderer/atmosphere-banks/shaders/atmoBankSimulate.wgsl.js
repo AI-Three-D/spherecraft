@@ -94,7 +94,7 @@ fn spawnParticle(slot: u32, claim: u32, emIdx: u32) -> AtmoParticle {
     // Each emitter owns a random patch radius (20–80 m). Particles are placed
     // uniformly across the full disk (sqrt(r) gives uniform area distribution).
     // This turns each emitter into a fog patch of variable size and density.
-    let patchRadius = mix(1.0, 40.0, hashToFloat(emitter.rngSeed ^ 0xFACE1234u));
+    let patchRadius = mix(1.0, 7.0, hashToFloat(emitter.rngSeed ^ 0xFACE1234u));
     let spawnRadius = r * patchRadius;
     let lx = cos(angle) * spawnRadius;
     let lz = sin(angle) * spawnRadius;

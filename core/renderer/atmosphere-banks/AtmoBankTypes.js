@@ -25,8 +25,8 @@ export const ATMO_BANK_ALL_TYPE_MASK =
     ATMO_BANK_CLOUD_TYPE_MASK;
 
 export const ATMO_TYPE_CAPACITY    = 4;
-export const ATMO_EMITTER_CAPACITY = 64;
-export const ATMO_MAX_PARTICLES    = 256;
+export const ATMO_EMITTER_CAPACITY = 320;
+export const ATMO_MAX_PARTICLES    = 800;
 export const ATMO_PARTICLE_STRIDE  = 96;
 export const ATMO_TYPE_DEF_STRIDE  = 96;
 export const ATMO_EMITTER_STRIDE   = 80;

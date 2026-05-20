@@ -1,15 +1,19 @@
 {
   "_comment": "Forest fog pockets and valley mist only. Low/peak atmospheric-bank clouds are intentionally not authored for this world.",
   "placement": {
-    "cellSize": 12, 
-    "scanRadius": 7,
     "maxRenderDist": 1600,
-    "baseSpawnBudget": 200,
     "lodNearDistance": 200,
     "lodFarDistance": 1500,
     "lodMinScale": 0.1,
     "distanceCutoff": 1600,
-    "spawnProbability": 0.24,
+    "clusterCellSize": 350,
+    "clusterScanRadius": 5,
+    "clusterProbability": 0.25,
+    "clusterSizeMin": 8,
+    "clusterSizeMax": 75,
+    "emitterSpacing": 5,
+    "shapeWarp": 0.55,
+    "maxEmittersPerCluster": 100,
     "localDistanceFog": {
       "enabled": true,
       "largeEmitterMinSize": 120,
@@ -27,16 +31,16 @@
       "displayName": "Valley Mist",
       "noiseScale": 0.08,
       "noiseSpeed": 0.004,
-      "densityBase": 0.78,
+      "densityBase": 0.30,
       "windResponse": 0.0,
       "lifetime": { "min": 60, "max": 120 },
-      "size": { "min": 8, "max": 18 },
+      "size": { "min": 8, "max": 21 },
       "color": [0.75, 0.78, 0.82, 0.125],
       "fadeNearStart": 20,
       "fadeFarStart": 1200,
       "fadeFarEnd": 2000,
       "densityThreshold": 0.56,
-      "altitudeOffset": { "min": 2.0, "max": 3.5 },
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
       "verticalScale": 1.0,
       "horizontalScale": 1.0,
       "heightMax": 14,
@@ -48,20 +52,20 @@
       "displayName": "Fog Pocket",
       "noiseScale": 0.024,
       "noiseSpeed": 0.008,
-      "densityBase": 0.82,
+      "densityBase": 0.35,
       "windResponse": 0.0,
       "lifetime": { "min": 30, "max": 80 },
-      "size": { "min": 4, "max": 10 },
+      "size": { "min": 4, "max": 13 },
       "color": [0.72, 0.75, 0.80, 0.25],
       "fadeNearStart": 10,
       "fadeFarStart": 800,
       "fadeFarEnd": 1500,
       "densityThreshold": 0.44,
-      "altitudeOffset": { "min": 0, "max": 1.0 },
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
       "verticalScale": 1.0,
       "horizontalScale": 1.0,
       "heightMax": 0,
-      "centerLiftScale": 0.8
+      "centerLiftScale": 1.0
     }
   ],
   "scatterRules": [
@@ -73,11 +77,12 @@
       "biomeTags": ["woodland"],
       "slope": { "min": 0.0, "max": 0.25, "weight": 1.0 },
       "elevation": { "min": 0.0, "max": 0.14 },
-      "probability": 0.95,
+      "probability": 0.06,
       "weatherWeight": 0.45,
       "fogWeight": 0.3,
       "weatherFloor": 0.30,
-      "spawnBudget": 600
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
+      "spawnBudget": 3
     },
     {
       "id": "depression_valley_mist",
@@ -91,11 +96,12 @@
       },
       "slope": { "min": 0.0, "max": 0.15, "weight": 1.0 },
       "elevation": { "min": 0.0, "max": 0.14 },
-      "probability": 0.90,
+      "probability": 0.05,
       "weatherWeight": 0.45,
       "fogWeight": 0.3,
       "weatherFloor": 0.32,
-      "spawnBudget": 600
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
+      "spawnBudget": 3
     }
   ]
 }

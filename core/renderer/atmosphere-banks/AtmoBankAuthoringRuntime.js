@@ -88,15 +88,19 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
 });
 
 export const DEFAULT_ATMO_PLACEMENT_CONFIG = Object.freeze({
-    cellSize: 400,
-    scanRadius: 7,
     maxRenderDist: 1600,
-    baseSpawnBudget: 2,
     lodNearDistance: 200,
     lodFarDistance: 1500,
     lodMinScale: 0.1,
     distanceCutoff: 1600,
-    spawnProbability: 0.24,
+    clusterCellSize: 350,
+    clusterScanRadius: 5,
+    clusterProbability: 0.13,
+    clusterSizeMin: 10,
+    clusterSizeMax: 65,
+    emitterSpacing: 12,
+    shapeWarp: 0.5,
+    maxEmittersPerCluster: 22,
     localDistanceFog: Object.freeze({
         enabled: true,
         largeEmitterMinSize: 120,
@@ -227,15 +231,19 @@ function collectTypeOverrides(rawTypes, warnings) {
 
 function normalizePlacement(raw = {}, fallback = DEFAULT_ATMO_PLACEMENT_CONFIG) {
     return {
-        cellSize: clampNumber(raw.cellSize, fallback.cellSize, 1, 100000),
-        scanRadius: clampInt(raw.scanRadius, fallback.scanRadius, 1, 65),
         maxRenderDist: clampNumber(raw.maxRenderDist, fallback.maxRenderDist, 1, 1000000),
-        baseSpawnBudget: clampInt(raw.baseSpawnBudget, fallback.baseSpawnBudget, 0, 128),
         lodNearDistance: clampNumber(raw.lodNearDistance, fallback.lodNearDistance, 0, 1000000),
         lodFarDistance: clampNumber(raw.lodFarDistance, fallback.lodFarDistance, 0, 1000000),
         lodMinScale: clampNumber(raw.lodMinScale, fallback.lodMinScale, 0, 1),
         distanceCutoff: clampNumber(raw.distanceCutoff, fallback.distanceCutoff, 1, 1000000),
-        spawnProbability: clampNumber(raw.spawnProbability, fallback.spawnProbability, 0, 1),
+        clusterCellSize: clampNumber(raw.clusterCellSize, fallback.clusterCellSize, 10, 100000),
+        clusterScanRadius: clampInt(raw.clusterScanRadius, fallback.clusterScanRadius, 1, 65),
+        clusterProbability: clampNumber(raw.clusterProbability, fallback.clusterProbability, 0, 1),
+        clusterSizeMin: clampNumber(raw.clusterSizeMin, fallback.clusterSizeMin, 1, 10000),
+        clusterSizeMax: clampNumber(raw.clusterSizeMax, fallback.clusterSizeMax, 1, 10000),
+        emitterSpacing: clampNumber(raw.emitterSpacing, fallback.emitterSpacing, 0.5, 1000),
+        shapeWarp: clampNumber(raw.shapeWarp, fallback.shapeWarp, 0, 1),
+        maxEmittersPerCluster: clampInt(raw.maxEmittersPerCluster, fallback.maxEmittersPerCluster, 1, 64),
         localDistanceFog: {
             enabled: raw.localDistanceFog?.enabled ?? fallback.localDistanceFog?.enabled ?? true,
             largeEmitterMinSize: clampNumber(

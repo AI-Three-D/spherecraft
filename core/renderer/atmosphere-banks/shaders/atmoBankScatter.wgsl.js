@@ -7,6 +7,8 @@ export function buildAtmoBankScatterWGSL({ maxEmitters = 32, tileCategories = []
 const MAX_EMITTERS: u32 = ${maxEmitters}u;
 const GRID_RES: u32 = 8u;
 const CELLS_PER_TILE: u32 = GRID_RES * GRID_RES;
+const CLUSTER_EMITTER_COUNT: u32 = 50u;
+const CLUSTER_RADIUS: f32 = 50.0;
 
 const TYPE_VALLEY_MIST: u32 = 0u;
 const TYPE_FOG_POCKET:  u32 = 1u;
@@ -96,6 +98,44 @@ fn getCubePoint(face: u32, u: f32, v: f32) -> vec3<f32> {
         case 4u { return vec3<f32>( s,  t,  1.0); }
         default { return vec3<f32>(-s,  t, -1.0); }
     }
+}
+
+fn directionToFaceUV(face: u32, dir: vec3<f32>) -> vec2<f32> {
+    var s = 0.0;
+    var t = 0.0;
+    switch (face) {
+        case 0u {
+            let inv = 1.0 / max(abs(dir.x), 1e-6);
+            s = -dir.z * inv;
+            t =  dir.y * inv;
+        }
+        case 1u {
+            let inv = 1.0 / max(abs(dir.x), 1e-6);
+            s =  dir.z * inv;
+            t =  dir.y * inv;
+        }
+        case 2u {
+            let inv = 1.0 / max(abs(dir.y), 1e-6);
+            s =  dir.x * inv;
+            t = -dir.z * inv;
+        }
+        case 3u {
+            let inv = 1.0 / max(abs(dir.y), 1e-6);
+            s =  dir.x * inv;
+            t =  dir.z * inv;
+        }
+        case 4u {
+            let inv = 1.0 / max(abs(dir.z), 1e-6);
+            s =  dir.x * inv;
+            t =  dir.y * inv;
+        }
+        default {
+            let inv = 1.0 / max(abs(dir.z), 1e-6);
+            s = -dir.x * inv;
+            t =  dir.y * inv;
+        }
+    }
+    return vec2<f32>(s * 0.5 + 0.5, t * 0.5 + 0.5);
 }
 
 fn sampleHeight(uv: vec2<f32>, layer: i32) -> f32 {
@@ -365,18 +405,49 @@ fn main(
     if (selected.matched == 0u) { return; }
     if (!typeEnabled(selected.typeId)) { return; }
 
-    let idx = atomicAdd(&counter.count, 1u);
-    if (idx >= MAX_EMITTERS) { return; }
+    // Build tangent frame so cluster offsets stay on the sphere surface
+    var clusterTangent: vec3<f32>;
+    if (abs(sphereDir.y) < 0.9) {
+        clusterTangent = normalize(cross(sphereDir, vec3<f32>(0.0, 1.0, 0.0)));
+    } else {
+        clusterTangent = normalize(cross(sphereDir, vec3<f32>(1.0, 0.0, 0.0)));
+    }
+    let clusterBitangent = cross(clusterTangent, sphereDir);
 
-    var em: EmitterOut;
-    em.posX = worldPos.x; em.posY = worldPos.y; em.posZ = worldPos.z;
-    em.spawnBudget = selected.spawnBudget;
-    em.upX = sphereDir.x; em.upY = sphereDir.y; em.upZ = sphereDir.z;
-    em.typeId = selected.typeId;
-    em.rngSeed = selected.rngSeed;
-    em.altitudeOffsetMin = selected.altitudeOffsetMin;
-    em.altitudeOffsetMax = selected.altitudeOffsetMax;
-    emitterOutput[idx] = em;
+    for (var ci = 0u; ci < CLUSTER_EMITTER_COUNT; ci++) {
+        let idx = atomicAdd(&counter.count, 1u);
+        if (idx >= MAX_EMITTERS) { return; }
+
+        let cSeed = hash1u(cellHash ^ (ci * 2654435761u + 0xDEADBEEFu));
+        let angle = hashToFloat(cSeed) * 6.28318530718;
+        let r = sqrt(hashToFloat(cSeed ^ 0xABCD1234u)) * CLUSTER_RADIUS;
+        let offset = cos(angle) * r * clusterTangent + sin(angle) * r * clusterBitangent;
+        let rawDir = normalize(worldPos + offset - params.planetOrigin);
+
+        // Reproject the offset direction back into the same cube-face tile before
+        // sampling height. The sampled height and final emitter direction must
+        // agree or ground fog can float well above the rendered terrain.
+        let rawFaceUv = directionToFaceUV(tileInfo.face, rawDir);
+        let emTexUv = clamp(
+            (rawFaceUv - vec2<f32>(tileUMin, tileVMin)) / tileUVSize,
+            vec2<f32>(0.0), vec2<f32>(1.0)
+        );
+        let emFaceU = tileUMin + emTexUv.x * tileUVSize;
+        let emFaceV = tileVMin + emTexUv.y * tileUVSize;
+        let emDir = normalize(getCubePoint(tileInfo.face, emFaceU, emFaceV));
+        let emElevation = sampleHeight(emTexUv, layer) * params.heightScale;
+        let emWorldPos = params.planetOrigin + emDir * (params.planetRadius + emElevation);
+
+        var em: EmitterOut;
+        em.posX = emWorldPos.x; em.posY = emWorldPos.y; em.posZ = emWorldPos.z;
+        em.spawnBudget = selected.spawnBudget;
+        em.upX = emDir.x; em.upY = emDir.y; em.upZ = emDir.z;
+        em.typeId = selected.typeId;
+        em.rngSeed = cSeed;
+        em.altitudeOffsetMin = selected.altitudeOffsetMin;
+        em.altitudeOffsetMax = selected.altitudeOffsetMax;
+        emitterOutput[idx] = em;
+    }
 }
 `;
 }

@@ -8,6 +8,8 @@ export function buildAtmoBankRenderWGSL({ typeCapacity = 4, sliceCount = 5 } = {
 ${common}
 
 const ATMO_VOLUME_SLICE_COUNT: u32 = ${volumeSliceCount}u;
+const TYPE_VALLEY_MIST: u32 = 0u;
+const TYPE_FOG_POCKET:  u32 = 1u;
 
 @group(0) @binding(0) var<uniform>       globals   : AtmoGlobals;
 @group(0) @binding(1) var<storage, read> particles : array<AtmoParticle>;
@@ -130,7 +132,10 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     let radiusA = max(2.0, p.size);
     let radiusB = max(2.0, p.size * max(td.horizontalScale, 0.05));
     var halfHeight = max(1.5, p.size * max(td.verticalScale, 0.01));
-    let centerLiftScale = clamp(td.centerLiftScale, 0.0, 1.0);
+    var centerLiftScale = clamp(td.centerLiftScale, 0.0, 1.0);
+    if (p.ptype == TYPE_VALLEY_MIST || p.ptype == TYPE_FOG_POCKET) {
+        centerLiftScale = 1.0;
+    }
     if (td.heightMax > 0.0) {
         let maxHalfHeight = max(1.5, td.heightMax / max(centerLiftScale + 1.0, 0.001));
         halfHeight = min(halfHeight, maxHalfHeight);
