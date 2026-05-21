@@ -25,8 +25,8 @@ export const ATMO_BANK_ALL_TYPE_MASK =
     ATMO_BANK_CLOUD_TYPE_MASK;
 
 export const ATMO_TYPE_CAPACITY    = 4;
-export const ATMO_EMITTER_CAPACITY = 320;
-export const ATMO_MAX_PARTICLES    = 800;
+export const ATMO_EMITTER_CAPACITY = 2048;
+export const ATMO_MAX_PARTICLES    = 2048;
 export const ATMO_PARTICLE_STRIDE  = 96;
 export const ATMO_TYPE_DEF_STRIDE  = 96;
 export const ATMO_EMITTER_STRIDE   = 80;
@@ -34,7 +34,7 @@ export const ATMO_GLOBALS_SIZE     = 256;
 export const ATMO_INDIRECT_SIZE    = 16;
 export const ATMO_SCRATCH_SIZE     = 16;
 export const ATMO_SCATTER_RULE_CAPACITY = 16;
-export const ATMO_SCATTER_RULE_STRIDE   = 80;
+export const ATMO_SCATTER_RULE_STRIDE   = 112;
 export const ATMO_FLAG_ALIVE       = 1;
 export const ATMO_WORKGROUP_SIZE   = 64;
 export const ATMO_VOLUME_SLICE_COUNT = 1;

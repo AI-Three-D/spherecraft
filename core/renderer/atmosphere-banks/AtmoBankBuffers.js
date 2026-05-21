@@ -126,6 +126,8 @@ export class AtmoBankBuffers {
             buf[b + 19] = e.horizontalScale ?? 1.0;
             buf[b + 20] = e.heightMax ?? 0;
             buf[b + 21] = e.centerLiftScale ?? 1.0;
+            buf[b + 22] = e.riseSpeed ?? 0;
+            buf[b + 23] = e.topNoiseFade ?? 0;
         }
         this.device.queue.writeBuffer(this.typeDefUBO, 0, buf);
     }
@@ -148,6 +150,11 @@ export class AtmoBankBuffers {
             this._eU32[b + 8] = (em.rngSeed ?? 0) >>> 0;
             this._eF32[b + 12] = em.altitudeOffset?.min ?? 0;
             this._eF32[b + 13] = em.altitudeOffset?.max ?? 0;
+            const color = Array.isArray(em.colorOverride) ? em.colorOverride : em.color;
+            this._eF32[b + 16] = Array.isArray(color) ? (color[0] ?? 0) : 0;
+            this._eF32[b + 17] = Array.isArray(color) ? (color[1] ?? 0) : 0;
+            this._eF32[b + 18] = Array.isArray(color) ? (color[2] ?? 0) : 0;
+            this._eF32[b + 19] = Array.isArray(color) ? (color[3] ?? -1) : -1;
         }
         this.device.queue.writeBuffer(this.emitterData, 0, this._eF32.buffer);
         this._emitterCounterData[0] = count >>> 0;

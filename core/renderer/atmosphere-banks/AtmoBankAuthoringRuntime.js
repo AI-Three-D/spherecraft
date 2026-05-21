@@ -21,6 +21,8 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         horizontalScale: 1.00,
         heightMax: 0.0,
         centerLiftScale: 0.0,
+        riseSpeed: 0.02,
+        topNoiseFade: 0.35,
     }),
     [ATMO_BANK_TYPES.FOG_POCKET]: Object.freeze({
         id: 'fog_pocket',
@@ -42,6 +44,8 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         horizontalScale: 1.00,
         heightMax: 0.0,
         centerLiftScale: 0.0,
+        riseSpeed: 0.02,
+        topNoiseFade: 0.35,
     }),
     [ATMO_BANK_TYPES.LOW_CLOUD]: Object.freeze({
         id: 'low_cloud',
@@ -63,6 +67,8 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         horizontalScale: 0.95,
         heightMax: 0.0,
         centerLiftScale: 1.0,
+        riseSpeed: 0.0,
+        topNoiseFade: 0.0,
     }),
     [ATMO_BANK_TYPES.PEAK_CLOUD]: Object.freeze({
         id: 'peak_cloud',
@@ -84,6 +90,8 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         horizontalScale: 0.88,
         heightMax: 0.0,
         centerLiftScale: 1.0,
+        riseSpeed: 0.0,
+        topNoiseFade: 0.0,
     }),
 });
 
@@ -98,7 +106,7 @@ export const DEFAULT_ATMO_PLACEMENT_CONFIG = Object.freeze({
     clusterProbability: 0.13,
     clusterSizeMin: 10,
     clusterSizeMax: 65,
-    emitterSpacing: 12,
+    emitterSpacing: 7,
     shapeWarp: 0.5,
     maxEmittersPerCluster: 22,
     localDistanceFog: Object.freeze({
@@ -161,6 +169,12 @@ function normalizeRange(raw = {}, fallback = {}, min = 0, max = Infinity) {
     return { min: Math.min(lo, hi), max: Math.max(lo, hi) };
 }
 
+function normalizeIntRange(raw = {}, fallback = {}, min = 0, max = Number.MAX_SAFE_INTEGER) {
+    const lo = clampInt(raw.min, fallback.min, min, max);
+    const hi = clampInt(raw.max, fallback.max, min, max);
+    return { min: Math.min(lo, hi), max: Math.max(lo, hi) };
+}
+
 function normalizeColor(raw, fallback) {
     const source = Array.isArray(raw) ? raw : fallback;
     return [
@@ -168,6 +182,16 @@ function normalizeColor(raw, fallback) {
         clampNumber(source?.[1], fallback[1], 0, 1),
         clampNumber(source?.[2], fallback[2], 0, 1),
         clampNumber(source?.[3], fallback[3], 0, 1),
+    ];
+}
+
+function normalizeOptionalColor(raw) {
+    if (!Array.isArray(raw)) return null;
+    return [
+        clampNumber(raw[0], 0.8, 0, 1),
+        clampNumber(raw[1], 0.8, 0, 1),
+        clampNumber(raw[2], 0.85, 0, 1),
+        clampNumber(raw[3], 0.5, 0, 1),
     ];
 }
 
@@ -201,6 +225,8 @@ function normalizeTypeDef(raw = {}, fallback = {}, typeId = 0) {
         horizontalScale: clampNumber(raw.horizontalScale, fallback.horizontalScale ?? 1.0, 0.05, 8),
         heightMax: clampNumber(raw.heightMax, fallback.heightMax ?? 0, 0, 100000),
         centerLiftScale: clampNumber(raw.centerLiftScale, fallback.centerLiftScale ?? 1.0, 0, 1),
+        riseSpeed: clampNumber(raw.riseSpeed, fallback.riseSpeed ?? 0, -10, 10),
+        topNoiseFade: clampNumber(raw.topNoiseFade, fallback.topNoiseFade ?? 0, 0, 1),
     };
 }
 
@@ -294,6 +320,17 @@ function normalizeOptionalSignalBand(raw) {
     return { min: Math.min(min, max), max: Math.max(min, max), weight };
 }
 
+function normalizeScatterCluster(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const emitterCount = raw.emitterCount && typeof raw.emitterCount === 'object'
+        ? normalizeIntRange(raw.emitterCount, { min: 0, max: 0 }, 0, 4096)
+        : null;
+    return {
+        radius: normalizeRange(raw.radius, { min: 50, max: 50 }, 0, 10000),
+        emitterCount,
+    };
+}
+
 function normalizeScatterRule(raw = {}, index = 0, warnings) {
     const typeId = normalizeTypeId(raw.typeId ?? raw.type, null);
     if (typeId == null) {
@@ -328,6 +365,8 @@ function normalizeScatterRule(raw = {}, index = 0, warnings) {
             ? cloneValue(raw.terrainShape)
             : null,
         altitudeOffset: normalizeOptionalSignalBand(raw.altitudeOffset),
+        cluster: normalizeScatterCluster(raw.cluster),
+        color: normalizeOptionalColor(raw.color),
     };
 }
 

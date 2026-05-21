@@ -43,8 +43,9 @@ struct VsOut {
     @location(10) @interpolate(flat) radiusA: f32,
     @location(11) @interpolate(flat) radiusB: f32,
     @location(12) @interpolate(flat) halfHeight: f32,
-    @location(13) @interpolate(flat) sliceWeight: f32,
+    @location(13) @interpolate(flat) riseSpeed: f32,
     @location(14) @interpolate(flat) camDist: f32,
+    @location(15) @interpolate(flat) topNoiseFade: f32,
 };
 
 fn quadCorner(vid: u32) -> vec2<f32> {
@@ -127,7 +128,6 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     let localUp = resolveLocalUp(p.position);
     let basis = stableTangentBasis(localUp, p.noisePhase);
     let sliceT = 0.0;
-    let sliceWeight = 1.0;
 
     let radiusA = max(2.0, p.size);
     let radiusB = max(2.0, p.size * max(td.horizontalScale, 0.05));
@@ -168,8 +168,9 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     out.radiusA         = radiusA;
     out.radiusB         = radiusB;
     out.halfHeight      = halfHeight;
-    out.sliceWeight     = sliceWeight;
+    out.riseSpeed       = td.riseSpeed;
     out.camDist         = length(volumeCenter - globals.cameraPos);
+    out.topNoiseFade    = td.topNoiseFade;
     return out;
 }
 
@@ -189,7 +190,8 @@ fn sceneDepthCoord(fragmentPosition: vec2<f32>, depthDims: vec2<u32>) -> vec2<i3
 }
 
 fn volumeShape(worldPos: vec3<f32>, center: vec3<f32>, phase: vec3<f32>,
-               radiusA: f32, radiusB: f32, halfHeight: f32) -> f32 {
+               radiusA: f32, radiusB: f32, halfHeight: f32,
+               topNoiseFadeAmount: f32, riseSpeed: f32) -> f32 {
     let localUp = resolveLocalUp(center);
     let basis = stableTangentBasis(localUp, phase);
     let offset = worldPos - center;
@@ -197,9 +199,16 @@ fn volumeShape(worldPos: vec3<f32>, center: vec3<f32>, phase: vec3<f32>,
     let lz = dot(offset, basis.b) / max(radiusB, 0.001);
     let ly = dot(offset, localUp) / max(halfHeight, 0.001);
     let d = sqrt(lx * lx + lz * lz + ly * ly);
-    let sphere = 1.0 - smoothstep(0.72, 1.0, d);
+    let edgeNoiseA = sin(lx * 9.1 + lz * 13.7 + ly * 5.3 + dot(phase, vec3<f32>(0.29, 0.43, 0.17)));
+    let edgeNoiseB = sin(lx * -16.7 + lz * 7.9 + ly * 3.1 + dot(phase, vec3<f32>(0.61, 0.11, 0.37)));
+    let edgeNoise = (edgeNoiseA + edgeNoiseB) * 0.5;
+    let edgeWarp = edgeNoise * 0.22 * smoothstep(0.18, 0.96, d);
+    let sphere = 1.0 - smoothstep(0.64, 1.0, d + edgeWarp);
+    let topNoisePos = worldPos - localUp * globals.time * max(riseSpeed, 0.0);
+    let topNoise = sin(dot(topNoisePos, vec3<f32>(0.081, 0.119, 0.067)) + dot(phase, vec3<f32>(0.37, 0.19, 0.53))) * 0.5 + 0.5;
+    let topStart = mix(0.3, 0.08 + topNoise * 0.38, clamp(topNoiseFadeAmount, 0.0, 1.0));
     // World-space fades — negligible rotation artifact at 5-10 m particle scale.
-    let topFade   = 1.0 - smoothstep(0.3, 1.0, ly);   // fades above ~30% height
+    let topFade   = 1.0 - smoothstep(topStart, 1.0, ly);
     let floorFade = smoothstep(-1.0, -0.9, ly);        // soft dissolve at sphere bottom only
     return clamp(sphere * topFade * floorFade, 0.0, 1.0);
 }
@@ -209,11 +218,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Single camera-facing sample — no raymarching. Particles are 5-12 m so volume
     // traversal depth is negligible and billboard rotation is imperceptible at this scale.
     let shape = volumeShape(in.worldPos, in.particleCenter, in.noisePhase,
-                            in.radiusA, in.radiusB, in.halfHeight);
+                            in.radiusA, in.radiusB, in.halfHeight, in.topNoiseFade, in.riseSpeed);
     if (shape < 0.005) { discard; }
 
+    let localUp = resolveLocalUp(in.particleCenter);
     let noiseCoord = in.worldPos * in.noiseScale + in.noisePhase +
-        vec3<f32>(globals.time * in.noiseSpeed, 0.0, globals.time * in.noiseSpeed * 0.7);
+        vec3<f32>(globals.time * in.noiseSpeed, 0.0, globals.time * in.noiseSpeed * 0.7) -
+        localUp * globals.time * max(in.riseSpeed, 0.0);
     let n1    = textureSampleLevel(noiseBase,   noiseSampler, fract(noiseCoord), 0.0).r;
     let n2    = textureSampleLevel(noiseDetail, noiseSampler,
                     fract(noiseCoord * 2.7 + vec3<f32>(0.3, 0.7, 0.1)), 1.0).r;

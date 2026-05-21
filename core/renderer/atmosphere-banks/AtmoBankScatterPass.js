@@ -423,6 +423,7 @@ export class AtmoBankScatterPass {
         paramU32[12] = this._stableSeed(planetConfig);
         paramU32[13] = this._packedRules.count >>> 0;
         paramU32[14] = this._enabledTypeMask >>> 0;
+        paramData[15] = Math.max(1, this._placement?.emitterSpacing ?? DEFAULT_ATMO_PLACEMENT_CONFIG.emitterSpacing ?? 7);
 
         const q = this.device.queue;
         q.writeBuffer(this._paramBuf, 0, paramData);
