@@ -305,7 +305,7 @@ export function createEngineConfig() {
       treesNear:         false,   // individual trees with leaves/branches
       treesMid:          false,   // hull trees (140–700 m)
       treesFar:          false,   // coarse canopy hulls (500–4000 m)
-      streamedAssets:    true,   // all streamed ground cover, props, etc.
+      streamedAssets:    false,   // all streamed ground cover, props, etc.
       particles:         false,   // campfire/leaves/fireflies particle system
       actors:            false,   // wizard, goblins, skinned mesh actors
       clouds:            true,    // high/cirrus WebGPUCloudRenderer

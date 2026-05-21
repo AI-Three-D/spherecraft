@@ -63,11 +63,24 @@ struct EmitterSelection {
     valid: u32,
 };
 
-fn selectEmitterIndex(claim: u32, emitterCount: u32) -> EmitterSelection {
+fn totalEmitterBudget(emitterCount: u32) -> u32 {
+    var total = 0u;
+    for (var idx = 0u; idx < ATMO_EMITTER_CAPACITY; idx++) {
+        if (idx >= emitterCount) { break; }
+        total = total + emitters[idx].spawnBudget;
+    }
+    return total;
+}
+
+fn selectEmitterIndex(claim: u32, emitterCount: u32, totalBudget: u32) -> EmitterSelection {
     var accum = 0u;
     var selection: EmitterSelection;
     selection.idx = 0u;
     selection.valid = 0u;
+
+    if (claim >= totalBudget) {
+        return selection;
+    }
 
     for (var idx = 0u; idx < ATMO_EMITTER_CAPACITY; idx++) {
         if (idx >= emitterCount) { break; }
@@ -84,14 +97,18 @@ fn selectEmitterIndex(claim: u32, emitterCount: u32) -> EmitterSelection {
 
 fn spawnParticle(slot: u32, claim: u32, emIdx: u32) -> AtmoParticle {
     let emitter = emitters[emIdx];
-    let seedBase = slot ^ (claim * 7919u) ^ emitter.rngSeed;
+    let spawnEpoch = u32(globals.time * 60.0);
+    let seedBase = slot ^ (claim * 7919u) ^ emitter.rngSeed ^ hash1u(spawnEpoch + slot * 747796405u);
     let td = typeDefs[emitter.typeId];
 
     let basis = buildLocalBasis(emitter.localUp);
 
     let angle = rand01(seedBase, 11u, emitter.rngSeed) * 6.2831853;
     let r = sqrt(rand01(seedBase, 12u, emitter.rngSeed));
-    let spawnRadius = mix(td.sizeMin * 0.3, td.sizeMax * 0.5, r);
+    // Keep per-emitter particle jitter tight; broad bank footprint comes from
+    // scatter-time emitter placement so height sampling stays terrain-local.
+    let patchRadius = mix(1.0, 7.0, hashToFloat(emitter.rngSeed ^ 0xFACE1234u));
+    let spawnRadius = r * patchRadius;
     let lx = cos(angle) * spawnRadius;
     let lz = sin(angle) * spawnRadius;
     var minUp = td.altitudeOffsetMin;
@@ -109,16 +126,19 @@ fn spawnParticle(slot: u32, claim: u32, emIdx: u32) -> AtmoParticle {
 
     let windX = globals.windDirX * globals.windSpeed * td.windResponse;
     let windZ = globals.windDirY * globals.windSpeed * td.windResponse;
-    let vx = windX + randRange(seedBase, 21u, emitter.rngSeed, -0.3, 0.3);
-    let vy = randRange(seedBase, 22u, emitter.rngSeed, -0.05, 0.05);
-    let vz = windZ + randRange(seedBase, 23u, emitter.rngSeed, -0.3, 0.3);
+    let tangentDrift = basis * vec3<f32>(
+        randRange(seedBase, 21u, emitter.rngSeed, -0.3, 0.3),
+        0.0,
+        randRange(seedBase, 23u, emitter.rngSeed, -0.3, 0.3)
+    );
+    let velocity = vec3<f32>(windX, 0.0, windZ) + tangentDrift;
 
     let life = randRange(seedBase, 31u, emitter.rngSeed, td.lifeMin, td.lifeMax);
 
     var p: AtmoParticle;
     p.position    = emitter.position + localOffset;
     p.lifetime    = life;
-    p.velocity    = vec3<f32>(vx, vy, vz);
+    p.velocity    = velocity;
     p.maxLifetime = life;
     p.noisePhase  = vec3<f32>(
         rand01(seedBase, 41u, emitter.rngSeed) * 100.0,
@@ -126,7 +146,11 @@ fn spawnParticle(slot: u32, claim: u32, emIdx: u32) -> AtmoParticle {
         rand01(seedBase, 43u, emitter.rngSeed) * 100.0,
     );
     p.size     = randRange(seedBase, 51u, emitter.rngSeed, td.sizeMin, td.sizeMax);
-    p.color    = td.color;
+    var particleColor = td.color;
+    if (emitter.colorOverride.a >= 0.0) {
+        particleColor = emitter.colorOverride;
+    }
+    p.color    = particleColor;
     p.ptype    = emitter.typeId;
     p.flags    = ATMO_FLAG_ALIVE;
     p.opacity  = 0.0;
@@ -172,8 +196,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         let emitterCount = min(atomicLoad(&emitterCounter.count), ATMO_EMITTER_CAPACITY);
         if (emitterCount > 0u) {
-            let claim = atomicAdd(&spawnScratch.claimed, 1u);
-            let selection = selectEmitterIndex(claim, emitterCount);
+            let totalBudget = min(totalEmitterBudget(emitterCount), globals.maxParticles);
+            let claim = i;
+            let selection = selectEmitterIndex(claim, emitterCount, totalBudget);
             if (selection.valid != 0u) {
                 p = spawnParticle(i, claim, selection.idx);
                 let idx = atomicAdd(&indirect.instanceCount, 1u);

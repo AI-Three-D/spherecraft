@@ -7,6 +7,8 @@ export function buildAtmoBankScatterWGSL({ maxEmitters = 32, tileCategories = []
 const MAX_EMITTERS: u32 = ${maxEmitters}u;
 const GRID_RES: u32 = 8u;
 const CELLS_PER_TILE: u32 = GRID_RES * GRID_RES;
+const CLUSTER_EMITTER_COUNT: u32 = 50u;
+const CLUSTER_RADIUS: f32 = 50.0;
 
 const TYPE_VALLEY_MIST: u32 = 0u;
 const TYPE_FOG_POCKET:  u32 = 1u;
@@ -26,7 +28,7 @@ struct ScatterParams {
     cameraPos: vec3<f32>, maxEmitters: u32,
     planetOrigin: vec3<f32>, planetRadius: f32,
     heightScale: f32, weatherIntensity: f32, fogDensity: f32, maxRenderDist: f32,
-    frameSeed: u32, ruleCount: u32, enabledTypeMask: u32, _p2: u32,
+    frameSeed: u32, ruleCount: u32, enabledTypeMask: u32, emitterSpacing: f32,
 };
 
 struct LayerMeta {
@@ -39,7 +41,7 @@ struct EmitterOut {
     upX: f32, upY: f32, upZ: f32, typeId: u32,
     rngSeed: u32, _p0: u32, _p1: u32, _p2: u32,
     altitudeOffsetMin: f32, altitudeOffsetMax: f32, _p5: f32, _p6: f32,
-    _p7: f32, _p8: f32, _p9: f32, _p10: f32,
+    colorOverride: vec4<f32>,
 };
 
 struct EmitterCounter { count: atomic<u32>, _p0: u32, _p1: u32, _p2: u32 };
@@ -50,6 +52,8 @@ struct ScatterRule {
     probability: f32, weatherWeight: f32, fogWeight: f32, weatherFloor: f32,
     elevationMin: f32, elevationMax: f32, slopeMin: f32, slopeMax: f32,
     shapeParam0: f32, shapeParam1: f32, altitudeOffsetMin: f32, altitudeOffsetMax: f32,
+    clusterEmitterCountMin: u32, clusterEmitterCountMax: u32, clusterRadiusMin: f32, clusterRadiusMax: f32,
+    colorOverride: vec4<f32>,
 };
 
 struct SelectedRule {
@@ -59,6 +63,10 @@ struct SelectedRule {
     rngSeed: u32,
     altitudeOffsetMin: f32,
     altitudeOffsetMax: f32,
+    clusterEmitterCountMin: u32,
+    clusterEmitterCountMax: u32,
+    clusterRadius: f32,
+    colorOverride: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: ScatterParams;
@@ -96,6 +104,44 @@ fn getCubePoint(face: u32, u: f32, v: f32) -> vec3<f32> {
         case 4u { return vec3<f32>( s,  t,  1.0); }
         default { return vec3<f32>(-s,  t, -1.0); }
     }
+}
+
+fn directionToFaceUV(face: u32, dir: vec3<f32>) -> vec2<f32> {
+    var s = 0.0;
+    var t = 0.0;
+    switch (face) {
+        case 0u {
+            let inv = 1.0 / max(abs(dir.x), 1e-6);
+            s = -dir.z * inv;
+            t =  dir.y * inv;
+        }
+        case 1u {
+            let inv = 1.0 / max(abs(dir.x), 1e-6);
+            s =  dir.z * inv;
+            t =  dir.y * inv;
+        }
+        case 2u {
+            let inv = 1.0 / max(abs(dir.y), 1e-6);
+            s =  dir.x * inv;
+            t = -dir.z * inv;
+        }
+        case 3u {
+            let inv = 1.0 / max(abs(dir.y), 1e-6);
+            s =  dir.x * inv;
+            t =  dir.z * inv;
+        }
+        case 4u {
+            let inv = 1.0 / max(abs(dir.z), 1e-6);
+            s =  dir.x * inv;
+            t =  dir.y * inv;
+        }
+        default {
+            let inv = 1.0 / max(abs(dir.z), 1e-6);
+            s = -dir.x * inv;
+            t =  dir.y * inv;
+        }
+    }
+    return vec2<f32>(s * 0.5 + 0.5, t * 0.5 + 0.5);
 }
 
 fn sampleHeight(uv: vec2<f32>, layer: i32) -> f32 {
@@ -190,6 +236,10 @@ fn noSelectedRule() -> SelectedRule {
     selected.rngSeed = 0u;
     selected.altitudeOffsetMin = 0.0;
     selected.altitudeOffsetMax = 0.0;
+    selected.clusterEmitterCountMin = 0u;
+    selected.clusterEmitterCountMax = 0u;
+    selected.clusterRadius = 0.0;
+    selected.colorOverride = vec4<f32>(0.0, 0.0, 0.0, -1.0);
     return selected;
 }
 
@@ -217,6 +267,9 @@ fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, eleva
             selected.typeId = TYPE_FOG_POCKET;
             selected.spawnBudget = 3u;
             selected.rngSeed = cellHash;
+            selected.clusterEmitterCountMin = CLUSTER_EMITTER_COUNT;
+            selected.clusterEmitterCountMax = CLUSTER_EMITTER_COUNT;
+            selected.clusterRadius = CLUSTER_RADIUS;
             return selected;
         }
     }
@@ -228,6 +281,9 @@ fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, eleva
             selected.typeId = TYPE_FOG_POCKET;
             selected.spawnBudget = 3u;
             selected.rngSeed = cellHash;
+            selected.clusterEmitterCountMin = CLUSTER_EMITTER_COUNT;
+            selected.clusterEmitterCountMax = CLUSTER_EMITTER_COUNT;
+            selected.clusterRadius = CLUSTER_RADIUS;
             return selected;
         }
     }
@@ -242,12 +298,15 @@ fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, eleva
         let depression = avgNeighbor - elevation;
 
         if (depression > 3.0) {
-            let prob = 0.22 * weatherMod * min(depression / 10.0, 1.0);
+            let prob = 0.06 * weatherMod * min(depression / 10.0, 1.0);
             if (roll < prob) {
                 selected.matched = 1u;
                 selected.typeId = TYPE_VALLEY_MIST;
                 selected.spawnBudget = 3u;
                 selected.rngSeed = cellHash;
+                selected.clusterEmitterCountMin = CLUSTER_EMITTER_COUNT;
+                selected.clusterEmitterCountMax = CLUSTER_EMITTER_COUNT;
+                selected.clusterRadius = CLUSTER_RADIUS;
                 return selected;
             }
         }
@@ -261,6 +320,9 @@ fn selectLegacyRule(tileId: u32, slope: f32, texUv: vec2<f32>, layer: i32, eleva
             selected.typeId = TYPE_LOW_CLOUD;
             selected.spawnBudget = 2u;
             selected.rngSeed = cellHash;
+            selected.clusterEmitterCountMin = CLUSTER_EMITTER_COUNT;
+            selected.clusterEmitterCountMax = CLUSTER_EMITTER_COUNT;
+            selected.clusterRadius = CLUSTER_RADIUS;
             return selected;
         }
     }
@@ -299,10 +361,34 @@ fn selectAuthoredRule(categoryId: u32, slope: f32, texUv: vec2<f32>, layer: i32,
             selected.rngSeed = cellHash ^ hash1u(ruleIdx + 0x9E3779B9u);
             selected.altitudeOffsetMin = rule.altitudeOffsetMin;
             selected.altitudeOffsetMax = rule.altitudeOffsetMax;
+            selected.colorOverride = rule.colorOverride;
+            selected.clusterEmitterCountMin = min(rule.clusterEmitterCountMin, rule.clusterEmitterCountMax);
+            selected.clusterEmitterCountMax = max(rule.clusterEmitterCountMin, rule.clusterEmitterCountMax);
+            let radiusMin = min(rule.clusterRadiusMin, rule.clusterRadiusMax);
+            let radiusMax = max(rule.clusterRadiusMin, rule.clusterRadiusMax);
+            let radiusRoll = pow(hashToFloat(cellHash ^ hash1u(ruleIdx + 0x63D83595u)), 0.62);
+            selected.clusterRadius = mix(radiusMin, radiusMax, radiusRoll);
             return selected;
         }
     }
     return selected;
+}
+
+fn resolveClusterEmitterCount(selected: SelectedRule) -> u32 {
+    let spacing = max(params.emitterSpacing, 1.0);
+    let radius = max(selected.clusterRadius, spacing);
+    let areaCount = max(1u, u32(ceil(3.14159265359 * radius * radius / (spacing * spacing))));
+    var resolved = areaCount;
+
+    let configuredMax = max(selected.clusterEmitterCountMin, selected.clusterEmitterCountMax);
+    if (configuredMax > 0u) {
+        let configuredMin = min(selected.clusterEmitterCountMin, selected.clusterEmitterCountMax);
+        let lo = max(configuredMin, 1u);
+        let hi = max(configuredMax, lo);
+        resolved = clamp(areaCount, lo, hi);
+    }
+
+    return min(resolved, MAX_EMITTERS);
 }
 
 @compute @workgroup_size(64)
@@ -365,18 +451,69 @@ fn main(
     if (selected.matched == 0u) { return; }
     if (!typeEnabled(selected.typeId)) { return; }
 
-    let idx = atomicAdd(&counter.count, 1u);
-    if (idx >= MAX_EMITTERS) { return; }
+    // Build tangent frame so cluster offsets stay on the sphere surface
+    var clusterTangent: vec3<f32>;
+    if (abs(sphereDir.y) < 0.9) {
+        clusterTangent = normalize(cross(sphereDir, vec3<f32>(0.0, 1.0, 0.0)));
+    } else {
+        clusterTangent = normalize(cross(sphereDir, vec3<f32>(1.0, 0.0, 0.0)));
+    }
+    let clusterBitangent = cross(clusterTangent, sphereDir);
 
-    var em: EmitterOut;
-    em.posX = worldPos.x; em.posY = worldPos.y; em.posZ = worldPos.z;
-    em.spawnBudget = selected.spawnBudget;
-    em.upX = sphereDir.x; em.upY = sphereDir.y; em.upZ = sphereDir.z;
-    em.typeId = selected.typeId;
-    em.rngSeed = selected.rngSeed;
-    em.altitudeOffsetMin = selected.altitudeOffsetMin;
-    em.altitudeOffsetMax = selected.altitudeOffsetMax;
-    emitterOutput[idx] = em;
+    let selectedClusterRadius = max(selected.clusterRadius, 0.0);
+
+    let selectedEmitterCount = resolveClusterEmitterCount(selected);
+    if (selectedEmitterCount == 0u) { return; }
+    let clusterPhase = hashToFloat(cellHash ^ 0xB5297A4Du) * 6.28318530718;
+    let warpPhase0 = hashToFloat(cellHash ^ 0x68BC21EBu) * 6.28318530718;
+    let warpPhase1 = hashToFloat(cellHash ^ 0x02E5BE93u) * 6.28318530718;
+    let warpPhase2 = hashToFloat(cellHash ^ 0x9E3779B9u) * 6.28318530718;
+
+    for (var ci = 0u; ci < selectedEmitterCount; ci++) {
+        let cSeed = hash1u(cellHash ^ (ci * 2654435761u + 0xDEADBEEFu));
+        let areaT = pow(fract(f32(ci) * 0.754877666 + hashToFloat(cSeed ^ 0x91E10DA5u)), 1.28);
+        let angleJitter = (hashToFloat(cSeed ^ 0xABCD1234u) - 0.5) * 0.45;
+        let angle = clusterPhase + f32(ci) * 2.39996322973 + angleJitter;
+        let boundaryWarp =
+            1.0 +
+            0.22 * sin(angle * 3.0 + warpPhase0) +
+            0.16 * sin(angle * 5.0 + warpPhase1) +
+            0.10 * sin(angle * 9.0 + warpPhase2);
+        let warpedRadius = selectedClusterRadius * clamp(boundaryWarp, 0.58, 1.28);
+        let r = sqrt(areaT) * warpedRadius;
+        let offset = cos(angle) * r * clusterTangent + sin(angle) * r * clusterBitangent;
+        let rawDir = normalize(worldPos + offset - params.planetOrigin);
+
+        // Reproject the offset direction back into the same cube-face tile before
+        // sampling height. The sampled height and final emitter direction must
+        // agree or ground fog can float well above the rendered terrain.
+        let rawFaceUv = directionToFaceUV(tileInfo.face, rawDir);
+        let emTexUvRaw = (rawFaceUv - vec2<f32>(tileUMin, tileVMin)) / tileUVSize;
+        if (emTexUvRaw.x < 0.0 || emTexUvRaw.x > 1.0 ||
+            emTexUvRaw.y < 0.0 || emTexUvRaw.y > 1.0) {
+            continue;
+        }
+        let emTexUv = clamp(emTexUvRaw, vec2<f32>(0.0), vec2<f32>(1.0));
+        let emFaceU = tileUMin + emTexUv.x * tileUVSize;
+        let emFaceV = tileVMin + emTexUv.y * tileUVSize;
+        let emDir = normalize(getCubePoint(tileInfo.face, emFaceU, emFaceV));
+        let emElevation = sampleHeight(emTexUv, layer) * params.heightScale;
+        let emWorldPos = params.planetOrigin + emDir * (params.planetRadius + emElevation);
+
+        let idx = atomicAdd(&counter.count, 1u);
+        if (idx >= MAX_EMITTERS) { return; }
+
+        var em: EmitterOut;
+        em.posX = emWorldPos.x; em.posY = emWorldPos.y; em.posZ = emWorldPos.z;
+        em.spawnBudget = selected.spawnBudget;
+        em.upX = emDir.x; em.upY = emDir.y; em.upZ = emDir.z;
+        em.typeId = selected.typeId;
+        em.rngSeed = cSeed;
+        em.altitudeOffsetMin = selected.altitudeOffsetMin;
+        em.altitudeOffsetMax = selected.altitudeOffsetMax;
+        em.colorOverride = selected.colorOverride;
+        emitterOutput[idx] = em;
+    }
 }
 `;
 }

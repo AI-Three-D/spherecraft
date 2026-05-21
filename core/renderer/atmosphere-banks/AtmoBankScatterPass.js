@@ -292,6 +292,25 @@ export class AtmoBankScatterPass {
         return dx * dx + dy * dy + dz * dz;
     }
 
+    _layerIdentity(info) {
+        return `${info.face ?? 0}:${info.depth ?? 0}:${info.x ?? 0}:${info.y ?? 0}`;
+    }
+
+    _buildDescendantCoveredSet(tileInfos) {
+        const covered = new Set();
+        for (const info of tileInfos) {
+            const face = info.face ?? 0;
+            const depth = Math.max(0, info.depth ?? 0);
+            const x = Math.max(0, info.x ?? 0);
+            const y = Math.max(0, info.y ?? 0);
+            for (let ancestorDepth = depth - 1; ancestorDepth >= 0; ancestorDepth--) {
+                const scale = 2 ** (depth - ancestorDepth);
+                covered.add(`${face}:${ancestorDepth}:${Math.floor(x / scale)}:${Math.floor(y / scale)}`);
+            }
+        }
+        return covered;
+    }
+
     _stableSeed(planetConfig) {
         const raw = planetConfig?.seed ?? planetConfig?.terrainSeed ?? planetConfig?.terrain?.seed;
         if (Number.isFinite(raw)) return raw >>> 0;
@@ -333,9 +352,20 @@ export class AtmoBankScatterPass {
         const activeLayers = new Uint32Array(MAX_LAYERS);
         const layerMeta = new Uint32Array(MAX_LAYERS * (LAYER_META_STRIDE / 4));
         const layers = [];
+        const residentInfos = [];
 
         for (const info of tileInfo.values()) {
             if (info.layer == null) continue;
+            residentInfos.push(info);
+        }
+
+        const descendantCovered = this._buildDescendantCoveredSet(residentInfos);
+        let skippedCoarseAncestors = 0;
+        for (const info of residentInfos) {
+            if (descendantCovered.has(this._layerIdentity(info))) {
+                skippedCoarseAncestors++;
+                continue;
+            }
             layers.push({
                 info,
                 distSq: this._estimateTileDistanceSq(info, camera, planetConfig),
@@ -393,6 +423,7 @@ export class AtmoBankScatterPass {
         paramU32[12] = this._stableSeed(planetConfig);
         paramU32[13] = this._packedRules.count >>> 0;
         paramU32[14] = this._enabledTypeMask >>> 0;
+        paramData[15] = Math.max(1, this._placement?.emitterSpacing ?? DEFAULT_ATMO_PLACEMENT_CONFIG.emitterSpacing ?? 7);
 
         const q = this.device.queue;
         q.writeBuffer(this._paramBuf, 0, paramData);
@@ -415,6 +446,8 @@ export class AtmoBankScatterPass {
             dispatched: true,
             reason: 'ok',
             layerCount,
+            residentLayerCount: residentInfos.length,
+            skippedCoarseAncestors,
             tileInfoSize: tileInfo.size,
             authoredRuleCount: this._packedRules.count,
             weatherIntensity: environmentState?.weatherIntensity ?? 0.3,

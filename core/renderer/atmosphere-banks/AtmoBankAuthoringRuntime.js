@@ -5,43 +5,47 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         id: 'valley_mist',
         type: 'VALLEY_MIST',
         displayName: 'Valley Mist',
-        noiseScale: 0.008,
+        noiseScale: 0.010,
         noiseSpeed: 0.02,
         densityBase: 0.78,
         windResponse: 0.1,
         lifetime: Object.freeze({ min: 60, max: 120 }),
-        size: Object.freeze({ min: 24, max: 220 }),
-        color: Object.freeze([0.75, 0.78, 0.82, 0.46]),
+        size: Object.freeze({ min: 5, max: 12 }),
+        color: Object.freeze([0.75, 0.78, 0.82, 0.07]),
         fadeNearStart: 20.0,
         fadeFarStart: 1200.0,
         fadeFarEnd: 2000.0,
-        densityThreshold: 0.26,
+        densityThreshold: 0.64,
         altitudeOffset: Object.freeze({ min: 0.0, max: 1.25 }),
-        verticalScale: 0.10,
-        horizontalScale: 1.20,
-        heightMax: 14.0,
-        centerLiftScale: 1.0,
+        verticalScale: 1.00,
+        horizontalScale: 1.00,
+        heightMax: 0.0,
+        centerLiftScale: 0.0,
+        riseSpeed: 0.02,
+        topNoiseFade: 0.35,
     }),
     [ATMO_BANK_TYPES.FOG_POCKET]: Object.freeze({
         id: 'fog_pocket',
         type: 'FOG_POCKET',
         displayName: 'Fog Pocket',
-        noiseScale: 0.02,
+        noiseScale: 0.024,
         noiseSpeed: 0.04,
         densityBase: 0.82,
         windResponse: 0.15,
         lifetime: Object.freeze({ min: 30, max: 80 }),
-        size: Object.freeze({ min: 14, max: 170 }),
-        color: Object.freeze([0.72, 0.75, 0.80, 0.50]),
+        size: Object.freeze({ min: 4, max: 10 }),
+        color: Object.freeze([0.72, 0.75, 0.80, 0.08]),
         fadeNearStart: 10.0,
         fadeFarStart: 800.0,
         fadeFarEnd: 1500.0,
-        densityThreshold: 0.28,
+        densityThreshold: 0.64,
         altitudeOffset: Object.freeze({ min: 0.0, max: 1.0 }),
-        verticalScale: 0.12,
-        horizontalScale: 1.05,
-        heightMax: 12.0,
-        centerLiftScale: 1.0,
+        verticalScale: 1.00,
+        horizontalScale: 1.00,
+        heightMax: 0.0,
+        centerLiftScale: 0.0,
+        riseSpeed: 0.02,
+        topNoiseFade: 0.35,
     }),
     [ATMO_BANK_TYPES.LOW_CLOUD]: Object.freeze({
         id: 'low_cloud',
@@ -63,6 +67,8 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         horizontalScale: 0.95,
         heightMax: 0.0,
         centerLiftScale: 1.0,
+        riseSpeed: 0.0,
+        topNoiseFade: 0.0,
     }),
     [ATMO_BANK_TYPES.PEAK_CLOUD]: Object.freeze({
         id: 'peak_cloud',
@@ -84,19 +90,25 @@ export const DEFAULT_ATMO_BANK_CONFIG = Object.freeze({
         horizontalScale: 0.88,
         heightMax: 0.0,
         centerLiftScale: 1.0,
+        riseSpeed: 0.0,
+        topNoiseFade: 0.0,
     }),
 });
 
 export const DEFAULT_ATMO_PLACEMENT_CONFIG = Object.freeze({
-    cellSize: 400,
-    scanRadius: 7,
     maxRenderDist: 1600,
-    baseSpawnBudget: 2,
     lodNearDistance: 200,
     lodFarDistance: 1500,
     lodMinScale: 0.1,
     distanceCutoff: 1600,
-    spawnProbability: 0.24,
+    clusterCellSize: 350,
+    clusterScanRadius: 5,
+    clusterProbability: 0.13,
+    clusterSizeMin: 10,
+    clusterSizeMax: 65,
+    emitterSpacing: 7,
+    shapeWarp: 0.5,
+    maxEmittersPerCluster: 22,
     localDistanceFog: Object.freeze({
         enabled: true,
         largeEmitterMinSize: 120,
@@ -157,6 +169,12 @@ function normalizeRange(raw = {}, fallback = {}, min = 0, max = Infinity) {
     return { min: Math.min(lo, hi), max: Math.max(lo, hi) };
 }
 
+function normalizeIntRange(raw = {}, fallback = {}, min = 0, max = Number.MAX_SAFE_INTEGER) {
+    const lo = clampInt(raw.min, fallback.min, min, max);
+    const hi = clampInt(raw.max, fallback.max, min, max);
+    return { min: Math.min(lo, hi), max: Math.max(lo, hi) };
+}
+
 function normalizeColor(raw, fallback) {
     const source = Array.isArray(raw) ? raw : fallback;
     return [
@@ -164,6 +182,16 @@ function normalizeColor(raw, fallback) {
         clampNumber(source?.[1], fallback[1], 0, 1),
         clampNumber(source?.[2], fallback[2], 0, 1),
         clampNumber(source?.[3], fallback[3], 0, 1),
+    ];
+}
+
+function normalizeOptionalColor(raw) {
+    if (!Array.isArray(raw)) return null;
+    return [
+        clampNumber(raw[0], 0.8, 0, 1),
+        clampNumber(raw[1], 0.8, 0, 1),
+        clampNumber(raw[2], 0.85, 0, 1),
+        clampNumber(raw[3], 0.5, 0, 1),
     ];
 }
 
@@ -197,6 +225,8 @@ function normalizeTypeDef(raw = {}, fallback = {}, typeId = 0) {
         horizontalScale: clampNumber(raw.horizontalScale, fallback.horizontalScale ?? 1.0, 0.05, 8),
         heightMax: clampNumber(raw.heightMax, fallback.heightMax ?? 0, 0, 100000),
         centerLiftScale: clampNumber(raw.centerLiftScale, fallback.centerLiftScale ?? 1.0, 0, 1),
+        riseSpeed: clampNumber(raw.riseSpeed, fallback.riseSpeed ?? 0, -10, 10),
+        topNoiseFade: clampNumber(raw.topNoiseFade, fallback.topNoiseFade ?? 0, 0, 1),
     };
 }
 
@@ -227,15 +257,19 @@ function collectTypeOverrides(rawTypes, warnings) {
 
 function normalizePlacement(raw = {}, fallback = DEFAULT_ATMO_PLACEMENT_CONFIG) {
     return {
-        cellSize: clampNumber(raw.cellSize, fallback.cellSize, 1, 100000),
-        scanRadius: clampInt(raw.scanRadius, fallback.scanRadius, 1, 65),
         maxRenderDist: clampNumber(raw.maxRenderDist, fallback.maxRenderDist, 1, 1000000),
-        baseSpawnBudget: clampInt(raw.baseSpawnBudget, fallback.baseSpawnBudget, 0, 128),
         lodNearDistance: clampNumber(raw.lodNearDistance, fallback.lodNearDistance, 0, 1000000),
         lodFarDistance: clampNumber(raw.lodFarDistance, fallback.lodFarDistance, 0, 1000000),
         lodMinScale: clampNumber(raw.lodMinScale, fallback.lodMinScale, 0, 1),
         distanceCutoff: clampNumber(raw.distanceCutoff, fallback.distanceCutoff, 1, 1000000),
-        spawnProbability: clampNumber(raw.spawnProbability, fallback.spawnProbability, 0, 1),
+        clusterCellSize: clampNumber(raw.clusterCellSize, fallback.clusterCellSize, 10, 100000),
+        clusterScanRadius: clampInt(raw.clusterScanRadius, fallback.clusterScanRadius, 1, 65),
+        clusterProbability: clampNumber(raw.clusterProbability, fallback.clusterProbability, 0, 1),
+        clusterSizeMin: clampNumber(raw.clusterSizeMin, fallback.clusterSizeMin, 1, 10000),
+        clusterSizeMax: clampNumber(raw.clusterSizeMax, fallback.clusterSizeMax, 1, 10000),
+        emitterSpacing: clampNumber(raw.emitterSpacing, fallback.emitterSpacing, 0.5, 1000),
+        shapeWarp: clampNumber(raw.shapeWarp, fallback.shapeWarp, 0, 1),
+        maxEmittersPerCluster: clampInt(raw.maxEmittersPerCluster, fallback.maxEmittersPerCluster, 1, 64),
         localDistanceFog: {
             enabled: raw.localDistanceFog?.enabled ?? fallback.localDistanceFog?.enabled ?? true,
             largeEmitterMinSize: clampNumber(
@@ -286,6 +320,17 @@ function normalizeOptionalSignalBand(raw) {
     return { min: Math.min(min, max), max: Math.max(min, max), weight };
 }
 
+function normalizeScatterCluster(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const emitterCount = raw.emitterCount && typeof raw.emitterCount === 'object'
+        ? normalizeIntRange(raw.emitterCount, { min: 0, max: 0 }, 0, 4096)
+        : null;
+    return {
+        radius: normalizeRange(raw.radius, { min: 50, max: 50 }, 0, 10000),
+        emitterCount,
+    };
+}
+
 function normalizeScatterRule(raw = {}, index = 0, warnings) {
     const typeId = normalizeTypeId(raw.typeId ?? raw.type, null);
     if (typeId == null) {
@@ -320,6 +365,8 @@ function normalizeScatterRule(raw = {}, index = 0, warnings) {
             ? cloneValue(raw.terrainShape)
             : null,
         altitudeOffset: normalizeOptionalSignalBand(raw.altitudeOffset),
+        cluster: normalizeScatterCluster(raw.cluster),
+        color: normalizeOptionalColor(raw.color),
     };
 }
 

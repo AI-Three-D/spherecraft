@@ -8,6 +8,8 @@ export function buildAtmoBankRenderWGSL({ typeCapacity = 4, sliceCount = 5 } = {
 ${common}
 
 const ATMO_VOLUME_SLICE_COUNT: u32 = ${volumeSliceCount}u;
+const TYPE_VALLEY_MIST: u32 = 0u;
+const TYPE_FOG_POCKET:  u32 = 1u;
 
 @group(0) @binding(0) var<uniform>       globals   : AtmoGlobals;
 @group(0) @binding(1) var<storage, read> particles : array<AtmoParticle>;
@@ -41,7 +43,9 @@ struct VsOut {
     @location(10) @interpolate(flat) radiusA: f32,
     @location(11) @interpolate(flat) radiusB: f32,
     @location(12) @interpolate(flat) halfHeight: f32,
-    @location(13) @interpolate(flat) sliceWeight: f32,
+    @location(13) @interpolate(flat) riseSpeed: f32,
+    @location(14) @interpolate(flat) camDist: f32,
+    @location(15) @interpolate(flat) topNoiseFade: f32,
 };
 
 fn quadCorner(vid: u32) -> vec2<f32> {
@@ -123,15 +127,15 @@ fn vs_main(@builtin(vertex_index) vid: u32,
 
     let localUp = resolveLocalUp(p.position);
     let basis = stableTangentBasis(localUp, p.noisePhase);
-    let sliceId = min(vid / 6u, ATMO_VOLUME_SLICE_COUNT - 1u);
-    let denom = max(f32(ATMO_VOLUME_SLICE_COUNT - 1u), 1.0);
-    let sliceT = (f32(sliceId) / denom) * 2.0 - 1.0;
-    let sliceWeight = (1.0 - abs(sliceT) * 0.25) * (1.08 / f32(ATMO_VOLUME_SLICE_COUNT));
+    let sliceT = 0.0;
 
     let radiusA = max(2.0, p.size);
     let radiusB = max(2.0, p.size * max(td.horizontalScale, 0.05));
     var halfHeight = max(1.5, p.size * max(td.verticalScale, 0.01));
-    let centerLiftScale = clamp(td.centerLiftScale, 0.0, 1.0);
+    var centerLiftScale = clamp(td.centerLiftScale, 0.0, 1.0);
+    if (p.ptype == TYPE_VALLEY_MIST || p.ptype == TYPE_FOG_POCKET) {
+        centerLiftScale = 1.0;
+    }
     if (td.heightMax > 0.0) {
         let maxHalfHeight = max(1.5, td.heightMax / max(centerLiftScale + 1.0, 0.001));
         halfHeight = min(halfHeight, maxHalfHeight);
@@ -164,7 +168,9 @@ fn vs_main(@builtin(vertex_index) vid: u32,
     out.radiusA         = radiusA;
     out.radiusB         = radiusB;
     out.halfHeight      = halfHeight;
-    out.sliceWeight     = sliceWeight;
+    out.riseSpeed       = td.riseSpeed;
+    out.camDist         = length(volumeCenter - globals.cameraPos);
+    out.topNoiseFade    = td.topNoiseFade;
     return out;
 }
 
@@ -184,7 +190,8 @@ fn sceneDepthCoord(fragmentPosition: vec2<f32>, depthDims: vec2<u32>) -> vec2<i3
 }
 
 fn volumeShape(worldPos: vec3<f32>, center: vec3<f32>, phase: vec3<f32>,
-               radiusA: f32, radiusB: f32, halfHeight: f32) -> f32 {
+               radiusA: f32, radiusB: f32, halfHeight: f32,
+               topNoiseFadeAmount: f32, riseSpeed: f32) -> f32 {
     let localUp = resolveLocalUp(center);
     let basis = stableTangentBasis(localUp, phase);
     let offset = worldPos - center;
@@ -192,43 +199,52 @@ fn volumeShape(worldPos: vec3<f32>, center: vec3<f32>, phase: vec3<f32>,
     let lz = dot(offset, basis.b) / max(radiusB, 0.001);
     let ly = dot(offset, localUp) / max(halfHeight, 0.001);
     let d = sqrt(lx * lx + lz * lz + ly * ly);
-    let ellipsoid = 1.0 - smoothstep(0.72, 1.0, d);
-    let floorFade = smoothstep(-1.0, -0.86, ly);
-    let topFade = 1.0 - smoothstep(0.50, 0.94, ly);
-    return clamp(ellipsoid * floorFade * topFade, 0.0, 1.0);
+    let edgeNoiseA = sin(lx * 9.1 + lz * 13.7 + ly * 5.3 + dot(phase, vec3<f32>(0.29, 0.43, 0.17)));
+    let edgeNoiseB = sin(lx * -16.7 + lz * 7.9 + ly * 3.1 + dot(phase, vec3<f32>(0.61, 0.11, 0.37)));
+    let edgeNoise = (edgeNoiseA + edgeNoiseB) * 0.5;
+    let edgeWarp = edgeNoise * 0.22 * smoothstep(0.18, 0.96, d);
+    let sphere = 1.0 - smoothstep(0.64, 1.0, d + edgeWarp);
+    let topNoisePos = worldPos - localUp * globals.time * max(riseSpeed, 0.0);
+    let topNoise = sin(dot(topNoisePos, vec3<f32>(0.081, 0.119, 0.067)) + dot(phase, vec3<f32>(0.37, 0.19, 0.53))) * 0.5 + 0.5;
+    let topStart = mix(0.3, 0.08 + topNoise * 0.38, clamp(topNoiseFadeAmount, 0.0, 1.0));
+    // World-space fades — negligible rotation artifact at 5-10 m particle scale.
+    let topFade   = 1.0 - smoothstep(topStart, 1.0, ly);
+    let floorFade = smoothstep(-1.0, -0.9, ly);        // soft dissolve at sphere bottom only
+    return clamp(sphere * topFade * floorFade, 0.0, 1.0);
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let shape = volumeShape(
-        in.worldPos,
-        in.particleCenter,
-        in.noisePhase,
-        in.radiusA,
-        in.radiusB,
-        in.halfHeight
-    );
-    if (shape <= 0.001) { discard; }
+    // Single camera-facing sample — no raymarching. Particles are 5-12 m so volume
+    // traversal depth is negligible and billboard rotation is imperceptible at this scale.
+    let shape = volumeShape(in.worldPos, in.particleCenter, in.noisePhase,
+                            in.radiusA, in.radiusB, in.halfHeight, in.topNoiseFade, in.riseSpeed);
+    if (shape < 0.005) { discard; }
 
+    let localUp = resolveLocalUp(in.particleCenter);
     let noiseCoord = in.worldPos * in.noiseScale + in.noisePhase +
-                     vec3<f32>(globals.time * in.noiseSpeed, 0.0, globals.time * in.noiseSpeed * 0.7);
-
-    let n1 = textureSampleLevel(noiseBase, noiseSampler, fract(noiseCoord), 0.0).r;
-    let n2 = textureSampleLevel(noiseDetail, noiseSampler, fract(noiseCoord * 2.7 + vec3<f32>(0.3, 0.7, 0.1)), 1.0).r;
-    let noise = n1 * 0.7 + n2 * 0.3;
-
+        vec3<f32>(globals.time * in.noiseSpeed, 0.0, globals.time * in.noiseSpeed * 0.7) -
+        localUp * globals.time * max(in.riseSpeed, 0.0);
+    let n1    = textureSampleLevel(noiseBase,   noiseSampler, fract(noiseCoord), 0.0).r;
+    let n2    = textureSampleLevel(noiseDetail, noiseSampler,
+                    fract(noiseCoord * 2.7 + vec3<f32>(0.3, 0.7, 0.1)), 1.0).r;
+    let noise   = n1 * 0.7 + n2 * 0.3;
     let density = smoothstep(in.densityThreshold, 1.0, noise) * shape;
+    if (density < 0.003) { discard; }
 
-    let depthDims = textureDimensions(depthTexture);
-    let clampedCoord = sceneDepthCoord(in.clipPos.xy, depthDims);
+    let depthDims     = textureDimensions(depthTexture);
+    let clampedCoord  = sceneDepthCoord(in.clipPos.xy, depthDims);
     let sceneDepthRaw = textureLoad(depthTexture, clampedCoord, 0);
-    let linearScene = linearizeDepth(sceneDepthRaw, globals.nearPlane, globals.farPlane);
-    let linearFrag  = linearizeDepth(in.clipPos.z, globals.nearPlane, globals.farPlane);
-    let softDist = max(in.particleSize * 0.30, 14.0);
-    let depthBias = max(in.particleSize * 0.05, 1.25);
-    let depthFade = clamp((linearScene - linearFrag + depthBias) / softDist, 0.0, 1.0);
+    let linearScene   = linearizeDepth(sceneDepthRaw, globals.nearPlane, globals.farPlane);
+    let linearFrag    = linearizeDepth(in.clipPos.z,  globals.nearPlane, globals.farPlane);
+    // Discard fog fragments that are behind the terrain surface.
+    // Tight threshold handles height-texture LOD mismatch between scatter and renderer.
+    if (linearScene < linearFrag - 0.1) { discard; }
+    // Soft fade at the terrain surface intersection.
+    let softDist  = max(in.particleSize * 0.4, 4.0);
+    let depthFade = clamp((linearScene - linearFrag + in.particleSize * 0.3) / softDist, 0.0, 1.0);
 
-    let alpha = density * depthFade * in.opacity * in.color.a * in.sliceWeight;
+    let alpha    = density * depthFade * in.opacity * in.color.a;
     if (alpha < 0.003) { discard; }
     let litColor = in.color.rgb * resolveFogLighting(in.particleCenter);
     return vec4<f32>(litColor * alpha, alpha);

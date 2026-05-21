@@ -15,7 +15,7 @@ struct AtmoTypeDef {
     color: vec4<f32>,
     fadeNearStart: f32, fadeFarStart: f32, fadeFarEnd: f32, densityThreshold: f32,
     altitudeOffsetMin: f32, altitudeOffsetMax: f32, verticalScale: f32, horizontalScale: f32,
-    heightMax: f32, centerLiftScale: f32, _padType0: f32, _padType1: f32,
+    heightMax: f32, centerLiftScale: f32, riseSpeed: f32, topNoiseFade: f32,
 };
 
 struct AtmoGlobals {
@@ -36,7 +36,7 @@ struct AtmoEmitterDef {
     localUp: vec3<f32>, typeId: u32,
     rngSeed: u32, _pad0: u32, _pad1: u32, _pad2: u32,
     altitudeOffsetMin: f32, altitudeOffsetMax: f32, _pad3: f32, _pad4: f32,
-    _pad5: vec4<f32>,
+    colorOverride: vec4<f32>,
 };
 
 struct AtmoEmitterCounter {

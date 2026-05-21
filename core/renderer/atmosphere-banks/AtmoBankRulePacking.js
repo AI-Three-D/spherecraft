@@ -252,6 +252,15 @@ export function packAtmoScatterRules(scatterRules = [], options = {}) {
         data[base + 17] = shape.param1;
         data[base + 18] = Number.isFinite(rule.altitudeOffset?.min) ? rule.altitudeOffset.min : 0;
         data[base + 19] = Number.isFinite(rule.altitudeOffset?.max) ? rule.altitudeOffset.max : 0;
+        dataU32[base + 20] = Math.max(0, Math.trunc(rule.cluster?.emitterCount?.min ?? 0)) >>> 0;
+        dataU32[base + 21] = Math.max(0, Math.trunc(rule.cluster?.emitterCount?.max ?? 0)) >>> 0;
+        data[base + 22] = Number.isFinite(rule.cluster?.radius?.min) ? rule.cluster.radius.min : 50;
+        data[base + 23] = Number.isFinite(rule.cluster?.radius?.max) ? rule.cluster.radius.max : 50;
+        const color = Array.isArray(rule.color) ? rule.color : null;
+        data[base + 24] = color ? color[0] : 0;
+        data[base + 25] = color ? color[1] : 0;
+        data[base + 26] = color ? color[2] : 0;
+        data[base + 27] = color ? color[3] : -1;
         count++;
     }
 
