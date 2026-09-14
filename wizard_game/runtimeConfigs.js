@@ -315,6 +315,7 @@ export function createEngineConfig() {
       cloudParticles:    false,   // low/peak atmospheric bank particle clouds
       fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
       skyEffects:        true,    // sky, stars, moon
+      rivers:            true,    // walking-skeleton river/shallow-water demo
     },
 
     gpuQuadtree: {

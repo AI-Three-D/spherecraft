@@ -762,6 +762,13 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         const { x: spawnX, y: spawnY, z: spawnZ } = this._computeSpawn();
 
+        if (this.renderer?.placeDemoRiver && this.planetConfig?.origin && Number.isFinite(this.planetConfig?.radius)) {
+            const origin = this.planetConfig.origin;
+            const dir = new Vector3(spawnX - origin.x, spawnY - origin.y, spawnZ - origin.z).normalize();
+            const anchorPos = new Vector3(origin.x, origin.y, origin.z).add(dir.multiplyScalar(this.planetConfig.radius));
+            this.renderer.placeDemoRiver(anchorPos);
+        }
+
         this.spaceship.reset(spawnX, spawnY, spawnZ);
         this.camera.follow(this.spaceship);
 

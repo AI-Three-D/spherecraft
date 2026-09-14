@@ -1,6 +1,42 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script>
+        // Early diagnostic capture (dev-only): grabs console.error/warn and
+        // uncaught errors from the very start of page load, before any other
+        // script runs, so headless/automated checks can inspect what
+        // happened during bootstrap (module import errors, WebGPU validation
+        // errors, etc.) after the fact via window.__diagLogs.
+        window.__diagLogs = [];
+        (function () {
+            const push = (level, args) => {
+                try {
+                    window.__diagLogs.push({
+                        level,
+                        t: performance.now(),
+                        msg: Array.from(args).map((a) => {
+                            try {
+                                if (a instanceof Error) return a.stack || (a.name + ': ' + a.message);
+                                return typeof a === 'string' ? a : JSON.stringify(a);
+                            } catch (e) { return String(a); }
+                        }).join(' '),
+                    });
+                } catch (e) { /* never let diagnostics break the page */ }
+            };
+            const origError = console.error.bind(console);
+            const origWarn = console.warn.bind(console);
+            const origLog = console.log.bind(console);
+            console.error = (...args) => { push('error', args); origError(...args); };
+            console.warn = (...args) => { push('warn', args); origWarn(...args); };
+            console.log = (...args) => { push('log', args); origLog(...args); };
+            window.addEventListener('error', (e) => {
+                push('uncaught', [e.message, e.filename + ':' + e.lineno + ':' + e.colno]);
+            });
+            window.addEventListener('unhandledrejection', (e) => {
+                push('unhandledrejection', [String(e.reason && e.reason.stack || e.reason)]);
+            });
+        })();
+    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Spaceship Game - Development</title>
@@ -3633,7 +3669,11 @@
             });
         }
         installQuadtreeDiagnostics(gameEngine);
-        
+
+        window.riverDiag = () => gameEngine?.renderer?.riverSystem?.getDebugInfo?.() ?? null;
+        window.riverState = () => gameEngine?.renderer?.riverSystem?.debugReadState?.() ?? Promise.resolve(null);
+        window.riverBed = () => gameEngine?.renderer?.riverSystem?.debugBedInfo?.() ?? null;
+
         // Loading screen
         const loadingScreen = document.getElementById('loading-screen');
         const debugPanel = document.getElementById('debug-panel');

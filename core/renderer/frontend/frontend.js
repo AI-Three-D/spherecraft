@@ -12,6 +12,7 @@ import { Logger} from '../../../shared/Logger.js'
 import { WeatherController } from '../environment/WeatherController.js';
 import { QuadtreeTileManager } from '../../world/quadtree/GPUQuadtreeTerrain.js';
 import { buildStreamerAuthoringRuntime } from '../../world/streamerAuthoringRuntime.js';
+import { computeSurfaceTangentFrame } from '../../planet/surfaceFrame.js';
 
 import { QuadtreeTerrainRenderer } from '../terrain/QuadtreeTerrainRenderer.js';
 import { PostProcessingPipeline, HDR_FORMAT } from '../postprocessing/PostProcessingPipeline.js';
@@ -359,6 +360,32 @@ export class Frontend {
                 Logger.warn(`[Frontend] Global ocean init failed: ${e?.message || e}`);
                 this.globalOceanRenderer = null;
             }
+
+            // River/shallow-water walking skeleton: a single demo patch anchored
+            // via placeDemoRiver(), sampling real terrain for its bed.
+            if (this.engineConfig?.features?.rivers === false) {
+                Logger.info('[Frontend] River system disabled by features.rivers');
+            } else {
+                try {
+                    const { RiverSystem } = await import('../rivers/riverSystem.js');
+                    const { DEFAULT_RIVER_CONFIG } = await import('../../../templates/configs/riverConfig.js');
+                    if (!this.riverSystem) {
+                        this.riverSystem = new RiverSystem({
+                            backend: this.backend,
+                            device: this.backend.device,
+                            quadtreeGPU: this.quadtreeTileManager?.quadtreeGPU || null,
+                            tileStreamer: this.quadtreeTileManager?.tileStreamer || null,
+                            planetConfig: this.planetConfig,
+                            uniformManager: this.uniformManager,
+                            riverConfig: DEFAULT_RIVER_CONFIG,
+                        });
+                        await this.riverSystem.initialize();
+                    }
+                } catch (e) {
+                    Logger.warn(`[Frontend] River system init failed: ${e?.message || e}`);
+                    this.riverSystem = null;
+                }
+            }
         } catch (error) {
             Logger.warn(`[Frontend] GPU quadtree init failed: ${error?.message || error}`);
             this.quadtreeTileManager = null;
@@ -640,13 +667,8 @@ export class Frontend {
 
 
     _makeSurfaceMatrix(worldPos, planetOrigin, scale) {
-        const up = new Vector3().subVectors(worldPos, planetOrigin).normalize();
-        const ref = Math.abs(up.y) > 0.99
-            ? new Vector3(0, 0, 1)
-            : new Vector3(0, 1, 0);
-        const right   = new Vector3().crossVectors(up, ref).normalize();
-        const forward = new Vector3().crossVectors(right, up);
-    
+        const { up, right, forward } = computeSurfaceTangentFrame(worldPos, planetOrigin);
+
         const m = new Matrix4();
         const e = m.elements;
         // col 0 — right
@@ -1198,7 +1220,17 @@ updateLighting(starSystem) {
                         this._lastDeltaTime || 0
                     );
                 }
-                
+
+                if (this.riverSystem) {
+                    this.backend.endRenderPassForCompute();
+                    const riverEncoder = this.backend.getCommandEncoder();
+                    this.riverSystem.update(riverEncoder, this._lastDeltaTime || 0);
+                    this.backend.resumeRenderPass();
+                    if (this.riverSystem.isReady()) {
+                        this.riverSystem.render(this.camera, viewMatrix, projectionMatrix);
+                    }
+                }
+
                 if (this.assetStreamer) {
                     this.backend.endRenderPassForCompute();
                     const encoder = this.backend.getCommandEncoder();
@@ -1262,6 +1294,10 @@ updateLighting(starSystem) {
         }
     }
 
+    placeDemoRiver(worldPos) {
+        this.riverSystem?.setAnchor(worldPos);
+    }
+
     playGLBAnimation(instance, animIndex, options = {}) {
         this.skinnedMeshRenderer?.playAnimation(instance, animIndex, options);
     }
@@ -1323,6 +1359,10 @@ this.skinnedMeshRenderer = null;
         if (this.globalOceanRenderer) {
             this.globalOceanRenderer.dispose();
             this.globalOceanRenderer = null;
+        }
+        if (this.riverSystem) {
+            this.riverSystem.dispose();
+            this.riverSystem = null;
         }
         if (this.assetStreamer) {
             this.assetStreamer.dispose();
