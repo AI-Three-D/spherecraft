@@ -91,8 +91,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 }
 
                 // ── Uniform buffers ───────────────────────────────────────
+                // 768 bytes: the Uniforms struct (advancedTerrainCompute.wgsl.js)
+                // is 720 bytes as of the river-path fields (riverPathCount +
+                // riverPath[16]), rounded up for headroom.
                 this.terrainUniformBuffer = this.device.createBuffer({
-                    size: 512,
+                    size: 768,
                     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
                 });
                 this.splatUniformBuffer = this.device.createBuffer({
@@ -386,11 +389,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 for (let i = 0; i < 8; i++) {
                     this._batchTerrainUniforms.push(this.device.createBuffer({
                         label: `TerrainBatchUniform-${i}`,
-                        size: 512,
+                        size: 768,
                         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
                     }));
                 }
-                this._terrainUniformScratch = new ArrayBuffer(512);
+                this._terrainUniformScratch = new ArrayBuffer(768);
             },
 
         _getAdvancedTerrainShaderOptions(extra = {}) {

@@ -578,6 +578,17 @@ export class TileStreamer {
         this._freshnessSkipThresholdMs = 200;
         this._freshnessMinDepth = 5;
 
+        // Keys queued via a one-shot prewarm call (e.g. GPUQuadtreeTerrain's
+        // prewarmWorldPosition), never dropped by the freshness check below.
+        // Prewarm requests don't flow through the per-frame camera-feedback
+        // path that normally refreshes _requestFreshness, so without this
+        // exemption a deep prewarm-queued tile reliably goes "stale" and
+        // gets purged before its turn, once real background streaming
+        // traffic is sharing the same queue — confirmed live: a 71-tile
+        // prewarm batch left droppedCount at 86 with depth 10/11 residency
+        // near the anchor never completing. See RIVER_WALKING_SKELETON_LOG.md.
+        this._prewarmKeys = new Set();
+
 
         this._pendingDestructions   = [];
         this._destructionDelayFrames = 3;
@@ -598,6 +609,8 @@ export class TileStreamer {
             maxQueueSize:    options.queueConfig?.maxQueueSize        ?? 2048,
             minStartIntervalMs: options.queueConfig?.minStartIntervalMs ?? 0,
             shouldDrop: (entry) => {
+                // Never drop prewarm-sourced requests — see _prewarmKeys above.
+                if (this._prewarmKeys.has(entry.key)) return false;
                 // Never drop coarse tiles — they serve as fallbacks
                 // Parse depth from key format "f{face}:d{depth}:{x},{y}"
                 const dIdx = entry.key.indexOf(':d');
@@ -1204,12 +1217,13 @@ this._freshnessSkipCount = 0;
         });
     }
 
-    _queueTile(tileAddr) {
+    _queueTile(tileAddr, { prewarm = false } = {}) {
         const key = tileAddr.toString();
         if (!this._requestTimestamps.has(key)) {
             this._requestTimestamps.set(key, performance.now());
         }
-        
+        if (prewarm) this._prewarmKeys.add(key);
+
         // Depth component: coarser = higher base priority (fallback safety)
         const depthPriority = 100000 - tileAddr.depth * 500;
         
@@ -1246,6 +1260,7 @@ this._freshnessSkipCount = 0;
                 const textures = await this.tileGenerator.generateTile(tileAddr);
                 if (generationEpoch !== this._generationEpoch) {
                     this._requestTimestamps.delete(key);
+                    this._prewarmKeys.delete(key);
                     this._destroyGeneratedTextures(textures);
                     return false;
                 }
@@ -1253,16 +1268,18 @@ this._freshnessSkipCount = 0;
                 if (!committed) {
                     this._requestTimestamps.delete(key);
                 }
-                
+                this._prewarmKeys.delete(key);
                 return committed;
             } catch (error) {
                 this._requestTimestamps.delete(key);
+                this._prewarmKeys.delete(key);
                 throw error;
             }
         });
         if (request === null) {
             this._queueRejectWindowCount++;
             this._requestTimestamps.delete(key);
+            this._prewarmKeys.delete(key);
         }
     }
 

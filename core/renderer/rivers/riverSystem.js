@@ -45,12 +45,20 @@ export class RiverSystem {
         this._initialized = false;
         this._state = 'idle'; // idle | pending | baking | ready | failed
         this._anchor = null;
-        this._framesSincePending = 0;
+        // Wall-clock, not frame-count: at high/uncapped framerates, counting
+        // frames burned through the whole maxRetries budget in ~35s instead
+        // of the intended ~2 minutes in testing, cutting the retry window
+        // short exactly when it matters (giving tile streaming less real
+        // time than planned). config.bake.readyDelayFrames is kept as the
+        // config field name (existing tuning reference point) but treated
+        // as "frames at a nominal 60fps" and converted to seconds here.
+        this._secondsSincePending = 0;
         this._retryCount = 0;
         this._time = 0;
         this._inEta = 0;
         this._fillEta = 0;
         this._lastBakeValidCount = null;
+        this._lastBakeAcceptableCount = null;
 
         this._bedBake = null;
         this._sim = null;
@@ -74,29 +82,49 @@ export class RiverSystem {
         return this._initialized && this.enabled && this._state === 'ready';
     }
 
-    setAnchor(worldPos) {
+    setAnchor(worldPos, channelDir = null) {
         if (!this._initialized) return;
         const originCfg = this.planetConfig?.origin || { x: 0, y: 0, z: 0 };
         const origin = new Vector3(originCfg.x, originCfg.y, originCfg.z);
         const pos = worldPos instanceof Vector3
             ? worldPos.clone()
             : new Vector3(worldPos.x, worldPos.y, worldPos.z);
-        const frame = computeSurfaceTangentFrame(pos, origin);
+
+        // When an explicit channel direction is given (HydrologyPrecompute's
+        // traced path, or the fixed-line fallback's own configured
+        // channelDir), build the frame from IT rather than the generic
+        // surface-tangent reference axis — otherwise the water mesh's own
+        // right/forward wouldn't match the direction featureRiverHeight()
+        // actually carved the terrain along, and the visible water patch
+        // would sit rotated relative to the real channel. right = cross(up,
+        // forward) matches featureRiverHeight()'s own
+        // rightAxis = cross(anchorDir, channelDir) exactly.
+        let frame;
+        if (channelDir) {
+            const up = new Vector3().subVectors(pos, origin).normalize();
+            const rawForward = channelDir instanceof Vector3 ? channelDir.clone() : new Vector3(channelDir.x, channelDir.y, channelDir.z);
+            const forward = rawForward.sub(up.clone().multiplyScalar(rawForward.dot(up))).normalize();
+            const right = new Vector3().crossVectors(up, forward);
+            frame = { up, right, forward };
+        } else {
+            frame = computeSurfaceTangentFrame(pos, origin);
+        }
 
         this._anchor = { position: pos, up: frame.up, right: frame.right, forward: frame.forward };
         this._state = 'pending';
-        this._framesSincePending = 0;
+        this._secondsSincePending = 0;
         this._retryCount = 0;
         Logger.info('[River] anchor set');
     }
 
     update(encoder, dt) {
         if (!this._initialized || !this.enabled || !this._anchor) return;
-        this._time += Math.min(Math.max(dt || 0, 0), 0.1);
+        const clampedDt = Math.min(Math.max(dt || 0, 0), 0.1);
+        this._time += clampedDt;
 
         if (this._state === 'pending') {
-            this._framesSincePending++;
-            if (this._framesSincePending >= this.config.bake.readyDelayFrames) {
+            this._secondsSincePending += clampedDt;
+            if (this._secondsSincePending >= this.config.bake.readyDelayFrames / 60) {
                 this._dispatchBake();
             }
             return;
@@ -110,6 +138,11 @@ export class RiverSystem {
 
     render(camera, viewMatrix, projectionMatrix) {
         if (!this.isReady()) return;
+        // Ground is no longer a separate overlay mesh here — the channel is
+        // carved directly into spherecraft's real terrain at generation
+        // time (see templates/terrain-shaders/features/featureRivers.wgsl.js
+        // and RIVER_WALKING_SKELETON_LOG.md, Session 4). Only the water
+        // surface itself is this system's own geometry now.
         RiverMaterialBuilder.updateUniformBuffers(this._material, {
             viewMatrix,
             projectionMatrix,
@@ -137,6 +170,7 @@ export class RiverSystem {
                 ? { x: this._anchor.position.x, y: this._anchor.position.y, z: this._anchor.position.z }
                 : null,
             cellsValid: this._lastBakeValidCount,
+            cellsAcceptable: this._lastBakeAcceptableCount,
             cellsTotal: W * L,
         };
     }
@@ -284,7 +318,7 @@ export class RiverSystem {
         if (!ok) {
             // resources (tile textures / hash table) not resident yet; try again
             // after another readyDelayFrames window.
-            this._framesSincePending = 0;
+            this._secondsSincePending = 0;
             this._retryCount++;
             if (this._retryCount > this.config.bake.maxRetries) {
                 Logger.warn('[River] bed bake resources never became available; giving up');
@@ -302,29 +336,37 @@ export class RiverSystem {
     _onBedResolved(result) {
         const total = this.config.grid.W * this.config.grid.L;
         const validCount = result?.validCount ?? 0;
+        // acceptableCount (depth/precision-gated) drives the retry decision,
+        // NOT validCount (any-real-height, almost always ~total once
+        // anything is resident). bedOut itself always carries the best real
+        // height found at any depth — see riverBedBakeShader.wgsl.js — so
+        // even the "give up and proceed" path below now gets coherent
+        // (if imprecise) geometry instead of scattered holes.
+        const acceptableCount = result?.acceptableCount ?? 0;
         this._lastBakeValidCount = validCount;
+        this._lastBakeAcceptableCount = acceptableCount;
         if (result?.bed) this._lastBedArray = result.bed;
         if (result?.debug) this._lastBakeDebug = result.debug;
 
-        const enoughValid = result && validCount >= this.config.bake.minValidFraction * total;
+        const enoughValid = result && acceptableCount >= this.config.bake.minValidFraction * total;
         if (!enoughValid) {
             this._retryCount++;
             if (this._retryCount > this.config.bake.maxRetries) {
-                Logger.warn(`[River] bed bake proceeding with partial data (${validCount}/${total} cells valid)`);
+                Logger.warn(`[River] bed bake proceeding with partial precision (${acceptableCount}/${total} cells at full depth, ${validCount}/${total} with any real height)`);
                 this._seedFromBed(result?.bed || new Float32Array(total));
                 this._state = 'ready';
                 Logger.info('[River] ready');
                 return;
             }
             if (this._retryCount === 1 || this._retryCount % 10 === 0) {
-                Logger.warn(`[River] bed bake mostly unresolved (${validCount}/${total}), retrying (attempt ${this._retryCount}/${this.config.bake.maxRetries})`);
+                Logger.warn(`[River] bed bake mostly unresolved (${acceptableCount}/${total} at full depth), retrying (attempt ${this._retryCount}/${this.config.bake.maxRetries})`);
             }
             this._state = 'pending';
-            this._framesSincePending = 0;
+            this._secondsSincePending = 0;
             return;
         }
 
-        Logger.info(`[River] bed bake resolved (${validCount}/${total} cells valid)`);
+        Logger.info(`[River] bed bake resolved (${acceptableCount}/${total} cells at full depth, ${validCount}/${total} with any real height)`);
         this._seedFromBed(result.bed);
         this._state = 'ready';
         Logger.info('[River] ready');
@@ -334,35 +376,54 @@ export class RiverSystem {
         const { W, L } = this.config.grid;
         this.device.queue.writeBuffer(this._sim.bedBuf, 0, bedArray);
 
-        const { edgeRowCount, depthAboveMin: inflowDepth } = this.config.inflow;
-        let minEdgeBed = Infinity;
-        for (let j = 0; j < edgeRowCount; j++) {
+        // Reference bed level for inEta/fillEta: search across i (columns) to
+        // correctly find the carved channel's own lowest point, but only
+        // within ONE representative row — not the whole row-band. On real
+        // (non-flat) terrain, a multi-row band can span enough elevation
+        // change on its own (a slope, not just the channel carve) that a
+        // global min across the whole band ends up far below the actual bed
+        // everywhere except right at that one extreme point — leaving most
+        // of the band (including right where the player is standing) with
+        // zero seeded/inflow water. Confirmed with a synthetic steep-terrain
+        // test: the old whole-band min produced visible water in only ~2% of
+        // the patch. Using one row's own local (channel) minimum keeps the
+        // reference tied to where it's actually applied.
+        const minBedInRow = (row) => {
+            let m = Infinity;
             for (let i = 0; i < W; i++) {
-                const b = bedArray[j * W + i];
-                if (b < minEdgeBed) minEdgeBed = b;
+                const b = bedArray[row * W + i];
+                if (b < m) m = b;
             }
-        }
-        if (!Number.isFinite(minEdgeBed)) minEdgeBed = 0;
-        this._inEta = minEdgeBed + inflowDepth;
+            return Number.isFinite(m) ? m : 0;
+        };
+
+        const { depthAboveMin: inflowDepth } = this.config.inflow;
+        this._inEta = minBedInRow(0) + inflowDepth;
 
         const { startRow, rowCount, depthAboveMin: fillDepth } = this.config.initialFill;
         const endRow = Math.min(L, startRow + rowCount);
-        let minFillBed = Infinity;
-        for (let j = startRow; j < endRow; j++) {
-            for (let i = 0; i < W; i++) {
-                const b = bedArray[j * W + i];
-                if (b < minFillBed) minFillBed = b;
-            }
-        }
-        if (!Number.isFinite(minFillBed)) minFillBed = 0;
-        this._fillEta = minFillBed + fillDepth;
+        const fillRefRow = Math.min(L - 1, Math.floor((startRow + endRow) / 2));
+        this._fillEta = minBedInRow(fillRefRow) + fillDepth; // kept for getDebugInfo() only
 
+        // Seed a uniform DEPTH (not a flat water-surface elevation) across
+        // the fill band, shaped to the channel's own cross-section. An
+        // eta-based dump (depth = referenceLevel - localBed) looks right on
+        // whitewater's flat synthetic terrain, but on real sloped terrain it
+        // either leaves most of the band dry (a reference level tied to one
+        // spot) or produces absurd multi-meter depths downhill from that
+        // reference (confirmed with a synthetic steep-terrain test: >25m
+        // "puddles"). A fixed depth is robust to any slope and lets the
+        // simulation's own flow physics redistribute it correctly over the
+        // first few seconds — physically fine as an initial condition.
+        const { halfWidth: channelHalfWidth } = this.config.channel;
+        const totalWidth = channelHalfWidth * 1.5;
         const state = new Float32Array(W * L * 4);
         for (let j = startRow; j < endRow; j++) {
             for (let i = 0; i < W; i++) {
                 const idx = j * W + i;
-                const h = Math.max(0, this._fillEta - bedArray[idx]);
-                state[idx * 4] = h;
+                const localX = (i + 0.5) * this.config.grid.dx - 0.5 * W * this.config.grid.dx;
+                const shape = Math.max(0, 1 - Math.min(1, Math.abs(localX) / totalWidth));
+                state[idx * 4] = fillDepth * shape * shape;
             }
         }
         this.device.queue.writeBuffer(this._sim.stateBufs[0], 0, state);

@@ -9,6 +9,14 @@
 // Cells whose world position doesn't resolve to a resident tile (streaming
 // hasn't caught up yet) are written as a sentinel below RIVER_BED_BAKE_INVALID
 // so the CPU side can tell real (possibly zero) heights apart from misses.
+//
+// No carving happens here anymore — the channel is carved directly into the
+// real terrain height at generation time (see
+// templates/terrain-shaders/features/featureRivers.wgsl.js), so the height
+// sampled here is already correct. This bake is purely "what is the real
+// (already-carved) terrain height here," matching this file's original
+// design intent before carving was (briefly, incorrectly) added here in
+// Session 4 — see RIVER_WALKING_SKELETON_LOG.md.
 
 export const RIVER_BED_BAKE_INVALID_SENTINEL = -100000.0;
 
@@ -41,6 +49,17 @@ struct BakeParams {
 // patch's center cell, written by whichever invocation happens to own it.
 // See RiverSystem.debugBedInfo() / window.riverBedDebug() in standalone.html.
 @group(0) @binding(4) var<storage, read_write> debugOut:  array<u32>;
+// Counts cells whose match was deep enough (see MIN_DEPTH_BELOW_MAX) —
+// separate from bedOut's actual height data. bedOut always gets the best
+// real height found at ANY depth (never a hard hole), so the geometry
+// itself never has catastrophic cell-to-cell discontinuities; this counter
+// is purely the signal RiverSystem uses to decide whether to keep retrying
+// for deeper (more accurate) data. Conflating the two — writing a sentinel
+// into bedOut for "not deep enough" cells — produced a checkerboard of
+// ~450m spikes next to 0m pits wherever deep/shallow matches were
+// scattered rather than contiguous (see RIVER_WALKING_SKELETON_LOG.md,
+// Session 4).
+@group(0) @binding(5) var<storage, read_write> acceptableCount: array<atomic<u32>>;
 
 // Must match the real loaded-tile hash table's own probe limit
 // (core/world/quadtree/quadtreeTraversal.wgsl.js's isLoaded()), not the
@@ -143,16 +162,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         d = d - 1u;
     }
 
-    // A coarse ancestor tile (found at a much lower depth than maxDepth) is
-    // typically a still-loading placeholder, not real terrain detail — using
-    // it would silently lock the whole patch onto approximate/near-zero
-    // heights the first time ANY tile happens to be resident, well before
-    // the fine-detail tile actually under the patch streams in. Require the
-    // match to be reasonably close to maxDepth; otherwise treat the cell as
-    // unresolved so RiverSystem's retry loop keeps waiting for real detail.
+    // bedOut ALWAYS gets the best real height found at ANY depth (even a
+    // coarse ancestor) — never a hard hole. A coarse ancestor's height is
+    // typically still a real (if downsampled) terrain value, not garbage;
+    // writing a sentinel instead, for cells that merely aren't at *maximum*
+    // depth yet, produced catastrophic cell-to-cell discontinuities
+    // (~450m spikes next to 0m pits) wherever deep/shallow matches were
+    // scattered across the patch rather than contiguous — a real, visible
+    // bug (see RIVER_WALKING_SKELETON_LOG.md, Session 4). Only the true
+    // "not found at any depth" case (vanishingly rare — would mean even the
+    // whole-face root tile is missing) writes INVALID.
+    // No carve applied here anymore: the real terrain height sampled above
+    // is now already carved by the terrain generator itself (see
+    // templates/terrain-shaders/features/featureRivers.wgsl.js) — carving
+    // it a second time here would double the channel depth and misalign it
+    // from the (now correctly carved) visible ground mesh.
+    let realHeight = height * params.heightScale;
+    bedOut[outIdx] = select(INVALID, realHeight, found);
+
+    // Separately: is this cell's match deep/precise enough that
+    // RiverSystem should stop retrying for better data? Tracked as its own
+    // atomic count, decoupled from what actually gets rendered/simulated
+    // above, so retry-readiness and geometry correctness can't fight each
+    // other again.
     const MIN_DEPTH_BELOW_MAX: u32 = 3u;
     let acceptable = found && (d + MIN_DEPTH_BELOW_MAX >= params.maxDepth);
-    bedOut[outIdx] = select(INVALID, height * params.heightScale, acceptable);
+    if (acceptable) {
+        atomicAdd(&acceptableCount[0], 1u);
+    }
 
     if (i == dbgI && j == dbgJ) {
         // Comprehensive raw dump for the center cell: every intermediate

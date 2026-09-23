@@ -261,6 +261,59 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 v.setFloat32(396, Number.isFinite(z4e[3]) ? z4e[3] : 0.0, true);
             },
 
+        // Bytes 400-447: river channel (see featureRivers.wgsl.js / the
+        // Uniforms struct's riverAnchor/riverChannelDir/riverParams). This
+        // was previously-unused, already-allocated uniform buffer space
+        // (the buffer is 512 bytes; climate zones end at byte 400).
+        _writeRiverUniforms(v, uniforms) {
+                const anchor = Array.isArray(uniforms.riverAnchor) ? uniforms.riverAnchor : [0, 1, 0, 0];
+                const channelDir = Array.isArray(uniforms.riverChannelDir) ? uniforms.riverChannelDir : [1, 0, 0, 0];
+                const params = Array.isArray(uniforms.riverParams) ? uniforms.riverParams : [16, 3, 128, 0];
+
+                v.setFloat32(400, Number.isFinite(anchor[0]) ? anchor[0] : 0.0, true);
+                v.setFloat32(404, Number.isFinite(anchor[1]) ? anchor[1] : 1.0, true);
+                v.setFloat32(408, Number.isFinite(anchor[2]) ? anchor[2] : 0.0, true);
+                v.setFloat32(412, Number.isFinite(anchor[3]) ? anchor[3] : 0.0, true);
+
+                v.setFloat32(416, Number.isFinite(channelDir[0]) ? channelDir[0] : 1.0, true);
+                v.setFloat32(420, Number.isFinite(channelDir[1]) ? channelDir[1] : 0.0, true);
+                v.setFloat32(424, Number.isFinite(channelDir[2]) ? channelDir[2] : 0.0, true);
+                v.setFloat32(428, 0.0, true);
+
+                v.setFloat32(432, Number.isFinite(params[0]) ? params[0] : 16.0, true);
+                v.setFloat32(436, Number.isFinite(params[1]) ? params[1] : 3.0, true);
+                v.setFloat32(440, Number.isFinite(params[2]) ? params[2] : 128.0, true);
+                v.setFloat32(444, 0.0, true);
+
+                this._writeRiverPathUniforms(v, uniforms);
+            },
+
+        // Bytes 448-719: traced river path (HydrologyPrecompute.js), see the
+        // Uniforms struct's riverPathCount/riverPath. Absent/empty path is a
+        // valid, expected state (before the precompute has run, or if it
+        // found nothing) — featureRiverHeight() falls back to the straight
+        // riverAnchor/riverChannelDir line in that case, so this just writes
+        // count=0 rather than erroring.
+        _writeRiverPathUniforms(v, uniforms) {
+                const MAX_POINTS = 16;
+                const path = Array.isArray(uniforms.riverPath) ? uniforms.riverPath : [];
+                const count = Math.max(0, Math.min(MAX_POINTS, path.length));
+
+                v.setInt32(448, count, true);
+                v.setInt32(452, 0, true);
+                v.setInt32(456, 0, true);
+                v.setInt32(460, 0, true);
+
+                for (let i = 0; i < MAX_POINTS; i++) {
+                    const base = 464 + i * 16;
+                    const p = i < count ? path[i] : null;
+                    v.setFloat32(base, p && Number.isFinite(p.along) ? p.along : 0.0, true);
+                    v.setFloat32(base + 4, p && Number.isFinite(p.across) ? p.across : 0.0, true);
+                    v.setFloat32(base + 8, p && Number.isFinite(p.widthScale) ? p.widthScale : 1.0, true);
+                    v.setFloat32(base + 12, p && Number.isFinite(p.depthScale) ? p.depthScale : 1.0, true);
+                }
+            },
+
         _computeSplatPaddingTexels() {
                 const kernelRadius = Math.max(0.5, 0.5 * Math.max(this.splatKernelSize, 1));
                 const slotExpansion = Math.max(0.0, this.splatSlotSupportExpansionTexels ?? 0.0);
@@ -336,6 +389,7 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
 
                 this._writeTerrainPaddingUniforms(v, uniforms);
                 this._writeClimateZoneUniforms(v, uniforms);
+                this._writeRiverUniforms(v, uniforms);
 
                 return v;
             },

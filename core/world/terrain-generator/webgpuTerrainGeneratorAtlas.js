@@ -390,7 +390,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         async runTerrainPassAtlas(outTex, atlasChunkX, atlasChunkY, face, type,
                 w, h, chunkSize, chunkGridSize,
                 heightTex = null, tileTex = null) {
-        const data = new ArrayBuffer(512);
+        const data = new ArrayBuffer(768);
         const v = new DataView(data);
 
         v.setInt32(0, atlasChunkX | 0, true);
@@ -446,6 +446,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         v.setFloat32(172, uniforms.climateParams[3], true);
         this._writeTerrainPaddingUniforms(v, uniforms);
         this._writeClimateZoneUniforms(v, uniforms);
+        this._writeRiverUniforms(v, uniforms);
 
         this.device.queue.writeBuffer(this.terrainUniformBuffer, 0, data);
 
@@ -519,7 +520,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         console.log(`[TerrainDebug] noiseProfileA=${JSON.stringify(uniforms.noiseProfileA)}, noiseRefRadius=${this.noiseReferenceRadiusM}, worldScale=${this.worldScale}`);
         }
 
-        const data = new ArrayBuffer(512);
+        const data = new ArrayBuffer(768);
         const v = new DataView(data);
 
         v.setInt32(0,  chunkCoordX | 0, true);
@@ -575,6 +576,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         v.setFloat32(172, uniforms.climateParams[3], true);
         this._writeTerrainPaddingUniforms(v, uniforms);
         this._writeClimateZoneUniforms(v, uniforms);
+        this._writeRiverUniforms(v, uniforms);
 
         if (this._logUniformsOnNextPass && type === 0) {
         this._logUniformsOnNextPass = false;

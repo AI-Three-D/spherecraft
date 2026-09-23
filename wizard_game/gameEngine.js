@@ -46,7 +46,10 @@ import { createTerrainFeatureLoneHills } from '../templates/terrain-shaders/feat
 import { createTerrainFeatureMicro } from '../templates/terrain-shaders/features/featureMicro.wgsl.js';
 import { createTerrainFeatureMesoDetail } from '../templates/terrain-shaders/features/featureMesoDetail.wgsl.js';
 import { createTerrainFeatureHighlands } from '../templates/terrain-shaders/features/featureHighlands.wgsl.js';
+import { createTerrainFeatureRivers } from '../templates/terrain-shaders/features/featureRivers.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
+import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
+import { computeSurfaceTangentFrame } from '../core/planet/surfaceFrame.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
 import {
     validateTierRanges,
@@ -151,6 +154,7 @@ const TERRAIN_SHADER_BUNDLE = {
     createTerrainFeatureMicro,
     createTerrainFeatureMesoDetail,
     createTerrainFeatureHighlands,
+    createTerrainFeatureRivers,
     baseGenerators: {
         earthLike: {
             constants: createEarthlikeConstants,
@@ -158,6 +162,15 @@ const TERRAIN_SHADER_BUNDLE = {
         },
     },
 };
+
+// Walking-skeleton demo river's fixed world-space placement — MUST exactly
+// match wizard_game/runtimeConfigs.js's `terrain.river.anchorDir`/
+// `channelDir` (that's what the terrain generator carves into real height
+// at generation time, see templates/terrain-shaders/features/
+// featureRivers.wgsl.js). Duplicated rather than imported only because this
+// is a hardcoded demo with no authoring system yet — see
+// RIVER_WALKING_SKELETON_LOG.md, Session 4.
+const DEMO_RIVER_ANCHOR_DIR = { x: -1, y: 0, z: 0 };
 
 const TERRAIN_THEME = {
     TILE_TYPES,
@@ -760,13 +773,90 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.inputManager.start();
         this.isGameActive = true;
 
-        const { x: spawnX, y: spawnY, z: spawnZ } = this._computeSpawn();
+        let { x: spawnX, y: spawnY, z: spawnZ } = this._computeSpawn();
 
         if (this.renderer?.placeDemoRiver && this.planetConfig?.origin && Number.isFinite(this.planetConfig?.radius)) {
+            // Fixed direction, NOT derived from spawnX/Y/Z: the terrain
+            // generator carves the river's channel into real height at a
+            // fixed world-space anchor (DEMO_RIVER_ANCHOR_DIR, matching
+            // wizard_game/runtimeConfigs.js's terrain.river.anchorDir) that's
+            // baked in once per tile and never invalidated — the water
+            // simulation's own tangent frame has to line up with that same
+            // fixed point, not wherever the (sun-relative) spawn happens to
+            // land. See RIVER_WALKING_SKELETON_LOG.md, Session 4.
             const origin = this.planetConfig.origin;
-            const dir = new Vector3(spawnX - origin.x, spawnY - origin.y, spawnZ - origin.z).normalize();
-            const anchorPos = new Vector3(origin.x, origin.y, origin.z).add(dir.multiplyScalar(this.planetConfig.radius));
-            this.renderer.placeDemoRiver(anchorPos);
+            let dir = new Vector3(DEMO_RIVER_ANCHOR_DIR.x, DEMO_RIVER_ANCHOR_DIR.y, DEMO_RIVER_ANCHOR_DIR.z).normalize();
+            let anchorPos = new Vector3(origin.x, origin.y, origin.z).add(dir.clone().multiplyScalar(this.planetConfig.radius));
+
+            // Find an actual valley-following channel instead of using the
+            // fixed straight line: sample real terrain height over a region
+            // around the demo point, route flow by steepest descent, and
+            // trace a path from wherever the most drainage area accumulates.
+            // Must run — and planetConfig.terrainGeneration.river must be
+            // updated — before any tile near here generates, since a tile's
+            // height is baked once and never invalidated. See
+            // RIVER_CARVE_ZERO_HEIGHT_BUG.md and RIVER_WALKING_SKELETON_LOG.md.
+            const terrainGenerator = this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator;
+            const device = this.renderer?.backend?.device;
+            if (terrainGenerator && device) {
+                try {
+                    const frame = computeSurfaceTangentFrame(anchorPos, origin);
+                    const hydrology = new HydrologyPrecompute(device);
+                    const result = await hydrology.run({
+                        terrainGenerator,
+                        origin,
+                        regionAnchor: anchorPos,
+                        regionRight: frame.right,
+                        regionForward: frame.forward,
+                        gridW: 256,
+                        gridL: 256,
+                        // 4km x 4km region at 16m/cell. Sampling only the
+                        // broad landform noise (not full detailed height,
+                        // see HydrologyPrecompute.js) is smooth enough that
+                        // finer resolution isn't needed for valley detection.
+                        cellSize: 16.0,
+                        radius: this.planetConfig.radius,
+                    });
+                    if (result) {
+                        this.planetConfig.terrainGeneration.river.anchorDir = result.anchorDir;
+                        this.planetConfig.terrainGeneration.river.channelDir = result.channelDir;
+                        this.planetConfig.terrainGeneration.river.path = result.path;
+                        dir = new Vector3(result.anchorDir.x, result.anchorDir.y, result.anchorDir.z).normalize();
+                        anchorPos = new Vector3(origin.x, origin.y, origin.z).add(dir.clone().multiplyScalar(this.planetConfig.radius));
+                    } else {
+                        Logger.warn('[Hydrology] no channel found near the demo point; falling back to the fixed straight-line anchor');
+                    }
+                } catch (err) {
+                    Logger.warn(`[Hydrology] precompute failed, falling back to the fixed straight-line anchor: ${err?.message || err}`);
+                }
+            }
+
+            // Spawn above wherever the river actually ended up, not the
+            // independent default spawn config: the fixed straight-line
+            // demo only ever looked connected because DEMO_RIVER_ANCHOR_DIR
+            // and the spawn config happened to be manually kept pointed at
+            // the same spot. Hydrology can place the channel anywhere in a
+            // multi-km search area, so without this the player spawns with
+            // no way to find it. See RIVER_CARVE_ZERO_HEIGHT_BUG.md.
+            const spawnHeight = this.gameDataConfig?.spawn?.height ?? 800;
+            const spawnPos = new Vector3(origin.x, origin.y, origin.z)
+                .add(dir.clone().multiplyScalar(this.planetConfig.radius + spawnHeight));
+            spawnX = spawnPos.x; spawnY = spawnPos.y; spawnZ = spawnPos.z;
+
+            this.renderer.placeDemoRiver(anchorPos, this.planetConfig.terrainGeneration.river.channelDir);
+
+            // The demo spawns the player instantly on top of this fixed
+            // point (no gradual approach), so the normal reactive/predictive
+            // streaming paths never get a chance to deepen residency here in
+            // time: predictive streaming only engages above a minimum camera
+            // speed (it exists to avoid pop-in ahead of a fast-moving ship,
+            // not to warm a stationary spawn), and reactive per-frame
+            // refinement climbing from depth 0 to max depth one level at a
+            // time is far slower than the initial-load loading screen's
+            // wait budget. Without this, the river's carved channel (a
+            // narrow, fine-scale feature) is still coarse/flat when the
+            // world is revealed. See RIVER_WALKING_SKELETON_LOG.md, Session 4.
+            this.renderer.quadtreeTileManager?.prewarmWorldPosition?.(anchorPos);
         }
 
         this.spaceship.reset(spawnX, spawnY, spawnZ);

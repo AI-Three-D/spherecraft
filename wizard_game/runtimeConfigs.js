@@ -809,6 +809,36 @@ export function createGameDataConfig() {
 	      // become "deep"/opaque faster when looking down.
 	      visualDepthRange: 240
 	    },
+	    // Walking-skeleton demo river: carved directly into terrain height at
+	    // generation time (see templates/terrain-shaders/features/featureRivers.wgsl.js).
+	    // anchorDir/channelDir MUST exactly match DEMO_RIVER_ANCHOR_DIR/
+	    // DEMO_RIVER_CHANNEL_DIR in wizard_game/gameEngine.js — that's what
+	    // places the demo player spawn (and the water simulation's own
+	    // tangent frame) at this same fixed point. A tile's height is baked
+	    // once and never invalidated (see RIVER_WALKING_SKELETON_LOG.md,
+	    // Session 4), so this can't be computed dynamically from wherever
+	    // the player happens to spawn — both sides read this one fixed
+	    // value instead, duplicated (not imported) only because this is a
+	    // hardcoded walking-skeleton demo with no authoring system yet.
+	    river: {
+	      enabled: true,
+	      anchorDir: { x: -1, y: 0, z: 0 },
+	      channelDir: { x: 0, y: 1, z: 0 },
+	      // Bed half-width; featureRiverHeight() now tapers out to 3.5x this
+	      // for the banks (a flat-bottomed valley, not a narrow groove) —
+	      // total valley width is roughly halfWidthM*7, so this reads as a
+	      // ~170m valley rather than a ~50m scratch.
+	      halfWidthM: 24,
+	      depthM: 6,
+	      // Deliberately much longer than the 128m water-simulation patch
+	      // (templates/configs/riverConfig.js's grid.W/L): the terrain carve
+	      // itself isn't tied to the water sim's extent, so keeping this
+	      // short made the channel taper to 0 depth *inside* the visible
+	      // patch, reading as a closed pond instead of a flowing channel.
+	      // With this much longer, the carve sits at full depth everywhere
+	      // within the water patch, and only tapers off far outside it.
+	      lengthM: 1000,
+	    },
     erosion: {
       enabled: true,
       globalRate: 0.6,

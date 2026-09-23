@@ -183,8 +183,8 @@ fn generalMicro2(
     let dips = billowAuto(wx, wy, unitDir, SCALE_MICRO2, 2, seed + 9602, 2.0, 0.45) - 0.35;
 
     // Blend weights from spatial character
-    let gentleW = smoothstep(0.6, 0.3, charA);
-    let bumpyW = smoothstep(0.3, 0.6, charA) * smoothstep(0.7, 0.4, charA);
+    let gentleW = 1.0 - smoothstep(0.3, 0.6, charA);
+    let bumpyW = smoothstep(0.3, 0.6, charA) * (1.0 - smoothstep(0.4, 0.7, charA));
     let dipsW = smoothstep(0.5, 0.8, charA) * smoothstep(0.4, 0.7, charB);
     let totalW = max(gentleW + bumpyW + dipsW, 0.001);
 
@@ -216,7 +216,7 @@ fn featureMesoDetail(
     let climate = getClimate(wx, wy, unitDir, elevation, seed);
 
     // Sand weight: hot + dry
-    let sandW = smoothstep(0.35, 0.15, climate.precipitation)
+    let sandW = (1.0 - smoothstep(0.15, 0.35, climate.precipitation))
               * smoothstep(0.5, 0.8, climate.temperature);
 
     // Rock weight: rough terrain

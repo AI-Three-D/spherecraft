@@ -24,6 +24,7 @@ import { createTerrainFeatureLoneHills } from '../templates/terrain-shaders/feat
 import { createTerrainFeatureMicro } from '../templates/terrain-shaders/features/featureMicro.wgsl.js';
 import { createTerrainFeatureMesoDetail } from '../templates/terrain-shaders/features/featureMesoDetail.wgsl.js';
 import { createTerrainFeatureHighlands } from '../templates/terrain-shaders/features/featureHighlands.wgsl.js';
+import { createTerrainFeatureRivers } from '../templates/terrain-shaders/features/featureRivers.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { TILE_TYPES, TILE_CATEGORIES, NUM_TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../templates/configs/tileTypes.js';
 
@@ -64,6 +65,7 @@ const TERRAIN_THEME = {
         createTerrainFeatureMicro,
         createTerrainFeatureMesoDetail,
         createTerrainFeatureHighlands,
+        createTerrainFeatureRivers,
         baseGenerators: { earthLike: { constants: createEarthlikeConstants, base: createEarthlikeBase } },
     },
 };

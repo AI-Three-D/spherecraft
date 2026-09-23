@@ -136,6 +136,35 @@ export class TerrainGenerationConfig {
             visualDepthRange: options.water?.visualDepthRange ?? null,
             waveHeight: options.water?.waveHeight ?? 1.5 // average meters
         };
+
+        // River channel — carved directly into terrain height at generation
+        // time (see templates/terrain-shaders/features/featureRivers.wgsl.js),
+        // not a separate overlay mesh. Walking-skeleton scope: one fixed
+        // straight channel, no authoring format yet. `anchorDir`/`channelDir`
+        // are unit direction vectors from the planet's own origin (NOT real
+        // meters — normalized before use on the shader side); `channelDir`
+        // must be perpendicular to `anchorDir` (a tangent at that point).
+        // Because a tile's height is baked once and never invalidated (see
+        // RIVER_WALKING_SKELETON_LOG.md, Session 4), this anchor must be a
+        // FIXED value known before any terrain generates — it cannot be
+        // computed dynamically from wherever the player happens to spawn,
+        // the way the original walking-skeleton design worked. Whatever
+        // caller places the river's water simulation (RiverSystem) should
+        // anchor itself to this SAME fixed point, not the other way around.
+        const river = options.river ?? {};
+        this.river = {
+            enabled: river.enabled ?? false,
+            anchorDir: river.anchorDir ?? { x: 0, y: 1, z: 0 },
+            channelDir: river.channelDir ?? { x: 1, y: 0, z: 0 },
+            halfWidthM: river.halfWidthM ?? 16,
+            depthM: river.depthM ?? 3,
+            lengthM: river.lengthM ?? 128,
+            // Traced steepest-descent path (HydrologyPrecompute.js), set at
+            // runtime once the precompute finishes — empty until then, which
+            // is a valid state (see featureRiverHeight()'s fallback).
+            // Each entry: {along, across, widthScale, depthScale}.
+            path: river.path ?? [],
+        };
     }
 
     // Get shader-compatible uniform data
@@ -267,6 +296,27 @@ export class TerrainGenerationConfig {
             climateZone4Extra: [
                 this.climate.zones[0].precipitationMax,
                 0, 0, 0
+            ],
+
+            // River channel (vec4 x3) — see featureRivers.wgsl.js.
+            riverAnchor: [
+                this.river.anchorDir.x,
+                this.river.anchorDir.y,
+                this.river.anchorDir.z,
+                this.river.enabled ? 1.0 : 0.0
+            ],
+            riverChannelDir: [
+                this.river.channelDir.x,
+                this.river.channelDir.y,
+                this.river.channelDir.z,
+                0.0
+            ],
+            riverPath: this.river.path,
+            riverParams: [
+                this.river.halfWidthM,
+                this.river.depthM,
+                this.river.lengthM,
+                0.0
             ]
         };
     }

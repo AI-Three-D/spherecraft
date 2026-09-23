@@ -44,6 +44,7 @@ export class RiverBedBake {
                 { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
                 { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
             ],
         });
 
@@ -96,6 +97,22 @@ export class RiverBedBake {
             usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
         });
 
+        // Atomic count of cells whose match was deep/precise enough to stop
+        // retrying for — decoupled from bedOut's actual height data (see
+        // riverBedBakeShader.wgsl.js). Zeroed before every dispatch, not
+        // just at init, since it accumulates via atomicAdd across a single
+        // dispatch's invocations.
+        this._acceptableCountBuffer = this.device.createBuffer({
+            label: 'RiverBedBake-AcceptableCount',
+            size: 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+        });
+        this._acceptableCountReadback = this.device.createBuffer({
+            label: 'RiverBedBake-AcceptableCountReadback',
+            size: 4,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
         this._initialized = true;
     }
 
@@ -133,6 +150,9 @@ export class RiverBedBake {
         f32[16] = patchRight.x; f32[17] = patchRight.y; f32[18] = patchRight.z; f32[19] = 0;
         f32[20] = patchForward.x; f32[21] = patchForward.y; f32[22] = patchForward.z; f32[23] = 0;
         this.device.queue.writeBuffer(this._paramsBuffer, 0, this._paramsArrayBuffer);
+        // Zero the atomic counter before every dispatch — it accumulates
+        // via atomicAdd across this dispatch's invocations only.
+        this.device.queue.writeBuffer(this._acceptableCountBuffer, 0, new Uint32Array([0]));
 
         const bindGroup = this.device.createBindGroup({
             label: 'RiverBedBake-BG',
@@ -143,6 +163,7 @@ export class RiverBedBake {
                 { binding: 2, resource: { buffer: hBuf } },
                 { binding: 3, resource: { buffer: this._bedBuffer } },
                 { binding: 4, resource: { buffer: this._debugBuffer } },
+                { binding: 5, resource: { buffer: this._acceptableCountBuffer } },
             ],
         });
 
@@ -154,13 +175,14 @@ export class RiverBedBake {
 
         encoder.copyBufferToBuffer(this._bedBuffer, 0, this._readbackBuffer, 0, this._byteLength);
         encoder.copyBufferToBuffer(this._debugBuffer, 0, this._debugReadbackBuffer, 0, 144);
+        encoder.copyBufferToBuffer(this._acceptableCountBuffer, 0, this._acceptableCountReadback, 0, 4);
         this._readbackState = 'copied';
         return true;
     }
 
     /**
      * Resolve the last dispatched bake.
-     * @returns {Promise<{bed: Float32Array, validCount: number, total: number, debug: {depth:number, layer:number, tx:number, ty:number}}|null>}
+     * @returns {Promise<{bed: Float32Array, validCount: number, acceptableCount: number, total: number, debug: object}|null>}
      */
     resolve() {
         if (this._readbackState !== 'copied') return Promise.resolve(null);
@@ -168,10 +190,16 @@ export class RiverBedBake {
         return Promise.all([
             this._readbackBuffer.mapAsync(GPUMapMode.READ),
             this._debugReadbackBuffer.mapAsync(GPUMapMode.READ),
+            this._acceptableCountReadback.mapAsync(GPUMapMode.READ),
         ]).then(() => {
             const range = this._readbackBuffer.getMappedRange(0, this._byteLength);
             const src = new Float32Array(range);
             const bed = new Float32Array(src.length);
+            // validCount: cells with ANY real height (used only to report
+            // how much of the patch resolved at all). acceptableCount
+            // (below) is the depth/precision-gated count RiverSystem
+            // actually uses to decide whether to keep retrying — see
+            // riverBedBakeShader.wgsl.js for why these are separate.
             let validCount = 0;
             for (let i = 0; i < src.length; i++) {
                 const v = src[i];
@@ -183,6 +211,9 @@ export class RiverBedBake {
                 }
             }
             this._readbackBuffer.unmap();
+
+            const acceptableCount = new Uint32Array(this._acceptableCountReadback.getMappedRange(0, 4).slice(0))[0];
+            this._acceptableCountReadback.unmap();
 
             const dbgBuf = this._debugReadbackBuffer.getMappedRange(0, 144).slice(0);
             const dbgU32 = new Uint32Array(dbgBuf);
@@ -204,7 +235,7 @@ export class RiverBedBake {
             };
 
             this._readbackState = 'idle';
-            return { bed, validCount, total: src.length, debug };
+            return { bed, validCount, acceptableCount, total: src.length, debug };
         }).catch(() => {
             this._readbackState = 'idle';
             return null;
@@ -229,5 +260,7 @@ export class RiverBedBake {
         this._readbackBuffer?.destroy();
         this._debugBuffer?.destroy();
         this._debugReadbackBuffer?.destroy();
+        this._acceptableCountBuffer?.destroy();
+        this._acceptableCountReadback?.destroy();
     }
 }

@@ -42,6 +42,17 @@ export const DEFAULT_RIVER_CONFIG = {
         depthAboveMin: 0.5,
     },
 
+    // Straight-channel carve into the real sampled terrain (see
+    // riverBedBakeShader.wgsl.js's channelCarve()) so the water sits in a
+    // valley instead of on a flat sheet. Centered on the patch's own local
+    // X=0 (i.e. the anchor's tangent-frame centerline) — no meander/authored
+    // path yet, that needs a real river-path authoring format (later
+    // increment, see "Longer-term plan" in RIVER_WALKING_SKELETON_LOG.md).
+    channel: {
+        halfWidth: 16,   // meters; full carved width is ~1.5x this
+        depth: 3,        // meters, at the centerline
+    },
+
     bake: {
         readyDelayFrames: 60,
         // Was 5 (~5-6s of real-world retrying): far too short. The bake is a

@@ -1294,8 +1294,8 @@ updateLighting(starSystem) {
         }
     }
 
-    placeDemoRiver(worldPos) {
-        this.riverSystem?.setAnchor(worldPos);
+    placeDemoRiver(worldPos, channelDir = null) {
+        this.riverSystem?.setAnchor(worldPos, channelDir);
     }
 
     playGLBAnimation(instance, animIndex, options = {}) {

@@ -30,6 +30,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
     createTerrainFeatureMicro,
     createTerrainFeatureMesoDetail,
     createTerrainFeatureHighlands,
+    createTerrainFeatureRivers,
   } = shaderBundle;
   const outputFormat = options?.outputFormat ?? 'rgba32float';
   const hasHeightBindings = options?.hasHeightBindings ?? false;
@@ -107,6 +108,32 @@ struct Uniforms {
     climateZone3Extra: vec4<f32>,
     climateZone4: vec4<f32>,
     climateZone4Extra: vec4<f32>,
+
+    // River channel (walking-skeleton scope: one fixed straight channel).
+    // riverAnchor.xyz = unit direction from planet origin to the channel's
+    // centerline anchor point; .w = enabled (0/1).
+    // riverChannelDir.xyz = unit tangent direction the channel runs along
+    // (must be perpendicular to riverAnchor.xyz); .w unused.
+    // riverParams = (halfWidth meters, depth meters, length meters, unused).
+    // See templates/terrain-shaders/features/featureRivers.wgsl.js.
+    riverAnchor: vec4<f32>,
+    riverChannelDir: vec4<f32>,
+    riverParams: vec4<f32>,
+
+    // Traced river path (HydrologyPrecompute.js): a polyline in the same
+    // (along, across) coordinate space riverAnchor/riverChannelDir define,
+    // found by steepest-descent flow routing over the real terrain instead
+    // of authored as a straight line. Each point is
+    // (along, across, widthScale, depthScale) — widthScale/depthScale scale
+    // riverParams.x/.y by how much drainage area passes through that point.
+    // riverPathCount == 0 means no path was found; featureRiverHeight()
+    // falls back to a straight line through riverAnchor/riverChannelDir in
+    // that case. See templates/terrain-shaders/features/featureRivers.wgsl.js.
+    riverPathCount: i32,
+    _riverPathPad0: i32,
+    _riverPathPad1: i32,
+    _riverPathPad2: i32,
+    riverPath: array<vec4<f32>, 16>,
 };
 
 ${createBiomeScoringWGSL({ maxBiomes })}
@@ -382,6 +409,7 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureMicro(),
     createTerrainFeatureMesoDetail(),
     createTerrainFeatureHighlands(),
+    createTerrainFeatureRivers(),
     base.base(),
     `
 const WATER_1: u32 = SURFACE_WATER;

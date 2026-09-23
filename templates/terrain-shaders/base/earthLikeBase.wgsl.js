@@ -179,9 +179,9 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
     let landBlend = smoothstep(0.15, 0.45, regional.landMask);
 
     // Feature type weights (kept for when features are re-enabled)
-    let plainness = smoothstep(0.4, 0.2, regional.terrainType);
+    let plainness = 1.0 - smoothstep(0.2, 0.4, regional.terrainType);
     let hillness = smoothstep(0.25, 0.5, regional.terrainType) *
-                   smoothstep(0.75, 0.5, regional.terrainType);
+                   (1.0 - smoothstep(0.5, 0.75, regional.terrainType));
     let mountainness = smoothstep(0.55, 0.8, regional.terrainType);
 
     // ==================== Land Height: BASELINE (flat + micro only) ====================
@@ -216,6 +216,9 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
 
     // ==================== Lone Hills (additive feature) ====================
     landHeight += featureLoneHillsHeight(wx, wy, unitDir, seed, regional, profile, amp);
+
+    // ==================== Rivers (carved channel, subtractive) ====================
+    landHeight += featureRiverHeight(wx, wy, unitDir, seed, regional, profile, amp);
 
     // ==================== Inland Uplift ====================
     let interior = smoothstep(0.55, 0.85, regional.landMask);

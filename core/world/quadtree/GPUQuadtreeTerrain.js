@@ -316,19 +316,33 @@ export class QuadtreeTileManager {
         const predY = pos.y + ps.smoothVelY * lookAheadSec;
         const predZ = pos.z + ps.smoothVelZ * lookAheadSec;
 
-        // ── 3. Map predicted position → face + tile UV ───────────────
-        // Inline sphereToCube: normalize the direction from planet origin,
-        // then project onto the dominant cube face (same math as
-        // CubeSphereCoords.sphereToCube / worldPositionToFaceUV).
+        this._queueDepthRangeAtWorldPosition(
+            { x: predX, y: predY, z: predZ },
+            {
+                depthMin: cfg.depthMin ?? 4,
+                depthMax: cfg.depthMax ?? 11,
+                neighborRadiusCoarse: cfg.neighborRadiusCoarse ?? (cfg.neighborRadius ?? 4),
+            }
+        );
+    }
+
+    // ── Shared world-position → face/tileUV projection ────────────────────────
+    //
+    // Inline sphereToCube: normalize the direction from planet origin, then
+    // project onto the dominant cube face (same math as
+    // CubeSphereCoords.sphereToCube / worldPositionToFaceUV). Shared by
+    // _updatePredictiveStreaming (predicted position) and prewarmWorldPosition
+    // (a fixed, caller-supplied position, e.g. a walking-skeleton demo POI).
+    _worldPositionToFaceTileUV(worldPos) {
         const originX = this.planetConfig?.origin?.x ?? 0;
         const originY = this.planetConfig?.origin?.y ?? 0;
         const originZ = this.planetConfig?.origin?.z ?? 0;
-        const relX = predX - originX;
-        const relY = predY - originY;
-        const relZ = predZ - originZ;
+        const relX = worldPos.x - originX;
+        const relY = worldPos.y - originY;
+        const relZ = worldPos.z - originZ;
 
         const len = Math.hypot(relX, relY, relZ);
-        if (len < 1e-10) return;
+        if (len < 1e-10) return null;
         const nx = relX / len, ny = relY / len, nz = relZ / len;
 
         const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
@@ -354,28 +368,29 @@ export class QuadtreeTileManager {
         }
 
         // Cube UV in [-1, 1] → tile UV in [0, 1] (matches TileAddress.fromFaceUV)
-        const tileU = (cubeU + 1) * 0.5;
-        const tileV = (cubeV + 1) * 0.5;
+        return { face, tileU: (cubeU + 1) * 0.5, tileV: (cubeV + 1) * 0.5 };
+    }
 
-        // ── 4. Queue tiles at each depth in the configured range ─────
-        //
-        // Neighbor radius shrinks with depth so the queued world-space
-        // footprint stays roughly constant across LOD levels.  At the
-        // coarsest depth we use neighborRadiusCoarse (default 4 → 9×9);
-        // each extra level halves the radius because tiles are half the size.
-        //   radius(d) = max(1, round(radiusCoarse / 2^(d - depthMin)))
-        // Example (depthMin=4, coarse=4):
-        //   depth 4 → 4  (9×9 — wide frustum sweep)
-        //   depth 6 → 1  (3×3)
-        //   depth 8+ → 1
+    // ── Shared multi-depth tile queuing ────────────────────────────────────────
+    //
+    // Queues tiles at each depth in [depthMin, depthMax] within a shrinking
+    // neighbor radius around (tileU, tileV) on the given face. Neighbor radius
+    // shrinks with depth so the queued world-space footprint stays roughly
+    // constant across LOD levels. At the coarsest depth we use
+    // neighborRadiusCoarse (default 4 → 9×9); each extra level halves the
+    // radius because tiles are half the size.
+    //   radius(d) = max(1, round(radiusCoarse / 2^(d - depthMin)))
+    // Example (depthMin=4, coarse=4):
+    //   depth 4 → 4  (9×9 — wide frustum sweep)
+    //   depth 6 → 1  (3×3)
+    //   depth 8+ → 1
+    _queueDepthRangeAtFaceUV(face, tileU, tileV, depthMin, depthMax, radiusCoarse, { prewarm = false } = {}) {
+        const maxDepth = this.quadtreeGPU.maxDepth;
+        depthMin = Math.min(depthMin, maxDepth);
+        depthMax = Math.min(depthMax, maxDepth);
 
-        const maxDepth     = this.quadtreeGPU.maxDepth;
-        const depthMin     = Math.min(cfg.depthMin         ?? 4,  maxDepth);
-        const depthMax     = Math.min(cfg.depthMax         ?? 11, maxDepth);
-        const radiusCoarse = cfg.neighborRadiusCoarse ?? (cfg.neighborRadius ?? 4);
-
-        const hashTable    = this.tileStreamer.hashTable;
-        const tileGenerator = this.tileStreamer.tileGenerator;
+        const hashTable      = this.tileStreamer.hashTable;
+        const tileGenerator  = this.tileStreamer.tileGenerator;
 
         for (let depth = depthMin; depth <= depthMax; depth++) {
             const gs = 1 << depth;
@@ -399,10 +414,50 @@ export class QuadtreeTileManager {
                     const addr = new TileAddress(face, depth, tx, ty);
                     if (tileGenerator.isGenerating(addr)) continue;
 
-                    this.tileStreamer._queueTile(addr);
+                    this.tileStreamer._queueTile(addr, { prewarm });
                 }
             }
         }
+    }
+
+    _queueDepthRangeAtWorldPosition(worldPos, { depthMin, depthMax, neighborRadiusCoarse, prewarm = false }) {
+        const projected = this._worldPositionToFaceTileUV(worldPos);
+        if (!projected) return;
+        this._queueDepthRangeAtFaceUV(
+            projected.face, projected.tileU, projected.tileV,
+            depthMin, depthMax, neighborRadiusCoarse, { prewarm }
+        );
+    }
+
+    // ── Public: one-shot deep pre-warm at a fixed world position ──────────────
+    //
+    // Unlike _updatePredictiveStreaming (gated behind a minimum camera speed,
+    // since it exists to avoid pop-in ahead of a fast-moving ship), this
+    // queues the full [depthMin, depthMax] tile range around a caller-supplied
+    // world position immediately, regardless of camera speed. Intended for a
+    // stationary spawn placed directly on top of a fixed point of interest
+    // (e.g. the walking-skeleton demo river's carved channel, which needs
+    // near-max-depth residency to be visible at all) — a scenario the normal
+    // reactive/predictive streaming paths aren't tuned for, since they assume
+    // gradual approach rather than an instant teleport onto virgin terrain.
+    prewarmWorldPosition(worldPos, options = {}) {
+        if (!this.tileStreamer?.hashTable || !this.tileStreamer?.tileGenerator) return;
+        if (!this.quadtreeGPU) return;
+        const cfg = this.engineConfig?.gpuQuadtree?.predictiveStreaming ?? {};
+        const maxDepth = this.quadtreeGPU.maxDepth;
+        this._queueDepthRangeAtWorldPosition(worldPos, {
+            depthMin: options.depthMin ?? cfg.depthMin ?? 4,
+            depthMax: Math.min(options.depthMax ?? cfg.depthMax ?? 11, maxDepth),
+            neighborRadiusCoarse: options.neighborRadiusCoarse ?? cfg.neighborRadiusCoarse ?? cfg.neighborRadius ?? 4,
+            // Exempt from the generation queue's camera-feedback freshness
+            // drop (tileStreamer.js's shouldDrop): a one-shot prewarm never
+            // participates in the per-frame feedback path that normally
+            // keeps a queued tile's request "fresh", so without this the
+            // deepest tiles reliably got purged before their turn once any
+            // background streaming shared the queue. See
+            // RIVER_WALKING_SKELETON_LOG.md, Finding 3.
+            prewarm: true,
+        });
     }
 
     toggleManualDiagnosticSnapshot(reason = 'manual') {
