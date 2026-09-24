@@ -220,6 +220,9 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
     // ==================== Rivers (carved channel, subtractive) ====================
     landHeight += featureRiverHeight(wx, wy, unitDir, seed, regional, profile, amp);
 
+    // ==================== Erosion Seeds (stage 1: subtractive) ====================
+    landHeight += featureErosionSeedsHeight(wx, wy, unitDir, seed, regional, profile, amp);
+
     // ==================== Inland Uplift ====================
     let interior = smoothstep(0.55, 0.85, regional.landMask);
     let detailBudget = amp.microGain + 0.005;

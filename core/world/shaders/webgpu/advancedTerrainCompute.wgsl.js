@@ -31,6 +31,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
     createTerrainFeatureMesoDetail,
     createTerrainFeatureHighlands,
     createTerrainFeatureRivers,
+    createTerrainFeatureErosionSeeds,
   } = shaderBundle;
   const outputFormat = options?.outputFormat ?? 'rgba32float';
   const hasHeightBindings = options?.hasHeightBindings ?? false;
@@ -134,6 +135,24 @@ struct Uniforms {
     _riverPathPad1: i32,
     _riverPathPad2: i32,
     riverPath: array<vec4<f32>, 16>,
+
+    // Stage-2 confirmed erosion-seed basins (ErosionSeedVerifier.js): of
+    // the (up to 9) level-1 candidates featureErosionSeedsHeight() places
+    // near the reference point, the ones verified to actually sit in a
+    // real basin get upgraded here instead of staying at the level-1
+    // nudge's own small size. Each entry is
+    // (regionX, regionY, radiusScale, depthScale); regionX/Y are the same
+    // integer region coordinates featureErosionSeedsHeight() computes
+    // internally, stored as f32 (exact for the small integers involved).
+    // erosionConfirmedCount == 0 means nothing survived verification yet
+    // (or it hasn't run) — every candidate stays at level-1 nudge size in
+    // that case, which is the correct, self-consistent fallback, not an
+    // error state. See templates/terrain-shaders/features/featureErosionSeeds.wgsl.js.
+    erosionConfirmedCount: i32,
+    _erosionConfirmedPad0: i32,
+    _erosionConfirmedPad1: i32,
+    _erosionConfirmedPad2: i32,
+    erosionConfirmed: array<vec4<f32>, 9>,
 };
 
 ${createBiomeScoringWGSL({ maxBiomes })}
@@ -410,6 +429,7 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureMesoDetail(),
     createTerrainFeatureHighlands(),
     createTerrainFeatureRivers(),
+    createTerrainFeatureErosionSeeds(),
     base.base(),
     `
 const WATER_1: u32 = SURFACE_WATER;

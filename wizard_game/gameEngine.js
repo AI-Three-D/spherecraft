@@ -47,8 +47,10 @@ import { createTerrainFeatureMicro } from '../templates/terrain-shaders/features
 import { createTerrainFeatureMesoDetail } from '../templates/terrain-shaders/features/featureMesoDetail.wgsl.js';
 import { createTerrainFeatureHighlands } from '../templates/terrain-shaders/features/featureHighlands.wgsl.js';
 import { createTerrainFeatureRivers } from '../templates/terrain-shaders/features/featureRivers.wgsl.js';
+import { createTerrainFeatureErosionSeeds } from '../templates/terrain-shaders/features/featureErosionSeeds.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
+import { ErosionSeedVerifier } from '../core/world/hydrology/ErosionSeedVerifier.js';
 import { computeSurfaceTangentFrame } from '../core/planet/surfaceFrame.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
 import {
@@ -155,6 +157,7 @@ const TERRAIN_SHADER_BUNDLE = {
     createTerrainFeatureMesoDetail,
     createTerrainFeatureHighlands,
     createTerrainFeatureRivers,
+    createTerrainFeatureErosionSeeds,
     baseGenerators: {
         earthLike: {
             constants: createEarthlikeConstants,
@@ -798,6 +801,22 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             // RIVER_CARVE_ZERO_HEIGHT_BUG.md and RIVER_WALKING_SKELETON_LOG.md.
             const terrainGenerator = this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator;
             const device = this.renderer?.backend?.device;
+            // Whether a real, terrain-following channel was found near the
+            // demo point. No channel found is a legitimate outcome, not a
+            // failure — see the "if the river does not have anywhere to
+            // flow from there, no river forms" rule from the river/lake
+            // design. Confirmed live: this specific fixed demo point can
+            // have essentially zero landform gradient for well over a
+            // kilometer in every direction (baseElevation identical to
+            // float32 precision out to 128m, pure noise-floor jitter out to
+            // 1km) — there's no slope to trace a channel along there, and
+            // no amount of trace-algorithm robustness can recover a signal
+            // that isn't present in the data. Previously this fell back to
+            // drawing the old fixed straight-line demo river anyway, which
+            // visibly contradicted the "no river forms" rule (a water patch
+            // sitting on an un-carved hillside). Now: no channel found means
+            // no river is placed at all.
+            let riverFound = false;
             if (terrainGenerator && device) {
                 try {
                     const frame = computeSurfaceTangentFrame(anchorPos, origin);
@@ -823,11 +842,39 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                         this.planetConfig.terrainGeneration.river.path = result.path;
                         dir = new Vector3(result.anchorDir.x, result.anchorDir.y, result.anchorDir.z).normalize();
                         anchorPos = new Vector3(origin.x, origin.y, origin.z).add(dir.clone().multiplyScalar(this.planetConfig.radius));
+                        riverFound = true;
                     } else {
-                        Logger.warn('[Hydrology] no channel found near the demo point; falling back to the fixed straight-line anchor');
+                        Logger.info('[Hydrology] no real channel near the demo point — no river placed there (working as designed, not a fallback)');
                     }
                 } catch (err) {
-                    Logger.warn(`[Hydrology] precompute failed, falling back to the fixed straight-line anchor: ${err?.message || err}`);
+                    Logger.warn(`[Hydrology] precompute failed, no river placed: ${err?.message || err}`);
+                }
+            }
+
+            // Stage 2 of the river/lake design: verify the level-1 nudge
+            // candidates (featureErosionSeeds.wgsl.js) near the same
+            // reference point, and upgrade whichever ones are confirmed
+            // real basins. Must run — and terrainGeneration.erosionSeeds
+            // must be updated — before any tile near here generates, same
+            // constraint as the river path above.
+            if (terrainGenerator && device) {
+                try {
+                    const refForward = new Vector3(
+                        this.planetConfig.terrainGeneration.river.channelDir.x,
+                        this.planetConfig.terrainGeneration.river.channelDir.y,
+                        this.planetConfig.terrainGeneration.river.channelDir.z
+                    ).normalize();
+                    const verifier = new ErosionSeedVerifier(device);
+                    const confirmed = await verifier.run({
+                        terrainGenerator,
+                        refDir: dir.clone(),
+                        refForward,
+                        radius: this.planetConfig.radius,
+                    });
+                    this.planetConfig.terrainGeneration.erosionSeeds.confirmed = confirmed;
+                    this.renderer.setLakes?.(confirmed);
+                } catch (err) {
+                    Logger.warn(`[ErosionSeedVerify] verification failed, all candidates stay at level-1 nudge size: ${err?.message || err}`);
                 }
             }
 
@@ -843,7 +890,9 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 .add(dir.clone().multiplyScalar(this.planetConfig.radius + spawnHeight));
             spawnX = spawnPos.x; spawnY = spawnPos.y; spawnZ = spawnPos.z;
 
-            this.renderer.placeDemoRiver(anchorPos, this.planetConfig.terrainGeneration.river.channelDir);
+            if (riverFound) {
+                this.renderer.placeDemoRiver(anchorPos, this.planetConfig.terrainGeneration.river.channelDir);
+            }
 
             // The demo spawns the player instantly on top of this fixed
             // point (no gradual approach), so the normal reactive/predictive

@@ -390,7 +390,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         async runTerrainPassAtlas(outTex, atlasChunkX, atlasChunkY, face, type,
                 w, h, chunkSize, chunkGridSize,
                 heightTex = null, tileTex = null) {
-        const data = new ArrayBuffer(768);
+        const data = new ArrayBuffer(1024);
         const v = new DataView(data);
 
         v.setInt32(0, atlasChunkX | 0, true);
@@ -520,7 +520,7 @@ export function installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator
         console.log(`[TerrainDebug] noiseProfileA=${JSON.stringify(uniforms.noiseProfileA)}, noiseRefRadius=${this.noiseReferenceRadiusM}, worldScale=${this.worldScale}`);
         }
 
-        const data = new ArrayBuffer(768);
+        const data = new ArrayBuffer(1024);
         const v = new DataView(data);
 
         v.setInt32(0,  chunkCoordX | 0, true);

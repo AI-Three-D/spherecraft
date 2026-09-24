@@ -25,6 +25,7 @@ import { createTerrainFeatureMicro } from '../templates/terrain-shaders/features
 import { createTerrainFeatureMesoDetail } from '../templates/terrain-shaders/features/featureMesoDetail.wgsl.js';
 import { createTerrainFeatureHighlands } from '../templates/terrain-shaders/features/featureHighlands.wgsl.js';
 import { createTerrainFeatureRivers } from '../templates/terrain-shaders/features/featureRivers.wgsl.js';
+import { createTerrainFeatureErosionSeeds } from '../templates/terrain-shaders/features/featureErosionSeeds.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { TILE_TYPES, TILE_CATEGORIES, NUM_TILE_CATEGORIES, buildTileCategoryLookupWGSL } from '../templates/configs/tileTypes.js';
 
@@ -66,6 +67,7 @@ const TERRAIN_THEME = {
         createTerrainFeatureMesoDetail,
         createTerrainFeatureHighlands,
         createTerrainFeatureRivers,
+        createTerrainFeatureErosionSeeds,
         baseGenerators: { earthLike: { constants: createEarthlikeConstants, base: createEarthlikeBase } },
     },
 };

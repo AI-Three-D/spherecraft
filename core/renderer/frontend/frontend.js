@@ -386,6 +386,24 @@ export class Frontend {
                     this.riverSystem = null;
                 }
             }
+
+            // Erosion-seed lake water (see core/renderer/lakes/lakeWaterSystem.js)
+            // — separate from the single-anchor river system: N independent
+            // static lake patches, populated later via setLakes() once
+            // ErosionSeedVerifier resolves its confirmed list.
+            try {
+                const { LakeWaterSystem } = await import('../lakes/lakeWaterSystem.js');
+                if (!this.lakeWaterSystem) {
+                    this.lakeWaterSystem = new LakeWaterSystem({
+                        backend: this.backend,
+                        planetConfig: this.planetConfig,
+                        uniformManager: this.uniformManager,
+                    });
+                }
+            } catch (e) {
+                Logger.warn(`[Frontend] Lake water system init failed: ${e?.message || e}`);
+                this.lakeWaterSystem = null;
+            }
         } catch (error) {
             Logger.warn(`[Frontend] GPU quadtree init failed: ${error?.message || error}`);
             this.quadtreeTileManager = null;
@@ -1231,6 +1249,11 @@ updateLighting(starSystem) {
                     }
                 }
 
+                if (this.lakeWaterSystem) {
+                    this.lakeWaterSystem.update(this._lastDeltaTime || 0);
+                    this.lakeWaterSystem.render(this.camera, viewMatrix, projectionMatrix);
+                }
+
                 if (this.assetStreamer) {
                     this.backend.endRenderPassForCompute();
                     const encoder = this.backend.getCommandEncoder();
@@ -1298,6 +1321,10 @@ updateLighting(starSystem) {
         this.riverSystem?.setAnchor(worldPos, channelDir);
     }
 
+    setLakes(confirmedLakes) {
+        this.lakeWaterSystem?.setLakes(confirmedLakes);
+    }
+
     playGLBAnimation(instance, animIndex, options = {}) {
         this.skinnedMeshRenderer?.playAnimation(instance, animIndex, options);
     }
@@ -1363,6 +1390,10 @@ this.skinnedMeshRenderer = null;
         if (this.riverSystem) {
             this.riverSystem.dispose();
             this.riverSystem = null;
+        }
+        if (this.lakeWaterSystem) {
+            this.lakeWaterSystem.dispose();
+            this.lakeWaterSystem = null;
         }
         if (this.assetStreamer) {
             this.assetStreamer.dispose();

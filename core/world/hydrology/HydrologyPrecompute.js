@@ -283,23 +283,56 @@ export class HydrologyPrecompute {
         const { x: seedX, y: seedY, valleyDepth: seedValleyDepth } = seed;
         const maxSteps = Math.min(gridW, gridL) - 2; // never chase past the region edge
 
-        // Downstream: follow this cell's own flow-direction pointer.
+        // Downstream: follow this cell's own flow-direction pointer. Seeds
+        // are chosen because they're a local basin bottom (lower than a
+        // wide ring around them) — which is also exactly the condition for
+        // being a D8 sink (flowDir = -1, no single steepest-neighbor
+        // direction was ever assigned there). Strictly requiring flowDir at
+        // every step meant the trace dead-ended at step 0 right at the
+        // seed itself for most/all candidates (confirmed live: 6/6 seeds
+        // produced a degenerate trace in one run). Falling back to a manual
+        // steepest-descent step among all 8 neighbors whenever the
+        // precomputed field has no answer — not just at the seed, at any
+        // small dip the chain runs into, since this terrain has plenty of
+        // small-scale bumps — lets the walk continue past that one cell;
+        // the field resumes giving real directions past it. If even the
+        // lowest neighbor isn't lower than here, that's a genuine regional
+        // minimum and the channel really does end there.
+        const stepDownhill = (x, y) => {
+            const d = flowDir[idxOf(x, y)];
+            if (d >= 0) {
+                const [ox, oy] = OFFSETS[d];
+                return [x + ox, y + oy];
+            }
+            const here = height[idxOf(x, y)];
+            let bestH = here, bestX = -1, bestY = -1;
+            for (let i = 0; i < 8; i++) {
+                const [ox, oy] = OFFSETS[i];
+                const cx = x + ox, cy = y + oy;
+                if (cx <= 0 || cy <= 0 || cx >= gridW - 1 || cy >= gridL - 1) continue;
+                const ch = height[idxOf(cx, cy)];
+                if (ch < bestH) { bestH = ch; bestX = cx; bestY = cy; }
+            }
+            return [bestX, bestY];
+        };
         const downstream = [];
         {
             let x = seedX, y = seedY;
             for (let s = 0; s < maxSteps; s++) {
-                const d = flowDir[idxOf(x, y)];
-                if (d < 0) break;
-                const [ox, oy] = OFFSETS[d];
-                x += ox; y += oy;
-                if (x <= 0 || y <= 0 || x >= gridW - 1 || y >= gridL - 1) break;
+                const [nx, ny] = stepDownhill(x, y);
+                if (nx < 0 || nx <= 0 || ny <= 0 || nx >= gridW - 1 || ny >= gridL - 1) break;
+                x = nx; y = ny;
                 downstream.push([x, y]);
             }
         }
 
-        // Upstream: at each step, follow whichever incoming neighbor climbs
-        // the steepest (the reverse of how flow direction itself is chosen)
-        // among those that actually flow into the current cell.
+        // Upstream: at each step, prefer whichever neighbor genuinely flows
+        // into the current cell (its own flowDir points here) and climbs
+        // the steepest among those. Since D8 assigns each cell only one
+        // outgoing direction, plenty of cells end up with zero inflow by
+        // chance even away from any seed-specific pit issue — when that
+        // happens, fall back to the steepest uphill neighbor directly,
+        // same reasoning as the downstream fallback above.
         const upstream = [];
         {
             let x = seedX, y = seedY;
@@ -314,7 +347,16 @@ export class HydrologyPrecompute {
                     const slope = height[idxOf(nx, ny)] - here;
                     if (slope > bestSlope) { bestSlope = slope; bestNx = nx; bestNy = ny; }
                 }
-                if (bestNx < 0) break;
+                if (bestNx < 0) {
+                    for (let i = 0; i < 8; i++) {
+                        const [ox, oy] = OFFSETS[i];
+                        const nx = x - ox, ny = y - oy;
+                        if (nx <= 0 || ny <= 0 || nx >= gridW - 1 || ny >= gridL - 1) continue;
+                        const slope = height[idxOf(nx, ny)] - here;
+                        if (slope > bestSlope) { bestSlope = slope; bestNx = nx; bestNy = ny; }
+                    }
+                }
+                if (bestNx < 0 || bestSlope <= 0) break; // no uphill neighbor at all — real ridge/edge
                 upstream.push([bestNx, bestNy]);
                 x = bestNx; y = bestNy;
             }

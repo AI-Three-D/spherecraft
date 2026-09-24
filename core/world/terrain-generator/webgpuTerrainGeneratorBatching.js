@@ -286,6 +286,7 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 v.setFloat32(444, 0.0, true);
 
                 this._writeRiverPathUniforms(v, uniforms);
+                this._writeErosionSeedUniforms(v, uniforms);
             },
 
         // Bytes 448-719: traced river path (HydrologyPrecompute.js), see the
@@ -311,6 +312,32 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     v.setFloat32(base + 4, p && Number.isFinite(p.across) ? p.across : 0.0, true);
                     v.setFloat32(base + 8, p && Number.isFinite(p.widthScale) ? p.widthScale : 1.0, true);
                     v.setFloat32(base + 12, p && Number.isFinite(p.depthScale) ? p.depthScale : 1.0, true);
+                }
+            },
+
+        // Bytes 720-879: stage-2 confirmed erosion-seed basins
+        // (ErosionSeedVerifier.js), see the Uniforms struct's
+        // erosionConfirmedCount/erosionConfirmed. Empty is a valid, expected
+        // state (before verification has run, or nothing survived it) —
+        // featureErosionSeedsHeight() just stays at level-1 nudge size for
+        // every candidate in that case, not an error.
+        _writeErosionSeedUniforms(v, uniforms) {
+                const MAX_ENTRIES = 9;
+                const confirmed = Array.isArray(uniforms.erosionConfirmed) ? uniforms.erosionConfirmed : [];
+                const count = Math.max(0, Math.min(MAX_ENTRIES, confirmed.length));
+
+                v.setInt32(720, count, true);
+                v.setInt32(724, 0, true);
+                v.setInt32(728, 0, true);
+                v.setInt32(732, 0, true);
+
+                for (let i = 0; i < MAX_ENTRIES; i++) {
+                    const base = 736 + i * 16;
+                    const e = i < count ? confirmed[i] : null;
+                    v.setFloat32(base, e && Number.isFinite(e.regionX) ? e.regionX : 0.0, true);
+                    v.setFloat32(base + 4, e && Number.isFinite(e.regionY) ? e.regionY : 0.0, true);
+                    v.setFloat32(base + 8, e && Number.isFinite(e.radiusScale) ? e.radiusScale : 1.0, true);
+                    v.setFloat32(base + 12, e && Number.isFinite(e.depthScale) ? e.depthScale : 1.0, true);
                 }
             },
 

@@ -165,6 +165,16 @@ export class TerrainGenerationConfig {
             // Each entry: {along, across, widthScale, depthScale}.
             path: river.path ?? [],
         };
+
+        // Stage-2 confirmed erosion-seed basins (ErosionSeedVerifier.js), set
+        // at runtime once verification finishes — empty until then, which is
+        // a valid state (every level-1 candidate just stays at its own small
+        // nudge size, see featureErosionSeedsHeight()). Each entry:
+        // {regionX, regionY, radiusScale, depthScale}.
+        const erosionSeeds = options.erosionSeeds ?? {};
+        this.erosionSeeds = {
+            confirmed: erosionSeeds.confirmed ?? [],
+        };
     }
 
     // Get shader-compatible uniform data
@@ -317,7 +327,8 @@ export class TerrainGenerationConfig {
                 this.river.depthM,
                 this.river.lengthM,
                 0.0
-            ]
+            ],
+            erosionConfirmed: this.erosionSeeds.confirmed,
         };
     }
 
