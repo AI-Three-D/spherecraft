@@ -398,6 +398,10 @@ export class Frontend {
                         backend: this.backend,
                         planetConfig: this.planetConfig,
                         uniformManager: this.uniformManager,
+                        device: this.backend.device,
+                        quadtreeGPU: this.quadtreeTileManager?.quadtreeGPU || null,
+                        tileStreamer: this.quadtreeTileManager?.tileStreamer || null,
+                        quadtreeTileManager: this.quadtreeTileManager || null,
                     });
                 }
             } catch (e) {
