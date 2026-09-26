@@ -30,11 +30,11 @@ import { erosionBlobRadiusAt } from '../../world/hydrology/erosionSeedShared.js'
 import { Geometry } from '../resources/geometry.js';
 import { LakeWaterMaterialBuilder } from './lakeWaterMaterialBuilder.js';
 
-const BLOB_SEGMENTS = 28;
+export const BLOB_SEGMENTS = 28;
 // Water fills inside the carved rim, not out to its very (tapering) edge —
 // avoids the visible mismatch of a flat water plane poking out past where
 // the terrain has actually finished sloping back up to the natural rim.
-const FILL_FRACTION = 0.82;
+export const FILL_FRACTION = 0.82;
 // Water surface sits this far below the natural (pre-carve) elevation, as
 // a fraction of the pit's own full carve depth — keeps it visibly "in" the
 // bowl rather than floating right at the rim's edge.

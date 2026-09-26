@@ -1291,6 +1291,26 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         return ok;
     }
 
+    /**
+     * Checkpoint-1 lake-height diagnostic (see CODEX_RIVER_LAKE_HANDOFF.md):
+     * samples the resident final height texture at a confirmed lake's
+     * center and planned water outline, and compares it to the old
+     * standalone naturalElevationNorm probe. Read-only — does not touch
+     * LakeWaterSystem. window.lakeHeightDiag() in standalone.html.
+     */
+    async debugLakeHeightProbe(lakeIndex = 0) {
+        const { runLakeHeightDiagnostic } = await import('../core/renderer/lakes/lakeHeightDiagnostic.js');
+        return runLakeHeightDiagnostic({
+            device: this.renderer?.backend?.device,
+            quadtreeGPU: this.renderer?.quadtreeTileManager?.quadtreeGPU,
+            tileStreamer: this.renderer?.quadtreeTileManager?.tileStreamer,
+            quadtreeTileManager: this.renderer?.quadtreeTileManager,
+            planetConfig: this.planetConfig,
+            confirmedLakes: this.planetConfig?.terrainGeneration?.erosionSeeds?.confirmed,
+            lakeIndex,
+        });
+    }
+
     teleportToLatLon(latDeg, lonDeg, options = {}) {
         if (!this.planetConfig || !this.camera) return;
 

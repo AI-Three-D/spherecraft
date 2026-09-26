@@ -18,6 +18,8 @@
 // design intent before carving was (briefly, incorrectly) added here in
 // Session 4 — see RIVER_WALKING_SKELETON_LOG.md.
 
+import { buildResidentTileHeightLookupWGSL } from '../../shaders/residentTileHeightLookupWgsl.js';
+
 export const RIVER_BED_BAKE_INVALID_SENTINEL = -100000.0;
 
 export function buildRiverBedBakeShader() {
@@ -66,51 +68,12 @@ struct BakeParams {
 // smaller value BiomeQuery.js happens to use — a real, populated tile's
 // probe chain can run past 64 while comfortably under 256, especially for
 // tiles streamed in together (spatial locality clusters in hash space).
-const MAX_PROBE: u32 = 256u;
 const INVALID: f32 = ${RIVER_BED_BAKE_INVALID_SENTINEL.toFixed(1)};
 
-fn hashKey(keyLo: u32, keyHi: u32) -> u32 {
-    let kl = keyLo ^ (keyLo >> 16u);
-    let kh = keyHi ^ (keyHi >> 16u);
-    let h = (kl * 0x9E3779B1u) ^ (kh * 0x85EBCA77u);
-    return h & params.hashMask;
-}
-
-fn lookupLayer(face: u32, depth: u32, x: u32, y: u32) -> i32 {
-    let keyLo = (x & 0xFFFFu) | ((y & 0xFFFFu) << 16u);
-    let keyHi = (depth & 0xFFFFu) | ((face & 0xFFFFu) << 16u);
-    var idx = hashKey(keyLo, keyHi);
-    let cap = params.hashCapacity;
-    for (var i = 0u; i < min(cap, MAX_PROBE); i++) {
-        let base = idx * 4u;
-        let hi = hashTable[base + 1u];
-        if (hi == 0xFFFFFFFFu) { return -1; }
-        if (hi == keyHi && hashTable[base] == keyLo) {
-            return i32(hashTable[base + 2u]);
-        }
-        idx = (idx + 1u) & params.hashMask;
-    }
-    return -1;
-}
-
-fn dirToFaceUV(d: vec3<f32>) -> vec3<f32> {
-    let ad = abs(d);
-    var face = 0u; var s = 0.0; var t = 0.0; var inv: f32;
-    if (ad.x >= ad.y && ad.x >= ad.z) {
-        inv = 1.0 / ad.x;
-        if (d.x > 0.0) { face = 0u; s = -d.z * inv; t = d.y * inv; }
-        else           { face = 1u; s =  d.z * inv; t = d.y * inv; }
-    } else if (ad.y >= ad.z) {
-        inv = 1.0 / ad.y;
-        if (d.y > 0.0) { face = 2u; s = d.x * inv; t = -d.z * inv; }
-        else           { face = 3u; s = d.x * inv; t =  d.z * inv; }
-    } else {
-        inv = 1.0 / ad.z;
-        if (d.z > 0.0) { face = 4u; s =  d.x * inv; t = d.y * inv; }
-        else           { face = 5u; s = -d.x * inv; t = d.y * inv; }
-    }
-    return vec3<f32>(f32(face), s * 0.5 + 0.5, t * 0.5 + 0.5);
-}
+// hashKey / lookupLayer / dirToFaceUV: shared with the lake height probe —
+// see residentTileHeightLookupWgsl.js. Unchanged from this file's original
+// inline copy.
+${buildResidentTileHeightLookupWGSL()}
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {

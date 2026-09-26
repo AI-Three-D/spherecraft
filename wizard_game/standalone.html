@@ -3673,6 +3673,7 @@
         window.riverDiag = () => gameEngine?.renderer?.riverSystem?.getDebugInfo?.() ?? null;
         window.riverState = () => gameEngine?.renderer?.riverSystem?.debugReadState?.() ?? Promise.resolve(null);
         window.riverBed = () => gameEngine?.renderer?.riverSystem?.debugBedInfo?.() ?? null;
+        window.lakeHeightDiag = (lakeIndex = 0) => gameEngine?.debugLakeHeightProbe?.(lakeIndex) ?? Promise.resolve(null);
 
         // Loading screen
         const loadingScreen = document.getElementById('loading-screen');
