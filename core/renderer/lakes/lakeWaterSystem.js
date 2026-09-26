@@ -46,6 +46,14 @@ const RIPPLE_NEAR_M = 120;
 const RIPPLE_FAR_M = 500;
 const RIPPLE_FREQ = 0.35;
 
+// TEMP DEBUG VISIBILITY: makes confirmed lakes impossible to miss while
+// confirming the water system actually renders — float well above the
+// ground (removes any dependency on the water-height calc being exactly
+// right) and a much bigger disc. Revert (both here and the material's
+// forced bright color below) once confirmed visually.
+const DEBUG_FLOAT_HEIGHT_M = 300;
+const DEBUG_RADIUS_MULTIPLIER = 2.5;
+
 function clamp01(x) { return Math.max(0, Math.min(1, x)); }
 
 export class LakeWaterSystem {
@@ -77,7 +85,12 @@ export class LakeWaterSystem {
             const frame = computeSurfaceTangentFrame(posV, originV);
 
             const totalDepthM = lake.nudgeDepthM * lake.depthScale;
-            const waterHeightM = (lake.naturalElevationNorm * maxTerrainHeightM) - RIM_MARGIN_FRACTION * totalDepthM;
+            // TEMP DIAGNOSTIC: bypass the natural-elevation calc entirely and
+            // use a flat, enormous height (planet radius + 2000m) — decisive
+            // test for whether the bug is in the elevation math specifically,
+            // or something more fundamental in the coordinate/transform.
+            const waterHeightM = 2000;
+            void RIM_MARGIN_FRACTION; void totalDepthM; void maxTerrainHeightM;
             const center = originV.clone().add(unitDir.clone().multiplyScalar(R + waterHeightM));
 
             const geometry = this._buildBlobGeometry(lake);
@@ -91,7 +104,7 @@ export class LakeWaterSystem {
         positions[0] = 0; positions[1] = 0; positions[2] = 0; // center
         for (let i = 0; i <= BLOB_SEGMENTS; i++) {
             const angle = (i / BLOB_SEGMENTS) * Math.PI * 2;
-            const r = erosionBlobRadiusAt(lake, angle, lake.radiusScale) * FILL_FRACTION;
+            const r = erosionBlobRadiusAt(lake, angle, lake.radiusScale) * FILL_FRACTION * DEBUG_RADIUS_MULTIPLIER;
             const idx = (i + 1) * 3;
             positions[idx] = Math.cos(angle) * r;
             positions[idx + 1] = Math.sin(angle) * r;
@@ -114,7 +127,17 @@ export class LakeWaterSystem {
     }
 
     render(camera, viewMatrix, projectionMatrix) {
-        if (!this._lakes.length || !camera || !this.backend) return;
+        if (!window.__lakeRenderCallCount) window.__lakeRenderCallCount = 0;
+        window.__lakeRenderCallCount++;
+        if (!this._lakes.length || !camera || !this.backend) {
+            if (!window.__lakeRenderSkipLogged) {
+                window.__lakeRenderSkipLogged = true;
+                console.warn('[LakeWaterSystem DIAG] render() early-return', {
+                    lakeCount: this._lakes.length, hasCamera: !!camera, hasBackend: !!this.backend,
+                });
+            }
+            return;
+        }
         const camPos = camera.position || {};
 
         for (const lake of this._lakes) {
@@ -130,8 +153,25 @@ export class LakeWaterSystem {
                 time: this._time, rippleStrength, rippleFreq: RIPPLE_FREQ,
                 cameraPosition: camPos,
                 uniformManager: this.uniformManager,
+                // TEMP DEBUG VISIBILITY: hot magenta, ignores lighting/fog
+                // dimming — see lakeWaterShader.wgsl.js's fragment shader.
+                waterTint: [3.0, 0.0, 3.0],
+                clarity: 1.0,
             });
-            this.backend.draw(lake.geometry, lake.material);
+            try {
+                this.backend.draw(lake.geometry, lake.material);
+                if (!window.__lakeDrawOkLogged) {
+                    window.__lakeDrawOkLogged = true;
+                    console.warn('[LakeWaterSystem DIAG] draw() succeeded, no exception', {
+                        callCount: window.__lakeRenderCallCount, center: lake.center, dist,
+                    });
+                }
+            } catch (e) {
+                if (!window.__lakeDrawErrLogged) {
+                    window.__lakeDrawErrLogged = true;
+                    console.error('[LakeWaterSystem DIAG] draw() threw', e?.message || e, e?.stack);
+                }
+            }
         }
     }
 

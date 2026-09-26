@@ -58,6 +58,7 @@ export class ErosionSeedVerifier {
      *   regionX:number, regionY:number, radiusScale:number, depthScale:number,
      *   pos:{x:number,y:number,z:number}, naturalElevationNorm:number,
      *   nudgeRadiusM:number, nudgeDepthM:number, blobAmpFactor:number,
+     *   jx:number, jy:number,
      * }>>}
      */
     async run({ terrainGenerator, refDir, refForward, radius }) {
@@ -79,6 +80,10 @@ export class ErosionSeedVerifier {
         const pipeline = device.createComputePipeline({
             layout: 'auto',
             compute: { module, entryPoint: 'erosionVerifyBasinsMain' },
+        });
+        const naturalHeightPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module, entryPoint: 'erosionVerifyNaturalHeightMain' },
         });
 
         // Real, fully-populated uniforms (real seed + noise config) — not
@@ -108,9 +113,9 @@ export class ErosionSeedVerifier {
         device.queue.writeBuffer(paramsBuf, 0, p);
 
         // 81 elevation samples (9 candidates x 9 ring points) + 9
-        // precipitation values (one per candidate) — see
-        // erosionSeedVerify.wgsl.js's output layout comment.
-        const OUT_FLOATS = 90;
+        // precipitation values + 9 natural full-height values (one per
+        // candidate) — see erosionSeedVerify.wgsl.js's output layout comment.
+        const OUT_FLOATS = 99;
         const outBuf = device.createBuffer({
             label: 'ErosionVerify-Out', size: OUT_FLOATS * 4,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -127,12 +132,25 @@ export class ErosionSeedVerifier {
                 { binding: outBinding, resource: { buffer: outBuf } },
             ],
         });
+        const naturalHeightBindGroup = device.createBindGroup({
+            layout: naturalHeightPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: paramsBinding, resource: { buffer: paramsBuf } },
+                { binding: outBinding, resource: { buffer: outBuf } },
+            ],
+        });
 
         const encoder = device.createCommandEncoder({ label: 'ErosionSeedVerify' });
-        const pass = encoder.beginComputePass();
+        let pass = encoder.beginComputePass();
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, bindGroup);
         pass.dispatchWorkgroups(1, 1);
+        pass.end();
+        pass = encoder.beginComputePass();
+        pass.setPipeline(naturalHeightPipeline);
+        pass.setBindGroup(0, naturalHeightBindGroup);
+        pass.dispatchWorkgroups(1);
         pass.end();
         encoder.copyBufferToBuffer(outBuf, 0, readback, 0, OUT_FLOATS * 4);
         device.queue.submit([encoder.finish()]);
@@ -156,6 +174,7 @@ export class ErosionSeedVerifier {
             let ringMin = Infinity;
             for (let r = 1; r <= RING_SAMPLES; r++) ringMin = Math.min(ringMin, samples[i * 9 + r]);
             const precipitation = samples[81 + i];
+            const naturalFullHeightNorm = samples[90 + i];
 
             const nudgeDepthNorm = candidates[i].nudgeDepthM / maxTerrainHeightM;
             const achievableDepthNorm = (ringMin - self) + nudgeDepthNorm;
@@ -178,13 +197,25 @@ export class ErosionSeedVerifier {
                 // Everything a renderer needs to build a matching water
                 // mesh without redoing this whole verification pass: exact
                 // world position, the pit's own (pre-upgrade) size/shape,
-                // and the natural (pre-carve) elevation so the water
-                // surface can sit at the right height instead of guessing.
+                // and the natural full-detail (pre-carve) elevation so the
+                // water surface can sit at the real ground height instead
+                // of the coarse baseElevation signal the retention check
+                // above uses — that signal skips mountains/hills/micro-
+                // detail entirely, which buried the water underground when
+                // it was used for this (confirmed live).
                 pos: { x: c.pos.x, y: c.pos.y, z: c.pos.z },
-                naturalElevationNorm: self,
+                naturalElevationNorm: naturalFullHeightNorm,
                 nudgeRadiusM: c.nudgeRadiusM,
                 nudgeDepthM: c.nudgeDepthM,
                 blobAmpFactor: c.blobAmpFactor,
+                // erosionBlobRadiusAt() needs these to reproduce the same
+                // per-candidate noise offset the WGSL carve used — omitting
+                // them here made LakeWaterSystem's geom.jx/jy undefined,
+                // silently producing NaN vertex positions (confirmed live:
+                // WebGPU just drops NaN geometry, rendering nothing, with
+                // no validation error at all).
+                jx: c.jx,
+                jy: c.jy,
             });
         }
 
