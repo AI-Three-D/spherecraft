@@ -96,8 +96,8 @@ export class LakeWaterSystem {
 
     /**
      * @param {Array} confirmedLakes - ErosionSeedVerifier's confirmed list:
-     *   {regionX, regionY, radiusScale, depthScale, pos, naturalElevationNorm,
-     *    nudgeRadiusM, nudgeDepthM, blobPhase1, blobAmp1, blobPhase2, blobAmp2}
+     *   {regionX, regionY, radiusScale, depthScale, sizeClass, pos,
+     *    naturalElevationNorm, nudgeRadiusM, nudgeDepthM, blobAmpFactor, jx, jy}
      */
     setLakes(confirmedLakes) {
         this._disposeLakes();
@@ -139,6 +139,7 @@ export class LakeWaterSystem {
 
             this._lakes.push({
                 regionX: lake.regionX, regionY: lake.regionY,
+                sizeClass: lake.sizeClass, radiusScale: lake.radiusScale,
                 naturalElevationNorm: lake.naturalElevationNorm,
                 posV, originV, frame,
                 geometry: null, material,
@@ -373,6 +374,7 @@ export class LakeWaterSystem {
             },
             lakes: this._lakes.map((lake) => ({
                 regionX: lake.regionX, regionY: lake.regionY,
+                sizeClass: lake.sizeClass, radiusScale: lake.radiusScale,
                 naturalElevationNorm: lake.naturalElevationNorm,
                 state: lake._resident.state,
                 retryCount: lake._resident.retryCount,

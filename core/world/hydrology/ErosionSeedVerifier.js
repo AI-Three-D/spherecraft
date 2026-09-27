@@ -34,9 +34,15 @@ import { Vector3 } from '../../../shared/math/index.js';
 import { Logger } from '../../../shared/Logger.js';
 import { createAdvancedTerrainComputeShader } from '../shaders/webgpu/advancedTerrainCompute.wgsl.js';
 import { buildErosionSeedVerifyEntryPoint } from './erosionSeedVerify.wgsl.js';
-import { computeErosionCandidateGeometry } from './erosionSeedShared.js';
+import { computeErosionCandidateGeometry, drawErosionSizeClassScale } from './erosionSeedShared.js';
 
-const RING_RADIUS_M = 60.0;  // wider than the nudge's own base radius
+// Wider than the nudge's own base radius. Independent size-class draws can
+// now propose candidates several times bigger than level-1 (see
+// EROSION_SIZE_LARGE_MAX in erosionSeedShared.js); this ring isn't scaled
+// per-candidate to match (that would need a per-candidate GPU uniform, not
+// just a shared one) so it's a fixed, moderately generous compromise rather
+// than a precise footprint match for every possible drawn size.
+const RING_RADIUS_M = 90.0;
 const RING_SAMPLES = 8;
 
 // Retention margin, as a fraction of the candidate's own nudge depth,
@@ -56,6 +62,7 @@ export class ErosionSeedVerifier {
     /**
      * @returns {Promise<Array<{
      *   regionX:number, regionY:number, radiusScale:number, depthScale:number,
+     *   sizeClass:'small'|'medium'|'large',
      *   pos:{x:number,y:number,z:number}, naturalElevationNorm:number,
      *   nudgeRadiusM:number, nudgeDepthM:number, blobAmpFactor:number,
      *   jx:number, jy:number,
@@ -176,24 +183,32 @@ export class ErosionSeedVerifier {
             const precipitation = samples[81 + i];
             const naturalFullHeightNorm = samples[90 + i];
 
-            const nudgeDepthNorm = candidates[i].nudgeDepthM / maxTerrainHeightM;
-            const achievableDepthNorm = (ringMin - self) + nudgeDepthNorm;
+            // Independent size-class proposal (see erosionSeedShared.js):
+            // decided before the retention check even runs, not derived
+            // from it. targetDepthNorm is the depth THIS proposal actually
+            // needs — a "large" draw needs proportionally more natural
+            // (ringMin - self) headroom to clear the same margin fraction,
+            // so bigger proposals are naturally harder to admit without any
+            // separate size-based rejection rule.
+            const c = candidates[i];
+            const { scale: targetScale, sizeClass } = drawErosionSizeClassScale(c.regionX, c.regionY, terrainGenerator.seed);
+            const targetDepthNorm = (c.nudgeDepthM * targetScale) / maxTerrainHeightM;
+            const achievableDepthNorm = (ringMin - self) + targetDepthNorm;
 
             const wetness = Math.max(0, Math.min(1, precipitation));
             const marginFraction = MARGIN_FRACTION_HUMID + (MARGIN_FRACTION_ARID - MARGIN_FRACTION_HUMID) * (1 - wetness);
-            const requiredDepthNorm = marginFraction * nudgeDepthNorm;
+            const requiredDepthNorm = marginFraction * targetDepthNorm;
 
-            const clearance = (achievableDepthNorm - requiredDepthNorm) / nudgeDepthNorm;
+            const clearance = (achievableDepthNorm - requiredDepthNorm) / targetDepthNorm;
             clearances.push(clearance);
 
             if (achievableDepthNorm < requiredDepthNorm) continue;
-            const scale = Math.max(1.0, Math.min(4.0, 1.0 + 1.5 * clearance));
-            const c = candidates[i];
             confirmed.push({
                 regionX: c.regionX,
                 regionY: c.regionY,
-                radiusScale: scale,
-                depthScale: scale,
+                radiusScale: targetScale,
+                depthScale: targetScale,
+                sizeClass,
                 // Everything a renderer needs to build a matching water
                 // mesh without redoing this whole verification pass: exact
                 // world position, the pit's own (pre-upgrade) size/shape,
@@ -221,7 +236,8 @@ export class ErosionSeedVerifier {
 
         Logger.info(
             `[ErosionSeedVerify] checked 9 candidates near reference point, ${confirmed.length} confirmed as real basins ` +
-            `(retention clearance, +ve = confirmed: ${clearances.map((v) => v.toFixed(3)).join(', ')})`
+            `(retention clearance, +ve = confirmed: ${clearances.map((v) => v.toFixed(3)).join(', ')}) ` +
+            `[sizes: ${confirmed.map((c) => `${c.sizeClass}(${c.radiusScale.toFixed(2)}x)`).join(', ') || 'none'}]`
         );
         return confirmed;
     }
@@ -230,7 +246,8 @@ export class ErosionSeedVerifier {
     // itself will independently derive, via the single shared geometry
     // function in erosionSeedShared.js (region (0,0) is centered on the
     // reference point itself, same as the shader's own
-    // regionX/regionY = floor(0/500) at the reference point).
+    // regionX/regionY = floor(0/EROSION_REGION_SIZE_M) at the reference
+    // point).
     _computeCandidates({ refPos, refRight, refForward, seed }) {
         const candidates = [];
         for (let ry = -1; ry <= 1; ry++) {

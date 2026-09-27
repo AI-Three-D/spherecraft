@@ -12,7 +12,13 @@
 
 import { Vector3 } from '../../../shared/math/index.js';
 
-export const EROSION_REGION_SIZE_M = 500.0;
+// Region-grid spacing between level-1 candidates. At real (2m/30m) scale a
+// pit every 500m read as a dense "carpet" of small dents across all land —
+// this is the region grid's own spacing (how far apart candidates are),
+// not any one lake's size. Widened 3x to thin that out; a candidate's own
+// footprint (tens of meters even at the largest confirmed size below) stays
+// comfortably inside a single region.
+export const EROSION_REGION_SIZE_M = 1500.0;
 
 export const EROSION_NUDGE_RADIUS_M = 30.0;
 export const EROSION_NUDGE_DEPTH_M = 2.0;
@@ -75,6 +81,29 @@ export const EROSION_BLOB_REJECT_MARGIN = 1.5;
 export const EROSION_HASH_SALT_POSITION = 9000;
 export const EROSION_HASH_SALT_SHAPE = 9500;
 export const EROSION_BLOB_NOISE_SEED_OFFSET = 9600;
+export const EROSION_HASH_SALT_SIZE_CLASS = 9700;
+
+// Stage-2 (ErosionSeedVerifier) size-class draw: an independent hash draw
+// decides how big a *candidate* upgrade to even attempt — small/medium/large
+// probability buckets, with continuous variety inside each — instead of
+// deriving the upgrade size FROM the retention check's own clearance value
+// the way the old `scale = 1 + 1.5*clearance` formula did. That old formula
+// only ever tested whether the tiny *level-1* depth was achievable, then
+// applied a much bigger scale afterward without re-testing it — on flat
+// terrain (where clearance barely varies between candidates) it also made
+// every confirmed lake come out nearly the same size. Drawing the size
+// first and then testing THAT specific (often much bigger) depth against
+// the same achievability check — see ErosionSeedVerifier.js — means big
+// lakes only survive where the natural terrain genuinely supports them,
+// which is the "let hydrology decide admission" part of the design.
+export const EROSION_SIZE_CLASS_SMALL_PROB = 0.60;
+export const EROSION_SIZE_CLASS_MEDIUM_PROB = 0.30; // remaining 0.10 -> large
+export const EROSION_SIZE_SMALL_MIN = 1.0;
+export const EROSION_SIZE_SMALL_MAX = 1.6;
+export const EROSION_SIZE_MEDIUM_MIN = 1.6;
+export const EROSION_SIZE_MEDIUM_MAX = 2.6;
+export const EROSION_SIZE_LARGE_MIN = 2.6;
+export const EROSION_SIZE_LARGE_MAX = 4.0;
 
 // PCG-style integer hash, bit-for-bit matching the WGSL erosionSeedHash4
 // (bitcast<u32>, not u32() value-conversion — matters for negative region
@@ -128,6 +157,27 @@ export function computeErosionCandidateGeometry({ regionX, regionY, seed, refPos
     const blobAmpFactor = EROSION_BLOB_AMP_FACTOR_MIN + (EROSION_BLOB_AMP_FACTOR_MAX - EROSION_BLOB_AMP_FACTOR_MIN) * hShape[1];
 
     return { regionX, regionY, pos, jx, jy, sizeFactor, nudgeRadiusM, nudgeDepthM, blobAmpFactor };
+}
+
+// Independent size-class draw for a Stage-2 upgrade proposal (see
+// EROSION_HASH_SALT_SIZE_CLASS above) — a different salt from position/
+// shape, so which size class a candidate rolls has nothing to do with where
+// it sits or how bumpy its outline is. Only ever called from
+// ErosionSeedVerifier.js (the level-1 WGSL carve doesn't need this — an
+// unconfirmed candidate always uses its own small level-1 sizeFactor).
+export function drawErosionSizeClassScale(regionX, regionY, seed) {
+    const h = erosionSeedHash4(regionX, regionY, seed + EROSION_HASH_SALT_SIZE_CLASS);
+    const classRoll = h[0];
+    const withinRoll = h[1];
+    let min, max, sizeClass;
+    if (classRoll < EROSION_SIZE_CLASS_SMALL_PROB) {
+        min = EROSION_SIZE_SMALL_MIN; max = EROSION_SIZE_SMALL_MAX; sizeClass = 'small';
+    } else if (classRoll < EROSION_SIZE_CLASS_SMALL_PROB + EROSION_SIZE_CLASS_MEDIUM_PROB) {
+        min = EROSION_SIZE_MEDIUM_MIN; max = EROSION_SIZE_MEDIUM_MAX; sizeClass = 'medium';
+    } else {
+        min = EROSION_SIZE_LARGE_MIN; max = EROSION_SIZE_LARGE_MAX; sizeClass = 'large';
+    }
+    return { scale: min + (max - min) * withinRoll, sizeClass };
 }
 
 // Cheap 2D value noise (own small implementation — same spirit as
