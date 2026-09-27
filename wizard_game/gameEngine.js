@@ -1348,6 +1348,43 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         }
     }
 
+    /**
+     * Wayfinding helper: erosion-seed lakes are real-scale (2m carve depth)
+     * and easy to miss on a 131km-radius planet even when nearby — hovers
+     * the player directly above a confirmed, resident-placement-ready lake
+     * instead. window.flyToLake(readyIndex) in standalone.html.
+     * @param {number} readyIndex - index into the READY lakes only (0-based).
+     * @param {number} hoverAltitudeM - height above the water surface to hover at.
+     */
+    debugFlyToLake(readyIndex = 0, hoverAltitudeM = 60) {
+        const ready = this.renderer?.lakeWaterSystem?.getReadyLakeCenters?.() || [];
+        const lake = ready[readyIndex];
+        if (!lake) {
+            Logger.warn(`[GameEngine] flyToLake(${readyIndex}): no ready lake at that index (${ready.length} ready)`);
+            return null;
+        }
+
+        const origin = this.planetConfig?.origin || { x: 0, y: 0, z: 0 };
+        const originV = new Vector3(origin.x, origin.y, origin.z);
+        const centerV = new Vector3(lake.center.x, lake.center.y, lake.center.z);
+        const unitDir = new Vector3().subVectors(centerV, originV).normalize();
+        const hoverPos = centerV.clone().add(unitDir.multiplyScalar(hoverAltitudeM));
+
+        if (this.spaceship?.reset) {
+            // Ship uses Z-up while world uses Y-up; swap Y/Z for follow mode (see teleportToLatLon above).
+            this.spaceship.reset(hoverPos.x, hoverPos.z, hoverPos.y);
+        }
+        if (this.cameraMode === 'follow') {
+            this.camera.follow(this.spaceship);
+            this.camera.resetOrbit();
+        } else {
+            this.camera.setPosition(hoverPos.x, hoverPos.y, hoverPos.z);
+            this.camera.lookAt(centerV.x, centerV.y, centerV.z);
+        }
+        Logger.info(`[GameEngine] flew to lake region (${lake.regionX},${lake.regionY}), hovering ${hoverAltitudeM}m above water`);
+        return { regionX: lake.regionX, regionY: lake.regionY, center: lake.center };
+    }
+
     async setTerrainDebugMode(mode) {
         const debug = this.engineConfig?.debug;
         if (!debug || !Number.isFinite(mode)) return;

@@ -3675,6 +3675,7 @@
         window.riverBed = () => gameEngine?.renderer?.riverSystem?.debugBedInfo?.() ?? null;
         window.lakeHeightDiag = (lakeIndex = 0) => gameEngine?.debugLakeHeightProbe?.(lakeIndex) ?? Promise.resolve(null);
         window.lakeReport = () => gameEngine?.renderer?.lakeWaterSystem?.getDebugPlacementReport?.() ?? null;
+        window.flyToLake = (readyIndex = 0, hoverAltitudeM = 60) => gameEngine?.debugFlyToLake?.(readyIndex, hoverAltitudeM) ?? null;
 
         // Loading screen
         const loadingScreen = document.getElementById('loading-screen');

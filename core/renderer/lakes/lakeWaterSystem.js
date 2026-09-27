@@ -7,11 +7,15 @@
 // continuously-simulated grid tied to a single fixed anchor.
 //
 // First increment (mid/far tier only, from the 3-tier plan): every
-// confirmed lake gets a static blob-shaped water mesh, matching the
-// terrain carve's own outline (erosionBlobRadiusAt — same shared geometry
-// featureErosionSeeds.wgsl.js uses), with a cheap per-frame ripple whose
-// strength fades to 0 with camera distance — a far lake ends up reading as
-// a flat textured plane without needing a second shader/material.
+// confirmed lake gets a static blob-shaped water mesh, with a cheap
+// per-frame ripple whose strength fades to 0 with camera distance — a far
+// lake ends up reading as a flat textured plane without needing a second
+// shader/material. erosionBlobRadiusAt (the terrain carve's own outline
+// function, shared with featureErosionSeeds.wgsl.js) gives each vertex's
+// nominal/upper-bound radius; the actual per-vertex radius is inset from
+// that to wherever real resident terrain crosses the water level (see
+// _onResidentQueryResolved), so the visible shoreline follows the real
+// basin shape instead of a uniform circle.
 //
 // Deliberately NOT reusing RiverBedBake/the shallow-water sim here: that
 // pipeline is a continuous per-frame cost (confirmed via investigation —
@@ -24,17 +28,19 @@
 // the camera, swapped in/out as the player moves — is a separate, later
 // increment once this static tier is confirmed to look right.
 //
-// Checkpoint 2 (see CODEX_RIVER_LAKE_HANDOFF.md): each lake now also runs a
+// Water placement (see CODEX_RIVER_LAKE_HANDOFF.md): each lake runs a
 // pending/residency/retry lifecycle (modeled on RiverSystem's) that samples
 // the resident final height texture (LakeHeightProbe — same hash-table walk
-// RiverBedBake uses, bilinearly sampled) at the center and the planned
-// water outline, and derives a real water level as (lowest resident rim
-// sample) - epsilon. USE_DEBUG_LAKE_PLACEHOLDER gates whether that real
-// result actually drives what's rendered — it stays true (preserving the
-// existing 2000m-float / magenta / oversized-disc debug behavior) until a
-// reviewer authorizes flipping it, per the handoff's checkpoint sequencing.
-// The real computation and its invariant checks run and are reportable
-// (getDebugPlacementReport()) regardless of the flag.
+// RiverBedBake uses, bilinearly sampled, per the terrain renderer's own
+// chunk-local convention) at the center and the planned water outline, and
+// derives the water level as (lowest resident rim sample) - a small
+// epsilon. A lake is only added to the render list once that real placement
+// resolves and confirms the center sits below that level; a candidate that
+// doesn't clear this against real resident data is rejected rather than
+// rendered at a fabricated height. The mesh's own per-vertex radius is then
+// separately inset to where each sampled ray actually crosses that water
+// level, so relief that varies around the rim doesn't leave most of the
+// disc buried under higher ground on one side.
 
 import { Vector3 } from '../../../shared/math/index.js';
 import { Logger } from '../../../shared/Logger.js';
@@ -49,35 +55,12 @@ export const BLOB_SEGMENTS = 28;
 // avoids the visible mismatch of a flat water plane poking out past where
 // the terrain has actually finished sloping back up to the natural rim.
 export const FILL_FRACTION = 0.82;
-// Water surface sits this far below the natural (pre-carve) elevation, as
-// a fraction of the pit's own full carve depth — keeps it visibly "in" the
-// bowl rather than floating right at the rim's edge.
-const RIM_MARGIN_FRACTION = 0.22;
 // Ripple strength is 1.0 inside RIPPLE_NEAR_M, fades linearly to 0.0 by
 // RIPPLE_FAR_M — the mid/far tiering from the 3-tier plan, expressed as a
 // continuous fade within one shader rather than two separate materials.
 const RIPPLE_NEAR_M = 120;
 const RIPPLE_FAR_M = 500;
 const RIPPLE_FREQ = 0.35;
-
-// TEMP DEBUG VISIBILITY: makes confirmed lakes impossible to miss while
-// confirming the water system actually renders — float well above the
-// ground (removes any dependency on the water-height calc being exactly
-// right) and a much bigger disc. Revert (both here and the material's
-// forced bright color below) once confirmed visually.
-const DEBUG_FLOAT_HEIGHT_M = 300;
-const DEBUG_RADIUS_MULTIPLIER = 2.5;
-
-// Explicit temporary override (checkpoint 2 of CODEX_RIVER_LAKE_HANDOFF.md):
-// true keeps every lake rendered exactly as before (2000m float, magenta
-// tint via render()'s own hardcoded waterTint, DEBUG_RADIUS_MULTIPLIER)
-// regardless of what the resident-height pipeline below computes, so the
-// real calculation can be built and proven numerically without changing
-// anything visible yet. Flip only after a reviewer has seen
-// getDebugPlacementReport()'s numbers and explicitly authorizes it — this
-// is checkpoint 3's job, done together with removing the debug scaffolding
-// entirely, not before.
-const USE_DEBUG_LAKE_PLACEHOLDER = true;
 
 // Same depth-adequacy bar RiverBedBake uses (see riverBedBakeShader.wgsl.js)
 // to decide a resident match is deep/precise enough to stop retrying for.
@@ -88,7 +71,7 @@ const RESIDENT_RETRY_DELAY_S = 0.25;
 // Small, documented margin the water level sits below the lowest resident
 // rim sample (the "spillway ceiling") — clears bilinear/micro-detail noise
 // between adjacent rim texels without eating meaningfully into a lake's
-// depth (rim spans observed in practice are tens of meters).
+// depth (measured basin depth at real scale is on the order of 1-3m).
 const WATER_LEVEL_EPSILON_M = 0.5;
 
 function clamp01(x) { return Math.max(0, Math.min(1, x)); }
@@ -120,33 +103,19 @@ export class LakeWaterSystem {
         this._disposeLakes();
         const origin = this.planetConfig?.origin;
         const R = this.planetConfig?.radius;
-        const maxTerrainHeightM = Math.max(this.planetConfig?.maxTerrainHeight ?? 2000, 1);
         if (!origin || !Number.isFinite(R) || !Array.isArray(confirmedLakes)) return;
         const originV = new Vector3(origin.x, origin.y, origin.z);
 
         for (const lake of confirmedLakes) {
             if (!lake?.pos) continue;
             const posV = new Vector3(lake.pos.x, lake.pos.y, lake.pos.z);
-            const unitDir = new Vector3().subVectors(posV, originV).normalize();
             const frame = computeSurfaceTangentFrame(posV, originV);
-
-            const totalDepthM = lake.nudgeDepthM * lake.depthScale;
-            // TEMP DIAGNOSTIC: bypass the natural-elevation calc entirely and
-            // use a flat, enormous height (planet radius + 2000m) — decisive
-            // test for whether the bug is in the elevation math specifically,
-            // or something more fundamental in the coordinate/transform.
-            const waterHeightM = 2000;
-            void RIM_MARGIN_FRACTION; void totalDepthM; void maxTerrainHeightM;
-            const debugCenter = originV.clone().add(unitDir.clone().multiplyScalar(R + waterHeightM));
-
-            const geometry = this._buildBlobGeometry(lake, DEBUG_RADIUS_MULTIPLIER);
             const material = LakeWaterMaterialBuilder.create();
 
-            // Resident-height query points: center + the same 29-vertex ring
-            // the blob mesh uses, at the real intended radius (FILL_FRACTION
-            // only — deliberately excluding DEBUG_RADIUS_MULTIPLIER, per the
-            // handoff's non-negotiable contract) computed once here and
-            // reused across every retry attempt.
+            // Resident-height query points: center + a 29-vertex ring
+            // (BLOB_SEGMENTS+1, first/last coincide at angle 0 — same count
+            // the blob mesh below uses) at the real intended water radius,
+            // computed once here and reused across every retry attempt.
             const queryWorldPositions = [posV.clone()];
             const plannedRadiusM = [null];
             for (let i = 0; i <= BLOB_SEGMENTS; i++) {
@@ -172,20 +141,20 @@ export class LakeWaterSystem {
                 regionX: lake.regionX, regionY: lake.regionY,
                 naturalElevationNorm: lake.naturalElevationNorm,
                 posV, originV, frame,
-                geometry, material,
-                center: debugCenter, up: frame.up, right: frame.right, forward: frame.forward,
+                geometry: null, material,
+                center: null, up: frame.up, right: frame.right, forward: frame.forward,
                 queryWorldPositions, plannedRadiusM,
                 _resident: { state: 'pending', secondsSincePending: 0, retryCount: 0, result: null, error: null },
             });
         }
     }
 
-    _buildBlobGeometry(lake, radiusMultiplier) {
+    _buildBlobGeometry(lake) {
         const positions = new Float32Array((BLOB_SEGMENTS + 2) * 3);
         positions[0] = 0; positions[1] = 0; positions[2] = 0; // center
         for (let i = 0; i <= BLOB_SEGMENTS; i++) {
             const angle = (i / BLOB_SEGMENTS) * Math.PI * 2;
-            const r = erosionBlobRadiusAt(lake, angle, lake.radiusScale) * FILL_FRACTION * radiusMultiplier;
+            const r = lake.shorelineRadiusM[i];
             const idx = (i + 1) * 3;
             positions[idx] = Math.cos(angle) * r;
             positions[idx + 1] = Math.sin(angle) * r;
@@ -207,7 +176,7 @@ export class LakeWaterSystem {
         return Number.isFinite(this.planetConfig?.heightScale) ? this.planetConfig.heightScale : 2000;
     }
 
-    // ---- resident-height pending/retry lifecycle (checkpoint 2) ---------
+    // ---- resident-height pending/retry lifecycle -------------------------
 
     _ensureProbe() {
         if (this._probe || this._probeCompilationFailed) return;
@@ -359,24 +328,44 @@ export class LakeWaterSystem {
             `rim=${foundRim.length}/${rim.length}`
         );
 
-        if (!USE_DEBUG_LAKE_PLACEHOLDER) {
-            const unitDir = new Vector3().subVectors(lake.posV, lake.originV).normalize();
-            const R = this.planetConfig?.radius;
-            lake.center = lake.originV.clone().add(unitDir.multiplyScalar(R + waterLevelM));
-            lake.geometry?.dispose?.();
-            lake.geometry = this._buildBlobGeometry(lake, 1.0);
-        }
+        const unitDir = new Vector3().subVectors(lake.posV, lake.originV).normalize();
+        const R = this.planetConfig?.radius;
+        lake.center = lake.originV.clone().add(unitDir.multiplyScalar(R + waterLevelM));
+
+        // Per-vertex shoreline radius, inset from the nominal outline
+        // (lake.plannedRadiusM) to where the REAL sampled terrain actually
+        // crosses the water level along that ray, not a uniform circle. A
+        // flat disc sized to the full nominal radius would sit buried under
+        // terrain almost everywhere except right at the single lowest
+        // (spillway) direction, since relief varies meaningfully around the
+        // rim now — this follows the actual per-direction waterline instead
+        // (the "sampled-inset" approach from CODEX_RIVER_LAKE_HANDOFF.md's
+        // minimal robust implementation shape, step 5).
+        const centerH = center.bilinearHeightM;
+        lake.shorelineRadiusM = rim.map((rec, i) => {
+            const nominalR = lake.plannedRadiusM[i + 1];
+            let t = 1.0;
+            if (rec.found && Number.isFinite(rec.bilinearHeightM)) {
+                const denom = rec.bilinearHeightM - centerH;
+                if (denom > 0.01) t = (waterLevelM - centerH) / denom;
+            }
+            // Small inward safety margin so the edge sits just inside the
+            // real crossing point, not exactly on it (avoids z-fighting/
+            // flicker against the terrain right at the shoreline).
+            t = Math.min(1, Math.max(0.05, t)) * 0.95;
+            return nominalR * t;
+        });
+
+        lake.geometry = this._buildBlobGeometry(lake);
     }
 
     /**
-     * Checkpoint-2 numeric proof (see CODEX_RIVER_LAKE_HANDOFF.md): the
-     * pending/residency/retry state and derived water level for every lake,
-     * sourced from the real setLakes()/update() pipeline — not a side
-     * diagnostic. window.lakeReport() in standalone.html.
+     * Numeric placement report for every lake, sourced from the real
+     * setLakes()/update() pipeline — not a side diagnostic.
+     * window.lakeReport() in standalone.html.
      */
     getDebugPlacementReport() {
         return {
-            usingDebugPlaceholder: USE_DEBUG_LAKE_PLACEHOLDER,
             probeCompilation: {
                 checked: !!this._probe,
                 hasErrors: this._probeCompilationFailed,
@@ -389,9 +378,20 @@ export class LakeWaterSystem {
                 retryCount: lake._resident.retryCount,
                 error: lake._resident.error,
                 result: lake._resident.result,
-                renderedCenter: { x: lake.center.x, y: lake.center.y, z: lake.center.z },
+                renderedCenter: lake.center ? { x: lake.center.x, y: lake.center.y, z: lake.center.z } : null,
             })),
         };
+    }
+
+    /**
+     * World-space centers of every lake whose real resident placement has
+     * resolved and is currently rendered — for wayfinding tools (e.g.
+     * window.flyToLake() in standalone.html). Not used by rendering itself.
+     */
+    getReadyLakeCenters() {
+        return this._lakes
+            .filter((lake) => lake._resident.state === 'ready' && lake.center)
+            .map((lake) => ({ regionX: lake.regionX, regionY: lake.regionY, center: { x: lake.center.x, y: lake.center.y, z: lake.center.z } }));
     }
 
     update(deltaTime) {
@@ -403,20 +403,15 @@ export class LakeWaterSystem {
     }
 
     render(camera, viewMatrix, projectionMatrix) {
-        if (!window.__lakeRenderCallCount) window.__lakeRenderCallCount = 0;
-        window.__lakeRenderCallCount++;
-        if (!this._lakes.length || !camera || !this.backend) {
-            if (!window.__lakeRenderSkipLogged) {
-                window.__lakeRenderSkipLogged = true;
-                console.warn('[LakeWaterSystem DIAG] render() early-return', {
-                    lakeCount: this._lakes.length, hasCamera: !!camera, hasBackend: !!this.backend,
-                });
-            }
-            return;
-        }
+        if (!this._lakes.length || !camera || !this.backend) return;
         const camPos = camera.position || {};
 
         for (const lake of this._lakes) {
+            // Not resolved (or rejected) yet — no fabricated placement is
+            // rendered; the lake simply doesn't draw until real resident
+            // data confirms it.
+            if (!lake.geometry || !lake.center) continue;
+
             const dx = (camPos.x ?? 0) - lake.center.x;
             const dy = (camPos.y ?? 0) - lake.center.y;
             const dz = (camPos.z ?? 0) - lake.center.z;
@@ -429,25 +424,10 @@ export class LakeWaterSystem {
                 time: this._time, rippleStrength, rippleFreq: RIPPLE_FREQ,
                 cameraPosition: camPos,
                 uniformManager: this.uniformManager,
-                // TEMP DEBUG VISIBILITY: hot magenta, ignores lighting/fog
-                // dimming — see lakeWaterShader.wgsl.js's fragment shader.
-                waterTint: [3.0, 0.0, 3.0],
-                clarity: 1.0,
+                // No waterTint/clarity override — LakeWaterMaterialBuilder's
+                // own defaults (a blue-teal tint, full clarity) apply.
             });
-            try {
-                this.backend.draw(lake.geometry, lake.material);
-                if (!window.__lakeDrawOkLogged) {
-                    window.__lakeDrawOkLogged = true;
-                    console.warn('[LakeWaterSystem DIAG] draw() succeeded, no exception', {
-                        callCount: window.__lakeRenderCallCount, center: lake.center, dist,
-                    });
-                }
-            } catch (e) {
-                if (!window.__lakeDrawErrLogged) {
-                    window.__lakeDrawErrLogged = true;
-                    console.error('[LakeWaterSystem DIAG] draw() threw', e?.message || e, e?.stack);
-                }
-            }
+            this.backend.draw(lake.geometry, lake.material);
         }
     }
 

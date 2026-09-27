@@ -14,11 +14,31 @@ import { Vector3 } from '../../../shared/math/index.js';
 
 export const EROSION_REGION_SIZE_M = 500.0;
 
-// TEMP DEBUG VISIBILITY: bumped way up from the real values (30m/2m) so
-// candidates are impossible to miss while confirming the system end to
-// end. Revert to 30.0/2.0 once confirmed visually.
-export const EROSION_NUDGE_RADIUS_M = 90.0;
-export const EROSION_NUDGE_DEPTH_M = 40.0;
+export const EROSION_NUDGE_RADIUS_M = 30.0;
+export const EROSION_NUDGE_DEPTH_M = 2.0;
+
+// Basin profile shape (see featureErosionSeedsHeight()). A single
+// smoothstep(0, effRadius, dist) spreads its whole floor-to-flat transition
+// across the full [0, effRadius] range, which puts LakeWaterSystem's own
+// water-edge radius (FILL_FRACTION, ~0.82) well into the already-nearly-
+// healed tail (measured ~0.73% of the nominal depth there) — at real (2m)
+// depth that's sub-centimeter relief, invisible against ordinary terrain
+// noise (see CODEX_RIVER_LAKE_HANDOFF.md's "buried by its own shape"
+// finding, and its live confirmation: flying to a confirmed lake showed
+// flat ground). Compressing the wall into the inner fraction below — and
+// shaping the floor itself as a parabola, not a flat-bottomed
+// (1-smoothstep)^2 — puts real, continuously-curving relief right where the
+// water's edge and shoreline actually are, instead of a flat plateau with a
+// sudden wall.
+export const EROSION_WALL_RADIUS_FRACTION = 0.55;
+// A small raised rim beyond the wall, peaking partway to the outer radius
+// and fading to 0 by the outer radius — real shoreline variation instead of
+// flat ground running right up to the water. Kept deliberately small: a
+// larger value (0.5) made the whole feature read as a mound/hill with a
+// small dent on top rather than a depression (confirmed live) — the
+// depression itself, not an added ring, must be the dominant visual
+// feature. Expressed as a fraction of the basin's own (unscaled) depth.
+export const EROSION_RIM_BOOST_FRACTION = 0.12;
 
 // Crude, level-1 admissibility — see featureErosionSeeds.wgsl.js's own
 // header comment for what this is (and isn't) checking.

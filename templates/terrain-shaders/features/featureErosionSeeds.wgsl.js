@@ -27,6 +27,7 @@
 
 import {
   EROSION_REGION_SIZE_M, EROSION_NUDGE_RADIUS_M, EROSION_NUDGE_DEPTH_M,
+  EROSION_WALL_RADIUS_FRACTION, EROSION_RIM_BOOST_FRACTION,
   EROSION_RUGGEDNESS_MAX, EROSION_SIZE_FACTOR_MIN, EROSION_SIZE_FACTOR_MAX,
   EROSION_BLOB_NOISE_SCALE_FACTOR, EROSION_BLOB_NOISE_AMPLITUDE_FACTOR,
   EROSION_BLOB_AMP_FACTOR_MIN, EROSION_BLOB_AMP_FACTOR_MAX,
@@ -41,6 +42,8 @@ export function createTerrainFeatureErosionSeeds() {
 const EROSION_REGION_SIZE_M: f32 = ${EROSION_REGION_SIZE_M.toFixed(1)};
 const EROSION_NUDGE_RADIUS_M: f32 = ${EROSION_NUDGE_RADIUS_M.toFixed(1)};
 const EROSION_NUDGE_DEPTH_M: f32 = ${EROSION_NUDGE_DEPTH_M.toFixed(1)};
+const EROSION_WALL_RADIUS_FRACTION: f32 = ${EROSION_WALL_RADIUS_FRACTION.toFixed(2)};
+const EROSION_RIM_BOOST_FRACTION: f32 = ${EROSION_RIM_BOOST_FRACTION.toFixed(2)};
 
 // Crude, level-1 admissibility: not "would this hold water" (that's the
 // refined, humidity-aware retention check in ErosionSeedVerifier.js/
@@ -229,9 +232,32 @@ fn featureErosionSeedsHeight(
     let boundaryNoise = fbmAuto(wx, wy, unitDir, noiseScaleKm, 3, seed + ${EROSION_BLOB_NOISE_SEED_OFFSET}, 2.0, 0.5);
     let warpedDist = bestDist - boundaryNoise * effRadius * EROSION_BLOB_NOISE_AMPLITUDE_FACTOR * bestBlobAmpFactor;
 
-    let shape = 1.0 - smoothstep(0.0, effRadius, warpedDist);
+    // Basin floor: a true parabolic bowl (continuous curvature all the way
+    // to the center), not (1-smoothstep)^2 — that shape stays within ~10%
+    // of full depth out past half its radius (a near-flat plateau) and dumps
+    // all its curvature into a narrow band near the edge, which reads as a
+    // flat-floored crater with a sudden wall rather than a natural basin.
+    // Compressed into the inner EROSION_WALL_RADIUS_FRACTION of effRadius
+    // (not the full [0, effRadius]) so the basin's own relief lands where
+    // LakeWaterSystem's water edge sits (~0.82 * effRadius), not in an
+    // already-flat tail beyond it. See erosionSeedShared.js's comments.
+    let wallRadius = effRadius * EROSION_WALL_RADIUS_FRACTION;
+    let basinT = clamp(warpedDist / wallRadius, 0.0, 1.0);
+    let basinShape = 1.0 - basinT * basinT;
     let normalizedDepth = (EROSION_NUDGE_DEPTH_M * bestDepthScale) / max(maxTerrainHeightM(), 1.0);
-    return -normalizedDepth * shape * shape;
+    var h = -normalizedDepth * basinShape;
+
+    // Small raised rim between the wall and the outer radius: real
+    // shoreline variation instead of flat ground running right up to the
+    // water. Deliberately small (EROSION_RIM_BOOST_FRACTION) — a larger
+    // value made the whole feature read as a mound with a dent on top
+    // rather than a depression (confirmed live); the basin itself, not an
+    // added ring, must be the dominant visual feature.
+    let rimT = clamp((warpedDist - wallRadius) / max(effRadius - wallRadius, 1.0), 0.0, 1.0);
+    let rimShape = sin(rimT * 3.14159265);
+    h = h + normalizedDepth * EROSION_RIM_BOOST_FRACTION * rimShape;
+
+    return h;
 }
 `;
 }
