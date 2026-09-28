@@ -21,8 +21,26 @@ export class AsyncGenerationQueue {
     }
 
     request(key, priority, task, canStart = null) {
-        if (this.pending.has(key)) {
-            return this.pending.get(key).promise;
+        const existing = this.pending.get(key);
+        if (existing) {
+            // A tile can be re-requested with a different (higher) priority
+            // or a looser admission gate before it starts — e.g. a
+            // PREDICTIVE request for a tile that becomes genuinely VISIBLE
+            // before generation begins. Promote in place rather than
+            // leaving it stuck with its original, more conservative
+            // priority/gate (never demote — the first caller's urgency
+            // still applies once granted).
+            if (!existing.started) {
+                const p = Number.isFinite(priority) ? priority : 0;
+                if (p > existing.priority) {
+                    existing.priority = p;
+                    this.queue.sort((a, b) => b.priority - a.priority);
+                }
+                if (existing.canStart && canStart === null) {
+                    existing.canStart = null;
+                }
+            }
+            return existing.promise;
         }
 
         if (this.queue.length >= this.maxQueueSize) {

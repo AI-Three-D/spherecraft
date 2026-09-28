@@ -3677,6 +3677,62 @@
         window.lakeReport = () => gameEngine?.renderer?.lakeWaterSystem?.getDebugPlacementReport?.() ?? null;
         window.flyToLake = (readyIndex = 0, hoverAltitudeM = 60) => gameEngine?.debugFlyToLake?.(readyIndex, hoverAltitudeM) ?? null;
 
+        // Phase 0 test matrix (SphereCraft_Optimization_Implementation_Plan.md
+        // §0.5): drives the manual free camera through the six standard
+        // scenarios via the same key-state the real input handler reads
+        // (gameEngine.inputManager.keys), so each phase exercises the real
+        // per-frame update/traversal/feedback/generation path — not a bypass.
+        // Each phase's TileStreamer pressure window is consumed fresh, so
+        // the returned report is per-phase, not cumulative. Run before and
+        // after a change and diff the two reports (see console.table output).
+        window.runFastFlightTestMatrix = async ({ phaseMs = 4000 } = {}) => {
+            const streamer = gameEngine?.renderer?.quadtreeTileManager?.tileStreamer;
+            if (!streamer) {
+                console.warn('[FastFlightMatrix] tileStreamer not ready yet');
+                return null;
+            }
+            if (gameEngine.cameraMode !== 'manual') {
+                gameEngine.toggleCameraMode();
+                if (gameEngine.cameraMode !== 'manual') gameEngine.toggleCameraMode();
+            }
+            const keys = gameEngine.inputManager.keys;
+            const setKeys = (codes) => {
+                keys.clear();
+                for (const c of codes) keys.add(c);
+            };
+            const runPhase = async (name, codes) => {
+                setKeys(codes);
+                streamer.consumePressureWindow(); // discard carry-over from the previous phase
+                await new Promise(r => setTimeout(r, phaseMs));
+                const p = streamer.consumePressureWindow();
+                return {
+                    phase: name,
+                    p50: p.stageLatency.requestToResident.p50.toFixed(0),
+                    p95: p.stageLatency.requestToResident.p95.toFixed(0),
+                    p99: p.stageLatency.requestToResident.p99.toFixed(0),
+                    gpuFencesMax: p.gpuFencesMax,
+                    tilesStarted: p.tilesStarted,
+                    queueDepthEnd: p.generationQueueDepth,
+                    requestAmplification: p.requestAmplification !== null ? p.requestAmplification.toFixed(2) : 'n/a',
+                    wastedGenerations: p.wastedGenerations,
+                    computeSubmissions: p.computeSubmissions,
+                    copyOperations: p.copyOperations,
+                    gpuBackpressureSkips: p.gpuBackpressureSkips
+                };
+            };
+
+            const report = [];
+            report.push(await runPhase('A stationary', []));
+            report.push(await runPhase('B slow', ['KeyW']));
+            report.push(await runPhase('C fast', ['KeyW', 'ShiftLeft']));
+            report.push(await runPhase('D reverse', ['KeyS', 'ShiftLeft']));
+            report.push(await runPhase('E turn-while-fast', ['KeyW', 'KeyA', 'ShiftLeft']));
+            report.push(await runPhase('F stop', []));
+
+            console.table(report);
+            return report;
+        };
+
         // Loading screen
         const loadingScreen = document.getElementById('loading-screen');
         const debugPanel = document.getElementById('debug-panel');

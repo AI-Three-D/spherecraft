@@ -1273,6 +1273,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         const shipState = this.spaceship.getState();
         const zoneInfo = this.altitudeZoneManager?.getDebugInfo();
+        const perfHud = this.renderer?.quadtreeTileManager?.getPerfHudSnapshot?.() ?? null;
 
         this.ui.update({
             fps: this._fps,
@@ -1280,6 +1281,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             shipState: shipState,
             zoneInfo: zoneInfo,
             playerStatus: this.actorManager?.getPlayerCombatState?.() ?? null,
+            perfHud,
         });
     }
 

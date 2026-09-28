@@ -100,6 +100,12 @@ export class TileGenerator {
 
         this._gpuFencesInFlight = 0;
 this._maxGpuFencesObserved = 0;
+        this._submissionCount = 0;
+        // Called once per tile, after the GPU fence for that tile's batched
+        // submission resolves. Lets TileStreamer attach the final
+        // gpuFenceComplete timestamp to its per-request telemetry record
+        // without TileGenerator knowing anything about request tracking.
+        this.onGenerationTelemetry = options.onGenerationTelemetry ?? null;
 
         this.terrainGen   = terrainGenerator;
         this.textureSize  = options.textureSize     ?? 1024;
@@ -138,22 +144,36 @@ this._maxGpuFencesObserved = 0;
         this._maxGpuFencesObserved = this._gpuFencesInFlight;
         return max;
     }
+
+    /** Reset the per-window GPU submission counter and return its previous value. */
+    consumeSubmissionCount() {
+        const count = this._submissionCount;
+        this._submissionCount = 0;
+        return count;
+    }
+
     /**
      * Generate all required textures for a tile.
      * Returns a cached promise if generation is already in progress.
      *
      * @param {TileAddress} tileAddr
+     * @param {object} [telemetry]  Optional per-request telemetry record
+     *   (see TileStreamer._queueTile). If provided, this call fills in
+     *   computeSubmitted (synchronously, right after the batched pass
+     *   submission) and gpuFenceComplete (asynchronously, once the GPU
+     *   fence for that submission resolves), then invokes
+     *   onGenerationTelemetry so the caller can finalize its own bookkeeping.
      * @returns {Promise<object>}  Resolves to { height, normal, tile, macro, splatData }
      *                              Each value is a Texture resource.
      */
-    async generateTile(tileAddr) {
+    async generateTile(tileAddr, telemetry = null) {
         const key = tileAddr.toString();
 
         // Reuse in-progress generation
         const existing = this._inProgress.get(key);
         if (existing) return existing;
-  
-        const promise = this._generateTileInternal(tileAddr)
+
+        const promise = this._generateTileInternal(tileAddr, { telemetry })
             .finally(() => this._inProgress.delete(key));
 
         this._inProgress.set(key, promise);
@@ -233,6 +253,7 @@ this._maxGpuFencesObserved = 0;
         const startTime = performance.now();
         const includeBaseHeight = options?.includeBaseHeight === true;
         const trackStats = options?.trackStats !== false;
+        const telemetry = options?.telemetry ?? null;
     
         const gridSize = 1 << tileAddr.depth;
         const textures = {};
@@ -451,6 +472,13 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
             splatPass
         });
 
+        if (telemetry) telemetry.computeSubmitted = performance.now();
+        // runBatchedTilePasses always submits once for terrainPasses, plus a
+        // second, separate submission for the splat pass when present (see
+        // _runPaddedQuadtreeSplatPass in webgpuTerrainGeneratorBatching.js) —
+        // count both so computeSubmissions reflects actual GPU submissions.
+        this._submissionCount += splatPass ? 2 : 1;
+
         this._gpuFencesInFlight++;
         if (this._gpuFencesInFlight > this._maxGpuFencesObserved) {
             this._maxGpuFencesObserved = this._gpuFencesInFlight;
@@ -477,18 +505,25 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
         const releaseFence = () => {
             this._gpuFencesInFlight = Math.max(0, this._gpuFencesInFlight - 1);
         };
+        const finalizeTelemetry = () => {
+            if (!telemetry) return;
+            telemetry.gpuFenceComplete = performance.now();
+            this.onGenerationTelemetry?.(telemetry);
+        };
         if (queue?.onSubmittedWorkDone) {
             queue.onSubmittedWorkDone()
                 .then(() => {
                     releaseFence();
+                    finalizeTelemetry();
                     for (const tempTex of temporaryTextures) {
                         if (!tempTex) continue;
                         try { tempTex.destroy(); } catch { /* ignore cleanup failure */ }
                     }
                 })
-                .catch(releaseFence);
+                .catch(() => { releaseFence(); finalizeTelemetry(); });
         } else {
             releaseFence();
+            finalizeTelemetry();
         }
 
         // ── Wrap GPU textures ─────────────────────────────────────

@@ -84,6 +84,7 @@ import { AsyncGenerationQueue } from '../asyncGenerationQueue.js';
 import { TileAddress } from './tileAddress.js';
 import { TileGenerator } from './tileGenerator.js';
 import { TileCache } from './tileCache.js';
+import { computeTileWorldCenter } from './gpuQuadtreeDiagnosticHelpers.js';
 import {
     Texture, TextureFormat, TextureFilter, TextureWrap,
     gpuFormatIsFilterable
@@ -127,6 +128,33 @@ function formatRequestLatencyWindow(window) {
     return REQUEST_LATENCY_BUCKET_LABELS
         .map((label, index) => `${label}:${window.buckets[index]}`)
         .join(' ');
+}
+
+// ─── PercentileWindow ───────────────────────────────────────────────────────
+// Raw-sample latency tracker for a single pipeline stage (Phase 0 of
+// SphereCraft_Optimization_Implementation_Plan.md, §0.4). Samples accumulate
+// between consume() calls; percentiles are computed on read, not on push, so
+// the hot path (push) stays a single array append.
+class PercentileWindow {
+    constructor() {
+        this.samples = [];
+    }
+
+    push(value) {
+        if (Number.isFinite(value)) this.samples.push(value);
+    }
+
+    consume() {
+        const n = this.samples.length;
+        if (n === 0) {
+            return { count: 0, p50: 0, p95: 0, p99: 0, max: 0 };
+        }
+        const sorted = this.samples.slice().sort((a, b) => a - b);
+        const at = (p) => sorted[Math.min(n - 1, Math.floor(p * n))];
+        const result = { count: n, p50: at(0.5), p95: at(0.95), p99: at(0.99), max: sorted[n - 1] };
+        this.samples.length = 0;
+        return result;
+    }
 }
 
 function nextPow2(value) {
@@ -315,10 +343,19 @@ class TileArrayPool {
         this._pendingCopies.push({ textures, layer });
     }
 
-    flushPendingCopies() {
-        const count = this._pendingCopies.length;
-        if (count === 0) return 0;
-    
+    // maxCount caps how many queued copies get flushed this call (plan §1.1
+    // maxCopyOperationsPerFrame); any remainder stays queued (FIFO order) for
+    // the next flush. Returns { count, textures } where `textures` is the
+    // flat list of source texture wrappers whose copy was actually submitted
+    // this call — the ONLY textures safe to schedule for destruction (a
+    // deferred/not-yet-flushed entry's source must survive until its own
+    // copy is actually submitted; see TileStreamer._flushArrayPoolCopies).
+    flushPendingCopies(maxCount = Infinity) {
+        const total = this._pendingCopies.length;
+        if (total === 0) return { count: 0, textures: [] };
+        const count = Math.max(0, Math.min(total, maxCount));
+        if (count === 0) return { count: 0, textures: [] };
+
         const encoder = this.device.createCommandEncoder({ label: 'QT-TileCopyBatch' });
     
         // Collect layers for post-copy mip generation. Set dedupes
@@ -357,10 +394,16 @@ class TileArrayPool {
         }
     
         this.device.queue.submit([encoder.finish()]);
-        this._pendingCopies.length = 0;
-        return count;
+        const flushed = this._pendingCopies.splice(0, count);
+        const textures = [];
+        for (const entry of flushed) {
+            for (const type of Object.keys(entry.textures)) {
+                if (entry.textures[type]) textures.push(entry.textures[type]);
+            }
+        }
+        return { count, textures };
     }
-    
+
     allocateLayer() {
         if (this.freeLayers.length > 0) return this.freeLayers.pop();
         return null;
@@ -496,9 +539,48 @@ class TileHashTable {
 export class TileStreamer {
 
     constructor(device, terrainGenerator, quadtreeGPU, options = {}) {
-        this._gpuBackpressureLimit = options.gpuBackpressureLimit ?? 4;
+        // ── Phase 1 admission budgets (SphereCraft_Optimization_Implementation_Plan.md §1) ──
+        // Named explicitly per the plan so they can be tuned from measured
+        // Phase 0 data rather than guessed. maxRefinementsPerFrame is
+        // intentionally absent: there is no refinement queue yet (Phase 2/3
+        // of the plan introduce it) — add the budget when that queue exists.
+        const admission = options.admissionBudgets ?? {};
+        this._admissionBudgets = {
+            maxNewTilesPerFrame: admission.maxNewTilesPerFrame
+                ?? options.queueConfig?.maxStartsPerFrame ?? 6,
+            maxConcurrentGenerations: admission.maxConcurrentGenerations
+                ?? options.queueConfig?.maxConcurrentTasks ?? 12,
+            maxCpuGenerationTimeMs: admission.maxCpuGenerationTimeMs
+                ?? options.queueConfig?.timeBudgetMs ?? 6,
+            maxGpuFencesInFlight: admission.maxGpuFencesInFlight
+                ?? options.gpuBackpressureLimit ?? 4,
+            maxCopyOperationsPerFrame: admission.maxCopyOperationsPerFrame ?? 8,
+            // Small always-available reserve so top-of-queue urgent
+            // (VISIBLE/FEEDBACK) work isn't starved indefinitely once the
+            // GPU fence budget saturates during sustained fast flight.
+            // Predictive/speculative entries self-gate below via canStart
+            // against the hard fence limit, so this reserve is a no-op
+            // unless genuinely urgent work is waiting (plan §1.3).
+            urgentReserveSlots: admission.urgentReserveSlots ?? 1
+        };
+        this._gpuBackpressureLimit = this._admissionBudgets.maxGpuFencesInFlight;
         this._gpuBackpressureSkipCount = 0;
         this._tilesStartedWindowCount = 0;
+
+        // ── Phase 0 instrumentation state (plan §0) ──────────────────────
+        this._cameraContext = { position: null, velocity: null, speed: 0, planetConfig: null };
+        this._telemetryByKey = new Map();
+        this._stageLatency = {
+            queueWait: new PercentileWindow(),        // request -> generationStart
+            startToSubmit: new PercentileWindow(),     // generationStart -> computeSubmitted
+            submitToFence: new PercentileWindow(),     // computeSubmitted -> gpuFenceComplete
+            requestToResident: new PercentileWindow()  // request -> resident (end-to-end)
+        };
+        this._requestedTilesWindowCount = 0;
+        this._newlyVisibleTilesWindowCount = 0;
+        this._wastedGenerationsWindowCount = 0;
+        this._computeSubmissionsWindowCount = 0;
+        this._copyOperationsWindowCount = 0;
         this.device = device;
         this._aoCommitQueue = [];
         this._scatterCommitQueue = [];
@@ -603,9 +685,9 @@ export class TileStreamer {
         this._debugVisibleCopyLogCount = 0;
         this._lastCopyVisibilitySummary = null;
         this._generationQueue = new AsyncGenerationQueue({
-            maxInFlight:     options.queueConfig?.maxConcurrentTasks  ?? 12,
-            maxPerFrame:     options.queueConfig?.maxStartsPerFrame   ?? 6,
-            timeBudgetMs:    options.queueConfig?.timeBudgetMs        ?? 6,
+            maxInFlight:     this._admissionBudgets.maxConcurrentGenerations,
+            maxPerFrame:     this._admissionBudgets.maxNewTilesPerFrame,
+            timeBudgetMs:    this._admissionBudgets.maxCpuGenerationTimeMs,
             maxQueueSize:    options.queueConfig?.maxQueueSize        ?? 2048,
             minStartIntervalMs: options.queueConfig?.minStartIntervalMs ?? 0,
             shouldDrop: (entry) => {
@@ -706,7 +788,8 @@ drainScatterCommitQueue() {
             quadtreeMaxDepth: this.quadtreeGPU?.maxDepth,
             maxGeomLOD: this.quadtreeGPU?.maxGeomLOD,
             enableSplat:    this.enableSplat,
-            logStats:       this._logStatsEnabled
+            logStats:       this._logStatsEnabled,
+            onGenerationTelemetry: (telemetry) => this._finalizeFenceTelemetry(telemetry)
         });
         this._seedRootTiles();
         this._createFeedbackRing();
@@ -726,7 +809,7 @@ drainScatterCommitQueue() {
                         const addr = new TileAddress(face, depth, x, y);
                         if (this._tileInfo.has(addr.toString())) continue;
                         if (this.tileGenerator.isGenerating(addr)) continue;
-                        this._queueTile(addr);
+                        this._queueTile(addr, { reason: 'VISIBLE' });
                     }
                 }
             }
@@ -805,6 +888,13 @@ this._freshnessSkipCount = 0;
         this._commitWindowCount = 0;
         this._queueRejectWindowCount = 0;
         this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
+
+        this._telemetryByKey.clear();
+        for (const window of Object.values(this._stageLatency)) window.consume();
+        this._requestedTilesWindowCount = 0;
+        this._newlyVisibleTilesWindowCount = 0;
+        this._wastedGenerationsWindowCount = 0;
+        this._copyOperationsWindowCount = 0;
 
         if (this.hashTable) {
             this.hashTable.clear();
@@ -944,10 +1034,15 @@ this._freshnessSkipCount = 0;
     _flushArrayPoolCopies() {
         if (!this.arrayPool) return;
 
+        const copyBudget = this._admissionBudgets.maxCopyOperationsPerFrame;
+        // Snapshot for debug bookkeeping BEFORE flushing (flushPendingCopies
+        // splices its own array); slicing with the same budget here mirrors
+        // exactly what flushPendingCopies will actually flush.
         const flushedCopies = Array.isArray(this.arrayPool._pendingCopies)
-            ? this.arrayPool._pendingCopies.slice()
+            ? this.arrayPool._pendingCopies.slice(0, copyBudget)
             : [];
-        const copyCount = this.arrayPool.flushPendingCopies();
+        const { count: copyCount, textures: flushedTextures } = this.arrayPool.flushPendingCopies(copyBudget);
+        this._copyOperationsWindowCount += copyCount;
         let copyFencePromise = null;
         if (copyCount > 0) {
             const batchId = ++this._debugCopyBatchId;
@@ -963,10 +1058,21 @@ this._freshnessSkipCount = 0;
                     this._debugMarkFailedCopies(flushedCopies, batchId);
                 });
         }
-        if (copyCount <= 0 || this._pendingCopyTextures.length === 0) return;
 
-        const textures = this._pendingCopyTextures.flat();
+        // Textures destined for a copy are only ever safe to destroy once
+        // flushPendingCopies() reports them as actually flushed (above) —
+        // never derived from a count-based slice of _pendingCopyTextures,
+        // which also holds unrelated castoffs (dup/pool-full/stale-epoch
+        // tiles in _commitTile/_queueTile) that were never queued for copy
+        // at all and don't correspond 1:1 with _pendingCopies.
+        const castoffTextures = this._pendingCopyTextures.length > 0
+            ? this._pendingCopyTextures.flat()
+            : [];
         this._pendingCopyTextures.length = 0;
+
+        const textures = [...flushedTextures, ...castoffTextures];
+        if (textures.length === 0) return;
+
         const entry = {
             textures,
             framesRemaining: this._destructionDelayFrames,
@@ -1004,9 +1110,18 @@ this._freshnessSkipCount = 0;
         // deep and latency spirals to 500+ ms. Budget is the headroom
         // between the limit and the current in-flight fence count.
         const gpuInFlight = this.tileGenerator?._gpuFencesInFlight ?? 0;
-        const budget = Math.max(0, this._gpuBackpressureLimit - gpuInFlight);
+        const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
 
-        if (budget === 0) {
+        // Keep a small reserve even at budget=0 so top-of-queue urgent
+        // (VISIBLE/FEEDBACK) work isn't fully starved by sustained
+        // predictive/GPU pressure (plan §1.3). PREDICTIVE entries carry
+        // their own canStart gate against the same fence limit (see
+        // _queueTile), so this reserve only ever admits genuinely urgent
+        // work — if the queue is all predictive, canStart defers it and
+        // nothing actually starts.
+        const effectiveBudget = Math.max(budget, this._admissionBudgets.urgentReserveSlots);
+
+        if (effectiveBudget === 0) {
             this._gpuBackpressureSkipCount++;
             this.tileGenerator?.tick?.();
             return;
@@ -1016,7 +1131,7 @@ this._freshnessSkipCount = 0;
         // maxPerFrame is restored immediately so config inspection
         // elsewhere still sees the real value.
         const savedMaxPerFrame = this._generationQueue.maxPerFrame;
-        this._generationQueue.maxPerFrame = Math.min(savedMaxPerFrame, budget);
+        this._generationQueue.maxPerFrame = Math.min(savedMaxPerFrame, effectiveBudget);
         const spawned = this._generationQueue.tick() || 0;
         this._generationQueue.maxPerFrame = savedMaxPerFrame;
 
@@ -1130,7 +1245,7 @@ this._freshnessSkipCount = 0;
 
         const addr = new TileAddress(face, depth, x, y);
         if (this.tileGenerator.isGenerating(addr)) return;
-        this._queueTile(addr);
+        this._queueTile(addr, { reason: 'FEEDBACK' });
     }
 
     _recordEvictFeedback(key, depth) {
@@ -1211,22 +1326,106 @@ this._freshnessSkipCount = 0;
     
                 const addr = new TileAddress(face, d, px, py);
                 if (!this.tileGenerator.isGenerating(addr)) {
-                    this._queueTile(addr);
+                    this._queueTile(addr, { reason: 'FEEDBACK' });
                 }
             }
         });
     }
 
-    _queueTile(tileAddr, { prewarm = false } = {}) {
+    // ── Phase 0 telemetry helpers ─────────────────────────────────────────
+    //
+    // Called once per frame by QuadtreeTileManager with the camera's current
+    // world position/velocity, so _estimateRequestGeometry can compute a
+    // rough distanceToCamera/velocityAlignment for each request without this
+    // class needing to own planetConfig or camera state itself.
+    setCameraContext({ position = null, velocity = null, planetConfig = null } = {}) {
+        this._cameraContext.position = position;
+        this._cameraContext.velocity = velocity;
+        this._cameraContext.planetConfig = planetConfig;
+        this._cameraContext.speed = velocity ? Math.hypot(velocity.x, velocity.y, velocity.z) : 0;
+    }
+
+    // Rough (base-radius, elevation-ignored) distance/alignment estimate —
+    // cheap enough to compute per request, precise enough to classify
+    // wasted/forward-vs-behind generation work (plan §0.1, §1.2).
+    _estimateRequestGeometry(tileAddr) {
+        const ctx = this._cameraContext;
+        if (!ctx.position || !ctx.planetConfig) {
+            return { distanceToCamera: null, velocityAlignment: null };
+        }
+        const world = computeTileWorldCenter(tileAddr, ctx.planetConfig);
+        if (!world) return { distanceToCamera: null, velocityAlignment: null };
+
+        const dx = world.x - ctx.position.x;
+        const dy = world.y - ctx.position.y;
+        const dz = world.z - ctx.position.z;
+        const distanceToCamera = Math.hypot(dx, dy, dz);
+
+        let velocityAlignment = null;
+        if (ctx.velocity && ctx.speed > 1e-3 && distanceToCamera > 1e-6) {
+            velocityAlignment =
+                (dx * ctx.velocity.x + dy * ctx.velocity.y + dz * ctx.velocity.z) /
+                (distanceToCamera * ctx.speed);
+        }
+        return { distanceToCamera, velocityAlignment };
+    }
+
+    // Called from TileGenerator once the GPU fence for a tile's submission
+    // resolves — the only point at which gpuFenceComplete/submitToFence are
+    // knowable, which is after this class has already committed the tile
+    // (residency is marked at copy-submit time, not GPU-copy-complete time;
+    // see _commitTile). This is therefore also telemetry's final cleanup point.
+    _finalizeFenceTelemetry(telemetry) {
+        if (!telemetry) return;
+        if (Number.isFinite(telemetry.gpuFenceComplete) && Number.isFinite(telemetry.computeSubmitted)) {
+            this._stageLatency.submitToFence.push(telemetry.gpuFenceComplete - telemetry.computeSubmitted);
+        }
+        // Identity check, not just key: a world reset (resetTiles) clears
+        // _telemetryByKey and can re-seed the same key before this stale
+        // generation's fence resolves — don't let its delayed cleanup evict
+        // a newer, still-live telemetry record for that key.
+        if (this._telemetryByKey.get(telemetry.key) === telemetry) {
+            this._telemetryByKey.delete(telemetry.key);
+        }
+    }
+
+    _queueTile(tileAddr, { prewarm = false, reason = 'FEEDBACK' } = {}) {
         const key = tileAddr.toString();
         if (!this._requestTimestamps.has(key)) {
             this._requestTimestamps.set(key, performance.now());
         }
         if (prewarm) this._prewarmKeys.add(key);
+        this._requestedTilesWindowCount++;
+
+        let telemetry = this._telemetryByKey.get(key);
+        if (!telemetry) {
+            const geom = this._estimateRequestGeometry(tileAddr);
+            telemetry = {
+                key,
+                face: tileAddr.face, depth: tileAddr.depth, x: tileAddr.x, y: tileAddr.y,
+                reason,
+                priority: null,
+                distanceToCamera: geom.distanceToCamera,
+                velocityAlignment: geom.velocityAlignment,
+                // Tiering (Phase 2) doesn't exist yet — every tile currently
+                // requests the streamer's full configured output set.
+                generationTier: 'default',
+                outputMask: this.streamedTypes,
+                resolution: this.tileTextureSize,
+                requestTime: performance.now(),
+                queueTime: null,
+                generationStart: null,
+                computeSubmitted: null,
+                gpuFenceComplete: null,
+                copySubmitted: null,
+                residentTime: null
+            };
+            this._telemetryByKey.set(key, telemetry);
+        }
 
         // Depth component: coarser = higher base priority (fallback safety)
         const depthPriority = 100000 - tileAddr.depth * 500;
-        
+
         // Camera-distance component: approximate screen importance
         // Tiles nearer to camera get priority boost up to 5000
         let distanceBias = 0;
@@ -1237,12 +1436,38 @@ this._freshnessSkipCount = 0;
             const age = performance.now() - this._requestFreshness.get(key);
             distanceBias = Math.max(0, 2000 - age * 10); // decays over 200ms
         }
-        
-        const priority = depthPriority + distanceBias;
-        
+
+        // Directional bias for predictive work only (plan §1.2: forward
+        // predictive geometry must outrank behind-camera predictive
+        // geometry). Small enough (±400) to never outrank real
+        // visible/feedback demand, which is what distanceBias already
+        // dominates with above.
+        let directionalBias = 0;
+        if (reason === 'PREDICTIVE' && Number.isFinite(telemetry.velocityAlignment)) {
+            directionalBias = telemetry.velocityAlignment * 400;
+        }
+
+        const priority = depthPriority + distanceBias + directionalBias;
+        telemetry.priority = priority;
+
+        // Phase 1 admission control (plan §1.3/§1.4): predictive/speculative
+        // work individually respects the hard GPU fence budget, so it backs
+        // off under pressure without needing to touch the frame-level
+        // maxNewTilesPerFrame clamp in tickGeneration(). VISIBLE/FEEDBACK
+        // requests are left ungated here — they're covered instead by
+        // tickGeneration()'s urgent reserve, so real on-screen geometry
+        // keeps making progress even while predictive work is fully stalled.
+        const canStart = (reason === 'PREDICTIVE')
+            ? () => (this.tileGenerator?._gpuFencesInFlight ?? 0) < this._admissionBudgets.maxGpuFencesInFlight
+            : null;
+
         const generationEpoch = this._generationEpoch;
         const request = this._generationQueue.request(key, priority, async () => {
-    
+            const now = performance.now();
+            telemetry.queueTime = now;
+            telemetry.generationStart = now;
+            this._stageLatency.queueWait.push(now - telemetry.requestTime);
+
             const demandState = this._describeTileDemandState(tileAddr, key);
             this._staleStartWindow.started++;
             if (!demandState.relevant) {
@@ -1254,17 +1479,25 @@ this._freshnessSkipCount = 0;
             } else {
                 this._staleStartWindow.unknown++;
             }
-         
+
 
             try {
-                const textures = await this.tileGenerator.generateTile(tileAddr);
+                const textures = await this.tileGenerator.generateTile(tileAddr, telemetry);
+                if (Number.isFinite(telemetry.computeSubmitted)) {
+                    this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
+                }
                 if (generationEpoch !== this._generationEpoch) {
                     this._requestTimestamps.delete(key);
                     this._prewarmKeys.delete(key);
                     this._destroyGeneratedTextures(textures);
+                    this._wastedGenerationsWindowCount++;
                     return false;
                 }
-                const committed = await this._commitTile(tileAddr, textures);
+                const committed = await this._commitTile(tileAddr, textures, telemetry);
+                const stillRelevant = this._describeTileDemandState(tileAddr, key).relevant;
+                if (!committed || !stillRelevant) {
+                    this._wastedGenerationsWindowCount++;
+                }
                 if (!committed) {
                     this._requestTimestamps.delete(key);
                 }
@@ -1273,13 +1506,15 @@ this._freshnessSkipCount = 0;
             } catch (error) {
                 this._requestTimestamps.delete(key);
                 this._prewarmKeys.delete(key);
+                this._telemetryByKey.delete(key);
                 throw error;
             }
-        });
+        }, canStart);
         if (request === null) {
             this._queueRejectWindowCount++;
             this._requestTimestamps.delete(key);
             this._prewarmKeys.delete(key);
+            this._telemetryByKey.delete(key);
         }
     }
 
@@ -1443,7 +1678,7 @@ _evictTile(key) {
     }
 
 
-async _commitTile(tileAddr, textures) {
+async _commitTile(tileAddr, textures, telemetry = null) {
     if (!this.arrayPool) {
         this._destroyGeneratedTextures(textures);
         return false;
@@ -1472,8 +1707,14 @@ async _commitTile(tileAddr, textures) {
     }
 
     this.arrayPool.queueCopyToLayer(textures, layer);
+    if (telemetry) telemetry.copySubmitted = performance.now();
     this._debugRegisterQueuedCopy(tileAddr, layer, textures);
-    this._destroyGeneratedTextures(textures);
+    // Do NOT schedule these for destruction here: arrayPool._pendingCopies
+    // (just queued above) still needs them until the copy is actually
+    // flushed, which may be a later frame under maxCopyOperationsPerFrame
+    // (plan §1.1). flushPendingCopies() returns exactly the textures whose
+    // copy it submitted; TileStreamer._flushArrayPoolCopies schedules those
+    // for delayed destruction once it has that list.
 
     const keyLo = this.hashTable.makeKeyLo(tileAddr.x, tileAddr.y);
     const keyHi = this.hashTable.makeKeyHi(tileAddr.face, tileAddr.depth);
@@ -1510,6 +1751,10 @@ async _commitTile(tileAddr, textures) {
     const requestedAt = this._requestTimestamps.get(key);
     if (Number.isFinite(requestedAt)) {
         this._recordRequestLatency(key, performance.now() - requestedAt);
+    }
+    if (telemetry) {
+        telemetry.residentTime = performance.now();
+        this._stageLatency.requestToResident.push(telemetry.residentTime - telemetry.requestTime);
     }
 
     this._aoCommitQueue.push({
@@ -1607,6 +1852,9 @@ markTilesVisible(tiles) {
             }
         }
     }
+    // Tiles newly entering the visible set this readback are exactly the
+    // "newlyVisibleTiles" denominator for request amplification (plan §0.2).
+    this._newlyVisibleTilesWindowCount += entered;
 
     // Prune old recently-exited entries (keep last 5 readbacks worth ~ 500ms)
     if (this._recentlyExitedKeys) {
@@ -1976,6 +2224,33 @@ markTilesVisible(tiles) {
         this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
         this._recordPoolHeadroom();
 
+        // ── Phase 0 additions: candidate-cause breakdown (plan §0.2-0.4) ──
+        const stageLatency = {
+            queueWait: this._stageLatency.queueWait.consume(),
+            startToSubmit: this._stageLatency.startToSubmit.consume(),
+            submitToFence: this._stageLatency.submitToFence.consume(),
+            requestToResident: this._stageLatency.requestToResident.consume()
+        };
+        const requestedTiles = this._requestedTilesWindowCount;
+        const newlyVisibleTiles = this._newlyVisibleTilesWindowCount;
+        const requestAmplification = newlyVisibleTiles > 0
+            ? requestedTiles / newlyVisibleTiles
+            : null;
+        const wastedGenerations = this._wastedGenerationsWindowCount;
+        const computeSubmissions = this.tileGenerator?.consumeSubmissionCount?.() ?? 0;
+        const copyOperations = this._copyOperationsWindowCount;
+        const generationQueueDepth = this._generationQueue.queue.length;
+        const generationQueueActive = this._generationQueue.active;
+        const pendingCopyCount = this.arrayPool?._pendingCopies?.length ?? 0;
+        const tilePoolUsed = this._tileInfo.size;
+        const tilePoolCapacity = this.tilePoolSize;
+        const tilePoolFree = this.arrayPool?.freeLayers?.length ?? null;
+
+        this._requestedTilesWindowCount = 0;
+        this._newlyVisibleTilesWindowCount = 0;
+        this._wastedGenerationsWindowCount = 0;
+        this._copyOperationsWindowCount = 0;
+
         return {
             requestLatency,
             staleStarts,
@@ -1986,7 +2261,20 @@ markTilesVisible(tiles) {
             minFreeLayers,
             gpuBackpressureSkips,
             tilesStarted,
-            gpuFencesMax
+            gpuFencesMax,
+            stageLatency,
+            requestedTiles,
+            newlyVisibleTiles,
+            requestAmplification,
+            wastedGenerations,
+            computeSubmissions,
+            copyOperations,
+            generationQueueDepth,
+            generationQueueActive,
+            pendingCopyCount,
+            tilePoolUsed,
+            tilePoolCapacity,
+            tilePoolFree
         };
     }
 

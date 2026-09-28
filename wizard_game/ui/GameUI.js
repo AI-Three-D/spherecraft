@@ -436,8 +436,10 @@ export class GameUI {
      * @param {string} params.cameraMode - 'follow' or 'manual'
      * @param {Object} params.shipState - Spaceship state from spaceship.getState()
      * @param {Object|null} params.zoneInfo - Altitude zone info or null
+     * @param {Object|null} params.perfHud - Terrain streaming perf snapshot from
+     *   QuadtreeTileManager.getPerfHudSnapshot(), or null before the first tick
      */
-    update({ fps, cameraMode, shipState, zoneInfo, playerStatus }) {
+    update({ fps, cameraMode, shipState, zoneInfo, playerStatus, perfHud }) {
         if (!this._hudContent) return;
 
         const fpsInfo = this._buildFPSInfo(fps);
@@ -447,8 +449,36 @@ export class GameUI {
             ? this._buildCharacterInfo(playerStatus)
             : this._buildFlightInfo(shipState);
         const altitudeInfo = this._buildAltitudeInfo(zoneInfo);
+        const perfInfo = this._buildPerfInfo(perfHud);
 
-        this._hudContent.innerHTML = fpsInfo + vitalsInfo + controlsInfo + modeInfo + altitudeInfo;
+        this._hudContent.innerHTML = fpsInfo + vitalsInfo + controlsInfo + modeInfo + altitudeInfo + perfInfo;
+    }
+
+    // Phase 0 terrain-streaming instrumentation (SphereCraft_Optimization_
+    // Implementation_Plan.md §0) — surfaces GPU fence count, queue depth and
+    // tile-pool pressure the audit asked to expose "in the normal debug HUD".
+    // Renders nothing until the first diagnostics tick has produced a snapshot.
+    _buildPerfInfo(perfHud) {
+        if (!perfHud) return '';
+        const p = perfHud.pressure;
+        const rtr = p?.stageLatency?.requestToResident;
+        const latencyStr = rtr && rtr.count > 0
+            ? `p50 ${rtr.p50.toFixed(0)} / p95 ${rtr.p95.toFixed(0)} / p99 ${rtr.p99.toFixed(0)} ms`
+            : 'n/a';
+        const amp = p?.requestAmplification;
+        return `
+            <div style="${this._buildInfoCardStyle()}">
+                <strong style="color:#d9f8ff; letter-spacing:0.1em;">TERRAIN PERF</strong><br>
+                <div style="font-size: 10px; line-height: 1.5; color: #d7e8ef; margin-top: 6px; font-family: monospace;">
+                    fences ${perfHud.gpu.inFlight} (max ${perfHud.gpu.fencesMax})<br>
+                    queue ${perfHud.queue.pending} pending / ${perfHud.queue.active} active<br>
+                    pool ${perfHud.pool.used}/${perfHud.pool.capacity} (free ${p?.tilePoolFree ?? 'n/a'})<br>
+                    copies ${perfHud.pendingCopies} pending<br>
+                    resident latency ${latencyStr}<br>
+                    amplification ${amp !== null && amp !== undefined ? amp.toFixed(2) : 'n/a'} | wasted ${p?.wastedGenerations ?? 0}
+                </div>
+            </div>
+        `;
     }
 
     _buildFPSInfo(fps) {

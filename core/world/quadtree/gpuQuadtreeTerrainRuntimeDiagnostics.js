@@ -945,6 +945,40 @@ export function installQuadtreeTileManagerRuntimeDiagnostics(QuadtreeTileManager
                                 `startVisible=${pressure.staleStarts.visible} startAncestor=${pressure.staleStarts.ancestor} startUnknown=${pressure.staleStarts.unknown}`
                             );
                         }
+
+                        // ── Phase 0 additions: stage percentiles + candidate-cause counters ──
+                        if (pressure?.stageLatency) {
+                            const sl = pressure.stageLatency;
+                            const fmt = (w) => w.count > 0
+                                ? `p50=${w.p50.toFixed(0)} p95=${w.p95.toFixed(0)} p99=${w.p99.toFixed(0)} max=${w.max.toFixed(0)} n=${w.count}`
+                                : 'n=0';
+                            Logger.info(
+                                `${TERRAIN_STEP_LOG_TAG} [QTLight] latency(ms) ` +
+                                `queueWait[${fmt(sl.queueWait)}] ` +
+                                `startToSubmit[${fmt(sl.startToSubmit)}] ` +
+                                `submitToFence[${fmt(sl.submitToFence)}] ` +
+                                `requestToResident[${fmt(sl.requestToResident)}]`
+                            );
+                            Logger.info(
+                                `${TERRAIN_STEP_LOG_TAG} [QTLight] causes ` +
+                                `requestAmplification=${pressure.requestAmplification !== null ? pressure.requestAmplification.toFixed(2) : 'n/a'} ` +
+                                `(requested=${pressure.requestedTiles} newlyVisible=${pressure.newlyVisibleTiles}) ` +
+                                `wastedGenerations=${pressure.wastedGenerations} ` +
+                                `computeSubmissions=${pressure.computeSubmissions} copyOps=${pressure.copyOperations} ` +
+                                `queueDepth=${pressure.generationQueueDepth} queueActive=${pressure.generationQueueActive} ` +
+                                `pendingCopies=${pressure.pendingCopyCount} ` +
+                                `pool=${pressure.tilePoolUsed}/${pressure.tilePoolCapacity} free=${pressure.tilePoolFree ?? 'n/a'}`
+                            );
+                        }
+
+                        this._lastPerfSnapshot = {
+                            timestamp: performance.now(),
+                            pool: { used: poolUsed, capacity: poolTotal },
+                            queue: { pending: queuePending, active: queueActive },
+                            gpu: { inFlight: gpuInFlight, fencesMax: pressure?.gpuFencesMax ?? 0 },
+                            pendingCopies,
+                            pressure
+                        };
                     },
 
         async _maybeReadbackVisibleTiles() {

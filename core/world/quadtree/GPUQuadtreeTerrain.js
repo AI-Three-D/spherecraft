@@ -267,6 +267,20 @@ export class QuadtreeTileManager {
         this._prevFrameTime = now;
     }
 
+    // Feeds the streamer's Phase 0 telemetry (SphereCraft_Optimization_
+    // Implementation_Plan.md §0.1) with the same raw camera velocity
+    // _updateAdaptiveLodScale just computed, so per-request
+    // distanceToCamera/velocityAlignment can be estimated without
+    // TileStreamer needing its own camera or planetConfig reference.
+    _syncTileStreamerCameraContext(camera) {
+        if (!this.tileStreamer?.setCameraContext || !camera?.position) return;
+        this.tileStreamer.setCameraContext({
+            position: camera.position,
+            velocity: this._rawCamVelocity ?? null,
+            planetConfig: this.planetConfig
+        });
+    }
+
     // ── Predictive tile streaming ────────────────────────────────────────────
     //
     // Each frame, extrapolates the camera position forward along its
@@ -414,7 +428,7 @@ export class QuadtreeTileManager {
                     const addr = new TileAddress(face, depth, tx, ty);
                     if (tileGenerator.isGenerating(addr)) continue;
 
-                    this.tileStreamer._queueTile(addr, { prewarm });
+                    this.tileStreamer._queueTile(addr, { prewarm, reason: 'PREDICTIVE' });
                 }
             }
         }
@@ -721,6 +735,7 @@ export class QuadtreeTileManager {
         }
 
         this._updateAdaptiveLodScale(camera);
+        this._syncTileStreamerCameraContext(camera);
         this._updatePredictiveStreaming(camera);
 
         // ── (B) Uniform update ───────────────────────────────────────
@@ -785,6 +800,14 @@ export class QuadtreeTileManager {
 
     getArrayTextures() {
         return this.tileStreamer.getArrayTextures();
+    }
+
+    // Latest Phase 0 instrumentation snapshot (SphereCraft_Optimization_
+    // Implementation_Plan.md §0), refreshed every _maybeLogLightweightDiagnostics
+    // tick (~every 120 frames). Consumed by the game HUD; null until the
+    // first tick has run.
+    getPerfHudSnapshot() {
+        return this._lastPerfSnapshot ?? null;
     }
 
     getInitialLoadStatus() {
