@@ -985,7 +985,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
             },
 
         _isMicroTerrainPass(terrainPass) {
-                return (terrainPass.outputType === 4 || terrainPass.outputType === 5 || terrainPass.outputType === 6)
+                return (terrainPass.outputType === 4 || terrainPass.outputType === 5 || terrainPass.outputType === 6
+                        || terrainPass.outputType === 9 || terrainPass.outputType === 10)
                     && terrainPass.heightTexture
                     && terrainPass.tileTexture;
             },

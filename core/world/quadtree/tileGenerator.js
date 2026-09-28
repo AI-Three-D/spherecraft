@@ -365,7 +365,52 @@ this._maxGpuFencesObserved = 0;
                 textureSize: this.textureSize
             });
         }
-        
+
+        // ── Placeholder splat from tile classification (geometry pass only) ──
+        // Phase 2 geometry-first residency: when this call is generating the
+        // fast/geometry preset (splatData not itself requested) but splat is
+        // configured at all, cheaply derive a single-material splatData/
+        // splatIndex pair from the tile classification already computed
+        // above — no noise, no blending, no padded-splat pipeline. Exposed
+        // under the normal 'splatData'/'splatIndex' keys below, so
+        // TileStreamer's zero-fill-on-commit logic picks these up instead of
+        // a biome-agnostic zero default. The real (multi-material) splat
+        // pass still runs and overwrites this once refinement completes —
+        // see _runPaddedQuadtreeSplatPass / TileStreamer._commitRefinement.
+        let gpuPlaceholderSplatData = null;
+        let gpuPlaceholderSplatIndex = null;
+        const wantsPlaceholderSplat = this.enableSplat
+            && !requiredTypes.includes('splatData')
+            && gpuHeight && gpuTile;
+        if (wantsPlaceholderSplat) {
+            const splatFormat = this.textureFormats.splatData || 'rgba8unorm';
+            const splatIndexFormat = this.textureFormats.splatIndex || 'rgba8unorm';
+            gpuPlaceholderSplatData = this._createGPUTexture(
+                this.textureSize, this.textureSize, splatFormat);
+            gpuPlaceholderSplatIndex = this._createGPUTexture(
+                this.textureSize, this.textureSize, splatIndexFormat);
+            terrainPasses.push({
+                outputType: 9,
+                texture: gpuPlaceholderSplatData,
+                format: splatFormat,
+                textureSize: this.textureSize,
+                heightTexture: gpuHeight,
+                tileTexture: gpuTile,
+                heightTextureFormat: heightFormat,
+                tileTextureFormat: tileFormat
+            });
+            terrainPasses.push({
+                outputType: 10,
+                texture: gpuPlaceholderSplatIndex,
+                format: splatIndexFormat,
+                textureSize: this.textureSize,
+                heightTexture: gpuHeight,
+                tileTexture: gpuTile,
+                heightTextureFormat: heightFormat,
+                tileTextureFormat: tileFormat
+            });
+        }
+
         // ── Scatter eligibility pass (needs height + tile) ────────
         let gpuScatter = null;
         let scatterTarget = null;
@@ -567,6 +612,19 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
         if (requiredTypes.includes('splatData') && gpuSplatIndex) {
             textures.splatIndex = this._wrapGPUTexture(
                 gpuSplatIndex, this.textureSize, this.textureFormats.splatIndex || 'rgba8unorm', true
+            );
+        }
+        // Geometry-pass placeholder splat (see wantsPlaceholderSplat above) —
+        // only reached when splatData wasn't itself requested this call, so
+        // this never overwrites a real splat result.
+        if (gpuPlaceholderSplatData) {
+            textures.splatData = this._wrapGPUTexture(
+                gpuPlaceholderSplatData, this.textureSize, this.textureFormats.splatData || 'rgba8unorm', true
+            );
+        }
+        if (gpuPlaceholderSplatIndex) {
+            textures.splatIndex = this._wrapGPUTexture(
+                gpuPlaceholderSplatIndex, this.textureSize, this.textureFormats.splatIndex || 'rgba8unorm', true
             );
         }
         if (requiredTypes.includes('splatValid') && gpuSplatValid) {

@@ -1435,6 +1435,37 @@ else if (uniforms.outputType == 5) {
         output = vec4<f32>(zoneMask, 0.0, 0.0, 1.0);
     }
 
+    // ═══ Placeholder splat from tile classification (outputType 9/10) ═════
+    // Phase 2 geometry-first residency: a cheap stand-in for the full splat
+    // pass (which needs the expensive padded/palette pipeline in
+    // webgpuTerrainGeneratorBatching.js and is deferred to background
+    // refinement). This does no noise evaluation and no material blending —
+    // it just re-encodes the tile-classification ID (already computed this
+    // same fast pass) into the same splatData/splatIndex encoding the real
+    // splat pass produces, so a not-yet-refined tile renders as its own
+    // real single material (correct color, no blending) instead of a
+    // biome-agnostic default. Encoding matches decodeSplatTileId in
+    // terrainChunkFragmentShaderBuilder.js (id/255, round-trip via *255+0.5)
+    // and loadSplatWeights (raw unorm, no extra scaling).
+    ${hasTileBindings ? `
+    else if (uniforms.outputType == 9 || uniforms.outputType == 10) {
+        let coordC = vec2<i32>(global_id.xy);
+        let tileSample = textureLoad(tileMap, coordC, 0);
+        let tileId = decodeTileId(tileSample);
+        if (uniforms.outputType == 9) {
+            // splatData: full weight on channel 0, matching splatEntryValid
+            // (weight > 0.0001) and an already-normalized total of 1.0.
+            output = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+        } else {
+            // splatIndex: same id in all 4 channels so every footprint
+            // corner agrees (bilinearValid fast path), no cross-tile
+            // blending attempted.
+            let encoded = f32(tileId) / 255.0;
+            output = vec4<f32>(encoded, encoded, encoded, encoded);
+        }
+    }
+    ` : ''}
+
     textureStore(outputTexture, vec2<i32>(global_id.xy), output);
 }
 `
