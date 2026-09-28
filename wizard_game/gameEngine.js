@@ -1406,7 +1406,12 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     _resolveTerrainDebugModes(mode) {
-        if (mode >= 25 && mode <= 89) {
+        // 90-99 reserved for fragment-only diagnostics (mode 90: geometryLOD
+        // color, 91-95: NdotL/worldNormal/detailNormal/normalMapBlend/
+        // lightDirection — see terrainChunkFragmentShaderBuilder.js; 99 was
+        // already named 'Fragment Test' below but this upper bound excluded
+        // it too before this fix).
+        if ((mode >= 25 && mode <= 89) || (mode >= 90 && mode <= 99)) {
             return { generatorMode: 0, fragmentMode: mode };
         }
         if (mode === 0) {

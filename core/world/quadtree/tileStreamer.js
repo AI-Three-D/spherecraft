@@ -821,6 +821,13 @@ export class TileStreamer {
             }
         });
         this._refinementRejectWindowCount = 0;
+        // key -> tileAddr for refinement requests that were dropped (queue
+        // full, or the tile was irrelevant right as its turn came up) —
+        // drained a few at a time by _retryDroppedRefinements() so they get
+        // reconsidered instead of staying resident with unrefined material
+        // forever. See _queueRefinement's two `request === null` /
+        // `!relevant` paths.
+        this._refinementRetryMap = new Map();
     }
     /**
  * Register an externally-owned array texture to be returned alongside the
@@ -957,6 +964,7 @@ this._freshnessSkipCount = 0;
         this._refinementQueue.clearPending?.(null);
         this._tileState.clear();
         this._refinementRejectWindowCount = 0;
+        this._refinementRetryMap.clear();
 
         if (this.arrayPool?._pendingCopies) {
             this.arrayPool._pendingCopies.length = 0;
@@ -1284,6 +1292,12 @@ this._freshnessSkipCount = 0;
     // geometry's own admission just used, and the two queues' combined
     // admission can roughly double the intended fence ceiling.
     _tickRefinement(geometrySpawnedThisFrame = 0) {
+        // Re-offer previously-dropped refinement requests before admission
+        // budgeting below — this only re-enqueues (cheap, no GPU work), the
+        // actual generation start is still gated by effectiveBudget/.tick()
+        // same as any other queued entry, so this can't bypass the budget.
+        this._retryDroppedRefinements();
+
         const gpuInFlight = (this.tileGenerator?._gpuFencesInFlight ?? 0) + geometrySpawnedThisFrame;
         const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
 
@@ -2053,11 +2067,13 @@ _queueRefinement(tileAddr) {
 
         // A tile can go irrelevant (camera moved on) while sitting in the
         // refinement queue. It's still resident (ancestor-fallback-quality,
-        // via its geometry), so there's no correctness issue — just don't
-        // spend GPU time refining something nobody's looking at right now.
+        // via its geometry), so there's no correctness issue as long as it
+        // gets reconsidered once it's relevant again — queue it for retry
+        // rather than dropping it permanently (see _refinementRetryMap).
         if (!this._describeTileDemandState(tileAddr, key).relevant) {
             this._telemetryByKey.delete(key);
             this._tileState.set(key, 'RESIDENT');
+            this._refinementRetryMap.set(key, tileAddr);
             return false;
         }
 
@@ -2082,8 +2098,39 @@ _queueRefinement(tileAddr) {
         }
     });
     if (request === null) {
+        // AsyncGenerationQueue.request() returns null when the refinement
+        // queue is at capacity (maxQueueSize). Previously this just counted
+        // the rejection and moved on — nothing ever asked again, so a tile
+        // unlucky enough to arrive during a full queue stayed resident with
+        // its material permanently zero-filled (black terrain, confirmed via
+        // debug-mode elimination: geometry/normals/lighting all proved
+        // correct, only baseColor was ever wrong, and only for tiles stuck
+        // at _tileState 'RESIDENT' with no path back to 'REFINING'). Queue
+        // it for retry instead of abandoning it.
         this._telemetryByKey.delete(key);
         this._refinementRejectWindowCount++;
+        this._refinementRetryMap.set(key, tileAddr);
+    }
+}
+
+// Tiles whose refinement request was dropped — either the queue was at
+// capacity (AsyncGenerationQueue.request() returned null) or the tile went
+// irrelevant right as its turn came up — get one more chance each tick
+// instead of staying resident with unrefined (zero-filled) material
+// forever. Bounded per tick so a large backlog drains gradually rather than
+// flooding _refinementQueue back to capacity in one frame; a still-evicted
+// tile is simply dropped (checked via _tileInfo, same as _queueRefinement's
+// own entry guard) rather than retried indefinitely.
+_retryDroppedRefinements() {
+    if (this._refinementRetryMap.size === 0) return;
+    const maxRetriesPerTick = 16;
+    let attempted = 0;
+    for (const [key, tileAddr] of this._refinementRetryMap) {
+        if (attempted >= maxRetriesPerTick) break;
+        this._refinementRetryMap.delete(key);
+        attempted++;
+        if (!this._tileInfo.has(key)) continue; // evicted since — nothing left to refine
+        this._queueRefinement(tileAddr);
     }
 }
 

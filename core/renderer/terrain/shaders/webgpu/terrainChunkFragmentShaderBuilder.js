@@ -3985,8 +3985,15 @@ if (debugMode == 16) {
     if (ENABLE_LIGHTING || ENABLE_AERIAL_PERSPECTIVE) {
         var worldNormal = normalize(input.vSphereDir);
         let normalMapBlend = computeNormalMapBlend(input);
+        // Debug-only: raw decoded detail normal, before the sphereDir sign
+        // correction below, and before it's ever mixed into worldNormal —
+        // so mode 93 shows exactly what calculateNormal() decoded from the
+        // normal texture for this fragment, with no fallback/correction
+        // masking a bad value.
+        var rawDetailNormal = vec3<f32>(0.0, 0.0, 0.0);
         if (normalMapBlend > 0.001) {
             var detailNormal = calculateNormal(input, layer);
+            rawDetailNormal = detailNormal;
             if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_NORMAL_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
                 detailNormal = normalize(mix(
                     detailNormal,
@@ -4001,6 +4008,55 @@ if (debugMode == 16) {
         }
         let lightDir = normalize(fragUniforms.lightDirection);
         NdotL = max(dot(worldNormal, lightDir), 0.0);
+        // Diagnostic modes (2026-09-29): isolating a per-tile "no directional
+        // light at all" defect that survives back to a9cd2ff, predating this
+        // session's LOD/altitude work. Each returns raw, unprocessed data —
+        // no fallback masking — so a screenshot from the exact spot where a
+        // tile looks unlit tells us which stage is actually wrong.
+        if (debugMode == 91) {
+            // Raw NdotL, grayscale. If an unlit-looking tile reads ~0 here
+            // while its lit neighbor reads >0 in the same frame (same
+            // fragUniforms.lightDirection for both), the defect is in
+            // worldNormal for that tile, not in lighting application below.
+            return vec4<f32>(vec3<f32>(NdotL), 1.0);
+        }
+        if (debugMode == 92) {
+            // Final worldNormal (post fallback/correction), packed to
+            // [0,1]. Should read as a smoothly-varying color across the
+            // whole visible dome, matching local "up" — a flat, uniform
+            // color across an entire tile (vs. gradient) points at a
+            // per-tile-constant normal (e.g. stuck on the sphereDir
+            // fallback) rather than per-texel sampled data.
+            return vec4<f32>(worldNormal * 0.5 + 0.5, 1.0);
+        }
+        if (debugMode == 93) {
+            // Raw detail normal as decoded from the normal texture, BEFORE
+            // any fallback/correction/blend — magenta (1,0,1) where
+            // normalMapBlend was too low to sample it at all (not a real
+            // decoded value). Anything else appearing wrong/uniform here
+            // (not magenta, not a plausible unit-ish color) means the
+            // normal TEXTURE ITSELF is bad for this tile, not the lighting
+            // math consuming it.
+            let shown = select(vec3<f32>(1.0, 0.0, 1.0), rawDetailNormal * 0.5 + 0.5, normalMapBlend > 0.001);
+            return vec4<f32>(shown, 1.0);
+        }
+        if (debugMode == 94) {
+            // normalMapBlend, grayscale (0=pure sphereDir fallback, 1=pure
+            // sampled detail normal). Confirms whether an unlit tile is even
+            // reaching the detail-normal path, or is rendering purely off
+            // the (otherwise-correct-by-construction) sphereDir fallback.
+            return vec4<f32>(vec3<f32>(normalMapBlend), 1.0);
+        }
+        if (debugMode == 95) {
+            // fragUniforms.lightDirection itself, packed as color. This is a
+            // frame-global uniform, not per-tile, so it must render as one
+            // flat, unchanging color across every tile in the same
+            // screenshot. If it visibly differs between a "lit" and "unlit"
+            // tile in the same frame, the bug is upstream of this shader
+            // entirely (the uniform itself, or which bind group a given
+            // draw call is reading it from).
+            return vec4<f32>(normalize(fragUniforms.lightDirection) * 0.5 + 0.5, 1.0);
+        }
         if (debugMode == 72) {
             let sphereNdotL = max(dot(normalize(input.vSphereDir), lightDir), 0.0);
             let heat = clamp(abs(NdotL - sphereNdotL) * 10.0, 0.0, 1.0);
