@@ -163,17 +163,21 @@ this._maxGpuFencesObserved = 0;
      *   submission) and gpuFenceComplete (asynchronously, once the GPU
      *   fence for that submission resolves), then invokes
      *   onGenerationTelemetry so the caller can finalize its own bookkeeping.
+     * @param {string[]} [outputTypes]  Override for this.requiredTypes —
+     *   lets a caller request just the geometry preset (fast path) or just
+     *   the refinement remainder, per Phase 2 of the optimization plan.
+     *   Defaults to this.requiredTypes (the full configured set).
      * @returns {Promise<object>}  Resolves to { height, normal, tile, macro, splatData }
      *                              Each value is a Texture resource.
      */
-    async generateTile(tileAddr, telemetry = null) {
+    async generateTile(tileAddr, telemetry = null, outputTypes = null) {
         const key = tileAddr.toString();
 
         // Reuse in-progress generation
         const existing = this._inProgress.get(key);
         if (existing) return existing;
 
-        const promise = this._generateTileInternal(tileAddr, { telemetry })
+        const promise = this._generateTileInternal(tileAddr, { telemetry, requiredTypes: outputTypes })
             .finally(() => this._inProgress.delete(key));
 
         this._inProgress.set(key, promise);
@@ -254,7 +258,15 @@ this._maxGpuFencesObserved = 0;
         const includeBaseHeight = options?.includeBaseHeight === true;
         const trackStats = options?.trackStats !== false;
         const telemetry = options?.telemetry ?? null;
-    
+        // Phase 2 (geometry-first residency): callers can request a subset
+        // of this.requiredTypes for a fast geometry-only pass, then a
+        // separate refinement call for the remainder. Height/tile are
+        // recomputed as intermediate inputs whenever splat/climate/scatter
+        // are requested (see needsFinalHeight/needsTile below) even if not
+        // themselves in the requested set — cheap, deterministic, and not
+        // returned unless actually requested.
+        const requiredTypes = options?.requiredTypes ?? this.requiredTypes;
+
         const gridSize = 1 << tileAddr.depth;
         const textures = {};
     
@@ -265,11 +277,11 @@ this._maxGpuFencesObserved = 0;
         const scatterFormat = this.textureFormats.scatter || 'r8unorm';
     
         const needsFinalHeight =
-            this.requiredTypes.includes('height')
-            || this.requiredTypes.includes('normal')
-            || (this.enableSplat && this.requiredTypes.includes('splatData'))
-            || this.requiredTypes.includes('scatter');
-        const needsTile = this.requiredTypes.includes('tile') || needsFinalHeight;
+            requiredTypes.includes('height')
+            || requiredTypes.includes('normal')
+            || (this.enableSplat && requiredTypes.includes('splatData'))
+            || requiredTypes.includes('scatter');
+        const needsTile = requiredTypes.includes('tile') || needsFinalHeight;
         const needsBaseHeight = needsTile;
     
         let gpuHeightBase = null;
@@ -292,11 +304,11 @@ this._maxGpuFencesObserved = 0;
             gpuHeight = this._createGPUTexture(
                 this.textureSize, this.textureSize, heightFormat);
         }
-        if (this.requiredTypes.includes('normal')) {
+        if (requiredTypes.includes('normal')) {
             gpuNormal = this._createGPUTexture(
                 this.textureSize, this.textureSize, normalFormat);
         }
-        if (this.requiredTypes.includes('macro')) {
+        if (requiredTypes.includes('macro')) {
             gpuMacro = this._createGPUTexture(
                 this.textureSize, this.textureSize, macroFormat);
         }
@@ -357,7 +369,7 @@ this._maxGpuFencesObserved = 0;
         // ── Scatter eligibility pass (needs height + tile) ────────
         let gpuScatter = null;
         let scatterTarget = null;
-        if (this.requiredTypes.includes('scatter') && gpuHeight && gpuTile) {
+        if (requiredTypes.includes('scatter') && gpuHeight && gpuTile) {
             scatterTarget = this.terrainGen.createStorageBackedOutputTarget(
                 this.textureSize, this.textureSize, scatterFormat);
             gpuScatter = scatterTarget.finalTexture;
@@ -379,7 +391,7 @@ this._maxGpuFencesObserved = 0;
         let gpuClimate = null;
         let climateTarget = null;
         const climateFormat = this.textureFormats.climate || 'rgba8unorm';
-        if (this.requiredTypes.includes('climate') && gpuHeight && gpuTile) {
+        if (requiredTypes.includes('climate') && gpuHeight && gpuTile) {
             climateTarget = this.terrainGen.createStorageBackedOutputTarget(
                 this.textureSize, this.textureSize, climateFormat);
             gpuClimate = climateTarget.finalTexture;
@@ -405,7 +417,7 @@ let gpuSplatValid = null;
 let gpuResolvedColor = null;
 let resolvedColorTarget = null;
 
-if (this.enableSplat && this.requiredTypes.includes('splatData')) {
+if (this.enableSplat && requiredTypes.includes('splatData')) {
     const splatFormat = this.textureFormats.splatData || 'rgba8unorm';
     const splatIndexFormat = this.textureFormats.splatIndex || 'rgba8unorm';
     const splatValidFormat = this.textureFormats.splatValid || 'rgba8unorm';
@@ -416,7 +428,7 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
         this.textureSize, this.textureSize, splatIndexFormat);
     gpuSplatValid = this._createGPUTexture(
         this.textureSize, this.textureSize, splatValidFormat);
-    if (this.requiredTypes.includes('resolvedColor')) {
+    if (requiredTypes.includes('resolvedColor')) {
         const resolvedColorFormat = this.textureFormats.resolvedColor || 'rgba8unorm';
         resolvedColorTarget = this.terrainGen.createStorageBackedOutputTarget(
             this.textureSize, this.textureSize, resolvedColorFormat);
@@ -527,7 +539,7 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
         }
 
         // ── Wrap GPU textures ─────────────────────────────────────
-        if (this.requiredTypes.includes('height') && gpuHeight) {
+        if (requiredTypes.includes('height') && gpuHeight) {
             textures.height = this._wrapGPUTexture(
                 gpuHeight, this.textureSize, heightFormat, true);
         }
@@ -535,34 +547,34 @@ if (this.enableSplat && this.requiredTypes.includes('splatData')) {
             textures.baseHeight = this._wrapGPUTexture(
                 gpuHeightBase, this.textureSize, heightFormat, true);
         }
-        if (this.requiredTypes.includes('normal') && gpuNormal) {
+        if (requiredTypes.includes('normal') && gpuNormal) {
             textures.normal = this._wrapGPUTexture(
                 gpuNormal, this.textureSize, normalFormat, false);
         }
-        if (this.requiredTypes.includes('tile') && gpuTile) {
+        if (requiredTypes.includes('tile') && gpuTile) {
             textures.tile = this._wrapGPUTexture(
                 gpuTile, this.textureSize, tileFormat, true);
         }
-        if (this.requiredTypes.includes('macro') && gpuMacro) {
+        if (requiredTypes.includes('macro') && gpuMacro) {
             textures.macro = this._wrapGPUTexture(
                 gpuMacro, this.textureSize, macroFormat, false);
         }
-        if (this.requiredTypes.includes('splatData') && gpuSplatData) {
+        if (requiredTypes.includes('splatData') && gpuSplatData) {
             textures.splatData = this._wrapGPUTexture(
                 gpuSplatData, this.textureSize, this.textureFormats.splatData || 'rgba8unorm', true
             );
         }
-        if (this.requiredTypes.includes('splatData') && gpuSplatIndex) {
+        if (requiredTypes.includes('splatData') && gpuSplatIndex) {
             textures.splatIndex = this._wrapGPUTexture(
                 gpuSplatIndex, this.textureSize, this.textureFormats.splatIndex || 'rgba8unorm', true
             );
         }
-        if (this.requiredTypes.includes('splatValid') && gpuSplatValid) {
+        if (requiredTypes.includes('splatValid') && gpuSplatValid) {
             textures.splatValid = this._wrapGPUTexture(
                 gpuSplatValid, this.textureSize, this.textureFormats.splatValid || 'rgba8unorm', true
             );
         }
-        if (this.requiredTypes.includes('resolvedColor') && gpuResolvedColor) {
+        if (requiredTypes.includes('resolvedColor') && gpuResolvedColor) {
             textures.resolvedColor = this._wrapGPUTexture(
                 gpuResolvedColor, this.textureSize, this.textureFormats.resolvedColor || 'rgba8unorm', false
             );

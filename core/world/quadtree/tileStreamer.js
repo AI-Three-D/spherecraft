@@ -85,6 +85,7 @@ import { TileAddress } from './tileAddress.js';
 import { TileGenerator } from './tileGenerator.js';
 import { TileCache } from './tileCache.js';
 import { computeTileWorldCenter } from './gpuQuadtreeDiagnosticHelpers.js';
+import { splitOutputTypes } from './terrainOutputs.js';
 import {
     Texture, TextureFormat, TextureFilter, TextureWrap,
     gpuFormatIsFilterable
@@ -338,9 +339,52 @@ class TileArrayPool {
         }
 
         this._pendingCopies = [];
+        this._zeroTextures = new Map();   // format -> lazily-created zero source
     }
-    queueCopyToLayer(textures, layer) {
-        this._pendingCopies.push({ textures, layer });
+
+    // A never-written texture is zero-initialized by WebGPU, so a single
+    // 1-layer texture per format, created once and only ever read from,
+    // works as a shared "zero" copy source for every type of that format.
+    _getZeroSourceTexture(format) {
+        let tex = this._zeroTextures.get(format);
+        if (!tex) {
+            tex = this.device.createTexture({
+                size: [this.tileSize, this.tileSize, 1],
+                format,
+                usage: GPUTextureUsage.COPY_SRC
+            });
+            this._zeroTextures.set(format, tex);
+        }
+        return tex;
+    }
+
+    // zeroFillMissing: when true, every type this pool manages but that
+    // isn't present in `textures` gets its layer copy-cleared from the
+    // shared zero source instead of being skipped. Needed for a Phase 2
+    // geometry-only commit (SphereCraft_Optimization_Implementation_Plan.md
+    // §2.3): array-pool layers are reused across evictions, so without this
+    // a tile that skips e.g. splat generation would render with whatever
+    // *previous* tile's stale splat data happens to still occupy that
+    // layer — exactly the kind of silent visual-correctness bug this
+    // codebase has been burned by before. The terrain fragment shader
+    // already degrades a zeroed splat/index layer to a deterministic
+    // single-material result (see sampleSplatData's topSum<=0.0001 path),
+    // so zero is a safe, intentional "not yet refined" default, not a hack.
+    queueCopyToLayer(textures, layer, { zeroFillMissing = false } = {}) {
+        if (!zeroFillMissing) {
+            this._pendingCopies.push({ textures, layer });
+            return;
+        }
+        const filled = { ...textures };
+        for (const type of this.types) {
+            if (filled[type]) continue;
+            const format = this.formats[type] || 'rgba32float';
+            filled[type] = {
+                _gpuTexture: { texture: this._getZeroSourceTexture(format) },
+                _isZeroFillPlaceholder: true
+            };
+        }
+        this._pendingCopies.push({ textures: filled, layer });
     }
 
     // maxCount caps how many queued copies get flushed this call (plan §1.1
@@ -398,7 +442,10 @@ class TileArrayPool {
         const textures = [];
         for (const entry of flushed) {
             for (const type of Object.keys(entry.textures)) {
-                if (entry.textures[type]) textures.push(entry.textures[type]);
+                const tex = entry.textures[type];
+                // Never schedule the shared zero-fill source for destruction
+                // — it's reused across every geometry-only commit.
+                if (tex && !tex._isZeroFillPlaceholder) textures.push(tex);
             }
         }
         return { count, textures };
@@ -541,9 +588,7 @@ export class TileStreamer {
     constructor(device, terrainGenerator, quadtreeGPU, options = {}) {
         // ── Phase 1 admission budgets (SphereCraft_Optimization_Implementation_Plan.md §1) ──
         // Named explicitly per the plan so they can be tuned from measured
-        // Phase 0 data rather than guessed. maxRefinementsPerFrame is
-        // intentionally absent: there is no refinement queue yet (Phase 2/3
-        // of the plan introduce it) — add the budget when that queue exists.
+        // Phase 0 data rather than guessed.
         const admission = options.admissionBudgets ?? {};
         this._admissionBudgets = {
             maxNewTilesPerFrame: admission.maxNewTilesPerFrame
@@ -561,7 +606,31 @@ export class TileStreamer {
             // Predictive/speculative entries self-gate below via canStart
             // against the hard fence limit, so this reserve is a no-op
             // unless genuinely urgent work is waiting (plan §1.3).
-            urgentReserveSlots: admission.urgentReserveSlots ?? 1
+            urgentReserveSlots: admission.urgentReserveSlots ?? 1,
+            // Phase 2: background material/refinement work for already-
+            // resident tiles. Deliberately smaller than maxNewTilesPerFrame,
+            // and subordinate to geometry admission in general — but plan
+            // §1.2 explicitly ranks refinement of a nearby tile above
+            // predictive/speculative geometry. Without a dedicated reserve,
+            // sustained predictive demand during continuous exploration can
+            // starve refinement indefinitely, leaving on-screen tiles stuck
+            // with flat placeholder material — visible as hard material
+            // seams against already-refined neighbors and multi-tile
+            // features "growing into shape" with a delay (confirmed by
+            // observation). Capped by the same overshoot logic as
+            // urgentReserveSlots, so it's a bounded cushion, not a trickle.
+            maxRefinementsPerFrame: admission.maxRefinementsPerFrame ?? 4,
+            refinementUrgentReserveSlots: admission.refinementUrgentReserveSlots ?? 1,
+            // Distance threshold (in tile-widths) within which a tile's
+            // refinement is treated as urgent enough to use the reserve
+            // above. Tuned directly from user observation: the geometry-
+            // then-material pop was "acceptable twice as far [away]" but
+            // "a bit too visible nearby" at the previous (unconditional)
+            // behavior — i.e. distance-scale the urgency instead of a flat
+            // visible/not-visible split, spending the reserve where the pop
+            // is actually objectionable and letting distant tiles pop
+            // without extra GPU cost.
+            refinementNearDistanceTileWidths: admission.refinementNearDistanceTileWidths ?? 6
         };
         this._gpuBackpressureLimit = this._admissionBudgets.maxGpuFencesInFlight;
         this._gpuBackpressureSkipCount = 0;
@@ -599,6 +668,18 @@ export class TileStreamer {
         if (this.enableSplat && this.streamedTypes.includes('splatData') && !this.streamedTypes.includes('splatValid')) {
             this.streamedTypes.push('splatValid');
         }
+
+        // Phase 2 (geometry-first residency, plan §2): split the configured
+        // output set into a fast geometry-only pass and a background
+        // refinement pass. If everything configured is already a geometry
+        // type (e.g. a minimal ['height','normal','tile'] setup),
+        // refinementTypes is empty and the refinement stage is simply
+        // never scheduled — no behavior change from before Phase 2.
+        const { geometryTypes, refinementTypes } = splitOutputTypes(this.streamedTypes);
+        this._geometryTypes = geometryTypes;
+        this._refinementTypes = refinementTypes;
+        this._tileState = new Map();   // key -> 'REQUESTED'|'QUEUED'|'GENERATING'|'GEOMETRY_READY'|'RESIDENT'|'REFINING'|'REFINED'
+
         this.textureFormats  = {
             ...DEFAULT_TEXTURE_FORMATS,
             ...(options.textureFormats || {})
@@ -720,6 +801,26 @@ export class TileStreamer {
         this._commitWindowCount = 0;
         this._queueRejectWindowCount = 0;
         this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
+
+        // ── Phase 2: background refinement queue (plan §2, §3 preview) ──
+        // Separate from _generationQueue so refinement admission never
+        // competes with geometry admission for the same per-frame slots —
+        // tickGeneration derives its own, smaller, GPU-fence-aware budget
+        // for this queue (see _tickRefinement).
+        this._refinementQueue = new AsyncGenerationQueue({
+            maxInFlight: this._admissionBudgets.maxConcurrentGenerations,
+            maxPerFrame: this._admissionBudgets.maxRefinementsPerFrame,
+            timeBudgetMs: this._admissionBudgets.maxCpuGenerationTimeMs,
+            maxQueueSize: options.queueConfig?.maxQueueSize ?? 2048,
+            shouldDrop: (entry) => {
+                // A tile can be evicted (or already refined by a prior
+                // duplicate) between being queued for refinement and this
+                // entry reaching the front — nothing to refine any more.
+                if (!this._tileInfo.has(entry.key)) return true;
+                return false;
+            }
+        });
+        this._refinementRejectWindowCount = 0;
     }
     /**
  * Register an externally-owned array texture to be returned alongside the
@@ -853,6 +954,9 @@ drainScatterCommitQueue() {
 this._freshnessSkipCount = 0;
         this._generationEpoch++;
         this._generationQueue.clearPending?.(null);
+        this._refinementQueue.clearPending?.(null);
+        this._tileState.clear();
+        this._refinementRejectWindowCount = 0;
 
         if (this.arrayPool?._pendingCopies) {
             this.arrayPool._pendingCopies.length = 0;
@@ -1119,7 +1223,19 @@ this._freshnessSkipCount = 0;
         // _queueTile), so this reserve only ever admits genuinely urgent
         // work — if the queue is all predictive, canStart defers it and
         // nothing actually starts.
-        const effectiveBudget = Math.max(budget, this._admissionBudgets.urgentReserveSlots);
+        //
+        // The reserve must be measured against total overshoot already
+        // granted, not handed out fresh every frame — during a sustained
+        // GPU backlog (fences take 12+ frames to resolve; confirmed via
+        // Phase 0 submitToFence measurements), a flat +1/frame reserve
+        // compounds every frame nothing resolves, letting fences climb
+        // well past the intended ceiling (measured: 8+ instead of the
+        // intended maxGpuFencesInFlight + urgentReserveSlots ≈ 5).
+        // Capping by remaining overshoot keeps the reserve a one-time
+        // cushion, not an unbounded trickle.
+        const overshoot = Math.max(0, gpuInFlight - this._admissionBudgets.maxGpuFencesInFlight);
+        const reserveRemaining = Math.max(0, this._admissionBudgets.urgentReserveSlots - overshoot);
+        const effectiveBudget = Math.max(budget, reserveRemaining);
 
         if (effectiveBudget === 0) {
             this._gpuBackpressureSkipCount++;
@@ -1136,7 +1252,65 @@ this._freshnessSkipCount = 0;
         this._generationQueue.maxPerFrame = savedMaxPerFrame;
 
         this._tilesStartedWindowCount += spawned;
+
+        this._tickRefinement(spawned);
+
         this.tileGenerator?.tick?.();
+    }
+
+    // Phase 2 background refinement admission (plan §1.2/§2): subordinate to
+    // geometry in general — it only starts against genuine spare GPU fence
+    // headroom left over after geometry admission above has already run
+    // this frame, further capped by its own (smaller) maxRefinementsPerFrame
+    // budget. BUT plan §1.2 ranks refinement of a nearby tile above
+    // predictive/speculative geometry: when the refinement queue's next
+    // candidate is within refinementNearDistanceTileWidths of the camera,
+    // it gets its own small reserve too — otherwise sustained predictive
+    // demand during continuous exploration can starve refinement
+    // indefinitely (confirmed by observation: visible material seams where
+    // an already-refined tile sits next to one stuck on flat placeholder
+    // material). Scaled by distance rather than a flat visible/not-visible
+    // split, per direct user feedback: the pop was "acceptable twice as far
+    // [away]" but "a bit too visible nearby" — so the reserve is spent near
+    // the camera, where the pop is actually objectionable, and distant
+    // tiles are left to pop without extra GPU cost.
+    //
+    // geometrySpawnedThisFrame must be added to the live fence count by
+    // hand: AsyncGenerationQueue.tick() only *schedules* admitted tasks as
+    // microtasks (Promise.resolve().then(entry.task)) — they don't actually
+    // run, and therefore don't increment _gpuFencesInFlight, until this
+    // synchronous tickGeneration() call has fully returned. Without this,
+    // refinement's budget check sees the same stale pre-tick fence count
+    // geometry's own admission just used, and the two queues' combined
+    // admission can roughly double the intended fence ceiling.
+    _tickRefinement(geometrySpawnedThisFrame = 0) {
+        const gpuInFlight = (this.tileGenerator?._gpuFencesInFlight ?? 0) + geometrySpawnedThisFrame;
+        const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
+
+        let effectiveBudget = budget;
+        const head = this._refinementQueue.queue[0];
+        const headDistance = head ? this._telemetryByKey.get(head.key)?.distanceInTileWidths : null;
+        // Unknown distance (no camera context yet, e.g. cold start) treated
+        // as near: no reason to withhold the reserve when there's no signal
+        // to scale it by, and cold start has no competing predictive demand
+        // anyway.
+        const headIsNear = head && (headDistance === null || headDistance === undefined
+            || !Number.isFinite(headDistance)
+            || headDistance <= this._admissionBudgets.refinementNearDistanceTileWidths);
+        if (headIsNear) {
+            // Same overshoot-capping as geometry's urgentReserveSlots (see
+            // tickGeneration): a bounded one-time cushion, not a per-frame
+            // trickle that could compound into unbounded fence growth.
+            const overshoot = Math.max(0, gpuInFlight - this._admissionBudgets.maxGpuFencesInFlight);
+            const reserveRemaining = Math.max(0, this._admissionBudgets.refinementUrgentReserveSlots - overshoot);
+            effectiveBudget = Math.max(budget, reserveRemaining);
+        }
+        if (effectiveBudget === 0) return;
+
+        const savedMaxPerFrame = this._refinementQueue.maxPerFrame;
+        this._refinementQueue.maxPerFrame = Math.min(savedMaxPerFrame, effectiveBudget);
+        this._refinementQueue.tick();
+        this._refinementQueue.maxPerFrame = savedMaxPerFrame;
     }
 
     // ── Feedback ────────────────────────────────────────────────────────────
@@ -1370,6 +1544,18 @@ this._freshnessSkipCount = 0;
         return { distanceToCamera, velocityAlignment };
     }
 
+    // Rough world-space width of a tile at a given quadtree depth — a cube
+    // face spans a diameter of ~2*radius in cube-space, split gridSize ways.
+    // Ignores cube-to-sphere warping (a small correction); precise enough
+    // for a "how many tile-widths away is the camera" priority heuristic,
+    // not for rendering.
+    _estimateTileWorldSize(depth) {
+        const radius = this._cameraContext.planetConfig?.radius;
+        if (!Number.isFinite(radius)) return null;
+        const gridSize = 1 << depth;
+        return (2 * radius) / gridSize;
+    }
+
     // Called from TileGenerator once the GPU fence for a tile's submission
     // resolves — the only point at which gpuFenceComplete/submitToFence are
     // knowable, which is after this class has already committed the tile
@@ -1407,10 +1593,11 @@ this._freshnessSkipCount = 0;
                 priority: null,
                 distanceToCamera: geom.distanceToCamera,
                 velocityAlignment: geom.velocityAlignment,
-                // Tiering (Phase 2) doesn't exist yet — every tile currently
-                // requests the streamer's full configured output set.
-                generationTier: 'default',
-                outputMask: this.streamedTypes,
+                // Phase 2: every tile's first pass requests only the
+                // geometry preset; remaining configured types (if any)
+                // follow as a separate background refinement pass.
+                generationTier: this._refinementTypes.length > 0 ? 'geometry' : 'full',
+                outputMask: this._geometryTypes,
                 resolution: this.tileTextureSize,
                 requestTime: performance.now(),
                 queueTime: null,
@@ -1421,6 +1608,7 @@ this._freshnessSkipCount = 0;
                 residentTime: null
             };
             this._telemetryByKey.set(key, telemetry);
+            this._tileState.set(key, 'REQUESTED');
         }
 
         // Depth component: coarser = higher base priority (fallback safety)
@@ -1466,6 +1654,7 @@ this._freshnessSkipCount = 0;
             const now = performance.now();
             telemetry.queueTime = now;
             telemetry.generationStart = now;
+            this._tileState.set(key, 'GENERATING');
             this._stageLatency.queueWait.push(now - telemetry.requestTime);
 
             const demandState = this._describeTileDemandState(tileAddr, key);
@@ -1482,17 +1671,23 @@ this._freshnessSkipCount = 0;
 
 
             try {
-                const textures = await this.tileGenerator.generateTile(tileAddr, telemetry);
+                // Geometry preset only (plan §2.1/§2.3) — the minimum a tile
+                // needs to become resident and visually useful. Any
+                // remaining configured types follow as a background
+                // refinement pass once this commits.
+                const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, this._geometryTypes);
                 if (Number.isFinite(telemetry.computeSubmitted)) {
                     this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
                 }
                 if (generationEpoch !== this._generationEpoch) {
                     this._requestTimestamps.delete(key);
                     this._prewarmKeys.delete(key);
+                    this._tileState.delete(key);
                     this._destroyGeneratedTextures(textures);
                     this._wastedGenerationsWindowCount++;
                     return false;
                 }
+                this._tileState.set(key, 'GEOMETRY_READY');
                 const committed = await this._commitTile(tileAddr, textures, telemetry);
                 const stillRelevant = this._describeTileDemandState(tileAddr, key).relevant;
                 if (!committed || !stillRelevant) {
@@ -1500,6 +1695,12 @@ this._freshnessSkipCount = 0;
                 }
                 if (!committed) {
                     this._requestTimestamps.delete(key);
+                    this._tileState.delete(key);
+                } else {
+                    this._tileState.set(key, 'RESIDENT');
+                    if (this._refinementTypes.length > 0) {
+                        this._queueRefinement(tileAddr);
+                    }
                 }
                 this._prewarmKeys.delete(key);
                 return committed;
@@ -1507,6 +1708,7 @@ this._freshnessSkipCount = 0;
                 this._requestTimestamps.delete(key);
                 this._prewarmKeys.delete(key);
                 this._telemetryByKey.delete(key);
+                this._tileState.delete(key);
                 throw error;
             }
         }, canStart);
@@ -1515,6 +1717,7 @@ this._freshnessSkipCount = 0;
             this._requestTimestamps.delete(key);
             this._prewarmKeys.delete(key);
             this._telemetryByKey.delete(key);
+            this._tileState.delete(key);
         }
     }
 
@@ -1673,6 +1876,7 @@ _evictTile(key) {
         this._tileInfo.delete(key);
         this._layerToKey.delete(info.layer);
         this._debugCopyStateByLayer.delete(info.layer);
+        this._tileState.delete(key);
         this.arrayPool.releaseLayer(info.layer);
         this._recordPoolHeadroom();
     }
@@ -1706,7 +1910,11 @@ async _commitTile(tileAddr, textures, telemetry = null) {
         return false;
     }
 
-    this.arrayPool.queueCopyToLayer(textures, layer);
+    // zeroFillMissing: this is a geometry-only commit (plan §2) — any
+    // configured type not generated yet (splat/climate/scatter/...) gets
+    // its layer explicitly zeroed rather than left with whatever the
+    // *previous* occupant of this (possibly reused) layer wrote there.
+    this.arrayPool.queueCopyToLayer(textures, layer, { zeroFillMissing: true });
     if (telemetry) telemetry.copySubmitted = performance.now();
     this._debugRegisterQueuedCopy(tileAddr, layer, textures);
     // Do NOT schedule these for destruction here: arrayPool._pendingCopies
@@ -1757,11 +1965,11 @@ async _commitTile(tileAddr, textures, telemetry = null) {
         this._stageLatency.requestToResident.push(telemetry.residentTime - telemetry.requestTime);
     }
 
+    // AO only needs height/normal (both geometry-stage), so it's safe to
+    // bake immediately. Scatter needs the actual scatter texture, which is
+    // now a refinement-stage output (plan §2) — its commit queue push moves
+    // to _commitRefinement, once real (non-zero-filled) scatter data exists.
     this._aoCommitQueue.push({
-        face: tileAddr.face, depth: tileAddr.depth,
-        x: tileAddr.x, y: tileAddr.y, layer,
-    });
-    this._scatterCommitQueue.push({
         face: tileAddr.face, depth: tileAddr.depth,
         x: tileAddr.x, y: tileAddr.y, layer,
     });
@@ -1775,6 +1983,138 @@ async _commitTile(tileAddr, textures, telemetry = null) {
         }
     }
     this._requestFreshness.delete(key);
+    return true;
+}
+
+// ── Phase 2: background refinement (plan §2, lightly previews §3) ─────────
+//
+// Queues generation of whatever configured output types weren't part of
+// the geometry preset (splat/climate/scatter/...) for a tile that's already
+// resident. Runs on a separate, smaller-budget queue so it never competes
+// with new-tile admission for the same per-frame slots (plan §1.2: visible/
+// predictive geometry always outranks refinement).
+_queueRefinement(tileAddr) {
+    const key = tileAddr.toString();
+    if (!this._tileInfo.has(key)) return; // evicted before refinement could even be queued
+
+    // Distance normalized by the tile's own world-space size ("how many
+    // tile-widths away is the camera") rather than raw meters, so one
+    // threshold works consistently across LOD depths. Driven directly by
+    // user observation: the geometry-then-material pop is tolerable at
+    // typical viewing distance but too visible up close — "acceptable
+    // twice as far [away]. Now it's a bit too visible nearby."
+    const geom = this._estimateRequestGeometry(tileAddr);
+    const tileWidth = this._estimateTileWorldSize(tileAddr.depth);
+    const distanceInTileWidths = (Number.isFinite(geom.distanceToCamera) && tileWidth > 0)
+        ? geom.distanceToCamera / tileWidth
+        : null;
+
+    const telemetry = {
+        key,
+        face: tileAddr.face, depth: tileAddr.depth, x: tileAddr.x, y: tileAddr.y,
+        reason: 'REFINEMENT',
+        priority: null,
+        distanceToCamera: geom.distanceToCamera,
+        distanceInTileWidths,
+        velocityAlignment: null,
+        generationTier: 'refinement',
+        outputMask: this._refinementTypes,
+        resolution: this.tileTextureSize,
+        requestTime: performance.now(),
+        queueTime: null,
+        generationStart: null,
+        computeSubmitted: null,
+        gpuFenceComplete: null,
+        copySubmitted: null,
+        residentTime: null
+    };
+    this._telemetryByKey.set(key, telemetry);
+
+    // This priority only orders candidates *within* _refinementQueue — it
+    // is never compared against _generationQueue's (geometry's) priority
+    // numbers directly, since the two queues are admitted separately (see
+    // tickGeneration/_tickRefinement). What actually matters for plan
+    // §1.2's "visible refinement outranks predictive geometry" is the
+    // *admission* side: _tickRefinement grants a near tile's refinement
+    // its own small reserve, independent of whatever geometry is doing.
+    // Here, just make sure that reserve (when available) and any leftover
+    // shared budget both go to the closest candidates first — continuous
+    // by distance, not a binary near/far split, so even among "far" tiles
+    // the closest still refines first when there's spare budget.
+    const priority = Number.isFinite(distanceInTileWidths)
+        ? -distanceInTileWidths
+        : 0; // unknown camera context (e.g. cold start) — neutral, not pushed to the back
+
+    const request = this._refinementQueue.request(key, priority, async () => {
+        const now = performance.now();
+        telemetry.queueTime = now;
+        telemetry.generationStart = now;
+        this._tileState.set(key, 'REFINING');
+
+        // A tile can go irrelevant (camera moved on) while sitting in the
+        // refinement queue. It's still resident (ancestor-fallback-quality,
+        // via its geometry), so there's no correctness issue — just don't
+        // spend GPU time refining something nobody's looking at right now.
+        if (!this._describeTileDemandState(tileAddr, key).relevant) {
+            this._telemetryByKey.delete(key);
+            this._tileState.set(key, 'RESIDENT');
+            return false;
+        }
+
+        try {
+            const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, this._refinementTypes);
+            if (Number.isFinite(telemetry.computeSubmitted)) {
+                this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
+            }
+            if (!this._tileInfo.has(key)) {
+                // Evicted while refinement was generating.
+                this._destroyGeneratedTextures(textures);
+                this._telemetryByKey.delete(key);
+                return false;
+            }
+            const committed = this._commitRefinement(tileAddr, textures, telemetry);
+            this._tileState.set(key, committed ? 'REFINED' : 'RESIDENT');
+            return committed;
+        } catch (error) {
+            this._telemetryByKey.delete(key);
+            this._tileState.set(key, 'RESIDENT');
+            throw error;
+        }
+    });
+    if (request === null) {
+        this._telemetryByKey.delete(key);
+        this._refinementRejectWindowCount++;
+    }
+}
+
+// Writes refinement-stage textures (splat/climate/scatter/...) into a tile's
+// *existing* array-pool layer — no new layer allocation, no hash-table
+// change, since the tile is already resident from its geometry commit.
+_commitRefinement(tileAddr, textures, telemetry = null) {
+    const key = tileAddr.toString();
+    const info = this._tileInfo.get(key);
+    if (!info || !this.arrayPool) {
+        this._destroyGeneratedTextures(textures);
+        return false;
+    }
+
+    // Not zero-fill here: this commit only ever carries refinement types,
+    // and the geometry types in the same layer are already correct from
+    // the initial commit — copying only what's present (the existing,
+    // non-zero-fill queueCopyToLayer behavior) is exactly right.
+    this.arrayPool.queueCopyToLayer(textures, info.layer);
+    if (telemetry) {
+        telemetry.copySubmitted = performance.now();
+        telemetry.residentTime = performance.now();
+    }
+    info.lastUsed = performance.now();
+
+    if (this._refinementTypes.includes('scatter')) {
+        this._scatterCommitQueue.push({
+            face: tileAddr.face, depth: tileAddr.depth,
+            x: tileAddr.x, y: tileAddr.y, layer: info.layer,
+        });
+    }
     return true;
 }
 
@@ -2246,10 +2586,23 @@ markTilesVisible(tiles) {
         const tilePoolCapacity = this.tilePoolSize;
         const tilePoolFree = this.arrayPool?.freeLayers?.length ?? null;
 
+        // Phase 2: background refinement pressure, separate from geometry
+        // admission above (plan §2/§1.2 — refinement is always subordinate).
+        const refinementQueueDepth = this._refinementQueue.queue.length;
+        const refinementQueueActive = this._refinementQueue.active;
+        const refinementDropped = this._refinementQueue.consumeDroppedCount();
+        const refinementRejected = this._refinementRejectWindowCount;
+        let tileStateCounts = null;
+        for (const state of this._tileState.values()) {
+            if (!tileStateCounts) tileStateCounts = {};
+            tileStateCounts[state] = (tileStateCounts[state] ?? 0) + 1;
+        }
+
         this._requestedTilesWindowCount = 0;
         this._newlyVisibleTilesWindowCount = 0;
         this._wastedGenerationsWindowCount = 0;
         this._copyOperationsWindowCount = 0;
+        this._refinementRejectWindowCount = 0;
 
         return {
             requestLatency,
@@ -2274,7 +2627,12 @@ markTilesVisible(tiles) {
             pendingCopyCount,
             tilePoolUsed,
             tilePoolCapacity,
-            tilePoolFree
+            tilePoolFree,
+            refinementQueueDepth,
+            refinementQueueActive,
+            refinementDropped,
+            refinementRejected,
+            tileStateCounts
         };
     }
 

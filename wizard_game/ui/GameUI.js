@@ -475,7 +475,8 @@ export class GameUI {
                     pool ${perfHud.pool.used}/${perfHud.pool.capacity} (free ${p?.tilePoolFree ?? 'n/a'})<br>
                     copies ${perfHud.pendingCopies} pending<br>
                     resident latency ${latencyStr}<br>
-                    amplification ${amp !== null && amp !== undefined ? amp.toFixed(2) : 'n/a'} | wasted ${p?.wastedGenerations ?? 0}
+                    amplification ${amp !== null && amp !== undefined ? amp.toFixed(2) : 'n/a'} | wasted ${p?.wastedGenerations ?? 0}<br>
+                    refinement ${p?.refinementQueueDepth ?? 0} pending / ${p?.refinementQueueActive ?? 0} active
                 </div>
             </div>
         `;

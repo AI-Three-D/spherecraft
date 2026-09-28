@@ -969,6 +969,18 @@ export function installQuadtreeTileManagerRuntimeDiagnostics(QuadtreeTileManager
                                 `pendingCopies=${pressure.pendingCopyCount} ` +
                                 `pool=${pressure.tilePoolUsed}/${pressure.tilePoolCapacity} free=${pressure.tilePoolFree ?? 'n/a'}`
                             );
+                            // Phase 2: refinement is a separate, lower-priority queue —
+                            // report it distinctly so a growing refinement backlog
+                            // doesn't get mistaken for geometry admission pressure.
+                            const stateStr = pressure.tileStateCounts
+                                ? Object.entries(pressure.tileStateCounts).map(([s, c]) => `${s}:${c}`).join(' ')
+                                : 'n/a';
+                            Logger.info(
+                                `${TERRAIN_STEP_LOG_TAG} [QTLight] refinement ` +
+                                `queueDepth=${pressure.refinementQueueDepth} queueActive=${pressure.refinementQueueActive} ` +
+                                `dropped=${pressure.refinementDropped} rejected=${pressure.refinementRejected} ` +
+                                `tileStates=[${stateStr}]`
+                            );
                         }
 
                         this._lastPerfSnapshot = {
