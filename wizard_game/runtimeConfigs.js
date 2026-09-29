@@ -202,10 +202,21 @@ export function createEngineConfig() {
         // Compile normals for farther LOD variants, but the shader samples
         // them only inside an altitude-scaled distance radius. Ground-level
         // cost stays bounded; aerial views keep directional terrain lighting.
+        // normalMapDistanceMaxMeters was a fixed 28000m regardless of
+        // altitude, so real terrain-shape normals never got sampled past
+        // that distance no matter how high up the camera went — the whole
+        // sphere fell back to the flat geometric sphere normal from orbit,
+        // which is why ridges/mountains went dull and flat (confirmed by
+        // observation: normal-map sampling itself was already proven
+        // correct earlier — this is purely the distance ceiling cutting it
+        // off). The altitude-scaled base (4500 * (1 + altitude/1000))
+        // already grows far past this old cap at any real altitude, so
+        // raising just the ceiling is the whole fix — no change to the
+        // scaling formula itself.
         normalMapMaxLod: 7,
         normalMapDistanceBaseMeters: 4500,
         normalMapDistanceAltitudeScaleMeters: 1000,
-        normalMapDistanceMaxMeters: 28000,
+        normalMapDistanceMaxMeters: 1000000,
         normalMapDistanceFadeMeters: 2500,
         altitudeNormalMinMeters: 8000,
         altitudeShadowMinMeters: 12000,

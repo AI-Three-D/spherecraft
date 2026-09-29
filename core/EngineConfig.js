@@ -169,6 +169,18 @@ export class EngineConfig {
         clusteredMaxLod: requireInt(terrainShader.clusteredMaxLod ?? 1, 'rendering.terrainShader.clusteredMaxLod', 0),
         aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 6, 'rendering.terrainShader.aerialMaxLod', 0),
         normalMapMaxLod: requireInt(terrainShader.normalMapMaxLod ?? 2, 'rendering.terrainShader.normalMapMaxLod', -1),
+        // These 4 were previously missing here entirely — EngineConfig
+        // builds its output object field-by-field, so any raw
+        // wizard_game/runtimeConfigs.js value not explicitly listed gets
+        // silently dropped, regardless of what's set there. That meant
+        // terrainChunkFragmentShaderBuilder.js's own hardcoded fallbacks
+        // (4500/1000/28000/2500, matched here) always won — confirmed via
+        // observation: raising normalMapDistanceMaxMeters in runtimeConfigs
+        // had zero visible effect at any altitude.
+        normalMapDistanceBaseMeters: requireNumber(terrainShader.normalMapDistanceBaseMeters ?? 4500, 'rendering.terrainShader.normalMapDistanceBaseMeters'),
+        normalMapDistanceAltitudeScaleMeters: requireNumber(terrainShader.normalMapDistanceAltitudeScaleMeters ?? 1000, 'rendering.terrainShader.normalMapDistanceAltitudeScaleMeters'),
+        normalMapDistanceMaxMeters: requireNumber(terrainShader.normalMapDistanceMaxMeters ?? 28000, 'rendering.terrainShader.normalMapDistanceMaxMeters'),
+        normalMapDistanceFadeMeters: requireNumber(terrainShader.normalMapDistanceFadeMeters ?? 2500, 'rendering.terrainShader.normalMapDistanceFadeMeters'),
         altitudeNormalMinMeters: requireNumber(terrainShader.altitudeNormalMinMeters ?? 8000, 'rendering.terrainShader.altitudeNormalMinMeters'),
         altitudeShadowMinMeters: requireNumber(terrainShader.altitudeShadowMinMeters ?? 12000, 'rendering.terrainShader.altitudeShadowMinMeters'),
         shadowDistanceMaxMeters: requireNumber(terrainShader.shadowDistanceMaxMeters ?? 1000, 'rendering.terrainShader.shadowDistanceMaxMeters'),
