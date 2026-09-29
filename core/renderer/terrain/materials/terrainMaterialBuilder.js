@@ -206,6 +206,7 @@ export class TerrainMaterialBuilder {
 
             const shaderOptions = {
                 tileCategories,
+                tileAverageColors: opts.tileAverageColors ?? null,
                 maxLightIndices: 8192,
                 useArrayTextures,
                 grassTileTypeIds: uniqueGrassTileTypeIds,

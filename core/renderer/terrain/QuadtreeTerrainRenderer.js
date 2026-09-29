@@ -261,6 +261,7 @@ export class QuadtreeTerrainRenderer {
             terrainAODefaults: this.terrainAODefaults,
             groundFieldDefaults: this.groundFieldDefaults,
             tileCategories: this.tileCategories,
+            tileAverageColors: this.textureManager?.getCategoryAverageColorMap?.(this.tileCategories) || null,
             backend: this.backend,
             atlasTextures: context.atlasTextures,
             lookupTables: context.lookupTables,

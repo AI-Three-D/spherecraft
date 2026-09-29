@@ -510,7 +510,10 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const terrainShaderConfig = options.terrainShaderConfig || {};
     const fixedMaterialFamiliesEnabled = options.fixedMaterialFamiliesEnabled === true;
     const fixedMaterialFamilyWGSL = buildFixedMaterialFamilyFragmentWGSL(options.tileCategories || []);
-    const coarseCategoryColorWGSL = buildCoarseCategoryColorFragmentWGSL(options.tileCategories || []);
+    const coarseCategoryColorWGSL = buildCoarseCategoryColorFragmentWGSL(
+        options.tileCategories || [],
+        options.tileAverageColors || null
+    );
     const fullMaxLod = Number.isFinite(terrainShaderConfig.fullMaxLOD)
         ? Math.max(0, Math.floor(terrainShaderConfig.fullMaxLOD))
         : 0;

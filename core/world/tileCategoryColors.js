@@ -19,38 +19,36 @@ import { buildTileCategoryLookupWGSLForCategories } from './tileCatalogRuntime.j
 // precede broader ones. The current default catalog's names
 // (WATER/GRASS/SAND/ROCK/TUNDRA/FOREST/SWAMP/DIRT/MUD/VOLCANIC/SNOW/DESERT)
 // have no such overlaps.
-// Darkened relative to a first, never-visually-tested guess (2026-09-29):
-// under this engine's real ambient+diffuse lighting, a flat color reads much
+// Fallback guesses used only when no real texture-average color is available
+// for a category (see buildCoarseCategoryColorFragmentWGSL's tileAverageColors
+// param). Darkened relative to a first, never-visually-tested guess: under
+// this engine's real ambient+diffuse lighting, a flat color reads much
 // brighter than the same nominal albedo does on a real (variation-breaking)
-// texture — confirmed too light by direct observation at LOD6. Snow/ice are
-// deliberately left bright (that's correct for them); everything else scaled
-// down roughly 0.55-0.65x.
+// texture. Snow/ice deliberately left bright; everything else scaled down
+// roughly 0.55-0.65x.
 const KEYWORD_COLORS = Object.freeze([
-    ['WATER', [0.04, 0.20, 0.36]],
-    ['ICE', [0.75, 0.88, 0.93]],
-    ['SNOW', [0.92, 0.94, 0.96]],
-    ['VOLCANIC', [0.18, 0.09, 0.08]],
-    ['ROCK', [0.27, 0.26, 0.24]],
-    ['TUNDRA', [0.33, 0.34, 0.29]],
-    ['DESERT', [0.43, 0.35, 0.21]],
-    ['SAND', [0.46, 0.40, 0.26]],
-    ['SWAMP', [0.16, 0.18, 0.10]],
-    ['MUD', [0.19, 0.14, 0.09]],
-    ['DIRT', [0.22, 0.16, 0.10]],
-    ['FOREST', [0.06, 0.16, 0.07]],
-    ['GRASS', [0.13, 0.28, 0.10]],
+    ['WATER', [0.05, 0.10, 0.22]],
+    ['ICE', [0.75, 0.82, 0.88]],
+    ['SNOW', [0.85, 0.87, 0.90]],
+    ['VOLCANIC', [0.10, 0.06, 0.05]],
+    ['ROCK', [0.16, 0.155, 0.14]],
+    ['TUNDRA', [0.25, 0.26, 0.22]],
+    ['DESERT', [0.45, 0.35, 0.20]],
+    ['SAND', [0.50, 0.42, 0.28]],
+    ['SWAMP', [0.14, 0.16, 0.10]],
+    ['MUD', [0.20, 0.15, 0.10]],
+    ['DIRT', [0.22, 0.16, 0.11]],
+    ['FOREST', [0.08, 0.16, 0.06]],
+    ['GRASS', [0.023, 0.065, 0.025]],
+   // ['GRASS', [0.13, 0.28, 0.10]],
 ]);
 
 // Reached whenever the raw tile id falls outside every configured
-// category's ranges — confirmed via debug-mode isolation (2026-09-29) that
-// this, not GRASS, is what LOD6 was actually showing: this catalog's real
-// computed ranges (WATER 0-3, GRASS 10-29, ROCK 42-53, FOREST 66-81/142-149,
-// SNOW 130-141, DESERT 150-165) leave a real 48-id gap (82-129) with no
-// category at all, and darkening GRASS earlier had no visible effect
-// because the pixels in question were never using it. Darkened to match
-// the rest of the palette (was the original, never-tested [0.38,0.38,0.34]
-// — same mistake as the rest of the table, just missed the first pass).
-const FALLBACK_COLOR = Object.freeze([0.19, 0.20, 0.17]);
+// category's ranges (e.g. this catalog's real 48-id gap, 82-129, with no
+// category at all). A neutral dirt-like tone rather than a diagnostic color
+// now that the "edits have no visual effect" mystery is resolved (it wasn't
+// this fallback path — see git history for the magenta diagnostic).
+const FALLBACK_COLOR = Object.freeze([0.20, 0.17, 0.13]);
 
 function colorForCategoryName(name) {
     const upper = typeof name === 'string' ? name.toUpperCase() : '';
@@ -71,29 +69,46 @@ function wgslVec3(color) {
  * the same tileCategories the rest of the material shader already receives,
  * and a coarseTileColor(tileId: f32) -> vec3<f32> convenience wrapper.
  *
+ * When `tileAverageColors` provides a real computed average (from
+ * TextureAtlasManager.getCategoryAverageColorMap, sampled from the same
+ * generated textures the normal detail tiers render), that value is used in
+ * place of the hand-picked KEYWORD_COLORS guess for that category — it's
+ * already correctly calibrated for this lighting pipeline since it's the
+ * true average tone of the texture that pipeline already renders correctly.
+ * The hand-picked table remains only as a fallback for categories with no
+ * matching generated tile (e.g. the unmatched-id fallback color).
+ *
  * @param {Array<{id:number,name:string,ranges:number[][]}>} tileCategories
+ * @param {Map<number, [number,number,number]>|null} tileAverageColors
  * @returns {string} WGSL source to splice into the fragment shader
  */
-export function buildCoarseCategoryColorFragmentWGSL(tileCategories = []) {
+let _loggedColorSources = false;
+
+export function buildCoarseCategoryColorFragmentWGSL(tileCategories = [], tileAverageColors = null) {
     const categories = Array.isArray(tileCategories) ? tileCategories : [];
-    // Temporary: print exactly what this function actually receives at
-    // runtime — two separate color-value edits produced zero visible change,
-    // which means the wrong data (or wrong shape) may be reaching here
-    // rather than the color values themselves being off.
-    // eslint-disable-next-line no-console
-    console.log('[CoarseColorDebug] tileCategories received:', JSON.stringify(categories));
     const categoryLookupWGSL = buildTileCategoryLookupWGSLForCategories(categories);
 
     const colorLines = ['fn categoryFlatColor(categoryId: u32) -> vec3<f32> {'];
+    const resolvedForLog = [];
     for (const category of categories) {
         if (!Number.isFinite(category?.id)) continue;
-        const color = colorForCategoryName(category.name);
+        const averageColor = tileAverageColors instanceof Map
+            ? tileAverageColors.get(category.id)
+            : null;
+        const color = averageColor || colorForCategoryName(category.name);
+        const source = averageColor ? 'texture average' : 'hand-picked fallback';
         colorLines.push(
-            `    if (categoryId == ${Math.trunc(category.id)}u) { return ${wgslVec3(color)}; } // ${category.name}`
+            `    if (categoryId == ${Math.trunc(category.id)}u) { return ${wgslVec3(color)}; } // ${category.name} (${source})`
         );
+        resolvedForLog.push({ id: category.id, name: category.name, color, source });
     }
     colorLines.push(`    return ${wgslVec3(FALLBACK_COLOR)};`);
     colorLines.push('}');
+
+    if (!_loggedColorSources) {
+        _loggedColorSources = true;
+        console.info('[SolidColorTier] category colors resolved:', resolvedForLog);
+    }
 
     return [
         categoryLookupWGSL,
