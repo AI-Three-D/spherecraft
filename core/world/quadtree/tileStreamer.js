@@ -340,6 +340,7 @@ class TileArrayPool {
 
         this._pendingCopies = [];
         this._zeroTextures = new Map();   // format -> lazily-created zero source
+        this._splatIndexSentinel = null;  // lazily-created "not ready" marker
     }
 
     // A never-written texture is zero-initialized by WebGPU, so a single
@@ -358,18 +359,53 @@ class TileArrayPool {
         return tex;
     }
 
+    // splatIndex specifically must NOT zero-fill: decodeTileId(0) is a real,
+    // valid tile id (id 0 happens to be WATER_1 in this catalog — see
+    // wizard_game/world/biomes.json), so a plain zero-filled layer decodes
+    // to "this whole tile is water" instead of "no data yet". Confirmed via
+    // debug-mode elimination that this — not the queue-drop bug fixed
+    // separately in _queueRefinement — is what painted resident-but-not-
+    // yet-refined tiles as flat dark blue: sampleSplatData's topSum<=0.0001
+    // fallback (terrainChunkFragmentShaderBuilder.js) still reads
+    // centerIds from the zero-filled splatIndexMap even when weights are
+    // zero, and nothing downstream re-checks id validity once a "dominant"
+    // id is picked from an all-zero-weight tie. 255 is already treated as
+    // out-of-range/invalid wherever this codebase decodes a splat tile id
+    // (decodeSplatTileId(...) < 255), so filling every texel with 255 gives
+    // an unambiguous "no real splat yet" signal that degrades correctly to
+    // the geometry pass's own raw tile color instead of a fake material.
+    _getSplatIndexSentinelTexture(format) {
+        if (this._splatIndexSentinel) return this._splatIndexSentinel;
+        const tex = this.device.createTexture({
+            size: [this.tileSize, this.tileSize, 1],
+            format,
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST
+        });
+        const bytesPerRow = alignTo(this.tileSize * 4, 256);
+        const data = new Uint8Array(bytesPerRow * this.tileSize).fill(255);
+        this.device.queue.writeTexture(
+            { texture: tex },
+            data,
+            { bytesPerRow, rowsPerImage: this.tileSize },
+            { width: this.tileSize, height: this.tileSize, depthOrArrayLayers: 1 }
+        );
+        this._splatIndexSentinel = tex;
+        return tex;
+    }
+
     // zeroFillMissing: when true, every type this pool manages but that
-    // isn't present in `textures` gets its layer copy-cleared from the
-    // shared zero source instead of being skipped. Needed for a Phase 2
-    // geometry-only commit (SphereCraft_Optimization_Implementation_Plan.md
-    // §2.3): array-pool layers are reused across evictions, so without this
-    // a tile that skips e.g. splat generation would render with whatever
-    // *previous* tile's stale splat data happens to still occupy that
-    // layer — exactly the kind of silent visual-correctness bug this
-    // codebase has been burned by before. The terrain fragment shader
-    // already degrades a zeroed splat/index layer to a deterministic
-    // single-material result (see sampleSplatData's topSum<=0.0001 path),
-    // so zero is a safe, intentional "not yet refined" default, not a hack.
+    // isn't present in `textures` gets its layer copy-cleared instead of
+    // being skipped. Needed for a Phase 2 geometry-only commit
+    // (SphereCraft_Optimization_Implementation_Plan.md §2.3): array-pool
+    // layers are reused across evictions, so without this a tile that skips
+    // e.g. splat generation would render with whatever *previous* tile's
+    // stale splat data happens to still occupy that layer — exactly the
+    // kind of silent visual-correctness bug this codebase has been burned
+    // by before. splatIndex gets the explicit 255 sentinel (see
+    // _getSplatIndexSentinelTexture — a plain zero decodes to a real tile
+    // id, id 0, which is WATER_1); every other type gets genuine zero,
+    // which the terrain shader already degrades safely (they're not decoded
+    // as an id the way splatIndex is).
     queueCopyToLayer(textures, layer, { zeroFillMissing = false } = {}) {
         if (!zeroFillMissing) {
             this._pendingCopies.push({ textures, layer });
@@ -379,8 +415,11 @@ class TileArrayPool {
         for (const type of this.types) {
             if (filled[type]) continue;
             const format = this.formats[type] || 'rgba32float';
+            const source = (type === 'splatIndex')
+                ? this._getSplatIndexSentinelTexture(format)
+                : this._getZeroSourceTexture(format);
             filled[type] = {
-                _gpuTexture: { texture: this._getZeroSourceTexture(format) },
+                _gpuTexture: { texture: source },
                 _isZeroFillPlaceholder: true
             };
         }
