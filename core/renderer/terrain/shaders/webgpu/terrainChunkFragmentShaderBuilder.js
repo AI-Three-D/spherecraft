@@ -4,6 +4,7 @@ import { getAerialPerspectiveWGSL } from '../../../../renderer/atmosphere/shader
 import { getProceduralDetailWGSL } from './prroceduralDetailNoise.wgsl.js';
 import { getClusteredLightingWGSL } from '../../../../lighting/shaders/clusteredLighting.wgsl.js';
 import { buildFixedMaterialFamilyFragmentWGSL } from '../../../../world/materialFamilies.js';
+import { buildCoarseCategoryColorFragmentWGSL } from '../../../../world/tileCategoryColors.js';
 
 const blendModeBlock = /* wgsl */`
 // ============================================================================
@@ -489,6 +490,17 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const enableGroundField = options.enableGroundField === true;
     const enableResolvedColor = options.enableResolvedColor === true;
     const enableResolvedColorDebugBinding = options.enableResolvedColorDebugBinding === true;
+    // Compile-time per-LOD constant, exactly like enableResolvedColor above —
+    // NOT a per-fragment/per-layer runtime check. That distinction matters:
+    // an earlier attempt at a similar tier gated on a per-tile splat-layer
+    // read inside a uniform-control-flow-sensitive function, which broke
+    // WGSL compilation (dpdx must only be called from uniform control flow)
+    // and, once patched around with select(), ran its expensive fallback
+    // unconditionally anyway. Gating per-LOD like this instead means each
+    // compiled shader variant is simply true or false, decided once at
+    // build time by the caller (terrainMaterialBuilder.js) from the chunk's
+    // own lod — no runtime branching risk at all.
+    const enableSolidColorTier = options.enableSolidColorTier === true;
     const maxLightIndices = options.maxLightIndices || 8192;
     const useArrayTextures = options.useArrayTextures === true;
     const aerialPerspectiveCode = getAerialPerspectiveWGSL();
@@ -498,6 +510,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const terrainShaderConfig = options.terrainShaderConfig || {};
     const fixedMaterialFamiliesEnabled = options.fixedMaterialFamiliesEnabled === true;
     const fixedMaterialFamilyWGSL = buildFixedMaterialFamilyFragmentWGSL(options.tileCategories || []);
+    const coarseCategoryColorWGSL = buildCoarseCategoryColorFragmentWGSL(options.tileCategories || []);
     const fullMaxLod = Number.isFinite(terrainShaderConfig.fullMaxLOD)
         ? Math.max(0, Math.floor(terrainShaderConfig.fullMaxLOD))
         : 0;
@@ -904,6 +917,7 @@ const NEAR_TO_MID_FADE_START_CHUNKS: f32 = ${nearToMidFadeStartChunks.toFixed(2)
 const NEAR_TO_MID_FADE_END_CHUNKS: f32 = ${nearToMidFadeEndChunks.toFixed(2)};
 const ENABLE_MACRO_OVERLAY: bool = ${enableMacroOverlay ? 'true' : 'false'};
 const ENABLE_RESOLVED_COLOR: bool = ${enableResolvedColor ? 'true' : 'false'};
+const ENABLE_SOLID_COLOR_TIER: bool = ${enableSolidColorTier ? 'true' : 'false'};
 const HAS_RESOLVED_COLOR_TEXTURE: bool = ${includeResolvedColorBinding ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
 const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
@@ -929,6 +943,7 @@ const DEBUG_LOD_COLORS: array<vec3<f32>, 7> = array<vec3<f32>, 7>(
 
 ${grassConstants}
 ${fixedMaterialFamilyWGSL}
+${coarseCategoryColorWGSL}
 ${aerialPerspectiveCode}
 ${clusteredLightingCode}
 struct FragmentUniforms {
@@ -2897,6 +2912,23 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let layer = i32(round(input.vLayer));
     let debugMode = fragUniforms.terrainDebugMode;
     let layerViewMode = fragUniforms.terrainLayerViewMode;
+    // Mode 90: geometryLOD by color — verifies which LOD's compiled shader
+    // variant is actually rendering a given on-screen tile, independent of
+    // any of the color/lighting debug modes below.
+    if (debugMode == 90) {
+        let lodColors = array<vec3<f32>, 8>(
+            vec3<f32>(1.0, 0.0, 0.0),   // LOD0 red
+            vec3<f32>(1.0, 0.5, 0.0),   // LOD1 orange
+            vec3<f32>(1.0, 1.0, 0.0),   // LOD2 yellow
+            vec3<f32>(0.0, 1.0, 0.0),   // LOD3 green
+            vec3<f32>(0.0, 1.0, 1.0),   // LOD4 cyan
+            vec3<f32>(0.0, 0.0, 1.0),   // LOD5 blue
+            vec3<f32>(1.0, 0.0, 1.0),   // LOD6 magenta
+            vec3<f32>(1.0, 1.0, 1.0)    // LOD7+ white
+        );
+        let lodIndex = clamp(fragUniforms.geometryLOD, 0, 7);
+        return vec4<f32>(lodColors[lodIndex], 1.0);
+    }
     let lodEdgeFade = clamp(input.vDebugSample.y, 0.0, 1.0);
     let lodEdgeAmount = select(0.0, 1.0 - lodEdgeFade, ENABLE_ANY_LOD_EDGE_FADE);
 
@@ -3282,7 +3314,38 @@ if (debugMode == 16) {
     let fallbackTileId = sampleChunkTileId(input, layer);
     let worldTileCoord = floor(input.vWorldPos);
     let local = fract(input.vWorldPos);
-   
+    // Mode 96: raw coarseTileColor(fallbackTileId) output, isolated from
+    // everything else (macro overlay, ground field, lighting) — the direct,
+    // unambiguous test of whether the flat-color function itself is
+    // producing the wrong color, vs. something downstream altering it.
+    if (debugMode == 96) {
+        return vec4<f32>(coarseTileColor(fallbackTileId), 1.0);
+    }
+    // Mode 97: raw fallbackTileId as grayscale (tileId / 255) — sanity check
+    // that the id itself is a sane, in-range value at this LOD.
+    if (debugMode == 97) {
+        let g = clamp(fallbackTileId / 255.0, 0.0, 1.0);
+        return vec4<f32>(g, g, g, 1.0);
+    }
+    // Mode 98: matched category id as a discrete color — bypasses the color
+    // palette entirely, so this tells us WHICH category (or none) actually
+    // matches, independent of what color it's assigned.
+    if (debugMode == 98) {
+        let catId = tileCategory(u32(round(fallbackTileId)));
+        let catColors = array<vec3<f32>, 8>(
+            vec3<f32>(1.0, 0.0, 0.0),   // 0 WATER red
+            vec3<f32>(1.0, 0.5, 0.0),   // 1 GRASS orange
+            vec3<f32>(1.0, 1.0, 0.0),   // 2 ROCK yellow
+            vec3<f32>(0.0, 1.0, 0.0),   // 3 FOREST green
+            vec3<f32>(0.0, 1.0, 1.0),   // 4 SNOW cyan
+            vec3<f32>(0.0, 0.0, 1.0),   // 5 DESERT blue
+            vec3<f32>(0.6, 0.6, 0.6),   // 6 unused gray
+            vec3<f32>(1.0, 0.0, 1.0)    // 7+/255 unmatched magenta
+        );
+        let idx = select(7u, min(catId, 6u), catId <= 6u);
+        return vec4<f32>(catColors[idx], 1.0);
+    }
+
     var splatResult: SplatData;
     splatResult.tileIds = vec4<f32>(fallbackTileId, fallbackTileId, fallbackTileId, fallbackTileId);
     splatResult.weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
@@ -3300,7 +3363,19 @@ if (debugMode == 16) {
         dominantTileId = splatDominantTileId(splatResult);
     }
 
-    if (ENABLE_RESOLVED_COLOR) {
+    if (ENABLE_SOLID_COLOR_TIER) {
+        // Flat category color for the single coarsest LOD (small first
+        // increment — see solidColorStartLod). Depends only on
+        // fallbackTileId, a geometry-pass output that's always ready with
+        // zero refinement wait, so this tier can never show the "resident
+        // but unrefined" artifacts the resolvedColor/splat tiers can. Gets
+        // lit by the exact same ambient/diffuse/shadow/AO block every other
+        // tier already goes through below, using the real per-tile normal
+        // (now extending to orbital distance) — that's what actually makes
+        // this worth doing over a plain unlit flat color.
+        microSample = vec4<f32>(coarseTileColor(fallbackTileId), 1.0);
+        microColorPath = 0;
+    } else if (ENABLE_RESOLVED_COLOR) {
         // Resolved-color path: one chunk-local prebaked color sample replaces
         // runtime splat decoding plus repeated atlas sampling. Procedural detail
         // can be layered on top later without bringing back atlas fan-out.

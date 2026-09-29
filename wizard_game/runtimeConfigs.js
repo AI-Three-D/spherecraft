@@ -177,6 +177,12 @@ export function createEngineConfig() {
         macroStartLod: 99,
         resolvedColorEnabled: true,
         resolvedColorStartLod: 5,
+        // Small first increment of the coarse-tier rework: only the single
+        // coarsest LOD (6 of 0-6) uses the flat, lit solid-color tier
+        // instead of resolved-color. LOD 5 (and everything nearer) is
+        // completely untouched. Widen later once this is confirmed good.
+        solidColorTierEnabled: true,
+        solidColorStartLod: 6,
         // Keep close and mid geometry on live category splats. The prebaked
         // resolved-color path is only for far terrain; nearer use exposes
         // hard category-mask contours because the prebake does not currently

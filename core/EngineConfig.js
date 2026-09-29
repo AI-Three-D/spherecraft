@@ -129,6 +129,13 @@ export class EngineConfig {
         splatDominantMinWeight: requireNumber(terrainShader.splatDominantMinWeight ?? 0.85, 'rendering.terrainShader.splatDominantMinWeight'),
         resolvedColorEnabled: requireBool(terrainShader.resolvedColorEnabled ?? true, 'rendering.terrainShader.resolvedColorEnabled'),
         resolvedColorStartLod: requireInt(terrainShader.resolvedColorStartLod ?? 0, 'rendering.terrainShader.resolvedColorStartLod', -1),
+        // Solid-color tier: a flat color from the tile's raw classification
+        // (geometry-pass output, always ready — no refinement wait), lit by
+        // the same ambient/diffuse/shadow/AO pipeline every other tier uses.
+        // Disabled (Infinity) unless a planet config opts in with an actual
+        // LOD, so this is a no-op everywhere until explicitly turned on.
+        solidColorTierEnabled: requireBool(terrainShader.solidColorTierEnabled ?? false, 'rendering.terrainShader.solidColorTierEnabled'),
+        solidColorStartLod: requireInt(terrainShader.solidColorStartLod ?? 99, 'rendering.terrainShader.solidColorStartLod', 0),
         lod0ResolvedColorEnabled: requireBool(
           terrainShader.lod0ResolvedColorEnabled ?? false,
           'rendering.terrainShader.lod0ResolvedColorEnabled'

@@ -175,6 +175,16 @@ export class TerrainMaterialBuilder {
             const enableResolvedColorDebugBinding =
                 !overlayPass &&
                 cachedTextures.resolvedColor?._isArray === true;
+            // Solid-color tier: no texture dependency at all (only needs the
+            // geometry pass's own `tile` output, already always bound), so
+            // unlike resolvedColor there's no cachedTextures guard here.
+            const solidColorStartLod = Number.isFinite(terrainShaderConfig?.solidColorStartLod)
+                ? Math.floor(terrainShaderConfig.solidColorStartLod)
+                : Infinity;
+            const enableSolidColorTier =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorTierEnabled === true &&
+                lod >= solidColorStartLod;
 
 
             const grassConfig = planetConfig?.grassConfig ?? null;
@@ -217,6 +227,7 @@ export class TerrainMaterialBuilder {
                 enableLod0ResolvedColor,
                 enableLodEdgeResolvedColor,
                 enableResolvedColorDebugBinding,
+                enableSolidColorTier,
                 fixedMaterialFamiliesEnabled,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
