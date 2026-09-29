@@ -3305,7 +3305,26 @@ if (debugMode == 16) {
         // runtime splat decoding plus repeated atlas sampling. Procedural detail
         // can be layered on top later without bringing back atlas fan-out.
         microSample = sampleResolvedTerrainColor(input, layer);
-        microColorPath = 2;
+        // resolvedColor is a refinement-stage output (generated in the
+        // background, same as splat), so a tile can be resident with this
+        // texture still zero-filled. Unlike splatIndex, zero-fill here isn't
+        // a decode issue — it's literally black with alpha=0, and real
+        // writes always store alpha=1 (see resolvedTerrainColorCompute.wgsl.js
+        // textureStore call). This tier covers a growing share of the screen
+        // as altitude increases (near/live band shrinks as a fraction of the
+        // visible dome), so an unrefined tile here was showing as expanding
+        // black area with altitude — confirmed by observation, not assumed.
+        // Fall back to the geometry pass's own raw tile color (always ready,
+        // no refinement wait) instead of black.
+        if (microSample.a < 0.5) {
+            microSample = sampleTileColor(
+                fallbackTileId, worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            microColorPath = 0;
+        } else {
+            microColorPath = 2;
+        }
     } else if (lod0ResolvedColorFade > 0.999) {
         // This branch varies per fragment, so use explicit-level sampling.
         // WGSL forbids derivative-taking textureSample in non-uniform control.

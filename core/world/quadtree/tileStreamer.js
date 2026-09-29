@@ -376,6 +376,7 @@ class TileArrayPool {
     // the geometry pass's own raw tile color instead of a fake material.
     _getSplatIndexSentinelTexture(format) {
         if (this._splatIndexSentinel) return this._splatIndexSentinel;
+        Logger.info(`[SplatSentinel] creating splatIndex sentinel texture, format=${format}, tileSize=${this.tileSize}`);
         const tex = this.device.createTexture({
             size: [this.tileSize, this.tileSize, 1],
             format,
@@ -2106,13 +2107,26 @@ _queueRefinement(tileAddr) {
 
         // A tile can go irrelevant (camera moved on) while sitting in the
         // refinement queue. It's still resident (ancestor-fallback-quality,
-        // via its geometry), so there's no correctness issue as long as it
-        // gets reconsidered once it's relevant again — queue it for retry
-        // rather than dropping it permanently (see _refinementRetryMap).
+        // via its geometry), so there's no correctness issue — just don't
+        // spend GPU time refining something nobody's looking at right now.
+        //
+        // Deliberately NOT queued for retry here (unlike the request===null
+        // path below): most resident tiles are "not relevant" at any given
+        // moment by design (cached off-screen tiles far outnumber currently-
+        // visible ones — confirmed via [QTLight]'s tileStates counts:
+        // RESIDENT far exceeds visible). Retrying this branch immediately
+        // re-queues nearly the entire resident population every tick, and
+        // since _retryDroppedRefinements() pulls it straight back out and
+        // re-queues it, the same tiles cycle through
+        // dequeue -> instantly-fail-relevance-again -> retry map -> dequeue
+        // forever, each cycle consuming one of the small refinement
+        // throughput slots. That livelock starves genuinely new refinement
+        // work completely (confirmed: refinement queueActive/tileStates
+        // frozen solid, zero progress, immediately after adding this retry —
+        // reverted after proving it via that data, not guessed).
         if (!this._describeTileDemandState(tileAddr, key).relevant) {
             this._telemetryByKey.delete(key);
             this._tileState.set(key, 'RESIDENT');
-            this._refinementRetryMap.set(key, tileAddr);
             return false;
         }
 
