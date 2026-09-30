@@ -185,6 +185,26 @@ export class TerrainMaterialBuilder {
                 !overlayPass &&
                 terrainShaderConfig?.solidColorTierEnabled === true &&
                 lod >= solidColorStartLod;
+            // The single LOD just before the solid-color tier starts: fade
+            // its color toward the coarse tier's averaged color as a function
+            // of distance to camera (not tile/chunk boundaries), so the
+            // transition doesn't visually trace the chunk grid and the two
+            // tiers already agree on color by the time the real LOD5->LOD6
+            // mesh seam is reached.
+            const lodEdgeToSolidColorStrength = Number.isFinite(terrainShaderConfig?.lodEdgeToSolidColorStrength)
+                ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeToSolidColorStrength))
+                : 0.0;
+            const lodEdgeToSolidColorFadeStartMeters = Number.isFinite(terrainShaderConfig?.lodEdgeToSolidColorFadeStartMeters)
+                ? Math.max(0.0, terrainShaderConfig.lodEdgeToSolidColorFadeStartMeters)
+                : 3000.0;
+            const lodEdgeToSolidColorFadeEndMeters = Number.isFinite(terrainShaderConfig?.lodEdgeToSolidColorFadeEndMeters)
+                ? Math.max(lodEdgeToSolidColorFadeStartMeters + 1.0, terrainShaderConfig.lodEdgeToSolidColorFadeEndMeters)
+                : lodEdgeToSolidColorFadeStartMeters + 3000.0;
+            const enableLodEdgeToSolidColor =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorTierEnabled === true &&
+                Number.isFinite(solidColorStartLod) &&
+                lod === solidColorStartLod - 1;
 
 
             const grassConfig = planetConfig?.grassConfig ?? null;
@@ -229,6 +249,10 @@ export class TerrainMaterialBuilder {
                 enableLodEdgeResolvedColor,
                 enableResolvedColorDebugBinding,
                 enableSolidColorTier,
+                enableLodEdgeToSolidColor,
+                lodEdgeToSolidColorStrength,
+                lodEdgeToSolidColorFadeStartMeters,
+                lodEdgeToSolidColorFadeEndMeters,
                 fixedMaterialFamiliesEnabled,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;

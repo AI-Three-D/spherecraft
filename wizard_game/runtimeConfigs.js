@@ -171,6 +171,18 @@ export function createEngineConfig() {
         lodEdgeAOStrength: 1.0,
         lodEdgeNormalStrength: 1.0,
         lodEdgeShadowStrength: 1.0,
+        // LOD5-only: fade its baseColor toward the same spatially-averaged
+        // coarse color LOD6 uses (sampleChunkAverageCoarseColor), purely as
+        // a function of camera distance (not tile/chunk boundaries — a
+        // simple smoothstep on distanceToCamera, cheaper than the tile-edge
+        // lodEdgeAmount mechanism and doesn't visually trace the chunk grid).
+        // Placeholder distances — tune by eye: should finish fading to solid
+        // color at or before the point LOD5 geometry actually switches to
+        // LOD6, so the two tiers already agree on color by the time the
+        // real mesh seam is reached.
+        lodEdgeToSolidColorStrength: 1.0,
+        lodEdgeToSolidColorFadeStartMeters: 3000.0,
+        lodEdgeToSolidColorFadeEndMeters: 6000.0,
         enableMacroLayer: false,
         forceMacroOverlay: false,
         pointSampleLodStart: 2,
@@ -183,13 +195,36 @@ export function createEngineConfig() {
         // completely untouched. Widen later once this is confirmed good.
         solidColorTierEnabled: true,
         solidColorStartLod: 6,
-        // Keep close and mid geometry on live category splats. The prebaked
-        // resolved-color path is only for far terrain; nearer use exposes
-        // hard category-mask contours because the prebake does not currently
-        // reproduce the fragment shader's live splat reconstruction.
-        lod0ResolvedColorEnabled: false,
-        lod0ResolvedColorFadeStartMeters: 128,
-        lod0ResolvedColorFadeEndMeters: 256,
+        // Was disabled: "prebaked resolved-color exposes hard category-mask
+        // contours because the prebake does not reproduce the fragment
+        // shader's live splat reconstruction." Re-testing (2026-09-30) at
+        // the user's request; the black-tile regression that first caused
+        // (missing resolvedColor alpha-validity check, mirrored from a bug
+        // fixed earlier today in a different call site) is now fixed at a
+        // shared helper (sampleResolvedColorOrFallback) covering every
+        // call site instead of one. Note: resolvedColor is baked from live
+        // splat data via a separate compute pass (resolvedTerrainColorCompute),
+        // NOT the category-average colors added earlier today for the
+        // solid-color tier — a different code path, so this isn't
+        // guaranteed to be the same already-fixed issue either way.
+        lod0ResolvedColorEnabled: true,
+        // These two (meters) are now used only as lod0AOFade's fallback
+        // default if lod0AOFadeStartMeters/EndMeters were unset — they no
+        // longer control the color blend itself, left at their original
+        // values. See lod0ResolvedColorFadeStartChunks/EndChunks below for
+        // the fade the color blend actually uses now.
+        lod0ResolvedColorFadeStartMeters: 8,
+        lod0ResolvedColorFadeEndMeters: 40,
+        // Mode-83 diagnostic (2026-09-30) showed 1500-3500m (and my
+        // "chunk-relative" 10-25 chunks, which at chunkSizeMeters=128 is
+        // 1280-3200m — barely different, my mistake) both sat entirely past
+        // where LOD4 actually switches to LOD5: fade was already fully
+        // saturated at 1.0 everywhere visible. Tightened per user request
+        // to a ~50m gradient (this is just a detail-level transition, not a
+        // large-scale effect): 1.0-1.4 chunks at chunkSizeMeters=128 ≈
+        // 128-180m.
+        lod0ResolvedColorFadeStartChunks: 1.0,
+        lod0ResolvedColorFadeEndChunks: 1.4,
         // AO has the same near-vs-prebaked frequency mismatch as albedo.
         // Fade LOD0 contact AO out over the same range so its tile-local
         // darkening does not stop abruptly where LOD1 takes over.

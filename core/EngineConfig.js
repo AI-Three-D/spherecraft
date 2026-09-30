@@ -122,6 +122,18 @@ export class EngineConfig {
           terrainShader.lodEdgeShadowStrength ?? 1.0,
           'rendering.terrainShader.lodEdgeShadowStrength'
         ),
+        lodEdgeToSolidColorStrength: requireNumber(
+          terrainShader.lodEdgeToSolidColorStrength ?? 0.0,
+          'rendering.terrainShader.lodEdgeToSolidColorStrength'
+        ),
+        lodEdgeToSolidColorFadeStartMeters: requireNumber(
+          terrainShader.lodEdgeToSolidColorFadeStartMeters ?? 3000.0,
+          'rendering.terrainShader.lodEdgeToSolidColorFadeStartMeters'
+        ),
+        lodEdgeToSolidColorFadeEndMeters: requireNumber(
+          terrainShader.lodEdgeToSolidColorFadeEndMeters ?? 6000.0,
+          'rendering.terrainShader.lodEdgeToSolidColorFadeEndMeters'
+        ),
         pointSampleLodStart: requireInt(terrainShader.pointSampleLodStart ?? 2, 'rendering.terrainShader.pointSampleLodStart', 0),
         macroStartLod: requireInt(terrainShader.macroStartLod ?? 2, 'rendering.terrainShader.macroStartLod', 0),
         splatTop2MaxLod: requireInt(terrainShader.splatTop2MaxLod ?? 2, 'rendering.terrainShader.splatTop2MaxLod', -1),
@@ -147,6 +159,18 @@ export class EngineConfig {
         lod0ResolvedColorFadeEndMeters: requireNumber(
           terrainShader.lod0ResolvedColorFadeEndMeters ?? 40,
           'rendering.terrainShader.lod0ResolvedColorFadeEndMeters'
+        ),
+        // Chunk-relative fade window actually used by the LOD4->5
+        // resolved-color blend (see computeLod0ResolvedColorFade) — the
+        // meters fields above remain only as lod0AOFade's fallback default,
+        // an unrelated LOD0 contact-AO feature.
+        lod0ResolvedColorFadeStartChunks: requireNumber(
+          terrainShader.lod0ResolvedColorFadeStartChunks ?? 10,
+          'rendering.terrainShader.lod0ResolvedColorFadeStartChunks'
+        ),
+        lod0ResolvedColorFadeEndChunks: requireNumber(
+          terrainShader.lod0ResolvedColorFadeEndChunks ?? 25,
+          'rendering.terrainShader.lod0ResolvedColorFadeEndChunks'
         ),
         lod0AOFadeEnabled: requireBool(
           terrainShader.lod0AOFadeEnabled ?? false,

@@ -501,6 +501,16 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     // build time by the caller (terrainMaterialBuilder.js) from the chunk's
     // own lod — no runtime branching risk at all.
     const enableSolidColorTier = options.enableSolidColorTier === true;
+    const enableLodEdgeToSolidColor = options.enableLodEdgeToSolidColor === true;
+    const lodEdgeToSolidColorStrength = Number.isFinite(options.lodEdgeToSolidColorStrength)
+        ? options.lodEdgeToSolidColorStrength
+        : 0.0;
+    const lodEdgeToSolidColorFadeStartMeters = Number.isFinite(options.lodEdgeToSolidColorFadeStartMeters)
+        ? options.lodEdgeToSolidColorFadeStartMeters
+        : 3000.0;
+    const lodEdgeToSolidColorFadeEndMeters = Number.isFinite(options.lodEdgeToSolidColorFadeEndMeters)
+        ? options.lodEdgeToSolidColorFadeEndMeters
+        : 6000.0;
     const maxLightIndices = options.maxLightIndices || 8192;
     const useArrayTextures = options.useArrayTextures === true;
     const aerialPerspectiveCode = getAerialPerspectiveWGSL();
@@ -535,6 +545,23 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const lod0ResolvedColorFadeEndMeters = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeEndMeters)
         ? Math.max(lod0ResolvedColorFadeStartMeters + 1.0, terrainShaderConfig.lod0ResolvedColorFadeEndMeters)
         : 40.0;
+    // Chunk-relative variant used by the ACTUAL LOD4->5 resolved-color
+    // blend (computeLod0ResolvedColorFade). An absolute-meters window
+    // (lod0ResolvedColorFadeStartMeters/EndMeters above, still used only as
+    // lod0AOFade's fallback default — unrelated LOD0 contact-AO feature,
+    // left untouched) turned out impossible to guess correctly: LOD4's
+    // real switch-to-LOD5 distance depends on chunk size, which varies by
+    // depth, so a fixed meters value only ever happens to work for one
+    // specific chunk size/altitude combination. Mirrors the same pattern
+    // already used by nearToMidFadeStartChunks/EndChunks (multiplied by
+    // fragUniforms.chunkWidth at runtime in WGSL) so this scales correctly
+    // regardless of chunk size. Still a first guess — needs visual tuning.
+    const lod0ResolvedColorFadeStartChunks = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeStartChunks)
+        ? Math.max(0.0, terrainShaderConfig.lod0ResolvedColorFadeStartChunks)
+        : 10.0;
+    const lod0ResolvedColorFadeEndChunks = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeEndChunks)
+        ? Math.max(lod0ResolvedColorFadeStartChunks + 0.01, terrainShaderConfig.lod0ResolvedColorFadeEndChunks)
+        : 25.0;
     const enableLod0AOFade =
         terrainShaderConfig.lod0AOFadeEnabled === true &&
         lod === 0;
@@ -894,8 +921,8 @@ const NEAR_DETAIL_CREVICE_COVERAGE: f32 = ${nearDetailCreviceCoverage.toFixed(4)
 const NEAR_DETAIL_FADE_START: f32 = ${nearDetailFadeStartMeters.toFixed(1)};
 const NEAR_DETAIL_FADE_END: f32 = ${nearDetailFadeEndMeters.toFixed(1)};
 const ENABLE_LOD0_RESOLVED_COLOR: bool = ${enableLod0ResolvedColor ? 'true' : 'false'};
-const LOD0_RESOLVED_COLOR_FADE_START: f32 = ${lod0ResolvedColorFadeStartMeters.toFixed(1)};
-const LOD0_RESOLVED_COLOR_FADE_END: f32 = ${lod0ResolvedColorFadeEndMeters.toFixed(1)};
+const LOD0_RESOLVED_COLOR_FADE_START_CHUNKS: f32 = ${lod0ResolvedColorFadeStartChunks.toFixed(3)};
+const LOD0_RESOLVED_COLOR_FADE_END_CHUNKS: f32 = ${lod0ResolvedColorFadeEndChunks.toFixed(3)};
 const ENABLE_LOD0_AO_FADE: bool = ${enableLod0AOFade ? 'true' : 'false'};
 const LOD0_AO_FADE_START: f32 = ${lod0AOFadeStartMeters.toFixed(1)};
 const LOD0_AO_FADE_END: f32 = ${lod0AOFadeEndMeters.toFixed(1)};
@@ -921,6 +948,10 @@ const NEAR_TO_MID_FADE_END_CHUNKS: f32 = ${nearToMidFadeEndChunks.toFixed(2)};
 const ENABLE_MACRO_OVERLAY: bool = ${enableMacroOverlay ? 'true' : 'false'};
 const ENABLE_RESOLVED_COLOR: bool = ${enableResolvedColor ? 'true' : 'false'};
 const ENABLE_SOLID_COLOR_TIER: bool = ${enableSolidColorTier ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_TO_SOLID_COLOR: bool = ${enableLodEdgeToSolidColor ? 'true' : 'false'};
+const LOD_EDGE_TO_SOLID_COLOR_STRENGTH: f32 = ${lodEdgeToSolidColorStrength.toFixed(4)};
+const LOD_EDGE_TO_SOLID_COLOR_FADE_START: f32 = ${lodEdgeToSolidColorFadeStartMeters.toFixed(2)};
+const LOD_EDGE_TO_SOLID_COLOR_FADE_END: f32 = ${lodEdgeToSolidColorFadeEndMeters.toFixed(2)};
 const HAS_RESOLVED_COLOR_TEXTURE: bool = ${includeResolvedColorBinding ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
 const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
@@ -1104,6 +1135,46 @@ fn applyChunkAtlasUV(uv: vec2<f32>, tex: texture_2d_array<f32>, atlasOffset: vec
     return (parentLocalUV * maxF + vec2<f32>(0.5)) / texSize;
 }
 
+// Same as applyChunkAtlasUV, but does NOT clamp the incoming chunk-local uv
+// to [0,1] before applying atlasOffset/atlasScale. Many chunks of the same
+// quadtree tile share ONE underlying tile texture, each mapped to its own
+// sub-rectangle via atlasOffset/atlasScale — so a uv slightly outside this
+// chunk's own [0,1] range still lands in a valid, meaningful region of that
+// SAME shared texture (the neighboring chunk's sub-rectangle), not garbage.
+// applyChunkAtlasUV's internal clamp prevents ever reaching that region,
+// which is exactly why sampleChunkAverageCoarseColor's box filter produced
+// a hard, chunk-shaped edge: every chunk's average was silently clipped to
+// only its own footprint, so neighboring chunks' independently-clipped
+// averages didn't agree at the shared boundary. The final atlas-space texel
+// coordinate is still safely clamped to the whole physical texture by
+// sampleRGBA32FNearest's own bounds check, so this can't read out of bounds.
+fn applyChunkAtlasUVUnbounded(uv: vec2<f32>, tex: texture_2d_array<f32>, atlasOffset: vec2<f32>, atlasScale: f32) -> vec2<f32> {
+    if (fragUniforms.useAtlasMode == 0) { return uv; }
+    let texSize = vec2<f32>(textureDimensions(tex));
+    let parentLocalUV = atlasOffset + uv * atlasScale;
+    let maxF = max(texSize - vec2<f32>(1.0), vec2<f32>(1.0));
+    return (parentLocalUV * maxF + vec2<f32>(0.5)) / texSize;
+}
+
+// Single source of truth for "read resolvedColor safely to blend with
+// something else." resolvedColor is a refinement-stage output; any
+// not-yet-refined tile leaves it zero-filled (black, alpha=0 — confirmed via
+// resolvedTerrainColorCompute.wgsl.js: real writes always store alpha=1).
+// Every one of the several LOD0/LOD-edge resolved-color blend sites in this
+// file needs to treat alpha<0.5 as "not ready" and fall back to whatever
+// color it would otherwise have kept, instead of silently mixing toward
+// black. That check was present in the main ENABLE_RESOLVED_COLOR tier
+// (fixed earlier) but had been independently duplicated — and missed — at
+// every other call site. Centralizing it here means fixing it once instead
+// of matching this exact check at each new call site by hand.
+fn sampleResolvedColorOrFallback(input: FragmentInput, layer: i32, fallback: vec3<f32>) -> vec3<f32> {
+    let sampled = sampleResolvedTerrainColorLevel(input, layer);
+    if (sampled.a < 0.5) {
+        return fallback;
+    }
+    return sampled.rgb;
+}
+
 fn applyChunkAtlasUV_2d(uv: vec2<f32>, texSize: vec2<f32>, atlasOffset: vec2<f32>, atlasScale: f32) -> vec2<f32> {
     if (fragUniforms.useAtlasMode == 0) { return uv; }
     let parentLocalUV = atlasOffset
@@ -1174,6 +1245,73 @@ fn sampleChunkTileId(input: FragmentInput, layer: i32) -> f32 {
     let uv = applyChunkAtlasUV(tileUV, tileTexture, input.vAtlasOffset, input.vAtlasScale);
     let s = sampleRGBA32FNearest(tileTexture, uv, layer);
     return decodeTileId(s.r);
+}
+
+// Diagnostic/first-pass fix for LOD6 horizon grain: sampleChunkTileId takes
+// exactly ONE nearest-neighbor texel from the full-resolution tile texture,
+// so a single stray texel (e.g. one sand id inside an otherwise-grass area)
+// makes the sampled region snap to that one material's color, and real
+// small coherent patches can be missed entirely if the sample misses them.
+//
+// First attempt here SNAPPED the sample window to the chunk cell (same
+// fixed window for every fragment in that chunk) — that only blurred the
+// existing chunk-block artifact in place, since every fragment in a chunk
+// still computed the identical average. This version instead centers a
+// window on each fragment's OWN vUv, so it slides continuously and no
+// longer aligns to chunk boundaries, and uses a denser 8x8 grid (64
+// samples) since the underlying speckle noise is sparser/finer than one
+// chunk cell. Per-category COLOR is averaged, never the raw id, since ids
+// are categorical and can't be interpolated meaningfully — large coherent
+// regions still dominate the average; small isolated ones blend in instead
+// of aliasing. Uses only the always-ready geometry-pass tile texture, so
+// this keeps the solid-color tier's zero-refinement-wait property; no
+// splat/resolvedColor dependency added. 64 texture loads/fragment is fine
+// for this diagnostic; the persistent fix should precompute a small
+// per-tile color texture instead of doing this live every frame.
+fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> {
+    // NOTE: fragUniforms.chunkWidth is NOT a subdivision count — it's
+    // chunkSizeMeters (world-space meters) reused as-is for an unrelated
+    // texel-snap in sampleChunkTileId. Using 1/chunkWidth here as a window
+    // size was a units bug: it produced a window a small fraction of one
+    // geometry chunk's own local UV span — far too small to contain any
+    // real variation, which is why more samples changed nothing. Using an
+    // explicit large fraction of the chunk's local UV span instead, sized
+    // for this diagnostic to unambiguously prove/disprove whether real
+    // small-scale variation exists in the tile texture at all.
+    let windowSize = 0.35;
+    let center = input.vUv;
+
+    var colorSum = vec3<f32>(0.0, 0.0, 0.0);
+    for (var gy: i32 = 0; gy < 8; gy = gy + 1) {
+        for (var gx: i32 = 0; gx < 8; gx = gx + 1) {
+            let cellCenter = (vec2<f32>(f32(gx), f32(gy)) + vec2<f32>(0.5, 0.5)) / 8.0 - vec2<f32>(0.5, 0.5);
+            // Per-sample jitter (self-contained hash, no dependency on any
+            // other function's declaration order) so the sample positions
+            // aren't a perfectly regular grid — a rigid grid beats against
+            // the tile texture's own spatial pattern as the window slides
+            // continuously across fragments, producing visible moiré
+            // stripes. Jittering each sample within its own cell breaks
+            // that coherent beat into unstructured (much less visible)
+            // noise instead.
+            let jitterSeed = input.vWorldPos.xy * 0.173
+                + vec2<f32>(f32(gx) * 12.9898, f32(gy) * 78.233);
+            let jx = fract(sin(dot(jitterSeed, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
+            let jy = fract(sin(dot(jitterSeed, vec2<f32>(39.346, 11.135))) * 24634.6345) - 0.5;
+            // NOT clamped to [0,1] here — deliberately allowed to extend
+            // into a neighboring chunk's own sub-rectangle of the same
+            // shared tile texture (see applyChunkAtlasUVUnbounded above).
+            // Clamping here was the cause of the hard, chunk-shaped seam:
+            // every chunk's average was clipped to its own footprint only,
+            // so adjacent chunks' independently-clipped averages disagreed
+            // right at the shared edge.
+            let sampleUV01 = center + (cellCenter + vec2<f32>(jx, jy) * 0.5) * windowSize;
+            let uv = applyChunkAtlasUVUnbounded(sampleUV01, tileTexture, input.vAtlasOffset, input.vAtlasScale);
+            let s = sampleRGBA32FNearest(tileTexture, uv, layer);
+            let tileId = decodeTileId(s.r);
+            colorSum = colorSum + coarseTileColor(tileId);
+        }
+    }
+    return colorSum / 64.0;
 }
 
 fn debugHash12(p: vec2<f32>) -> f32 {
@@ -2461,11 +2599,15 @@ fn computeLod0ResolvedColorFade(input: FragmentInput) -> f32 {
     if (!ENABLE_LOD0_RESOLVED_COLOR) {
         return 0.0;
     }
-    return smoothstep(
-        LOD0_RESOLVED_COLOR_FADE_START,
-        LOD0_RESOLVED_COLOR_FADE_END,
-        input.vDistanceToCamera
-    );
+    // Chunk-relative, not a fixed meters window — mode-83 diagnostic
+    // (2026-09-30) showed a fixed-meters window was always either fully
+    // 0 or fully 1 across every visible LOD4 chunk, because LOD4's actual
+    // switch-to-LOD5 distance scales with chunk size (varies by depth) and
+    // a hardcoded meters value only ever matches one specific case. Mirrors
+    // computeNearToMidDetailFade's existing chunkWidth-relative pattern.
+    let fadeStart = max(fragUniforms.chunkWidth * LOD0_RESOLVED_COLOR_FADE_START_CHUNKS, 0.0);
+    let fadeEnd = max(fragUniforms.chunkWidth * LOD0_RESOLVED_COLOR_FADE_END_CHUNKS, fadeStart + 0.001);
+    return smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
 }
 
 fn computeLod0AOFade(input: FragmentInput) -> f32 {
@@ -3194,8 +3336,13 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(sampleResolvedTerrainColorNearest(input, layer).rgb, 1.0);
     }
+    // Mode 99: the NEW spatially-averaged LOD6 color (horizon-grain fix),
+    // isolated the same way mode 96 isolates the OLD single-sample color —
+    // direct before/after comparison at the same camera position. Compare
+    // against mode 96 to confirm grain disappears while large coherent
+    // regions look the same.
     if (debugMode == 99) {
-        return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        return vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
     }
     if (debugMode == 5) {
         let zm = sampleZoneMaskSmooth(input, layer);
@@ -3313,6 +3460,20 @@ if (debugMode == 16) {
     let nearToMidDetailFade = computeNearToMidDetailFade(input);
     let lod0ResolvedColorFade = computeLod0ResolvedColorFade(input);
     let lod0AOFade = computeLod0AOFade(input);
+    // Mode 83: raw lod0ResolvedColorFade value as a heatmap (black=0/pure
+    // live detail, red=1/pure resolvedColor, green=mid-transition) — proves
+    // what the fade actually is at a given point instead of guessing from
+    // the visual result. If this LOD4 chunk is uniformly black or uniformly
+    // red across its whole visible area, the fade-distance window
+    // (lod0ResolvedColorFadeStart/EndMeters) doesn't overlap this chunk's
+    // actual camera-distance range at all — no partial blend is possible
+    // for any fragment in it, regardless of the shader logic being correct.
+    if (debugMode == 83) {
+        let heat = clamp(lod0ResolvedColorFade, 0.0, 1.0);
+        let color = mix(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), heat);
+        let midGlow = 1.0 - abs(heat - 0.5) * 2.0;
+        return vec4<f32>(color + vec3<f32>(0.0, max(midGlow, 0.0) * 0.6, 0.0), 1.0);
+    }
 
     let fallbackTileId = sampleChunkTileId(input, layer);
     let worldTileCoord = floor(input.vWorldPos);
@@ -3376,7 +3537,7 @@ if (debugMode == 16) {
         // tier already goes through below, using the real per-tile normal
         // (now extending to orbital distance) — that's what actually makes
         // this worth doing over a plain unlit flat color.
-        microSample = vec4<f32>(coarseTileColor(fallbackTileId), 1.0);
+        microSample = vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
         microColorPath = 0;
     } else if (ENABLE_RESOLVED_COLOR) {
         // Resolved-color path: one chunk-local prebaked color sample replaces
@@ -3406,8 +3567,21 @@ if (debugMode == 16) {
     } else if (lod0ResolvedColorFade > 0.999) {
         // This branch varies per fragment, so use explicit-level sampling.
         // WGSL forbids derivative-taking textureSample in non-uniform control.
-        microSample = sampleResolvedTerrainColorLevel(input, layer);
-        microColorPath = 1;
+        // Same not-yet-refined-tile fallback as the ENABLE_RESOLVED_COLOR
+        // branch above — this is a direct overwrite (not a mix), so a
+        // missing check here doesn't just tint the blend, it replaces the
+        // whole fragment with solid black outright.
+        let resolvedSample = sampleResolvedTerrainColorLevel(input, layer);
+        if (resolvedSample.a < 0.5) {
+            microSample = sampleTileColor(
+                fallbackTileId, worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            microColorPath = 0;
+        } else {
+            microSample = resolvedSample;
+            microColorPath = 1;
+        }
     } else if (hasLiveSplat) {
         if (USE_FIXED_MATERIAL_FAMILIES) {
             microSample = sampleMicroTextureWithFixedMaterialFamilies(
@@ -3954,7 +4128,7 @@ if (debugMode == 16) {
     var baseColor = microSample.rgb;
 
     if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
-        let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        let resolvedColor = sampleResolvedColorOrFallback(input, layer, baseColor);
         baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
     }
     if (debugMode == 84) {
@@ -3963,7 +4137,7 @@ if (debugMode == 16) {
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
         if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
-            let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+            let resolvedColor = sampleResolvedColorOrFallback(input, layer, unionBase);
             unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
         }
         return vec4<f32>(unionBase, 1.0);
@@ -3986,7 +4160,7 @@ if (debugMode == 16) {
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
         if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
-            let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+            let resolvedColor = sampleResolvedColorOrFallback(input, layer, unionBase);
             unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
         }
         // Mode 87: swap union in for fallback (!bilinearValid) pixels.
@@ -4019,12 +4193,38 @@ if (debugMode == 16) {
     }
 
     if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
-        let resolvedEdgeColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        let resolvedEdgeColor = sampleResolvedColorOrFallback(input, layer, baseColor);
         baseColor = mix(
             baseColor,
             resolvedEdgeColor,
             clamp(lodEdgeAmount * LOD_EDGE_COLOR_STRENGTH, 0.0, 1.0)
         );
+    }
+    // Only compiled true for the single LOD immediately before the solid-
+    // color tier starts (e.g. LOD5 when solidColorStartLod=6). Fades this
+    // LOD's real detailed/lit color toward the SAME spatially-averaged color
+    // the solid-color tier itself renders, purely as a function of camera
+    // distance — NOT tile/chunk boundaries (deliberately not lodEdgeAmount):
+    // a per-chunk edge fade visibly traces the chunk grid as a seam shape,
+    // while a distance-based smoothstep is a plain camera-centered shell,
+    // cheaper too (no per-vertex neighbor-LOD data needed). Should finish
+    // fading to solid color at/before the real LOD5->LOD6 mesh transition
+    // distance so both tiers already agree on color by the time that seam
+    // is reached; tune via lodEdgeToSolidColorFadeStart/EndMeters.
+    if (ENABLE_LOD_EDGE_TO_SOLID_COLOR && LOD_EDGE_TO_SOLID_COLOR_STRENGTH > 0.0001) {
+        let solidColorDistanceFade = smoothstep(
+            LOD_EDGE_TO_SOLID_COLOR_FADE_START,
+            LOD_EDGE_TO_SOLID_COLOR_FADE_END,
+            input.vDistanceToCamera
+        );
+        if (solidColorDistanceFade > 0.0001) {
+            let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
+            baseColor = mix(
+                baseColor,
+                solidEdgeColor,
+                clamp(solidColorDistanceFade * LOD_EDGE_TO_SOLID_COLOR_STRENGTH, 0.0, 1.0)
+            );
+        }
     }
     if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
@@ -4036,7 +4236,7 @@ if (debugMode == 16) {
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
         if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
-            let resolvedColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+            let resolvedColor = sampleResolvedColorOrFallback(input, layer, unionBase);
             unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
         }
         if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
@@ -4054,7 +4254,7 @@ if (debugMode == 16) {
             }
         }
         if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
-            let resolvedEdgeColor = sampleResolvedTerrainColorLevel(input, layer).rgb;
+            let resolvedEdgeColor = sampleResolvedColorOrFallback(input, layer, unionBase);
             unionBase = mix(
                 unionBase,
                 resolvedEdgeColor,
