@@ -195,18 +195,41 @@ export function createEngineConfig() {
         // completely untouched. Widen later once this is confirmed good.
         solidColorTierEnabled: true,
         // Experiment (2026-10-02): LOD5 renders the flat solid-color tier
-        // (previously LOD6+ only), and LOD4 blends into it inside its own
-        // tiles (solidColorTierEdgeBlend* below) instead of the old
-        // LOD5-only camera-distance fade, which left a hard step at the
-        // LOD4/5 line. The prebaked LOD5 tier is still in the code: set this
-        // back to 6 to restore it (the in-tile blend then applies to LOD5
-        // toward LOD6 instead).
+        // (previously LOD6+ only). The prebaked LOD5 tier is still in the
+        // code: set this back to 6 to restore it.
         solidColorStartLod: 5,
+        // Distance ramp into the solid tier: every LOD below the tier mixes
+        // its color toward the tier's flat color by camera distance. Start
+        // and end are recomputed every frame from the traversal's LOD metric
+        // (QuadtreeTerrainRenderer._computeTierFadeDistances), so the ramp
+        // keeps its place relative to the LOD bands on any canvas size and
+        // moves smoothly with the camera instead of jumping with tile splits.
+        // It ends where the nearest solid-tier pixel can appear, so both
+        // sides of the LOD boundary are fully flat where they meet.
+        solidColorTierDistanceFadeEnabled: true,
+        // Ramp length, as a fraction of the solid tier's split distance.
+        solidColorTierDistanceFadeBandFraction: 0.3,
+        // Terrain-height allowance (m) in the "nearest possible solid-tier
+        // pixel" bound.
+        solidColorTierDistanceFadeHeightMarginMeters: 1000,
+        // 1.0 = the ramp always completes before any solid-tier pixel can
+        // appear (worst-case geometry). Lower values push detail farther out
+        // and rely on the edge safety net below where a solid-tier tile is
+        // drawn nearer. 0.5 measured seamless at the LOD4/5 line while
+        // flattening 5 % of LOD4 pixels vs 12 % at 1.0 (2880x1800 canvas,
+        // 4 km altitude; see LOD4_LOD5_BLEND_ANALYSIS.md section 10).
+        solidColorTierDistanceFadeEndSafety: 0.5,
+        // In-tile ramp toward edges shared with a solid-tier neighbour.
+        // Now a narrow safety net: combined with the distance ramp by max().
         solidColorTierEdgeBlendEnabled: true,
-        // Fraction of the tile, from the shared edge, over which the LOD
-        // before the solid tier ramps into the solid color. 0.5 = half tile.
-        solidColorTierEdgeBlendWidth: 0.5,
+        // Fraction of the tile, from the shared edge, the safety-net ramp spans.
+        solidColorTierEdgeBlendWidth: 0.15,
         solidColorTierEdgeBlendStrength: 1.0,
+        // World-size averaging window (m) of the flat color, identical in
+        // every tier so the color does not change when a tile splits or
+        // merges. Was 35 % of each tile (1434 m on LOD5, 2867 m on LOD6).
+        // 0 = legacy 35 %-of-tile window.
+        solidColorAverageWindowMeters: 1434,
         // Was disabled: "prebaked resolved-color exposes hard category-mask
         // contours because the prebake does not reproduce the fragment
         // shader's live splat reconstruction." Re-testing (2026-09-30) at

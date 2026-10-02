@@ -223,17 +223,32 @@ export class TerrainMaterialBuilder {
             const tierEdgeBlendStrength = Number.isFinite(terrainShaderConfig?.solidColorTierEdgeBlendStrength)
                 ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.solidColorTierEdgeBlendStrength))
                 : 1.0;
-            // sampleChunkAverageCoarseColor averages over a window sized in
-            // the tile's own UV. Scale it so this finer LOD averages over the
-            // same world-space area as the solid-tier tile across the edge
-            // (one LOD coarser = twice the tile size), so both sides compute
-            // the same color where they meet.
-            const solidColorWindowScale = enableTierEdgeBlend
-                ? Math.pow(2, Math.max(0, solidColorStartLod - lod))
-                : 1.0;
+            // Camera-distance ramp into the solid tier, compiled into EVERY LOD
+            // below it so all of them evaluate the same weight at the same
+            // distance (no step when a tile splits or merges). The ramp's
+            // start/end are uniforms (tierFadeStart/tierFadeEnd) refreshed
+            // each frame by QuadtreeTerrainRenderer from the traversal's LOD
+            // metric; they default to 0/0, which disables the ramp.
+            const enableTierDistanceFade =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorTierEnabled === true &&
+                terrainShaderConfig?.solidColorTierDistanceFadeEnabled === true &&
+                Number.isFinite(solidColorStartLod) &&
+                lod < solidColorStartLod;
+            // World-size averaging window for sampleChunkAverageCoarseColor,
+            // so every tier averages the same ground area (0 = legacy 35 % of
+            // the tile). The shader converts it to tile UV per instance using
+            // the instance's own tile size and the cube-face size.
+            const solidColorAverageWindowMeters = Number.isFinite(terrainShaderConfig?.solidColorAverageWindowMeters)
+                ? Math.max(0, terrainShaderConfig.solidColorAverageWindowMeters)
+                : 0;
+            const faceSizeMeters = Number.isFinite(planetConfig?.radius)
+                ? 2.0 * planetConfig.radius
+                : 0;
             const enableLodEdgeToSolidColor =
                 isLodBeforeSolidTier &&
-                !enableTierEdgeBlend;
+                !enableTierEdgeBlend &&
+                !enableTierDistanceFade;
 
 
             const grassConfig = planetConfig?.grassConfig ?? null;
@@ -285,7 +300,9 @@ export class TerrainMaterialBuilder {
                 enableTierEdgeBlend,
                 tierEdgeBlendWidth,
                 tierEdgeBlendStrength,
-                solidColorWindowScale,
+                enableTierDistanceFade,
+                solidColorAverageWindowMeters,
+                faceSizeMeters,
                 fixedMaterialFamiliesEnabled,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
@@ -426,7 +443,11 @@ resolvedColorTexture: { value: cachedTextures.resolvedColor },
             macroNoiseWeight: { value: macroNoiseWeight },
             terrainDebugMode: { value: debugMode },
             terrainLayerViewMode: { value: 0 },
-            
+            // Distance ramp into the solid-color tier (camera distance, m).
+            // Written every frame by QuadtreeTerrainRenderer; 0/0 = off.
+            tierFadeStart: { value: 0.0 },
+            tierFadeEnd: { value: 0.0 },
+
             tileScale: { value: 1.0 },
             isFeature: { value: 0.0 },
 

@@ -2105,8 +2105,11 @@ _packFragmentUniforms(uniforms) {
     f32[55] = uniforms.macroNoiseWeight?.value ?? 0.5;
     i32[56] = uniforms.terrainDebugMode?.value ?? 0;
     i32[57] = uniforms.terrainLayerViewMode?.value ?? 0;
-    i32[58] = 0;
-    i32[59] = 0;
+    // Former padding: distance ramp into the solid-color tier (metres).
+    // Terrain fragment shader reads these as tierFadeStart/tierFadeEnd; the
+    // hover-overlay shader still declares them as unused padding.
+    f32[58] = uniforms.tierFadeStart?.value ?? 0.0;
+    f32[59] = uniforms.tierFadeEnd?.value ?? 0.0;
 
     i32[60] = uniforms.terrainHoverFace?.value ?? -1;
     i32[61] = uniforms.terrainHoverFlags?.value ?? 0;

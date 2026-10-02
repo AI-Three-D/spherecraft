@@ -167,6 +167,31 @@ export class EngineConfig {
           terrainShader.solidColorTierEdgeBlendStrength ?? 1.0,
           'rendering.terrainShader.solidColorTierEdgeBlendStrength'
         ),
+        // Camera-distance ramp into the solid-color tier, evaluated the same
+        // way by every LOD below the tier. Its start/end are derived each
+        // frame from the traversal's LOD metric by QuadtreeTerrainRenderer.
+        solidColorTierDistanceFadeEnabled: requireBool(
+          terrainShader.solidColorTierDistanceFadeEnabled ?? false,
+          'rendering.terrainShader.solidColorTierDistanceFadeEnabled'
+        ),
+        solidColorTierDistanceFadeBandFraction: requireNumber(
+          terrainShader.solidColorTierDistanceFadeBandFraction ?? 0.3,
+          'rendering.terrainShader.solidColorTierDistanceFadeBandFraction'
+        ),
+        solidColorTierDistanceFadeHeightMarginMeters: requireNumber(
+          terrainShader.solidColorTierDistanceFadeHeightMarginMeters ?? 1000,
+          'rendering.terrainShader.solidColorTierDistanceFadeHeightMarginMeters'
+        ),
+        solidColorTierDistanceFadeEndSafety: requireNumber(
+          terrainShader.solidColorTierDistanceFadeEndSafety ?? 1.0,
+          'rendering.terrainShader.solidColorTierDistanceFadeEndSafety'
+        ),
+        // World-size averaging window (m) of the solid-tier color; 0 keeps
+        // the legacy window of 35 % of each tile.
+        solidColorAverageWindowMeters: requireNumber(
+          terrainShader.solidColorAverageWindowMeters ?? 0,
+          'rendering.terrainShader.solidColorAverageWindowMeters'
+        ),
         lod0ResolvedColorEnabled: requireBool(
           terrainShader.lod0ResolvedColorEnabled ?? false,
           'rendering.terrainShader.lod0ResolvedColorEnabled'

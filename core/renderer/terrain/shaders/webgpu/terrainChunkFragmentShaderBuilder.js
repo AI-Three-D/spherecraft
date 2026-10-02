@@ -522,9 +522,17 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const tierEdgeBlendStrength = Number.isFinite(options.tierEdgeBlendStrength)
         ? Math.min(1.0, Math.max(0.0, options.tierEdgeBlendStrength))
         : 1.0;
-    const solidColorWindowScale = Number.isFinite(options.solidColorWindowScale)
-        ? Math.max(0.01, options.solidColorWindowScale)
-        : 1.0;
+    // Camera-distance ramp into the solid tier, compiled into every LOD below
+    // it; the weight uses fragUniforms.tierFadeStart/tierFadeEnd (per frame).
+    const enableTierDistanceFade = options.enableTierDistanceFade === true;
+    // World-size averaging window of the solid-tier color (0 = legacy 35 %
+    // of the tile) and the cube-face size used to convert it to tile UV.
+    const solidColorAverageWindowMeters = Number.isFinite(options.solidColorAverageWindowMeters)
+        ? Math.max(0, options.solidColorAverageWindowMeters)
+        : 0;
+    const faceSizeMeters = Number.isFinite(options.faceSizeMeters)
+        ? Math.max(0, options.faceSizeMeters)
+        : 0;
     const maxLightIndices = options.maxLightIndices || 8192;
     const useArrayTextures = options.useArrayTextures === true;
     const aerialPerspectiveCode = getAerialPerspectiveWGSL();
@@ -969,10 +977,12 @@ const LOD_EDGE_TO_SOLID_COLOR_FADE_END: f32 = ${lodEdgeToSolidColorFadeEndMeters
 const ENABLE_TIER_EDGE_BLEND: bool = ${enableTierEdgeBlend ? 'true' : 'false'};
 const TIER_EDGE_BLEND_WIDTH: f32 = ${tierEdgeBlendWidth.toFixed(4)};
 const TIER_EDGE_BLEND_STRENGTH: f32 = ${tierEdgeBlendStrength.toFixed(4)};
-// Averaging window of sampleChunkAverageCoarseColor in this tile's UV.
-// 0.35 of the tile by default; scaled up in the LOD before the solid tier so
-// it covers the same world area as the coarser solid-tier tile next to it.
-const SOLID_COLOR_WINDOW_UV: f32 = ${(0.35 * solidColorWindowScale).toFixed(4)};
+const ENABLE_TIER_DISTANCE_FADE: bool = ${enableTierDistanceFade ? 'true' : 'false'};
+// Averaging window of sampleChunkAverageCoarseColor, in metres of ground
+// (0 = legacy: 35 % of the tile's own UV span), and the cube-face size used
+// to convert it into each instance's tile UV.
+const SOLID_COLOR_WINDOW_METERS: f32 = ${solidColorAverageWindowMeters.toFixed(2)};
+const FACE_SIZE_METERS: f32 = ${faceSizeMeters.toFixed(2)};
 const HAS_RESOLVED_COLOR_TEXTURE: bool = ${includeResolvedColorBinding ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
 const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
@@ -1057,8 +1067,10 @@ struct FragmentUniforms {
     macroNoiseWeight: f32,
     terrainDebugMode: i32,
     terrainLayerViewMode: i32,
-    _debugPad1: i32,
-    _debugPad2: i32,
+    // Distance ramp into the solid-color tier (camera distance, m), written
+    // each frame by QuadtreeTerrainRenderer. Formerly _debugPad1/_debugPad2.
+    tierFadeStart: f32,
+    tierFadeEnd: f32,
 };
 
 @group(0) @binding(1) var<uniform> fragUniforms: FragmentUniforms;
@@ -1299,7 +1311,15 @@ fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> 
     // explicit large fraction of the chunk's local UV span instead, sized
     // for this diagnostic to unambiguously prove/disprove whether real
     // small-scale variation exists in the tile texture at all.
-    let windowSize = SOLID_COLOR_WINDOW_UV;
+    // World-size window when configured, so every tier (and every tile size
+    // drawn by the same LOD variant) averages the same ground area and the
+    // color does not change when a tile splits or merges. vFaceInfo.z is the
+    // instance's own tile size in face UV.
+    var windowSize = 0.35;
+    if (SOLID_COLOR_WINDOW_METERS > 0.0 && FACE_SIZE_METERS > 0.0) {
+        let tileMeters = max(input.vFaceInfo.z * FACE_SIZE_METERS, 1.0);
+        windowSize = SOLID_COLOR_WINDOW_METERS / tileMeters;
+    }
     let center = input.vUv;
 
     var colorSum = vec3<f32>(0.0, 0.0, 0.0);
@@ -1358,6 +1378,23 @@ fn computeTierEdgeBlend(input: FragmentInput) -> f32 {
     if ((mask & 1u) != 0u) { edgeDistance = min(edgeDistance, 1.0 - uv.y); }
     let ramp = 1.0 - smoothstep(0.0, max(TIER_EDGE_BLEND_WIDTH, 0.0001), edgeDistance);
     return clamp(ramp * TIER_EDGE_BLEND_STRENGTH, 0.0, 1.0);
+}
+
+// Camera-distance ramp into the solid-color tier. Every LOD below the tier
+// evaluates exactly this, so the weight at a point does not depend on which
+// tile draws it. tierFadeEnd is where the nearest solid-tier pixel can
+// appear (derived per frame from the traversal's LOD metric), so the
+// weight is 1 wherever a solid-tier tile can border this one.
+fn computeTierDistanceFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_TIER_DISTANCE_FADE) {
+        return 0.0;
+    }
+    let fadeStart = fragUniforms.tierFadeStart;
+    let fadeEnd = fragUniforms.tierFadeEnd;
+    if (fadeEnd <= fadeStart) {
+        return 0.0;
+    }
+    return smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
 }
 
 fn debugHash12(p: vec2<f32>) -> f32 {
@@ -3163,17 +3200,19 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     //   orange       10,000-100,000m
     //   red          100,000-1,000,000m
     //   white        >= 1,000,000m
-    // Mode 104: weight of the in-tile blend into the solid-color tier.
-    // Black = no blend (or a LOD without it), yellow = fully solid color at
-    // the edge shared with a coarser (solid-tier) neighbour. Tiles of the
-    // solid tier itself are tinted dark blue so the boundary stays visible.
+    // Mode 104: blend weights into the solid-color tier.
+    // Red = camera-distance ramp, green = in-tile safety-net ramp (red and
+    // green together read as yellow). Black = detail material untouched.
+    // Tiles of the solid tier itself are dark blue, so the LOD boundary
+    // stays visible.
     if (debugMode == 104) {
-        let w = computeTierEdgeBlend(input);
-        var c = mix(vec3<f32>(0.04, 0.04, 0.04), vec3<f32>(1.0, 0.85, 0.1), w);
+        let wDistance = computeTierDistanceFade(input);
+        let wEdge = computeTierEdgeBlend(input);
+        var c = vec3<f32>(0.04, 0.04, 0.04) + vec3<f32>(wDistance, wEdge * 0.85, 0.0);
         if (ENABLE_SOLID_COLOR_TIER) {
             c = vec3<f32>(0.05, 0.10, 0.45);
         }
-        return vec4<f32>(c, 1.0);
+        return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
     if (debugMode == 103) {
         let d = input.vDistanceToCamera;
@@ -4361,15 +4400,16 @@ if (debugMode == 16) {
             );
         }
     }
-    // In-tile alternative to the distance fade above (only one of the two is
-    // compiled into a given LOD): ramp into the solid tier's color across
-    // the part of this tile that borders a coarser neighbour, reaching it
-    // exactly at the shared edge, where the neighbour draws the same color.
-    if (ENABLE_TIER_EDGE_BLEND) {
-        let tierEdgeBlend = computeTierEdgeBlend(input);
-        if (tierEdgeBlend > 0.0001) {
+    // Blend into the solid tier's color. Main ramp: camera distance, the same
+    // in every LOD below the tier. Safety net: an in-tile ramp toward edges
+    // shared with a solid-tier neighbour, for the rare tile drawn nearer
+    // than the distance ramp's end. The larger of the two wins. Replaces the
+    // older LOD5-only distance fade above when either is enabled.
+    if (ENABLE_TIER_DISTANCE_FADE || ENABLE_TIER_EDGE_BLEND) {
+        let tierBlend = max(computeTierDistanceFade(input), computeTierEdgeBlend(input));
+        if (tierBlend > 0.0001) {
             let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
-            baseColor = mix(baseColor, solidEdgeColor, tierEdgeBlend);
+            baseColor = mix(baseColor, solidEdgeColor, tierBlend);
         }
     }
     if (ENABLE_GROUND_FIELD) {

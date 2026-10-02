@@ -127,6 +127,7 @@ export class QuadtreeTerrainRenderer {
         const instanceBuffer = this.tileManager.getInstanceBuffer();
         const indirectBuffer = this.tileManager.getIndirectArgsBuffer();
         const overlayEnabled = this._isHoverOverlayEnabled();
+        this._tierFade = this._computeTierFadeDistances();
 
         for (let lod = 0; lod <= this._maxGeomLOD; lod++) {
             this._drawTerrainLod(
@@ -368,6 +369,47 @@ export class QuadtreeTerrainRenderer {
         if (uniforms.terrainLayerViewMode) {
             uniforms.terrainLayerViewMode.value = this._terrainLayerViewMode;
         }
+        if (uniforms.tierFadeStart && uniforms.tierFadeEnd) {
+            uniforms.tierFadeStart.value = this._tierFade?.start ?? 0.0;
+            uniforms.tierFadeEnd.value = this._tierFade?.end ?? 0.0;
+        }
+    }
+
+    // Camera-distance ramp into the solid-color tier (see
+    // solidColorTierDistanceFade* in the terrain shader config). Derived each
+    // frame from the same LOD metric the GPU traversal uses, so the ramp sits
+    // at the same place relative to the LOD bands on any canvas size and
+    // follows the camera smoothly:
+    //   split distance of the solid tier's tiles  D = tileSize * lodFactor / T
+    //   farthest a tile's pixel can be from its centre  R = sqrt(halfDiag^2 + h^2)
+    //   end   = D - safety * R   (nearest point a solid-tier pixel can appear)
+    //   start = end - bandFraction * D
+    // T mirrors the traversal's 4-px quantization of the screen error:
+    // round(e / 4) * 4 > threshold  <=>  e >= 4 * floor(threshold / 4) + 2.
+    // Returns null (ramp off) when disabled or the traversal isn't ready.
+    _computeTierFadeDistances() {
+        const cfg = this.engineConfig?.rendering?.terrainShader;
+        if (!cfg?.solidColorTierEnabled || !cfg?.solidColorTierDistanceFadeEnabled) return null;
+        const quadtree = this.tileManager?.quadtreeGPU;
+        const lodFactor = quadtree?.lodFactor;
+        const faceSize = quadtree?.faceSize;
+        const maxDepth = quadtree?.maxDepth;
+        const threshold = quadtree?.lodErrorThreshold;
+        const solidLod = cfg.solidColorStartLod;
+        if (![lodFactor, faceSize, maxDepth, threshold, solidLod].every(Number.isFinite)) return null;
+
+        const tileSize = faceSize / Math.pow(2, Math.max(0, maxDepth - solidLod));
+        const effectiveThreshold = Math.max(1, 4 * Math.floor(threshold / 4) + 2);
+        const splitDistance = tileSize * lodFactor / effectiveThreshold;
+        const halfDiagonal = tileSize * Math.SQRT1_2;
+        const heightMargin = Math.max(0, cfg.solidColorTierDistanceFadeHeightMarginMeters ?? 1000);
+        const reach = Math.sqrt(halfDiagonal * halfDiagonal + heightMargin * heightMargin);
+        const safety = Math.max(0, cfg.solidColorTierDistanceFadeEndSafety ?? 1.0);
+        const bandFraction = Math.max(0.01, cfg.solidColorTierDistanceFadeBandFraction ?? 0.3);
+
+        const end = Math.max(1.0, splitDistance - safety * reach);
+        const start = Math.max(0.0, end - bandFraction * splitDistance);
+        return { start, end, splitDistance, reach };
     }
 
     _applyTerrainHoverUniforms(uniforms) {

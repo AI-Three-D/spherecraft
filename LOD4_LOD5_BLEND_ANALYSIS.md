@@ -195,3 +195,45 @@ Images: `blend_1_mode90_lod.png`, `blend_2_mode104_ramp_weight.png`, `blend_3_mo
 - **Perspective:** half a tile looks narrow on screen at grazing angles. Set the width toward 1.0 for a longer gradient.
 - **Debug mode 15** shows the mask instead of the stitch axis in the LOD4 variant.
 - **Compute is unchanged:** LOD5 tiles still run the full refinement. Skipping it for flat-tier tiles is the follow-up (§7 and the evidence document §4).
+
+---
+
+## 10. Distance ramp (replaces the in-tile ramp as the main blend)
+
+**Why:** in your test the in-tile ramp looked good, but it moved in whole-tile steps whenever tiles split or merged. A distance ramp gives the same weight at a point no matter which tile draws it, so the blend region follows the camera smoothly.
+
+**How it works:**
+- Every LOD below the solid tier (LOD0–4) mixes its colour toward the flat colour with `smoothstep(start, end, cameraDistance)`. LOD5+ is flat.
+- `QuadtreeTerrainRenderer._computeTierFadeDistances()` computes `start` and `end` every frame from the traversal's own metric, so they follow canvas size and field of view:
+  - `D = tileSize(LOD5) × lodFactor / T` is the split distance, where `T = 4·floor(threshold/4)+2` mirrors the 4-px quantization.
+  - `R = sqrt(halfDiagonal² + heightMargin²)` is how far a LOD5 tile's pixels can reach toward the camera from its centre.
+  - `end = D − safety·R` and `start = end − bandFraction·D`.
+- The values travel in the two former padding slots of the terrain fragment uniforms (`tierFadeStart`/`tierFadeEnd`, `webgpuBackend.js` slots 58–59).
+- The in-tile ramp stays as a narrow safety net (width 0.15 of the tile, combined by `max`). It covers any LOD5 tile drawn nearer than the ramp's end.
+- The flat colour is now averaged over a fixed **world-size** window (1434 m, `solidColorAverageWindowMeters`) instead of 35 % of each tile. Every tier therefore computes the same flat colour at a point, and it does not change when a tile splits.
+- Debug mode 104 now shows red for the distance weight, green for the safety net and blue for the solid tier.
+
+**Settings** (`wizard_game/runtimeConfigs.js`): `solidColorTierDistanceFadeEnabled`, `…BandFraction: 0.3`, `…HeightMarginMeters: 1000`, `…EndSafety: 0.5`, `solidColorTierEdgeBlendWidth: 0.15`, `solidColorAverageWindowMeters: 1434`. The safety value and band fraction take effect live, with no material rebuild:
+```js
+gameEngine.engineConfig.rendering.terrainShader.solidColorTierDistanceFadeEndSafety = 1.0;
+```
+
+**[RUN] Results** (2880×1800 canvas, 4 km altitude, 40° down, same camera as §9; ramp 5.0–7.8 km at safety 0.5, 3.5–6.3 km at safety 1.0):
+
+| Version | Unlit step across the LOD4/5 line, median / p90 | Lit step, median / p90 | LOD4 pixels flattened vs original |
+|---|---|---|---|
+| Original (LOD5 prebake + fade) | 3.0 / 47.7 | 7.8 / 37.7 | 0 % |
+| In-tile ramp, half tile (§9) | 0.7 / 4.1 | 4.9 / 14.0 | 1.2 % |
+| Distance ramp, safety 1.0 | 0.5 / 1.4 | 5.1 / 14.5 | 12.2 % |
+| **Distance ramp, safety 0.5 (default)** | **0.5 / 2.0** | **5.1 / 14.6** | **5.1 %** |
+
+- At ground level (900 m altitude, looking at the horizon) the near terrain keeps full detail. The ramp only touches the far LOD4 band, and no line is visible: `dist_8`–`dist_10`.
+- All seven shader variants compiled without errors, and there were no GPU validation errors.
+
+Images: `dist_1_mode90_lod.png`, `dist_2_mode104_weights_safety1.png`, `dist_3_mode104_weights_safety05.png`, `dist_4_mode0_safety1.png`, `dist_5_mode0_safety05.png`, `dist_6_mode45_safety1.png`, `dist_7_mode45_safety05.png`, `dist_8_low_mode90_lod.png`, `dist_9_low_mode104_weights.png`, `dist_10_low_mode0.png`.
+
+**Trade-offs and open points:**
+- **Detail ends at a distance shell**, not at the tile line, so part of LOD4 is flat; that is the 5 % above. Raise `…EndSafety` toward 1.0 for a strict guarantee, or lower it for more detail, which leans more on the safety net.
+- **Not measured over time.** Smoothness while moving follows from the formula, which depends only on camera distance and per-frame constants. I didn't capture it as a sequence; that is the check to do on your display.
+- **Cost:** the flat colour is 64 texture reads per pixel, now also inside the ramp in LOD0–4. Baking it per tile is the later optimisation.
+- **Compute is unchanged:** LOD5+ still runs the full refinement. Skipping it is the next step.
