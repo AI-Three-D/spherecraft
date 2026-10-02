@@ -421,6 +421,15 @@ export function createEngineConfig() {
       visibleTableCapacity: 2048,
       feedbackCapacity: 4096,
       lodErrorThreshold:  512,  //512,
+      // Visible tiles draw from the nearest layer whose material is finished
+      // (own or ancestor), so a tile never flashes a geometry-only
+      // placeholder while its refinement is pending. false = old behaviour.
+      preferCompleteMaterialLayers: true,
+      // Tiles drawn by the flat solid-color tier (rendering.terrainShader.
+      // solidColorStartLod and coarser) skip the splat and prebaked-color
+      // refinement outputs, which they never draw (~12 of ~17.5 ms GPU per
+      // refinement). Scatter/climate are still generated for vegetation.
+      solidTierSkipsDetailMaterial: true,
       workgroupSize: 128,
 
       // 8 instead of 4: allows more tile generations to be in-flight

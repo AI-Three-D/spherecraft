@@ -561,6 +561,19 @@ export class EngineConfig {
       visibleTableCapacity: requireInt(gpuQuadtree.visibleTableCapacity ?? 16384, 'gpuQuadtree.visibleTableCapacity', 1),
       feedbackCapacity: requireInt(gpuQuadtree.feedbackCapacity ?? 4096, 'gpuQuadtree.feedbackCapacity', 1),
       lodErrorThreshold: requireNumber(gpuQuadtree.lodErrorThreshold ?? 512, 'gpuQuadtree.lodErrorThreshold'),
+      // Draw each visible tile from the nearest layer whose material is
+      // complete (own or ancestor) instead of the nearest resident one, so
+      // tiles never flash a geometry-only placeholder. See TileStreamer.
+      preferCompleteMaterialLayers: requireBool(
+        gpuQuadtree.preferCompleteMaterialLayers ?? true,
+        'gpuQuadtree.preferCompleteMaterialLayers'
+      ),
+      // Tiles drawn by the flat solid-color tier skip the splat and
+      // prebaked-color refinement outputs (they keep scatter/climate).
+      solidTierSkipsDetailMaterial: requireBool(
+        gpuQuadtree.solidTierSkipsDetailMaterial ?? true,
+        'gpuQuadtree.solidTierSkipsDetailMaterial'
+      ),
       workgroupSize: requireInt(gpuQuadtree.workgroupSize ?? 64, 'gpuQuadtree.workgroupSize', 1),
       adaptiveLod: (() => {
         const al = gpuQuadtree.adaptiveLod || {};

@@ -79,7 +79,7 @@ struct FragmentInput {
     @location(2) vWorldPosition: vec3<f32>,
     @location(3) vViewPosition: vec3<f32>,
     @location(4) vDistanceToCamera: f32,
-    @location(5) vTileUv: vec2<f32>,
+    @location(5) vMaterialUv: vec4<f32>,
     @location(6) vWorldPos: vec2<f32>,
     @location(7) vSphereDir: vec3<f32>,
     @location(8) vHeight: f32,

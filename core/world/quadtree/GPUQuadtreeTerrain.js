@@ -206,6 +206,15 @@ export class QuadtreeTileManager {
               feedbackReadbackInterval: qt.feedbackReadbackInterval,
               feedbackReadbackRingSize: qt.feedbackReadbackRingSize,
               gpuBackpressureLimit: qt.gpuBackpressureLimit ?? 4,   // NEW
+              preferCompleteMaterialLayers: qt.preferCompleteMaterialLayers !== false,
+              // Flat solid-color tier start: those tiles skip the splat and
+              // prebaked-color refinement outputs they never draw.
+              solidTierStartLod: (() => {
+                  const ts = this.engineConfig?.rendering?.terrainShader;
+                  if (qt.solidTierSkipsDetailMaterial === false) return null;
+                  if (ts?.solidColorTierEnabled !== true) return null;
+                  return Number.isFinite(ts?.solidColorStartLod) ? ts.solidColorStartLod : null;
+              })(),
               logStats: qt.logStats === true
           }
       );

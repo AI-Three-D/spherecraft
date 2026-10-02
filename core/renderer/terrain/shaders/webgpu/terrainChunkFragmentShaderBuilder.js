@@ -525,6 +525,9 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     // Camera-distance ramp into the solid tier, compiled into every LOD below
     // it; the weight uses fragUniforms.tierFadeStart/tierFadeEnd (per frame).
     const enableTierDistanceFade = options.enableTierDistanceFade === true;
+    // Draw the solid tier's flat color when the instance's drawn layer has
+    // no detail material (instance flag bit 4, see instanceBufferBuilder).
+    const enableIncompleteSourceFlat = options.enableIncompleteSourceFlat === true;
     // World-size averaging window of the solid-tier color (0 = legacy 35 %
     // of the tile) and the cube-face size used to convert it to tile UV.
     const solidColorAverageWindowMeters = Number.isFinite(options.solidColorAverageWindowMeters)
@@ -798,7 +801,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
         : '';
     const resolvedColorCode = includeResolvedColorBinding ? `
 fn sampleResolvedTerrainColor(input: FragmentInput, layer: i32) -> vec4<f32> {
-    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vMaterialUv.xy, input.vMaterialUv.z);
     return ${useArrayTextures
         ? 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, layer, 0.0)'
         : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
@@ -806,7 +809,7 @@ fn sampleResolvedTerrainColor(input: FragmentInput, layer: i32) -> vec4<f32> {
 }
 
 fn sampleResolvedTerrainColorImplicit(input: FragmentInput, layer: i32) -> vec4<f32> {
-    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vMaterialUv.xy, input.vMaterialUv.z);
     return ${useArrayTextures
         ? 'textureSample(resolvedColorTexture, chunkLinearSampler, uv, layer)'
         : 'textureSample(resolvedColorTexture, chunkLinearSampler, uv)'
@@ -814,7 +817,7 @@ fn sampleResolvedTerrainColorImplicit(input: FragmentInput, layer: i32) -> vec4<
 }
 
 fn sampleResolvedTerrainColorLevel(input: FragmentInput, layer: i32) -> vec4<f32> {
-    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vMaterialUv.xy, input.vMaterialUv.z);
     return ${useArrayTextures
         ? 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, layer, 0.0)'
         : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
@@ -822,7 +825,7 @@ fn sampleResolvedTerrainColorLevel(input: FragmentInput, layer: i32) -> vec4<f32
 }
 
 fn sampleResolvedTerrainColorNearest(input: FragmentInput, layer: i32) -> vec4<f32> {
-    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vMaterialUv.xy, input.vMaterialUv.z);
     let texSize = vec2<i32>(textureDimensions(resolvedColorTexture));
     let coord = clamp(
         vec2<i32>(floor(uv * vec2<f32>(texSize))),
@@ -978,6 +981,7 @@ const ENABLE_TIER_EDGE_BLEND: bool = ${enableTierEdgeBlend ? 'true' : 'false'};
 const TIER_EDGE_BLEND_WIDTH: f32 = ${tierEdgeBlendWidth.toFixed(4)};
 const TIER_EDGE_BLEND_STRENGTH: f32 = ${tierEdgeBlendStrength.toFixed(4)};
 const ENABLE_TIER_DISTANCE_FADE: bool = ${enableTierDistanceFade ? 'true' : 'false'};
+const ENABLE_INCOMPLETE_SOURCE_FLAT: bool = ${enableIncompleteSourceFlat ? 'true' : 'false'};
 // Averaging window of sampleChunkAverageCoarseColor, in metres of ground
 // (0 = legacy: 35 % of the tile's own UV span), and the cube-face size used
 // to convert it into each instance's tile UV.
@@ -1108,7 +1112,11 @@ struct FragmentInput {
     @location(2) vWorldPosition: vec3<f32>,
     @location(3) vViewPosition: vec3<f32>,
     @location(4) vDistanceToCamera: f32,
-    @location(5) vTileUv: vec2<f32>,
+    // Material source (uvOffset.xy, uvScale, layer): every splat / prebaked-
+    // color read uses this instead of vAtlasOffset/vAtlasScale/vLayer, so a
+    // tile awaiting refinement shows its refined ancestor's material on top
+    // of its own geometry (see instanceBufferBuilder.wgsl.js).
+    @location(5) vMaterialUv: vec4<f32>,
     @location(6) vWorldPos: vec2<f32>,
     @location(7) vSphereDir: vec3<f32>,
     @location(8) vHeight: f32,
@@ -1366,7 +1374,7 @@ fn computeTierEdgeBlend(input: FragmentInput) -> f32 {
     if (!ENABLE_TIER_EDGE_BLEND) {
         return 0.0;
     }
-    let mask = u32(round(clamp(input.vDebugSample.z, 0.0, 15.0)));
+    let mask = u32(round(clamp(input.vDebugSample.z, 0.0, 31.0))) & 15u;
     if (mask == 0u) {
         return 0.0;
     }
@@ -1378,6 +1386,18 @@ fn computeTierEdgeBlend(input: FragmentInput) -> f32 {
     if ((mask & 1u) != 0u) { edgeDistance = min(edgeDistance, 1.0 - uv.y); }
     let ramp = 1.0 - smoothstep(0.0, max(TIER_EDGE_BLEND_WIDTH, 0.0001), edgeDistance);
     return clamp(ramp * TIER_EDGE_BLEND_STRENGTH, 0.0, 1.0);
+}
+
+// True when this instance's drawn layer has no detail material (instance
+// flag bit 4): geometry-only layer at a cold start, or a flat-tier ancestor
+// that never generates splat/prebaked color. The flat color needs only the
+// tile ids every resident layer has, so it is always valid.
+fn tierSourceIncomplete(input: FragmentInput) -> bool {
+    if (!ENABLE_INCOMPLETE_SOURCE_FLAT) {
+        return false;
+    }
+    let flags = u32(round(clamp(input.vDebugSample.z, 0.0, 31.0)));
+    return (flags & 16u) != 0u;
 }
 
 // Camera-distance ramp into the solid-color tier. Every LOD below the tier
@@ -1687,7 +1707,7 @@ fn loadSplatValidity(coord: vec2<i32>, layer: i32) -> bool {
 }
 
 fn sampleFixedMaterialFamilyData(input: FragmentInput, layer: i32) -> SplatData {
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     var weights = sampleSplatWeightsFiltered(uv, layer);
     let total = weights.x + weights.y + weights.z + weights.w;
@@ -1874,7 +1894,7 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
         return sampleFixedMaterialFamilyData(input, layer);
     }
 
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     let centerCoord = clamp(
         vec2<i32>(floor(uv * splatTexSize)),
@@ -2002,7 +2022,7 @@ fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
 }
 
 fn sampleSplatDataUnionReference(input: FragmentInput, layer: i32) -> SplatData {
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     let centerCoord = clamp(
         vec2<i32>(floor(uv * splatTexSize)),
@@ -2093,7 +2113,7 @@ fn sampleSplatDataUnionReference(input: FragmentInput, layer: i32) -> SplatData 
 }
 
 fn sampleStoredSplatTexel(input: FragmentInput, layer: i32) -> SplatData {
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     let coord = clamp(
         vec2<i32>(floor(uv * splatTexSize)),
@@ -2109,7 +2129,7 @@ fn sampleStoredSplatTexel(input: FragmentInput, layer: i32) -> SplatData {
 }
 
 fn sampleSplatDataFastReference(input: FragmentInput, layer: i32) -> SplatData {
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     let coord = uv * splatTexSize - 0.5;
     let base = floor(coord);
@@ -2125,7 +2145,7 @@ fn sampleSplatDataFastReference(input: FragmentInput, layer: i32) -> SplatData {
 }
 
 fn splatFootprintPrecomputedValid(input: FragmentInput, layer: i32) -> bool {
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     let coord = uv * splatTexSize - 0.5;
     let base = floor(coord);
@@ -2143,7 +2163,7 @@ fn luma709(c: vec3<f32>) -> f32 {
 }
 
 fn splatGridAmount(input: FragmentInput) -> f32 {
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatSize = vec2<f32>(textureDimensions(splatDataMap));
     let gridCell = fract(uv * splatSize);
     let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
@@ -2151,7 +2171,7 @@ fn splatGridAmount(input: FragmentInput) -> f32 {
 }
 
 fn splatCornerMismatchFactor(input: FragmentInput, layer: i32) -> f32 {
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     let coord = uv * splatTexSize - 0.5;
     let base = floor(coord);
@@ -2272,7 +2292,7 @@ fn splatIdSetsEquivalent(a: vec4<i32>, b: vec4<i32>) -> bool {
 }
 
 fn splatCornerUnorderedMismatchFactor(input: FragmentInput, layer: i32) -> f32 {
-    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
     let coord = uv * splatTexSize - 0.5;
     let base = floor(coord);
@@ -2932,7 +2952,7 @@ fn sampleDebugNonResolvedMicro(
     let local = fract(input.vWorldPos);
 
     if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, i32(round(input.vMaterialUv.w)));
         return sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splat
         ).rgb;
@@ -3138,6 +3158,7 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
 //return vec4((f32(fragUniforms.geometryLOD) + 1.0)/6.0, 0.0, 0.0, 0.5);
     let activeSeason = select(fragUniforms.nextSeason, fragUniforms.currentSeason, fragUniforms.seasonTransition < 0.5);
     let layer = i32(round(input.vLayer));
+    let materialLayer = i32(round(input.vMaterialUv.w));
     let debugMode = fragUniforms.terrainDebugMode;
     let layerViewMode = fragUniforms.terrainLayerViewMode;
     // Mode 90: geometryLOD by color — verifies which LOD's compiled shader
@@ -3204,11 +3225,15 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     // Red = camera-distance ramp, green = in-tile safety-net ramp (red and
     // green together read as yellow). Black = detail material untouched.
     // Tiles of the solid tier itself are dark blue, so the LOD boundary
-    // stays visible.
+    // stays visible. Magenta = detail tile drawn from a layer without detail
+    // material (shown as the flat color in normal rendering).
     if (debugMode == 104) {
         let wDistance = computeTierDistanceFade(input);
         let wEdge = computeTierEdgeBlend(input);
         var c = vec3<f32>(0.04, 0.04, 0.04) + vec3<f32>(wDistance, wEdge * 0.85, 0.0);
+        if (tierSourceIncomplete(input)) {
+            c = vec3<f32>(1.0, 0.0, 1.0);
+        }
         if (ENABLE_SOLID_COLOR_TIER) {
             c = vec3<f32>(0.05, 0.10, 0.45);
         }
@@ -3313,14 +3338,14 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         return vec4<f32>(ao, ao, ao, 1.0);*/
     }
     if (debugMode == 2) {
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, materialLayer);
         let weight = splatPrimaryWeight(splat, splat.cellLocal);
         let pairChange = select(0.0, 1.0, splat.hasBoundary);
         let bilinearValid = select(0.0, 1.0, splat.bilinearValid);
         return vec4<f32>(weight, pairChange, bilinearValid, 1.0);
     }
     if (debugMode == 3) {
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, materialLayer);
         let weight = splatPrimaryWeight(splat, splat.cellLocal);
         return vec4<f32>(weight, weight, weight, 1.0);
     }
@@ -3330,22 +3355,22 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         return vec4<f32>(splatSize.x / 1024.0, tileSize.x / 1024.0, 0.0, 1.0);
     }
     if (debugMode == 25) {
-        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
         let splatSize = vec2<f32>(textureDimensions(splatDataMap));
         let cell = fract(uv * splatSize);
         let edgeDist = min(min(cell.x, cell.y), min(1.0 - cell.x, 1.0 - cell.y));
         let grid = 1.0 - smoothstep(0.02, 0.05, edgeDist);
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, materialLayer);
         let w = splatPrimaryWeight(splat, splat.cellLocal);
         let base = vec3<f32>(w, w, w);
         return vec4<f32>(mix(base, vec3<f32>(1.0, 0.1, 0.1), grid), 1.0);
     }
     if (debugMode == 26) {
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, materialLayer);
         return vec4<f32>(debugTileIdColor(splat.tileIds.x), 1.0);
     }
     if (debugMode == 27) {
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, materialLayer);
         return vec4<f32>(debugTileIdColor(splat.tileIds.y), 1.0);
     }
     if (debugMode == 28) {
@@ -3354,12 +3379,12 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         return vec4<f32>(debugCategoryColor(cat), 1.0);
     }
     if (debugMode == 29) {
-        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
         let splatSize = vec2<f32>(textureDimensions(splatDataMap));
         let gridCell = fract(uv * splatSize);
         let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
         let grid = 1.0 - smoothstep(0.02, 0.05, edgeDist);
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, materialLayer);
         let baseColor = select(
             vec3<f32>(0.08, 0.08, 0.08),
             vec3<f32>(1.0, 0.2, 0.2),
@@ -3372,17 +3397,17 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         return vec4<f32>(h, h, h, 1.0);
     }
     if (debugMode == 31) {
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, materialLayer);
         let weight = splatPrimaryWeight(splat, splat.cellLocal);
         return vec4<f32>(weight, weight, weight, 1.0);
     }
     if (debugMode == 32) {
-        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
         let splatSize = vec2<f32>(textureDimensions(splatDataMap));
         let gridCell = fract(uv * splatSize);
         let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
         let grid = 1.0 - smoothstep(0.02, 0.05, edgeDist);
-        let splat = sampleSplatData(input, layer);
+        let splat = sampleSplatData(input, materialLayer);
         let v = select(0.0, 1.0, splat.bilinearValid);
         let base = vec3<f32>(v, v, v);
         return vec4<f32>(mix(base, vec3<f32>(0.1, 0.6, 1.0), grid * 0.35), 1.0);
@@ -3406,8 +3431,8 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         return vec4<f32>(mix(base, vec3<f32>(1.0), edgeGlow * 0.18), 1.0);
     }
     if (debugMode == 34) {
-        let risk = computeAtlasBilinearLeakRisk(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
-        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+        let risk = computeAtlasBilinearLeakRisk(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
         let splatSize = vec2<f32>(textureDimensions(splatDataMap));
         let gridCell = fract(uv * splatSize);
         let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
@@ -3434,7 +3459,7 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         if (!HAS_RESOLVED_COLOR_TEXTURE) {
             return vec4<f32>(1.0, 0.0, 1.0, 1.0);
         }
-        return vec4<f32>(sampleResolvedTerrainColor(input, layer).rgb, 1.0);
+        return vec4<f32>(sampleResolvedTerrainColor(input, materialLayer).rgb, 1.0);
     }
     if (debugMode == 37) {
         let liveColor = sampleDebugNonResolvedMicro(
@@ -3446,7 +3471,7 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         if (!HAS_RESOLVED_COLOR_TEXTURE) {
             return vec4<f32>(1.0, 0.0, 1.0, 1.0);
         }
-        let resolvedColor = sampleResolvedTerrainColor(input, layer).rgb;
+        let resolvedColor = sampleResolvedTerrainColor(input, materialLayer).rgb;
         let liveColor = sampleDebugNonResolvedMicro(
             input, activeSeason, ddx_vUv, ddy_vUv, layer
         );
@@ -3458,7 +3483,7 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         if (!HAS_RESOLVED_COLOR_TEXTURE) {
             return vec4<f32>(1.0, 0.0, 1.0, 1.0);
         }
-        let resolvedColor = sampleResolvedTerrainColor(input, layer).rgb;
+        let resolvedColor = sampleResolvedTerrainColor(input, materialLayer).rgb;
         let edgeDist = min(min(input.vUv.x, input.vUv.y), min(1.0 - input.vUv.x, 1.0 - input.vUv.y));
         let grid = 1.0 - smoothstep(0.008, 0.025, edgeDist);
         return vec4<f32>(mix(resolvedColor, vec3<f32>(1.0, 0.0, 1.0), grid * 0.65), 1.0);
@@ -3467,14 +3492,14 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         if (!HAS_RESOLVED_COLOR_TEXTURE) {
             return vec4<f32>(1.0, 0.0, 1.0, 1.0);
         }
-        return vec4<f32>(sampleResolvedTerrainColorLevel(input, layer).rgb, 1.0);
+        return vec4<f32>(sampleResolvedTerrainColorLevel(input, materialLayer).rgb, 1.0);
     }
     if (debugMode == 41) {
         if (!HAS_RESOLVED_COLOR_TEXTURE) {
             return vec4<f32>(1.0, 0.0, 1.0, 1.0);
         }
-        let implicitColor = sampleResolvedTerrainColorImplicit(input, layer).rgb;
-        let mip0Color = sampleResolvedTerrainColorLevel(input, layer).rgb;
+        let implicitColor = sampleResolvedTerrainColorImplicit(input, materialLayer).rgb;
+        let mip0Color = sampleResolvedTerrainColorLevel(input, materialLayer).rgb;
         let delta = abs(implicitColor - mip0Color);
         let heat = clamp(max(max(delta.r, delta.g), delta.b) * 8.0, 0.0, 1.0);
         return vec4<f32>(heat, 1.0 - heat, 0.0, 1.0);
@@ -3483,7 +3508,7 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
         if (!HAS_RESOLVED_COLOR_TEXTURE) {
             return vec4<f32>(1.0, 0.0, 1.0, 1.0);
         }
-        return vec4<f32>(sampleResolvedTerrainColorNearest(input, layer).rgb, 1.0);
+        return vec4<f32>(sampleResolvedTerrainColorNearest(input, materialLayer).rgb, 1.0);
     }
     // Mode 99: the NEW spatially-averaged LOD6 color (horizon-grain fix),
     // isolated the same way mode 96 isolates the OLD single-sample color —
@@ -3671,7 +3696,7 @@ if (debugMode == 16) {
     var microColorPath: i32 = 0;
 
     if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
-        splatResult = sampleSplatData(input, layer);
+        splatResult = sampleSplatData(input, materialLayer);
         hasLiveSplat = true;
         dominantTileId = splatDominantTileId(splatResult);
     }
@@ -3691,7 +3716,7 @@ if (debugMode == 16) {
     //     fallback is firing, i.e. resolvedColor is NOT valid for LOD4
     //     tiles — confirms the handoff doc's leading hypothesis directly.
     if (debugMode == 102 && fragUniforms.geometryLOD == 4) {
-        microSample = sampleResolvedTerrainColor(input, layer);
+        microSample = sampleResolvedTerrainColor(input, materialLayer);
         if (microSample.a < 0.5) {
             microSample = sampleTileColor(
                 fallbackTileId, worldTileCoord, local,
@@ -3717,7 +3742,7 @@ if (debugMode == 16) {
         // Resolved-color path: one chunk-local prebaked color sample replaces
         // runtime splat decoding plus repeated atlas sampling. Procedural detail
         // can be layered on top later without bringing back atlas fan-out.
-        microSample = sampleResolvedTerrainColor(input, layer);
+        microSample = sampleResolvedTerrainColor(input, materialLayer);
         // resolvedColor is a refinement-stage output (generated in the
         // background, same as splat), so a tile can be resident with this
         // texture still zero-filled. Unlike splatIndex, zero-fill here isn't
@@ -3745,7 +3770,7 @@ if (debugMode == 16) {
         // branch above — this is a direct overwrite (not a mix), so a
         // missing check here doesn't just tint the blend, it replaces the
         // whole fragment with solid black outright.
-        let resolvedSample = sampleResolvedTerrainColorLevel(input, layer);
+        let resolvedSample = sampleResolvedTerrainColorLevel(input, materialLayer);
         if (resolvedSample.a < 0.5) {
             microSample = sampleTileColor(
                 fallbackTileId, worldTileCoord, local,
@@ -3822,13 +3847,13 @@ if (debugMode == 16) {
     }
 
     if (debugMode == 48) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let productionColor = splatCategoryBlendColor(splatResult);
         let unionColor = splatCategoryBlendColor(unionSplat);
         let reconstructionDelta = maxAbsVec3(productionColor - unionColor);
         let heat = clamp(reconstructionDelta * 8.0, 0.0, 1.0);
 
-        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vAtlasOffset, input.vAtlasScale);
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
         let splatSize = vec2<f32>(textureDimensions(splatDataMap));
         let gridCell = fract(uv * splatSize);
         let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
@@ -3852,7 +3877,7 @@ if (debugMode == 16) {
     // no validity branch. If the rim is visible here, it is already baked into
     // the generated splat payload.
     if (debugMode == 49) {
-        let storedSplat = sampleStoredSplatTexel(input, layer);
+        let storedSplat = sampleStoredSplatTexel(input, materialLayer);
         let storedColor = splatCategoryBlendColor(storedSplat);
         let grid = splatGridAmount(input);
         return vec4<f32>(mix(storedColor, vec3<f32>(1.0), grid * 0.22), 1.0);
@@ -3863,7 +3888,7 @@ if (debugMode == 16) {
     // material exists in the stored texel. This isolates stored weights from
     // texture atlas colors.
     if (debugMode == 50) {
-        let storedSplat = sampleStoredSplatTexel(input, layer);
+        let storedSplat = sampleStoredSplatTexel(input, materialLayer);
         let minority = clamp(1.0 - splatDominantWeight(storedSplat), 0.0, 1.0);
         let heat = clamp(minority * 8.0, 0.0, 1.0);
         let grid = splatGridAmount(input);
@@ -3877,7 +3902,7 @@ if (debugMode == 16) {
     // Compare with 52. If 51 shows a rim and 52 does not, channel identity /
     // fast-path reconstruction is the problem.
     if (debugMode == 51) {
-        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
         let fastColor = splatCategoryBlendColor(fastSplat);
         let grid = splatGridAmount(input);
         return vec4<f32>(mix(fastColor, vec3<f32>(0.0, 0.65, 1.0), grid * 0.18), 1.0);
@@ -3888,7 +3913,7 @@ if (debugMode == 16) {
     // the same rim, the source/generator payload is the likely cause. If only
     // 52 differs, sparse top-four reconstruction is losing information.
     if (debugMode == 52) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let unionColor = splatCategoryBlendColor(unionSplat);
         let grid = splatGridAmount(input);
         return vec4<f32>(mix(unionColor, vec3<f32>(0.0, 0.65, 1.0), grid * 0.18), 1.0);
@@ -3902,7 +3927,7 @@ if (debugMode == 16) {
     if (debugMode == 53) {
         let tileId = sampleChunkTileId(input, layer);
         let tileCat = debugTileCategory(tileId);
-        let storedSplat = sampleStoredSplatTexel(input, layer);
+        let storedSplat = sampleStoredSplatTexel(input, materialLayer);
         let splatCat = debugTileCategory(splatDominantTileId(storedSplat));
         let mismatch = select(0.0, 1.0, tileCat != splatCat);
         let grid = splatGridAmount(input);
@@ -3917,8 +3942,8 @@ if (debugMode == 16) {
     // mismatches among the 2x2 footprint. If this contour matches the rim but
     // modes 49/52 do not, validity/slot stability is still suspect.
     if (debugMode == 54) {
-        let mismatch = splatCornerMismatchFactor(input, layer);
-        let valid = select(0.0, 1.0, splatFootprintPrecomputedValid(input, layer));
+        let mismatch = splatCornerMismatchFactor(input, materialLayer);
+        let valid = select(0.0, 1.0, splatFootprintPrecomputedValid(input, materialLayer));
         let grid = splatGridAmount(input);
         var color = vec3<f32>(mismatch, valid, 1.0 - valid);
         color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
@@ -3930,7 +3955,7 @@ if (debugMode == 16) {
     // always-union reference. Red on the visual rim means normal rendering is
     // using different material weights than the union reconstruction.
     if (debugMode == 55) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let delta = splatIdAwareWeightDelta(splatResult, unionSplat);
         let heat = clamp(delta * 10.0, 0.0, 1.0);
         let grid = splatGridAmount(input);
@@ -3943,7 +3968,7 @@ if (debugMode == 16) {
     // Same comparison as 55, but after exact all-channel tile texture sampling.
     // This is closest to the visible pre-lighting albedo consequence.
     if (debugMode == 56) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let productionColor = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
         ).rgb;
@@ -3962,8 +3987,8 @@ if (debugMode == 16) {
     // Isolates the unsafe hardware-filtered-channel assumption, independent of
     // whether production currently chose the fast or fallback branch.
     if (debugMode == 57) {
-        let fastSplat = sampleSplatDataFastReference(input, layer);
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let delta = splatIdAwareWeightDelta(fastSplat, unionSplat);
         let heat = clamp(delta * 10.0, 0.0, 1.0);
         let grid = splatGridAmount(input);
@@ -3975,8 +4000,8 @@ if (debugMode == 16) {
     // ── Debug mode 58: forced fast vs union material delta ─────────────────
     // Actual material-color consequence of the fast-path assumption.
     if (debugMode == 58) {
-        let fastSplat = sampleSplatDataFastReference(input, layer);
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let fastColor = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, fastSplat
         ).rgb;
@@ -3995,8 +4020,8 @@ if (debugMode == 16) {
     // Green = ordered 2x2 ID slots match. Yellow = same unordered ID set but
     // different slot order. Red = actual neighboring top-4 ID set changes.
     if (debugMode == 59) {
-        let orderedMismatch = splatCornerMismatchFactor(input, layer);
-        let unorderedMismatch = splatCornerUnorderedMismatchFactor(input, layer);
+        let orderedMismatch = splatCornerMismatchFactor(input, materialLayer);
+        let unorderedMismatch = splatCornerUnorderedMismatchFactor(input, materialLayer);
         let grid = splatGridAmount(input);
         var color = vec3<f32>(0.0, 0.85, 0.08);
         if (orderedMismatch > 0.001 && unorderedMismatch <= 0.001) {
@@ -4014,8 +4039,8 @@ if (debugMode == 16) {
     // Green = forced fast dominant category differs from union reference.
     // Yellow = both differ. Black/dim = dominant category agrees.
     if (debugMode == 60) {
-        let fastSplat = sampleSplatDataFastReference(input, layer);
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let productionDiff = splatDominantCategoryDiff(splatResult, unionSplat);
         let fastDiff = splatDominantCategoryDiff(fastSplat, unionSplat);
         let grid = splatGridAmount(input);
@@ -4044,7 +4069,7 @@ if (debugMode == 16) {
     // reconstruction path is the cause. If the rim is still present here, it is
     // in the stored splat payload plus real material colors.
     if (debugMode == 62) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let color = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
@@ -4055,7 +4080,7 @@ if (debugMode == 16) {
     // Actual atlas material sampling from c00 IDs plus hardware-filtered
     // weights. This renders the fast-path assumption directly.
     if (debugMode == 63) {
-        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
         let color = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, fastSplat
         ).rgb;
@@ -4066,7 +4091,7 @@ if (debugMode == 16) {
     // Actual atlas material sampling from the nearest stored splat texel, with
     // no bilinear filtering, no union, and no validity branch.
     if (debugMode == 64) {
-        let storedSplat = sampleStoredSplatTexel(input, layer);
+        let storedSplat = sampleStoredSplatTexel(input, materialLayer);
         let color = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, storedSplat
         ).rgb;
@@ -4101,8 +4126,8 @@ if (debugMode == 16) {
     // but the fragment's actual 2x2 IDs do not match. Yellow = splatValidMap
     // says invalid but the runtime 2x2 IDs match.
     if (debugMode == 66) {
-        let precomputed = splatFootprintPrecomputedValid(input, layer);
-        let runtime = splatFootprintRuntimeOrderedValid(input, layer);
+        let precomputed = splatFootprintPrecomputedValid(input, materialLayer);
+        let runtime = splatFootprintRuntimeOrderedValid(input, materialLayer);
         let grid = splatGridAmount(input);
         var color = vec3<f32>(0.0, 0.85, 0.08);
         if (!precomputed && !runtime) {
@@ -4124,7 +4149,7 @@ if (debugMode == 16) {
     // fallback path. Blue heat should be near-zero; if not, fallback and union
     // are not equivalent.
     if (debugMode == 67) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let productionColor = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
         ).rgb;
@@ -4149,7 +4174,7 @@ if (debugMode == 16) {
     // always-union reference. Red = union blend is darker than pure dominant;
     // cyan = union blend is brighter than pure dominant.
     if (debugMode == 68) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let unionColor = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
@@ -4177,7 +4202,7 @@ if (debugMode == 16) {
     // and the raw center tile. Hot pixels mean the stored splat payload is
     // intentionally mixing materials there, independent of production branch.
     if (debugMode == 69) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let unionColor = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
@@ -4213,8 +4238,8 @@ if (debugMode == 16) {
             return vec4<f32>(0.02, 0.08, 0.95, 1.0);
         }
 
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
-        let fastSplat = sampleSplatDataFastReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
         let productionColor = sampleMicroTextureWithSplatFull(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
         ).rgb;
@@ -4269,7 +4294,7 @@ if (debugMode == 16) {
     // fallback branch differs from union. A clean 86 with a visible 43 rim means
     // the source is after the micro material sample.
     if (debugMode == 86) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let unionMicro = sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
@@ -4302,16 +4327,16 @@ if (debugMode == 16) {
     var baseColor = microSample.rgb;
 
     if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
-        let resolvedColor = sampleResolvedColorOrFallback(input, layer, baseColor);
+        let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, baseColor);
         baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
     }
     if (debugMode == 84) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         var unionBase = sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
         if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
-            let resolvedColor = sampleResolvedColorOrFallback(input, layer, unionBase);
+            let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, unionBase);
             unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
         }
         return vec4<f32>(unionBase, 1.0);
@@ -4329,12 +4354,12 @@ if (debugMode == 16) {
     //   If the rim disappears vs mode 43, hardware-filtered weights differ from manual
     //   accumulation at the boundary — the method-switch seam hypothesis confirmed.
     if (debugMode == 87 || debugMode == 88) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         var unionBase = sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
         if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
-            let resolvedColor = sampleResolvedColorOrFallback(input, layer, unionBase);
+            let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, unionBase);
             unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
         }
         // Mode 87: swap union in for fallback (!bilinearValid) pixels.
@@ -4367,7 +4392,7 @@ if (debugMode == 16) {
     }
 
     if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
-        let resolvedEdgeColor = sampleResolvedColorOrFallback(input, layer, baseColor);
+        let resolvedEdgeColor = sampleResolvedColorOrFallback(input, materialLayer, baseColor);
         baseColor = mix(
             baseColor,
             resolvedEdgeColor,
@@ -4405,8 +4430,11 @@ if (debugMode == 16) {
     // shared with a solid-tier neighbour, for the rare tile drawn nearer
     // than the distance ramp's end. The larger of the two wins. Replaces the
     // older LOD5-only distance fade above when either is enabled.
-    if (ENABLE_TIER_DISTANCE_FADE || ENABLE_TIER_EDGE_BLEND) {
-        let tierBlend = max(computeTierDistanceFade(input), computeTierEdgeBlend(input));
+    if (ENABLE_TIER_DISTANCE_FADE || ENABLE_TIER_EDGE_BLEND || ENABLE_INCOMPLETE_SOURCE_FLAT) {
+        var tierBlend = max(computeTierDistanceFade(input), computeTierEdgeBlend(input));
+        if (tierSourceIncomplete(input)) {
+            tierBlend = 1.0;
+        }
         if (tierBlend > 0.0001) {
             let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
             baseColor = mix(baseColor, solidEdgeColor, tierBlend);
@@ -4416,13 +4444,13 @@ if (debugMode == 16) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
     }
     if (debugMode == 85) {
-        let unionSplat = sampleSplatDataUnionReference(input, layer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
         let unionDominantTileId = splatDominantTileId(unionSplat);
         var unionBase = sampleMicroTextureWithSplat(
             input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
         ).rgb;
         if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
-            let resolvedColor = sampleResolvedColorOrFallback(input, layer, unionBase);
+            let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, unionBase);
             unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
         }
         if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
@@ -4440,7 +4468,7 @@ if (debugMode == 16) {
             }
         }
         if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
-            let resolvedEdgeColor = sampleResolvedColorOrFallback(input, layer, unionBase);
+            let resolvedEdgeColor = sampleResolvedColorOrFallback(input, materialLayer, unionBase);
             unionBase = mix(
                 unionBase,
                 resolvedEdgeColor,

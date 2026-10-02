@@ -315,3 +315,48 @@ How to read it: `own:U` means the tile draws its own unrefined layer, and `ancN`
   - **A:** 224 visible tiles, 48 on their own unrefined layers; draining took 2.7 s.
   - **B:** visible tiles by LOD were LOD3 48, LOD4 48, LOD5 26, LOD6 22, LOD7 18, LOD8 4. Unrefined: LOD3 24, LOD4 16, LOD7 2. Draining took 5.9 s.
 - **First headless session** (bundled Chrome 131, generation only): `submitToFence` p50 about 110 ms; `bpSkips` 77–83 per 120-frame window; `started=0` alongside `commits=152`.
+
+---
+
+## 8. Flicker fix and flat-tier refinement skip (2026-10-02, uncommitted)
+
+### 8.1 Flicker fix: geometry and material resolved separately
+
+- **Material-complete flag:** each GPU lookup entry carries it in its spare word, bit 0 of `LoadedEntry._pad`. `TileStreamer._markMaterialCompleteForFlushedCopies` sets it right after the refinement copy is submitted and before the dirty hash slots are uploaded.
+- **Geometry** comes from the nearest resident layer, as before (`resolveGeometrySource`). Edge stitching uses the same rule.
+- **Material** comes from the nearest layer with the flag set (`resolveMaterialSource`). The material layer and its level offset are packed into `neighborLODs.y`: bit 4 means "none", bits 8–19 hold the layer and bits 20–24 the levels. The vertex shader rebuilds the material UV transform and passes it in the former `vTileUv` slot, now `vMaterialUv`. All splat and prebaked-colour reads use it.
+- **No refined material anywhere above a tile** (bit 4): detail tiers draw the flat tier colour instead of the old placeholder.
+- **Second bug fixed: ancestor UV offset.** The old fallback loop summed coordinate bits in reverse order. On a cold arrival, 174 of 211 fallback instances sampled the wrong part of their ancestor; afterwards 0 of 289 did.
+- **Off switch:** `gpuQuadtree.preferCompleteMaterialLayers: false` restores the old behaviour, with every resident layer counting as a material source.
+
+A first version also took geometry from the complete layer, which opened cracks at tile edges while refinement was pending. That version was replaced; the measurements below cover the replacement.
+
+**[RUN] Results** (headless Chrome 154, 2880×1800):
+
+| Test | Before | After |
+|---|---|---|
+| Fallback instances with a wrong UV offset, cold arrival | 174 of 211 | 0 of 289 |
+| Flashes, 30 m/s / 120 m/s / cold arrival | 6 / 37 / 344 | 0 / 0 / 0 (measured on the first version; material selection is unchanged in the split version) |
+| Pause refinement, then resume: pixels that change | 11.6 % | 0.09 % (first version) |
+| Crack pixels, frozen half-refined frame | – | first version 407, split version 5 |
+| Same frozen frame, split version vs old geometry rule: terrain pixels that differ | – | 0 below the horizon, 53 edge pixels at the horizon |
+
+### 8.2 Flat-tier tiles skip the splat and prebaked-colour outputs
+
+Tiles drawn by the flat tier (`solidColorStartLod` and coarser) now refine only `scatter` and `climate`. The splat step is about 12 of the 17.5 ms GPU per refinement. These layers never get the material-complete flag. Switch: `gpuQuadtree.solidTierSkipsDetailMaterial`.
+
+**[RUN] Results**
+- **Vegetation inputs unchanged:** scatter and climate are byte-identical with and without the skip, on 8 tiles at depths 6–9 with real vegetation data.
+- **Settle time after a 40 km jump** (same session, alternating order):
+
+| Pair | Skip on | Skip off |
+|---|---|---|
+| 1 | 15.4 s | 30.3 s |
+| 2 | 16.3 s | 23.9 s |
+
+- Zero flashes and zero GPU errors in all four runs.
+
+### 8.3 Open points
+
+- **Not yet measured in isolation:** the flat-colour fallback costs 64 texture reads per pixel on every detail pixel without refined material. That is most of the screen during a cold load, so it may lower FPS while loading.
+- **GPU sharing:** every number above came from a headless browser sharing the GPU with the user's browser. Absolute timings and FPS are therefore pessimistic, and they disturbed the user's own session while the tests ran.

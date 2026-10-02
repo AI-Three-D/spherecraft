@@ -187,14 +187,50 @@ fn computeGeomLOD(depth : u32) -> u32 {
     return u32(clamped);
 }
 
-fn findLoadedSourceDepth(face : u32, depth : u32, x : u32, y : u32) -> u32 {
+// LoadedEntry._pad carries per-tile flags written by TileStreamer.
+// Bit 0: the tile's material (refinement output) has been copied into its
+// layer — the layer is complete, not a geometry-only placeholder.
+const LOADED_FLAG_MATERIAL_COMPLETE : u32 = 1u;
+
+// (layer, flags) for a resident tile, or (EMPTY_KEY, 0) when not resident.
+fn lookupLoadedEntry(face : u32, depth : u32, x : u32, y : u32) -> vec2<u32> {
+    let keyLo = makeKeyLo(x, y);
+    let keyHi = makeKeyHi(face, depth);
+    var idx = hashKey(keyLo, keyHi, params.loadedTableMask);
+    for (var i = 0u; i < params.loadedTableCapacity; i++) {
+        let entry = loadedTable[idx];
+        if (entry.keyHi == EMPTY_KEY) {
+            return vec2<u32>(EMPTY_KEY, 0u);
+        }
+        if (entry.keyHi == keyHi && entry.keyLo == keyLo) {
+            return vec2<u32>(entry.layer, entry._pad);
+        }
+        idx = (idx + 1u) & params.loadedTableMask;
+    }
+    return vec2<u32>(EMPTY_KEY, 0u);
+}
+
+// Geometry and material are resolved separately for each visible tile.
+//
+// Geometry: the nearest resident layer (own, then ancestors), the finest
+// heights available. Neighbour data-LOD lookups for edge stitching use the
+// same rule, so stitching always matches the drawn geometry.
+//
+// Material: the nearest layer whose material is complete (flag set by
+// TileStreamer once the refinement copy is submitted). A visible tile never
+// switches from finished material to a geometry-only placeholder: until its
+// own refinement lands it keeps the refined ancestor's material on top of
+// its own geometry. found = 0 when no complete layer exists up the chain.
+//
+// Both return (layer, owner depth, found); layer = EMPTY_KEY when not found.
+fn resolveGeometrySource(face : u32, depth : u32, x : u32, y : u32) -> vec3<u32> {
     var d = depth;
     var tx = x;
     var ty = y;
     loop {
-        let layer = lookupLoaded(face, d, tx, ty);
-        if (layer != EMPTY_KEY) {
-            return d;
+        let entry = lookupLoadedEntry(face, d, tx, ty);
+        if (entry.x != EMPTY_KEY) {
+            return vec3<u32>(entry.x, d, 1u);
         }
         if (d == 0u) {
             break;
@@ -203,7 +239,34 @@ fn findLoadedSourceDepth(face : u32, depth : u32, x : u32, y : u32) -> u32 {
         ty = ty >> 1u;
         d = d - 1u;
     }
-    return depth;
+    return vec3<u32>(EMPTY_KEY, depth, 0u);
+}
+
+fn resolveMaterialSource(face : u32, depth : u32, x : u32, y : u32) -> vec3<u32> {
+    var d = depth;
+    var tx = x;
+    var ty = y;
+    loop {
+        let entry = lookupLoadedEntry(face, d, tx, ty);
+        if (entry.x != EMPTY_KEY && (entry.y & LOADED_FLAG_MATERIAL_COMPLETE) != 0u) {
+            return vec3<u32>(entry.x, d, 1u);
+        }
+        if (d == 0u) {
+            break;
+        }
+        tx = tx >> 1u;
+        ty = ty >> 1u;
+        d = d - 1u;
+    }
+    return vec3<u32>(EMPTY_KEY, depth, 0u);
+}
+
+fn findLoadedSourceDepth(face : u32, depth : u32, x : u32, y : u32) -> u32 {
+    let source = resolveGeometrySource(face, depth, x, y);
+    if (source.x == EMPTY_KEY) {
+        return depth;
+    }
+    return source.y;
 }
 
 fn findRenderedDataLOD(face : u32, depth : u32, x : u32, y : u32, coverDepth : u32) -> u32 {
@@ -482,45 +545,53 @@ if (tid == 0u) {
         if (computeGeomLOD(topDepth) > geomLOD) { geomCoarserMask = geomCoarserMask | 1u; }
         neighborPacked.y = geomCoarserMask;
 
-        // Loaded tile lookup (self or nearest parent)
-        var useLayer = lookupLoaded(face, depth, x, y);
-        var uvOffset = vec2<f32>(0.0);
-        var uvScale = 1.0;
-        if (useLayer == EMPTY_KEY) {
-            // Emit feedback for missing tile
+        // Request this tile if its own layer isn't resident yet (a resident
+        // but material-incomplete layer is already on its way: no request).
+        if (lookupLoaded(face, depth, x, y) == EMPTY_KEY) {
             let fbIdx = atomicAdd(&metaData.feedbackCount, 1u);
             if (fbIdx < params.maxFeedback) {
                 feedbackBuffer[fbIdx] = vec4<u32>(face, depth, x, y);
             }
-
-            // Search parents for fallback
-            var tx = x;
-            var ty = y;
-            var d = depth;
-            var scale = 1.0;
-            loop {
-                if (d == 0u) {
-                    break;
-                }
-                scale = scale * 0.5;
-                let bitX = tx & 1u;
-                let bitY = ty & 1u;
-                uvOffset = uvOffset + vec2<f32>(f32(bitX), f32(bitY)) * scale;
-                tx = tx >> 1u;
-                ty = ty >> 1u;
-                d = d - 1u;
-                let layer = lookupLoaded(face, d, tx, ty);
-if (layer != EMPTY_KEY) {
-    useLayer = layer;
-    uvScale = scale;
-    atomicAdd(&metaData.parentFallbackHits, 1u);
-    break;
-}
-            }
         }
 
+        // Geometry: nearest resident layer (own or ancestor). For an ancestor
+        // k levels up, this tile covers the sub-rectangle at
+        // (x mod 2^k, y mod 2^k) / 2^k of the ancestor's UV space. (The
+        // previous incremental walk summed the bits in reverse order, so
+        // every fallback of 2+ levels sampled the wrong part of the
+        // ancestor: wrong heights and wrong material.)
+        let geometrySource = resolveGeometrySource(face, depth, x, y);
+        let useLayer = geometrySource.x;
         if (useLayer == EMPTY_KEY) {
             continue;
+        }
+        var uvOffset = vec2<f32>(0.0);
+        var uvScale = 1.0;
+        if (geometrySource.y < depth) {
+            let levelsUp = depth - geometrySource.y;
+            let span = 1u << levelsUp;
+            uvScale = 1.0 / f32(span);
+            uvOffset = vec2<f32>(f32(x & (span - 1u)), f32(y & (span - 1u))) * uvScale;
+            atomicAdd(&metaData.parentFallbackHits, 1u);
+        }
+
+        // Material: nearest layer with complete material, packed into
+        // neighborLODs.y next to the coarser-neighbour mask (bits 0-3):
+        //   bit 4      no complete material layer exists for this tile
+        //   bits 8-19  material layer (pool layers must stay below 4096)
+        //   bits 20-24 levels from this tile up to the material layer
+        // The vertex shader rebuilds the material UV transform from the tile
+        // coordinates and those levels. Detail-tier shaders draw the flat
+        // solid-tier color when bit 4 is set (it needs only the tile ids
+        // every resident layer has) instead of placeholder material.
+        let materialSource = resolveMaterialSource(face, depth, x, y);
+        if (materialSource.z == 0u || materialSource.x >= 4096u) {
+            neighborPacked.y = neighborPacked.y | 16u;
+        } else {
+            let materialLevels = min(depth - materialSource.y, 31u);
+            neighborPacked.y = neighborPacked.y
+                | ((materialSource.x & 0xFFFu) << 8u)
+                | (materialLevels << 20u);
         }
 
         let maxCount = metaData.indirectArgs[geomLOD * 5u + 1u];

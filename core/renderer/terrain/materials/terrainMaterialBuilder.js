@@ -245,6 +245,16 @@ export class TerrainMaterialBuilder {
             const faceSizeMeters = Number.isFinite(planetConfig?.radius)
                 ? 2.0 * planetConfig.radius
                 : 0;
+            // Every detail LOD (below the solid tier) draws the solid tier's
+            // flat color instead of placeholder material when its drawn layer
+            // has no detail material yet (instance flag from the instance
+            // builder): cold start, or a tile borrowing a flat-tier ancestor,
+            // which never generates splat/prebaked color.
+            const enableIncompleteSourceFlat =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorTierEnabled === true &&
+                Number.isFinite(solidColorStartLod) &&
+                lod < solidColorStartLod;
             const enableLodEdgeToSolidColor =
                 isLodBeforeSolidTier &&
                 !enableTierEdgeBlend &&
@@ -301,6 +311,7 @@ export class TerrainMaterialBuilder {
                 tierEdgeBlendWidth,
                 tierEdgeBlendStrength,
                 enableTierDistanceFade,
+                enableIncompleteSourceFlat,
                 solidColorAverageWindowMeters,
                 faceSizeMeters,
                 fixedMaterialFamiliesEnabled,
@@ -315,6 +326,7 @@ export class TerrainMaterialBuilder {
                 lod,
                 terrainShaderConfig,
                 enableTierEdgeBlend,
+                forwardTierFlags: enableIncompleteSourceFlat,
                 debugMode: debugVertexMode
             });
             const fragmentShader = overlayPass

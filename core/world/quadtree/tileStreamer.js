@@ -407,9 +407,13 @@ class TileArrayPool {
     // id, id 0, which is WATER_1); every other type gets genuine zero,
     // which the terrain shader already degrades safely (they're not decoded
     // as an id the way splatIndex is).
-    queueCopyToLayer(textures, layer, { zeroFillMissing = false } = {}) {
+    // completesMaterial: once this copy has been submitted, the layer holds
+    // the tile's finished material (refinement output, or a single-stage
+    // full tile). TileStreamer._flushArrayPoolCopies uses it to flag the
+    // tile complete for the GPU only after the data is really in the layer.
+    queueCopyToLayer(textures, layer, { zeroFillMissing = false, completesMaterial = false } = {}) {
         if (!zeroFillMissing) {
-            this._pendingCopies.push({ textures, layer });
+            this._pendingCopies.push({ textures, layer, completesMaterial });
             return;
         }
         const filled = { ...textures };
@@ -424,7 +428,7 @@ class TileArrayPool {
                 _isZeroFillPlaceholder: true
             };
         }
-        this._pendingCopies.push({ textures: filled, layer });
+        this._pendingCopies.push({ textures: filled, layer, completesMaterial });
     }
 
     // maxCount caps how many queued copies get flushed this call (plan §1.1
@@ -559,6 +563,14 @@ class TileArrayPool {
     }
 }
 
+// Per-tile flag bits in the 4th word of a hash entry (GPU: LoadedEntry._pad).
+// Must match LOADED_FLAG_MATERIAL_COMPLETE in instanceBufferBuilder.wgsl.js.
+const TILE_FLAG_MATERIAL_COMPLETE = 1;
+
+// Refinement outputs that only the detail tiers (live splat / prebaked
+// color) read. Tiles of the flat solid-color tier skip them.
+const DETAIL_MATERIAL_TYPES = new Set(['splatData', 'splatIndex', 'splatValid', 'resolvedColor']);
+
 // ─── TileHashTable ────────────────────────────────────────────────────────────
 // Unchanged from original.
 
@@ -602,7 +614,10 @@ class TileHashTable {
         return -1;
     }
 
-    insert(keyLo, keyHi, layer) {
+    // The 4th word of an entry carries per-tile flags for the GPU (read as
+    // LoadedEntry._pad by instanceBufferBuilder.wgsl.js). A new insert
+    // starts with no flags; remove()'s cluster rehash carries them over.
+    insert(keyLo, keyHi, layer, flags = 0) {
         let idx = this.hash(keyLo, keyHi);
         for (var i = 0; i < this.capacity; i++) {
             const base = idx * 4;
@@ -611,12 +626,22 @@ class TileHashTable {
                 this.entries[base]     = keyLo;
                 this.entries[base + 1] = keyHi;
                 this.entries[base + 2] = layer >>> 0;
-                this.entries[base + 3] = 0;
+                this.entries[base + 3] = flags >>> 0;
                 return idx;
             }
             idx = (idx + 1) & this.mask;
         }
         return -1;
+    }
+
+    setFlags(slot, flags) {
+        if (slot < 0 || slot >= this.capacity) return;
+        this.entries[slot * 4 + 3] = flags >>> 0;
+    }
+
+    getFlags(slot) {
+        if (slot < 0 || slot >= this.capacity) return 0;
+        return this.entries[slot * 4 + 3];
     }
 
     remove(keyLo, keyHi, touchedSlots = null) {
@@ -638,12 +663,13 @@ class TileHashTable {
             if (hi === 0xFFFFFFFF) break;
             const lo    = this.entries[base];
             const layer = this.entries[base + 2];
+            const flags = this.entries[base + 3];
             this.entries[base]     = 0xFFFFFFFF;
             this.entries[base + 1] = 0xFFFFFFFF;
             this.entries[base + 2] = 0xFFFFFFFF;
             this.entries[base + 3] = 0xFFFFFFFF;
             if (touchedSlots) touchedSlots.push(idx);
-            const newSlot = this.insert(lo, hi, layer);
+            const newSlot = this.insert(lo, hi, layer, flags);
             if (touchedSlots && newSlot >= 0) touchedSlots.push(newSlot);
             idx = (idx + 1) & this.mask;
         }
@@ -705,6 +731,13 @@ export class TileStreamer {
         };
         this._gpuBackpressureLimit = this._admissionBudgets.maxGpuFencesInFlight;
         this._gpuBackpressureSkipCount = 0;
+        // Flag tiles "material complete" in the GPU lookup table once their
+        // finished material has been copied into their layer. The instance
+        // builder then draws the nearest complete layer (own or ancestor), so
+        // a visible tile never switches from finished material back to a
+        // geometry-only placeholder. false = previous behaviour (nearest
+        // resident layer, finished or not).
+        this._preferCompleteMaterialLayers = options.preferCompleteMaterialLayers !== false;
         this._tilesStartedWindowCount = 0;
 
         // ── Phase 0 instrumentation state (plan §0) ──────────────────────
@@ -749,6 +782,20 @@ export class TileStreamer {
         const { geometryTypes, refinementTypes } = splitOutputTypes(this.streamedTypes);
         this._geometryTypes = geometryTypes;
         this._refinementTypes = refinementTypes;
+        // Tiles drawn by the flat solid-color tier (geometry LOD >=
+        // solidTierStartLod) never sample the splat maps or the prebaked
+        // color: the tier's color comes from the geometry pass's tile ids.
+        // Their refinement skips those outputs (the splat step is ~12 of the
+        // ~17.5 ms GPU per refinement) and keeps the rest (scatter/climate,
+        // used by vegetation and ground-field bakes at every depth). Such a
+        // layer is never flagged material-complete, so detail tiers never
+        // pick it as a material source; the detail shaders draw the flat
+        // color for a tile whose drawn layer has no detail material.
+        // null/undefined = refine every tile fully (previous behaviour).
+        this._solidTierStartLod = Number.isFinite(options.solidTierStartLod)
+            ? Math.max(0, Math.floor(options.solidTierStartLod))
+            : null;
+        this._coarseRefinementTypes = refinementTypes.filter(type => !DETAIL_MATERIAL_TYPES.has(type));
         this._tileState = new Map();   // key -> 'REQUESTED'|'QUEUED'|'GENERATING'|'GEOMETRY_READY'|'RESIDENT'|'REFINING'|'REFINED'
 
         this.textureFormats  = {
@@ -1248,6 +1295,7 @@ this._freshnessSkipCount = 0;
             : [];
         const { count: copyCount, textures: flushedTextures } = this.arrayPool.flushPendingCopies(copyBudget);
         this._copyOperationsWindowCount += copyCount;
+        this._markMaterialCompleteForFlushedCopies(flushedCopies, copyCount);
         let copyFencePromise = null;
         if (copyCount > 0) {
             const batchId = ++this._debugCopyBatchId;
@@ -1292,6 +1340,31 @@ this._freshnessSkipCount = 0;
                 .catch(resolveFence);
         }
         this._pendingDestructions.push(entry);
+    }
+
+    // Raise the GPU "material complete" flag for tiles whose finishing copy
+    // was just submitted. Runs inside tickFlush right after the copy batch's
+    // queue.submit and before the dirty hash slots are uploaded, so the flag
+    // reaches the GPU in the same frame as (and queue-ordered after) the
+    // data it vouches for — never before. Pending copies of a released layer
+    // are purged in releaseLayer, so a flushed entry always belongs to the
+    // layer's current occupant.
+    _markMaterialCompleteForFlushedCopies(flushedCopies, copyCount) {
+        if (!this._preferCompleteMaterialLayers || copyCount <= 0) return;
+        const count = Math.min(copyCount, flushedCopies.length);
+        for (let i = 0; i < count; i++) {
+            const entry = flushedCopies[i];
+            if (!entry?.completesMaterial) continue;
+            const key = this._layerToKey.get(entry.layer);
+            const info = key ? this._tileInfo.get(key) : null;
+            if (!info || info.layer !== entry.layer) continue;
+            const slot = this.hashTable.findSlot(info.keyLo, info.keyHi);
+            if (slot < 0) continue;
+            const flags = this.hashTable.getFlags(slot);
+            if ((flags & TILE_FLAG_MATERIAL_COMPLETE) !== 0) continue;
+            this.hashTable.setFlags(slot, flags | TILE_FLAG_MATERIAL_COMPLETE);
+            this._dirtySlots.add(slot);
+        }
     }
 
     _destroyDeferredTextures() {
@@ -2022,7 +2095,12 @@ async _commitTile(tileAddr, textures, telemetry = null) {
     // configured type not generated yet (splat/climate/scatter/...) gets
     // its layer explicitly zeroed rather than left with whatever the
     // *previous* occupant of this (possibly reused) layer wrote there.
-    this.arrayPool.queueCopyToLayer(textures, layer, { zeroFillMissing: true });
+    // A geometry-only commit completes the tile's material only when nothing
+    // is left to refine (single-stage configuration).
+    this.arrayPool.queueCopyToLayer(textures, layer, {
+        zeroFillMissing: true,
+        completesMaterial: this._refinementTypes.length === 0
+    });
     if (telemetry) telemetry.copySubmitted = performance.now();
     this._debugRegisterQueuedCopy(tileAddr, layer, textures);
     // Do NOT schedule these for destruction here: arrayPool._pendingCopies
@@ -2034,7 +2112,10 @@ async _commitTile(tileAddr, textures, telemetry = null) {
 
     const keyLo = this.hashTable.makeKeyLo(tileAddr.x, tileAddr.y);
     const keyHi = this.hashTable.makeKeyHi(tileAddr.face, tileAddr.depth);
-    const slot  = this.hashTable.insert(keyLo, keyHi, layer);
+    // With preferCompleteMaterialLayers off, every resident layer counts as
+    // a material source right away (previous behaviour: nearest resident).
+    const initialFlags = this._preferCompleteMaterialLayers ? 0 : TILE_FLAG_MATERIAL_COMPLETE;
+    const slot  = this.hashTable.insert(keyLo, keyHi, layer, initialFlags);
     if (slot < 0) {
         Logger.warn('[TileStreamer] Hash insert failed');
         this._debugCopyStateByLayer.delete(layer);
@@ -2101,9 +2182,30 @@ async _commitTile(tileAddr, textures, telemetry = null) {
 // resident. Runs on a separate, smaller-budget queue so it never competes
 // with new-tile admission for the same per-frame slots (plan §1.2: visible/
 // predictive geometry always outranks refinement).
+// True when the tile at this depth is drawn by the flat solid-color tier.
+_isSolidTierDepth(depth) {
+    if (this._solidTierStartLod === null) return false;
+    const maxDepth = this.quadtreeGPU?.maxDepth;
+    if (!Number.isFinite(maxDepth)) return false;
+    return (maxDepth - depth) >= this._solidTierStartLod;
+}
+
+// Refinement outputs for a tile: the full set for detail tiers, the set
+// without splat/prebaked color for the flat tier (see constructor).
+_refinementTypesFor(tileAddr) {
+    return this._isSolidTierDepth(tileAddr.depth)
+        ? this._coarseRefinementTypes
+        : this._refinementTypes;
+}
+
 _queueRefinement(tileAddr) {
     const key = tileAddr.toString();
     if (!this._tileInfo.has(key)) return; // evicted before refinement could even be queued
+    const refinementTypes = this._refinementTypesFor(tileAddr);
+    if (refinementTypes.length === 0) {
+        this._tileState.set(key, 'REFINED');
+        return;
+    }
 
     // Distance normalized by the tile's own world-space size ("how many
     // tile-widths away is the camera") rather than raw meters, so one
@@ -2126,7 +2228,7 @@ _queueRefinement(tileAddr) {
         distanceInTileWidths,
         velocityAlignment: null,
         generationTier: 'refinement',
-        outputMask: this._refinementTypes,
+        outputMask: refinementTypes,
         resolution: this.tileTextureSize,
         requestTime: performance.now(),
         queueTime: null,
@@ -2192,7 +2294,7 @@ _queueRefinement(tileAddr) {
         }
 
         try {
-            const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, this._refinementTypes);
+            const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, refinementTypes);
             if (Number.isFinite(telemetry.computeSubmitted)) {
                 this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
             }
@@ -2299,14 +2401,17 @@ _commitRefinement(tileAddr, textures, telemetry = null) {
     // and the geometry types in the same layer are already correct from
     // the initial commit — copying only what's present (the existing,
     // non-zero-fill queueCopyToLayer behavior) is exactly right.
-    this.arrayPool.queueCopyToLayer(textures, info.layer);
+    // A flat-tier tile's refinement carries no detail material, so it never
+    // makes the layer a valid material source for detail tiers.
+    const solidTier = this._isSolidTierDepth(tileAddr.depth);
+    this.arrayPool.queueCopyToLayer(textures, info.layer, { completesMaterial: !solidTier });
     if (telemetry) {
         telemetry.copySubmitted = performance.now();
         telemetry.residentTime = performance.now();
     }
     info.lastUsed = performance.now();
 
-    if (this._refinementTypes.includes('scatter')) {
+    if (this._refinementTypesFor(tileAddr).includes('scatter')) {
         this._scatterCommitQueue.push({
             face: tileAddr.face, depth: tileAddr.depth,
             x: tileAddr.x, y: tileAddr.y, layer: info.layer,

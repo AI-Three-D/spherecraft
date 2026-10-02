@@ -23,6 +23,9 @@ export function buildTerrainChunkVertexShader(options = {}) {
     // geometry-LOD coarser-neighbour mask; the fragment stage computes the
     // ramp per pixel from vUv, so it stays smooth regardless of mesh density.
     const enableTierEdgeBlend = options.enableTierEdgeBlend === true;
+    // Detail variants that react to the instance's tier flags (coarser-
+    // neighbour mask bits 0-3, bit 4 = drawn layer has no detail material).
+    const forwardTierFlags = enableTierEdgeBlend || options.forwardTierFlags === true;
     const defaultSegments = [128, 64, 32, 16, 8, 4, 2];
     const lodSegments = Array.isArray(options.lodSegments) ? options.lodSegments : defaultSegments;
     const segments = defaultSegments.map((value, index) => {
@@ -82,7 +85,9 @@ fn unpackNeighborLODs(packed: vec2<u32>) -> vec4<f32> {
         neighborLODs = unpackNeighborLODs(chunk.neighborLODs);
         heightLayer = i32(chunk.layer);
         debugEdgeMask = f32(chunk.edgeMask);
-        tierEdgeMask = f32(chunk.neighborLODs.y & 0xFu);
+        tierEdgeMask = f32(chunk.neighborLODs.y & 0x1Fu);
+        materialPacked = chunk.neighborLODs.y;
+        hasMaterialPacked = true;
         selfLOD = i32(chunk.lod);
         if (uniforms.useAtlasMode > 0.5) {
             atlasOffset = chunk.uvOffset;
@@ -113,7 +118,7 @@ const DEBUG_STITCH_STEP_FIX : bool = true;
 const USE_TRANSITION_TOPOLOGY : bool = ${useTransitionTopology ? 'true' : 'false'};
 const ENABLE_LOD_EDGE_FADE : bool = ${enableLodEdgeFade ? 'true' : 'false'};
 const LOD_EDGE_FADE_WIDTH : f32 = ${lodEdgeFadeWidth.toFixed(4)};
-const ENABLE_TIER_EDGE_BLEND : bool = ${enableTierEdgeBlend ? 'true' : 'false'};
+const FORWARD_TIER_FLAGS : bool = ${forwardTierFlags ? 'true' : 'false'};
 const MAX_MORPH_DISTANCE : f32 = 1e9;
 const SEGMENTS_PER_LOD : array<f32, 7> = array<f32, 7>(${segmentLiteral});
 const MAX_LOD : f32 = 6.0;
@@ -176,7 +181,10 @@ struct VertexOutput {
     @location(2) vWorldPosition: vec3<f32>,
     @location(3) vViewPosition: vec3<f32>,
     @location(4) vDistanceToCamera: f32,
-    @location(5) vTileUv: vec2<f32>,
+    // Material source for the fragment stage: (uvOffset.xy, uvScale, layer).
+    // Equals the geometry source unless the instance builder found a nearer
+    // layer with complete material (see instanceBufferBuilder.wgsl.js).
+    @location(5) vMaterialUv: vec4<f32>,
     @location(6) vWorldPos: vec2<f32>,
     @location(7) vSphereDir: vec3<f32>,
     @location(8) vHeight: f32,
@@ -567,6 +575,8 @@ fn main(input: VertexInput${instanceParam}) -> VertexOutput {
     var edgeValue: f32 = 0.0;
     var debugEdgeMask: f32 = 0.0;
     var tierEdgeMask: f32 = 0.0;
+    var materialPacked: u32 = 0u;
+    var hasMaterialPacked = false;
     var debugInstanceIndex: f32 = 0.0;
     if (useInstancing) {
 ${instancingBlock}
@@ -613,10 +623,12 @@ ${instancingBlock}
         let maskPack = clamp(debugEdgeMask, 0.0, 4095.0) / 4096.0;
         debugEdge.w = rawNeighborLODs.w + maskPack;
         // .z normally carries the stitch axis for debug mode 15. All 16
-        // inter-stage slots are in use, so the in-tile tier blend borrows it
-        // for the coarser-neighbour mask (constant per instance, so it
-        // interpolates to itself); mode 15 shows that mask in this variant.
-        let debugZ = select(debugAxis, tierEdgeMask, ENABLE_TIER_EDGE_BLEND);
+        // inter-stage slots are in use, so detail-tier variants borrow it for
+        // the instance's tier flags: coarser-neighbour mask (bits 0-3) and
+        // "drawn layer has no detail material" (bit 4). Constant per
+        // instance, so it interpolates to itself; mode 15 shows the flags in
+        // these variants.
+        let debugZ = select(debugAxis, tierEdgeMask, FORWARD_TIER_FLAGS);
         debugSample = vec4<f32>(f32(selfLOD), edgeFade, debugZ, debugSampleLod);
     }
     var worldPosition: vec3<f32>;
@@ -693,7 +705,21 @@ ${instancingBlock}
     if (chunkFace >= 0) {
         worldPos2D = faceUV * faceSizeWorld;
     }
-    output.vTileUv = finalUV * uniforms.chunkSize;
+    // Material source (see VertexOutput.vMaterialUv). Default: the geometry
+    // source. Bits 8-19 of neighborLODs.y hold the material layer and bits
+    // 20-24 the levels from this tile up to it; bit 4 = no complete material
+    // (the fragment stage then draws the flat tier color when enabled).
+    var materialUv = vec4<f32>(atlasOffset, atlasScale, f32(heightLayer));
+    if (hasMaterialPacked && (materialPacked & 16u) == 0u) {
+        let materialLevels = (materialPacked >> 20u) & 0x1Fu;
+        let span = 1u << materialLevels;
+        let tileX = u32(round(chunkLocation.x / max(chunkSizeUVLocal, 1e-9)));
+        let tileY = u32(round(chunkLocation.y / max(chunkSizeUVLocal, 1e-9)));
+        let materialScale = 1.0 / f32(span);
+        let materialOffset = vec2<f32>(f32(tileX & (span - 1u)), f32(tileY & (span - 1u))) * materialScale;
+        materialUv = vec4<f32>(materialOffset, materialScale, f32((materialPacked >> 8u) & 0xFFFu));
+    }
+    output.vMaterialUv = materialUv;
     output.vWorldPos = worldPos2D;
     output.vNormal = normal;
     output.vSphereDir = sphereDirOut;
