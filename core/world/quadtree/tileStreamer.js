@@ -497,6 +497,37 @@ class TileArrayPool {
     }
 
     releaseLayer(layer) {
+        // Purge any still-pending copy targeting this layer before freeing
+        // it for reuse. flushPendingCopies() writes directly to a stored
+        // layer index with no check that the layer still belongs to the
+        // tile that queued the copy — without this purge, a tile evicted
+        // after its refinement copy was queued but before that copy
+        // flushed would leave a "ghost" write sitting in _pendingCopies;
+        // once this layer is handed to a brand-new tile and THAT tile
+        // commits its own (correct) data, the ghost copy can still flush
+        // afterward and silently overwrite it with the evicted tile's
+        // stale textures. Confirmed plausible root cause (2026-10-01) of
+        // resolvedColor reading as permanently invalid on tiles that
+        // recently reused a layer, and of the reported "high-res tile
+        // briefly flickers back to low-res" symptom — both match a tile's
+        // freshly-correct data being overwritten by a stale ghost write
+        // from an unrelated, already-evicted tile.
+        if (this._pendingCopies && this._pendingCopies.length > 0) {
+            const kept = [];
+            for (const entry of this._pendingCopies) {
+                if (entry.layer !== layer) {
+                    kept.push(entry);
+                    continue;
+                }
+                for (const type of Object.keys(entry.textures)) {
+                    const tex = entry.textures[type];
+                    if (tex && !tex._isZeroFillPlaceholder) {
+                        try { tex.destroy?.(); } catch { /* ignore cleanup failure */ }
+                    }
+                }
+            }
+            this._pendingCopies = kept;
+        }
         this.freeLayers.push(layer);
     }
 
@@ -841,6 +872,9 @@ export class TileStreamer {
         this._commitWindowCount = 0;
         this._queueRejectWindowCount = 0;
         this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
+        // Refinement-drop-by-depth instrumentation (2026-10-01) — see the
+        // drop site in _queueRefinement's inner task for what this counts.
+        this._refinementDropByDepthWindow = new Map();
 
         // ── Phase 2: background refinement queue (plan §2, §3 preview) ──
         // Separate from _generationQueue so refinement admission never
@@ -861,13 +895,30 @@ export class TileStreamer {
             }
         });
         this._refinementRejectWindowCount = 0;
-        // key -> tileAddr for refinement requests that were dropped (queue
-        // full, or the tile was irrelevant right as its turn came up) —
-        // drained a few at a time by _retryDroppedRefinements() so they get
-        // reconsidered instead of staying resident with unrefined material
-        // forever. See _queueRefinement's two `request === null` /
-        // `!relevant` paths.
+        // key -> tileAddr for refinement requests dropped because the queue
+        // was at capacity (AsyncGenerationQueue.request() returned null).
+        // Drained a few at a time by _retryDroppedRefinements(), unconditionally
+        // (queue-full is orthogonal to visibility, so no extra filter needed).
         this._refinementRetryMap = new Map();
+        // key -> tileAddr for refinement requests dropped because the tile
+        // was no longer "relevant" (not visible, not an ancestor/descendant
+        // of anything visible) at dequeue time. Separate from the map above,
+        // and separate retry logic (_retryVisibleDroppedRefinements), because
+        // this case needs a much stricter filter: most resident tiles are
+        // "relevant" via ancestor/descendant leniency at any given moment
+        // (confirmed — cached off-screen tiles vastly outnumber visible
+        // ones), so retrying on mere "relevant" reintroduced a livelock
+        // (confirmed via frozen refinement throughput, not guessed — see the
+        // comment at the original drop site). Only tiles that are STRICTLY
+        // currently visible get re-queued; everything else is cheaply
+        // rechecked and left in the map rather than consuming a refinement
+        // queue slot. 2026-10-01: added to fix tiles that get unluckily
+        // dropped during camera movement and then stay resident-but-never-
+        // refined forever even after the camera settles and they become
+        // squarely visible (confirmed via debug mode 102 + idle [QTLight]
+        // telemetry: resolvedColor permanently invalid on some LOD4 tiles
+        // even at steady state with an empty refinement queue).
+        this._refinementVisibleDropRetryMap = new Map();
     }
     /**
  * Register an externally-owned array texture to be returned alongside the
@@ -1005,6 +1056,7 @@ this._freshnessSkipCount = 0;
         this._tileState.clear();
         this._refinementRejectWindowCount = 0;
         this._refinementRetryMap.clear();
+        this._refinementVisibleDropRetryMap.clear();
 
         if (this.arrayPool?._pendingCopies) {
             this.arrayPool._pendingCopies.length = 0;
@@ -1040,6 +1092,7 @@ this._freshnessSkipCount = 0;
         this._commitWindowCount = 0;
         this._queueRejectWindowCount = 0;
         this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
+        this._refinementDropByDepthWindow.clear();
 
         this._telemetryByKey.clear();
         for (const window of Object.values(this._stageLatency)) window.consume();
@@ -1337,6 +1390,7 @@ this._freshnessSkipCount = 0;
         // actual generation start is still gated by effectiveBudget/.tick()
         // same as any other queued entry, so this can't bypass the budget.
         this._retryDroppedRefinements();
+        this._retryVisibleDroppedRefinements();
 
         const gpuInFlight = (this.tileGenerator?._gpuFencesInFlight ?? 0) + geometrySpawnedThisFrame;
         const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
@@ -2110,23 +2164,30 @@ _queueRefinement(tileAddr) {
         // via its geometry), so there's no correctness issue — just don't
         // spend GPU time refining something nobody's looking at right now.
         //
-        // Deliberately NOT queued for retry here (unlike the request===null
-        // path below): most resident tiles are "not relevant" at any given
-        // moment by design (cached off-screen tiles far outnumber currently-
-        // visible ones — confirmed via [QTLight]'s tileStates counts:
-        // RESIDENT far exceeds visible). Retrying this branch immediately
-        // re-queues nearly the entire resident population every tick, and
-        // since _retryDroppedRefinements() pulls it straight back out and
-        // re-queues it, the same tiles cycle through
-        // dequeue -> instantly-fail-relevance-again -> retry map -> dequeue
-        // forever, each cycle consuming one of the small refinement
-        // throughput slots. That livelock starves genuinely new refinement
-        // work completely (confirmed: refinement queueActive/tileStates
-        // frozen solid, zero progress, immediately after adding this retry —
-        // reverted after proving it via that data, not guessed).
+        // NOT re-queued unconditionally here (that caused a confirmed
+        // livelock before — see _refinementVisibleDropRetryMap's comment in
+        // the constructor). Instead, added to a separate retry map that
+        // _retryVisibleDroppedRefinements() only acts on once the tile is
+        // STRICTLY visible again — cheap to recheck repeatedly, and only
+        // consumes a real refinement queue slot for the much smaller
+        // currently-visible subset, which is what actually needs healing
+        // (a tile stuck resident-but-never-refined forever after the camera
+        // settles on it — confirmed via debug mode 102 + idle telemetry).
         if (!this._describeTileDemandState(tileAddr, key).relevant) {
             this._telemetryByKey.delete(key);
             this._tileState.set(key, 'RESIDENT');
+            this._refinementVisibleDropRetryMap.set(key, tileAddr);
+            // Instrumentation (2026-10-01): counts refinement drops by tile
+            // depth, to test whether LOD4-depth tiles are disproportionately
+            // dropped here before ever completing refinement — the leading
+            // hypothesis for why resolvedColor reads as permanently invalid
+            // (alpha<0.5) on LOD4 (confirmed via debug mode 102: LOD4 forced
+            // through LOD5's exact resolvedColor path still always falls
+            // back, everywhere, not just at the seam). See consumePressureWindow().
+            this._refinementDropByDepthWindow.set(
+                tileAddr.depth,
+                (this._refinementDropByDepthWindow.get(tileAddr.depth) || 0) + 1
+            );
             return false;
         }
 
@@ -2166,14 +2227,16 @@ _queueRefinement(tileAddr) {
     }
 }
 
-// Tiles whose refinement request was dropped — either the queue was at
-// capacity (AsyncGenerationQueue.request() returned null) or the tile went
-// irrelevant right as its turn came up — get one more chance each tick
-// instead of staying resident with unrefined (zero-filled) material
-// forever. Bounded per tick so a large backlog drains gradually rather than
-// flooding _refinementQueue back to capacity in one frame; a still-evicted
-// tile is simply dropped (checked via _tileInfo, same as _queueRefinement's
-// own entry guard) rather than retried indefinitely.
+// Tiles whose refinement request was dropped because the queue was at
+// capacity (AsyncGenerationQueue.request() returned null) get one more
+// chance each tick instead of staying resident with unrefined (zero-filled)
+// material forever. Bounded per tick so a large backlog drains gradually
+// rather than flooding _refinementQueue back to capacity in one frame; a
+// still-evicted tile is simply dropped (checked via _tileInfo, same as
+// _queueRefinement's own entry guard) rather than retried indefinitely.
+// Unconditional (no visibility filter) — queue-full is a capacity problem,
+// not correlated with visibility, so there's no livelock risk here the way
+// there is for the "not relevant" case (see _retryVisibleDroppedRefinements).
 _retryDroppedRefinements() {
     if (this._refinementRetryMap.size === 0) return;
     const maxRetriesPerTick = 16;
@@ -2183,6 +2246,40 @@ _retryDroppedRefinements() {
         this._refinementRetryMap.delete(key);
         attempted++;
         if (!this._tileInfo.has(key)) continue; // evicted since — nothing left to refine
+        this._queueRefinement(tileAddr);
+    }
+}
+
+// Tiles whose refinement request was dropped because they were no longer
+// "relevant" at dequeue time (see _queueRefinement's !relevant branch).
+// Unlike _retryDroppedRefinements above, this CANNOT unconditionally
+// re-queue every entry — most resident tiles are "relevant" via ancestor/
+// descendant leniency at any given moment (far outnumbering strictly-visible
+// ones), so doing that reintroduced a confirmed livelock (frozen refinement
+// throughput, proven via telemetry, not guessed).
+//
+// Instead: the demand-state check itself is cheap (no GPU/queue involved),
+// so it's fine to recheck every entry every tick. Only entries that are
+// STRICTLY visible right now (demand reason === 'visible', not merely
+// ancestor/descendant-relevant) actually get pushed back into
+// _queueRefinement — the one operation that consumes real refinement
+// throughput. Everything else is left in the map for a future tick's
+// recheck rather than being retried or dropped outright, so a tile that
+// becomes visible later still eventually heals. Evicted tiles are removed.
+// No per-tick cap on re-queues: in steady state only a handful of tiles are
+// ever newly-visible-and-unrefined at once, so this doesn't reproduce the
+// livelock's "flood the queue every tick" failure mode.
+_retryVisibleDroppedRefinements() {
+    if (this._refinementVisibleDropRetryMap.size === 0) return;
+    for (const [key, tileAddr] of this._refinementVisibleDropRetryMap) {
+        if (!this._tileInfo.has(key)) {
+            this._refinementVisibleDropRetryMap.delete(key);
+            continue; // evicted since — nothing left to refine
+        }
+        if (this._describeTileDemandState(tileAddr, key).reason !== 'visible') {
+            continue; // still not strictly visible — recheck next tick
+        }
+        this._refinementVisibleDropRetryMap.delete(key);
         this._queueRefinement(tileAddr);
     }
 }
@@ -2704,6 +2801,17 @@ markTilesVisible(tiles) {
         this._copyOperationsWindowCount = 0;
         this._refinementRejectWindowCount = 0;
 
+        // Instrumentation (2026-10-01): refinement jobs dropped as "not
+        // relevant" at dequeue, broken out by tile depth — tests whether
+        // LOD4-depth tiles are disproportionately starved of refinement
+        // (leading hypothesis for resolvedColor reading as permanently
+        // invalid on LOD4; see the drop site in _queueRefinement).
+        const refinementDroppedByDepth = {};
+        for (const [depth, count] of this._refinementDropByDepthWindow) {
+            refinementDroppedByDepth[depth] = count;
+        }
+        this._refinementDropByDepthWindow.clear();
+
         return {
             requestLatency,
             staleStarts,
@@ -2732,6 +2840,14 @@ markTilesVisible(tiles) {
             refinementQueueActive,
             refinementDropped,
             refinementRejected,
+            refinementDroppedByDepth,
+            // Instrumentation (2026-10-01): direct visibility into whether
+            // _retryVisibleDroppedRefinements is doing anything. Always
+            // present (not just when nonzero), unlike refinementDroppedByDepth,
+            // specifically so we can see it SHRINK over time (healing working)
+            // vs stay flat/grow (not working) rather than just knowing it's
+            // nonzero at one instant.
+            refinementVisibleDropRetryMapSize: this._refinementVisibleDropRetryMap.size,
             tileStateCounts
         };
     }

@@ -262,7 +262,26 @@ fn shouldSubdivideWithCenter(depth : u32, worldCenter : vec3<f32>) -> bool {
     // Approximate screen-space error in pixels
     let screenError = tileWorldSize * params.lodFactor / max(distance, 0.001);
 
-    return screenError > params.lodErrorThreshold;
+    // Quantize before comparing to the threshold. This traversal is fully
+    // stateless — recomputed from scratch every frame with no memory of the
+    // previous frame's decision for this tile — so a tile whose raw
+    // screenError happens to sit right at lodErrorThreshold will flip its
+    // subdivide/merge decision on ANY sub-pixel noise (floating-point drift,
+    // tiny camera input jitter), even with an otherwise-stationary camera.
+    // Confirmed symptom (2026-10-01): tiles visibly flickering between LOD
+    // levels — sometimes cycling through more than one variant — for
+    // several seconds, including while standing still. Rounding to a whole
+    // multiple of a few pixels creates a dead zone around the threshold
+    // that absorbs that noise, at the cost of the decision being quantized
+    // to ~4-pixel steps rather than exact. This is NOT true two-sided
+    // hysteresis (which would need persistent per-tile state recording the
+    // prior frame's decision) — just enough to stop noise-driven flicker at
+    // a fixed boundary. Revisit with real hysteresis if quantization alone
+    // isn't enough.
+    let quantizeStepPixels = 4.0;
+    let quantizedScreenError = round(screenError / quantizeStepPixels) * quantizeStepPixels;
+
+    return quantizedScreenError > params.lodErrorThreshold;
 }
 
 // ─── Hash table helpers (match instanceBufferBuilder key encoding) ────────

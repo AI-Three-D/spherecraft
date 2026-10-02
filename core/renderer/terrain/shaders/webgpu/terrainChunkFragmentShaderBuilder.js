@@ -3077,6 +3077,58 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let lodEdgeFade = clamp(input.vDebugSample.y, 0.0, 1.0);
     let lodEdgeAmount = select(0.0, 1.0 - lodEdgeFade, ENABLE_ANY_LOD_EDGE_FADE);
 
+    // Mode 100: LOD4/5 transition-edge seam highlight. Reuses the existing
+    // per-vertex neighbor-LOD edge signal (lodEdgeAmount — proximity to an
+    // edge bordering a COARSER neighbor; already live for LOD4 today via
+    // lodEdgeAOFadeEnabled+lodEdgeFadeMaxLod=4, unrelated to the broken
+    // color fade). Bright magenta exactly where geometryLOD==4 borders a
+    // coarser neighbor (LOD5, the only coarser tier adjacent to LOD4) —
+    // confirms we are actually looking at the LOD4/LOD5 boundary and not
+    // some other transition, independent of any color-path logic.
+    if (debugMode == 100) {
+        let isLod4 = fragUniforms.geometryLOD == 4;
+        let edgeGlow = select(0.0, lodEdgeAmount, isLod4);
+        let base = select(vec3<f32>(0.08, 0.08, 0.08), vec3<f32>(0.0, 0.55, 0.12), isLod4);
+        let seamColor = vec3<f32>(1.0, 0.0, 1.0);
+        return vec4<f32>(mix(base, seamColor, clamp(edgeGlow * 3.0, 0.0, 1.0)), 1.0);
+    }
+    // Mode 101: raw input.vDistanceToCamera as a red gradient, unscaled by
+    // any fade logic — proves distance-to-camera actually varies smoothly
+    // per-fragment WITHIN a single tile's own footprint (not just per-tile
+    // or per-chunk), which any future distance-based fade depends on.
+    // Scaled so a full 0-2000m range maps to black-to-red; adjust divisor
+    // if testing at very different altitudes.
+    if (debugMode == 101) {
+        let g = clamp(input.vDistanceToCamera / 2000.0, 0.0, 1.0);
+        return vec4<f32>(g, 0.0, 0.0, 1.0);
+    }
+    // Mode 103: order-of-magnitude bucket of the SAME raw vDistanceToCamera
+    // mode 101 reads, since mode 101 was reported solid red even standing
+    // ~100m from terrain — i.e. saturated past 2000m at a distance that
+    // should read near-black. This reads out roughly which decade the real
+    // value falls in, to tell a "still too small a divisor" explanation
+    // apart from "the value itself is wrong" (e.g. tens of thousands+,
+    // consistent with a planet-scale float32 precision problem in the
+    // view-space transform feeding it).
+    //   black        < 10m
+    //   blue         10-100m
+    //   green        100-1,000m
+    //   yellow       1,000-10,000m
+    //   orange       10,000-100,000m
+    //   red          100,000-1,000,000m
+    //   white        >= 1,000,000m
+    if (debugMode == 103) {
+        let d = input.vDistanceToCamera;
+        var color = vec3<f32>(0.0, 0.0, 0.0);
+        if (d >= 1000000.0) { color = vec3<f32>(1.0, 1.0, 1.0); }
+        else if (d >= 100000.0) { color = vec3<f32>(1.0, 0.0, 0.0); }
+        else if (d >= 10000.0) { color = vec3<f32>(1.0, 0.5, 0.0); }
+        else if (d >= 1000.0) { color = vec3<f32>(1.0, 1.0, 0.0); }
+        else if (d >= 100.0) { color = vec3<f32>(0.0, 1.0, 0.0); }
+        else if (d >= 10.0) { color = vec3<f32>(0.0, 0.3, 1.0); }
+        return vec4<f32>(color, 1.0);
+    }
+
     let segDims = vec2<f32>(fragUniforms.chunkWidth, fragUniforms.chunkHeight);
     var ddx_vUv = dpdx(input.vUv) * segDims;
     var ddy_vUv = dpdy(input.vUv) * segDims;
@@ -3527,7 +3579,32 @@ if (debugMode == 16) {
         dominantTileId = splatDominantTileId(splatResult);
     }
 
-    if (ENABLE_SOLID_COLOR_TIER) {
+    // Mode 102: force LOD4 through the EXACT same resolvedColor path LOD5
+    // uses (ENABLE_RESOLVED_COLOR's own branch body, copied verbatim,
+    // including its alpha-validity fallback), then falls through to the
+    // normal lighting/fog pipeline below like any other tier — a true
+    // "what would LOD4 look like if it were LOD5" render, not just a color-
+    // path code. A runtime check (fragUniforms.geometryLOD), not a compile-
+    // time flag, so it needs no JS/config wiring at all. Only affects
+    // LOD4's own draws; LOD5 renders normally for side-by-side comparison.
+    // Two possible outcomes:
+    //   - LOD4 visibly flattens to match LOD5's look  -> resolvedColor data
+    //     IS valid for LOD4 tiles; the fade logic itself is what's broken.
+    //   - LOD4 still looks textured/detailed (same as mode 0) -> the alpha
+    //     fallback is firing, i.e. resolvedColor is NOT valid for LOD4
+    //     tiles — confirms the handoff doc's leading hypothesis directly.
+    if (debugMode == 102 && fragUniforms.geometryLOD == 4) {
+        microSample = sampleResolvedTerrainColor(input, layer);
+        if (microSample.a < 0.5) {
+            microSample = sampleTileColor(
+                fallbackTileId, worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            microColorPath = 0;
+        } else {
+            microColorPath = 2;
+        }
+    } else if (ENABLE_SOLID_COLOR_TIER) {
         // Flat category color for the single coarsest LOD (small first
         // increment — see solidColorStartLod). Depends only on
         // fallbackTileId, a geometry-pass output that's always ready with

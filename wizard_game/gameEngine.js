@@ -1410,8 +1410,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         // color, 91-95: NdotL/worldNormal/detailNormal/normalMapBlend/
         // lightDirection — see terrainChunkFragmentShaderBuilder.js; 99 was
         // already named 'Fragment Test' below but this upper bound excluded
-        // it too before this fix).
-        if ((mode >= 25 && mode <= 89) || (mode >= 90 && mode <= 99)) {
+        // it too before this fix). 100-109: LOD4/5 seam investigation
+        // (100: edge highlight, 101: distance gradient, 102: force LOD4
+        // through LOD5's resolvedColor path) — extended range for the same
+        // reason 90-99 was reserved.
+        if ((mode >= 25 && mode <= 89) || (mode >= 90 && mode <= 109)) {
             return { generatorMode: 0, fragmentMode: mode };
         }
         if (mode === 0) {

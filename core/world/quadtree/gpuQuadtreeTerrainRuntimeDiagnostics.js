@@ -934,7 +934,7 @@ export function installQuadtreeTileManagerRuntimeDiagnostics(QuadtreeTileManager
                             `pendingCopies=${pendingCopies} dirtySlots=${dirtySlots} ` +
                             `gpuInFlight=${gpuInFlight} lodScale=${lodScale.toFixed(2)} ` +
                             `visibleScale=${lodVisibleScale.toFixed(2)}` +
-                            `${pressure ? ` bpSkips=${pressure.gpuBackpressureSkips} started=${pressure.tilesStarted} gpuMax=${pressure.gpuFencesMax} commits=${pressure.commits} staleStarts=${pressure.staleStarts.stale}/${pressure.staleStarts.started} feedbackReadbacks=${pressure.feedback.readbacks} minFree=${pressure.minFreeLayers ?? 'n/a'} queueRejected=${pressure.queueRejected} queueDropped=${pressure.queueDropped}` : ''}` +
+                            `${pressure ? ` bpSkips=${pressure.gpuBackpressureSkips} started=${pressure.tilesStarted} gpuMax=${pressure.gpuFencesMax} commits=${pressure.commits} staleStarts=${pressure.staleStarts.stale}/${pressure.staleStarts.started} feedbackReadbacks=${pressure.feedback.readbacks} minFree=${pressure.minFreeLayers ?? 'n/a'} queueRejected=${pressure.queueRejected} queueDropped=${pressure.queueDropped} visibleDropRetryMap=${pressure.refinementVisibleDropRetryMapSize}` : ''}` +
                             `${visible ? ` visible=${visible.totalVisible} resident=${visible.residentVisible} fallback=${visible.fallbackVisible}` : ''}`
                         );
 
@@ -943,6 +943,21 @@ export function installQuadtreeTileManagerRuntimeDiagnostics(QuadtreeTileManager
                                 `${TERRAIN_STEP_LOG_TAG} [QTLight] requestLatency=${pressure.requestLatency.summary} ` +
                                 `latencyMax=${pressure.requestLatency.maxMs.toFixed(0)}ms ` +
                                 `startVisible=${pressure.staleStarts.visible} startAncestor=${pressure.staleStarts.ancestor} startUnknown=${pressure.staleStarts.unknown}`
+                            );
+                        }
+
+                        // Instrumentation (2026-10-01): refinement-drop counts
+                        // by tile depth — testing whether LOD4-depth tiles are
+                        // disproportionately dropped before refinement (which
+                        // generates resolvedColor) ever completes. Only logs
+                        // when something actually dropped, to avoid noise.
+                        if (pressure?.refinementDroppedByDepth &&
+                            Object.keys(pressure.refinementDroppedByDepth).length > 0) {
+                            const byDepthStr = Object.entries(pressure.refinementDroppedByDepth)
+                                .map(([depth, count]) => `d${depth}:${count}`)
+                                .join(' ');
+                            Logger.info(
+                                `${TERRAIN_STEP_LOG_TAG} [QTLight] refinementDroppedByDepth ${byDepthStr}`
                             );
                         }
 

@@ -717,6 +717,28 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     pass.end();
                 }
 
+                // Instrumentation (2026-10-01): this gate silently skips the
+                // resolvedColor bake entirely if ANY input is missing — no
+                // error thrown, the generation task still "succeeds", so the
+                // tile still gets marked REFINED with resolvedColor left
+                // permanently zero-filled (alpha=0) and never retried. Testing
+                // whether this is firing, since it would explain a 100%-
+                // consistent (not timing/race-dependent) invalid-resolvedColor
+                // result on LOD4 — logged once per missing-input combination
+                // actually seen, not spammed per tile.
+                if (!(splatPass.resolvedColorTex && splatPass.tileTex &&
+                      splatPass.atlasTexture && splatPass.tileTypeLookup)) {
+                    const missing = [
+                        !splatPass.resolvedColorTex && 'resolvedColorTex',
+                        !splatPass.tileTex && 'tileTex',
+                        !splatPass.atlasTexture && 'atlasTexture',
+                        !splatPass.tileTypeLookup && 'tileTypeLookup'
+                    ].filter(Boolean).join(',');
+                    if (this._loggedMissingResolvedColorInputs !== missing) {
+                        this._loggedMissingResolvedColorInputs = missing;
+                        Logger.warn(`[ResolvedColorBake] SKIPPED — missing: ${missing}`);
+                    }
+                }
                 if (
                     splatPass.resolvedColorTex &&
                     splatPass.tileTex &&
