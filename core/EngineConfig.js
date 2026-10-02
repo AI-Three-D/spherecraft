@@ -148,6 +148,25 @@ export class EngineConfig {
         // LOD, so this is a no-op everywhere until explicitly turned on.
         solidColorTierEnabled: requireBool(terrainShader.solidColorTierEnabled ?? false, 'rendering.terrainShader.solidColorTierEnabled'),
         solidColorStartLod: requireInt(terrainShader.solidColorStartLod ?? 99, 'rendering.terrainShader.solidColorStartLod', 0),
+        // In-tile blend into the solid-color tier: the LOD just before the
+        // tier ramps its color to the tier's averaged color across the part
+        // of each tile that borders a coarser (solid-tier) neighbor. When
+        // enabled it replaces the camera-distance fade above
+        // (lodEdgeToSolidColor*) for that LOD.
+        solidColorTierEdgeBlendEnabled: requireBool(
+          terrainShader.solidColorTierEdgeBlendEnabled ?? false,
+          'rendering.terrainShader.solidColorTierEdgeBlendEnabled'
+        ),
+        // Fraction of the tile (0..1, tile UV) the ramp spans, measured from
+        // the shared edge. 0.5 = half the tile, 1.0 = the whole tile.
+        solidColorTierEdgeBlendWidth: requireNumber(
+          terrainShader.solidColorTierEdgeBlendWidth ?? 0.5,
+          'rendering.terrainShader.solidColorTierEdgeBlendWidth'
+        ),
+        solidColorTierEdgeBlendStrength: requireNumber(
+          terrainShader.solidColorTierEdgeBlendStrength ?? 1.0,
+          'rendering.terrainShader.solidColorTierEdgeBlendStrength'
+        ),
         lod0ResolvedColorEnabled: requireBool(
           terrainShader.lod0ResolvedColorEnabled ?? false,
           'rendering.terrainShader.lod0ResolvedColorEnabled'

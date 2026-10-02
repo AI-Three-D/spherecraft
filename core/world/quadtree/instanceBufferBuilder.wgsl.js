@@ -463,8 +463,24 @@ if (tid == 0u) {
         let bottomLOD = findRenderedDataLOD(bottomCoord.x, depth, bottomCoord.y, bottomCoord.z, bottomDepth);
         let topLOD = findRenderedDataLOD(topCoord.x, depth, topCoord.y, topCoord.z, topDepth);
 
-        let neighborPacked = packNeighborLODs(leftLOD, rightLOD, bottomLOD, topLOD);
+        var neighborPacked = packNeighborLODs(leftLOD, rightLOD, bottomLOD, topLOD);
         let edgeMask = computeEdgeMask(geomLOD, leftLOD, rightLOD, bottomLOD, topLOD);
+
+        // Which neighbours are DRAWN by a coarser geometry LOD (their covering
+        // leaf depth), as opposed to leftLOD..topLOD above, which follow the
+        // depth of the data layer a neighbour currently samples (so a
+        // not-yet-loaded neighbour reads as coarser). The terrain shaders'
+        // in-tile blend into the next material tier needs what the neighbour
+        // actually renders. Same bit layout as edgeMask's coarser bits:
+        // left=8, right=2, bottom=4, top=1. Stored in the otherwise-unused
+        // neighborLODs.y; the covering lookup reports a miss as the tile's own
+        // depth, which correctly reads as "not coarser".
+        var geomCoarserMask : u32 = 0u;
+        if (computeGeomLOD(leftDepth) > geomLOD) { geomCoarserMask = geomCoarserMask | 8u; }
+        if (computeGeomLOD(rightDepth) > geomLOD) { geomCoarserMask = geomCoarserMask | 2u; }
+        if (computeGeomLOD(bottomDepth) > geomLOD) { geomCoarserMask = geomCoarserMask | 4u; }
+        if (computeGeomLOD(topDepth) > geomLOD) { geomCoarserMask = geomCoarserMask | 1u; }
+        neighborPacked.y = geomCoarserMask;
 
         // Loaded tile lookup (self or nearest parent)
         var useLayer = lookupLoaded(face, depth, x, y);

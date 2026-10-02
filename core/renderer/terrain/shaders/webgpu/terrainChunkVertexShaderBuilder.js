@@ -18,6 +18,11 @@ export function buildTerrainChunkVertexShader(options = {}) {
          terrainShaderConfig.lodEdgeAOFadeEnabled === true) &&
         lodEdgeFadeMaxLod >= 0 &&
         lod <= lodEdgeFadeMaxLod;
+    // In-tile blend into the solid-color tier (decided per LOD by
+    // terrainMaterialBuilder). The vertex stage only forwards the instance's
+    // geometry-LOD coarser-neighbour mask; the fragment stage computes the
+    // ramp per pixel from vUv, so it stays smooth regardless of mesh density.
+    const enableTierEdgeBlend = options.enableTierEdgeBlend === true;
     const defaultSegments = [128, 64, 32, 16, 8, 4, 2];
     const lodSegments = Array.isArray(options.lodSegments) ? options.lodSegments : defaultSegments;
     const segments = defaultSegments.map((value, index) => {
@@ -77,6 +82,7 @@ fn unpackNeighborLODs(packed: vec2<u32>) -> vec4<f32> {
         neighborLODs = unpackNeighborLODs(chunk.neighborLODs);
         heightLayer = i32(chunk.layer);
         debugEdgeMask = f32(chunk.edgeMask);
+        tierEdgeMask = f32(chunk.neighborLODs.y & 0xFu);
         selfLOD = i32(chunk.lod);
         if (uniforms.useAtlasMode > 0.5) {
             atlasOffset = chunk.uvOffset;
@@ -107,6 +113,7 @@ const DEBUG_STITCH_STEP_FIX : bool = true;
 const USE_TRANSITION_TOPOLOGY : bool = ${useTransitionTopology ? 'true' : 'false'};
 const ENABLE_LOD_EDGE_FADE : bool = ${enableLodEdgeFade ? 'true' : 'false'};
 const LOD_EDGE_FADE_WIDTH : f32 = ${lodEdgeFadeWidth.toFixed(4)};
+const ENABLE_TIER_EDGE_BLEND : bool = ${enableTierEdgeBlend ? 'true' : 'false'};
 const MAX_MORPH_DISTANCE : f32 = 1e9;
 const SEGMENTS_PER_LOD : array<f32, 7> = array<f32, 7>(${segmentLiteral});
 const MAX_LOD : f32 = 6.0;
@@ -559,6 +566,7 @@ fn main(input: VertexInput${instanceParam}) -> VertexOutput {
     var edgeAxis: i32 = -1;
     var edgeValue: f32 = 0.0;
     var debugEdgeMask: f32 = 0.0;
+    var tierEdgeMask: f32 = 0.0;
     var debugInstanceIndex: f32 = 0.0;
     if (useInstancing) {
 ${instancingBlock}
@@ -604,7 +612,12 @@ ${instancingBlock}
         debugEdge = rawNeighborLODs;
         let maskPack = clamp(debugEdgeMask, 0.0, 4095.0) / 4096.0;
         debugEdge.w = rawNeighborLODs.w + maskPack;
-        debugSample = vec4<f32>(f32(selfLOD), edgeFade, debugAxis, debugSampleLod);
+        // .z normally carries the stitch axis for debug mode 15. All 16
+        // inter-stage slots are in use, so the in-tile tier blend borrows it
+        // for the coarser-neighbour mask (constant per instance, so it
+        // interpolates to itself); mode 15 shows that mask in this variant.
+        let debugZ = select(debugAxis, tierEdgeMask, ENABLE_TIER_EDGE_BLEND);
+        debugSample = vec4<f32>(f32(selfLOD), edgeFade, debugZ, debugSampleLod);
     }
     var worldPosition: vec3<f32>;
     var normal: vec3<f32>;

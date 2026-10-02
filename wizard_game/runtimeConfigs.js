@@ -194,7 +194,19 @@ export function createEngineConfig() {
         // instead of resolved-color. LOD 5 (and everything nearer) is
         // completely untouched. Widen later once this is confirmed good.
         solidColorTierEnabled: true,
-        solidColorStartLod: 6,
+        // Experiment (2026-10-02): LOD5 renders the flat solid-color tier
+        // (previously LOD6+ only), and LOD4 blends into it inside its own
+        // tiles (solidColorTierEdgeBlend* below) instead of the old
+        // LOD5-only camera-distance fade, which left a hard step at the
+        // LOD4/5 line. The prebaked LOD5 tier is still in the code: set this
+        // back to 6 to restore it (the in-tile blend then applies to LOD5
+        // toward LOD6 instead).
+        solidColorStartLod: 5,
+        solidColorTierEdgeBlendEnabled: true,
+        // Fraction of the tile, from the shared edge, over which the LOD
+        // before the solid tier ramps into the solid color. 0.5 = half tile.
+        solidColorTierEdgeBlendWidth: 0.5,
+        solidColorTierEdgeBlendStrength: 1.0,
         // Was disabled: "prebaked resolved-color exposes hard category-mask
         // contours because the prebake does not reproduce the fragment
         // shader's live splat reconstruction." Re-testing (2026-09-30) at

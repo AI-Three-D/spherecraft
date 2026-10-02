@@ -200,11 +200,40 @@ export class TerrainMaterialBuilder {
             const lodEdgeToSolidColorFadeEndMeters = Number.isFinite(terrainShaderConfig?.lodEdgeToSolidColorFadeEndMeters)
                 ? Math.max(lodEdgeToSolidColorFadeStartMeters + 1.0, terrainShaderConfig.lodEdgeToSolidColorFadeEndMeters)
                 : lodEdgeToSolidColorFadeStartMeters + 3000.0;
-            const enableLodEdgeToSolidColor =
+            // In-tile alternative to the distance fade (enabled by
+            // solidColorTierEdgeBlendEnabled): the same "LOD just before the
+            // solid tier" ramps into the tier's averaged color across the
+            // part of each of its tiles that borders a coarser neighbor
+            // (geometry LOD, from the instance builder's neighborLODs.y mask),
+            // reaching the solid color exactly at the shared edge. Tied to the
+            // tile instead of camera distance, so it lines up with the LOD
+            // boundary on any canvas size. Replaces the distance fade for
+            // that LOD when enabled.
+            const isLodBeforeSolidTier =
                 !overlayPass &&
                 terrainShaderConfig?.solidColorTierEnabled === true &&
                 Number.isFinite(solidColorStartLod) &&
                 lod === solidColorStartLod - 1;
+            const enableTierEdgeBlend =
+                isLodBeforeSolidTier &&
+                terrainShaderConfig?.solidColorTierEdgeBlendEnabled === true;
+            const tierEdgeBlendWidth = Number.isFinite(terrainShaderConfig?.solidColorTierEdgeBlendWidth)
+                ? Math.min(1.0, Math.max(0.01, terrainShaderConfig.solidColorTierEdgeBlendWidth))
+                : 0.5;
+            const tierEdgeBlendStrength = Number.isFinite(terrainShaderConfig?.solidColorTierEdgeBlendStrength)
+                ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.solidColorTierEdgeBlendStrength))
+                : 1.0;
+            // sampleChunkAverageCoarseColor averages over a window sized in
+            // the tile's own UV. Scale it so this finer LOD averages over the
+            // same world-space area as the solid-tier tile across the edge
+            // (one LOD coarser = twice the tile size), so both sides compute
+            // the same color where they meet.
+            const solidColorWindowScale = enableTierEdgeBlend
+                ? Math.pow(2, Math.max(0, solidColorStartLod - lod))
+                : 1.0;
+            const enableLodEdgeToSolidColor =
+                isLodBeforeSolidTier &&
+                !enableTierEdgeBlend;
 
 
             const grassConfig = planetConfig?.grassConfig ?? null;
@@ -253,6 +282,10 @@ export class TerrainMaterialBuilder {
                 lodEdgeToSolidColorStrength,
                 lodEdgeToSolidColorFadeStartMeters,
                 lodEdgeToSolidColorFadeEndMeters,
+                enableTierEdgeBlend,
+                tierEdgeBlendWidth,
+                tierEdgeBlendStrength,
+                solidColorWindowScale,
                 fixedMaterialFamiliesEnabled,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
@@ -264,6 +297,7 @@ export class TerrainMaterialBuilder {
                 useStorageBuffer,
                 lod,
                 terrainShaderConfig,
+                enableTierEdgeBlend,
                 debugMode: debugVertexMode
             });
             const fragmentShader = overlayPass

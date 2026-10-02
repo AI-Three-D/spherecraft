@@ -511,6 +511,20 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const lodEdgeToSolidColorFadeEndMeters = Number.isFinite(options.lodEdgeToSolidColorFadeEndMeters)
         ? options.lodEdgeToSolidColorFadeEndMeters
         : 6000.0;
+    // In-tile blend into the solid-color tier (see terrainMaterialBuilder):
+    // compiled only into the LOD just before the tier. The ramp is computed
+    // per pixel from vUv and the instance's geometry-LOD coarser-neighbour
+    // mask (forwarded by the vertex stage in vDebugSample.z).
+    const enableTierEdgeBlend = options.enableTierEdgeBlend === true;
+    const tierEdgeBlendWidth = Number.isFinite(options.tierEdgeBlendWidth)
+        ? Math.min(1.0, Math.max(0.01, options.tierEdgeBlendWidth))
+        : 0.5;
+    const tierEdgeBlendStrength = Number.isFinite(options.tierEdgeBlendStrength)
+        ? Math.min(1.0, Math.max(0.0, options.tierEdgeBlendStrength))
+        : 1.0;
+    const solidColorWindowScale = Number.isFinite(options.solidColorWindowScale)
+        ? Math.max(0.01, options.solidColorWindowScale)
+        : 1.0;
     const maxLightIndices = options.maxLightIndices || 8192;
     const useArrayTextures = options.useArrayTextures === true;
     const aerialPerspectiveCode = getAerialPerspectiveWGSL();
@@ -952,6 +966,13 @@ const ENABLE_LOD_EDGE_TO_SOLID_COLOR: bool = ${enableLodEdgeToSolidColor ? 'true
 const LOD_EDGE_TO_SOLID_COLOR_STRENGTH: f32 = ${lodEdgeToSolidColorStrength.toFixed(4)};
 const LOD_EDGE_TO_SOLID_COLOR_FADE_START: f32 = ${lodEdgeToSolidColorFadeStartMeters.toFixed(2)};
 const LOD_EDGE_TO_SOLID_COLOR_FADE_END: f32 = ${lodEdgeToSolidColorFadeEndMeters.toFixed(2)};
+const ENABLE_TIER_EDGE_BLEND: bool = ${enableTierEdgeBlend ? 'true' : 'false'};
+const TIER_EDGE_BLEND_WIDTH: f32 = ${tierEdgeBlendWidth.toFixed(4)};
+const TIER_EDGE_BLEND_STRENGTH: f32 = ${tierEdgeBlendStrength.toFixed(4)};
+// Averaging window of sampleChunkAverageCoarseColor in this tile's UV.
+// 0.35 of the tile by default; scaled up in the LOD before the solid tier so
+// it covers the same world area as the coarser solid-tier tile next to it.
+const SOLID_COLOR_WINDOW_UV: f32 = ${(0.35 * solidColorWindowScale).toFixed(4)};
 const HAS_RESOLVED_COLOR_TEXTURE: bool = ${includeResolvedColorBinding ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
 const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
@@ -1278,7 +1299,7 @@ fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> 
     // explicit large fraction of the chunk's local UV span instead, sized
     // for this diagnostic to unambiguously prove/disprove whether real
     // small-scale variation exists in the tile texture at all.
-    let windowSize = 0.35;
+    let windowSize = SOLID_COLOR_WINDOW_UV;
     let center = input.vUv;
 
     var colorSum = vec3<f32>(0.0, 0.0, 0.0);
@@ -1312,6 +1333,31 @@ fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> 
         }
     }
     return colorSum / 64.0;
+}
+
+// In-tile ramp into the solid-color tier, for the LOD just before it.
+// 1.0 exactly at a tile edge whose neighbour is drawn by a coarser geometry
+// LOD (and therefore renders the solid tier), falling smoothly to 0.0 at
+// TIER_EDGE_BLEND_WIDTH of the tile away from that edge. The coarser-
+// neighbour mask is constant per instance and arrives in vDebugSample.z:
+// left=8 (u=0), right=2 (u=1), bottom=4 (v=0), top=1 (v=1), the same layout
+// computeLodEdgeFade uses for the mode-100 band.
+fn computeTierEdgeBlend(input: FragmentInput) -> f32 {
+    if (!ENABLE_TIER_EDGE_BLEND) {
+        return 0.0;
+    }
+    let mask = u32(round(clamp(input.vDebugSample.z, 0.0, 15.0)));
+    if (mask == 0u) {
+        return 0.0;
+    }
+    let uv = clamp(input.vUv, vec2<f32>(0.0), vec2<f32>(1.0));
+    var edgeDistance = 2.0;
+    if ((mask & 8u) != 0u) { edgeDistance = min(edgeDistance, uv.x); }
+    if ((mask & 2u) != 0u) { edgeDistance = min(edgeDistance, 1.0 - uv.x); }
+    if ((mask & 4u) != 0u) { edgeDistance = min(edgeDistance, uv.y); }
+    if ((mask & 1u) != 0u) { edgeDistance = min(edgeDistance, 1.0 - uv.y); }
+    let ramp = 1.0 - smoothstep(0.0, max(TIER_EDGE_BLEND_WIDTH, 0.0001), edgeDistance);
+    return clamp(ramp * TIER_EDGE_BLEND_STRENGTH, 0.0, 1.0);
 }
 
 fn debugHash12(p: vec2<f32>) -> f32 {
@@ -3117,6 +3163,18 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     //   orange       10,000-100,000m
     //   red          100,000-1,000,000m
     //   white        >= 1,000,000m
+    // Mode 104: weight of the in-tile blend into the solid-color tier.
+    // Black = no blend (or a LOD without it), yellow = fully solid color at
+    // the edge shared with a coarser (solid-tier) neighbour. Tiles of the
+    // solid tier itself are tinted dark blue so the boundary stays visible.
+    if (debugMode == 104) {
+        let w = computeTierEdgeBlend(input);
+        var c = mix(vec3<f32>(0.04, 0.04, 0.04), vec3<f32>(1.0, 0.85, 0.1), w);
+        if (ENABLE_SOLID_COLOR_TIER) {
+            c = vec3<f32>(0.05, 0.10, 0.45);
+        }
+        return vec4<f32>(c, 1.0);
+    }
     if (debugMode == 103) {
         let d = input.vDistanceToCamera;
         var color = vec3<f32>(0.0, 0.0, 0.0);
@@ -4301,6 +4359,17 @@ if (debugMode == 16) {
                 solidEdgeColor,
                 clamp(solidColorDistanceFade * LOD_EDGE_TO_SOLID_COLOR_STRENGTH, 0.0, 1.0)
             );
+        }
+    }
+    // In-tile alternative to the distance fade above (only one of the two is
+    // compiled into a given LOD): ramp into the solid tier's color across
+    // the part of this tile that borders a coarser neighbour, reaching it
+    // exactly at the shared edge, where the neighbour draws the same color.
+    if (ENABLE_TIER_EDGE_BLEND) {
+        let tierEdgeBlend = computeTierEdgeBlend(input);
+        if (tierEdgeBlend > 0.0001) {
+            let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
+            baseColor = mix(baseColor, solidEdgeColor, tierEdgeBlend);
         }
     }
     if (ENABLE_GROUND_FIELD) {

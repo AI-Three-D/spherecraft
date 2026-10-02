@@ -156,3 +156,42 @@ So once LOD5 stops flattening near LOD4, the only colour difference left is preb
 - **Verified in code:** no blend today is tile-relative; the edge signal exists only for LOD0–4, is capped at 30 % of the tile, and currently affects AO only.
 - **Not verified:** whether the 16-m versus 32-m prebake resolution step is visible on a Retina display at the LOD4/5 line (decides step 3). Also not verified: how visible option B's grid shape and neighbour-change pops would be.
 - **Not examined:** the LOD3/4 live-splat → prebake switch and the LOD5/6 transition.
+
+---
+
+## 9. Experiment implemented: LOD5 uses the flat tier, LOD4 ramps into it inside its tiles
+
+**What changed** (`solidColorStartLod: 5` plus three new settings in `wizard_game/runtimeConfigs.js`):
+
+| File | Change |
+|---|---|
+| `wizard_game/runtimeConfigs.js` | `solidColorStartLod: 5` (was 6); `solidColorTierEdgeBlendEnabled: true`, `solidColorTierEdgeBlendWidth: 0.5`, `solidColorTierEdgeBlendStrength: 1.0` |
+| `core/EngineConfig.js` | Accepts the three new settings |
+| `core/world/quadtree/instanceBufferBuilder.wgsl.js` | Writes a mask of neighbours drawn by a coarser **geometry** LOD into the unused `neighborLODs.y` |
+| `core/renderer/terrain/shaders/webgpu/terrainChunkVertexShaderBuilder.js` | Forwards that mask in `vDebugSample.z`, only in the blend variant; all 16 inter-stage slots are taken |
+| `core/renderer/terrain/materials/terrainMaterialBuilder.js` | Compiles the ramp into the LOD just before the solid tier, disables that LOD's distance fade, and doubles its averaging window to match the coarser tile |
+| `core/renderer/terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js` | `computeTierEdgeBlend` (per-pixel ramp from `vUv`), the blend step, `SOLID_COLOR_WINDOW_UV`, and debug **mode 104** (ramp weight) |
+
+**How to go back:**
+- `solidColorStartLod: 6` restores the prebaked LOD5 tier. The in-tile ramp then moves to LOD5, blending toward LOD6.
+- `solidColorTierEdgeBlendEnabled: false` brings back the old camera-distance fade.
+
+**[RUN] Result** (headless Chrome 154, 2880×1800 canvas, 4 km altitude, 40° down; 438 pixel columns along the LOD4/5 line):
+
+| Image | Colour step across the line, median / p90 | Same 10-px offset inside LOD4, median / p90 |
+|---|---|---|
+| Unlit base colour (mode 45), old | 3.0 / 47.7 | 2.1 / 10.9 |
+| Unlit base colour (mode 45), new | **0.7 / 4.1** | 2.1 / 10.6 |
+| Final image (mode 0), old | 7.8 / 37.7 | 6.2 / 18.9 |
+| Final image (mode 0), new | **4.9 / 14.0** | 6.3 / 18.7 |
+
+The step across the line is now smaller than the terrain's own variation over the same distance. All seven shader variants compiled without errors, and there were no GPU validation errors.
+
+Images: `blend_1_mode90_lod.png`, `blend_2_mode104_ramp_weight.png`, `blend_3_mode0_new_lod5_solid_with_lod4_ramp.png`, `blend_4_mode0_old_lod5_prebake_distance_fade.png`, `blend_5_crop_old_top_new_bottom.png`, `blend_6_mode45_new.png`, `blend_7_mode45_old.png`.
+
+**Known limits of this first version:**
+- **Corners:** a LOD4 tile that touches LOD5 only at a corner gets no ramp, because the mask covers the four sides only.
+- **Pops:** the ramp switches on or off in one frame when a neighbour splits or merges.
+- **Perspective:** half a tile looks narrow on screen at grazing angles. Set the width toward 1.0 for a longer gradient.
+- **Debug mode 15** shows the mask instead of the stitch axis in the LOD4 variant.
+- **Compute is unchanged:** LOD5 tiles still run the full refinement. Skipping it for flat-tier tiles is the follow-up (§7 and the evidence document §4).
