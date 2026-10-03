@@ -184,8 +184,14 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
                    (1.0 - smoothstep(0.5, 0.75, regional.terrainType));
     let mountainness = smoothstep(0.55, 0.8, regional.terrainType);
 
+    // Land and ocean are blended by landBlend below. A side whose weight is
+    // exactly 0 cannot change the result, so it is not evaluated: full land
+    // skips the ocean-floor noise (11 octaves), full ocean skips every land
+    // feature. landBlend is a smoothstep, so both cases are common.
+    var landHeight = 0.0;
+    if (landBlend > 0.0) {
     // ==================== Land Height: BASELINE (flat + micro only) ====================
-    var landHeight = regional.baseElevation * amp.continentalShelf;
+    landHeight = regional.baseElevation * amp.continentalShelf;
 
     // --- FEATURES DISABLED: re-enable one-by-one after baseline is satisfactory ---
     // landHeight += featurePlainsHeight(wx, wy, unitDir, seed, profile, amp) * plainness;
@@ -227,6 +233,10 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
     let interior = smoothstep(0.55, 0.85, regional.landMask);
     let detailBudget = amp.microGain + 0.005;
     landHeight += interior * detailBudget;
+    }
+    if (landBlend >= 1.0) {
+        return softClampHeight(landHeight, -1.1, 1.8, 0.25);
+    }
 
     // ==================== Ocean Floor ====================
     let n500m = fbmAuto(wx, wy, unitDir, 0.5, 4, seed + 1000, 2.0, 0.5);

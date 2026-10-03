@@ -168,6 +168,18 @@ fn warpFlatAuto(wx: f32, wy: f32, unitDir: vec3<f32>, scale: f32, strength: f32,
     return vec2<f32>(wx + warp, wy - warp);
 }
 
+// warpFlatAuto for coordinates that are only ever passed back into the *Auto
+// noise helpers. On the sphere (face >= 0) those sample unitDir and ignore
+// wx/wy, so the warp could never change the result there: skip its three
+// noise octaves. (Making such warps act on the sphere would change the
+// terrain; that belongs to the noise overhaul, not here.)
+fn warpFlatForNoise(wx: f32, wy: f32, unitDir: vec3<f32>, scale: f32, strength: f32, seed: i32) -> vec2<f32> {
+    if (uniforms.face >= 0) {
+        return vec2<f32>(wx, wy);
+    }
+    return warpFlatAuto(wx, wy, unitDir, scale, strength, seed);
+}
+
 // ==================== Coverage / rarity helpers ====================
 
 fn coverageThreshold(coverage: f32) -> f32 {

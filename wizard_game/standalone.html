@@ -3585,6 +3585,66 @@
                 console.info(`[QT-MANUAL] terrainDebugMode=${mode | 0}`);
             }
 
+            // GPU time per generated tile, by the batch-slope method of
+            // TILE_SEAM_FLICKER_LOADING_EVIDENCE.md §6.3: time one tile and a
+            // batch of `count` tiles (queue idle before each), and take the
+            // difference per extra tile, which cancels the fixed overhead.
+            // Tiles are laid out around the camera at `depth` so they cost
+            // what the terrain on screen costs (ocean is much cheaper than
+            // mountains). Stand still with an empty queue for clean numbers;
+            // rendering keeps running, so results include its contention.
+            async function benchTerrainGeneration({ count = 24, depth = 7, rounds = 2 } = {}) {
+                const tileStreamer = getTileStreamer();
+                const generator = tileStreamer?.tileGenerator;
+                const device = generator?.terrainGen?.device;
+                const faceUV = getCameraFaceUV();
+                if (!generator || !device || !faceUV) {
+                    console.warn('[QT-MANUAL] bench: terrain generator or camera not ready');
+                    return null;
+                }
+                const { TileAddress } = await import('../core/world/quadtree/tileAddress.js');
+                const grid = 1 << depth;
+                const cx = Math.min(grid - 1, Math.floor(faceUV.u * grid));
+                const cy = Math.min(grid - 1, Math.floor(faceUV.v * grid));
+                const side = Math.ceil(Math.sqrt(count + 1));
+                let next = 0;
+                const nextAddr = () => {
+                    const i = next++ % (side * side);
+                    const x = Math.max(0, Math.min(grid - 1, cx - (side >> 1) + (i % side)));
+                    const y = Math.max(0, Math.min(grid - 1, cy - (side >> 1) + Math.floor(i / side)));
+                    return new TileAddress(faceUV.face, depth, x, y);
+                };
+                const batch = async (n, types) => {
+                    await device.queue.onSubmittedWorkDone();
+                    const addrs = Array.from({ length: n }, nextAddr);
+                    const t0 = performance.now();
+                    const out = await Promise.all(addrs.map(a => generator._generateTileInternal(a, { requiredTypes: types, trackStats: false })));
+                    await device.queue.onSubmittedWorkDone();
+                    const ms = performance.now() - t0;
+                    out.forEach(t => tileStreamer._destroyGeneratedTextures(t));
+                    return ms;
+                };
+                const perTile = async (types) => {
+                    let best = Infinity;
+                    for (let r = 0; r < rounds; r++) {
+                        const ms = ((await batch(count, types)) - (await batch(1, types))) / (count - 1);
+                        best = Math.min(best, ms);
+                    }
+                    return +best.toFixed(2);
+                };
+                const result = {
+                    face: faceUV.face,
+                    depth,
+                    lod: (tileStreamer.quadtreeGPU?.maxDepth ?? 11) - depth,
+                    geometryMsPerTile: await perTile(tileStreamer._geometryTypes),
+                    refinementMsPerTile: tileStreamer._refinementTypes.length
+                        ? await perTile(tileStreamer._refinementTypes)
+                        : 0
+                };
+                console.table(result);
+                return result;
+            }
+
             // Tile streamer behaviour switches (EngineConfig
             // gpuQuadtree.streamerFlags), e.g. { diagnostics: true } to bring
             // back the per-readback / per-eviction diagnostic scans and logs.
@@ -3656,6 +3716,7 @@
                         'window.qtDiag.saveCapture()',
                         'window.qtDiag.setTerrainDebugMode(mode)',
                         'window.qtDiag.setStreamerFlags({ diagnostics: true }) // streamer switches, see EngineConfig gpuQuadtree.streamerFlags',
+                        'await window.qtDiag.benchTerrainGeneration({ count: 24, depth: 7 }) // GPU ms per generated tile near the camera',
                         'window.qtDiag.spawnGoblinGroup({ groupSize: 3 }) // disabled by default'
                     ].join('\n'));
                 },
@@ -3688,6 +3749,7 @@
                 saveCapture,
                 setTerrainDebugMode,
                 setStreamerFlags,
+                benchTerrainGeneration,
                 spawnGoblinGroup(options = {}) {
                     return gameEngine?.debugSpawnGoblinGroup?.(options) ?? false;
                 }

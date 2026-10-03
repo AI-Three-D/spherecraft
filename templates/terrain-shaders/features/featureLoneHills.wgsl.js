@@ -30,8 +30,10 @@ export function createTerrainFeatureLoneHills() {
   
   fn loneHillWithCrater(noise: f32, threshold: f32, craterNoise: f32) -> f32 {
       return 0.0; // THIS METHOD IS BROKEN. WE WILL FIX LATER!
-  
+
   }
+  // Tier 3 (craters) is skipped until loneHillWithCrater is implemented.
+  const ENABLE_LONE_HILL_CRATERS: bool = false;
   fn loneHillMesa01(x: f32, threshold01: f32) -> f32 {
     // x in 0..1. Mesa: steep sides + flat top.
     let extend = 0.25; // in 0..1 space
@@ -107,8 +109,10 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
   
       // ================================================================
       //  Tier 3 — RARE  (mini volcano, ~100–250 m visible)
+      //  Off while loneHillWithCrater is a stub returning 0: the tier then
+      //  only spent 1-3 noise octaves per sample to add nothing.
       // ================================================================
-      {
+      if (ENABLE_LONE_HILL_CRATERS) {
           let n = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_LARGE, 1, seed + 4300, 2.0, 0.5);
           if (n > 0.30) {
               let craterN = fbmAuto(wx, wy, unitDir,
@@ -125,7 +129,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
     // Use the SAME noise field for placement+shape (like your other tiers),
     // but warp the domain so the hill footprint isn't a clean blob.
     let w = wavelength_m(SCALE_LONE_HILL_HUGE, GEOLOGY_SCALE);
-    let p = warpFlatAuto(wx, wy, unitDir, SCALE_LONE_HILL_HUGE * 0.45, w * 0.08, seed + 4390);
+    let p = warpFlatForNoise(wx, wy, unitDir, SCALE_LONE_HILL_HUGE * 0.45, w * 0.08, seed + 4390);
 
     // Base hill noise (single octave keeps it round-ish)
     let n = fbmAuto(p.x, p.y, unitDir, SCALE_LONE_HILL_HUGE, 1, seed + 4400, 2.0, 0.5);
@@ -157,8 +161,8 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
     let w = wavelength_m(SCALE_LONE_HILL_LANDMARK, GEOLOGY_SCALE);
 
     // Two slightly different warps -> two nearby lobes/peaks, still coherent
-    let pA = warpFlatAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.40, w * 0.09, seed + 4490);
-    let pB = warpFlatAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.40, w * 0.09, seed + 4491);
+    let pA = warpFlatForNoise(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.40, w * 0.09, seed + 4490);
+    let pB = warpFlatForNoise(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.40, w * 0.09, seed + 4491);
 
     // Same octave count (1) keeps each lobe round
     let nA = fbmAuto(pA.x, pA.y, unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4500, 2.0, 0.5);
@@ -216,7 +220,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
     if (rollingPresence > 0.01) {
         // 2) Slight warp so paths aren't clean isolines
         let wPath = wavelength_m(SCALE_ROLLING_HILL_PATH, GEOLOGY_SCALE);
-        let pw = warpFlatAuto(wx, wy, unitDir, SCALE_ROLLING_HILL_PATH * 0.7, wPath * 0.06, seed + 5057);
+        let pw = warpFlatForNoise(wx, wy, unitDir, SCALE_ROLLING_HILL_PATH * 0.7, wPath * 0.06, seed + 5057);
 
         // 3) Build a smooth distance-to-path field (NO abs/min seams)
         let pathN1 = fbmAuto(pw.x, pw.y, unitDir, SCALE_ROLLING_HILL_PATH, 2, seed + 5050, 2.0, 0.5);

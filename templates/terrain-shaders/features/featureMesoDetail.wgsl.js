@@ -212,36 +212,41 @@ fn featureMesoDetail(
     // Combined modulation
     let _mod = roughMod * quietPatch * regionMod * clamp(profile.microGain, 0.0, 5.0);
 
-    // === Surface hint: climate-driven type weights ===
-    let climate = getClimate(wx, wy, unitDir, elevation, seed);
-
-    // Sand weight: hot + dry
-    let sandW = (1.0 - smoothstep(0.15, 0.35, climate.precipitation))
-              * smoothstep(0.5, 0.8, climate.temperature);
-
-    // Rock weight: rough terrain
-    let rockW = smoothstep(0.3, 0.7, roughness);
-
-    // Normalize so sand + rock <= 1, remainder is general
-    let totalHint = sandW + rockW;
-    let cappedSand = select(sandW, sandW / totalHint, totalHint > 1.0);
-    let cappedRock = select(rockW, rockW / totalHint, totalHint > 1.0);
-    let generalW = max(0.0, 1.0 - cappedSand - cappedRock);
-
     // === micro2: surface-type-dependent ===
+    // The caller scales micro2 by DISP_MICRO2, currently 0 (micro handled
+    // per tile). While it is 0, skip the climate lookup and the 8-25 noise
+    // octaves below: they cannot change the height. Compile-time constant,
+    // so the branch disappears.
     var micro2 = 0.0;
+    if (DISP_MICRO2 > 0.0) {
+        // Surface hint: climate-driven type weights
+        let climate = getClimate(wx, wy, unitDir, elevation, seed);
 
-    if (cappedSand > 0.05) {
-        micro2 += sandMicro2(wx, wy, unitDir, seed) * cappedSand;
-    }
-    if (cappedRock > 0.05) {
-        micro2 += rockMicro2(wx, wy, unitDir, seed) * cappedRock;
-    }
-    if (generalW > 0.05) {
-        micro2 += generalMicro2(wx, wy, unitDir, seed) * generalW;
-    }
+        // Sand weight: hot + dry
+        let sandW = (1.0 - smoothstep(0.15, 0.35, climate.precipitation))
+                  * smoothstep(0.5, 0.8, climate.temperature);
 
-    micro2 *= _mod;
+        // Rock weight: rough terrain
+        let rockW = smoothstep(0.3, 0.7, roughness);
+
+        // Normalize so sand + rock <= 1, remainder is general
+        let totalHint = sandW + rockW;
+        let cappedSand = select(sandW, sandW / totalHint, totalHint > 1.0);
+        let cappedRock = select(rockW, rockW / totalHint, totalHint > 1.0);
+        let generalW = max(0.0, 1.0 - cappedSand - cappedRock);
+
+        if (cappedSand > 0.05) {
+            micro2 += sandMicro2(wx, wy, unitDir, seed) * cappedSand;
+        }
+        if (cappedRock > 0.05) {
+            micro2 += rockMicro2(wx, wy, unitDir, seed) * cappedRock;
+        }
+        if (generalW > 0.05) {
+            micro2 += generalMicro2(wx, wy, unitDir, seed) * generalW;
+        }
+
+        micro2 *= _mod;
+    }
 
     // === meso1: 15–30 m wavelength ===
     let meso1 = fbmAuto(wx, wy, unitDir, SCALE_MESO1, 2, seed + 9700, 2.0, 0.48) * _mod;

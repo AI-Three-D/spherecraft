@@ -33,7 +33,7 @@ fn featureMountainsHeight(
 
     // === Domain warp so paths aren't clean isolines ===
     let wPath = wavelength_m(SCALE_MOUNTAIN_RANGES * 0.5, GEOLOGY_SCALE);
-    let pw = warpFlatAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 0.3, wPath * 0.07, seed + 1605);
+    let pw = warpFlatForNoise(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 0.3, wPath * 0.07, seed + 1605);
 
     // === Distance-to-path field (line-based mountain ranges) ===
     // Two overlapping path layers create branching / converging ranges.
