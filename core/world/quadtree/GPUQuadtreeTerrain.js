@@ -34,6 +34,7 @@ export class QuadtreeTileManager {
         this.terrainGenerator = options.terrainGenerator || null;
         this.textureManager = options.textureManager || null;
         this.tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : null;
+        this.terrainAODefaults = options.terrainAODefaults ?? null;
         this._initialized = false;
         this._maxGeomLOD = 14;
 
@@ -192,6 +193,38 @@ export class QuadtreeTileManager {
         if (enableCoarseColor) {
             requiredTypes.push('coarseColor');
         }
+        // Refinement output is read by the terrain shader (splat / prebaked
+        // color, and the splat boundary in the terrain-AO block on LODs up to
+        // terrainAO.maxLod) and by the asset streamer (scatter, climate, and
+        // the ground field baked from them). Where the flat solid-tier color
+        // fully replaces a detail tile's material and nothing else reads it,
+        // the tile's refinement can wait until it comes within the fade
+        // (TileStreamer._refinementChangesPixels). null = never skip.
+        const flatTierRefinementSkip = (() => {
+            if (streamedAssetsEnabled) return null;
+            if (terrainShaderConfig.solidColorTierEnabled !== true ||
+                terrainShaderConfig.solidColorTierDistanceFadeEnabled !== true) {
+                return null;
+            }
+            // Same merge as TerrainMaterialBuilder (defaults, engine, planet).
+            const ao = {
+                ...(this.terrainAODefaults || {}),
+                ...(this.planetConfig?.engineConfig?.terrainAO || {}),
+                ...(this.planetConfig?.terrainAO || {})
+            };
+            const aoEnabled = ao.enabled ?? true;
+            const aoMaxLod = Number.isFinite(ao.maxLod) ? ao.maxLod : Infinity;
+            const minLod = aoEnabled ? aoMaxLod + 1 : 0;
+            const maxTerrainHeight = this.planetConfig?.maxTerrainHeight;
+            if (!Number.isFinite(minLod) || !Number.isFinite(maxTerrainHeight)) return null;
+            return {
+                shaderConfig: terrainShaderConfig,
+                minLod,
+                // Heights are soft-clamped to about -1.1 x maxTerrainHeight;
+                // 1.5 x keeps the nearest-pixel bound conservative.
+                minSurfaceRadius: planetRadius - 1.5 * maxTerrainHeight
+            };
+        })();
         const textureFormats = {
             height:    'r32float',
             normal:    'rgba8unorm',
@@ -225,6 +258,8 @@ export class QuadtreeTileManager {
               feedbackReadbackRingSize: qt.feedbackReadbackRingSize,
               gpuBackpressureLimit: qt.gpuBackpressureLimit ?? 4,   // NEW
               preferCompleteMaterialLayers: qt.preferCompleteMaterialLayers !== false,
+              streamerFlags: qt.streamerFlags,
+              flatTierRefinementSkip,
               // AO / scatter commit queues are drained only by the asset
               // streamer; without it they would grow forever.
               assetCommitQueuesEnabled: streamedAssetsEnabled,

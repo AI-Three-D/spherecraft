@@ -159,5 +159,9 @@ export class AsyncGenerationQueue {
                     this.pending.delete(entry.key);
                 });
         }
+        // Tasks started this tick. They only run once the caller's
+        // synchronous frame code returns (microtasks), so callers that budget
+        // GPU work must count them by hand.
+        return spawned;
     }
 }

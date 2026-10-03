@@ -9,8 +9,17 @@
         // errors, etc.) after the fact via window.__diagLogs.
         window.__diagLogs = [];
         (function () {
+            // Bounded: keep the first 500 entries (bootstrap, what this
+            // capture is for) and the newest 1500. Every Logger.info/warn
+            // line lands here, which at INFO is dozens per second, so an
+            // unbounded array grew for the whole session.
+            const MAX_DIAG_LOGS = 2000;
+            const BOOT_DIAG_LOGS = 500;
             const push = (level, args) => {
                 try {
+                    if (window.__diagLogs.length >= 2 * MAX_DIAG_LOGS) {
+                        window.__diagLogs.splice(BOOT_DIAG_LOGS, window.__diagLogs.length - MAX_DIAG_LOGS);
+                    }
                     window.__diagLogs.push({
                         level,
                         t: performance.now(),
@@ -3576,6 +3585,20 @@
                 console.info(`[QT-MANUAL] terrainDebugMode=${mode | 0}`);
             }
 
+            // Tile streamer behaviour switches (EngineConfig
+            // gpuQuadtree.streamerFlags), e.g. { diagnostics: true } to bring
+            // back the per-readback / per-eviction diagnostic scans and logs.
+            function setStreamerFlags(flags = {}) {
+                const tileStreamer = getTileStreamer();
+                if (!tileStreamer?.setStreamerFlags) {
+                    console.warn('[QT-MANUAL] tile streamer not ready');
+                    return null;
+                }
+                const result = tileStreamer.setStreamerFlags(flags);
+                console.info('[QT-MANUAL] streamerFlags', result);
+                return result;
+            }
+
             function manualSnapshot(reason = 'console') {
                 const tileManager = getTileManager();
                 if (!tileManager?.toggleManualDiagnosticSnapshot) {
@@ -3632,6 +3655,7 @@
                         'window.qtDiag.setParticleDebugMode(mode)',
                         'window.qtDiag.saveCapture()',
                         'window.qtDiag.setTerrainDebugMode(mode)',
+                        'window.qtDiag.setStreamerFlags({ diagnostics: true }) // streamer switches, see EngineConfig gpuQuadtree.streamerFlags',
                         'window.qtDiag.spawnGoblinGroup({ groupSize: 3 }) // disabled by default'
                     ].join('\n'));
                 },
@@ -3663,6 +3687,7 @@
                 setParticleDebugMode,
                 saveCapture,
                 setTerrainDebugMode,
+                setStreamerFlags,
                 spawnGoblinGroup(options = {}) {
                     return gameEngine?.debugSpawnGoblinGroup?.(options) ?? false;
                 }

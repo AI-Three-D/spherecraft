@@ -587,6 +587,56 @@ export class EngineConfig {
         gpuQuadtree.solidTierSkipsDetailMaterial ?? true,
         'gpuQuadtree.solidTierSkipsDetailMaterial'
       ),
+      // Tile streamer behaviour switches (runtime: tileStreamer.setStreamerFlags).
+      // Defaults are the current behaviour; false restores the previous one.
+      streamerFlags: (() => {
+        const sf = gpuQuadtree.streamerFlags || {};
+        return {
+          // Visibility questions (refinement relevance, dropped-refinement
+          // retries) answered from an integer index rebuilt per visibility
+          // readback, and dropped refinements re-queued when their tile shows
+          // up in a readback. false = scan the visible list per question and
+          // the whole retry map every frame.
+          indexedVisibility: requireBool(
+            sf.indexedVisibility ?? true,
+            'gpuQuadtree.streamerFlags.indexedVisibility'
+          ),
+          // Refinement's fence budget subtracts the geometry jobs started in
+          // the same frame (so the two queues can't both take a reserve slot).
+          refinementBudgetCountsGeometryStarts: requireBool(
+            sf.refinementBudgetCountsGeometryStarts ?? true,
+            'gpuQuadtree.streamerFlags.refinementBudgetCountsGeometryStarts'
+          ),
+          // Keep refinement's queue-full retries running in frames where
+          // geometry has no fence budget (admission itself is still gated).
+          refinementTickWhenGeometryBlocked: requireBool(
+            sf.refinementTickWhenGeometryBlocked ?? true,
+            'gpuQuadtree.streamerFlags.refinementTickWhenGeometryBlocked'
+          ),
+          // Don't refine detail tiles drawn entirely past the end of the
+          // distance ramp into the flat solid-color tier: the flat color
+          // replaces their material on every pixel. Only applies when nothing
+          // else reads refinement output (no streamed assets, no terrain AO
+          // at that LOD); such tiles are refined once they come within range.
+          skipRefinementBeyondFlatFade: requireBool(
+            sf.skipRefinementBeyondFlatFade ?? true,
+            'gpuQuadtree.streamerFlags.skipRefinementBeyondFlatFade'
+          ),
+          // Extra distance, as a fraction of the fade end, a tile must lie
+          // beyond before its refinement is skipped.
+          flatFadeSkipMarginFraction: requireNumber(
+            sf.flatFadeSkipMarginFraction ?? 0.1,
+            'gpuQuadtree.streamerFlags.flatFadeSkipMarginFraction'
+          ),
+          // Per-readback and per-eviction diagnostic scans and their logs
+          // ([QT-VisMarkD3], [QT-Pipeline-Oscillation], [QT-FallbackEvict-*],
+          // [QT-Stitch-Evict], visible-copy-state samples).
+          diagnostics: requireBool(
+            sf.diagnostics ?? false,
+            'gpuQuadtree.streamerFlags.diagnostics'
+          ),
+        };
+      })(),
       workgroupSize: requireInt(gpuQuadtree.workgroupSize ?? 64, 'gpuQuadtree.workgroupSize', 1),
       adaptiveLod: (() => {
         const al = gpuQuadtree.adaptiveLod || {};

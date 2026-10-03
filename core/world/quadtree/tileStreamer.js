@@ -86,6 +86,8 @@ import { TileGenerator } from './tileGenerator.js';
 import { TileCache } from './tileCache.js';
 import { computeTileWorldCenter } from './gpuQuadtreeDiagnosticHelpers.js';
 import { splitOutputTypes } from './terrainOutputs.js';
+import { TileVisibilityIndex } from './tileVisibilityIndex.js';
+import { computeSolidTierFadeDistances, tileNearestDistanceLowerBound } from './solidTierFade.js';
 import {
     Texture, TextureFormat, TextureFilter, TextureWrap,
     gpuFormatIsFilterable
@@ -741,6 +743,27 @@ export class TileStreamer {
         // geometry-only placeholder. false = previous behaviour (nearest
         // resident layer, finished or not).
         this._preferCompleteMaterialLayers = options.preferCompleteMaterialLayers !== false;
+        // Behaviour switches (EngineConfig gpuQuadtree.streamerFlags); the
+        // defaults here are only for callers that pass none.
+        this._flags = {
+            indexedVisibility: true,
+            refinementBudgetCountsGeometryStarts: true,
+            refinementTickWhenGeometryBlocked: true,
+            skipRefinementBeyondFlatFade: true,
+            flatFadeSkipMarginFraction: 0.1,
+            diagnostics: false,
+            ...(options.streamerFlags || {})
+        };
+        // Visible tiles and their ancestors as integer keys, rebuilt per
+        // visibility readback (see tileVisibilityIndex.js).
+        this._visibilityIndex = new TileVisibilityIndex();
+        // { shaderConfig, minLod, minSurfaceRadius } when a detail tile drawn
+        // entirely past the flat-tier fade end has no reader of its
+        // refinement output (QuadtreeTileManager decides); null = never.
+        this._flatTierRefinementSkip = options.flatTierRefinementSkip ?? null;
+        // key -> tileAddr: resident tiles whose refinement waits because the
+        // flat color covers all their pixels. Re-checked at each readback.
+        this._refinementDeferredMap = new Map();
         // Refinement reads the resident layer's height/tile ids instead of
         // recomputing them (saves the base-height, classification and
         // micro-height passes per refinement). false = recompute as before.
@@ -809,7 +832,7 @@ export class TileStreamer {
             ? Math.max(0, Math.floor(options.solidTierStartLod))
             : null;
         this._coarseRefinementTypes = refinementTypes.filter(type => !DETAIL_MATERIAL_TYPES.has(type));
-        this._tileState = new Map();   // key -> 'REQUESTED'|'QUEUED'|'GENERATING'|'GEOMETRY_READY'|'RESIDENT'|'REFINING'|'REFINED'
+        this._tileState = new Map();   // key -> 'REQUESTED'|'QUEUED'|'GENERATING'|'GEOMETRY_READY'|'RESIDENT'|'REFINING'|'REFINED'|'DEFERRED'
 
         this.textureFormats  = {
             ...DEFAULT_TEXTURE_FORMATS,
@@ -992,6 +1015,28 @@ setExternalArrayTexture(name, wrapper) {
 }
 
 /**
+ * Change streamer behaviour switches at runtime (see EngineConfig
+ * gpuQuadtree.streamerFlags). Returns the resulting flags.
+ */
+setStreamerFlags(partial = {}) {
+    const wasSkipping = this._flags.skipRefinementBeyondFlatFade;
+    for (const [name, value] of Object.entries(partial || {})) {
+        if (!(name in this._flags)) {
+            Logger.warn(`[TileStreamer] unknown streamer flag '${name}'`);
+            continue;
+        }
+        this._flags[name] = value;
+    }
+    if (wasSkipping && !this._flags.skipRefinementBeyondFlatFade) {
+        // Nothing is skipped any more: refine everything that was waiting.
+        const deferred = [...this._refinementDeferredMap.values()];
+        this._refinementDeferredMap.clear();
+        for (const tileAddr of deferred) this._queueRefinement(tileAddr);
+    }
+    return { ...this._flags };
+}
+
+/**
  * Drain the tile-commit queue. Returns an array of
  * {face, depth, x, y, layer} for every tile that committed since the
  * last drain. Caller takes ownership of the returned array.
@@ -1120,6 +1165,8 @@ this._freshnessSkipCount = 0;
         this._refinementRejectWindowCount = 0;
         this._refinementRetryMap.clear();
         this._refinementVisibleDropRetryMap.clear();
+        this._refinementDeferredMap.clear();
+        this._visibilityIndex.clear();
 
         if (this.arrayPool?._pendingCopies) {
             this.arrayPool._pendingCopies.length = 0;
@@ -1445,6 +1492,13 @@ this._freshnessSkipCount = 0;
 
         if (effectiveBudget === 0) {
             this._gpuBackpressureSkipCount++;
+            // Geometry's budget is 0 only once the fences overshoot by at
+            // least urgentReserveSlots, which also exhausts refinement's own
+            // reserve, so no refinement can start here. Ticking keeps its
+            // queue-full retries moving through saturated stretches.
+            if (this._flags.refinementTickWhenGeometryBlocked) {
+                this._tickRefinement(0);
+            }
             this.tileGenerator?.tick?.();
             return;
         }
@@ -1459,7 +1513,7 @@ this._freshnessSkipCount = 0;
 
         this._tilesStartedWindowCount += spawned;
 
-        this._tickRefinement(spawned);
+        this._tickRefinement(this._flags.refinementBudgetCountsGeometryStarts ? spawned : 0);
 
         this.tileGenerator?.tick?.();
     }
@@ -1935,60 +1989,64 @@ this._freshnessSkipCount = 0;
     }
 
 
- // In _evictTile(), add age and visibility logging:
 _evictTile(key) {
     const info = this._tileInfo.get(key);
     if (!info) return;
 
+    if (this._flags.diagnostics) {
+        this._recordEvictionDiagnostics(key, info);
+    }
+
+    const touchedSlots = [];
+    this.hashTable.remove(info.keyLo, info.keyHi, touchedSlots);
+    for (const s of touchedSlots) {
+        this._dirtySlots.add(s);
+    }
+
+    this._tileInfo.delete(key);
+    this._layerToKey.delete(info.layer);
+    this._debugCopyStateByLayer.delete(info.layer);
+    this._tileState.delete(key);
+    this._refinementVisibleDropRetryMap.delete(key);
+    this._refinementDeferredMap.delete(key);
+    this._refinementRetryMap.delete(key);
+    this.arrayPool.releaseLayer(info.layer);
+    this._recordPoolHeadroom();
+}
+
+// Diagnostics only (streamerFlags.diagnostics): which visible tiles were
+// drawing from the evicted tile, how old it was relative to the rest of the
+// pool, and the recent-eviction record the evict→feedback stats read. Scans
+// the visible list and the whole pool, so it is off by default.
+_recordEvictionDiagnostics(key, info) {
     const now = performance.now();
-    
-    // NEW: Check if any visible tile would use this as a fallback
+
+    // Visible tiles without their own data that fell back to this one.
     let fallbackDependents = 0;
-    let dependentDepths = [];
-    
+    const dependentDepths = [];
     if (this._lastVisibleTilesList) {
         for (const tile of this._lastVisibleTilesList) {
-            // Check if this visible tile's data is loaded
             const visKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
-            const visInfo = this._tileInfo.get(visKey);
-            
-            if (visInfo) {
-                // Tile has its own data loaded - no fallback needed
-                continue;
-            }
-            
-            // Tile needs a fallback - check if evicted tile is an ancestor
-            if (tile.face !== info.face) continue;  // Different face, can't be ancestor
-            
-            // Walk up the ancestor chain from the visible tile
+            if (this._tileInfo.has(visKey)) continue;
+            if (tile.face !== info.face) continue;
             let d = tile.depth;
             let x = tile.x;
             let y = tile.y;
-            
             while (d > info.depth) {
                 d--;
                 x >>= 1;
                 y >>= 1;
             }
-            
-            // Check if we landed on the evicted tile
-            if (d === info.depth) {
-                const evictedX = parseInt(key.split(':')[2].split(',')[0]);
-                const evictedY = parseInt(key.split(':')[2].split(',')[1]);
-                
-                if (x === evictedX && y === evictedY) {
-                    fallbackDependents++;
-                    dependentDepths.push(tile.depth);
-                }
+            if (d === info.depth && x === info.x && y === info.y) {
+                fallbackDependents++;
+                dependentDepths.push(tile.depth);
             }
         }
     }
 
-    // Log eviction with fallback dependency info
     if (!this._evictFallbackLogCount) this._evictFallbackLogCount = 0;
     if (this._evictFallbackLogCount < 50 || fallbackDependents > 0) {
         this._evictFallbackLogCount++;
-        
         const depthHist = {};
         for (const d of dependentDepths) {
             depthHist[d] = (depthHist[d] || 0) + 1;
@@ -1997,21 +2055,19 @@ _evictTile(key) {
             .sort((a, b) => +a[0] - +b[0])
             .map(([d, c]) => `d${d}:${c}`)
             .join(' ');
-        
         Logger.warn(
             `[QT-FallbackEvict-Dependency] key=${key} depth=${info.depth} ` +
             `fallbackDependents=${fallbackDependents} ` +
             `dependentDepths=[${depthStr}]`
         );
     }
-    
-    // Track statistics
+
     if (!this._fallbackEvictStats) {
-        this._fallbackEvictStats = { 
-            total: 0, 
-            withDependents: 0, 
+        this._fallbackEvictStats = {
+            total: 0,
+            withDependents: 0,
             totalDependents: 0,
-            maxDependents: 0 
+            maxDependents: 0
         };
     }
     this._fallbackEvictStats.total++;
@@ -2019,30 +2075,27 @@ _evictTile(key) {
         this._fallbackEvictStats.withDependents++;
         this._fallbackEvictStats.totalDependents += fallbackDependents;
         this._fallbackEvictStats.maxDependents = Math.max(
-            this._fallbackEvictStats.maxDependents, 
+            this._fallbackEvictStats.maxDependents,
             fallbackDependents
         );
     }
-    const age = now - info.lastUsed;
-    
-    // Check if evicted tile was in the last visible readback
-    const wasVisible = this._lastVisibleKeySet?.has(key) ?? false;
-    const readbackAge = this._lastVisibleReadbackTime 
-        ? (now - this._lastVisibleReadbackTime).toFixed(0) 
-        : 'never';
 
-    // Find the LRU score spread: what's the youngest eligible eviction candidate?
+    // LRU spread: youngest and oldest eligible eviction candidates.
+    const age = now - info.lastUsed;
+    const wasVisible = this._lastVisibleKeySet?.has(key) ?? false;
+    const readbackAge = this._lastVisibleReadbackTime
+        ? (now - this._lastVisibleReadbackTime).toFixed(0)
+        : 'never';
     let youngestAge = Infinity;
     let oldestAge = -Infinity;
     let eligibleCount = 0;
-    for (const [k, i] of this._tileInfo) {
+    for (const i of this._tileInfo.values()) {
         if (i.depth <= 2) continue;
         const a = now - i.lastUsed;
         if (a < youngestAge) youngestAge = a;
         if (a > oldestAge) oldestAge = a;
         eligibleCount++;
     }
-
     if (!this._evictDetailLogCount) this._evictDetailLogCount = 0;
     if (this._evictDetailLogCount < 30 || wasVisible) {
         this._evictDetailLogCount++;
@@ -2054,46 +2107,30 @@ _evictTile(key) {
             `eligible=${eligibleCount}`
         );
     }
-    
-        if (!this._recentEvictions) this._recentEvictions = new Map();
-        this._recentEvictions.set(key, {
-            evictedAt: performance.now(),
-            depth: info.depth,
-            layer: info.layer,
-            keyLo: info.keyLo,
-            keyHi: info.keyHi
-        });
-        // Prune old records (keep last 10 seconds)
-        const cutoff = performance.now() - 10000;
-        for (const [k, v] of this._recentEvictions) {
-            if (v.evictedAt < cutoff) this._recentEvictions.delete(k);
-        }
-    
 
-        if (!this._evictLogCount) this._evictLogCount = 0;
-        if (this._evictLogCount < 50 || this._evictLogCount % 100 === 0) {
-            this._evictLogCount++;
-            Logger.warn(
-                `[QT-Stitch-Evict] key=${key} layer=${info.layer} depth=${info.depth} ` +
-                `slot=${info.slot} dirtyBefore=${this._dirtySlots.size}`
-            );
-        }
-    
-        const touchedSlots = [];
-        this.hashTable.remove(info.keyLo, info.keyHi, touchedSlots);
-        for (const s of touchedSlots) {
-            this._dirtySlots.add(s);
-        }
-
-    
-        this._tileInfo.delete(key);
-        this._layerToKey.delete(info.layer);
-        this._debugCopyStateByLayer.delete(info.layer);
-        this._tileState.delete(key);
-        this.arrayPool.releaseLayer(info.layer);
-        this._recordPoolHeadroom();
+    // Read by _processFeedbackAddress for the evict→feedback stats.
+    if (!this._recentEvictions) this._recentEvictions = new Map();
+    this._recentEvictions.set(key, {
+        evictedAt: now,
+        depth: info.depth,
+        layer: info.layer,
+        keyLo: info.keyLo,
+        keyHi: info.keyHi
+    });
+    const cutoff = now - 10000;
+    for (const [k, v] of this._recentEvictions) {
+        if (v.evictedAt < cutoff) this._recentEvictions.delete(k);
     }
 
+    if (!this._evictLogCount) this._evictLogCount = 0;
+    if (this._evictLogCount < 50 || this._evictLogCount % 100 === 0) {
+        this._evictLogCount++;
+        Logger.warn(
+            `[QT-Stitch-Evict] key=${key} layer=${info.layer} depth=${info.depth} ` +
+            `slot=${info.slot} dirtyBefore=${this._dirtySlots.size}`
+        );
+    }
+}
 
 async _commitTile(tileAddr, textures, telemetry = null) {
     if (!this.arrayPool) {
@@ -2222,6 +2259,41 @@ _isSolidTierDepth(depth) {
     return (maxDepth - depth) >= this._solidTierStartLod;
 }
 
+// False when every pixel of this detail tile is currently drawn with the
+// flat solid-tier color at full weight (nearest possible pixel past the end
+// of the distance ramp, plus a margin), so its refinement output would not
+// change the image. Only when QuadtreeTileManager found no other reader of
+// refinement output (_flatTierRefinementSkip); true whenever unsure.
+_refinementChangesPixels(tileAddr) {
+    const skip = this._flatTierRefinementSkip;
+    if (!skip || !this._flags.skipRefinementBeyondFlatFade) return true;
+    const quadtree = this.quadtreeGPU;
+    const maxDepth = quadtree?.maxDepth;
+    if (!Number.isFinite(maxDepth)) return true;
+    const lod = maxDepth - tileAddr.depth;
+    if (lod < skip.minLod || this._isSolidTierDepth(tileAddr.depth)) return true;
+    const ctx = this._cameraContext;
+    if (!ctx.position || !ctx.planetConfig) return true;
+    const fade = computeSolidTierFadeDistances({
+        lodFactor: quadtree.lodFactor,
+        faceSize: quadtree.faceSize,
+        maxDepth,
+        lodErrorThreshold: quadtree.lodErrorThreshold,
+        shaderConfig: skip.shaderConfig
+    });
+    if (!fade) return true;
+    const nearest = tileNearestDistanceLowerBound(
+        tileAddr, ctx.position, ctx.planetConfig.origin, skip.minSurfaceRadius
+    );
+    const margin = Math.max(0, this._flags.flatFadeSkipMarginFraction ?? 0) * fade.end;
+    return nearest < fade.end + margin;
+}
+
+_deferRefinement(key, tileAddr) {
+    this._tileState.set(key, 'DEFERRED');
+    this._refinementDeferredMap.set(key, tileAddr);
+}
+
 // Refinement outputs for a tile: the full set for detail tiers, the set
 // without splat/prebaked color for the flat tier (see constructor).
 _refinementTypesFor(tileAddr) {
@@ -2236,6 +2308,10 @@ _queueRefinement(tileAddr) {
     const refinementTypes = this._refinementTypesFor(tileAddr);
     if (refinementTypes.length === 0) {
         this._tileState.set(key, 'REFINED');
+        return;
+    }
+    if (!this._refinementChangesPixels(tileAddr)) {
+        this._deferRefinement(key, tileAddr);
         return;
     }
 
@@ -2322,6 +2398,12 @@ _queueRefinement(tileAddr) {
                 tileAddr.depth,
                 (this._refinementDropByDepthWindow.get(tileAddr.depth) || 0) + 1
             );
+            return false;
+        }
+        // The camera may have moved away since this was queued.
+        if (!this._refinementChangesPixels(tileAddr)) {
+            this._telemetryByKey.delete(key);
+            this._deferRefinement(key, tileAddr);
             return false;
         }
 
@@ -2412,6 +2494,10 @@ _retryDroppedRefinements() {
 // livelock's "flood the queue every tick" failure mode.
 _retryVisibleDroppedRefinements() {
     if (this._refinementVisibleDropRetryMap.size === 0) return;
+    // Indexed mode re-queues from the visibility readback instead
+    // (_requeueParkedRefinementsOnReadback), so nothing scans this map per
+    // frame; evicted entries are removed in _evictTile.
+    if (this._flags.indexedVisibility) return;
     for (const [key, tileAddr] of this._refinementVisibleDropRetryMap) {
         if (!this._tileInfo.has(key)) {
             this._refinementVisibleDropRetryMap.delete(key);
@@ -2472,22 +2558,28 @@ _commitRefinement(tileAddr, textures, telemetry = null) {
         return bestKey;
     }
 
-// In TileStreamer, add a Set to track tiles from the most recent readback
+// Called once per visibility readback with the visible tile list. Keeps
+// eviction protection, LRU stamps and the visibility index current, and
+// re-queues refinements that were parked until their tile became visible
+// (or, for deferred ones, came within the flat-tier fade).
 markTilesVisible(tiles) {
 
     if (!tiles || tiles.length === 0) return;
     const now = performance.now();
-        // Store full tile list for fallback analysis
-        this._lastVisibleTilesList = tiles;
-        this._lastVisibleReadbackTime = now;
-    
-        
-    // NEW: Build a fast lookup of what was visible in this readback
+    const diagnostics = this._flags.diagnostics === true;
+    this._lastVisibleTilesList = tiles;
+    this._lastVisibleReadbackTime = now;
+    this._visibilityIndex.rebuild(tiles);
+
     if (!this._lastVisibleKeySet) this._lastVisibleKeySet = new Set();
     this._lastVisibleKeySet.clear();
     this._protectedKeys.clear();
-    this._lastVisibleReadbackTime = now;
-    
+    // Refinements parked while their tile was not visible (stale at dequeue)
+    // that are visible now. Collected here, re-queued once bookkeeping is done.
+    const parkedNowVisible = [];
+    const requeueFromReadback = this._flags.indexedVisibility &&
+        this._refinementVisibleDropRetryMap.size > 0;
+
     for (const tile of tiles) {
         const visibleKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
         this._lastVisibleKeySet.add(visibleKey);
@@ -2495,6 +2587,10 @@ markTilesVisible(tiles) {
         // Protect the visible tile itself if resident.
         if (this._tileInfo.has(visibleKey)) {
             this._protectedKeys.add(visibleKey);
+        }
+        if (requeueFromReadback) {
+            const parked = this._refinementVisibleDropRetryMap.get(visibleKey);
+            if (parked) parkedNowVisible.push([visibleKey, parked]);
         }
 
         // Protect the nearest loaded ancestor currently acting as fallback.
@@ -2511,38 +2607,160 @@ markTilesVisible(tiles) {
             break;
         }
     }
-    
-    // H2: Track LOD boundary oscillation — tiles entering/exiting visible set
+
+    // Tiles newly entering the visible set this readback are exactly the
+    // "newlyVisibleTiles" denominator for request amplification (plan §0.2).
     if (!this._prevVisibleKeySet) this._prevVisibleKeySet = new Set();
+    let entered = 0;
+    for (const key of this._lastVisibleKeySet) {
+        if (!this._prevVisibleKeySet.has(key)) entered++;
+    }
+    this._newlyVisibleTilesWindowCount += entered;
+    if (diagnostics) {
+        this._logVisibilityOscillation();
+        this._logPooledDepth3Visibility();
+    }
+    this._prevVisibleKeySet = new Set(this._lastVisibleKeySet);
 
-    let entered = 0, exited = 0;
+    let residentVisible = 0;
+    let ownVisibleNotReady = 0;
+    let fallbackVisible = 0;
+    let fallbackVisibleNotReady = 0;
+    const nonReadySamples = [];
+
+    for (const tile of tiles) {
+        const visibleKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
+        const residentInfo = this._tileInfo.get(visibleKey);
+        if (residentInfo) {
+            residentVisible++;
+            const state = this._debugCopyStateByLayer.get(residentInfo.layer);
+            if (state && state.state !== 'ready') {
+                ownVisibleNotReady++;
+                if (diagnostics && nonReadySamples.length < 8) {
+                    nonReadySamples.push(
+                        `own f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${residentInfo.layer}:${state.state}`
+                    );
+                }
+            }
+            continue;
+        }
+
+        let depth = tile.depth;
+        let x = tile.x;
+        let y = tile.y;
+        while (depth > 0) {
+            depth--;
+            x >>= 1;
+            y >>= 1;
+            const ancestorKey = this._makeKey(tile.face, depth, x, y);
+            const ancestorInfo = this._tileInfo.get(ancestorKey);
+            if (!ancestorInfo) continue;
+            fallbackVisible++;
+            const state = this._debugCopyStateByLayer.get(ancestorInfo.layer);
+            if (state && state.state !== 'ready') {
+                fallbackVisibleNotReady++;
+                if (diagnostics && nonReadySamples.length < 8) {
+                    nonReadySamples.push(
+                        `fallback f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${ancestorInfo.layer}:${state.state}`
+                    );
+                }
+            }
+            break;
+        }
+    }
+
+    this._lastCopyVisibilitySummary = {
+        totalVisible: tiles.length,
+        residentVisible,
+        ownVisibleNotReady,
+        fallbackVisible,
+        fallbackVisibleNotReady,
+        samples: nonReadySamples,
+        timestamp: now
+    };
+
+    // The first few readbacks always log (startup); after that only with
+    // diagnostics on, since copies are routinely in flight while streaming.
+    if (
+        this._debugVisibleCopyLogCount < 8 ||
+        (diagnostics && (ownVisibleNotReady > 0 || fallbackVisibleNotReady > 0))
+    ) {
+        this._debugVisibleCopyLogCount++;
+        Logger.info(
+            `${TERRAIN_STEP_LOG_TAG} [QTCommit] visible-copy-state total=${tiles.length} ` +
+            `resident=${residentVisible} ownNotReady=${ownVisibleNotReady} ` +
+            `fallbackVisible=${fallbackVisible} fallbackNotReady=${fallbackVisibleNotReady}` +
+            `${nonReadySamples.length ? ` samples=${nonReadySamples.join(' ; ')}` : ''}`
+        );
+    }
+
+    // LRU stamp for every visible tile and all of its resident ancestors.
+    // Visible tiles share most of their ancestors, so each chain stops at the
+    // first ancestor already visited this readback (the rest of that chain
+    // was stamped then): O(visible + unique ancestors), not O(visible × depth).
+    const visitedAncestors = this._lruVisitedScratch ?? (this._lruVisitedScratch = new Set());
+    visitedAncestors.clear();
+    for (const tile of tiles) {
+        let { face, depth, x, y } = tile;
+        let info = this._tileInfo.get(this._makeKey(face, depth, x, y));
+        if (info) info.lastUsed = now;
+        while (depth > 0) {
+            depth--; x >>= 1; y >>= 1;
+            const ancestorKey = this._makeKey(face, depth, x, y);
+            if (visitedAncestors.has(ancestorKey)) break;
+            visitedAncestors.add(ancestorKey);
+            info = this._tileInfo.get(ancestorKey);
+            if (info) info.lastUsed = now;
+        }
+    }
+
+    for (const [key, tileAddr] of parkedNowVisible) {
+        this._refinementVisibleDropRetryMap.delete(key);
+        if (this._tileInfo.has(key)) this._queueRefinement(tileAddr);
+    }
+    this._requeueDeferredRefinements();
+}
+
+// Deferred refinements (flat color covered every pixel) whose tile may now
+// show detail: re-queue them. O(deferred), each check O(1); the map holds
+// only resident tiles and is small (detail tiles past the fade end).
+_requeueDeferredRefinements() {
+    if (this._refinementDeferredMap.size === 0) return;
+    for (const [key, tileAddr] of this._refinementDeferredMap) {
+        if (!this._tileInfo.has(key)) {
+            this._refinementDeferredMap.delete(key);
+            continue;
+        }
+        if (!this._refinementChangesPixels(tileAddr)) continue;
+        this._refinementDeferredMap.delete(key);
+        this._tileState.set(key, 'RESIDENT');
+        this._queueRefinement(tileAddr);
+    }
+}
+
+// Diagnostics only (streamerFlags.diagnostics): tiles that left the visible
+// set and came back within 500 ms, logged every 10 readbacks.
+_logVisibilityOscillation() {
+    const now = performance.now();
+    let entered = 0;
+    let exited = 0;
     const oscillating = [];
-
+    if (!this._recentlyExitedKeys) this._recentlyExitedKeys = new Map();
     for (const key of this._prevVisibleKeySet) {
         if (!this._lastVisibleKeySet.has(key)) {
             exited++;
-            if (!this._recentlyExitedKeys) this._recentlyExitedKeys = new Map();
-            this._recentlyExitedKeys.set(key, performance.now());
+            this._recentlyExitedKeys.set(key, now);
         }
     }
     for (const key of this._lastVisibleKeySet) {
         if (!this._prevVisibleKeySet.has(key)) {
             entered++;
-            if (this._recentlyExitedKeys?.has(key)) {
-                oscillating.push(key);
-            }
+            if (this._recentlyExitedKeys.has(key)) oscillating.push(key);
         }
     }
-    // Tiles newly entering the visible set this readback are exactly the
-    // "newlyVisibleTiles" denominator for request amplification (plan §0.2).
-    this._newlyVisibleTilesWindowCount += entered;
-
-    // Prune old recently-exited entries (keep last 5 readbacks worth ~ 500ms)
-    if (this._recentlyExitedKeys) {
-        const cutoff = performance.now() - 500;
-        for (const [k, t] of this._recentlyExitedKeys) {
-            if (t < cutoff) this._recentlyExitedKeys.delete(k);
-        }
+    const cutoff = now - 500;
+    for (const [k, t] of this._recentlyExitedKeys) {
+        if (t < cutoff) this._recentlyExitedKeys.delete(k);
     }
 
     if (!this._oscillationStats) {
@@ -2573,109 +2791,22 @@ markTilesVisible(tiles) {
         }
         this._oscillationStats = { readbacks: 0, totalEntered: 0, totalExited: 0, totalOscillating: 0 };
     }
+}
 
-    this._prevVisibleKeySet = new Set(this._lastVisibleKeySet);
-
-    // NEW: Count how many pooled d3 tiles are currently visible
+// Diagnostics only: how many pooled depth-3 tiles are in the readback.
+_logPooledDepth3Visibility() {
     let d3Total = 0, d3Visible = 0;
     for (const [key, info] of this._tileInfo) {
         if (info.depth !== 3) continue;
         d3Total++;
         if (this._lastVisibleKeySet.has(key)) d3Visible++;
     }
-
-
     if (d3Total > 0) {
         Logger.info(
             `[QT-VisMarkD3] depth=3 in pool: ${d3Total}, ` +
             `in visible readback: ${d3Visible}, ` +
             `NOT in readback: ${d3Total - d3Visible}`
         );
-    }
-
-    let residentVisible = 0;
-    let ownVisibleNotReady = 0;
-    let fallbackVisible = 0;
-    let fallbackVisibleNotReady = 0;
-    const nonReadySamples = [];
-
-    for (const tile of tiles) {
-        const visibleKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
-        const residentInfo = this._tileInfo.get(visibleKey);
-        if (residentInfo) {
-            residentVisible++;
-            const state = this._debugCopyStateByLayer.get(residentInfo.layer);
-            if (state && state.state !== 'ready') {
-                ownVisibleNotReady++;
-                if (nonReadySamples.length < 8) {
-                    nonReadySamples.push(
-                        `own f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${residentInfo.layer}:${state.state}`
-                    );
-                }
-            }
-            continue;
-        }
-
-        let depth = tile.depth;
-        let x = tile.x;
-        let y = tile.y;
-        while (depth > 0) {
-            depth--;
-            x >>= 1;
-            y >>= 1;
-            const ancestorKey = this._makeKey(tile.face, depth, x, y);
-            const ancestorInfo = this._tileInfo.get(ancestorKey);
-            if (!ancestorInfo) continue;
-            fallbackVisible++;
-            const state = this._debugCopyStateByLayer.get(ancestorInfo.layer);
-            if (state && state.state !== 'ready') {
-                fallbackVisibleNotReady++;
-                if (nonReadySamples.length < 8) {
-                    nonReadySamples.push(
-                        `fallback f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${ancestorInfo.layer}:${state.state}`
-                    );
-                }
-            }
-            break;
-        }
-    }
-
-    this._lastCopyVisibilitySummary = {
-        totalVisible: tiles.length,
-        residentVisible,
-        ownVisibleNotReady,
-        fallbackVisible,
-        fallbackVisibleNotReady,
-        samples: nonReadySamples,
-        timestamp: now
-    };
-
-    if (
-        ownVisibleNotReady > 0 ||
-        fallbackVisibleNotReady > 0 ||
-        this._debugVisibleCopyLogCount < 8
-    ) {
-        this._debugVisibleCopyLogCount++;
-        Logger.info(
-            `${TERRAIN_STEP_LOG_TAG} [QTCommit] visible-copy-state total=${tiles.length} ` +
-            `resident=${residentVisible} ownNotReady=${ownVisibleNotReady} ` +
-            `fallbackVisible=${fallbackVisible} fallbackNotReady=${fallbackVisibleNotReady}` +
-            `${nonReadySamples.length ? ` samples=${nonReadySamples.join(' ; ')}` : ''}`
-        );
-    }
-
-    // ... existing lastUsed update logic unchanged ...
-    for (const tile of tiles) {
-        let { face, depth, x, y } = tile;
-        let key = this._makeKey(face, depth, x, y);
-        let info = this._tileInfo.get(key);
-        if (info) info.lastUsed = now;
-        while (depth > 0) {
-            depth--; x >>= 1; y >>= 1;
-            key = this._makeKey(face, depth, x, y);
-            info = this._tileInfo.get(key);
-            if (info) info.lastUsed = now;
-        }
     }
 }
 
@@ -2821,7 +2952,20 @@ markTilesVisible(tiles) {
         this._requestTimestamps.delete(key);
     }
 
+    // Is this tile visible, an ancestor or descendant of a visible tile, or
+    // stale, as of the last visibility readback? Indexed mode answers in
+    // O(depth); the scan below is O(visible × depth) and is kept as the
+    // indexedVisibility=false fallback and as the reference the index's
+    // tests compare against.
     _describeTileDemandState(tileAddr, key = tileAddr?.toString?.()) {
+        if (this._flags.indexedVisibility) {
+            if (!tileAddr) return { relevant: true, reason: 'unknown' };
+            return this._visibilityIndex.describe(tileAddr.face, tileAddr.depth, tileAddr.x, tileAddr.y);
+        }
+        return this._describeTileDemandStateScan(tileAddr, key);
+    }
+
+    _describeTileDemandStateScan(tileAddr, key = tileAddr?.toString?.()) {
         if (!tileAddr || !this._lastVisibleKeySet || !this._lastVisibleTilesList) {
             return { relevant: true, reason: 'unknown' };
         }
@@ -2992,6 +3136,9 @@ markTilesVisible(tiles) {
             // vs stay flat/grow (not working) rather than just knowing it's
             // nonzero at one instant.
             refinementVisibleDropRetryMapSize: this._refinementVisibleDropRetryMap.size,
+            // Resident detail tiles whose refinement waits because the flat
+            // tier covers all their pixels (skipRefinementBeyondFlatFade).
+            refinementDeferredCount: this._refinementDeferredMap.size,
             tileStateCounts
         };
     }

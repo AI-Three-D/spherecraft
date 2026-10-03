@@ -210,6 +210,10 @@ export class Frontend {
                 // For the baked coarse (flat-tier) color, which must use the
                 // same category colors as the terrain shader.
                 tileCategories: this._terrainTheme.TILE_CATEGORIES,
+                // Same AO defaults the terrain materials merge, so the streamer
+                // knows which LODs sample terrain AO (and therefore read their
+                // material even where it is drawn as flat color).
+                terrainAODefaults: this._streamerTheme?.TERRAIN_AO_CONFIG ?? null,
             });
             await this.quadtreeTileManager.initialize();
            

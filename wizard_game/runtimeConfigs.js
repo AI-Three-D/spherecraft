@@ -430,6 +430,16 @@ export function createEngineConfig() {
       // refinement outputs, which they never draw (~12 of ~17.5 ms GPU per
       // refinement). Scatter/climate are still generated for vegetation.
       solidTierSkipsDetailMaterial: true,
+      // Tile streamer switches (see EngineConfig gpuQuadtree.streamerFlags).
+      // Toggle at runtime: qtDiag.setStreamerFlags({ diagnostics: true }).
+      streamerFlags: {
+        indexedVisibility: true,
+        refinementBudgetCountsGeometryStarts: true,
+        refinementTickWhenGeometryBlocked: true,
+        skipRefinementBeyondFlatFade: true,
+        flatFadeSkipMarginFraction: 0.1,
+        diagnostics: false
+      },
       workgroupSize: 128,
 
       // 8 instead of 4: allows more tile generations to be in-flight

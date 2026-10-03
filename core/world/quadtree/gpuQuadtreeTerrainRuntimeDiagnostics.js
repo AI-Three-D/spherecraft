@@ -994,6 +994,7 @@ export function installQuadtreeTileManagerRuntimeDiagnostics(QuadtreeTileManager
                                 `${TERRAIN_STEP_LOG_TAG} [QTLight] refinement ` +
                                 `queueDepth=${pressure.refinementQueueDepth} queueActive=${pressure.refinementQueueActive} ` +
                                 `dropped=${pressure.refinementDropped} rejected=${pressure.refinementRejected} ` +
+                                `deferred=${pressure.refinementDeferredCount ?? 0} ` +
                                 `tileStates=[${stateStr}]`
                             );
                         }
