@@ -11,12 +11,26 @@ export class TerrainGenerationConfig {
 
         // How the base pass derives the slope that drives tile classification
         // and micro detail (heightBase.g):
-        //   'stencil'  - central differences over a ~32 m stencil (5 height
-        //                evaluations per texel; the long-standing behaviour).
         //   'analytic' - one dual-number evaluation giving height and its exact
-        //                surface gradient. About half the cost; slopes are not
-        //                low-pass filtered, so small steep features read steeper.
-        this.slopeMode = options.slopeMode === 'analytic' ? 'analytic' : 'stencil';
+        //                surface gradient (default; owner A/B 2026-10-03 showed
+        //                the same look at about half the base-pass cost).
+        //   'stencil'  - central differences over a ~32 m stencil (5 height
+        //                evaluations per texel; the behaviour before 2026-10).
+        this.slopeMode = options.slopeMode === 'stencil' ? 'stencil' : 'analytic';
+
+        // Corrections to terrain features that change the terrain's shape.
+        // Each can be switched off to compare against the old look.
+        //   smoothMax     - the mountain foothill/core blend used a smooth MIN
+        //                   (the old smoothMax formula), which capped every
+        //                   range near foothill height. On: true max.
+        //   loneHillGates - lone-hill tiers 4/5 and rolling hills ramp from
+        //                   their presence gate instead of starting with a
+        //                   1-6 m vertical step.
+        const fixes = options.fixes ?? {};
+        this.fixes = {
+            smoothMax: fixes.smoothMax !== false,
+            loneHillGates: fixes.loneHillGates !== false
+        };
 
         // High-level noise profile knobs (shader expects these in _pad3/_pad4).
         const profile = options.noiseProfile ?? {};

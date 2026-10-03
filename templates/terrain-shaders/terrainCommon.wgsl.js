@@ -238,10 +238,19 @@ fn dSmoothMin(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
     return vec4<f32>(value, b.yzw * (1.0 - h) + a.yzw * h + dfdh * dh);
 }
 
-// Mirrors smoothMax exactly as written: mix(b, a, h) + kk h (1 - h),
-// h = clamp(0.5 + 0.5 (b - a) / kk). (Note: away from a ~ b that selects
-// the SMALLER argument; kept identical so heights do not change.)
+// Mirrors smoothMax: mix(a, b, h) + kk h (1 - h), h = clamp(0.5 + 0.5 (b - a) / kk).
 fn dSmoothMax(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
+    let kk = max(k, 1e-4);
+    let hRaw = 0.5 + 0.5 * (b.x - a.x) / kk;
+    let h = clamp(hRaw, 0.0, 1.0);
+    let value = mix(a.x, b.x, h) + kk * h * (1.0 - h);
+    let dfdh = (b.x - a.x) + kk - 2.0 * kk * h;
+    let dh = select(vec3<f32>(0.0), (b.yzw - a.yzw) * (0.5 / kk), hRaw > 0.0 && hRaw < 1.0);
+    return vec4<f32>(value, a.yzw * (1.0 - h) + b.yzw * h + dfdh * dh);
+}
+
+// Mirrors smoothMaxLegacy (the old, min-like formula).
+fn dSmoothMaxLegacy(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
     let kk = max(k, 1e-4);
     let hRaw = 0.5 + 0.5 * (b.x - a.x) / kk;
     let h = clamp(hRaw, 0.0, 1.0);

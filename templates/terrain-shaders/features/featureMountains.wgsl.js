@@ -98,7 +98,8 @@ fn featureMountainsHeight(
     let detailH = foothillEnv * detailN * (HEIGHT_MOUNTAIN_DETAIL / maxH);
 
     // Smooth union so foothills blend seamlessly into core peaks
-    var h = smoothMax(foothillH, coreH, 0.003) + detailH;
+    let blendH = select(smoothMaxLegacy(foothillH, coreH, 0.003), smoothMax(foothillH, coreH, 0.003), TERRAIN_FIX_SMOOTH_MAX);
+    var h = blendH + detailH;
 
     // Slightly tighten the whole feature so it reads as a range, not a plateau
     h *= pow(foothillEnv, 0.15);
@@ -178,7 +179,8 @@ fn featureMountainsHeight_d(
     let coreH = dMul(coreEnv, coreMod) * (HEIGHT_MOUNTAIN_CORE / maxH);
     let detailH = dMul(foothillEnv, detailN) * (HEIGHT_MOUNTAIN_DETAIL / maxH);
 
-    var h = dSmoothMax(foothillH, coreH, 0.003) + detailH;
+    let blendH = select(dSmoothMaxLegacy(foothillH, coreH, 0.003), dSmoothMax(foothillH, coreH, 0.003), TERRAIN_FIX_SMOOTH_MAX);
+    var h = blendH + detailH;
     h = dMul(h, dPow(foothillEnv, 0.15));
 
     let exceptMask = rarityMaskAuto_d(

@@ -39,6 +39,9 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
   const analyticSlope = options?.analyticSlope === true;
+  // Terrain shape fixes (terrain.fixes); default on, off reproduces the old shapes.
+  const fixSmoothMax = options?.terrainFixes?.smoothMax !== false;
+  const fixLoneHillGates = options?.terrainFixes?.loneHillGates !== false;
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
     Math.min(1.0, Number.isFinite(options?.authoredSplatSourceMinProbability)
@@ -442,6 +445,10 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
 ` : ''}
 `,
     createNoiseLibrary(),
+    `
+const TERRAIN_FIX_SMOOTH_MAX: bool = ${fixSmoothMax};
+const TERRAIN_FIX_LONE_HILL_GATES: bool = ${fixLoneHillGates};
+`,
     createTerrainCommon(),
     createSurfaceCommon({
         tileCategories: options.tileCategories,

@@ -149,7 +149,10 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
         let cutN = fbmAuto(p.x, p.y, unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
         h = applySlopeCuts(h, cutN, 0.18);
 
-        totalHeight += h * presence
+        // Ramp from the gate so the hill starts at zero height (a bare
+        // presence > 0.001 gate leaves a ~1-2 m step at the rim).
+        let presenceW = select(presence, (presence - 0.001) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
+        totalHeight += h * presenceW
             * (HEIGHT_LONE_HILL_VERY_RARE / maxH) * sizeMod * hillAmp;
     }
 }
@@ -194,7 +197,8 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
         let detail = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
         h *= (1.0 + detail * 0.10);
 
-        totalHeight += h * presence
+        let presenceW = select(presence, (presence - 0.001) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
+        totalHeight += h * presenceW
             * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
     }
 }
@@ -260,7 +264,10 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
 
         let h = corridor * lump;
 
-        totalHeight += h * rollingPresence
+        // Ramp from the gate (a bare > 0.01 gate leaves a step of up to
+        // 0.01 * HEIGHT_ROLLING_HILLS at the region edge).
+        let presenceW = select(rollingPresence, (rollingPresence - 0.01) / 0.99, TERRAIN_FIX_LONE_HILL_GATES);
+        totalHeight += h * presenceW
             * (HEIGHT_ROLLING_HILLS / maxH) * sizeMod * hillAmp;
     }
 }
@@ -346,7 +353,8 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
               var h = loneHillDome_d(n2, 0.42);
               let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
               h = applySlopeCuts_d(h, cutN, 0.18);
-              totalHeight += dMul(dMul(h, presence) * (HEIGHT_LONE_HILL_VERY_RARE / maxH), sizeMod) * hillAmp;
+              let presenceW = select(presence, (presence - dConst(0.001)) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
+              totalHeight += dMul(dMul(h, presenceW) * (HEIGHT_LONE_HILL_VERY_RARE / maxH), sizeMod) * hillAmp;
           }
       }
 
@@ -368,7 +376,8 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
               h = applySlopeCuts_d(h, cutN, 0.22);
               let detail = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
               h = dMul(h, dConst(1.0) + detail * 0.10);
-              totalHeight += dMul(h, presence) * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
+              let presenceW = select(presence, (presence - dConst(0.001)) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
+              totalHeight += dMul(h, presenceW) * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
           }
       }
 
@@ -400,7 +409,8 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
               let lump = dMul(dConst(0.30) + beads * 0.70, dConst(0.55) + bumps * 0.45);
               let corridor = dPow(envelope, 1.25);
               let h = dMul(corridor, lump);
-              totalHeight += dMul(dMul(h, rollingPresence) * (HEIGHT_ROLLING_HILLS / maxH), sizeMod) * hillAmp;
+              let presenceW = select(rollingPresence, (rollingPresence - dConst(0.01)) / 0.99, TERRAIN_FIX_LONE_HILL_GATES);
+              totalHeight += dMul(dMul(h, presenceW) * (HEIGHT_ROLLING_HILLS / maxH), sizeMod) * hillAmp;
           }
       }
       return totalHeight;

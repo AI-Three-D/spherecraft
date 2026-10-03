@@ -409,6 +409,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     authoredSplatSourceWinnerSnapEnd: this.authoredSplatSourceWinnerSnapEnd,
                     fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                     analyticSlope: this.slopeMode === 'analytic',
+                    terrainFixes: this.terrainFixes,
                     ...extra,
                 };
             },

@@ -199,7 +199,11 @@ export class WebGPUTerrainGenerator {
         this.planetConfig = planetConfig;
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
-        this.slopeMode = this.terrainConfig?.slopeMode === 'analytic' ? 'analytic' : 'stencil';
+        this.slopeMode = this.terrainConfig?.slopeMode === 'stencil' ? 'stencil' : 'analytic';
+        this.terrainFixes = {
+            smoothMax: this.terrainConfig?.fixes?.smoothMax !== false,
+            loneHillGates: this.terrainConfig?.fixes?.loneHillGates !== false
+        };
         this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');
         const radiusM = this.worldScale;
         const continentsEnabled = this.terrainConfig?.continents?.enabled ?? true;
