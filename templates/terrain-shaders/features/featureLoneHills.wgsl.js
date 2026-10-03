@@ -267,6 +267,145 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       return totalHeight;
   }
   
+  // ---- Analytic-derivative twins (sphere) ----
+
+  fn loneHillDome_d(noise: vec4<f32>, threshold: f32) -> vec4<f32> {
+      let extend = 0.08;
+      let base = threshold - extend;
+      let t = (noise - dConst(base)) / max(1.0 - base, 0.001);
+      if (t.x <= 0.0) { return dConst(0.0); }
+      return dQuintic(dClamp(t, 0.0, 1.0));
+  }
+
+  fn irregularizeNoiseNearBase_d(n: vec4<f32>, threshold: f32, edgeN: vec4<f32>, strength: f32) -> vec4<f32> {
+      let band = dConst(1.0) - dSmoothstep(0.0, 0.20, dAbs(n - dConst(threshold)));
+      return n + dMul(edgeN * strength, band);
+  }
+
+  fn applySlopeCuts_d(h: vec4<f32>, cutN: vec4<f32>, amount: f32) -> vec4<f32> {
+      let band = dMul(dSmoothstep(0.12, 0.40, h), dConst(1.0) - dSmoothstep(0.70, 0.92, h));
+      let n = dClamp(cutN * 0.5 + dConst(0.5), 0.0, 1.0);
+      let cuts = dMul(band * amount, dPow(n, 2.2));
+      let r = h - cuts;
+      return select(dConst(0.0), r, r.x > 0.0);
+  }
+
+  fn twoPeakBlend_d(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+      let k = 0.10;
+      let m = dMax(a, b);
+      let t = dClamp(dAbs(a - b) / k, 0.0, 1.0);
+      return dMix((a + b) * 0.5, m, t);
+  }
+
+  // Analytic-derivative twin of featureLoneHillsHeight (sphere). Warps are
+  // skipped as warpFlatForNoise skips them on the sphere; tier 3 stays off
+  // with ENABLE_LONE_HILL_CRATERS.
+  fn featureLoneHillsHeight_d(
+      unitDir: vec3<f32>, seed: i32,
+      regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes
+  ) -> vec4<f32> {
+      let hillAmp = amp.loneHillsHeight;
+      if (hillAmp < 0.001) { return dConst(0.0); }
+
+      let maxH = maxTerrainHeightM();
+
+      let densityNoise = fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_LONE_HILL_DENSITY), 3, seed + 4000, 2.0, 0.5);
+      let densityMod = dSmoothstep(-0.35, 0.35, densityNoise);
+      let sizeNoise = fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_LONE_HILL_SIZE_VAR), 3, seed + 4050, 2.0, 0.5);
+      let sizeMod = dConst(0.7) + dSmoothstep(-0.3, 0.4, sizeNoise) * 0.6;
+
+      let flatSuppression = dSmoothstep(0.06, 0.22, regional.terrainType);
+      let commonMod = dMul(dMix(dConst(0.08), dConst(1.0), flatSuppression), dMix(dConst(0.25), dConst(1.0), densityMod));
+
+      var totalHeight = dConst(0.0);
+
+      // Tier 1 — common domes
+      {
+          let n1 = fbmAuto_d(unitDir, SCALE_LONE_HILL_SMALL, 1, seed + 4100, 2.0, 0.5);
+          let bump1 = loneHillDome_d(n1, 0.15);
+          let n2 = fbmAuto_d(unitDir, SCALE_LONE_HILL_SMALL * 2.0, 1, seed + 4120, 2.0, 0.5);
+          let bump2 = loneHillDome_d(n2, 0.12);
+          let bump = bump1 * 0.7 + bump2 * 0.3;
+          totalHeight += dMul(dMul(bump * (HEIGHT_LONE_HILL_COMMON / maxH), sizeMod), commonMod) * hillAmp;
+      }
+
+      // Tier 2 — uncommon domes
+      {
+          let n = fbmAuto_d(unitDir, SCALE_LONE_HILL_MEDIUM, 1, seed + 4200, 2.0, 0.5);
+          let bump = loneHillDome_d(n, 0.30);
+          totalHeight += dMul(dMul(bump * (HEIGHT_LONE_HILL_UNCOMMON / maxH), sizeMod), commonMod) * hillAmp;
+      }
+
+      // Tier 4 — very rare irregular dome with cuts
+      {
+          let n = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE, 1, seed + 4400, 2.0, 0.5);
+          let presence = dSmoothstep(0.28, 0.42, n);
+          if (presence.x > 0.001) {
+              let edgeN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.22, 2, seed + 4413, 2.0, 0.5);
+              let n2 = irregularizeNoiseNearBase_d(n, 0.42, edgeN, 0.10);
+              var h = loneHillDome_d(n2, 0.42);
+              let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
+              h = applySlopeCuts_d(h, cutN, 0.18);
+              totalHeight += dMul(dMul(h, presence) * (HEIGHT_LONE_HILL_VERY_RARE / maxH), sizeMod) * hillAmp;
+          }
+      }
+
+      // Tier 5 — exceptional two-peak landmark
+      {
+          let nA = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4500, 2.0, 0.5);
+          let nB = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4501, 2.0, 0.5);
+          let nMax = dMax(nA, nB);
+          let presence = dSmoothstep(0.34, 0.48, nMax);
+          if (presence.x > 0.001) {
+              let edgeA = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.20, 2, seed + 4513, 2.0, 0.5);
+              let edgeB = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.20, 2, seed + 4514, 2.0, 0.5);
+              let nA2 = irregularizeNoiseNearBase_d(nA, 0.48, edgeA, 0.12);
+              let nB2 = irregularizeNoiseNearBase_d(nB, 0.48, edgeB, 0.12);
+              let hA = loneHillDome_d(nA2, 0.48);
+              let hB = loneHillDome_d(nB2, 0.48);
+              var h = twoPeakBlend_d(hA, hB);
+              let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.09, 3, seed + 4521, 2.2, 0.55);
+              h = applySlopeCuts_d(h, cutN, 0.22);
+              let detail = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
+              h = dMul(h, dConst(1.0) + detail * 0.10);
+              totalHeight += dMul(h, presence) * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
+          }
+      }
+
+      // Rolling hill chains
+      {
+          let rollMask = rarityMaskAuto_d(
+              unitDir,
+              clampMacroScaleToPlanet(SCALE_ROLLING_HILL_DENSITY),
+              seed + 5000,
+              RARITY_UNCOMMON,
+              profile.rareBoost
+          );
+          let rollTerrainMod = dSmoothstep(0.03, 0.18, regional.terrainType);
+          let rollingPresence = dMul(rollMask, rollTerrainMod);
+          if (rollingPresence.x > 0.01) {
+              let pathN1 = fbmAuto_d(unitDir, SCALE_ROLLING_HILL_PATH, 2, seed + 5050, 2.0, 0.5);
+              let pathN2 = fbmAuto_d(unitDir, SCALE_ROLLING_HILL_PATH * 0.70, 2, seed + 5060, 2.0, 0.5);
+              let d1 = dSmoothAbs(pathN1, 0.02);
+              let d2 = dSmoothAbs(pathN2, 0.02);
+              let pathDist = dSmoothMin(d1, d2, 0.04);
+              let widthN = fbmAuto_d(unitDir, SCALE_ROLLING_HILL_PATH * 0.35, 2, seed + 5067, 2.0, 0.5);
+              let width = dMix(dConst(0.16), dConst(0.30), dSmoothstep(-0.4, 0.4, widthN));
+              let r = dConst(1.0) - dDiv(pathDist, vec4<f32>(max(width.x, 1e-4), width.yzw));
+              let envelope = dQuintic(dClamp(r, 0.0, 1.0));
+              let beadN = fbmAuto_d(unitDir, SCALE_ROLLING_HILL_BUMP * 1.35, 2, seed + 5108, 2.0, 0.5);
+              let beads = dSmoothstep(-0.15, 0.65, beadN);
+              let bumpN = fbmAuto_d(unitDir, SCALE_ROLLING_HILL_BUMP, 2, seed + 5100, 2.0, 0.5);
+              let bumps = dSmoothstep(-0.2, 0.7, bumpN);
+              let lump = dMul(dConst(0.30) + beads * 0.70, dConst(0.55) + bumps * 0.45);
+              let corridor = dPow(envelope, 1.25);
+              let h = dMul(corridor, lump);
+              totalHeight += dMul(dMul(h, rollingPresence) * (HEIGHT_ROLLING_HILLS / maxH), sizeMod) * hillAmp;
+          }
+      }
+      return totalHeight;
+  }
+
   // ==================== Lone Hills Surface ====================
   
   fn featureLoneHillsSurface(

@@ -38,6 +38,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const hasTileBindings = options?.hasTileBindings ?? false;
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
+  const analyticSlope = options?.analyticSlope === true;
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
     Math.min(1.0, Number.isFinite(options?.authoredSplatSourceMinProbability)
@@ -265,6 +266,33 @@ fn computeStableNormalSlopeSphere(face: i32, u: f32, v: f32) -> NormalSlope {
     return computeNormalSlopeSphere(face, u, v, stableStep, stableStep);
 }
 
+// Slope (sine of the tilt from local up) of the displaced sphere
+// dir * (1 + h * nd) given the height's tangential surface gradient; the same
+// geometry computeNormalSlopeSphere differentiates numerically.
+fn slopeFromSurfaceGradient(gSurf: vec3<f32>, h: f32) -> f32 {
+    let a = 1.0 + h * normalDisplacementScale();
+    let b = length(gSurf) * maxTerrainHeightM();
+    return b / max(sqrt(a * a + b * b), 1e-12);
+}
+
+struct BaseHeightSlope {
+    h: f32,
+    slope: f32,
+}
+
+// Base height and the LOD-stable slope that drives tile classification and
+// micro detail (cached in heightBase.g). slopeMode 'stencil': plain height plus
+// ~32 m central differences, five height evaluations. slopeMode 'analytic':
+// one dual-number evaluation of height and its exact gradient.
+fn baseHeightSlopeSphere(face: i32, u: f32, v: f32, unitDir: vec3<f32>) -> BaseHeightSlope {
+    var r: BaseHeightSlope;
+${analyticSlope ? `    let hd = calculateTerrainHeightD(uniforms.seed, unitDir);
+    r.h = hd.x;
+    r.slope = slopeFromSurfaceGradient(terrainSurfaceGradient(hd, unitDir), hd.x);` : `    r.h = calculateTerrainHeight(unitDir.x, unitDir.z, uniforms.seed, unitDir);
+    r.slope = computeStableNormalSlopeSphere(face, u, v).slope;`}
+    return r;
+}
+
 ${hasHeightBindings ? `
 fn sampleHeightAt(coord: vec2<i32>) -> f32 {
     return textureLoad(heightMap, coord, 0).r;
@@ -275,9 +303,9 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
     let wx = dir.x;
     let wy = dir.z;
 
-    let baseH = calculateTerrainHeight(wx, wy, uniforms.seed, dir);
-    let ns = computeStableNormalSlopeSphere(face, u, v);
-    let slope = ns.slope;
+    let hs = baseHeightSlopeSphere(face, u, v, dir);
+    let baseH = hs.h;
+    let slope = hs.slope;
 
     var tileType: u32 = determineTileType(baseH, slope, wx, wy, dir, uniforms.seed);
     let profile = getTerrainProfile();
@@ -1012,20 +1040,18 @@ if (uniforms.outputType == 0) {
         h = cellShapeAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 0.8, uniforms.seed + 2620, 0.28) * 0.4;
     } else if (uniforms.debugMode == 13) {
         h = cellRandomAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050) * 0.4;
-    } else {
-        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
-
+    } else if (uniforms.face >= 0) {
         // ── Compute LOD-stable slope ONCE here ───────────────────────
         // Passes 2 (tile) and 4 (micro) read this from heightBase.g
         // instead of each calling calculateTerrainHeight 4× for finite
         // differences. This is the single biggest win in the pipeline.
-        if (uniforms.face >= 0) {
-            let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
-            stableSlope = ns.slope;
-        } else {
-            let ns = computeNormalSlopeFlat(wx, wy);
-            stableSlope = ns.slope;
-        }
+        let hs = baseHeightSlopeSphere(uniforms.face, u, v, unitDir);
+        h = hs.h;
+        stableSlope = hs.slope;
+    } else {
+        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
+        let ns = computeNormalSlopeFlat(wx, wy);
+        stableSlope = ns.slope;
     }
     output = vec4<f32>(h, stableSlope, 0.0, 1.0);
 
@@ -1141,12 +1167,14 @@ if (uniforms.outputType == 0) {
     let h = heightSample.r;
     let slope = heightSample.g;
     ` : `
-    let h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
-    var slope: f32 = 0.0;
+    var h: f32;
+    var slope: f32;
     if (uniforms.face >= 0) {
-        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
-        slope = ns.slope;
+        let hs = baseHeightSlopeSphere(uniforms.face, u, v, unitDir);
+        h = hs.h;
+        slope = hs.slope;
     } else {
+        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
         let ns = computeNormalSlopeFlat(wx, wy);
         slope = ns.slope;
     }
@@ -1189,12 +1217,14 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
     let h = heightSample.r;
     let slope = heightSample.g;
     ` : `
-    let h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
-    var slope: f32 = 0.0;
+    var h: f32;
+    var slope: f32;
     if (uniforms.face >= 0) {
-        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
-        slope = ns.slope;
+        let hs = baseHeightSlopeSphere(uniforms.face, u, v, unitDir);
+        h = hs.h;
+        slope = hs.slope;
     } else {
+        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
         let ns = computeNormalSlopeFlat(wx, wy);
         slope = ns.slope;
     }

@@ -453,6 +453,213 @@ fn smoothMin(a: f32, b: f32, k: f32) -> f32 {
       return ridgedMultifractal3D(p, octaves, seed, lacunarity, gain, offset);
   }
   
+  // ==================== ANALYTIC DERIVATIVES ====================
+  // *_d variants return vec4(value, gradient). The value is computed with
+  // exactly the same expressions as the plain function (same result), the
+  // gradient analytically, so one call replaces a value plus finite-
+  // difference taps.
+
+  // Gradient vector selected by grad3(h, ...): grad3(h, x, y, z) equals
+  // dot(grad3vec(h), vec3(x, y, z)). Mirrors grad3's selection exactly,
+  // including its variant table (second axis: y for hh < 4, z for hh 12/14,
+  // x otherwise).
+  fn grad3vec(h: u32) -> vec3<f32> {
+      let hh = h & 15u;
+      let s1 = select(-1.0, 1.0, (hh & 1u) == 0u);
+      let s2 = select(-1.0, 1.0, (hh & 2u) == 0u);
+      var g = vec3<f32>(0.0);
+      if (hh < 8u) { g.x = s1; } else { g.y = s1; }
+      if (hh < 4u) {
+          g.y = g.y + s2;
+      } else if (hh == 12u || hh == 14u) {
+          g.z = g.z + s2;
+      } else {
+          g.x = g.x + s2;
+      }
+      return g;
+  }
+
+  // Derivative of the quintic fade: 30 t^2 (t - 1)^2.
+  fn fadeDeriv(t: f32) -> f32 {
+      let s = t - 1.0;
+      return 30.0 * t * t * s * s;
+  }
+
+  fn perlin3D_d(p: vec3<f32>, seed: i32) -> vec4<f32> {
+      let i = vec3<i32>(floor(p));
+      let f = fract(p);
+
+      let u = vec3<f32>(fade(f.x), fade(f.y), fade(f.z));
+      let du = vec3<f32>(fadeDeriv(f.x), fadeDeriv(f.y), fadeDeriv(f.z));
+
+      let h000 = hash3d(i, seed);
+      let h100 = hash3d(i + vec3<i32>(1, 0, 0), seed);
+      let h010 = hash3d(i + vec3<i32>(0, 1, 0), seed);
+      let h110 = hash3d(i + vec3<i32>(1, 1, 0), seed);
+      let h001 = hash3d(i + vec3<i32>(0, 0, 1), seed);
+      let h101 = hash3d(i + vec3<i32>(1, 0, 1), seed);
+      let h011 = hash3d(i + vec3<i32>(0, 1, 1), seed);
+      let h111 = hash3d(i + vec3<i32>(1, 1, 1), seed);
+
+      let g000 = grad3(h000, f.x,       f.y,       f.z);
+      let g100 = grad3(h100, f.x - 1.0, f.y,       f.z);
+      let g010 = grad3(h010, f.x,       f.y - 1.0, f.z);
+      let g110 = grad3(h110, f.x - 1.0, f.y - 1.0, f.z);
+      let g001 = grad3(h001, f.x,       f.y,       f.z - 1.0);
+      let g101 = grad3(h101, f.x - 1.0, f.y,       f.z - 1.0);
+      let g011 = grad3(h011, f.x,       f.y - 1.0, f.z - 1.0);
+      let g111 = grad3(h111, f.x - 1.0, f.y - 1.0, f.z - 1.0);
+
+      // Value: the same nested interpolation as perlin3D.
+      let x00 = mix(g000, g100, u.x);
+      let x10 = mix(g010, g110, u.x);
+      let x01 = mix(g001, g101, u.x);
+      let x11 = mix(g011, g111, u.x);
+      let y0 = mix(x00, x10, u.y);
+      let y1 = mix(x01, x11, u.y);
+      let value = mix(y0, y1, u.z);
+
+      // Gradient: the expanded trilinear form
+      //   n = k0 + k1 ux + k2 uy + k3 uz + k4 ux uy + k5 uy uz + k6 uz ux + k7 ux uy uz
+      // differentiated through both the corner dot products and the fades.
+      let k1 = g100 - g000;
+      let k2 = g010 - g000;
+      let k3 = g001 - g000;
+      let k4 = g000 - g100 - g010 + g110;
+      let k5 = g000 - g010 - g001 + g011;
+      let k6 = g000 - g100 - g001 + g101;
+      let k7 = -g000 + g100 + g010 - g110 + g001 - g101 - g011 + g111;
+
+      let G000 = grad3vec(h000);
+      let G100 = grad3vec(h100);
+      let G010 = grad3vec(h010);
+      let G110 = grad3vec(h110);
+      let G001 = grad3vec(h001);
+      let G101 = grad3vec(h101);
+      let G011 = grad3vec(h011);
+      let G111 = grad3vec(h111);
+      let K1 = G100 - G000;
+      let K2 = G010 - G000;
+      let K3 = G001 - G000;
+      let K4 = G000 - G100 - G010 + G110;
+      let K5 = G000 - G010 - G001 + G011;
+      let K6 = G000 - G100 - G001 + G101;
+      let K7 = -G000 + G100 + G010 - G110 + G001 - G101 - G011 + G111;
+
+      let grad = G000 + u.x * K1 + u.y * K2 + u.z * K3
+          + (u.x * u.y) * K4 + (u.y * u.z) * K5 + (u.z * u.x) * K6
+          + (u.x * u.y * u.z) * K7
+          + du * vec3<f32>(
+              k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z,
+              k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x,
+              k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y
+          );
+      return vec4<f32>(value, grad);
+  }
+
+  fn fbm3D_d(p: vec3<f32>, octaves: i32, seed: i32, lacunarity: f32, gain: f32) -> vec4<f32> {
+      var value = 0.0;
+      var grad = vec3<f32>(0.0);
+      var amp = 1.0;
+      var freq = 1.0;
+      var sumAmp = 0.0;
+
+      for (var i = 0; i < 16; i++) {
+          if (i >= octaves) { break; }
+          let n = perlin3D_d(p * freq, seed + i);
+          value += n.x * amp;
+          grad += n.yzw * (amp * freq);
+          sumAmp += amp;
+          amp *= gain;
+          freq *= lacunarity;
+      }
+
+      let norm = max(sumAmp, 1e-6);
+      return vec4<f32>(value / norm, grad / norm);
+  }
+
+  fn ridgedMultifractal3D_d(p: vec3<f32>, octaves: i32, seed: i32, lacunarity: f32, gain: f32, offset: f32) -> vec4<f32> {
+      var value = 0.0;
+      var grad = vec3<f32>(0.0);
+      var amplitude = 1.0;
+      var frequency = 1.0;
+      var weight = 1.0;
+      var weightGrad = vec3<f32>(0.0);
+
+      for (var i = 0; i < 16; i++) {
+          if (i >= octaves) { break; }
+
+          let n = perlin3D_d(p * frequency, seed + i);
+          // signal = (offset - |n|)^2 * weight
+          let base = offset - abs(n.x);
+          let baseGrad = -sign(n.x) * n.yzw * frequency;
+          let sq = base * base;
+          let sqGrad = 2.0 * base * baseGrad;
+          let signal = sq * weight;
+          let signalGrad = sqGrad * weight + sq * weightGrad;
+
+          let w = signal * amplitude;
+          let inRange = w > 0.0 && w < 1.0;
+          weight = clamp(w, 0.0, 1.0);
+          weightGrad = select(vec3<f32>(0.0), signalGrad * amplitude, inRange);
+          value += signal * amplitude;
+          grad += signalGrad * amplitude;
+
+          amplitude *= gain;
+          frequency *= lacunarity;
+      }
+
+      return vec4<f32>(value, grad);
+  }
+
+  // Metric FBM on the sphere with the gradient taken with respect to
+  // unitDir (a 3-vector; callers project it onto the tangent plane).
+  fn fbmMetricSphere3D_d(
+      unitDir: vec3<f32>,
+      scale: f32,
+      geologyScaleMeters: f32,
+      noiseReferenceRadiusM: f32,
+      octaves: i32,
+      seed: i32,
+      lacunarity: f32,
+      gain: f32
+  ) -> vec4<f32> {
+      let R = max(noiseReferenceRadiusM, 1.0);
+      let pM = sphereDomainPos(unitDir, R);
+      let w = wavelength_m(scale, geologyScaleMeters);
+      let p = rotateDomain3(pM / w);
+      let n = fbm3D_d(p, octaves, seed, lacunarity, gain);
+      return vec4<f32>(n.x, rotateDomain3Transpose(n.yzw) * (R / w));
+  }
+
+  fn ridgedMetricSphere3D_d(
+      unitDir: vec3<f32>,
+      scale: f32,
+      geologyScaleMeters: f32,
+      noiseReferenceRadiusM: f32,
+      octaves: i32,
+      seed: i32,
+      lacunarity: f32,
+      gain: f32,
+      offset: f32
+  ) -> vec4<f32> {
+      let R = max(noiseReferenceRadiusM, 1.0);
+      let pM = sphereDomainPos(unitDir, R);
+      let w = wavelength_m(scale, geologyScaleMeters);
+      let p = rotateDomain3(pM / w);
+      let n = ridgedMultifractal3D_d(p, octaves, seed, lacunarity, gain, offset);
+      return vec4<f32>(n.x, rotateDomain3Transpose(n.yzw) * (R / w));
+  }
+
+  // Transpose of rotateDomain3 (it is orthonormal, so also its inverse):
+  // pulls a gradient in rotated noise space back to the input space.
+  fn rotateDomain3Transpose(g: vec3<f32>) -> vec3<f32> {
+      let m0 = vec3<f32>( 0.00,  0.80,  0.60);
+      let m1 = vec3<f32>(-0.80,  0.36, -0.48);
+      let m2 = vec3<f32>(-0.60, -0.48,  0.64);
+      return m0 * g.x + m1 * g.y + m2 * g.z;
+  }
+
   // Metric ridged sampling for flat (2D)
   fn ridgedMetricFlat2D(
       wx_m: f32,

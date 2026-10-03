@@ -123,6 +123,81 @@ fn featureMountainsHeight(
     return h * mtnAmp * activity * rangeMask;
 }
 
+// Analytic-derivative twin of featureMountainsHeight (sphere). The domain
+// warp is skipped exactly as warpFlatForNoise skips it on the sphere.
+fn featureMountainsHeight_d(
+    unitDir: vec3<f32>, seed: i32,
+    regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes
+) -> vec4<f32> {
+    let mtnAmp = amp.mountainBase;
+    if (mtnAmp < 0.001) { return dConst(0.0); }
+
+    let maxH = maxTerrainHeightM();
+    let activity = dClamp(regional.tectonicActivity, 0.0, 1.0);
+    let ridgeSharp = clamp(profile.ridgeSharpness, 0.0, 1.0);
+
+    let rangeMask = rarityMaskAuto_d(
+        unitDir,
+        clampMacroScaleToPlanet(SCALE_MOUNTAIN_RANGES),
+        seed + 1650,
+        RARITY_UNCOMMON,
+        profile.rareBoost
+    );
+    if (rangeMask.x < 0.01) { return dConst(0.0); }
+
+    let pathN1 = fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_MOUNTAIN_RANGES), 2, seed + 1600, 2.0, 0.5);
+    let pathN2 = fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_MOUNTAIN_RANGES * 0.55), 2, seed + 1610, 2.0, 0.5);
+
+    let d1 = dSmoothAbs(pathN1, 0.015);
+    let d2 = dSmoothAbs(pathN2, 0.015);
+    let pathDist = dSmoothMin(d1, d2, 0.03);
+
+    let widthN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_RANGES * 0.2, 2, seed + 1620, 2.0, 0.5);
+    let foothillWidth = dMix(dConst(0.22), dConst(0.42), dSmoothstep(-0.4, 0.4, widthN));
+    let coreWidth = foothillWidth * 0.30;
+
+    // max(width, 1e-4) never binds: widths are >= 0.066.
+    let fhR = dConst(1.0) - dDiv(pathDist, vec4<f32>(max(foothillWidth.x, 1e-4), foothillWidth.yzw));
+    let foothillEnv = dQuintic(dClamp(fhR, 0.0, 1.0));
+
+    let coreR = dConst(1.0) - dDiv(pathDist, vec4<f32>(max(coreWidth.x, 1e-4), coreWidth.yzw));
+    let coreQ = dQuintic(dClamp(coreR, 0.0, 1.0));
+    let peakExpo = mix(1.8, 3.5, ridgeSharp);
+    let coreEnv = dPow(coreQ, peakExpo);
+
+    let peakN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_PEAKS, 2, seed + 1800, 2.0, 0.5);
+    let peaks = dSmoothstep(-0.15, 0.60, peakN);
+
+    let ridgeOffset = mix(0.6, 1.2, ridgeSharp);
+    let ridgeN = ridgedAuto_d(unitDir, SCALE_MOUNTAIN_RIDGES, 3, seed + 1700, 2.0, 0.5, ridgeOffset);
+
+    let detailN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_DETAIL, 2, seed + 1900, 2.0, 0.5);
+
+    let foothillH = foothillEnv * (HEIGHT_MOUNTAIN_FOOTHILL / maxH);
+    let coreMod = dMul(dConst(0.35) + peaks * 0.65, dConst(0.70) + ridgeN * 0.30);
+    let coreH = dMul(coreEnv, coreMod) * (HEIGHT_MOUNTAIN_CORE / maxH);
+    let detailH = dMul(foothillEnv, detailN) * (HEIGHT_MOUNTAIN_DETAIL / maxH);
+
+    var h = dSmoothMax(foothillH, coreH, 0.003) + detailH;
+    h = dMul(h, dPow(foothillEnv, 0.15));
+
+    let exceptMask = rarityMaskAuto_d(
+        unitDir,
+        clampMacroScaleToPlanet(SCALE_MOUNTAIN_RANGES * 1.5),
+        seed + 2200,
+        RARITY_EXCEPTIONAL,
+        profile.rareBoost
+    );
+    if (exceptMask.x > 0.01) {
+        let exceptN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_PEAKS * 1.5, 1, seed + 2220, 2.0, 0.5);
+        let exceptBump = loneHillDome_d(exceptN, 0.55);
+        let exceptH = dMul(exceptBump, exceptMask) * (HEIGHT_MOUNTAIN_EXCEPTIONAL / maxH);
+        h += dMul(exceptH, coreEnv);
+    }
+
+    return dMul(dMul(h * mtnAmp, activity), rangeMask);
+}
+
 // ==================== Mountain Surface ====================
 
 fn featureMountainsSurface(

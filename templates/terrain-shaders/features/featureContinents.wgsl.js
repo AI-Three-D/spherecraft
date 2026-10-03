@@ -115,5 +115,104 @@ info.baseElevation = landT * 1.0;  // (scale tuned later)
 
     return info;
 }
+
+// ---- Analytic-derivative twins (sphere only; see terrainCommon) ----
+
+struct RegionalInfoD {
+    isLand: bool,
+    landMask: vec4<f32>,
+    terrainType: vec4<f32>,
+    tectonicActivity: vec4<f32>,
+    ruggedness: vec4<f32>,
+    baseElevation: vec4<f32>,
+};
+
+fn getContinentalMask_d(unitDir: vec3<f32>, seed: i32, profile: TerrainProfile) -> vec4<f32> {
+    let enabled = clamp(uniforms.continentParams.x, 0.0, 1.0);
+    if (enabled < 0.01) {
+        return dConst(0.5);
+    }
+
+    let baseScale = clampMacroScaleToPlanet(SCALE_CONTINENTAL_BASE);
+    let detailScale = clampMacroScaleToPlanet(SCALE_CONTINENTAL_DETAIL);
+    let shelfScale = clampMacroScaleToPlanet(SCALE_CONTINENTAL_SHELF);
+
+    let warpStrength = 0.08 + 0.12 * profile.warpStrength;
+    let warp = warpDirAuto_d(unitDir, 2.0, warpStrength, seed + 140);
+    let dir = warp.d;
+
+    // Gradients below are with respect to the warped direction; pulled back
+    // to unitDir at the end.
+    let continental = fbmAuto_d(dir, baseScale, 5, seed + 100, 2.0, 0.5);
+    let detail = fbmAuto_d(dir, detailScale, 4, seed + 200, 2.1, 0.5) * 0.35;
+    let shelf = fbmAuto_d(dir, shelfScale, 3, seed + 250, 2.0, 0.55) * 0.2;
+
+    let coastalComplexity = clamp(uniforms.continentParams.w, 0.0, 1.0);
+    let coastScale = mix(detailScale * 0.5, detailScale * 2.5, coastalComplexity);
+    let coastNoise = fbmAuto_d(dir, coastScale, 3, seed + 260, 2.2, 0.5) * (0.15 + 0.35 * coastalComplexity);
+
+    let combined = continental + detail + shelf + coastNoise;
+
+    let avgSize = clamp(uniforms.continentParams.z, 0.05, 0.9);
+    let coverage = mix(0.25, 0.75, avgSize);
+    let threshold = coverageThreshold(coverage);
+    var mask = dSmoothstep(threshold - 0.12, threshold + 0.12, combined);
+
+    let basinMask = sparseMaskAuto_d(dir, baseScale * 0.55, seed + 320, 0.35, 0.18);
+    mask = dMul(mask, dMix(dConst(0.35), dConst(1.0), basinMask));
+
+    let result = dMix(dConst(0.5), mask, dConst(enabled));
+    return vec4<f32>(result.x, pullbackWarp(warp, result.yzw));
+}
+
+fn getRegionalCharacter_d(unitDir: vec3<f32>, seed: i32, profile: TerrainProfile) -> RegionalInfoD {
+    var info: RegionalInfoD;
+
+    if (smallPlanetMode()) {
+        let landNoise = fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_REGIONAL_ZONES), 4, seed + 7000, 2.0, 0.5);
+        let landMask = dSmoothstep(-0.18, 0.22, landNoise);
+
+        info.isLand = landMask.x > 0.4;
+        info.landMask = landMask;
+        info.baseElevation = (landMask - dConst(0.5)) * 1.6;
+
+        let rugged = dAbs(fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_REGIONAL_VARIATION), 3, seed + 7100, 2.0, 0.5));
+        info.ruggedness = rugged;
+        info.tectonicActivity = dClamp(dConst(0.3) + dAbs(landNoise) * 0.5, 0.0, 1.0);
+        info.terrainType = dClamp(dConst(0.25) + rugged * 0.6 + info.tectonicActivity * 0.2, 0.0, 1.2);
+        return info;
+    }
+
+    let continental = getContinentalMask_d(unitDir, seed, profile);
+    info.landMask = continental;
+    let landThreshold: f32 = 0.32;
+    let landT = dClamp((continental - dConst(landThreshold)) / (1.0 - landThreshold), 0.0, 1.0);
+    info.isLand = continental.x > landThreshold;
+    info.baseElevation = landT * 1.0;
+
+    let tectonicScale = clampMacroScaleToPlanet(SCALE_TECTONIC_PLATES);
+    let zoneScale = clampMacroScaleToPlanet(SCALE_REGIONAL_ZONES);
+    let variationScale = clampMacroScaleToPlanet(SCALE_REGIONAL_VARIATION);
+
+    let plateNoise = dAbs(fbmAuto_d(unitDir, tectonicScale, 4, seed + 300, 2.0, 0.5));
+    info.tectonicActivity = dSmoothstep(0.2, 0.75, plateNoise);
+
+    let zoneNoise = fbmAuto_d(unitDir, zoneScale, 4, seed + 400, 2.0, 0.5);
+    let variationNoise = fbmAuto_d(unitDir, variationScale, 3, seed + 500, 2.0, 0.5) * 0.4;
+    let ruggedNoise = fbmAuto_d(unitDir, variationScale * 0.8, 3, seed + 520, 2.0, 0.5);
+    info.ruggedness = dClamp(dSmoothstep(-0.2, 0.6, ruggedNoise), 0.0, 1.0);
+
+    let zoneBase = dClamp(zoneNoise * 0.5 + dConst(0.25), 0.0, 0.8);
+    let baseType = zoneBase + variationNoise * 0.15 + info.ruggedness * 0.25;
+    let tectonicBoost = info.tectonicActivity * 0.35 * max(profile.mountainBias, 0.2);
+    info.terrainType = dClamp(baseType + tectonicBoost, 0.0, 1.2);
+
+    let landInfluence = dSmoothstep(0.1, 0.5, continental);
+    info.terrainType = dMul(info.terrainType, landInfluence);
+    info.tectonicActivity = dMul(info.tectonicActivity, landInfluence);
+    info.ruggedness = dMul(info.ruggedness, landInfluence);
+
+    return info;
+}
 `;
 }

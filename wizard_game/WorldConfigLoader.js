@@ -288,6 +288,7 @@ export class WorldConfigLoader {
             if (terrain.impacts)              Object.assign(t.impacts,      terrain.impacts);
             if (terrain.water)                Object.assign(t.water,        terrain.water);
             if (terrain.surface)              Object.assign(t.surface,      terrain.surface);
+            if (terrain.slopeMode)            t.slopeMode = terrain.slopeMode === 'analytic' ? 'analytic' : 'stencil';
         }
 
         // ── Planet ───────────────────────────────────────────────────────

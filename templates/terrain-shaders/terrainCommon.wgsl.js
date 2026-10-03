@@ -180,6 +180,207 @@ fn warpFlatForNoise(wx: f32, wy: f32, unitDir: vec3<f32>, scale: f32, strength: 
     return warpFlatAuto(wx, wy, unitDir, scale, strength, seed);
 }
 
+// ==================== Analytic derivatives (sphere) ====================
+// Dual numbers vec4(value, gradient). The gradient is with respect to
+// unitDir (callers project it onto the tangent plane and scale to metres at
+// the end). Values are computed with the same expressions as the plain
+// functions they mirror; *_d twins exist only for the sphere (face >= 0).
+
+fn dConst(c: f32) -> vec4<f32> { return vec4<f32>(c, 0.0, 0.0, 0.0); }
+
+fn dMul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(a.x * b.x, a.x * b.yzw + b.x * a.yzw);
+}
+
+fn dSmoothstep(e0: f32, e1: f32, a: vec4<f32>) -> vec4<f32> {
+    let t = clamp((a.x - e0) / (e1 - e0), 0.0, 1.0);
+    return vec4<f32>(smoothstep(e0, e1, a.x), a.yzw * (6.0 * t * (1.0 - t) / (e1 - e0)));
+}
+
+fn dClamp(a: vec4<f32>, lo: f32, hi: f32) -> vec4<f32> {
+    let inside = a.x > lo && a.x < hi;
+    return vec4<f32>(clamp(a.x, lo, hi), select(vec3<f32>(0.0), a.yzw, inside));
+}
+
+fn dAbs(a: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(abs(a.x), a.yzw * sign(a.x));
+}
+
+// mix(a, b, t) with t a dual.
+fn dMix(a: vec4<f32>, b: vec4<f32>, t: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(
+        mix(a.x, b.x, t.x),
+        a.yzw * (1.0 - t.x) + b.yzw * t.x + (b.x - a.x) * t.yzw
+    );
+}
+
+// pow(a, p) for a >= 0. The derivative is taken as 0 at a = 0 (it is
+// unbounded there for p < 1, where the value is 0 and flat on one side).
+fn dPow(a: vec4<f32>, p: f32) -> vec4<f32> {
+    let v = pow(a.x, p);
+    let d = select(0.0, p * pow(a.x, p - 1.0), a.x > 0.0);
+    return vec4<f32>(v, a.yzw * d);
+}
+
+// Mirrors smoothAbs.
+fn dSmoothAbs(a: vec4<f32>, k: f32) -> vec4<f32> {
+    let r = sqrt(a.x * a.x + k * k);
+    return vec4<f32>(r - k, a.yzw * (a.x / r));
+}
+
+// Mirrors smoothMin: mix(b, a, h) - k h (1 - h), h = clamp(0.5 + 0.5 (b - a) / k).
+fn dSmoothMin(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
+    let hRaw = 0.5 + 0.5 * (b.x - a.x) / k;
+    let h = clamp(hRaw, 0.0, 1.0);
+    let value = mix(b.x, a.x, h) - k * h * (1.0 - h);
+    let dfdh = (a.x - b.x) - k + 2.0 * k * h;
+    let dh = select(vec3<f32>(0.0), (b.yzw - a.yzw) * (0.5 / k), hRaw > 0.0 && hRaw < 1.0);
+    return vec4<f32>(value, b.yzw * (1.0 - h) + a.yzw * h + dfdh * dh);
+}
+
+// Mirrors smoothMax exactly as written: mix(b, a, h) + kk h (1 - h),
+// h = clamp(0.5 + 0.5 (b - a) / kk). (Note: away from a ~ b that selects
+// the SMALLER argument; kept identical so heights do not change.)
+fn dSmoothMax(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
+    let kk = max(k, 1e-4);
+    let hRaw = 0.5 + 0.5 * (b.x - a.x) / kk;
+    let h = clamp(hRaw, 0.0, 1.0);
+    let value = mix(b.x, a.x, h) + kk * h * (1.0 - h);
+    let dfdh = (a.x - b.x) + kk - 2.0 * kk * h;
+    let dh = select(vec3<f32>(0.0), (b.yzw - a.yzw) * (0.5 / kk), hRaw > 0.0 && hRaw < 1.0);
+    return vec4<f32>(value, b.yzw * (1.0 - h) + a.yzw * h + dfdh * dh);
+}
+
+// Quintic smoothstep core c^3 (c (6c - 15) + 10) of a clamped dual.
+fn dQuintic(c: vec4<f32>) -> vec4<f32> {
+    let x = c.x;
+    let s = x - 1.0;
+    return vec4<f32>(x * x * x * (x * (x * 6.0 - 15.0) + 10.0), c.yzw * (30.0 * x * x * s * s));
+}
+
+// a / b for duals.
+fn dDiv(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(a.x / b.x, (a.yzw * b.x - a.x * b.yzw) / (b.x * b.x));
+}
+
+// max(a, b) for duals (the larger value's dual).
+fn dMax(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    return select(b, a, a.x >= b.x);
+}
+
+// smoothstep(e0, e1, x) where the edges are duals too.
+fn dSmoothstepDual(e0: vec4<f32>, e1: vec4<f32>, x: vec4<f32>) -> vec4<f32> {
+    let w = e1.x - e0.x;
+    let tRaw = (x.x - e0.x) / w;
+    let t = clamp(tRaw, 0.0, 1.0);
+    let inside = tRaw > 0.0 && tRaw < 1.0;
+    let dt = ((x.yzw - e0.yzw) - (x.x - e0.x) * (e1.yzw - e0.yzw) / w) / w;
+    return vec4<f32>(smoothstep(e0.x, e1.x, x.x), select(vec3<f32>(0.0), 6.0 * t * (1.0 - t) * dt, inside));
+}
+
+fn dSin(a: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(sin(a.x), a.yzw * cos(a.x));
+}
+
+fn dTanh(a: vec4<f32>) -> vec4<f32> {
+    let t = tanh(a.x);
+    return vec4<f32>(t, a.yzw * (1.0 - t * t));
+}
+
+fn fbmAuto_d(unitDir: vec3<f32>, scale: f32, octaves: i32, seed: i32, lac: f32, gain: f32) -> vec4<f32> {
+    return fbmMetricSphere3D_d(unitDir, scale, GEOLOGY_SCALE, noiseReferenceRadiusM(), octaves, seed, lac, gain);
+}
+
+fn ridgedAuto_d(unitDir: vec3<f32>, scale: f32, octaves: i32, seed: i32, lac: f32, gain: f32, offset: f32) -> vec4<f32> {
+    return ridgedMetricSphere3D_d(unitDir, scale, GEOLOGY_SCALE, noiseReferenceRadiusM(), octaves, seed, lac, gain, offset);
+}
+
+// A warped direction d = normalize(n + strength * w(n)), w = three fbm
+// fields, kept with what is needed to pull a gradient at d back to n.
+struct WarpedDir {
+    d: vec3<f32>,
+    invLen: f32,
+    strength: f32,
+    ga: vec3<f32>,   // gradients of the three warp components
+    gb: vec3<f32>,
+    gc: vec3<f32>,
+};
+
+fn makeWarpedDir(unitDir: vec3<f32>, wa: vec4<f32>, wb: vec4<f32>, wc: vec4<f32>, strength: f32) -> WarpedDir {
+    var out: WarpedDir;
+    let v = unitDir + vec3<f32>(wa.x, wb.x, wc.x) * strength;
+    out.d = normalize(v);
+    out.invLen = 1.0 / length(v);
+    out.strength = strength;
+    out.ga = wa.yzw;
+    out.gb = wb.yzw;
+    out.gc = wc.yzw;
+    return out;
+}
+
+// Chain rule through d = normalize(n + s w(n)):
+// grad_n = (I + s Jw)^T (I - d d^T) / |v| grad_d.
+fn pullbackWarp(w: WarpedDir, gradAtD: vec3<f32>) -> vec3<f32> {
+    let q = (gradAtD - w.d * dot(w.d, gradAtD)) * w.invLen;
+    return q + w.strength * (q.x * w.ga + q.y * w.gb + q.z * w.gc);
+}
+
+// Mirrors warpDirAuto (sphere).
+fn warpDirAuto_d(unitDir: vec3<f32>, scale: f32, strength: f32, seed: i32) -> WarpedDir {
+    let wa = fbmAuto_d(unitDir, scale, 3, seed, 2.0, 0.5);
+    let wb = fbmAuto_d(unitDir, scale, 3, seed + 11, 2.0, 0.5);
+    let wc = fbmAuto_d(unitDir, scale, 3, seed + 23, 2.0, 0.5);
+    return makeWarpedDir(unitDir, wa, wb, wc, strength);
+}
+
+// Mirrors rarityNoiseAuto (sphere).
+fn rarityNoiseAuto_d(unitDir: vec3<f32>, scale: f32, seed: i32) -> vec4<f32> {
+    let warpScale = scale * 1.7;
+    let wa = fbmAuto_d(unitDir, warpScale, 2, seed + 500, 2.0, 0.5);
+    let wb = fbmAuto_d(unitDir, warpScale, 2, seed + 501, 2.0, 0.5);
+    let wc = fbmAuto_d(unitDir, warpScale, 2, seed + 502, 2.0, 0.5);
+    let w = makeWarpedDir(unitDir, wa, wb, wc, 0.3);
+    let n = fbmAuto_d(w.d, scale, 3, seed, 2.0, 0.5);
+    return vec4<f32>(n.x, pullbackWarp(w, n.yzw));
+}
+
+// Mirrors rarityMaskAuto (sphere).
+fn rarityMaskAuto_d(unitDir: vec3<f32>, scale: f32, seed: i32, tier: i32, rareBoost: f32) -> vec4<f32> {
+    let coverage = rarityCoverage(scale, tier, rareBoost);
+    let n = rarityNoiseAuto_d(unitDir, scale, seed);
+    let threshold = coverageThreshold(coverage);
+    let soft = RARITY_SOFTNESS * 2.0;
+    return dSmoothstep(threshold - soft, threshold + soft, n);
+}
+
+// Mirrors sparseMaskAuto (sphere).
+fn sparseMaskAuto_d(unitDir: vec3<f32>, scale: f32, seed: i32, coverage: f32, softness: f32) -> vec4<f32> {
+    let n = fbmAuto_d(unitDir, scale, 3, seed, 2.0, 0.5);
+    let t = coverageThreshold(coverage);
+    return dSmoothstep(t - softness, t + softness, n);
+}
+
+// Mirrors softClampMax / softClampMin / softClampHeight.
+fn softClampMax_d(value: vec4<f32>, limit: f32, knee: f32) -> vec4<f32> {
+    let k = max(knee, 0.001);
+    if (value.x <= limit - k) { return value; }
+    let excess = (value - dConst(limit - k)) / k;
+    return dConst(limit - k) + dTanh(excess) * k;
+}
+
+fn softClampMin_d(value: vec4<f32>, limit: f32, knee: f32) -> vec4<f32> {
+    let k = max(knee, 0.001);
+    if (value.x >= limit + k) { return value; }
+    let deficit = (dConst(limit + k) - value) / k;
+    return dConst(limit + k) - dTanh(deficit) * k;
+}
+
+fn softClampHeight_d(value: vec4<f32>, minH: f32, maxH: f32, knee: f32) -> vec4<f32> {
+    var h = softClampMax_d(value, maxH, knee);
+    h = softClampMin_d(h, minH, knee);
+    return h;
+}
+
 // ==================== Coverage / rarity helpers ====================
 
 fn coverageThreshold(coverage: f32) -> f32 {

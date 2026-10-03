@@ -251,5 +251,67 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
 
     return softClampHeight(height, -1.1, 1.8, 0.25);
 }
+
+// Height and its gradient in one evaluation (sphere, face >= 0):
+// vec4(height, d height / d unitDir). Same terms, order and land/ocean
+// skips as calculateTerrainHeight, so the height matches it (to float
+// rounding where the compiler fuses differently); the gradient is analytic.
+// Callers project the gradient onto the tangent plane (terrainSurfaceGradient).
+fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
+    let profile = getTerrainProfile();
+    let amp = getTerrainAmplitudes(profile);
+
+    let regional = getRegionalCharacter_d(unitDir, seed, profile);
+    let landBlend = dSmoothstep(0.15, 0.45, regional.landMask);
+    let mountainness = dSmoothstep(0.55, 0.8, regional.terrainType);
+
+    var landHeight = dConst(0.0);
+    if (landBlend.x > 0.0) {
+        landHeight = regional.baseElevation * amp.continentalShelf;
+
+        if (mountainness.x > 0.01) {
+            landHeight += dMul(featureMountainsHeight_d(unitDir, seed, regional, profile, amp), mountainness);
+        }
+
+        // micro2 (DISP_MICRO2 = 0) contributes nothing; see featureMesoDetail_d.
+        let mesoRoughness = dMax(regional.terrainType, regional.ruggedness * 0.5);
+        let meso = featureMesoDetail_d(unitDir, seed, profile, mesoRoughness);
+        let mesoMaxH = maxTerrainHeightM();
+        landHeight += meso.meso1 * (DISP_MESO1 / mesoMaxH);
+        landHeight += meso.meso2 * (DISP_MESO2 / mesoMaxH);
+        landHeight += meso.meso3 * (DISP_MESO3 / mesoMaxH);
+
+        landHeight += featureHighlandsHeight_d(unitDir, seed, regional, profile, amp);
+        landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp);
+        landHeight += featureRiverHeight_d(unitDir, seed, regional, profile, amp);
+        landHeight += featureErosionSeedsHeight_d(unitDir, seed, regional, profile, amp);
+
+        let interior = dSmoothstep(0.55, 0.85, regional.landMask);
+        let detailBudget = amp.microGain + 0.005;
+        landHeight += interior * detailBudget;
+    }
+    if (landBlend.x >= 1.0) {
+        return softClampHeight_d(landHeight, -1.1, 1.8, 0.25);
+    }
+
+    let n500m = fbmAuto_d(unitDir, 0.5, 4, seed + 1000, 2.0, 0.5);
+    let n100m = fbmAuto_d(unitDir, 0.1, 4, seed + 2000, 2.0, 0.5);
+    let n20m = fbmAuto_d(unitDir, 0.02, 3, seed + 3000, 2.0, 0.5);
+    let oceanBase = uniforms.waterParams.y + amp.oceanDepth;
+    let oceanVariation = n500m * 0.05 + n100m * 0.02 + n20m * 0.005;
+    let oceanHeight = dConst(oceanBase) + oceanVariation;
+
+    let height = dMix(oceanHeight, landHeight, landBlend);
+    return softClampHeight_d(height, -1.1, 1.8, 0.25);
+}
+
+// Tangential gradient of a terrainHeightD-style dual, in normalized height
+// per metre of surface at sea level: drop the radial part of d/d(unitDir)
+// and divide by the planet's noise reference radius (unitDir moves 1/R per
+// metre along the surface).
+fn terrainSurfaceGradient(hd: vec4<f32>, unitDir: vec3<f32>) -> vec3<f32> {
+    let g = hd.yzw;
+    return (g - unitDir * dot(unitDir, g)) / noiseReferenceRadiusM();
+}
 `;
 }

@@ -259,5 +259,100 @@ fn featureErosionSeedsHeight(
 
     return h;
 }
+
+// Analytic-derivative twin of featureErosionSeedsHeight (sphere). Candidate
+// selection is the plain code (value-only regional gating); the gradient
+// follows the distance to the chosen candidate and the boundary noise.
+fn featureErosionSeedsHeight_d(
+    unitDir: vec3<f32>, seed: i32,
+    regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes
+) -> vec4<f32> {
+    if (uniforms.riverAnchor.w < 0.5) { return dConst(0.0); }
+
+    let R = noiseReferenceRadiusM();
+    let refDir = normalize(uniforms.riverAnchor.xyz);
+    let refForward = normalize(uniforms.riverChannelDir.xyz);
+    let refRight = cross(refDir, refForward);
+
+    let refPos = refDir * R;
+    let realPos = unitDir * R;
+    let delta = realPos - refPos;
+    let localX = dot(delta, refRight);
+    let localZ = dot(delta, refForward);
+
+    let regionX = i32(floor(localX / EROSION_REGION_SIZE_M));
+    let regionY = i32(floor(localZ / EROSION_REGION_SIZE_M));
+
+    var bestDist: f32 = 1e18;
+    var found = false;
+    var bestRadiusScale: f32 = 1.0;
+    var bestDepthScale: f32 = 1.0;
+    var bestBlobAmpFactor: f32 = 1.0;
+    var bestJx: f32 = 0.0;
+    var bestJy: f32 = 0.0;
+
+    const BLOB_REJECT_MARGIN: f32 = ${EROSION_BLOB_REJECT_MARGIN.toFixed(2)};
+
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let rx = regionX + dx;
+            let ry = regionY + dy;
+            let h = erosionSeedHash4(rx, ry, seed + ${EROSION_HASH_SALT_POSITION});
+            let hShape = erosionSeedHash4(rx, ry, seed + ${EROSION_HASH_SALT_SHAPE});
+            let blobAmpFactor = mix(EROSION_BLOB_AMP_FACTOR_MIN, EROSION_BLOB_AMP_FACTOR_MAX, hShape.y);
+            let jx = (f32(rx) + 0.25 + h.x * 0.5) * EROSION_REGION_SIZE_M;
+            let jy = (f32(ry) + 0.25 + h.y * 0.5) * EROSION_REGION_SIZE_M;
+            let sizeFactor = mix(EROSION_SIZE_FACTOR_MIN, EROSION_SIZE_FACTOR_MAX, h.z);
+            var radiusScale: f32 = sizeFactor;
+            var depthScale: f32 = sizeFactor;
+            for (var ci = 0; ci < uniforms.erosionConfirmedCount; ci = ci + 1) {
+                let entry = uniforms.erosionConfirmed[ci];
+                if (i32(entry.x) == rx && i32(entry.y) == ry) {
+                    radiusScale = radiusScale * entry.z;
+                    depthScale = depthScale * entry.w;
+                }
+            }
+            let dist = distance(vec2<f32>(localX, localZ), vec2<f32>(jx, jy));
+            if (dist > EROSION_NUDGE_RADIUS_M * radiusScale * BLOB_REJECT_MARGIN) { continue; }
+            let candPos = refPos + refRight * jx + refForward * jy;
+            let candDir = normalize(candPos);
+            let candRegional = getRegionalCharacter(candDir.x, candDir.z, candDir, seed, profile);
+            if (!candRegional.isLand) { continue; }
+            if (candRegional.ruggedness > EROSION_RUGGEDNESS_MAX) { continue; }
+            if (dist < bestDist) {
+                bestDist = dist;
+                found = true;
+                bestRadiusScale = radiusScale;
+                bestDepthScale = depthScale;
+                bestBlobAmpFactor = blobAmpFactor;
+                bestJx = jx;
+                bestJy = jy;
+            }
+        }
+    }
+
+    if (!found) { return dConst(0.0); }
+
+    // d(localX)/d(unitDir) = R refRight, d(localZ)/d(unitDir) = R refForward.
+    let distGrad = ((localX - bestJx) * refRight + (localZ - bestJy) * refForward) * (R / max(bestDist, 1e-3));
+    let bestDistD = vec4<f32>(bestDist, distGrad);
+
+    let effRadius = EROSION_NUDGE_RADIUS_M * bestRadiusScale;
+    let noiseScaleKm = max(effRadius * EROSION_BLOB_NOISE_SCALE_FACTOR, 1.0) / 1000.0;
+    let boundaryNoise = fbmAuto_d(unitDir, noiseScaleKm, 3, seed + ${EROSION_BLOB_NOISE_SEED_OFFSET}, 2.0, 0.5);
+    let warpedDist = bestDistD - boundaryNoise * effRadius * EROSION_BLOB_NOISE_AMPLITUDE_FACTOR * bestBlobAmpFactor;
+
+    let wallRadius = effRadius * EROSION_WALL_RADIUS_FRACTION;
+    let basinT = dClamp(warpedDist / wallRadius, 0.0, 1.0);
+    let basinShape = dConst(1.0) - dMul(basinT, basinT);
+    let normalizedDepth = (EROSION_NUDGE_DEPTH_M * bestDepthScale) / max(maxTerrainHeightM(), 1.0);
+    var h = basinShape * (-normalizedDepth);
+
+    let rimT = dClamp((warpedDist - dConst(wallRadius)) / max(effRadius - wallRadius, 1.0), 0.0, 1.0);
+    let rimShape = dSin(rimT * 3.14159265);
+    h = h + rimShape * (normalizedDepth * EROSION_RIM_BOOST_FRACTION);
+
+    return h;
+}
 `;
 }

@@ -9,6 +9,15 @@ export class TerrainGenerationConfig {
         // Base generator selection (used by WebGPU terrain shader assembly).
         this.baseGenerator = options.baseGenerator ?? 'earthLike';
 
+        // How the base pass derives the slope that drives tile classification
+        // and micro detail (heightBase.g):
+        //   'stencil'  - central differences over a ~32 m stencil (5 height
+        //                evaluations per texel; the long-standing behaviour).
+        //   'analytic' - one dual-number evaluation giving height and its exact
+        //                surface gradient. About half the cost; slopes are not
+        //                low-pass filtered, so small steep features read steeper.
+        this.slopeMode = options.slopeMode === 'analytic' ? 'analytic' : 'stencil';
+
         // High-level noise profile knobs (shader expects these in _pad3/_pad4).
         const profile = options.noiseProfile ?? {};
         this.noiseProfile = {

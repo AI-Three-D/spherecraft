@@ -115,5 +115,56 @@ fn featureHighlandsHeight(
 
     return totalHeight;
 }
+
+// ---- Analytic-derivative twins (sphere) ----
+
+fn highlandProfile_d(noise: vec4<f32>, threshold: f32, roughness: vec4<f32>) -> vec4<f32> {
+    let t = (noise - dConst(threshold)) / max(1.0 - threshold, 0.001);
+    if (t.x <= 0.0) { return dConst(0.0); }
+    let c = dClamp(t, 0.0, 1.0);
+    let transWidth = dMix(dConst(0.50), dConst(0.12), dClamp(roughness, 0.0, 1.0));
+    let x = dClamp(dDiv(c, transWidth), 0.0, 1.0);
+    return dQuintic(x);
+}
+
+// One highland tier: gated noise, plateau rise, plateau undulation.
+fn highlandTier_d(
+    unitDir: vec3<f32>, scale: f32, seed: i32, gate: f32, threshold: f32,
+    plateauScale: f32, plateauOctaves: i32, base: f32, wobble: f32,
+    roughness: vec4<f32>, heightNorm: f32
+) -> vec4<f32> {
+    let n = fbmAuto_d(unitDir, scale, 2, seed, 2.0, 0.5);
+    if (n.x <= gate) { return dConst(0.0); }
+    let rise = highlandProfile_d(n, threshold, roughness);
+    let plateauNoise = fbmAuto_d(unitDir, plateauScale, plateauOctaves, seed + 20, 2.0, 0.5);
+    let h = dMul(rise, dConst(base) + plateauNoise * wobble);
+    return h * heightNorm;
+}
+
+// Analytic-derivative twin of featureHighlandsHeight (sphere). Tier gates
+// and constants match the plain function one for one.
+fn featureHighlandsHeight_d(
+    unitDir: vec3<f32>, seed: i32,
+    regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes
+) -> vec4<f32> {
+    let highAmp = amp.highlandsHeight;
+    if (highAmp < 0.001) { return dConst(0.0); }
+
+    let maxH = maxTerrainHeightM();
+    let roughness = dMax(regional.terrainType, regional.ruggedness * 0.5);
+
+    var totalHeight = dConst(0.0);
+    totalHeight += highlandTier_d(unitDir, SCALE_HIGHLAND_COMMON, seed + 6000, 0.0, 0.15,
+        SCALE_HIGHLAND_COMMON * 0.2, 2, 0.9, 0.1, roughness, HEIGHT_HIGHLAND_COMMON / maxH) * highAmp;
+    totalHeight += highlandTier_d(unitDir, SCALE_HIGHLAND_UNCOMMON, seed + 6100, 0.10, 0.30,
+        SCALE_HIGHLAND_UNCOMMON * 0.15, 2, 0.92, 0.08, roughness, HEIGHT_HIGHLAND_UNCOMMON / maxH) * highAmp;
+    totalHeight += highlandTier_d(unitDir, clampMacroScaleToPlanet(SCALE_HIGHLAND_RARE), seed + 6200, 0.25, 0.45,
+        SCALE_HIGHLAND_RARE * 0.12, 2, 0.93, 0.07, roughness, HEIGHT_HIGHLAND_RARE / maxH) * highAmp;
+    totalHeight += highlandTier_d(unitDir, clampMacroScaleToPlanet(SCALE_HIGHLAND_VERY_RARE), seed + 6300, 0.35, 0.55,
+        SCALE_HIGHLAND_VERY_RARE * 0.10, 2, 0.94, 0.06, roughness, HEIGHT_HIGHLAND_VERY_RARE / maxH) * highAmp;
+    totalHeight += highlandTier_d(unitDir, clampMacroScaleToPlanet(SCALE_HIGHLAND_EXCEPTIONAL), seed + 6400, 0.45, 0.65,
+        SCALE_HIGHLAND_EXCEPTIONAL * 0.08, 3, 0.95, 0.05, roughness, HEIGHT_HIGHLAND_EXCEPTIONAL / maxH) * highAmp;
+    return totalHeight;
+}
 `;
 }

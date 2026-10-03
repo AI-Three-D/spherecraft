@@ -259,5 +259,35 @@ fn featureMesoDetail(
 
     return vec4<f32>(micro2, meso1, meso2, meso3);
 }
+
+// Analytic-derivative twin of featureMesoDetail (sphere): meso1-3 as duals.
+// micro2 is not mirrored: its amplitude DISP_MICRO2 is 0 (see
+// featureMesoDetail). Mirror it before giving DISP_MICRO2 a non-zero value.
+struct MesoDetailD {
+    meso1: vec4<f32>,
+    meso2: vec4<f32>,
+    meso3: vec4<f32>,
+};
+
+fn featureMesoDetail_d(
+    unitDir: vec3<f32>, seed: i32,
+    profile: TerrainProfile, roughness: vec4<f32>
+) -> MesoDetailD {
+    let roughMod = dSmoothstep(0.05, 0.40, roughness);
+
+    let localVar = fbmAuto_d(unitDir, 1.5, 2, seed + 9500, 2.0, 0.5);
+    let quietPatch = dMix(dConst(0.20), dConst(1.0), dSmoothstep(-0.4, 0.2, localVar));
+
+    let regionVar = fbmAuto_d(unitDir, 10.0, 2, seed + 9550, 2.0, 0.5);
+    let regionMod = dMix(dConst(0.35), dConst(1.0), dSmoothstep(-0.3, 0.3, regionVar));
+
+    let _mod = dMul(dMul(roughMod, quietPatch), regionMod) * clamp(profile.microGain, 0.0, 5.0);
+
+    var out: MesoDetailD;
+    out.meso1 = dMul(fbmAuto_d(unitDir, SCALE_MESO1, 2, seed + 9700, 2.0, 0.48), _mod);
+    out.meso2 = dMul(fbmAuto_d(unitDir, SCALE_MESO2, 3, seed + 9800, 2.0, 0.50), _mod);
+    out.meso3 = dMul(fbmAuto_d(unitDir, SCALE_MESO3, 3, seed + 9900, 2.0, 0.50), _mod);
+    return out;
+}
 `;
 }
