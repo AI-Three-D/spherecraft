@@ -528,6 +528,8 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     // Draw the solid tier's flat color when the instance's drawn layer has
     // no detail material (instance flag bit 4, see instanceBufferBuilder).
     const enableIncompleteSourceFlat = options.enableIncompleteSourceFlat === true;
+    // Baked flat-tier color array (group 1 binding 10), mipmapped by the pool.
+    const hasCoarseColorTexture = options.hasCoarseColorTexture === true;
     // World-size averaging window of the solid-tier color (0 = legacy 35 %
     // of the tile) and the cube-face size used to convert it to tile UV.
     const solidColorAverageWindowMeters = Number.isFinite(options.solidColorAverageWindowMeters)
@@ -543,6 +545,9 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const debugMode =  Number.isFinite(options.debugMode) ? Math.floor(options.debugMode) : 0;
     const lod = Number.isFinite(options.lod) ? Math.max(0, Math.floor(options.lod)) : 0;
     const terrainShaderConfig = options.terrainShaderConfig || {};
+    const solidColorSampleGrid = Number.isFinite(terrainShaderConfig.solidColorSampleGrid)
+        ? Math.max(1, Math.min(8, Math.floor(terrainShaderConfig.solidColorSampleGrid)))
+        : 8;
     const fixedMaterialFamiliesEnabled = options.fixedMaterialFamiliesEnabled === true;
     const fixedMaterialFamilyWGSL = buildFixedMaterialFamilyFragmentWGSL(options.tileCategories || []);
     const coarseCategoryColorWGSL = buildCoarseCategoryColorFragmentWGSL(
@@ -982,10 +987,13 @@ const TIER_EDGE_BLEND_WIDTH: f32 = ${tierEdgeBlendWidth.toFixed(4)};
 const TIER_EDGE_BLEND_STRENGTH: f32 = ${tierEdgeBlendStrength.toFixed(4)};
 const ENABLE_TIER_DISTANCE_FADE: bool = ${enableTierDistanceFade ? 'true' : 'false'};
 const ENABLE_INCOMPLETE_SOURCE_FLAT: bool = ${enableIncompleteSourceFlat ? 'true' : 'false'};
+const HAS_COARSE_COLOR_TEXTURE: bool = ${hasCoarseColorTexture ? 'true' : 'false'};
 // Averaging window of sampleChunkAverageCoarseColor, in metres of ground
 // (0 = legacy: 35 % of the tile's own UV span), and the cube-face size used
 // to convert it into each instance's tile UV.
 const SOLID_COLOR_WINDOW_METERS: f32 = ${solidColorAverageWindowMeters.toFixed(2)};
+// Samples per axis of the flat-color average (N x N texture loads/pixel).
+const SOLID_COLOR_SAMPLE_GRID: i32 = ${solidColorSampleGrid};
 const FACE_SIZE_METERS: f32 = ${faceSizeMeters.toFixed(2)};
 const HAS_RESOLVED_COLOR_TEXTURE: bool = ${includeResolvedColorBinding ? 'true' : 'false'};
 const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
@@ -1089,6 +1097,7 @@ struct FragmentUniforms {
 ${terrainAOBindingDecl}
 ${groundFieldBindingDecl}
 ${resolvedColorBindingDecl}
+${hasCoarseColorTexture ? `@group(1) @binding(10) var coarseColorTexture: ${chunkTextureType};` : ''}
 
 @group(2) @binding(0) var atlasTexture: texture_2d_array<f32>;
 @group(2) @binding(1) var level2AtlasTexture: texture_2d_array<f32>;
@@ -1309,7 +1318,8 @@ fn sampleChunkTileId(input: FragmentInput, layer: i32) -> f32 {
 // splat/resolvedColor dependency added. 64 texture loads/fragment is fine
 // for this diagnostic; the persistent fix should precompute a small
 // per-tile color texture instead of doing this live every frame.
-fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> {
+${hasCoarseColorTexture ? '' : `
+fn sampleChunkAverageCoarseColorLegacy(input: FragmentInput, layer: i32) -> vec3<f32> {
     // NOTE: fragUniforms.chunkWidth is NOT a subdivision count — it's
     // chunkSizeMeters (world-space meters) reused as-is for an unrelated
     // texel-snap in sampleChunkTileId. Using 1/chunkWidth here as a window
@@ -1331,9 +1341,9 @@ fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> 
     let center = input.vUv;
 
     var colorSum = vec3<f32>(0.0, 0.0, 0.0);
-    for (var gy: i32 = 0; gy < 8; gy = gy + 1) {
-        for (var gx: i32 = 0; gx < 8; gx = gx + 1) {
-            let cellCenter = (vec2<f32>(f32(gx), f32(gy)) + vec2<f32>(0.5, 0.5)) / 8.0 - vec2<f32>(0.5, 0.5);
+    for (var gy: i32 = 0; gy < SOLID_COLOR_SAMPLE_GRID; gy = gy + 1) {
+        for (var gx: i32 = 0; gx < SOLID_COLOR_SAMPLE_GRID; gx = gx + 1) {
+            let cellCenter = (vec2<f32>(f32(gx), f32(gy)) + vec2<f32>(0.5, 0.5)) / f32(SOLID_COLOR_SAMPLE_GRID) - vec2<f32>(0.5, 0.5);
             // Per-sample jitter (self-contained hash, no dependency on any
             // other function's declaration order) so the sample positions
             // aren't a perfectly regular grid — a rigid grid beats against
@@ -1360,9 +1370,11 @@ fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> 
             colorSum = colorSum + coarseTileColor(tileId);
         }
     }
-    return colorSum / 64.0;
+    return colorSum / f32(SOLID_COLOR_SAMPLE_GRID * SOLID_COLOR_SAMPLE_GRID);
 }
 
+
+`}
 // In-tile ramp into the solid-color tier, for the LOD just before it.
 // 1.0 exactly at a tile edge whose neighbour is drawn by a coarser geometry
 // LOD (and therefore renders the solid tier), falling smoothly to 0.0 at
@@ -1415,6 +1427,25 @@ fn computeTierDistanceFade(input: FragmentInput) -> f32 {
         return 0.0;
     }
     return smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
+}
+
+// Flat (solid-tier) color around this fragment: the baked per-tile
+// window average when available, else the per-pixel average (legacy).
+fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> {
+    var windowSize = 0.35;
+    if (SOLID_COLOR_WINDOW_METERS > 0.0 && FACE_SIZE_METERS > 0.0) {
+        let tileMeters = max(input.vFaceInfo.z * FACE_SIZE_METERS, 1.0);
+        windowSize = SOLID_COLOR_WINDOW_METERS / tileMeters;
+    }
+    let center = input.vUv;
+${hasCoarseColorTexture ? `
+    // Baked path: the generator stored this exact window average per texel
+    // (TileGenerator._runCoarseColorPass), so one bilinear sample replaces
+    // the 64 tile-id loads per pixel of the legacy path below.
+    let coarseUv = applyChunkAtlasUV(center, coarseColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    return textureSampleLevel(coarseColorTexture, chunkLinearSampler, coarseUv, layer, 0.0).rgb;
+` : ''}
+${hasCoarseColorTexture ? '' : '    return sampleChunkAverageCoarseColorLegacy(input, layer);'}
 }
 
 fn debugHash12(p: vec2<f32>) -> f32 {
@@ -3238,6 +3269,11 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
             c = vec3<f32>(0.05, 0.10, 0.45);
         }
         return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
+    // Mode 105: the flat (solid-tier) color as used, unlit (baked texture,
+    // or the per-pixel average when solidColorBakedTexture is false).
+    if (debugMode == 105) {
+        return vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
     }
     if (debugMode == 103) {
         let d = input.vDistanceToCamera;

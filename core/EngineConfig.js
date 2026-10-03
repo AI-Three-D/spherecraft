@@ -188,6 +188,19 @@ export class EngineConfig {
         ),
         // World-size averaging window (m) of the solid-tier color; 0 keeps
         // the legacy window of 35 % of each tile.
+        // Samples per axis of the flat-color average in the terrain shader
+        // (N x N texture loads per pixel, 1-8).
+        // Bake the flat-tier color per tile (mipmapped) instead of
+        // averaging tile ids per pixel; false = per-pixel average.
+        solidColorBakedTexture: requireBool(
+          terrainShader.solidColorBakedTexture ?? true,
+          'rendering.terrainShader.solidColorBakedTexture'
+        ),
+        solidColorSampleGrid: requireInt(
+          terrainShader.solidColorSampleGrid ?? 8,
+          'rendering.terrainShader.solidColorSampleGrid',
+          1
+        ),
         solidColorAverageWindowMeters: requireNumber(
           terrainShader.solidColorAverageWindowMeters ?? 0,
           'rendering.terrainShader.solidColorAverageWindowMeters'

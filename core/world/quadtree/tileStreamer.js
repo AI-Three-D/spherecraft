@@ -261,7 +261,10 @@ class TileArrayPool {
             type === 'splatValid';
         const neverMipmapByType = (type) =>
             wantsNearestByType(type) ||
-            type === 'resolvedColor';
+            type === 'resolvedColor' ||
+            // Already a ~1.4 km window average and only magnified on
+            // screen (LOD selection keeps texels >= 1 px): no mips needed.
+            type === 'coarseColor';
 
         const fullMipCount = Math.floor(Math.log2(tileSize)) + 1;
 
@@ -738,6 +741,16 @@ export class TileStreamer {
         // geometry-only placeholder. false = previous behaviour (nearest
         // resident layer, finished or not).
         this._preferCompleteMaterialLayers = options.preferCompleteMaterialLayers !== false;
+        // Refinement reads the resident layer's height/tile ids instead of
+        // recomputing them (saves the base-height, classification and
+        // micro-height passes per refinement). false = recompute as before.
+        this._reuseResidentGeometryForRefinement = options.reuseResidentGeometryForRefinement !== false;
+        // AO bake / scatter commit queues are drained by the asset streamer
+        // only. When it is disabled nothing drains them, so don't fill them.
+        this._assetCommitQueuesEnabled = options.assetCommitQueuesEnabled !== false;
+        this._tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : null;
+        this._coarseColorWindowMeters = options.coarseColorWindowMeters;
+        this._coarseColorFaceSizeMeters = options.coarseColorFaceSizeMeters;
         this._tilesStartedWindowCount = 0;
 
         // ── Phase 0 instrumentation state (plan §0) ──────────────────────
@@ -1034,6 +1047,9 @@ drainScatterCommitQueue() {
             quadtreeMaxDepth: this.quadtreeGPU?.maxDepth,
             maxGeomLOD: this.quadtreeGPU?.maxGeomLOD,
             enableSplat:    this.enableSplat,
+            tileCategories: this._tileCategories,
+            coarseColorWindowMeters: this._coarseColorWindowMeters,
+            coarseColorFaceSizeMeters: this._coarseColorFaceSizeMeters,
             logStats:       this._logStatsEnabled,
             onGenerationTelemetry: (telemetry) => this._finalizeFenceTelemetry(telemetry)
         });
@@ -1295,6 +1311,7 @@ this._freshnessSkipCount = 0;
             : [];
         const { count: copyCount, textures: flushedTextures } = this.arrayPool.flushPendingCopies(copyBudget);
         this._copyOperationsWindowCount += copyCount;
+        this._markGeometryCopiesSubmitted(flushedCopies, copyCount);
         this._markMaterialCompleteForFlushedCopies(flushedCopies, copyCount);
         let copyFencePromise = null;
         if (copyCount > 0) {
@@ -1340,6 +1357,21 @@ this._freshnessSkipCount = 0;
                 .catch(resolveFence);
         }
         this._pendingDestructions.push(entry);
+    }
+
+    // Record that a tile's layer now holds its geometry outputs (the copy was
+    // submitted to the queue). Its refinement may then read height and tile
+    // ids straight from the layer instead of recomputing them; refinements
+    // queued earlier fall back to recomputing (see _queueRefinement).
+    _markGeometryCopiesSubmitted(flushedCopies, copyCount) {
+        const count = Math.min(copyCount, flushedCopies.length);
+        for (let i = 0; i < count; i++) {
+            const entry = flushedCopies[i];
+            if (!entry) continue;
+            const key = this._layerToKey.get(entry.layer);
+            const info = key ? this._tileInfo.get(key) : null;
+            if (info && info.layer === entry.layer) info.geometryInLayer = true;
+        }
     }
 
     // Raise the GPU "material complete" flag for tiles whose finishing copy
@@ -2158,7 +2190,7 @@ async _commitTile(tileAddr, textures, telemetry = null) {
     // bake immediately. Scatter needs the actual scatter texture, which is
     // now a refinement-stage output (plan §2) — its commit queue push moves
     // to _commitRefinement, once real (non-zero-filled) scatter data exists.
-    this._aoCommitQueue.push({
+    if (this._assetCommitQueuesEnabled) this._aoCommitQueue.push({
         face: tileAddr.face, depth: tileAddr.depth,
         x: tileAddr.x, y: tileAddr.y, layer,
     });
@@ -2294,7 +2326,14 @@ _queueRefinement(tileAddr) {
         }
 
         try {
-            const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, refinementTypes);
+            // Reuse the resident layer's height/tile ids as inputs when its
+            // geometry copy has been submitted (queue order then guarantees
+            // the refinement reads the finished data).
+            const residentInfo = this._tileInfo.get(key);
+            const geometrySource = (this._reuseResidentGeometryForRefinement && residentInfo?.geometryInLayer)
+                ? { arrayPool: this.arrayPool, layer: residentInfo.layer }
+                : null;
+            const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, refinementTypes, geometrySource);
             if (Number.isFinite(telemetry.computeSubmitted)) {
                 this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
             }
@@ -2411,7 +2450,7 @@ _commitRefinement(tileAddr, textures, telemetry = null) {
     }
     info.lastUsed = performance.now();
 
-    if (this._refinementTypesFor(tileAddr).includes('scatter')) {
+    if (this._assetCommitQueuesEnabled && this._refinementTypesFor(tileAddr).includes('scatter')) {
         this._scatterCommitQueue.push({
             face: tileAddr.face, depth: tileAddr.depth,
             x: tileAddr.x, y: tileAddr.y, layer: info.layer,

@@ -55,6 +55,18 @@ export class TerrainAOBaker {
         const tree = { ...this.TERRAIN_AO_CONFIG.tree, ...(c.tree || {}) };
         const gc   = { ...this.TERRAIN_AO_CONFIG.groundCover, ...(c.groundCover || {}) };
 
+        // Coarsest geometry LOD that still gets an AO bake. Tree / ground-
+        // cover contact AO (radius ~2-8 m) is invisible on coarse tiles
+        // (64 texels across 1-16+ km), so their bakes are skipped and the
+        // layer is reset to "no occlusion" instead (see enqueueBake). The
+        // terrain shader drops AO sampling for the same LODs.
+        const maxLod = Number.isFinite(c.maxLod) ? Math.max(0, Math.floor(c.maxLod)) : null;
+        const quadtreeMaxDepth = Number.isFinite(opts.quadtreeMaxDepth) ? opts.quadtreeMaxDepth : null;
+        this._minBakeDepth = (maxLod !== null && quadtreeMaxDepth !== null)
+            ? Math.max(0, quadtreeMaxDepth - maxLod)
+            : 0;
+        this._skippedBakeCount = 0;
+
         this._cfg = {
             enabled:          c.enabled !== false,
             resolution:       Math.max(16, c.resolution | 0),
@@ -142,7 +154,29 @@ export class TerrainAOBaker {
         for (let i = this._queue.length - 1; i >= 0; i--) {
             if (this._queue[i].layer === layer) { this._queue.splice(i, 1); }
         }
+        if (depth < this._minBakeDepth) {
+            // Coarser than maxLod: no bake. Reset the layer to 1.0 (no
+            // occlusion) so a previous occupant's AO can't show through,
+            // e.g. on finer tiles drawn from this layer while loading.
+            this._clearLayerToNoOcclusion(layer);
+            this._skippedBakeCount++;
+            return;
+        }
         this._queue.push({ face, depth, tileX, tileY, layer });
+    }
+
+    _clearLayerToNoOcclusion(layer) {
+        if (!this._aoTexture || !Number.isInteger(layer) || layer < 0 || layer >= this._tilePoolSize) return;
+        const res = this._cfg.resolution;
+        if (!this._noOcclusionData || this._noOcclusionData.length !== res * res) {
+            this._noOcclusionData = new Float32Array(res * res).fill(1.0);
+        }
+        this.device.queue.writeTexture(
+            { texture: this._aoTexture, origin: { x: 0, y: 0, z: layer } },
+            this._noOcclusionData,
+            { bytesPerRow: res * 4, rowsPerImage: res },
+            { width: res, height: res, depthOrArrayLayers: 1 }
+        );
     }
 
 update(encoder, scatterGPU, tileGPU) {

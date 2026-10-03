@@ -1056,7 +1056,7 @@ compileShader(material) {
     // Two terrain materials differing only in normal format must get
     // distinct pipelines.
     const chunkFmts = material._chunkTextureFormats || {};
-    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','splatValid','macro','terrainAO','groundField','resolvedColor']
+    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','splatValid','macro','terrainAO','groundField','resolvedColor','coarseColor']
         .map(t => chunkFmts[t] || '')
         .join('|');
 
@@ -1248,6 +1248,7 @@ _createBindGroupLayouts(material) {
     const includeTerrainAO = !!material.defines?.USE_TERRAIN_AO;
     const includeGroundField = !!material.defines?.USE_GROUND_FIELD;
     const includeResolvedColor = !!material.defines?.USE_RESOLVED_COLOR_TEXTURE || !!material.defines?.USE_RESOLVED_COLOR;
+    const includeCoarseColor = !!material.defines?.USE_COARSE_COLOR_TEXTURE;
     // Full per-slot format map. Missing keys default to rgba32float.
     const chunkFormats = material._chunkTextureFormats || {};
     return this._createTerrainBindGroupLayouts(
@@ -1255,7 +1256,8 @@ _createBindGroupLayouts(material) {
         includeTerrainAO,
         includeGroundField,
         includeResolvedColor,
-        chunkFormats
+        chunkFormats,
+        includeCoarseColor
     );
 }
 
@@ -1265,7 +1267,8 @@ _createTerrainBindGroupLayouts(
     includeTerrainAO = false,
     includeGroundField = false,
     includeResolvedColor = false,
-    chunkFormats = {}
+    chunkFormats = {},
+    includeCoarseColor = false
 ) {
     const layouts = [];
     const chunkViewDimension = useArrayTextures ? '2d-array' : '2d';
@@ -1324,6 +1327,12 @@ const slotSampleType = (type) =>
         group1Entries.push({
             binding: 9, visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: slotSampleType('resolvedColor'), viewDimension: chunkViewDimension }
+        });
+    }
+    if (includeCoarseColor) {
+        group1Entries.push({
+            binding: 10, visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: slotSampleType('coarseColor'), viewDimension: chunkViewDimension }
         });
     }
     layouts.push(this.device.createBindGroupLayout({ entries: group1Entries }));
@@ -1818,6 +1827,9 @@ _createTerrainBindGroups(material, uniforms, geometry) {
         }
         if (material.defines?.USE_RESOLVED_COLOR_TEXTURE || material.defines?.USE_RESOLVED_COLOR) {
             chunkTextureBindings.push({ name: 'resolvedColorTexture', binding: 9 });
+        }
+        if (material.defines?.USE_COARSE_COLOR_TEXTURE) {
+            chunkTextureBindings.push({ name: 'coarseColorTexture', binding: 10 });
         }
         const chunkTextureNames = chunkTextureBindings.map(entry => entry.name);
         const g1Key = this._buildTextureKey(uniforms, chunkTextureNames);

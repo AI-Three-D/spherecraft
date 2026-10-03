@@ -688,6 +688,21 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 return record;
             },
 
+        // Same bindings as _getSplatPalettePipelineForFormat, entry point
+        // mainReduce: one 64-thread workgroup per palette texel (dispatch
+        // paletteWidth x paletteHeight workgroups). See splatPaletteCompute.
+        _getSplatPaletteReducePipelineForFormat(tileFormat = 'r32float') {
+                const base = this._getSplatPalettePipelineForFormat(tileFormat);
+                if (base.reducePipeline) return { pipeline: base.reducePipeline, bindGroupLayout: base.bindGroupLayout };
+                base.reducePipeline = this.device.createComputePipeline({
+                    layout: this.device.createPipelineLayout({
+                        bindGroupLayouts: [base.bindGroupLayout]
+                    }),
+                    compute: { module: this.splatPaletteShaderModule, entryPoint: 'mainReduce' }
+                });
+                return { pipeline: base.reducePipeline, bindGroupLayout: base.bindGroupLayout };
+            },
+
         _getSplatValidityPipelineCacheKey(indexFormat = 'rgba8unorm', maskFormat = 'rgba8unorm') {
                 return `i:${gpuFormatSampleType(indexFormat || 'rgba8unorm')}|m:${maskFormat || 'rgba8unorm'}`;
             },

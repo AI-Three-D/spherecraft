@@ -33,6 +33,7 @@ export class QuadtreeTileManager {
         this.planetConfig = options.planetConfig || null;
         this.terrainGenerator = options.terrainGenerator || null;
         this.textureManager = options.textureManager || null;
+        this.tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : null;
         this._initialized = false;
         this._maxGeomLOD = 14;
 
@@ -171,9 +172,25 @@ export class QuadtreeTileManager {
             terrainShaderConfig.resolvedColorEnabled !== false &&
             resolvedColorStartLod >= 0 &&
             hasResolvedColorInputs;
-        const requiredTypes = ['height', 'normal', 'tile', 'splatData', 'scatter', 'climate'];
+        // scatter and climate feed only the asset streamer (trees, ground
+        // cover, AO and ground-field bakes). With features.streamedAssets
+        // off nothing reads them, so they are neither generated nor given
+        // pool layers (and flat-tier tiles then need no refinement at all).
+        const streamedAssetsEnabled = this.engineConfig?.features?.streamedAssets !== false;
+        const requiredTypes = streamedAssetsEnabled
+            ? ['height', 'normal', 'tile', 'splatData', 'scatter', 'climate']
+            : ['height', 'normal', 'tile', 'splatData'];
         if (enableResolvedColor) {
             requiredTypes.push('resolvedColor');
+        }
+        // Baked flat-tier color: one mipmapped texel lookup in the terrain
+        // shader instead of a 64-sample average per pixel.
+        const enableCoarseColor =
+            terrainShaderConfig.solidColorTierEnabled === true &&
+            terrainShaderConfig.solidColorBakedTexture !== false &&
+            Array.isArray(this.tileCategories) && this.tileCategories.length > 0;
+        if (enableCoarseColor) {
+            requiredTypes.push('coarseColor');
         }
         const textureFormats = {
             height:    'r32float',
@@ -185,6 +202,7 @@ export class QuadtreeTileManager {
             resolvedColor: 'rgba8unorm',
             scatter:   'r8unorm',
             climate:   'rgba8unorm',
+            coarseColor: 'rgba8unorm',
             ...(qt.textureFormats || {})
         };
         this.tileStreamer = new TileStreamer(
@@ -207,6 +225,12 @@ export class QuadtreeTileManager {
               feedbackReadbackRingSize: qt.feedbackReadbackRingSize,
               gpuBackpressureLimit: qt.gpuBackpressureLimit ?? 4,   // NEW
               preferCompleteMaterialLayers: qt.preferCompleteMaterialLayers !== false,
+              // AO / scatter commit queues are drained only by the asset
+              // streamer; without it they would grow forever.
+              assetCommitQueuesEnabled: streamedAssetsEnabled,
+              tileCategories: this.tileCategories,
+              coarseColorWindowMeters: terrainShaderConfig.solidColorAverageWindowMeters ?? 0,
+              coarseColorFaceSizeMeters: 2 * (this.planetConfig?.radius ?? 0),
               // Flat solid-color tier start: those tiles skip the splat and
               // prebaked-color refinement outputs they never draw.
               solidTierStartLod: (() => {

@@ -22,6 +22,7 @@
 
 import { Logger } from '../../../shared/Logger.js';
 import { gpuFormatBytesPerTexel } from '../../renderer/resources/texture.js';
+import { buildCoarseCategoryColorFragmentWGSL } from '../tileCategoryColors.js';
 
 function alignTo(value, alignment) {
     return Math.ceil(value / alignment) * alignment;
@@ -111,6 +112,13 @@ this._maxGpuFencesObserved = 0;
         this.textureSize  = options.textureSize     ?? 1024;
         this.requiredTypes = options.requiredTypes  ?? ['height', 'normal', 'tile'];
         this.textureManager = options.textureManager ?? null;
+        // Tile categories for the baked flat-tier color ('coarseColor').
+        this.tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : null;
+        this._coarseColorPipeline = null;
+        // Window (m) of the baked flat-color average and the cube-face size,
+        // matching the terrain shader's solidColorAverageWindowMeters.
+        this.coarseColorWindowMeters = Number.isFinite(options.coarseColorWindowMeters) ? options.coarseColorWindowMeters : 0;
+        this.coarseColorFaceSizeMeters = Number.isFinite(options.coarseColorFaceSizeMeters) ? options.coarseColorFaceSizeMeters : 0;
         this.enableSplat  = options.enableSplat     ?? this.requiredTypes.includes('splatData');
         this.splatKernelSize = options.splatKernelSize ?? 3;
         this.textureFormats = {
@@ -170,14 +178,19 @@ this._maxGpuFencesObserved = 0;
      * @returns {Promise<object>}  Resolves to { height, normal, tile, macro, splatData }
      *                              Each value is a Texture resource.
      */
-    async generateTile(tileAddr, telemetry = null, outputTypes = null) {
+    // geometrySource (optional, refinement only): { arrayPool, layer } of the
+    // tile's resident pool layer. Its height and tile-id layers are copied
+    // in as the refinement's inputs instead of re-running the base-height,
+    // tile-classification and final-height passes. The caller must ensure
+    // the layer's geometry copy has already been submitted to the queue.
+    async generateTile(tileAddr, telemetry = null, outputTypes = null, geometrySource = null) {
         const key = tileAddr.toString();
 
         // Reuse in-progress generation
         const existing = this._inProgress.get(key);
         if (existing) return existing;
 
-        const promise = this._generateTileInternal(tileAddr, { telemetry, requiredTypes: outputTypes })
+        const promise = this._generateTileInternal(tileAddr, { telemetry, requiredTypes: outputTypes, geometrySource })
             .finally(() => this._inProgress.delete(key));
 
         this._inProgress.set(key, promise);
@@ -282,7 +295,27 @@ this._maxGpuFencesObserved = 0;
             || (this.enableSplat && requiredTypes.includes('splatData'))
             || requiredTypes.includes('scatter');
         const needsTile = requiredTypes.includes('tile') || needsFinalHeight;
-        const needsBaseHeight = needsTile;
+
+        // Refinement of a resident tile: copy its final height and tile ids
+        // from its pool layer instead of recomputing them (base height +
+        // stable slope, biome classification, micro height). Byte-identical
+        // inputs: the pool layer holds exactly what the geometry pass made.
+        const geometrySource = options?.geometrySource ?? null;
+        const sourcePool = geometrySource?.arrayPool ?? null;
+        const reuseResidentGeometry =
+            !!sourcePool &&
+            Number.isInteger(geometrySource.layer) &&
+            needsTile &&
+            !requiredTypes.includes('height') &&
+            !requiredTypes.includes('normal') &&
+            !requiredTypes.includes('tile') &&
+            !requiredTypes.includes('macro') &&
+            sourcePool.textures?.get?.('height') &&
+            sourcePool.textures?.get?.('tile') &&
+            sourcePool.formats?.height === heightFormat &&
+            sourcePool.formats?.tile === tileFormat &&
+            sourcePool.tileSize === this.textureSize;
+        const needsBaseHeight = needsTile && !reuseResidentGeometry;
     
         let gpuHeightBase = null;
         let gpuHeight = null;
@@ -290,17 +323,42 @@ this._maxGpuFencesObserved = 0;
         let gpuTile = null;
         let gpuMacro = null;
         let tileTarget = null;
-    
+        // Intermediate inputs created here but not returned to the caller;
+        // destroyed once the GPU work is done (previously leaked).
+        const internalInputs = [];
+
+        if (reuseResidentGeometry) {
+            gpuHeight = this.terrainGen.createSampledGPUTexture(
+                this.textureSize, this.textureSize, heightFormat);
+            gpuTile = this.terrainGen.createSampledGPUTexture(
+                this.textureSize, this.textureSize, tileFormat);
+            internalInputs.push(gpuHeight, gpuTile);
+            const device = this.terrainGen.device;
+            const enc = device.createCommandEncoder({ label: 'RefinementInputsFromPool' });
+            const extent = { width: this.textureSize, height: this.textureSize, depthOrArrayLayers: 1 };
+            enc.copyTextureToTexture(
+                { texture: sourcePool.textures.get('height'), origin: { x: 0, y: 0, z: geometrySource.layer } },
+                { texture: gpuHeight },
+                extent
+            );
+            enc.copyTextureToTexture(
+                { texture: sourcePool.textures.get('tile'), origin: { x: 0, y: 0, z: geometrySource.layer } },
+                { texture: gpuTile },
+                extent
+            );
+            device.queue.submit([enc.finish()]);
+        }
+
         if (needsBaseHeight) {
             gpuHeightBase = this._createGPUTexture(
                 this.textureSize, this.textureSize, 'rgba32float');
         }
-        if (needsTile) {
+        if (needsTile && !reuseResidentGeometry) {
             tileTarget = this.terrainGen.createStorageBackedOutputTarget(
                 this.textureSize, this.textureSize, tileFormat);
             gpuTile = tileTarget.finalTexture;
         }
-        if (needsFinalHeight) {
+        if (needsFinalHeight && !reuseResidentGeometry) {
             gpuHeight = this._createGPUTexture(
                 this.textureSize, this.textureSize, heightFormat);
         }
@@ -323,7 +381,7 @@ this._maxGpuFencesObserved = 0;
                 textureSize: this.textureSize
             });
         }
-        if (gpuTile) {
+        if (gpuTile && !reuseResidentGeometry) {
             terrainPasses.push({
                 outputType: 2,
                 texture: tileTarget.storageTexture,
@@ -335,7 +393,7 @@ this._maxGpuFencesObserved = 0;
                 resolveToFormat: tileTarget.requiresResolve ? tileTarget.finalFormat : null
             });
         }
-        if (gpuHeight) {
+        if (gpuHeight && !reuseResidentGeometry) {
             terrainPasses.push({
                 outputType: 4,
                 texture: gpuHeight,
@@ -484,6 +542,14 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
             splatPass
         });
 
+        // Baked flat-tier color from the tile ids just generated (queue order
+        // puts this after the tile pass). The pool builds its mip chain on
+        // copy, so the terrain shader averages with one filtered sample.
+        let gpuCoarseColor = null;
+        if (requiredTypes.includes('coarseColor') && gpuTile) {
+            gpuCoarseColor = this._runCoarseColorPass(gpuTile, tileAddr);
+        }
+
         if (telemetry) telemetry.computeSubmitted = performance.now();
         // runBatchedTilePasses always submits once for terrainPasses, plus a
         // second, separate submission for the splat pass when present (see
@@ -499,6 +565,16 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
         const temporaryTextures = [];
         if (gpuHeightBase && !includeBaseHeight) {
             temporaryTextures.push(gpuHeightBase);
+        }
+        // Final height / tile ids made only as inputs (not requested) were
+        // never destroyed before. The splat debug analysis may still read
+        // the tile ids of its first few tiles right after the GPU finishes,
+        // so these are released slightly later than the other temporaries.
+        if (gpuHeight && !requiredTypes.includes('height') && !internalInputs.includes(gpuHeight)) {
+            internalInputs.push(gpuHeight);
+        }
+        if (gpuTile && !requiredTypes.includes('tile') && !internalInputs.includes(gpuTile)) {
+            internalInputs.push(gpuTile);
         }
         if (tileTarget?.requiresResolve) {
             temporaryTextures.push(tileTarget.storageTexture);
@@ -530,6 +606,13 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
                     for (const tempTex of temporaryTextures) {
                         if (!tempTex) continue;
                         try { tempTex.destroy(); } catch { /* ignore cleanup failure */ }
+                    }
+                    if (internalInputs.length > 0) {
+                        setTimeout(() => {
+                            for (const tex of internalInputs) {
+                                try { tex.destroy(); } catch { /* ignore cleanup failure */ }
+                            }
+                        }, 1000);
                     }
                 })
                 .catch(() => { releaseFence(); finalizeTelemetry(); });
@@ -588,6 +671,10 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
             textures.climate = this._wrapGPUTexture(
                 gpuClimate, this.textureSize, climateFormat, false);
         }
+        if (gpuCoarseColor) {
+            textures.coarseColor = this._wrapGPUTexture(
+                gpuCoarseColor, this.textureSize, 'rgba8unorm', false);
+        }
     
         // ── Update stats ──────────────────────────────────────────
         if (trackStats) {
@@ -608,6 +695,104 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
     /**
      * Create a GPU-only texture (no CPU-side data).
      */
+    // Flat (solid-tier) color per texel: the same 8x8 jittered window
+    // average of category colors that the terrain shader used to compute
+    // per pixel (sampleChunkAverageCoarseColorLegacy), evaluated once per
+    // texel here instead — same window in metres, same jitter seed (world
+    // position), same clamping at the tile edge — so the shader reads it with
+    // one bilinear sample. Category colors come from the same WGSL function
+    // as the shader (buildCoarseCategoryColorFragmentWGSL with the same
+    // categories and atlas average colors).
+    _runCoarseColorPass(tileTexture, tileAddr) {
+        const device = this.terrainGen?.device;
+        if (!device || !this.tileCategories) return null;
+        if (!this._coarseColorPipeline) {
+            const averageColors = this.textureManager?.getCategoryAverageColorMap?.(this.tileCategories) || null;
+            const code = `
+${buildCoarseCategoryColorFragmentWGSL(this.tileCategories, averageColors)}
+
+struct CoarseBakeParams {
+    windowUV: f32,
+    tileX: f32,
+    tileY: f32,
+    tileUVSize: f32,
+    faceSize: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+};
+
+@group(0) @binding(0) var tileIds: texture_2d<f32>;
+@group(0) @binding(1) var outColor: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> params: CoarseBakeParams;
+
+const GRID: i32 = 8;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = textureDimensions(outColor);
+    if (gid.x >= size.x || gid.y >= size.y) { return; }
+    let maxCoord = vec2<i32>(textureDimensions(tileIds)) - vec2<i32>(1);
+    // Tile textures are vertex-aligned: texel i sits at tile UV i/(size-1).
+    let denom = max(f32(size.x) - 1.0, 1.0);
+    let center = vec2<f32>(gid.xy) / denom;
+    let worldPos = (vec2<f32>(params.tileX, params.tileY) + center) * params.tileUVSize * params.faceSize;
+    var colorSum = vec3<f32>(0.0);
+    for (var gy: i32 = 0; gy < GRID; gy = gy + 1) {
+        for (var gx: i32 = 0; gx < GRID; gx = gx + 1) {
+            let cellCenter = (vec2<f32>(f32(gx), f32(gy)) + vec2<f32>(0.5, 0.5)) / f32(GRID) - vec2<f32>(0.5, 0.5);
+            let jitterSeed = worldPos * 0.173 + vec2<f32>(f32(gx) * 12.9898, f32(gy) * 78.233);
+            let jx = fract(sin(dot(jitterSeed, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
+            let jy = fract(sin(dot(jitterSeed, vec2<f32>(39.346, 11.135))) * 24634.6345) - 0.5;
+            let sampleUV = center + (cellCenter + vec2<f32>(jx, jy) * 0.5) * params.windowUV;
+            let coord = clamp(vec2<i32>(floor(sampleUV * denom + 0.5)), vec2<i32>(0), maxCoord);
+            let s = textureLoad(tileIds, coord, 0);
+            let tileId = select(s.r * 255.0, s.r, s.r > 1.0);
+            colorSum = colorSum + coarseTileColor(tileId);
+        }
+    }
+    textureStore(outColor, vec2<i32>(gid.xy), vec4<f32>(colorSum / f32(GRID * GRID), 1.0));
+}
+`;
+            this._coarseColorPipeline = device.createComputePipeline({
+                label: 'CoarseColorBake',
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ label: 'CoarseColorBake', code }), entryPoint: 'main' }
+            });
+            this._coarseColorUsesAverageColors = !!averageColors;
+            this._coarseColorParams = device.createBuffer({
+                label: 'CoarseColorBakeParams',
+                size: 32,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+        }
+        const gridSize = 1 << tileAddr.depth;
+        const faceSize = this.coarseColorFaceSizeMeters;
+        const tileMeters = faceSize > 0 ? faceSize / gridSize : 0;
+        const windowUV = (this.coarseColorWindowMeters > 0 && tileMeters > 0)
+            ? this.coarseColorWindowMeters / tileMeters
+            : 0.35;
+        device.queue.writeBuffer(this._coarseColorParams, 0, new Float32Array([
+            windowUV, tileAddr.x, tileAddr.y, 1 / gridSize, faceSize, 0, 0, 0
+        ]));
+        const out = this._createGPUTexture(this.textureSize, this.textureSize, 'rgba8unorm');
+        const enc = device.createCommandEncoder({ label: 'CoarseColorBake' });
+        const pass = enc.beginComputePass({ label: 'CoarseColorBake' });
+        pass.setPipeline(this._coarseColorPipeline);
+        pass.setBindGroup(0, device.createBindGroup({
+            layout: this._coarseColorPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: tileTexture.createView() },
+                { binding: 1, resource: out.createView() },
+                { binding: 2, resource: { buffer: this._coarseColorParams } }
+            ]
+        }));
+        pass.dispatchWorkgroups(Math.ceil(this.textureSize / 8), Math.ceil(this.textureSize / 8));
+        pass.end();
+        device.queue.submit([enc.finish()]);
+        return out;
+    }
+
     _createGPUTexture(width, height, format) {
         return this.terrainGen.createGPUTexture(width, height, format || 'rgba8unorm');
     }

@@ -207,6 +207,9 @@ export class Frontend {
                 planetConfig: this.planetConfig,
                 terrainGenerator: terrainGenerator,
                 textureManager: this.textureManager,
+                // For the baked coarse (flat-tier) color, which must use the
+                // same category colors as the terrain shader.
+                tileCategories: this._terrainTheme.TILE_CATEGORIES,
             });
             await this.quadtreeTileManager.initialize();
            

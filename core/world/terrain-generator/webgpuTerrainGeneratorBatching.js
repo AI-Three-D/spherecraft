@@ -474,6 +474,19 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 }
 
                 const paddedTileMap = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
+                // Shared padded base height (.r = height, .g = LOD-stable
+                // slope), computed once by output type 0 over the padded
+                // region. The tile-id and smooth-splat source passes below
+                // then read it through the height-input pipelines instead of
+                // each re-evaluating the full height noise 5x per texel
+                // (height + 4-sample stable slope). Same uniforms, so the
+                // values are the ones those passes computed inline before.
+                // Set _paddedSplatSharedHeightBase = false to restore the old
+                // per-pass evaluation.
+                const useSharedHeightBase = this._paddedSplatSharedHeightBase !== false;
+                const paddedHeightBase = useSharedHeightBase
+                    ? this.createGPUTexture(paddedSize, paddedSize, 'rgba32float')
+                    : null;
                 const paddedSmoothSplatData = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
                 const paddedSmoothSplatIndex = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
                 const paletteSize = this._getSplatPaletteDimensions(
@@ -534,6 +547,22 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 }
                 this.device.queue.writeBuffer(this._paddedTileGenUniformBuffer, 0, this._terrainUniformScratch);
 
+                if (useSharedHeightBase) {
+                    this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
+                    const v = new DataView(this._terrainUniformScratch);
+                    v.setInt32(48, 0, true);        // outputType = 0 (base height + stable slope)
+                    v.setFloat32(64, uvShift, true);
+                    v.setFloat32(68, uvShift, true);
+                    if (!this._paddedHeightBaseUniformBuffer) {
+                        this._paddedHeightBaseUniformBuffer = this.device.createBuffer({
+                            label: 'PaddedHeightBaseUniform',
+                            size: this._terrainUniformScratch.byteLength,
+                            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                        });
+                    }
+                    this.device.queue.writeBuffer(this._paddedHeightBaseUniformBuffer, 0, this._terrainUniformScratch);
+                }
+
                 this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
                 {
                     const v = new DataView(this._terrainUniformScratch);
@@ -574,12 +603,25 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     this._terrainUniformScratch
                 );
 
-                const { pipeline: tileGenPipeline, bindGroupLayout: tileGenBindGroupLayout } =
-                    this._getTerrainPipelineForFormat('rgba8unorm');
-                const { pipeline: smoothSourcePipeline, bindGroupLayout: smoothSourceBindGroupLayout } =
-                    this._getTerrainPipelineForFormat('rgba8unorm');
-                const { pipeline: splatPalettePipeline, bindGroupLayout: splatPaletteBindGroupLayout } =
-                    this._getSplatPalettePipelineForFormat('rgba8unorm');
+                const { pipeline: tileGenPipeline, bindGroupLayout: tileGenBindGroupLayout } = useSharedHeightBase
+                    ? this._getHeightInputPipelineForFormat('rgba8unorm', 'rgba32float')
+                    : this._getTerrainPipelineForFormat('rgba8unorm');
+                const { pipeline: smoothSourcePipeline, bindGroupLayout: smoothSourceBindGroupLayout } = useSharedHeightBase
+                    ? this._getHeightInputPipelineForFormat('rgba8unorm', 'rgba32float')
+                    : this._getTerrainPipelineForFormat('rgba8unorm');
+                const heightBasePipeline = useSharedHeightBase
+                    ? this._getTerrainPipelineForFormat('rgba32float')
+                    : null;
+                const heightInputEntry = useSharedHeightBase
+                    ? [{ binding: 2, resource: paddedHeightBase.createView() }]
+                    : [];
+                // Parallel-reduction palette (one workgroup per palette texel);
+                // set _splatPaletteParallelReduce = false for the old
+                // one-thread-per-texel pass.
+                const useReducePalette = this._splatPaletteParallelReduce !== false;
+                const { pipeline: splatPalettePipeline, bindGroupLayout: splatPaletteBindGroupLayout } = useReducePalette
+                    ? this._getSplatPaletteReducePipelineForFormat('rgba8unorm')
+                    : this._getSplatPalettePipelineForFormat('rgba8unorm');
                 const { pipeline: splatPipeline, bindGroupLayout: splatBindGroupLayout } =
                     this._getSplatPipelineForFormats(
                         splatPass.heightFormat || 'r32float',
@@ -603,6 +645,24 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
 
                 const enc = this.device.createCommandEncoder({ label: 'PaddedQuadtreeSplat' });
 
+                if (useSharedHeightBase) {
+                    const pass = enc.beginComputePass({ label: 'GenPaddedHeightBase' });
+                    pass.setPipeline(heightBasePipeline.pipeline);
+                    pass.setBindGroup(0, this.device.createBindGroup({
+                        layout: heightBasePipeline.bindGroupLayout,
+                        entries: [
+                            { binding: 0, resource: { buffer: this._paddedHeightBaseUniformBuffer } },
+                            { binding: 1, resource: paddedHeightBase.createView() }
+                        ]
+                    }));
+                    this._setTerrainBiomeBindGroup(pass);
+                    pass.dispatchWorkgroups(
+                        Math.ceil(paddedSize / 8),
+                        Math.ceil(paddedSize / 8)
+                    );
+                    pass.end();
+                }
+
                 {
                     const pass = enc.beginComputePass({ label: 'GenPaddedTileMap' });
                     pass.setPipeline(tileGenPipeline);
@@ -610,7 +670,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         layout: tileGenBindGroupLayout,
                         entries: [
                             { binding: 0, resource: { buffer: this._paddedTileGenUniformBuffer } },
-                            { binding: 1, resource: paddedTileMap.createView() }
+                            { binding: 1, resource: paddedTileMap.createView() },
+                            ...heightInputEntry
                         ]
                     }));
                     this._setTerrainBiomeBindGroup(pass);
@@ -628,7 +689,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         layout: smoothSourceBindGroupLayout,
                         entries: [
                             { binding: 0, resource: { buffer: this._paddedSmoothSplatDataUniformBuffer } },
-                            { binding: 1, resource: paddedSmoothSplatData.createView() }
+                            { binding: 1, resource: paddedSmoothSplatData.createView() },
+                            ...heightInputEntry
                         ]
                     }));
                     this._setTerrainBiomeBindGroup(pass);
@@ -646,7 +708,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         layout: smoothSourceBindGroupLayout,
                         entries: [
                             { binding: 0, resource: { buffer: this._paddedSmoothSplatIndexUniformBuffer } },
-                            { binding: 1, resource: paddedSmoothSplatIndex.createView() }
+                            { binding: 1, resource: paddedSmoothSplatIndex.createView() },
+                            ...heightInputEntry
                         ]
                     }));
                     this._setTerrainBiomeBindGroup(pass);
@@ -671,8 +734,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         ]
                     }));
                     pass.dispatchWorkgroups(
-                        Math.ceil(paletteSize.width / 8),
-                        Math.ceil(paletteSize.height / 8)
+                        useReducePalette ? paletteSize.width : Math.ceil(paletteSize.width / 8),
+                        useReducePalette ? paletteSize.height : Math.ceil(paletteSize.height / 8)
                     );
                     pass.end();
                 }
@@ -872,6 +935,9 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                             Logger.warn(`${SPLAT_STEP_PREFIX} [SplatDebug] quadtree splat diagnostics failed: ${err?.message || err}`);
                         }
                         try { paddedTileMap.destroy(); } catch { /* ignore cleanup failure */ }
+                        if (paddedHeightBase) {
+                            try { paddedHeightBase.destroy(); } catch { /* ignore cleanup failure */ }
+                        }
                         try { paddedSmoothSplatData.destroy(); } catch { /* ignore cleanup failure */ }
                         try { paddedSmoothSplatIndex.destroy(); } catch { /* ignore cleanup failure */ }
                         try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ }

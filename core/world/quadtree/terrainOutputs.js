@@ -12,7 +12,10 @@
 // Everything else is generated afterward, in the background, as a
 // refinement pass against the tile's existing array-pool layer.
 
-export const GEOMETRY_TYPES = Object.freeze(['height', 'normal', 'tile']);
+// coarseColor (per-texel flat category color, mipmapped by the pool) is
+// derived from the tile ids alone, so it belongs to the geometry stage when
+// configured: flat-tier tiles need nothing else.
+export const GEOMETRY_TYPES = Object.freeze(['height', 'normal', 'tile', 'coarseColor']);
 
 // Splat's three textures (data/index/valid) are always generated together —
 // see TileGenerator's enableSplat handling — so they're grouped as one unit

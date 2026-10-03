@@ -100,7 +100,10 @@ export class TerrainMaterialBuilder {
                 ...(planetAO || {}),
             };
 
-            const enableTerrainAO = terrainAOConfig.enabled ?? true;
+            // No AO on LODs coarser than terrainAO.maxLod: their layers are
+            // never baked (TerrainAOBaker resets them to no occlusion).
+            const aoMaxLod = Number.isFinite(terrainAOConfig.maxLod) ? terrainAOConfig.maxLod : Infinity;
+            const enableTerrainAO = (terrainAOConfig.enabled ?? true) && lod <= aoMaxLod;
             const macroLayerEnabled = terrainShaderConfig?.enableMacroLayer === false ? 0.0 : 1.0;
             const macroBlendStrength = Number.isFinite(terrainShaderConfig?.macroBlend)
                 ? Math.max(0, Math.min(1, terrainShaderConfig.macroBlend))
@@ -137,6 +140,7 @@ export class TerrainMaterialBuilder {
                     : 'rgba8unorm',
                 macro:      readGpuFormat(cachedTextures.macro),
                 resolvedColor: readGpuFormat(cachedTextures.resolvedColor),
+                coarseColor: readGpuFormat(cachedTextures.coarseColor),
             };
 
             if (enableTerrainAO) {
@@ -255,6 +259,13 @@ export class TerrainMaterialBuilder {
                 terrainShaderConfig?.solidColorTierEnabled === true &&
                 Number.isFinite(solidColorStartLod) &&
                 lod < solidColorStartLod;
+            // Baked, mipmapped flat-tier color from the tile pool (geometry
+            // stage). When present the shader averages it with one filtered
+            // sample instead of 64 tile-id loads per pixel.
+            const hasCoarseColorTexture =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorBakedTexture !== false &&
+                cachedTextures.coarseColor?._isArray === true;
             const enableLodEdgeToSolidColor =
                 isLodBeforeSolidTier &&
                 !enableTierEdgeBlend &&
@@ -312,6 +323,7 @@ export class TerrainMaterialBuilder {
                 tierEdgeBlendStrength,
                 enableTierDistanceFade,
                 enableIncompleteSourceFlat,
+                hasCoarseColorTexture,
                 solidColorAverageWindowMeters,
                 faceSizeMeters,
                 fixedMaterialFamiliesEnabled,
@@ -371,6 +383,9 @@ export class TerrainMaterialBuilder {
             if (enableResolvedColor || enableLod0ResolvedColor || enableLodEdgeResolvedColor || enableResolvedColorDebugBinding) {
                 defines.USE_RESOLVED_COLOR_TEXTURE = true;
             }
+            if (hasCoarseColorTexture) {
+                defines.USE_COARSE_COLOR_TEXTURE = true;
+            }
 
         // =============================================
         // Build ALL uniforms
@@ -427,6 +442,7 @@ splatIndexMap: { value: cachedTextures.splatIndex },
 splatValidMap: { value: cachedTextures.splatValid },
 macroMaskTexture: { value: cachedTextures.macro },
 resolvedColorTexture: { value: cachedTextures.resolvedColor },
+coarseColorTexture: { value: cachedTextures.coarseColor ?? null },
             // === LOOKUP TABLES ===
             tileTypeLookup: { value: lookupTables.tileTypeLookup },
             macroTileTypeLookup: { value: lookupTables.macroTileTypeLookup },

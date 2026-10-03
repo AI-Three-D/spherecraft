@@ -309,5 +309,141 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         )
     );
 }
+
+// ─── Parallel-reduction variant (entry point mainReduce) ─────────────────
+// Same result as main, one WORKGROUP per palette texel instead of one
+// thread. When a palette texel covers a whole tile (chunk size = tile
+// size, the quadtree case), main runs a single GPU thread that loops over
+// every texel of the padded tile (~18k texels x 4 source slots) — about
+// 8 ms of serial GPU time per tile. Here 64 threads split the rows,
+// each sums its rows in order, and thread 0 adds the 64 partial sums in
+// thread order before the unchanged top-4 / representative / sort / store
+// logic. Only the floating-point summation order differs from main.
+const PALETTE_REDUCE_THREADS: u32 = 64u;
+var<workgroup> paletteReducePartials: array<array<f32, CATEGORY_SCORE_COUNT>, PALETTE_REDUCE_THREADS>;
+
+fn storePaletteFromCategoryScores(
+    paletteCoord: vec2<i32>,
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>
+) {
+    var topCategories: array<u32, 4> = array<u32, 4>(
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID,
+        INVALID_CATEGORY_ID
+    );
+    var topScores: array<f32, 4> = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+
+    for (var categoryId = 0u; categoryId < CATEGORY_SCORE_COUNT; categoryId = categoryId + 1u) {
+        insertTop4(categoryId, (*categoryScores)[categoryId], &topCategories, &topScores);
+    }
+
+    var outputTileIds: array<u32, 4> = array<u32, 4>(
+        INVALID_TILE_ID,
+        INVALID_TILE_ID,
+        INVALID_TILE_ID,
+        INVALID_TILE_ID
+    );
+    for (var i = 0; i < 4; i = i + 1) {
+        let categoryId = topCategories[i];
+        if (!validCategory(categoryId) || topScores[i] <= SCORE_EPSILON) {
+            continue;
+        }
+        outputTileIds[i] = categoryRepresentativeTileId(categoryId);
+    }
+
+    for (var i: i32 = 0; i < 3; i = i + 1) {
+        for (var j: i32 = i + 1; j < 4; j = j + 1) {
+            let vi = validTile(outputTileIds[i]);
+            let vj = validTile(outputTileIds[j]);
+            let shouldSwap = (vj && !vi) ||
+                             (vi && vj && outputTileIds[j] < outputTileIds[i]);
+            if (shouldSwap) {
+                let tmpId = outputTileIds[i];
+                outputTileIds[i] = outputTileIds[j];
+                outputTileIds[j] = tmpId;
+            }
+        }
+    }
+
+    textureStore(
+        paletteTexture,
+        paletteCoord,
+        vec4<f32>(
+            encodeTileId(outputTileIds[0]),
+            encodeTileId(outputTileIds[1]),
+            encodeTileId(outputTileIds[2]),
+            encodeTileId(outputTileIds[3])
+        )
+    );
+}
+
+@compute @workgroup_size(64)
+fn mainReduce(
+    @builtin(workgroup_id) workgroupId: vec3<u32>,
+    @builtin(local_invocation_index) localIndex: u32
+) {
+    let paletteSize = textureDimensions(paletteTexture);
+    if (workgroupId.x >= paletteSize.x || workgroupId.y >= paletteSize.y) {
+        return;
+    }
+    let paletteCoord = vec2<i32>(workgroupId.xy);
+
+    let tileMapSize = vec2<i32>(textureDimensions(tileMap));
+    let maxCoord = tileMapSize - vec2<i32>(1);
+    let chunkSize = max(uniforms.chunkSize, 1);
+    let inputPadding = max(uniforms.inputPadding, 0);
+    let border = max(uniforms.chunkPaletteBorderTexels, 0);
+    let innerOrigin = vec2<i32>(inputPadding);
+    let innerSize = max(tileMapSize - vec2<i32>(inputPadding * 2), vec2<i32>(1));
+
+    let chunkMinInner = paletteCoord * chunkSize;
+    if (chunkMinInner.x >= innerSize.x || chunkMinInner.y >= innerSize.y) {
+        if (localIndex == 0u) {
+            textureStore(paletteTexture, paletteCoord, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+        }
+        return;
+    }
+
+    let chunkMaxInner = min(chunkMinInner + vec2<i32>(chunkSize), innerSize);
+    let sampleMin = clamp(
+        innerOrigin + chunkMinInner - vec2<i32>(border),
+        vec2<i32>(0),
+        maxCoord
+    );
+    let sampleMax = clamp(
+        innerOrigin + chunkMaxInner + vec2<i32>(border) - vec2<i32>(1),
+        vec2<i32>(0),
+        maxCoord
+    );
+
+    var partialScores: array<f32, CATEGORY_SCORE_COUNT>;
+    for (var categoryIdx = 0u; categoryIdx < CATEGORY_SCORE_COUNT; categoryIdx = categoryIdx + 1u) {
+        partialScores[categoryIdx] = 0.0;
+    }
+    for (var y = sampleMin.y + i32(localIndex); y <= sampleMax.y; y = y + i32(PALETTE_REDUCE_THREADS)) {
+        for (var x = sampleMin.x; x <= sampleMax.x; x = x + 1) {
+            accumulatePaletteSmoothSourceCategories(vec2<i32>(x, y), &partialScores);
+        }
+    }
+    for (var categoryIdx = 0u; categoryIdx < CATEGORY_SCORE_COUNT; categoryIdx = categoryIdx + 1u) {
+        paletteReducePartials[localIndex][categoryIdx] = partialScores[categoryIdx];
+    }
+
+    workgroupBarrier();
+
+    if (localIndex == 0u) {
+        var categoryScores: array<f32, CATEGORY_SCORE_COUNT>;
+        for (var categoryIdx = 0u; categoryIdx < CATEGORY_SCORE_COUNT; categoryIdx = categoryIdx + 1u) {
+            categoryScores[categoryIdx] = 0.0;
+        }
+        for (var t = 0u; t < PALETTE_REDUCE_THREADS; t = t + 1u) {
+            for (var categoryIdx = 0u; categoryIdx < CATEGORY_SCORE_COUNT; categoryIdx = categoryIdx + 1u) {
+                categoryScores[categoryIdx] = categoryScores[categoryIdx] + paletteReducePartials[t][categoryIdx];
+            }
+        }
+        storePaletteFromCategoryScores(paletteCoord, &categoryScores);
+    }
+}
 `;
 }
