@@ -27,7 +27,10 @@ export class TerrainGenerationConfig {
             // flat. At summits and saddles the gully direction spins around a
             // point; with a sharp onset that left pinch points and closed
             // crease rings around hilltops.
-            rounding: vec(ef.rounding, [0.1, 0.0, 1.0, 2.0]),
+            // rounding.y (crease rounding) 0.1 (demo: 0.0): gully bottoms ~17 m
+            // wide instead of zero-width V creases, which the tile mesh and
+            // normal grid drew as sawtooth teeth along gullies and spines.
+            rounding: vec(ef.rounding, [0.1, 0.1, 1.0, 2.0]),
             onset: vec(ef.onset, [0.9, 1.25, 2.8, 1.5]),
             assumedSlope: vec(ef.assumedSlope, [0.7, 1.0]),
             octaves: Math.max(1, Math.min(8, Math.round(num(ef.octaves, 5)))),
