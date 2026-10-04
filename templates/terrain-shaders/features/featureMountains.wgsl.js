@@ -100,7 +100,7 @@ fn featureMountainsHeight(
     let detailH = foothillEnv * detailN * (HEIGHT_MOUNTAIN_DETAIL / maxH);
 
     // Smooth union so foothills blend seamlessly into core peaks
-    let blendH = select(smoothMaxLegacy(foothillH, coreH, 0.003), smoothMax(foothillH, coreH, 0.003), TERRAIN_FIX_SMOOTH_MAX);
+    let blendH = smoothMax(foothillH, coreH, 0.003);
     var h = blendH + detailH;
 
     // Slightly tighten the whole feature so it reads as a range, not a plateau
@@ -119,13 +119,13 @@ fn featureMountainsHeight(
         let exceptN = fbmAuto(wx, wy, unitDir,
             SCALE_MOUNTAIN_PEAKS * 1.5, 1, seed + 2220, 2.0, 0.5);
         let exceptBump = loneHillDome(exceptN, 0.55);
-        let exceptW = select(exceptMask, gateRamp(exceptMask, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+        let exceptW = gateRamp(exceptMask, 0.01);
         let exceptH = exceptBump * exceptW * (HEIGHT_MOUNTAIN_EXCEPTIONAL / maxH);
         h += exceptH * coreEnv;
     }
 
     // Ramp from the rangeMask < 0.01 gate (no step at the range edge).
-    let rangeW = select(rangeMask, gateRamp(rangeMask, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+    let rangeW = gateRamp(rangeMask, 0.01);
     return h * mtnAmp * activity * rangeW;
 }
 
@@ -207,14 +207,14 @@ fn featureMountainsHeight2_d(
     let coreH = dMul(coreEnv, coreMod) * (HEIGHT_MOUNTAIN_CORE / maxH);
     let detailH = dMul(foothillEnv, detailN) * (HEIGHT_MOUNTAIN_DETAIL / maxH);
 
-    let blendH = select(dSmoothMaxLegacy(foothillH, coreH, 0.003), dSmoothMax(foothillH, coreH, 0.003), TERRAIN_FIX_SMOOTH_MAX);
+    let blendH = dSmoothMax(foothillH, coreH, 0.003);
     let tighten = dPow(foothillEnv, 0.15);
     var h = blendH + detailH;
     h = dMul(h, tighten);
 
     // Smooth landform: ridge texture at a nominal 0.5, wider blend, no detail.
     let coreHs = dMul(coreEnv, dConst(0.35) + peaks * 0.65) * (0.85 * HEIGHT_MOUNTAIN_CORE / maxH);
-    var hs = dMul(select(dSmoothMaxLegacy(foothillH, coreHs, 0.02), dSmoothMax(foothillH, coreHs, 0.02), TERRAIN_FIX_SMOOTH_MAX), tighten);
+    var hs = dMul(dSmoothMax(foothillH, coreHs, 0.02), tighten);
 
     let exceptMask = rarityMaskAuto_d(
         unitDir,
@@ -226,13 +226,13 @@ fn featureMountainsHeight2_d(
     if (exceptMask.x > 0.01 && terrainFeatureOn(TF_MOUNTAIN_PEAKS)) {
         let exceptN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_PEAKS * 1.5, 1, seed + 2220, 2.0, 0.5);
         let exceptBump = loneHillDome_d(exceptN, 0.55);
-        let exceptW = select(exceptMask, dGateRamp(exceptMask, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+        let exceptW = dGateRamp(exceptMask, 0.01);
         let exceptH = dMul(exceptBump, exceptW) * (HEIGHT_MOUNTAIN_EXCEPTIONAL / maxH);
         h += dMul(exceptH, coreEnv);
         hs += dMul(exceptH, coreEnv);
     }
 
-    let rangeW = select(rangeMask, dGateRamp(rangeMask, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+    let rangeW = dGateRamp(rangeMask, 0.01);
     let scaleD = dMul(activity, rangeW) * mtnAmp;
     out.full = dMul(h, scaleD);
     out.smoothed = dMul(hs, scaleD);

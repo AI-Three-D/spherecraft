@@ -15,30 +15,13 @@ const wgslNum = (v) => {
 const wgslVec = (arr) => `vec${arr.length}<f32>(${arr.map(wgslNum).join(', ')})`;
 
 // terrain.erosionFilter: the RuneVision filter applied to the land height in
-// calculateTerrainHeightD (sphere only). Emits EROSION_FILTER_ENABLED and
-// erosionFilterLand_d(); a pass-through stub when disabled, so the base
-// shader always compiles.
+// calculateTerrainHeightD (sphere). Always on; cfg holds its parameters
+// (TerrainGenerationConfig.erosionFilter).
 function createErosionFilterLandWgsl(cfg, createFeature) {
-  const enabled = cfg?.enabled === true && typeof createFeature === 'function';
-  if (!enabled) {
-    return `
-const EROSION_FILTER_ENABLED: bool = false;
-const EROSION_MESO_KEEP: f32 = 1.0;
-struct ErosionLandResult { delta: vec4<f32>, amount: vec4<f32>, }
-fn erosionFilterActive() -> bool { return false; }
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> ErosionLandResult {
-    var r: ErosionLandResult;
-    r.delta = vec4<f32>(0.0);
-    r.amount = vec4<f32>(0.0);
-    return r;
-}
-`;
+  if (!cfg || !Number.isFinite(cfg.strength)) {
+    throw new Error('createAdvancedTerrainComputeShader requires options.erosionFilter (TerrainGenerationConfig.erosionFilter)');
   }
   return createFeature() + `
-const EROSION_FILTER_ENABLED: bool = true;
-// Compiled in and not switched off by the erosionFilter feature toggle.
-fn erosionFilterActive() -> bool { return terrainFeatureOn(TF_EROSION_FILTER); }
-
 fn erosionConfiguredParams() -> ErosionParams {
     var prm: ErosionParams;
     prm.strength = ${wgslNum(cfg.strength)};
@@ -155,7 +138,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
     'createTerrainFeaturePlains', 'createTerrainFeatureHills', 'createTerrainFeatureMountains',
     'createTerrainFeatureCanyons', 'createTerrainFeatureLoneHills', 'createTerrainFeatureMicro',
     'createTerrainFeatureMesoDetail', 'createTerrainFeatureHighlands', 'createTerrainFeatureRivers',
-    'createTerrainFeatureErosionSeeds',
+    'createTerrainFeatureErosionSeeds', 'createTerrainFeatureErosionFilter',
   ].filter(name => typeof shaderBundle[name] !== 'function');
   if (missing.length) {
     throw new Error(
@@ -170,11 +153,6 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
   const analyticSlope = options?.analyticSlope === true;
-  // Terrain shape fixes (terrain.fixes); default on, off reproduces the old shapes.
-  const fixSmoothMax = options?.terrainFixes?.smoothMax !== false;
-  const fixLoneHillGates = options?.terrainFixes?.loneHillGates !== false;
-  const fixMountainGates = options?.terrainFixes?.mountainGates !== false;
-  const fixSmoothBlends = options?.terrainFixes?.smoothBlends !== false;
   const erosionFilterWgsl = createErosionFilterLandWgsl(options?.erosionFilter, createTerrainFeatureErosionFilter);
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
@@ -623,12 +601,6 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
 ` : ''}
 `,
     createNoiseLibrary(),
-    `
-const TERRAIN_FIX_SMOOTH_MAX: bool = ${fixSmoothMax};
-const TERRAIN_FIX_LONE_HILL_GATES: bool = ${fixLoneHillGates};
-const TERRAIN_FIX_MOUNTAIN_GATES: bool = ${fixMountainGates};
-const TERRAIN_FIX_SMOOTH_BLENDS: bool = ${fixSmoothBlends};
-`,
     createTerrainFeatureToggleWgsl(),
     erosionFilterWgsl,
     createTerrainCommon(),

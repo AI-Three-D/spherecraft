@@ -18,29 +18,14 @@ export class TerrainGenerationConfig {
         //                evaluations per texel; the behaviour before 2026-10).
         this.slopeMode = options.slopeMode === 'stencil' ? 'stencil' : 'analytic';
 
-        // Corrections to terrain features that change the terrain's shape.
-        // Each can be switched off to compare against the old look.
-        //   smoothMax     - the mountain foothill/core blend used a smooth MIN
-        //                   (the old smoothMax formula), which capped every
-        //                   range near foothill height. On: true max.
-        //   loneHillGates - lone-hill tiers 4/5 and rolling hills ramp from
-        //                   their presence gate instead of starting with a
-        //                   1-6 m vertical step.
-        //   mountainGates - mountains ramp from the mountainness, range-mask
-        //                   and exceptional-peak gates (were ~25 m steps).
-        //   smoothBlends  - slope-continuous landmark blends (twoPeakBlend,
-        //                   lobe max). Their kinks became ~25 m steps under
-        //                   the erosion filter, which reads the input slope.
         // RuneVision erosion filter (templates/terrain-shaders/features/
-        // featureErosionFilter.wgsl.js, MPL-2.0). When enabled it replaces the
-        // noise that imitated erosion (meso1/meso2, lone-hill slope cuts and
-        // landmark detail) and erodes the remaining landform. Sphere only.
-        // All lengths in metres; see the filter file for the parameters.
+        // featureErosionFilter.wgsl.js, MPL-2.0), always on: erodes the
+        // landform of the sphere terrain. All lengths in metres; see the
+        // filter file for the parameters.
         const ef = options.erosionFilter ?? {};
         const num = (v, d) => (Number.isFinite(v) ? v : d);
         const vec = (v, d) => (Array.isArray(v) && v.length === d.length && v.every(Number.isFinite) ? v.slice() : d);
         this.erosionFilter = {
-            enabled: ef.enabled !== false,
             scale: num(ef.scale, 1500),
             strength: num(ef.strength, 0.18),
             gullyWeight: num(ef.gullyWeight, 0.5),
@@ -86,14 +71,6 @@ export class TerrainGenerationConfig {
         // core/world/terrain-generator/terrainFeatureToggles.js. At runtime:
         // qtDiag.setTerrainFeatures({...}) / qtDiag.terrainFeatures().
         this.features = { ...(options.features ?? {}) };
-
-        const fixes = options.fixes ?? {};
-        this.fixes = {
-            smoothMax: fixes.smoothMax !== false,
-            loneHillGates: fixes.loneHillGates !== false,
-            mountainGates: fixes.mountainGates !== false,
-            smoothBlends: fixes.smoothBlends !== false
-        };
 
         // High-level noise profile knobs (shader expects these in _pad3/_pad4).
         const profile = options.noiseProfile ?? {};

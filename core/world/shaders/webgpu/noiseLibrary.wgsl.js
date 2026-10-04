@@ -50,15 +50,6 @@ fn smoothMin(a: f32, b: f32, k: f32) -> f32 {
     return mix(a, b, h) + kk * h * (1.0 - h);
 }
 
-// The formula smoothMax had until 2026-10: mix(b, a, h) picks the SMALLER
-// argument away from a ~ b, so it was a smooth min with a bump. Kept only so
-// terrain.fixes.smoothMax = false can reproduce the old mountains.
-fn smoothMaxLegacy(a: f32, b: f32, k: f32) -> f32 {
-    let kk = max(k, 1e-4);
-    let h = clamp(0.5 + 0.5 * (b - a) / kk, 0.0, 1.0);
-    return mix(b, a, h) + kk * h * (1.0 - h);
-}
-
   fn hash1(seed: i32) -> u32 {
       return mix32(bitcast<u32>(seed));
   }

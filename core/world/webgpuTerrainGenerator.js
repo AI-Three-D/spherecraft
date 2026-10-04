@@ -205,14 +205,8 @@ export class WebGPUTerrainGenerator {
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
         this.slopeMode = this.terrainConfig?.slopeMode === 'stencil' ? 'stencil' : 'analytic';
-        this.erosionFilter = this.terrainConfig?.erosionFilter ?? { enabled: false };
+        this.erosionFilter = requireObject(this.terrainConfig.erosionFilter, 'planetConfig.terrainGeneration.erosionFilter');
         this._applyTerrainFeatures(this.terrainConfig?.features ?? {}, null);
-        this.terrainFixes = {
-            smoothMax: this.terrainConfig?.fixes?.smoothMax !== false,
-            loneHillGates: this.terrainConfig?.fixes?.loneHillGates !== false,
-            mountainGates: this.terrainConfig?.fixes?.mountainGates !== false,
-            smoothBlends: this.terrainConfig?.fixes?.smoothBlends !== false
-        };
         this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');
         const radiusM = this.worldScale;
         const continentsEnabled = this.terrainConfig?.continents?.enabled ?? true;

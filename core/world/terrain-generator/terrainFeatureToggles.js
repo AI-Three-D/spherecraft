@@ -19,8 +19,8 @@ export const TERRAIN_FEATURES = Object.freeze([
     { key: 'mountainDetail', wgsl: 'TF_MOUNTAIN_DETAIL', about: 'Mountain slope roughness: 2 octaves at 4 km, 120 m.' },
     { key: 'mountainPeaks', wgsl: 'TF_MOUNTAIN_PEAKS', about: 'Exceptional towering peaks inside ranges (very rare).' },
     { key: 'mountainFoothills', wgsl: 'TF_MOUNTAIN_FOOTHILLS', about: 'Foothills: 3 km rolling hills ramping up toward mountain regions (terrainType 0.45-0.56), 220 m x mountain amplitude.' },
-    { key: 'meso1', wgsl: 'TF_MESO1', about: 'Meso detail 80 m wavelength, 25 m (with erosion: added on top, faded where erosion is strong).' },
-    { key: 'meso2', wgsl: 'TF_MESO2', about: 'Meso detail 750 m wavelength, 135 m (with erosion: added on top, faded where erosion is strong).' },
+    { key: 'meso1', wgsl: 'TF_MESO1', about: 'Meso detail 80 m wavelength, 25 m; added on top of the eroded terrain, faded where erosion is strong.' },
+    { key: 'meso2', wgsl: 'TF_MESO2', about: 'Meso detail 750 m wavelength, 135 m; added on top of the eroded terrain, faded where erosion is strong.' },
     { key: 'meso3', wgsl: 'TF_MESO3', about: 'Meso detail 4 km wavelength, 150 m.' },
     { key: 'highlands', wgsl: 'TF_HIGHLANDS', about: 'Plateaus, five rarity tiers (5-70 km).' },
     { key: 'loneHillsCommon', wgsl: 'TF_LONE_HILLS_COMMON', about: 'Lone hills tier 1: common round domes, 0.8 / 1.6 km.' },
@@ -28,12 +28,10 @@ export const TERRAIN_FEATURES = Object.freeze([
     { key: 'loneHillsVeryRare', wgsl: 'TF_LONE_HILLS_VERY_RARE', about: 'Lone hills tier 4: very rare irregular dome, 10 km.' },
     { key: 'loneHillsLandmark', wgsl: 'TF_LONE_HILLS_LANDMARK', about: 'Lone hills tier 5: two-peak landmark massif, 18 km.' },
     { key: 'rollingHills', wgsl: 'TF_ROLLING_HILLS', about: 'Rolling hill chains (beads on a 4 km path).' },
-    { key: 'loneHillCuts', wgsl: 'TF_LONE_HILL_CUTS', about: 'Slope cuts on tiers 4/5 and the landmark detail noise (replaced by the erosion filter when it is on).' },
     { key: 'riverCarve', wgsl: 'TF_RIVER_CARVE', about: 'Demo river channel carved from uniforms.' },
     { key: 'erosionSeeds', wgsl: 'TF_EROSION_SEEDS', about: 'Erosion-seed pits (the demo lakes sit in them).' },
     { key: 'inlandUplift', wgsl: 'TF_INLAND_UPLIFT', about: 'Uniform uplift of continental interiors.' },
     { key: 'oceanFloor', wgsl: 'TF_OCEAN_FLOOR', about: 'Ocean-floor noise (off: flat floor at the ocean base depth).' },
-    { key: 'erosionFilter', wgsl: 'TF_EROSION_FILTER', about: 'RuneVision erosion filter (only if terrain.erosionFilter.enabled compiled it in). Off restores the lone-hill cuts and full meso1/meso2.' },
     { key: 'microDetail', wgsl: 'TF_MICRO_DETAIL', about: 'Per-tile micro displacement by surface type (final height pass).' },
 ]);
 

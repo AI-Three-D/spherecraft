@@ -97,16 +97,6 @@ fn irregularizeNoiseNearBase(n: f32, threshold: f32, edgeN: f32, strength: f32) 
     return n + edgeN * strength * band;
 }
 
-// Carves cuts into the slope by subtracting from the *height* (not the noise),
-// limited to mid-slope so it doesn't create a ring at the base.
-fn applySlopeCuts(h: f32, cutN: f32, amount: f32) -> f32 {
-    // Only affect mid-slope: not at base (h~0) and not at top (h~1)
-    let band = smoothstep(0.12, 0.40, h) * (1.0 - smoothstep(0.70, 0.92, h));
-    let n = saturate(cutN * 0.5 + 0.5);
-    let cuts = band * amount * pow(n, 2.2);
-    return max(h - cuts, 0.0);
-}
-
 // Two-peak blend: combines two domes (same underlying noise, different scales/warps)
 // without multiplying unrelated fields.
 // x faded in from a gate g: zero value and zero slope at g, equal to x from
@@ -125,7 +115,7 @@ fn twoPeakBlend(a: f32, b: f32) -> f32 {
     // smoothstep keeps the slope continuous where the blend meets max at
     // d = k (the linear ramp left a kink there, which the erosion filter
     // turns into a step); the shape is otherwise the same.
-    let t = select(saturate(d / k), smoothstep(0.0, k, d), TERRAIN_FIX_SMOOTH_BLENDS);
+    let t = smoothstep(0.0, k, d);
     return mix((a + b) * 0.5, m, t);
 }
 
@@ -258,17 +248,6 @@ fn dSmoothMax(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
     let dfdh = (b.x - a.x) + kk - 2.0 * kk * h;
     let dh = select(vec3<f32>(0.0), (b.yzw - a.yzw) * (0.5 / kk), hRaw > 0.0 && hRaw < 1.0);
     return vec4<f32>(value, a.yzw * (1.0 - h) + b.yzw * h + dfdh * dh);
-}
-
-// Mirrors smoothMaxLegacy (the old, min-like formula).
-fn dSmoothMaxLegacy(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
-    let kk = max(k, 1e-4);
-    let hRaw = 0.5 + 0.5 * (b.x - a.x) / kk;
-    let h = clamp(hRaw, 0.0, 1.0);
-    let value = mix(b.x, a.x, h) + kk * h * (1.0 - h);
-    let dfdh = (a.x - b.x) + kk - 2.0 * kk * h;
-    let dh = select(vec3<f32>(0.0), (b.yzw - a.yzw) * (0.5 / kk), hRaw > 0.0 && hRaw < 1.0);
-    return vec4<f32>(value, b.yzw * (1.0 - h) + a.yzw * h + dfdh * dh);
 }
 
 // Mirrors gateRamp.

@@ -178,9 +178,10 @@ fn getTerrainAmplitudes(profile: TerrainProfile) -> TerrainAmplitudes {
 }
 
 fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f32 {
-    // With the erosion filter on, the height needs its own gradient, so every
-    // sphere evaluation goes through the dual path (same value everywhere).
-    if (erosionFilterActive() && uniforms.face >= 0) {
+    // The sphere terrain is eroded, and erosion needs the landform's gradient:
+    // every sphere evaluation goes through the dual path (the same value
+    // everywhere). The plain body below is the flat-world (face < 0) path only.
+    if (uniforms.face >= 0) {
         return calculateTerrainHeightD(seed, unitDir).x;
     }
     let profile = getTerrainProfile();
@@ -213,7 +214,7 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
     if (mountainness > 0.01 && terrainFeatureOn(TF_MOUNTAINS)) {
         // Ramp from the gate: a bare > 0.01 gate left a step of 1 % of the
         // mountain height (~25 m on fixed-smoothMax cores) along the edge.
-        let mountainW = select(mountainness, gateRamp(mountainness, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+        let mountainW = gateRamp(mountainness, 0.01);
         landHeight += featureMountainsHeight(wx, wy, unitDir, seed, regional, profile, amp) * mountainW;
     }
 
@@ -236,10 +237,7 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
     // NOTE: Micro detail is now applied in a later pass based on tile type.
 
     // ==================== Meso Detail (micro2 + meso1–3) ====================
-    let mesoRoughness = select(
-        max(regional.terrainType, regional.ruggedness * 0.5),
-        smoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02),
-        TERRAIN_FIX_SMOOTH_BLENDS);
+    let mesoRoughness = smoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02);
     let meso = featureMesoDetail(wx, wy, unitDir, seed, profile, mesoRoughness, landHeight);
     let mesoMaxH = maxTerrainHeightM();
     landHeight += meso.x * (DISP_MICRO2 / mesoMaxH);
@@ -309,14 +307,13 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     var landHeight = dConst(0.0);
     if (landBlend.x > 0.0) {
         landHeight = select(dConst(0.0), regional.baseElevation * amp.continentalShelf, terrainFeatureOn(TF_CONTINENT_RELIEF));
-        let erosionOn = erosionFilterActive();
 
         // Mountains: the full height, and the slope-continuous version that
         // drives the erosion filter (MountainHeightD).
         var mountainsH = dConst(0.0);
         var mountainsSmooth = dConst(0.0);
         if (mountainness.x > 0.01 && terrainFeatureOn(TF_MOUNTAINS)) {
-            let mountainW = select(mountainness, dGateRamp(mountainness, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+            let mountainW = dGateRamp(mountainness, 0.01);
             let m = featureMountainsHeight2_d(unitDir, seed, regional, profile, amp);
             mountainsH = dMul(m.full, mountainW);
             mountainsSmooth = dMul(m.smoothed, mountainW);
@@ -336,16 +333,11 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
         }
 
         // micro2 (DISP_MICRO2 = 0) contributes nothing; see featureMesoDetail_d.
-        let mesoRoughness = select(
-            dMax(regional.terrainType, regional.ruggedness * 0.5),
-            dSmoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02),
-            TERRAIN_FIX_SMOOTH_BLENDS);
+        let mesoRoughness = dSmoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02);
         let meso = featureMesoDetail_d(unitDir, seed, profile, mesoRoughness);
         let mesoMaxH = maxTerrainHeightM();
-        // With erosion, meso1/meso2 go on top of the eroded terrain instead
-        // (below), faded where erosion is strong.
-        if (!erosionOn && terrainFeatureOn(TF_MESO1)) { landHeight += meso.meso1 * (DISP_MESO1 / mesoMaxH); }
-        if (!erosionOn && terrainFeatureOn(TF_MESO2)) { landHeight += meso.meso2 * (DISP_MESO2 / mesoMaxH); }
+        // meso1/meso2 go on top of the eroded terrain (below), faded where
+        // erosion is strong; meso3 is part of the eroded landform.
         if (terrainFeatureOn(TF_MESO3)) { landHeight += meso.meso3 * (DISP_MESO3 / mesoMaxH); }
 
         var highlandsH = dConst(0.0);
@@ -353,7 +345,7 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             highlandsH = featureHighlandsHeight_d(unitDir, seed, regional, profile, amp);
             landHeight += highlandsH;
         }
-        if (erosionOn) {
+        {
             // The filter reads a slope-continuous landform (mountains swapped
             // for their smooth version; every other term here is C1), and its
             // height change is added to the full terrain. Relief, which sets
@@ -369,8 +361,6 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             let mesoW = dConst(1.0) - er.amount * (1.0 - EROSION_MESO_KEEP);
             if (terrainFeatureOn(TF_MESO1)) { landHeight += dMul(meso.meso1, mesoW) * (DISP_MESO1 / mesoMaxH); }
             if (terrainFeatureOn(TF_MESO2)) { landHeight += dMul(meso.meso2, mesoW) * (DISP_MESO2 / mesoMaxH); }
-        } else {
-            landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_ALL);
         }
         if (terrainFeatureOn(TF_RIVER_CARVE)) {
             landHeight += featureRiverHeight_d(unitDir, seed, regional, profile, amp);

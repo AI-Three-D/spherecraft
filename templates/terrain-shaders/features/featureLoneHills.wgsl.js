@@ -143,17 +143,11 @@ if (terrainFeatureOn(TF_LONE_HILLS_VERY_RARE)) {
         let n2 = irregularizeNoiseNearBase(n, 0.42, edgeN, 0.10);
 
         // Main dome (slightly higher threshold than common tiers)
-        var h = loneHillDome(n2, 0.42);
-
-        // Cuts/crevices: ridged-ish noise on slope band
-        if (terrainFeatureOn(TF_LONE_HILL_CUTS)) {
-            let cutN = fbmAuto(p.x, p.y, unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
-            h = applySlopeCuts(h, cutN, 0.18);
-        }
+        let h = loneHillDome(n2, 0.42);
 
         // Ramp from the gate so the hill starts at zero height (a bare
         // presence > 0.001 gate leaves a ~1-2 m step at the rim).
-        let presenceW = select(presence, gateRamp(presence, 0.001), TERRAIN_FIX_LONE_HILL_GATES);
+        let presenceW = gateRamp(presence, 0.001);
         totalHeight += h * presenceW
             * (HEIGHT_LONE_HILL_VERY_RARE / maxH) * sizeMod * hillAmp;
     }
@@ -175,7 +169,7 @@ if (terrainFeatureOn(TF_LONE_HILLS_LANDMARK)) {
 
     // Very rare presence based on the *stronger* lobe (still single-field-ish)
     // Smooth max: a hard max kinks the presence where the lobes are equal.
-    let nMax = select(max(nA, nB), smoothMax(nA, nB, 0.03), TERRAIN_FIX_SMOOTH_BLENDS);
+    let nMax = smoothMax(nA, nB, 0.03);
     let presence = smoothstep(0.34, 0.48, nMax);
 
     if (presence > 0.001) {
@@ -190,19 +184,9 @@ if (terrainFeatureOn(TF_LONE_HILLS_LANDMARK)) {
         let hB = loneHillDome(nB2, 0.48);
 
         // Two-peak blend creates a saddle sometimes, but still looks like one feature
-        var h = twoPeakBlend(hA, hB);
+        let h = twoPeakBlend(hA, hB);
 
-        // Cuts on mid-slope (shared cut noise so cuts "flow" across both lobes)
-        if (terrainFeatureOn(TF_LONE_HILL_CUTS)) {
-            let cutN = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.09, 3, seed + 4521, 2.2, 0.55);
-            h = applySlopeCuts(h, cutN, 0.22);
-
-            // Optional subtle roughness (kept from your old code idea)
-            let detail = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
-            h *= (1.0 + detail * 0.10);
-        }
-
-        let presenceW = select(presence, gateRamp(presence, 0.001), TERRAIN_FIX_LONE_HILL_GATES);
+        let presenceW = gateRamp(presence, 0.001);
         totalHeight += h * presenceW
             * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
     }
@@ -271,7 +255,7 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
 
         // Ramp from the gate (a bare > 0.01 gate leaves a step of up to
         // 0.01 * HEIGHT_ROLLING_HILLS at the region edge).
-        let presenceW = select(rollingPresence, gateRamp(rollingPresence, 0.01), TERRAIN_FIX_LONE_HILL_GATES);
+        let presenceW = gateRamp(rollingPresence, 0.01);
         totalHeight += h * presenceW
             * (HEIGHT_ROLLING_HILLS / maxH) * sizeMod * hillAmp;
     }
@@ -294,19 +278,11 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
       return n + dMul(edgeN * strength, band);
   }
 
-  fn applySlopeCuts_d(h: vec4<f32>, cutN: vec4<f32>, amount: f32) -> vec4<f32> {
-      let band = dMul(dSmoothstep(0.12, 0.40, h), dConst(1.0) - dSmoothstep(0.70, 0.92, h));
-      let n = dClamp(cutN * 0.5 + dConst(0.5), 0.0, 1.0);
-      let cuts = dMul(band * amount, dPow(n, 2.2));
-      let r = h - cuts;
-      return select(dConst(0.0), r, r.x > 0.0);
-  }
-
   fn twoPeakBlend_d(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
       let k = 0.10;
       let m = dMax(a, b);
       let d = dAbs(a - b);
-      let t = select(dClamp(d / k, 0.0, 1.0), dSmoothstep(0.0, k, d), TERRAIN_FIX_SMOOTH_BLENDS);
+      let t = dSmoothstep(0.0, k, d);
       return dMix((a + b) * 0.5, m, t);
   }
 
@@ -363,13 +339,8 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
           if (presence.x > 0.001) {
               let edgeN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.22, 2, seed + 4413, 2.0, 0.5);
               let n2 = irregularizeNoiseNearBase_d(n, 0.42, edgeN, 0.10);
-              var h = loneHillDome_d(n2, 0.42);
-              // Slope cuts imitate erosion; the erosion filter replaces them.
-              if (!erosionFilterActive() && terrainFeatureOn(TF_LONE_HILL_CUTS)) {
-                  let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
-                  h = applySlopeCuts_d(h, cutN, 0.18);
-              }
-              let presenceW = select(presence, dGateRamp(presence, 0.001), TERRAIN_FIX_LONE_HILL_GATES);
+              let h = loneHillDome_d(n2, 0.42);
+              let presenceW = dGateRamp(presence, 0.001);
               totalHeight += dMul(dMul(h, presenceW) * (HEIGHT_LONE_HILL_VERY_RARE / maxH), sizeMod) * hillAmp;
           }
       }
@@ -378,7 +349,7 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
       if ((parts & LONE_HILLS_BIG) != 0u && terrainFeatureOn(TF_LONE_HILLS_LANDMARK)) {
           let nA = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4500, 2.0, 0.5);
           let nB = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4501, 2.0, 0.5);
-          let nMax = select(dMax(nA, nB), dSmoothMax(nA, nB, 0.03), TERRAIN_FIX_SMOOTH_BLENDS);
+          let nMax = dSmoothMax(nA, nB, 0.03);
           let presence = dSmoothstep(0.34, 0.48, nMax);
           if (presence.x > 0.001) {
               let edgeA = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.20, 2, seed + 4513, 2.0, 0.5);
@@ -387,14 +358,8 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
               let nB2 = irregularizeNoiseNearBase_d(nB, 0.48, edgeB, 0.12);
               let hA = loneHillDome_d(nA2, 0.48);
               let hB = loneHillDome_d(nB2, 0.48);
-              var h = twoPeakBlend_d(hA, hB);
-              if (!erosionFilterActive() && terrainFeatureOn(TF_LONE_HILL_CUTS)) {
-                  let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.09, 3, seed + 4521, 2.2, 0.55);
-                  h = applySlopeCuts_d(h, cutN, 0.22);
-                  let detail = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
-                  h = dMul(h, dConst(1.0) + detail * 0.10);
-              }
-              let presenceW = select(presence, dGateRamp(presence, 0.001), TERRAIN_FIX_LONE_HILL_GATES);
+              let h = twoPeakBlend_d(hA, hB);
+              let presenceW = dGateRamp(presence, 0.001);
               totalHeight += dMul(h, presenceW) * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
           }
       }
@@ -427,7 +392,7 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
               let lump = dMul(dConst(0.30) + beads * 0.70, dConst(0.55) + bumps * 0.45);
               let corridor = dPow(envelope, 1.25);
               let h = dMul(corridor, lump);
-              let presenceW = select(rollingPresence, dGateRamp(rollingPresence, 0.01), TERRAIN_FIX_LONE_HILL_GATES);
+              let presenceW = dGateRamp(rollingPresence, 0.01);
               totalHeight += dMul(dMul(h, presenceW) * (HEIGHT_ROLLING_HILLS / maxH), sizeMod) * hillAmp;
           }
       }
