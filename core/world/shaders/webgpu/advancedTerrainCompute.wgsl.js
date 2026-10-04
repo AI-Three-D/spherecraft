@@ -61,9 +61,12 @@ struct ErosionLandResult {
 // - Rounding: ridges and creases blend to lowAmountRounding as the amount
 //   falls from softAmountNone to softAmountFull.
 // - Fade target: relief over fadeRangeM, mapped to [-1, 1].
-// - Height offset -fadeTarget * magnitude * (1 - initialMask) cancels the
-//   filter's fade-to-target exactly on flat input (flat ground keeps its
-//   height) and vanishes on slopes, so the landform is not reshaped.
+// - Height offset -fadeTarget * initialFadeWeight removes the initial fade
+//   target's whole contribution (it reaches every octave through the stacked
+//   masks), leaving the gully structure: flat ground keeps its height and the
+//   landform is not reshaped. (Cancelling only (1 - initialMask) * magnitude
+//   over-cancelled where later masks were partly open: rings around flat
+//   hilltops and valley floors.)
 // Slope deltas are the filter's approximate derivatives (as in the
 // original), plus the first-order terms of the amount and the offset.
 fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> ErosionLandResult {
@@ -90,7 +93,7 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let fadeRaw = relief.x / ${wgslNum(cfg.fadeRangeM)} * 2.0 - 1.0;
     let fadeTarget = clamp(fadeRaw, -1.0, 1.0);
     let e = erosionFilterSphere(unitDir * R, unitDir, land.x * maxH, slope, fadeTarget, prm);
-    let keep = e.magnitude * (1.0 - e.initialMask);
+    let keep = e.initialFadeWeight;
     let dh = e.heightDelta - fadeTarget * keep;
     // d(fadeTarget)/d(unitDir) where unclamped.
     let fadeGrad = select(vec3<f32>(0.0), relief.yzw * (2.0 / ${wgslNum(cfg.fadeRangeM)}), abs(fadeRaw) < 1.0);

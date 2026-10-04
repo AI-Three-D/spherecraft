@@ -255,6 +255,10 @@ struct ErosionResultSphere {
     fadeTarget: f32,
     // The mask applied to the first octave (0 on flat input, 1 on slopes).
     initialMask: f32,
+    // Coefficient of the initial fade target in heightDelta:
+    // sum_i strength_i * prod_{j<=i} (1 - mask_j). heightDelta minus
+    // fadeTargetIn * initialFadeWeight is the gully structure alone.
+    initialFadeWeight: f32,
 }
 
 // ErosionFilter on the sphere. posM: point in metres (unitDir * radius),
@@ -275,6 +279,8 @@ fn erosionFilterSphere(
     let roundingForInput = mix(prm.rounding.y, prm.rounding.x, erosionClamp01(fadeTarget + 0.5)) * prm.rounding.z;
     var combiMask = erosionEaseOut(erosionSmoothStart(slopeLength * prm.onset.x, roundingForInput * prm.onset.x));
     let initialMask = combiMask;
+    var fadeProduct = 1.0;
+    var initialFadeWeight = 0.0;
 
     var ridgeMapCombiMask = erosionEaseOut(slopeLength * prm.onset.z);
     var ridgeMapFadeTarget = fadeTarget;
@@ -293,6 +299,8 @@ fn erosionFilterSphere(
         let gullyS = ph.cs.y * side;
         let fadedH = mix(fadeTarget, gullyH * prm.gullyWeight, combiMask);
         let fadedS = gullyS * prm.gullyWeight * combiMask;
+        fadeProduct *= 1.0 - combiMask;
+        initialFadeWeight += strength * fadeProduct;
         height += fadedH * strength;
         slope += fadedS * strength;
         magnitude += strength;
@@ -318,6 +326,7 @@ fn erosionFilterSphere(
     r.ridgeMap = ridgeMapFadeTarget * (1.0 - ridgeMapCombiMask);
     r.fadeTarget = fadeTarget;
     r.initialMask = initialMask;
+    r.initialFadeWeight = initialFadeWeight;
     return r;
 }
 
