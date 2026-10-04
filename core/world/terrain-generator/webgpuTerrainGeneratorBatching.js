@@ -378,7 +378,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 v.setInt32(52, face !== null && face !== undefined ? (face | 0) : -1, true);
 
                 v.setInt32(56, this.debugMode, true);
-                v.setInt32(60, 0, true);
+                // featureDisableMask: terrain feature toggles (terrainFeatureToggles.js).
+                v.setUint32(60, (this.terrainFeatureDisableMask ?? 0) >>> 0, true);
                 v.setFloat32(64, 0.0, true);
                 v.setFloat32(68, 0.0, true);
 

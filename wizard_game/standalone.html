@@ -3659,6 +3659,37 @@
                 return result;
             }
 
+            // Terrain feature toggles (core/world/terrain-generator/
+            // terrainFeatureToggles.js): switch height-function terms off or
+            // on and regenerate the terrain, e.g.
+            //   qtDiag.setTerrainFeatures({ mountains: false })
+            //   qtDiag.setTerrainFeatures({ mountains: true, meso3: false })
+            // qtDiag.terrainFeatures() lists them. Startup-only systems
+            // (hydrology, demo lakes) are not recomputed.
+            function terrainFeatures() {
+                const generator = engine?.terrainGenerator;
+                if (!generator?.getTerrainFeatures) {
+                    console.warn('[QT-MANUAL] terrain generator not ready');
+                    return null;
+                }
+                const rows = generator.getTerrainFeatures();
+                console.table(rows);
+                return rows;
+            }
+
+            function setTerrainFeatures(features = {}) {
+                const generator = engine?.terrainGenerator;
+                const tileManager = getTileManager();
+                if (!generator?.setTerrainFeatures || !tileManager?.refreshTiles) {
+                    console.warn('[QT-MANUAL] terrain generator or tile manager not ready');
+                    return null;
+                }
+                const rows = generator.setTerrainFeatures(features);
+                tileManager.refreshTiles();
+                console.table(rows);
+                return rows;
+            }
+
             function manualSnapshot(reason = 'console') {
                 const tileManager = getTileManager();
                 if (!tileManager?.toggleManualDiagnosticSnapshot) {
@@ -3749,6 +3780,8 @@
                 saveCapture,
                 setTerrainDebugMode,
                 setStreamerFlags,
+                terrainFeatures,
+                setTerrainFeatures,
                 benchTerrainGeneration,
                 spawnGoblinGroup(options = {}) {
                     return gameEngine?.debugSpawnGoblinGroup?.(options) ?? false;

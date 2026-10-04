@@ -82,8 +82,10 @@ fn featureMountainsHeight(
         SCALE_MOUNTAIN_RIDGES, 3, seed + 1700, 2.0, 0.5, ridgeOffset);
 
     // === Small-scale slope roughness ===
-    let detailN = fbmAuto(wx, wy, unitDir,
-        SCALE_MOUNTAIN_DETAIL, 2, seed + 1900, 2.0, 0.5);
+    var detailN = 0.0;
+    if (terrainFeatureOn(TF_MOUNTAIN_DETAIL)) {
+        detailN = fbmAuto(wx, wy, unitDir, SCALE_MOUNTAIN_DETAIL, 2, seed + 1900, 2.0, 0.5);
+    }
 
     // === Compose heights ===
 
@@ -113,7 +115,7 @@ fn featureMountainsHeight(
         profile.rareBoost
     );
 
-    if (exceptMask > 0.01) {
+    if (exceptMask > 0.01 && terrainFeatureOn(TF_MOUNTAIN_PEAKS)) {
         let exceptN = fbmAuto(wx, wy, unitDir,
             SCALE_MOUNTAIN_PEAKS * 1.5, 1, seed + 2220, 2.0, 0.5);
         let exceptBump = loneHillDome(exceptN, 0.55);
@@ -172,7 +174,10 @@ fn featureMountainsHeight_d(
     let ridgeOffset = mix(0.6, 1.2, ridgeSharp);
     let ridgeN = ridgedAuto_d(unitDir, SCALE_MOUNTAIN_RIDGES, 3, seed + 1700, 2.0, 0.5, ridgeOffset);
 
-    let detailN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_DETAIL, 2, seed + 1900, 2.0, 0.5);
+    var detailN = dConst(0.0);
+    if (terrainFeatureOn(TF_MOUNTAIN_DETAIL)) {
+        detailN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_DETAIL, 2, seed + 1900, 2.0, 0.5);
+    }
 
     let foothillH = foothillEnv * (HEIGHT_MOUNTAIN_FOOTHILL / maxH);
     let coreMod = dMul(dConst(0.35) + peaks * 0.65, dConst(0.70) + ridgeN * 0.30);
@@ -190,7 +195,7 @@ fn featureMountainsHeight_d(
         RARITY_EXCEPTIONAL,
         profile.rareBoost
     );
-    if (exceptMask.x > 0.01) {
+    if (exceptMask.x > 0.01 && terrainFeatureOn(TF_MOUNTAIN_PEAKS)) {
         let exceptN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_PEAKS * 1.5, 1, seed + 2220, 2.0, 0.5);
         let exceptBump = loneHillDome_d(exceptN, 0.55);
         let exceptH = dMul(exceptBump, exceptMask) * (HEIGHT_MOUNTAIN_EXCEPTIONAL / maxH);

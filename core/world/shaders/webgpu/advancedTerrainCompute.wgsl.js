@@ -1,5 +1,6 @@
 // js/world/shaders/webgpu/advancedTerrainCompute.wgsl.js
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
+import { createTerrainFeatureToggleWgsl } from '../../terrain-generator/terrainFeatureToggles.js';
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
 
 function wgslFloat(value, fallback) {
@@ -22,11 +23,14 @@ function createErosionFilterLandWgsl(cfg, createFeature) {
   if (!enabled) {
     return `
 const EROSION_FILTER_ENABLED: bool = false;
+fn erosionFilterActive() -> bool { return false; }
 fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> vec4<f32> { return land; }
 `;
   }
   return createFeature() + `
 const EROSION_FILTER_ENABLED: bool = true;
+// Compiled in and not switched off by the erosionFilter feature toggle.
+fn erosionFilterActive() -> bool { return terrainFeatureOn(TF_EROSION_FILTER); }
 
 fn erosionConfiguredParams() -> ErosionParams {
     var prm: ErosionParams;
@@ -166,7 +170,8 @@ struct Uniforms {
     face: i32,
 
     debugMode: i32,
-    _pad_i:    i32,
+    // Bit set = terrain feature off (terrainFeatureToggles.js, TF_*).
+    featureDisableMask: u32,
     uvOffset:  vec2<f32>,
 
     continentParams: vec4<f32>,
@@ -407,7 +412,7 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
     let micro = select(
         0.0,
         tileMicroDetail(wx, wy, dir, uniforms.seed, slope, profile, tileType),
-        dispMeters > 0.0
+        dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
     let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain;
@@ -570,6 +575,7 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
 const TERRAIN_FIX_SMOOTH_MAX: bool = ${fixSmoothMax};
 const TERRAIN_FIX_LONE_HILL_GATES: bool = ${fixLoneHillGates};
 `,
+    createTerrainFeatureToggleWgsl(),
     erosionFilterWgsl,
     createTerrainCommon(),
     createSurfaceCommon({
@@ -1474,7 +1480,7 @@ else if (uniforms.outputType == 4) {
     var micro = select(
         0.0,
         tileMicroDetail(wx, wy, unitDir, uniforms.seed, slope, profile, tileId),
-        dispMeters > 0.0
+        dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
     let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain;

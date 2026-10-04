@@ -291,6 +291,7 @@ export class WorldConfigLoader {
             if (terrain.slopeMode)            t.slopeMode = terrain.slopeMode === 'stencil' ? 'stencil' : 'analytic';
             if (terrain.fixes)                Object.assign(t.fixes,        terrain.fixes);
             if (terrain.erosionFilter)        Object.assign(t.erosionFilter, terrain.erosionFilter);
+            if (terrain.features)             t.features = { ...(t.features ?? {}), ...terrain.features };
         }
 
         // ── Planet ───────────────────────────────────────────────────────

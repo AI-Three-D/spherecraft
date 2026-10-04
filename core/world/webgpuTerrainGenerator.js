@@ -6,6 +6,11 @@ import { installWebGPUTerrainGeneratorAtlasMethods } from './terrain-generator/w
 import { installWebGPUTerrainGeneratorBatchMethods } from './terrain-generator/webgpuTerrainGeneratorBatching.js';
 import { installWebGPUTerrainGeneratorPipelineMethods } from './terrain-generator/webgpuTerrainGeneratorPipelines.js';
 import { requireInt, requireNumber, requireObject } from './terrain-generator/webgpuTerrainGeneratorDebugUtils.js';
+import {
+    describeTerrainFeatures,
+    normalizeTerrainFeatures,
+    terrainFeatureDisableMask,
+} from './terrain-generator/terrainFeatureToggles.js';
 
 
 
@@ -201,6 +206,7 @@ export class WebGPUTerrainGenerator {
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
         this.slopeMode = this.terrainConfig?.slopeMode === 'stencil' ? 'stencil' : 'analytic';
         this.erosionFilter = this.terrainConfig?.erosionFilter ?? { enabled: false };
+        this._applyTerrainFeatures(this.terrainConfig?.features ?? {}, null);
         this.terrainFixes = {
             smoothMax: this.terrainConfig?.fixes?.smoothMax !== false,
             loneHillGates: this.terrainConfig?.fixes?.loneHillGates !== false
@@ -228,6 +234,31 @@ export class WebGPUTerrainGenerator {
 
     setDebugMode(mode) {
         this.debugMode = mode;
+    }
+
+    _applyTerrainFeatures(features, base) {
+        const { features: normalized, unknown } = normalizeTerrainFeatures(features, base);
+        if (unknown.length) {
+            Logger.warn(`WebGPUTerrainGenerator: unknown terrain features ignored: ${unknown.join(', ')}`);
+        }
+        this.terrainFeatures = normalized;
+        this.terrainFeatureDisableMask = terrainFeatureDisableMask(normalized);
+        return unknown;
+    }
+
+    /**
+     * Switches terrain height-function terms on or off for tiles generated
+     * from now on, e.g. { mountains: false, meso3: false }. Keys not given keep
+     * their state. The caller regenerates resident tiles (qtDiag does it via
+     * GPUQuadtreeTerrain.refreshTiles). Returns the full on/off table.
+     */
+    setTerrainFeatures(features = {}) {
+        this._applyTerrainFeatures(features, this.terrainFeatures);
+        return describeTerrainFeatures(this.terrainFeatures);
+    }
+
+    getTerrainFeatures() {
+        return describeTerrainFeatures(this.terrainFeatures);
     }
 
     /**

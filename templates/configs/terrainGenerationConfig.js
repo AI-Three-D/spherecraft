@@ -60,6 +60,12 @@ export class TerrainGenerationConfig {
             seed: Math.round(num(ef.seed, 7))
         };
 
+        // Terrain feature toggles: { mountains: false, ... } switches a term
+        // of the height function off. Keys and descriptions:
+        // core/world/terrain-generator/terrainFeatureToggles.js. At runtime:
+        // qtDiag.setTerrainFeatures({...}) / qtDiag.terrainFeatures().
+        this.features = { ...(options.features ?? {}) };
+
         const fixes = options.fixes ?? {};
         this.fixes = {
             smoothMax: fixes.smoothMax !== false,

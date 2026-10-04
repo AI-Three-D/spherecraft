@@ -85,7 +85,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       // ================================================================
       //  Tier 1 — COMMON  (round domes, ~20–60 m visible)
       // ================================================================
-      {
+      if (terrainFeatureOn(TF_LONE_HILLS_COMMON)) {
           // A) Primary domes (800 m wavelength)
           let n1 = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_SMALL, 1, seed + 4100, 2.0, 0.5);
           let bump1 = loneHillDome(n1, 0.15);
@@ -101,7 +101,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       // ================================================================
       //  Tier 2 — UNCOMMON  (round domes, ~50–120 m visible)
       // ================================================================
-      {
+      if (terrainFeatureOn(TF_LONE_HILLS_UNCOMMON)) {
           let n = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_MEDIUM, 1, seed + 4200, 2.0, 0.5);
           let bump = loneHillDome(n, 0.30);
           totalHeight += bump * (HEIGHT_LONE_HILL_UNCOMMON / maxH) * sizeMod * commonMod * hillAmp;
@@ -125,7 +125,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
 // ================================================================
 //  Tier 4 — VERY RARE  (irregular round dome + cuts, ~200–500 m visible)
 // ================================================================
-{
+if (terrainFeatureOn(TF_LONE_HILLS_VERY_RARE)) {
     // Use the SAME noise field for placement+shape (like your other tiers),
     // but warp the domain so the hill footprint isn't a clean blob.
     let w = wavelength_m(SCALE_LONE_HILL_HUGE, GEOLOGY_SCALE);
@@ -146,8 +146,10 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
         var h = loneHillDome(n2, 0.42);
 
         // Cuts/crevices: ridged-ish noise on slope band
-        let cutN = fbmAuto(p.x, p.y, unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
-        h = applySlopeCuts(h, cutN, 0.18);
+        if (terrainFeatureOn(TF_LONE_HILL_CUTS)) {
+            let cutN = fbmAuto(p.x, p.y, unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
+            h = applySlopeCuts(h, cutN, 0.18);
+        }
 
         // Ramp from the gate so the hill starts at zero height (a bare
         // presence > 0.001 gate leaves a ~1-2 m step at the rim).
@@ -160,7 +162,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
   // ================================================================
 //  Tier 5 — EXCEPTIONAL  (two-peak landmark, rough edges + cuts)
 // ================================================================
-{
+if (terrainFeatureOn(TF_LONE_HILLS_LANDMARK)) {
     let w = wavelength_m(SCALE_LONE_HILL_LANDMARK, GEOLOGY_SCALE);
 
     // Two slightly different warps -> two nearby lobes/peaks, still coherent
@@ -190,12 +192,14 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
         var h = twoPeakBlend(hA, hB);
 
         // Cuts on mid-slope (shared cut noise so cuts "flow" across both lobes)
-        let cutN = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.09, 3, seed + 4521, 2.2, 0.55);
-        h = applySlopeCuts(h, cutN, 0.22);
+        if (terrainFeatureOn(TF_LONE_HILL_CUTS)) {
+            let cutN = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.09, 3, seed + 4521, 2.2, 0.55);
+            h = applySlopeCuts(h, cutN, 0.22);
 
-        // Optional subtle roughness (kept from your old code idea)
-        let detail = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
-        h *= (1.0 + detail * 0.10);
+            // Optional subtle roughness (kept from your old code idea)
+            let detail = fbmAuto(wx, wy, unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
+            h *= (1.0 + detail * 0.10);
+        }
 
         let presenceW = select(presence, (presence - 0.001) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
         totalHeight += h * presenceW
@@ -204,7 +208,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
 }
 
 
-{
+if (terrainFeatureOn(TF_ROLLING_HILLS)) {
 
 
     // 1) Make rolling hills less common (event-like regions)
@@ -334,7 +338,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       var totalHeight = dConst(0.0);
 
       // Tier 1 — common domes
-      if ((parts & LONE_HILLS_SMALL) != 0u) {
+      if ((parts & LONE_HILLS_SMALL) != 0u && terrainFeatureOn(TF_LONE_HILLS_COMMON)) {
           let n1 = fbmAuto_d(unitDir, SCALE_LONE_HILL_SMALL, 1, seed + 4100, 2.0, 0.5);
           let bump1 = loneHillDome_d(n1, 0.15);
           let n2 = fbmAuto_d(unitDir, SCALE_LONE_HILL_SMALL * 2.0, 1, seed + 4120, 2.0, 0.5);
@@ -344,14 +348,14 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       }
 
       // Tier 2 — uncommon domes
-      if ((parts & LONE_HILLS_SMALL) != 0u) {
+      if ((parts & LONE_HILLS_SMALL) != 0u && terrainFeatureOn(TF_LONE_HILLS_UNCOMMON)) {
           let n = fbmAuto_d(unitDir, SCALE_LONE_HILL_MEDIUM, 1, seed + 4200, 2.0, 0.5);
           let bump = loneHillDome_d(n, 0.30);
           totalHeight += dMul(dMul(bump * (HEIGHT_LONE_HILL_UNCOMMON / maxH), sizeMod), commonMod) * hillAmp;
       }
 
       // Tier 4 — very rare irregular dome with cuts
-      if ((parts & LONE_HILLS_BIG) != 0u) {
+      if ((parts & LONE_HILLS_BIG) != 0u && terrainFeatureOn(TF_LONE_HILLS_VERY_RARE)) {
           let n = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE, 1, seed + 4400, 2.0, 0.5);
           let presence = dSmoothstep(0.28, 0.42, n);
           if (presence.x > 0.001) {
@@ -359,7 +363,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
               let n2 = irregularizeNoiseNearBase_d(n, 0.42, edgeN, 0.10);
               var h = loneHillDome_d(n2, 0.42);
               // Slope cuts imitate erosion; the erosion filter replaces them.
-              if (!EROSION_FILTER_ENABLED) {
+              if (!erosionFilterActive() && terrainFeatureOn(TF_LONE_HILL_CUTS)) {
                   let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
                   h = applySlopeCuts_d(h, cutN, 0.18);
               }
@@ -369,7 +373,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       }
 
       // Tier 5 — exceptional two-peak landmark
-      if ((parts & LONE_HILLS_BIG) != 0u) {
+      if ((parts & LONE_HILLS_BIG) != 0u && terrainFeatureOn(TF_LONE_HILLS_LANDMARK)) {
           let nA = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4500, 2.0, 0.5);
           let nB = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4501, 2.0, 0.5);
           let nMax = dMax(nA, nB);
@@ -382,7 +386,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
               let hA = loneHillDome_d(nA2, 0.48);
               let hB = loneHillDome_d(nB2, 0.48);
               var h = twoPeakBlend_d(hA, hB);
-              if (!EROSION_FILTER_ENABLED) {
+              if (!erosionFilterActive() && terrainFeatureOn(TF_LONE_HILL_CUTS)) {
                   let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.09, 3, seed + 4521, 2.2, 0.55);
                   h = applySlopeCuts_d(h, cutN, 0.22);
                   let detail = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
@@ -394,7 +398,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       }
 
       // Rolling hill chains
-      if ((parts & LONE_HILLS_ROLLING) != 0u) {
+      if ((parts & LONE_HILLS_ROLLING) != 0u && terrainFeatureOn(TF_ROLLING_HILLS)) {
           let rollMask = rarityMaskAuto_d(
               unitDir,
               clampMacroScaleToPlanet(SCALE_ROLLING_HILL_DENSITY),
