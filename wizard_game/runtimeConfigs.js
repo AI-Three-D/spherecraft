@@ -927,7 +927,10 @@ export function createGameDataConfig() {
 	    // value instead, duplicated (not imported) only because this is a
 	    // hardcoded walking-skeleton demo with no authoring system yet.
 	    river: {
-	      enabled: true,
+	      // Off: the walking-skeleton demo river (straight 16-point carve +
+	      // simulated water patch) read as a ditch across the eroded terrain.
+	      // The water graph (core/world/hydrology/waterGraph.js) replaces it.
+	      enabled: false,
 	      anchorDir: { x: -1, y: 0, z: 0 },
 	      channelDir: { x: 0, y: 1, z: 0 },
 	      // Bed half-width; featureRiverHeight() now tapers out to 3.5x this

@@ -819,7 +819,12 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             // sitting on an un-carved hillside). Now: no channel found means
             // no river is placed at all.
             let riverFound = false;
-            if (terrainGenerator && device) {
+            // The walking-skeleton demo river (carve + water patch) runs only
+            // when terrain.river.enabled; off by default since 2026-10-04 (its
+            // straight 16-point carve read as a ditch; the water graph will
+            // provide real rivers).
+            const demoRiverEnabled = this.planetConfig?.terrainGeneration?.river?.enabled === true;
+            if (demoRiverEnabled && terrainGenerator && device) {
                 try {
                     const frame = computeSurfaceTangentFrame(anchorPos, origin);
                     const hydrology = new HydrologyPrecompute(device);
