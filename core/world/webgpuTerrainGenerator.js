@@ -200,6 +200,7 @@ export class WebGPUTerrainGenerator {
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
         this.slopeMode = this.terrainConfig?.slopeMode === 'stencil' ? 'stencil' : 'analytic';
+        this.erosionFilter = this.terrainConfig?.erosionFilter ?? { enabled: false };
         this.terrainFixes = {
             smoothMax: this.terrainConfig?.fixes?.smoothMax !== false,
             loneHillGates: this.terrainConfig?.fixes?.loneHillGates !== false

@@ -171,6 +171,11 @@ fn getTerrainAmplitudes(profile: TerrainProfile) -> TerrainAmplitudes {
 }
 
 fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f32 {
+    // With the erosion filter on, the height needs its own gradient, so every
+    // sphere evaluation goes through the dual path (same value everywhere).
+    if (EROSION_FILTER_ENABLED && uniforms.face >= 0) {
+        return calculateTerrainHeightD(seed, unitDir).x;
+    }
     let profile = getTerrainProfile();
     let amp = getTerrainAmplitudes(profile);
 
@@ -269,20 +274,38 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     if (landBlend.x > 0.0) {
         landHeight = regional.baseElevation * amp.continentalShelf;
 
+        var mountainsH = dConst(0.0);
         if (mountainness.x > 0.01) {
-            landHeight += dMul(featureMountainsHeight_d(unitDir, seed, regional, profile, amp), mountainness);
+            mountainsH = dMul(featureMountainsHeight_d(unitDir, seed, regional, profile, amp), mountainness);
+            landHeight += mountainsH;
         }
 
         // micro2 (DISP_MICRO2 = 0) contributes nothing; see featureMesoDetail_d.
         let mesoRoughness = dMax(regional.terrainType, regional.ruggedness * 0.5);
         let meso = featureMesoDetail_d(unitDir, seed, profile, mesoRoughness);
         let mesoMaxH = maxTerrainHeightM();
-        landHeight += meso.meso1 * (DISP_MESO1 / mesoMaxH);
-        landHeight += meso.meso2 * (DISP_MESO2 / mesoMaxH);
+        // meso1/meso2 imitate erosion detail; the erosion filter replaces them.
+        if (!EROSION_FILTER_ENABLED) {
+            landHeight += meso.meso1 * (DISP_MESO1 / mesoMaxH);
+            landHeight += meso.meso2 * (DISP_MESO2 / mesoMaxH);
+        }
         landHeight += meso.meso3 * (DISP_MESO3 / mesoMaxH);
 
-        landHeight += featureHighlandsHeight_d(unitDir, seed, regional, profile, amp);
-        landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp);
+        let highlandsH = featureHighlandsHeight_d(unitDir, seed, regional, profile, amp);
+        landHeight += highlandsH;
+        if (EROSION_FILTER_ENABLED) {
+            // Erode the large landforms only; their combined height is the
+            // relief that sets the erosion strength. Small domes, rolling
+            // hills and the carved features (river channel, erosion-seed
+            // pits) are added afterwards, so erosion neither spikes the small
+            // bumps nor fills the carves.
+            let bigHillsH = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_BIG);
+            landHeight += bigHillsH;
+            landHeight = erosionFilterLand_d(unitDir, landHeight, mountainsH + highlandsH + bigHillsH);
+            landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_SMALL | LONE_HILLS_ROLLING);
+        } else {
+            landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_ALL);
+        }
         landHeight += featureRiverHeight_d(unitDir, seed, regional, profile, amp);
         landHeight += featureErosionSeedsHeight_d(unitDir, seed, regional, profile, amp);
 

@@ -7,6 +7,81 @@ function wgslFloat(value, fallback) {
   return Number(n).toFixed(6);
 }
 
+const wgslNum = (v) => {
+  const s = String(Number(v));
+  return /[.eE]/.test(s) ? s : `${s}.0`;
+};
+const wgslVec = (arr) => `vec${arr.length}<f32>(${arr.map(wgslNum).join(', ')})`;
+
+// terrain.erosionFilter: the RuneVision filter applied to the land height in
+// calculateTerrainHeightD (sphere only). Emits EROSION_FILTER_ENABLED and
+// erosionFilterLand_d(); a pass-through stub when disabled, so the base
+// shader always compiles.
+function createErosionFilterLandWgsl(cfg, createFeature) {
+  const enabled = cfg?.enabled === true && typeof createFeature === 'function';
+  if (!enabled) {
+    return `
+const EROSION_FILTER_ENABLED: bool = false;
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> vec4<f32> { return land; }
+`;
+  }
+  return createFeature() + `
+const EROSION_FILTER_ENABLED: bool = true;
+
+fn erosionConfiguredParams() -> ErosionParams {
+    var prm: ErosionParams;
+    prm.strength = ${wgslNum(cfg.strength)};
+    prm.gullyWeight = ${wgslNum(cfg.gullyWeight)};
+    prm.detail = ${wgslNum(cfg.detail)};
+    prm.rounding = ${wgslVec(cfg.rounding)};
+    prm.onset = ${wgslVec(cfg.onset)};
+    prm.assumedSlope = ${wgslVec(cfg.assumedSlope)};
+    prm.scale = ${wgslNum(cfg.scale)};
+    prm.octaves = ${Math.round(cfg.octaves)};
+    prm.lacunarity = ${wgslNum(cfg.lacunarity)};
+    prm.gain = ${wgslNum(cfg.gain)};
+    prm.cellScale = ${wgslNum(cfg.cellScale)};
+    prm.normalization = ${wgslNum(cfg.normalization)};
+    prm.normalSquash = ${wgslNum(cfg.normalSquash)};
+    prm.seed = ${Math.round(cfg.seed)};
+    return prm;
+}
+
+// Erodes the land height (dual: normalized height + gradient w.r.t.
+// unitDir). reliefNorm: the summed height of the large landforms (mountains,
+// highlands, big lone hills; dual, normalized).
+// - Relief (metres) sets the strength: 0 below reliefStartM, full from
+//   reliefFullM. No relief, no filter.
+// - The fade target is the relief over fadeRangeM, mapped to [-1, 1].
+// - The height offset -fadeTarget * magnitude * (1 - initialMask) cancels the
+//   filter's fade-to-target exactly on flat input (flat ground keeps its
+//   height) and vanishes on slopes, so the landform is not reshaped.
+// Slope deltas are the filter's approximate derivatives (as in the
+// original), plus the first-order terms of the strength ramp and offset.
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> vec4<f32> {
+    let maxH = maxTerrainHeightM();
+    let R = noiseReferenceRadiusM();
+    let relief = reliefNorm * maxH;
+    let reliefMask = dSmoothstep(${wgslNum(cfg.reliefStartM)}, ${wgslNum(cfg.reliefFullM)}, relief);
+    if (reliefMask.x <= 0.0) { return land; }
+    var prm = erosionConfiguredParams();
+    prm.strength *= reliefMask.x;
+    let slope = terrainSurfaceGradient(land, unitDir) * maxH;
+    let fadeRaw = relief.x / ${wgslNum(cfg.fadeRangeM)} * 2.0 - 1.0;
+    let fadeTarget = clamp(fadeRaw, -1.0, 1.0);
+    let e = erosionFilterSphere(unitDir * R, unitDir, land.x * maxH, slope, fadeTarget, prm);
+    let keep = e.magnitude * (1.0 - e.initialMask);
+    let dh = e.heightDelta - fadeTarget * keep;
+    // d(fadeTarget)/d(unitDir) where unclamped.
+    let fadeGrad = select(vec3<f32>(0.0), relief.yzw * (2.0 / ${wgslNum(cfg.fadeRangeM)}), abs(fadeRaw) < 1.0);
+    // The output scales ~linearly with strength: d(dh)/dx += dh / mask * d(mask)/dx.
+    let maskGrad = reliefMask.yzw * (dh / max(reliefMask.x, 1e-3));
+    let dGrad = e.slopeDelta * (R / maxH) - fadeGrad * (keep / maxH) + maskGrad / maxH;
+    return land + vec4<f32>(dh / maxH, dGrad);
+}
+`;
+}
+
 export function createAdvancedTerrainComputeShader(options = {}) {
   const shaderBundle = options?.terrainShaderBundle;
   if (!shaderBundle) {
@@ -32,16 +107,19 @@ export function createAdvancedTerrainComputeShader(options = {}) {
     createTerrainFeatureHighlands,
     createTerrainFeatureRivers,
     createTerrainFeatureErosionSeeds,
+    createTerrainFeatureErosionFilter,
   } = shaderBundle;
   const outputFormat = options?.outputFormat ?? 'rgba32float';
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;
+  const hasBaseHeightBinding = hasHeightBindings && options?.hasBaseHeightBinding === true;
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
   const analyticSlope = options?.analyticSlope === true;
   // Terrain shape fixes (terrain.fixes); default on, off reproduces the old shapes.
   const fixSmoothMax = options?.terrainFixes?.smoothMax !== false;
   const fixLoneHillGates = options?.terrainFixes?.loneHillGates !== false;
+  const erosionFilterWgsl = createErosionFilterLandWgsl(options?.erosionFilter, createTerrainFeatureErosionFilter);
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
     Math.min(1.0, Number.isFinite(options?.authoredSplatSourceMinProbability)
@@ -165,6 +243,7 @@ ${createBiomeScoringWGSL({ maxBiomes })}
 @group(0) @binding(1) var outputTexture: texture_storage_2d<${outputFormat}, write>;
 ${hasHeightBindings ? '@group(0) @binding(2) var heightMap: texture_2d<f32>;' : ''}
 ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
+${hasBaseHeightBinding ? '@group(0) @binding(4) var baseHeightMap: texture_2d<f32>;' : ''}
 @group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
 
 const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY: f32 = ${wgslFloat(authoredSplatSourceMinProbability, 0.18)};
@@ -350,6 +429,42 @@ fn sampleBaseHeightProcedural(face: i32, u: f32, v: f32) -> f32 {
     return softClampHeight(baseH, -1.1, 1.8, 0.25);
 }
 
+// Base height (no micro) at a border-band neighbour of the normal pass.
+// - preferTexture and inside the tile: read heightBase (written by the base
+//   pass for this very texel).
+// - otherwise evaluate the terrain function at the texel's face UV, rebuilt
+//   with main's chunk + pixel / (size - 1) arithmetic for the tile that owns
+//   it (this tile, or the adjacent one beyond the edge).
+// Shared-edge agreement: an edge texel and the adjacent tile's edge texel
+// must see identical values for the two neighbours across the edge, so the
+// caller passes preferTexture = false for those; both tiles then evaluate
+// the same points in the same shader module. (The base pass is a different
+// module and may round the terrain function differently.) Across a face edge
+// it falls back to the caller's clamped u, v.
+fn borderBaseHeight(face: i32, u: f32, v: f32, coord: vec2<i32>, maxC: vec2<i32>, preferTexture: bool) -> f32 {
+${hasBaseHeightBinding ? `    let inside = all(coord >= vec2<i32>(0)) && all(coord <= maxC);
+    if (preferTexture && inside) {
+        return softClampHeight(textureLoad(baseHeightMap, coord, 0).r, -1.1, 1.8, 0.25);
+    }
+    let usesPaddedSingleChunk = abs(uniforms.uvOffset.x) > 0.0 || abs(uniforms.uvOffset.y) > 0.0;
+    let chunks = max(uniforms.chunkGridSize, 1);
+    if (uniforms.chunkSize > 1 && !usesPaddedSingleChunk && maxC.x == uniforms.chunkSize - 1 && maxC.y == uniforms.chunkSize - 1) {
+        let below = coord < vec2<i32>(0);
+        let above = coord > maxC;
+        let chunkShift = select(vec2<i32>(0), vec2<i32>(-1), below) + select(vec2<i32>(0), vec2<i32>(1), above);
+        let local = select(select(coord, vec2<i32>(1), above), maxC - vec2<i32>(1), below);
+        let chunk = uniforms.chunkCoord + chunkShift;
+        if (all(chunk >= vec2<i32>(0)) && all(chunk < vec2<i32>(chunks))) {
+            let chunkSizePx = vec2<f32>(f32(uniforms.chunkSize));
+            let localUV = vec2<f32>(local) / max(chunkSizePx - vec2<f32>(1.0), vec2<f32>(1.0));
+            let totalChunks = f32(chunks);
+            let uvN = (vec2<f32>(f32(chunk.x), f32(chunk.y)) + localUV) / totalChunks + uniforms.uvOffset;
+            return sampleBaseHeightProcedural(face, uvN.x, uvN.y);
+        }
+    }
+` : ''}    return sampleBaseHeightProcedural(face, u, v);
+}
+
 fn computeNormalSlopeFromHeightMapSphere(
     face: i32, u: f32, v: f32, du: f32, dv: f32,
     coordC: vec2<i32>
@@ -386,12 +501,18 @@ fn computeNormalSlopeFromHeightMapSphere(
     let edgeDistX = min(coordC.x, maxC.x - coordC.x);
     let edgeDistY = min(coordC.y, maxC.y - coordC.y);
     let edgeDist = min(edgeDistX, edgeDistY);
-    if (edgeDist <= 2) {
+    // blendT reaches 1 at edgeDist 2: those texels use the height map only.
+    if (edgeDist < 2) {
         let blendT = clamp(f32(edgeDist) / 2.0, 0.0, 1.0);
-        let bR = sampleBaseHeightProcedural(face, uR, v);
-        let bL = sampleBaseHeightProcedural(face, uL, v);
-        let bU = sampleBaseHeightProcedural(face, u, vU);
-        let bD = sampleBaseHeightProcedural(face, u, vD);
+        // On an edge column (row), the across-edge neighbours are evaluated,
+        // not read, so the adjacent tile computes the same values (see
+        // borderBaseHeight).
+        let readX = coordC.x != 0 && coordC.x != maxC.x;
+        let readY = coordC.y != 0 && coordC.y != maxC.y;
+        let bR = borderBaseHeight(face, uR, v, coordC + vec2<i32>(1, 0), maxC, readX);
+        let bL = borderBaseHeight(face, uL, v, coordC - vec2<i32>(1, 0), maxC, readX);
+        let bU = borderBaseHeight(face, u, vU, coordC + vec2<i32>(0, 1), maxC, readY);
+        let bD = borderBaseHeight(face, u, vD, coordC - vec2<i32>(0, 1), maxC, readY);
         hR = mix(bR, hR, blendT);
         hL = mix(bL, hL, blendT);
         hU = mix(bU, hU, blendT);
@@ -449,6 +570,7 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
 const TERRAIN_FIX_SMOOTH_MAX: bool = ${fixSmoothMax};
 const TERRAIN_FIX_LONE_HILL_GATES: bool = ${fixLoneHillGates};
 `,
+    erosionFilterWgsl,
     createTerrainCommon(),
     createSurfaceCommon({
         tileCategories: options.tileCategories,

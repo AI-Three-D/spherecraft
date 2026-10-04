@@ -1046,9 +1046,11 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 }
 
                 if (this._isHeightInputTerrainPass(terrainPass)) {
+                    const withBaseHeight = terrainPass.outputType === 1 && !!terrainPass.baseHeightTexture;
                     const { pipeline, bindGroupLayout } = this._getHeightInputPipelineForFormat(
                         terrainPass.format,
-                        terrainPass.heightTextureFormat
+                        terrainPass.heightTextureFormat,
+                        { withBaseHeight }
                     );
                     return {
                         pipeline,
@@ -1056,7 +1058,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         entries: [
                             { binding: 0, resource: { buffer: uniformBuffer } },
                             { binding: 1, resource: terrainPass.texture.createView() },
-                            { binding: 2, resource: terrainPass.heightTexture.createView() }
+                            { binding: 2, resource: terrainPass.heightTexture.createView() },
+                            ...(withBaseHeight ? [{ binding: 4, resource: terrainPass.baseHeightTexture.createView() }] : [])
                         ]
                     };
                 }

@@ -412,7 +412,9 @@ this._maxGpuFencesObserved = 0;
                 format: normalFormat,
                 textureSize: this.textureSize,
                 heightTexture: gpuHeight,
-                heightTextureFormat: heightFormat
+                heightTextureFormat: heightFormat,
+                // Base height (heightBase.r) for the border-band normals.
+                baseHeightTexture: gpuHeightBase ?? null
             });
         }
         if (gpuMacro) {

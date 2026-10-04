@@ -410,6 +410,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                     analyticSlope: this.slopeMode === 'analytic',
                     terrainFixes: this.terrainFixes,
+                    erosionFilter: this.erosionFilter,
                     ...extra,
                 };
             },
@@ -418,19 +419,23 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 return `${format || 'rgba32float'}|h:${gpuFormatSampleType(heightFormat || 'r32float')}`;
             },
 
-        _getHeightInputPipelineForFormat(format, heightFormat = 'r32float') {
+        // withBaseHeight: also binds heightBase (rgba32float, binding 4) so the
+        // normal pass reads in-tile border base heights instead of evaluating
+        // the terrain function for them.
+        _getHeightInputPipelineForFormat(format, heightFormat = 'r32float', { withBaseHeight = false } = {}) {
                 const fmt = format || 'rgba32float';
                 const inputFmt = heightFormat || 'r32float';
-                const cacheKey = this._getHeightInputPipelineCacheKey(fmt, inputFmt);
+                const cacheKey = this._getHeightInputPipelineCacheKey(fmt, inputFmt) + (withBaseHeight ? '|base' : '');
                 const cached = this._heightInputPipelineCache?.get(cacheKey);
                 if (cached) return cached;
 
                 const shaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
                     outputFormat: fmt,
                     hasHeightBindings: true,
+                    hasBaseHeightBinding: withBaseHeight,
                 }));
                 const shaderModule = this.device.createShaderModule({
-                    label: `Height Input Terrain Compute (${fmt})`,
+                    label: `Height Input Terrain Compute (${fmt}${withBaseHeight ? ', base height' : ''})`,
                     code: shaderCode
                 });
 
@@ -457,7 +462,15 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                                 sampleType: gpuFormatSampleType(inputFmt),
                                 viewDimension: '2d'
                             }
-                        }
+                        },
+                        ...(withBaseHeight ? [{
+                            binding: 4,
+                            visibility: GPUShaderStage.COMPUTE,
+                            texture: {
+                                sampleType: gpuFormatSampleType('rgba32float'),
+                                viewDimension: '2d'
+                            }
+                        }] : [])
                     ]
                 });
 

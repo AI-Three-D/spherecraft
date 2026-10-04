@@ -307,9 +307,16 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
   // Analytic-derivative twin of featureLoneHillsHeight (sphere). Warps are
   // skipped as warpFlatForNoise skips them on the sphere; tier 3 stays off
   // with ENABLE_LONE_HILL_CRATERS.
+  // Tier groups for featureLoneHillsHeight_d's parts mask.
+  const LONE_HILLS_SMALL: u32 = 1u;    // tiers 1-2: common and uncommon domes
+  const LONE_HILLS_BIG: u32 = 2u;      // tiers 4-5: very rare dome, landmark
+  const LONE_HILLS_ROLLING: u32 = 4u;  // rolling hill chains
+  const LONE_HILLS_ALL: u32 = 7u;
+
   fn featureLoneHillsHeight_d(
       unitDir: vec3<f32>, seed: i32,
-      regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes
+      regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes,
+      parts: u32
   ) -> vec4<f32> {
       let hillAmp = amp.loneHillsHeight;
       if (hillAmp < 0.001) { return dConst(0.0); }
@@ -327,7 +334,7 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       var totalHeight = dConst(0.0);
 
       // Tier 1 — common domes
-      {
+      if ((parts & LONE_HILLS_SMALL) != 0u) {
           let n1 = fbmAuto_d(unitDir, SCALE_LONE_HILL_SMALL, 1, seed + 4100, 2.0, 0.5);
           let bump1 = loneHillDome_d(n1, 0.15);
           let n2 = fbmAuto_d(unitDir, SCALE_LONE_HILL_SMALL * 2.0, 1, seed + 4120, 2.0, 0.5);
@@ -337,29 +344,32 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
       }
 
       // Tier 2 — uncommon domes
-      {
+      if ((parts & LONE_HILLS_SMALL) != 0u) {
           let n = fbmAuto_d(unitDir, SCALE_LONE_HILL_MEDIUM, 1, seed + 4200, 2.0, 0.5);
           let bump = loneHillDome_d(n, 0.30);
           totalHeight += dMul(dMul(bump * (HEIGHT_LONE_HILL_UNCOMMON / maxH), sizeMod), commonMod) * hillAmp;
       }
 
       // Tier 4 — very rare irregular dome with cuts
-      {
+      if ((parts & LONE_HILLS_BIG) != 0u) {
           let n = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE, 1, seed + 4400, 2.0, 0.5);
           let presence = dSmoothstep(0.28, 0.42, n);
           if (presence.x > 0.001) {
               let edgeN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.22, 2, seed + 4413, 2.0, 0.5);
               let n2 = irregularizeNoiseNearBase_d(n, 0.42, edgeN, 0.10);
               var h = loneHillDome_d(n2, 0.42);
-              let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
-              h = applySlopeCuts_d(h, cutN, 0.18);
+              // Slope cuts imitate erosion; the erosion filter replaces them.
+              if (!EROSION_FILTER_ENABLED) {
+                  let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
+                  h = applySlopeCuts_d(h, cutN, 0.18);
+              }
               let presenceW = select(presence, (presence - dConst(0.001)) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
               totalHeight += dMul(dMul(h, presenceW) * (HEIGHT_LONE_HILL_VERY_RARE / maxH), sizeMod) * hillAmp;
           }
       }
 
       // Tier 5 — exceptional two-peak landmark
-      {
+      if ((parts & LONE_HILLS_BIG) != 0u) {
           let nA = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4500, 2.0, 0.5);
           let nB = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4501, 2.0, 0.5);
           let nMax = dMax(nA, nB);
@@ -372,17 +382,19 @@ fn loneHillMesaOrganic01(x01: f32, edgeJitter: f32, skirtJitter: f32) -> f32 {
               let hA = loneHillDome_d(nA2, 0.48);
               let hB = loneHillDome_d(nB2, 0.48);
               var h = twoPeakBlend_d(hA, hB);
-              let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.09, 3, seed + 4521, 2.2, 0.55);
-              h = applySlopeCuts_d(h, cutN, 0.22);
-              let detail = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
-              h = dMul(h, dConst(1.0) + detail * 0.10);
+              if (!EROSION_FILTER_ENABLED) {
+                  let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.09, 3, seed + 4521, 2.2, 0.55);
+                  h = applySlopeCuts_d(h, cutN, 0.22);
+                  let detail = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
+                  h = dMul(h, dConst(1.0) + detail * 0.10);
+              }
               let presenceW = select(presence, (presence - dConst(0.001)) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
               totalHeight += dMul(h, presenceW) * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
           }
       }
 
       // Rolling hill chains
-      {
+      if ((parts & LONE_HILLS_ROLLING) != 0u) {
           let rollMask = rarityMaskAuto_d(
               unitDir,
               clampMacroScaleToPlanet(SCALE_ROLLING_HILL_DENSITY),

@@ -48,6 +48,7 @@ import { createTerrainFeatureMesoDetail } from '../templates/terrain-shaders/fea
 import { createTerrainFeatureHighlands } from '../templates/terrain-shaders/features/featureHighlands.wgsl.js';
 import { createTerrainFeatureRivers } from '../templates/terrain-shaders/features/featureRivers.wgsl.js';
 import { createTerrainFeatureErosionSeeds } from '../templates/terrain-shaders/features/featureErosionSeeds.wgsl.js';
+import { createTerrainFeatureErosionFilter } from '../templates/terrain-shaders/features/featureErosionFilter.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { ErosionSeedVerifier } from '../core/world/hydrology/ErosionSeedVerifier.js';
@@ -149,15 +150,16 @@ const TERRAIN_SHADER_BUNDLE = {
     createSurfaceCommon,
     createTerrainFeatureContinents,
     createTerrainFeaturePlains,
-    createTerrainFeatureHills,
+   /* createTerrainFeatureHills,
     createTerrainFeatureMountains,
     createTerrainFeatureCanyons,
     createTerrainFeatureLoneHills,
     createTerrainFeatureMicro,
     createTerrainFeatureMesoDetail,
     createTerrainFeatureHighlands,
-    createTerrainFeatureRivers,
+    createTerrainFeatureRivers,*/
     createTerrainFeatureErosionSeeds,
+    createTerrainFeatureErosionFilter,
     baseGenerators: {
         earthLike: {
             constants: createEarthlikeConstants,

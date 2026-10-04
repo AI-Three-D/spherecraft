@@ -14,6 +14,7 @@ import { createTerrainFeatureMesoDetail } from '../../../../templates/terrain-sh
 import { createTerrainFeatureHighlands } from '../../../../templates/terrain-shaders/features/featureHighlands.wgsl.js';
 import { createTerrainFeatureRivers } from '../../../../templates/terrain-shaders/features/featureRivers.wgsl.js';
 import { createTerrainFeatureErosionSeeds } from '../../../../templates/terrain-shaders/features/featureErosionSeeds.wgsl.js';
+import { createTerrainFeatureErosionFilter } from '../../../../templates/terrain-shaders/features/featureErosionFilter.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../../../../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { TILE_TYPES, TILE_CATEGORIES } from '../../../../templates/configs/tileTypes.js';
 
@@ -37,6 +38,7 @@ const TERRAIN_SHADER_BUNDLE = {
     createTerrainFeatureHighlands,
     createTerrainFeatureRivers,
     createTerrainFeatureErosionSeeds,
+    createTerrainFeatureErosionFilter,
     baseGenerators: {
         earthLike: { constants: createEarthlikeConstants, base: createEarthlikeBase }
     }
@@ -66,7 +68,10 @@ describe('terrain generation compute shader', () => {
         heightInput: { hasHeightBindings: true },
         micro: { hasHeightBindings: true, hasTileBindings: true },
         terrainAnalyticSlope: { analyticSlope: true },
-        heightInputAnalyticSlope: { hasHeightBindings: true, analyticSlope: true }
+        heightInputAnalyticSlope: { hasHeightBindings: true, analyticSlope: true },
+        heightInputBaseHeight: { hasHeightBindings: true, hasBaseHeightBinding: true },
+        erosionFilter: { analyticSlope: true, erosionFilter: { enabled: true, scale: 1500, strength: 0.22, gullyWeight: 0.5, detail: 1.5, rounding: [0.1, 0, 0.1, 2], onset: [1.25, 1.25, 2.8, 1.5], assumedSlope: [0.7, 1], octaves: 5, lacunarity: 2, gain: 0.5, cellScale: 0.7, normalization: 0.5, normalSquash: 2.5, fadeRangeM: 1200, reliefStartM: 60, reliefFullM: 500, seed: 7 } },
+        microErosionFilter: { hasHeightBindings: true, hasTileBindings: true, erosionFilter: { enabled: true, scale: 1500, strength: 0.22, gullyWeight: 0.5, detail: 1.5, rounding: [0.1, 0, 0.1, 2], onset: [1.25, 1.25, 2.8, 1.5], assumedSlope: [0.7, 1], octaves: 5, lacunarity: 2, gain: 0.5, cellScale: 0.7, normalization: 0.5, normalSquash: 2.5, fadeRangeM: 1200, reliefStartM: 60, reliefFullM: 500, seed: 7 } }
     };
     for (const [name, extra] of Object.entries(variants)) {
         it(`${name} variant compiles`, () => {

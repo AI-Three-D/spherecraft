@@ -253,6 +253,8 @@ struct ErosionResultSphere {
     magnitude: f32,
     ridgeMap: f32,
     fadeTarget: f32,
+    // The mask applied to the first octave (0 on flat input, 1 on slopes).
+    initialMask: f32,
 }
 
 // ErosionFilter on the sphere. posM: point in metres (unitDir * radius),
@@ -272,6 +274,7 @@ fn erosionFilterSphere(
 
     let roundingForInput = mix(prm.rounding.y, prm.rounding.x, erosionClamp01(fadeTarget + 0.5)) * prm.rounding.z;
     var combiMask = erosionEaseOut(erosionSmoothStart(slopeLength * prm.onset.x, roundingForInput * prm.onset.x));
+    let initialMask = combiMask;
 
     var ridgeMapCombiMask = erosionEaseOut(slopeLength * prm.onset.z);
     var ridgeMapFadeTarget = fadeTarget;
@@ -314,6 +317,7 @@ fn erosionFilterSphere(
     r.magnitude = magnitude;
     r.ridgeMap = ridgeMapFadeTarget * (1.0 - ridgeMapCombiMask);
     r.fadeTarget = fadeTarget;
+    r.initialMask = initialMask;
     return r;
 }
 

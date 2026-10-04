@@ -26,6 +26,40 @@ export class TerrainGenerationConfig {
         //   loneHillGates - lone-hill tiers 4/5 and rolling hills ramp from
         //                   their presence gate instead of starting with a
         //                   1-6 m vertical step.
+        // RuneVision erosion filter (templates/terrain-shaders/features/
+        // featureErosionFilter.wgsl.js, MPL-2.0). When enabled it replaces the
+        // noise that imitated erosion (meso1/meso2, lone-hill slope cuts and
+        // landmark detail) and erodes the remaining landform. Sphere only.
+        // All lengths in metres; see the filter file for the parameters.
+        const ef = options.erosionFilter ?? {};
+        const num = (v, d) => (Number.isFinite(v) ? v : d);
+        const vec = (v, d) => (Array.isArray(v) && v.length === d.length && v.every(Number.isFinite) ? v.slice() : d);
+        this.erosionFilter = {
+            enabled: ef.enabled !== false,
+            scale: num(ef.scale, 1500),
+            strength: num(ef.strength, 0.22),
+            gullyWeight: num(ef.gullyWeight, 0.5),
+            detail: num(ef.detail, 1.5),
+            rounding: vec(ef.rounding, [0.1, 0.0, 0.1, 2.0]),
+            onset: vec(ef.onset, [1.25, 1.25, 2.8, 1.5]),
+            assumedSlope: vec(ef.assumedSlope, [0.7, 1.0]),
+            octaves: Math.max(1, Math.min(8, Math.round(num(ef.octaves, 5)))),
+            lacunarity: num(ef.lacunarity, 2.0),
+            gain: num(ef.gain, 0.5),
+            cellScale: num(ef.cellScale, 0.7),
+            normalization: num(ef.normalization, 0.5),
+            normalSquash: num(ef.normalSquash, 2.5),
+            // Height above the regional base that maps to the filter's fade
+            // target range [-1, 1] (valleys .. peaks).
+            fadeRangeM: num(ef.fadeRangeM, 1200),
+            // Strength ramps with the landform's height above the regional
+            // base: none below reliefStartM (plains, valley floors, sea floor),
+            // full from reliefFullM. Where it is zero the filter is skipped.
+            reliefStartM: num(ef.reliefStartM, 150),
+            reliefFullM: num(ef.reliefFullM, 600),
+            seed: Math.round(num(ef.seed, 7))
+        };
+
         const fixes = options.fixes ?? {};
         this.fixes = {
             smoothMax: fixes.smoothMax !== false,
