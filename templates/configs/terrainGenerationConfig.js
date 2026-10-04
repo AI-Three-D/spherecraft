@@ -27,12 +27,15 @@ export class TerrainGenerationConfig {
             // flat. At summits and saddles the gully direction spins around a
             // point; with a sharp onset that left pinch points and closed
             // crease rings around hilltops.
-            // rounding.y (crease rounding) 0.1 (demo: 0.0): gully bottoms ~17 m
-            // wide instead of zero-width V creases (which alias on the tile grid).
-            // rounding.x (ridge rounding) 0.3 (demo: 0.1): the finer octaves
-            // fade out over a wider band along each coarser crest. At 0.1 the
-            // band was narrow, so most spurs carried a ~60 m wide raised cap
-            // above concave shoulders (a "spinal cord" down every ridge).
+            // On the sphere terrain rounding.x / .y / .z set only the input
+            // mask (first-octave onset); the octaves' ridge and crease
+            // rounding come from styleRidgeRounding / styleCreaseRounding
+            // (below). .w (per-octave multiplier) applies as is.
+            // Crease rounding >= 0.1 (demo: 0.0): zero-width V gully bottoms
+            // alias on the tile grid. Ridge rounding 0.1 (demo) made a narrow
+            // band along each coarser crest where the finer octaves fade
+            // out: a ~60 m wide raised cap above concave shoulders down most
+            // spurs ("spinal cord"); 0.2+ softens it.
             rounding: vec(ef.rounding, [0.3, 0.1, 1.0, 2.0]),
             onset: vec(ef.onset, [0.9, 1.25, 2.8, 1.5]),
             assumedSlope: vec(ef.assumedSlope, [0.7, 1.0]),
@@ -73,6 +76,25 @@ export class TerrainGenerationConfig {
             lowAmountRounding: num(ef.lowAmountRounding, 1.0),
             softAmountFull: num(ef.softAmountFull, 0.15),
             softAmountNone: num(ef.softAmountNone, 0.6),
+            // Mountain style by location: a noise field (wavelength
+            // styleScaleM) from 0 = rounded (old, grassy ridges) to
+            // 1 = jagged (sharp crests, deep couloirs). styleBias shifts
+            // the mix: -1 all rounded, 0 about half each, +1 all jagged.
+            // Each pair below is [rounded, jagged]:
+            // - styleStrength multiplies the erosion amount;
+            // - styleRidgeRounding / styleCreaseRounding replace rounding.x
+            //   / rounding.y (before the low-amount softening);
+            // - styleMountainHeight scales the mountain ranges, and rounded
+            //   ranges use their smooth shape (jagged: the ridged one).
+            // Rounding compounds per octave (x rounding.w), so values much
+            // above 0.5 suppress the finer octaves and with them the
+            // branching valleys.
+            styleScaleM: num(ef.styleScaleM, 40000),
+            styleBias: num(ef.styleBias, 0.0),
+            styleStrength: vec(ef.styleStrength, [0.8, 1.3]),
+            styleRidgeRounding: vec(ef.styleRidgeRounding, [0.4, 0.2]),
+            styleCreaseRounding: vec(ef.styleCreaseRounding, [0.3, 0.1]),
+            styleMountainHeight: vec(ef.styleMountainHeight, [0.8, 1.15]),
             seed: Math.round(num(ef.seed, 7))
         };
 

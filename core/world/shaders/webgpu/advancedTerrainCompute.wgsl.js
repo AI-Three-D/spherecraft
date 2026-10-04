@@ -38,11 +38,25 @@ fn erosionConfiguredParams() -> ErosionParams {
     prm.normalization = ${wgslNum(cfg.normalization)};
     prm.normalSquash = ${wgslNum(cfg.normalSquash)};
     prm.seed = ${Math.round(cfg.seed)};
+    prm.inputRounding = -1.0;
     return prm;
 }
 
 // Fraction of meso1/meso2 kept where erosion runs at full amount.
 const EROSION_MESO_KEEP: f32 = ${wgslNum(cfg.mesoKeep)};
+
+// Mountain style (dual, 0..1): 0 = rounded, 1 = jagged. A noise field
+// with wavelength styleScaleM, shifted by styleBias.
+fn terrainStyle_d(unitDir: vec3<f32>) -> vec4<f32> {
+    let n = fbmAuto_d(unitDir, ${wgslNum(cfg.styleScaleM / 1000)}, 3, uniforms.seed + 7300, 2.0, 0.5);
+    return dSmoothstep(-0.15, 0.15, n + dConst(${wgslNum(cfg.styleBias)}));
+}
+
+// Mountain range height scale for a style (dual): styleMountainHeight
+// [rounded, jagged].
+fn styleMountainHeight_d(style: vec4<f32>) -> vec4<f32> {
+    return dConst(${wgslNum(cfg.styleMountainHeight[0])}) + style * ${wgslNum(cfg.styleMountainHeight[1] - cfg.styleMountainHeight[0])};
+}
 
 // Relief ramp (dual, 0..1) of the erosion amount: reliefNorm (normalized
 // height of the large landforms) from reliefStartM to reliefFullM.
@@ -53,21 +67,25 @@ fn erosionReliefRamp_d(reliefNorm: vec4<f32>) -> vec4<f32> {
 struct ErosionLandResult {
     // Height change (dual, normalized) to add to the terrain.
     delta: vec4<f32>,
-    // Local erosion amount 0..1 (dual): regional variation x relief.
+    // Local erosion amount (dual, 0 .. styleStrength[1]): regional
+    // variation x relief x style strength x steepness.
     amount: vec4<f32>,
 }
 
 // Erodes a slope-continuous landform (dual: normalized height + gradient
 // w.r.t. unitDir) and returns the height change. reliefNorm: the summed
 // height of the large landforms (mountains, highlands, big lone hills).
-// - Amount = variation x mix(lowReliefAmount, 1, relief ramp) x steepness:
+// - Amount = variation x mix(lowReliefAmount, 1, relief ramp) x style
+//   strength x steepness:
 //   variation is a noise field (wavelength variationScaleM) between
 //   variationMin and 1, so some regions erode hard and others stay smooth;
 //   the relief ramp goes from reliefStartM to reliefFullM; steepness ramps
 //   with the input slope from sharpSlopeStart to sharpSlopeFull.
 //   Strength = strength x amount.
-// - Rounding: ridges and creases blend to lowAmountRounding as the amount
-//   falls from softAmountNone to softAmountFull.
+//   Style strength goes from styleStrength[0] (rounded) to [1] (jagged).
+// - Rounding: ridge and crease rounding from the style pairs, blended to
+//   lowAmountRounding as the amount falls from softAmountNone to
+//   softAmountFull.
 // - Fade target: relief over fadeRangeM, mapped to [-1, 1].
 // - Height offset -fadeTarget * initialFadeWeight removes the initial fade
 //   target's whole contribution (it reaches every octave through the stacked
@@ -77,7 +95,7 @@ struct ErosionLandResult {
 //   hilltops and valley floors.)
 // Slope deltas are the filter's approximate derivatives (as in the
 // original), plus the first-order terms of the amount and the offset.
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> ErosionLandResult {
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>) -> ErosionLandResult {
     var r: ErosionLandResult;
     r.delta = vec4<f32>(0.0);
     r.amount = vec4<f32>(0.0);
@@ -87,7 +105,8 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let reliefRamp = erosionReliefRamp_d(reliefNorm);
     let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
     let variation = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
-    let reliefAmount = dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)}));
+    let styleStrength = dConst(${wgslNum(cfg.styleStrength[0])}) + style * ${wgslNum(cfg.styleStrength[1] - cfg.styleStrength[0])};
+    let reliefAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
     // Steepness: full erosion on steep ground, fading out toward flat ground.
     // Summits, saddles and valley floors are where the gully direction spins
     // around a point (pinches, bowties); this keeps gullies away from them
@@ -103,10 +122,18 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     // Light erosion gets rounded ridges and creases: with the default sharp
     // creases, shallow gullies read as thin etched lines on gentle terrain.
     let soft = 1.0 - smoothstep(${wgslNum(cfg.softAmountFull)}, ${wgslNum(cfg.softAmountNone)}, amount.x);
-    prm.rounding.x = mix(prm.rounding.x, ${wgslNum(cfg.lowAmountRounding)}, soft);
-    prm.rounding.y = mix(prm.rounding.y, ${wgslNum(cfg.lowAmountRounding)}, soft);
     let fadeRaw = relief.x / ${wgslNum(cfg.fadeRangeM)} * 2.0 - 1.0;
     let fadeTarget = clamp(fadeRaw, -1.0, 1.0);
+    // Input mask (first octave onset): the configured rounding, softened
+    // at low amount. The style sets only the octaves' ridge and crease
+    // rounding; through the input mask a high rounding also held back the
+    // first octave, and rounded mountains lost their big valleys.
+    let inputBase = mix(${wgslNum(cfg.rounding[1])}, ${wgslNum(cfg.rounding[0])}, clamp(fadeTarget + 0.5, 0.0, 1.0));
+    prm.inputRounding = mix(inputBase, ${wgslNum(cfg.lowAmountRounding)}, soft) * ${wgslNum(cfg.rounding[2])};
+    let ridgeRounding = mix(${wgslNum(cfg.styleRidgeRounding[0])}, ${wgslNum(cfg.styleRidgeRounding[1])}, style.x);
+    let creaseRounding = mix(${wgslNum(cfg.styleCreaseRounding[0])}, ${wgslNum(cfg.styleCreaseRounding[1])}, style.x);
+    prm.rounding.x = mix(ridgeRounding, ${wgslNum(cfg.lowAmountRounding)}, soft);
+    prm.rounding.y = mix(creaseRounding, ${wgslNum(cfg.lowAmountRounding)}, soft);
     let e = erosionFilterSphere(unitDir * R, unitDir, land.x * maxH, slope, fadeTarget, prm);
     let keep = e.initialFadeWeight;
     let dh = e.heightDelta - fadeTarget * keep;

@@ -58,6 +58,9 @@ struct ErosionParams {
     normalization: f32,
     normalSquash: f32,
     seed: i32,
+    // Sphere filter only: rounding of the input mask (the onset of the
+    // first octave). Negative: derived from rounding as in the original.
+    inputRounding: f32,
 }
 
 fn erosionPcg3(v0: vec3<u32>) -> vec3<u32> {
@@ -276,7 +279,8 @@ fn erosionFilterSphere(
     var magnitude = 0.0;
     var roundingMult = 1.0;
 
-    let roundingForInput = mix(prm.rounding.y, prm.rounding.x, erosionClamp01(fadeTarget + 0.5)) * prm.rounding.z;
+    let roundingDerived = mix(prm.rounding.y, prm.rounding.x, erosionClamp01(fadeTarget + 0.5)) * prm.rounding.z;
+    let roundingForInput = select(roundingDerived, prm.inputRounding, prm.inputRounding >= 0.0);
     var combiMask = erosionEaseOut(erosionSmoothStart(slopeLength * prm.onset.x, roundingForInput * prm.onset.x));
     let initialMask = combiMask;
     var fadeProduct = 1.0;
@@ -348,6 +352,7 @@ fn erosionDefaultParams(scale: f32, seed: i32) -> ErosionParams {
     prm.normalization = 0.5;
     prm.normalSquash = 0.0;
     prm.seed = seed;
+    prm.inputRounding = -1.0;
     return prm;
 }
 `;

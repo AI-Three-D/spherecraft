@@ -202,14 +202,20 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     if (landBlend.x > 0.0) {
         landHeight = select(dConst(0.0), regional.baseElevation * amp.continentalShelf, terrainFeatureOn(TF_CONTINENT_RELIEF));
 
+        // Mountain style by location, 0 = rounded .. 1 = jagged (erosion
+        // strength and rounding, mountain shape and height).
+        let style = terrainStyle_d(unitDir);
+
         // Mountains: the full height, and the slope-continuous version that
-        // drives the erosion filter (MountainHeightD).
+        // drives the erosion filter (MountainHeightD). Rounded ranges are
+        // their smooth shape, jagged ones the ridged one, scaled by
+        // styleMountainHeight.
         var mountainsH = dConst(0.0);
         var mountainsSmooth = dConst(0.0);
         if (mountainness.x > 0.01 && terrainFeatureOn(TF_MOUNTAINS)) {
-            let mountainW = dGateRamp(mountainness, 0.01);
+            let mountainW = dMul(dGateRamp(mountainness, 0.01), styleMountainHeight_d(style));
             let m = featureMountainsHeight2_d(unitDir, seed, regional, profile, amp);
-            mountainsH = dMul(m.full, mountainW);
+            mountainsH = dMul(dMix(m.smoothed, m.full, style), mountainW);
             mountainsSmooth = dMul(m.smoothed, mountainW);
             landHeight += mountainsH;
         }
@@ -259,7 +265,7 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             let smallHillsH = dMul(smallHillsRaw, dMul(lowRelief, lowRelief));
             landHeight += bigHillsH + smallHillsH;
             let erosionInput = landHeight - mountainsH + mountainsSmooth;
-            let er = erosionFilterLand_d(unitDir, erosionInput, relief);
+            let er = erosionFilterLand_d(unitDir, erosionInput, relief, style);
             landHeight += er.delta;
             landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_ROLLING);
             let mesoW = dConst(1.0) - er.amount * (1.0 - EROSION_MESO_KEEP);
