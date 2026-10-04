@@ -1,118 +1,234 @@
 // core/world/hydrology/HydrologyGrid.js
 //
-// Topology grid for the water graph (IMPLEMENTATION_PLAN 6.1): terrain
-// height (metres) and precipitation on 6 x N x N cube-sphere cells, sampled
-// on the GPU with the production terrain shader and read back.
+// Terrain sampling for the water system, on the GPU with the production
+// terrain shader, read back to the CPU:
+// - the topology grid for the water graph (IMPLEMENTATION_PLAN 6.1): height
+//   (metres) and precipitation on 6 x N x N cube-sphere cells;
+// - local patches for the fine lake solve (lakeRefine.js): height on a
+//   gnomonic tangent-plane grid around a centre direction.
 //
-// Cell layout matches waterGraph.js: id = face * N * N + j * N + i, cell
-// centre at face UV ((i + 0.5) / N, (j + 0.5) / N). Heights are the mean of
-// 2 x 2 samples inside the cell (less aliasing of sub-cell detail).
+// Grid cell layout matches waterGraph.js: id = face * N * N + j * N + i, cell
+// centre at face UV ((i + 0.5) / N, (j + 0.5) / N). Grid heights are the mean
+// of 2 x 2 samples inside the cell (less aliasing of sub-cell detail). Patch
+// cell (i, j) sits at tangent-plane point x0 + (i + 0.5) * spacing,
+// y0 + (j + 0.5) * spacing (see lakeRefine.js), one sample each.
 
 import { createAdvancedTerrainComputeShader } from '../shaders/webgpu/advancedTerrainCompute.wgsl.js';
+import { hashParts } from './waterCache.js';
 
-function hydrologyGridEntryPoint({ paramsBinding, outBinding }) {
+function hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut }) {
     return `
 struct HydroGridParams {
     n: u32,
-    faceOffset: u32,
-    faceCount: u32,
+    face: u32,
+    rowOffset: u32,
     maxH: f32,
 }
-@group(0) @binding(${paramsBinding}) var<uniform> hydroGrid: HydroGridParams;
-@group(0) @binding(${outBinding}) var<storage, read_write> hydroGridOut: array<vec2<f32>>;
+@group(0) @binding(${gridParams}) var<uniform> hydroGrid: HydroGridParams;
+@group(0) @binding(${gridOut}) var<storage, read_write> hydroGridOut: array<vec2<f32>>;
 
 @compute @workgroup_size(8, 8)
 fn hydroGridMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = hydroGrid.n;
-    let face = hydroGrid.faceOffset + gid.z;
-    if (gid.x >= n || gid.y >= n || gid.z >= hydroGrid.faceCount) { return; }
+    let face = hydroGrid.face;
+    let cell = vec2<u32>(gid.x, hydroGrid.rowOffset + gid.y);
+    if (cell.x >= n || cell.y >= n) { return; }
     var hSum = 0.0;
     for (var s = 0u; s < 4u; s++) {
         let o = vec2<f32>(f32(s & 1u), f32(s >> 1u)) * 0.5 + 0.25;
-        let uv = (vec2<f32>(gid.xy) + o) / f32(n);
+        let uv = (vec2<f32>(cell) + o) / f32(n);
         let dir = getSpherePoint(i32(face), uv.x, uv.y);
         hSum += calculateTerrainHeight(dir.x, dir.z, uniforms.seed, dir);
     }
     let h = hSum * 0.25;
-    let uvC = (vec2<f32>(gid.xy) + 0.5) / f32(n);
+    let uvC = (vec2<f32>(cell) + 0.5) / f32(n);
     let dirC = getSpherePoint(i32(face), uvC.x, uvC.y);
     let climate = getClimate(dirC.x, dirC.z, dirC, h, uniforms.seed);
-    hydroGridOut[(face - hydroGrid.faceOffset) * n * n + gid.y * n + gid.x] = vec2<f32>(h * hydroGrid.maxH, climate.precipitation);
+    hydroGridOut[gid.y * n + gid.x] = vec2<f32>(h * hydroGrid.maxH, climate.precipitation);
+}
+
+struct HydroPatchParams {
+    c: vec3<f32>, spacing: f32,
+    e1: vec3<f32>, x0: f32,
+    e2: vec3<f32>, y0: f32,
+    nx: u32, ny: u32, maxH: f32, invR: f32,
+}
+@group(0) @binding(${patchParams}) var<uniform> hydroPatch: HydroPatchParams;
+@group(0) @binding(${patchOut}) var<storage, read_write> hydroPatchOut: array<f32>;
+
+@compute @workgroup_size(8, 8)
+fn hydroPatchMain(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= hydroPatch.nx || gid.y >= hydroPatch.ny) { return; }
+    let x = hydroPatch.x0 + (f32(gid.x) + 0.5) * hydroPatch.spacing;
+    let y = hydroPatch.y0 + (f32(gid.y) + 0.5) * hydroPatch.spacing;
+    let dir = normalize(hydroPatch.c + (x * hydroPatch.e1 + y * hydroPatch.e2) * hydroPatch.invR);
+    hydroPatchOut[gid.y * hydroPatch.nx + gid.x] = calculateTerrainHeight(dir.x, dir.z, uniforms.seed, dir) * hydroPatch.maxH;
 }
 `;
 }
 
 /**
- * Samples the topology grid. Returns { N, heights (Float32Array, metres),
- * precip (Float32Array), seaLevelM }. One face per dispatch so a frame is
- * never blocked by the whole planet at once.
+ * Terrain evaluations per dispatch (one grid cell is 5: 4 heights + climate).
+ * Keeps each dispatch to a few ms of GPU, so background sampling never
+ * stalls a frame for long.
  */
-export async function sampleHydrologyGrid({ device, terrainGenerator, N = 512 }) {
+const DEFAULT_SAMPLES_PER_DISPATCH = 131072;
+
+/**
+ * Compiles the sampling pipelines once. Returns
+ * { sampleGrid(N), samplePatch(frame, R), maxH, seaLevelM, terrainKey, destroy() }.
+ * Work is split into dispatches of at most samplesPerDispatch terrain
+ * evaluations; yieldBetween (e.g. one animation frame) runs between them.
+ */
+export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null }) {
     const baseSource = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions());
     const used = new Set();
     for (const m of baseSource.matchAll(/@group\(0\)\s*@binding\((\d+)\)/g)) used.add(Number(m[1]));
-    let paramsBinding = 0; while (used.has(paramsBinding)) paramsBinding++;
-    let outBinding = paramsBinding + 1; while (used.has(outBinding)) outBinding++;
+    const free = [];
+    for (let b = 0; free.length < 4; b++) if (!used.has(b)) free.push(b);
+    const [gridParams, gridOut, patchParams, patchOut] = free;
 
     const module = device.createShaderModule({
-        label: 'HydrologyGrid',
-        code: baseSource + hydrologyGridEntryPoint({ paramsBinding, outBinding }),
+        label: 'HydrologySampler',
+        code: baseSource + hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut }),
     });
-    const pipeline = await device.createComputePipelineAsync({
-        layout: 'auto',
-        compute: { module, entryPoint: 'hydroGridMain' },
-    });
+    const [gridPipeline, patchPipeline] = await Promise.all([
+        device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'hydroGridMain' } }),
+        device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'hydroPatchMain' } }),
+    ]);
 
-    // face 0: any face >= 0 selects the sphere terrain path; the entry point
-    // passes its own directions.
+    // face 0: any face >= 0 selects the sphere terrain path; the entry
+    // points pass their own directions.
     terrainGenerator._fillTerrainUniformScratch(0, 0, 128, 1, 0);
     const uniformBytes = terrainGenerator._terrainUniformScratch.slice(0);
-    const uniformBuffer = device.createBuffer({ label: 'HydroGrid-Uniforms', size: uniformBytes.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const uniformBuffer = device.createBuffer({ label: 'Hydro-Uniforms', size: uniformBytes.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(uniformBuffer, 0, uniformBytes);
     // Same values the shader uses: maxTerrainHeightM() = _pad2.z (offset 184),
     // ocean level = waterParams.y (offset 116, normalized height).
     const uv = new DataView(uniformBytes);
     const maxH = Math.max(uv.getFloat32(184, true), 1.0);
-    const seaLevelNorm = uv.getFloat32(116, true);
+    const seaLevelM = uv.getFloat32(116, true) * maxH;
 
-    const faceBytes = N * N * 8;
-    const heights = new Float32Array(6 * N * N);
-    const precip = new Float32Array(6 * N * N);
-    const out = device.createBuffer({ label: 'HydroGrid-Out', size: faceBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    const params = device.createBuffer({ label: 'HydroGrid-Params', size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const bindGroup = device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: uniformBuffer } },
-            { binding: paramsBinding, resource: { buffer: params } },
-            { binding: outBinding, resource: { buffer: out } },
-        ],
-    });
-    let biomeBindGroupSet = false;
-    for (let face = 0; face < 6; face++) {
-        const p = new ArrayBuffer(16);
-        const pv = new DataView(p);
-        pv.setUint32(0, N, true); pv.setUint32(4, face, true); pv.setUint32(8, 1, true); pv.setFloat32(12, maxH, true);
-        device.queue.writeBuffer(params, 0, p);
-        const readback = device.createBuffer({ size: faceBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-        const enc = device.createCommandEncoder({ label: `HydroGrid-face${face}` });
-        const pass = enc.beginComputePass();
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, bindGroup);
-        try { terrainGenerator._setTerrainBiomeBindGroup(pass); biomeBindGroupSet = true; } catch { /* entry point may not use group 1 */ }
-        pass.dispatchWorkgroups(Math.ceil(N / 8), Math.ceil(N / 8), 1);
-        pass.end();
-        enc.copyBufferToBuffer(out, 0, readback, 0, faceBytes);
-        device.queue.submit([enc.finish()]);
-        await readback.mapAsync(GPUMapMode.READ);
-        const data = new Float32Array(readback.getMappedRange());
-        for (let k = 0; k < N * N; k++) {
-            heights[face * N * N + k] = data[k * 2];
-            precip[face * N * N + k] = data[k * 2 + 1];
+    const setBiome = (pass) => {
+        try { terrainGenerator._setTerrainBiomeBindGroup(pass); return true; } catch { return false; /* entry point may not use group 1 */ }
+    };
+
+    async function sampleGrid(N) {
+        const heights = new Float32Array(6 * N * N);
+        const precip = new Float32Array(6 * N * N);
+        // Rows per dispatch: a multiple of 8 (the workgroup height).
+        const rowsPer = Math.max(8, Math.floor(samplesPerDispatch / (5 * N) / 8) * 8);
+        const chunkBytes = N * rowsPer * 8;
+        const out = device.createBuffer({ label: 'HydroGrid-Out', size: chunkBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+        const params = device.createBuffer({ label: 'HydroGrid-Params', size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const bindGroup = device.createBindGroup({
+            layout: gridPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: gridParams, resource: { buffer: params } },
+                { binding: gridOut, resource: { buffer: out } },
+            ],
+        });
+        let biomeBindGroupSet = false;
+        for (let face = 0; face < 6; face++) {
+            for (let j0 = 0; j0 < N; j0 += rowsPer) {
+                const rows = Math.min(rowsPer, N - j0);
+                const p = new ArrayBuffer(16);
+                const pv = new DataView(p);
+                pv.setUint32(0, N, true); pv.setUint32(4, face, true); pv.setUint32(8, j0, true); pv.setFloat32(12, maxH, true);
+                device.queue.writeBuffer(params, 0, p);
+                const bytes = N * rows * 8;
+                const readback = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+                const enc = device.createCommandEncoder({ label: `HydroGrid-face${face}` });
+                const pass = enc.beginComputePass();
+                pass.setPipeline(gridPipeline);
+                pass.setBindGroup(0, bindGroup);
+                biomeBindGroupSet = setBiome(pass) || biomeBindGroupSet;
+                pass.dispatchWorkgroups(Math.ceil(N / 8), Math.ceil(rows / 8), 1);
+                pass.end();
+                enc.copyBufferToBuffer(out, 0, readback, 0, bytes);
+                device.queue.submit([enc.finish()]);
+                await readback.mapAsync(GPUMapMode.READ);
+                const data = new Float32Array(readback.getMappedRange());
+                const base = face * N * N + j0 * N;
+                for (let k = 0; k < N * rows; k++) {
+                    heights[base + k] = data[k * 2];
+                    precip[base + k] = data[k * 2 + 1];
+                }
+                readback.unmap();
+                readback.destroy();
+                if (yieldBetween) await yieldBetween();
+            }
         }
-        readback.unmap();
-        readback.destroy();
+        out.destroy(); params.destroy();
+        return { N, heights, precip, seaLevelM, biomeBindGroupSet };
     }
-    out.destroy(); params.destroy(); uniformBuffer.destroy();
-    return { N, heights, precip, seaLevelM: seaLevelNorm * maxH, biomeBindGroupSet };
+
+    /**
+     * Heights (metres) on a tangent-plane patch, frame from lakeRefine.js:
+     * { c, e1, e2, x0, y0, spacing, nx, ny }. Row-major Float32Array.
+     */
+    async function samplePatch(frame, R) {
+        const { nx, ny } = frame;
+        const heights = new Float32Array(nx * ny);
+        const rowsPer = Math.max(8, Math.min(Math.ceil(ny / 8) * 8, Math.floor(samplesPerDispatch / nx / 8) * 8));
+        const bytes = nx * rowsPer * 4;
+        const out = device.createBuffer({ label: 'HydroPatch-Out', size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+        const params = device.createBuffer({ label: 'HydroPatch-Params', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const bindGroup = device.createBindGroup({
+            layout: patchPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: patchParams, resource: { buffer: params } },
+                { binding: patchOut, resource: { buffer: out } },
+            ],
+        });
+        for (let j0 = 0; j0 < ny; j0 += rowsPer) {
+            const rows = Math.min(rowsPer, ny - j0);
+            const p = new ArrayBuffer(64);
+            const f = new Float32Array(p), u = new Uint32Array(p);
+            f.set([frame.c[0], frame.c[1], frame.c[2], frame.spacing], 0);
+            f.set([frame.e1[0], frame.e1[1], frame.e1[2], frame.x0], 4);
+            f.set([frame.e2[0], frame.e2[1], frame.e2[2], frame.y0 + j0 * frame.spacing], 8);
+            u[12] = nx; u[13] = rows; f[14] = maxH; f[15] = 1 / R;
+            device.queue.writeBuffer(params, 0, p);
+            const readback = device.createBuffer({ size: nx * rows * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            const enc = device.createCommandEncoder({ label: 'HydroPatch' });
+            const pass = enc.beginComputePass();
+            pass.setPipeline(patchPipeline);
+            pass.setBindGroup(0, bindGroup);
+            setBiome(pass);
+            pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(rows / 8), 1);
+            pass.end();
+            enc.copyBufferToBuffer(out, 0, readback, 0, nx * rows * 4);
+            device.queue.submit([enc.finish()]);
+            await readback.mapAsync(GPUMapMode.READ);
+            heights.set(new Float32Array(readback.getMappedRange()), j0 * nx);
+            readback.unmap();
+            readback.destroy();
+            if (yieldBetween) await yieldBetween();
+        }
+        out.destroy(); params.destroy();
+        return heights;
+    }
+
+    return {
+        sampleGrid, samplePatch, maxH, seaLevelM,
+        // Everything the samples depend on: the terrain shader and its uniforms.
+        terrainKey: hashParts([baseSource, uniformBytes]),
+        destroy() { uniformBuffer.destroy(); },
+    };
+}
+
+/**
+ * Samples the topology grid. Returns { N, heights (Float32Array, metres),
+ * precip (Float32Array), seaLevelM }.
+ */
+export async function sampleHydrologyGrid({ device, terrainGenerator, N = 512 }) {
+    const sampler = await createHydrologySampler({ device, terrainGenerator });
+    try {
+        return await sampler.sampleGrid(N);
+    } finally {
+        sampler.destroy();
+    }
 }
