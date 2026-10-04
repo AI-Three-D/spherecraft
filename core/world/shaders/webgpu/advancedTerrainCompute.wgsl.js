@@ -75,6 +75,8 @@ struct ErosionLandResult {
 //   noise field (wavelength variationScaleM) between variationMin and 1, so
 //   some regions erode hard and others stay smooth; the relief ramp goes
 //   from reliefStartM to reliefFullM. Strength = strength x amount.
+// - Rounding: ridges and creases blend to lowAmountRounding as the amount
+//   falls from softAmountNone to softAmountFull.
 // - Fade target: relief over fadeRangeM, mapped to [-1, 1].
 // - Height offset -fadeTarget * magnitude * (1 - initialMask) cancels the
 //   filter's fade-to-target exactly on flat input (flat ground keeps its
@@ -96,6 +98,11 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     if (amount.x <= 0.001) { return r; }
     var prm = erosionConfiguredParams();
     prm.strength *= amount.x;
+    // Light erosion gets rounded ridges and creases: with the default sharp
+    // creases, shallow gullies read as thin etched lines on gentle terrain.
+    let soft = 1.0 - smoothstep(${wgslNum(cfg.softAmountFull)}, ${wgslNum(cfg.softAmountNone)}, amount.x);
+    prm.rounding.x = mix(prm.rounding.x, ${wgslNum(cfg.lowAmountRounding)}, soft);
+    prm.rounding.y = mix(prm.rounding.y, ${wgslNum(cfg.lowAmountRounding)}, soft);
     let slope = terrainSurfaceGradient(land, unitDir) * maxH;
     let fadeRaw = relief.x / ${wgslNum(cfg.fadeRangeM)} * 2.0 - 1.0;
     let fadeTarget = clamp(fadeRaw, -1.0, 1.0);

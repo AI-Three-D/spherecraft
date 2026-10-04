@@ -18,6 +18,7 @@ export const TERRAIN_FEATURES = Object.freeze([
     { key: 'mountains', wgsl: 'TF_MOUNTAINS', about: 'Mountain ranges: foothills, ridge cores, peaks (whole feature).' },
     { key: 'mountainDetail', wgsl: 'TF_MOUNTAIN_DETAIL', about: 'Mountain slope roughness: 2 octaves at 4 km, 120 m.' },
     { key: 'mountainPeaks', wgsl: 'TF_MOUNTAIN_PEAKS', about: 'Exceptional towering peaks inside ranges (very rare).' },
+    { key: 'mountainFoothills', wgsl: 'TF_MOUNTAIN_FOOTHILLS', about: 'Foothills: 3 km rolling hills ramping up toward mountain regions (terrainType 0.45-0.56), 220 m x mountain amplitude.' },
     { key: 'meso1', wgsl: 'TF_MESO1', about: 'Meso detail 80 m wavelength, 25 m (with erosion: added on top, faded where erosion is strong).' },
     { key: 'meso2', wgsl: 'TF_MESO2', about: 'Meso detail 750 m wavelength, 135 m (with erosion: added on top, faded where erosion is strong).' },
     { key: 'meso3', wgsl: 'TF_MESO3', about: 'Meso detail 4 km wavelength, 150 m.' },

@@ -72,6 +72,12 @@ export class TerrainGenerationConfig {
             // Fraction of meso1/meso2 kept where erosion is at full amount
             // (1 everywhere it is 0).
             mesoKeep: num(ef.mesoKeep, 0.35),
+            // Ridge/crease rounding used where the amount is low (light
+            // erosion as soft undulation, not etched lines): fully at amount
+            // <= softAmountFull, not at all from softAmountNone.
+            lowAmountRounding: num(ef.lowAmountRounding, 1.0),
+            softAmountFull: num(ef.softAmountFull, 0.15),
+            softAmountNone: num(ef.softAmountNone, 0.6),
             seed: Math.round(num(ef.seed, 7))
         };
 

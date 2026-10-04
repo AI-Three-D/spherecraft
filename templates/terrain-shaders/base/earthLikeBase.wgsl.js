@@ -23,6 +23,7 @@ const SCALE_MOUNTAIN_RANGES: f32 = 90.0;
 const SCALE_MOUNTAIN_RIDGES: f32 = 35.0;
 const SCALE_MOUNTAIN_PEAKS: f32 = 12.0;
 const SCALE_MOUNTAIN_DETAIL: f32 = 4.0;
+const SCALE_MOUNTAIN_FOOTHILLS: f32 = 3.0;     // 3 km rolling foothill hills
 
 // Hill scales
 const SCALE_HILLS_LARGE: f32 = 18.0;
@@ -120,6 +121,12 @@ const SCALE_GENERAL_SHAPE: f32 = 8.0;         // 8 km — broad shape modulation
 const HEIGHT_MOUNTAIN_FOOTHILL: f32 = 500.0;      // gentle foothill apron (~100-250 m effective)
 const HEIGHT_MOUNTAIN_CORE: f32 = 4000.0;         // main ridge peaks (~1000-3000 m effective)
 const HEIGHT_MOUNTAIN_DETAIL: f32 = 120.0;        // small-scale slope roughness
+const HEIGHT_MOUNTAIN_FOOTHILLS: f32 = 220.0;     // foothill hills (x mountain amplitude)
+// Foothill band in regional terrainType. On land terrainType is mostly
+// 0.34-0.50 (p10-p90); mountains start at 0.55, so this covers roughly the
+// top quarter of land and ramps into the mountain regions.
+const FOOTHILL_TT_START: f32 = 0.45;
+const FOOTHILL_TT_FULL: f32 = 0.56;
 const HEIGHT_MOUNTAIN_EXCEPTIONAL: f32 = 7000.0;  // rare towering peaks (~3000-5000 m)
 
 // ---- Highland feature scales & heights (KNOBS) ----
@@ -208,6 +215,18 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
         // mountain height (~25 m on fixed-smoothMax cores) along the edge.
         let mountainW = select(mountainness, gateRamp(mountainness, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
         landHeight += featureMountainsHeight(wx, wy, unitDir, seed, regional, profile, amp) * mountainW;
+    }
+
+    // ==================== Foothills ====================
+    // Rolling hills that ramp up as the regional terrain type approaches
+    // mountain regions and continue under the ranges, so mountains rise from
+    // hills instead of straight out of the plain.
+    if (terrainFeatureOn(TF_MOUNTAIN_FOOTHILLS)) {
+        let footBand = smoothstep(FOOTHILL_TT_START, FOOTHILL_TT_FULL, regional.terrainType);
+        if (footBand > 0.0) {
+            let hillN = fbmAuto(wx, wy, unitDir, SCALE_MOUNTAIN_FOOTHILLS, 3, seed + 1950, 2.0, 0.5);
+            landHeight += footBand * smoothstep(-0.3, 0.6, hillN) * (HEIGHT_MOUNTAIN_FOOTHILLS / maxTerrainHeightM()) * amp.mountainBase;
+        }
     }
 
     // let canyonBlend = mix(0.3, 1.0, regional.tectonicActivity);
@@ -304,6 +323,18 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             landHeight += mountainsH;
         }
 
+        // Foothills (see calculateTerrainHeight). Slope-continuous, so part
+        // of the erosion input, and counted as relief.
+        var foothillsH = dConst(0.0);
+        if (terrainFeatureOn(TF_MOUNTAIN_FOOTHILLS)) {
+            let footBand = dSmoothstep(FOOTHILL_TT_START, FOOTHILL_TT_FULL, regional.terrainType);
+            if (footBand.x > 0.0) {
+                let hillN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_FOOTHILLS, 3, seed + 1950, 2.0, 0.5);
+                foothillsH = dMul(footBand, dSmoothstep(-0.3, 0.6, hillN)) * ((HEIGHT_MOUNTAIN_FOOTHILLS / maxTerrainHeightM()) * amp.mountainBase);
+                landHeight += foothillsH;
+            }
+        }
+
         // micro2 (DISP_MICRO2 = 0) contributes nothing; see featureMesoDetail_d.
         let mesoRoughness = select(
             dMax(regional.terrainType, regional.ruggedness * 0.5),
@@ -333,7 +364,7 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             let smallHillsH = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_SMALL | LONE_HILLS_ROLLING);
             landHeight += bigHillsH + smallHillsH;
             let erosionInput = landHeight - mountainsH + mountainsSmooth;
-            let er = erosionFilterLand_d(unitDir, erosionInput, mountainsSmooth + highlandsH + bigHillsH);
+            let er = erosionFilterLand_d(unitDir, erosionInput, mountainsSmooth + foothillsH + highlandsH + bigHillsH);
             landHeight += er.delta;
             let mesoW = dConst(1.0) - er.amount * (1.0 - EROSION_MESO_KEEP);
             if (terrainFeatureOn(TF_MESO1)) { landHeight += dMul(meso.meso1, mesoW) * (DISP_MESO1 / mesoMaxH); }
