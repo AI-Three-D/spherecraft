@@ -863,8 +863,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             // reference point, and upgrade whichever ones are confirmed
             // real basins. Must run — and terrainGeneration.erosionSeeds
             // must be updated — before any tile near here generates, same
-            // constraint as the river path above.
-            if (terrainGenerator && device) {
+            // constraint as the river path above. Skipped when the pits are
+            // off (terrain.features.erosionSeeds: false): the lake meshes
+            // would sit on ground without a pit under them.
+            const erosionSeedsOn = this.planetConfig?.terrainGeneration?.features?.erosionSeeds !== false;
+            if (erosionSeedsOn && terrainGenerator && device) {
                 try {
                     const refForward = new Vector3(
                         this.planetConfig.terrainGeneration.river.channelDir.x,

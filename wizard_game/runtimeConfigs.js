@@ -948,6 +948,13 @@ export function createGameDataConfig() {
 	      // within the water patch, and only tapers off far outside it.
 	      lengthM: 1000,
 	    },
+    // Terrain feature toggles (core/world/terrain-generator/terrainFeatureToggles.js).
+    // Erosion-seed pits off (owner, 2026-10-04): the water graph's lakes come
+    // from the terrain's own basins; the pits (30 m, 2 m deep) and the old
+    // verified-lake meshes that sit in them are retired.
+    features: {
+      erosionSeeds: false,
+    },
     erosion: {
       enabled: true,
       globalRate: 0.6,
