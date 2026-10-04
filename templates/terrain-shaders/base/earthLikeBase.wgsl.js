@@ -247,12 +247,19 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             // (river channel, erosion-seed pits) come after, so erosion does
             // not fill them.
             let bigHillsH = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_BIG);
+            let relief = mountainsSmooth + foothillsH + highlandsH + bigHillsH;
             // Rolling hill chains are added after erosion: eroding their steep
             // corridor walls cut thin grooves along them.
-            let smallHillsH = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_SMALL);
+            // The small domes (common, uncommon) are a low-relief feature and
+            // fade out with (1 - erosion's relief ramp)^2. On mountains and big hills,
+            // full-strength gullies carved their flanks while their flat tops
+            // stayed, leaving a sunken top inside a crown of ridges.
+            let smallHillsRaw = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_SMALL);
+            let lowRelief = dConst(1.0) - erosionReliefRamp_d(relief);
+            let smallHillsH = dMul(smallHillsRaw, dMul(lowRelief, lowRelief));
             landHeight += bigHillsH + smallHillsH;
             let erosionInput = landHeight - mountainsH + mountainsSmooth;
-            let er = erosionFilterLand_d(unitDir, erosionInput, mountainsSmooth + foothillsH + highlandsH + bigHillsH);
+            let er = erosionFilterLand_d(unitDir, erosionInput, relief);
             landHeight += er.delta;
             landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_ROLLING);
             let mesoW = dConst(1.0) - er.amount * (1.0 - EROSION_MESO_KEEP);

@@ -45,7 +45,8 @@ export class TerrainGenerationConfig {
             // full from reliefFullM. Variation: a noise field with wavelength
             // variationScaleM between variationMin and 1, so some regions are
             // rugged and others gentle. Where the amount is 0 the filter is
-            // skipped.
+            // skipped. The small lone-hill domes fade out over the same relief
+            // ramp (scaled by (1 - ramp)^2).
             reliefStartM: num(ef.reliefStartM, 150),
             reliefFullM: num(ef.reliefFullM, 600),
             lowReliefAmount: num(ef.lowReliefAmount, 0.2),

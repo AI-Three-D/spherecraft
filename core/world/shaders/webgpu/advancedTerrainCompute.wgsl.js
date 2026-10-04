@@ -44,6 +44,12 @@ fn erosionConfiguredParams() -> ErosionParams {
 // Fraction of meso1/meso2 kept where erosion runs at full amount.
 const EROSION_MESO_KEEP: f32 = ${wgslNum(cfg.mesoKeep)};
 
+// Relief ramp (dual, 0..1) of the erosion amount: reliefNorm (normalized
+// height of the large landforms) from reliefStartM to reliefFullM.
+fn erosionReliefRamp_d(reliefNorm: vec4<f32>) -> vec4<f32> {
+    return dSmoothstep(${wgslNum(cfg.reliefStartM)}, ${wgslNum(cfg.reliefFullM)}, reliefNorm * maxTerrainHeightM());
+}
+
 struct ErosionLandResult {
     // Height change (dual, normalized) to add to the terrain.
     delta: vec4<f32>,
@@ -78,7 +84,7 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let maxH = maxTerrainHeightM();
     let R = noiseReferenceRadiusM();
     let relief = reliefNorm * maxH;
-    let reliefRamp = dSmoothstep(${wgslNum(cfg.reliefStartM)}, ${wgslNum(cfg.reliefFullM)}, relief);
+    let reliefRamp = erosionReliefRamp_d(reliefNorm);
     let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
     let variation = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
     let reliefAmount = dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)}));
