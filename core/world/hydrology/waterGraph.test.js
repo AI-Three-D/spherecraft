@@ -10,6 +10,32 @@ function heightsFrom(fn) {
     for (let id = 0; id < h.length; id++) h[id] = fn(cellDir(id, N));
     return h;
 }
+// Heights set per cell (face, i, j), for exact control over drainage.
+function gridHeights(M, fn) {
+    const h = new Float32Array(6 * M * M);
+    for (let face = 0; face < 6; face++) {
+        for (let j = 0; j < M; j++) for (let i = 0; i < M; i++) h[face * M * M + j * M + i] = fn(face, i, j);
+    }
+    return h;
+}
+// Every river starts at a lake and, following its end links (a confluence
+// hands over to the trunk), reaches a lake or the sea.
+function expectNoDeadEnds(g, h) {
+    for (const r of g.rivers) {
+        expect(g.lakes[r.fromLake]).toBeDefined();
+        expect(g.lakeOf[r.cells[0]]).toBe(r.fromLake);
+        let cur = r, hops = 0;
+        while (cur.to.type === 'river') {
+            const trunk = g.rivers[cur.to.id];
+            expect(trunk.cells).toContain(cur.to.cell);
+            cur = trunk;
+            expect(++hops).toBeLessThan(g.rivers.length + 1);
+        }
+        const last = cur.cells[cur.cells.length - 1];
+        if (cur.to.type === 'sea') expect(h[last]).toBeLessThanOrEqual(0);
+        else expect(g.lakeOf[last]).toBe(cur.to.id);
+    }
+}
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const angle = (a, b) => Math.acos(Math.max(-1, Math.min(1, dot(a, b))));
 const norm = (v) => { const l = Math.hypot(...v); return v.map(x => x / l); };
@@ -125,12 +151,64 @@ describe('water graph', () => {
         const h = heightsFrom(d => continent(d) + centres.reduce((s, c, k) => s + bowl(d, c, 60 + 30 * k, 0.15), 0));
         const g = buildWaterGraph({ N, heights: h, seaLevelM: 0, params: { ...SMALL, minRiverQ: 1 } });
         expect(g.lakes.length).toBeGreaterThan(0);
-        for (const r of g.rivers) {
-            expect(g.lakes[r.fromLake]).toBeDefined();
-            const last = r.cells[r.cells.length - 1];
-            if (r.to.type === 'sea') expect(h[last]).toBeLessThanOrEqual(0);
-            else expect(g.lakeOf[last]).toBe(r.to.id);
-        }
+        expectNoDeadEnds(g, h);
+    });
+
+    it('deep cores in one basin are one lake, with no river between them', () => {
+        // Flat plateau (100 m) in the middle of face 4, ocean around it. A
+        // shallow basin 5 m deep (body, not core) holds two pits 40 m deep.
+        const M = 32;
+        const h = gridHeights(M, (face, i, j) => {
+            if (face !== 4 || i < 2 || j < 2 || i > M - 3 || j > M - 3) return -100;
+            const inBasin = i >= 8 && i <= 23 && j >= 12 && j <= 18;
+            const pit = (i >= 10 && i <= 11 && j >= 14 && j <= 15) || (i >= 20 && i <= 21 && j >= 14 && j <= 15);
+            return pit ? 60 : inBasin ? 95 : 100;
+        });
+        const g = buildWaterGraph({ N: M, heights: h, seaLevelM: 0, params: { minLakeDepthM: 8, minLakeCells: 4, minRiverQ: 1 } });
+        expect(g.lakes.length).toBe(1);
+        const lake = g.lakes[0];
+        expect(lake.coreCells).toBe(8);
+        expect(lake.cells.length).toBe(16 * 7);
+        expect(lake.level).toBe(100);
+        expect(lake.maxDepth).toBe(40);
+        expect(g.rivers.length).toBe(1);
+        expect(g.rivers[0].to).toEqual({ type: 'sea' });
+        expectNoDeadEnds(g, h);
+    });
+
+    it('a tributary ends on the larger river (confluence); both lakes reach the sea', () => {
+        // Face 4 continent sloping down toward i = 2 (the coast), a trench
+        // along j = 16 to the sea, the land sloping toward the trench. Two
+        // pits on either side drain into the trench, where their rivers meet.
+        const M = 32;
+        const h = gridHeights(M, (face, i, j) => {
+            if (face !== 4 || i < 2 || j < 2 || i > M - 3 || j > M - 3) return -100;
+            let z = 10 + 5 * i + 4 * Math.abs(j - 16) - (j === 16 ? 30 : 0);
+            if (i >= 22 && i <= 23 && j >= 8 && j <= 9) z -= 60;
+            if (i >= 21 && i <= 23 && j >= 23 && j <= 25) z -= 60;
+            return z;
+        });
+        const g = buildWaterGraph({ N: M, heights: h, seaLevelM: 0, params: { minLakeDepthM: 8, minLakeCells: 4, minRiverQ: 1 } });
+        expect(g.lakes.length).toBe(2);
+        expect(g.rivers.length).toBe(2);
+        const [big, small] = [...g.rivers].sort((a, b) => b.q[0] - a.q[0]);
+        expect(big.to).toEqual({ type: 'sea' });
+        expect(small.to.type).toBe('river');
+        expect(small.to.id).toBe(big.id);
+        expect(big.cells).toContain(small.to.cell);
+        expect(g.stats.confluences).toBe(1);
+        for (const lake of g.lakes) expect(lake.downstream).toEqual({ type: 'sea' });
+        expectNoDeadEnds(g, h);
+    });
+
+    it('lake level is the exact spill elevation (no epsilon drift)', () => {
+        const c = norm([0.2, 0.1, 1]);
+        const h = heightsFrom(d => continent(d) + bowl(d, c, 120, 0.25));
+        const g = buildWaterGraph({ N, heights: h, seaLevelM: 0, params: { ...SMALL, minRiverQ: 1e9 } });
+        const lake = g.lakes[0];
+        // The exit cell is the sill: its height is the spill level.
+        expect(lake.level).toBe(h[lake.exitCell]);
+        for (const cell of lake.cells) expect(g.fillExact[cell]).toBe(lake.level);
     });
 
     it('is deterministic (independent of evaluation order)', () => {

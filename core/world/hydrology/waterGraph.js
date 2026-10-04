@@ -10,18 +10,28 @@
 //   dead ends). Not every lake has a river.
 //
 // Method:
-// 1. Priority-flood (Barnes et al. 2014) from the ocean cells, with an
-//    epsilon so flats drain. Each cell's flow parent is the cell that flooded
-//    it, which gives a loop-free drainage tree in which every cell drains to
-//    the sea. Ties break by cell index, so the result does not depend on
-//    traversal order.
-// 2. Lakes: connected cells whose fill depth exceeds minLakeDepthM, at least
-//    minLakeCells cells. Level = spill elevation; outlet = where the
-//    drainage leaves the lake.
+// 1. Priority-flood (Barnes et al. 2014) from the ocean cells, twice:
+//    - exact (no epsilon): spill elevations, so lake levels and fill depths
+//      are exact;
+//    - with an epsilon so flats drain: each cell's flow parent is the cell
+//      that flooded it, which gives a loop-free drainage tree in which every
+//      cell drains to the sea.
+//    Ties break by cell index, so the result does not depend on traversal
+//    order.
+// 2. Lakes: a lake is a whole water body, i.e. connected cells with fill
+//    depth > lakeExtentDepthM, that holds a deep core (connected cells deeper
+//    than minLakeDepthM, at least minLakeCells of them). Several cores in
+//    one basin are one lake. Level = exact spill elevation; outlet = the lake
+//    cell the drainage leaves through, exit = the next cell (the sill).
 // 3. Q (catchment proxy): cell area x precipitation accumulated down the
 //    drainage tree.
 // 4. Rivers: from each lake whose outflow Q >= minRiverQ, follow the
-//    drainage from the outlet until a cell of another lake or the sea.
+//    drainage from the outlet until a cell of another lake, the sea, or a
+//    larger river (a confluence: the tributary ends on the trunk, which goes
+//    on to a lake or the sea). Larger outflow claims a shared path first.
+//
+// Below-sea-level cells are ocean even inland (the ocean renderer draws sea
+// level there).
 //
 // Grid: 6 faces x N x N cells, cell id = face * N * N + j * N + i, cell
 // centres at face UV ((i + 0.5) / N, (j + 0.5) / N), with the same gnomonic
@@ -130,7 +140,7 @@ export function makeNeighbors(N) {
 }
 
 /** Binary min-heap on (key, id), ties broken by id (determinism). */
-class MinHeap {
+export class MinHeap {
     constructor(capacity) {
         this.keys = new Float64Array(capacity);
         this.ids = new Int32Array(capacity);
@@ -172,41 +182,38 @@ class MinHeap {
 }
 
 export const WATER_GRAPH_DEFAULTS = Object.freeze({
-    // A cell's fill depth must exceed this to count as lake (metres).
-    // Planet survey (512^2 per face, eroded terrain): 3 m / 4 cells gave
-    // ~7000 lakes (12 % of the planet); 8 m / 12 cells ~2300 (8.5 %).
+    // A lake needs a deep core: connected cells whose fill depth exceeds
+    // minLakeDepthM, at least minLakeCells of them (12 cells ~ 1.6 km^2 at
+    // N 512). Shallower or smaller depressions get no lake.
+    // Planet survey (2026-10-04, N 512, counted as whole water bodies):
+    // 4 m / 6 cells 4054 lakes (18 % of land), 8 m / 12 cells 1699 (15.6 %),
+    // 15 m / 30 cells 495 (12 %), 25 m / 60 cells 145 (7 %). Owner: 8 / 12.
     minLakeDepthM: 8.0,
-    // Smaller depressions are breached (no lake). 12 cells ~ 3 km^2 at N 512.
     minLakeCells: 12,
+    // The lake is the whole water body around its core(s): connected cells
+    // with fill depth above this (metres).
+    lakeExtentDepthM: 0.5,
     // Outflow Q (cells x precipitation, area-weighted) needed for a lake to
     // have a river.
     minRiverQ: 400,
-    // Fill epsilon per flooded step (metres): flats drain.
+    // Fill epsilon per flooded step (metres) for the drainage tree: flats drain.
     epsilonM: 1e-3,
 });
 
 /**
- * @param {object} p
- * @param {number} p.N              cells per face side
- * @param {Float32Array} p.heights  6*N*N heights in metres
- * @param {number} p.seaLevelM      cells at or below are ocean
- * @param {Float32Array} [p.precip] 6*N*N precipitation weights (default 1)
- * @param {object} [p.params]       WATER_GRAPH_DEFAULTS overrides
+ * Priority flood from the ocean (cells at or below sea level; the lowest
+ * cell if there is none). Returns the filled surface and, with withTree, the
+ * drainage tree (parent = the cell that flooded it) and the pop order; give
+ * the tree an epsilonM > 0 so flats drain.
  */
-export function buildWaterGraph({ N, heights, seaLevelM, precip = null, params = {} }) {
-    const P = { ...WATER_GRAPH_DEFAULTS, ...params };
-    const NN = N * N, total = 6 * NN;
-    const neighbors = makeNeighbors(N);
-    const area = cellAreaWeights(N);
-
-    // ---- 1. Priority-flood from the ocean ----
+function priorityFlood(heights, seaLevelM, neighbors, epsilonM, withTree) {
+    const total = heights.length;
     const filled = new Float64Array(total);
-    const parent = new Int32Array(total).fill(-1);
+    const parent = withTree ? new Int32Array(total).fill(-1) : null;
+    const order = withTree ? new Int32Array(total) : null;
     const closed = new Uint8Array(total);
-    const order = new Int32Array(total);   // pop order (sea first)
-    let orderCount = 0;
     const heap = new MinHeap(total);
-    let oceanCells = 0;
+    let orderCount = 0, oceanCells = 0;
     for (let id = 0; id < total; id++) {
         if (heights[id] <= seaLevelM) {
             closed[id] = 1;
@@ -223,60 +230,99 @@ export function buildWaterGraph({ N, heights, seaLevelM, precip = null, params =
     }
     while (heap.size > 0) {
         const c = heap.pop();
-        order[orderCount++] = c;
+        if (withTree) order[orderCount++] = c;
         const { list, count } = neighbors(c);
         for (let n = 0; n < count; n++) {
             const nb = list[n];
             if (closed[nb]) continue;
             closed[nb] = 1;
-            filled[nb] = Math.max(heights[nb], filled[c] + P.epsilonM);
-            parent[nb] = c;
+            filled[nb] = Math.max(heights[nb], filled[c] + epsilonM);
+            if (withTree) parent[nb] = c;
             heap.push(filled[nb], nb);
         }
     }
+    return { filled, parent, order, orderCount, oceanCells };
+}
 
-    const isOcean = (id) => heights[id] <= seaLevelM && parent[id] === -1;
-
-    // ---- 2. Lakes ----
-    const depth = (id) => filled[id] - heights[id];
-    const lakeOf = new Int32Array(total).fill(-1);
-    const lakes = [];
+/**
+ * Connected components (cube-grid neighbours) of the cells where keep(id)
+ * holds. Components come out in order of their smallest cell id, each with
+ * its cells sorted ascending. compOf[id] = component index or -1.
+ */
+function components(total, neighbors, keep) {
+    const compOf = new Int32Array(total).fill(-1);
+    const comps = [];
     const stack = [];
     for (let id = 0; id < total; id++) {
-        if (lakeOf[id] !== -1 || isOcean(id) || depth(id) <= P.minLakeDepthM) continue;
-        // Flood-fill the connected component of deep cells.
-        const cells = [];
-        lakeOf[id] = -2; stack.push(id);
+        if (compOf[id] !== -1 || !keep(id)) continue;
+        const k = comps.length, cells = [];
+        compOf[id] = k; stack.push(id);
         while (stack.length) {
             const c = stack.pop();
             cells.push(c);
             const { list, count } = neighbors(c);
             for (let n = 0; n < count; n++) {
                 const nb = list[n];
-                if (lakeOf[nb] !== -1 || isOcean(nb) || depth(nb) <= P.minLakeDepthM) continue;
-                lakeOf[nb] = -2; stack.push(nb);
+                if (compOf[nb] !== -1 || !keep(nb)) continue;
+                compOf[nb] = k; stack.push(nb);
             }
         }
-        if (cells.length < P.minLakeCells) {
-            for (const c of cells) lakeOf[c] = -3; // breached depression
-            continue;
-        }
         cells.sort((a, b) => a - b);
+        comps.push(cells);
+    }
+    return { compOf, comps };
+}
+
+/**
+ * @param {object} p
+ * @param {number} p.N              cells per face side
+ * @param {Float32Array} p.heights  6*N*N heights in metres
+ * @param {number} p.seaLevelM      cells at or below are ocean
+ * @param {Float32Array} [p.precip] 6*N*N precipitation weights (default 1)
+ * @param {object} [p.params]       WATER_GRAPH_DEFAULTS overrides
+ */
+export function buildWaterGraph({ N, heights, seaLevelM, precip = null, params = {} }) {
+    const P = { ...WATER_GRAPH_DEFAULTS, ...params };
+    const NN = N * N, total = 6 * NN;
+    const neighbors = makeNeighbors(N);
+    const area = cellAreaWeights(N);
+
+    // ---- 1. Priority floods from the ocean ----
+    const exact = priorityFlood(heights, seaLevelM, neighbors, 0, false).filled;
+    const { filled, parent, order, orderCount, oceanCells } = priorityFlood(heights, seaLevelM, neighbors, P.epsilonM, true);
+    const isOcean = (id) => heights[id] <= seaLevelM && parent[id] === -1;
+    const depth = (id) => exact[id] - heights[id];
+
+    // ---- 2. Lakes: water bodies that hold a deep core ----
+    const extentDepth = Math.min(P.lakeExtentDepthM, P.minLakeDepthM);
+    const bodies = components(total, neighbors, (id) => !isOcean(id) && depth(id) > extentDepth);
+    const cores = components(total, neighbors, (id) => !isOcean(id) && depth(id) > P.minLakeDepthM);
+    const coreCells = new Int32Array(bodies.comps.length);
+    for (const cells of cores.comps) {
+        if (cells.length < P.minLakeCells) continue;
+        coreCells[bodies.compOf[cells[0]]] += cells.length;
+    }
+    const lakeOf = new Int32Array(total).fill(-1);
+    const lakes = [];
+    for (let b = 0; b < bodies.comps.length; b++) {
+        if (coreCells[b] === 0) continue;
+        const cells = bodies.comps[b];
         const lakeId = lakes.length;
-        let level = -Infinity, maxDepth = 0;
+        let deepest = cells[0];
         for (const c of cells) {
             lakeOf[c] = lakeId;
-            level = Math.max(level, filled[c]);
-            maxDepth = Math.max(maxDepth, depth(c));
+            if (depth(c) > depth(deepest)) deepest = c;
         }
-        lakes.push({ id: lakeId, cells, level, maxDepth, outletCell: -1, exitCell: -1, outflowQ: 0, river: -1, downstream: null });
+        lakes.push({
+            id: lakeId, cells, coreCells: coreCells[b],
+            level: exact[deepest], maxDepth: depth(deepest), deepestCell: deepest,
+            outletCell: -1, exitCell: -1, outflowQ: 0, river: -1, downstream: null,
+        });
     }
-    for (let id = 0; id < total; id++) if (lakeOf[id] < -1) lakeOf[id] = -1;
-
-    // Outlet: the lake cell whose parent leaves the lake (the spill point).
-    // All lake cells drain through it (they were flooded from it).
+    // Outlet: follow the drainage from the deepest cell to the last lake
+    // cell; every lake cell drains through it (they were flooded from it).
     for (const lake of lakes) {
-        let c = lake.cells[0];
+        let c = lake.deepestCell;
         while (parent[c] !== -1 && lakeOf[parent[c]] === lake.id) c = parent[c];
         lake.outletCell = c;
         lake.exitCell = parent[c];
@@ -291,32 +337,47 @@ export function buildWaterGraph({ N, heights, seaLevelM, precip = null, params =
     }
     for (const lake of lakes) lake.outflowQ = Q[lake.outletCell];
 
-    // ---- 4. Rivers: lake outlet -> next lake or sea ----
-    const rivers = [];
-    for (const lake of lakes) {
-        let c = lake.exitCell;
-        if (c === -1) { lake.downstream = { type: 'sea' }; continue; }
-        const path = [lake.outletCell];
-        let end = null;
+    // ---- 4. Downstream lake or sea, and rivers ----
+    // End of a lake's drainage: the first cell of another lake, or the sea.
+    const endOf = (lake, c) => {
         while (c !== -1) {
-            if (lakeOf[c] !== -1 && lakeOf[c] !== lake.id) { end = { type: 'lake', id: lakeOf[c] }; path.push(c); break; }
-            if (isOcean(c)) { end = { type: 'sea' }; path.push(c); break; }
-            path.push(c);
+            if (lakeOf[c] !== -1 && lakeOf[c] !== lake.id) return { type: 'lake', id: lakeOf[c] };
+            if (isOcean(c)) return { type: 'sea' };
             c = parent[c];
         }
-        if (!end) end = { type: 'sea' };
-        lake.downstream = end;
-        if (lake.outflowQ >= P.minRiverQ) {
-            lake.river = rivers.length;
-            rivers.push({ id: rivers.length, fromLake: lake.id, to: end, cells: path, q: path.map(p => Q[p]) });
+        return { type: 'sea' };
+    };
+    for (const lake of lakes) lake.downstream = endOf(lake, lake.exitCell);
+
+    const sources = lakes.filter(l => l.outflowQ >= P.minRiverQ && l.exitCell !== -1)
+        .sort((a, b) => b.outflowQ - a.outflowQ || a.id - b.id);
+    const riverOf = new Int32Array(total).fill(-1);
+    const rivers = [];
+    let confluences = 0;
+    for (const lake of sources) {
+        const id = rivers.length;
+        const path = [lake.outletCell];
+        let to = null;
+        for (let c = lake.exitCell; c !== -1; c = parent[c]) {
+            path.push(c);
+            if (lakeOf[c] !== -1 && lakeOf[c] !== lake.id) { to = { type: 'lake', id: lakeOf[c] }; break; }
+            if (isOcean(c)) { to = { type: 'sea' }; break; }
+            if (riverOf[c] !== -1) { to = { type: 'river', id: riverOf[c], cell: c }; confluences++; break; }
+            riverOf[c] = id;
         }
+        lake.river = id;
+        rivers.push({ id, fromLake: lake.id, to: to ?? { type: 'sea' }, cells: path, q: path.map(p => Q[p]) });
     }
 
     return {
         N, params: P, seaLevelM,
         lakes, rivers,
-        // Per-cell arrays for overlays, carving and queries.
-        lakeOf, parent, filled: Float32Array.from(filled), Q: Float32Array.from(Q),
-        stats: { oceanCells, lakeCount: lakes.length, riverCount: rivers.length },
+        // Per-cell arrays for overlays, refinement and queries.
+        lakeOf, riverOf, parent,
+        filled: Float32Array.from(filled), fillExact: Float32Array.from(exact), Q: Float32Array.from(Q),
+        stats: {
+            oceanCells, waterBodies: bodies.comps.length,
+            lakeCount: lakes.length, riverCount: rivers.length, confluences,
+        },
     };
 }
