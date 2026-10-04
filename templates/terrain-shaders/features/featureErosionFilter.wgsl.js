@@ -182,7 +182,11 @@ fn phacelleNoise3D(
         }
     }
     let interpolated = phaseDir / max(weightSum, 1e-20);
-    let magnitude = max(1.0 - normalization, sqrt(dot(interpolated, interpolated)));
+    // Smooth max (the original's max() creases the output along the curves
+    // where the interpolated length crosses 1 - normalization).
+    let len = sqrt(dot(interpolated, interpolated));
+    let floorLen = 1.0 - normalization;
+    let magnitude = 0.5 * (floorLen + len + sqrt((len - floorLen) * (len - floorLen) + 0.01));
     var r: Phacelle3;
     r.cs = interpolated / magnitude;
     r.side = sideDir;
@@ -311,7 +315,10 @@ fn erosionFilterSphere(
 
         fadeTarget = fadedH;
 
-        let roundingForOctave = mix(prm.rounding.y, prm.rounding.x, erosionClamp01(gullyH + 0.5)) * roundingMult;
+        // smoothstep, not the original's clamp: the clamp's corners crease
+        // the mask, and with it the terrain, where ridge and crease
+        // rounding differ.
+        let roundingForOctave = mix(prm.rounding.y, prm.rounding.x, smoothstep(-0.5, 0.5, gullyH)) * roundingMult;
         let newMask = erosionEaseOut(erosionSmoothStart(sloping * prm.onset.y, roundingForOctave * prm.onset.y));
         combiMask = erosionPowInv(combiMask, prm.detail) * newMask;
 

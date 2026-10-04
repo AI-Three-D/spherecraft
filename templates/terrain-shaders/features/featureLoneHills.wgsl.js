@@ -27,11 +27,15 @@ export function createTerrainFeatureLoneHills() {
       return n + dMul(edgeN * strength, band);
   }
 
+  // Quintic ramp (C2): the erosion filter orients its gullies along the
+  // landform's gradient, so a curvature jump in the landform (smoothstep is
+  // only C1) becomes a crease in the eroded terrain - here a seam around the
+  // landmark's lower slopes, where the two peaks' heights differ by k.
   fn twoPeakBlend_d(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
       let k = 0.10;
       let m = dMax(a, b);
       let d = dAbs(a - b);
-      let t = dSmoothstep(0.0, k, d);
+      let t = dQuintic(dClamp(d * (1.0 / k), 0.0, 1.0));
       return dMix((a + b) * 0.5, m, t);
   }
 
