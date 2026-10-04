@@ -177,118 +177,12 @@ fn getTerrainAmplitudes(profile: TerrainProfile) -> TerrainAmplitudes {
     return amp;
 }
 
+// Terrain height (normalized) at unitDir: the value of calculateTerrainHeightD.
+// The sphere terrain is eroded, and erosion needs the landform's gradient, so
+// there is a single implementation (the dual-number one). wx, wy are unused;
+// the parameters stay for the many callers.
 fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f32 {
-    // The sphere terrain is eroded, and erosion needs the landform's gradient:
-    // every sphere evaluation goes through the dual path (the same value
-    // everywhere). The plain body below is the flat-world (face < 0) path only.
-    if (uniforms.face >= 0) {
-        return calculateTerrainHeightD(seed, unitDir).x;
-    }
-    let profile = getTerrainProfile();
-    let amp = getTerrainAmplitudes(profile);
-
-    // ==================== Regional Character ====================
-    let regional = getRegionalCharacter(wx, wy, unitDir, seed, profile);
-    let landBlend = smoothstep(0.15, 0.45, regional.landMask);
-
-    // Feature type weights (kept for when features are re-enabled)
-    let plainness = 1.0 - smoothstep(0.2, 0.4, regional.terrainType);
-    let hillness = smoothstep(0.25, 0.5, regional.terrainType) *
-                   (1.0 - smoothstep(0.5, 0.75, regional.terrainType));
-    let mountainness = smoothstep(0.55, 0.8, regional.terrainType);
-
-    // Land and ocean are blended by landBlend below. A side whose weight is
-    // exactly 0 cannot change the result, so it is not evaluated: full land
-    // skips the ocean-floor noise (11 octaves), full ocean skips every land
-    // feature. landBlend is a smoothstep, so both cases are common.
-    var landHeight = 0.0;
-    if (landBlend > 0.0) {
-    // ==================== Land Height: BASELINE (flat + micro only) ====================
-    landHeight = select(0.0, regional.baseElevation * amp.continentalShelf, terrainFeatureOn(TF_CONTINENT_RELIEF));
-
-    // --- FEATURES DISABLED: re-enable one-by-one after baseline is satisfactory ---
-    // landHeight += featurePlainsHeight(wx, wy, unitDir, seed, profile, amp) * plainness;
-    // landHeight += featureHillsHeight(wx, wy, unitDir, seed, profile, amp) * hillness;
-
-    // ==================== Mountains (line-based ranges with foothills) ====================
-    if (mountainness > 0.01 && terrainFeatureOn(TF_MOUNTAINS)) {
-        // Ramp from the gate: a bare > 0.01 gate left a step of 1 % of the
-        // mountain height (~25 m on fixed-smoothMax cores) along the edge.
-        let mountainW = gateRamp(mountainness, 0.01);
-        landHeight += featureMountainsHeight(wx, wy, unitDir, seed, regional, profile, amp) * mountainW;
-    }
-
-    // ==================== Foothills ====================
-    // Rolling hills that ramp up as the regional terrain type approaches
-    // mountain regions and continue under the ranges, so mountains rise from
-    // hills instead of straight out of the plain.
-    if (terrainFeatureOn(TF_MOUNTAIN_FOOTHILLS)) {
-        let footBand = smoothstep(FOOTHILL_TT_START, FOOTHILL_TT_FULL, regional.terrainType);
-        if (footBand > 0.0) {
-            let hillN = fbmAuto(wx, wy, unitDir, SCALE_MOUNTAIN_FOOTHILLS, 3, seed + 1950, 2.0, 0.5);
-            landHeight += footBand * smoothstep(-0.3, 0.6, hillN) * (HEIGHT_MOUNTAIN_FOOTHILLS / maxTerrainHeightM()) * amp.mountainBase;
-        }
-    }
-
-    // let canyonBlend = mix(0.3, 1.0, regional.tectonicActivity);
-    // landHeight += featureCanyonHeight(wx, wy, unitDir, seed, regional, profile, amp) * canyonBlend * landBlend;
-
-    // ==================== Micro Detail ====================
-    // NOTE: Micro detail is now applied in a later pass based on tile type.
-
-    // ==================== Meso Detail (micro2 + meso1–3) ====================
-    let mesoRoughness = smoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02);
-    let meso = featureMesoDetail(wx, wy, unitDir, seed, profile, mesoRoughness, landHeight);
-    let mesoMaxH = maxTerrainHeightM();
-    landHeight += meso.x * (DISP_MICRO2 / mesoMaxH);
-    if (terrainFeatureOn(TF_MESO1)) { landHeight += meso.y * (DISP_MESO1  / mesoMaxH); }
-    if (terrainFeatureOn(TF_MESO2)) { landHeight += meso.z * (DISP_MESO2  / mesoMaxH); }
-    if (terrainFeatureOn(TF_MESO3)) { landHeight += meso.w * (DISP_MESO3  / mesoMaxH); }
-
-    // ==================== Highlands (additive plateaus) ====================
-    if (terrainFeatureOn(TF_HIGHLANDS)) {
-        landHeight += featureHighlandsHeight(wx, wy, unitDir, seed, regional, profile, amp);
-    }
-
-    // ==================== Lone Hills (additive feature) ====================
-    landHeight += featureLoneHillsHeight(wx, wy, unitDir, seed, regional, profile, amp);
-
-    // ==================== Rivers (carved channel, subtractive) ====================
-    if (terrainFeatureOn(TF_RIVER_CARVE)) {
-        landHeight += featureRiverHeight(wx, wy, unitDir, seed, regional, profile, amp);
-    }
-
-    // ==================== Erosion Seeds (stage 1: subtractive) ====================
-    if (terrainFeatureOn(TF_EROSION_SEEDS)) {
-        landHeight += featureErosionSeedsHeight(wx, wy, unitDir, seed, regional, profile, amp);
-    }
-
-    // ==================== Inland Uplift ====================
-    if (terrainFeatureOn(TF_INLAND_UPLIFT)) {
-        let interior = smoothstep(0.55, 0.85, regional.landMask);
-        let detailBudget = amp.microGain + 0.005;
-        landHeight += interior * detailBudget;
-    }
-    }
-    if (landBlend >= 1.0) {
-        return softClampHeight(landHeight, -1.1, 1.8, 0.25);
-    }
-
-    // ==================== Ocean Floor ====================
-    var oceanVariation = 0.0;
-    if (terrainFeatureOn(TF_OCEAN_FLOOR)) {
-        let n500m = fbmAuto(wx, wy, unitDir, 0.5, 4, seed + 1000, 2.0, 0.5);
-        let n100m = fbmAuto(wx, wy, unitDir, 0.1, 4, seed + 2000, 2.0, 0.5);
-        let n20m = fbmAuto(wx, wy, unitDir, 0.02, 3, seed + 3000, 2.0, 0.5);
-        oceanVariation = n500m * 0.05 + n100m * 0.02 + n20m * 0.005;
-    }
-    let oceanBase = uniforms.waterParams.y + amp.oceanDepth;
-    let oceanHeight = oceanBase + oceanVariation;
-
-    // ==================== Blend Land and Ocean ====================
-    var height = mix(oceanHeight, landHeight, landBlend);
-
-    return softClampHeight(height, -1.1, 1.8, 0.25);
+    return calculateTerrainHeightD(seed, unitDir).x;
 }
 
 // Height and its gradient in one evaluation (sphere, face >= 0):

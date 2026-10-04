@@ -9,14 +9,6 @@ export class TerrainGenerationConfig {
         // Base generator selection (used by WebGPU terrain shader assembly).
         this.baseGenerator = options.baseGenerator ?? 'earthLike';
 
-        // How the base pass derives the slope that drives tile classification
-        // and micro detail (heightBase.g):
-        //   'analytic' - one dual-number evaluation giving height and its exact
-        //                surface gradient (default; owner A/B 2026-10-03 showed
-        //                the same look at about half the base-pass cost).
-        //   'stencil'  - central differences over a ~32 m stencil (5 height
-        //                evaluations per texel; the behaviour before 2026-10).
-        this.slopeMode = options.slopeMode === 'stencil' ? 'stencil' : 'analytic';
 
         // RuneVision erosion filter (templates/terrain-shaders/features/
         // featureErosionFilter.wgsl.js, MPL-2.0), always on: erodes the

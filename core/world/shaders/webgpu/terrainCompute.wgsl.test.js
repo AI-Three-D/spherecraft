@@ -69,8 +69,6 @@ describe('terrain generation compute shader', () => {
         terrain: {},
         heightInput: { hasHeightBindings: true },
         micro: { hasHeightBindings: true, hasTileBindings: true },
-        terrainAnalyticSlope: { analyticSlope: true },
-        heightInputAnalyticSlope: { hasHeightBindings: true, analyticSlope: true },
         heightInputBaseHeight: { hasHeightBindings: true, hasBaseHeightBinding: true }
     };
     for (const [name, extra] of Object.entries(variants)) {

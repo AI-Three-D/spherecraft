@@ -99,7 +99,11 @@ export class HydrologyPrecompute {
         // built by reusing the real packing function (no reimplementation
         // risk). Rivers don't need disabling here — this entry point never
         // calls featureRiverHeight() to begin with, only getRegionalCharacter().
-        const scratchView = terrainGenerator._fillTerrainUniformScratch(0, 0, gridW, 1, -1);
+        // face 0, not -1: any face >= 0 selects the sphere noise path (the
+        // entry point passes its own unit direction). face -1 selected the
+        // flat-world path, which sampled noise at the unit vector's x/z as if
+        // they were metres, i.e. not the planet's terrain.
+        const scratchView = terrainGenerator._fillTerrainUniformScratch(0, 0, gridW, 1, 0);
         scratchView.setInt32(48, 0, true); // outputType — unused by our entry point, harmless
         const uniformBytes = terrainGenerator._terrainUniformScratch.slice(0);
         const hydroUniformBuffer = device.createBuffer({

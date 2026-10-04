@@ -152,7 +152,6 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const hasBaseHeightBinding = hasHeightBindings && options?.hasBaseHeightBinding === true;
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
-  const analyticSlope = options?.analyticSlope === true;
   const erosionFilterWgsl = createErosionFilterLandWgsl(options?.erosionFilter, createTerrainFeatureErosionFilter);
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
@@ -318,46 +317,6 @@ fn hemiOctEncode(n: vec3<f32>) -> vec2<f32> {
     return n.xy * (1.0 / (abs(n.x) + abs(n.y) + n.z));
 }
 
-fn computeNormalSlopeSphere(face: i32, u: f32, v: f32, du: f32, dv: f32) -> NormalSlope {
-    let epsU = max(du, 1.0 / 8192.0);
-    let epsV = max(dv, 1.0 / 8192.0);
-
-    let uR = min(u + epsU, 1.0);
-    let uL = max(u - epsU, 0.0);
-    let vU = min(v + epsV, 1.0);
-    let vD = max(v - epsV, 0.0);
-
-    let dirC = getSpherePoint(face, u, v);
-    let dirR = getSpherePoint(face, uR, v);
-    let dirL = getSpherePoint(face, uL, v);
-    let dirU = getSpherePoint(face, u, vU);
-    let dirD = getSpherePoint(face, u, vD);
-
-    let hR = calculateTerrainHeight(dirR.x, dirR.z, uniforms.seed, dirR);
-    let hL = calculateTerrainHeight(dirL.x, dirL.z, uniforms.seed, dirL);
-    let hU = calculateTerrainHeight(dirU.x, dirU.z, uniforms.seed, dirU);
-    let hD = calculateTerrainHeight(dirD.x, dirD.z, uniforms.seed, dirD);
-
-    let nd = normalDisplacementScale();
-    let pR = dirR * (1.0 + hR * nd);
-    let pL = dirL * (1.0 + hL * nd);
-    let pU = dirU * (1.0 + hU * nd);
-    let pD = dirD * (1.0 + hD * nd);
-
-    let dX = pR - pL;
-    let dY = pU - pD;
-
-    var n = normalize(cross(dY, dX));
-    if (any(n != n) || length(n) < 0.1) {
-        n = dirC;
-    }
-
-    var ns: NormalSlope;
-    ns.n = n;
-    ns.slope = slopeFromNormal(n, dirC);
-    return ns;
-}
-
 fn computeNormalSlopeFlat(wx: f32, wy: f32) -> NormalSlope {
     let eps = 1.0;
 
@@ -378,14 +337,8 @@ fn computeNormalSlopeFlat(wx: f32, wy: f32) -> NormalSlope {
     return ns;
 }
 
-fn computeStableNormalSlopeSphere(face: i32, u: f32, v: f32) -> NormalSlope {
-    let stableStep = 1.0 / 8192.0;
-    return computeNormalSlopeSphere(face, u, v, stableStep, stableStep);
-}
-
 // Slope (sine of the tilt from local up) of the displaced sphere
-// dir * (1 + h * nd) given the height's tangential surface gradient; the same
-// geometry computeNormalSlopeSphere differentiates numerically.
+// dir * (1 + h * nd) given the height's tangential surface gradient.
 fn slopeFromSurfaceGradient(gSurf: vec3<f32>, h: f32) -> f32 {
     let a = 1.0 + h * normalDisplacementScale();
     let b = length(gSurf) * maxTerrainHeightM();
@@ -397,16 +350,14 @@ struct BaseHeightSlope {
     slope: f32,
 }
 
-// Base height and the LOD-stable slope that drives tile classification and
-// micro detail (cached in heightBase.g). slopeMode 'stencil': plain height plus
-// ~32 m central differences, five height evaluations. slopeMode 'analytic':
-// one dual-number evaluation of height and its exact gradient.
+// Base height and the slope that drives tile classification and micro detail
+// (cached in heightBase.g), from one dual-number evaluation: the exact
+// surface gradient, independent of texel size, so the same at every LOD.
 fn baseHeightSlopeSphere(face: i32, u: f32, v: f32, unitDir: vec3<f32>) -> BaseHeightSlope {
     var r: BaseHeightSlope;
-${analyticSlope ? `    let hd = calculateTerrainHeightD(uniforms.seed, unitDir);
+    let hd = calculateTerrainHeightD(uniforms.seed, unitDir);
     r.h = hd.x;
-    r.slope = slopeFromSurfaceGradient(terrainSurfaceGradient(hd, unitDir), hd.x);` : `    r.h = calculateTerrainHeight(unitDir.x, unitDir.z, uniforms.seed, unitDir);
-    r.slope = computeStableNormalSlopeSphere(face, u, v).slope;`}
+    r.slope = slopeFromSurfaceGradient(terrainSurfaceGradient(hd, unitDir), hd.x);
     return r;
 }
 
@@ -1323,7 +1274,6 @@ if (uniforms.outputType == 0) {
     ${hasHeightBindings ? `
     let coordC = vec2<i32>(global_id.xy);
     // heightMap here is heightBase: .r = height, .g = cached stable slope.
-    // Was: computeStableNormalSlopeSphere → 4× calculateTerrainHeight per pixel.
     let heightSample = textureLoad(heightMap, coordC, 0);
     let h = heightSample.r;
     let slope = heightSample.g;
@@ -1483,7 +1433,6 @@ ${hasTileBindings ? `
 else if (uniforms.outputType == 4) {
     let coordC = vec2<i32>(global_id.xy);
     // heightMap here is heightBase: .r = base height, .g = cached stable slope.
-    // Was: computeStableNormalSlopeSphere → 4× calculateTerrainHeight per pixel.
     let heightSample = textureLoad(heightMap, coordC, 0);
     let baseH = heightSample.r;
     let slope = heightSample.g;

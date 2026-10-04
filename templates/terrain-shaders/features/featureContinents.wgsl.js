@@ -116,7 +116,7 @@ info.baseElevation = landT * 1.0;  // (scale tuned later)
     return info;
 }
 
-// ---- Analytic-derivative twins (sphere only; see terrainCommon) ----
+// ---- Dual-number versions (sphere only; see terrainCommon) ----
 
 struct RegionalInfoD {
     isLand: bool,

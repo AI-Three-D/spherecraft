@@ -96,7 +96,10 @@ export class ErosionSeedVerifier {
         // Real, fully-populated uniforms (real seed + noise config) — not
         // the live shared buffer, which this session confirmed is stale/
         // unused by this demo's batched generation path.
-        terrainGenerator._fillTerrainUniformScratch(0, 0, 128, 1, -1);
+        // face 0, not -1: any face >= 0 selects the sphere terrain path (the
+        // shader passes its own unit direction); -1 selected the flat-world
+        // path, which is not the planet's terrain.
+        terrainGenerator._fillTerrainUniformScratch(0, 0, 128, 1, 0);
         const uniformBytes = terrainGenerator._terrainUniformScratch.slice(0);
         const uniformBuffer = device.createBuffer({
             label: 'ErosionVerify-Uniforms',

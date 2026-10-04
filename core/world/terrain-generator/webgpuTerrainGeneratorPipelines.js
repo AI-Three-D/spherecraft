@@ -408,7 +408,6 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     authoredSplatSourceWinnerSnapStart: this.authoredSplatSourceWinnerSnapStart,
                     authoredSplatSourceWinnerSnapEnd: this.authoredSplatSourceWinnerSnapEnd,
                     fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
-                    analyticSlope: this.slopeMode === 'analytic',
                     erosionFilter: this.erosionFilter,
                     ...extra,
                 };

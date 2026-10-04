@@ -204,7 +204,6 @@ export class WebGPUTerrainGenerator {
         this.planetConfig = planetConfig;
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
-        this.slopeMode = this.terrainConfig?.slopeMode === 'stencil' ? 'stencil' : 'analytic';
         this.erosionFilter = requireObject(this.terrainConfig.erosionFilter, 'planetConfig.terrainGeneration.erosionFilter');
         this._applyTerrainFeatures(this.terrainConfig?.features ?? {}, null);
         this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');

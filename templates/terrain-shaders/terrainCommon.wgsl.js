@@ -88,37 +88,6 @@ fn normalDisplacementScale() -> f32 {
 
 fn saturate(x: f32) -> f32 { return clamp(x, 0.0, 1.0); }
 
-// Adds irregular perimeter without creating a hard band.
-// Works by modulating the input noise near the threshold.
-fn irregularizeNoiseNearBase(n: f32, threshold: f32, edgeN: f32, strength: f32) -> f32 {
-    // baseBand ~1 near the foot of the hill (where n is around threshold/threshold-extend)
-    // We approximate "near base" by looking at how close n is to threshold.
-    let band = 1.0 - smoothstep(0.0, 0.20, abs(n - threshold));
-    return n + edgeN * strength * band;
-}
-
-// Two-peak blend: combines two domes (same underlying noise, different scales/warps)
-// without multiplying unrelated fields.
-// x faded in from a gate g: zero value and zero slope at g, equal to x from
-// 6 g on. Replaces "if (x > g) { ... * x }" gates, which start a feature with
-// a step (or, with a linear ramp, a slope kink that the erosion filter turns
-// into a step).
-fn gateRamp(x: f32, g: f32) -> f32 {
-    return x * smoothstep(g, 6.0 * g, x);
-}
-
-fn twoPeakBlend(a: f32, b: f32) -> f32 {
-    // soft max-ish blend
-    let k = 0.10;
-    let m = max(a, b);
-    let d = abs(a - b);
-    // smoothstep keeps the slope continuous where the blend meets max at
-    // d = k (the linear ramp left a kink there, which the erosion filter
-    // turns into a step); the shape is otherwise the same.
-    let t = smoothstep(0.0, k, d);
-    return mix((a + b) * 0.5, m, t);
-}
-
 fn clampMacroScaleToPlanet(scale: f32) -> f32 {
     if (uniforms.face < 0) {
         return scale;
