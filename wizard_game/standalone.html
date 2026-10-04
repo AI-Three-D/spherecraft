@@ -3749,7 +3749,11 @@
                         'window.qtDiag.setTerrainDebugMode(mode)',
                         'window.qtDiag.setStreamerFlags({ diagnostics: true }) // streamer switches, see EngineConfig gpuQuadtree.streamerFlags',
                         'await window.qtDiag.benchTerrainGeneration({ count: 24, depth: 7 }) // GPU ms per generated tile near the camera',
-                        'window.qtDiag.spawnGoblinGroup({ groupSize: 3 }) // disabled by default'
+                        'window.qtDiag.spawnGoblinGroup({ groupSize: 3 }) // disabled by default',
+                        'window.qtDiag.water.stats() // water graph + lake refinement state',
+                        'window.qtDiag.water.near(10) // lakes nearest the camera (level, area, refined, downstream)',
+                        'window.qtDiag.water.goto(lakeId, 300) // free camera 300 m above a lake',
+                        'await window.qtDiag.water.refine(lakeId) / await window.qtDiag.water.clearCache()'
                     ].join('\n'));
                 },
                 status,
@@ -3797,6 +3801,15 @@
         window.lakeHeightDiag = (lakeIndex = 0) => gameEngine?.debugLakeHeightProbe?.(lakeIndex) ?? Promise.resolve(null);
         window.lakeReport = () => gameEngine?.renderer?.lakeWaterSystem?.getDebugPlacementReport?.() ?? null;
         window.flyToLake = (readyIndex = 0, hoverAltitudeM = 60) => gameEngine?.debugFlyToLake?.(readyIndex, hoverAltitudeM) ?? null;
+
+        // Water graph (core/world/hydrology/WaterService.js, terrain.waterGraph).
+        window.qtDiag.water = {
+            stats() { const s = gameEngine?.waterSummary?.() ?? null; console.info('[Water]', s); return s; },
+            near(count = 10) { const rows = gameEngine?.waterLakesNear?.(count) ?? []; console.table(rows); return rows; },
+            goto(lakeId, hoverAltitudeM = 300) { return gameEngine?.gotoWaterLake?.(lakeId, hoverAltitudeM) ?? null; },
+            refine(lakeId) { return gameEngine?.waterService?.refineLake?.(lakeId) ?? Promise.resolve(null); },
+            clearCache() { return gameEngine?.waterService?.clearCache?.() ?? Promise.resolve(false); },
+        };
 
         // Phase 0 test matrix (SphereCraft_Optimization_Implementation_Plan.md
         // §0.5): drives the manual free camera through the six standard

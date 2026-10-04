@@ -270,6 +270,14 @@ export class TerrainGenerationConfig {
         this.erosionSeeds = {
             confirmed: erosionSeeds.confirmed ?? [],
         };
+
+        // Water system (core/world/hydrology/WaterService.js): water graph
+        // (lakes, rivers) built in the background once the terrain has
+        // loaded, lakes refined near the camera. Off unless enabled; other
+        // fields override WATER_SERVICE_DEFAULTS (gridN, params, cache,
+        // refine: { radiusM, spacingM, bandM, ... }).
+        const waterGraph = options.waterGraph ?? {};
+        this.waterGraph = { ...waterGraph, enabled: waterGraph.enabled === true };
     }
 
     // Get shader-compatible uniform data

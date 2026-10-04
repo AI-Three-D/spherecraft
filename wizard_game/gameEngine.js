@@ -51,6 +51,7 @@ import { createTerrainFeatureErosionSeeds } from '../templates/terrain-shaders/f
 import { createTerrainFeatureErosionFilter } from '../templates/terrain-shaders/features/featureErosionFilter.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
+import { WaterService } from '../core/world/hydrology/WaterService.js';
 import { ErosionSeedVerifier } from '../core/world/hydrology/ErosionSeedVerifier.js';
 import { computeSurfaceTangentFrame } from '../core/planet/surfaceFrame.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
@@ -988,6 +989,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
     stop() {
         this.isGameActive = false;
+        this.waterService?.dispose();
+        this.waterService = null;
         this.inputManager.stop();
         if (this._resizeHandler) {
             window.removeEventListener('resize', this._resizeHandler);
@@ -1192,6 +1195,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.camera.update();
         }
 
+        this._tickWater();
+
         this.gameState = {
             time: performance.now(),
             player: this.spaceship,
@@ -1395,6 +1400,81 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         }
         Logger.info(`[GameEngine] flew to lake region (${lake.regionX},${lake.regionY}), hovering ${hoverAltitudeM}m above water`);
         return { regionX: lake.regionX, regionY: lake.regionY, center: lake.center };
+    }
+
+    /**
+     * Water system (core/world/hydrology/WaterService.js): starts in the
+     * background once the initial terrain load is done (terrain never waits),
+     * then refines lakes near the camera. terrain.waterGraph.enabled.
+     */
+    _tickWater() {
+        if (this.planetConfig?.terrainGeneration?.waterGraph?.enabled !== true) return;
+        if (!this.waterService) {
+            if (!this.isInitialLoadComplete()) return;
+            const terrainGenerator = this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator;
+            const device = this.renderer?.backend?.device;
+            if (!terrainGenerator || !device) return;
+            this.waterService = new WaterService({
+                device,
+                terrainGenerator,
+                planetConfig: this.planetConfig,
+                // One GPU sampling dispatch per frame.
+                yieldBetween: () => new Promise(resolve => requestAnimationFrame(() => resolve())),
+            });
+            this.waterService.start();
+            return;
+        }
+        this.waterService.update(this.camera?.position);
+    }
+
+    /** qtDiag.water.stats() */
+    waterSummary() {
+        return this.waterService?.summary() ?? { state: 'off (terrain.waterGraph.enabled false, or not started yet)' };
+    }
+
+    /** qtDiag.water.near(n): lakes nearest the camera. */
+    waterLakesNear(count = 10) {
+        const svc = this.waterService;
+        if (svc?.state !== 'ready' || !this.camera?.position) return [];
+        return svc.lakesNear(this.camera.position, count).map(({ lake, distanceM }) => {
+            const r = svc.refined.get(lake.id);
+            return {
+                id: lake.id, distanceKm: +(distanceM / 1000).toFixed(2),
+                levelM: +(r?.level ?? lake.level).toFixed(1), graphLevelM: +lake.level.toFixed(1),
+                areaKm2: r ? +(r.areaM2 / 1e6).toFixed(2) : null, maxDepthM: +(r?.maxDepth ?? lake.maxDepth).toFixed(0),
+                refined: !!r, river: lake.river >= 0,
+                downstream: (r?.downstream ?? lake.downstream)?.type === 'lake' ? `lake ${(r?.downstream ?? lake.downstream).id}` : 'sea',
+            };
+        });
+    }
+
+    /**
+     * qtDiag.water.goto(lakeId): free camera hovering over a lake, looking
+     * across it. Switch back with the camera-mode key.
+     */
+    gotoWaterLake(lakeId, hoverAltitudeM = 300) {
+        const svc = this.waterService;
+        const lake = svc?.lakes?.[svc.rep(lakeId)];
+        if (!lake || !this.camera) {
+            Logger.warn(`[GameEngine] water lake ${lakeId} not available (water state: ${svc?.state ?? 'off'})`);
+            return null;
+        }
+        const r = svc.refined.get(lake.id);
+        const level = r?.level ?? lake.level;
+        const R = this.planetConfig.radius;
+        const origin = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
+        const c = lake.centreDir, e1 = lake.frame.e1;
+        const eye = R + level + hoverAltitudeM;
+        // Look 2 km across the lake, at its level.
+        const lookDir = new Vector3(c[0] + e1[0] * 2000 / R, c[1] + e1[1] * 2000 / R, c[2] + e1[2] * 2000 / R).normalize();
+        if (this.cameraMode !== 'manual') {
+            this.cameraMode = 'manual';
+            this.camera.unfollow?.();
+        }
+        this.camera.setPosition(origin.x + c[0] * eye, origin.y + c[1] * eye, origin.z + c[2] * eye);
+        this.camera.lookAt(origin.x + lookDir.x * (R + level), origin.y + lookDir.y * (R + level), origin.z + lookDir.z * (R + level));
+        Logger.info(`[GameEngine] water lake ${lake.id}: level ${level.toFixed(1)} m${r ? '' : ' (graph level, not refined yet)'}, camera ${hoverAltitudeM} m above`);
+        return { id: lake.id, level, refined: !!r };
     }
 
     async setTerrainDebugMode(mode) {

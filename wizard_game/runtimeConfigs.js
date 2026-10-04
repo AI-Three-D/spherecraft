@@ -955,6 +955,11 @@ export function createGameDataConfig() {
     features: {
       erosionSeeds: false,
     },
+    // Water graph + lake refinement in the background (no visuals yet):
+    // qtDiag.water.stats() / .near() / .goto(id). See WaterService.js.
+    waterGraph: {
+      enabled: true,
+    },
     erosion: {
       enabled: true,
       globalRate: 0.6,
