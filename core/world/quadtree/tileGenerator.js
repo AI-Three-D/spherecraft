@@ -349,9 +349,15 @@ this._maxGpuFencesObserved = 0;
             device.queue.submit([enc.finish()]);
         }
 
+        // heightBase carries a 1-texel apron (the adjacent tiles' edge-adjacent
+        // texels, see advancedTerrainCompute main) so the normal pass needs no
+        // terrain evaluations for its border samples. Not when heightBase is
+        // returned to the caller (diagnostics expect textureSize^2).
+        const baseHeightApron = needsBaseHeight && !includeBaseHeight;
+        const baseHeightSize = this.textureSize + (baseHeightApron ? 2 : 0);
         if (needsBaseHeight) {
             gpuHeightBase = this._createGPUTexture(
-                this.textureSize, this.textureSize, 'rgba32float');
+                baseHeightSize, baseHeightSize, 'rgba32float');
         }
         if (needsTile && !reuseResidentGeometry) {
             tileTarget = this.terrainGen.createStorageBackedOutputTarget(
@@ -378,7 +384,7 @@ this._maxGpuFencesObserved = 0;
                 outputType: 0,
                 texture: gpuHeightBase,
                 format: 'rgba32float',
-                textureSize: this.textureSize
+                textureSize: baseHeightSize
             });
         }
         if (gpuTile && !reuseResidentGeometry) {

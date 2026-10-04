@@ -366,6 +366,15 @@ fn sampleHeightAt(coord: vec2<i32>) -> f32 {
     return textureLoad(heightMap, coord, 0).r;
 }
 
+// heightMap may be the base-height target with its 1-texel apron (2 texels
+// larger than this pass's output, unpadded passes only): this tile's texel
+// coord is then at +1.
+fn heightInputCoord(coord: vec2<i32>) -> vec2<i32> {
+    let d = vec2<i32>(textureDimensions(heightMap)) - vec2<i32>(textureDimensions(outputTexture));
+    let padded = abs(uniforms.uvOffset.x) > 0.0 || abs(uniforms.uvOffset.y) > 0.0;
+    return coord + select(vec2<i32>(0), vec2<i32>(1), (d == vec2<i32>(2)) & vec2<bool>(!padded));
+}
+
 fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f32 {
     let dir = getSpherePoint(face, u, v);
     let wx = dir.x;
@@ -416,6 +425,8 @@ fn sampleBaseHeightProcedural(face: i32, u: f32, v: f32) -> f32 {
 }
 
 // Base height (no micro) at a border-band neighbour of the normal pass.
+// - heightBase with the apron (tile generation): always read from it.
+// Without the apron (heightBase requested as an output, diagnostics):
 // - preferTexture and inside the tile: read heightBase (written by the base
 //   pass for this very texel).
 // - otherwise evaluate the terrain function at the texel's face UV, rebuilt
@@ -428,7 +439,13 @@ fn sampleBaseHeightProcedural(face: i32, u: f32, v: f32) -> f32 {
 // module and may round the terrain function differently.) Across a face edge
 // it falls back to the caller's clamped u, v.
 fn borderBaseHeight(face: i32, u: f32, v: f32, coord: vec2<i32>, maxC: vec2<i32>, preferTexture: bool) -> f32 {
-${hasBaseHeightBinding ? `    let inside = all(coord >= vec2<i32>(0)) && all(coord <= maxC);
+${hasBaseHeightBinding ? `    // heightBase with its 1-texel apron holds every neighbour, including the
+    // adjacent tiles' texels (written by the same base-pass module on both
+    // sides of an edge, so shared-edge normals agree exactly).
+    if (all(vec2<i32>(textureDimensions(baseHeightMap)) == maxC + vec2<i32>(3))) {
+        return softClampHeight(textureLoad(baseHeightMap, coord + vec2<i32>(1), 0).r, -1.1, 1.8, 0.25);
+    }
+    let inside = all(coord >= vec2<i32>(0)) && all(coord <= maxC);
     if (preferTexture && inside) {
         return softClampHeight(textureLoad(baseHeightMap, coord, 0).r, -1.1, 1.8, 0.25);
     }
@@ -1066,8 +1083,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 u = (chunkCoord.x + localUV.x) / totalChunks;
                 v = (chunkCoord.y + localUV.y) / totalChunks;
             } else {
-                let localChunk = floor(pixelCoord / chunkSizePx);
-                let localPixel = pixelCoord - localChunk * chunkSizePx;
+                // Base-height apron: a base-pass target 2 texels larger than
+                // the chunk (tileGenerator) also holds, around the tile, the
+                // adjacent tiles' edge-adjacent texels (index -1 is the
+                // previous tile's texel n-2, index n the next tile's texel
+                // 1), computed with that tile's own arithmetic so both tiles
+                // get bit-identical values. Beyond the face edge it repeats
+                // this tile's edge texel. The normal pass reads its border
+                // samples from it instead of evaluating the terrain.
+                let n = max(uniforms.chunkSize, 1);
+                let hasApron = uniforms.outputType == 0 && n > 2
+                    && i32(texSize.x) == n + 2 && i32(texSize.y) == n + 2;
+                var px = pixelCoord;
+                var chunkShift = vec2<i32>(0);
+                if (hasApron) {
+                    let idx = vec2<i32>(global_id.xy) - vec2<i32>(1);
+                    let grid = max(uniforms.chunkGridSize, 1);
+                    let below = idx < vec2<i32>(0);
+                    let above = idx > vec2<i32>(n - 1);
+                    chunkShift = select(vec2<i32>(0), vec2<i32>(-1), below) + select(vec2<i32>(0), vec2<i32>(1), above);
+                    var local = select(select(idx, vec2<i32>(1), above), vec2<i32>(n - 2), below);
+                    let c = uniforms.chunkCoord + chunkShift;
+                    let offFace = vec2<bool>(c.x < 0 || c.x >= grid, c.y < 0 || c.y >= grid);
+                    local = select(local, clamp(idx, vec2<i32>(0), vec2<i32>(n - 1)), offFace);
+                    chunkShift = select(chunkShift, vec2<i32>(0), offFace);
+                    px = vec2<f32>(local);
+                }
+                let localChunk = floor(px / chunkSizePx);
+                let localPixel = px - localChunk * chunkSizePx;
 
                 if (chunkSizePx.x < 2.0) {
                     localUV = vec2<f32>(0.5, 0.5);
@@ -1076,7 +1119,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 }
 
                 let chunkCoord =
-                    vec2<f32>(f32(uniforms.chunkCoord.x), f32(uniforms.chunkCoord.y))
+                    vec2<f32>(f32(uniforms.chunkCoord.x + chunkShift.x), f32(uniforms.chunkCoord.y + chunkShift.y))
                     + localChunk;
                 u = (chunkCoord.x + localUV.x) / totalChunks;
                 v = (chunkCoord.y + localUV.y) / totalChunks;
@@ -1274,7 +1317,7 @@ if (uniforms.outputType == 0) {
     ${hasHeightBindings ? `
     let coordC = vec2<i32>(global_id.xy);
     // heightMap here is heightBase: .r = height, .g = cached stable slope.
-    let heightSample = textureLoad(heightMap, coordC, 0);
+    let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
     let h = heightSample.r;
     let slope = heightSample.g;
     ` : `
@@ -1324,7 +1367,7 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
 
     ${hasHeightBindings ? `
     let coordC = vec2<i32>(global_id.xy);
-    let heightSample = textureLoad(heightMap, coordC, 0);
+    let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
     let h = heightSample.r;
     let slope = heightSample.g;
     ` : `
@@ -1433,7 +1476,7 @@ ${hasTileBindings ? `
 else if (uniforms.outputType == 4) {
     let coordC = vec2<i32>(global_id.xy);
     // heightMap here is heightBase: .r = base height, .g = cached stable slope.
-    let heightSample = textureLoad(heightMap, coordC, 0);
+    let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
     let baseH = heightSample.r;
     let slope = heightSample.g;
     let tileSample = textureLoad(tileMap, coordC, 0);
