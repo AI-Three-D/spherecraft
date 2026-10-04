@@ -19,11 +19,16 @@ export class TerrainGenerationConfig {
         const vec = (v, d) => (Array.isArray(v) && v.length === d.length && v.every(Number.isFinite) ? v.slice() : d);
         this.erosionFilter = {
             scale: num(ef.scale, 1500),
-            strength: num(ef.strength, 0.18),
+            strength: num(ef.strength, 0.22),
             gullyWeight: num(ef.gullyWeight, 0.5),
             detail: num(ef.detail, 1.5),
-            rounding: vec(ef.rounding, [0.1, 0.0, 0.1, 2.0]),
-            onset: vec(ef.onset, [1.25, 1.25, 2.8, 1.5]),
+            // rounding.z (input rounding) 1.0 and onset.x 0.9 (RuneVision demo:
+            // 0.1, 1.25): gullies fade in more gently where the input is nearly
+            // flat. At summits and saddles the gully direction spins around a
+            // point; with a sharp onset that left pinch points and closed
+            // crease rings around hilltops.
+            rounding: vec(ef.rounding, [0.1, 0.0, 1.0, 2.0]),
+            onset: vec(ef.onset, [0.9, 1.25, 2.8, 1.5]),
             assumedSlope: vec(ef.assumedSlope, [0.7, 1.0]),
             octaves: Math.max(1, Math.min(8, Math.round(num(ef.octaves, 5)))),
             lacunarity: num(ef.lacunarity, 2.0),
