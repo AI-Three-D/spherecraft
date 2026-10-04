@@ -49,6 +49,12 @@ export class TerrainGenerationConfig {
             reliefStartM: num(ef.reliefStartM, 150),
             reliefFullM: num(ef.reliefFullM, 600),
             lowReliefAmount: num(ef.lowReliefAmount, 0.2),
+            // Steepness ramp (input slope, rise over run): erosion at full
+            // amount from sharpSlopeFull, none below sharpSlopeStart. Keeps
+            // gullies off summits, saddles and valley floors (where they
+            // pinched into bowties) and lightens erosion on gentle ground.
+            sharpSlopeStart: num(ef.sharpSlopeStart, 0.05),
+            sharpSlopeFull: num(ef.sharpSlopeFull, 0.45),
             variationScaleM: num(ef.variationScaleM, 15000),
             variationMin: num(ef.variationMin, 0.15),
             // Fraction of meso1/meso2 kept where erosion is at full amount

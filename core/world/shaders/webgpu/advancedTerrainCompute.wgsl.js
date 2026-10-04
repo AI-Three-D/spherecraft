@@ -54,10 +54,12 @@ struct ErosionLandResult {
 // Erodes a slope-continuous landform (dual: normalized height + gradient
 // w.r.t. unitDir) and returns the height change. reliefNorm: the summed
 // height of the large landforms (mountains, highlands, big lone hills).
-// - Amount = variation x mix(lowReliefAmount, 1, relief ramp): variation is a
-//   noise field (wavelength variationScaleM) between variationMin and 1, so
-//   some regions erode hard and others stay smooth; the relief ramp goes
-//   from reliefStartM to reliefFullM. Strength = strength x amount.
+// - Amount = variation x mix(lowReliefAmount, 1, relief ramp) x steepness:
+//   variation is a noise field (wavelength variationScaleM) between
+//   variationMin and 1, so some regions erode hard and others stay smooth;
+//   the relief ramp goes from reliefStartM to reliefFullM; steepness ramps
+//   with the input slope from sharpSlopeStart to sharpSlopeFull.
+//   Strength = strength x amount.
 // - Rounding: ridges and creases blend to lowAmountRounding as the amount
 //   falls from softAmountNone to softAmountFull.
 // - Fade target: relief over fadeRangeM, mapped to [-1, 1].
@@ -79,7 +81,15 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let reliefRamp = dSmoothstep(${wgslNum(cfg.reliefStartM)}, ${wgslNum(cfg.reliefFullM)}, relief);
     let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
     let variation = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
-    let amount = dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)}));
+    let reliefAmount = dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)}));
+    // Steepness: full erosion on steep ground, fading out toward flat ground.
+    // Summits, saddles and valley floors are where the gully direction spins
+    // around a point (pinches, bowties); this keeps gullies away from them
+    // and makes erosion lighter on gentle hills. Its gradient (a second
+    // derivative of the landform) is not tracked.
+    let slope = terrainSurfaceGradient(land, unitDir) * maxH;
+    let steepness = smoothstep(${wgslNum(cfg.sharpSlopeStart)}, ${wgslNum(cfg.sharpSlopeFull)}, length(slope));
+    let amount = reliefAmount * steepness;
     r.amount = amount;
     if (amount.x <= 0.001) { return r; }
     var prm = erosionConfiguredParams();
@@ -89,7 +99,6 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let soft = 1.0 - smoothstep(${wgslNum(cfg.softAmountFull)}, ${wgslNum(cfg.softAmountNone)}, amount.x);
     prm.rounding.x = mix(prm.rounding.x, ${wgslNum(cfg.lowAmountRounding)}, soft);
     prm.rounding.y = mix(prm.rounding.y, ${wgslNum(cfg.lowAmountRounding)}, soft);
-    let slope = terrainSurfaceGradient(land, unitDir) * maxH;
     let fadeRaw = relief.x / ${wgslNum(cfg.fadeRangeM)} * 2.0 - 1.0;
     let fadeTarget = clamp(fadeRaw, -1.0, 1.0);
     let e = erosionFilterSphere(unitDir * R, unitDir, land.x * maxH, slope, fadeTarget, prm);
