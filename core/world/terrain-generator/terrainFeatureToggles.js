@@ -18,8 +18,8 @@ export const TERRAIN_FEATURES = Object.freeze([
     { key: 'mountains', wgsl: 'TF_MOUNTAINS', about: 'Mountain ranges: foothills, ridge cores, peaks (whole feature).' },
     { key: 'mountainDetail', wgsl: 'TF_MOUNTAIN_DETAIL', about: 'Mountain slope roughness: 2 octaves at 4 km, 120 m.' },
     { key: 'mountainPeaks', wgsl: 'TF_MOUNTAIN_PEAKS', about: 'Exceptional towering peaks inside ranges (very rare).' },
-    { key: 'meso1', wgsl: 'TF_MESO1', about: 'Meso detail 80 m wavelength, 25 m (replaced by the erosion filter when it is on).' },
-    { key: 'meso2', wgsl: 'TF_MESO2', about: 'Meso detail 750 m wavelength, 135 m (replaced by the erosion filter when it is on).' },
+    { key: 'meso1', wgsl: 'TF_MESO1', about: 'Meso detail 80 m wavelength, 25 m (with erosion: added on top, faded where erosion is strong).' },
+    { key: 'meso2', wgsl: 'TF_MESO2', about: 'Meso detail 750 m wavelength, 135 m (with erosion: added on top, faded where erosion is strong).' },
     { key: 'meso3', wgsl: 'TF_MESO3', about: 'Meso detail 4 km wavelength, 150 m.' },
     { key: 'highlands', wgsl: 'TF_HIGHLANDS', about: 'Plateaus, five rarity tiers (5-70 km).' },
     { key: 'loneHillsCommon', wgsl: 'TF_LONE_HILLS_COMMON', about: 'Lone hills tier 1: common round domes, 0.8 / 1.6 km.' },
@@ -32,7 +32,7 @@ export const TERRAIN_FEATURES = Object.freeze([
     { key: 'erosionSeeds', wgsl: 'TF_EROSION_SEEDS', about: 'Erosion-seed pits (the demo lakes sit in them).' },
     { key: 'inlandUplift', wgsl: 'TF_INLAND_UPLIFT', about: 'Uniform uplift of continental interiors.' },
     { key: 'oceanFloor', wgsl: 'TF_OCEAN_FLOOR', about: 'Ocean-floor noise (off: flat floor at the ocean base depth).' },
-    { key: 'erosionFilter', wgsl: 'TF_EROSION_FILTER', about: 'RuneVision erosion filter (only if terrain.erosionFilter.enabled compiled it in). Off restores meso1/meso2 and the cuts.' },
+    { key: 'erosionFilter', wgsl: 'TF_EROSION_FILTER', about: 'RuneVision erosion filter (only if terrain.erosionFilter.enabled compiled it in). Off restores the lone-hill cuts and full meso1/meso2.' },
     { key: 'microDetail', wgsl: 'TF_MICRO_DETAIL', about: 'Per-tile micro displacement by surface type (final height pass).' },
 ]);
 

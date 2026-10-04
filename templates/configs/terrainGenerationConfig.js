@@ -26,6 +26,11 @@ export class TerrainGenerationConfig {
         //   loneHillGates - lone-hill tiers 4/5 and rolling hills ramp from
         //                   their presence gate instead of starting with a
         //                   1-6 m vertical step.
+        //   mountainGates - mountains ramp from the mountainness, range-mask
+        //                   and exceptional-peak gates (were ~25 m steps).
+        //   smoothBlends  - slope-continuous landmark blends (twoPeakBlend,
+        //                   lobe max). Their kinks became ~25 m steps under
+        //                   the erosion filter, which reads the input slope.
         // RuneVision erosion filter (templates/terrain-shaders/features/
         // featureErosionFilter.wgsl.js, MPL-2.0). When enabled it replaces the
         // noise that imitated erosion (meso1/meso2, lone-hill slope cuts and
@@ -37,7 +42,7 @@ export class TerrainGenerationConfig {
         this.erosionFilter = {
             enabled: ef.enabled !== false,
             scale: num(ef.scale, 1500),
-            strength: num(ef.strength, 0.22),
+            strength: num(ef.strength, 0.18),
             gullyWeight: num(ef.gullyWeight, 0.5),
             detail: num(ef.detail, 1.5),
             rounding: vec(ef.rounding, [0.1, 0.0, 0.1, 2.0]),
@@ -52,11 +57,21 @@ export class TerrainGenerationConfig {
             // Height above the regional base that maps to the filter's fade
             // target range [-1, 1] (valleys .. peaks).
             fadeRangeM: num(ef.fadeRangeM, 1200),
-            // Strength ramps with the landform's height above the regional
-            // base: none below reliefStartM (plains, valley floors, sea floor),
-            // full from reliefFullM. Where it is zero the filter is skipped.
+            // Local amount (multiplies strength) = variation x relief ramp.
+            // Relief = summed height of the large landforms (mountains,
+            // highlands, big lone hills): lowReliefAmount below reliefStartM,
+            // full from reliefFullM. Variation: a noise field with wavelength
+            // variationScaleM between variationMin and 1, so some regions are
+            // rugged and others gentle. Where the amount is 0 the filter is
+            // skipped.
             reliefStartM: num(ef.reliefStartM, 150),
             reliefFullM: num(ef.reliefFullM, 600),
+            lowReliefAmount: num(ef.lowReliefAmount, 0.2),
+            variationScaleM: num(ef.variationScaleM, 15000),
+            variationMin: num(ef.variationMin, 0.15),
+            // Fraction of meso1/meso2 kept where erosion is at full amount
+            // (1 everywhere it is 0).
+            mesoKeep: num(ef.mesoKeep, 0.35),
             seed: Math.round(num(ef.seed, 7))
         };
 
@@ -69,7 +84,9 @@ export class TerrainGenerationConfig {
         const fixes = options.fixes ?? {};
         this.fixes = {
             smoothMax: fixes.smoothMax !== false,
-            loneHillGates: fixes.loneHillGates !== false
+            loneHillGates: fixes.loneHillGates !== false,
+            mountainGates: fixes.mountainGates !== false,
+            smoothBlends: fixes.smoothBlends !== false
         };
 
         // High-level noise profile knobs (shader expects these in _pad3/_pad4).

@@ -23,8 +23,15 @@ function createErosionFilterLandWgsl(cfg, createFeature) {
   if (!enabled) {
     return `
 const EROSION_FILTER_ENABLED: bool = false;
+const EROSION_MESO_KEEP: f32 = 1.0;
+struct ErosionLandResult { delta: vec4<f32>, amount: vec4<f32>, }
 fn erosionFilterActive() -> bool { return false; }
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> vec4<f32> { return land; }
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> ErosionLandResult {
+    var r: ErosionLandResult;
+    r.delta = vec4<f32>(0.0);
+    r.amount = vec4<f32>(0.0);
+    return r;
+}
 `;
   }
   return createFeature() + `
@@ -51,25 +58,44 @@ fn erosionConfiguredParams() -> ErosionParams {
     return prm;
 }
 
-// Erodes the land height (dual: normalized height + gradient w.r.t.
-// unitDir). reliefNorm: the summed height of the large landforms (mountains,
-// highlands, big lone hills; dual, normalized).
-// - Relief (metres) sets the strength: 0 below reliefStartM, full from
-//   reliefFullM. No relief, no filter.
-// - The fade target is the relief over fadeRangeM, mapped to [-1, 1].
-// - The height offset -fadeTarget * magnitude * (1 - initialMask) cancels the
+// Fraction of meso1/meso2 kept where erosion runs at full amount.
+const EROSION_MESO_KEEP: f32 = ${wgslNum(cfg.mesoKeep)};
+
+struct ErosionLandResult {
+    // Height change (dual, normalized) to add to the terrain.
+    delta: vec4<f32>,
+    // Local erosion amount 0..1 (dual): regional variation x relief.
+    amount: vec4<f32>,
+}
+
+// Erodes a slope-continuous landform (dual: normalized height + gradient
+// w.r.t. unitDir) and returns the height change. reliefNorm: the summed
+// height of the large landforms (mountains, highlands, big lone hills).
+// - Amount = variation x mix(lowReliefAmount, 1, relief ramp): variation is a
+//   noise field (wavelength variationScaleM) between variationMin and 1, so
+//   some regions erode hard and others stay smooth; the relief ramp goes
+//   from reliefStartM to reliefFullM. Strength = strength x amount.
+// - Fade target: relief over fadeRangeM, mapped to [-1, 1].
+// - Height offset -fadeTarget * magnitude * (1 - initialMask) cancels the
 //   filter's fade-to-target exactly on flat input (flat ground keeps its
 //   height) and vanishes on slopes, so the landform is not reshaped.
 // Slope deltas are the filter's approximate derivatives (as in the
-// original), plus the first-order terms of the strength ramp and offset.
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> vec4<f32> {
+// original), plus the first-order terms of the amount and the offset.
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>) -> ErosionLandResult {
+    var r: ErosionLandResult;
+    r.delta = vec4<f32>(0.0);
+    r.amount = vec4<f32>(0.0);
     let maxH = maxTerrainHeightM();
     let R = noiseReferenceRadiusM();
     let relief = reliefNorm * maxH;
-    let reliefMask = dSmoothstep(${wgslNum(cfg.reliefStartM)}, ${wgslNum(cfg.reliefFullM)}, relief);
-    if (reliefMask.x <= 0.0) { return land; }
+    let reliefRamp = dSmoothstep(${wgslNum(cfg.reliefStartM)}, ${wgslNum(cfg.reliefFullM)}, relief);
+    let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
+    let variation = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
+    let amount = dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)}));
+    r.amount = amount;
+    if (amount.x <= 0.001) { return r; }
     var prm = erosionConfiguredParams();
-    prm.strength *= reliefMask.x;
+    prm.strength *= amount.x;
     let slope = terrainSurfaceGradient(land, unitDir) * maxH;
     let fadeRaw = relief.x / ${wgslNum(cfg.fadeRangeM)} * 2.0 - 1.0;
     let fadeTarget = clamp(fadeRaw, -1.0, 1.0);
@@ -78,10 +104,11 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let dh = e.heightDelta - fadeTarget * keep;
     // d(fadeTarget)/d(unitDir) where unclamped.
     let fadeGrad = select(vec3<f32>(0.0), relief.yzw * (2.0 / ${wgslNum(cfg.fadeRangeM)}), abs(fadeRaw) < 1.0);
-    // The output scales ~linearly with strength: d(dh)/dx += dh / mask * d(mask)/dx.
-    let maskGrad = reliefMask.yzw * (dh / max(reliefMask.x, 1e-3));
-    let dGrad = e.slopeDelta * (R / maxH) - fadeGrad * (keep / maxH) + maskGrad / maxH;
-    return land + vec4<f32>(dh / maxH, dGrad);
+    // The output scales ~linearly with strength: d(dh)/dx += dh / amount * d(amount)/dx.
+    let amountGrad = amount.yzw * (dh / max(amount.x, 1e-3));
+    let dGrad = e.slopeDelta * (R / maxH) - fadeGrad * (keep / maxH) + amountGrad / maxH;
+    r.delta = vec4<f32>(dh / maxH, dGrad);
+    return r;
 }
 `;
 }
@@ -139,6 +166,8 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   // Terrain shape fixes (terrain.fixes); default on, off reproduces the old shapes.
   const fixSmoothMax = options?.terrainFixes?.smoothMax !== false;
   const fixLoneHillGates = options?.terrainFixes?.loneHillGates !== false;
+  const fixMountainGates = options?.terrainFixes?.mountainGates !== false;
+  const fixSmoothBlends = options?.terrainFixes?.smoothBlends !== false;
   const erosionFilterWgsl = createErosionFilterLandWgsl(options?.erosionFilter, createTerrainFeatureErosionFilter);
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
@@ -590,6 +619,8 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     `
 const TERRAIN_FIX_SMOOTH_MAX: bool = ${fixSmoothMax};
 const TERRAIN_FIX_LONE_HILL_GATES: bool = ${fixLoneHillGates};
+const TERRAIN_FIX_MOUNTAIN_GATES: bool = ${fixMountainGates};
+const TERRAIN_FIX_SMOOTH_BLENDS: bool = ${fixSmoothBlends};
 `,
     createTerrainFeatureToggleWgsl(),
     erosionFilterWgsl,

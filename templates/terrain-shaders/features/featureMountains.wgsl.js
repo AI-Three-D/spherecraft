@@ -119,21 +119,44 @@ fn featureMountainsHeight(
         let exceptN = fbmAuto(wx, wy, unitDir,
             SCALE_MOUNTAIN_PEAKS * 1.5, 1, seed + 2220, 2.0, 0.5);
         let exceptBump = loneHillDome(exceptN, 0.55);
-        let exceptH = exceptBump * exceptMask * (HEIGHT_MOUNTAIN_EXCEPTIONAL / maxH);
+        let exceptW = select(exceptMask, gateRamp(exceptMask, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+        let exceptH = exceptBump * exceptW * (HEIGHT_MOUNTAIN_EXCEPTIONAL / maxH);
         h += exceptH * coreEnv;
     }
 
-    return h * mtnAmp * activity * rangeMask;
+    // Ramp from the rangeMask < 0.01 gate (no step at the range edge).
+    let rangeW = select(rangeMask, gateRamp(rangeMask, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+    return h * mtnAmp * activity * rangeW;
 }
 
-// Analytic-derivative twin of featureMountainsHeight (sphere). The domain
-// warp is skipped exactly as warpFlatForNoise skips it on the sphere.
+struct MountainHeightD {
+    // The mountain height (dual), as featureMountainsHeight.
+    full: vec4<f32>,
+    // A slope-continuous version for the erosion filter's input: no ridged
+    // texture (its crests and clamps are slope kinks), no slope roughness, and
+    // a wider foothill/core blend. The filter's gullies follow this field's
+    // slope; a kink in it becomes a step in the eroded terrain.
+    smoothed: vec4<f32>,
+}
+
+// Analytic-derivative twin of featureMountainsHeight (sphere).
 fn featureMountainsHeight_d(
     unitDir: vec3<f32>, seed: i32,
     regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes
 ) -> vec4<f32> {
+    return featureMountainsHeight2_d(unitDir, seed, regional, profile, amp).full;
+}
+
+// The domain warp is skipped exactly as warpFlatForNoise skips it on the sphere.
+fn featureMountainsHeight2_d(
+    unitDir: vec3<f32>, seed: i32,
+    regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes
+) -> MountainHeightD {
+    var out: MountainHeightD;
+    out.full = dConst(0.0);
+    out.smoothed = dConst(0.0);
     let mtnAmp = amp.mountainBase;
-    if (mtnAmp < 0.001) { return dConst(0.0); }
+    if (mtnAmp < 0.001) { return out; }
 
     let maxH = maxTerrainHeightM();
     let activity = dClamp(regional.tectonicActivity, 0.0, 1.0);
@@ -146,7 +169,7 @@ fn featureMountainsHeight_d(
         RARITY_UNCOMMON,
         profile.rareBoost
     );
-    if (rangeMask.x < 0.01) { return dConst(0.0); }
+    if (rangeMask.x < 0.01) { return out; }
 
     let pathN1 = fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_MOUNTAIN_RANGES), 2, seed + 1600, 2.0, 0.5);
     let pathN2 = fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_MOUNTAIN_RANGES * 0.55), 2, seed + 1610, 2.0, 0.5);
@@ -185,8 +208,13 @@ fn featureMountainsHeight_d(
     let detailH = dMul(foothillEnv, detailN) * (HEIGHT_MOUNTAIN_DETAIL / maxH);
 
     let blendH = select(dSmoothMaxLegacy(foothillH, coreH, 0.003), dSmoothMax(foothillH, coreH, 0.003), TERRAIN_FIX_SMOOTH_MAX);
+    let tighten = dPow(foothillEnv, 0.15);
     var h = blendH + detailH;
-    h = dMul(h, dPow(foothillEnv, 0.15));
+    h = dMul(h, tighten);
+
+    // Smooth landform: ridge texture at a nominal 0.5, wider blend, no detail.
+    let coreHs = dMul(coreEnv, dConst(0.35) + peaks * 0.65) * (0.85 * HEIGHT_MOUNTAIN_CORE / maxH);
+    var hs = dMul(select(dSmoothMaxLegacy(foothillH, coreHs, 0.02), dSmoothMax(foothillH, coreHs, 0.02), TERRAIN_FIX_SMOOTH_MAX), tighten);
 
     let exceptMask = rarityMaskAuto_d(
         unitDir,
@@ -198,11 +226,17 @@ fn featureMountainsHeight_d(
     if (exceptMask.x > 0.01 && terrainFeatureOn(TF_MOUNTAIN_PEAKS)) {
         let exceptN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_PEAKS * 1.5, 1, seed + 2220, 2.0, 0.5);
         let exceptBump = loneHillDome_d(exceptN, 0.55);
-        let exceptH = dMul(exceptBump, exceptMask) * (HEIGHT_MOUNTAIN_EXCEPTIONAL / maxH);
+        let exceptW = select(exceptMask, dGateRamp(exceptMask, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+        let exceptH = dMul(exceptBump, exceptW) * (HEIGHT_MOUNTAIN_EXCEPTIONAL / maxH);
         h += dMul(exceptH, coreEnv);
+        hs += dMul(exceptH, coreEnv);
     }
 
-    return dMul(dMul(h * mtnAmp, activity), rangeMask);
+    let rangeW = select(rangeMask, dGateRamp(rangeMask, 0.01), TERRAIN_FIX_MOUNTAIN_GATES);
+    let scaleD = dMul(activity, rangeW) * mtnAmp;
+    out.full = dMul(h, scaleD);
+    out.smoothed = dMul(hs, scaleD);
+    return out;
 }
 
 // ==================== Mountain Surface ====================

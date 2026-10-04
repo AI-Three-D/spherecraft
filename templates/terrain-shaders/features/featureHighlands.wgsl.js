@@ -33,7 +33,11 @@ fn featureHighlandsHeight(
     if (highAmp < 0.001) { return 0.0; }
 
     let maxH = maxTerrainHeightM();
-    let roughness = max(regional.terrainType, regional.ruggedness * 0.5);
+    // Smooth max: a hard max kinks the plateau profile (erosion input).
+    let roughness = select(
+        max(regional.terrainType, regional.ruggedness * 0.5),
+        smoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02),
+        TERRAIN_FIX_SMOOTH_BLENDS);
 
     var totalHeight: f32 = 0.0;
 
@@ -151,7 +155,10 @@ fn featureHighlandsHeight_d(
     if (highAmp < 0.001) { return dConst(0.0); }
 
     let maxH = maxTerrainHeightM();
-    let roughness = dMax(regional.terrainType, regional.ruggedness * 0.5);
+    let roughness = select(
+        dMax(regional.terrainType, regional.ruggedness * 0.5),
+        dSmoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02),
+        TERRAIN_FIX_SMOOTH_BLENDS);
 
     var totalHeight = dConst(0.0);
     totalHeight += highlandTier_d(unitDir, SCALE_HIGHLAND_COMMON, seed + 6000, 0.0, 0.15,

@@ -209,7 +209,9 @@ export class WebGPUTerrainGenerator {
         this._applyTerrainFeatures(this.terrainConfig?.features ?? {}, null);
         this.terrainFixes = {
             smoothMax: this.terrainConfig?.fixes?.smoothMax !== false,
-            loneHillGates: this.terrainConfig?.fixes?.loneHillGates !== false
+            loneHillGates: this.terrainConfig?.fixes?.loneHillGates !== false,
+            mountainGates: this.terrainConfig?.fixes?.mountainGates !== false,
+            smoothBlends: this.terrainConfig?.fixes?.smoothBlends !== false
         };
         this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');
         const radiusM = this.worldScale;

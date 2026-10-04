@@ -109,12 +109,23 @@ fn applySlopeCuts(h: f32, cutN: f32, amount: f32) -> f32 {
 
 // Two-peak blend: combines two domes (same underlying noise, different scales/warps)
 // without multiplying unrelated fields.
+// x faded in from a gate g: zero value and zero slope at g, equal to x from
+// 6 g on. Replaces "if (x > g) { ... * x }" gates, which start a feature with
+// a step (or, with a linear ramp, a slope kink that the erosion filter turns
+// into a step).
+fn gateRamp(x: f32, g: f32) -> f32 {
+    return x * smoothstep(g, 6.0 * g, x);
+}
+
 fn twoPeakBlend(a: f32, b: f32) -> f32 {
     // soft max-ish blend
     let k = 0.10;
     let m = max(a, b);
     let d = abs(a - b);
-    let t = saturate(d / k);
+    // smoothstep keeps the slope continuous where the blend meets max at
+    // d = k (the linear ramp left a kink there, which the erosion filter
+    // turns into a step); the shape is otherwise the same.
+    let t = select(saturate(d / k), smoothstep(0.0, k, d), TERRAIN_FIX_SMOOTH_BLENDS);
     return mix((a + b) * 0.5, m, t);
 }
 
@@ -258,6 +269,11 @@ fn dSmoothMaxLegacy(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
     let dfdh = (a.x - b.x) + kk - 2.0 * kk * h;
     let dh = select(vec3<f32>(0.0), (b.yzw - a.yzw) * (0.5 / kk), hRaw > 0.0 && hRaw < 1.0);
     return vec4<f32>(value, b.yzw * (1.0 - h) + a.yzw * h + dfdh * dh);
+}
+
+// Mirrors gateRamp.
+fn dGateRamp(x: vec4<f32>, g: f32) -> vec4<f32> {
+    return dMul(x, dSmoothstep(g, 6.0 * g, x));
 }
 
 // Quintic smoothstep core c^3 (c (6c - 15) + 10) of a clamped dual.

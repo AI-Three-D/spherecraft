@@ -153,7 +153,7 @@ if (terrainFeatureOn(TF_LONE_HILLS_VERY_RARE)) {
 
         // Ramp from the gate so the hill starts at zero height (a bare
         // presence > 0.001 gate leaves a ~1-2 m step at the rim).
-        let presenceW = select(presence, (presence - 0.001) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
+        let presenceW = select(presence, gateRamp(presence, 0.001), TERRAIN_FIX_LONE_HILL_GATES);
         totalHeight += h * presenceW
             * (HEIGHT_LONE_HILL_VERY_RARE / maxH) * sizeMod * hillAmp;
     }
@@ -174,7 +174,8 @@ if (terrainFeatureOn(TF_LONE_HILLS_LANDMARK)) {
     let nB = fbmAuto(pB.x, pB.y, unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4501, 2.0, 0.5);
 
     // Very rare presence based on the *stronger* lobe (still single-field-ish)
-    let nMax = max(nA, nB);
+    // Smooth max: a hard max kinks the presence where the lobes are equal.
+    let nMax = select(max(nA, nB), smoothMax(nA, nB, 0.03), TERRAIN_FIX_SMOOTH_BLENDS);
     let presence = smoothstep(0.34, 0.48, nMax);
 
     if (presence > 0.001) {
@@ -201,7 +202,7 @@ if (terrainFeatureOn(TF_LONE_HILLS_LANDMARK)) {
             h *= (1.0 + detail * 0.10);
         }
 
-        let presenceW = select(presence, (presence - 0.001) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
+        let presenceW = select(presence, gateRamp(presence, 0.001), TERRAIN_FIX_LONE_HILL_GATES);
         totalHeight += h * presenceW
             * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
     }
@@ -270,7 +271,7 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
 
         // Ramp from the gate (a bare > 0.01 gate leaves a step of up to
         // 0.01 * HEIGHT_ROLLING_HILLS at the region edge).
-        let presenceW = select(rollingPresence, (rollingPresence - 0.01) / 0.99, TERRAIN_FIX_LONE_HILL_GATES);
+        let presenceW = select(rollingPresence, gateRamp(rollingPresence, 0.01), TERRAIN_FIX_LONE_HILL_GATES);
         totalHeight += h * presenceW
             * (HEIGHT_ROLLING_HILLS / maxH) * sizeMod * hillAmp;
     }
@@ -304,7 +305,8 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
   fn twoPeakBlend_d(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
       let k = 0.10;
       let m = dMax(a, b);
-      let t = dClamp(dAbs(a - b) / k, 0.0, 1.0);
+      let d = dAbs(a - b);
+      let t = select(dClamp(d / k, 0.0, 1.0), dSmoothstep(0.0, k, d), TERRAIN_FIX_SMOOTH_BLENDS);
       return dMix((a + b) * 0.5, m, t);
   }
 
@@ -367,7 +369,7 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
                   let cutN = fbmAuto_d(unitDir, SCALE_LONE_HILL_HUGE * 0.10, 3, seed + 4421, 2.2, 0.55);
                   h = applySlopeCuts_d(h, cutN, 0.18);
               }
-              let presenceW = select(presence, (presence - dConst(0.001)) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
+              let presenceW = select(presence, dGateRamp(presence, 0.001), TERRAIN_FIX_LONE_HILL_GATES);
               totalHeight += dMul(dMul(h, presenceW) * (HEIGHT_LONE_HILL_VERY_RARE / maxH), sizeMod) * hillAmp;
           }
       }
@@ -376,7 +378,7 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
       if ((parts & LONE_HILLS_BIG) != 0u && terrainFeatureOn(TF_LONE_HILLS_LANDMARK)) {
           let nA = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4500, 2.0, 0.5);
           let nB = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK, 1, seed + 4501, 2.0, 0.5);
-          let nMax = dMax(nA, nB);
+          let nMax = select(dMax(nA, nB), dSmoothMax(nA, nB, 0.03), TERRAIN_FIX_SMOOTH_BLENDS);
           let presence = dSmoothstep(0.34, 0.48, nMax);
           if (presence.x > 0.001) {
               let edgeA = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.20, 2, seed + 4513, 2.0, 0.5);
@@ -392,7 +394,7 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
                   let detail = fbmAuto_d(unitDir, SCALE_LONE_HILL_LANDMARK * 0.07, 3, seed + 4570, 2.0, 0.5);
                   h = dMul(h, dConst(1.0) + detail * 0.10);
               }
-              let presenceW = select(presence, (presence - dConst(0.001)) / 0.999, TERRAIN_FIX_LONE_HILL_GATES);
+              let presenceW = select(presence, dGateRamp(presence, 0.001), TERRAIN_FIX_LONE_HILL_GATES);
               totalHeight += dMul(h, presenceW) * (HEIGHT_LONE_HILL_EXCEPTIONAL / maxH) * hillAmp;
           }
       }
@@ -425,7 +427,7 @@ if (terrainFeatureOn(TF_ROLLING_HILLS)) {
               let lump = dMul(dConst(0.30) + beads * 0.70, dConst(0.55) + bumps * 0.45);
               let corridor = dPow(envelope, 1.25);
               let h = dMul(corridor, lump);
-              let presenceW = select(rollingPresence, (rollingPresence - dConst(0.01)) / 0.99, TERRAIN_FIX_LONE_HILL_GATES);
+              let presenceW = select(rollingPresence, dGateRamp(rollingPresence, 0.01), TERRAIN_FIX_LONE_HILL_GATES);
               totalHeight += dMul(dMul(h, presenceW) * (HEIGHT_ROLLING_HILLS / maxH), sizeMod) * hillAmp;
           }
       }
