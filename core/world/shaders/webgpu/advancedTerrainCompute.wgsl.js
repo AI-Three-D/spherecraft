@@ -113,6 +113,22 @@ export function createAdvancedTerrainComputeShader(options = {}) {
     createTerrainFeatureErosionSeeds,
     createTerrainFeatureErosionFilter,
   } = shaderBundle;
+  // Every feature module is part of the shader source (the height function
+  // calls them). To switch a feature off use terrain.features or
+  // qtDiag.setTerrainFeatures (terrainFeatureToggles.js), not the bundle.
+  const missing = [
+    'createTerrainCommon', 'createSurfaceCommon', 'createTerrainFeatureContinents',
+    'createTerrainFeaturePlains', 'createTerrainFeatureHills', 'createTerrainFeatureMountains',
+    'createTerrainFeatureCanyons', 'createTerrainFeatureLoneHills', 'createTerrainFeatureMicro',
+    'createTerrainFeatureMesoDetail', 'createTerrainFeatureHighlands', 'createTerrainFeatureRivers',
+    'createTerrainFeatureErosionSeeds',
+  ].filter(name => typeof shaderBundle[name] !== 'function');
+  if (missing.length) {
+    throw new Error(
+      `terrainShaderBundle is missing ${missing.join(', ')}. All feature modules are required; ` +
+      'switch features off with terrain.features or qtDiag.setTerrainFeatures instead.'
+    );
+  }
   const outputFormat = options?.outputFormat ?? 'rgba32float';
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;

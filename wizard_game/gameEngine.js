@@ -150,14 +150,14 @@ const TERRAIN_SHADER_BUNDLE = {
     createSurfaceCommon,
     createTerrainFeatureContinents,
     createTerrainFeaturePlains,
-   /* createTerrainFeatureHills,
+    createTerrainFeatureHills,
     createTerrainFeatureMountains,
     createTerrainFeatureCanyons,
     createTerrainFeatureLoneHills,
     createTerrainFeatureMicro,
     createTerrainFeatureMesoDetail,
     createTerrainFeatureHighlands,
-    createTerrainFeatureRivers,*/
+    createTerrainFeatureRivers,
     createTerrainFeatureErosionSeeds,
     createTerrainFeatureErosionFilter,
     baseGenerators: {
