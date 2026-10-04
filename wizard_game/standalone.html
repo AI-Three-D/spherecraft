@@ -1985,7 +1985,8 @@
                 const label = pick?.error
                     ? `[QT-PICK] failed method=${pick?.pickMethod ?? options.pickMethod ?? options.method ?? 'terrain'}`
                     : `[QT-PICK] screen=(${pick.point.client.x},${pick.point.client.y}) method=${pick.pickMethod} ` +
-                        `f${pick.instance.tile.face}:d${pick.instance.tile.depth}:${pick.instance.tile.x},${pick.instance.tile.y}`;
+                        `f${pick.instance.tile.face}:d${pick.instance.tile.depth}:${pick.instance.tile.x},${pick.instance.tile.y} ` +
+                        `faceUV=${pick.faceUV.face},${pick.faceUV.u},${pick.faceUV.v}`;
                 console.groupCollapsed(label);
                 console.log('[QT-PICK] raw', pick);
                 console.groupEnd();
