@@ -64,9 +64,15 @@ export function createWaterWorkerCore() {
         }));
         const rivers = g.rivers.map((r) => ({ id: r.id, fromLake: r.fromLake, to: r.to, cells: Int32Array.from(r.cells) }));
         const lakeOf = g.lakeOf.slice(), riverOf = g.riverOf.slice();
+        // Every lake's grid cells, concatenated: lake k owns
+        // lakeCells[lakeCellStart[k] .. lakeCellStart[k + 1]).
+        const lakeCellStart = new Int32Array(g.lakes.length + 1);
+        for (let k = 0; k < g.lakes.length; k++) lakeCellStart[k + 1] = lakeCellStart[k] + g.lakes[k].cells.length;
+        const lakeCells = new Int32Array(lakeCellStart[g.lakes.length]);
+        for (let k = 0; k < g.lakes.length; k++) lakeCells.set(g.lakes[k].cells, lakeCellStart[k]);
         return {
-            reply: { type: 'built', N, lakes, rivers, stats: g.stats, lakeOf, riverOf },
-            transfer: [lakeOf.buffer, riverOf.buffer, ...rivers.map(r => r.cells.buffer)],
+            reply: { type: 'built', N, lakes, rivers, stats: g.stats, lakeOf, riverOf, lakeCells, lakeCellStart },
+            transfer: [lakeOf.buffer, riverOf.buffer, lakeCells.buffer, lakeCellStart.buffer, ...rivers.map(r => r.cells.buffer)],
         };
     }
 
@@ -103,14 +109,20 @@ export function createWaterWorkerCore() {
         }
 
         const mask = lakeMask(h, frame.nx, frame.ny, s.region, s.level, bandM);
+        // Grid cells under the mask: the GPU lake index points them here.
+        const cellSet = new Set();
+        for (let k = 0; k < mask.length; k++) {
+            if (mask[k]) cellSet.add(dirToCell(planeToDir(cx(k), cy(k), frame, R), N));
+        }
+        const maskCells = Int32Array.from([...cellSet].sort((a, b) => a - b));
         const downstream = allDownstream();
         return {
             reply: {
                 type: 'solved', lakeId, status: 'ok', frame,
                 level: s.level, maxDepth: s.maxDepth, cells: s.cells, areaM2: s.cells * frame.spacing * frame.spacing,
-                exitDir, mask, merged, downstream,
+                exitDir, mask, maskCells, merged, downstream,
             },
-            transfer: [mask.buffer],
+            transfer: [mask.buffer, maskCells.buffer],
         };
     }
 

@@ -21,7 +21,7 @@ import { createWaterWorkerCore } from './waterWorkerCore.js';
 import { growPatchFrame, limitPatchCells } from './lakeRefine.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v1';
+export const WATER_ALGO_VERSION = 'water-v2';
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,
@@ -107,6 +107,8 @@ export class WaterService {
         this.stats = null;
         this.lakeOf = null;      // Int32Array, 6 * N * N
         this.riverOf = null;
+        this.lakeCells = null;   // lake k's grid cells: lakeCells[lakeCellStart[k] .. lakeCellStart[k + 1])
+        this.lakeCellStart = null;
         this.refined = new Map();    // lakeId -> solve record
         this.mergedInto = new Map(); // lakeId -> representative lake id
         this.version = 0;            // bumps whenever lake data changes
@@ -162,6 +164,8 @@ export class WaterService {
             this.stats = built.stats;
             this.lakeOf = built.lakeOf;
             this.riverOf = built.riverOf;
+            this.lakeCells = built.lakeCells;
+            this.lakeCellStart = built.lakeCellStart;
             this.state = 'ready';
             this.version++;
             Logger.info(
