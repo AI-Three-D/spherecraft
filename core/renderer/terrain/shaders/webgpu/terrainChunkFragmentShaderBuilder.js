@@ -5,6 +5,7 @@ import { getProceduralDetailWGSL } from './prroceduralDetailNoise.wgsl.js';
 import { getClusteredLightingWGSL } from '../../../../lighting/shaders/clusteredLighting.wgsl.js';
 import { buildFixedMaterialFamilyFragmentWGSL } from '../../../../world/materialFamilies.js';
 import { buildCoarseCategoryColorFragmentWGSL } from '../../../../world/tileCategoryColors.js';
+import { createLakeWaterWgsl } from '../../../../world/water/lakeWaterWgsl.js';
 
 const blendModeBlock = /* wgsl */`
 // ============================================================================
@@ -732,6 +733,10 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const usePointSampling = false;//lod >= pointSampleLodStart;
     const enableClusteredLights = true;//lod <= clusteredMaxLod;
     const enableAerialPerspective = lod <= aerialMaxLod;
+    // Lake water drawn in the terrain's own shading (core/world/water/
+    // lakeWaterWgsl.js; LakeGpuData switches it on at runtime once lakes
+    // exist). terrainShader.lakeWater: false removes it from the shader.
+    const enableLakeWater = terrainShaderConfig.lakeWater !== false;
     const enablePointSplat = false;
     
     const enableNormalMap = lod <= normalMapMaxLod;
@@ -1114,6 +1119,7 @@ ${hasCoarseColorTexture ? `@group(1) @binding(10) var coarseColorTexture: ${chun
 @group(3) @binding(7) var transmittanceLUT: texture_2d<f32>;
 @group(3) @binding(8) var transmittanceSampler: sampler;
 ${shadowBindings}
+${enableLakeWater ? createLakeWaterWgsl({ group: 3 }) : ''}
 struct FragmentInput {
     @builtin(position) clipPosition: vec4<f32>,
     @location(0) vUv: vec2<f32>,
@@ -4738,6 +4744,16 @@ if (debugMode == 16) {
         }
     }
 
+${enableLakeWater ? `
+    // Lake water over terrain below a lake's level (exact shoreline per pixel).
+    finalColor = applyLakeWater(
+        finalColor, input.vWorldPosition, fragUniforms.cameraPosition, fragUniforms.planetCenter,
+        normalize(fragUniforms.lightDirection),
+        fragUniforms.lightColor * fragUniforms.sunLightIntensity,
+        fragUniforms.ambientColor * fragUniforms.ambientLightIntensity,
+        transmittanceSampler
+    );
+` : ''}
     var foggedColor = finalColor;
 
     if (ENABLE_AERIAL_PERSPECTIVE && fragUniforms.aerialPerspectiveEnabled > 0.5) {

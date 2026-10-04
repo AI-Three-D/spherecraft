@@ -1370,6 +1370,11 @@ const slotSampleType = (type) =>
             { binding: 9,  visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
             { binding: 10, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
             { binding: 11, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
+            // Lake water (core/world/water/lakeWaterWgsl.js LAKE_WATER_BINDINGS).
+            { binding: 12, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
+            { binding: 13, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
+            { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+            { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
         ]
     }));
 
@@ -1918,9 +1923,16 @@ _createTerrainBindGroups(material, uniforms, geometry) {
 
     const clusterKey = clusterBuffers ? 'real' : 'dummy';
 
+    // Lake water (LakeGpuData resources, or dummies: params all zero = off).
+    const water = uniforms._waterLakeData?.value?.resources || null;
+    const waterIndexBuf = water?.index || dummyStorage;
+    const waterLakesBuf = water?.lakes || dummyStorage;
+    const waterMasksView = water?.masks || this._getOrCreateDummyArrayTextureView();
+    const waterParamsBuf = water?.params || this._getOrCreateUniformBuffer('_water_params_dummy', new Float32Array(16));
+
     // Build cache key including shadow state
     const shadowKey = shadowRenderer ? 'shadow' : 'noshadow';
-    const g3CacheKey = `terrain_g3_${needArray ? 'arr' : '2d'}_${g3Key}_${clusterKey}_${shadowKey}`;
+    const g3CacheKey = `terrain_g3_${needArray ? 'arr' : '2d'}_${g3Key}_${clusterKey}_${shadowKey}_${water ? 'water' : 'nowater'}`;
 
     let g3Record = materialCache.get(g3CacheKey);
     const g3PipelineChanged = g3Record?.pipeline !== material._gpuPipeline;
@@ -1942,6 +1954,10 @@ _createTerrainBindGroups(material, uniforms, geometry) {
             { binding: 9,  resource: shadowCascade2 },
             { binding: 10, resource: shadowSampler },
             { binding: 11, resource: { buffer: shadowUniformBuf } },
+            { binding: 12, resource: { buffer: waterIndexBuf } },
+            { binding: 13, resource: { buffer: waterLakesBuf } },
+            { binding: 14, resource: waterMasksView },
+            { binding: 15, resource: { buffer: waterParamsBuf } },
         ];
         const group = this.device.createBindGroup({
             layout: material._gpuPipeline.bindGroupLayouts[3],

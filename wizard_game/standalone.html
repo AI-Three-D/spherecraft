@@ -3753,7 +3753,9 @@
                         'window.qtDiag.water.stats() // water graph + lake refinement state',
                         'window.qtDiag.water.near(10) // lakes nearest the camera (level, area, refined, downstream)',
                         'window.qtDiag.water.goto(lakeId, 300) // free camera 300 m above a lake',
-                        'await window.qtDiag.water.refine(lakeId) / await window.qtDiag.water.clearCache()'
+                        'await window.qtDiag.water.refine(lakeId) / await window.qtDiag.water.clearCache()',
+                        'window.qtDiag.water.tint(mode) // 0 water, 1 lakes by id, 2 + graph lake/river cells, 3 depth',
+                        'window.qtDiag.water.look({ reflection: 1.4, absorption: [0.4, 0.11, 0.08], enabled: true })'
                     ].join('\n'));
                 },
                 status,
@@ -3809,6 +3811,8 @@
             goto(lakeId, hoverAltitudeM = 300) { return gameEngine?.gotoWaterLake?.(lakeId, hoverAltitudeM) ?? null; },
             refine(lakeId) { return gameEngine?.waterService?.refineLake?.(lakeId) ?? Promise.resolve(null); },
             clearCache() { return gameEngine?.waterService?.clearCache?.() ?? Promise.resolve(false); },
+            tint(mode = 1) { return gameEngine?.setWaterDebugMode?.(mode) ?? null; },
+            look(look = {}) { const r = gameEngine?.setWaterLook?.(look) ?? null; console.info('[Water] look', r); return r; },
         };
 
         // Phase 0 test matrix (SphereCraft_Optimization_Implementation_Plan.md

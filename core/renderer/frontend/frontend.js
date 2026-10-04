@@ -121,6 +121,12 @@ export class Frontend {
 
     setActorManager(mgr) { this._actorManager = mgr; }
 
+    /** Lake water data (core/world/water/LakeGpuData.js) for the terrain shader. */
+    setWaterLakeData(data) {
+        this._waterLakeData = data || null;
+        this.quadtreeTerrainRenderer?.setWaterLakeData?.(this._waterLakeData);
+    }
+
     addDistortionSource(options = {}) {
         const type = options?.type ?? 'heatHaze';
         if (type === 'heatHaze') {
@@ -231,6 +237,7 @@ export class Frontend {
                 groundFieldDefaults: this._streamerTheme.GROUND_FIELD_BAKE_CONFIG,
                 tileCategories: this._terrainTheme.TILE_CATEGORIES,
             });
+            this.quadtreeTerrainRenderer.setWaterLakeData(this._waterLakeData ?? null);
             
             // Asset streamer: modular multi-category GPU scatter system
             // (trees, ground cover, plants — replaces single-purpose GrassRenderer)

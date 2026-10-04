@@ -175,6 +175,13 @@ export class QuadtreeTerrainRenderer {
     _bindChunkInstances(material, instanceBuffer) {
         if (!material.storageBuffers) material.storageBuffers = {};
         material.storageBuffers.chunkInstances = instanceBuffer;
+        // Lake water for the terrain shader (bind group 3, bindings 12-15).
+        if (material.uniforms) material.uniforms._waterLakeData = this._waterLakeData ?? { value: null };
+    }
+
+    /** Lake water data (core/world/water/LakeGpuData.js) for the terrain shader, or null. */
+    setWaterLakeData(data) {
+        this._waterLakeData = { value: data || null };
     }
 
     setShadowRenderer(renderer) {
