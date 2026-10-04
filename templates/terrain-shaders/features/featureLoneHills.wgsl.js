@@ -129,7 +129,10 @@ export function createTerrainFeatureLoneHills() {
               let d2 = dSmoothAbs(pathN2, 0.02);
               let pathDist = dSmoothMin(d1, d2, 0.04);
               let widthN = fbmAuto_d(unitDir, SCALE_ROLLING_HILL_PATH * 0.35, 2, seed + 5067, 2.0, 0.5);
-              let width = dMix(dConst(0.16), dConst(0.30), dSmoothstep(-0.4, 0.4, widthN));
+              // Corridor width in path-noise units. 0.16-0.30 made chains a few
+              // hundred metres wide but up to ~300 m tall: steep walls and
+              // narrow gaps between parallel chains that read as trenches.
+              let width = dMix(dConst(0.35), dConst(0.60), dSmoothstep(-0.4, 0.4, widthN));
               let r = dConst(1.0) - dDiv(pathDist, vec4<f32>(max(width.x, 1e-4), width.yzw));
               let envelope = dQuintic(dClamp(r, 0.0, 1.0));
               let beadN = fbmAuto_d(unitDir, SCALE_ROLLING_HILL_BUMP * 1.35, 2, seed + 5108, 2.0, 0.5);

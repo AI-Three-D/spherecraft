@@ -247,11 +247,14 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             // (river channel, erosion-seed pits) come after, so erosion does
             // not fill them.
             let bigHillsH = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_BIG);
-            let smallHillsH = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_SMALL | LONE_HILLS_ROLLING);
+            // Rolling hill chains are added after erosion: eroding their steep
+            // corridor walls cut thin grooves along them.
+            let smallHillsH = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_SMALL);
             landHeight += bigHillsH + smallHillsH;
             let erosionInput = landHeight - mountainsH + mountainsSmooth;
             let er = erosionFilterLand_d(unitDir, erosionInput, mountainsSmooth + foothillsH + highlandsH + bigHillsH);
             landHeight += er.delta;
+            landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_ROLLING);
             let mesoW = dConst(1.0) - er.amount * (1.0 - EROSION_MESO_KEEP);
             if (terrainFeatureOn(TF_MESO1)) { landHeight += dMul(meso.meso1, mesoW) * (DISP_MESO1 / mesoMaxH); }
             if (terrainFeatureOn(TF_MESO2)) { landHeight += dMul(meso.meso2, mesoW) * (DISP_MESO2 / mesoMaxH); }
