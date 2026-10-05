@@ -114,6 +114,24 @@ describe('WaterGpuData', () => {
         expect(gpu._segs[o + 11]).toBeCloseTo(101.8, 4);
     });
 
+    it('packs the stride-12 river points: hollows reach, skew, speed and foam at both ends', () => {
+        const dev = stubDevice();
+        const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
+        const svc = fakeService();
+        gpu.update(svc, cam, 0);
+        // dir.xyz, level, half-width, depth, speed, Q, fill, pool, skew, foam
+        const points = new Float32Array(24);
+        points.set([0, 0, 1, 105, 15, 1.05, 0.8, 3, 106, 40, 0.1, 0.2], 0);
+        points.set([0.001, 0, 1, 104, 16, 1.2, 0.9, 3, 105, -1, -0.2, 0.4], 12);
+        svc.riverRecs.set(0, { points, stride: 12, segCellStart: Int32Array.from([0, 1]), segCells: Int32Array.from([64]) });
+        svc.version++;
+        gpu.update(svc, cam, 0);
+        const e = gpu.index[2 * gpu.cells + (gpu.index[gpu.cells + 4] - 1) * 16];
+        const o = (e >>> 8) * RIVER_SEG_FLOATS;
+        expect(Array.from(gpu._segs.slice(o + 8, o + 20)).map(v => +v.toFixed(4)))
+            .toEqual([15, 16, 103.95, 102.8, 40, -1, 0.1, -0.2, 0.8, 0.9, 0.2, 0.4]);
+    });
+
     it('tilesTouchingCells picks the tiles over (or next to) changed cells', () => {
         const N = 8, cell = 2 * N * N + 5 * N + 3;            // face 2, i 3, j 5
         const touches = tilesTouchingCells(new Set([cell]), N);

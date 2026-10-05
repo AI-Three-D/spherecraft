@@ -25,7 +25,6 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     absorption: [0.40, 0.11, 0.08],   // per metre of water path (r, g, b)
     rippleFadeM: 800,                 // ripples fade out by this camera distance
     shoreSoftM: 0.15,                 // waterline fade-in depth
-    riverSpreadSlope: 0.15,           // river level drop per metre beyond its channel
 });
 
 const SLOT_MASK = 0x7fff;
@@ -36,7 +35,7 @@ export class WaterGpuData {
      * @param {GPUDevice} device
      * @param {object} o  gridN, planetRadius, maxLakes, maskLayerSize, maxMaskLayers
      */
-    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96, maxRiverSegs = 131072, maxRiverCells = 65536, carve = null } = {}) {
+    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96, maxRiverSegs = 262144, maxRiverCells = 65536, carve = null } = {}) {
         this.device = device;
         this.N = gridN;
         this.R = planetRadius;
@@ -282,7 +281,7 @@ export class WaterGpuData {
         u[0] = this.N; u[1] = this.enabled && this._ready ? 1 : 0; u[2] = this.debugMode >>> 0; u[3] = this._appliedRivers.size;
         f[4] = this.R; f[5] = time; f[6] = L.rippleFadeM; f[7] = L.shoreSoftM;
         f.set([L.deepColor[0], L.deepColor[1], L.deepColor[2], L.reflection], 8);
-        f.set([L.absorption[0], L.absorption[1], L.absorption[2], L.riverSpreadSlope], 12);
+        f.set([L.absorption[0], L.absorption[1], L.absorption[2], 0], 12);
         const site = this.site;
         if (site && site.fade > 0) {
             f.set([site.c[0], site.c[1], site.c[2], site.halfM], 16);
@@ -291,9 +290,12 @@ export class WaterGpuData {
         } else {
             f.fill(0, 16, 28);
         }
-        const C = this.carve;
-        if (C?.enabled) f.set([1, C.bankM, C.bankCurvature, C.fillDepthFactor], 28);
-        else f.fill(0, 28, 32);
+        // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
+        // shading uses it too, so it is set even with the carve off.
+        const C = this.carve ?? {};
+        f.set([C.enabled ? 1 : 0, C.bankW ?? 12, C.blendW ?? 30, C.waterFrac ?? 0.75], 28);
+        f.set([C.bankH ?? 1.5, C.bankSoftM ?? 3, C.bankGrade ?? 0.06, 0], 32);
+        f.set([C.poolFadeM ?? 30, C.floodGrade ?? 0.01, 0, 0], 36);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
     }
 
@@ -341,9 +343,13 @@ export class WaterGpuData {
             const list = lists.get(id), first = next;
             for (let m = 0; m < list.length; m += 2) {
                 const rec = list[m], k = list[m + 1], P = rec.points, st = rec.stride, a = k * st, b = (k + 1) * st, o = next * F;
-                // WaterRiverSeg: p0, eta0, p1, eta1, hw0, hw1, bed0, bed1, speed (waterWgsl.js).
+                // WaterRiverSeg (waterWgsl.js): p0, eta0, p1, eta1, hw, thalweg,
+                // pool, skew, speed, foam at both ends (points: waterWorkerCore.js).
+                const ext = st >= 12;
                 this._segs.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
-                    P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5], 0.5 * (P[a + 6] + P[b + 6]), 0, 0, 0], o);
+                    P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5],
+                    ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
+                    P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0], o);
                 next++;
             }
             this.index[2 * this.cells + block * SS + (id % SS)] = (first << 8) | (list.length / 2);

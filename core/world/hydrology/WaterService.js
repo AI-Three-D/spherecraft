@@ -23,7 +23,7 @@ import { dirToCell } from './waterGraph.js';
 import { RIVER_SUB } from '../water/waterWgsl.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v5';
+export const WATER_ALGO_VERSION = 'water-v6';
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,
@@ -37,15 +37,21 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
         startToleranceM: 1.0,
         shape: {},         // RIVER_SHAPE_DEFAULTS overrides (riverRefine.js)
     },
-    // River channels carved into the terrain (riverCarve.wgsl.js).
+    // River corridor shaped into the terrain (riverCarve.wgsl.js), after
+    // Whitewater's cross-section: channel, banks rising beyond its edge,
+    // blend into the natural terrain. x = metres beyond the channel's edge.
     carve: {
         enabled: true,
-        bankM: 40,              // banks reach this far beyond the half-width (rising to a wall over the outer half)
-        bankCurvature: 0.02,    // 1/m: bank height above the water = a x + c x^2 (a keeps the waterline smooth)
-        fillDepthFactor: 2,     // hollows in the channel up to this x depth are filled; deeper stay as ponds
-        freeboardM: 0.4,        // water below the banks by freeboardM + freeboardDepthFrac x depth,
-        freeboardDepthFrac: 0.25,
-        rampM: 60,              // reached over the first rampM from the source
+        waterFrac: 0.75,        // water fills this fraction of the bank-full depth
+        bankH: 1.5,             // bank rise beyond the edge (m); with (1 - waterFrac) D: the bank crest above the water
+        bankSoftM: 3,           // the bank rises over ~2 x this (m)
+        bankGrade: 0.06,        // further rise per metre on the bank
+        bankW: 12,              // x < bankW: the terrain is the cross-section (cut and levee)
+        blendW: 30,             // then blends into the natural terrain over this (m)
+        rampM: 120,             // the river cuts in to full depth over this from its source
+        poolMaxM: 300,          // hollows below the river's level up to this far from it are filled to its floodplain,
+        poolFadeM: 30,          // fading out over this beyond them
+        floodGrade: 0.01,       // floodplain rise per metre beyond the bank zone
     },
     refine: {
         enabled: true,
@@ -360,8 +366,10 @@ export class WaterService {
                     const CV = this.config.carve;
                     const r = await this._client.call({
                         type: 'solveRiver', riverId, frame, heights, shape: RC.shape,
-                        levels: { freeboardM: CV.freeboardM, freeboardDepthFrac: CV.freeboardDepthFrac, rampM: CV.rampM },
-                        reachM: CV.enabled ? CV.bankM : 0,
+                        levels: { waterFrac: CV.waterFrac, bankH: CV.bankH, rampM: CV.rampM, poolMaxM: CV.poolMaxM },
+                        // The carve's reach beyond the half-width (riverCarve.wgsl.js) + margin.
+                        reachM: CV.enabled ? CV.bankW + CV.blendW + 8 : 0,
+                        poolExtraM: CV.poolFadeM + 8,
                         sub: RIVER_SUB,
                     }, [heights.buffer]);
                     if (r.status === 'ok' && (!rec || rec.status !== 'ok' || r.startLevel < rec.startLevel)) rec = r;

@@ -18,8 +18,9 @@
 // - trace from the source cell down the drainage: the path ends in the
 //   destination's water by construction, and fill never rises along it.
 // The trace is then smoothed, resampled, and given width, depth and flow
-// speed from the catchment, and a water level and bed below the banks
-// (riverLevels): the terrain is carved to them (riverCarve.wgsl.js).
+// speed from the catchment, a water level cut into the ground (riverLevels)
+// and its pools (riverPools): the terrain is shaped around it
+// (riverCarve.wgsl.js).
 
 import { MinHeap } from './waterGraph.js';
 
@@ -131,60 +132,214 @@ export function smoothRiverPath(xs, ys, fill, { window = 4, stepM = 24 } = {}) {
     return out;
 }
 
+// Floats per river point (waterWorkerCore.js solveRiver): dir.xyz, level,
+// half-width, water depth at the thalweg, speed, Q, spill level, pool reach,
+// skew, foam.
+export const RIVER_POINT_STRIDE = 12;
+
 export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // Discharge (m^3/s) per km^2 of precipitation-weighted catchment.
     runoffM3sPerKm2: 0.03,
-    widthCoef: 4.0,       // width = widthCoef * Q^0.5 (m), at least minWidthM
+    // Owner 2026-10-05: rivers at least 3x wider than the first version
+    // (10 m, 4 Q^0.5). Whitewater's rivers are 11-24 m wide, 1-2.3 m deep.
+    widthCoef: 12.0,      // width = widthCoef * Q^0.5 (m), at least minWidthM
     widthExp: 0.5,
-    minWidthM: 10,
-    depthCoef: 0.45,      // depth = depthCoef * Q^0.4 (m), at least minDepthM
+    minWidthM: 30,
+    // Bank-full depth D (thalweg to the channel's edge); the water fills
+    // waterFrac of it (RIVER_LEVEL_DEFAULTS).
+    depthCoef: 0.6,       // D = depthCoef * Q^0.4 (m), at least minDepthM
     depthExp: 0.4,
-    minDepthM: 0.6,
+    minDepthM: 1.4,
     manning: 0.035,
 });
 
-/** Width, depth (m) and flow speed (m/s) of a river with discharge Q (m^3/s) and surface slope S. */
-export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS) {
+/**
+ * Width, bank-full depth D (m) and flow speed (m/s) of a river with
+ * discharge Q (m^3/s) and surface slope S; speed from Manning's equation at
+ * the water depth waterFrac x D.
+ */
+export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.75) {
     const width = Math.max(P.minWidthM, P.widthCoef * Math.pow(Math.max(Qm3s, 0), P.widthExp));
     const depth = Math.max(P.minDepthM, P.depthCoef * Math.pow(Math.max(Qm3s, 0), P.depthExp));
-    const speed = Math.max(0.3, Math.min(3.5, Math.pow(depth, 2 / 3) * Math.sqrt(Math.max(slope, 1e-5)) / P.manning));
+    const speed = Math.max(0.3, Math.min(3.5, Math.pow(waterFrac * depth, 2 / 3) * Math.sqrt(Math.max(slope, 1e-5)) / P.manning));
     return { width, depth, speed };
 }
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
-    // The water surface sits freeboardM + freeboardDepthFrac x depth below
-    // the trace's spill level (visible banks)...
-    freeboardM: 0.4,
-    freeboardDepthFrac: 0.25,
+    // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
+    waterFrac: 0.75,
+    // Bank rise beyond the channel's edge (riverCarve.wgsl.js). The river is
+    // cut into the ground: its bank crest, (1 - waterFrac) D + bankH above
+    // the water, sits at the trace's spill level (the natural ground)...
+    bankH: 1.5,
     // ...reached over the first rampM from the source (no step at the outlet).
-    rampM: 60,
+    rampM: 120,
 });
 
 /**
- * Water level and bed along a traced river, for the terrain carve
- * (riverCarve.wgsl.js): eta = min(srcLevel, max(destLevel, fill - freeboard
- * x ramp(s))), so the water is below the banks, never above the source
- * lake and never below the destination's water; bed = eta - depth. A
- * running minimum keeps the water level from rising downstream (the river
- * never flows backwards). The bed may rise again where a deeper section
- * gets shallower, as real riverbeds do (owner 2026-10-05: that just holds
- * some water).
- * @param {ArrayLike<number>} fill   spill level along the trace (m)
- * @param {ArrayLike<number>} s      distance from the source (m)
- * @param {ArrayLike<number>} depth  channel depth (riverShape)
- * @returns {{eta: Float64Array, bed: Float64Array}}
+ * Least-squares non-increasing fit of values (pool adjacent violators):
+ * runs of equal level where the data would rise, means of the data there.
+ * @param {ArrayLike<number>} v
+ * @param {ArrayLike<number>} [w]  weights (default 1)
+ * @returns {Float64Array}
  */
-export function riverLevels(fill, s, depth, { srcLevel, destLevel }, P = RIVER_LEVEL_DEFAULTS) {
-    const n = fill.length, eta = new Float64Array(n), bed = new Float64Array(n);
+export function fitNonIncreasing(v, w = null) {
+    const n = v.length, mean = [], weight = [], size = [];
+    for (let k = 0; k < n; k++) {
+        let m = v[k], wt = w ? w[k] : 1, sz = 1;
+        while (mean.length && mean[mean.length - 1] < m) {
+            const pm = mean.pop(), pw = weight.pop(), ps = size.pop();
+            m = (pm * pw + m * wt) / (pw + wt); wt += pw; sz += ps;
+        }
+        mean.push(m); weight.push(wt); size.push(sz);
+    }
+    const out = new Float64Array(n);
+    let k = 0;
+    for (let b = 0; b < mean.length; b++) for (let q = 0; q < size[b]; q++) out[k++] = mean[b];
+    return out;
+}
+
+/**
+ * Water level and thalweg (deepest bed) along a traced river, for the
+ * terrain carve (riverCarve.wgsl.js). The river is cut into the ground: the
+ * level is the least-squares non-increasing fit (fitNonIncreasing) of the
+ * ground along it minus incision = (1 - waterFrac) D + bankH, so on
+ * average the bank crest lands on the natural ground, rims get cut and
+ * hollows filled by similar amounts (lab 2026-10-05: following the spill
+ * level instead left the river above most of its surroundings, 20-40 m of
+ * fill in hollows), and level runs with drops between them read as pools
+ * and riffles. Ramped in from the source lake's level over rampM; never
+ * above the source lake, never below the destination's water; a running
+ * minimum keeps it from rising downstream (the river never flows
+ * backwards). thalweg = eta - waterFrac D may rise again where a deeper
+ * section gets shallower (owner 2026-10-05: that just holds water).
+ * @param {ArrayLike<number>} ground  natural ground along the river (m)
+ * @param {ArrayLike<number>} s       distance from the source (m)
+ * @param {ArrayLike<number>} depth   bank-full depth D (riverShape)
+ * @param {ArrayLike<number>} [lakeAt]  per point the level of the lake it lies in (NaN: none):
+ *   there the river's level is the lake's (weight 20 in the fit; the lake bed is not ground)
+ * @returns {{eta: Float64Array, bed: Float64Array}}  bed = thalweg
+ */
+export function riverLevels(ground, s, depth, { srcLevel, destLevel }, P = RIVER_LEVEL_DEFAULTS, lakeAt = null) {
+    const n = ground.length, eta = new Float64Array(n), bed = new Float64Array(n);
+    const target = new Float64Array(n), weight = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+        const lake = lakeAt ? lakeAt[k] : NaN;
+        target[k] = Number.isFinite(lake) ? lake : ground[k] - ((1 - P.waterFrac) * depth[k] + P.bankH);
+        weight[k] = Number.isFinite(lake) ? 20 : 1;
+    }
+    const fit = fitNonIncreasing(target, weight);
     let runEta = Infinity;
     for (let k = 0; k < n; k++) {
         const x = Math.min(1, Math.max(0, s[k] / Math.max(P.rampM, 1e-6)));
-        const fb = (P.freeboardM + P.freeboardDepthFrac * depth[k]) * x * x * (3 - 2 * x);
-        runEta = Math.min(runEta, Math.min(srcLevel, Math.max(destLevel, fill[k] - fb)));
+        const ramp = x * x * (3 - 2 * x);
+        const level = srcLevel + (Math.min(fit[k], srcLevel) - srcLevel) * ramp;
+        runEta = Math.min(runEta, Math.min(srcLevel, Math.max(destLevel, level)));
         eta[k] = runEta;
-        bed[k] = runEta - depth[k];
+        bed[k] = runEta - P.waterFrac * depth[k];
     }
     return { eta, bed };
+}
+
+/**
+ * Hollows along a river: ground below its water level that would take the
+ * river's water (lab 2026-10-05: on the lumpy terrain most of a river's
+ * length passes such hollows, many m deep). The carve fills them up to the
+ * river's floodplain (riverCarve.wgsl.js), like Whitewater's valley floor.
+ * On a patch grid (heights, corridor mask), every corridor cell takes the
+ * river point nearest to it (propagated outward from the line); a cell is
+ * under the river's water when it lies below that point's level (minus
+ * 0.25 m), within maxReachM of it and not in a lake (lake mask: the source
+ * and destination lakes, drawn as lakes); a hollow is the set of such cells
+ * connected to the river line. Returns per point the hollow's reach: the
+ * farthest of its hollow cells from it (0: none; -1: the point lies in a
+ * lake). Smoothed with a running maximum over +-2 points (lake points stay -1).
+ * @param {object} p
+ * @param {Float32Array} p.heights   nx * ny (m)
+ * @param {Uint8Array|null} p.corridor  nx * ny, 1 = inside (null: the whole patch)
+ * @param {number} p.nx, p.ny, p.x0, p.y0, p.spacing   patch grid
+ * @param {ArrayLike<number>} p.px, p.py   river points (plane coords)
+ * @param {ArrayLike<number>} p.eta        water level per point
+ * @param {Uint8Array} [p.lake]    nx * ny, 1 = lake cell
+ * @param {number} [p.maxReachM=300]
+ * @param {boolean} [p.withMasks]  also return { reach, inPool, nearest } (lab)
+ * @returns {Float64Array}
+ */
+export function riverPools({ heights, corridor, nx, ny, x0, y0, spacing, px, py, eta, lake = null, maxReachM = 300, withMasks = false }) {
+    const n = px.length, cells = nx * ny;
+    corridor ??= new Uint8Array(cells).fill(1);
+    const nearest = new Int32Array(cells).fill(-1);
+    // Float64: a value rounded on store would look improved on every revisit.
+    const dist2 = new Float64Array(cells).fill(Infinity);
+    const cx = (c) => x0 + ((c % nx) + 0.5) * spacing, cy = (c) => y0 + (Math.floor(c / nx) + 0.5) * spacing;
+    const cellAt = (x, y) => {
+        const i = Math.floor((x - x0) / spacing), j = Math.floor((y - y0) / spacing);
+        return i >= 0 && j >= 0 && i < nx && j < ny ? j * nx + i : -1;
+    };
+    // Seeds: cells along the line, each owned by the nearer end of its segment.
+    let queue = [];
+    const seeds = [];
+    for (let k = 0; k + 1 < n || (k === 0 && n === 1); k++) {
+        const bx = n > 1 ? px[k + 1] : px[k], by = n > 1 ? py[k + 1] : py[k];
+        const len = Math.hypot(bx - px[k], by - py[k]), steps = Math.max(1, Math.ceil(len / (0.5 * spacing)));
+        for (let q = 0; q <= steps; q++) {
+            const t = q / steps, c = cellAt(px[k] + t * (bx - px[k]), py[k] + t * (by - py[k]));
+            if (c < 0 || !corridor[c]) continue;
+            const own = t < 0.5 || n === 1 ? k : k + 1;
+            const d2 = (cx(c) - px[own]) ** 2 + (cy(c) - py[own]) ** 2;
+            if (d2 < dist2[c]) { dist2[c] = d2; nearest[c] = own; queue.push(c); seeds.push(c); }
+        }
+        if (n === 1) break;
+    }
+    // Nearest point for every corridor cell (brushfire propagation).
+    const NB = [1, -1, nx, -nx, nx + 1, nx - 1, -nx + 1, -nx - 1];
+    while (queue.length) {
+        const next = [];
+        for (const c of queue) {
+            const ci = c % nx, k = nearest[c];
+            for (const o of NB) {
+                const m = c + o;
+                if (m < 0 || m >= cells || !corridor[m]) continue;
+                const mi = m % nx;
+                if (Math.abs(mi - ci) > 1) continue;   // wrapped across a row end
+                const d2 = (cx(m) - px[k]) ** 2 + (cy(m) - py[k]) ** 2;
+                if (d2 < dist2[m]) { dist2[m] = d2; nearest[m] = k; next.push(m); }
+            }
+        }
+        queue = next;
+    }
+    // Underwater cells connected to the line.
+    const maxD2 = maxReachM * maxReachM;
+    const under = (c) => nearest[c] >= 0 && dist2[c] <= maxD2 && !(lake && lake[c]) && heights[c] < eta[nearest[c]] - 0.25;
+    // Hollow cells connected to the line.
+    const inPool = new Uint8Array(cells);
+    let stack = seeds.filter(under);
+    for (const c of stack) inPool[c] = 1;
+    while (stack.length) {
+        const c = stack.pop(), ci = c % nx;
+        for (const o of NB) {
+            const m = c + o;
+            if (m < 0 || m >= cells || inPool[m] || !corridor[m]) continue;
+            if (Math.abs((m % nx) - ci) > 1 || !under(m)) continue;
+            inPool[m] = 1;
+            stack.push(m);
+        }
+    }
+    const reach = new Float64Array(n);
+    for (let c = 0; c < cells; c++) {
+        if (!inPool[c]) continue;
+        const k = nearest[c], r = Math.sqrt(dist2[c]) + 0.5 * spacing;
+        if (r > reach[k]) reach[k] = r;
+    }
+    const inLake = (k) => { const c = cellAt(px[k], py[k]); return !!(lake && c >= 0 && lake[c]); };
+    const out = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+        if (inLake(k)) { out[k] = -1; continue; }
+        let m = 0;
+        for (let q = Math.max(0, k - 2); q <= Math.min(n - 1, k + 2); q++) m = Math.max(m, reach[q]);
+        out[k] = m;
+    }
+    return withMasks ? { reach: out, inPool, nearest } : out;
 }
 
 /**

@@ -20,18 +20,17 @@
 // - waterParams: switches, grid size, colours, river carve parameters.
 // A point is lake water when a lake in its cell has a level above the
 // point's height and (refined lakes) the mask allows water there. It is
-// river water when it lies in a river's channel (half-width from the
-// traced line), or beside it below the river's level, which drops by
-// spreadSlope per metre away from the channel. Shorelines are exact per
-// pixel: where the terrain height crosses the level. The terrain itself is
-// carved along the rivers (riverCarve.wgsl.js), from the same segments.
+// river water when it lies below the river's level inside the river's
+// channel zone (riverCarve.wgsl.js shapes the terrain there from the same
+// segments: channel, banks above the level, hollows beside it filled).
+// Shorelines are exact per pixel: where the terrain height crosses the level.
 
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 
-// WaterLake: 4 x vec4 (64 bytes). WaterParams: 8 x vec4. WaterRiverSeg: 4 x vec4 (64 bytes).
+// WaterLake: 4 x vec4 (64 bytes). WaterParams: 10 x vec4. WaterRiverSeg: 5 x vec4 (80 bytes).
 export const LAKE_RECORD_FLOATS = 16;
-export const LAKE_PARAMS_FLOATS = 32;
-export const RIVER_SEG_FLOATS = 16;
+export const LAKE_PARAMS_FLOATS = 40;
+export const RIVER_SEG_FLOATS = 20;
 export const RIVER_MAX_SEGS_PER_CELL = 255;
 // River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
 // 512): a terrain point only walks the segments that can reach it.
@@ -49,23 +48,35 @@ struct WaterParams {
     gridN: u32, enabled: u32, debugMode: u32, riverCount: u32,
     planetRadius: f32, time: f32, rippleFade: f32, shoreSoftM: f32,
     deepColor: vec4<f32>,      // rgb; a = reflection strength
-    absorption: vec4<f32>,     // rgb per metre of water path; a = river spread slope (m/m)
+    absorption: vec4<f32>,     // rgb per metre of water path; a unused
     // Active simulation site (WaterSimSite.js): inside it the simulated
     // surface draws the water, so the static water fades out (siteFade).
     siteC: vec4<f32>,          // centre direction; w = half size (m)
     siteE1: vec4<f32>,         // tangent axis 1; w = fade 0..1
     siteE2: vec4<f32>,         // tangent axis 2; w = border width (m)
-    // River carve (riverCarve.wgsl.js): x = on (0/1), y = bank width beyond
-    // the half-width (m), z = bank curvature (1/m), w = hollows up to w x depth are filled.
+    // River cross-section (waterRiverProfile, riverCarve.wgsl.js), x = metres
+    // beyond the channel's edge: carve = (on 0/1, bankW: the terrain is the
+    // cross-section for x < bankW, blendW: then blends into the natural
+    // terrain, waterFrac: water fills this part of the bank-full depth);
+    // bank = (bankH: rise beyond the edge, bankSoftM: over ~2x this,
+    // bankGrade: further rise per metre, unused); flood = (poolFadeM: the
+    // fill of hollows along the river fades out over this beyond them,
+    // floodGrade: floodplain rise per metre beyond the bank zone, unused, unused).
     carve: vec4<f32>,
+    bank: vec4<f32>,
+    flood: vec4<f32>,
 };
 // A piece of a traced river between two points (unit directions); values
-// interpolate along it: water level and bed (m above the sphere), half-width.
+// interpolate along it: water level and thalweg (m above the sphere),
+// half-width (channel edge), reach of the hollows along it that the carve
+// fills (m; 0 = none, < 0 = in a lake), thalweg skew toward the outer bank
+// (+ = left of the flow), flow speed, foam hint.
 struct WaterRiverSeg {
     p0: vec3<f32>, eta0: f32,
     p1: vec3<f32>, eta1: f32,
     hw0: f32, hw1: f32, bed0: f32, bed1: f32,
-    speed: f32, _pad0: f32, _pad1: f32, _pad2: f32,
+    pool0: f32, pool1: f32, skew0: f32, skew1: f32,
+    speed0: f32, speed1: f32, foam0: f32, foam1: f32,
 };
 @group(${group}) @binding(${b.index}) var<storage, read> waterIndex: array<u32>;
 @group(${group}) @binding(${b.params}) var<uniform> waterParams: WaterParams;
@@ -104,6 +115,53 @@ fn waterDirToCellSub(d: vec3<f32>, n: u32) -> vec2<u32> {
 
 fn waterDirToCell(d: vec3<f32>, n: u32) -> u32 {
     return waterDirToCellSub(d, n).x;
+}
+
+// The nearest point of a river segment to a unit direction, and the
+// segment's values there.
+struct WaterRiverPt {
+    d: f32,          // distance from the centre line (m)
+    n: f32,          // signed offset: d, + left of the flow
+    t: f32,          // position along the segment (0..1)
+    tRaw: f32,       // unclamped
+    v: vec3<f32>,    // the direction minus the nearest point
+    eta: f32, bed: f32, hw: f32, pool: f32, skew: f32, speed: f32, foam: f32,
+};
+
+fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
+    var p: WaterRiverPt;
+    let ab = s.p1 - s.p0;
+    p.tRaw = dot(dir - s.p0, ab) / max(dot(ab, ab), 1.0e-20);
+    p.t = clamp(p.tRaw, 0.0, 1.0);
+    p.v = dir - (s.p0 + ab * p.t);
+    p.d = length(p.v) * waterParams.planetRadius;
+    let left = cross(dir, ab);
+    p.n = select(-p.d, p.d, dot(p.v, left) >= 0.0);
+    p.eta = mix(s.eta0, s.eta1, p.t);
+    p.bed = mix(s.bed0, s.bed1, p.t);
+    p.hw = max(mix(s.hw0, s.hw1, p.t), 0.5);
+    p.pool = mix(s.pool0, s.pool1, p.t);
+    p.skew = mix(s.skew0, s.skew1, p.t);
+    p.speed = mix(s.speed0, s.speed1, p.t);
+    p.foam = mix(s.foam0, s.foam1, p.t);
+    return p;
+}
+
+// Height (m) of the river's cross-section at a point (Whitewater's
+// river.js): channel T + D (1 - (1 - u^2)^1.5), u = offset / half-width with
+// the thalweg moved toward the outer bank; beyond the edge (x m) the bank
+// T + D + (bankH (1 - e^(-x / soft)) + grade x) smoothstep(0, soft, x).
+// D = (level - thalweg) / waterFrac: the water fills waterFrac of it.
+fn waterRiverProfile(p: WaterRiverPt) -> f32 {
+    let D = (p.eta - p.bed) / max(waterParams.carve.w, 0.05);
+    if (p.d < p.hw) {
+        let u = p.n / p.hw;
+        let de = select((u - p.skew) / (1.0 - p.skew), (u - p.skew) / (1.0 + p.skew), u < p.skew);
+        return p.bed + D * (1.0 - pow(max(0.0, 1.0 - de * de), 1.5));
+    }
+    let x = p.d - p.hw;
+    let soft = max(waterParams.bank.y, 0.1);
+    return p.bed + D + (waterParams.bank.x * (1.0 - exp(-x / soft)) + waterParams.bank.z * x) * smoothstep(0.0, soft, x);
 }
 
 // River segments listed at a unit direction: first << 8 | count (0: none).
@@ -164,51 +222,55 @@ fn waterLakeLevelAt(dir: vec3<f32>, heightM: f32, samp: sampler) -> f32 {
 }
 
 struct WaterRiverHit {
-    found: bool,
+    found: bool,          // water at the point
+    near: bool,           // within the channel zone (channel + bankW) of a river
     depthM: f32,          // water depth at the point
     distM: f32,           // distance from the river line
     halfWidthM: f32,
+    etaM: f32,            // the river's level there
     flow: vec3<f32>,      // flow direction (unit, along the line)
     speed: f32,
+    foam: f32,
 };
 
-// The river (if any) at a point: nearest segment among those listed in its cell.
+// The river (if any) at a point: the nearest segment among those listed
+// there. Water where the terrain lies below the river's level inside its
+// channel zone (the carve shapes banks above the level, and fills the
+// hollows beside it). Terrain not carved yet (tiles still regenerating)
+// shows the channel's water painted on.
 fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     var hit: WaterRiverHit;
     hit.found = false;
+    hit.near = false;
     let e = waterRiverList(dir);
     let count = min(e & 0xffu, ${RIVER_MAX_SEGS_PER_CELL}u);
     if (count == 0u) { return hit; }
     let first = e >> 8u;
-    var best = 1.0e30;
-    var eta = 0.0;
-    var bed = 0.0;
+    var best: WaterRiverPt;
+    best.d = 1.0e30;
+    var bestK = first;
     for (var k = 0u; k < count; k++) {
-        let s = waterRivers[first + k];
-        let ab = s.p1 - s.p0;
-        let t = clamp(dot(dir - s.p0, ab) / max(dot(ab, ab), 1.0e-20), 0.0, 1.0);
-        let dist = length(dir - (s.p0 + ab * t)) * waterParams.planetRadius;
-        if (dist < best) {
-            best = dist;
-            eta = mix(s.eta0, s.eta1, t);
-            bed = mix(s.bed0, s.bed1, t);
-            hit.halfWidthM = mix(s.hw0, s.hw1, t);
-            hit.flow = ab;
-            hit.speed = s.speed;
-        }
+        let p = waterRiverPoint(waterRivers[first + k], dir);
+        if (p.d < best.d) { best = p; bestK = first + k; }
     }
-    let hw = hit.halfWidthM;
-    if (best > hw + 200.0) { return hit; }
-    // Channel: parabolic cross-section of the river's depth (the shape the
-    // carve cuts, so terrain not carved yet still shows the river); beside
-    // it the level drops with distance, so water spreads only into low ground.
-    let channel = (eta - bed) * max(0.0, 1.0 - (best / hw) * (best / hw));
-    let etaSide = eta - max(0.0, best - hw) * waterParams.absorption.a;
-    let depthM = max(channel, etaSide - heightM);
+    let zone = best.hw + waterParams.carve.y;
+    if (best.d > zone) { return hit; }
+    hit.near = true;
+    hit.distM = best.d;
+    hit.halfWidthM = best.hw;
+    hit.etaM = best.eta;
+    hit.speed = best.speed;
+    hit.foam = best.foam;
+    // Waterline of the channel profile: 1 - (1 - u^2)^1.5 = waterFrac.
+    let wf = clamp(waterParams.carve.w, 0.05, 0.99);
+    let uw = sqrt(1.0 - pow(1.0 - wf, 2.0 / 3.0));
+    let paint = (best.eta - best.bed) * max(0.0, 1.0 - (best.d / (uw * best.hw)) * (best.d / (uw * best.hw)));
+    let depthM = max(best.eta - heightM, paint);
     hit.found = depthM > 0.0;
     hit.depthM = depthM;
-    hit.distM = best;
-    let along = hit.flow - dir * dot(hit.flow, dir);
+    let s = waterRivers[bestK];
+    let ab = s.p1 - s.p0;
+    let along = ab - dir * dot(ab, dir);
     hit.flow = select(normalize(cross(dir, vec3<f32>(0.0, 1.0, 0.0001))), normalize(along), dot(along, along) > 1.0e-24);
     return hit;
 }
@@ -321,12 +383,24 @@ fn applyWater(
     }
 
     let river = waterRiverAt(up, heightM);
+    // River bed and banks: wet brown soil, darker just above the waterline,
+    // fading back to the terrain's own colour up the bank.
+    var ground = bedColor;
+    if (river.near) {
+        let lum = dot(bedColor, vec3<f32>(0.30, 0.59, 0.11));
+        let soil = vec3<f32>(0.42, 0.33, 0.24) * (lum / 0.33);
+        let crest = river.halfWidthM + 2.0 * waterParams.bank.y;
+        let w = 1.0 - smoothstep(river.halfWidthM, crest, river.distM);
+        let wet = 1.0 - 0.35 * (1.0 - smoothstep(0.0, 0.6, heightM - river.etaM));
+        ground = mix(bedColor, soil * wet, 0.8 * w);
+    }
     if (river.found) {
         if (dbg == 1u || dbg == 2u) { return mix(vec3<f32>(1.0, 0.15, 0.1), vec3<f32>(0.3, 0.0, 0.5), clamp(river.depthM / 5.0, 0.0, 1.0)); }
         if (dbg == 3u) { return mix(vec3<f32>(0.6, 1.0, 1.0), vec3<f32>(0.0, 0.0, 0.3), clamp(river.depthM / 50.0, 0.0, 1.0)); }
-        let riverCol = waterSurfaceColor(bedColor, river.depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, river.flow, river.speed, 1.6);
+        let riverCol = waterSurfaceColor(ground, river.depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, river.flow, river.speed, 1.6);
         return mix(riverCol, bedColor, waterSiteCover(up));
     }
+    if (river.near && dbg == 0u) { return ground; }
 
     if (dbg == 2u) {
         let cell = waterDirToCell(up, waterParams.gridN);

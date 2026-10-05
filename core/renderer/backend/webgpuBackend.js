@@ -5,6 +5,7 @@ import { Backend } from './backend.js';
 import { TextureFormat } from '../resources/texture.js';
 import { Logger } from '../../../shared/Logger.js';
 import { gpuFormatSampleType } from '../resources/texture.js';
+import { LAKE_PARAMS_FLOATS } from '../../world/water/waterWgsl.js';
 export class WebGPUBackend extends Backend {
     constructor(canvas) {
         super(canvas);
@@ -1930,7 +1931,7 @@ _createTerrainBindGroups(material, uniforms, geometry) {
     const waterLakesBuf = water?.lakes || dummyStorage;
     const waterRiversBuf = water?.rivers || dummyStorage;
     const waterMasksView = water?.masks || this._getOrCreateDummyArrayTextureView();
-    const waterParamsBuf = water?.params || this._getOrCreateUniformBuffer('_water_params_dummy', new Float32Array(32));
+    const waterParamsBuf = water?.params || this._getOrCreateUniformBuffer('_water_params_dummy', new Float32Array(LAKE_PARAMS_FLOATS));
 
     // Build cache key including shadow state
     const shadowKey = shadowRenderer ? 'shadow' : 'noshadow';
