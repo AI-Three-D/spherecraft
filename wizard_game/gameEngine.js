@@ -1479,12 +1479,14 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         let sim = this.waterRiverSim;
         if (!sim) {
             const { enabled: _e, activateDistanceM: _d, activateAltitudeM: _a, ...simCfg } = cfg;
-            sim = this.waterRiverSim = new WaterRiverSim({ device: this.renderer.backend.device, sampler: svc._sampler, radius: R, config: simCfg });
+            sim = this.waterRiverSim = new WaterRiverSim({ device: this.renderer.backend.device, sampler: svc._sampler, radius: R, config: { ...simCfg, shape: svc.config.carve } });
             this.renderer?.setWaterSimSite?.(sim, gpu.look);
             this._waterStrips = new Map();   // riverId -> { rec, strip, centre, radiusM }
         }
         // The camera's river: followed every frame; a search for the nearest
         // traced river every 15 frames (or when there is none).
+        // A river that left the GPU lists is no longer carved: stop there.
+        if (sim.active && !gpu.isRiverDrawn(sim.riverId)) sim.stop();
         const dist = sim.active ? sim.follow(dir) : Infinity;
         this._waterSimFrame = (this._waterSimFrame ?? 0) + 1;
         // Not while a placement samples its bed (it would restart it).
@@ -1509,6 +1511,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         const svc = this.waterService, R = this.planetConfig.radius;
         let best = null;
         for (const [riverId, rec] of svc.riverRecs) {
+            // Only rivers carved into the terrain (in the GPU lists).
+            if (!this.waterGpuData?.isRiverDrawn(riverId)) continue;
             let e = this._waterStrips.get(riverId);
             if (!e || e.rec !== rec) {
                 const strip = createRiverStrip(rec, R);

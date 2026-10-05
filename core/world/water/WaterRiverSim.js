@@ -24,6 +24,7 @@
 import { ShallowWaterSim } from './ShallowWaterSim.js';
 import { SWE_OPEN_BOTTOM, SWE_OPEN_TOP } from './shallowWaterSim.wgsl.js';
 import { createRiverStrip } from './riverStrip.js';
+import { riverShapeMaxScale } from './riverShapeNoise.js';
 
 export const WATER_RIVER_SIM_DEFAULTS = Object.freeze({
     dx: 1.0,               // cell size (m); larger for rivers wider than maxCols
@@ -38,6 +39,7 @@ export const WATER_RIVER_SIM_DEFAULTS = Object.freeze({
     endFadeM: 48,          // the simulated surface fades into the static water at the window's ends
     sideFadeM: 4,
     sim: {},               // SWE_DEFAULTS overrides (ShallowWaterSim.js)
+    shape: null,           // the river shape's noise amounts (WaterService config.carve)
 });
 
 // Per physical row: centre (xyz) + level, left normal (xyz) + speed,
@@ -235,7 +237,8 @@ export class WaterRiverSim {
         this.fade = 0;
         const c = this.config;
         const strip = createRiverStrip(rec, this.R);
-        const halfM = strip.maxHalfWidth() + c.marginM;
+        // Wide enough for the channel at its widest and most wandering (riverShapeNoise.js).
+        const halfM = strip.maxHalfWidth() * riverShapeMaxScale(c.shape ?? { widthVar: 0.2, wobble: 0.15 }) + c.marginM;
         let dx = c.dx, W = Math.ceil((2 * halfM / dx) / 8) * 8;
         if (W > c.maxCols) { W = c.maxCols; dx = 2 * halfM / W; }
         const L = Math.max(64, Math.round(c.lengthM / dx / 8) * 8);

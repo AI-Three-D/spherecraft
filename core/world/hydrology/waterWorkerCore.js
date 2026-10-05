@@ -55,7 +55,11 @@ export function createWaterWorkerCore() {
     // then the graph's drainage. Returns the destination, the graph cells on
     // the way (destination's cell last) and how many leading cells came
     // from the fine outflow.
-    function routeFrom(id) {
+    // join: the route also ends where it reaches another river's graph path
+    // (a confluence: that river carries the water on; lab 2026-10-05: routes
+    // passing through a lake that is not lower followed that lake's own
+    // river, and the two were traced side by side down one valley).
+    function routeFrom(id, { join = false, ownRiver = -1 } = {}) {
         const self = rep(id);
         const r = refined.get(self);
         const L = levelOf(self);
@@ -67,6 +71,10 @@ export function createWaterWorkerCore() {
             if (x !== -1) {
                 const xr = rep(x);
                 if (xr !== self && levelOf(xr) < L) return { type: 'lake', id: xr };
+            }
+            if (join && x === -1) {
+                const rv = g.riverOf[c];
+                if (rv !== -1 && rv !== ownRiver && rep(g.rivers[rv].fromLake) !== self) return { type: 'river', id: rv, cell: c };
             }
             return null;
         };
@@ -193,10 +201,10 @@ export function createWaterWorkerCore() {
     const plans = new Map();   // riverId -> plan from planRiver
 
     function planRiver(msg) {
-        const { riverId, spacing = 16, corridorM = 1000 } = msg;
+        const { riverId, spacing = 16, corridorM = 1000, join = false } = msg;
         const src = g.rivers[riverId].fromLake;
         if (rep(src) !== src) return { reply: { type: 'riverPlan', riverId, status: 'merged' } };
-        const { dest, cells, outflowCells } = routeFrom(src);
+        const { dest, cells, outflowCells } = routeFrom(src, { join, ownRiver: riverId });
         const r = refined.get(src);
         const sourceDir = r ? r.exitDir : cellDir(g.lakes[src].exitCell, N);
         // Polyline: the fine outflow out of the sill, then the graph's route,
@@ -206,7 +214,8 @@ export function createWaterWorkerCore() {
             : [sourceDir, ...cells.slice(1).map(c => cellDir(c, N))];
         if (dest.type === 'lake') dirs.push(cellDir(g.lakes[dest.id].deepestCell, N));
         const frame = polylinePatchFrame(dirs, { R, spacing, marginM: corridorM + 200 });
-        const destLevel = dest.type === 'lake' ? levelOf(dest.id) : seaLevelM;
+        // A river destination's level comes with solveRiver (msg.trunk.eta).
+        const destLevel = dest.type === 'lake' ? levelOf(dest.id) : dest.type === 'sea' ? seaLevelM : -Infinity;
         plans.set(riverId, { src, dest, destLevel, dirs, cells, sourceDir, corridorM });
         return { reply: { type: 'riverPlan', riverId, status: 'ok', frame, dest, sourceRefined: !!r } };
     }
@@ -217,6 +226,7 @@ export function createWaterWorkerCore() {
         const levelP = { ...RIVER_LEVEL_DEFAULTS, ...(msg.levels ?? {}) };
         const plan = plans.get(riverId);
         if (!plan) return { reply: { type: 'riverSolved', riverId, status: 'noPlan' } };
+        if (plan.dest.type === 'river' && !msg.trunk) return { reply: { type: 'riverSolved', riverId, status: 'noTrunk' } };
         const h = msg.heights, { nx, ny, spacing } = frame;
         const cx = (k) => frame.x0 + ((k % nx) + 0.5) * spacing;
         const cy = (k) => frame.y0 + (Math.floor(k / nx) + 0.5) * spacing;
@@ -238,11 +248,35 @@ export function createWaterWorkerCore() {
             const l = g.lakeOf[dirToCell(d, N)];
             return l !== -1 && rep(l) === plan.dest.id;
         };
+        // A trunk river: the wet middle of its traced channel (msg.trunk:
+        // dirs xyz per point, half-widths, its level at the junction).
+        let trunkMask = null;
+        if (plan.dest.type === 'river') {
+            const T = msg.trunk, tn = T.hw.length;
+            plan.destLevel = T.eta;
+            trunkMask = new Uint8Array(nx * ny);
+            const pts = [];
+            for (let k = 0; k < tn; k++) pts.push(dirToPlane([T.dirs[3 * k], T.dirs[3 * k + 1], T.dirs[3 * k + 2]], frame, R));
+            const x1 = frame.x0 + nx * spacing, y1 = frame.y0 + ny * spacing;
+            for (let k = 0; k + 1 < tn; k++) {
+                const [ax, ay] = pts[k], [bx, by] = pts[k + 1], r = 0.6 * Math.min(T.hw[k], T.hw[k + 1]);
+                if (Math.max(ax, bx) + r < frame.x0 || Math.min(ax, bx) - r > x1 || Math.max(ay, by) + r < frame.y0 || Math.min(ay, by) - r > y1) continue;
+                const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - r - frame.x0) / spacing)), i1 = Math.min(nx - 1, Math.floor((Math.max(ax, bx) + r - frame.x0) / spacing));
+                const j0 = Math.max(0, Math.floor((Math.min(ay, by) - r - frame.y0) / spacing)), j1 = Math.min(ny - 1, Math.floor((Math.max(ay, by) + r - frame.y0) / spacing));
+                const ux = bx - ax, uy = by - ay, L2 = ux * ux + uy * uy || 1e-9;
+                for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+                    const px = frame.x0 + (i + 0.5) * spacing - ax, py = frame.y0 + (j + 0.5) * spacing - ay;
+                    const t = Math.max(0, Math.min(1, (px * ux + py * uy) / L2));
+                    if (Math.hypot(px - t * ux, py - t * uy) <= r) trunkMask[j * nx + i] = 1;
+                }
+            }
+        }
         const seeds = new Uint8Array(nx * ny);
         let seedCount = 0;
         for (let k = 0; k < nx * ny; k++) {
             if (!corridor[k]) continue;
             if (plan.dest.type === 'sea') { if (!(h[k] <= seaLevelM)) continue; }
+            else if (plan.dest.type === 'river') { if (!trunkMask[k]) continue; }
             else if (!(h[k] < plan.destLevel) || !inDest(k)) continue;
             seeds[k] = 1; seedCount++;
         }
@@ -267,7 +301,7 @@ export function createWaterWorkerCore() {
         for (const ci of plan.cells) qMax = Math.max(qMax, qAt(ci));
         const widthMax = riverShape(qMax, 0.001, shapeP, levelP.waterFrac).width;
         const window = Math.max(4, Math.min(16, Math.round((1.5 * widthMax) / spacing)));
-        const sm = smoothRiverPath(xs, ys, tr.fill, { window, stepM: Math.max(40, spacing * 2.5) });
+        const sm = smoothRiverPath(xs, ys, tr.fill, { window, stepM: msg.stepM ?? 20, passes: msg.smoothPasses ?? 8 });
         const n = sm.x.length, total = sm.s[n - 1] || 1;
         // The water never stands above the source lake: where the trace had
         // to cross higher ground (the graph's route and the 16 m terrain
@@ -313,12 +347,19 @@ export function createWaterWorkerCore() {
         };
         const ground = sm.x.map((x, k) => groundAt(x, sm.y[k]));
         const lv = riverLevels(ground, sm.s, shapes.map(sh => sh.depth), { srcLevel, destLevel: plan.destLevel }, levelP, lakeAt);
-        const poolRes = riverPools({
-            // The whole patch: hollows beside the line may reach past the route's corridor.
-            heights: h, corridor: null, nx, ny, x0: frame.x0, y0: frame.y0, spacing, px: sm.x, py: sm.y, eta: lv.eta,
-            lake: lakeMask, maxReachM: levelP.poolMaxM ?? 300, withMasks: !!msg.debugPools,
-        });
-        const pool = msg.debugPools ? poolRes.reach : poolRes;
+        // Per point: -1 in a lake (no levee there: the carve), else the reach
+        // of hollows beside the river (riverPools; off by default: the carve
+        // no longer fills them, its levee holds the water).
+        let pool, poolRes = null;
+        if ((levelP.poolMaxM ?? 0) > 0) {
+            poolRes = riverPools({
+                heights: h, corridor: null, nx, ny, x0: frame.x0, y0: frame.y0, spacing, px: sm.x, py: sm.y, eta: lv.eta,
+                lake: lakeMask, maxReachM: levelP.poolMaxM, withMasks: !!msg.debugPools,
+            });
+            pool = msg.debugPools ? poolRes.reach : poolRes;
+        } else {
+            pool = lakeAt.map(l => (Number.isFinite(l) ? -1 : 0));
+        }
         const dirs = [];
         for (let k = 0; k < n; k++) dirs.push(planeToDir(sm.x[k], sm.y[k], frame, R));
         // Bends: signed curvature (1/m, + = turning left seen from above),
@@ -356,7 +397,7 @@ export function createWaterWorkerCore() {
         }
         // Sub-cells each segment reaches: channel, banks and their blend into
         // the terrain (the carve), or its filled hollow, whichever is wider.
-        const reachExtra = Math.max(40, msg.reachM ?? 0);
+        const reachExtra = Math.max(40, msg.reachM ?? 0), reachScale = msg.reachScale ?? 1;
         const poolExtra = msg.poolExtraM ?? 40;
         const sub = msg.sub ?? 4;
         const cellAt = (x, y) => dirToCellSub(planeToDir(x, y, frame, R), N, sub);
@@ -365,7 +406,7 @@ export function createWaterWorkerCore() {
         for (let k = 0; k + 1 < n; k++) {
             segCellStart[k] = segCellList.length;
             const a = k * stride, b = (k + 1) * stride;
-            const reach = Math.max(points[a + 4] + reachExtra, points[b + 4] + reachExtra,
+            const reach = Math.max(points[a + 4] * reachScale + reachExtra, points[b + 4] * reachScale + reachExtra,
                 points[a + 9] > 0 ? points[a + 9] + poolExtra : 0, points[b + 9] > 0 ? points[b + 9] + poolExtra : 0);
             for (const c of segmentCells(sm.x[k], sm.y[k], sm.x[k + 1], sm.y[k + 1], reach, cellAt)) segCellList.push(c);
         }
@@ -377,7 +418,7 @@ export function createWaterWorkerCore() {
                 lengthM: total, points, stride, segCellStart, segCells,
                 startLevel: sm.fill[0], endLevel: sm.fill[n - 1], destLevel: plan.destLevel,
                 // Lab only (msg.debugPools): the trace patch and its pool masks.
-                ...(msg.debugPools ? { debug: { frame, heights: h, corridor, inPool: poolRes.inPool, nearest: poolRes.nearest, sx: sm.x, sy: sm.y, eta: lv.eta, fill: sm.fill } } : {}),
+                ...(msg.debugPools && poolRes ? { debug: { frame, heights: h, corridor, inPool: poolRes.inPool, nearest: poolRes.nearest, sx: sm.x, sy: sm.y, eta: lv.eta, fill: sm.fill } } : {}),
             },
             transfer: [points.buffer, segCellStart.buffer, segCells.buffer],
         };

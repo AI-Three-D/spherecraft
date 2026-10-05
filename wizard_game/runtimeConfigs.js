@@ -971,11 +971,19 @@ export function createGameDataConfig() {
         lengthM: 768,
       },
     },
+    /*
     erosion: {
       enabled: true,
       globalRate: 0.6,
       hydraulicRate: 0.7,
       thermalRate: 0.4
+    },
+    */
+    erosion: {
+      enabled: true,
+      globalRate: 0.10,
+      hydraulicRate: 0.3,
+      thermalRate: 0.1
     },
     impacts: {
       enabled: true,

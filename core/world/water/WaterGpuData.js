@@ -30,6 +30,8 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     riverAnimNearM: 1500,
     riverAnimFarM: 3000,
     riverFoamGain: 1.0,
+    // Lakes whose shore is not solved yet are hidden closer than this (m).
+    unsolvedLakeHideM: 2500,
 });
 
 const SLOT_MASK = 0x7fff;
@@ -114,6 +116,11 @@ export class WaterGpuData {
         const cells = this._changedCells;
         this._changedCells = new Set();
         return cells;
+    }
+
+    /** True when river riverId is in the GPU lists (drawn and carved). */
+    isRiverDrawn(riverId) {
+        return this._inGpu?.has(riverId) ?? false;
     }
 
     /** Resources for a bind group (see waterWgsl.js WATER_BINDINGS). */
@@ -281,6 +288,16 @@ export class WaterGpuData {
                 this._flushRows();
                 this._writeTable(svc);
                 this._appliedVersion = svc.version;
+            } else if (this._droppedRivers > 0 && this._layoutDir) {
+                // Rivers were left out of the full buffer: lay out again once
+                // the camera has moved 2 km (nearest rivers first).
+                const l = Math.hypot(cameraPos.x, cameraPos.y, cameraPos.z) || 1;
+                const camDir = [cameraPos.x / l, cameraPos.y / l, cameraPos.z / l];
+                const L = this._layoutDir;
+                if (Math.acos(Math.min(1, camDir[0] * L[0] + camDir[1] * L[1] + camDir[2] * L[2])) * this.R > 2000) {
+                    this._rebuildRivers(camDir);
+                    this._flushRows();
+                }
             }
         }
         const p = this._params, u = new Uint32Array(p), f = new Float32Array(p), L = this.look;
@@ -295,13 +312,13 @@ export class WaterGpuData {
         } else {
             f.fill(0, 16, 24);
         }
-        f.set([L.riverAnimNearM ?? 1500, L.riverAnimFarM ?? 3000, L.riverFoamGain ?? 1, 0], 24);
+        f.set([L.riverAnimNearM ?? 1500, L.riverAnimFarM ?? 3000, L.riverFoamGain ?? 1, L.unsolvedLakeHideM ?? 2500], 24);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.
         const C = this.carve ?? {};
         f.set([C.enabled ? 1 : 0, C.bankW ?? 12, C.blendW ?? 30, C.waterFrac ?? 0.75], 28);
-        f.set([C.bankH ?? 1.5, C.bankSoftM ?? 3, C.bankGrade ?? 0.06, 0], 32);
-        f.set([C.poolFadeM ?? 30, C.floodGrade ?? 0.01, 0, 0], 36);
+        f.set([C.bankH ?? 1.5, C.bankSoftM ?? 3, C.bankGrade ?? 0.06, C.leveeGrade ?? 0.08], 32);
+        f.set([C.widthVar ?? 0.2, C.wobble ?? 0.15, C.bankVar ?? 0.35, 0], 36);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
     }
 
@@ -313,18 +330,23 @@ export class WaterGpuData {
      */
     _rebuildRivers(camDir) {
         const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map();
+        // Nearest rivers first, by their nearest point (a river's source can
+        // be far while it runs past the camera: lab 2026-10-05).
         const recs = [...this._appliedRivers.entries()].map(([rid, rec]) => {
-            const P = rec.points;
-            const cosA = camDir[0] * P[0] + camDir[1] * P[1] + camDir[2] * P[2];
+            const P = rec.points, st = rec.stride, n = P.length / st;
+            let cosA = -2;
+            for (let k = 0; k < n; k += 4) cosA = Math.max(cosA, camDir[0] * P[k * st] + camDir[1] * P[k * st + 1] + camDir[2] * P[k * st + 2]);
             return { rid, rec, far: -cosA };
         }).sort((a, b) => a.far - b.far);
         const ridOf = new Map(recs.map(r => [r.rec, r.rid]));
         let total = 0, dropped = 0;
-        for (const { rec } of recs) {
+        const inGpu = new Set();
+        for (const { rid, rec } of recs) {
             const n = rec.points.length / rec.stride;
             const need = rec.segCells.length;
             if (total + need > this.maxRiverSegs) { dropped++; continue; }
             total += need;
+            inGpu.add(rid);
             for (let k = 0; k + 1 < n; k++) {
                 for (let m = rec.segCellStart[k]; m < rec.segCellStart[k + 1]; m++) {
                     const c = rec.segCells[m];
@@ -380,6 +402,15 @@ export class WaterGpuData {
         if (full) console.warn(`[Water] river cell blocks full: ${full} sub-cells not listed`);
         if (next) this.device.queue.writeBuffer(this.riversBuffer, 0, this._segs, 0, next * F);
         this.riverSegCount = next;
+        // Rivers entering or leaving the lists change the carve in their cells.
+        for (const rid of new Set([...inGpu, ...(this._inGpu ?? [])])) {
+            if (inGpu.has(rid) === (this._inGpu?.has(rid) ?? false)) continue;
+            const rec = this._appliedRivers.get(rid);
+            if (rec?.segCells) for (const id of rec.segCells) this._changedCells.add(Math.floor(id / SS));
+        }
+        this._inGpu = inGpu;
+        this._droppedRivers = dropped;
+        this._layoutDir = camDir;
         if (dropped) console.warn(`[Water] river segment buffer full: ${dropped} far rivers not drawn`);
     }
 

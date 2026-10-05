@@ -19,8 +19,9 @@ import { createHydrologySampler } from './HydrologyGrid.js';
 import { WaterCache, hashParts } from './waterCache.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
 import { dirToPlane, growPatchFrame, limitPatchCells } from './lakeRefine.js';
-import { dirToCell } from './waterGraph.js';
+import { cellDir, dirToCell } from './waterGraph.js';
 import { RIVER_SUB } from '../water/waterWgsl.js';
+import { riverShapeMaxScale } from '../water/riverShapeNoise.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
 export const WATER_ALGO_VERSION = 'water-v7';
@@ -36,6 +37,9 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
         retryCorridorScale: 2.5,  // wider corridor when the start sits above the source lake
         startToleranceM: 1.0,
         shape: {},         // RIVER_SHAPE_DEFAULTS overrides (riverRefine.js)
+        stepM: 20,         // traced line resampled every stepM...
+        smoothPasses: 8,   // ...and smoothed by this many [1 2 1] passes (curves, not corners)
+        confluences: true, // a river reaching another river's path ends in it
     },
     // River corridor shaped into the terrain (riverCarve.wgsl.js), after
     // Whitewater's cross-section: channel, banks rising beyond its edge,
@@ -49,15 +53,19 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
         bankW: 12,              // x < bankW: the terrain is the cross-section (cut and levee)
         blendW: 30,             // then blends into the natural terrain over this (m)
         rampM: 120,             // the river cuts in to full depth over this from its source
-        poolMaxM: 300,          // hollows below the river's level up to this far from it are filled to its floodplain,
-        poolFadeM: 30,          // fading out over this beyond them
-        floodGrade: 0.01,       // floodplain rise per metre beyond the bank zone
+        leveeGrade: 0.08,       // where the ground is lower, the bank falls away past its crest by this per metre
+        // Irregularity along the river (riverShapeNoise.js): half-width +- widthVar,
+        // centre wandering +- wobble x half-width, bank height +- bankVar.
+        widthVar: 0.2,
+        wobble: 0.15,
+        bankVar: 0.35,
     },
     refine: {
         enabled: true,
         spacingM: 16,      // lab: 16 m and 4 m solves agree within 0.2 m
         radiusM: 40000,    // refine lakes whose patch comes this close
         bandM: 6,          // shore band of the render mask (metres above the level)
+        lookAheadS: 3,     // work is ranked by distance from where the camera will be this far ahead
         maxCells: 4e6,     // larger patches get a coarser spacing
         maxGrows: 3,       // patch growths (x1.6) when a lake reaches the patch border
     },
@@ -245,23 +253,56 @@ export class WaterService {
     }
 
     /**
-     * Per-frame: start refining the nearest unrefined lake in range; when
-     * all lakes in range are done, the nearest river whose source lake is
-     * in range.
+     * Per-frame: start the nearest piece of water work in range, lakes and
+     * rivers alike (lab 2026-10-05: lakes first, then rivers, left the rivers
+     * by the camera untraced for 49 s while 80 lakes within 40 km were
+     * solved). Distances from where the camera will be ~lookAheadS ahead;
+     * a river's from its nearest graph cell. The next piece starts the
+     * frame after one finishes.
      */
     update(cameraPosition) {
         if (this.state !== 'ready' || this._busy || !this.config.refine.enabled || !cameraPosition) return;
         const now = performance.now();
-        if (now - this._lastPick < 250) return;
-        this._lastPick = now;
-        const near = this.lakesNear(cameraPosition, 96).filter(({ distanceM }) => distanceM <= this.config.refine.radiusM);
-        const lake = near.find(({ lake: l }) => !this.refined.has(l.id) && !this._failed.has(l.id));
-        if (lake) { this.refineLake(lake.lake.id); return; }
-        if (!this.config.rivers.enabled) return;
-        for (const { lake: l } of near) {
-            const rid = l.river;
-            if (rid >= 0 && !this.riverRecs.has(rid) && !this._failedRivers.has(rid)) { this.refineRiver(rid); return; }
+        const origin = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
+        const p = [cameraPosition.x - origin.x, cameraPosition.y - origin.y, cameraPosition.z - origin.z];
+        // Look ahead along the camera's motion.
+        let ahead = p;
+        if (this._lastCam && now > this._lastCam.t) {
+            const dt = Math.min(1, (now - this._lastCam.t) / 1000), k = this.config.refine.lookAheadS / Math.max(dt, 1e-3);
+            ahead = [p[0] + (p[0] - this._lastCam.p[0]) * k, p[1] + (p[1] - this._lastCam.p[1]) * k, p[2] + (p[2] - this._lastCam.p[2]) * k];
         }
+        if (!this._lastCam || now - this._lastCam.t > 250) this._lastCam = { p, t: now };
+        const l = Math.hypot(...ahead) || 1;
+        const dir = [ahead[0] / l, ahead[1] / l, ahead[2] / l];
+        const radiusM = this.config.refine.radiusM;
+        let best = null;
+        for (const lake of this.lakes) {
+            if (this.rep(lake.id) !== lake.id) continue;
+            const d = this._lakeDistance(lake, dir);
+            if (d > radiusM) continue;
+            if (!this.refined.has(lake.id) && !this._failed.has(lake.id) && (!best || d < best.d)) best = { d, lake: lake.id };
+            const rid = lake.river;
+            if (!this.config.rivers.enabled || rid < 0 || this.riverRecs.has(rid) || this._failedRivers.has(rid)) continue;
+            const dr = this._riverDistance(rid, dir);
+            if (!best || dr < best.d) best = { d: dr, river: rid };
+        }
+        if (!best) return;
+        if (best.lake !== undefined) this.refineLake(best.lake);
+        else this.refineRiver(best.river);
+    }
+
+    /** Distance (m) from a unit direction to a river's graph cells. */
+    _riverDistance(rid, dir) {
+        this._riverCellDirs ??= new Map();
+        let dirs = this._riverCellDirs.get(rid);
+        if (!dirs) {
+            const N = this.config.gridN;
+            dirs = Array.from(this.rivers[rid].cells ?? [], c => cellDir(c, N));   // cells: Int32Array
+            this._riverCellDirs.set(rid, dirs);
+        }
+        let best = -1;
+        for (const d of dirs) best = Math.max(best, d[0] * dir[0] + d[1] * dir[1] + d[2] * dir[2]);
+        return Math.acos(Math.max(-1, Math.min(1, best))) * this.radius;
     }
 
     /** Solves one lake (cache first). Resolves to its record, or null. */
@@ -333,22 +374,61 @@ export class WaterService {
         if (this.state !== 'ready' || this._busy) return null;
         if (this.riverRecs.has(riverId)) return this.riverRecs.get(riverId);
         this._busy = true;
+        try {
+            return await this._refineRiver(riverId, 0);
+        } finally {
+            this._busy = false;
+        }
+    }
+
+    /** The traced point of rec nearest to unit direction d: { k, eta, hw }. */
+    _riverPointNear(rec, d) {
+        const P = rec.points, st = rec.stride, n = P.length / st;
+        let best = { k: 0, cos: -2 };
+        for (let k = 0; k < n; k++) {
+            const c = P[k * st] * d[0] + P[k * st + 1] * d[1] + P[k * st + 2] * d[2];
+            if (c > best.cos) best = { k, cos: c };
+        }
+        return { k: best.k, eta: P[best.k * st + 3], hw: P[best.k * st + 4] };
+    }
+
+    async _refineRiver(riverId, depth) {
+        if (this.riverRecs.has(riverId)) return this.riverRecs.get(riverId);
+        if (this._failedRivers.has(riverId) || depth > 6) return null;
         const t0 = performance.now();
         const RC = this.config.rivers;
         try {
             const src = this.rivers[riverId].fromLake;
             if (this.rep(src) !== src) { this._failedRivers.add(riverId); return null; }
             await this._refineLake(src);
-            let plan = null;
-            // The destination's level decides the route: refine it, then route again.
-            for (let k = 0; k < 4; k++) {
-                plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM: RC.corridorM });
-                if (plan.status !== 'ok' || plan.dest.type !== 'lake' || this.refined.has(plan.dest.id)) break;
-                if (!(await this._refineLake(plan.dest.id))) break;
+            const srcLevel0 = this.refined.get(src)?.level ?? this.lakes[src].level;
+            let join = RC.confluences !== false;
+            let plan = null, trunk = null;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                // The destination's level decides the route: refine it, then route again.
+                for (let k = 0; k < 4; k++) {
+                    plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM: RC.corridorM, join });
+                    if (plan.status !== 'ok' || plan.dest.type !== 'lake' || this.refined.has(plan.dest.id)) break;
+                    if (!(await this._refineLake(plan.dest.id))) break;
+                }
+                if (plan?.status !== 'ok' || plan.dest.type !== 'river') break;
+                // A confluence: the trunk is traced first; this river ends in
+                // its channel at its level there (lower than the source lake),
+                // otherwise it is routed as before.
+                const t = await this._refineRiver(plan.dest.id, depth + 1);
+                const j = t && this._riverPointNear(t, cellDir(plan.dest.cell, this.config.gridN));
+                if (t && j.eta < srcLevel0 + RC.startToleranceM) {
+                    const P = t.points, st = t.stride, n = P.length / st;
+                    const dirs = new Float32Array(n * 3), hw = new Float32Array(n);
+                    for (let k = 0; k < n; k++) { dirs.set([P[k * st], P[k * st + 1], P[k * st + 2]], 3 * k); hw[k] = P[k * st + 4]; }
+                    trunk = { dirs, hw, eta: j.eta, key: hashParts([P]) };
+                    break;
+                }
+                join = false;
             }
             if (plan?.status !== 'ok') { this._failedRivers.add(riverId); return null; }
-            const destKey = plan.dest.type === 'lake' ? `lake${plan.dest.id}` : 'sea';
-            const shapeKey = hashParts([RC.shape, this.config.carve]);
+            const destKey = plan.dest.type === 'lake' ? `lake${plan.dest.id}` : plan.dest.type === 'river' ? `river${plan.dest.id}-${trunk.key}` : 'sea';
+            const shapeKey = hashParts([RC.shape, RC.stepM, RC.smoothPasses, this.config.carve]);
             const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${shapeKey}:${riverId}:${destKey}`;
             let rec = this.config.cache ? await this._cache.get(riverKey) : null;
             const fromCache = !!rec;
@@ -358,7 +438,7 @@ export class WaterService {
                 const srcLevel = this.refined.get(src)?.level ?? this.lakes[src].level;
                 for (const corridorM of [RC.corridorM, RC.corridorM * RC.retryCorridorScale]) {
                     if (corridorM !== RC.corridorM) {
-                        plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM });
+                        plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM, join: !!trunk });
                         if (plan.status !== 'ok') break;
                     }
                     const frame = limitPatchCells(plan.frame, this.config.refine.maxCells);
@@ -366,11 +446,14 @@ export class WaterService {
                     const CV = this.config.carve;
                     const r = await this._client.call({
                         type: 'solveRiver', riverId, frame, heights, shape: RC.shape,
-                        levels: { waterFrac: CV.waterFrac, bankH: CV.bankH, rampM: CV.rampM, poolMaxM: CV.poolMaxM },
-                        // The carve's reach beyond the half-width (riverCarve.wgsl.js) + margin.
+                        levels: { waterFrac: CV.waterFrac, bankH: CV.bankH, rampM: CV.rampM },
+                        // The carve's reach beyond the half-width (riverCarve.wgsl.js) + margin,
+                        // the half-width as wide as the shape noise makes it.
                         reachM: CV.enabled ? CV.bankW + CV.blendW + 8 : 0,
-                        poolExtraM: CV.poolFadeM + 8,
+                        reachScale: riverShapeMaxScale(CV),
+                        stepM: RC.stepM, smoothPasses: RC.smoothPasses,
                         sub: RIVER_SUB,
+                        trunk: trunk ? { dirs: trunk.dirs, hw: trunk.hw, eta: trunk.eta } : null,
                     }, [heights.buffer]);
                     if (r.status === 'ok' && (!rec || rec.status !== 'ok' || r.startLevel < rec.startLevel)) rec = r;
                     else if (!rec) rec = r;
@@ -391,10 +474,7 @@ export class WaterService {
             if (!fromCache && rec.status === 'ok' && rec.startLevel - srcLevel > RC.startToleranceM && !this._lakeRegrown.has(src)) {
                 this._lakeRegrown.add(src);
                 const high = this._riverHighPoint(rec);
-                if (high && await this._resolveLakeIncluding(src, high)) {
-                    this._busy = false;
-                    return this.refineRiver(riverId);
-                }
+                if (high && await this._resolveLakeIncluding(src, high)) return this._refineRiver(riverId, depth + 1);
             }
             if (!fromCache && this.config.cache) { const { ms: _ms, ...stored } = rec; this._cache.put(riverKey, stored); }
             this.riverRecs.set(riverId, rec);
@@ -406,8 +486,6 @@ export class WaterService {
             this._failedRivers.add(riverId);
             Logger.warn(`[Water] river ${riverId} refine failed: ${err?.message || err}`);
             return null;
-        } finally {
-            this._busy = false;
         }
     }
 

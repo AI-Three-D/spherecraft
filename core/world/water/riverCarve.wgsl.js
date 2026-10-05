@@ -14,22 +14,21 @@
 // cross-section is waterRiverProfile (waterWgsl.js): channel, then the bank
 // rising bankH beyond the channel's edge; the river is cut into the ground
 // so the bank crest meets the natural terrain (waterWorkerCore.js levels).
-// With x = metres beyond the channel's edge:
-// - x < bankW: the terrain is the cross-section: cut where the ground is
-//   higher, raised (a levee) where it is lower (not in the lakes at the
-//   river's ends: pool < 0);
-// - bankW .. bankW + blendW: cut and levee fade out to the natural terrain;
-// - hollows beside the river below its level (worker: riverPools; lab
-//   2026-10-05: most of a river's length passes them, often metres deep)
-//   are filled to the floodplain: the bank zone's end level, rising
-//   floodGrade per metre, out to their reach, fading over poolFadeM;
+// The river's width, centre and bank height vary along it
+// (riverShapeNoise.js), so it does not read as a dug moat. With x = metres
+// beyond the channel's edge:
+// - up to the bank's crest (x = 2 bankSoftM) the terrain is the
+//   cross-section: cut where the ground is higher, raised where lower;
+// - past the crest, ground higher than the rising bank is cut back (the
+//   valley side) and ground lower than a falling natural levee (leveeGrade
+//   per metre) is raised to it; ground between them stays as it is;
+// - both fade out over blendW after the bank zone (bankW); no raising in
+//   the lakes at the river's ends (pool < 0);
 // - each segment shapes the terrain on its own; the shapes are blended by
 //   distance, the nearest dominating (riverCarve_d).
-// Smooth min + smooth max: where both weights are 1 (the bank zone) the
-// result is the cross-section exactly (smin + smax = a + b).
-// Dual numbers vec4(height, d/d unitDir) as in the height function; the
-// gradients of half-width, pool and skew along the river are left out
-// (they vary slowly).
+// Dual numbers vec4(height, d/d unitDir) as in the height function,
+// including the centre's wobble and the width's change along the river;
+// skew and bank height are taken as constant along it (they vary slowly).
 
 import { createWaterCommonWgsl, RIVER_MAX_SEGS_PER_CELL } from './waterWgsl.js';
 
@@ -65,58 +64,62 @@ fn riverCarveCellEntry(unitDir: vec3<f32>) -> u32 {
     return waterRiverList(unitDir);
 }
 
-// How far the segment acts: its cross-section (channel, banks, blend into
-// the terrain) and the hollows beside it that it fills.
+// How far the segment acts: channel, banks, blend into the terrain.
 fn riverCarveReach(p: WaterRiverPt) -> f32 {
-    let zone = p.hw + waterParams.carve.y + waterParams.carve.z;
-    return max(zone, select(0.0, p.pool + waterParams.flood.x, p.pool > 0.0)) + 1.0;
+    return p.hw + waterParams.carve.y + waterParams.carve.z + 1.0;
 }
 
 // The cross-section of segment s at unitDir as a dual (p: its nearest
-// point); flat = true: the floodplain the hollows are filled to (the
-// cross-section up to the bank zone's end, then rising floodGrade per metre).
-fn riverCarveProfile_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, flat: bool) -> vec4<f32> {
+// point, shaped: waterRiverPoint). levee = true: the fill target, which past
+// the bank's crest (2 x bankSoftM beyond the edge) falls away by leveeGrade
+// per metre, like a natural levee, instead of rising on.
+fn riverCarveProfile_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, levee: bool) -> vec4<f32> {
     let R = waterParams.planetRadius;
     let ab = s.p1 - s.p0;
-    // d(t)/d unitDir inside the segment; d(d)/d unitDir = R^2 v / d (v is
-    // perpendicular to the segment there, and t is fixed past its ends).
+    // d(t)/d unitDir inside the segment (t is fixed past its ends); arc
+    // length s = mix(s0, s1, t). Offset from the channel's centre:
+    // n = side x (distance from the line) - wobble(s).
     let tg = select(vec3<f32>(0.0), ab / max(dot(ab, ab), 1.0e-20), p.tRaw > 0.0 && p.tRaw < 1.0);
-    let dGrad = p.v * (R * R / max(p.d, 1.0e-3));
-    let dD = vec4<f32>(p.d, dGrad);
+    let sGrad = (s.s1 - s.s0) * tg;
+    let lineGrad = p.v * (R * R / max(p.dLine, 1.0e-3));
+    let nD = vec4<f32>(p.n, p.nSign * lineGrad - p.dOff * sGrad);
+    let dD = nD * select(-1.0, 1.0, p.n >= 0.0);
+    let hwD = vec4<f32>(p.hw, p.dHw * sGrad);
     let eta = vec4<f32>(p.eta, (s.eta1 - s.eta0) * tg);
     let bed = vec4<f32>(p.bed, (s.bed1 - s.bed0) * tg);
     let D = (eta - bed) * (1.0 / max(waterParams.carve.w, 0.05));
-    let edge = p.hw + waterParams.carve.y;
     if (p.d < p.hw) {
-        let u = vec4<f32>(p.n, select(-dGrad, dGrad, p.n >= 0.0)) * (1.0 / p.hw);
+        let u = dDiv(nD, hwD);
         let de = (u - dConst(p.skew)) * select(1.0 / (1.0 - p.skew), 1.0 / (1.0 + p.skew), u.x < p.skew);
         let q = dConst(1.0) - dMul(de, de);
         return bed + dMul(D, dConst(1.0) - dPow(vec4<f32>(max(q.x, 0.0), q.yzw), 1.5));
     }
     let soft = max(waterParams.bank.y, 0.1);
-    let beyond = flat && p.d > edge;
-    let xs = select(dD - dConst(p.hw), dConst(edge - p.hw), beyond);
+    let crest = 2.0 * soft;
+    let x = dD - hwD;
+    let past = levee && x.x > crest;
+    let xs = select(x, vec4<f32>(crest, 0.0, 0.0, 0.0), past);
     let ex = exp(-xs.x / soft);
     let E = vec4<f32>(ex, xs.yzw * (-ex / soft));
-    let bank = (dConst(1.0) - E) * waterParams.bank.x + xs * waterParams.bank.z;
+    let bank = (dConst(1.0) - E) * p.bankH + xs * waterParams.bank.z;
     var P = bed + D + dMul(bank, dSmoothstep(0.0, soft, xs));
-    if (beyond) { P += (dD - dConst(edge)) * waterParams.flood.y; }
+    if (past) { P -= (x - dConst(crest)) * waterParams.bank.w; }
     return P;
 }
 
 // The terrain (m, dual) as segment s alone shapes it: cut toward its
-// cross-section, fill toward its floodplain; both 1 in the bank zone
-// (there the result is the cross-section: smin + smax = a + b), the cut
-// fading over the blend, the fill over the blend (levee) or out to its
-// hollows' reach and over poolFadeM; no fill in lakes (pool < 0). It is the
-// natural terrain h0 at the segment's reach.
+// cross-section where the ground is higher (a valley side), fill toward
+// its levee where lower; both 1 in the bank zone, fading over the blend; up
+// to the bank's crest they agree, so there the result is the cross-section
+// (smin + smax = a + b); past it ground between the two stays as it is. No
+// fill in the lakes at the river's ends (pool < 0). It is the natural
+// terrain h0 at the segment's reach.
 fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0: vec4<f32>) -> vec4<f32> {
     let R = waterParams.planetRadius;
-    let dD = vec4<f32>(p.d, p.v * (R * R / max(p.d, 1.0e-3)));
+    let dD = vec4<f32>(p.d, p.v * (R * R / max(p.dLine, 1.0e-3)) * (p.nSign * select(-1.0, 1.0, p.n >= 0.0)));
     let edge = p.hw + waterParams.carve.y;
     let wz = dConst(1.0) - dSmoothstep(edge, edge + max(waterParams.carve.z, 1.0), dD);
-    let wp = select(dConst(0.0), dConst(1.0) - dSmoothstep(p.pool, p.pool + max(waterParams.flood.x, 1.0), dD), p.pool > 0.0);
-    let wf = select(select(wp, wz, wz.x >= wp.x), dConst(0.0), p.pool < 0.0);
+    let wf = select(wz, dConst(0.0), p.pool < 0.0);
     let kk = ${RIVER_CARVE_SMOOTH_M.toFixed(2)};
     let cut = dSmoothMin(h0, riverCarveProfile_d(s, p, unitDir, false), kk) - h0;
     var fill = dConst(0.0);

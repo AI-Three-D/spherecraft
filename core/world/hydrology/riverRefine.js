@@ -96,12 +96,15 @@ export function traceRiverPatch({ heights, nx, ny, corridor, seeds, source }) {
 
 /**
  * Smooths a traced cell path and resamples it by arc length. The water
- * level along it never rises downstream (running minimum).
+ * level along it never rises downstream (running minimum). passes: binomial
+ * [1 2 1] smoothing passes after resampling (end points kept), so the line
+ * bends in curves rather than corners (owner 2026-10-05: straight pieces
+ * read as a dug moat); arc lengths are measured on the result.
  * @param {Float64Array} xs, ys  plane coords of the path cells
  * @param {Float64Array} fill    spill level per path cell
  * @returns {{ x: number[], y: number[], fill: number[], s: number[] }}
  */
-export function smoothRiverPath(xs, ys, fill, { window = 4, stepM = 24 } = {}) {
+export function smoothRiverPath(xs, ys, fill, { window = 4, stepM = 24, passes = 0 } = {}) {
     if (xs.length < 2) return { x: [xs[0], xs[0]], y: [ys[0], ys[0]], fill: [fill[0], fill[0]], s: [0, 0] };
     const n = xs.length;
     const sx = new Float64Array(n), sy = new Float64Array(n);
@@ -129,6 +132,15 @@ export function smoothRiverPath(xs, ys, fill, { window = 4, stepM = 24 } = {}) {
         out.fill.push(run);
         out.s.push(s);
     }
+    const m = out.x.length;
+    for (let p = 0; p < passes && m > 2; p++) {
+        const x = out.x.slice(), y = out.y.slice();
+        for (let k = 1; k + 1 < m; k++) {
+            out.x[k] = 0.25 * x[k - 1] + 0.5 * x[k] + 0.25 * x[k + 1];
+            out.y[k] = 0.25 * y[k - 1] + 0.5 * y[k] + 0.25 * y[k + 1];
+        }
+    }
+    if (passes > 0) for (let k = 1; k < m; k++) out.s[k] = out.s[k - 1] + Math.hypot(out.x[k] - out.x[k - 1], out.y[k] - out.y[k - 1]);
     return out;
 }
 
@@ -174,6 +186,8 @@ export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     bankH: 1.5,
     // ...reached over the first rampM from the source (no step at the outlet).
     rampM: 120,
+    // Hollows beside the river within this (m) are found (riverPools); 0: not searched.
+    poolMaxM: 0,
 });
 
 /**

@@ -210,7 +210,7 @@ export const WATER_GRAPH_DEFAULTS = Object.freeze({
     lakeExtentDepthM: 0.5,
     // Outflow Q (cells x precipitation, area-weighted) needed for a lake to
     // have a river.
-    minRiverQ: 400,
+    minRiverQ: 1200,   // owner 2026-10-05: rivers sparingly (344 -> 164 rivers on the default planet)
     // Fill epsilon per flooded step (metres) for the drainage tree: flats drain.
     epsilonM: 1e-3,
 });

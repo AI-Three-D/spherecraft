@@ -136,6 +136,31 @@ describe('WaterGpuData', () => {
         expect(gpu._segs[o + 22]).toBe(0);
     });
 
+    it('full buffer: rivers nearest the camera (by their nearest point) win; one leaving marks its cells changed', () => {
+        const dev = stubDevice();
+        const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2, maxRiverSegs: 2 });
+        const svc = fakeService();
+        svc.rivers.push({ id: 1, fromLake: 1, cells: Int32Array.from([]) });
+        gpu.update(svc, cam, 0);
+        // River 0: source far (x = 1), but its second point right under the camera (z axis).
+        // River 1: both points at 45 degrees. Each needs 2 list entries; the buffer holds 2.
+        const pts = (a, b) => { const P = new Float32Array(24); P.set([...a, 100, 15, 1, 0.5, 3, 101, 0, 0, 0], 0); P.set([...b, 99, 15, 1, 0.5, 3, 100, 0, 0, 0], 12); return P; };
+        const r = Math.SQRT1_2;
+        svc.riverRecs.set(0, { points: pts([1, 0, 0], [0, 0, 1]), stride: 12, segCellStart: Int32Array.from([0, 2]), segCells: Int32Array.from([16 * 7, 16 * 8]) });
+        svc.riverRecs.set(1, { points: pts([r, 0, r], [r, 0.01, r]), stride: 12, segCellStart: Int32Array.from([0, 2]), segCells: Int32Array.from([16 * 20, 16 * 21]) });
+        svc.version++;
+        gpu.update(svc, cam, 0);
+        expect(gpu.isRiverDrawn(0)).toBe(true);
+        expect(gpu.isRiverDrawn(1)).toBe(false);
+        gpu.takeChangedCells();
+        // The camera moves over river 1 (> 2 km): layout again, river 0 leaves.
+        gpu.update(svc, { x: 200000 * r, y: 0, z: 200000 * r }, 0);
+        expect(gpu.isRiverDrawn(1)).toBe(true);
+        expect(gpu.isRiverDrawn(0)).toBe(false);
+        const changed = gpu.takeChangedCells();
+        expect([...changed].sort((a, b) => a - b)).toEqual([7, 8, 20, 21]);
+    });
+
     it('tilesTouchingCells picks the tiles over (or next to) changed cells', () => {
         const N = 8, cell = 2 * N * N + 5 * N + 3;            // face 2, i 3, j 5
         const touches = tilesTouchingCells(new Set([cell]), N);

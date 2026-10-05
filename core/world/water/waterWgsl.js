@@ -25,6 +25,8 @@
 // segments: channel, banks above the level, hollows beside it filled).
 // Shorelines are exact per pixel: where the terrain height crosses the level.
 
+import { createRiverNoiseWgsl } from './riverShapeNoise.js';
+
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 
 // WaterLake: 4 x vec4 (64 bytes). WaterParams: 10 x vec4. WaterRiverSeg: 6 x vec4 (96 bytes).
@@ -43,7 +45,7 @@ export const RIVER_SUB = 4;
  * @param {{index: number, params: number, rivers: number}} b  binding numbers
  */
 export function createWaterCommonWgsl(group, b) {
-    return /* wgsl */`
+    return createRiverNoiseWgsl() + /* wgsl */`
 struct WaterParams {
     gridN: u32, enabled: u32, debugMode: u32, riverCount: u32,
     planetRadius: f32, time: f32, rippleFade: f32, shoreSoftM: f32,
@@ -54,19 +56,21 @@ struct WaterParams {
     simRiver: vec4<f32>,       // river id, arc lengths s0, s1 of the window (m), half-width (m)
     simFade: vec4<f32>,        // fade at the window's ends (m), at its sides (m), unused, fade 0..1
     // Rivers between the simulation and far away (waterRiverColor): animated
-    // out to animNear, fading to plain colour by animFar (m); foam gain; unused.
+    // out to animNear, fading to plain colour by animFar (m); foam gain;
+    // w: lakes whose shore is not solved yet are not drawn closer than this (m)
+    // (their grid-cell outline and coarse level look wrong up close).
     riverLook: vec4<f32>,
     // River cross-section (waterRiverProfile, riverCarve.wgsl.js), x = metres
     // beyond the channel's edge: carve = (on 0/1, bankW: the terrain is the
     // cross-section for x < bankW, blendW: then blends into the natural
     // terrain, waterFrac: water fills this part of the bank-full depth);
     // bank = (bankH: rise beyond the edge, bankSoftM: over ~2x this,
-    // bankGrade: further rise per metre, unused); flood = (poolFadeM: the
-    // fill of hollows along the river fades out over this beyond them,
-    // floodGrade: floodplain rise per metre beyond the bank zone, unused, unused).
+    // bankGrade: further rise per metre, leveeGrade: where the ground is
+    // lower the bank falls away by this per metre past its crest);
+    // shape = (widthVar, wobble, bankVar: riverShapeNoise.js, unused).
     carve: vec4<f32>,
     bank: vec4<f32>,
-    flood: vec4<f32>,
+    shape: vec4<f32>,
 };
 // A piece of a traced river between two points (unit directions); values
 // interpolate along it: water level and thalweg (m above the sphere),
@@ -122,16 +126,23 @@ fn waterDirToCell(d: vec3<f32>, n: u32) -> u32 {
 }
 
 // The nearest point of a river segment to a unit direction, and the
-// segment's values there.
+// segment's values there, with the river's natural irregularity along its
+// length (riverShapeNoise.js): the half-width varies, the channel's centre
+// wanders off the traced line, the banks rise more or less.
 struct WaterRiverPt {
-    d: f32,          // distance from the centre line (m)
-    n: f32,          // signed offset: d, + left of the flow
+    d: f32,          // distance from the channel's centre (m)
+    n: f32,          // signed offset from it, + left of the flow
+    nSign: f32,      // side of the traced line (+1 left, -1 right)
+    dLine: f32,      // distance from the traced line (m)
     t: f32,          // position along the segment (0..1)
     tRaw: f32,       // unclamped
-    v: vec3<f32>,    // the direction minus the nearest point
+    v: vec3<f32>,    // the direction minus the nearest point of the line
     eta: f32, bed: f32, hw: f32, pool: f32, skew: f32, speed: f32, foam: f32,
     s: f32,          // arc length along the river (m)
     river: f32,      // the river's id
+    dOff: f32,       // d(centre offset)/ds
+    dHw: f32,        // d(half-width)/ds
+    bankH: f32,      // bank rise beyond the edge here (m)
 };
 
 fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
@@ -140,18 +151,28 @@ fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
     p.tRaw = dot(dir - s.p0, ab) / max(dot(ab, ab), 1.0e-20);
     p.t = clamp(p.tRaw, 0.0, 1.0);
     p.v = dir - (s.p0 + ab * p.t);
-    p.d = length(p.v) * waterParams.planetRadius;
+    p.dLine = length(p.v) * waterParams.planetRadius;
     let left = cross(dir, ab);
-    p.n = select(-p.d, p.d, dot(p.v, left) >= 0.0);
+    p.nSign = select(-1.0, 1.0, dot(p.v, left) >= 0.0);
     p.eta = mix(s.eta0, s.eta1, p.t);
     p.bed = mix(s.bed0, s.bed1, p.t);
-    p.hw = max(mix(s.hw0, s.hw1, p.t), 0.5);
     p.pool = mix(s.pool0, s.pool1, p.t);
     p.skew = mix(s.skew0, s.skew1, p.t);
     p.speed = mix(s.speed0, s.speed1, p.t);
     p.foam = mix(s.foam0, s.foam1, p.t);
     p.s = mix(s.s0, s.s1, p.t);
     p.river = s.river;
+    let hw0 = max(mix(s.hw0, s.hw1, p.t), 0.5);
+    let wn = waterRiverNoise(p.s, s.river, 0u);
+    let on = waterRiverNoise(p.s, s.river, 1u);
+    let bn = waterRiverNoise(p.s, s.river, 2u);
+    p.hw = max(hw0 * (1.0 + waterParams.shape.x * wn.x), 0.5);
+    p.dHw = hw0 * waterParams.shape.x * wn.y;
+    let off = waterParams.shape.y * hw0 * on.x;
+    p.dOff = waterParams.shape.y * hw0 * on.y;
+    p.n = p.nSign * p.dLine - off;
+    p.d = abs(p.n);
+    p.bankH = waterParams.bank.x * (1.0 + waterParams.shape.z * bn.x);
     return p;
 }
 
@@ -169,7 +190,7 @@ fn waterRiverProfile(p: WaterRiverPt) -> f32 {
     }
     let x = p.d - p.hw;
     let soft = max(waterParams.bank.y, 0.1);
-    return p.bed + D + (waterParams.bank.x * (1.0 - exp(-x / soft)) + waterParams.bank.z * x) * smoothstep(0.0, soft, x);
+    return p.bed + D + (p.bankH * (1.0 - exp(-x / soft)) + waterParams.bank.z * x) * smoothstep(0.0, soft, x);
 }
 
 // River segments listed at a unit direction: first << 8 | count (0: none).
@@ -205,11 +226,12 @@ ${createWaterCommonWgsl(group, B)}
 const WATER_NO_LAKE: f32 = -1.0e30;
 
 // Level of lake slot s (1-based, 0 = none) if it covers dir at heightM.
-fn waterLakeLevelIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler) -> f32 {
+// levelOnly: lakes without a solved shore (no mask layer) count too.
+fn waterLakeLevelIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool) -> f32 {
     if (slot == 0u) { return WATER_NO_LAKE; }
     let lake = waterLakes[slot - 1u];
     if (heightM >= lake.level) { return WATER_NO_LAKE; }
-    if (lake.maskLayer < 0) { return lake.level; }
+    if (lake.maskLayer < 0) { return select(WATER_NO_LAKE, lake.level, levelOnly); }
     let k = dot(dir, lake.c);
     if (k <= 0.0) { return WATER_NO_LAKE; }
     let px = dot(dir, lake.e1) / k * waterParams.planetRadius;
@@ -223,10 +245,13 @@ fn waterLakeLevelIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler) -> f
 // Water level over a point (unit direction, height above the sphere), or
 // WATER_NO_LAKE.
 fn waterLakeLevelAt(dir: vec3<f32>, heightM: f32, samp: sampler) -> f32 {
+    return waterLakeLevelView(dir, heightM, samp, true);
+}
+fn waterLakeLevelView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool) -> f32 {
     let e = waterIndex[waterDirToCell(dir, waterParams.gridN)];
-    let a = waterLakeLevelIn(e & 0x7fffu, dir, heightM, samp);
+    let a = waterLakeLevelIn(e & 0x7fffu, dir, heightM, samp, levelOnly);
     if (a > WATER_NO_LAKE) { return a; }
-    return waterLakeLevelIn((e >> 15u) & 0x7fffu, dir, heightM, samp);
+    return waterLakeLevelIn((e >> 15u) & 0x7fffu, dir, heightM, samp, levelOnly);
 }
 
 struct WaterRiverHit {
@@ -257,13 +282,17 @@ fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     let count = min(e & 0xffu, ${RIVER_MAX_SEGS_PER_CELL}u);
     if (count == 0u) { return hit; }
     let first = e >> 8u;
-    var best: WaterRiverPt;
-    best.d = 1.0e30;
+    // Nearest by the traced line (cheap); its shape only for that one.
     var bestK = first;
+    var bestD = 1.0e30;
     for (var k = 0u; k < count; k++) {
-        let p = waterRiverPoint(waterRivers[first + k], dir);
-        if (p.d < best.d) { best = p; bestK = first + k; }
+        let sg = waterRivers[first + k];
+        let ab = sg.p1 - sg.p0;
+        let t = clamp(dot(dir - sg.p0, ab) / max(dot(ab, ab), 1.0e-20), 0.0, 1.0);
+        let dd = length(dir - (sg.p0 + ab * t));
+        if (dd < bestD) { bestD = dd; bestK = first + k; }
     }
+    let best = waterRiverPoint(waterRivers[bestK], dir);
     let zone = best.hw + waterParams.carve.y;
     if (best.d > zone) { return hit; }
     hit.near = true;
@@ -276,10 +305,13 @@ fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     hit.speed = best.speed;
     hit.foam = best.foam;
     // Waterline of the channel profile: 1 - (1 - u^2)^1.5 = waterFrac.
+    // Only in the channel: carved banks rise above the level beyond it, and
+    // terrain not carved yet must not flood out to the zone's straight edge
+    // (owner 2026-10-05).
     let wf = clamp(waterParams.carve.w, 0.05, 0.99);
     let uw = sqrt(1.0 - pow(1.0 - wf, 2.0 / 3.0));
     let paint = (best.eta - best.bed) * max(0.0, 1.0 - (best.d / (uw * best.hw)) * (best.d / (uw * best.hw)));
-    let depthM = max(best.eta - heightM, paint);
+    let depthM = select(0.0, max(best.eta - heightM, paint), best.d < best.hw);
     hit.found = depthM > 0.0;
     hit.depthM = depthM;
     let s = waterRivers[bestK];
@@ -452,7 +484,7 @@ fn applyWater(
     // Where the simulation strip draws the water, the static water gives way.
     let cover = waterSimCover(river);
 
-    let level = waterLakeLevelAt(up, heightM, samp);
+    let level = waterLakeLevelView(up, heightM, samp, length(cameraPos - worldPos) > waterParams.riverLook.w);
     if (level > WATER_NO_LAKE) {
         let depthM = level - heightM;
         if (dbg == 1u || dbg == 2u) {

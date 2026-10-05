@@ -31,7 +31,7 @@
   },
   "erosion": {
     "enabled":       true,
-    "globalRate":    0.5,
+    "globalRate":    0.3, 
     "hydraulicRate": 0.6,
     "thermalRate":   0.3
   },
