@@ -1,10 +1,13 @@
-// core/world/water/LakeGpuData.js
+// core/world/water/WaterGpuData.js
 //
-// GPU copy of the lakes for shaders (layout: lakeWaterWgsl.js), kept in sync
-// with a WaterService:
-// - index (6 x N x N u32): two lake slots per grid cell + a river bit. A
-//   lake first covers its graph cells; once refined, the cells under its
-//   16 m mask. Updated per lake, uploading only the rows that changed;
+// GPU copy of the lakes and rivers for shaders (layout: waterWgsl.js), kept
+// in sync with a WaterService:
+// - index, two halves of 6 x N x N u32: (1) two lake slots per grid cell +
+//   the graph-river debug bit; a lake first covers its graph cells, once
+//   refined the cells under its 16 m mask; (2) per cell, the traced river
+//   segments listed in it (first << 8 | count). Uploads only changed rows;
+// - river segments: rebuilt whenever traced rivers change (48 bytes each,
+//   a segment repeated in every cell its water can reach);
 // - lake table: level, mask layer, tangent-plane frame (whole table per
 //   change, 64 bytes a lake);
 // - mask atlas: r8 layers of maskLayerSize^2, one per refined lake (max-
@@ -12,25 +15,26 @@
 //   from the camera gives its layer up and falls back to level-only;
 // - params uniform: switches and look, written every frame (time).
 
-import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS } from './lakeWaterWgsl.js';
+import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS } from './waterWgsl.js';
 
-export const LAKE_LOOK_DEFAULTS = Object.freeze({
+export const WATER_LOOK_DEFAULTS = Object.freeze({
     deepColor: [0.015, 0.05, 0.06],   // albedo of deep water (lit by sky + sun)
     reflection: 1.4,                  // sky reflection strength (x sky radiance)
     absorption: [0.40, 0.11, 0.08],   // per metre of water path (r, g, b)
     rippleFadeM: 800,                 // ripples fade out by this camera distance
     shoreSoftM: 0.15,                 // waterline fade-in depth
+    riverSpreadSlope: 0.15,           // river level drop per metre beyond its channel
 });
 
 const SLOT_MASK = 0x7fff;
 const RIVER_BIT = 1 << 30;
 
-export class LakeGpuData {
+export class WaterGpuData {
     /**
      * @param {GPUDevice} device
      * @param {object} o  gridN, planetRadius, maxLakes, maskLayerSize, maxMaskLayers
      */
-    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96 } = {}) {
+    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96, maxRiverSegs = 131072 } = {}) {
         this.device = device;
         this.N = gridN;
         this.R = planetRadius;
@@ -39,12 +43,15 @@ export class LakeGpuData {
         this.maxLayers = maxMaskLayers;
         this.enabled = true;
         this.debugMode = 0;
-        this.look = { ...LAKE_LOOK_DEFAULTS };
+        this.look = { ...WATER_LOOK_DEFAULTS };
 
         const cells = 6 * gridN * gridN;
         const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
         // COPY_SRC: readable for checks (terrain-lab/lake-gpu-run.mjs).
-        this.indexBuffer = device.createBuffer({ label: 'Lake-index', size: cells * 4, usage: S | GPUBufferUsage.COPY_SRC });
+        this.cells = cells;
+        this.indexBuffer = device.createBuffer({ label: 'Water-index', size: 2 * cells * 4, usage: S | GPUBufferUsage.COPY_SRC });
+        this.maxRiverSegs = maxRiverSegs;
+        this.riversBuffer = device.createBuffer({ label: 'Water-rivers', size: maxRiverSegs * RIVER_SEG_FLOATS * 4, usage: S | GPUBufferUsage.COPY_SRC });
         this.lakesBuffer = device.createBuffer({ label: 'Lake-table', size: maxLakes * LAKE_RECORD_FLOATS * 4, usage: S });
         this.paramsBuffer = device.createBuffer({ label: 'Lake-params', size: LAKE_PARAMS_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         this.masksTexture = device.createTexture({
@@ -53,7 +60,11 @@ export class LakeGpuData {
         });
         this.masksView = this.masksTexture.createView({ dimension: '2d-array' });
 
-        this.index = new Uint32Array(cells);
+        this.index = new Uint32Array(2 * cells);
+        this._segs = new Float32Array(maxRiverSegs * RIVER_SEG_FLOATS);
+        this._appliedRivers = new Map(); // riverId -> traced record in the index
+        this._riverCells = new Set();    // cells that list river segments
+        this.riverSegCount = 0;
         this._table = new Float32Array(maxLakes * LAKE_RECORD_FLOATS);
         this._tableI32 = new Int32Array(this._table.buffer);
         this._params = new ArrayBuffer(LAKE_PARAMS_FLOATS * 4);
@@ -66,9 +77,9 @@ export class LakeGpuData {
         this.lakeCount = 0;
     }
 
-    /** Resources for a bind group (see lakeWaterWgsl.js LAKE_WATER_BINDINGS). */
+    /** Resources for a bind group (see waterWgsl.js WATER_BINDINGS). */
     get resources() {
-        return { index: this.indexBuffer, lakes: this.lakesBuffer, masks: this.masksView, params: this.paramsBuffer };
+        return { index: this.indexBuffer, lakes: this.lakesBuffer, masks: this.masksView, params: this.paramsBuffer, rivers: this.riversBuffer };
     }
 
     _setSlot(cell, slot) {
@@ -105,7 +116,7 @@ export class LakeGpuData {
 
     _buildInitialIndex(svc) {
         this.index.fill(0);
-        for (let c = 0; c < this.index.length; c++) if (svc.riverOf[c] >= 0) this.index[c] |= RIVER_BIT;
+        for (let c = 0; c < this.cells; c++) if (svc.riverOf[c] >= 0) this.index[c] |= RIVER_BIT;
         for (const lake of svc.lakes) {
             const slot = svc.rep(lake.id) + 1;
             for (const c of this._lakeCellsOf(svc, lake.id)) this._setSlot(c, slot);
@@ -213,20 +224,81 @@ export class LakeGpuData {
                     if (layer >= 0) this._uploadMask(rec, layer);
                     this._applied.set(id, rec);
                 }
+                let riversChanged = false;
+                for (const [rid, rec] of svc.riverRecs ?? []) {
+                    if (this._appliedRivers.get(rid) === rec) continue;
+                    // The traced river replaces its graph cells in the debug view.
+                    for (const c of svc.rivers[rid].cells) {
+                        if (svc.riverOf[c] === rid && (this.index[c] & RIVER_BIT)) { this.index[c] &= ~RIVER_BIT; this._dirtyRows.add(Math.floor(c / this.N)); }
+                    }
+                    this._appliedRivers.set(rid, rec);
+                    riversChanged = true;
+                }
+                if (riversChanged) this._rebuildRivers(camDir);
                 this._flushRows();
                 this._writeTable(svc);
                 this._appliedVersion = svc.version;
             }
         }
         const p = this._params, u = new Uint32Array(p), f = new Float32Array(p), L = this.look;
-        u[0] = this.N; u[1] = this.enabled && this._ready ? 1 : 0; u[2] = this.debugMode >>> 0; u[3] = this.lakeCount;
+        u[0] = this.N; u[1] = this.enabled && this._ready ? 1 : 0; u[2] = this.debugMode >>> 0; u[3] = this._appliedRivers.size;
         f[4] = this.R; f[5] = time; f[6] = L.rippleFadeM; f[7] = L.shoreSoftM;
         f.set([L.deepColor[0], L.deepColor[1], L.deepColor[2], L.reflection], 8);
-        f.set([L.absorption[0], L.absorption[1], L.absorption[2], 0], 12);
+        f.set([L.absorption[0], L.absorption[1], L.absorption[2], L.riverSpreadSlope], 12);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
     }
 
+    /**
+     * Lays out every traced river's segments per grid cell (index half 2)
+     * and uploads them. Nearest rivers first when the buffer is full.
+     */
+    _rebuildRivers(camDir) {
+        const F = RIVER_SEG_FLOATS, lists = new Map();
+        const recs = [...this._appliedRivers.values()].map(rec => {
+            const P = rec.points;
+            const cosA = camDir[0] * P[0] + camDir[1] * P[1] + camDir[2] * P[2];
+            return { rec, far: -cosA };
+        }).sort((a, b) => a.far - b.far);
+        let total = 0, dropped = 0;
+        for (const { rec } of recs) {
+            const n = rec.points.length / rec.stride;
+            const need = rec.segCells.length;
+            if (total + need > this.maxRiverSegs) { dropped++; continue; }
+            total += need;
+            for (let k = 0; k + 1 < n; k++) {
+                for (let m = rec.segCellStart[k]; m < rec.segCellStart[k + 1]; m++) {
+                    const c = rec.segCells[m];
+                    let list = lists.get(c);
+                    if (!list) lists.set(c, (list = []));
+                    if (list.length < RIVER_MAX_SEGS_PER_CELL) list.push(rec, k);
+                }
+            }
+        }
+        const cells = [...lists.keys()].sort((a, b) => a - b);
+        let next = 0;
+        for (const c of cells) {
+            const list = lists.get(c), first = next;
+            for (let m = 0; m < list.length; m += 2) {
+                const rec = list[m], k = list[m + 1], P = rec.points, st = rec.stride, a = k * st, b = (k + 1) * st, o = next * F;
+                this._segs.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
+                    P[a + 4], P[b + 4], 0.5 * (P[a + 5] + P[b + 5]), 0.5 * (P[a + 6] + P[b + 6])], o);
+                next++;
+            }
+            const idx = this.cells + c, e = (first << 8) | (list.length / 2);
+            if (this.index[idx] !== e) { this.index[idx] = e; this._dirtyRows.add(Math.floor(idx / this.N)); }
+        }
+        for (const c of this._riverCells) {
+            if (lists.has(c)) continue;
+            const idx = this.cells + c;
+            this.index[idx] = 0; this._dirtyRows.add(Math.floor(idx / this.N));
+        }
+        this._riverCells = new Set(cells);
+        if (next) this.device.queue.writeBuffer(this.riversBuffer, 0, this._segs, 0, next * F);
+        this.riverSegCount = next;
+        if (dropped) console.warn(`[Water] river segment buffer full: ${dropped} far rivers not drawn`);
+    }
+
     destroy() {
-        this.indexBuffer.destroy(); this.lakesBuffer.destroy(); this.paramsBuffer.destroy(); this.masksTexture.destroy();
+        this.indexBuffer.destroy(); this.lakesBuffer.destroy(); this.paramsBuffer.destroy(); this.masksTexture.destroy(); this.riversBuffer.destroy();
     }
 }

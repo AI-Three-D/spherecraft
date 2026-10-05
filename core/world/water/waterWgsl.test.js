@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { parseWgsl, validate } from 'naga-wasm';
-import { createLakeWaterWgsl, LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS } from './lakeWaterWgsl.js';
+import { createWaterWgsl, LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_SEG_FLOATS } from './waterWgsl.js';
 import { cellDir, dirToCell } from '../hydrology/waterGraph.js';
 
-describe('lake water WGSL', () => {
+describe('water WGSL', () => {
     it('validates inside a fragment shader', () => {
-        const src = createLakeWaterWgsl({ group: 3 }) + `
+        const src = createWaterWgsl({ group: 3 }) + `
 @group(3) @binding(8) var linearSampler: sampler;
 @fragment
 fn main(@location(0) wp: vec3<f32>) -> @location(0) vec4<f32> {
-    let c = applyLakeWater(vec3<f32>(0.3, 0.4, 0.2), wp, vec3<f32>(0.0, 140000.0, 0.0), vec3<f32>(0.0),
+    let c = applyWater(vec3<f32>(0.3, 0.4, 0.2), wp, vec3<f32>(0.0, 140000.0, 0.0), vec3<f32>(0.0),
         vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0), vec3<f32>(0.3, 0.4, 0.6), linearSampler);
     return vec4<f32>(c, 1.0);
 }`;
@@ -17,7 +17,7 @@ fn main(@location(0) wp: vec3<f32>) -> @location(0) vec4<f32> {
     });
 
     it('struct sizes match the JS packing', () => {
-        const src = createLakeWaterWgsl();
+        const src = createWaterWgsl();
         const count = (name) => {
             const body = src.match(new RegExp(`struct ${name} \\{([^}]*)\\}`))[1];
             return body.split(/[,;]/).map(s => s.trim()).filter(s => s.includes(':'))
@@ -25,6 +25,7 @@ fn main(@location(0) wp: vec3<f32>) -> @location(0) vec4<f32> {
         };
         expect(count('WaterLake')).toBe(LAKE_RECORD_FLOATS);
         expect(count('WaterParams')).toBe(LAKE_PARAMS_FLOATS);
+        expect(count('WaterRiverSeg')).toBe(RIVER_SEG_FLOATS);
     });
 
     it('waterDirToCell matches waterGraph.dirToCell (CPU mirror of the WGSL)', () => {

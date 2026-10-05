@@ -52,7 +52,7 @@ import { createTerrainFeatureErosionFilter } from '../templates/terrain-shaders/
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
-import { LakeGpuData } from '../core/world/water/LakeGpuData.js';
+import { WaterGpuData } from '../core/world/water/WaterGpuData.js';
 import { ErosionSeedVerifier } from '../core/world/hydrology/ErosionSeedVerifier.js';
 import { computeSurfaceTangentFrame } from '../core/planet/surfaceFrame.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
@@ -1423,35 +1423,36 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 yieldBetween: () => new Promise(resolve => requestAnimationFrame(() => resolve())),
             });
             this.waterService.start();
-            // Lakes drawn in the terrain shading (core/world/water/lakeWaterWgsl.js).
-            this.lakeGpuData = new LakeGpuData(device, { gridN: this.waterService.config.gridN, planetRadius: this.planetConfig.radius });
-            this.renderer?.setWaterLakeData?.(this.lakeGpuData);
+            // Lakes and rivers drawn in the terrain shading (core/world/water/waterWgsl.js).
+            this.waterGpuData = new WaterGpuData(device, { gridN: this.waterService.config.gridN, planetRadius: this.planetConfig.radius });
+            this.renderer?.setWaterData?.(this.waterGpuData);
             return;
         }
         this.waterService.update(this.camera?.position);
         const cam = this.camera?.position, origin = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
-        if (cam && this.lakeGpuData) {
-            this.lakeGpuData.update(this.waterService, { x: cam.x - origin.x, y: cam.y - origin.y, z: cam.z - origin.z }, performance.now() / 1000);
+        if (cam && this.waterGpuData) {
+            this.waterGpuData.update(this.waterService, { x: cam.x - origin.x, y: cam.y - origin.y, z: cam.z - origin.z }, performance.now() / 1000);
         }
     }
 
     /**
-     * qtDiag.water.tint(mode): 0 water, 1 lakes coloured by id, 2 also the
-     * graph's lake cells (blue) and river cells (red), 3 water depth.
+     * qtDiag.water.tint(mode): 0 water; 1 lakes coloured by id, rivers red;
+     * 2 as 1 plus grid cells: lake cells blue, cells with traced river
+     * segments red, graph river cells not traced yet orange; 3 water depth.
      */
     setWaterDebugMode(mode = 0) {
-        if (!this.lakeGpuData) return null;
-        this.lakeGpuData.debugMode = mode | 0;
-        return this.lakeGpuData.debugMode;
+        if (!this.waterGpuData) return null;
+        this.waterGpuData.debugMode = mode | 0;
+        return this.waterGpuData.debugMode;
     }
 
     /** qtDiag.water.look({ deepColor, reflection, absorption, rippleFadeM, shoreSoftM, enabled }) */
     setWaterLook(look = {}) {
-        if (!this.lakeGpuData) return null;
+        if (!this.waterGpuData) return null;
         const { enabled, ...rest } = look;
-        if (enabled !== undefined) this.lakeGpuData.enabled = !!enabled;
-        Object.assign(this.lakeGpuData.look, rest);
-        return { enabled: this.lakeGpuData.enabled, ...this.lakeGpuData.look };
+        if (enabled !== undefined) this.waterGpuData.enabled = !!enabled;
+        Object.assign(this.waterGpuData.look, rest);
+        return { enabled: this.waterGpuData.enabled, ...this.waterGpuData.look };
     }
 
     /** qtDiag.water.stats() */

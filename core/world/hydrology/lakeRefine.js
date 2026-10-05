@@ -71,6 +71,25 @@ export function lakePatchFrame(lake, N, { R, spacing = 16, marginM = 1500, margi
     return { ...frame, x0: xMin, y0: yMin, spacing, nx, ny };
 }
 
+/**
+ * Patch frame around a polyline of unit directions (river corridors):
+ * centred on its mean direction, covering its points plus marginM.
+ */
+export function polylinePatchFrame(dirs, { R, spacing = 16, marginM = 1200 }) {
+    let sx = 0, sy = 0, sz = 0;
+    for (const d of dirs) { sx += d[0]; sy += d[1]; sz += d[2]; }
+    const c = normalize([sx, sy, sz]);
+    const frame = { c, ...tangentBasis(c) };
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+    for (const d of dirs) {
+        const [x, y] = dirToPlane(d, frame, R);
+        xMin = Math.min(xMin, x); xMax = Math.max(xMax, x);
+        yMin = Math.min(yMin, y); yMax = Math.max(yMax, y);
+    }
+    xMin -= marginM; xMax += marginM; yMin -= marginM; yMax += marginM;
+    return { ...frame, x0: xMin, y0: yMin, spacing, nx: Math.ceil((xMax - xMin) / spacing), ny: Math.ceil((yMax - yMin) / spacing) };
+}
+
 /** Grows a frame by `factor` around its centre (same spacing). */
 export function growPatchFrame(f, factor) {
     const cx = f.x0 + f.nx * f.spacing / 2, cy = f.y0 + f.ny * f.spacing / 2;
@@ -141,7 +160,7 @@ export function lakeSeed(heights, frame, lake, lakeOf, N, R) {
  * @param {number} p.nx
  * @param {number} p.ny
  * @param {number} p.seed           a cell inside the lake's basin (its lowest, ideally)
- * @returns {{ level, region: Uint8Array, cells, maxDepth, outlet, exit, touchesBorder } | null}
+ * @returns {{ level, region: Uint8Array, cells, maxDepth, outlet, exit, outflow: Int32Array, touchesBorder } | null}
  *   null when the seed is not in a basin (no water at fine scale).
  *   touchesBorder: the lake reaches the patch border or spills over it, so
  *   the level is not trustworthy; solve again on a larger patch.
@@ -200,8 +219,11 @@ export function solveLakePatch({ heights, nx, ny, seed }) {
     // A real spill drops below the level before the drainage leaves the
     // patch. If it never does, a border cell set the level (the sill may sit
     // on a flat ring at the level, not on the border itself).
+    // Outflow: the drainage from the sill down to the patch border, where
+    // the lake's water really goes (rivers follow it out of the lake).
+    const outflow = [];
     let root = exit;
-    while (root !== -1 && parent[root] !== -1) root = parent[root];
+    while (root !== -1) { outflow.push(root); if (parent[root] === -1) break; root = parent[root]; }
     if (root === -1 || fill[root] >= level) touchesBorder = true;
-    return { level, region, cells, maxDepth: level - minH, outlet, exit, touchesBorder };
+    return { level, region, cells, maxDepth: level - minH, outlet, exit, outflow: Int32Array.from(outflow), touchesBorder };
 }

@@ -18,15 +18,23 @@ import { Logger } from '../../../shared/Logger.js';
 import { createHydrologySampler } from './HydrologyGrid.js';
 import { WaterCache, hashParts } from './waterCache.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
-import { growPatchFrame, limitPatchCells } from './lakeRefine.js';
+import { dirToPlane, growPatchFrame, limitPatchCells } from './lakeRefine.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v2';
+export const WATER_ALGO_VERSION = 'water-v4';
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,
     params: {},            // WATER_GRAPH_DEFAULTS overrides
     cache: true,
+    rivers: {
+        enabled: true,
+        spacingM: 16,
+        corridorM: 1000,   // the trace stays within this of the graph's route
+        retryCorridorScale: 2.5,  // wider corridor when the start sits above the source lake
+        startToleranceM: 1.0,
+        shape: {},         // RIVER_SHAPE_DEFAULTS overrides (riverRefine.js)
+    },
     refine: {
         enabled: true,
         spacingM: 16,      // lab: 16 m and 4 m solves agree within 0.2 m
@@ -38,7 +46,11 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
 });
 
 function mergeConfig(cfg = {}) {
-    return { ...WATER_SERVICE_DEFAULTS, ...cfg, refine: { ...WATER_SERVICE_DEFAULTS.refine, ...(cfg.refine ?? {}) } };
+    return {
+        ...WATER_SERVICE_DEFAULTS, ...cfg,
+        refine: { ...WATER_SERVICE_DEFAULTS.refine, ...(cfg.refine ?? {}) },
+        rivers: { ...WATER_SERVICE_DEFAULTS.rivers, ...(cfg.rivers ?? {}) },
+    };
 }
 
 class WorkerClient {
@@ -109,6 +121,9 @@ export class WaterService {
         this.riverOf = null;
         this.lakeCells = null;   // lake k's grid cells: lakeCells[lakeCellStart[k] .. lakeCellStart[k + 1])
         this.lakeCellStart = null;
+        this.riverRecs = new Map();  // riverId -> traced river (riverRefine.js)
+        this._failedRivers = new Set();
+        this._lakeRegrown = new Set();
         this.refined = new Map();    // lakeId -> solve record
         this.mergedInto = new Map(); // lakeId -> representative lake id
         this.version = 0;            // bumps whenever lake data changes
@@ -203,24 +218,40 @@ export class WaterService {
             .slice(0, count);
     }
 
-    /** Per-frame: start refining the nearest unrefined lake in range. */
+    /**
+     * Per-frame: start refining the nearest unrefined lake in range; when
+     * all lakes in range are done, the nearest river whose source lake is
+     * in range.
+     */
     update(cameraPosition) {
         if (this.state !== 'ready' || this._busy || !this.config.refine.enabled || !cameraPosition) return;
         const now = performance.now();
         if (now - this._lastPick < 250) return;
         this._lastPick = now;
-        const next = this.lakesNear(cameraPosition, 64)
-            .find(({ lake, distanceM }) => distanceM <= this.config.refine.radiusM
-                && !this.refined.has(lake.id) && !this._failed.has(lake.id));
-        if (next) this.refineLake(next.lake.id);
+        const near = this.lakesNear(cameraPosition, 96).filter(({ distanceM }) => distanceM <= this.config.refine.radiusM);
+        const lake = near.find(({ lake: l }) => !this.refined.has(l.id) && !this._failed.has(l.id));
+        if (lake) { this.refineLake(lake.lake.id); return; }
+        if (!this.config.rivers.enabled) return;
+        for (const { lake: l } of near) {
+            const rid = l.river;
+            if (rid >= 0 && !this.riverRecs.has(rid) && !this._failedRivers.has(rid)) { this.refineRiver(rid); return; }
+        }
     }
 
     /** Solves one lake (cache first). Resolves to its record, or null. */
     async refineLake(lakeId) {
         if (this.state !== 'ready' || this._busy) return null;
+        this._busy = true;
+        try {
+            return await this._refineLake(lakeId);
+        } finally {
+            this._busy = false;
+        }
+    }
+
+    async _refineLake(lakeId) {
         const id = this.rep(lakeId);
         if (this.refined.has(id)) return this.refined.get(id);
-        this._busy = true;
         const t0 = performance.now();
         const R = this.config.refine;
         const lakeKey = `lake:${this._key}:${R.spacingM}:${R.bandM}:${id}`;
@@ -228,7 +259,10 @@ export class WaterService {
             let rec = this.config.cache ? await this._cache.get(lakeKey) : null;
             const fromCache = !!rec;
             if (rec) {
-                const restored = await this._client.call({ type: 'restoreLake', lakeId: id, level: rec.level, exitDir: rec.exitDir, merged: rec.merged });
+                const restored = await this._client.call({
+                    type: 'restoreLake', lakeId: id, level: rec.level, exitDir: rec.exitDir, merged: rec.merged,
+                    frame: rec.frame, mask: rec.mask, outflowDirs: rec.outflowDirs,
+                });
                 rec.downstream = restored.downstream;
             } else {
                 let frame = limitPatchCells(this.lakes[id].frame, R.maxCells);
@@ -261,9 +295,118 @@ export class WaterService {
             this._failed.add(id);
             Logger.warn(`[Water] lake ${id} refine failed: ${err?.message || err}`);
             return null;
+        }
+    }
+
+    /**
+     * Traces one river at 16 m (riverRefine.js): from its source lake's
+     * fine sill to the water it ends in. Both lakes are refined first, so
+     * the river meets the water as drawn. Resolves to its record, or null.
+     */
+    async refineRiver(riverId) {
+        if (this.state !== 'ready' || this._busy) return null;
+        if (this.riverRecs.has(riverId)) return this.riverRecs.get(riverId);
+        this._busy = true;
+        const t0 = performance.now();
+        const RC = this.config.rivers;
+        try {
+            const src = this.rivers[riverId].fromLake;
+            if (this.rep(src) !== src) { this._failedRivers.add(riverId); return null; }
+            await this._refineLake(src);
+            let plan = null;
+            // The destination's level decides the route: refine it, then route again.
+            for (let k = 0; k < 4; k++) {
+                plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM: RC.corridorM });
+                if (plan.status !== 'ok' || plan.dest.type !== 'lake' || this.refined.has(plan.dest.id)) break;
+                if (!(await this._refineLake(plan.dest.id))) break;
+            }
+            if (plan?.status !== 'ok') { this._failedRivers.add(riverId); return null; }
+            const destKey = plan.dest.type === 'lake' ? `lake${plan.dest.id}` : 'sea';
+            const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${riverId}:${destKey}`;
+            let rec = this.config.cache ? await this._cache.get(riverKey) : null;
+            const fromCache = !!rec;
+            if (!rec) {
+                // A start above the source lake's level means the corridor
+                // missed the water's lower way past a sill: retry wider.
+                const srcLevel = this.refined.get(src)?.level ?? this.lakes[src].level;
+                for (const corridorM of [RC.corridorM, RC.corridorM * RC.retryCorridorScale]) {
+                    if (corridorM !== RC.corridorM) {
+                        plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM });
+                        if (plan.status !== 'ok') break;
+                    }
+                    const frame = limitPatchCells(plan.frame, this.config.refine.maxCells);
+                    const heights = await this._sampler.samplePatch(frame, this.radius);
+                    const r = await this._client.call({ type: 'solveRiver', riverId, frame, heights, shape: RC.shape }, [heights.buffer]);
+                    if (r.status === 'ok' && (!rec || rec.status !== 'ok' || r.startLevel < rec.startLevel)) rec = r;
+                    else if (!rec) rec = r;
+                    if (rec.status === 'ok' && rec.startLevel - srcLevel <= RC.startToleranceM) break;
+                }
+            }
+            rec.ms = performance.now() - t0;
+            if (rec.status !== 'ok') {
+                this._failedRivers.add(riverId);
+                Logger.info(`[Water] river ${riverId}: ${rec.status}`);
+                return null;
+            }
+            // Still above the source lake: a closed depression past its sill
+            // backs up into the lake (its patch ended inside it). Solve the
+            // lake again on a patch reaching past the river's high point, then
+            // trace the river once more.
+            const srcLevel = this.refined.get(src)?.level ?? this.lakes[src].level;
+            if (!fromCache && rec.status === 'ok' && rec.startLevel - srcLevel > RC.startToleranceM && !this._lakeRegrown.has(src)) {
+                this._lakeRegrown.add(src);
+                const high = this._riverHighPoint(rec);
+                if (high && await this._resolveLakeIncluding(src, high)) {
+                    this._busy = false;
+                    return this.refineRiver(riverId);
+                }
+            }
+            if (!fromCache && this.config.cache) { const { ms: _ms, ...stored } = rec; this._cache.put(riverKey, stored); }
+            this.riverRecs.set(riverId, rec);
+            this.version++;
+            Logger.debug(`[Water] river ${riverId}: ${(rec.lengthM / 1000).toFixed(1)} km to ${destKey}${rec.weakEnd ? ' (no destination water in the corridor)' : ''}, ` +
+                `${fromCache ? 'cache' : 'traced'} ${rec.ms.toFixed(0)} ms`);
+            return rec;
+        } catch (err) {
+            this._failedRivers.add(riverId);
+            Logger.warn(`[Water] river ${riverId} refine failed: ${err?.message || err}`);
+            return null;
         } finally {
             this._busy = false;
         }
+    }
+
+    /** First point along a traced river where its water level drops below the start level (just past the high sill). */
+    _riverHighPoint(rec) {
+        const n = rec.points.length / rec.stride, P = rec.points, st = rec.stride;
+        for (let k = 0; k < n; k++) {
+            const fill = P[k * st + 3] - P[k * st + 5];
+            if (fill < rec.startLevel - 0.05) return [P[k * st], P[k * st + 1], P[k * st + 2]];
+        }
+        return null;
+    }
+
+    /** Solves a lake again on its patch grown to include dir (+ margin). */
+    async _resolveLakeIncluding(id, dir) {
+        const R = this.config.refine;
+        const old = this.refined.get(id);
+        const f = old?.frame ?? this.lakes[id].frame;
+        const [x, y] = dirToPlane(dir, f, this.radius);
+        const m = 1500;
+        const x0 = Math.min(f.x0, x - m), y0 = Math.min(f.y0, y - m);
+        const x1 = Math.max(f.x0 + f.nx * f.spacing, x + m), y1 = Math.max(f.y0 + f.ny * f.spacing, y + m);
+        const spacing = R.spacingM;
+        const frame = limitPatchCells({ c: f.c, e1: f.e1, e2: f.e2, x0, y0, spacing, nx: Math.ceil((x1 - x0) / spacing), ny: Math.ceil((y1 - y0) / spacing) }, R.maxCells);
+        const heights = await this._sampler.samplePatch(frame, this.radius);
+        const rec = await this._client.call({ type: 'solveLake', lakeId: id, frame, heights, bandM: R.bandM }, [heights.buffer]);
+        if (rec.status !== 'ok') return false;
+        Logger.debug(`[Water] lake ${id} re-solved past its outflow: level ${old?.level?.toFixed(1)} -> ${rec.level.toFixed(1)} m`);
+        this._apply(id, rec);
+        if (this.config.cache) {
+            const { downstream: _downstream, ...stored } = rec;
+            this._cache.put(`lake:${this._key}:${R.spacingM}:${R.bandM}:${id}`, stored);
+        }
+        return true;
     }
 
     _apply(id, rec) {
@@ -285,6 +428,7 @@ export class WaterService {
             state: this.state, key: this._key, inWorker: this._client?.inWorker ?? false,
             lakes: this.lakes.length, rivers: this.rivers.length, stats: this.stats,
             refined: this.refined.size, merged: this.mergedInto.size, failed: this._failed.size,
+            riversTraced: this.riverRecs.size, riversFailed: this._failedRivers.size,
             meanAbsLevelChangeM: levels.length ? levels.reduce((s, d) => s + Math.abs(d), 0) / levels.length : 0,
             timings: this.timings,
         };

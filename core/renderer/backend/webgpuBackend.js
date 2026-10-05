@@ -1370,11 +1370,12 @@ const slotSampleType = (type) =>
             { binding: 9,  visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
             { binding: 10, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
             { binding: 11, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
-            // Lake water (core/world/water/lakeWaterWgsl.js LAKE_WATER_BINDINGS).
+            // Water (core/world/water/waterWgsl.js WATER_BINDINGS).
             { binding: 12, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
             { binding: 13, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
             { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
             { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
+            { binding: 16, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
         ]
     }));
 
@@ -1923,10 +1924,11 @@ _createTerrainBindGroups(material, uniforms, geometry) {
 
     const clusterKey = clusterBuffers ? 'real' : 'dummy';
 
-    // Lake water (LakeGpuData resources, or dummies: params all zero = off).
-    const water = uniforms._waterLakeData?.value?.resources || null;
+    // Water (WaterGpuData resources, or dummies: params all zero = off).
+    const water = uniforms._waterData?.value?.resources || null;
     const waterIndexBuf = water?.index || dummyStorage;
     const waterLakesBuf = water?.lakes || dummyStorage;
+    const waterRiversBuf = water?.rivers || dummyStorage;
     const waterMasksView = water?.masks || this._getOrCreateDummyArrayTextureView();
     const waterParamsBuf = water?.params || this._getOrCreateUniformBuffer('_water_params_dummy', new Float32Array(16));
 
@@ -1958,6 +1960,7 @@ _createTerrainBindGroups(material, uniforms, geometry) {
             { binding: 13, resource: { buffer: waterLakesBuf } },
             { binding: 14, resource: waterMasksView },
             { binding: 15, resource: { buffer: waterParamsBuf } },
+            { binding: 16, resource: { buffer: waterRiversBuf } },
         ];
         const group = this.device.createBindGroup({
             layout: material._gpuPipeline.bindGroupLayouts[3],

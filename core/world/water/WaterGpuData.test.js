@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { LakeGpuData } from './LakeGpuData.js';
+import { WaterGpuData } from './WaterGpuData.js';
 
 // Stub device: records uploads; no GPU in vitest.
 beforeAll(() => {
@@ -29,7 +29,8 @@ function fakeService() {
         state: 'ready', version: 1, N,
         lakes: [0, 1, 2].map(id => ({ id, level: 100 + id, frame: frame(id) })),
         lakeCells: Int32Array.from([1, 2, 10, 11, 50]), lakeCellStart: Int32Array.from([0, 2, 4, 5]),
-        riverOf, refined: new Map(), mergedInto: new Map(),
+        riverOf, refined: new Map(), mergedInto: new Map(), riverRecs: new Map(),
+        rivers: [{ id: 0, fromLake: 0, cells: Int32Array.from([1, 3, 10]) }],
         rep(id) { while (this.mergedInto.has(id)) id = this.mergedInto.get(id); return id; },
     };
     return svc;
@@ -37,9 +38,9 @@ function fakeService() {
 const slots = (gpu, c) => [gpu.index[c] & 0x7fff, (gpu.index[c] >>> 15) & 0x7fff, (gpu.index[c] >>> 30) & 1];
 const cam = { x: 0, y: 0, z: 200000 };
 
-describe('LakeGpuData', () => {
+describe('WaterGpuData', () => {
     it('builds the index from graph cells and river bits', () => {
-        const gpu = new LakeGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
+        const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
         gpu.update(fakeService(), cam, 0);
         expect(slots(gpu, 1)).toEqual([1, 0, 0]);
         expect(slots(gpu, 10)).toEqual([2, 0, 0]);
@@ -49,7 +50,7 @@ describe('LakeGpuData', () => {
 
     it('a refined lake moves to its mask cells; a merged lake leaves the index', () => {
         const dev = stubDevice();
-        const gpu = new LakeGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
+        const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
         const svc = fakeService();
         gpu.update(svc, cam, 0);
         svc.refined.set(0, { level: 99, frame: svc.lakes[0].frame, mask: new Uint8Array(64).fill(2), maskCells: Int32Array.from([2, 3, 11]), merged: [1] });
@@ -66,7 +67,7 @@ describe('LakeGpuData', () => {
 
     it('when the atlas is full the farthest lake gives its layer up', () => {
         const dev = stubDevice();
-        const gpu = new LakeGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 1 });
+        const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 1 });
         const svc = fakeService();
         gpu.update(svc, cam, 0);
         const refine = (id, cells) => svc.refined.set(id, { level: 90 + id, frame: svc.lakes[id].frame, mask: new Uint8Array(64).fill(2), maskCells: Int32Array.from(cells), merged: [] });
@@ -76,5 +77,31 @@ describe('LakeGpuData', () => {
         expect(gpu._layerOf.get(0)).toBe(0);
         expect(gpu._layerOf.has(2)).toBe(false);
         expect(slots(gpu, 50)).toEqual([3, 0, 0]);     // lake 2 stays indexed, level-only
+    });
+
+    it('a traced river lists its segments in its cells and replaces the graph river cell', () => {
+        const dev = stubDevice();
+        const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
+        const svc = fakeService();
+        gpu.update(svc, cam, 0);
+        expect(slots(gpu, 3)[2]).toBe(1);
+        // Three points (stride 8): segment 0 in cells 3 and 4, segment 1 in cell 4.
+        const points = new Float32Array(24);
+        points.set([0, 0, 1, 105, 6, 1, 1.2, 3], 0);
+        points.set([0.001, 0, 1, 104, 6, 1, 1.2, 3], 8);
+        points.set([0.002, 0, 1, 103, 7, 1.2, 1.4, 4], 16);
+        svc.riverRecs.set(0, { points, stride: 8, segCellStart: Int32Array.from([0, 2, 3]), segCells: Int32Array.from([3, 4, 4]) });
+        svc.version++;
+        gpu.update(svc, cam, 0);
+        const cells = gpu.cells;
+        expect(slots(gpu, 3)[2]).toBe(0);                       // graph river bit cleared
+        const e3 = gpu.index[cells + 3], e4 = gpu.index[cells + 4];
+        expect(e3 & 0xff).toBe(1);
+        expect(e4 & 0xff).toBe(2);
+        expect(gpu.riverSegCount).toBe(3);
+        // Cell 4's second entry is segment 1: from point 1 to point 2.
+        const o = ((e4 >>> 8) + 1) * 12;
+        expect(Array.from(gpu._segs.slice(o, o + 4))).toEqual([0.001, 0, 1, 104].map(Math.fround));
+        expect(gpu._segs[o + 7]).toBe(103);
     });
 });
