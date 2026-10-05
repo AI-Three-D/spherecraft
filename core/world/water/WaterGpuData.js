@@ -335,7 +335,7 @@ export class WaterGpuData {
         const recs = [...this._appliedRivers.entries()].map(([rid, rec]) => {
             const P = rec.points, st = rec.stride, n = P.length / st;
             let cosA = -2;
-            for (let k = 0; k < n; k += 4) cosA = Math.max(cosA, camDir[0] * P[k * st] + camDir[1] * P[k * st + 1] + camDir[2] * P[k * st + 2]);
+            for (let k = 0; k < n; k = (k + 4 < n || k === n - 1) ? k + 4 : n - 1) cosA = Math.max(cosA, camDir[0] * P[k * st] + camDir[1] * P[k * st + 1] + camDir[2] * P[k * st + 2]);
             return { rid, rec, far: -cosA };
         }).sort((a, b) => a.far - b.far);
         const ridOf = new Map(recs.map(r => [r.rec, r.rid]));

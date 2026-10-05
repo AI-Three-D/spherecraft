@@ -1,5 +1,7 @@
 # Water plan v2: rivers that hold their water (2026-10-05)
 
+**Superseded:** see `WATER_HANDOFF.md` (status, diagnosis, recommended direction).
+
 Written after the owner's browser check of `33915bf` (carved rivers + square simulation site). Status of each phase is at the end; update it as work lands. Local file, not committed (like `IMPLEMENTATION_PLAN*.md`).
 
 ## What the owner saw, and the targets
