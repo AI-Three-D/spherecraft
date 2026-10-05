@@ -20,11 +20,16 @@ import { dirToCell } from '../hydrology/waterGraph.js';
 import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
 
 export const WATER_LOOK_DEFAULTS = Object.freeze({
-    deepColor: [0.015, 0.05, 0.06],   // albedo of deep water (lit by sky + sun)
+    deepColor: [0.02, 0.10, 0.09],    // albedo of deep water (lit by sky + sun); Whitewater's water tint
     reflection: 1.4,                  // sky reflection strength (x sky radiance)
-    absorption: [0.40, 0.11, 0.08],   // per metre of water path (r, g, b)
+    absorption: [1.6, 0.8, 0.6],      // per metre of water path (r, g, b); Whitewater's
     rippleFadeM: 800,                 // ripples fade out by this camera distance
     shoreSoftM: 0.15,                 // waterline fade-in depth
+    // Rivers (waterWgsl.js waterRiverColor): animated out to riverAnimNearM,
+    // plain colour from riverAnimFarM; foam gain on the steepness hint.
+    riverAnimNearM: 1500,
+    riverAnimFarM: 3000,
+    riverFoamGain: 1.0,
 });
 
 const SLOT_MASK = 0x7fff;
@@ -290,7 +295,7 @@ export class WaterGpuData {
         } else {
             f.fill(0, 16, 24);
         }
-        f.fill(0, 24, 28);
+        f.set([L.riverAnimNearM ?? 1500, L.riverAnimFarM ?? 3000, L.riverFoamGain ?? 1, 0], 24);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.
         const C = this.carve ?? {};

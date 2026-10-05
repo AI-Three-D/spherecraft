@@ -23,7 +23,7 @@ import { dirToCell } from './waterGraph.js';
 import { RIVER_SUB } from '../water/waterWgsl.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v6';
+export const WATER_ALGO_VERSION = 'water-v7';
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,

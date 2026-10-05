@@ -332,10 +332,18 @@ export function createWaterWorkerCore() {
             const cr = [f0[1] * f1[2] - f0[2] * f1[1], f0[2] * f1[0] - f0[0] * f1[2], f0[0] * f1[1] - f0[1] * f1[0]];
             kappaRaw[k] = ((cr[0] * d[0] + cr[1] * d[1] + cr[2] * d[2]) / (l0 * l1)) / (0.5 * (l0 + l1) * R);
         }
+        // Flow speed and foam from the water level's own slope (its drops,
+        // where the level fit steps down, are riffles and rapids).
+        const etaSlope = (k) => {
+            const k0 = Math.max(0, k - 2), k1 = Math.min(n - 1, k + 2);
+            return Math.max(0, lv.eta[k0] - lv.eta[k1]) / Math.max(1, sm.s[k1] - sm.s[k0]);
+        };
         const stride = RIVER_POINT_STRIDE;
         const points = new Float32Array(n * stride);
         for (let k = 0; k < n; k++) {
-            const { width, depth, speed, Qm3s, slope } = shapes[k];
+            const { width, depth, Qm3s } = shapes[k];
+            const slope = etaSlope(k);
+            const speed = riverShape(Qm3s, slope, shapeP, levelP.waterFrac).speed;
             const d = dirs[k], hw = width / 2;
             let kappa = 0, m = 0;
             for (let q = Math.max(0, k - 3); q <= Math.min(n - 1, k + 3); q++) { kappa += kappaRaw[q]; m++; }
