@@ -183,13 +183,14 @@ export class MinHeap {
 
 export const WATER_GRAPH_DEFAULTS = Object.freeze({
     // A lake needs a deep core: connected cells whose fill depth exceeds
-    // minLakeDepthM, at least minLakeCells of them (12 cells ~ 1.6 km^2 at
+    // minLakeDepthM, at least minLakeCells of them (18 cells ~ 2.5 km^2 at
     // N 512). Shallower or smaller depressions get no lake.
     // Planet survey (2026-10-04, N 512, counted as whole water bodies):
     // 4 m / 6 cells 4054 lakes (18 % of land), 8 m / 12 cells 1699 (15.6 %),
-    // 15 m / 30 cells 495 (12 %), 25 m / 60 cells 145 (7 %). Owner: 8 / 12.
+    // 8 m / 18 cells 1160 (14.5 %), 15 m / 30 cells 495 (12 %), 25 m / 60
+    // cells 145 (7 %). Owner: 8 / 12 first, then a third fewer (2026-10-05).
     minLakeDepthM: 8.0,
-    minLakeCells: 12,
+    minLakeCells: 18,
     // The lake is the whole water body around its core(s): connected cells
     // with fill depth above this (metres).
     lakeExtentDepthM: 0.5,
