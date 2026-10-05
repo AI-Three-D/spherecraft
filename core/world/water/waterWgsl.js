@@ -25,9 +25,9 @@
 
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 
-// WaterLake: 4 x vec4 (64 bytes). WaterParams: 4 x vec4. WaterRiverSeg: 3 x vec4 (48 bytes).
+// WaterLake: 4 x vec4 (64 bytes). WaterParams: 8 x vec4. WaterRiverSeg: 3 x vec4 (48 bytes).
 export const LAKE_RECORD_FLOATS = 16;
-export const LAKE_PARAMS_FLOATS = 16;
+export const LAKE_PARAMS_FLOATS = 32;
 export const RIVER_SEG_FLOATS = 12;
 export const RIVER_MAX_SEGS_PER_CELL = 64;
 
@@ -51,6 +51,12 @@ struct WaterParams {
     planetRadius: f32, time: f32, rippleFade: f32, shoreSoftM: f32,
     deepColor: vec4<f32>,      // rgb; a = reflection strength
     absorption: vec4<f32>,     // rgb per metre of water path; a = river spread slope (m/m)
+    // Active simulation site (WaterSimSite.js): inside it the simulated
+    // surface draws the water, so the static water fades out (siteFade).
+    siteC: vec4<f32>,          // centre direction; w = half size (m)
+    siteE1: vec4<f32>,         // tangent axis 1; w = fade 0..1
+    siteE2: vec4<f32>,         // tangent axis 2; w = border width (m)
+    _reserved: vec4<f32>,
 };
 struct WaterRiverSeg {
     p0: vec3<f32>, eta0: f32,  // unit direction, water level (m)
@@ -232,6 +238,19 @@ fn waterTint(id: f32) -> vec3<f32> {
     return fract(vec3<f32>(id * 0.618034, id * 0.381966 + 0.3, id * 0.7548777 + 0.6));
 }
 
+// How much of the static water the simulation site replaces at dir (0..1).
+fn waterSiteCover(dir: vec3<f32>) -> f32 {
+    let fade = waterParams.siteE1.w;
+    if (fade <= 0.0) { return 0.0; }
+    let k = dot(dir, waterParams.siteC.xyz);
+    if (k <= 0.0) { return 0.0; }
+    let px = abs(dot(dir, waterParams.siteE1.xyz) / k * waterParams.planetRadius);
+    let py = abs(dot(dir, waterParams.siteE2.xyz) / k * waterParams.planetRadius);
+    let half = waterParams.siteC.w;
+    let border = waterParams.siteE2.w;
+    return fade * (1.0 - smoothstep(half - border, half, max(px, py)));
+}
+
 // Shades a terrain fragment under lake or river water; unchanged elsewhere.
 fn applyWater(
     bedColor: vec3<f32>, worldPos: vec3<f32>, cameraPos: vec3<f32>, planetCenter: vec3<f32>,
@@ -252,14 +271,16 @@ fn applyWater(
             return mix(waterTint(f32(e & 0x7fffu)), vec3<f32>(0.0, 0.1, 0.6), clamp(depthM / 40.0, 0.0, 0.8));
         }
         if (dbg == 3u) { return mix(vec3<f32>(0.6, 1.0, 1.0), vec3<f32>(0.0, 0.0, 0.3), clamp(depthM / 50.0, 0.0, 1.0)); }
-        return waterSurfaceColor(bedColor, depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, up, 0.0, 1.0);
+        let lakeCol = waterSurfaceColor(bedColor, depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, up, 0.0, 1.0);
+        return mix(lakeCol, bedColor, waterSiteCover(up));
     }
 
     let river = waterRiverAt(up, heightM);
     if (river.found) {
         if (dbg == 1u || dbg == 2u) { return mix(vec3<f32>(1.0, 0.15, 0.1), vec3<f32>(0.3, 0.0, 0.5), clamp(river.depthM / 5.0, 0.0, 1.0)); }
         if (dbg == 3u) { return mix(vec3<f32>(0.6, 1.0, 1.0), vec3<f32>(0.0, 0.0, 0.3), clamp(river.depthM / 50.0, 0.0, 1.0)); }
-        return waterSurfaceColor(bedColor, river.depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, river.flow, river.speed, 1.6);
+        let riverCol = waterSurfaceColor(bedColor, river.depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, river.flow, river.speed, 1.6);
+        return mix(riverCol, bedColor, waterSiteCover(up));
     }
 
     if (dbg == 2u) {

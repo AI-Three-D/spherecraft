@@ -3755,7 +3755,8 @@
                         'window.qtDiag.water.goto(lakeId, 300) // free camera 300 m above a lake',
                         'await window.qtDiag.water.refine(lakeId) / await window.qtDiag.water.clearCache()',
                         'window.qtDiag.water.tint(mode) // 0 water, 1 lakes by id + rivers red, 2 + grid cells (lake blue, traced river red, untraced river orange), 3 depth',
-                        'window.qtDiag.water.look({ reflection: 1.4, absorption: [0.4, 0.11, 0.08], enabled: true })'
+                        'window.qtDiag.water.look({ reflection: 1.4, absorption: [0.4, 0.11, 0.08], enabled: true })',
+                        'window.qtDiag.water.sim() // near-field shallow-water simulation site (state, fade, size)'
                     ].join('\n'));
                 },
                 status,
@@ -3813,6 +3814,7 @@
             clearCache() { return gameEngine?.waterService?.clearCache?.() ?? Promise.resolve(false); },
             tint(mode = 1) { return gameEngine?.setWaterDebugMode?.(mode) ?? null; },
             look(look = {}) { const r = gameEngine?.setWaterLook?.(look) ?? null; console.info('[Water] look', r); return r; },
+            sim() { const r = gameEngine?.waterSimStatus?.() ?? null; console.info('[Water] sim', r); return r; },
         };
 
         // Phase 0 test matrix (SphereCraft_Optimization_Implementation_Plan.md

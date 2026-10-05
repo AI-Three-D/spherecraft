@@ -16,6 +16,8 @@
 // - params uniform: switches and look, written every frame (time).
 
 import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS } from './waterWgsl.js';
+import { dirToCell } from '../hydrology/waterGraph.js';
+import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
 
 export const WATER_LOOK_DEFAULTS = Object.freeze({
     deepColor: [0.015, 0.05, 0.06],   // albedo of deep water (lit by sky + sun)
@@ -43,6 +45,9 @@ export class WaterGpuData {
         this.maxLayers = maxMaskLayers;
         this.enabled = true;
         this.debugMode = 0;
+        // Active simulation site { c, e1, e2, halfM, borderM, fade } or null:
+        // the terrain shader hides static water under it (waterSiteCover).
+        this.site = null;
         this.look = { ...WATER_LOOK_DEFAULTS };
 
         const cells = 6 * gridN * gridN;
@@ -75,6 +80,17 @@ export class WaterGpuData {
         this._layerOwner = new Array(maxMaskLayers).fill(-1);
         this._dirtyRows = new Set();   // face * N + j
         this.lakeCount = 0;
+    }
+
+    /** True when a lake or a traced river is listed in a grid cell within radiusM of dir (9 probes). */
+    hasWaterNear(dir, radiusM) {
+        if (!this._ready) return false;
+        const frame = { c: dir, ...tangentBasis(dir) };
+        for (const [a, b] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+            const c = dirToCell(planeToDir(a * radiusM, b * radiusM, frame, this.R), this.N);
+            if ((this.index[c] & SLOT_MASK) || (this.index[this.cells + c] & 0xff)) return true;
+        }
+        return false;
     }
 
     /** Resources for a bind group (see waterWgsl.js WATER_BINDINGS). */
@@ -245,6 +261,14 @@ export class WaterGpuData {
         f[4] = this.R; f[5] = time; f[6] = L.rippleFadeM; f[7] = L.shoreSoftM;
         f.set([L.deepColor[0], L.deepColor[1], L.deepColor[2], L.reflection], 8);
         f.set([L.absorption[0], L.absorption[1], L.absorption[2], L.riverSpreadSlope], 12);
+        const site = this.site;
+        if (site && site.fade > 0) {
+            f.set([site.c[0], site.c[1], site.c[2], site.halfM], 16);
+            f.set([site.e1[0], site.e1[1], site.e1[2], site.fade], 20);
+            f.set([site.e2[0], site.e2[1], site.e2[2], site.borderM], 24);
+        } else {
+            f.fill(0, 16, 28);
+        }
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
     }
 

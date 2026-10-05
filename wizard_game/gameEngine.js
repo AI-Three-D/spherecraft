@@ -53,6 +53,7 @@ import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terr
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
 import { WaterGpuData } from '../core/world/water/WaterGpuData.js';
+import { WaterSimSite } from '../core/world/water/WaterSimSite.js';
 import { ErosionSeedVerifier } from '../core/world/hydrology/ErosionSeedVerifier.js';
 import { computeSurfaceTangentFrame } from '../core/planet/surfaceFrame.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
@@ -1431,8 +1432,62 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.waterService.update(this.camera?.position);
         const cam = this.camera?.position, origin = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
         if (cam && this.waterGpuData) {
-            this.waterGpuData.update(this.waterService, { x: cam.x - origin.x, y: cam.y - origin.y, z: cam.z - origin.z }, performance.now() / 1000);
+            const rel = { x: cam.x - origin.x, y: cam.y - origin.y, z: cam.z - origin.z };
+            this._tickWaterSim(rel);
+            this.waterGpuData.update(this.waterService, rel, performance.now() / 1000);
         }
+    }
+
+    /**
+     * Near-field water simulation (core/world/water/WaterSimSite.js), like
+     * Whitewater simulating only around the boat: a site follows the camera
+     * while it is low and near a lake or river (terrain.waterGraph.sim).
+     * Steps in its own submit before the frame renders.
+     */
+    _tickWaterSim(camRel) {
+        const cfg = this.planetConfig?.terrainGeneration?.waterGraph?.sim ?? {};
+        const svc = this.waterService, gpu = this.waterGpuData;
+        if (cfg.enabled === false || svc?.state !== 'ready' || !gpu?._ready) return;
+        const r = Math.hypot(camRel.x, camRel.y, camRel.z) || 1;
+        const dir = [camRel.x / r, camRel.y / r, camRel.z / r];
+        const altitude = r - this.planetConfig.radius - svc.groundHeightAt(dir);
+        const want = altitude < (cfg.activateAltitudeM ?? 400) && gpu.hasWaterNear(dir, cfg.waterSearchM ?? 300);
+        let site = this.waterSimSite;
+        if (!site) {
+            if (!want) return;
+            const { enabled: _e, activateAltitudeM: _a, waterSearchM: _w, recenterFraction: _r, ...siteCfg } = cfg;
+            site = this.waterSimSite = new WaterSimSite({ device: this.renderer.backend.device, sampler: svc._sampler, waterGpu: gpu, radius: this.planetConfig.radius, config: siteCfg });
+            this.renderer?.setWaterSimSite?.(site, gpu.look);
+        }
+        if (!want) {
+            site.deactivate();
+            gpu.site = null;
+            return;
+        }
+        const recenter = (cfg.recenterFraction ?? 0.25) * site.n * site.config.dx;
+        if (site.state !== 'placing' && (site.state === 'idle' || site.distanceTo(dir) > recenter)) {
+            site.place(dir).catch(err => Logger.warn(`[Water] simulation site failed: ${err?.message || err}`));
+        }
+        if (site.state === 'warming' || site.state === 'running') {
+            const device = this.renderer.backend.device;
+            const enc = device.createCommandEncoder({ label: 'WaterSimSite' });
+            site.encode(enc, performance.now() / 1000);
+            device.queue.submit([enc.finish()]);
+        }
+        gpu.site = site.coverage;
+    }
+
+    /** qtDiag.water.sim(): the near-field simulation site. */
+    waterSimStatus() {
+        const site = this.waterSimSite;
+        if (!site) return { state: 'none (camera not low near water yet, or terrain.waterGraph.sim.enabled false)' };
+        const cam = this.camera?.position, o = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
+        const rel = cam ? [cam.x - o.x, cam.y - o.y, cam.z - o.z] : null;
+        const l = rel ? Math.hypot(...rel) : 1;
+        return {
+            state: site.state, fade: +site.fade.toFixed(2), cells: site.n, dx: site.config.dx,
+            sizeM: site.n * site.config.dx, cameraOffsetM: rel ? +site.distanceTo(rel.map(v => v / l)).toFixed(0) : null,
+        };
     }
 
     /**

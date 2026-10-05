@@ -19,7 +19,7 @@ fn main(@location(0) wp: vec3<f32>) -> @location(0) vec4<f32> {
     it('struct sizes match the JS packing', () => {
         const src = createWaterWgsl();
         const count = (name) => {
-            const body = src.match(new RegExp(`struct ${name} \\{([^}]*)\\}`))[1];
+            const body = src.match(new RegExp(`struct ${name} \\{([^}]*)\\}`))[1].replace(/\/\/[^\n]*/g, '');
             return body.split(/[,;]/).map(s => s.trim()).filter(s => s.includes(':'))
                 .reduce((n, f) => n + (f.includes('vec4') ? 4 : f.includes('vec3') ? 3 : 1), 0);
         };

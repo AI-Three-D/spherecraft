@@ -19,6 +19,7 @@ import { createHydrologySampler } from './HydrologyGrid.js';
 import { WaterCache, hashParts } from './waterCache.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
 import { dirToPlane, growPatchFrame, limitPatchCells } from './lakeRefine.js';
+import { dirToCell } from './waterGraph.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
 export const WATER_ALGO_VERSION = 'water-v4';
@@ -165,6 +166,7 @@ export class WaterService {
                 if (this.config.cache) this._cache.put(`grid:${this._key}`, { N, heights: grid.heights, precip: grid.precip, seaLevelM: grid.seaLevelM });
             }
             this.timings.gridMs = performance.now() - t0;
+            this.gridHeights = grid.heights;
 
             this.state = 'building';
             const t1 = performance.now();
@@ -192,6 +194,11 @@ export class WaterService {
             this.state = 'failed';
             Logger.warn(`[Water] graph build failed: ${err?.stack || err}`);
         }
+    }
+
+    /** Terrain height (m) of the water graph's grid cell under a unit direction (coarse, ~400 m). */
+    groundHeightAt(dir) {
+        return this.gridHeights ? this.gridHeights[dirToCell(dir, this.N)] : 0;
     }
 
     /** Representative of a lake (lakes merged into another resolve to it). */

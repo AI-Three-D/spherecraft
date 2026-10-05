@@ -1930,7 +1930,7 @@ _createTerrainBindGroups(material, uniforms, geometry) {
     const waterLakesBuf = water?.lakes || dummyStorage;
     const waterRiversBuf = water?.rivers || dummyStorage;
     const waterMasksView = water?.masks || this._getOrCreateDummyArrayTextureView();
-    const waterParamsBuf = water?.params || this._getOrCreateUniformBuffer('_water_params_dummy', new Float32Array(16));
+    const waterParamsBuf = water?.params || this._getOrCreateUniformBuffer('_water_params_dummy', new Float32Array(32));
 
     // Build cache key including shadow state
     const shadowKey = shadowRenderer ? 'shadow' : 'noshadow';

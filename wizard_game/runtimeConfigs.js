@@ -959,6 +959,17 @@ export function createGameDataConfig() {
     // qtDiag.water.stats() / .near() / .goto(id). See WaterService.js.
     waterGraph: {
       enabled: true,
+      // Near-field shallow-water simulation (core/world/water/WaterSimSite.js):
+      // a 256 m site of 1 m cells around the camera while it is within
+      // activateAltitudeM of the ground and water is within waterSearchM.
+      sim: {
+        enabled: true,
+        activateAltitudeM: 400,
+        waterSearchM: 300,
+        recenterFraction: 0.25,
+        cells: 256,
+        dx: 1.0,
+      },
     },
     erosion: {
       enabled: true,

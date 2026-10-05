@@ -1,3 +1,4 @@
+import { WaterSimRenderer } from '../water/WaterSimRenderer.js';
 import { Vector3, Matrix4, Color } from '../../../shared/math/index.js';
 import { WebGPUBackend } from '../backend/webgpuBackend.js';
 
@@ -120,6 +121,13 @@ export class Frontend {
     }
 
     setActorManager(mgr) { this._actorManager = mgr; }
+
+    /** The near-field water simulation site to draw (or null), with the water look. */
+    setWaterSimSite(site, look) {
+        if (!site && !this.waterSimRenderer) return;
+        this.waterSimRenderer ??= new WaterSimRenderer({ backend: this.backend, uniformManager: this.uniformManager, planetConfig: this.planetConfig });
+        this.waterSimRenderer.setSite(site, look);
+    }
 
     /** Water data (lakes, rivers: core/world/water/WaterGpuData.js) for the terrain shader. */
     setWaterData(data) {
@@ -1310,6 +1318,11 @@ updateLighting(starSystem) {
                     this.genericMeshRenderer.update(this.camera.position, this._lastDeltaTime || 0);
                     this.genericMeshRenderer.render(viewMatrix, projectionMatrix);
                 }
+
+                // Near-field simulated water (core/world/water/WaterSimSite.js):
+                // transparent, after the opaque meshes so objects in water show
+                // through it by depth.
+                this.waterSimRenderer?.render(this.camera, viewMatrix, projectionMatrix, performance.now() / 1000);
 
                 // Particles draw after opaque terrain + assets + skinned meshes,
                 // still inside the main color render pass (before post-processing).
