@@ -6,6 +6,8 @@ import { createResolvedTerrainColorComputeShader } from '../shaders/webgpu/resol
 import { createSplatComputeShader } from '../shaders/webgpu/splatCompute.wgsl.js';
 import { createSplatPaletteComputeShader } from '../shaders/webgpu/splatPaletteCompute.wgsl.js';
 import { createSplatValidityComputeShader } from '../shaders/webgpu/splatValidityCompute.wgsl.js';
+import { RIVER_CARVE_BINDINGS } from '../water/riverCarve.wgsl.js';
+import { LAKE_PARAMS_FLOATS, RIVER_SEG_FLOATS } from '../water/waterWgsl.js';
 
 const SPLAT_STEP_PREFIX = '[TerrainStep] [SplatStep]';
 
@@ -116,21 +118,29 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     size: getPackedBiomeUniformByteSize(this.maxGpuBiomes),
                     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
                 });
+                // Group 1 of every terrain pipeline: the biome uniform, and the
+                // river carve's water data (riverCarve.wgsl.js; placeholders
+                // until setWaterCarveResources).
+                const C = RIVER_CARVE_BINDINGS;
                 this.biomeBindGroupLayout = this.device.createBindGroupLayout({
                     entries: [
                         {
                             binding: 0,
                             visibility: GPUShaderStage.COMPUTE,
                             buffer: { type: 'uniform' }
-                        }
+                        },
+                        { binding: C.index, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                        { binding: C.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                        { binding: C.rivers, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                     ]
                 });
-                this.biomeBindGroup = this.device.createBindGroup({
-                    layout: this.biomeBindGroupLayout,
-                    entries: [
-                        { binding: 0, resource: { buffer: this.biomeUniformBuffer } }
-                    ]
-                });
+                // Zero params: gridN 0 = no river data, the carve passes through.
+                this._waterCarvePlaceholder = {
+                    index: this.device.createBuffer({ label: 'RiverCarve-index-none', size: 16, usage: GPUBufferUsage.STORAGE }),
+                    params: this.device.createBuffer({ label: 'RiverCarve-params-none', size: LAKE_PARAMS_FLOATS * 4, usage: GPUBufferUsage.UNIFORM }),
+                    rivers: this.device.createBuffer({ label: 'RiverCarve-rivers-none', size: RIVER_SEG_FLOATS * 4, usage: GPUBufferUsage.STORAGE }),
+                };
+                this.setWaterCarveResources(null);
                 this._uploadPackedBiomeUniforms();
 
                 // ── Standard terrain bind group layout (bindings 0,1) ──────
@@ -409,6 +419,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     authoredSplatSourceWinnerSnapEnd: this.authoredSplatSourceWinnerSnapEnd,
                     fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                     erosionFilter: this.erosionFilter,
+                    waterCarve: this.waterCarve === true,
                     ...extra,
                 };
             },
@@ -1219,6 +1230,37 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
 
         _mapTextureFormat(formatOverride) {
                 return gpuFormatToWrapperFormat(formatOverride);
+            },
+
+        /**
+         * River carve data for tiles generated from now on: WaterGpuData
+         * resources ({ index, params, rivers } buffers), or null for none.
+         * Bumps waterCarveVersion (see markWaterCarveChanged).
+         */
+        setWaterCarveResources(res) {
+                const C = RIVER_CARVE_BINDINGS;
+                const r = res ?? this._waterCarvePlaceholder;
+                this.biomeBindGroup = this.device.createBindGroup({
+                    label: 'Terrain-group1',
+                    layout: this.biomeBindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: this.biomeUniformBuffer } },
+                        { binding: C.index, resource: { buffer: r.index } },
+                        { binding: C.params, resource: { buffer: r.params } },
+                        { binding: C.rivers, resource: { buffer: r.rivers } },
+                    ]
+                });
+                this.waterCarveBound = !!res;
+                this.markWaterCarveChanged();
+            },
+
+        /**
+         * The river data in the bound buffers changed: tiles generated before
+         * are stale where rivers changed. TileStreamer re-queues a tile whose
+         * generation spanned a change (the version moved meanwhile).
+         */
+        markWaterCarveChanged() {
+                this.waterCarveVersion = (this.waterCarveVersion ?? 0) + 1;
             },
 
         _setTerrainBiomeBindGroup(pass) {

@@ -978,6 +978,17 @@ export class TileStreamer {
             }
         });
         this._refinementRejectWindowCount = 0;
+        // In-place regeneration of resident tiles whose terrain changed
+        // (regenerateTiles): its own small queue, started only with GPU
+        // budget left after geometry and refinement.
+        this._regenQueue = new AsyncGenerationQueue({
+            maxInFlight: 2,
+            maxPerFrame: 1,
+            timeBudgetMs: this._admissionBudgets.maxCpuGenerationTimeMs,
+            maxQueueSize: 8192,
+            shouldDrop: (entry) => !this._tileInfo.has(entry.key),
+        });
+        this._regenStats = { queued: 0, done: 0, rejected: 0 };
         // key -> tileAddr for refinement requests dropped because the queue
         // was at capacity (AsyncGenerationQueue.request() returned null).
         // Drained a few at a time by _retryDroppedRefinements(), unconditionally
@@ -1161,6 +1172,7 @@ this._freshnessSkipCount = 0;
         this._generationEpoch++;
         this._generationQueue.clearPending?.(null);
         this._refinementQueue.clearPending?.(null);
+        this._regenQueue.clearPending?.(null);
         this._tileState.clear();
         this._refinementRejectWindowCount = 0;
         this._refinementRetryMap.clear();
@@ -1513,7 +1525,8 @@ this._freshnessSkipCount = 0;
 
         this._tilesStartedWindowCount += spawned;
 
-        this._tickRefinement(this._flags.refinementBudgetCountsGeometryStarts ? spawned : 0);
+        const refined = this._tickRefinement(this._flags.refinementBudgetCountsGeometryStarts ? spawned : 0) || 0;
+        this._tickRegeneration(spawned + refined);
 
         this.tileGenerator?.tick?.();
     }
@@ -1576,8 +1589,85 @@ this._freshnessSkipCount = 0;
 
         const savedMaxPerFrame = this._refinementQueue.maxPerFrame;
         this._refinementQueue.maxPerFrame = Math.min(savedMaxPerFrame, effectiveBudget);
-        this._refinementQueue.tick();
+        const started = this._refinementQueue.tick() || 0;
         this._refinementQueue.maxPerFrame = savedMaxPerFrame;
+        return started;
+    }
+
+    // In-place regenerations start only with fence headroom left after this
+    // frame's geometry and refinement starts (no reserve: the old content
+    // stays drawn meanwhile).
+    _tickRegeneration(spawnedThisFrame = 0) {
+        if (this._regenQueue.queue.length === 0) return;
+        const gpuInFlight = (this.tileGenerator?._gpuFencesInFlight ?? 0) + spawnedThisFrame;
+        const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
+        if (budget === 0) return;
+        const savedMaxPerFrame = this._regenQueue.maxPerFrame;
+        this._regenQueue.maxPerFrame = Math.min(savedMaxPerFrame, budget);
+        this._regenQueue.tick();
+        this._regenQueue.maxPerFrame = savedMaxPerFrame;
+    }
+
+    _terrainCarveVersion() {
+        return this.terrainGenerator?.waterCarveVersion ?? 0;
+    }
+
+    /**
+     * Regenerates resident tiles in place where the terrain function changed
+     * (the river carve: core/world/water/riverCarve.wgsl.js), e.g.
+     * predicate(face, depth, x, y) = "touches a grid cell whose rivers
+     * changed". All output types are generated again and copied into the
+     * tile's own layer, so the old content stays drawn until then (no
+     * fallback to an ancestor). Returns the number queued.
+     */
+    regenerateTiles(predicate) {
+        let queued = 0;
+        for (const info of this._tileInfo.values()) {
+            if (!predicate(info.face, info.depth, info.x, info.y)) continue;
+            if (this._queueRegeneration(new TileAddress(info.face, info.depth, info.x, info.y))) queued++;
+        }
+        return queued;
+    }
+
+    getRegenerationStats() {
+        return { ...this._regenStats, pending: this._regenQueue.queue.length };
+    }
+
+    _queueRegeneration(tileAddr) {
+        const key = tileAddr.toString();
+        if (!this._tileInfo.has(key)) return false;
+        const geom = this._estimateRequestGeometry(tileAddr);
+        const tileWidth = this._estimateTileWorldSize(tileAddr.depth);
+        const distance = (Number.isFinite(geom.distanceToCamera) && tileWidth > 0) ? geom.distanceToCamera / tileWidth : null;
+        const request = this._regenQueue.request(key, Number.isFinite(distance) ? -distance : 0, async () => {
+            if (!this._tileInfo.has(key)) return false;
+            const version = this._terrainCarveVersion();
+            const refinementTypes = this._refinementTypesFor(tileAddr);
+            const types = [...new Set([...this._geometryTypes, ...refinementTypes])];
+            const textures = await this.tileGenerator.generateTile(tileAddr, null, types);
+            const info = this._tileInfo.get(key);
+            if (!info || !this.arrayPool) {
+                this._destroyGeneratedTextures(textures);
+                return false;
+            }
+            this.arrayPool.queueCopyToLayer(textures, info.layer, {
+                completesMaterial: refinementTypes.length === 0 || !this._isSolidTierDepth(tileAddr.depth),
+            });
+            info.carveVersion = version;
+            info.lastUsed = performance.now();
+            if (this._assetCommitQueuesEnabled) {
+                const commit = { face: tileAddr.face, depth: tileAddr.depth, x: tileAddr.x, y: tileAddr.y, layer: info.layer };
+                this._aoCommitQueue.push(commit);
+                if (refinementTypes.includes('scatter')) this._scatterCommitQueue.push({ ...commit });
+            }
+            this._regenStats.done++;
+            // Changed again meanwhile: once more (after this entry left the queue).
+            if (this._terrainCarveVersion() !== version) setTimeout(() => this._queueRegeneration(tileAddr), 0);
+            return true;
+        });
+        if (request === null) { this._regenStats.rejected++; return false; }
+        this._regenStats.queued++;
+        return true;
     }
 
     // ── Feedback ────────────────────────────────────────────────────────────
@@ -1942,6 +2032,7 @@ this._freshnessSkipCount = 0;
                 // needs to become resident and visually useful. Any
                 // remaining configured types follow as a background
                 // refinement pass once this commits.
+                const carveVersion = this._terrainCarveVersion();
                 const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, this._geometryTypes);
                 if (Number.isFinite(telemetry.computeSubmitted)) {
                     this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
@@ -1965,6 +2056,10 @@ this._freshnessSkipCount = 0;
                     this._tileState.delete(key);
                 } else {
                     this._tileState.set(key, 'RESIDENT');
+                    const info = this._tileInfo.get(key);
+                    if (info) info.carveVersion = carveVersion;
+                    // Generated across a terrain change (river carve): stale.
+                    if (this._terrainCarveVersion() !== carveVersion) this._queueRegeneration(tileAddr);
                     if (this._refinementTypes.length > 0) {
                         this._queueRefinement(tileAddr);
                     }
@@ -2415,6 +2510,9 @@ _queueRefinement(tileAddr) {
             const geometrySource = (this._reuseResidentGeometryForRefinement && residentInfo?.geometryInLayer)
                 ? { arrayPool: this.arrayPool, layer: residentInfo.layer }
                 : null;
+            const carveVersion = this._terrainCarveVersion();
+            // Reusing the layer's geometry: its terrain version is the input's.
+            const inputVersion = geometrySource ? (residentInfo.carveVersion ?? carveVersion) : carveVersion;
             const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, refinementTypes, geometrySource);
             if (Number.isFinite(telemetry.computeSubmitted)) {
                 this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
@@ -2427,6 +2525,10 @@ _queueRefinement(tileAddr) {
             }
             const committed = this._commitRefinement(tileAddr, textures, telemetry);
             this._tileState.set(key, committed ? 'REFINED' : 'RESIDENT');
+            // Refined from (or across) a terrain the river carve changed since.
+            if (committed && (inputVersion !== carveVersion || this._terrainCarveVersion() !== carveVersion)) {
+                this._queueRegeneration(tileAddr);
+            }
             return committed;
         } catch (error) {
             this._telemetryByKey.delete(key);

@@ -15,7 +15,7 @@
 //   from the camera gives its layer up and falls back to level-only;
 // - params uniform: switches and look, written every frame (time).
 
-import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS } from './waterWgsl.js';
+import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS, RIVER_SUB } from './waterWgsl.js';
 import { dirToCell } from '../hydrology/waterGraph.js';
 import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
 
@@ -36,7 +36,7 @@ export class WaterGpuData {
      * @param {GPUDevice} device
      * @param {object} o  gridN, planetRadius, maxLakes, maskLayerSize, maxMaskLayers
      */
-    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96, maxRiverSegs = 131072 } = {}) {
+    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96, maxRiverSegs = 131072, maxRiverCells = 65536, carve = null } = {}) {
         this.device = device;
         this.N = gridN;
         this.R = planetRadius;
@@ -49,12 +49,18 @@ export class WaterGpuData {
         // the terrain shader hides static water under it (waterSiteCover).
         this.site = null;
         this.look = { ...WATER_LOOK_DEFAULTS };
+        // River carve parameters (WaterService config.carve; riverCarve.wgsl.js), or null: no carve.
+        this.carve = carve;
 
         const cells = 6 * gridN * gridN;
         const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
         // COPY_SRC: readable for checks (terrain-lab/lake-gpu-run.mjs).
         this.cells = cells;
-        this.indexBuffer = device.createBuffer({ label: 'Water-index', size: 2 * cells * 4, usage: S | GPUBufferUsage.COPY_SRC });
+        // Two halves of one u32 per cell, then a sub-list block per river cell (waterWgsl.js).
+        this.subPerCell = RIVER_SUB * RIVER_SUB;
+        this.maxRiverCells = maxRiverCells;
+        const indexLen = 2 * cells + maxRiverCells * this.subPerCell;
+        this.indexBuffer = device.createBuffer({ label: 'Water-index', size: indexLen * 4, usage: S | GPUBufferUsage.COPY_SRC });
         this.maxRiverSegs = maxRiverSegs;
         this.riversBuffer = device.createBuffer({ label: 'Water-rivers', size: maxRiverSegs * RIVER_SEG_FLOATS * 4, usage: S | GPUBufferUsage.COPY_SRC });
         this.lakesBuffer = device.createBuffer({ label: 'Lake-table', size: maxLakes * LAKE_RECORD_FLOATS * 4, usage: S });
@@ -65,10 +71,11 @@ export class WaterGpuData {
         });
         this.masksView = this.masksTexture.createView({ dimension: '2d-array' });
 
-        this.index = new Uint32Array(2 * cells);
+        this.index = new Uint32Array(indexLen);
         this._segs = new Float32Array(maxRiverSegs * RIVER_SEG_FLOATS);
         this._appliedRivers = new Map(); // riverId -> traced record in the index
         this._riverCells = new Set();    // cells that list river segments
+        this._changedCells = new Set();  // cells whose rivers changed (takeChangedCells)
         this.riverSegCount = 0;
         this._table = new Float32Array(maxLakes * LAKE_RECORD_FLOATS);
         this._tableI32 = new Int32Array(this._table.buffer);
@@ -88,9 +95,20 @@ export class WaterGpuData {
         const frame = { c: dir, ...tangentBasis(dir) };
         for (const [a, b] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
             const c = dirToCell(planeToDir(a * radiusM, b * radiusM, frame, this.R), this.N);
-            if ((this.index[c] & SLOT_MASK) || (this.index[this.cells + c] & 0xff)) return true;
+            if ((this.index[c] & SLOT_MASK) || this.index[this.cells + c]) return true;
         }
         return false;
+    }
+
+    /**
+     * Grid cells whose rivers changed since the last call (the terrain
+     * carve differs there: tiles touching them are stale), or null.
+     */
+    takeChangedCells() {
+        if (!this._changedCells.size) return null;
+        const cells = this._changedCells;
+        this._changedCells = new Set();
+        return cells;
     }
 
     /** Resources for a bind group (see waterWgsl.js WATER_BINDINGS). */
@@ -247,6 +265,10 @@ export class WaterGpuData {
                     for (const c of svc.rivers[rid].cells) {
                         if (svc.riverOf[c] === rid && (this.index[c] & RIVER_BIT)) { this.index[c] &= ~RIVER_BIT; this._dirtyRows.add(Math.floor(c / this.N)); }
                     }
+                    // The terrain carve changes in the cells of the old and the new trace.
+                    for (const old of [this._appliedRivers.get(rid), rec]) {
+                        if (old?.segCells) for (const id of old.segCells) this._changedCells.add(Math.floor(id / this.subPerCell));
+                    }
                     this._appliedRivers.set(rid, rec);
                     riversChanged = true;
                 }
@@ -269,15 +291,20 @@ export class WaterGpuData {
         } else {
             f.fill(0, 16, 28);
         }
+        const C = this.carve;
+        if (C?.enabled) f.set([1, C.bankM, C.bankCurvature, C.fillDepthFactor], 28);
+        else f.fill(0, 28, 32);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
     }
 
     /**
-     * Lays out every traced river's segments per grid cell (index half 2)
-     * and uploads them. Nearest rivers first when the buffer is full.
+     * Lays out every traced river's segments per sub-cell (rec.segCells:
+     * cell * SUB^2 + sub, waterGraph.js dirToCellSub): a block of sub-lists
+     * per river cell (index half 2 points at it), and uploads them. Nearest
+     * rivers first when the buffers are full.
      */
     _rebuildRivers(camDir) {
-        const F = RIVER_SEG_FLOATS, lists = new Map();
+        const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map();
         const recs = [...this._appliedRivers.values()].map(rec => {
             const P = rec.points;
             const cosA = camDir[0] * P[0] + camDir[1] * P[1] + camDir[2] * P[2];
@@ -298,25 +325,43 @@ export class WaterGpuData {
                 }
             }
         }
-        const cells = [...lists.keys()].sort((a, b) => a - b);
-        let next = 0;
-        for (const c of cells) {
-            const list = lists.get(c), first = next;
+        const subs = [...lists.keys()].sort((a, b) => a - b);
+        const blockOf = new Map();   // river cell -> block
+        let next = 0, full = 0;
+        for (const id of subs) {
+            const c = Math.floor(id / SS);
+            let block = blockOf.get(c);
+            if (block === undefined) {
+                if (blockOf.size >= this.maxRiverCells) { full++; continue; }
+                block = blockOf.size;
+                blockOf.set(c, block);
+                const b0 = 2 * this.cells + block * SS;
+                this.index.fill(0, b0, b0 + SS);
+            }
+            const list = lists.get(id), first = next;
             for (let m = 0; m < list.length; m += 2) {
                 const rec = list[m], k = list[m + 1], P = rec.points, st = rec.stride, a = k * st, b = (k + 1) * st, o = next * F;
+                // WaterRiverSeg: p0, eta0, p1, eta1, hw0, hw1, bed0, bed1, speed (waterWgsl.js).
                 this._segs.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
-                    P[a + 4], P[b + 4], 0.5 * (P[a + 5] + P[b + 5]), 0.5 * (P[a + 6] + P[b + 6])], o);
+                    P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5], 0.5 * (P[a + 6] + P[b + 6]), 0, 0, 0], o);
                 next++;
             }
-            const idx = this.cells + c, e = (first << 8) | (list.length / 2);
-            if (this.index[idx] !== e) { this.index[idx] = e; this._dirtyRows.add(Math.floor(idx / this.N)); }
+            this.index[2 * this.cells + block * SS + (id % SS)] = (first << 8) | (list.length / 2);
+        }
+        for (const [c, block] of blockOf) {
+            const idx = this.cells + c;
+            if (this.index[idx] !== block + 1) { this.index[idx] = block + 1; this._dirtyRows.add(Math.floor(idx / this.N)); }
         }
         for (const c of this._riverCells) {
-            if (lists.has(c)) continue;
+            if (blockOf.has(c)) continue;
             const idx = this.cells + c;
             this.index[idx] = 0; this._dirtyRows.add(Math.floor(idx / this.N));
         }
-        this._riverCells = new Set(cells);
+        // The used blocks, whole rows.
+        const b0 = 2 * this.cells, b1 = b0 + blockOf.size * SS;
+        for (let r = Math.floor(b0 / this.N); r * this.N < b1; r++) this._dirtyRows.add(r);
+        this._riverCells = new Set(blockOf.keys());
+        if (full) console.warn(`[Water] river cell blocks full: ${full} sub-cells not listed`);
         if (next) this.device.queue.writeBuffer(this.riversBuffer, 0, this._segs, 0, next * F);
         this.riverSegCount = next;
         if (dropped) console.warn(`[Water] river segment buffer full: ${dropped} far rivers not drawn`);
@@ -325,4 +370,34 @@ export class WaterGpuData {
     destroy() {
         this.indexBuffer.destroy(); this.lakesBuffer.destroy(); this.paramsBuffer.destroy(); this.masksTexture.destroy(); this.riversBuffer.destroy();
     }
+}
+
+/**
+ * Predicate (face, depth, x, y) for quadtree tiles touching any of the grid
+ * cells (water graph cube grid, N per face side) or within marginCells of
+ * one (tile normals read a border beyond the tile). Tile x, y index face U,
+ * V at 2^depth tiles per side, as the cells do at N.
+ */
+export function tilesTouchingCells(cells, N, marginCells = 1) {
+    const byFace = new Map();
+    for (const c of cells) {
+        const face = Math.floor(c / (N * N)), r = c % (N * N);
+        let list = byFace.get(face);
+        if (!list) byFace.set(face, (list = []));
+        list.push(r);
+    }
+    const sets = new Map([...byFace].map(([f, list]) => [f, new Set(list)]));
+    return (face, depth, x, y) => {
+        const list = byFace.get(face);
+        if (!list) return false;
+        const g = 2 ** depth;
+        const i0 = Math.max(0, Math.floor((x / g) * N) - marginCells), i1 = Math.min(N - 1, Math.ceil(((x + 1) / g) * N) - 1 + marginCells);
+        const j0 = Math.max(0, Math.floor((y / g) * N) - marginCells), j1 = Math.min(N - 1, Math.ceil(((y + 1) / g) * N) - 1 + marginCells);
+        if ((i1 - i0 + 1) * (j1 - j0 + 1) <= list.length) {
+            const set = sets.get(face);
+            for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) if (set.has(j * N + i)) return true;
+            return false;
+        }
+        return list.some(r => { const i = r % N, j = Math.floor(r / N); return i >= i0 && i <= i1 && j >= j0 && j <= j1; });
+    };
 }

@@ -12,9 +12,13 @@
 // of 2 x 2 samples inside the cell (less aliasing of sub-cell detail). Patch
 // cell (i, j) sits at tangent-plane point x0 + (i + 0.5) * spacing,
 // y0 + (j + 0.5) * spacing (see lakeRefine.js), one sample each.
+// The water system finds lakes and rivers on the terrain without the river
+// carve (riverCarve.wgsl.js). Patches can also be sampled carved (the water
+// simulation's bed), once setWaterCarveResources gave the river data.
 
 import { createAdvancedTerrainComputeShader } from '../shaders/webgpu/advancedTerrainCompute.wgsl.js';
 import { hashParts } from './waterCache.js';
+import { RIVER_CARVE_BINDINGS } from '../water/riverCarve.wgsl.js';
 
 function hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut }) {
     return `
@@ -81,21 +85,34 @@ const DEFAULT_SAMPLES_PER_DISPATCH = 131072;
  * evaluations; yieldBetween (e.g. one animation frame) runs between them.
  */
 export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null }) {
-    const baseSource = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions());
+    const baseSource = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: false }));
     const used = new Set();
     for (const m of baseSource.matchAll(/@group\(0\)\s*@binding\((\d+)\)/g)) used.add(Number(m[1]));
     const free = [];
     for (let b = 0; free.length < 4; b++) if (!used.has(b)) free.push(b);
     const [gridParams, gridOut, patchParams, patchOut] = free;
+    const entryPoints = hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut });
 
-    const module = device.createShaderModule({
-        label: 'HydrologySampler',
-        code: baseSource + hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut }),
-    });
+    const module = device.createShaderModule({ label: 'HydrologySampler', code: baseSource + entryPoints });
     const [gridPipeline, patchPipeline] = await Promise.all([
         device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'hydroGridMain' } }),
         device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'hydroPatchMain' } }),
     ]);
+    // Carved patches (same group 0 bindings; the carve's data in group 1),
+    // compiled on first use.
+    let carvedPipeline = null;
+    let carvedPromise = null;
+    let carveGroup = null;
+    const carvedReady = () => {
+        if (terrainGenerator.waterCarve !== true) return Promise.resolve(null);
+        carvedPromise ??= (async () => {
+            const src = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: true }));
+            const m = device.createShaderModule({ label: 'HydrologySampler-carved', code: src + entryPoints });
+            carvedPipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: m, entryPoint: 'hydroPatchMain' } });
+            return carvedPipeline;
+        })();
+        return carvedPromise;
+    };
 
     // face 0: any face >= 0 selects the sphere terrain path; the entry
     // points pass their own directions.
@@ -168,15 +185,18 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
      * Heights (metres) on a tangent-plane patch, frame from lakeRefine.js:
      * { c, e1, e2, x0, y0, spacing, nx, ny }. Row-major Float32Array.
      */
-    async function samplePatch(frame, R) {
+    async function samplePatch(frame, R, { carved = false } = {}) {
         const { nx, ny } = frame;
+        if (carved) await carvedReady();
+        const carve = carved && carvedPipeline && carveGroup;
+        const pipeline = carve ? carvedPipeline : patchPipeline;
         const heights = new Float32Array(nx * ny);
         const rowsPer = Math.max(8, Math.min(Math.ceil(ny / 8) * 8, Math.floor(samplesPerDispatch / nx / 8) * 8));
         const bytes = nx * rowsPer * 4;
         const out = device.createBuffer({ label: 'HydroPatch-Out', size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
         const params = device.createBuffer({ label: 'HydroPatch-Params', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         const bindGroup = device.createBindGroup({
-            layout: patchPipeline.getBindGroupLayout(0),
+            layout: pipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: uniformBuffer } },
                 { binding: patchParams, resource: { buffer: params } },
@@ -195,9 +215,10 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
             const readback = device.createBuffer({ size: nx * rows * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
             const enc = device.createCommandEncoder({ label: 'HydroPatch' });
             const pass = enc.beginComputePass();
-            pass.setPipeline(patchPipeline);
+            pass.setPipeline(pipeline);
             pass.setBindGroup(0, bindGroup);
-            setBiome(pass);
+            if (carve) pass.setBindGroup(1, carveGroup);
+            else setBiome(pass);
             pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(rows / 8), 1);
             pass.end();
             enc.copyBufferToBuffer(out, 0, readback, 0, nx * rows * 4);
@@ -212,8 +233,24 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         return heights;
     }
 
+    /** River carve data for carved patches: WaterGpuData resources, or null. */
+    async function setWaterCarveResources(res) {
+        if (!res) { carveGroup = null; return; }
+        if (!(await carvedReady())) return;
+        const C = RIVER_CARVE_BINDINGS;
+        carveGroup = device.createBindGroup({
+            label: 'HydroPatch-carve',
+            layout: carvedPipeline.getBindGroupLayout(1),
+            entries: [
+                { binding: C.index, resource: { buffer: res.index } },
+                { binding: C.params, resource: { buffer: res.params } },
+                { binding: C.rivers, resource: { buffer: res.rivers } },
+            ],
+        });
+    }
+
     return {
-        sampleGrid, samplePatch, maxH, seaLevelM,
+        sampleGrid, samplePatch, setWaterCarveResources, maxH, seaLevelM,
         // Everything the samples depend on: the terrain shader and its uniforms.
         terrainKey: hashParts([baseSource, uniformBytes]),
         destroy() { uniformBuffer.destroy(); },

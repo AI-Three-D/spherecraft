@@ -7,8 +7,9 @@
 // rivers already drawn by the terrain shader.
 // - Frame: gnomonic tangent plane at the centre (lakeRefine.js frames);
 //   cell (i, j) centre at x = (i + 0.5 - n/2) dx, y = (j + 0.5 - n/2) dx.
-// - Bed: the terrain height function at the cell centres (HydrologyGrid
-//   samplePatch; no per-tile micro detail: H_simBed of the plan).
+// - Bed: the terrain height function at the cell centres, with the river
+//   channels carved (HydrologyGrid samplePatch carved; no per-tile micro
+//   detail: H_simBed of the plan).
 // - Start: the static water at every cell, from the same lookup the terrain
 //   shader uses (waterWgsl.js): lake level, or river level and flow.
 // - Boundaries: open edges, and a border band relaxed toward the static
@@ -128,7 +129,7 @@ export class WaterSimSite {
         const { e1, e2 } = tangentBasis(c);
         const half = 0.5 * n * dx;
         const frame = { c, e1, e2, x0: -half, y0: -half, spacing: dx, nx: n, ny: n };
-        const bed = await this.sampler.samplePatch(frame, this.R);
+        const bed = await this.sampler.samplePatch(frame, this.R, { carved: true });
         this.frame = frame;
         this.bed = bed;
         this.sim.setBed(bed);

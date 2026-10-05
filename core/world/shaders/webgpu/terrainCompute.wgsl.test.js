@@ -76,5 +76,12 @@ describe('terrain generation compute shader', () => {
             const code = createAdvancedTerrainComputeShader({ ...base, ...extra });
             expect(compile(code)).toBeNull();
         });
+        // With the river carve (riverCarve.wgsl.js, group 1 bindings 1-3).
+        it(`${name} variant compiles with the river carve`, () => {
+            const code = createAdvancedTerrainComputeShader({ ...base, ...extra, waterCarve: true });
+            expect(code).toContain('fn riverCarve_d');
+            expect(code).toMatch(/@group\(1\) @binding\(3\) var<storage, read> waterRivers/);
+            expect(compile(code)).toBeNull();
+        });
     }
 });

@@ -20,9 +20,10 @@ import { WaterCache, hashParts } from './waterCache.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
 import { dirToPlane, growPatchFrame, limitPatchCells } from './lakeRefine.js';
 import { dirToCell } from './waterGraph.js';
+import { RIVER_SUB } from '../water/waterWgsl.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v4';
+export const WATER_ALGO_VERSION = 'water-v5';
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,
@@ -35,6 +36,16 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
         retryCorridorScale: 2.5,  // wider corridor when the start sits above the source lake
         startToleranceM: 1.0,
         shape: {},         // RIVER_SHAPE_DEFAULTS overrides (riverRefine.js)
+    },
+    // River channels carved into the terrain (riverCarve.wgsl.js).
+    carve: {
+        enabled: true,
+        bankM: 40,              // banks reach this far beyond the half-width (rising to a wall over the outer half)
+        bankCurvature: 0.02,    // 1/m: bank height above the water = a x + c x^2 (a keeps the waterline smooth)
+        fillDepthFactor: 2,     // hollows in the channel up to this x depth are filled; deeper stay as ponds
+        freeboardM: 0.4,        // water below the banks by freeboardM + freeboardDepthFrac x depth,
+        freeboardDepthFrac: 0.25,
+        rampM: 60,              // reached over the first rampM from the source
     },
     refine: {
         enabled: true,
@@ -51,6 +62,7 @@ function mergeConfig(cfg = {}) {
         ...WATER_SERVICE_DEFAULTS, ...cfg,
         refine: { ...WATER_SERVICE_DEFAULTS.refine, ...(cfg.refine ?? {}) },
         rivers: { ...WATER_SERVICE_DEFAULTS.rivers, ...(cfg.rivers ?? {}) },
+        carve: { ...WATER_SERVICE_DEFAULTS.carve, ...(cfg.carve ?? {}) },
     };
 }
 
@@ -149,6 +161,7 @@ export class WaterService {
             this._sampler = await createHydrologySampler({
                 device: this.device, terrainGenerator: this.terrainGenerator, yieldBetween: this._yieldBetween,
             });
+            if (this._carveResources) this._sampler.setWaterCarveResources(this._carveResources);
             const N = this.config.gridN;
             this._key = hashParts([
                 WATER_ALGO_VERSION, N, this.radius, this.config.params,
@@ -329,7 +342,8 @@ export class WaterService {
             }
             if (plan?.status !== 'ok') { this._failedRivers.add(riverId); return null; }
             const destKey = plan.dest.type === 'lake' ? `lake${plan.dest.id}` : 'sea';
-            const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${riverId}:${destKey}`;
+            const shapeKey = hashParts([RC.shape, this.config.carve]);
+            const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${shapeKey}:${riverId}:${destKey}`;
             let rec = this.config.cache ? await this._cache.get(riverKey) : null;
             const fromCache = !!rec;
             if (!rec) {
@@ -343,7 +357,13 @@ export class WaterService {
                     }
                     const frame = limitPatchCells(plan.frame, this.config.refine.maxCells);
                     const heights = await this._sampler.samplePatch(frame, this.radius);
-                    const r = await this._client.call({ type: 'solveRiver', riverId, frame, heights, shape: RC.shape }, [heights.buffer]);
+                    const CV = this.config.carve;
+                    const r = await this._client.call({
+                        type: 'solveRiver', riverId, frame, heights, shape: RC.shape,
+                        levels: { freeboardM: CV.freeboardM, freeboardDepthFrac: CV.freeboardDepthFrac, rampM: CV.rampM },
+                        reachM: CV.enabled ? CV.bankM : 0,
+                        sub: RIVER_SUB,
+                    }, [heights.buffer]);
                     if (r.status === 'ok' && (!rec || rec.status !== 'ok' || r.startLevel < rec.startLevel)) rec = r;
                     else if (!rec) rec = r;
                     if (rec.status === 'ok' && rec.startLevel - srcLevel <= RC.startToleranceM) break;
@@ -387,8 +407,7 @@ export class WaterService {
     _riverHighPoint(rec) {
         const n = rec.points.length / rec.stride, P = rec.points, st = rec.stride;
         for (let k = 0; k < n; k++) {
-            const fill = P[k * st + 3] - P[k * st + 5];
-            if (fill < rec.startLevel - 0.05) return [P[k * st], P[k * st + 1], P[k * st + 2]];
+            if (P[k * st + 8] < rec.startLevel - 0.05) return [P[k * st], P[k * st + 1], P[k * st + 2]];
         }
         return null;
     }
@@ -427,6 +446,20 @@ export class WaterService {
             if (r) r.downstream = down;
         }
         this.version++;
+    }
+
+    /**
+     * River carve data (WaterGpuData resources) for carved patch samples
+     * (samplePatch(frame, R, { carved: true }): the simulation's bed).
+     */
+    setWaterCarveResources(res) {
+        this._carveResources = res;
+        this._sampler?.setWaterCarveResources(res);
+    }
+
+    /** Terrain heights (m) on a tangent-plane patch; carved: with the river channels. */
+    samplePatch(frame, { carved = false } = {}) {
+        return this._sampler.samplePatch(frame, this.radius, { carved });
     }
 
     summary() {

@@ -33,6 +33,7 @@ export const TERRAIN_FEATURES = Object.freeze([
     { key: 'inlandUplift', wgsl: 'TF_INLAND_UPLIFT', about: 'Uniform uplift of continental interiors.' },
     { key: 'oceanFloor', wgsl: 'TF_OCEAN_FLOOR', about: 'Ocean-floor noise (off: flat floor at the ocean base depth).' },
     { key: 'microDetail', wgsl: 'TF_MICRO_DETAIL', about: 'Per-tile micro displacement by surface type (final height pass).' },
+    { key: 'waterCarve', wgsl: 'TF_WATER_CARVE', about: 'River channels carved along the traced rivers (riverCarve.wgsl.js; terrain.waterGraph.carve).' },
 ]);
 
 const BIT_BY_KEY = new Map(TERRAIN_FEATURES.map((f, i) => [f.key, 1 << i]));

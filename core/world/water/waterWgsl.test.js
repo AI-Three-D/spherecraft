@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseWgsl, validate } from 'naga-wasm';
 import { createWaterWgsl, LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_SEG_FLOATS } from './waterWgsl.js';
-import { cellDir, dirToCell } from '../hydrology/waterGraph.js';
+import { cellDir, dirToCell, dirToCellSub, faceUVToDir } from '../hydrology/waterGraph.js';
 
 describe('water WGSL', () => {
     it('validates inside a fragment shader', () => {
@@ -44,6 +44,18 @@ fn main(@location(0) wp: vec3<f32>) -> @location(0) vec4<f32> {
         for (let id = 0; id < 6 * N * N; id += 7) {
             const d = cellDir(id, N);
             expect(wgslCell(d, N)).toBe(dirToCell(d, N));
+        }
+    });
+
+    it('dirToCellSub: the cell and its S x S sub-cell from face UV', () => {
+        const N = 16, S = 4;
+        for (let face = 0; face < 6; face++) {
+            for (let a = 0; a < N * S; a++) for (let b = 0; b < N * S; b += 3) {
+                const u = (a + 0.5) / (N * S), v = (b + 0.5) / (N * S);
+                const id = dirToCellSub(faceUVToDir(face, u, v), N, S);
+                const cell = face * N * N + Math.floor(b / S) * N + Math.floor(a / S);
+                expect(id).toBe(cell * S * S + (b % S) * S + (a % S));
+            }
         }
     });
 });

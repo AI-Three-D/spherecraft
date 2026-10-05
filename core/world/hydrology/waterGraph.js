@@ -84,6 +84,20 @@ export function dirToCell(d, N) {
     return face * N * N + j * N + i;
 }
 
+/**
+ * Cell and sub-cell of a direction, as one id: cell * S * S + sj * S + si
+ * (S x S sub-cells per cell; waterWgsl.js waterDirToCellSub).
+ */
+export function dirToCellSub(d, N, S = 4) {
+    const { face, u, v } = dirToFaceUV(d);
+    const fx = u * N, fy = v * N;
+    const i = Math.min(N - 1, Math.max(0, Math.floor(fx)));
+    const j = Math.min(N - 1, Math.max(0, Math.floor(fy)));
+    const si = Math.min(S - 1, Math.max(0, Math.floor((fx - i) * S)));
+    const sj = Math.min(S - 1, Math.max(0, Math.floor((fy - j) * S)));
+    return (face * N * N + j * N + i) * S * S + sj * S + si;
+}
+
 /** Relative cell area (solid angle) of the gnomonic cell, mean 1. */
 function cellAreaWeights(N) {
     const w = new Float32Array(N * N);

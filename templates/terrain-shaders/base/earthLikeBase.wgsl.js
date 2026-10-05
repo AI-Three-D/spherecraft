@@ -190,7 +190,14 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
 // skips as calculateTerrainHeight, so the height matches it (to float
 // rounding where the compiler fuses differently); the gradient is analytic.
 // Callers project the gradient onto the tangent plane (terrainSurfaceGradient).
+// Last step: the river channels (core/world/water/riverCarve.wgsl.js; a
+// pass-through where the shader is built without them).
 fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
+    return riverCarve_d(calculateTerrainHeightBaseD(seed, unitDir), unitDir);
+}
+
+// The terrain before the river carve.
+fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     let profile = getTerrainProfile();
     let amp = getTerrainAmplitudes(profile);
 

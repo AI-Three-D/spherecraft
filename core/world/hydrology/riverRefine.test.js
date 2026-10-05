@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { corridorMask, riverShape, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
+import { corridorMask, riverLevels, riverShape, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
 
 // 60 x 30 patch, 16 m cells, frame origin at (0, 0). A valley runs along
 // j = 15 from a source lake (i < 10, level 50 m) down to a destination lake
@@ -59,5 +59,50 @@ describe('river trace', () => {
         expect(b.width).toBeGreaterThan(a.width);
         expect(b.depth).toBeGreaterThan(a.depth);
         expect(a.width).toBeGreaterThanOrEqual(10);
+    });
+});
+
+describe('river levels for the carve', () => {
+    it('water below the banks, never above the source or below the destination; the level never rises', () => {
+        // Spill level: flat at the source sill (100), a hump the trace crossed
+        // (fill above the source lake), down to the destination lake (80).
+        const s = [], fill = [], depth = [];
+        for (let k = 0; k <= 50; k++) {
+            s.push(k * 40);
+            fill.push(k < 5 ? 100 : k < 10 ? 103 : Math.max(80, 100 - (k - 10) * 0.6));
+            depth.push(k % 7 === 3 ? 0.6 : 1.0 + k * 0.01);   // depth not monotone
+        }
+        const { eta, bed } = riverLevels(fill, s, depth, { srcLevel: 100, destLevel: 80 },
+            { freeboardM: 0.4, freeboardDepthFrac: 0.25, rampM: 60 });
+        expect(eta[0]).toBe(100);                                   // no step at the outlet
+        for (let k = 0; k < eta.length; k++) {
+            expect(eta[k]).toBeLessThanOrEqual(100);
+            expect(eta[k]).toBeGreaterThanOrEqual(80);
+            expect(eta[k] - bed[k]).toBeCloseTo(depth[k], 9);
+            if (k) expect(eta[k]).toBeLessThanOrEqual(eta[k - 1]);
+            if (s[k] >= 60 && fill[k] - 0.4 - 0.25 * depth[k] > 80) expect(eta[k]).toBeLessThanOrEqual(fill[k] - 0.4 - 0.25 * depth[k] + 1e-9);
+        }
+        expect(eta[eta.length - 1]).toBe(80);                       // meets the destination's level
+    });
+
+    it('segmentCells covers every cell the segment capsule touches', () => {
+        // Rotated square cells of 50 m, a 40 m segment with reach 60 m.
+        const th = 0.37, cs = Math.cos(th), sn = Math.sin(th);
+        const cellAt = (x, y) => {
+            const u = x * cs + y * sn, v = -x * sn + y * cs;
+            return Math.floor(u / 50) * 1000 + Math.floor(v / 50);
+        };
+        for (const [ax, ay, bx, by] of [[3, 7, 43, 7], [10, 10, 30, 45], [0, 0, 0.5, 0]]) {
+            const got = segmentCells(ax, ay, bx, by, 60, cellAt);
+            const len = Math.hypot(bx - ax, by - ay);
+            let missed = 0;
+            for (let x = Math.min(ax, bx) - 62; x <= Math.max(ax, bx) + 62; x += 0.5) {
+                for (let y = Math.min(ay, by) - 62; y <= Math.max(ay, by) + 62; y += 0.5) {
+                    const t = len > 0 ? Math.max(0, Math.min(1, ((x - ax) * (bx - ax) + (y - ay) * (by - ay)) / (len * len))) : 0;
+                    if (Math.hypot(x - ax - t * (bx - ax), y - ay - t * (by - ay)) <= 60 && !got.has(cellAt(x, y))) missed++;
+                }
+            }
+            expect(missed).toBe(0);
+        }
     });
 });

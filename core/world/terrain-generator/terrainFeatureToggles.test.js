@@ -39,7 +39,7 @@ describe('terrain feature toggles', () => {
     });
 
     it('every TF_ constant used by the terrain shaders is in the table, and every table entry is used', () => {
-        const roots = ['templates/terrain-shaders', 'core/world/shaders/webgpu'];
+        const roots = ['templates/terrain-shaders', 'core/world/shaders/webgpu', 'core/world/water'];
         const used = new Set();
         const walk = (dir) => {
             for (const name of fs.readdirSync(dir)) {

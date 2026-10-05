@@ -205,6 +205,10 @@ export class WebGPUTerrainGenerator {
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
         this.erosionFilter = requireObject(this.terrainConfig.erosionFilter, 'planetConfig.terrainGeneration.erosionFilter');
+        // River channels carved into the height (riverCarve.wgsl.js), from the
+        // water graph's traced rivers (setWaterCarveResources).
+        const waterGraph = this.terrainConfig.waterGraph ?? {};
+        this.waterCarve = waterGraph.enabled === true && waterGraph.carve?.enabled !== false;
         this._applyTerrainFeatures(this.terrainConfig?.features ?? {}, null);
         this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');
         const radiusM = this.worldScale;

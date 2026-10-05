@@ -79,7 +79,7 @@ export class HydrologyPrecompute {
         const N = gridW * gridL;
 
         // ---- Pass A: broad landform elevation sample -----------------------
-        const baseOptions = terrainGenerator._getAdvancedTerrainShaderOptions();
+        const baseOptions = terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: false });
         const baseSource = createAdvancedTerrainComputeShader(baseOptions);
 
         const used = new Set();

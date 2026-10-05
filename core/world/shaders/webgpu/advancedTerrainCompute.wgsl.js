@@ -2,6 +2,7 @@
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
 import { createTerrainFeatureToggleWgsl } from '../../terrain-generator/terrainFeatureToggles.js';
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
+import { createRiverCarveWgsl } from '../../water/riverCarve.wgsl.js';
 
 function wgslFloat(value, fallback) {
   const n = Number.isFinite(value) ? value : fallback;
@@ -450,7 +451,8 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
         dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
-    let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain;
+    // No micro detail in river channels (it would raise the carved bed).
+    let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(dir);
     return softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
 }
 
@@ -632,6 +634,9 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureHighlands(),
     createTerrainFeatureRivers(),
     createTerrainFeatureErosionSeeds(),
+    // options.waterCarve: river channels in the height (group 1 bindings 1-3,
+    // riverCarve.wgsl.js); otherwise pass-through stubs.
+    createRiverCarveWgsl({ enabled: options?.waterCarve === true }),
     base.base(),
     `
 const WATER_1: u32 = SURFACE_WATER;
@@ -1546,7 +1551,7 @@ else if (uniforms.outputType == 4) {
         dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
-    let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain;
+    let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(unitDir);
     let finalH = softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
     output = vec4<f32>(finalH, 0.0, 0.0, 1.0);
 }

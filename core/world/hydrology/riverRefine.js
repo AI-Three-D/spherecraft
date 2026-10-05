@@ -17,8 +17,9 @@
 //   gets a drainage path to the destination and its spill level (fill);
 // - trace from the source cell down the drainage: the path ends in the
 //   destination's water by construction, and fill never rises along it.
-// The trace is then smoothed, resampled, and given a water surface (fill +
-// depth), width, depth and flow speed from the catchment.
+// The trace is then smoothed, resampled, and given width, depth and flow
+// speed from the catchment, and a water level and bed below the banks
+// (riverLevels): the terrain is carved to them (riverCarve.wgsl.js).
 
 import { MinHeap } from './waterGraph.js';
 
@@ -148,4 +149,64 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS) {
     const depth = Math.max(P.minDepthM, P.depthCoef * Math.pow(Math.max(Qm3s, 0), P.depthExp));
     const speed = Math.max(0.3, Math.min(3.5, Math.pow(depth, 2 / 3) * Math.sqrt(Math.max(slope, 1e-5)) / P.manning));
     return { width, depth, speed };
+}
+
+export const RIVER_LEVEL_DEFAULTS = Object.freeze({
+    // The water surface sits freeboardM + freeboardDepthFrac x depth below
+    // the trace's spill level (visible banks)...
+    freeboardM: 0.4,
+    freeboardDepthFrac: 0.25,
+    // ...reached over the first rampM from the source (no step at the outlet).
+    rampM: 60,
+});
+
+/**
+ * Water level and bed along a traced river, for the terrain carve
+ * (riverCarve.wgsl.js): eta = min(srcLevel, max(destLevel, fill - freeboard
+ * x ramp(s))), so the water is below the banks, never above the source
+ * lake and never below the destination's water; bed = eta - depth. A
+ * running minimum keeps the water level from rising downstream (the river
+ * never flows backwards). The bed may rise again where a deeper section
+ * gets shallower, as real riverbeds do (owner 2026-10-05: that just holds
+ * some water).
+ * @param {ArrayLike<number>} fill   spill level along the trace (m)
+ * @param {ArrayLike<number>} s      distance from the source (m)
+ * @param {ArrayLike<number>} depth  channel depth (riverShape)
+ * @returns {{eta: Float64Array, bed: Float64Array}}
+ */
+export function riverLevels(fill, s, depth, { srcLevel, destLevel }, P = RIVER_LEVEL_DEFAULTS) {
+    const n = fill.length, eta = new Float64Array(n), bed = new Float64Array(n);
+    let runEta = Infinity;
+    for (let k = 0; k < n; k++) {
+        const x = Math.min(1, Math.max(0, s[k] / Math.max(P.rampM, 1e-6)));
+        const fb = (P.freeboardM + P.freeboardDepthFrac * depth[k]) * x * x * (3 - 2 * x);
+        runEta = Math.min(runEta, Math.min(srcLevel, Math.max(destLevel, fill[k] - fb)));
+        eta[k] = runEta;
+        bed[k] = runEta - depth[k];
+    }
+    return { eta, bed };
+}
+
+/**
+ * Grid cells a river segment's carve can reach: the rectangle around its
+ * capsule (the segment from (ax, ay) to (bx, by), plane coords, radius
+ * reachM), widened by marginM and probed every stepM. A cell (much larger
+ * than stepM) that touches the capsule then contains a probe.
+ * @param {(x: number, y: number) => number} cellAt  grid cell of a plane point
+ * @returns {Set<number>}
+ */
+export function segmentCells(ax, ay, bx, by, reachM, cellAt, { stepM = 10, marginM = 15 } = {}) {
+    const len = Math.hypot(bx - ax, by - ay);
+    const ux = len > 0 ? (bx - ax) / len : 1, uy = len > 0 ? (by - ay) / len : 0;
+    const r = reachM + marginM;
+    const na = Math.max(1, Math.ceil((len + 2 * r) / stepM)), nc = Math.max(1, Math.ceil(2 * r / stepM));
+    const cells = new Set();
+    for (let i = 0; i <= na; i++) {
+        const a = -r + (i / na) * (len + 2 * r);
+        for (let j = 0; j <= nc; j++) {
+            const c = -r + (j / nc) * 2 * r;
+            cells.add(cellAt(ax + a * ux - c * uy, ay + a * uy + c * ux));
+        }
+    }
+    return cells;
 }

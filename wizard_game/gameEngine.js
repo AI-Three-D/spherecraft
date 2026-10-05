@@ -52,7 +52,7 @@ import { createTerrainFeatureErosionFilter } from '../templates/terrain-shaders/
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
-import { WaterGpuData } from '../core/world/water/WaterGpuData.js';
+import { WaterGpuData, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
 import { WaterSimSite } from '../core/world/water/WaterSimSite.js';
 import { ErosionSeedVerifier } from '../core/world/hydrology/ErosionSeedVerifier.js';
 import { computeSurfaceTangentFrame } from '../core/planet/surfaceFrame.js';
@@ -1425,8 +1425,19 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             });
             this.waterService.start();
             // Lakes and rivers drawn in the terrain shading (core/world/water/waterWgsl.js).
-            this.waterGpuData = new WaterGpuData(device, { gridN: this.waterService.config.gridN, planetRadius: this.planetConfig.radius });
+            const cfg = this.waterService.config;
+            this.waterGpuData = new WaterGpuData(device, {
+                gridN: cfg.gridN, planetRadius: this.planetConfig.radius,
+                carve: terrainGenerator.waterCarve ? cfg.carve : null,
+            });
             this.renderer?.setWaterData?.(this.waterGpuData);
+            // River channels carved into tiles generated from now on, and into
+            // the simulation's bed (core/world/water/riverCarve.wgsl.js).
+            if (terrainGenerator.waterCarve) {
+                terrainGenerator.setWaterCarveResources(this.waterGpuData.resources);
+                this.waterService.setWaterCarveResources(this.waterGpuData.resources);
+                this._waterCarveGenerator = terrainGenerator;
+            }
             return;
         }
         this.waterService.update(this.camera?.position);
@@ -1435,6 +1446,14 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             const rel = { x: cam.x - origin.x, y: cam.y - origin.y, z: cam.z - origin.z };
             this._tickWaterSim(rel);
             this.waterGpuData.update(this.waterService, rel, performance.now() / 1000);
+            // Where rivers changed the carve changed: regenerate those tiles in
+            // place (tiles still generating with the old data notice the version).
+            const changed = this.waterGpuData.takeChangedCells();
+            if (changed && this._waterCarveGenerator) {
+                this._waterCarveGenerator.markWaterCarveChanged();
+                const queued = this.renderer?.quadtreeTileManager?.regenerateTiles?.(tilesTouchingCells(changed, this.waterGpuData.N)) ?? 0;
+                Logger.debug(`[Water] rivers changed in ${changed.size} cells: ${queued} resident tiles regenerating`);
+            }
         }
     }
 
@@ -1475,6 +1494,18 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             device.queue.submit([enc.finish()]);
         }
         gpu.site = site.coverage;
+    }
+
+    /** qtDiag.water.carve(): the river carve (core/world/water/riverCarve.wgsl.js) and the in-place tile regeneration it drives. */
+    waterCarveStatus() {
+        const gen = this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator;
+        if (!gen?.waterCarve) return { state: 'off (terrain.waterGraph.enabled or .carve.enabled false)' };
+        return {
+            state: gen.waterCarveBound ? 'bound' : 'waiting for the water system',
+            version: gen.waterCarveVersion ?? 0,
+            rivers: this.waterGpuData?._appliedRivers?.size ?? 0,
+            regeneration: this.renderer?.quadtreeTileManager?.tileStreamer?.getRegenerationStats?.() ?? null,
+        };
     }
 
     /** qtDiag.water.sim(): the near-field simulation site. */

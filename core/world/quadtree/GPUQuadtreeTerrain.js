@@ -852,6 +852,12 @@ export class QuadtreeTileManager {
         this.tileStreamer?.resetTiles?.({ reseedRootTiles: true });
     }
 
+    /** Regenerates matching resident tiles in place (TileStreamer.regenerateTiles). */
+    regenerateTiles(predicate) {
+        if (!this.isReady()) return 0;
+        return this.tileStreamer?.regenerateTiles?.(predicate) ?? 0;
+    }
+
     // ── Buffer / texture accessors for the renderer ──────────────────────
 
     getInstanceBuffer() {

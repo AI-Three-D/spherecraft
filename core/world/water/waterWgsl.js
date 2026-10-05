@@ -10,42 +10,41 @@
 //   grid (6 x N x N cells, cell id = face * N * N + j * N + i):
 //   [0, cells): lake slot A + 1 in bits 0..14, slot B + 1 in bits 15..29
 //   (0 = none), bit 30 = a graph river cell not traced yet (debug view);
-//   [cells, 2 cells): river segments in the cell: first << 8 | count;
+//   [cells, 2 cells): rivers in the cell: its sub-list block + 1 (0 = none);
+//   [2 cells, ...): sub-list blocks, one per river cell: for each of its
+//   4 x 4 sub-cells, the river segments reaching it: first << 8 | count;
 // - waterLakes: per lake, its level and, once refined, its mask layer and
 //   tangent-plane frame (lakeRefine.js);
 // - waterLakeMasks: r8 layers, 1 where the lake's water may show;
 // - waterRivers: river segments (riverRefine.js), listed per cell;
-// - waterParams: switches, grid size, colours.
+// - waterParams: switches, grid size, colours, river carve parameters.
 // A point is lake water when a lake in its cell has a level above the
 // point's height and (refined lakes) the mask allows water there. It is
 // river water when it lies in a river's channel (half-width from the
 // traced line), or beside it below the river's level, which drops by
 // spreadSlope per metre away from the channel. Shorelines are exact per
-// pixel: where the terrain height crosses the level.
+// pixel: where the terrain height crosses the level. The terrain itself is
+// carved along the rivers (riverCarve.wgsl.js), from the same segments.
 
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 
-// WaterLake: 4 x vec4 (64 bytes). WaterParams: 8 x vec4. WaterRiverSeg: 3 x vec4 (48 bytes).
+// WaterLake: 4 x vec4 (64 bytes). WaterParams: 8 x vec4. WaterRiverSeg: 4 x vec4 (64 bytes).
 export const LAKE_RECORD_FLOATS = 16;
 export const LAKE_PARAMS_FLOATS = 32;
-export const RIVER_SEG_FLOATS = 12;
-export const RIVER_MAX_SEGS_PER_CELL = 64;
+export const RIVER_SEG_FLOATS = 16;
+export const RIVER_MAX_SEGS_PER_CELL = 255;
+// River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
+// 512): a terrain point only walks the segments that can reach it.
+export const RIVER_SUB = 4;
 
 /**
- * @param {object} [o]
- * @param {number} [o.group=3]   bind group of the water bindings
- * @returns {string} WGSL: structs, bindings, waterLakeLevelAt(), waterRiverAt(), applyWater()
+ * WGSL shared by the water lookup and the river carve: WaterParams,
+ * WaterRiverSeg, the params / index / rivers bindings, waterDirToCell().
+ * @param {number} group
+ * @param {{index: number, params: number, rivers: number}} b  binding numbers
  */
-export function createWaterWgsl({ group = 3 } = {}) {
-    const B = WATER_BINDINGS;
+export function createWaterCommonWgsl(group, b) {
     return /* wgsl */`
-// ==================== Water (core/world/water/waterWgsl.js) ====
-struct WaterLake {
-    level: f32, maskLayer: i32, sizeX: f32, sizeY: f32,
-    c: vec3<f32>, x0: f32,
-    e1: vec3<f32>, y0: f32,
-    e2: vec3<f32>, _pad: f32,
-};
 struct WaterParams {
     gridN: u32, enabled: u32, debugMode: u32, riverCount: u32,
     planetRadius: f32, time: f32, rippleFade: f32, shoreSoftM: f32,
@@ -56,23 +55,27 @@ struct WaterParams {
     siteC: vec4<f32>,          // centre direction; w = half size (m)
     siteE1: vec4<f32>,         // tangent axis 1; w = fade 0..1
     siteE2: vec4<f32>,         // tangent axis 2; w = border width (m)
-    _reserved: vec4<f32>,
+    // River carve (riverCarve.wgsl.js): x = on (0/1), y = bank width beyond
+    // the half-width (m), z = bank curvature (1/m), w = hollows up to w x depth are filled.
+    carve: vec4<f32>,
 };
+// A piece of a traced river between two points (unit directions); values
+// interpolate along it: water level and bed (m above the sphere), half-width.
 struct WaterRiverSeg {
-    p0: vec3<f32>, eta0: f32,  // unit direction, water level (m)
+    p0: vec3<f32>, eta0: f32,
     p1: vec3<f32>, eta1: f32,
-    hw0: f32, hw1: f32, depth: f32, speed: f32,
+    hw0: f32, hw1: f32, bed0: f32, bed1: f32,
+    speed: f32, _pad0: f32, _pad1: f32, _pad2: f32,
 };
-@group(${group}) @binding(${B.index}) var<storage, read> waterIndex: array<u32>;
-@group(${group}) @binding(${B.lakes}) var<storage, read> waterLakes: array<WaterLake>;
-@group(${group}) @binding(${B.masks}) var waterLakeMasks: texture_2d_array<f32>;
-@group(${group}) @binding(${B.params}) var<uniform> waterParams: WaterParams;
-@group(${group}) @binding(${B.rivers}) var<storage, read> waterRivers: array<WaterRiverSeg>;
+@group(${group}) @binding(${b.index}) var<storage, read> waterIndex: array<u32>;
+@group(${group}) @binding(${b.params}) var<uniform> waterParams: WaterParams;
+@group(${group}) @binding(${b.rivers}) var<storage, read> waterRivers: array<WaterRiverSeg>;
 
-const WATER_NO_LAKE: f32 = -1.0e30;
+const WATER_RIVER_SUB: u32 = ${RIVER_SUB}u;
 
-// Cube-grid cell of a unit direction; same mapping as waterGraph.js dirToCell.
-fn waterDirToCell(d: vec3<f32>, n: u32) -> u32 {
+// Cube-grid cell of a unit direction and its sub-cell (0 .. SUB^2 - 1);
+// same mapping as waterGraph.js dirToCell / dirToCellSub.
+fn waterDirToCellSub(d: vec3<f32>, n: u32) -> vec2<u32> {
     let a = abs(d);
     var face = 0u;
     var x = 0.0;
@@ -89,10 +92,51 @@ fn waterDirToCell(d: vec3<f32>, n: u32) -> u32 {
         face = 5u; x = -d.x / -d.z; y = d.y / -d.z;
     }
     let fn_ = f32(n);
-    let i = u32(clamp(floor((x + 1.0) * 0.5 * fn_), 0.0, fn_ - 1.0));
-    let j = u32(clamp(floor((y + 1.0) * 0.5 * fn_), 0.0, fn_ - 1.0));
-    return face * n * n + j * n + i;
+    let fx = (x + 1.0) * 0.5 * fn_;
+    let fy = (y + 1.0) * 0.5 * fn_;
+    let i = u32(clamp(floor(fx), 0.0, fn_ - 1.0));
+    let j = u32(clamp(floor(fy), 0.0, fn_ - 1.0));
+    let sub = f32(WATER_RIVER_SUB);
+    let si = u32(clamp(floor((fx - f32(i)) * sub), 0.0, sub - 1.0));
+    let sj = u32(clamp(floor((fy - f32(j)) * sub), 0.0, sub - 1.0));
+    return vec2<u32>(face * n * n + j * n + i, sj * WATER_RIVER_SUB + si);
 }
+
+fn waterDirToCell(d: vec3<f32>, n: u32) -> u32 {
+    return waterDirToCellSub(d, n).x;
+}
+
+// River segments listed at a unit direction: first << 8 | count (0: none).
+fn waterRiverList(d: vec3<f32>) -> u32 {
+    let n = waterParams.gridN;
+    let cs = waterDirToCellSub(d, n);
+    let block = waterIndex[6u * n * n + cs.x];
+    if (block == 0u) { return 0u; }
+    return waterIndex[12u * n * n + (block - 1u) * WATER_RIVER_SUB * WATER_RIVER_SUB + cs.y];
+}
+`;
+}
+
+/**
+ * @param {object} [o]
+ * @param {number} [o.group=3]   bind group of the water bindings
+ * @returns {string} WGSL: structs, bindings, waterLakeLevelAt(), waterRiverAt(), applyWater()
+ */
+export function createWaterWgsl({ group = 3 } = {}) {
+    const B = WATER_BINDINGS;
+    return /* wgsl */`
+// ==================== Water (core/world/water/waterWgsl.js) ====
+struct WaterLake {
+    level: f32, maskLayer: i32, sizeX: f32, sizeY: f32,
+    c: vec3<f32>, x0: f32,
+    e1: vec3<f32>, y0: f32,
+    e2: vec3<f32>, _pad: f32,
+};
+${createWaterCommonWgsl(group, B)}
+@group(${group}) @binding(${B.lakes}) var<storage, read> waterLakes: array<WaterLake>;
+@group(${group}) @binding(${B.masks}) var waterLakeMasks: texture_2d_array<f32>;
+
+const WATER_NO_LAKE: f32 = -1.0e30;
 
 // Level of lake slot s (1-based, 0 = none) if it covers dir at heightM.
 fn waterLakeLevelIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler) -> f32 {
@@ -132,13 +176,13 @@ struct WaterRiverHit {
 fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     var hit: WaterRiverHit;
     hit.found = false;
-    let n = waterParams.gridN;
-    let e = waterIndex[6u * n * n + waterDirToCell(dir, n)];
+    let e = waterRiverList(dir);
     let count = min(e & 0xffu, ${RIVER_MAX_SEGS_PER_CELL}u);
     if (count == 0u) { return hit; }
     let first = e >> 8u;
     var best = 1.0e30;
     var eta = 0.0;
+    var bed = 0.0;
     for (var k = 0u; k < count; k++) {
         let s = waterRivers[first + k];
         let ab = s.p1 - s.p0;
@@ -147,17 +191,18 @@ fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
         if (dist < best) {
             best = dist;
             eta = mix(s.eta0, s.eta1, t);
+            bed = mix(s.bed0, s.bed1, t);
             hit.halfWidthM = mix(s.hw0, s.hw1, t);
             hit.flow = ab;
             hit.speed = s.speed;
-            hit.depthM = s.depth;
         }
     }
     let hw = hit.halfWidthM;
     if (best > hw + 200.0) { return hit; }
-    // Channel: parabolic cross-section of the river's depth; beside it the
-    // level drops with distance, so water spreads only into low ground.
-    let channel = hit.depthM * max(0.0, 1.0 - (best / hw) * (best / hw));
+    // Channel: parabolic cross-section of the river's depth (the shape the
+    // carve cuts, so terrain not carved yet still shows the river); beside
+    // it the level drops with distance, so water spreads only into low ground.
+    let channel = (eta - bed) * max(0.0, 1.0 - (best / hw) * (best / hw));
     let etaSide = eta - max(0.0, best - hw) * waterParams.absorption.a;
     let depthM = max(channel, etaSide - heightM);
     hit.found = depthM > 0.0;
@@ -288,7 +333,7 @@ fn applyWater(
         let e = waterIndex[cell];
         let n = waterParams.gridN;
         if ((e & 0x7fffu) != 0u) { return mix(bedColor, vec3<f32>(0.1, 0.4, 1.0), 0.35); }
-        if ((waterIndex[6u * n * n + cell] & 0xffu) != 0u) { return mix(bedColor, vec3<f32>(1.0, 0.1, 0.05), 0.3); }
+        if (waterIndex[6u * n * n + cell] != 0u) { return mix(bedColor, vec3<f32>(1.0, 0.1, 0.05), 0.3); }
         if (((e >> 30u) & 1u) != 0u) { return mix(bedColor, vec3<f32>(1.0, 0.6, 0.0), 0.45); }
     }
     return bedColor;

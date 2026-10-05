@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { WaterGpuData } from './WaterGpuData.js';
+import { WaterGpuData, tilesTouchingCells } from './WaterGpuData.js';
+import { RIVER_SEG_FLOATS } from './waterWgsl.js';
 
 // Stub device: records uploads; no GPU in vitest.
 beforeAll(() => {
@@ -85,23 +86,43 @@ describe('WaterGpuData', () => {
         const svc = fakeService();
         gpu.update(svc, cam, 0);
         expect(slots(gpu, 3)[2]).toBe(1);
-        // Three points (stride 8): segment 0 in cells 3 and 4, segment 1 in cell 4.
+        // Three points (stride 8): segment 0 in sub-cell 5 of cell 3 and sub-cell
+        // 0 of cell 4, segment 1 in sub-cell 0 of cell 4 (ids cell * 16 + sub).
         const points = new Float32Array(24);
         points.set([0, 0, 1, 105, 6, 1, 1.2, 3], 0);
         points.set([0.001, 0, 1, 104, 6, 1, 1.2, 3], 8);
         points.set([0.002, 0, 1, 103, 7, 1.2, 1.4, 4], 16);
-        svc.riverRecs.set(0, { points, stride: 8, segCellStart: Int32Array.from([0, 2, 3]), segCells: Int32Array.from([3, 4, 4]) });
+        svc.riverRecs.set(0, { points, stride: 8, segCellStart: Int32Array.from([0, 2, 3]), segCells: Int32Array.from([53, 64, 64]) });
         svc.version++;
         gpu.update(svc, cam, 0);
         const cells = gpu.cells;
         expect(slots(gpu, 3)[2]).toBe(0);                       // graph river bit cleared
-        const e3 = gpu.index[cells + 3], e4 = gpu.index[cells + 4];
-        expect(e3 & 0xff).toBe(1);
+        const sub = (c, s) => gpu.index[2 * cells + (gpu.index[cells + c] - 1) * 16 + s];
+        expect(gpu.index[cells + 3]).toBeGreaterThan(0);
+        expect(gpu.index[cells + 4]).toBeGreaterThan(0);
+        expect(gpu.index[cells + 5]).toBe(0);
+        expect(sub(3, 5) & 0xff).toBe(1);
+        expect(sub(3, 0)).toBe(0);
+        const e4 = sub(4, 0);
         expect(e4 & 0xff).toBe(2);
         expect(gpu.riverSegCount).toBe(3);
-        // Cell 4's second entry is segment 1: from point 1 to point 2.
-        const o = ((e4 >>> 8) + 1) * 12;
+        // Sub-cell 0 of cell 4: its second entry is segment 1, from point 1 to point 2; bed = level - depth.
+        const o = ((e4 >>> 8) + 1) * RIVER_SEG_FLOATS;
         expect(Array.from(gpu._segs.slice(o, o + 4))).toEqual([0.001, 0, 1, 104].map(Math.fround));
         expect(gpu._segs[o + 7]).toBe(103);
+        expect(gpu._segs[o + 10]).toBe(103);
+        expect(gpu._segs[o + 11]).toBeCloseTo(101.8, 4);
+    });
+
+    it('tilesTouchingCells picks the tiles over (or next to) changed cells', () => {
+        const N = 8, cell = 2 * N * N + 5 * N + 3;            // face 2, i 3, j 5
+        const touches = tilesTouchingCells(new Set([cell]), N);
+        expect(touches(2, 3, 3, 5)).toBe(true);                 // the same square
+        expect(touches(2, 3, 4, 5)).toBe(true);                 // neighbour (normals' border)
+        expect(touches(2, 3, 5, 5)).toBe(false);
+        expect(touches(2, 0, 0, 0)).toBe(true);                 // the whole face
+        expect(touches(1, 0, 0, 0)).toBe(false);                // another face
+        expect(touches(2, 5, 13, 21)).toBe(true);               // a small tile inside the cell
+        expect(touches(2, 5, 21, 21)).toBe(false);              // two cells away
     });
 });
