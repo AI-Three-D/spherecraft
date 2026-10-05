@@ -44,8 +44,9 @@ export class WaterGpuData {
         this.maxLayers = maxMaskLayers;
         this.enabled = true;
         this.debugMode = 0;
-        // Active simulation site { c, e1, e2, halfM, borderM, fade } or null:
-        // the terrain shader hides static water under it (waterSiteCover).
+        // Active simulation strip { river, s0, s1, halfM, endFadeM, sideFadeM,
+        // fade } (WaterRiverSim coverage) or null: the terrain shader hides
+        // static water under it (waterSimCover).
         this.site = null;
         this.look = { ...WATER_LOOK_DEFAULTS };
         // River carve parameters (WaterService config.carve; riverCarve.wgsl.js), or null: no carve.
@@ -284,12 +285,12 @@ export class WaterGpuData {
         f.set([L.absorption[0], L.absorption[1], L.absorption[2], 0], 12);
         const site = this.site;
         if (site && site.fade > 0) {
-            f.set([site.c[0], site.c[1], site.c[2], site.halfM], 16);
-            f.set([site.e1[0], site.e1[1], site.e1[2], site.fade], 20);
-            f.set([site.e2[0], site.e2[1], site.e2[2], site.borderM], 24);
+            f.set([site.river, site.s0, site.s1, site.halfM], 16);
+            f.set([site.endFadeM, site.sideFadeM, 0, site.fade], 20);
         } else {
-            f.fill(0, 16, 28);
+            f.fill(0, 16, 24);
         }
+        f.fill(0, 24, 28);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.
         const C = this.carve ?? {};
@@ -307,11 +308,12 @@ export class WaterGpuData {
      */
     _rebuildRivers(camDir) {
         const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map();
-        const recs = [...this._appliedRivers.values()].map(rec => {
+        const recs = [...this._appliedRivers.entries()].map(([rid, rec]) => {
             const P = rec.points;
             const cosA = camDir[0] * P[0] + camDir[1] * P[1] + camDir[2] * P[2];
-            return { rec, far: -cosA };
+            return { rid, rec, far: -cosA };
         }).sort((a, b) => a.far - b.far);
+        const ridOf = new Map(recs.map(r => [r.rec, r.rid]));
         let total = 0, dropped = 0;
         for (const { rec } of recs) {
             const n = rec.points.length / rec.stride;
@@ -343,13 +345,16 @@ export class WaterGpuData {
             const list = lists.get(id), first = next;
             for (let m = 0; m < list.length; m += 2) {
                 const rec = list[m], k = list[m + 1], P = rec.points, st = rec.stride, a = k * st, b = (k + 1) * st, o = next * F;
+                const arc = this._arcLengths(rec);
                 // WaterRiverSeg (waterWgsl.js): p0, eta0, p1, eta1, hw, thalweg,
-                // pool, skew, speed, foam at both ends (points: waterWorkerCore.js).
+                // pool, skew, speed, foam, arc length at both ends, river id
+                // (points: waterWorkerCore.js).
                 const ext = st >= 12;
                 this._segs.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
                     P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5],
                     ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
-                    P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0], o);
+                    P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0,
+                    arc[k], arc[k + 1], ridOf.get(rec) ?? -1, 0], o);
                 next++;
             }
             this.index[2 * this.cells + block * SS + (id % SS)] = (first << 8) | (list.length / 2);
@@ -371,6 +376,20 @@ export class WaterGpuData {
         if (next) this.device.queue.writeBuffer(this.riversBuffer, 0, this._segs, 0, next * F);
         this.riverSegCount = next;
         if (dropped) console.warn(`[Water] river segment buffer full: ${dropped} far rivers not drawn`);
+    }
+
+    /** Arc length (m) of each point of a traced river (cached per record). */
+    _arcLengths(rec) {
+        this._arcCache ??= new WeakMap();
+        let arc = this._arcCache.get(rec);
+        if (arc) return arc;
+        const P = rec.points, st = rec.stride, n = P.length / st;
+        arc = new Float64Array(n);
+        for (let k = 1; k < n; k++) {
+            arc[k] = arc[k - 1] + Math.hypot(P[k * st] - P[(k - 1) * st], P[k * st + 1] - P[(k - 1) * st + 1], P[k * st + 2] - P[(k - 1) * st + 2]) * this.R;
+        }
+        this._arcCache.set(rec, arc);
+        return arc;
     }
 
     destroy() {

@@ -20,7 +20,7 @@ import { createAdvancedTerrainComputeShader } from '../shaders/webgpu/advancedTe
 import { hashParts } from './waterCache.js';
 import { RIVER_CARVE_BINDINGS } from '../water/riverCarve.wgsl.js';
 
-function hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut }) {
+function hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut, dirsParams, dirsIn, dirsOut }) {
     return `
 struct HydroGridParams {
     n: u32,
@@ -68,6 +68,18 @@ fn hydroPatchMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dir = normalize(hydroPatch.c + (x * hydroPatch.e1 + y * hydroPatch.e2) * hydroPatch.invR);
     hydroPatchOut[gid.y * hydroPatch.nx + gid.x] = calculateTerrainHeight(dir.x, dir.z, uniforms.seed, dir) * hydroPatch.maxH;
 }
+
+struct HydroDirsParams { count: u32, maxH: f32, _p0: u32, _p1: u32, }
+@group(0) @binding(${dirsParams}) var<uniform> hydroDirs: HydroDirsParams;
+@group(0) @binding(${dirsIn}) var<storage, read> hydroDirsIn: array<vec4<f32>>;
+@group(0) @binding(${dirsOut}) var<storage, read_write> hydroDirsOut: array<f32>;
+
+@compute @workgroup_size(64)
+fn hydroDirsMain(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= hydroDirs.count) { return; }
+    let dir = normalize(hydroDirsIn[gid.x].xyz);
+    hydroDirsOut[gid.x] = calculateTerrainHeight(dir.x, dir.z, uniforms.seed, dir) * hydroDirs.maxH;
+}
 `;
 }
 
@@ -89,9 +101,9 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     const used = new Set();
     for (const m of baseSource.matchAll(/@group\(0\)\s*@binding\((\d+)\)/g)) used.add(Number(m[1]));
     const free = [];
-    for (let b = 0; free.length < 4; b++) if (!used.has(b)) free.push(b);
-    const [gridParams, gridOut, patchParams, patchOut] = free;
-    const entryPoints = hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut });
+    for (let b = 0; free.length < 7; b++) if (!used.has(b)) free.push(b);
+    const [gridParams, gridOut, patchParams, patchOut, dirsParams, dirsIn, dirsOut] = free;
+    const entryPoints = hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut, dirsParams, dirsIn, dirsOut });
 
     const module = device.createShaderModule({ label: 'HydrologySampler', code: baseSource + entryPoints });
     const [gridPipeline, patchPipeline] = await Promise.all([
@@ -100,15 +112,18 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     ]);
     // Carved patches (same group 0 bindings; the carve's data in group 1),
     // compiled on first use.
-    let carvedPipeline = null;
+    let carvedPipeline = null, carvedDirsPipeline = null;
     let carvedPromise = null;
-    let carveGroup = null;
+    let carveGroup = null, carveDirsGroup = null;
     const carvedReady = () => {
         if (terrainGenerator.waterCarve !== true) return Promise.resolve(null);
         carvedPromise ??= (async () => {
             const src = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: true }));
             const m = device.createShaderModule({ label: 'HydrologySampler-carved', code: src + entryPoints });
-            carvedPipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: m, entryPoint: 'hydroPatchMain' } });
+            [carvedPipeline, carvedDirsPipeline] = await Promise.all([
+                device.createComputePipelineAsync({ layout: 'auto', compute: { module: m, entryPoint: 'hydroPatchMain' } }),
+                device.createComputePipelineAsync({ layout: 'auto', compute: { module: m, entryPoint: 'hydroDirsMain' } }),
+            ]);
             return carvedPipeline;
         })();
         return carvedPromise;
@@ -233,24 +248,64 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         return heights;
     }
 
-    /** River carve data for carved patches: WaterGpuData resources, or null. */
+    /** River carve data for carved samples: WaterGpuData resources, or null. */
     async function setWaterCarveResources(res) {
-        if (!res) { carveGroup = null; return; }
+        if (!res) { carveGroup = carveDirsGroup = null; return; }
         if (!(await carvedReady())) return;
         const C = RIVER_CARVE_BINDINGS;
-        carveGroup = device.createBindGroup({
-            label: 'HydroPatch-carve',
-            layout: carvedPipeline.getBindGroupLayout(1),
+        const entries = [
+            { binding: C.index, resource: { buffer: res.index } },
+            { binding: C.params, resource: { buffer: res.params } },
+            { binding: C.rivers, resource: { buffer: res.rivers } },
+        ];
+        carveGroup = device.createBindGroup({ label: 'HydroPatch-carve', layout: carvedPipeline.getBindGroupLayout(1), entries });
+        carveDirsGroup = device.createBindGroup({ label: 'HydroDirs-carve', layout: carvedDirsPipeline.getBindGroupLayout(1), entries });
+    }
+
+    /**
+     * Carved terrain heights (m) at unit directions (Float32Array, 4 floats
+     * per direction: x, y, z, unused), or null when the carve is not ready.
+     * One dispatch (callers keep it to tens of thousands of directions).
+     */
+    async function sampleDirsCarved(dirs4) {
+        await carvedReady();
+        if (!carvedDirsPipeline || !carveDirsGroup) return null;
+        const count = dirs4.length / 4;
+        const inBuf = device.createBuffer({ label: 'HydroDirs-In', size: Math.max(16, dirs4.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const out = device.createBuffer({ label: 'HydroDirs-Out', size: Math.max(16, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+        const params = device.createBuffer({ label: 'HydroDirs-Params', size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const readback = device.createBuffer({ size: Math.max(16, count * 4), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        device.queue.writeBuffer(inBuf, 0, dirs4);
+        const p = new ArrayBuffer(16), pv = new DataView(p);
+        pv.setUint32(0, count, true); pv.setFloat32(4, maxH, true);
+        device.queue.writeBuffer(params, 0, p);
+        const bindGroup = device.createBindGroup({
+            layout: carvedDirsPipeline.getBindGroupLayout(0),
             entries: [
-                { binding: C.index, resource: { buffer: res.index } },
-                { binding: C.params, resource: { buffer: res.params } },
-                { binding: C.rivers, resource: { buffer: res.rivers } },
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: dirsParams, resource: { buffer: params } },
+                { binding: dirsIn, resource: { buffer: inBuf } },
+                { binding: dirsOut, resource: { buffer: out } },
             ],
         });
+        const enc = device.createCommandEncoder({ label: 'HydroDirs' });
+        const pass = enc.beginComputePass();
+        pass.setPipeline(carvedDirsPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.setBindGroup(1, carveDirsGroup);
+        pass.dispatchWorkgroups(Math.ceil(count / 64));
+        pass.end();
+        enc.copyBufferToBuffer(out, 0, readback, 0, count * 4);
+        device.queue.submit([enc.finish()]);
+        await readback.mapAsync(GPUMapMode.READ);
+        const heights = new Float32Array(readback.getMappedRange().slice(0, count * 4));
+        readback.unmap();
+        for (const b of [readback, inBuf, out, params]) b.destroy();
+        return heights;
     }
 
     return {
-        sampleGrid, samplePatch, setWaterCarveResources, maxH, seaLevelM,
+        sampleGrid, samplePatch, sampleDirsCarved, setWaterCarveResources, maxH, seaLevelM,
         // Everything the samples depend on: the terrain shader and its uniforms.
         terrainKey: hashParts([baseSource, uniformBytes]),
         destroy() { uniformBuffer.destroy(); },

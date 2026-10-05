@@ -130,6 +130,10 @@ describe('WaterGpuData', () => {
         const o = (e >>> 8) * RIVER_SEG_FLOATS;
         expect(Array.from(gpu._segs.slice(o + 8, o + 20)).map(v => +v.toFixed(4)))
             .toEqual([15, 16, 103.95, 102.8, 40, -1, 0.1, -0.2, 0.8, 0.9, 0.2, 0.4]);
+        // Arc length (m) at both ends and the river's id.
+        expect(gpu._segs[o + 20]).toBe(0);
+        expect(gpu._segs[o + 21]).toBeCloseTo(131072 * 0.001, 1);
+        expect(gpu._segs[o + 22]).toBe(0);
     });
 
     it('tilesTouchingCells picks the tiles over (or next to) changed cells', () => {

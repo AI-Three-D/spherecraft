@@ -1,35 +1,41 @@
 // core/renderer/water/waterSimSurface.wgsl.js
 //
 // Surface of the near-field water simulation (core/world/water/
-// WaterSimSite.js), adapted from Whitewater's vsWater/fsWater
-// (../whitewater/js/shaders.js): one vertex per cell read from the
-// simulation buffers, normal from neighbouring surface heights, small
-// turbulence waves; flow-advected ripples (two phases), foam from the
-// simulation's foam field, Fresnel sky reflection, sun glint, alpha from
-// depth. Changes: cells sit on the sphere (site tangent frame, radial
-// heights), dry cells keep the bed height and fragments below hmin are
-// discarded (soft wet/dry edge), and the surface fades across the site's
-// border band, where the terrain shader's static water takes over.
+// WaterRiverSim.js: a strip of cells along a river), adapted from
+// Whitewater's vsWater/fsWater (../whitewater/js/shaders.js): one vertex per
+// cell read from the simulation buffers, normal from neighbouring surface
+// heights, small turbulence waves; flow-advected ripples (two phases), foam
+// from the simulation's foam field, Fresnel sky reflection, sun glint, alpha
+// from depth. SphereCraft: cells sit on the sphere along the river (row
+// frames: centre direction and left normal per row, rows in a ring like the
+// simulation's), dry cells keep the bed height and fragments below hmin are
+// discarded (soft wet/dry edge); ripple coordinates are the offset across
+// and the arc length along the river, so the pattern stays on the ground as
+// the strip scrolls; the surface fades out at the strip's ends, where the
+// terrain shader's static water takes over.
 
 export function buildWaterSimVertexShader() {
     return /* wgsl */`
 struct SimVU {
     viewMatrix: mat4x4<f32>,
     projectionMatrix: mat4x4<f32>,
-    c: vec3<f32>, R: f32,
-    e1: vec3<f32>, dx: f32,
-    e2: vec3<f32>, n: f32,
-    origin: vec3<f32>, hmin: f32,
-    time: f32, fade: f32, border: f32, waveAmp: f32,
+    origin: vec3<f32>, R: f32,
+    dx: f32, W: f32, L: f32, rowBase: f32,
+    hmin: f32, time: f32, fade: f32, endFade: f32,
+    waveAmp: f32, _p0: f32, _p1: f32, _p2: f32,
 };
 @group(0) @binding(0) var<uniform> V: SimVU;
 @group(1) @binding(0) var<storage, read> B: array<f32>;
 @group(1) @binding(1) var<storage, read> S: array<vec4<f32>>;
 @group(1) @binding(2) var<storage, read> K: array<f32>;
+@group(1) @binding(3) var<storage, read> ROWS: array<vec4<f32>>;   // per row: centre, left normal, (hw, thalweg, s, valid)
 
+fn phys(j: i32) -> u32 {
+    let r = u32(clamp(j, 0, i32(V.L) - 1)) + u32(V.rowBase);
+    return select(r, r - u32(V.L), r >= u32(V.L));
+}
 fn ci(i: i32, j: i32) -> u32 {
-    let n = i32(V.n);
-    return u32(clamp(j, 0, n - 1) * n + clamp(i, 0, n - 1));
+    return phys(j) * u32(V.W) + u32(clamp(i, 0, i32(V.W) - 1));
 }
 fn etaN(i: i32, j: i32, eta0: f32) -> f32 {
     let s = S[ci(i, j)];
@@ -40,15 +46,17 @@ struct SimVOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) wp: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) hv: vec4<f32>,        // h, velocity along e1, along e2, foam
+    @location(2) hv: vec4<f32>,        // h, velocity across, along, foam
     @location(3) k: f32,
-    @location(4) local: vec2<f32>,     // site plane coords (m)
-    @location(5) edge: f32,            // border fade x site fade
+    @location(4) local: vec2<f32>,     // across (m), arc length along the river (m)
+    @location(5) edge: f32,            // end fade x strip fade
+    @location(6) e1: vec3<f32>,        // across (left)
+    @location(7) e2: vec3<f32>,        // along (downstream)
 };
 
 @vertex
 fn main(@builtin(vertex_index) vi: u32) -> SimVOut {
-    let n = i32(V.n);
+    let n = i32(V.W);
     let i = i32(vi) % n;
     let j = i32(vi) / n;
     let id = ci(i, j);
@@ -61,25 +69,32 @@ fn main(@builtin(vertex_index) vi: u32) -> SimVOut {
     let uc = 0.5 * (s.y + S[ci(i + 1, j)].y);
     let vc = 0.5 * (s.z + S[ci(i, j + 1)].z);
     let k = K[id];
-    let x = (f32(i) + 0.5 - 0.5 * V.n) * V.dx;
-    let y = (f32(j) + 0.5 - 0.5 * V.n) * V.dx;
+    let pr = phys(j);
+    let c = ROWS[pr * 3u].xyz;
+    let left = ROWS[pr * 3u + 1u].xyz;
+    let sArc = ROWS[pr * 3u + 2u].z;
+    let x = (f32(i) + 0.5 - 0.5 * V.W) * V.dx;
+    let dir = normalize(c + left * (x / V.R));
+    let along = normalize(cross(left, dir));
     let amp = V.waveAmp * k * smoothstep(0.0, 0.35, h);
-    let wave = amp * (sin(x * 2.3 + y * 0.9 - V.time * 6.0) + sin(-x * 1.1 + y * 2.4 - V.time * 4.7)
-                     + 0.6 * sin(x * 3.9 + y * 3.3 - V.time * 8.1));
+    let wave = amp * (sin(x * 2.3 + sArc * 0.9 - V.time * 6.0) + sin(-x * 1.1 + sArc * 2.4 - V.time * 4.7)
+                     + 0.6 * sin(x * 3.9 + sArc * 3.3 - V.time * 8.1));
     let surf = select(eta + wave, b, h <= V.hmin);
-    let dir = normalize(V.c + (x * V.e1 + y * V.e2) / V.R);
     let worldPos = V.origin + dir * (V.R + surf);
     let gx = (eR - eL) / (2.0 * V.dx);
     let gy = (eU - eD) / (2.0 * V.dx);
-    let half = 0.5 * V.n * V.dx;
+    let toEnd = f32(min(j, i32(V.L) - 1 - j)) * V.dx;
+    let toSide = f32(min(i, n - 1 - i)) * V.dx;
     var o: SimVOut;
     o.pos = V.projectionMatrix * (V.viewMatrix * vec4<f32>(worldPos, 1.0));
     o.wp = worldPos;
-    o.normal = normalize(dir - V.e1 * gx - V.e2 * gy);
+    o.normal = normalize(dir - left * gx - along * gy);
     o.hv = vec4<f32>(h, uc, vc, s.w);
     o.k = k;
-    o.local = vec2<f32>(x, y);
-    o.edge = V.fade * (1.0 - smoothstep(half - V.border, half, max(abs(x), abs(y))));
+    o.local = vec2<f32>(x, sArc);
+    o.edge = V.fade * smoothstep(0.0, V.endFade, toEnd) * smoothstep(0.0, 2.0 * V.dx, toSide);
+    o.e1 = left;
+    o.e2 = along;
     return o;
 }
 `;
@@ -94,8 +109,6 @@ struct SimFU {
     cameraPos: vec3<f32>, hmin: f32,
     deepColor: vec3<f32>, reflection: f32,
     absorption: vec3<f32>, _pad: f32,
-    e1: vec3<f32>, _pad1: f32,
-    e2: vec3<f32>, _pad2: f32,
 };
 @group(0) @binding(1) var<uniform> F: SimFU;
 
@@ -124,6 +137,8 @@ fn main(
     @location(3) k: f32,
     @location(4) local: vec2<f32>,
     @location(5) edge: f32,
+    @location(6) e1: vec3<f32>,
+    @location(7) e2: vec3<f32>,
 ) -> @location(0) vec4<f32> {
     let h = hv.x;
     if (h < F.hmin || edge <= 0.001) { discard; }
@@ -141,7 +156,7 @@ fn main(
     let uvB = local - vel * ph1 * T + vec2<f32>(37.0, 11.0);
     let g = mix(noiseGrad(uvA * 1.6), noiseGrad(uvB * 1.6), blend);
     let str = 0.03 + 0.12 * k;
-    let N = normalize(up - (F.e1 * g.x + F.e2 * g.y) * str);
+    let N = normalize(up - (normalize(e1) * g.x + normalize(e2) * g.y) * str);
 
     let toCam = F.cameraPos - wp;
     let V = normalize(toCam);

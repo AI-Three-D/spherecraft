@@ -27,10 +27,10 @@
 
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 
-// WaterLake: 4 x vec4 (64 bytes). WaterParams: 10 x vec4. WaterRiverSeg: 5 x vec4 (80 bytes).
+// WaterLake: 4 x vec4 (64 bytes). WaterParams: 10 x vec4. WaterRiverSeg: 6 x vec4 (96 bytes).
 export const LAKE_RECORD_FLOATS = 16;
 export const LAKE_PARAMS_FLOATS = 40;
-export const RIVER_SEG_FLOATS = 20;
+export const RIVER_SEG_FLOATS = 24;
 export const RIVER_MAX_SEGS_PER_CELL = 255;
 // River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
 // 512): a terrain point only walks the segments that can reach it.
@@ -49,11 +49,11 @@ struct WaterParams {
     planetRadius: f32, time: f32, rippleFade: f32, shoreSoftM: f32,
     deepColor: vec4<f32>,      // rgb; a = reflection strength
     absorption: vec4<f32>,     // rgb per metre of water path; a unused
-    // Active simulation site (WaterSimSite.js): inside it the simulated
-    // surface draws the water, so the static water fades out (siteFade).
-    siteC: vec4<f32>,          // centre direction; w = half size (m)
-    siteE1: vec4<f32>,         // tangent axis 1; w = fade 0..1
-    siteE2: vec4<f32>,         // tangent axis 2; w = border width (m)
+    // Active simulation strip (WaterRiverSim.js): along it the simulated
+    // surface draws the water, so the static water fades out (waterSimCover).
+    simRiver: vec4<f32>,       // river id, arc lengths s0, s1 of the window (m), half-width (m)
+    simFade: vec4<f32>,        // fade at the window's ends (m), at its sides (m), unused, fade 0..1
+    _reserved: vec4<f32>,
     // River cross-section (waterRiverProfile, riverCarve.wgsl.js), x = metres
     // beyond the channel's edge: carve = (on 0/1, bankW: the terrain is the
     // cross-section for x < bankW, blendW: then blends into the natural
@@ -70,13 +70,15 @@ struct WaterParams {
 // interpolate along it: water level and thalweg (m above the sphere),
 // half-width (channel edge), reach of the hollows along it that the carve
 // fills (m; 0 = none, < 0 = in a lake), thalweg skew toward the outer bank
-// (+ = left of the flow), flow speed, foam hint.
+// (+ = left of the flow), flow speed, foam hint, arc length along the river
+// (m), the river's id.
 struct WaterRiverSeg {
     p0: vec3<f32>, eta0: f32,
     p1: vec3<f32>, eta1: f32,
     hw0: f32, hw1: f32, bed0: f32, bed1: f32,
     pool0: f32, pool1: f32, skew0: f32, skew1: f32,
     speed0: f32, speed1: f32, foam0: f32, foam1: f32,
+    s0: f32, s1: f32, river: f32, _pad: f32,
 };
 @group(${group}) @binding(${b.index}) var<storage, read> waterIndex: array<u32>;
 @group(${group}) @binding(${b.params}) var<uniform> waterParams: WaterParams;
@@ -126,6 +128,8 @@ struct WaterRiverPt {
     tRaw: f32,       // unclamped
     v: vec3<f32>,    // the direction minus the nearest point
     eta: f32, bed: f32, hw: f32, pool: f32, skew: f32, speed: f32, foam: f32,
+    s: f32,          // arc length along the river (m)
+    river: f32,      // the river's id
 };
 
 fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
@@ -144,6 +148,8 @@ fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
     p.skew = mix(s.skew0, s.skew1, p.t);
     p.speed = mix(s.speed0, s.speed1, p.t);
     p.foam = mix(s.foam0, s.foam1, p.t);
+    p.s = mix(s.s0, s.s1, p.t);
+    p.river = s.river;
     return p;
 }
 
@@ -231,6 +237,8 @@ struct WaterRiverHit {
     flow: vec3<f32>,      // flow direction (unit, along the line)
     speed: f32,
     foam: f32,
+    sM: f32,              // arc length along the river (m)
+    river: f32,           // the river's id
 };
 
 // The river (if any) at a point: the nearest segment among those listed
@@ -256,6 +264,8 @@ fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     let zone = best.hw + waterParams.carve.y;
     if (best.d > zone) { return hit; }
     hit.near = true;
+    hit.sM = best.s;
+    hit.river = best.river;
     hit.distM = best.d;
     hit.halfWidthM = best.hw;
     hit.etaM = best.eta;
@@ -346,16 +356,19 @@ fn waterTint(id: f32) -> vec3<f32> {
 }
 
 // How much of the static water the simulation site replaces at dir (0..1).
-fn waterSiteCover(dir: vec3<f32>) -> f32 {
-    let fade = waterParams.siteE1.w;
-    if (fade <= 0.0) { return 0.0; }
-    let k = dot(dir, waterParams.siteC.xyz);
-    if (k <= 0.0) { return 0.0; }
-    let px = abs(dot(dir, waterParams.siteE1.xyz) / k * waterParams.planetRadius);
-    let py = abs(dot(dir, waterParams.siteE2.xyz) / k * waterParams.planetRadius);
-    let half = waterParams.siteC.w;
-    let border = waterParams.siteE2.w;
-    return fade * (1.0 - smoothstep(half - border, half, max(px, py)));
+// How much of the static water the simulation strip replaces at a point
+// (0..1), from the river there (waterRiverAt): its river, inside the
+// strip's window along it and across it.
+fn waterSimCover(river: WaterRiverHit) -> f32 {
+    let fade = waterParams.simFade.w;
+    if (fade <= 0.0 || !river.near || abs(river.river - waterParams.simRiver.x) > 0.5) { return 0.0; }
+    let s0 = waterParams.simRiver.y;
+    let s1 = waterParams.simRiver.z;
+    let endFade = max(waterParams.simFade.x, 1.0);
+    let along = smoothstep(s0, s0 + endFade, river.sM) * (1.0 - smoothstep(s1 - endFade, s1, river.sM));
+    let half = waterParams.simRiver.w;
+    let across = 1.0 - smoothstep(half - max(waterParams.simFade.y, 0.5), half, river.distM);
+    return fade * along * across;
 }
 
 // Shades a terrain fragment under lake or river water; unchanged elsewhere.
@@ -370,6 +383,10 @@ fn applyWater(
     let heightM = r - waterParams.planetRadius;
     let dbg = waterParams.debugMode;
 
+    let river = waterRiverAt(up, heightM);
+    // Where the simulation strip draws the water, the static water gives way.
+    let cover = waterSimCover(river);
+
     let level = waterLakeLevelAt(up, heightM, samp);
     if (level > WATER_NO_LAKE) {
         let depthM = level - heightM;
@@ -379,10 +396,9 @@ fn applyWater(
         }
         if (dbg == 3u) { return mix(vec3<f32>(0.6, 1.0, 1.0), vec3<f32>(0.0, 0.0, 0.3), clamp(depthM / 50.0, 0.0, 1.0)); }
         let lakeCol = waterSurfaceColor(bedColor, depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, up, 0.0, 1.0);
-        return mix(lakeCol, bedColor, waterSiteCover(up));
+        return mix(lakeCol, bedColor, cover);
     }
 
-    let river = waterRiverAt(up, heightM);
     // River bed and banks: wet brown soil, darker just above the waterline,
     // fading back to the terrain's own colour up the bank.
     var ground = bedColor;
@@ -398,10 +414,9 @@ fn applyWater(
         if (dbg == 1u || dbg == 2u) { return mix(vec3<f32>(1.0, 0.15, 0.1), vec3<f32>(0.3, 0.0, 0.5), clamp(river.depthM / 5.0, 0.0, 1.0)); }
         if (dbg == 3u) { return mix(vec3<f32>(0.6, 1.0, 1.0), vec3<f32>(0.0, 0.0, 0.3), clamp(river.depthM / 50.0, 0.0, 1.0)); }
         let riverCol = waterSurfaceColor(ground, river.depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, river.flow, river.speed, 1.6);
-        return mix(riverCol, bedColor, waterSiteCover(up));
+        return mix(riverCol, ground, cover);
     }
     if (river.near && dbg == 0u) { return ground; }
-
     if (dbg == 2u) {
         let cell = waterDirToCell(up, waterParams.gridN);
         let e = waterIndex[cell];

@@ -53,7 +53,8 @@ import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terr
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
 import { WaterGpuData, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
-import { WaterSimSite } from '../core/world/water/WaterSimSite.js';
+import { WaterRiverSim } from '../core/world/water/WaterRiverSim.js';
+import { createRiverStrip } from '../core/world/water/riverStrip.js';
 import { ErosionSeedVerifier } from '../core/world/hydrology/ErosionSeedVerifier.js';
 import { computeSurfaceTangentFrame } from '../core/planet/surfaceFrame.js';
 import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
@@ -991,6 +992,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
     stop() {
         this.isGameActive = false;
+        this.waterRiverSim?.destroy();
+        this.waterRiverSim = null;
         this.waterService?.dispose();
         this.waterService = null;
         this.inputManager.stop();
@@ -1458,42 +1461,73 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     /**
-     * Near-field water simulation (core/world/water/WaterSimSite.js), like
-     * Whitewater simulating only around the boat: a site follows the camera
-     * while it is low and near a lake or river (terrain.waterGraph.sim).
+     * Near-field water simulation (core/world/water/WaterRiverSim.js): like
+     * Whitewater simulating only its river around the boat, a strip of cells
+     * follows the river nearest the camera while the camera is low and near
+     * it (terrain.waterGraph.sim), scrolling along it without restarts.
      * Steps in its own submit before the frame renders.
      */
     _tickWaterSim(camRel) {
         const cfg = this.planetConfig?.terrainGeneration?.waterGraph?.sim ?? {};
         const svc = this.waterService, gpu = this.waterGpuData;
-        if (cfg.enabled === false || svc?.state !== 'ready' || !gpu?._ready) return;
+        if (cfg.enabled === false || svc?.state !== 'ready' || !gpu?._ready || !svc._sampler?.sampleDirsCarved) return;
+        const R = this.planetConfig.radius;
         const r = Math.hypot(camRel.x, camRel.y, camRel.z) || 1;
         const dir = [camRel.x / r, camRel.y / r, camRel.z / r];
-        const altitude = r - this.planetConfig.radius - svc.groundHeightAt(dir);
-        const want = altitude < (cfg.activateAltitudeM ?? 400) && gpu.hasWaterNear(dir, cfg.waterSearchM ?? 300);
-        let site = this.waterSimSite;
-        if (!site) {
-            if (!want) return;
-            const { enabled: _e, activateAltitudeM: _a, waterSearchM: _w, recenterFraction: _r, ...siteCfg } = cfg;
-            site = this.waterSimSite = new WaterSimSite({ device: this.renderer.backend.device, sampler: svc._sampler, waterGpu: gpu, radius: this.planetConfig.radius, config: siteCfg });
-            this.renderer?.setWaterSimSite?.(site, gpu.look);
+        const altitude = r - R - svc.groundHeightAt(dir);
+        const nearM = cfg.activateDistanceM ?? 1500, highM = cfg.activateAltitudeM ?? 600;
+        let sim = this.waterRiverSim;
+        if (!sim) {
+            const { enabled: _e, activateDistanceM: _d, activateAltitudeM: _a, ...simCfg } = cfg;
+            sim = this.waterRiverSim = new WaterRiverSim({ device: this.renderer.backend.device, sampler: svc._sampler, radius: R, config: simCfg });
+            this.renderer?.setWaterSimSite?.(sim, gpu.look);
+            this._waterStrips = new Map();   // riverId -> { rec, strip, centre, radiusM }
         }
-        if (!want) {
-            site.deactivate();
-            gpu.site = null;
-            return;
+        // The camera's river: followed every frame; a search for the nearest
+        // traced river every 15 frames (or when there is none).
+        const dist = sim.active ? sim.follow(dir) : Infinity;
+        this._waterSimFrame = (this._waterSimFrame ?? 0) + 1;
+        // Not while a placement samples its bed (it would restart it).
+        if (sim.state !== 'placing' && (!sim.active || this._waterSimFrame % 15 === 0)) {
+            const best = this._nearestTracedRiver(dir, nearM);
+            const retraced = sim.active && svc.riverRecs.get(sim.riverId) !== sim.rec;
+            const better = best && (!sim.active || retraced || (best.riverId !== sim.riverId && best.dist < 0.5 * dist));
+            if (best && altitude < highM && better) sim.place(best.riverId, best.rec, best.s).catch(err => Logger.warn(`[Water] river simulation failed: ${err?.message || err}`));
+            else if (sim.active && (altitude > 1.25 * highM || dist > 1.25 * nearM)) sim.deactivate();
         }
-        const recenter = (cfg.recenterFraction ?? 0.25) * site.n * site.config.dx;
-        if (site.state !== 'placing' && (site.state === 'idle' || site.distanceTo(dir) > recenter)) {
-            site.place(dir).catch(err => Logger.warn(`[Water] simulation site failed: ${err?.message || err}`));
-        }
-        if (site.state === 'warming' || site.state === 'running') {
+        if (sim.state === 'running') {
             const device = this.renderer.backend.device;
-            const enc = device.createCommandEncoder({ label: 'WaterSimSite' });
-            site.encode(enc, performance.now() / 1000);
+            const enc = device.createCommandEncoder({ label: 'WaterRiverSim' });
+            sim.encode(enc, performance.now() / 1000);
             device.queue.submit([enc.finish()]);
         }
-        gpu.site = site.coverage;
+        gpu.site = sim.coverage;
+    }
+
+    /** Nearest traced river to a unit direction within maxM: { riverId, rec, s, dist } or null. */
+    _nearestTracedRiver(dir, maxM) {
+        const svc = this.waterService, R = this.planetConfig.radius;
+        let best = null;
+        for (const [riverId, rec] of svc.riverRecs) {
+            let e = this._waterStrips.get(riverId);
+            if (!e || e.rec !== rec) {
+                const strip = createRiverStrip(rec, R);
+                // Bounding cap: mean direction and the farthest point from it.
+                const P = rec.points, st = rec.stride, n = P.length / st;
+                let c = [0, 0, 0];
+                for (let k = 0; k < n; k++) { c[0] += P[k * st]; c[1] += P[k * st + 1]; c[2] += P[k * st + 2]; }
+                const l = Math.hypot(...c) || 1; c = [c[0] / l, c[1] / l, c[2] / l];
+                let radiusM = 0;
+                for (let k = 0; k < n; k++) radiusM = Math.max(radiusM, Math.acos(Math.min(1, c[0] * P[k * st] + c[1] * P[k * st + 1] + c[2] * P[k * st + 2])) * R);
+                e = { rec, strip, centre: c, radiusM };
+                this._waterStrips.set(riverId, e);
+            }
+            const toCentre = Math.acos(Math.min(1, e.centre[0] * dir[0] + e.centre[1] * dir[1] + e.centre[2] * dir[2])) * R;
+            if (toCentre - e.radiusM > maxM) continue;
+            const near = e.strip.nearest(dir);
+            if (near.dist <= maxM && (!best || near.dist < best.dist)) best = { riverId, rec, s: near.s, dist: near.dist };
+        }
+        return best;
     }
 
     /** qtDiag.water.carve(): the river carve (core/world/water/riverCarve.wgsl.js) and the in-place tile regeneration it drives. */
@@ -1508,16 +1542,14 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         };
     }
 
-    /** qtDiag.water.sim(): the near-field simulation site. */
+    /** qtDiag.water.sim(): the near-field simulation strip. */
     waterSimStatus() {
-        const site = this.waterSimSite;
-        if (!site) return { state: 'none (camera not low near water yet, or terrain.waterGraph.sim.enabled false)' };
-        const cam = this.camera?.position, o = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
-        const rel = cam ? [cam.x - o.x, cam.y - o.y, cam.z - o.z] : null;
-        const l = rel ? Math.hypot(...rel) : 1;
+        const sim = this.waterRiverSim;
+        if (!sim) return { state: 'none (camera not low near a traced river yet, or terrain.waterGraph.sim.enabled false)' };
         return {
-            state: site.state, fade: +site.fade.toFixed(2), cells: site.n, dx: site.config.dx,
-            sizeM: site.n * site.config.dx, cameraOffsetM: rel ? +site.distanceTo(rel.map(v => v / l)).toFixed(0) : null,
+            state: sim.state, river: sim.riverId, fade: +sim.fade.toFixed(2),
+            cells: `${sim.W} x ${sim.L}`, dxM: +sim.dx.toFixed(2),
+            windowM: [+sim.s0.toFixed(0), +sim.s1.toFixed(0)], shifting: !!sim._pending,
         };
     }
 

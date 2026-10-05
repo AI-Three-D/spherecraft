@@ -12,6 +12,8 @@
 //   the current state between substeps;
 // - k: turbulence, ping-pongs with the state;
 // - relax: vec4 (targetEta, targetU, targetV, rate 1/s), rate 0 = none.
+// Rows form a ring (rowBase: logical row j is physical row (j + rowBase) mod
+// L); setRowRing moves it (WaterRiverSim.js scrolls along a river).
 
 import { SHALLOW_WATER_WGSL, SWE_PARAM_FLOATS, SWE_WORKGROUP } from './shallowWaterSim.wgsl.js';
 
@@ -43,6 +45,8 @@ export class ShallowWaterSim {
         if (!(this.W > 1 && this.L > 1)) throw new Error('ShallowWaterSim: W and L must be > 1');
         this.params = { ...SWE_DEFAULTS, ...opts };
         this.time = 0;
+        this.rowBase = 0;     // physical row of logical row 0
+        this.rowWorld = 0;    // world row index of logical row 0 (turbulence noise)
         const n = this.W * this.L;
         const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
         this.bedBuffer = device.createBuffer({ label: 'SWE-bed', size: n * 4, usage: S });
@@ -97,6 +101,12 @@ export class ShallowWaterSim {
     /** @param {Float32Array} relax  W * L * 4: (targetEta, targetU, targetV, rate) */
     setRelax(relax) { this.device.queue.writeBuffer(this.relaxBuffer, 0, relax); }
 
+    /** Ring position: physical row of logical row 0, and its world row index. */
+    setRowRing(rowBase, rowWorld) {
+        this.rowBase = ((rowBase % this.L) + this.L) % this.L;
+        this.rowWorld = rowWorld;
+    }
+
     _writeUniforms(jOffset) {
         const p = this.params;
         const u32 = new Uint32Array(this._uniforms), f32 = new Float32Array(this._uniforms);
@@ -104,6 +114,9 @@ export class ShallowWaterSim {
         f32.set([p.dx, p.dt, p.g, p.manning, p.hmin, p.umax, this.time, p.macCormack ? 1 : 0,
             p.turbA, p.turbL, p.turbT, p.foamDecay, p.kDecay, p.kGen, p.foamGen, p.maxRise,
             p.maxFall, p.outLimit, p.kRelax, 0], 4);
+        u32[24] = this.rowBase >>> 0;
+        // World row index wrapped to keep f32 precision in the noise.
+        f32[25] = this.rowWorld % 65536;
         this.device.queue.writeBuffer(this.uniformBuffer, 0, this._uniforms);
     }
 

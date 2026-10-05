@@ -21,6 +21,10 @@
 // - The depth-change clamp (Whitewater's waterfall fix) is optional
 //   (maxRise / maxFall 0 = off): it does not conserve mass where it acts.
 // - No vortex.
+// - Rows are a ring: logical row j lives in physical row (j + rowBase) mod L,
+//   so a window moving along a river (WaterRiverSim.js) scrolls by
+//   re-filling only the rows that enter; rowWorld (rows) keeps the
+//   turbulence noise fixed to the ground meanwhile.
 // WGSL: no ?: operator, select() only.
 
 export const SWE_WORKGROUP = 8;
@@ -31,8 +35,8 @@ export const SWE_OPEN_RIGHT = 2;   // i = W
 export const SWE_OPEN_BOTTOM = 4;  // j = 0
 export const SWE_OPEN_TOP = 8;     // j = L
 
-// SimParams layout (std140-compatible, 24 x 4 bytes).
-export const SWE_PARAM_FLOATS = 24;
+// SimParams layout (std140-compatible, 28 x 4 bytes).
+export const SWE_PARAM_FLOATS = 28;
 
 export const SHALLOW_WATER_WGSL = /* wgsl */`
 struct SimParams {
@@ -42,6 +46,7 @@ struct SimParams {
   turbA: f32, turbL: f32, turbT: f32, foamDecay: f32,
   kDecay: f32, kGen: f32, foamGen: f32, maxRise: f32,
   maxFall: f32, outLimit: f32, kRelax: f32, _pad0: f32,
+  rowBase: u32, rowWorld: f32, _pad1: f32, _pad2: f32,
 };
 @group(0) @binding(0) var<uniform> P: SimParams;
 @group(0) @binding(1) var<storage, read> B: array<f32>;
@@ -68,11 +73,12 @@ fn noise3(p: vec3f) -> f32 {
 }
 
 fn isOpen(bit: u32) -> bool { return (P.openMask & bit) != 0u; }
-// Cell index, clamped to the domain (ghost cells copy the edge cell).
+// Cell index, clamped to the domain (ghost cells copy the edge cell); rows
+// through the ring (rowBase).
 fn ci(i: i32, j: i32) -> u32 {
   let ii = clamp(i, 0, i32(P.W) - 1);
-  let jj = clamp(j, 0, i32(P.L) - 1);
-  return u32(jj) * P.W + u32(ii);
+  let r = u32(clamp(j, 0, i32(P.L) - 1)) + P.rowBase;
+  return select(r, r - P.L, r >= P.L) * P.W + u32(ii);
 }
 // u on face i of row j (face i = left face of cell i), i in [0, W].
 fn faceU(i: i32, j: i32) -> f32 {
@@ -189,8 +195,9 @@ fn height(@builtin(global_invocation_id) gid: vec3u) {
   KO[id] = KI[id];
 }
 
-fn noiseGrad(p: vec2f, t: f32) -> vec2f {
+fn noiseGrad(pl: vec2f, t: f32) -> vec2f {
   let e = 0.02;
+  let p = pl + vec2f(0.0, P.rowWorld * P.dx);
   let n = vec3f(p / P.turbL, t / P.turbT);
   let n2 = vec3f(p / (P.turbL * 0.45) + vec2f(17.3, 9.1), t / (P.turbT * 0.6));
   let px = (noise3(n + vec3f(e, 0.0, 0.0)) - noise3(n - vec3f(e, 0.0, 0.0))) / (2.0 * e)
