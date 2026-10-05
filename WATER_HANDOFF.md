@@ -229,6 +229,32 @@ Locally computable river-network noise, e.g. Gaillard et al. 2019 "Dendry":
 - `IMPLEMENTATION_PLAN_SUPPLEMENT.md` (working agreements, facts not worth rediscovering, terrain history).
 - `IMPLEMENTATION_PLAN_WATER.md` (water plan v2; superseded by §4–5 here).
 
+## 7b. Corrections after the ChatGPT review (verified in the code at `80919e8`)
+
+These are real defects, and some correct §3 above:
+
+1. **Slow, "lava-like" flow has a second cause besides the list overflow: the level fit.**
+   - `riverLevels` uses `fitNonIncreasing`, a least-squares monotone fit. Its output is always a staircase: flat runs with sudden drops.
+   - Since `627c299` the speed comes from that level's slope (`etaSlope`). So most of a river has slope 0 and speed at the `riverShape` floor of 0.3 m/s. The lab strip on river 135 reached a max of 0.4 m/s.
+   - The flat runs also make the simulation pond and plunge, which concentrates foam at the steps.
+   - Fix: the water level must be a smooth, strictly falling curve (minimum slope, e.g. ≥ 3e-4) between the source and destination levels. Speed must not come from a fitted step function.
+2. **Velocities don't add up to the discharge.**
+   - Width, depth and speed are estimated separately (`riverShape`).
+   - The strip's start and inflow use `speed × (h/hMean)^⅔`, clamped, without normalizing to Q.
+   - Whitewater normalizes: `inVelScale = Q / Σ h^(5/3)·dx` (`river.js`). Do the same, so the start state and inflow carry Q.
+3. **`weakEnd` is published as a successful river** (`waterWorkerCore.solveRiver`, logged in `WaterService`). That is a dead-end path. Remove it: grow the corridor or the destination patch and retry, else fail.
+4. **The scheduler gates rivers on their source lake.** In `WaterService.update` a river is a candidate only while iterating a lake within `radiusM` (40 km). A river near the camera with a farther source is never picked. Rivers need their own candidate list, by their own distance.
+5. **Animation speed is tied to the physical speed** (`waterRiverColor`: `max(river.speed, 0.2)`), so it crawls too. Use a separate visual speed.
+6. **Stale tiles.** Tile regeneration runs on spare GPU budget only, with no priority for visible river tiles, and water shading doesn't know whether the tile under it has the current carve. Track a carve version per tile, and give visible river tiles priority.
+7. **Simulation start.** The strip starts in a steady-state guess and fades in at once. A hidden warm-up is better: the static river shows while the strip runs 100–300 substeps, and it takes over when its surface matches the static level and discharge.
+
+What the review got wrong:
+- "Remove the fill": the owner's test shows the simulation spills without confinement.
+- "The coarse graph dictates the banks": the 16 m trace does.
+- "Endpoints are point-based": they are seeded from the destination's solved shore region, except for `weakEnd`.
+
+Its useful new idea: shape the bed as a constrained optimisation, the smallest smooth terrain change that keeps the river's water from escaping. The flood/escape test in `water-corridor-run.mjs` can be the objective, and it fits Option B in §5.
+
 ## 8. Suggested first steps for the next session
 
 1. Decide between Option B and Option A (§5) with the owner.
