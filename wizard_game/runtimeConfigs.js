@@ -963,8 +963,10 @@ export function createGameDataConfig() {
       // a strip of 1 m cells along the nearest traced river (768 m of it,
       // scrolling with the camera) while the camera is within
       // activateAltitudeM of the ground and activateDistanceM of the river.
+      // Off for now (owner 2026-10-06): rivers first get the lakes' look
+      // (near water ribbons); the simulation comes back on the ribbons.
       sim: {
-        enabled: true,
+        enabled: false,
         activateAltitudeM: 600,
         activateDistanceM: 1500,
         dx: 1.0,

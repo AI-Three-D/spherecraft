@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { WaterGpuData, tilesTouchingCells } from './WaterGpuData.js';
 import { RIVER_SEG_FLOATS } from './waterWgsl.js';
+import { dirToCell } from '../hydrology/waterGraph.js';
 
 // Stub device: records uploads; no GPU in vitest.
 beforeAll(() => {
@@ -179,14 +180,43 @@ describe('WaterGpuData', () => {
         expect(gpu.lakesNear(eye, 400)).toEqual([0]);
     });
 
+    it('a river traced beside a lake clears its shore band there (mask re-uploaded, lakeAt agrees)', () => {
+        const dev = stubDevice();
+        const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2, carve: { bankW: 12, blendW: 30 } });
+        const svc = fakeService();
+        gpu.update(svc, cam, 0);
+        // Lake 2 under (0, 0, 1): water in columns 0..3 (x < 0), band in 4 and 5.
+        const mask = new Uint8Array(64);
+        for (let j = 0; j < 8; j++) for (let i = 0; i < 6; i++) mask[j * 8 + i] = i < 4 ? 2 : 1;
+        const frame = { c: [0, 0, 1], e1: [1, 0, 0], e2: [0, 1, 0], x0: -64, y0: -64, spacing: 16, nx: 8, ny: 8 };
+        svc.refined.set(2, { level: 100, frame, mask, maskCells: Int32Array.from([50]), merged: [] });
+        svc.version++;
+        gpu.update(svc, cam, 0);
+        const at = (xM) => gpu.lakeAt([xM / 131072, 0, 1].map((v, _, a) => v / Math.hypot(...a)))?.id ?? null;
+        // lakeAt reads the index (cell of the direction): put lake 2 in the
+        // cells either side of x = 0 (a cell boundary at this grid size).
+        for (const xM of [-8, 8]) gpu._setSlot(dirToCell([xM / 131072, 0, 1], 4), 3);
+        expect(at(8)).toBe(2);                         // band
+        const uploads = dev.log.textures.length;
+        // A river along x = 60 m on open land (pool 0).
+        const P = new Float32Array(9 * 12);
+        for (let k = 0; k < 9; k++) { const d = [60 / 131072, (-64 + 16 * k) / 131072, 1], l = Math.hypot(...d); P.set([d[0] / l, d[1] / l, d[2] / l, 100, 5, 2, 1, 0, 0, 0, 0, 0], k * 12); }
+        svc.riverRecs.set(0, { points: P, stride: 12, segCellStart: Int32Array.from([0, 0, 0, 0, 0, 0, 0, 0, 0]), segCells: new Int32Array(0) });
+        svc.version++;
+        gpu.update(svc, cam, 0);
+        expect(dev.log.textures.length).toBe(uploads + 1);   // lake 2's layer again
+        expect(at(8)).toBe(null);                      // band cleared beside the river
+        expect(at(-8)).toBe(2);                        // water kept
+    });
+
     it('near water: switch and fade distances go to the params', () => {
         const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072 });
         const svc = fakeService();
         gpu.update(svc, cam, 0);
-        expect([...new Float32Array(gpu.paramsData, 160, 4)]).toEqual([0, 0, 0, 0]);
-        gpu.near.enabled = true;
-        gpu.update(svc, cam, 0);
         expect([...new Float32Array(gpu.paramsData, 160, 4)]).toEqual([1000, 1600, 1, 0]);
+        gpu.near.enabled = false;
+        gpu.update(svc, cam, 0);
+        expect([...new Float32Array(gpu.paramsData, 160, 4)]).toEqual([0, 0, 0, 0]);
     });
 
     it('tilesTouchingCells picks the tiles over (or next to) changed cells', () => {

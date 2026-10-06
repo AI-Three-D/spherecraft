@@ -365,7 +365,67 @@ The owner asked for the real look instead of the debug views, with a master swit
 - `absorption` default changed to [0.45, 0.2, 0.15] (clear water; the owner wants to see the bed). Whitewater's [1.6, 0.8, 0.6] was murky. This applies to all water: lakes, rivers and the simulation strip's alpha.
 - Checks: vitest 193/193, naga, Dawn/Tint pipeline compile. Not yet seen in a browser.
 
-**Next steps (revised):**
+### 2026-10-06, session 1 (cont.): lakes committed (38e71ae); rivers get the lakes' approach (uncommitted)
+
+The owner: "Should we just have the lake's approach everywhere? ... the same texture everywhere and no need to displace geometry according to water flow (this only later). Then once the river looks ok, we would slowly start bringing in the simulation there." Then: "you decide and move forward".
+
+Decided and built:
+- **Rivers use the lakes' look everywhere.** Far, `applyWater` gives rivers `waterNearFarColor` (shared with lakes) over the bank's soil tint. `waterRiverColor` (flow-carried ripples, foam) is deleted, along with its settings (riverAnimNearM, riverAnimFarM, riverFoamGain; `riverLook.xyz` now unused) and the unused flow branch of `waterSurfaceTerms`.
+- **Near rivers: ribbons** (`core/world/water/riverRibbon.js`, drawn by `NearWaterRenderer`).
+  - Flat across at the water level (point field 16; the design level on older records).
+  - Along the channel's centre: the traced line plus the shape noise's wobble, the same as `waterRiverPoint`.
+  - Width: the shaped half-width + 2 m. The banks hide the rest by depth, as at lake shores.
+  - The inner edge in tight bends is limited to 0.8 × the bend radius (no fold).
+  - Rebuilt on the CPU when the camera moves 10 m. Rivers far from the camera are skipped by a bounding cap.
+- **Seams with lakes.**
+  - The ribbon gives way where a lake mask covers the point (`waterLakeLevelView(up, -1e30, ..., false)`), and to a nearer river at confluences (`waterRiverAt(...).river`).
+  - Its level eases to the lake's level over 80 m from the lake mask (`WaterGpuData.lakeAt`, the CPU mirror of the mask test), so the surfaces meet without a step.
+  - The terrain's river body near a mouth still uses the record's own level, so they can differ there by however far the record's level is from the lake's.
+- **Simulation off** (`runtimeConfigs.js` `waterGraph.sim.enabled: false`). The owner saw its white froth strip again: the first version paused it only while `nearMesh` was on, and that switch was off. The coupling is gone; the config switch is the only one. The near meshes' sim-cover code is gone. The simulation comes back later on the ribbons.
+- **Near water on by default** (`WATER_NEAR_DEFAULTS.enabled: true`; `qtDiag.water.nearMesh(false)` turns it off).
+- **Lake shore band trimmed beside rivers** (`core/world/water/lakeBand.js`). The owner saw water polygons outside the river channel, cut by straight 16 m edges.
+  - Cause (lab, terrain-lab/near-band-check.mjs, outlets 12 and 17): lakes are solved before the carve. The carve and valley lower the ground beside the channel, so the lake's band cells (mask 1) show lake water in hollows there.
+  - Fix: band cells within the carve's reach (hw × shape scale + bankW + blendW + 8) of a river point outside lakes (pool ≥ 0) are cleared, in `WaterGpuData` (mask upload, `lakeAt`). Lakes near a changed river are re-trimmed and re-uploaded.
+  - Lab: band spill beside the river 11184 → 5356 px at outlet 17. The rest is the lake's own water cells near the outlet. Water cells lost: 0. The channel mouth's band blocks are gone, so the river's water reaches the lake.
+  - This is a stopgap until lakes and carving are solved together (carving phase).
+- One shared fragment function `nearWaterShade` for lakes and rivers: surface terms, the exact hand-over blend, aerial perspective.
+- Checks: vitest 203/203 (new: riverRibbon.test.js, lakeBand.test.js, river shaders in nearWaterSurface.wgsl.test.js, band re-trim in WaterGpuData.test.js); Dawn/Tint compile of both pipelines and `applyWater`. Not yet seen in a browser.
+
+Known limits:
+- Where the carved bed lies above the river's water level (the dry channel by the lake in the owner's screenshot), the ground covers the ribbon. That's the carving phase.
+- Rivers ending at the sea: the ribbon's last stretch overlaps the ocean surface.
+
+### 2026-10-06, session 1 (cont.): junction round, cost of water for tile loading (uncommitted)
+
+The owner: only minor overflow is left, but the river still doesn't join the lake well in places. One river end stayed green ("Maybe the ocean?"). Tiles have become slow to refine (15+ s when flying fast). "Do a final round of improvements at the lake-river junction, then we move to the carving."
+
+Junction changes:
+- `riverWaterLevels` (riverRibbon.js) is the one place where a river's level eases to the lake's. The ribbons and the terrain shading's river segments (`WaterGpuData._rebuildRivers`, `wl0`/`wl1`) both use it, so the water's depth, and so its colour, match across the lake's edge. The carve doesn't read `wl`: no tile regeneration.
+- The bank soil tint now also lies under a lake's water at a river mouth, fading out where the river runs inside a lake (`WaterRiverHit.pool`). Before, the river side was soil-tinted and the lake side grass, giving a straight colour seam at the mask edge.
+- Ribbon caps: the ribbon runs on by the half-width past a river's ends, over the round end of the terrain's river water. Before, a lighter half-disc showed the body without a surface.
+- Lab (near-band-check.mjs): at outlets 12 and 17 the river starts exactly at the lake's level (508.35, 492.69), so there's no level step there. The outlets drop fast: 2 m in 39 m and 9.6 m in 98 m at outlet 17. That's the carving's to fix.
+- The flat green area at a river's end in the owner's screenshot (long straight edges) looks like the old ocean renderer (`globalOceanRenderer`, out of scope). Check: `qtDiag.water.tint(1)` colours lakes by id; the ocean stays as it is.
+
+Cost of lakes and rivers for tile loading (lab, terrain-lab/water-tile-cost.mjs, owner's MacBook GPU via Dawn; 14 lakes, 5 rivers around the biggest lake):
+- **Terrain function per tile** (128², height+normal+tile, depth 11):
+  - carve and valley compiled out: 2.30 ms (away from rivers), 2.37 ms (on rivers);
+  - compiled in: 2.46 ms away (+7 % on every tile) and 2.82 ms on rivers with data (+19 %).
+- **Water service GPU sampling:** about 30 ms per dispatch (max 124 ms), about 1 per lake and 3 per river (with the valley bake). 14 lakes + 5 rivers took 27 dispatches, about 0.9 s of GPU. In the browser it's one dispatch per frame while new water comes into range, sharing the queue with tile generation.
+- **Regeneration (likely the biggest multiplier in fast flight; not measured in the browser):**
+  - Each traced river regenerates every resident tile touching its grid cells (a 30 km river: about 200 cells of 400 m).
+  - Every river trace also bumps the global `waterCarveVersion`. So every tile generating or refining at that moment is queued again, anywhere (tileStreamer.js 2062, 2529).
+  - Regeneration uses only leftover fence budget, but each one is a full tile.
+- To confirm in the browser: `qtDiag.water.carve()` after a fast flight (regeneration queued/done/pending). The definitive A/B: `waterGraph.enabled: false` in runtimeConfigs.js, then the same flight.
+
+**Next steps (owner's order, 2026-10-06; one thing at a time):**
+1. ~~Rivers, geometry~~ (built, above; owner check pending).
+2. Rivers, look and simulation: both working properly (the simulation strip is drawn across lakes today).
+3. Rivers, carving: rivers that connect to their lakes, and a natural channel instead of the "man-made moat". These are the river-terrain session's files.
+4. Lakes, last: weather-dependent geometric waves and the look. Today the sun glint (×3, power 600, on ripples) makes white blobs and speckles against the sun.
+5. Optimization where needed.
+- Not placed by the owner yet: diving (plan: item 7 of the earlier list below).
+
+Earlier list, kept for the diving plan:
 4. ~~Surface shading on the mesh~~ (done, above).
 5. River ribbons and ownership (as planned above). Their surface terms use the same split.
 6. Waves: vertex displacement in the near grid, with amplitude fading by distance.

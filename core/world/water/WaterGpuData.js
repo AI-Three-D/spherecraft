@@ -20,6 +20,8 @@
 
 import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS, RIVER_SUB } from './waterWgsl.js';
 import { dirToCell } from '../hydrology/waterGraph.js';
+import { riverCarveReach, riverNearLake, trimLakeBand } from './lakeBand.js';
+import { riverWaterLevels } from './riverRibbon.js';
 import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
 import { RIVER_VALLEY_DEFAULTS, valleyLayout, valleyPageCells, valleyParamsData } from './riverValley.js';
 
@@ -32,24 +34,19 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     absorption: [0.45, 0.2, 0.15],
     rippleFadeM: 800,                 // ripples fade out by this camera distance
     shoreSoftM: 0.15,                 // waterline fade-in depth
-    // Rivers (waterWgsl.js waterRiverColor): animated out to riverAnimNearM,
-    // plain colour from riverAnimFarM; foam gain on the steepness hint.
-    riverAnimNearM: 1500,
-    riverAnimFarM: 3000,
-    riverFoamGain: 1.0,
     // Lakes whose shore is not solved yet are hidden closer than this (m).
     unsolvedLakeHideM: 2500,
 });
 
-// Near water (core/renderer/water/NearWaterRenderer.js): lakes closer than
-// fadeEndM get a surface mesh at their level, and the terrain shading keeps
-// only the water's body there (waterWgsl.js applyWater), handing over from
-// fadeStartM. Off: the terrain shading draws all water. Range: the owner
-// (2026-10-06) wants the mesh about 4x as far as 400 m. Beyond the aerial
-// perspective's start (rendering.terrainShader.aerialFadeStartMeters, 400)
-// the mesh's own shading must apply it.
+// Near water (core/renderer/water/NearWaterRenderer.js): lakes and rivers
+// closer than fadeEndM get a surface mesh at their level, and the terrain
+// shading keeps only the water's body there (waterWgsl.js applyWater),
+// handing over from fadeStartM. Off (qtDiag.water.nearMesh(false)): the
+// terrain shading draws all water. Range: the owner (2026-10-06) wants the
+// mesh about 4x as far as 400 m; beyond the aerial perspective's start
+// (rendering.terrainShader.aerialFadeStartMeters, 400) the mesh applies it.
 export const WATER_NEAR_DEFAULTS = Object.freeze({
-    enabled: false,
+    enabled: true,
     fadeStartM: 1000,
     fadeEndM: 1600,
 });
@@ -79,6 +76,10 @@ export class WaterGpuData {
         this.near = { ...WATER_NEAR_DEFAULTS };
         // River carve parameters (WaterService config.carve; riverCarve.wgsl.js), or null: no carve.
         this.carve = carve;
+        // Lake masks as drawn: the shore band cleared beside rivers outside
+        // lakes (lakeBand.js), lake id -> mask; the carve's reach for it.
+        this._maskOf = new Map();
+        this._carveReach = riverCarveReach(carve ?? {});
 
         const cells = 6 * gridN * gridN;
         const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
@@ -225,6 +226,7 @@ export class WaterGpuData {
         const rec = this._applied.get(id);
         for (const c of rec ? rec.maskCells : this._lakeCellsOf(svc, id)) this._clearSlot(c, id + 1);
         this._applied.delete(id);
+        this._maskOf.delete(id);
         const layer = this._layerOf.get(id);
         if (layer !== undefined) { this._layerOwner[layer] = -1; this._layerOf.delete(id); }
     }
@@ -281,7 +283,17 @@ export class WaterGpuData {
         return layer;
     }
 
-    _uploadMask(rec, layer) {
+    // Lakes near rivers that changed: their band trimmed again and uploaded.
+    _retrimLakes(changedRivers) {
+        for (const [id, rec] of this._applied) {
+            const layer = this._layerOf.get(id);
+            if (!changedRivers.some(r => riverNearLake(r, rec, this.R))) continue;
+            this._maskOf.set(id, trimLakeBand(rec, this._appliedRivers.values(), this.R, this._carveReach));
+            if (layer >= 0) this._uploadMask(rec, layer, this._maskOf.get(id));
+        }
+    }
+
+    _uploadMask(rec, layer, mask = rec.mask) {
         const { nx, ny } = rec.frame, S = this.S;
         const out = new Uint8Array(S * S);
         for (let b = 0; b < S; b++) {
@@ -289,7 +301,7 @@ export class WaterGpuData {
             for (let a = 0; a < S; a++) {
                 const i0 = Math.floor(a * nx / S), i1 = Math.max(i0 + 1, Math.floor((a + 1) * nx / S));
                 let v = 0;
-                for (let j = j0; j < j1 && !v; j++) for (let i = i0; i < i1; i++) if (rec.mask[j * nx + i]) { v = 255; break; }
+                for (let j = j0; j < j1 && !v; j++) for (let i = i0; i < i1; i++) if (mask[j * nx + i]) { v = 255; break; }
                 out[b * S + a] = v;
             }
         }
@@ -336,12 +348,15 @@ export class WaterGpuData {
                     for (const m of rec.merged ?? []) this._unapply(svc, m);
                     for (const c of rec.maskCells) this._setSlot(c, id + 1);
                     const layer = this._allocLayer(svc, id, camDir);
-                    if (layer >= 0) this._uploadMask(rec, layer);
+                    this._maskOf.set(id, trimLakeBand(rec, this._appliedRivers.values(), this.R, this._carveReach));
+                    if (layer >= 0) this._uploadMask(rec, layer, this._maskOf.get(id));
                     this._applied.set(id, rec);
                 }
                 let riversChanged = false;
+                const changedRivers = [];
                 for (const [rid, rec] of svc.riverRecs ?? []) {
                     if (this._appliedRivers.get(rid) === rec) continue;
+                    changedRivers.push(rec, ...(this._appliedRivers.has(rid) ? [this._appliedRivers.get(rid)] : []));
                     // The traced river replaces its graph cells in the debug view.
                     for (const c of svc.rivers[rid].cells) {
                         if (svc.riverOf[c] === rid && (this.index[c] & RIVER_BIT)) { this.index[c] &= ~RIVER_BIT; this._dirtyRows.add(Math.floor(c / this.N)); }
@@ -353,6 +368,8 @@ export class WaterGpuData {
                     this._appliedRivers.set(rid, rec);
                     riversChanged = true;
                 }
+                // Lakes' bands first: the river levels ease to the lakes' masks.
+                if (changedRivers.length) this._retrimLakes(changedRivers);
                 if (riversChanged) this._rebuildRivers(camDir);
                 this._applyValleyUpdates(svc);
                 this._flushRows();
@@ -382,7 +399,7 @@ export class WaterGpuData {
         } else {
             f.fill(0, 16, 24);
         }
-        f.set([L.riverAnimNearM ?? 1500, L.riverAnimFarM ?? 3000, L.riverFoamGain ?? 1, L.unsolvedLakeHideM ?? 2500], 24);
+        f.set([0, 0, 0, L.unsolvedLakeHideM ?? 2500], 24);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.
         const C = this.carve ?? {};
@@ -425,13 +442,33 @@ export class WaterGpuData {
     }
 
     /**
+     * The lake whose mask (water or shore band) covers a unit direction, as
+     * the near water shaders test it (refined, with a mask layer):
+     * { id, level }, or null.
+     */
+    lakeAt(dir) {
+        const e = this.index[dirToCell(dir, this.N)];
+        for (const slot of [e & SLOT_MASK, (e >>> 15) & SLOT_MASK]) {
+            const id = slot - 1, rec = slot ? this._applied.get(id) : null;
+            if (!rec || !(this._layerOf.get(id) >= 0)) continue;
+            const fr = rec.frame;
+            const k = dir[0] * fr.c[0] + dir[1] * fr.c[1] + dir[2] * fr.c[2];
+            if (k <= 0) continue;
+            const i = Math.floor(((dir[0] * fr.e1[0] + dir[1] * fr.e1[1] + dir[2] * fr.e1[2]) / k * this.R - fr.x0) / fr.spacing);
+            const j = Math.floor(((dir[0] * fr.e2[0] + dir[1] * fr.e2[1] + dir[2] * fr.e2[2]) / k * this.R - fr.y0) / fr.spacing);
+            if (i >= 0 && j >= 0 && i < fr.nx && j < fr.ny && (this._maskOf.get(id) ?? rec.mask)[j * fr.nx + i]) return { id, level: rec.level };
+        }
+        return null;
+    }
+
+    /**
      * Lays out every traced river's segments per sub-cell (rec.segCells:
      * cell * SUB^2 + sub, waterGraph.js dirToCellSub): a block of sub-lists
      * per river cell (index half 2 points at it), and uploads them. Nearest
      * rivers first when the buffers are full.
      */
     _rebuildRivers(camDir) {
-        const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map();
+        const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map(), levelsOf = new Map();
         // Nearest rivers first, by their nearest point (a river's source can
         // be far while it runs past the camera: lab 2026-10-05).
         const recs = [...this._appliedRivers.entries()].map(([rid, rec]) => {
@@ -479,8 +516,12 @@ export class WaterGpuData {
                 // pool, skew, speed, foam, arc length at both ends, river id,
                 // water level (points: waterWorkerCore.js).
                 const ext = st >= 12;
-                // Water level (points 16) on records that have it, else the design level.
-                const wlA = st >= 20 ? P[a + 16] : P[a + 3], wlB = st >= 20 ? P[b + 16] : P[b + 3];
+                // Water level (points 16 on records that have it, else the design
+                // level), eased to the lakes at the river's ends (riverWaterLevels,
+                // as the near ribbons have it).
+                let wl = levelsOf.get(rec);
+                if (!wl) levelsOf.set(rec, (wl = riverWaterLevels(rec, arc, (d) => this.lakeAt(d))));
+                const wlA = wl[k], wlB = wl[k + 1];
                 this._segs.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
                     P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5],
                     ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
