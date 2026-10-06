@@ -484,6 +484,18 @@ fn computeShadow(worldPos: vec3<f32>, viewPos: vec3<f32>, worldNormal: vec3<f32>
 }
 `;
 
+/**
+ * Camera distances (m) over which the aerial perspective fades in
+ * (rendering.terrainShader.aerialFadeStartMeters / aerialFadeEndMeters).
+ * Shared with shaders drawn over the terrain (NearWaterRenderer.js).
+ */
+export function aerialFadeRange(terrainShaderConfig = {}) {
+    const cfg = terrainShaderConfig || {};
+    const start = Number.isFinite(cfg.aerialFadeStartMeters) ? Math.max(0, cfg.aerialFadeStartMeters) : 400;
+    const end = Number.isFinite(cfg.aerialFadeEndMeters) ? Math.max(start + 1, cfg.aerialFadeEndMeters) : 500;
+    return { start, end };
+}
+
 export function buildTerrainChunkFragmentShader(options = {}) {
     const normalTextureFilterable = options.normalTextureFilterable === true;
 
@@ -749,12 +761,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
         enableLodEdgeFade &&
         !enableResolvedColor;
 
-    const apFadeStartMeters = Number.isFinite(terrainShaderConfig.aerialFadeStartMeters)
-        ? Math.max(0, terrainShaderConfig.aerialFadeStartMeters)
-        : 400;
-    const apFadeEndMeters = Number.isFinite(terrainShaderConfig.aerialFadeEndMeters)
-        ? Math.max(apFadeStartMeters + 1, terrainShaderConfig.aerialFadeEndMeters)
-        : 500;
+    const { start: apFadeStartMeters, end: apFadeEndMeters } = aerialFadeRange(terrainShaderConfig);
     let shadowMode = 0;
     if (lod == 0) {
         shadowMode = 3;

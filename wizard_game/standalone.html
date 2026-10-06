@@ -3815,6 +3815,7 @@
             clearCache() { return gameEngine?.waterService?.clearCache?.() ?? Promise.resolve(false); },
             tint(mode = 1) { return gameEngine?.setWaterDebugMode?.(mode) ?? null; },
             look(look = {}) { const r = gameEngine?.setWaterLook?.(look) ?? null; console.info('[Water] look', r); return r; },
+            nearMesh(near = true) { const r = gameEngine?.setWaterNear?.(near) ?? null; console.info('[Water] near', r); return r; },
             sim() { const r = gameEngine?.waterSimStatus?.() ?? null; console.info('[Water] sim', r); return r; },
             carve() { const r = gameEngine?.waterCarveStatus?.() ?? null; console.info('[Water] carve', r); return r; },
         };

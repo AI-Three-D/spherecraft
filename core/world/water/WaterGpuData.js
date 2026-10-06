@@ -22,7 +22,10 @@ import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
 export const WATER_LOOK_DEFAULTS = Object.freeze({
     deepColor: [0.02, 0.10, 0.09],    // albedo of deep water (lit by sky + sun); Whitewater's water tint
     reflection: 1.4,                  // sky reflection strength (x sky radiance)
-    absorption: [1.6, 0.8, 0.6],      // per metre of water path (r, g, b); Whitewater's
+    // Per metre of water path (r, g, b): clear water, the bed shows through a
+    // few metres (owner 2026-10-06: see-through close up). Whitewater's
+    // murky [1.6, 0.8, 0.6] hid it below ~2 m.
+    absorption: [0.45, 0.2, 0.15],
     rippleFadeM: 800,                 // ripples fade out by this camera distance
     shoreSoftM: 0.15,                 // waterline fade-in depth
     // Rivers (waterWgsl.js waterRiverColor): animated out to riverAnimNearM,
@@ -32,6 +35,19 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     riverFoamGain: 1.0,
     // Lakes whose shore is not solved yet are hidden closer than this (m).
     unsolvedLakeHideM: 2500,
+});
+
+// Near water (core/renderer/water/NearWaterRenderer.js): lakes closer than
+// fadeEndM get a surface mesh at their level, and the terrain shading keeps
+// only the water's body there (waterWgsl.js applyWater), handing over from
+// fadeStartM. Off: the terrain shading draws all water. Range: the owner
+// (2026-10-06) wants the mesh about 4x as far as 400 m. Beyond the aerial
+// perspective's start (rendering.terrainShader.aerialFadeStartMeters, 400)
+// the mesh's own shading must apply it.
+export const WATER_NEAR_DEFAULTS = Object.freeze({
+    enabled: false,
+    fadeStartM: 1000,
+    fadeEndM: 1600,
 });
 
 const SLOT_MASK = 0x7fff;
@@ -56,6 +72,7 @@ export class WaterGpuData {
         // static water under it (waterSimCover).
         this.site = null;
         this.look = { ...WATER_LOOK_DEFAULTS };
+        this.near = { ...WATER_NEAR_DEFAULTS };
         // River carve parameters (WaterService config.carve; riverCarve.wgsl.js), or null: no carve.
         this.carve = carve;
 
@@ -319,7 +336,39 @@ export class WaterGpuData {
         f.set([C.enabled ? 1 : 0, C.bankW ?? 12, C.blendW ?? 30, C.waterFrac ?? 0.75], 28);
         f.set([C.bankH ?? 1.5, C.bankSoftM ?? 3, C.bankGrade ?? 0.06, C.leveeGrade ?? 0.08], 32);
         f.set([C.widthVar ?? 0.2, C.wobble ?? 0.15, C.bankVar ?? 0.35, 0], 36);
+        const nr = this.near;
+        f.set(nr.enabled ? [nr.fadeStartM, nr.fadeEndM, 1, 0] : [0, 0, 0, 0], 40);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
+    }
+
+    /** This frame's WaterParams (layout: waterWgsl.js), for shaders that bind their own copy. */
+    get paramsData() {
+        return this._params;
+    }
+
+    /**
+     * Lakes with a solved shore (mask layer) whose patch comes within rangeM
+     * of the camera, nearest first: ids (= lake table slots).
+     * @param {{x,y,z}} cameraPos  planet-centred
+     */
+    lakesNear(cameraPos, rangeM, max = 16) {
+        const r = Math.hypot(cameraPos.x, cameraPos.y, cameraPos.z) || 1;
+        const d = [cameraPos.x / r, cameraPos.y / r, cameraPos.z / r];
+        const found = [];
+        for (const [id, rec] of this._applied) {
+            if (!(this._layerOf.get(id) >= 0)) continue;
+            const fr = rec.frame;
+            const k = d[0] * fr.c[0] + d[1] * fr.c[1] + d[2] * fr.c[2];
+            if (k <= 0) continue;
+            // The camera in the lake's tangent plane, its distance from the patch.
+            const px = (d[0] * fr.e1[0] + d[1] * fr.e1[1] + d[2] * fr.e1[2]) / k * this.R;
+            const py = (d[0] * fr.e2[0] + d[1] * fr.e2[1] + d[2] * fr.e2[2]) / k * this.R;
+            const x1 = fr.x0 + fr.nx * fr.spacing, y1 = fr.y0 + fr.ny * fr.spacing;
+            const dx = Math.max(fr.x0 - px, 0, px - x1), dy = Math.max(fr.y0 - py, 0, py - y1);
+            const dist = Math.hypot(dx, dy, r - this.R - rec.level);
+            if (dist < rangeM) found.push({ id, dist });
+        }
+        return found.sort((a, b) => a.dist - b.dist).slice(0, max).map(e => e.id);
     }
 
     /**

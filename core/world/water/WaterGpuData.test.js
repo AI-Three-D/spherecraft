@@ -161,6 +161,34 @@ describe('WaterGpuData', () => {
         expect([...changed].sort((a, b) => a - b)).toEqual([7, 8, 20, 21]);
     });
 
+    it('lakesNear: lakes with a mask layer whose patch comes within range, nearest first', () => {
+        const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
+        const svc = fakeService();
+        gpu.update(svc, cam, 0);
+        const frame = (x0) => ({ c: [0, 0, 1], e1: [1, 0, 0], e2: [0, 1, 0], x0, y0: -64, spacing: 16, nx: 8, ny: 8 });
+        const refine = (id, x0, cells) => svc.refined.set(id, { level: 100, frame: frame(x0), mask: new Uint8Array(64).fill(2), maskCells: Int32Array.from(cells), merged: [] });
+        refine(0, 200, [1, 2]);    // patch 200 m off to the side
+        refine(2, -64, [50]);      // patch under the camera
+        svc.version++;
+        gpu.update(svc, cam, 0);
+        const eye = { x: 0, y: 0, z: 131072 + 130 };   // 30 m above the level
+        expect(gpu.lakesNear(eye, 400)).toEqual([2, 0]);
+        expect(gpu.lakesNear(eye, 150)).toEqual([2]);
+        expect(gpu.lakesNear(eye, 400, 1)).toEqual([2]);
+        gpu._layerOf.delete(2);    // gave its mask layer up: level-only, no mesh
+        expect(gpu.lakesNear(eye, 400)).toEqual([0]);
+    });
+
+    it('near water: switch and fade distances go to the params', () => {
+        const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072 });
+        const svc = fakeService();
+        gpu.update(svc, cam, 0);
+        expect([...new Float32Array(gpu.paramsData, 160, 4)]).toEqual([0, 0, 0, 0]);
+        gpu.near.enabled = true;
+        gpu.update(svc, cam, 0);
+        expect([...new Float32Array(gpu.paramsData, 160, 4)]).toEqual([1000, 1600, 1, 0]);
+    });
+
     it('tilesTouchingCells picks the tiles over (or next to) changed cells', () => {
         const N = 8, cell = 2 * N * N + 5 * N + 3;            // face 2, i 3, j 5
         const touches = tilesTouchingCells(new Set([cell]), N);

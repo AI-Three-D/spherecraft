@@ -14,7 +14,7 @@ import { buildWaterSimFragmentShader, buildWaterSimVertexShader } from './waterS
 const VERTEX_FLOATS = 48;
 const FRAGMENT_FLOATS = 24;
 
-function gridIndices(W, L) {
+export function gridIndices(W, L) {
     const idx = new Uint32Array((W - 1) * (L - 1) * 6);
     let q = 0;
     for (let j = 0; j < L - 1; j++) {

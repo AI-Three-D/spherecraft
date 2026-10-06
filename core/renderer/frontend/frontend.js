@@ -1,4 +1,5 @@
 import { WaterSimRenderer } from '../water/WaterSimRenderer.js';
+import { NearWaterRenderer } from '../water/NearWaterRenderer.js';
 import { Vector3, Matrix4, Color } from '../../../shared/math/index.js';
 import { WebGPUBackend } from '../backend/webgpuBackend.js';
 
@@ -133,6 +134,8 @@ export class Frontend {
     setWaterData(data) {
         this._waterData = data || null;
         this.quadtreeTerrainRenderer?.setWaterData?.(this._waterData);
+        if (this._waterData) this.nearWaterRenderer ??= new NearWaterRenderer({ backend: this.backend, uniformManager: this.uniformManager, planetConfig: this.planetConfig, engineConfig: this.engineConfig });
+        this.nearWaterRenderer?.setWaterData(this._waterData);
     }
 
     addDistortionSource(options = {}) {
@@ -1319,9 +1322,11 @@ updateLighting(starSystem) {
                     this.genericMeshRenderer.render(viewMatrix, projectionMatrix);
                 }
 
-                // Near-field simulated water (core/world/water/WaterSimSite.js):
+                // Lake surfaces near the camera (WaterGpuData.near) and the
+                // near-field simulated water (core/world/water/WaterSimSite.js):
                 // transparent, after the opaque meshes so objects in water show
-                // through it by depth.
+                // through them by depth.
+                this.nearWaterRenderer?.render(this.camera, viewMatrix, projectionMatrix);
                 this.waterSimRenderer?.render(this.camera, viewMatrix, projectionMatrix, performance.now() / 1000);
 
                 // Particles draw after opaque terrain + assets + skinned meshes,

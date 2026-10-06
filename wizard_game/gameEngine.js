@@ -1560,7 +1560,9 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     /**
      * qtDiag.water.tint(mode): 0 water; 1 lakes coloured by id, rivers red;
      * 2 as 1 plus grid cells: lake cells blue, cells with traced river
-     * segments red, graph river cells not traced yet orange; 3 water depth.
+     * segments red, graph river cells not traced yet orange; 3 water depth;
+     * 4 who draws the lakes' surface: cyan the terrain shading, magenta the
+     * near mesh (qtDiag.water.nearMesh).
      */
     setWaterDebugMode(mode = 0) {
         if (!this.waterGpuData) return null;
@@ -1575,6 +1577,16 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         if (enabled !== undefined) this.waterGpuData.enabled = !!enabled;
         Object.assign(this.waterGpuData.look, rest);
         return { enabled: this.waterGpuData.enabled, ...this.waterGpuData.look };
+    }
+
+    /**
+     * qtDiag.water.nearMesh(true | false | { enabled, fadeStartM, fadeEndM }):
+     * the lakes' surface mesh near the camera (WaterGpuData.near).
+     */
+    setWaterNear(near = {}) {
+        if (!this.waterGpuData) return null;
+        Object.assign(this.waterGpuData.near, typeof near === 'boolean' ? { enabled: near } : near);
+        return { ...this.waterGpuData.near };
     }
 
     /** qtDiag.water.stats() */

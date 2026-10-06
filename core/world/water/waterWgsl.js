@@ -29,9 +29,9 @@ import { createRiverNoiseWgsl } from './riverShapeNoise.js';
 
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 
-// WaterLake: 4 x vec4 (64 bytes). WaterParams: 10 x vec4. WaterRiverSeg: 6 x vec4 (96 bytes).
+// WaterLake: 4 x vec4 (64 bytes). WaterParams: 11 x vec4. WaterRiverSeg: 6 x vec4 (96 bytes).
 export const LAKE_RECORD_FLOATS = 16;
-export const LAKE_PARAMS_FLOATS = 40;
+export const LAKE_PARAMS_FLOATS = 44;
 export const RIVER_SEG_FLOATS = 24;
 export const RIVER_MAX_SEGS_PER_CELL = 255;
 // River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
@@ -71,6 +71,11 @@ struct WaterParams {
     carve: vec4<f32>,
     bank: vec4<f32>,
     shape: vec4<f32>,
+    // Near water (WaterGpuData.near): closer than near.y (m) a mesh draws
+    // the lakes' surface (core/renderer/water/NearWaterRenderer.js) and the
+    // terrain shading keeps only the water's body, faded in from near.x;
+    // z = 1 on, 0 off (the terrain shading draws all of the water).
+    near: vec4<f32>,
 };
 // A piece of a traced river between two points (unit directions); values
 // interpolate along it: water level and thalweg (m above the sphere),
@@ -338,24 +343,34 @@ fn waterNoiseGrad(p: vec2<f32>) -> vec2<f32> {
                      waterNoise(p + vec2<f32>(0.0, e)) - waterNoise(p - vec2<f32>(0.0, e))) / (2.0 * e);
 }
 
-// Water colour over a bed: the bed seen through the water column along
-// the view ray, sky reflection (Fresnel), sun glint, ripples near the
-// camera; for rivers the ripples move with the flow (two phases blended,
-// as Whitewater's flow-mapped water does).
-fn waterSurfaceColor(
-    bedColor: vec3<f32>, depthM: f32, worldPos: vec3<f32>, up: vec3<f32>, cameraPos: vec3<f32>,
+// The water's body over a bed, without its surface: the bed seen through
+// the water column along the view ray (V: toward the camera), toward the
+// deep water's colour.
+fn waterBodyColor(
+    bedColor: vec3<f32>, depthM: f32, V: vec3<f32>, up: vec3<f32>,
     lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>,
-    flow: vec3<f32>, speed: f32, rippleGain: f32,
 ) -> vec3<f32> {
-    let toCam = cameraPos - worldPos;
-    let dist = length(toCam);
-    let V = toCam / dist;
     let cosV = max(dot(V, up), 0.02);
     let transmit = exp(-(depthM / cosV) * waterParams.absorption.rgb);
     let sunUp = max(dot(up, lightDir), 0.0);
     let deep = waterParams.deepColor.rgb * (skyRadiance + sunRadiance * sunUp);
-    let body = mix(deep, bedColor, transmit);
+    return mix(deep, bedColor, transmit);
+}
 
+// The water's surface over its body: sky reflection (Fresnel), sun glint,
+// ripples near the camera; for rivers the ripples move with the flow (two
+// phases blended, as Whitewater's flow-mapped water does). rgb is added
+// over the body, a (the Fresnel term) is how much of the body it hides:
+// colour = body (1 - a) + rgb. Also drawn by the near water mesh
+// (core/renderer/water/nearWaterSurface.wgsl.js).
+fn waterSurfaceTerms(
+    worldPos: vec3<f32>, up: vec3<f32>, cameraPos: vec3<f32>,
+    lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>,
+    flow: vec3<f32>, speed: f32, rippleGain: f32,
+) -> vec4<f32> {
+    let toCam = cameraPos - worldPos;
+    let dist = length(toCam);
+    let V = toCam / dist;
     var N = up;
     let ripple = (1.0 - smoothstep(0.0, waterParams.rippleFade, dist)) * rippleGain;
     if (ripple > 0.001) {
@@ -382,7 +397,19 @@ fn waterSurfaceColor(
     let fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
     let R = reflect(-V, N);
     let spec = pow(max(dot(R, lightDir), 0.0), 600.0) * 3.0;
-    var col = mix(body, skyRadiance * waterParams.deepColor.a, fres) + sunRadiance * spec;
+    return vec4<f32>(skyRadiance * waterParams.deepColor.a * fres + sunRadiance * spec, fres);
+}
+
+// Water colour over a bed: its body (the bed seen through the water column
+// along the view ray) under its surface.
+fn waterSurfaceColor(
+    bedColor: vec3<f32>, depthM: f32, worldPos: vec3<f32>, up: vec3<f32>, cameraPos: vec3<f32>,
+    lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>,
+    flow: vec3<f32>, speed: f32, rippleGain: f32,
+) -> vec3<f32> {
+    let body = waterBodyColor(bedColor, depthM, normalize(cameraPos - worldPos), up, lightDir, sunRadiance, skyRadiance);
+    let s = waterSurfaceTerms(worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, flow, speed, rippleGain);
+    let col = body * (1.0 - s.a) + s.rgb;
     // Soft waterline: the first centimetres of depth fade in.
     return mix(bedColor, col, smoothstep(0.0, waterParams.shoreSoftM, depthM));
 }
@@ -468,6 +495,13 @@ fn waterSimCover(river: WaterRiverHit) -> f32 {
     return fade * along * across;
 }
 
+// Share of a lake's surface the near mesh draws at a camera distance (m):
+// 1 closer than near.x, 0 beyond near.y, 0 with the near mesh off.
+fn waterNearWeight(dist: f32) -> f32 {
+    if (waterParams.near.z < 0.5) { return 0.0; }
+    return 1.0 - smoothstep(waterParams.near.x, max(waterParams.near.y, waterParams.near.x + 1.0), dist);
+}
+
 // Shades a terrain fragment under lake or river water; unchanged elsewhere.
 fn applyWater(
     bedColor: vec3<f32>, worldPos: vec3<f32>, cameraPos: vec3<f32>, planetCenter: vec3<f32>,
@@ -484,7 +518,8 @@ fn applyWater(
     // Where the simulation strip draws the water, the static water gives way.
     let cover = waterSimCover(river);
 
-    let level = waterLakeLevelView(up, heightM, samp, length(cameraPos - worldPos) > waterParams.riverLook.w);
+    let dist = length(cameraPos - worldPos);
+    let level = waterLakeLevelView(up, heightM, samp, dist > waterParams.riverLook.w);
     if (level > WATER_NO_LAKE) {
         let depthM = level - heightM;
         if (dbg == 1u || dbg == 2u) {
@@ -492,7 +527,21 @@ fn applyWater(
             return mix(waterTint(f32(e & 0x7fffu)), vec3<f32>(0.0, 0.1, 0.6), clamp(depthM / 40.0, 0.0, 0.8));
         }
         if (dbg == 3u) { return mix(vec3<f32>(0.6, 1.0, 1.0), vec3<f32>(0.0, 0.0, 0.3), clamp(depthM / 50.0, 0.0, 1.0)); }
-        let lakeCol = waterSurfaceColor(bedColor, depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, up, 0.0, 1.0);
+        // Near the camera the near mesh draws the surface (reflection, glint,
+        // ripples) over this; here only the water's body, the same maths.
+        let nearW = waterNearWeight(dist);
+        if (dbg == 4u) {
+            // Who draws the surface: cyan the terrain shading, magenta the near mesh.
+            return mix(vec3<f32>(0.1, 0.75, 1.0), vec3<f32>(1.0, 0.2, 0.85), nearW) * mix(1.0, 0.4, clamp(depthM / 20.0, 0.0, 1.0));
+        }
+        var lakeCol = bedColor;
+        if (nearW < 1.0) {
+            lakeCol = waterSurfaceColor(bedColor, depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance, up, 0.0, 1.0);
+        }
+        if (nearW > 0.0) {
+            let body = waterBodyColor(bedColor, depthM, (cameraPos - worldPos) / dist, up, lightDir, sunRadiance, skyRadiance);
+            lakeCol = mix(lakeCol, mix(bedColor, body, smoothstep(0.0, waterParams.shoreSoftM, depthM)), nearW);
+        }
         return mix(lakeCol, bedColor, cover);
     }
 
