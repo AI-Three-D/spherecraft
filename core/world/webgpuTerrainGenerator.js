@@ -209,6 +209,10 @@ export class WebGPUTerrainGenerator {
         // water graph's traced rivers (setWaterCarveResources).
         const waterGraph = this.terrainConfig.waterGraph ?? {};
         this.waterCarve = waterGraph.enabled === true && waterGraph.carve?.enabled !== false;
+        // River valleys shaped into the height before erosion (riverValley.wgsl.js),
+        // from the same rivers (setRiverValleyResources).
+        this.riverValley = this.waterCarve && waterGraph.valley?.enabled !== false;
+        this.riverValleyPage = waterGraph.valley?.page ?? 32;
         this._applyTerrainFeatures(this.terrainConfig?.features ?? {}, null);
         this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');
         const radiusM = this.worldScale;

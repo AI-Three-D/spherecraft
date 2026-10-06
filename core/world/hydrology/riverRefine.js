@@ -18,9 +18,9 @@
 // - trace from the source cell down the drainage: the path ends in the
 //   destination's water by construction, and fill never rises along it.
 // The trace is then smoothed, resampled, and given width, depth and flow
-// speed from the catchment, a water level cut into the ground (riverLevels)
-// and its pools (riverPools): the terrain is shaped around it
-// (riverCarve.wgsl.js).
+// speed from the catchment, a smooth falling water level (riverValleyLevels)
+// and its valley (riverValleyShape): the terrain is shaped around it
+// (riverValley.wgsl.js, riverCarve.wgsl.js).
 
 import { MinHeap } from './waterGraph.js';
 
@@ -144,10 +144,14 @@ export function smoothRiverPath(xs, ys, fill, { window = 4, stepM = 24, passes =
     return out;
 }
 
-// Floats per river point (waterWorkerCore.js solveRiver): dir.xyz, level,
-// half-width, water depth at the thalweg, speed, Q, spill level, pool reach,
-// skew, foam.
-export const RIVER_POINT_STRIDE = 12;
+// Floats per river point (waterWorkerCore.js solveRiver): dir.xyz, design
+// level (the channel's waterline: carve and valley), half-width, design
+// water depth at the thalweg, mean flow speed, Q, spill level of the trace,
+// pool (-1: the point lies in a lake), skew, foam; the valley
+// (riverValley.js): floor level, floor half-width, fill weight, wall slope;
+// the water (riverWaterLevel): its level (normal depth of Q in the channel),
+// its depth at the thalweg; two unused.
+export const RIVER_POINT_STRIDE = 20;
 
 export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // Discharge (m^3/s) per km^2 of precipitation-weighted catchment.
@@ -180,180 +184,182 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
     waterFrac: 0.75,
-    // Bank rise beyond the channel's edge (riverCarve.wgsl.js). The river is
-    // cut into the ground: its bank crest, (1 - waterFrac) D + bankH above
-    // the water, sits at the trace's spill level (the natural ground)...
+    // Bank rise beyond the channel's edge (riverCarve.wgsl.js); with
+    // (1 - waterFrac) D it is the bank crest, which the valley floor meets.
     bankH: 1.5,
-    // ...reached over the first rampM from the source (no step at the outlet).
-    rampM: 120,
-    // Hollows beside the river within this (m) are found (riverPools); 0: not searched.
-    poolMaxM: 0,
+    // The level falls at least this much per metre (owner 2026-10-05: the
+    // level staircase made the water crawl).
+    minSlope: 3e-4,
+    // Share of the river where the floor may sit above the natural ground
+    // beside it (fill); the rest is cut into it (a valley).
+    tauFill: 0.2,
+    // The floor stays this far below that ground where it can.
+    marginM: 0.5,
+    // One-sided (downstream) smoothing of the fitted level: drops become
+    // rapids, never extra fill.
+    levelSmoothM: 400,
+    // The level meets the lake or sea over this at the river's ends.
+    endRampM: 120,
+    // The floor's height above the water ramps in over this from the source
+    // (at the sill the floor is the lake's level); the fill ramps in over
+    // outletFillM. The lake's rim is kept by the valley field (riverValley.js:
+    // near lake water the cut stops at its level; no fill on lake water).
+    outletRampM: 150,
+    outletFillM: 40,
+    // Floor half-width = floorScale x channel half-width + floorExtraM.
+    floorScale: 1.5,
+    floorExtraM: 15,
+    // Valley wall slope: wallFrac of the natural rise wallProbeM past the
+    // floor's edge, within [wallMin, wallMax].
+    wallFrac: 0.7, wallMin: 0.1, wallMax: 0.7, wallProbeM: 300,
 });
 
+const quintic01 = (t) => { const x = Math.max(0, Math.min(1, t)); return x * x * x * (x * (x * 6 - 15) + 10); };
+
 /**
- * Least-squares non-increasing fit of values (pool adjacent violators):
- * runs of equal level where the data would rise, means of the data there.
+ * Non-increasing weighted tau-quantile fit (pool adjacent violators with
+ * block quantiles): minimises sum w (tau (v - f)+ + (1 - tau) (f - v)+),
+ * so about a share tau of the values ends up below the fit.
  * @param {ArrayLike<number>} v
- * @param {ArrayLike<number>} [w]  weights (default 1)
+ * @param {ArrayLike<number>} w  weights
+ * @param {number} tau
  * @returns {Float64Array}
  */
-export function fitNonIncreasing(v, w = null) {
-    const n = v.length, mean = [], weight = [], size = [];
-    for (let k = 0; k < n; k++) {
-        let m = v[k], wt = w ? w[k] : 1, sz = 1;
-        while (mean.length && mean[mean.length - 1] < m) {
-            const pm = mean.pop(), pw = weight.pop(), ps = size.pop();
-            m = (pm * pw + m * wt) / (pw + wt); wt += pw; sz += ps;
+export function fitNonIncreasingQuantile(v, w, tau) {
+    const blocks = [];
+    const quantile = (vals) => {
+        let tot = 0; for (const [, ww] of vals) tot += ww;
+        let acc = 0;
+        for (const [vv, ww] of vals) { acc += ww; if (acc >= tau * tot) return vv; }
+        return vals[vals.length - 1][0];
+    };
+    const mergeSorted = (a, b) => {
+        const out = []; let i = 0, j = 0;
+        while (i < a.length || j < b.length) out.push(j >= b.length || (i < a.length && a[i][0] <= b[j][0]) ? a[i++] : b[j++]);
+        return out;
+    };
+    for (let k = 0; k < v.length; k++) {
+        let blk = { vals: [[v[k], w[k]]], size: 1, value: v[k] };
+        while (blocks.length && blocks[blocks.length - 1].value < blk.value) {
+            const p = blocks.pop();
+            const vals = mergeSorted(p.vals, blk.vals);
+            blk = { vals, size: p.size + blk.size, value: quantile(vals) };
         }
-        mean.push(m); weight.push(wt); size.push(sz);
+        blocks.push(blk);
     }
-    const out = new Float64Array(n);
+    const out = new Float64Array(v.length);
     let k = 0;
-    for (let b = 0; b < mean.length; b++) for (let q = 0; q < size[b]; q++) out[k++] = mean[b];
+    for (const b of blocks) for (let q = 0; q < b.size; q++) out[k++] = b.value;
     return out;
 }
 
 /**
- * Water level and thalweg (deepest bed) along a traced river, for the
- * terrain carve (riverCarve.wgsl.js). The river is cut into the ground: the
- * level is the least-squares non-increasing fit (fitNonIncreasing) of the
- * ground along it minus incision = (1 - waterFrac) D + bankH, so on
- * average the bank crest lands on the natural ground, rims get cut and
- * hollows filled by similar amounts (lab 2026-10-05: following the spill
- * level instead left the river above most of its surroundings, 20-40 m of
- * fill in hollows), and level runs with drops between them read as pools
- * and riffles. Ramped in from the source lake's level over rampM; never
- * above the source lake, never below the destination's water; a running
- * minimum keeps it from rising downstream (the river never flows
- * backwards). thalweg = eta - waterFrac D may rise again where a deeper
- * section gets shallower (owner 2026-10-05: that just holds water).
- * @param {ArrayLike<number>} ground  natural ground along the river (m)
- * @param {ArrayLike<number>} s       distance from the source (m)
- * @param {ArrayLike<number>} depth   bank-full depth D (riverShape)
- * @param {ArrayLike<number>} [lakeAt]  per point the level of the lake it lies in (NaN: none):
- *   there the river's level is the lake's (weight 20 in the fit; the lake bed is not ground)
- * @returns {{eta: Float64Array, bed: Float64Array}}  bed = thalweg
+ * Water level along a river for the valley (riverValley.js): a smooth
+ * curve falling at least minSlope per metre from the source lake's level
+ * to the destination's, below the natural ground beside the river where it
+ * can be (floor = level + freeboard stays marginM under it; fill on about
+ * a share tauFill of the river): the non-increasing tau-quantile fit of
+ * (ground - freeboard - margin + minSlope s), smoothed looking downstream
+ * only (so never above the fit), C2 ramps onto both end levels.
+ * @param {object} p
+ * @param {ArrayLike<number>} p.s       arc length per point (m)
+ * @param {ArrayLike<number>} p.ground  natural ground beside the line (lowest within the floor)
+ * @param {ArrayLike<number>} p.free    floor height above the water per point (m)
+ * @param {number} p.srcLevel, p.destLevel
+ * @returns {{ eta: Float64Array, minSlope: number }}
  */
-export function riverLevels(ground, s, depth, { srcLevel, destLevel }, P = RIVER_LEVEL_DEFAULTS, lakeAt = null) {
-    const n = ground.length, eta = new Float64Array(n), bed = new Float64Array(n);
-    const target = new Float64Array(n), weight = new Float64Array(n);
+export function riverValleyLevels({ s, ground, free, srcLevel, destLevel }, P = RIVER_LEVEL_DEFAULTS) {
+    const n = s.length, L = s[n - 1];
+    let S = P.minSlope;
+    if (srcLevel - destLevel < S * L * 1.05) S = Math.max(0, ((srcLevel - destLevel) / Math.max(L, 1)) * 0.5);
+    const zt = new Float64Array(n), w = new Float64Array(n).fill(1);
+    for (let k = 0; k < n; k++) zt[k] = ground[k] - free[k] - P.marginM + S * s[k];
+    const zSrc = srcLevel, zDst = destLevel + S * L;
+    zt[0] = zSrc; w[0] = 1e9;
+    zt[n - 1] = zDst; w[n - 1] = 1e9;
+    const z = fitNonIncreasingQuantile(zt, w, P.tauFill);
+    for (let k = 0; k < n; k++) z[k] = Math.min(zSrc, Math.max(zDst, z[k]));
+    const step = L / Math.max(1, n - 1), m = Math.max(1, Math.round(P.levelSmoothM / Math.max(step, 1e-6)));
+    const K = []; let Ks = 0;
+    for (let j = 0; j <= m; j++) { const kv = Math.sin(Math.PI * (j + 0.5) / (m + 1)) ** 2; K.push(kv); Ks += kv; }
+    const zs = new Float64Array(n);
     for (let k = 0; k < n; k++) {
-        const lake = lakeAt ? lakeAt[k] : NaN;
-        target[k] = Number.isFinite(lake) ? lake : ground[k] - ((1 - P.waterFrac) * depth[k] + P.bankH);
-        weight[k] = Number.isFinite(lake) ? 20 : 1;
+        let a = 0;
+        for (let j = 0; j <= m; j++) a += K[j] * z[Math.min(n - 1, k + j)];
+        zs[k] = a / Ks;
     }
-    const fit = fitNonIncreasing(target, weight);
-    let runEta = Infinity;
+    const R0 = Math.min(P.endRampM, 0.3 * L);
     for (let k = 0; k < n; k++) {
-        const x = Math.min(1, Math.max(0, s[k] / Math.max(P.rampM, 1e-6)));
-        const ramp = x * x * (3 - 2 * x);
-        const level = srcLevel + (Math.min(fit[k], srcLevel) - srcLevel) * ramp;
-        runEta = Math.min(runEta, Math.min(srcLevel, Math.max(destLevel, level)));
-        eta[k] = runEta;
-        bed[k] = runEta - P.waterFrac * depth[k];
+        zs[k] = zSrc + (zs[k] - zSrc) * quintic01(s[k] / R0);
+        zs[k] = zs[k] + (zDst - zs[k]) * quintic01((s[k] - (L - R0)) / R0);
     }
-    return { eta, bed };
+    const eta = new Float64Array(n);
+    for (let k = 0; k < n; k++) eta[k] = zs[k] - S * s[k];
+    return { eta, minSlope: S };
 }
 
 /**
- * Hollows along a river: ground below its water level that would take the
- * river's water (lab 2026-10-05: on the lumpy terrain most of a river's
- * length passes such hollows, many m deep). The carve fills them up to the
- * river's floodplain (riverCarve.wgsl.js), like Whitewater's valley floor.
- * On a patch grid (heights, corridor mask), every corridor cell takes the
- * river point nearest to it (propagated outward from the line); a cell is
- * under the river's water when it lies below that point's level (minus
- * 0.25 m), within maxReachM of it and not in a lake (lake mask: the source
- * and destination lakes, drawn as lakes); a hollow is the set of such cells
- * connected to the river line. Returns per point the hollow's reach: the
- * farthest of its hollow cells from it (0: none; -1: the point lies in a
- * lake). Smoothed with a running maximum over +-2 points (lake points stay -1).
- * @param {object} p
- * @param {Float32Array} p.heights   nx * ny (m)
- * @param {Uint8Array|null} p.corridor  nx * ny, 1 = inside (null: the whole patch)
- * @param {number} p.nx, p.ny, p.x0, p.y0, p.spacing   patch grid
- * @param {ArrayLike<number>} p.px, p.py   river points (plane coords)
- * @param {ArrayLike<number>} p.eta        water level per point
- * @param {Uint8Array} [p.lake]    nx * ny, 1 = lake cell
- * @param {number} [p.maxReachM=300]
- * @param {boolean} [p.withMasks]  also return { reach, inPool, nearest } (lab)
- * @returns {Float64Array}
+ * Normal depth (m) of discharge Q (m^3/s) in the carved channel (Whitewater's
+ * profile D (1 - (1 - u^2)^1.5), u = x / half-width; riverCarve.wgsl.js) on
+ * slope S, Manning's n: the depth at which uniform flow carries Q. Capped at
+ * D (bank-full). Also the wetted area (m^2).
  */
-export function riverPools({ heights, corridor, nx, ny, x0, y0, spacing, px, py, eta, lake = null, maxReachM = 300, withMasks = false }) {
-    const n = px.length, cells = nx * ny;
-    corridor ??= new Uint8Array(cells).fill(1);
-    const nearest = new Int32Array(cells).fill(-1);
-    // Float64: a value rounded on store would look improved on every revisit.
-    const dist2 = new Float64Array(cells).fill(Infinity);
-    const cx = (c) => x0 + ((c % nx) + 0.5) * spacing, cy = (c) => y0 + (Math.floor(c / nx) + 0.5) * spacing;
-    const cellAt = (x, y) => {
-        const i = Math.floor((x - x0) / spacing), j = Math.floor((y - y0) / spacing);
-        return i >= 0 && j >= 0 && i < nx && j < ny ? j * nx + i : -1;
+export function riverNormalDepth(Qm3s, S, hw, D, manning) {
+    const sq = Math.sqrt(Math.max(S, 1e-6));
+    const flow = (h) => {
+        // Wetted half-width (fraction of hw) where the profile reaches h.
+        const uw = Math.sqrt(Math.max(0, 1 - Math.pow(Math.max(0, 1 - h / D), 2 / 3)));
+        let A = 0, Pw = 0;
+        const m = 16;
+        for (let i = 0; i < m; i++) {
+            const u0 = (i / m) * uw, u1 = ((i + 1) / m) * uw;
+            const z0 = D * (1 - Math.pow(1 - u0 * u0, 1.5)), z1 = D * (1 - Math.pow(Math.max(0, 1 - u1 * u1), 1.5));
+            A += 0.5 * ((h - z0) + (h - z1)) * (u1 - u0) * hw;
+            Pw += Math.hypot((u1 - u0) * hw, z1 - z0);
+        }
+        A *= 2; Pw *= 2;
+        return { Q: Pw > 0 ? (A * Math.pow(A / Pw, 2 / 3) * sq) / manning : 0, A };
     };
-    // Seeds: cells along the line, each owned by the nearer end of its segment.
-    let queue = [];
-    const seeds = [];
-    for (let k = 0; k + 1 < n || (k === 0 && n === 1); k++) {
-        const bx = n > 1 ? px[k + 1] : px[k], by = n > 1 ? py[k + 1] : py[k];
-        const len = Math.hypot(bx - px[k], by - py[k]), steps = Math.max(1, Math.ceil(len / (0.5 * spacing)));
-        for (let q = 0; q <= steps; q++) {
-            const t = q / steps, c = cellAt(px[k] + t * (bx - px[k]), py[k] + t * (by - py[k]));
-            if (c < 0 || !corridor[c]) continue;
-            const own = t < 0.5 || n === 1 ? k : k + 1;
-            const d2 = (cx(c) - px[own]) ** 2 + (cy(c) - py[own]) ** 2;
-            if (d2 < dist2[c]) { dist2[c] = d2; nearest[c] = own; queue.push(c); seeds.push(c); }
-        }
-        if (n === 1) break;
+    const full = flow(D);
+    if (full.Q <= Qm3s) return { h: D, A: full.A };
+    let lo = 0.005, hi = D;
+    for (let it = 0; it < 40; it++) {
+        const mid = 0.5 * (lo + hi);
+        if (flow(mid).Q < Qm3s) lo = mid; else hi = mid;
     }
-    // Nearest point for every corridor cell (brushfire propagation).
-    const NB = [1, -1, nx, -nx, nx + 1, nx - 1, -nx + 1, -nx - 1];
-    while (queue.length) {
-        const next = [];
-        for (const c of queue) {
-            const ci = c % nx, k = nearest[c];
-            for (const o of NB) {
-                const m = c + o;
-                if (m < 0 || m >= cells || !corridor[m]) continue;
-                const mi = m % nx;
-                if (Math.abs(mi - ci) > 1) continue;   // wrapped across a row end
-                const d2 = (cx(m) - px[k]) ** 2 + (cy(m) - py[k]) ** 2;
-                if (d2 < dist2[m]) { dist2[m] = d2; nearest[m] = k; next.push(m); }
-            }
-        }
-        queue = next;
-    }
-    // Underwater cells connected to the line.
-    const maxD2 = maxReachM * maxReachM;
-    const under = (c) => nearest[c] >= 0 && dist2[c] <= maxD2 && !(lake && lake[c]) && heights[c] < eta[nearest[c]] - 0.25;
-    // Hollow cells connected to the line.
-    const inPool = new Uint8Array(cells);
-    let stack = seeds.filter(under);
-    for (const c of stack) inPool[c] = 1;
-    while (stack.length) {
-        const c = stack.pop(), ci = c % nx;
-        for (const o of NB) {
-            const m = c + o;
-            if (m < 0 || m >= cells || inPool[m] || !corridor[m]) continue;
-            if (Math.abs((m % nx) - ci) > 1 || !under(m)) continue;
-            inPool[m] = 1;
-            stack.push(m);
-        }
-    }
-    const reach = new Float64Array(n);
-    for (let c = 0; c < cells; c++) {
-        if (!inPool[c]) continue;
-        const k = nearest[c], r = Math.sqrt(dist2[c]) + 0.5 * spacing;
-        if (r > reach[k]) reach[k] = r;
-    }
-    const inLake = (k) => { const c = cellAt(px[k], py[k]); return !!(lake && c >= 0 && lake[c]); };
-    const out = new Float64Array(n);
+    const h = 0.5 * (lo + hi);
+    return { h, A: flow(h).A };
+}
+
+/** Bank crest above the water: (1 - waterFrac) D + the bank's rise at its crest (riverCarve.wgsl.js). */
+export function riverCrestAbove(depth, P = RIVER_LEVEL_DEFAULTS) {
+    return (1 - P.waterFrac) * depth + P.bankH * (1 - Math.exp(-2));
+}
+
+/**
+ * The valley along a river (riverValley.js), per point: floor level (the
+ * level plus its freeboard), fill weight, wall slope. The fill ramps in over
+ * outletFillM from the source and fades out toward the end (the
+ * destination's water); none where the point lies in a lake.
+ * @param {object} p
+ * @param {ArrayLike<number>} p.s, p.eta, p.free, p.wc   per point
+ * @param {ArrayLike<number>} p.rise   natural ground wallProbeM past the floor's edge (higher side)
+ * @param {ArrayLike<boolean>} p.inLake
+ */
+export function riverValleyShape({ s, eta, free, wc, rise, inLake }, P = RIVER_LEVEL_DEFAULTS) {
+    const n = s.length, L = s[n - 1];
+    const F = new Float64Array(n), wFill = new Float64Array(n), raw = new Float64Array(n), sWall = new Float64Array(n);
     for (let k = 0; k < n; k++) {
-        if (inLake(k)) { out[k] = -1; continue; }
-        let m = 0;
-        for (let q = Math.max(0, k - 2); q <= Math.min(n - 1, k + 2); q++) m = Math.max(m, reach[q]);
-        out[k] = m;
+        F[k] = eta[k] + free[k];
+        wFill[k] = inLake[k] ? 0 : Math.min(quintic01(s[k] / P.outletFillM), quintic01((L - s[k]) / P.endRampM - 0.25));
+        raw[k] = Math.min(P.wallMax, Math.max(P.wallMin, P.wallFrac * Math.max(0, rise[k] - F[k]) / P.wallProbeM));
     }
-    return withMasks ? { reach: out, inPool, nearest } : out;
+    for (let k = 0; k < n; k++) {
+        let a = 0, m = 0;
+        for (let q = Math.max(0, k - 15); q <= Math.min(n - 1, k + 15); q++) { a += raw[q]; m++; }
+        sWall[k] = a / m;
+    }
+    return { F, wFill, sWall };
 }
 
 /**

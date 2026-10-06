@@ -1432,6 +1432,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.waterGpuData = new WaterGpuData(device, {
                 gridN: cfg.gridN, planetRadius: this.planetConfig.radius,
                 carve: terrainGenerator.waterCarve ? cfg.carve : null,
+                valley: terrainGenerator.riverValley ? cfg.valley : null,
             });
             this.renderer?.setWaterData?.(this.waterGpuData);
             // River channels carved into tiles generated from now on, and into
@@ -1440,6 +1441,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 terrainGenerator.setWaterCarveResources(this.waterGpuData.resources);
                 this.waterService.setWaterCarveResources(this.waterGpuData.resources);
                 this._waterCarveGenerator = terrainGenerator;
+            }
+            // River valleys shaped into the terrain before erosion (core/world/water/riverValley.js).
+            if (terrainGenerator.riverValley) {
+                terrainGenerator.setRiverValleyResources(this.waterGpuData.valleyResources);
+                this.waterService.setRiverValleyResources(this.waterGpuData.valleyResources);
             }
             return;
         }
@@ -1542,6 +1548,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             state: gen.waterCarveBound ? 'bound' : 'waiting for the water system',
             version: gen.waterCarveVersion ?? 0,
             rivers: this.waterGpuData?._appliedRivers?.size ?? 0,
+            valleyPages: this.waterGpuData?.valleyPageCount ?? 0,
             regeneration: this.renderer?.quadtreeTileManager?.tileStreamer?.getRegenerationStats?.() ?? null,
         };
     }

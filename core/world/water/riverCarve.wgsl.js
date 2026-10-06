@@ -23,7 +23,7 @@
 //   valley side) and ground lower than a falling natural levee (leveeGrade
 //   per metre) is raised to it; ground between them stays as it is;
 // - both fade out over blendW after the bank zone (bankW); no raising in
-//   the lakes at the river's ends (pool < 0);
+//   the lakes at the river's ends (pool < 0), nor behind its first point;
 // - each segment shapes the terrain on its own; the shapes are blended by
 //   distance, the nearest dominating (riverCarve_d).
 // Dual numbers vec4(height, d/d unitDir) as in the height function,
@@ -119,7 +119,10 @@ fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0
     let dD = vec4<f32>(p.d, p.v * (R * R / max(p.dLine, 1.0e-3)) * (p.nSign * select(-1.0, 1.0, p.n >= 0.0)));
     let edge = p.hw + waterParams.carve.y;
     let wz = dConst(1.0) - dSmoothstep(edge, edge + max(waterParams.carve.z, 1.0), dD);
-    let wf = select(wz, dConst(0.0), p.pool < 0.0);
+    // No fill in the lakes at the river's ends (pool < 0), nor behind the
+    // river's first point (the rounded end reaching into its source lake: a
+    // levee there dammed the lake off; owner 2026-10-06).
+    let wf = select(wz, dConst(0.0), p.pool < 0.0 || (p.tRaw < 0.0 && s.s0 <= 0.0));
     let kk = ${RIVER_CARVE_SMOOTH_M.toFixed(2)};
     let cut = dSmoothMin(h0, riverCarveProfile_d(s, p, unitDir, false), kk) - h0;
     var fill = dConst(0.0);

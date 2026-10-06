@@ -19,6 +19,7 @@
 import { createAdvancedTerrainComputeShader } from '../shaders/webgpu/advancedTerrainCompute.wgsl.js';
 import { hashParts } from './waterCache.js';
 import { RIVER_CARVE_BINDINGS } from '../water/riverCarve.wgsl.js';
+import { RIVER_VALLEY_BINDINGS } from '../water/riverValley.wgsl.js';
 
 function hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut, dirsParams, dirsIn, dirsOut }) {
     return `
@@ -97,7 +98,9 @@ const DEFAULT_SAMPLES_PER_DISPATCH = 131072;
  * evaluations; yieldBetween (e.g. one animation frame) runs between them.
  */
 export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null }) {
-    const baseSource = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: false }));
+    // The natural terrain: no river carve, no river valleys (the water graph,
+    // lakes and river traces are found on it).
+    const baseSource = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: false, riverValley: false }));
     const used = new Set();
     for (const m of baseSource.matchAll(/@group\(0\)\s*@binding\((\d+)\)/g)) used.add(Number(m[1]));
     const free = [];
@@ -248,19 +251,35 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         return heights;
     }
 
-    /** River carve data for carved samples: WaterGpuData resources, or null. */
-    async function setWaterCarveResources(res) {
-        if (!res) { carveGroup = carveDirsGroup = null; return; }
+    /**
+     * River carve data for carved samples (WaterGpuData resources, or null),
+     * and the river valleys' field (WaterGpuData valley resources; the
+     * generator's placeholders until set). Carved samples are the terrain as
+     * the tiles show it: valleys and channels.
+     */
+    let carveRes = null, valleyRes = null;
+    async function rebuildCarveGroups() {
+        if (!carveRes) { carveGroup = carveDirsGroup = null; return; }
         if (!(await carvedReady())) return;
-        const C = RIVER_CARVE_BINDINGS;
+        const C = RIVER_CARVE_BINDINGS, V = RIVER_VALLEY_BINDINGS;
         const entries = [
-            { binding: C.index, resource: { buffer: res.index } },
-            { binding: C.params, resource: { buffer: res.params } },
-            { binding: C.rivers, resource: { buffer: res.rivers } },
+            { binding: C.index, resource: { buffer: carveRes.index } },
+            { binding: C.params, resource: { buffer: carveRes.params } },
+            { binding: C.rivers, resource: { buffer: carveRes.rivers } },
         ];
+        if (terrainGenerator.riverValley === true) {
+            const v = valleyRes ?? terrainGenerator._riverValleyPlaceholder;
+            entries.push(
+                { binding: V.pages, resource: { buffer: v.pages } },
+                { binding: V.texels, resource: { buffer: v.texels } },
+                { binding: V.params, resource: { buffer: v.params } },
+            );
+        }
         carveGroup = device.createBindGroup({ label: 'HydroPatch-carve', layout: carvedPipeline.getBindGroupLayout(1), entries });
         carveDirsGroup = device.createBindGroup({ label: 'HydroDirs-carve', layout: carvedDirsPipeline.getBindGroupLayout(1), entries });
     }
+    async function setWaterCarveResources(res) { carveRes = res ?? null; await rebuildCarveGroups(); }
+    async function setRiverValleyResources(res) { valleyRes = res ?? null; await rebuildCarveGroups(); }
 
     /**
      * Carved terrain heights (m) at unit directions (Float32Array, 4 floats
@@ -305,7 +324,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     }
 
     return {
-        sampleGrid, samplePatch, sampleDirsCarved, setWaterCarveResources, maxH, seaLevelM,
+        sampleGrid, samplePatch, sampleDirsCarved, setWaterCarveResources, setRiverValleyResources, maxH, seaLevelM,
         // Everything the samples depend on: the terrain shader and its uniforms.
         terrainKey: hashParts([baseSource, uniformBytes]),
         destroy() { uniformBuffer.destroy(); },

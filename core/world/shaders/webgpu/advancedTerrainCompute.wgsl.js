@@ -3,6 +3,7 @@ import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
 import { createTerrainFeatureToggleWgsl } from '../../terrain-generator/terrainFeatureToggles.js';
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
 import { createRiverCarveWgsl } from '../../water/riverCarve.wgsl.js';
+import { createRiverValleyWgsl } from '../../water/riverValley.wgsl.js';
 
 function wgslFloat(value, fallback) {
   const n = Number.isFinite(value) ? value : fallback;
@@ -637,6 +638,9 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     // options.waterCarve: river channels in the height (group 1 bindings 1-3,
     // riverCarve.wgsl.js); otherwise pass-through stubs.
     createRiverCarveWgsl({ enabled: options?.waterCarve === true }),
+    // options.riverValley: river valleys in the height (group 1 bindings 4-7,
+    // riverValley.wgsl.js); otherwise pass-through stubs.
+    createRiverValleyWgsl({ enabled: options?.riverValley === true, page: options?.riverValleyPage ?? 32 }),
     base.base(),
     `
 const WATER_1: u32 = SURFACE_WATER;

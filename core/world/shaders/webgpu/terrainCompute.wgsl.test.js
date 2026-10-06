@@ -83,5 +83,12 @@ describe('terrain generation compute shader', () => {
             expect(code).toMatch(/@group\(1\) @binding\(3\) var<storage, read> waterRivers/);
             expect(compile(code)).toBeNull();
         });
+        // With the river valleys (riverValley.wgsl.js, group 1 bindings 4-7).
+        it(`${name} variant compiles with the river valleys`, () => {
+            const code = createAdvancedTerrainComputeShader({ ...base, ...extra, waterCarve: true, riverValley: true });
+            expect(code).toContain('fn valleyShapeAt');
+            expect(code).toMatch(/@group\(1\) @binding\(5\) var<storage, read> valleyTexels/);
+            expect(compile(code)).toBeNull();
+        });
     }
 });

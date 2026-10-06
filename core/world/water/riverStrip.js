@@ -56,7 +56,8 @@ export function createRiverStrip(rec, R, { tangentM = 20 } = {}) {
         /**
          * Row frame and river values at arc length x: c (centre, unit
          * direction), along (unit flow direction), left (unit, + across),
-         * eta (level), hw (half-width), bed (thalweg), speed.
+         * eta (the water's level: normal depth of Q, waterWorkerCore.js),
+         * hw (half-width), bed (thalweg), speed (mean), Q (m^3/s).
          */
         at(x) {
             const c = centre(x);
@@ -66,8 +67,9 @@ export function createRiverStrip(rec, R, { tangentM = 20 } = {}) {
             const left = norm3(cross3(c, along));
             const { k, t } = locate(x), k1 = Math.min(n - 1, k + 1);
             const lerp = (o) => val(k, o) + (val(k1, o) - val(k, o)) * t;
-            const eta = lerp(3), depth = lerp(5);
-            return { c, along, left, eta, hw: lerp(4), bed: eta - depth, speed: lerp(6) };
+            const design = lerp(3), depth = lerp(5);
+            const eta = st >= 20 ? lerp(16) : design;
+            return { c, along, left, eta, hw: lerp(4), bed: design - depth, speed: lerp(6), Q: lerp(7) };
         },
         /**
          * Arc length of the river point nearest to unit direction d, and the

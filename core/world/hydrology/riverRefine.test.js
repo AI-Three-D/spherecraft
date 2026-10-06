@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { corridorMask, fitNonIncreasing, riverLevels, riverPools, riverShape, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
+import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverShape, riverValleyLevels, riverValleyShape, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
 
 // 60 x 30 patch, 16 m cells, frame origin at (0, 0). A valley runs along
 // j = 15 from a source lake (i < 10, level 50 m) down to a destination lake
@@ -62,69 +62,68 @@ describe('river trace', () => {
     });
 });
 
-describe('river levels for the carve', () => {
-    it('fitNonIncreasing: the least-squares fit that never rises', () => {
-        expect(Array.from(fitNonIncreasing([5, 4, 6, 2, 3, 1]))).toEqual([5, 5, 5, 2.5, 2.5, 1]);
-        expect(Array.from(fitNonIncreasing([1, 2, 3]))).toEqual([2, 2, 2]);
-        expect(Array.from(fitNonIncreasing([3, 2, 1]))).toEqual([3, 2, 1]);
+describe('river levels for the valley', () => {
+    it('fitNonIncreasingQuantile: never rises; tau sets how much lies below', () => {
+        const w = [1, 1, 1, 1, 1, 1];
+        const med = Array.from(fitNonIncreasingQuantile([5, 4, 6, 2, 3, 1], w, 0.5));
+        for (let k = 1; k < med.length; k++) expect(med[k]).toBeLessThanOrEqual(med[k - 1]);
+        expect(Array.from(fitNonIncreasingQuantile([3, 2, 1], [1, 1, 1], 0.1))).toEqual([3, 2, 1]);
+        // A rise is pooled at the low quantile: the block takes its lower value.
+        expect(Array.from(fitNonIncreasingQuantile([1, 2], [1, 1], 0.1))).toEqual([1, 1]);
+        expect(Array.from(fitNonIncreasingQuantile([1, 2], [1, 1], 0.9))).toEqual([2, 2]);
     });
 
-    it('cut into the ground, never above the source or below the destination; the level never rises', () => {
-        // Ground along a river: a rim, a deep hollow, then down to a lake at 80.
-        const s = [], ground = [], depth = [];
-        for (let k = 0; k <= 60; k++) {
-            s.push(k * 40);
-            const g = 100 - k * 0.3 + (k >= 20 && k < 26 ? -12 : 0) + (k >= 14 && k < 18 ? 4 : 0);
-            ground.push(Math.max(78, g));
-            depth.push(k % 7 === 3 ? 1.4 : 1.6 + k * 0.01);   // depth not monotone
+    // Ground along a river: a rim, a deep hollow, bumps, then down to a lake at 80.
+    const s = [], ground = [], free = [];
+    for (let k = 0; k <= 150; k++) {
+        s.push(k * 20);
+        const g = 100 - k * 0.12 + (k >= 50 && k < 60 ? -10 : 0) + (k >= 30 && k < 40 ? 6 : 0) + 2 * Math.sin(k * 0.7);
+        ground.push(Math.max(78, g));
+        free.push(riverCrestAbove(1.8));
+    }
+    const P = { ...RIVER_LEVEL_DEFAULTS };
+
+    it('falls strictly and smoothly from the source level to the destination level', () => {
+        const { eta, minSlope } = riverValleyLevels({ s, ground, free, srcLevel: 100, destLevel: 80 }, P);
+        expect(minSlope).toBe(P.minSlope);
+        expect(eta[0]).toBeCloseTo(100, 9);
+        expect(eta[eta.length - 1]).toBeCloseTo(80, 6);
+        let maxDrop = 0;
+        for (let k = 1; k < eta.length; k++) {
+            const drop = eta[k - 1] - eta[k];
+            expect(drop).toBeGreaterThanOrEqual(P.minSlope * 20 - 1e-9);   // never flat, never rising
+            maxDrop = Math.max(maxDrop, drop);
         }
-        const P = { waterFrac: 0.75, bankH: 1.5, rampM: 60 };
-        const { eta, bed } = riverLevels(ground, s, depth, { srcLevel: 100, destLevel: 80 }, P);
-        expect(eta[0]).toBe(100);                                   // no step at the outlet
-        let cut = 0, fill = 0;
-        for (let k = 0; k < eta.length; k++) {
-            expect(eta[k]).toBeLessThanOrEqual(100);
-            expect(eta[k]).toBeGreaterThanOrEqual(80);
-            expect(eta[k] - bed[k]).toBeCloseTo(0.75 * depth[k], 9);
-            if (k) expect(eta[k]).toBeLessThanOrEqual(eta[k - 1]);
-            const crest = eta[k] + 0.25 * depth[k] + 1.5;
-            if (s[k] >= 60 && eta[k] > 80) { cut = Math.max(cut, ground[k] - crest); fill = Math.max(fill, crest - ground[k]); }
-        }
-        // The rim is cut and the hollow filled, both by less than the hollow's depth.
-        expect(cut).toBeGreaterThan(1);
-        expect(fill).toBeGreaterThan(1);
-        expect(Math.max(cut, fill)).toBeLessThan(12);
-        expect(eta[eta.length - 1]).toBe(80);                       // meets the destination's level
+        // Drops are spread (no steps): at most a few metres per 20 m point.
+        expect(maxDrop).toBeLessThan(3);
     });
 
-    it('riverPools: a hollow the river crosses is found, a valley falling downstream is not', () => {
-        const nx = 80, ny = 40, spacing = 4, x0 = 0, y0 = 0;
-        const corridor = new Uint8Array(nx * ny).fill(1);
-        const px = [], py = [], eta = [];
-        for (let k = 0; k <= 8; k++) { px.push(10 + k * 37.5); py.push(80); }
-        // Flat ground at 10 with a bowl (radius 50 m, 5 m deep) at x = 160; level 9.
-        const bowl = new Float32Array(nx * ny);
-        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-            const r = Math.hypot((i + 0.5) * spacing - 160, (j + 0.5) * spacing - 80);
-            bowl[j * nx + i] = 10 - 5 * Math.max(0, 1 - (r / 50) ** 2);
+    it('stays under the ground beside the river (the floor is cut in), filling only a small share', () => {
+        const { eta } = riverValleyLevels({ s, ground, free, srcLevel: 100, destLevel: 80 }, P);
+        let fill = 0, n = 0;
+        for (let k = 10; k < eta.length - 10; k++) {
+            n++;
+            if (eta[k] + free[k] > ground[k] - P.marginM + 1e-6) fill++;
         }
-        for (let k = 0; k <= 8; k++) eta.push(9);
-        const reach = riverPools({ heights: bowl, corridor, nx, ny, x0, y0, spacing, px, py, eta });
-        // Beyond maxReachM of the line it is not counted.
-        expect(Math.max(...riverPools({ heights: bowl, corridor, nx, ny, x0, y0, spacing, px, py, eta, maxReachM: 20 }))).toBeLessThan(30);
-        // Below 8.75 m inside r < 43.3 m: the points near x = 160 see it.
-        const mid = 4;   // x = 160
-        expect(reach[mid]).toBeGreaterThan(38);
-        expect(reach[mid]).toBeLessThan(52);
-        expect(reach[0]).toBe(0);
-        expect(reach[8]).toBe(0);
-        // A valley falling along the river, the level 1 m below the ground at
-        // every point: lower ground downstream is not water.
-        const valley = new Float32Array(nx * ny), eta2 = [];
-        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) valley[j * nx + i] = 20 - 0.03 * (i + 0.5) * spacing;
-        for (let k = 0; k <= 8; k++) eta2.push(20 - 0.03 * px[k] - 1);
-        const none = riverPools({ heights: valley, corridor, nx, ny, x0, y0, spacing, px, py, eta: eta2 });
-        expect(Math.max(...none)).toBe(0);
+        expect(fill / n).toBeLessThan(0.2);
+    });
+
+    it('valley shape: floor = level + freeboard; no fill at the sill, at the end or in lakes', () => {
+        const { eta } = riverValleyLevels({ s, ground, free, srcLevel: 100, destLevel: 80 }, P);
+        const n = s.length, wc = new Array(n).fill(45), rise = ground.map(g => g + 20);
+        const inLake = s.map((_, k) => k > n - 3);
+        const fr = s.map(x => riverCrestAbove(1.8) * Math.min(1, x / P.outletRampM));
+        const { F, wFill, sWall } = riverValleyShape({ s, eta, free: fr, wc, rise, inLake }, P);
+        expect(F[0]).toBeCloseTo(100, 9);
+        expect(wFill[0]).toBe(0);
+        for (let k = 0; k < n; k++) {
+            expect(F[k]).toBeCloseTo(eta[k] + fr[k], 9);
+            expect(sWall[k]).toBeGreaterThanOrEqual(P.wallMin);
+            expect(sWall[k]).toBeLessThanOrEqual(P.wallMax);
+            if (inLake[k]) expect(wFill[k]).toBe(0);
+        }
+        expect(wFill[Math.floor(n / 2)]).toBe(1);
+        expect(wFill[n - 1]).toBe(0);
     });
 
     it('segmentCells covers every cell the segment capsule touches', () => {

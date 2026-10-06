@@ -13,11 +13,15 @@
 // - mask atlas: r8 layers of maskLayerSize^2, one per refined lake (max-
 //   pooled when the lake's mask is larger); when full, the lake farthest
 //   from the camera gives its layer up and falls back to level-only;
-// - params uniform: switches and look, written every frame (time).
+// - params uniform: switches and look, written every frame (time);
+// - river valley field (riverValley.js): page table, packed texel pages,
+//   params; pages arrive baked from the WaterService
+//   (valleyUpdates) and mark their grid cells changed (tiles regenerate).
 
 import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS, RIVER_SUB } from './waterWgsl.js';
 import { dirToCell } from '../hydrology/waterGraph.js';
 import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
+import { RIVER_VALLEY_DEFAULTS, valleyLayout, valleyPageCells, valleyParamsData } from './riverValley.js';
 
 export const WATER_LOOK_DEFAULTS = Object.freeze({
     deepColor: [0.02, 0.10, 0.09],    // albedo of deep water (lit by sky + sun); Whitewater's water tint
@@ -58,7 +62,7 @@ export class WaterGpuData {
      * @param {GPUDevice} device
      * @param {object} o  gridN, planetRadius, maxLakes, maskLayerSize, maxMaskLayers
      */
-    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96, maxRiverSegs = 262144, maxRiverCells = 65536, carve = null } = {}) {
+    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96, maxRiverSegs = 262144, maxRiverCells = 65536, carve = null, valley = null, maxValleyPages = 3072 } = {}) {
         this.device = device;
         this.N = gridN;
         this.R = planetRadius;
@@ -111,6 +115,54 @@ export class WaterGpuData {
         this._layerOwner = new Array(maxMaskLayers).fill(-1);
         this._dirtyRows = new Set();   // face * N + j
         this.lakeCount = 0;
+
+        // River valley field (riverValley.js), or none (valley null).
+        this.valley = valley ? { ...RIVER_VALLEY_DEFAULTS, ...valley } : null;
+        if (this.valley) {
+            const L = valleyLayout(this.valley);
+            this._valleyLayout = L;
+            this.maxValleyPages = maxValleyPages;
+            this.valleyPagesBuffer = device.createBuffer({ label: 'Valley-pages', size: L.pageCount * 4, usage: S });
+            this.valleyTexelsBuffer = device.createBuffer({ label: 'Valley-texels', size: maxValleyPages * L.TEX * 16, usage: S });
+            this.valleyParamsBuffer = device.createBuffer({ label: 'Valley-params', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            device.queue.writeBuffer(this.valleyParamsBuffer, 0, valleyParamsData(this.valley, true));
+            this._valleyPageTable = new Uint32Array(L.pageCount);
+            this._valleySlotOf = new Map();   // page id -> slot (0-based)
+            this.valleyPageCount = 0;
+        }
+    }
+
+    /** Valley field resources for bind groups (riverValley.wgsl.js), or null. */
+    get valleyResources() {
+        if (!this.valley) return null;
+        return { pages: this.valleyPagesBuffer, texels: this.valleyTexelsBuffer, params: this.valleyParamsBuffer };
+    }
+
+    /**
+     * Uploads baked valley pages (WaterService valleyUpdates): a slot per
+     * page (kept when re-baked), the page table, and the pages' grid cells
+     * marked changed (the terrain there differs: tiles regenerate).
+     */
+    _applyValleyUpdates(svc) {
+        if (!this.valley || !svc.valleyUpdates?.length) return;
+        const L = this._valleyLayout, q = this.device.queue;
+        let tableChanged = false, full = 0;
+        for (const u of svc.valleyUpdates.splice(0)) {
+            u.pageIds.forEach((pid, k) => {
+                let slot = this._valleySlotOf.get(pid);
+                if (slot === undefined) {
+                    if (this.valleyPageCount >= this.maxValleyPages) { full++; return; }
+                    slot = this.valleyPageCount++;
+                    this._valleySlotOf.set(pid, slot);
+                    this._valleyPageTable[pid] = slot + 1;
+                    tableChanged = true;
+                }
+                q.writeBuffer(this.valleyTexelsBuffer, slot * L.TEX * 16, u.texels, k * L.TEX * 4, L.TEX * 4);
+                for (const c of valleyPageCells(pid, this.N, this.valley)) this._changedCells.add(c);
+            });
+        }
+        if (tableChanged) q.writeBuffer(this.valleyPagesBuffer, 0, this._valleyPageTable);
+        if (full) console.warn(`[Water] valley pages full (${this.maxValleyPages}): ${full} pages left out`);
     }
 
     /** True when a lake or a traced river is listed in a grid cell within radiusM of dir (9 probes). */
@@ -302,6 +354,7 @@ export class WaterGpuData {
                     riversChanged = true;
                 }
                 if (riversChanged) this._rebuildRivers(camDir);
+                this._applyValleyUpdates(svc);
                 this._flushRows();
                 this._writeTable(svc);
                 this._appliedVersion = svc.version;
@@ -423,14 +476,17 @@ export class WaterGpuData {
                 const rec = list[m], k = list[m + 1], P = rec.points, st = rec.stride, a = k * st, b = (k + 1) * st, o = next * F;
                 const arc = this._arcLengths(rec);
                 // WaterRiverSeg (waterWgsl.js): p0, eta0, p1, eta1, hw, thalweg,
-                // pool, skew, speed, foam, arc length at both ends, river id
-                // (points: waterWorkerCore.js).
+                // pool, skew, speed, foam, arc length at both ends, river id,
+                // water level (points: waterWorkerCore.js).
                 const ext = st >= 12;
+                // Water level (points 16) on records that have it, else the design level.
+                const wlA = st >= 20 ? P[a + 16] : P[a + 3], wlB = st >= 20 ? P[b + 16] : P[b + 3];
                 this._segs.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
                     P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5],
                     ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
                     P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0,
-                    arc[k], arc[k + 1], ridOf.get(rec) ?? -1, 0], o);
+                    arc[k], arc[k + 1], ridOf.get(rec) ?? -1, 0,
+                    wlA, wlB, 0, 0], o);
                 next++;
             }
             this.index[2 * this.cells + block * SS + (id % SS)] = (first << 8) | (list.length / 2);

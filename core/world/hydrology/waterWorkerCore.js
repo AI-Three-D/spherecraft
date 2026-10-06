@@ -14,14 +14,19 @@
 //     -> { type: 'restored', lakeId, downstream }
 //   { type: 'planRiver', riverId, spacing, corridorM }
 //     -> { type: 'riverPlan', riverId, status, frame, dest }   (route + corridor frame)
+//   { type: 'restoreRiver', riverId, points, stride }   (a cached trace, for the valleys)
+//   { type: 'bakeValley', riverIds, opts }
+//     -> { type: 'valleyBaked', pageIds, texels }   (riverValley.js)
 //   { type: 'solveRiver', riverId, frame, heights, shape, levels, reachM, sub }
 //     -> { type: 'riverSolved', riverId, status, points, stride, segCellStart, segCells, ... }
-//     points, stride 12 (riverRefine.js RIVER_POINT_STRIDE): dir.xyz, water
+//     points, stride 16 (riverRefine.js RIVER_POINT_STRIDE): dir.xyz, water
 //     level, half-width, water depth at the thalweg (level - thalweg), speed,
-//     discharge (m^3/s), spill level of the trace (uncarved terrain), reach
-//     of the hollows beside it that the carve fills (m; 0 = none, -1 = the
-//     point lies in a lake), thalweg skew toward the outer bank (-0.35..0.35,
-//     + = left of the flow), foam hint (0..1);
+//     discharge (m^3/s), spill level of the trace (uncarved terrain), pool
+//     (-1 = the point lies in a lake, else 0), thalweg skew toward the outer
+//     bank (-0.35..0.35, + = left of the flow), foam hint (0..1); the valley
+//     (riverValley.js): floor level, floor half-width, fill weight, wall slope;
+//     the water: its level (normal depth of Q in the channel), its depth at
+//     the thalweg; two unused;
 //     segCells: per segment, the sub-cells it reaches (waterGraph.js dirToCellSub).
 //     The sub-cell size (msg.sub, default 4 per cell side) must match the
 //     GPU lists' (waterWgsl.js RIVER_SUB).
@@ -35,14 +40,19 @@
 // two-lake cycles).
 
 import { buildWaterGraph, cellDir, dirToCell, dirToCellSub } from './waterGraph.js';
+import { bakeValleyPages, RIVER_VALLEY_DEFAULTS, valleyPagesNear, valleyRiverFromRecord } from '../water/riverValley.js';
 import { dirToPlane, lakeMask, lakePatchFrame, lakeSeed, planeToDir, polylinePatchFrame, solveLakePatch } from './lakeRefine.js';
-import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverLevels, riverPools, riverShape, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
+import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverCrestAbove, riverNormalDepth, riverShape, riverValleyLevels, riverValleyShape, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
+
+// C2 ramp 0..1 (quintic smoothstep of a clamped value).
+const ramp5 = (t) => { const x = Math.max(0, Math.min(1, t)); return x * x * x * (x * (x * 6 - 15) + 10); };
 
 export function createWaterWorkerCore() {
     let g = null;
     let N = 0, R = 0, seaLevelM = 0;
     let heights = null;
     const refined = new Map();   // lakeId -> { level, exitDir, frame, region }
+    const valleyRivers = new Map();   // riverId -> valley line (riverValley.js valleyRiverFromRecord)
     const mergedInto = new Map(); // lakeId -> lakeId it is part of
 
     const rep = (id) => { while (mergedInto.has(id)) id = mergedInto.get(id); return id; };
@@ -280,13 +290,10 @@ export function createWaterWorkerCore() {
             else if (!(h[k] < plan.destLevel) || !inDest(k)) continue;
             seeds[k] = 1; seedCount++;
         }
-        let weakEnd = false;
-        if (!seedCount) {
-            // No destination water inside the corridor: end where the route ends.
-            weakEnd = true;
-            const [ex, ey] = poly[poly.length - 1];
-            for (let k = 0; k < nx * ny; k++) if (corridor[k] && Math.hypot(cx(k) - ex, cy(k) - ey) < 300) seeds[k] = 1;
-        }
+        // No destination water inside the corridor: no river (the service
+        // retries with a wider corridor). A river must end in water
+        // (owner 2026-10-03: no dead ends).
+        if (!seedCount) return { reply: { type: 'riverSolved', riverId, status: 'noDest' } };
         const [sx, sy] = poly[0];
         const si = Math.max(0, Math.min(nx - 1, Math.floor((sx - frame.x0) / spacing)));
         const sj = Math.max(0, Math.min(ny - 1, Math.floor((sy - frame.y0) / spacing)));
@@ -307,59 +314,100 @@ export function createWaterWorkerCore() {
         // to cross higher ground (the graph's route and the 16 m terrain
         // disagree over long distances), the carve cuts a channel through the rise.
         const srcLevel = levelOf(plan.src);
+        // Discharge: the route cell at the same arc fraction, but never less
+        // than the source lake's outflow and never falling downstream (the
+        // cells along a lake's fine outflow are off the graph's drainage
+        // tree and hold almost none: lab 2026-10-06, river 17 dry there).
         const shapes = [];
+        let qRun = g.lakes[plan.src].outflowQ ?? 0;
         for (let k = 0; k < n; k++) {
             const ci = plan.cells[Math.min(plan.cells.length - 1, Math.round((sm.s[k] / total) * (plan.cells.length - 1)))];
-            const Qm3s = qAt(ci);
+            qRun = Math.max(qRun, g.Q[ci]);
+            const Qm3s = shapeP.runoffM3sPerKm2 * qRun * cellKm2;
             const k0 = Math.max(0, k - 4), k1 = Math.min(n - 1, k + 4);
             const slope = (sm.fill[k0] - sm.fill[k1]) / Math.max(1, sm.s[k1] - sm.s[k0]);
             shapes.push({ ...riverShape(Qm3s, slope, shapeP, levelP.waterFrac), Qm3s, slope });
         }
-        // Lake water on the patch (any lake: a refined one by its region,
-        // others below their level in their grid cells; the sea): the carve
-        // neither fills nor raises banks there, and where the river crosses
-        // it the level is the lake's.
+        // Lake water on the patch: the sea; refined lakes by their solved
+        // region, which can reach beyond the graph's cells; other lakes below
+        // their level in their graph cells. The valley neither fills nor
+        // counts as ground there, and the river's points in it are lake points.
         const lakeMask = new Uint8Array(nx * ny), lakeLevel = new Float32Array(nx * ny);
+        const patchR = 0.5 * Math.hypot(nx, ny) * spacing;
+        const near = [];
+        for (const [id, rr] of refined) {
+            if (!rr.region || rep(id) !== id) continue;
+            const f = rr.frame, fr = 0.5 * Math.hypot(f.nx, f.ny) * f.spacing;
+            const cosA = f.c[0] * frame.c[0] + f.c[1] * frame.c[1] + f.c[2] * frame.c[2];
+            if (Math.acos(Math.max(-1, Math.min(1, cosA))) * R < patchR + fr) near.push(rr);
+        }
         for (let k = 0; k < nx * ny; k++) {
-            const d = planeToDir(cx(k), cy(k), frame, R);
             if (h[k] <= seaLevelM) { lakeMask[k] = 1; lakeLevel[k] = seaLevelM; continue; }
-            const l0 = g.lakeOf[dirToCell(d, N)];
-            if (l0 === -1) continue;
-            const l = rep(l0), rr = refined.get(l);
-            if (rr?.region) {
+            const d = planeToDir(cx(k), cy(k), frame, R);
+            for (const rr of near) {
+                if (!(h[k] < rr.level)) continue;
                 const f = rr.frame;
                 const [x, y] = dirToPlane(d, f, R);
                 const i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
-                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rr.region[j * f.nx + i] === 1 && h[k] < rr.level) { lakeMask[k] = 1; lakeLevel[k] = rr.level; }
-            } else if (h[k] < levelOf(l)) { lakeMask[k] = 1; lakeLevel[k] = levelOf(l); }
+                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rr.region[j * f.nx + i] === 1) { lakeMask[k] = 1; lakeLevel[k] = rr.level; break; }
+            }
+            if (lakeMask[k]) continue;
+            const l0 = g.lakeOf[dirToCell(d, N)];
+            if (l0 === -1) continue;
+            const l = rep(l0);
+            if (!refined.get(l)?.region && h[k] < levelOf(l)) { lakeMask[k] = 1; lakeLevel[k] = levelOf(l); }
         }
         const pointCell = (k) => {
             const i = Math.floor((sm.x[k] - frame.x0) / spacing), j = Math.floor((sm.y[k] - frame.y0) / spacing);
             return i >= 0 && j >= 0 && i < nx && j < ny ? j * nx + i : -1;
         };
-        const lakeAt = sm.x.map((_, k) => { const c = pointCell(k); return c >= 0 && lakeMask[c] === 1 ? lakeLevel[c] : NaN; });
-        // Natural ground along the line (bilinear on the patch).
+        // Natural ground (bilinear on the patch).
         const groundAt = (x, y) => {
             const fx = (x - frame.x0) / spacing - 0.5, fy = (y - frame.y0) / spacing - 0.5;
             const i = Math.max(0, Math.min(nx - 2, Math.floor(fx))), j = Math.max(0, Math.min(ny - 2, Math.floor(fy)));
             const tx = Math.min(1, Math.max(0, fx - i)), ty = Math.min(1, Math.max(0, fy - j)), c = j * nx + i;
             return (h[c] * (1 - tx) + h[c + 1] * tx) * (1 - ty) + (h[c + nx] * (1 - tx) + h[c + nx + 1] * tx) * ty;
         };
-        const ground = sm.x.map((x, k) => groundAt(x, sm.y[k]));
-        const lv = riverLevels(ground, sm.s, shapes.map(sh => sh.depth), { srcLevel, destLevel: plan.destLevel }, levelP, lakeAt);
-        // Per point: -1 in a lake (no levee there: the carve), else the reach
-        // of hollows beside the river (riverPools; off by default: the carve
-        // no longer fills them, its levee holds the water).
-        let pool, poolRes = null;
-        if ((levelP.poolMaxM ?? 0) > 0) {
-            poolRes = riverPools({
-                heights: h, corridor: null, nx, ny, x0: frame.x0, y0: frame.y0, spacing, px: sm.x, py: sm.y, eta: lv.eta,
-                lake: lakeMask, maxReachM: levelP.poolMaxM, withMasks: !!msg.debugPools,
-            });
-            pool = msg.debugPools ? poolRes.reach : poolRes;
-        } else {
-            pool = lakeAt.map(l => (Number.isFinite(l) ? -1 : 0));
+        const cellOf = (x, y) => {
+            const i = Math.floor((x - frame.x0) / spacing), j = Math.floor((y - frame.y0) / spacing);
+            return i >= 0 && j >= 0 && i < nx && j < ny ? j * nx + i : -1;
+        };
+        // Per point: the floor's half-width, its height above the water (ramped
+        // in from the source), the lowest dry ground beside the line within the
+        // floor (lake water is not ground; where all of it is water, the
+        // water's level), and the ground wallProbeM past the floor's edge.
+        const hwArr = shapes.map(sh => sh.width / 2);
+        const wc = hwArr.map(hw => levelP.floorScale * hw + levelP.floorExtraM);
+        const free = shapes.map((sh, k) => riverCrestAbove(sh.depth, levelP) * ramp5(sm.s[k] / levelP.outletRampM));
+        const ground = new Float64Array(n), rise = new Float64Array(n), inLake = new Array(n);
+        for (let k = 0; k < n; k++) {
+            const k0 = Math.max(0, k - 1), k1 = Math.min(n - 1, k + 1);
+            const tx = sm.x[k1] - sm.x[k0], ty = sm.y[k1] - sm.y[k0], tl = Math.hypot(tx, ty) || 1;
+            const nxv = -ty / tl, nyv = tx / tl;
+            let lo = Infinity, wet = Infinity;
+            for (let o = -wc[k]; o <= wc[k] + 1e-6; o += 0.5 * spacing) {
+                const x = sm.x[k] + nxv * o, y = sm.y[k] + nyv * o, c = cellOf(x, y);
+                if (c >= 0 && lakeMask[c]) { wet = Math.min(wet, lakeLevel[c]); continue; }
+                lo = Math.min(lo, groundAt(x, y));
+            }
+            const c0 = pointCell(k);
+            inLake[k] = c0 >= 0 && lakeMask[c0] === 1;
+            ground[k] = Number.isFinite(lo) ? lo : (Number.isFinite(wet) ? wet + free[k] + levelP.marginM : groundAt(sm.x[k], sm.y[k]));
+            // The higher side, wallProbeM past the floor's edge (or as far as the patch reaches).
+            let r = -Infinity;
+            for (const side of [-1, 1]) {
+                for (let o = wc[k] + levelP.wallProbeM; o > wc[k]; o -= 50) {
+                    const x = sm.x[k] + nxv * o * side, y = sm.y[k] + nyv * o * side;
+                    if (cellOf(x, y) < 0) continue;
+                    r = Math.max(r, groundAt(x, y));
+                    break;
+                }
+            }
+            rise[k] = Number.isFinite(r) ? r : ground[k];
         }
+        const destLevel = plan.destLevel;
+        const { eta } = riverValleyLevels({ s: sm.s, ground, free, srcLevel, destLevel }, levelP);
+        const vs = riverValleyShape({ s: sm.s, eta, free, wc, rise, inLake }, levelP);
         const dirs = [];
         for (let k = 0; k < n; k++) dirs.push(planeToDir(sm.x[k], sm.y[k], frame, R));
         // Bends: signed curvature (1/m, + = turning left seen from above),
@@ -373,18 +421,36 @@ export function createWaterWorkerCore() {
             const cr = [f0[1] * f1[2] - f0[2] * f1[1], f0[2] * f1[0] - f0[0] * f1[2], f0[0] * f1[1] - f0[1] * f1[0]];
             kappaRaw[k] = ((cr[0] * d[0] + cr[1] * d[1] + cr[2] * d[2]) / (l0 * l1)) / (0.5 * (l0 + l1) * R);
         }
-        // Flow speed and foam from the water level's own slope (its drops,
-        // where the level fit steps down, are riffles and rapids).
+        // The bed's slope (the design level's, over +-100 m).
         const etaSlope = (k) => {
-            const k0 = Math.max(0, k - 2), k1 = Math.min(n - 1, k + 2);
-            return Math.max(0, lv.eta[k0] - lv.eta[k1]) / Math.max(1, sm.s[k1] - sm.s[k0]);
+            let k0 = k, k1 = k;
+            while (k0 > 0 && sm.s[k] - sm.s[k0] < 100) k0--;
+            while (k1 < n - 1 && sm.s[k1] - sm.s[k] < 100) k1++;
+            return Math.max(levelP.minSlope * 0.5, (eta[k0] - eta[k1]) / Math.max(1, sm.s[k1] - sm.s[k0]));
         };
+        // The water: normal depth of Q in the channel on that slope
+        // (Whitewater derives its inflow the same way), so the simulation's
+        // steady flow carries the river's discharge at the drawn level. At the
+        // source it meets the lake's level; never below the destination's;
+        // never rising.
+        const wl = new Float64Array(n), wDepth = new Float64Array(n), speedArr = new Float64Array(n);
+        for (let k = 0, run = Infinity; k < n; k++) {
+            const { width, depth, Qm3s } = shapes[k];
+            const T = eta[k] - levelP.waterFrac * depth;
+            const nd = riverNormalDepth(Qm3s, etaSlope(k), width / 2, depth, shapeP.manning);
+            const a = ramp5(sm.s[k] / levelP.outletRampM);
+            let level = eta[k] + (T + nd.h - eta[k]) * a;
+            level = Math.max(level, destLevel);
+            run = Math.min(run, level);
+            wl[k] = run; wDepth[k] = Math.max(0, run - T);
+            speedArr[k] = Math.max(0.05, Math.min(6, Qm3s / Math.max(nd.A, 0.1)));
+        }
         const stride = RIVER_POINT_STRIDE;
         const points = new Float32Array(n * stride);
         for (let k = 0; k < n; k++) {
             const { width, depth, Qm3s } = shapes[k];
             const slope = etaSlope(k);
-            const speed = riverShape(Qm3s, slope, shapeP, levelP.waterFrac).speed;
+            const speed = speedArr[k];
             const d = dirs[k], hw = width / 2;
             let kappa = 0, m = 0;
             for (let q = Math.max(0, k - 3); q <= Math.min(n - 1, k + 3); q++) { kappa += kappaRaw[q]; m++; }
@@ -392,13 +458,13 @@ export function createWaterWorkerCore() {
             // The thalweg moves toward the outer bank of bends (Whitewater's d0).
             const skew = Math.max(-0.35, Math.min(0.35, -0.7 * kappa * hw));
             // Foam hint for the medium-distance water: steeper reaches are rougher.
-            const foam = Math.max(0, Math.min(1, (slope - 0.0015) / 0.012));
-            points.set([d[0], d[1], d[2], lv.eta[k], hw, lv.eta[k] - lv.bed[k], speed, Qm3s, sm.fill[k], pool[k], skew, foam], k * stride);
+            const foam = Math.max(0, Math.min(1, (slope - 0.004) / 0.03));
+            points.set([d[0], d[1], d[2], eta[k], hw, levelP.waterFrac * depth, speed, Qm3s, sm.fill[k], inLake[k] ? -1 : 0, skew, foam,
+                vs.F[k], wc[k], vs.wFill[k], vs.sWall[k], wl[k], wDepth[k], 0, 0], k * stride);
         }
         // Sub-cells each segment reaches: channel, banks and their blend into
         // the terrain (the carve), or its filled hollow, whichever is wider.
         const reachExtra = Math.max(40, msg.reachM ?? 0), reachScale = msg.reachScale ?? 1;
-        const poolExtra = msg.poolExtraM ?? 40;
         const sub = msg.sub ?? 4;
         const cellAt = (x, y) => dirToCellSub(planeToDir(x, y, frame, R), N, sub);
         const segCellStart = new Int32Array(n);
@@ -406,27 +472,89 @@ export function createWaterWorkerCore() {
         for (let k = 0; k + 1 < n; k++) {
             segCellStart[k] = segCellList.length;
             const a = k * stride, b = (k + 1) * stride;
-            const reach = Math.max(points[a + 4] * reachScale + reachExtra, points[b + 4] * reachScale + reachExtra,
-                points[a + 9] > 0 ? points[a + 9] + poolExtra : 0, points[b + 9] > 0 ? points[b + 9] + poolExtra : 0);
+            const reach = Math.max(points[a + 4], points[b + 4]) * reachScale + reachExtra;
             for (const c of segmentCells(sm.x[k], sm.y[k], sm.x[k + 1], sm.y[k + 1], reach, cellAt)) segCellList.push(c);
         }
         segCellStart[n - 1] = segCellList.length;
         const segCells = Int32Array.from(segCellList);
+        valleyRivers.set(riverId, valleyRiverFromRecord({ points, stride }, R));
         return {
             reply: {
-                type: 'riverSolved', riverId, status: 'ok', dest: plan.dest, src: plan.src, weakEnd,
+                type: 'riverSolved', riverId, status: 'ok', dest: plan.dest, src: plan.src,
                 lengthM: total, points, stride, segCellStart, segCells,
                 startLevel: sm.fill[0], endLevel: sm.fill[n - 1], destLevel: plan.destLevel,
-                // Lab only (msg.debugPools): the trace patch and its pool masks.
-                ...(msg.debugPools && poolRes ? { debug: { frame, heights: h, corridor, inPool: poolRes.inPool, nearest: poolRes.nearest, sx: sm.x, sy: sm.y, eta: lv.eta, fill: sm.fill } } : {}),
             },
             transfer: [points.buffer, segCellStart.buffer, segCells.buffer],
+        };
+    }
+
+    // ---- River valleys (riverValley.js) ----
+    function restoreRiver(msg) {
+        valleyRivers.set(msg.riverId, valleyRiverFromRecord({ points: msg.points, stride: msg.stride }, R));
+        return { reply: { type: 'riverRestored', riverId: msg.riverId } };
+    }
+
+    // Level of lake or sea water at a unit direction on the natural terrain,
+    // NaN where dry: refined lakes by their solved region (lakes: candidate
+    // records), others by their graph cells, the sea by the grid.
+    function lakeLevelAtFor(lakes) {
+        return (dir) => {
+            const c = dirToCell(dir, N);
+            if (isOcean(c)) return seaLevelM;
+            for (const { rr, cosR } of lakes) {
+                const f = rr.frame, k = dir[0] * f.c[0] + dir[1] * f.c[1] + dir[2] * f.c[2];
+                if (k < cosR) continue;
+                const [x, y] = dirToPlane(dir, f, R);
+                const i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
+                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rr.region[j * f.nx + i] === 1) return rr.level;
+            }
+            const l0 = g.lakeOf[c];
+            if (l0 === -1) return NaN;
+            const l = rep(l0);
+            return refined.get(l)?.region ? NaN : levelOf(l);
+        };
+    }
+
+    function bakeValley(msg) {
+        const opts = { ...RIVER_VALLEY_DEFAULTS, ...(msg.opts ?? {}) };
+        const pages = new Set();
+        for (const rid of msg.riverIds) {
+            const rv = valleyRivers.get(rid);
+            if (rv) for (const p of valleyPagesNear(rv.dirs, rv.s, R, opts)) pages.add(p);
+        }
+        const pageIds = Int32Array.from([...pages].sort((a, b) => a - b));
+        // Every known river can reach these pages (the bake keeps the nearest).
+        const rivers = [...valleyRivers.values()];
+        // Refined lakes near the baked rivers (their frames within reach).
+        const lakes = [];
+        const reachM = opts.dBig + 3000;
+        for (const rr of refined.values()) {
+            if (!rr.region) continue;
+            const f = rr.frame, half = 0.5 * Math.hypot(f.nx, f.ny) * f.spacing;
+            let near = false;
+            for (const rid of msg.riverIds) {
+                const rv = valleyRivers.get(rid);
+                if (!rv) continue;
+                for (let k = 0; k < rv.dirs.length && !near; k += 25) {
+                    const d = rv.dirs[k], cosA = d[0] * f.c[0] + d[1] * f.c[1] + d[2] * f.c[2];
+                    if (Math.acos(Math.max(-1, Math.min(1, cosA))) * R < half + reachM) near = true;
+                }
+                if (near) break;
+            }
+            if (near) lakes.push({ rr, cosR: Math.cos(Math.min(Math.PI / 2, (half + 200) / R)) });
+        }
+        const { texels } = bakeValleyPages(Array.from(pageIds), rivers, { R, lakeLevelAt: lakeLevelAtFor(lakes) }, opts);
+        return {
+            reply: { type: 'valleyBaked', pageIds, texels },
+            transfer: [pageIds.buffer, texels.buffer],
         };
     }
 
     return {
         handle(msg) {
             if (msg.type === 'build') return build(msg);
+            if (msg.type === 'restoreRiver') return restoreRiver(msg);
+            if (msg.type === 'bakeValley') return bakeValley(msg);
             if (msg.type === 'solveLake') return solveLake(msg);
             if (msg.type === 'restoreLake') return restoreLake(msg);
             if (msg.type === 'planRiver') return planRiver(msg);

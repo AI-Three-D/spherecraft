@@ -29,10 +29,10 @@ import { createRiverNoiseWgsl } from './riverShapeNoise.js';
 
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 
-// WaterLake: 4 x vec4 (64 bytes). WaterParams: 11 x vec4. WaterRiverSeg: 6 x vec4 (96 bytes).
+// WaterLake: 4 x vec4 (64 bytes). WaterParams: 11 x vec4. WaterRiverSeg: 7 x vec4 (112 bytes).
 export const LAKE_RECORD_FLOATS = 16;
 export const LAKE_PARAMS_FLOATS = 44;
-export const RIVER_SEG_FLOATS = 24;
+export const RIVER_SEG_FLOATS = 28;
 export const RIVER_MAX_SEGS_PER_CELL = 255;
 // River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
 // 512): a terrain point only walks the segments that can reach it.
@@ -78,11 +78,12 @@ struct WaterParams {
     near: vec4<f32>,
 };
 // A piece of a traced river between two points (unit directions); values
-// interpolate along it: water level and thalweg (m above the sphere),
-// half-width (channel edge), reach of the hollows along it that the carve
-// fills (m; 0 = none, < 0 = in a lake), thalweg skew toward the outer bank
-// (+ = left of the flow), flow speed, foam hint, arc length along the river
-// (m), the river's id.
+// interpolate along it: design level (the channel's waterline) and thalweg
+// (m above the sphere), half-width (channel edge), pool (< 0 = in a lake:
+// no fill), thalweg skew toward the outer bank (+ = left of the flow), mean
+// flow speed, foam hint, arc length along the river (m), the river's id,
+// and the water's level (normal depth of the river's discharge: what is
+// drawn and simulated; at or below the design level).
 struct WaterRiverSeg {
     p0: vec3<f32>, eta0: f32,
     p1: vec3<f32>, eta1: f32,
@@ -90,6 +91,7 @@ struct WaterRiverSeg {
     pool0: f32, pool1: f32, skew0: f32, skew1: f32,
     speed0: f32, speed1: f32, foam0: f32, foam1: f32,
     s0: f32, s1: f32, river: f32, _pad: f32,
+    wl0: f32, wl1: f32, _pad1: f32, _pad2: f32,
 };
 @group(${group}) @binding(${b.index}) var<storage, read> waterIndex: array<u32>;
 @group(${group}) @binding(${b.params}) var<uniform> waterParams: WaterParams;
@@ -143,6 +145,7 @@ struct WaterRiverPt {
     tRaw: f32,       // unclamped
     v: vec3<f32>,    // the direction minus the nearest point of the line
     eta: f32, bed: f32, hw: f32, pool: f32, skew: f32, speed: f32, foam: f32,
+    wl: f32,         // the water's level (m)
     s: f32,          // arc length along the river (m)
     river: f32,      // the river's id
     dOff: f32,       // d(centre offset)/ds
@@ -165,6 +168,7 @@ fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
     p.skew = mix(s.skew0, s.skew1, p.t);
     p.speed = mix(s.speed0, s.speed1, p.t);
     p.foam = mix(s.foam0, s.foam1, p.t);
+    p.wl = mix(s.wl0, s.wl1, p.t);
     p.s = mix(s.s0, s.s1, p.t);
     p.river = s.river;
     let hw0 = max(mix(s.hw0, s.hw1, p.t), 0.5);
@@ -265,7 +269,7 @@ struct WaterRiverHit {
     depthM: f32,          // water depth at the point
     distM: f32,           // distance from the river line
     halfWidthM: f32,
-    etaM: f32,            // the river's level there
+    etaM: f32,            // the water's level there
     flow: vec3<f32>,      // flow direction (unit, along the line)
     speed: f32,
     foam: f32,
@@ -306,17 +310,19 @@ fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     hit.river = best.river;
     hit.distM = best.d;
     hit.halfWidthM = best.hw;
-    hit.etaM = best.eta;
+    hit.etaM = best.wl;
     hit.speed = best.speed;
     hit.foam = best.foam;
-    // Waterline of the channel profile: 1 - (1 - u^2)^1.5 = waterFrac.
-    // Only in the channel: carved banks rise above the level beyond it, and
-    // terrain not carved yet must not flood out to the zone's straight edge
-    // (owner 2026-10-05).
+    // Waterline of the channel profile at the water's depth h (of the
+    // bank-full D): 1 - (1 - u^2)^1.5 = h / D. Only in the channel: carved
+    // banks rise above the level beyond it, and terrain not carved yet must
+    // not flood out to the zone's straight edge (owner 2026-10-05).
     let wf = clamp(waterParams.carve.w, 0.05, 0.99);
-    let uw = sqrt(1.0 - pow(1.0 - wf, 2.0 / 3.0));
-    let paint = (best.eta - best.bed) * max(0.0, 1.0 - (best.d / (uw * best.hw)) * (best.d / (uw * best.hw)));
-    let depthM = select(0.0, max(best.eta - heightM, paint), best.d < best.hw);
+    let Dfull = max((best.eta - best.bed) / wf, 0.05);
+    let hWater = clamp(best.wl - best.bed, 0.0, Dfull);
+    let uw = sqrt(max(1.0 - pow(1.0 - hWater / Dfull, 2.0 / 3.0), 1.0e-4));
+    let paint = hWater * max(0.0, 1.0 - (best.d / (uw * best.hw)) * (best.d / (uw * best.hw)));
+    let depthM = select(0.0, max(best.wl - heightM, paint), best.d < best.hw);
     hit.found = depthM > 0.0;
     hit.depthM = depthM;
     let s = waterRivers[bestK];
@@ -438,7 +444,8 @@ fn waterRiverColor(
     let wf = clamp(waterParams.carve.w, 0.05, 0.99);
     let hwW = max(river.halfWidthM * sqrt(1.0 - pow(1.0 - wf, 2.0 / 3.0)), 0.5);
     let q = clamp(1.0 - (river.nM / hwW) * (river.nM / hwW), 0.0, 1.0);
-    let vAlong = max(river.speed, 0.2) * (0.35 + 0.95 * sqrt(q));
+    // Animation speed, not the physical one: slow rivers still visibly flow.
+    let vAlong = max(river.speed, 0.8) * (0.35 + 0.95 * sqrt(q));
     var N = up;
     var fmask = 0.0;
     if (anim > 0.001) {
@@ -450,7 +457,8 @@ fn waterRiverColor(
         let blend = abs(2.0 * ph0 - 1.0);
         let uvA = local - vel * ph0 * T;
         let uvB = local - vel * ph1 * T + vec2<f32>(37.0, 11.0);
-        let foam = clamp(river.foam * waterParams.riverLook.z + 0.45 * smoothstep(0.7, 1.0, abs(river.nM) / hwW) * min(river.speed / 1.2, 1.0), 0.0, 1.0);
+        // Foam where the river is steep (hint), a trace along the banks of fast water.
+        let foam = clamp(river.foam * waterParams.riverLook.z + 0.15 * smoothstep(0.8, 1.0, abs(river.nM) / hwW) * smoothstep(1.2, 2.5, river.speed), 0.0, 1.0);
         // Turbulence as the simulation would have it: rougher where faster and steeper.
         let kEq = clamp(0.12 + 0.15 * min(river.speed, 2.0) + 0.5 * foam, 0.0, 1.0);
         let g = mix(waterNoiseGrad(uvA * 1.6), waterNoiseGrad(uvB * 1.6), blend);

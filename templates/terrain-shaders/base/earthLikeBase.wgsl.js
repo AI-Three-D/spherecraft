@@ -207,6 +207,10 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
 
     var landHeight = dConst(0.0);
     if (landBlend.x > 0.0) {
+        // River valleys (core/world/water/riverValley.wgsl.js): shaped into
+        // the landform before erosion and again after the detail added
+        // after it; a pass-through where the shader is built without them.
+        let vly = valleyShapeAt(unitDir);
         landHeight = select(dConst(0.0), regional.baseElevation * amp.continentalShelf, terrainFeatureOn(TF_CONTINENT_RELIEF));
 
         // Mountain style by location, 0 = rounded .. 1 = jagged (erosion
@@ -271,6 +275,7 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             let lowRelief = dConst(1.0) - erosionReliefRamp_d(relief);
             let smallHillsH = dMul(smallHillsRaw, dMul(lowRelief, lowRelief));
             landHeight += bigHillsH + smallHillsH;
+            landHeight = valleyApplyPre_d(vly, landHeight);
             let erosionInput = landHeight - mountainsH + mountainsSmooth;
             let er = erosionFilterLand_d(unitDir, erosionInput, relief, style);
             landHeight += er.delta;
@@ -291,6 +296,7 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             let detailBudget = amp.microGain + 0.005;
             landHeight += interior * detailBudget;
         }
+        landHeight = valleyApply_d(vly, landHeight);
     }
     if (landBlend.x >= 1.0) {
         return softClampHeight_d(landHeight, -1.1, 1.8, 0.25);

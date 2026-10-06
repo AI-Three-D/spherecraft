@@ -111,26 +111,33 @@ export function limitPatchCells(f, maxCells) {
 /**
  * Where lake water may show, for rendering: 2 = lake (below the level),
  * 1 = shore band (rim cells with level <= h < level + bandM, connected to
- * the lake), 0 = never. The band covers sub-patch terrain detail: the
- * renderer decides the exact shoreline per pixel from the real terrain
- * height, the mask only stops water outside the basin (the outlet valley
- * and neighbouring basins below the level stay 0).
+ * the lake, at most bandCells cells from it), 0 = never. The band covers
+ * sub-patch terrain detail: the renderer decides the exact shoreline per
+ * pixel from the real terrain height, the mask only stops water outside the
+ * basin (the outlet valley and neighbouring basins below the level stay 0).
+ * The band stays narrow: on flat land it would reach the patch's edge, and
+ * where the terrain was later shaped below the level (river valleys and
+ * channels) lake water showed in straight-edged strips (owner 2026-10-06).
  */
-export function lakeMask(heights, nx, ny, region, level, bandM) {
+export function lakeMask(heights, nx, ny, region, level, bandM, bandCells = 3) {
     const mask = new Uint8Array(nx * ny);
-    const stack = [];
-    for (let k = 0; k < nx * ny; k++) if (region[k]) { mask[k] = 2; stack.push(k); }
-    while (stack.length) {
-        const id = stack.pop(), i = id % nx, j = (id - i) / nx;
-        for (const [di, dj] of NB8) {
-            const ii = i + di, jj = j + dj;
-            if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
-            const nb = jj * nx + ii;
-            if (mask[nb]) continue;
-            const h = heights[nb];
-            if (h < level || h >= level + bandM) continue;
-            mask[nb] = 1; stack.push(nb);
+    let ring = [];
+    for (let k = 0; k < nx * ny; k++) if (region[k]) { mask[k] = 2; ring.push(k); }
+    for (let step = 0; step < bandCells && ring.length; step++) {
+        const next = [];
+        for (const id of ring) {
+            const i = id % nx, j = (id - i) / nx;
+            for (const [di, dj] of NB8) {
+                const ii = i + di, jj = j + dj;
+                if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
+                const nb = jj * nx + ii;
+                if (mask[nb]) continue;
+                const h = heights[nb];
+                if (h < level || h >= level + bandM) continue;
+                mask[nb] = 1; next.push(nb);
+            }
         }
+        ring = next;
     }
     return mask;
 }

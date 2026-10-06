@@ -14,10 +14,17 @@
 // - banks are closed edges; upstream rows are relaxed toward the river's
 //   level and flow (inflow), the downstream end is open with a gentle pull
 //   toward the river's level;
+// - the steady flow a row starts from (and the inflow it relaxes to) carries
+//   the river's discharge Q at its water level (the normal depth of Q,
+//   waterWorkerCore.js): velocity inScale h^(2/3) with inScale = Q /
+//   sum(h^(5/3) dx) over the row (Whitewater's inVelScale), so the water
+//   neither piles up and spills nor creeps in as a front;
+// - after placing, warmupSubsteps run hidden (the static water shows), then
+//   the simulated surface fades in;
 // - the window scrolls with the camera along the river in steps of shiftM:
 //   rows form a ring (ShallowWaterSim rowBase); only rows entering the
 //   window are sampled and set to the river's steady flow, so the water
-//   keeps running (no restart, no warm-up);
+//   keeps running (no restart);
 // - coverage tells the terrain shading (waterWgsl.js) which river stretch
 //   the simulated surface draws, so its static water fades out there.
 
@@ -36,14 +43,16 @@ export const WATER_RIVER_SIM_DEFAULTS = Object.freeze({
     inflowRows: 16, inflowRate: 6,     // 1/s at the upstream end
     outflowRows: 16, outflowRate: 1,   // 1/s at the downstream end (level only pulls gently)
     fadeSeconds: 0.6,
+    warmupSubsteps: 240,   // hidden after placing (2 s of simulated time) ..
+    warmupPerFrame: 48,    // .. this many per frame
     endFadeM: 48,          // the simulated surface fades into the static water at the window's ends
     sideFadeM: 4,
     sim: {},               // SWE_DEFAULTS overrides (ShallowWaterSim.js)
     shape: null,           // the river shape's noise amounts (WaterService config.carve)
 });
 
-// Per physical row: centre (xyz) + level, left normal (xyz) + speed,
-// half-width, thalweg, arc length, unused. 3 x vec4.
+// Per physical row: centre (xyz) + water level, left normal (xyz) + speed,
+// half-width, thalweg, arc length, inflow scale (Q / sum(h^(5/3) dx)). 3 x vec4.
 const ROW_FLOATS = 12;
 
 const INIT_WGSL = /* wgsl */`
@@ -62,16 +71,15 @@ struct RowInfo { c: vec4f, left: vec4f, extra: vec4f };
 
 fn phys(j: u32) -> u32 { let r = j + U.rowBase; return select(r, r - U.L, r >= U.L); }
 
-// The river's steady flow at a cell: its level, flowing downstream (+v)
-// faster where deeper (Whitewater's inflow: velocity ~ h^(2/3)).
+// The river's steady flow at a cell: its water level, flowing downstream
+// (+v) at inScale h^(2/3), so the row carries the river's discharge
+// (Whitewater's inflow).
 fn steady(i: u32, j: u32) -> vec4f {
   let pr = phys(j);
   let row = ROWS[pr];
   let b = BED[pr * U.W + i];
-  let eta = row.c.w;
-  let h = max(0.0, eta - b);
-  let hMean = max(0.6 * (eta - row.extra.y), 0.05);
-  let v = row.left.w * clamp(pow(h / hMean, 0.6667), 0.0, 1.3);
+  let h = max(0.0, row.c.w - b);
+  let v = min(row.extra.w * pow(h, 0.6667), 6.0);
   return vec4f(h, 0.0, v, 0.0);
 }
 
@@ -126,6 +134,7 @@ export class WaterRiverSim {
         this._pending = null;    // shift in progress
         this._sHint = null;
         this._generation = 0;
+        this._warmLeft = 0;
         const module = device.createShaderModule({ label: 'WaterRiverSim-init', code: INIT_WGSL });
         const C = GPUShaderStage.COMPUTE;
         this._initLayout = device.createBindGroupLayout({ entries: [
@@ -178,7 +187,7 @@ export class WaterRiverSim {
         for (let r = 0; r < count; r++) {
             const s = (jFrom + r + 0.5) * dx;
             const f = this.strip.at(s);
-            rows.set([f.c[0], f.c[1], f.c[2], f.eta, f.left[0], f.left[1], f.left[2], f.speed, f.hw, f.bed, s, 1], r * ROW_FLOATS);
+            rows.set([f.c[0], f.c[1], f.c[2], f.eta, f.left[0], f.left[1], f.left[2], f.speed, f.hw, f.bed, s, f.Q ?? 0], r * ROW_FLOATS);
             for (let i = 0; i < W; i++) {
                 const n = (i + 0.5 - W / 2) * dx / R;
                 const x = f.c[0] + f.left[0] * n, y = f.c[1] + f.left[1] * n, z = f.c[2] + f.left[2] * n, l = Math.hypot(x, y, z);
@@ -186,6 +195,20 @@ export class WaterRiverSim {
             }
         }
         return { rows, dirs };
+    }
+
+    /**
+     * Turns each row's discharge (rows float 11, from _buildRows) into its
+     * inflow scale Q / sum(h^(5/3) dx) over the sampled bed.
+     */
+    _inflowScales(rows, bed, count) {
+        const { W } = this, dx = this.dx;
+        for (let r = 0; r < count; r++) {
+            const o = r * ROW_FLOATS, eta = rows[o + 3], Q = rows[o + 11];
+            let sum = 0;
+            for (let i = 0; i < W; i++) { const h = eta - bed[r * W + i]; if (h > 0) sum += Math.pow(h, 5 / 3) * dx; }
+            rows[o + 11] = sum > 1e-4 ? Q / sum : 0;
+        }
     }
 
     /** Writes rows' data into physical rows starting at pFrom (wrapping). */
@@ -252,6 +275,7 @@ export class WaterRiverSim {
         const bed = await this.sampler.sampleDirsCarved(dirs);
         if (gen !== this._generation) return;            // replaced meanwhile
         if (!bed) { this.state = 'idle'; return; }
+        this._inflowScales(rows, bed, L);
         this.jStart = jStart;
         this.sim.setRowRing(0, jStart);
         this._writeRows(0, L, rows, bed);
@@ -260,7 +284,9 @@ export class WaterRiverSim {
         this.sim.time = 0;
         this._sHint = sCenter;
         this.state = 'running';
-        this._fadeTarget = 1;
+        // Hidden warm-up first (encode), then the fade-in.
+        this._warmLeft = c.warmupSubsteps;
+        this._fadeTarget = 0;
     }
 
     /**
@@ -292,6 +318,7 @@ export class WaterRiverSim {
         if (gen !== this._generation || this._pending !== pending || this.state !== 'running') return;
         this._pending = null;
         if (!bed) return;
+        this._inflowScales(rows, bed, n);
         const sim = this.sim;
         if (k > 0) {
             // The upstream rows leave; their physical rows take the new downstream ones.
@@ -315,12 +342,19 @@ export class WaterRiverSim {
         const rate = 1 / Math.max(1e-3, this.config.fadeSeconds);
         this.fade = Math.max(0, Math.min(1, this.fade + Math.sign(this._fadeTarget - this.fade) * rate * dt));
         if (this.state !== 'running') return;
+        if (this._warmLeft > 0) {
+            const k = Math.min(this._warmLeft, this.config.warmupPerFrame);
+            this.sim.encode(encoder, k);
+            this._warmLeft -= k;
+            if (this._warmLeft <= 0) this._fadeTarget = 1;
+            return;
+        }
         if (this._fadeTarget === 0 && this.fade <= 0) { this.stop(); return; }
         this.sim.encode(encoder, this.config.substepsPerFrame);
     }
 
     /** Fades out, then stops (the static water shows again); keep encoding meanwhile. */
-    deactivate() { this._fadeTarget = 0; }
+    deactivate() { this._fadeTarget = 0; this._warmLeft = 0; }
 
     /** Stops at once. */
     stop() {

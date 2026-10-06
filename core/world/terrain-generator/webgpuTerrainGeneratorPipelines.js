@@ -7,6 +7,8 @@ import { createSplatComputeShader } from '../shaders/webgpu/splatCompute.wgsl.js
 import { createSplatPaletteComputeShader } from '../shaders/webgpu/splatPaletteCompute.wgsl.js';
 import { createSplatValidityComputeShader } from '../shaders/webgpu/splatValidityCompute.wgsl.js';
 import { RIVER_CARVE_BINDINGS } from '../water/riverCarve.wgsl.js';
+import { RIVER_VALLEY_BINDINGS } from '../water/riverValley.wgsl.js';
+import { valleyParamsData } from '../water/riverValley.js';
 import { LAKE_PARAMS_FLOATS, RIVER_SEG_FLOATS } from '../water/waterWgsl.js';
 
 const SPLAT_STEP_PREFIX = '[TerrainStep] [SplatStep]';
@@ -118,10 +120,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     size: getPackedBiomeUniformByteSize(this.maxGpuBiomes),
                     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
                 });
-                // Group 1 of every terrain pipeline: the biome uniform, and the
-                // river carve's water data (riverCarve.wgsl.js; placeholders
-                // until setWaterCarveResources).
-                const C = RIVER_CARVE_BINDINGS;
+                // Group 1 of every terrain pipeline: the biome uniform, the
+                // river carve's water data (riverCarve.wgsl.js) and the river
+                // valleys' field (riverValley.wgsl.js); placeholders until
+                // setWaterCarveResources / setRiverValleyResources.
+                const C = RIVER_CARVE_BINDINGS, V = RIVER_VALLEY_BINDINGS;
                 this.biomeBindGroupLayout = this.device.createBindGroupLayout({
                     entries: [
                         {
@@ -132,6 +135,9 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                         { binding: C.index, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                         { binding: C.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
                         { binding: C.rivers, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                        { binding: V.pages, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                        { binding: V.texels, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                        { binding: V.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
                     ]
                 });
                 // Zero params: gridN 0 = no river data, the carve passes through.
@@ -139,6 +145,14 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     index: this.device.createBuffer({ label: 'RiverCarve-index-none', size: 16, usage: GPUBufferUsage.STORAGE }),
                     params: this.device.createBuffer({ label: 'RiverCarve-params-none', size: LAKE_PARAMS_FLOATS * 4, usage: GPUBufferUsage.UNIFORM }),
                     rivers: this.device.createBuffer({ label: 'RiverCarve-rivers-none', size: RIVER_SEG_FLOATS * 4, usage: GPUBufferUsage.STORAGE }),
+                };
+                // Valley params with on = 0: the valleys pass through.
+                const valleyParams = this.device.createBuffer({ label: 'RiverValley-params-none', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+                this.device.queue.writeBuffer(valleyParams, 0, valleyParamsData(undefined, false));
+                this._riverValleyPlaceholder = {
+                    pages: this.device.createBuffer({ label: 'RiverValley-pages-none', size: 16, usage: GPUBufferUsage.STORAGE }),
+                    texels: this.device.createBuffer({ label: 'RiverValley-texels-none', size: 16, usage: GPUBufferUsage.STORAGE }),
+                    params: valleyParams,
                 };
                 this.setWaterCarveResources(null);
                 this._uploadPackedBiomeUniforms();
@@ -420,6 +434,8 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                     erosionFilter: this.erosionFilter,
                     waterCarve: this.waterCarve === true,
+                    riverValley: this.riverValley === true,
+                    riverValleyPage: this.riverValleyPage ?? 32,
                     ...extra,
                 };
             },
@@ -1238,8 +1254,26 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
          * Bumps waterCarveVersion (see markWaterCarveChanged).
          */
         setWaterCarveResources(res) {
-                const C = RIVER_CARVE_BINDINGS;
-                const r = res ?? this._waterCarvePlaceholder;
+                this._waterCarveResources = res ?? null;
+                this.waterCarveBound = !!res;
+                this._rebuildTerrainGroup1();
+            },
+
+        /**
+         * River valley field for tiles generated from now on (riverValley.js;
+         * WaterGpuData valley resources { pages, texels, params }), or
+         * null for none. Bumps waterCarveVersion like the carve.
+         */
+        setRiverValleyResources(res) {
+                this._riverValleyResources = res ?? null;
+                this.riverValleyBound = !!res;
+                this._rebuildTerrainGroup1();
+            },
+
+        _rebuildTerrainGroup1() {
+                const C = RIVER_CARVE_BINDINGS, V = RIVER_VALLEY_BINDINGS;
+                const r = this._waterCarveResources ?? this._waterCarvePlaceholder;
+                const v = this._riverValleyResources ?? this._riverValleyPlaceholder;
                 this.biomeBindGroup = this.device.createBindGroup({
                     label: 'Terrain-group1',
                     layout: this.biomeBindGroupLayout,
@@ -1248,9 +1282,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                         { binding: C.index, resource: { buffer: r.index } },
                         { binding: C.params, resource: { buffer: r.params } },
                         { binding: C.rivers, resource: { buffer: r.rivers } },
+                        { binding: V.pages, resource: { buffer: v.pages } },
+                        { binding: V.texels, resource: { buffer: v.texels } },
+                        { binding: V.params, resource: { buffer: v.params } },
                     ]
                 });
-                this.waterCarveBound = !!res;
                 this.markWaterCarveChanged();
             },
 
