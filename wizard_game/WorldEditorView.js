@@ -23,7 +23,6 @@ import { createTerrainFeatureCanyons } from '../templates/terrain-shaders/featur
 import { createTerrainFeatureLoneHills } from '../templates/terrain-shaders/features/featureLoneHills.wgsl.js';
 import { createTerrainFeatureMicro } from '../templates/terrain-shaders/features/featureMicro.wgsl.js';
 import { createTerrainFeatureMesoDetail } from '../templates/terrain-shaders/features/featureMesoDetail.wgsl.js';
-import { createTerrainFeatureHighlands } from '../templates/terrain-shaders/features/featureHighlands.wgsl.js';
 import { createTerrainFeatureRivers } from '../templates/terrain-shaders/features/featureRivers.wgsl.js';
 import { createTerrainFeatureErosionSeeds } from '../templates/terrain-shaders/features/featureErosionSeeds.wgsl.js';
 import { createTerrainFeatureErosionFilter } from '../templates/terrain-shaders/features/featureErosionFilter.wgsl.js';
@@ -66,7 +65,6 @@ const TERRAIN_THEME = {
         createTerrainFeatureLoneHills,
         createTerrainFeatureMicro,
         createTerrainFeatureMesoDetail,
-        createTerrainFeatureHighlands,
         createTerrainFeatureRivers,
         createTerrainFeatureErosionSeeds,
         createTerrainFeatureErosionFilter,

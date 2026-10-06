@@ -49,13 +49,12 @@ export class TerrainGenerationConfig {
             // target range [-1, 1] (valleys .. peaks).
             fadeRangeM: num(ef.fadeRangeM, 1200),
             // Local amount (multiplies strength) = variation x relief ramp.
-            // Relief = summed height of the large landforms (mountains,
-            // highlands, big lone hills): lowReliefAmount below reliefStartM,
-            // full from reliefFullM. Variation: a noise field with wavelength
+            // Relief = summed height of the large landforms (foothills, big
+            // lone hills, mountains): lowReliefAmount below reliefStartM, full
+            // from reliefFullM. Variation: a noise field with wavelength
             // variationScaleM between variationMin and 1, so some regions are
             // rugged and others gentle. Where the amount is 0 the filter is
-            // skipped. The small lone-hill domes fade out over the same relief
-            // ramp (scaled by (1 - ramp)^2).
+            // skipped.
             reliefStartM: num(ef.reliefStartM, 150),
             reliefFullM: num(ef.reliefFullM, 600),
             lowReliefAmount: num(ef.lowReliefAmount, 0.2),
@@ -67,7 +66,7 @@ export class TerrainGenerationConfig {
             sharpSlopeFull: num(ef.sharpSlopeFull, 0.45),
             variationScaleM: num(ef.variationScaleM, 15000),
             variationMin: num(ef.variationMin, 0.15),
-            // Fraction of meso1/meso2 kept where erosion is at full amount
+            // Fraction of meso2 kept where erosion is at full amount
             // (1 everywhere it is 0).
             mesoKeep: num(ef.mesoKeep, 0.35),
             // Ridge/crease rounding used where the amount is low (light
@@ -76,16 +75,14 @@ export class TerrainGenerationConfig {
             lowAmountRounding: num(ef.lowAmountRounding, 1.0),
             softAmountFull: num(ef.softAmountFull, 0.15),
             softAmountNone: num(ef.softAmountNone, 0.6),
-            // Mountain style by location: a noise field (wavelength
+            // Erosion style by location: a noise field (wavelength
             // styleScaleM) from 0 = rounded (old, grassy ridges) to
             // 1 = jagged (sharp crests, deep couloirs). styleBias shifts
             // the mix: -1 all rounded, 0 about half each, +1 all jagged.
             // Each pair below is [rounded, jagged]:
             // - styleStrength multiplies the erosion amount;
             // - styleRidgeRounding / styleCreaseRounding replace rounding.x
-            //   / rounding.y (before the low-amount softening);
-            // - styleMountainHeight scales the mountain ranges, and rounded
-            //   ranges use their smooth shape (jagged: the ridged one).
+            //   / rounding.y (before the low-amount softening).
             // Rounding compounds per octave (x rounding.w), so values much
             // above 0.5 suppress the finer octaves and with them the
             // branching valleys.
@@ -94,7 +91,6 @@ export class TerrainGenerationConfig {
             styleStrength: vec(ef.styleStrength, [0.8, 1.3]),
             styleRidgeRounding: vec(ef.styleRidgeRounding, [0.4, 0.2]),
             styleCreaseRounding: vec(ef.styleCreaseRounding, [0.3, 0.1]),
-            styleMountainHeight: vec(ef.styleMountainHeight, [0.8, 1.15]),
             seed: Math.round(num(ef.seed, 7))
         };
 

@@ -42,12 +42,9 @@ struct TerrainAmplitudes {
     plainsVariation: f32,
     hillsHeight: f32,
     loneHillsHeight: f32,
-    mountainBase: f32,
-    mountainPeaks: f32,
-    exceptionalPeaks: f32,
+    mountainHeight: f32,
     canyonDepth: f32,
     microGain: f32,
-    highlandsHeight: f32,
 };
 
 fn getTerrainProfile() -> TerrainProfile {
@@ -258,6 +255,21 @@ fn dSin(a: vec4<f32>) -> vec4<f32> {
 fn dTanh(a: vec4<f32>) -> vec4<f32> {
     let t = tanh(a.x);
     return vec4<f32>(t, a.yzw * (1.0 - t * t));
+}
+
+fn dCos(a: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(cos(a.x), a.yzw * -sin(a.x));
+}
+
+fn dExp(a: vec4<f32>) -> vec4<f32> {
+    let e = exp(a.x);
+    return vec4<f32>(e, a.yzw * e);
+}
+
+// sqrt for a > 0.
+fn dSqrt(a: vec4<f32>) -> vec4<f32> {
+    let s = sqrt(a.x);
+    return vec4<f32>(s, a.yzw * (0.5 / s));
 }
 
 fn fbmAuto_d(unitDir: vec3<f32>, scale: f32, octaves: i32, seed: i32, lac: f32, gain: f32) -> vec4<f32> {

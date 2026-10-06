@@ -18,12 +18,8 @@ const SCALE_TECTONIC_PLATES: f32 = 320.0;
 const SCALE_REGIONAL_ZONES: f32 = 160.0;
 const SCALE_REGIONAL_VARIATION: f32 = 80.0;
 
-// Mountain scales
-const SCALE_MOUNTAIN_RANGES: f32 = 90.0;
-const SCALE_MOUNTAIN_RIDGES: f32 = 35.0;
-const SCALE_MOUNTAIN_PEAKS: f32 = 12.0;
-const SCALE_MOUNTAIN_DETAIL: f32 = 4.0;
-const SCALE_MOUNTAIN_FOOTHILLS: f32 = 3.0;     // 3 km rolling foothill hills
+// Foothills scale
+const SCALE_FOOTHILLS: f32 = 3.0;     // 3 km rolling hills
 
 // Hill scales
 const SCALE_HILLS_LARGE: f32 = 18.0;
@@ -51,12 +47,8 @@ const SCALE_MICRO_300: f32 = 0.300;
 const SCALE_MICRO_500: f32 = 0.500;
 
 // Lone hill feature scales (isolated hill placement)
-const SCALE_LONE_HILL_SMALL: f32 = 0.8;       // 800m - common round domes
-const SCALE_LONE_HILL_MEDIUM: f32 = 2.5;      // 2.5km - uncommon hills
-const SCALE_LONE_HILL_LARGE: f32 = 5.0;       // 5km - rare (mini volcanoes)
 const SCALE_LONE_HILL_HUGE: f32 = 10.0;       // 10km - very rare (mesas)
 const SCALE_LONE_HILL_LANDMARK: f32 = 18.0;   // 18km - exceptional (dramatic mesas)
-const SCALE_LONE_HILL_DENSITY: f32 = 120.0;   // 120km - regional density modulation
 const SCALE_LONE_HILL_SIZE_VAR: f32 = 70.0;   // 70km - regional size modulation
 
 // Rolling hill chain scales
@@ -69,9 +61,6 @@ const AMP_OCEAN_DEPTH: f32 = -0.6;
 const AMP_CONTINENT_SHELF: f32 = 0.14;
 const AMP_PLAINS: f32 = 0.20;
 const AMP_HILLS: f32 = 0.38;
-const AMP_MOUNTAIN_BASE: f32 = 0.75;
-const AMP_MOUNTAIN_PEAKS: f32 = 1.05;
-const AMP_EXCEPTIONAL_PEAKS: f32 = 1.45;
 const AMP_CANYON_DEPTH: f32 = 0.45;
 
 const MICRO_HEIGHT_GAIN: f32 = 0.002;
@@ -79,9 +68,6 @@ const MICRO_HEIGHT_GAIN: f32 = 0.002;
 // Lone hill heights in METERS (planet-independent via maxTerrainHeight conversion).
 // These are peak heights before dome/modulation attenuation.
 // Typical visible hills are ~25-50% of these values.
-const HEIGHT_LONE_HILL_COMMON: f32 = 200.0;        // effective ~20-60m typical
-const HEIGHT_LONE_HILL_UNCOMMON: f32 = 300.0;       // effective ~50-120m
-const HEIGHT_LONE_HILL_RARE: f32 = 800.0;           // effective ~100-250m
 const HEIGHT_LONE_HILL_VERY_RARE: f32 = 1200.0;      // effective ~200-500m
 const HEIGHT_LONE_HILL_EXCEPTIONAL: f32 = 1600.0;    // effective ~500-1200m (max ~1.8km)
 
@@ -90,14 +76,10 @@ const HEIGHT_ROLLING_HILLS: f32 = 500.0;             // effective ~25-60m per bu
 
 // ---- Meso / micro2 detail (KNOBS — adjust displacement in meters) ----
 const SCALE_MICRO2: f32 = 0.008;     // 8 m wavelength  (5–10 m range)
-const SCALE_MESO1: f32 = 0.08;      // 80 m wavelength (15–30 m range)
-const SCALE_MESO2: f32 = 0.75;      // 150 m wavelength (40–70 m range)
-const SCALE_MESO3: f32 = 4.0;       // 8 km wavelength (80–120 m range)
+const SCALE_MESO2: f32 = 0.75;       // 750 m wavelength
 
 const DISP_MICRO2: f32 = 0.0;        // disabled for now (micro handled per-tile)
-const DISP_MESO1: f32 = 25.0;         // ±6 m max displacement
-const DISP_MESO2: f32 =  135.0 ;        // ±70 m max displacement
-const DISP_MESO3: f32 = 150.0;        // ±10 m max displacement
+const DISP_MESO2: f32 = 135.0;       // amplitude (m) before the roughness/patch modulation
 
 // ---- Surface-type micro2 parameters (KNOBS) ----
 // Sand: directional aeolian ripple patterns
@@ -117,30 +99,84 @@ const SCALE_ROCK_CHARACTER: f32 = 3.0;        // 3 km — smooth vs jagged varia
 const SCALE_GENERAL_CHARACTER: f32 = 2.0;     // 2 km — noise character variation
 const SCALE_GENERAL_SHAPE: f32 = 8.0;         // 8 km — broad shape modulation
 
-// ---- Mountain line heights (KNOBS — meters, planet-independent) ----
-const HEIGHT_MOUNTAIN_FOOTHILL: f32 = 500.0;      // gentle foothill apron (~100-250 m effective)
-const HEIGHT_MOUNTAIN_CORE: f32 = 4000.0;         // main ridge peaks (~1000-3000 m effective)
-const HEIGHT_MOUNTAIN_DETAIL: f32 = 120.0;        // small-scale slope roughness
-const HEIGHT_MOUNTAIN_FOOTHILLS: f32 = 220.0;     // foothill hills (x mountain amplitude)
+// ---- Land regions (KNOBS — meters, planet-independent) ----
+// landRegions_d: a 100 km field (fbm, p10..p90 about -0.23..0.23) plus the
+// inland lean; region coordinate = (field - REGION_PLAIN_TOP) /
+// REGION_HINGE (one unit ~12 km at the median field gradient). Plains
+// below 0; highland climb over REGION_CLIMB units from
+// REGION_HIGHLAND_START to a plateau HEIGHT_PLATEAU1 up, a second climb from
+// REGION_PLATEAU2_START to a high plateau HEIGHT_PLATEAU2 higher.
+const SCALE_REGION_FIELD: f32 = 100.0;   // 100 km
+const REGION_INLAND_BIAS: f32 = 0.15;    // field += bias x (regional base 0..1 - 0.5)
+const REGION_PLAIN_TOP: f32 = -0.12;
+const REGION_HINGE: f32 = 0.10;
+const REGION_ROUGH_PLAIN: f32 = 0.15;    // local relief kept on the plains ..
+const REGION_ROUGH_FULL: f32 = 1.5;      // .. full from here (region units)
+const REGION_HIGHLAND_START: f32 = 2.0;
+const REGION_CLIMB: f32 = 1.2;
+const REGION_PLATEAU2_START: f32 = 4.0;
+const HEIGHT_PLATEAU1: f32 = 350.0;
+const HEIGHT_PLATEAU2: f32 = 350.0;
+// Lake basins: hollows where a 6 km fbm exceeds LAKE_BASIN_FROM, full depth
+// from LAKE_BASIN_FULL; ramping in over LAKE_BASIN_RISE region units above
+// the plains.
+const SCALE_LAKE_BASIN: f32 = 6.0;
+const LAKE_BASIN_FROM: f32 = 0.10;
+const LAKE_BASIN_FULL: f32 = 0.30;
+const LAKE_BASIN_RISE: f32 = 0.8;
+const HEIGHT_LAKE_BASIN: f32 = 25.0;     // metres
+
+// ---- Mountains (KNOBS — meters, planet-independent) ----
+// featureMountains: densities per km² of surface where the region is
+// highland; elsewhere x *_LOWLAND_CHANCE (landmarks and ranges: anywhere),
+// height x MTN_LOWLAND_HEIGHT (landmarks and ranges: x 0.85).
+// Cells (one candidate each) are about *_CELL_M across; footprints must fit.
+const MTN_EPS: f32 = 0.06;               // summit rounding (fraction of radius)
+const MTN_TAPER_Q0: f32 = 0.45;          // base taper from (0.67 r)^2 to r
+const MTN_LOWLAND_HEIGHT: f32 = 0.7;
+const MTN_EROSION_START_M: f32 = 300.0;  // erosion variation raised from here ..
+const MTN_EROSION_FULL_M: f32 = 1200.0;  // .. to full (mountain height)
+// Uncommon mountains: a peak and 3 spurs.
+const MTN_CELL_M: f32 = 45000.0;
+const MTN_DENSITY_PER_KM2: f32 = 1.0 / 3000.0;
+const MTN_LOWLAND_CHANCE: f32 = 0.3;
+const MTN_H_MIN: f32 = 1100.0;
+const MTN_H_MAX: f32 = 2200.0;
+const MTN_R_MIN: f32 = 3500.0;
+const MTN_R_MAX: f32 = 6000.0;
+const MTN_K: f32 = 2.4;                  // flank concavity
+// Landmark massif: a peak, 4 spurs and a broad base.
+const MTN_LANDMARK_CELL_M: f32 = 140000.0;
+const MTN_LANDMARK_DENSITY_PER_KM2: f32 = 1.0 / 50000.0;
+const MTN_LANDMARK_LOWLAND_CHANCE: f32 = 1.0;
+const MTN_LANDMARK_H_MIN: f32 = 2800.0;
+const MTN_LANDMARK_H_MAX: f32 = 3800.0;
+const MTN_LANDMARK_R_MIN: f32 = 8000.0;
+const MTN_LANDMARK_R_MAX: f32 = 11000.0;
+const MTN_LANDMARK_K: f32 = 2.8;
+// Mountain ranges.
+const MTN_RANGE_CELL_M: f32 = 220000.0;
+const MTN_RANGE_DENSITY_PER_KM2: f32 = 1.0 / 50000.0;
+const MTN_RANGE_LOWLAND_CHANCE: f32 = 1.0;
+const MTN_RANGE_LEN_MIN: f32 = 40000.0;
+const MTN_RANGE_LEN_MAX: f32 = 75000.0;
+const MTN_RANGE_HALF_W_MIN: f32 = 4500.0;
+const MTN_RANGE_HALF_W_MAX: f32 = 6500.0;
+const MTN_RANGE_H_MIN: f32 = 1600.0;
+const MTN_RANGE_H_MAX: f32 = 2600.0;
+const MTN_RANGE_K: f32 = 1.8;
+const MTN_RANGE_WIDTH_WAVE: f32 = 23000.0;   // backbone width varies along the spine
+const MTN_RANGE_SUMMIT_WAVE1: f32 = 9000.0;  // summits and saddles along the crest
+const MTN_RANGE_SUMMIT_WAVE2: f32 = 5300.0;
+const MTN_RANGE_SPUR_SPACING: f32 = 4500.0;  // side spurs (jittered, ~75 % of slots)
+
+// ---- Foothills (KNOBS — meters, planet-independent) ----
+// 3 km hills; height x amp.mountainHeight (mountainBias, erosion rate).
+const HEIGHT_FOOTHILLS: f32 = 165.0;
 // Foothill band in regional terrainType. On land terrainType is mostly
-// 0.34-0.50 (p10-p90); mountains start at 0.55, so this covers roughly the
-// top quarter of land and ramps into the mountain regions.
+// 0.34-0.50 (p10-p90), so this covers roughly the top quarter of land.
 const FOOTHILL_TT_START: f32 = 0.45;
 const FOOTHILL_TT_FULL: f32 = 0.56;
-const HEIGHT_MOUNTAIN_EXCEPTIONAL: f32 = 7000.0;  // rare towering peaks (~3000-5000 m)
-
-// ---- Highland feature scales & heights (KNOBS) ----
-const SCALE_HIGHLAND_COMMON: f32 = 5.0;         // 5 km — common plateaus
-const SCALE_HIGHLAND_UNCOMMON: f32 = 12.0;      // 12 km
-const SCALE_HIGHLAND_RARE: f32 = 25.0;          // 25 km
-const SCALE_HIGHLAND_VERY_RARE: f32 = 45.0;     // 45 km
-const SCALE_HIGHLAND_EXCEPTIONAL: f32 = 70.0;   // 70 km — massive plateaus
-
-const HEIGHT_HIGHLAND_COMMON: f32 = 100.0;        // 40–60 m effective
-const HEIGHT_HIGHLAND_UNCOMMON: f32 = 1200.0;     // ~80–120 m
-const HEIGHT_HIGHLAND_RARE: f32 = 1500.0;         // ~150–250 m
-const HEIGHT_HIGHLAND_VERY_RARE: f32 = 1600.0;    // ~300–500 m
-const HEIGHT_HIGHLAND_EXCEPTIONAL: f32 = 2000.0;  // ~500–800 m
 `;
 }
 
@@ -155,24 +191,17 @@ fn getTerrainAmplitudes(profile: TerrainProfile) -> TerrainAmplitudes {
     amp.continentalShelf = AMP_CONTINENT_SHELF * profile.baseBias;
     amp.plainsVariation = AMP_PLAINS * profile.baseBias;
     amp.hillsHeight = AMP_HILLS * profile.hillBias;
-    amp.mountainBase = AMP_MOUNTAIN_BASE * profile.mountainBias;
-    amp.mountainPeaks = AMP_MOUNTAIN_PEAKS * profile.mountainBias;
-    amp.exceptionalPeaks = AMP_EXCEPTIONAL_PEAKS * profile.mountainBias;
+    amp.mountainHeight = profile.mountainBias;
     amp.canyonDepth = AMP_CANYON_DEPTH * profile.canyonBias;
     amp.microGain = MICRO_HEIGHT_GAIN * profile.microGain;
 
     let erosion = clamp(uniforms.erosionParams.y, 0.0, 1.0);
-    amp.mountainBase *= (1.0 - erosion * 0.2);
-    amp.mountainPeaks *= (1.0 - erosion * 0.5);
-    amp.exceptionalPeaks *= (1.0 - erosion * 0.7);
+    amp.mountainHeight *= (1.0 - erosion * 0.2);
     amp.hillsHeight *= (1.0 - erosion * 0.1);
     amp.canyonDepth *= (1.0 + erosion * 0.25);
 
     amp.loneHillsHeight = 1.0 * profile.hillBias;
     amp.loneHillsHeight *= (1.0 - erosion * 0.15);
-
-    amp.highlandsHeight = 1.0 * profile.baseBias;
-    amp.highlandsHeight *= (1.0 - erosion * 0.1);
 
     return amp;
 }
@@ -203,7 +232,6 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
 
     let regional = getRegionalCharacter_d(unitDir, seed, profile);
     let landBlend = dSmoothstep(0.15, 0.45, regional.landMask);
-    let mountainness = dSmoothstep(0.55, 0.8, regional.terrainType);
 
     var landHeight = dConst(0.0);
     if (landBlend.x > 0.0) {
@@ -213,76 +241,65 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
         let vly = valleyShapeAt(unitDir);
         landHeight = select(dConst(0.0), regional.baseElevation * amp.continentalShelf, terrainFeatureOn(TF_CONTINENT_RELIEF));
 
-        // Mountain style by location, 0 = rounded .. 1 = jagged (erosion
-        // strength and rounding, mountain shape and height).
-        let style = terrainStyle_d(unitDir);
-
-        // Mountains: the full height, and the slope-continuous version that
-        // drives the erosion filter (MountainHeightD). Rounded ranges are
-        // their smooth shape, jagged ones the ridged one, scaled by
-        // styleMountainHeight.
-        var mountainsH = dConst(0.0);
-        var mountainsSmooth = dConst(0.0);
-        if (mountainness.x > 0.01 && terrainFeatureOn(TF_MOUNTAINS)) {
-            let mountainW = dMul(dGateRamp(mountainness, 0.01), styleMountainHeight_d(style));
-            let m = featureMountainsHeight2_d(unitDir, seed, regional, profile, amp);
-            mountainsH = dMul(dMix(m.smoothed, m.full, style), mountainW);
-            mountainsSmooth = dMul(m.smoothed, mountainW);
-            landHeight += mountainsH;
+        // Regional landform: plains / uplands / highlands (see
+        // landRegions_d); its relief multiplier damps the local detail.
+        var region: LandRegionD;
+        region.coord = dConst(REGION_HIGHLAND_START);
+        region.height = dConst(0.0);
+        region.rough = dConst(1.0);
+        if (terrainFeatureOn(TF_LAND_REGIONS)) {
+            region = landRegions_d(unitDir, seed, regional);
+            landHeight += region.height;
         }
 
-        // Foothills (see calculateTerrainHeight). Slope-continuous, so part
-        // of the erosion input, and counted as relief.
+        // Erosion style by location, 0 = rounded .. 1 = jagged (strength
+        // and rounding of the erosion filter).
+        let style = terrainStyle_d(unitDir);
+
+        // Foothills: 3 km hills over the most rugged quarter of the land.
+        // Slope-continuous, so part of the erosion input, and counted as
+        // relief.
         var foothillsH = dConst(0.0);
-        if (terrainFeatureOn(TF_MOUNTAIN_FOOTHILLS)) {
+        if (terrainFeatureOn(TF_FOOTHILLS)) {
             let footBand = dSmoothstep(FOOTHILL_TT_START, FOOTHILL_TT_FULL, regional.terrainType);
             if (footBand.x > 0.0) {
-                let hillN = fbmAuto_d(unitDir, SCALE_MOUNTAIN_FOOTHILLS, 3, seed + 1950, 2.0, 0.5);
-                foothillsH = dMul(footBand, dSmoothstep(-0.3, 0.6, hillN)) * ((HEIGHT_MOUNTAIN_FOOTHILLS / maxTerrainHeightM()) * amp.mountainBase);
+                let hillN = fbmAuto_d(unitDir, SCALE_FOOTHILLS, 3, seed + 1950, 2.0, 0.5);
+                foothillsH = dMul(footBand, dSmoothstep(-0.3, 0.6, hillN)) * ((HEIGHT_FOOTHILLS / maxTerrainHeightM()) * amp.mountainHeight);
                 landHeight += foothillsH;
             }
         }
 
-        // micro2 (DISP_MICRO2 = 0) contributes nothing; see featureMesoDetail_d.
-        let mesoRoughness = dSmoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02);
-        let meso = featureMesoDetail_d(unitDir, seed, profile, mesoRoughness);
-        let mesoMaxH = maxTerrainHeightM();
-        // meso1/meso2 go on top of the eroded terrain (below), faded where
-        // erosion is strong; meso3 is part of the eroded landform.
-        if (terrainFeatureOn(TF_MESO3)) { landHeight += meso.meso3 * (DISP_MESO3 / mesoMaxH); }
-
-        var highlandsH = dConst(0.0);
-        if (terrainFeatureOn(TF_HIGHLANDS)) {
-            highlandsH = featureHighlandsHeight_d(unitDir, seed, regional, profile, amp);
-            landHeight += highlandsH;
-        }
         {
-            // The filter reads a slope-continuous landform (mountains swapped
-            // for their smooth version; every other term here is C1), and its
-            // height change is added to the full terrain. Relief, which sets
-            // the strength, is the large landforms only. The carved features
-            // (river channel, erosion-seed pits) come after, so erosion does
-            // not fill them.
-            let bigHillsH = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_BIG);
-            let relief = mountainsSmooth + foothillsH + highlandsH + bigHillsH;
+            // The filter reads a slope-continuous landform (every term here
+            // is C1), and its height change is added to the terrain. Relief,
+            // which sets the strength, is the large landforms only. The
+            // carved features (river channel, erosion-seed pits) come after,
+            // so erosion does not fill them.
+            let bigHillsH = featureBigHillsHeight_d(unitDir, seed, amp);
+            let mountainsH = featureMountainsHeight_d(unitDir, seed);
+            let relief = foothillsH + bigHillsH + mountainsH;
+            landHeight += bigHillsH + mountainsH;
+            // Mountains are always carved: erosion's regional variation is
+            // raised to full from MTN_EROSION_FULL_M of mountain height.
+            let mtnCarve = dQuintic(dClamp((mountainsH * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
+            landHeight = valleyApplyPre_d(vly, landHeight);
+            let er = erosionFilterLand_d(unitDir, landHeight, relief, style, mtnCarve);
+            landHeight += er.delta;
             // Rolling hill chains are added after erosion: eroding their steep
             // corridor walls cut thin grooves along them.
-            // The small domes (common, uncommon) are a low-relief feature and
-            // fade out with (1 - erosion's relief ramp)^2. On mountains and big hills,
-            // full-strength gullies carved their flanks while their flat tops
-            // stayed, leaving a sunken top inside a crown of ridges.
-            let smallHillsRaw = featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_SMALL);
-            let lowRelief = dConst(1.0) - erosionReliefRamp_d(relief);
-            let smallHillsH = dMul(smallHillsRaw, dMul(lowRelief, lowRelief));
-            landHeight += bigHillsH + smallHillsH;
-            landHeight = valleyApplyPre_d(vly, landHeight);
-            let erosionInput = landHeight - mountainsH + mountainsSmooth;
-            let er = erosionFilterLand_d(unitDir, erosionInput, relief, style);
-            landHeight += er.delta;
-            landHeight += featureLoneHillsHeight_d(unitDir, seed, regional, profile, amp, LONE_HILLS_ROLLING);
-            let mesoW = dConst(1.0) - er.amount * (1.0 - EROSION_MESO_KEEP);
-            if (terrainFeatureOn(TF_MESO1)) { landHeight += dMul(meso.meso1, mesoW) * (DISP_MESO1 / mesoMaxH); }
-            if (terrainFeatureOn(TF_MESO2)) { landHeight += dMul(meso.meso2, mesoW) * (DISP_MESO2 / mesoMaxH); }
+            landHeight += dMul(featureRollingHillsHeight_d(unitDir, seed, regional, profile, amp), region.rough);
+            // meso2 goes on top of the eroded terrain, faded where erosion is
+            // strong. micro2 (DISP_MICRO2 = 0) contributes nothing; see
+            // featureMesoDetail_d.
+            if (terrainFeatureOn(TF_MESO2)) {
+                let mesoRoughness = dSmoothMax(regional.terrainType, regional.ruggedness * 0.5, 0.02);
+                let meso2 = featureMesoDetail_d(unitDir, seed, profile, mesoRoughness);
+                let mesoW = dMul(dConst(1.0) - er.amount * (1.0 - EROSION_MESO_KEEP), region.rough);
+                landHeight += dMul(meso2, mesoW) * (DISP_MESO2 / maxTerrainHeightM());
+            }
+        }
+        if (terrainFeatureOn(TF_LAKE_BASINS)) {
+            landHeight += featureLakeBasinsHeight_d(unitDir, seed, region);
         }
         if (terrainFeatureOn(TF_RIVER_CARVE)) {
             landHeight += featureRiverHeight_d(unitDir, seed, regional, profile, amp);

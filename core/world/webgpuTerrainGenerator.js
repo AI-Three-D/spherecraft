@@ -251,7 +251,7 @@ export class WebGPUTerrainGenerator {
 
     /**
      * Switches terrain height-function terms on or off for tiles generated
-     * from now on, e.g. { mountains: false, meso3: false }. Keys not given keep
+     * from now on, e.g. { rollingHills: false, meso2: false }. Keys not given keep
      * their state. The caller regenerates resident tiles (qtDiag does it via
      * GPUQuadtreeTerrain.refreshTiles). Returns the full on/off table.
      */

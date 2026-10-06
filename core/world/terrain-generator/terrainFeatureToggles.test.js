@@ -18,19 +18,19 @@ describe('terrain feature toggles', () => {
     });
 
     it('sets one bit per disabled feature, in table order', () => {
-        const { features } = normalizeTerrainFeatures({ mountains: false, microDetail: false });
+        const { features } = normalizeTerrainFeatures({ foothills: false, microDetail: false });
         const bit = (key) => 1 << TERRAIN_FEATURES.findIndex(f => f.key === key);
-        expect(terrainFeatureDisableMask(features)).toBe((bit('mountains') | bit('microDetail')) >>> 0);
+        expect(terrainFeatureDisableMask(features)).toBe((bit('foothills') | bit('microDetail')) >>> 0);
     });
 
     it('keeps earlier state for keys not given and reports unknown keys', () => {
-        const first = normalizeTerrainFeatures({ highlands: false }).features;
-        const { features, unknown } = normalizeTerrainFeatures({ meso3: false, volcanoes: false }, first);
-        expect(features.highlands).toBe(false);
-        expect(features.meso3).toBe(false);
-        expect(features.mountains).toBe(true);
+        const first = normalizeTerrainFeatures({ rollingHills: false }).features;
+        const { features, unknown } = normalizeTerrainFeatures({ meso2: false, volcanoes: false }, first);
+        expect(features.rollingHills).toBe(false);
+        expect(features.meso2).toBe(false);
+        expect(features.foothills).toBe(true);
         expect(unknown).toEqual(['volcanoes']);
-        expect(describeTerrainFeatures(features).find(r => r.feature === 'highlands').on).toBe(false);
+        expect(describeTerrainFeatures(features).find(r => r.feature === 'rollingHills').on).toBe(false);
     });
 
     it('fits the 32-bit uniform mask', () => {

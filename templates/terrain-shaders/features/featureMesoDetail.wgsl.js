@@ -1,12 +1,8 @@
 // js/world/shaders/webgpu/terrain/features/featureMesoDetail.wgsl.js
 //
-// Continuous meso-scale noise that fills gaps between features, additive on
-// top of the terrain (sphere, dual numbers):
-//   meso1 — 80 m wavelength, ±DISP_MESO1 m
-//   meso2 — 750 m wavelength, ±DISP_MESO2 m
-//   meso3 — 4 km wavelength, ±DISP_MESO3 m
-// meso3 is part of the eroded landform; meso1/meso2 go on top of the eroded
-// terrain. Amplitudes are METRES, constants in earthLikeBase. Also holds the
+// Continuous meso-scale noise that fills gaps between features (sphere,
+// dual numbers): meso2, 750 m wavelength, ±DISP_MESO2 m (METRES, constant in
+// earthLikeBase), added on top of the eroded terrain. Also holds the
 // directional (anisotropic) noise helpers used by featureMicro.
 
 export function createTerrainFeatureMesoDetail() {
@@ -68,19 +64,14 @@ fn directionalSinAuto(
 
 // ==================== Main meso detail function ====================
 
-// Meso detail (sphere): meso1-3 as duals. micro2 is not implemented (its
-// amplitude DISP_MICRO2 is 0); add it here before giving DISP_MICRO2 a
-// non-zero value.
-struct MesoDetailD {
-    meso1: vec4<f32>,
-    meso2: vec4<f32>,
-    meso3: vec4<f32>,
-};
-
+// Meso detail (sphere, dual): the meso2 noise scaled by roughness and two
+// patch fields, in [-1, 1] x microGain; the caller applies DISP_MESO2.
+// micro2 is not implemented (its amplitude DISP_MICRO2 is 0); add it here
+// before giving DISP_MICRO2 a non-zero value.
 fn featureMesoDetail_d(
     unitDir: vec3<f32>, seed: i32,
     profile: TerrainProfile, roughness: vec4<f32>
-) -> MesoDetailD {
+) -> vec4<f32> {
     let roughMod = dSmoothstep(0.05, 0.40, roughness);
 
     let localVar = fbmAuto_d(unitDir, 1.5, 2, seed + 9500, 2.0, 0.5);
@@ -90,12 +81,7 @@ fn featureMesoDetail_d(
     let regionMod = dMix(dConst(0.35), dConst(1.0), dSmoothstep(-0.3, 0.3, regionVar));
 
     let _mod = dMul(dMul(roughMod, quietPatch), regionMod) * clamp(profile.microGain, 0.0, 5.0);
-
-    var out: MesoDetailD;
-    out.meso1 = dMul(fbmAuto_d(unitDir, SCALE_MESO1, 2, seed + 9700, 2.0, 0.48), _mod);
-    out.meso2 = dMul(fbmAuto_d(unitDir, SCALE_MESO2, 3, seed + 9800, 2.0, 0.50), _mod);
-    out.meso3 = dMul(fbmAuto_d(unitDir, SCALE_MESO3, 3, seed + 9900, 2.0, 0.50), _mod);
-    return out;
+    return dMul(fbmAuto_d(unitDir, SCALE_MESO2, 3, seed + 9800, 2.0, 0.50), _mod);
 }
 `;
 }

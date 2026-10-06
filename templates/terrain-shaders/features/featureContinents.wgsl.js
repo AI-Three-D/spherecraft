@@ -214,5 +214,60 @@ fn getRegionalCharacter_d(unitDir: vec3<f32>, seed: i32, profile: TerrainProfile
 
     return info;
 }
+
+// ==================== Land regions ====================
+// One large field (SCALE_REGION_FIELD) sorts the land into lowland plains
+// (flat: little local relief), uplands and highlands. Only the highlands
+// rise above the regional base (continentRelief: low coasts, rising
+// inland): a very gradual climb (REGION_CLIMB of the region coordinate,
+// ~15 km) up to a broad plateau and, where the field is highest, a second
+// climb to a high plateau. Plains and uplands follow the base. The raised
+// parts are sparse, so the land between them stays connected and drains to
+// the sea (an elevation field of large amplitude makes deep closed basins
+// at its low spots, flooded as lakes up to 400 m deep). The field leans low
+// at the coast and high inland (REGION_INLAND_BIAS): plains are mostly
+// coastal, highlands inland.
+
+// Region coordinate without the inland lean (plain f32; at a mountain's
+// centre, where the continental mask is not at hand).
+fn landRegionCoordNoLean(unitDir: vec3<f32>, seed: i32) -> f32 {
+    let e = fbmAuto(unitDir.x, unitDir.z, unitDir, clampMacroScaleToPlanet(SCALE_REGION_FIELD), 3, seed + 8000, 2.0, 0.5);
+    return (e - REGION_PLAIN_TOP) * (1.0 / REGION_HINGE);
+}
+
+struct LandRegionD {
+    // Region coordinate (dual): <= 0 plains, then uplands; the highland
+    // climb from REGION_HIGHLAND_START.
+    coord: vec4<f32>,
+    // Highland rise (dual, normalized), part of the erosion input (not of
+    // its relief: the slopes are gentle).
+    height: vec4<f32>,
+    // Local relief multiplier: REGION_ROUGH_PLAIN on the plains .. 1.
+    rough: vec4<f32>,
+}
+
+fn landRegions_d(unitDir: vec3<f32>, seed: i32, regional: RegionalInfoD) -> LandRegionD {
+    var out: LandRegionD;
+    let e = fbmAuto_d(unitDir, clampMacroScaleToPlanet(SCALE_REGION_FIELD), 3, seed + 8000, 2.0, 0.5)
+        + (regional.baseElevation - dConst(0.5)) * REGION_INLAND_BIAS;
+    out.coord = (e - dConst(REGION_PLAIN_TOP)) * (1.0 / REGION_HINGE);
+    // Highland climbs: quintic ramps, level below and above (C2).
+    let climb1 = dQuintic(dClamp((out.coord - dConst(REGION_HIGHLAND_START)) * (1.0 / REGION_CLIMB), 0.0, 1.0));
+    let climb2 = dQuintic(dClamp((out.coord - dConst(REGION_PLATEAU2_START)) * (1.0 / REGION_CLIMB), 0.0, 1.0));
+    out.height = (climb1 * HEIGHT_PLATEAU1 + climb2 * HEIGHT_PLATEAU2) * (1.0 / maxTerrainHeightM());
+    out.rough = dConst(REGION_ROUGH_PLAIN) + dQuintic(dClamp(out.coord * (1.0 / REGION_ROUGH_FULL), 0.0, 1.0)) * (1.0 - REGION_ROUGH_PLAIN);
+    return out;
+}
+
+// Lake basins (dual, normalized, <= 0): shallow flat-floored hollows on the
+// uplands and plateaus (fading out toward the plains). They hold lakes
+// where the ground around is gentle enough; on climbs they spill.
+fn featureLakeBasinsHeight_d(unitDir: vec3<f32>, seed: i32, region: LandRegionD) -> vec4<f32> {
+    let w = dQuintic(dClamp(region.coord * (1.0 / LAKE_BASIN_RISE), 0.0, 1.0));
+    if (w.x <= 0.0) { return dConst(0.0); }
+    let n = fbmAuto_d(unitDir, SCALE_LAKE_BASIN, 2, seed + 8200, 2.0, 0.5);
+    let hollow = dQuintic(dClamp((n - dConst(LAKE_BASIN_FROM)) * (1.0 / (LAKE_BASIN_FULL - LAKE_BASIN_FROM)), 0.0, 1.0));
+    return dMul(hollow, w) * (-HEIGHT_LAKE_BASIN / maxTerrainHeightM());
+}
 `;
 }

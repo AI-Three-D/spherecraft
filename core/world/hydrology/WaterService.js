@@ -22,6 +22,7 @@ import { dirToPlane, growPatchFrame, limitPatchCells } from './lakeRefine.js';
 import { cellDir, dirToCell } from './waterGraph.js';
 import { RIVER_SUB } from '../water/waterWgsl.js';
 import { riverShapeMaxScale } from '../water/riverShapeNoise.js';
+import { RIVER_LEVEL_DEFAULTS } from './riverRefine.js';
 import { RIVER_VALLEY_DEFAULTS } from '../water/riverValley.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
@@ -445,7 +446,10 @@ export class WaterService {
             }
             if (plan?.status !== 'ok') { this._failedRivers.add(riverId); return null; }
             const destKey = plan.dest.type === 'lake' ? `lake${plan.dest.id}` : plan.dest.type === 'river' ? `river${plan.dest.id}-${trunk.key}` : 'sea';
-            const shapeKey = hashParts([RC.shape, RC.levels, RC.stepM, RC.smoothPasses, this.config.carve]);
+            const shapeKey = hashParts([
+                RC.shape, { ...RIVER_LEVEL_DEFAULTS, ...RC.levels },
+                RC.stepM, RC.smoothPasses, this.config.carve,
+            ]);
             const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${shapeKey}:${riverId}:${destKey}`;
             let rec = this.config.cache ? await this._cache.get(riverKey) : null;
             const fromCache = !!rec;

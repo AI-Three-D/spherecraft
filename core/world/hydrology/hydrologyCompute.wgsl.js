@@ -65,7 +65,7 @@ fn hydroHeightMain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let wy = dir.z;
 
     // Only the broad landform signal, not the full detailed height: skips
-    // mountains/highlands/lone-hills/meso-detail/ocean-floor noise entirely
+    // foothills/lone-hills/meso-detail/ocean-floor noise entirely
     // (cheaper) and gives a smooth field where genuine large-scale basins
     // are actually findable (no fine-noise-created spurious pits). Rivers
     // don't need disabling here — featureRiverHeight() was never part of

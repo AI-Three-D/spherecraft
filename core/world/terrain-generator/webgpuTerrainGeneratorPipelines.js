@@ -1251,7 +1251,6 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         /**
          * River carve data for tiles generated from now on: WaterGpuData
          * resources ({ index, params, rivers } buffers), or null for none.
-         * Bumps waterCarveVersion (see markWaterCarveChanged).
          */
         setWaterCarveResources(res) {
                 this._waterCarveResources = res ?? null;
@@ -1261,8 +1260,8 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
 
         /**
          * River valley field for tiles generated from now on (riverValley.js;
-         * WaterGpuData valley resources { pages, texels, params }), or
-         * null for none. Bumps waterCarveVersion like the carve.
+         * WaterGpuData valley resources { pages, texels, params }), or null
+         * for none.
          */
         setRiverValleyResources(res) {
                 this._riverValleyResources = res ?? null;
@@ -1287,13 +1286,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                         { binding: V.params, resource: { buffer: v.params } },
                     ]
                 });
-                this.markWaterCarveChanged();
             },
 
         /**
-         * The river data in the bound buffers changed: tiles generated before
-         * are stale where rivers changed. TileStreamer re-queues a tile whose
-         * generation spanned a change (the version moved meanwhile).
+         * The river data in the bound buffers changed. TileStreamer uses this
+         * counter for diagnostics; changed-cell predicates scope regeneration.
          */
         markWaterCarveChanged() {
                 this.waterCarveVersion = (this.waterCarveVersion ?? 0) + 1;

@@ -45,7 +45,6 @@ import { createTerrainFeatureCanyons } from '../templates/terrain-shaders/featur
 import { createTerrainFeatureLoneHills } from '../templates/terrain-shaders/features/featureLoneHills.wgsl.js';
 import { createTerrainFeatureMicro } from '../templates/terrain-shaders/features/featureMicro.wgsl.js';
 import { createTerrainFeatureMesoDetail } from '../templates/terrain-shaders/features/featureMesoDetail.wgsl.js';
-import { createTerrainFeatureHighlands } from '../templates/terrain-shaders/features/featureHighlands.wgsl.js';
 import { createTerrainFeatureRivers } from '../templates/terrain-shaders/features/featureRivers.wgsl.js';
 import { createTerrainFeatureErosionSeeds } from '../templates/terrain-shaders/features/featureErosionSeeds.wgsl.js';
 import { createTerrainFeatureErosionFilter } from '../templates/terrain-shaders/features/featureErosionFilter.wgsl.js';
@@ -160,7 +159,6 @@ const TERRAIN_SHADER_BUNDLE = {
     createTerrainFeatureLoneHills,
     createTerrainFeatureMicro,
     createTerrainFeatureMesoDetail,
-    createTerrainFeatureHighlands,
     createTerrainFeatureRivers,
     createTerrainFeatureErosionSeeds,
     createTerrainFeatureErosionFilter,
@@ -1460,7 +1458,10 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             const changed = this.waterGpuData.takeChangedCells();
             if (changed && this._waterCarveGenerator) {
                 this._waterCarveGenerator.markWaterCarveChanged();
-                const queued = this.renderer?.quadtreeTileManager?.regenerateTiles?.(tilesTouchingCells(changed, this.waterGpuData.N)) ?? 0;
+                const touchesChangedCells = tilesTouchingCells(changed, this.waterGpuData.N);
+                const tileManager = this.renderer?.quadtreeTileManager;
+                tileManager?.markTerrainRegionsChanged?.(touchesChangedCells);
+                const queued = tileManager?.regenerateTiles?.(touchesChangedCells) ?? 0;
                 Logger.debug(`[Water] rivers changed in ${changed.size} cells: ${queued} resident tiles regenerating`);
             }
         }

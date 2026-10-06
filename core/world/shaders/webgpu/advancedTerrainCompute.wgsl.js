@@ -44,20 +44,14 @@ fn erosionConfiguredParams() -> ErosionParams {
     return prm;
 }
 
-// Fraction of meso1/meso2 kept where erosion runs at full amount.
+// Fraction of meso2 kept where erosion runs at full amount.
 const EROSION_MESO_KEEP: f32 = ${wgslNum(cfg.mesoKeep)};
 
-// Mountain style (dual, 0..1): 0 = rounded, 1 = jagged. A noise field
+// Erosion style (dual, 0..1): 0 = rounded, 1 = jagged. A noise field
 // with wavelength styleScaleM, shifted by styleBias.
 fn terrainStyle_d(unitDir: vec3<f32>) -> vec4<f32> {
     let n = fbmAuto_d(unitDir, ${wgslNum(cfg.styleScaleM / 1000)}, 3, uniforms.seed + 7300, 2.0, 0.5);
     return dSmoothstep(-0.15, 0.15, n + dConst(${wgslNum(cfg.styleBias)}));
-}
-
-// Mountain range height scale for a style (dual): styleMountainHeight
-// [rounded, jagged].
-fn styleMountainHeight_d(style: vec4<f32>) -> vec4<f32> {
-    return dConst(${wgslNum(cfg.styleMountainHeight[0])}) + style * ${wgslNum(cfg.styleMountainHeight[1] - cfg.styleMountainHeight[0])};
 }
 
 // Relief ramp (dual, 0..1) of the erosion amount: reliefNorm (normalized
@@ -76,11 +70,12 @@ struct ErosionLandResult {
 
 // Erodes a slope-continuous landform (dual: normalized height + gradient
 // w.r.t. unitDir) and returns the height change. reliefNorm: the summed
-// height of the large landforms (mountains, highlands, big lone hills).
+// height of the large landforms (foothills, big lone hills, mountains).
 // - Amount = variation x mix(lowReliefAmount, 1, relief ramp) x style
 //   strength x steepness:
 //   variation is a noise field (wavelength variationScaleM) between
-//   variationMin and 1, so some regions erode hard and others stay smooth;
+//   variationMin and 1, so some regions erode hard and others stay smooth,
+//   raised toward 1 by variationFloor (the mountains: always carved);
 //   the relief ramp goes from reliefStartM to reliefFullM; steepness ramps
 //   with the input slope from sharpSlopeStart to sharpSlopeFull.
 //   Strength = strength x amount.
@@ -97,7 +92,7 @@ struct ErosionLandResult {
 //   hilltops and valley floors.)
 // Slope deltas are the filter's approximate derivatives (as in the
 // original), plus the first-order terms of the amount and the offset.
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>) -> ErosionLandResult {
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>, variationFloor: vec4<f32>) -> ErosionLandResult {
     var r: ErosionLandResult;
     r.delta = vec4<f32>(0.0);
     r.amount = vec4<f32>(0.0);
@@ -106,7 +101,9 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let relief = reliefNorm * maxH;
     let reliefRamp = erosionReliefRamp_d(reliefNorm);
     let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
-    let variation = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
+    let variationN = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
+    // variationFloor (0..1) raises it smoothly toward 1: 1 - (1 - v)(1 - floor).
+    let variation = dConst(1.0) - dMul(dConst(1.0) - variationN, dConst(1.0) - variationFloor);
     let styleStrength = dConst(${wgslNum(cfg.styleStrength[0])}) + style * ${wgslNum(cfg.styleStrength[1] - cfg.styleStrength[0])};
     let reliefAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
     // Steepness: full erosion on steep ground, fading out toward flat ground.
@@ -172,7 +169,6 @@ export function createAdvancedTerrainComputeShader(options = {}) {
     createTerrainFeatureLoneHills,
     createTerrainFeatureMicro,
     createTerrainFeatureMesoDetail,
-    createTerrainFeatureHighlands,
     createTerrainFeatureRivers,
     createTerrainFeatureErosionSeeds,
     createTerrainFeatureErosionFilter,
@@ -184,7 +180,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
     'createTerrainCommon', 'createSurfaceCommon', 'createTerrainFeatureContinents',
     'createTerrainFeaturePlains', 'createTerrainFeatureHills', 'createTerrainFeatureMountains',
     'createTerrainFeatureCanyons', 'createTerrainFeatureLoneHills', 'createTerrainFeatureMicro',
-    'createTerrainFeatureMesoDetail', 'createTerrainFeatureHighlands', 'createTerrainFeatureRivers',
+    'createTerrainFeatureMesoDetail', 'createTerrainFeatureRivers',
     'createTerrainFeatureErosionSeeds', 'createTerrainFeatureErosionFilter',
   ].filter(name => typeof shaderBundle[name] !== 'function');
   if (missing.length) {
@@ -632,7 +628,6 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureLoneHills(),
     createTerrainFeatureMicro(),
     createTerrainFeatureMesoDetail(),
-    createTerrainFeatureHighlands(),
     createTerrainFeatureRivers(),
     createTerrainFeatureErosionSeeds(),
     // options.waterCarve: river channels in the height (group 1 bindings 1-3,
@@ -1237,18 +1232,11 @@ if (uniforms.outputType == 0) {
     } else if (uniforms.debugMode == 8) {
         let profile = getTerrainProfile();
         h = getContinentalMask(wx, wy, unitDir, uniforms.seed, profile) * 0.5;
-    } else if (uniforms.debugMode == 9) {
-        let profile = getTerrainProfile();
-        h = rarityMaskAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050, RARITY_RARE, profile.rareBoost) * 0.4;
-    } else if (uniforms.debugMode == 10) {
-        h = cellShapeAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 0.9, uniforms.seed + 2070, 0.5) * 0.4;
     } else if (uniforms.debugMode == 11) {
         let profile = getTerrainProfile();
         h = rarityMaskAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 1.1, uniforms.seed + 2600, RARITY_VERY_RARE, profile.rareBoost) * 0.4;
     } else if (uniforms.debugMode == 12) {
         h = cellShapeAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 0.8, uniforms.seed + 2620, 0.28) * 0.4;
-    } else if (uniforms.debugMode == 13) {
-        h = cellRandomAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050) * 0.4;
     } else if (uniforms.face >= 0) {
         // ── Compute LOD-stable slope ONCE here ───────────────────────
         // Passes 2 (tile) and 4 (micro) read this from heightBase.g

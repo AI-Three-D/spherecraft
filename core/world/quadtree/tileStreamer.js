@@ -989,6 +989,13 @@ export class TileStreamer {
             shouldDrop: (entry) => !this._tileInfo.has(entry.key),
         });
         this._regenStats = { queued: 0, done: 0, rejected: 0 };
+        // River carve edits are tracked by changed terrain regions. Each
+        // record keeps the predicate needed to decide whether a tile job that
+        // started earlier actually overlaps the edit. The bounded history is
+        // only a fallback for unusually long-running jobs; those regenerate
+        // conservatively if their starting version has fallen out of it.
+        this._terrainRegionChanges = [];
+        this._terrainRegionChangeFloor = 0;
         // key -> tileAddr for refinement requests dropped because the queue
         // was at capacity (AsyncGenerationQueue.request() returned null).
         // Drained a few at a time by _retryDroppedRefinements(), unconditionally
@@ -1612,6 +1619,35 @@ this._freshnessSkipCount = 0;
         return this.terrainGenerator?.waterCarveVersion ?? 0;
     }
 
+    /** Records the affected tile region for one terrain-input version. */
+    markTerrainRegionsChanged(predicate) {
+        if (typeof predicate !== 'function') return;
+        const version = this._terrainCarveVersion();
+        this._terrainRegionChanges.push({ version, predicate });
+        if (this._terrainRegionChanges.length > 128) {
+            const removed = this._terrainRegionChanges.shift();
+            this._terrainRegionChangeFloor = Math.max(this._terrainRegionChangeFloor, removed.version);
+        }
+    }
+
+    _terrainCarveChangedSince(tileAddr, version) {
+        const current = this._terrainCarveVersion();
+        if (current === version) return false;
+        if (version < this._terrainRegionChangeFloor) return true;
+        let nextVersion = version + 1;
+        for (const change of this._terrainRegionChanges) {
+            if (change.version <= version) continue;
+            // A version with no region record represents an unscoped terrain
+            // change, so preserve the old conservative behavior for it.
+            if (change.version > nextVersion) return true;
+            nextVersion = Math.max(nextVersion, change.version + 1);
+            if (change.predicate(tileAddr.face, tileAddr.depth, tileAddr.x, tileAddr.y)) return true;
+        }
+        // Compatibility and safety for non-water terrain changes, which do
+        // not publish a region predicate.
+        return nextVersion <= current;
+    }
+
     /**
      * Regenerates resident tiles in place where the terrain function changed
      * (the river carve: core/world/water/riverCarve.wgsl.js), e.g.
@@ -1662,7 +1698,7 @@ this._freshnessSkipCount = 0;
             }
             this._regenStats.done++;
             // Changed again meanwhile: once more (after this entry left the queue).
-            if (this._terrainCarveVersion() !== version) setTimeout(() => this._queueRegeneration(tileAddr), 0);
+            if (this._terrainCarveChangedSince(tileAddr, version)) setTimeout(() => this._queueRegeneration(tileAddr), 0);
             return true;
         });
         if (request === null) { this._regenStats.rejected++; return false; }
@@ -2059,7 +2095,7 @@ this._freshnessSkipCount = 0;
                     const info = this._tileInfo.get(key);
                     if (info) info.carveVersion = carveVersion;
                     // Generated across a terrain change (river carve): stale.
-                    if (this._terrainCarveVersion() !== carveVersion) this._queueRegeneration(tileAddr);
+                    if (this._terrainCarveChangedSince(tileAddr, carveVersion)) this._queueRegeneration(tileAddr);
                     if (this._refinementTypes.length > 0) {
                         this._queueRefinement(tileAddr);
                     }
@@ -2526,7 +2562,7 @@ _queueRefinement(tileAddr) {
             const committed = this._commitRefinement(tileAddr, textures, telemetry);
             this._tileState.set(key, committed ? 'REFINED' : 'RESIDENT');
             // Refined from (or across) a terrain the river carve changed since.
-            if (committed && (inputVersion !== carveVersion || this._terrainCarveVersion() !== carveVersion)) {
+            if (committed && (this._terrainCarveChangedSince(tileAddr, inputVersion) || this._terrainCarveChangedSince(tileAddr, carveVersion))) {
                 this._queueRegeneration(tileAddr);
             }
             return committed;

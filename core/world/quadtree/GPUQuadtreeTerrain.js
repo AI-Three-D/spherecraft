@@ -858,6 +858,11 @@ export class QuadtreeTileManager {
         return this.tileStreamer?.regenerateTiles?.(predicate) ?? 0;
     }
 
+    /** Records which in-flight tile jobs overlap a terrain input change. */
+    markTerrainRegionsChanged(predicate) {
+        this.tileStreamer?.markTerrainRegionsChanged?.(predicate);
+    }
+
     // ── Buffer / texture accessors for the renderer ──────────────────────
 
     getInstanceBuffer() {
