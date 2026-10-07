@@ -115,6 +115,18 @@ describe('WaterGpuData', () => {
         expect(gpu._segs[o + 11]).toBeCloseTo(101.8, 4);
     });
 
+    it('retains more than 128 nearby segments at wide junctions', () => {
+        const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
+        const svc = fakeService(), count = 200, points = new Float32Array((count + 1) * 8);
+        for (let k = 0; k <= count; k++) points.set([k * 0.00001, 0, 1, 105 - k * 0.01, 30, 1, 1, 3], k * 8);
+        svc.riverRecs.set(0, { points, stride: 8, segCellStart: Int32Array.from({ length: count + 1 }, (_, k) => k), segCells: new Int32Array(count).fill(64) });
+        gpu.update(svc, cam, 0);
+        const block = gpu.index[gpu.cells + 4] - 1;
+        const entry = gpu.index[2 * gpu.cells + block * 16];
+        expect(entry & 0xff).toBe(count);
+        expect(gpu.riverSegCount).toBe(count);
+    });
+
     it('packs the stride-12 river points: hollows reach, skew, speed and foam at both ends', () => {
         const dev = stubDevice();
         const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });

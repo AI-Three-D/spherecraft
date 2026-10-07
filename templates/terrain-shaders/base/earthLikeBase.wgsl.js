@@ -273,8 +273,9 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             // The filter reads a slope-continuous landform (every term here
             // is C1), and its height change is added to the terrain. Relief,
             // which sets the strength, is the large landforms only. The
-            // carved features (river channel, erosion-seed pits) come after,
-            // so erosion does not fill them.
+            // narrow channel correction and erosion-seed pits come after.
+            // Cached river banks enter here so their gullies drain toward
+            // the actual excavated valley in this same erosion pass.
             let bigHillsH = featureBigHillsHeight_d(unitDir, seed, amp);
             let mountainsH = featureMountainsHeight_d(unitDir, seed);
             let relief = foothillsH + bigHillsH + mountainsH;
@@ -283,8 +284,21 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             // raised to full from MTN_EROSION_FULL_M of mountain height.
             let mtnCarve = dQuintic(dClamp((mountainsH * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
             landHeight = valleyApplyPre_d(vly, landHeight);
-            let er = erosionFilterLand_d(unitDir, landHeight, relief, style, mtnCarve);
-            landHeight += er.delta;
+            // Bank incision and individual hill erodibility use this same pass.
+            let riverRelief = vly.erosionRelief / maxTerrainHeightM();
+            let riverFloor = dConst(1.0) - dMul(dConst(1.0) - mtnCarve, dConst(1.0) - vly.erosionFloor);
+            let er = erosionFilterLand_d(unitDir, landHeight, relief + riverRelief, style, riverFloor, vly.erosionAmount);
+            var erosionDelta = er.delta;
+            if (vly.isOn && vly.erosionAmount.x > 0.001) {
+                // Do not let the filter's mountain-scale amplitude build a
+                // rim on a low river bank. Existing large landforms retain
+                // their relief budget; bank additions get a smaller one.
+                let depthBudget = relief * 0.5 + vly.erosionDepth / maxTerrainHeightM();
+                let ridgeBudget = relief * 0.5 + vly.erosionRidge / maxTerrainHeightM();
+                let roundM = 2.0 / maxTerrainHeightM();
+                erosionDelta = dSmoothMin(dSmoothMax(erosionDelta, -depthBudget, roundM), ridgeBudget, roundM);
+            }
+            landHeight += erosionDelta;
             // Rolling hill chains are added after erosion: eroding their steep
             // corridor walls cut thin grooves along them.
             landHeight += dMul(featureRollingHillsHeight_d(unitDir, seed, regional, profile, amp), region.rough);
@@ -313,7 +327,7 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             let detailBudget = amp.microGain + 0.005;
             landHeight += interior * detailBudget;
         }
-        landHeight = valleyApply_d(vly, landHeight);
+        landHeight = valleyBoundBanks_d(vly, landHeight);
     }
     if (landBlend.x >= 1.0) {
         return softClampHeight_d(landHeight, -1.1, 1.8, 0.25);

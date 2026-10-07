@@ -11,12 +11,13 @@
 // cleared. The lake's water cells are kept.
 
 import { riverCap } from './riverRibbon.js';
-import { riverShapeMaxScale } from './riverShapeNoise.js';
+import { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } from './riverShapeNoise.js';
 
 /** Reach (m) of a river's carve beyond its centre line, for a half-width (as WaterService passes it to solveRiver). */
 export function riverCarveReach(carve = {}) {
-    const scale = riverShapeMaxScale({ widthVar: carve.widthVar ?? 0.2, wobble: carve.wobble ?? 0.15 });
-    const beyond = (carve.bankW ?? 12) + (carve.blendW ?? 30) + 8;
+    const C = { ...RIVER_CARVE_DEFAULTS, ...carve };
+    const scale = riverShapeMaxScale(C);
+    const beyond = C.bankW + C.blendW + 8;
     return (hw) => hw * scale + beyond;
 }
 

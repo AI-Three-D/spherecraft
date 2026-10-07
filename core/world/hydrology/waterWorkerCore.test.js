@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { cellDir } from './waterGraph.js';
-import { planeToDir } from './lakeRefine.js';
+import { dirToPlane, planeToDir } from './lakeRefine.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
 
 // Synthetic planet (metres): a continent around +Z, ocean elsewhere; a
@@ -40,6 +40,28 @@ function patchHeights(frame) {
 }
 
 describe('water worker core', () => {
+    it('traces from inside source water with a descending surface and varying depth', () => {
+        const { core, built } = buildCore();
+        const upper = built.lakes.reduce((a, b) => a.level > b.level ? a : b);
+        const lakes = new Map();
+        for (const lake of built.lakes) lakes.set(lake.id, core.handle({ type: 'solveLake', lakeId: lake.id, frame: lake.frame, heights: patchHeights(lake.frame), bandM: 6 }).reply);
+        const plan = core.handle({ type: 'planRiver', riverId: upper.river, spacing: 128, corridorM: 1800 }).reply;
+        expect(plan.status).toBe('ok');
+        const rec = core.handle({ type: 'solveRiver', riverId: upper.river, frame: plan.frame, heights: patchHeights(plan.frame), stepM: 20 }).reply;
+        expect(rec.status).toBe('ok');
+        const lake = lakes.get(upper.id), P = rec.points, st = rec.stride;
+        const [x, y] = dirToPlane(Array.from(P.slice(0, 3)), lake.frame, R);
+        const i = Math.floor((x - lake.frame.x0) / lake.frame.spacing), j = Math.floor((y - lake.frame.y0) / lake.frame.spacing);
+        expect(lake.mask[j * lake.frame.nx + i]).toBe(2);
+        expect(P[16]).toBeCloseTo(lake.level, 3);
+        let bedRises = 0;
+        for (let o = st; o < P.length; o += st) {
+            expect(P[o + 16]).toBeLessThanOrEqual(P[o - st + 16]);
+            expect(P[o + 16] - (P[o + 3] - P[o + 5])).toBeGreaterThan(0);
+            if (P[o + 3] - P[o + 5] > P[o - st + 3] - P[o - st + 5]) bedRises++;
+        }
+        expect(bedRises).toBeGreaterThan(0);
+    });
     it('builds the graph and solves both lakes; the upper drains into the lower', () => {
         const { core, built } = buildCore();
         expect(built.lakes.length).toBe(2);

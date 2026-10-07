@@ -54,18 +54,52 @@ describe('river ribbons', () => {
         expect(mid(0)[0]).toBeLessThan(mid(1)[0]);                      // behind the start, along -x
     });
 
-    it('the level eases to the lake where the river enters it', () => {
-        // Points 0..4 lie in the lake's mask (level 50); the river's own level is 52.
+    it('does not extend a source cap backwards across the lake shore', () => {
+        const rec = straightRiver(10);
+        rec.points[9] = -1;
+        const { points } = buildRiverRibbons({ ...base, rivers: [[1, rec]], camera: { x: 0, y: 0, z: R + 60 }, rangeM: 1000 });
+        expect(points.length / RIBBON_POINT_FLOATS).toBe(11);
+        const p = point(points, 0);
+        expect((p[0] + p[4]) / 2).toBeCloseTo(0, 2);
+    });
+
+    it('the level meets the source lake without an upstream gradient', () => {
+        // A design above its source lake must be clamped, never eased uphill.
         const lakeAt = (d) => (Math.asin(d[0]) * R < 16 * 4 + 1 ? { level: 50 } : null);
         const rec = straightRiver(20);
+        for (let k = 0; k <= 4; k++) rec.points[k * ST + 9] = -1;
         const levels = riverWaterLevels(rec, arcOf(rec), lakeAt);
         const level = (k) => levels[k];
         expect(level(2)).toBeCloseTo(50, 5);
         expect(level(4)).toBeCloseTo(50, 5);
-        expect(level(5)).toBeGreaterThan(50);
-        expect(level(5)).toBeLessThan(52);
-        expect(level(5 + 80 / 16)).toBeCloseTo(52, 5);
-        for (let k = 1; k < 20; k++) expect(level(k)).toBeGreaterThanOrEqual(level(k - 1) - 1e-6);
+        expect(level(5)).toBe(50);
+        for (let k = 1; k < 20; k++) expect(level(k)).toBeLessThanOrEqual(level(k - 1));
+    });
+
+    it('lake easing preserves downstream descent and both lake levels', () => {
+        const rec = straightRiver(40, k => 60 - k * 0.25);
+        // The path passes near the source again mid-reach, then enters the
+        // destination. Nearest-lake easing used to create a bump here.
+        const lakeAt = d => {
+            const x = Math.asin(d[0]) * R;
+            if (x < 40 || (x > 170 && x < 190)) return { level: 60 };
+            if (x > 570) return { level: 50 };
+            return null;
+        };
+        for (let k = 0; k < 40; k++) {
+            if (lakeAt(Array.from(rec.points.slice(k * ST, k * ST + 3)))) rec.points[k * ST + 9] = -1;
+        }
+        const levels = riverWaterLevels(rec, arcOf(rec), lakeAt);
+        expect(levels[0]).toBe(60);
+        expect(levels[39]).toBe(50);
+        for (let k = 1; k < levels.length; k++) expect(levels[k]).toBeLessThanOrEqual(levels[k - 1]);
+    });
+
+    it('keeps the solved outlet surface below the bank-full edge on steep rivers', () => {
+        const rec = straightRiver(20, k => 60 - 0.6 * k);
+        rec.points[9] = -1;
+        const levels = riverWaterLevels(rec, arcOf(rec), d => Math.asin(d[0]) * R < 1 ? { level: 60 } : null);
+        for (let k = 0; k < 20; k++) expect(levels[k]).toBeCloseTo(rec.points[k * ST + 16], 6);
     });
 
     it('a tight bend keeps the inner edge inside the bend (no fold)', () => {

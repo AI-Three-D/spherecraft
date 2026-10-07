@@ -56,7 +56,7 @@ export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
     for (let k = 0; k < n; k++) {
         out[k] = st >= 20 ? P[k * st + 16] : P[k * st + 3];
         const l = lakeAt([P[k * st], P[k * st + 1], P[k * st + 2]]);
-        if (l) { toLake[k] = 0; lakeLevel[k] = l.level; }
+        if (l && (st < 20 || P[k * st + 9] < 0)) { toLake[k] = 0; lakeLevel[k] = l.level; }
     }
     for (let k = 1; k < n; k++) {
         const d = toLake[k - 1] + arc[k] - arc[k - 1];
@@ -67,8 +67,23 @@ export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
         if (d < toLake[k]) { toLake[k] = d; lakeLevel[k] = lakeLevel[k + 1]; }
     }
     for (let k = 0; k < n; k++) {
-        if (Number.isFinite(toLake[k])) out[k] = lakeLevel[k] + (out[k] - lakeLevel[k]) * smoothstep(0, easeM, toLake[k]);
+        if (st >= 20) {
+            // The solved surface already meets the lakes. Easing it upward
+            // again at a steep outlet would put water above its carved banks.
+            if (toLake[k] === 0) out[k] = lakeLevel[k];
+        } else if (Number.isFinite(toLake[k])) {
+            out[k] = lakeLevel[k] + (out[k] - lakeLevel[k]) * smoothstep(0, easeM, toLake[k]);
+        }
     }
+    // Easing toward a lake must never introduce a local upstream slope.
+    // First respect downstream lake anchors, then impose the upstream
+    // ceiling. This also handles a winding outlet passing near its lake twice.
+    let floor = -Infinity;
+    for (let k = n - 1; k >= 0; k--) {
+        if (toLake[k] === 0) floor = Math.max(floor, lakeLevel[k]);
+        out[k] = Math.max(out[k], floor);
+    }
+    for (let k = 1; k < n; k++) out[k] = Math.min(out[k], out[k - 1]);
     return out;
 }
 
@@ -110,8 +125,12 @@ export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, sh
         const ribbonPoint = (k, capSign) => {
             const a = dirAt(Math.max(0, k - 1)), b = dirAt(Math.min(n - 1, k + 1)), p = dirAt(k);
             const tangent = norm([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
-            const sh = riverShapeAt(arc[k], rid, Math.max(P[k * st + 4], 0.5), shape);
-            const hw = Math.max(sh.hw, 0.5) + marginM;
+            const baseHw = Math.max(P[k * st + 4], 0.5);
+            const sh = riverShapeAt(arc[k], rid, baseHw, shape);
+            // The shader evaluates bank detail continuously between 20 m
+            // ribbon rows. Cover its excursions; dry banks clip the excess.
+            const cover = 0.5 * baseHw * (Math.abs(shape.widthVar) + Math.abs(shape.wobble));
+            const hw = Math.max(sh.hw, 0.5) + marginM + cover;
             const d = capSign ? norm([p[0] + tangent[0] * capSign * hw / R, p[1] + tangent[1] * capSign * hw / R, p[2] + tangent[2] * capSign * hw / R]) : p;
             const left = norm(cross(d, tangent));
             // Bend: radius from the turn at this point; the inner edge stays inside it.
@@ -141,7 +160,7 @@ export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, sh
             if (!want && runStart >= 0) {
                 // The run's points, with a cap beyond the river's own ends.
                 const run = [];
-                if (runStart === 0) run.push(ribbonPoint(0, -1));
+                if (runStart === 0 && !(st >= 12 && P[9] < 0)) run.push(ribbonPoint(0, -1));
                 for (let m = runStart; m < k; m++) run.push(ribbonPoint(m, 0));
                 if (k === n) run.push(ribbonPoint(n - 1, 1));
                 const base = pts.length / RIBBON_POINT_FLOATS;

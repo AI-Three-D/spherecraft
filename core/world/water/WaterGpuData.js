@@ -24,6 +24,7 @@ import { riverCarveReach, riverNearLake, trimLakeBand } from './lakeBand.js';
 import { riverWaterLevels } from './riverRibbon.js';
 import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
 import { RIVER_VALLEY_DEFAULTS, valleyLayout, valleyPageCells, valleyParamsData } from './riverValley.js';
+import { RIVER_CARVE_DEFAULTS } from './riverShapeNoise.js';
 
 export const WATER_LOOK_DEFAULTS = Object.freeze({
     deepColor: [0.02, 0.10, 0.09],    // albedo of deep water (lit by sky + sun); Whitewater's water tint
@@ -402,10 +403,10 @@ export class WaterGpuData {
         f.set([0, 0, 0, L.unsolvedLakeHideM ?? 2500], 24);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.
-        const C = this.carve ?? {};
-        f.set([C.enabled ? 1 : 0, C.bankW ?? 12, C.blendW ?? 30, C.waterFrac ?? 0.75], 28);
-        f.set([C.bankH ?? 1.5, C.bankSoftM ?? 3, C.bankGrade ?? 0.06, C.leveeGrade ?? 0.08], 32);
-        f.set([C.widthVar ?? 0.2, C.wobble ?? 0.15, C.bankVar ?? 0.35, 0], 36);
+        const C = { ...RIVER_CARVE_DEFAULTS, ...(this.carve ?? {}) };
+        f.set([this.carve?.enabled ? 1 : 0, C.bankW, C.blendW, C.waterFrac], 28);
+        f.set([C.bankH, C.bankSoftM, C.bankGrade, 0], 32);
+        f.set([C.widthVar, C.wobble, C.bankVar, C.islandHeightM], 36);
         const nr = this.near;
         f.set(nr.enabled ? [nr.fadeStartM, nr.fadeEndM, 1, 0] : [0, 0, 0, 0], 40);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
@@ -491,7 +492,7 @@ export class WaterGpuData {
                     const c = rec.segCells[m];
                     let list = lists.get(c);
                     if (!list) lists.set(c, (list = []));
-                    if (list.length < RIVER_MAX_SEGS_PER_CELL) list.push(rec, k);
+                    if (list.length / 2 < RIVER_MAX_SEGS_PER_CELL) list.push(rec, k);
                 }
             }
         }
@@ -527,7 +528,8 @@ export class WaterGpuData {
                     ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
                     P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0,
                     arc[k], arc[k + 1], ridOf.get(rec) ?? -1, 0,
-                    wlA, wlB, 0, 0], o);
+                    wlA, wlB, st >= 20 ? P[a + 18] : -1e20, st >= 20 ? P[b + 18] : -1e20,
+                    st >= 20 ? P[a + 19] : 0, st >= 20 ? P[b + 19] : 0, 0, 0], o);
                 next++;
             }
             this.index[2 * this.cells + block * SS + (id % SS)] = (first << 8) | (list.length / 2);

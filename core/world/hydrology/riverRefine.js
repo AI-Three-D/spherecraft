@@ -19,10 +19,10 @@
 //   destination's water by construction, and fill never rises along it.
 // The trace is then smoothed, resampled, and given width, depth and flow
 // speed from the catchment, a smooth falling water level (riverValleyLevels)
-// and its valley (riverValleyShape): the terrain is shaped around it
-// (riverValley.wgsl.js, riverCarve.wgsl.js).
+// The sparse landscape bake prepares the banks around this surface.
 
 import { MinHeap } from './waterGraph.js';
+import { riverNoise } from '../water/riverShapeNoise.js';
 
 const NB8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]];
 
@@ -148,9 +148,9 @@ export function smoothRiverPath(xs, ys, fill, { window = 4, stepM = 24, passes =
 // level (the channel's waterline: carve and valley), half-width, design
 // water depth at the thalweg, mean flow speed, Q, spill level of the trace,
 // pool (-1: the point lies in a lake), skew, foam; the valley
-// (riverValley.js): floor level, floor half-width, fill weight, wall slope;
+// four reserved floats (former valley cross-section);
 // the water (riverWaterLevel): its level (normal depth of Q in the channel),
-// its depth at the thalweg; two unused.
+// its depth at the thalweg; nearby lake level, optional island mask.
 export const RIVER_POINT_STRIDE = 20;
 
 export const RIVER_SHAPE_DEFAULTS = Object.freeze({
@@ -167,7 +167,29 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     depthExp: 0.4,
     minDepthM: 1.4,
     manning: 0.035,
+    reachWidthVar: 0.55,
+    depthVar: 0.45,
+    junctionWidthScale: 2.3,
+    junctionLengthM: 180,
+    sourceInsetM: 100,
+    islands: false,
+    islandThreshold: 0.3,
+    waterfalls: { enabled: false },    // riverFeatures.js RIVER_FALL_DEFAULTS overrides
 });
+
+/** Baked pools/constrictions and lake mouths. Depth never sets the surface slope. */
+export function riverReachShape(shape, s, length, river, P = RIVER_SHAPE_DEFAULTS) {
+    const reach = riverNoise(s, river, 'reach').v;
+    const pool = riverNoise(s, river, 'depth').v;
+    const joinM = Math.max(P.junctionLengthM, shape.width * 2);
+    const start = P.junctionStartM ?? 0, end = P.junctionEndM ?? length;
+    const mouth = 1 - quintic01(Math.min(Math.abs(s - start), Math.abs(end - s)) / joinM);
+    const width = shape.width * (1 + P.reachWidthVar * reach) * (1 + (P.junctionWidthScale - 1) * mouth);
+    const depth = shape.depth * Math.max(0.45, 1 + P.depthVar * pool) * Math.pow(shape.width / width, 0.25);
+    const island = P.islands && s > 2 * joinM && length - s > 2 * joinM
+        ? quintic01((reach - P.islandThreshold) / 0.3) * (1 - quintic01(((shape.slope ?? 0) - 0.004) / 0.008)) : 0;
+    return { ...shape, width, depth, island };
+}
 
 /**
  * Width, bank-full depth D (m) and flow speed (m/s) of a river with
@@ -186,13 +208,13 @@ export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     waterFrac: 0.75,
     // Bank rise beyond the channel's edge (riverCarve.wgsl.js); with
     // (1 - waterFrac) D it is the bank crest, which the valley floor meets.
-    bankH: 1.5,
+    bankH: 0.8,
     // The level falls at least this much per metre (owner 2026-10-05: the
     // level staircase made the water crawl).
     minSlope: 3e-4,
-    // Share of the river where the floor may sit above the natural ground
-    // beside it (fill); the rest is cut into it (a valley).
-    tauFill: 0.2,
+    // Quantile of adjacent ground used to fit the surface. This is not a
+    // terrain fill operation; low depressions remain untouched by carving.
+    tauFill: 0,
     // The floor stays this far below that ground where it can.
     marginM: 0.5,
     // One-sided (downstream) smoothing of the fitted level: drops become
@@ -200,18 +222,11 @@ export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     levelSmoothM: 400,
     // The level meets the lake or sea over this at the river's ends.
     endRampM: 120,
-    // The floor's height above the water ramps in over this from the source
-    // (at the sill the floor is the lake's level); the fill ramps in over
-    // outletFillM. The lake's rim is kept by the valley field (riverValley.js:
-    // near lake water the cut stops at its level; no fill on lake water).
+    // Ramp the freeboard allowance used by the surface fit near the source.
     outletRampM: 150,
-    outletFillM: 40,
-    // Floor half-width = floorScale x channel half-width + floorExtraM.
-    floorScale: 1.5,
-    floorExtraM: 15,
-    // Valley wall slope: wallFrac of the natural rise wallProbeM past the
-    // floor's edge, within [wallMin, wallMax].
-    wallFrac: 0.7, wallMin: 0.1, wallMax: 0.7, wallProbeM: 300,
+    // Width over which adjacent ground is sampled for the surface fit.
+    floorScale: 2.0,
+    floorExtraM: 25,
 });
 
 const quintic01 = (t) => { const x = Math.max(0, Math.min(1, t)); return x * x * x * (x * (x * 6 - 15) + 10); };
@@ -268,8 +283,18 @@ export function fitNonIncreasingQuantile(v, w, tau) {
  * @param {number} p.srcLevel, p.destLevel
  * @returns {{ eta: Float64Array, minSlope: number }}
  */
-export function riverValleyLevels({ s, ground, free, srcLevel, destLevel }, P = RIVER_LEVEL_DEFAULTS) {
+export function riverValleyLevels({ s, ground, free, srcLevel, destLevel, sourceEnd = 0, destStart = s.length - 1 }, P = RIVER_LEVEL_DEFAULTS) {
+    // Fit only between lake overlaps, which stay flat at their lake's level.
+    if (sourceEnd > 0 || destStart < s.length - 1) {
+        const ss = Array.from(s).slice(sourceEnd, destStart + 1).map(x => x - s[sourceEnd]);
+        const fitted = riverValleyLevels({ s: ss, ground: Array.from(ground).slice(sourceEnd, destStart + 1), free: Array.from(free).slice(sourceEnd, destStart + 1), srcLevel, destLevel }, P);
+        const eta = new Float64Array(s.length).fill(destLevel);
+        eta.fill(srcLevel, 0, sourceEnd);
+        eta.set(fitted.eta, sourceEnd);
+        return { eta, minSlope: fitted.minSlope };
+    }
     const n = s.length, L = s[n - 1];
+    if (n < 2 || !(L > 0)) return { eta: new Float64Array(n).fill(srcLevel), minSlope: 0 };
     let S = P.minSlope;
     if (srcLevel - destLevel < S * L * 1.05) S = Math.max(0, ((srcLevel - destLevel) / Math.max(L, 1)) * 0.5);
     const zt = new Float64Array(n), w = new Float64Array(n).fill(1);
@@ -334,32 +359,6 @@ export function riverNormalDepth(Qm3s, S, hw, D, manning) {
 /** Bank crest above the water: (1 - waterFrac) D + the bank's rise at its crest (riverCarve.wgsl.js). */
 export function riverCrestAbove(depth, P = RIVER_LEVEL_DEFAULTS) {
     return (1 - P.waterFrac) * depth + P.bankH * (1 - Math.exp(-2));
-}
-
-/**
- * The valley along a river (riverValley.js), per point: floor level (the
- * level plus its freeboard), fill weight, wall slope. The fill ramps in over
- * outletFillM from the source and fades out toward the end (the
- * destination's water); none where the point lies in a lake.
- * @param {object} p
- * @param {ArrayLike<number>} p.s, p.eta, p.free, p.wc   per point
- * @param {ArrayLike<number>} p.rise   natural ground wallProbeM past the floor's edge (higher side)
- * @param {ArrayLike<boolean>} p.inLake
- */
-export function riverValleyShape({ s, eta, free, wc, rise, inLake }, P = RIVER_LEVEL_DEFAULTS) {
-    const n = s.length, L = s[n - 1];
-    const F = new Float64Array(n), wFill = new Float64Array(n), raw = new Float64Array(n), sWall = new Float64Array(n);
-    for (let k = 0; k < n; k++) {
-        F[k] = eta[k] + free[k];
-        wFill[k] = inLake[k] ? 0 : Math.min(quintic01(s[k] / P.outletFillM), quintic01((L - s[k]) / P.endRampM - 0.25));
-        raw[k] = Math.min(P.wallMax, Math.max(P.wallMin, P.wallFrac * Math.max(0, rise[k] - F[k]) / P.wallProbeM));
-    }
-    for (let k = 0; k < n; k++) {
-        let a = 0, m = 0;
-        for (let q = Math.max(0, k - 15); q <= Math.min(n - 1, k + 15); q++) { a += raw[q]; m++; }
-        sWall[k] = a / m;
-    }
-    return { F, wFill, sWall };
 }
 
 /**

@@ -12,12 +12,25 @@
 
 // Wavelengths (m) and weights of the octaves.
 export const RIVER_NOISE = Object.freeze({
-    width: [[90, 0.7], [35, 0.3]],
-    wobble: [[70, 1.0]],
+    width: [[240, 0.55], [85, 0.3], [27, 0.15]],
+    wobble: [[170, 0.65], [53, 0.35]],
     bank: [[50, 0.7], [21, 0.3]],
+    // These fields are baked into the trace/valley, outside the GPU shader.
+    reach: [[430, 0.65], [145, 0.35]],
+    depth: [[180, 0.7], [61, 0.3]],
+    valley: [[320, 0.7], [113, 0.3]],
 });
 
-const SALT = { width: 0x9e37, wobble: 0x7f4a, bank: 0x2c1b };
+export const RIVER_CARVE_DEFAULTS = Object.freeze({
+    enabled: true,
+    waterFrac: 0.75,
+    bankH: 0.8, bankSoftM: 8, bankGrade: 0.035,
+    bankW: 10, blendW: 65,
+    widthVar: 0.4, wobble: 0.3, bankVar: 0.55,
+    islandHeightM: 2.5,
+});
+
+const SALT = { width: 0x9e37, wobble: 0x7f4a, bank: 0x2c1b, reach: 0x51e3, depth: 0x68bc, valley: 0x319d };
 
 function hashU32(x) {
     x = (x ^ 61) ^ (x >>> 16);
@@ -53,6 +66,7 @@ export function riverShapeAt(s, river, hw, P) {
         hw: hw * (1 + P.widthVar * w.v), dhw: hw * P.widthVar * w.dv,
         off: P.wobble * hw * o.v, doff: P.wobble * hw * o.dv,
         bank: 1 + P.bankVar * b.v,
+        bankLeft: 1 + P.bankVar * b.v, bankRight: 1 - P.bankVar * b.v,
     };
 }
 
@@ -61,7 +75,7 @@ export const riverShapeMaxScale = (P) => 1 + P.widthVar + P.wobble;
 
 /** WGSL of riverNoise: waterRiverNoise(s, river, kind 0 width / 1 wobble / 2 bank) -> vec2(v, dv/ds). */
 export function createRiverNoiseWgsl() {
-    const octaves = (kind, k) => RIVER_NOISE[kind].map(([lambda, w]) => `
+    const octaves = (kind) => RIVER_NOISE[kind].map(([lambda, w]) => `
         n += waterNoiseOctave(s, seed + ${lambda}u, ${lambda.toFixed(1)}, ${w.toFixed(3)});`).join('');
     return /* wgsl */`
 fn waterHashU32(xIn: u32) -> u32 {

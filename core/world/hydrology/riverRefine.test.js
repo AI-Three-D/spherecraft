@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverShape, riverValleyLevels, riverValleyShape, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
+import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
 
 // 60 x 30 patch, 16 m cells, frame origin at (0, 0). A valley runs along
 // j = 15 from a source lake (i < 10, level 50 m) down to a destination lake
@@ -63,6 +63,28 @@ describe('river trace', () => {
 });
 
 describe('river levels for the valley', () => {
+    it('has pools and constrictions while only the surface is constrained downhill', () => {
+        const widths = [], depths = [], beds = [];
+        for (let s = 500; s < 5000; s += 10) {
+            const shape = riverReachShape({ width: 40, depth: 3, speed: 1 }, s, 6000, 17);
+            widths.push(shape.width); depths.push(shape.depth);
+            beds.push(100 - s * 0.0003 - 0.75 * shape.depth);
+        }
+        expect(Math.max(...widths) / Math.min(...widths)).toBeGreaterThan(1.8);
+        expect(Math.max(...depths) / Math.min(...depths)).toBeGreaterThan(1.6);
+        expect(beds.some((b, k) => k > 0 && b > beds[k - 1])).toBe(true);
+        const mouth = riverReachShape({ width: 40, depth: 3 }, 0, 6000, 17);
+        expect(mouth.width).toBeGreaterThan(60);
+    });
+
+    it('keeps lake overlaps flat and a positive slope even with a tiny total drop', () => {
+        const s = Array.from({ length: 51 }, (_, k) => k * 20);
+        const { eta, minSlope } = riverValleyLevels({ s, ground: s.map(() => 100), free: s.map(() => 1), srcLevel: 100, destLevel: 99.98, sourceEnd: 5, destStart: 46 });
+        expect(eta[0]).toBe(100); expect(eta[5]).toBe(100);
+        expect(eta[46]).toBeCloseTo(99.98, 10); expect(eta[50]).toBeCloseTo(99.98, 10);
+        expect(minSlope).toBeGreaterThan(0);
+        for (let k = 6; k <= 46; k++) expect(eta[k]).toBeLessThan(eta[k - 1]);
+    });
     it('fitNonIncreasingQuantile: never rises; tau sets how much lies below', () => {
         const w = [1, 1, 1, 1, 1, 1];
         const med = Array.from(fitNonIncreasingQuantile([5, 4, 6, 2, 3, 1], w, 0.5));
@@ -106,24 +128,6 @@ describe('river levels for the valley', () => {
             if (eta[k] + free[k] > ground[k] - P.marginM + 1e-6) fill++;
         }
         expect(fill / n).toBeLessThan(0.2);
-    });
-
-    it('valley shape: floor = level + freeboard; no fill at the sill, at the end or in lakes', () => {
-        const { eta } = riverValleyLevels({ s, ground, free, srcLevel: 100, destLevel: 80 }, P);
-        const n = s.length, wc = new Array(n).fill(45), rise = ground.map(g => g + 20);
-        const inLake = s.map((_, k) => k > n - 3);
-        const fr = s.map(x => riverCrestAbove(1.8) * Math.min(1, x / P.outletRampM));
-        const { F, wFill, sWall } = riverValleyShape({ s, eta, free: fr, wc, rise, inLake }, P);
-        expect(F[0]).toBeCloseTo(100, 9);
-        expect(wFill[0]).toBe(0);
-        for (let k = 0; k < n; k++) {
-            expect(F[k]).toBeCloseTo(eta[k] + fr[k], 9);
-            expect(sWall[k]).toBeGreaterThanOrEqual(P.wallMin);
-            expect(sWall[k]).toBeLessThanOrEqual(P.wallMax);
-            if (inLake[k]) expect(wFill[k]).toBe(0);
-        }
-        expect(wFill[Math.floor(n / 2)]).toBe(1);
-        expect(wFill[n - 1]).toBe(0);
     });
 
     it('segmentCells covers every cell the segment capsule touches', () => {

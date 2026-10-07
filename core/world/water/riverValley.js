@@ -1,65 +1,22 @@
-// core/world/water/riverValley.js
-//
-// River valleys in the terrain (WATER_HANDOFF.md §5, option B: network
-// first, terrain second, water third). The terrain is shaped toward each
-// river's valley before the erosion filter, so the filter's gullies drain
-// into it and the river sits on a valley floor instead of in a trench dug
-// into a finished terrain (owner 2026-10-06: "the moat"). Lab:
-// terrain-lab/valley-proto.mjs (4 rivers, 66 km: no water escapes, bank
-// crest ~2 m above the water, lakes unchanged within 4 cm).
-//
-// The field: per texel of a cube-face grid (texels per face edge, 64-128 m
-// on a 131 km planet), stored in pages of page^2 texels with a 2-texel
-// apron (the 4 x 4 B-spline footprint of any sample inside the page stays
-// in it), only where a river comes within dBig:
-//   d      distance to the nearest river's centre line (m, clamped to dBig)
-//   F      that river's valley floor there (m; riverRefine.js riverValleyShape)
-//   wc     its floor half-width (m)
-//   wFill  1: ground lower than the floor is raised to it, 0: not (on lake
-//          water, at the river's ends)
-//   sWall  the valley side's slope
-//   rim    the level of lake water within rimProbeM (else the floor), and
-//   wRim   1 there: the valley side is not cut below that level (the lake
-//          keeps its rim and level)
-// packed as 4 x u32: F as f32, then pairs of half floats (d, wc), (wFill,
-// sWall), (wRim, rim - F): a texel's values depend on the texel alone, so
-// pages sharing apron texels store them identically (no seams). The shader
-// samples it with a cubic B-spline (C2: the erosion filter's input must be
-// C2) and builds the cross-section (riverValley.wgsl.js).
-//
-// Pure JS (worker-friendly). Texel (i, j) of a face sits at face UV
-// ((i + 0.5) / texels, (j + 0.5) / texels); apron texels past the face's edge
-// use the gnomonic map extended past it (waterGraph.js faceUVToDir), so
-// pages on both sides of an edge agree.
+// Sparse cached river terrain: independent hill heights, cut-only bank
+// retreat, and bank controls for the existing Runevision filter.
+// Four packed words per texel, with a C2 B-spline and identical page aprons.
 
 import { dirToFaceUV, faceUVToDir } from '../hydrology/waterGraph.js';
-import { tangentBasis } from '../hydrology/lakeRefine.js';
+import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
+import { riverHillAt, riverIncisionSampler } from '../hydrology/riverLandscape.js';
 
 export const RIVER_VALLEY_DEFAULTS = Object.freeze({
     enabled: true,
-    texels: 2048,        // per cube-face edge (lab: 2048 and 4096 hold the same)
-    page: 32,            // texels per page side (+2 apron each side)
-    dBig: 2000,          // stored distance clamp (m)
-    reach0: 1200,        // the valley's effect fades out between reach0 ..
-    reach1: 1700,        // .. and reach1 (m from the river)
-    // Cross-section, x = metres past the floor's edge: the valley side rises
-    // vH (1 - e^(-x / vS)) + wallSlope x (Whitewater's river.js valley),
-    // switched on over wallL; ground above it is cut toward it, blending over
-    // kCut (m of height); ground below the floor is raised to it within the
-    // floor (fill weight), falling away past its edge at fillSlope (C2 over
-    // fillL), blending over kSmooth.
-    vH: 12, vS: 90, wallL: 30,
-    kCut: 15, kSmooth: 1.5,
-    fillSlope: 0.15, fillL: 20,
-    // Lake rims: texels with lake water within any of these distances (m).
-    rimProbeM: [50, 100, 150],
-    rimMarginM: 0.3,     // the cut stops this far above the lake's level
+    erosionReliefScale: 3,
+    erosionStrength: 0.65,
+    erosionDepthFraction: 0.5,
+    erosionRidgeFraction: 0.1,
+    texels: 4096,
+    page: 32,
+    dBig: 650,
 });
 
-/** Floats of data per texel before packing. */
-const FIELDS = 7;   // d, F, wc, wFill, sWall, rim, wRim
-
-const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const norm3 = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l]; };
 
 // IEEE 754 half float bits of a number (round to nearest even).
@@ -108,7 +65,7 @@ export function valleyPagesNear(dirs, s, R, opts = RIVER_VALLEY_DEFAULTS) {
     const { T, P, PE } = valleyLayout(opts);
     const out = new Set();
     const pageM = P * (2 * Math.PI * R / 4) / T;
-    const ext = opts.dBig + 1.5 * pageM, st = pageM / 3;
+    const ext = opts.dBig + 1.25 * pageM, st = pageM / 3;
     const every = Math.max(1, Math.round(200 / Math.max(1, (s[1] ?? 20) - (s[0] ?? 0))));
     for (let k = 0; k < dirs.length; k += every) {
         const c = dirs[k], { e1, e2 } = tangentBasis(c);
@@ -123,132 +80,129 @@ export function valleyPagesNear(dirs, s, R, opts = RIVER_VALLEY_DEFAULTS) {
     return out;
 }
 
-/**
- * River lines for the bake from traced river records (riverRefine.js
- * RIVER_POINT_STRIDE: valley floor, floor half-width, fill weight and wall
- * slope at floats 12..15).
- */
+/** Pages touched by sparse excavation, including its interpolation support. */
+export function valleyIncisionPages(landscape, R, opts = RIVER_VALLEY_DEFAULTS) {
+    const { T, P, PE } = valleyLayout(opts), pages = new Set(), f = landscape.frame;
+    const add = (face, pi, pj) => {
+        if (pi < 0 || pj < 0 || pi >= PE || pj >= PE) {
+            const d = faceUVToDir(face, (pi + 0.5) / PE, (pj + 0.5) / PE);
+            const q = dirToFaceUV(d);
+            face = q.face; pi = Math.min(PE - 1, Math.floor(q.u * PE)); pj = Math.min(PE - 1, Math.floor(q.v * PE));
+        }
+        pages.add(face * PE * PE + pj * PE + pi);
+    };
+    for (const k of landscape.cells) {
+        const d = planeToDir(f.x0 + (k % f.nx + 0.5) * f.spacing, f.y0 + (Math.floor(k / f.nx) + 0.5) * f.spacing, f, R);
+        const { face, u, v } = dirToFaceUV(d), x = u * T, y = v * T;
+        const pi = Math.min(PE - 1, Math.floor(x / P)), pj = Math.min(PE - 1, Math.floor(y / P));
+        // Two B-spline texels plus the fine field's bilinear support.
+        const margin = 3 + f.spacing / (2 * R / T / Math.sqrt(3));
+        const dx = x - pi * P < margin ? -1 : x - pi * P > P - margin ? 1 : 0;
+        const dy = y - pj * P < margin ? -1 : y - pj * P > P - margin ? 1 : 0;
+        add(face, pi, pj);
+        if (dx) add(face, pi + dx, pj);
+        if (dy) add(face, pi, pj + dy);
+        if (dx && dy) add(face, pi + dx, pj + dy);
+    }
+    return pages;
+}
+
+/** Cache sparse field support; unchanged rivers need no new index or scan. */
+export function valleyRiverIncisionPages(rv, R, opts = RIVER_VALLEY_DEFAULTS) {
+    const key = `${opts.texels}:${opts.page}`;
+    rv.pageSupport ??= new Map();
+    let pages = rv.pageSupport.get(key);
+    if (!pages) { pages = valleyIncisionPages(rv.landscape, R, opts); rv.pageSupport.set(key, pages); }
+    return pages;
+}
+
+/** Conservative page/independent-hill intersection, including the apron. */
+export function valleyPageTouchesHill(pid, hill, R, opts = RIVER_VALLEY_DEFAULTS) {
+    const { T, P, PE } = valleyLayout(opts);
+    const face = Math.floor(pid / (PE * PE)), pj = Math.floor(pid % (PE * PE) / PE), pi = pid % PE;
+    const c = faceUVToDir(face, (pi + 0.5) / PE, (pj + 0.5) / PE);
+    let radius = 0;
+    for (const x of [pi * P - 3, (pi + 1) * P + 3]) for (const y of [pj * P - 3, (pj + 1) * P + 3]) {
+        const corner = faceUVToDir(face, x / T, y / T);
+        radius = Math.max(radius, Math.hypot(c[0] - corner[0], c[1] - corner[1], c[2] - corner[2]) * R);
+    }
+    return Math.hypot(c[0] - hill.c[0], c[1] - hill.c[1], c[2] - hill.c[2]) * R < radius * 1.05 + Math.max(hill.a, hill.b) * 1.2;
+}
+
+/** River directions and sparse baked landscape for page selection. */
 export function valleyRiverFromRecord(rec, R) {
     const P = rec.points, st = rec.stride, n = P.length / st;
-    const dirs = [], s = new Float64Array(n), F = new Float64Array(n), wc = new Float64Array(n), wFill = new Float64Array(n), sWall = new Float64Array(n);
+    const dirs = [], s = new Float64Array(n);
     for (let k = 0; k < n; k++) {
         const o = k * st;
         dirs.push([P[o], P[o + 1], P[o + 2]]);
-        if (k) s[k] = s[k - 1] + Math.acos(Math.min(1, dot3(dirs[k - 1], dirs[k]))) * R;
-        F[k] = P[o + 12]; wc[k] = P[o + 13]; wFill[k] = P[o + 14]; sWall[k] = P[o + 15];
+        // acos(dot) loses whole 20 m steps after directions are stored as f32.
+        if (k) s[k] = s[k - 1] + Math.hypot(...dirs[k].map((v, i) => v - dirs[k - 1][i])) * R;
     }
-    return { dirs, s, F, wc, wFill, sWall };
+    return { dirs, s, river: rec.riverId ?? 0, landscape: rec.landscape,
+        field: rec.landscape ? riverIncisionSampler(rec.landscape, R) : null };
 }
 
-/**
- * Bakes pages of the field.
- * @param {number[]} pageIds
- * @param {Array} rivers   valleyRiverFromRecord() results (all rivers that may reach the pages)
- * @param {object} p
- * @param {number} p.R
- * @param {(dir: number[]) => number} [p.lakeLevelAt]  level of lake (or sea) water at a
- *   unit direction on the natural terrain, NaN where dry
- * @returns {{ texels: Uint32Array, near: number }}
- *   texels: per page (P + 4)^2 x 4 u32; near: texels within dBig
- */
-export function bakeValleyPages(pageIds, rivers, { R, lakeLevelAt = null }, opts = RIVER_VALLEY_DEFAULTS) {
-    const { T, P, PE, ST, TEX } = valleyLayout(opts);
-    const dBig = opts.dBig;
-    // Segments (3D chords) of all rivers, with per-end attributes.
-    let nSeg = 0;
-    for (const rv of rivers) nSeg += Math.max(0, rv.dirs.length - 1);
-    const A = new Float64Array(nSeg * 3), B = new Float64Array(nSeg * 3), MID = new Float64Array(nSeg * 3), RAD = new Float64Array(nSeg);
-    const segRiver = new Int32Array(nSeg), segK = new Int32Array(nSeg);
-    let q = 0;
-    rivers.forEach((rv, ri) => {
-        for (let k = 0; k + 1 < rv.dirs.length; k++, q++) {
-            const a = rv.dirs[k], b = rv.dirs[k + 1];
-            A.set(a, 3 * q); B.set(b, 3 * q);
-            MID.set(norm3([a[0] + b[0], a[1] + b[1], a[2] + b[2]]), 3 * q);
-            RAD[q] = 0.5 * Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) * R;
-            segRiver[q] = ri; segK[q] = k;
-        }
-    });
-    const probe = [[0, 0]];
-    for (const r of opts.rimProbeM) for (let m = 0; m < 8; m++) probe.push([r * Math.cos(m * Math.PI / 4), r * Math.sin(m * Math.PI / 4)]);
-    const texels = new Uint32Array(pageIds.length * TEX * 4);
-    const cand = new Int32Array(nSeg), raw = new Float64Array(TEX * FIELDS);
-    let near = 0;
-    pageIds.forEach((pid, slot) => {
-        const face = Math.floor(pid / (PE * PE)), pj = Math.floor((pid % (PE * PE)) / PE), pi = pid % PE;
-        const i0 = pi * P - 2, j0 = pj * P - 2;
-        const pc = faceUVToDir(face, (pi + 0.5) / PE, (pj + 0.5) / PE), corner = faceUVToDir(face, pi / PE, pj / PE);
-        const pr = Math.acos(Math.min(1, dot3(pc, corner))) * R * 1.3 + 3 * (P * (2 * Math.PI * R / 4) / T) / P;
-        // Candidate segments: every one that can be the nearest for a texel
-        // of the page within dBig + a margin; with none, all of them (every
-        // texel takes its nearest river's values, so pages sharing apron
-        // texels agree exactly).
-        let nc = 0;
-        for (let i = 0; i < nSeg; i++) {
-            const cosA = MID[3 * i] * pc[0] + MID[3 * i + 1] * pc[1] + MID[3 * i + 2] * pc[2];
-            if (Math.acos(Math.min(1, cosA)) * R - RAD[i] < pr + dBig + 1000) cand[nc++] = i;
-        }
-        if (!nc) for (let i = 0; i < nSeg; i++) cand[nc++] = i;
-        for (let jj = 0; jj < ST; jj++) for (let ii = 0; ii < ST; ii++) {
-            const t = jj * ST + ii, o = t * FIELDS;
-            const p = faceUVToDir(face, (i0 + ii + 0.5) / T, (j0 + jj + 0.5) / T);
-            let best = Infinity, bi = -1, bt = 0;
-            for (let c = 0; c < nc; c++) {
-                const i = cand[c], a0 = A[3 * i], a1 = A[3 * i + 1], a2 = A[3 * i + 2];
-                const ux = B[3 * i] - a0, uy = B[3 * i + 1] - a1, uz = B[3 * i + 2] - a2;
-                const px = p[0] - a0, py = p[1] - a1, pz = p[2] - a2;
-                const L2 = ux * ux + uy * uy + uz * uz;
-                const tt = L2 > 0 ? Math.max(0, Math.min(1, (px * ux + py * uy + pz * uz) / L2)) : 0;
-                const dx = px - tt * ux, dy = py - tt * uy, dz = pz - tt * uz;
-                const d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 < best) { best = d2; bi = i; bt = tt; }
-            }
-            if (bi < 0) { raw.fill(0, o, o + FIELDS); raw[o] = dBig; continue; }
-            const dist = Math.sqrt(best) * R;
-            if (dist < dBig) near++;
-            const rv = rivers[segRiver[bi]], k = segK[bi];
-            const lerp = (arr) => arr[k] + (arr[k + 1] - arr[k]) * bt;
-            const F = lerp(rv.F);
-            raw[o] = Math.min(dist, dBig); raw[o + 1] = F; raw[o + 2] = lerp(rv.wc); raw[o + 3] = lerp(rv.wFill); raw[o + 4] = lerp(rv.sWall);
-            raw[o + 5] = F; raw[o + 6] = 0;
-            // Lake water nearby: the cut stops at its level (the lake keeps its
-            // rim); on lake water itself, no fill (a fill there dammed the
-            // lake's edge; dry ground beside it is still filled, or a river
-            // leaving a lake spilled into hollows beside its outlet).
-            if (lakeLevelAt && dist < opts.reach1 + 200) {
-                const { e1, e2 } = tangentBasis(p);
-                let lv = -Infinity;
-                for (const [ox, oy] of probe) {
-                    const here = !ox && !oy;
-                    const d = here ? p : norm3([p[0] + (ox * e1[0] + oy * e2[0]) / R, p[1] + (ox * e1[1] + oy * e2[1]) / R, p[2] + (ox * e1[2] + oy * e2[2]) / R]);
-                    const l = lakeLevelAt(d);
-                    if (!Number.isFinite(l)) continue;
-                    lv = Math.max(lv, l);
-                    if (here) raw[o + 3] = 0;
-                }
-                if (lv > -Infinity) { raw[o + 5] = lv + opts.rimMarginM; raw[o + 6] = 1; }
-            }
-        }
-        for (let t = 0; t < TEX; t++) {
-            const o = t * FIELDS, w = (slot * TEX + t) * 4;
-            texels[w] = f32bits(raw[o + 1]);
-            texels[w + 1] = pack2(raw[o], raw[o + 2]);
-            texels[w + 2] = pack2(raw[o + 3], raw[o + 4]);
-            texels[w + 3] = pack2(raw[o + 6], raw[o + 5] - raw[o + 1]);
-        }
-    });
-    return { texels, near };
-}
-
-/** Packed ValleyParams uniform (riverValley.wgsl.js), 64 bytes. on: 0 = the term passes through. */
+/** Packed ValleyParams uniform, 64 bytes. The unused words stay zero. */
 export function valleyParamsData(opts = RIVER_VALLEY_DEFAULTS, on = true) {
     const { T, P, PE } = valleyLayout(opts);
     const buf = new ArrayBuffer(64), f = new Float32Array(buf), u = new Uint32Array(buf);
     f[0] = T; u[1] = P; u[2] = PE; u[3] = on ? 1 : 0;
-    f[4] = opts.dBig; f[5] = opts.reach0; f[6] = opts.reach1; f[7] = opts.kSmooth;
-    f[8] = opts.vH; f[9] = opts.vS; f[10] = opts.wallL; f[11] = opts.fillSlope;
-    f[12] = opts.fillL; f[13] = opts.kCut; f[14] = 0; f[15] = 0;
+    f[4] = opts.erosionStrength ?? 0.65;
+    f[5] = opts.erosionDepthFraction ?? 0.5;
+    f[6] = opts.erosionRidgeFraction ?? 0.1;
+    f[15] = opts.erosionReliefScale ?? 3;
     return buf;
+}
+
+// Morphology pages: cut depth (f32), hill / erodible hill height (half),
+// erodible cut depth (half), clearance (15 positive half-float bits) and
+// lake guard (one bit), bank reference elevation (f32). Absolute elevations
+// need f32 precision even when a high-altitude bank is only a metre deep.
+// B-spline weights keep cuts
+// and independent hill footprints bounded.
+export function bakeValleyPages(pageIds, rivers, { R, lakeLevelAt = null }, opts = RIVER_VALLEY_DEFAULTS) {
+    const { T, P, PE, ST, TEX } = valleyLayout(opts);
+    const fields = rivers.filter(r => r.landscape).map(r => ({ sample: r.field ?? riverIncisionSampler(r.landscape, R),
+        pages: valleyRiverIncisionPages(r, R, opts) }));
+    const hills = new Map();
+    for (const r of rivers) for (const h of r.landscape?.hills ?? []) {
+        if (!hills.has(h.id) || hills.get(h.id).height < h.height) hills.set(h.id, h);
+    }
+    const texels = new Uint32Array(pageIds.length * TEX * 4);
+    const sample = new Float64Array(5);
+    let near = 0;
+    pageIds.forEach((pid, slot) => {
+        const face = Math.floor(pid / (PE * PE)), pj = Math.floor((pid % (PE * PE)) / PE), pi = pid % PE;
+        const i0 = pi * P - 2, j0 = pj * P - 2;
+        const centre = faceUVToDir(face, (pi + 0.5) / PE, (pj + 0.5) / PE);
+        const corner = faceUVToDir(face, (i0 + 0.5) / T, (j0 + 0.5) / T);
+        const radius = Math.hypot(...centre.map((v, i) => v - corner[i])) * R * 1.5;
+        const localHills = [...hills.values()].filter(h => Math.hypot(...h.c.map((v, i) => v - centre[i])) * R < radius + Math.max(h.a, h.b) * 1.2);
+        const localFields = fields.filter(f => f.pages.has(pid));
+        for (let j = 0; j < ST; j++) for (let i = 0; i < ST; i++) {
+            const dir = faceUVToDir(face, (i0 + i + 0.5) / T, (j0 + j + 0.5) / T);
+            let cut = 0, erodedCut = 0, hill = 0, erodedHill = 0, reference = 0, clearance = 0;
+            for (const field of localFields) {
+                field.sample.all(dir, sample);
+                if (sample[0] > cut) {
+                    cut = sample[0];
+                    reference = sample[4] > 0 ? sample[2] / sample[4] : 0;
+                    clearance = sample[4] > 0 ? sample[3] / sample[4] : 0;
+                }
+                erodedCut = Math.max(erodedCut, sample[1]);
+            }
+            for (const h of localHills) { const v = riverHillAt(dir, h, R); hill += v; erodedHill += v * h.erosion; }
+            const lake = lakeLevelAt && Number.isFinite(lakeLevelAt(dir)) ? 1 : 0;
+            if (lake) { cut = 0; hill = 0; erodedHill = 0; erodedCut = 0; reference = 0; clearance = 0; }
+            const w = (slot * TEX + j * ST + i) * 4;
+            texels[w] = f32bits(cut); texels[w + 1] = pack2(hill, erodedHill);
+            texels[w + 2] = (toHalfBits(erodedCut) | (toHalfBits(clearance) << 16) | (lake ? 0x80000000 : 0)) >>> 0;
+            texels[w + 3] = f32bits(reference);
+            if (cut > 0 || hill > 0) near++;
+        }
+    });
+    return { texels, near };
 }
 
 /**

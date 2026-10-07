@@ -9,13 +9,11 @@
 //   the near range, in one instanced draw.
 // - Rivers: ribbons along the stretches within range (core/world/water/
 //   riverRibbon.js), rebuilt on the CPU as the camera moves, in one draw.
-// Farther away the terrain shading draws the water (waterWgsl.js
-// applyWater), which near the camera keeps only the water's body under
-// these surfaces: the bed seen through the water. Transparent
-// (premultiplied), depth test on, no depth write; drawn after the opaque
-// meshes so objects in the water show through. Binds the WaterGpuData
-// buffers, its own copy of the frame's WaterParams, and the lighting and
-// atmosphere the terrain shading uses (uniformManager).
+// Farther away the terrain shader draws the water. Near geometry uses the
+// existing water colour and surface terms; it fades to that terrain shading
+// over the handover range. Depth test on, no depth write, drawn after opaque
+// meshes. Binds WaterGpuData and the terrain's lighting/atmosphere uniforms.
+
 
 import { Material } from '../resources/material.js';
 import { Geometry } from '../resources/geometry.js';

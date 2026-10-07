@@ -92,7 +92,7 @@ struct ErosionLandResult {
 //   hilltops and valley floors.)
 // Slope deltas are the filter's approximate derivatives (as in the
 // original), plus the first-order terms of the amount and the offset.
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>, variationFloor: vec4<f32>) -> ErosionLandResult {
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>, variationFloor: vec4<f32>, localAmount: vec4<f32>) -> ErosionLandResult {
     var r: ErosionLandResult;
     r.delta = vec4<f32>(0.0);
     r.amount = vec4<f32>(0.0);
@@ -105,7 +105,8 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     // variationFloor (0..1) raises it smoothly toward 1: 1 - (1 - v)(1 - floor).
     let variation = dConst(1.0) - dMul(dConst(1.0) - variationN, dConst(1.0) - variationFloor);
     let styleStrength = dConst(${wgslNum(cfg.styleStrength[0])}) + style * ${wgslNum(cfg.styleStrength[1] - cfg.styleStrength[0])};
-    let reliefAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
+    let regionalAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
+    let reliefAmount = dSmoothMax(regionalAmount, dMul(localAmount, styleStrength), 0.02);
     // Steepness: full erosion on steep ground, fading out toward flat ground.
     // Summits, saddles and valley floors are where the gully direction spins
     // around a point (pinches, bowties); this keeps gullies away from them

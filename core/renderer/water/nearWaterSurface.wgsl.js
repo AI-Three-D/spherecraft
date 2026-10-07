@@ -18,13 +18,10 @@
 // drawn there) and where another river is nearer (confluences: the terrain
 // shading's rule, waterRiverAt).
 //
-// Shading (both): the terrain shading under it already drew the water's
-// body (the bed seen through the water column, waterBodyColor), so this
-// adds only the surface (waterSurfaceTerms: ripples, Fresnel sky reflection,
-// sun glint), premultiplied: colour = framebuffer (1 - a) + rgb. In the
-// hand-over band the terrain draws mix(its full water, body, w) (applyWater)
-// and the blend here is chosen so the sum is the full water exactly. Then
-// the aerial perspective, as the terrain applies it after its water (c T + S).
+// Near water draws its body on the actual surface geometry using the
+// existing deep colour, reflection and light. Only the distance handover
+// is transparent. Fresnel-only blending over coloured bed polygons made
+// submerged bank faces appear as floating sheets and uphill water.
 
 import { createWaterWgsl } from '../../world/water/waterWgsl.js';
 import { getAerialPerspectiveWGSL } from '../atmosphere/shaders/aerialPerspectiveCommon.js';
@@ -94,8 +91,8 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Nea
 `;
 }
 
-// Fragment shading shared by lakes and rivers: the surface over the body the
-// terrain drew, with the hand-over blend and the aerial perspective.
+// Fragment shading shared by lakes and rivers, with distance handover
+// and aerial perspective.
 // Premultiplied colour, a = 0 where nothing is drawn.
 function shadeWgsl() {
     return getAerialPerspectiveWGSL() + /* wgsl */`
@@ -112,11 +109,13 @@ fn nearWaterShade(wp: vec3<f32>, level: f32) -> vec4<f32> {
     let sky = U.ambientColor * U.ambientIntensity;
     let s = waterSurfaceTerms(wp, up, U.cameraPos, L, sun, sky);
 
-    // Under this the terrain drew X = mix(full, body, w), full = body (1 - F) + S.
-    // X (1 - a) + add = full for a = F w / (1 - F + F w), add = S (1 - (1 - w)(1 - a)).
-    let F = s.a;
-    let a = F * w / max(1.0 - F + F * w, 1.0e-4);
-    let add = s.rgb * (1.0 - (1.0 - w) * (1.0 - a));
+    // The body must live on the surface geometry too. Compositing only
+    // Fresnel over water-coloured bed polygons exposes their steep edges as
+    // floating sheets and makes the bed's uphill pools look like water slopes.
+    // Use the existing deep-water colour until bed refraction is implemented.
+    let body = waterParams.deepColor.rgb * (sky + sun * max(dot(up, L), 0.0));
+    let a = w;
+    let add = (body * (1.0 - s.a) + s.rgb) * a;
 
     // Aerial perspective (or fog), as the terrain shading applies it after
     // its water: colour T + inscatter. Over the framebuffer (already c T + S)
@@ -151,6 +150,10 @@ fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
     let lake = waterLakes[in.lake];
     let m = textureSampleLevel(waterLakeMasks, nearWaterSampler, in.uv, lake.maskLayer, 0.0).r;
     if (m < 0.5) { discard; }
+    if (m < 0.75) {
+        let river = waterRiverAt(normalize(in.wp - U.origin), lake.level);
+        if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { discard; }
+    }
     let c = nearWaterShade(in.wp, lake.level);
     if (c.a <= 0.0) { discard; }
     return c;
@@ -199,7 +202,7 @@ fn main(in: NearRiverVOut) -> @location(0) vec4<f32> {
     if (waterLakeLevelView(up, -1.0e30, nearWaterSampler, false) > WATER_NO_LAKE) { discard; }
     // Another river is nearer (confluences).
     let hit = waterRiverAt(up, in.level);
-    if (!hit.near || abs(hit.river - in.river) > 0.5) { discard; }
+    if (!hit.near || hit.distM >= hit.halfWidthM || abs(hit.river - in.river) > 0.5) { discard; }
     let c = nearWaterShade(in.wp, in.level);
     if (c.a <= 0.0) { discard; }
     return c;

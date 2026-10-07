@@ -22,17 +22,17 @@
 // point's height and (refined lakes) the mask allows water there. It is
 // river water when it lies below the river's level inside the river's
 // channel zone (riverCarve.wgsl.js shapes the terrain there from the same
-// segments: channel, banks above the level, hollows beside it filled).
+// segments for its cut-only channel correction).
 // Shorelines are exact per pixel: where the terrain height crosses the level.
 
 import { createRiverNoiseWgsl } from './riverShapeNoise.js';
 
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 
-// WaterLake: 4 x vec4 (64 bytes). WaterParams: 11 x vec4. WaterRiverSeg: 7 x vec4 (112 bytes).
+// WaterLake: 4 x vec4 (64 bytes). WaterParams: 11 x vec4. WaterRiverSeg: 8 x vec4 (128 bytes).
 export const LAKE_RECORD_FLOATS = 16;
 export const LAKE_PARAMS_FLOATS = 44;
-export const RIVER_SEG_FLOATS = 28;
+export const RIVER_SEG_FLOATS = 32;
 export const RIVER_MAX_SEGS_PER_CELL = 255;
 // River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
 // 512): a terrain point only walks the segments that can reach it.
@@ -55,7 +55,7 @@ struct WaterParams {
     // surface draws the water, so the static water fades out (waterSimCover).
     simRiver: vec4<f32>,       // river id, arc lengths s0, s1 of the window (m), half-width (m)
     simFade: vec4<f32>,        // fade at the window's ends (m), at its sides (m), unused, fade 0..1
-    // x, y, z unused; w: lakes whose shore is not solved yet are not drawn
+    // x, y, z unused; w: unsolved lakes are not drawn
     // closer than this (m) (their grid-cell outline and coarse level look
     // wrong up close).
     riverLook: vec4<f32>,
@@ -64,9 +64,9 @@ struct WaterParams {
     // cross-section for x < bankW, blendW: then blends into the natural
     // terrain, waterFrac: water fills this part of the bank-full depth);
     // bank = (bankH: rise beyond the edge, bankSoftM: over ~2x this,
-    // bankGrade: further rise per metre, leveeGrade: where the ground is
-    // lower the bank falls away by this per metre past its crest);
-    // shape = (widthVar, wobble, bankVar: riverShapeNoise.js, unused).
+    // bankGrade: further rise per metre, w: reserved). These describe a
+    // cut ceiling; lower natural terrain is never raised to this profile.
+    // shape = (widthVar, wobble, bankVar: riverShapeNoise.js, island height).
     carve: vec4<f32>,
     bank: vec4<f32>,
     shape: vec4<f32>,
@@ -90,7 +90,8 @@ struct WaterRiverSeg {
     pool0: f32, pool1: f32, skew0: f32, skew1: f32,
     speed0: f32, speed1: f32, foam0: f32, foam1: f32,
     s0: f32, s1: f32, river: f32, _pad: f32,
-    wl0: f32, wl1: f32, _pad1: f32, _pad2: f32,
+    wl0: f32, wl1: f32, lakeGuard0: f32, lakeGuard1: f32,
+    island0: f32, island1: f32, _pad1: f32, _pad2: f32,
 };
 @group(${group}) @binding(${b.index}) var<storage, read> waterIndex: array<u32>;
 @group(${group}) @binding(${b.params}) var<uniform> waterParams: WaterParams;
@@ -150,6 +151,8 @@ struct WaterRiverPt {
     dOff: f32,       // d(centre offset)/ds
     dHw: f32,        // d(half-width)/ds
     bankH: f32,      // bank rise beyond the edge here (m)
+    lakeGuard: f32,  // nearby lake level: terrain below it must not be filled
+    island: f32, dIsland: f32,
 };
 
 fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
@@ -168,6 +171,9 @@ fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
     p.speed = mix(s.speed0, s.speed1, p.t);
     p.foam = mix(s.foam0, s.foam1, p.t);
     p.wl = mix(s.wl0, s.wl1, p.t);
+    p.lakeGuard = max(s.lakeGuard0, s.lakeGuard1);
+    p.island = mix(s.island0, s.island1, p.t);
+    p.dIsland = (s.island1 - s.island0) / max(s.s1 - s.s0, 0.001);
     p.s = mix(s.s0, s.s1, p.t);
     p.river = s.river;
     let hw0 = max(mix(s.hw0, s.hw1, p.t), 0.5);
@@ -175,12 +181,13 @@ fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
     let on = waterRiverNoise(p.s, s.river, 1u);
     let bn = waterRiverNoise(p.s, s.river, 2u);
     p.hw = max(hw0 * (1.0 + waterParams.shape.x * wn.x), 0.5);
-    p.dHw = hw0 * waterParams.shape.x * wn.y;
+    let baseSlope = (s.hw1 - s.hw0) / max(s.s1 - s.s0, 0.001);
+    p.dHw = baseSlope * (1.0 + waterParams.shape.x * wn.x) + hw0 * waterParams.shape.x * wn.y;
     let off = waterParams.shape.y * hw0 * on.x;
-    p.dOff = waterParams.shape.y * hw0 * on.y;
+    p.dOff = waterParams.shape.y * (baseSlope * on.x + hw0 * on.y);
     p.n = p.nSign * p.dLine - off;
     p.d = abs(p.n);
-    p.bankH = waterParams.bank.x * (1.0 + waterParams.shape.z * bn.x);
+    p.bankH = waterParams.bank.x * (1.0 + waterParams.shape.z * bn.x * select(-1.0, 1.0, p.n >= 0.0));
     return p;
 }
 
@@ -247,6 +254,13 @@ fn waterLakeLevelIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, leve
     let uv = vec2<f32>((px - lake.x0) / lake.sizeX, (py - lake.y0) / lake.sizeY);
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return WATER_NO_LAKE; }
     let m = textureSampleLevel(waterLakeMasks, samp, uv, lake.maskLayer, 0.0).r;
+    // The shore band is render coverage, not lake water. Once excavation
+    // lowers an outlet, the band's flat lake sheet must give way to the
+    // descending river; otherwise it hangs over the channel as a wedge.
+    if (m >= 0.5 && m < 0.75) {
+        let river = waterRiverAt(dir, heightM);
+        if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { return WATER_NO_LAKE; }
+    }
     return select(WATER_NO_LAKE, lake.level, m >= 0.5);
 }
 
@@ -276,13 +290,12 @@ struct WaterRiverHit {
     nM: f32,              // offset across (m, + left of the flow)
     river: f32,           // the river's id
     pool: f32,            // < 0 inside a lake
+    slope: f32,           // descending water-surface slope, including waterfall lips
 };
 
-// The river (if any) at a point: the nearest segment among those listed
-// there. Water where the terrain lies below the river's level inside its
-// channel zone (the carve shapes banks above the level, and fills the
-// hollows beside it). Terrain not carved yet (tiles still regenerating)
-// shows the channel's water painted on.
+// The closest traced segment. Water is present only inside its channel,
+// where actual terrain is below the solved level; no assumed bed is painted
+// across dry or still-regenerating terrain.
 fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     var hit: WaterRiverHit;
     hit.found = false;
@@ -318,18 +331,18 @@ fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     // bank-full D): 1 - (1 - u^2)^1.5 = h / D. Only in the channel: carved
     // banks rise above the level beyond it, and terrain not carved yet must
     // not flood out to the zone's straight edge (owner 2026-10-05).
-    let wf = clamp(waterParams.carve.w, 0.05, 0.99);
-    let Dfull = max((best.eta - best.bed) / wf, 0.05);
-    let hWater = clamp(best.wl - best.bed, 0.0, Dfull);
-    let uw = sqrt(max(1.0 - pow(1.0 - hWater / Dfull, 2.0 / 3.0), 1.0e-4));
-    let paint = hWater * max(0.0, 1.0 - (best.d / (uw * best.hw)) * (best.d / (uw * best.hw)));
-    let depthM = select(0.0, max(best.wl - heightM, paint), best.d < best.hw);
+    // The actual terrain is authoritative: painting an assumed parabola
+    // over dry terrain hid islands and flooded banks before regeneration.
+    let depthM = select(0.0, max(best.wl - heightM, 0.0), best.d < best.hw);
     hit.found = depthM > 0.0;
     hit.depthM = depthM;
     let s = waterRivers[bestK];
+    hit.slope = max(0.0, (s.wl0 - s.wl1) / max(s.s1 - s.s0, 0.001));
     let ab = s.p1 - s.p0;
     let along = ab - dir * dot(ab, dir);
-    hit.flow = select(normalize(cross(dir, vec3<f32>(0.0, 1.0, 0.0001))), normalize(along), dot(along, along) > 1.0e-24);
+    let left = normalize(cross(dir, ab));
+    let split = left * select(-1.0, 1.0, best.n >= 0.0) * best.dIsland * best.hw * 0.35;
+    hit.flow = select(normalize(cross(dir, vec3<f32>(0.0, 1.0, 0.0001))), normalize(along + split * length(along)), dot(along, along) > 1.0e-24);
     return hit;
 }
 

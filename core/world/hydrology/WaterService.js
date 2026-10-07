@@ -21,12 +21,13 @@ import { createWaterWorkerCore } from './waterWorkerCore.js';
 import { dirToPlane, growPatchFrame, limitPatchCells } from './lakeRefine.js';
 import { cellDir, dirToCell } from './waterGraph.js';
 import { RIVER_SUB } from '../water/waterWgsl.js';
-import { riverShapeMaxScale } from '../water/riverShapeNoise.js';
+import { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } from '../water/riverShapeNoise.js';
 import { RIVER_LEVEL_DEFAULTS } from './riverRefine.js';
 import { RIVER_VALLEY_DEFAULTS } from '../water/riverValley.js';
+import { RIVER_LANDSCAPE_DEFAULTS } from './riverLandscape.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v10';
+export const WATER_ALGO_VERSION = 'water-v16';
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,
@@ -47,26 +48,12 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
     // River corridor shaped into the terrain (riverCarve.wgsl.js), after
     // Whitewater's cross-section: channel, banks rising beyond its edge,
     // blend into the natural terrain. x = metres beyond the channel's edge.
-    carve: {
-        enabled: true,
-        waterFrac: 0.75,        // water fills this fraction of the bank-full depth
-        bankH: 1.5,             // bank rise beyond the edge (m); with (1 - waterFrac) D: the bank crest above the water
-        bankSoftM: 3,           // the bank rises over ~2 x this (m)
-        bankGrade: 0.06,        // further rise per metre on the bank
-        bankW: 12,              // x < bankW: the terrain is the cross-section (cut and levee)
-        blendW: 30,             // then blends into the natural terrain over this (m)
-        rampM: 120,             // the river cuts in to full depth over this from its source
-        leveeGrade: 0.08,       // where the ground is lower, the bank falls away past its crest by this per metre
-        // Irregularity along the river (riverShapeNoise.js): half-width +- widthVar,
-        // centre wandering +- wobble x half-width, bank height +- bankVar.
-        widthVar: 0.2,
-        wobble: 0.15,
-        bankVar: 0.35,
-    },
+    carve: RIVER_CARVE_DEFAULTS,
     // River valleys in the terrain (riverValley.js; RIVER_VALLEY_DEFAULTS
     // overrides), baked from each traced river; compiled in with the carve
     // unless terrain.waterGraph.valley.enabled is false.
     valley: {},
+    landscape: RIVER_LANDSCAPE_DEFAULTS,
     refine: {
         enabled: true,
         spacingM: 16,      // lab: 16 m and 4 m solves agree within 0.2 m
@@ -85,6 +72,7 @@ function mergeConfig(cfg = {}) {
         rivers: { ...WATER_SERVICE_DEFAULTS.rivers, ...(cfg.rivers ?? {}) },
         carve: { ...WATER_SERVICE_DEFAULTS.carve, ...(cfg.carve ?? {}) },
         valley: { ...RIVER_VALLEY_DEFAULTS, ...(cfg.valley ?? {}) },
+        landscape: { ...RIVER_LANDSCAPE_DEFAULTS, ...(cfg.landscape ?? {}) },
     };
 }
 
@@ -425,7 +413,7 @@ export class WaterService {
             for (let attempt = 0; attempt < 2; attempt++) {
                 // The destination's level decides the route: refine it, then route again.
                 for (let k = 0; k < 4; k++) {
-                    plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM: RC.corridorM, join });
+                    plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM: RC.corridorM, shape: RC.shape, join });
                     if (plan.status !== 'ok' || plan.dest.type !== 'lake' || this.refined.has(plan.dest.id)) break;
                     if (!(await this._refineLake(plan.dest.id))) break;
                 }
@@ -448,7 +436,7 @@ export class WaterService {
             const destKey = plan.dest.type === 'lake' ? `lake${plan.dest.id}` : plan.dest.type === 'river' ? `river${plan.dest.id}-${trunk.key}` : 'sea';
             const shapeKey = hashParts([
                 RC.shape, { ...RIVER_LEVEL_DEFAULTS, ...RC.levels },
-                RC.stepM, RC.smoothPasses, this.config.carve,
+                RC.stepM, RC.smoothPasses, this.config.carve, this.config.landscape,
             ]);
             const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${shapeKey}:${riverId}:${destKey}`;
             let rec = this.config.cache ? await this._cache.get(riverKey) : null;
@@ -459,7 +447,7 @@ export class WaterService {
                 const srcLevel = this.refined.get(src)?.level ?? this.lakes[src].level;
                 for (const corridorM of [RC.corridorM, RC.corridorM * RC.retryCorridorScale]) {
                     if (corridorM !== RC.corridorM) {
-                        plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM, join: !!trunk });
+                        plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM, shape: RC.shape, join: !!trunk });
                         if (plan.status !== 'ok') break;
                     }
                     const frame = limitPatchCells(plan.frame, this.config.refine.maxCells);
@@ -468,6 +456,7 @@ export class WaterService {
                     const r = await this._client.call({
                         type: 'solveRiver', riverId, frame, heights, shape: RC.shape,
                         levels: { ...RC.levels, waterFrac: CV.waterFrac, bankH: CV.bankH },
+                        landscape: { ...this.config.landscape, enabled: this.valleyOn && this.config.landscape.enabled }, shapeNoise: CV,
                         // The carve's reach beyond the half-width (riverCarve.wgsl.js) + margin,
                         // the half-width as wide as the shape noise makes it.
                         reachM: CV.enabled ? CV.bankW + CV.blendW + 8 : 0,
@@ -524,11 +513,11 @@ export class WaterService {
         try {
             if (fromCache) {
                 const points = rec.points.slice();
-                await this._client.call({ type: 'restoreRiver', riverId, points, stride: rec.stride }, [points.buffer]);
+                await this._client.call({ type: 'restoreRiver', riverId, points, stride: rec.stride, landscape: rec.landscape }, [points.buffer]);
             }
             // Lakes within reach of the valley (nearest few), so their rims are known.
             const P = rec.points, st = rec.stride, n = P.length / st;
-            const reachM = this.config.valley.reach1 + 500;
+            const reachM = this.config.valley.dBig + 500;
             const cand = [];
             for (const lake of this.lakes) {
                 if (this.rep(lake.id) !== lake.id || this.refined.has(lake.id) || this._failed.has(lake.id)) continue;
