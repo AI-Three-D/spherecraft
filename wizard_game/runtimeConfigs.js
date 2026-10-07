@@ -544,7 +544,13 @@ export function createEngineConfig() {
       maxStartsPerFrame: 16,
       timeBudgetMs: 8,
       maxQueueSize: 1024,
-      minStartIntervalMs: 0
+      minStartIntervalMs: 0,
+      staleRequestAgeMs: 200,
+      staleRequestMinDepth: 5,
+      priorityRefreshIntervalMs: 100,
+      // At capacity, current demand can replace a less urgent queued tile.
+      // Prewarm, coarse fallbacks and current visible demand are protected.
+      replaceLowerPriority: true
     },
     weather: WEATHER_CONFIG,
 

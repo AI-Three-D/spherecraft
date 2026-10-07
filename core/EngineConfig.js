@@ -554,7 +554,11 @@ export class EngineConfig {
       maxStartsPerFrame: requireInt(generationQueue.maxStartsPerFrame, 'generationQueue.maxStartsPerFrame', 1),
       timeBudgetMs: requireNumber(generationQueue.timeBudgetMs, 'generationQueue.timeBudgetMs'),
       maxQueueSize: requireInt(generationQueue.maxQueueSize, 'generationQueue.maxQueueSize', 1),
-      minStartIntervalMs: requireNumber(generationQueue.minStartIntervalMs, 'generationQueue.minStartIntervalMs')
+      minStartIntervalMs: requireNumber(generationQueue.minStartIntervalMs, 'generationQueue.minStartIntervalMs'),
+      staleRequestAgeMs: requireNumber(generationQueue.staleRequestAgeMs ?? 200, 'generationQueue.staleRequestAgeMs'),
+      staleRequestMinDepth: requireInt(generationQueue.staleRequestMinDepth ?? 5, 'generationQueue.staleRequestMinDepth', 0),
+      priorityRefreshIntervalMs: requireNumber(generationQueue.priorityRefreshIntervalMs ?? 100, 'generationQueue.priorityRefreshIntervalMs'),
+      replaceLowerPriority: requireBool(generationQueue.replaceLowerPriority ?? true, 'generationQueue.replaceLowerPriority')
     };
 
     // ==================== GPU QUADTREE (WEBGPU) ====================

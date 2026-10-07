@@ -584,31 +584,28 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     this._terrainUniformScratch
                 );
 
-                this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
-                {
+                const fuseSmoothSplatSource = useSharedHeightBase && this.terrainConfig?.fuseSmoothSplatSource !== false;
+                if (!fuseSmoothSplatSource) {
+                    this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
                     const v = new DataView(this._terrainUniformScratch);
                     v.setInt32(48, 8, true);
                     v.setFloat32(64, uvShift, true);
                     v.setFloat32(68, uvShift, true);
+                    if (!this._paddedSmoothSplatIndexUniformBuffer) {
+                        this._paddedSmoothSplatIndexUniformBuffer = this.device.createBuffer({
+                            label: 'PaddedSmoothSplatIndexUniform',
+                            size: this._terrainUniformScratch.byteLength,
+                            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                        });
+                    }
+                    this.device.queue.writeBuffer(this._paddedSmoothSplatIndexUniformBuffer, 0, this._terrainUniformScratch);
                 }
-                if (!this._paddedSmoothSplatIndexUniformBuffer) {
-                    this._paddedSmoothSplatIndexUniformBuffer = this.device.createBuffer({
-                        label: 'PaddedSmoothSplatIndexUniform',
-                        size: this._terrainUniformScratch.byteLength,
-                        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-                    });
-                }
-                this.device.queue.writeBuffer(
-                    this._paddedSmoothSplatIndexUniformBuffer,
-                    0,
-                    this._terrainUniformScratch
-                );
 
                 const { pipeline: tileGenPipeline, bindGroupLayout: tileGenBindGroupLayout } = useSharedHeightBase
                     ? this._getHeightInputPipelineForFormat('rgba8unorm', 'rgba32float')
                     : this._getTerrainPipelineForFormat('rgba8unorm');
                 const { pipeline: smoothSourcePipeline, bindGroupLayout: smoothSourceBindGroupLayout } = useSharedHeightBase
-                    ? this._getHeightInputPipelineForFormat('rgba8unorm', 'rgba32float')
+                    ? this._getHeightInputPipelineForFormat('rgba8unorm', 'rgba32float', { withSmoothSplatIds: fuseSmoothSplatSource })
                     : this._getTerrainPipelineForFormat('rgba8unorm');
                 const heightBasePipeline = useSharedHeightBase
                     ? this._getTerrainPipelineForFormat('rgba32float')
@@ -684,14 +681,15 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 }
 
                 {
-                    const pass = enc.beginComputePass({ label: 'GenPaddedSmoothSplatWeights' });
+                    const pass = enc.beginComputePass({ label: fuseSmoothSplatSource ? 'GenPaddedSmoothSplatPair' : 'GenPaddedSmoothSplatWeights' });
                     pass.setPipeline(smoothSourcePipeline);
                     pass.setBindGroup(0, this.device.createBindGroup({
                         layout: smoothSourceBindGroupLayout,
                         entries: [
                             { binding: 0, resource: { buffer: this._paddedSmoothSplatDataUniformBuffer } },
                             { binding: 1, resource: paddedSmoothSplatData.createView() },
-                            ...heightInputEntry
+                            ...heightInputEntry,
+                            ...(fuseSmoothSplatSource ? [{ binding: 5, resource: paddedSmoothSplatIndex.createView() }] : [])
                         ]
                     }));
                     this._setTerrainBiomeBindGroup(pass);
@@ -702,7 +700,7 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     pass.end();
                 }
 
-                {
+                if (!fuseSmoothSplatSource) {
                     const pass = enc.beginComputePass({ label: 'GenPaddedSmoothSplatIds' });
                     pass.setPipeline(smoothSourcePipeline);
                     pass.setBindGroup(0, this.device.createBindGroup({

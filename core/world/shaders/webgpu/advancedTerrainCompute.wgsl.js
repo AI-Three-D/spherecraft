@@ -193,6 +193,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;
   const hasBaseHeightBinding = hasHeightBindings && options?.hasBaseHeightBinding === true;
+  const hasSmoothSplatIdsBinding = options?.hasSmoothSplatIdsBinding === true;
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
   const erosionFilterWgsl = createErosionFilterLandWgsl(options?.erosionFilter, createTerrainFeatureErosionFilter);
@@ -321,6 +322,7 @@ ${createBiomeScoringWGSL({ maxBiomes })}
 ${hasHeightBindings ? '@group(0) @binding(2) var heightMap: texture_2d<f32>;' : ''}
 ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
 ${hasBaseHeightBinding ? '@group(0) @binding(4) var baseHeightMap: texture_2d<f32>;' : ''}
+${hasSmoothSplatIdsBinding ? '@group(0) @binding(5) var smoothSplatIdsTexture: texture_storage_2d<rgba8unorm, write>;' : ''}
 @group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
 
 const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY: f32 = ${wgslFloat(authoredSplatSourceMinProbability, 0.18)};
@@ -1406,6 +1408,10 @@ if (uniforms.outputType == 0) {
 
 else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
     let oceanLevel = uniforms.waterParams.y;
+    // Both outputs come from the same sorted payload. A paired source pass
+    // writes them together, avoiding a second biome/noise/top-four evaluation.
+    var splatWeights: vec4<f32>;
+    var splatIds: vec4<f32>;
 
     ${hasHeightBindings ? `
     let coordC = vec2<i32>(global_id.xy);
@@ -1427,40 +1433,33 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
     `}
 
     if (h <= oceanLevel) {
-        if (uniforms.outputType == 7) {
-            output = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-        } else {
-            output = vec4<f32>(
-                encodeSmoothSplatTileId(SURFACE_WATER),
-                encodeSmoothSplatTileId(255u),
-                encodeSmoothSplatTileId(255u),
-                encodeSmoothSplatTileId(255u)
-            );
-        }
+        splatWeights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+        splatIds = vec4<f32>(
+            encodeSmoothSplatTileId(SURFACE_WATER),
+            encodeSmoothSplatTileId(255u),
+            encodeSmoothSplatTileId(255u),
+            encodeSmoothSplatTileId(255u)
+        );
     } else if (biomeConfigUniforms.biomeCount > 0u) {
         let payload = computeAuthoredSmoothSplatPayload(slope, h, wx, wy, unitDir, uniforms.seed);
         let totalTop = payload.weights[0] + payload.weights[1] + payload.weights[2] + payload.weights[3];
 
         if (totalTop <= 0.00001) {
-            if (uniforms.outputType == 7) {
-                output = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-            } else {
-                output = vec4<f32>(
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u)
-                );
-            }
-        } else if (uniforms.outputType == 7) {
-            output = vec4<f32>(
+            splatWeights = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+            splatIds = vec4<f32>(
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u)
+            );
+        } else {
+            splatWeights = vec4<f32>(
                 payload.weights[0] / totalTop,
                 payload.weights[1] / totalTop,
                 payload.weights[2] / totalTop,
                 payload.weights[3] / totalTop
             );
-        } else {
-            output = vec4<f32>(
+            splatIds = vec4<f32>(
                 encodeSmoothSplatTileId(payload.tileIds[0]),
                 encodeSmoothSplatTileId(payload.tileIds[1]),
                 encodeSmoothSplatTileId(payload.tileIds[2]),
@@ -1486,25 +1485,21 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
 
         let totalTop = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
         if (totalTop <= 0.00001) {
-            if (uniforms.outputType == 7) {
-                output = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-            } else {
-                output = vec4<f32>(
-                    encodeSmoothSplatTileId(SURFACE_GRASS_BASE),
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u)
-                );
-            }
-        } else if (uniforms.outputType == 7) {
-            output = vec4<f32>(
+            splatWeights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+            splatIds = vec4<f32>(
+                encodeSmoothSplatTileId(SURFACE_GRASS_BASE),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u)
+            );
+        } else {
+            splatWeights = vec4<f32>(
                 topWeights[0] / totalTop,
                 topWeights[1] / totalTop,
                 topWeights[2] / totalTop,
                 topWeights[3] / totalTop
             );
-        } else {
-            output = vec4<f32>(
+            splatIds = vec4<f32>(
                 encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[0])),
                 encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[1])),
                 encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[2])),
@@ -1512,6 +1507,8 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
             );
         }
     }
+    output = select(splatIds, splatWeights, uniforms.outputType == 7);
+    ${hasSmoothSplatIdsBinding ? 'textureStore(smoothSplatIdsTexture, vec2<i32>(global_id.xy), splatIds);' : ''}
 }
 
 ${hasTileBindings ? `

@@ -85,7 +85,79 @@ describe('TileStreamer visibility index', () => {
     });
 });
 
+describe('TileStreamer geometry backlog', () => {
+    function enqueue(ts, tile, options) {
+        ts.tileGenerator ??= { isGenerating: () => false, _gpuFencesInFlight: 100 };
+        ts._queueTile(tile, options);
+        const key = tile.toString();
+        ts._generationQueue.pending.get(key).enqueuedAt = performance.now() - 2000;
+        return key;
+    }
+
+    it('prunes during GPU saturation and cleans request tracking', () => {
+        const ts = makeStreamer();
+        const stale = enqueue(ts, new TileAddress(4, 10, 100, 100));
+        const visibleTile = new TileAddress(4, 10, 512, 512);
+        const visible = enqueue(ts, visibleTile);
+        const parent = enqueue(ts, new TileAddress(4, 9, 256, 256));
+        const coarse = enqueue(ts, new TileAddress(1, 2, 0, 0));
+        const prewarm = enqueue(ts, new TileAddress(5, 10, 100, 100), { prewarm: true });
+        ts.markTilesVisible([visibleTile]);
+        ts.tickGeneration();
+        expect(ts._generationQueue.pending.has(stale)).toBe(false);
+        expect(ts._requestTimestamps.has(stale)).toBe(false);
+        expect(ts._telemetryByKey.has(stale)).toBe(false);
+        expect(ts._tileState.has(stale)).toBe(false);
+        for (const key of [visible, parent, coarse, prewarm]) {
+            expect(ts._generationQueue.pending.has(key)).toBe(true);
+        }
+        expect(ts._generationQueue.active).toBe(0);
+    });
+
+    it('refreshes geometry and refinement priorities when the camera moves', () => {
+        const ts = makeStreamer();
+        const a = new TileAddress(4, 10, 510, 512);
+        const b = new TileAddress(4, 10, 520, 512);
+        ts.setCameraContext({ position: cameraAboveTile(a, 100), planetConfig: PLANET });
+        const aKey = enqueue(ts, a), bKey = enqueue(ts, b);
+        expect(ts._generationQueue.peek().key).toBe(aKey);
+        ts.setCameraContext({ position: cameraAboveTile(b, 100), planetConfig: PLANET });
+        ts._refreshQueuedPriorities();
+        expect(ts._generationQueue.peek().key).toBe(bKey);
+        ts.setCameraContext({ position: cameraAboveTile(a, 100), planetConfig: PLANET });
+        makeResident(ts, a);
+        makeResident(ts, b);
+        // The refinement queue uses the same telemetry map, so remove the
+        // geometry requests before mimicking their resident refinements.
+        ts._generationQueue.clearPending();
+        ts._queueRefinement(a);
+        ts._queueRefinement(b);
+        expect(ts._refinementQueue.peek().key).toBe(aKey);
+        ts.setCameraContext({ position: cameraAboveTile(b, 100), planetConfig: PLANET });
+        ts._lastPriorityRefreshTime = -Infinity;
+        ts._refreshQueuedPriorities();
+        expect(ts._refinementQueue.peek().key).toBe(bKey);
+    });
+});
+
 describe('TileStreamer parked refinements', () => {
+    it('parks obsolete queued refinements during saturation and retries them on visibility', () => {
+        const ts = makeStreamer();
+        ts.tileGenerator = { _gpuFencesInFlight: 100 };
+        const tile = new TileAddress(4, 10, 100, 100);
+        const key = makeResident(ts, tile);
+        ts._queueRefinement(tile);
+        ts.markTilesVisible([new TileAddress(4, 10, 512, 512)]);
+        ts.tickGeneration();
+        expect(ts._refinementQueue.pending.has(key)).toBe(false);
+        expect(ts._refinementQueue.active).toBe(0);
+        expect(ts._refinementVisibleDropRetryMap.has(key)).toBe(true);
+        expect(ts._tileState.get(key)).toBe('RESIDENT');
+        ts.markTilesVisible([tile]);
+        expect(ts._refinementQueue.pending.has(key)).toBe(true);
+        expect(ts._refinementVisibleDropRetryMap.has(key)).toBe(false);
+    });
+
     it('re-queues a parked refinement when its tile shows up in a readback, without a per-frame scan', () => {
         const ts = makeStreamer();
         const near = new TileAddress(4, 10, 512, 512);    // LOD1, needs material

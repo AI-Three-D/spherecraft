@@ -67,7 +67,8 @@ describe('terrain generation compute shader', () => {
         terrain: {},
         heightInput: { hasHeightBindings: true },
         micro: { hasHeightBindings: true, hasTileBindings: true },
-        heightInputBaseHeight: { hasHeightBindings: true, hasBaseHeightBinding: true }
+        heightInputBaseHeight: { hasHeightBindings: true, hasBaseHeightBinding: true },
+        smoothSplatPair: { hasHeightBindings: true, hasSmoothSplatIdsBinding: true, outputFormat: 'rgba8unorm' }
     };
     for (const [name, extra] of Object.entries(variants)) {
         it(`${name} variant compiles`, () => {

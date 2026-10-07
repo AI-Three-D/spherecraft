@@ -892,8 +892,10 @@ export class TileStreamer {
 
         this._feedbackDedupeSet = null;  // Created in initialize()
         this._requestFreshness = new Map();
-        this._freshnessSkipThresholdMs = 200;
-        this._freshnessMinDepth = 5;
+        this._freshnessSkipThresholdMs = options.queueConfig?.staleRequestAgeMs ?? 200;
+        this._freshnessMinDepth = options.queueConfig?.staleRequestMinDepth ?? 5;
+        this._priorityRefreshIntervalMs = options.queueConfig?.priorityRefreshIntervalMs ?? 100;
+        this._lastPriorityRefreshTime = -Infinity;
 
         // Keys queued via a one-shot prewarm call (e.g. GPUQuadtreeTerrain's
         // prewarmWorldPosition), never dropped by the freshness check below.
@@ -925,26 +927,19 @@ export class TileStreamer {
             timeBudgetMs:    this._admissionBudgets.maxCpuGenerationTimeMs,
             maxQueueSize:    options.queueConfig?.maxQueueSize        ?? 2048,
             minStartIntervalMs: options.queueConfig?.minStartIntervalMs ?? 0,
-            shouldDrop: (entry) => {
-                // Never drop prewarm-sourced requests — see _prewarmKeys above.
-                if (this._prewarmKeys.has(entry.key)) return false;
-                // Never drop coarse tiles — they serve as fallbacks
-                // Parse depth from key format "f{face}:d{depth}:{x},{y}"
-                const dIdx = entry.key.indexOf(':d');
-                if (dIdx >= 0) {
-                    const colonAfterD = entry.key.indexOf(':', dIdx + 2);
-                    const depth = parseInt(entry.key.substring(dIdx + 2, colonAfterD > 0 ? colonAfterD : undefined), 10);
-                    if (Number.isFinite(depth) && depth < this._freshnessMinDepth) {
-                        return false;
-                    }
-                }
+            shouldDrop: (entry, now = performance.now()) => {
                 const lastSeen = this._requestFreshness.get(entry.key);
-                if (!Number.isFinite(lastSeen)) {
-                    // Never appeared in feedback — was queued by seed or parent-walk.
-                    // Keep it if it's young enough (just queued).
-                    return (performance.now() - entry.enqueuedAt) > this._freshnessSkipThresholdMs;
-                }
-                return (performance.now() - lastSeen) > this._freshnessSkipThresholdMs;
+                if (now - (Number.isFinite(lastSeen) ? lastSeen : entry.enqueuedAt)
+                    <= this._freshnessSkipThresholdMs) return false;
+                return !this._isProtectedGenerationRequest(entry, now);
+            },
+            canReplace: options.queueConfig?.replaceLowerPriority === false ? null
+                : (entry) => !this._isProtectedGenerationRequest(entry),
+            onDrop: (entry) => {
+                this._requestTimestamps.delete(entry.key);
+                this._requestFreshness.delete(entry.key);
+                this._telemetryByKey.delete(entry.key);
+                this._tileState.delete(entry.key);
             }
         });
         this._generationEpoch = 0;
@@ -974,7 +969,16 @@ export class TileStreamer {
                 // duplicate) between being queued for refinement and this
                 // entry reaching the front — nothing to refine any more.
                 if (!this._tileInfo.has(entry.key)) return true;
-                return false;
+                if (this._tileState.get(entry.key) === 'REFINED') return true;
+                const tile = this._telemetryByKey.get(entry.key);
+                return tile && !this._describeTileDemandState(tile, entry.key).relevant;
+            },
+            onDrop: (entry) => {
+                const tile = this._telemetryByKey.get(entry.key);
+                this._telemetryByKey.delete(entry.key);
+                if (tile && this._tileInfo.has(entry.key) && this._tileState.get(entry.key) !== 'REFINED') {
+                    this._parkStaleRefinement(new TileAddress(tile.face, tile.depth, tile.x, tile.y), entry.key);
+                }
             }
         });
         this._refinementRejectWindowCount = 0;
@@ -1174,6 +1178,7 @@ drainScatterCommitQueue() {
     }
 
     resetTiles({ reseedRootTiles = true } = {}) {
+        this._lastPriorityRefreshTime = -Infinity;
         this._requestFreshness.clear();
 this._freshnessSkipCount = 0;
         this._generationEpoch++;
@@ -1481,6 +1486,12 @@ this._freshnessSkipCount = 0;
         }
     }
     tickGeneration() {
+        // Prune even when admission is blocked; otherwise fast movement can
+        // leave a full queue of obsolete requests until a GPU fence resolves.
+        this._generationQueue.prunePending();
+        this._refinementQueue.prunePending();
+        this._regenQueue.prunePending();
+        this._refreshQueuedPriorities();
         // Bound outstanding GPU generation work. Each tile is ~9 ms GPU;
         // without this, movement bursts push the command queue 30+ frames
         // deep and latency spirals to 500+ ms. Budget is the headroom
@@ -1570,12 +1581,13 @@ this._freshnessSkipCount = 0;
         // same as any other queued entry, so this can't bypass the budget.
         this._retryDroppedRefinements();
         this._retryVisibleDroppedRefinements();
+        this._refinementQueue.prunePending();
 
         const gpuInFlight = (this.tileGenerator?._gpuFencesInFlight ?? 0) + geometrySpawnedThisFrame;
         const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
 
         let effectiveBudget = budget;
-        const head = this._refinementQueue.queue[0];
+        const head = this._refinementQueue.peek();
         const headDistance = head ? this._telemetryByKey.get(head.key)?.distanceInTileWidths : null;
         // Unknown distance (no camera context yet, e.g. cold start) treated
         // as near: no reason to withhold the reserve when there's no signal
@@ -2004,31 +2016,8 @@ this._freshnessSkipCount = 0;
             this._tileState.set(key, 'REQUESTED');
         }
 
-        // Depth component: coarser = higher base priority (fallback safety)
-        const depthPriority = 100000 - tileAddr.depth * 500;
-
-        // Camera-distance component: approximate screen importance
-        // Tiles nearer to camera get priority boost up to 5000
-        let distanceBias = 0;
-        if (this._lastVisibleTilesList && this._lastVisibleKeySet?.has(key)) {
-            distanceBias = 3000; // Currently visible = high priority
-        } else if (this._requestFreshness.has(key)) {
-            // Recently in feedback = moderate priority
-            const age = performance.now() - this._requestFreshness.get(key);
-            distanceBias = Math.max(0, 2000 - age * 10); // decays over 200ms
-        }
-
-        // Directional bias for predictive work only (plan §1.2: forward
-        // predictive geometry must outrank behind-camera predictive
-        // geometry). Small enough (±400) to never outrank real
-        // visible/feedback demand, which is what distanceBias already
-        // dominates with above.
-        let directionalBias = 0;
-        if (reason === 'PREDICTIVE' && Number.isFinite(telemetry.velocityAlignment)) {
-            directionalBias = telemetry.velocityAlignment * 400;
-        }
-
-        const priority = depthPriority + distanceBias + directionalBias;
+        if (reason !== 'PREDICTIVE') telemetry.reason = reason;
+        const priority = this._generationPriority(telemetry);
         telemetry.priority = priority;
 
         // Phase 1 admission control (plan §1.3/§1.4): predictive/speculative
@@ -2117,6 +2106,62 @@ this._freshnessSkipCount = 0;
             this._telemetryByKey.delete(key);
             this._tileState.delete(key);
         }
+    }
+
+    _isProtectedGenerationRequest(entry, now = performance.now()) {
+        if (this._prewarmKeys.has(entry.key)) return true;
+        const tile = this._telemetryByKey.get(entry.key);
+        // Unknown metadata is kept conservatively. Real tile requests carry
+        // the address in telemetry, avoiding string parsing during each scan.
+        if (!tile || tile.depth < this._freshnessMinDepth) return true;
+        // A delayed feedback readback must not purge geometry still visible
+        // or needed as its fallback. Old visibility is not a permanent pin.
+        if (now - this._lastVisibleReadbackTime <= Math.max(1000, this._freshnessSkipThresholdMs)) {
+            const demand = this._describeTileDemandState(tile, entry.key);
+            return demand.reason === 'visible' || demand.reason === 'ancestor';
+        }
+        return false;
+    }
+
+    _generationPriority(telemetry, now = performance.now()) {
+        let demandBias = 0;
+        if (this._lastVisibleKeySet?.has(telemetry.key)) {
+            demandBias = 3000;
+        } else {
+            const seen = this._requestFreshness.get(telemetry.key);
+            if (Number.isFinite(seen)) demandBias = Math.max(0, 2000 - (now - seen) * 10);
+        }
+        const width = this._estimateTileWorldSize(telemetry.depth);
+        const proximityBias = Number.isFinite(telemetry.distanceToCamera) && width > 0
+            ? 400 / (1 + telemetry.distanceToCamera / width) : 0;
+        const directionBias = telemetry.reason === 'PREDICTIVE' && Number.isFinite(telemetry.velocityAlignment)
+            ? telemetry.velocityAlignment * 400 : 0;
+        return 100000 - telemetry.depth * 500 + demandBias + proximityBias + directionBias;
+    }
+
+    _refreshQueuedPriorities() {
+        const now = performance.now();
+        if (now - this._lastPriorityRefreshTime < this._priorityRefreshIntervalMs) return;
+        this._lastPriorityRefreshTime = now;
+        // Allow demotion as the camera moves; promotion-only requests leave
+        // yesterday's near tiles ahead of today's demand. Scan at most once
+        // per configured interval, with no per-frame full sort.
+        this._generationQueue.reprioritize((entry) => {
+            const telemetry = this._telemetryByKey.get(entry.key);
+            if (!telemetry) return entry.priority;
+            Object.assign(telemetry, this._estimateRequestGeometry(telemetry));
+            return (telemetry.priority = this._generationPriority(telemetry, now));
+        });
+        this._refinementQueue.reprioritize((entry) => {
+            const telemetry = this._telemetryByKey.get(entry.key);
+            if (!telemetry) return entry.priority;
+            const geom = this._estimateRequestGeometry(telemetry);
+            const width = this._estimateTileWorldSize(telemetry.depth);
+            telemetry.distanceToCamera = geom.distanceToCamera;
+            telemetry.distanceInTileWidths = Number.isFinite(geom.distanceToCamera) && width > 0
+                ? geom.distanceToCamera / width : null;
+            return (telemetry.priority = -(telemetry.distanceInTileWidths ?? 0));
+        });
     }
 
 
@@ -2516,8 +2561,6 @@ _queueRefinement(tileAddr) {
         // settles on it — confirmed via debug mode 102 + idle telemetry).
         if (!this._describeTileDemandState(tileAddr, key).relevant) {
             this._telemetryByKey.delete(key);
-            this._tileState.set(key, 'RESIDENT');
-            this._refinementVisibleDropRetryMap.set(key, tileAddr);
             // Instrumentation (2026-10-01): counts refinement drops by tile
             // depth, to test whether LOD4-depth tiles are disproportionately
             // dropped here before ever completing refinement — the leading
@@ -2525,10 +2568,7 @@ _queueRefinement(tileAddr) {
             // (alpha<0.5) on LOD4 (confirmed via debug mode 102: LOD4 forced
             // through LOD5's exact resolvedColor path still always falls
             // back, everywhere, not just at the seam). See consumePressureWindow().
-            this._refinementDropByDepthWindow.set(
-                tileAddr.depth,
-                (this._refinementDropByDepthWindow.get(tileAddr.depth) || 0) + 1
-            );
+            this._parkStaleRefinement(tileAddr, key);
             return false;
         }
         // The camera may have moved away since this was queued.
@@ -2586,6 +2626,18 @@ _queueRefinement(tileAddr) {
         this._refinementRejectWindowCount++;
         this._refinementRetryMap.set(key, tileAddr);
     }
+}
+
+// Park before admission whenever possible: obsolete refinements must not
+// consume a start slot or occupy a saturated queue. The visibility readback
+// re-offers them when the player looks at their resident tile again.
+_parkStaleRefinement(tileAddr, key) {
+    this._tileState.set(key, 'RESIDENT');
+    this._refinementVisibleDropRetryMap.set(key, tileAddr);
+    this._refinementDropByDepthWindow.set(
+        tileAddr.depth,
+        (this._refinementDropByDepthWindow.get(tileAddr.depth) || 0) + 1
+    );
 }
 
 // Tiles whose refinement request was dropped because the queue was at
@@ -2708,6 +2760,7 @@ markTilesVisible(tiles) {
     this._lastVisibleTilesList = tiles;
     this._lastVisibleReadbackTime = now;
     this._visibilityIndex.rebuild(tiles);
+    this._generationQueue.invalidateReplacementCandidates();
 
     if (!this._lastVisibleKeySet) this._lastVisibleKeySet = new Set();
     this._lastVisibleKeySet.clear();
@@ -3162,6 +3215,7 @@ _logPooledDepth3Visibility() {
         const queueRejected = this._queueRejectWindowCount;
  
         const queueDropped = this._generationQueue.consumeDroppedCount();
+        const queueReplaced = this._generationQueue.consumeReplacedCount();
 
         this._requestLatencyWindow = createRequestLatencyWindow();
         this._staleStartWindow = createStaleStartWindow();
@@ -3245,6 +3299,8 @@ _logPooledDepth3Visibility() {
             commits,
             queueRejected,
             queueDropped,
+            queueReplaced,
+            generationQueueCapacity: this._generationQueue.maxQueueSize,
             minFreeLayers,
             gpuBackpressureSkips,
             tilesStarted,

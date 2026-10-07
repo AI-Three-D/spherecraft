@@ -6,7 +6,7 @@ Written 2026-10-03, updated in session 3 (2026-10-05, HEAD `33915bf`) for the ag
 
 - **HEAD `33915bf`, not pushed** (11 water commits on top of `deed28a`; push only when the owner asks).
 - **Part A:** the steady-state regression is fixed (`a96731a`, `ceade51`). Streaming catch-up after fast flight: owner parked it until after water.
-- **Part B, terrain:** RuneVision erosion in production (single height function, no B5 tier stack). Mountain terrainType remap: owner wants it **after lakes exist**, then re-tune lake density.
+- **Part B, terrain:** RuneVision erosion in production (single height function, no B5 tier stack). Session 4 (2026-10-05): old mountain ranges, highlands, meso1/meso3 and the small domes deleted; new land regions (plains / uplands / highland plateaus), lake basins and cheap mountains (landmark, uncommon, ranges) added.
 - **Part B, water:** lakes (1160) and rivers (traced at 16 m, lake to lake/sea) drawn in the terrain shading; the shallow-water simulation runs in a 256 m site around the camera when low near water. Owner saw lakes in the browser (2026-10-05); **rivers and the simulation await the owner's browser check**.
 - **Before trusting line numbers,** run `git log --oneline -10`. Plan line numbers refer to `a96731a`.
 
@@ -173,7 +173,7 @@ Owner: erosion level on mountains is good; erosion is permanent; remove the code
 | `2bc3445` | Hydrology precompute and erosion-seed verifier used face -1 (flat-world noise at unit-vector coordinates, not the planet) since `32c159a`; now face 0. Demo river now found (16-point path), 1 confirmed lake (was 9 on the wrong terrain). Plain height implementation deleted (single dual-number implementation); `slopeMode` removed. |
 | `fa7f0a2` | heightBase apron (130^2): normal pass reads all border samples (0.97 -> 0.13 ms/tile); shared-edge normals exact. |
 
-**Open question for the owner:** terrainType on land is p10 0.34 / p50 0.40 / p90 0.50; mountains need 0.55 (3.8 % of land) and are full only at 0.8 (no land). Mountains therefore never exceed ~20-30 % of their designed height. Remapping the mountain thresholds to the distribution (e.g. 0.48 -> 0.60) would give many more and taller mountains. Not done.
+**Open question for the owner (resolved 2026-10-05: mountain ranges deleted, see "Session 4"):** terrainType on land is p10 0.34 / p50 0.40 / p90 0.50; mountains need 0.55 (3.8 % of land) and are full only at 0.8 (no land). Mountains therefore never exceed ~20-30 % of their designed height. Remapping the mountain thresholds to the distribution (e.g. 0.48 -> 0.60) would give many more and taller mountains. Not done.
 
 **Lab tools added:** `jump-scan.mjs` (1 m transects in eroded areas, jump attribution by toggles, input-slope check), `jump-profile.mjs`, `ab-erosion.mjs` (A_FEATURES/B_FEATURES), `tt-dist.mjs`, `hydro-run.mjs` (startup hydrology in Node), `hydro-compile.mjs`.
 
@@ -199,6 +199,40 @@ The owner flew the terrain and reported defects one by one; each fix was found b
 - **The erosion input must be C2, not just C1.** The filter orients gullies along the input gradient; a curvature jump becomes a crease, a slope kink becomes a step. Gates/blends with large amplitude inside the erosion input need quintic (C2) ramps. Proven on the landmark ring seam; adding C2 to the lone-hill presence/irregularization gates showed no effect and was reverted.
 - **Remaining small stuff:** `meso1` has its own kinks (exist with erosion off); centimetre jitter in strongly eroded jagged areas (≈2° normal wobble, likely f32 phase precision). Neither reported by the owner.
 - **Mountain ranges are rare** (terrainType threshold, see the open question above). Most "mountains" the owner sees are big lone hills (landmark tier). The owner was asked whether to remap; no answer yet.
+
+## Session 4 (2026-10-05): terrain feature pruning
+
+The owner switched features off one by one in the browser and judged each by eye; a planet-wide lab survey (`terrain-lab/feature-survey.mjs`, 614k samples, 396k on land; share of land moved when the feature is switched off alone) settled the unclear cases. Code deleted, no toggles kept:
+
+| Deleted | Owner's verdict | Survey |
+|---|---|---|
+| Mountain ranges, `mountainDetail`, `mountainPeaks` (`featureMountains.wgsl.js`, `styleMountainHeight`) | "not a single mountain appeared" | > 10 m on 0.9 % of land, max 409 m; peaks never; detail max 4 m. Mountainness needs terrainType > 0.55 (2.2 % of land). |
+| `meso1` (80 m) | golf ball | max 20 m |
+| `meso3` (4 km) | barely visible | > 10 m on 38 %, max 127 m |
+| `highlands` (`featureHighlands.wgsl.js`) | looks like the very rare domes | 25 % of land, max 1.6 km |
+| Lone-hill tiers 1–2 (common, uncommon domes) | "pimples", "chickenpox" | 45 % / 15 % of land, max 390 / 750 m |
+
+Kept: `continentRelief` (moves 98 % of land by > 10 m, coast-to-interior rise up to 560 m; one multiply), foothills (now standalone: toggle `foothills`, `HEIGHT_FOOTHILLS` 165 m x `mountainBias`; > 50 m on 9 % of land, up to 470 m), `meso2`, very rare domes (owner's choice), landmark, rolling hills. Debug compute modes 9, 10, 13 (mountain-scale cell masks) removed.
+
+Checks: the pruned tree with everything on equals the old tree with the deleted toggles off to 0.7 mm (whole planet). Strong-erosion land (relief ramp > 0.5) 9.1 % → 6.2 %. Cost per tile (height + normal + tile, lab bench): depth 7 2.94 → 2.24 ms, depth 9 3.00 → 2.27 ms, depth 11 2.85 → 2.15 ms; height pass at depth 9 2.29 → 1.49 ms. Before/after pictures: `terrain-lab/patch-ab.mjs` (`out/patch-ab-*.png`).
+
+Owner on rolling hills: fine, but bump size and placement are too uniform; wants organic variation later.
+
+**New features (same day).** Owner's brief: lakes at varying altitude with rivers between them, modelled on real regions ("Netherlands, Denmark flat as a pancake; Norway, Switzerland mountains; Finland flat on the coast and gradually rising toward the east"); not level steps (a first terraced version drew contour-line banding and was dropped). Mountains: a landmark, uncommon ones ("still quite uncommon"), a range, as cheap as possible. All sizes in metres and densities per km² (planets will range from 100 km to 1000+ km radius).
+
+| Feature (toggle) | What | Survey (share of land moved) |
+|---|---|---|
+| `landRegions` (featureContinents `landRegions_d`) | 100 km field, leaning low at coasts, high inland: plains (19 % of land; local relief of meso2 and rolling hills x 0.15), uplands (follow continentRelief), highlands: a ~15 km quintic climb to a +350 m plateau, rarely a second to +700 m. Only highlands rise: an elevation field of large amplitude made enclosed basins flooded up to 400 m deep (one lake of 3,100 km²). | > 50 m on 38 %, max 746 m |
+| `lakeBasins` | Flat-floored hollows (6 km fbm, 25 m) on uplands and plateaus; hold lakes where the ground is gentle. | > 10 m on 12 %, max 25 m |
+| `mountains`, `mountainLandmark`, `mountainRange` (featureMountains.wgsl.js, re-created) | No noise: cube-face cells sized in metres (cell count per face from the radius), chance = density x exact cell solid angle x R², footprint must fit the cell (exact safe interval, `mtnSafeRange`), so a sample evaluates only its own cell. Massifs: elliptic peak (rounded summit, concave flanks, quintic base taper) + spur ridges, plane warped; ranges: bowed spine, backbone with crest summits, apron, irregular side spurs (each windowed along the spine so 5 anchors cover every reach). Erosion variation floored to 1 on mountains (`mtnCarve`). Heights not scaled by `noiseProfile.mountainBias` (2.65 on the demo planet, raised for the old mountains; it still scales foothills and terrainType). Uncommon mountains prefer highlands (chance x mix(0.3, 1)). | 18 / 2 / 2 on land on the demo planet; 1.0 / 0.7 / 1.2 % of land |
+
+Checks: continuity of the mountain term by trapezoid residual vs analytic gradient (`smooth-check.mjs`): no steps (residual scales with step³ down to f32 sample-position noise). Water graph (512 grid): 614 lakes (was 674 after pruning), 106 rivers, 97 lakes linked to another lake by a river, chains up to 7 lakes; lake levels p10 305 m .. p90 1,067 m (pruned: 237 .. 738 m). Cost per tile (lab bench): depth 7/9/11 2.43 / 2.38 / 2.37 ms (HEAD before pruning 2.94 / 3.00 / 2.85; pruned only 2.24 / 2.27 / 2.15); tiles on the range/landmark/mountain sites 3.53 ms vs 4.09 ms at HEAD.
+
+Open for the owner: lake count (614; minLakeCells tunes it), whether `mountainBias` should drive the new mountains (then reset 2.65 to 1.0 and compensate foothills), the very rare and landmark domes still at hillBias 2.3 (up to 3.2-3.5 km, the "warts" from orbit).
+
+**Lab tools added:** `feature-survey.mjs` (per-toggle land survey; `DIAG=1` on pre-pruning trees for the mountain gates and erosion relief; `REF_OFF`/`DUMP` for tree A/B), `ab-dump-compare.mjs`, `patch-ab.mjs` (before/after hillshade), `persp-ab.mjs` (low-angle perspective A/B with the water graph's lake rule), `probe-expr.mjs` (planet-wide percentiles of any WGSL expression), `mtn-census.mjs` (every mountain cell's fate and location), `smooth-check.mjs` (continuity), `water-graph-run.mjs` env `FEATURES`/`OUT` and an atlas-style map.
+
+Lab probes now need an explicit pipeline layout with `gen.biomeBindGroupLayout` as group 1 (the river carve buffers live there); `layout: 'auto'` scripts such as `ab-erosion.mjs` fail at dispatch. `labsetup.mjs` / `terrainlab.mjs` skip shader modules missing from the tree.
 
 ## Open: streaming catch-up after fast flight
 

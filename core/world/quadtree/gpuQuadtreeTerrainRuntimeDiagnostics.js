@@ -980,7 +980,8 @@ export function installQuadtreeTileManagerRuntimeDiagnostics(QuadtreeTileManager
                                 `(requested=${pressure.requestedTiles} newlyVisible=${pressure.newlyVisibleTiles}) ` +
                                 `wastedGenerations=${pressure.wastedGenerations} ` +
                                 `computeSubmissions=${pressure.computeSubmissions} copyOps=${pressure.copyOperations} ` +
-                                `queueDepth=${pressure.generationQueueDepth} queueActive=${pressure.generationQueueActive} ` +
+                                `queueDepth=${pressure.generationQueueDepth}/${pressure.generationQueueCapacity} queueActive=${pressure.generationQueueActive} ` +
+                                `queueReplaced=${pressure.queueReplaced} ` +
                                 `pendingCopies=${pressure.pendingCopyCount} ` +
                                 `pool=${pressure.tilePoolUsed}/${pressure.tilePoolCapacity} free=${pressure.tilePoolFree ?? 'n/a'}`
                             );

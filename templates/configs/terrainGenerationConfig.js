@@ -8,6 +8,9 @@ export class TerrainGenerationConfig {
 
         // Base generator selection (used by WebGPU terrain shader assembly).
         this.baseGenerator = options.baseGenerator ?? 'earthLike';
+        // Smooth-splat weights and IDs share one payload evaluation. false
+        // retains separate passes for performance/visual comparisons.
+        this.fuseSmoothSplatSource = options.fuseSmoothSplatSource !== false;
 
 
         // RuneVision erosion filter (templates/terrain-shaders/features/

@@ -374,10 +374,15 @@ fn sampleShadowMap(cascade: i32, uv: vec2<f32>, compareDepth: f32) -> f32 {
     // Use the explicit-level compare variant so debug-mode branches earlier in
     // the terrain fragment shader do not violate WGSL's uniform-control rule
     // for implicit shadow comparisons.
-    let s0 = textureSampleCompareLevel(shadowCascade0, shadowSampler, uv, compareDepth);
-    let s1 = textureSampleCompareLevel(shadowCascade1, shadowSampler, uv, compareDepth);
-    let s2 = textureSampleCompareLevel(shadowCascade2, shadowSampler, uv, compareDepth);
-    return select(select(s2, s1, cascade == 1), s0, cascade == 0);
+    // Explicit-level comparisons also allow a varying cascade branch. Only
+    // sample the selected map; select() evaluates all three texture reads.
+    if (cascade == 0) {
+        return textureSampleCompareLevel(shadowCascade0, shadowSampler, uv, compareDepth);
+    }
+    if (cascade == 1) {
+        return textureSampleCompareLevel(shadowCascade1, shadowSampler, uv, compareDepth);
+    }
+    return textureSampleCompareLevel(shadowCascade2, shadowSampler, uv, compareDepth);
 }
     fn sampleCascadePCF(
     cascade: i32,
@@ -470,8 +475,9 @@ fn computeShadow(worldPos: vec3<f32>, viewPos: vec3<f32>, worldNormal: vec3<f32>
                    || uv.y < 0.0 || uv.y > 1.0
                    || shadowNDC.z < 0.0 || shadowNDC.z > 1.0;
 
+    // These pixels already returned fully lit. Avoid their PCF reads too.
+    if (outOfBounds) { return 1.0; }
     let shadow = sampleCascadePCF(cascadeIdx, uv, compareDepth, texelSize);
-    let maskedShadow = select(shadow, 1.0, outOfBounds);
 
     let splitDist = select(
         select(shadowUniforms.splits.z, shadowUniforms.splits.y, cascadeIdx == 1),
@@ -480,7 +486,7 @@ fn computeShadow(worldPos: vec3<f32>, viewPos: vec3<f32>, worldNormal: vec3<f32>
     );
     let fadeStart   = splitDist * 0.9;
     let cascadeFade = 1.0 - smoothstep(fadeStart, splitDist, viewZ);
-    return mix(1.0, maskedShadow, max(cascadeFade, select(0.0, 1.0, cascadeIdx == 2)));
+    return mix(1.0, shadow, max(cascadeFade, select(0.0, 1.0, cascadeIdx == 2)));
 }
 `;
 
