@@ -124,10 +124,10 @@ export class Frontend {
     setActorManager(mgr) { this._actorManager = mgr; }
 
     /** The near-field water simulation site to draw (or null), with the water look. */
-    setWaterSimSite(site, look) {
+    setWaterSimSite(site, water) {
         if (!site && !this.waterSimRenderer) return;
-        this.waterSimRenderer ??= new WaterSimRenderer({ backend: this.backend, uniformManager: this.uniformManager, planetConfig: this.planetConfig });
-        this.waterSimRenderer.setSite(site, look);
+        this.waterSimRenderer ??= new WaterSimRenderer({ backend: this.backend, uniformManager: this.uniformManager, planetConfig: this.planetConfig,engineConfig:this.engineConfig });
+        this.waterSimRenderer.setSite(site, water);
     }
 
     /** Water data (lakes, rivers: core/world/water/WaterGpuData.js) for the terrain shader. */
@@ -873,7 +873,7 @@ updateLighting(starSystem) {
 
     async render(gameState, environmentState, deltaTime, planetConfig, sphericalMapper, starSystem) {
 
-        if (!this.textureManager?.loaded ) return;
+        if (this.backend.deviceLoss||!this.textureManager?.loaded ) return;
         this._lastDeltaTime = Number.isFinite(deltaTime) ? deltaTime : 0;
         this._currentEnvironmentState = environmentState;
         
@@ -899,6 +899,7 @@ updateLighting(starSystem) {
         if (this.atmosphereLUT && this.atmosphereSettings) {
             await this.atmosphereLUT.compute(this.atmosphereSettings);
         }
+        if(this.backend.deviceLoss)return;
 
         const doValidationScope = this.backend.device &&
             (this.debugMode || (this._validationScopeInterval > 0 && (this.frameCount % this._validationScopeInterval) === 0));
@@ -918,6 +919,7 @@ updateLighting(starSystem) {
         }
 
         await this.updateChunks(gameState, environmentState, deltaTime, planetConfig, sphericalMapper);
+        if(this.backend.deviceLoss)return;
         
         this.updateLighting(starSystem);
 

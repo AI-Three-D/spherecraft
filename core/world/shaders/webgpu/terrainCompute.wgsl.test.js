@@ -17,6 +17,11 @@ import { createTerrainFeatureErosionFilter } from '../../../../templates/terrain
 import { createEarthlikeConstants, createEarthlikeBase } from '../../../../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { TILE_TYPES, TILE_CATEGORIES } from '../../../../templates/configs/tileTypes.js';
 import { TerrainGenerationConfig } from '../../../../templates/configs/terrainGenerationConfig.js';
+import { createRegionalTerrainBakeWgsl, createRegionalTerrainBoundsWgsl } from '../../terrain-generator/regionalTerrain.wgsl.js';
+import {createRegionalValleyAnchorWgsl} from '../../terrain-generator/regionalValleyFeature.wgsl.js';
+import {createRegionalShapeBakeWgsl} from '../../terrain-generator/regionalShape.wgsl.js';
+import { terrainDisplacementBudgets } from '../../terrain-generator/terrainHeightContract.js';
+import { createRegionalBasinCertificateWgsl, createRegionalRouteHeightWgsl, createRegionalPlacementSurveyWgsl } from '../../terrain-generator/regionalBasins.wgsl.js';
 
 // Compiles the terrain generation shader the way
 // WebGPUTerrainGenerator.initializePipelines assembles it, and validates it
@@ -53,6 +58,17 @@ function compile(code) {
 }
 
 describe('terrain generation compute shader', () => {
+    it('compiles organic bank geometry and splat consumers only when selected',()=>{
+        for(const shape of [false,true])for(const inputs of [{},{hasHeightBindings:true},{hasHeightBindings:true,hasTileBindings:true}]) {
+            const src=createAdvancedTerrainComputeShader({...base,waterCarve:true,riverBankDetail:true,
+                regionalTerrain:true,regionalShape:shape,...inputs});
+            expect(compile(src)).toBeNull();
+            expect(src).toContain('let noise = waterBankNoise');
+        }
+        const legacy=createAdvancedTerrainComputeShader({...base,waterCarve:true});
+        expect(legacy).not.toContain('let noise = waterBankNoise');
+        expect(legacy).not.toContain('let ln = waterShoreNoise');
+    });
     const base = {
         baseGenerator: 'earthLike',
         maxBiomes: 16,
@@ -71,6 +87,11 @@ describe('terrain generation compute shader', () => {
         smoothSplatPair: { hasHeightBindings: true, hasSmoothSplatIdsBinding: true, outputFormat: 'rgba8unorm' }
     };
     for (const [name, extra] of Object.entries(variants)) {
+        it(`${name} variant compiles with persistent regional input`, () => {
+            const code = createAdvancedTerrainComputeShader({ ...base, ...extra,
+                regionalTerrain: true, waterCarve: true, riverValley: true });
+            expect(compile(code)).toBeNull();
+        });
         it(`${name} variant compiles`, () => {
             const code = createAdvancedTerrainComputeShader({ ...base, ...extra });
             expect(compile(code)).toBeNull();
@@ -90,4 +111,35 @@ describe('terrain generation compute shader', () => {
             expect(compile(code)).toBeNull();
         });
     }
+    it('macro controls and conservative bounds generation compile', () => {
+        const budgets = terrainDisplacementBudgets({ erosionFilter: base.erosionFilter });
+        const code = createAdvancedTerrainComputeShader(base) + createRegionalTerrainBakeWgsl()
+            + createRegionalTerrainBoundsWgsl(budgets, 4);
+        expect(compile(code)).toBeNull();
+    });
+    it('valley survey and slope-aware local certificates compile', () => {
+        const budgets=terrainDisplacementBudgets({erosionFilter:base.erosionFilter});
+        expect(compile(createAdvancedTerrainComputeShader({...base,regionalTerrain:true})
+            +createRegionalBasinCertificateWgsl(base.erosionFilter,budgets,{slopeAware:true})
+            +createRegionalPlacementSurveyWgsl())).toBeNull();
+    });
+    it('generation-owned valley terrain and macro-only anchor compile',()=>{
+        expect(compile(createAdvancedTerrainComputeShader({...base,regionalTerrain:true,regionalValleyFeature:true}))).toBeNull();
+        expect(compile(createAdvancedTerrainComputeShader({...base,regionalTerrain:true})+createRegionalValleyAnchorWgsl())).toBeNull();
+    });
+    it('authoritative eroded shape generation and all fine consumers compile',()=>{
+        expect(compile(createAdvancedTerrainComputeShader({...base,regionalTerrain:true})+createRegionalShapeBakeWgsl())).toBeNull();
+        for(const extra of Object.values(variants)) expect(compile(createAdvancedTerrainComputeShader({...base,...extra,regionalTerrain:true,regionalShape:true}))).toBeNull();
+    });
+    it('local basin certificates compile against the existing terrain equations', () => {
+        const budgets=terrainDisplacementBudgets({erosionFilter:base.erosionFilter});
+        expect(compile(createAdvancedTerrainComputeShader({...base,regionalTerrain:true})
+            +createRegionalBasinCertificateWgsl(base.erosionFilter,budgets)+createRegionalRouteHeightWgsl())).toBeNull();
+    });
+    it('light route sampling compiles with macro inputs and optional reused authoritative shape',()=>{
+        const budgets=terrainDisplacementBudgets({erosionFilter:base.erosionFilter});
+        for(const shape of [false,true])expect(compile(createAdvancedTerrainComputeShader({...base,
+            regionalTerrain:true,regionalShape:shape})+createRegionalBasinCertificateWgsl(base.erosionFilter,budgets)
+            +createRegionalRouteHeightWgsl({source:'foundation',shape}))).toBeNull();
+    });
 });

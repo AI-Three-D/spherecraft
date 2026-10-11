@@ -6,6 +6,7 @@ import { installWebGPUTerrainGeneratorAtlasMethods } from './terrain-generator/w
 import { installWebGPUTerrainGeneratorBatchMethods } from './terrain-generator/webgpuTerrainGeneratorBatching.js';
 import { installWebGPUTerrainGeneratorPipelineMethods } from './terrain-generator/webgpuTerrainGeneratorPipelines.js';
 import { requireInt, requireNumber, requireObject } from './terrain-generator/webgpuTerrainGeneratorDebugUtils.js';
+import { createRegionalTerrainData, regionalTerrainOptions } from './terrain-generator/regionalTerrain.js';
 import {
     describeTerrainFeatures,
     normalizeTerrainFeatures,
@@ -200,6 +201,8 @@ export class WebGPUTerrainGenerator {
 
 
     setPlanetConfig(config) {
+        this._regionalTerrainInputRevision = (this._regionalTerrainInputRevision ?? 0) + 1;
+        this._regionalTerrainDirty = true;
         const planetConfig = requireObject(config, 'planetConfig');
         this.planetConfig = planetConfig;
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
@@ -257,6 +260,8 @@ export class WebGPUTerrainGenerator {
      */
     setTerrainFeatures(features = {}) {
         this._applyTerrainFeatures(features, this.terrainFeatures);
+        this._regionalTerrainInputRevision = (this._regionalTerrainInputRevision ?? 0) + 1;
+        this._regionalTerrainDirty = true;
         return describeTerrainFeatures(this.terrainFeatures);
     }
 
@@ -277,7 +282,62 @@ export class WebGPUTerrainGenerator {
     async initialize() {
         if (this.initialized) return;
         await this.initializePipelines();
+        if (this.terrainConfig.regionalTerrain?.enabled === true) await this.prepareRegionalTerrain();
         this.initialized = true;
+    }
+
+    /**
+     * Generate dependencies before fine work; publish one immutable version.
+     * Feature configuration changes share unchanged terrain foundation inputs.
+     * regenerate:true remains a full rebuild; explicitly reuseFoundation:true
+     * to regenerate only dependent features and preserve the foundation.
+     */
+    async prepareRegionalTerrain(options = this.terrainConfig.regionalTerrain, { regenerate = false, reuseFoundation = !regenerate } = {}) {
+        const opts = regionalTerrainOptions(options);
+        if (this._regionalTerrainPreparing) {
+            // Coalesce matching requests; a different resolution must wait for
+            // its own inputs rather than receiving the preceding request's data.
+            const pending = await this._regionalTerrainPreparing;
+            if (!this._regionalTerrainDirty && pending.cells === opts.cells && pending.seamCells === opts.seamCells
+                && JSON.stringify(pending.basinsConfig??null)===JSON.stringify(opts.basins)
+                && JSON.stringify(pending.drainageConfig??null)===JSON.stringify(opts.drainage)
+                && JSON.stringify(pending.placementConfig??null)===JSON.stringify(opts.placement)
+                && JSON.stringify(pending.valleyConfig??null)===JSON.stringify(opts.valley)
+                && JSON.stringify(pending.shapeConfig??null)===JSON.stringify(opts.shape)
+                && JSON.stringify(pending.worldConfig??null)===JSON.stringify(opts.world)) return pending;
+        }
+        if (!regenerate && !this._regionalTerrainDirty && this.regionalTerrain && this.regionalTerrain.cells === opts.cells
+            && this.regionalTerrain.seamCells === opts.seamCells
+            && JSON.stringify(this.regionalTerrain.basinsConfig??null)===JSON.stringify(opts.basins)
+            && JSON.stringify(this.regionalTerrain.drainageConfig??null)===JSON.stringify(opts.drainage)
+            && JSON.stringify(this.regionalTerrain.placementConfig??null)===JSON.stringify(opts.placement)
+            && JSON.stringify(this.regionalTerrain.valleyConfig??null)===JSON.stringify(opts.valley)
+            && JSON.stringify(this.regionalTerrain.shapeConfig??null)===JSON.stringify(opts.shape)
+            && JSON.stringify(this.regionalTerrain.worldConfig??null)===JSON.stringify(opts.world)) {
+            this.regionalTerrainActive = true;
+            return this.regionalTerrain;
+        }
+        this._regionalTerrainPreparing = (async () => {
+            const old = this.regionalTerrain;
+            const revision = this._regionalTerrainInputRevision ?? 0;
+            const next = await createRegionalTerrainData({ device: this.device, terrainGenerator: this,
+                options: opts, version: (old?.version ?? 0) + 1, previousFoundation: reuseFoundation ? old?.foundation : null });
+            if (revision !== (this._regionalTerrainInputRevision ?? 0)) {
+                await next.destroy();
+                throw new Error('Regional terrain inputs changed during generation; retry with current inputs');
+            }
+            this.regionalTerrain = next;
+            this.regionalTerrainActive = true;
+            this._regionalTerrainDirty = false;
+            if (old) await old.destroy();
+            return next;
+        })();
+        try { return await this._regionalTerrainPreparing; }
+        finally { this._regionalTerrainPreparing = null; }
+    }
+
+    _terrainPipelineLayouts(layouts) {
+        return this.regionalTerrainActive ? [...layouts, this.regionalTerrain.bindGroupLayout] : layouts;
     }
 
     initializeStreamedTypes() {

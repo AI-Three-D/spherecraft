@@ -180,7 +180,7 @@ const FOOTHILL_TT_FULL: f32 = 0.56;
 `;
 }
 
-export function createEarthlikeBase() {
+export function createEarthlikeBase({regionalShape=false}={}) {
   return `
 // ==================== Base: Earthlike ====================
 
@@ -219,26 +219,32 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
 // skips as calculateTerrainHeight, so the height matches it (to float
 // rounding where the compiler fuses differently); the gradient is analytic.
 // Callers project the gradient onto the tangent plane (terrainSurfaceGradient).
-// Last step: the river channels (core/world/water/riverCarve.wgsl.js; a
-// pass-through where the shader is built without them).
+// After the existing terrain stack: cut-only bank retreat and river channels
+// (core/world/water/riverCarve.wgsl.js; pass-throughs when disabled).
 fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
-    return riverCarve_d(calculateTerrainHeightBaseD(seed, unitDir), unitDir);
+    let natural = calculateTerrainHeightBaseD(seed, unitDir);
+    let excavated = valleyApply_d(valleyShapeAt(unitDir), regionalBasinApply_d(natural, unitDir));
+    return riverCarve_d(excavated, unitDir);
 }
 
 // The terrain before the river carve.
-fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
+${regionalShape ? `fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
+    let s=regionalShapeSample_d(unitDir);
+    if(s.weight.x>=1.0) { return s.height; }
+    let old=calculateTerrainHeightAnalyticBaseD(seed,unitDir);
+    if(s.weight.x<=0.0) { return old; }
+    return dMix(old,s.height,s.weight);
+}
+fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     let profile = getTerrainProfile();
     let amp = getTerrainAmplitudes(profile);
 
-    let regional = getRegionalCharacter_d(unitDir, seed, profile);
+    let foundationData = terrainMacro_d(unitDir, seed, profile);
+    let regional = foundationData.regional;
     let landBlend = dSmoothstep(0.15, 0.45, regional.landMask);
 
     var landHeight = dConst(0.0);
     if (landBlend.x > 0.0) {
-        // River valleys (core/world/water/riverValley.wgsl.js): shaped into
-        // the landform before erosion and again after the detail added
-        // after it; a pass-through where the shader is built without them.
-        let vly = valleyShapeAt(unitDir);
         landHeight = select(dConst(0.0), regional.baseElevation * amp.continentalShelf, terrainFeatureOn(TF_CONTINENT_RELIEF));
 
         // Regional landform: plains / uplands / highlands (see
@@ -248,7 +254,7 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
         region.height = dConst(0.0);
         region.rough = dConst(1.0);
         if (terrainFeatureOn(TF_LAND_REGIONS)) {
-            region = landRegions_d(unitDir, seed, regional);
+            region = foundationData.region;
             landHeight += region.height;
         }
 
@@ -273,9 +279,8 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             // The filter reads a slope-continuous landform (every term here
             // is C1), and its height change is added to the terrain. Relief,
             // which sets the strength, is the large landforms only. The
-            // narrow channel correction and erosion-seed pits come after.
-            // Cached river banks enter here so their gullies drain toward
-            // the actual excavated valley in this same erosion pass.
+            // carved features (river channel, erosion-seed pits) come after,
+            // so erosion does not fill them.
             let bigHillsH = featureBigHillsHeight_d(unitDir, seed, amp);
             let mountainsH = featureMountainsHeight_d(unitDir, seed);
             let relief = foothillsH + bigHillsH + mountainsH;
@@ -283,22 +288,8 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             // Mountains are always carved: erosion's regional variation is
             // raised to full from MTN_EROSION_FULL_M of mountain height.
             let mtnCarve = dQuintic(dClamp((mountainsH * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
-            landHeight = valleyApplyPre_d(vly, landHeight);
-            // Bank incision and individual hill erodibility use this same pass.
-            let riverRelief = vly.erosionRelief / maxTerrainHeightM();
-            let riverFloor = dConst(1.0) - dMul(dConst(1.0) - mtnCarve, dConst(1.0) - vly.erosionFloor);
-            let er = erosionFilterLand_d(unitDir, landHeight, relief + riverRelief, style, riverFloor, vly.erosionAmount);
-            var erosionDelta = er.delta;
-            if (vly.isOn && vly.erosionAmount.x > 0.001) {
-                // Do not let the filter's mountain-scale amplitude build a
-                // rim on a low river bank. Existing large landforms retain
-                // their relief budget; bank additions get a smaller one.
-                let depthBudget = relief * 0.5 + vly.erosionDepth / maxTerrainHeightM();
-                let ridgeBudget = relief * 0.5 + vly.erosionRidge / maxTerrainHeightM();
-                let roundM = 2.0 / maxTerrainHeightM();
-                erosionDelta = dSmoothMin(dSmoothMax(erosionDelta, -depthBudget, roundM), ridgeBudget, roundM);
-            }
-            landHeight += erosionDelta;
+            let er = erosionFilterLand_d(unitDir, landHeight, relief, style, mtnCarve);
+            landHeight += er.delta;
             // Rolling hill chains are added after erosion: eroding their steep
             // corridor walls cut thin grooves along them.
             landHeight += dMul(featureRollingHillsHeight_d(unitDir, seed, regional, profile, amp), region.rough);
@@ -327,10 +318,9 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
             let detailBudget = amp.microGain + 0.005;
             landHeight += interior * detailBudget;
         }
-        landHeight = valleyBoundBanks_d(vly, landHeight);
     }
     if (landBlend.x >= 1.0) {
-        return softClampHeight_d(landHeight, -1.1, 1.8, 0.25);
+        return regionalValleyApply_d(softClampHeight_d(landHeight, -1.1, 1.8, 0.25),unitDir,foundationData);
     }
 
     var oceanVariation = dConst(0.0);
@@ -344,7 +334,7 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     let oceanHeight = dConst(oceanBase) + oceanVariation;
 
     let height = dMix(oceanHeight, landHeight, landBlend);
-    return softClampHeight_d(height, -1.1, 1.8, 0.25);
+    return regionalValleyApply_d(softClampHeight_d(height, -1.1, 1.8, 0.25),unitDir,foundationData);
 }
 
 // Tangential gradient of a terrainHeightD-style dual, in normalized height

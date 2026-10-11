@@ -97,9 +97,11 @@ const DEFAULT_SAMPLES_PER_DISPATCH = 131072;
  * Work is split into dispatches of at most samplesPerDispatch terrain
  * evaluations; yieldBetween (e.g. one animation frame) runs between them.
  */
-export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null }) {
+export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null, directionsOnly = false }) {
     // The natural terrain: no river carve, no river valleys (the water graph,
     // lakes and river traces are found on it).
+    const usesRegionalTerrain = terrainGenerator.regionalTerrainActive === true;
+    const regionalSourceKey = usesRegionalTerrain ? terrainGenerator.regionalTerrain.sourceKey : null;
     const baseSource = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: false, riverValley: false }));
     const used = new Set();
     for (const m of baseSource.matchAll(/@group\(0\)\s*@binding\((\d+)\)/g)) used.add(Number(m[1]));
@@ -109,7 +111,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     const entryPoints = hydrologyEntryPoints({ gridParams, gridOut, patchParams, patchOut, dirsParams, dirsIn, dirsOut });
 
     const module = device.createShaderModule({ label: 'HydrologySampler', code: baseSource + entryPoints });
-    const [gridPipeline, patchPipeline] = await Promise.all([
+    const [gridPipeline, patchPipeline] = directionsOnly ? [null,null] : await Promise.all([
         device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'hydroGridMain' } }),
         device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'hydroPatchMain' } }),
     ]);
@@ -121,13 +123,13 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     const carvedReady = () => {
         if (terrainGenerator.waterCarve !== true) return Promise.resolve(null);
         carvedPromise ??= (async () => {
-            const src = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: true }));
+            const src = createAdvancedTerrainComputeShader(terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: true, regionalTerrain: usesRegionalTerrain }));
             const m = device.createShaderModule({ label: 'HydrologySampler-carved', code: src + entryPoints });
             [carvedPipeline, carvedDirsPipeline] = await Promise.all([
-                device.createComputePipelineAsync({ layout: 'auto', compute: { module: m, entryPoint: 'hydroPatchMain' } }),
+                directionsOnly ? null : device.createComputePipelineAsync({ layout: 'auto', compute: { module: m, entryPoint: 'hydroPatchMain' } }),
                 device.createComputePipelineAsync({ layout: 'auto', compute: { module: m, entryPoint: 'hydroDirsMain' } }),
             ]);
-            return carvedPipeline;
+            return carvedDirsPipeline;
         })();
         return carvedPromise;
     };
@@ -144,11 +146,34 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     const maxH = Math.max(uv.getFloat32(184, true), 1.0);
     const seaLevelM = uv.getFloat32(116, true) * maxH;
 
-    const setBiome = (pass) => {
-        try { terrainGenerator._setTerrainBiomeBindGroup(pass); return true; } catch { return false; /* entry point may not use group 1 */ }
+    const regionalGroups = new Map();
+    const assertRegionalCurrent = () => {
+        if (!usesRegionalTerrain) return;
+        const inputs = terrainGenerator.regionalTerrain;
+        if (terrainGenerator._regionalTerrainDirty || inputs?.sourceKey !== regionalSourceKey) {
+            throw new Error('Regional terrain source changed; recreate hydrology sampling and water records before continuing');
+        }
+    };
+    const setRegional = (pass, pipeline) => {
+        if (!usesRegionalTerrain) return;
+        assertRegionalCurrent();
+        const inputs = terrainGenerator.regionalTerrain;
+        let record = regionalGroups.get(pipeline);
+        if (record?.inputs !== inputs) {
+            record = { inputs, group: device.createBindGroup({
+                layout: pipeline.getBindGroupLayout(2), entries: inputs.bindGroupEntries,
+            }) };
+            regionalGroups.set(pipeline, record);
+        }
+        pass.setBindGroup(2, record.group);
+    };
+    const setBiome = (pass, pipeline) => {
+        setRegional(pass, pipeline);
+        try { terrainGenerator._setTerrainBiomeBindGroup(pass, { regional: false }); return true; } catch { return false; /* entry point may not use group 1 */ }
     };
 
     async function sampleGrid(N) {
+        assertRegionalCurrent();
         const heights = new Float32Array(6 * N * N);
         const precip = new Float32Array(6 * N * N);
         // Rows per dispatch: a multiple of 8 (the workgroup height).
@@ -178,7 +203,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
                 const pass = enc.beginComputePass();
                 pass.setPipeline(gridPipeline);
                 pass.setBindGroup(0, bindGroup);
-                biomeBindGroupSet = setBiome(pass) || biomeBindGroupSet;
+                biomeBindGroupSet = setBiome(pass, gridPipeline) || biomeBindGroupSet;
                 pass.dispatchWorkgroups(Math.ceil(N / 8), Math.ceil(rows / 8), 1);
                 pass.end();
                 enc.copyBufferToBuffer(out, 0, readback, 0, bytes);
@@ -204,6 +229,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
      * { c, e1, e2, x0, y0, spacing, nx, ny }. Row-major Float32Array.
      */
     async function samplePatch(frame, R, { carved = false } = {}) {
+        assertRegionalCurrent();
         const { nx, ny } = frame;
         if (carved) await carvedReady();
         const carve = carved && carvedPipeline && carveGroup;
@@ -235,8 +261,11 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
             const pass = enc.beginComputePass();
             pass.setPipeline(pipeline);
             pass.setBindGroup(0, bindGroup);
-            if (carve) pass.setBindGroup(1, carveGroup);
-            else setBiome(pass);
+            if (carve) {
+                pass.setBindGroup(1, carveGroup);
+                setRegional(pass, pipeline);
+            }
+            else setBiome(pass, pipeline);
             pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(rows / 8), 1);
             pass.end();
             enc.copyBufferToBuffer(out, 0, readback, 0, nx * rows * 4);
@@ -275,7 +304,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
                 { binding: V.params, resource: { buffer: v.params } },
             );
         }
-        carveGroup = device.createBindGroup({ label: 'HydroPatch-carve', layout: carvedPipeline.getBindGroupLayout(1), entries });
+        if(carvedPipeline)carveGroup = device.createBindGroup({ label: 'HydroPatch-carve', layout: carvedPipeline.getBindGroupLayout(1), entries });
         carveDirsGroup = device.createBindGroup({ label: 'HydroDirs-carve', layout: carvedDirsPipeline.getBindGroupLayout(1), entries });
     }
     async function setWaterCarveResources(res) { carveRes = res ?? null; await rebuildCarveGroups(); }
@@ -286,9 +315,17 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
      * per direction: x, y, z, unused), or null when the carve is not ready.
      * One dispatch (callers keep it to tens of thousands of directions).
      */
-    async function sampleDirsCarved(dirs4) {
-        await carvedReady();
-        if (!carvedDirsPipeline || !carveDirsGroup) return null;
+    let naturalDirsPipeline = null;
+    async function sampleDirs(dirs4, { carved = false } = {}) {
+        assertRegionalCurrent();
+        if (carved) {
+            await carvedReady();
+            if (!carvedDirsPipeline || !carveDirsGroup) return null;
+        } else {
+            naturalDirsPipeline ??= device.createComputePipelineAsync({ layout: 'auto',
+                compute: { module, entryPoint: 'hydroDirsMain' } });
+        }
+        const pipeline = carved ? carvedDirsPipeline : await naturalDirsPipeline;
         const count = dirs4.length / 4;
         const inBuf = device.createBuffer({ label: 'HydroDirs-In', size: Math.max(16, dirs4.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         const out = device.createBuffer({ label: 'HydroDirs-Out', size: Math.max(16, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -299,7 +336,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         pv.setUint32(0, count, true); pv.setFloat32(4, maxH, true);
         device.queue.writeBuffer(params, 0, p);
         const bindGroup = device.createBindGroup({
-            layout: carvedDirsPipeline.getBindGroupLayout(0),
+            layout: pipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: uniformBuffer } },
                 { binding: dirsParams, resource: { buffer: params } },
@@ -309,9 +346,12 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         });
         const enc = device.createCommandEncoder({ label: 'HydroDirs' });
         const pass = enc.beginComputePass();
-        pass.setPipeline(carvedDirsPipeline);
+        pass.setPipeline(pipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.setBindGroup(1, carveDirsGroup);
+        if (carved) {
+            pass.setBindGroup(1, carveDirsGroup);
+            setRegional(pass, pipeline);
+        } else setBiome(pass, pipeline);
         pass.dispatchWorkgroups(Math.ceil(count / 64));
         pass.end();
         enc.copyBufferToBuffer(out, 0, readback, 0, count * 4);
@@ -324,9 +364,12 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     }
 
     return {
-        sampleGrid, samplePatch, sampleDirsCarved, setWaterCarveResources, setRiverValleyResources, maxH, seaLevelM,
+        sampleGrid, samplePatch,
+        sampleDirsNatural: dirs => sampleDirs(dirs),
+        sampleDirsCarved: dirs => sampleDirs(dirs, { carved: true }),
+        setWaterCarveResources, setRiverValleyResources, maxH, seaLevelM,
         // Everything the samples depend on: the terrain shader and its uniforms.
-        terrainKey: hashParts([baseSource, uniformBytes]),
+        terrainKey: hashParts([baseSource, uniformBytes, ...(usesRegionalTerrain ? [regionalSourceKey] : [])]),
         destroy() { uniformBuffer.destroy(); },
     };
 }

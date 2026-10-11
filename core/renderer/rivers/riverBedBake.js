@@ -66,7 +66,7 @@ export class RiverBedBake {
         this._bedBuffer = this.device.createBuffer({
             label: 'RiverBedBake-Bed',
             size: this._byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
         });
         // Pre-fill with the invalid sentinel (not left zero-initialized) so
         // a compute dispatch that fails to run (e.g. a shader compile error)
@@ -86,7 +86,7 @@ export class RiverBedBake {
         this._debugBuffer = this.device.createBuffer({
             label: 'RiverBedBake-Debug',
             size: 144,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
         });
         // 0xDEAD_BEEF sentinel so "never written" is visibly distinguishable
         // from any real computed value (0 included).

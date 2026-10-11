@@ -23,6 +23,8 @@ import { dirToCell } from '../hydrology/waterGraph.js';
 import { riverCarveReach, riverNearLake, trimLakeBand } from './lakeBand.js';
 import { riverWaterLevels } from './riverRibbon.js';
 import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
+import {resampleLakeSurfaceMask} from './lakeSurfaceField.js';
+import {WATER_GPU_CAPACITY_DEFAULTS as CAPACITY} from './structuredWaterGpuCapacity.js';
 import { RIVER_VALLEY_DEFAULTS, valleyLayout, valleyPageCells, valleyParamsData } from './riverValley.js';
 import { RIVER_CARVE_DEFAULTS } from './riverShapeNoise.js';
 
@@ -37,6 +39,9 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     shoreSoftM: 0.15,                 // waterline fade-in depth
     // Lakes whose shore is not solved yet are hidden closer than this (m).
     unsolvedLakeHideM: 2500,
+    structuredRiverSurface: true,
+    structuredRiverBody: true,
+    structuredRiverSurfaceStartM: 1600,
 });
 
 // Near water (core/renderer/water/NearWaterRenderer.js): lakes and rivers
@@ -60,20 +65,23 @@ export class WaterGpuData {
      * @param {GPUDevice} device
      * @param {object} o  gridN, planetRadius, maxLakes, maskLayerSize, maxMaskLayers
      */
-    constructor(device, { gridN = 512, planetRadius, maxLakes = 8192, maskLayerSize = 512, maxMaskLayers = 96, maxRiverSegs = 262144, maxRiverCells = 65536, carve = null, valley = null, maxValleyPages = 3072 } = {}) {
+    constructor(device, { gridN = 512, planetRadius, maxLakes = CAPACITY.maxLakes, maskLayerSize = CAPACITY.maskLayerSize,
+        maxMaskLayers = CAPACITY.maxMaskLayers, maskTilesPerAxis = 1, maxRiverSegs = CAPACITY.maxRiverSegs, maxRiverCells = CAPACITY.maxRiverCells,
+        carve = null, valley = null, maxValleyPages = CAPACITY.maxValleyPages, structuredRiverSurface = true } = {}) {
         this.device = device;
         this.N = gridN;
         this.R = planetRadius;
         this.maxLakes = maxLakes;
         this.S = maskLayerSize;
         this.maxLayers = maxMaskLayers;
+        this.maskTilesPerAxis = maskTilesPerAxis;
         this.enabled = true;
         this.debugMode = 0;
         // Active simulation strip { river, s0, s1, halfM, endFadeM, sideFadeM,
         // fade } (WaterRiverSim coverage) or null: the terrain shader hides
         // static water under it (waterSimCover).
         this.site = null;
-        this.look = { ...WATER_LOOK_DEFAULTS };
+        this.look = { ...WATER_LOOK_DEFAULTS,structuredRiverSurface };
         this.near = { ...WATER_NEAR_DEFAULTS };
         // River carve parameters (WaterService config.carve; riverCarve.wgsl.js), or null: no carve.
         this.carve = carve;
@@ -96,7 +104,7 @@ export class WaterGpuData {
         this.lakesBuffer = device.createBuffer({ label: 'Lake-table', size: maxLakes * LAKE_RECORD_FLOATS * 4, usage: S });
         this.paramsBuffer = device.createBuffer({ label: 'Lake-params', size: LAKE_PARAMS_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         this.masksTexture = device.createTexture({
-            label: 'Lake-masks', size: [maskLayerSize, maskLayerSize, maxMaskLayers], format: 'r8unorm',
+            label: 'Lake-masks', size: [maskLayerSize*maskTilesPerAxis, maskLayerSize*maskTilesPerAxis, Math.ceil(maxMaskLayers/(maskTilesPerAxis*maskTilesPerAxis))], format: 'r8unorm',
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
         });
         this.masksView = this.masksTexture.createView({ dimension: '2d-array' });
@@ -250,7 +258,7 @@ export class WaterGpuData {
         // Contiguous row runs, one upload each.
         let start = rows[0], prev = rows[0];
         const flush = (r0, r1) => {
-            const off = r0 * this.N, len = (r1 - r0 + 1) * this.N;
+            const off = r0 * this.N, len = Math.min((r1 - r0 + 1) * this.N,this.index.length-off);
             this.device.queue.writeBuffer(this.indexBuffer, off * 4, this.index, off, len);
         };
         for (let k = 1; k < rows.length; k++) {
@@ -296,6 +304,13 @@ export class WaterGpuData {
 
     _uploadMask(rec, layer, mask = rec.mask) {
         const { nx, ny } = rec.frame, S = this.S;
+        const tiles=this.maskTilesPerAxis,origin={x:layer%tiles*S,y:Math.floor(layer/tiles)%tiles*S,z:Math.floor(layer/(tiles*tiles))};
+        if(rec.surfaceDepthMask) {
+            const out=resampleLakeSurfaceMask(rec,mask,S);
+            this.device.queue.writeTexture({texture:this.masksTexture,origin},out,
+                {bytesPerRow:S,rowsPerImage:S},{width:S,height:S,depthOrArrayLayers:1});
+            return;
+        }
         const out = new Uint8Array(S * S);
         for (let b = 0; b < S; b++) {
             const j0 = Math.floor(b * ny / S), j1 = Math.max(j0 + 1, Math.floor((b + 1) * ny / S));
@@ -306,7 +321,7 @@ export class WaterGpuData {
                 out[b * S + a] = v;
             }
         }
-        this.device.queue.writeTexture({ texture: this.masksTexture, origin: { x: 0, y: 0, z: layer } }, out,
+        this.device.queue.writeTexture({ texture: this.masksTexture, origin }, out,
             { bytesPerRow: S, rowsPerImage: S }, { width: S, height: S, depthOrArrayLayers: 1 });
     }
 
@@ -320,10 +335,14 @@ export class WaterGpuData {
             const fr = rec?.frame ?? lake.frame;
             t[o] = rec?.level ?? lake.level;
             ti[o + 1] = rec ? (this._layerOf.get(id) ?? -1) : -1;
+            if(ti[o+1]>=0&&this.maskTilesPerAxis>1) {
+                const slot=ti[o+1],tiles=this.maskTilesPerAxis;
+                ti[o+1]=Math.floor(slot/(tiles*tiles))|((slot%tiles)<<8)|((Math.floor(slot/tiles)%tiles)<<12)|(tiles<<16);
+            }
             t[o + 2] = fr.nx * fr.spacing; t[o + 3] = fr.ny * fr.spacing;
             t.set([fr.c[0], fr.c[1], fr.c[2], fr.x0], o + 4);
             t.set([fr.e1[0], fr.e1[1], fr.e1[2], fr.y0], o + 8);
-            t.set([fr.e2[0], fr.e2[1], fr.e2[2], 0], o + 12);
+            t.set([fr.e2[0], fr.e2[1], fr.e2[2], rec?.surfaceDepthRangeM??0], o + 12);
         }
         const n = Math.min(svc.lakes.length, this.maxLakes) * F;
         this.device.queue.writeBuffer(this.lakesBuffer, 0, t, 0, n);
@@ -400,12 +419,13 @@ export class WaterGpuData {
         } else {
             f.fill(0, 16, 24);
         }
-        f.set([0, 0, 0, L.unsolvedLakeHideM ?? 2500], 24);
+        f.set([L.structuredRiverSurface?1:0,L.structuredRiverBody?1:0,L.structuredRiverSurfaceStartM,L.unsolvedLakeHideM ?? 2500], 24);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.
         const C = { ...RIVER_CARVE_DEFAULTS, ...(this.carve ?? {}) };
+        f[22] = Math.min(Math.max(C.bankCutM, 0.5), 24);
         f.set([this.carve?.enabled ? 1 : 0, C.bankW, C.blendW, C.waterFrac], 28);
-        f.set([C.bankH, C.bankSoftM, C.bankGrade, 0], 32);
+        f.set([C.bankH, C.bankSoftM, C.bankGrade, Math.min(Math.max(C.bankDetail, 0), 1)], 32);
         f.set([C.widthVar, C.wobble, C.bankVar, C.islandHeightM], 36);
         const nr = this.near;
         f.set(nr.enabled ? [nr.fadeStartM, nr.fadeEndM, 1, 0] : [0, 0, 0, 0], 40);
@@ -527,7 +547,9 @@ export class WaterGpuData {
                     P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5],
                     ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
                     P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0,
-                    arc[k], arc[k + 1], ridOf.get(rec) ?? -1, 0,
+                    arc[k], arc[k + 1], ridOf.get(rec) ?? -1,
+                    rec.structured===true&&this.carve?.enabled===true&&st>=20&&P[a+19]===0&&P[b+19]===0
+                        &&Math.max(Math.abs(wlA),Math.abs(wlB),Math.abs(P[a+3]-P[a+5]),Math.abs(P[b+3]-P[b+5]))<=10000?1:0,
                     wlA, wlB, st >= 20 ? P[a + 18] : -1e20, st >= 20 ? P[b + 18] : -1e20,
                     st >= 20 ? P[a + 19] : 0, st >= 20 ? P[b + 19] : 0, 0, 0], o);
                 next++;
@@ -578,6 +600,7 @@ export class WaterGpuData {
 
     destroy() {
         this.indexBuffer.destroy(); this.lakesBuffer.destroy(); this.paramsBuffer.destroy(); this.masksTexture.destroy(); this.riversBuffer.destroy();
+        this.valleyPagesBuffer?.destroy(); this.valleyTexelsBuffer?.destroy(); this.valleyParamsBuffer?.destroy();
     }
 }
 

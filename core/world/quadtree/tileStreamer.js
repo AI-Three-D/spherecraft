@@ -92,6 +92,7 @@ import {
     Texture, TextureFormat, TextureFilter, TextureWrap,
     gpuFormatIsFilterable
 } from '../../renderer/resources/texture.js';
+import {gpuDeviceLoss,reportGpuAsyncFailure} from '../../../shared/gpuDeviceState.js';
 import { Logger } from '../../../shared/Logger.js';
 
 const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
@@ -1371,7 +1372,7 @@ this._freshnessSkipCount = 0;
     }
 
     _flushArrayPoolCopies() {
-        if (!this.arrayPool) return;
+        if (!this.arrayPool||gpuDeviceLoss(this.device)) return;
 
         const copyBudget = this._admissionBudgets.maxCopyOperationsPerFrame;
         // Snapshot for debug bookkeeping BEFORE flushing (flushPendingCopies
@@ -1395,7 +1396,8 @@ this._freshnessSkipCount = 0;
                         return this._debugVerifyCopiedLayers(flushedCopies, batchId);
                     }
                 })
-                .catch(() => {
+                .catch(error => {
+                    reportGpuAsyncFailure(this.device,'terrain copy fence',error);
                     this._debugMarkFailedCopies(flushedCopies, batchId);
                 });
         }
@@ -1486,6 +1488,10 @@ this._freshnessSkipCount = 0;
         }
     }
     tickGeneration() {
+        if(gpuDeviceLoss(this.device)) {
+            this._generationQueue.clearPending();this._refinementQueue.clearPending();this._regenQueue.clearPending();
+            return;
+        }
         // Prune even when admission is blocked; otherwise fast movement can
         // leave a full queue of obsolete requests until a GPU fence resolves.
         this._generationQueue.prunePending();
@@ -3817,6 +3823,7 @@ _logPooledDepth3Visibility() {
             state.state = 'failed';
             state.batchId = batchId;
         }
+        if(gpuDeviceLoss(this.device))return;
         Logger.warn(
             `${TERRAIN_STEP_LOG_TAG} [QTCommit] copy fence failed batch=${batchId} copies=${flushedCopies.length}`
         );

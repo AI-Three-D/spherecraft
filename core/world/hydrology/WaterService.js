@@ -25,14 +25,16 @@ import { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } from '../water/riverShapeNoi
 import { RIVER_LEVEL_DEFAULTS } from './riverRefine.js';
 import { RIVER_VALLEY_DEFAULTS } from '../water/riverValley.js';
 import { RIVER_LANDSCAPE_DEFAULTS } from './riverLandscape.js';
+import { regionalWaterModel,regionalWaterGridN } from './regionalWater.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v16';
+export const WATER_ALGO_VERSION = 'water-v18';
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,
     params: {},            // WATER_GRAPH_DEFAULTS overrides
     cache: true,
+    gpu: {structuredCapacity:true,structuredLakeGridN:64,structuredRiverSurface:true},
     rivers: {
         enabled: true,
         spacingM: 16,
@@ -68,6 +70,7 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
 function mergeConfig(cfg = {}) {
     return {
         ...WATER_SERVICE_DEFAULTS, ...cfg,
+        gpu: {...WATER_SERVICE_DEFAULTS.gpu,...(cfg.gpu??{})},
         refine: { ...WATER_SERVICE_DEFAULTS.refine, ...(cfg.refine ?? {}) },
         rivers: { ...WATER_SERVICE_DEFAULTS.rivers, ...(cfg.rivers ?? {}) },
         carve: { ...WATER_SERVICE_DEFAULTS.carve, ...(cfg.carve ?? {}) },
@@ -169,6 +172,19 @@ export class WaterService {
         if (this.state !== 'idle') return;
         const t0 = performance.now();
         try {
+            const regional=this.terrainGenerator.regionalTerrain;
+            if(this.terrainGenerator.regionalTerrainActive && regional?.basinsConfig) {
+                if(this.terrainGenerator._regionalTerrainDirty) throw new Error('Regional terrain is stale; regenerate before publishing water');
+                if(this.config.gpu.structuredCapacity) {
+                    this.config.gridN=regionalWaterGridN(regional,this.config.gridN,this.config.gpu.structuredLakeGridN);
+                }
+                Object.assign(this,regionalWaterModel(regional,this.radius,this.config.gridN));
+                this._key=regional.sourceKey;
+                this.timings.coarsePublicationMs=performance.now()-t0;
+                this.state='ready';this.version++;
+                Logger.info(`[Water] regional water ready: ${this.lakes.length} certified basins, ${this.rivers.length} coarse rivers, ${this.timings.coarsePublicationMs.toFixed(1)} ms`);
+                return;
+            }
             this.state = 'sampling';
             this._client = new WorkerClient(this._useWorker);
             this._sampler = await createHydrologySampler({
@@ -599,6 +615,18 @@ export class WaterService {
     setRiverValleyResources(res) {
         this._valleyResources = res;
         this._sampler?.setRiverValleyResources?.(res);
+    }
+
+    /** Structured placement needs no sampled height grid. Only a close
+     * simulation requests this bounded, lazy carved-direction sampler. */
+    async sampleSimulationBed(dirs) {
+        if(!this._sampler) {
+            this._simSamplerPromise ??= createHydrologySampler({device:this.device,terrainGenerator:this.terrainGenerator,directionsOnly:true});
+            this._sampler=await this._simSamplerPromise;
+            await this._sampler.setWaterCarveResources(this._carveResources);
+            await this._sampler.setRiverValleyResources(this._valleyResources);
+        }
+        return this._sampler.sampleDirsCarved(dirs);
     }
 
     /** Terrain heights (m) on a tangent-plane patch; carved: with the river channels. */

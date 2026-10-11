@@ -12,6 +12,10 @@ export class TerrainGenerationConfig {
         // retains separate passes for performance/visual comparisons.
         this.fuseSmoothSplatSource = options.fuseSmoothSplatSource !== false;
 
+        // Prototype: persistent macro controls consumed by finer terrain.
+        // Off until the matched visual comparison has been assessed.
+        this.regionalTerrain = { enabled: false, cells: 128, seamCells: 4, basins:{enabled:false}, ...(options.regionalTerrain ?? {}) };
+
 
         // RuneVision erosion filter (templates/terrain-shaders/features/
         // featureErosionFilter.wgsl.js, MPL-2.0), always on: erodes the

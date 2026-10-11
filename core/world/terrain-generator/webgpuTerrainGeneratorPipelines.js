@@ -170,7 +170,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 });
                 this.terrainPipeline = this.device.createComputePipeline({
                     layout: this.device.createPipelineLayout({
-                        bindGroupLayouts: [this.terrainBindGroupLayout, this.biomeBindGroupLayout]
+                        bindGroupLayouts: this._terrainPipelineLayouts([this.terrainBindGroupLayout, this.biomeBindGroupLayout])
                     }),
                     compute: { module: this.terrainShaderModule, entryPoint: 'main' }
                 });
@@ -191,7 +191,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 });
                 this.heightInputPipeline = this.device.createComputePipeline({
                     layout: this.device.createPipelineLayout({
-                        bindGroupLayouts: [this.heightInputBindGroupLayout, this.biomeBindGroupLayout]
+                        bindGroupLayouts: this._terrainPipelineLayouts([this.heightInputBindGroupLayout, this.biomeBindGroupLayout])
                     }),
                     compute: { module: this.heightInputShaderModule, entryPoint: 'main' }
                 });
@@ -215,7 +215,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 });
                 this.microPipeline = this.device.createComputePipeline({
                     layout: this.device.createPipelineLayout({
-                        bindGroupLayouts: [this.microBindGroupLayout, this.biomeBindGroupLayout]
+                        bindGroupLayouts: this._terrainPipelineLayouts([this.microBindGroupLayout, this.biomeBindGroupLayout])
                     }),
                     compute: { module: this.microShaderModule, entryPoint: 'main' }
                 });
@@ -434,14 +434,18 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                     erosionFilter: this.erosionFilter,
                     waterCarve: this.waterCarve === true,
+                    riverBankDetail: this.terrainConfig.waterGraph?.carve?.bankDetail > 0,
                     riverValley: this.riverValley === true,
                     riverValleyPage: this.riverValleyPage ?? 32,
+                    regionalTerrain: this.regionalTerrainActive === true,
+                    regionalValleyFeature: !!this.regionalTerrain?.valleyConfig,
+                    regionalShape: !!this.regionalTerrain?.shapeData,
                     ...extra,
                 };
             },
 
         _getHeightInputPipelineCacheKey(format, heightFormat = 'r32float') {
-                return `${format || 'rgba32float'}|h:${gpuFormatSampleType(heightFormat || 'r32float')}`;
+                return `${format || 'rgba32float'}|h:${gpuFormatSampleType(heightFormat || 'r32float')}${this.regionalTerrainActive ? '|regional' : ''}${this.regionalTerrain?.valleyConfig?'|feature':''}${this.regionalTerrain?.shapeConfig?'|shape':''}${this.terrainConfig.waterGraph?.carve?.bankDetail>0?'|banks':''}`;
             },
 
         // withBaseHeight: also binds heightBase (rgba32float, binding 4) so the
@@ -508,7 +512,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
 
                 const pipeline = this.device.createComputePipeline({
                     layout: this.device.createPipelineLayout({
-                        bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout]
+                        bindGroupLayouts: this._terrainPipelineLayouts([bindGroupLayout, this.biomeBindGroupLayout])
                     }),
                     compute: { module: shaderModule, entryPoint: 'main' }
                 });
@@ -522,7 +526,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
             },
 
         _getMicroPipelineCacheKey(format, heightFormat = 'r32float', tileFormat = 'r32float') {
-                return `${format || 'rgba32float'}|h:${gpuFormatSampleType(heightFormat || 'r32float')}|t:${gpuFormatSampleType(tileFormat || 'r32float')}`;
+                return `${format || 'rgba32float'}|h:${gpuFormatSampleType(heightFormat || 'r32float')}|t:${gpuFormatSampleType(tileFormat || 'r32float')}${this.regionalTerrainActive ? '|regional' : ''}${this.regionalTerrain?.valleyConfig?'|feature':''}${this.regionalTerrain?.shapeConfig?'|shape':''}${this.terrainConfig.waterGraph?.carve?.bankDetail>0?'|banks':''}`;
             },
 
         _getMicroPipelineForFormat(format, heightFormat = 'r32float', tileFormat = 'r32float') {
@@ -562,7 +566,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
 
                 const pipeline = this.device.createComputePipeline({
                     layout: this.device.createPipelineLayout({
-                        bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout]
+                        bindGroupLayouts: this._terrainPipelineLayouts([bindGroupLayout, this.biomeBindGroupLayout])
                     }),
                     compute: { module: shaderModule, entryPoint: 'main' }
                 });
@@ -574,7 +578,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
             },
 
         _getSplatPipelineCacheKey(heightFormat = 'r32float', tileFormat = 'r32float') {
-                return `h:${gpuFormatSampleType(heightFormat || 'r32float')}|t:${gpuFormatSampleType(tileFormat || 'r32float')}`;
+                return `h:${gpuFormatSampleType(heightFormat || 'r32float')}|t:${gpuFormatSampleType(tileFormat || 'r32float')}${this.regionalTerrainActive ? '|regional' : ''}${this.regionalTerrain?.valleyConfig?'|feature':''}${this.regionalTerrain?.shapeConfig?'|shape':''}${this.terrainConfig.waterGraph?.carve?.bankDetail>0?'|banks':''}`;
             },
 
         _getSplatPipelineForFormats(heightFormat = 'r32float', tileFormat = 'r32float') {
@@ -1216,7 +1220,8 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
 
         _getTerrainPipelineForFormat(format) {
                 const fmt = format || 'rgba32float';
-                const cached = this._terrainPipelineCache?.get(fmt);
+                const cacheKey = fmt + (this.regionalTerrainActive ? '|regional' : '')+(this.regionalTerrain?.valleyConfig?'|feature':'')+(this.regionalTerrain?.shapeConfig?'|shape':'')+(this.terrainConfig.waterGraph?.carve?.bankDetail>0?'|banks':'');
+                const cached = this._terrainPipelineCache?.get(cacheKey);
                 if (cached) return cached;
 
                 const shaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
@@ -1239,7 +1244,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 });
 
                 const pipeline = this.device.createComputePipeline({
-                    layout: this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, this.biomeBindGroupLayout] }),
+                    layout: this.device.createPipelineLayout({ bindGroupLayouts: this._terrainPipelineLayouts([bindGroupLayout, this.biomeBindGroupLayout]) }),
                     compute: { module: shaderModule, entryPoint: 'main' }
                 });
 
@@ -1247,7 +1252,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     this._terrainPipelineCache = new Map();
                 }
                 const record = { pipeline, bindGroupLayout };
-                this._terrainPipelineCache.set(fmt, record);
+                this._terrainPipelineCache.set(cacheKey, record);
                 return record;
             },
 
@@ -1303,9 +1308,10 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 this.waterCarveVersion = (this.waterCarveVersion ?? 0) + 1;
             },
 
-        _setTerrainBiomeBindGroup(pass) {
+        _setTerrainBiomeBindGroup(pass, { regional = true } = {}) {
                 if (pass && this.biomeBindGroup) {
                     pass.setBindGroup(1, this.biomeBindGroup);
+                    if (regional && this.regionalTerrainActive) pass.setBindGroup(2, this.regionalTerrain.bindGroup);
                 }
             },
 

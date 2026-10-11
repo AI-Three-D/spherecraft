@@ -45,7 +45,7 @@ struct SimParams {
   hmin: f32, umax: f32, time: f32, macCormack: f32,
   turbA: f32, turbL: f32, turbT: f32, foamDecay: f32,
   kDecay: f32, kGen: f32, foamGen: f32, maxRise: f32,
-  maxFall: f32, outLimit: f32, kRelax: f32, _pad0: f32,
+  maxFall: f32, outLimit: f32, kRelax: f32, referenceFlow: f32,
   rowBase: u32, rowWorld: f32, _pad1: f32, _pad2: f32,
 };
 @group(0) @binding(0) var<uniform> P: SimParams;
@@ -118,8 +118,20 @@ fn velAt(p: vec2f) -> vec2f {
 }
 fn facePosU(i: i32, j: i32) -> vec2f { return vec2f(f32(i) * P.dx, (f32(j) + 0.5) * P.dx); }
 fn facePosV(i: i32, j: i32) -> vec2f { return vec2f((f32(i) + 0.5) * P.dx, f32(j) * P.dx); }
-fn advU(p: vec2f) -> f32 { let pb = p - P.dt * velAt(p); return bilinU(pb.x / P.dx, pb.y / P.dx - 0.5); }
-fn advV(p: vec2f) -> f32 { let pb = p - P.dt * velAt(p); return bilinV(pb.x / P.dx - 0.5, pb.y / P.dx); }
+fn referenceVel(gx:f32,gy:f32,axis:u32) -> f32 {
+  let p=floor(vec2f(gx,gy));let f=vec2f(gx,gy)-p;let i=i32(p.x);let j=i32(p.y);
+  return mix(mix(RX[ci(i,j)][axis],RX[ci(i+1,j)][axis],f.x),mix(RX[ci(i,j+1)][axis],RX[ci(i+1,j+1)][axis],f.x),f.y);
+}
+fn advU(p: vec2f) -> f32 {
+  let pb = p - P.dt * velAt(p);var v=bilinU(pb.x / P.dx, pb.y / P.dx - 0.5);
+  if(P.referenceFlow>0.5){v+=referenceVel(p.x/P.dx,p.y/P.dx-0.5,1u)-referenceVel(pb.x/P.dx,pb.y/P.dx-0.5,1u);}
+  return v;
+}
+fn advV(p: vec2f) -> f32 {
+  let pb = p - P.dt * velAt(p);var v=bilinV(pb.x / P.dx - 0.5, pb.y / P.dx);
+  if(P.referenceFlow>0.5){v+=referenceVel(p.x/P.dx-0.5,p.y/P.dx,2u)-referenceVel(pb.x/P.dx-0.5,pb.y/P.dx,2u);}
+  return v;
+}
 
 @compute @workgroup_size(8, 8)
 fn advect(@builtin(global_invocation_id) gid: vec3u) {
@@ -132,7 +144,7 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
   var u = advU(pu);
   let pv = facePosV(i, j);
   var v = advV(pv);
-  if (P.macCormack > 0.5) {
+  if (P.macCormack > 0.5 && P.referenceFlow < 0.5) {
     let vu = velAt(pu);
     let pf = pu + dt * vu;
     var gx = pf.x / dx; var gy = pf.y / dx - 0.5;
@@ -171,6 +183,14 @@ fn outScale(i: i32, j: i32) -> f32 {
   return select(1.0, lim / outf, outf > lim);
 }
 
+fn referenceDepth(i:i32,j:i32) -> f32 { let id=ci(i,j);return max(0.0,RX[id].x-B[id]); }
+fn referenceFluxV(i:i32,j:i32) -> f32 {
+  var v=RX[ci(i,j)].z;
+  if(j<=0){v=select(0.0,RX[ci(i,1)].z,isOpen(4u));}
+  if(j>=i32(P.L)){v=select(0.0,RX[ci(i,i32(P.L)-1)].z,isOpen(8u));}
+  return v*select(referenceDepth(i,j),referenceDepth(i,j-1),v>0.0);
+}
+
 @compute @workgroup_size(8, 8)
 fn height(@builtin(global_invocation_id) gid: vec3u) {
   let i = i32(gid.x); let j = i32(gid.y) + i32(P.jOffset);
@@ -187,7 +207,15 @@ fn height(@builtin(global_invocation_id) gid: vec3u) {
   let FR = select(uR * hR * outScale(i + 1, j), uR * h * sc, uR > 0.0);
   let FB = select(vB * h * sc, vB * hB * outScale(i, j - 1), vB > 0.0);
   let FT = select(vT * hT * outScale(i, j + 1), vT * h * sc, vT > 0.0);
-  var hNew = max(0.0, h - P.dt / P.dx * (FR - FL + FT - FB));
+  var divergence=FR-FL+FT-FB;
+  if(P.referenceFlow>0.5){
+    // Defect correction: the sampled, curved design channel is an imposed
+    // base flow. Its discretisation error must not slowly drain that base.
+    // Cross-stream target velocity is zero; only the longitudinal base
+    // flux needs subtracting. Perturbation fluxes still use donor limiting.
+    divergence-=referenceFluxV(i,j+1)-referenceFluxV(i,j);
+  }
+  var hNew = max(0.0, h - P.dt / P.dx * divergence);
   // Optional depth-change cap (not mass-conserving where it acts).
   if (P.maxRise > 0.0) { hNew = min(hNew, h + P.maxRise * P.dt); }
   if (P.maxFall > 0.0) { hNew = max(hNew, h - P.maxFall * P.dt); }
@@ -210,12 +238,12 @@ fn noiseGrad(pl: vec2f, t: f32) -> vec2f {
 // Pressure update of a face velocity between cell a (upwind side) and cell
 // b, with Whitewater's wet/dry rules: no flow between two dry cells; a wet
 // cell only pushes into a dry one whose bed is below its surface.
-fn pressureStep(vel: f32, ha: f32, ba: f32, hb: f32, bb: f32) -> f32 {
+fn pressureStep(vel: f32, ha: f32, ba: f32, hb: f32, bb: f32, referenceDelta: f32) -> f32 {
   let wetA = ha > P.hmin; let wetB = hb > P.hmin;
   let etaA = ba + ha; let etaB = bb + hb;
   var w = vel;
   if (!wetA && !wetB) { w = 0.0; }
-  else if (wetA && wetB) { w -= P.g * P.dt * (etaB - etaA) / P.dx; }
+  else if (wetA && wetB) { w -= P.g * P.dt * (etaB - etaA - referenceDelta) / P.dx; }
   else if (wetA) { if (etaA <= bb) { w = 0.0; } else { w -= P.g * P.dt * (bb - etaA) / P.dx; w = max(w, 0.0); } }
   else { if (etaB <= ba) { w = 0.0; } else { w -= P.g * P.dt * (etaB - ba) / P.dx; w = min(w, 0.0); } }
   return w;
@@ -236,7 +264,7 @@ fn momentum(@builtin(global_invocation_id) gid: vec3u) {
   if (i == 0) {
     u = select(0.0, faceU(0, j), isOpen(1u));
   } else {
-    u = pressureStep(u, hL, bL, h, b);
+    u = pressureStep(u, hL, bL, h, b, 0.0);
     let vavg = 0.25 * (sL.z + SI[ci(i - 1, j + 1)].z + s.z + SI[ci(i, j + 1)].z);
     let hf = max(0.5 * (hL + h), P.hmin);
     let spd = sqrt(u * u + vavg * vavg);
@@ -253,12 +281,32 @@ fn momentum(@builtin(global_invocation_id) gid: vec3u) {
   var v = s.z;
   if (j == 0) {
     v = select(0.0, faceV(i, 0), isOpen(4u));
+    if(P.referenceFlow>0.5 && isOpen(4u)) {
+      v=RX[id].z+SI[ci(i,1)].z-RX[ci(i,1)].z;
+    }
   } else {
-    v = pressureStep(v, hB, bB, h, b);
+    // The regional water level is a geometric contract, not a hydraulic
+    // steady state. In reference-flow mode its longitudinal pressure force
+    // is balanced by an external driving force. Cross-stream pressure and
+    // residual waves still evolve; unrestricted SWE remains the default.
+    let referenceA = select(0.0, RX[ci(i,j-1)].x, P.referenceFlow > 0.5);
+    let referenceB = select(0.0, RX[id].x, P.referenceFlow > 0.5);
+    v = pressureStep(v, hB, bB-referenceA, h, b-referenceB, 0.0);
+    if(P.referenceFlow>0.5){
+      // Curved/wandering banks can interrupt a straightened-grid base
+      // face. Cancel that base momentum defect as well as its mass defect;
+      // otherwise the imposed current slowly disappears at every bend.
+      let baseV=RX[id].z;
+      let basePressure=pressureStep(baseV,referenceDepth(i,j-1),bB-referenceA,
+          referenceDepth(i,j),b-referenceB,0.0);
+      v+=baseV-basePressure;
+    }
     let uavg = 0.25 * (sB.y + SI[ci(i + 1, j - 1)].y + s.y + SI[ci(i + 1, j)].y);
     let hf = max(0.5 * (hB + h), P.hmin);
     let spd = sqrt(v * v + uavg * uavg);
-    v = v / (1.0 + dt * g * P.manning * P.manning * spd / pow(hf, 1.3333));
+    let drag = dt * g * P.manning * P.manning / pow(hf, 1.3333);
+    let meanV = RX[id].z;
+    v = (v + select(0.0, drag * abs(meanV) * meanV, P.referenceFlow > 0.5)) / (1.0 + drag * spd);
     let kf = 0.5 * (KI[ci(i, j - 1)] + KI[id]);
     if (P.turbA > 1e-4 && kf > 0.02 && hB > P.hmin && h > P.hmin) {
       v += dt * P.turbA * clamp(kf, 0.0, 1.0) * (-noiseGrad(facePosV(i, j), P.time).x);
@@ -284,9 +332,16 @@ fn momentum(@builtin(global_invocation_id) gid: vec3u) {
     if ((sR.x <= P.hmin && bR > eta) || (hL <= P.hmin && bL > eta) || (sT.x <= P.hmin && bT > eta) || (hB <= P.hmin && bB > eta)) { rock = 1.0; }
     let eR = select(eta, bR + sR.x, sR.x > P.hmin); let eL2 = select(eta, bL + hL, hL > P.hmin);
     let eT = select(eta, bT + sT.x, sT.x > P.hmin); let eB2 = select(eta, bB + hB, hB > P.hmin);
-    let slopeMag = length(vec2f(eR - eL2, eT - eB2)) / (2.0 * dx);
-    let foamSrc = P.foamGen * (max(0.0, Fr - 0.8) * 1.2 + max(0.0, -div) * 0.6
-                               + max(0.0, slopeMag - 0.15) * 3.0 + rock * 0.8 * min(spd, 3.0) / 3.0);
+    let refT=select(RX[id].x,RX[ci(i,j+1)].x,sT.x>P.hmin);
+    let refB=select(RX[id].x,RX[ci(i,j-1)].x,hB>P.hmin);
+    let baseDelta=select(0.0,refT-refB,P.referenceFlow>0.5);
+    // A prescribed mountain descent is not a breaking wave. Use the
+    // disturbance slope so slow deep water cannot become solid white foam.
+    let slopeMag = length(vec2f(eR - eL2, eT - eB2 - baseDelta)) / (2.0 * dx);
+    let baseFr=select(0.0,length(RX[id].yz)/sqrt(g*max(referenceDepth(i,j),P.hmin)),P.referenceFlow>0.5);
+    let baseDiv=select(0.0,(RX[ci(i+1,j)].y-RX[id].y+RX[ci(i,j+1)].z-RX[id].z)/dx,P.referenceFlow>0.5);
+    let foamSrc = P.foamGen * (max(0.0, Fr - max(1.0,baseFr+0.15)) * 0.7 + max(0.0, -(div-baseDiv)) * 0.35
+                               + max(0.0, slopeMag - 0.15) * 1.2 + rock * 0.25 * min(spd, 3.0) / 3.0);
     foam = min(1.5, foam * exp(-P.foamDecay * dt) + dt * foamSrc);
     // Rocks churn the water in proportion to the flow (Whitewater's
     // unscaled rock * 0.8 stirred still lakes at every shore: lab, 1.3 m/s

@@ -8,7 +8,7 @@
 // to the lake's patch so the rest collapses to nothing, at the lake's level
 // on the sphere (same arithmetic as the terrain's vertices: origin + dir
 // radius). Fragments where the lake's mask is below 0.5 are discarded (the
-// terrain shading's test, waterLakeLevelIn); the terrain's depth hides the
+// terrain shading's coverage test); the terrain's depth hides the
 // surface where the ground rises above the level, so the shoreline is where
 // the flat water meets the ground.
 //
@@ -34,7 +34,7 @@ export const NEAR_WATER_TRANSMITTANCE_BINDING = 18;
 export const NEAR_RIVER_POINTS_BINDING = 0;
 export const NEAR_RIVER_QUADS_BINDING = 1;
 
-function commonWgsl() {
+export function commonWgsl() {
     return createWaterWgsl({ group: 1 }) + /* wgsl */`
 struct NearWaterU {
     viewMatrix: mat4x4<f32>,
@@ -94,20 +94,32 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Nea
 // Fragment shading shared by lakes and rivers, with distance handover
 // and aerial perspective.
 // Premultiplied colour, a = 0 where nothing is drawn.
-function shadeWgsl() {
+export function shadeWgsl() {
     return getAerialPerspectiveWGSL() + /* wgsl */`
 @group(1) @binding(${NEAR_WATER_TRANSMITTANCE_BINDING}) var transmittanceLUT: texture_2d<f32>;
 
-fn nearWaterShade(wp: vec3<f32>, level: f32) -> vec4<f32> {
+fn nearWaterShade(wp: vec3<f32>, level: f32, flatLake: bool) -> vec4<f32> {
     let dist = length(U.cameraPos - wp);
     let w = waterNearWeight(dist);
     // Seen from below (camera under the level): the underside comes with diving.
-    if (w <= 0.0 || length(U.cameraPos - U.origin) < U.R + level) { return vec4<f32>(0.0); }
+    if (w <= 0.0 || (flatLake && length(U.cameraPos - U.origin) < U.R + level)) { return vec4<f32>(0.0); }
     let up = normalize(wp - U.origin);
     let L = normalize(U.sunDir);
     let sun = U.sunColor * U.sunIntensity;
     let sky = U.ambientColor * U.ambientIntensity;
     let s = waterSurfaceTerms(wp, up, U.cameraPos, L, sun, sky);
+
+    return nearWaterCompose(wp, up, s);
+}
+
+// Shared premultiplied surface/body and atmosphere treatment. Simulation
+// supplies flow normals and foam but keeps the same lighting and handover.
+fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>) -> vec4<f32> {
+    let dist = length(U.cameraPos - wp);
+    let w = waterNearWeight(dist);
+    let L = normalize(U.sunDir);
+    let sun = U.sunColor * U.sunIntensity;
+    let sky = U.ambientColor * U.ambientIntensity;
 
     // The body must live on the surface geometry too. Compositing only
     // Fresnel over water-coloured bed polygons exposes their steep edges as
@@ -148,13 +160,13 @@ export function buildNearWaterFragmentShader() {
 @fragment
 fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
     let lake = waterLakes[in.lake];
-    let m = textureSampleLevel(waterLakeMasks, nearWaterSampler, in.uv, lake.maskLayer, 0.0).r;
-    if (m < 0.5) { discard; }
-    if (m < 0.75) {
+    let m = waterLakeMaskSample(lake,in.uv,nearWaterSampler);
+    if (m < select(0.5,63.5/255.0,lake.surfaceDepthRangeM>0.0)) { discard; }
+    if (lake.surfaceDepthRangeM<=0.0 && m < 0.75) {
         let river = waterRiverAt(normalize(in.wp - U.origin), lake.level);
         if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { discard; }
     }
-    let c = nearWaterShade(in.wp, lake.level);
+    let c = nearWaterShade(in.wp, lake.level, true);
     if (c.a <= 0.0) { discard; }
     return c;
 }
@@ -198,12 +210,20 @@ export function buildNearRiverFragmentShader() {
 @fragment
 fn main(in: NearRiverVOut) -> @location(0) vec4<f32> {
     let up = normalize(in.wp - U.origin);
+    // This mesh is double-sided. Classify its local sloped surface before
+    // divergent clipping, instead of comparing two planet-wide elevations.
+    let geometricNormal=cross(dpdx(in.wp),dpdy(in.wp));
+    let surfaceNormal=geometricNormal*select(-1.0,1.0,dot(geometricNormal,up)>=0.0);
+    if(dot(surfaceNormal,U.cameraPos-in.wp)<=0.0) { discard; }
     // A lake's mask covers the point: the lake's surface is drawn there.
     if (waterLakeLevelView(up, -1.0e30, nearWaterSampler, false) > WATER_NO_LAKE) { discard; }
     // Another river is nearer (confluences).
     let hit = waterRiverAt(up, in.level);
     if (!hit.near || hit.distM >= hit.halfWidthM || abs(hit.river - in.river) > 0.5) { discard; }
-    let c = nearWaterShade(in.wp, in.level);
+    // A downstream observer can be below an upstream river's elevation
+    // while viewing its top/front surface. Radial lake underside rejection
+    // would hide that waterfall; raster face/depth tests handle its geometry.
+    let c = nearWaterShade(in.wp, in.level, false) * (1.0 - waterSimCover(hit));
     if (c.a <= 0.0) { discard; }
     return c;
 }

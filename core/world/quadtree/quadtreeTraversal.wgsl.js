@@ -39,6 +39,7 @@
 export function buildTraversalShaderSource(config = {}) {
     const WG = config.workgroupSize ?? 64;
     const disableCulling = config.disableCulling === true;
+    const regionalFoundation = config.regionalFoundation === true;
 
     return /* wgsl */`
 // ─── Quadtree Traversal Compute Shader ────────────────────────────────────
@@ -76,6 +77,7 @@ struct TraversalParams {
     currentEpoch : u32,
     doVisibleClear : u32,
     _padEnd : f32,
+    ${regionalFoundation ? 'lodFoundation : vec4<f32>, // cells, shelf metres, regional metres, padding' : ''}
 };
 
 struct LoadedEntry {
@@ -165,6 +167,68 @@ fn getTileWorldCenter(face : u32, depth : u32, x : u32, y : u32) -> vec3<f32> {
     let sphereDir = normalize(cubePoint);
     return params.planetOrigin + sphereDir * params.planetRadius;
 }
+
+${regionalFoundation ? `
+// Reuse the terrain's pinned coarse controls for selection distance only.
+// Culling continues to use the sea-level centre and its existing height
+// envelope. No basin data, final-height readback, or render residency needed.
+@group(1) @binding(0) var lodMacroA: texture_2d_array<f32>;
+@group(1) @binding(1) var lodMacroB: texture_2d_array<f32>;
+struct LodShapeParams { address: vec4<f32>,info: vec4<f32>,water: vec4<f32>,limits: vec4<f32>, }
+@group(1) @binding(2) var<uniform> lodShapeParams: LodShapeParams;
+@group(1) @binding(3) var lodShapeField: texture_2d<f32>;
+
+fn lodSpline(t: f32) -> vec4<f32> {
+    let a = 1.0 - t;
+    return vec4<f32>(a*a*a, 3.0*t*t*t-6.0*t*t+4.0,
+        -3.0*t*t*t+3.0*t*t+3.0*t+1.0, t*t*t) / 6.0;
+}
+fn lodShapeHeight(face: u32,uv: vec2<f32>,fallback: f32) -> f32 {
+    var p=lodShapeParams;var offset=vec2<i32>(0);
+    if(p.limits.z==-2.0) {
+        let grid=i32(p.address.y);let directory=clamp(vec2<i32>(floor(uv*f32(grid))),vec2<i32>(0),vec2<i32>(grid-1));
+        let id=i32(textureLoad(lodShapeField,vec2<i32>(directory.x,i32(face)*grid+directory.y),0).x)-1;
+        if(id<0||id>=i32(p.limits.y)) { return fallback; }
+        offset=vec2<i32>((id%i32(p.address.z))*i32(p.address.w),i32(p.limits.x)+(id/i32(p.address.z))*i32(p.address.w));
+        let recordPos=vec2<i32>(id*4,6*grid);
+        p.address=textureLoad(lodShapeField,recordPos,0);p.info=textureLoad(lodShapeField,recordPos+vec2<i32>(1,0),0);
+        p.water=textureLoad(lodShapeField,recordPos+vec2<i32>(2,0),0);p.limits=textureLoad(lodShapeField,recordPos+vec2<i32>(3,0),0);
+    }
+    if(p.info.x<=0.0||face!=u32(p.address.x)) { return fallback; }
+    let pos=(uv*p.address.y-p.address.zw)*p.info.x;
+    var extent=vec2<f32>(p.info.x);var local=pos;
+    if(p.limits.z<0.0) { extent=p.limits.xy;local=pos-floor(pos/p.info.x)*p.info.x; }
+    if(any(pos<vec2<f32>(0.0))||any(pos>=extent)) { return fallback; }
+    let edge=clamp(min(local,vec2<f32>(p.info.x)-local)/p.info.y,vec2<f32>(0.0),vec2<f32>(1.0));
+    let blend=edge*edge*edge*(edge*(edge*6.0-15.0)+10.0);let weight=blend.x*blend.y;
+    let cell=vec2<i32>(floor(pos));let t=pos-vec2<f32>(cell);let u=lodSpline(t.x);let v=lodSpline(t.y);
+    var height=0.0;
+    for(var j=0;j<4;j++) { for(var i=0;i<4;i++) {
+        height+=textureLoad(lodShapeField,cell+vec2<i32>(i,j)+offset,0).x*u[i]*v[j];
+    } }
+    return mix(fallback,height,weight);
+}
+fn getTileLodCenter(tile: vec4<u32>, seaCentre: vec3<f32>) -> vec3<f32> {
+    let uv = (vec2<f32>(tile.zw) + vec2<f32>(0.5)) / f32(1u << tile.y);
+    let pos = uv * params.lodFoundation.x;
+    let cell = min(vec2<i32>(floor(pos)), vec2<i32>(i32(params.lodFoundation.x)-1));
+    let t = pos - vec2<f32>(cell);
+    let wu = lodSpline(t.x); let wv = lodSpline(t.y);
+    var a = vec4<f32>(0.0); var b = vec4<f32>(0.0);
+    for(var j=0;j<4;j++) { for(var i=0;i<4;i++) {
+        let w = wu[i] * wv[j];
+        a += textureLoad(lodMacroA, cell+vec2<i32>(i,j), i32(tile.x), 0)*w;
+        b += textureLoad(lodMacroB, cell+vec2<i32>(i,j), i32(tile.x), 0)*w;
+    } }
+    // Ocean selection still follows the visible sea-level surface.
+    let foundation = max(0.0, a.w*params.lodFoundation.y+b.z*params.lodFoundation.z)
+        * smoothstep(0.15, 0.45, a.x);
+    // Reuse the authoritative eroded generation field, before water cuts.
+    // This is a position estimate, not a new culling/minimum certificate.
+    let elevation=lodShapeHeight(tile.x,uv,foundation);
+    return seaCentre + normalize(seaCentre-params.planetOrigin)*elevation;
+}
+` : ''}
 
 // ─── Culling helpers ──────────────────────────────────────────────────────
 
@@ -569,7 +633,7 @@ fn main(@builtin(local_invocation_id) lid : vec3<u32>) {
             // only the LOD-appropriate leaves enter the visible list.
             // The instance builder handles texture fallback for unloaded leaves
             // (walks up the quadtree to the nearest loaded ancestor).
-            let wantSubdivide = shouldSubdivideWithCenter(depth, worldCenter);
+            let wantSubdivide = shouldSubdivideWithCenter(depth, ${regionalFoundation ? 'getTileLodCenter(tile, worldCenter)' : 'worldCenter'});
 
             if (!wantSubdivide) {
                 atomicAdd(&debugCounters[DC_EMITTED], 1u);

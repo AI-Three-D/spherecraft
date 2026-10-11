@@ -6,7 +6,9 @@
 //
 // Rendering is handled by renderer/terrain/QuadtreeTerrainRenderer.
 
-import { QuadtreeGPU } from './QuadtreeGPU.js';
+// Regional traversal requires the matching quadtree API. A versioned import
+// prevents an older browser-cached module from being mixed with this manager.
+import { QuadtreeGPU } from './QuadtreeGPU.js?regionalTerrainApi=1';
 import { TileStreamer } from './tileStreamer.js';
 import { TileAddress } from './tileAddress.js';
 import { TerrainGeometryBuilder } from '../../renderer/terrain/geometry/terrainGeometryBuilder.js';
@@ -140,6 +142,8 @@ export class QuadtreeTileManager {
 
         this.quadtreeGPU = new QuadtreeGPU(this.device, {
             maxHeightDisplacement: maxHeightDisplacement,
+            regionalTerrain: this.terrainGenerator?.regionalTerrainActive ? this.terrainGenerator.regionalTerrain : null,
+            regionalShapeLod:qt.regionalShapeLod,
             planetRadius: planetRadius,
             planetOrigin: planetOrigin,
             minTileSize: qt.minTileSizeMeters,
@@ -807,6 +811,7 @@ export class QuadtreeTileManager {
         this._updatePredictiveStreaming(camera);
 
         // ── (B) Uniform update ───────────────────────────────────────
+        this.quadtreeGPU.setRegionalTerrain(this.terrainGenerator?.regionalTerrainActive ? this.terrainGenerator.regionalTerrain : null);
         if (!frozen || !dp.freezeUniforms) {
             const baseThreshold = this.engineConfig.gpuQuadtree.lodErrorThreshold;
             const visibleLodScale = Number.isFinite(this._lodVisibleScale)

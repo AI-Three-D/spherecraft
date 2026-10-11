@@ -41,6 +41,80 @@ const slots = (gpu, c) => [gpu.index[c] & 0x7fff, (gpu.index[c] >>> 15) & 0x7fff
 const cam = { x: 0, y: 0, z: 200000 };
 
 describe('WaterGpuData', () => {
+    it('publishes more than 96 immutable masks together without eviction and keeps tile addresses inside their layers',()=>{
+        const dev=stubDevice(),uploads=[];dev.queue.writeTexture=(dst)=>uploads.push(dst.origin);
+        const gpu=new WaterGpuData(dev,{gridN:16,planetRadius:131072,maxLakes:112,maxMaskLayers:112,maskTilesPerAxis:4,maskLayerSize:8,
+            maxRiverCells:1,maxRiverSegs:1});
+        const svc=fakeService(),frame=svc.lakes[0].frame;
+        svc.riverOf=new Int32Array(6*16*16).fill(-1);svc.rivers=[];
+        svc.lakes=Array.from({length:112},(_,id)=>({id,level:100+id,frame}));
+        svc.lakeCells=Int32Array.from({length:112},(_,i)=>i);svc.lakeCellStart=Int32Array.from({length:113},(_,i)=>i);
+        svc.refined=new Map(svc.lakes.map(l=>[l.id,{level:l.level,frame,mask:new Uint8Array(64).fill(2),maskCells:new Int32Array([l.id])}]));
+        gpu.update(svc,cam,0);
+        expect(gpu._layerOf.size).toBe(112);expect(gpu.masksTexture.size).toEqual([32,32,7]);
+        for(const id of [0,3,4,15,16,95,96,111]) {
+            const code=gpu._tableI32[id*16+1];
+            expect(uploads[id]).toEqual({x:((code>>8)&15)*8,y:((code>>12)&15)*8,z:code&255});
+            expect(code>>16).toBe(4);
+        }
+        gpu.update(svc,{x:200000,y:0,z:0},1);expect(gpu._layerOf.size).toBe(112);expect(uploads).toHaveLength(112);
+    });
+    it('shares bank detail and cut limits without overwriting the simulation fade',()=>{
+        const gpu=new WaterGpuData(stubDevice(),{gridN:4,planetRadius:131072,maxMaskLayers:2,
+            carve:{enabled:true,bankDetail:1,bankCutM:6}});
+        gpu.site={river:0,s0:10,s1:100,halfM:5,endFadeM:8,sideFadeM:1,fade:.7};
+        gpu.update(fakeService(),cam,0);
+        const values=new Float32Array(gpu.paramsData);
+        expect(values[22]).toBe(6);expect(values[23]).toBeCloseTo(.7);expect(values[35]).toBe(1);
+    });
+    it('marks distant bed coverage only for carved structured reaches without islands',()=>{
+        const gpu=new WaterGpuData(stubDevice(),{gridN:4,planetRadius:131072,maxMaskLayers:2,carve:{enabled:true}});
+        const svc=fakeService(),points=new Float32Array(40);
+        points.set([0,0,1,105,15,1.5,.8,3,0,0,0,0,0,0,0,0,105,1.5,-1e20,0]);
+        points.set([.001,0,1,104,15,1.5,.8,3,0,0,0,0,0,0,0,0,104,1.5,-1e20,0],20);
+        const publish=structured=>{
+            svc.riverRecs.set(0,{structured,points:points.slice(),stride:20,segCellStart:Int32Array.from([0,1]),segCells:Int32Array.from([64])});
+            svc.version++;gpu.update(svc,cam,0);return gpu._segs[23];
+        };
+        expect(publish(true)).toBe(1);expect(publish(false)).toBe(0);
+        points[19]=.4;expect(publish(true)).toBe(0);
+        points[19]=0;gpu.carve.enabled=false;expect(publish(true)).toBe(0);
+    });
+    it('uploads only the valid tail when a compact river-cell pool ends partway through a row',()=>{
+        const dev=stubDevice(),gpu=new WaterGpuData(dev,{gridN:32,planetRadius:131072,maxRiverCells:1,maxRiverSegs:1,maxLakes:1,maskLayerSize:32,maxMaskLayers:1});
+        gpu._dirtyRows.add(2*gpu.cells/gpu.N);gpu._flushRows();
+        const u=dev.log.buffers.at(-1);expect(u.size).toBe(16);expect(u.dataOffset+u.size).toBe(gpu.index.length);
+    });
+    it('publishes packed bed depth using the existing mask allocation and clears its format when replaced',()=>{
+        const dev=stubDevice(),uploads=[];
+        dev.queue.writeTexture=(_dst,data)=>uploads.push(data.slice());
+        const gpu=new WaterGpuData(dev,{gridN:4,planetRadius:131072,maskLayerSize:8,maxMaskLayers:2});
+        const svc=fakeService(),frame=svc.lakes[0].frame;
+        const rec={level:100,frame,mask:new Uint8Array(64).fill(2),maskCells:new Int32Array([1,2]),
+            surfaceDepthMask:new Uint8Array(64).fill(160),surfaceDepthRangeM:16};
+        svc.refined.set(0,rec);gpu.update(svc,cam,0);
+        expect([...uploads[0]]).toEqual(new Array(64).fill(160));
+        expect(gpu._table[15]).toBe(16);expect(gpu._table[0]).toBe(100);
+        const replacement={...rec,surfaceDepthMask:undefined,surfaceDepthRangeM:0};
+        svc.refined.set(0,replacement);svc.version++;gpu.update(svc,cam,0);
+        expect(gpu._table[15]).toBe(0);expect([...uploads.at(-1)]).toEqual(new Array(64).fill(255));
+    });
+    it('repeated water publication releases its valley allocations as well as lake/river data', () => {
+        const dev=stubDevice();let liveBytes=0;
+        for(const method of ['createBuffer','createTexture']) {
+            const original=dev[method];
+            dev[method]=d=>{
+                const resource=original(d),bytes=typeof d.size==='number'?d.size:d.size.reduce((a,b)=>a*b,1);
+                liveBytes+=bytes;let destroyed=false;
+                resource.destroy=()=>{if(!destroyed) {liveBytes-=bytes;destroyed=true;}};
+                return resource;
+            };
+        }
+        for(let i=0;i<3;i++) {
+            const gpu=new WaterGpuData(dev,{gridN:4,planetRadius:131072,valley:{enabled:true},maxValleyPages:3});
+            expect(liveBytes).toBeGreaterThan(0);gpu.destroy();expect(liveBytes).toBe(0);
+        }
+    });
     it('builds the index from graph cells and river bits', () => {
         const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
         gpu.update(fakeService(), cam, 0);

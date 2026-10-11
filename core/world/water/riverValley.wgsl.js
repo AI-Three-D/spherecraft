@@ -1,6 +1,5 @@
-// C2 sampling of cached hill, excavation and drainage fields. Hill heights
-// and excavation enter before the existing Runevision erosion pass.
-// No bank fill or corridor-wide terrain uplift.
+// C2 sampling of cached bank excavation. Applied after the existing terrain
+// stack: no added hills, bank fill or river-specific erosion changes.
 
 import { RIVER_CARVE_GROUP } from './riverCarve.wgsl.js';
 
@@ -11,17 +10,15 @@ export const RIVER_VALLEY_BINDINGS = Object.freeze({ pages: 4, texels: 5, params
  * @param {object} [o]
  * @param {boolean} [o.enabled=true]  false: pass-through stubs (no bindings)
  * @param {number} [o.page=32]        texels per page side (riverValley.js)
- * @returns {string} WGSL: ValleyShape, valleyShapeAt(unitDir), valleyApplyPre_d(shape, hNorm)
- *   (before erosion)
+ * @returns {string} WGSL: ValleyShape, valleyShapeAt(unitDir), valleyApply_d(shape, hNorm)
  */
 export function createRiverValleyWgsl({ enabled = true, page = 32 } = {}) {
     if (!enabled) {
         return /* wgsl */`
 // River valleys off in this shader (riverValley.wgsl.js).
-struct ValleyShape { isOn: bool, erosionRelief: vec4<f32>, erosionFloor: vec4<f32>, erosionAmount: vec4<f32>, erosionDepth: vec4<f32>, erosionRidge: vec4<f32>, }
+struct ValleyShape { isOn: bool, cut: vec4<f32>, }
 fn valleyShapeAt(unitDir: vec3<f32>) -> ValleyShape { var s: ValleyShape; s.isOn = false; return s; }
-fn valleyApplyPre_d(s: ValleyShape, hNorm: vec4<f32>) -> vec4<f32> { return hNorm; }
-fn valleyBoundBanks_d(s: ValleyShape, hNorm: vec4<f32>) -> vec4<f32> { return hNorm; }
+fn valleyApply_d(s: ValleyShape, hNorm: vec4<f32>) -> vec4<f32> { return hNorm; }
 `;
     }
     const B = RIVER_VALLEY_BINDINGS, G = RIVER_CARVE_GROUP;
@@ -32,23 +29,18 @@ fn valleyBoundBanks_d(s: ValleyShape, hNorm: vec4<f32>) -> vec4<f32> { return hN
         taps += `
     {
         let q = valleyTexels[base + (lj0 + ${jj}) * ${ST} + li0 + ${ii}];
-        let dw = unpack2x16float(q.y);
-        let v0 = vec4<f32>(dw.x, bitcast<f32>(q.x), dw.y, select(0.0, 1.0, q.w != 0u));
-        let v1 = vec4<f32>(unpack2x16float(q.z).x, f32(q.z >> 31u), bitcast<f32>(q.w), unpack2x16float((q.z >> 16u) & 0x7fffu).x);
+        let v = vec2<f32>(bitcast<f32>(q.x), f32(q.z >> 31u));
         let w = wx.${cx} * wy.${cy};
         let wdx = dwx.${cx} * wy.${cy};
         let wdy = wx.${cx} * dwy.${cy};
-        a0 += v0 * w; ax0 += v0 * wdx; ay0 += v0 * wdy;
-        a1 += v1 * w; ax1 += v1 * wdx; ay1 += v1 * wdy;
+        a += v * w; ax += v * wdx; ay += v * wdy;
     }`;
     }
     return /* wgsl */`
 // ==================== River valleys (core/world/water/riverValley.wgsl.js) ====
 struct ValleyParams {
     texels: f32, pageSize: u32, pagesPerEdge: u32, on: u32,
-    erosionStrength: f32, erosionDepthFraction: f32, erosionRidgeFraction: f32, reserved0: f32,
-    reserved1: vec4<f32>,
-    reserved2: vec3<f32>, erosionReliefScale: f32,
+    reserved0: vec4<f32>, reserved1: vec4<f32>, reserved2: vec4<f32>,
 }
 @group(${G}) @binding(${B.pages}) var<storage, read> valleyPages: array<u32>;
 @group(${G}) @binding(${B.texels}) var<storage, read> valleyTexels: array<vec4<u32>>;
@@ -103,21 +95,9 @@ fn valleyBDW(f: f32) -> vec4<f32> {
     return vec4<f32>(-3.0 + 6.0 * f - 3.0 * f2, -12.0 * f + 9.0 * f2, 3.0 + 6.0 * f - 9.0 * f2, 3.0 * f2) * (1.0 / 6.0);
 }
 
-struct ValleyShape {
-    isOn: bool,
-    hill: vec4<f32>,
-    cut: vec4<f32>,
-    erosionRelief: vec4<f32>,
-    erosionFloor: vec4<f32>,
-    erosionAmount: vec4<f32>,
-    erosionDepth: vec4<f32>,
-    erosionRidge: vec4<f32>,
-    bankReference: vec4<f32>,
-    bankClearance: vec4<f32>,
-    bankCoverage: vec4<f32>,
-}
+struct ValleyShape { isOn: bool, cut: vec4<f32>, }
 
-// The cached landforms at a direction (once per height evaluation).
+// The cached cut at a direction (once per height evaluation).
 fn valleyShapeAt(dir: vec3<f32>) -> ValleyShape {
     var s: ValleyShape;
     s.isOn = false;
@@ -138,68 +118,23 @@ fn valleyShapeAt(dir: vec3<f32>) -> ValleyShape {
     let lj0 = clamp(jb - 1 - (pj * P - 2), 0, ${ST - 4});
     let wx = valleyBW(tx - fxb); let wy = valleyBW(ty - fyb);
     let dwx = valleyBDW(tx - fxb); let dwy = valleyBDW(ty - fyb);
-    var a0 = vec4<f32>(0.0); var ax0 = vec4<f32>(0.0); var ay0 = vec4<f32>(0.0);
-    var a1 = vec4<f32>(0.0); var ax1 = vec4<f32>(0.0); var ay1 = vec4<f32>(0.0);
+    var a = vec2<f32>(0.0); var ax = vec2<f32>(0.0); var ay = vec2<f32>(0.0);
     ${taps}
     let gtx = fu.gx * (0.5 * T);
     let gty = fu.gy * (0.5 * T);
-    // Sparse morphology: independent hill footprints minus cut-only bank
-    // retreat. The existing erosion pass sees the actual excavated landform.
-    let hill = vec4<f32>(a0.x, ax0.x * gtx + ay0.x * gty);
-    let cut = vec4<f32>(a0.y, ax0.y * gtx + ay0.y * gty);
-    let hillErode = vec4<f32>(a0.z, ax0.z * gtx + ay0.z * gty);
-    let cutErode = vec4<f32>(a1.x, ax1.x * gtx + ay1.x * gty);
-    let lakeGuard = vec4<f32>(a1.y, ax1.y * gtx + ay1.y * gty);
-    let coverage = vec4<f32>(a0.w, ax0.w * gtx + ay0.w * gty);
-    let reference = vec4<f32>(a1.z, ax1.z * gtx + ay1.z * gty);
-    let clearance = vec4<f32>(a1.w, ax1.w * gtx + ay1.w * gty);
+    let cut = vec4<f32>(a.x, ax.x * gtx + ay.x * gty);
+    let lakeGuard = vec4<f32>(a.y, ax.y * gtx + ay.y * gty);
     let keep = dConst(1.0) - dQuintic(dClamp(lakeGuard * 8.0, 0.0, 1.0));
-    s.isOn = hill.x + cut.x > 0.001;
-    s.hill = dMul(hill, keep);
     s.cut = dMul(cut, keep);
-    let erodibleRelief = hillErode + cutErode;
-    s.erosionRelief = dMul(erodibleRelief, keep) * valleyP.erosionReliefScale;
-    s.erosionFloor = dMul(dSmoothstep(2.0, 30.0, erodibleRelief), keep) * 0.5;
-    // River banks do not need mountain-sized relief before they can erode.
-    // Their material controls the local amount, while the actual terrain
-    // slope still gates the same Runevision call. No extra erosion pass.
-    let physicalRelief = s.hill + s.cut;
-    let material = dClamp(dDiv(dMul(erodibleRelief, keep), physicalRelief + dConst(0.01)), 0.0, 1.0);
-    s.erosionAmount = dMul(dSmoothstep(2.0, 20.0, physicalRelief), material) * valleyP.erosionStrength;
-    s.erosionDepth = physicalRelief * valleyP.erosionDepthFraction;
-    s.erosionRidge = physicalRelief * valleyP.erosionRidgeFraction;
-    if (coverage.x > 0.001) {
-        s.bankReference = dDiv(reference, coverage);
-        s.bankClearance = dDiv(clearance, coverage);
-        s.bankCoverage = dMul(dSmoothstep(0.1, 0.9, coverage), keep);
-    }
+    s.isOn = s.cut.x > 0.0;
     return s;
 }
 
-// The landform (normalized height dual) shaped toward the valley before erosion.
-fn valleyApplyPre_d(s: ValleyShape, hNorm: vec4<f32>) -> vec4<f32> {
+// Nonnegative cut depths and positive B-spline weights only lower terrain.
+// Nothing feeds back into Runevision or changes the natural terrain outside banks.
+fn valleyApply_d(s: ValleyShape, hNorm: vec4<f32>) -> vec4<f32> {
     if (!s.isOn) { return hNorm; }
-    return hNorm + (s.hill - s.cut) / maxTerrainHeightM();
-}
-
-// Changing the slope changes the filter's gully pattern. Keep those changes
-// relative to the sampled, excavated bank, rather than letting mountain-scale
-// amplitude flood low banks. This never adds a ridge above natural ground:
-// its positive budget is only a fraction of material already excavated.
-fn valleyBoundBanks_d(s: ValleyShape, hNorm: vec4<f32>) -> vec4<f32> {
-    if (!s.isOn || s.bankCoverage.x <= 0.001) { return hNorm; }
-    let maxH = maxTerrainHeightM();
-    let reference = s.bankReference / maxH;
-    let diff = hNorm - reference;
-    var budget = s.cut * valleyP.erosionRidgeFraction / maxH;
-    if (diff.x < 0.0) {
-        budget = s.bankClearance * valleyP.erosionDepthFraction / maxH;
-    }
-    budget += dConst(0.01 / maxH);
-    // Smooth saturation, with analytic derivatives and no hard contour shelf.
-    let ratio = dDiv(diff, budget);
-    let limited = reference + dDiv(diff, dSqrt(dConst(1.0) + dMul(ratio, ratio)));
-    return hNorm + dMul(limited - hNorm, s.bankCoverage);
+    return hNorm - s.cut / maxTerrainHeightM();
 }
 `;
 }

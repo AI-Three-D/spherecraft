@@ -905,6 +905,24 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     }
                 }
 
+                // The caller can copy these outputs into the atlas and
+                // destroy them before our asynchronous diagnostic readback.
+                // Capture owned copies in this submission, while the outputs
+                // are still alive. Only the first three startup probes pay
+                // for these copies; ordinary terrain generation is unchanged.
+                let diagnosticSplatPass = null;
+                if (shouldRunProbePasses) {
+                    diagnosticSplatPass = {
+                        ...splatPass,
+                        tileTex: this.createSampledGPUTexture(innerSize, innerSize, splatPass.tileFormat || 'r8unorm'),
+                        splatTex: this.createSampledGPUTexture(innerSize, innerSize, 'rgba8unorm')
+                    };
+                    enc.copyTextureToTexture({ texture: splatPass.tileTex },
+                        { texture: diagnosticSplatPass.tileTex }, [innerSize, innerSize]);
+                    enc.copyTextureToTexture({ texture: splatPass.splatTex },
+                        { texture: diagnosticSplatPass.splatTex }, [innerSize, innerSize]);
+                }
+
                 this.device.queue.submit([enc.finish()]);
                 const validationErrorPromise = shouldCaptureValidationError
                     ? this.device.popErrorScope().catch(() => null)
@@ -916,8 +934,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 ])
                     .then(async ([, validationError]) => {
                         try {
-                            await this._debugAnalyzeQuadtreeSplatPass(
-                                splatPass,
+                            if (diagnosticSplatPass) await this._debugAnalyzeQuadtreeSplatPass(
+                                diagnosticSplatPass,
                                 paddedTileMap,
                                 innerSize,
                                 paddedSize,
@@ -940,6 +958,10 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         try { paddedSmoothSplatData.destroy(); } catch { /* ignore cleanup failure */ }
                         try { paddedSmoothSplatIndex.destroy(); } catch { /* ignore cleanup failure */ }
                         try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ }
+                        if (diagnosticSplatPass) {
+                            try { diagnosticSplatPass.tileTex.destroy(); } catch { /* ignore cleanup failure */ }
+                            try { diagnosticSplatPass.splatTex.destroy(); } catch { /* ignore cleanup failure */ }
+                        }
                         if (debugProbeTextures) {
                             try { debugProbeTextures.constantWrite.destroy(); } catch { /* ignore cleanup failure */ }
                             try { debugProbeTextures.tileEcho.destroy(); } catch { /* ignore cleanup failure */ }

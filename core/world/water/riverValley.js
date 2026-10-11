@@ -1,17 +1,13 @@
-// Sparse cached river terrain: independent hill heights, cut-only bank
-// retreat, and bank controls for the existing Runevision filter.
-// Four packed words per texel, with a C2 B-spline and identical page aprons.
+// Sparse cut-only bank retreat, applied after the existing terrain stack.
+// C2 B-spline sampling and identical page aprons keep bank slopes continuous.
+// The four-word storage layout is retained; unused words are reserved and zero.
 
 import { dirToFaceUV, faceUVToDir } from '../hydrology/waterGraph.js';
 import { planeToDir, tangentBasis } from '../hydrology/lakeRefine.js';
-import { riverHillAt, riverIncisionSampler } from '../hydrology/riverLandscape.js';
+import { riverIncisionSampler } from '../hydrology/riverLandscape.js';
 
 export const RIVER_VALLEY_DEFAULTS = Object.freeze({
     enabled: true,
-    erosionReliefScale: 3,
-    erosionStrength: 0.65,
-    erosionDepthFraction: 0.5,
-    erosionRidgeFraction: 0.1,
     texels: 4096,
     page: 32,
     dBig: 650,
@@ -19,35 +15,8 @@ export const RIVER_VALLEY_DEFAULTS = Object.freeze({
 
 const norm3 = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l]; };
 
-// IEEE 754 half float bits of a number (round to nearest even).
 const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
-export function toHalfBits(x) {
-    f32[0] = x;
-    const b = u32[0], sign = (b >>> 16) & 0x8000;
-    let exp = ((b >>> 23) & 0xff) - 127 + 15, mant = b & 0x7fffff;
-    if (exp >= 31) return sign | 0x7c00;                      // overflow: inf
-    if (exp <= 0) {
-        if (exp < -10) return sign;                           // underflow: 0
-        mant |= 0x800000;
-        const shift = 14 - exp;
-        let h = mant >>> shift;
-        const rem = mant & ((1 << shift) - 1), half = 1 << (shift - 1);
-        if (rem > half || (rem === half && (h & 1))) h++;
-        return sign | h;
-    }
-    let h = (exp << 10) | (mant >>> 13);
-    const rem = mant & 0x1fff;
-    if (rem > 0x1000 || (rem === 0x1000 && (h & 1))) h++;
-    return sign | h;
-}
-export function fromHalfBits(h) {
-    const s = h & 0x8000 ? -1 : 1, e = (h >>> 10) & 0x1f, m = h & 0x3ff;
-    if (e === 0) return s * m * 2 ** -24;
-    if (e === 31) return m ? NaN : s * Infinity;
-    return s * (1 + m / 1024) * 2 ** (e - 15);
-}
-const pack2 = (a, b) => (toHalfBits(a) | (toHalfBits(b) << 16)) >>> 0;
-const f32bits = (x) => { f32[0] = x; return u32[0]; };
+const f32bits = x => { f32[0] = x; return u32[0]; };
 
 /** Layout constants of a field configuration. */
 export function valleyLayout(opts = RIVER_VALLEY_DEFAULTS) {
@@ -116,19 +85,6 @@ export function valleyRiverIncisionPages(rv, R, opts = RIVER_VALLEY_DEFAULTS) {
     return pages;
 }
 
-/** Conservative page/independent-hill intersection, including the apron. */
-export function valleyPageTouchesHill(pid, hill, R, opts = RIVER_VALLEY_DEFAULTS) {
-    const { T, P, PE } = valleyLayout(opts);
-    const face = Math.floor(pid / (PE * PE)), pj = Math.floor(pid % (PE * PE) / PE), pi = pid % PE;
-    const c = faceUVToDir(face, (pi + 0.5) / PE, (pj + 0.5) / PE);
-    let radius = 0;
-    for (const x of [pi * P - 3, (pi + 1) * P + 3]) for (const y of [pj * P - 3, (pj + 1) * P + 3]) {
-        const corner = faceUVToDir(face, x / T, y / T);
-        radius = Math.max(radius, Math.hypot(c[0] - corner[0], c[1] - corner[1], c[2] - corner[2]) * R);
-    }
-    return Math.hypot(c[0] - hill.c[0], c[1] - hill.c[1], c[2] - hill.c[2]) * R < radius * 1.05 + Math.max(hill.a, hill.b) * 1.2;
-}
-
 /** River directions and sparse baked landscape for page selection. */
 export function valleyRiverFromRecord(rec, R) {
     const P = rec.points, st = rec.stride, n = P.length / st;
@@ -148,58 +104,30 @@ export function valleyParamsData(opts = RIVER_VALLEY_DEFAULTS, on = true) {
     const { T, P, PE } = valleyLayout(opts);
     const buf = new ArrayBuffer(64), f = new Float32Array(buf), u = new Uint32Array(buf);
     f[0] = T; u[1] = P; u[2] = PE; u[3] = on ? 1 : 0;
-    f[4] = opts.erosionStrength ?? 0.65;
-    f[5] = opts.erosionDepthFraction ?? 0.5;
-    f[6] = opts.erosionRidgeFraction ?? 0.1;
-    f[15] = opts.erosionReliefScale ?? 3;
     return buf;
 }
 
-// Morphology pages: cut depth (f32), hill / erodible hill height (half),
-// erodible cut depth (half), clearance (15 positive half-float bits) and
-// lake guard (one bit), bank reference elevation (f32). Absolute elevations
-// need f32 precision even when a high-altitude bank is only a metre deep.
-// B-spline weights keep cuts
-// and independent hill footprints bounded.
+// Texels hold f32 cut depth in x and a categorical lake guard in z's high bit.
+// y and w are reserved. No hill, extra erosion or terrain fill data is baked.
 export function bakeValleyPages(pageIds, rivers, { R, lakeLevelAt = null }, opts = RIVER_VALLEY_DEFAULTS) {
     const { T, P, PE, ST, TEX } = valleyLayout(opts);
     const fields = rivers.filter(r => r.landscape).map(r => ({ sample: r.field ?? riverIncisionSampler(r.landscape, R),
         pages: valleyRiverIncisionPages(r, R, opts) }));
-    const hills = new Map();
-    for (const r of rivers) for (const h of r.landscape?.hills ?? []) {
-        if (!hills.has(h.id) || hills.get(h.id).height < h.height) hills.set(h.id, h);
-    }
     const texels = new Uint32Array(pageIds.length * TEX * 4);
-    const sample = new Float64Array(5);
     let near = 0;
     pageIds.forEach((pid, slot) => {
         const face = Math.floor(pid / (PE * PE)), pj = Math.floor((pid % (PE * PE)) / PE), pi = pid % PE;
         const i0 = pi * P - 2, j0 = pj * P - 2;
-        const centre = faceUVToDir(face, (pi + 0.5) / PE, (pj + 0.5) / PE);
-        const corner = faceUVToDir(face, (i0 + 0.5) / T, (j0 + 0.5) / T);
-        const radius = Math.hypot(...centre.map((v, i) => v - corner[i])) * R * 1.5;
-        const localHills = [...hills.values()].filter(h => Math.hypot(...h.c.map((v, i) => v - centre[i])) * R < radius + Math.max(h.a, h.b) * 1.2);
         const localFields = fields.filter(f => f.pages.has(pid));
         for (let j = 0; j < ST; j++) for (let i = 0; i < ST; i++) {
             const dir = faceUVToDir(face, (i0 + i + 0.5) / T, (j0 + j + 0.5) / T);
-            let cut = 0, erodedCut = 0, hill = 0, erodedHill = 0, reference = 0, clearance = 0;
-            for (const field of localFields) {
-                field.sample.all(dir, sample);
-                if (sample[0] > cut) {
-                    cut = sample[0];
-                    reference = sample[4] > 0 ? sample[2] / sample[4] : 0;
-                    clearance = sample[4] > 0 ? sample[3] / sample[4] : 0;
-                }
-                erodedCut = Math.max(erodedCut, sample[1]);
-            }
-            for (const h of localHills) { const v = riverHillAt(dir, h, R); hill += v; erodedHill += v * h.erosion; }
-            const lake = lakeLevelAt && Number.isFinite(lakeLevelAt(dir)) ? 1 : 0;
-            if (lake) { cut = 0; hill = 0; erodedHill = 0; erodedCut = 0; reference = 0; clearance = 0; }
+            const lake = lakeLevelAt && Number.isFinite(lakeLevelAt(dir));
+            let cut = 0;
+            if (!lake) for (const field of localFields) cut = Math.max(cut, field.sample(dir));
             const w = (slot * TEX + j * ST + i) * 4;
-            texels[w] = f32bits(cut); texels[w + 1] = pack2(hill, erodedHill);
-            texels[w + 2] = (toHalfBits(erodedCut) | (toHalfBits(clearance) << 16) | (lake ? 0x80000000 : 0)) >>> 0;
-            texels[w + 3] = f32bits(reference);
-            if (cut > 0 || hill > 0) near++;
+            texels[w] = f32bits(cut);
+            texels[w + 2] = lake ? 0x80000000 : 0;
+            if (cut > 0) near++;
         }
     });
     return { texels, near };

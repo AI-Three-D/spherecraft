@@ -32,22 +32,27 @@ import { ShallowWaterSim } from './ShallowWaterSim.js';
 import { SWE_OPEN_BOTTOM, SWE_OPEN_TOP } from './shallowWaterSim.wgsl.js';
 import { createRiverStrip } from './riverStrip.js';
 import { riverShapeMaxScale } from './riverShapeNoise.js';
+import { advanceWaterSimClock } from './waterSimClock.js';
 
 export const WATER_RIVER_SIM_DEFAULTS = Object.freeze({
     dx: 1.0,               // cell size (m); larger for rivers wider than maxCols
-    lengthM: 768,          // window along the river
-    marginM: 10,           // strip reaches this far beyond the channel's edge (banks)
+    lengthM: 256,          // bounded close window; static ribbons remain immediately visible
+    marginM: 6,
     maxCols: 128,
-    shiftM: 64,            // the window moves along the river in steps of this
-    substepsPerFrame: 2,   // of SWE dt (1/120 s): real time at 60 fps
+    shiftM: 32,
+    maxSubstepsPerFrame: 8, // real elapsed time at fixed dt, bounded catch-up
     inflowRows: 16, inflowRate: 6,     // 1/s at the upstream end
     outflowRows: 16, outflowRate: 1,   // 1/s at the downstream end (level only pulls gently)
     fadeSeconds: 0.6,
-    warmupSubsteps: 240,   // hidden after placing (2 s of simulated time) ..
-    warmupPerFrame: 48,    // .. this many per frame
-    endFadeM: 48,          // the simulated surface fades into the static water at the window's ends
+    warmupSubsteps: 16,    // starts at the already wet design level, no travelling fill front
+    warmupPerFrame: 8,
+    endFadeM: 32,
     sideFadeM: 4,
-    sim: {},               // SWE_DEFAULTS overrides (ShallowWaterSim.js)
+    waveAmpM: 0.06,
+    minFlowSpeedMps: 0.5,   // prescribed visual base flow; regional Q currently is a placement placeholder
+    fastFlowSpeedMps: 3.0,
+    fastFlowSlope: 0.08,
+    sim: {referenceFlow:true,macCormack:false},
     shape: null,           // the river shape's noise amounts (WaterService config.carve)
 });
 
@@ -122,7 +127,8 @@ export class WaterRiverSim {
         this.device = device;
         this.sampler = sampler;
         this.R = radius;
-        this.config = { ...WATER_RIVER_SIM_DEFAULTS, ...config };
+        this.config = { ...WATER_RIVER_SIM_DEFAULTS, ...config,
+            sim:{...WATER_RIVER_SIM_DEFAULTS.sim,...config.sim} };
         this.state = 'idle';     // idle | placing | running
         this.sim = null;
         this.riverId = -1;
@@ -135,6 +141,8 @@ export class WaterRiverSim {
         this._sHint = null;
         this._generation = 0;
         this._warmLeft = 0;
+        this._clock = {remainderS:0,droppedS:0};
+        this.diagnostics = {placeMs:0,sampleMs:0,shifts:0,lastShiftMs:0,lastSubsteps:0,droppedS:0};
         const module = device.createShaderModule({ label: 'WaterRiverSim-init', code: INIT_WGSL });
         const C = GPUShaderStage.COMPUTE;
         this._initLayout = device.createBindGroupLayout({ entries: [
@@ -146,8 +154,8 @@ export class WaterRiverSim {
             { binding: 5, visibility: C, buffer: { type: 'storage' } },
         ] });
         const layout = device.createPipelineLayout({ bindGroupLayouts: [this._initLayout] });
-        this._initPipeline = device.createComputePipeline({ layout, compute: { module, entryPoint: 'initMain' } });
-        this._relaxPipeline = device.createComputePipeline({ layout, compute: { module, entryPoint: 'relaxMain' } });
+        this.ready=Promise.all(['initMain','relaxMain'].map(entryPoint=>device.createComputePipelineAsync({layout,compute:{module,entryPoint}})))
+            .then(([init,relax])=>{this._initPipeline=init;this._relaxPipeline=relax;});
         this._initUniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         this._relaxUniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     }
@@ -165,7 +173,7 @@ export class WaterRiverSim {
         this.sim?.destroy();
         this.rowsBuffer?.destroy();
         this.sim = new ShallowWaterSim(this.device, {
-            W, L, dx, openMask: SWE_OPEN_BOTTOM | SWE_OPEN_TOP, ...this.config.sim,
+            W, L, dx, asyncPipelines:true,openMask: SWE_OPEN_BOTTOM | SWE_OPEN_TOP, ...this.config.sim,
         });
         this.rowsBuffer = this.device.createBuffer({ label: 'WaterRiverSim-rows', size: L * ROW_FLOATS * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         const bg = (pipeline, uniform) => this.device.createBindGroup({ layout: this._initLayout, entries: [
@@ -203,8 +211,25 @@ export class WaterRiverSim {
      */
     _inflowScales(rows, bed, count) {
         const { W } = this, dx = this.dx;
+        const sections=[];
+        let maxQ=Infinity;
+        for(let r=0;r<count;r++){
+            const eta=rows[r*ROW_FLOATS+3];let area=0,sum=0,maxPow=0;
+            for(let i=0;i<W;i++){
+                const h=Math.max(0,eta-bed[r*W+i]),p=Math.pow(h,2/3);area+=h*dx;sum+=h*p*dx;maxPow=Math.max(maxPow,p);
+            }
+            sections.push(area);if(maxPow>0)maxQ=Math.min(maxQ,6*sum/maxPow);
+        }
+        if(this.config.sim.referenceFlow && this._referenceQ==null){
+            const slope=Math.max(0,(rows[3]-rows[(count-1)*ROW_FLOATS+3])/Math.max(1,(count-1)*dx));
+            const c=this.config,speed=c.minFlowSpeedMps+(c.fastFlowSpeedMps-c.minFlowSpeedMps)*Math.min(1,slope/c.fastFlowSlope);
+            const medianArea=sections.sort((a,b)=>a-b)[Math.floor(count/2)];
+            this._referenceQ=Math.min(maxQ,Math.max(rows[11],medianArea*speed));
+            this.diagnostics.referenceQ=this._referenceQ;
+            this.diagnostics.referenceSpeedMps=speed;
+        }
         for (let r = 0; r < count; r++) {
-            const o = r * ROW_FLOATS, eta = rows[o + 3], Q = rows[o + 11];
+            const o = r * ROW_FLOATS, eta = rows[o + 3], Q = this._referenceQ??rows[o + 11];
             let sum = 0;
             for (let i = 0; i < W; i++) { const h = eta - bed[r * W + i]; if (h > 0) sum += Math.pow(h, 5 / 3) * dx; }
             rows[o + 11] = sum > 1e-4 ? Q / sum : 0;
@@ -254,10 +279,12 @@ export class WaterRiverSim {
      * length sCenter (m). Async: samples the bed.
      */
     async place(riverId, rec, sCenter) {
+        const started=performance.now();
         const gen = ++this._generation;
         this.state = 'placing';
         this._pending = null;
         this.fade = 0;
+        this._referenceQ=null;
         const c = this.config;
         const strip = createRiverStrip(rec, this.R);
         // Wide enough for the channel at its widest and most wandering (riverShapeNoise.js).
@@ -270,9 +297,11 @@ export class WaterRiverSim {
         this.riverId = riverId;
         this.rec = rec;
         this.halfM = 0.5 * W * dx;
-        const jStart = Math.round(sCenter / dx - L / 2);
+        const jStart = Math.max(0,Math.min(Math.max(0,Math.floor(strip.length/dx)-L),Math.round(sCenter / dx - L / 2)));
         const { rows, dirs } = this._buildRows(jStart, L);
+        const sampleStarted=performance.now();
         const bed = await this.sampler.sampleDirsCarved(dirs);
+        await Promise.all([this.ready,this.sim.ready]);
         if (gen !== this._generation) return;            // replaced meanwhile
         if (!bed) { this.state = 'idle'; return; }
         this._inflowScales(rows, bed, L);
@@ -282,6 +311,10 @@ export class WaterRiverSim {
         this.sim.setTurbulence(new Float32Array(W * L));
         this._dispatchInit(0, L);
         this.sim.time = 0;
+        this._lastNow=null;
+        this._clock={remainderS:0,droppedS:0};
+        this.diagnostics.placeMs=performance.now()-started;
+        this.diagnostics.sampleMs=performance.now()-sampleStarted;
         this._sHint = sCenter;
         this.state = 'running';
         // Hidden warm-up first (encode), then the fade-in.
@@ -302,15 +335,17 @@ export class WaterRiverSim {
         this._sHint = near.s;
         if (this._pending) return near.dist;
         const dx = this.dx, centre = (this.jStart + this.L / 2) * dx, shift = Math.round(this.config.shiftM / dx);
-        if (near.s - centre > this.config.shiftM) this._shift(shift);
-        else if (centre - near.s > this.config.shiftM) this._shift(-shift);
+        if (near.s - centre > this.config.shiftM && this.s1+shift*dx <= this.strip.length) this._shift(shift);
+        else if (centre - near.s > this.config.shiftM && this.jStart>=shift) this._shift(-shift);
         return near.dist;
     }
 
     async _shift(k) {
+        const started=performance.now();
         const gen = this._generation;
         const { L } = this;
         const n = Math.abs(k);
+        if(n===0||n>=L) return;
         const jFrom = k > 0 ? this.jStart + L : this.jStart - n;
         const pending = this._pending = { k };
         const { rows, dirs } = this._buildRows(jFrom, n);
@@ -318,6 +353,8 @@ export class WaterRiverSim {
         if (gen !== this._generation || this._pending !== pending || this.state !== 'running') return;
         this._pending = null;
         if (!bed) return;
+        this.diagnostics.shifts++;
+        this.diagnostics.lastShiftMs=performance.now()-started;
         this._inflowScales(rows, bed, n);
         const sim = this.sim;
         if (k > 0) {
@@ -337,7 +374,7 @@ export class WaterRiverSim {
 
     /** Encodes this frame's substeps; nowS (s) drives the fade. */
     encode(encoder, nowS) {
-        const dt = this._lastNow === null ? 0 : Math.max(0, Math.min(0.25, nowS - this._lastNow));
+        const dt = this._lastNow === null ? 0 : Math.max(0, nowS - this._lastNow);
         this._lastNow = nowS;
         const rate = 1 / Math.max(1e-3, this.config.fadeSeconds);
         this.fade = Math.max(0, Math.min(1, this.fade + Math.sign(this._fadeTarget - this.fade) * rate * dt));
@@ -350,11 +387,17 @@ export class WaterRiverSim {
             return;
         }
         if (this._fadeTarget === 0 && this.fade <= 0) { this.stop(); return; }
-        this.sim.encode(encoder, this.config.substepsPerFrame);
+        const steps=advanceWaterSimClock(this._clock,dt,this.sim.params.dt,this.config.maxSubstepsPerFrame);
+        this.diagnostics.lastSubsteps=steps;
+        this.diagnostics.droppedS=this._clock.droppedS;
+        if(steps>0)this.sim.encode(encoder,steps);
     }
 
     /** Fades out, then stops (the static water shows again); keep encoding meanwhile. */
     deactivate() { this._fadeTarget = 0; this._warmLeft = 0; }
+
+    /** Returning inside the activation range cancels an in-progress fade. */
+    activate() { if(this.state==='running'&&this._warmLeft<=0)this._fadeTarget=1; }
 
     /** Stops at once. */
     stop() {
@@ -370,12 +413,15 @@ export class WaterRiverSim {
 
     /** For WaterGpuData.site: the river stretch the simulated surface draws. */
     get coverage() {
-        if (this.state !== 'running' || this.fade <= 0) return null;
+        if (this.state !== 'running' || this.fade <= 0 || this.surfaceReady===false) return null;
         const c = this.config;
         return { river: this.riverId, s0: this.s0, s1: this.s1, halfM: this.halfM, endFadeM: c.endFadeM, sideFadeM: c.sideFadeM, fade: this.fade };
     }
 
     destroy() {
+        this._generation++;
+        this._pending=null;
+        this.fade=0;
         this.sim?.destroy();
         this.rowsBuffer?.destroy();
         this._initUniform.destroy();

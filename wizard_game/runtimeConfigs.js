@@ -892,6 +892,8 @@ export function createEngineConfig() {
 
 export function createGameDataConfig() {
   const terrain = new TerrainGenerationConfig({
+    // Shared planet-wide water inputs are complete before the first tiles.
+    regionalTerrain: {enabled:true,cells:256,seamCells:4,basins:{enabled:true},world:{enabled:true,maxLakes:1200,maxRivers:320}},
     continents: {
       enabled: true,
       count: 4,
@@ -961,22 +963,25 @@ export function createGameDataConfig() {
     features: {
       erosionSeeds: false,
     },
-    // Water graph + lake refinement in the background (no visuals yet):
+    // Water graph, lake refinement and nearby river visuals:
     // qtDiag.water.stats() / .near() / .goto(id). See WaterService.js.
     waterGraph: {
       enabled: true,
+      // Independent shoreline variation, bank relief and shore splat materials.
+      carve: { bankDetail: 1 },
       // Near-field shallow-water simulation (core/world/water/WaterRiverSim.js):
-      // a strip of 1 m cells along the nearest traced river (768 m of it,
+      // a strip of 1 m cells along the nearest traced river (256 m of it,
       // scrolling with the camera) while the camera is within
-      // activateAltitudeM of the ground and activateDistanceM of the river.
-      // Off for now (owner 2026-10-06): rivers first get the lakes' look
-      // (near water ribbons); the simulation comes back on the ribbons.
+      // activateAltitudeM of the river level and activateDistanceM of the river.
+      // Enabled by default; ?riverSim=off disables it for comparisons.
+      // Prescribed mean flow plus local SWE
+      // disturbances, on displaced geometry using the current water material.
       sim: {
-        enabled: false,
-        activateAltitudeM: 600,
-        activateDistanceM: 1500,
+        enabled: true,
+        activateAltitudeM: 150,
+        activateDistanceM: 120,
         dx: 1.0,
-        lengthM: 768,
+        lengthM: 256,
       },
     },
     /*

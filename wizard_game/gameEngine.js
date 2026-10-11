@@ -52,6 +52,7 @@ import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terr
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
 import { WaterGpuData, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
+import {structuredWaterGpuCapacity} from '../core/world/water/structuredWaterGpuCapacity.js';
 import { WaterRiverSim } from '../core/world/water/WaterRiverSim.js';
 import { createRiverStrip } from '../core/world/water/riverStrip.js';
 import { ErosionSeedVerifier } from '../core/world/hydrology/ErosionSeedVerifier.js';
@@ -688,6 +689,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         );
         await this.terrainGenerator.initialize();
 
+        // Structured placement is complete now. Publish its carve records
+        // before the quadtree can generate even its first coarse root tiles.
+        if (this.terrainGenerator.regionalTerrainActive && this.terrainGenerator.regionalTerrain?.basinsConfig) {
+            this._tickWater();
+        }
         console.log('WebGPUTerrainGenerator initialized', this.terrainGenerator);
         if (this.engineConfig.gpuQuadtree?.enabled) {
             await this.renderer.initializeGPUQuadtree( this.terrainGenerator);
@@ -1002,7 +1008,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     update(deltaTime) {
-        if (!this.isGameActive) return;
+        if (!this.isGameActive||this.renderer?.backend?.deviceLoss) return;
         deltaTime = Math.min(deltaTime, 0.1);
         this._fpsFrames++;
         const nowMs = performance.now();
@@ -1018,6 +1024,10 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         if (!this.isInitialLoadComplete()) {
             this._tickInitialLoadState();
+            // Structured water already owns a coarse basin plan; publish it
+            // while refined terrain is loading. Legacy discovery keeps its
+            // existing initial-load guard in _tickWater.
+            this._tickWater();
             this.gameTime.update();
             this._syncStarSystemTimeScale();
             if (this.starSystem) {
@@ -1238,7 +1248,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
  
 
     async render(deltaTime) {
-        if (!this.isGameActive) return;
+        if (!this.isGameActive||this.renderer?.backend?.deviceLoss) return;
         if (this._renderInFlight) return;
 
         if (this._resizePending) {
@@ -1260,6 +1270,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                     this.sphericalMapper,
                     this.starSystem
                 );
+            } catch(error) {
+                if(!this.renderer.backend.deviceLoss)throw error;
             } finally {
                 this._renderInFlight = false;
             }
@@ -1406,15 +1418,16 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     /**
-     * Water system (core/world/hydrology/WaterService.js): starts in the
-     * background once the initial terrain load is done (terrain never waits),
-     * then refines lakes near the camera. terrain.waterGraph.enabled.
+     * Legacy water starts after initial terrain load and refines nearby lakes.
+     * Structured water publishes its completed placement before quadtree
+     * initialization so first terrain outputs already contain its carve.
+     * Both paths require terrain.waterGraph.enabled.
      */
     _tickWater() {
         if (this.planetConfig?.terrainGeneration?.waterGraph?.enabled !== true) return;
         if (!this.waterService) {
-            if (!this.isInitialLoadComplete()) return;
-            const terrainGenerator = this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator;
+            const terrainGenerator = this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator ?? this.terrainGenerator;
+            if (!this.isInitialLoadComplete() && !terrainGenerator?.regionalTerrain?.basinsConfig) return;
             const device = this.renderer?.backend?.device;
             if (!terrainGenerator || !device) return;
             this.waterService = new WaterService({
@@ -1431,7 +1444,20 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 gridN: cfg.gridN, planetRadius: this.planetConfig.radius,
                 carve: terrainGenerator.waterCarve ? cfg.carve : null,
                 valley: terrainGenerator.riverValley ? cfg.valley : null,
+                ...(cfg.gpu.structuredCapacity?structuredWaterGpuCapacity(this.waterService):{}),
+                structuredRiverSurface:cfg.gpu.structuredRiverSurface,
             });
+            if (terrainGenerator.regionalTerrainActive && this.waterService.state === 'ready') {
+                const origin = this.planetConfig.origin || {x:0,y:0,z:0}, cam = this.camera?.position;
+                const basin = terrainGenerator.regionalTerrain.basins[0];
+                const radius = this.planetConfig.radius + (basin?.levelM ?? 0);
+                const rel = cam ? {x:cam.x-origin.x,y:cam.y-origin.y,z:cam.z-origin.z}
+                    : {x:(basin?.centre[0]??1)*radius,y:(basin?.centre[1]??0)*radius,z:(basin?.centre[2]??0)*radius};
+                this.waterGpuData.update(this.waterService, rel, performance.now()/1000);
+                // No render tiles exist before quadtree initialization. These
+                // initial uploads are generation inputs, not terrain changes.
+                if (!this.renderer?.quadtreeTileManager?.tileStreamer) this.waterGpuData.takeChangedCells();
+            }
             this.renderer?.setWaterData?.(this.waterGpuData);
             // River channels carved into tiles generated from now on, and into
             // the simulation's bed (core/world/water/riverCarve.wgsl.js).
@@ -1477,17 +1503,18 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     _tickWaterSim(camRel) {
         const cfg = this.planetConfig?.terrainGeneration?.waterGraph?.sim ?? {};
         const svc = this.waterService, gpu = this.waterGpuData;
-        if (cfg.enabled === false || svc?.state !== 'ready' || !gpu?._ready || !svc._sampler?.sampleDirsCarved) return;
+        if(cfg.enabled!==true){this.waterRiverSim?.stop();if(gpu)gpu.site=null;return;}
+        if (svc?.state !== 'ready' || !gpu?._ready) return;
         const R = this.planetConfig.radius;
         const r = Math.hypot(camRel.x, camRel.y, camRel.z) || 1;
         const dir = [camRel.x / r, camRel.y / r, camRel.z / r];
-        const altitude = r - R - svc.groundHeightAt(dir);
         const nearM = cfg.activateDistanceM ?? 1500, highM = cfg.activateAltitudeM ?? 600;
         let sim = this.waterRiverSim;
         if (!sim) {
             const { enabled: _e, activateDistanceM: _d, activateAltitudeM: _a, ...simCfg } = cfg;
-            sim = this.waterRiverSim = new WaterRiverSim({ device: this.renderer.backend.device, sampler: svc._sampler, radius: R, config: { ...simCfg, shape: svc.config.carve } });
-            this.renderer?.setWaterSimSite?.(sim, gpu.look);
+            sim = this.waterRiverSim = new WaterRiverSim({ device: this.renderer.backend.device,
+                sampler:{sampleDirsCarved:dirs=>svc.sampleSimulationBed(dirs)},radius: R, config: { ...simCfg, shape: svc.config.carve } });
+            this.renderer?.setWaterSimSite?.(sim, gpu);
             this._waterStrips = new Map();   // riverId -> { rec, strip, centre, radiusM }
         }
         // The camera's river: followed every frame; a search for the nearest
@@ -1495,14 +1522,17 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         // A river that left the GPU lists is no longer carved: stop there.
         if (sim.active && !gpu.isRiverDrawn(sim.riverId)) sim.stop();
         const dist = sim.active ? sim.follow(dir) : Infinity;
+        const altitude=sim.strip ? r-R-sim.strip.at(sim._sHint??0).eta : Infinity;
         this._waterSimFrame = (this._waterSimFrame ?? 0) + 1;
         // Not while a placement samples its bed (it would restart it).
         if (sim.state !== 'placing' && (!sim.active || this._waterSimFrame % 15 === 0)) {
             const best = this._nearestTracedRiver(dir, nearM);
             const retraced = sim.active && svc.riverRecs.get(sim.riverId) !== sim.rec;
             const better = best && (!sim.active || retraced || (best.riverId !== sim.riverId && best.dist < 0.5 * dist));
-            if (best && altitude < highM && better) sim.place(best.riverId, best.rec, best.s).catch(err => Logger.warn(`[Water] river simulation failed: ${err?.message || err}`));
-            else if (sim.active && (altitude > 1.25 * highM || dist > 1.25 * nearM)) sim.deactivate();
+            if (best && r-R-best.levelM < highM) {
+                if(better)sim.place(best.riverId, best.rec, best.s).catch(err => {sim.stop();Logger.warn(`[Water] river simulation failed: ${err?.message || err}`);});
+                else if(sim.state==='running'&&sim._warmLeft<=0)sim.activate();
+            } else if (sim.active && (altitude > 1.25 * highM || dist > 1.25 * nearM)) sim.deactivate();
         }
         if (sim.state === 'running') {
             const device = this.renderer.backend.device;
@@ -1536,7 +1566,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             const toCentre = Math.acos(Math.min(1, e.centre[0] * dir[0] + e.centre[1] * dir[1] + e.centre[2] * dir[2])) * R;
             if (toCentre - e.radiusM > maxM) continue;
             const near = e.strip.nearest(dir);
-            if (near.dist <= maxM && (!best || near.dist < best.dist)) best = { riverId, rec, s: near.s, dist: near.dist };
+                if (near.dist <= maxM && (!best || near.dist < best.dist)) best = { riverId, rec, s: near.s, dist: near.dist,levelM:e.strip.at(near.s).eta };
         }
         return best;
     }
@@ -1562,6 +1592,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             state: sim.state, river: sim.riverId, fade: +sim.fade.toFixed(2),
             cells: `${sim.W} x ${sim.L}`, dxM: +sim.dx.toFixed(2),
             windowM: [+sim.s0.toFixed(0), +sim.s1.toFixed(0)], shifting: !!sim._pending,
+            timeS:sim.sim?.time??0,diagnostics:sim.diagnostics,
         };
     }
 

@@ -1,144 +1,63 @@
-// core/renderer/water/WaterSimRenderer.js
-//
-// Draws the near-field water simulation (core/world/water/WaterRiverSim.js,
-// a strip of cells along a river) as a transparent mesh, one vertex per
-// simulation cell, reading the simulation's buffers and row frames directly
-// (shaders: waterSimSurface.wgsl.js). Drawn after the terrain and the
-// meshes, so objects standing in water show through it by depth. Material
-// layout follows riverMaterialBuilder.js.
-
-import { Material } from '../resources/material.js';
+// Close river surface reads the bounded Whitewater simulation directly.
+// It shares current water/atmosphere bindings and premultiplied lighting.
 import { Geometry } from '../resources/geometry.js';
+import { createNearWaterMaterial } from './NearWaterRenderer.js';
+import { fillNearWaterUniforms, NEAR_WATER_UNIFORM_FLOATS } from './nearWaterUniforms.js';
+import { aerialFadeRange } from '../terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import { buildWaterSimFragmentShader, buildWaterSimVertexShader } from './waterSimSurface.wgsl.js';
-
-const VERTEX_FLOATS = 48;
-const FRAGMENT_FLOATS = 24;
-
-export function gridIndices(W, L) {
-    const idx = new Uint32Array((W - 1) * (L - 1) * 6);
-    let q = 0;
-    for (let j = 0; j < L - 1; j++) {
-        for (let i = 0; i < W - 1; i++) {
-            const a = j * W + i, b = a + 1, c = a + W, d = c + 1;
-            idx[q++] = a; idx[q++] = c; idx[q++] = b;
-            idx[q++] = b; idx[q++] = c; idx[q++] = d;
-        }
-    }
-    return idx;
-}
-
-const vec3Of = (v, fallback) => {
-    if (Array.isArray(v) && v.length >= 3) return v;
-    if (v && Number.isFinite(v.x)) return [v.x, v.y, v.z];
-    if (v && Number.isFinite(v.r)) return [v.r, v.g, v.b];
-    return fallback;
-};
-const numOf = (v, fallback) => (Number.isFinite(v) ? v : fallback);
+import { gridIndices } from './waterGrid.js';
+export { gridIndices } from './waterGrid.js';
 
 export class WaterSimRenderer {
-    constructor({ backend, uniformManager, planetConfig }) {
-        this.backend = backend;
-        this.uniformManager = uniformManager;
-        this.planetConfig = planetConfig;
-        this.site = null;
-        this.look = null;
-        this._dims = '';
-        this._geometry = null;
-        this._material = null;
+    constructor({backend,uniformManager,planetConfig,engineConfig}) {
+        Object.assign(this,{backend,uniformManager,planetConfig});
+        this.apFade=aerialFadeRange(engineConfig?.rendering?.terrainShader);
+        this._uniforms=new Float32Array(NEAR_WATER_UNIFORM_FLOATS);
+        this._simUniforms=new Float32Array(12);
+        this.site=null;this.water=null;this._dims='';this._geometry=null;this._material=null;
     }
-
-    /** The simulation to draw (WaterRiverSim, or null) and the water look (WaterGpuData.look). */
-    setSite(site, look) {
-        this.site = site || null;
-        this.look = look || null;
-        if (!site) return;
-        if (!this._material) {
-            this._material = new Material({
-                name: 'WaterSimSurface',
-                vertexShader: buildWaterSimVertexShader(),
-                fragmentShader: buildWaterSimFragmentShader(),
-                uniforms: {
-                    waterSimVertexUniforms: { value: new Float32Array(VERTEX_FLOATS) },
-                    waterSimFragmentUniforms: { value: new Float32Array(FRAGMENT_FLOATS) },
-                },
-                vertexLayout: [],
-                side: 'double',
-                transparent: true,
-                depthTest: true,
-                depthWrite: false,
-                blending: 'normal',
-                bindGroupLayoutSpec: [
-                    {
-                        label: 'WaterSim-Uniforms',
-                        entries: [
-                            { binding: 0, visibility: 'vertex', name: 'waterSimVertexUniforms', buffer: { type: 'uniform' } },
-                            { binding: 1, visibility: 'fragment', name: 'waterSimFragmentUniforms', buffer: { type: 'uniform' } },
-                        ],
-                    },
-                    {
-                        label: 'WaterSim-Storage',
-                        entries: [
-                            { binding: 0, visibility: 'vertex', name: 'bed', buffer: { type: 'read-only-storage' } },
-                            { binding: 1, visibility: 'vertex', name: 'state', buffer: { type: 'read-only-storage' } },
-                            { binding: 2, visibility: 'vertex', name: 'turbulence', buffer: { type: 'read-only-storage' } },
-                            { binding: 3, visibility: 'vertex', name: 'rows', buffer: { type: 'read-only-storage' } },
-                        ],
-                    },
-                ],
-            });
+    setSite(site,water) {
+        this.site=site??null;this.water=water??null;
+        if(!site)return;
+        if(this._material){
+            site.surfaceReady=!!this._material._gpuPipeline;
+            this._material._pipelinePromise?.then(pipeline=>{if(this.site===site&&pipeline)site.surfaceReady=true;});
+            return;
         }
-        this._ensureGeometry();
+        this._material=createNearWaterMaterial('WaterSimSurface',buildWaterSimVertexShader(),buildWaterSimFragmentShader(),this._uniforms,[{
+            label:'WaterSim-Strip',entries:[
+                {binding:0,visibility:'vertex',name:'bed',buffer:{type:'read-only-storage'}},
+                {binding:1,visibility:'vertex',name:'state',buffer:{type:'read-only-storage'}},
+                {binding:2,visibility:'vertex',name:'turbulence',buffer:{type:'read-only-storage'}},
+                {binding:3,visibility:'vertex',name:'rows',buffer:{type:'read-only-storage'}},
+                {binding:4,visibility:'vertex|fragment',name:'simRenderUniforms',buffer:{type:'uniform'}},
+            ],
+        }]);
+        this._material.uniforms.simRenderUniforms={value:this._simUniforms};
+        site.surfaceReady=false;
+        this._material.asyncCompile=true;
+        this.backend.compileShader(this._material);
+        const ready=this._material._pipelinePromise??Promise.resolve(this._material._gpuPipeline);
+        ready.then(pipeline=>{if(this.site===site&&pipeline)site.surfaceReady=true;});
     }
-
-    // Index grid and buffer bindings for the simulation's current size.
-    _ensureGeometry() {
-        const site = this.site;
-        if (!site?.sim) return false;
-        const dims = `${site.W}x${site.L}`;
-        if (dims !== this._dims) {
-            this._geometry?.dispose?.();
-            this._geometry = new Geometry();
-            this._geometry.setIndex(gridIndices(site.W, site.L));
-            this._dims = dims;
+    render(camera,viewMatrix,projectionMatrix) {
+        const site=this.site,water=this.water;
+        if(!site?.sim||site.state!=='running'||site.fade<=0||!water?._ready||!water.enabled||!water.near?.enabled||water.debugMode!==0)return;
+        const dims=`${site.W}x${site.L}`;
+        if(this._dims!==dims){
+            this._geometry?.dispose?.();this._geometry=new Geometry();this._geometry.setIndex(gridIndices(site.W,site.L));this._dims=dims;
         }
-        this._material.storageBuffers = {
-            bed: site.sim.bedBuffer,
-            state: site.sim.stateBuffer,
-            turbulence: site.sim.kBuffers[0],
-            rows: site.rowsBuffer,
-        };
-        return true;
+        fillNearWaterUniforms(this._uniforms,{viewMatrix,projectionMatrix,camera,water,planetConfig:this.planetConfig,
+            uniformManager:this.uniformManager,apFade:this.apFade});
+        const p=site.sim.params,c=site.config;
+        this._simUniforms.set([p.dx,site.W,site.L,site.sim.rowBase,p.hmin,site.sim.time,site.fade,c.endFadeM,c.waveAmpM,c.sideFadeM,0,0]);
+        const res=water.resources,m=this._material;
+        m.storageBuffers={waterIndex:res.index,waterLakes:res.lakes,waterRivers:res.rivers,
+            bed:site.sim.bedBuffer,state:site.sim.stateBuffer,turbulence:site.sim.kBuffers[0],rows:site.rowsBuffer};
+        if(m.uniforms.waterParams.value?.buffer!==water.paramsData)m.uniforms.waterParams.value=new Float32Array(water.paramsData);
+        m.uniforms.waterLakeMasks.value=res.masks;
+        m.uniforms.transmittanceLUT.value=this.uniformManager?.uniforms?.transmittanceLUT?.value??null;
+        this.backend.draw(this._geometry,m);
     }
-
-    render(camera, viewMatrix, projectionMatrix, timeS) {
-        const site = this.site;
-        if (!site || !this._material || site.state !== 'running' || site.fade <= 0) return;
-        if (!this._ensureGeometry()) return;
-        const vu = this._material.uniforms.waterSimVertexUniforms.value;
-        const fu = this._material.uniforms.waterSimFragmentUniforms.value;
-        vu.set(viewMatrix.elements ?? viewMatrix, 0);
-        vu.set(projectionMatrix.elements ?? projectionMatrix, 16);
-        const o = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
-        const p = site.sim.params, cfg = site.config;
-        vu.set([o.x, o.y, o.z, site.R, p.dx, site.W, site.L, site.sim.rowBase,
-            p.hmin, timeS, site.fade, cfg.endFadeM, 0.06, 0, 0, 0], 32);
-
-        const g = this.uniformManager?.uniforms ?? {};
-        const L = this.look ?? {};
-        const cam = camera?.position ?? { x: 0, y: 0, z: 0 };
-        fu.set([...vec3Of(g.sunLightDirection?.value, [0.5, 1, 0.3]), numOf(g.sunLightIntensity?.value, 1),
-            ...vec3Of(g.sunLightColor?.value, [1, 1, 1]), numOf(g.ambientLightIntensity?.value, 0.8),
-            ...vec3Of(g.ambientLightColor?.value, [0.25, 0.25, 0.25]), timeS,
-            cam.x, cam.y, cam.z, p.hmin,
-            ...(L.deepColor ?? [0.015, 0.05, 0.06]), numOf(L.reflection, 1.4),
-            ...(L.absorption ?? [0.4, 0.11, 0.08]), 0], 0);
-        this.backend.draw(this._geometry, this._material);
-    }
-
-    dispose() {
-        this._geometry?.dispose?.();
-        this._material?.dispose?.();
-        this._geometry = null;
-        this._material = null;
-    }
+    dispose(){this._geometry?.dispose?.();this._material?.dispose?.();this._geometry=null;this._material=null;}
 }

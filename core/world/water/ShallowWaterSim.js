@@ -31,6 +31,7 @@ export const SWE_DEFAULTS = Object.freeze({
     outLimit: 0.8,      // a cell sends at most this fraction of dx/dt outflow per substep
     kRelax: 0.12,       // turbulence that relaxed (inflow) cells carry
     openMask: 0,        // SWE_OPEN_* bits; closed edges by default
+    referenceFlow: false, // near visuals: solve perturbations around the prescribed river, not its global drainage
 });
 
 export class ShallowWaterSim {
@@ -68,8 +69,14 @@ export class ShallowWaterSim {
             { binding: 6, visibility: C, buffer: { type: 'read-only-storage' } },
         ] });
         const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
-        this._pipelines = ['advect', 'height', 'momentum'].map(entryPoint =>
-            device.createComputePipeline({ label: `SWE-${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } }));
+        const descriptors=['advect','height','momentum'].map(entryPoint=>({label:`SWE-${entryPoint}`,layout:pipelineLayout,compute:{module,entryPoint}}));
+        if(opts.asyncPipelines){
+            this._pipelines=null;
+            this.ready=Promise.all(descriptors.map(d=>device.createComputePipelineAsync(d))).then(pipelines=>{this._pipelines=pipelines;});
+        }else{
+            this._pipelines=descriptors.map(d=>device.createComputePipeline(d));
+            this.ready=Promise.resolve();
+        }
         this._bindGroups = [[0, 1], [1, 2], [2, 0]].map(([a, b]) => device.createBindGroup({ layout, entries: [
             { binding: 0, resource: { buffer: this.uniformBuffer } },
             { binding: 1, resource: { buffer: this.bedBuffer } },
@@ -113,7 +120,7 @@ export class ShallowWaterSim {
         u32[0] = this.W; u32[1] = this.L; u32[2] = jOffset >>> 0; u32[3] = p.openMask >>> 0;
         f32.set([p.dx, p.dt, p.g, p.manning, p.hmin, p.umax, this.time, p.macCormack ? 1 : 0,
             p.turbA, p.turbL, p.turbT, p.foamDecay, p.kDecay, p.kGen, p.foamGen, p.maxRise,
-            p.maxFall, p.outLimit, p.kRelax, 0], 4);
+            p.maxFall, p.outLimit, p.kRelax, p.referenceFlow ? 1 : 0], 4);
         u32[24] = this.rowBase >>> 0;
         // World row index wrapped to keep f32 precision in the noise.
         f32[25] = this.rowWorld % 65536;

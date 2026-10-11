@@ -22,8 +22,9 @@
 //   const results = await qt.readResults();
 
 import { TileAddress } from './tileAddress.js';
+import {gpuDeviceLoss,reportGpuAsyncFailure} from '../../../shared/gpuDeviceState.js';
 import { Logger } from '../../../shared/Logger.js';
-import { buildTraversalShaderSource } from './quadtreeTraversal.wgsl.js';
+import { buildTraversalShaderSource } from './quadtreeTraversal.wgsl.js?regionalTerrainApi=1';
 import { buildInstanceBuilderShaderSource } from './instanceBufferBuilder.wgsl.js';
 
 // ─── Uniform layout constants ─────────────────────────────────────────────
@@ -59,6 +60,7 @@ const U_HORIZON_GROUND_COS = 41; // f32
 const U_HORIZON_BLEND_SCALE = 42; // f32
 const U_CURRENT_EPOCH = 43;     // u32
 const U_DO_VISIBLE_CLEAR = 44;  // u32
+const U_LOD_FOUNDATION = 48; // optional vec4: cells, shelfM, regionM, padding
 
 // ─── Buffer size helpers ──────────────────────────────────────────────────
 
@@ -111,6 +113,9 @@ export class QuadtreeGPU {
         }
 
         this.device = device;
+        this._regionalTerrain = config.regionalTerrain ?? null;
+        this.regionalShapeLod = config.regionalShapeLod !== false;
+        this._regionalBindGroup = null;
 
         // ── Planet ──────────────────────────────────────────────────────
         this.planetRadius = config.planetRadius;
@@ -332,10 +337,11 @@ async _withDebugReadbackLock(fn) {
         if (this._initialized) return;
 
         this._createBuffers();
-        this._createPipeline();
+        await this._createPipeline();
         this._createBindGroup();
         this._createInstancePipeline();
         this._createInstanceBindGroup();
+        this.setRegionalTerrain(this._regionalTerrain);
 
         this._initialized = true;
 
@@ -352,7 +358,7 @@ async _withDebugReadbackLock(fn) {
     }
 
     isReady() {
-        return this._initialized;
+        return this._initialized&&!gpuDeviceLoss(this.device);
     }
 
     dispose() {
@@ -374,6 +380,8 @@ async _withDebugReadbackLock(fn) {
         destroy(this._metaBuffer);
         destroy(this._feedbackBuffer);
         destroy(this._lodIndexBuffer);
+        destroy(this._emptyShapeParams);destroy(this._emptyShapeTexture);
+        this._emptyShapeParams=null;this._emptyShapeTexture=null;
 
         this._uniformBuffer        = null;
         this._queueBufferA         = null;
@@ -395,6 +403,10 @@ async _withDebugReadbackLock(fn) {
         this._pipeline        = null;
         this._bindGroupLayout = null;
         this._bindGroup       = null;
+        this._regionalPipeline = null;
+        this._regionalLayout = null;
+        this._regionalBindGroup = null;
+        this._regionalTerrain = null;
 
         this._instancePipeline = null;
         this._instanceBindGroupLayout = null;
@@ -408,6 +420,21 @@ async _withDebugReadbackLock(fn) {
     // ═══════════════════════════════════════════════════════════════════════
     // Per-frame uniform update
     // ═══════════════════════════════════════════════════════════════════════
+
+    // Bind the newly published generation version before submitting a frame.
+    // The generator owns/fences these textures; traversal never destroys them.
+    setRegionalTerrain(regional,{shapeLod=this.regionalShapeLod}={}) {
+        if (regional === this._regionalTerrain && (this._regionalBindGroup || !regional)&&shapeLod===this._regionalShapeLodApplied) return;
+        this._regionalTerrain = regional;
+        this.regionalShapeLod=shapeLod;this._regionalShapeLodApplied=shapeLod;
+        const shape=shapeLod?regional?.shapeData:null;
+        this._regionalBindGroup = regional && this._regionalPipeline
+            ? this.device.createBindGroup({ label: `QT-RegionalFoundation-v${regional.version}`,
+                layout: this._regionalLayout, entries: [...regional.bindGroupEntries.slice(0, 2),
+                    {binding:2,resource:{buffer:shape?.params??this._emptyShapeParams}},
+                    {binding:3,resource:(shape?.texture??this._emptyShapeTexture).createView()}] })
+            : null;
+    }
 
     /**
      * Pack camera and LOD parameters into the uniform buffer.
@@ -507,6 +534,10 @@ async _withDebugReadbackLock(fn) {
         this._visibleEpoch++;
         u32[U_CURRENT_EPOCH] = this._visibleEpoch;
         u32[U_DO_VISIBLE_CLEAR] = doVisibleClear;
+        const foundation = this._regionalTerrain?.lodFoundation;
+        if (foundation && this._regionalBindGroup) {
+            f32.set([foundation.cells, foundation.shelfM, foundation.regionM, 0], U_LOD_FOUNDATION);
+        }
 
         // Upload
         this.device.queue.writeBuffer(this._uniformBuffer, 0, this._uniformData);
@@ -540,7 +571,7 @@ async _withDebugReadbackLock(fn) {
      *        If null, a standalone encoder is created and submitted.
      */
     traverse(commandEncoder) {
-        if (!this._initialized) return;
+        if (!this.isReady()) return;
 
         const standalone = !commandEncoder;
         if (standalone) {
@@ -553,8 +584,9 @@ async _withDebugReadbackLock(fn) {
             label: 'QuadtreeTraversal'
         });
 
-        pass.setPipeline(this._pipeline);
+        pass.setPipeline(this._regionalBindGroup ? this._regionalPipeline : this._pipeline);
         pass.setBindGroup(0, this._bindGroup);
+        if (this._regionalBindGroup) pass.setBindGroup(1, this._regionalBindGroup);
         // Single workgroup dispatch — the shader handles all 6 faces internally
         pass.dispatchWorkgroups(1);
         pass.end();
@@ -566,7 +598,7 @@ async _withDebugReadbackLock(fn) {
                     `lodFactor=${this.lodFactor.toFixed(1)} ` +
                     `lodThreshold=${this.lodErrorThreshold}`
                 );
-            });
+            }).catch(error=>reportGpuAsyncFailure(this.device,'quadtree counter readback',error));
         }
 
         if (standalone) {
@@ -1391,7 +1423,7 @@ async debugReadMetaRaw(maxLODLevels) {
     // Internal: pipeline creation
     // ═══════════════════════════════════════════════════════════════════════
 
-    _createPipeline() {
+    async _createPipeline() {
         const shaderSource = buildTraversalShaderSource({
             workgroupSize: this.workgroupSize,
             disableCulling: !this.enableFrustumCulling && !this.enableHorizonCulling
@@ -1480,6 +1512,23 @@ if (!this._loggedTraversalVariant) {
                 entryPoint: 'main'
             }
         });
+
+        if (this._regionalTerrain) {
+            this._emptyShapeParams=this.device.createBuffer({label:'QT-empty regional shape params',size:64,
+                usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+            this._emptyShapeTexture=this.device.createTexture({label:'QT-empty regional shape',size:[1,1],format:'r32float',usage:GPUTextureUsage.TEXTURE_BINDING});
+            this._regionalLayout = this.device.createBindGroupLayout({ label: 'QT-RegionalFoundationLayout',
+                entries: [...[0, 1].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
+                    texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } })),
+                    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},
+                    {binding:3,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:'unfilterable-float',viewDimension:'2d'}}] });
+            const regionalModule = this.device.createShaderModule({ label: 'QT-RegionalFoundationShader',
+                code: buildTraversalShaderSource({ workgroupSize: this.workgroupSize,
+                    disableCulling: !this.enableFrustumCulling && !this.enableHorizonCulling, regionalFoundation: true }) });
+            this._regionalPipeline = await this.device.createComputePipelineAsync({ label: 'QT-RegionalFoundationPipeline',
+                layout: this.device.createPipelineLayout({ bindGroupLayouts: [this._bindGroupLayout, this._regionalLayout] }),
+                compute: { module: regionalModule, entryPoint: 'main' } });
+        }
 
         Logger.info('[QuadtreeGPU] Traversal pipeline created');
     }

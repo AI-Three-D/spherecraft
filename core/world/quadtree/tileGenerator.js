@@ -268,6 +268,13 @@ this._maxGpuFencesObserved = 0;
 
     async _generateTileInternal(tileAddr, options = {}) {
         const startTime = performance.now();
+        // The prototype's six macro roots are pinned independently of the
+        // render pool. A fine tile never substitutes a render fallback for
+        // generation input or depends on intervening render LOD residency.
+        if (this.terrainGen.terrainConfig?.regionalTerrain?.enabled === true
+            || (this.terrainGen.regionalTerrainActive && this.terrainGen._regionalTerrainDirty)) {
+            await this.terrainGen.prepareRegionalTerrain();
+        }
         const includeBaseHeight = options?.includeBaseHeight === true;
         const trackStats = options?.trackStats !== false;
         const telemetry = options?.telemetry ?? null;

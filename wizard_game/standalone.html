@@ -3820,6 +3820,83 @@
             carve() { const r = gameEngine?.waterCarveStatus?.() ?? null; console.info('[Water] carve', r); return r; },
         };
 
+        // Copy an existing useful view between baseline and regional preview.
+        // This keeps live comparisons at the same pose without teleporting
+        // the reviewer to a different part of the planet.
+        window.qtDiag.regional = {
+            daylight(enabled = true) {
+                const s=gameEngine?.starSystem,body=s?.currentBody;
+                const basin=gameEngine?.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator?.regionalTerrain?.basinPlan?.basins?.[0];
+                if(!body||!basin) throw new Error('Regional basin and star system are not ready');
+                if(!enabled) {
+                    if(this._savedLighting) Object.assign(s,this._savedLighting.system);
+                    if(this._savedLighting) body.currentRotation=this._savedLighting.rotation;
+                    this._savedLighting=null;
+                    return {restored:true};
+                }
+                this._savedLighting??={system:{paused:s.paused,useGameTimeRotation:s.useGameTimeRotation},rotation:body.currentRotation};
+                s.paused=true;s.useGameTimeRotation=false;
+                let best=Infinity,rotation=0,dot=0;
+                for(let i=0;i<720;i++) {
+                    body.currentRotation=i*Math.PI*2/720;
+                    const d=body.getStarDirection(s.primaryStar).direction,c=basin.centre;
+                    const h=d.x*c[0]+d.y*c[1]+d.z*c[2],score=Math.abs(h-0.75);
+                    if(score<best) {best=score;rotation=body.currentRotation;dot=h;}
+                }
+                body.currentRotation=rotation;
+                return {rotation,sunUpDot:dot,paused:true};
+            },
+            basin(altitudeM = null, backM = null) {
+                const lake=gameEngine?.waterService?.lakes?.[0];
+                if(!lake?.frame) throw new Error('Regional basin is not ready');
+                const R=gameEngine.planetConfig.radius,origin=gameEngine.planetConfig.origin??{x:0,y:0,z:0};
+                const {c,e2}=lake.frame,pose=this.camera(),axes=['x','y','z'],reach=lake.frame.spacing*16*1.8;
+                for(let i=0;i<3;i++) {
+                    pose.position[axes[i]]=origin[axes[i]]+c[i]*(R+lake.level+(altitudeM??reach))-e2[i]*(backM??reach);
+                    pose.target[axes[i]]=origin[axes[i]]+c[i]*(R+lake.level);
+                    pose.up[axes[i]]=c[i];
+                }
+                return this.useCamera(pose);
+            },
+            river(fraction = .5, altitudeM = 200, backM = 350) {
+                const rec=gameEngine?.terrainGenerator?.regionalTerrain?.drainagePlan?.rivers?.[0];
+                if(!rec) throw new Error('Regional river is not ready');
+                const stride=rec.stride,k=Math.round(Math.min(1,Math.max(0,fraction))*(rec.points.length/stride-1)),offset=k*stride;
+                const d=Array.from(rec.points.slice(offset,offset+3)),h=rec.points[offset+3];
+                const next=Math.min(k+1,rec.points.length/stride-1),prev=Math.max(0,k-1);
+                const along=d.map((_,i)=>rec.points[next*stride+i]-rec.points[prev*stride+i]);
+                const length=Math.hypot(...along),direction=along.map(v=>v/length);
+                const R=gameEngine.planetConfig.radius,o=gameEngine.planetConfig.origin??{x:0,y:0,z:0};
+                const pose=this.camera(),axes=['x','y','z'];
+                axes.forEach((a,i)=>{
+                    pose.position[a]=o[a]+d[i]*(R+h+altitudeM)-direction[i]*backM;
+                    pose.target[a]=o[a]+d[i]*(R+h);pose.up[a]=d[i];
+                });
+                return this.useCamera(pose);
+            },
+            camera() {
+                const c = gameEngine?.camera;
+                return c ? { position: { ...c.position }, target: { ...c.target }, up: { ...c.up }, fov: c.fov } : null;
+            },
+            useCamera(pose) {
+                const c = gameEngine?.camera;
+                if (!c) throw new Error('Camera is not ready');
+                for (const key of ['position', 'target', 'up']) {
+                    if (!pose?.[key] || !['x', 'y', 'z'].every(axis => Number.isFinite(pose[key][axis]))) {
+                        throw new Error(`Invalid camera ${key}`);
+                    }
+                }
+                if (!Number.isFinite(pose.fov) || pose.fov <= 0 || pose.fov >= 180) throw new Error('Invalid camera fov');
+                gameEngine.cameraMode = 'manual';
+                c.unfollow();
+                c.setPosition(pose.position.x, pose.position.y, pose.position.z);
+                c.lookAt(pose.target.x, pose.target.y, pose.target.z);
+                c.up = { ...pose.up };
+                c.fov = pose.fov;
+                return this.camera();
+            },
+        };
+
         // Phase 0 test matrix (SphereCraft_Optimization_Implementation_Plan.md
         // §0.5): drives the manual free camera through the six standard
         // scenarios via the same key-state the real input handler reads
@@ -3882,6 +3959,18 @@
 
         // Loading screen
         const loadingScreen = document.getElementById('loading-screen');
+        function showGraphicsFailure() {
+            loadingScreen.style.display='flex';
+            loadingScreen.style.opacity='1';
+            loadingScreen.style.visibility='visible';
+            const panel=document.createElement('div');
+            panel.style.textAlign='center';
+            const title=document.createElement('h2');title.textContent='Graphics device disconnected';
+            const text=document.createElement('p');text.textContent='Reload the game to reconnect.';
+            const button=document.createElement('button');button.textContent='Reload game';
+            button.onclick=()=>location.reload();
+            panel.append(title,text,button);loadingScreen.replaceChildren(panel);
+        }
         const debugPanel = document.getElementById('debug-panel');
         const loadingTitle = document.getElementById('loading-title');
         const loadingText = document.getElementById('loading-text');
@@ -3934,10 +4023,138 @@
                     worldConfigLoader = null;
                 }
 
+                // Startup-only comparison: terrain and hydrology must share
+                // the same macro inputs and cache key throughout the run.
+                const regionalPreview = new URLSearchParams(location.search).get('regionalTerrain');
+                // Fixed historical comparison cases keep their original inputs.
+                const placementQueries=new URLSearchParams(location.search);
+                if(['regionalTerrain','regionalBasins','regionalWhitewater','regionalLargeLake','regionalOrganicRiver'].some(k=>placementQueries.has(k))) {
+                    for(const planet of gameDataConfig.planets)if(planet.enabled) {
+                        planet.terrain.regionalTerrain={...planet.terrain.regionalTerrain,world:{enabled:false},basins:{enabled:false}};
+                    }
+                }
+                if (regionalPreview !== null) {
+                    const cells = Number(regionalPreview);
+                    if (![0, 128, 256].includes(cells)) throw new Error('regionalTerrain preview must be 0, 128 or 256');
+                    for (const planet of gameDataConfig.planets) {
+                        if (planet.enabled) planet.terrain.regionalTerrain = {
+                            ...planet.terrain.regionalTerrain, enabled: cells > 0, cells: cells || 128, seamCells: 4,
+                        };
+                    }
+                }
+                const basinPreview=new URLSearchParams(location.search).get('regionalBasins');
+                const drainagePreview=new URLSearchParams(location.search).get('regionalRivers');
+                const valleyPreview=new URLSearchParams(location.search).get('regionalValleys');
+                const featurePreview=new URLSearchParams(location.search).get('regionalFeature');
+                const shapePreview=new URLSearchParams(location.search).get('regionalShape');
+                const shapeRegion=new URLSearchParams(location.search).get('shapeRegion');
+                const shapeAddress=shapeRegion!==null?(await import('../core/world/terrain-generator/regionalShape.js')).regionalShapeAddress(shapeRegion):{};
+                const shapeOverrides={};
+                for(const [query,key] of Object.entries({shapeRadius:'maxRadiusM',shapePotential:'maxPotentialCells',
+                    shapeMinLevel:'minLevelM',shapeSurface:'surfaceCells',shapeMinWet:'minWetCells'})) {
+                    const value=new URLSearchParams(location.search).get(query);
+                    if(value!==null)shapeOverrides[key]=Number(value);
+                }
+                if(new URLSearchParams(location.search).has('shapeRises')) {
+                    shapeOverrides.risesM=new URLSearchParams(location.search).get('shapeRises').split(',').map(Number);
+                }
+                if(['1','organic'].includes(new URLSearchParams(location.search).get('regionalDepression'))) {
+                    shapeOverrides.depression={radiusM:450,maxCutM:8,depthM:2.5,seed:17,
+                        profile:new URLSearchParams(location.search).get('regionalDepression')==='organic'?'organic':'lobes'};
+                }
+                const basinOverrides={};
+                for(const [query,key] of Object.entries({regionalBankReach:'bankReachM',regionalBasinRadius:'radiusM',
+                    regionalMinLevel:'minLevelM',regionalMaxRoughness:'maxRoughness',regionalMaxCut:'maxCentreCutM'})) {
+                    const value=new URLSearchParams(location.search).get(query);
+                    if(value!==null) basinOverrides[key]=Number(value);
+                }
+                if(['1','reference'].includes(basinPreview)) {
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.regionalTerrain={...planet.terrain.regionalTerrain,enabled:true,cells:256,seamCells:4,
+                            basins:{enabled:true,carve:basinPreview==='1',...basinOverrides},...(valleyPreview==='1'?{placement:{enabled:true}}:{}),
+                            ...(['1','dry','reference'].includes(featurePreview)?{valley:{enabled:true,terrain:featurePreview!=='reference'}}:{}),
+                            ...(['1','dry'].includes(shapePreview)?{shape:{enabled:true,
+                                surfaceDepth:new URLSearchParams(location.search).get('regionalSurface')!=='0',
+                                ...(new URLSearchParams(location.search).has('shapeEnclosure')?{
+                                    minimumEnclosureM:Number(new URLSearchParams(location.search).get('shapeEnclosure'))}:{}),
+                                ...(new URLSearchParams(location.search).get('shapeSite')==='lowland'?{face:1,x:81,y:40,minLevelM:100}:{}),
+                                ...shapeAddress,...shapeOverrides,
+                                cells:Number(new URLSearchParams(location.search).get('shapeCells')??128)}}:{}),
+                            drainage:drainagePreview==='1'||drainagePreview==='reference'?{enabled:true,carve:drainagePreview==='1'}:undefined};
+                    }
+                }
+
+                if(new URLSearchParams(location.search).get('regionalWhitewater')==='1') {
+                    engineConfig.gpuQuadtree.regionalShapeLod=new URLSearchParams(location.search).get('shapeLod')!=='0';
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.regionalTerrain={...planet.terrain.regionalTerrain,enabled:true,cells:256,seamCells:4,
+                            basins:{enabled:true},shape:{enabled:true,face:0,depth:7,x:102,y:114,
+                                receiverRegion:{dx:-1,dy:0,minLevelM:100}},
+                            drainage:{enabled:true,carve:drainagePreview!=='reference',profile:'terrain',
+                                minimumDropM:40,minDistanceM:1800,halfWidthM:4,spacingM:32,
+                                course:new URLSearchParams(location.search).get('regionalRiverCourse')??'coarse',
+                                heightSource:new URLSearchParams(location.search).get('regionalRouteHeight')??'natural',
+                                fallExtraCutM:Number(new URLSearchParams(location.search).get('regionalFallExtra')??4)}};
+                    }
+                }
+                if(['1','organic'].includes(new URLSearchParams(location.search).get('regionalLargeLake'))) {
+                    const lakeVersion=placementQueries.get('regionalLakeVersion')??'current';
+                    if(!['current','previous'].includes(lakeVersion))throw new Error('regionalLakeVersion must be current or previous');
+                    for(const planet of gameDataConfig.planets)if(planet.enabled) {
+                        planet.terrain.regionalTerrain={enabled:true,cells:256,seamCells:4,
+                            basins:{enabled:true},shape:{enabled:true,face:1,depth:6,x:40,y:20,cells:256,minLevelM:100,
+                                minimumEnclosureM:0,maxRadiusM:1000,maxPotentialCells:8192,minWetCells:256,surfaceCells:128,
+                                depression:{radiusM:450,maxCutM:8,depthM:2.5,seed:17,
+                                    potentialVersion:lakeVersion,
+                                    profile:new URLSearchParams(location.search).get('regionalLargeLake')==='organic'?'organic':'lobes'}}};
+                    }
+                }
+                if(new URLSearchParams(location.search).get('regionalOrganicRiver')==='1') {
+                    for(const planet of gameDataConfig.planets)if(planet.enabled) {
+                        planet.terrain.regionalTerrain={...planet.terrain.regionalTerrain,enabled:true,cells:256,seamCells:4,
+                            basins:{enabled:true},drainage:{enabled:true,
+                                course:new URLSearchParams(location.search).get('regionalRiverCourse')??'organic',
+                                heightSource:new URLSearchParams(location.search).get('regionalRouteHeight')??'natural',
+                                profile:'terrain',minimumDropM:2,minDistanceM:4000,maxDistanceM:8000,
+                                halfWidthM:12,spacingM:128,profileStepM:16}};
+                    }
+                }
+                const regionalBankMode=new URLSearchParams(location.search).get('regionalBanks');
+                if(regionalBankMode==='organic'||regionalBankMode==='legacy') {
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.waterGraph={...planet.terrain.waterGraph,
+                            carve:{...planet.terrain.waterGraph?.carve,bankDetail:regionalBankMode==='organic'?1:0}};
+                    }
+                }
+                const riverSimMode=new URLSearchParams(location.search).get('riverSim');
+                if(riverSimMode==='whitewater'||riverSimMode==='off') {
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.waterGraph={...planet.terrain.waterGraph,sim:{...planet.terrain.waterGraph?.sim,
+                            enabled:riverSimMode==='whitewater',lengthM:256,activateAltitudeM:150,activateDistanceM:120}};
+                    }
+                }
+                if(new URLSearchParams(location.search).get('waterPools')==='legacy') {
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.waterGraph={...planet.terrain.waterGraph,gpu:{structuredCapacity:false}};
+                    }
+                }
+                if(new URLSearchParams(location.search).has('waterIndex')) {
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.waterGraph={...planet.terrain.waterGraph,gpu:{...planet.terrain.waterGraph?.gpu,
+                            structuredLakeGridN:Number(new URLSearchParams(location.search).get('waterIndex'))}};
+                    }
+                }
+                if(new URLSearchParams(location.search).get('regionalRiverSurface')==='0') {
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.waterGraph={...planet.terrain.waterGraph,gpu:{...planet.terrain.waterGraph?.gpu,
+                            structuredRiverSurface:false}};
+                    }
+                }
                 gameEngine = new GameEngine('gameCanvas', engineConfig, gameDataConfig);
                 window.gameEngine = gameEngine;
                 installQuadtreeDiagnostics(gameEngine);
                 await gameEngine.start();
+                if(gameEngine.renderer.backend.deviceLoss){showGraphicsFailure();return;}
                 worldConfigLoader?.applyRealtime(
                     gameEngine,
                     worldRaw?.postprocessing,
@@ -3952,8 +4169,14 @@
                 let frameCount = 0;
                 let fpsTime = 0;
                 let loadingHidden = false;
+                let regionalView=new URLSearchParams(location.search).get('regionalView');
+                let renderFailure=null;
 
                 function gameLoop(currentTime) {
+                    if(gameEngine.renderer.backend.deviceLoss||renderFailure) {
+                        showGraphicsFailure();
+                        return;
+                    }
                     const deltaTime = (currentTime - lastTime) / 1000;
                     lastTime = currentTime;
                     
@@ -3972,7 +4195,21 @@
                     
                     const clampedDelta = Math.min(deltaTime, 0.1);
                     gameEngine.update(clampedDelta);
-                    gameEngine.render(clampedDelta);
+                    if(regionalView&&gameEngine.isInitialLoadComplete()&&gameEngine.waterService?.state==='ready'
+                        &&gameEngine.waterService.lakes.length&&gameEngine.terrainGenerator.regionalTerrain?.basinPlan?.basins?.length) {
+                        window.qtDiag.regional.daylight();
+                        if(regionalView==='basin')window.qtDiag.regional.basin(1000,700);
+                        else if(regionalView==='river')window.qtDiag.regional.river(.205,65,90);
+                        else if(regionalView==='flow') {
+                            const mountain=new URLSearchParams(location.search).get('regionalWhitewater')==='1';
+                            window.qtDiag.regional.river(.45,mountain?40:5,mountain?25:35);
+                        }
+                        regionalView=null;
+                    }
+                    gameEngine.render(clampedDelta)?.catch(error=>{
+                        renderFailure=error;
+                        console.error('Game render failed:',error);
+                    });
 
                     const loadingStatus = gameEngine.getLoadingStatus?.();
                     if (loadingStatus && !loadingHidden) {
@@ -3983,7 +4220,7 @@
                             loadingScreen.style.opacity = '0';
                             loadingScreen.style.visibility = 'hidden';
                             setTimeout(() => {
-                                loadingScreen.style.display = 'none';
+                                if(!gameEngine.renderer.backend.deviceLoss&&!renderFailure)loadingScreen.style.display = 'none';
                             }, 720);
                         }
                     }
@@ -3994,6 +4231,7 @@
                 requestAnimationFrame(gameLoop);
                 
             } catch (error) {
+                if(gameEngine?.renderer?.backend?.deviceLoss){showGraphicsFailure();return;}
                 console.error('Failed to initialize game:', error);
                 loadingScreen.innerHTML = `
                     <div style="color: #ff4444; text-align: center;">

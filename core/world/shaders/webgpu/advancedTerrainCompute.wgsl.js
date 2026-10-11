@@ -4,6 +4,8 @@ import { createTerrainFeatureToggleWgsl } from '../../terrain-generator/terrainF
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
 import { createRiverCarveWgsl } from '../../water/riverCarve.wgsl.js';
 import { createRiverValleyWgsl } from '../../water/riverValley.wgsl.js';
+import { createRegionalTerrainWgsl } from '../../terrain-generator/regionalTerrain.wgsl.js';
+import { createRegionalShapeWgsl } from '../../terrain-generator/regionalShape.wgsl.js';
 
 function wgslFloat(value, fallback) {
   const n = Number.isFinite(value) ? value : fallback;
@@ -92,7 +94,7 @@ struct ErosionLandResult {
 //   hilltops and valley floors.)
 // Slope deltas are the filter's approximate derivatives (as in the
 // original), plus the first-order terms of the amount and the offset.
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>, variationFloor: vec4<f32>, localAmount: vec4<f32>) -> ErosionLandResult {
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>, variationFloor: vec4<f32>) -> ErosionLandResult {
     var r: ErosionLandResult;
     r.delta = vec4<f32>(0.0);
     r.amount = vec4<f32>(0.0);
@@ -105,8 +107,7 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     // variationFloor (0..1) raises it smoothly toward 1: 1 - (1 - v)(1 - floor).
     let variation = dConst(1.0) - dMul(dConst(1.0) - variationN, dConst(1.0) - variationFloor);
     let styleStrength = dConst(${wgslNum(cfg.styleStrength[0])}) + style * ${wgslNum(cfg.styleStrength[1] - cfg.styleStrength[0])};
-    let regionalAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
-    let reliefAmount = dSmoothMax(regionalAmount, dMul(localAmount, styleStrength), 0.02);
+    let reliefAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
     // Steepness: full erosion on steep ground, fading out toward flat ground.
     // Summits, saddles and valley floors are where the gully direction spins
     // around a point (pinches, bowties); this keeps gullies away from them
@@ -452,7 +453,7 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
     // No micro detail in river channels (it would raise the carved bed).
-    let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(dir);
+    let microH = regionalValleyMicro(micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(dir) * regionalBasinMicroKeep(dir), dir);
     return softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
 }
 
@@ -635,11 +636,13 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureErosionSeeds(),
     // options.waterCarve: river channels in the height (group 1 bindings 1-3,
     // riverCarve.wgsl.js); otherwise pass-through stubs.
-    createRiverCarveWgsl({ enabled: options?.waterCarve === true }),
+    createRiverCarveWgsl({ enabled: options?.waterCarve === true, bankDetail: options?.riverBankDetail === true }),
     // options.riverValley: river valleys in the height (group 1 bindings 4-7,
     // riverValley.wgsl.js); otherwise pass-through stubs.
     createRiverValleyWgsl({ enabled: options?.riverValley === true, page: options?.riverValleyPage ?? 32 }),
-    base.base(),
+    createRegionalTerrainWgsl({ enabled: options.regionalTerrain === true, valleyFeature: options.regionalValleyFeature === true, shape: options.regionalShape === true }),
+    options.regionalShape===true?createRegionalShapeWgsl():'',
+    base.base(options),
     `
 const WATER_1: u32 = SURFACE_WATER;
 const GRASS_SHORT_1: u32 = SURFACE_GRASS_BASE;
@@ -1541,7 +1544,7 @@ else if (uniforms.outputType == 4) {
         dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
-    let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(unitDir);
+    let microH = regionalValleyMicro(micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(unitDir) * regionalBasinMicroKeep(unitDir), unitDir);
     let finalH = softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
     output = vec4<f32>(finalH, 0.0, 0.0, 1.0);
 }

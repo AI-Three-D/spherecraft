@@ -38,10 +38,10 @@
 // two-lake cycles).
 
 import { buildWaterGraph, cellDir, dirToCell, dirToCellSub } from './waterGraph.js';
-import { bakeValleyPages, RIVER_VALLEY_DEFAULTS, valleyPagesNear, valleyPageTouchesHill, valleyRiverFromRecord, valleyRiverIncisionPages } from '../water/riverValley.js';
+import { bakeValleyPages, RIVER_VALLEY_DEFAULTS, valleyRiverFromRecord, valleyRiverIncisionPages } from '../water/riverValley.js';
 import { dirToPlane, lakeMask, lakePatchFrame, lakeSeed, planeToDir, polylinePatchFrame, solveLakePatch } from './lakeRefine.js';
 import { bakeRiverWaterfalls } from './riverFeatures.js';
-import { bakeRiverIncision, riverHills } from './riverLandscape.js';
+import { bakeRiverIncision } from './riverLandscape.js';
 import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverCrestAbove, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
 
 // C2 ramp 0..1 (quintic smoothstep of a clamped value).
@@ -524,15 +524,12 @@ export function createWaterWorkerCore() {
         }
         segCellStart[n - 1] = segCellList.length;
         const segCells = Int32Array.from(segCellList);
-        const lakeAt = lakeLevelAtFor(near.map(rr => ({ rr, cosR: -1 })));
         const tLandscape = performance.now();
-        const hills = riverHills(dirs, R, riverId, msg.landscape, lakeAt);
         const landscape = bakeRiverIncision({ frame, heights: h, points, stride, arc: features.arc, R, river: riverId,
-            shape: { waterFrac: levelP.waterFrac, widthVar: 0.4, wobble: 0.3, bankVar: 0.55, ...msg.shapeNoise }, hills, options: msg.landscape });
+            shape: { waterFrac: levelP.waterFrac, widthVar: 0.4, wobble: 0.3, bankVar: 0.55, ...msg.shapeNoise }, options: msg.landscape });
         // The worker retains the sparse field; reply buffers are independent.
         valleyRivers.set(riverId, valleyRiverFromRecord({ points, stride, riverId, landscape }, R));
-        const replyLandscape = { ...landscape, cells: landscape.cells.slice(), cuts: landscape.cuts.slice(), erosionCuts: landscape.erosionCuts.slice(),
-            bankReferences: landscape.bankReferences?.slice(), bankClearances: landscape.bankClearances?.slice() };
+        const replyLandscape = { ...landscape, cells: landscape.cells.slice(), cuts: landscape.cuts.slice() };
         const landscapeMs = performance.now() - tLandscape;
         return {
             reply: {
@@ -541,8 +538,7 @@ export function createWaterWorkerCore() {
                 waterfalls: features.waterfalls, landscape: replyLandscape, landscapeMs,
                 startLevel: sm.fill[0], endLevel: sm.fill[n - 1], destLevel: plan.destLevel,
             },
-            transfer: [points.buffer, segCellStart.buffer, segCells.buffer, replyLandscape.cells.buffer, replyLandscape.cuts.buffer, replyLandscape.erosionCuts.buffer,
-                ...(replyLandscape.bankReferences ? [replyLandscape.bankReferences.buffer, replyLandscape.bankClearances.buffer] : [])],
+            transfer: [points.buffer, segCellStart.buffer, segCells.buffer, replyLandscape.cells.buffer, replyLandscape.cuts.buffer],
         };
     }
 
@@ -580,13 +576,6 @@ export function createWaterWorkerCore() {
             const rv = valleyRivers.get(rid);
             if (!rv) continue;
             if (rv.landscape) for (const p of valleyRiverIncisionPages(rv, R, opts)) pages.add(p);
-            // A placement range selects hill centres, never clips their
-            // footprints. Larger configured hills can extend beyond it.
-            for (const hill of rv.landscape?.hills ?? []) {
-                for (const p of valleyPagesNear([hill.c], [0], R, { ...opts, dBig: Math.max(hill.a, hill.b) * 1.2 })) {
-                    if (valleyPageTouchesHill(p, hill, R, opts)) pages.add(p);
-                }
-            }
         }
         const pageIds = Int32Array.from([...pages].sort((a, b) => a - b));
         // Every known river can reach these pages (the bake keeps the nearest).
