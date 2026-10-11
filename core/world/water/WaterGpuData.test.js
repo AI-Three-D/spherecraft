@@ -67,7 +67,7 @@ describe('WaterGpuData', () => {
         const values=new Float32Array(gpu.paramsData);
         expect(values[22]).toBe(6);expect(values[23]).toBeCloseTo(.7);expect(values[35]).toBe(1);
     });
-    it('marks distant bed coverage only for carved structured reaches without islands',()=>{
+    it('marks distant bed coverage for carved reaches without islands, traced or structured',()=>{
         const gpu=new WaterGpuData(stubDevice(),{gridN:4,planetRadius:131072,maxMaskLayers:2,carve:{enabled:true}});
         const svc=fakeService(),points=new Float32Array(40);
         points.set([0,0,1,105,15,1.5,.8,3,0,0,0,0,0,0,0,0,105,1.5,-1e20,0]);
@@ -76,9 +76,11 @@ describe('WaterGpuData', () => {
             svc.riverRecs.set(0,{structured,points:points.slice(),stride:20,segCellStart:Int32Array.from([0,1]),segCells:Int32Array.from([64])});
             svc.version++;gpu.update(svc,cam,0);return gpu._segs[23];
         };
-        expect(publish(true)).toBe(1);expect(publish(false)).toBe(0);
+        // Traced rivers too: the carve cuts every listed wet core to the profile.
+        expect(publish(true)).toBe(2);expect(publish(false)).toBe(1);
         points[19]=.4;expect(publish(true)).toBe(0);
-        points[19]=0;gpu.carve.enabled=false;expect(publish(true)).toBe(0);
+        points[19]=.4;expect(publish(false)).toBe(0);
+        points[19]=0;gpu.carve.enabled=false;expect(publish(true)).toBe(0);expect(publish(false)).toBe(0);
     });
     it('uploads only the valid tail when a compact river-cell pool ends partway through a row',()=>{
         const dev=stubDevice(),gpu=new WaterGpuData(dev,{gridN:32,planetRadius:131072,maxRiverCells:1,maxRiverSegs:1,maxLakes:1,maskLayerSize:32,maxMaskLayers:1});

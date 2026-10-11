@@ -352,6 +352,7 @@ struct WaterRiverHit {
     found: bool,          // water at the point
     near: bool,           // within the channel zone (channel + bankW) of a river
     constructedSurface: bool, // coarse cut contract supplies coverage, not a sampled bed
+    opaqueBody: bool,     // structured reach: shade the body without the coarse ground below
     depthM: f32,          // water depth at the point
     distM: f32,           // distance from the river line
     halfWidthM: f32,
@@ -412,6 +413,10 @@ fn waterRiverAtView(dir: vec3<f32>, heightM: f32, coarseSurface: bool) -> WaterR
     // over dry terrain hid islands and flooded banks before regeneration.
     var depthM = select(0.0, max(best.wl - heightM, 0.0), best.d < best.hw);
     hit.constructedSurface=coarseSurface && s._pad>0.5 && waterParams.carve.x>0.5;
+    // Structured reaches (flag 2) shade an opaque body at every far distance;
+    // traced reaches (flag 1) blend into it from their near colour model
+    // (applyWater), since an opaque body right at the switch made a step.
+    hit.opaqueBody=hit.constructedSurface && s._pad>1.5;
     if(hit.constructedSurface) {
         depthM=0.0;
         // Below .85*width the terrain cut has full weight, and final micro
@@ -616,6 +621,17 @@ fn applyWater(
             let surface=waterSurfaceTerms(worldPos,up,cameraPos,lightDir,sunRadiance,skyRadiance);
             let body=waterParams.deepColor.rgb*(skyRadiance+sunRadiance*max(dot(up,lightDir),0.0));
             riverCol=body*(1.0-surface.a)+surface.rgb;
+            // Traced reaches start from their near colour model (ground seen
+            // through the profile depth) at the near/far switch and reach the
+            // opaque body by 2.5x its distance: no colour step there, and
+            // water-coloured rivers from the air (owner 2026-10-11).
+            if(!river.opaqueBody) {
+                let switchM=max(waterParams.near.y,waterParams.riverLook.z);
+                let w=smoothstep(switchM,switchM*2.5,dist);
+                if(w<1.0) {
+                    riverCol=mix(waterNearFarColor(ground,river.depthM,worldPos,up,cameraPos,dist,nearW,lightDir,sunRadiance,skyRadiance),riverCol,w);
+                }
+            }
         } else {
             riverCol=waterNearFarColor(ground,river.depthM,worldPos,up,cameraPos,dist,nearW,lightDir,sunRadiance,skyRadiance);
         }

@@ -4133,6 +4133,14 @@
                             enabled:riverSimMode==='whitewater',lengthM:256,activateAltitudeM:150,activateDistanceM:120}};
                     }
                 }
+                // Original (terrain-sampled) lakes, every lake solved at 32 m
+                // before it is drawn (WaterService refine.precompute).
+                if(new URLSearchParams(location.search).get('waterPrecompute')==='1') {
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.waterGraph={...planet.terrain.waterGraph,
+                            refine:{...planet.terrain.waterGraph?.refine,precompute:true,spacingM:32}};
+                    }
+                }
                 if(new URLSearchParams(location.search).get('waterPools')==='legacy') {
                     for(const planet of gameDataConfig.planets) if(planet.enabled) {
                         planet.terrain.waterGraph={...planet.terrain.waterGraph,gpu:{structuredCapacity:false}};

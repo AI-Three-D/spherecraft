@@ -64,8 +64,19 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
         lookAheadS: 3,     // work is ranked by distance from where the camera will be this far ahead
         maxCells: 4e6,     // larger patches get a coarser spacing
         maxGrows: 3,       // patch growths (x1.6) when a lake reaches the patch border
+        // Every lake solved right after the graph, nearest first; a lake is
+        // drawn only once solved (no grid-cell outlines, no level pops). Use
+        // with spacingM 32: lab 2026-10-11 (lake-recovery-2026-10-11/lab2),
+        // 614 lakes, 32 m vs 16 m levels p5..p95 -0.23..+0.14 m, visible
+        // water IoU 0.994 by area, 3.3x less flood work.
+        precompute: false,
     },
 });
+
+// Precompute sampling: larger dispatches, a frame yield only after this much
+// main-thread time (instead of one dispatch per frame).
+const PRECOMPUTE_SAMPLES_PER_DISPATCH = 262144;
+const PRECOMPUTE_SLICE_MS = 12;
 
 function mergeConfig(cfg = {}) {
     return {
@@ -130,7 +141,7 @@ export class WaterService {
      * @param {boolean} [p.useWorker=true]
      * @param {Function} [p.yieldBetween]   awaited between GPU dispatches
      */
-    constructor({ device, terrainGenerator, planetConfig, config = null, useWorker = true, yieldBetween = null }) {
+    constructor({ device, terrainGenerator, planetConfig, config = null, useWorker = true, yieldBetween = null, loading = null }) {
         this.device = device;
         this.terrainGenerator = terrainGenerator;
         this.planetConfig = planetConfig;
@@ -138,6 +149,10 @@ export class WaterService {
         this.radius = planetConfig.radius;
         this._useWorker = useWorker;
         this._yieldBetween = yieldBetween;
+        // () => true while the initial terrain loads: the precompute then
+        // floods one lake at a time (a full pool delayed the loader by ~3.5 s,
+        // lake-recovery-2026-10-11 runs 5, 8, 9).
+        this._loading = loading;
 
         this.state = 'idle';     // idle | sampling | building | ready | failed
         this.lakes = [];         // graph lakes (worker summaries)
@@ -187,8 +202,18 @@ export class WaterService {
             }
             this.state = 'sampling';
             this._client = new WorkerClient(this._useWorker);
+            const pre = this.config.refine.precompute === true;
+            let sliceStart = performance.now();
+            const sliced = async () => {
+                if (performance.now() - sliceStart < PRECOMPUTE_SLICE_MS) return;
+                if (this._yieldBetween) await this._yieldBetween();
+                sliceStart = performance.now();
+            };
             this._sampler = await createHydrologySampler({
-                device: this.device, terrainGenerator: this.terrainGenerator, yieldBetween: this._yieldBetween,
+                device: this.device, terrainGenerator: this.terrainGenerator, yieldBetween: pre ? sliced : this._yieldBetween,
+                ...(pre ? { samplesPerDispatch: PRECOMPUTE_SAMPLES_PER_DISPATCH } : {}),
+                // The carved variant only serves the simulation's bed.
+                eagerCarved: !pre && this.config.sim?.enabled !== false,
             });
             if (this._carveResources) this._sampler.setWaterCarveResources(this._carveResources);
             if (this._valleyResources) this._sampler.setRiverValleyResources(this._valleyResources);
@@ -233,6 +258,10 @@ export class WaterService {
                 `(grid ${fromCache ? 'from cache' : 'sampled'} ${this.timings.gridMs.toFixed(0)} ms, ` +
                 `build ${this.timings.buildMs.toFixed(0)} ms ${this._client.inWorker ? 'in worker' : 'in-process'}, key ${this._key})`
             );
+            if (pre) {
+                this._busy = true;   // update() waits: lakes are solved here, rivers after them
+                this._precomputeLakes().catch(err => Logger.warn(`[Water] lake precompute failed: ${err?.stack || err}`));
+            }
         } catch (err) {
             this.state = 'failed';
             Logger.warn(`[Water] graph build failed: ${err?.stack || err}`);
@@ -277,6 +306,11 @@ export class WaterService {
      * frame after one finishes.
      */
     update(cameraPosition) {
+        if (cameraPosition) {
+            const o = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
+            const v = [cameraPosition.x - o.x, cameraPosition.y - o.y, cameraPosition.z - o.z], l = Math.hypot(...v) || 1;
+            this._camDir = [v[0] / l, v[1] / l, v[2] / l];
+        }
         if (this.state !== 'ready' || this._busy || !this.config.refine.enabled || !cameraPosition) return;
         const now = performance.now();
         const origin = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
@@ -327,6 +361,116 @@ export class WaterService {
         return Math.acos(Math.max(-1, Math.min(1, best))) * this.radius;
     }
 
+    /**
+     * Precompute (refine.precompute): every lake solved once, nearest to the
+     * camera first (re-ranked after each lake), then the downstream routes
+     * once for all. Holds _busy throughout, so rivers start after it.
+     */
+    async _precomputeLakes() {
+        const t0 = performance.now();
+        const R = this.config.refine;
+        let solved = 0, cached = 0;
+        // Floods in a pool of workers (waterWorkerCore solvePatchLake); the
+        // graph worker adopts them in dispatch order, so merges come out as
+        // a one-worker precompute along the same camera path would make them.
+        const poolSize = R.workers > 0 ? R.workers : Math.max(1, Math.min(6, (globalThis.navigator?.hardwareConcurrency ?? 4) - 3));
+        const pool = Array.from({ length: poolSize }, () => new WorkerClient(this._useWorker));
+        const free = [...pool], waiters = [];
+        const takeWorker = () => (free.length ? Promise.resolve(free.pop()) : new Promise(r => waiters.push(r)));
+        const releaseWorker = (w) => { const r = waiters.shift(); if (r) r(w); else free.push(w); };
+        const others = new Float64Array(this.lakes.length * 4);
+        this.lakes.forEach((l, k) => others.set([l.id, l.centreDir[0], l.centreDir[1], l.centreDir[2]], 4 * k));
+        const lakeKey = (id) => `lake:${this._key}:${R.spacingM}:${R.bandM}:crop:${id}`;
+        const pending = new Set(this.lakes.map(l => l.id));
+        const results = new Map();   // dispatch seq -> { id, rec, fromCache } | { id, failed }
+        let seqNext = 0, adoptNext = 0;
+        const pick = () => {
+            let best = -1, bestD = Infinity;
+            for (const id of pending) {
+                if (this.rep(id) !== id || this.refined.has(id) || this._failed.has(id)) { pending.delete(id); continue; }
+                const d = this._camDir ? this._lakeDistance(this.lakes[id], this._camDir) : id;
+                if (d < bestD) { bestD = d; best = id; }
+            }
+            return best;
+        };
+        const runJob = async (id, seq) => {
+            try {
+                const hit = this.config.cache ? await this._cache.get(lakeKey(id)) : null;
+                if (hit) { results.set(seq, { id, rec: hit, fromCache: true }); return; }
+                let frame = limitPatchCells(this.lakes[id].frame, R.maxCells);
+                for (let grows = 0; ; grows++) {
+                    const heights = await this._sampler.samplePatch(frame, this.radius);
+                    const worker = await takeWorker();
+                    let rec;
+                    try {
+                        rec = await worker.call({ type: 'solvePatchLake', lakeId: id, frame, heights, bandM: R.bandM, N: this.N, R: this.radius,
+                            lakeCells: this.lakeCells.subarray(this.lakeCellStart[id], this.lakeCellStart[id + 1]), others }, [heights.buffer]);
+                    } finally { releaseWorker(worker); }
+                    if (rec.status === 'ok') { results.set(seq, { id, rec }); return; }
+                    if (rec.status !== 'grow' || grows >= R.maxGrows) { results.set(seq, { id, failed: rec.status }); return; }
+                    frame = limitPatchCells(growPatchFrame(frame, 1.6), R.maxCells);
+                }
+            } catch (err) {
+                Logger.warn(`[Water] lake ${id} precompute failed: ${err?.message || err}`);
+                results.set(seq, { id, failed: 'error' });
+            }
+        };
+        const adoptReady = async () => {
+            while (results.has(adoptNext)) {
+                const { id, rec, fromCache, failed } = results.get(adoptNext);
+                results.delete(adoptNext++);
+                if (failed) { this._failed.add(id); continue; }
+                if (this.rep(id) !== id) continue;
+                if (fromCache) {
+                    await this._client.call({ type: 'restoreLake', lakeId: id, level: rec.level, exitDir: rec.exitDir, merged: rec.merged,
+                        frame: rec.frame, mask: rec.mask, outflowDirs: rec.outflowDirs, skipDownstream: true });
+                    cached++;
+                } else {
+                    const a = await this._client.call({ type: 'adoptLake', lakeId: id, level: rec.level, exitDir: rec.exitDir,
+                        outflowDirs: rec.outflowDirs, frame: rec.frame, mask: rec.mask, candidates: rec.candidates });
+                    if (a.status !== 'ok') { this.mergedInto.set(id, a.into); continue; }
+                    rec.merged = a.merged;
+                    delete rec.candidates;
+                    if (this.config.cache) this._cache.put(lakeKey(id), rec);
+                }
+                this._apply(id, rec);
+                if (++solved === 1) this.timings.firstLakeMs = performance.now() - t0;
+            }
+        };
+        try {
+            const running = new Set();
+            for (;;) {
+                // One job beyond the pool: its patch samples while the pool floods.
+                while (running.size < (this._loading?.() ? 1 : poolSize) + 1) {
+                    const id = pick();
+                    if (id < 0) break;
+                    pending.delete(id);
+                    const job = runJob(id, seqNext++).then(() => running.delete(job));
+                    running.add(job);
+                }
+                if (!running.size) break;
+                await Promise.race(running);
+                await adoptReady();
+            }
+            await adoptReady();
+            this.timings.precomputeWorkers = poolSize;
+            const { downstream } = await this._client.call({ type: 'downstream' });
+            for (const [lid, down] of Object.entries(downstream)) {
+                const r = this.refined.get(Number(lid));
+                if (r) r.downstream = down;
+            }
+        } finally {
+            for (const w of pool) w.terminate();
+            this.timings.precomputeMs = performance.now() - t0;
+            this.precomputed = true;
+            this._busy = false;
+            this.version++;
+        }
+        Logger.info(`[Water] lakes precomputed: ${solved} solved (${cached} from cache), ${this.mergedInto.size} merged, ` +
+            `${this._failed.size} failed, ${this.timings.precomputeMs.toFixed(0)} ms`);
+        if (this.config.sim?.enabled !== false) this._sampler.warmCarved?.().catch(() => {});
+    }
+
     /** Solves one lake (cache first). Resolves to its record, or null. */
     async refineLake(lakeId) {
         if (this.state !== 'ready' || this._busy) return null;
@@ -343,21 +487,24 @@ export class WaterService {
         if (this.refined.has(id)) return this.refined.get(id);
         const t0 = performance.now();
         const R = this.config.refine;
-        const lakeKey = `lake:${this._key}:${R.spacingM}:${R.bandM}:${id}`;
+        const lakeKey = `lake:${this._key}:${R.spacingM}:${R.bandM}:${R.precompute ? 'crop:' : ''}${id}`;
+        // Precompute: masks cropped to the water; routes once at the end.
+        const pre = R.precompute ? { crop: true, skipDownstream: true } : {};
         try {
             let rec = this.config.cache ? await this._cache.get(lakeKey) : null;
             const fromCache = !!rec;
             if (rec) {
                 const restored = await this._client.call({
                     type: 'restoreLake', lakeId: id, level: rec.level, exitDir: rec.exitDir, merged: rec.merged,
-                    frame: rec.frame, mask: rec.mask, outflowDirs: rec.outflowDirs,
+                    frame: rec.frame, mask: rec.mask, outflowDirs: rec.outflowDirs, ...pre,
                 });
                 rec.downstream = restored.downstream;
+                rec.fromCache = true;
             } else {
                 let frame = limitPatchCells(this.lakes[id].frame, R.maxCells);
                 for (let grows = 0; ; grows++) {
                     const heights = await this._sampler.samplePatch(frame, this.radius);
-                    rec = await this._client.call({ type: 'solveLake', lakeId: id, frame, heights, bandM: R.bandM }, [heights.buffer]);
+                    rec = await this._client.call({ type: 'solveLake', lakeId: id, frame, heights, bandM: R.bandM, ...pre }, [heights.buffer]);
                     if (rec.status !== 'grow' || grows >= R.maxGrows) break;
                     frame = limitPatchCells(growPatchFrame(frame, 1.6), R.maxCells);
                 }
@@ -374,7 +521,7 @@ export class WaterService {
             }
             this._apply(id, rec);
             if (!fromCache && this.config.cache) {
-                const { downstream: _downstream, ms: _ms, ...stored } = rec;
+                const { downstream: _downstream, ms: _ms, fromCache: _fc, ...stored } = rec;
                 this._cache.put(lakeKey, stored);
             }
             Logger.debug(`[Water] lake ${id}: level ${rec.level.toFixed(1)} m (graph ${this.lakes[id].level.toFixed(1)}), ` +
@@ -570,7 +717,7 @@ export class WaterService {
     async _resolveLakeIncluding(id, dir) {
         const R = this.config.refine;
         const old = this.refined.get(id);
-        const f = old?.frame ?? this.lakes[id].frame;
+        const f = old?.patchFrame ?? old?.frame ?? this.lakes[id].frame;
         const [x, y] = dirToPlane(dir, f, this.radius);
         const m = 1500;
         const x0 = Math.min(f.x0, x - m), y0 = Math.min(f.y0, y - m);
@@ -578,13 +725,13 @@ export class WaterService {
         const spacing = R.spacingM;
         const frame = limitPatchCells({ c: f.c, e1: f.e1, e2: f.e2, x0, y0, spacing, nx: Math.ceil((x1 - x0) / spacing), ny: Math.ceil((y1 - y0) / spacing) }, R.maxCells);
         const heights = await this._sampler.samplePatch(frame, this.radius);
-        const rec = await this._client.call({ type: 'solveLake', lakeId: id, frame, heights, bandM: R.bandM }, [heights.buffer]);
+        const rec = await this._client.call({ type: 'solveLake', lakeId: id, frame, heights, bandM: R.bandM, ...(R.precompute ? { crop: true } : {}) }, [heights.buffer]);
         if (rec.status !== 'ok') return false;
         Logger.debug(`[Water] lake ${id} re-solved past its outflow: level ${old?.level?.toFixed(1)} -> ${rec.level.toFixed(1)} m`);
         this._apply(id, rec);
         if (this.config.cache) {
             const { downstream: _downstream, ...stored } = rec;
-            this._cache.put(`lake:${this._key}:${R.spacingM}:${R.bandM}:${id}`, stored);
+            this._cache.put(`lake:${this._key}:${R.spacingM}:${R.bandM}:${R.precompute ? 'crop:' : ''}${id}`, stored);
         }
         return true;
     }

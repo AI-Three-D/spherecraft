@@ -97,7 +97,7 @@ const DEFAULT_SAMPLES_PER_DISPATCH = 131072;
  * Work is split into dispatches of at most samplesPerDispatch terrain
  * evaluations; yieldBetween (e.g. one animation frame) runs between them.
  */
-export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null, directionsOnly = false }) {
+export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null, directionsOnly = false, eagerCarved = true }) {
     // The natural terrain: no river carve, no river valleys (the water graph,
     // lakes and river traces are found on it).
     const usesRegionalTerrain = terrainGenerator.regionalTerrainActive === true;
@@ -231,7 +231,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     async function samplePatch(frame, R, { carved = false } = {}) {
         assertRegionalCurrent();
         const { nx, ny } = frame;
-        if (carved) await carvedReady();
+        if (carved) await ensureCarveGroups();
         const carve = carved && carvedPipeline && carveGroup;
         const pipeline = carve ? carvedPipeline : patchPipeline;
         const heights = new Float32Array(nx * ny);
@@ -286,8 +286,16 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
      * generator's placeholders until set). Carved samples are the terrain as
      * the tiles show it: valleys and channels.
      */
-    let carveRes = null, valleyRes = null;
+    // eagerCarved false: the carved variant (a second full terrain pipeline,
+    // ~20 s cold) compiles on the first carved sample instead of as soon as
+    // the river data arrives; nothing samples it while the simulation is off.
+    let carveRes = null, valleyRes = null, carveGroupsStale = true;
+    async function ensureCarveGroups() {
+        await carvedReady();
+        if (carveGroupsStale) await rebuildCarveGroups();
+    }
     async function rebuildCarveGroups() {
+        carveGroupsStale = false;
         if (!carveRes) { carveGroup = carveDirsGroup = null; return; }
         if (!(await carvedReady())) return;
         const C = RIVER_CARVE_BINDINGS, V = RIVER_VALLEY_BINDINGS;
@@ -307,8 +315,9 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         if(carvedPipeline)carveGroup = device.createBindGroup({ label: 'HydroPatch-carve', layout: carvedPipeline.getBindGroupLayout(1), entries });
         carveDirsGroup = device.createBindGroup({ label: 'HydroDirs-carve', layout: carvedDirsPipeline.getBindGroupLayout(1), entries });
     }
-    async function setWaterCarveResources(res) { carveRes = res ?? null; await rebuildCarveGroups(); }
-    async function setRiverValleyResources(res) { valleyRes = res ?? null; await rebuildCarveGroups(); }
+    const refreshCarveGroups = async () => { carveGroupsStale = true; if (eagerCarved || carvedPromise) await rebuildCarveGroups(); };
+    async function setWaterCarveResources(res) { carveRes = res ?? null; await refreshCarveGroups(); }
+    async function setRiverValleyResources(res) { valleyRes = res ?? null; await refreshCarveGroups(); }
 
     /**
      * Carved terrain heights (m) at unit directions (Float32Array, 4 floats
@@ -319,7 +328,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     async function sampleDirs(dirs4, { carved = false } = {}) {
         assertRegionalCurrent();
         if (carved) {
-            await carvedReady();
+            await ensureCarveGroups();
             if (!carvedDirsPipeline || !carveDirsGroup) return null;
         } else {
             naturalDirsPipeline ??= device.createComputePipelineAsync({ layout: 'auto',
@@ -368,6 +377,8 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         sampleDirsNatural: dirs => sampleDirs(dirs),
         sampleDirsCarved: dirs => sampleDirs(dirs, { carved: true }),
         setWaterCarveResources, setRiverValleyResources, maxH, seaLevelM,
+        // Compiles the carved variant ahead of its first use (background).
+        warmCarved: ensureCarveGroups,
         // Everything the samples depend on: the terrain shader and its uniforms.
         terrainKey: hashParts([baseSource, uniformBytes, ...(usesRegionalTerrain ? [regionalSourceKey] : [])]),
         destroy() { uniformBuffer.destroy(); },

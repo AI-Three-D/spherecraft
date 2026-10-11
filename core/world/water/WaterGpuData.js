@@ -67,7 +67,7 @@ export class WaterGpuData {
      */
     constructor(device, { gridN = 512, planetRadius, maxLakes = CAPACITY.maxLakes, maskLayerSize = CAPACITY.maskLayerSize,
         maxMaskLayers = CAPACITY.maxMaskLayers, maskTilesPerAxis = 1, maxRiverSegs = CAPACITY.maxRiverSegs, maxRiverCells = CAPACITY.maxRiverCells,
-        carve = null, valley = null, maxValleyPages = CAPACITY.maxValleyPages, structuredRiverSurface = true } = {}) {
+        carve = null, valley = null, maxValleyPages = CAPACITY.maxValleyPages, structuredRiverSurface = true, maskAtlas = null } = {}) {
         this.device = device;
         this.N = gridN;
         this.R = planetRadius;
@@ -75,6 +75,25 @@ export class WaterGpuData {
         this.S = maskLayerSize;
         this.maxLayers = maxMaskLayers;
         this.maskTilesPerAxis = maskTilesPerAxis;
+        // maskAtlas (lakeMaskAtlasPlan): mask slots of several tile sizes,
+        // one size per layer of dim^2; a lake takes the smallest tile that
+        // holds its mask unpooled, else the largest. Otherwise one size.
+        this._slots = null;
+        if (maskAtlas) {
+            this._slots = [];
+            let layer = 0;
+            for (const { size, slots } of maskAtlas.classes) {
+                const tiles = maskAtlas.dim / size, perLayer = tiles * tiles;
+                for (let s = 0; s < slots; s++) {
+                    this._slots.push({ size, tiles, layer: layer + Math.floor(s / perLayer), tx: s % tiles, ty: Math.floor(s / tiles) % tiles });
+                }
+                layer += Math.ceil(slots / perLayer);
+            }
+            this.maxLayers = this._slots.length;
+            this._atlasDim = maskAtlas.dim;
+            this._atlasPool = maskAtlas.pool ?? 1;
+            this._atlasLayers = Math.max(1, layer);
+        }
         this.enabled = true;
         this.debugMode = 0;
         // Active simulation strip { river, s0, s1, halfM, endFadeM, sideFadeM,
@@ -104,9 +123,11 @@ export class WaterGpuData {
         this.lakesBuffer = device.createBuffer({ label: 'Lake-table', size: maxLakes * LAKE_RECORD_FLOATS * 4, usage: S });
         this.paramsBuffer = device.createBuffer({ label: 'Lake-params', size: LAKE_PARAMS_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         this.masksTexture = device.createTexture({
-            label: 'Lake-masks', size: [maskLayerSize*maskTilesPerAxis, maskLayerSize*maskTilesPerAxis, Math.ceil(maxMaskLayers/(maskTilesPerAxis*maskTilesPerAxis))], format: 'r8unorm',
+            label: 'Lake-masks', size: this._slots ? [this._atlasDim, this._atlasDim, this._atlasLayers]
+                : [maskLayerSize*maskTilesPerAxis, maskLayerSize*maskTilesPerAxis, Math.ceil(maxMaskLayers/(maskTilesPerAxis*maskTilesPerAxis))], format: 'r8unorm',
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
         });
+        this.maskBytes = this.masksTexture.width * this.masksTexture.height * this.masksTexture.depthOrArrayLayers;
         this.masksView = this.masksTexture.createView({ dimension: '2d-array' });
 
         this.index = new Uint32Array(indexLen);
@@ -122,7 +143,7 @@ export class WaterGpuData {
         this._appliedVersion = -1;
         this._applied = new Map();     // lakeId -> refined record already in the index
         this._layerOf = new Map();     // lakeId -> mask layer
-        this._layerOwner = new Array(maxMaskLayers).fill(-1);
+        this._layerOwner = new Array(this.maxLayers).fill(-1);
         this._dirtyRows = new Set();   // face * N + j
         this.lakeCount = 0;
 
@@ -274,8 +295,21 @@ export class WaterGpuData {
         return Math.acos(Math.max(-1, Math.min(1, camDir[0] * c[0] + camDir[1] * c[1] + camDir[2] * c[2])));
     }
 
-    _allocLayer(svc, id, camDir) {
-        let layer = this._layerOwner.indexOf(-1);
+    /** A free mask slot for rec (see maskAtlas), or -1. */
+    _freeSlot(rec) {
+        if (!this._slots) return this._layerOwner.indexOf(-1);
+        const need = Math.max(rec.frame.nx, rec.frame.ny) / (this._atlasPool ?? 1);
+        let best = -1;
+        for (let s = 0; s < this._slots.length; s++) {
+            if (this._layerOwner[s] !== -1) continue;
+            const size = this._slots[s].size, cur = best < 0 ? 0 : this._slots[best].size;
+            if (best < 0 || (size >= need ? (cur < need || size < cur) : (cur < need && size > cur))) best = s;
+        }
+        return best;
+    }
+
+    _allocLayer(svc, id, camDir, rec) {
+        let layer = this._freeSlot(rec);
         if (layer < 0) {
             // Evict the farthest lake that has a layer (if it is farther than this one).
             let far = -1, farD = this._distanceTo(svc, id, camDir);
@@ -303,8 +337,10 @@ export class WaterGpuData {
     }
 
     _uploadMask(rec, layer, mask = rec.mask) {
-        const { nx, ny } = rec.frame, S = this.S;
-        const tiles=this.maskTilesPerAxis,origin={x:layer%tiles*S,y:Math.floor(layer/tiles)%tiles*S,z:Math.floor(layer/(tiles*tiles))};
+        const slot = this._slots?.[layer];
+        const { nx, ny } = rec.frame, S = slot ? slot.size : this.S;
+        const tiles=this.maskTilesPerAxis,origin=slot?{x:slot.tx*S,y:slot.ty*S,z:slot.layer}
+            :{x:layer%tiles*S,y:Math.floor(layer/tiles)%tiles*S,z:Math.floor(layer/(tiles*tiles))};
         if(rec.surfaceDepthMask) {
             const out=resampleLakeSurfaceMask(rec,mask,S);
             this.device.queue.writeTexture({texture:this.masksTexture,origin},out,
@@ -335,7 +371,10 @@ export class WaterGpuData {
             const fr = rec?.frame ?? lake.frame;
             t[o] = rec?.level ?? lake.level;
             ti[o + 1] = rec ? (this._layerOf.get(id) ?? -1) : -1;
-            if(ti[o+1]>=0&&this.maskTilesPerAxis>1) {
+            if (ti[o + 1] >= 0 && this._slots) {
+                const s = this._slots[ti[o + 1]];
+                ti[o + 1] = s.layer | (s.tx << 8) | (s.ty << 12) | (s.tiles << 16);
+            } else if(ti[o+1]>=0&&this.maskTilesPerAxis>1) {
                 const slot=ti[o+1],tiles=this.maskTilesPerAxis;
                 ti[o+1]=Math.floor(slot/(tiles*tiles))|((slot%tiles)<<8)|((Math.floor(slot/tiles)%tiles)<<12)|(tiles<<16);
             }
@@ -367,7 +406,7 @@ export class WaterGpuData {
                     this._unapply(svc, id);
                     for (const m of rec.merged ?? []) this._unapply(svc, m);
                     for (const c of rec.maskCells) this._setSlot(c, id + 1);
-                    const layer = this._allocLayer(svc, id, camDir);
+                    const layer = this._allocLayer(svc, id, camDir, rec);
                     this._maskOf.set(id, trimLakeBand(rec, this._appliedRivers.values(), this.R, this._carveReach));
                     if (layer >= 0) this._uploadMask(rec, layer, this._maskOf.get(id));
                     this._applied.set(id, rec);
@@ -548,8 +587,15 @@ export class WaterGpuData {
                     ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
                     P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0,
                     arc[k], arc[k + 1], ridOf.get(rec) ?? -1,
-                    rec.structured===true&&this.carve?.enabled===true&&st>=20&&P[a+19]===0&&P[b+19]===0
-                        &&Math.max(Math.abs(wlA),Math.abs(wlB),Math.abs(P[a+3]-P[a+5]),Math.abs(P[b+3]-P[b+5]))<=10000?1:0,
+                    // Distant coverage from the channel profile (waterRiverAtView):
+                    // the carve cuts every listed segment's wet core to that
+                    // profile (riverCarveSegment_d), traced or structured, while
+                    // coarse triangles miss the channel (rivers drew as a brown
+                    // strip with cyan spots from the air, owner 2026-10-11).
+                    // 2: structured (opaque far body), 1: traced (ground seen through it).
+                    this.carve?.enabled===true&&st>=20&&P[a+19]===0&&P[b+19]===0
+                        &&Math.max(Math.abs(wlA),Math.abs(wlB),Math.abs(P[a+3]-P[a+5]),Math.abs(P[b+3]-P[b+5]))<=10000
+                        ?(rec.structured===true?2:1):0,
                     wlA, wlB, st >= 20 ? P[a + 18] : -1e20, st >= 20 ? P[b + 18] : -1e20,
                     st >= 20 ? P[a + 19] : 0, st >= 20 ? P[b + 19] : 0, 0, 0], o);
                 next++;
@@ -602,6 +648,31 @@ export class WaterGpuData {
         this.indexBuffer.destroy(); this.lakesBuffer.destroy(); this.paramsBuffer.destroy(); this.masksTexture.destroy(); this.riversBuffer.destroy();
         this.valleyPagesBuffer?.destroy(); this.valleyTexelsBuffer?.destroy(); this.valleyParamsBuffer?.destroy();
     }
+}
+
+/**
+ * Mask atlas for a service that solves every lake (refine.precompute):
+ * slots per tile size, from each graph lake's patch frame. The solved masks
+ * are cropped to the water (waterWorkerCore solveLake crop): the coarse
+ * extent is the frame less the solve margins (lakeRefine.lakePatchFrame:
+ * max(1500 m, 0.3 x extent) a side), grown 25 % for basins wider at fine scale.
+ * 2048^2 layers keep tile coordinates within the shader's 4 bits for 128^2
+ * tiles. Default planet, 614 lakes at 32 m: 82 / 191 / 508 slots, 44 MB.
+ * @returns {{ dim: number, classes: { size: number, slots: number }[], bytes: number }}
+ */
+export function lakeMaskAtlasPlan(lakes, { dim = 2048, sizes = [512, 256, 128], slack = 1.25, pool = 2 } = {}) {
+    const asc = sizes.slice().sort((a, b) => a - b), counts = new Map(asc.map(s => [s, 0]));
+    for (const { frame: f } of lakes) {
+        const W = Math.max(f.nx, f.ny) * f.spacing, extent = W >= 8000 ? W / 1.6 : Math.max(0, W - 3000);
+        const cells = (extent * 1.25) / f.spacing + 8;
+        // Up to pool x pooled before taking a larger tile (the 16 m solves
+        // drew lakes over 8 km with 512^2 at ~70 m a texel).
+        const size = asc.find(s => s * pool >= cells) ?? asc[asc.length - 1];
+        counts.set(size, counts.get(size) + 1);
+    }
+    const classes = asc.slice().reverse().map(size => ({ size, slots: Math.ceil(counts.get(size) * slack) + 4 }));
+    const layers = classes.reduce((n, c) => n + Math.ceil(c.slots / (dim / c.size) ** 2), 0);
+    return { dim, classes, pool, bytes: layers * dim * dim };
 }
 
 /**

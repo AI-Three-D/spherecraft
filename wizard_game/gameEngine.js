@@ -51,7 +51,7 @@ import { createTerrainFeatureErosionFilter } from '../templates/terrain-shaders/
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
-import { WaterGpuData, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
+import { WaterGpuData, lakeMaskAtlasPlan, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
 import {structuredWaterGpuCapacity} from '../core/world/water/structuredWaterGpuCapacity.js';
 import { WaterRiverSim } from '../core/world/water/WaterRiverSim.js';
 import { createRiverStrip } from '../core/world/water/riverStrip.js';
@@ -1425,9 +1425,12 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
      */
     _tickWater() {
         if (this.planetConfig?.terrainGeneration?.waterGraph?.enabled !== true) return;
+        // refine.precompute (WaterService): the graph and every lake's solve
+        // start with the terrain, and the GPU data is sized from the graph.
+        const precompute = this.planetConfig.terrainGeneration.waterGraph.refine?.precompute === true;
         if (!this.waterService) {
             const terrainGenerator = this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator ?? this.terrainGenerator;
-            if (!this.isInitialLoadComplete() && !terrainGenerator?.regionalTerrain?.basinsConfig) return;
+            if (!this.isInitialLoadComplete() && !terrainGenerator?.regionalTerrain?.basinsConfig && !precompute) return;
             const device = this.renderer?.backend?.device;
             if (!terrainGenerator || !device) return;
             this.waterService = new WaterService({
@@ -1436,43 +1439,63 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 planetConfig: this.planetConfig,
                 // One GPU sampling dispatch per frame.
                 yieldBetween: () => new Promise(resolve => requestAnimationFrame(() => resolve())),
+                loading: () => !this.isInitialLoadComplete(),
             });
             this.waterService.start();
-            // Lakes and rivers drawn in the terrain shading (core/world/water/waterWgsl.js).
-            const cfg = this.waterService.config;
-            this.waterGpuData = new WaterGpuData(device, {
-                gridN: cfg.gridN, planetRadius: this.planetConfig.radius,
-                carve: terrainGenerator.waterCarve ? cfg.carve : null,
-                valley: terrainGenerator.riverValley ? cfg.valley : null,
-                ...(cfg.gpu.structuredCapacity?structuredWaterGpuCapacity(this.waterService):{}),
-                structuredRiverSurface:cfg.gpu.structuredRiverSurface,
-            });
-            if (terrainGenerator.regionalTerrainActive && this.waterService.state === 'ready') {
-                const origin = this.planetConfig.origin || {x:0,y:0,z:0}, cam = this.camera?.position;
-                const basin = terrainGenerator.regionalTerrain.basins[0];
-                const radius = this.planetConfig.radius + (basin?.levelM ?? 0);
-                const rel = cam ? {x:cam.x-origin.x,y:cam.y-origin.y,z:cam.z-origin.z}
-                    : {x:(basin?.centre[0]??1)*radius,y:(basin?.centre[1]??0)*radius,z:(basin?.centre[2]??0)*radius};
-                this.waterGpuData.update(this.waterService, rel, performance.now()/1000);
-                // No render tiles exist before quadtree initialization. These
-                // initial uploads are generation inputs, not terrain changes.
-                if (!this.renderer?.quadtreeTileManager?.tileStreamer) this.waterGpuData.takeChangedCells();
-            }
-            this.renderer?.setWaterData?.(this.waterGpuData);
-            // River channels carved into tiles generated from now on, and into
-            // the simulation's bed (core/world/water/riverCarve.wgsl.js).
-            if (terrainGenerator.waterCarve) {
-                terrainGenerator.setWaterCarveResources(this.waterGpuData.resources);
-                this.waterService.setWaterCarveResources(this.waterGpuData.resources);
-                this._waterCarveGenerator = terrainGenerator;
-            }
-            // River valleys shaped into the terrain before erosion (core/world/water/riverValley.js).
-            if (terrainGenerator.riverValley) {
-                terrainGenerator.setRiverValleyResources(this.waterGpuData.valleyResources);
-                this.waterService.setRiverValleyResources(this.waterGpuData.valleyResources);
-            }
+            if (!precompute) this._createWaterGpuData(terrainGenerator, device);
             return;
         }
+        if (!this.waterGpuData) {
+            this.waterService.update(this.camera?.position);   // camera for the precompute's order
+            if (this.waterService.state !== 'ready') return;
+            const terrainGenerator = this.waterService.terrainGenerator;
+            this._createWaterGpuData(terrainGenerator, this.renderer.backend.device,
+                { maskAtlas: lakeMaskAtlasPlan(this.waterService.lakes) });
+            // Only solved lakes are drawn: no grid-cell outlines at any distance.
+            this.waterGpuData.look.unsolvedLakeHideM = 1e12;
+            return;
+        }
+        this._tickWaterFrame();
+    }
+
+    _createWaterGpuData(terrainGenerator, device, extra = {}) {
+        // Lakes and rivers drawn in the terrain shading (core/world/water/waterWgsl.js).
+        const cfg = this.waterService.config;
+        this.waterGpuData = new WaterGpuData(device, {
+            gridN: cfg.gridN, planetRadius: this.planetConfig.radius,
+            carve: terrainGenerator.waterCarve ? cfg.carve : null,
+            valley: terrainGenerator.riverValley ? cfg.valley : null,
+            ...(cfg.gpu.structuredCapacity?structuredWaterGpuCapacity(this.waterService):{}),
+            structuredRiverSurface:cfg.gpu.structuredRiverSurface,
+            ...extra,
+        });
+        if (terrainGenerator.regionalTerrainActive && this.waterService.state === 'ready') {
+            const origin = this.planetConfig.origin || {x:0,y:0,z:0}, cam = this.camera?.position;
+            const basin = terrainGenerator.regionalTerrain.basins[0];
+            const radius = this.planetConfig.radius + (basin?.levelM ?? 0);
+            const rel = cam ? {x:cam.x-origin.x,y:cam.y-origin.y,z:cam.z-origin.z}
+                : {x:(basin?.centre[0]??1)*radius,y:(basin?.centre[1]??0)*radius,z:(basin?.centre[2]??0)*radius};
+            this.waterGpuData.update(this.waterService, rel, performance.now()/1000);
+            // No render tiles exist before quadtree initialization. These
+            // initial uploads are generation inputs, not terrain changes.
+            if (!this.renderer?.quadtreeTileManager?.tileStreamer) this.waterGpuData.takeChangedCells();
+        }
+        this.renderer?.setWaterData?.(this.waterGpuData);
+        // River channels carved into tiles generated from now on, and into
+        // the simulation's bed (core/world/water/riverCarve.wgsl.js).
+        if (terrainGenerator.waterCarve) {
+            terrainGenerator.setWaterCarveResources(this.waterGpuData.resources);
+            this.waterService.setWaterCarveResources(this.waterGpuData.resources);
+            this._waterCarveGenerator = terrainGenerator;
+        }
+        // River valleys shaped into the terrain before erosion (core/world/water/riverValley.js).
+        if (terrainGenerator.riverValley) {
+            terrainGenerator.setRiverValleyResources(this.waterGpuData.valleyResources);
+            this.waterService.setRiverValleyResources(this.waterGpuData.valleyResources);
+        }
+    }
+
+    _tickWaterFrame() {
         this.waterService.update(this.camera?.position);
         const cam = this.camera?.position, origin = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
         if (cam && this.waterGpuData) {

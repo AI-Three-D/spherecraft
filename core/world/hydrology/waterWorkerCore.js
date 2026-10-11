@@ -47,6 +47,70 @@ import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEF
 // C2 ramp 0..1 (quintic smoothstep of a clamped value).
 const ramp5 = (t) => { const x = Math.max(0, Math.min(1, t)); return x * x * x * (x * (x * 6 - 15) + 10); };
 
+/**
+ * One lake on its patch without the graph (precompute pool workers): seed
+ * among the lake's graph cells (msg.lakeCells), solve, render mask cropped
+ * to the water, the grid cells under it, and the merge candidates: other
+ * lakes (msg.others: id, x, y, z of their deepest cell, by id) whose deepest
+ * point lies in the water. Same results as solveLake's for one lake.
+ */
+export function solvePatchLake(msg) {
+    const { lakeId, frame, bandM, N, R } = msg, h = msg.heights;
+    const own = new Set(msg.lakeCells);
+    let seed = -1;
+    for (let j = 0; j < frame.ny; j++) {
+        const y = frame.y0 + (j + 0.5) * frame.spacing;
+        for (let i = 0; i < frame.nx; i++) {
+            const id = j * frame.nx + i;
+            if (seed !== -1 && h[id] >= h[seed]) continue;
+            if (own.has(dirToCell(planeToDir(frame.x0 + (i + 0.5) * frame.spacing, y, frame, R), N))) seed = id;
+        }
+    }
+    if (seed < 0) return { reply: { type: 'patchSolved', lakeId, status: 'noSeed' } };
+    const s = solveLakePatch({ heights: h, nx: frame.nx, ny: frame.ny, seed });
+    if (!s) return { reply: { type: 'patchSolved', lakeId, status: 'dry' } };
+    if (s.touchesBorder) return { reply: { type: 'patchSolved', lakeId, status: 'grow' } };
+    const cx = (k) => frame.x0 + ((k % frame.nx) + 0.5) * frame.spacing;
+    const cy = (k) => frame.y0 + (Math.floor(k / frame.nx) + 0.5) * frame.spacing;
+    const exitDir = planeToDir(cx(s.exit), cy(s.exit), frame, R);
+    const step = Math.max(1, Math.round(100 / frame.spacing));
+    const outflowDirs = [];
+    for (let k = 0; k < s.outflow.length; k += step) outflowDirs.push(planeToDir(cx(s.outflow[k]), cy(s.outflow[k]), frame, R));
+    const lastOut = s.outflow[s.outflow.length - 1];
+    outflowDirs.push(planeToDir(cx(lastOut), cy(lastOut), frame, R));
+    const candidates = [];
+    const O = msg.others;
+    for (let o = 0; o < O.length; o += 4) {
+        const d = [O[o + 1], O[o + 2], O[o + 3]];
+        if (O[o] === lakeId || d[0] * frame.c[0] + d[1] * frame.c[1] + d[2] * frame.c[2] < 0.5) continue;
+        const [x, y] = dirToPlane(d, frame, R);
+        const i = Math.floor((x - frame.x0) / frame.spacing), j = Math.floor((y - frame.y0) / frame.spacing);
+        if (i >= 0 && j >= 0 && i < frame.nx && j < frame.ny && s.region[j * frame.nx + i]) candidates.push(O[o]);
+    }
+    const full = lakeMask(h, frame.nx, frame.ny, s.region, s.level, bandM);
+    const cellSet = new Set();
+    let i0 = frame.nx, i1 = -1, j0 = frame.ny, j1 = -1;
+    for (let k = 0; k < full.length; k++) {
+        if (!full[k]) continue;
+        cellSet.add(dirToCell(planeToDir(cx(k), cy(k), frame, R), N));
+        const i = k % frame.nx, j = (k - i) / frame.nx;
+        if (i < i0) i0 = i; if (i > i1) i1 = i; if (j < j0) j0 = j; if (j > j1) j1 = j;
+    }
+    i0 = Math.max(0, i0 - 1); j0 = Math.max(0, j0 - 1); i1 = Math.min(frame.nx - 1, i1 + 1); j1 = Math.min(frame.ny - 1, j1 + 1);
+    const nx = i1 - i0 + 1, ny = j1 - j0 + 1, mask = new Uint8Array(nx * ny);
+    for (let j = 0; j < ny; j++) mask.set(full.subarray((j0 + j) * frame.nx + i0, (j0 + j) * frame.nx + i0 + nx), j * nx);
+    const maskCells = Int32Array.from([...cellSet].sort((a, b) => a - b));
+    return {
+        reply: {
+            type: 'patchSolved', lakeId, status: 'ok', patchFrame: frame,
+            frame: { ...frame, x0: frame.x0 + i0 * frame.spacing, y0: frame.y0 + j0 * frame.spacing, nx, ny },
+            level: s.level, maxDepth: s.maxDepth, cells: s.cells, areaM2: s.cells * frame.spacing * frame.spacing,
+            exitDir, outflowDirs, mask, maskCells, candidates,
+        },
+        transfer: [mask.buffer, maskCells.buffer],
+    };
+}
+
 export function createWaterWorkerCore() {
     let g = null;
     let N = 0, R = 0, seaLevelM = 0;
@@ -169,22 +233,58 @@ export function createWaterWorkerCore() {
             merged.push(r);
         }
 
-        const mask = lakeMask(h, frame.nx, frame.ny, s.region, s.level, bandM);
+        let mask = lakeMask(h, frame.nx, frame.ny, s.region, s.level, bandM);
         // Grid cells under the mask: the GPU lake index points them here.
         const cellSet = new Set();
+        let i0 = frame.nx, i1 = -1, j0 = frame.ny, j1 = -1;
         for (let k = 0; k < mask.length; k++) {
-            if (mask[k]) cellSet.add(dirToCell(planeToDir(cx(k), cy(k), frame, R), N));
+            if (!mask[k]) continue;
+            cellSet.add(dirToCell(planeToDir(cx(k), cy(k), frame, R), N));
+            const i = k % frame.nx, j = (k - i) / frame.nx;
+            if (i < i0) i0 = i; if (i > i1) i1 = i; if (j < j0) j0 = j; if (j > j1) j1 = j;
         }
         const maskCells = Int32Array.from([...cellSet].sort((a, b) => a - b));
-        const downstream = allDownstream();
+        // msg.crop: the mask and its frame shrink to the water and shore band
+        // (plus a dry cell); the solved patch stays in patchFrame. Same
+        // tangent plane, so (frame, mask) pairs index alike.
+        let maskFrame = frame;
+        if (msg.crop && i1 >= 0) {
+            i0 = Math.max(0, i0 - 1); j0 = Math.max(0, j0 - 1); i1 = Math.min(frame.nx - 1, i1 + 1); j1 = Math.min(frame.ny - 1, j1 + 1);
+            const nx = i1 - i0 + 1, ny = j1 - j0 + 1, cropped = new Uint8Array(nx * ny);
+            for (let j = 0; j < ny; j++) cropped.set(mask.subarray((j0 + j) * frame.nx + i0, (j0 + j) * frame.nx + i0 + nx), j * nx);
+            maskFrame = { ...frame, x0: frame.x0 + i0 * frame.spacing, y0: frame.y0 + j0 * frame.spacing, nx, ny };
+            mask = cropped;
+        }
+        // skipDownstream: a precompute asks for every route once at the end
+        // (each solve here would recompute all refined lakes' routes again).
+        const downstream = msg.skipDownstream ? null : allDownstream();
         return {
             reply: {
-                type: 'solved', lakeId, status: 'ok', frame,
+                type: 'solved', lakeId, status: 'ok', frame: maskFrame, ...(msg.crop ? { patchFrame: frame } : {}),
                 level: s.level, maxDepth: s.maxDepth, cells: s.cells, areaM2: s.cells * frame.spacing * frame.spacing,
                 exitDir, outflowDirs, mask, maskCells, merged, downstream,
             },
             transfer: [mask.buffer, maskCells.buffer],
         };
+    }
+
+    // Precompute pool (WaterService refine.precompute): the graph worker
+    // adopts results solved elsewhere (solvePatchLake), in dispatch order,
+    // merging as solveLake does. msg.candidates: other lakes whose deepest
+    // point lies in this lake's water, by id.
+    function adoptLake(msg) {
+        const { lakeId, level, exitDir, outflowDirs, frame, mask, candidates } = msg;
+        if (mergedInto.has(lakeId)) return { reply: { type: 'adopted', lakeId, status: 'merged', into: rep(lakeId) } };
+        refined.set(lakeId, { level, exitDir, outflowDirs, frame, region: Uint8Array.from(mask, v => (v === 2 ? 1 : 0)) });
+        const merged = [];
+        for (const other of candidates) {
+            if (other === lakeId || rep(other) === lakeId) continue;
+            const r = rep(other);
+            mergedInto.set(r, lakeId);
+            refined.delete(r);
+            merged.push(r);
+        }
+        return { reply: { type: 'adopted', lakeId, status: 'ok', merged } };
     }
 
     // Every refined lake's route (routes change whenever a level changes).
@@ -204,7 +304,7 @@ export function createWaterWorkerCore() {
             mergedInto.set(r, lakeId);
             refined.delete(r);
         }
-        return { reply: { type: 'restored', lakeId, downstream: allDownstream() } };
+        return { reply: { type: 'restored', lakeId, downstream: msg.skipDownstream ? null : allDownstream() } };
     }
 
     // ---- Rivers (riverRefine.js) ----
@@ -612,6 +712,9 @@ export function createWaterWorkerCore() {
             if (msg.type === 'bakeValley') return bakeValley(msg);
             if (msg.type === 'solveLake') return solveLake(msg);
             if (msg.type === 'restoreLake') return restoreLake(msg);
+            if (msg.type === 'downstream') return { reply: { type: 'downstream', downstream: allDownstream() } };
+            if (msg.type === 'adoptLake') return adoptLake(msg);
+            if (msg.type === 'solvePatchLake') return solvePatchLake(msg);
             if (msg.type === 'planRiver') return planRiver(msg);
             if (msg.type === 'solveRiver') return solveRiver(msg);
             throw new Error(`waterWorkerCore: unknown message ${msg.type}`);
