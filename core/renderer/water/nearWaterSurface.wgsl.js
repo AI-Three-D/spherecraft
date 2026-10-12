@@ -161,10 +161,22 @@ export function buildNearWaterFragmentShader() {
 fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
     let lake = waterLakes[in.lake];
     let m = waterLakeMaskSample(lake,in.uv,nearWaterSampler);
-    if (m < select(0.5,63.5/255.0,lake.surfaceDepthRangeM>0.0)) { discard; }
-    if (lake.surfaceDepthRangeM<=0.0 && m < 0.75) {
-        let river = waterRiverAt(normalize(in.wp - U.origin), lake.level);
-        if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { discard; }
+    if (lake.surfaceDepthRangeM < 0.0) {
+        // Signed-distance mask (lakeMaskSdf.js): the sheet ends half a solve
+        // cell beyond the solved water, where the ground is at or above the
+        // level, instead of over lower ground past a sill (floating edges).
+        let F = m * 255.0 - 128.0;
+        if (F <= lake.surfaceDepthRangeM) { discard; }
+        if (F < 0.0) {
+            let river = waterRiverAt(normalize(in.wp - U.origin), lake.level);
+            if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { discard; }
+        }
+    } else {
+        if (m < select(0.5,63.5/255.0,lake.surfaceDepthRangeM>0.0)) { discard; }
+        if (lake.surfaceDepthRangeM<=0.0 && m < 0.75) {
+            let river = waterRiverAt(normalize(in.wp - U.origin), lake.level);
+            if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { discard; }
+        }
     }
     let c = nearWaterShade(in.wp, lake.level, true);
     if (c.a <= 0.0) { discard; }

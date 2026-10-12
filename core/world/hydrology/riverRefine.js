@@ -203,6 +203,11 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
     return { width, depth, speed };
 }
 
+// Bump on any change to the river trace, levels or bank bake (river cache
+// key, WaterService): 2 = bounded level smoothing and ramps, lake holds only
+// at the river's ends, bank limits from the nearest channel point.
+export const RIVER_SOLVE_VERSION = 2;
+
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
     waterFrac: 0.75,

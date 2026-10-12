@@ -50,6 +50,26 @@ describe('mountain lakes', () => {
         expect(p.pathH.at(-1)).toBeLessThan(p.pathH[0] - 50);
     });
 
+    it('reports the hollows its drainage crosses, with their level and place on the path', () => {
+        const S = 32, nx = 160, ny = 160, frame = frameAt(nx, ny, S);
+        // A second, closed hollow down the slope (centre x = 700 m).
+        const h = patch(nx, ny, S, [{ x: -600, y: 0, r: 400, depth: 40 }, { x: 700, y: 0, r: 250, depth: 40 }]);
+        const pockets = findPockets({ heights: h, frame, R, seaLevelM: 0, P: MOUNTAIN_LAKE_DEFAULTS });
+        const up = pockets.find(p => dirToPlane(p.dir, frame, R)[0] < 0);
+        // Filled cells at the pocket's own level are its water, not a pond.
+        const below = up.pits.filter(t => t.level < up.level - 0.5);
+        expect(below.length).toBe(1);
+        const pit = below[0], [px] = dirToPlane(pit.dir, frame, R);
+        expect(Math.abs(px - 700)).toBeLessThan(150);
+        expect(pit.depth).toBeGreaterThan(5);
+        expect(pit.level).toBeLessThan(up.level);
+        // Its spill level is the ground where the path leaves it.
+        const xs = up.path.map(d => dirToPlane(d, frame, R)[0]);
+        expect(xs[pit.entry]).toBeLessThan(px);
+        expect(xs[pit.exit]).toBeGreaterThan(px);
+        expect(Math.abs(up.pathH[pit.exit] - pit.level)).toBeLessThan(5);
+    });
+
     it('continues a drainage that left its patch on a patch ahead of its end', () => {
         const S = 32, frame0 = frameAt(160, 160, S), P = MOUNTAIN_LAKE_DEFAULTS;
         // The last two points of a path leaving frame0's east border.

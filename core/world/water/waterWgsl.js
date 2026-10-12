@@ -333,6 +333,17 @@ fn waterLakeHitIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, levelO
         if(depth<=0.0) { return miss; }
         return WaterLakeHit(lake.level,depth);
     }
+    // Signed-distance masks (lakeMaskSdf.js): water within -range metres of
+    // the solved water, and the rendered ground below the level (above).
+    if(lake.surfaceDepthRangeM<0.0) {
+        let F=m*255.0-128.0;
+        if(F<=lake.surfaceDepthRangeM) { return miss; }
+        if(F<0.0) {
+            let river = waterRiverAt(dir, heightM);
+            if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { return miss; }
+        }
+        return WaterLakeHit(lake.level,lake.level-heightM);
+    }
     // The shore band is render coverage, not lake water. Once excavation
     // lowers an outlet, the band's flat lake sheet must give way to the
     // descending river; otherwise it hangs over the channel as a wedge.

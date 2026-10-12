@@ -589,8 +589,17 @@ export function createWaterWorkerCore() {
         };
         // The whole outlet must clear the lake before its surface descends.
         // Centre-only anchors left a high lake sheet over the lower ribbon.
-        for (let k = 0; k < n - 1; k++) if (touchesLake(k, srcLevel)) sourceEnd = k;
-        for (let k = n - 1; k > sourceEnd; k--) if (touchesLake(k, destLevel)) destStart = k;
+        // Only the runs at the river's ends count (gaps of up to two points
+        // for shore wiggles): a stream passing near an arm of its lake far
+        // from its end was held at the lake's level from there on, up to
+        // 13 m under the ground, and cut a slot (owner 2026-10-12, v30).
+        const GAP = 2;
+        for (let k = 0, miss = 0; k < n - 1 && miss <= GAP; k++) {
+            if (touchesLake(k, srcLevel)) { sourceEnd = k; miss = 0; } else if (k > 0) miss++;
+        }
+        for (let k = n - 1, miss = 0; k > sourceEnd && miss <= GAP; k--) {
+            if (touchesLake(k, destLevel)) { destStart = k; miss = 0; } else if (k < n - 1) miss++;
+        }
         // Mouths belong at the actual lake boundaries, which can be far
         // from the record's endpoints inside open water.
         const reachP = { ...shapeP, junctionStartM: sm.s[sourceMouth], junctionEndM: sm.s[destMouth] };

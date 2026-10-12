@@ -18,6 +18,7 @@
 //   params; pages arrive baked from the WaterService
 //   (valleyUpdates) and mark their grid cells changed (tiles regenerate).
 
+import { lakeMaskSdf, resampleLakeMaskSdf } from './lakeMaskSdf.js';
 import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, NARROW_RIVER_DRAW_M, NARROW_RIVER_HW_M, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS, RIVER_SUB } from './waterWgsl.js';
 import { dirToCell } from '../hydrology/waterGraph.js';
 import { riverCarveReach, riverNearLake, trimLakeBand } from './lakeBand.js';
@@ -347,6 +348,16 @@ export class WaterGpuData {
                 {bytesPerRow:S,rowsPerImage:S},{width:S,height:S,depthOrArrayLayers:1});
             return;
         }
+        if (this._sdfMasks(rec)) {
+            // Signed distance to the solved water (lakeMaskSdf.js), per record.
+            this._sdfCache ??= new WeakMap();
+            let F = this._sdfCache.get(rec);
+            if (!F) this._sdfCache.set(rec, (F = lakeMaskSdf(rec.mask, nx, ny, rec.frame.spacing)));
+            const out = resampleLakeMaskSdf(F, nx, ny, S);
+            this.device.queue.writeTexture({ texture: this.masksTexture, origin }, out,
+                { bytesPerRow: S, rowsPerImage: S }, { width: S, height: S, depthOrArrayLayers: 1 });
+            return;
+        }
         const out = new Uint8Array(S * S);
         for (let b = 0; b < S; b++) {
             const j0 = Math.floor(b * ny / S), j1 = Math.max(j0 + 1, Math.floor((b + 1) * ny / S));
@@ -359,6 +370,11 @@ export class WaterGpuData {
         }
         this.device.queue.writeTexture({ texture: this.masksTexture, origin }, out,
             { bytesPerRow: S, rowsPerImage: S }, { width: S, height: S, depthOrArrayLayers: 1 });
+    }
+
+    /** Masks as signed distances: the mask atlas (every lake solved), except depth masks. */
+    _sdfMasks(rec) {
+        return !!this._slots && !rec.surfaceDepthMask;
     }
 
     _writeTable(svc) {
@@ -381,7 +397,9 @@ export class WaterGpuData {
             t[o + 2] = fr.nx * fr.spacing; t[o + 3] = fr.ny * fr.spacing;
             t.set([fr.c[0], fr.c[1], fr.c[2], fr.x0], o + 4);
             t.set([fr.e1[0], fr.e1[1], fr.e1[2], fr.y0], o + 8);
-            t.set([fr.e2[0], fr.e2[1], fr.e2[2], rec?.surfaceDepthRangeM??0], o + 12);
+            // < 0: a signed-distance mask, water within -value metres of the
+            // solved water (half a solve cell); > 0: a depth mask's range.
+            t.set([fr.e2[0], fr.e2[1], fr.e2[2], rec && this._sdfMasks(rec) ? -0.5 * rec.frame.spacing : rec?.surfaceDepthRangeM ?? 0], o + 12);
         }
         const n = Math.min(svc.lakes.length, this.maxLakes) * F;
         this.device.queue.writeBuffer(this.lakesBuffer, 0, t, 0, n);

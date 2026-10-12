@@ -22,7 +22,7 @@ export function bakeRiverIncision({ frame, heights, points, stride, arc, R, rive
     // allocated many entries per bank cell and caused avoidable GC spikes.
     const index = new Map();
     let count = 0, capacity = 16384;
-    const F = { cell: new Int32Array(capacity), settled: new Uint8Array(capacity), original: new Float64Array(capacity),
+    const F = { cell: new Int32Array(capacity), settled: new Uint8Array(capacity), near: new Uint8Array(capacity), original: new Float64Array(capacity),
         goal: new Float64Array(capacity).fill(Infinity), distance: new Float64Array(capacity), slope: new Float64Array(capacity),
     };
     const heap = new MinHeap(8192);
@@ -58,8 +58,13 @@ export function bakeRiverIncision({ frame, heights, points, stride, arc, R, rive
             const t = m / samples, x = A[0] + (B[0] - A[0]) * t, y = A[1] + (B[1] - A[1]) * t;
             const hw = points[o + 4] + (points[z + 4] - points[o + 4]) * t;
             const sh = riverShapeAt(arc[a] + (arc[a + 1] - arc[a]) * t, river, hw, shape);
+            // A channel narrower than a cell is not resolved here: only cells
+            // whose centres fell inside it became channel, and every other
+            // cell along it took a lower one's limit from up to 32 m
+            // downstream (a 5 m mountain stream cut 25-30 m on 16 m cells,
+            // water-look v28). The carve shapes such channels alone.
+            if (2 * sh.hw < spacing) continue;
             const cx = x - (B[1] - A[1]) / Math.max(len, 1e-6) * sh.off, cy = y + (B[0] - A[0]) / Math.max(len, 1e-6) * sh.off;
-            const eta = points[o + 16] + (points[z + 16] - points[o + 16]) * t, depth = points[o + 5] + (points[z + 5] - points[o + 5]) * t;
             const r = sh.hw + spacing;
             for (let j = Math.max(0, Math.floor((cy - r - y0) / spacing)); j <= Math.min(ny - 1, Math.ceil((cy + r - y0) / spacing)); j++) {
                 for (let i = Math.max(0, Math.floor((cx - r - x0) / spacing)); i <= Math.min(nx - 1, Math.ceil((cx + r - x0) / spacing)); i++) {
@@ -68,10 +73,18 @@ export function bakeRiverIncision({ frame, heights, points, stride, arc, R, rive
                     const u = Math.abs(-(B[1] - A[1]) * dx + (B[0] - A[0]) * dy) / Math.max(len * sh.hw, 1e-6);
                     const along = ((B[0] - A[0]) * dx + (B[1] - A[1]) * dy) / Math.max(len, 1e-6);
                     if (u >= 1 || Math.abs(along) > spacing) continue;
+                    // The level and depth at the cell's own place along the
+                    // segment: the sample's, up to a cell downstream, over-cut
+                    // steep streams by slope x spacing (5-10 m at 16 m cells).
+                    // Cells before or past the segment belong to its neighbour.
+                    const tc = t + along / Math.max(len, 1e-6);
+                    if ((tc < 0 && a > 0) || (tc > 1 && a + 2 < n)) continue;
+                    const tt = Math.max(0, Math.min(1, tc));
+                    const eta = points[o + 16] + (points[z + 16] - points[o + 16]) * tt, depth = points[o + 5] + (points[z + 5] - points[o + 5]) * tt;
                     const q = Math.max(0, 1 - u * u), goal = eta - depth + depth / shape.waterFrac * (1 - q ** 1.5);
                     const k = slot(j * nx + i);
                     if (goal >= F.original[k] - 0.001 || goal >= F.goal[k]) continue;
-                    F.goal[k] = goal; F.distance[k] = 0;
+                    F.goal[k] = goal; F.distance[k] = 0; F.near[k] = 1;
                     const material = riverBankErodibility(arc[a] + (arc[a + 1] - arc[a]) * t, river, P.bankVariation);
                     // Loose banks retreat more gently; resistant deep cuts
                     // retain canyon walls. A shallow cut must not immediately
@@ -83,7 +96,14 @@ export function bakeRiverIncision({ frame, heights, points, stride, arc, R, rive
             }
         }
     }
-    for (let k = 0; k < count; k++) if (Number.isFinite(F.goal[k])) enqueue(F.goal[k], k);
+    // Each bank cell takes its limit from its nearest channel cell (cells in
+    // order of distance; the first path to reach a cell keeps it), and the
+    // channel cells keep their own profile. Visiting cells lowest goal first
+    // let any lower channel point limit them: on a steep stream the points
+    // downstream pulled the channel and its banks upstream down to bankSlope
+    // from the lowest point, a slot growing to ~30 m deep at the source lake
+    // (owner 2026-10-12: "man-made dam", toothed banks; water-look v25).
+    for (let k = 0; k < count; k++) if (Number.isFinite(F.goal[k])) enqueue(0, k);
     while (heap.size) {
         const k = heap.pop();
         if (F.settled[k]) continue;
@@ -94,14 +114,16 @@ export function bakeRiverIncision({ frame, heights, points, stride, arc, R, rive
             const step = spacing * (dx && dy ? Math.SQRT2 : 1), d = F.distance[k] + step;
             if (d > P.bankReachM) continue;
             const q = slot((j + dy) * nx + i + dx);
-            if (F.settled[q]) continue;
+            if (F.settled[q] || (F.near[q] && d >= F.distance[q])) continue;
             const raw = h + F.slope[k] * step;
             // A finite work budget must not end in a cut wall. Bank retreat
             // loses influence smoothly, and usually stops on natural ground.
             const goal = F.original[q] - Math.max(0, F.original[q] - raw) * (1 - smooth(d / P.bankReachM));
-            if (goal >= F.original[q] - 0.001 || goal >= F.goal[q]) continue;
-            F.goal[q] = goal; F.distance[q] = d; F.slope[q] = F.slope[k];
-            enqueue(goal, q);
+            // Nearer than any path so far: this channel cell rules q, and
+            // where it needs no cut, q is not cut (nor beyond it).
+            F.near[q] = 1; F.distance[q] = d; F.slope[q] = F.slope[k];
+            F.goal[q] = goal < F.original[q] - 0.001 ? goal : Infinity;
+            if (Number.isFinite(F.goal[q])) enqueue(d, q);
         }
     }
     const cells = Uint32Array.from(F.cell.subarray(0, count).filter((_, k) => Number.isFinite(F.goal[k]))).sort();

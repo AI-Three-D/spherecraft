@@ -18,7 +18,7 @@ import { MinHeap, faceUVToDir, makeNeighbors } from './waterGraph.js';
 import { tangentBasis, dirToPlane, planeToDir } from './lakeRefine.js';
 
 // Bump on any change to discovery, choice or the drainage paths (cache key).
-export const MOUNTAIN_LAKE_VERSION = 3;
+export const MOUNTAIN_LAKE_VERSION = 4;
 
 export const MOUNTAIN_LAKE_DEFAULTS = Object.freeze({
     enabled: true,
@@ -48,6 +48,9 @@ export const MOUNTAIN_LAKE_DEFAULTS = Object.freeze({
     drainRounds: 4,
     // A stream within this of an earlier stream's route joins it (WaterService).
     joinM: 64,
+    // Hollows a drainage crosses at least this deep fill into ponds (lakes
+    // with their own stream on); shallower ones the stream cuts through.
+    pondMinDepthM: 3,
 });
 
 /**
@@ -152,6 +155,45 @@ function drainCells(q, { fill, parent }, nx, ny) {
     return cells;
 }
 
+/**
+ * A drainage (cells from drainCells) as path points every pathStepM (the
+ * first cell skipped when it is a continuation's start), the ground at
+ * each, and the hollows it crosses: runs of filled cells (fill above the
+ * ground by more than 0.5 m) that end before the patch border, each with
+ * its filled level (the spill), depth, deepest point and the path points
+ * around it (entry: last point before, exit: first point after).
+ */
+function drainPath(drain, { fill, h, nx, ny, frame, R, every, skipFirst = false }) {
+    const at = (q) => planeToDir(frame.x0 + (q % nx + 0.5) * frame.spacing, frame.y0 + (Math.floor(q / nx) + 0.5) * frame.spacing, frame, R);
+    const path = [], pathH = [], idx = new Int32Array(drain.length).fill(-1);
+    drain.forEach((q, s) => {
+        if ((s || !skipFirst) && (s % every === 0 || s === drain.length - 1)) { idx[s] = path.length; path.push(at(q)); pathH.push(h[q]); }
+    });
+    const pits = [];
+    for (let s = 0; s < drain.length; s++) {
+        if (!(fill[drain[s]] - h[drain[s]] > 0.5)) continue;
+        let e = s, deep = s;
+        while (e + 1 < drain.length && fill[drain[e + 1]] - h[drain[e + 1]] > 0.5) {
+            e++;
+            if (fill[drain[e]] - h[drain[e]] > fill[drain[deep]] - h[drain[deep]]) deep = e;
+        }
+        if (e + 1 < drain.length) {
+            let entry = -1, exit = -1;
+            for (let t = s; t >= 0 && entry < 0; t--) entry = idx[t];
+            for (let t = e + 1; t < drain.length && exit < 0; t++) exit = idx[t];
+            const q = drain[deep], last = pits.at(-1);
+            // Runs at the same spill level are one hollow (the path grazed its rim).
+            if (last && Math.abs(last.level - fill[q]) < 0.01) {
+                if (fill[q] - h[q] > last.depth) { last.dir = at(q); last.depth = fill[q] - h[q]; }
+                if (exit >= 0) last.exit = exit;
+                last.cells += e - s + 1;
+            } else if (exit >= 0) pits.push({ dir: at(q), level: fill[q], depth: fill[q] - h[q], entry, exit, cells: e - s + 1 });
+        }
+        s = e;
+    }
+    return { path, pathH, pits };
+}
+
 export function findPockets({ heights: h, frame, R, seaLevelM, P = MOUNTAIN_LAKE_DEFAULTS }) {
     const { nx, ny, spacing } = frame, n = nx * ny;
     const flood = floodPatch(h, nx, ny), { fill, parent } = flood;
@@ -212,14 +254,12 @@ export function findPockets({ heights: h, frame, R, seaLevelM, P = MOUNTAIN_LAKE
             if (fill[q] - h[q] > 0.5 && fill[q] < level - 1) { lowest = Math.min(lowest, fill[q]); break; }
         }
         const at = (i, j) => planeToDir(frame.x0 + (i + 0.5) * spacing, frame.y0 + (j + 0.5) * spacing, frame, R);
-        // Every pathStepM; streams follow it (WaterService).
-        const path = [], pathH = [], every = Math.max(1, Math.round(P.pathStepM / spacing));
-        drain.forEach((q, s) => {
-            if (s % every === 0 || s === drain.length - 1) { path.push(at(q % nx, Math.floor(q / nx))); pathH.push(h[q]); }
-        });
+        // Every pathStepM; streams follow it (WaterService), and the hollows
+        // it crosses fill into ponds.
+        const { path, pathH, pits } = drainPath(drain, { fill, h, nx, ny, frame, R, every: Math.max(1, Math.round(P.pathStepM / spacing)) });
         out.push({
             dir: at(deepest % nx, Math.floor(deepest / nx)), level, depth, areaKm2, enclosureM, outflowDropM: level - lowest,
-            corners: [at(i0, j0), at(i1, j0), at(i0, j1), at(i1, j1)], sill: at(c % nx, Math.floor(c / nx)), path, pathH,
+            corners: [at(i0, j0), at(i1, j0), at(i0, j1), at(i1, j1)], sill: at(c % nx, Math.floor(c / nx)), path, pathH, pits,
         });
     }
     return out;
@@ -227,11 +267,6 @@ export function findPockets({ heights: h, frame, R, seaLevelM, P = MOUNTAIN_LAKE
 
 const angleM = (a, b, R) => Math.acos(Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])) * R;
 
-/**
- * Pockets that become lakes: in a mountain setting, spilling steeply,
- * larger first, at least minSpacingM between shores (circle-equivalent).
- * Deterministic for a given candidate list (ties by position).
- */
 /**
  * Patch continuing a drainage path that left its patch dry: drainPatchM
  * square at the discovery spacing, its back edge 500 m behind the path's
@@ -247,25 +282,23 @@ export function drainFrame(end, prev, R, P = MOUNTAIN_LAKE_DEFAULTS) {
 
 /**
  * The drainage from `start` (a path's end) across the patch (drainFrame):
- * its points every pathStepM after the start, to the patch border, and the
- * ground height at each.
- * @returns {{ path: number[][], pathH: number[] }}
+ * its points every pathStepM after the start, to the patch border, the
+ * ground height at each and the hollows it crosses (drainPath).
+ * @returns {{ path: number[][], pathH: number[], pits: object[] }}
  */
 export function continueDrain({ heights: h, frame, R, start, P = MOUNTAIN_LAKE_DEFAULTS }) {
     const { nx, ny, spacing } = frame;
     const [x, y] = dirToPlane(start, frame, R);
     const i = Math.max(1, Math.min(nx - 2, Math.floor((x - frame.x0) / spacing))), j = Math.max(1, Math.min(ny - 2, Math.floor((y - frame.y0) / spacing)));
-    const drain = drainCells(j * nx + i, floodPatch(h, nx, ny), nx, ny);
-    const path = [], pathH = [], every = Math.max(1, Math.round(P.pathStepM / spacing));
-    drain.forEach((q, s) => {
-        if (s && (s % every === 0 || s === drain.length - 1)) {
-            path.push(planeToDir(frame.x0 + (q % nx + 0.5) * spacing, frame.y0 + (Math.floor(q / nx) + 0.5) * spacing, frame, R));
-            pathH.push(h[q]);
-        }
-    });
-    return { path, pathH };
+    const flood = floodPatch(h, nx, ny), drain = drainCells(j * nx + i, flood, nx, ny);
+    return drainPath(drain, { fill: flood.fill, h, nx, ny, frame, R, every: Math.max(1, Math.round(P.pathStepM / spacing)), skipFirst: true });
 }
 
+/**
+ * Pockets that become lakes: in a mountain setting, spilling steeply,
+ * larger first, at least minSpacingM between shores (circle-equivalent).
+ * Deterministic for a given candidate list (ties by position).
+ */
 export function chooseMountainLakes(cands, R, P = MOUNTAIN_LAKE_DEFAULTS) {
     const ok = cands.filter(p => p.areaKm2 >= P.minAreaKm2 && p.enclosureM >= P.minEnclosureM && p.outflowDropM >= P.minOutflowDropM)
         .map(p => ({ ...p, r: Math.sqrt(p.areaKm2 * 1e6 / Math.PI) }))
