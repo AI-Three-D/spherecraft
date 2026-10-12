@@ -1,4 +1,4 @@
-import type { RenderCamera, RenderContext, RenderFrame, Vector3Like } from '../contracts.js';
+import type { RenderCamera, RenderContext, RenderFrame } from '../contracts.js';
 import type { Texture } from '../resources/texture.js';
 
 /** Texture slots used by the production terrain shaders. Fixtures can provide just their needed slots. */
@@ -74,12 +74,3 @@ export interface TerrainModuleOptions {
 
 /** A finite cube-face tile's address; no whole-world state is needed. */
 export interface TerrainTileAddress { readonly face: 0 | 1 | 2 | 3 | 4 | 5; readonly depth: number; readonly x: number; readonly y: number }
-
-/** A local heightfield in metres, row-major. Suitable for a fixture-owned TerrainDraw implementation. */
-export interface HeightGrid {
-    readonly width: number;
-    readonly height: number;
-    readonly spacing: number;
-    readonly origin: Vector3Like;
-    readonly heights: Float32Array;
-}

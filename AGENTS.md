@@ -18,7 +18,7 @@ Short map of the current code so agents can jump to the right place and make saf
 - Render loop delegates environment, terrain, atmosphere, water, clouds, and asset rendering to `Frontend`.
 
 ## Rendering Stack
-- Start with `docs/renderer-modules.md` for the module boundaries, typed contracts, ownership, and fixture workflow.
+- Start with `docs/renderer-modules.md` for the module boundaries, typed contracts, and ownership.
 - `core/renderer/Renderer.js` is the scene-independent core. It manages module lifecycle, frame phases, viewport, and frame submission. It accepts zero modules and has no world/game dependencies.
 - `core/renderer/contracts.d.ts` defines `RenderModule`, `RenderFrame`, camera and backend contracts.
 - `core/renderer/terrain/TerrainModule.js` adapts a `TerrainSource`, `TerrainDraw`, and optional water layers. Contracts live in `core/renderer/terrain/contracts.d.ts`.
@@ -38,9 +38,7 @@ Short map of the current code so agents can jump to the right place and make saf
 - `core/renderer/terrain/QuadtreeTerrainRenderer.d.ts` documents its typed configuration and source interface.
 - `core/renderer/terrain/materials/terrainBindings.js` owns terrain/water shader bindings and packing. Generic backend materials require an explicit binding specification or adapter.
 
-## Isolated Fixtures & TypeScript
-- `examples/modules/height-grid.html` runs a finite heightfield without GameEngine, planet generation, assets, or environment systems.
-- `HeightGridSource` in `core/world/fixtures` owns the fixture data; `HeightGridTerrainRenderer` owns drawing. Use these as the smallest reference implementations when introducing a module or fixture.
+## TypeScript Interfaces
 - Run `npm run typecheck` alongside `npm test` when changing public contracts. It checks the new JavaScript implementations, TypeScript consumers with JavaScript inference disabled, negative contract examples, and generated declaration freshness.
 - Run `npm run types:build` after changing a checked public class, and commit the generated `.d.ts`. Keep the core free of concrete world imports.
 

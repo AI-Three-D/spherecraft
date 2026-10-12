@@ -14,11 +14,7 @@
   "include": [
     "core/renderer/Renderer.js",
     "core/renderer/terrain/TerrainModule.js",
-    "core/renderer/terrain/HeightGridTerrainRenderer.js",
-    "core/world/fixtures/HeightGridSource.js",
     "core/renderer/**/*.d.ts",
-    "tests/contracts/**/*.ts",
-    "examples/modules/**/*.ts",
-    "examples/modules/**/*.js"
+    "tests/contracts/**/*.ts"
   ]
 }

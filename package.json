@@ -43,10 +43,6 @@
     "./resources": {
       "types": "./core/renderer/resources/index.d.ts",
       "import": "./core/renderer/resources/index.js"
-    },
-    "./fixtures/height-grid": {
-      "types": "./core/world/fixtures/HeightGridSource.d.ts",
-      "import": "./core/world/fixtures/HeightGridSource.js"
     }
   }
 }
