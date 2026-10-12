@@ -288,6 +288,10 @@ export class WorldConfigLoader {
             if (terrain.impacts)              Object.assign(t.impacts,      terrain.impacts);
             if (terrain.water)                Object.assign(t.water,        terrain.water);
             if (terrain.surface)              Object.assign(t.surface,      terrain.surface);
+            if (terrain.erosionFilter)        Object.assign(t.erosionFilter, terrain.erosionFilter);
+            if (terrain.features)             t.features = { ...(t.features ?? {}), ...terrain.features };
+            if (terrain.regionalTerrain)      t.regionalTerrain = mergePlainConfig(t.regionalTerrain, terrain.regionalTerrain);
+            if (terrain.waterGraph)           t.waterGraph = mergePlainConfig(t.waterGraph, terrain.waterGraph);
         }
 
         // ── Planet ───────────────────────────────────────────────────────

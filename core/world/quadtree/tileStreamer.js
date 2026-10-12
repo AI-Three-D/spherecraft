@@ -84,10 +84,15 @@ import { AsyncGenerationQueue } from '../asyncGenerationQueue.js';
 import { TileAddress } from './tileAddress.js';
 import { TileGenerator } from './tileGenerator.js';
 import { TileCache } from './tileCache.js';
+import { computeTileWorldCenter } from './gpuQuadtreeDiagnosticHelpers.js';
+import { splitOutputTypes } from './terrainOutputs.js';
+import { TileVisibilityIndex } from './tileVisibilityIndex.js';
+import { computeSolidTierFadeDistances, tileNearestDistanceLowerBound } from './solidTierFade.js';
 import {
     Texture, TextureFormat, TextureFilter, TextureWrap,
     gpuFormatIsFilterable
 } from '../../renderer/resources/texture.js';
+import {gpuDeviceLoss,reportGpuAsyncFailure} from '../../../shared/gpuDeviceState.js';
 import { Logger } from '../../../shared/Logger.js';
 
 const TERRAIN_STEP_LOG_TAG = '[TerrainStep]';
@@ -127,6 +132,33 @@ function formatRequestLatencyWindow(window) {
     return REQUEST_LATENCY_BUCKET_LABELS
         .map((label, index) => `${label}:${window.buckets[index]}`)
         .join(' ');
+}
+
+// ─── PercentileWindow ───────────────────────────────────────────────────────
+// Raw-sample latency tracker for a single pipeline stage (Phase 0 of
+// SphereCraft_Optimization_Implementation_Plan.md, §0.4). Samples accumulate
+// between consume() calls; percentiles are computed on read, not on push, so
+// the hot path (push) stays a single array append.
+class PercentileWindow {
+    constructor() {
+        this.samples = [];
+    }
+
+    push(value) {
+        if (Number.isFinite(value)) this.samples.push(value);
+    }
+
+    consume() {
+        const n = this.samples.length;
+        if (n === 0) {
+            return { count: 0, p50: 0, p95: 0, p99: 0, max: 0 };
+        }
+        const sorted = this.samples.slice().sort((a, b) => a - b);
+        const at = (p) => sorted[Math.min(n - 1, Math.floor(p * n))];
+        const result = { count: n, p50: at(0.5), p95: at(0.95), p99: at(0.99), max: sorted[n - 1] };
+        this.samples.length = 0;
+        return result;
+    }
 }
 
 function nextPow2(value) {
@@ -232,7 +264,10 @@ class TileArrayPool {
             type === 'splatValid';
         const neverMipmapByType = (type) =>
             wantsNearestByType(type) ||
-            type === 'resolvedColor';
+            type === 'resolvedColor' ||
+            // Already a ~1.4 km window average and only magnified on
+            // screen (LOD selection keeps texels >= 1 px): no mips needed.
+            type === 'coarseColor';
 
         const fullMipCount = Math.floor(Math.log2(tileSize)) + 1;
 
@@ -310,15 +345,111 @@ class TileArrayPool {
         }
 
         this._pendingCopies = [];
-    }
-    queueCopyToLayer(textures, layer) {
-        this._pendingCopies.push({ textures, layer });
+        this._zeroTextures = new Map();   // format -> lazily-created zero source
+        this._splatIndexSentinel = null;  // lazily-created "not ready" marker
     }
 
-    flushPendingCopies() {
-        const count = this._pendingCopies.length;
-        if (count === 0) return 0;
-    
+    // A never-written texture is zero-initialized by WebGPU, so a single
+    // 1-layer texture per format, created once and only ever read from,
+    // works as a shared "zero" copy source for every type of that format.
+    _getZeroSourceTexture(format) {
+        let tex = this._zeroTextures.get(format);
+        if (!tex) {
+            tex = this.device.createTexture({
+                size: [this.tileSize, this.tileSize, 1],
+                format,
+                usage: GPUTextureUsage.COPY_SRC
+            });
+            this._zeroTextures.set(format, tex);
+        }
+        return tex;
+    }
+
+    // splatIndex specifically must NOT zero-fill: decodeTileId(0) is a real,
+    // valid tile id (id 0 happens to be WATER_1 in this catalog — see
+    // wizard_game/world/biomes.json), so a plain zero-filled layer decodes
+    // to "this whole tile is water" instead of "no data yet". Confirmed via
+    // debug-mode elimination that this — not the queue-drop bug fixed
+    // separately in _queueRefinement — is what painted resident-but-not-
+    // yet-refined tiles as flat dark blue: sampleSplatData's topSum<=0.0001
+    // fallback (terrainChunkFragmentShaderBuilder.js) still reads
+    // centerIds from the zero-filled splatIndexMap even when weights are
+    // zero, and nothing downstream re-checks id validity once a "dominant"
+    // id is picked from an all-zero-weight tie. 255 is already treated as
+    // out-of-range/invalid wherever this codebase decodes a splat tile id
+    // (decodeSplatTileId(...) < 255), so filling every texel with 255 gives
+    // an unambiguous "no real splat yet" signal that degrades correctly to
+    // the geometry pass's own raw tile color instead of a fake material.
+    _getSplatIndexSentinelTexture(format) {
+        if (this._splatIndexSentinel) return this._splatIndexSentinel;
+        Logger.info(`[SplatSentinel] creating splatIndex sentinel texture, format=${format}, tileSize=${this.tileSize}`);
+        const tex = this.device.createTexture({
+            size: [this.tileSize, this.tileSize, 1],
+            format,
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST
+        });
+        const bytesPerRow = alignTo(this.tileSize * 4, 256);
+        const data = new Uint8Array(bytesPerRow * this.tileSize).fill(255);
+        this.device.queue.writeTexture(
+            { texture: tex },
+            data,
+            { bytesPerRow, rowsPerImage: this.tileSize },
+            { width: this.tileSize, height: this.tileSize, depthOrArrayLayers: 1 }
+        );
+        this._splatIndexSentinel = tex;
+        return tex;
+    }
+
+    // zeroFillMissing: when true, every type this pool manages but that
+    // isn't present in `textures` gets its layer copy-cleared instead of
+    // being skipped. Needed for a Phase 2 geometry-only commit
+    // (SphereCraft_Optimization_Implementation_Plan.md §2.3): array-pool
+    // layers are reused across evictions, so without this a tile that skips
+    // e.g. splat generation would render with whatever *previous* tile's
+    // stale splat data happens to still occupy that layer — exactly the
+    // kind of silent visual-correctness bug this codebase has been burned
+    // by before. splatIndex gets the explicit 255 sentinel (see
+    // _getSplatIndexSentinelTexture — a plain zero decodes to a real tile
+    // id, id 0, which is WATER_1); every other type gets genuine zero,
+    // which the terrain shader already degrades safely (they're not decoded
+    // as an id the way splatIndex is).
+    // completesMaterial: once this copy has been submitted, the layer holds
+    // the tile's finished material (refinement output, or a single-stage
+    // full tile). TileStreamer._flushArrayPoolCopies uses it to flag the
+    // tile complete for the GPU only after the data is really in the layer.
+    queueCopyToLayer(textures, layer, { zeroFillMissing = false, completesMaterial = false } = {}) {
+        if (!zeroFillMissing) {
+            this._pendingCopies.push({ textures, layer, completesMaterial });
+            return;
+        }
+        const filled = { ...textures };
+        for (const type of this.types) {
+            if (filled[type]) continue;
+            const format = this.formats[type] || 'rgba32float';
+            const source = (type === 'splatIndex')
+                ? this._getSplatIndexSentinelTexture(format)
+                : this._getZeroSourceTexture(format);
+            filled[type] = {
+                _gpuTexture: { texture: source },
+                _isZeroFillPlaceholder: true
+            };
+        }
+        this._pendingCopies.push({ textures: filled, layer, completesMaterial });
+    }
+
+    // maxCount caps how many queued copies get flushed this call (plan §1.1
+    // maxCopyOperationsPerFrame); any remainder stays queued (FIFO order) for
+    // the next flush. Returns { count, textures } where `textures` is the
+    // flat list of source texture wrappers whose copy was actually submitted
+    // this call — the ONLY textures safe to schedule for destruction (a
+    // deferred/not-yet-flushed entry's source must survive until its own
+    // copy is actually submitted; see TileStreamer._flushArrayPoolCopies).
+    flushPendingCopies(maxCount = Infinity) {
+        const total = this._pendingCopies.length;
+        if (total === 0) return { count: 0, textures: [] };
+        const count = Math.max(0, Math.min(total, maxCount));
+        if (count === 0) return { count: 0, textures: [] };
+
         const encoder = this.device.createCommandEncoder({ label: 'QT-TileCopyBatch' });
     
         // Collect layers for post-copy mip generation. Set dedupes
@@ -357,16 +488,56 @@ class TileArrayPool {
         }
     
         this.device.queue.submit([encoder.finish()]);
-        this._pendingCopies.length = 0;
-        return count;
+        const flushed = this._pendingCopies.splice(0, count);
+        const textures = [];
+        for (const entry of flushed) {
+            for (const type of Object.keys(entry.textures)) {
+                const tex = entry.textures[type];
+                // Never schedule the shared zero-fill source for destruction
+                // — it's reused across every geometry-only commit.
+                if (tex && !tex._isZeroFillPlaceholder) textures.push(tex);
+            }
+        }
+        return { count, textures };
     }
-    
+
     allocateLayer() {
         if (this.freeLayers.length > 0) return this.freeLayers.pop();
         return null;
     }
 
     releaseLayer(layer) {
+        // Purge any still-pending copy targeting this layer before freeing
+        // it for reuse. flushPendingCopies() writes directly to a stored
+        // layer index with no check that the layer still belongs to the
+        // tile that queued the copy — without this purge, a tile evicted
+        // after its refinement copy was queued but before that copy
+        // flushed would leave a "ghost" write sitting in _pendingCopies;
+        // once this layer is handed to a brand-new tile and THAT tile
+        // commits its own (correct) data, the ghost copy can still flush
+        // afterward and silently overwrite it with the evicted tile's
+        // stale textures. Confirmed plausible root cause (2026-10-01) of
+        // resolvedColor reading as permanently invalid on tiles that
+        // recently reused a layer, and of the reported "high-res tile
+        // briefly flickers back to low-res" symptom — both match a tile's
+        // freshly-correct data being overwritten by a stale ghost write
+        // from an unrelated, already-evicted tile.
+        if (this._pendingCopies && this._pendingCopies.length > 0) {
+            const kept = [];
+            for (const entry of this._pendingCopies) {
+                if (entry.layer !== layer) {
+                    kept.push(entry);
+                    continue;
+                }
+                for (const type of Object.keys(entry.textures)) {
+                    const tex = entry.textures[type];
+                    if (tex && !tex._isZeroFillPlaceholder) {
+                        try { tex.destroy?.(); } catch { /* ignore cleanup failure */ }
+                    }
+                }
+            }
+            this._pendingCopies = kept;
+        }
         this.freeLayers.push(layer);
     }
 
@@ -397,6 +568,14 @@ class TileArrayPool {
         this.device.queue.submit([encoder.finish()]);
     }
 }
+
+// Per-tile flag bits in the 4th word of a hash entry (GPU: LoadedEntry._pad).
+// Must match LOADED_FLAG_MATERIAL_COMPLETE in instanceBufferBuilder.wgsl.js.
+const TILE_FLAG_MATERIAL_COMPLETE = 1;
+
+// Refinement outputs that only the detail tiers (live splat / prebaked
+// color) read. Tiles of the flat solid-color tier skip them.
+const DETAIL_MATERIAL_TYPES = new Set(['splatData', 'splatIndex', 'splatValid', 'resolvedColor']);
 
 // ─── TileHashTable ────────────────────────────────────────────────────────────
 // Unchanged from original.
@@ -441,7 +620,10 @@ class TileHashTable {
         return -1;
     }
 
-    insert(keyLo, keyHi, layer) {
+    // The 4th word of an entry carries per-tile flags for the GPU (read as
+    // LoadedEntry._pad by instanceBufferBuilder.wgsl.js). A new insert
+    // starts with no flags; remove()'s cluster rehash carries them over.
+    insert(keyLo, keyHi, layer, flags = 0) {
         let idx = this.hash(keyLo, keyHi);
         for (var i = 0; i < this.capacity; i++) {
             const base = idx * 4;
@@ -450,12 +632,22 @@ class TileHashTable {
                 this.entries[base]     = keyLo;
                 this.entries[base + 1] = keyHi;
                 this.entries[base + 2] = layer >>> 0;
-                this.entries[base + 3] = 0;
+                this.entries[base + 3] = flags >>> 0;
                 return idx;
             }
             idx = (idx + 1) & this.mask;
         }
         return -1;
+    }
+
+    setFlags(slot, flags) {
+        if (slot < 0 || slot >= this.capacity) return;
+        this.entries[slot * 4 + 3] = flags >>> 0;
+    }
+
+    getFlags(slot) {
+        if (slot < 0 || slot >= this.capacity) return 0;
+        return this.entries[slot * 4 + 3];
     }
 
     remove(keyLo, keyHi, touchedSlots = null) {
@@ -477,12 +669,13 @@ class TileHashTable {
             if (hi === 0xFFFFFFFF) break;
             const lo    = this.entries[base];
             const layer = this.entries[base + 2];
+            const flags = this.entries[base + 3];
             this.entries[base]     = 0xFFFFFFFF;
             this.entries[base + 1] = 0xFFFFFFFF;
             this.entries[base + 2] = 0xFFFFFFFF;
             this.entries[base + 3] = 0xFFFFFFFF;
             if (touchedSlots) touchedSlots.push(idx);
-            const newSlot = this.insert(lo, hi, layer);
+            const newSlot = this.insert(lo, hi, layer, flags);
             if (touchedSlots && newSlot >= 0) touchedSlots.push(newSlot);
             idx = (idx + 1) & this.mask;
         }
@@ -496,9 +689,108 @@ class TileHashTable {
 export class TileStreamer {
 
     constructor(device, terrainGenerator, quadtreeGPU, options = {}) {
-        this._gpuBackpressureLimit = options.gpuBackpressureLimit ?? 4;
+        // ── Phase 1 admission budgets (SphereCraft_Optimization_Implementation_Plan.md §1) ──
+        // Named explicitly per the plan so they can be tuned from measured
+        // Phase 0 data rather than guessed.
+        const admission = options.admissionBudgets ?? {};
+        this._admissionBudgets = {
+            maxNewTilesPerFrame: admission.maxNewTilesPerFrame
+                ?? options.queueConfig?.maxStartsPerFrame ?? 6,
+            maxConcurrentGenerations: admission.maxConcurrentGenerations
+                ?? options.queueConfig?.maxConcurrentTasks ?? 12,
+            maxCpuGenerationTimeMs: admission.maxCpuGenerationTimeMs
+                ?? options.queueConfig?.timeBudgetMs ?? 6,
+            maxGpuFencesInFlight: admission.maxGpuFencesInFlight
+                ?? options.gpuBackpressureLimit ?? 4,
+            maxCopyOperationsPerFrame: admission.maxCopyOperationsPerFrame ?? 8,
+            // Small always-available reserve so top-of-queue urgent
+            // (VISIBLE/FEEDBACK) work isn't starved indefinitely once the
+            // GPU fence budget saturates during sustained fast flight.
+            // Predictive/speculative entries self-gate below via canStart
+            // against the hard fence limit, so this reserve is a no-op
+            // unless genuinely urgent work is waiting (plan §1.3).
+            urgentReserveSlots: admission.urgentReserveSlots ?? 1,
+            // Phase 2: background material/refinement work for already-
+            // resident tiles. Deliberately smaller than maxNewTilesPerFrame,
+            // and subordinate to geometry admission in general — but plan
+            // §1.2 explicitly ranks refinement of a nearby tile above
+            // predictive/speculative geometry. Without a dedicated reserve,
+            // sustained predictive demand during continuous exploration can
+            // starve refinement indefinitely, leaving on-screen tiles stuck
+            // with flat placeholder material — visible as hard material
+            // seams against already-refined neighbors and multi-tile
+            // features "growing into shape" with a delay (confirmed by
+            // observation). Capped by the same overshoot logic as
+            // urgentReserveSlots, so it's a bounded cushion, not a trickle.
+            maxRefinementsPerFrame: admission.maxRefinementsPerFrame ?? 4,
+            refinementUrgentReserveSlots: admission.refinementUrgentReserveSlots ?? 1,
+            // Distance threshold (in tile-widths) within which a tile's
+            // refinement is treated as urgent enough to use the reserve
+            // above. Tuned directly from user observation: the geometry-
+            // then-material pop was "acceptable twice as far [away]" but
+            // "a bit too visible nearby" at the previous (unconditional)
+            // behavior — i.e. distance-scale the urgency instead of a flat
+            // visible/not-visible split, spending the reserve where the pop
+            // is actually objectionable and letting distant tiles pop
+            // without extra GPU cost.
+            refinementNearDistanceTileWidths: admission.refinementNearDistanceTileWidths ?? 6
+        };
+        this._gpuBackpressureLimit = this._admissionBudgets.maxGpuFencesInFlight;
         this._gpuBackpressureSkipCount = 0;
+        // Flag tiles "material complete" in the GPU lookup table once their
+        // finished material has been copied into their layer. The instance
+        // builder then draws the nearest complete layer (own or ancestor), so
+        // a visible tile never switches from finished material back to a
+        // geometry-only placeholder. false = previous behaviour (nearest
+        // resident layer, finished or not).
+        this._preferCompleteMaterialLayers = options.preferCompleteMaterialLayers !== false;
+        // Behaviour switches (EngineConfig gpuQuadtree.streamerFlags); the
+        // defaults here are only for callers that pass none.
+        this._flags = {
+            indexedVisibility: true,
+            refinementBudgetCountsGeometryStarts: true,
+            refinementTickWhenGeometryBlocked: true,
+            skipRefinementBeyondFlatFade: true,
+            flatFadeSkipMarginFraction: 0.1,
+            diagnostics: false,
+            ...(options.streamerFlags || {})
+        };
+        // Visible tiles and their ancestors as integer keys, rebuilt per
+        // visibility readback (see tileVisibilityIndex.js).
+        this._visibilityIndex = new TileVisibilityIndex();
+        // { shaderConfig, minLod, minSurfaceRadius } when a detail tile drawn
+        // entirely past the flat-tier fade end has no reader of its
+        // refinement output (QuadtreeTileManager decides); null = never.
+        this._flatTierRefinementSkip = options.flatTierRefinementSkip ?? null;
+        // key -> tileAddr: resident tiles whose refinement waits because the
+        // flat color covers all their pixels. Re-checked at each readback.
+        this._refinementDeferredMap = new Map();
+        // Refinement reads the resident layer's height/tile ids instead of
+        // recomputing them (saves the base-height, classification and
+        // micro-height passes per refinement). false = recompute as before.
+        this._reuseResidentGeometryForRefinement = options.reuseResidentGeometryForRefinement !== false;
+        // AO bake / scatter commit queues are drained by the asset streamer
+        // only. When it is disabled nothing drains them, so don't fill them.
+        this._assetCommitQueuesEnabled = options.assetCommitQueuesEnabled !== false;
+        this._tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : null;
+        this._coarseColorWindowMeters = options.coarseColorWindowMeters;
+        this._coarseColorFaceSizeMeters = options.coarseColorFaceSizeMeters;
         this._tilesStartedWindowCount = 0;
+
+        // ── Phase 0 instrumentation state (plan §0) ──────────────────────
+        this._cameraContext = { position: null, velocity: null, speed: 0, planetConfig: null };
+        this._telemetryByKey = new Map();
+        this._stageLatency = {
+            queueWait: new PercentileWindow(),        // request -> generationStart
+            startToSubmit: new PercentileWindow(),     // generationStart -> computeSubmitted
+            submitToFence: new PercentileWindow(),     // computeSubmitted -> gpuFenceComplete
+            requestToResident: new PercentileWindow()  // request -> resident (end-to-end)
+        };
+        this._requestedTilesWindowCount = 0;
+        this._newlyVisibleTilesWindowCount = 0;
+        this._wastedGenerationsWindowCount = 0;
+        this._computeSubmissionsWindowCount = 0;
+        this._copyOperationsWindowCount = 0;
         this.device = device;
         this._aoCommitQueue = [];
         this._scatterCommitQueue = [];
@@ -517,6 +809,32 @@ export class TileStreamer {
         if (this.enableSplat && this.streamedTypes.includes('splatData') && !this.streamedTypes.includes('splatValid')) {
             this.streamedTypes.push('splatValid');
         }
+
+        // Phase 2 (geometry-first residency, plan §2): split the configured
+        // output set into a fast geometry-only pass and a background
+        // refinement pass. If everything configured is already a geometry
+        // type (e.g. a minimal ['height','normal','tile'] setup),
+        // refinementTypes is empty and the refinement stage is simply
+        // never scheduled — no behavior change from before Phase 2.
+        const { geometryTypes, refinementTypes } = splitOutputTypes(this.streamedTypes);
+        this._geometryTypes = geometryTypes;
+        this._refinementTypes = refinementTypes;
+        // Tiles drawn by the flat solid-color tier (geometry LOD >=
+        // solidTierStartLod) never sample the splat maps or the prebaked
+        // color: the tier's color comes from the geometry pass's tile ids.
+        // Their refinement skips those outputs (the splat step is ~12 of the
+        // ~17.5 ms GPU per refinement) and keeps the rest (scatter/climate,
+        // used by vegetation and ground-field bakes at every depth). Such a
+        // layer is never flagged material-complete, so detail tiers never
+        // pick it as a material source; the detail shaders draw the flat
+        // color for a tile whose drawn layer has no detail material.
+        // null/undefined = refine every tile fully (previous behaviour).
+        this._solidTierStartLod = Number.isFinite(options.solidTierStartLod)
+            ? Math.max(0, Math.floor(options.solidTierStartLod))
+            : null;
+        this._coarseRefinementTypes = refinementTypes.filter(type => !DETAIL_MATERIAL_TYPES.has(type));
+        this._tileState = new Map();   // key -> 'REQUESTED'|'QUEUED'|'GENERATING'|'GEOMETRY_READY'|'RESIDENT'|'REFINING'|'REFINED'|'DEFERRED'
+
         this.textureFormats  = {
             ...DEFAULT_TEXTURE_FORMATS,
             ...(options.textureFormats || {})
@@ -575,8 +893,21 @@ export class TileStreamer {
 
         this._feedbackDedupeSet = null;  // Created in initialize()
         this._requestFreshness = new Map();
-        this._freshnessSkipThresholdMs = 200;
-        this._freshnessMinDepth = 5;
+        this._freshnessSkipThresholdMs = options.queueConfig?.staleRequestAgeMs ?? 200;
+        this._freshnessMinDepth = options.queueConfig?.staleRequestMinDepth ?? 5;
+        this._priorityRefreshIntervalMs = options.queueConfig?.priorityRefreshIntervalMs ?? 100;
+        this._lastPriorityRefreshTime = -Infinity;
+
+        // Keys queued via a one-shot prewarm call (e.g. GPUQuadtreeTerrain's
+        // prewarmWorldPosition), never dropped by the freshness check below.
+        // Prewarm requests don't flow through the per-frame camera-feedback
+        // path that normally refreshes _requestFreshness, so without this
+        // exemption a deep prewarm-queued tile reliably goes "stale" and
+        // gets purged before its turn, once real background streaming
+        // traffic is sharing the same queue — confirmed live: a 71-tile
+        // prewarm batch left droppedCount at 86 with depth 10/11 residency
+        // near the anchor never completing. See RIVER_WALKING_SKELETON_LOG.md.
+        this._prewarmKeys = new Set();
 
 
         this._pendingDestructions   = [];
@@ -592,29 +923,24 @@ export class TileStreamer {
         this._debugVisibleCopyLogCount = 0;
         this._lastCopyVisibilitySummary = null;
         this._generationQueue = new AsyncGenerationQueue({
-            maxInFlight:     options.queueConfig?.maxConcurrentTasks  ?? 12,
-            maxPerFrame:     options.queueConfig?.maxStartsPerFrame   ?? 6,
-            timeBudgetMs:    options.queueConfig?.timeBudgetMs        ?? 6,
+            maxInFlight:     this._admissionBudgets.maxConcurrentGenerations,
+            maxPerFrame:     this._admissionBudgets.maxNewTilesPerFrame,
+            timeBudgetMs:    this._admissionBudgets.maxCpuGenerationTimeMs,
             maxQueueSize:    options.queueConfig?.maxQueueSize        ?? 2048,
             minStartIntervalMs: options.queueConfig?.minStartIntervalMs ?? 0,
-            shouldDrop: (entry) => {
-                // Never drop coarse tiles — they serve as fallbacks
-                // Parse depth from key format "f{face}:d{depth}:{x},{y}"
-                const dIdx = entry.key.indexOf(':d');
-                if (dIdx >= 0) {
-                    const colonAfterD = entry.key.indexOf(':', dIdx + 2);
-                    const depth = parseInt(entry.key.substring(dIdx + 2, colonAfterD > 0 ? colonAfterD : undefined), 10);
-                    if (Number.isFinite(depth) && depth < this._freshnessMinDepth) {
-                        return false;
-                    }
-                }
+            shouldDrop: (entry, now = performance.now()) => {
                 const lastSeen = this._requestFreshness.get(entry.key);
-                if (!Number.isFinite(lastSeen)) {
-                    // Never appeared in feedback — was queued by seed or parent-walk.
-                    // Keep it if it's young enough (just queued).
-                    return (performance.now() - entry.enqueuedAt) > this._freshnessSkipThresholdMs;
-                }
-                return (performance.now() - lastSeen) > this._freshnessSkipThresholdMs;
+                if (now - (Number.isFinite(lastSeen) ? lastSeen : entry.enqueuedAt)
+                    <= this._freshnessSkipThresholdMs) return false;
+                return !this._isProtectedGenerationRequest(entry, now);
+            },
+            canReplace: options.queueConfig?.replaceLowerPriority === false ? null
+                : (entry) => !this._isProtectedGenerationRequest(entry),
+            onDrop: (entry) => {
+                this._requestTimestamps.delete(entry.key);
+                this._requestFreshness.delete(entry.key);
+                this._telemetryByKey.delete(entry.key);
+                this._tileState.delete(entry.key);
             }
         });
         this._generationEpoch = 0;
@@ -625,6 +951,80 @@ export class TileStreamer {
         this._commitWindowCount = 0;
         this._queueRejectWindowCount = 0;
         this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
+        // Refinement-drop-by-depth instrumentation (2026-10-01) — see the
+        // drop site in _queueRefinement's inner task for what this counts.
+        this._refinementDropByDepthWindow = new Map();
+
+        // ── Phase 2: background refinement queue (plan §2, §3 preview) ──
+        // Separate from _generationQueue so refinement admission never
+        // competes with geometry admission for the same per-frame slots —
+        // tickGeneration derives its own, smaller, GPU-fence-aware budget
+        // for this queue (see _tickRefinement).
+        this._refinementQueue = new AsyncGenerationQueue({
+            maxInFlight: this._admissionBudgets.maxConcurrentGenerations,
+            maxPerFrame: this._admissionBudgets.maxRefinementsPerFrame,
+            timeBudgetMs: this._admissionBudgets.maxCpuGenerationTimeMs,
+            maxQueueSize: options.queueConfig?.maxQueueSize ?? 2048,
+            shouldDrop: (entry) => {
+                // A tile can be evicted (or already refined by a prior
+                // duplicate) between being queued for refinement and this
+                // entry reaching the front — nothing to refine any more.
+                if (!this._tileInfo.has(entry.key)) return true;
+                if (this._tileState.get(entry.key) === 'REFINED') return true;
+                const tile = this._telemetryByKey.get(entry.key);
+                return tile && !this._describeTileDemandState(tile, entry.key).relevant;
+            },
+            onDrop: (entry) => {
+                const tile = this._telemetryByKey.get(entry.key);
+                this._telemetryByKey.delete(entry.key);
+                if (tile && this._tileInfo.has(entry.key) && this._tileState.get(entry.key) !== 'REFINED') {
+                    this._parkStaleRefinement(new TileAddress(tile.face, tile.depth, tile.x, tile.y), entry.key);
+                }
+            }
+        });
+        this._refinementRejectWindowCount = 0;
+        // In-place regeneration of resident tiles whose terrain changed
+        // (regenerateTiles): its own small queue, started only with GPU
+        // budget left after geometry and refinement.
+        this._regenQueue = new AsyncGenerationQueue({
+            maxInFlight: 2,
+            maxPerFrame: 1,
+            timeBudgetMs: this._admissionBudgets.maxCpuGenerationTimeMs,
+            maxQueueSize: 8192,
+            shouldDrop: (entry) => !this._tileInfo.has(entry.key),
+        });
+        this._regenStats = { queued: 0, done: 0, rejected: 0 };
+        // River carve edits are tracked by changed terrain regions. Each
+        // record keeps the predicate needed to decide whether a tile job that
+        // started earlier actually overlaps the edit. The bounded history is
+        // only a fallback for unusually long-running jobs; those regenerate
+        // conservatively if their starting version has fallen out of it.
+        this._terrainRegionChanges = [];
+        this._terrainRegionChangeFloor = 0;
+        // key -> tileAddr for refinement requests dropped because the queue
+        // was at capacity (AsyncGenerationQueue.request() returned null).
+        // Drained a few at a time by _retryDroppedRefinements(), unconditionally
+        // (queue-full is orthogonal to visibility, so no extra filter needed).
+        this._refinementRetryMap = new Map();
+        // key -> tileAddr for refinement requests dropped because the tile
+        // was no longer "relevant" (not visible, not an ancestor/descendant
+        // of anything visible) at dequeue time. Separate from the map above,
+        // and separate retry logic (_retryVisibleDroppedRefinements), because
+        // this case needs a much stricter filter: most resident tiles are
+        // "relevant" via ancestor/descendant leniency at any given moment
+        // (confirmed — cached off-screen tiles vastly outnumber visible
+        // ones), so retrying on mere "relevant" reintroduced a livelock
+        // (confirmed via frozen refinement throughput, not guessed — see the
+        // comment at the original drop site). Only tiles that are STRICTLY
+        // currently visible get re-queued; everything else is cheaply
+        // rechecked and left in the map rather than consuming a refinement
+        // queue slot. 2026-10-01: added to fix tiles that get unluckily
+        // dropped during camera movement and then stay resident-but-never-
+        // refined forever even after the camera settles and they become
+        // squarely visible (confirmed via debug mode 102 + idle [QTLight]
+        // telemetry: resolvedColor permanently invalid on some LOD4 tiles
+        // even at steady state with an empty refinement queue).
+        this._refinementVisibleDropRetryMap = new Map();
     }
     /**
  * Register an externally-owned array texture to be returned alongside the
@@ -635,6 +1035,28 @@ export class TileStreamer {
 setExternalArrayTexture(name, wrapper) {
     if (!this._externalArrayTextures) this._externalArrayTextures = {};
     this._externalArrayTextures[name] = wrapper;
+}
+
+/**
+ * Change streamer behaviour switches at runtime (see EngineConfig
+ * gpuQuadtree.streamerFlags). Returns the resulting flags.
+ */
+setStreamerFlags(partial = {}) {
+    const wasSkipping = this._flags.skipRefinementBeyondFlatFade;
+    for (const [name, value] of Object.entries(partial || {})) {
+        if (!(name in this._flags)) {
+            Logger.warn(`[TileStreamer] unknown streamer flag '${name}'`);
+            continue;
+        }
+        this._flags[name] = value;
+    }
+    if (wasSkipping && !this._flags.skipRefinementBeyondFlatFade) {
+        // Nothing is skipped any more: refine everything that was waiting.
+        const deferred = [...this._refinementDeferredMap.values()];
+        this._refinementDeferredMap.clear();
+        for (const tileAddr of deferred) this._queueRefinement(tileAddr);
+    }
+    return { ...this._flags };
 }
 
 /**
@@ -693,7 +1115,11 @@ drainScatterCommitQueue() {
             quadtreeMaxDepth: this.quadtreeGPU?.maxDepth,
             maxGeomLOD: this.quadtreeGPU?.maxGeomLOD,
             enableSplat:    this.enableSplat,
-            logStats:       this._logStatsEnabled
+            tileCategories: this._tileCategories,
+            coarseColorWindowMeters: this._coarseColorWindowMeters,
+            coarseColorFaceSizeMeters: this._coarseColorFaceSizeMeters,
+            logStats:       this._logStatsEnabled,
+            onGenerationTelemetry: (telemetry) => this._finalizeFenceTelemetry(telemetry)
         });
         this._seedRootTiles();
         this._createFeedbackRing();
@@ -713,7 +1139,7 @@ drainScatterCommitQueue() {
                         const addr = new TileAddress(face, depth, x, y);
                         if (this._tileInfo.has(addr.toString())) continue;
                         if (this.tileGenerator.isGenerating(addr)) continue;
-                        this._queueTile(addr);
+                        this._queueTile(addr, { reason: 'VISIBLE' });
                     }
                 }
             }
@@ -753,10 +1179,19 @@ drainScatterCommitQueue() {
     }
 
     resetTiles({ reseedRootTiles = true } = {}) {
+        this._lastPriorityRefreshTime = -Infinity;
         this._requestFreshness.clear();
 this._freshnessSkipCount = 0;
         this._generationEpoch++;
         this._generationQueue.clearPending?.(null);
+        this._refinementQueue.clearPending?.(null);
+        this._regenQueue.clearPending?.(null);
+        this._tileState.clear();
+        this._refinementRejectWindowCount = 0;
+        this._refinementRetryMap.clear();
+        this._refinementVisibleDropRetryMap.clear();
+        this._refinementDeferredMap.clear();
+        this._visibilityIndex.clear();
 
         if (this.arrayPool?._pendingCopies) {
             this.arrayPool._pendingCopies.length = 0;
@@ -792,6 +1227,14 @@ this._freshnessSkipCount = 0;
         this._commitWindowCount = 0;
         this._queueRejectWindowCount = 0;
         this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
+        this._refinementDropByDepthWindow.clear();
+
+        this._telemetryByKey.clear();
+        for (const window of Object.values(this._stageLatency)) window.consume();
+        this._requestedTilesWindowCount = 0;
+        this._newlyVisibleTilesWindowCount = 0;
+        this._wastedGenerationsWindowCount = 0;
+        this._copyOperationsWindowCount = 0;
 
         if (this.hashTable) {
             this.hashTable.clear();
@@ -929,12 +1372,19 @@ this._freshnessSkipCount = 0;
     }
 
     _flushArrayPoolCopies() {
-        if (!this.arrayPool) return;
+        if (!this.arrayPool||gpuDeviceLoss(this.device)) return;
 
+        const copyBudget = this._admissionBudgets.maxCopyOperationsPerFrame;
+        // Snapshot for debug bookkeeping BEFORE flushing (flushPendingCopies
+        // splices its own array); slicing with the same budget here mirrors
+        // exactly what flushPendingCopies will actually flush.
         const flushedCopies = Array.isArray(this.arrayPool._pendingCopies)
-            ? this.arrayPool._pendingCopies.slice()
+            ? this.arrayPool._pendingCopies.slice(0, copyBudget)
             : [];
-        const copyCount = this.arrayPool.flushPendingCopies();
+        const { count: copyCount, textures: flushedTextures } = this.arrayPool.flushPendingCopies(copyBudget);
+        this._copyOperationsWindowCount += copyCount;
+        this._markGeometryCopiesSubmitted(flushedCopies, copyCount);
+        this._markMaterialCompleteForFlushedCopies(flushedCopies, copyCount);
         let copyFencePromise = null;
         if (copyCount > 0) {
             const batchId = ++this._debugCopyBatchId;
@@ -946,14 +1396,26 @@ this._freshnessSkipCount = 0;
                         return this._debugVerifyCopiedLayers(flushedCopies, batchId);
                     }
                 })
-                .catch(() => {
+                .catch(error => {
+                    reportGpuAsyncFailure(this.device,'terrain copy fence',error);
                     this._debugMarkFailedCopies(flushedCopies, batchId);
                 });
         }
-        if (copyCount <= 0 || this._pendingCopyTextures.length === 0) return;
 
-        const textures = this._pendingCopyTextures.flat();
+        // Textures destined for a copy are only ever safe to destroy once
+        // flushPendingCopies() reports them as actually flushed (above) —
+        // never derived from a count-based slice of _pendingCopyTextures,
+        // which also holds unrelated castoffs (dup/pool-full/stale-epoch
+        // tiles in _commitTile/_queueTile) that were never queued for copy
+        // at all and don't correspond 1:1 with _pendingCopies.
+        const castoffTextures = this._pendingCopyTextures.length > 0
+            ? this._pendingCopyTextures.flat()
+            : [];
         this._pendingCopyTextures.length = 0;
+
+        const textures = [...flushedTextures, ...castoffTextures];
+        if (textures.length === 0) return;
+
         const entry = {
             textures,
             framesRemaining: this._destructionDelayFrames,
@@ -968,6 +1430,46 @@ this._freshnessSkipCount = 0;
                 .catch(resolveFence);
         }
         this._pendingDestructions.push(entry);
+    }
+
+    // Record that a tile's layer now holds its geometry outputs (the copy was
+    // submitted to the queue). Its refinement may then read height and tile
+    // ids straight from the layer instead of recomputing them; refinements
+    // queued earlier fall back to recomputing (see _queueRefinement).
+    _markGeometryCopiesSubmitted(flushedCopies, copyCount) {
+        const count = Math.min(copyCount, flushedCopies.length);
+        for (let i = 0; i < count; i++) {
+            const entry = flushedCopies[i];
+            if (!entry) continue;
+            const key = this._layerToKey.get(entry.layer);
+            const info = key ? this._tileInfo.get(key) : null;
+            if (info && info.layer === entry.layer) info.geometryInLayer = true;
+        }
+    }
+
+    // Raise the GPU "material complete" flag for tiles whose finishing copy
+    // was just submitted. Runs inside tickFlush right after the copy batch's
+    // queue.submit and before the dirty hash slots are uploaded, so the flag
+    // reaches the GPU in the same frame as (and queue-ordered after) the
+    // data it vouches for — never before. Pending copies of a released layer
+    // are purged in releaseLayer, so a flushed entry always belongs to the
+    // layer's current occupant.
+    _markMaterialCompleteForFlushedCopies(flushedCopies, copyCount) {
+        if (!this._preferCompleteMaterialLayers || copyCount <= 0) return;
+        const count = Math.min(copyCount, flushedCopies.length);
+        for (let i = 0; i < count; i++) {
+            const entry = flushedCopies[i];
+            if (!entry?.completesMaterial) continue;
+            const key = this._layerToKey.get(entry.layer);
+            const info = key ? this._tileInfo.get(key) : null;
+            if (!info || info.layer !== entry.layer) continue;
+            const slot = this.hashTable.findSlot(info.keyLo, info.keyHi);
+            if (slot < 0) continue;
+            const flags = this.hashTable.getFlags(slot);
+            if ((flags & TILE_FLAG_MATERIAL_COMPLETE) !== 0) continue;
+            this.hashTable.setFlags(slot, flags | TILE_FLAG_MATERIAL_COMPLETE);
+            this._dirtySlots.add(slot);
+        }
     }
 
     _destroyDeferredTextures() {
@@ -986,15 +1488,53 @@ this._freshnessSkipCount = 0;
         }
     }
     tickGeneration() {
+        if(gpuDeviceLoss(this.device)) {
+            this._generationQueue.clearPending();this._refinementQueue.clearPending();this._regenQueue.clearPending();
+            return;
+        }
+        // Prune even when admission is blocked; otherwise fast movement can
+        // leave a full queue of obsolete requests until a GPU fence resolves.
+        this._generationQueue.prunePending();
+        this._refinementQueue.prunePending();
+        this._regenQueue.prunePending();
+        this._refreshQueuedPriorities();
         // Bound outstanding GPU generation work. Each tile is ~9 ms GPU;
         // without this, movement bursts push the command queue 30+ frames
         // deep and latency spirals to 500+ ms. Budget is the headroom
         // between the limit and the current in-flight fence count.
         const gpuInFlight = this.tileGenerator?._gpuFencesInFlight ?? 0;
-        const budget = Math.max(0, this._gpuBackpressureLimit - gpuInFlight);
+        const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
 
-        if (budget === 0) {
+        // Keep a small reserve even at budget=0 so top-of-queue urgent
+        // (VISIBLE/FEEDBACK) work isn't fully starved by sustained
+        // predictive/GPU pressure (plan §1.3). PREDICTIVE entries carry
+        // their own canStart gate against the same fence limit (see
+        // _queueTile), so this reserve only ever admits genuinely urgent
+        // work — if the queue is all predictive, canStart defers it and
+        // nothing actually starts.
+        //
+        // The reserve must be measured against total overshoot already
+        // granted, not handed out fresh every frame — during a sustained
+        // GPU backlog (fences take 12+ frames to resolve; confirmed via
+        // Phase 0 submitToFence measurements), a flat +1/frame reserve
+        // compounds every frame nothing resolves, letting fences climb
+        // well past the intended ceiling (measured: 8+ instead of the
+        // intended maxGpuFencesInFlight + urgentReserveSlots ≈ 5).
+        // Capping by remaining overshoot keeps the reserve a one-time
+        // cushion, not an unbounded trickle.
+        const overshoot = Math.max(0, gpuInFlight - this._admissionBudgets.maxGpuFencesInFlight);
+        const reserveRemaining = Math.max(0, this._admissionBudgets.urgentReserveSlots - overshoot);
+        const effectiveBudget = Math.max(budget, reserveRemaining);
+
+        if (effectiveBudget === 0) {
             this._gpuBackpressureSkipCount++;
+            // Geometry's budget is 0 only once the fences overshoot by at
+            // least urgentReserveSlots, which also exhausts refinement's own
+            // reserve, so no refinement can start here. Ticking keeps its
+            // queue-full retries moving through saturated stretches.
+            if (this._flags.refinementTickWhenGeometryBlocked) {
+                this._tickRefinement(0);
+            }
             this.tileGenerator?.tick?.();
             return;
         }
@@ -1003,12 +1543,185 @@ this._freshnessSkipCount = 0;
         // maxPerFrame is restored immediately so config inspection
         // elsewhere still sees the real value.
         const savedMaxPerFrame = this._generationQueue.maxPerFrame;
-        this._generationQueue.maxPerFrame = Math.min(savedMaxPerFrame, budget);
+        this._generationQueue.maxPerFrame = Math.min(savedMaxPerFrame, effectiveBudget);
         const spawned = this._generationQueue.tick() || 0;
         this._generationQueue.maxPerFrame = savedMaxPerFrame;
 
         this._tilesStartedWindowCount += spawned;
+
+        const refined = this._tickRefinement(this._flags.refinementBudgetCountsGeometryStarts ? spawned : 0) || 0;
+        this._tickRegeneration(spawned + refined);
+
         this.tileGenerator?.tick?.();
+    }
+
+    // Phase 2 background refinement admission (plan §1.2/§2): subordinate to
+    // geometry in general — it only starts against genuine spare GPU fence
+    // headroom left over after geometry admission above has already run
+    // this frame, further capped by its own (smaller) maxRefinementsPerFrame
+    // budget. BUT plan §1.2 ranks refinement of a nearby tile above
+    // predictive/speculative geometry: when the refinement queue's next
+    // candidate is within refinementNearDistanceTileWidths of the camera,
+    // it gets its own small reserve too — otherwise sustained predictive
+    // demand during continuous exploration can starve refinement
+    // indefinitely (confirmed by observation: visible material seams where
+    // an already-refined tile sits next to one stuck on flat placeholder
+    // material). Scaled by distance rather than a flat visible/not-visible
+    // split, per direct user feedback: the pop was "acceptable twice as far
+    // [away]" but "a bit too visible nearby" — so the reserve is spent near
+    // the camera, where the pop is actually objectionable, and distant
+    // tiles are left to pop without extra GPU cost.
+    //
+    // geometrySpawnedThisFrame must be added to the live fence count by
+    // hand: AsyncGenerationQueue.tick() only *schedules* admitted tasks as
+    // microtasks (Promise.resolve().then(entry.task)) — they don't actually
+    // run, and therefore don't increment _gpuFencesInFlight, until this
+    // synchronous tickGeneration() call has fully returned. Without this,
+    // refinement's budget check sees the same stale pre-tick fence count
+    // geometry's own admission just used, and the two queues' combined
+    // admission can roughly double the intended fence ceiling.
+    _tickRefinement(geometrySpawnedThisFrame = 0) {
+        // Re-offer previously-dropped refinement requests before admission
+        // budgeting below — this only re-enqueues (cheap, no GPU work), the
+        // actual generation start is still gated by effectiveBudget/.tick()
+        // same as any other queued entry, so this can't bypass the budget.
+        this._retryDroppedRefinements();
+        this._retryVisibleDroppedRefinements();
+        this._refinementQueue.prunePending();
+
+        const gpuInFlight = (this.tileGenerator?._gpuFencesInFlight ?? 0) + geometrySpawnedThisFrame;
+        const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
+
+        let effectiveBudget = budget;
+        const head = this._refinementQueue.peek();
+        const headDistance = head ? this._telemetryByKey.get(head.key)?.distanceInTileWidths : null;
+        // Unknown distance (no camera context yet, e.g. cold start) treated
+        // as near: no reason to withhold the reserve when there's no signal
+        // to scale it by, and cold start has no competing predictive demand
+        // anyway.
+        const headIsNear = head && (headDistance === null || headDistance === undefined
+            || !Number.isFinite(headDistance)
+            || headDistance <= this._admissionBudgets.refinementNearDistanceTileWidths);
+        if (headIsNear) {
+            // Same overshoot-capping as geometry's urgentReserveSlots (see
+            // tickGeneration): a bounded one-time cushion, not a per-frame
+            // trickle that could compound into unbounded fence growth.
+            const overshoot = Math.max(0, gpuInFlight - this._admissionBudgets.maxGpuFencesInFlight);
+            const reserveRemaining = Math.max(0, this._admissionBudgets.refinementUrgentReserveSlots - overshoot);
+            effectiveBudget = Math.max(budget, reserveRemaining);
+        }
+        if (effectiveBudget === 0) return;
+
+        const savedMaxPerFrame = this._refinementQueue.maxPerFrame;
+        this._refinementQueue.maxPerFrame = Math.min(savedMaxPerFrame, effectiveBudget);
+        const started = this._refinementQueue.tick() || 0;
+        this._refinementQueue.maxPerFrame = savedMaxPerFrame;
+        return started;
+    }
+
+    // In-place regenerations start only with fence headroom left after this
+    // frame's geometry and refinement starts (no reserve: the old content
+    // stays drawn meanwhile).
+    _tickRegeneration(spawnedThisFrame = 0) {
+        if (this._regenQueue.queue.length === 0) return;
+        const gpuInFlight = (this.tileGenerator?._gpuFencesInFlight ?? 0) + spawnedThisFrame;
+        const budget = Math.max(0, this._admissionBudgets.maxGpuFencesInFlight - gpuInFlight);
+        if (budget === 0) return;
+        const savedMaxPerFrame = this._regenQueue.maxPerFrame;
+        this._regenQueue.maxPerFrame = Math.min(savedMaxPerFrame, budget);
+        this._regenQueue.tick();
+        this._regenQueue.maxPerFrame = savedMaxPerFrame;
+    }
+
+    _terrainCarveVersion() {
+        return this.terrainGenerator?.waterCarveVersion ?? 0;
+    }
+
+    /** Records the affected tile region for one terrain-input version. */
+    markTerrainRegionsChanged(predicate) {
+        if (typeof predicate !== 'function') return;
+        const version = this._terrainCarveVersion();
+        this._terrainRegionChanges.push({ version, predicate });
+        if (this._terrainRegionChanges.length > 128) {
+            const removed = this._terrainRegionChanges.shift();
+            this._terrainRegionChangeFloor = Math.max(this._terrainRegionChangeFloor, removed.version);
+        }
+    }
+
+    _terrainCarveChangedSince(tileAddr, version) {
+        const current = this._terrainCarveVersion();
+        if (current === version) return false;
+        if (version < this._terrainRegionChangeFloor) return true;
+        let nextVersion = version + 1;
+        for (const change of this._terrainRegionChanges) {
+            if (change.version <= version) continue;
+            // A version with no region record represents an unscoped terrain
+            // change, so preserve the old conservative behavior for it.
+            if (change.version > nextVersion) return true;
+            nextVersion = Math.max(nextVersion, change.version + 1);
+            if (change.predicate(tileAddr.face, tileAddr.depth, tileAddr.x, tileAddr.y)) return true;
+        }
+        // Compatibility and safety for non-water terrain changes, which do
+        // not publish a region predicate.
+        return nextVersion <= current;
+    }
+
+    /**
+     * Regenerates resident tiles in place where the terrain function changed
+     * (the river carve: core/world/water/riverCarve.wgsl.js), e.g.
+     * predicate(face, depth, x, y) = "touches a grid cell whose rivers
+     * changed". All output types are generated again and copied into the
+     * tile's own layer, so the old content stays drawn until then (no
+     * fallback to an ancestor). Returns the number queued.
+     */
+    regenerateTiles(predicate) {
+        let queued = 0;
+        for (const info of this._tileInfo.values()) {
+            if (!predicate(info.face, info.depth, info.x, info.y)) continue;
+            if (this._queueRegeneration(new TileAddress(info.face, info.depth, info.x, info.y))) queued++;
+        }
+        return queued;
+    }
+
+    getRegenerationStats() {
+        return { ...this._regenStats, pending: this._regenQueue.queue.length };
+    }
+
+    _queueRegeneration(tileAddr) {
+        const key = tileAddr.toString();
+        if (!this._tileInfo.has(key)) return false;
+        const geom = this._estimateRequestGeometry(tileAddr);
+        const tileWidth = this._estimateTileWorldSize(tileAddr.depth);
+        const distance = (Number.isFinite(geom.distanceToCamera) && tileWidth > 0) ? geom.distanceToCamera / tileWidth : null;
+        const request = this._regenQueue.request(key, Number.isFinite(distance) ? -distance : 0, async () => {
+            if (!this._tileInfo.has(key)) return false;
+            const version = this._terrainCarveVersion();
+            const refinementTypes = this._refinementTypesFor(tileAddr);
+            const types = [...new Set([...this._geometryTypes, ...refinementTypes])];
+            const textures = await this.tileGenerator.generateTile(tileAddr, null, types);
+            const info = this._tileInfo.get(key);
+            if (!info || !this.arrayPool) {
+                this._destroyGeneratedTextures(textures);
+                return false;
+            }
+            this.arrayPool.queueCopyToLayer(textures, info.layer, {
+                completesMaterial: refinementTypes.length === 0 || !this._isSolidTierDepth(tileAddr.depth),
+            });
+            info.carveVersion = version;
+            info.lastUsed = performance.now();
+            if (this._assetCommitQueuesEnabled) {
+                const commit = { face: tileAddr.face, depth: tileAddr.depth, x: tileAddr.x, y: tileAddr.y, layer: info.layer };
+                this._aoCommitQueue.push(commit);
+                if (refinementTypes.includes('scatter')) this._scatterCommitQueue.push({ ...commit });
+            }
+            this._regenStats.done++;
+            // Changed again meanwhile: once more (after this entry left the queue).
+            if (this._terrainCarveChangedSince(tileAddr, version)) setTimeout(() => this._queueRegeneration(tileAddr), 0);
+            return true;
+        });
+        if (request === null) { this._regenStats.rejected++; return false; }
+        this._regenStats.queued++;
+        return true;
     }
 
     // ── Feedback ────────────────────────────────────────────────────────────
@@ -1117,7 +1830,7 @@ this._freshnessSkipCount = 0;
 
         const addr = new TileAddress(face, depth, x, y);
         if (this.tileGenerator.isGenerating(addr)) return;
-        this._queueTile(addr);
+        this._queueTile(addr, { reason: 'FEEDBACK' });
     }
 
     _recordEvictFeedback(key, depth) {
@@ -1198,37 +1911,140 @@ this._freshnessSkipCount = 0;
     
                 const addr = new TileAddress(face, d, px, py);
                 if (!this.tileGenerator.isGenerating(addr)) {
-                    this._queueTile(addr);
+                    this._queueTile(addr, { reason: 'FEEDBACK' });
                 }
             }
         });
     }
 
-    _queueTile(tileAddr) {
+    // ── Phase 0 telemetry helpers ─────────────────────────────────────────
+    //
+    // Called once per frame by QuadtreeTileManager with the camera's current
+    // world position/velocity, so _estimateRequestGeometry can compute a
+    // rough distanceToCamera/velocityAlignment for each request without this
+    // class needing to own planetConfig or camera state itself.
+    setCameraContext({ position = null, velocity = null, planetConfig = null } = {}) {
+        this._cameraContext.position = position;
+        this._cameraContext.velocity = velocity;
+        this._cameraContext.planetConfig = planetConfig;
+        this._cameraContext.speed = velocity ? Math.hypot(velocity.x, velocity.y, velocity.z) : 0;
+    }
+
+    // Rough (base-radius, elevation-ignored) distance/alignment estimate —
+    // cheap enough to compute per request, precise enough to classify
+    // wasted/forward-vs-behind generation work (plan §0.1, §1.2).
+    _estimateRequestGeometry(tileAddr) {
+        const ctx = this._cameraContext;
+        if (!ctx.position || !ctx.planetConfig) {
+            return { distanceToCamera: null, velocityAlignment: null };
+        }
+        const world = computeTileWorldCenter(tileAddr, ctx.planetConfig);
+        if (!world) return { distanceToCamera: null, velocityAlignment: null };
+
+        const dx = world.x - ctx.position.x;
+        const dy = world.y - ctx.position.y;
+        const dz = world.z - ctx.position.z;
+        const distanceToCamera = Math.hypot(dx, dy, dz);
+
+        let velocityAlignment = null;
+        if (ctx.velocity && ctx.speed > 1e-3 && distanceToCamera > 1e-6) {
+            velocityAlignment =
+                (dx * ctx.velocity.x + dy * ctx.velocity.y + dz * ctx.velocity.z) /
+                (distanceToCamera * ctx.speed);
+        }
+        return { distanceToCamera, velocityAlignment };
+    }
+
+    // Rough world-space width of a tile at a given quadtree depth — a cube
+    // face spans a diameter of ~2*radius in cube-space, split gridSize ways.
+    // Ignores cube-to-sphere warping (a small correction); precise enough
+    // for a "how many tile-widths away is the camera" priority heuristic,
+    // not for rendering.
+    _estimateTileWorldSize(depth) {
+        const radius = this._cameraContext.planetConfig?.radius;
+        if (!Number.isFinite(radius)) return null;
+        const gridSize = 1 << depth;
+        return (2 * radius) / gridSize;
+    }
+
+    // Called from TileGenerator once the GPU fence for a tile's submission
+    // resolves — the only point at which gpuFenceComplete/submitToFence are
+    // knowable, which is after this class has already committed the tile
+    // (residency is marked at copy-submit time, not GPU-copy-complete time;
+    // see _commitTile). This is therefore also telemetry's final cleanup point.
+    _finalizeFenceTelemetry(telemetry) {
+        if (!telemetry) return;
+        if (Number.isFinite(telemetry.gpuFenceComplete) && Number.isFinite(telemetry.computeSubmitted)) {
+            this._stageLatency.submitToFence.push(telemetry.gpuFenceComplete - telemetry.computeSubmitted);
+        }
+        // Identity check, not just key: a world reset (resetTiles) clears
+        // _telemetryByKey and can re-seed the same key before this stale
+        // generation's fence resolves — don't let its delayed cleanup evict
+        // a newer, still-live telemetry record for that key.
+        if (this._telemetryByKey.get(telemetry.key) === telemetry) {
+            this._telemetryByKey.delete(telemetry.key);
+        }
+    }
+
+    _queueTile(tileAddr, { prewarm = false, reason = 'FEEDBACK' } = {}) {
         const key = tileAddr.toString();
         if (!this._requestTimestamps.has(key)) {
             this._requestTimestamps.set(key, performance.now());
         }
-        
-        // Depth component: coarser = higher base priority (fallback safety)
-        const depthPriority = 100000 - tileAddr.depth * 500;
-        
-        // Camera-distance component: approximate screen importance
-        // Tiles nearer to camera get priority boost up to 5000
-        let distanceBias = 0;
-        if (this._lastVisibleTilesList && this._lastVisibleKeySet?.has(key)) {
-            distanceBias = 3000; // Currently visible = high priority
-        } else if (this._requestFreshness.has(key)) {
-            // Recently in feedback = moderate priority
-            const age = performance.now() - this._requestFreshness.get(key);
-            distanceBias = Math.max(0, 2000 - age * 10); // decays over 200ms
+        if (prewarm) this._prewarmKeys.add(key);
+        this._requestedTilesWindowCount++;
+
+        let telemetry = this._telemetryByKey.get(key);
+        if (!telemetry) {
+            const geom = this._estimateRequestGeometry(tileAddr);
+            telemetry = {
+                key,
+                face: tileAddr.face, depth: tileAddr.depth, x: tileAddr.x, y: tileAddr.y,
+                reason,
+                priority: null,
+                distanceToCamera: geom.distanceToCamera,
+                velocityAlignment: geom.velocityAlignment,
+                // Phase 2: every tile's first pass requests only the
+                // geometry preset; remaining configured types (if any)
+                // follow as a separate background refinement pass.
+                generationTier: this._refinementTypes.length > 0 ? 'geometry' : 'full',
+                outputMask: this._geometryTypes,
+                resolution: this.tileTextureSize,
+                requestTime: performance.now(),
+                queueTime: null,
+                generationStart: null,
+                computeSubmitted: null,
+                gpuFenceComplete: null,
+                copySubmitted: null,
+                residentTime: null
+            };
+            this._telemetryByKey.set(key, telemetry);
+            this._tileState.set(key, 'REQUESTED');
         }
-        
-        const priority = depthPriority + distanceBias;
-        
+
+        if (reason !== 'PREDICTIVE') telemetry.reason = reason;
+        const priority = this._generationPriority(telemetry);
+        telemetry.priority = priority;
+
+        // Phase 1 admission control (plan §1.3/§1.4): predictive/speculative
+        // work individually respects the hard GPU fence budget, so it backs
+        // off under pressure without needing to touch the frame-level
+        // maxNewTilesPerFrame clamp in tickGeneration(). VISIBLE/FEEDBACK
+        // requests are left ungated here — they're covered instead by
+        // tickGeneration()'s urgent reserve, so real on-screen geometry
+        // keeps making progress even while predictive work is fully stalled.
+        const canStart = (reason === 'PREDICTIVE')
+            ? () => (this.tileGenerator?._gpuFencesInFlight ?? 0) < this._admissionBudgets.maxGpuFencesInFlight
+            : null;
+
         const generationEpoch = this._generationEpoch;
         const request = this._generationQueue.request(key, priority, async () => {
-    
+            const now = performance.now();
+            telemetry.queueTime = now;
+            telemetry.generationStart = now;
+            this._tileState.set(key, 'GENERATING');
+            this._stageLatency.queueWait.push(now - telemetry.requestTime);
+
             const demandState = this._describeTileDemandState(tileAddr, key);
             this._staleStartWindow.started++;
             if (!demandState.relevant) {
@@ -1240,87 +2056,179 @@ this._freshnessSkipCount = 0;
             } else {
                 this._staleStartWindow.unknown++;
             }
-         
+
 
             try {
-                const textures = await this.tileGenerator.generateTile(tileAddr);
+                // Geometry preset only (plan §2.1/§2.3) — the minimum a tile
+                // needs to become resident and visually useful. Any
+                // remaining configured types follow as a background
+                // refinement pass once this commits.
+                const carveVersion = this._terrainCarveVersion();
+                const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, this._geometryTypes);
+                if (Number.isFinite(telemetry.computeSubmitted)) {
+                    this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
+                }
                 if (generationEpoch !== this._generationEpoch) {
                     this._requestTimestamps.delete(key);
+                    this._prewarmKeys.delete(key);
+                    this._tileState.delete(key);
                     this._destroyGeneratedTextures(textures);
+                    this._wastedGenerationsWindowCount++;
                     return false;
                 }
-                const committed = await this._commitTile(tileAddr, textures);
+                this._tileState.set(key, 'GEOMETRY_READY');
+                const committed = await this._commitTile(tileAddr, textures, telemetry);
+                const stillRelevant = this._describeTileDemandState(tileAddr, key).relevant;
+                if (!committed || !stillRelevant) {
+                    this._wastedGenerationsWindowCount++;
+                }
                 if (!committed) {
                     this._requestTimestamps.delete(key);
+                    this._tileState.delete(key);
+                } else {
+                    this._tileState.set(key, 'RESIDENT');
+                    const info = this._tileInfo.get(key);
+                    if (info) info.carveVersion = carveVersion;
+                    // Generated across a terrain change (river carve): stale.
+                    if (this._terrainCarveChangedSince(tileAddr, carveVersion)) this._queueRegeneration(tileAddr);
+                    if (this._refinementTypes.length > 0) {
+                        this._queueRefinement(tileAddr);
+                    }
                 }
-                
+                this._prewarmKeys.delete(key);
                 return committed;
             } catch (error) {
                 this._requestTimestamps.delete(key);
+                this._prewarmKeys.delete(key);
+                this._telemetryByKey.delete(key);
+                this._tileState.delete(key);
                 throw error;
             }
-        });
+        }, canStart);
         if (request === null) {
             this._queueRejectWindowCount++;
             this._requestTimestamps.delete(key);
+            this._prewarmKeys.delete(key);
+            this._telemetryByKey.delete(key);
+            this._tileState.delete(key);
         }
     }
 
+    _isProtectedGenerationRequest(entry, now = performance.now()) {
+        if (this._prewarmKeys.has(entry.key)) return true;
+        const tile = this._telemetryByKey.get(entry.key);
+        // Unknown metadata is kept conservatively. Real tile requests carry
+        // the address in telemetry, avoiding string parsing during each scan.
+        if (!tile || tile.depth < this._freshnessMinDepth) return true;
+        // A delayed feedback readback must not purge geometry still visible
+        // or needed as its fallback. Old visibility is not a permanent pin.
+        if (now - this._lastVisibleReadbackTime <= Math.max(1000, this._freshnessSkipThresholdMs)) {
+            const demand = this._describeTileDemandState(tile, entry.key);
+            return demand.reason === 'visible' || demand.reason === 'ancestor';
+        }
+        return false;
+    }
 
- // In _evictTile(), add age and visibility logging:
+    _generationPriority(telemetry, now = performance.now()) {
+        let demandBias = 0;
+        if (this._lastVisibleKeySet?.has(telemetry.key)) {
+            demandBias = 3000;
+        } else {
+            const seen = this._requestFreshness.get(telemetry.key);
+            if (Number.isFinite(seen)) demandBias = Math.max(0, 2000 - (now - seen) * 10);
+        }
+        const width = this._estimateTileWorldSize(telemetry.depth);
+        const proximityBias = Number.isFinite(telemetry.distanceToCamera) && width > 0
+            ? 400 / (1 + telemetry.distanceToCamera / width) : 0;
+        const directionBias = telemetry.reason === 'PREDICTIVE' && Number.isFinite(telemetry.velocityAlignment)
+            ? telemetry.velocityAlignment * 400 : 0;
+        return 100000 - telemetry.depth * 500 + demandBias + proximityBias + directionBias;
+    }
+
+    _refreshQueuedPriorities() {
+        const now = performance.now();
+        if (now - this._lastPriorityRefreshTime < this._priorityRefreshIntervalMs) return;
+        this._lastPriorityRefreshTime = now;
+        // Allow demotion as the camera moves; promotion-only requests leave
+        // yesterday's near tiles ahead of today's demand. Scan at most once
+        // per configured interval, with no per-frame full sort.
+        this._generationQueue.reprioritize((entry) => {
+            const telemetry = this._telemetryByKey.get(entry.key);
+            if (!telemetry) return entry.priority;
+            Object.assign(telemetry, this._estimateRequestGeometry(telemetry));
+            return (telemetry.priority = this._generationPriority(telemetry, now));
+        });
+        this._refinementQueue.reprioritize((entry) => {
+            const telemetry = this._telemetryByKey.get(entry.key);
+            if (!telemetry) return entry.priority;
+            const geom = this._estimateRequestGeometry(telemetry);
+            const width = this._estimateTileWorldSize(telemetry.depth);
+            telemetry.distanceToCamera = geom.distanceToCamera;
+            telemetry.distanceInTileWidths = Number.isFinite(geom.distanceToCamera) && width > 0
+                ? geom.distanceToCamera / width : null;
+            return (telemetry.priority = -(telemetry.distanceInTileWidths ?? 0));
+        });
+    }
+
+
 _evictTile(key) {
     const info = this._tileInfo.get(key);
     if (!info) return;
 
+    if (this._flags.diagnostics) {
+        this._recordEvictionDiagnostics(key, info);
+    }
+
+    const touchedSlots = [];
+    this.hashTable.remove(info.keyLo, info.keyHi, touchedSlots);
+    for (const s of touchedSlots) {
+        this._dirtySlots.add(s);
+    }
+
+    this._tileInfo.delete(key);
+    this._layerToKey.delete(info.layer);
+    this._debugCopyStateByLayer.delete(info.layer);
+    this._tileState.delete(key);
+    this._refinementVisibleDropRetryMap.delete(key);
+    this._refinementDeferredMap.delete(key);
+    this._refinementRetryMap.delete(key);
+    this.arrayPool.releaseLayer(info.layer);
+    this._recordPoolHeadroom();
+}
+
+// Diagnostics only (streamerFlags.diagnostics): which visible tiles were
+// drawing from the evicted tile, how old it was relative to the rest of the
+// pool, and the recent-eviction record the evict→feedback stats read. Scans
+// the visible list and the whole pool, so it is off by default.
+_recordEvictionDiagnostics(key, info) {
     const now = performance.now();
-    
-    // NEW: Check if any visible tile would use this as a fallback
+
+    // Visible tiles without their own data that fell back to this one.
     let fallbackDependents = 0;
-    let dependentDepths = [];
-    
+    const dependentDepths = [];
     if (this._lastVisibleTilesList) {
         for (const tile of this._lastVisibleTilesList) {
-            // Check if this visible tile's data is loaded
             const visKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
-            const visInfo = this._tileInfo.get(visKey);
-            
-            if (visInfo) {
-                // Tile has its own data loaded - no fallback needed
-                continue;
-            }
-            
-            // Tile needs a fallback - check if evicted tile is an ancestor
-            if (tile.face !== info.face) continue;  // Different face, can't be ancestor
-            
-            // Walk up the ancestor chain from the visible tile
+            if (this._tileInfo.has(visKey)) continue;
+            if (tile.face !== info.face) continue;
             let d = tile.depth;
             let x = tile.x;
             let y = tile.y;
-            
             while (d > info.depth) {
                 d--;
                 x >>= 1;
                 y >>= 1;
             }
-            
-            // Check if we landed on the evicted tile
-            if (d === info.depth) {
-                const evictedX = parseInt(key.split(':')[2].split(',')[0]);
-                const evictedY = parseInt(key.split(':')[2].split(',')[1]);
-                
-                if (x === evictedX && y === evictedY) {
-                    fallbackDependents++;
-                    dependentDepths.push(tile.depth);
-                }
+            if (d === info.depth && x === info.x && y === info.y) {
+                fallbackDependents++;
+                dependentDepths.push(tile.depth);
             }
         }
     }
 
-    // Log eviction with fallback dependency info
     if (!this._evictFallbackLogCount) this._evictFallbackLogCount = 0;
     if (this._evictFallbackLogCount < 50 || fallbackDependents > 0) {
         this._evictFallbackLogCount++;
-        
         const depthHist = {};
         for (const d of dependentDepths) {
             depthHist[d] = (depthHist[d] || 0) + 1;
@@ -1329,21 +2237,19 @@ _evictTile(key) {
             .sort((a, b) => +a[0] - +b[0])
             .map(([d, c]) => `d${d}:${c}`)
             .join(' ');
-        
         Logger.warn(
             `[QT-FallbackEvict-Dependency] key=${key} depth=${info.depth} ` +
             `fallbackDependents=${fallbackDependents} ` +
             `dependentDepths=[${depthStr}]`
         );
     }
-    
-    // Track statistics
+
     if (!this._fallbackEvictStats) {
-        this._fallbackEvictStats = { 
-            total: 0, 
-            withDependents: 0, 
+        this._fallbackEvictStats = {
+            total: 0,
+            withDependents: 0,
             totalDependents: 0,
-            maxDependents: 0 
+            maxDependents: 0
         };
     }
     this._fallbackEvictStats.total++;
@@ -1351,30 +2257,27 @@ _evictTile(key) {
         this._fallbackEvictStats.withDependents++;
         this._fallbackEvictStats.totalDependents += fallbackDependents;
         this._fallbackEvictStats.maxDependents = Math.max(
-            this._fallbackEvictStats.maxDependents, 
+            this._fallbackEvictStats.maxDependents,
             fallbackDependents
         );
     }
-    const age = now - info.lastUsed;
-    
-    // Check if evicted tile was in the last visible readback
-    const wasVisible = this._lastVisibleKeySet?.has(key) ?? false;
-    const readbackAge = this._lastVisibleReadbackTime 
-        ? (now - this._lastVisibleReadbackTime).toFixed(0) 
-        : 'never';
 
-    // Find the LRU score spread: what's the youngest eligible eviction candidate?
+    // LRU spread: youngest and oldest eligible eviction candidates.
+    const age = now - info.lastUsed;
+    const wasVisible = this._lastVisibleKeySet?.has(key) ?? false;
+    const readbackAge = this._lastVisibleReadbackTime
+        ? (now - this._lastVisibleReadbackTime).toFixed(0)
+        : 'never';
     let youngestAge = Infinity;
     let oldestAge = -Infinity;
     let eligibleCount = 0;
-    for (const [k, i] of this._tileInfo) {
+    for (const i of this._tileInfo.values()) {
         if (i.depth <= 2) continue;
         const a = now - i.lastUsed;
         if (a < youngestAge) youngestAge = a;
         if (a > oldestAge) oldestAge = a;
         eligibleCount++;
     }
-
     if (!this._evictDetailLogCount) this._evictDetailLogCount = 0;
     if (this._evictDetailLogCount < 30 || wasVisible) {
         this._evictDetailLogCount++;
@@ -1386,47 +2289,32 @@ _evictTile(key) {
             `eligible=${eligibleCount}`
         );
     }
-    
-        if (!this._recentEvictions) this._recentEvictions = new Map();
-        this._recentEvictions.set(key, {
-            evictedAt: performance.now(),
-            depth: info.depth,
-            layer: info.layer,
-            keyLo: info.keyLo,
-            keyHi: info.keyHi
-        });
-        // Prune old records (keep last 10 seconds)
-        const cutoff = performance.now() - 10000;
-        for (const [k, v] of this._recentEvictions) {
-            if (v.evictedAt < cutoff) this._recentEvictions.delete(k);
-        }
-    
 
-        if (!this._evictLogCount) this._evictLogCount = 0;
-        if (this._evictLogCount < 50 || this._evictLogCount % 100 === 0) {
-            this._evictLogCount++;
-            Logger.warn(
-                `[QT-Stitch-Evict] key=${key} layer=${info.layer} depth=${info.depth} ` +
-                `slot=${info.slot} dirtyBefore=${this._dirtySlots.size}`
-            );
-        }
-    
-        const touchedSlots = [];
-        this.hashTable.remove(info.keyLo, info.keyHi, touchedSlots);
-        for (const s of touchedSlots) {
-            this._dirtySlots.add(s);
-        }
-
-    
-        this._tileInfo.delete(key);
-        this._layerToKey.delete(info.layer);
-        this._debugCopyStateByLayer.delete(info.layer);
-        this.arrayPool.releaseLayer(info.layer);
-        this._recordPoolHeadroom();
+    // Read by _processFeedbackAddress for the evict→feedback stats.
+    if (!this._recentEvictions) this._recentEvictions = new Map();
+    this._recentEvictions.set(key, {
+        evictedAt: now,
+        depth: info.depth,
+        layer: info.layer,
+        keyLo: info.keyLo,
+        keyHi: info.keyHi
+    });
+    const cutoff = now - 10000;
+    for (const [k, v] of this._recentEvictions) {
+        if (v.evictedAt < cutoff) this._recentEvictions.delete(k);
     }
 
+    if (!this._evictLogCount) this._evictLogCount = 0;
+    if (this._evictLogCount < 50 || this._evictLogCount % 100 === 0) {
+        this._evictLogCount++;
+        Logger.warn(
+            `[QT-Stitch-Evict] key=${key} layer=${info.layer} depth=${info.depth} ` +
+            `slot=${info.slot} dirtyBefore=${this._dirtySlots.size}`
+        );
+    }
+}
 
-async _commitTile(tileAddr, textures) {
+async _commitTile(tileAddr, textures, telemetry = null) {
     if (!this.arrayPool) {
         this._destroyGeneratedTextures(textures);
         return false;
@@ -1454,13 +2342,31 @@ async _commitTile(tileAddr, textures) {
         return false;
     }
 
-    this.arrayPool.queueCopyToLayer(textures, layer);
+    // zeroFillMissing: this is a geometry-only commit (plan §2) — any
+    // configured type not generated yet (splat/climate/scatter/...) gets
+    // its layer explicitly zeroed rather than left with whatever the
+    // *previous* occupant of this (possibly reused) layer wrote there.
+    // A geometry-only commit completes the tile's material only when nothing
+    // is left to refine (single-stage configuration).
+    this.arrayPool.queueCopyToLayer(textures, layer, {
+        zeroFillMissing: true,
+        completesMaterial: this._refinementTypes.length === 0
+    });
+    if (telemetry) telemetry.copySubmitted = performance.now();
     this._debugRegisterQueuedCopy(tileAddr, layer, textures);
-    this._destroyGeneratedTextures(textures);
+    // Do NOT schedule these for destruction here: arrayPool._pendingCopies
+    // (just queued above) still needs them until the copy is actually
+    // flushed, which may be a later frame under maxCopyOperationsPerFrame
+    // (plan §1.1). flushPendingCopies() returns exactly the textures whose
+    // copy it submitted; TileStreamer._flushArrayPoolCopies schedules those
+    // for delayed destruction once it has that list.
 
     const keyLo = this.hashTable.makeKeyLo(tileAddr.x, tileAddr.y);
     const keyHi = this.hashTable.makeKeyHi(tileAddr.face, tileAddr.depth);
-    const slot  = this.hashTable.insert(keyLo, keyHi, layer);
+    // With preferCompleteMaterialLayers off, every resident layer counts as
+    // a material source right away (previous behaviour: nearest resident).
+    const initialFlags = this._preferCompleteMaterialLayers ? 0 : TILE_FLAG_MATERIAL_COMPLETE;
+    const slot  = this.hashTable.insert(keyLo, keyHi, layer, initialFlags);
     if (slot < 0) {
         Logger.warn('[TileStreamer] Hash insert failed');
         this._debugCopyStateByLayer.delete(layer);
@@ -1494,12 +2400,16 @@ async _commitTile(tileAddr, textures) {
     if (Number.isFinite(requestedAt)) {
         this._recordRequestLatency(key, performance.now() - requestedAt);
     }
+    if (telemetry) {
+        telemetry.residentTime = performance.now();
+        this._stageLatency.requestToResident.push(telemetry.residentTime - telemetry.requestTime);
+    }
 
-    this._aoCommitQueue.push({
-        face: tileAddr.face, depth: tileAddr.depth,
-        x: tileAddr.x, y: tileAddr.y, layer,
-    });
-    this._scatterCommitQueue.push({
+    // AO only needs height/normal (both geometry-stage), so it's safe to
+    // bake immediately. Scatter needs the actual scatter texture, which is
+    // now a refinement-stage output (plan §2) — its commit queue push moves
+    // to _commitRefinement, once real (non-zero-filled) scatter data exists.
+    if (this._assetCommitQueuesEnabled) this._aoCommitQueue.push({
         face: tileAddr.face, depth: tileAddr.depth,
         x: tileAddr.x, y: tileAddr.y, layer,
     });
@@ -1516,6 +2426,321 @@ async _commitTile(tileAddr, textures) {
     return true;
 }
 
+// ── Phase 2: background refinement (plan §2, lightly previews §3) ─────────
+//
+// Queues generation of whatever configured output types weren't part of
+// the geometry preset (splat/climate/scatter/...) for a tile that's already
+// resident. Runs on a separate, smaller-budget queue so it never competes
+// with new-tile admission for the same per-frame slots (plan §1.2: visible/
+// predictive geometry always outranks refinement).
+// True when the tile at this depth is drawn by the flat solid-color tier.
+_isSolidTierDepth(depth) {
+    if (this._solidTierStartLod === null) return false;
+    const maxDepth = this.quadtreeGPU?.maxDepth;
+    if (!Number.isFinite(maxDepth)) return false;
+    return (maxDepth - depth) >= this._solidTierStartLod;
+}
+
+// False when every pixel of this detail tile is currently drawn with the
+// flat solid-tier color at full weight (nearest possible pixel past the end
+// of the distance ramp, plus a margin), so its refinement output would not
+// change the image. Only when QuadtreeTileManager found no other reader of
+// refinement output (_flatTierRefinementSkip); true whenever unsure.
+_refinementChangesPixels(tileAddr) {
+    const skip = this._flatTierRefinementSkip;
+    if (!skip || !this._flags.skipRefinementBeyondFlatFade) return true;
+    const quadtree = this.quadtreeGPU;
+    const maxDepth = quadtree?.maxDepth;
+    if (!Number.isFinite(maxDepth)) return true;
+    const lod = maxDepth - tileAddr.depth;
+    if (lod < skip.minLod || this._isSolidTierDepth(tileAddr.depth)) return true;
+    const ctx = this._cameraContext;
+    if (!ctx.position || !ctx.planetConfig) return true;
+    const fade = computeSolidTierFadeDistances({
+        lodFactor: quadtree.lodFactor,
+        faceSize: quadtree.faceSize,
+        maxDepth,
+        lodErrorThreshold: quadtree.lodErrorThreshold,
+        shaderConfig: skip.shaderConfig
+    });
+    if (!fade) return true;
+    const nearest = tileNearestDistanceLowerBound(
+        tileAddr, ctx.position, ctx.planetConfig.origin, skip.minSurfaceRadius
+    );
+    const margin = Math.max(0, this._flags.flatFadeSkipMarginFraction ?? 0) * fade.end;
+    return nearest < fade.end + margin;
+}
+
+_deferRefinement(key, tileAddr) {
+    this._tileState.set(key, 'DEFERRED');
+    this._refinementDeferredMap.set(key, tileAddr);
+}
+
+// Refinement outputs for a tile: the full set for detail tiers, the set
+// without splat/prebaked color for the flat tier (see constructor).
+_refinementTypesFor(tileAddr) {
+    return this._isSolidTierDepth(tileAddr.depth)
+        ? this._coarseRefinementTypes
+        : this._refinementTypes;
+}
+
+_queueRefinement(tileAddr) {
+    const key = tileAddr.toString();
+    if (!this._tileInfo.has(key)) return; // evicted before refinement could even be queued
+    const refinementTypes = this._refinementTypesFor(tileAddr);
+    if (refinementTypes.length === 0) {
+        this._tileState.set(key, 'REFINED');
+        return;
+    }
+    if (!this._refinementChangesPixels(tileAddr)) {
+        this._deferRefinement(key, tileAddr);
+        return;
+    }
+
+    // Distance normalized by the tile's own world-space size ("how many
+    // tile-widths away is the camera") rather than raw meters, so one
+    // threshold works consistently across LOD depths. Driven directly by
+    // user observation: the geometry-then-material pop is tolerable at
+    // typical viewing distance but too visible up close — "acceptable
+    // twice as far [away]. Now it's a bit too visible nearby."
+    const geom = this._estimateRequestGeometry(tileAddr);
+    const tileWidth = this._estimateTileWorldSize(tileAddr.depth);
+    const distanceInTileWidths = (Number.isFinite(geom.distanceToCamera) && tileWidth > 0)
+        ? geom.distanceToCamera / tileWidth
+        : null;
+
+    const telemetry = {
+        key,
+        face: tileAddr.face, depth: tileAddr.depth, x: tileAddr.x, y: tileAddr.y,
+        reason: 'REFINEMENT',
+        priority: null,
+        distanceToCamera: geom.distanceToCamera,
+        distanceInTileWidths,
+        velocityAlignment: null,
+        generationTier: 'refinement',
+        outputMask: refinementTypes,
+        resolution: this.tileTextureSize,
+        requestTime: performance.now(),
+        queueTime: null,
+        generationStart: null,
+        computeSubmitted: null,
+        gpuFenceComplete: null,
+        copySubmitted: null,
+        residentTime: null
+    };
+    this._telemetryByKey.set(key, telemetry);
+
+    // This priority only orders candidates *within* _refinementQueue — it
+    // is never compared against _generationQueue's (geometry's) priority
+    // numbers directly, since the two queues are admitted separately (see
+    // tickGeneration/_tickRefinement). What actually matters for plan
+    // §1.2's "visible refinement outranks predictive geometry" is the
+    // *admission* side: _tickRefinement grants a near tile's refinement
+    // its own small reserve, independent of whatever geometry is doing.
+    // Here, just make sure that reserve (when available) and any leftover
+    // shared budget both go to the closest candidates first — continuous
+    // by distance, not a binary near/far split, so even among "far" tiles
+    // the closest still refines first when there's spare budget.
+    const priority = Number.isFinite(distanceInTileWidths)
+        ? -distanceInTileWidths
+        : 0; // unknown camera context (e.g. cold start) — neutral, not pushed to the back
+
+    const request = this._refinementQueue.request(key, priority, async () => {
+        const now = performance.now();
+        telemetry.queueTime = now;
+        telemetry.generationStart = now;
+        this._tileState.set(key, 'REFINING');
+
+        // A tile can go irrelevant (camera moved on) while sitting in the
+        // refinement queue. It's still resident (ancestor-fallback-quality,
+        // via its geometry), so there's no correctness issue — just don't
+        // spend GPU time refining something nobody's looking at right now.
+        //
+        // NOT re-queued unconditionally here (that caused a confirmed
+        // livelock before — see _refinementVisibleDropRetryMap's comment in
+        // the constructor). Instead, added to a separate retry map that
+        // _retryVisibleDroppedRefinements() only acts on once the tile is
+        // STRICTLY visible again — cheap to recheck repeatedly, and only
+        // consumes a real refinement queue slot for the much smaller
+        // currently-visible subset, which is what actually needs healing
+        // (a tile stuck resident-but-never-refined forever after the camera
+        // settles on it — confirmed via debug mode 102 + idle telemetry).
+        if (!this._describeTileDemandState(tileAddr, key).relevant) {
+            this._telemetryByKey.delete(key);
+            // Instrumentation (2026-10-01): counts refinement drops by tile
+            // depth, to test whether LOD4-depth tiles are disproportionately
+            // dropped here before ever completing refinement — the leading
+            // hypothesis for why resolvedColor reads as permanently invalid
+            // (alpha<0.5) on LOD4 (confirmed via debug mode 102: LOD4 forced
+            // through LOD5's exact resolvedColor path still always falls
+            // back, everywhere, not just at the seam). See consumePressureWindow().
+            this._parkStaleRefinement(tileAddr, key);
+            return false;
+        }
+        // The camera may have moved away since this was queued.
+        if (!this._refinementChangesPixels(tileAddr)) {
+            this._telemetryByKey.delete(key);
+            this._deferRefinement(key, tileAddr);
+            return false;
+        }
+
+        try {
+            // Reuse the resident layer's height/tile ids as inputs when its
+            // geometry copy has been submitted (queue order then guarantees
+            // the refinement reads the finished data).
+            const residentInfo = this._tileInfo.get(key);
+            const geometrySource = (this._reuseResidentGeometryForRefinement && residentInfo?.geometryInLayer)
+                ? { arrayPool: this.arrayPool, layer: residentInfo.layer }
+                : null;
+            const carveVersion = this._terrainCarveVersion();
+            // Reusing the layer's geometry: its terrain version is the input's.
+            const inputVersion = geometrySource ? (residentInfo.carveVersion ?? carveVersion) : carveVersion;
+            const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, refinementTypes, geometrySource);
+            if (Number.isFinite(telemetry.computeSubmitted)) {
+                this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
+            }
+            if (!this._tileInfo.has(key)) {
+                // Evicted while refinement was generating.
+                this._destroyGeneratedTextures(textures);
+                this._telemetryByKey.delete(key);
+                return false;
+            }
+            const committed = this._commitRefinement(tileAddr, textures, telemetry);
+            this._tileState.set(key, committed ? 'REFINED' : 'RESIDENT');
+            // Refined from (or across) a terrain the river carve changed since.
+            if (committed && (this._terrainCarveChangedSince(tileAddr, inputVersion) || this._terrainCarveChangedSince(tileAddr, carveVersion))) {
+                this._queueRegeneration(tileAddr);
+            }
+            return committed;
+        } catch (error) {
+            this._telemetryByKey.delete(key);
+            this._tileState.set(key, 'RESIDENT');
+            throw error;
+        }
+    });
+    if (request === null) {
+        // AsyncGenerationQueue.request() returns null when the refinement
+        // queue is at capacity (maxQueueSize). Previously this just counted
+        // the rejection and moved on — nothing ever asked again, so a tile
+        // unlucky enough to arrive during a full queue stayed resident with
+        // its material permanently zero-filled (black terrain, confirmed via
+        // debug-mode elimination: geometry/normals/lighting all proved
+        // correct, only baseColor was ever wrong, and only for tiles stuck
+        // at _tileState 'RESIDENT' with no path back to 'REFINING'). Queue
+        // it for retry instead of abandoning it.
+        this._telemetryByKey.delete(key);
+        this._refinementRejectWindowCount++;
+        this._refinementRetryMap.set(key, tileAddr);
+    }
+}
+
+// Park before admission whenever possible: obsolete refinements must not
+// consume a start slot or occupy a saturated queue. The visibility readback
+// re-offers them when the player looks at their resident tile again.
+_parkStaleRefinement(tileAddr, key) {
+    this._tileState.set(key, 'RESIDENT');
+    this._refinementVisibleDropRetryMap.set(key, tileAddr);
+    this._refinementDropByDepthWindow.set(
+        tileAddr.depth,
+        (this._refinementDropByDepthWindow.get(tileAddr.depth) || 0) + 1
+    );
+}
+
+// Tiles whose refinement request was dropped because the queue was at
+// capacity (AsyncGenerationQueue.request() returned null) get one more
+// chance each tick instead of staying resident with unrefined (zero-filled)
+// material forever. Bounded per tick so a large backlog drains gradually
+// rather than flooding _refinementQueue back to capacity in one frame; a
+// still-evicted tile is simply dropped (checked via _tileInfo, same as
+// _queueRefinement's own entry guard) rather than retried indefinitely.
+// Unconditional (no visibility filter) — queue-full is a capacity problem,
+// not correlated with visibility, so there's no livelock risk here the way
+// there is for the "not relevant" case (see _retryVisibleDroppedRefinements).
+_retryDroppedRefinements() {
+    if (this._refinementRetryMap.size === 0) return;
+    const maxRetriesPerTick = 16;
+    let attempted = 0;
+    for (const [key, tileAddr] of this._refinementRetryMap) {
+        if (attempted >= maxRetriesPerTick) break;
+        this._refinementRetryMap.delete(key);
+        attempted++;
+        if (!this._tileInfo.has(key)) continue; // evicted since — nothing left to refine
+        this._queueRefinement(tileAddr);
+    }
+}
+
+// Tiles whose refinement request was dropped because they were no longer
+// "relevant" at dequeue time (see _queueRefinement's !relevant branch).
+// Unlike _retryDroppedRefinements above, this CANNOT unconditionally
+// re-queue every entry — most resident tiles are "relevant" via ancestor/
+// descendant leniency at any given moment (far outnumbering strictly-visible
+// ones), so doing that reintroduced a confirmed livelock (frozen refinement
+// throughput, proven via telemetry, not guessed).
+//
+// Instead: the demand-state check itself is cheap (no GPU/queue involved),
+// so it's fine to recheck every entry every tick. Only entries that are
+// STRICTLY visible right now (demand reason === 'visible', not merely
+// ancestor/descendant-relevant) actually get pushed back into
+// _queueRefinement — the one operation that consumes real refinement
+// throughput. Everything else is left in the map for a future tick's
+// recheck rather than being retried or dropped outright, so a tile that
+// becomes visible later still eventually heals. Evicted tiles are removed.
+// No per-tick cap on re-queues: in steady state only a handful of tiles are
+// ever newly-visible-and-unrefined at once, so this doesn't reproduce the
+// livelock's "flood the queue every tick" failure mode.
+_retryVisibleDroppedRefinements() {
+    if (this._refinementVisibleDropRetryMap.size === 0) return;
+    // Indexed mode re-queues from the visibility readback instead
+    // (_requeueParkedRefinementsOnReadback), so nothing scans this map per
+    // frame; evicted entries are removed in _evictTile.
+    if (this._flags.indexedVisibility) return;
+    for (const [key, tileAddr] of this._refinementVisibleDropRetryMap) {
+        if (!this._tileInfo.has(key)) {
+            this._refinementVisibleDropRetryMap.delete(key);
+            continue; // evicted since — nothing left to refine
+        }
+        if (this._describeTileDemandState(tileAddr, key).reason !== 'visible') {
+            continue; // still not strictly visible — recheck next tick
+        }
+        this._refinementVisibleDropRetryMap.delete(key);
+        this._queueRefinement(tileAddr);
+    }
+}
+
+// Writes refinement-stage textures (splat/climate/scatter/...) into a tile's
+// *existing* array-pool layer — no new layer allocation, no hash-table
+// change, since the tile is already resident from its geometry commit.
+_commitRefinement(tileAddr, textures, telemetry = null) {
+    const key = tileAddr.toString();
+    const info = this._tileInfo.get(key);
+    if (!info || !this.arrayPool) {
+        this._destroyGeneratedTextures(textures);
+        return false;
+    }
+
+    // Not zero-fill here: this commit only ever carries refinement types,
+    // and the geometry types in the same layer are already correct from
+    // the initial commit — copying only what's present (the existing,
+    // non-zero-fill queueCopyToLayer behavior) is exactly right.
+    // A flat-tier tile's refinement carries no detail material, so it never
+    // makes the layer a valid material source for detail tiers.
+    const solidTier = this._isSolidTierDepth(tileAddr.depth);
+    this.arrayPool.queueCopyToLayer(textures, info.layer, { completesMaterial: !solidTier });
+    if (telemetry) {
+        telemetry.copySubmitted = performance.now();
+        telemetry.residentTime = performance.now();
+    }
+    info.lastUsed = performance.now();
+
+    if (this._assetCommitQueuesEnabled && this._refinementTypesFor(tileAddr).includes('scatter')) {
+        this._scatterCommitQueue.push({
+            face: tileAddr.face, depth: tileAddr.depth,
+            x: tileAddr.x, y: tileAddr.y, layer: info.layer,
+        });
+    }
+    return true;
+}
+
     _selectEvictionCandidate() {
         let bestKey = null, bestScore = -Infinity;
         const now = performance.now();
@@ -1529,22 +2754,29 @@ async _commitTile(tileAddr, textures) {
         return bestKey;
     }
 
-// In TileStreamer, add a Set to track tiles from the most recent readback
+// Called once per visibility readback with the visible tile list. Keeps
+// eviction protection, LRU stamps and the visibility index current, and
+// re-queues refinements that were parked until their tile became visible
+// (or, for deferred ones, came within the flat-tier fade).
 markTilesVisible(tiles) {
 
     if (!tiles || tiles.length === 0) return;
     const now = performance.now();
-        // Store full tile list for fallback analysis
-        this._lastVisibleTilesList = tiles;
-        this._lastVisibleReadbackTime = now;
-    
-        
-    // NEW: Build a fast lookup of what was visible in this readback
+    const diagnostics = this._flags.diagnostics === true;
+    this._lastVisibleTilesList = tiles;
+    this._lastVisibleReadbackTime = now;
+    this._visibilityIndex.rebuild(tiles);
+    this._generationQueue.invalidateReplacementCandidates();
+
     if (!this._lastVisibleKeySet) this._lastVisibleKeySet = new Set();
     this._lastVisibleKeySet.clear();
     this._protectedKeys.clear();
-    this._lastVisibleReadbackTime = now;
-    
+    // Refinements parked while their tile was not visible (stale at dequeue)
+    // that are visible now. Collected here, re-queued once bookkeeping is done.
+    const parkedNowVisible = [];
+    const requeueFromReadback = this._flags.indexedVisibility &&
+        this._refinementVisibleDropRetryMap.size > 0;
+
     for (const tile of tiles) {
         const visibleKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
         this._lastVisibleKeySet.add(visibleKey);
@@ -1552,6 +2784,10 @@ markTilesVisible(tiles) {
         // Protect the visible tile itself if resident.
         if (this._tileInfo.has(visibleKey)) {
             this._protectedKeys.add(visibleKey);
+        }
+        if (requeueFromReadback) {
+            const parked = this._refinementVisibleDropRetryMap.get(visibleKey);
+            if (parked) parkedNowVisible.push([visibleKey, parked]);
         }
 
         // Protect the nearest loaded ancestor currently acting as fallback.
@@ -1568,35 +2804,160 @@ markTilesVisible(tiles) {
             break;
         }
     }
-    
-    // H2: Track LOD boundary oscillation — tiles entering/exiting visible set
+
+    // Tiles newly entering the visible set this readback are exactly the
+    // "newlyVisibleTiles" denominator for request amplification (plan §0.2).
     if (!this._prevVisibleKeySet) this._prevVisibleKeySet = new Set();
+    let entered = 0;
+    for (const key of this._lastVisibleKeySet) {
+        if (!this._prevVisibleKeySet.has(key)) entered++;
+    }
+    this._newlyVisibleTilesWindowCount += entered;
+    if (diagnostics) {
+        this._logVisibilityOscillation();
+        this._logPooledDepth3Visibility();
+    }
+    this._prevVisibleKeySet = new Set(this._lastVisibleKeySet);
 
-    let entered = 0, exited = 0;
+    let residentVisible = 0;
+    let ownVisibleNotReady = 0;
+    let fallbackVisible = 0;
+    let fallbackVisibleNotReady = 0;
+    const nonReadySamples = [];
+
+    for (const tile of tiles) {
+        const visibleKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
+        const residentInfo = this._tileInfo.get(visibleKey);
+        if (residentInfo) {
+            residentVisible++;
+            const state = this._debugCopyStateByLayer.get(residentInfo.layer);
+            if (state && state.state !== 'ready') {
+                ownVisibleNotReady++;
+                if (diagnostics && nonReadySamples.length < 8) {
+                    nonReadySamples.push(
+                        `own f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${residentInfo.layer}:${state.state}`
+                    );
+                }
+            }
+            continue;
+        }
+
+        let depth = tile.depth;
+        let x = tile.x;
+        let y = tile.y;
+        while (depth > 0) {
+            depth--;
+            x >>= 1;
+            y >>= 1;
+            const ancestorKey = this._makeKey(tile.face, depth, x, y);
+            const ancestorInfo = this._tileInfo.get(ancestorKey);
+            if (!ancestorInfo) continue;
+            fallbackVisible++;
+            const state = this._debugCopyStateByLayer.get(ancestorInfo.layer);
+            if (state && state.state !== 'ready') {
+                fallbackVisibleNotReady++;
+                if (diagnostics && nonReadySamples.length < 8) {
+                    nonReadySamples.push(
+                        `fallback f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${ancestorInfo.layer}:${state.state}`
+                    );
+                }
+            }
+            break;
+        }
+    }
+
+    this._lastCopyVisibilitySummary = {
+        totalVisible: tiles.length,
+        residentVisible,
+        ownVisibleNotReady,
+        fallbackVisible,
+        fallbackVisibleNotReady,
+        samples: nonReadySamples,
+        timestamp: now
+    };
+
+    // The first few readbacks always log (startup); after that only with
+    // diagnostics on, since copies are routinely in flight while streaming.
+    if (
+        this._debugVisibleCopyLogCount < 8 ||
+        (diagnostics && (ownVisibleNotReady > 0 || fallbackVisibleNotReady > 0))
+    ) {
+        this._debugVisibleCopyLogCount++;
+        Logger.info(
+            `${TERRAIN_STEP_LOG_TAG} [QTCommit] visible-copy-state total=${tiles.length} ` +
+            `resident=${residentVisible} ownNotReady=${ownVisibleNotReady} ` +
+            `fallbackVisible=${fallbackVisible} fallbackNotReady=${fallbackVisibleNotReady}` +
+            `${nonReadySamples.length ? ` samples=${nonReadySamples.join(' ; ')}` : ''}`
+        );
+    }
+
+    // LRU stamp for every visible tile and all of its resident ancestors.
+    // Visible tiles share most of their ancestors, so each chain stops at the
+    // first ancestor already visited this readback (the rest of that chain
+    // was stamped then): O(visible + unique ancestors), not O(visible × depth).
+    const visitedAncestors = this._lruVisitedScratch ?? (this._lruVisitedScratch = new Set());
+    visitedAncestors.clear();
+    for (const tile of tiles) {
+        let { face, depth, x, y } = tile;
+        let info = this._tileInfo.get(this._makeKey(face, depth, x, y));
+        if (info) info.lastUsed = now;
+        while (depth > 0) {
+            depth--; x >>= 1; y >>= 1;
+            const ancestorKey = this._makeKey(face, depth, x, y);
+            if (visitedAncestors.has(ancestorKey)) break;
+            visitedAncestors.add(ancestorKey);
+            info = this._tileInfo.get(ancestorKey);
+            if (info) info.lastUsed = now;
+        }
+    }
+
+    for (const [key, tileAddr] of parkedNowVisible) {
+        this._refinementVisibleDropRetryMap.delete(key);
+        if (this._tileInfo.has(key)) this._queueRefinement(tileAddr);
+    }
+    this._requeueDeferredRefinements();
+}
+
+// Deferred refinements (flat color covered every pixel) whose tile may now
+// show detail: re-queue them. O(deferred), each check O(1); the map holds
+// only resident tiles and is small (detail tiles past the fade end).
+_requeueDeferredRefinements() {
+    if (this._refinementDeferredMap.size === 0) return;
+    for (const [key, tileAddr] of this._refinementDeferredMap) {
+        if (!this._tileInfo.has(key)) {
+            this._refinementDeferredMap.delete(key);
+            continue;
+        }
+        if (!this._refinementChangesPixels(tileAddr)) continue;
+        this._refinementDeferredMap.delete(key);
+        this._tileState.set(key, 'RESIDENT');
+        this._queueRefinement(tileAddr);
+    }
+}
+
+// Diagnostics only (streamerFlags.diagnostics): tiles that left the visible
+// set and came back within 500 ms, logged every 10 readbacks.
+_logVisibilityOscillation() {
+    const now = performance.now();
+    let entered = 0;
+    let exited = 0;
     const oscillating = [];
-
+    if (!this._recentlyExitedKeys) this._recentlyExitedKeys = new Map();
     for (const key of this._prevVisibleKeySet) {
         if (!this._lastVisibleKeySet.has(key)) {
             exited++;
-            if (!this._recentlyExitedKeys) this._recentlyExitedKeys = new Map();
-            this._recentlyExitedKeys.set(key, performance.now());
+            this._recentlyExitedKeys.set(key, now);
         }
     }
     for (const key of this._lastVisibleKeySet) {
         if (!this._prevVisibleKeySet.has(key)) {
             entered++;
-            if (this._recentlyExitedKeys?.has(key)) {
-                oscillating.push(key);
-            }
+            if (this._recentlyExitedKeys.has(key)) oscillating.push(key);
         }
     }
-
-    // Prune old recently-exited entries (keep last 5 readbacks worth ~ 500ms)
-    if (this._recentlyExitedKeys) {
-        const cutoff = performance.now() - 500;
-        for (const [k, t] of this._recentlyExitedKeys) {
-            if (t < cutoff) this._recentlyExitedKeys.delete(k);
-        }
+    const cutoff = now - 500;
+    for (const [k, t] of this._recentlyExitedKeys) {
+        if (t < cutoff) this._recentlyExitedKeys.delete(k);
     }
 
     if (!this._oscillationStats) {
@@ -1627,109 +2988,22 @@ markTilesVisible(tiles) {
         }
         this._oscillationStats = { readbacks: 0, totalEntered: 0, totalExited: 0, totalOscillating: 0 };
     }
+}
 
-    this._prevVisibleKeySet = new Set(this._lastVisibleKeySet);
-
-    // NEW: Count how many pooled d3 tiles are currently visible
+// Diagnostics only: how many pooled depth-3 tiles are in the readback.
+_logPooledDepth3Visibility() {
     let d3Total = 0, d3Visible = 0;
     for (const [key, info] of this._tileInfo) {
         if (info.depth !== 3) continue;
         d3Total++;
         if (this._lastVisibleKeySet.has(key)) d3Visible++;
     }
-
-
     if (d3Total > 0) {
         Logger.info(
             `[QT-VisMarkD3] depth=3 in pool: ${d3Total}, ` +
             `in visible readback: ${d3Visible}, ` +
             `NOT in readback: ${d3Total - d3Visible}`
         );
-    }
-
-    let residentVisible = 0;
-    let ownVisibleNotReady = 0;
-    let fallbackVisible = 0;
-    let fallbackVisibleNotReady = 0;
-    const nonReadySamples = [];
-
-    for (const tile of tiles) {
-        const visibleKey = this._makeKey(tile.face, tile.depth, tile.x, tile.y);
-        const residentInfo = this._tileInfo.get(visibleKey);
-        if (residentInfo) {
-            residentVisible++;
-            const state = this._debugCopyStateByLayer.get(residentInfo.layer);
-            if (state && state.state !== 'ready') {
-                ownVisibleNotReady++;
-                if (nonReadySamples.length < 8) {
-                    nonReadySamples.push(
-                        `own f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${residentInfo.layer}:${state.state}`
-                    );
-                }
-            }
-            continue;
-        }
-
-        let depth = tile.depth;
-        let x = tile.x;
-        let y = tile.y;
-        while (depth > 0) {
-            depth--;
-            x >>= 1;
-            y >>= 1;
-            const ancestorKey = this._makeKey(tile.face, depth, x, y);
-            const ancestorInfo = this._tileInfo.get(ancestorKey);
-            if (!ancestorInfo) continue;
-            fallbackVisible++;
-            const state = this._debugCopyStateByLayer.get(ancestorInfo.layer);
-            if (state && state.state !== 'ready') {
-                fallbackVisibleNotReady++;
-                if (nonReadySamples.length < 8) {
-                    nonReadySamples.push(
-                        `fallback f${tile.face}:d${tile.depth}:${tile.x},${tile.y}->L${ancestorInfo.layer}:${state.state}`
-                    );
-                }
-            }
-            break;
-        }
-    }
-
-    this._lastCopyVisibilitySummary = {
-        totalVisible: tiles.length,
-        residentVisible,
-        ownVisibleNotReady,
-        fallbackVisible,
-        fallbackVisibleNotReady,
-        samples: nonReadySamples,
-        timestamp: now
-    };
-
-    if (
-        ownVisibleNotReady > 0 ||
-        fallbackVisibleNotReady > 0 ||
-        this._debugVisibleCopyLogCount < 8
-    ) {
-        this._debugVisibleCopyLogCount++;
-        Logger.info(
-            `${TERRAIN_STEP_LOG_TAG} [QTCommit] visible-copy-state total=${tiles.length} ` +
-            `resident=${residentVisible} ownNotReady=${ownVisibleNotReady} ` +
-            `fallbackVisible=${fallbackVisible} fallbackNotReady=${fallbackVisibleNotReady}` +
-            `${nonReadySamples.length ? ` samples=${nonReadySamples.join(' ; ')}` : ''}`
-        );
-    }
-
-    // ... existing lastUsed update logic unchanged ...
-    for (const tile of tiles) {
-        let { face, depth, x, y } = tile;
-        let key = this._makeKey(face, depth, x, y);
-        let info = this._tileInfo.get(key);
-        if (info) info.lastUsed = now;
-        while (depth > 0) {
-            depth--; x >>= 1; y >>= 1;
-            key = this._makeKey(face, depth, x, y);
-            info = this._tileInfo.get(key);
-            if (info) info.lastUsed = now;
-        }
     }
 }
 
@@ -1875,7 +3149,20 @@ markTilesVisible(tiles) {
         this._requestTimestamps.delete(key);
     }
 
+    // Is this tile visible, an ancestor or descendant of a visible tile, or
+    // stale, as of the last visibility readback? Indexed mode answers in
+    // O(depth); the scan below is O(visible × depth) and is kept as the
+    // indexedVisibility=false fallback and as the reference the index's
+    // tests compare against.
     _describeTileDemandState(tileAddr, key = tileAddr?.toString?.()) {
+        if (this._flags.indexedVisibility) {
+            if (!tileAddr) return { relevant: true, reason: 'unknown' };
+            return this._visibilityIndex.describe(tileAddr.face, tileAddr.depth, tileAddr.x, tileAddr.y);
+        }
+        return this._describeTileDemandStateScan(tileAddr, key);
+    }
+
+    _describeTileDemandStateScan(tileAddr, key = tileAddr?.toString?.()) {
         if (!tileAddr || !this._lastVisibleKeySet || !this._lastVisibleTilesList) {
             return { relevant: true, reason: 'unknown' };
         }
@@ -1934,6 +3221,7 @@ markTilesVisible(tiles) {
         const queueRejected = this._queueRejectWindowCount;
  
         const queueDropped = this._generationQueue.consumeDroppedCount();
+        const queueReplaced = this._generationQueue.consumeReplacedCount();
 
         this._requestLatencyWindow = createRequestLatencyWindow();
         this._staleStartWindow = createStaleStartWindow();
@@ -1959,6 +3247,57 @@ markTilesVisible(tiles) {
         this._minFreeLayersSinceLog = Number.POSITIVE_INFINITY;
         this._recordPoolHeadroom();
 
+        // ── Phase 0 additions: candidate-cause breakdown (plan §0.2-0.4) ──
+        const stageLatency = {
+            queueWait: this._stageLatency.queueWait.consume(),
+            startToSubmit: this._stageLatency.startToSubmit.consume(),
+            submitToFence: this._stageLatency.submitToFence.consume(),
+            requestToResident: this._stageLatency.requestToResident.consume()
+        };
+        const requestedTiles = this._requestedTilesWindowCount;
+        const newlyVisibleTiles = this._newlyVisibleTilesWindowCount;
+        const requestAmplification = newlyVisibleTiles > 0
+            ? requestedTiles / newlyVisibleTiles
+            : null;
+        const wastedGenerations = this._wastedGenerationsWindowCount;
+        const computeSubmissions = this.tileGenerator?.consumeSubmissionCount?.() ?? 0;
+        const copyOperations = this._copyOperationsWindowCount;
+        const generationQueueDepth = this._generationQueue.queue.length;
+        const generationQueueActive = this._generationQueue.active;
+        const pendingCopyCount = this.arrayPool?._pendingCopies?.length ?? 0;
+        const tilePoolUsed = this._tileInfo.size;
+        const tilePoolCapacity = this.tilePoolSize;
+        const tilePoolFree = this.arrayPool?.freeLayers?.length ?? null;
+
+        // Phase 2: background refinement pressure, separate from geometry
+        // admission above (plan §2/§1.2 — refinement is always subordinate).
+        const refinementQueueDepth = this._refinementQueue.queue.length;
+        const refinementQueueActive = this._refinementQueue.active;
+        const refinementDropped = this._refinementQueue.consumeDroppedCount();
+        const refinementRejected = this._refinementRejectWindowCount;
+        let tileStateCounts = null;
+        for (const state of this._tileState.values()) {
+            if (!tileStateCounts) tileStateCounts = {};
+            tileStateCounts[state] = (tileStateCounts[state] ?? 0) + 1;
+        }
+
+        this._requestedTilesWindowCount = 0;
+        this._newlyVisibleTilesWindowCount = 0;
+        this._wastedGenerationsWindowCount = 0;
+        this._copyOperationsWindowCount = 0;
+        this._refinementRejectWindowCount = 0;
+
+        // Instrumentation (2026-10-01): refinement jobs dropped as "not
+        // relevant" at dequeue, broken out by tile depth — tests whether
+        // LOD4-depth tiles are disproportionately starved of refinement
+        // (leading hypothesis for resolvedColor reading as permanently
+        // invalid on LOD4; see the drop site in _queueRefinement).
+        const refinementDroppedByDepth = {};
+        for (const [depth, count] of this._refinementDropByDepthWindow) {
+            refinementDroppedByDepth[depth] = count;
+        }
+        this._refinementDropByDepthWindow.clear();
+
         return {
             requestLatency,
             staleStarts,
@@ -1966,10 +3305,41 @@ markTilesVisible(tiles) {
             commits,
             queueRejected,
             queueDropped,
+            queueReplaced,
+            generationQueueCapacity: this._generationQueue.maxQueueSize,
             minFreeLayers,
             gpuBackpressureSkips,
             tilesStarted,
-            gpuFencesMax
+            gpuFencesMax,
+            stageLatency,
+            requestedTiles,
+            newlyVisibleTiles,
+            requestAmplification,
+            wastedGenerations,
+            computeSubmissions,
+            copyOperations,
+            generationQueueDepth,
+            generationQueueActive,
+            pendingCopyCount,
+            tilePoolUsed,
+            tilePoolCapacity,
+            tilePoolFree,
+            refinementQueueDepth,
+            refinementQueueActive,
+            refinementDropped,
+            refinementRejected,
+            refinementDroppedByDepth,
+            // Instrumentation (2026-10-01): direct visibility into whether
+            // _retryVisibleDroppedRefinements is doing anything. Always
+            // present (not just when nonzero), unlike refinementDroppedByDepth,
+            // specifically so we can see it SHRINK over time (healing working)
+            // vs stay flat/grow (not working) rather than just knowing it's
+            // nonzero at one instant.
+            refinementVisibleDropRetryMapSize: this._refinementVisibleDropRetryMap.size,
+            // Resident detail tiles whose refinement waits because the flat
+            // tier covers all their pixels (skipRefinementBeyondFlatFade).
+            refinementDeferredCount: this._refinementDeferredMap.size,
+            tileStateCounts
         };
     }
 
@@ -2453,6 +3823,7 @@ markTilesVisible(tiles) {
             state.state = 'failed';
             state.batchId = batchId;
         }
+        if(gpuDeviceLoss(this.device))return;
         Logger.warn(
             `${TERRAIN_STEP_LOG_TAG} [QTCommit] copy fence failed batch=${batchId} copies=${flushedCopies.length}`
         );

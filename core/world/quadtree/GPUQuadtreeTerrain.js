@@ -6,7 +6,9 @@
 //
 // Rendering is handled by renderer/terrain/QuadtreeTerrainRenderer.
 
-import { QuadtreeGPU } from './QuadtreeGPU.js';
+// Regional traversal requires the matching quadtree API. A versioned import
+// prevents an older browser-cached module from being mixed with this manager.
+import { QuadtreeGPU } from './QuadtreeGPU.js?regionalTerrainApi=1';
 import { TileStreamer } from './tileStreamer.js';
 import { TileAddress } from './tileAddress.js';
 import { TerrainGeometryBuilder } from '../../renderer/terrain/geometry/terrainGeometryBuilder.js';
@@ -33,6 +35,8 @@ export class QuadtreeTileManager {
         this.planetConfig = options.planetConfig || null;
         this.terrainGenerator = options.terrainGenerator || null;
         this.textureManager = options.textureManager || null;
+        this.tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : null;
+        this.terrainAODefaults = options.terrainAODefaults ?? null;
         this._initialized = false;
         this._maxGeomLOD = 14;
 
@@ -138,6 +142,8 @@ export class QuadtreeTileManager {
 
         this.quadtreeGPU = new QuadtreeGPU(this.device, {
             maxHeightDisplacement: maxHeightDisplacement,
+            regionalTerrain: this.terrainGenerator?.regionalTerrainActive ? this.terrainGenerator.regionalTerrain : null,
+            regionalShapeLod:qt.regionalShapeLod,
             planetRadius: planetRadius,
             planetOrigin: planetOrigin,
             minTileSize: qt.minTileSizeMeters,
@@ -171,10 +177,58 @@ export class QuadtreeTileManager {
             terrainShaderConfig.resolvedColorEnabled !== false &&
             resolvedColorStartLod >= 0 &&
             hasResolvedColorInputs;
-        const requiredTypes = ['height', 'normal', 'tile', 'splatData', 'scatter', 'climate'];
+        // scatter and climate feed only the asset streamer (trees, ground
+        // cover, AO and ground-field bakes). With features.streamedAssets
+        // off nothing reads them, so they are neither generated nor given
+        // pool layers (and flat-tier tiles then need no refinement at all).
+        const streamedAssetsEnabled = this.engineConfig?.features?.streamedAssets !== false;
+        const requiredTypes = streamedAssetsEnabled
+            ? ['height', 'normal', 'tile', 'splatData', 'scatter', 'climate']
+            : ['height', 'normal', 'tile', 'splatData'];
         if (enableResolvedColor) {
             requiredTypes.push('resolvedColor');
         }
+        // Baked flat-tier color: one mipmapped texel lookup in the terrain
+        // shader instead of a 64-sample average per pixel.
+        const enableCoarseColor =
+            terrainShaderConfig.solidColorTierEnabled === true &&
+            terrainShaderConfig.solidColorBakedTexture !== false &&
+            Array.isArray(this.tileCategories) && this.tileCategories.length > 0;
+        if (enableCoarseColor) {
+            requiredTypes.push('coarseColor');
+        }
+        // Refinement output is read by the terrain shader (splat / prebaked
+        // color, and the splat boundary in the terrain-AO block on LODs up to
+        // terrainAO.maxLod) and by the asset streamer (scatter, climate, and
+        // the ground field baked from them). Where the flat solid-tier color
+        // fully replaces a detail tile's material and nothing else reads it,
+        // the tile's refinement can wait until it comes within the fade
+        // (TileStreamer._refinementChangesPixels). null = never skip.
+        const flatTierRefinementSkip = (() => {
+            if (streamedAssetsEnabled) return null;
+            if (terrainShaderConfig.solidColorTierEnabled !== true ||
+                terrainShaderConfig.solidColorTierDistanceFadeEnabled !== true) {
+                return null;
+            }
+            // Same merge as TerrainMaterialBuilder (defaults, engine, planet).
+            const ao = {
+                ...(this.terrainAODefaults || {}),
+                ...(this.planetConfig?.engineConfig?.terrainAO || {}),
+                ...(this.planetConfig?.terrainAO || {})
+            };
+            const aoEnabled = ao.enabled ?? true;
+            const aoMaxLod = Number.isFinite(ao.maxLod) ? ao.maxLod : Infinity;
+            const minLod = aoEnabled ? aoMaxLod + 1 : 0;
+            const maxTerrainHeight = this.planetConfig?.maxTerrainHeight;
+            if (!Number.isFinite(minLod) || !Number.isFinite(maxTerrainHeight)) return null;
+            return {
+                shaderConfig: terrainShaderConfig,
+                minLod,
+                // Heights are soft-clamped to about -1.1 x maxTerrainHeight;
+                // 1.5 x keeps the nearest-pixel bound conservative.
+                minSurfaceRadius: planetRadius - 1.5 * maxTerrainHeight
+            };
+        })();
         const textureFormats = {
             height:    'r32float',
             normal:    'rgba8unorm',
@@ -185,6 +239,7 @@ export class QuadtreeTileManager {
             resolvedColor: 'rgba8unorm',
             scatter:   'r8unorm',
             climate:   'rgba8unorm',
+            coarseColor: 'rgba8unorm',
             ...(qt.textureFormats || {})
         };
         this.tileStreamer = new TileStreamer(
@@ -206,6 +261,23 @@ export class QuadtreeTileManager {
               feedbackReadbackInterval: qt.feedbackReadbackInterval,
               feedbackReadbackRingSize: qt.feedbackReadbackRingSize,
               gpuBackpressureLimit: qt.gpuBackpressureLimit ?? 4,   // NEW
+              preferCompleteMaterialLayers: qt.preferCompleteMaterialLayers !== false,
+              streamerFlags: qt.streamerFlags,
+              flatTierRefinementSkip,
+              // AO / scatter commit queues are drained only by the asset
+              // streamer; without it they would grow forever.
+              assetCommitQueuesEnabled: streamedAssetsEnabled,
+              tileCategories: this.tileCategories,
+              coarseColorWindowMeters: terrainShaderConfig.solidColorAverageWindowMeters ?? 0,
+              coarseColorFaceSizeMeters: 2 * (this.planetConfig?.radius ?? 0),
+              // Flat solid-color tier start: those tiles skip the splat and
+              // prebaked-color refinement outputs they never draw.
+              solidTierStartLod: (() => {
+                  const ts = this.engineConfig?.rendering?.terrainShader;
+                  if (qt.solidTierSkipsDetailMaterial === false) return null;
+                  if (ts?.solidColorTierEnabled !== true) return null;
+                  return Number.isFinite(ts?.solidColorStartLod) ? ts.solidColorStartLod : null;
+              })(),
               logStats: qt.logStats === true
           }
       );
@@ -267,6 +339,20 @@ export class QuadtreeTileManager {
         this._prevFrameTime = now;
     }
 
+    // Feeds the streamer's Phase 0 telemetry (SphereCraft_Optimization_
+    // Implementation_Plan.md §0.1) with the same raw camera velocity
+    // _updateAdaptiveLodScale just computed, so per-request
+    // distanceToCamera/velocityAlignment can be estimated without
+    // TileStreamer needing its own camera or planetConfig reference.
+    _syncTileStreamerCameraContext(camera) {
+        if (!this.tileStreamer?.setCameraContext || !camera?.position) return;
+        this.tileStreamer.setCameraContext({
+            position: camera.position,
+            velocity: this._rawCamVelocity ?? null,
+            planetConfig: this.planetConfig
+        });
+    }
+
     // ── Predictive tile streaming ────────────────────────────────────────────
     //
     // Each frame, extrapolates the camera position forward along its
@@ -316,19 +402,33 @@ export class QuadtreeTileManager {
         const predY = pos.y + ps.smoothVelY * lookAheadSec;
         const predZ = pos.z + ps.smoothVelZ * lookAheadSec;
 
-        // ── 3. Map predicted position → face + tile UV ───────────────
-        // Inline sphereToCube: normalize the direction from planet origin,
-        // then project onto the dominant cube face (same math as
-        // CubeSphereCoords.sphereToCube / worldPositionToFaceUV).
+        this._queueDepthRangeAtWorldPosition(
+            { x: predX, y: predY, z: predZ },
+            {
+                depthMin: cfg.depthMin ?? 4,
+                depthMax: cfg.depthMax ?? 11,
+                neighborRadiusCoarse: cfg.neighborRadiusCoarse ?? (cfg.neighborRadius ?? 4),
+            }
+        );
+    }
+
+    // ── Shared world-position → face/tileUV projection ────────────────────────
+    //
+    // Inline sphereToCube: normalize the direction from planet origin, then
+    // project onto the dominant cube face (same math as
+    // CubeSphereCoords.sphereToCube / worldPositionToFaceUV). Shared by
+    // _updatePredictiveStreaming (predicted position) and prewarmWorldPosition
+    // (a fixed, caller-supplied position, e.g. a walking-skeleton demo POI).
+    _worldPositionToFaceTileUV(worldPos) {
         const originX = this.planetConfig?.origin?.x ?? 0;
         const originY = this.planetConfig?.origin?.y ?? 0;
         const originZ = this.planetConfig?.origin?.z ?? 0;
-        const relX = predX - originX;
-        const relY = predY - originY;
-        const relZ = predZ - originZ;
+        const relX = worldPos.x - originX;
+        const relY = worldPos.y - originY;
+        const relZ = worldPos.z - originZ;
 
         const len = Math.hypot(relX, relY, relZ);
-        if (len < 1e-10) return;
+        if (len < 1e-10) return null;
         const nx = relX / len, ny = relY / len, nz = relZ / len;
 
         const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
@@ -354,28 +454,29 @@ export class QuadtreeTileManager {
         }
 
         // Cube UV in [-1, 1] → tile UV in [0, 1] (matches TileAddress.fromFaceUV)
-        const tileU = (cubeU + 1) * 0.5;
-        const tileV = (cubeV + 1) * 0.5;
+        return { face, tileU: (cubeU + 1) * 0.5, tileV: (cubeV + 1) * 0.5 };
+    }
 
-        // ── 4. Queue tiles at each depth in the configured range ─────
-        //
-        // Neighbor radius shrinks with depth so the queued world-space
-        // footprint stays roughly constant across LOD levels.  At the
-        // coarsest depth we use neighborRadiusCoarse (default 4 → 9×9);
-        // each extra level halves the radius because tiles are half the size.
-        //   radius(d) = max(1, round(radiusCoarse / 2^(d - depthMin)))
-        // Example (depthMin=4, coarse=4):
-        //   depth 4 → 4  (9×9 — wide frustum sweep)
-        //   depth 6 → 1  (3×3)
-        //   depth 8+ → 1
+    // ── Shared multi-depth tile queuing ────────────────────────────────────────
+    //
+    // Queues tiles at each depth in [depthMin, depthMax] within a shrinking
+    // neighbor radius around (tileU, tileV) on the given face. Neighbor radius
+    // shrinks with depth so the queued world-space footprint stays roughly
+    // constant across LOD levels. At the coarsest depth we use
+    // neighborRadiusCoarse (default 4 → 9×9); each extra level halves the
+    // radius because tiles are half the size.
+    //   radius(d) = max(1, round(radiusCoarse / 2^(d - depthMin)))
+    // Example (depthMin=4, coarse=4):
+    //   depth 4 → 4  (9×9 — wide frustum sweep)
+    //   depth 6 → 1  (3×3)
+    //   depth 8+ → 1
+    _queueDepthRangeAtFaceUV(face, tileU, tileV, depthMin, depthMax, radiusCoarse, { prewarm = false } = {}) {
+        const maxDepth = this.quadtreeGPU.maxDepth;
+        depthMin = Math.min(depthMin, maxDepth);
+        depthMax = Math.min(depthMax, maxDepth);
 
-        const maxDepth     = this.quadtreeGPU.maxDepth;
-        const depthMin     = Math.min(cfg.depthMin         ?? 4,  maxDepth);
-        const depthMax     = Math.min(cfg.depthMax         ?? 11, maxDepth);
-        const radiusCoarse = cfg.neighborRadiusCoarse ?? (cfg.neighborRadius ?? 4);
-
-        const hashTable    = this.tileStreamer.hashTable;
-        const tileGenerator = this.tileStreamer.tileGenerator;
+        const hashTable      = this.tileStreamer.hashTable;
+        const tileGenerator  = this.tileStreamer.tileGenerator;
 
         for (let depth = depthMin; depth <= depthMax; depth++) {
             const gs = 1 << depth;
@@ -399,10 +500,50 @@ export class QuadtreeTileManager {
                     const addr = new TileAddress(face, depth, tx, ty);
                     if (tileGenerator.isGenerating(addr)) continue;
 
-                    this.tileStreamer._queueTile(addr);
+                    this.tileStreamer._queueTile(addr, { prewarm, reason: 'PREDICTIVE' });
                 }
             }
         }
+    }
+
+    _queueDepthRangeAtWorldPosition(worldPos, { depthMin, depthMax, neighborRadiusCoarse, prewarm = false }) {
+        const projected = this._worldPositionToFaceTileUV(worldPos);
+        if (!projected) return;
+        this._queueDepthRangeAtFaceUV(
+            projected.face, projected.tileU, projected.tileV,
+            depthMin, depthMax, neighborRadiusCoarse, { prewarm }
+        );
+    }
+
+    // ── Public: one-shot deep pre-warm at a fixed world position ──────────────
+    //
+    // Unlike _updatePredictiveStreaming (gated behind a minimum camera speed,
+    // since it exists to avoid pop-in ahead of a fast-moving ship), this
+    // queues the full [depthMin, depthMax] tile range around a caller-supplied
+    // world position immediately, regardless of camera speed. Intended for a
+    // stationary spawn placed directly on top of a fixed point of interest
+    // (e.g. the walking-skeleton demo river's carved channel, which needs
+    // near-max-depth residency to be visible at all) — a scenario the normal
+    // reactive/predictive streaming paths aren't tuned for, since they assume
+    // gradual approach rather than an instant teleport onto virgin terrain.
+    prewarmWorldPosition(worldPos, options = {}) {
+        if (!this.tileStreamer?.hashTable || !this.tileStreamer?.tileGenerator) return;
+        if (!this.quadtreeGPU) return;
+        const cfg = this.engineConfig?.gpuQuadtree?.predictiveStreaming ?? {};
+        const maxDepth = this.quadtreeGPU.maxDepth;
+        this._queueDepthRangeAtWorldPosition(worldPos, {
+            depthMin: options.depthMin ?? cfg.depthMin ?? 4,
+            depthMax: Math.min(options.depthMax ?? cfg.depthMax ?? 11, maxDepth),
+            neighborRadiusCoarse: options.neighborRadiusCoarse ?? cfg.neighborRadiusCoarse ?? cfg.neighborRadius ?? 4,
+            // Exempt from the generation queue's camera-feedback freshness
+            // drop (tileStreamer.js's shouldDrop): a one-shot prewarm never
+            // participates in the per-frame feedback path that normally
+            // keeps a queued tile's request "fresh", so without this the
+            // deepest tiles reliably got purged before their turn once any
+            // background streaming shared the queue. See
+            // RIVER_WALKING_SKELETON_LOG.md, Finding 3.
+            prewarm: true,
+        });
     }
 
     toggleManualDiagnosticSnapshot(reason = 'manual') {
@@ -666,9 +807,11 @@ export class QuadtreeTileManager {
         }
 
         this._updateAdaptiveLodScale(camera);
+        this._syncTileStreamerCameraContext(camera);
         this._updatePredictiveStreaming(camera);
 
         // ── (B) Uniform update ───────────────────────────────────────
+        this.quadtreeGPU.setRegionalTerrain(this.terrainGenerator?.regionalTerrainActive ? this.terrainGenerator.regionalTerrain : null);
         if (!frozen || !dp.freezeUniforms) {
             const baseThreshold = this.engineConfig.gpuQuadtree.lodErrorThreshold;
             const visibleLodScale = Number.isFinite(this._lodVisibleScale)
@@ -714,6 +857,17 @@ export class QuadtreeTileManager {
         this.tileStreamer?.resetTiles?.({ reseedRootTiles: true });
     }
 
+    /** Regenerates matching resident tiles in place (TileStreamer.regenerateTiles). */
+    regenerateTiles(predicate) {
+        if (!this.isReady()) return 0;
+        return this.tileStreamer?.regenerateTiles?.(predicate) ?? 0;
+    }
+
+    /** Records which in-flight tile jobs overlap a terrain input change. */
+    markTerrainRegionsChanged(predicate) {
+        this.tileStreamer?.markTerrainRegionsChanged?.(predicate);
+    }
+
     // ── Buffer / texture accessors for the renderer ──────────────────────
 
     getInstanceBuffer() {
@@ -730,6 +884,14 @@ export class QuadtreeTileManager {
 
     getArrayTextures() {
         return this.tileStreamer.getArrayTextures();
+    }
+
+    // Latest Phase 0 instrumentation snapshot (SphereCraft_Optimization_
+    // Implementation_Plan.md §0), refreshed every _maybeLogLightweightDiagnostics
+    // tick (~every 120 frames). Consumed by the game HUD; null until the
+    // first tick has run.
+    getPerfHudSnapshot() {
+        return this._lastPerfSnapshot ?? null;
     }
 
     getInitialLoadStatus() {

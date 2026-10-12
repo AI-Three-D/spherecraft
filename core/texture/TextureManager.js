@@ -51,6 +51,12 @@ export class TextureAtlasManager {
     
         this._uvCache = new Map();
         this._initialized = false;
+
+        // Per-raw-tile-id average color of its generated MICRO texture, in
+        // linear 0-1 RGB. Populated once during createProceduralAtlas(MICRO)
+        // so callers (e.g. the coarse solid-color LOD tier) can use the real
+        // authored texture's average tone instead of a hand-picked guess.
+        this.tileMicroAverageColors = new Map();
     
         Object.values(this.TEXTURE_LEVELS).forEach(level => {
             this.atlases.set(level, {
@@ -414,11 +420,12 @@ export class TextureAtlasManager {
     
         this._configureProceduralGenerator(gen, config, textureSize);
     
+        const atlasIndexAverageColor = new Map();
         for (let i = 0; i < uniqueVariants.length; i++) {
             const atlasIndex = i + startIndex;
             const layerOffset = atlasIndex * bytesPerLayer;
             try {
-                await this._writeProceduralVariantLayer(
+                const avg = await this._writeProceduralVariantLayer(
                     gen,
                     uniqueVariants[i].layers,
                     allLayerData,
@@ -426,11 +433,22 @@ export class TextureAtlasManager {
                     textureSize,
                     atlasIndex
                 );
+                if (avg) atlasIndexAverageColor.set(atlasIndex, avg);
             } catch {
                 this._fillProceduralFallback(allLayerData, layerOffset, textureSize, atlasIndex);
             }
         }
-    
+
+        if (level === this.TEXTURE_LEVELS.MICRO) {
+            for (let i = 0; i < variants.length; i++) {
+                const tileId = variants[i].tileType;
+                if (this.tileMicroAverageColors.has(tileId)) continue;
+                const atlasIndex = variantIndexToUniqueIndex.get(i);
+                const avg = atlasIndexAverageColor.get(atlasIndex);
+                if (avg) this.tileMicroAverageColors.set(tileId, avg);
+            }
+        }
+
         this._populateSeasonalTextureMap(atlas, variants, variantIndexToUniqueIndex);
     
         // Create array texture — each layer is independent, mipmaps per layer.
@@ -500,7 +518,7 @@ export class TextureAtlasManager {
     async _writeProceduralVariantLayer(generator, layers, buffer, layerOffset, textureSize, atlasIndex) {
         if (!Array.isArray(layers)) {
             this._fillProceduralFallback(buffer, layerOffset, textureSize, atlasIndex);
-            return;
+            return null;
         }
 
         generator.clearLayers();
@@ -514,6 +532,19 @@ export class TextureAtlasManager {
         copyCtx.drawImage(textureCanvas, 0, 0);
         const imageData = copyCtx.getImageData(0, 0, textureSize, textureSize);
         buffer.set(new Uint8Array(imageData.data.buffer), layerOffset);
+        return this._computeAverageColor(imageData);
+    }
+
+    _computeAverageColor(imageData) {
+        const data = imageData.data;
+        let r = 0, g = 0, b = 0;
+        const pixelCount = data.length / 4;
+        for (let p = 0; p < data.length; p += 4) {
+            r += data[p];
+            g += data[p + 1];
+            b += data[p + 2];
+        }
+        return [r / pixelCount / 255, g / pixelCount / 255, b / pixelCount / 255];
     }
 
     _populateSeasonalTextureMap(atlas, variants, variantIndexToUniqueIndex) {
@@ -750,6 +781,34 @@ export class TextureAtlasManager {
     getAtlasTexture(level) {
         const atlas = this.atlases.get(level);
         return atlas ? atlas.texture : null;
+    }
+
+    // Averages the real generated MICRO texture color across every raw tile
+    // id inside each runtime category's ranges, for categories built from
+    // the running planet's tileCatalog (id/name/ranges — see
+    // core/world/tileCatalogRuntime.js). Returns Map<categoryId, [r,g,b]>;
+    // a category with no matching generated tiles is simply absent, and the
+    // caller falls back to its own default color for that id.
+    getCategoryAverageColorMap(tileCategories) {
+        const result = new Map();
+        if (!Array.isArray(tileCategories)) return result;
+
+        for (const category of tileCategories) {
+            if (!Number.isFinite(category?.id) || !Array.isArray(category.ranges)) continue;
+            let r = 0, g = 0, b = 0, count = 0;
+            for (const [minId, maxId] of category.ranges) {
+                for (let tileId = minId; tileId <= maxId; tileId++) {
+                    const avg = this.tileMicroAverageColors.get(tileId);
+                    if (!avg) continue;
+                    r += avg[0]; g += avg[1]; b += avg[2];
+                    count++;
+                }
+            }
+            if (count > 0) {
+                result.set(category.id, [r / count, g / count, b / count]);
+            }
+        }
+        return result;
     }
 
     getNextSeason(currentSeason) {

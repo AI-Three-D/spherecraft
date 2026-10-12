@@ -5,6 +5,8 @@ import { Backend } from './backend.js';
 import { TextureFormat } from '../resources/texture.js';
 import { Logger } from '../../../shared/Logger.js';
 import { gpuFormatSampleType } from '../resources/texture.js';
+import { LAKE_PARAMS_FLOATS } from '../../world/water/waterWgsl.js';
+import {gpuDeviceLoss,reportGpuAsyncFailure} from '../../../shared/gpuDeviceState.js';
 export class WebGPUBackend extends Backend {
     constructor(canvas) {
         super(canvas);
@@ -102,6 +104,7 @@ export class WebGPUBackend extends Backend {
     drawInstanced(geometry, material, uniforms, instanceBuffer, instanceCount) {
         if (!this._renderPassEncoder) this.clear(true, true, false);
         if (material._needsCompile || !material._gpuPipeline) this.compileShader(material);
+        if(!material._gpuPipeline)return;
 
     const allUniforms = { ...material.uniforms, ...uniforms };
         this._ensureTexturesUploaded(allUniforms);
@@ -174,6 +177,8 @@ export class WebGPUBackend extends Backend {
         this._instancedDrawCount += instanceCount;
     }
 
+    get deviceLoss() { return gpuDeviceLoss(this.device); }
+
     async initialize() {
         if (this.device) {
 
@@ -241,10 +246,11 @@ export class WebGPUBackend extends Backend {
             requiredFeatures,
             requiredLimits,
         });
+        gpuDeviceLoss(this.device);
         Logger.info(`[WebGPU] Feature indirect-first-instance=${this.supportsIndirectFirstInstance ? 'yes' : 'no'}`);
 
         this.device.lost.then((info) => {
-
+            Logger.error(`[WebGPU] device lost: ${info.reason}: ${info.message}`);
         });
 
         this.context = this.canvas.getContext('webgpu');
@@ -1028,6 +1034,8 @@ _getVertexSize(wgslType) {
 }
 
 compileShader(material) {
+    if(this.deviceLoss)return null;
+    if(material._pipelinePromise && !material._gpuPipeline) return null;
     const materialType = (material.name || 'unknown').toLowerCase().trim();
     const baseType = materialType.replace(/[0-9_-]/g, '');
 
@@ -1056,7 +1064,7 @@ compileShader(material) {
     // Two terrain materials differing only in normal format must get
     // distinct pipelines.
     const chunkFmts = material._chunkTextureFormats || {};
-    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','splatValid','macro','terrainAO','groundField','resolvedColor']
+    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','splatValid','macro','terrainAO','groundField','resolvedColor','coarseColor']
         .map(t => chunkFmts[t] || '')
         .join('|');
 
@@ -1082,7 +1090,9 @@ compileShader(material) {
 
         const logCompilationInfo = async (module, stageLabel) => {
             if (!module.getCompilationInfo) return;
-            const info = await module.getCompilationInfo();
+            let info;
+            try {info=await module.getCompilationInfo();}
+            catch(error){reportGpuAsyncFailure(this.device,`${material.name} ${stageLabel} compilation diagnostics`,error);return;}
             if (info.messages?.length) {
                 console.error(`[WebGPU][${material.name}] ${stageLabel} compilation messages:`);
                 for (const msg of info.messages) {
@@ -1099,10 +1109,7 @@ compileShader(material) {
         const vertexBufferLayouts = material.vertexLayout || this._getVertexBufferLayouts(material);
 
     try {
-            // Validation scopes to surface errors clearly
-            this.device.pushErrorScope('validation');
-            this.device.pushErrorScope('internal');
-            const pipeline = this.device.createRenderPipeline({
+            const descriptor = {
             label: material.name || 'Material',
             layout: pipelineLayout,
             vertex: {
@@ -1135,21 +1142,36 @@ compileShader(material) {
             depthWriteEnabled: material.depthWrite,
             depthCompare: material.depthCompare || 'less'
         } : undefined
-            }
-        );
-        this.device.popErrorScope().then(err => {
-            if (err) {
-                console.error(`[WebGPU][${material.name}] Pipeline internal error:`, err.message || err);
-            }
-        });
-
-            // Pop validation errors
-            this.device.popErrorScope().then(err => {
-                if (err) {
-                    console.error(`[WebGPU][${material.name}] Pipeline validation error:`, err.message || err);
-                }
+            };
+        if(material.asyncCompile) {
+            material._gpuPipeline=null;
+            material._pipelinePromise=this.device.createRenderPipelineAsync(descriptor).then(pipeline=>{
+                if(this.deviceLoss)return null;
+                material._gpuPipeline={pipeline,bindGroupLayouts,pipelineLayout,vertexBufferLayouts};
+                this._pipelineCache.set(cacheKey,material._gpuPipeline);
+                material._needsCompile=false;
+                return material._gpuPipeline;
+            }).catch(error=>{
+                material._pipelineError=error;
+                reportGpuAsyncFailure(this.device,`${material.name} async pipeline creation`,error);
+                return null;
             });
-  
+            logCompilationInfo(vertexModule,'vertex');logCompilationInfo(fragmentModule,'fragment');
+            return null;
+        }
+        this.device.pushErrorScope('validation');this.device.pushErrorScope('internal');
+        let pipeline;
+        try {pipeline=this.device.createRenderPipeline(descriptor);}
+        finally {
+            // Drain both scopes even when pipeline creation throws. A lost
+            // browser instance rejects these diagnostic promises too.
+            for(const kind of ['internal','validation']) {
+                this.device.popErrorScope().then(err=>{
+                    if(err)console.error(`[WebGPU][${material.name}] Pipeline ${kind} error:`,err.message??err);
+                }).catch(error=>reportGpuAsyncFailure(this.device,`${material.name} ${kind} scope`,error));
+            }
+        }
+
             // Also log async shader compilation warnings
             logCompilationInfo(vertexModule, 'vertex');
             logCompilationInfo(fragmentModule, 'fragment');
@@ -1248,6 +1270,7 @@ _createBindGroupLayouts(material) {
     const includeTerrainAO = !!material.defines?.USE_TERRAIN_AO;
     const includeGroundField = !!material.defines?.USE_GROUND_FIELD;
     const includeResolvedColor = !!material.defines?.USE_RESOLVED_COLOR_TEXTURE || !!material.defines?.USE_RESOLVED_COLOR;
+    const includeCoarseColor = !!material.defines?.USE_COARSE_COLOR_TEXTURE;
     // Full per-slot format map. Missing keys default to rgba32float.
     const chunkFormats = material._chunkTextureFormats || {};
     return this._createTerrainBindGroupLayouts(
@@ -1255,7 +1278,8 @@ _createBindGroupLayouts(material) {
         includeTerrainAO,
         includeGroundField,
         includeResolvedColor,
-        chunkFormats
+        chunkFormats,
+        includeCoarseColor
     );
 }
 
@@ -1265,7 +1289,8 @@ _createTerrainBindGroupLayouts(
     includeTerrainAO = false,
     includeGroundField = false,
     includeResolvedColor = false,
-    chunkFormats = {}
+    chunkFormats = {},
+    includeCoarseColor = false
 ) {
     const layouts = [];
     const chunkViewDimension = useArrayTextures ? '2d-array' : '2d';
@@ -1326,6 +1351,12 @@ const slotSampleType = (type) =>
             texture: { sampleType: slotSampleType('resolvedColor'), viewDimension: chunkViewDimension }
         });
     }
+    if (includeCoarseColor) {
+        group1Entries.push({
+            binding: 10, visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: slotSampleType('coarseColor'), viewDimension: chunkViewDimension }
+        });
+    }
     layouts.push(this.device.createBindGroupLayout({ entries: group1Entries }));
 
     layouts.push(this.device.createBindGroupLayout({
@@ -1361,6 +1392,12 @@ const slotSampleType = (type) =>
             { binding: 9,  visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
             { binding: 10, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
             { binding: 11, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
+            // Water (core/world/water/waterWgsl.js WATER_BINDINGS).
+            { binding: 12, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
+            { binding: 13, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
+            { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+            { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
+            { binding: 16, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
         ]
     }));
 
@@ -1819,6 +1856,9 @@ _createTerrainBindGroups(material, uniforms, geometry) {
         if (material.defines?.USE_RESOLVED_COLOR_TEXTURE || material.defines?.USE_RESOLVED_COLOR) {
             chunkTextureBindings.push({ name: 'resolvedColorTexture', binding: 9 });
         }
+        if (material.defines?.USE_COARSE_COLOR_TEXTURE) {
+            chunkTextureBindings.push({ name: 'coarseColorTexture', binding: 10 });
+        }
         const chunkTextureNames = chunkTextureBindings.map(entry => entry.name);
         const g1Key = this._buildTextureKey(uniforms, chunkTextureNames);
         const g1CacheKey = `terrain_g1_${needArray ? 'arr' : '2d'}_${g1Key}`;
@@ -1906,16 +1946,27 @@ _createTerrainBindGroups(material, uniforms, geometry) {
 
     const clusterKey = clusterBuffers ? 'real' : 'dummy';
 
+    // Water (WaterGpuData resources, or dummies: params all zero = off).
+    const water = uniforms._waterData?.value?.resources || null;
+    const waterIndexBuf = water?.index || dummyStorage;
+    const waterLakesBuf = water?.lakes || dummyStorage;
+    const waterRiversBuf = water?.rivers || dummyStorage;
+    const waterMasksView = water?.masks || this._getOrCreateDummyArrayTextureView();
+    const waterParamsBuf = water?.params || this._getOrCreateUniformBuffer('_water_params_dummy', new Float32Array(LAKE_PARAMS_FLOATS));
+
     // Build cache key including shadow state
     const shadowKey = shadowRenderer ? 'shadow' : 'noshadow';
-    const g3CacheKey = `terrain_g3_${needArray ? 'arr' : '2d'}_${g3Key}_${clusterKey}_${shadowKey}`;
+    const g3CacheKey = `terrain_g3_${needArray ? 'arr' : '2d'}_${g3Key}_${clusterKey}_${shadowKey}_${water ? 'water' : 'nowater'}`;
 
     let g3Record = materialCache.get(g3CacheKey);
     const g3PipelineChanged = g3Record?.pipeline !== material._gpuPipeline;
     const g3ViewChanged = g3Record?.view !== g3View;
     const g3BufferChanged = g3Record?.buffer !== storageBuffer;
+    const g3WaterChanged = g3Record?.waterIndex !== waterIndexBuf || g3Record?.waterLakes !== waterLakesBuf
+        || g3Record?.waterMasks !== waterMasksView || g3Record?.waterParams !== waterParamsBuf
+        || g3Record?.waterRivers !== waterRiversBuf;
 
-    if (!g3Record || g3ViewChanged || g3BufferChanged || g3PipelineChanged) {
+    if (!g3Record || g3ViewChanged || g3BufferChanged || g3PipelineChanged || g3WaterChanged) {
         const entries = [
             { binding: 0, resource: { buffer: storageBuffer } },
             { binding: 7, resource: g3View },
@@ -1930,6 +1981,11 @@ _createTerrainBindGroups(material, uniforms, geometry) {
             { binding: 9,  resource: shadowCascade2 },
             { binding: 10, resource: shadowSampler },
             { binding: 11, resource: { buffer: shadowUniformBuf } },
+            { binding: 12, resource: { buffer: waterIndexBuf } },
+            { binding: 13, resource: { buffer: waterLakesBuf } },
+            { binding: 14, resource: waterMasksView },
+            { binding: 15, resource: { buffer: waterParamsBuf } },
+            { binding: 16, resource: { buffer: waterRiversBuf } },
         ];
         const group = this.device.createBindGroup({
             layout: material._gpuPipeline.bindGroupLayouts[3],
@@ -1940,7 +1996,9 @@ _createTerrainBindGroups(material, uniforms, geometry) {
             key: g3Key,
             view: g3View,
             buffer: storageBuffer,
-            pipeline: material._gpuPipeline
+            pipeline: material._gpuPipeline,
+            waterIndex:waterIndexBuf,waterLakes:waterLakesBuf,waterMasks:waterMasksView,
+            waterParams:waterParamsBuf,waterRivers:waterRiversBuf,
         };
         materialCache.set(g3CacheKey, g3Record);
     }
@@ -2105,8 +2163,11 @@ _packFragmentUniforms(uniforms) {
     f32[55] = uniforms.macroNoiseWeight?.value ?? 0.5;
     i32[56] = uniforms.terrainDebugMode?.value ?? 0;
     i32[57] = uniforms.terrainLayerViewMode?.value ?? 0;
-    i32[58] = 0;
-    i32[59] = 0;
+    // Former padding: distance ramp into the solid-color tier (metres).
+    // Terrain fragment shader reads these as tierFadeStart/tierFadeEnd; the
+    // hover-overlay shader still declares them as unused padding.
+    f32[58] = uniforms.tierFadeStart?.value ?? 0.0;
+    f32[59] = uniforms.tierFadeEnd?.value ?? 0.0;
 
     i32[60] = uniforms.terrainHoverFace?.value ?? -1;
     i32[61] = uniforms.terrainHoverFlags?.value ?? 0;
@@ -2193,6 +2254,7 @@ _ensureTexturesUploaded(uniforms) {
 draw(geometry, material, uniforms = {}) {
     if (!this._renderPassEncoder) this.clear(true, true, false);
         if (material._needsCompile || !material._gpuPipeline) this.compileShader(material);
+        if(!material._gpuPipeline)return;
     
         const allUniforms = { ...material.uniforms, ...uniforms };
     this._ensureTexturesUploaded(allUniforms);
@@ -2313,6 +2375,7 @@ _getOrCreateDummyVertexBuffer(size = 16) {
 drawIndexedIndirect(geometry, material, indirectBuffer, indirectOffset = 0, uniforms = {}) {
     if (!this._renderPassEncoder) this.clear(true, true, false);
     if (material._needsCompile || !material._gpuPipeline) this.compileShader(material);
+        if(!material._gpuPipeline)return;
 
     const allUniforms = { ...material.uniforms, ...uniforms };
     this._ensureTexturesUploaded(allUniforms);

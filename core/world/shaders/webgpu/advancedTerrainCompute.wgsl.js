@@ -1,10 +1,152 @@
 // js/world/shaders/webgpu/advancedTerrainCompute.wgsl.js
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
+import { createTerrainFeatureToggleWgsl } from '../../terrain-generator/terrainFeatureToggles.js';
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
+import { createRiverCarveWgsl } from '../../water/riverCarve.wgsl.js';
+import { createRiverValleyWgsl } from '../../water/riverValley.wgsl.js';
+import { createRegionalTerrainWgsl } from '../../terrain-generator/regionalTerrain.wgsl.js';
+import { createRegionalShapeWgsl } from '../../terrain-generator/regionalShape.wgsl.js';
 
 function wgslFloat(value, fallback) {
   const n = Number.isFinite(value) ? value : fallback;
   return Number(n).toFixed(6);
+}
+
+const wgslNum = (v) => {
+  const s = String(Number(v));
+  return /[.eE]/.test(s) ? s : `${s}.0`;
+};
+const wgslVec = (arr) => `vec${arr.length}<f32>(${arr.map(wgslNum).join(', ')})`;
+
+// terrain.erosionFilter: the RuneVision filter applied to the land height in
+// calculateTerrainHeightD (sphere). Always on; cfg holds its parameters
+// (TerrainGenerationConfig.erosionFilter).
+function createErosionFilterLandWgsl(cfg, createFeature) {
+  if (!cfg || !Number.isFinite(cfg.strength)) {
+    throw new Error('createAdvancedTerrainComputeShader requires options.erosionFilter (TerrainGenerationConfig.erosionFilter)');
+  }
+  return createFeature() + `
+fn erosionConfiguredParams() -> ErosionParams {
+    var prm: ErosionParams;
+    prm.strength = ${wgslNum(cfg.strength)};
+    prm.gullyWeight = ${wgslNum(cfg.gullyWeight)};
+    prm.detail = ${wgslNum(cfg.detail)};
+    prm.rounding = ${wgslVec(cfg.rounding)};
+    prm.onset = ${wgslVec(cfg.onset)};
+    prm.assumedSlope = ${wgslVec(cfg.assumedSlope)};
+    prm.scale = ${wgslNum(cfg.scale)};
+    prm.octaves = ${Math.round(cfg.octaves)};
+    prm.lacunarity = ${wgslNum(cfg.lacunarity)};
+    prm.gain = ${wgslNum(cfg.gain)};
+    prm.cellScale = ${wgslNum(cfg.cellScale)};
+    prm.normalization = ${wgslNum(cfg.normalization)};
+    prm.normalSquash = ${wgslNum(cfg.normalSquash)};
+    prm.seed = ${Math.round(cfg.seed)};
+    prm.inputRounding = -1.0;
+    return prm;
+}
+
+// Fraction of meso2 kept where erosion runs at full amount.
+const EROSION_MESO_KEEP: f32 = ${wgslNum(cfg.mesoKeep)};
+
+// Erosion style (dual, 0..1): 0 = rounded, 1 = jagged. A noise field
+// with wavelength styleScaleM, shifted by styleBias.
+fn terrainStyle_d(unitDir: vec3<f32>) -> vec4<f32> {
+    let n = fbmAuto_d(unitDir, ${wgslNum(cfg.styleScaleM / 1000)}, 3, uniforms.seed + 7300, 2.0, 0.5);
+    return dSmoothstep(-0.15, 0.15, n + dConst(${wgslNum(cfg.styleBias)}));
+}
+
+// Relief ramp (dual, 0..1) of the erosion amount: reliefNorm (normalized
+// height of the large landforms) from reliefStartM to reliefFullM.
+fn erosionReliefRamp_d(reliefNorm: vec4<f32>) -> vec4<f32> {
+    return dSmoothstep(${wgslNum(cfg.reliefStartM)}, ${wgslNum(cfg.reliefFullM)}, reliefNorm * maxTerrainHeightM());
+}
+
+struct ErosionLandResult {
+    // Height change (dual, normalized) to add to the terrain.
+    delta: vec4<f32>,
+    // Local erosion amount (dual, 0 .. styleStrength[1]): regional
+    // variation x relief x style strength x steepness.
+    amount: vec4<f32>,
+}
+
+// Erodes a slope-continuous landform (dual: normalized height + gradient
+// w.r.t. unitDir) and returns the height change. reliefNorm: the summed
+// height of the large landforms (foothills, big lone hills, mountains).
+// - Amount = variation x mix(lowReliefAmount, 1, relief ramp) x style
+//   strength x steepness:
+//   variation is a noise field (wavelength variationScaleM) between
+//   variationMin and 1, so some regions erode hard and others stay smooth,
+//   raised toward 1 by variationFloor (the mountains: always carved);
+//   the relief ramp goes from reliefStartM to reliefFullM; steepness ramps
+//   with the input slope from sharpSlopeStart to sharpSlopeFull.
+//   Strength = strength x amount.
+//   Style strength goes from styleStrength[0] (rounded) to [1] (jagged).
+// - Rounding: ridge and crease rounding from the style pairs, blended to
+//   lowAmountRounding as the amount falls from softAmountNone to
+//   softAmountFull.
+// - Fade target: relief over fadeRangeM, mapped to [-1, 1].
+// - Height offset -fadeTarget * initialFadeWeight removes the initial fade
+//   target's whole contribution (it reaches every octave through the stacked
+//   masks), leaving the gully structure: flat ground keeps its height and the
+//   landform is not reshaped. (Cancelling only (1 - initialMask) * magnitude
+//   over-cancelled where later masks were partly open: rings around flat
+//   hilltops and valley floors.)
+// Slope deltas are the filter's approximate derivatives (as in the
+// original), plus the first-order terms of the amount and the offset.
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>, variationFloor: vec4<f32>) -> ErosionLandResult {
+    var r: ErosionLandResult;
+    r.delta = vec4<f32>(0.0);
+    r.amount = vec4<f32>(0.0);
+    let maxH = maxTerrainHeightM();
+    let R = noiseReferenceRadiusM();
+    let relief = reliefNorm * maxH;
+    let reliefRamp = erosionReliefRamp_d(reliefNorm);
+    let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
+    let variationN = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
+    // variationFloor (0..1) raises it smoothly toward 1: 1 - (1 - v)(1 - floor).
+    let variation = dConst(1.0) - dMul(dConst(1.0) - variationN, dConst(1.0) - variationFloor);
+    let styleStrength = dConst(${wgslNum(cfg.styleStrength[0])}) + style * ${wgslNum(cfg.styleStrength[1] - cfg.styleStrength[0])};
+    let reliefAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
+    // Steepness: full erosion on steep ground, fading out toward flat ground.
+    // Summits, saddles and valley floors are where the gully direction spins
+    // around a point (pinches, bowties); this keeps gullies away from them
+    // and makes erosion lighter on gentle hills. Its gradient (a second
+    // derivative of the landform) is not tracked.
+    let slope = terrainSurfaceGradient(land, unitDir) * maxH;
+    let steepness = smoothstep(${wgslNum(cfg.sharpSlopeStart)}, ${wgslNum(cfg.sharpSlopeFull)}, length(slope));
+    let amount = reliefAmount * steepness;
+    r.amount = amount;
+    if (amount.x <= 0.001) { return r; }
+    var prm = erosionConfiguredParams();
+    prm.strength *= amount.x;
+    // Light erosion gets rounded ridges and creases: with the default sharp
+    // creases, shallow gullies read as thin etched lines on gentle terrain.
+    let soft = 1.0 - smoothstep(${wgslNum(cfg.softAmountFull)}, ${wgslNum(cfg.softAmountNone)}, amount.x);
+    let fadeRaw = relief.x / ${wgslNum(cfg.fadeRangeM)} * 2.0 - 1.0;
+    let fadeTarget = clamp(fadeRaw, -1.0, 1.0);
+    // Input mask (first octave onset): the configured rounding, softened
+    // at low amount. The style sets only the octaves' ridge and crease
+    // rounding; through the input mask a high rounding also held back the
+    // first octave, and rounded mountains lost their big valleys.
+    let inputBase = mix(${wgslNum(cfg.rounding[1])}, ${wgslNum(cfg.rounding[0])}, clamp(fadeTarget + 0.5, 0.0, 1.0));
+    prm.inputRounding = mix(inputBase, ${wgslNum(cfg.lowAmountRounding)}, soft) * ${wgslNum(cfg.rounding[2])};
+    let ridgeRounding = mix(${wgslNum(cfg.styleRidgeRounding[0])}, ${wgslNum(cfg.styleRidgeRounding[1])}, style.x);
+    let creaseRounding = mix(${wgslNum(cfg.styleCreaseRounding[0])}, ${wgslNum(cfg.styleCreaseRounding[1])}, style.x);
+    prm.rounding.x = mix(ridgeRounding, ${wgslNum(cfg.lowAmountRounding)}, soft);
+    prm.rounding.y = mix(creaseRounding, ${wgslNum(cfg.lowAmountRounding)}, soft);
+    let e = erosionFilterSphere(unitDir * R, unitDir, land.x * maxH, slope, fadeTarget, prm);
+    let keep = e.initialFadeWeight;
+    let dh = e.heightDelta - fadeTarget * keep;
+    // d(fadeTarget)/d(unitDir) where unclamped.
+    let fadeGrad = select(vec3<f32>(0.0), relief.yzw * (2.0 / ${wgslNum(cfg.fadeRangeM)}), abs(fadeRaw) < 1.0);
+    // The output scales ~linearly with strength: d(dh)/dx += dh / amount * d(amount)/dx.
+    let amountGrad = amount.yzw * (dh / max(amount.x, 1e-3));
+    let dGrad = e.slopeDelta * (R / maxH) - fadeGrad * (keep / maxH) + amountGrad / maxH;
+    r.delta = vec4<f32>(dh / maxH, dGrad);
+    return r;
+}
+`;
 }
 
 export function createAdvancedTerrainComputeShader(options = {}) {
@@ -29,13 +171,34 @@ export function createAdvancedTerrainComputeShader(options = {}) {
     createTerrainFeatureLoneHills,
     createTerrainFeatureMicro,
     createTerrainFeatureMesoDetail,
-    createTerrainFeatureHighlands,
+    createTerrainFeatureRivers,
+    createTerrainFeatureErosionSeeds,
+    createTerrainFeatureErosionFilter,
   } = shaderBundle;
+  // Every feature module is part of the shader source (the height function
+  // calls them). To switch a feature off use terrain.features or
+  // qtDiag.setTerrainFeatures (terrainFeatureToggles.js), not the bundle.
+  const missing = [
+    'createTerrainCommon', 'createSurfaceCommon', 'createTerrainFeatureContinents',
+    'createTerrainFeaturePlains', 'createTerrainFeatureHills', 'createTerrainFeatureMountains',
+    'createTerrainFeatureCanyons', 'createTerrainFeatureLoneHills', 'createTerrainFeatureMicro',
+    'createTerrainFeatureMesoDetail', 'createTerrainFeatureRivers',
+    'createTerrainFeatureErosionSeeds', 'createTerrainFeatureErosionFilter',
+  ].filter(name => typeof shaderBundle[name] !== 'function');
+  if (missing.length) {
+    throw new Error(
+      `terrainShaderBundle is missing ${missing.join(', ')}. All feature modules are required; ` +
+      'switch features off with terrain.features or qtDiag.setTerrainFeatures instead.'
+    );
+  }
   const outputFormat = options?.outputFormat ?? 'rgba32float';
   const hasHeightBindings = options?.hasHeightBindings ?? false;
   const hasTileBindings = options?.hasTileBindings ?? false;
+  const hasBaseHeightBinding = hasHeightBindings && options?.hasBaseHeightBinding === true;
+  const hasSmoothSplatIdsBinding = options?.hasSmoothSplatIdsBinding === true;
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
+  const erosionFilterWgsl = createErosionFilterLandWgsl(options?.erosionFilter, createTerrainFeatureErosionFilter);
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
     Math.min(1.0, Number.isFinite(options?.authoredSplatSourceMinProbability)
@@ -82,7 +245,8 @@ struct Uniforms {
     face: i32,
 
     debugMode: i32,
-    _pad_i:    i32,
+    // Bit set = terrain feature off (terrainFeatureToggles.js, TF_*).
+    featureDisableMask: u32,
     uvOffset:  vec2<f32>,
 
     continentParams: vec4<f32>,
@@ -107,6 +271,50 @@ struct Uniforms {
     climateZone3Extra: vec4<f32>,
     climateZone4: vec4<f32>,
     climateZone4Extra: vec4<f32>,
+
+    // River channel (walking-skeleton scope: one fixed straight channel).
+    // riverAnchor.xyz = unit direction from planet origin to the channel's
+    // centerline anchor point; .w = enabled (0/1).
+    // riverChannelDir.xyz = unit tangent direction the channel runs along
+    // (must be perpendicular to riverAnchor.xyz); .w unused.
+    // riverParams = (halfWidth meters, depth meters, length meters, unused).
+    // See templates/terrain-shaders/features/featureRivers.wgsl.js.
+    riverAnchor: vec4<f32>,
+    riverChannelDir: vec4<f32>,
+    riverParams: vec4<f32>,
+
+    // Traced river path (HydrologyPrecompute.js): a polyline in the same
+    // (along, across) coordinate space riverAnchor/riverChannelDir define,
+    // found by steepest-descent flow routing over the real terrain instead
+    // of authored as a straight line. Each point is
+    // (along, across, widthScale, depthScale) — widthScale/depthScale scale
+    // riverParams.x/.y by how much drainage area passes through that point.
+    // riverPathCount == 0 means no path was found; featureRiverHeight()
+    // falls back to a straight line through riverAnchor/riverChannelDir in
+    // that case. See templates/terrain-shaders/features/featureRivers.wgsl.js.
+    riverPathCount: i32,
+    _riverPathPad0: i32,
+    _riverPathPad1: i32,
+    _riverPathPad2: i32,
+    riverPath: array<vec4<f32>, 16>,
+
+    // Stage-2 confirmed erosion-seed basins (ErosionSeedVerifier.js): of
+    // the (up to 9) level-1 candidates featureErosionSeedsHeight() places
+    // near the reference point, the ones verified to actually sit in a
+    // real basin get upgraded here instead of staying at the level-1
+    // nudge's own small size. Each entry is
+    // (regionX, regionY, radiusScale, depthScale); regionX/Y are the same
+    // integer region coordinates featureErosionSeedsHeight() computes
+    // internally, stored as f32 (exact for the small integers involved).
+    // erosionConfirmedCount == 0 means nothing survived verification yet
+    // (or it hasn't run) — every candidate stays at level-1 nudge size in
+    // that case, which is the correct, self-consistent fallback, not an
+    // error state. See templates/terrain-shaders/features/featureErosionSeeds.wgsl.js.
+    erosionConfirmedCount: i32,
+    _erosionConfirmedPad0: i32,
+    _erosionConfirmedPad1: i32,
+    _erosionConfirmedPad2: i32,
+    erosionConfirmed: array<vec4<f32>, 9>,
 };
 
 ${createBiomeScoringWGSL({ maxBiomes })}
@@ -115,6 +323,8 @@ ${createBiomeScoringWGSL({ maxBiomes })}
 @group(0) @binding(1) var outputTexture: texture_storage_2d<${outputFormat}, write>;
 ${hasHeightBindings ? '@group(0) @binding(2) var heightMap: texture_2d<f32>;' : ''}
 ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
+${hasBaseHeightBinding ? '@group(0) @binding(4) var baseHeightMap: texture_2d<f32>;' : ''}
+${hasSmoothSplatIdsBinding ? '@group(0) @binding(5) var smoothSplatIdsTexture: texture_storage_2d<rgba8unorm, write>;' : ''}
 @group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
 
 const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY: f32 = ${wgslFloat(authoredSplatSourceMinProbability, 0.18)};
@@ -154,46 +364,6 @@ fn hemiOctEncode(n: vec3<f32>) -> vec2<f32> {
     return n.xy * (1.0 / (abs(n.x) + abs(n.y) + n.z));
 }
 
-fn computeNormalSlopeSphere(face: i32, u: f32, v: f32, du: f32, dv: f32) -> NormalSlope {
-    let epsU = max(du, 1.0 / 8192.0);
-    let epsV = max(dv, 1.0 / 8192.0);
-
-    let uR = min(u + epsU, 1.0);
-    let uL = max(u - epsU, 0.0);
-    let vU = min(v + epsV, 1.0);
-    let vD = max(v - epsV, 0.0);
-
-    let dirC = getSpherePoint(face, u, v);
-    let dirR = getSpherePoint(face, uR, v);
-    let dirL = getSpherePoint(face, uL, v);
-    let dirU = getSpherePoint(face, u, vU);
-    let dirD = getSpherePoint(face, u, vD);
-
-    let hR = calculateTerrainHeight(dirR.x, dirR.z, uniforms.seed, dirR);
-    let hL = calculateTerrainHeight(dirL.x, dirL.z, uniforms.seed, dirL);
-    let hU = calculateTerrainHeight(dirU.x, dirU.z, uniforms.seed, dirU);
-    let hD = calculateTerrainHeight(dirD.x, dirD.z, uniforms.seed, dirD);
-
-    let nd = normalDisplacementScale();
-    let pR = dirR * (1.0 + hR * nd);
-    let pL = dirL * (1.0 + hL * nd);
-    let pU = dirU * (1.0 + hU * nd);
-    let pD = dirD * (1.0 + hD * nd);
-
-    let dX = pR - pL;
-    let dY = pU - pD;
-
-    var n = normalize(cross(dY, dX));
-    if (any(n != n) || length(n) < 0.1) {
-        n = dirC;
-    }
-
-    var ns: NormalSlope;
-    ns.n = n;
-    ns.slope = slopeFromNormal(n, dirC);
-    return ns;
-}
-
 fn computeNormalSlopeFlat(wx: f32, wy: f32) -> NormalSlope {
     let eps = 1.0;
 
@@ -214,9 +384,28 @@ fn computeNormalSlopeFlat(wx: f32, wy: f32) -> NormalSlope {
     return ns;
 }
 
-fn computeStableNormalSlopeSphere(face: i32, u: f32, v: f32) -> NormalSlope {
-    let stableStep = 1.0 / 8192.0;
-    return computeNormalSlopeSphere(face, u, v, stableStep, stableStep);
+// Slope (sine of the tilt from local up) of the displaced sphere
+// dir * (1 + h * nd) given the height's tangential surface gradient.
+fn slopeFromSurfaceGradient(gSurf: vec3<f32>, h: f32) -> f32 {
+    let a = 1.0 + h * normalDisplacementScale();
+    let b = length(gSurf) * maxTerrainHeightM();
+    return b / max(sqrt(a * a + b * b), 1e-12);
+}
+
+struct BaseHeightSlope {
+    h: f32,
+    slope: f32,
+}
+
+// Base height and the slope that drives tile classification and micro detail
+// (cached in heightBase.g), from one dual-number evaluation: the exact
+// surface gradient, independent of texel size, so the same at every LOD.
+fn baseHeightSlopeSphere(face: i32, u: f32, v: f32, unitDir: vec3<f32>) -> BaseHeightSlope {
+    var r: BaseHeightSlope;
+    let hd = calculateTerrainHeightD(uniforms.seed, unitDir);
+    r.h = hd.x;
+    r.slope = slopeFromSurfaceGradient(terrainSurfaceGradient(hd, unitDir), hd.x);
+    return r;
 }
 
 ${hasHeightBindings ? `
@@ -224,14 +413,23 @@ fn sampleHeightAt(coord: vec2<i32>) -> f32 {
     return textureLoad(heightMap, coord, 0).r;
 }
 
+// heightMap may be the base-height target with its 1-texel apron (2 texels
+// larger than this pass's output, unpadded passes only): this tile's texel
+// coord is then at +1.
+fn heightInputCoord(coord: vec2<i32>) -> vec2<i32> {
+    let d = vec2<i32>(textureDimensions(heightMap)) - vec2<i32>(textureDimensions(outputTexture));
+    let padded = abs(uniforms.uvOffset.x) > 0.0 || abs(uniforms.uvOffset.y) > 0.0;
+    return coord + select(vec2<i32>(0), vec2<i32>(1), (d == vec2<i32>(2)) & vec2<bool>(!padded));
+}
+
 fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f32 {
     let dir = getSpherePoint(face, u, v);
     let wx = dir.x;
     let wy = dir.z;
 
-    let baseH = calculateTerrainHeight(wx, wy, uniforms.seed, dir);
-    let ns = computeStableNormalSlopeSphere(face, u, v);
-    let slope = ns.slope;
+    let hs = baseHeightSlopeSphere(face, u, v, dir);
+    let baseH = hs.h;
+    let slope = hs.slope;
 
     var tileType: u32 = determineTileType(baseH, slope, wx, wy, dir, uniforms.seed);
     let profile = getTerrainProfile();
@@ -251,10 +449,11 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
     let micro = select(
         0.0,
         tileMicroDetail(wx, wy, dir, uniforms.seed, slope, profile, tileType),
-        dispMeters > 0.0
+        dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
-    let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain;
+    // No micro detail in river channels (it would raise the carved bed).
+    let microH = regionalValleyMicro(micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(dir) * regionalBasinMicroKeep(dir), dir);
     return softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
 }
 
@@ -271,6 +470,50 @@ fn sampleBaseHeightProcedural(face: i32, u: f32, v: f32) -> f32 {
     let wy = dir.z;
     let baseH = calculateTerrainHeight(wx, wy, uniforms.seed, dir);
     return softClampHeight(baseH, -1.1, 1.8, 0.25);
+}
+
+// Base height (no micro) at a border-band neighbour of the normal pass.
+// - heightBase with the apron (tile generation): always read from it.
+// Without the apron (heightBase requested as an output, diagnostics):
+// - preferTexture and inside the tile: read heightBase (written by the base
+//   pass for this very texel).
+// - otherwise evaluate the terrain function at the texel's face UV, rebuilt
+//   with main's chunk + pixel / (size - 1) arithmetic for the tile that owns
+//   it (this tile, or the adjacent one beyond the edge).
+// Shared-edge agreement: an edge texel and the adjacent tile's edge texel
+// must see identical values for the two neighbours across the edge, so the
+// caller passes preferTexture = false for those; both tiles then evaluate
+// the same points in the same shader module. (The base pass is a different
+// module and may round the terrain function differently.) Across a face edge
+// it falls back to the caller's clamped u, v.
+fn borderBaseHeight(face: i32, u: f32, v: f32, coord: vec2<i32>, maxC: vec2<i32>, preferTexture: bool) -> f32 {
+${hasBaseHeightBinding ? `    // heightBase with its 1-texel apron holds every neighbour, including the
+    // adjacent tiles' texels (written by the same base-pass module on both
+    // sides of an edge, so shared-edge normals agree exactly).
+    if (all(vec2<i32>(textureDimensions(baseHeightMap)) == maxC + vec2<i32>(3))) {
+        return softClampHeight(textureLoad(baseHeightMap, coord + vec2<i32>(1), 0).r, -1.1, 1.8, 0.25);
+    }
+    let inside = all(coord >= vec2<i32>(0)) && all(coord <= maxC);
+    if (preferTexture && inside) {
+        return softClampHeight(textureLoad(baseHeightMap, coord, 0).r, -1.1, 1.8, 0.25);
+    }
+    let usesPaddedSingleChunk = abs(uniforms.uvOffset.x) > 0.0 || abs(uniforms.uvOffset.y) > 0.0;
+    let chunks = max(uniforms.chunkGridSize, 1);
+    if (uniforms.chunkSize > 1 && !usesPaddedSingleChunk && maxC.x == uniforms.chunkSize - 1 && maxC.y == uniforms.chunkSize - 1) {
+        let below = coord < vec2<i32>(0);
+        let above = coord > maxC;
+        let chunkShift = select(vec2<i32>(0), vec2<i32>(-1), below) + select(vec2<i32>(0), vec2<i32>(1), above);
+        let local = select(select(coord, vec2<i32>(1), above), maxC - vec2<i32>(1), below);
+        let chunk = uniforms.chunkCoord + chunkShift;
+        if (all(chunk >= vec2<i32>(0)) && all(chunk < vec2<i32>(chunks))) {
+            let chunkSizePx = vec2<f32>(f32(uniforms.chunkSize));
+            let localUV = vec2<f32>(local) / max(chunkSizePx - vec2<f32>(1.0), vec2<f32>(1.0));
+            let totalChunks = f32(chunks);
+            let uvN = (vec2<f32>(f32(chunk.x), f32(chunk.y)) + localUV) / totalChunks + uniforms.uvOffset;
+            return sampleBaseHeightProcedural(face, uvN.x, uvN.y);
+        }
+    }
+` : ''}    return sampleBaseHeightProcedural(face, u, v);
 }
 
 fn computeNormalSlopeFromHeightMapSphere(
@@ -309,12 +552,18 @@ fn computeNormalSlopeFromHeightMapSphere(
     let edgeDistX = min(coordC.x, maxC.x - coordC.x);
     let edgeDistY = min(coordC.y, maxC.y - coordC.y);
     let edgeDist = min(edgeDistX, edgeDistY);
-    if (edgeDist <= 2) {
+    // blendT reaches 1 at edgeDist 2: those texels use the height map only.
+    if (edgeDist < 2) {
         let blendT = clamp(f32(edgeDist) / 2.0, 0.0, 1.0);
-        let bR = sampleBaseHeightProcedural(face, uR, v);
-        let bL = sampleBaseHeightProcedural(face, uL, v);
-        let bU = sampleBaseHeightProcedural(face, u, vU);
-        let bD = sampleBaseHeightProcedural(face, u, vD);
+        // On an edge column (row), the across-edge neighbours are evaluated,
+        // not read, so the adjacent tile computes the same values (see
+        // borderBaseHeight).
+        let readX = coordC.x != 0 && coordC.x != maxC.x;
+        let readY = coordC.y != 0 && coordC.y != maxC.y;
+        let bR = borderBaseHeight(face, uR, v, coordC + vec2<i32>(1, 0), maxC, readX);
+        let bL = borderBaseHeight(face, uL, v, coordC - vec2<i32>(1, 0), maxC, readX);
+        let bU = borderBaseHeight(face, u, vU, coordC + vec2<i32>(0, 1), maxC, readY);
+        let bD = borderBaseHeight(face, u, vD, coordC - vec2<i32>(0, 1), maxC, readY);
         hR = mix(bR, hR, blendT);
         hL = mix(bL, hL, blendT);
         hU = mix(bU, hU, blendT);
@@ -368,6 +617,8 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
 ` : ''}
 `,
     createNoiseLibrary(),
+    createTerrainFeatureToggleWgsl(),
+    erosionFilterWgsl,
     createTerrainCommon(),
     createSurfaceCommon({
         tileCategories: options.tileCategories,
@@ -381,8 +632,17 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureLoneHills(),
     createTerrainFeatureMicro(),
     createTerrainFeatureMesoDetail(),
-    createTerrainFeatureHighlands(),
-    base.base(),
+    createTerrainFeatureRivers(),
+    createTerrainFeatureErosionSeeds(),
+    // options.waterCarve: river channels in the height (group 1 bindings 1-3,
+    // riverCarve.wgsl.js); otherwise pass-through stubs.
+    createRiverCarveWgsl({ enabled: options?.waterCarve === true, bankDetail: options?.riverBankDetail === true }),
+    // options.riverValley: river valleys in the height (group 1 bindings 4-7,
+    // riverValley.wgsl.js); otherwise pass-through stubs.
+    createRiverValleyWgsl({ enabled: options?.riverValley === true, page: options?.riverValleyPage ?? 32 }),
+    createRegionalTerrainWgsl({ enabled: options.regionalTerrain === true, valleyFeature: options.regionalValleyFeature === true, shape: options.regionalShape === true }),
+    options.regionalShape===true?createRegionalShapeWgsl():'',
+    base.base(options),
     `
 const WATER_1: u32 = SURFACE_WATER;
 const GRASS_SHORT_1: u32 = SURFACE_GRASS_BASE;
@@ -878,8 +1138,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 u = (chunkCoord.x + localUV.x) / totalChunks;
                 v = (chunkCoord.y + localUV.y) / totalChunks;
             } else {
-                let localChunk = floor(pixelCoord / chunkSizePx);
-                let localPixel = pixelCoord - localChunk * chunkSizePx;
+                // Base-height apron: a base-pass target 2 texels larger than
+                // the chunk (tileGenerator) also holds, around the tile, the
+                // adjacent tiles' edge-adjacent texels (index -1 is the
+                // previous tile's texel n-2, index n the next tile's texel
+                // 1), computed with that tile's own arithmetic so both tiles
+                // get bit-identical values. Beyond the face edge it repeats
+                // this tile's edge texel. The normal pass reads its border
+                // samples from it instead of evaluating the terrain.
+                let n = max(uniforms.chunkSize, 1);
+                let hasApron = uniforms.outputType == 0 && n > 2
+                    && i32(texSize.x) == n + 2 && i32(texSize.y) == n + 2;
+                var px = pixelCoord;
+                var chunkShift = vec2<i32>(0);
+                if (hasApron) {
+                    let idx = vec2<i32>(global_id.xy) - vec2<i32>(1);
+                    let grid = max(uniforms.chunkGridSize, 1);
+                    let below = idx < vec2<i32>(0);
+                    let above = idx > vec2<i32>(n - 1);
+                    chunkShift = select(vec2<i32>(0), vec2<i32>(-1), below) + select(vec2<i32>(0), vec2<i32>(1), above);
+                    var local = select(select(idx, vec2<i32>(1), above), vec2<i32>(n - 2), below);
+                    let c = uniforms.chunkCoord + chunkShift;
+                    let offFace = vec2<bool>(c.x < 0 || c.x >= grid, c.y < 0 || c.y >= grid);
+                    local = select(local, clamp(idx, vec2<i32>(0), vec2<i32>(n - 1)), offFace);
+                    chunkShift = select(chunkShift, vec2<i32>(0), offFace);
+                    px = vec2<f32>(local);
+                }
+                let localChunk = floor(px / chunkSizePx);
+                let localPixel = px - localChunk * chunkSizePx;
 
                 if (chunkSizePx.x < 2.0) {
                     localUV = vec2<f32>(0.5, 0.5);
@@ -888,7 +1174,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 }
 
                 let chunkCoord =
-                    vec2<f32>(f32(uniforms.chunkCoord.x), f32(uniforms.chunkCoord.y))
+                    vec2<f32>(f32(uniforms.chunkCoord.x + chunkShift.x), f32(uniforms.chunkCoord.y + chunkShift.y))
                     + localChunk;
                 u = (chunkCoord.x + localUV.x) / totalChunks;
                 v = (chunkCoord.y + localUV.y) / totalChunks;
@@ -952,32 +1238,23 @@ if (uniforms.outputType == 0) {
     } else if (uniforms.debugMode == 8) {
         let profile = getTerrainProfile();
         h = getContinentalMask(wx, wy, unitDir, uniforms.seed, profile) * 0.5;
-    } else if (uniforms.debugMode == 9) {
-        let profile = getTerrainProfile();
-        h = rarityMaskAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050, RARITY_RARE, profile.rareBoost) * 0.4;
-    } else if (uniforms.debugMode == 10) {
-        h = cellShapeAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 0.9, uniforms.seed + 2070, 0.5) * 0.4;
     } else if (uniforms.debugMode == 11) {
         let profile = getTerrainProfile();
         h = rarityMaskAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 1.1, uniforms.seed + 2600, RARITY_VERY_RARE, profile.rareBoost) * 0.4;
     } else if (uniforms.debugMode == 12) {
         h = cellShapeAuto(wx, wy, unitDir, SCALE_CANYON_MAIN * 0.8, uniforms.seed + 2620, 0.28) * 0.4;
-    } else if (uniforms.debugMode == 13) {
-        h = cellRandomAuto(wx, wy, unitDir, SCALE_MOUNTAIN_RANGES * 1.3, uniforms.seed + 2050) * 0.4;
-    } else {
-        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
-
+    } else if (uniforms.face >= 0) {
         // ── Compute LOD-stable slope ONCE here ───────────────────────
         // Passes 2 (tile) and 4 (micro) read this from heightBase.g
         // instead of each calling calculateTerrainHeight 4× for finite
         // differences. This is the single biggest win in the pipeline.
-        if (uniforms.face >= 0) {
-            let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
-            stableSlope = ns.slope;
-        } else {
-            let ns = computeNormalSlopeFlat(wx, wy);
-            stableSlope = ns.slope;
-        }
+        let hs = baseHeightSlopeSphere(uniforms.face, u, v, unitDir);
+        h = hs.h;
+        stableSlope = hs.slope;
+    } else {
+        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
+        let ns = computeNormalSlopeFlat(wx, wy);
+        stableSlope = ns.slope;
     }
     output = vec4<f32>(h, stableSlope, 0.0, 1.0);
 
@@ -1088,17 +1365,18 @@ if (uniforms.outputType == 0) {
     ${hasHeightBindings ? `
     let coordC = vec2<i32>(global_id.xy);
     // heightMap here is heightBase: .r = height, .g = cached stable slope.
-    // Was: computeStableNormalSlopeSphere → 4× calculateTerrainHeight per pixel.
-    let heightSample = textureLoad(heightMap, coordC, 0);
+    let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
     let h = heightSample.r;
     let slope = heightSample.g;
     ` : `
-    let h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
-    var slope: f32 = 0.0;
+    var h: f32;
+    var slope: f32;
     if (uniforms.face >= 0) {
-        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
-        slope = ns.slope;
+        let hs = baseHeightSlopeSphere(uniforms.face, u, v, unitDir);
+        h = hs.h;
+        slope = hs.slope;
     } else {
+        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
         let ns = computeNormalSlopeFlat(wx, wy);
         slope = ns.slope;
     }
@@ -1134,59 +1412,58 @@ if (uniforms.outputType == 0) {
 
 else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
     let oceanLevel = uniforms.waterParams.y;
+    // Both outputs come from the same sorted payload. A paired source pass
+    // writes them together, avoiding a second biome/noise/top-four evaluation.
+    var splatWeights: vec4<f32>;
+    var splatIds: vec4<f32>;
 
     ${hasHeightBindings ? `
     let coordC = vec2<i32>(global_id.xy);
-    let heightSample = textureLoad(heightMap, coordC, 0);
+    let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
     let h = heightSample.r;
     let slope = heightSample.g;
     ` : `
-    let h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
-    var slope: f32 = 0.0;
+    var h: f32;
+    var slope: f32;
     if (uniforms.face >= 0) {
-        let ns = computeStableNormalSlopeSphere(uniforms.face, u, v);
-        slope = ns.slope;
+        let hs = baseHeightSlopeSphere(uniforms.face, u, v, unitDir);
+        h = hs.h;
+        slope = hs.slope;
     } else {
+        h = calculateTerrainHeight(wx, wy, uniforms.seed, unitDir);
         let ns = computeNormalSlopeFlat(wx, wy);
         slope = ns.slope;
     }
     `}
 
     if (h <= oceanLevel) {
-        if (uniforms.outputType == 7) {
-            output = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-        } else {
-            output = vec4<f32>(
-                encodeSmoothSplatTileId(SURFACE_WATER),
-                encodeSmoothSplatTileId(255u),
-                encodeSmoothSplatTileId(255u),
-                encodeSmoothSplatTileId(255u)
-            );
-        }
+        splatWeights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+        splatIds = vec4<f32>(
+            encodeSmoothSplatTileId(SURFACE_WATER),
+            encodeSmoothSplatTileId(255u),
+            encodeSmoothSplatTileId(255u),
+            encodeSmoothSplatTileId(255u)
+        );
     } else if (biomeConfigUniforms.biomeCount > 0u) {
         let payload = computeAuthoredSmoothSplatPayload(slope, h, wx, wy, unitDir, uniforms.seed);
         let totalTop = payload.weights[0] + payload.weights[1] + payload.weights[2] + payload.weights[3];
 
         if (totalTop <= 0.00001) {
-            if (uniforms.outputType == 7) {
-                output = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-            } else {
-                output = vec4<f32>(
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u)
-                );
-            }
-        } else if (uniforms.outputType == 7) {
-            output = vec4<f32>(
+            splatWeights = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+            splatIds = vec4<f32>(
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u)
+            );
+        } else {
+            splatWeights = vec4<f32>(
                 payload.weights[0] / totalTop,
                 payload.weights[1] / totalTop,
                 payload.weights[2] / totalTop,
                 payload.weights[3] / totalTop
             );
-        } else {
-            output = vec4<f32>(
+            splatIds = vec4<f32>(
                 encodeSmoothSplatTileId(payload.tileIds[0]),
                 encodeSmoothSplatTileId(payload.tileIds[1]),
                 encodeSmoothSplatTileId(payload.tileIds[2]),
@@ -1212,25 +1489,21 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
 
         let totalTop = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
         if (totalTop <= 0.00001) {
-            if (uniforms.outputType == 7) {
-                output = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-            } else {
-                output = vec4<f32>(
-                    encodeSmoothSplatTileId(SURFACE_GRASS_BASE),
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u),
-                    encodeSmoothSplatTileId(255u)
-                );
-            }
-        } else if (uniforms.outputType == 7) {
-            output = vec4<f32>(
+            splatWeights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+            splatIds = vec4<f32>(
+                encodeSmoothSplatTileId(SURFACE_GRASS_BASE),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u),
+                encodeSmoothSplatTileId(255u)
+            );
+        } else {
+            splatWeights = vec4<f32>(
                 topWeights[0] / totalTop,
                 topWeights[1] / totalTop,
                 topWeights[2] / totalTop,
                 topWeights[3] / totalTop
             );
-        } else {
-            output = vec4<f32>(
+            splatIds = vec4<f32>(
                 encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[0])),
                 encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[1])),
                 encodeSmoothSplatTileId(smoothSplatRepresentativeTileId(topIndices[2])),
@@ -1238,14 +1511,15 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
             );
         }
     }
+    output = select(splatIds, splatWeights, uniforms.outputType == 7);
+    ${hasSmoothSplatIdsBinding ? 'textureStore(smoothSplatIdsTexture, vec2<i32>(global_id.xy), splatIds);' : ''}
 }
 
 ${hasTileBindings ? `
 else if (uniforms.outputType == 4) {
     let coordC = vec2<i32>(global_id.xy);
     // heightMap here is heightBase: .r = base height, .g = cached stable slope.
-    // Was: computeStableNormalSlopeSphere → 4× calculateTerrainHeight per pixel.
-    let heightSample = textureLoad(heightMap, coordC, 0);
+    let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
     let baseH = heightSample.r;
     let slope = heightSample.g;
     let tileSample = textureLoad(tileMap, coordC, 0);
@@ -1267,10 +1541,10 @@ else if (uniforms.outputType == 4) {
     var micro = select(
         0.0,
         tileMicroDetail(wx, wy, unitDir, uniforms.seed, slope, profile, tileId),
-        dispMeters > 0.0
+        dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
-    let microH = micro * (dispMeters / maxTerrainHeightM()) * microGain;
+    let microH = regionalValleyMicro(micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(unitDir) * regionalBasinMicroKeep(unitDir), unitDir);
     let finalH = softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
     output = vec4<f32>(finalH, 0.0, 0.0, 1.0);
 }

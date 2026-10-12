@@ -261,6 +261,86 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 v.setFloat32(396, Number.isFinite(z4e[3]) ? z4e[3] : 0.0, true);
             },
 
+        // Bytes 400-447: river channel (see featureRivers.wgsl.js / the
+        // Uniforms struct's riverAnchor/riverChannelDir/riverParams). This
+        // was previously-unused, already-allocated uniform buffer space
+        // (the buffer is 512 bytes; climate zones end at byte 400).
+        _writeRiverUniforms(v, uniforms) {
+                const anchor = Array.isArray(uniforms.riverAnchor) ? uniforms.riverAnchor : [0, 1, 0, 0];
+                const channelDir = Array.isArray(uniforms.riverChannelDir) ? uniforms.riverChannelDir : [1, 0, 0, 0];
+                const params = Array.isArray(uniforms.riverParams) ? uniforms.riverParams : [16, 3, 128, 0];
+
+                v.setFloat32(400, Number.isFinite(anchor[0]) ? anchor[0] : 0.0, true);
+                v.setFloat32(404, Number.isFinite(anchor[1]) ? anchor[1] : 1.0, true);
+                v.setFloat32(408, Number.isFinite(anchor[2]) ? anchor[2] : 0.0, true);
+                v.setFloat32(412, Number.isFinite(anchor[3]) ? anchor[3] : 0.0, true);
+
+                v.setFloat32(416, Number.isFinite(channelDir[0]) ? channelDir[0] : 1.0, true);
+                v.setFloat32(420, Number.isFinite(channelDir[1]) ? channelDir[1] : 0.0, true);
+                v.setFloat32(424, Number.isFinite(channelDir[2]) ? channelDir[2] : 0.0, true);
+                v.setFloat32(428, 0.0, true);
+
+                v.setFloat32(432, Number.isFinite(params[0]) ? params[0] : 16.0, true);
+                v.setFloat32(436, Number.isFinite(params[1]) ? params[1] : 3.0, true);
+                v.setFloat32(440, Number.isFinite(params[2]) ? params[2] : 128.0, true);
+                v.setFloat32(444, 0.0, true);
+
+                this._writeRiverPathUniforms(v, uniforms);
+                this._writeErosionSeedUniforms(v, uniforms);
+            },
+
+        // Bytes 448-719: traced river path (HydrologyPrecompute.js), see the
+        // Uniforms struct's riverPathCount/riverPath. Absent/empty path is a
+        // valid, expected state (before the precompute has run, or if it
+        // found nothing) — featureRiverHeight() falls back to the straight
+        // riverAnchor/riverChannelDir line in that case, so this just writes
+        // count=0 rather than erroring.
+        _writeRiverPathUniforms(v, uniforms) {
+                const MAX_POINTS = 16;
+                const path = Array.isArray(uniforms.riverPath) ? uniforms.riverPath : [];
+                const count = Math.max(0, Math.min(MAX_POINTS, path.length));
+
+                v.setInt32(448, count, true);
+                v.setInt32(452, 0, true);
+                v.setInt32(456, 0, true);
+                v.setInt32(460, 0, true);
+
+                for (let i = 0; i < MAX_POINTS; i++) {
+                    const base = 464 + i * 16;
+                    const p = i < count ? path[i] : null;
+                    v.setFloat32(base, p && Number.isFinite(p.along) ? p.along : 0.0, true);
+                    v.setFloat32(base + 4, p && Number.isFinite(p.across) ? p.across : 0.0, true);
+                    v.setFloat32(base + 8, p && Number.isFinite(p.widthScale) ? p.widthScale : 1.0, true);
+                    v.setFloat32(base + 12, p && Number.isFinite(p.depthScale) ? p.depthScale : 1.0, true);
+                }
+            },
+
+        // Bytes 720-879: stage-2 confirmed erosion-seed basins
+        // (ErosionSeedVerifier.js), see the Uniforms struct's
+        // erosionConfirmedCount/erosionConfirmed. Empty is a valid, expected
+        // state (before verification has run, or nothing survived it) —
+        // featureErosionSeedsHeight() just stays at level-1 nudge size for
+        // every candidate in that case, not an error.
+        _writeErosionSeedUniforms(v, uniforms) {
+                const MAX_ENTRIES = 9;
+                const confirmed = Array.isArray(uniforms.erosionConfirmed) ? uniforms.erosionConfirmed : [];
+                const count = Math.max(0, Math.min(MAX_ENTRIES, confirmed.length));
+
+                v.setInt32(720, count, true);
+                v.setInt32(724, 0, true);
+                v.setInt32(728, 0, true);
+                v.setInt32(732, 0, true);
+
+                for (let i = 0; i < MAX_ENTRIES; i++) {
+                    const base = 736 + i * 16;
+                    const e = i < count ? confirmed[i] : null;
+                    v.setFloat32(base, e && Number.isFinite(e.regionX) ? e.regionX : 0.0, true);
+                    v.setFloat32(base + 4, e && Number.isFinite(e.regionY) ? e.regionY : 0.0, true);
+                    v.setFloat32(base + 8, e && Number.isFinite(e.radiusScale) ? e.radiusScale : 1.0, true);
+                    v.setFloat32(base + 12, e && Number.isFinite(e.depthScale) ? e.depthScale : 1.0, true);
+                }
+            },
+
         _computeSplatPaddingTexels() {
                 const kernelRadius = Math.max(0.5, 0.5 * Math.max(this.splatKernelSize, 1));
                 const slotExpansion = Math.max(0.0, this.splatSlotSupportExpansionTexels ?? 0.0);
@@ -298,7 +378,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 v.setInt32(52, face !== null && face !== undefined ? (face | 0) : -1, true);
 
                 v.setInt32(56, this.debugMode, true);
-                v.setInt32(60, 0, true);
+                // featureDisableMask: terrain feature toggles (terrainFeatureToggles.js).
+                v.setUint32(60, (this.terrainFeatureDisableMask ?? 0) >>> 0, true);
                 v.setFloat32(64, 0.0, true);
                 v.setFloat32(68, 0.0, true);
 
@@ -336,6 +417,7 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
 
                 this._writeTerrainPaddingUniforms(v, uniforms);
                 this._writeClimateZoneUniforms(v, uniforms);
+                this._writeRiverUniforms(v, uniforms);
 
                 return v;
             },
@@ -393,6 +475,19 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 }
 
                 const paddedTileMap = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
+                // Shared padded base height (.r = height, .g = LOD-stable
+                // slope), computed once by output type 0 over the padded
+                // region. The tile-id and smooth-splat source passes below
+                // then read it through the height-input pipelines instead of
+                // each re-evaluating the full height noise 5x per texel
+                // (height + 4-sample stable slope). Same uniforms, so the
+                // values are the ones those passes computed inline before.
+                // Set _paddedSplatSharedHeightBase = false to restore the old
+                // per-pass evaluation.
+                const useSharedHeightBase = this._paddedSplatSharedHeightBase !== false;
+                const paddedHeightBase = useSharedHeightBase
+                    ? this.createGPUTexture(paddedSize, paddedSize, 'rgba32float')
+                    : null;
                 const paddedSmoothSplatData = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
                 const paddedSmoothSplatIndex = this.createGPUTexture(paddedSize, paddedSize, 'rgba8unorm');
                 const paletteSize = this._getSplatPaletteDimensions(
@@ -453,6 +548,22 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 }
                 this.device.queue.writeBuffer(this._paddedTileGenUniformBuffer, 0, this._terrainUniformScratch);
 
+                if (useSharedHeightBase) {
+                    this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
+                    const v = new DataView(this._terrainUniformScratch);
+                    v.setInt32(48, 0, true);        // outputType = 0 (base height + stable slope)
+                    v.setFloat32(64, uvShift, true);
+                    v.setFloat32(68, uvShift, true);
+                    if (!this._paddedHeightBaseUniformBuffer) {
+                        this._paddedHeightBaseUniformBuffer = this.device.createBuffer({
+                            label: 'PaddedHeightBaseUniform',
+                            size: this._terrainUniformScratch.byteLength,
+                            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                        });
+                    }
+                    this.device.queue.writeBuffer(this._paddedHeightBaseUniformBuffer, 0, this._terrainUniformScratch);
+                }
+
                 this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
                 {
                     const v = new DataView(this._terrainUniformScratch);
@@ -473,32 +584,42 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     this._terrainUniformScratch
                 );
 
-                this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
-                {
+                const fuseSmoothSplatSource = useSharedHeightBase && this.terrainConfig?.fuseSmoothSplatSource !== false;
+                if (!fuseSmoothSplatSource) {
+                    this._fillTerrainUniformScratch(chunkCoordX, chunkCoordY, innerSize, chunkGridSize, face);
                     const v = new DataView(this._terrainUniformScratch);
                     v.setInt32(48, 8, true);
                     v.setFloat32(64, uvShift, true);
                     v.setFloat32(68, uvShift, true);
+                    if (!this._paddedSmoothSplatIndexUniformBuffer) {
+                        this._paddedSmoothSplatIndexUniformBuffer = this.device.createBuffer({
+                            label: 'PaddedSmoothSplatIndexUniform',
+                            size: this._terrainUniformScratch.byteLength,
+                            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                        });
+                    }
+                    this.device.queue.writeBuffer(this._paddedSmoothSplatIndexUniformBuffer, 0, this._terrainUniformScratch);
                 }
-                if (!this._paddedSmoothSplatIndexUniformBuffer) {
-                    this._paddedSmoothSplatIndexUniformBuffer = this.device.createBuffer({
-                        label: 'PaddedSmoothSplatIndexUniform',
-                        size: this._terrainUniformScratch.byteLength,
-                        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-                    });
-                }
-                this.device.queue.writeBuffer(
-                    this._paddedSmoothSplatIndexUniformBuffer,
-                    0,
-                    this._terrainUniformScratch
-                );
 
-                const { pipeline: tileGenPipeline, bindGroupLayout: tileGenBindGroupLayout } =
-                    this._getTerrainPipelineForFormat('rgba8unorm');
-                const { pipeline: smoothSourcePipeline, bindGroupLayout: smoothSourceBindGroupLayout } =
-                    this._getTerrainPipelineForFormat('rgba8unorm');
-                const { pipeline: splatPalettePipeline, bindGroupLayout: splatPaletteBindGroupLayout } =
-                    this._getSplatPalettePipelineForFormat('rgba8unorm');
+                const { pipeline: tileGenPipeline, bindGroupLayout: tileGenBindGroupLayout } = useSharedHeightBase
+                    ? this._getHeightInputPipelineForFormat('rgba8unorm', 'rgba32float')
+                    : this._getTerrainPipelineForFormat('rgba8unorm');
+                const { pipeline: smoothSourcePipeline, bindGroupLayout: smoothSourceBindGroupLayout } = useSharedHeightBase
+                    ? this._getHeightInputPipelineForFormat('rgba8unorm', 'rgba32float', { withSmoothSplatIds: fuseSmoothSplatSource })
+                    : this._getTerrainPipelineForFormat('rgba8unorm');
+                const heightBasePipeline = useSharedHeightBase
+                    ? this._getTerrainPipelineForFormat('rgba32float')
+                    : null;
+                const heightInputEntry = useSharedHeightBase
+                    ? [{ binding: 2, resource: paddedHeightBase.createView() }]
+                    : [];
+                // Parallel-reduction palette (one workgroup per palette texel);
+                // set _splatPaletteParallelReduce = false for the old
+                // one-thread-per-texel pass.
+                const useReducePalette = this._splatPaletteParallelReduce !== false;
+                const { pipeline: splatPalettePipeline, bindGroupLayout: splatPaletteBindGroupLayout } = useReducePalette
+                    ? this._getSplatPaletteReducePipelineForFormat('rgba8unorm')
+                    : this._getSplatPalettePipelineForFormat('rgba8unorm');
                 const { pipeline: splatPipeline, bindGroupLayout: splatBindGroupLayout } =
                     this._getSplatPipelineForFormats(
                         splatPass.heightFormat || 'r32float',
@@ -522,6 +643,24 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
 
                 const enc = this.device.createCommandEncoder({ label: 'PaddedQuadtreeSplat' });
 
+                if (useSharedHeightBase) {
+                    const pass = enc.beginComputePass({ label: 'GenPaddedHeightBase' });
+                    pass.setPipeline(heightBasePipeline.pipeline);
+                    pass.setBindGroup(0, this.device.createBindGroup({
+                        layout: heightBasePipeline.bindGroupLayout,
+                        entries: [
+                            { binding: 0, resource: { buffer: this._paddedHeightBaseUniformBuffer } },
+                            { binding: 1, resource: paddedHeightBase.createView() }
+                        ]
+                    }));
+                    this._setTerrainBiomeBindGroup(pass);
+                    pass.dispatchWorkgroups(
+                        Math.ceil(paddedSize / 8),
+                        Math.ceil(paddedSize / 8)
+                    );
+                    pass.end();
+                }
+
                 {
                     const pass = enc.beginComputePass({ label: 'GenPaddedTileMap' });
                     pass.setPipeline(tileGenPipeline);
@@ -529,7 +668,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         layout: tileGenBindGroupLayout,
                         entries: [
                             { binding: 0, resource: { buffer: this._paddedTileGenUniformBuffer } },
-                            { binding: 1, resource: paddedTileMap.createView() }
+                            { binding: 1, resource: paddedTileMap.createView() },
+                            ...heightInputEntry
                         ]
                     }));
                     this._setTerrainBiomeBindGroup(pass);
@@ -541,13 +681,15 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 }
 
                 {
-                    const pass = enc.beginComputePass({ label: 'GenPaddedSmoothSplatWeights' });
+                    const pass = enc.beginComputePass({ label: fuseSmoothSplatSource ? 'GenPaddedSmoothSplatPair' : 'GenPaddedSmoothSplatWeights' });
                     pass.setPipeline(smoothSourcePipeline);
                     pass.setBindGroup(0, this.device.createBindGroup({
                         layout: smoothSourceBindGroupLayout,
                         entries: [
                             { binding: 0, resource: { buffer: this._paddedSmoothSplatDataUniformBuffer } },
-                            { binding: 1, resource: paddedSmoothSplatData.createView() }
+                            { binding: 1, resource: paddedSmoothSplatData.createView() },
+                            ...heightInputEntry,
+                            ...(fuseSmoothSplatSource ? [{ binding: 5, resource: paddedSmoothSplatIndex.createView() }] : [])
                         ]
                     }));
                     this._setTerrainBiomeBindGroup(pass);
@@ -558,14 +700,15 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     pass.end();
                 }
 
-                {
+                if (!fuseSmoothSplatSource) {
                     const pass = enc.beginComputePass({ label: 'GenPaddedSmoothSplatIds' });
                     pass.setPipeline(smoothSourcePipeline);
                     pass.setBindGroup(0, this.device.createBindGroup({
                         layout: smoothSourceBindGroupLayout,
                         entries: [
                             { binding: 0, resource: { buffer: this._paddedSmoothSplatIndexUniformBuffer } },
-                            { binding: 1, resource: paddedSmoothSplatIndex.createView() }
+                            { binding: 1, resource: paddedSmoothSplatIndex.createView() },
+                            ...heightInputEntry
                         ]
                     }));
                     this._setTerrainBiomeBindGroup(pass);
@@ -590,8 +733,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         ]
                     }));
                     pass.dispatchWorkgroups(
-                        Math.ceil(paletteSize.width / 8),
-                        Math.ceil(paletteSize.height / 8)
+                        useReducePalette ? paletteSize.width : Math.ceil(paletteSize.width / 8),
+                        useReducePalette ? paletteSize.height : Math.ceil(paletteSize.height / 8)
                     );
                     pass.end();
                 }
@@ -636,6 +779,28 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     pass.end();
                 }
 
+                // Instrumentation (2026-10-01): this gate silently skips the
+                // resolvedColor bake entirely if ANY input is missing — no
+                // error thrown, the generation task still "succeeds", so the
+                // tile still gets marked REFINED with resolvedColor left
+                // permanently zero-filled (alpha=0) and never retried. Testing
+                // whether this is firing, since it would explain a 100%-
+                // consistent (not timing/race-dependent) invalid-resolvedColor
+                // result on LOD4 — logged once per missing-input combination
+                // actually seen, not spammed per tile.
+                if (!(splatPass.resolvedColorTex && splatPass.tileTex &&
+                      splatPass.atlasTexture && splatPass.tileTypeLookup)) {
+                    const missing = [
+                        !splatPass.resolvedColorTex && 'resolvedColorTex',
+                        !splatPass.tileTex && 'tileTex',
+                        !splatPass.atlasTexture && 'atlasTexture',
+                        !splatPass.tileTypeLookup && 'tileTypeLookup'
+                    ].filter(Boolean).join(',');
+                    if (this._loggedMissingResolvedColorInputs !== missing) {
+                        this._loggedMissingResolvedColorInputs = missing;
+                        Logger.warn(`[ResolvedColorBake] SKIPPED — missing: ${missing}`);
+                    }
+                }
                 if (
                     splatPass.resolvedColorTex &&
                     splatPass.tileTex &&
@@ -740,6 +905,24 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     }
                 }
 
+                // The caller can copy these outputs into the atlas and
+                // destroy them before our asynchronous diagnostic readback.
+                // Capture owned copies in this submission, while the outputs
+                // are still alive. Only the first three startup probes pay
+                // for these copies; ordinary terrain generation is unchanged.
+                let diagnosticSplatPass = null;
+                if (shouldRunProbePasses) {
+                    diagnosticSplatPass = {
+                        ...splatPass,
+                        tileTex: this.createSampledGPUTexture(innerSize, innerSize, splatPass.tileFormat || 'r8unorm'),
+                        splatTex: this.createSampledGPUTexture(innerSize, innerSize, 'rgba8unorm')
+                    };
+                    enc.copyTextureToTexture({ texture: splatPass.tileTex },
+                        { texture: diagnosticSplatPass.tileTex }, [innerSize, innerSize]);
+                    enc.copyTextureToTexture({ texture: splatPass.splatTex },
+                        { texture: diagnosticSplatPass.splatTex }, [innerSize, innerSize]);
+                }
+
                 this.device.queue.submit([enc.finish()]);
                 const validationErrorPromise = shouldCaptureValidationError
                     ? this.device.popErrorScope().catch(() => null)
@@ -751,8 +934,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 ])
                     .then(async ([, validationError]) => {
                         try {
-                            await this._debugAnalyzeQuadtreeSplatPass(
-                                splatPass,
+                            if (diagnosticSplatPass) await this._debugAnalyzeQuadtreeSplatPass(
+                                diagnosticSplatPass,
                                 paddedTileMap,
                                 innerSize,
                                 paddedSize,
@@ -769,9 +952,16 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                             Logger.warn(`${SPLAT_STEP_PREFIX} [SplatDebug] quadtree splat diagnostics failed: ${err?.message || err}`);
                         }
                         try { paddedTileMap.destroy(); } catch { /* ignore cleanup failure */ }
+                        if (paddedHeightBase) {
+                            try { paddedHeightBase.destroy(); } catch { /* ignore cleanup failure */ }
+                        }
                         try { paddedSmoothSplatData.destroy(); } catch { /* ignore cleanup failure */ }
                         try { paddedSmoothSplatIndex.destroy(); } catch { /* ignore cleanup failure */ }
                         try { splatPaletteTex.destroy(); } catch { /* ignore cleanup failure */ }
+                        if (diagnosticSplatPass) {
+                            try { diagnosticSplatPass.tileTex.destroy(); } catch { /* ignore cleanup failure */ }
+                            try { diagnosticSplatPass.splatTex.destroy(); } catch { /* ignore cleanup failure */ }
+                        }
                         if (debugProbeTextures) {
                             try { debugProbeTextures.constantWrite.destroy(); } catch { /* ignore cleanup failure */ }
                             try { debugProbeTextures.tileEcho.destroy(); } catch { /* ignore cleanup failure */ }
@@ -877,9 +1067,11 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                 }
 
                 if (this._isHeightInputTerrainPass(terrainPass)) {
+                    const withBaseHeight = terrainPass.outputType === 1 && !!terrainPass.baseHeightTexture;
                     const { pipeline, bindGroupLayout } = this._getHeightInputPipelineForFormat(
                         terrainPass.format,
-                        terrainPass.heightTextureFormat
+                        terrainPass.heightTextureFormat,
+                        { withBaseHeight }
                     );
                     return {
                         pipeline,
@@ -887,7 +1079,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                         entries: [
                             { binding: 0, resource: { buffer: uniformBuffer } },
                             { binding: 1, resource: terrainPass.texture.createView() },
-                            { binding: 2, resource: terrainPass.heightTexture.createView() }
+                            { binding: 2, resource: terrainPass.heightTexture.createView() },
+                            ...(withBaseHeight ? [{ binding: 4, resource: terrainPass.baseHeightTexture.createView() }] : [])
                         ]
                     };
                 }

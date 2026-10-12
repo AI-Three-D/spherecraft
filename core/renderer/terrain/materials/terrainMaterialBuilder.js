@@ -100,7 +100,10 @@ export class TerrainMaterialBuilder {
                 ...(planetAO || {}),
             };
 
-            const enableTerrainAO = terrainAOConfig.enabled ?? true;
+            // No AO on LODs coarser than terrainAO.maxLod: their layers are
+            // never baked (TerrainAOBaker resets them to no occlusion).
+            const aoMaxLod = Number.isFinite(terrainAOConfig.maxLod) ? terrainAOConfig.maxLod : Infinity;
+            const enableTerrainAO = (terrainAOConfig.enabled ?? true) && lod <= aoMaxLod;
             const macroLayerEnabled = terrainShaderConfig?.enableMacroLayer === false ? 0.0 : 1.0;
             const macroBlendStrength = Number.isFinite(terrainShaderConfig?.macroBlend)
                 ? Math.max(0, Math.min(1, terrainShaderConfig.macroBlend))
@@ -137,6 +140,7 @@ export class TerrainMaterialBuilder {
                     : 'rgba8unorm',
                 macro:      readGpuFormat(cachedTextures.macro),
                 resolvedColor: readGpuFormat(cachedTextures.resolvedColor),
+                coarseColor: readGpuFormat(cachedTextures.coarseColor),
             };
 
             if (enableTerrainAO) {
@@ -175,6 +179,97 @@ export class TerrainMaterialBuilder {
             const enableResolvedColorDebugBinding =
                 !overlayPass &&
                 cachedTextures.resolvedColor?._isArray === true;
+            // Solid-color tier: no texture dependency at all (only needs the
+            // geometry pass's own `tile` output, already always bound), so
+            // unlike resolvedColor there's no cachedTextures guard here.
+            const solidColorStartLod = Number.isFinite(terrainShaderConfig?.solidColorStartLod)
+                ? Math.floor(terrainShaderConfig.solidColorStartLod)
+                : Infinity;
+            const enableSolidColorTier =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorTierEnabled === true &&
+                lod >= solidColorStartLod;
+            // The single LOD just before the solid-color tier starts: fade
+            // its color toward the coarse tier's averaged color as a function
+            // of distance to camera (not tile/chunk boundaries), so the
+            // transition doesn't visually trace the chunk grid and the two
+            // tiers already agree on color by the time the real LOD5->LOD6
+            // mesh seam is reached.
+            const lodEdgeToSolidColorStrength = Number.isFinite(terrainShaderConfig?.lodEdgeToSolidColorStrength)
+                ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeToSolidColorStrength))
+                : 0.0;
+            const lodEdgeToSolidColorFadeStartMeters = Number.isFinite(terrainShaderConfig?.lodEdgeToSolidColorFadeStartMeters)
+                ? Math.max(0.0, terrainShaderConfig.lodEdgeToSolidColorFadeStartMeters)
+                : 3000.0;
+            const lodEdgeToSolidColorFadeEndMeters = Number.isFinite(terrainShaderConfig?.lodEdgeToSolidColorFadeEndMeters)
+                ? Math.max(lodEdgeToSolidColorFadeStartMeters + 1.0, terrainShaderConfig.lodEdgeToSolidColorFadeEndMeters)
+                : lodEdgeToSolidColorFadeStartMeters + 3000.0;
+            // In-tile alternative to the distance fade (enabled by
+            // solidColorTierEdgeBlendEnabled): the same "LOD just before the
+            // solid tier" ramps into the tier's averaged color across the
+            // part of each of its tiles that borders a coarser neighbor
+            // (geometry LOD, from the instance builder's neighborLODs.y mask),
+            // reaching the solid color exactly at the shared edge. Tied to the
+            // tile instead of camera distance, so it lines up with the LOD
+            // boundary on any canvas size. Replaces the distance fade for
+            // that LOD when enabled.
+            const isLodBeforeSolidTier =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorTierEnabled === true &&
+                Number.isFinite(solidColorStartLod) &&
+                lod === solidColorStartLod - 1;
+            const enableTierEdgeBlend =
+                isLodBeforeSolidTier &&
+                terrainShaderConfig?.solidColorTierEdgeBlendEnabled === true;
+            const tierEdgeBlendWidth = Number.isFinite(terrainShaderConfig?.solidColorTierEdgeBlendWidth)
+                ? Math.min(1.0, Math.max(0.01, terrainShaderConfig.solidColorTierEdgeBlendWidth))
+                : 0.5;
+            const tierEdgeBlendStrength = Number.isFinite(terrainShaderConfig?.solidColorTierEdgeBlendStrength)
+                ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.solidColorTierEdgeBlendStrength))
+                : 1.0;
+            // Camera-distance ramp into the solid tier, compiled into EVERY LOD
+            // below it so all of them evaluate the same weight at the same
+            // distance (no step when a tile splits or merges). The ramp's
+            // start/end are uniforms (tierFadeStart/tierFadeEnd) refreshed
+            // each frame by QuadtreeTerrainRenderer from the traversal's LOD
+            // metric; they default to 0/0, which disables the ramp.
+            const enableTierDistanceFade =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorTierEnabled === true &&
+                terrainShaderConfig?.solidColorTierDistanceFadeEnabled === true &&
+                Number.isFinite(solidColorStartLod) &&
+                lod < solidColorStartLod;
+            // World-size averaging window for sampleChunkAverageCoarseColor,
+            // so every tier averages the same ground area (0 = legacy 35 % of
+            // the tile). The shader converts it to tile UV per instance using
+            // the instance's own tile size and the cube-face size.
+            const solidColorAverageWindowMeters = Number.isFinite(terrainShaderConfig?.solidColorAverageWindowMeters)
+                ? Math.max(0, terrainShaderConfig.solidColorAverageWindowMeters)
+                : 0;
+            const faceSizeMeters = Number.isFinite(planetConfig?.radius)
+                ? 2.0 * planetConfig.radius
+                : 0;
+            // Every detail LOD (below the solid tier) draws the solid tier's
+            // flat color instead of placeholder material when its drawn layer
+            // has no detail material yet (instance flag from the instance
+            // builder): cold start, or a tile borrowing a flat-tier ancestor,
+            // which never generates splat/prebaked color.
+            const enableIncompleteSourceFlat =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorTierEnabled === true &&
+                Number.isFinite(solidColorStartLod) &&
+                lod < solidColorStartLod;
+            // Baked, mipmapped flat-tier color from the tile pool (geometry
+            // stage). When present the shader averages it with one filtered
+            // sample instead of 64 tile-id loads per pixel.
+            const hasCoarseColorTexture =
+                !overlayPass &&
+                terrainShaderConfig?.solidColorBakedTexture !== false &&
+                cachedTextures.coarseColor?._isArray === true;
+            const enableLodEdgeToSolidColor =
+                isLodBeforeSolidTier &&
+                !enableTierEdgeBlend &&
+                !enableTierDistanceFade;
 
 
             const grassConfig = planetConfig?.grassConfig ?? null;
@@ -196,6 +291,7 @@ export class TerrainMaterialBuilder {
 
             const shaderOptions = {
                 tileCategories,
+                tileAverageColors: opts.tileAverageColors ?? null,
                 maxLightIndices: 8192,
                 useArrayTextures,
                 grassTileTypeIds: uniqueGrassTileTypeIds,
@@ -217,6 +313,19 @@ export class TerrainMaterialBuilder {
                 enableLod0ResolvedColor,
                 enableLodEdgeResolvedColor,
                 enableResolvedColorDebugBinding,
+                enableSolidColorTier,
+                enableLodEdgeToSolidColor,
+                lodEdgeToSolidColorStrength,
+                lodEdgeToSolidColorFadeStartMeters,
+                lodEdgeToSolidColorFadeEndMeters,
+                enableTierEdgeBlend,
+                tierEdgeBlendWidth,
+                tierEdgeBlendStrength,
+                enableTierDistanceFade,
+                enableIncompleteSourceFlat,
+                hasCoarseColorTexture,
+                solidColorAverageWindowMeters,
+                faceSizeMeters,
                 fixedMaterialFamiliesEnabled,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
@@ -228,6 +337,8 @@ export class TerrainMaterialBuilder {
                 useStorageBuffer,
                 lod,
                 terrainShaderConfig,
+                enableTierEdgeBlend,
+                forwardTierFlags: enableIncompleteSourceFlat,
                 debugMode: debugVertexMode
             });
             const fragmentShader = overlayPass
@@ -271,6 +382,9 @@ export class TerrainMaterialBuilder {
             }
             if (enableResolvedColor || enableLod0ResolvedColor || enableLodEdgeResolvedColor || enableResolvedColorDebugBinding) {
                 defines.USE_RESOLVED_COLOR_TEXTURE = true;
+            }
+            if (hasCoarseColorTexture) {
+                defines.USE_COARSE_COLOR_TEXTURE = true;
             }
 
         // =============================================
@@ -328,6 +442,7 @@ splatIndexMap: { value: cachedTextures.splatIndex },
 splatValidMap: { value: cachedTextures.splatValid },
 macroMaskTexture: { value: cachedTextures.macro },
 resolvedColorTexture: { value: cachedTextures.resolvedColor },
+coarseColorTexture: { value: cachedTextures.coarseColor ?? null },
             // === LOOKUP TABLES ===
             tileTypeLookup: { value: lookupTables.tileTypeLookup },
             macroTileTypeLookup: { value: lookupTables.macroTileTypeLookup },
@@ -356,7 +471,11 @@ resolvedColorTexture: { value: cachedTextures.resolvedColor },
             macroNoiseWeight: { value: macroNoiseWeight },
             terrainDebugMode: { value: debugMode },
             terrainLayerViewMode: { value: 0 },
-            
+            // Distance ramp into the solid-color tier (camera distance, m).
+            // Written every frame by QuadtreeTerrainRenderer; 0/0 = off.
+            tierFadeStart: { value: 0.0 },
+            tierFadeEnd: { value: 0.0 },
+
             tileScale: { value: 1.0 },
             isFeature: { value: 0.0 },
 

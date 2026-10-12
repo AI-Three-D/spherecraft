@@ -7,6 +7,7 @@
 import { Matrix4, Vector4 } from '../../../shared/math/index.js';
 import { TerrainGeometryBuilder } from './geometry/terrainGeometryBuilder.js';
 import { TerrainMaterialBuilder } from './materials/terrainMaterialBuilder.js';
+import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
 import { Logger } from '../../../shared/Logger.js';
 
 export class QuadtreeTerrainRenderer {
@@ -127,6 +128,7 @@ export class QuadtreeTerrainRenderer {
         const instanceBuffer = this.tileManager.getInstanceBuffer();
         const indirectBuffer = this.tileManager.getIndirectArgsBuffer();
         const overlayEnabled = this._isHoverOverlayEnabled();
+        this._tierFade = this._computeTierFadeDistances();
 
         for (let lod = 0; lod <= this._maxGeomLOD; lod++) {
             this._drawTerrainLod(
@@ -173,6 +175,13 @@ export class QuadtreeTerrainRenderer {
     _bindChunkInstances(material, instanceBuffer) {
         if (!material.storageBuffers) material.storageBuffers = {};
         material.storageBuffers.chunkInstances = instanceBuffer;
+        // Lake water for the terrain shader (bind group 3, bindings 12-15).
+        if (material.uniforms) material.uniforms._waterData = this._waterData ?? { value: null };
+    }
+
+    /** Water data (lakes, rivers: core/world/water/WaterGpuData.js) for the terrain shader, or null. */
+    setWaterData(data) {
+        this._waterData = { value: data || null };
     }
 
     setShadowRenderer(renderer) {
@@ -261,6 +270,7 @@ export class QuadtreeTerrainRenderer {
             terrainAODefaults: this.terrainAODefaults,
             groundFieldDefaults: this.groundFieldDefaults,
             tileCategories: this.tileCategories,
+            tileAverageColors: this.textureManager?.getCategoryAverageColorMap?.(this.tileCategories) || null,
             backend: this.backend,
             atlasTextures: context.atlasTextures,
             lookupTables: context.lookupTables,
@@ -367,6 +377,24 @@ export class QuadtreeTerrainRenderer {
         if (uniforms.terrainLayerViewMode) {
             uniforms.terrainLayerViewMode.value = this._terrainLayerViewMode;
         }
+        if (uniforms.tierFadeStart && uniforms.tierFadeEnd) {
+            uniforms.tierFadeStart.value = this._tierFade?.start ?? 0.0;
+            uniforms.tierFadeEnd.value = this._tierFade?.end ?? 0.0;
+        }
+    }
+
+    // Camera-distance ramp into the solid-color tier, derived each frame from
+    // the traversal's LOD metric (formula in solidTierFade.js, shared with the
+    // tile streamer's refinement skip). null = ramp off.
+    _computeTierFadeDistances() {
+        const quadtree = this.tileManager?.quadtreeGPU;
+        return computeSolidTierFadeDistances({
+            lodFactor: quadtree?.lodFactor,
+            faceSize: quadtree?.faceSize,
+            maxDepth: quadtree?.maxDepth,
+            lodErrorThreshold: quadtree?.lodErrorThreshold,
+            shaderConfig: this.engineConfig?.rendering?.terrainShader
+        });
     }
 
     _applyTerrainHoverUniforms(uniforms) {

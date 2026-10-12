@@ -122,6 +122,18 @@ export class EngineConfig {
           terrainShader.lodEdgeShadowStrength ?? 1.0,
           'rendering.terrainShader.lodEdgeShadowStrength'
         ),
+        lodEdgeToSolidColorStrength: requireNumber(
+          terrainShader.lodEdgeToSolidColorStrength ?? 0.0,
+          'rendering.terrainShader.lodEdgeToSolidColorStrength'
+        ),
+        lodEdgeToSolidColorFadeStartMeters: requireNumber(
+          terrainShader.lodEdgeToSolidColorFadeStartMeters ?? 3000.0,
+          'rendering.terrainShader.lodEdgeToSolidColorFadeStartMeters'
+        ),
+        lodEdgeToSolidColorFadeEndMeters: requireNumber(
+          terrainShader.lodEdgeToSolidColorFadeEndMeters ?? 6000.0,
+          'rendering.terrainShader.lodEdgeToSolidColorFadeEndMeters'
+        ),
         pointSampleLodStart: requireInt(terrainShader.pointSampleLodStart ?? 2, 'rendering.terrainShader.pointSampleLodStart', 0),
         macroStartLod: requireInt(terrainShader.macroStartLod ?? 2, 'rendering.terrainShader.macroStartLod', 0),
         splatTop2MaxLod: requireInt(terrainShader.splatTop2MaxLod ?? 2, 'rendering.terrainShader.splatTop2MaxLod', -1),
@@ -129,6 +141,70 @@ export class EngineConfig {
         splatDominantMinWeight: requireNumber(terrainShader.splatDominantMinWeight ?? 0.85, 'rendering.terrainShader.splatDominantMinWeight'),
         resolvedColorEnabled: requireBool(terrainShader.resolvedColorEnabled ?? true, 'rendering.terrainShader.resolvedColorEnabled'),
         resolvedColorStartLod: requireInt(terrainShader.resolvedColorStartLod ?? 0, 'rendering.terrainShader.resolvedColorStartLod', -1),
+        // Solid-color tier: a flat color from the tile's raw classification
+        // (geometry-pass output, always ready — no refinement wait), lit by
+        // the same ambient/diffuse/shadow/AO pipeline every other tier uses.
+        // Disabled (Infinity) unless a planet config opts in with an actual
+        // LOD, so this is a no-op everywhere until explicitly turned on.
+        solidColorTierEnabled: requireBool(terrainShader.solidColorTierEnabled ?? false, 'rendering.terrainShader.solidColorTierEnabled'),
+        solidColorStartLod: requireInt(terrainShader.solidColorStartLod ?? 99, 'rendering.terrainShader.solidColorStartLod', 0),
+        // In-tile blend into the solid-color tier: the LOD just before the
+        // tier ramps its color to the tier's averaged color across the part
+        // of each tile that borders a coarser (solid-tier) neighbor. When
+        // enabled it replaces the camera-distance fade above
+        // (lodEdgeToSolidColor*) for that LOD.
+        solidColorTierEdgeBlendEnabled: requireBool(
+          terrainShader.solidColorTierEdgeBlendEnabled ?? false,
+          'rendering.terrainShader.solidColorTierEdgeBlendEnabled'
+        ),
+        // Fraction of the tile (0..1, tile UV) the ramp spans, measured from
+        // the shared edge. 0.5 = half the tile, 1.0 = the whole tile.
+        solidColorTierEdgeBlendWidth: requireNumber(
+          terrainShader.solidColorTierEdgeBlendWidth ?? 0.5,
+          'rendering.terrainShader.solidColorTierEdgeBlendWidth'
+        ),
+        solidColorTierEdgeBlendStrength: requireNumber(
+          terrainShader.solidColorTierEdgeBlendStrength ?? 1.0,
+          'rendering.terrainShader.solidColorTierEdgeBlendStrength'
+        ),
+        // Camera-distance ramp into the solid-color tier, evaluated the same
+        // way by every LOD below the tier. Its start/end are derived each
+        // frame from the traversal's LOD metric by QuadtreeTerrainRenderer.
+        solidColorTierDistanceFadeEnabled: requireBool(
+          terrainShader.solidColorTierDistanceFadeEnabled ?? false,
+          'rendering.terrainShader.solidColorTierDistanceFadeEnabled'
+        ),
+        solidColorTierDistanceFadeBandFraction: requireNumber(
+          terrainShader.solidColorTierDistanceFadeBandFraction ?? 0.3,
+          'rendering.terrainShader.solidColorTierDistanceFadeBandFraction'
+        ),
+        solidColorTierDistanceFadeHeightMarginMeters: requireNumber(
+          terrainShader.solidColorTierDistanceFadeHeightMarginMeters ?? 1000,
+          'rendering.terrainShader.solidColorTierDistanceFadeHeightMarginMeters'
+        ),
+        solidColorTierDistanceFadeEndSafety: requireNumber(
+          terrainShader.solidColorTierDistanceFadeEndSafety ?? 1.0,
+          'rendering.terrainShader.solidColorTierDistanceFadeEndSafety'
+        ),
+        // World-size averaging window (m) of the solid-tier color; 0 keeps
+        // the legacy window of 35 % of each tile.
+        // Samples per axis of the flat-color average in the terrain shader
+        // (N x N texture loads per pixel, 1-8).
+        // Bake the flat-tier color per tile (mipmapped) instead of
+        // averaging tile ids per pixel; false = per-pixel average.
+        solidColorBakedTexture: requireBool(
+          terrainShader.solidColorBakedTexture ?? true,
+          'rendering.terrainShader.solidColorBakedTexture'
+        ),
+        solidColorSampleGrid: requireInt(
+          terrainShader.solidColorSampleGrid ?? 8,
+          'rendering.terrainShader.solidColorSampleGrid',
+          1
+        ),
+        solidColorAverageWindowMeters: requireNumber(
+          terrainShader.solidColorAverageWindowMeters ?? 0,
+          'rendering.terrainShader.solidColorAverageWindowMeters'
+        ),
         lod0ResolvedColorEnabled: requireBool(
           terrainShader.lod0ResolvedColorEnabled ?? false,
           'rendering.terrainShader.lod0ResolvedColorEnabled'
@@ -140,6 +216,18 @@ export class EngineConfig {
         lod0ResolvedColorFadeEndMeters: requireNumber(
           terrainShader.lod0ResolvedColorFadeEndMeters ?? 40,
           'rendering.terrainShader.lod0ResolvedColorFadeEndMeters'
+        ),
+        // Chunk-relative fade window actually used by the LOD4->5
+        // resolved-color blend (see computeLod0ResolvedColorFade) — the
+        // meters fields above remain only as lod0AOFade's fallback default,
+        // an unrelated LOD0 contact-AO feature.
+        lod0ResolvedColorFadeStartChunks: requireNumber(
+          terrainShader.lod0ResolvedColorFadeStartChunks ?? 10,
+          'rendering.terrainShader.lod0ResolvedColorFadeStartChunks'
+        ),
+        lod0ResolvedColorFadeEndChunks: requireNumber(
+          terrainShader.lod0ResolvedColorFadeEndChunks ?? 25,
+          'rendering.terrainShader.lod0ResolvedColorFadeEndChunks'
         ),
         lod0AOFadeEnabled: requireBool(
           terrainShader.lod0AOFadeEnabled ?? false,
@@ -169,6 +257,18 @@ export class EngineConfig {
         clusteredMaxLod: requireInt(terrainShader.clusteredMaxLod ?? 1, 'rendering.terrainShader.clusteredMaxLod', 0),
         aerialMaxLod: requireInt(terrainShader.aerialMaxLod ?? 6, 'rendering.terrainShader.aerialMaxLod', 0),
         normalMapMaxLod: requireInt(terrainShader.normalMapMaxLod ?? 2, 'rendering.terrainShader.normalMapMaxLod', -1),
+        // These 4 were previously missing here entirely — EngineConfig
+        // builds its output object field-by-field, so any raw
+        // wizard_game/runtimeConfigs.js value not explicitly listed gets
+        // silently dropped, regardless of what's set there. That meant
+        // terrainChunkFragmentShaderBuilder.js's own hardcoded fallbacks
+        // (4500/1000/28000/2500, matched here) always won — confirmed via
+        // observation: raising normalMapDistanceMaxMeters in runtimeConfigs
+        // had zero visible effect at any altitude.
+        normalMapDistanceBaseMeters: requireNumber(terrainShader.normalMapDistanceBaseMeters ?? 4500, 'rendering.terrainShader.normalMapDistanceBaseMeters'),
+        normalMapDistanceAltitudeScaleMeters: requireNumber(terrainShader.normalMapDistanceAltitudeScaleMeters ?? 1000, 'rendering.terrainShader.normalMapDistanceAltitudeScaleMeters'),
+        normalMapDistanceMaxMeters: requireNumber(terrainShader.normalMapDistanceMaxMeters ?? 28000, 'rendering.terrainShader.normalMapDistanceMaxMeters'),
+        normalMapDistanceFadeMeters: requireNumber(terrainShader.normalMapDistanceFadeMeters ?? 2500, 'rendering.terrainShader.normalMapDistanceFadeMeters'),
         altitudeNormalMinMeters: requireNumber(terrainShader.altitudeNormalMinMeters ?? 8000, 'rendering.terrainShader.altitudeNormalMinMeters'),
         altitudeShadowMinMeters: requireNumber(terrainShader.altitudeShadowMinMeters ?? 12000, 'rendering.terrainShader.altitudeShadowMinMeters'),
         shadowDistanceMaxMeters: requireNumber(terrainShader.shadowDistanceMaxMeters ?? 1000, 'rendering.terrainShader.shadowDistanceMaxMeters'),
@@ -444,6 +544,7 @@ export class EngineConfig {
       cloudParticles:   requireBool(features.cloudParticles   ?? true, 'features.cloudParticles'),
       fogParticles:     requireBool(features.fogParticles     ?? true, 'features.fogParticles'),
       skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
+      rivers:           requireBool(features.rivers           ?? true, 'features.rivers'),
     };
 
     // ==================== GENERATION QUEUE (ENGINE-WIDE) ====================
@@ -453,7 +554,11 @@ export class EngineConfig {
       maxStartsPerFrame: requireInt(generationQueue.maxStartsPerFrame, 'generationQueue.maxStartsPerFrame', 1),
       timeBudgetMs: requireNumber(generationQueue.timeBudgetMs, 'generationQueue.timeBudgetMs'),
       maxQueueSize: requireInt(generationQueue.maxQueueSize, 'generationQueue.maxQueueSize', 1),
-      minStartIntervalMs: requireNumber(generationQueue.minStartIntervalMs, 'generationQueue.minStartIntervalMs')
+      minStartIntervalMs: requireNumber(generationQueue.minStartIntervalMs, 'generationQueue.minStartIntervalMs'),
+      staleRequestAgeMs: requireNumber(generationQueue.staleRequestAgeMs ?? 200, 'generationQueue.staleRequestAgeMs'),
+      staleRequestMinDepth: requireInt(generationQueue.staleRequestMinDepth ?? 5, 'generationQueue.staleRequestMinDepth', 0),
+      priorityRefreshIntervalMs: requireNumber(generationQueue.priorityRefreshIntervalMs ?? 100, 'generationQueue.priorityRefreshIntervalMs'),
+      replaceLowerPriority: requireBool(generationQueue.replaceLowerPriority ?? true, 'generationQueue.replaceLowerPriority')
     };
 
     // ==================== GPU QUADTREE (WEBGPU) ====================
@@ -473,6 +578,69 @@ export class EngineConfig {
       visibleTableCapacity: requireInt(gpuQuadtree.visibleTableCapacity ?? 16384, 'gpuQuadtree.visibleTableCapacity', 1),
       feedbackCapacity: requireInt(gpuQuadtree.feedbackCapacity ?? 4096, 'gpuQuadtree.feedbackCapacity', 1),
       lodErrorThreshold: requireNumber(gpuQuadtree.lodErrorThreshold ?? 512, 'gpuQuadtree.lodErrorThreshold'),
+      // Draw each visible tile from the nearest layer whose material is
+      // complete (own or ancestor) instead of the nearest resident one, so
+      // tiles never flash a geometry-only placeholder. See TileStreamer.
+      preferCompleteMaterialLayers: requireBool(
+        gpuQuadtree.preferCompleteMaterialLayers ?? true,
+        'gpuQuadtree.preferCompleteMaterialLayers'
+      ),
+      // Tiles drawn by the flat solid-color tier skip the splat and
+      // prebaked-color refinement outputs (they keep scatter/climate).
+      solidTierSkipsDetailMaterial: requireBool(
+        gpuQuadtree.solidTierSkipsDetailMaterial ?? true,
+        'gpuQuadtree.solidTierSkipsDetailMaterial'
+      ),
+      // Tile streamer behaviour switches (runtime: tileStreamer.setStreamerFlags).
+      // Defaults are the current behaviour; false restores the previous one.
+      streamerFlags: (() => {
+        const sf = gpuQuadtree.streamerFlags || {};
+        return {
+          // Visibility questions (refinement relevance, dropped-refinement
+          // retries) answered from an integer index rebuilt per visibility
+          // readback, and dropped refinements re-queued when their tile shows
+          // up in a readback. false = scan the visible list per question and
+          // the whole retry map every frame.
+          indexedVisibility: requireBool(
+            sf.indexedVisibility ?? true,
+            'gpuQuadtree.streamerFlags.indexedVisibility'
+          ),
+          // Refinement's fence budget subtracts the geometry jobs started in
+          // the same frame (so the two queues can't both take a reserve slot).
+          refinementBudgetCountsGeometryStarts: requireBool(
+            sf.refinementBudgetCountsGeometryStarts ?? true,
+            'gpuQuadtree.streamerFlags.refinementBudgetCountsGeometryStarts'
+          ),
+          // Keep refinement's queue-full retries running in frames where
+          // geometry has no fence budget (admission itself is still gated).
+          refinementTickWhenGeometryBlocked: requireBool(
+            sf.refinementTickWhenGeometryBlocked ?? true,
+            'gpuQuadtree.streamerFlags.refinementTickWhenGeometryBlocked'
+          ),
+          // Don't refine detail tiles drawn entirely past the end of the
+          // distance ramp into the flat solid-color tier: the flat color
+          // replaces their material on every pixel. Only applies when nothing
+          // else reads refinement output (no streamed assets, no terrain AO
+          // at that LOD); such tiles are refined once they come within range.
+          skipRefinementBeyondFlatFade: requireBool(
+            sf.skipRefinementBeyondFlatFade ?? true,
+            'gpuQuadtree.streamerFlags.skipRefinementBeyondFlatFade'
+          ),
+          // Extra distance, as a fraction of the fade end, a tile must lie
+          // beyond before its refinement is skipped.
+          flatFadeSkipMarginFraction: requireNumber(
+            sf.flatFadeSkipMarginFraction ?? 0.1,
+            'gpuQuadtree.streamerFlags.flatFadeSkipMarginFraction'
+          ),
+          // Per-readback and per-eviction diagnostic scans and their logs
+          // ([QT-VisMarkD3], [QT-Pipeline-Oscillation], [QT-FallbackEvict-*],
+          // [QT-Stitch-Evict], visible-copy-state samples).
+          diagnostics: requireBool(
+            sf.diagnostics ?? false,
+            'gpuQuadtree.streamerFlags.diagnostics'
+          ),
+        };
+      })(),
       workgroupSize: requireInt(gpuQuadtree.workgroupSize ?? 64, 'gpuQuadtree.workgroupSize', 1),
       adaptiveLod: (() => {
         const al = gpuQuadtree.adaptiveLod || {};

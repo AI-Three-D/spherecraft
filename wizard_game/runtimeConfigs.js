@@ -171,19 +171,95 @@ export function createEngineConfig() {
         lodEdgeAOStrength: 1.0,
         lodEdgeNormalStrength: 1.0,
         lodEdgeShadowStrength: 1.0,
+        // LOD5-only: fade its baseColor toward the same spatially-averaged
+        // coarse color LOD6 uses (sampleChunkAverageCoarseColor), purely as
+        // a function of camera distance (not tile/chunk boundaries — a
+        // simple smoothstep on distanceToCamera, cheaper than the tile-edge
+        // lodEdgeAmount mechanism and doesn't visually trace the chunk grid).
+        // Placeholder distances — tune by eye: should finish fading to solid
+        // color at or before the point LOD5 geometry actually switches to
+        // LOD6, so the two tiers already agree on color by the time the
+        // real mesh seam is reached.
+        lodEdgeToSolidColorStrength: 1.0,
+        lodEdgeToSolidColorFadeStartMeters: 3000.0,
+        lodEdgeToSolidColorFadeEndMeters: 6000.0,
         enableMacroLayer: false,
         forceMacroOverlay: false,
         pointSampleLodStart: 2,
         macroStartLod: 99,
         resolvedColorEnabled: true,
         resolvedColorStartLod: 5,
-        // Keep close and mid geometry on live category splats. The prebaked
-        // resolved-color path is only for far terrain; nearer use exposes
-        // hard category-mask contours because the prebake does not currently
-        // reproduce the fragment shader's live splat reconstruction.
-        lod0ResolvedColorEnabled: false,
-        lod0ResolvedColorFadeStartMeters: 128,
-        lod0ResolvedColorFadeEndMeters: 256,
+        // Small first increment of the coarse-tier rework: only the single
+        // coarsest LOD (6 of 0-6) uses the flat, lit solid-color tier
+        // instead of resolved-color. LOD 5 (and everything nearer) is
+        // completely untouched. Widen later once this is confirmed good.
+        solidColorTierEnabled: true,
+        // Experiment (2026-10-02): LOD5 renders the flat solid-color tier
+        // (previously LOD6+ only). The prebaked LOD5 tier is still in the
+        // code: set this back to 6 to restore it.
+        solidColorStartLod: 5,
+        // Distance ramp into the solid tier: every LOD below the tier mixes
+        // its color toward the tier's flat color by camera distance. Start
+        // and end are recomputed every frame from the traversal's LOD metric
+        // (QuadtreeTerrainRenderer._computeTierFadeDistances), so the ramp
+        // keeps its place relative to the LOD bands on any canvas size and
+        // moves smoothly with the camera instead of jumping with tile splits.
+        // It ends where the nearest solid-tier pixel can appear, so both
+        // sides of the LOD boundary are fully flat where they meet.
+        solidColorTierDistanceFadeEnabled: true,
+        // Ramp length, as a fraction of the solid tier's split distance.
+        solidColorTierDistanceFadeBandFraction: 0.3,
+        // Terrain-height allowance (m) in the "nearest possible solid-tier
+        // pixel" bound.
+        solidColorTierDistanceFadeHeightMarginMeters: 1000,
+        // 1.0 = the ramp always completes before any solid-tier pixel can
+        // appear (worst-case geometry). Lower values push detail farther out
+        // and rely on the edge safety net below where a solid-tier tile is
+        // drawn nearer. 0.5 measured seamless at the LOD4/5 line while
+        // flattening 5 % of LOD4 pixels vs 12 % at 1.0 (2880x1800 canvas,
+        // 4 km altitude; see LOD4_LOD5_BLEND_ANALYSIS.md section 10).
+        solidColorTierDistanceFadeEndSafety: 0.5,
+        // In-tile ramp toward edges shared with a solid-tier neighbour.
+        // Now a narrow safety net: combined with the distance ramp by max().
+        solidColorTierEdgeBlendEnabled: true,
+        // Fraction of the tile, from the shared edge, the safety-net ramp spans.
+        solidColorTierEdgeBlendWidth: 0.15,
+        solidColorTierEdgeBlendStrength: 1.0,
+        // World-size averaging window (m) of the flat color, identical in
+        // every tier so the color does not change when a tile splits or
+        // merges. Was 35 % of each tile (1434 m on LOD5, 2867 m on LOD6).
+        // 0 = legacy 35 %-of-tile window.
+        solidColorAverageWindowMeters: 1434,
+        // Was disabled: "prebaked resolved-color exposes hard category-mask
+        // contours because the prebake does not reproduce the fragment
+        // shader's live splat reconstruction." Re-testing (2026-09-30) at
+        // the user's request; the black-tile regression that first caused
+        // (missing resolvedColor alpha-validity check, mirrored from a bug
+        // fixed earlier today in a different call site) is now fixed at a
+        // shared helper (sampleResolvedColorOrFallback) covering every
+        // call site instead of one. Note: resolvedColor is baked from live
+        // splat data via a separate compute pass (resolvedTerrainColorCompute),
+        // NOT the category-average colors added earlier today for the
+        // solid-color tier — a different code path, so this isn't
+        // guaranteed to be the same already-fixed issue either way.
+        lod0ResolvedColorEnabled: true,
+        // These two (meters) are now used only as lod0AOFade's fallback
+        // default if lod0AOFadeStartMeters/EndMeters were unset — they no
+        // longer control the color blend itself, left at their original
+        // values. See lod0ResolvedColorFadeStartChunks/EndChunks below for
+        // the fade the color blend actually uses now.
+        lod0ResolvedColorFadeStartMeters: 8,
+        lod0ResolvedColorFadeEndMeters: 40,
+        // Mode-83 diagnostic (2026-09-30) showed 1500-3500m (and my
+        // "chunk-relative" 10-25 chunks, which at chunkSizeMeters=128 is
+        // 1280-3200m — barely different, my mistake) both sat entirely past
+        // where LOD4 actually switches to LOD5: fade was already fully
+        // saturated at 1.0 everywhere visible. Tightened per user request
+        // to a ~50m gradient (this is just a detail-level transition, not a
+        // large-scale effect): 1.0-1.4 chunks at chunkSizeMeters=128 ≈
+        // 128-180m.
+        lod0ResolvedColorFadeStartChunks: 1.0,
+        lod0ResolvedColorFadeEndChunks: 1.4,
         // AO has the same near-vs-prebaked frequency mismatch as albedo.
         // Fade LOD0 contact AO out over the same range so its tile-local
         // darkening does not stop abruptly where LOD1 takes over.
@@ -202,10 +278,21 @@ export function createEngineConfig() {
         // Compile normals for farther LOD variants, but the shader samples
         // them only inside an altitude-scaled distance radius. Ground-level
         // cost stays bounded; aerial views keep directional terrain lighting.
+        // normalMapDistanceMaxMeters was a fixed 28000m regardless of
+        // altitude, so real terrain-shape normals never got sampled past
+        // that distance no matter how high up the camera went — the whole
+        // sphere fell back to the flat geometric sphere normal from orbit,
+        // which is why ridges/mountains went dull and flat (confirmed by
+        // observation: normal-map sampling itself was already proven
+        // correct earlier — this is purely the distance ceiling cutting it
+        // off). The altitude-scaled base (4500 * (1 + altitude/1000))
+        // already grows far past this old cap at any real altitude, so
+        // raising just the ceiling is the whole fix — no change to the
+        // scaling formula itself.
         normalMapMaxLod: 7,
         normalMapDistanceBaseMeters: 4500,
         normalMapDistanceAltitudeScaleMeters: 1000,
-        normalMapDistanceMaxMeters: 28000,
+        normalMapDistanceMaxMeters: 1000000,
         normalMapDistanceFadeMeters: 2500,
         altitudeNormalMinMeters: 8000,
         altitudeShadowMinMeters: 12000,
@@ -315,6 +402,7 @@ export function createEngineConfig() {
       cloudParticles:    false,   // low/peak atmospheric bank particle clouds
       fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
       skyEffects:        true,    // sky, stars, moon
+      rivers:            true,    // walking-skeleton river/shallow-water demo
     },
 
     gpuQuadtree: {
@@ -333,6 +421,25 @@ export function createEngineConfig() {
       visibleTableCapacity: 2048,
       feedbackCapacity: 4096,
       lodErrorThreshold:  512,  //512,
+      // Visible tiles draw from the nearest layer whose material is finished
+      // (own or ancestor), so a tile never flashes a geometry-only
+      // placeholder while its refinement is pending. false = old behaviour.
+      preferCompleteMaterialLayers: true,
+      // Tiles drawn by the flat solid-color tier (rendering.terrainShader.
+      // solidColorStartLod and coarser) skip the splat and prebaked-color
+      // refinement outputs, which they never draw (~12 of ~17.5 ms GPU per
+      // refinement). Scatter/climate are still generated for vegetation.
+      solidTierSkipsDetailMaterial: true,
+      // Tile streamer switches (see EngineConfig gpuQuadtree.streamerFlags).
+      // Toggle at runtime: qtDiag.setStreamerFlags({ diagnostics: true }).
+      streamerFlags: {
+        indexedVisibility: true,
+        refinementBudgetCountsGeometryStarts: true,
+        refinementTickWhenGeometryBlocked: true,
+        skipRefinementBeyondFlatFade: true,
+        flatFadeSkipMarginFraction: 0.1,
+        diagnostics: false
+      },
       workgroupSize: 128,
 
       // 8 instead of 4: allows more tile generations to be in-flight
@@ -437,7 +544,13 @@ export function createEngineConfig() {
       maxStartsPerFrame: 16,
       timeBudgetMs: 8,
       maxQueueSize: 1024,
-      minStartIntervalMs: 0
+      minStartIntervalMs: 0,
+      staleRequestAgeMs: 200,
+      staleRequestMinDepth: 5,
+      priorityRefreshIntervalMs: 100,
+      // At capacity, current demand can replace a less urgent queued tile.
+      // Prewarm, coarse fallbacks and current visible demand are protected.
+      replaceLowerPriority: true
     },
     weather: WEATHER_CONFIG,
 
@@ -779,6 +892,8 @@ export function createEngineConfig() {
 
 export function createGameDataConfig() {
   const terrain = new TerrainGenerationConfig({
+    // Shared planet-wide water inputs are complete before the first tiles.
+    regionalTerrain: {enabled:true,cells:256,seamCells:4,basins:{enabled:true},world:{enabled:true,maxLakes:1200,maxRivers:320}},
     continents: {
       enabled: true,
       count: 4,
@@ -808,11 +923,80 @@ export function createGameDataConfig() {
 	      // become "deep"/opaque faster when looking down.
 	      visualDepthRange: 240
 	    },
+	    // Walking-skeleton demo river: carved directly into terrain height at
+	    // generation time (see templates/terrain-shaders/features/featureRivers.wgsl.js).
+	    // anchorDir/channelDir MUST exactly match DEMO_RIVER_ANCHOR_DIR/
+	    // DEMO_RIVER_CHANNEL_DIR in wizard_game/gameEngine.js — that's what
+	    // places the demo player spawn (and the water simulation's own
+	    // tangent frame) at this same fixed point. A tile's height is baked
+	    // once and never invalidated (see RIVER_WALKING_SKELETON_LOG.md,
+	    // Session 4), so this can't be computed dynamically from wherever
+	    // the player happens to spawn — both sides read this one fixed
+	    // value instead, duplicated (not imported) only because this is a
+	    // hardcoded walking-skeleton demo with no authoring system yet.
+	    river: {
+	      // Off: the walking-skeleton demo river (straight 16-point carve +
+	      // simulated water patch) read as a ditch across the eroded terrain.
+	      // The water graph (core/world/hydrology/waterGraph.js) replaces it.
+	      enabled: false,
+	      anchorDir: { x: -1, y: 0, z: 0 },
+	      channelDir: { x: 0, y: 1, z: 0 },
+	      // Bed half-width; featureRiverHeight() now tapers out to 3.5x this
+	      // for the banks (a flat-bottomed valley, not a narrow groove) —
+	      // total valley width is roughly halfWidthM*7, so this reads as a
+	      // ~170m valley rather than a ~50m scratch.
+	      halfWidthM: 24,
+	      depthM: 6,
+	      // Deliberately much longer than the 128m water-simulation patch
+	      // (templates/configs/riverConfig.js's grid.W/L): the terrain carve
+	      // itself isn't tied to the water sim's extent, so keeping this
+	      // short made the channel taper to 0 depth *inside* the visible
+	      // patch, reading as a closed pond instead of a flowing channel.
+	      // With this much longer, the carve sits at full depth everywhere
+	      // within the water patch, and only tapers off far outside it.
+	      lengthM: 1000,
+	    },
+    // Terrain feature toggles (core/world/terrain-generator/terrainFeatureToggles.js).
+    // Erosion-seed pits off (owner, 2026-10-04): the water graph's lakes come
+    // from the terrain's own basins; the pits (30 m, 2 m deep) and the old
+    // verified-lake meshes that sit in them are retired.
+    features: {
+      erosionSeeds: false,
+    },
+    // Water graph, lake refinement and nearby river visuals:
+    // qtDiag.water.stats() / .near() / .goto(id). See WaterService.js.
+    waterGraph: {
+      enabled: true,
+      // Independent shoreline variation, bank relief and shore splat materials.
+      carve: { bankDetail: 1 },
+      // Near-field shallow-water simulation (core/world/water/WaterRiverSim.js):
+      // a strip of 1 m cells along the nearest traced river (256 m of it,
+      // scrolling with the camera) while the camera is within
+      // activateAltitudeM of the river level and activateDistanceM of the river.
+      // Enabled by default; ?riverSim=off disables it for comparisons.
+      // Prescribed mean flow plus local SWE
+      // disturbances, on displaced geometry using the current water material.
+      sim: {
+        enabled: true,
+        activateAltitudeM: 150,
+        activateDistanceM: 120,
+        dx: 1.0,
+        lengthM: 256,
+      },
+    },
+    /*
     erosion: {
       enabled: true,
       globalRate: 0.6,
       hydraulicRate: 0.7,
       thermalRate: 0.4
+    },
+    */
+    erosion: {
+      enabled: true,
+      globalRate: 0.10,
+      hydraulicRate: 0.3,
+      thermalRate: 0.1
     },
     impacts: {
       enabled: true,

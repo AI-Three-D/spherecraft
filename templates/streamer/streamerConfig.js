@@ -268,6 +268,10 @@ export const QUALITY_PRESETS = {
 export const TERRAIN_AO_CONFIG = {
     enabled: true,
     resolution: 64,
+    // Coarsest geometry LOD that gets contact-AO bakes and AO sampling.
+    // LOD3 tiles are ~1 km (16 m per AO texel); coarser tiles can't show
+    // tree/ground-cover AO, so baking them is wasted GPU time.
+    maxLod: 3,
     // 24 instead of 8: AO bakes cascade (each new tile re-bakes up to 8
     // neighbors), so a burst of 20 forest tiles queues ~180 AO bakes.
     // At 8/frame that stalls for 22+ frames; 24/frame brings it to ~7.

@@ -8,6 +8,104 @@ export class TerrainGenerationConfig {
 
         // Base generator selection (used by WebGPU terrain shader assembly).
         this.baseGenerator = options.baseGenerator ?? 'earthLike';
+        // Smooth-splat weights and IDs share one payload evaluation. false
+        // retains separate passes for performance/visual comparisons.
+        this.fuseSmoothSplatSource = options.fuseSmoothSplatSource !== false;
+
+        // Prototype: persistent macro controls consumed by finer terrain.
+        // Off until the matched visual comparison has been assessed.
+        this.regionalTerrain = { enabled: false, cells: 128, seamCells: 4, basins:{enabled:false}, ...(options.regionalTerrain ?? {}) };
+
+
+        // RuneVision erosion filter (templates/terrain-shaders/features/
+        // featureErosionFilter.wgsl.js, MPL-2.0), always on: erodes the
+        // landform of the sphere terrain. All lengths in metres; see the
+        // filter file for the parameters.
+        const ef = options.erosionFilter ?? {};
+        const num = (v, d) => (Number.isFinite(v) ? v : d);
+        const vec = (v, d) => (Array.isArray(v) && v.length === d.length && v.every(Number.isFinite) ? v.slice() : d);
+        this.erosionFilter = {
+            scale: num(ef.scale, 1500),
+            strength: num(ef.strength, 0.22),
+            gullyWeight: num(ef.gullyWeight, 0.5),
+            detail: num(ef.detail, 1.5),
+            // rounding.z (input rounding) 1.0 and onset.x 0.9 (RuneVision demo:
+            // 0.1, 1.25): gullies fade in more gently where the input is nearly
+            // flat. At summits and saddles the gully direction spins around a
+            // point; with a sharp onset that left pinch points and closed
+            // crease rings around hilltops.
+            // On the sphere terrain rounding.x / .y / .z set only the input
+            // mask (first-octave onset); the octaves' ridge and crease
+            // rounding come from styleRidgeRounding / styleCreaseRounding
+            // (below). .w (per-octave multiplier) applies as is.
+            // Crease rounding >= 0.1 (demo: 0.0): zero-width V gully bottoms
+            // alias on the tile grid. Ridge rounding 0.1 (demo) made a narrow
+            // band along each coarser crest where the finer octaves fade
+            // out: a ~60 m wide raised cap above concave shoulders down most
+            // spurs ("spinal cord"); 0.2+ softens it.
+            rounding: vec(ef.rounding, [0.3, 0.1, 1.0, 2.0]),
+            onset: vec(ef.onset, [0.9, 1.25, 2.8, 1.5]),
+            assumedSlope: vec(ef.assumedSlope, [0.7, 1.0]),
+            octaves: Math.max(1, Math.min(8, Math.round(num(ef.octaves, 5)))),
+            lacunarity: num(ef.lacunarity, 2.0),
+            gain: num(ef.gain, 0.5),
+            cellScale: num(ef.cellScale, 0.7),
+            normalization: num(ef.normalization, 0.5),
+            normalSquash: num(ef.normalSquash, 2.5),
+            // Height above the regional base that maps to the filter's fade
+            // target range [-1, 1] (valleys .. peaks).
+            fadeRangeM: num(ef.fadeRangeM, 1200),
+            // Local amount (multiplies strength) = variation x relief ramp.
+            // Relief = summed height of the large landforms (foothills, big
+            // lone hills, mountains): lowReliefAmount below reliefStartM, full
+            // from reliefFullM. Variation: a noise field with wavelength
+            // variationScaleM between variationMin and 1, so some regions are
+            // rugged and others gentle. Where the amount is 0 the filter is
+            // skipped.
+            reliefStartM: num(ef.reliefStartM, 150),
+            reliefFullM: num(ef.reliefFullM, 600),
+            lowReliefAmount: num(ef.lowReliefAmount, 0.2),
+            // Steepness ramp (input slope, rise over run): erosion at full
+            // amount from sharpSlopeFull, none below sharpSlopeStart. Keeps
+            // gullies off summits, saddles and valley floors (where they
+            // pinched into bowties) and lightens erosion on gentle ground.
+            sharpSlopeStart: num(ef.sharpSlopeStart, 0.05),
+            sharpSlopeFull: num(ef.sharpSlopeFull, 0.45),
+            variationScaleM: num(ef.variationScaleM, 15000),
+            variationMin: num(ef.variationMin, 0.15),
+            // Fraction of meso2 kept where erosion is at full amount
+            // (1 everywhere it is 0).
+            mesoKeep: num(ef.mesoKeep, 0.35),
+            // Ridge/crease rounding used where the amount is low (light
+            // erosion as soft undulation, not etched lines): fully at amount
+            // <= softAmountFull, not at all from softAmountNone.
+            lowAmountRounding: num(ef.lowAmountRounding, 1.0),
+            softAmountFull: num(ef.softAmountFull, 0.15),
+            softAmountNone: num(ef.softAmountNone, 0.6),
+            // Erosion style by location: a noise field (wavelength
+            // styleScaleM) from 0 = rounded (old, grassy ridges) to
+            // 1 = jagged (sharp crests, deep couloirs). styleBias shifts
+            // the mix: -1 all rounded, 0 about half each, +1 all jagged.
+            // Each pair below is [rounded, jagged]:
+            // - styleStrength multiplies the erosion amount;
+            // - styleRidgeRounding / styleCreaseRounding replace rounding.x
+            //   / rounding.y (before the low-amount softening).
+            // Rounding compounds per octave (x rounding.w), so values much
+            // above 0.5 suppress the finer octaves and with them the
+            // branching valleys.
+            styleScaleM: num(ef.styleScaleM, 40000),
+            styleBias: num(ef.styleBias, 0.0),
+            styleStrength: vec(ef.styleStrength, [0.8, 1.3]),
+            styleRidgeRounding: vec(ef.styleRidgeRounding, [0.4, 0.2]),
+            styleCreaseRounding: vec(ef.styleCreaseRounding, [0.3, 0.1]),
+            seed: Math.round(num(ef.seed, 7))
+        };
+
+        // Terrain feature toggles: { mountains: false, ... } switches a term
+        // of the height function off. Keys and descriptions:
+        // core/world/terrain-generator/terrainFeatureToggles.js. At runtime:
+        // qtDiag.setTerrainFeatures({...}) / qtDiag.terrainFeatures().
+        this.features = { ...(options.features ?? {}) };
 
         // High-level noise profile knobs (shader expects these in _pad3/_pad4).
         const profile = options.noiseProfile ?? {};
@@ -136,6 +234,53 @@ export class TerrainGenerationConfig {
             visualDepthRange: options.water?.visualDepthRange ?? null,
             waveHeight: options.water?.waveHeight ?? 1.5 // average meters
         };
+
+        // River channel — carved directly into terrain height at generation
+        // time (see templates/terrain-shaders/features/featureRivers.wgsl.js),
+        // not a separate overlay mesh. Walking-skeleton scope: one fixed
+        // straight channel, no authoring format yet. `anchorDir`/`channelDir`
+        // are unit direction vectors from the planet's own origin (NOT real
+        // meters — normalized before use on the shader side); `channelDir`
+        // must be perpendicular to `anchorDir` (a tangent at that point).
+        // Because a tile's height is baked once and never invalidated (see
+        // RIVER_WALKING_SKELETON_LOG.md, Session 4), this anchor must be a
+        // FIXED value known before any terrain generates — it cannot be
+        // computed dynamically from wherever the player happens to spawn,
+        // the way the original walking-skeleton design worked. Whatever
+        // caller places the river's water simulation (RiverSystem) should
+        // anchor itself to this SAME fixed point, not the other way around.
+        const river = options.river ?? {};
+        this.river = {
+            enabled: river.enabled ?? false,
+            anchorDir: river.anchorDir ?? { x: 0, y: 1, z: 0 },
+            channelDir: river.channelDir ?? { x: 1, y: 0, z: 0 },
+            halfWidthM: river.halfWidthM ?? 16,
+            depthM: river.depthM ?? 3,
+            lengthM: river.lengthM ?? 128,
+            // Traced steepest-descent path (HydrologyPrecompute.js), set at
+            // runtime once the precompute finishes — empty until then, which
+            // is a valid state (see featureRiverHeight()'s fallback).
+            // Each entry: {along, across, widthScale, depthScale}.
+            path: river.path ?? [],
+        };
+
+        // Stage-2 confirmed erosion-seed basins (ErosionSeedVerifier.js), set
+        // at runtime once verification finishes — empty until then, which is
+        // a valid state (every level-1 candidate just stays at its own small
+        // nudge size, see featureErosionSeedsHeight()). Each entry:
+        // {regionX, regionY, radiusScale, depthScale}.
+        const erosionSeeds = options.erosionSeeds ?? {};
+        this.erosionSeeds = {
+            confirmed: erosionSeeds.confirmed ?? [],
+        };
+
+        // Water system (core/world/hydrology/WaterService.js): water graph
+        // (lakes, rivers) built in the background once the terrain has
+        // loaded, lakes refined near the camera. Off unless enabled; other
+        // fields override WATER_SERVICE_DEFAULTS (gridN, params, cache,
+        // refine: { radiusM, spacingM, bandM, ... }).
+        const waterGraph = options.waterGraph ?? {};
+        this.waterGraph = { ...waterGraph, enabled: waterGraph.enabled === true };
     }
 
     // Get shader-compatible uniform data
@@ -267,7 +412,29 @@ export class TerrainGenerationConfig {
             climateZone4Extra: [
                 this.climate.zones[0].precipitationMax,
                 0, 0, 0
-            ]
+            ],
+
+            // River channel (vec4 x3) — see featureRivers.wgsl.js.
+            riverAnchor: [
+                this.river.anchorDir.x,
+                this.river.anchorDir.y,
+                this.river.anchorDir.z,
+                this.river.enabled ? 1.0 : 0.0
+            ],
+            riverChannelDir: [
+                this.river.channelDir.x,
+                this.river.channelDir.y,
+                this.river.channelDir.z,
+                0.0
+            ],
+            riverPath: this.river.path,
+            riverParams: [
+                this.river.halfWidthM,
+                this.river.depthM,
+                this.river.lengthM,
+                0.0
+            ],
+            erosionConfirmed: this.erosionSeeds.confirmed,
         };
     }
 

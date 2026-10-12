@@ -512,6 +512,9 @@ export class AssetStreamer {
                 faceSize,
                 seed:            this.engineConfig.seed,
                 gcCellWorldSize: gcCellM,
+                // Lets the baker map tile depth to geometry LOD for its
+                // maxLod gate (no AO bakes for coarse tiles).
+                quadtreeMaxDepth: this.quadtreeGPU?.maxDepth,
                 tileLayerLookup: (face, depth, x, y) =>
                     this.tileStreamer?.getLoadedLayer?.(face, depth, x, y) ?? null,
                 textureFormats:  this.tileStreamer?.textureFormats,

@@ -590,7 +590,7 @@ fn computeSandTransitionWeightsInternal(
                 (1.0 - smoothstep(0.50 + tB, 0.54 + tB, m));
     let grassW = smoothstep(0.58 + tB, 0.64 + tB, m);
 
-    // Per-type patch noise to create clustered, dithered edges.
+    // Per-type shoreNoise noise to create clustered, dithered edges.
     let sandPatch = (fbmAuto(wx, wy, unitDir, 0.40, 2, seed + 6200, 2.0, 0.5) + 1.0) * 0.5;
     let dirtPatch = (fbmAuto(wx, wy, unitDir, 0.28, 2, seed + 6210, 2.0, 0.5) + 1.0) * 0.5;
     let grassPatch = (fbmAuto(wx, wy, unitDir, 0.35, 2, seed + 6220, 2.0, 0.5) + 1.0) * 0.5;
@@ -1028,7 +1028,7 @@ fn computeSurfaceWeightsInternal(
 
     var mixed = blendSurfaceWeights(cool, warm, warmGate);
 
-    // Desert patch bias: larger, hotter/drier sand fields with multi-scale variation.
+    // Desert shoreNoise bias: larger, hotter/drier sand fields with multi-scale variation.
     let desertLarge = fbmAuto(wx, wy, unitDir, 5.0, 2, seed + 7340, 2.0, 0.5);
     let desertMid = fbmAuto(wx, wy, unitDir, 1.8, 2, seed + 7345, 2.0, 0.5);
     let desertSmall = fbmAuto(wx, wy, unitDir, 0.55, 2, seed + 7350, 2.0, 0.5);
@@ -1166,6 +1166,31 @@ fn computeSurfaceWeightsInternal(
     let dirtAmount = dirtMask * 0.08 * (1.0 - forestMask * 0.4) * dirtTempGate;
     mixed.dirt = max(mixed.dirt, dirtAmount);
 
+    // Shore materials use the same level and ownership as the generated water.
+    // Both classification and smooth splat consume this blend, before lighting.
+    if (riverCarveShoreEnabled()) {
+        let heightM = elevation * maxTerrainHeightM();
+        var shore = riverCarveShoreWeights(unitDir, heightM, slope);
+        let lakeLevel = regionalLakeShoreLevel(unitDir);
+        let above = heightM - lakeLevel;
+        if (lakeLevel > -1.0e19 && above < 2.0 && above > -3.0) {
+            let shoreNoise = riverCarveShoreNoise(unitDir);
+            let edge = (1.0 - smoothstep(0.08, 0.45 + 0.7 * smoothstep(-0.5, 0.5, shoreNoise), above))
+                * (0.05 + 0.7 * smoothstep(-0.15, 0.55, shoreNoise)) * regionalLakeShoreWeight(unitDir);
+            let rock = smoothstep(0.25, 0.65, slope);
+            shore = max(shore, vec3<f32>(edge * (1.0 - rock) * 0.85, edge * rock,
+                edge * (1.0 - smoothstep(0.1, 0.8, above)) * 0.12));
+        }
+        let amount = clamp(shore.x + shore.y + shore.z, 0.0, 0.55);
+        if (amount > 0.001) {
+            var bank = zeroSurfaceWeights();
+            bank.rock = shore.y + shore.x * 0.12;
+            bank.sand = shore.x * 0.08;
+            bank.dirt = shore.x * 0.8;
+            bank.mud = shore.z;
+            mixed = blendSurfaceWeights(mixed, normalizeSurfaceWeights(bank), amount);
+        }
+    }
     return normalizeSurfaceWeights(mixed);
 }
 

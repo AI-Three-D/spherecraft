@@ -1,3 +1,5 @@
+import { WaterSimRenderer } from '../water/WaterSimRenderer.js';
+import { NearWaterRenderer } from '../water/NearWaterRenderer.js';
 import { Vector3, Matrix4, Color } from '../../../shared/math/index.js';
 import { WebGPUBackend } from '../backend/webgpuBackend.js';
 
@@ -12,6 +14,7 @@ import { Logger} from '../../../shared/Logger.js'
 import { WeatherController } from '../environment/WeatherController.js';
 import { QuadtreeTileManager } from '../../world/quadtree/GPUQuadtreeTerrain.js';
 import { buildStreamerAuthoringRuntime } from '../../world/streamerAuthoringRuntime.js';
+import { computeSurfaceTangentFrame } from '../../planet/surfaceFrame.js';
 
 import { QuadtreeTerrainRenderer } from '../terrain/QuadtreeTerrainRenderer.js';
 import { PostProcessingPipeline, HDR_FORMAT } from '../postprocessing/PostProcessingPipeline.js';
@@ -120,6 +123,21 @@ export class Frontend {
 
     setActorManager(mgr) { this._actorManager = mgr; }
 
+    /** The near-field water simulation site to draw (or null), with the water look. */
+    setWaterSimSite(site, water) {
+        if (!site && !this.waterSimRenderer) return;
+        this.waterSimRenderer ??= new WaterSimRenderer({ backend: this.backend, uniformManager: this.uniformManager, planetConfig: this.planetConfig,engineConfig:this.engineConfig });
+        this.waterSimRenderer.setSite(site, water);
+    }
+
+    /** Water data (lakes, rivers: core/world/water/WaterGpuData.js) for the terrain shader. */
+    setWaterData(data) {
+        this._waterData = data || null;
+        this.quadtreeTerrainRenderer?.setWaterData?.(this._waterData);
+        if (this._waterData) this.nearWaterRenderer ??= new NearWaterRenderer({ backend: this.backend, uniformManager: this.uniformManager, planetConfig: this.planetConfig, engineConfig: this.engineConfig });
+        this.nearWaterRenderer?.setWaterData(this._waterData);
+    }
+
     addDistortionSource(options = {}) {
         const type = options?.type ?? 'heatHaze';
         if (type === 'heatHaze') {
@@ -206,6 +224,13 @@ export class Frontend {
                 planetConfig: this.planetConfig,
                 terrainGenerator: terrainGenerator,
                 textureManager: this.textureManager,
+                // For the baked coarse (flat-tier) color, which must use the
+                // same category colors as the terrain shader.
+                tileCategories: this._terrainTheme.TILE_CATEGORIES,
+                // Same AO defaults the terrain materials merge, so the streamer
+                // knows which LODs sample terrain AO (and therefore read their
+                // material even where it is drawn as flat color).
+                terrainAODefaults: this._streamerTheme?.TERRAIN_AO_CONFIG ?? null,
             });
             await this.quadtreeTileManager.initialize();
            
@@ -223,6 +248,7 @@ export class Frontend {
                 groundFieldDefaults: this._streamerTheme.GROUND_FIELD_BAKE_CONFIG,
                 tileCategories: this._terrainTheme.TILE_CATEGORIES,
             });
+            this.quadtreeTerrainRenderer.setWaterData(this._waterData ?? null);
             
             // Asset streamer: modular multi-category GPU scatter system
             // (trees, ground cover, plants — replaces single-purpose GrassRenderer)
@@ -358,6 +384,54 @@ export class Frontend {
             } catch (e) {
                 Logger.warn(`[Frontend] Global ocean init failed: ${e?.message || e}`);
                 this.globalOceanRenderer = null;
+            }
+
+            // River/shallow-water walking skeleton: a single demo patch anchored
+            // via placeDemoRiver(), sampling real terrain for its bed.
+            if (this.engineConfig?.features?.rivers === false) {
+                Logger.info('[Frontend] River system disabled by features.rivers');
+            } else {
+                try {
+                    const { RiverSystem } = await import('../rivers/riverSystem.js');
+                    const { DEFAULT_RIVER_CONFIG } = await import('../../../templates/configs/riverConfig.js');
+                    if (!this.riverSystem) {
+                        this.riverSystem = new RiverSystem({
+                            backend: this.backend,
+                            device: this.backend.device,
+                            quadtreeGPU: this.quadtreeTileManager?.quadtreeGPU || null,
+                            tileStreamer: this.quadtreeTileManager?.tileStreamer || null,
+                            planetConfig: this.planetConfig,
+                            uniformManager: this.uniformManager,
+                            riverConfig: DEFAULT_RIVER_CONFIG,
+                        });
+                        await this.riverSystem.initialize();
+                    }
+                } catch (e) {
+                    Logger.warn(`[Frontend] River system init failed: ${e?.message || e}`);
+                    this.riverSystem = null;
+                }
+            }
+
+            // Erosion-seed lake water (see core/renderer/lakes/lakeWaterSystem.js)
+            // — separate from the single-anchor river system: N independent
+            // static lake patches, populated later via setLakes() once
+            // ErosionSeedVerifier resolves its confirmed list.
+            try {
+                const { LakeWaterSystem } = await import('../lakes/lakeWaterSystem.js');
+                if (!this.lakeWaterSystem) {
+                    this.lakeWaterSystem = new LakeWaterSystem({
+                        backend: this.backend,
+                        planetConfig: this.planetConfig,
+                        uniformManager: this.uniformManager,
+                        device: this.backend.device,
+                        quadtreeGPU: this.quadtreeTileManager?.quadtreeGPU || null,
+                        tileStreamer: this.quadtreeTileManager?.tileStreamer || null,
+                        quadtreeTileManager: this.quadtreeTileManager || null,
+                    });
+                }
+            } catch (e) {
+                Logger.warn(`[Frontend] Lake water system init failed: ${e?.message || e}`);
+                this.lakeWaterSystem = null;
             }
         } catch (error) {
             Logger.warn(`[Frontend] GPU quadtree init failed: ${error?.message || error}`);
@@ -640,13 +714,8 @@ export class Frontend {
 
 
     _makeSurfaceMatrix(worldPos, planetOrigin, scale) {
-        const up = new Vector3().subVectors(worldPos, planetOrigin).normalize();
-        const ref = Math.abs(up.y) > 0.99
-            ? new Vector3(0, 0, 1)
-            : new Vector3(0, 1, 0);
-        const right   = new Vector3().crossVectors(up, ref).normalize();
-        const forward = new Vector3().crossVectors(right, up);
-    
+        const { up, right, forward } = computeSurfaceTangentFrame(worldPos, planetOrigin);
+
         const m = new Matrix4();
         const e = m.elements;
         // col 0 — right
@@ -804,7 +873,7 @@ updateLighting(starSystem) {
 
     async render(gameState, environmentState, deltaTime, planetConfig, sphericalMapper, starSystem) {
 
-        if (!this.textureManager?.loaded ) return;
+        if (this.backend.deviceLoss||!this.textureManager?.loaded ) return;
         this._lastDeltaTime = Number.isFinite(deltaTime) ? deltaTime : 0;
         this._currentEnvironmentState = environmentState;
         
@@ -830,6 +899,7 @@ updateLighting(starSystem) {
         if (this.atmosphereLUT && this.atmosphereSettings) {
             await this.atmosphereLUT.compute(this.atmosphereSettings);
         }
+        if(this.backend.deviceLoss)return;
 
         const doValidationScope = this.backend.device &&
             (this.debugMode || (this._validationScopeInterval > 0 && (this.frameCount % this._validationScopeInterval) === 0));
@@ -849,6 +919,7 @@ updateLighting(starSystem) {
         }
 
         await this.updateChunks(gameState, environmentState, deltaTime, planetConfig, sphericalMapper);
+        if(this.backend.deviceLoss)return;
         
         this.updateLighting(starSystem);
 
@@ -1198,7 +1269,22 @@ updateLighting(starSystem) {
                         this._lastDeltaTime || 0
                     );
                 }
-                
+
+                if (this.riverSystem) {
+                    this.backend.endRenderPassForCompute();
+                    const riverEncoder = this.backend.getCommandEncoder();
+                    this.riverSystem.update(riverEncoder, this._lastDeltaTime || 0);
+                    this.backend.resumeRenderPass();
+                    if (this.riverSystem.isReady()) {
+                        this.riverSystem.render(this.camera, viewMatrix, projectionMatrix);
+                    }
+                }
+
+                if (this.lakeWaterSystem) {
+                    this.lakeWaterSystem.update(this._lastDeltaTime || 0);
+                    this.lakeWaterSystem.render(this.camera, viewMatrix, projectionMatrix);
+                }
+
                 if (this.assetStreamer) {
                     this.backend.endRenderPassForCompute();
                     const encoder = this.backend.getCommandEncoder();
@@ -1238,6 +1324,13 @@ updateLighting(starSystem) {
                     this.genericMeshRenderer.render(viewMatrix, projectionMatrix);
                 }
 
+                // Lake surfaces near the camera (WaterGpuData.near) and the
+                // near-field simulated water (core/world/water/WaterSimSite.js):
+                // transparent, after the opaque meshes so objects in water show
+                // through them by depth.
+                this.nearWaterRenderer?.render(this.camera, viewMatrix, projectionMatrix);
+                this.waterSimRenderer?.render(this.camera, viewMatrix, projectionMatrix, performance.now() / 1000);
+
                 // Particles draw after opaque terrain + assets + skinned meshes,
                 // still inside the main color render pass (before post-processing).
                 if (this.particleSystem && this.backend._renderPassEncoder) {
@@ -1260,6 +1353,14 @@ updateLighting(starSystem) {
             }
             return;
         }
+    }
+
+    placeDemoRiver(worldPos, channelDir = null) {
+        this.riverSystem?.setAnchor(worldPos, channelDir);
+    }
+
+    setLakes(confirmedLakes) {
+        this.lakeWaterSystem?.setLakes(confirmedLakes);
     }
 
     playGLBAnimation(instance, animIndex, options = {}) {
@@ -1323,6 +1424,14 @@ this.skinnedMeshRenderer = null;
         if (this.globalOceanRenderer) {
             this.globalOceanRenderer.dispose();
             this.globalOceanRenderer = null;
+        }
+        if (this.riverSystem) {
+            this.riverSystem.dispose();
+            this.riverSystem = null;
+        }
+        if (this.lakeWaterSystem) {
+            this.lakeWaterSystem.dispose();
+            this.lakeWaterSystem = null;
         }
         if (this.assetStreamer) {
             this.assetStreamer.dispose();

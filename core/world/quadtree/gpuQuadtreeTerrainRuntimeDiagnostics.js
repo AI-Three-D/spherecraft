@@ -934,7 +934,7 @@ export function installQuadtreeTileManagerRuntimeDiagnostics(QuadtreeTileManager
                             `pendingCopies=${pendingCopies} dirtySlots=${dirtySlots} ` +
                             `gpuInFlight=${gpuInFlight} lodScale=${lodScale.toFixed(2)} ` +
                             `visibleScale=${lodVisibleScale.toFixed(2)}` +
-                            `${pressure ? ` bpSkips=${pressure.gpuBackpressureSkips} started=${pressure.tilesStarted} gpuMax=${pressure.gpuFencesMax} commits=${pressure.commits} staleStarts=${pressure.staleStarts.stale}/${pressure.staleStarts.started} feedbackReadbacks=${pressure.feedback.readbacks} minFree=${pressure.minFreeLayers ?? 'n/a'} queueRejected=${pressure.queueRejected} queueDropped=${pressure.queueDropped}` : ''}` +
+                            `${pressure ? ` bpSkips=${pressure.gpuBackpressureSkips} started=${pressure.tilesStarted} gpuMax=${pressure.gpuFencesMax} commits=${pressure.commits} staleStarts=${pressure.staleStarts.stale}/${pressure.staleStarts.started} feedbackReadbacks=${pressure.feedback.readbacks} minFree=${pressure.minFreeLayers ?? 'n/a'} queueRejected=${pressure.queueRejected} queueDropped=${pressure.queueDropped} visibleDropRetryMap=${pressure.refinementVisibleDropRetryMapSize}` : ''}` +
                             `${visible ? ` visible=${visible.totalVisible} resident=${visible.residentVisible} fallback=${visible.fallbackVisible}` : ''}`
                         );
 
@@ -945,6 +945,69 @@ export function installQuadtreeTileManagerRuntimeDiagnostics(QuadtreeTileManager
                                 `startVisible=${pressure.staleStarts.visible} startAncestor=${pressure.staleStarts.ancestor} startUnknown=${pressure.staleStarts.unknown}`
                             );
                         }
+
+                        // Instrumentation (2026-10-01): refinement-drop counts
+                        // by tile depth — testing whether LOD4-depth tiles are
+                        // disproportionately dropped before refinement (which
+                        // generates resolvedColor) ever completes. Only logs
+                        // when something actually dropped, to avoid noise.
+                        if (pressure?.refinementDroppedByDepth &&
+                            Object.keys(pressure.refinementDroppedByDepth).length > 0) {
+                            const byDepthStr = Object.entries(pressure.refinementDroppedByDepth)
+                                .map(([depth, count]) => `d${depth}:${count}`)
+                                .join(' ');
+                            Logger.info(
+                                `${TERRAIN_STEP_LOG_TAG} [QTLight] refinementDroppedByDepth ${byDepthStr}`
+                            );
+                        }
+
+                        // ── Phase 0 additions: stage percentiles + candidate-cause counters ──
+                        if (pressure?.stageLatency) {
+                            const sl = pressure.stageLatency;
+                            const fmt = (w) => w.count > 0
+                                ? `p50=${w.p50.toFixed(0)} p95=${w.p95.toFixed(0)} p99=${w.p99.toFixed(0)} max=${w.max.toFixed(0)} n=${w.count}`
+                                : 'n=0';
+                            Logger.info(
+                                `${TERRAIN_STEP_LOG_TAG} [QTLight] latency(ms) ` +
+                                `queueWait[${fmt(sl.queueWait)}] ` +
+                                `startToSubmit[${fmt(sl.startToSubmit)}] ` +
+                                `submitToFence[${fmt(sl.submitToFence)}] ` +
+                                `requestToResident[${fmt(sl.requestToResident)}]`
+                            );
+                            Logger.info(
+                                `${TERRAIN_STEP_LOG_TAG} [QTLight] causes ` +
+                                `requestAmplification=${pressure.requestAmplification !== null ? pressure.requestAmplification.toFixed(2) : 'n/a'} ` +
+                                `(requested=${pressure.requestedTiles} newlyVisible=${pressure.newlyVisibleTiles}) ` +
+                                `wastedGenerations=${pressure.wastedGenerations} ` +
+                                `computeSubmissions=${pressure.computeSubmissions} copyOps=${pressure.copyOperations} ` +
+                                `queueDepth=${pressure.generationQueueDepth}/${pressure.generationQueueCapacity} queueActive=${pressure.generationQueueActive} ` +
+                                `queueReplaced=${pressure.queueReplaced} ` +
+                                `pendingCopies=${pressure.pendingCopyCount} ` +
+                                `pool=${pressure.tilePoolUsed}/${pressure.tilePoolCapacity} free=${pressure.tilePoolFree ?? 'n/a'}`
+                            );
+                            // Phase 2: refinement is a separate, lower-priority queue —
+                            // report it distinctly so a growing refinement backlog
+                            // doesn't get mistaken for geometry admission pressure.
+                            const stateStr = pressure.tileStateCounts
+                                ? Object.entries(pressure.tileStateCounts).map(([s, c]) => `${s}:${c}`).join(' ')
+                                : 'n/a';
+                            Logger.info(
+                                `${TERRAIN_STEP_LOG_TAG} [QTLight] refinement ` +
+                                `queueDepth=${pressure.refinementQueueDepth} queueActive=${pressure.refinementQueueActive} ` +
+                                `dropped=${pressure.refinementDropped} rejected=${pressure.refinementRejected} ` +
+                                `deferred=${pressure.refinementDeferredCount ?? 0} ` +
+                                `tileStates=[${stateStr}]`
+                            );
+                        }
+
+                        this._lastPerfSnapshot = {
+                            timestamp: performance.now(),
+                            pool: { used: poolUsed, capacity: poolTotal },
+                            queue: { pending: queuePending, active: queueActive },
+                            gpu: { inFlight: gpuInFlight, fencesMax: pressure?.gpuFencesMax ?? 0 },
+                            pendingCopies,
+                            pressure
+                        };
                     },
 
         async _maybeReadbackVisibleTiles() {
