@@ -21,6 +21,7 @@ export class Material {
         this.depthWrite = options.depthWrite !== false;
         this.blending = options.blending || 'normal';
         this.bindGroupLayoutSpec = options.bindGroupLayoutSpec || null;
+        this.bindingAdapter = options.bindingAdapter || null;
         this.depthCompare = options.depthCompare || 'less';
         this.targetFormat = options.targetFormat || null;
         this._gpuProgram = null;
@@ -52,6 +53,7 @@ export class Material {
             vertexLayout: this.vertexLayout,
             defines: { ...this.defines },
             bindGroupLayoutSpec: this.bindGroupLayoutSpec,
+            bindingAdapter: this.bindingAdapter,
             storageBuffers: { ...this.storageBuffers },
             side: this.side,
             transparent: this.transparent,

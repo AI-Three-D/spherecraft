@@ -10,7 +10,7 @@
 
 /**
  * @typedef {Object} BufferHandle
- * @property {GPUBuffer} glBuffer - The native buffer object
+ * @property {GPUBuffer} gpuBuffer - The native buffer object
  * @property {number} target - Usage flags
  * @property {number} size - Size of buffer in bytes
  * @property {boolean} [isIndex] - Whether this is an index buffer
@@ -19,7 +19,7 @@
 
 /**
  * @typedef {Object} GPUTextureHandle
- * @property {GPUTexture} glTexture - The native texture object
+ * @property {GPUTexture} texture - The native texture object
  * @property {number|string} internalFormat - Internal texture format
  * @property {number|string} format - Texture format
  * @property {number|string} type - Data type

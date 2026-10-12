@@ -108,7 +108,6 @@ export function createEngineConfig() {
     },
 
     rendering: {
-      preferWebGPU: true,
       maxPoolSlots: 2048,
       lighting: {
         ambient: {

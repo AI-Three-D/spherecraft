@@ -1,9 +1,6 @@
-import { WaterSimRenderer } from '../water/WaterSimRenderer.js';
-import { NearWaterRenderer } from '../water/NearWaterRenderer.js';
 import { Vector3, Matrix4, Color } from '../../../shared/math/index.js';
 import { WebGPUBackend } from '../backend/webgpuBackend.js';
 
-import { ChunkCullingManager } from '../chunkCullingManager.js';
 import { UniformManager } from '../../lighting/uniformManager.js';
 import { ClusteredLightManager } from '../../lighting/clusteredLightManager.js';
 import { ClusterGrid } from '../../lighting/clusterGrid.js';
@@ -12,14 +9,13 @@ import { GenericMeshRenderer } from '../mesh/genericMeshRenderer.js';
 import { LightingController } from '../../lighting/lightingController.js';
 import { Logger} from '../../../shared/Logger.js'
 import { WeatherController } from '../environment/WeatherController.js';
-import { QuadtreeTileManager } from '../../world/quadtree/GPUQuadtreeTerrain.js';
 import { buildStreamerAuthoringRuntime } from '../../world/streamerAuthoringRuntime.js';
 import { computeSurfaceTangentFrame } from '../../planet/surfaceFrame.js';
 
-import { QuadtreeTerrainRenderer } from '../terrain/QuadtreeTerrainRenderer.js';
+import { Renderer } from '../Renderer.js';
 import { PostProcessingPipeline, HDR_FORMAT } from '../postprocessing/PostProcessingPipeline.js';
 import { HeatHazeEmitter } from '../particles/HeatHazeEmitter.js';
-import {  requireMaxFinite, requireNumber, requireNumberArray, requireObject } from '../../../shared/requireUtil.js';
+import {  requireObject } from '../../../shared/requireUtil.js';
 export class Frontend {
     constructor(canvas, options = {}) {
 
@@ -37,30 +33,18 @@ export class Frontend {
         this._particleAuthoring = options.particleAuthoring || null;
         this.gpuQuadtreeConfig = options.gpuQuadtree || this.engineConfig?.gpuQuadtree || null;
         this.gpuQuadtreeEnabled = this.gpuQuadtreeConfig?.enabled === true;
-        this.quadtreeTileManager = null;
-        this.quadtreeTerrainRenderer = null;
+        this.terrainModule = null;
+        this.rendererCore = null;
         this.textureManager = options.textureManager;
         this.propTextureManager = options.propTextureManager || null;  // NEW
         this.leafAlbedoTextureManager = options.leafAlbedoTextureManager || null;
         this.leafNormalTextureManager = options.leafNormalTextureManager || null;
 
         this.textureCache = options.textureCache;
-        this.chunkSize = requireNumber(options.chunkSize, 'chunkSize');
-        this.lodDistances = requireNumberArray(options.lodDistances, 'lodDistances', 1, true);
-        const viewDistance = requireMaxFinite(this.lodDistances, 'lodDistances');
-
         this.uniformManager = new UniformManager();
         this.uniformManager.applyAmbientConfig(this.engineConfig?.rendering?.lighting?.ambient);
         this.uniformManager.applyFogConfig(this.engineConfig?.rendering?.lighting?.fog);
         this.genericMeshRenderer = null;
-
-        this.chunkCullingManager = new ChunkCullingManager({
-            chunkSize: this.chunkSize,
-            viewDistance,
-            margin: this.chunkSize
-        });
-
-        this._instancedTest = null;
 
         this.camera = {
             position: new Vector3(0, 50, 0),
@@ -77,20 +61,6 @@ export class Frontend {
         this.debugMode = false;
 
 
-        this._instanceBuffers = new Map(); 
-  
-        this._chunkInstanceBufferCapacity = 0;
-        this._chunkInstanceStride = 64;
-        this._preparedLODData = null; 
-        this._lodDataVersion = 0; 
-        this._lastChunkVersion = -1; 
-        this._lastLodMapVersion = -1; 
-        this._lastEdgeMaskVersion = -1; 
-        this._lastInstanceDataVersion = -1; 
-        this._atlasTouchInterval = Number.isFinite(options.atlasTouchInterval)
-            ? Math.max(1, Math.floor(options.atlasTouchInterval))
-            : 30;
-        this._lastAtlasTouchFrame = -Infinity;
         this._validationScopeInterval = Number.isFinite(options.validationScopeInterval)
             ? Math.max(1, Math.floor(options.validationScopeInterval))
             : 120;
@@ -123,19 +93,20 @@ export class Frontend {
 
     setActorManager(mgr) { this._actorManager = mgr; }
 
-    /** The near-field water simulation site to draw (or null), with the water look. */
-    setWaterSimSite(site, water) {
-        if (!site && !this.waterSimRenderer) return;
-        this.waterSimRenderer ??= new WaterSimRenderer({ backend: this.backend, uniformManager: this.uniformManager, planetConfig: this.planetConfig,engineConfig:this.engineConfig });
-        this.waterSimRenderer.setSite(site, water);
-    }
+    // Compatibility views for existing game tools. TerrainModule owns these resources.
+    get quadtreeTileManager() { return this.terrainModule?.source ?? null; }
+    get quadtreeTerrainRenderer() { return this.terrainModule?.renderer ?? null; }
+    get globalOceanRenderer() { return this.terrainModule?.ocean ?? null; }
+    get riverSystem() { return this.terrainModule?.rivers ?? null; }
+    get lakeWaterSystem() { return this.terrainModule?.lakes ?? null; }
+    get nearWaterRenderer() { return this.terrainModule?.nearWater ?? null; }
+    get waterSimRenderer() { return this.terrainModule?.simWater ?? null; }
 
-    /** Water data (lakes, rivers: core/world/water/WaterGpuData.js) for the terrain shader. */
+    setWaterSimSite(site, water) { this.terrainModule?.setWaterSimSite(site, water); }
+
     setWaterData(data) {
-        this._waterData = data || null;
-        this.quadtreeTerrainRenderer?.setWaterData?.(this._waterData);
-        if (this._waterData) this.nearWaterRenderer ??= new NearWaterRenderer({ backend: this.backend, uniformManager: this.uniformManager, planetConfig: this.planetConfig, engineConfig: this.engineConfig });
-        this.nearWaterRenderer?.setWaterData(this._waterData);
+        this._waterData = data ?? null;
+        this.terrainModule?.setWaterData(this._waterData);
     }
 
     addDistortionSource(options = {}) {
@@ -202,246 +173,97 @@ export class Frontend {
     }
 
     async initializeGPUQuadtree(terrainGenerator) {
-        if (!this.gpuQuadtreeEnabled) return;
-        if (!this.backend?.device) {
-            Logger.warn('[Frontend] GPU quadtree requires WebGPU backend');
-            return;
-        }
-        if (!this.engineConfig) {
-            Logger.warn('[Frontend] GPU quadtree requires engineConfig');
-            return;
-        }
-        if (!terrainGenerator) {
-            Logger.warn('[Frontend] GPU quadtree requires terrainGenerator');
-        }
-        if (this.quadtreeTileManager) return;
+        if (!this.gpuQuadtreeEnabled || this.terrainModule) return;
+        if (!this.rendererCore || !terrainGenerator) throw new Error('Terrain requires an initialized renderer and terrainGenerator');
+        const { PlanetTerrainModule } = await import('../../world/PlanetTerrainModule.js');
+        const terrain = new PlanetTerrainModule({
+            backend: this.backend,
+            engineConfig: this.engineConfig,
+            planetConfig: this.planetConfig,
+            terrainGenerator,
+            textureManager: this.textureManager,
+            uniformManager: this.uniformManager,
+            terrainAODefaults: this._streamerTheme.TERRAIN_AO_CONFIG,
+            groundFieldDefaults: this._streamerTheme.GROUND_FIELD_BAKE_CONFIG,
+            tileCategories: this._terrainTheme.TILE_CATEGORIES,
+            atmosphereLUT: this.atmosphereLUT,
+        });
+        terrain.setWaterData(this._waterData ?? null);
+        await this.rendererCore.addModule(terrain);
+        this.terrainModule = terrain;
 
+        // Asset streamer: modular multi-category GPU scatter system
+        // (trees, ground cover, plants — replaces single-purpose GrassRenderer)
+        if (this.engineConfig?.features?.streamedAssets === false) {
+            Logger.info('[Frontend] Asset streamer disabled by features.streamedAssets');
+        } else
         try {
-            // 1. Tile manager: selection + streaming (world concern)
-            this.quadtreeTileManager = new QuadtreeTileManager({
-                backend: this.backend,
-                engineConfig: this.engineConfig,
-                planetConfig: this.planetConfig,
-                terrainGenerator: terrainGenerator,
-                textureManager: this.textureManager,
-                // For the baked coarse (flat-tier) color, which must use the
-                // same category colors as the terrain shader.
-                tileCategories: this._terrainTheme.TILE_CATEGORIES,
-                // Same AO defaults the terrain materials merge, so the streamer
-                // knows which LODs sample terrain AO (and therefore read their
-                // material even where it is drawn as flat color).
-                terrainAODefaults: this._streamerTheme?.TERRAIN_AO_CONFIG ?? null,
-            });
-            await this.quadtreeTileManager.initialize();
-           
-
-            // 2. Terrain renderer: geometry, materials, draw calls (renderer concern)
-            this.quadtreeTerrainRenderer = new QuadtreeTerrainRenderer({
-                backend: this.backend,
-                tileManager: this.quadtreeTileManager,
-                engineConfig: this.engineConfig,
-                planetConfig: this.planetConfig,
-                textureManager: this.textureManager,
-                uniformManager: this.uniformManager,
-                terrainGenerator: terrainGenerator,
-                terrainAODefaults: this._streamerTheme.TERRAIN_AO_CONFIG,
-                groundFieldDefaults: this._streamerTheme.GROUND_FIELD_BAKE_CONFIG,
-                tileCategories: this._terrainTheme.TILE_CATEGORIES,
-            });
-            this.quadtreeTerrainRenderer.setWaterData(this._waterData ?? null);
-            
-            // Asset streamer: modular multi-category GPU scatter system
-            // (trees, ground cover, plants — replaces single-purpose GrassRenderer)
-            if (this.engineConfig?.features?.streamedAssets === false) {
-                Logger.info('[Frontend] Asset streamer disabled by features.streamedAssets');
-            } else
-            try {
-                const { AssetStreamer } = await import('../streamer/AssetStreamer.js');
-                const streamerAuthoringRuntime = buildStreamerAuthoringRuntime(
-                    this.planetConfig?.worldAuthoring,
-                    {
-                        assetDefinitions: this._streamerTheme.DEFAULT_ASSET_DEFINITIONS,
-                        archetypeDefinitions: this._streamerTheme.ARCHETYPE_DEFINITIONS,
-                        tileCategories: this._terrainTheme?.TILE_CATEGORIES,
-                    }
+            const { AssetStreamer } = await import('../streamer/AssetStreamer.js');
+            const streamerAuthoringRuntime = buildStreamerAuthoringRuntime(
+                this.planetConfig?.worldAuthoring,
+                {
+                    assetDefinitions: this._streamerTheme.DEFAULT_ASSET_DEFINITIONS,
+                    archetypeDefinitions: this._streamerTheme.ARCHETYPE_DEFINITIONS,
+                    tileCategories: this._terrainTheme?.TILE_CATEGORIES,
+                }
+            );
+            if (streamerAuthoringRuntime.summary.appliedProfileCount > 0) {
+                Logger.info(
+                    `[AssetAuthoring] Applied ${streamerAuthoringRuntime.summary.appliedProfileCount}/` +
+                    `${streamerAuthoringRuntime.summary.profileCount} authored asset profiles ` +
+                    'to streamer placement'
                 );
-                if (streamerAuthoringRuntime.summary.appliedProfileCount > 0) {
-                    Logger.info(
-                        `[AssetAuthoring] Applied ${streamerAuthoringRuntime.summary.appliedProfileCount}/` +
-                        `${streamerAuthoringRuntime.summary.profileCount} authored asset profiles ` +
-                        'to streamer placement'
-                    );
-                }
-                if (streamerAuthoringRuntime.summary.clusterTreeAuthoredTileCount > 0) {
-                    Logger.info(
-                        `[AssetAuthoring] Authored cluster tree metadata covers ` +
-                        `${streamerAuthoringRuntime.summary.clusterTreeAuthoredTileCount} tile types`
-                    );
-                }
-                if (streamerAuthoringRuntime.summary.unsupportedProfileCount > 0) {
-                    Logger.warn(
-                        `[AssetAuthoring] ${streamerAuthoringRuntime.summary.unsupportedProfileCount} ` +
-                        'asset profiles use unsupported archetype refs'
-                    );
-                }
-                this.assetStreamer = new AssetStreamer({
-                    device:         this.backend.device,
-                    backend:        this.backend,
-                    quadtreeGPU:    this.quadtreeTileManager.quadtreeGPU,
-                    tileStreamer:   this.quadtreeTileManager.tileStreamer,
-                    planetConfig:   this.planetConfig,
-                    engineConfig:   this.engineConfig,
-                    uniformManager: this.uniformManager,
-                    streamerTheme:  this._streamerTheme,
-                    assetDefinitions: streamerAuthoringRuntime.assetDefinitions,
-                    archetypeDefinitions: streamerAuthoringRuntime.archetypeDefinitions,
-                    clusterTreeTileMetadata: streamerAuthoringRuntime.clusterTreeTileMetadata,
-                    propTextureManager: this.propTextureManager,
-                    leafAlbedoTextureManager: this.leafAlbedoTextureManager,
-                    leafNormalTextureManager: this.leafNormalTextureManager,
-                    quality:        'medium',
-                    debug: {
-                        enabled: false,
-                        readback: false,
-                        interval: 120,
-                        warnIfNoPlants: true,
-                        forceVisible: false,
-                        drawSingle: false,
-                        drawSample: false,
-                        drawDirect: false
-                    }
-                });
-                await this.assetStreamer.initialize();
-            } catch (e) {
-                Logger.warn(`[Frontend] Asset streamer init failed: ${e?.message || e}`);
-                this.assetStreamer = null;
             }
-            if (this.atmosphereLUT) {
-                this.quadtreeTerrainRenderer.setAtmosphereLUT(this.atmosphereLUT);
+            if (streamerAuthoringRuntime.summary.clusterTreeAuthoredTileCount > 0) {
+                Logger.info(
+                    `[AssetAuthoring] Authored cluster tree metadata covers ` +
+                    `${streamerAuthoringRuntime.summary.clusterTreeAuthoredTileCount} tile types`
+                );
             }
-            await this.quadtreeTerrainRenderer.initialize();
-
-            if (this.engineConfig?.features?.shadows !== false) await this._maybeInitGPUShadows();
-
-            if (this.masterChunkLoader?.setStreamingEnabled) {
-                this.masterChunkLoader.setStreamingEnabled(false);
+            if (streamerAuthoringRuntime.summary.unsupportedProfileCount > 0) {
+                Logger.warn(
+                    `[AssetAuthoring] ${streamerAuthoringRuntime.summary.unsupportedProfileCount} ` +
+                    'asset profiles use unsupported archetype refs'
+                );
             }
-
-            // Initialize global ocean renderer (water) for GPU quadtree path
-            try {
-                const { GlobalOceanRenderer } = await import('../water/globalOceanRenderer.js');
-                const arrayTextures = this.quadtreeTileManager?.getArrayTextures?.() || {};
-                const heightTexture = arrayTextures.height || null;
-
-                const terrainWater = this.planetConfig?.terrainGeneration?.water || {};
-                const heightScale = Number.isFinite(this.planetConfig?.heightScale) ? this.planetConfig.heightScale : 2000.0;
-                const oceanLevelNorm = Number.isFinite(terrainWater.oceanLevel) ? terrainWater.oceanLevel : 0.0;
-                const avgOceanDepth = Number.isFinite(terrainWater.averageOceanDepth)
-                    ? terrainWater.averageOceanDepth
-                    : 2000.0;
-
-                const visualDepthRange = Number.isFinite(terrainWater.visualDepthRange)
-                    ? terrainWater.visualDepthRange
-                    : Math.max(40.0, Math.min(600.0, avgOceanDepth * 0.12));
-
-                const waterConfig = {
-                    oceanLevel: oceanLevelNorm * heightScale,
-                    depthRange: visualDepthRange,
-                    waveHeight: Number.isFinite(terrainWater.waveHeight) ? terrainWater.waveHeight : 0.35,
-                    waveFrequency: 0.8,
-                    windDirection: [1.0, 0.0],
-                    windSpeed: 5.0,
-                    foamIntensity: 0.6,
-                    foamDepthStart: 0.0,
-                    foamDepthEnd: 2.5,
-                    foamTiling: 0.06,
-                    shallowAlpha: 0.14,
-                    deepAlpha: 0.85, 
-                    // UPDATED COLORS (Darker, more natural)
-                    colorShallow: 0x154550, // Dark Teal
-                    colorDeep: 0x001525,    // Dark Navy
-                    maxWaveLOD: 5.0,
-                    maxFoamLOD: 4.0
-                };
-
-                if (!this.globalOceanRenderer) {
-                    this.globalOceanRenderer = new GlobalOceanRenderer({
-                        backend: this.backend,
-                        quadtreeGPU: this.quadtreeTileManager?.quadtreeGPU || null,
-                        planetConfig: this.planetConfig,
-                        waterConfig,
-                        uniformManager: this.uniformManager,
-                        terrainGeometries: this.quadtreeTerrainRenderer?.geometries || null,
-                        heightTexture,
-                        maxGeomLOD: this.quadtreeTileManager?.maxGeomLOD ?? 6
-                    });
-                    await this.globalOceanRenderer.initialize();
-
-                    if (terrainWater.hasOceans === false) {
-                        this.globalOceanRenderer.enabled = false;
-                    }
+            this.assetStreamer = new AssetStreamer({
+                device:         this.backend.device,
+                backend:        this.backend,
+                quadtreeGPU:    this.quadtreeTileManager.quadtreeGPU,
+                tileStreamer:   this.quadtreeTileManager.tileStreamer,
+                planetConfig:   this.planetConfig,
+                engineConfig:   this.engineConfig,
+                uniformManager: this.uniformManager,
+                streamerTheme:  this._streamerTheme,
+                assetDefinitions: streamerAuthoringRuntime.assetDefinitions,
+                archetypeDefinitions: streamerAuthoringRuntime.archetypeDefinitions,
+                clusterTreeTileMetadata: streamerAuthoringRuntime.clusterTreeTileMetadata,
+                propTextureManager: this.propTextureManager,
+                leafAlbedoTextureManager: this.leafAlbedoTextureManager,
+                leafNormalTextureManager: this.leafNormalTextureManager,
+                quality:        'medium',
+                debug: {
+                    enabled: false,
+                    readback: false,
+                    interval: 120,
+                    warnIfNoPlants: true,
+                    forceVisible: false,
+                    drawSingle: false,
+                    drawSample: false,
+                    drawDirect: false
                 }
-            } catch (e) {
-                Logger.warn(`[Frontend] Global ocean init failed: ${e?.message || e}`);
-                this.globalOceanRenderer = null;
-            }
-
-            // River/shallow-water walking skeleton: a single demo patch anchored
-            // via placeDemoRiver(), sampling real terrain for its bed.
-            if (this.engineConfig?.features?.rivers === false) {
-                Logger.info('[Frontend] River system disabled by features.rivers');
-            } else {
-                try {
-                    const { RiverSystem } = await import('../rivers/riverSystem.js');
-                    const { DEFAULT_RIVER_CONFIG } = await import('../../../templates/configs/riverConfig.js');
-                    if (!this.riverSystem) {
-                        this.riverSystem = new RiverSystem({
-                            backend: this.backend,
-                            device: this.backend.device,
-                            quadtreeGPU: this.quadtreeTileManager?.quadtreeGPU || null,
-                            tileStreamer: this.quadtreeTileManager?.tileStreamer || null,
-                            planetConfig: this.planetConfig,
-                            uniformManager: this.uniformManager,
-                            riverConfig: DEFAULT_RIVER_CONFIG,
-                        });
-                        await this.riverSystem.initialize();
-                    }
-                } catch (e) {
-                    Logger.warn(`[Frontend] River system init failed: ${e?.message || e}`);
-                    this.riverSystem = null;
-                }
-            }
-
-            // Erosion-seed lake water (see core/renderer/lakes/lakeWaterSystem.js)
-            // — separate from the single-anchor river system: N independent
-            // static lake patches, populated later via setLakes() once
-            // ErosionSeedVerifier resolves its confirmed list.
-            try {
-                const { LakeWaterSystem } = await import('../lakes/lakeWaterSystem.js');
-                if (!this.lakeWaterSystem) {
-                    this.lakeWaterSystem = new LakeWaterSystem({
-                        backend: this.backend,
-                        planetConfig: this.planetConfig,
-                        uniformManager: this.uniformManager,
-                        device: this.backend.device,
-                        quadtreeGPU: this.quadtreeTileManager?.quadtreeGPU || null,
-                        tileStreamer: this.quadtreeTileManager?.tileStreamer || null,
-                        quadtreeTileManager: this.quadtreeTileManager || null,
-                    });
-                }
-            } catch (e) {
-                Logger.warn(`[Frontend] Lake water system init failed: ${e?.message || e}`);
-                this.lakeWaterSystem = null;
-            }
-        } catch (error) {
-            Logger.warn(`[Frontend] GPU quadtree init failed: ${error?.message || error}`);
-            this.quadtreeTileManager = null;
-            this.quadtreeTerrainRenderer = null;
+            });
+            await this.assetStreamer.initialize();
+            // Optional asset bakes attach AO/ground-field textures to the source.
+            // Rebind materials while keeping terrain geometry and world ownership intact.
+            await this.quadtreeTerrainRenderer.rebuildMaterials();
+        } catch (e) {
+            Logger.warn(`[Frontend] Asset streamer init failed: ${e?.message || e}`);
+            this.assetStreamer = null;
         }
 
-        if (this.atmoBankSystem && this.quadtreeTileManager?.tileStreamer) {
-            this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
-        }
+        if (this.engineConfig?.features?.shadows !== false) await this._maybeInitGPUShadows();
+        this.atmoBankSystem?.setTileStreamer(this.quadtreeTileManager.tileStreamer);
     }
 
     async setTerrainDebugMode(mode) {
@@ -503,6 +325,8 @@ export class Frontend {
         // Set HDR scene format immediately so all renderers compile
         // their pipelines against rgba16float, not the canvas format.
         this.backend.sceneFormat = HDR_FORMAT;
+        this.rendererCore = new Renderer({ canvas: this.canvas, backend: this.backend, backendInitialized: true });
+        await this.rendererCore.initialize();
 
         if (this.backend && this.backend._pipelineCache) {
             this.backend._pipelineCache.clear();
@@ -525,7 +349,7 @@ export class Frontend {
 
         this.backend.setViewport(0, 0, this.canvas.width, this.canvas.height);
         this.genericMeshRenderer = new GenericMeshRenderer(this.backend);
-        
+
         if (this.planetConfig && this.planetConfig.hasAtmosphere) {
             this.uniformManager.updateFromPlanetConfig(this.planetConfig);
             this.atmosphereSettings = requireObject(
@@ -539,9 +363,6 @@ export class Frontend {
                 this.uniformManager
             );
             this.atmosphereLUT.update();
-            if (this.atmosphereLUT && this.masterChunkLoader?.terrainMeshManager) {
-                this.masterChunkLoader.terrainMeshManager.setAtmosphereLUT(this.atmosphereLUT);
-            }
 
             if (this.engineConfig?.features?.skyEffects !== false) {
                 const { SkyRenderer } = await import('../sky/SkyRenderer.js');
@@ -730,7 +551,7 @@ export class Frontend {
     }
     _computeGLBWorldMatrix(options) {
         const scale = options.scale ?? 1;
-    
+
         let pos;
         if (options.position) {
             const p = options.position;
@@ -738,7 +559,7 @@ export class Frontend {
         } else {
             pos = this.camera.position.clone();
         }
-    
+
         if (this.planetConfig?.origin) {
             const o = this.planetConfig.origin;
             const origin = new Vector3(o.x, o.y, o.z);
@@ -783,7 +604,7 @@ _preparePerFrameLightingAndParticles(encoder) {
 updateLighting(starSystem) {
     this._updateGlobalLighting(starSystem);
 }
-    
+
     _updateGlobalLighting(starSystem) {
         this.lightingController.update(
             starSystem,
@@ -803,7 +624,7 @@ updateLighting(starSystem) {
             decay
         });
     }
-    
+
     addSpotLight(position, direction, color, intensity, radius, angle, penumbra = 0.1) {
         if (!this.lightManager) return null;
         return this.lightManager.addLight(2, {
@@ -816,7 +637,7 @@ updateLighting(starSystem) {
             penumbra
         });
     }
-    
+
     removeLight(light) {
         if (!this.lightManager || !light) return;
         const idx = this.lightManager.lights.indexOf(light);
@@ -824,7 +645,7 @@ updateLighting(starSystem) {
             this.lightManager.lights.splice(idx, 1);
         }
     }
-    
+
     clearLights() {
         if (!this.lightManager) return;
         this.lightManager.lights = [];
@@ -852,14 +673,14 @@ updateLighting(starSystem) {
     }
     _pushClusterBuffersToMaterials() {
         const buf = this.clusterLightBuffers;
-    
+
         // Push to terrain materials
         if (this.quadtreeTerrainRenderer?._materials) {
             for (const mat of this.quadtreeTerrainRenderer._materials.values()) {
                 mat.uniforms._clusterBuffers = { value: buf };
             }
         }
-    
+
         // Push to asset streamer
         if (this.assetStreamer) {
             this.assetStreamer.setClusterLightBuffers(buf);
@@ -873,10 +694,10 @@ updateLighting(starSystem) {
 
     async render(gameState, environmentState, deltaTime, planetConfig, sphericalMapper, starSystem) {
 
-        if (this.backend.deviceLoss||!this.textureManager?.loaded ) return;
+        if (this.backend.deviceLoss || (this.terrainModule && !this.textureManager?.loaded)) return;
         this._lastDeltaTime = Number.isFinite(deltaTime) ? deltaTime : 0;
         this._currentEnvironmentState = environmentState;
-        
+
         if (!this._renderDiagLastWall) this._renderDiagLastWall = performance.now();
         if (!this._renderDiagCount) this._renderDiagCount = 0;
         this._renderDiagCount++;
@@ -895,7 +716,7 @@ updateLighting(starSystem) {
         }
 
         this._renderDiagLastWall = wallNow;
-        
+
         if (this.atmosphereLUT && this.atmosphereSettings) {
             await this.atmosphereLUT.compute(this.atmosphereSettings);
         }
@@ -907,222 +728,189 @@ updateLighting(starSystem) {
             this.backend.device.pushErrorScope('validation');
         }
 
-        this.frameCount++;
+        try {
+            this.frameCount++;
 
-        if (this.textureCache?.processDeferredDestructions) {
-            this.textureCache.processDeferredDestructions();
-        }
-
-        this.updateCamera(gameState);
-        if (this.planetConfig && this.uniformManager.currentPlanetConfig !== this.planetConfig) {
-            this.uniformManager.updateFromPlanetConfig(this.planetConfig);
-        }
-
-        await this.updateChunks(gameState, environmentState, deltaTime, planetConfig, sphericalMapper);
-        if(this.backend.deviceLoss)return;
-        
-        this.updateLighting(starSystem);
-
-
-        // --- UPDATED WEATHER CONTROLLER LOGIC ---
-        // The WeatherController now drives the environmentState (interpolation/logic)
-        if (this.weatherController && environmentState) {
-            this.weatherController.update(deltaTime, environmentState);
-            
-            environmentState.weatherMap = {
-                current: this.weatherController.getCurrentView(),
-                previous: this.weatherController.getPreviousView(),
-                blend: this.weatherController.getBlend(),
-                resolution: this.weatherController.getResolution()
-            };
-        }
-
-        if (this.uniformManager?.setLocalFogDensityBoost) {
-            const localFogBoost = this.atmoBankSystem?.estimateLocalDistanceFogBoost?.(
-                this.camera,
-                environmentState,
-                this.planetConfig
-            ) ?? 0;
-            this.uniformManager.setLocalFogDensityBoost(localFogBoost);
-        }
-
-        // --- UPDATED OCEAN UPDATE LOGIC ---
-        // Pass the computed values from environmentState directly to the renderer
-        if (this.globalOceanRenderer && environmentState && environmentState.water) {
-            const waterParams = environmentState.water;
-            const windDir = environmentState.windDirection;
-            
-            this.globalOceanRenderer.setWaterConfig({
-                windDirection: [windDir.x, windDir.y],
-                windSpeed: environmentState.windSpeed,
-                waveHeight: waterParams.waveHeight,
-                waveFrequency: waterParams.waveFrequency,
-                foamIntensity: waterParams.foamIntensity,
-                foamDepthEnd: waterParams.foamDepthEnd
-                // Colors are now handled by initial config, or we can expose setters in GlobalOceanRenderer
-            });
-        }
-
-        const hasPostProcessing = !!this.postProcessing;
-        const postEffectsActive = !!(this.postProcessing && this.postProcessing.enabled !== false);
-
-        // Route scene rendering through HDR postprocessing target.
-        if (hasPostProcessing) {
-            this.postProcessing.beginScenePass(this.backend);
-        } else {
-            this.backend.setRenderTarget(null);
-            this.backend.setClearColor(0.0, 0.0, 0.0, 1.0);
-            this.backend.clear(true, true, false);
-        }
-
-        let sunDiskFade = 1.0;
-        if (this.starRenderer && starSystem?.primaryStar && starSystem.currentBody) {
-            const camPos = this.camera.position;
-            const starInfo = starSystem.currentBody.getStarDirection(
-                starSystem.primaryStar,
-                { x: camPos.x, y: camPos.y, z: camPos.z }
-            );
-            sunDiskFade = this.starRenderer.update(this.camera, starSystem.primaryStar, starInfo);
-        } else if (this.starRenderer) {
-            this.starRenderer.visible = false;
-            this.starRenderer.opacity = 0;
-        }
-
-        if (this.moonRenderer && starSystem) {
-            const camPos = this.camera.position;
-            const moonInfo = starSystem.getMoonInfo({ x: camPos.x, y: camPos.y, z: camPos.z });
-            const sunDir = this.lightingController.getSunDirection();
-            this.moonRenderer.update(this.camera, moonInfo, sunDir);
-            this.moonRenderer.render(this.camera);
-        }
-
-        
-        if (this.skyRenderer && this.atmosphereSettings) {
-            const sunDir = environmentState?.sunLightDirection ||
-                this.uniformManager.uniforms.sunLightDirection.value;
-            this.skyRenderer.render(
-                this.camera,
-                this.atmosphereSettings,
-                sunDir,
-                this.uniformManager,
-                sunDiskFade
-            );
-        }
-
-        if (this.starRenderer) {
-            this.starRenderer.render();
-        }
-
-        if (this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds) {
-            this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager);
-        }
-        
-        this.renderTerrain();
-
-        if (!this.isGPUQuadtreeActive() && this.skinnedMeshRenderer?.isReady()) {
-            this.skinnedMeshRenderer.render(
-                this.camera,
-                this.camera.matrixWorldInverse,
-                this.camera.projectionMatrix
-            );
-        }
-
-        // GPU-quadtree path renders generic meshes INSIDE renderTerrain so
-        // they share the terrain render pass. Avoid a double draw here.
-        if (this.genericMeshRenderer && !this.isGPUQuadtreeActive()) {
-            this.genericMeshRenderer.update(this.camera.position, deltaTime);
-            this.genericMeshRenderer.render(
-                this.camera.matrixWorldInverse,
-                this.camera.projectionMatrix
-            );
-        }
-
-        if (this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds) {
-            this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
-            this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
-
-            if (this.atmoBankSystem && this.cloudRenderer.noiseGenerator) {
-                const ng = this.cloudRenderer.noiseGenerator;
-                this.atmoBankSystem.setNoiseTextures(
-                    ng.getBaseTextureView(),
-                    ng.getDetailTextureView()
-                );
+            if (this.textureCache?.processDeferredDestructions) {
+                this.textureCache.processDeferredDestructions();
             }
-        }
 
-        if (postEffectsActive) {
-            this.postProcessing.beginBloomSourcePass(this.backend);
+            this.updateCamera(gameState);
+            if (this.planetConfig && this.uniformManager.currentPlanetConfig !== this.planetConfig) {
+                this.uniformManager.updateFromPlanetConfig(this.planetConfig);
+            }
 
-            if (this.skinnedMeshRenderer?.isReady()) {
-                this.skinnedMeshRenderer.renderBloom(
+            await this.updateChunks(gameState, environmentState, deltaTime, planetConfig, sphericalMapper);
+            if(this.backend.deviceLoss)return;
+
+            this.updateLighting(starSystem);
+
+
+            // --- UPDATED WEATHER CONTROLLER LOGIC ---
+            // The WeatherController now drives the environmentState (interpolation/logic)
+            if (this.weatherController && environmentState) {
+                this.weatherController.update(deltaTime, environmentState);
+
+                environmentState.weatherMap = {
+                    current: this.weatherController.getCurrentView(),
+                    previous: this.weatherController.getPreviousView(),
+                    blend: this.weatherController.getBlend(),
+                    resolution: this.weatherController.getResolution()
+                };
+            }
+
+            if (this.uniformManager?.setLocalFogDensityBoost) {
+                const localFogBoost = this.atmoBankSystem?.estimateLocalDistanceFogBoost?.(
                     this.camera,
-                    this.camera.matrixWorldInverse,
-                    this.camera.projectionMatrix
+                    environmentState,
+                    this.planetConfig
+                ) ?? 0;
+                this.uniformManager.setLocalFogDensityBoost(localFogBoost);
+            }
+
+            this.terrainModule?.setEnvironmentState(environmentState);
+            const frame = this.rendererCore.beginFrame({ camera: this.camera, deltaTime: this._lastDeltaTime });
+
+            const hasPostProcessing = !!this.postProcessing;
+            const postEffectsActive = !!(this.postProcessing && this.postProcessing.enabled !== false);
+
+            // Route scene rendering through HDR postprocessing target.
+            if (hasPostProcessing) {
+                this.postProcessing.beginScenePass(this.backend);
+            } else {
+                this.backend.setRenderTarget(null);
+                this.backend.setClearColor(0.0, 0.0, 0.0, 1.0);
+                this.backend.clear(true, true, false);
+            }
+
+            let sunDiskFade = 1.0;
+            if (this.starRenderer && starSystem?.primaryStar && starSystem.currentBody) {
+                const camPos = this.camera.position;
+                const starInfo = starSystem.currentBody.getStarDirection(
+                    starSystem.primaryStar,
+                    { x: camPos.x, y: camPos.y, z: camPos.z }
+                );
+                sunDiskFade = this.starRenderer.update(this.camera, starSystem.primaryStar, starInfo);
+            } else if (this.starRenderer) {
+                this.starRenderer.visible = false;
+                this.starRenderer.opacity = 0;
+            }
+
+            if (this.moonRenderer && starSystem) {
+                const camPos = this.camera.position;
+                const moonInfo = starSystem.getMoonInfo({ x: camPos.x, y: camPos.y, z: camPos.z });
+                const sunDir = this.lightingController.getSunDirection();
+                this.moonRenderer.update(this.camera, moonInfo, sunDir);
+                this.moonRenderer.render(this.camera);
+            }
+
+
+            if (this.skyRenderer && this.atmosphereSettings) {
+                const sunDir = environmentState?.sunLightDirection ||
+                    this.uniformManager.uniforms.sunLightDirection.value;
+                this.skyRenderer.render(
+                    this.camera,
+                    this.atmosphereSettings,
+                    sunDir,
+                    this.uniformManager,
+                    sunDiskFade
                 );
             }
 
-            if (this.particleSystem && this.backend._renderPassEncoder) {
-                this.particleSystem.renderBloom(this.backend._renderPassEncoder);
+            if (this.starRenderer) {
+                this.starRenderer.render();
             }
-        }
 
-        // Execute HDR postprocessing chain (bloom, distortion, tone mapping).
-        if (hasPostProcessing) {
-            const dp = this.postProcessing.distortionPass;
-            let hazeRendered = false;
+            if (this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds) {
+                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager);
+            }
 
-            // Render heat haze distortion sources before postprocessing.
-            // Update first so callback-driven source positions are refreshed
-            // before any range culling happens inside the emitter.
-            if (postEffectsActive && this.heatHazeEmitter && dp) {
-                this.backend._endCurrentRenderPass();
-                this.backend._ensureCommandEncoder();
-                const enc = this.backend._commandEncoder;
+            this.renderTerrain(frame);
 
-                this.heatHazeEmitter.update(
-                    this._lastDeltaTime || 0,
-                    this.planetConfig?.origin || null,
-                    this.camera.position
-                );
+            if (this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds) {
+                this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
+                this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
 
-                if (this.heatHazeEmitter.hasRenderableParticles()) {
-                    dp.clearDistortionMap(enc);
-
-                    const te = this.camera.matrixWorldInverse.elements;
-                    const cameraRight = [te[0], te[4], te[8]];
-                    const cameraUp = [te[1], te[5], te[9]];
-                    const vpMat = new Matrix4();
-                    vpMat.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
-
-                    this.heatHazeEmitter.render(
-                        enc,
-                        dp.getDistortionMapView(),
-                        this.postProcessing.depthTextureView,
-                        vpMat.elements,
-                        cameraRight,
-                        cameraUp,
-                        this.planetConfig?.origin || null
+                if (this.atmoBankSystem && this.cloudRenderer.noiseGenerator) {
+                    const ng = this.cloudRenderer.noiseGenerator;
+                    this.atmoBankSystem.setNoiseTextures(
+                        ng.getBaseTextureView(),
+                        ng.getDetailTextureView()
                     );
-                    hazeRendered = true;
                 }
             }
 
-            if (dp) dp.hasActiveSources = hazeRendered;
-            this.postProcessing.execute(this.backend);
-        }
+            if (postEffectsActive) {
+                this.postProcessing.beginBloomSourcePass(this.backend);
 
-        this.backend.submitCommands();
-        this._actorManager?.resolveReadback();
-        if (this.quadtreeTileManager?.resolveFeedbackReadback) {
-            this.quadtreeTileManager.resolveFeedbackReadback();
-        }
-        if (doValidationScope) {
-            const error = await this.backend.device.popErrorScope();
-            if (error) {
-                // Error scopes are sampled here only to drain validation state.
+                if (this.skinnedMeshRenderer?.isReady()) {
+                    this.skinnedMeshRenderer.renderBloom(
+                        this.camera,
+                        this.camera.matrixWorldInverse,
+                        this.camera.projectionMatrix
+                    );
+                }
+
+                if (this.particleSystem && this.backend._renderPassEncoder) {
+                    this.particleSystem.renderBloom(this.backend._renderPassEncoder);
+                }
             }
+
+            // Execute HDR postprocessing chain (bloom, distortion, tone mapping).
+            if (hasPostProcessing) {
+                const dp = this.postProcessing.distortionPass;
+                let hazeRendered = false;
+
+                // Render heat haze distortion sources before postprocessing.
+                // Update first so callback-driven source positions are refreshed
+                // before any range culling happens inside the emitter.
+                if (postEffectsActive && this.heatHazeEmitter && dp) {
+                    this.backend._endCurrentRenderPass();
+                    this.backend._ensureCommandEncoder();
+                    const enc = this.backend._commandEncoder;
+
+                    this.heatHazeEmitter.update(
+                        this._lastDeltaTime || 0,
+                        this.planetConfig?.origin || null,
+                        this.camera.position
+                    );
+
+                    if (this.heatHazeEmitter.hasRenderableParticles()) {
+                        dp.clearDistortionMap(enc);
+
+                        const te = this.camera.matrixWorldInverse.elements;
+                        const cameraRight = [te[0], te[4], te[8]];
+                        const cameraUp = [te[1], te[5], te[9]];
+                        const vpMat = new Matrix4();
+                        vpMat.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+
+                        this.heatHazeEmitter.render(
+                            enc,
+                            dp.getDistortionMapView(),
+                            this.postProcessing.depthTextureView,
+                            vpMat.elements,
+                            cameraRight,
+                            cameraUp,
+                            this.planetConfig?.origin || null
+                        );
+                        hazeRendered = true;
+                    }
+                }
+
+                if (dp) dp.hasActiveSources = hazeRendered;
+                this.postProcessing.execute(this.backend);
+            }
+
+            this.rendererCore.endFrame(frame);
+            this._actorManager?.resolveReadback();
+        } catch (error) {
+            this.rendererCore.abortFrame();
+            throw error;
+        } finally {
+            if (doValidationScope) await this.backend.device.popErrorScope();
         }
     }
+
 
     async _maybeInitGPUShadows() {
         if (this.gpuShadowRenderer) return;
@@ -1223,150 +1011,65 @@ updateLighting(starSystem) {
         pass.end();
     }
 
-    renderTerrain() {
-        const useGPUQuadtree = this.isGPUQuadtreeActive();
-
-    if (useGPUQuadtree) {
+    renderTerrain(frame) {
         const viewMatrix = this.camera.matrixWorldInverse;
         const projectionMatrix = this.camera.projectionMatrix;
-        
-        if (this.quadtreeTileManager) {
+        this.backend.endRenderPassForCompute();
+        const encoder = this.backend.getCommandEncoder();
+        this._preparePerFrameLightingAndParticles(encoder);
+        this.skinnedMeshRenderer?.update(this._lastDeltaTime);
+        if (this.gpuShadowRenderer?.isReady) {
+            this.gpuShadowRenderer.updateCascadeParams(this.camera, encoder);
+            this.gpuShadowRenderer.cullAndBuildIndirect(encoder);
+            this.gpuShadowRenderer.renderShadowPasses(encoder);
+            this.skinnedMeshRenderer?.renderShadowPasses(encoder, this.gpuShadowRenderer);
+        }
+
+        this.rendererCore.compute(frame);
+        this.rendererCore.render(frame);
+
+        if (this.assetStreamer || this._actorManager) {
             this.backend.endRenderPassForCompute();
-            const encoder = this.backend.getCommandEncoder();
-            
-            // Update particle-attached lights first, then upload/assign clustered lights.
-            this._preparePerFrameLightingAndParticles(encoder);
-            
-            // Always update actor joint/transform state before any rendering.
-            if (this.skinnedMeshRenderer?.isReady()) {
-                this.skinnedMeshRenderer.update(this._lastDeltaTime);
-            }
-
-            // === SHADOW PASSES ===
-            if (this.gpuShadowRenderer?.isReady) {
-                this.gpuShadowRenderer.updateCascadeParams(this.camera, encoder);
-                this.gpuShadowRenderer.cullAndBuildIndirect(encoder);
-                this.gpuShadowRenderer.renderShadowPasses(encoder);
-                if (this.skinnedMeshRenderer?.isReady()) {
-                    this.skinnedMeshRenderer.renderShadowPasses(encoder, this.gpuShadowRenderer);
-                }
-            }
-            
-            this.quadtreeTileManager.update(this.camera, encoder);
+            const assetEncoder = this.backend.getCommandEncoder();
+            this.assetStreamer?.update(assetEncoder, this.camera);
+            this._dispatchActorCompute(assetEncoder);
             this.backend.resumeRenderPass();
-            
-            this.quadtreeTerrainRenderer.render(this.camera, viewMatrix, projectionMatrix);
-
-                if (this.globalOceanRenderer?.isReady?.()) {
-                    const instanceBuffer = this.quadtreeTileManager?.getInstanceBuffer?.() || null;
-                    const indirectBuffer = this.quadtreeTileManager?.getIndirectArgsBuffer?.() || null;
-                    this.globalOceanRenderer.render(
-                        this.camera,
-                        viewMatrix,
-                        projectionMatrix,
-                        instanceBuffer,
-                        indirectBuffer,
-                        this._lastDeltaTime || 0
-                    );
-                }
-
-                if (this.riverSystem) {
-                    this.backend.endRenderPassForCompute();
-                    const riverEncoder = this.backend.getCommandEncoder();
-                    this.riverSystem.update(riverEncoder, this._lastDeltaTime || 0);
-                    this.backend.resumeRenderPass();
-                    if (this.riverSystem.isReady()) {
-                        this.riverSystem.render(this.camera, viewMatrix, projectionMatrix);
-                    }
-                }
-
-                if (this.lakeWaterSystem) {
-                    this.lakeWaterSystem.update(this._lastDeltaTime || 0);
-                    this.lakeWaterSystem.render(this.camera, viewMatrix, projectionMatrix);
-                }
-
-                if (this.assetStreamer) {
-                    this.backend.endRenderPassForCompute();
-                    const encoder = this.backend.getCommandEncoder();
-                    this.assetStreamer.update(encoder, this.camera);
-                
-                    this._dispatchActorCompute(encoder);
-                
-                    this.backend.resumeRenderPass();
-                    this.assetStreamer.render(this.camera, viewMatrix, projectionMatrix);
-                
-                    if (this._actorManager?.destinationMarker?.active) {
-                        this._actorManager.renderOverlays(
-                            this.backend._renderPassEncoder,
-                            this.camera,
-                            this._lastDeltaTime
-                        );
-                    }
-                } else if (this._actorManager) {
-                    this.backend.endRenderPassForCompute();
-                    const encoder = this.backend.getCommandEncoder();
-                    this._dispatchActorCompute(encoder);
-                    this.backend.resumeRenderPass();
-                }   
-
-                
-                if (this.skinnedMeshRenderer?.isReady()) {
-                    this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
-                }
-
-                // Generic meshes (game-specific primitive actors like the
-                // platform_game ball and cloud platforms) must render in
-                // the same render pass as terrain and assets, otherwise
-                // they fall outside the active color/depth attachment in
-                // GPU-quadtree mode.
-                if (this.genericMeshRenderer) {
-                    this.genericMeshRenderer.update(this.camera.position, this._lastDeltaTime || 0);
-                    this.genericMeshRenderer.render(viewMatrix, projectionMatrix);
-                }
-
-                // Lake surfaces near the camera (WaterGpuData.near) and the
-                // near-field simulated water (core/world/water/WaterSimSite.js):
-                // transparent, after the opaque meshes so objects in water show
-                // through them by depth.
-                this.nearWaterRenderer?.render(this.camera, viewMatrix, projectionMatrix);
-                this.waterSimRenderer?.render(this.camera, viewMatrix, projectionMatrix, performance.now() / 1000);
-
-                // Particles draw after opaque terrain + assets + skinned meshes,
-                // still inside the main color render pass (before post-processing).
-                if (this.particleSystem && this.backend._renderPassEncoder) {
-                    this.particleSystem.render(this.backend._renderPassEncoder);
-                }
-
-                if (this.atmoBankSystem) {
-                    this.backend.endRenderPassForCompute();
-                    const abEnc = this.backend.getCommandEncoder();
-                    this.atmoBankSystem.update(
-                        abEnc, this.camera, this._lastDeltaTime || 0,
-                        this._currentEnvironmentState, this.planetConfig,
-                        this.lightingController, this.uniformManager
-                    );
-                    this.atmoBankSystem.setDepthTexture(this.postProcessing?.depthTextureView);
-                    this._renderAtmoBanks(abEnc);
-                    this.backend.resumeRenderPass();
-                }
-
+            this.assetStreamer?.render(this.camera, viewMatrix, projectionMatrix);
+            if (this._actorManager?.destinationMarker?.active) {
+                this._actorManager.renderOverlays(this.backend.getRenderPassEncoder(), this.camera, this._lastDeltaTime);
             }
-            return;
+        }
+        if (this.skinnedMeshRenderer?.isReady()) this.skinnedMeshRenderer.render(this.camera, viewMatrix, projectionMatrix);
+        if (this.genericMeshRenderer) {
+            this.genericMeshRenderer.update(this.camera.position, this._lastDeltaTime);
+            this.genericMeshRenderer.render(viewMatrix, projectionMatrix);
+        }
+
+        this.rendererCore.renderTransparent(frame);
+        if (this.particleSystem && this.backend.getRenderPassEncoder()) this.particleSystem.render(this.backend.getRenderPassEncoder());
+        if (this.atmoBankSystem) {
+            this.backend.endRenderPassForCompute();
+            const bankEncoder = this.backend.getCommandEncoder();
+            this.atmoBankSystem.update(bankEncoder, this.camera, this._lastDeltaTime,
+                this._currentEnvironmentState, this.planetConfig, this.lightingController, this.uniformManager);
+            this.atmoBankSystem.setDepthTexture(this.postProcessing?.depthTextureView);
+            this._renderAtmoBanks(bankEncoder);
+            this.backend.resumeRenderPass();
         }
     }
 
     placeDemoRiver(worldPos, channelDir = null) {
-        this.riverSystem?.setAnchor(worldPos, channelDir);
+        this.terrainModule?.placeRiver(worldPos, channelDir);
     }
 
     setLakes(confirmedLakes) {
-        this.lakeWaterSystem?.setLakes(confirmedLakes);
+        this.terrainModule?.setLakes(confirmedLakes);
     }
 
     playGLBAnimation(instance, animIndex, options = {}) {
         this.skinnedMeshRenderer?.playAnimation(instance, animIndex, options);
     }
-    
+
     stopGLBAnimation(instance) {
         this.skinnedMeshRenderer?.stopAnimation(instance);
     }
@@ -1374,7 +1077,7 @@ updateLighting(starSystem) {
     handleResize(width, height) {
         this.camera.aspect = width / height;
         this._updateCameraMatrices();
-        this.backend.setViewport(0, 0, width, height);
+        this.rendererCore.resize(width, height);
         this.postProcessing?.handleResize(width, height);
     }
 
@@ -1406,48 +1109,28 @@ updateLighting(starSystem) {
     }
 
     dispose() {
-        
-        this.skinnedMeshRenderer?.dispose();
-this.skinnedMeshRenderer = null;
-        if (this.moonRenderer) {
-            this.moonRenderer.dispose();
-            this.moonRenderer = null;
-        }
-        if (this.gpuShadowRenderer) {
-            this.gpuShadowRenderer.dispose();
-            this.gpuShadowRenderer = null;
-        }
-
-        if (this.atmosphereLUT) {
-            this.atmosphereLUT.dispose();
-        }
-        if (this.globalOceanRenderer) {
-            this.globalOceanRenderer.dispose();
-            this.globalOceanRenderer = null;
-        }
-        if (this.riverSystem) {
-            this.riverSystem.dispose();
-            this.riverSystem = null;
-        }
-        if (this.lakeWaterSystem) {
-            this.lakeWaterSystem.dispose();
-            this.lakeWaterSystem = null;
-        }
-        if (this.assetStreamer) {
-            this.assetStreamer.dispose();
-            this.assetStreamer = null;
-        }
-        if (this.particleSystem) {
-            this.particleSystem.dispose();
-            this.particleSystem = null;
-        }
-        if (this.atmoBankSystem) {
-            this.atmoBankSystem.dispose();
-            this.atmoBankSystem = null;
-        }
-        this.lightManager.cleanup();
-        this.shadowRenderer.cleanup();
-        this.backend.dispose();
+        // App extensions first; terrain resources next; the shared device last.
+        this.assetStreamer?.dispose?.();
+        this.assetStreamer = null;
+        this.skinnedMeshRenderer?.dispose?.();
+        this.skinnedMeshRenderer = null;
+        this.gpuShadowRenderer?.dispose?.();
+        this.gpuShadowRenderer = null;
+        this.particleSystem?.dispose?.();
+        this.atmoBankSystem?.dispose?.();
+        this.moonRenderer?.dispose?.();
+        this.starRenderer?.dispose?.();
+        this.skyRenderer?.dispose?.();
+        this.cloudRenderer?.dispose?.();
+        this.heatHazeEmitter?.dispose?.();
+        this.postProcessing?.dispose?.();
+        this.weatherController?.dispose?.();
+        this.lightManager?.cleanup();
+        this.clusterLightBuffers?.dispose?.();
+        this.rendererCore?.dispose?.();
+        this.terrainModule = null;
+        this.atmosphereLUT?.dispose?.();
+        this.backend?.dispose?.();
     }
 
     updateCamera(gameState) {
@@ -1475,7 +1158,7 @@ this.skinnedMeshRenderer = null;
     _updateCameraMatrices() {
         const position = this.camera.position;
         const target = this.camera.target;
-    
+
         if (this.planetConfig?.radius) {
             const origin = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
             const dx = position.x - origin.x;
@@ -1486,7 +1169,7 @@ this.skinnedMeshRenderer = null;
             const altitude = Math.max(0, dist - radius);
             const horizon = Math.sqrt(Math.max(0, dist * dist - radius * radius));
             let targetFar = Math.max(2000, Math.min(radius * 3, horizon * 2 + altitude));
-    
+
             const fullSphereQuadtree = this.gpuQuadtreeEnabled &&
                 this.gpuQuadtreeConfig?.enableHorizonCulling === false &&
                 this.gpuQuadtreeConfig?.enableFrustumCulling === false;
@@ -1499,24 +1182,24 @@ this.skinnedMeshRenderer = null;
             if (Number.isFinite(targetFar)) {
                 this.camera.far = targetFar;
             }
-    
+
             // Dynamic near plane improves depth precision at all altitudes.
             // Scales from 0.5m at ground to ~50m at orbital altitude.
             const altitudeRatio = altitude / radius;
             this.camera.near = Math.max(0.5, Math.min(100.0,
                 0.5 + altitudeRatio * altitudeRatio * 1000.0));
         }
-    
+
         // View matrix (unchanged from your original)
         const zAxis = new Vector3().subVectors(position, target).normalize();
         let up = new Vector3().copy(position).normalize();
         if (up.lengthSq() < 0.0001) up.set(0, 1, 0);
         const dot = Math.abs(zAxis.dot(up));
         if (dot > 0.99) up.set(0, 0, 1);
-    
+
         const xAxis = new Vector3().crossVectors(up, zAxis).normalize();
         const yAxis = new Vector3().crossVectors(zAxis, xAxis);
-    
+
         const te = this.camera.matrixWorldInverse.elements;
         te[0] = xAxis.x; te[4] = xAxis.y; te[8]  = xAxis.z;
         te[1] = yAxis.x; te[5] = yAxis.y; te[9]  = yAxis.z;
@@ -1525,7 +1208,7 @@ this.skinnedMeshRenderer = null;
         te[13] = -yAxis.dot(position);
         te[14] = -zAxis.dot(position);
         te[3] = 0; te[7] = 0; te[11] = 0; te[15] = 1;
-    
+
         // -----------------------------------------------------------------------
         // Forward-Z WebGPU projection matrix.
         //
@@ -1542,35 +1225,35 @@ this.skinnedMeshRenderer = null;
         const aspect = this.camera.aspect;
         const near   = this.camera.near;
         const far    = this.camera.far;
-    
+
         const f = 1.0 / Math.tan(fov / 2); // focal length
-    
+
         const pe = this.camera.projectionMatrix.elements;
-    
+
         // Column 0
         pe[0]  = f / aspect;
         pe[1]  = 0;
         pe[2]  = 0;
         pe[3]  = 0;
-    
+
         // Column 1
         pe[4]  = 0;
         pe[5]  = f;
         pe[6]  = 0;
         pe[7]  = 0;
-    
+
         // Column 2
         pe[8]  = 0;
         pe[9]  = 0;
         pe[10] = -far / (far - near);          // WebGPU forward-Z
         pe[11] = -1;                           // perspective divide (w = -z_view)
-    
+
         // Column 3
         pe[12] = 0;
         pe[13] = 0;
         pe[14] = -(far * near) / (far - near); // WebGPU forward-Z
         pe[15] = 0;
-    
+
         if (this.uniformManager) {
             this.uniformManager.updateCameraParameters(this.camera);
         }

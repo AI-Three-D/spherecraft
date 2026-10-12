@@ -4,8 +4,6 @@
 import { Backend } from './backend.js';
 import { TextureFormat } from '../resources/texture.js';
 import { Logger } from '../../../shared/Logger.js';
-import { gpuFormatSampleType } from '../resources/texture.js';
-import { LAKE_PARAMS_FLOATS } from '../../world/water/waterWgsl.js';
 import {gpuDeviceLoss,reportGpuAsyncFailure} from '../../../shared/gpuDeviceState.js';
 export class WebGPUBackend extends Backend {
     constructor(canvas) {
@@ -32,6 +30,7 @@ export class WebGPUBackend extends Backend {
         this._renderPassEncoder = null;
 
         this._bufferCache = new Map();
+        this._materialUniformBuffers = new WeakMap();
         this._textureCache = new Map();
         this._pipelineCache = new Map();
         this._bindGroupLayoutCache = new Map();
@@ -51,131 +50,9 @@ export class WebGPUBackend extends Backend {
         this._dummyStorageTexture = null;
         this._dummyStorageTextureView = null;
 
-        this._terrainVertexUniformScratch = {
-            buffer: new ArrayBuffer(82 * 4),
-            f32: null,
-            i32: null
-        };
-        this._terrainVertexUniformScratch.f32 = new Float32Array(this._terrainVertexUniformScratch.buffer);
-        this._terrainVertexUniformScratch.i32 = new Int32Array(this._terrainVertexUniformScratch.buffer);
 
-        this._terrainFragmentUniformScratch = {
-            buffer: new ArrayBuffer(512),
-            f32: null,
-            i32: null
-        };
-        this._terrainFragmentUniformScratch.f32 = new Float32Array(this._terrainFragmentUniformScratch.buffer);
-        this._terrainFragmentUniformScratch.i32 = new Int32Array(this._terrainFragmentUniformScratch.buffer);
-
-        this._textureUploadSkip = new Set([
-            'clusterDataTexture',
-            'lightDataTexture',
-            'lightIndicesTexture',
-            'shadowMapCascade0',
-            'shadowMapCascade1',
-            'shadowMapCascade2'
-        ]);
-        this._chunkTextureNames = [
-            'heightTexture',
-            'normalTexture',
-            'tileTexture',
-            'splatDataMap',
-            'splatIndexMap',
-            'splatValidMap',
-            'macroMaskTexture',
-        ];  
-        
-        this._atlasTextureNames = ['atlasTexture', 'level2AtlasTexture', 'tileTypeLookup', 'macroTileTypeLookup', 'numVariantsTex'];
-        this._lightingTextureNames = [
-        'shadowMapCascade0', 'shadowMapCascade1', 'shadowMapCascade2',
-            'clusterDataTexture', 'lightDataTexture', 'lightIndicesTexture'
-        ];
     }
 
-
-    /**
-     * Draw terrain using instancing.
-     * @param {Object} geometry - Shared geometry for LOD
-     * @param {Object} material - Terrain material
-     * @param {Object} uniforms - Global uniforms
-     * @param {GPUBuffer} instanceBuffer - Storage buffer with instance data
-     * @param {number} instanceCount - Number of instances to draw
-     */
-    drawInstanced(geometry, material, uniforms, instanceBuffer, instanceCount) {
-        if (!this._renderPassEncoder) this.clear(true, true, false);
-        if (material._needsCompile || !material._gpuPipeline) this.compileShader(material);
-        if(!material._gpuPipeline)return;
-
-    const allUniforms = { ...material.uniforms, ...uniforms };
-        this._ensureTexturesUploaded(allUniforms);
-
-        this._renderPassEncoder.setPipeline(material._gpuPipeline.pipeline);
-
-        // Set the instance buffer on the material's storage buffers
-        material.storageBuffers = material.storageBuffers || {};
-        material.storageBuffers.chunkInstances = { gpuBuffer: instanceBuffer };
-
-    const bindGroups = this._createBindGroups(material, allUniforms, geometry);
-        bindGroups.forEach((bg, i) => this._renderPassEncoder.setBindGroup(i, bg));
-
-        // Set vertex buffers
-    const vertexLayouts = material._gpuPipeline.vertexBufferLayouts || material.vertexLayout;
-        if (vertexLayouts) {
-            for (let slot = 0; slot < vertexLayouts.length; slot++) {
-            const layout = vertexLayouts[slot];
-                if (layout.stepMode === 'instance') continue; // Skip instance buffers (handled via storage)
-
-                let attributeName = null;
-                if (layout.attributes?.[0]) {
-                const location = layout.attributes[0].shaderLocation;
-                    switch(location) {
-                        case 0: attributeName = 'position'; break;
-                        case 1: attributeName = 'normal'; break;
-                        case 2: attributeName = 'uv'; break;
-                    }
-                }
-
-                if (attributeName) {
-                const attr = geometry.attributes.get(attributeName);
-                    if (attr?.gpuBuffer) {
-                        this._renderPassEncoder.setVertexBuffer(slot, attr.gpuBuffer, attr.gpuBufferOffset || 0);
-                    } else if (attr?.data) {
-                    const buf = this._getOrCreateAttributeBuffer(geometry, attr.data, false, attributeName);
-                        this._renderPassEncoder.setVertexBuffer(slot, buf.gpuBuffer);
-                    } else {
-                    const dummyBuffer = this._getOrCreateDummyVertexBuffer(layout.arrayStride || 16);
-                        this._renderPassEncoder.setVertexBuffer(slot, dummyBuffer);
-                    }
-                }
-            }
-        }
-
-        // Get draw count
-        let count = geometry.drawRange.count;
-        if (count === Infinity) {
-            if (geometry.index) count = geometry.index.count;
-            else if (geometry.attributes.get('position')) count = geometry.attributes.get('position').count;
-            else count = 0;
-        }
-
-        if (count === 0 || instanceCount === 0) return;
-
-        // Issue instanced draw call
-        if (geometry.index) {
-        const iBuf = this._getOrCreateAttributeBuffer(geometry, geometry.index.data, true, 'index');
-            this._renderPassEncoder.setIndexBuffer(
-                iBuf.gpuBuffer,
-                geometry.index.data instanceof Uint32Array ? 'uint32' : 'uint16'
-            );
-            this._renderPassEncoder.drawIndexed(count, instanceCount, geometry.drawRange.start, 0, 0);
-        } else {
-            this._renderPassEncoder.draw(count, instanceCount, geometry.drawRange.start, 0);
-        }
-
-        // Log instancing stats periodically
-        if (!this._instancedDrawCount) this._instancedDrawCount = 0;
-        this._instancedDrawCount += instanceCount;
-    }
 
     get deviceLoss() { return gpuDeviceLoss(this.device); }
 
@@ -273,34 +150,6 @@ export class WebGPUBackend extends Backend {
         this._createDefaultSamplers();
 
 
-    }
-
-    _packAtmosphereUniforms(uniforms) {
-        const data = new Float32Array(16);
-
-        data[0] = uniforms.atmospherePlanetRadius?.value ?? 50000;
-        data[1] = uniforms.atmosphereRadius?.value ?? 55000;
-        data[2] = uniforms.atmosphereScaleHeightRayleigh?.value ?? 800;
-        data[3] = uniforms.atmosphereScaleHeightMie?.value ?? 120;
-
-        const rayleigh = uniforms.atmosphereRayleighScattering?.value;
-        data[4] = rayleigh?.x ?? 5.5e-5;
-        data[5] = rayleigh?.y ?? 13.0e-5;
-        data[6] = rayleigh?.z ?? 22.4e-5;
-        data[7] = uniforms.atmosphereMieScattering?.value ?? 21e-5;
-
-        const ozone = uniforms.atmosphereOzoneAbsorption?.value;
-        data[8] = ozone?.x ?? 0.65e-6;
-        data[9] = ozone?.y ?? 1.881e-6;
-        data[10] = ozone?.z ?? 0.085e-6;
-        data[11] = uniforms.atmosphereMieAnisotropy?.value ?? 0.8;
-
-        data[12] = uniforms.atmosphereGroundAlbedo?.value ?? 0.3;
-        data[13] = uniforms.atmosphereSunIntensity?.value ?? 20.0;
-        data[14] = uniforms.viewerAltitude?.value ?? 0.0;
-        data[15] = 0.0;
-
-        return data;
     }
 
     _createDepthTexture() {
@@ -1039,36 +888,15 @@ compileShader(material) {
     const materialType = (material.name || 'unknown').toLowerCase().trim();
     const baseType = materialType.replace(/[0-9_-]/g, '');
 
-    const layoutVersion = materialType.includes('terrain') ? 'v19' : 'v1';
-    const layoutKeyRaw = material.vertexLayout ?
-        JSON.stringify(material.vertexLayout.map(l => ({
-            stride: l.arrayStride,
-            step: l.stepMode,
-            attrs: l.attributes.length
-        }))) :
-        `default_${layoutVersion}`;
-    const layoutKey = materialType.includes('terrain')
-        ? `${layoutKeyRaw}_v${layoutVersion}`
-        : layoutKeyRaw;
-
-    // Terrain shader builders emit compile-time LOD feature branches well past
-    // the first few hundred characters. Hash the full sources so LOD-specific
-    // bindings, such as resolved far-terrain color, cannot accidentally reuse
-    // a pipeline layout from another terrain variant.
+    const layoutKey = JSON.stringify(material.vertexLayout || []);
     const shaderHash = this._hashCode(`${material.vertexShader}\n${material.fragmentShader}`);
-
-    const arrayFlag = material.defines?.USE_TEXTURE_ARRAYS ? 'arr' : '2d';
+    const bindingKey = material.bindingAdapter
+        ? `${material.bindingAdapter.cacheKey}:${material.bindingAdapter.getCacheKey?.(material) || ''}`
+        : JSON.stringify(material.bindGroupLayoutSpec || []);
     const fmtFlag = material.targetFormat || this.sceneFormat || '';
-
-    // Chunk texture formats affect the bind group layout sampleTypes.
-    // Two terrain materials differing only in normal format must get
-    // distinct pipelines.
-    const chunkFmts = material._chunkTextureFormats || {};
-    const chunkFmtKey = ['height','normal','tile','splatData','splatIndex','splatValid','macro','terrainAO','groundField','resolvedColor','coarseColor']
-        .map(t => chunkFmts[t] || '')
-        .join('|');
-
-    const cacheKey = `${baseType}_${shaderHash}_${layoutKey}_${arrayFlag}_${fmtFlag}_cf${chunkFmtKey}`;
+    const stateKey = JSON.stringify([material.side, material.transparent, material.blending,
+        material.depthTest, material.depthWrite, material.depthCompare]);
+    const cacheKey = `${baseType}_${shaderHash}_${layoutKey}_${fmtFlag}_${bindingKey}_${stateKey}`;
 
     if (this._pipelineCache.has(cacheKey)) {
         material._gpuPipeline = this._pipelineCache.get(cacheKey);
@@ -1202,246 +1030,10 @@ _describeLayouts(layouts) {
     return layouts.map((layout, i) => `Group${i}`);
 }
 
-_createOrbitalSphereLayouts() {
-        const layouts = [];
-    
-        const group0 = this.device.createBindGroupLayout({
-        label: 'OrbitalSphere-Group0-Uniforms',
-        entries: [
-    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-    { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
-            ]
-        });
-    layouts.push(group0);
-    
-        const group1 = this.device.createBindGroupLayout({
-        label: 'OrbitalSphere-Group1-Textures',
-        entries: [
-    {
-        binding: 0,
-            visibility: GPUShaderStage.FRAGMENT,
-        texture: {
-        sampleType: 'float',
-            viewDimension: '2d',
-            multisampled: false
-    }
-    },
-    {
-        binding: 1,
-            visibility: GPUShaderStage.FRAGMENT,
-        sampler: {
-        type: 'filtering'
-    }
-    },
-    {
-        binding: 2,
-            visibility: GPUShaderStage.FRAGMENT,
-        texture: {
-        sampleType: 'float',
-            viewDimension: '2d',
-            multisampled: false
-    }
-    }
-            ]
-        });
-    layouts.push(group1);
-
-    return layouts;
-}
-
 _createBindGroupLayouts(material) {
-    const materialName = (material.name || '').toLowerCase();
-    const useArrayTextures = !!material.defines?.USE_TEXTURE_ARRAYS;
-
-    if (materialName.includes('shadow') || materialName.includes('depth')) {
-        return this._createShadowLayouts();
-    }
-    if (materialName.includes('orbital') || materialName.includes('sphere')) {
-        return this._createOrbitalSphereLayouts();
-    }
-    if (material.bindGroupLayoutSpec) {
-        return this._buildLayoutsFromSpec(material.bindGroupLayoutSpec);
-    }
-    const shaderContent = (material.fragmentShader || '').toLowerCase();
-    if (shaderContent.includes('planettexture')) {
-        return this._createOrbitalSphereLayouts();
-    }
-
-    const includeTerrainAO = !!material.defines?.USE_TERRAIN_AO;
-    const includeGroundField = !!material.defines?.USE_GROUND_FIELD;
-    const includeResolvedColor = !!material.defines?.USE_RESOLVED_COLOR_TEXTURE || !!material.defines?.USE_RESOLVED_COLOR;
-    const includeCoarseColor = !!material.defines?.USE_COARSE_COLOR_TEXTURE;
-    // Full per-slot format map. Missing keys default to rgba32float.
-    const chunkFormats = material._chunkTextureFormats || {};
-    return this._createTerrainBindGroupLayouts(
-        useArrayTextures,
-        includeTerrainAO,
-        includeGroundField,
-        includeResolvedColor,
-        chunkFormats,
-        includeCoarseColor
-    );
-}
-
-
-_createTerrainBindGroupLayouts(
-    useArrayTextures = false,
-    includeTerrainAO = false,
-    includeGroundField = false,
-    includeResolvedColor = false,
-    chunkFormats = {},
-    includeCoarseColor = false
-) {
-    const layouts = [];
-    const chunkViewDimension = useArrayTextures ? '2d-array' : '2d';
-
-    // Slot → texture type mapping (fixed order, matches shader bindings)
-// Slot → texture type mapping (fixed order, matches shader bindings)
-const slotTypes = ['height', 'normal', 'tile', 'splatData', 'splatIndex', 'splatValid', 'macro'];
-const slotSampleType = (type) =>
-    gpuFormatSampleType(chunkFormats[type] || 'rgba32float');
-
-    // Group 0 — uniforms
-    layouts.push(this.device.createBindGroupLayout({
-        entries: [
-            { binding: 0, visibility: GPUShaderStage.VERTEX,                          buffer: { type: 'uniform' } },
-            { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
-        ]
-    }));
-
-    // Group 1 — chunk data textures. Every slot derives its sampleType
-    // from the actual format, so when any slot moves to a filterable
-    // format, it gets sampleType:'float' automatically.
-    const group1Entries = [
-        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-          texture: { sampleType: slotSampleType('height'),     viewDimension: chunkViewDimension } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: slotSampleType('normal'),     viewDimension: chunkViewDimension } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: slotSampleType('tile'),       viewDimension: chunkViewDimension } },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: slotSampleType('splatData'),  viewDimension: chunkViewDimension } },
-        { binding: 4, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: slotSampleType('splatIndex'), viewDimension: chunkViewDimension } },
-        { binding: 5, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: slotSampleType('splatValid'), viewDimension: chunkViewDimension } },
-        { binding: 6, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: slotSampleType('macro'),      viewDimension: chunkViewDimension } },
-    ];
-    if (includeTerrainAO) {
-        group1Entries.push({
-            binding: 7, visibility: GPUShaderStage.FRAGMENT,
-            texture: { sampleType: slotSampleType('terrainAO'), viewDimension: chunkViewDimension }
-        });
-    } else if (includeGroundField) {
-        group1Entries.push({
-            binding: 7, visibility: GPUShaderStage.FRAGMENT,
-            texture: { sampleType: slotSampleType('terrainAO'), viewDimension: chunkViewDimension }
-        });
-    }
-    if (includeGroundField) {
-        group1Entries.push({
-            binding: 8, visibility: GPUShaderStage.FRAGMENT,
-            texture: { sampleType: slotSampleType('groundField'), viewDimension: chunkViewDimension }
-        });
-    }
-    if (includeResolvedColor) {
-        group1Entries.push({
-            binding: 9, visibility: GPUShaderStage.FRAGMENT,
-            texture: { sampleType: slotSampleType('resolvedColor'), viewDimension: chunkViewDimension }
-        });
-    }
-    if (includeCoarseColor) {
-        group1Entries.push({
-            binding: 10, visibility: GPUShaderStage.FRAGMENT,
-            texture: { sampleType: slotSampleType('coarseColor'), viewDimension: chunkViewDimension }
-        });
-    }
-    layouts.push(this.device.createBindGroupLayout({ entries: group1Entries }));
-
-    layouts.push(this.device.createBindGroupLayout({
-        entries: [
-            { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
-            { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
-            { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
-            { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
-            { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
-            { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-            { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-            { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
-            // Clamp-to-edge + trilinear. Used by chunk textures (normal map
-            // today) that have their own mip chain. textureSampler at binding 5
-            // is repeat-mode for atlas tiling and would wrap across tile edges
-            // at mip levels > 0.
-            { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-        ]
-    }));
-
-    layouts.push(this.device.createBindGroupLayout({
-        label: 'Terrain-Group3-Storage-Atmo-Lights-Shadows',
-        entries: [
-            { binding: 0,  visibility: GPUShaderStage.VERTEX,   buffer:  { type: 'read-only-storage' } },
-            { binding: 7,  visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-            { binding: 8,  visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-            { binding: 1,  visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
-            { binding: 2,  visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
-            { binding: 3,  visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
-            { binding: 4,  visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
-            { binding: 5,  visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
-            { binding: 6,  visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
-            { binding: 9,  visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
-            { binding: 10, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
-            { binding: 11, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
-            // Water (core/world/water/waterWgsl.js WATER_BINDINGS).
-            { binding: 12, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
-            { binding: 13, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
-            { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
-            { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
-            { binding: 16, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
-        ]
-    }));
-
-    Logger.info(`[WebGPU] Terrain bind group layouts created: count=${layouts.length} chunkFormats=${JSON.stringify(chunkFormats)}`);
-    return layouts;
-}
-
-_buildClusterBindGroup(material, uniforms) {
-    const clusterBuffers = uniforms._clusterBuffers?.value;
-    const dummy = this._getOrCreateDummyStorageBuffer();
-
-    const lightBuf   = clusterBuffers?.lightBuffer    || dummy;
-    const clusterBuf = clusterBuffers?.clusterBuffer  || dummy;
-    const indexBuf   = clusterBuffers?.lightIndexBuffer || dummy;
-    const paramBuf   = clusterBuffers?.paramBuffer;
-
-    // Param buffer needs to be a real uniform; fall back to a small zero buffer
-    const paramGpu = paramBuf || this._getOrCreateUniformBuffer(
-        '_cluster_params_dummy', new Float32Array(16)
-    );
-
-    const layout = material._gpuPipeline.bindGroupLayouts[4];
-    if (!layout) return null;
-
-    return this.device.createBindGroup({
-        label: 'Terrain-ClusteredLights',
-        layout,
-        entries: [
-            { binding: 0, resource: { buffer: lightBuf   } },
-            { binding: 1, resource: { buffer: clusterBuf } },
-            { binding: 2, resource: { buffer: indexBuf   } },
-            { binding: 3, resource: { buffer: paramGpu   } },
-        ]
-    });
-}
-
-_createShadowLayouts() {
-        const layouts = [];
-    layouts.push(this.device.createBindGroupLayout({
-        entries: [
-    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }
-            ]
-        }));
-    return layouts;
+    if (material.bindingAdapter) return material.bindingAdapter.createLayouts(this, material);
+    if (material.bindGroupLayoutSpec) return this._buildLayoutsFromSpec(material.bindGroupLayoutSpec);
+    throw new Error(`Material ${material.name} requires explicit bindings`);
 }
 
 _buildLayoutsFromSpec(spec) {
@@ -1471,28 +1063,9 @@ _mapVisibility(v) {
 }
 
 _createBindGroups(material, uniforms, geometry = null) {
-        const groups = [];
-        const materialName = (material.name || '').toLowerCase();
-
-    if (materialName.includes('instanceddebug') && material.bindGroupLayoutSpec) {
-            const packed = this._packDebugUniforms(uniforms);
-            const buf = this._getOrCreateUniformBuffer(`instanced_${material.id}`, packed);
-        groups.push(this.device.createBindGroup({
-            layout: material._gpuPipeline.bindGroupLayouts[0],
-            entries: [{ binding: 0, resource: { buffer: buf } }]
-            }));
-        return groups;
-    }
-
-    if (material.bindGroupLayoutSpec && !materialName.includes('orbital') && !materialName.includes('sphere')) {
-        return this._createBindGroupsFromSpec(material, uniforms);
-    }
-
-    if (materialName.includes('orbital') || materialName.includes('sphere')) {
-        return this._createOrbitalSphereBindGroups(material, uniforms);
-    }
-
-    return this._createTerrainBindGroups(material, uniforms, geometry);
+    if (material.bindingAdapter) return material.bindingAdapter.createBindGroups(this, material, uniforms, geometry);
+    if (material.bindGroupLayoutSpec) return this._createBindGroupsFromSpec(material, uniforms);
+    throw new Error(`Material ${material.name} requires explicit bindings`);
 }
 
 _createBindGroupsFromSpec(material, uniforms) {
@@ -1529,7 +1102,7 @@ _createBindGroupsFromSpec(material, uniforms) {
                         entries.push({ binding: entry.binding, resource: { buffer: storageBuffer } });
                     } else {
                         const data = this._resolveUniformData(uniforms, name);
-                        const buf = this._getOrCreateUniformBuffer(`${material.id}_g${gi}_b${entry.binding}`, data);
+                        const buf = this._getOrCreateUniformBuffer(`${material.id}_g${gi}_b${entry.binding}`, data, material);
                         entries.push({ binding: entry.binding, resource: { buffer: buf } });
                     }
         } else if (entry.texture) {
@@ -1618,136 +1191,6 @@ _buildTextureKey(uniforms, names) {
         }).join('|');
 }
 
-// In webgpuBackend.js, update _createOrbitalSphereBindGroups()
-
-_createOrbitalSphereBindGroups(material, uniforms) {
-    const materialCache = this._getMaterialBindGroupCache(material);
-
-    const vertU = this._getOrCreateUniformBuffer(`vert_orbital_${material.id}`, this._packVertexUniforms(uniforms));
-    const fragU = this._getOrCreateUniformBuffer(`frag_orbital_${material.id}`, this._packFragmentUniforms(uniforms));
-
-    const planetTex = uniforms.planetTexture?.value;
-    const normalTex = uniforms.planetNormalMap?.value;
-    
-    const texID = planetTex ? (planetTex.id || planetTex.uuid || 'valid') : 'dummy';
-    const normalID = normalTex ? (normalTex.id || normalTex.uuid || 'valid') : 'dummy';
-    const cacheKey = `orbital_groups_${texID}_${normalID}`;
-
-    if (materialCache.has(cacheKey)) {
-        return materialCache.get(cacheKey);
-    }
-
-    const groups = [];
-
-    // Group 0: Uniforms
-    const group0 = this.device.createBindGroup({
-        label: 'OrbitalSphere-BindGroup0',
-        layout: material._gpuPipeline.bindGroupLayouts[0],
-        entries: [
-    { binding: 0, resource: { buffer: vertU } },
-    { binding: 1, resource: { buffer: fragU } }
-        ]
-    });
-    groups.push(group0);
-
-    // Group 1: Textures
-    let colorTextureView = null;
-    if (planetTex && planetTex._gpuTexture && planetTex._gpuTexture.texture) {
-        if (!planetTex._gpuTexture._view_2d) {
-            try {
-                planetTex._gpuTexture._view_2d = planetTex._gpuTexture.texture.createView({ dimension: '2d' });
-            } catch { /* ignore optional failure */ }
-        }
-        colorTextureView = planetTex._gpuTexture._view_2d;
-    }
-    if (!colorTextureView) {
-        colorTextureView = this._getOrCreateDummyTextureView();
-    }
-
-    let normalTextureView = null;
-    if (normalTex && normalTex._gpuTexture && normalTex._gpuTexture.texture) {
-        if (!normalTex._gpuTexture._view_2d) {
-            try {
-                normalTex._gpuTexture._view_2d = normalTex._gpuTexture.texture.createView({ dimension: '2d' });
-            } catch { /* ignore optional failure */ }
-        }
-        normalTextureView = normalTex._gpuTexture._view_2d;
-    }
-    if (!normalTextureView) {
-        normalTextureView = this._getOrCreateDummyTextureView();
-    }
-
-    const sampler = this._samplerCache.get('linear');
-
-    const group1 = this.device.createBindGroup({
-        label: 'OrbitalSphere-BindGroup1',
-        layout: material._gpuPipeline.bindGroupLayouts[1],
-        entries: [
-    { binding: 0, resource: colorTextureView },
-    { binding: 1, resource: sampler },
-    { binding: 2, resource: normalTextureView }
-        ]
-    });
-    groups.push(group1);
-
-    materialCache.set(cacheKey, groups);
-    return groups;
-}
-_packOrbitalVertexUniforms(uniforms) {
-        const data = new Float32Array(64);
-    let offset = 0;
-
-        const writeMat = (m) => {
-    if (m?.elements) {
-        data.set(m.elements, offset);
-    } else {
-        data.set([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1], offset);
-    }
-    offset += 16;
-        };
-
-    writeMat(uniforms.modelMatrix?.value);
-    writeMat(uniforms.viewMatrix?.value);
-    writeMat(uniforms.projectionMatrix?.value);
-
-        const origin = uniforms.planetOrigin?.value;
-    data[offset++] = origin?.x ?? 0;
-    data[offset++] = origin?.y ?? 0;
-    data[offset++] = origin?.z ?? 0;
-    data[offset++] = uniforms.planetRadius?.value ?? 50000;
-
-    return data;
-}
-
-_packOrbitalFragmentUniforms(uniforms) {
-        const data = new Float32Array(16);
-    let offset = 0;
-
-        const sunDir = uniforms.sunDirection?.value;
-    data[offset++] = sunDir?.x ?? 0.5;
-    data[offset++] = sunDir?.y ?? 0.5;
-    data[offset++] = sunDir?.z ?? 0.5;
-    data[offset++] = uniforms.opacity?.value ?? 1.0;
-
-        const camPos = uniforms.cameraPosition?.value;
-    data[offset++] = camPos?.x ?? 0.0;
-    data[offset++] = camPos?.y ?? 0.0;
-    data[offset++] = camPos?.z ?? 0.0;
-    data[offset++] = uniforms.atmospherePlanetRadius?.value ?? uniforms.planetRadius?.value ?? 50000;
-
-    data[offset++] = uniforms.atmosphereRadius?.value ?? 60000;
-    data[offset++] = uniforms.atmosphereMieScattering?.value ?? 21e-5;
-    data[offset++] = 0.0;
-    data[offset++] = 0.0;
-
-        const rayleigh = uniforms.atmosphereRayleighScattering?.value;
-    data[offset++] = rayleigh?.x ?? 5.5e-5;
-    data[offset++] = rayleigh?.y ?? 13.0e-5;
-    data[offset++] = rayleigh?.z ?? 22.4e-5;
-    data[offset++] = 0.0;
-
-    return data;
-}
 
 _getOrCreateDummyDepthTextureView() {
     if (!this._dummyDepthTexture) {
@@ -1788,434 +1231,14 @@ _getOrCreateDefaultComparisonSampler() {
     }
     return this._samplerCache.get('shadow-comparison');
 }
-_createTerrainBindGroups(material, uniforms, geometry) {
-        const groups = [];
-        const materialCache = this._getMaterialBindGroupCache(material);
-        const geometryCache = this._getGeometryBindGroupCache(geometry);
-        const needArray = !!material.defines?.USE_TEXTURE_ARRAYS;
-        const ensureView = (tex, dimension) => {
-        if (tex && tex._gpuTexture) {
-                const depth = tex.depth || tex._gpuTexture.texture?.depthOrArrayLayers || 1;
-                const isArray = depth > 1 || tex._isArray;
-            if (dimension === '2d-array' && !isArray) {
-                return null;
-            }
-                const wantDimension = dimension || (needArray && isArray ? '2d-array' : '2d');
-                const viewKey = `_view_${wantDimension}`;
-            if (!tex._gpuTexture[viewKey]) {
-                try {
-                        const viewDesc = { dimension: wantDimension };
-                    if (wantDimension === '2d' && isArray) {
-                        viewDesc.baseArrayLayer = 0;
-                        viewDesc.arrayLayerCount = 1;
-                    }
-                    tex._gpuTexture[viewKey] = tex._gpuTexture.texture.createView(viewDesc);
-                } catch { /* ignore cleanup failure */ }
-            }
-            if (tex._gpuTexture[viewKey]) return tex._gpuTexture[viewKey];
-        }
-        return null;
-    };
-        const getView = (name, dimension) => {
-            const tex = uniforms[name]?.value;
-            const view = ensureView(tex, dimension);
-        if (view) return view;
-        if (dimension === '2d-array') return this._getOrCreateDummyArrayTextureView();
-        return this._getOrCreateDummyTextureView();
-    };
-
-        const vertKey = `vert_${material.id}`;
-        const fragKey = `frag_${material.id}`;
-        const vertU = this._getOrCreateUniformBuffer(vertKey, this._packVertexUniforms(uniforms));
-        const fragU = this._getOrCreateUniformBuffer(fragKey, this._packFragmentUniforms(uniforms));
-
-    let g0Record = materialCache.get('terrain_g0');
-    if (!g0Record || g0Record.vert !== vertU || g0Record.frag !== fragU) {
-            const group = this.device.createBindGroup({
-            layout: material._gpuPipeline.bindGroupLayouts[0],
-            entries: [
-        { binding: 0, resource: { buffer: vertU } },
-        { binding: 1, resource: { buffer: fragU } }
-                ]
-            });
-        g0Record = { group, vert: vertU, frag: fragU };
-        materialCache.set('terrain_g0', g0Record);
-    }
-
-
-    
-    groups.push(g0Record.group);
-
-        const chunkTextureBindings = this._chunkTextureNames.map((name, index) => ({ name, binding: index }));
-        if (material.defines?.USE_TERRAIN_AO || material.defines?.USE_GROUND_FIELD) {
-            chunkTextureBindings.push({ name: 'terrainAOMask', binding: 7 });
-        }
-        if (material.defines?.USE_GROUND_FIELD) {
-            chunkTextureBindings.push({ name: 'groundFieldMask', binding: 8 });
-        }
-        if (material.defines?.USE_RESOLVED_COLOR_TEXTURE || material.defines?.USE_RESOLVED_COLOR) {
-            chunkTextureBindings.push({ name: 'resolvedColorTexture', binding: 9 });
-        }
-        if (material.defines?.USE_COARSE_COLOR_TEXTURE) {
-            chunkTextureBindings.push({ name: 'coarseColorTexture', binding: 10 });
-        }
-        const chunkTextureNames = chunkTextureBindings.map(entry => entry.name);
-        const g1Key = this._buildTextureKey(uniforms, chunkTextureNames);
-        const g1CacheKey = `terrain_g1_${needArray ? 'arr' : '2d'}_${g1Key}`;
-        const g1ViewDimension = needArray ? '2d-array' : '2d';
-        const g1Views = chunkTextureNames.map(name => getView(name, g1ViewDimension));
-    let g1Record = geometryCache.get(g1CacheKey);
-        const g1ViewsChanged = g1Record?.views?.some((view, idx) => view !== g1Views[idx]);
-        const g1PipelineChanged = g1Record?.pipeline !== material._gpuPipeline;
-    const shouldLogNewQt = !this._newQtTerrainBindLog || g1ViewsChanged || !g1Record;
-
-    if (!g1Record || g1Record.key !== g1Key || g1ViewsChanged || g1PipelineChanged) {
-            const entries = g1Views.map((view, i) => ({
-                binding: chunkTextureBindings[i].binding,
-                resource: view
-            }));
-            const group = this.device.createBindGroup({
-            layout: material._gpuPipeline.bindGroupLayouts[1],
-            entries
-            });
-        g1Record = { group, key: g1Key, views: g1Views, pipeline: material._gpuPipeline };
-        geometryCache.set(g1CacheKey, g1Record);
-    }
-    groups.push(g1Record.group);
-
-        const g2Key = this._buildTextureKey(uniforms, this._atlasTextureNames);
-        const g2CacheKey = `terrain_g2_${needArray ? 'arr' : '2d'}_${g2Key}`;
-    let g2Record = materialCache.get(g2CacheKey);
-    const g2Views = [
-        getView('atlasTexture',       '2d-array'),   // ← was '2d'
-        getView('level2AtlasTexture', '2d-array'),   // ← was '2d'
-        getView('tileTypeLookup',     '2d'),
-        getView('macroTileTypeLookup','2d'),
-        getView('numVariantsTex',     '2d'),
-    ];
-    const blendModeView = getView('blendModeTable', '2d');
-
-    const g2ViewsChanged = g2Record?.views?.some((view, idx) => view !== g2Views[idx]);
-    if (!g2Record || g2ViewsChanged) {
-        const entries = [
-            { binding: 0, resource: g2Views[0] },
-            { binding: 1, resource: g2Views[1] },
-            { binding: 2, resource: g2Views[2] },
-            { binding: 3, resource: g2Views[3] },
-            { binding: 4, resource: g2Views[4] },
-            { binding: 5, resource: this._samplerCache.get('linear-repeat') },
-            { binding: 6, resource: this._samplerCache.get('nearest') },
-            { binding: 7, resource: blendModeView },
-            { binding: 8, resource: this._samplerCache.get('linear') },  // ← clamp, trilinear
-        ];
-        const group = this.device.createBindGroup({
-            layout: material._gpuPipeline.bindGroupLayouts[2],
-            entries
-        });
-        g2Record = { group, key: g2Key, views: g2Views };
-        materialCache.set(g2CacheKey, g2Record);
-    }
-    groups.push(g2Record.group);
-    
-    const storageHandle = material.storageBuffers?.chunkInstances;
-    const storageBuffer = storageHandle?.gpuBuffer || storageHandle || this._getOrCreateDummyStorageBuffer();
-    const g3Key = this._buildTextureKey(uniforms, ['transmittanceLUT']);
-    const g3View = getView('transmittanceLUT', '2d');
-
-    // Get cluster buffers (or dummies)
-    const clusterBuffers = uniforms._clusterBuffers?.value;
-    const dummyStorage = this._getOrCreateDummyStorageBuffer();
-    const dummyUniform = this._getOrCreateUniformBuffer('_cluster_params_dummy', new Float32Array(16));
-
-    const lightBuf   = clusterBuffers?.lightBuffer      || dummyStorage;
-    const clusterBuf = clusterBuffers?.clusterBuffer    || dummyStorage;
-    const indexBuf   = clusterBuffers?.lightIndexBuffer || dummyStorage;
-    const paramBuf   = clusterBuffers?.paramBuffer      || dummyUniform;
-
-
-    // Shadow resources
-    const shadowRenderer = uniforms._shadowRenderer?.value;
-    const dummyDepthView = this._getOrCreateDummyDepthTextureView();
-    const shadowCascade0 = shadowRenderer?.getShadowDepthView(0) || dummyDepthView;
-    const shadowCascade1 = shadowRenderer?.getShadowDepthView(1) || dummyDepthView;
-    const shadowCascade2 = shadowRenderer?.getShadowDepthView(2) || dummyDepthView;
-    const shadowSampler = shadowRenderer?.getComparisonSampler() ||
-        this._samplerCache.get('shadow-comparison') ||
-        this._getOrCreateDefaultComparisonSampler();
-    const shadowUniformBuf = shadowRenderer?.getCascadeUniformBuffer() || dummyUniform;
-
-    const clusterKey = clusterBuffers ? 'real' : 'dummy';
-
-    // Water (WaterGpuData resources, or dummies: params all zero = off).
-    const water = uniforms._waterData?.value?.resources || null;
-    const waterIndexBuf = water?.index || dummyStorage;
-    const waterLakesBuf = water?.lakes || dummyStorage;
-    const waterRiversBuf = water?.rivers || dummyStorage;
-    const waterMasksView = water?.masks || this._getOrCreateDummyArrayTextureView();
-    const waterParamsBuf = water?.params || this._getOrCreateUniformBuffer('_water_params_dummy', new Float32Array(LAKE_PARAMS_FLOATS));
-
-    // Build cache key including shadow state
-    const shadowKey = shadowRenderer ? 'shadow' : 'noshadow';
-    const g3CacheKey = `terrain_g3_${needArray ? 'arr' : '2d'}_${g3Key}_${clusterKey}_${shadowKey}_${water ? 'water' : 'nowater'}`;
-
-    let g3Record = materialCache.get(g3CacheKey);
-    const g3PipelineChanged = g3Record?.pipeline !== material._gpuPipeline;
-    const g3ViewChanged = g3Record?.view !== g3View;
-    const g3BufferChanged = g3Record?.buffer !== storageBuffer;
-    const g3WaterChanged = g3Record?.waterIndex !== waterIndexBuf || g3Record?.waterLakes !== waterLakesBuf
-        || g3Record?.waterMasks !== waterMasksView || g3Record?.waterParams !== waterParamsBuf
-        || g3Record?.waterRivers !== waterRiversBuf;
-
-    if (!g3Record || g3ViewChanged || g3BufferChanged || g3PipelineChanged || g3WaterChanged) {
-        const entries = [
-            { binding: 0, resource: { buffer: storageBuffer } },
-            { binding: 7, resource: g3View },
-            { binding: 8, resource: this._samplerCache.get('linear') },
-            { binding: 1, resource: { buffer: lightBuf } },
-            { binding: 2, resource: { buffer: clusterBuf } },
-            { binding: 3, resource: { buffer: indexBuf } },
-            { binding: 4, resource: { buffer: paramBuf } },
-            // Shadow entries
-            { binding: 5,  resource: shadowCascade0 },
-            { binding: 6,  resource: shadowCascade1 },
-            { binding: 9,  resource: shadowCascade2 },
-            { binding: 10, resource: shadowSampler },
-            { binding: 11, resource: { buffer: shadowUniformBuf } },
-            { binding: 12, resource: { buffer: waterIndexBuf } },
-            { binding: 13, resource: { buffer: waterLakesBuf } },
-            { binding: 14, resource: waterMasksView },
-            { binding: 15, resource: { buffer: waterParamsBuf } },
-            { binding: 16, resource: { buffer: waterRiversBuf } },
-        ];
-        const group = this.device.createBindGroup({
-            layout: material._gpuPipeline.bindGroupLayouts[3],
-            entries
-        });
-        g3Record = {
-            group,
-            key: g3Key,
-            view: g3View,
-            buffer: storageBuffer,
-            pipeline: material._gpuPipeline,
-            waterIndex:waterIndexBuf,waterLakes:waterLakesBuf,waterMasks:waterMasksView,
-            waterParams:waterParamsBuf,waterRivers:waterRiversBuf,
-        };
-        materialCache.set(g3CacheKey, g3Record);
-    }
-    groups.push(g3Record.group);
-    return groups;
-}
-
-_packVertexUniforms(uniforms) {
-    // Fixed-size packing for terrain uniforms (80 floats / 320 bytes), including useInstancing slot
-        const data = this._terrainVertexUniformScratch.f32;
-        const intView = this._terrainVertexUniformScratch.i32;
-    let offset = 0;
-
-        const writeMat = (m) => {
-    if (m && m.elements) {
-        data.set(m.elements, offset);
-    } else {
-        data.set([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1], offset);
-    }
-    offset += 16;
-        };
-
-    writeMat(uniforms.modelMatrix?.value);
-    writeMat(uniforms.viewMatrix?.value);
-    writeMat(uniforms.projectionMatrix?.value);
-
-    data[offset++] = uniforms.chunkOffset?.value?.x || 0;
-    data[offset++] = uniforms.chunkOffset?.value?.y || 0;
-    data[offset++] = uniforms.chunkSize?.value || 128;
-    data[offset++] = uniforms.macroScale?.value || 0.25;
-
-    data[offset++] = uniforms.planetRadius?.value || 50000;
-    data[offset++] = 0;
-    data[offset++] = 0;
-    data[offset++] = 0;
-
-        const origin = uniforms.planetOrigin?.value;
-    data[offset++] = origin?.x || 0;
-    data[offset++] = origin?.y || 0;
-    data[offset++] = origin?.z || 0;
-    data[offset++] = 0;
-
-    intView[offset] = (uniforms.chunkFace?.value ?? -1);
-    offset++;
-    data[offset++] = 0;
-    data[offset++] = uniforms.chunkLocation?.value?.x || 0;
-    data[offset++] = uniforms.chunkLocation?.value?.y || 0;
-    data[offset++] = uniforms.chunkSizeUV?.value || 0.0625;
-
-    data[offset++] = uniforms.useAtlasMode?.value || 0;
-    data[offset++] = uniforms.atlasUVOffset?.value?.x || 0;
-    data[offset++] = uniforms.atlasUVOffset?.value?.y || 0;
-    data[offset++] = uniforms.atlasUVScale?.value || 1.0;
-    data[offset++] = uniforms.useInstancing?.value || 0;
-
-    data[offset++] = requireNumber(uniforms.heightScale?.value, 'uniforms.heightScale');
-        const atlasSizeVal = uniforms.atlasTextureSize?.value;
-    data[offset++] = typeof atlasSizeVal === 'object' ? (atlasSizeVal?.x || atlasSizeVal?.width || 129) : (atlasSizeVal || 129);
-    data[offset++] = requireInt(uniforms.chunksPerFace?.value, 'uniforms.chunksPerFace', 1);
-    data[offset++] = 0; // _pad5
-
-    // geometryLOD, lodMorph fields (offsets 74-77)
-    intView[offset] = uniforms.geometryLOD?.value ?? 0;
-    offset++;
-    data[offset++] = uniforms.lodMorphStart?.value ?? 0.7;
-    data[offset++] = uniforms.lodMorphEnd?.value ?? 0.9;
-    data[offset++] = 0; // _padMorph
-
-    // cameraPosition + pad (offsets 78-81)
-        const camPos = uniforms.cameraPosition?.value;
-    data[offset++] = camPos?.x ?? 0;
-    data[offset++] = camPos?.y ?? 0;
-    data[offset++] = camPos?.z ?? 0;
-    data[offset++] = 0; // _pad6
-
-    return data;
-}
-
-
-_packFragmentUniforms(uniforms) {
-        const f32 = this._terrainFragmentUniformScratch.f32;
-        const i32 = this._terrainFragmentUniformScratch.i32;
-    
-        const cam = uniforms.cameraPosition?.value;
-    f32[0] = cam?.x ?? 0;
-    f32[1] = cam?.y ?? 0;
-    f32[2] = cam?.z ?? 0;
-    f32[3] = uniforms.time?.value ?? 0;
-
-    f32[4] = uniforms.chunkOffset?.value?.x ?? 0;
-    f32[5] = uniforms.chunkOffset?.value?.y ?? 0;
-    f32[6] = uniforms.chunkWidth?.value ?? uniforms.chunkSize?.value ?? 128;
-    f32[7] = uniforms.chunkHeight?.value ?? uniforms.chunkSize?.value ?? 128;
-    
-        const sunDir = uniforms.sunLightDirection?.value;
-    f32[8] = sunDir?.x ?? 0;
-    f32[9] = sunDir?.y ?? 1;
-    f32[10] = sunDir?.z ?? 0;
-    f32[11] = uniforms.sunLightIntensity?.value ?? 1.0; // ADD: Sun intensity
-    
-        const sunCol = uniforms.sunLightColor?.value;
-        f32[12] = sunCol?.r ?? 1;
-        f32[13] = sunCol?.g ?? 1;
-        f32[14] = sunCol?.b ?? 1;
-        f32[15] = uniforms.terrainAODirectStrength?.value ?? 0.55; 
-        const amb = uniforms.ambientLightColor?.value;
-    f32[16] = amb?.r ?? 0.3;
-    f32[17] = amb?.g ?? 0.3;
-    f32[18] = amb?.b ?? 0.4;
-    f32[19] = uniforms.ambientLightIntensity?.value ?? 0.8; // CHANGE: This should be intensity, not enableSplatLayer
-
-    f32[20] = uniforms.enableSplatLayer?.value ?? 1; // MOVE: enableSplatLayer here
-    f32[21] = uniforms.enableMacroLayer?.value ?? 1; // SHIFT: Move everything down
-    i32[22] = uniforms.geometryLOD?.value ?? 0;
-    i32[23] = uniforms.currentSeason?.value ?? 0;
-
-    i32[24] = uniforms.nextSeason?.value ?? 1;
-    f32[25] = uniforms.seasonTransition?.value ?? 0;
-    const atlasSize = uniforms.atlasTextureSize?.value;
-    f32[26] = typeof atlasSize === 'object'
-            ? (atlasSize?.x ?? atlasSize?.width ?? 1024)
-            : (atlasSize ?? 1024);
-    f32[27] = uniforms.terrainAOStrength?.value ?? 1.0;  
-    
-        const atlasOffset = uniforms.atlasUVOffset?.value;
-    f32[28] = atlasOffset?.x ?? 0;
-    f32[29] = atlasOffset?.y ?? 0;
-    f32[30] = uniforms.atlasUVScale?.value ?? 1;
-    i32[31] = uniforms.useAtlasMode?.value ?? 0;
-
-    f32[32] = uniforms.isFeature?.value ?? 0;
-    f32[33] = uniforms.aerialPerspectiveEnabled?.value ?? 1.0;
-    f32[34] = uniforms.macroScale?.value ?? 0.25;
-    i32[35] = uniforms.macroMaxLOD?.value ?? 0;
-    
-        const planetCenter = uniforms.planetCenter?.value;
-    f32[36] = planetCenter?.x ?? 0;
-    f32[37] = planetCenter?.y ?? 0;
-    f32[38] = planetCenter?.z ?? 0;
-    f32[39] = uniforms.atmospherePlanetRadius?.value ?? 50000;
-
-    f32[40] = uniforms.atmosphereRadius?.value ?? 60000;
-    f32[41] = uniforms.atmosphereScaleHeightRayleigh?.value ?? 800;
-    f32[42] = uniforms.atmosphereScaleHeightMie?.value ?? 120;
-    f32[43] = uniforms.atmosphereMieAnisotropy?.value ?? 0.8;
-    
-        const rayleigh = uniforms.atmosphereRayleighScattering?.value;
-    f32[44] = rayleigh?.x ?? 5.5e-5;
-    f32[45] = rayleigh?.y ?? 13.0e-5;
-    f32[46] = rayleigh?.z ?? 22.4e-5;
-    f32[47] = uniforms.atmosphereMieScattering?.value ?? 21e-5;
-
-    f32[48] = uniforms.atmosphereSunIntensity?.value ?? 20.0;
-    f32[49] = uniforms.fogDensity?.value ?? 0.00005;
-    f32[50] = uniforms.fogScaleHeight?.value ?? 1200;
-    f32[51] = uniforms.level2Blend?.value ?? 0.7;
-
-    const fogCol = uniforms.fogColor?.value;
-    f32[52] = fogCol?.r ?? 0.7;
-    f32[53] = fogCol?.g ?? 0.8;
-    f32[54] = fogCol?.b ?? 1.0;
-    f32[55] = uniforms.macroNoiseWeight?.value ?? 0.5;
-    i32[56] = uniforms.terrainDebugMode?.value ?? 0;
-    i32[57] = uniforms.terrainLayerViewMode?.value ?? 0;
-    // Former padding: distance ramp into the solid-color tier (metres).
-    // Terrain fragment shader reads these as tierFadeStart/tierFadeEnd; the
-    // hover-overlay shader still declares them as unused padding.
-    f32[58] = uniforms.tierFadeStart?.value ?? 0.0;
-    f32[59] = uniforms.tierFadeEnd?.value ?? 0.0;
-
-    i32[60] = uniforms.terrainHoverFace?.value ?? -1;
-    i32[61] = uniforms.terrainHoverFlags?.value ?? 0;
-    f32[62] = 0.0;
-    f32[63] = 0.0;
-
-    const microRect = uniforms.terrainHoverMicroRect?.value;
-    f32[64] = microRect?.x ?? 0.0;
-    f32[65] = microRect?.y ?? 0.0;
-    f32[66] = microRect?.z ?? 0.0;
-    f32[67] = microRect?.w ?? 0.0;
-
-    const macroRect = uniforms.terrainHoverMacroRect?.value;
-    f32[68] = macroRect?.x ?? 0.0;
-    f32[69] = macroRect?.y ?? 0.0;
-    f32[70] = macroRect?.z ?? 0.0;
-    f32[71] = macroRect?.w ?? 0.0;
-
-    const microColor = uniforms.terrainHoverMicroColor?.value;
-    f32[72] = microColor?.x ?? 1.0;
-    f32[73] = microColor?.y ?? 0.42;
-    f32[74] = microColor?.z ?? 0.42;
-    f32[75] = microColor?.w ?? 1.5;
-
-    const macroColor = uniforms.terrainHoverMacroColor?.value;
-    f32[76] = macroColor?.x ?? 0.42;
-    f32[77] = macroColor?.y ?? 0.64;
-    f32[78] = macroColor?.z ?? 1.0;
-    f32[79] = macroColor?.w ?? 2.0;
-
-    return f32;
-}
-_packDebugUniforms(uniforms) {
-        const data = new Float32Array(32);
-    let offset = 0;
-        const writeMat = (m) => {
-    if (m?.elements) data.set(m.elements, offset);
-            else data.set([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1], offset);
-    offset += 16;
-        };
-    writeMat(uniforms.viewMatrix?.value);
-    writeMat(uniforms.projectionMatrix?.value);
-    return data;
-}
-
 _getOrCreateBuffer(name, data) { return this._getOrCreateUniformBuffer(name, data); }
 
-_getOrCreateUniformBuffer(name, data) {
+_getOrCreateUniformBuffer(name, data, owner = null) {
+    if (owner) {
+        let keys = this._materialUniformBuffers.get(owner);
+        if (!keys) { keys = new Set(); this._materialUniformBuffers.set(owner, keys); }
+        keys.add(name);
+    }
         const alignedSize = Math.ceil(data.byteLength / 256) * 256;
         const key = name;
     let record = this._bufferCache.get(key);
@@ -2229,25 +1252,23 @@ _getOrCreateUniformBuffer(name, data) {
     return record.gpuBuffer;
 }
 
+destroyMaterial(material) {
+    this._bindGroupCache.delete(material);
+    for (const key of this._materialUniformBuffers.get(material) || []) {
+        const record = this._bufferCache.get(key);
+        if (record) this._pendingBufferDestroys.push(record.gpuBuffer);
+        this._bufferCache.delete(key);
+    }
+    this._materialUniformBuffers.delete(material);
+    material.dispose();
+}
+
 _ensureTexturesUploaded(uniforms) {
-        const check = (name) => {
-    if (this._textureUploadSkip.has(name)) return;
-            const tex = uniforms[name]?.value;
-    if (!tex) return;
-
-    if (tex._gpuTexture && tex._gpuTexture.texture && tex._gpuTexture.view) {
-        return;
+    for (const uniform of Object.values(uniforms)) {
+        const texture = uniform?.value;
+        if (texture?._gpuTexture?.texture && texture._gpuTexture.view) continue;
+        if (texture?._needsUpload && (texture.data || texture.image)) this.updateTexture(texture);
     }
-
-    if (tex._needsUpload && (tex.data || tex.image)) {
-        this.updateTexture(tex);
-    }
-        };
-
-    this._chunkTextureNames.forEach(check);
-    this._atlasTextureNames.forEach(check);
-    this._lightingTextureNames.forEach(check);
-    check('planetTexture');
 }
 
 
@@ -2592,6 +1613,19 @@ getCommandEncoder() {
     return this._commandEncoder;
 }
 
+getRenderPassEncoder() {
+    return this._renderPassEncoder;
+}
+
+discardCommands() {
+    this._endCurrentRenderPass();
+    this._commandEncoder = null;
+    this._currentPipeline = null;
+    this._currentBindGroups.clear();
+    this._pendingBufferDestroys.splice(0).forEach(buffer => buffer.destroy?.());
+    this._pendingTextureDestroys.splice(0).forEach(texture => texture.destroy?.());
+}
+
 endRenderPassForCompute() {
     this._endCurrentRenderPass();
 }
@@ -2738,6 +1772,11 @@ getAPIName() {
 }
 
 dispose() {
+    this.discardCommands();
+    for (const name of ['_dummyArrayTexture', '_dummyDepthTexture', '_dummyStorageTexture', '_dummyStorageBuffer']) {
+        this[name]?.destroy();
+        this[name] = null;
+    }
     if (this._depthTexture) {
         this._depthTexture.destroy();
         this._depthTexture = null;
@@ -2775,22 +1814,4 @@ dispose() {
         // Defer to end of submit to avoid "destroyed texture used in submit".
         this._pendingTextureDestroys.push(texture);
     }
-}
-
-function requireNumber(value, name) {
-    if (!Number.isFinite(value)) {
-        throw new Error(`WebGPUBackend missing required number: ${name}`);
-    }
-    return value;
-}
-
-function requireInt(value, name, min = null) {
-    if (!Number.isFinite(value)) {
-        throw new Error(`WebGPUBackend missing required integer: ${name}`);
-    }
-    const n = Math.floor(value);
-    if (min !== null && n < min) {
-        throw new Error(`WebGPUBackend ${name} must be >= ${min}`);
-    }
-    return n;
 }

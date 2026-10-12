@@ -1173,6 +1173,47 @@ drainScatterCommitQueue() {
         return { ...base, ...this._externalArrayTextures };
     }
 
+    /** Stop admission and release this world's resources. External array textures are borrowed. */
+    dispose() {
+        if (this._disposed) return;
+        this._disposed = true;
+        this._generationEpoch++;
+        const activeJobs = [];
+        for (const queue of [this._generationQueue, this._refinementQueue, this._regenQueue]) {
+            for (const entry of queue?.pending?.values() ?? []) {
+                if (entry.started) activeJobs.push(entry.promise);
+            }
+            queue?.clearPending(null);
+        }
+        this._tileInfo.clear();
+        this._tileState.clear();
+        this.tileCache?.clear();
+        const pending = [...this._pendingCopyTextures.flat(), ...this._pendingDestructions.map(item => item.textures).flat()];
+        this._pendingCopyTextures = [];
+        this._pendingDestructions = [];
+        const pool = this.arrayPool;
+        this.arrayPool = null;
+        const releasePool = () => {
+            if (!pool) return;
+            pool._pendingCopies.length = 0;
+            for (const texture of pool.textures.values()) texture.destroy();
+            for (const texture of pool._zeroTextures.values()) texture.destroy();
+            pool._splatIndexSentinel?.destroy();
+            pool.textures.clear();
+            pool.wrappers.clear();
+        };
+        // Refinements already running may still read their resident height layer.
+        // Stop exposing the pool immediately, but retain those inputs until jobs finish.
+        if (activeJobs.length) Promise.allSettled(activeJobs).then(releasePool);
+        else releasePool();
+        this._destroyGeneratedTextures(Object.fromEntries(pending.map((texture, i) => [i, texture])));
+        for (const slot of this._feedbackRing ?? []) {
+            slot.feedbackStaging.destroy();
+            slot.metaStaging.destroy();
+        }
+        this._feedbackRing = [];
+    }
+
     tick() {
         this.tickFlush();
         this.tickGeneration();
@@ -1252,6 +1293,7 @@ this._freshnessSkipCount = 0;
 
     /** Flush completed work: texture copies, hash uploads, deferred destructions. */
     tickFlush() {
+        if (this._disposed) return;
         this._advanceFlushStatsFrame();
         this._pruneRequestFreshness();
         this._logEvictFeedbackStats();
@@ -1488,6 +1530,7 @@ this._freshnessSkipCount = 0;
         }
     }
     tickGeneration() {
+        if (this._disposed) return;
         if(gpuDeviceLoss(this.device)) {
             this._generationQueue.clearPending();this._refinementQueue.clearPending();this._regenQueue.clearPending();
             return;
@@ -1758,6 +1801,7 @@ this._freshnessSkipCount = 0;
         slot.state = 'copying';
     }
     resolveFeedbackReadback() {
+        if (this._disposed) return;
         for (const slot of this._feedbackRing) {
             if (slot.state !== 'copying') continue;
 
@@ -1767,6 +1811,7 @@ this._freshnessSkipCount = 0;
                 slot.metaStaging.mapAsync(GPUMapMode.READ),
                 slot.feedbackStaging.mapAsync(GPUMapMode.READ)
             ]).then(() => {
+                if (this._disposed) return;
                 this._processFeedbackSlot(slot);
             }).catch(() => {
                 slot.state = 'idle';

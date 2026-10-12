@@ -13,6 +13,19 @@ function fixture(){
     return {backend,material,create,resolve,reject};
 }
 describe('optional asynchronous material pipeline',()=>{
+    it('keeps pipelines distinct when modules use different render state with the same shaders',()=>{
+        const f=fixture();
+        f.material.asyncCompile=false;
+        f.backend.device.createRenderPipeline=vi.fn(()=>({}));
+        f.backend.device.pushErrorScope=vi.fn();
+        f.backend.device.popErrorScope=vi.fn(()=>Promise.resolve(null));
+        f.backend.compileShader(f.material);
+        const opaque={...f.material,transparent:false,depthWrite:true,_gpuPipeline:null};
+        f.backend.compileShader(opaque);
+        expect(f.backend.device.createRenderPipeline).toHaveBeenCalledTimes(2);
+        f.backend.compileShader({...opaque,_gpuPipeline:null});
+        expect(f.backend.device.createRenderPipeline).toHaveBeenCalledTimes(2);
+    });
     it('skips an unready draw, then makes the compiled pipeline reusable',async()=>{
         const f=fixture();
         expect(f.backend.compileShader(f.material)).toBeNull();

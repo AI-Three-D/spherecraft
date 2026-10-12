@@ -11,6 +11,7 @@ import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFad
 import { Logger } from '../../../shared/Logger.js';
 
 export class QuadtreeTerrainRenderer {
+    /** @param {import('./QuadtreeTerrainRenderer.js').QuadtreeTerrainRendererOptions} options */
     constructor(options = {}) {
         if (!options.terrainAODefaults) {
             throw new Error('QuadtreeTerrainRenderer requires options.terrainAODefaults');
@@ -207,7 +208,7 @@ export class QuadtreeTerrainRenderer {
         const context = this._createTerrainBuildContext();
 
         for (let lod = 0; lod <= this._maxGeomLOD; lod++) {
-            const geometry = this._buildGeometryForLod(lod, context);
+            const geometry = this._geometries.get(lod) || this._buildGeometryForLod(lod, context);
             if (!geometry) continue;
 
             this._geometries.set(lod, geometry);
@@ -387,14 +388,22 @@ export class QuadtreeTerrainRenderer {
     // the traversal's LOD metric (formula in solidTierFade.js, shared with the
     // tile streamer's refinement skip). null = ramp off.
     _computeTierFadeDistances() {
-        const quadtree = this.tileManager?.quadtreeGPU;
+        const parameters = this.tileManager?.getTierFadeParameters?.();
         return computeSolidTierFadeDistances({
-            lodFactor: quadtree?.lodFactor,
-            faceSize: quadtree?.faceSize,
-            maxDepth: quadtree?.maxDepth,
-            lodErrorThreshold: quadtree?.lodErrorThreshold,
+            ...parameters,
             shaderConfig: this.engineConfig?.rendering?.terrainShader
         });
+    }
+
+    /** Releases draw resources only. TerrainSource and shared atlases have separate owners. */
+    dispose() {
+        for (const geometry of this._geometries.values()) geometry.dispose();
+        for (const material of this._materials.values()) this.backend.destroyMaterial(material);
+        for (const material of this._overlayMaterials.values()) this.backend.destroyMaterial(material);
+        this._geometries.clear();
+        this._materials.clear();
+        this._overlayMaterials.clear();
+        this._initialized = false;
     }
 
     _applyTerrainHoverUniforms(uniforms) {

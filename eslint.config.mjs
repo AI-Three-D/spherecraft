@@ -26,6 +26,10 @@ export default [
         GPUShaderModule: "readonly",
         GPUSampler: "readonly",
         GPUQuerySet: "readonly",
+        GPUBufferUsage: "readonly",
+        GPUTextureUsage: "readonly",
+        GPUShaderStage: "readonly",
+        GPUMapMode: "readonly",
         navigator: "readonly",
       },
     },
@@ -39,7 +43,7 @@ export default [
   },
   {
     // Node.js scripts (CI, config files)
-    files: [".github/scripts/**/*.mjs", "*.config.mjs"],
+    files: [".github/scripts/**/*.mjs", "tools/types/**/*.mjs", "*.config.mjs"],
     languageOptions: {
       globals: {
         ...globals.node,

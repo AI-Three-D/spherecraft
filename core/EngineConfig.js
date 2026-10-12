@@ -53,7 +53,6 @@ export class EngineConfig {
     const atmoBankParticles = rendering.atmoBankParticles || {};
     const atmoBankOffscreen = atmoBankParticles.offscreen || {};
     this.rendering = {
-      preferWebGPU: requireBool(rendering.preferWebGPU, 'rendering.preferWebGPU'),
       maxPoolSlots: requireInt(rendering.maxPoolSlots, 'rendering.maxPoolSlots', 1),
       terrainShader: {
         aerialFadeStartMeters: requireInt(terrainShader.aerialFadeStartMeters ?? 0, 'rendering.terrainShader.aerialFadeStartMeters', 0),
@@ -545,6 +544,7 @@ export class EngineConfig {
       fogParticles:     requireBool(features.fogParticles     ?? true, 'features.fogParticles'),
       skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
       rivers:           requireBool(features.rivers           ?? true, 'features.rivers'),
+      lakes:            requireBool(features.lakes            ?? true, 'features.lakes'),
     };
 
     // ==================== GENERATION QUEUE (ENGINE-WIDE) ====================
