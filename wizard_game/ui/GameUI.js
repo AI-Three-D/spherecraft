@@ -438,8 +438,9 @@ export class GameUI {
      * @param {Object|null} params.zoneInfo - Altitude zone info or null
      * @param {Object|null} params.perfHud - Terrain streaming perf snapshot from
      *   QuadtreeTileManager.getPerfHudSnapshot(), or null before the first tick
+     * @param {Object|null} params.camera - { position, target, up } of the view camera
      */
-    update({ fps, cameraMode, shipState, zoneInfo, playerStatus, perfHud }) {
+    update({ fps, cameraMode, shipState, zoneInfo, playerStatus, perfHud, camera }) {
         if (!this._hudContent) return;
 
         const fpsInfo = this._buildFPSInfo(fps);
@@ -449,9 +450,27 @@ export class GameUI {
             ? this._buildCharacterInfo(playerStatus)
             : this._buildFlightInfo(shipState);
         const altitudeInfo = this._buildAltitudeInfo(zoneInfo);
+        const cameraInfo = this._buildCameraInfo(camera);
         const perfInfo = this._buildPerfInfo(perfHud);
 
-        this._hudContent.innerHTML = fpsInfo + vitalsInfo + controlsInfo + modeInfo + altitudeInfo + perfInfo;
+        this._hudContent.innerHTML = fpsInfo + vitalsInfo + controlsInfo + modeInfo + altitudeInfo + cameraInfo + perfInfo;
+    }
+
+    // The view camera's pose, so a screenshot gives the exact view back
+    // (qtDiag.regional.useCamera({ position, target, up, fov })).
+    _buildCameraInfo(camera) {
+        if (!camera?.position || !camera?.target) return '';
+        const v = (p, d = 1) => `${p.x.toFixed(d)}, ${p.y.toFixed(d)}, ${p.z.toFixed(d)}`;
+        return `
+            <div style="${this._buildInfoCardStyle()}">
+                <strong style="color:#d9f8ff; letter-spacing:0.1em;">CAMERA</strong><br>
+                <div style="font-size: 10px; line-height: 1.5; color: #d7e8ef; margin-top: 6px; font-family: monospace; user-select: text;">
+                    pos ${v(camera.position)}<br>
+                    look ${v(camera.target)}<br>
+                    up ${camera.up ? v(camera.up, 4) : 'n/a'}
+                </div>
+            </div>
+        `;
     }
 
     // Phase 0 terrain-streaming instrumentation (SphereCraft_Optimization_

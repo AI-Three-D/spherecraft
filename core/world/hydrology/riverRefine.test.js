@@ -116,8 +116,28 @@ describe('river levels for the valley', () => {
             expect(drop).toBeGreaterThanOrEqual(P.minSlope * 20 - 1e-9);   // never flat, never rising
             maxDrop = Math.max(maxDrop, drop);
         }
-        // Drops are spread (no steps): at most a few metres per 20 m point.
-        expect(maxDrop).toBeLessThan(3);
+        // Small drops are spread into rapids; the 10 m hollow stays a fall.
+        expect(maxDrop).toBeLessThan(10);
+    });
+
+    it('follows a steep mountain stream: no slot from smoothing, no water above the falling ground', () => {
+        // 12 % slope with bumps, from a lake at 500 m, a 6 m step at 1 km.
+        const s2 = [], g2 = [], f2 = [];
+        for (let k = 0; k <= 100; k++) {
+            s2.push(k * 20);
+            g2.push(500 - 0.12 * k * 20 - (k >= 50 ? 6 : 0) + 1.5 * Math.sin(k * 0.9));
+            f2.push(riverCrestAbove(0.8));
+        }
+        const { eta } = riverValleyLevels({ s: s2, ground: g2, free: f2, srcLevel: 500, destLevel: g2[100] - 2 }, P);
+        for (let k = 1; k < 95; k++) {
+            const surface = g2[k] - f2[k] - P.marginM;
+            // Never held above the ground's surface (allowing the ramp's rise),
+            expect(eta[k]).toBeLessThanOrEqual(surface + P.rampRiseM + 1e-9);
+            // and never far below its running minimum (the fit through the bumps).
+            let lowUp = Infinity;
+            for (let j = 0; j <= k; j++) lowUp = Math.min(lowUp, g2[j] - f2[j] - P.marginM);
+            expect(eta[k]).toBeGreaterThan(lowUp - P.smoothCutM - 3.5);
+        }
     });
 
     it('stays under the ground beside the river (the floor is cut in), filling only a small share', () => {

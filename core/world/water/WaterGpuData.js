@@ -18,7 +18,7 @@
 //   params; pages arrive baked from the WaterService
 //   (valleyUpdates) and mark their grid cells changed (tiles regenerate).
 
-import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS, RIVER_SUB } from './waterWgsl.js';
+import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, NARROW_RIVER_DRAW_M, NARROW_RIVER_HW_M, RIVER_MAX_SEGS_PER_CELL, RIVER_SEG_FLOATS, RIVER_SUB } from './waterWgsl.js';
 import { dirToCell } from '../hydrology/waterGraph.js';
 import { riverCarveReach, riverNearLake, trimLakeBand } from './lakeBand.js';
 import { riverWaterLevels } from './riverRibbon.js';
@@ -525,10 +525,14 @@ export class WaterGpuData {
      * Lays out every traced river's segments per sub-cell (rec.segCells:
      * cell * SUB^2 + sub, waterGraph.js dirToCellSub): a block of sub-lists
      * per river cell (index half 2 points at it), and uploads them. Nearest
-     * rivers first when the buffers are full.
+     * rivers first when the buffers are full. Narrow streams only within
+     * NARROW_RIVER_DRAW_M (sub-pixel beyond): ~1,400 mountain streams pushed
+     * distant big rivers out of the full buffer (lake-recovery run 23).
      */
     _rebuildRivers(camDir) {
         const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map(), levelsOf = new Map();
+        const narrowCos = Math.cos(NARROW_RIVER_DRAW_M / this.R);
+        let beyond = 0;
         // Nearest rivers first, by their nearest point (a river's source can
         // be far while it runs past the camera: lab 2026-10-05).
         const recs = [...this._appliedRivers.entries()].map(([rid, rec]) => {
@@ -536,6 +540,10 @@ export class WaterGpuData {
             let cosA = -2;
             for (let k = 0; k < n; k = (k + 4 < n || k === n - 1) ? k + 4 : n - 1) cosA = Math.max(cosA, camDir[0] * P[k * st] + camDir[1] * P[k * st + 1] + camDir[2] * P[k * st + 2]);
             return { rid, rec, far: -cosA };
+        }).filter(({ rec, far }) => {
+            if (-far >= narrowCos || !this._isNarrow(rec)) return true;
+            beyond++;
+            return false;
         }).sort((a, b) => a.far - b.far);
         const ridOf = new Map(recs.map(r => [r.rec, r.rid]));
         let total = 0, dropped = 0;
@@ -619,15 +627,33 @@ export class WaterGpuData {
         if (next) this.device.queue.writeBuffer(this.riversBuffer, 0, this._segs, 0, next * F);
         this.riverSegCount = next;
         // Rivers entering or leaving the lists change the carve in their cells.
+        // Not narrow ones crossing the draw radius: their cut is sub-pixel
+        // there, and regenerating tiles every 2 km of flight is not (tiles
+        // made while one is listed keep its cut; nearer tiles get it anew).
         for (const rid of new Set([...inGpu, ...(this._inGpu ?? [])])) {
             if (inGpu.has(rid) === (this._inGpu?.has(rid) ?? false)) continue;
             const rec = this._appliedRivers.get(rid);
+            if (rec && this._isNarrow(rec)) continue;
             if (rec?.segCells) for (const id of rec.segCells) this._changedCells.add(Math.floor(id / SS));
         }
         this._inGpu = inGpu;
-        this._droppedRivers = dropped;
+        // Left-out rivers are laid out again once the camera has moved (update).
+        this._droppedRivers = dropped + beyond;
         this._layoutDir = camDir;
         if (dropped) console.warn(`[Water] river segment buffer full: ${dropped} far rivers not drawn`);
+    }
+
+    /** Every point's half-width below NARROW_RIVER_HW_M (cached per record). */
+    _isNarrow(rec) {
+        this._narrowCache ??= new WeakMap();
+        let narrow = this._narrowCache.get(rec);
+        if (narrow === undefined) {
+            const P = rec.points, st = rec.stride;
+            narrow = true;
+            for (let o = 4; o < P.length && narrow; o += st) narrow = P[o] < NARROW_RIVER_HW_M;
+            this._narrowCache.set(rec, narrow);
+        }
+        return narrow;
     }
 
     /** Arc length (m) of each point of a traced river (cached per record). */
@@ -656,11 +682,11 @@ export class WaterGpuData {
  * are cropped to the water (waterWorkerCore solveLake crop): the coarse
  * extent is the frame less the solve margins (lakeRefine.lakePatchFrame:
  * max(1500 m, 0.3 x extent) a side), grown 25 % for basins wider at fine scale.
- * 2048^2 layers keep tile coordinates within the shader's 4 bits for 128^2
- * tiles. Default planet, 614 lakes at 32 m: 82 / 191 / 508 slots, 44 MB.
+ * 1024^2 layers keep tile coordinates within the shader's 4 bits down to
+ * 64^2 tiles (small mountain lakes; reserve: slots for lakes added later).
  * @returns {{ dim: number, classes: { size: number, slots: number }[], bytes: number }}
  */
-export function lakeMaskAtlasPlan(lakes, { dim = 2048, sizes = [512, 256, 128], slack = 1.25, pool = 2 } = {}) {
+export function lakeMaskAtlasPlan(lakes, { dim = 1024, sizes = [512, 256, 128, 64], slack = 1.25, pool = 2, reserve = 0 } = {}) {
     const asc = sizes.slice().sort((a, b) => a - b), counts = new Map(asc.map(s => [s, 0]));
     for (const { frame: f } of lakes) {
         const W = Math.max(f.nx, f.ny) * f.spacing, extent = W >= 8000 ? W / 1.6 : Math.max(0, W - 3000);
@@ -670,6 +696,8 @@ export function lakeMaskAtlasPlan(lakes, { dim = 2048, sizes = [512, 256, 128], 
         const size = asc.find(s => s * pool >= cells) ?? asc[asc.length - 1];
         counts.set(size, counts.get(size) + 1);
     }
+    // reserve: lakes added later (mountain lakes), in the smallest tiles.
+    counts.set(asc[0], counts.get(asc[0]) + reserve / slack);
     const classes = asc.slice().reverse().map(size => ({ size, slots: Math.ceil(counts.get(size) * slack) + 4 }));
     const layers = classes.reduce((n, c) => n + Math.ceil(c.slots / (dim / c.size) ** 2), 0);
     return { dim, classes, pool, bytes: layers * dim * dim };

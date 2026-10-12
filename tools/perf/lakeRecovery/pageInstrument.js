@@ -22,6 +22,20 @@
                 try { return await orig(desc); } finally { rec.ms = now() - start; LR.compiles.push(rec); }
             };
         }
+        // Synchronous pipelines block the main thread while the driver
+        // compiles (run 24: one 12.5 s stall after a shader change); the
+        // slow ones (> 20 ms) are recorded with their fragment entry.
+        for (const kind of ['createRenderPipeline', 'createComputePipeline']) {
+            const orig = d[kind].bind(d);
+            d[kind] = (desc) => {
+                const start = now();
+                try { return orig(desc); } finally {
+                    const ms = now() - start;
+                    if (ms > 20) LR.compiles.push({ kind, label: desc?.label ?? desc?.fragment?.module?.label ?? desc?.vertex?.module?.label ?? null,
+                        entry: desc?.fragment?.entryPoint ?? desc?.compute?.entryPoint ?? null, start, ms });
+                }
+            };
+        }
         return d;
     };
 

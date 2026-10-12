@@ -250,6 +250,35 @@ describe('WaterGpuData', () => {
         expect([...changed].sort((a, b) => a - b)).toEqual([7, 8, 20, 21]);
     });
 
+    it('narrow streams are listed only within their draw radius; crossing it regenerates nothing', () => {
+        const dev = stubDevice();
+        const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2, maxRiverSegs: 8 });
+        const svc = fakeService();
+        svc.rivers.push({ id: 1, fromLake: 1, cells: Int32Array.from([]) });
+        gpu.update(svc, cam, 0);
+        // Half-width 4 m (a mountain lake's stream), 45 degrees from the camera.
+        const pts = (a, b) => { const P = new Float32Array(24); P.set([...a, 100, 4, 1, 0.5, 3, 101, 0, 0, 0], 0); P.set([...b, 99, 4, 1, 0.5, 3, 100, 0, 0, 0], 12); return P; };
+        const r = Math.SQRT1_2;
+        svc.riverRecs.set(0, { points: pts([r, 0, r], [r, 0.01, r]), stride: 12, segCellStart: Int32Array.from([0, 2]), segCells: Int32Array.from([16 * 20, 16 * 21]) });
+        svc.version++;
+        gpu.update(svc, cam, 0);
+        expect(gpu.isRiverDrawn(0)).toBe(false);
+        gpu.takeChangedCells();
+        // Over it: listed, without regenerating its cells; and away again.
+        gpu.update(svc, { x: 200000 * r, y: 0, z: 200000 * r }, 0);
+        expect(gpu.isRiverDrawn(0)).toBe(true);
+        expect(gpu.takeChangedCells()).toBe(null);
+        // Away again: it leaves at the next layout (here a new river's), and
+        // only the new river's cells change.
+        const wide = pts([0, 0, 1], [0, 0.01, 1]).map((v, i) => (i % 12 === 4 ? 15 : v));
+        svc.riverRecs.set(1, { points: wide, stride: 12, segCellStart: Int32Array.from([0, 2]), segCells: Int32Array.from([16 * 7, 16 * 8]) });
+        svc.version++;
+        gpu.update(svc, cam, 0);
+        expect(gpu.isRiverDrawn(0)).toBe(false);
+        expect(gpu.isRiverDrawn(1)).toBe(true);
+        expect([...gpu.takeChangedCells()].sort((a, b) => a - b)).toEqual([7, 8]);
+    });
+
     it('lakesNear: lakes with a mask layer whose patch comes within range, nearest first', () => {
         const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxMaskLayers: 2 });
         const svc = fakeService();

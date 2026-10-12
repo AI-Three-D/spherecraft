@@ -26,6 +26,7 @@ import { RIVER_LEVEL_DEFAULTS } from './riverRefine.js';
 import { RIVER_VALLEY_DEFAULTS } from '../water/riverValley.js';
 import { RIVER_LANDSCAPE_DEFAULTS } from './riverLandscape.js';
 import { regionalWaterModel,regionalWaterGridN } from './regionalWater.js';
+import { MOUNTAIN_LAKE_DEFAULTS, MOUNTAIN_LAKE_VERSION, chooseMountainLakes, drainFrame, mountainBlockFrame, mountainBlocks, pocketSolveFrame } from './mountainLakes.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
 export const WATER_ALGO_VERSION = 'water-v18';
@@ -70,6 +71,9 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
         // 614 lakes, 32 m vs 16 m levels p5..p95 -0.23..+0.14 m, visible
         // water IoU 0.994 by area, 3.3x less flood work.
         precompute: false,
+        // Small mountain lakes (mountainLakes.js), found and solved after the
+        // graph's lakes in a precompute; MOUNTAIN_LAKE_DEFAULTS overrides.
+        mountain: {},
     },
 });
 
@@ -259,6 +263,14 @@ export class WaterService {
                 `build ${this.timings.buildMs.toFixed(0)} ms ${this._client.inWorker ? 'in worker' : 'in-process'}, key ${this._key})`
             );
             if (pre) {
+                // Mask slots for the mountain lakes to come (WaterGpuData is
+                // sized when the graph is ready): ~0.47 a block on the
+                // default planet at 800 m spacing (lab 8), reserved generously.
+                const MP = { ...MOUNTAIN_LAKE_DEFAULTS, ...this.config.refine.mountain };
+                if (MP.enabled) {
+                    this._mountainBlocks = mountainBlocks(this.gridHeights, grid.seaLevelM, N, MP).blocks;
+                    this.mountainReserve = Math.ceil(this._mountainBlocks.length * 0.6) + 32;
+                }
                 this._busy = true;   // update() waits: lakes are solved here, rivers after them
                 this._precomputeLakes().catch(err => Logger.warn(`[Water] lake precompute failed: ${err?.stack || err}`));
             }
@@ -454,6 +466,8 @@ export class WaterService {
             }
             await adoptReady();
             this.timings.precomputeWorkers = poolSize;
+            this.timings.lakesMs = performance.now() - t0;
+            if (this._mountainBlocks) await this._mountainLakes({ takeWorker, releaseWorker, poolSize });
             const { downstream } = await this._client.call({ type: 'downstream' });
             for (const [lid, down] of Object.entries(downstream)) {
                 const r = this.refined.get(Number(lid));
@@ -469,6 +483,244 @@ export class WaterService {
         Logger.info(`[Water] lakes precomputed: ${solved} solved (${cached} from cache), ${this.mergedInto.size} merged, ` +
             `${this._failed.size} failed, ${this.timings.precomputeMs.toFixed(0)} ms`);
         if (this.config.sim?.enabled !== false) this._sampler.warmCarved?.().catch(() => {});
+    }
+
+    /**
+     * Small mountain lakes (mountainLakes.js), inside the precompute: pockets
+     * of the mountain blocks (64 m floods, nearest blocks first), chosen by
+     * setting, outflow drop and spacing, solved at 32 m, then added as lakes
+     * after the graph's (ids from lakes.length; no graph river of their own
+     * yet). The solved lakes are cached as one record.
+     */
+    async _mountainLakes({ takeWorker, releaseWorker, poolSize }) {
+        const t0 = performance.now();
+        const P = { ...MOUNTAIN_LAKE_DEFAULTS, ...this.config.refine.mountain };
+        const N = this.N, Rp = this.radius, sea = this._sampler.seaLevelM, NN = N * N;
+        const key = `mlakes:${this._key}:${hashParts([MOUNTAIN_LAKE_VERSION, P, this.config.refine.bandM])}`;
+        let solved = this.config.cache ? await this._cache.get(key) : null;
+        const fromCache = !!solved;
+        const runBounded = async (items, job) => {
+            const running = new Set();
+            for (const item of items) {
+                while (running.size >= (this._loading?.() ? 1 : poolSize) + 1) await Promise.race(running);
+                const p = job(item).then(() => running.delete(p));
+                running.add(p);
+            }
+            await Promise.all(running);
+        };
+        if (!solved) {
+            const dist = (d) => (this._camDir ? Math.acos(Math.max(-1, Math.min(1, d[0] * this._camDir[0] + d[1] * this._camDir[1] + d[2] * this._camDir[2]))) : 0);
+            const blocks = this._mountainBlocks.map(b => ({ ...b, frame: mountainBlockFrame(b, N, Rp, P.discoverySpacingM, P) }))
+                .sort((a, b) => dist(a.frame.c) - dist(b.frame.c));
+            const B = P.blockCells, cands = [];
+            const owns = (b, cell) => { const f = Math.floor(cell / NN), k = cell % NN; return f === b.f && Math.floor((k % N) / B) === b.bi && Math.floor(Math.floor(k / N) / B) === b.bj; };
+            // Not in a graph lake, and clear of the graph's river cells (their
+            // traces run through such pockets).
+            const clear = (cell) => {
+                if (this.lakeOf[cell] !== -1 || this.riverOf[cell] !== -1) return false;
+                return true;
+            };
+            await runBounded(blocks, async (b) => {
+                const heights = await this._sampler.samplePatch(b.frame, Rp);
+                const worker = await takeWorker();
+                let r;
+                try { r = await worker.call({ type: 'findPockets', frame: b.frame, heights, R: Rp, seaLevelM: sea, params: P }, [heights.buffer]); }
+                finally { releaseWorker(worker); }
+                for (const p of r.pockets) { const cell = dirToCell(p.dir, N); if (owns(b, cell) && clear(cell)) cands.push(p); }
+            });
+            this.timings.mountainDiscoveryMs = performance.now() - t0;
+            const picks = chooseMountainLakes(cands, Rp, P).sort((a, b) => dist(a.dir) - dist(b.dir));
+            const empty = new Float64Array(0);
+            solved = [];
+            await runBounded(picks, async (p) => {
+                let frame = pocketSolveFrame(p, Rp, P);
+                for (let grows = 0; grows <= 2; grows++) {
+                    const heights = await this._sampler.samplePatch(frame, Rp);
+                    const worker = await takeWorker();
+                    let rec;
+                    try { rec = await worker.call({ type: 'solvePatchLake', lakeId: -1, frame, heights, bandM: this.config.refine.bandM, N, R: Rp, seedDir: p.dir, others: empty }, [heights.buffer]); }
+                    finally { releaseWorker(worker); }
+                    if (rec.status === 'ok') { solved.push({ dir: p.dir, rec, path: p.path, pathH: p.pathH }); return; }
+                    if (rec.status !== 'grow') return;
+                    frame = growPatchFrame(frame, 1.6);
+                }
+            });
+            // Registration order must not depend on worker timing.
+            solved.sort((a, b) => dist(a.dir) - dist(b.dir) || a.dir[0] - b.dir[0] || a.dir[1] - b.dir[1]);
+            this.mountainStats = { blocks: blocks.length, candidates: cands.length, picks: picks.length, solved: solved.length };
+        }
+        const base = this.lakes.length;
+        this._addLakes(solved.map(({ dir, rec }) => ({ dir, rec, mountain: true })));
+        // Streams follow each lake's fine drainage (from its sill, 64 m) to
+        // the first lower water on it; the graph worker takes them as rivers
+        // (waterWorkerCore addLakes). A drainage that left its discovery
+        // patch dry continues on patches ahead of its end, then the whole
+        // set (lakes and drainages) is cached.
+        const walk = this._mountainDrainWalk(solved, base, P);
+        if (!fromCache) {
+            const t1 = performance.now();
+            let extended = 0;
+            const stuck = new Set();
+            for (let round = 0; round < P.drainRounds; round++) {
+                const open = solved.map((_, k) => k).filter(k => !stuck.has(k) && walk(k).open);
+                if (!open.length) break;
+                await runBounded(open, async (k) => {
+                    const it = solved[k], end = it.path.at(-1), prev = it.path.at(-2) ?? it.dir;
+                    const frame = drainFrame(end, prev, Rp, P);
+                    const heights = await this._sampler.samplePatch(frame, Rp);
+                    const worker = await takeWorker();
+                    let r;
+                    try { r = await worker.call({ type: 'continueDrain', frame, heights, R: Rp, start: end, params: P }, [heights.buffer]); }
+                    finally { releaseWorker(worker); }
+                    if (!r.path.length) stuck.add(k);
+                    it.path.push(...r.path); it.pathH.push(...r.pathH);
+                    extended++;
+                });
+            }
+            // Keep each drainage only up to its stream's end (the walk
+            // repeats it from the cache).
+            const ends = { stream: 0, long: 0, open: 0, none: 0 };
+            solved.forEach((it, k) => {
+                const w = walk(k), n = w.stream?.dirs.length ?? 0;
+                ends[w.stream ? 'stream' : w.long ? 'long' : w.open ? 'open' : 'none']++;
+                it.path = it.path.slice(0, n); it.pathH = it.pathH.slice(0, n);
+            });
+            this.mountainStats.drainEnds = ends;
+            this.timings.mountainDrainMs = performance.now() - t1;
+            this.mountainStats.drainPatches = extended;
+            if (this.config.cache) this._cache.put(key, solved);
+        }
+        const streams = this._joinMountainStreams(solved, walk, P, this.rivers.length), ends = { stream: 0, long: 0, open: 0, none: 0, joined: 0 };
+        solved.forEach((_, k) => { const w = walk(k); ends[w.stream ? 'stream' : w.long ? 'long' : w.open ? 'open' : 'none']++; });
+        ends.joined = streams.filter(st => st.to.type === 'river' && st.to.dir).length;
+        this.mountainStreamEnds = ends;
+        const added = await this._client.call({ type: 'addLakes', maxRouteM: P.maxStreamM, streams, streamCorridorM: P.streamCorridorM,
+            lakes: solved.map(({ dir, rec }) => ({
+                level: rec.level, maxDepth: rec.maxDepth, exitDir: rec.exitDir, outflowDirs: rec.outflowDirs,
+                frame: rec.frame, mask: rec.mask, maskCells: rec.maskCells, deepestDir: dir })) });
+        for (const r of added.rivers) {
+            if (r.id !== this.rivers.length) throw new Error(`mountain stream id ${r.id} != ${this.rivers.length}`);
+            this.rivers.push({ ...r, mountain: true });
+            this.lakes[r.fromLake].river = r.id;
+        }
+        this.mountainStreams = added.rivers.length;
+        this.timings.mountainMs = performance.now() - t0;
+        Logger.info(`[Water] mountain lakes: ${solved.length} ${fromCache ? 'from cache' : `solved (${JSON.stringify(this.mountainStats)})`}, ` +
+            `${added.rivers.length} streams, ${this.timings.mountainMs.toFixed(0)} ms`);
+    }
+
+    /**
+     * Walks a mountain lake's drainage (points from its sill): the first
+     * point in the sea, in lower lake water (any solved lake's water mask)
+     * or on a graph river's cell ends its stream. A river destination keeps
+     * two more points, so the trace's corridor reaches the trunk's channel
+     * inside that ~400 m cell. Longer than maxStreamM: no stream; ended dry
+     * short of that: open (continued by the cold precompute).
+     * @returns {(k: number) => { stream?: { lake, dirs, to, lengthM }, open?: boolean }}
+     */
+    _mountainDrainWalk(solved, base, P) {
+        const N = this.N, Rp = this.radius, sea = this._sampler.seaLevelM, byCell = new Map();
+        for (const [id, rec] of this.refined) {
+            if (!rec.maskCells || !rec.mask) continue;
+            for (const c of rec.maskCells) { let l = byCell.get(c); if (!l) byCell.set(c, (l = [])); l.push(id); }
+        }
+        const waterAt = (d, cell) => {
+            for (const id of byCell.get(cell) ?? []) {
+                const rec = this.refined.get(id), f = rec.frame, k = d[0] * f.c[0] + d[1] * f.c[1] + d[2] * f.c[2];
+                if (k <= 0) continue;
+                const [x, y] = dirToPlane(d, f, Rp);
+                const i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
+                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rec.mask[j * f.nx + i] === 2) return { id, level: rec.level };
+            }
+            return null;
+        };
+        return (k) => {
+            const { rec, path = [], pathH = [] } = solved[k], id = base + k, dirs = [];
+            let lengthM = 0;
+            for (let p = 0; p < path.length; p++) {
+                const d = path[p];
+                if (dirs.length) { const a = dirs[dirs.length - 1]; lengthM += Math.acos(Math.min(1, a[0] * d[0] + a[1] * d[1] + a[2] * d[2])) * Rp; }
+                if (lengthM > P.maxStreamM) return { long: true };
+                dirs.push(d);
+                if (pathH[p] <= sea) return { stream: { lake: k, dirs, to: { type: 'sea' }, lengthM } };
+                const cell = dirToCell(d, N);
+                const w = waterAt(d, cell);
+                if (w && this.rep(w.id) !== id && w.level < rec.level - 0.5) return { stream: { lake: k, dirs, to: { type: 'lake', id: this.rep(w.id) }, lengthM } };
+                if (this.riverOf[cell] !== -1) {
+                    dirs.push(...path.slice(p + 1, p + 3));
+                    return { stream: { lake: k, dirs, to: { type: 'river', id: this.riverOf[cell], cell }, lengthM } };
+                }
+            }
+            return { open: path.length > 0 };
+        };
+    }
+
+    /**
+     * Streams of the mountain lakes, joined: drainages that meet run on as
+     * one river. Taken in the cached order, a stream ends at its first point
+     * within joinM of an earlier stream's route, as that stream's tributary
+     * (two streams ran side by side down one valley, their ribbons meeting
+     * in a seam: owner 2026-10-12, "a line in the middle of the river").
+     * River ids follow from riverBase in this order (waterWorkerCore addLakes).
+     */
+    _joinMountainStreams(solved, walk, P, riverBase) {
+        const N = this.N, Rp = this.radius, cellM = P.joinM;
+        const cellOf = (d) => d.map(x => Math.floor(x * Rp / cellM));
+        // Earlier streams' route segments (points are pathStepM apart, so
+        // streams 30 m apart could stay over joinM from each other's points),
+        // under the cells of both ends and the middle.
+        const claimed = new Map(), streams = [];
+        const claim = (q, e) => { const k = q.join(','); if (!claimed.has(k)) claimed.set(k, new Set()); claimed.get(k).add(e); };
+        const near = (d) => {
+            const q = cellOf(d);
+            let best = null, bestM = cellM;
+            for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) {
+                for (const e of claimed.get(`${q[0] + a},${q[1] + b},${q[2] + c}`) ?? []) {
+                    const u = e.b.map((x, i) => x - e.a[i]), w = d.map((x, i) => x - e.a[i]);
+                    const t = Math.max(0, Math.min(1, (w[0] * u[0] + w[1] * u[1] + w[2] * u[2]) / ((u[0] * u[0] + u[1] * u[1] + u[2] * u[2]) || 1e-30)));
+                    const p = e.a.map((x, i) => x + t * u[i]), m = Math.hypot(d[0] - p[0], d[1] - p[1], d[2] - p[2]) * Rp;
+                    if (m < bestM) { bestM = m; const l = Math.hypot(...p); best = { rid: e.rid, dir: p.map(x => x / l) }; }
+                }
+            }
+            return best;
+        };
+        solved.forEach((_, k) => {
+            let st = walk(k).stream;
+            if (!st) return;
+            let lengthM = 0;
+            for (let p = 0; p < st.dirs.length; p++) {
+                const d = st.dirs[p];
+                if (p) { const a = st.dirs[p - 1]; lengthM += Math.acos(Math.min(1, a[0] * d[0] + a[1] * d[1] + a[2] * d[2])) * Rp; }
+                const e = near(d);
+                if (e) { st = { lake: k, dirs: [...st.dirs.slice(0, p), e.dir], to: { type: 'river', id: e.rid, cell: dirToCell(e.dir, N), dir: e.dir }, lengthM }; break; }
+            }
+            const rid = riverBase + streams.length;
+            streams.push(st);
+            for (let p = 0; p + 1 < st.dirs.length; p++) {
+                const a = st.dirs[p], b = st.dirs[p + 1], e = { rid, a, b };
+                claim(cellOf(a), e); claim(cellOf(b), e); claim(cellOf(a.map((x, i) => (x + b[i]) / 2)), e);
+            }
+        });
+        return streams;
+    }
+
+    /** Appends solved lakes that the graph does not hold (ids from lakes.length): summaries, grid cells, records. */
+    _addLakes(items) {
+        if (!items.length) return;
+        const base = this.lakes.length, extra = items.reduce((n, it) => n + it.rec.maskCells.length, 0);
+        const cells = new Int32Array(this.lakeCells.length + extra), start = new Int32Array(this.lakeCellStart.length + items.length);
+        cells.set(this.lakeCells); start.set(this.lakeCellStart);
+        let at = this.lakeCells.length;
+        items.forEach(({ dir, rec, mountain }, k) => {
+            const id = base + k;
+            cells.set(rec.maskCells, at); at += rec.maskCells.length; start[id + 1] = at;
+            this.lakes.push({ id, level: rec.level, maxDepth: rec.maxDepth, coreCells: 0, cellCount: rec.maskCells.length, outflowQ: 0,
+                river: -1, downstream: null, centreDir: dir, frame: rec.patchFrame ?? rec.frame, mountain: !!mountain });
+            rec.merged = []; rec.downstream = null; rec.status = 'ok';
+            this.refined.set(id, rec);
+        });
+        this.lakeCells = cells; this.lakeCellStart = start;
+        this.version++;
     }
 
     /** Solves one lake (cache first). Resolves to its record, or null. */
@@ -566,6 +818,9 @@ export class WaterService {
         if (this._failedRivers.has(riverId) || depth > 6) return null;
         const t0 = performance.now();
         const RC = this.config.rivers;
+        // Streams of mountain lakes are narrower (mountainLakes.js streamShape).
+        const shape = this.rivers[riverId].mountain
+            ? { ...RC.shape, ...MOUNTAIN_LAKE_DEFAULTS.streamShape, ...this.config.refine.mountain?.streamShape } : RC.shape;
         try {
             const src = this.rivers[riverId].fromLake;
             if (this.rep(src) !== src) { this._failedRivers.add(riverId); return null; }
@@ -576,7 +831,7 @@ export class WaterService {
             for (let attempt = 0; attempt < 2; attempt++) {
                 // The destination's level decides the route: refine it, then route again.
                 for (let k = 0; k < 4; k++) {
-                    plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM: RC.corridorM, shape: RC.shape, join });
+                    plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM: RC.corridorM, baseCorridorM: RC.corridorM, shape, join });
                     if (plan.status !== 'ok' || plan.dest.type !== 'lake' || this.refined.has(plan.dest.id)) break;
                     if (!(await this._refineLake(plan.dest.id))) break;
                 }
@@ -585,7 +840,8 @@ export class WaterService {
                 // its channel at its level there (lower than the source lake),
                 // otherwise it is routed as before.
                 const t = await this._refineRiver(plan.dest.id, depth + 1);
-                const j = t && this._riverPointNear(t, cellDir(plan.dest.cell, this.config.gridN));
+                // At the junction itself where it is known (mountain streams).
+                const j = t && this._riverPointNear(t, plan.dest.dir ?? cellDir(plan.dest.cell, this.config.gridN));
                 if (t && j.eta < srcLevel0 + RC.startToleranceM) {
                     const P = t.points, st = t.stride, n = P.length / st;
                     const dirs = new Float32Array(n * 3), hw = new Float32Array(n);
@@ -598,7 +854,7 @@ export class WaterService {
             if (plan?.status !== 'ok') { this._failedRivers.add(riverId); return null; }
             const destKey = plan.dest.type === 'lake' ? `lake${plan.dest.id}` : plan.dest.type === 'river' ? `river${plan.dest.id}-${trunk.key}` : 'sea';
             const shapeKey = hashParts([
-                RC.shape, { ...RIVER_LEVEL_DEFAULTS, ...RC.levels },
+                shape, { ...RIVER_LEVEL_DEFAULTS, ...RC.levels },
                 RC.stepM, RC.smoothPasses, this.config.carve, this.config.landscape,
             ]);
             const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${shapeKey}:${riverId}:${destKey}`;
@@ -610,14 +866,14 @@ export class WaterService {
                 const srcLevel = this.refined.get(src)?.level ?? this.lakes[src].level;
                 for (const corridorM of [RC.corridorM, RC.corridorM * RC.retryCorridorScale]) {
                     if (corridorM !== RC.corridorM) {
-                        plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM, shape: RC.shape, join: !!trunk });
+                        plan = await this._client.call({ type: 'planRiver', riverId, spacing: RC.spacingM, corridorM, baseCorridorM: RC.corridorM, shape, join: !!trunk });
                         if (plan.status !== 'ok') break;
                     }
                     const frame = limitPatchCells(plan.frame, this.config.refine.maxCells);
                     const heights = await this._sampler.samplePatch(frame, this.radius);
                     const CV = this.config.carve;
                     const r = await this._client.call({
-                        type: 'solveRiver', riverId, frame, heights, shape: RC.shape,
+                        type: 'solveRiver', riverId, frame, heights, shape,
                         levels: { ...RC.levels, waterFrac: CV.waterFrac, bankH: CV.bankH },
                         landscape: { ...this.config.landscape, enabled: this.valleyOn && this.config.landscape.enabled }, shapeNoise: CV,
                         // The carve's reach beyond the half-width (riverCarve.wgsl.js) + margin,

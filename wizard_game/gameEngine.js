@@ -1312,6 +1312,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             zoneInfo: zoneInfo,
             playerStatus: this.actorManager?.getPlayerCombatState?.() ?? null,
             perfHud,
+            camera: this.camera,
         });
     }
 
@@ -1450,7 +1451,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             if (this.waterService.state !== 'ready') return;
             const terrainGenerator = this.waterService.terrainGenerator;
             this._createWaterGpuData(terrainGenerator, this.renderer.backend.device,
-                { maskAtlas: lakeMaskAtlasPlan(this.waterService.lakes) });
+                { maskAtlas: lakeMaskAtlasPlan(this.waterService.lakes, { reserve: this.waterService.mountainReserve ?? 0 }) });
             // Only solved lakes are drawn: no grid-cell outlines at any distance.
             this.waterGpuData.look.unsolvedLakeHideM = 1e12;
             return;
@@ -1624,7 +1625,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
      * 2 as 1 plus grid cells: lake cells blue, cells with traced river
      * segments red, graph river cells not traced yet orange; 3 water depth;
      * 4 who draws the lakes' surface: cyan the terrain shading, magenta the
-     * near mesh (qtDiag.water.nearMesh).
+     * near mesh (qtDiag.water.nearMesh); 5 rivers' zones by nearest traced
+     * segment, alternately red and blue.
      */
     setWaterDebugMode(mode = 0) {
         if (!this.waterGpuData) return null;

@@ -4138,7 +4138,9 @@
                 if(new URLSearchParams(location.search).get('waterPrecompute')==='1') {
                     for(const planet of gameDataConfig.planets) if(planet.enabled) {
                         planet.terrain.waterGraph={...planet.terrain.waterGraph,
-                            refine:{...planet.terrain.waterGraph?.refine,precompute:true,spacingM:32}};
+                            refine:{...planet.terrain.waterGraph?.refine,precompute:true,spacingM:32,
+                                // Small mountain lakes (mountainLakes.js); mountainLakes=0 compares without.
+                                mountain:{enabled:new URLSearchParams(location.search).get('mountainLakes')!=='0'}}};
                     }
                 }
                 if(new URLSearchParams(location.search).get('waterPools')==='legacy') {

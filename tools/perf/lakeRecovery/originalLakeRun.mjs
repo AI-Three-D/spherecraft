@@ -128,6 +128,29 @@ async function usePose(pose) {
 }
 
 try {
+    // --clearCache=prefix: delete the water cache's records with this key
+    // prefix (e.g. mlakes: for the mountain lakes) before the app loads.
+    if (args.clearCache) {
+        // A static file of the same origin (not the app: run 23 opened
+        // /wizard_game/, which started a second app and slowed its loader).
+        await page.goto(new URL('/wizard_game/runtimeConfigs.js', url).href, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+        report.clearedCache = await page.evaluate((prefix) => new Promise((resolve) => {
+            const req = indexedDB.open('spherecraft-water', 1);
+            req.onupgradeneeded = () => req.result.createObjectStore('entries');
+            req.onerror = () => resolve({ error: String(req.error) });
+            req.onsuccess = () => {
+                const tx = req.result.transaction('entries', 'readwrite'), store = tx.objectStore('entries');
+                let deleted = 0;
+                store.openCursor().onsuccess = (e) => {
+                    const c = e.target.result;
+                    if (!c) return;
+                    if (String(c.key).startsWith(prefix)) { c.delete(); deleted++; }
+                    c.continue();
+                };
+                tx.oncomplete = () => { req.result.close(); resolve({ prefix, deleted }); };
+            };
+        }), String(args.clearCache));
+    }
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 180000 });
     report.timeOrigin = await page.evaluate(() => performance.timeOrigin);   // page ms = Date.now() - timeOrigin
     await page.waitForFunction(() => window.gameEngine?.getLoadingStatus?.()?.complete, { timeout: 300000, polling: 100 });
@@ -244,11 +267,73 @@ try {
         await capture(`close-lake-${id}-tint1`, { tint: 1 });
     }
 
+    // Mountain lakes (mountainLakes.js): --mountainViews=K close views of the
+    // largest within 60 km of the spawn, and one overview of them.
+    if (Number(args.mountainViews ?? 0) > 0) {
+        await page.waitForFunction(() => window.gameEngine.waterService.precomputed === true, { timeout: 600000, polling: 500 });
+        report.precomputeDoneAt = await pnow();
+        const ml = await page.evaluate(() => {
+            const s = window.gameEngine.waterService;
+            return { stats: s.mountainStats ?? null, timings: s.timings, lakes: s.lakes.filter(l => l.mountain).map(l => ({ id: l.id, level: l.level, dir: l.centreDir,
+                halfM: 0.5 * Math.max(l.frame.nx, l.frame.ny) * l.frame.spacing, areaKm2: (s.refined.get(l.id)?.areaM2 ?? 0) / 1e6 })) };
+        });
+        const near = ml.lakes.map(l => ({ ...l, spawnKm: Math.acos(Math.min(1, dot(l.dir, SPAWN))) * R / 1000 })).filter(l => l.spawnKm < 60);
+        const picks = near.sort((a, b) => b.areaKm2 - a.areaKm2).slice(0, Number(args.mountainViews));
+        report.mountain = { count: ml.lakes.length, stats: ml.stats, timings: ml.timings, nearSpawn: near.length, picks,
+            areaKm2Total: ml.lakes.reduce((a, l) => a + l.areaKm2, 0),
+            streams: await page.evaluate(() => window.gameEngine.waterService.mountainStreams ?? null),
+            streamEnds: await page.evaluate(() => window.gameEngine.waterService.mountainStreamEnds ?? null),
+            // Streams by destination, and their fine routes' lengths (m).
+            streamRoutes: await page.evaluate(() => {
+                const byDest = {}, len = [];
+                for (const r of window.gameEngine.waterService.rivers) {
+                    if (!r.mountain) continue;
+                    byDest[r.to.type] = (byDest[r.to.type] ?? 0) + 1;
+                    if (r.lengthM != null) len.push(r.lengthM);
+                }
+                len.sort((a, b) => a - b);
+                const q = (f) => len.length ? len[Math.min(len.length - 1, Math.floor(f * len.length))] : null;
+                return { byDest, lengthM: { p10: q(0.1), p50: q(0.5), p90: q(0.9), max: len.at(-1) ?? null } };
+            }) };
+        // Their streams, and --streamViews=K of the longest streams from lakes
+        // within 30 km of the spawn, viewed with the river views below (--streamAlts).
+        report.mountainStreamIds = await page.evaluate((ids) => ids.map(id => window.gameEngine.waterService.lakes[id].river).filter(r => r >= 0), picks.map(l => l.id));
+        const nearIds = near.filter(l => l.spawnKm < 30).map(l => l.id);
+        const longest = await page.evaluate((ids, k) => {
+            const s = window.gameEngine.waterService;
+            return ids.map(id => s.lakes[id].river).filter(r => r >= 0).map(r => s.rivers[r]).sort((a, b) => b.lengthM - a.lengthM).slice(0, k)
+                .map(r => ({ id: r.id, fromLake: r.fromLake, to: r.to, lengthM: r.lengthM }));
+        }, nearIds, Number(args.streamViews ?? 0));
+        report.mountain.longestNearStreams = longest;
+        for (const r of longest) if (!report.mountainStreamIds.includes(r.id)) report.mountainStreamIds.push(r.id);
+        for (const l of picks) {
+            const bk = tangentToward(l.dir, SPAWN) ?? [0, 1, 0];
+            const pose = { position: groundAt(norm(add(l.dir, bk, (l.halfM + 1500) / R)), l.level + 1500), target: groundAt(l.dir, l.level), up: l.dir };
+            report.poses[`mountain-${l.id}`] = pose;
+            await usePose(pose);
+            report[`settle_mountain_${l.id}`] = await settle(`mountain-${l.id}`);
+            await capture(`mountain-lake-${l.id}`);
+            await capture(`mountain-lake-${l.id}-tint1`, { tint: 1 });
+        }
+        if (picks.length) {
+            const c = norm(picks.reduce((a, l) => add(a, l.dir), [0, 0, 0])), bk = tangentToward(c, SPAWN) ?? [0, 1, 0];
+            const pose = { position: groundAt(norm(add(c, bk, 9000 / R)), picks[0].level + 6000), target: groundAt(c, picks[0].level), up: c };
+            report.poses['mountain-overview'] = pose;
+            await usePose(pose);
+            report.settle_mountain_overview = await settle('mountain-overview');
+            await capture('mountain-overview');
+            await capture('mountain-overview-tint1', { tint: 1 });
+        }
+        save();
+    }
+
     // River views: --riverViews=ids --riverAlts=m,m. Each altitude is captured
     // with mesh-only river water (old), profile coverage with the opaque body
     // colour, and profile coverage seeing the bed through the water.
     report.rivers = [];
-    for (const rid of String(args.riverViews ?? '').split(',').filter(Boolean).map(Number)) {
+    const riverIds = [...String(args.riverViews ?? '').split(',').filter(Boolean).map(Number).map(id => ({ id, alts: args.riverAlts ?? '1000,3000,8000' })),
+        ...(report.mountainStreamIds ?? []).map(id => ({ id, alts: args.streamAlts ?? '600,1500', stream: true }))];
+    for (const { id: rid, alts, stream } of riverIds) {
         const ready = await page.evaluate(async (rid) => {
             const g = window.gameEngine, s = g.waterService;
             for (let i = 0; i < 1200; i++) {
@@ -270,13 +355,14 @@ try {
         report.rivers.push(entry);
         if (!info) continue;
         const flowT = tangentToward(info.dir, add(info.dir, info.flow)) ?? [1, 0, 0];
-        for (const alt of String(args.riverAlts ?? '1000,3000,8000').split(',').map(Number)) {
+        for (const alt of String(alts).split(',').map(Number)) {
             const pose = { position: groundAt(norm(add(info.dir, flowT, -alt / R)), info.eta + alt), target: groundAt(info.dir, info.eta), up: info.dir };
             report.poses[`river-${rid}-${alt}`] = pose;
             await usePose(pose);
             const st = await settle(`river-${rid}-${alt}`);
             entry.views.push({ alt, settle: st.settled, ms: st.ms });
-            for (const [variant, surface, body] of [['mesh', false, true], ['surface-body', true, true], ['surface-bed', true, false]]) {
+            // Streams: the default look only.
+            for (const [variant, surface, body] of stream ? [['surface-body', true, true]] : [['mesh', false, true], ['surface-body', true, true], ['surface-bed', true, false]]) {
                 await page.evaluate((surface, body) => Object.assign(window.gameEngine.waterGpuData.look,
                     { structuredRiverSurface: surface, structuredRiverBody: body }), surface, body);
                 await capture(`river-${rid}-${alt}-${variant}`);

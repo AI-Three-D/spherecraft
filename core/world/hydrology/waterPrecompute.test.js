@@ -1,8 +1,10 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { cellDir } from './waterGraph.js';
-import { planeToDir } from './lakeRefine.js';
+import { dirToPlane, planeToDir } from './lakeRefine.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
 import { WaterGpuData, lakeMaskAtlasPlan } from '../water/WaterGpuData.js';
+import { WaterService } from './WaterService.js';
+import { MOUNTAIN_LAKE_DEFAULTS } from './mountainLakes.js';
 
 // Precompute mode (WaterService refine.precompute): cropped lake masks,
 // routes once at the end, and a mask atlas with several tile sizes.
@@ -86,6 +88,113 @@ describe('lake precompute: pool solve and adoption', () => {
     });
 });
 
+describe('lake precompute: lakes added to the graph', () => {
+    it('routes a stream from an added upper lake down to the graph lake below it', () => {
+        const { core, built } = buildCore();
+        const lake = built.lakes[0];
+        const solved = core.handle({ type: 'solveLake', lakeId: lake.id, frame: lake.frame, heights: patchHeights(lake.frame), bandM: 6, crop: true, skipDownstream: true }).reply;
+        expect(solved.status).toBe('ok');
+        // An upper pocket up the valley (the terrain falls to +s): a lake 40 m
+        // above the graph lake, spilling down the valley toward it.
+        const d = lake.centreDir;   // the deepest cell's direction
+        // Exit well above the lake's grid cells, so the route has a length.
+        const s0 = d[0] / d[2], up = [s0 - 0.22, 0, 1], l = Math.hypot(...up), dir = up.map(v => v / l);
+        const exit = [s0 - 0.2, 0, 1].map((v, i, a) => v / Math.hypot(...a));
+        const frame = { ...solved.frame };
+        const added = core.handle({ type: 'addLakes', maxRouteM: 1e6, lakes: [{ level: solved.level + 40, maxDepth: 5, exitDir: exit,
+            outflowDirs: [exit], frame, mask: new Uint8Array(frame.nx * frame.ny), maskCells: Int32Array.from([0]), deepestDir: dir }] }).reply;
+        expect(added.base).toBe(built.lakes.length);
+        expect(added.rivers).toHaveLength(1);
+        expect(added.rivers[0].fromLake).toBe(built.lakes.length);
+        expect(added.rivers[0].to).toEqual({ type: 'lake', id: lake.id });
+        // A route longer than the limit gives no stream.
+        const none = core.handle({ type: 'addLakes', maxRouteM: 1, lakes: [{ level: solved.level + 60, maxDepth: 5, exitDir: exit,
+            outflowDirs: [exit], frame, mask: new Uint8Array(frame.nx * frame.ny), maskCells: Int32Array.from([1]), deepestDir: dir }] }).reply;
+        expect(none.rivers).toHaveLength(0);
+    });
+});
+
+describe('lake precompute: streams on fine routes', () => {
+    it('takes a stream along its given route and traces it inside a narrow corridor', () => {
+        const { core, built } = buildCore();
+        const lake = built.lakes[0];
+        const solved = core.handle({ type: 'solveLake', lakeId: lake.id, frame: lake.frame, heights: patchHeights(lake.frame), bandM: 6, crop: true, skipDownstream: true }).reply;
+        const s0 = lake.centreDir[0] / lake.centreDir[2];
+        const at = (s, t) => { const l = Math.hypot(s, t, 1); return [s / l, t / l, 1 / l]; };
+        // Down the valley from above the lake's uphill shore (s0 - 0.126),
+        // with a bend off the straight line (t = 0.015, ~2 km), into its water.
+        const route = [at(s0 - 0.2, 0), at(s0 - 0.17, 0.015), at(s0 - 0.14, 0.015), at(s0 - 0.11, 0), at(s0 - 0.08, 0)];
+        const frame = { ...solved.frame };
+        const added = core.handle({ type: 'addLakes', maxRouteM: 1e6, streamCorridorM: 300,
+            streams: [{ lake: 0, dirs: route, to: { type: 'lake', id: lake.id }, lengthM: 11000 }],
+            lakes: [{ level: solved.level + 40, maxDepth: 5, exitDir: route[0], outflowDirs: [route[0]], frame,
+                mask: new Uint8Array(frame.nx * frame.ny), maskCells: Int32Array.from([0]), deepestDir: at(s0 - 0.21, 0) }] }).reply;
+        expect(added.rivers).toHaveLength(1);
+        const rid = added.rivers[0].id;
+        expect(added.rivers[0].to).toEqual({ type: 'lake', id: lake.id });
+        // A wider retry corridor scales the stream's own (1500 / 1000).
+        const wide = core.handle({ type: 'planRiver', riverId: rid, spacing: 64, corridorM: 1500, baseCorridorM: 1000 }).reply;
+        const plan = core.handle({ type: 'planRiver', riverId: rid, spacing: 64, corridorM: 1000, baseCorridorM: 1000 }).reply;
+        expect(plan.status).toBe('ok');
+        expect(plan.dest).toEqual({ type: 'lake', id: lake.id });
+        expect((wide.frame.ny - plan.frame.ny) * 64).toBeGreaterThan(250);
+        const rec = core.handle({ type: 'solveRiver', riverId: rid, frame: plan.frame, heights: patchHeights(plan.frame), stepM: 20 }).reply;
+        expect(rec.status).toBe('ok');
+        // Every traced point within the corridor (300 m, plus a cell) of the route.
+        const f = plan.frame, poly = route.map(d => dirToPlane(d, f, R));
+        const P = rec.points, st = rec.stride;
+        let off = 0;
+        for (let o = 0; o < P.length; o += st) {
+            const [x, y] = dirToPlane([P[o], P[o + 1], P[o + 2]], f, R);
+            let best = Infinity;
+            for (let k = 0; k + 1 < poly.length; k++) {
+                const [ax, ay] = poly[k], [bx, by] = poly[k + 1], ux = bx - ax, uy = by - ay, L2 = ux * ux + uy * uy || 1e-9;
+                const t = Math.max(0, Math.min(1, ((x - ax) * ux + (y - ay) * uy) / L2));
+                best = Math.min(best, Math.hypot(x - ax - t * ux, y - ay - t * uy));
+            }
+            off = Math.max(off, best);
+        }
+        expect(off).toBeLessThan(300 + 64);
+        // The bend is followed: some point sits well off the straight line.
+        let maxT = 0;
+        for (let o = 0; o < P.length; o += st) maxT = Math.max(maxT, P[o + 1] / P[o + 2]);
+        expect(maxT).toBeGreaterThan(0.01);
+    });
+});
+
+describe('lake precompute: mountain streams that meet', () => {
+    it('a stream reaching the route of an earlier stream joins it as a tributary there', () => {
+        const at = (xM, yM) => { const l = Math.hypot(xM / R, yM / R, 1); return [xM / R / l, yM / R / l, 1 / l]; };
+        // Stream A down the valley (x = 0); stream B from the side, meeting A at y = 600 m.
+        const A = Array.from({ length: 12 }, (_, k) => at(0, k * 128));
+        const B = [...Array.from({ length: 5 }, (_, k) => at(640 - k * 128, 600)), ...A.slice(5)];
+        const walk = (k) => ({ stream: { lake: k, dirs: k ? B : A, to: { type: 'lake', id: 7 }, lengthM: 1 } });
+        const streams = WaterService.prototype._joinMountainStreams.call({ N: 512, radius: R }, [{}, {}], walk, MOUNTAIN_LAKE_DEFAULTS, 100);
+        expect(streams[0].to).toEqual({ type: 'lake', id: 7 });
+        expect(streams[1].to.type).toBe('river');
+        expect(streams[1].to.id).toBe(100);
+        // It ends at its first point within 64 m of A's route (A's point at
+        // y = 640; (128, 600) is 128 m off), not running on beside it.
+        expect(streams[1].dirs.length).toBe(6);
+        expect(Math.hypot(streams[1].to.dir[0] * R, streams[1].to.dir[1] * R - 640)).toBeLessThan(1);
+        expect(Math.abs(streams[1].lengthM - 646)).toBeLessThan(2);
+    });
+
+    it('streams running side by side between their route points still join', () => {
+        const at = (xM, yM) => { const l = Math.hypot(xM / R, yM / R, 1); return [xM / R / l, yM / R / l, 1 / l]; };
+        // A every 128 m along x = 0; B comes in from the side, then runs 40 m
+        // beside it with points offset by 64 m along: 75 m from A's points,
+        // 40 m from its route.
+        const A = Array.from({ length: 12 }, (_, k) => at(0, k * 128));
+        const B = [at(300, 64), at(200, 192), at(100, 320), ...Array.from({ length: 6 }, (_, k) => at(40, 448 + k * 128))];
+        const walk = (k) => ({ stream: { lake: k, dirs: k ? B : A, to: { type: 'lake', id: 7 }, lengthM: 1 } });
+        const streams = WaterService.prototype._joinMountainStreams.call({ N: 512, radius: R }, [{}, {}], walk, MOUNTAIN_LAKE_DEFAULTS, 100);
+        expect(streams[1].to.type).toBe('river');
+        expect(streams[1].dirs.length).toBe(4);
+        expect(Math.abs(streams[1].to.dir[0] * R)).toBeLessThan(1);
+    });
+});
+
 describe('lake precompute: mask atlas', () => {
     beforeAll(() => {
         globalThis.GPUBufferUsage ??= { STORAGE: 1, COPY_DST: 2, UNIFORM: 4, COPY_SRC: 8, MAP_READ: 16 };
@@ -93,11 +202,14 @@ describe('lake precompute: mask atlas', () => {
     });
     const frameOf = (nx, ny = nx, spacing = 32) => ({ c: [0, 0, 1], e1: [1, 0, 0], e2: [0, 1, 0], x0: 0, y0: 0, spacing, nx, ny });
 
-    it('sizes classes from the graph frames less their solve margins', () => {
-        // 5 km wide: extent 2 km (margins 1.5 km) -> small; 80 km: extent 50 km -> pooled into 512.
+    it('sizes classes from the graph frames less their solve margins, plus a reserve', () => {
+        // 5 km wide: extent 2 km (margins 1.5 km) -> 64^2; 80 km: extent 50 km -> pooled into 512^2.
         const plan = lakeMaskAtlasPlan([{ frame: frameOf(160) }, { frame: frameOf(2500) }], { slack: 1 });
-        expect(plan.classes).toEqual([{ size: 512, slots: 5 }, { size: 256, slots: 4 }, { size: 128, slots: 5 }]);
-        expect(plan.bytes).toBe(3 * 2048 * 2048);
+        expect(plan.classes).toEqual([{ size: 512, slots: 5 }, { size: 256, slots: 4 }, { size: 128, slots: 4 }, { size: 64, slots: 5 }]);
+        // 1024^2 layers: 4 / 16 / 64 / 256 tiles each.
+        expect(plan.bytes).toBe(5 * 1024 * 1024);
+        const reserved = lakeMaskAtlasPlan([{ frame: frameOf(160) }], { slack: 1, reserve: 300 });
+        expect(reserved.classes.at(-1)).toEqual({ size: 64, slots: 305 });
     });
 
     it('gives each lake the smallest tile it fits (pooled at most 2x) and encodes it for the shader', () => {

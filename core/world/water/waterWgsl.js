@@ -39,6 +39,17 @@ export const RIVER_MAX_SEGS_PER_CELL = 255;
 // River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
 // 512): a terrain point only walks the segments that can reach it.
 export const RIVER_SUB = 4;
+// Narrow reaches (mountain lakes' streams, 8 m wide; the graph's rivers are
+// 30 m or wider): half-width below this. Drawn from their channel profile
+// wherever the triangles miss their cut (waterRiverAtView), and listed only
+// within NARROW_RIVER_DRAW_M of the camera (WaterGpuData._rebuildRivers).
+export const NARROW_RIVER_HW_M = 10;
+// Extra apparent depth of far lake water per metre past the near/far switch
+// (applyWater): 0.05 adds 20 m by 400 m past it, where the bed's green
+// shows through at under 2 %. 0.0125 left 5 m at 2 km altitude: the bed
+// still showed through at 40-50 % and blurred (owner 2026-10-12, v20).
+export const LAKE_FAR_DEPTH_PER_M = 0.05;
+export const NARROW_RIVER_DRAW_M = 12000;
 
 /**
  * WGSL shared by the water lookup and the river carve: WaterParams,
@@ -352,7 +363,7 @@ struct WaterRiverHit {
     found: bool,          // water at the point
     near: bool,           // within the channel zone (channel + bankW) of a river
     constructedSurface: bool, // coarse cut contract supplies coverage, not a sampled bed
-    opaqueBody: bool,     // structured reach: shade the body without the coarse ground below
+    opaqueBody: bool,     // structured or narrow reach: shade the body without the coarse ground below
     depthM: f32,          // water depth at the point
     distM: f32,           // distance from the river line
     halfWidthM: f32,
@@ -364,6 +375,7 @@ struct WaterRiverHit {
     nM: f32,              // offset across (m, + left of the flow)
     river: f32,           // the river's id
     pool: f32,            // < 0 inside a lake
+    seg: f32,             // index of the nearest traced segment (debug view 5)
     slope: f32,           // descending water-surface slope, including waterfall lips
 };
 
@@ -400,6 +412,7 @@ fn waterRiverAtView(dir: vec3<f32>, heightM: f32, coarseSurface: bool) -> WaterR
     hit.nM = best.n;
     hit.river = best.river;
     hit.pool = best.pool;
+    hit.seg = f32(bestK);
     hit.distM = best.d;
     hit.halfWidthM = best.hw;
     hit.etaM = best.wl;
@@ -412,11 +425,21 @@ fn waterRiverAtView(dir: vec3<f32>, heightM: f32, coarseSurface: bool) -> WaterR
     // The actual terrain is authoritative: painting an assumed parabola
     // over dry terrain hid islands and flooded banks before regeneration.
     var depthM = select(0.0, max(best.wl - heightM, 0.0), best.d < best.hw);
-    hit.constructedSurface=coarseSurface && s._pad>0.5 && waterParams.carve.x>0.5;
-    // Structured reaches (flag 2) shade an opaque body at every far distance;
-    // traced reaches (flag 1) blend into it from their near colour model
-    // (applyWater), since an opaque body right at the switch made a step.
-    hit.opaqueBody=hit.constructedSurface && s._pad>1.5;
+    let flagged=s._pad>0.5 && waterParams.carve.x>0.5;
+    // Narrow reaches (NARROW_RIVER_HW_M): from ~0.5 km the triangles are
+    // too coarse for their cut, sit above the level and hide the near
+    // ribbon, so the stream read as a dry trench (lake-recovery run 22).
+    // Where they do, the cut's profile gives the water near the camera too,
+    // and the terrain shading draws the whole surface. Wider rivers keep
+    // the terrain authoritative.
+    let narrow=flagged && best.hw<${NARROW_RIVER_HW_M.toFixed(1)};
+    let meshMissed=!coarseSurface && narrow && depthM<=0.0;
+    hit.constructedSurface=(coarseSurface && flagged) || meshMissed;
+    // Structured reaches (flag 2) and narrow ones shade an opaque body at
+    // every distance it is drawn from the profile; other traced reaches
+    // (flag 1) blend into it from their near colour model (applyWater),
+    // since an opaque body right at the switch made a step.
+    hit.opaqueBody=hit.constructedSurface && (s._pad>1.5 || narrow);
     if(hit.constructedSurface) {
         depthM=0.0;
         // Below .85*width the terrain cut has full weight, and final micro
@@ -588,6 +611,12 @@ fn applyWater(
         ground = mix(bedColor, soil * wet, 0.8 * w);
     }
 
+    // Debug view 5: within a river's zone, alternate colours per nearest
+    // traced segment (the carve picks the same segment).
+    if (dbg == 5u && river.near) {
+        let odd = fract(river.seg * 0.5) > 0.25;
+        return mix(bedColor, select(vec3<f32>(1.0, 0.25, 0.1), vec3<f32>(0.1, 0.4, 1.0), odd), 0.55);
+    }
     let lakeHit=waterLakeHitView(up,heightM,samp,dist>waterParams.riverLook.w);
     let level = lakeHit.level;
     if (level > WATER_NO_LAKE) {
@@ -601,7 +630,30 @@ fn applyWater(
         // ripples) over this; here only the water's body, the same maths.
         let nearW = waterNearWeight(dist);
         if (dbg == 4u) { return waterOwnerTint(nearW, depthM); }
-        let lakeCol = waterNearFarColor(ground, depthM, worldPos, up, cameraPos, dist, nearW, lightDir, sunRadiance, skyRadiance);
+        // Far away the depth comes from coarse triangles interpolated over
+        // hundreds of metres: a see-through body showed their facets and
+        // shoals as blurred shores, islands and dirty spots (owner
+        // 2026-10-12, depth tint water-look v2). Past the near/far switch the
+        // water reads as deeper than those triangles by LAKE_FAR_DEPTH_PER_M
+        // per metre, so the bed fades out within a few hundred metres (a 2.5x
+        // blend alone left the shores blurred at 2.5 km, v15), and the body
+        // turns opaque by 1.5x the switch distance.
+        // Both start where the near mesh starts handing over (near.x,
+        // 1 km), not at the switch (1.6 km): from 1.2-1.9 km neither the
+        // mesh nor this fade covered the coarse depth, and the islands and
+        // shores blurred there (owner 2026-10-12, camera ~1.55 km above the
+        // lake, v20/v21).
+        let switchM=max(waterParams.near.y,waterParams.riverLook.z);
+        let farStartM=select(switchM,waterParams.near.x,waterParams.near.z>0.5);
+        let farDepthM=depthM+max(dist-farStartM,0.0)*${LAKE_FAR_DEPTH_PER_M};
+        var lakeCol = waterNearFarColor(ground, farDepthM, worldPos, up, cameraPos, dist, nearW, lightDir, sunRadiance, skyRadiance);
+        let wFar=smoothstep(farStartM,switchM*1.5,dist);
+        if(wFar>0.0) {
+            let surface=waterSurfaceTerms(worldPos,up,cameraPos,lightDir,sunRadiance,skyRadiance);
+            let body=waterParams.deepColor.rgb*(skyRadiance+sunRadiance*max(dot(up,lightDir),0.0));
+            let opaque=mix(ground,body*(1.0-surface.a)+surface.rgb,smoothstep(0.0,waterParams.shoreSoftM,depthM));
+            lakeCol=mix(lakeCol,opaque,wFar);
+        }
         return lakeCol;
     }
 

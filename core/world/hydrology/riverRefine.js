@@ -220,6 +220,16 @@ export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // One-sided (downstream) smoothing of the fitted level: drops become
     // rapids, never extra fill.
     levelSmoothM: 400,
+    // ... but it lowers the level at most this far below the fitted
+    // surface. Averaging 400 m ahead on a steep mountain stream put the
+    // level ~20 m under the ground: the carve cut slots with vertical walls
+    // (owner 2026-10-12: "man-made dam" outlets, toothed banks once the
+    // bank retreat eroded them). Larger drops stay falls.
+    smoothCutM: 2,
+    // The level near the source stays at most this far above the fitted
+    // surface: the ramp from the lake's level over a steep outlet held the
+    // water above falling ground (floating ribbons, owner 2026-10-12).
+    rampRiseM: 0.5,
     // The level meets the lake or sea over this at the river's ends.
     endRampM: 120,
     // Ramp the freeboard allowance used by the surface fit near the source.
@@ -275,7 +285,8 @@ export function fitNonIncreasingQuantile(v, w, tau) {
  * can be (floor = level + freeboard stays marginM under it; fill on about
  * a share tauFill of the river): the non-increasing tau-quantile fit of
  * (ground - freeboard - margin + minSlope s), smoothed looking downstream
- * only (so never above the fit), C2 ramps onto both end levels.
+ * only (so never above the fit, and at most smoothCutM below it), C2 ramps
+ * onto both end levels (at most rampRiseM above the fit).
  * @param {object} p
  * @param {ArrayLike<number>} p.s       arc length per point (m)
  * @param {ArrayLike<number>} p.ground  natural ground beside the line (lowest within the floor)
@@ -311,12 +322,14 @@ export function riverValleyLevels({ s, ground, free, srcLevel, destLevel, source
     for (let k = 0; k < n; k++) {
         let a = 0;
         for (let j = 0; j <= m; j++) a += K[j] * z[Math.min(n - 1, k + j)];
-        zs[k] = a / Ks;
+        zs[k] = Math.max(a / Ks, z[k] - P.smoothCutM);
     }
     const R0 = Math.min(P.endRampM, 0.3 * L);
     for (let k = 0; k < n; k++) {
         zs[k] = zSrc + (zs[k] - zSrc) * quintic01(s[k] / R0);
         zs[k] = zs[k] + (zDst - zs[k]) * quintic01((s[k] - (L - R0)) / R0);
+        // Every bound is non-increasing along s, so the level still falls.
+        zs[k] = Math.min(zs[k], Math.max(z[k] + P.rampRiseM, zDst));
     }
     const eta = new Float64Array(n);
     for (let k = 0; k < n; k++) eta[k] = zs[k] - S * s[k];

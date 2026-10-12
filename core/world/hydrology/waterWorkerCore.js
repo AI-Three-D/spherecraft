@@ -42,6 +42,7 @@ import { bakeValleyPages, RIVER_VALLEY_DEFAULTS, valleyRiverFromRecord, valleyRi
 import { dirToPlane, lakeMask, lakePatchFrame, lakeSeed, planeToDir, polylinePatchFrame, solveLakePatch } from './lakeRefine.js';
 import { bakeRiverWaterfalls } from './riverFeatures.js';
 import { bakeRiverIncision } from './riverLandscape.js';
+import { continueDrain, findPockets } from './mountainLakes.js';
 import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverCrestAbove, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
 
 // C2 ramp 0..1 (quintic smoothstep of a clamped value).
@@ -56,14 +57,28 @@ const ramp5 = (t) => { const x = Math.max(0, Math.min(1, t)); return x * x * x *
  */
 export function solvePatchLake(msg) {
     const { lakeId, frame, bandM, N, R } = msg, h = msg.heights;
-    const own = new Set(msg.lakeCells);
     let seed = -1;
-    for (let j = 0; j < frame.ny; j++) {
-        const y = frame.y0 + (j + 0.5) * frame.spacing;
-        for (let i = 0; i < frame.nx; i++) {
-            const id = j * frame.nx + i;
-            if (seed !== -1 && h[id] >= h[seed]) continue;
-            if (own.has(dirToCell(planeToDir(frame.x0 + (i + 0.5) * frame.spacing, y, frame, R), N))) seed = id;
+    if (msg.seedDir) {
+        // A pocket found at another resolution (mountainLakes.js): the
+        // lowest cell within ~100 m of its deepest point.
+        const [x, y] = dirToPlane(msg.seedDir, frame, R);
+        const ci = Math.floor((x - frame.x0) / frame.spacing), cj = Math.floor((y - frame.y0) / frame.spacing);
+        const r = Math.max(1, Math.round(100 / frame.spacing));
+        for (let j = Math.max(0, cj - r); j <= Math.min(frame.ny - 1, cj + r); j++) {
+            for (let i = Math.max(0, ci - r); i <= Math.min(frame.nx - 1, ci + r); i++) {
+                const id = j * frame.nx + i;
+                if (seed === -1 || h[id] < h[seed]) seed = id;
+            }
+        }
+    } else {
+        const own = new Set(msg.lakeCells);
+        for (let j = 0; j < frame.ny; j++) {
+            const y = frame.y0 + (j + 0.5) * frame.spacing;
+            for (let i = 0; i < frame.nx; i++) {
+                const id = j * frame.nx + i;
+                if (seed !== -1 && h[id] >= h[seed]) continue;
+                if (own.has(dirToCell(planeToDir(frame.x0 + (i + 0.5) * frame.spacing, y, frame, R), N))) seed = id;
+            }
         }
     }
     if (seed < 0) return { reply: { type: 'patchSolved', lakeId, status: 'noSeed' } };
@@ -287,6 +302,53 @@ export function createWaterWorkerCore() {
         return { reply: { type: 'adopted', lakeId, status: 'ok', merged } };
     }
 
+    // Lakes the graph does not hold (mountainLakes.js), already solved:
+    // appended to the graph with ids from g.lakes.length, their grid cells
+    // marked where no graph lake holds them. Then a river each whose route
+    // reaches strictly lower water (lake, sea or a graph river) within
+    // maxRouteM; routes come after all are known, as a stream may end in
+    // another new lake. Reply: the new rivers ({ id, fromLake, to, cells }).
+    function addLakes(msg) {
+        const ids = [];
+        for (const L of msg.lakes) {
+            const id = g.lakes.length, cells = Array.from(L.maskCells), exitCell = dirToCell(L.exitDir, N);
+            g.lakes.push({ id, cells, coreCells: 0, level: L.level, maxDepth: L.maxDepth, deepestCell: dirToCell(L.deepestDir, N),
+                outletCell: exitCell, exitCell, outflowQ: g.Q[exitCell], river: -1, downstream: null });
+            for (const c of cells) if (g.lakeOf[c] === -1) g.lakeOf[c] = id;
+            refined.set(id, { level: L.level, exitDir: L.exitDir, outflowDirs: L.outflowDirs, frame: L.frame,
+                region: Uint8Array.from(L.mask, v => (v === 2 ? 1 : 0)) });
+            ids.push(id);
+        }
+        const rivers = [];
+        // Streams with fine routes given (msg.streams: { lake: index in
+        // msg.lakes, dirs, to }); otherwise the graph's routes below.
+        if (msg.streams) {
+            for (const st of msg.streams) {
+                const id = ids[st.lake], cells = [];
+                for (const d of st.dirs) { const c = dirToCell(d, N); if (cells[cells.length - 1] !== c) cells.push(c); }
+                const rid = g.rivers.length;
+                g.rivers.push({ id: rid, fromLake: id, to: st.to, cells, q: cells.map(c => g.Q[c]), fineDirs: st.dirs, corridorM: msg.streamCorridorM });
+                g.lakes[id].river = rid;
+                rivers.push({ id: rid, fromLake: id, to: st.to, cells: Int32Array.from(cells), lengthM: st.lengthM });
+            }
+            return { reply: { type: 'lakesAdded', base: ids[0] ?? g.lakes.length, rivers } };
+        }
+        for (const id of ids) {
+            const { dest, cells } = routeFrom(id, { join: true });
+            let lengthM = 0;
+            for (let k = 1; k < cells.length; k++) {
+                const a = cellDir(cells[k - 1], N), b = cellDir(cells[k], N);
+                lengthM += Math.acos(Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])) * R;
+            }
+            if (!(lengthM <= msg.maxRouteM)) continue;
+            const rid = g.rivers.length;
+            g.rivers.push({ id: rid, fromLake: id, to: dest, cells, q: cells.map(c => g.Q[c]) });
+            g.lakes[id].river = rid;
+            rivers.push({ id: rid, fromLake: id, to: dest, cells: Int32Array.from(cells), lengthM });
+        }
+        return { reply: { type: 'lakesAdded', base: ids[0] ?? g.lakes.length, rivers } };
+    }
+
     // Every refined lake's route (routes change whenever a level changes).
     function allDownstream() {
         const downstream = {};
@@ -312,9 +374,13 @@ export function createWaterWorkerCore() {
 
     function planRiver(msg) {
         const { riverId, spacing = 16, corridorM = 1000, join = false } = msg;
-        const src = g.rivers[riverId].fromLake;
+        const rv = g.rivers[riverId], src = rv.fromLake;
         if (rep(src) !== src) return { reply: { type: 'riverPlan', riverId, status: 'merged' } };
-        const { dest, cells, outflowCells } = routeFrom(src, { join, ownRiver: riverId });
+        // A stream with a fine route (mountain lakes: the 64 m drainage to
+        // its destination, addLakes) follows it in a narrow corridor.
+        const { dest, cells, outflowCells } = rv.fineDirs
+            ? { dest: rv.to, cells: rv.cells, outflowCells: 0 } : routeFrom(src, { join, ownRiver: riverId });
+        const corridor = rv.fineDirs ? rv.corridorM * corridorM / (msg.baseCorridorM ?? corridorM) : corridorM;
         const r = refined.get(src);
         const sillDir = r ? r.exitDir : cellDir(g.lakes[src].exitCell, N);
         let sourceDir = sillDir;
@@ -356,15 +422,17 @@ export function createWaterWorkerCore() {
             }
         }
         // Polyline: the fine outflow out of the sill, then the graph's route,
-        // then into the destination lake's deepest cell (its water).
-        const dirs = r?.outflowDirs
-            ? [sourceDir, sillDir, ...r.outflowDirs, ...cells.slice(outflowCells).map(c => cellDir(c, N))]
-            : [sourceDir, sillDir, ...cells.slice(1).map(c => cellDir(c, N))];
-        if (dest.type === 'lake') dirs.push(cellDir(g.lakes[dest.id].deepestCell, N));
-        const frame = polylinePatchFrame(dirs, { R, spacing, marginM: corridorM + 200 });
+        // then into the destination lake's deepest cell (its water). A fine
+        // route already ends inside its destination's water.
+        const dirs = rv.fineDirs ? [sourceDir, sillDir, ...rv.fineDirs]
+            : r?.outflowDirs
+                ? [sourceDir, sillDir, ...r.outflowDirs, ...cells.slice(outflowCells).map(c => cellDir(c, N))]
+                : [sourceDir, sillDir, ...cells.slice(1).map(c => cellDir(c, N))];
+        if (dest.type === 'lake' && !rv.fineDirs) dirs.push(cellDir(g.lakes[dest.id].deepestCell, N));
+        const frame = polylinePatchFrame(dirs, { R, spacing, marginM: corridor + 200 });
         // A river destination's level comes with solveRiver (msg.trunk.eta).
         const destLevel = dest.type === 'lake' ? levelOf(dest.id) : dest.type === 'sea' ? seaLevelM : -Infinity;
-        plans.set(riverId, { src, dest, destLevel, dirs, cells, sourceDir, corridorM });
+        plans.set(riverId, { src, dest, destLevel, dirs, cells, sourceDir, corridorM: corridor });
         return { reply: { type: 'riverPlan', riverId, status: 'ok', frame, dest, sourceRefined: !!r } };
     }
 
@@ -714,7 +782,14 @@ export function createWaterWorkerCore() {
             if (msg.type === 'restoreLake') return restoreLake(msg);
             if (msg.type === 'downstream') return { reply: { type: 'downstream', downstream: allDownstream() } };
             if (msg.type === 'adoptLake') return adoptLake(msg);
+            if (msg.type === 'addLakes') return addLakes(msg);
             if (msg.type === 'solvePatchLake') return solvePatchLake(msg);
+            if (msg.type === 'findPockets') {
+                return { reply: { type: 'pockets', pockets: findPockets({ heights: msg.heights, frame: msg.frame, R: msg.R, seaLevelM: msg.seaLevelM, P: msg.params }) } };
+            }
+            if (msg.type === 'continueDrain') {
+                return { reply: { type: 'drain', ...continueDrain({ heights: msg.heights, frame: msg.frame, R: msg.R, start: msg.start, P: msg.params }) } };
+            }
             if (msg.type === 'planRiver') return planRiver(msg);
             if (msg.type === 'solveRiver') return solveRiver(msg);
             throw new Error(`waterWorkerCore: unknown message ${msg.type}`);
