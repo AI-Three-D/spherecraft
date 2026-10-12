@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "."
+  },
+  "include": [
+    "core/renderer/Renderer.js",
+    "core/renderer/terrain/TerrainModule.js",
+    "core/renderer/terrain/HeightGridTerrainRenderer.js",
+    "core/world/fixtures/HeightGridSource.js"
+  ]
+}

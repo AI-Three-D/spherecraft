@@ -1,5 +1,6 @@
 import { Vector2, Vector3, Vector4 } from '../../../../shared/math/index.js';
 import { Material } from '../../resources/material.js';
+import { terrainBindingAdapter } from './terrainBindings.js';
 import { requireBool, requireInt, requireNumber, requireObject } from '../../../../shared/requireUtil.js';
 
 export class TerrainMaterialBuilder {
@@ -584,6 +585,7 @@ coarseColorTexture: { value: cachedTextures.coarseColor ?? null },
         }
 
         const material = new Material({
+            bindingAdapter: terrainBindingAdapter,
             name: overlayPass ? 'TerrainHoverOverlayMaterial' : 'TerrainMaterial',
             vertexShader: vertexShader,
             fragmentShader: fragmentShader,

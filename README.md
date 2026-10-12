@@ -2,6 +2,8 @@
 
 A procedural WebGPU planet engine with real-time terrain streaming, physically-based atmosphere, GPU-driven vegetation LOD, and two playable game modes — built entirely from scratch without Three.js or Babylon.js.
 
+The [renderer module guide](docs/renderer-modules.md) documents the scene-independent core, optional terrain/water module, TypeScript contracts, and isolated height-grid harness. Run `npm run typecheck` to validate the public interfaces.
+
 > **Requires a WebGPU-capable browser.** Chrome 113+ or Edge 113+ on desktop is recommended.
 
 ![Forest terrain screenshot](screenshots/pic1.jpg)

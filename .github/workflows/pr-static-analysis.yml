@@ -51,3 +51,6 @@ jobs:
       - name: Run tests
         # passWithNoTests is set in vitest.config.mjs — this won't fail when no tests exist yet
         run: npm test
+
+      - name: Check renderer and terrain contracts
+        run: npm run typecheck

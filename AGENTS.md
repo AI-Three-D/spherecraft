@@ -18,9 +18,14 @@ Short map of the current code so agents can jump to the right place and make saf
 - Render loop delegates environment, terrain, atmosphere, water, clouds, and asset rendering to `Frontend`.
 
 ## Rendering Stack
-- `core/renderer/frontend/frontend.js` is the orchestration layer for rendering and render-adjacent simulation.
+- Start with `docs/renderer-modules.md` for the module boundaries, typed contracts, ownership, and fixture workflow.
+- `core/renderer/Renderer.js` is the scene-independent core. It manages module lifecycle, frame phases, viewport, and frame submission. It accepts zero modules and has no world/game dependencies.
+- `core/renderer/contracts.d.ts` defines `RenderModule`, `RenderFrame`, camera and backend contracts.
+- `core/renderer/terrain/TerrainModule.js` adapts a `TerrainSource`, `TerrainDraw`, and optional water layers. Contracts live in `core/renderer/terrain/contracts.d.ts`.
+- `core/world/PlanetTerrainModule.js` assembles the production quadtree world, terrain draw, and water renderers; the core does not construct them.
+- `core/renderer/frontend/frontend.js` is the existing game's composition layer. It runs terrain through the core and interleaves its other application extensions.
 - Current main path is WebGPU via `core/renderer/backend/webgpuBackend.js`.
-- `Frontend` coordinates:
+- The game composition coordinates:
   - lighting uniforms and clustered lighting
   - sky/moon/atmosphere setup
   - weather simulation and environment interpolation
@@ -30,6 +35,14 @@ Short map of the current code so agents can jump to the right place and make saf
   - GLTF/generic mesh rendering
   - streamed vegetation/props via `renderer/streamer`
 - `core/renderer/terrain/QuadtreeTerrainRenderer.js` is the terrain draw path. It consumes buffers from the quadtree tile manager and owns terrain materials/geometries.
+- `core/renderer/terrain/QuadtreeTerrainRenderer.d.ts` documents its typed configuration and source interface.
+- `core/renderer/terrain/materials/terrainBindings.js` owns terrain/water shader bindings and packing. Generic backend materials require an explicit binding specification or adapter.
+
+## Isolated Fixtures & TypeScript
+- `examples/modules/height-grid.html` runs a finite heightfield without GameEngine, planet generation, assets, or environment systems.
+- `HeightGridSource` in `core/world/fixtures` owns the fixture data; `HeightGridTerrainRenderer` owns drawing. Use these as the smallest reference implementations when introducing a module or fixture.
+- Run `npm run typecheck` alongside `npm test` when changing public contracts. It checks the new JavaScript implementations, TypeScript consumers with JavaScript inference disabled, negative contract examples, and generated declaration freshness.
+- Run `npm run types:build` after changing a checked public class, and commit the generated `.d.ts`. Keep the core free of concrete world imports.
 
 ## World & Terrain Generation (`core/world`)
 - Terrain generation is compute-driven in `core/world/webgpuTerrainGenerator.js`.
@@ -66,7 +79,7 @@ Short map of the current code so agents can jump to the right place and make saf
   - `webgpuCloudRenderer.js` is the main active volumetric path
   - `cloudNoiseGenerator.js` builds cloud noise resources
   - `cloudTypeDefinitions.js` and `cloudLayerDefinition.js` define weather-driven cloud layering
-- Water is handled by `core/renderer/water/globalOceanRenderer.js` on the GPU quadtree path.
+- `PlanetTerrainModule` plugs ocean, river simulation, lake surfaces, near-water and simulated-water draw layers into the optional terrain module. Blended water follows opaque geometry. Shared water data is owned by the application.
 
 ## Assets, Meshes & Streaming
 - GLTF loading lives under `shared/gltf`.
@@ -103,7 +116,7 @@ Short map of the current code so agents can jump to the right place and make saf
 ## General Instructions For Agents
 - Keep changes config-driven: prefer editing `wizard_game/runtimeConfigs.js`, `EngineConfig`, `GameDataConfig`, and planet config builders over sprinkling constants.
 - Run locally with `python3 server.py` and open `wizard_game/standalone.html`; browser console logging is a primary debug channel.
-- The supported main path is WebGPU-first. There are still legacy `webgl2` files in the tree, but do not assume they are the active architecture unless the code path clearly uses them.
+- WebGPU is the supported backend. The old backend preference flag and material-name layout inference have been removed.
 - Preserve the world/render split:
   - world modules decide data, generation, residency, and selection
   - renderer modules decide materials, passes, and draw calls

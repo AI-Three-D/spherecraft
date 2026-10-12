@@ -9,7 +9,9 @@
   "scripts": {
     "lint": "eslint .",
     "lint:fix": "eslint --fix .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.consumer.json && node tools/types/build-types.mjs --check",
+    "types:build": "node tools/types/build-types.mjs"
   },
   "keywords": [],
   "author": "",
@@ -17,9 +19,34 @@
   "description": "",
   "devDependencies": {
     "@eslint/js": "^9.26.0",
+    "@webgpu/types": "^0.1.74",
     "eslint": "^9.26.0",
     "globals": "^16.0.0",
     "naga-wasm": "^30.2.0",
+    "typescript": "~5.8.3",
     "vitest": "^3.1.0"
+  },
+  "types": "./core/renderer/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./core/renderer/index.d.ts",
+      "import": "./index.js"
+    },
+    "./renderer": {
+      "types": "./core/renderer/index.d.ts",
+      "import": "./core/renderer/index.js"
+    },
+    "./terrain": {
+      "types": "./core/renderer/terrain/index.d.ts",
+      "import": "./core/renderer/terrain/index.js"
+    },
+    "./resources": {
+      "types": "./core/renderer/resources/index.d.ts",
+      "import": "./core/renderer/resources/index.js"
+    },
+    "./fixtures/height-grid": {
+      "types": "./core/world/fixtures/HeightGridSource.d.ts",
+      "import": "./core/world/fixtures/HeightGridSource.js"
+    }
   }
 }

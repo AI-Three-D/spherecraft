@@ -886,6 +886,22 @@ export class QuadtreeTileManager {
         return this.tileStreamer.getArrayTextures();
     }
 
+    /** Traversal metrics needed by the draw layer, without exposing a quadtree implementation. */
+    getTierFadeParameters() {
+        if (!this.quadtreeGPU) return null;
+        const { lodFactor, faceSize, maxDepth, lodErrorThreshold } = this.quadtreeGPU;
+        return { lodFactor, faceSize, maxDepth, lodErrorThreshold };
+    }
+
+    dispose() {
+        this._initialized = false;
+        this._releaseManualDiagnosticSnapshot();
+        this.tileStreamer?.dispose();
+        this.quadtreeGPU?.dispose();
+        this.tileStreamer = null;
+        this.quadtreeGPU = null;
+    }
+
     // Latest Phase 0 instrumentation snapshot (SphereCraft_Optimization_
     // Implementation_Plan.md §0), refreshed every _maybeLogLightweightDiagnostics
     // tick (~every 120 frames). Consumed by the game HUD; null until the

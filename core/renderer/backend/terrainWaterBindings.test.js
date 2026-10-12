@@ -1,5 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {WebGPUBackend} from './webgpuBackend.js';
+import {terrainBindingAdapter} from '../terrain/materials/terrainBindings.js';
 
 describe('terrain water resource replacement',()=>{
     it('reuses stable bindings and replaces each changed water resource after regeneration',()=>{
@@ -15,16 +16,16 @@ describe('terrain water resource replacement',()=>{
             _getOrCreateDummyDepthTextureView:()=>depth,_getOrCreateDummyStorageBuffer:()=>storage,
         });
         const resources={index:{},lakes:{},masks:{},params:{},rivers:{}};
-        const u={_waterData:{value:{resources}}},m={id:1,_gpuPipeline:{bindGroupLayouts:[{},{},{},{}]}};
-        const first=b._createTerrainBindGroups(m,u,{});
-        expect(b._createTerrainBindGroups(m,u,{})[3]).toBe(first[3]);expect(groupsCreated).toBe(4);
+        const u={_waterData:{value:{resources}},heightScale:{value:2000},chunksPerFace:{value:64}},m={id:1,bindingAdapter:terrainBindingAdapter,_gpuPipeline:{bindGroupLayouts:[{},{},{},{}]}};
+        const first=b._createBindGroups(m,u,{});
+        expect(b._createBindGroups(m,u,{})[3]).toBe(first[3]);expect(groupsCreated).toBe(4);
         let previous=first[3];
         for(const [key,binding] of [['index',12],['lakes',13],['masks',14],['params',15],['rivers',16]]) {
-            resources[key]={};const next=b._createTerrainBindGroups(m,u,{})[3];
+            resources[key]={};const next=b._createBindGroups(m,u,{})[3];
             expect(next).not.toBe(previous);
             const entry=next.entries.find(e=>e.binding===binding);
             expect(binding===14?entry.resource:entry.resource.buffer).toBe(resources[key]);
-            expect(b._createTerrainBindGroups(m,u,{})[3]).toBe(next);previous=next;
+            expect(b._createBindGroups(m,u,{})[3]).toBe(next);previous=next;
         }
         expect(groupsCreated).toBe(9);
     });
