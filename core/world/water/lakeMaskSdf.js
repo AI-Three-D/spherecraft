@@ -72,6 +72,22 @@ export function lakeMaskSdf(mask, nx, ny, spacing) {
 }
 
 /**
+ * The field at point (x, y) m of the lake's frame, bilinear between cell
+ * centres (the shader samples its atlas tile smoothed, waterWgsl.js);
+ * -LAKE_SDF_RANGE_M outside the patch (no water there).
+ * @param {Float32Array} F  lakeMaskSdf
+ * @param {{ nx, ny, spacing, x0, y0 }} frame
+ */
+export function lakeSdfAt(F, frame, x, y) {
+    const { nx, ny, spacing, x0, y0 } = frame;
+    const u = (x - x0) / spacing, v = (y - y0) / spacing;
+    if (!(u >= 0 && v >= 0 && u <= nx && v <= ny)) return -LAKE_SDF_RANGE_M;
+    const at = (i, j) => F[Math.max(0, Math.min(ny - 1, j)) * nx + Math.max(0, Math.min(nx - 1, i))];
+    const i = Math.floor(u - 0.5), j = Math.floor(v - 0.5), a = u - 0.5 - i, b = v - 0.5 - j;
+    return (at(i, j) * (1 - a) + at(i + 1, j) * a) * (1 - b) + (at(i, j + 1) * (1 - a) + at(i + 1, j + 1) * a) * b;
+}
+
+/**
  * The field on an S x S atlas tile over the same extent: bilinear where
  * the tile is as fine as the mask or finer; where it is coarser, the
  * largest value of the cells under each texel (keeps narrow water, as the

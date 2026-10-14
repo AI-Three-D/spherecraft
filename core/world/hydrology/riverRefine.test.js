@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
+import { RIVER_SECTION } from '../water/riverSection.js';
+import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverLakeHold, riverReachShape, riverShape, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
 
 // 60 x 30 patch, 16 m cells, frame origin at (0, 0). A valley runs along
 // j = 15 from a source lake (i < 10, level 50 m) down to a destination lake
@@ -120,7 +121,7 @@ describe('river levels for the valley', () => {
         expect(maxDrop).toBeLessThan(10);
     });
 
-    it('follows a steep mountain stream: no slot from smoothing, no water above the falling ground', () => {
+    it('follows a steep mountain stream: no slot below the fit, no water above the falling ground', () => {
         // 12 % slope with bumps, from a lake at 500 m, a 6 m step at 1 km.
         const s2 = [], g2 = [], f2 = [];
         for (let k = 0; k <= 100; k++) {
@@ -133,10 +134,11 @@ describe('river levels for the valley', () => {
             const surface = g2[k] - f2[k] - P.marginM;
             // Never held above the ground's surface (allowing the ramp's rise),
             expect(eta[k]).toBeLessThanOrEqual(surface + P.rampRiseM + 1e-9);
-            // and never far below its running minimum (the fit through the bumps).
+            // and at its running minimum (the fit through the bumps), not
+            // lowered further: averaging downstream put steep streams 2 m deeper.
             let lowUp = Infinity;
             for (let j = 0; j <= k; j++) lowUp = Math.min(lowUp, g2[j] - f2[j] - P.marginM);
-            expect(eta[k]).toBeGreaterThan(lowUp - P.smoothCutM - 3.5);
+            expect(eta[k]).toBeGreaterThan(lowUp - 0.5);
         }
     });
 
@@ -169,5 +171,55 @@ describe('river levels for the valley', () => {
             }
             expect(missed).toBe(0);
         }
+    });
+});
+
+describe('source lake hold', () => {
+    const hold = (held, sourceEnd, destStart) => {
+        const eta = Float64Array.from([100, 100, 99.5, 99, 98.5, 98, 97]);
+        return { end: riverLakeHold({ eta, held, srcLevel: 100, sourceEnd, destStart }), eta: Array.from(eta) };
+    };
+    it('holds the lake level while the lake water lies beside the channel, the fit beyond', () => {
+        expect(hold([0, 0, 1, 1, 0, 1, 1], 1, 6)).toEqual({ end: 3, eta: [100, 100, 100, 100, 98.5, 98, 97] });
+        expect(hold([0, 0, 0, 1, 1, 1, 1], 1, 6)).toEqual({ end: 1, eta: [100, 100, 99.5, 99, 98.5, 98, 97] });
+        expect(hold([1, 1, 1, 1, 1, 1, 1], 1, 4).end).toBe(3);
+    });
+});
+
+describe('trunk level', () => {
+    it('takes the trunk\'s level where the tributary meets it, along its nearest segment', () => {
+        // A trunk descending 2 m per 20 m point along x, bending north at x = 60.
+        const pts = [[0, 0], [20, 0], [40, 0], [60, 0], [60, 20], [60, 40]];
+        const etas = [110, 108, 106, 104, 102, 100];
+        expect(trunkLevelAt(pts, etas, 30, 3).level).toBeCloseTo(107, 9);
+        expect(trunkLevelAt(pts, etas, 30, 3).distM).toBeCloseTo(3, 9);
+        expect(trunkLevelAt(pts, etas, 64, 30).level).toBeCloseTo(101, 9);
+        // Beyond the ends: the end points' levels.
+        expect(trunkLevelAt(pts, etas, -15, 0).level).toBe(110);
+        expect(trunkLevelAt(pts, etas, 60, 55).level).toBe(100);
+    });
+});
+
+describe('lake rims', () => {
+    it('raise the bank on the side the water is on, near it, falling off along the river', () => {
+        // A river along x (y = 0) through a 2 km patch at 16 m; a lake (level 50) north of it at y > 40 m, x < 0.
+        const nx = 125, ny = 125, spacing = 16, x0 = -1000, y0 = -1000;
+        const water = new Uint8Array(nx * ny), level = new Float32Array(nx * ny);
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+            const x = x0 + (i + 0.5) * spacing, y = y0 + (j + 0.5) * spacing;
+            if (y > 40 && x < 0) { water[j * nx + i] = 1; level[j * nx + i] = 50; }
+        }
+        const n = 41, xs = Float64Array.from({ length: n }, (_, k) => -400 + 20 * k), ys = new Float64Array(n), s = Float64Array.from(xs, x => x + 400);
+        const hw = new Float64Array(n).fill(5);
+        const { left, right } = riverLakeRims({ x: xs, y: ys, s, hw, reach: new Float64Array(n).fill(120), water, level, nx, ny, x0, y0, spacing });
+        const P = RIVER_SECTION, at = (x) => xs.indexOf(x);
+        // Left (north): its bank 20 m out (y = 25) within the band of the water (y > 40): the full rim.
+        expect(left[at(-200)]).toBeCloseTo(50 + P.lakeMarginM, 6);
+        // Right: its nearest bank point 10 m south, the water's cell centres 58 m from it.
+        expect(right[at(-200)]).toBeCloseTo(50 + P.lakeMarginM - P.lakeSlope * (Math.hypot(8, 58) - P.lakeBandM), 6);
+        expect(right[at(-200)]).toBeLessThan(left[at(-200)]);
+        for (let k = 1; k < n; k++) expect(Math.abs(left[k] - left[k - 1])).toBeLessThanOrEqual(P.lakeSlope * 20 + 1e-9);
+        // 400 m past the lake: far below the ground near it.
+        expect(left[at(400)]).toBeLessThan(0);
     });
 });

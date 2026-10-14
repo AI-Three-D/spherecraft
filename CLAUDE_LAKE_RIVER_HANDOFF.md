@@ -151,3 +151,194 @@ Third round: lakes still blurred with the camera 1.2–1.9 km from the water (ow
 Joins now measure the distance to earlier streams' route segments, not their points (streams 40 m apart between 128 m points were missed).
 
 Still open: some cross-slope stream banks keep teeth (the cut into the uphill side, then the 16 m bank-retreat grid); a stream's ribbon can sit above under-resolved triangles on steep reaches (shot 5, two strips). Cold shader compile stall (optimization item 15).
+
+## 9. Floating edges, slots and ponds (2026-10-12, branch `water-ponds`; most of it merged to main in 82c916d)
+
+Evidence: `tools/perf/structured-terrain-results/water-look-2026-10-12/` v23–v36.
+
+**Floating lake edges and rim pockets.** Lake masks are now a signed distance to the solved water (`core/world/water/lakeMaskSdf.js`, encoded 128 + metres in the r8 atlas; `surfaceDepthRangeM < 0` marks them). Water shows only where the ground is below the level and within half a solve cell (16 m) of the solved region; the near mesh discards the same. The old binary mask with its shore band (up to 3 cells where the 32 m ground is less than 6 m above the level) let water into every dip of a ~96 m rim, and big lakes' downsampling dilated it further. Cost on the main thread: 0.86 s over all lakes, at most 31 ms for one (applied a few lakes per frame). Residual: on very flat shores the cut shows as short straight segments near the camera.
+
+**Slots under streams (the "dam", toothed banks, floating ribbons).** Three causes, each measured with the carved sampler against the river levels:
+1. The level fit's downstream smoothing (fixed earlier: at most 2 m below the fit).
+2. The bank-retreat bake (`riverLandscape.js`): it processed cells lowest-goal first, so low downstream channel points limited everything upstream; on a 60 % stream the cut grew to ~30 m at the outlet. Now each cell takes its limit from its nearest channel cell, and channels narrower than a bake cell (16 m) are left to the carve: the bake cannot resolve them (a 5 m stream was cut 25–30 m). Shot 5: carved ground 0–0.9 m below the water.
+3. Drainages that cross closed hollows: the level cannot rise again, so the carve cut through the rim (stream 110: 13 m for 900 m). 52 % of the streams did this.
+
+**Ponds.** Hollows at least 3 m deep (`pondMinDepthM`) that a mountain lake's drainage crosses before its stream ends fill to their spill: solved at 32 m like the lakes, the stream ends in the pond, and the pond's stream follows the rest of the drainage (`WaterService._mountainPonds`, `mountainLakes.js drainPath` pits). 3,239 ponds (p50 14 ha, 16 m deep; 546 over 50 ha), 4,686 streams on the default planet: the ranges become an upland lake district. Owner (2026-10-12): ponds and constrictions are wanted river features.
+
+Also: `RIVER_SOLVE_VERSION` in the river cache key (level, trace or bake changes); lake holds at the river's ends only (`waterWorkerCore solveRiver`).
+
+**Costs and limits.** Cold mountain phase 77 s (discovery 25 s, drains and ponds 40 s); warm from the cache. Mask atlas 65 MB with the reserve raised to 1.3 slots per mountain block (the atlas is sized before the mountain lakes exist; a growable atlas is optimization item 4). Streams quadrupled: more lazy traces and tile regeneration near the camera (item 8). Open: toothed uphill banks where a narrow stream runs across a slope (the carve's organic bank profile), the flat-shore cut, and whether this many ponds is the look the owner wants.
+
+**Teeth (2026-10-12, branch `water-ponds`, uncommitted; v37–v54).** The carved height field is smooth at 0.5 m, but where a stream is cut into a cross slope its uphill wall rose 5 m within 2 m (a 4.5 m ledge over 0.5 m, cut off by a ~1.5 m fade); the 1–4 m terrain grid drew that wall as a saw-tooth. Organic banks now lay the cut back: the fade is at least 2 m wide per metre cut and the ledge above a 1 m toe at least 1.9 m wide per metre of rise (`RIVER_BANK_DETAIL` wallRunPerM, ledgeRunPerM, toeRiseM). That cuts all the way to a stream's edge, where its bank is only 0.2 m above the water, and coarse triangles dipped under the water in shards: narrow reaches (half-width under 10 m) now take their water from the channel profile at every distance (`waterRiverAtView`), and the near ribbon is clipped where the profile is above the water. Several wrong hypotheses on the way are recorded in the evidence README (v38–v53). Open: streams at the junction view look wider than before, a small T-shaped piece at one confluence; streams sit 4–5 m under the ground on their own line on cross slopes (the level fit's 25 m floor width; a narrower floor for streams was tried and set aside).
+
+
+## 10. Rivers: start here for the redesign (2026-10-13, branch `water-ponds`, uncommitted)
+
+**Owner's verdict (2026-10-13).** The rivers are far below the bar; the owner's whitewater screenshots are the minimum, and the target is higher. Four problems, then performance:
+1. **One water surface.** Shallow-water equations will displace the river mesh and drive its texturing, so a river's water must be one geometry from bank to bank. A middle drawn by one path and sides by another (the "strip in the middle") cannot work.
+2. **Width varies** along a river by at least 2–3x (pools, narrows), not the current near-uniform width.
+3. **No sawtooth banks.** Some remain.
+4. **Banks vary.** Today they have one height and gradient along the whole river and look man-made. They need varying ledges, and in places no bank at all: the ground grades smoothly into the surrounding terrain, blended over 50+ m.
+
+**What the strip is (proven, evidence v59–v61).** Stream 1319 at the owner's pose:
+- The terrain shading draws channel-profile water for narrow reaches (half-width under 10 m, the v54 change).
+- The near river ribbon is drawn over that and spans wider. Beyond the terrain's water it lies on banks at about the level: its outline is cut by the bank triangles (straight edges), and the speckle there is most likely a depth fight.
+- The debug tints cannot show this: the near meshes are skipped whenever a tint is on (`NearWaterRenderer.render`), so tint 4 magenta means the terrain shading's near weight, not the mesh. To tell the passes apart, use variants that patch `backend.draw` per material (`views-strip3.json`).
+
+So the owner's reading is right. Two renderers each decide independently where the water is: the terrain shading (depth test or channel profile) and the ribbon (`profileM < level` within `hw`), and the banks' triangles decide the rest.
+
+**State of this branch.** All uncommitted on `water-ponds` (on top of main `d840654`):
+- Teeth fix: laid-back organic banks, `RIVER_BANK_DETAIL` wallRunPerM, ledgeRunPerM and toeRiseM.
+- Narrow reaches drawn from the channel profile at every distance.
+- The ribbon clipped where the profile is above the water.
+- River ordering: mountain streams ranked at 4x their distance, within 12 km.
+- Atlas reserve, and the `waterViews.mjs` variants.
+
+These patch the current design rather than meet the bar. The owner has not approved them; review each hunk before keeping any of them.
+
+**Also open: big rivers barely trace.**
+- Cold first load: about 107 s of precompute before the first river trace.
+- After that the 4,686 mountain streams starve the 106 graph rivers: 5 graph rivers traced in 3 min (v56), and 6 with the ranking change (v57).
+- Each lazy trace is slow. Rivers need precomputing in the worker pool like the lakes (optimization item 8).
+
+**How to work (owner, 2026-10-13).** Small increments, foundations first. Every increment must be a measurable step forward:
+- Name the metric before changing code.
+- Measure the baseline on the code as it stands.
+- Change one thing, measure again, and capture the owner's poses.
+- Report the numbers and stop for the owner's look before the next increment.
+
+Nothing visible changes until the measurement tools (R1) and the cross-section function (R2) exist. An old path stays behind a switch only while the A/B is needed. Once the owner accepts the new one, delete the old code, its toggle and its config (memory: delete pruned code outright).
+
+**Increments (proposed; the owner may reorder).**
+
+- **R0. Starting point (no code).**
+  - Ask the owner to decide on the uncommitted hunks on `water-ponds`. Each was a patch to the current design:
+    - laid-back organic banks (`riverCarve.wgsl.js`, `RIVER_BANK_DETAIL` in `riverShapeNoise.js`);
+    - narrow reaches drawn from the profile (`waterWgsl.js waterRiverAtView`);
+    - ribbon clip (`nearWaterSurface.wgsl.js`);
+    - stream ranking (`WaterService.update`);
+    - atlas reserve; `waterViews.mjs` variants; docs.
+  - Note, don't build on: a river simulation exists (`WaterRiverSim.js`, `ShallowWaterSim.js`, `riverStrip.js`, `WaterSimRenderer.js`; on by default, off in every capture here with `riverSim=off`). The owner (2026-10-13): it is still quite broken. It might be a starting point later, but it is far from ready. Keep `riverSim=off` until R7.
+  - Output: a short status note, no metric.
+- **R1. Measurement foundation.**
+  - (a) A truthful ownership view. The debug tints skip the near meshes today. In debug, each pass draws its own colour: terrain-shading water, near ribbon, simulated surface, lake sheet. Overlaps show as a mix. Count the pixels per class inside the river's screen area: one owner, more than one, or none where the ground is below the water.
+  - (b) River metrics along traced rivers, sampled every few metres:
+    - wet width on each side;
+    - bank height and slope on each side;
+    - water level minus ground on the river's line (the trench);
+    - the narrowest ledge, in terrain vertex spacings at LOD 0.
+    - Summaries: width p90/p10, along-river variation of bank height and slope per side, trench p50/p90, count of ledges under 2 spacings.
+  - (c) Baselines on the current code: the owner's poses plus 3–5 rivers (graph rivers and mountain streams).
+  - Metric: the tools exist and the baselines are recorded.
+- **R2. The cross-section function (foundation, not drawn yet).**
+  - One definition, in JS with WGSL generated from the same constants (as `riverShapeNoise.js`). At a river's arc length s and signed offset n it gives the bed, each side's bank surface out to where it meets the natural ground, the wet edge on each side, and the water level.
+  - Inputs:
+    - long-wavelength (100–400 m) fields that choose each side's bank type: cut bank, low ledge, or no bank with a 50–80 m floodplain blend;
+    - the width, varying by 2–3x, with pools at bends and confluences;
+    - the thalweg skew.
+  - Ledges are at least 2 LOD-0 vertex spacings wide by construction.
+  - Unit tests: JS–WGSL parity, continuity in s and n, the ledge bound, width p90/p10 in 2–3 over long rivers.
+  - Metric: R1(b) computed on the function alone (no GPU) meets the targets.
+- **R3. Carve the terrain with it; water rendering unchanged.**
+  - Metric: carved ground minus the function at LOD-0 probe points; R1(b) on the real terrain; zero ledges under 2 spacings (teeth); the owner's poses.
+- **R4. Levels that follow the ground along the river's line.**
+  - Today the level fit's 25 m floor (`floorExtraM`) puts streams 4–5 m under the ground on cross slopes.
+  - Metric: trench p50/p90 from about 4–5 m to under 1 m; no lake or river records change except the intended ones.
+- **R5. One water surface.**
+  - Near: one river mesh spans the function's wet edge, and the terrain shading draws no river water inside its range.
+  - Far: the same function, opaque body.
+  - Metric: R1(a) at the owner's poses: no pixels with more than one owner, and no gaps.
+- **R6. Big rivers trace and precompute in the worker pool** (optimization item 8).
+  - Metric: graph rivers traced when loading ends (target 106 of 106; 6 today, v57); cold load time; tile regenerations after load.
+- **R7. Near-camera simulated water (deferred until R1–R6 work; the idea itself is open).**
+  - What the owner wants (2026-10-13): when a Whitewater-style simulation runs near the camera, the water's geometry may need to be finer than the terrain and move with the simulation; possibly lakes too. It matters for games where the river is the main feature (for example kayaking in this engine), so it would be switchable per game (config and `qtDiag`).
+  - Open: whether finer water than terrain is a good idea at all. The shoreline is where the water meets the bank, so fine water over 1–4 m terrain triangles still gives a 1–4 m shoreline, and the two would need matching bank detail. Decide later, with the owner, once everything else works.
+  - The existing simulation (`WaterRiverSim` and the rest, see R0) is broken; it might be a starting point, nothing more. Whitewater runs 0.5 m cells (256 x 1024, a 128 x 512 m window).
+  - Until then: don't design for R7 beyond keeping R2's river frame (s along, n across) usable by a later simulation grid.
+- **R8. Performance** (`WATER_OPTIMIZATION_PLAN.md`).
+
+**Reference: whitewater** (`../whitewater`), the owner's river game. Its terrain is generated for rivers.
+- `js/river.js` `channelProfile`: half-width with `widthVar` noise along the river, ponds 4x wide, waterfall pinches.
+- Bank `1.8*(1-exp(-m/2.5)) + 0.06*m` plus valley and relief; thermal erosion outside the channel.
+- `js/sim.js`: drives its GPU shallow-water simulation (Manning friction, foam) on one W x L grid.
+
+It is not a drop-in (a fixed rectangular grid, not a planet), but it shows the level the owner expects.
+
+**How to verify** (memory: prove a visual cause before fixing).
+- `tools/perf/lakeRecovery/waterViews.mjs` with the owner's HUD poses (`{pos, look}`); owned server :8193; warm profile in the scratchpad.
+- One evidence directory per run under `tools/perf/structured-terrain-results/water-look-2026-10-12/`, with a README row each.
+- Owner poses on record: the strip at `[27537.2, 51504.4, -118473.7]` looking at `[27534.5, 51498.4, -118471.2]`; the others are in the `views-*.json` files.
+
+**Progress (2026-10-13).**
+- **R0 done.** The owner went with the recommendations. Kept, uncommitted, as the state R1 measures: laid-back banks, narrow reaches from the profile, the ribbon clip (delete the first when R3 is accepted, the other two when R5 is), the atlas reserve, the harness variants and the docs. Dropped: the stream ranking (v57: no gain for the graph rivers); its diff is `water-look-2026-10-12/r0-dropped-stream-ranking.patch`.
+- **R1 built** (debug views and tooling only; the default rendering is unchanged):
+  - Water debug views 6 and 7 (`qtDiag.water.tint(6)`, `(7)`): every pass writes a flat colour; the near meshes keep drawing and add theirs (alpha 0 under their premultiplied blend); the terrain returns before aerial perspective. 6: red the terrain shading draws river water, green a ribbon, blue the simulated surface (not wired). 7: red a river's zone (half-width + bankW), green the ground below that river's water, blue lake water.
+  - `waterViews.mjs` views with `owner: true` take both with sky, clouds, particles, vegetation, meshes and post effects hidden. `tools/perf/riverMetrics/ownership.js` classes the pixels (shares of the wet pixels) and writes `<name>-owners.png`: magenta both, green ribbon only, cyan terrain only, red gap, grey dry zone, dark blue lake.
+  - Views with `metrics: { river }` measure a river's cross-sections: `tools/perf/riverMetrics/` (`riverSections.js` stations every 4 m and clipping at bends, `sectionMetrics.js` the definitions, unit tests). Sections reach the widest half-width + 100 m at 0.25 m, sampled by the hydrology sampler as drawn and natural. The raw sections are stored; `recompute.mjs RUN_DIR` recomputes them without the GPU.
+  - Definitions: wet edge; bank = the ground's rise above the water 2, 10 and 20 m past the wet edge, and the steepest 1 m slope within 10 m; classes by the rise at 10 m (none < 0.5 m, low < 2 m, high); blend = until the ground is back within 0.1 m of the natural terrain for 2 m; trench = natural ground on the traced line - water level; ledges = parts steeper than 45 degrees over 0.5 m that rise 0.3 m or more, measured in LOD-0 vertex spacings (about 1 m at face centres, from the cube mapping). A bank "top" (where the ground first levels off) was tried first and dropped: it flipped between a bench by the water and the whole valley side (v62, v63).
+  - Gotcha: narrow streams are carved, in tiles and in the carved sampler, only while listed for the GPU (within 12 km of the camera). Metrics views stand the camera over the river first and record `listed`.
+- **Baselines** (v63, README row):
+
+| | Streams 1319 / 337 / 117 | Graph rivers 37 / 75 | Target |
+| --- | --- | --- | --- |
+| Width p90/p10 | 1.81 / 1.87 / 1.64 | 2.07 / 2.07 | 2–3 (R2, R3) |
+| Trench p50 (p90) | 3.7 / 5.3 / 4.8 m (6.1 / 11.5 / 6.6) | 25.7 / 6.0 m (52.9 / 13.3) | < 1 m (R4) |
+| Banks | high on 77–98 % of each side, in runs of 60–272 m | high 55–69 %, low 28–42 %, changing every 8–18 m | variety (R2) |
+| Blend p50; share ≥ 50 m | 4–11 m; 0 % | 72–148 m (the valley bake); 93–96 % | proposed ≥ 20 % |
+| Ledges < 2 spacings per km of bank | 102–153 | 72 / 44 | 0 (R3) |
+
+  Who draws, as shares of the wet pixels: both passes 64–76 % at the stream poses (strip, river sheet 643, s112) and 99.5 % on river 37; ribbon only 19–24 % on streams; gaps 4–7 % on streams; shot 5 51 % terrain only (a narrow reach drawn from the profile where triangles hide the ribbon). R5 target: 0 % both, 0 % gaps. Where both draw on a stream, removing the ribbons changes nothing (the same colour), so the earlier on/off A/B could not see the double draw; view 6 does.
+- **Found:** river 37's water stays at 504–501 m for 12.6 km under natural ground at 520–566 m, a canyon 25–60 m deep whose walls the valley bake lays back over ~150 m. The level looks capped by a dip in the natural ground at s ≈ 3.6 km (513 m) under the never-rising rule; that is inferred from the line profile, not traced in code. Relevant to R4.
+- Stream ids in the warm profile (stable since v34): strip 1319, shot 5 337, s112 117, river sheet 643 163 and 2311. Graph rivers traced from the cache: 75, 62, 57, 43, 18, 66; 37 traces when asked.
+- **Rivers too rare to verify (owner 2026-10-13: "it's still very hard to find rivers. They should be more common").** Census (v64, `tools/perf/riverMetrics/riverCensus.mjs`): land's median distance to the nearest graph river 17.7 km, with mountain streams 5.7 km; to a drawn river 163 km. After loading, the spawn has 192 traced rivers (6 graph, 186 narrow streams), and 3 minutes later still the same: the lazy trace only reaches 40 km, one river at a time. More lake outlets (`minRiverQ`) are capped by the 614 lakes (399 rivers at Q 100, median 7.0 km). Headwater rivers (Q ≥ 300) give 683 more, median 5.3 km, but break the rule that rivers start at lakes. By terrain (owner: "are they limited to … mountains? … plains lakes did not have any"): streams start only in 300 m relief, so plains (60 % of the land) are 14 % within 5 km of a graph river; 72 of 287 plains lakes have a river (outflow Q median 335 vs `minRiverQ` 1200). Plains within 5 km: `minRiverQ` 300 → 28 %, headwaters Q ≥ 300 → 53 %, ≥ 150 → 72 % (README v64). Awaiting the owner's choice: trace everything at load (R6 brought forward) and/or a density target.
+- **Q fix and more rivers (owner 2026-10-13: fix Q, 70-80 % of lakes with a river, small rivers welcome, width variation stays in R2).** `waterGraph.js` took a lake's outflow Q at its outlet, the first cell where the deepest cell's drainage left the lake body, often its own shallow margin; 28.6 % of lake cells bypass it. Q is now read at the spill point (`spillCell`; the outlet and river starts are unchanged), `minRiverQ` 1200 → 100, graph rivers' `minWidthM` 30 → 8 and `minDepthM` 1.4 → 0.8, `WATER_ALGO_VERSION` water-v19, plus a regression test. Result: 453 of 614 lakes have a river (106 before), plains within 5 km 39 % (14 %); cold browser run (v66): no failed traces, 9 graph rivers within 40 km of the spawn (5 before). Resolved by the owner (2026-10-13): the rivers are there, they just load late. In a cold start the small lakes and their streams near the spawn appear after ~2 minutes. Requirement for the optimization (R6/R8): once optimized, lakes and rivers are computed at startup, never popping in minutes later.
+- **R2 done** (owner 2026-10-13: "proven to work, proceed with the fixes and improvements; optimization comes last"). `core/world/water/riverSection.js`: one cross-section in JS with its WGSL generated from the same constants (`RIVER_SECTION`).
+  - Channel: Whitewater's bed with the thalweg skew; each side's bank-full depth from its freeboard.
+  - Beyond the half-width: a step, a terrace and a blend from bank-full to the natural ground. Each side's bank type τ (0 none, 1 ledge, 2 cut) comes from long-wavelength noise (320 / 130 m), the bend's curvature (cut banks outside, bars inside) and a per-river style.
+  - The cut only lowers ground (soft min, C1). Ramps have a constant-slope middle and eased ends; a curvature cap (0.45 /m) sets each step's and blend's minimum width from its height, so no ledge is narrower than the grid can draw.
+  - Width: `exp(σ N(s))` with σ 0.55–1.15 per river and wavelengths scaled to the river's typical width; baked into the trace's half-width (`riverRefine.js`), so the GPU carve and the water read the same width.
+  - Tests (`riverSection.test.js`): only cuts, continuity, teeth under 0.15 m over bank type × height × slope, width p90/p10 median in 2–3 over 200 rivers, bank variety, naga validation. WGSL vs JS on the GPU (`tools/perf/riverMetrics/sectionParity.mjs`, Dawn): heights within 1.7e-4 m, derivatives within 2e-5.
+- **R3 done (v68).** The terrain carve is the section function (`riverCarve.wgsl.js` rewritten; the trace record's field 12 is the bend curvature). Results:
+  - Teeth p90 0.06–0.13 m on every measured river (0.6–2.5 m before); over 0.15 m on 0–3 % of stations (70–81 % before).
+  - Bank classes mixed, in runs of 56–150 m; stream blends p50 29–61 m (7–13 m).
+  - Carve minus function on streams: p99 0.09–0.27 m. Graph rivers 16 m and wider still get the valley bake on top (`riverLandscape`, p99 9–33 m); their remaining teeth (max 1.3 m on river 41) are there.
+  - Open:
+    - The banks look canal-like: smooth, but with straight, parallel edges. The organic banks' small-scale shore irregularity went with them. Next candidate: a smooth, curvature-capped wiggle of the wet edge and step (a few metres, 10–40 m wavelengths).
+    - Gaps at shot 5 rose from 11 to 20 % of the wet pixels (cause not proven).
+- **R3b (v70, v71).** Where two rivers meet, the carve took the nearest river's section, and the ground stepped along the line where the nearest river changes. At the river sheet confluence that was a 4 m step running 110 m across the land on both sides. Now every river in the cell's list gives its own section from its nearest segment, and the ground is the lowest. Junction seams 682 → 0 pairs (`carveSeams.js`: a jump in the carve's depth of 0.5 m or more and 4x its neighbours; 0 at river starts and mouths).
+- **R4a (v72–v74).** A tributary took its end level from the trunk at the graph's junction, 114–386 m along the trunk from where its path actually meets it: up to 18.7 m above or 9.8 m below the trunk's water (6 tributaries). With R3b the trunk's lower banks then cut under a hanging tributary, leaving its water up to 4.9 m above the ground. It now ends at the trunk's level where its path meets it (`trunkLevelAt`; `RIVER_SOLVE_VERSION` 4): mismatch p50 0.01 m, max 0.4 m, and stream 2635's water sits 0.45–0.59 m above its own channel floor to the mouth.
+- **Still open from earlier:**
+  - the ribbon's speckled sides and the double draw (R5);
+  - trench p50 4–6 m on streams and 26 m on river 37 (R4);
+  - the segment buffer drops 1–5 far rivers since the Q fix (R6/R8);
+  - slow river loading (R6).
+- **Owner's look (2026-10-13 evening):** trenches; no visible width variation; artificial banks (a bit better); "very broken starts of rivers" = fragmented polygons where a river leaves a lake; one river "broken in between, does not lead anywhere" (new). "Use your own judgement how to proceed."
+- **Junction shores (v76-v85).** Proven by carve on/off A/B (v81): at the owner's poses the fragments were lake water drawn on banks the carve had cut below the lake's level. The lake shore band (water on ground below the level within 16 m of the solved water) took them; `trimLakeBand` used to clear the band near rivers, but signed-distance masks ignore the trimmed mask. Fixed in the water shading, not the terrain: near the carve of a river below a lake, the lake keeps to its solved water (`waterLakeBandYield`, terrain shading and near lake sheets). The cut-off behind a river's first point (a seam up to 2.4 m) now fades out over 30 m. A carve-side "lake floor" was tried and reverted (v82: terraces where it met the cut).
+- **Still open at junctions:**
+  - The lake index drops a third lake in a 400 m cell (161 cells of 112 lakes; ponds go missing at river starts: river 2591).
+  - The trace flags reaches as in a lake from coarse graph cells where no lake is drawn (river 2587); one record starts 10 m above its source lake (2576).
+  - Thin ground strips between a lake's outline and the river band at outlets (not carve-made).
+  - The water lookup takes the nearest river only, while the carve takes the lowest.
+  - The owner's "river broken in between" was not found at the posed screenshots (v77: every river continuous there); screenshot 2 has no coordinates. Likely candidates are the first two items.
+- **Lake rims and capacity (v86-v94).** Owner: shot 5's lake "floats" with terrain-shaded water under it.
+  - **Rims:** per river point and side, the highest drawn water within the banks' reach plus 0.3 m, falling 0.2 m/m beyond 40 m (`riverLakeRims`, record 14/15). The bank's step rises to it (`riverBankRim`), so the section's own ramp and blend keep their shape. Unlike the reverted floor, no flank and no crease.
+  - **Shore-band rule:** narrowed to 20-30 m from a river's channel. Over the whole reach it turned small ponds into polygons.
+  - **Lake index:** a third lake per cell, in the cell's second word above its river block (161 dropped cells -> 3, counted).
+  - Result: s1, s3 and river 2591's pond are clean; shot 5's gap 23 -> 8 %.
+  - Left at shot 5: a thin strip where the lake sits on a natural rim narrower than its 32 m solve cells above a valley. The lake's outline reaches over the crest: a lake shore resolution problem, not the carve.
+- **R4 trenches (v95-v99).** Trench (natural ground on the line - water level) broken down on the stored sections. Baseline streams p50 3.6-5.3 m:
+  - **Lateral** (the lowest ground within 2 hw + 25 m beside the channel): 0.3-2.1 m.
+  - **Allowance** (bank crest incl. the old banks' 0.8 m rise + 0.5 m margin): 1.4 m.
+  - **Smoothing:** 1.9 m. Steep streams (6.6-24 % median slope) were always lowered by the 400 m average's 2 m cap.
+  - **Changes:** levels not smoothed (the 20 m points make drops rapids, falls bake); ground within 4 m of the channel's edge (`bankBandM`); allowance (1 - waterFrac) D + 0.5 m (`RIVER_SOLVE_VERSION` 11; record 13 = the fit's ground).
+  - **Result:** trench p50 strip 1.3, shot 5 1.6, s112 1.35, river 95 2.3 m; spill 0 %; teeth p90 0.09-0.14 m. River 41 still 25.7 m: a low spot upstream holds its level for 12 km (the canyon).
+- **Starts and ends (v100-v115, owner 2026-10-14: "ugly starts and endings, hard edges, land strips, floating water, darker cyan").**
+  - **Band yield removed (v101).** It cut the lake's shore band along every river near a lake: the straight edges and dry strips at mouths.
+  - **Rims from bank points (v103).** Measured at hw + 5 and hw + 20 m (lakes behind the bank were missed from the line): bank spill at starts 3,167 -> 2,879 m².
+  - **Smooth mask sampling (v105).** Cubic B-spline over the signed-distance atlas: the star's 32 m scallops ("sine wave") gone.
+  - **Debug view 9** (`qtDiag.water.tint(9)`): why a signed-distance lake draws or not, per term of `waterLakeHitIn`. It separated two mechanisms (v109):
+    - (A) outlet strips: a river dropped below its lake while the ground beside it was still inside the lake's band, so the lake gave way over the river's half-width and the river drew only to its profile's waterline;
+    - (B) straight band edges over low ground: the lake ends at the 32 m solve's -16 m contour, straight between cell centres, where the real ground beyond dips below the level for a few metres (o4-mouth, o4-star, s1).
+  - **Source lake hold (A, v115).** A river keeps its lake's level past the lake's cells while ground beside its channel is below the level inside the lake's drawn band and nowhere outside it (`riverLakeHold`, `RIVER_SOLVE_VERSION` 15); downstream the fit as before. Gap at o4-floating 3.66 -> 0.01 %, outlet-down 0.38 -> 0.03 %, shot 5 10.2 -> 10.9 % with its floating wedge gone; seven other poses identical. Attempts: a 32 m cap on ground alone flooded land outside the band (v113); restarting the fit at the hold kept the water 0.5 m higher for 120 m downstream (v114, shot 5 gap 18.5 %).
+  - **B open:** needs finer heights than the 32 m solve (between two outside centres the bilinear 32 m ground is above the level too). Plan: per lake near the camera, flood-fill its shore ring at 8 m from the solved region over ground below the level; the mask's distance field from that, point-sampled at the atlas texels (distance fields interpolate straight shores exactly even at 32-64 m texels); band -4 m. Open questions: lazy near-camera vs precompute cost, and keeping the trace's lake cells (hold, rims) consistent with the finer outline.
+- **Next:** B (fine lake shores); river 41's canyon (levels capped by an upstream low spot: fill it as a pond, or let the level rise); width variation that reads (pools and narrows); natural bank edges. Still open: river 2576's start 10 m above its lake, the water lookup's nearest-only river at confluences, ribbon edges (R5).

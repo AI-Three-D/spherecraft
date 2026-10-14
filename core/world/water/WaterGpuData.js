@@ -60,6 +60,11 @@ export const WATER_NEAR_DEFAULTS = Object.freeze({
 
 const SLOT_MASK = 0x7fff;
 const RIVER_BIT = 1 << 30;
+// The cell's second word: its river block (+1) below bit 17, a third lake's
+// slot above. Two lakes per cell dropped 161 cells of 112 lakes, ponds at
+// river starts among them (owner 2026-10-13, water-look v80, v91).
+const BLOCK_MASK = 0x1ffff;
+const SLOT3_SHIFT = 17;
 
 export class WaterGpuData {
     /**
@@ -230,22 +235,25 @@ export class WaterGpuData {
     }
 
     _setSlot(cell, slot) {
-        const e = this.index[cell];
-        const a = e & SLOT_MASK, b = (e >>> 15) & SLOT_MASK;
-        if (a === slot || b === slot) return;
+        const e = this.index[cell], w = this.index[this.cells + cell];
+        const a = e & SLOT_MASK, b = (e >>> 15) & SLOT_MASK, c = w >>> SLOT3_SHIFT;
+        if (a === slot || b === slot || c === slot) return;
         if (a === 0) this.index[cell] = (e & ~SLOT_MASK) | slot;
         else if (b === 0) this.index[cell] = (e & ~(SLOT_MASK << 15)) | (slot << 15);
-        else return; // a third lake in one cell: rare, dropped
+        else if (c === 0) { this.index[this.cells + cell] = ((w & BLOCK_MASK) | (slot << SLOT3_SHIFT)) >>> 0; this._dirtyRows.add(Math.floor((this.cells + cell) / this.N)); return; }
+        else { this.slotDrops = (this.slotDrops ?? 0) + 1; return; }   // a fourth lake in one cell
         this._dirtyRows.add(Math.floor(cell / this.N));
     }
 
     _clearSlot(cell, slot) {
-        const e = this.index[cell];
-        let a = e & SLOT_MASK, b = (e >>> 15) & SLOT_MASK;
-        if (a !== slot && b !== slot) return;
-        if (a === slot) { a = b; b = 0; } else b = 0;
+        const e = this.index[cell], w = this.index[this.cells + cell];
+        let a = e & SLOT_MASK, b = (e >>> 15) & SLOT_MASK, c = w >>> SLOT3_SHIFT;
+        if (a !== slot && b !== slot && c !== slot) return;
+        if (a === slot) { a = b; b = c; c = 0; } else if (b === slot) { b = c; c = 0; } else c = 0;
         this.index[cell] = (e & RIVER_BIT) | a | (b << 15);
+        this.index[this.cells + cell] = ((w & BLOCK_MASK) | (c << SLOT3_SHIFT)) >>> 0;
         this._dirtyRows.add(Math.floor(cell / this.N));
+        this._dirtyRows.add(Math.floor((this.cells + cell) / this.N));
     }
 
     _lakeCellsOf(svc, id) {
@@ -525,8 +533,8 @@ export class WaterGpuData {
      * { id, level }, or null.
      */
     lakeAt(dir) {
-        const e = this.index[dirToCell(dir, this.N)];
-        for (const slot of [e & SLOT_MASK, (e >>> 15) & SLOT_MASK]) {
+        const cell = dirToCell(dir, this.N), e = this.index[cell];
+        for (const slot of [e & SLOT_MASK, (e >>> 15) & SLOT_MASK, this.index[this.cells + cell] >>> SLOT3_SHIFT]) {
             const id = slot - 1, rec = slot ? this._applied.get(id) : null;
             if (!rec || !(this._layerOf.get(id) >= 0)) continue;
             const fr = rec.frame;
@@ -600,7 +608,7 @@ export class WaterGpuData {
                 const arc = this._arcLengths(rec);
                 // WaterRiverSeg (waterWgsl.js): p0, eta0, p1, eta1, hw, thalweg,
                 // pool, skew, speed, foam, arc length at both ends, river id,
-                // water level (points: waterWorkerCore.js).
+                // water level, lake guard, island, bend curvature, lake rims (points: waterWorkerCore.js).
                 const ext = st >= 12;
                 // Water level (points 16 on records that have it, else the design
                 // level), eased to the lakes at the river's ends (riverWaterLevels,
@@ -623,19 +631,21 @@ export class WaterGpuData {
                         &&Math.max(Math.abs(wlA),Math.abs(wlB),Math.abs(P[a+3]-P[a+5]),Math.abs(P[b+3]-P[b+5]))<=10000
                         ?(rec.structured===true?2:1):0,
                     wlA, wlB, st >= 20 ? P[a + 18] : -1e20, st >= 20 ? P[b + 18] : -1e20,
-                    st >= 20 ? P[a + 19] : 0, st >= 20 ? P[b + 19] : 0, 0, 0], o);
+                    st >= 20 ? P[a + 19] : 0, st >= 20 ? P[b + 19] : 0, st >= 20 ? P[a + 12] : 0, st >= 20 ? P[b + 12] : 0,
+                    // Lake rims of the banks (14 left, 15 right; none on older records).
+                    st >= 20 ? P[a + 14] : -1e4, st >= 20 ? P[b + 14] : -1e4, st >= 20 ? P[a + 15] : -1e4, st >= 20 ? P[b + 15] : -1e4], o);
                 next++;
             }
             this.index[2 * this.cells + block * SS + (id % SS)] = (first << 8) | (list.length / 2);
         }
         for (const [c, block] of blockOf) {
             const idx = this.cells + c;
-            if (this.index[idx] !== block + 1) { this.index[idx] = block + 1; this._dirtyRows.add(Math.floor(idx / this.N)); }
+            if ((this.index[idx] & BLOCK_MASK) !== block + 1) { this.index[idx] = ((this.index[idx] & ~BLOCK_MASK) | (block + 1)) >>> 0; this._dirtyRows.add(Math.floor(idx / this.N)); }
         }
         for (const c of this._riverCells) {
             if (blockOf.has(c)) continue;
             const idx = this.cells + c;
-            this.index[idx] = 0; this._dirtyRows.add(Math.floor(idx / this.N));
+            this.index[idx] = (this.index[idx] & ~BLOCK_MASK) >>> 0; this._dirtyRows.add(Math.floor(idx / this.N));
         }
         // The used blocks, whole rows.
         const b0 = 2 * this.cells, b1 = b0 + blockOf.size * SS;

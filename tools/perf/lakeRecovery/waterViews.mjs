@@ -1,4 +1,4 @@
-/* global process */
+/* global process, Buffer */
 // Captures listed camera views of the water (owned server + headless Chrome,
 // warm profile), each settled, with water tints and terrain debug modes.
 //
@@ -7,13 +7,22 @@
 //
 // Views: [{ name, dir: [x, y, z] (ground point), groundM, altM, back: [x, y, z]
 // (tangent the camera steps back along, km in backKm; omitted: straight
-// down), upHint, tints: [0, 3], terrain: [10], eval: "js returning JSON" }].
+// down), upHint, tints: [0, 3], terrain: [10], eval: "js returning JSON",
+// owner: true (who draws the water, ownerCaptures), traceNearM: trace the rivers
+// passing that close first, metrics: { river: id }
+// or { near: view name, mountain: true } (cross-section metrics, riverMetrics),
+// census: { waitS } (the planet's rivers, waterCensus) }].
 // Writes DIR/report.json and DIR/<name>[-tintN|-dbgN].png. Never reuses a
 // non-empty DIR.
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { readPng, writePng } from '../riverMetrics/png.js';
+import { classifyOwners, ribbonContainment } from '../riverMetrics/ownership.js';
+import { buildStations, clipExtents, lod0Spacing } from '../riverMetrics/riverSections.js';
+import { sectionMetrics, summarizeRiver } from '../riverMetrics/sectionMetrics.js';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
 const req = createRequire('/Users/okkokauhanen/work/DATrain/feature/proj/terrain-lab/package.json');
@@ -69,6 +78,21 @@ async function shot(name) {
     save();
 }
 async function captureView(v) {
+    // traceNearM: trace the rivers passing that close to the camera's ground point first (nearest first, up to 8).
+    if (v.traceNearM) report[`traced_${v.name}`] = await page.evaluate(async ({ nearM, o }) => {
+        const s = window.gameEngine.waterService, c = window.gameEngine.camera.position;
+        const p = [c.x - o[0], c.y - o[1], c.z - o[2]], l = Math.hypot(...p), d = p.map(x => x / l);
+        const near = s.rivers.map(r => ({ rid: r.id, m: s._riverDistance(r.id, d) })).filter(r => r.m <= nearM).sort((a, b) => a.m - b.m).slice(0, 8);
+        const t0 = performance.now(), out = [];
+        for (const { rid, m } of near) {
+            for (let i = 0; i < 1800 && !s.riverRecs.has(rid) && !s._failedRivers.has(rid); i++) {
+                if (i % 20 === 0 && !s._busy) s.refineRiver(rid);
+                await new Promise(r => setTimeout(r, 100));
+            }
+            out.push({ rid, m: Math.round(m), traced: s.riverRecs.has(rid) });
+        }
+        return { ms: Math.round(performance.now() - t0), rivers: out };
+    }, { nearM: v.traceNearM, o: report.origin }).catch(e => String(e));
     const st = await settle();
     report[`settle_${v.name}`] = st;
     if (v.eval) report[`eval_${v.name}`] = await page.evaluate(v.eval).catch(e => String(e));
@@ -129,13 +153,176 @@ async function captureView(v) {
         await shot(`${v.name}-dbg${mode}`);
     }
     if ((v.terrain ?? []).length) await page.evaluate(() => window.qtDiag.setTerrainDebugMode(0));
-    // variants: [{ name, set: "js", reset: "js" }] captured after the tints.
+    // variants: [{ name, set: "js", reset: "js", settle }] captured after
+    // the tints; settle: wait for the terrain to regenerate (feature toggles).
     for (const x of v.variants ?? []) {
         await page.evaluate(x.set);
-        await sleep(300);
+        if (x.settle) { await sleep(500); report[`settle_${v.name}-${x.name}`] = await settle(); } else await sleep(300);
         await shot(`${v.name}-${x.name}`);
         await page.evaluate(x.reset);
+        if (x.settle) { await sleep(500); await settle(); }
     }
+    if (v.owner) await ownerCaptures(v);
+}
+
+// owner: who draws the water (river redesign R1(a); tools/perf/riverMetrics
+// ownership.js). Water views 6 and 7 with post effects, sky, clouds,
+// particles, vegetation and meshes hidden, so only the terrain and the
+// water passes write: classes to <name>-owners.png and report.owners_<name>.
+// With a 'noribbons' variant also the check against that earlier method.
+async function ownerCaptures(v) {
+    await page.evaluate(() => {
+        const f = window.gameEngine.renderer, saved = [], noop = () => {};
+        const off = (o, k, val) => { if (!o) return; saved.push([o, k, Object.prototype.hasOwnProperty.call(o, k), o[k]]); o[k] = val; };
+        off(f.postProcessing, 'enabled', false);
+        off(f.cloudRenderer, 'enabled', false);
+        for (const r of [f.skyRenderer, f.starRenderer, f.moonRenderer, f.assetStreamer, f.particleSystem, f.skinnedMeshRenderer, f.genericMeshRenderer]) off(r, 'render', noop);
+        off(f, '_renderAtmoBanks', noop);
+        window.__ownerRestore = () => { for (const [o, k, own, val] of saved.reverse()) { if (own) o[k] = val; else delete o[k]; } };
+    });
+    try {
+        for (const mode of [6, 7]) {
+            await page.evaluate((m) => window.qtDiag.water.tint(m), mode);
+            await shot(`${v.name}-own${mode}`);
+        }
+    } finally {
+        await page.evaluate(() => { window.qtDiag.water.tint(0); window.__ownerRestore(); });
+    }
+    const png = (s) => readPng(fs.readFileSync(path.join(out, `${s}.png`)));
+    const a = png(`${v.name}-own6`), b = png(`${v.name}-own7`), base = fs.existsSync(path.join(out, `${v.name}.png`)) ? png(v.name) : null;
+    const r = classifyOwners(a, b, base);
+    fs.writeFileSync(path.join(out, `${v.name}-owners.png`), writePng(r.w, r.h, r.image));
+    report[`owners_${v.name}`] = { counts: r.counts, shares: r.shares, isolated: r.isolated };
+    if (base && fs.existsSync(path.join(out, `${v.name}-noribbons.png`))) report[`ribbonCheck_${v.name}`] = ribbonContainment(base, png(`${v.name}-noribbons`), a);
+    save();
+}
+
+// metrics: { river: id } | { near: view, mountain } | { pos: [x, y, z], mountain }:
+// cross-section metrics of one traced river (river redesign R1(b);
+// tools/perf/riverMetrics): stations every METRIC_STEP_M along the traced
+// line, sections out to its widest half-width + METRIC_MARGIN_M at
+// METRIC_DN, sampled from the tiles' height function by the hydrology
+// sampler, as drawn (valleys and carve) and natural. Narrow streams are
+// carved only while listed for the GPU (within NARROW_RIVER_DRAW_M of the
+// camera), so this runs with the camera over the river. Writes
+// <name>-river<id>-stations.json, -sections.f32.gz (as drawn, then natural)
+// and -metrics.json; the summary to report.metrics_<name>.
+const METRIC_STEP_M = 4, METRIC_DN = 0.25, METRIC_MARGIN_M = 100;
+async function riverMetrics(v, rid) {
+    const t0 = Date.now();
+    const src = await page.evaluate(async (rid) => {
+        const s = window.gameEngine.waterService, g = window.gameEngine.waterGpuData, rec = s.riverRecs.get(rid);
+        if (!rec) return null;
+        for (let i = 0; i < 50 && !g._inGpu?.has(rid); i++) await new Promise(r => setTimeout(r, 100));
+        const { riverWaterLevels } = await import('/core/world/water/riverRibbon.js');
+        const arc = g._arcLengths(rec), levels = riverWaterLevels(rec, arc, (d) => g.lakeAt(d));
+        const b64 = (a) => { const u = new Uint8Array(a.buffer, a.byteOffset, a.byteLength); let t = ''; for (let i = 0; i < u.length; i += 0x8000) t += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(t); };
+        const qt = window.gameEngine.renderer?.quadtreeTileManager;
+        return { stride: rec.stride, points: b64(Float32Array.from(rec.points)), arc: b64(Float64Array.from(arc)), levels: b64(Float64Array.from(levels)),
+            listed: g._inGpu?.has(rid) ?? null, mountain: !!s.rivers[rid]?.mountain, R: s.radius,
+            maxDepth: qt?.quadtreeGPU?.maxDepth ?? null, segments: qt?.engineConfig?.chunkSegments ?? null };
+    }, rid);
+    if (!src) { report[`metrics_${v.name}`] = { rid, error: 'not traced' }; save(); return; }
+    const dec = (b, T) => new T(Uint8Array.from(Buffer.from(b, 'base64')).buffer);
+    const points = dec(src.points, Float32Array), arc = dec(src.arc, Float64Array), levels = dec(src.levels, Float64Array), R = src.R;
+    const st = buildStations({ points, stride: src.stride, arc, levels, stepM: METRIC_STEP_M });
+    let hwMax = 0, hwMin = Infinity;
+    for (let o = 4; o < points.length; o += src.stride) { hwMax = Math.max(hwMax, points[o]); hwMin = Math.min(hwMin, points[o]); }
+    const half = Math.ceil(hwMax + METRIC_MARGIN_M), N = Math.round(half / METRIC_DN), count = 2 * N + 1;
+    const ext = clipExtents(st, R, half);
+    // Sampled per chunk of stations, directions built in the page.
+    const H = new Float32Array(st.count * count), H0 = new Float32Array(st.count * count);
+    const K = Math.max(1, Math.floor(65536 / count));
+    for (let q0 = 0; q0 < st.count; q0 += K) {
+        const q1 = Math.min(st.count, q0 + K);
+        const res = await page.evaluate(async ({ dir, left, N, dn, R }) => {
+            const s = window.gameEngine.waterService, m = dir.length / 3, count = 2 * N + 1, dirs = new Float32Array(4 * m * count);
+            for (let q = 0; q < m; q++) for (let i = 0; i < count; i++) {
+                const k = (i - N) * dn / R, o = 4 * (q * count + i);
+                const x = dir[3 * q] + left[3 * q] * k, y = dir[3 * q + 1] + left[3 * q + 1] * k, z = dir[3 * q + 2] + left[3 * q + 2] * k, l = Math.hypot(x, y, z);
+                dirs[o] = x / l; dirs[o + 1] = y / l; dirs[o + 2] = z / l;
+            }
+            const drawn = await s._sampler.sampleDirsCarved(dirs), natural = await s._sampler.sampleDirsNatural(dirs);
+            if (!drawn || !natural) return null;
+            const b64 = (a) => { const u = new Uint8Array(a.buffer, a.byteOffset, a.byteLength); let t = ''; for (let i = 0; i < u.length; i += 0x8000) t += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(t); };
+            return { drawn: b64(drawn), natural: b64(natural) };
+        }, { dir: Array.from(st.dir.subarray(3 * q0, 3 * q1)), left: Array.from(st.left.subarray(3 * q0, 3 * q1)), N, dn: METRIC_DN, R });
+        if (!res) { report[`metrics_${v.name}`] = { rid, error: 'carved sampler not ready' }; save(); return; }
+        H.set(dec(res.drawn, Float32Array), q0 * count);
+        H0.set(dec(res.natural, Float32Array), q0 * count);
+    }
+    const sampleMs = Date.now() - t0;
+    const maxDepth = src.maxDepth ?? Math.ceil(Math.log2(2 * R / 128)), segments = src.segments ?? 128;
+    const rows = [];
+    for (let q = 0; q < st.count; q++) {
+        const spacing = lod0Spacing(st.dir.subarray(3 * q, 3 * q + 3), R, maxDepth, segments);
+        const m = sectionMetrics({ h: H.subarray(q * count, (q + 1) * count), h0: H0.subarray(q * count, (q + 1) * count),
+            dn: METRIC_DN, wl: st.wl[q], extentL: ext.left[q], extentR: ext.right[q], spacing });
+        rows.push({ ...m, s: st.s[q], inLake: st.pool[q] < 0, spacing });
+    }
+    const summary = summarizeRiver(rows, { stepM: METRIC_STEP_M });
+    const base = path.join(out, `${v.name}-river${rid}`), r3 = (x) => (x == null ? null : Math.round(x * 1000) / 1000);
+    fs.writeFileSync(`${base}-sections.f32.gz`, zlib.gzipSync(Buffer.concat([Buffer.from(H.buffer), Buffer.from(H0.buffer)])));
+    // The traced record itself (RIVER_POINT_STRIDE floats a point, riverRefine.js), for offline sections.
+    fs.writeFileSync(`${base}-record.f32.gz`, zlib.gzipSync(Buffer.from(points.buffer)));
+    fs.writeFileSync(`${base}-stations.json`, JSON.stringify({ rid, R, dn: METRIC_DN, N, count, stepM: METRIC_STEP_M, maxDepth, segments,
+        layout: 'sections.f32.gz: stations x count float32 as drawn, then the same natural; sample i at (i - N) dn, + left; record.f32.gz: the traced points, recordStride floats each', recordStride: src.stride,
+        s: [...st.s], wl: [...st.wl].map(r3), hw: [...st.hw].map(r3), pool: [...st.pool].map(r3), extentL: [...ext.left].map(r3), extentR: [...ext.right].map(r3),
+        dir: [...st.dir], left: [...st.left] }));
+    const side = (b) => (!b ? null : b.open ? 'open' : [r3(b.wet), r3(b.rise2), r3(b.rise10), r3(b.rise20), r3(b.steep10), r3(b.blend), b.cls, r3(b.pocket)]);
+    fs.writeFileSync(`${base}-metrics.json`, JSON.stringify({ summary,
+        columns: 's, inLake, dry, lineDry, trench, depthLine, width, left [wet, rise2, rise10, rise20, steep10, blend, class, pocket], right [same], ledges [n, width, rise] under 2 spacings, spacing',
+        rows: rows.map(r => [r.s, r.inLake ? 1 : 0, r.dry ? 1 : 0, r.lineDry ? 1 : 0, r3(r.trench), r3(r.depthLine),
+            r.edgeL != null && r.edgeR != null ? r3(r.edgeL - r.edgeR) : null, side(r.left), side(r.right),
+            r.ledges.filter(l => l.spacings < 2).map(l => [r3(l.n), r3(l.width), r3(l.rise)]), r3(r.spacing)]) }));
+    report[`metrics_${v.name}`] = { rid, mountain: src.mountain, listed: src.listed, lengthM: Math.round(arc[arc.length - 1]), hw: [r3(hwMin), r3(hwMax)],
+        stations: st.count, halfSpanM: half, maxDepth, segments, sampleMs, totalMs: Date.now() - t0, summary };
+    save();
+}
+
+// census: { waitS }: the planet's rivers for offline analysis
+// (tools/perf/riverMetrics/riverCensus.mjs; owner 2026-10-13: rivers are
+// hard to find). The water graph's sampled grid (heights, precipitation,
+// from the service's cache) to <name>-grid.f32.gz, and every lake and river
+// (kind, grid cells) with the traced ones now and after waitS seconds with
+// the camera still (waitS: seconds or a list) to <name>-rivers.json.
+async function waterCensus(v) {
+    const traced = () => page.evaluate(() => { const s = window.gameEngine.waterService, g = window.gameEngine.waterGpuData;
+        return { t: Math.round(performance.now()), traced: [...s.riverRecs.keys()], failed: [...(s._failedRivers ?? [])],
+            drawn: [...(g?._inGpu ?? [])], dropped: g?._droppedRivers ?? null, timings: s.timings }; });
+    const head = await page.evaluate(async () => {
+        const s = window.gameEngine.waterService;
+        window.__censusGrid = s.config.cache ? await s._cache.get(`grid:${s._key}`) : null;
+        return { N: s.N, R: s.radius, seaLevelM: window.__censusGrid?.seaLevelM ?? null, params: s.config.params, stats: s.stats,
+            lakes: s.lakes.map(l => [l.id, l.mountain ? 1 : 0, l.cellCount ?? 0, l.outflowQ ?? 0, l.level, l.river ?? -1]),
+            rivers: s.rivers.map(r => ({ id: r.id, mountain: !!r.mountain, fromLake: r.fromLake, to: r.to, cells: Array.from(r.cells ?? []) })) };
+    });
+    const snapshots = [await traced()];
+    if (head.seaLevelM != null) {
+        const per = head.N * head.N, H = new Float32Array(6 * per), Pc = new Float32Array(6 * per);
+        const dec = (b) => new Float32Array(Uint8Array.from(Buffer.from(b, 'base64')).buffer);
+        for (let f = 0; f < 6; f++) {
+            const r = await page.evaluate((f, per) => {
+                const g = window.__censusGrid;
+                const b64 = (a) => { const u = new Uint8Array(a.buffer, a.byteOffset, a.byteLength); let t = ''; for (let i = 0; i < u.length; i += 0x8000) t += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(t); };
+                return { h: b64(g.heights.subarray(f * per, (f + 1) * per)), p: b64(g.precip.subarray(f * per, (f + 1) * per)) };
+            }, f, per);
+            H.set(dec(r.h), f * per);
+            Pc.set(dec(r.p), f * per);
+        }
+        fs.writeFileSync(path.join(out, `${v.name}-grid.f32.gz`), zlib.gzipSync(Buffer.concat([Buffer.from(H.buffer), Buffer.from(Pc.buffer)])));
+    }
+    await page.evaluate(() => { delete window.__censusGrid; });
+    // waitS: seconds, or a list of them (one snapshot after each, counted from here).
+    let waited = 0;
+    for (const w of [].concat(v.census?.waitS ?? [])) { await sleep((w - waited) * 1000); waited = w; snapshots.push(await traced()); }
+    const pose = await page.evaluate(() => window.__lr.pose());
+    fs.writeFileSync(path.join(out, `${v.name}-rivers.json`), JSON.stringify({ ...head, pose, snapshots,
+        layout: 'grid.f32.gz: 6 N N float32 heights (m), then precipitation; lakes [id, mountain, cellCount, outflowQ, level, river]' }));
+    report[`census_${v.name}`] = { lakes: head.lakes.length, rivers: head.rivers.length, grid: head.seaLevelM != null,
+        traced: snapshots.map(s => ({ t: s.t, traced: s.traced.length, failed: s.failed.length, drawn: s.drawn.length, dropped: s.dropped })),
+        timings: snapshots[0].timings };
+    save();
 }
 const norm = (a) => { const l = Math.hypot(...a); return a.map(v => v / l); };
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -164,13 +351,35 @@ try {
             }
             v.dir = d0; v.groundM = L.level;
         }
+        // { metrics: { river: id } or { near: view, mountain } }: the river
+        // (or the nearest traced river of that kind listed for an earlier
+        // pose view) seen from over its middle, then its metrics.
+        let metricsRid = null;
+        if (v.metrics) {
+            const near = report[`rivers_${v.metrics.near}`];
+            metricsRid = v.metrics.river ?? (Array.isArray(near) ? near.find(r => r.mountain === !!v.metrics.mountain)?.rid : null) ?? null;
+            // { pos: [x, y, z] world, mountain }: the river of that kind whose graph cells come nearest (ids change with the graph).
+            if (metricsRid == null && v.metrics.pos) metricsRid = await page.evaluate(({ pos, mountain, o }) => {
+                const s = window.gameEngine.waterService, p = pos.map((x, i) => x - o[i]), l = Math.hypot(...p), d = p.map(x => x / l);
+                let best = null;
+                for (const r of s.rivers) {
+                    if (!!r.mountain !== mountain) continue;
+                    const dr = s._riverDistance(r.id, d);
+                    if (!best || dr < best.d) best = { d: dr, rid: r.id };
+                }
+                return best?.rid ?? null;
+            }, { pos: v.metrics.pos, mountain: !!v.metrics.mountain, o: report.origin });
+            report[`metricsRiver_${v.name}`] = metricsRid;
+            if (metricsRid == null) continue;
+            v.river = metricsRid; v.frac ??= 0.5; v.altM ??= 300;
+        }
         // { river: id, frac, altM, backM }: behind a traced river's point at
         // arc fraction frac (solved first if needed), looking along its flow.
         if (v.river != null) {
             const P = await page.evaluate(async ({ rid, frac }) => {
                 const s = window.gameEngine.waterService;
-                for (let i = 0; i < 600 && !s.riverRecs.has(rid); i++) {
-                    if (i % 50 === 0 && !s._busy) s.refineRiver(rid);
+                for (let i = 0; i < 1800 && !s.riverRecs.has(rid); i++) {
+                    if (i % 20 === 0 && !s._busy) s.refineRiver(rid);
                     await new Promise(r => setTimeout(r, 100));
                 }
                 const rec = s.riverRecs.get(rid);
@@ -209,6 +418,8 @@ try {
             target: { x: o[0] + target[0], y: o[1] + target[1], z: o[2] + target[2] },
             up: { x: up[0], y: up[1], z: up[2] }, fov: v.fov ?? 75 });
         await captureView(v);
+        if (metricsRid != null) await riverMetrics(v, metricsRid);
+        if (v.census) await waterCensus(v);
     }
 } catch (e) {
     report.failure = String(e?.stack || e);

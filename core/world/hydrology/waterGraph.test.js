@@ -211,6 +211,40 @@ describe('water graph', () => {
         for (const cell of lake.cells) expect(g.fillExact[cell]).toBe(lake.level);
     });
 
+    it('a lake drains through its spill point: outflow Q counts its whole catchment', () => {
+        // Face 4 sloping down to the coast at i = 2. A basin (i 10..22, j 10..20)
+        // floored 0.3 m under its sill, a notch at (9, 15): a shallow margin,
+        // not lake body. Its lake is a 40 m pit at the far end (i 20..21, j
+        // 14..15), which drains out through the margin to the notch. Q at the
+        // pit's edge (the outlet) held a few cells (water-look v64: lake 165,
+        // 13 instead of 1,797).
+        const M = 32;
+        const h = gridHeights(M, (face, i, j) => {
+            if (face !== 4 || i < 2 || j < 2 || i > M - 3 || j > M - 3) return -100;
+            if (i >= 20 && i <= 21 && j >= 14 && j <= 15) return 7;
+            if (i >= 10 && i <= 22 && j >= 10 && j <= 20) return 46.7;
+            if (i === 9 && j >= 9 && j <= 21) return j === 15 ? 47 : 48;
+            return 20 + 3 * i;
+        });
+        const g = buildWaterGraph({ N: M, heights: h, seaLevelM: 0, params: { minLakeDepthM: 8, minLakeCells: 4, minRiverQ: 1 } });
+        expect(g.lakes.length).toBe(1);
+        const lake = g.lakes[0], cellAt = (i, j) => 4 * M * M + j * M + i;
+        expect(lake.cells.length).toBe(4);
+        expect(lake.level).toBe(47);
+        expect(lake.spillCell).toBe(cellAt(9, 15));
+        expect(lake.outflowQ).toBeCloseTo(g.Q[lake.spillCell], 3);   // Q is returned as Float32
+        // Every cell of the basin drains through the spill.
+        for (let j = 10; j <= 20; j++) for (let i = 10; i <= 22; i++) {
+            let c = cellAt(i, j);
+            while (c !== -1 && c !== lake.spillCell) c = g.parent[c];
+            expect(c).toBe(lake.spillCell);
+        }
+        expect(lake.outflowQ).toBeGreaterThan(0.5 * 13 * 11);
+        expect(lake.outflowQ).toBeGreaterThan(g.Q[lake.outletCell]);
+        expect(g.rivers.length).toBe(1);
+        expectNoDeadEnds(g, h);
+    });
+
     it('is deterministic (independent of evaluation order)', () => {
         const c = norm([0.2, -0.1, 1]);
         const h = heightsFrom(d => continent(d) + bowl(d, c, 80, 0.2));

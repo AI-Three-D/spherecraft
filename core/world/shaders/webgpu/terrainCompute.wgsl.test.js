@@ -58,16 +58,18 @@ function compile(code) {
 }
 
 describe('terrain generation compute shader', () => {
-    it('compiles organic bank geometry and splat consumers only when selected',()=>{
+    it('compiles the river cross-section, and the shore materials only when selected',()=>{
         for(const shape of [false,true])for(const inputs of [{},{hasHeightBindings:true},{hasHeightBindings:true,hasTileBindings:true}]) {
             const src=createAdvancedTerrainComputeShader({...base,waterCarve:true,riverBankDetail:true,
                 regionalTerrain:true,regionalShape:shape,...inputs});
             expect(compile(src)).toBeNull();
-            expect(src).toContain('let noise = waterBankNoise');
+            expect(src).toContain('riverSection_d(nD, hwD, bed, D');
+            expect(src).toContain('let shoreNoise = waterBankNoise');
         }
-        const legacy=createAdvancedTerrainComputeShader({...base,waterCarve:true});
-        expect(legacy).not.toContain('let noise = waterBankNoise');
-        expect(legacy).not.toContain('let ln = waterShoreNoise');
+        const plain=createAdvancedTerrainComputeShader({...base,waterCarve:true});
+        expect(compile(plain)).toBeNull();
+        expect(plain).toContain('riverSection_d(nD, hwD, bed, D');
+        expect(plain).not.toContain('let shoreNoise = waterBankNoise');
     });
     const base = {
         baseGenerator: 'earthLike',

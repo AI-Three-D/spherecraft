@@ -12,12 +12,13 @@
 
 import { riverCap } from './riverRibbon.js';
 import { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } from './riverShapeNoise.js';
+import { RIVER_SECTION } from './riverSection.js';
 
 /** Reach (m) of a river's carve beyond its centre line, for a half-width (as WaterService passes it to solveRiver). */
 export function riverCarveReach(carve = {}) {
     const C = { ...RIVER_CARVE_DEFAULTS, ...carve };
     const scale = riverShapeMaxScale(C);
-    const beyond = C.bankW + C.blendW + 8;
+    const beyond = RIVER_SECTION.reachM + 8;
     return (hw) => hw * scale + beyond;
 }
 

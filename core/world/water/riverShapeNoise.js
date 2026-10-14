@@ -18,6 +18,20 @@ export const RIVER_BANK_DETAIL = Object.freeze({
     reliefM: 0.45,
     noiseCellM: 3,
     maxExtentM: 45,
+    // Organic banks are laid back to about 45 degrees: the ledge (the bank's
+    // rise beyond its shelf) is at least ledgeRunPerM metres wide per metre
+    // of rise, and the cut fades into the natural ground over at least
+    // wallRunPerM metres per metre cut. A 4.5 m ledge over 0.5 m, cut off by
+    // a ~1.5 m fade, left walls up to 5 m high within 2 m wherever a stream
+    // is cut into a cross slope; the 1-4 m terrain grid drew them as a saw-
+    // tooth (owner 2026-10-12, "teeth"; water-look v37-v44). Each change
+    // alone did nothing: both terms make the wall. The first toeRiseM of
+    // the rise keeps the bank's own steepness: a laid-back bank stayed
+    // within a few tenths of a metre of a stream's water (0.2 m freeboard),
+    // and coarse triangles dipped under it in shards (water-look v50).
+    ledgeRunPerM: 1.9,
+    wallRunPerM: 2,
+    toeRiseM: 1,
 });
 const SHORE_OCTAVES = [[23, 0.55], [7, 0.45]];
 
@@ -32,6 +46,11 @@ export const RIVER_NOISE = Object.freeze({
     reach: [[430, 0.65], [145, 0.35]],
     depth: [[180, 0.7], [61, 0.3]],
     valley: [[320, 0.7], [113, 0.3]],
+    // River cross-section (riverSection.js): width along the river (baked
+    // into the trace's half-width) and each side's bank type.
+    widthLong: [[420, 0.6], [160, 0.4]],
+    bankLeft: [[320, 0.6], [130, 0.4]],
+    bankRight: [[320, 0.6], [130, 0.4]],
 });
 
 export const RIVER_CARVE_DEFAULTS = Object.freeze({
@@ -39,14 +58,17 @@ export const RIVER_CARVE_DEFAULTS = Object.freeze({
     waterFrac: 0.75,
     bankH: 0.8, bankSoftM: 8, bankGrade: 0.035,
     bankW: 10, blendW: 65,
-    widthVar: 0.4, wobble: 0.3, bankVar: 0.55,
+    // Width along a river is baked into the trace's half-width now
+    // (riverSection.js riverWidthFactor); no width noise on top in the shader.
+    widthVar: 0, wobble: 0.3, bankVar: 0.55,
     islandHeightM: 2.5,
     bankDetail: 0, // opt-in independent shores, bank relief and shore materials
     bankCutM: 6,   // maximum excavation beyond the wet channel (metres)
 });
 
-const SALT = { width: 0x9e37, wobble: 0x7f4a, bank: 0x2c1b, shoreLeft: 0x4729, shoreRight: 0xa351,
-    reach: 0x51e3, depth: 0x68bc, valley: 0x319d };
+export const RIVER_NOISE_SALT = Object.freeze({ width: 0x9e37, wobble: 0x7f4a, bank: 0x2c1b, shoreLeft: 0x4729, shoreRight: 0xa351,
+    reach: 0x51e3, depth: 0x68bc, valley: 0x319d, widthLong: 0x3b17, bankLeft: 0xc61d, bankRight: 0x5e83 });
+const SALT = RIVER_NOISE_SALT;
 
 function hashU32(x) {
     x = (x ^ 61) ^ (x >>> 16);
@@ -56,6 +78,9 @@ function hashU32(x) {
     return (x ^ (x >>> 15)) >>> 0;
 }
 const hashF = (i, seed) => hashU32(((i | 0) + Math.imul(seed, 0x632be5ab)) >>> 0) / 4294967296;
+
+/** A river's own value in [0, 1) for a salt (as WGSL waterHashF(river, salt)). */
+export const riverHash = (river, salt) => hashF(river, salt);
 
 /** Noise in [-1, 1] at arc length s and its derivative per metre. */
 export function riverNoise(s, river, kind) {

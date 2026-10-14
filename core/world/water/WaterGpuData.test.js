@@ -41,6 +41,22 @@ const slots = (gpu, c) => [gpu.index[c] & 0x7fff, (gpu.index[c] >>> 15) & 0x7fff
 const cam = { x: 0, y: 0, z: 200000 };
 
 describe('WaterGpuData', () => {
+    it('keeps a third lake in a cell (in its second word, beside the river block) and counts a fourth', () => {
+        const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxRiverCells: 4, maxRiverSegs: 4 });
+        const cells = gpu.cells, c = 7;
+        gpu.index[cells + c] = 3;                    // river block 2 (+1)
+        for (const slot of [5, 9, 12, 20]) gpu._setSlot(c, slot);
+        expect(slots(gpu, c).slice(0, 2)).toEqual([5, 9]);
+        expect(gpu.index[cells + c] >>> 17).toBe(12);
+        expect(gpu.index[cells + c] & 0x1ffff).toBe(3);
+        expect(gpu.slotDrops).toBe(1);
+        gpu._clearSlot(c, 5);                        // the others move up
+        expect(slots(gpu, c).slice(0, 2)).toEqual([9, 12]);
+        expect(gpu.index[cells + c]).toBe(3);
+        gpu._clearSlot(c, 12);
+        expect(slots(gpu, c).slice(0, 2)).toEqual([9, 0]);
+    });
+
     it('publishes more than 96 immutable masks together without eviction and keeps tile addresses inside their layers',()=>{
         const dev=stubDevice(),uploads=[];dev.queue.writeTexture=(dst)=>uploads.push(dst.origin);
         const gpu=new WaterGpuData(dev,{gridN:16,planetRadius:131072,maxLakes:112,maxMaskLayers:112,maskTilesPerAxis:4,maskLayerSize:8,
