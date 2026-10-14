@@ -22,6 +22,8 @@ import { DEFAULT_TILE_CATALOG } from '../templates/configs/defaultTileCatalog.js
 import { buildWorldAuthoringRuntime } from '../core/world/biomeRuntime.js';
 import { buildAtmoBankAuthoringRuntime } from '../core/renderer/atmosphere-banks/AtmoBankAuthoringRuntime.js';
 import { buildParticleAuthoringRuntime } from '../core/renderer/particles/ParticleAuthoringRuntime.js';
+import { requireInt, requireNumber } from '../shared/requireUtil.js';
+import { createAdaptiveQualityConfig } from '../core/AdaptiveQuality.js';
 
 function cloneJSONValue(value) {
     if (Array.isArray(value)) {
@@ -160,6 +162,17 @@ export class WorldConfigLoader {
 
     _buildEngineConfig(terrain, planet, engine = {}) {
         const base = createEngineConfig();
+        if (engine.rendering?.pixelRatio != null) {
+            const pixelRatio = requireNumber(engine.rendering.pixelRatio, 'rendering.pixelRatio');
+            if (pixelRatio <= 0) throw new Error('EngineConfig rendering.pixelRatio must be > 0');
+            base.rendering.pixelRatio = pixelRatio;
+        }
+        if (engine.rendering?.maxFps != null) {
+            base.rendering.maxFps = requireInt(engine.rendering.maxFps, 'rendering.maxFps', 0);
+        }
+        if (engine.rendering?.adaptive) {
+            base.rendering.adaptive = createAdaptiveQualityConfig({ ...base.rendering.adaptive, ...engine.rendering.adaptive });
+        }
         // Seed from terrain JSON
         if (terrain?.seed != null) base.seed = terrain.seed;
         // macroConfig

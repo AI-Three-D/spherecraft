@@ -10,12 +10,14 @@ import { Spaceship } from './game/spaceShip.js';
 import { SpaceshipModel } from './game/spaceShipModel.js';
 import { AltitudeController } from './game/altitudeController.js';
 import { GameInputManager } from './GameInputManager.js';
+import { waitForVisibleFrame } from './FrameLoop.js';
 import { TextureCache } from '../core/texture/textureCache.js';
 import { AltitudeZoneManager } from '../core/planet/altitudeZoneManager.js';
 import { PlanetConfig } from '../templates/configs/planetConfig.js';
 import { SphericalChunkMapper } from '../core/planet/sphericalChunkMapper.js';
 import { StarSystem } from '../core/celestial/StarSystem.js';
 import { EngineConfig } from '../core/EngineConfig.js';
+import { AdaptiveQualityController } from '../core/AdaptiveQuality.js';
 import { GameDataConfig } from './GameDataConfig.js';
 import { Logger } from '../shared/Logger.js';
 import { GameUI } from './ui/GameUI.js';
@@ -188,13 +190,12 @@ const TERRAIN_THEME = {
     terrainShaderBundle: TERRAIN_SHADER_BUNDLE,
 };
 
-function updateCanvasResolution(canvas) {
+function updateCanvasResolution(canvas, pixelRatio) {
     const displayWidth = canvas.clientWidth;
     const displayHeight = canvas.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
 
-    const width = Math.max(1, Math.floor(displayWidth * dpr));
-    const height = Math.max(1, Math.floor(displayHeight * dpr));
+    const width = Math.max(1, Math.floor(displayWidth * pixelRatio));
+    const height = Math.max(1, Math.floor(displayHeight * pixelRatio));
 
     if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
@@ -221,11 +222,12 @@ export class GameEngine {
 
         this.engineConfig = engineConfig;
         this.gameDataConfig = gameDataConfig;
+        this.adaptiveQuality = new AdaptiveQualityController(engineConfig.rendering);
 
         // Apply log level from config
         Logger.setLevel(this.engineConfig.logLevel);
 
-        updateCanvasResolution(this.canvas);
+        updateCanvasResolution(this.canvas, this.adaptiveQuality.pixelRatio);
         this.chunkSize = this.engineConfig.chunkSizeMeters;
 
         this.textureCache = new TextureCache();
@@ -545,7 +547,7 @@ export class GameEngine {
             this.starSystem = StarSystem.createTestSystem(this.planetConfig, starSystemOptions);
         }
 
-        updateCanvasResolution(this.canvas);
+        updateCanvasResolution(this.canvas, this.adaptiveQuality.pixelRatio);
 
         this.inputManager = new GameInputManager(this.canvas);
 
@@ -984,8 +986,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 if (this.cameraMode !== 'character') return;
                 if (!this.actorManager) return;
                 this.actorManager._pendingScreenClick = {
-                    x: e.offsetX * (window.devicePixelRatio || 1),
-                    y: e.offsetY * (window.devicePixelRatio || 1),
+                    x: e.offsetX * this.canvas.width / Math.max(1, this.canvas.clientWidth),
+                    y: e.offsetY * this.canvas.height / Math.max(1, this.canvas.clientHeight),
                 };
             });
             await this._registerNPCs();
@@ -996,6 +998,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
     stop() {
         this.isGameActive = false;
+        this.frameLoop?.stop();
         this.waterRiverSim?.destroy();
         this.waterRiverSim = null;
         this.waterService?.dispose();
@@ -1008,7 +1011,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     update(deltaTime) {
-        if (!this.isGameActive||this.renderer?.backend?.deviceLoss) return;
+        if (!this.isGameActive || document.hidden || this.renderer?.backend?.deviceLoss) return;
         deltaTime = Math.min(deltaTime, 0.1);
         this._fpsFrames++;
         const nowMs = performance.now();
@@ -1248,7 +1251,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
  
 
     async render(deltaTime) {
-        if (!this.isGameActive||this.renderer?.backend?.deviceLoss) return;
+        if (!this.isGameActive || document.hidden || this.renderer?.backend?.deviceLoss) return;
         if (this._renderInFlight) return;
 
         if (this._resizePending) {
@@ -1439,7 +1442,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 terrainGenerator,
                 planetConfig: this.planetConfig,
                 // One GPU sampling dispatch per frame.
-                yieldBetween: () => new Promise(resolve => requestAnimationFrame(() => resolve())),
+                yieldBetween: waitForVisibleFrame,
                 loading: () => !this.isInitialLoadComplete(),
             });
             this.waterService.start();
@@ -1816,13 +1819,22 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.altitudeController.onPitchEvent(noteEvent, intensity);
     }
 
+    updateAdaptiveQuality(nowMs) {
+        const state = this.adaptiveQuality.update(nowMs, {
+            inputActive: this.inputManager?.hasViewInput() || !!this.actorManager?._pendingScreenClick,
+            forceActive: !this.isInitialLoadComplete(),
+        });
+        if (state.ratioChanged) this.handleResize();
+        return state;
+    }
+
     handleResize() {
-        if (this._renderInFlight) {
+        if (document.hidden || this._renderInFlight) {
             this._resizePending = true;
             return;
         }
 
-        const result = updateCanvasResolution(this.canvas);
+        const result = updateCanvasResolution(this.canvas, this.adaptiveQuality.pixelRatio);
 
         if (result.changed) {
             this._applyResize(result.width, result.height);

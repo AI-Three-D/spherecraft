@@ -1,6 +1,7 @@
 // js/ui/GameUI.js
 import { MidNearDebugPanel } from '../../tools/MidNearDebugPanel.js';
 import { clamp01 } from '../../shared/math/index.js';
+import { createAdaptiveQualityConfig } from '../../core/AdaptiveQuality.js';
 
 /**
  * Manages the in-game UI elements including HUD, crash screen, and debug controls.
@@ -64,6 +65,7 @@ export class GameUI {
     setup(engine = null) {
         this.engine = engine;
         this._createMainUI();
+        this._createSettings();
         this._createCrashScreen();
         this._createDebugControls();
         this._createMidNearPanel();
@@ -148,6 +150,85 @@ export class GameUI {
         this.uiElement = ui;
         this._hudContent = hudContent;
         this._debugToggleButton = debugToggle;
+    }
+
+    _createSettings() {
+        if (!this.engine) return;
+        const settings = document.createElement('details');
+        settings.id = 'game-settings';
+        settings.style.cssText = `
+            padding: 10px 14px;
+            border: 1px solid rgba(180, 233, 255, 0.45);
+            border-radius: 14px;
+            background: rgba(6, 14, 22, 0.88);
+            color: #eaf8ff;
+            font: 12px Georgia, "Times New Roman", serif;
+        `;
+        settings.innerHTML = `
+            <summary style="cursor: pointer;">Settings</summary>
+            <label for="max-fps-setting" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px;">
+                Active FPS cap
+                <select id="max-fps-setting">
+                    <option value="0">Unlimited</option>
+                    <option value="30">30 FPS</option>
+                    <option value="60">60 FPS</option>
+                    <option value="90">90 FPS</option>
+                    <option value="120">120 FPS</option>
+                </select>
+            </label>
+            <label style="display: flex; gap: 8px; margin-top: 12px; align-items: center;">
+                <input id="adaptive-quality-enabled" type="checkbox" /> Adaptive power saving
+            </label>
+            <div style="display: grid; grid-template-columns: 1fr 72px; gap: 8px; align-items: center; margin-top: 10px;">
+                <label for="stationary-fps-setting">FPS when still</label>
+                <input id="stationary-fps-setting" type="number" min="1" max="240" step="1" />
+                <label for="stationary-delay-setting">Stillness delay (ms)</label>
+                <input id="stationary-delay-setting" type="number" min="0" max="5000" step="50" />
+                <label for="stationary-pixel-ratio-setting">Resolution when still</label>
+                <input id="stationary-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05" />
+                <label for="motion-pixel-ratio-setting">Resolution in motion</label>
+                <input id="motion-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05" />
+                <label for="fast-pixel-ratio-setting">Resolution in fast motion</label>
+                <input id="fast-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05" />
+            </div>
+            <div style="margin-top: 8px; opacity: 0.8;">1.0 is the default resolution; lower values save power. Resolution changes blend smoothly.</div>
+            <div id="adaptive-quality-status" style="margin-top: 8px;"></div>
+        `;
+        const fpsSelect = settings.querySelector('#max-fps-setting');
+        const maxFps = this.engine.engineConfig.rendering.maxFps;
+        if (![...fpsSelect.options].some(option => Number(option.value) === maxFps)) {
+            const option = document.createElement('option');
+            option.value = String(maxFps);
+            option.textContent = `${maxFps} FPS`;
+            fpsSelect.appendChild(option);
+        }
+        fpsSelect.value = String(maxFps);
+        fpsSelect.addEventListener('change', () => {
+            this.engine.engineConfig.rendering.maxFps = Number(fpsSelect.value);
+        });
+        const rendering = this.engine.engineConfig.rendering;
+        const enabled = settings.querySelector('#adaptive-quality-enabled');
+        enabled.checked = rendering.adaptive.enabled;
+        enabled.addEventListener('change', () => { rendering.adaptive.enabled = enabled.checked; });
+        for (const [id, key] of [
+            ['stationary-fps-setting', 'stationaryFps'],
+            ['stationary-delay-setting', 'stationaryDelayMs'],
+            ['stationary-pixel-ratio-setting', 'stationaryPixelRatio'],
+            ['motion-pixel-ratio-setting', 'motionPixelRatio'],
+            ['fast-pixel-ratio-setting', 'fastMotionPixelRatio'],
+        ]) {
+            const input = settings.querySelector(`#${id}`);
+            input.value = String(rendering.adaptive[key]);
+            input.addEventListener('change', () => {
+                if (input.checkValidity()) {
+                    rendering.adaptive = createAdaptiveQualityConfig({ ...rendering.adaptive, [key]: input.valueAsNumber });
+                } else {
+                    input.value = String(rendering.adaptive[key]);
+                }
+            });
+        }
+        this._adaptiveQualityStatus = settings.querySelector('#adaptive-quality-status');
+        this.uiElement.insertBefore(settings, this._hudContent);
     }
 
     /**
@@ -441,6 +522,11 @@ export class GameUI {
      * @param {Object|null} params.camera - { position, target, up } of the view camera
      */
     update({ fps, cameraMode, shipState, zoneInfo, playerStatus, perfHud, camera }) {
+        const quality = this.engine?.adaptiveQuality?.state;
+        if (quality && this._adaptiveQualityStatus) {
+            const cap = quality.maxFps > 0 ? `${quality.maxFps} FPS cap` : 'Unlimited FPS';
+            this._adaptiveQualityStatus.textContent = `${quality.mode} · ${cap} · resolution ${quality.pixelRatio.toFixed(2)}`;
+        }
         if (!this._hudContent) return;
 
         const fpsInfo = this._buildFPSInfo(fps);
@@ -1016,6 +1102,7 @@ export class GameUI {
             this.uiElement = null;
         }
         this._hudContent = null;
+        this._adaptiveQualityStatus = null;
         this._debugToggleButton = null;
         if (this.crashScreen) {
             this.crashScreen.remove();

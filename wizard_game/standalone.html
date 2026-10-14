@@ -513,6 +513,7 @@
     <!-- Game modules -->
     <script type="module">
         import { GameEngine } from './gameEngine.js';
+        import { FrameLoop } from './FrameLoop.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
         import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
@@ -4175,20 +4176,22 @@
                 console.log('Game initialized');
 
                 // Start game loop
-                let lastTime = performance.now();
                 let frameCount = 0;
                 let fpsTime = 0;
                 let loadingHidden = false;
                 let regionalView=new URLSearchParams(location.search).get('regionalView');
                 let renderFailure=null;
 
-                function gameLoop(currentTime) {
+                function gameLoop(currentTime, deltaTime) {
+                    if (!gameEngine.isGameActive) {
+                        gameEngine.frameLoop.stop();
+                        return;
+                    }
                     if(gameEngine.renderer.backend.deviceLoss||renderFailure) {
+                        gameEngine.frameLoop.stop();
                         showGraphicsFailure();
                         return;
                     }
-                    const deltaTime = (currentTime - lastTime) / 1000;
-                    lastTime = currentTime;
                     
                     // FPS counter
                     frameCount++;
@@ -4216,6 +4219,8 @@
                         }
                         regionalView=null;
                     }
+                    gameEngine.adaptiveQuality.observeCamera(gameEngine.camera, currentTime);
+                    gameEngine.updateAdaptiveQuality(currentTime);
                     gameEngine.render(clampedDelta)?.catch(error=>{
                         renderFailure=error;
                         console.error('Game render failed:',error);
@@ -4235,10 +4240,30 @@
                         }
                     }
                     
-                    requestAnimationFrame(gameLoop);
-                    
                 }
-                requestAnimationFrame(gameLoop);
+
+                const resetFrameTiming = () => {
+                    frameCount = 0;
+                    fpsTime = 0;
+                    gameEngine._fps = 0;
+                    gameEngine._fpsFrames = 0;
+                    gameEngine._fpsLastSample = performance.now();
+                    gameEngine.adaptiveQuality.reset();
+                };
+                gameEngine.frameLoop = new FrameLoop({
+                    onFrame: gameLoop,
+                    beforeFrame: currentTime => gameEngine.updateAdaptiveQuality(currentTime),
+                    getMaxFps: () => gameEngine.adaptiveQuality.state.maxFps,
+                    onPause: () => {
+                        resetFrameTiming();
+                        gameEngine.inputManager.reset();
+                    },
+                    onResume: () => {
+                        resetFrameTiming();
+                        gameEngine.handleResize();
+                    },
+                });
+                gameEngine.frameLoop.start();
                 
             } catch (error) {
                 if(gameEngine?.renderer?.backend?.deviceLoss){showGraphicsFailure();return;}

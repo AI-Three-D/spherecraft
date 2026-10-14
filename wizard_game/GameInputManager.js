@@ -1,4 +1,6 @@
 // js/GameInputManager.js
+const VIEW_MOVEMENT_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyZ', 'KeyX', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'];
+
 export class GameInputManager {
     constructor(canvas) {
         this.canvas = canvas;
@@ -43,6 +45,22 @@ export class GameInputManager {
         this.canvas.removeEventListener('mouseup', this._onMouseUp);
         this.canvas.removeEventListener('wheel', this._onWheel);
         this.canvas.removeEventListener('contextmenu', this._onContextMenu);
+        this.reset();
+    }
+
+    reset() {
+        this.keys.clear();
+        this._justPressedKeys.clear();
+        this.mouseDelta.x = 0;
+        this.mouseDelta.y = 0;
+        this.wheelDelta = 0;
+        this.isLeftMouseDown = false;
+        this.isRightMouseDown = false;
+    }
+
+    hasViewInput() {
+        return VIEW_MOVEMENT_KEYS.some(code => this.keys.has(code)) || this.wheelDelta !== 0
+            || (this.isDragging() && (this.mouseDelta.x !== 0 || this.mouseDelta.y !== 0));
     }
 
     _onKeyDown(event) {
