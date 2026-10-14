@@ -25,7 +25,7 @@
 //    cell the drainage leaves through, exit = the next cell (the sill).
 // 3. Q (catchment proxy): cell area x precipitation accumulated down the
 //    drainage tree.
-// 4. Rivers: from each lake whose outflow Q >= minRiverQ, follow the
+// 4. Rivers: from each lake whose outflow Q (at its spill point) >= minRiverQ, follow the
 //    drainage from the outlet until a cell of another lake, the sea, or a
 //    larger river (a confluence: the tributary ends on the trunk, which goes
 //    on to a lake or the sea). Larger outflow claims a shared path first.
@@ -195,6 +195,9 @@ export class MinHeap {
     }
 }
 
+// The spill: drainage cells still under a lake's level, within this (m).
+const SPILL_TOLERANCE_M = 0.01;
+
 export const WATER_GRAPH_DEFAULTS = Object.freeze({
     // A lake needs a deep core: connected cells whose fill depth exceeds
     // minLakeDepthM, at least minLakeCells of them (18 cells ~ 2.5 km^2 at
@@ -208,9 +211,13 @@ export const WATER_GRAPH_DEFAULTS = Object.freeze({
     // The lake is the whole water body around its core(s): connected cells
     // with fill depth above this (metres).
     lakeExtentDepthM: 0.5,
-    // Outflow Q (cells x precipitation, area-weighted) needed for a lake to
-    // have a river.
-    minRiverQ: 1200,   // owner 2026-10-05: rivers sparingly (344 -> 164 rivers on the default planet)
+    // Outflow Q (cells x precipitation, area-weighted; x the mean cell area
+    // gives km^2 of rain-weighted catchment, ~0.14 km^2 a cell at N 512)
+    // needed for a lake to have a river. Owner 2026-10-13: most real lakes
+    // drain to the sea, 70-80 % of lakes with a river would do, small rivers
+    // are welcome: 100 gives 453 of 614 lakes a river (74 %; was 1200, 106
+    // rivers, set 2026-10-05 for "rivers sparingly"; water-look v64).
+    minRiverQ: 100,
     // Fill epsilon per flooded step (metres) for the drainage tree: flats drain.
     epsilonM: 1e-3,
 });
@@ -331,16 +338,23 @@ export function buildWaterGraph({ N, heights, seaLevelM, precip = null, params =
         lakes.push({
             id: lakeId, cells, coreCells: coreCells[b],
             level: exact[deepest], maxDepth: depth(deepest), deepestCell: deepest,
-            outletCell: -1, exitCell: -1, outflowQ: 0, river: -1, downstream: null,
+            outletCell: -1, exitCell: -1, spillCell: -1, outflowQ: 0, river: -1, downstream: null,
         });
     }
     // Outlet: follow the drainage from the deepest cell to the last lake
-    // cell; every lake cell drains through it (they were flooded from it).
+    // cell (the river starts there). The lake's water leaves at its spill
+    // point, further down that drainage: past the shallow margin (fill depth
+    // below lakeExtentDepthM) that is still under the level. Every lake cell
+    // drains through the spill, but not always through the outlet; Q at the
+    // outlet missed much of the lake's catchment (437 of 614 lakes on the
+    // default planet, lake 165: 13 instead of 1,797; water-look v64).
     for (const lake of lakes) {
         let c = lake.deepestCell;
         while (parent[c] !== -1 && lakeOf[parent[c]] === lake.id) c = parent[c];
         lake.outletCell = c;
         lake.exitCell = parent[c];
+        while (parent[c] !== -1 && !isOcean(parent[c]) && exact[parent[c]] >= lake.level - SPILL_TOLERANCE_M) c = parent[c];
+        lake.spillCell = c;
     }
 
     // ---- 3. Q: area x precipitation down the drainage tree ----
@@ -350,7 +364,7 @@ export function buildWaterGraph({ N, heights, seaLevelM, precip = null, params =
         const c = order[k];
         if (parent[c] !== -1) Q[parent[c]] += Q[c];
     }
-    for (const lake of lakes) lake.outflowQ = Q[lake.outletCell];
+    for (const lake of lakes) lake.outflowQ = Q[lake.spillCell];
 
     // ---- 4. Downstream lake or sea, and rivers ----
     // End of a lake's drainage: the first cell of another lake, or the sea.

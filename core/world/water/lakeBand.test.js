@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { riverCarveReach, trimLakeBand } from './lakeBand.js';
+import { RIVER_SECTION } from './riverSection.js';
 
 const R = 100000;
 // Lake patch around (0, 0, 1): 8 x 8 cells of 16 m from x, y = -64; water
@@ -35,8 +36,8 @@ describe('lake shore band beside rivers', () => {
         expect(trimLakeBand(L, [river(400, 0)], R, reach)).toBe(L.mask);
     });
 
-    it('the reach grows with the half-width and the shape noise', () => {
+    it('the reach grows with the half-width and the shape noise; beyond it, the reach of the cross-section', () => {
         expect(reach(10) - reach(0)).toBeCloseTo(10 * 1.35, 6);
-        expect(reach(0)).toBe(12 + 30 + 8);
+        expect(reach(0)).toBe(RIVER_SECTION.reachM + 8);
     });
 });

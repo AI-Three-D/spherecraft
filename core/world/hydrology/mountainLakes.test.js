@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MOUNTAIN_LAKE_DEFAULTS, chooseMountainLakes, continueDrain, drainFrame, findPockets, pocketSolveFrame } from './mountainLakes.js';
 import { tangentBasis, dirToPlane, planeToDir } from './lakeRefine.js';
 import { RIVER_SHAPE_DEFAULTS, riverReachShape } from './riverRefine.js';
+import { riverWidthFactor } from '../water/riverSection.js';
 
 const R = 131072;
 const frameAt = (nx, ny, spacing) => ({ c: [0, 0, 1], ...tangentBasis([0, 0, 1]), x0: -nx * spacing / 2, y0: -ny * spacing / 2, spacing, nx, ny });
@@ -94,8 +95,9 @@ describe('mountain lakes', () => {
     });
 
     it("a stream's ends flare at most 1.25x over a short length", () => {
-        const P = { ...RIVER_SHAPE_DEFAULTS, ...MOUNTAIN_LAKE_DEFAULTS.streamShape, reachWidthVar: 0 };
-        const at = (s) => riverReachShape({ width: 8, depth: 0.8 }, s, 900, 3, P).width;
+        const P = { ...RIVER_SHAPE_DEFAULTS, ...MOUNTAIN_LAKE_DEFAULTS.streamShape };
+        // Relative to the width along the river (riverSection.js riverWidthFactor).
+        const at = (s) => riverReachShape({ width: 8, depth: 0.8 }, s, 900, 3, P).width / riverWidthFactor(s, 3, 8).f;
         expect(at(0)).toBeCloseTo(10, 6);
         expect(at(900)).toBeCloseTo(10, 6);
         expect(at(40)).toBeCloseTo(8, 6);

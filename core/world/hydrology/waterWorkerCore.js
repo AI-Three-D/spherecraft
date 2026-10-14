@@ -23,8 +23,10 @@
 //     level, half-width, water depth at the thalweg (level - thalweg), speed,
 //     discharge (m^3/s), spill level of the trace (uncarved terrain), pool
 //     (-1 = the point lies in a lake, else 0), thalweg skew toward the outer
-//     bank (-0.35..0.35, + = left of the flow), foam hint (0..1); four
-//     reserved floats; solved surface level, depth, nearby lake level, island.
+//     bank (-0.35..0.35, + = left of the flow), foam hint (0..1); the bend's
+//     curvature, the ground the level fit saw beside the channel, lake rims
+//     left and right (riverLakeRims);
+//     solved surface level, depth, nearby lake level, island.
 //     segCells: per segment, the sub-cells it reaches (waterGraph.js dirToCellSub).
 //     The sub-cell size (msg.sub, default 4 per cell side) must match the
 //     GPU lists' (waterWgsl.js RIVER_SUB).
@@ -43,7 +45,8 @@ import { dirToPlane, lakeMask, lakePatchFrame, lakeSeed, planeToDir, polylinePat
 import { bakeRiverWaterfalls } from './riverFeatures.js';
 import { bakeRiverIncision } from './riverLandscape.js';
 import { continueDrain, findPockets } from './mountainLakes.js';
-import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverCrestAbove, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch } from './riverRefine.js';
+import { lakeMaskSdf, lakeSdfAt } from '../water/lakeMaskSdf.js';
+import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverCrestAbove, riverLakeHold, riverLakeRims, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
 
 // C2 ramp 0..1 (quintic smoothstep of a clamped value).
 const ramp5 = (t) => { const x = Math.max(0, Math.min(1, t)); return x * x * x * (x * (x * 6 - 15) + 10); };
@@ -124,6 +127,19 @@ export function solvePatchLake(msg) {
         },
         transfer: [mask.buffer, maskCells.buffer],
     };
+}
+
+// Signed distance to a solved lake's water, as its mask is drawn
+// (lakeMaskSdf.js, WaterGpuData.js), per record.
+const regionSdf = new WeakMap();
+function lakeRegionSdf(rr) {
+    let F = regionSdf.get(rr);
+    if (!F) {
+        const m = new Uint8Array(rr.region.length);
+        for (let c = 0; c < m.length; c++) if (rr.region[c] === 1) m[c] = 2;
+        regionSdf.set(rr, F = lakeMaskSdf(m, rr.frame.nx, rr.frame.ny, rr.frame.spacing));
+    }
+    return F;
 }
 
 export function createWaterWorkerCore() {
@@ -465,13 +481,14 @@ export function createWaterWorkerCore() {
             return l !== -1 && rep(l) === plan.dest.id;
         };
         // A trunk river: the wet middle of its traced channel (msg.trunk:
-        // dirs xyz per point, half-widths, its level at the junction).
+        // dirs xyz per point, half-widths, its level at the graph's
+        // junction, its levels per point).
         let trunkMask = null;
+        const pts = [];
         if (plan.dest.type === 'river') {
             const T = msg.trunk, tn = T.hw.length;
             plan.destLevel = T.eta;
             trunkMask = new Uint8Array(nx * ny);
-            const pts = [];
             for (let k = 0; k < tn; k++) pts.push(dirToPlane([T.dirs[3 * k], T.dirs[3 * k + 1], T.dirs[3 * k + 2]], frame, R));
             const x1 = frame.x0 + nx * spacing, y1 = frame.y0 + ny * spacing;
             for (let k = 0; k + 1 < tn; k++) {
@@ -540,6 +557,9 @@ export function createWaterWorkerCore() {
         // their level in their graph cells. The valley neither fills nor
         // counts as ground there, and the river's points in it are lake points.
         const lakeMask = new Uint8Array(nx * ny), lakeLevel = new Float32Array(nx * ny);
+        // Water as drawn (the sea, solved lakes' regions; not the graph's
+        // cells of unsolved ones): the banks keep its rim (riverLakeRims).
+        const lakeDrawn = new Uint8Array(nx * ny);
         const patchR = 0.5 * Math.hypot(nx, ny) * spacing;
         const near = [];
         for (const [id, rr] of refined) {
@@ -549,14 +569,14 @@ export function createWaterWorkerCore() {
             if (Math.acos(Math.max(-1, Math.min(1, cosA))) * R < patchR + fr) near.push(rr);
         }
         for (let k = 0; k < nx * ny; k++) {
-            if (h[k] <= seaLevelM) { lakeMask[k] = 1; lakeLevel[k] = seaLevelM; continue; }
+            if (h[k] <= seaLevelM) { lakeMask[k] = 1; lakeDrawn[k] = 1; lakeLevel[k] = seaLevelM; continue; }
             const d = planeToDir(cx(k), cy(k), frame, R);
             for (const rr of near) {
                 if (!(h[k] < rr.level)) continue;
                 const f = rr.frame;
                 const [x, y] = dirToPlane(d, f, R);
                 const i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
-                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rr.region[j * f.nx + i] === 1) { lakeMask[k] = 1; lakeLevel[k] = rr.level; break; }
+                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rr.region[j * f.nx + i] === 1) { lakeMask[k] = 1; lakeDrawn[k] = 1; lakeLevel[k] = rr.level; break; }
             }
             if (lakeMask[k]) continue;
             const l0 = g.lakeOf[dirToCell(d, N)];
@@ -568,6 +588,14 @@ export function createWaterWorkerCore() {
             const i = Math.floor((sm.x[k] - frame.x0) / spacing), j = Math.floor((sm.y[k] - frame.y0) / spacing);
             return i >= 0 && j >= 0 && i < nx && j < ny ? j * nx + i : -1;
         };
+        // A trunk: its level where this river's path meets it. At the graph's
+        // junction, 110-390 m along the trunk from there, it was up to 19 m
+        // above or 10 m below the trunk's water (water-look v73): the stream
+        // hung over the trunk or cut a trench beside it.
+        if (trunkMask && msg.trunk.etas) {
+            const at = trunkLevelAt(pts, msg.trunk.etas, sm.x[n - 1], sm.y[n - 1]);
+            if (at.level <= srcLevel) plan.destLevel = at.level;
+        }
         const destLevel = plan.destLevel;
         if (destLevel > srcLevel) return { reply: { type: 'riverSolved', riverId, status: 'uphill' } };
         let sourceEnd = 0, destStart = n - 1, sourceMouth = 0, destMouth = n - 1;
@@ -602,7 +630,9 @@ export function createWaterWorkerCore() {
         }
         // Mouths belong at the actual lake boundaries, which can be far
         // from the record's endpoints inside open water.
-        const reachP = { ...shapeP, junctionStartM: sm.s[sourceMouth], junctionEndM: sm.s[destMouth] };
+        // The river's typical width (median) scales its width noise (riverSection.js).
+        const typicalWidthM = shapes.map(sh => sh.width).sort((a, b) => a - b)[shapes.length >> 1];
+        const reachP = { ...shapeP, junctionStartM: sm.s[sourceMouth], junctionEndM: sm.s[destMouth], typicalWidthM };
         for (let k = 0; k < n; k++) shapes[k] = riverReachShape(shapes[k], sm.s[k], total, riverId, reachP);
         // Natural ground (bilinear on the patch).
         const groundAt = (x, y) => {
@@ -615,32 +645,60 @@ export function createWaterWorkerCore() {
             const i = Math.floor((x - frame.x0) / spacing), j = Math.floor((y - frame.y0) / spacing);
             return i >= 0 && j >= 0 && i < nx && j < ny ? j * nx + i : -1;
         };
-        // Fit the surface below the dry ground beside the channel. Lake water
-        // is an anchor, and pool-bed depth is independent of this fit.
+        // Fit the surface below the dry ground at the channel's edges (within
+        // bankBandM of them). Lake water within the wider wc is an anchor,
+        // and pool-bed depth is independent of this fit.
         const hwArr = shapes.map(sh => sh.width / 2);
         const wc = hwArr.map(hw => levelP.floorScale * hw + levelP.floorExtraM);
         const free = shapes.map((sh, k) => riverCrestAbove(sh.depth, levelP) * ramp5(sm.s[k] / levelP.outletRampM));
         const ground = new Float64Array(n), inLake = new Array(n);
         const lakeGuard = new Float64Array(n).fill(-1e20);
+        // The source lake's drawn water: within half a solve cell of its
+        // solved water where the ground is below its level (waterWgsl.js
+        // waterLakeHitIn). held[k]: ground beside the channel below the
+        // level, all within that (riverLakeHold).
+        const src = refined.get(rep(plan.src));
+        const srcSdf = src?.region && (touchesLake(0, srcLevel) || sourceEnd > 0) ? lakeRegionSdf(src) : null;
+        const held = new Uint8Array(n);
         for (let k = 0; k < n; k++) {
             const k0 = Math.max(0, k - 1), k1 = Math.min(n - 1, k + 1);
             const tx = sm.x[k1] - sm.x[k0], ty = sm.y[k1] - sm.y[k0], tl = Math.hypot(tx, ty) || 1;
             const nxv = -ty / tl, nyv = tx / tl;
             let lo = Infinity, wet = Infinity;
             for (let o = -wc[k]; o <= wc[k] + 1e-6; o += 0.5 * spacing) {
-                const x = sm.x[k] + nxv * o, y = sm.y[k] + nyv * o, c = cellOf(x, y);
+                const c = cellOf(sm.x[k] + nxv * o, sm.y[k] + nyv * o);
                 if (c >= 0 && lakeMask[c]) {
                     wet = Math.min(wet, lakeLevel[c]);
                     lakeGuard[k] = Math.max(lakeGuard[k], lakeLevel[c]);
-                    continue;
                 }
-                if (Math.abs(o) >= hwArr[k]) lo = Math.min(lo, groundAt(x, y));
+            }
+            for (const side of [-1, 1]) {
+                for (const d of [hwArr[k], hwArr[k] + 0.5 * levelP.bankBandM, hwArr[k] + levelP.bankBandM]) {
+                    const x = sm.x[k] + nxv * side * d, y = sm.y[k] + nyv * side * d, c = cellOf(x, y);
+                    if (c >= 0 && lakeMask[c]) continue;
+                    lo = Math.min(lo, groundAt(x, y));
+                }
+            }
+            if (srcSdf && k > sourceEnd) {
+                let wet = false, dry = false;
+                for (const side of [-1, 1]) {
+                    for (const d of [hwArr[k], hwArr[k] + 0.5 * levelP.bankBandM, hwArr[k] + levelP.bankBandM]) {
+                        const x = sm.x[k] + nxv * side * d, y = sm.y[k] + nyv * side * d;
+                        if (!(groundAt(x, y) < srcLevel)) continue;
+                        const [px, py] = dirToPlane(planeToDir(x, y, frame, R), src.frame, R);
+                        if (lakeSdfAt(srcSdf, src.frame, px, py) > -0.5 * src.frame.spacing) wet = true; else dry = true;
+                    }
+                }
+                held[k] = wet && !dry ? 1 : 0;
             }
             const c0 = pointCell(k);
             inLake[k] = c0 >= 0 && lakeMask[c0] === 1;
             ground[k] = Number.isFinite(lo) ? lo : (Number.isFinite(wet) ? wet + free[k] + levelP.marginM : groundAt(sm.x[k], sm.y[k]));
         }
         const { eta } = riverValleyLevels({ s: sm.s, ground, free, srcLevel, destLevel, sourceEnd, destStart }, levelP);
+        // A river leaving its lake keeps the lake's level while the lake's
+        // water still lies beside it.
+        riverLakeHold({ eta, held, srcLevel, sourceEnd, destStart });
         const dirs = [];
         for (let k = 0; k < n; k++) dirs.push(planeToDir(sm.x[k], sm.y[k], frame, R));
         // Bends: signed curvature (1/m, + = turning left seen from above),
@@ -665,6 +723,11 @@ export function createWaterWorkerCore() {
         // from normal depth and clamping it with a running minimum produced
         // flat runs and dry pools. Vary the bed independently underneath it.
         const stride = RIVER_POINT_STRIDE;
+        // How far each point's carve reaches (channel, banks, blend), and the
+        // lake rims its banks keep (14, 15).
+        const reachExtra = Math.max(40, msg.reachM ?? 0), reachScale = msg.reachScale ?? 1;
+        const rims = riverLakeRims({ x: sm.x, y: sm.y, s: sm.s, hw: hwArr, reach: hwArr.map(hw => hw * reachScale + reachExtra),
+            water: lakeDrawn, level: lakeLevel, nx, ny, x0: frame.x0, y0: frame.y0, spacing });
         let points = new Float32Array(n * stride);
         for (let k = 0; k < n; k++) {
             const { width, depth, Qm3s } = shapes[k];
@@ -679,8 +742,9 @@ export function createWaterWorkerCore() {
             const skew = Math.max(-0.35, Math.min(0.35, -0.7 * kappa * hw));
             // Foam hint for the medium-distance water: steeper reaches are rougher.
             const foam = Math.max(0, Math.min(1, (slope - 0.004) / 0.03));
+            // 12: the bends' curvature (riverSection.js bank types: cut banks outside, bars inside).
             points.set([d[0], d[1], d[2], eta[k], hw, levelP.waterFrac * depth, speed, Qm3s, sm.fill[k], inLake[k] ? -1 : 0, skew, foam,
-                0, 0, 0, 0, eta[k], waterDepth, lakeGuard[k], inLake[k] ? 0 : shapes[k].island], k * stride);
+                kappa, ground[k], rims.left[k], rims.right[k], eta[k], waterDepth, lakeGuard[k], inLake[k] ? 0 : shapes[k].island], k * stride);
         }
         const features = bakeRiverWaterfalls(points, stride, sm.s, shapeP.waterfalls);
         points = features.points; n = points.length / stride;
@@ -688,7 +752,6 @@ export function createWaterWorkerCore() {
         const line = Array.from({ length: n }, (_, k) => dirToPlane([points[k * stride], points[k * stride + 1], points[k * stride + 2]], frame, R));
         // Sub-cells each segment reaches: channel, banks and their blend into
         // the terrain (the carve), or its filled hollow, whichever is wider.
-        const reachExtra = Math.max(40, msg.reachM ?? 0), reachScale = msg.reachScale ?? 1;
         const sub = msg.sub ?? 4;
         const cellAt = (x, y) => dirToCellSub(planeToDir(x, y, frame, R), N, sub);
         const segCellStart = new Int32Array(n);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lakeMaskSdf, resampleLakeMaskSdf } from './lakeMaskSdf.js';
+import { LAKE_SDF_RANGE_M, lakeMaskSdf, lakeSdfAt, resampleLakeMaskSdf } from './lakeMaskSdf.js';
 
 // Region (2) cells x in [3, 6], all rows, on a 12 x 4 grid at 32 m; a shore band (1) beside it.
 function strip(nx = 12, ny = 4) {
@@ -18,6 +18,14 @@ describe('lake mask signed distance', () => {
         expect(row[1]).toBeCloseTo(-48, 5);
         expect(row[0]).toBeCloseTo(-80, 5);
         expect(row[8]).toBeCloseTo(-48, 5);
+    });
+
+    it('is read at a point between cell centres, no water outside the patch', () => {
+        const F = lakeMaskSdf(strip(), 12, 4, 32), frame = { nx: 12, ny: 4, spacing: 32, x0: -192, y0: -64 };
+        expect(lakeSdfAt(F, frame, -192 + 3.5 * 32, -64 + 1.5 * 32)).toBeCloseTo(16, 5);
+        expect(lakeSdfAt(F, frame, -192 + 3 * 32, -64 + 1.5 * 32)).toBeCloseTo(0, 5);    // the cells' boundary
+        expect(lakeSdfAt(F, frame, -192 + 2 * 32, -64 + 0.1)).toBeCloseTo(-32, 5);    // edge rows clamp
+        expect(lakeSdfAt(F, frame, -193, 0)).toBe(-LAKE_SDF_RANGE_M);
     });
 
     it('measures across diagonals and caps far cells', () => {

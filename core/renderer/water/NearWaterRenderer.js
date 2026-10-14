@@ -113,8 +113,10 @@ export class NearWaterRenderer {
 
     render(camera, viewMatrix, projectionMatrix) {
         const water = this.water, near = water?.near;
-        // Debug views (qtDiag.water.tint) are the terrain shading's alone.
-        if (!near?.enabled || !water.enabled || !water._ready || water.debugMode !== 0 || !camera?.position) return;
+        // Debug views 1-5 (qtDiag.water.tint) are the terrain shading's alone;
+        // in 6 and 7 (who draws the water) these meshes add their colour.
+        const tintOnly = water?.debugMode > 0 && water.debugMode < 6;
+        if (!near?.enabled || !water.enabled || !water._ready || tintOnly || !camera?.position) return;
         const o = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
         const cam = camera.position;
         const rel = { x: cam.x - o.x, y: cam.y - o.y, z: cam.z - o.z };

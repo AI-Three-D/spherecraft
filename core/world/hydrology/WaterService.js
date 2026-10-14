@@ -22,6 +22,7 @@ import { dirToPlane, growPatchFrame, limitPatchCells, tangentBasis } from './lak
 import { cellDir, dirToCell } from './waterGraph.js';
 import { RIVER_SUB } from '../water/waterWgsl.js';
 import { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } from '../water/riverShapeNoise.js';
+import { RIVER_SECTION } from '../water/riverSection.js';
 import { RIVER_LEVEL_DEFAULTS, RIVER_SOLVE_VERSION } from './riverRefine.js';
 import { RIVER_VALLEY_DEFAULTS } from '../water/riverValley.js';
 import { RIVER_LANDSCAPE_DEFAULTS } from './riverLandscape.js';
@@ -29,7 +30,7 @@ import { regionalWaterModel,regionalWaterGridN } from './regionalWater.js';
 import { MOUNTAIN_LAKE_DEFAULTS, MOUNTAIN_LAKE_VERSION, chooseMountainLakes, drainFrame, mountainBlockFrame, mountainBlocks, pocketSolveFrame } from './mountainLakes.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v18';
+export const WATER_ALGO_VERSION = 'water-v19';   // v19: lake outflow Q at the spill point, minRiverQ 100
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,
@@ -263,13 +264,14 @@ export class WaterService {
                 `build ${this.timings.buildMs.toFixed(0)} ms ${this._client.inWorker ? 'in worker' : 'in-process'}, key ${this._key})`
             );
             if (pre) {
-                // Mask slots for the mountain lakes to come (WaterGpuData is
-                // sized when the graph is ready): ~0.47 a block on the
-                // default planet at 800 m spacing (lab 8), reserved generously.
+                // WaterGpuData is sized when the graph is ready, before the
+                // mountain lakes exist.
                 const MP = { ...MOUNTAIN_LAKE_DEFAULTS, ...this.config.refine.mountain };
                 if (MP.enabled) {
                     this._mountainBlocks = mountainBlocks(this.gridHeights, grid.seaLevelM, N, MP).blocks;
-                    this.mountainReserve = Math.ceil(this._mountainBlocks.length * 0.9) + 64;   // with the ponds
+                    // Mask slots for the mountain lakes and ponds: 0.47 and 0.68
+                    // per block on the default planet (water-look v35), 1.3 reserved.
+                    this.mountainReserve = Math.ceil(this._mountainBlocks.length * 1.3) + 64;
                 }
                 this._busy = true;   // update() waits: lakes are solved here, rivers after them
                 this._precomputeLakes().catch(err => Logger.warn(`[Water] lake precompute failed: ${err?.stack || err}`));
@@ -922,9 +924,9 @@ export class WaterService {
                 const j = t && this._riverPointNear(t, plan.dest.dir ?? cellDir(plan.dest.cell, this.config.gridN));
                 if (t && j.eta < srcLevel0 + RC.startToleranceM) {
                     const P = t.points, st = t.stride, n = P.length / st;
-                    const dirs = new Float32Array(n * 3), hw = new Float32Array(n);
-                    for (let k = 0; k < n; k++) { dirs.set([P[k * st], P[k * st + 1], P[k * st + 2]], 3 * k); hw[k] = P[k * st + 4]; }
-                    trunk = { dirs, hw, eta: j.eta, key: hashParts([P]) };
+                    const dirs = new Float32Array(n * 3), hw = new Float32Array(n), etas = new Float32Array(n);
+                    for (let k = 0; k < n; k++) { dirs.set([P[k * st], P[k * st + 1], P[k * st + 2]], 3 * k); hw[k] = P[k * st + 4]; etas[k] = P[k * st + 3]; }
+                    trunk = { dirs, hw, eta: j.eta, etas, key: hashParts([P]) };
                     break;
                 }
                 join = false;
@@ -952,15 +954,16 @@ export class WaterService {
                     const CV = this.config.carve;
                     const r = await this._client.call({
                         type: 'solveRiver', riverId, frame, heights, shape,
-                        levels: { ...RC.levels, waterFrac: CV.waterFrac, bankH: CV.bankH },
-                        landscape: { ...this.config.landscape, enabled: this.valleyOn && this.config.landscape.enabled }, shapeNoise: CV,
+                        levels: { ...RC.levels, waterFrac: CV.waterFrac },
+                        // The shader's shape: no shore scallops (riverSection.js banks).
+                        landscape: { ...this.config.landscape, enabled: this.valleyOn && this.config.landscape.enabled }, shapeNoise: { ...CV, bankDetail: 0 },
                         // The carve's reach beyond the half-width (riverCarve.wgsl.js) + margin,
                         // the half-width as wide as the shape noise makes it.
-                        reachM: CV.enabled ? CV.bankW + CV.blendW + 8 : 0,
-                        reachScale: riverShapeMaxScale(CV),
+                        reachM: CV.enabled ? RIVER_SECTION.reachM + 8 : 0,
+                        reachScale: riverShapeMaxScale({ ...CV, bankDetail: 0 }),
                         stepM: RC.stepM, smoothPasses: RC.smoothPasses,
                         sub: RIVER_SUB,
-                        trunk: trunk ? { dirs: trunk.dirs, hw: trunk.hw, eta: trunk.eta } : null,
+                        trunk: trunk ? { dirs: trunk.dirs, hw: trunk.hw, eta: trunk.eta, etas: trunk.etas } : null,
                     }, [heights.buffer]);
                     if (r.status === 'ok' && (!rec || rec.status !== 'ok' || r.startLevel < rec.startLevel)) rec = r;
                     else if (!rec) rec = r;

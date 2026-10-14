@@ -8,28 +8,32 @@
 // sampler compiles the terrain without it (it traces the rivers on the
 // natural terrain).
 //
-// Legacy traces can supply a cached broad incision. Structured rivers also
-// shape bounded, independent banks here, in the first tile-generation chain.
-// Both paths only cut: lower natural ground is preserved.
+// The ground is the river cross-section (riverSection.js riverSection_d):
+// the channel, then each side's bank (cut bank, ledge or none, chosen by the
+// bends and long-wavelength noise) out to where it meets the natural ground.
+// It only cuts: lower natural ground is preserved. Next to a lake a bank
+// keeps its rim (riverSection.js riverBankRim).
 // The closest traced segment is shared with waterRiverAt; width, depth and
-// centre variation interpolate along the river.
+// the centre's wobble interpolate along the river.
 // Dual numbers vec4(height, d/d unitDir) as in the height function,
 // including the centre's wobble and the width's change along the river;
-// skew and bank height are taken as constant along it (they vary slowly).
+// skew and the bank types are taken as constant along it (they vary slowly).
 
 import { createWaterCommonWgsl, RIVER_MAX_SEGS_PER_CELL } from './waterWgsl.js';
-import { RIVER_BANK_DETAIL } from './riverShapeNoise.js';
+import { RIVER_SECTION, createRiverSectionWgsl } from './riverSection.js';
 
 // Group 1 of the terrain generator's pipelines (binding 0 is its biome uniform).
 export const RIVER_CARVE_GROUP = 1;
 export const RIVER_CARVE_BINDINGS = Object.freeze({ index: 1, params: 2, rivers: 3 });
-// Smoothing of the final excavation edge (m).
-export const RIVER_CARVE_SMOOTH_M = 0.5;
+// Terrain micro detail returns over this far (m) beyond a river's half-width.
+const MICRO_RETURN_M = 8;
+// The cut fades out over this far (m) behind a river's first point.
+const START_FADE_M = 30;
 
 /**
  * @param {object} [o]
  * @param {boolean} [o.enabled=true]  false: pass-through stubs (no bindings)
- * @param {boolean} [o.bankDetail=false] compile the optional organic-bank path
+ * @param {boolean} [o.bankDetail=false] compile the shore materials
  * @returns {string} WGSL: riverCarve_d(hd, unitDir), riverCarveMicroKeep(unitDir)
  */
 export function createRiverCarveWgsl({ enabled = true, bankDetail = false } = {}) {
@@ -45,7 +49,8 @@ fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 { return 0.0; }
     }
     return /* wgsl */`
 // ==================== River corridors (core/world/water/riverCarve.wgsl.js) ====
-${createWaterCommonWgsl(RIVER_CARVE_GROUP, RIVER_CARVE_BINDINGS, { bankDetail })}
+${createWaterCommonWgsl(RIVER_CARVE_GROUP, RIVER_CARVE_BINDINGS)}
+${createRiverSectionWgsl({ scalar: false, dual: true })}
 
 // River segments that can reach unitDir: first << 8 | count (count 0: none).
 fn riverCarveCellEntry(unitDir: vec3<f32>) -> u32 {
@@ -55,11 +60,11 @@ fn riverCarveCellEntry(unitDir: vec3<f32>) -> u32 {
 
 // How far the segment acts: channel, banks, blend into the terrain.
 fn riverCarveReach(p: WaterRiverPt) -> f32 {
-    return p.hw + waterParams.carve.y + waterParams.carve.z + 1.0;
+    return p.hw + ${RIVER_SECTION.reachM.toFixed(1)};
 }
 
-// The nearest segment's channel and low bank toe, as a height dual.
-fn riverCarveProfile_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>) -> vec4<f32> {
+// The nearest segment's cross-section at unitDir over the natural ground h0, as a height dual.
+fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0: vec4<f32>) -> vec4<f32> {
     let R = waterParams.planetRadius;
     let ab = s.p1 - s.p0;
     // d(t)/d unitDir inside the segment (t is fixed past its ends); arc
@@ -69,138 +74,81 @@ fn riverCarveProfile_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>) ->
     let sGrad = (s.s1 - s.s0) * tg;
     let lineGrad = p.v * (R * R / max(p.dLine, 1.0e-3));
     let nD = vec4<f32>(p.n, p.nSign * lineGrad - p.dOff * sGrad);
-    let dD = nD * select(-1.0, 1.0, p.n >= 0.0);
     let hwD = vec4<f32>(p.hw, p.dHw * sGrad);
     let eta = vec4<f32>(p.eta, (s.eta1 - s.eta0) * tg);
     let bed = vec4<f32>(p.bed, (s.bed1 - s.bed0) * tg);
     let D = (eta - bed) * (1.0 / max(waterParams.carve.w, 0.05));
-    var relief = dConst(0.0);
-${bankDetail ? `    if (waterParams.bank.w > 0.0 && p.d > p.hw * 0.5) {
-        let noise = waterBankNoise(p.s, p.n, p.river);
-        let noiseD = vec4<f32>(noise.x, noise.y * sGrad + noise.z * nD.yzw);
-        let mask = dQuintic(dClamp(dDiv(dD - hwD * 0.5, hwD * 0.35), 0.0, 1.0));
-        relief = dMul(mask, noiseD) * (${RIVER_BANK_DETAIL.reliefM.toFixed(2)} * waterParams.bank.w);
-    }` : ''}
-    if (p.d < p.hw) {
-        let u = dDiv(nD, hwD);
-        let de = (u - dConst(p.skew)) * select(1.0 / (1.0 - p.skew), 1.0 / (1.0 + p.skew), u.x < p.skew);
-        let q = dConst(1.0) - dMul(de, de);
-        let channel = bed + dMul(D, dConst(1.0) - dPow(vec4<f32>(max(q.x, 0.0), q.yzw), 1.5));
-        // A tapered mid-channel bar leaves two connected arms around it.
-        // One profile and one ribbon suffice; terrain depth clips the island.
-        if (p.island > 0.0) {
-            let iq = dConst(1.0) - dMul(u, u) * (1.0 / (0.34 * 0.34));
-            if (iq.x > 0.0) {
-                let mask = vec4<f32>(p.island, p.dIsland * sGrad);
-                let bar = bed + dMul(dMul(mask, dMul(iq, iq)), eta - bed + dConst(waterParams.shape.w));
-                return dSmoothMax(channel, bar, 0.15);
-            }
-        }
-        return channel + relief;
-    }
-    let soft = max(waterParams.bank.y, 0.1);
-    let x = dD - hwD;
-${bankDetail ? `    if (waterParams.bank.w > 0.0) {
-        // A low toe ends in either a broad shelf or a steep exposed bank.
-        // This is a cut ceiling: where natural ground is lower it survives.
-        // Continuous independent bank fields also move the wet edge; there
-        // is no bank-only mask or second terrain generation to synchronize.
-        let morph = vec4<f32>(p.bankMorph, p.dBankMorph * sGrad);
-        let extent = riverCarveBankExtent_d(morph);
-        let shelf = dConst(0.25) + extent * 0.65;
-        let soft = dConst(0.5) + (dConst(1.0) - morph) * 1.8;
-        let rise = dConst(1.5) + morph * 2.5 + D * 0.5;
-        let step = dQuintic(dClamp(dDiv(x - shelf, soft), 0.0, 1.0));
-        let roughToe = dMul(x, dConst(0.05) + morph * 0.12);
-        return bed + D + roughToe + dMul(rise, step) + relief;
-    }` : ''}
-    let on = dSmoothstep(0.0, soft, x);
-    let ex = exp(-x.x / soft);
-    let E = vec4<f32>(ex, x.yzw * (-ex / soft));
-    let bank = (dConst(1.0) - E) * p.bankH + x * waterParams.bank.z;
-    let hillside = dMul(x, x) * (0.5 / max(waterParams.carve.z, soft));
-    return bed + D + dMul(bank, on) + hillside;
+    // Each bank keeps the rim of drawn water next to it (riverBankRim): cut
+    // below a lake's level, banks left the lake hanging over lower ground (v85).
+    let left = waterRiverBank(p, true);
+    let right = waterRiverBank(p, false);
+    let fullL = bed.x + riverSideDepth(D.x, left.freeboard);
+    let fullR = bed.x + riverSideDepth(D.x, right.freeboard);
+    let h = riverSection_d(nD, hwD, bed, D, p.skew, h0, riverBankRim(left, p.rimL, fullL), riverBankRim(right, p.rimR, fullR));
+    // Behind the river's first point (in its source lake) the cut fades out
+    // over ${START_FADE_M} m. Ending it on a line there stepped up to 2.4 m where
+    // the line reached land (water-look v76); a full rounded cap made a false inlet.
+    if (s.s0 > 0.0 || p.tRaw >= 0.0) { return h; }
+    let L = length(ab) * R;
+    let behind = vec4<f32>(-p.tRaw * L, ab * (-L / max(dot(ab, ab), 1.0e-20)));
+    let w = dConst(1.0) - dSmoothstep(0.0, ${START_FADE_M.toFixed(1)}, behind);
+    return h0 + dMul(h - h0, w);
 }
 
-${bankDetail ? `// Dual counterpart of waterBankExtent; the scalar uses the same physical limit.
-fn riverCarveBankExtent_d(morph: vec4<f32>) -> vec4<f32> {
-    return dConst(1.0) + dPow(dConst(1.0) - morph, 3.0) * (clamp(waterParams.carve.z, 1.0, ${RIVER_BANK_DETAIL.maxExtentM.toFixed(1)}) - 1.0);
-}
-` : ''}
-// Final cut, including the optional dry-bank excavation cap.
-fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0: vec4<f32>) -> vec4<f32> {
-    // The first point overlaps the lake; the lake supplies water behind it.
-    // Excavating a rounded cap backwards into its shoreline made a false inlet.
-    if (s.s0 <= 0.0 && p.tRaw < 0.0) { return h0; }
-    let R = waterParams.planetRadius;
-    let ab = s.p1 - s.p0;
-    let tg = select(vec3<f32>(0.0), ab / max(dot(ab, ab), 1.0e-20), p.tRaw > 0.0 && p.tRaw < 1.0);
-    let sGrad = (s.s1 - s.s0) * tg;
-    let dD = vec4<f32>(p.n, p.v * (R * R / max(p.dLine, 1.0e-3)) * p.nSign - p.dOff * sGrad) * select(-1.0, 1.0, p.n >= 0.0);
-    // Full correction inside the wet core, fading into surviving natural banks.
-    let edge = vec4<f32>(p.hw * 0.85, p.dHw * sGrad * 0.85);
-    var bankExtent = dConst(waterParams.carve.y);
-${bankDetail ? `    if (waterParams.bank.w > 0.0) {
-        let morph = vec4<f32>(p.bankMorph, p.dBankMorph * sGrad);
-        bankExtent = riverCarveBankExtent_d(morph);
-    }` : ''}
-    let wz = dConst(1.0) - dQuintic(dClamp(dDiv(dD - edge, vec4<f32>(p.hw * 0.15, p.dHw * sGrad * 0.15)+bankExtent), 0.0, 1.0));
-    let kk = ${RIVER_CARVE_SMOOTH_M.toFixed(2)};
-    var cut = dSmoothMin(h0, riverCarveProfile_d(s, p, unitDir), kk) - h0;
-${bankDetail ? `    if (waterParams.bank.w > 0.0) {
-        // Do not bulldoze an uphill valley wall to make a broad shelf.
-        // This cap begins beyond the certified wet core. Existing lower
-        // terrain still survives; maximum dry-bank excavation is configured.
-        let widthD = vec4<f32>(p.hw, p.dHw * sGrad);
-        let dry = dQuintic(dClamp(dDiv(dD - widthD * 0.95, widthD * 0.45), 0.0, 1.0));
-        let cap = dConst(24.0) + dry * (waterParams.simFade.z - 24.0);
-        cut = dSmoothMax(cut, -cap, 0.05);
-    }` : ''}
-    // No fill: low ground, lake water and open floodplains keep their height.
-    return h0 + dMul(wz, cut);
-}
-
-// Use the same closest traced segment as waterRiverAt. Blending endpoint
-// caps by radial distance made the terrain depend on sampling density:
-// extra short waterfall segments pulled upstream banks below their water.
-// Width, depth and noise still interpolate continuously along each reach.
+// Each river's section from its closest traced segment (as waterRiverAt),
+// the lowest of the rivers'. Every section only cuts, so the ground stays
+// continuous where two rivers' banks meet; the closest river's section alone
+// stepped along the line where the closest river changes (4 m where a
+// tributary hangs above its trunk, water-look v70). Blending endpoint caps
+// by radial distance made the terrain depend on sampling density: extra
+// short waterfall segments pulled upstream banks below their water. A
+// cell's list holds each river's segments together (WaterGpuData.js).
 fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> {
     let e = riverCarveCellEntry(unitDir);
     let count = min(e & 0xffu, ${RIVER_MAX_SEGS_PER_CELL}u);
     if (count == 0u) { return hd; }
     let first = e >> 8u;
-    var bestK = first;
-    var bestD = 1.0e30;
-    for (var k = 0u; k < count; k++) {
-        let sg = waterRivers[first + k];
-        let ab = sg.p1 - sg.p0;
-        let t = clamp(dot(unitDir - sg.p0, ab) / max(dot(ab, ab), 1.0e-20), 0.0, 1.0);
-        let dd = length(unitDir - (sg.p0 + ab * t));
-        if (dd < bestD) { bestD = dd; bestK = first + k; }
-    }
-    let s = waterRivers[bestK];
-    let reach = max(s.hw0, s.hw1) * (1.0 + waterParams.shape.x + waterParams.shape.y + ${RIVER_BANK_DETAIL.shoreFraction.toFixed(2)} * waterParams.bank.w) + waterParams.carve.y + waterParams.carve.z + 1.0;
-    if (bestD * waterParams.planetRadius >= reach) { return hd; }
-    let p = waterRiverPoint(s, unitDir);
-    if (p.d >= riverCarveReach(p)) { return hd; }
     let maxH = maxTerrainHeightM();
-    return riverCarveSegment_d(s, p, unitDir, hd * maxH) / maxH;
+    let h0 = hd * maxH;
+    var h = h0;
+    var k = 0u;
+    loop {
+        if (k >= count) { break; }
+        let river = waterRivers[first + k].river;
+        var bestK = first + k;
+        var bestD = 1.0e30;
+        loop {
+            if (k >= count) { break; }
+            let sg = waterRivers[first + k];
+            if (sg.river != river) { break; }
+            let ab = sg.p1 - sg.p0;
+            let t = clamp(dot(unitDir - sg.p0, ab) / max(dot(ab, ab), 1.0e-20), 0.0, 1.0);
+            let dd = length(unitDir - (sg.p0 + ab * t));
+            if (dd < bestD) { bestD = dd; bestK = first + k; }
+            k++;
+        }
+        let s = waterRivers[bestK];
+        let reach = max(s.hw0, s.hw1) * (1.0 + waterParams.shape.y) + ${RIVER_SECTION.reachM.toFixed(1)} + 1.0;
+        if (bestD * waterParams.planetRadius >= reach) { continue; }
+        let p = waterRiverPoint(s, unitDir);
+        if (p.d >= riverCarveReach(p)) { continue; }
+        let c = riverCarveSegment_d(s, p, unitDir, h0);
+        if (c.x < h.x) { h = c; }
+    }
+    return h / maxH;
 }
 
-// Share of the per-tile micro detail kept at unitDir: 0 in the channel and
-// at the bank toe, back to 1 by the end of the local bank extent. The
-// bounded spatial relief above supplies detail where tile micro is masked.
+// Share of the per-tile micro detail kept at unitDir: 0 in the channel, back
+// to 1 by MICRO_RETURN_M beyond it (the banks keep the terrain's detail).
 fn riverCarveMicroKeep(unitDir: vec3<f32>) -> f32 {
     let e = riverCarveCellEntry(unitDir);
     let count = min(e & 0xffu, ${RIVER_MAX_SEGS_PER_CELL}u);
     if (count == 0u) { return 1.0; }
     let first = e >> 8u;
-    let bankW = waterParams.carve.y;
     var keep = 1.0;
     for (var k = 0u; k < count; k++) {
         let p = waterRiverPoint(waterRivers[first + k], unitDir);
-        let extent = ${bankDetail ? 'select(bankW, waterBankExtent(p), waterParams.bank.w > 0.0)' : 'bankW'};
-        keep = min(keep, smoothstep(p.hw + 0.5 * extent, p.hw + extent, p.d));
+        keep = min(keep, smoothstep(p.hw + ${(MICRO_RETURN_M * 0.5).toFixed(1)}, p.hw + ${MICRO_RETURN_M.toFixed(1)}, p.d));
     }
     return keep;
 }
@@ -212,6 +160,7 @@ fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 {
 }
 // Sediment / exposed rock / wet toe. This only controls existing splat
 // materials; it neither paints a solid colour nor changes water ownership.
+// Bars (no bank) get wide sediment beaches, cut banks narrow rock faces.
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> {
     if (!riverCarveShoreEnabled()) { return vec3<f32>(0.0); }
     let e = riverCarveCellEntry(dir);
@@ -230,10 +179,11 @@ fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32>
     let p = waterRiverPoint(waterRivers[best], dir);
     if (p.pool < 0.0 || p.d > riverCarveReach(p)) { return vec3<f32>(0.0); }
     let shoreNoise = waterBankNoise(p.s * 0.04, p.n * 0.075, p.river + 17.0).x;
-    let extent = waterBankExtent(p) * (0.8 + 0.6 * shoreNoise);
+    let tau = riverBankType(p.s, p.river, p.n >= 0.0, p.kappa);
+    let extent = mix(14.0, 3.0, tau * 0.5) * (0.8 + 0.6 * shoreNoise);
     let across = 1.0 - smoothstep(p.hw + extent * 0.3, p.hw + max(extent, 0.5), p.d);
     let above = heightM - p.wl;
-    let vertical = 1.0 - smoothstep(0.15, 1.0 + 1.5 * (1.0 - p.bankMorph), above);
+    let vertical = 1.0 - smoothstep(0.15, 1.0 + 0.75 * (2.0 - tau), above);
     let gravel = across * vertical * (1.0 - smoothstep(0.2, 0.65, slope)) * (0.1 + 0.9 * smoothstep(-0.1, 0.6, shoreNoise));
     // Reuse the sediment field to break up exposed faces too. A uniform
     // rock override across every steep bank makes a second artificial strip.

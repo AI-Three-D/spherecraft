@@ -101,6 +101,8 @@ export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
  */
 export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, shape, lakeAt, marginM = 2, easeM = 80 }) {
     const pts = [], quads = [];
+    // The shader's channel: the wobble only (riverSection.js banks, no shore scallops).
+    const noShore = { ...shape, bankDetail: 0 };
     const cam = [camera.x, camera.y, camera.z];
     const camDir = norm(cam);
     for (const [rid, rec] of rivers) {
@@ -126,7 +128,7 @@ export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, sh
             const a = dirAt(Math.max(0, k - 1)), b = dirAt(Math.min(n - 1, k + 1)), p = dirAt(k);
             const tangent = norm([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
             const baseHw = Math.max(P[k * st + 4], 0.5);
-            const sh = riverShapeAt(arc[k], rid, baseHw, shape);
+            const sh = riverShapeAt(arc[k], rid, baseHw, noShore);
             // The shader evaluates bank detail continuously between 20 m
             // ribbon rows. Cover its excursions; dry banks clip the excess.
             const cover = 0.5 * baseHw * (Math.abs(shape.widthVar) + Math.abs(shape.wobble));

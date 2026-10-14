@@ -4766,6 +4766,8 @@ ${enableLakeWater ? `
         fragUniforms.ambientColor * fragUniforms.ambientLightIntensity,
         transmittanceSampler
     );
+    // Water debug views 6 and 7 (who draws the water): flat colours, no haze.
+    if (waterParams.debugMode == 6u || waterParams.debugMode == 7u) { return vec4<f32>(finalColor, 1.0); }
 ` : ''}
     var foggedColor = finalColor;
 

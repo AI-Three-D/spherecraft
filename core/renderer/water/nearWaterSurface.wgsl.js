@@ -160,7 +160,7 @@ export function buildNearWaterFragmentShader() {
 @fragment
 fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
     let lake = waterLakes[in.lake];
-    let m = waterLakeMaskSample(lake,in.uv,nearWaterSampler);
+    let m = select(waterLakeMaskSample(lake,in.uv,nearWaterSampler),waterLakeMaskSampleSmooth(lake,in.uv,nearWaterSampler),lake.surfaceDepthRangeM<0.0);
     if (lake.surfaceDepthRangeM < 0.0) {
         // Signed-distance mask (lakeMaskSdf.js): the sheet ends half a solve
         // cell beyond the solved water, where the ground is at or above the
@@ -180,6 +180,10 @@ fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
     }
     let c = nearWaterShade(in.wp, lake.level, true);
     if (c.a <= 0.0) { discard; }
+    // Water debug views 6 and 7 (waterWgsl.js applyWater): alpha 0 adds
+    // the flat colour to what is below (premultiplied blending).
+    if (waterParams.debugMode == 6u) { discard; }
+    if (waterParams.debugMode == 7u) { return vec4<f32>(0.0, 0.0, WATER_OWNER_ON, 0.0); }
     return c;
 }
 `;
@@ -232,11 +236,18 @@ fn main(in: NearRiverVOut) -> @location(0) vec4<f32> {
     // Another river is nearer (confluences).
     let hit = waterRiverAt(up, in.level);
     if (!hit.near || hit.distM >= hit.halfWidthM || abs(hit.river - in.river) > 0.5) { discard; }
+    // Not where the carved channel is above the water: there the ground
+    // always is. Coarse triangles sagging under a low, laid-back bank showed
+    // the ribbon's edge in shards (water-look v46-v47).
+    if (hit.profileM >= in.level) { discard; }
     // A downstream observer can be below an upstream river's elevation
     // while viewing its top/front surface. Radial lake underside rejection
     // would hide that waterfall; raster face/depth tests handle its geometry.
     let c = nearWaterShade(in.wp, in.level, false) * (1.0 - waterSimCover(hit));
     if (c.a <= 0.0) { discard; }
+    // Water debug views 6 and 7, as the lake sheets.
+    if (waterParams.debugMode == 6u) { return vec4<f32>(0.0, WATER_OWNER_ON, 0.0, 0.0); }
+    if (waterParams.debugMode == 7u) { discard; }
     return c;
 }
 `;

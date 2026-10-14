@@ -108,13 +108,13 @@ export function createEngineConfig() {
     },
 
     rendering: {
-      pixelRatio: 1.0,
+      pixelRatio: 1.5,
       maxFps: 60, // 0 = unlimited; adjustable in the in-game Settings.
       adaptive: {
         enabled: true,
         stationaryFps: 30,
         stationaryDelayMs: 250,
-        stationaryPixelRatio: 1.0,
+        stationaryPixelRatio: 1.5,
         motionPixelRatio: 0.85,
         fastMotionPixelRatio: 0.70,
       },

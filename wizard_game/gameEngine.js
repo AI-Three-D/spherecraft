@@ -1627,9 +1627,12 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
      * qtDiag.water.tint(mode): 0 water; 1 lakes coloured by id, rivers red;
      * 2 as 1 plus grid cells: lake cells blue, cells with traced river
      * segments red, graph river cells not traced yet orange; 3 water depth;
-     * 4 who draws the lakes' surface: cyan the terrain shading, magenta the
-     * near mesh (qtDiag.water.nearMesh); 5 rivers' zones by nearest traced
-     * segment, alternately red and blue.
+     * 4 the terrain shading's near-mesh weight, cyan 0 to magenta 1 (the
+     * near meshes themselves are not drawn in 1-5); 5 rivers' zones by
+     * nearest traced segment, alternately red and blue. 6 and 7: who draws
+     * the water, flat colours with the near meshes drawn too (waterWgsl.js
+     * applyWater; clearest with post effects off, as waterViews.mjs owner
+     * views take them).
      */
     setWaterDebugMode(mode = 0) {
         if (!this.waterGpuData) return null;
