@@ -1,5 +1,6 @@
 // js/config/EngineConfig.js
 import { DataTextureConfig } from './world/dataTextureConfiguration.js';
+import { createAdaptiveQualityConfig } from './AdaptiveQuality.js';
 import { requireBool, requireInt, requireIntArray, requireLogLevel, requireNumber, requireNumberArray, requireObject } from '../shared/requireUtil.js';
 
 function clonePlainConfig(value) {
@@ -52,7 +53,14 @@ export class EngineConfig {
     const sourceCutoffs = distortion.sourceCutoffs || {};
     const atmoBankParticles = rendering.atmoBankParticles || {};
     const atmoBankOffscreen = atmoBankParticles.offscreen || {};
+    const pixelRatio = requireNumber(rendering.pixelRatio ?? 1.0, 'rendering.pixelRatio');
+    if (pixelRatio <= 0) throw new Error('EngineConfig rendering.pixelRatio must be > 0');
     this.rendering = {
+      // Canvas pixels per CSS pixel, independent of the display's Retina scale.
+      pixelRatio,
+      // 0 follows the display refresh rate without an additional cap.
+      maxFps: requireInt(rendering.maxFps ?? 0, 'rendering.maxFps', 0),
+      adaptive: createAdaptiveQualityConfig(rendering.adaptive),
       maxPoolSlots: requireInt(rendering.maxPoolSlots, 'rendering.maxPoolSlots', 1),
       terrainShader: {
         aerialFadeStartMeters: requireInt(terrainShader.aerialFadeStartMeters ?? 0, 'rendering.terrainShader.aerialFadeStartMeters', 0),

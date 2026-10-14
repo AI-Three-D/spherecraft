@@ -108,6 +108,16 @@ export function createEngineConfig() {
     },
 
     rendering: {
+      pixelRatio: 1.0,
+      maxFps: 60, // 0 = unlimited; adjustable in the in-game Settings.
+      adaptive: {
+        enabled: true,
+        stationaryFps: 30,
+        stationaryDelayMs: 250,
+        stationaryPixelRatio: 1.0,
+        motionPixelRatio: 0.85,
+        fastMotionPixelRatio: 0.70,
+      },
       maxPoolSlots: 2048,
       lighting: {
         ambient: {
