@@ -149,7 +149,7 @@ export class QuadtreeTileManager {
             minTileSize: qt.minTileSizeMeters,
             maxVisibleTiles: qt.maxVisibleTiles,
             queueCapacity: qt.queueCapacity,
-            screenHeight: this.backend.canvas?.height || 1080,
+            screenHeight: this._getLodScreenHeight(),
             fovDegrees: this.engineConfig.camera?.fov ?? 75,
             lodErrorThreshold: qt.lodErrorThreshold,
             workgroupSize: qt.workgroupSize,
@@ -285,6 +285,27 @@ export class QuadtreeTileManager {
 
         this._initialized = true;
         Logger.info('[QuadtreeTileManager] Initialized');
+    }
+
+    _getLodScreenHeight() {
+        const canvas = this.backend?.canvas;
+        const rendering = this.engineConfig?.rendering;
+        if (!(canvas?.clientHeight > 0) || !rendering) return canvas?.height || 1080;
+
+        // Terrain selection and material fades use a stable reference size.
+        // Adaptive resolution only changes how many pixels we shade; tying
+        // LOD to that allocation swaps fine tiles for coarse parents in motion
+        // and removes the fine tiles from the streamer's visible protection.
+        const adaptive = rendering.adaptive;
+        const baseRatio = rendering.pixelRatio ?? 1;
+        const referenceRatio = adaptive?.enabled
+            ? Math.max(
+                adaptive.stationaryPixelRatio ?? baseRatio,
+                adaptive.motionPixelRatio ?? baseRatio,
+                adaptive.fastMotionPixelRatio ?? baseRatio
+            )
+            : baseRatio;
+        return canvas.clientHeight * referenceRatio;
     }
 
     _updateAdaptiveLodScale(camera) {
@@ -818,7 +839,7 @@ export class QuadtreeTileManager {
                 ? this._lodVisibleScale
                 : this._lodSpeedScale;
             this.quadtreeGPU.updateUniforms(camera, {
-                screenHeight: this.backend.canvas?.height || 1080,
+                screenHeight: this._getLodScreenHeight(),
                 lodErrorThreshold: baseThreshold * visibleLodScale
             });
         }
