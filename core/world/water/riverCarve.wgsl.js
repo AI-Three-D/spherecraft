@@ -34,13 +34,14 @@ const START_FADE_M = 30;
  * @param {object} [o]
  * @param {boolean} [o.enabled=true]  false: pass-through stubs (no bindings)
  * @param {boolean} [o.bankDetail=false] compile the shore materials
- * @returns {string} WGSL: riverCarve_d(hd, unitDir), riverCarveMicroKeep(unitDir)
+ * @returns {string} WGSL: riverCarveTerrain_d(natural, excavated, unitDir), riverCarveMicroKeep(unitDir)
  */
 export function createRiverCarveWgsl({ enabled = true, bankDetail = false } = {}) {
     if (!enabled) {
         return /* wgsl */`
 // River carve off in this shader (riverCarve.wgsl.js).
 fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> { return hd; }
+fn riverCarveTerrain_d(natural: vec4<f32>, excavated: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> { return excavated; }
 fn riverCarveMicroKeep(unitDir: vec3<f32>) -> f32 { return 1.0; }
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> { return vec3<f32>(0.0); }
 fn riverCarveShoreEnabled() -> bool { return false; }
@@ -103,7 +104,7 @@ fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0
 // by radial distance made the terrain depend on sampling density: extra
 // short waterfall segments pulled upstream banks below their water. A
 // cell's list holds each river's segments together (WaterGpuData.js).
-fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> {
+fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> {
     let e = riverCarveCellEntry(unitDir);
     let count = min(e & 0xffu, ${RIVER_MAX_SEGS_PER_CELL}u);
     if (count == 0u) { return hd; }
@@ -111,6 +112,10 @@ fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> {
     let maxH = maxTerrainHeightM();
     let h0 = hd * maxH;
     var h = h0;
+    let original = natural * maxH;
+    var fine = original;
+    var valleyWeight = dConst(1.0);
+    let excavated = h0.x < original.x;
     var k = 0u;
     loop {
         if (k >= count) { break; }
@@ -134,8 +139,29 @@ fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> {
         if (p.d >= riverCarveReach(p)) { continue; }
         let c = riverCarveSegment_d(s, p, unitDir, h0);
         if (c.x < h.x) { h = c; }
+        if (excavated) {
+            // The coarse valley field can interpolate a downstream cut into
+            // an upstream bank. Near the channel, use the fine section cut
+            // from the original terrain instead. This restores excavation;
+            // it never constructs a bank above the original ground.
+            let section = riverCarveSegment_d(s, p, unitDir, original);
+            if (section.x < fine.x) { fine = section; }
+            let ab = s.p1 - s.p0;
+            let tg = select(vec3<f32>(0.0), ab / max(dot(ab, ab), 1.0e-20), p.tRaw > 0.0 && p.tRaw < 1.0);
+            let sg = (s.s1 - s.s0) * tg;
+            let lineGrad = p.v * (waterParams.planetRadius * waterParams.planetRadius / max(p.dLine, 1.0e-3));
+            let grad = sign(p.n) * (p.nSign * lineGrad - p.dOff * sg) - p.dHw * sg;
+            let edge = vec4<f32>(p.d - p.hw, grad);
+            let weight = dSmoothstep(${(MICRO_RETURN_M * 0.5).toFixed(1)}, ${MICRO_RETURN_M.toFixed(1)}, edge);
+            if (weight.x < valleyWeight.x) { valleyWeight = weight; }
+        }
     }
+    if (excavated) { return (fine + dMul(h - fine, valleyWeight)) / maxH; }
     return h / maxH;
+}
+
+fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> {
+    return riverCarveTerrain_d(hd, hd, unitDir);
 }
 
 // Share of the per-tile micro detail kept at unitDir: 0 in the channel, back
@@ -160,7 +186,7 @@ fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 {
 }
 // Sediment / exposed rock / wet toe. This only controls existing splat
 // materials; it neither paints a solid colour nor changes water ownership.
-// Bars (no bank) get wide sediment beaches, cut banks narrow rock faces.
+// Sediment and rock fade out within a narrow strip above the waterline.
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> {
     if (!riverCarveShoreEnabled()) { return vec3<f32>(0.0); }
     let e = riverCarveCellEntry(dir);
@@ -180,16 +206,20 @@ fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32>
     if (p.pool < 0.0 || p.d > riverCarveReach(p)) { return vec3<f32>(0.0); }
     let shoreNoise = waterBankNoise(p.s * 0.04, p.n * 0.075, p.river + 17.0).x;
     let tau = riverBankType(p.s, p.river, p.n >= 0.0, p.kappa);
-    let extent = mix(14.0, 3.0, tau * 0.5) * (0.8 + 0.6 * shoreNoise);
+    let extent = min(p.hw * 0.4, mix(3.0, 1.0, tau * 0.5)) * (0.8 + 0.6 * shoreNoise);
     let across = 1.0 - smoothstep(p.hw + extent * 0.3, p.hw + max(extent, 0.5), p.d);
     let above = heightM - p.wl;
-    let vertical = 1.0 - smoothstep(0.15, 1.0 + 0.75 * (2.0 - tau), above);
+    let vertical = 1.0 - smoothstep(0.05, 0.4 + 0.15 * (2.0 - tau), above);
+    let bed = (1.0 - smoothstep(p.hw * 0.85, p.hw, p.d)) * (1.0 - smoothstep(-0.15, 0.15, above));
     let gravel = across * vertical * (1.0 - smoothstep(0.2, 0.65, slope)) * (0.1 + 0.9 * smoothstep(-0.1, 0.6, shoreNoise));
     // Reuse the sediment field to break up exposed faces too. A uniform
     // rock override across every steep bank makes a second artificial strip.
-    let rock = across * vertical * smoothstep(0.25, 0.7, slope) * (0.4 + 0.5 * smoothstep(-0.4, 0.5, shoreNoise));
+    let rock = max(bed * (0.15 + 0.3 * smoothstep(-0.4, 0.5, shoreNoise)),
+        across * vertical * smoothstep(0.25, 0.7, slope) * (0.4 + 0.5 * smoothstep(-0.4, 0.5, shoreNoise)));
     let wet = across * (1.0 - smoothstep(0.1, 0.8, above)) * 0.15;
-    return vec3<f32>(gravel, rock, wet);
+    // Fully submerged channel replaces vegetation with sediment and rock.
+    // A patchy shore blend alone left grass visible through clear water.
+    return vec3<f32>(max(gravel, bed * (1.0 - rock)), rock, wet);
 }` : `fn riverCarveShoreEnabled() -> bool { return false; }
 fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 { return 0.0; }
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> { return vec3<f32>(0.0); }`}

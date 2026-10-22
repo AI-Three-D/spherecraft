@@ -147,6 +147,13 @@ export function lakeMask(heights, nx, ny, region, level, bandM, bandCells = 3) {
  * cell belongs to the lake. -1 if no patch cell falls on the lake.
  */
 export function lakeSeed(heights, frame, lake, lakeOf, N, R) {
+    // Fine discovered lakes can share one graph cell. That cell's owner or
+    // lowest point can belong to an entirely different depression.
+    if (lake.deepestDir) {
+        const [x,y] = dirToPlane(lake.deepestDir, frame, R);
+        const i=Math.floor((x-frame.x0)/frame.spacing), j=Math.floor((y-frame.y0)/frame.spacing);
+        return i>=0 && j>=0 && i<frame.nx && j<frame.ny ? j*frame.nx+i : -1;
+    }
     let seed = -1;
     for (let j = 0; j < frame.ny; j++) {
         const y = frame.y0 + (j + 0.5) * frame.spacing;

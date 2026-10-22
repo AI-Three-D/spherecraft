@@ -257,6 +257,19 @@ const WATER_NO_LAKE: f32 = -1.0e30;
 const WATER_OWNER_ON: f32 = 64.0;
 struct WaterLakeHit { level: f32, depthM: f32, }
 
+fn waterLakeCandidateCount(cell: u32) -> u32 {
+    let e = waterIndex[cell];
+    if ((e & 0x80000000u) != 0u) { return waterIndex[e & 0x3fffffffu]; }
+    return 3u;
+}
+fn waterLakeCandidate(cell: u32, k: u32) -> u32 {
+    let e = waterIndex[cell];
+    if ((e & 0x80000000u) != 0u) { return waterIndex[(e & 0x3fffffffu) + 1u + k]; }
+    if (k == 0u) { return e & 0x7fffu; }
+    if (k == 1u) { return (e >> 15u) & 0x7fffu; }
+    return waterIndex[6u * waterParams.gridN * waterParams.gridN + cell] >> 17u;
+}
+
 // Structured planets keep every immutable lake mask resident. Several masks
 // share an array layer; clamp to texel centres to prevent adjacent-tile bleed.
 fn waterLakeMaskSample(lake: WaterLake, uv: vec2<f32>, samp: sampler) -> f32 {
@@ -350,6 +363,18 @@ fn waterLakeHitView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool
     let n = waterParams.gridN;
     let cell = waterDirToCell(dir, n);
     let e = waterIndex[cell];
+    // Crowded cells keep every candidate in a sparse overflow list. The
+    // lake renderer draws these sheets too; silently dropping a fourth
+    // candidate left an overlapping river surface visible through them.
+    if ((e & 0x80000000u) != 0u) {
+        let at = e & 0x3fffffffu;
+        let count = waterIndex[at];
+        for (var k = 0u; k < count; k++) {
+            let h = waterLakeHitIn(waterIndex[at + 1u + k], dir, heightM, samp, levelOnly);
+            if (h.level > WATER_NO_LAKE) { return h; }
+        }
+        return WaterLakeHit(WATER_NO_LAKE, 0.0);
+    }
     let a = waterLakeHitIn(e & 0x7fffu, dir, heightM, samp, levelOnly);
     if (a.level > WATER_NO_LAKE) { return a; }
     let b = waterLakeHitIn((e >> 15u) & 0x7fffu, dir, heightM, samp, levelOnly);
@@ -597,8 +622,7 @@ fn waterNearFarColor(
         col = waterSurfaceColor(bedColor, depthM, worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance);
     }
     if (nearW > 0.0) {
-        let body = waterBodyColor(bedColor, depthM, (cameraPos - worldPos) / dist, up, lightDir, sunRadiance, skyRadiance);
-        col = mix(col, mix(bedColor, body, smoothstep(0.0, waterParams.shoreSoftM, depthM)), nearW);
+        col = mix(col, bedColor, nearW);
     }
     return col;
 }
@@ -621,6 +645,9 @@ fn applyWater(
     let dbg = waterParams.debugMode;
 
     let dist = length(cameraPos - worldPos);
+    // Close water is drawn at its surface, with transmission from scene depth.
+    // The bed stays terrain, including when the camera is underwater.
+    if (dbg == 0u && waterNearWeight(dist) >= 1.0) { return bedColor; }
     let river = waterRiverAtView(up,heightM,waterParams.riverLook.x>0.5 && dist>max(waterParams.near.y,waterParams.riverLook.z));
     // The near surfaces retain the bed/body underneath. Simulation replaces
     // the ribbon surface, rather than clearing the terrain colour to dry land.
@@ -644,10 +671,12 @@ fn applyWater(
         return mix(bedColor, select(vec3<f32>(1.0, 0.25, 0.1), vec3<f32>(0.1, 0.4, 1.0), odd), 0.55);
     }
     if (dbg == 9u) {
-        let n9 = waterParams.gridN; let c9 = waterDirToCell(up, n9); let e9 = waterIndex[c9];
-        var w9 = waterLakeDebugWhy(e9 & 0x7fffu, up, heightM, samp);
-        if (w9.a < 0.5) { w9 = waterLakeDebugWhy((e9 >> 15u) & 0x7fffu, up, heightM, samp); }
-        if (w9.a < 0.5) { w9 = waterLakeDebugWhy(waterIndex[6u * n9 * n9 + c9] >> 17u, up, heightM, samp); }
+        let c9 = waterDirToCell(up, waterParams.gridN);
+        var w9 = vec4<f32>(0.0);
+        for (var k9 = 0u; k9 < waterLakeCandidateCount(c9); k9++) {
+            w9 = waterLakeDebugWhy(waterLakeCandidate(c9, k9), up, heightM, samp);
+            if (w9.a >= 0.5) { break; }
+        }
         if (w9.a < 0.5) { return bedColor * 0.25; }
         return w9.rgb * 0.85;
     }
@@ -669,8 +698,8 @@ fn applyWater(
     if (level > WATER_NO_LAKE) {
         let depthM = lakeHit.depthM;
         if (dbg == 1u || dbg == 2u) {
-            let e = waterIndex[waterDirToCell(up, waterParams.gridN)];
-            return mix(waterTint(f32(e & 0x7fffu)), vec3<f32>(0.0, 0.1, 0.6), clamp(depthM / 40.0, 0.0, 0.8));
+            let slot = waterLakeCandidate(waterDirToCell(up, waterParams.gridN), 0u);
+            return mix(waterTint(f32(slot)), vec3<f32>(0.0, 0.1, 0.6), clamp(depthM / 40.0, 0.0, 0.8));
         }
         if (dbg == 3u) { return mix(vec3<f32>(0.6, 1.0, 1.0), vec3<f32>(0.0, 0.0, 0.3), clamp(depthM / 50.0, 0.0, 1.0)); }
         // Near the camera the near mesh draws the surface (reflection, glint,
@@ -741,7 +770,7 @@ fn applyWater(
         let cell = waterDirToCell(up, waterParams.gridN);
         let e = waterIndex[cell];
         let n = waterParams.gridN;
-        if ((e & 0x7fffu) != 0u) { return mix(bedColor, vec3<f32>(0.1, 0.4, 1.0), 0.35); }
+        if (waterLakeCandidate(cell, 0u) != 0u) { return mix(bedColor, vec3<f32>(0.1, 0.4, 1.0), 0.35); }
         if ((waterIndex[6u * n * n + cell] & 0x1ffffu) != 0u) { return mix(bedColor, vec3<f32>(1.0, 0.1, 0.05), 0.3); }
         if (((e >> 30u) & 1u) != 0u) { return mix(bedColor, vec3<f32>(1.0, 0.6, 0.0), 0.45); }
     }

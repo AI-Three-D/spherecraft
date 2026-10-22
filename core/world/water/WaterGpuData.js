@@ -65,6 +65,8 @@ const RIVER_BIT = 1 << 30;
 // river starts among them (owner 2026-10-13, water-look v80, v91).
 const BLOCK_MASK = 0x1ffff;
 const SLOT3_SHIFT = 17;
+const LAKE_OVERFLOW_BIT = 0x80000000;
+const LAKE_OVERFLOW_OFFSET_MASK = 0x3fffffff;
 
 export class WaterGpuData {
     /**
@@ -73,7 +75,8 @@ export class WaterGpuData {
      */
     constructor(device, { gridN = 512, planetRadius, maxLakes = CAPACITY.maxLakes, maskLayerSize = CAPACITY.maskLayerSize,
         maxMaskLayers = CAPACITY.maxMaskLayers, maskTilesPerAxis = 1, maxRiverSegs = CAPACITY.maxRiverSegs, maxRiverCells = CAPACITY.maxRiverCells,
-        carve = null, valley = null, maxValleyPages = CAPACITY.maxValleyPages, structuredRiverSurface = true, maskAtlas = null } = {}) {
+        carve = null, valley = null, maxValleyPages = CAPACITY.maxValleyPages, structuredRiverSurface = true, maskAtlas = null,
+        maxLakeOverlapEntries = maxLakes * 16 } = {}) {
         this.device = device;
         this.N = gridN;
         this.R = planetRadius;
@@ -122,7 +125,10 @@ export class WaterGpuData {
         // Two halves of one u32 per cell, then a sub-list block per river cell (waterWgsl.js).
         this.subPerCell = RIVER_SUB * RIVER_SUB;
         this.maxRiverCells = maxRiverCells;
-        const indexLen = 2 * cells + maxRiverCells * this.subPerCell;
+        this._lakeOverflowStart = 2 * cells + maxRiverCells * this.subPerCell;
+        const indexLen = this._lakeOverflowStart + maxLakeOverlapEntries;
+        this._lakeOverflow = new Map();
+        this._lakeOverflowDirty = false;
         this.indexBuffer = device.createBuffer({ label: 'Water-index', size: indexLen * 4, usage: S | GPUBufferUsage.COPY_SRC });
         this.maxRiverSegs = maxRiverSegs;
         this.riversBuffer = device.createBuffer({ label: 'Water-rivers', size: maxRiverSegs * RIVER_SEG_FLOATS * 4, usage: S | GPUBufferUsage.COPY_SRC });
@@ -208,7 +214,7 @@ export class WaterGpuData {
         const frame = { c: dir, ...tangentBasis(dir) };
         for (const [a, b] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
             const c = dirToCell(planeToDir(a * radiusM, b * radiusM, frame, this.R), this.N);
-            if ((this.index[c] & SLOT_MASK) || this.index[this.cells + c]) return true;
+            if ((this.index[c] & ~RIVER_BIT) || this.index[this.cells + c]) return true;
         }
         return false;
     }
@@ -234,26 +240,56 @@ export class WaterGpuData {
         return { index: this.indexBuffer, lakes: this.lakesBuffer, masks: this.masksView, params: this.paramsBuffer, rivers: this.riversBuffer };
     }
 
-    _setSlot(cell, slot) {
-        const e = this.index[cell], w = this.index[this.cells + cell];
-        const a = e & SLOT_MASK, b = (e >>> 15) & SLOT_MASK, c = w >>> SLOT3_SHIFT;
-        if (a === slot || b === slot || c === slot) return;
-        if (a === 0) this.index[cell] = (e & ~SLOT_MASK) | slot;
-        else if (b === 0) this.index[cell] = (e & ~(SLOT_MASK << 15)) | (slot << 15);
-        else if (c === 0) { this.index[this.cells + cell] = ((w & BLOCK_MASK) | (slot << SLOT3_SHIFT)) >>> 0; this._dirtyRows.add(Math.floor((this.cells + cell) / this.N)); return; }
-        else { this.slotDrops = (this.slotDrops ?? 0) + 1; return; }   // a fourth lake in one cell
+    _lakeSlots(cell) {
+        const overflow = this._lakeOverflow.get(cell);
+        if (overflow) return overflow;
+        const e = this.index[cell];
+        return [e & SLOT_MASK, (e >>> 15) & SLOT_MASK, this.index[this.cells + cell] >>> SLOT3_SHIFT].filter(Boolean);
+    }
+
+    _writeLakeSlots(cell, slots) {
+        if (slots.length > 3) {
+            this._lakeOverflow.set(cell, slots);
+            this._lakeOverflowDirty = true;
+            return;
+        }
+        if (this._lakeOverflow.delete(cell)) this._lakeOverflowDirty = true;
+        this.index[cell] = ((this.index[cell] & RIVER_BIT) | (slots[0] ?? 0) | ((slots[1] ?? 0) << 15)) >>> 0;
+        this.index[this.cells + cell] = ((this.index[this.cells + cell] & BLOCK_MASK) | ((slots[2] ?? 0) << SLOT3_SHIFT)) >>> 0;
         this._dirtyRows.add(Math.floor(cell / this.N));
+        this._dirtyRows.add(Math.floor((this.cells + cell) / this.N));
+    }
+
+    _setSlot(cell, slot) {
+        const slots = this._lakeSlots(cell);
+        if (!slots.includes(slot)) this._writeLakeSlots(cell, [...slots, slot]);
     }
 
     _clearSlot(cell, slot) {
-        const e = this.index[cell], w = this.index[this.cells + cell];
-        let a = e & SLOT_MASK, b = (e >>> 15) & SLOT_MASK, c = w >>> SLOT3_SHIFT;
-        if (a !== slot && b !== slot && c !== slot) return;
-        if (a === slot) { a = b; b = c; c = 0; } else if (b === slot) { b = c; c = 0; } else c = 0;
-        this.index[cell] = (e & RIVER_BIT) | a | (b << 15);
-        this.index[this.cells + cell] = ((w & BLOCK_MASK) | (c << SLOT3_SHIFT)) >>> 0;
-        this._dirtyRows.add(Math.floor(cell / this.N));
-        this._dirtyRows.add(Math.floor((this.cells + cell) / this.N));
+        const slots = this._lakeSlots(cell);
+        if (slots.includes(slot)) this._writeLakeSlots(cell, slots.filter(s => s !== slot));
+    }
+
+    // Common cells retain the compact three-slot lookup. Only crowded cells
+    // use a sparse list in the existing index buffer. A dropped fourth lake
+    // used to draw its sheet while rivers could not see it, drawing twice.
+    _packLakeOverflow() {
+        if (!this._lakeOverflowDirty) return;
+        let end = this._lakeOverflowStart;
+        for (const slots of this._lakeOverflow.values()) end += 1 + slots.length;
+        if (end > this.index.length) throw new Error('Water lake overlap pool exhausted');
+        let at = this._lakeOverflowStart;
+        for (const [cell, slots] of this._lakeOverflow) {
+            this.index[cell] = ((this.index[cell] & RIVER_BIT) | LAKE_OVERFLOW_BIT | (at & LAKE_OVERFLOW_OFFSET_MASK)) >>> 0;
+            this.index[this.cells + cell] &= BLOCK_MASK;
+            this.index[at++] = slots.length;
+            this.index.set(slots, at); at += slots.length;
+            this._dirtyRows.add(Math.floor(cell / this.N));
+            this._dirtyRows.add(Math.floor((this.cells + cell) / this.N));
+        }
+        if (end > this._lakeOverflowStart) this.device.queue.writeBuffer(this.indexBuffer, this._lakeOverflowStart * 4,
+            this.index, this._lakeOverflowStart, end - this._lakeOverflowStart);
+        this._lakeOverflowDirty = false;
     }
 
     _lakeCellsOf(svc, id) {
@@ -272,17 +308,21 @@ export class WaterGpuData {
 
     _buildInitialIndex(svc) {
         this.index.fill(0);
+        this._lakeOverflow.clear();
+        this._lakeOverflowDirty = false;
         for (let c = 0; c < this.cells; c++) if (svc.riverOf[c] >= 0) this.index[c] |= RIVER_BIT;
         for (const lake of svc.lakes) {
             const slot = svc.rep(lake.id) + 1;
             for (const c of this._lakeCellsOf(svc, lake.id)) this._setSlot(c, slot);
         }
+        this._packLakeOverflow();
         this.device.queue.writeBuffer(this.indexBuffer, 0, this.index);
         this._dirtyRows.clear();
         this.lakeCount = svc.lakes.length;
     }
 
     _flushRows() {
+        this._packLakeOverflow();
         if (!this._dirtyRows.size) return;
         const rows = [...this._dirtyRows].sort((x, y) => x - y);
         // Contiguous row runs, one upload each.
@@ -439,6 +479,13 @@ export class WaterGpuData {
                 }
                 let riversChanged = false;
                 const changedRivers = [];
+                for (const [rid, old] of this._appliedRivers) {
+                    if (svc.riverRecs?.has(rid)) continue;
+                    changedRivers.push(old);
+                    for (const cell of old.segCells ?? []) this._changedCells.add(Math.floor(cell / this.subPerCell));
+                    this._appliedRivers.delete(rid);
+                    riversChanged = true;
+                }
                 for (const [rid, rec] of svc.riverRecs ?? []) {
                     if (this._appliedRivers.get(rid) === rec) continue;
                     changedRivers.push(rec, ...(this._appliedRivers.has(rid) ? [this._appliedRivers.get(rid)] : []));
@@ -533,8 +580,8 @@ export class WaterGpuData {
      * { id, level }, or null.
      */
     lakeAt(dir) {
-        const cell = dirToCell(dir, this.N), e = this.index[cell];
-        for (const slot of [e & SLOT_MASK, (e >>> 15) & SLOT_MASK, this.index[this.cells + cell] >>> SLOT3_SHIFT]) {
+        const cell = dirToCell(dir, this.N);
+        for (const slot of this._lakeSlots(cell)) {
             const id = slot - 1, rec = slot ? this._applied.get(id) : null;
             if (!rec || !(this._layerOf.get(id) >= 0)) continue;
             const fr = rec.frame;

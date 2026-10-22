@@ -17,7 +17,8 @@ export class WebGPUBackend implements RendererBackend {
     getCommandEncoder(): GPUCommandEncoder;
     getRenderPassEncoder(): GPURenderPassEncoder | null;
     endRenderPassForCompute(): void;
-    resumeRenderPass(): void;
+    resumeRenderPass(options?: { depthReadOnly?: boolean }): void;
+    getDepthTextureView(): GPUTextureView | null;
     submitCommands(): void;
     discardCommands(): void;
     draw(geometry: Geometry, material: Material): void;

@@ -117,6 +117,7 @@ fn noiseGrad(p: vec2<f32>) -> vec2<f32> {
 
 @fragment
 fn main(
+    @builtin(position) pixel: vec4<f32>,
     @location(0) wp: vec3<f32>,
     @location(1) normalIn: vec3<f32>,
     @location(2) hv: vec4<f32>,
@@ -146,29 +147,27 @@ fn main(
     let uvB = local - vel * ph1 * T + vec2<f32>(37.0, 11.0);
     let g = mix(noiseGrad(uvA * 1.6), noiseGrad(uvB * 1.6), blend);
     let str = 0.03 + 0.12 * k;
-    let N = normalize(up - (normalize(e1) * g.x + normalize(e2) * g.y) * str);
+    let waveNormal = normalize(up - (normalize(e1) * g.x + normalize(e2) * g.y) * str);
 
     let toCam = U.cameraPos - wp;
     let V = normalize(toCam);
+    let N = waveNormal * select(-1.0, 1.0, dot(waveNormal,V) >= 0.0);
     let sunDir = normalize(U.sunDir);
     let sun = U.sunColor * U.sunIntensity;
     let sky = U.ambientColor * U.ambientIntensity;
     let fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
     let R = reflect(-V, N);
     let spec = pow(max(dot(R, sunDir), 0.0), 300.0) * 0.8;
-    let body = waterParams.deepColor.rgb * (sky + sun * max(dot(up, sunDir), 0.0));
-    var col = mix(body, sky * waterParams.deepColor.a, fres) + sun * spec;
+    let reflected = sky * waterParams.deepColor.a * fres + sun * spec;
 
     // Foam: patchy, stronger where the simulation made foam.
     let pat = mix(noise2(uvA * 2.2), noise2(uvB * 2.2), blend) * 0.6 + 0.4 * mix(noise2(uvA * 6.0), noise2(uvB * 6.0), blend);
     let fmask = smoothstep(0.58, 0.9, pat) * smoothstep(0.08, 0.7, foam) * 0.75;
     let foamCol = vec3<f32>(0.92, 0.95, 0.97) * (sky + sun * (0.4 + 0.6 * max(dot(N, sunDir), 0.0)));
-    col = mix(col, foamCol, fmask);
-
-    // Same opaque body and premultiplied atmosphere as the accepted near
-    // ribbon. The terrain's coloured bed is not exposed through a duplicate
-    // transparent water sheet. Refraction is a separate future feature.
-    let result = nearWaterCompose(wp, geometricUp, vec4f(col, 1.0));
+    let surface = vec4f(mix(reflected, foamCol, fmask), mix(fres, 1.0, fmask));
+    // Reflection and foam obscure only their share of the bed. Absorption
+    // and shoreline contact use the same scene depth as the static surface.
+    let result = nearWaterCompose(wp, geometricUp, surface, pixel.xy);
     return result * edge;
 }
 `;

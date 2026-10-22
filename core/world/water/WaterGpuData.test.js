@@ -41,20 +41,65 @@ const slots = (gpu, c) => [gpu.index[c] & 0x7fff, (gpu.index[c] >>> 15) & 0x7fff
 const cam = { x: 0, y: 0, z: 200000 };
 
 describe('WaterGpuData', () => {
-    it('keeps a third lake in a cell (in its second word, beside the river block) and counts a fourth', () => {
+    it('removes invalidated river segments and invalidates their former terrain cells', () => {
+        const gpu=new WaterGpuData(stubDevice(),{gridN:4,planetRadius:131072,maxMaskLayers:2});
+        const svc=fakeService(),points=new Float32Array(40);
+        points.set([0,0,1,105,4,1.5],0);points[16]=105;
+        points.set([.001,0,1,104,4,1.5],20);points[36]=104;
+        svc.riverRecs.set(0,{points,stride:20,segCellStart:new Int32Array([0,1]),segCells:new Int32Array([64])});
+        gpu.update(svc,cam,0);expect(gpu.riverSegCount).toBe(1);gpu.takeChangedCells();
+        svc.riverRecs.delete(0);svc.version++;gpu.update(svc,cam,1);
+        expect(gpu.riverSegCount).toBe(0);expect(gpu._appliedRivers.has(0)).toBe(false);
+        expect(gpu.index[gpu.cells+4]&0x1ffff).toBe(0);
+        expect(gpu.takeChangedCells().has(4)).toBe(true);
+    });
+    it('keeps crowded lake cells in a sparse list and preserves the river block through compaction', () => {
         const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxRiverCells: 4, maxRiverSegs: 4 });
         const cells = gpu.cells, c = 7;
         gpu.index[cells + c] = 3;                    // river block 2 (+1)
-        for (const slot of [5, 9, 12, 20]) gpu._setSlot(c, slot);
-        expect(slots(gpu, c).slice(0, 2)).toEqual([5, 9]);
-        expect(gpu.index[cells + c] >>> 17).toBe(12);
+        const read = cell => {
+            const e = gpu.index[cell];
+            if (!(e & 0x80000000)) return [e & 32767, (e >>> 15) & 32767, gpu.index[cells + cell] >>> 17].filter(Boolean);
+            const start = e & 0x3fffffff;
+            return [...gpu.index.slice(start + 1, start + 1 + gpu.index[start])];
+        };
+        for (const slot of [5, 9, 12, 20, 23, 27, 31]) gpu._setSlot(c, slot);
+        for (const slot of [1, 2, 3, 4]) gpu._setSlot(c + 1, slot);
+        gpu._setSlot(c, 20); // duplicate publication
+        gpu._flushRows();
+        expect(read(c)).toEqual([5, 9, 12, 20, 23, 27, 31]);
+        expect(read(c + 1)).toEqual([1, 2, 3, 4]);
         expect(gpu.index[cells + c] & 0x1ffff).toBe(3);
-        expect(gpu.slotDrops).toBe(1);
-        gpu._clearSlot(c, 5);                        // the others move up
+        for (const slot of [5, 23, 27, 31]) gpu._clearSlot(c, slot);
+        gpu._flushRows();
         expect(slots(gpu, c).slice(0, 2)).toEqual([9, 12]);
-        expect(gpu.index[cells + c]).toBe(3);
+        expect(gpu.index[cells + c] >>> 17).toBe(20);
+        expect(read(c + 1)).toEqual([1, 2, 3, 4]); // sparse list moved
         gpu._clearSlot(c, 12);
-        expect(slots(gpu, c).slice(0, 2)).toEqual([9, 0]);
+        expect(slots(gpu, c).slice(0, 2)).toEqual([9, 20]);
+        expect(gpu.index[cells + c]).toBe(3);
+    });
+
+    it('reports overlap pool exhaustion instead of silently omitting a drawn lake', () => {
+        const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxLakeOverlapEntries: 4 });
+        for (const slot of [1, 2, 3, 4]) gpu._setSlot(7, slot);
+        expect(() => gpu._flushRows()).toThrow('overlap pool exhausted');
+    });
+
+    it('finds a covering fourth lake even when the first three candidates are dry at the query', () => {
+        const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072 });
+        const dir = [0, 0, 1], cell = dirToCell(dir, 4);
+        const frame = { c: dir, e1: [1, 0, 0], e2: [0, 1, 0], x0: -8, y0: -8, spacing: 16, nx: 1, ny: 1 };
+        for (let id = 0; id < 4; id++) {
+            gpu._applied.set(id, { frame, level: 100 + id, mask: Uint8Array.of(id === 3 ? 2 : 0) });
+            gpu._layerOf.set(id, id);
+            gpu._setSlot(cell, id + 1);
+        }
+        gpu._flushRows();
+        expect(gpu.lakeAt(dir)).toEqual({ id: 3, level: 103 });
+        gpu._clearSlot(cell, 1); // removing another lake leaves the covering one indexed
+        gpu._flushRows();
+        expect(gpu.lakeAt(dir)).toEqual({ id: 3, level: 103 });
     });
 
     it('publishes more than 96 immutable masks together without eviction and keeps tile addresses inside their layers',()=>{
@@ -99,7 +144,7 @@ describe('WaterGpuData', () => {
         points[19]=0;gpu.carve.enabled=false;expect(publish(true)).toBe(0);expect(publish(false)).toBe(0);
     });
     it('uploads only the valid tail when a compact river-cell pool ends partway through a row',()=>{
-        const dev=stubDevice(),gpu=new WaterGpuData(dev,{gridN:32,planetRadius:131072,maxRiverCells:1,maxRiverSegs:1,maxLakes:1,maskLayerSize:32,maxMaskLayers:1});
+        const dev=stubDevice(),gpu=new WaterGpuData(dev,{gridN:32,planetRadius:131072,maxRiverCells:1,maxRiverSegs:1,maxLakes:1,maskLayerSize:32,maxMaskLayers:1,maxLakeOverlapEntries:0});
         gpu._dirtyRows.add(2*gpu.cells/gpu.N);gpu._flushRows();
         const u=dev.log.buffers.at(-1);expect(u.size).toBe(16);expect(u.dataOffset+u.size).toBe(gpu.index.length);
     });

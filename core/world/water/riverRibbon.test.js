@@ -22,6 +22,14 @@ const arcOf = (rec) => {
 const flat = { widthVar: 0, wobble: 0, bankVar: 0 };
 const base = { arcOf, R, origin: { x: 0, y: 0, z: 0 }, shape: flat, lakeAt: () => null };
 const point = (pts, i) => pts.slice(i * RIBBON_POINT_FLOATS, (i + 1) * RIBBON_POINT_FLOATS);
+const legacy = rec => {
+    const points = new Float32Array(rec.points.length / ST * 12);
+    for (let k = 0; k < points.length / 12; k++) {
+        points.set(rec.points.subarray(k * ST, k * ST + 12), k * 12);
+        points[k * 12 + 3] = rec.points[k * ST + 16];
+    }
+    return { points, stride: 12 };
+};
 
 describe('river ribbons', () => {
     it('flat across at the water level, channel width plus the margin', () => {
@@ -63,12 +71,12 @@ describe('river ribbons', () => {
         expect((p[0] + p[4]) / 2).toBeCloseTo(0, 2);
     });
 
-    it('the level meets the source lake without an upstream gradient', () => {
+    it('legacy design levels meet the source lake without an upstream gradient', () => {
         // A design above its source lake must be clamped, never eased uphill.
         const lakeAt = (d) => (Math.asin(d[0]) * R < 16 * 4 + 1 ? { level: 50 } : null);
         const rec = straightRiver(20);
         for (let k = 0; k <= 4; k++) rec.points[k * ST + 9] = -1;
-        const levels = riverWaterLevels(rec, arcOf(rec), lakeAt);
+        const levels = riverWaterLevels(legacy(rec), arcOf(rec), lakeAt);
         const level = (k) => levels[k];
         expect(level(2)).toBeCloseTo(50, 5);
         expect(level(4)).toBeCloseTo(50, 5);
@@ -76,7 +84,7 @@ describe('river ribbons', () => {
         for (let k = 1; k < 20; k++) expect(level(k)).toBeLessThanOrEqual(level(k - 1));
     });
 
-    it('lake easing preserves downstream descent and both lake levels', () => {
+    it('legacy lake easing preserves downstream descent and both lake levels', () => {
         const rec = straightRiver(40, k => 60 - k * 0.25);
         // The path passes near the source again mid-reach, then enters the
         // destination. Nearest-lake easing used to create a bump here.
@@ -89,7 +97,7 @@ describe('river ribbons', () => {
         for (let k = 0; k < 40; k++) {
             if (lakeAt(Array.from(rec.points.slice(k * ST, k * ST + 3)))) rec.points[k * ST + 9] = -1;
         }
-        const levels = riverWaterLevels(rec, arcOf(rec), lakeAt);
+        const levels = riverWaterLevels(legacy(rec), arcOf(rec), lakeAt);
         expect(levels[0]).toBe(60);
         expect(levels[39]).toBe(50);
         for (let k = 1; k < levels.length; k++) expect(levels[k]).toBeLessThanOrEqual(levels[k - 1]);
@@ -100,6 +108,16 @@ describe('river ribbons', () => {
         rec.points[9] = -1;
         const levels = riverWaterLevels(rec, arcOf(rec), d => Math.asin(d[0]) * R < 1 ? { level: 60 } : null);
         for (let k = 0; k < 20; k++) expect(levels[k]).toBeCloseTo(rec.points[k * ST + 16], 6);
+    });
+
+    it('does not lift a solved reach when a coarse mask overlaps a higher neighbouring lake', () => {
+        const rec = straightRiver(30, k => 548 - k * 0.5);
+        for (let k = 8; k < 26; k++) rec.points[k * ST + 9] = -1;
+        const levels = riverWaterLevels(rec, arcOf(rec), () => ({ level: 543.2 }));
+        for (let k = 0; k < levels.length; k++) expect(levels[k]).toBe(rec.points[k * ST + 16]);
+        const mesh = buildRiverRibbons({ ...base, lakeAt: () => ({ level: 543.2 }),
+            rivers: [[1, rec]], camera: { x: 0, y: 0, z: R + 550 }, rangeM: 1000 });
+        for (let k = 0; k < levels.length; k++) expect(point(mesh.points, k + 1)[7]).toBe(levels[k]);
     });
 
     it('a tight bend keeps the inner edge inside the bend (no fold)', () => {
