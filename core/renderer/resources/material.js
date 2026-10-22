@@ -59,6 +59,7 @@ export class Material {
             transparent: this.transparent,
             depthTest: this.depthTest,
             depthWrite: this.depthWrite,
+            depthCompare: this.depthCompare,
             blending: this.blending
         });
         

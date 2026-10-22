@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { cellDir } from './waterGraph.js';
-import { dirToPlane, planeToDir } from './lakeRefine.js';
+import { cellDir, dirToCell } from './waterGraph.js';
+import { dirToPlane, planeToDir, tangentBasis } from './lakeRefine.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
 
 // Synthetic planet (metres): a continent around +Z, ocean elsewhere; a
@@ -40,6 +40,88 @@ function patchHeights(frame) {
 }
 
 describe('water worker core', () => {
+    it('ends a fine stream in the first lower lake it enters, before its obsolete graph destination', () => {
+        const {core}=buildCore(),frame={c:[0,0,1],e1:[1,0,0],e2:[0,1,0],x0:-256,y0:-128,spacing:8,nx:192,ny:32};
+        const dir=x=>planeToDir(x,0,frame,R);
+        const lake=(lo,hi,level)=>{
+            const mask=new Uint8Array(frame.nx*frame.ny);
+            for(let j=0;j<frame.ny;j++)for(let i=0;i<frame.nx;i++){
+                const x=frame.x0+(i+.5)*8,y=frame.y0+(j+.5)*8;
+                if(x>=lo&&x<=hi&&Math.abs(y)<100)mask[j*frame.nx+i]=2;
+            }
+            return {frame,mask,maskCells:Int32Array.of(dirToCell(dir((lo+hi)/2),N)),deepestDir:dir((lo+hi)/2),
+                level,maxDepth:2,exitDir:dir(hi),outflowDirs:[dir(hi+32)]};
+        };
+        const base=core.handle({type:'addLakes',lakes:[lake(-180,0,500),lake(400,560,495),lake(900,1100,490)],streams:[]}).reply.base;
+        // Add another source whose prescribed route crosses the middle lake.
+        const added=core.handle({type:'addLakes',lakes:[lake(-180,0,500)],streams:[{
+            lake:0,to:{type:'lake',id:base+2},dirs:[dir(-100),dir(1000)],lengthM:1100,
+        }],streamCorridorM:128}).reply;
+        const riverId=added.rivers[0].id,plan=core.handle({type:'planRiver',riverId,spacing:8,corridorM:128}).reply;
+        expect(plan.dest.id).toBe(base+2);
+        const heights=new Float32Array(plan.frame.nx*plan.frame.ny);
+        for(let j=0;j<plan.frame.ny;j++)for(let i=0;i<plan.frame.nx;i++){
+            const d=planeToDir(plan.frame.x0+(i+.5)*8,plan.frame.y0+(j+.5)*8,plan.frame,R);
+            const [x,y]=dirToPlane(d,frame,R);
+            heights[j*plan.frame.nx+i]=499-.01*Math.max(0,x)+.002*y*y;
+        }
+        const rec=core.handle({type:'solveRiver',riverId,frame:plan.frame,heights,stepM:8}).reply;
+        expect(rec.status).toBe('ok');expect(rec.dest).toEqual({type:'lake',id:base+1});
+        expect(rec.destLevel).toBe(495);
+        const last=rec.points.subarray(rec.points.length-rec.stride),[endX]=dirToPlane(Array.from(last.subarray(0,3)),frame,R);
+        expect(endX).toBeGreaterThanOrEqual(400);expect(endX).toBeLessThan(560);
+        expect(last[16]).toBeCloseTo(495,3);
+        for(let k=0;k<rec.points.length;k+=rec.stride)expect(rec.points[k+16]).toBeGreaterThanOrEqual(495);
+    });
+    it('keeps two fine basins in one coarse cell separate when either lake is re-solved', () => {
+        const {core}=buildCore(),c=cellDir(4*N*N+12*N+12,N);
+        const frame={c,...tangentBasis(c),x0:-100,y0:-100,spacing:4,nx:80,ny:50};
+        const heights=new Float32Array(frame.nx*frame.ny),maskA=new Uint8Array(heights.length),maskB=maskA.slice();
+        for(let j=0;j<frame.ny;j++)for(let i=0;i<frame.nx;i++){
+            const x=frame.x0+(i+.5)*4,y=frame.y0+(j+.5)*4,a=Math.hypot(x,y),b=Math.hypot(x-100,y),k=j*frame.nx+i;
+            heights[k]=a<30?.02*a*a:a<40?20:b<20?10+.02*b*b:b<30?30:0;
+            if(a<30)maskA[k]=2;if(b<20)maskB[k]=2;
+        }
+        const seeds=[planeToDir(0,0,frame,R),planeToDir(100,0,frame,R)];
+        expect(dirToCell(seeds[0],N)).toBe(dirToCell(seeds[1],N));
+        const lake=(mask,k)=>({frame,mask,maskCells:Int32Array.of(dirToCell(seeds[k],N)),deepestDir:seeds[k],
+            level:k===0?20:30,maxDepth:20,exitDir:seeds[k],outflowDirs:[]});
+        const {base}=core.handle({type:'addLakes',lakes:[lake(maskA,0),lake(maskB,1)],streams:[]}).reply;
+        const a=core.handle({type:'solveLake',lakeId:base,frame,heights,bandM:0,skipDownstream:true}).reply;
+        expect(a.status).toBe('ok');expect(a.level).toBe(20);expect(a.merged).not.toContain(base+1);
+        const b=core.handle({type:'solveLake',lakeId:base+1,frame,heights,bandM:0,skipDownstream:true}).reply;
+        expect(b.status).toBe('ok');expect(b.level).toBe(30);expect(b.merged).not.toContain(base);
+    });
+    it('routes a fine mountain stream to the surviving lake after its destination is merged', () => {
+        const {core,built}=buildCore();
+        const upper=built.lakes.reduce((a,b)=>a.level>b.level?a:b),lower=built.lakes.find(l=>l!==upper);
+        const solve=lake=>core.handle({type:'solveLake',lakeId:lake.id,frame:lake.frame,heights:patchHeights(lake.frame),bandM:6}).reply;
+        const u=solve(upper),l=solve(lower);
+        const seedDir=lake=>lake.frame.c;
+        const added=core.handle({type:'addLakes',lakes:[{...u,deepestDir:seedDir(upper)},{...l,deepestDir:seedDir(lower)}],
+            streams:[{lake:0,to:{type:'lake',id:lower.id},dirs:[u.exitDir,l.exitDir],lengthM:1000}],streamCorridorM:1800}).reply;
+        const representative=added.base+1;
+        core.handle({...l,type:'restoreLake',lakeId:representative,merged:[lower.id],skipDownstream:true});
+        const riverId=added.rivers[0].id;
+        const plan=core.handle({type:'planRiver',riverId,spacing:128,corridorM:1800}).reply;
+        expect(plan.dest).toEqual({type:'lake',id:representative});
+        const traced=core.handle({type:'solveRiver',riverId,frame:plan.frame,heights:patchHeights(plan.frame),stepM:20}).reply;
+        expect(traced.status).toBe('ok');expect(traced.dest.id).toBe(representative);
+    });
+    it('clears removed river excavation while keeping overlapping surviving excavation', () => {
+        const {core}=buildCore(),frame={c:[0,0,1],e1:[1,0,0],e2:[0,1,0],x0:-128,y0:-128,spacing:16,nx:16,ny:16};
+        const points=new Float32Array([0,0,1,50,4,1,0,0,0,0,0,0,.001,0,1,49,4,1,0,0,0,0,0,0]);
+        const landscape=cut=>({frame,cells:Uint32Array.from({length:256},(_,i)=>i),cuts:new Float32Array(256).fill(cut)});
+        for(const [riverId,cut] of [[0,8],[1,3]])core.handle({type:'restoreRiver',riverId,points,stride:12,landscape:landscape(cut)});
+        const opts={texels:4096,page:32};
+        const before=core.handle({type:'bakeValley',riverIds:[0,1],opts}).reply;
+        const after=core.handle({type:'removeRivers',riverIds:[0],opts}).reply;
+        const cuts=r=>new Float32Array(r.texels.buffer).filter((_,i)=>i%4===0);
+        expect(Math.max(...cuts(before))).toBeCloseTo(8);
+        expect(Math.max(...cuts(after))).toBeCloseTo(3);
+        const empty=core.handle({type:'removeRivers',riverIds:[1],opts}).reply;
+        expect(empty.pageIds.length).toBeGreaterThan(0);expect(cuts(empty).every(v=>v===0)).toBe(true);
+    });
     it('traces from inside source water with a descending surface and varying depth', () => {
         const { core, built } = buildCore();
         const upper = built.lakes.reduce((a, b) => a.level > b.level ? a : b);

@@ -251,8 +251,8 @@ export function createWaterWorkerCore() {
         // Other lakes whose deepest point lies in this lake are part of it.
         const merged = [];
         for (const other of g.lakes) {
-            if (other.id === lakeId || rep(other.id) === lakeId) continue;
-            const d = cellDir(other.deepestCell, N);
+            if (other.id === lakeId || rep(other.id) !== other.id) continue;
+            const d = other.deepestDir ?? cellDir(other.deepestCell, N);
             if (d[0] * frame.c[0] + d[1] * frame.c[1] + d[2] * frame.c[2] < 0.5) continue;
             const [x, y] = dirToPlane(d, frame, R);
             const i = Math.floor((x - frame.x0) / frame.spacing), j = Math.floor((y - frame.y0) / frame.spacing);
@@ -328,7 +328,7 @@ export function createWaterWorkerCore() {
         const ids = [];
         for (const L of msg.lakes) {
             const id = g.lakes.length, cells = Array.from(L.maskCells), exitCell = dirToCell(L.exitDir, N);
-            g.lakes.push({ id, cells, coreCells: 0, level: L.level, maxDepth: L.maxDepth, deepestCell: dirToCell(L.deepestDir, N),
+            g.lakes.push({ id, cells, coreCells: 0, level: L.level, maxDepth: L.maxDepth, deepestDir:L.deepestDir, deepestCell: dirToCell(L.deepestDir, N),
                 outletCell: exitCell, exitCell, outflowQ: g.Q[exitCell], river: -1, downstream: null });
             for (const c of cells) if (g.lakeOf[c] === -1) g.lakeOf[c] = id;
             refined.set(id, { level: L.level, exitDir: L.exitDir, outflowDirs: L.outflowDirs, frame: L.frame,
@@ -395,7 +395,8 @@ export function createWaterWorkerCore() {
         // A stream with a fine route (mountain lakes: the 64 m drainage to
         // its destination, addLakes) follows it in a narrow corridor.
         const { dest, cells, outflowCells } = rv.fineDirs
-            ? { dest: rv.to, cells: rv.cells, outflowCells: 0 } : routeFrom(src, { join, ownRiver: riverId });
+            ? { dest: rv.to.type === 'lake' ? {...rv.to, id:rep(rv.to.id)} : rv.to, cells: rv.cells, outflowCells: 0 }
+            : routeFrom(src, { join, ownRiver: riverId });
         const corridor = rv.fineDirs ? rv.corridorM * corridorM / (msg.baseCorridorM ?? corridorM) : corridorM;
         const r = refined.get(src);
         const sillDir = r ? r.exitDir : cellDir(g.lakes[src].exitCell, N);
@@ -444,7 +445,7 @@ export function createWaterWorkerCore() {
             : r?.outflowDirs
                 ? [sourceDir, sillDir, ...r.outflowDirs, ...cells.slice(outflowCells).map(c => cellDir(c, N))]
                 : [sourceDir, sillDir, ...cells.slice(1).map(c => cellDir(c, N))];
-        if (dest.type === 'lake' && !rv.fineDirs) dirs.push(cellDir(g.lakes[dest.id].deepestCell, N));
+        if (dest.type === 'lake' && !rv.fineDirs) dirs.push(g.lakes[dest.id].deepestDir ?? cellDir(g.lakes[dest.id].deepestCell, N));
         const frame = polylinePatchFrame(dirs, { R, spacing, marginM: corridor + 200 });
         // A river destination's level comes with solveRiver (msg.trunk.eta).
         const destLevel = dest.type === 'lake' ? levelOf(dest.id) : dest.type === 'sea' ? seaLevelM : -Infinity;
@@ -504,10 +505,51 @@ export function createWaterWorkerCore() {
                 }
             }
         }
+        const srcLevel = levelOf(plan.src);
+        // Lake water on the patch: the sea; refined lakes by their solved
+        // region, which can reach beyond the graph's cells; other lakes below
+        // their level in their graph cells. The valley neither fills nor
+        // counts as ground there, and the river's points in it are lake points.
+        const lakeMask = new Uint8Array(nx * ny), lakeLevel = new Float32Array(nx * ny);
+        const lakeOwner = new Int32Array(nx * ny).fill(-1);
+        // Water as drawn (the sea, solved lakes' regions; not the graph's
+        // cells of unsolved ones): the banks keep its rim (riverLakeRims).
+        const lakeDrawn = new Uint8Array(nx * ny);
+        const patchR = 0.5 * Math.hypot(nx, ny) * spacing;
+        const near = [];
+        for (const [id, rr] of refined) {
+            if (!rr.region || rep(id) !== id) continue;
+            const f = rr.frame, fr = 0.5 * Math.hypot(f.nx, f.ny) * f.spacing;
+            const cosA = f.c[0] * frame.c[0] + f.c[1] * frame.c[1] + f.c[2] * frame.c[2];
+            if (Math.acos(Math.max(-1, Math.min(1, cosA))) * R < patchR + fr) near.push({id,rec:rr});
+        }
+        // A lower body owns overlap; insertion order must not select a higher sheet.
+        near.sort((a,b)=>a.rec.level-b.rec.level || a.id-b.id);
+        for (let k = 0; k < nx * ny; k++) {
+            if (h[k] <= seaLevelM) { lakeMask[k] = 1; lakeDrawn[k] = 1; lakeLevel[k] = seaLevelM; continue; }
+            const d = planeToDir(cx(k), cy(k), frame, R);
+            for (const {id,rec:rr} of near) {
+                if (!(h[k] < rr.level)) continue;
+                const f = rr.frame;
+                const [x, y] = dirToPlane(d, f, R);
+                const i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
+                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rr.region[j * f.nx + i] === 1) { lakeMask[k] = 1; lakeDrawn[k] = 1; lakeLevel[k] = rr.level; lakeOwner[k] = id; break; }
+            }
+            if (lakeMask[k]) continue;
+            const l0 = g.lakeOf[dirToCell(d, N)];
+            if (l0 === -1) continue;
+            const l = rep(l0);
+            if (!refined.get(l)?.region && h[k] < levelOf(l)) { lakeMask[k] = 1; lakeLevel[k] = levelOf(l); lakeOwner[k] = l; }
+        }
         const seeds = new Uint8Array(nx * ny);
         let seedCount = 0;
         for (let k = 0; k < nx * ny; k++) {
             if (!corridor[k]) continue;
+            // Fine lakes may lie between the source and the coarse route's
+            // destination. They terminate this reach at their own level;
+            // their outlet river is responsible for water farther downstream.
+            const lowerLake = lakeDrawn[k] && lakeOwner[k] >= 0 && lakeLevel[k] < srcLevel - 0.01;
+            if (lowerLake) { seeds[k] = 1; seedCount++; continue; }
             if (plan.dest.type === 'sea') { if (!(h[k] <= seaLevelM)) continue; }
             else if (plan.dest.type === 'river') { if (!trunkMask[k]) continue; }
             else if (!(h[k] < plan.destLevel) || !inDest(k)) continue;
@@ -522,7 +564,12 @@ export function createWaterWorkerCore() {
         const sj = Math.max(0, Math.min(ny - 1, Math.floor((sy - frame.y0) / spacing)));
         const tr = traceRiverPatch({ heights: h, nx, ny, corridor, seeds, source: sj * nx + si });
         if (!tr) return { reply: { type: 'riverSolved', riverId, status: 'noPath' } };
-
+        const endCell = tr.path[tr.path.length - 1];
+        if (lakeDrawn[endCell] && lakeOwner[endCell] >= 0 && lakeLevel[endCell] < srcLevel - 0.01) {
+            plan.dest = {type:'lake',id:lakeOwner[endCell]};
+            plan.destLevel = lakeLevel[endCell];
+            trunkMask = null;
+        }
         const xs = Float64Array.from(tr.path, cx), ys = Float64Array.from(tr.path, cy);
         const cellKm2 = 4 * Math.PI * R * R / (6 * N * N) / 1e6;
         const qAt = (ci) => shapeP.runoffM3sPerKm2 * g.Q[ci] * cellKm2;
@@ -537,7 +584,6 @@ export function createWaterWorkerCore() {
         // The water never stands above the source lake: where the trace had
         // to cross higher ground (the graph's route and the 16 m terrain
         // disagree over long distances), the carve cuts a channel through the rise.
-        const srcLevel = levelOf(plan.src);
         // Discharge: the route cell at the same arc fraction, but never less
         // than the source lake's outflow and never falling downstream (the
         // cells along a lake's fine outflow are off the graph's drainage
@@ -551,38 +597,6 @@ export function createWaterWorkerCore() {
             const k0 = Math.max(0, k - 4), k1 = Math.min(n - 1, k + 4);
             const slope = (sm.fill[k0] - sm.fill[k1]) / Math.max(1, sm.s[k1] - sm.s[k0]);
             shapes.push({ ...riverShape(Qm3s, slope, shapeP, levelP.waterFrac), Qm3s, slope });
-        }
-        // Lake water on the patch: the sea; refined lakes by their solved
-        // region, which can reach beyond the graph's cells; other lakes below
-        // their level in their graph cells. The valley neither fills nor
-        // counts as ground there, and the river's points in it are lake points.
-        const lakeMask = new Uint8Array(nx * ny), lakeLevel = new Float32Array(nx * ny);
-        // Water as drawn (the sea, solved lakes' regions; not the graph's
-        // cells of unsolved ones): the banks keep its rim (riverLakeRims).
-        const lakeDrawn = new Uint8Array(nx * ny);
-        const patchR = 0.5 * Math.hypot(nx, ny) * spacing;
-        const near = [];
-        for (const [id, rr] of refined) {
-            if (!rr.region || rep(id) !== id) continue;
-            const f = rr.frame, fr = 0.5 * Math.hypot(f.nx, f.ny) * f.spacing;
-            const cosA = f.c[0] * frame.c[0] + f.c[1] * frame.c[1] + f.c[2] * frame.c[2];
-            if (Math.acos(Math.max(-1, Math.min(1, cosA))) * R < patchR + fr) near.push(rr);
-        }
-        for (let k = 0; k < nx * ny; k++) {
-            if (h[k] <= seaLevelM) { lakeMask[k] = 1; lakeDrawn[k] = 1; lakeLevel[k] = seaLevelM; continue; }
-            const d = planeToDir(cx(k), cy(k), frame, R);
-            for (const rr of near) {
-                if (!(h[k] < rr.level)) continue;
-                const f = rr.frame;
-                const [x, y] = dirToPlane(d, f, R);
-                const i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
-                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rr.region[j * f.nx + i] === 1) { lakeMask[k] = 1; lakeDrawn[k] = 1; lakeLevel[k] = rr.level; break; }
-            }
-            if (lakeMask[k]) continue;
-            const l0 = g.lakeOf[dirToCell(d, N)];
-            if (l0 === -1) continue;
-            const l = rep(l0);
-            if (!refined.get(l)?.region && h[k] < levelOf(l)) { lakeMask[k] = 1; lakeLevel[k] = levelOf(l); }
         }
         const pointCell = (k) => {
             const i = Math.floor((sm.x[k] - frame.x0) / spacing), j = Math.floor((sm.y[k] - frame.y0) / spacing);
@@ -773,7 +787,7 @@ export function createWaterWorkerCore() {
         const landscapeMs = performance.now() - tLandscape;
         return {
             reply: {
-                type: 'riverSolved', riverId, status: 'ok', dest: plan.dest, src: plan.src,
+                type: 'riverSolved', riverId, status: 'ok', dest: plan.dest, src: plan.src, dependencyFrame: frame,
                 lengthM: total, points, stride, segCellStart, segCells,
                 waterfalls: features.waterfalls, landscape: replyLandscape, landscapeMs,
                 startLevel: sm.fill[0], endLevel: sm.fill[n - 1], destLevel: plan.destLevel,
@@ -812,8 +826,8 @@ export function createWaterWorkerCore() {
     function bakeValley(msg) {
         const opts = { ...RIVER_VALLEY_DEFAULTS, ...(msg.opts ?? {}) };
         const pages = new Set();
-        for (const rid of msg.riverIds) {
-            const rv = valleyRivers.get(rid);
+        const affectedRivers = msg.affectedRivers ?? msg.riverIds.map(rid => valleyRivers.get(rid)).filter(Boolean);
+        for (const rv of affectedRivers) {
             if (!rv) continue;
             if (rv.landscape) for (const p of valleyRiverIncisionPages(rv, R, opts)) pages.add(p);
         }
@@ -827,8 +841,7 @@ export function createWaterWorkerCore() {
             if (!rr.region) continue;
             const f = rr.frame, half = 0.5 * Math.hypot(f.nx, f.ny) * f.spacing;
             let near = false;
-            for (const rid of msg.riverIds) {
-                const rv = valleyRivers.get(rid);
+            for (const rv of affectedRivers) {
                 if (!rv) continue;
                 for (let k = 0; k < rv.dirs.length && !near; k += 25) {
                     const d = rv.dirs[k], cosA = d[0] * f.c[0] + d[1] * f.c[1] + d[2] * f.c[2];
@@ -845,10 +858,19 @@ export function createWaterWorkerCore() {
         };
     }
 
+    function removeRivers(msg) {
+        const affectedRivers = msg.riverIds.map(id => valleyRivers.get(id)).filter(Boolean);
+        for (const id of msg.riverIds) { valleyRivers.delete(id); plans.delete(id); }
+        // Bake the former footprints using only surviving rivers. Empty
+        // texels explicitly clear old cuts; overlapping trunks are retained.
+        return bakeValley({...msg, affectedRivers});
+    }
+
     return {
         handle(msg) {
             if (msg.type === 'build') return build(msg);
             if (msg.type === 'restoreRiver') return restoreRiver(msg);
+            if (msg.type === 'removeRivers') return removeRivers(msg);
             if (msg.type === 'bakeValley') return bakeValley(msg);
             if (msg.type === 'solveLake') return solveLake(msg);
             if (msg.type === 'restoreLake') return restoreLake(msg);

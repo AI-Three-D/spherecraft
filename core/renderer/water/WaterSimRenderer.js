@@ -57,7 +57,12 @@ export class WaterSimRenderer {
         if(m.uniforms.waterParams.value?.buffer!==water.paramsData)m.uniforms.waterParams.value=new Float32Array(water.paramsData);
         m.uniforms.waterLakeMasks.value=res.masks;
         m.uniforms.transmittanceLUT.value=this.uniformManager?.uniforms?.transmittanceLUT?.value??null;
+        m.uniforms.nearWaterSceneDepth.value=this.backend.getDepthTextureView();
+        this.backend.endRenderPassForCompute();
+        this.backend.resumeRenderPass({depthReadOnly:true});
         this.backend.draw(this._geometry,m);
+        this.backend.endRenderPassForCompute();
+        this.backend.resumeRenderPass();
     }
     dispose(){this._geometry?.dispose?.();this._material?.dispose?.();this._geometry=null;this._material=null;}
 }

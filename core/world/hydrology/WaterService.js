@@ -30,7 +30,7 @@ import { regionalWaterModel,regionalWaterGridN } from './regionalWater.js';
 import { MOUNTAIN_LAKE_DEFAULTS, MOUNTAIN_LAKE_VERSION, chooseMountainLakes, drainFrame, mountainBlockFrame, mountainBlocks, pocketSolveFrame } from './mountainLakes.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
-export const WATER_ALGO_VERSION = 'water-v19';   // v19: lake outflow Q at the spill point, minRiverQ 100
+export const WATER_ALGO_VERSION = 'water-v20';   // v20: preserve fine lake seeds and merge only the actual basin
 
 export const WATER_SERVICE_DEFAULTS = Object.freeze({
     gridN: 512,
@@ -447,7 +447,7 @@ export class WaterService {
                     delete rec.candidates;
                     if (this.config.cache) this._cache.put(lakeKey(id), rec);
                 }
-                this._apply(id, rec);
+                await this._apply(id, rec);
                 if (++solved === 1) this.timings.firstLakeMs = performance.now() - t0;
             }
         };
@@ -851,7 +851,7 @@ export class WaterService {
                 Logger.info(`[Water] lake ${id}: ${rec.status} (${rec.ms.toFixed(0)} ms)`);
                 return null;
             }
-            this._apply(id, rec);
+            await this._apply(id, rec);
             if (!fromCache && this.config.cache) {
                 const { downstream: _downstream, ms: _ms, fromCache: _fc, ...stored } = rec;
                 this._cache.put(lakeKey, stored);
@@ -937,8 +937,14 @@ export class WaterService {
                 RIVER_SOLVE_VERSION, shape, { ...RIVER_LEVEL_DEFAULTS, ...RC.levels },
                 RC.stepM, RC.smoothPasses, this.config.carve, this.config.landscape,
             ]);
-            const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${shapeKey}:${riverId}:${destKey}`;
+            // A lake can grow or merge after a river has been cached. IDs
+            // alone do not identify its shoreline, exit or water level.
+            const anchors = hashParts([this._lakeIdentity(src), plan.dest.type === 'lake' ? this._lakeIdentity(plan.dest.id) : destKey]);
+            const riverKey = `river:${this._key}:${RC.spacingM}:${RC.corridorM}:${shapeKey}:${riverId}:${destKey}:${anchors}`;
             let rec = this.config.cache ? await this._cache.get(riverKey) : null;
+            // Any refined basin in the solve patch can terminate this reach,
+            // including one absent when the cached river was first traced.
+            if (rec && rec.lakeDependencies !== this._riverLakeIdentity(rec.dependencyFrame)) rec = null;
             const fromCache = !!rec;
             if (!rec) {
                 // A start above the source lake's level means the corridor
@@ -986,13 +992,14 @@ export class WaterService {
                 const high = this._riverHighPoint(rec);
                 if (high && await this._resolveLakeIncluding(src, high)) return this._refineRiver(riverId, depth + 1);
             }
+            if (!fromCache) rec.lakeDependencies = this._riverLakeIdentity(rec.dependencyFrame);
             if (!fromCache && this.config.cache) { const { ms: _ms, ...stored } = rec; this._cache.put(riverKey, stored); }
             this.riverRecs.set(riverId, rec);
             this.version++;
             await this._bakeValley(riverId, rec, fromCache);
             Logger.debug(`[Water] river ${riverId}: ${(rec.lengthM / 1000).toFixed(1)} km to ${destKey}, ` +
                 `${fromCache ? 'cache' : 'traced'} ${rec.ms.toFixed(0)} ms`);
-            return rec;
+            return this.riverRecs.get(riverId) ?? null;
         } catch (err) {
             this._failedRivers.add(riverId);
             Logger.warn(`[Water] river ${riverId} refine failed: ${err?.message || err}`);
@@ -1031,6 +1038,7 @@ export class WaterService {
             }
             cand.sort((a, b) => a.d - b.d);
             for (const c of cand.slice(0, 6)) await this._refineLake(c.id);
+            if (this.riverRecs.get(riverId) !== rec) return;
             const t0 = performance.now();
             const r = await this._client.call({ type: 'bakeValley', riverIds: [riverId], opts: this.config.valley });
             this.valleyUpdates.push({ pageIds: r.pageIds, texels: r.texels });
@@ -1065,7 +1073,7 @@ export class WaterService {
         const rec = await this._client.call({ type: 'solveLake', lakeId: id, frame, heights, bandM: R.bandM, ...(R.precompute ? { crop: true } : {}) }, [heights.buffer]);
         if (rec.status !== 'ok') return false;
         Logger.debug(`[Water] lake ${id} re-solved past its outflow: level ${old?.level?.toFixed(1)} -> ${rec.level.toFixed(1)} m`);
-        this._apply(id, rec);
+        await this._apply(id, rec);
         if (this.config.cache) {
             const { downstream: _downstream, ...stored } = rec;
             this._cache.put(`lake:${this._key}:${R.spacingM}:${R.bandM}:${R.precompute ? 'crop:' : ''}${id}`, stored);
@@ -1073,17 +1081,65 @@ export class WaterService {
         return true;
     }
 
-    _apply(id, rec) {
+    _lakeIdentity(id) {
+        const representative = this.rep(id), r = this.refined.get(representative) ?? this.lakes[representative];
+        return hashParts([representative, r.level, r.frame, r.exitDir ?? null, r.mask ?? null]);
+    }
+
+    _patchesOverlap(a, b) {
+        if (!a?.c || !b?.c) return false;
+        const radius = f => 0.5 * Math.hypot(f.nx, f.ny) * f.spacing;
+        const cos = a.c.reduce((sum, v, k) => sum + v * b.c[k], 0);
+        return Math.acos(Math.max(-1, Math.min(1, cos))) * this.radius < radius(a) + radius(b);
+    }
+
+    _riverLakeIdentity(frame) {
+        if (!frame) return null;
+        const ids = [...this.refined.keys()].filter(id => this.rep(id) === id &&
+            this._patchesOverlap(frame, this.refined.get(id).frame)).sort((a, b) => a - b);
+        return hashParts(ids.map(id => this._lakeIdentity(id)));
+    }
+
+    async _apply(id, rec) {
+        const affected = new Set([id, ...(rec.merged ?? [])]);
+        const invalid = new Set();
+        // Include tributaries of an invalidated trunk. A source absorbed by
+        // another lake no longer has a separate outlet river at all.
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const [rid, river] of this.riverRecs) {
+                if (invalid.has(rid)) continue;
+                if (affected.has(river.src) || (river.dest?.type === 'lake' && affected.has(river.dest.id)) ||
+                    this._patchesOverlap(river.dependencyFrame, rec.frame) ||
+                    [...affected].some(lid => this._patchesOverlap(river.dependencyFrame, this.refined.get(lid)?.frame)) ||
+                    (river.dest?.type === 'river' && invalid.has(river.dest.id))) {
+                    invalid.add(rid); changed = true;
+                }
+            }
+        }
         for (const m of rec.merged ?? []) {
             this.mergedInto.set(m, id);
             this.refined.delete(m);
         }
         this.refined.set(id, rec);
+        for (const rid of invalid) this.riverRecs.delete(rid);
+        for (const river of this.rivers) {
+            if (affected.has(river.fromLake) || (river.to?.type === 'lake' && affected.has(river.to.id)) || invalid.has(river.id))
+                this._failedRivers.delete(river.id);
+        }
         for (const [lid, down] of Object.entries(rec.downstream ?? {})) {
             const r = this.refined.get(Number(lid));
             if (r) r.downstream = down;
         }
         this.version++;
+        if (invalid.size) {
+            // Remove old incision pages too; rebuilding just the water mesh
+            // would leave the former river cut into the terrain.
+            const update = await this._client.call({type:'removeRivers', riverIds:[...invalid], opts:this.config.valley});
+            if (this.valleyOn && update.pageIds.length) this.valleyUpdates.push(update);
+            this.version++;
+        }
     }
 
     /**

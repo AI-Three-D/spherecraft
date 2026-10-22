@@ -52,11 +52,17 @@ export function riverCap(rec) {
  */
 export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
     const P = rec.points, st = rec.stride, n = P.length / st;
+    // Modern traces already contain the surface used to design their bed.
+    // Re-anchoring that solution to render masks can select a neighbouring
+    // lake, then propagate its level upstream. River 2576 was lifted by
+    // 7.64 m this way while its bed stayed at the solved height. Changes to
+    // an actual endpoint lake must invalidate/re-solve the trace instead.
+    if (st >= 20) return Float64Array.from({ length: n }, (_, k) => P[k * st + 16]);
     const out = new Float64Array(n), toLake = new Float64Array(n).fill(Infinity), lakeLevel = new Float64Array(n);
     for (let k = 0; k < n; k++) {
-        out[k] = st >= 20 ? P[k * st + 16] : P[k * st + 3];
+        out[k] = P[k * st + 3];
         const l = lakeAt([P[k * st], P[k * st + 1], P[k * st + 2]]);
-        if (l && (st < 20 || P[k * st + 9] < 0)) { toLake[k] = 0; lakeLevel[k] = l.level; }
+        if (l) { toLake[k] = 0; lakeLevel[k] = l.level; }
     }
     for (let k = 1; k < n; k++) {
         const d = toLake[k - 1] + arc[k] - arc[k - 1];
@@ -67,11 +73,7 @@ export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
         if (d < toLake[k]) { toLake[k] = d; lakeLevel[k] = lakeLevel[k + 1]; }
     }
     for (let k = 0; k < n; k++) {
-        if (st >= 20) {
-            // The solved surface already meets the lakes. Easing it upward
-            // again at a steep outlet would put water above its carved banks.
-            if (toLake[k] === 0) out[k] = lakeLevel[k];
-        } else if (Number.isFinite(toLake[k])) {
+        if (Number.isFinite(toLake[k])) {
             out[k] = lakeLevel[k] + (out[k] - lakeLevel[k]) * smoothstep(0, easeM, toLake[k]);
         }
     }

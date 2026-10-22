@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Lake shore review</title>
+<style>
+html,body{margin:0;height:100%;background:#182026;color:#edf3f6;font:14px system-ui}
+body{display:flex;flex-direction:column}header{padding:10px 14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+button{padding:7px 12px;border:1px solid #66808b;border-radius:5px;background:#2b414b;color:white;cursor:pointer}button:disabled{opacity:.45;cursor:wait}
+small{color:#bbced6}iframe{flex:1;border:0;width:100%}#status{min-width:240px}
+</style>
+<header>
+  <strong>Lake shore review</strong>
+  <select id="pose" aria-label="Review viewpoint"><option value="o4-star">o4-star overview</option><option value="o4-star-bank-45m">Bank at 45 m</option><option value="o4-star-bank-12m">Bank at 12 m</option></select>
+  <button id="jump" disabled>Go to view</button>
+  <button id="toggle" disabled>Show cached shore mask</button>
+  <button id="detail" disabled>Costly shore-detail test</button>
+  <span id="status">Loading the planet…</span>
+  <small>Experimental: frame-cost target not met. One cached region; automatic loading is pending.</small>
+</header>
+<iframe id="game" title="Live Spherecraft lake review" src="/wizard_game/standalone.html?regionalTerrain=0&amp;regionalBanks=organic&amp;riverSim=off&amp;waterPrecompute=1"></iframe>
+<script type="module">
+const frame=document.querySelector('#game'),status=document.querySelector('#status'),jump=document.querySelector('#jump'),toggle=document.querySelector('#toggle'),detail=document.querySelector('#detail');
+let enabled=false,busy=false,ready=false,retained=false;
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+async function idleDraw() {
+    const g=frame.contentWindow.gameEngine;
+    while(g._renderInFlight)await wait(16);
+    await g.renderer.backend.device.queue.onSubmittedWorkDone();
+}
+async function stableWater() {
+    const started=Date.now();let version=-1,since=Date.now();
+    while(Date.now()-started<90000) {
+        const g=frame.contentWindow.gameEngine,w=g.waterGpuData,s=g.waterService;
+        if(w._appliedVersion!==version||s._busy||s._client._pending.size){version=w._appliedVersion;since=Date.now();}
+        if(Date.now()-since>2000)return;
+        await wait(100);
+    }
+    throw new Error('Water is still loading. Try the toggle again when loading finishes.');
+}
+async function action(fn) {
+    if(busy)return;busy=true;toggle.disabled=jump.disabled=detail.disabled=true;
+    try{await fn();}catch(error){status.textContent=String(error);console.error(error);}
+    finally{busy=false;toggle.disabled=jump.disabled=!ready;detail.disabled=!frame.contentWindow.__lastFinalLakeMetadata;frame.focus();}
+}
+jump.onclick=()=>action(async()=>{
+    if(enabled){await idleDraw();await frame.contentWindow.__connectedPrototype.restore();enabled=false;toggle.textContent='Show cached shore mask';}
+    if(retained){frame.contentWindow.__restoreShoreLod();retained=false;detail.textContent='Costly shore-detail test';}
+    const views=await(await fetch('./views.json')).json(),v=views.find(v=>v.name===document.querySelector('#pose').value),up=v.pos.map(x=>x/Math.hypot(...v.pos));
+    const w=frame.contentWindow;
+    w.qtDiag.regional.useCamera({position:{x:v.pos[0],y:v.pos[1],z:v.pos[2]},target:{x:v.look[0],y:v.look[1],z:v.look[2]},up:{x:up[0],y:up[1],z:up[2]},fov:75});
+    status.textContent=`Loading ${v.name} terrain…`;await wait(5000);
+    status.textContent=`${v.name} · original coverage`;
+});
+toggle.onclick=()=>action(async()=>{
+    if(enabled){await idleDraw();await frame.contentWindow.__connectedPrototype.restore();enabled=false;status.textContent='Original coverage';}
+    else {
+        status.textContent='Waiting for local water data…';await stableWater();
+        status.textContent='Building the review mask…';await wait(40);
+        // This diagnostic install is intentionally separate from future
+        // background/camera-driven production publication. The game keeps
+        // running; shader changes and the local source remain reversible.
+        const m=await frame.contentWindow.eval("import('/tools/perf/waterStepReview/finalHeightLake.js').then(m=>m.installFinalHeightLake(633,{indexedOnly:true,sparse:true}))");
+        enabled=true;status.textContent=`Cached mask visible · ${(m.publicationMs/1000).toFixed(2)} s to prepare`;
+    }
+    toggle.textContent=enabled?'Show original coverage':'Show cached shore mask';
+});
+detail.onclick=()=>action(async()=>{
+    if(retained){frame.contentWindow.__restoreShoreLod();retained=false;status.textContent='Normal terrain selection';}
+    else {
+        const m=await frame.contentWindow.eval("import('/tools/perf/waterStepReview/shoreLod.js').then(m=>m.installShoreLod(window.__lastFinalLakeMetadata))");
+        retained=true;status.textContent=`Retaining detail in ${m.shoreTiles} shore tiles · loading…`;
+    }
+    detail.textContent=retained?'Use normal terrain detail':'Costly shore-detail test';
+});
+const timer=setInterval(()=>{
+    const g=frame.contentWindow?.gameEngine;
+    if(g?.waterGpuData?._applied?.has(633)&&g.waterService?.precomputed&&g.isInitialLoadComplete()){
+        ready=true;clearInterval(timer);jump.disabled=toggle.disabled=false;status.textContent='Ready · go to o4-star, then toggle coverage';
+        const style=frame.contentDocument.createElement('style');style.textContent='body > *:not(#gameCanvas){visibility:hidden!important}';frame.contentDocument.head.appendChild(style);
+    }
+},500);
+</script>
+</html>

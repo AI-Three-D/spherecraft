@@ -27,7 +27,7 @@ export interface RendererBackend {
     getCommandEncoder(): GPUCommandEncoder;
     getRenderPassEncoder(): GPURenderPassEncoder | null;
     endRenderPassForCompute(): void;
-    resumeRenderPass(): void;
+    resumeRenderPass(options?: { depthReadOnly?: boolean }): void;
     submitCommands(): void;
     discardCommands(): void;
     draw(geometry: Geometry, material: Material): void;

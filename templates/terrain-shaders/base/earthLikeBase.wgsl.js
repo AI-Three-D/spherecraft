@@ -223,8 +223,9 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
 // (core/world/water/riverCarve.wgsl.js; pass-throughs when disabled).
 fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     let natural = calculateTerrainHeightBaseD(seed, unitDir);
-    let excavated = valleyApply_d(valleyShapeAt(unitDir), regionalBasinApply_d(natural, unitDir));
-    return riverCarve_d(excavated, unitDir);
+    let basin = regionalBasinApply_d(natural, unitDir);
+    let excavated = valleyApply_d(valleyShapeAt(unitDir), basin);
+    return riverCarveTerrain_d(basin, excavated, unitDir);
 }
 
 // The terrain before the river carve.

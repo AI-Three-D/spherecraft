@@ -1504,7 +1504,7 @@ setRenderTarget(rt) {
 }
 // Add this new method to expose the depth texture view
 getDepthTextureView() {
-    return this._depthTextureView || null;
+    return this._currentRenderTarget?._gpuRenderTarget?.depthView ?? this._depthTextureView ?? null;
 }
 
 getDepthTexture() {
@@ -1630,7 +1630,7 @@ endRenderPassForCompute() {
     this._endCurrentRenderPass();
 }
 
-resumeRenderPass() {
+resumeRenderPass({ depthReadOnly = false } = {}) {
     if (this._renderPassEncoder) return;
     this._ensureCommandEncoder();
     
@@ -1645,12 +1645,15 @@ resumeRenderPass() {
         hasDepth = true;
     }
     
-    const depthAttachment = hasDepth ? {
+    const depthAttachment = hasDepth ? (depthReadOnly ? {
+        view: depthView,
+        depthReadOnly: true,
+    } : {
         view: depthView,
         depthClearValue: 1.0,
         depthLoadOp: 'load',
         depthStoreOp: 'store'
-    } : undefined;
+    }) : undefined;
     
     const colorAttachments = [];
     if (this._currentRenderTarget) {

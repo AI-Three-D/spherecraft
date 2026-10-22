@@ -24,7 +24,7 @@ import { fillNearWaterUniforms } from './nearWaterUniforms.js';
 import { aerialFadeRange } from '../terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import {
     NEAR_RIVER_POINTS_BINDING, NEAR_RIVER_QUADS_BINDING,
-    NEAR_WATER_MAX_LAKES, NEAR_WATER_SAMPLER_BINDING, NEAR_WATER_TRANSMITTANCE_BINDING, NEAR_WATER_UNIFORM_FLOATS,
+    NEAR_WATER_MAX_LAKES, NEAR_WATER_SAMPLER_BINDING, NEAR_WATER_TRANSMITTANCE_BINDING, NEAR_WATER_SCENE_DEPTH_BINDING, NEAR_WATER_UNIFORM_FLOATS,
     buildNearRiverFragmentShader, buildNearRiverVertexShader, buildNearWaterFragmentShader, buildNearWaterVertexShader,
 } from './nearWaterSurface.wgsl.js';
 
@@ -141,7 +141,10 @@ export class NearWaterRenderer {
             if (params.value?.buffer !== water.paramsData) params.value = new Float32Array(water.paramsData);
             m.uniforms.waterLakeMasks.value = res.masks;
             m.uniforms.transmittanceLUT.value = g.transmittanceLUT?.value ?? null;
+            m.uniforms.nearWaterSceneDepth.value = this.backend.getDepthTextureView();
         }
+        this.backend.endRenderPassForCompute();
+        this.backend.resumeRenderPass({ depthReadOnly: true });
         if (this._lakes.length) {
             this._lakeGeometry.instanceCount = this._lakes.length;
             this.backend.draw(this._lakeGeometry, this._lakeMaterial);
@@ -152,6 +155,8 @@ export class NearWaterRenderer {
             this._riverGeometry.setDrawRange(0, this._quadCount * 6);
             this.backend.draw(this._riverGeometry, this._riverMaterial);
         }
+        this.backend.endRenderPassForCompute();
+        this.backend.resumeRenderPass();
     }
 
     dispose() {
@@ -174,11 +179,13 @@ export function createNearWaterMaterial(name, vertexShader, fragmentShader, unif
                 waterParams: { value: null },
                 waterLakeMasks: { value: null },
                 transmittanceLUT: { value: null },
+                nearWaterSceneDepth: { value: null },
             },
             vertexLayout: [],
             side: 'double',
             transparent: true,
             depthTest: true,
+            depthCompare: 'always',
             depthWrite: false,
             blending: 'premultiplied',
             bindGroupLayoutSpec: [
@@ -196,6 +203,7 @@ export function createNearWaterMaterial(name, vertexShader, fragmentShader, unif
                         { binding: B.rivers, visibility: VF, name: 'waterRivers', buffer: { type: 'read-only-storage' } },
                         { binding: NEAR_WATER_SAMPLER_BINDING, visibility: VF, name: 'nearWaterSampler', sampler: { type: 'filtering' } },
                         { binding: NEAR_WATER_TRANSMITTANCE_BINDING, visibility: 'fragment', name: 'transmittanceLUT', texture: { sampleType: 'float', viewDimension: '2d' } },
+                        { binding: NEAR_WATER_SCENE_DEPTH_BINDING, visibility: 'fragment', name: 'nearWaterSceneDepth', texture: { sampleType: 'depth', viewDimension: '2d' } },
                     ],
                 },
                 ...extraGroups,

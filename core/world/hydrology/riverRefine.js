@@ -227,7 +227,7 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 // ground beside the channel is below it, at most 32 m; 14 = held while the
 // lake's drawn water lies beside it (riverLakeHold); 15 = downstream of
 // the hold the fit from the lake as before.
-export const RIVER_SOLVE_VERSION = 15;
+export const RIVER_SOLVE_VERSION = 16; // refined lower lakes terminate reaches at their own surface
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
