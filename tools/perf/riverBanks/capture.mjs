@@ -8,7 +8,9 @@
 // the highest lake within 40 km; terrainDetail/abDetail.mjs discovery).
 // With --compare BASELINE_DIR, writes <pose>-before-after.png (baseline left).
 // --poses FILE adds poses ({ name, pos, look } or { name, river, fraction });
-// --url-extra appends to the URL (e.g. '&water=off&lodHeight=ground').
+// --url-extra appends to the URL (e.g. '&water=off&lodHeight=ground');
+// --eval runs a page expression after loading (e.g.
+// 'qtDiag.setTerrainFeatures({ waterCarve: false })'), awaited, then settles.
 //
 //   node tools/perf/riverBanks/capture.mjs OUT_DIR [--profile DIR] [--compare DIR] [--only a,b] [--poses FILE] [--url-extra S]
 import fs from 'node:fs';
@@ -73,6 +75,13 @@ try {
         document.head.appendChild(st);
     });
     console.log(JSON.stringify({ loaded: report.loadS }));
+    if (arg('--eval')) {
+        report.eval = await page.evaluate(async (code) => {
+            const r = await (0, eval)(code);
+            await (await import('/tools/perf/waterStepReview/qualityScene.js')).settle(300000);
+            return JSON.stringify(r ?? null).slice(0, 400);
+        }, arg('--eval'));
+    }
 
     for (const view of poses) {
         const rec = await page.evaluate(async (v) => {

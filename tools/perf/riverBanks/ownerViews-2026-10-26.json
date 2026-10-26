@@ -1,0 +1,11 @@
+[
+ {"name":"o26-shore-saw","pos":[-131815.4,2225.7,-511.6],"look":[-131812.1,2219.7,-509.8],"note":"sawtooth along a lake shore (tan land)"},
+ {"name":"o26-lake-crease","pos":[-131814.9,2477.8,20.3],"look":[-131810.8,2482.2,24.0],"note":"dark line across the water: river carving extending into the lake"},
+ {"name":"o26-mouth-blur","pos":[-131840.2,3069.2,162.4],"look":[-131835.2,3065.8,158.7],"note":"river mouth into a lake"},
+ {"name":"o26-scales","pos":[-131897.5,2049.9,1458.0],"look":[-131893.9,2044.1,1456.1],"note":"segments / scales along the river banks, dark stripes on the hillside"},
+ {"name":"o26-mouth-curve","pos":[-131958.5,1762.7,1346.5],"look":[-131954.5,1757.0,1347.2],"note":"river reaching a lake"},
+ {"name":"o26-tan-saw","pos":[-131878.8,1487.4,3269.7],"look":[-131875.8,1482.9,3265.2],"note":"sawtooth bank, dark band, odd green shape (tan area)"},
+ {"name":"o26-mouth-band","pos":[-131951.1,1125.6,2636.0],"look":[-131945.8,1120.9,2636.6],"note":"river into a lake, band across"},
+ {"name":"o26-lake-edge","pos":[-132028.9,940.5,2654.4],"look":[-132023.9,935.7,2652.6],"note":"river along a lake edge"},
+ {"name":"o26-mouth-wide","pos":[-132020.6,-862.4,789.0],"look":[-132014.7,-865.1,786.0],"note":"river channel continuing under the lake"}
+]

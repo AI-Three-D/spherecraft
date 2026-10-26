@@ -612,10 +612,10 @@ export function createWaterWorkerCore() {
         }
         const destLevel = plan.destLevel;
         if (destLevel > srcLevel) return { reply: { type: 'riverSolved', riverId, status: 'uphill' } };
-        let sourceEnd = 0, destStart = n - 1, sourceMouth = 0, destMouth = n - 1;
+        let sourceEnd = 0, destStart = n - 1, sourceMouth = 0, destMouth = n - 1, deltaLake = false;
         const centreInLake = (k, level) => { const c = pointCell(k); return c >= 0 && lakeMask[c] && Math.abs(lakeLevel[c] - level) < 0.01; };
         for (let k = 0; k < n - 1; k++) if (centreInLake(k, srcLevel)) sourceMouth = k;
-        for (let k = n - 1; k > sourceMouth; k--) if (centreInLake(k, destLevel)) destMouth = k;
+        for (let k = n - 1; k > sourceMouth; k--) if (centreInLake(k, destLevel)) { destMouth = k; deltaLake = true; }
         const touchesLake = (k, level) => {
             const a = Math.max(0, k - 1), b = Math.min(n - 1, k + 1);
             const dx = sm.x[b] - sm.x[a], dy = sm.y[b] - sm.y[a], len = Math.hypot(dx, dy) || 1;
@@ -646,8 +646,6 @@ export function createWaterWorkerCore() {
         // from the record's endpoints inside open water.
         // The river's typical width (median) scales its width noise (riverSection.js).
         const typicalWidthM = shapes.map(sh => sh.width).sort((a, b) => a - b)[shapes.length >> 1];
-        const reachP = { ...shapeP, junctionStartM: sm.s[sourceMouth], junctionEndM: sm.s[destMouth], typicalWidthM };
-        for (let k = 0; k < n; k++) shapes[k] = riverReachShape(shapes[k], sm.s[k], total, riverId, reachP);
         // Natural ground (bilinear on the patch).
         const groundAt = (x, y) => {
             const fx = (x - frame.x0) / spacing - 0.5, fy = (y - frame.y0) / spacing - 0.5;
@@ -655,6 +653,17 @@ export function createWaterWorkerCore() {
             const tx = Math.min(1, Math.max(0, fx - i)), ty = Math.min(1, Math.max(0, fy - j)), c = j * nx + i;
             return (h[c] * (1 - tx) + h[c + 1] * tx) * (1 - ty) + (h[c + nx] * (1 - tx) + h[c + nx + 1] * tx) * ty;
         };
+        // A delta reaches its full width at the shore: where the natural
+        // ground along the channel last drops under the lake's level (the
+        // coarse lake flag lags it by a segment or two).
+        let deltaEndK = destMouth;
+        if (deltaLake) {
+            let k = n - 1;
+            while (k > sourceMouth + 1 && groundAt(sm.x[k - 1], sm.y[k - 1]) < destLevel) k--;
+            deltaEndK = Math.min(destMouth, k);
+        }
+        const reachP = { ...shapeP, junctionStartM: sm.s[sourceMouth], junctionEndM: sm.s[deltaEndK], typicalWidthM, deltaLake };
+        for (let k = 0; k < n; k++) shapes[k] = riverReachShape(shapes[k], sm.s[k], total, riverId, reachP);
         const cellOf = (x, y) => {
             const i = Math.floor((x - frame.x0) / spacing), j = Math.floor((y - frame.y0) / spacing);
             return i >= 0 && j >= 0 && i < nx && j < ny ? j * nx + i : -1;

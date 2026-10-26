@@ -178,10 +178,16 @@ struct WaterRiverPt {
 };
 
 fn waterRiverPoint(s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverPt {
+    return waterRiverPointOn(s, dir, false);
+}
+// extend: on the segment's line past its ends, its values extrapolated (the
+// river carve's blend across a joint; riverCarve.wgsl.js riverCarveJoint),
+// instead of a rounded cap with the end's values.
+fn waterRiverPointOn(s: WaterRiverSeg, dir: vec3<f32>, extend: bool) -> WaterRiverPt {
     var p: WaterRiverPt;
     let ab = s.p1 - s.p0;
     p.tRaw = dot(dir - s.p0, ab) / max(dot(ab, ab), 1.0e-20);
-    p.t = clamp(p.tRaw, 0.0, 1.0);
+    p.t = select(clamp(p.tRaw, 0.0, 1.0), p.tRaw, extend);
     p.v = dir - (s.p0 + ab * p.t);
     p.dLine = length(p.v) * waterParams.planetRadius;
     let left = cross(dir, ab);
