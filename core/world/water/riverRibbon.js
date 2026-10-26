@@ -90,6 +90,33 @@ export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
 }
 
 /**
+ * A value along a traced river at fraction t of segment k (points k, k + 1),
+ * blended toward its neighbour's across the nearer joint as the shaders'
+ * waterRiverJoint: the neighbour's line extended past the joint, weight 1/2
+ * there, 0 from the middle of the shorter segment.
+ * @param {ArrayLike<number>} values  per point
+ * @param {ArrayLike<number>} arc     arc length (m) per point
+ */
+export function riverJointValue(values, arc, k, t) {
+    const n = values.length, L = arc[k + 1] - arc[k];
+    const own = values[k] + (values[k + 1] - values[k]) * t;
+    const next = t >= 0.5, o = next ? k + 1 : k - 1;
+    if (o < 0 || o + 1 >= n || !(L > 0)) return own;
+    const Lo = arc[o + 1] - arc[o], band = 0.5 * Math.min(L, Lo);
+    if (!(band > 0)) return own;
+    const a = next ? (1 - t) * L : t * L, slope = (values[o + 1] - values[o]) / Lo;
+    const other = next ? values[k + 1] - slope * a : values[k] + slope * a;
+    const x = Math.min(1, Math.max(0, a / band));
+    return own + (other - own) * 0.5 * (1 - x * x * (3 - 2 * x));
+}
+
+// Ribbon rows between two points: the level follows the joints' blend
+// (riverJointValue) as the bed and the shading's level do; with one row per
+// point its straight pieces met the smoothed bed in a waterline that bulged
+// at every point (stairs, owner 2026-10-26).
+export const RIBBON_SUB_ROWS = 3;
+
+/**
  * @param {object} o
  * @param {Iterable<[number, object]>} o.rivers  [river id, traced record] (points stride >= 12; water level at 16 when stride >= 20)
  * @param {(rec: object) => Float64Array} o.arcOf  arc length (m) at each point (as the GPU segments have it)
@@ -165,7 +192,24 @@ export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, sh
                 // The run's points, with a cap beyond the river's own ends.
                 const run = [];
                 if (runStart === 0 && !(st >= 12 && P[9] < 0)) run.push(ribbonPoint(0, -1));
-                for (let m = runStart; m < k; m++) run.push(ribbonPoint(m, 0));
+                let prev = null;
+                for (let m = runStart; m < k; m++) {
+                    const row = ribbonPoint(m, 0);
+                    if (prev) {
+                        for (let j = 1; j <= RIBBON_SUB_ROWS; j++) {
+                            const t = j / (RIBBON_SUB_ROWS + 1), r = R + riverJointValue(levels, arc, m - 1, t);
+                            const at = (i) => {
+                                const a = [prev[i] - origin.x, prev[i + 1] - origin.y, prev[i + 2] - origin.z];
+                                const b = [row[i] - origin.x, row[i + 1] - origin.y, row[i + 2] - origin.z];
+                                const d = norm([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
+                                return [origin.x + d[0] * r, origin.y + d[1] * r, origin.z + d[2] * r];
+                            };
+                            run.push([...at(0), rid, ...at(4), r - R]);
+                        }
+                    }
+                    run.push(row);
+                    prev = row;
+                }
                 if (k === n) run.push(ribbonPoint(n - 1, 1));
                 const base = pts.length / RIBBON_POINT_FLOATS;
                 run.forEach((p, i) => { pts.push(...p); if (i > 0) quads.push(base + i - 1); });

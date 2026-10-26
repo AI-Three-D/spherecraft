@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRiverRibbons, RIBBON_POINT_FLOATS, riverWaterLevels } from './riverRibbon.js';
+import { buildRiverRibbons, RIBBON_POINT_FLOATS, RIBBON_SUB_ROWS, riverJointValue, riverWaterLevels } from './riverRibbon.js';
 
 const R = 100000;
 const ST = 20;
@@ -22,6 +22,10 @@ const arcOf = (rec) => {
 const flat = { widthVar: 0, wobble: 0, bankVar: 0 };
 const base = { arcOf, R, origin: { x: 0, y: 0, z: 0 }, shape: flat, lakeAt: () => null };
 const point = (pts, i) => pts.slice(i * RIBBON_POINT_FLOATS, (i + 1) * RIBBON_POINT_FLOATS);
+// Rows: a river point, then RIBBON_SUB_ROWS rows to the next one.
+const ROW = RIBBON_SUB_ROWS + 1;
+const rowOf = (k, cap = 1) => cap + k * ROW;
+const rows = (pointCount, caps) => pointCount + RIBBON_SUB_ROWS * (pointCount - 1) + caps;
 const legacy = rec => {
     const points = new Float32Array(rec.points.length / ST * 12);
     for (let k = 0; k < points.length / 12; k++) {
@@ -34,9 +38,9 @@ const legacy = rec => {
 describe('river ribbons', () => {
     it('flat across at the water level, channel width plus the margin', () => {
         const { points, quads } = buildRiverRibbons({ ...base, rivers: [[7, straightRiver(10)]], camera: { x: 0, y: 0, z: R + 60 }, rangeM: 1000 });
-        expect(points.length / RIBBON_POINT_FLOATS).toBe(12);          // 10 points and a cap at each end
-        expect([...quads]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        const p = point(points, 5);                                    // river point 4
+        expect(points.length / RIBBON_POINT_FLOATS).toBe(rows(10, 2)); // 10 points and a cap at each end
+        expect([...quads]).toEqual(Array.from({ length: rows(10, 2) - 1 }, (_, i) => i));
+        const p = point(points, rowOf(4));                             // river point 4
         expect(p[3]).toBe(7);                                          // river id
         expect(p[7]).toBeCloseTo(52, 5);                               // level
         expect(Math.hypot(p[0], p[1], p[2])).toBeCloseTo(R + 52, 2);   // left edge on the level
@@ -46,9 +50,10 @@ describe('river ribbons', () => {
 
     it('only the stretches within range, one more point at each end', () => {
         const { points, quads } = buildRiverRibbons({ ...base, rivers: [[1, straightRiver(200)]], camera: { x: 0, y: 0, z: R + 60 }, rangeM: 160 });
-        const n = points.length / RIBBON_POINT_FLOATS;
-        expect(n).toBeGreaterThan(9);
-        expect(n).toBeLessThan(15);
+        const n = points.length / RIBBON_POINT_FLOATS, pointCount = (n - 1 + RIBBON_SUB_ROWS) / ROW;   // a cap at the start (point 0 in range)
+        expect(Number.isInteger(pointCount)).toBe(true);
+        expect(pointCount).toBeGreaterThan(9);
+        expect(pointCount).toBeLessThan(15);
         expect(quads.length).toBe(n - 1);
     });
 
@@ -56,9 +61,9 @@ describe('river ribbons', () => {
         const { points } = buildRiverRibbons({ ...base, rivers: [[1, straightRiver(4)]], camera: { x: 0, y: 0, z: R + 60 }, rangeM: 1000 });
         const mid = (i) => { const p = point(points, i); return [(p[0] + p[4]) / 2, (p[1] + p[5]) / 2, (p[2] + p[6]) / 2]; };
         const gap = (i, j) => Math.hypot(...mid(i).map((v, c) => v - mid(j)[c])) * R / (R + 52);
-        expect(points.length / RIBBON_POINT_FLOATS).toBe(6);
+        expect(points.length / RIBBON_POINT_FLOATS).toBe(rows(4, 2));
         expect(gap(0, 1)).toBeCloseTo(12, 1);                          // before point 0
-        expect(gap(4, 5)).toBeCloseTo(12, 1);                          // after the last point
+        expect(gap(rowOf(3), rowOf(3) + 1)).toBeCloseTo(12, 1);        // after the last point
         expect(mid(0)[0]).toBeLessThan(mid(1)[0]);                      // behind the start, along -x
     });
 
@@ -66,7 +71,7 @@ describe('river ribbons', () => {
         const rec = straightRiver(10);
         rec.points[9] = -1;
         const { points } = buildRiverRibbons({ ...base, rivers: [[1, rec]], camera: { x: 0, y: 0, z: R + 60 }, rangeM: 1000 });
-        expect(points.length / RIBBON_POINT_FLOATS).toBe(11);
+        expect(points.length / RIBBON_POINT_FLOATS).toBe(rows(10, 1));
         const p = point(points, 0);
         expect((p[0] + p[4]) / 2).toBeCloseTo(0, 2);
     });
@@ -117,7 +122,21 @@ describe('river ribbons', () => {
         for (let k = 0; k < levels.length; k++) expect(levels[k]).toBe(rec.points[k * ST + 16]);
         const mesh = buildRiverRibbons({ ...base, lakeAt: () => ({ level: 543.2 }),
             rivers: [[1, rec]], camera: { x: 0, y: 0, z: R + 550 }, rangeM: 1000 });
-        for (let k = 0; k < levels.length; k++) expect(point(mesh.points, k + 1)[7]).toBe(levels[k]);
+        for (let k = 0; k < levels.length; k++) expect(point(mesh.points, rowOf(k))[7]).toBe(levels[k]);
+    });
+
+    it('rows between points follow the joints\' blend: continuous level and slope', () => {
+        // Level falling 0.5 m, then 3 m per 16 m segment: a kink at point 5.
+        const lv = Array.from({ length: 10 }, (_, k) => 100 - (k <= 5 ? 0.5 * k : 2.5 + 3 * (k - 5)));
+        const arc = Array.from({ length: 10 }, (_, k) => 16 * k);
+        const at = (s) => { const k = Math.min(8, Math.floor(s / 16)); return riverJointValue(lv, arc, k, (s - 16 * k) / 16); };
+        expect(at(16 * 5)).toBeCloseTo(lv[5], 9);                      // through the points
+        expect(at(16 * 2.5)).toBeCloseTo((lv[2] + lv[3]) / 2, 9);       // straight mid-segment
+        const slope = (s) => (at(s + 0.001) - at(s - 0.001)) / 0.002;
+        expect(slope(16 * 5 - 0.01)).toBeCloseTo(slope(16 * 5 + 0.01), 2);   // no kink at the joint
+        expect(slope(16 * 5)).toBeCloseTo(-(0.5 + 3) / 2 / 16, 3);
+        const mesh = buildRiverRibbons({ ...base, rivers: [[1, straightRiver(10, k => lv[k])]], camera: { x: 0, y: 0, z: R + 60 }, rangeM: 1000 });
+        expect(point(mesh.points, rowOf(4) + 2)[7]).toBeCloseTo(riverJointValue(lv, arcOf(straightRiver(10)), 4, 0.5), 3);
     });
 
     it('a tight bend keeps the inner edge inside the bend (no fold)', () => {
@@ -126,7 +145,7 @@ describe('river ribbons', () => {
         const pts = [[0, 0], [16, 0], [16, 16]];
         pts.forEach(([x, y], k) => { const d = [x / R, y / R, 1], l = Math.hypot(...d); P.set([d[0] / l, d[1] / l, d[2] / l, 53, 10, 3], k * ST); P[k * ST + 16] = 52; });
         const { points } = buildRiverRibbons({ ...base, marginM: 2, rivers: [[1, { points: P, stride: ST }]], camera: { x: 0, y: 0, z: R + 60 }, rangeM: 1000 });
-        const p = point(points, 2);                                    // river point 1 (after the start cap)
+        const p = point(points, rowOf(1));                             // river point 1 (after the start cap)
         const centre = [16 / R * (R + 52), 0, R + 52];
         // Widths are metres at radius R (as the terrain's waterRiverPoint measures them).
         const atR = R / (R + 52);

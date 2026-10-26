@@ -44,7 +44,9 @@ export async function riversNearProbe({ pos, radiusM = 400 }) {
         const inLake = near.filter(k => P[k * st + 9] < 0);
         out.push({ id, points: n, near: [near[0], near.at(-1)], inLake: inLake.length,
             inLakeGroundMinusGuard: inLake.map(k => +(P[k * st + 13] - P[k * st + 18]).toFixed(2)).slice(0, 12),
-            hwNear: near.map(k => +P[k * st + 4].toFixed(1)).slice(0, 12) });
+            hwNear: near.map(k => +P[k * st + 4].toFixed(1)).slice(0, 12),
+            nearest: near.map(k => ({ k, dM: Math.round(R * Math.acos(Math.min(1, P[k * st] * dir[0] + P[k * st + 1] * dir[1] + P[k * st + 2] * dir[2]))), eta: +P[k * st + 3].toFixed(2) }))
+                .sort((a, b) => a.dM - b.dM).slice(0, 4) });
     }
     return out;
 }

@@ -750,7 +750,7 @@ export function createWaterWorkerCore() {
         // lake rims its banks keep (14, 15).
         const reachExtra = Math.max(40, msg.reachM ?? 0), reachScale = msg.reachScale ?? 1;
         const rims = riverLakeRims({ x: sm.x, y: sm.y, s: sm.s, hw: hwArr, reach: hwArr.map(hw => hw * reachScale + reachExtra),
-            water: lakeDrawn, level: lakeLevel, nx, ny, x0: frame.x0, y0: frame.y0, spacing });
+            water: lakeDrawn, level: lakeLevel, wl: eta, nx, ny, x0: frame.x0, y0: frame.y0, spacing });
         let points = new Float32Array(n * stride);
         for (let k = 0; k < n; k++) {
             const { width, depth, Qm3s } = shapes[k];

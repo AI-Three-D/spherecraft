@@ -248,5 +248,17 @@ describe('lake rims', () => {
         for (let k = 1; k < n; k++) expect(Math.abs(left[k] - left[k - 1])).toBeLessThanOrEqual(P.lakeSlope * 20 + 1e-9);
         // 400 m past the lake: far below the ground near it.
         expect(left[at(400)]).toBeLessThan(0);
+        // Down a stream steeper than lakeSlope (0.3 per m) the rims fall
+        // with the water: never more above it than near the lake.
+        const wl = Float64Array.from(xs, x => 49 - 0.3 * Math.max(0, x));
+        const steep = riverLakeRims({ x: xs, y: ys, s, hw, reach: new Float64Array(n).fill(120), water, level, wl, nx, ny, x0, y0, spacing });
+        const excess = (k) => steep.left[k] - wl[k];
+        expect(steep.left[at(-200)]).toBeCloseTo(50 + P.lakeMarginM, 6);
+        // Beyond the water's direct reach (160 m from its cells) only the
+        // carried rim: its height above the water falls lakeSlope per m.
+        for (let k = at(200) + 1; k < n; k++) expect(excess(k)).toBeCloseTo(Math.max(excess(k - 1) - P.lakeSlope * 20, -1e4 - wl[k]), 6);
+        expect(excess(at(300))).toBeLessThan(0);
+        // Absolute rims (no wl) stood far above that water.
+        expect(left[at(200)] - wl[at(200)]).toBeGreaterThan(20);
     });
 });
