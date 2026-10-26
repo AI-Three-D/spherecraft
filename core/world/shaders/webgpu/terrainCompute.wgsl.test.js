@@ -64,12 +64,17 @@ describe('terrain generation compute shader', () => {
                 regionalTerrain:true,regionalShape:shape,...inputs});
             expect(compile(src)).toBeNull();
             expect(src).toContain('riverSection_d(nD, hwD, bed, D');
-            expect(src).toContain('let shoreNoise = waterBankNoise');
+            expect(src).toContain('let nLong = waterBankNoise');
+            // Lake beds are mud too: the lake lookup in group 1 (bindings 7-9).
+            expect(src).toContain('fn riverCarveLakeBed');
+            expect(src).toMatch(/@group\(1\) @binding\(7\) var<storage, read> waterLakes/);
+            expect(src).toMatch(/@group\(1\) @binding\(9\) var riverCarveLakeSampler: sampler/);
         }
         const plain=createAdvancedTerrainComputeShader({...base,waterCarve:true});
         expect(compile(plain)).toBeNull();
         expect(plain).toContain('riverSection_d(nD, hwD, bed, D');
-        expect(plain).not.toContain('let shoreNoise = waterBankNoise');
+        expect(plain).not.toContain('let nLong = waterBankNoise');
+        expect(plain).not.toContain('waterLakes');
     });
     const base = {
         baseGenerator: 'earthLike',

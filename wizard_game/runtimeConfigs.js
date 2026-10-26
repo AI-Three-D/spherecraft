@@ -430,6 +430,11 @@ export function createEngineConfig() {
       visibleTableCapacity: 2048,
       feedbackCapacity: 4096,
       lodErrorThreshold:  512,  //512,
+      // Non-regional terrain: distance for the detail choice from each tile's
+      // sea-level centre ('sea') or its own resident ground ('ground'). From
+      // sea level, raised land near the camera got far-ground detail (600 m
+      // up: 2 m vertices under the camera instead of 1 m). URL ?lodHeight=.
+      lodHeightSource: 'sea',
       // Visible tiles draw from the nearest layer whose material is finished
       // (own or ancestor), so a tile never flashes a geometry-only
       // placeholder while its refinement is pending. false = old behaviour.

@@ -1,0 +1,10 @@
+[
+ {"name":"owner-far-dotted-a","pos":[-133427.5,-63.7,45.0],"look":[-133424.0,-57.6,44.7],"note":"river between lakes a light dotted line from 2.3 km"},
+ {"name":"owner-far-dotted-b","pos":[-132819.4,817.8,-7.4],"look":[-132815.9,823.9,-7.8],"note":"same, 1.7 km"},
+ {"name":"owner-mid","pos":[-131929.9,2407.4,51.1],"look":[-131925.9,2413.1,50.1],"note":"looks like water a bit closer"},
+ {"name":"owner-close","pos":[-131811.9,2534.3,60.5],"look":[-131807.7,2533.9,66.2],"note":"bed close up"},
+ {"name":"owner-bank-seam","pos":[-131811.9,2534.3,60.5],"look":[-131809.0,2540.6,61.7],"note":"faint seam in the bank (red arrow)"},
+ {"name":"owner-top-rock","pos":[-131823.5,2547.7,67.2],"look":[-131818.6,2549.4,71.9],"note":"grey grid patches in the bed (rock?)"},
+ {"name":"owner-scallop","pos":[-131898.5,2048.5,1377.1],"look":[-131895.4,2042.8,1379.8],"note":"scalloped line along the bank"},
+ {"name":"owner-rock-bed","pos":[-131808.6,2589.1,-892.5],"look":[-131804.8,2587.9,-898.4],"note":"grid texture in the bed, tiger stripes on a hillside"}
+]

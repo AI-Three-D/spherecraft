@@ -19,16 +19,20 @@
 // including the centre's wobble and the width's change along the river;
 // skew and the bank types are taken as constant along it (they vary slowly).
 
-import { createWaterCommonWgsl, RIVER_MAX_SEGS_PER_CELL } from './waterWgsl.js';
+import { createWaterCommonWgsl, createWaterLookupWgsl, RIVER_MAX_SEGS_PER_CELL } from './waterWgsl.js';
 import { RIVER_SECTION, createRiverSectionWgsl } from './riverSection.js';
 
 // Group 1 of the terrain generator's pipelines (binding 0 is its biome uniform).
+// lakes, masks and sampler: the lake lookup of the shore materials (bankDetail).
 export const RIVER_CARVE_GROUP = 1;
-export const RIVER_CARVE_BINDINGS = Object.freeze({ index: 1, params: 2, rivers: 3 });
+export const RIVER_CARVE_BINDINGS = Object.freeze({ index: 1, params: 2, rivers: 3, lakes: 7, masks: 8, sampler: 9 });
 // Terrain micro detail returns over this far (m) beyond a river's half-width.
 const MICRO_RETURN_M = 8;
 // The cut fades out over this far (m) behind a river's first point.
 const START_FADE_M = 30;
+// Rivers per point whose containment floor is kept (riverSection.js contain).
+const MAX_FLOORS = 6;
+const CONTAIN = RIVER_SECTION.contain;
 
 /**
  * @param {object} [o]
@@ -64,8 +68,11 @@ fn riverCarveReach(p: WaterRiverPt) -> f32 {
     return p.hw + ${RIVER_SECTION.reachM.toFixed(1)};
 }
 
-// The nearest segment's cross-section at unitDir over the natural ground h0, as a height dual.
-fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0: vec4<f32>) -> vec4<f32> {
+// A segment's values at unitDir as height duals (d/d unitDir): offset n
+// from the channel's centre, half-width, level, thalweg, bank-full depth D
+// and the water's level.
+struct RiverCarveDuals { n: vec4<f32>, hw: vec4<f32>, eta: vec4<f32>, bed: vec4<f32>, D: vec4<f32>, wl: vec4<f32>, };
+fn riverCarveDuals(s: WaterRiverSeg, p: WaterRiverPt) -> RiverCarveDuals {
     let R = waterParams.planetRadius;
     let ab = s.p1 - s.p0;
     // d(t)/d unitDir inside the segment (t is fixed past its ends); arc
@@ -74,11 +81,40 @@ fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0
     let tg = select(vec3<f32>(0.0), ab / max(dot(ab, ab), 1.0e-20), p.tRaw > 0.0 && p.tRaw < 1.0);
     let sGrad = (s.s1 - s.s0) * tg;
     let lineGrad = p.v * (R * R / max(p.dLine, 1.0e-3));
-    let nD = vec4<f32>(p.n, p.nSign * lineGrad - p.dOff * sGrad);
-    let hwD = vec4<f32>(p.hw, p.dHw * sGrad);
-    let eta = vec4<f32>(p.eta, (s.eta1 - s.eta0) * tg);
-    let bed = vec4<f32>(p.bed, (s.bed1 - s.bed0) * tg);
-    let D = (eta - bed) * (1.0 / max(waterParams.carve.w, 0.05));
+    var c: RiverCarveDuals;
+    c.n = vec4<f32>(p.n, p.nSign * lineGrad - p.dOff * sGrad);
+    c.hw = vec4<f32>(p.hw, p.dHw * sGrad);
+    c.eta = vec4<f32>(p.eta, (s.eta1 - s.eta0) * tg);
+    c.bed = vec4<f32>(p.bed, (s.bed1 - s.bed0) * tg);
+    c.D = (c.eta - c.bed) * (1.0 / max(waterParams.carve.w, 0.05));
+    c.wl = vec4<f32>(p.wl, (s.wl1 - s.wl0) * tg);
+    return c;
+}
+
+// The containment floor of the segment at unitDir (riverSection.js
+// riverContainFloor), and how much of its fill applies (0..1): none where
+// the river is in a lake, none behind its first point; riverCarveTerrain_d
+// adds none on ground below a nearby lake's level (lakeGuard: lake bed and
+// shore band, the lake's water covers it). Gating on the river's level
+// near the lake instead raised a lake's shallow edge at a mouth above its
+// water (the river's level ramps down to the lake's there).
+fn riverCarveFloor_d(c: RiverCarveDuals, p: WaterRiverPt) -> vec4<f32> {
+    return riverContainFloor_d(c.n, c.hw, c.bed, c.D, p.skew, c.wl, waterRiverBank(p, true), waterRiverBank(p, false));
+}
+fn riverCarveFloorWeight(s: WaterRiverSeg, p: WaterRiverPt) -> f32 {
+    if (s.s0 <= 0.0 && p.tRaw < 0.0) { return 0.0; }
+    return clamp(1.0 + p.pool, 0.0, 1.0);
+}
+
+// The nearest segment's cross-section at unitDir over the natural ground h0, as a height dual.
+fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0: vec4<f32>) -> vec4<f32> {
+    let c = riverCarveDuals(s, p);
+    let nD = c.n;
+    let hwD = c.hw;
+    let bed = c.bed;
+    let D = c.D;
+    let ab = s.p1 - s.p0;
+    let R = waterParams.planetRadius;
     // Each bank keeps the rim of drawn water next to it (riverBankRim): cut
     // below a lake's level, banks left the lake hanging over lower ground (v85).
     let left = waterRiverBank(p, true);
@@ -116,6 +152,14 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
     var fine = original;
     var valleyWeight = dConst(1.0);
     let excavated = h0.x < original.x;
+    // Each river's containment floor, its weight, and how far the point is
+    // beyond its channel's edge (a floor never fills another river's channel).
+    var floors: array<vec4<f32>, ${MAX_FLOORS}>;
+    var floorWater: array<vec4<f32>, ${MAX_FLOORS}>;
+    var floorWeight: array<f32, ${MAX_FLOORS}>;
+    var floorLake: array<f32, ${MAX_FLOORS}>;
+    var beyond: array<f32, ${MAX_FLOORS}>;
+    var nFloors = 0u;
     var k = 0u;
     loop {
         if (k >= count) { break; }
@@ -139,6 +183,15 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
         if (p.d >= riverCarveReach(p)) { continue; }
         let c = riverCarveSegment_d(s, p, unitDir, h0);
         if (c.x < h.x) { h = c; }
+        if (nFloors < ${MAX_FLOORS}u) {
+            let cd = riverCarveDuals(s, p);
+            floors[nFloors] = riverCarveFloor_d(cd, p);
+            floorWater[nFloors] = cd.wl;
+            floorWeight[nFloors] = riverCarveFloorWeight(s, p);
+            floorLake[nFloors] = p.lakeGuard;
+            beyond[nFloors] = p.d - p.hw;
+            nFloors++;
+        }
         if (excavated) {
             // The coarse valley field can interpolate a downstream cut into
             // an upstream bank. Near the channel, use the fine section cut
@@ -156,8 +209,22 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
             if (weight.x < valleyWeight.x) { valleyWeight = weight; }
         }
     }
-    if (excavated) { return (fine + dMul(h - fine, valleyWeight)) / maxH; }
-    return h / maxH;
+    if (excavated) { h = fine + dMul(h - fine, valleyWeight); }
+    // Containment (riverSection.js riverContainedHeight): raise the ground
+    // toward the highest floor, where it applies. The weights are taken as
+    // constant (their change along a river and across a junction is slow).
+    var fill = dConst(0.0);
+    for (var i = 0u; i < nFloors; i++) {
+        let lake = floorLake[i];
+        var w = floorWeight[i] * select(smoothstep(lake - 0.1, lake + 0.2, h.x), 1.0, lake < -1.0e10);
+        for (var j = 0u; j < nFloors; j++) {
+            if (j != i) { w = min(w, smoothstep(0.0, ${CONTAIN.riseM.toFixed(1)}, beyond[j])); }
+        }
+        if (w <= 0.0) { continue; }
+        let f = riverContainFill_d(floors[i], h, floorWater[i]) * w;
+        if (f.x > fill.x) { fill = f; }
+    }
+    return (h + fill) / maxH;
 }
 
 fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> {
@@ -179,16 +246,33 @@ fn riverCarveMicroKeep(unitDir: vec3<f32>) -> f32 {
     return keep;
 }
 
-${bankDetail ? `fn riverCarveShoreEnabled() -> bool { return waterParams.bank.w > 0.0 && waterParams.enabled != 0u; }
+${bankDetail ? `${createWaterLookupWgsl(RIVER_CARVE_GROUP, RIVER_CARVE_BINDINGS)}
+@group(${RIVER_CARVE_GROUP}) @binding(${RIVER_CARVE_BINDINGS.sampler}) var riverCarveLakeSampler: sampler;
+
+fn riverCarveShoreEnabled() -> bool { return waterParams.bank.w > 0.0 && waterParams.enabled != 0u; }
 fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 {
     let R = waterParams.planetRadius;
     return waterBankNoise((dir.x + dir.z * 0.31) * R * 0.08, (dir.y + dir.z * 0.73) * R * 0.08, 927.0).x;
 }
-// Sediment / exposed rock / wet toe. This only controls existing splat
-// materials; it neither paints a solid colour nor changes water ownership.
-// Sediment and rock fade out within a narrow strip above the waterline.
+// Bed / rock (none) / wet toe. This only controls existing splat materials;
+// it neither paints a solid colour nor changes water ownership. River and
+// lake beds are the same mud (owner 2026-10-25), so a river's bed runs on
+// into its lake's.
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> {
     if (!riverCarveShoreEnabled()) { return vec3<f32>(0.0); }
+    return max(riverCarveRiverShore(dir, heightM, slope), vec3<f32>(riverCarveLakeBed(dir, heightM), 0.0, 0.0));
+}
+
+// Ground below a lake's level, over 0.3 m of depth. Lakes without a solved
+// shore yet count by level (their cells), as the lake renderer draws them.
+fn riverCarveLakeBed(dir: vec3<f32>, heightM: f32) -> f32 {
+    let level = waterLakeLevelAt(dir, heightM, riverCarveLakeSampler);
+    return select(0.0, smoothstep(0.0, 0.3, level - heightM), level > WATER_NO_LAKE);
+}
+
+// The bed and a narrow strip above the waterline are mud (owner 2026-10-24:
+// the mixed gravel, dirt and rock bed read as a tiled road).
+fn riverCarveRiverShore(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> {
     let e = riverCarveCellEntry(dir);
     let count = min(e & 0xffu, ${RIVER_MAX_SEGS_PER_CELL}u);
     if (count == 0u) { return vec3<f32>(0.0); }
@@ -203,23 +287,32 @@ fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32>
         if (d < distance) { distance = d; best = first + k; }
     }
     let p = waterRiverPoint(waterRivers[best], dir);
-    if (p.pool < 0.0 || p.d > riverCarveReach(p)) { return vec3<f32>(0.0); }
-    let shoreNoise = waterBankNoise(p.s * 0.04, p.n * 0.075, p.river + 17.0).x;
-    let tau = riverBankType(p.s, p.river, p.n >= 0.0, p.kappa);
-    let extent = min(p.hw * 0.4, mix(3.0, 1.0, tau * 0.5)) * (0.8 + 0.6 * shoreNoise);
-    let across = 1.0 - smoothstep(p.hw + extent * 0.3, p.hw + max(extent, 0.5), p.d);
-    let above = heightM - p.wl;
-    let vertical = 1.0 - smoothstep(0.05, 0.4 + 0.15 * (2.0 - tau), above);
-    let bed = (1.0 - smoothstep(p.hw * 0.85, p.hw, p.d)) * (1.0 - smoothstep(-0.15, 0.15, above));
-    let gravel = across * vertical * (1.0 - smoothstep(0.2, 0.65, slope)) * (0.1 + 0.9 * smoothstep(-0.1, 0.6, shoreNoise));
-    // Reuse the sediment field to break up exposed faces too. A uniform
-    // rock override across every steep bank makes a second artificial strip.
-    let rock = max(bed * (0.15 + 0.3 * smoothstep(-0.4, 0.5, shoreNoise)),
-        across * vertical * smoothstep(0.25, 0.7, slope) * (0.4 + 0.5 * smoothstep(-0.4, 0.5, shoreNoise)));
-    let wet = across * (1.0 - smoothstep(0.1, 0.8, above)) * 0.15;
-    // Fully submerged channel replaces vegetation with sediment and rock.
-    // A patchy shore blend alone left grass visible through clear water.
-    return vec3<f32>(max(gravel, bed * (1.0 - rock)), rock, wet);
+    // Into a lake (pool -1 there) the bed fades out over the segment where
+    // the flag changes, into the lake's (riverCarveLakeBed); cut at the
+    // first lake point, it ended in a straight line across the channel
+    // (owner 2026-10-24).
+    let inLake = clamp(-p.pool, 0.0, 1.0);
+    if (inLake >= 1.0 || p.d > riverCarveReach(p)) { return vec3<f32>(0.0); }
+    // Mud over the channel and out onto the banks, its reach and its blend
+    // varied organically: how far it goes beyond the channel's edge (0-8 m,
+    // ~75 m and ~15 m along the river), how wide it blends into the
+    // ground (1.5-5 m, ~30 m), and its edge broken into lobes (~6 m and ~3 m
+    // across both ways). A constant edge read as a clean line (owner
+    // 2026-10-26); edges by height or over the outer 15 % of the half-width
+    // were finer than the splat grid and drew in teeth. No rock: its texture
+    // showed a grid of 1 m tiles in the bed (owner 2026-10-25).
+    let nLong = waterBankNoise(p.s * 0.04, p.n * 0.075, p.river + 17.0).x;
+    let nMid = waterBankNoise(p.s * 0.2, p.n * 0.2, p.river + 31.0).x;
+    let nBlend = waterBankNoise(p.s * 0.1, p.n * 0.1, p.river + 47.0).x;
+    let lobes = 1.5 * waterBankNoise(p.s * 0.5, p.n * 0.5, p.river + 59.0).x
+        + 0.6 * waterBankNoise(p.s * 1.0, p.n * 1.0, p.river + 73.0).x;
+    let reach = clamp(2.5 + 2.5 * nLong + 1.5 * nMid, 0.0, 8.0);
+    let blend = 3.25 + 1.75 * nBlend;
+    let edge = p.hw + reach;
+    // The channel itself stays mud: the lobes act beyond its edge.
+    let dEdge = p.d + lobes * smoothstep(p.hw - 1.0, p.hw + 1.0, p.d);
+    let mud = 1.0 - smoothstep(max(p.hw - 0.5, edge - 0.5 * blend), edge + 0.5 * blend, dEdge);
+    return vec3<f32>(mud, 0.0, mud * 0.15) * (1.0 - inLake);
 }` : `fn riverCarveShoreEnabled() -> bool { return false; }
 fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 { return 0.0; }
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> { return vec3<f32>(0.0); }`}

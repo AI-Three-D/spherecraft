@@ -17,7 +17,7 @@
 
 import { Material } from '../resources/material.js';
 import { Geometry } from '../resources/geometry.js';
-import { WATER_BINDINGS } from '../../world/water/waterWgsl.js';
+import { WATER_BINDINGS, WATER_DEBUG_DRY } from '../../world/water/waterWgsl.js';
 import { buildRiverRibbons } from '../../world/water/riverRibbon.js';
 import { gridIndices } from './waterGrid.js';
 import { fillNearWaterUniforms } from './nearWaterUniforms.js';
@@ -114,8 +114,9 @@ export class NearWaterRenderer {
     render(camera, viewMatrix, projectionMatrix) {
         const water = this.water, near = water?.near;
         // Debug views 1-5 (qtDiag.water.tint) are the terrain shading's alone;
-        // in 6 and 7 (who draws the water) these meshes add their colour.
-        const tintOnly = water?.debugMode > 0 && water.debugMode < 6;
+        // in 6 and 7 (who draws the water) these meshes add their colour; the
+        // dry view draws no water at all.
+        const tintOnly = (water?.debugMode > 0 && water.debugMode < 6) || water?.debugMode === WATER_DEBUG_DRY;
         if (!near?.enabled || !water.enabled || !water._ready || tintOnly || !camera?.position) return;
         const o = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
         const cam = camera.position;

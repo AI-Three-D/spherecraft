@@ -1457,6 +1457,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 { maskAtlas: lakeMaskAtlasPlan(this.waterService.lakes, { reserve: this.waterService.mountainReserve ?? 0 }) });
             // Only solved lakes are drawn: no grid-cell outlines at any distance.
             this.waterGpuData.look.unsolvedLakeHideM = 1e12;
+            // Initial water debug view (URL water=off: the dry view, WATER_DEBUG_DRY).
+            this.waterGpuData.debugMode = this.engineConfig?.waterDebugMode ?? 0;
             return;
         }
         this._tickWaterFrame();

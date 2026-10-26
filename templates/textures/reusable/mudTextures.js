@@ -1,10 +1,14 @@
 // js/config/textures/reusable/mudTextures.js
 
+// River and lake beds (riverCarve.wgsl.js shore materials). The atlas keeps
+// one micro variant per category (this one), and the terrain turns it a
+// random quarter per metre (sampleTileColor): like the grass, only fine,
+// low-contrast grain with blurred mottling, so no cell or ridge pattern
+// can show as a grid of 1 m tiles (owner 2026-10-24, "a tiled road").
 export const MUD_MICRO_A = [
-  { type: 'fbm',    octaves: 5, frequency: 0.032, color: '#00FF00', opacity: 1.0, seed: 30101 },
-  { type: 'ridged', octaves: 3, frequency: 0.060, amplitude: 0.85, color: '#171312', opacity: 0.28, blendMode: 'multiply', seed: 30111 },
-  { type: 'perlin', octaves: 2, frequency: 0.090, amplitude: 0.35, color: '#3a3230', opacity: 0.14, blendMode: 'overlay', filter: 'blur', filterStrength: 1.2, seed: 30121 },
-  { type: 'grain',  octaves: 1, frequency: 0.76, amplitude: 1.0,  color: '#0f0d0c', opacity: 0.12, blendMode: 'overlay', seed: 30131 }
+  { type: 'fbm',    octaves: 2, frequency: 4.0,  amplitude: 1.0,  color: '#3e352c', opacity: 1.0, seed: 30101 },
+  { type: 'perlin', octaves: 3, frequency: 0.19, amplitude: 0.14, color: '#4b4034', opacity: 0.40, blendMode: 'multiply', filter: 'blur', filterStrength: 4.5, seed: 30111 },
+  { type: 'grain',  octaves: 1, frequency: 0.76, amplitude: 1.0,  color: '#0f0d0c', opacity: 0.06, blendMode: 'overlay', seed: 30131 }
 ];
 
 export const MUD_MICRO_B = [

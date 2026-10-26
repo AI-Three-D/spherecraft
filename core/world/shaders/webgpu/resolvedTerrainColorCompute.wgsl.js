@@ -1,4 +1,13 @@
-export function createResolvedTerrainColorComputeShader() {
+import { buildFixedMaterialFamilyFragmentWGSL } from '../../materialFamilies.js';
+
+/**
+ * @param {object} [o]
+ * @param {boolean} [o.fixedMaterialFamilies=false]  splats are fixed material
+ *   family weights; the index texture holds the bed's share of the soil
+ *   family (materialFamilies.js), not tile ids
+ * @param {Array} [o.tileCategories]
+ */
+export function createResolvedTerrainColorComputeShader({ fixedMaterialFamilies = false, tileCategories = [] } = {}) {
     return /* wgsl */`
 struct Uniforms {
     chunkCoord: vec2<i32>,
@@ -77,6 +86,9 @@ fn sampleTileColor(tileId: f32, worldTileCoord: vec2<f32>, localUV: vec2<f32>, s
     return textureSampleLevel(atlasTexture, atlasSampler, rotatedLocal, atlasLayer, uniforms.atlasSampleLod).rgb;
 }
 
+const USE_FIXED_MATERIAL_FAMILIES: bool = ${fixedMaterialFamilies ? 'true' : 'false'};
+${buildFixedMaterialFamilyFragmentWGSL(tileCategories)}
+
 fn splatChannelUsable(tileId: f32, weight: f32) -> bool {
     return tileId >= 0.0 && tileId < 255.0 && weight > 0.001;
 }
@@ -101,12 +113,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let weights = clamp(textureLoad(splatDataMap, coord, 0), vec4<f32>(0.0), vec4<f32>(1.0));
     let encodedIds = textureLoad(splatIndexMap, coord, 0);
-    let ids = vec4<f32>(
+    let ids = select(vec4<f32>(
         decodeTileId(encodedIds.r),
         decodeTileId(encodedIds.g),
         decodeTileId(encodedIds.b),
         decodeTileId(encodedIds.a)
-    );
+    ), FIXED_MATERIAL_FAMILY_TILE_IDS, USE_FIXED_MATERIAL_FAMILIES);
 
     var color = vec3<f32>(0.0);
     var sum = 0.0;
@@ -119,7 +131,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         sum += weights.y;
     }
     if (splatChannelUsable(ids.z, weights.z)) {
-        color += sampleTileColor(ids.z, worldTileCoord, tileLocalUV, season) * weights.z;
+        var soil = sampleTileColor(ids.z, worldTileCoord, tileLocalUV, season);
+        // The bed's share of the soil family is mud (the fragment shader's
+        // sampleTileColor in family mode; red holds the bed's weight).
+        if (USE_FIXED_MATERIAL_FAMILIES && FIXED_MATERIAL_BED_TILE >= 0.0 && encodedIds.r > 0.0) {
+            let share = clamp(encodedIds.r / weights.z, 0.0, 1.0);
+            soil = mix(soil, sampleTileColor(FIXED_MATERIAL_BED_TILE, worldTileCoord, tileLocalUV, season), share);
+        }
+        color += soil * weights.z;
         sum += weights.z;
     }
     if (splatChannelUsable(ids.w, weights.w)) {

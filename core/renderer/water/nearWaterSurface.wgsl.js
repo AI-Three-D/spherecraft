@@ -13,17 +13,23 @@
 // the flat water meets the ground.
 //
 // Rivers: ribbons flat across at the river's water level (built on the CPU,
-// core/world/water/riverRibbon.js), read from storage per vertex. A ribbon
-// gives way where a lake's mask covers the point (the lake's surface is
-// drawn there) and where another river is nearer (confluences: the terrain
-// shading's rule, waterRiverAt).
+// core/world/water/riverRibbon.js), read from storage per vertex, out to
+// just inside the banks' containment crest. A ribbon gives way where a
+// lake's mask covers the point (the lake's surface is drawn there) and
+// where another river is nearer (confluences: the terrain shading's rule,
+// waterRiverAt).
 //
 // Nearby water blends reflection and depth-dependent absorption over the
 // terrain bed. Opaque scene depth supplies both shoreline contact and the
 // distance travelled through the water.
 
 import { createWaterWgsl } from '../../world/water/waterWgsl.js';
+import { RIVER_SECTION } from '../../world/water/riverSection.js';
 import { getAerialPerspectiveWGSL } from '../atmosphere/shaders/aerialPerspectiveCommon.js';
+
+// A river's surface ends this far (m) beyond its channel's edge, half a
+// metre inside the banks' containment crest.
+const SURFACE_EDGE_M = RIVER_SECTION.contain.crestM - 0.5;
 
 export const NEAR_WATER_MAX_LAKES = 16;
 export const NEAR_WATER_UNIFORM_FLOATS = 16 + 16 + 4 + 4 + 4 + NEAR_WATER_MAX_LAKES + 7 * 4;
@@ -243,15 +249,17 @@ fn main(in: NearRiverVOut) -> @location(0) vec4<f32> {
     let up = normalize(in.wp - U.origin);
     // A lake's mask covers the point: the lake's surface is drawn there.
     if (waterLakeLevelView(up, -1.0e30, nearWaterSampler, false) > WATER_NO_LAKE) { discard; }
-    // Another river is nearer (confluences).
+    // Another river is nearer (confluences). The surface ends inside the
+    // banks' containment crest (riverSection.js contain): the ground there
+    // is above the water, so the depth test draws the shoreline where the
+    // water meets the actual ground. (Clipping it at the designed channel
+    // drew a canal edge with a step at every ribbon row.) Beside a lake at
+    // the river's level the carve raises no bank on ground below the lake's
+    // level, so there it ends at the channel's edge: beyond, it lay as a
+    // film over grass a few centimetres under it (owner 2026-10-25).
     let hit = waterRiverAt(up, in.level);
-    if (!hit.near || hit.distM >= hit.halfWidthM || abs(hit.river - in.river) > 0.5) { discard; }
-    // Until connected bank coverage replaces this guard, compare the
-    // profile and surface at the same position along the river. The mesh
-    // interpolates across diagonal triangles; at bends its varying level
-    // differs from the segment field and made a step at every ribbon row.
-    // A cut-only profile is not proof that lower natural ground is dry.
-    if (hit.profileM >= hit.etaM) { discard; }
+    let edge = select(${SURFACE_EDGE_M.toFixed(2)}, 0.0, hit.lakeGuard >= hit.etaM - 0.5);
+    if (!hit.near || hit.distM >= hit.halfWidthM + edge || abs(hit.river - in.river) > 0.5) { discard; }
     // A downstream observer can be below an upstream river's elevation
     // while viewing its top/front surface. Radial lake underside rejection
     // would hide that waterfall; raster face/depth tests handle its geometry.

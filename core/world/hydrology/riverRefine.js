@@ -166,7 +166,12 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // Small rivers stay small (owner 2026-10-13: most rivers seen are small,
     // with some big ones 50-100+ m): as the mountain streams. Was 30 m and
     // 1.4 m, when only lakes with Q >= 1200 had rivers (waterGraph.js minRiverQ).
-    minWidthM: 8,
+    // 12 m (was 8): narrower beds were one or two splat texels wide on
+    // coarser tiles and drew as beads (owner 2026-10-26, 50 % wider).
+    minWidthM: 12,
+    // Constrictions (riverReachShape's width factor) narrow a reach to this
+    // at least (they went to 3.3 m).
+    minReachWidthM: 8,
     // Bank-full depth D (thalweg to the channel's edge); the water fills
     // waterFrac of it (RIVER_LEVEL_DEFAULTS).
     depthCoef: 0.6,       // D = depthCoef * Q^0.4 (m), at least minDepthM
@@ -194,7 +199,7 @@ export function riverReachShape(shape, s, length, river, P = RIVER_SHAPE_DEFAULT
     const joinM = Math.max(P.junctionLengthM, shape.width * 2);
     const start = P.junctionStartM ?? 0, end = P.junctionEndM ?? length;
     const mouth = 1 - quintic01(Math.min(Math.abs(s - start), Math.abs(end - s)) / joinM);
-    const width = shape.width * riverWidthFactor(s, river, P.typicalWidthM ?? shape.width).f * (1 + (P.junctionWidthScale - 1) * mouth);
+    const width = Math.max(P.minReachWidthM ?? 0, shape.width * riverWidthFactor(s, river, P.typicalWidthM ?? shape.width).f) * (1 + (P.junctionWidthScale - 1) * mouth);
     const depth = shape.depth * Math.max(0.45, 1 + P.depthVar * pool) * Math.pow(shape.width / width, 0.25);
     const island = P.islands && s > 2 * joinM && length - s > 2 * joinM
         ? quintic01((reach - P.islandThreshold) / 0.3) * (1 - quintic01(((shape.slope ?? 0) - 0.004) / 0.008)) : 0;
@@ -227,7 +232,10 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 // ground beside the channel is below it, at most 32 m; 14 = held while the
 // lake's drawn water lies beside it (riverLakeHold); 15 = downstream of
 // the hold the fit from the lake as before.
-export const RIVER_SOLVE_VERSION = 16; // refined lower lakes terminate reaches at their own surface
+// 16 = refined lower lakes terminate reaches at their own surface;
+// 17 = rivers at least 12 m wide, constrictions to 8 m (minReachWidthM);
+// 18 = a share of the rivers widens to 3-4 x (riverSection.js wideShare).
+export const RIVER_SOLVE_VERSION = 18;
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).

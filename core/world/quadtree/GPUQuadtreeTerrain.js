@@ -161,6 +161,8 @@ export class QuadtreeTileManager {
             enableHorizonCulling: qt.enableHorizonCulling,
             horizonGroundCos: qt.horizonCulling?.groundCos,
             horizonBlendScale: qt.horizonCulling?.blendScale,
+            lodHeightSource: qt.lodHeightSource,
+            heightScale: this.planetConfig.heightScale,
             logStats: qt.logStats === true
         });
 
@@ -282,6 +284,7 @@ export class QuadtreeTileManager {
           }
       );
         await this.tileStreamer.initialize();
+        this.quadtreeGPU.setLodHeightTexture(this.tileStreamer.arrayPool?.textures.get('height') ?? null);
 
         this._initialized = true;
         Logger.info('[QuadtreeTileManager] Initialized');

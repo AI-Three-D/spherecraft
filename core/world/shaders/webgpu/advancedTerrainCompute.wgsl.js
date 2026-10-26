@@ -635,7 +635,8 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureRivers(),
     createTerrainFeatureErosionSeeds(),
     // options.waterCarve: river channels in the height (group 1 bindings 1-3,
-    // riverCarve.wgsl.js); otherwise pass-through stubs.
+    // riverCarve.wgsl.js; with riverBankDetail the shore materials and lake
+    // beds add the lakes, 7-9); otherwise pass-through stubs.
     createRiverCarveWgsl({ enabled: options?.waterCarve === true, bankDetail: options?.riverBankDetail === true }),
     // options.riverValley: river valleys in the height (group 1 bindings 4-7,
     // riverValley.wgsl.js); otherwise pass-through stubs.
@@ -947,7 +948,7 @@ struct SmoothSplatPayload {
 // search is added for beds or banks.
 fn riverShoreTile(tileId: u32, shore: vec3<f32>) -> u32 {
     if (shore.y > 0.5 && shore.y > shore.x) { return SURFACE_ROCK_BASE; }
-    if (shore.x > 0.5) { return SURFACE_DIRT_BASE; }
+    if (shore.x > 0.5) { return SURFACE_MUD_BASE; }
     return tileId;
 }
 
@@ -1535,12 +1536,9 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
                 insertSmoothSplatTileTop4(u32(round(splatIds[k]*255.0)), splatWeights[k]*(1.0-coverage), &payload);
             }
             let mineral = max(shore.x + shore.y, 0.00001);
-            let sediment = coverage * shore.x / mineral;
-            let rock = coverage * shore.y / mineral;
-            let wet = clamp(shore.z, 0.0, 1.0);
-            insertSmoothSplatTileTop4(SURFACE_DIRT_BASE, sediment*(1.0-wet), &payload);
-            insertSmoothSplatTileTop4(SURFACE_MUD_SILT_BASE, sediment*wet, &payload);
-            insertSmoothSplatTileTop4(SURFACE_ROCK_BASE, rock, &payload);
+            // One mud for the bed and its shore strip (riverCarveShoreWeights).
+            insertSmoothSplatTileTop4(SURFACE_MUD_BASE, coverage * shore.x / mineral, &payload);
+            insertSmoothSplatTileTop4(SURFACE_ROCK_BASE, coverage * shore.y / mineral, &payload);
             let total = max(payload.weights[0]+payload.weights[1]+payload.weights[2]+payload.weights[3], 0.00001);
             for (var k=0u; k<4u; k++) {
                 splatWeights[k]=payload.weights[k]/total;

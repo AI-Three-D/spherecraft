@@ -83,8 +83,19 @@ export function resolveFixedMaterialFamilies(tileCategories = []) {
     };
 }
 
+// River and lake beds are MUD tiles (riverCarve.wgsl.js shore materials), a
+// SOIL_ARID material its representative (desert, in a world without sand)
+// would draw. In family mode the splat index texture holds no tile ids (they
+// are the constants below), so splatCompute.wgsl.js writes the bed's share of
+// the soil family to its red channel, and the terrain fragment shader and the
+// resolved colour bake draw that share of the soil with the bed's texture.
+function bedCategory(tileCategories) {
+    return (Array.isArray(tileCategories) ? tileCategories : []).find(c => normalizeCategoryName(c?.name) === 'MUD') ?? null;
+}
+
 export function buildFixedMaterialFamilyComputeWGSL(tileCategories = []) {
-    const { categoryToFamily, familyTileIds } = resolveFixedMaterialFamilies(tileCategories);
+    const { categoryToFamily } = resolveFixedMaterialFamilies(tileCategories);
+    const bed = bedCategory(tileCategories);
     const mapperLines = ['fn fixedMaterialFamilyForCategory(categoryId: u32) -> u32 {'];
     for (const [categoryId, familyId] of [...categoryToFamily.entries()].sort((a, b) => a[0] - b[0])) {
         mapperLines.push(`    if (categoryId == ${categoryId}u) { return ${familyId}u; }`);
@@ -92,17 +103,14 @@ export function buildFixedMaterialFamilyComputeWGSL(tileCategories = []) {
     mapperLines.push('    return INVALID_CATEGORY_ID;');
     mapperLines.push('}');
 
-    const tileLines = ['fn fixedMaterialFamilyTileId(familyId: u32) -> u32 {'];
-    for (let i = 0; i < familyTileIds.length; i++) {
-        tileLines.push(`    if (familyId == ${i}u) { return ${familyTileIds[i]}u; }`);
-    }
-    tileLines.push('    return INVALID_TILE_ID;');
-    tileLines.push('}');
-
-    return `${mapperLines.join('\n')}\n\n${tileLines.join('\n')}`;
+    const bedLine = `const FIXED_MATERIAL_BED_CATEGORY: u32 = ${Number.isFinite(bed?.id) ? `${Math.trunc(bed.id)}u` : 'INVALID_CATEGORY_ID'};`;
+    return `${mapperLines.join('\n')}\n\n${bedLine}`;
 }
 
 export function buildFixedMaterialFamilyFragmentWGSL(tileCategories = []) {
     const { familyTileIds } = resolveFixedMaterialFamilies(tileCategories);
-    return `const FIXED_MATERIAL_FAMILY_TILE_IDS: vec4<f32> = vec4<f32>(${familyTileIds.map((id) => `${id}.0`).join(', ')});`;
+    // The bed's tile (bedCategory), -1 without MUD.
+    const mud = (bedCategory(tileCategories)?.ranges ?? []).flat().filter(Number.isFinite);
+    return `const FIXED_MATERIAL_FAMILY_TILE_IDS: vec4<f32> = vec4<f32>(${familyTileIds.map((id) => `${id}.0`).join(', ')});
+const FIXED_MATERIAL_BED_TILE: f32 = ${mud.length ? Math.min(...mud) : -1}.0;`;
 }

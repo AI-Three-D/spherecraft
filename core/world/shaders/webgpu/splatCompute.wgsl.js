@@ -589,20 +589,32 @@ fn fixedMaterialFamilyWeights(
     return weights / total;
 }
 
-fn storeFixedMaterialFamilySplat(coord: vec2<i32>, weights: vec4<f32>) {
+// The bed's (river and lake mud) share of the soil family (family 2).
+fn fixedMaterialBedShare(
+    categoryScores: ptr<function, array<f32, CATEGORY_SCORE_COUNT>>,
+    centerCategory: u32
+) -> f32 {
+    if (!validCategory(FIXED_MATERIAL_BED_CATEGORY)) { return 0.0; }
+    var soil = 0.0;
+    for (var categoryId = 0u; categoryId < CATEGORY_SCORE_COUNT; categoryId = categoryId + 1u) {
+        let score = (*categoryScores)[categoryId];
+        if (score > SCORE_EPSILON && fixedMaterialFamilyForCategory(categoryId) == 2u) { soil = soil + score; }
+    }
+    if (soil <= SCORE_EPSILON) { return select(0.0, 1.0, centerCategory == FIXED_MATERIAL_BED_CATEGORY); }
+    let bed = (*categoryScores)[min(FIXED_MATERIAL_BED_CATEGORY, CATEGORY_SCORE_COUNT - 1u)];
+    return clamp(select(0.0, bed, bed > SCORE_EPSILON) / soil, 0.0, 1.0);
+}
+
+// The family ids are constants (materialFamilies.js), so the index texture
+// carries the bed's weight instead (red): the soil weight times the bed's
+// share of it. Filtered like the weights, bed / soil is the share between
+// texels too; a share itself (0 where there is no soil) drew desert on the
+// soil's edges.
+fn storeFixedMaterialFamilySplat(coord: vec2<i32>, weights: vec4<f32>, bedShare: f32) {
     let total = weights.x + weights.y + weights.z + weights.w;
-    let normalized = select(vec4<f32>(1.0, 0.0, 0.0, 0.0), weights / max(total, SCORE_EPSILON), total > SCORE_EPSILON);
-    textureStore(splatWeightTexture, coord, clamp(normalized, vec4<f32>(0.0), vec4<f32>(1.0)));
-    textureStore(
-        splatIndexTexture,
-        coord,
-        vec4<f32>(
-            encodeTileId(fixedMaterialFamilyTileId(0u)),
-            encodeTileId(fixedMaterialFamilyTileId(1u)),
-            encodeTileId(fixedMaterialFamilyTileId(2u)),
-            encodeTileId(fixedMaterialFamilyTileId(3u))
-        )
-    );
+    let normalized = clamp(select(vec4<f32>(1.0, 0.0, 0.0, 0.0), weights / max(total, SCORE_EPSILON), total > SCORE_EPSILON), vec4<f32>(0.0), vec4<f32>(1.0));
+    textureStore(splatWeightTexture, coord, normalized);
+    textureStore(splatIndexTexture, coord, vec4<f32>(normalized.z * bedShare, 0.0, 0.0, 0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -701,7 +713,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     if (USE_FIXED_MATERIAL_FAMILIES) {
         let fixedWeights = fixedMaterialFamilyWeights(&categoryScores, centerCategory);
-        storeFixedMaterialFamilySplat(vec2<i32>(global_id.xy), fixedWeights);
+        storeFixedMaterialFamilySplat(vec2<i32>(global_id.xy), fixedWeights, fixedMaterialBedShare(&categoryScores, centerCategory));
         return;
     }
 

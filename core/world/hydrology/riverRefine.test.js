@@ -78,6 +78,15 @@ describe('river levels for the valley', () => {
         expect(mouth.width).toBeGreaterThan(60);
     });
 
+    it('narrows the smallest rivers to minReachWidthM at most', () => {
+        const small = riverShape(0, 0.001);
+        expect(small.width).toBe(12);
+        const widths = [];
+        for (let s = 500; s < 5000; s += 10) widths.push(riverReachShape(small, s, 6000, 17).width);
+        expect(Math.min(...widths)).toBe(8);
+        expect(Math.max(...widths)).toBeGreaterThan(12);
+    });
+
     it('keeps lake overlaps flat and a positive slope even with a tiny total drop', () => {
         const s = Array.from({ length: 51 }, (_, k) => k * 20);
         const { eta, minSlope } = riverValleyLevels({ s, ground: s.map(() => 100), free: s.map(() => 1), srcLevel: 100, destLevel: 99.98, sourceEnd: 5, destStart: 46 });

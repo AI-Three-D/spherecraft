@@ -1,0 +1,7 @@
+[
+ {"name":"owner-grass-seam","pos":[-131834.0,1886.5,3106.5],"look":[-131830.4,1892.4,3105.1],"note":"straight seams and sharp-edged shading patches in grass by a lake"},
+ {"name":"owner-mouth-broken-a","pos":[-131859.0,1838.6,3102.2],"look":[-131853.7,1843.2,3102.2],"note":"broken geometry above a river mouth"},
+ {"name":"owner-tan-river","pos":[-131984.6,1274.1,2917.1],"look":[-131979.7,1277.4,2921.0],"note":"river through a tan area, dark band along it"},
+ {"name":"owner-bank-band","pos":[-131838.7,1823.4,3105.5],"look":[-131834.5,1829.0,3104.7],"note":"seam on the bank (red arrow)"},
+ {"name":"owner-mouth-broken-b","pos":[-131889.6,1817.5,3101.7],"look":[-131884.7,1822.6,3101.0],"note":"broken geometry at the mouth from higher up (red arrow)"}
+]

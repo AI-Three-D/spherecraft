@@ -3,7 +3,8 @@ import { parseWgsl, validate } from 'naga-wasm';
 import { createTerrainCommon } from '../../../templates/terrain-shaders/terrainCommon.wgsl.js';
 import { createRiverNoiseWgsl } from './riverShapeNoise.js';
 import {
-    RIVER_SECTION, createRiverSectionWgsl, riverBankParams, riverBankRim, riverBankType, riverRamp, riverSectionHeight, riverSideDepth, riverSoftCut, riverWidthFactor,
+    RIVER_SECTION, createRiverSectionWgsl, riverBankParams, riverBankRim, riverBankType, riverContainFloor, riverContainedHeight, riverRamp,
+    riverSectionHeight, riverSideDepth, riverSoftCut, riverWidthFactor,
 } from './riverSection.js';
 import { quantile, sectionMetrics, summarizeRiver } from '../../../tools/perf/riverMetrics/sectionMetrics.js';
 
@@ -55,7 +56,7 @@ describe('river section', () => {
             if (H > 1) expect(h[mid]).toBeCloseTo(riverSectionHeight({ ...channel, n: 0, h0: 1e4, left: bankOf(tau), right: bankOf(2 - tau) }), 6);
         }
         expect(riverSectionHeight({ ...channel, n: 0, h0: 1e4, left: bankOf(1), right: bankOf(1) }))
-            .toBeCloseTo(channel.bed + channel.depth * (1 - Math.pow(1 - (channel.skew / (1 + channel.skew)) ** 2, 1.5)), 6);
+            .toBeCloseTo(channel.bed + riverSideDepth(channel.depth, bankOf(1).freeboard) * (1 - Math.pow(1 - (channel.skew / (1 + channel.skew)) ** 2, 1.5)), 6);
     });
 
     it('is continuous across the channel edge, the bank and the end of the cut', () => {
@@ -151,6 +152,69 @@ describe('bank variety along a meandering river', () => {
         expect(sum.sidesDiffer).toBeGreaterThanOrEqual(0.3);
         expect(sum.width.ratio9010).toBeGreaterThan(1.6);
         expect(sum.teeth.max).toBeLessThan(0.15);
+    });
+});
+
+describe('river containment', () => {
+    // A small stream (D 0.8 m: bank-full only 0.2 m over the water by freeboard).
+    const stream = { hw: 4, bed: 100, depth: 0.8, skew: 0 };
+    const water = stream.bed + P.waterFrac * stream.depth;
+    const C = P.contain;
+    const at = (n, h0, tau = 0) => ({ ...stream, n, h0, left: bankOf(tau), right: bankOf(tau) });
+    const across = (h0, tau, half = stream.hw + 12) => {
+        const out = [];
+        for (let n = -half; n <= half + 1e-9; n += 0.01) out.push([n, riverContainedHeight(at(n, h0(n), tau)), riverSectionHeight(at(n, h0(n), tau))]);
+        return out;
+    };
+
+    it('draws every bank-full at least marginM above the water', () => {
+        for (const tau of [0, 1, 2]) for (const depth of [0.8, 1.5, 4]) {
+            const b = bankOf(tau);
+            expect(stream.bed + riverSideDepth(depth, b.freeboard) - P.softM / 2).toBeGreaterThanOrEqual(stream.bed + P.waterFrac * depth + P.marginM - 1e-9);
+        }
+    });
+
+    it('raises nothing where the natural ground is above the banks', () => {
+        for (const tau of [0, 1, 2]) for (const H of [0.6, 2, 10]) {
+            for (const [, contained, cut] of across(() => water + H, tau)) expect(contained).toBeCloseTo(cut, 9);
+        }
+    });
+
+    it('holds lower ground at the water + marginM out to the crest, in a bank a few metres wide', () => {
+        for (const tau of [0, 1, 2]) for (const low of [0.2, 1, 1.1]) {
+            const ground = water - low;
+            for (const [n, contained] of across(() => ground, tau)) {
+                const x = Math.abs(n) - stream.hw;
+                if (x >= C.riseM && x <= C.crestM) expect(contained).toBeGreaterThanOrEqual(water + P.marginM - 1e-6);
+                // The raised bank ends within a few metres of the crest.
+                if (x > C.crestM + (P.marginM + C.wetFadeM) / C.outSlope + 1.5) expect(contained).toBeCloseTo(ground, 6);
+                expect(contained - ground).toBeLessThanOrEqual(C.maxFillM + 1e-9);
+            }
+        }
+    });
+
+    it('fills at most maxFillM (a deeper deficit means the level is wrong) and leaves hollows under the water', () => {
+        const ground = water - 3;
+        for (const [n, contained] of across(() => ground, 1)) {
+            expect(contained - ground).toBeLessThanOrEqual(C.maxFillM + 1e-9);
+            // The hollow under the channel stays one (only the fade's edge reaches it).
+            if (Math.abs(n) < 0.5) expect(contained).toBeLessThan(water - 2.5);
+        }
+    });
+
+    it('is continuous across the channel edge, the crest and the fade', () => {
+        for (const tau of [0, 1, 2]) for (const low of [-0.1, 0.3, 1.2, 2.5]) {
+            const rows = across((n) => water - low + 0.02 * n, tau);
+            for (let i = 1; i < rows.length; i++) expect(Math.abs(rows[i][1] - rows[i - 1][1])).toBeLessThan(0.03);
+        }
+    });
+
+    it('rises from bank-full to the crest and falls at outSlope (riverContainFloor)', () => {
+        const full = water + 0.6, top = water + P.marginM;
+        expect(riverContainFloor(0, full, top)).toBeCloseTo(full, 9);
+        expect(riverContainFloor(C.riseM, full, top)).toBeCloseTo(top, 9);
+        expect(riverContainFloor(C.crestM, full, top)).toBeCloseTo(top, 9);
+        expect(riverContainFloor(C.crestM + 3, full, top)).toBeCloseTo(top - C.outSlope * 2.5, 9);
     });
 });
 
