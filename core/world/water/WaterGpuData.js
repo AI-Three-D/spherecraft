@@ -34,8 +34,10 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     reflection: 1.4,                  // sky reflection strength (x sky radiance)
     // Per metre of water path (r, g, b): clear water, the bed shows through a
     // few metres (owner 2026-10-06: see-through close up). Whitewater's
-    // murky [1.6, 0.8, 0.6] hid it below ~2 m.
-    absorption: [0.45, 0.2, 0.15],
+    // murky [1.6, 0.8, 0.6] hid it below ~2 m; [0.45, 0.2, 0.15] let a
+    // shallow river all but vanish over its bed (owner 2026-10-25: slightly
+    // less transparent). qtDiag.water.look({ absorption }) to tune.
+    absorption: [0.9, 0.4, 0.3],
     rippleFadeM: 800,                 // ripples fade out by this camera distance
     shoreSoftM: 0.15,                 // waterline fade-in depth
     // Lakes whose shore is not solved yet are hidden closer than this (m).

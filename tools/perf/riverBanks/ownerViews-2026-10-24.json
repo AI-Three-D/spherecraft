@@ -1,0 +1,6 @@
+[
+ {"name":"owner-end-cut","pos":[-131928.3,-1310.3,-401.9],"look":[-131921.6,-1312.3,-402.6],"note":"river bed ends in a straight cut at the lake"},
+ {"name":"owner-patchy-a","pos":[-132026.3,-879.3,803.0],"look":[-132019.9,-882.3,803.4],"note":"bed material in patches with straight cross edges"},
+ {"name":"owner-tiled-bed","pos":[-131944.0,-851.4,1045.7],"look":[-131940.2,-849.3,1051.7],"note":"bed reads as a tiled road"},
+ {"name":"owner-patchy-b","pos":[-132067.9,-947.5,684.0],"look":[-132062.0,-948.0,688.4],"note":"bed material in patches with straight cross edges"}
+]

@@ -4,21 +4,10 @@ import { PROFILE_FIXTURE, naturalGround, profileCoverageFixture } from './profil
 // These acceptance counterexamples exercise both sides of the proposed
 // coverage-rule change. Passing means the fixtures expose the tradeoff;
 // it does not mean production water passes a shoreline/connectivity check.
+// The connected-low-bank case counted pixels the analytic profile guard
+// rejected; the guard is gone (river surfaces end inside the containment
+// crest, riverSection.js contain), so only the pocket cases remain.
 describe('analytic river profile removal acceptance counterexamples', () => {
-    it('recovers connected naturally low bank that the analytic profile rejects', () => {
-        const f = profileCoverageFixture('connectedLowBank');
-        expect(f.connectivity[4]).toEqual(f.connectivity[8]);
-        expect(f.connectivity[4].addedWetSamples).toBe(1377);
-        expect(f.connectivity[4].addedConnectedSamples).toBe(1377);
-        expect(f.connectivity[4].addedDisconnectedSamples).toBe(0);
-        expect(f.connectivity[4].beforeDisconnectedSamples).toBe(0);
-        const i = 40 * f.nx + 76; // s = 0, n = 19 m.
-        expect(f.heights[i]).toBe(1);
-        expect(f.profiles[i]).toBeCloseTo(1.9391112695156156, 12);
-        expect(f.before[i]).toBe(0);
-        expect(f.after[i]).toBe(1);
-    });
-
     it('also floods a closed submerged pocket disconnected from the river', () => {
         const f = profileCoverageFixture('closedPocket');
         expect(f.connectivity[4]).toEqual(f.connectivity[8]);

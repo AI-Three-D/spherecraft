@@ -33,6 +33,9 @@ export const RIVER_SECTION = Object.freeze({
     // few widths, so its wavelengths scale with the river's typical width,
     // clamped), sigma per river between these (p90/p10 ~ exp(1.6 sigma)).
     sigmaMin: 0.55, sigmaMax: 1.15,
+    // A share of the rivers varies more: their widest reaches 3-4 x their
+    // typical width (the others ~2 x; owner 2026-10-26).
+    wideShare: 0.35, wideSigma: [1.5, 1.65],
     widthRefM: 60, widthScale: [0.25, 2],
     // Bank type tau = typeBase + typeNoise N_side(s) + bendGain clamp(outer kappa
     // bendRefM, -1, 1) + river style (+-styleSpread), clamped to [0, 2].
@@ -63,7 +66,19 @@ export const RIVER_SECTION = Object.freeze({
     // cells, which the trace sees as 16 m cells (20 m left a bank 0.3 m under
     // the lake beside an outlet, water-look v87).
     lakeMarginM: 0.3, lakeBandM: 40, lakeSlope: 0.2,
-    salts: Object.freeze({ sigma: 0x7d21, style: 0x2fa9, noBank: 0x91c3 }),
+    // Containment (owner 2026-10-17: raise banks only where needed, to the
+    // water + ~0.3 m, a few metres wide, blending back): beyond the channel's
+    // edge the ground stays at least marginM above the water out to crestM,
+    // so the near river surface can end there and the depth test draws the
+    // shoreline. Each side's bank-full is at least the water + marginM
+    // (riverSideDepth); natural ground lower than that is raised by the
+    // carve to riverContainFloor: from bank-full over riseM to the water +
+    // marginM, flat to crestM, then down at outSlope. Fill fades out where
+    // the floor is wetFadeM below the water (hollows under it stay) and is
+    // at most maxFillM (more means the level is wrong there).
+    marginM: 0.3,
+    contain: Object.freeze({ riseM: 1, crestM: 2.5, outSlope: 0.4, maxFillM: 1.5, wetFadeM: 1 }),
+    salts: Object.freeze({ sigma: 0x7d21, style: 0x2fa9, noBank: 0x91c3, wide: 0x5e17 }),
 });
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -90,7 +105,8 @@ export const riverSoftCut = (d, k) => (d <= 0 ? 0 : d < k ? d * d / (2 * k) : d 
  * typical width (m; one value per river, so the noise's argument stays s / scale).
  */
 export function riverWidthFactor(s, river, widthM = RIVER_SECTION.widthRefM, P = RIVER_SECTION) {
-    const sigma = lerp(P.sigmaMin, P.sigmaMax, riverHash(river, P.salts.sigma));
+    const h = riverHash(river, P.salts.sigma);
+    const sigma = riverHash(river, P.salts.wide) < P.wideShare ? lerp(P.wideSigma[0], P.wideSigma[1], h) : lerp(P.sigmaMin, P.sigmaMax, h);
     const scale = clamp(widthM / P.widthRefM, P.widthScale[0], P.widthScale[1]);
     const { v, dv } = riverNoise(s / scale, river, 'widthLong');
     const f = Math.exp(sigma * v);
@@ -126,8 +142,42 @@ export function riverBankRim(b, rim, bankFull) {
     return { ...b, stepM: Math.max(b.stepM, rim - bankFull) };
 }
 
-/** Bank-full depth of a side: the water's depth plus the side's freeboard. */
-export const riverSideDepth = (depth, freeboard, P = RIVER_SECTION) => depth * (P.waterFrac + freeboard * (1 - P.waterFrac));
+/**
+ * Bank-full depth of a side: the water's depth plus the side's freeboard;
+ * drawn (softM / 2 lower, riverSectionHeight) at least marginM above the water.
+ */
+export const riverSideDepth = (depth, freeboard, P = RIVER_SECTION) =>
+    Math.max(depth * (P.waterFrac + freeboard * (1 - P.waterFrac)), depth * P.waterFrac + P.marginM + P.softM / 2);
+
+/**
+ * Containment floor at x m beyond the channel's edge (x > 0): from the
+ * side's drawn bank-full height to top (the water + marginM) over riseM,
+ * flat to crestM, then down at outSlope (corner rounded over 1 m). Inside
+ * the channel the floor is the drawn channel (riverChannel - softM / 2); at
+ * x = 0 both are bank-full. riverContainedHeight raises the ground to it.
+ */
+export function riverContainFloor(x, bankFull, top, P = RIVER_SECTION) {
+    const C = P.contain;
+    if (x < C.riseM) return bankFull + (top - bankFull) * riverRamp(x / C.riseM, 0.5);
+    return top - C.outSlope * riverSoftCut(x - C.crestM, 1);
+}
+
+/**
+ * Ground of one river with containment (the carve's rule for a lone river,
+ * away from lakes): the cut section, raised toward the floor where that is
+ * above it, fully where the floor is at or above the water, fading out over
+ * wetFadeM below it, by at most maxFillM. Arguments as riverSectionHeight.
+ */
+export function riverContainedHeight(x, P = RIVER_SECTION) {
+    const h = riverSectionHeight(x, P);
+    const { n, hw, bed, depth, skew, left, right } = x, C = P.contain, d = Math.abs(n);
+    const water = bed + P.waterFrac * depth;
+    const depthL = riverSideDepth(depth, left.freeboard, P), depthR = riverSideDepth(depth, right.freeboard, P);
+    const floor = d < hw ? riverChannel(n, hw, bed, depthL, depthR, skew) - P.softM / 2
+        : riverContainFloor(d - hw, bed + (n >= 0 ? depthL : depthR) - P.softM / 2, water + P.marginM, P);
+    const t = clamp((floor - (water - C.wetFadeM)) / C.wetFadeM, 0, 1);
+    return h + Math.min(C.maxFillM, Math.max(0, floor - h) * t * t * (3 - 2 * t));
+}
 
 /**
  * Channel bed height at offset n (|n| <= hw). Each side of the thalweg has
@@ -180,7 +230,7 @@ export function createRiverSectionWgsl({ scalar = true, dual = false } = {}, P =
         n += waterNoiseOctave(s, seed + ${lambda}u, ${f(lambda)}, ${w.toFixed(3)});`).join('');
     const a = P.rampRound, m = 1 / (1 - a), aa = a * (1 - a), curv = f(1 / (P.maxCurv * aa));
     const bank = (t, blend = f(t.blendM)) => `RiverBank(${f(t.stepM)}, ${f(t.slope)}, ${f(t.terraceM)}, ${blend}, ${f(t.freeboard)})`;
-    const wf = f(P.waterFrac), fbScale = f(1 - P.waterFrac);
+    const wf = f(P.waterFrac), fbScale = f(1 - P.waterFrac), minFull = f(P.marginM + P.softM / 2), C = P.contain;
     return (scalar ? /* wgsl */`
 // ==================== River cross-section (core/world/water/riverSection.js) ====
 struct RiverBank { stepM: f32, slope: f32, terraceM: f32, blendM: f32, freeboard: f32, };
@@ -209,7 +259,7 @@ fn riverBankParams(tau: f32, river: f32) -> RiverBank {
     if (t < 1.0) { return riverBankMix(none, ${bank(P.ledge)}, t); }
     return riverBankMix(${bank(P.ledge)}, ${bank(P.cut)}, t - 1.0);
 }
-fn riverSideDepth(depth: f32, freeboard: f32) -> f32 { return depth * (${wf} + freeboard * ${fbScale}); }
+fn riverSideDepth(depth: f32, freeboard: f32) -> f32 { return max(depth * (${wf} + freeboard * ${fbScale}), depth * ${wf} + ${minFull}); }
 // riverBankRim (riverSection.js): the bank's step reaches the lake rim.
 fn riverBankRim(b: RiverBank, rim: f32, bankFull: f32) -> RiverBank {
     return RiverBank(max(b.stepM, rim - bankFull), b.slope, b.terraceM, b.blendM, b.freeboard);
@@ -271,10 +321,13 @@ fn riverChannel_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depthL: vec4<f32>
     let q = dConst(1.0) - dMul(de, de);
     return bed + dMul(select(depthR, depthL, de.x >= 0.0), dConst(1.0) - dPow(vec4<f32>(max(q.x, 0.0), select(vec3<f32>(0.0), q.yzw, q.x > 0.0)), 1.5));
 }
+fn riverSideDepth_d(depth: vec4<f32>, freeboard: f32) -> vec4<f32> {
+    return dMax(depth * (${wf} + freeboard * ${fbScale}), depth * ${wf} + dConst(${minFull}));
+}
 fn riverSection_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depth: vec4<f32>, skew: f32, h0: vec4<f32>, left: RiverBank, right: RiverBank) -> vec4<f32> {
     let d = n * select(-1.0, 1.0, n.x >= 0.0);
-    let depthL = depth * (${wf} + left.freeboard * ${fbScale});
-    let depthR = depth * (${wf} + right.freeboard * ${fbScale});
+    let depthL = riverSideDepth_d(depth, left.freeboard);
+    let depthR = riverSideDepth_d(depth, right.freeboard);
     let p0 = select(bed + select(depthR, depthL, n.x >= 0.0), riverChannel_d(n, hw, bed, depthL, depthR, skew), d.x < hw.x) - dConst(${f(P.softM / 2)});
     let cut = riverSoftCut_d(h0 - p0);
     let x = d - hw;
@@ -288,6 +341,32 @@ fn riverSection_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depth: vec4<f32>,
     let blend = dSmoothMax(dConst(b.blendM), dSqrt(dMax(rest, dConst(0.001)) * ${curv}), ${f(P.widthSoftM)});
     let start = dConst(b.terraceM) + dMul(width, dClamp(stepH * (1.0 / ${f(P.stepPresentM)}), 0.0, 1.0));
     return h0 - cut + dMul(stepH, riverRamp_d(dDiv(x, width))) + dMul(rest, riverRamp_d(dDiv(x - start, blend)));
+}
+// Containment (riverSection.js riverContainFloor, riverContainedHeight):
+// the floor at offset n (the drawn channel inside, the raised bank beyond),
+// and the fill that raises ground h toward it for water level wl.
+fn riverContainFloor_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depth: vec4<f32>, skew: f32, wl: vec4<f32>, left: RiverBank, right: RiverBank) -> vec4<f32> {
+    let depthL = riverSideDepth_d(depth, left.freeboard);
+    let depthR = riverSideDepth_d(depth, right.freeboard);
+    let x = n * select(-1.0, 1.0, n.x >= 0.0) - hw;
+    if (x.x < 0.0) { return riverChannel_d(n, hw, bed, depthL, depthR, skew) - dConst(${f(P.softM / 2)}); }
+    let full = bed + select(depthR, depthL, n.x >= 0.0) - dConst(${f(P.softM / 2)});
+    let top = wl + dConst(${f(P.marginM)});
+    if (x.x < ${f(C.riseM)}) {
+        // riverRamp with rampRound 0.5: 2 t^2, then 1 - 2 (1 - t)^2.
+        let t = x * ${f(1 / C.riseM)};
+        let r = select(dConst(1.0) - dMul(dConst(1.0) - t, dConst(1.0) - t) * 2.0, dMul(t, t) * 2.0, t.x < 0.5);
+        return full + dMul(top - full, r);
+    }
+    // riverSoftCut over 1 m: 0, d^2 / 2, d - 1 / 2.
+    let dx = x - dConst(${f(C.crestM)});
+    let soft = select(select(dx - dConst(0.5), dMul(dx, dx) * 0.5, dx.x < 1.0), dConst(0.0), dx.x <= 0.0);
+    return top - soft * ${f(C.outSlope)};
+}
+fn riverContainFill_d(floor: vec4<f32>, h: vec4<f32>, wl: vec4<f32>) -> vec4<f32> {
+    let t = dSmoothstep(0.0, 1.0, (floor - wl) * ${f(1 / C.wetFadeM)} + dConst(1.0));
+    let fill = dMul(dMax(floor - h, dConst(0.0)), t);
+    return fill - dMax(fill - dConst(${f(C.maxFillM)}), dConst(0.0));
 }
 ` : '');
 }

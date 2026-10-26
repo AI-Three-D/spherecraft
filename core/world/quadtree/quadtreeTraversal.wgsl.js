@@ -40,6 +40,11 @@ export function buildTraversalShaderSource(config = {}) {
     const WG = config.workgroupSize ?? 64;
     const disableCulling = config.disableCulling === true;
     const regionalFoundation = config.regionalFoundation === true;
+    // Non-regional terrain: selection distance from each tile's own ground
+    // (QuadtreeGPU lodHeightSource 'ground'). heightScale: metres per unit
+    // of the tiles' height texture (PlanetConfig.heightScale).
+    const groundLodHeight = !regionalFoundation && config.groundLodHeight === true;
+    const heightScale = Number(config.heightScale ?? 0);
 
     return /* wgsl */`
 // ─── Quadtree Traversal Compute Shader ────────────────────────────────────
@@ -227,6 +232,42 @@ fn getTileLodCenter(tile: vec4<u32>, seaCentre: vec3<f32>) -> vec3<f32> {
     // This is a position estimate, not a new culling/minimum certificate.
     let elevation=lodShapeHeight(tile.x,uv,foundation);
     return seaCentre + normalize(seaCentre-params.planetOrigin)*elevation;
+}
+` : ''}
+${groundLodHeight ? `
+// Selection distance from the tile's own ground, not its sea-level centre.
+// From the sea-level centre, close ground on raised land was taken for far
+// ground: 600 m up, the tiles under the camera stopped one depth short (2 m
+// vertices instead of 1 m) and 5-13 m rivers lost their shape. The height
+// is the tile's centre texel in its nearest resident ancestor (its own tile
+// once loaded). Culling keeps the sea-level centre and its height envelope.
+@group(1) @binding(0) var lodHeights: texture_2d_array<f32>;
+
+fn getTileLodCenter(tile: vec4<u32>, seaCentre: vec3<f32>) -> vec3<f32> {
+    let uv = (vec2<f32>(tile.zw) + 0.5) / f32(1u << tile.y);
+    var depth = tile.y;
+    var xy = tile.zw;
+    loop {
+        let keyLo = makeKeyLo(xy.x, xy.y);
+        let keyHi = makeKeyHi(tile.x, depth);
+        var idx = hashKey(keyLo, keyHi, params.loadedTableMask);
+        for (var i = 0u; i < min(params.loadedTableCapacity, 256u); i++) {
+            let entry = loadedTable[idx];
+            if (entry.keyHi == EMPTY_KEY) { break; }
+            if (entry.keyHi == keyHi && entry.keyLo == keyLo) {
+                let size = vec2<i32>(textureDimensions(lodHeights));
+                let local = uv * f32(1u << depth) - vec2<f32>(xy);
+                let texel = clamp(vec2<i32>(local * vec2<f32>(size)), vec2<i32>(0), size - vec2<i32>(1));
+                let height = textureLoad(lodHeights, texel, i32(entry.layer), 0).x * ${heightScale.toFixed(1)};
+                return seaCentre + normalize(seaCentre - params.planetOrigin) * max(height, 0.0);
+            }
+            idx = (idx + 1u) & params.loadedTableMask;
+        }
+        if (depth == 0u) { break; }
+        depth--;
+        xy = xy >> vec2<u32>(1u);
+    }
+    return seaCentre;
 }
 ` : ''}
 
@@ -633,7 +674,7 @@ fn main(@builtin(local_invocation_id) lid : vec3<u32>) {
             // only the LOD-appropriate leaves enter the visible list.
             // The instance builder handles texture fallback for unloaded leaves
             // (walks up the quadtree to the nearest loaded ancestor).
-            let wantSubdivide = shouldSubdivideWithCenter(depth, ${regionalFoundation ? 'getTileLodCenter(tile, worldCenter)' : 'worldCenter'});
+            let wantSubdivide = shouldSubdivideWithCenter(depth, ${regionalFoundation || groundLodHeight ? 'getTileLodCenter(tile, worldCenter)' : 'worldCenter'});
 
             if (!wantSubdivide) {
                 atomicAdd(&debugCounters[DC_EMITTED], 1u);

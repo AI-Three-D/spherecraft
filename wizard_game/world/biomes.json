@@ -31,7 +31,12 @@
       { "name": "DESERT_DRY_1", "id": 150, "category": "DESERT" },
       { "name": "DESERT_DRY_2", "id": 151, "category": "DESERT" },
       { "name": "DESERT_DRY_3", "id": 152, "category": "DESERT" },
-      { "name": "DESERT_DRY_4", "id": 153, "category": "DESERT" }
+      { "name": "DESERT_DRY_4", "id": 153, "category": "DESERT" },
+
+      { "name": "MUD_WET_1", "id": 106, "category": "MUD" },
+      { "name": "MUD_WET_2", "id": 107, "category": "MUD" },
+      { "name": "MUD_WET_3", "id": 108, "category": "MUD" },
+      { "name": "MUD_WET_4", "id": 109, "category": "MUD" }
     ],
     "categories": [
       { "name": "WATER", "ranges": [[0, 3]] },
@@ -39,7 +44,8 @@
       { "name": "ROCK", "ranges": [[42, 53]] },
       { "name": "FOREST", "ranges": [[66, 81], [142, 149]] },
       { "name": "SNOW", "ranges": [[130, 141]] },
-      { "name": "DESERT", "ranges": [[150, 165]] }
+      { "name": "DESERT", "ranges": [[150, 165]] },
+      { "name": "MUD", "ranges": [[106, 109]] }
     ]
   },
   "biomes": [

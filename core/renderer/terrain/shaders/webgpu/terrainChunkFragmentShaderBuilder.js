@@ -1756,6 +1756,18 @@ fn loadSplatValidity(coord: vec2<i32>, layer: i32) -> bool {
     return textureLoad(splatValidMap, coord, layer, 0).r > 0.5;
 }
 
+// The bed's share of the soil family (weight z): in family mode
+// splatIndexMap holds the bed's weight (red) instead of tile ids
+// (splatCompute.wgsl.js storeFixedMaterialFamilySplat).
+fn sampleFixedMaterialBedShare(input: FragmentInput, layer: i32, soil: f32) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let bed = ${useArrayTextures
+        ? 'textureSampleLevel(splatIndexMap, chunkLinearSampler, uv, layer, 0.0).r'
+        : 'textureSampleLevel(splatIndexMap, chunkLinearSampler, uv, 0.0).r'
+    };
+    return clamp(bed / max(soil, 0.001), 0.0, 1.0);
+}
+
 fn sampleFixedMaterialFamilyData(input: FragmentInput, layer: i32) -> SplatData {
     let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
     let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
@@ -2667,7 +2679,30 @@ fn sampleMacroAtlasLayer(
     return textureSampleGrad(level2AtlasTexture, textureSampler, tileUv, layer, ddx_vUv, ddy_vUv);
 }
 
+// River and lake beds are mud, a soil-family material the family's
+// representative (desert, in a world without sand) would draw: the bed's
+// share of the soil (fixedSoilBedW, set per fragment from
+// sampleFixedMaterialBedShare) draws with the mud texture. Swapping the
+// texture leaves the splat's weights and blend path alone (moving weight
+// between splat slots drew seams along the banks; blending the final colour
+// by the soil share left a desert rim).
+var<private> fixedSoilBedW: f32 = 0.0;
+
 fn sampleTileColor(
+    tileId: f32,
+    worldTileCoord: vec2<f32>,
+    localUV: vec2<f32>,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>
+) -> vec4<f32> {
+    let color = sampleTileColorOwn(tileId, worldTileCoord, localUV, activeSeason, ddx_vUv, ddy_vUv);
+    if (fixedSoilBedW <= 0.0 || FIXED_MATERIAL_BED_TILE < 0.0 || abs(tileId - FIXED_MATERIAL_FAMILY_TILE_IDS.z) > 0.5) { return color; }
+    let mud = sampleTileColorOwn(FIXED_MATERIAL_BED_TILE, worldTileCoord, localUV, activeSeason, ddx_vUv, ddy_vUv);
+    return mix(color, mud, fixedSoilBedW);
+}
+
+fn sampleTileColorOwn(
     tileId: f32,
     worldTileCoord: vec2<f32>,
     localUV: vec2<f32>,
@@ -3756,6 +3791,14 @@ if (debugMode == 16) {
         dominantTileId = splatDominantTileId(splatResult);
     }
 
+    // Mode 106: fixed material family weights, unlit: organic green, mineral
+    // red, soil blue (its bed share magenta), cold white.
+    if (debugMode == 106 && USE_FIXED_MATERIAL_FAMILIES && hasLiveSplat) {
+        let w = splatResult.weights;
+        let bed = sampleFixedMaterialBedShare(input, materialLayer, w.z);
+        return vec4<f32>(w.y + w.w + w.z * bed, w.x + w.w, w.z + w.w, 1.0);
+    }
+
     // Mode 102: force LOD4 through the EXACT same resolvedColor path LOD5
     // uses (ENABLE_RESOLVED_COLOR's own branch body, copied verbatim,
     // including its alpha-validity fallback), then falls through to the
@@ -3838,9 +3881,14 @@ if (debugMode == 16) {
         }
     } else if (hasLiveSplat) {
         if (USE_FIXED_MATERIAL_FAMILIES) {
+            // The bed's share of the soil draws as mud (sampleTileColor).
+            if (FIXED_MATERIAL_BED_TILE >= 0.0 && splatResult.weights.z > 0.001) {
+                fixedSoilBedW = sampleFixedMaterialBedShare(input, materialLayer, splatResult.weights.z);
+            }
             microSample = sampleMicroTextureWithFixedMaterialFamilies(
                 input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
             );
+            fixedSoilBedW = 0.0;
         } else {
             microSample = sampleMicroTextureWithSplat(
                 input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult

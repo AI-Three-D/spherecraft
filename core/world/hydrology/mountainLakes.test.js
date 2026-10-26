@@ -95,7 +95,7 @@ describe('mountain lakes', () => {
     });
 
     it("a stream's ends flare at most 1.25x over a short length", () => {
-        const P = { ...RIVER_SHAPE_DEFAULTS, ...MOUNTAIN_LAKE_DEFAULTS.streamShape };
+        const P = { ...RIVER_SHAPE_DEFAULTS, ...MOUNTAIN_LAKE_DEFAULTS.streamShape, minReachWidthM: 0 };
         // Relative to the width along the river (riverSection.js riverWidthFactor).
         const at = (s) => riverReachShape({ width: 8, depth: 0.8 }, s, 900, 3, P).width / riverWidthFactor(s, 3, 8).f;
         expect(at(0)).toBeCloseTo(10, 6);

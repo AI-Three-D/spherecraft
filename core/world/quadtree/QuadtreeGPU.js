@@ -105,6 +105,10 @@ export class QuadtreeGPU {
      * @param {number}      [config.maxFeedback=4096]
      * @param {boolean}     [config.enableFrustumCulling=true]
      * @param {boolean}     [config.enableHorizonCulling=true]
+     * @param {'sea'|'ground'} [config.lodHeightSource='sea']  Non-regional terrain:
+     *        selection distance from the tiles' sea-level centres or from their own
+     *        resident ground (setLodHeightTexture, setLodHeightSource)
+     * @param {number}      [config.heightScale]  metres per unit of the height texture
      */
     constructor(device, config = {}) {
         if (!device) throw new Error('QuadtreeGPU: device is required');
@@ -116,6 +120,11 @@ export class QuadtreeGPU {
         this._regionalTerrain = config.regionalTerrain ?? null;
         this.regionalShapeLod = config.regionalShapeLod !== false;
         this._regionalBindGroup = null;
+        this.lodHeightSource = config.lodHeightSource === 'ground' ? 'ground' : 'sea';
+        this.heightScale = config.heightScale ?? 0;
+        this._groundPipeline = null;
+        this._groundLayout = null;
+        this._groundBindGroup = null;
 
         // ── Planet ──────────────────────────────────────────────────────
         this.planetRadius = config.planetRadius;
@@ -407,6 +416,9 @@ async _withDebugReadbackLock(fn) {
         this._regionalLayout = null;
         this._regionalBindGroup = null;
         this._regionalTerrain = null;
+        this._groundPipeline = null;
+        this._groundLayout = null;
+        this._groundBindGroup = null;
 
         this._instancePipeline = null;
         this._instanceBindGroupLayout = null;
@@ -434,6 +446,21 @@ async _withDebugReadbackLock(fn) {
                     {binding:2,resource:{buffer:shape?.params??this._emptyShapeParams}},
                     {binding:3,resource:(shape?.texture??this._emptyShapeTexture).createView()}] })
             : null;
+    }
+
+    // The tiles' height array (TileArrayPool 'height', created once): with
+    // lodHeightSource 'ground', non-regional selection measures distance
+    // from each tile's own ground (quadtreeTraversal.wgsl.js getTileLodCenter).
+    setLodHeightTexture(heightTexture) {
+        this._groundBindGroup = heightTexture && this._groundLayout
+            ? this.device.createBindGroup({ label: 'QT-GroundLod', layout: this._groundLayout,
+                entries: [{ binding: 0, resource: heightTexture.createView({ dimension: '2d-array' }) }] })
+            : null;
+    }
+
+    /** 'sea' (sea-level tile centres) or 'ground' (each tile's resident ground). */
+    setLodHeightSource(source) {
+        this.lodHeightSource = source === 'ground' ? 'ground' : 'sea';
     }
 
     /**
@@ -584,9 +611,11 @@ async _withDebugReadbackLock(fn) {
             label: 'QuadtreeTraversal'
         });
 
-        pass.setPipeline(this._regionalBindGroup ? this._regionalPipeline : this._pipeline);
+        const ground = !this._regionalBindGroup && this.lodHeightSource === 'ground' && this._groundBindGroup;
+        pass.setPipeline(this._regionalBindGroup ? this._regionalPipeline : ground ? this._groundPipeline : this._pipeline);
         pass.setBindGroup(0, this._bindGroup);
         if (this._regionalBindGroup) pass.setBindGroup(1, this._regionalBindGroup);
+        else if (ground) pass.setBindGroup(1, this._groundBindGroup);
         // Single workgroup dispatch — the shader handles all 6 faces internally
         pass.dispatchWorkgroups(1);
         pass.end();
@@ -1528,6 +1557,17 @@ if (!this._loggedTraversalVariant) {
             this._regionalPipeline = await this.device.createComputePipelineAsync({ label: 'QT-RegionalFoundationPipeline',
                 layout: this.device.createPipelineLayout({ bindGroupLayouts: [this._bindGroupLayout, this._regionalLayout] }),
                 compute: { module: regionalModule, entryPoint: 'main' } });
+        } else if (this.heightScale > 0) {
+            this._groundLayout = this.device.createBindGroupLayout({ label: 'QT-GroundLodLayout',
+                entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE,
+                    texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }] });
+            const groundModule = this.device.createShaderModule({ label: 'QT-GroundLodShader',
+                code: buildTraversalShaderSource({ workgroupSize: this.workgroupSize,
+                    disableCulling: !this.enableFrustumCulling && !this.enableHorizonCulling,
+                    groundLodHeight: true, heightScale: this.heightScale }) });
+            this._groundPipeline = await this.device.createComputePipelineAsync({ label: 'QT-GroundLodPipeline',
+                layout: this.device.createPipelineLayout({ bindGroupLayouts: [this._bindGroupLayout, this._groundLayout] }),
+                compute: { module: groundModule, entryPoint: 'main' } });
         }
 
         Logger.info('[QuadtreeGPU] Traversal pipeline created');

@@ -51,6 +51,10 @@ export const NARROW_RIVER_HW_M = 10;
 // still showed through at 40-50 % and blurred (owner 2026-10-12, v20).
 export const LAKE_FAR_DEPTH_PER_M = 0.05;
 export const NARROW_RIVER_DRAW_M = 12000;
+// Water debug view without any water (qtDiag.water.tint, URL water=off): the
+// terrain shading returns the ground, near and simulated surfaces are not
+// drawn. Beds, banks and their materials stay as generated.
+export const WATER_DEBUG_DRY = 10;
 
 /**
  * WGSL shared by the water lookup and the river carve: WaterParams,
@@ -234,27 +238,25 @@ fn waterRiverList(d: vec3<f32>) -> u32 {
 }
 
 /**
- * @param {object} [o]
- * @param {number} [o.group=3]   bind group of the water bindings
- * @returns {string} WGSL: structs, bindings, waterLakeLevelAt(), waterRiverAt(), applyWater()
+ * Lake and river lookups (waterLakeLevelAt, waterLakeHitView, waterRiverAt):
+ * the lake table and masks, on the bindings of createWaterCommonWgsl (which
+ * the caller includes). The water rendering (createWaterWgsl) and the terrain
+ * generator's lake beds (riverCarve.wgsl.js) share them.
+ * @param {number} group
+ * @param {{lakes: number, masks: number}} b  binding numbers
  */
-export function createWaterWgsl({ group = 3 } = {}) {
-    const B = WATER_BINDINGS;
+export function createWaterLookupWgsl(group, b) {
     return /* wgsl */`
-// ==================== Water (core/world/water/waterWgsl.js) ====
 struct WaterLake {
     level: f32, maskLayer: i32, sizeX: f32, sizeY: f32,
     c: vec3<f32>, x0: f32,
     e1: vec3<f32>, y0: f32,
     e2: vec3<f32>, surfaceDepthRangeM: f32,
 };
-${createWaterCommonWgsl(group, B)}
-@group(${group}) @binding(${B.lakes}) var<storage, read> waterLakes: array<WaterLake>;
-@group(${group}) @binding(${B.masks}) var waterLakeMasks: texture_2d_array<f32>;
+@group(${group}) @binding(${b.lakes}) var<storage, read> waterLakes: array<WaterLake>;
+@group(${group}) @binding(${b.masks}) var waterLakeMasks: texture_2d_array<f32>;
 
 const WATER_NO_LAKE: f32 = -1.0e30;
-// Debug views 6 and 7 (applyWater): a channel that is on; tone mapping saturates it.
-const WATER_OWNER_ON: f32 = 64.0;
 struct WaterLakeHit { level: f32, depthM: f32, }
 
 fn waterLakeCandidateCount(cell: u32) -> u32 {
@@ -402,36 +404,12 @@ struct WaterRiverHit {
     pool: f32,            // < 0 inside a lake
     seg: f32,             // index of the nearest traced segment (debug view 5)
     slope: f32,           // descending water-surface slope, including waterfall lips
+    lakeGuard: f32,       // level of a lake beside the river (WaterRiverPt.lakeGuard)
 };
 
 // Close queries use actual terrain. A flagged, island-free structured segment
 // also defines a cut-only bed upper bound inside its full-cut channel core.
 // The distant renderer may use that field when coarse triangles miss the cut.
-// Debug view 9: why a signed-distance lake draws or not here (the terms of
-// waterLakeHitIn, terrain shading only): white the ground is above the
-// level, red outside the band (F <= range), blue the lake gives way to a
-// lower river, magenta drawn in the band, cyan drawn in the solved water.
-fn waterLakeDebugWhy(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler) -> vec4<f32> {
-    if (slot == 0u) { return vec4<f32>(0.0); }
-    let lake = waterLakes[slot - 1u];
-    if (lake.surfaceDepthRangeM >= 0.0 || lake.maskLayer < 0) { return vec4<f32>(0.0); }
-    let k = dot(dir, lake.c);
-    if (k <= 0.0) { return vec4<f32>(0.0); }
-    let px = dot(dir, lake.e1) / k * waterParams.planetRadius;
-    let py = dot(dir, lake.e2) / k * waterParams.planetRadius;
-    let uv = vec2<f32>((px - lake.x0) / lake.sizeX, (py - lake.y0) / lake.sizeY);
-    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return vec4<f32>(0.0); }
-    let F = waterLakeMaskSampleSmooth(lake, uv, samp) * 255.0 - 128.0;
-    if (heightM >= lake.level) { return vec4<f32>(1.0, 1.0, 1.0, 1.0); }
-    if (F <= lake.surfaceDepthRangeM) { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
-    if (F < 0.0) {
-        let river = waterRiverAt(dir, heightM);
-        if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { return vec4<f32>(0.0, 0.0, 1.0, 1.0); }
-        return vec4<f32>(1.0, 0.0, 1.0, 1.0);
-    }
-    return vec4<f32>(0.0, 1.0, 1.0, 1.0);
-}
-
 fn waterRiverAt(dir: vec3<f32>, heightM: f32) -> WaterRiverHit {
     return waterRiverAtView(dir,heightM,false);
 }
@@ -459,6 +437,7 @@ fn waterRiverAtView(dir: vec3<f32>, heightM: f32, coarseSurface: bool) -> WaterR
     if (best.d > zone) { return hit; }
     hit.near = true;
     hit.sM = best.s;
+    hit.lakeGuard = best.lakeGuard;
     hit.nM = best.n;
     hit.river = best.river;
     hit.pool = best.pool;
@@ -509,6 +488,47 @@ fn waterRiverAtView(dir: vec3<f32>, heightM: f32, coarseSurface: bool) -> WaterR
     let split = left * select(-1.0, 1.0, best.n >= 0.0) * best.dIsland * best.hw * 0.35;
     hit.flow = select(normalize(cross(dir, vec3<f32>(0.0, 1.0, 0.0001))), normalize(along + split * length(along)), dot(along, along) > 1.0e-24);
     return hit;
+}
+`;
+}
+
+/**
+ * @param {object} [o]
+ * @param {number} [o.group=3]   bind group of the water bindings
+ * @returns {string} WGSL: structs, bindings, waterLakeLevelAt(), waterRiverAt(), applyWater()
+ */
+export function createWaterWgsl({ group = 3 } = {}) {
+    const B = WATER_BINDINGS;
+    return /* wgsl */`
+// ==================== Water (core/world/water/waterWgsl.js) ====
+${createWaterCommonWgsl(group, B)}
+${createWaterLookupWgsl(group, B)}
+// Debug views 6 and 7 (applyWater): a channel that is on; tone mapping saturates it.
+const WATER_OWNER_ON: f32 = 64.0;
+
+// Debug view 9: why a signed-distance lake draws or not here (the terms of
+// waterLakeHitIn, terrain shading only): white the ground is above the
+// level, red outside the band (F <= range), blue the lake gives way to a
+// lower river, magenta drawn in the band, cyan drawn in the solved water.
+fn waterLakeDebugWhy(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler) -> vec4<f32> {
+    if (slot == 0u) { return vec4<f32>(0.0); }
+    let lake = waterLakes[slot - 1u];
+    if (lake.surfaceDepthRangeM >= 0.0 || lake.maskLayer < 0) { return vec4<f32>(0.0); }
+    let k = dot(dir, lake.c);
+    if (k <= 0.0) { return vec4<f32>(0.0); }
+    let px = dot(dir, lake.e1) / k * waterParams.planetRadius;
+    let py = dot(dir, lake.e2) / k * waterParams.planetRadius;
+    let uv = vec2<f32>((px - lake.x0) / lake.sizeX, (py - lake.y0) / lake.sizeY);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return vec4<f32>(0.0); }
+    let F = waterLakeMaskSampleSmooth(lake, uv, samp) * 255.0 - 128.0;
+    if (heightM >= lake.level) { return vec4<f32>(1.0, 1.0, 1.0, 1.0); }
+    if (F <= lake.surfaceDepthRangeM) { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
+    if (F < 0.0) {
+        let river = waterRiverAt(dir, heightM);
+        if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { return vec4<f32>(0.0, 0.0, 1.0, 1.0); }
+        return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+    }
+    return vec4<f32>(0.0, 1.0, 1.0, 1.0);
 }
 
 fn waterHash(p: vec2<f32>) -> f32 {
@@ -637,7 +657,7 @@ fn applyWater(
     bedColor: vec3<f32>, worldPos: vec3<f32>, cameraPos: vec3<f32>, planetCenter: vec3<f32>,
     lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>, samp: sampler,
 ) -> vec3<f32> {
-    if (waterParams.enabled == 0u) { return bedColor; }
+    if (waterParams.enabled == 0u || waterParams.debugMode == ${WATER_DEBUG_DRY}u) { return bedColor; }
     let rel = worldPos - planetCenter;
     let r = length(rel);
     let up = rel / r;

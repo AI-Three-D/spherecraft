@@ -1184,10 +1184,8 @@ fn computeSurfaceWeightsInternal(
         let amount = clamp(shore.x + shore.y + shore.z, 0.0, 0.55);
         if (amount > 0.001) {
             var bank = zeroSurfaceWeights();
-            bank.rock = shore.y + shore.x * 0.12;
-            bank.sand = shore.x * 0.08;
-            bank.dirt = shore.x * 0.8;
-            bank.mud = shore.z;
+            bank.rock = shore.y;
+            bank.mud = shore.x + shore.z;
             mixed = blendSurfaceWeights(mixed, normalizeSurfaceWeights(bank), amount);
         }
     }
