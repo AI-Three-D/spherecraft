@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RIVER_SECTION } from '../water/riverSection.js';
-import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverLakeHold, riverReachShape, riverShape, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
+import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverDelta, riverLakeHold, riverReachShape, riverShape, RIVER_SHAPE_DEFAULTS, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
 
 // 60 x 30 patch, 16 m cells, frame origin at (0, 0). A valley runs along
 // j = 15 from a source lake (i < 10, level 50 m) down to a destination lake
@@ -76,6 +76,24 @@ describe('river levels for the valley', () => {
         expect(beds.some((b, k) => k > 0 && b > beds[k - 1])).toBe(true);
         const mouth = riverReachShape({ width: 40, depth: 3 }, 0, 6000, 17);
         expect(mouth.width).toBeGreaterThan(60);
+    });
+
+    it('widens into a lake as a delta, 1.6-4 x, a third of the rivers 3-4 x', () => {
+        const scales = [];
+        for (let river = 0; river < 300; river++) {
+            expect(riverDelta(1000 - 400, 1000, river, 12)).toBe(1);
+            const at = riverDelta(1000, 1000, river, 12);
+            expect(riverDelta(1000 - 30, 1000, river, 12)).toBeLessThan(at);
+            scales.push(at);
+        }
+        expect(Math.min(...scales)).toBeGreaterThanOrEqual(1.6);
+        expect(Math.max(...scales)).toBeLessThanOrEqual(4);
+        const big = scales.filter(x => x >= 3).length / scales.length;
+        expect(big).toBeGreaterThan(0.25);
+        expect(big).toBeLessThan(0.45);
+        const small = riverShape(0, 0.001), P = { ...RIVER_SHAPE_DEFAULTS, junctionEndM: 3000, typicalWidthM: 12, deltaLake: true };
+        const mouth = riverReachShape(small, 3000, 3100, 5, P), up = riverReachShape(small, 2000, 3100, 5, P);
+        expect(mouth.depth).toBeLessThan(up.depth);
     });
 
     it('narrows the smallest rivers to minReachWidthM at most', () => {

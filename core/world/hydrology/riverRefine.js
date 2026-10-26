@@ -22,7 +22,7 @@
 // The sparse landscape bake prepares the banks around this surface.
 
 import { MinHeap } from './waterGraph.js';
-import { riverNoise } from '../water/riverShapeNoise.js';
+import { riverHash, riverNoise } from '../water/riverShapeNoise.js';
 import { RIVER_SECTION, riverWidthFactor } from '../water/riverSection.js';
 
 const NB8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]];
@@ -181,11 +181,32 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     depthVar: 0.45,
     junctionWidthScale: 2.3,
     junctionLengthM: 180,
+    // A river's delta into its destination lake (P.deltaLake; junctions and
+    // outlets keep the junction flare): it widens like a trumpet over
+    // lengthWidths of its typical width (at least minLengthM) before the
+    // lake (growing as u^shapeExp over it), to scale x its width, bigShare
+    // of the rivers to bigScale; the channel shallows as it spreads
+    // (depth ~ width^-depthExp). Its full width is at the shore
+    // (waterWorkerCore.js deltaEndK): the flare centred on the coarse lake
+    // entry fell mostly under the water and read as no delta at all (owner
+    // 2026-10-26).
+    delta: Object.freeze({ scale: [1.6, 2.4], bigShare: 0.35, bigScale: [3, 4], lengthWidths: [6, 12], minLengthM: 100, shapeExp: 1.6, depthExp: 0.5,
+        salts: Object.freeze({ big: 0x3d51, scale: 0x6a2f, length: 0x1b77 }) }),
     sourceInsetM: 100,
     islands: false,
     islandThreshold: 0.3,
     waterfalls: { enabled: false },    // riverFeatures.js RIVER_FALL_DEFAULTS overrides
 });
+
+/** Width factor of a river's delta at arc length s (m), its lake entry at end. */
+export function riverDelta(s, end, river, typicalWidthM, D = RIVER_SHAPE_DEFAULTS.delta) {
+    const lerp = (r, t) => r[0] + (r[1] - r[0]) * t;
+    const big = riverHash(river, D.salts.big) < D.bigShare;
+    const scale = lerp(big ? D.bigScale : D.scale, riverHash(river, D.salts.scale));
+    const L = Math.max(D.minLengthM, typicalWidthM * lerp(D.lengthWidths, riverHash(river, D.salts.length)));
+    const u = Math.min(1, Math.max(0, 1 - (end - s) / L));
+    return 1 + (scale - 1) * Math.pow(u, D.shapeExp);
+}
 
 /**
  * Baked pools/constrictions and lake mouths. Depth never sets the surface
@@ -198,9 +219,11 @@ export function riverReachShape(shape, s, length, river, P = RIVER_SHAPE_DEFAULT
     const pool = riverNoise(s, river, 'depth').v;
     const joinM = Math.max(P.junctionLengthM, shape.width * 2);
     const start = P.junctionStartM ?? 0, end = P.junctionEndM ?? length;
-    const mouth = 1 - quintic01(Math.min(Math.abs(s - start), Math.abs(end - s)) / joinM);
-    const width = Math.max(P.minReachWidthM ?? 0, shape.width * riverWidthFactor(s, river, P.typicalWidthM ?? shape.width).f) * (1 + (P.junctionWidthScale - 1) * mouth);
-    const depth = shape.depth * Math.max(0.45, 1 + P.depthVar * pool) * Math.pow(shape.width / width, 0.25);
+    const delta = P.deltaLake ? riverDelta(s, end, river, P.typicalWidthM ?? shape.width, P.delta ?? RIVER_SHAPE_DEFAULTS.delta) : 1;
+    const mouth = 1 - quintic01(Math.min(Math.abs(s - start), P.deltaLake ? Infinity : Math.abs(end - s)) / joinM);
+    const width = Math.max(P.minReachWidthM ?? 0, shape.width * riverWidthFactor(s, river, P.typicalWidthM ?? shape.width).f) * (1 + (P.junctionWidthScale - 1) * mouth) * delta;
+    const depth = shape.depth * Math.max(0.45, 1 + P.depthVar * pool) * Math.pow(shape.width / width * delta, 0.25)
+        * Math.pow(delta, -(P.delta ?? RIVER_SHAPE_DEFAULTS.delta).depthExp);
     const island = P.islands && s > 2 * joinM && length - s > 2 * joinM
         ? quintic01((reach - P.islandThreshold) / 0.3) * (1 - quintic01(((shape.slope ?? 0) - 0.004) / 0.008)) : 0;
     return { ...shape, width, depth, island };
@@ -234,8 +257,10 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 // the hold the fit from the lake as before.
 // 16 = refined lower lakes terminate reaches at their own surface;
 // 17 = rivers at least 12 m wide, constrictions to 8 m (minReachWidthM);
-// 18 = a share of the rivers widens to 3-4 x (riverSection.js wideShare).
-export const RIVER_SOLVE_VERSION = 18;
+// 18 = a share of the rivers widens to 3-4 x (riverSection.js wideShare);
+// 19 = deltas into lakes (RIVER_SHAPE_DEFAULTS.delta); 20 = full at the
+// shore; 21 = longer, gentler.
+export const RIVER_SOLVE_VERSION = 21;
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
