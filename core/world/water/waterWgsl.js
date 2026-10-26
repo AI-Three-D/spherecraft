@@ -216,6 +216,61 @@ fn waterRiverPointOn(s: WaterRiverSeg, dir: vec3<f32>, extend: bool) -> WaterRiv
     return p;
 }
 
+// The segment across the nearer joint from segment k (its neighbour in the
+// list [listStart, listEnd): same river, adjacent arc) and its weight with
+// the weight's gradient (d/d dir): 1/2 at the joint, 0 from the middle of
+// the shorter segment. Each segment's values are straight lines along the
+// river, so its level, width and bed changed slope at every joint: bands
+// across the river like scales and stairs (owner 2026-10-26). The carve,
+// the water lookup and the near ribbons (riverRibbon.js riverJointValue)
+// blend alike, both segments on their lines extended past the joint
+// (waterRiverPointOn): a rounded cap there is shallower. (Weighed by how
+// much nearer segment k is instead, the weight did not vanish where the
+// neighbour switches mid-segment: creases across the river.)
+struct WaterRiverJoint { k: u32, w: f32, dw: vec3<f32>, };
+fn waterRiverJoint(k: u32, listStart: u32, listEnd: u32, s: WaterRiverSeg, p: WaterRiverPt) -> WaterRiverJoint {
+    var j = WaterRiverJoint(k, 0.0, vec3<f32>(0.0));
+    let next = p.tRaw >= 0.5;
+    if ((next && k + 1u >= listEnd) || (!next && k <= listStart)) { return j; }
+    let ko = select(k - 1u, k + 1u, next);
+    let o = waterRivers[ko];
+    if (o.river != s.river || abs(select(o.s1 - s.s0, o.s0 - s.s1, next)) > 0.5) { return j; }
+    let ab = s.p1 - s.p0;
+    let L = s.s1 - s.s0;
+    let band = 0.5 * min(L, o.s1 - o.s0);
+    if (band <= 0.0) { return j; }
+    // Arc length (m) to the joint and its gradient.
+    let g = ab * (L / max(dot(ab, ab), 1.0e-20));
+    let a = select(p.tRaw * L, (1.0 - p.tRaw) * L, next);
+    let x = clamp(a / band, 0.0, 1.0);
+    j.k = ko;
+    j.w = 0.5 * (1.0 - x * x * (3.0 - 2.0 * x));
+    j.dw = select(vec3<f32>(0.0), select(g, -g, next) * (-3.0 * x * (1.0 - x) / band), a > 0.0 && a < band);
+    return j;
+}
+
+// Two segments' points mixed (waterRiverJoint's blend; a's side and lake guard).
+fn waterRiverPtMix(a: WaterRiverPt, b: WaterRiverPt, w: f32) -> WaterRiverPt {
+    var p = a;
+    p.n = mix(a.n, b.n, w);
+    p.d = abs(p.n);
+    p.dLine = mix(a.dLine, b.dLine, w);
+    p.eta = mix(a.eta, b.eta, w);
+    p.bed = mix(a.bed, b.bed, w);
+    p.hw = mix(a.hw, b.hw, w);
+    p.pool = mix(a.pool, b.pool, w);
+    p.skew = mix(a.skew, b.skew, w);
+    p.speed = mix(a.speed, b.speed, w);
+    p.foam = mix(a.foam, b.foam, w);
+    p.wl = mix(a.wl, b.wl, w);
+    p.kappa = mix(a.kappa, b.kappa, w);
+    p.rimL = mix(a.rimL, b.rimL, w);
+    p.rimR = mix(a.rimR, b.rimR, w);
+    p.island = mix(a.island, b.island, w);
+    p.s = mix(a.s, b.s, w);
+    return p;
+}
+
 // Each side's bank (riverSection.js): left, then right.
 fn waterRiverBank(p: WaterRiverPt, left: bool) -> RiverBank {
     return riverBankParams(riverBankType(p.s, p.river, left, p.kappa), p.river);
@@ -438,7 +493,11 @@ fn waterRiverAtView(dir: vec3<f32>, heightM: f32, coarseSurface: bool) -> WaterR
         if (dd < bestD) { bestD = dd; bestK = first + k; }
     }
     let s = waterRivers[bestK];
-    let best = waterRiverPoint(s, dir);
+    var best = waterRiverPoint(s, dir);
+    let joint = waterRiverJoint(bestK, first, first + count, s, best);
+    if (joint.w > 0.0) {
+        best = waterRiverPtMix(waterRiverPointOn(s, dir, true), waterRiverPointOn(waterRivers[joint.k], dir, true), joint.w);
+    }
     let zone = best.hw + waterParams.carve.y;
     if (best.d > zone) { return hit; }
     hit.near = true;

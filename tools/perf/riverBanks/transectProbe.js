@@ -41,3 +41,24 @@ export async function transectAt({ view, halfM = 30, stepM = 0.05 }) {
     const top = [...jumps].sort((a, b) => Math.abs(b.dSlope) - Math.abs(a.dSlope)).slice(0, 12);
     return { rid, k, s: arc[k], hw, level: P[k * st + 16], bed: P[k * st + 3] - P[k * st + 5], stepM, ns, carved, natural, top };
 }
+
+// The same cross-section with the river valleys' field switched off
+// (WaterGpuData valley params, shared with the sampler), then restored.
+export async function transectNoValley(args) {
+    const w = window.gameEngine.waterGpuData;
+    const { valleyParamsData } = await import('/core/world/water/riverValley.js');
+    const q = window.gameEngine.renderer.device?.queue ?? w.device.queue;
+    q.writeBuffer(w.valleyParamsBuffer, 0, valleyParamsData(w.valley ?? undefined, false));
+    try { return await transectAt(args); }
+    finally { q.writeBuffer(w.valleyParamsBuffer, 0, valleyParamsData(w.valley ?? undefined, true)); }
+}
+
+// The same cross-section with the river carve switched off (WaterParams
+// carve.x, written each frame from WaterGpuData.carve): the valley field alone.
+export async function transectValleyOnly(args) {
+    const w = window.gameEngine.waterGpuData, carve = w.carve;
+    w.carve = { ...carve, enabled: false };
+    await new Promise(r => setTimeout(r, 300));
+    try { return await transectAt(args); }
+    finally { w.carve = carve; }
+}

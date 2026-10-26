@@ -85,3 +85,70 @@ export async function wetWidths({ id, ks }) {
     }
     return rows;
 }
+
+// Points of the river passing nearest pos within radiusM: arc length (m),
+// design level eta (3), water level (16), depth at the thalweg (5), bed,
+// half-width (4), pool flag (9).
+export async function riverProfileNear({ pos, radiusM = 300 }) {
+    const g = window.gameEngine, svc = g.waterService, R = g.planetConfig.radius, o = g.planetConfig.origin || { x: 0, y: 0, z: 0 };
+    const v = [pos[0] - o.x, pos[1] - o.y, pos[2] - o.z], l = Math.hypot(...v), dir = v.map(x => x / l);
+    for (let t = 0; t < 120; t++) {
+        let best = null;
+        for (const [id, rec] of svc.riverRecs ?? []) {
+            const P = rec.points, st = rec.stride;
+            for (let k = 0; k < P.length / st; k++) {
+                const d = R * Math.acos(Math.min(1, P[k * st] * dir[0] + P[k * st + 1] * dir[1] + P[k * st + 2] * dir[2]));
+                if (d < radiusM && (!best || d < best.d)) best = { d, id, rec };
+            }
+        }
+        if (best) {
+            const P = best.rec.points, st = best.rec.stride, n = P.length / st, s = [0], rows = [];
+            for (let k = 1; k < n; k++) {
+                const a = (k - 1) * st, b = k * st;
+                s.push(s[k - 1] + R * Math.acos(Math.min(1, P[a] * P[b] + P[a + 1] * P[b + 1] + P[a + 2] * P[b + 2])));
+            }
+            for (let k = 0; k < n; k++) {
+                const a = k * st, d = R * Math.acos(Math.min(1, P[a] * dir[0] + P[a + 1] * dir[1] + P[a + 2] * dir[2]));
+                if (d < radiusM) rows.push([Math.round(s[k]), +P[a + 3].toFixed(2), +P[a + 16].toFixed(2), +P[a + 5].toFixed(2), +(P[a + 3] - P[a + 5]).toFixed(2), +P[a + 4].toFixed(1), P[a + 9]]);
+            }
+            return { id: best.id, n, cols: 's eta wl depth bed hw pool', rows };
+        }
+        await new Promise(r => setTimeout(r, 1000));
+    }
+    return null;
+}
+
+// Carved ground (the height function with carve and valley) every stepM
+// along river id's centreline between points k0 and k1, against the
+// record's bed (eta - depth / waterFrac... here eta - depth field 5).
+export async function bedAlong({ id, k0, k1, stepM = 1 }) {
+    const g = window.gameEngine, svc = g.waterService, R = g.planetConfig.radius;
+    for (let t = 0; t < 240 && !svc.riverRecs?.get(id); t++) await new Promise(r => setTimeout(r, 500));
+    const rec = svc.riverRecs.get(id), P = rec.points, st = rec.stride, arc = g.waterGpuData._arcLengths(rec);
+    const dirs = [], s = [];
+    for (let k = k0; k < k1; k++) {
+        const a = k * st, b = (k + 1) * st, L = arc[k + 1] - arc[k];
+        for (let x = 0; x < L; x += stepM) {
+            const t = x / L, d = [0, 1, 2].map(i => P[a + i] + (P[b + i] - P[a + i]) * t), l = Math.hypot(...d);
+            dirs.push(d[0] / l, d[1] / l, d[2] / l, 0);
+            s.push(+(arc[k] + x).toFixed(1));
+        }
+    }
+    const carved = Array.from(await svc._sampler.sampleDirsCarved(Float32Array.from(dirs)));
+    const joints = [];
+    for (let k = k0; k <= k1; k++) joints.push(+arc[k].toFixed(1));
+    return { id, joints, s, carved: carved.map(v => +v.toFixed(3)) };
+}
+
+// Lake rims (fields 14 left, 15 right), level (16), bank-full estimate and
+// lake guard (18) of river id's points k0..k1.
+export async function rimsOf({ id, k0 = 0, k1 = 1e9 }) {
+    const svc = window.gameEngine.waterService;
+    for (let t = 0; t < 240 && !svc.riverRecs?.get(id); t++) await new Promise(r => setTimeout(r, 500));
+    const rec = svc.riverRecs.get(id), P = rec.points, st = rec.stride, n = P.length / st, rows = [];
+    for (let k = Math.max(0, k0); k < Math.min(n, k1); k++) {
+        const a = k * st;
+        rows.push([k, +P[a + 16].toFixed(2), +P[a + 14].toFixed(2), +P[a + 15].toFixed(2), P[a + 18] < -1e10 ? null : +P[a + 18].toFixed(2), +P[a + 4].toFixed(1)]);
+    }
+    return { id, cols: 'k wl rimL rimR lakeGuard hw', rows };
+}

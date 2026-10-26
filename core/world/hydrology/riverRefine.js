@@ -173,10 +173,15 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // at least (they went to 3.3 m).
     minReachWidthM: 8,
     // Bank-full depth D (thalweg to the channel's edge); the water fills
-    // waterFrac of it (RIVER_LEVEL_DEFAULTS).
-    depthCoef: 0.6,       // D = depthCoef * Q^0.4 (m), at least minDepthM
+    // waterFrac of it (RIVER_LEVEL_DEFAULTS). Twice the first design (0.6,
+    // 0.8 m): the water was 0.4-0.6 m deep, the banks' fixed margins took
+    // much of it and deltas were dry mud (owner 2026-10-26).
+    depthCoef: 1.0,       // D = depthCoef * Q^0.4 (m), at least minDepthM
     depthExp: 0.4,
-    minDepthM: 0.8,
+    minDepthM: 1.6,
+    // Pools, constrictions and deltas shallow a reach to this share of
+    // minDepthM at most.
+    minReachDepthShare: 0.6,
     manning: 0.035,
     depthVar: 0.45,
     junctionWidthScale: 2.3,
@@ -190,7 +195,7 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // (waterWorkerCore.js deltaEndK): the flare centred on the coarse lake
     // entry fell mostly under the water and read as no delta at all (owner
     // 2026-10-26).
-    delta: Object.freeze({ scale: [1.6, 2.4], bigShare: 0.35, bigScale: [3, 4], lengthWidths: [6, 12], minLengthM: 100, shapeExp: 1.6, depthExp: 0.5,
+    delta: Object.freeze({ scale: [1.6, 2.4], bigShare: 0.35, bigScale: [3, 4], lengthWidths: [6, 12], minLengthM: 100, shapeExp: 1.6, depthExp: 0.2,
         salts: Object.freeze({ big: 0x3d51, scale: 0x6a2f, length: 0x1b77 }) }),
     sourceInsetM: 100,
     islands: false,
@@ -222,8 +227,8 @@ export function riverReachShape(shape, s, length, river, P = RIVER_SHAPE_DEFAULT
     const delta = P.deltaLake ? riverDelta(s, end, river, P.typicalWidthM ?? shape.width, P.delta ?? RIVER_SHAPE_DEFAULTS.delta) : 1;
     const mouth = 1 - quintic01(Math.min(Math.abs(s - start), P.deltaLake ? Infinity : Math.abs(end - s)) / joinM);
     const width = Math.max(P.minReachWidthM ?? 0, shape.width * riverWidthFactor(s, river, P.typicalWidthM ?? shape.width).f) * (1 + (P.junctionWidthScale - 1) * mouth) * delta;
-    const depth = shape.depth * Math.max(0.45, 1 + P.depthVar * pool) * Math.pow(shape.width / width * delta, 0.25)
-        * Math.pow(delta, -(P.delta ?? RIVER_SHAPE_DEFAULTS.delta).depthExp);
+    const depth = Math.max((P.minReachDepthShare ?? 0) * P.minDepthM, shape.depth * Math.max(0.45, 1 + P.depthVar * pool)
+        * Math.pow(shape.width / width * delta, 0.25) * Math.pow(delta, -(P.delta ?? RIVER_SHAPE_DEFAULTS.delta).depthExp));
     const island = P.islands && s > 2 * joinM && length - s > 2 * joinM
         ? quintic01((reach - P.islandThreshold) / 0.3) * (1 - quintic01(((shape.slope ?? 0) - 0.004) / 0.008)) : 0;
     return { ...shape, width, depth, island };
@@ -259,8 +264,9 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 // 17 = rivers at least 12 m wide, constrictions to 8 m (minReachWidthM);
 // 18 = a share of the rivers widens to 3-4 x (riverSection.js wideShare);
 // 19 = deltas into lakes (RIVER_SHAPE_DEFAULTS.delta); 20 = full at the
-// shore; 21 = longer, gentler.
-export const RIVER_SOLVE_VERSION = 21;
+// shore; 21 = longer, gentler; 22 = rivers twice as deep; 23 = lake rims
+// fall relative to the water (riverLakeRims wl).
+export const RIVER_SOLVE_VERSION = 23;
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
@@ -458,16 +464,21 @@ export function riverCrestAbove(depth, P = RIVER_LEVEL_DEFAULTS) {
  * a lake just upstream of an outlet's bank was 57 m off and the bank was cut
  * below it (water-look v102). The rims fall by at most lakeSlope per m along
  * the river, so they stay continuous between points; -1e4 where no water is
- * in reach.
+ * in reach. With the river's water level (o.wl), their height above it falls
+ * so instead: carried as absolute heights down a stream steeper than
+ * lakeSlope, a source lake's rim stood 20 m above the water 270 m below the
+ * lake and the bank cut a wall and a bench into the hillside (owner
+ * 2026-10-26, "facets").
  * @param {object} o
  * @param {ArrayLike<number>} o.x, o.y, o.s  points (plane m) and arc length
  * @param {ArrayLike<number>} o.hw     half-width per point (m)
  * @param {ArrayLike<number>} o.reach  per point: how far its banks reach (m)
  * @param {Uint8Array} o.water  patch cells of drawn water; o.level their level
+ * @param {ArrayLike<number>} [o.wl]  the river's water level per point (m)
  * @param {number} o.nx, o.ny, o.x0, o.y0, o.spacing  the patch grid
  * @returns {{ left: Float64Array, right: Float64Array }}
  */
-export function riverLakeRims({ x, y, s, hw, reach, water, level, nx, ny, x0, y0, spacing }, P = RIVER_SECTION) {
+export function riverLakeRims({ x, y, s, hw, reach, water, level, wl, nx, ny, x0, y0, spacing }, P = RIVER_SECTION) {
     const n = x.length, NONE = -1e4;
     const left = new Float64Array(n).fill(-Infinity), right = new Float64Array(n).fill(-Infinity);
     for (let k = 0; k < n; k++) {
@@ -492,9 +503,10 @@ export function riverLakeRims({ x, y, s, hw, reach, water, level, nx, ny, x0, y0
             }
         }
     }
+    const base = (k) => (wl ? wl[k] : 0);
     for (const A of [left, right]) {
-        for (let k = 1; k < n; k++) A[k] = Math.max(A[k], A[k - 1] - P.lakeSlope * (s[k] - s[k - 1]));
-        for (let k = n - 2; k >= 0; k--) A[k] = Math.max(A[k], A[k + 1] - P.lakeSlope * (s[k + 1] - s[k]));
+        for (let k = 1; k < n; k++) A[k] = Math.max(A[k], A[k - 1] - base(k - 1) + base(k) - P.lakeSlope * (s[k] - s[k - 1]));
+        for (let k = n - 2; k >= 0; k--) A[k] = Math.max(A[k], A[k + 1] - base(k + 1) + base(k) - P.lakeSlope * (s[k + 1] - s[k]));
         for (let k = 0; k < n; k++) if (!(A[k] > NONE)) A[k] = NONE;
     }
     return { left, right };

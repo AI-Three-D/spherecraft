@@ -145,36 +145,8 @@ fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0
     return h0 + dMul(h - h0, w);
 }
 
-// The segment across the nearer joint from the closest one (its neighbour in
-// the river's run of the cell's list) and its weight as a dual: 1/2 at the
-// joint, 0 from a third of the shorter segment away. Each segment's section
-// alone changed the banks' slope at every joint (its own width and level
-// gradient, its own direction across): bands of light across the river
-// like scales (owner 2026-10-26). Both are taken on their lines extended
-// past the joint (waterRiverPointOn): a rounded cap beside it is shallower
-// and raised ripples across the channel.
-struct RiverCarveJoint { k: u32, w: vec4<f32>, };
-fn riverCarveJoint(bestK: u32, runStart: u32, runEnd: u32, s: WaterRiverSeg, p: WaterRiverPt) -> RiverCarveJoint {
-    var j = RiverCarveJoint(bestK, dConst(0.0));
-    let next = p.tRaw >= 0.5;
-    if ((next && bestK + 1u >= runEnd) || (!next && bestK <= runStart)) { return j; }
-    let k = select(bestK - 1u, bestK + 1u, next);
-    let o = waterRivers[k];
-    if (o.river != s.river || abs(select(o.s1 - s.s0, o.s0 - s.s1, next)) > 0.5) { return j; }
-    let R = waterParams.planetRadius;
-    let ab = s.p1 - s.p0;
-    let L = length(ab) * R;
-    let g = ab * (L / max(dot(ab, ab), 1.0e-20));
-    // Distance (m) along the segment to the joint.
-    let a = select(vec4<f32>(p.tRaw * L, g), vec4<f32>((1.0 - p.tRaw) * L, -g), next);
-    let band = 0.35 * min(L, length(o.p1 - o.p0) * R);
-    j.k = k;
-    j.w = 0.5 * (dConst(1.0) - dSmoothstep(0.0, band, dMax(a, dConst(0.0))));
-    return j;
-}
-
 // Each river's section from its closest traced segment (as waterRiverAt),
-// blended into its neighbour's near their joint (riverCarveJoint),
+// blended into its neighbour's toward their joint (waterRiverJoint),
 // the lowest of the rivers'. Every section only cuts, so the ground stays
 // continuous where two rivers' banks meet; the closest river's section alone
 // stepped along the line where the closest river changes (4 m where a
@@ -224,18 +196,19 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
         if (bestD * waterParams.planetRadius >= reach) { continue; }
         let p = waterRiverPoint(s, unitDir);
         if (p.d >= riverCarveReach(p)) { continue; }
-        let joint = riverCarveJoint(bestK, runStart, first + k, s, p);
-        let blend = joint.w.x > 0.0;
+        let jt = waterRiverJoint(bestK, runStart, first + k, s, p);
+        let jw = vec4<f32>(jt.w, jt.dw);
+        let blend = jt.w > 0.0;
         var so = s;
         var po = p;
         var pb = p;
         if (blend) {
-            so = waterRivers[joint.k];
+            so = waterRivers[jt.k];
             po = waterRiverPointOn(so, unitDir, true);
             pb = waterRiverPointOn(s, unitDir, true);
         }
         var c = riverCarveSegment_d(s, pb, unitDir, h0);
-        if (blend) { c = dMix(c, riverCarveSegment_d(so, po, unitDir, h0), joint.w); }
+        if (blend) { c = dMix(c, riverCarveSegment_d(so, po, unitDir, h0), jw); }
         if (c.x < h.x) { h = c; }
         if (nFloors < ${MAX_FLOORS}u) {
             let cd = riverCarveDuals(s, pb);
@@ -243,8 +216,8 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
             var water = cd.wl;
             if (blend) {
                 let co = riverCarveDuals(so, po);
-                floor = dMix(floor, riverCarveFloor_d(co, po), joint.w);
-                water = dMix(water, co.wl, joint.w);
+                floor = dMix(floor, riverCarveFloor_d(co, po), jw);
+                water = dMix(water, co.wl, jw);
             }
             floors[nFloors] = floor;
             floorWater[nFloors] = water;
@@ -259,7 +232,7 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
             // from the original terrain instead. This restores excavation;
             // it never constructs a bank above the original ground.
             var section = riverCarveSegment_d(s, pb, unitDir, original);
-            if (blend) { section = dMix(section, riverCarveSegment_d(so, po, unitDir, original), joint.w); }
+            if (blend) { section = dMix(section, riverCarveSegment_d(so, po, unitDir, original), jw); }
             if (section.x < fine.x) { fine = section; }
             let ab = s.p1 - s.p0;
             let tg = select(vec3<f32>(0.0), ab / max(dot(ab, ab), 1.0e-20), p.tRaw > 0.0 && p.tRaw < 1.0);

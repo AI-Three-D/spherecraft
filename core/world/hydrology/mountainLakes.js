@@ -39,7 +39,7 @@ export const MOUNTAIN_LAKE_DEFAULTS = Object.freeze({
     // Ends flare a little over a short length: the rivers' 2.3x over 180 m
     // (big rivers' mouths) made 20-26 m flat sheets at a stream's outlet and
     // junction (owner 2026-10-12, water-look v15-v17).
-    streamShape: { minWidthM: 12, minDepthM: 0.8, junctionWidthScale: 1.25, junctionLengthM: 40 },
+    streamShape: { minWidthM: 12, minDepthM: 1.6, junctionWidthScale: 1.25, junctionLengthM: 40 },
     pathStepM: 128,        // spacing of the fine drainage path's points
     streamCorridorM: 300,  // the 16 m trace stays this close to the fine path
     // A path leaving its discovery patch dry continues on patches this wide
