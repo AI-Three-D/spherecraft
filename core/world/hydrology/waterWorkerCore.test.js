@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { cellDir, dirToCell } from './waterGraph.js';
 import { dirToPlane, planeToDir, tangentBasis } from './lakeRefine.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
+import { RIVER_SHAPE_DEFAULTS } from './riverRefine.js';
 
 // Synthetic planet (metres): a continent around +Z, ocean elsewhere; a
 // valley sloping to the coast with two bowls on its floor (upper at
@@ -143,6 +144,27 @@ describe('water worker core', () => {
             if (P[o + 3] - P[o + 5] > P[o - st + 3] - P[o - st + 5]) bedRises++;
         }
         expect(bedRises).toBeGreaterThan(0);
+        // Held at the lake's level, with the lake's water on both banks, the
+        // river is part of the lake: its water no deeper than the lake within
+        // 24 m (no groove along a shallow arm); its channel deepens where
+        // the level falls.
+        let o = 0, inLake = 0;
+        for (; o < P.length && P[o + 3] >= lake.level - 1e-3; o += st) {
+            const d = [P[o], P[o + 1], P[o + 2]], next = o + st < P.length ? [P[o + st], P[o + st + 1], P[o + st + 2]] : d;
+            const t = next.map((v, i) => v - d[i]), side = [t[1] * d[2] - t[2] * d[1], t[2] * d[0] - t[0] * d[2], t[0] * d[1] - t[1] * d[0]];
+            const sl = Math.hypot(...side) || 1, tl = Math.hypot(...t) || 1, hw = P[o + 4];
+            const at = (u, v) => terrain(d.map((x, i) => x + (side[i] / sl * u + t[i] / tl * v) / R));
+            const banks = [-1, 1].flatMap(sg => [0, 2, 4].map(e => at(sg * (hw + e), 0)));
+            if (!banks.every(b => b < lake.level - 0.5)) continue;
+            inLake++;
+            let deep = 0;
+            for (const r of [8, 16, 24]) for (let q = 0; q < 8; q++) deep = Math.max(deep, lake.level - at(r * Math.cos(q * Math.PI / 4), r * Math.sin(q * Math.PI / 4)));
+            expect(P[o + 5]).toBeLessThanOrEqual(Math.max(0.02, deep) + 0.1);
+        }
+        expect(inLake).toBeGreaterThan(0);
+        // Leaving the lake it deepens gradually.
+        for (let q = st; q <= Math.min(o + 3 * st, P.length - st); q += st) expect(P[q + 5] - P[q - st + 5]).toBeLessThanOrEqual(RIVER_SHAPE_DEFAULTS.outletDeepenM + 1e-4);
+        expect(Math.max(...Array.from({ length: (P.length - o) / st }, (_, q) => P[o + q * st + 5]))).toBeGreaterThan(0.5);
     });
     it('builds the graph and solves both lakes; the upper drains into the lower', () => {
         const { core, built } = buildCore();

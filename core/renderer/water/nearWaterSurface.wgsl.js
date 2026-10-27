@@ -64,9 +64,30 @@ struct NearWaterU {
 struct NearWaterVOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) wp: vec3<f32>,
-    @location(1) uv: vec2<f32>,          // in the lake's mask
-    @location(2) @interpolate(flat) lake: u32,
+    @location(1) @interpolate(flat) lake: u32,
 };
+
+// Where a lake's mask covers a river: the river's surface's share by how
+// far (m) its level is above the lake's, the lake sheet's the rest. Switched
+// at one level instead, any mismatch between the two surfaces' tests drew
+// a line: a gap (brown) or both surfaces (bright), metres wide where the
+// river is nearly level with the lake (owner 2026-10-26).
+fn nearRiverOverLake(above: f32) -> f32 { return smoothstep(0.0, 0.1, above); }
+// The river's share where a lake's mask covers it, cover 0..1 over the
+// mask's last metres (WaterLakeHit.cover): switched at the edge, the two
+// surfaces tested it at points a little apart (the river's higher, nearer
+// along the view) and left a thin gap that aliased into a dotted line
+// across the river (owner 2026-10-26).
+fn nearRiverShare(above: f32, cover: f32) -> f32 { return mix(1.0, nearRiverOverLake(above), cover); }
+// How far (m) a river's near surface runs past its channel's edge: to just
+// inside the banks' containment crest, narrowing over a metre of level as
+// the river reaches a lake beside it: its banks are not raised there, and
+// beyond the channel it lay as a film over grass a few centimetres under it
+// (owner 2026-10-25); switched at 0.5 m, its outline stepped across the
+// river (owner 2026-10-26).
+fn nearRiverEdge(hit: WaterRiverHit) -> f32 {
+    return ${SURFACE_EDGE_M.toFixed(2)} * mix(1.0, smoothstep(0.5, 1.5, hit.etaM - hit.lakeGuard), hit.lakeGuardW);
+}
 `;
 }
 
@@ -90,7 +111,6 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Nea
     var o: NearWaterVOut;
     o.pos = U.projectionMatrix * (U.viewMatrix * vec4<f32>(wp, 1.0));
     o.wp = wp;
-    o.uv = (p - lo) / size;
     o.lake = slot;
     return o;
 }
@@ -105,7 +125,9 @@ export function shadeWgsl() {
 @group(1) @binding(${NEAR_WATER_TRANSMITTANCE_BINDING}) var transmittanceLUT: texture_2d<f32>;
 @group(1) @binding(${NEAR_WATER_SCENE_DEPTH_BINDING}) var nearWaterSceneDepth: texture_depth_2d;
 
-fn nearWaterShade(wp: vec3<f32>, pixel: vec2<f32>) -> vec4<f32> {
+// plane: the surface's normal for telling its top from its underside (the
+// planet's up for lakes; a river's is tilted by its fall).
+fn nearWaterShade(wp: vec3<f32>, pixel: vec2<f32>, plane: vec3<f32>) -> vec4<f32> {
     let dist = length(U.cameraPos - wp);
     let w = waterNearWeight(dist);
     if (w <= 0.0) { return vec4<f32>(0.0); }
@@ -113,15 +135,15 @@ fn nearWaterShade(wp: vec3<f32>, pixel: vec2<f32>) -> vec4<f32> {
     let L = normalize(U.sunDir);
     let sun = U.sunColor * U.sunIntensity;
     let sky = U.ambientColor * U.ambientIntensity;
-    let facing = up * select(-1.0, 1.0, dot(U.cameraPos - wp, up) >= 0.0);
+    let facing = up * select(-1.0, 1.0, dot(U.cameraPos - wp, plane) >= 0.0);
     let s = waterSurfaceTerms(wp, facing, U.cameraPos, L, sun, sky);
 
-    return nearWaterCompose(wp, up, s, pixel);
+    return nearWaterCompose(wp, up, s, pixel, plane);
 }
 
 // Shared premultiplied surface/body and atmosphere treatment. Simulation
 // supplies flow normals and foam but keeps the same lighting and handover.
-fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>) -> vec4<f32> {
+fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>, plane: vec3<f32>) -> vec4<f32> {
     let dist = length(U.cameraPos - wp);
     let w = waterNearWeight(dist);
     let L = normalize(U.sunDir);
@@ -139,7 +161,11 @@ fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>
     let rayScale = dist / max(-viewZ, 0.001);
     let behind = max((viewZ - bedZ) * rayScale, 0.0);
     let V = normalize(U.cameraPos - wp);
-    let above = dot(V, up) >= 0.0;
+    // Seen from above the surface's plane: a river falling toward the camera
+    // is above its eye height upstream, and by the planet's up alone its
+    // water there was shaded as seen from below (no body): a line across the
+    // river where it crosses the eye height (owner 2026-10-26, "stairs").
+    let above = dot(V, plane) >= 0.0;
     let path = select(0.0, behind, above);
     let extinction = dot(waterParams.absorption.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
     let transmission = exp(-path * extinction);
@@ -181,16 +207,29 @@ export function buildNearWaterFragmentShader() {
 @fragment
 fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
     let lake = waterLakes[in.lake];
-    let m = select(waterLakeMaskSample(lake,in.uv,nearWaterSampler),waterLakeMaskSampleSmooth(lake,in.uv,nearWaterSampler),lake.surfaceDepthRangeM<0.0);
+    var sheetW = 1.0;
+    // The mask at the fragment's own direction, projected as waterLakeHitIn
+    // (the river surfaces' test) does.
+    let dir = normalize(in.wp - U.origin);
+    let kd = max(dot(dir, lake.c), 1.0e-6);
+    let uv = (vec2<f32>(dot(dir, lake.e1), dot(dir, lake.e2)) / kd * waterParams.planetRadius - vec2<f32>(lake.x0, lake.y0))
+        / vec2<f32>(lake.sizeX, lake.sizeY);
+    let m = select(waterLakeMaskSample(lake,uv,nearWaterSampler),waterLakeMaskSampleSmooth(lake,uv,nearWaterSampler),lake.surfaceDepthRangeM<0.0);
     if (lake.surfaceDepthRangeM < 0.0) {
         // Signed-distance mask (lakeMaskSdf.js): the sheet ends half a solve
         // cell beyond the solved water, where the ground is at or above the
         // level, instead of over lower ground past a sill (floating edges).
         let F = m * 255.0 - 128.0;
         if (F <= lake.surfaceDepthRangeM) { discard; }
-        if (F < 0.0) {
-            let river = waterRiverAt(normalize(in.wp - U.origin), lake.level);
-            if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { discard; }
+        let river = waterRiverAt(normalize(in.wp - U.origin), lake.level);
+        // The lake gives way to a lower river in the band (waterLakeBelowRiver),
+        // and within a river's surface the two cross-fade (nearRiverShare),
+        // by the same cover as the river surfaces' lookup (WaterLakeHit).
+        let below = select(0.0, waterLakeGiveWay(lake, river, F), F < 0.0);
+        if (river.near && river.distM < river.halfWidthM + nearRiverEdge(river)) {
+            sheetW = 1.0 - nearRiverShare(river.etaM - lake.level, waterLakeEdgeCover(lake, F) * (1.0 - below));
+        } else {
+            sheetW = 1.0 - below;
         }
     } else {
         if (m < select(0.5,63.5/255.0,lake.surfaceDepthRangeM>0.0)) { discard; }
@@ -199,7 +238,8 @@ fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
             if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { discard; }
         }
     }
-    let c = nearWaterShade(in.wp, in.pos.xy);
+    if (sheetW <= 0.0) { discard; }
+    let c = nearWaterShade(in.wp, in.pos.xy, normalize(in.wp - U.origin)) * sheetW;
     if (c.a <= 0.0) { discard; }
     // Water debug views 6 and 7 (waterWgsl.js applyWater): alpha 0 adds
     // the flat colour to what is below (premultiplied blending).
@@ -247,23 +287,42 @@ export function buildNearRiverFragmentShader() {
 @fragment
 fn main(in: NearRiverVOut) -> @location(0) vec4<f32> {
     let up = normalize(in.wp - U.origin);
-    // A lake's mask covers the point: the lake's surface is drawn there.
-    if (waterLakeLevelView(up, -1.0e30, nearWaterSampler, false) > WATER_NO_LAKE) { discard; }
+    // The surface's own plane (a river falling toward the camera is tilted
+    // by its fall), taken before any discard.
+    let gn = cross(dpdx(in.wp), dpdy(in.wp));
+    let hit = waterRiverAt(up, in.level);
+    // A lake's mask covers the point: the river's surface fades out as it
+    // comes down to the lake's and toward the mask's edge (nearRiverShare),
+    // tested where its sheet is on this pixel (waterLakeHitOnRay).
+    let lh = waterLakeHitOnRay(U.origin, U.cameraPos, in.wp, nearWaterSampler);
+    let riverW = select(1.0, nearRiverShare(hit.etaM - lh.level, lh.cover), lh.level > WATER_NO_LAKE);
+    if (riverW <= 0.0) { discard; }
     // Another river is nearer (confluences). The surface ends inside the
     // banks' containment crest (riverSection.js contain): the ground there
     // is above the water, so the depth test draws the shoreline where the
     // water meets the actual ground. (Clipping it at the designed channel
     // drew a canal edge with a step at every ribbon row.) Beside a lake at
     // the river's level the carve raises no bank on ground below the lake's
-    // level, so there it ends at the channel's edge: beyond, it lay as a
-    // film over grass a few centimetres under it (owner 2026-10-25).
-    let hit = waterRiverAt(up, in.level);
-    let edge = select(${SURFACE_EDGE_M.toFixed(2)}, 0.0, hit.lakeGuard >= hit.etaM - 0.5);
+    // level, so there it ends at the channel's edge (nearRiverEdge).
+    let edge = nearRiverEdge(hit);
     if (!hit.near || hit.distM >= hit.halfWidthM + edge || abs(hit.river - in.river) > 0.5) { discard; }
     // A downstream observer can be below an upstream river's elevation
     // while viewing its top/front surface. Radial lake underside rejection
     // would hide that waterfall; raster face/depth tests handle its geometry.
-    let c = nearWaterShade(in.wp, in.pos.xy) * (1.0 - waterSimCover(hit));
+    let plane = select(up, normalize(gn) * sign(dot(gn, up)), dot(gn, gn) > 1.0e-12);
+    var c = nearWaterShade(in.wp, in.pos.xy, plane) * (1.0 - waterSimCover(hit));
+    if (riverW < 1.0) {
+        // Cross-fading with the lake sheet drawn before (its share 1 - riverW):
+        // the two semi-transparent layers over each other covered less than
+        // either, a band of bed across the mouth (owner 2026-10-26). Drawn so
+        // the result is their linear mix over what lies below: the sheet's
+        // shading here, then this layer's colour and coverage solved for it.
+        let lk = nearWaterShade(in.wp, in.pos.xy, up);
+        let al = lk.a * (1.0 - riverW);
+        let mixA = al + c.a * riverW;
+        let a = 1.0 - (1.0 - mixA) / max(1.0 - al, 1.0e-4);
+        c = vec4<f32>(c.rgb * riverW + lk.rgb * (1.0 - riverW) * a, a);
+    }
     if (c.a <= 0.0) { discard; }
     // Water debug views 6 and 7, as the lake sheets.
     if (waterParams.debugMode == 6u) { return vec4<f32>(0.0, WATER_OWNER_ON, 0.0, 0.0); }

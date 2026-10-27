@@ -304,6 +304,16 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
             { binding: C.params, resource: { buffer: carveRes.params } },
             { binding: C.rivers, resource: { buffer: carveRes.rivers } },
         ];
+        // With the shore materials compiled in, the carve looks up the lakes
+        // too (riverCarveUnderLake: no bank fill under a lake's water).
+        if (terrainGenerator.terrainConfig.waterGraph?.carve?.bankDetail > 0) {
+            const r = carveRes.lakes ? carveRes : terrainGenerator._waterCarvePlaceholder;
+            entries.push(
+                { binding: C.lakes, resource: { buffer: r.lakes } },
+                { binding: C.masks, resource: r.masks },
+                { binding: C.sampler, resource: terrainGenerator._lakeMaskSampler },
+            );
+        }
         if (terrainGenerator.riverValley === true) {
             const v = valleyRes ?? terrainGenerator._riverValleyPlaceholder;
             entries.push(

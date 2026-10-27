@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RIVER_SECTION } from '../water/riverSection.js';
-import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverDelta, riverLakeHold, riverReachShape, riverShape, RIVER_SHAPE_DEFAULTS, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
+import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverDelta, riverHeldDepth, riverLakeApproach, riverLakeHold, riverReachShape, riverShape, RIVER_SHAPE_DEFAULTS, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
 
 // 60 x 30 patch, 16 m cells, frame origin at (0, 0). A valley runs along
 // j = 15 from a source lake (i < 10, level 50 m) down to a destination lake
@@ -37,6 +37,56 @@ describe('river trace', () => {
         // Through the pool the water level is the pool's spill level, not the pit floor.
         const pool = r.path.findIndex(c => c % NX === 30);
         expect(r.fill[pool]).toBeGreaterThan(heights[r.path[pool]]);
+    });
+
+    it('re-routes an outlet to leave its lake head-on, through the middle of the water', () => {
+        // A lake (j < 12) with an arm south along i 20-24 to j 29 in a flat
+        // shelf just above its level; the outflow valley starts at the arm's
+        // end (i 22, j 33 on). The flood's path walks the lake's shore.
+        const nx = 40, ny = 48, h = new Float32Array(nx * ny), water = new Uint8Array(nx * ny);
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+            const lake = (j < 12 && i >= 4 && i < 36) || (j >= 12 && j < 30 && i >= 20 && i < 25);
+            h[j * nx + i] = j >= 33 ? 10.1 + Math.abs(i - 22) * 0.5 - (j - 33) * 0.2 : lake ? 9.5 : 10.05;
+            water[j * nx + i] = lake ? 1 : 0;
+        }
+        const seeds = new Uint8Array(nx * ny); seeds[47 * nx + 22] = 1;
+        const corridor = new Uint8Array(nx * ny).fill(1);
+        const toWater = (c) => {
+            let d = Infinity;
+            for (let k = 0; k < nx * ny; k++) if (water[k]) d = Math.min(d, Math.hypot(k % nx - c % nx, Math.floor(k / nx) - Math.floor(c / nx)));
+            return d;
+        };
+        const alongShore = (p) => Array.from(p).filter(c => !water[c] && toWater(c) <= 4).length;
+        const tr = traceRiverPatch({ heights: h, nx, ny, corridor, seeds, source: 5 * nx + 12 });
+        expect(alongShore(tr.path)).toBeGreaterThan(10);
+        const { path, why } = riverLakeApproach({ path: tr.path, fill: tr.fill, heights: h, nx, ny, corridor, water, atStart: true, level: 10, spacing: 16 });
+        expect(why).toBe('ok');
+        expect(path[0]).toBe(tr.path[0]);
+        expect(path[path.length - 1]).toBe(tr.path[tr.path.length - 1]);
+        for (let k = 1; k < path.length; k++) expect(Math.max(Math.abs(path[k] % nx - path[k - 1] % nx), Math.abs(Math.floor(path[k] / nx) - Math.floor(path[k - 1] / nx)))).toBe(1);
+        // Out of the water head-on: every land cell farther from it than the one before, until clear of the shore.
+        const land = Array.from(path).filter(c => !water[c]);
+        for (let k = 1; k < land.length && toWater(land[k - 1]) < 4; k++) expect(toWater(land[k])).toBeGreaterThan(toWater(land[k - 1]));
+        expect(alongShore(path)).toBeLessThanOrEqual(4);
+        // Down the middle of the arm.
+        for (const c of path) if (Math.floor(c / nx) >= 12 && water[c]) expect(c % nx).toBe(22);
+    });
+
+    it('a river held at its lake\'s level keeps a channel only between dry banks or into deep water', () => {
+        // Lake level 10 m; the river runs along +x at y = 0, 4 m half-width, D 2 m.
+        const at = (groundAt, inLake = (x, y) => groundAt(x, y) < 10) => riverHeldDepth({ x: 0, y: 0, tx: 1, ty: 0, hw: 4, depth: 2, groundAt, inLake, level: 10 });
+        // A long shallow arm: lake 0.1 m deep all around - no channel.
+        expect(at(() => 9.9)).toBeLessThan(0.15 / RIVER_LEVEL_DEFAULTS.waterFrac + 1e-9);
+        // Through the lake's rim: dry banks (0.6 m above) - the full channel.
+        expect(at(() => 10.6)).toBe(2);
+        // A narrow shallow edge (0.1 m) with deep water (3 m) 16 m ahead: the channel goes on into it.
+        expect(at((x) => (x > 12 ? 7 : 9.9))).toBe(2);
+        // One bank dry, one in the shallow lake: half.
+        expect(at((x, y) => (y > 0 ? 10.6 : 9.9))).toBeCloseTo(1, 9);
+        // A bay half as deep as the channel's water (0.7 of 1.5 m) all around: no channel.
+        expect(at(() => 9.3)).toBeLessThan(0.15 / RIVER_LEVEL_DEFAULTS.waterFrac + 1e-9);
+        // Ground under the level that is not the lake (the outlet's own valley ahead): no channel into the arm.
+        expect(at((x) => (x > 12 ? 7 : 9.9), (x) => x <= 12)).toBeLessThan(0.15 / RIVER_LEVEL_DEFAULTS.waterFrac + 1e-9);
     });
 
     it('returns null when the corridor does not connect the source to the seeds', () => {
@@ -78,7 +128,7 @@ describe('river levels for the valley', () => {
         expect(mouth.width).toBeGreaterThan(60);
     });
 
-    it('widens into a lake as a delta, 1.6-4 x, a third of the rivers 3-4 x', () => {
+    it('widens into a lake as a delta, 1.6-4 x, a third of the rivers 3-4 x, at full depth', () => {
         const scales = [];
         for (let river = 0; river < 300; river++) {
             expect(riverDelta(1000 - 400, 1000, river, 12)).toBe(1);
@@ -92,8 +142,10 @@ describe('river levels for the valley', () => {
         expect(big).toBeGreaterThan(0.25);
         expect(big).toBeLessThan(0.45);
         const small = riverShape(0, 0.001), P = { ...RIVER_SHAPE_DEFAULTS, junctionEndM: 3000, typicalWidthM: 12, deltaLake: true };
-        const mouth = riverReachShape(small, 3000, 3100, 5, P), up = riverReachShape(small, 2000, 3100, 5, P);
-        expect(mouth.depth).toBeLessThan(up.depth);
+        // Not shallower than the minimum in the delta; elsewhere not below 80 % of it.
+        const mouth = riverReachShape(small, 3000, 3100, 5, P);
+        expect(mouth.depth).toBeGreaterThanOrEqual(P.minDepthM);
+        for (let s = 0; s < 2800; s += 7) expect(riverReachShape(small, s, 3100, 5, P).depth).toBeGreaterThanOrEqual(0.8 * P.minDepthM - 1e-9);
     });
 
     it('narrows the smallest rivers to minReachWidthM at most', () => {

@@ -125,18 +125,24 @@ describe('river ribbons', () => {
         for (let k = 0; k < levels.length; k++) expect(point(mesh.points, rowOf(k))[7]).toBe(levels[k]);
     });
 
-    it('rows between points follow the joints\' blend: continuous level and slope', () => {
+    it('rows between points follow the joints\' window average: slopes change monotonically', () => {
         // Level falling 0.5 m, then 3 m per 16 m segment: a kink at point 5.
         const lv = Array.from({ length: 10 }, (_, k) => 100 - (k <= 5 ? 0.5 * k : 2.5 + 3 * (k - 5)));
         const arc = Array.from({ length: 10 }, (_, k) => 16 * k);
         const at = (s) => { const k = Math.min(8, Math.floor(s / 16)); return riverJointValue(lv, arc, k, (s - 16 * k) / 16); };
-        expect(at(16 * 5)).toBeCloseTo(lv[5], 9);                      // through the points
+        const m1 = -0.5 / 16, m2 = -3 / 16, b = 8;
         expect(at(16 * 2.5)).toBeCloseTo((lv[2] + lv[3]) / 2, 9);       // straight mid-segment
+        expect(at(16 * 5)).toBeCloseTo(lv[5] + (m2 - m1) * b / 4, 9);   // the corner cut at the joint
         const slope = (s) => (at(s + 0.001) - at(s - 0.001)) / 0.002;
-        expect(slope(16 * 5 - 0.01)).toBeCloseTo(slope(16 * 5 + 0.01), 2);   // no kink at the joint
-        expect(slope(16 * 5)).toBeCloseTo(-(0.5 + 3) / 2 / 16, 3);
+        expect(slope(16 * 5 - 0.01)).toBeCloseTo(slope(16 * 5 + 0.01), 3);   // no kink at the joint
+        expect(slope(16 * 5)).toBeCloseTo((m1 + m2) / 2, 3);
+        // From one mid-segment to the next the slope only falls (a curve
+        // through the points overshot: stairs on steep beds).
+        for (let s = 16 * 4.5 + 0.25; s < 16 * 5.5; s += 0.25) expect(slope(s)).toBeLessThanOrEqual(slope(s - 0.25) + 1e-6);
         const mesh = buildRiverRibbons({ ...base, rivers: [[1, straightRiver(10, k => lv[k])]], camera: { x: 0, y: 0, z: R + 60 }, rangeM: 1000 });
-        expect(point(mesh.points, rowOf(4) + 2)[7]).toBeCloseTo(riverJointValue(lv, arcOf(straightRiver(10)), 4, 0.5), 3);
+        const arc16 = arcOf(straightRiver(10));
+        expect(point(mesh.points, rowOf(4) + 2)[7]).toBeCloseTo(riverJointValue(lv, arc16, 4, 0.5), 3);
+        expect(point(mesh.points, rowOf(5))[7]).toBeCloseTo(riverJointValue(lv, arc16, 5, 0), 3);
     });
 
     it('a tight bend keeps the inner edge inside the bend (no fold)', () => {
