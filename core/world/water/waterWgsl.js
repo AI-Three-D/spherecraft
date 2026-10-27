@@ -55,6 +55,9 @@ export const NARROW_RIVER_DRAW_M = 12000;
 // terrain shading returns the ground, near and simulated surfaces are not
 // drawn. Beds, banks and their materials stay as generated.
 export const WATER_DEBUG_DRY = 10;
+// Lake sheets and river surfaces hand over across this much (m) of a lake
+// mask's edge (waterLakeEdgeCover, waterLakeGiveWay).
+const LAKE_EDGE_RAMP_M = 3;
 
 /**
  * WGSL shared by the water lookup and the river carve: WaterParams,
@@ -171,8 +174,10 @@ struct WaterRiverPt {
     river: f32,      // the river's id
     dOff: f32,       // d(centre offset)/ds
     dHw: f32,        // d(half-width)/ds
+    dEta: f32, dBed: f32, dWl: f32,  // d(design level, thalweg, water level)/ds
     kappa: f32,      // the bend's signed curvature (1/m, + turning left)
     lakeGuard: f32,  // nearby lake level: terrain below it must not be filled
+    guardW: f32,     // how much the guard applies, 0..1 along the segment (an end without one: 0)
     island: f32, dIsland: f32,
     rimL: f32, rimR: f32,  // lake rims of the banks (riverBankRim)
 };
@@ -203,53 +208,161 @@ fn waterRiverPointOn(s: WaterRiverSeg, dir: vec3<f32>, extend: bool) -> WaterRiv
     p.rimL = mix(s.rimL0, s.rimL1, p.t);
     p.rimR = mix(s.rimR0, s.rimR1, p.t);
     p.lakeGuard = max(s.lakeGuard0, s.lakeGuard1);
+    // Per segment the guard switched on where the nearest segment changes:
+    // a step in the banks across the river (owner 2026-10-26).
+    p.guardW = mix(select(0.0, 1.0, s.lakeGuard0 > -1.0e10), select(0.0, 1.0, s.lakeGuard1 > -1.0e10), clamp(p.t, 0.0, 1.0));
     p.island = mix(s.island0, s.island1, p.t);
     p.dIsland = (s.island1 - s.island0) / max(s.s1 - s.s0, 0.001);
     p.s = mix(s.s0, s.s1, p.t);
     p.river = s.river;
     p.hw = max(mix(s.hw0, s.hw1, p.t), 0.5);
-    p.dHw = (s.hw1 - s.hw0) / max(s.s1 - s.s0, 0.001);
-    let on = waterRiverNoise(p.s, s.river, 1u);
-    p.dOff = waterParams.shape.y * (p.dHw * on.x + p.hw * on.y);
-    p.n = p.nSign * p.dLine - waterParams.shape.y * p.hw * on.x;
-    p.d = abs(p.n);
+    let m = waterRiverSlopes(s);
+    p.dWl = m.x; p.dEta = m.y; p.dBed = m.z; p.dHw = m.w;
+    waterRiverWobble(&p);
     return p;
 }
 
-// The segment across the nearer joint from segment k (its neighbour in the
-// list [listStart, listEnd): same river, adjacent arc) and its weight with
-// the weight's gradient (d/d dir): 1/2 at the joint, 0 from the middle of
-// the shorter segment. Each segment's values are straight lines along the
-// river, so its level, width and bed changed slope at every joint: bands
-// across the river like scales and stairs (owner 2026-10-26). The carve,
-// the water lookup and the near ribbons (riverRibbon.js riverJointValue)
-// blend alike, both segments on their lines extended past the joint
-// (waterRiverPointOn): a rounded cap there is shallower. (Weighed by how
-// much nearer segment k is instead, the weight did not vanish where the
-// neighbour switches mid-segment: creases across the river.)
+// The channel's centre off the traced line (the wobble, riverShapeNoise.js)
+// for the point's half-width.
+fn waterRiverWobble(p: ptr<function, WaterRiverPt>) {
+    let on = waterRiverNoise((*p).s, (*p).river, 1u);
+    (*p).dOff = waterParams.shape.y * ((*p).dHw * on.x + (*p).hw * on.y);
+    (*p).n = (*p).nSign * (*p).dLine - waterParams.shape.y * (*p).hw * on.x;
+    (*p).d = abs((*p).n);
+}
+
+// Per metre along a segment: water level, design level, thalweg, half-width.
+fn waterRiverSlopes(s: WaterRiverSeg) -> vec4<f32> {
+    return vec4<f32>(s.wl1 - s.wl0, s.eta1 - s.eta0, s.bed1 - s.bed0, s.hw1 - s.hw0) / max(s.s1 - s.s0, 0.001);
+}
+// Segment a runs on into segment b (same river, adjacent arc).
+fn waterRiverRunsInto(a: WaterRiverSeg, b: WaterRiverSeg) -> bool {
+    return a.river == b.river && abs(a.s1 - b.s0) <= 0.5;
+}
+
+// waterRiverPointOn of segment k of the list [listStart, listEnd), its
+// levels, thalweg and half-width the trace's piecewise-linear values
+// averaged over a window of half the shorter segment at each joint
+// (riverRibbon.js riverJointValue): their slopes change linearly from one
+// segment's to the next's. Through the trace's points instead, a C1 curve
+// overshoots in slope every segment: bands across steep beds, banks bulging
+// once a segment (owner 2026-10-26, "stairs"). On an extended line past the
+// segment's end the neighbour's values hold, so both sides of a joint agree.
+fn waterRiverPointAt(k: u32, listStart: u32, listEnd: u32, dir: vec3<f32>, extend: bool) -> WaterRiverPt {
+    var p = waterRiverPointOn(waterRivers[k], dir, extend);
+    var g = k;
+    var sg = waterRivers[k];
+    let u = p.s;
+    if (u < sg.s0 && g > listStart && waterRiverRunsInto(waterRivers[g - 1u], sg)) { g = g - 1u; sg = waterRivers[g]; }
+    else if (u > sg.s1 && g + 1u < listEnd && waterRiverRunsInto(sg, waterRivers[g + 1u])) { g = g + 1u; sg = waterRivers[g]; }
+    let L = max(sg.s1 - sg.s0, 0.001);
+    let t = (u - sg.s0) / L;
+    var v = vec4<f32>(mix(sg.wl0, sg.wl1, t), mix(sg.eta0, sg.eta1, t), mix(sg.bed0, sg.bed1, t), mix(sg.hw0, sg.hw1, t));
+    var m = waterRiverSlopes(sg);
+    if (sg.s1 - u < u - sg.s0) {
+        if (g + 1u < listEnd && waterRiverRunsInto(sg, waterRivers[g + 1u])) {
+            let o = waterRivers[g + 1u];
+            let b = 0.5 * min(L, o.s1 - o.s0);
+            let a = max(sg.s1 - u, 0.0);
+            if (a < b) {
+                let dm = waterRiverSlopes(o) - m;
+                v += dm * ((b - a) * (b - a) / (4.0 * b));
+                m += dm * ((b - a) / (2.0 * b));
+            }
+        }
+    } else if (g > listStart && waterRiverRunsInto(waterRivers[g - 1u], sg)) {
+        let o = waterRivers[g - 1u];
+        let b = 0.5 * min(L, o.s1 - o.s0);
+        let a = max(u - sg.s0, 0.0);
+        if (a < b) {
+            let dm = m - waterRiverSlopes(o);
+            v += dm * ((b - a) * (b - a) / (4.0 * b));
+            m -= dm * ((b - a) / (2.0 * b));
+        }
+    }
+    p.wl = v.x; p.eta = v.y; p.bed = v.z; p.hw = max(v.w, 0.5);
+    p.dWl = m.x; p.dEta = m.y; p.dBed = m.z; p.dHw = m.w;
+    waterRiverWobble(&p);
+    return p;
+}
+
+// The segments across segment k's joints (its neighbours in the list
+// [listStart, listEnd): same river, adjacent arc), each with its weight and
+// the weight's gradient (d/d dir): by the signed distance a from the
+// joint's bisector plane into segment k's side, 1/2 on the plane, 0 from
+// a = b (half the shorter segment) and 1 at a = -b, so either segment's
+// weight gives the same mix wherever the nearest segment switches. Each
+// segment's section alone changed the banks' slope at every joint: bands
+// across the river (owner 2026-10-26, "scales", "stairs"). Measured along
+// the segment instead, the weights did not add up to 1 where the nearest
+// segment switches on the inner side of bends: the banks jogged there; with
+// one neighbour by the half of the segment, the mix jumped at mid-segment
+// deep inside tight bends. All are taken on their lines extended past the
+// joints
+// (waterRiverPointOn): a rounded cap there is shallower.
 struct WaterRiverJoint { k: u32, w: f32, dw: vec3<f32>, };
-fn waterRiverJoint(k: u32, listStart: u32, listEnd: u32, s: WaterRiverSeg, p: WaterRiverPt) -> WaterRiverJoint {
+// The neighbour across the joint at segment k's end (next) or start, weight 0
+// when there is none or the point is past b on k's side.
+fn waterRiverJointAt(k: u32, listStart: u32, listEnd: u32, s: WaterRiverSeg, dir: vec3<f32>, next: bool) -> WaterRiverJoint {
     var j = WaterRiverJoint(k, 0.0, vec3<f32>(0.0));
-    let next = p.tRaw >= 0.5;
     if ((next && k + 1u >= listEnd) || (!next && k <= listStart)) { return j; }
     let ko = select(k - 1u, k + 1u, next);
     let o = waterRivers[ko];
     if (o.river != s.river || abs(select(o.s1 - s.s0, o.s0 - s.s1, next)) > 0.5) { return j; }
-    let ab = s.p1 - s.p0;
-    let L = s.s1 - s.s0;
-    let band = 0.5 * min(L, o.s1 - o.s0);
+    let band = 0.5 * min(s.s1 - s.s0, o.s1 - o.s0);
     if (band <= 0.0) { return j; }
-    // Arc length (m) to the joint and its gradient.
-    let g = ab * (L / max(dot(ab, ab), 1.0e-20));
-    let a = select(p.tRaw * L, (1.0 - p.tRaw) * L, next);
-    let x = clamp(a / band, 0.0, 1.0);
+    // Bisector plane through the joint: normal along the mean direction.
+    let joint = select(s.p0, s.p1, next);
+    let us = normalize(s.p1 - s.p0);
+    let uo = normalize(o.p1 - o.p0);
+    // Off at joints that barely turn (a third turn under 1 degree): no
+    // crease to hide there, and each blend evaluates another section
+    // (tile generation 3.0 -> 3.35 ms a tile with every joint blended).
+    // 1 - cos: 0.3 degrees 1.4e-5, 1 degree 1.5e-4.
+    let turnW = smoothstep(1.4e-5, 1.5e-4, 1.0 - dot(us, uo));
+    if (turnW <= 0.0) { return j; }
+    let nb = normalize(us + uo) * select(1.0, -1.0, next);
+    let R = waterParams.planetRadius;
+    let a = dot(dir - joint, nb) * R;
+    let x = clamp(a / band, -1.0, 1.0);
+    // 1/2 - (3 x |x| - 2 x^3) / 2: C1, odd about the plane.
     j.k = ko;
-    j.w = 0.5 * (1.0 - x * x * (3.0 - 2.0 * x));
-    j.dw = select(vec3<f32>(0.0), select(g, -g, next) * (-3.0 * x * (1.0 - x) / band), a > 0.0 && a < band);
+    j.w = turnW * (0.5 - 0.5 * (3.0 * x * abs(x) - 2.0 * x * x * x));
+    j.dw = turnW * select(vec3<f32>(0.0), nb * (R / band) * (-0.5 * (6.0 * abs(x) - 6.0 * x * x)), abs(a) < band);
     return j;
 }
+// Both joints of segment k: upstream (.x) and downstream (.y).
+struct WaterRiverJoints { up: WaterRiverJoint, down: WaterRiverJoint, };
+fn waterRiverJoints(k: u32, listStart: u32, listEnd: u32, s: WaterRiverSeg, dir: vec3<f32>) -> WaterRiverJoints {
+    return WaterRiverJoints(waterRiverJointAt(k, listStart, listEnd, s, dir, false), waterRiverJointAt(k, listStart, listEnd, s, dir, true));
+}
 
-// Two segments' points mixed (waterRiverJoint's blend; a's side and lake guard).
+// A point plus w times (b - a), field by field (waterRiverJoints' blend; a's
+// side and lake guard).
+fn waterRiverPtAdd(p0: WaterRiverPt, a: WaterRiverPt, b: WaterRiverPt, w: f32) -> WaterRiverPt {
+    var p = p0;
+    let q = waterRiverPtMix(a, b, w);
+    p.n += q.n - a.n; p.dLine += q.dLine - a.dLine; p.eta += q.eta - a.eta; p.bed += q.bed - a.bed;
+    p.hw += q.hw - a.hw; p.pool += q.pool - a.pool; p.skew += q.skew - a.skew; p.speed += q.speed - a.speed;
+    p.foam += q.foam - a.foam; p.wl += q.wl - a.wl; p.kappa += q.kappa - a.kappa; p.rimL += q.rimL - a.rimL;
+    p.rimR += q.rimR - a.rimR; p.island += q.island - a.island; p.s += q.s - a.s; p.dHw += q.dHw - a.dHw;
+    p.dEta += q.dEta - a.dEta; p.dBed += q.dBed - a.dBed; p.dWl += q.dWl - a.dWl;
+    p.guardW += q.guardW - a.guardW;
+    p.lakeGuard = max(p.lakeGuard, select(-1.0e20, b.lakeGuard, w > 0.0));
+    p.d = abs(p.n);
+    return p;
+}
+// Segment k's point (waterRiverPointAt) blended into its neighbours' across
+// its joints (waterRiverJoints), as the carve blends their sections.
+fn waterRiverBlended(k: u32, listStart: u32, listEnd: u32, dir: vec3<f32>) -> WaterRiverPt {
+    let joints = waterRiverJoints(k, listStart, listEnd, waterRivers[k], dir);
+    if (joints.up.w <= 0.0 && joints.down.w <= 0.0) { return waterRiverPointAt(k, listStart, listEnd, dir, false); }
+    let own = waterRiverPointAt(k, listStart, listEnd, dir, true);
+    var p = own;
+    if (joints.up.w > 0.0) { p = waterRiverPtAdd(p, own, waterRiverPointAt(joints.up.k, listStart, listEnd, dir, true), joints.up.w); }
+    if (joints.down.w > 0.0) { p = waterRiverPtAdd(p, own, waterRiverPointAt(joints.down.k, listStart, listEnd, dir, true), joints.down.w); }
+    return p;
+}
 fn waterRiverPtMix(a: WaterRiverPt, b: WaterRiverPt, w: f32) -> WaterRiverPt {
     var p = a;
     p.n = mix(a.n, b.n, w);
@@ -268,12 +381,23 @@ fn waterRiverPtMix(a: WaterRiverPt, b: WaterRiverPt, w: f32) -> WaterRiverPt {
     p.rimR = mix(a.rimR, b.rimR, w);
     p.island = mix(a.island, b.island, w);
     p.s = mix(a.s, b.s, w);
+    p.dHw = mix(a.dHw, b.dHw, w);
+    p.dEta = mix(a.dEta, b.dEta, w);
+    p.dBed = mix(a.dBed, b.dBed, w);
+    p.dWl = mix(a.dWl, b.dWl, w);
+    p.guardW = mix(a.guardW, b.guardW, w);
+    p.lakeGuard = max(a.lakeGuard, select(-1.0e20, b.lakeGuard, w > 0.0));
     return p;
 }
 
-// Each side's bank (riverSection.js): left, then right.
+// Each side's bank (riverSection.js): left, then right. Toward a lake beside
+// the river (guardW) it lowers to the type without a step: a cut bank's wall
+// ran on to the lake's shore and turned along it in a corner (owner
+// 2026-10-26, a notch at a mouth). The lake's rim still holds it up where
+// the lake would spill into the channel (riverBankRim).
 fn waterRiverBank(p: WaterRiverPt, left: bool) -> RiverBank {
-    return riverBankParams(riverBankType(p.s, p.river, left, p.kappa), p.river);
+    let b = riverBankParams(riverBankType(p.s, p.river, left, p.kappa), p.river);
+    return riverBankMix(b, riverBankParams(0.0, p.river), clamp(p.guardW, 0.0, 1.0));
 }
 
 // Height (m) of the river's channel at a point inside it (d < hw): the
@@ -318,7 +442,11 @@ struct WaterLake {
 @group(${group}) @binding(${b.masks}) var waterLakeMasks: texture_2d_array<f32>;
 
 const WATER_NO_LAKE: f32 = -1.0e30;
-struct WaterLakeHit { level: f32, depthM: f32, }
+// cover: how far inside its mask's edge the point is, 0..1 over its last
+// metres (signed-distance masks, waterLakeEdgeCover; 1 otherwise): river surfaces hand over to the
+// lake's by it (nearWaterSurface.wgsl.js). insideM: metres inside that edge
+// (signed-distance masks; 1000 otherwise, 0 for none).
+struct WaterLakeHit { level: f32, depthM: f32, cover: f32, insideM: f32, }
 
 fn waterLakeCandidateCount(cell: u32) -> u32 {
     let e = waterIndex[cell];
@@ -366,15 +494,38 @@ fn waterLakeMaskSampleSmooth(lake: WaterLake, uv: vec2<f32>, samp: sampler) -> f
     return g0.y*(g0.x*a+g1.x*b)+g1.y*(g0.x*c+g1.x*d);
 }
 
+// Outside the solved water (signed-distance band), how far the lake gives
+// way to a river below its level: over 2-12 cm of level and the channel's
+// last metre across. Switched at 2 cm and the channel's edge, the river and
+// lake surfaces tested it at points a little apart and left gaps along it, a
+// dotted line across an outlet (owner 2026-10-26). The lake sheets use it
+// too (nearWaterSurface.wgsl.js).
+fn waterLakeBelowRiver(lake: WaterLake, river: WaterRiverHit) -> f32 {
+    if (!river.near) { return 0.0; }
+    return smoothstep(0.02, 0.12, lake.level - river.etaM) * (1.0 - smoothstep(river.halfWidthM - 1.0, river.halfWidthM, river.distM));
+}
+// A signed-distance mask's edge (F, m): the share of it covering the point
+// over its last ${LAKE_EDGE_RAMP_M} m, and how far the lake gives way to a river below it
+// there (waterLakeBelowRiver), fading out over the same before its solved
+// water. Over 1 m, and switched off at the solved water, the river's and the
+// lake's surfaces handed over in a line across an outlet where the river
+// had fallen below the lake (owner 2026-10-27). The lake sheets use them too.
+fn waterLakeEdgeCover(lake: WaterLake, F: f32) -> f32 {
+    return smoothstep(lake.surfaceDepthRangeM, lake.surfaceDepthRangeM + ${LAKE_EDGE_RAMP_M.toFixed(1)}, F);
+}
+fn waterLakeGiveWay(lake: WaterLake, river: WaterRiverHit, F: f32) -> f32 {
+    return waterLakeBelowRiver(lake, river) * (1.0 - smoothstep(-${LAKE_EDGE_RAMP_M.toFixed(1)}, 0.0, F));
+}
+
 // Level of lake slot s (1-based, 0 = none) if it covers dir at heightM.
 // levelOnly: lakes without a solved shore (no mask layer) count too.
 fn waterLakeHitIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool) -> WaterLakeHit {
-    let miss=WaterLakeHit(WATER_NO_LAKE,0.0);
+    let miss=WaterLakeHit(WATER_NO_LAKE,0.0,0.0,0.0);
     if (slot == 0u) { return miss; }
     let lake = waterLakes[slot - 1u];
     if (lake.surfaceDepthRangeM<=0.0 && heightM >= lake.level) { return miss; }
     if (lake.maskLayer < 0) {
-        if(levelOnly && heightM<lake.level) { return WaterLakeHit(lake.level,lake.level-heightM); }
+        if(levelOnly && heightM<lake.level) { return WaterLakeHit(lake.level,lake.level-heightM,1.0,1000.0); }
         return miss;
     }
     let k = dot(dir, lake.c);
@@ -390,18 +541,17 @@ fn waterLakeHitIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, levelO
         // remains unchanged; sampled depth affects only coverage/shading.
         let depth=(m*255.0-128.0)*(lake.surfaceDepthRangeM/127.0);
         if(depth<=0.0) { return miss; }
-        return WaterLakeHit(lake.level,depth);
+        return WaterLakeHit(lake.level,depth,1.0,1000.0);
     }
     // Signed-distance masks (lakeMaskSdf.js): water within -range metres of
     // the solved water, and the rendered ground below the level (above).
     if(lake.surfaceDepthRangeM<0.0) {
         let F=m*255.0-128.0;
         if(F<=lake.surfaceDepthRangeM) { return miss; }
-        if(F<0.0) {
-            let river = waterRiverAt(dir, heightM);
-            if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { return miss; }
-        }
-        return WaterLakeHit(lake.level,lake.level-heightM);
+        var cover = waterLakeEdgeCover(lake, F);
+        if(F<0.0) { cover *= 1.0 - waterLakeGiveWay(lake, waterRiverAt(dir, heightM), F); }
+        if(cover <= 0.0) { return miss; }
+        return WaterLakeHit(lake.level,lake.level-heightM,cover,F-lake.surfaceDepthRangeM);
     }
     // The shore band is render coverage, not lake water. Once excavation
     // lowers an outlet, the band's flat lake sheet must give way to the
@@ -410,7 +560,7 @@ fn waterLakeHitIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, levelO
         let river = waterRiverAt(dir, heightM);
         if (river.near && river.distM < river.halfWidthM && river.etaM < lake.level - 0.02) { return miss; }
     }
-    if(m>=0.5) { return WaterLakeHit(lake.level,lake.level-heightM); }
+    if(m>=0.5) { return WaterLakeHit(lake.level,lake.level-heightM,1.0,1000.0); }
     return miss;
 }
 
@@ -421,6 +571,35 @@ fn waterLakeLevelAt(dir: vec3<f32>, heightM: f32, samp: sampler) -> f32 {
 }
 fn waterLakeLevelView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool) -> f32 {
     return waterLakeHitView(dir,heightM,samp,levelOnly).level;
+}
+// The lake as its sheet sees it on the view ray from cam through wp (world
+// positions, planet centre origin): each candidate tested where the ray
+// meets its level. A river surface a little above or below that level
+// tested the mask a little apart, at a grazing view tens of centimetres, and
+// over the mask's last metre the river's and the lake's shares overlapped:
+// a line across an outlet (owner 2026-10-27).
+fn waterLakeHitOnRay(origin: vec3<f32>, cam: vec3<f32>, wp: vec3<f32>, samp: sampler) -> WaterLakeHit {
+    let up = normalize(wp - origin);
+    let cell = waterDirToCell(up, waterParams.gridN);
+    let ray = normalize(wp - cam);
+    let o = cam - origin;
+    let b = dot(o, ray);
+    let count = waterLakeCandidateCount(cell);
+    for (var k = 0u; k < count; k++) {
+        let slot = waterLakeCandidate(cell, k);
+        if (slot == 0u) { continue; }
+        let r = waterParams.planetRadius + waterLakes[slot - 1u].level;
+        let disc = b * b - dot(o, o) + r * r;
+        var dir = up;
+        if (disc > 0.0) {
+            let near = -b - sqrt(disc);
+            let t = select(-b + sqrt(disc), near, near > 0.0);
+            if (t > 0.0) { dir = normalize(o + ray * t); }
+        }
+        let h = waterLakeHitIn(slot, dir, -1.0e30, samp, false);
+        if (h.level > WATER_NO_LAKE) { return h; }
+    }
+    return WaterLakeHit(WATER_NO_LAKE, 0.0, 0.0, 0.0);
 }
 fn waterLakeHitView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool) -> WaterLakeHit {
     let n = waterParams.gridN;
@@ -436,7 +615,7 @@ fn waterLakeHitView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool
             let h = waterLakeHitIn(waterIndex[at + 1u + k], dir, heightM, samp, levelOnly);
             if (h.level > WATER_NO_LAKE) { return h; }
         }
-        return WaterLakeHit(WATER_NO_LAKE, 0.0);
+        return WaterLakeHit(WATER_NO_LAKE, 0.0, 0.0, 0.0);
     }
     let a = waterLakeHitIn(e & 0x7fffu, dir, heightM, samp, levelOnly);
     if (a.level > WATER_NO_LAKE) { return a; }
@@ -466,6 +645,7 @@ struct WaterRiverHit {
     seg: f32,             // index of the nearest traced segment (debug view 5)
     slope: f32,           // descending water-surface slope, including waterfall lips
     lakeGuard: f32,       // level of a lake beside the river (WaterRiverPt.lakeGuard)
+    lakeGuardW: f32,      // how much it applies (WaterRiverPt.guardW)
 };
 
 // Close queries use actual terrain. A flagged, island-free structured segment
@@ -493,16 +673,17 @@ fn waterRiverAtView(dir: vec3<f32>, heightM: f32, coarseSurface: bool) -> WaterR
         if (dd < bestD) { bestD = dd; bestK = first + k; }
     }
     let s = waterRivers[bestK];
-    var best = waterRiverPoint(s, dir);
-    let joint = waterRiverJoint(bestK, first, first + count, s, best);
-    if (joint.w > 0.0) {
-        best = waterRiverPtMix(waterRiverPointOn(s, dir, true), waterRiverPointOn(waterRivers[joint.k], dir, true), joint.w);
-    }
+    // Per frame the nearest segment alone (the carve, made once per tile,
+    // blends across joints and filters the values: waterRiverBlended). The
+    // blend here cost 3-8 ms a frame; the near surfaces draw the water's
+    // level from their own (filtered) rows.
+    let best = waterRiverPoint(s, dir);
     let zone = best.hw + waterParams.carve.y;
     if (best.d > zone) { return hit; }
     hit.near = true;
     hit.sM = best.s;
     hit.lakeGuard = best.lakeGuard;
+    hit.lakeGuardW = best.guardW;
     hit.nM = best.n;
     hit.river = best.river;
     hit.pool = best.pool;
@@ -546,7 +727,8 @@ fn waterRiverAtView(dir: vec3<f32>, heightM: f32, coarseSurface: bool) -> WaterR
     }
     hit.found = depthM > 0.0;
     hit.depthM = depthM;
-    hit.slope = max(0.0, (s.wl0 - s.wl1) / max(s.s1 - s.s0, 0.001));
+    // The water level's fall per metre along the flow, as the carve's (smooth across joints).
+    hit.slope = max(0.0, -best.dWl);
     let ab = s.p1 - s.p0;
     let along = ab - dir * dot(ab, dir);
     let left = normalize(cross(dir, ab));

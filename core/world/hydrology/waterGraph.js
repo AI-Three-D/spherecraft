@@ -155,6 +155,7 @@ export function makeNeighbors(N) {
 
 /** Binary min-heap on (key, id), ties broken by id (determinism). */
 export class MinHeap {
+    // The heap grows past capacity (a lazy decrease-key pushes a cell again).
     constructor(capacity) {
         this.keys = new Float64Array(capacity);
         this.ids = new Int32Array(capacity);
@@ -168,6 +169,10 @@ export class MinHeap {
         const i = this.ids[a]; this.ids[a] = this.ids[b]; this.ids[b] = i;
     }
     push(key, id) {
+        if (this.size === this.ids.length) {
+            const grow = (a) => { const b = new a.constructor(Math.max(16, a.length * 2)); b.set(a); return b; };
+            this.keys = grow(this.keys); this.ids = grow(this.ids);
+        }
         let n = this.size++;
         this.keys[n] = key; this.ids[n] = id;
         while (n > 0) {

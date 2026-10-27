@@ -167,7 +167,7 @@ fn main(
     let surface = vec4f(mix(reflected, foamCol, fmask), mix(fres, 1.0, fmask));
     // Reflection and foam obscure only their share of the bed. Absorption
     // and shoreline contact use the same scene depth as the static surface.
-    let result = nearWaterCompose(wp, geometricUp, surface, pixel.xy);
+    let result = nearWaterCompose(wp, geometricUp, surface, pixel.xy, geometricUp);
     return result * edge;
 }
 `;

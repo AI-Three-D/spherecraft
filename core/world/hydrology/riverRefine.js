@@ -95,6 +95,145 @@ export function traceRiverPatch({ heights, nx, ny, corridor, seeds, source }) {
     return { path: Int32Array.from(path), fill: f };
 }
 
+// The nearest cell of mask to every cell (two raster passes carrying the
+// nearest seed) and the distance to it (cells).
+function nearestCell(mask, nx, ny) {
+    const n = nx * ny, near = new Int32Array(n).fill(-1), d = new Float32Array(n).fill(Infinity);
+    for (let k = 0; k < n; k++) if (mask[k]) { near[k] = k; d[k] = 0; }
+    const visit = (k, i, j, o) => {
+        const q = near[k + o];
+        if (q < 0) return;
+        const e = Math.hypot(i - q % nx, j - Math.floor(q / nx));
+        if (e < d[k]) { d[k] = e; near[k] = q; }
+    };
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const k = j * nx + i;
+        if (i > 0) visit(k, i, j, -1);
+        if (j > 0) { visit(k, i, j, -nx); if (i > 0) visit(k, i, j, -nx - 1); if (i + 1 < nx) visit(k, i, j, -nx + 1); }
+    }
+    for (let j = ny - 1; j >= 0; j--) for (let i = nx - 1; i >= 0; i--) {
+        const k = j * nx + i;
+        if (i + 1 < nx) visit(k, i, j, 1);
+        if (j + 1 < ny) { visit(k, i, j, nx); if (i + 1 < nx) visit(k, i, j, nx + 1); if (i > 0) visit(k, i, j, nx - 1); }
+    }
+    return { near, d };
+}
+
+export const RIVER_APPROACH_DEFAULTS = Object.freeze({
+    // The path is re-routed from where it is this far from the lake's water
+    // for good (within reachM of its end there).
+    awayM: 96, reachM: 640,
+    // Within bandM of the shore a step on land along it costs up to
+    // 1 + bandCost (sin^2 of its angle to the shore's normal); one straight
+    // toward or away from the water nothing more. In the water a step costs
+    // up to 1 + bandCost near the shore, so the way keeps to the middle.
+    bandM: 64, bandCost: 4,
+    // Ground above the old path's spill level (at its nearest cell) costs
+    // this per metre per step: a metre or so beside a lake is cut through
+    // (riverCarve); the new way keeps to the old one's valley floor.
+    climbCostPerM: 3,
+});
+
+/**
+ * Where a traced cell path leaves its lake (atStart: an outlet, the path
+ * starts in the water) or reaches it, re-routes its stretch near the lake so
+ * that it meets the shore at an angle: from where the path is awayM from
+ * the water for good to the nearest of its water, the cheapest way over
+ * land where steps along the shore near it cost more (the way meets the
+ * shore head-on), as does ground above the old path's spill level near it
+ * (never below the lake's level). An outlet's way from
+ * its source to there keeps to the middle of the water. The flood's path
+ * ran along its lake for up to 150 m, beside a shallow arm of it or through
+ * it (owner 2026-10-27: rivers meet a lake at an angle, never run along it).
+ * @param {object} p
+ * @param {Int32Array} p.path    cell path, source first
+ * @param {Float64Array} p.fill  spill level per path cell (traceRiverPatch)
+ * @param {Uint8Array} p.water   1 = this lake's water
+ * @param {number} p.level       the lake's level (m)
+ * @param {number} p.spacing     cell size (m)
+ * @returns {{ path: Int32Array | null, why: string }}  the new path (null
+ *   keeps the old) and why: ok, near (never awayM from the water), noWay
+ *   (no water within the corridor), srcDry (an outlet's first cell not in
+ *   the water)
+ */
+export function riverLakeApproach({ path, fill, heights, nx, ny, corridor, water, atStart, level, spacing }, P = RIVER_APPROACH_DEFAULTS) {
+    const n = nx * ny, toWater = nearestCell(water, nx, ny), dWater = toWater.d;
+    // The first (last) path cell awayM from the water after which it stays
+    // away (within reachM): a path coming back to brush the lake again kept
+    // that stretch.
+    const away = P.awayM / spacing, m = path.length, reach = Math.round(P.reachM / spacing);
+    let a = -1;
+    if (atStart) {
+        for (let i = 0; i < Math.min(m, reach); i++) if (dWater[path[i]] < away) a = i;
+        do a++; while (a < m && dWater[path[a]] < away);
+        if (a >= m) a = -1;
+    } else {
+        a = m;
+        for (let i = m - 1; i >= Math.max(0, m - reach); i--) if (dWater[path[i]] < away) a = i;
+        do a--; while (a >= 0 && dWater[path[a]] < away);
+    }
+    if (a < 0) return { path: null, why: 'near' };
+    // The old path's spill level at its cell nearest each cell (never below
+    // the lake's): against one level for all, a steep river's new way ran
+    // along the hillside below it and cut a tall bank into the slope.
+    const onPath = new Uint8Array(n), index = new Int32Array(n).fill(-1);
+    for (let i = 0; i < m; i++) { onPath[path[i]] = 1; index[path[i]] = i; }
+    const toPath = nearestCell(onPath, nx, ny);
+    const ref = (c) => Math.max(level, fill[index[toPath.near[c]]]);
+    const band = P.bandM / spacing;
+    // The share of a step along the shore: its angle to the direction from
+    // the nearest water cell (the distance's gradient vanishes along the
+    // middle of a strip of land between two waters).
+    const along = (c, di, dj) => {
+        const q = toWater.near[c];
+        if (q < 0) return 0;
+        const gx = c % nx - q % nx, gy = Math.floor(c / nx) - Math.floor(q / nx), g = Math.hypot(gx, gy);
+        if (!(g > 0)) return 0;
+        const cr = (di * gy - dj * gx) / (g * Math.hypot(di, dj));
+        return cr * cr;
+    };
+    const landCost = (c, di, dj) => (di && dj ? Math.SQRT2 : 1) * (1 + P.bandCost * Math.max(0, 1 - dWater[c] / band) * along(c, di, dj)
+        + P.climbCostPerM * Math.max(0, heights[c] - ref(c)));
+    // Cheapest ways from cell from (Dijkstra over corridor cells allowed by
+    // ok) to the first cell where done: the cells, from first to last.
+    const cheapest = (from, ok, stepCost, done) => {
+        const cost = new Float64Array(n).fill(Infinity), parent = new Int32Array(n).fill(-1), closed = new Uint8Array(n);
+        const heap = new MinHeap(n);
+        cost[from] = 0; heap.push(0, from);
+        while (heap.size > 0) {
+            const id = heap.pop();
+            if (closed[id]) continue;
+            closed[id] = 1;
+            if (done(id)) {
+                const way = [];
+                for (let c = id; c !== -1; c = parent[c]) way.push(c);
+                return way.reverse();
+            }
+            const i = id % nx, j = (id - i) / nx;
+            for (const [di, dj] of NB8) {
+                const ii = i + di, jj = j + dj;
+                if (ii < 0 || jj < 0 || ii >= nx || jj >= ny) continue;
+                const nb = jj * nx + ii;
+                if (closed[nb] || !corridor[nb] || !ok(nb)) continue;
+                const c = cost[id] + stepCost(nb, di, dj);
+                if (c < cost[nb]) { cost[nb] = c; parent[nb] = id; heap.push(c, nb); }
+            }
+        }
+        return null;
+    };
+    const toLake = cheapest(path[a], () => true, landCost, (c) => water[c] === 1);
+    if (!toLake) return { path: null, why: 'noWay' };
+    if (!atStart) return { path: Int32Array.from([...path.subarray(0, a), ...toLake]), why: 'ok' };
+    // An outlet: from its source through the middle of the water to there.
+    const src = path[0];
+    if (!water[src]) return { path: null, why: 'srcDry' };
+    const land = Uint8Array.from(water, (w) => 1 - w), dLand = nearestCell(land, nx, ny).d, target = toLake[toLake.length - 1];
+    const inLake = cheapest(src, (c) => water[c] === 1,
+        (c, di, dj) => (di && dj ? Math.SQRT2 : 1) * (1 + P.bandCost * Math.max(0, 1 - dLand[c] / band)), (c) => c === target);
+    if (!inLake) return { path: null, why: 'srcDry' };
+    return { path: Int32Array.from([...inLake.slice(0, -1), ...toLake.reverse(), ...path.subarray(a + 1)]), why: 'ok' };
+}
+
 /**
  * Smooths a traced cell path and resamples it by arc length. The water
  * level along it never rises downstream (running minimum). passes: binomial
@@ -179,9 +318,13 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     depthCoef: 1.0,       // D = depthCoef * Q^0.4 (m), at least minDepthM
     depthExp: 0.4,
     minDepthM: 1.6,
-    // Pools, constrictions and deltas shallow a reach to this share of
-    // minDepthM at most.
-    minReachDepthShare: 0.6,
+    // Pools and constrictions shallow a reach to this share of minDepthM at
+    // most; deltas not below minDepthM (at 60 % the mouths' water was 0.7 m
+    // and read as wet mud, owner 2026-10-26).
+    minReachDepthShare: 0.8,
+    // Leaving its lake, a river's water deepens by at most this a point
+    // (stepM, 20 m) until its own depth (waterWorkerCore.js solveRiver).
+    outletDeepenM: 0.4,
     manning: 0.035,
     depthVar: 0.45,
     junctionWidthScale: 2.3,
@@ -190,12 +333,16 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // outlets keep the junction flare): it widens like a trumpet over
     // lengthWidths of its typical width (at least minLengthM) before the
     // lake (growing as u^shapeExp over it), to scale x its width, bigShare
-    // of the rivers to bigScale; the channel shallows as it spreads
-    // (depth ~ width^-depthExp). Its full width is at the shore
+    // of the rivers to bigScale, at least minDepthM deep. Its full width is
+    // at the shore
     // (waterWorkerCore.js deltaEndK): the flare centred on the coarse lake
     // entry fell mostly under the water and read as no delta at all (owner
     // 2026-10-26).
-    delta: Object.freeze({ scale: [1.6, 2.4], bigShare: 0.35, bigScale: [3, 4], lengthWidths: [6, 12], minLengthM: 100, shapeExp: 1.6, depthExp: 0.2,
+    // Its bed also deepens over that length to the lake's depth just past
+    // the shore (frontDepthM of water at most, near opaque): from a shallow
+    // river onto a lake shelving steeply the water's colour changed at the
+    // shoreline, a muddy rim across the mouth (owner 2026-10-26).
+    delta: Object.freeze({ scale: [1.6, 2.4], bigShare: 0.35, bigScale: [3, 4], lengthWidths: [6, 12], minLengthM: 100, shapeExp: 1.6, frontDepthM: 3,
         salts: Object.freeze({ big: 0x3d51, scale: 0x6a2f, length: 0x1b77 }) }),
     sourceInsetM: 100,
     islands: false,
@@ -203,14 +350,19 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     waterfalls: { enabled: false },    // riverFeatures.js RIVER_FALL_DEFAULTS overrides
 });
 
+/** How far into its delta arc length s (m) is: 0 before it, 1 at the lake entry (end). */
+export function riverDeltaProgress(s, end, river, typicalWidthM, D = RIVER_SHAPE_DEFAULTS.delta) {
+    const lerp = (r, t) => r[0] + (r[1] - r[0]) * t;
+    const L = Math.max(D.minLengthM, typicalWidthM * lerp(D.lengthWidths, riverHash(river, D.salts.length)));
+    return Math.min(1, Math.max(0, 1 - (end - s) / L));
+}
+
 /** Width factor of a river's delta at arc length s (m), its lake entry at end. */
 export function riverDelta(s, end, river, typicalWidthM, D = RIVER_SHAPE_DEFAULTS.delta) {
     const lerp = (r, t) => r[0] + (r[1] - r[0]) * t;
     const big = riverHash(river, D.salts.big) < D.bigShare;
     const scale = lerp(big ? D.bigScale : D.scale, riverHash(river, D.salts.scale));
-    const L = Math.max(D.minLengthM, typicalWidthM * lerp(D.lengthWidths, riverHash(river, D.salts.length)));
-    const u = Math.min(1, Math.max(0, 1 - (end - s) / L));
-    return 1 + (scale - 1) * Math.pow(u, D.shapeExp);
+    return 1 + (scale - 1) * Math.pow(riverDeltaProgress(s, end, river, typicalWidthM, D), D.shapeExp);
 }
 
 /**
@@ -227,8 +379,8 @@ export function riverReachShape(shape, s, length, river, P = RIVER_SHAPE_DEFAULT
     const delta = P.deltaLake ? riverDelta(s, end, river, P.typicalWidthM ?? shape.width, P.delta ?? RIVER_SHAPE_DEFAULTS.delta) : 1;
     const mouth = 1 - quintic01(Math.min(Math.abs(s - start), P.deltaLake ? Infinity : Math.abs(end - s)) / joinM);
     const width = Math.max(P.minReachWidthM ?? 0, shape.width * riverWidthFactor(s, river, P.typicalWidthM ?? shape.width).f) * (1 + (P.junctionWidthScale - 1) * mouth) * delta;
-    const depth = Math.max((P.minReachDepthShare ?? 0) * P.minDepthM, shape.depth * Math.max(0.45, 1 + P.depthVar * pool)
-        * Math.pow(shape.width / width * delta, 0.25) * Math.pow(delta, -(P.delta ?? RIVER_SHAPE_DEFAULTS.delta).depthExp));
+    const floor = P.minDepthM * ((P.minReachDepthShare ?? 0) + (1 - (P.minReachDepthShare ?? 0)) * Math.min(1, (delta - 1) / 0.2));
+    const depth = Math.max(floor, shape.depth * Math.max(0.45, 1 + P.depthVar * pool) * Math.pow(shape.width / width * delta, 0.25));
     const island = P.islands && s > 2 * joinM && length - s > 2 * joinM
         ? quintic01((reach - P.islandThreshold) / 0.3) * (1 - quintic01(((shape.slope ?? 0) - 0.004) / 0.008)) : 0;
     return { ...shape, width, depth, island };
@@ -265,8 +417,11 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 // 18 = a share of the rivers widens to 3-4 x (riverSection.js wideShare);
 // 19 = deltas into lakes (RIVER_SHAPE_DEFAULTS.delta); 20 = full at the
 // shore; 21 = longer, gentler; 22 = rivers twice as deep; 23 = lake rims
-// fall relative to the water (riverLakeRims wl).
-export const RIVER_SOLVE_VERSION = 23;
+// fall relative to the water (riverLakeRims wl); 24 = deltas and pools
+// not as shallow; 25 = deltas deepen to the lake's depth; 26-39 = ends
+// re-routed to meet their lakes head-on (riverLakeApproach), held outlets
+// part of their lake (riverHeldDepth), deepening gradually (outletDeepenM).
+export const RIVER_SOLVE_VERSION = 39;
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
@@ -333,6 +488,44 @@ export function fitNonIncreasingQuantile(v, w, tau) {
     let k = 0;
     for (const b of blocks) for (let q = 0; q < b.size; q++) out[k++] = b.value;
     return out;
+}
+
+/**
+ * The bank-full depth D of a river point held at its source lake's level
+ * (riverLakeHold): part of the lake as far as its banks lie under the
+ * level, unless the lake within 24 m is as deep as its channel. No channel along a shallow
+ * arm of the lake (a full one showed as a groove for 160 m: owner
+ * 2026-10-27, rivers meet a lake at an angle); the full channel between dry
+ * banks (through the lake's rim; by the ground at its centre, a gully there
+ * left 2 cm of water through a rim 0.5-0.9 m high, a mud band between two
+ * knobs) and on through a narrow shallow edge into the deep water (without,
+ * the edge drew a mud band across the outlet).
+ * @param {object} p
+ * @param {number} p.x, p.y, p.tx, p.ty  the point and its direction (plane, m)
+ * @param {number} p.hw, p.depth          half-width, bank-full depth D (m)
+ * @param {(x: number, y: number) => number} p.groundAt  natural ground (m)
+ * @param {(x: number, y: number) => boolean} p.inLake  the lake's water there
+ * @param {number} p.level                the lake's level (m)
+ * @returns {number} D
+ */
+export function riverHeldDepth({ x, y, tx, ty, hw, depth, groundAt, inLake, level }, P = RIVER_LEVEL_DEFAULTS) {
+    const tl = Math.hypot(tx, ty) || 1;
+    // Lake water only: ground under the level past the outlet is the
+    // river's own valley (counted, it cut a groove into a bay up to 24 m from it).
+    const lakeDepth = (u, v) => (inLake(u, v) ? Math.max(0, level - groundAt(u, v)) : 0);
+    let wet = 0, deep = 0;
+    for (const side of [-1, 1]) {
+        for (const d of [hw, hw + 0.5 * P.bankBandM, hw + P.bankBandM]) {
+            if (lakeDepth(x - ty / tl * side * d, y + tx / tl * side * d) > 0) wet++;
+        }
+    }
+    for (const r of [8, 16, 24]) {
+        for (let q = 0; q < 8; q++) deep = Math.max(deep, lakeDepth(x + r * Math.cos(q * Math.PI / 4), y + r * Math.sin(q * Math.PI / 4)));
+    }
+    // Into deep water nearby (as deep as its channel): a bay as deep as half
+    // its water, given that depth, kept a faint groove ending in a line.
+    const water = depth * P.waterFrac, t = Math.min(1, Math.max(0, (deep - 0.5 * water) / (0.5 * water)));
+    return Math.min(depth, Math.max(0.02 / P.waterFrac, depth * (1 - wet / 6), depth * t * t * (3 - 2 * t)));
 }
 
 /**

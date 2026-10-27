@@ -90,29 +90,32 @@ export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
 }
 
 /**
- * A value along a traced river at fraction t of segment k (points k, k + 1),
- * blended toward its neighbour's across the nearer joint as the shaders'
- * waterRiverJoint: the neighbour's line extended past the joint, weight 1/2
- * there, 0 from the middle of the shorter segment.
+ * A value along a traced river at fraction t of segment k (points k, k + 1):
+ * the trace's piecewise-linear values averaged over a window of half the
+ * shorter segment at each joint, as the shaders' waterRiverPointAt: its
+ * slope changes linearly from one segment's to the next's.
  * @param {ArrayLike<number>} values  per point
  * @param {ArrayLike<number>} arc     arc length (m) per point
  */
 export function riverJointValue(values, arc, k, t) {
     const n = values.length, L = arc[k + 1] - arc[k];
-    const own = values[k] + (values[k + 1] - values[k]) * t;
-    const next = t >= 0.5, o = next ? k + 1 : k - 1;
-    if (o < 0 || o + 1 >= n || !(L > 0)) return own;
-    const Lo = arc[o + 1] - arc[o], band = 0.5 * Math.min(L, Lo);
-    if (!(band > 0)) return own;
-    const a = next ? (1 - t) * L : t * L, slope = (values[o + 1] - values[o]) / Lo;
-    const other = next ? values[k + 1] - slope * a : values[k] + slope * a;
-    const x = Math.min(1, Math.max(0, a / band));
-    return own + (other - own) * 0.5 * (1 - x * x * (3 - 2 * x));
+    const slope = (j) => (values[j + 1] - values[j]) / Math.max(arc[j + 1] - arc[j], 0.001);
+    const m = slope(k);
+    let v = values[k] + (values[k + 1] - values[k]) * t;
+    if (!(L > 0)) return v;
+    if (t >= 0.5 && k + 2 < n) {
+        const b = 0.5 * Math.min(L, arc[k + 2] - arc[k + 1]), a = (1 - t) * L;
+        if (b > 0 && a < b) v += (slope(k + 1) - m) * (b - a) * (b - a) / (4 * b);
+    } else if (t < 0.5 && k > 0) {
+        const b = 0.5 * Math.min(L, arc[k] - arc[k - 1]), a = t * L;
+        if (b > 0 && a < b) v += (m - slope(k - 1)) * (b - a) * (b - a) / (4 * b);
+    }
+    return v;
 }
 
-// Ribbon rows between two points: the level follows the joints' blend
-// (riverJointValue) as the bed and the shading's level do; with one row per
-// point its straight pieces met the smoothed bed in a waterline that bulged
+// Ribbon rows between two points: the level follows riverJointValue as the
+// bed and the shading's level do; with one row per point at the trace's
+// level its straight pieces met the smoothed bed in a waterline that bulged
 // at every point (stairs, owner 2026-10-26).
 export const RIBBON_SUB_ROWS = 3;
 
@@ -179,9 +182,10 @@ export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, sh
             const c = norm([d[0] + left[0] * sh.off / R, d[1] + left[1] * sh.off / R, d[2] + left[2] * sh.off / R]);
             const L = norm([c[0] + left[0] * wl / R, c[1] + left[1] * wl / R, c[2] + left[2] * wl / R]);
             const Rt = norm([c[0] - left[0] * wr / R, c[1] - left[1] * wr / R, c[2] - left[2] * wr / R]);
-            const r = R + levels[k];
+            const level = n > 1 ? riverJointValue(levels, arc, Math.min(k, n - 2), k >= n - 1 ? 1 : 0) : levels[k];
+            const r = R + level;
             return [origin.x + L[0] * r, origin.y + L[1] * r, origin.z + L[2] * r, rid,
-                origin.x + Rt[0] * r, origin.y + Rt[1] * r, origin.z + Rt[2] * r, levels[k]];
+                origin.x + Rt[0] * r, origin.y + Rt[1] * r, origin.z + Rt[2] * r, level];
         };
 
         let runStart = -1;

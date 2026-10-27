@@ -33,6 +33,7 @@ try {
     });
     const page = await browser.newPage();
     await page.evaluateOnNewDocument(fs.readFileSync(path.join(root, 'tools/perf/lakeRecovery/pageInstrument.js'), 'utf8'));
+    await page.evaluateOnNewDocument(fs.readFileSync(path.join(root, 'tools/perf/terrainDetail/gpuTimer.js'), 'utf8'));
     await page.goto(`http://127.0.0.1:${PORT}${URL_PATH}`, { waitUntil: 'domcontentloaded', timeout: 180000 });
     await page.waitForFunction(() => window.gameEngine?.waterService?.precomputed === true && window.gameEngine?.getLoadingStatus?.()?.complete,
         { timeout: 900000, polling: 500 });

@@ -309,10 +309,11 @@ fn riverRamp_d(t: vec4<f32>) -> vec4<f32> {
     if (t.x > ${f(1 - a)}) { let r = 1.0 - t.x; return vec4<f32>(1.0 - ${f(m)} * r * r / ${f(2 * a)}, t.yzw * (${f(m / a)} * r)); }
     return vec4<f32>(${f(m)} * (t.x - ${f(a / 2)}), t.yzw * ${f(m)});
 }
-fn riverSoftCut_d(d: vec4<f32>) -> vec4<f32> {
+// Dual of riverSoftCut over k (m): 0, d^2 / 2k, d - k / 2.
+fn riverSoftCutK_d(d: vec4<f32>, k: f32) -> vec4<f32> {
     if (d.x <= 0.0) { return dConst(0.0); }
-    if (d.x < ${f(P.softM)}) { return vec4<f32>(d.x * d.x / ${f(2 * P.softM)}, d.yzw * (d.x / ${f(P.softM)})); }
-    return vec4<f32>(d.x - ${f(P.softM / 2)}, d.yzw);
+    if (d.x < k) { return vec4<f32>(d.x * d.x / (2.0 * k), d.yzw * (d.x / k)); }
+    return vec4<f32>(d.x - 0.5 * k, d.yzw);
 }
 // Dual of riverChannel (the bed, side depths and half-width as duals).
 fn riverChannel_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depthL: vec4<f32>, depthR: vec4<f32>, skew: f32) -> vec4<f32> {
@@ -324,12 +325,15 @@ fn riverChannel_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depthL: vec4<f32>
 fn riverSideDepth_d(depth: vec4<f32>, freeboard: f32) -> vec4<f32> {
     return dMax(depth * (${wf} + freeboard * ${fbScale}), depth * ${wf} + dConst(${minFull}));
 }
-fn riverSection_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depth: vec4<f32>, skew: f32, h0: vec4<f32>, left: RiverBank, right: RiverBank) -> vec4<f32> {
+// soft: the cut fades in over this (m) of natural ground above the
+// section (softM; wider where a channel meets a steep lake basin, whose
+// crossing with it drew a crease).
+fn riverSection_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depth: vec4<f32>, skew: f32, h0: vec4<f32>, left: RiverBank, right: RiverBank, soft: f32) -> vec4<f32> {
     let d = n * select(-1.0, 1.0, n.x >= 0.0);
     let depthL = riverSideDepth_d(depth, left.freeboard);
     let depthR = riverSideDepth_d(depth, right.freeboard);
-    let p0 = select(bed + select(depthR, depthL, n.x >= 0.0), riverChannel_d(n, hw, bed, depthL, depthR, skew), d.x < hw.x) - dConst(${f(P.softM / 2)});
-    let cut = riverSoftCut_d(h0 - p0);
+    let p0 = select(bed + select(depthR, depthL, n.x >= 0.0), riverChannel_d(n, hw, bed, depthL, depthR, skew), d.x < hw.x) - dConst(0.5 * soft);
+    let cut = riverSoftCutK_d(h0 - p0, soft);
     let x = d - hw;
     if (x.x <= 0.0) { return h0 - cut; }
     var b = right;
