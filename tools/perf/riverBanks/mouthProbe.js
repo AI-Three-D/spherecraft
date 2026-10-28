@@ -513,3 +513,35 @@ export async function riverPoints({ id, k0 = 0, k1 = 1e9 }) {
     }
     return { id, n, approach: rec.approach ?? null, rows };
 }
+
+// For each view: the traced river nearest the ground under the screen centre
+// (1440 x 900, fov 75) and the lake there: river id, point index, distance,
+// half-width, level, water depth, in-lake flag, its ends' re-route outcome.
+export async function riversAtViews({ views }) {
+    const q = await import('/tools/perf/waterStepReview/qualityScene.js');
+    const g = window.gameEngine, s = g.waterService, R = g.planetConfig.radius, o = g.planetConfig.origin || { x: 0, y: 0, z: 0 };
+    const sub = (a, b) => a.map((v, i) => v - b[i]), add = (a, b) => a.map((v, i) => v + b[i]), mul = (a, k) => a.map(v => v * k);
+    const norm = a => mul(a, 1 / Math.hypot(...a)), O = [o.x, o.y, o.z], out = [];
+    for (const view of views) {
+        await q.poseView(view);
+        const ray = norm(sub(view.look, view.pos));
+        let at = null;
+        for (let t = 2; t < 3000; t += 2) {
+            const p = sub(add(view.pos, mul(ray, t)), O), d = norm(p);
+            if (Math.hypot(...p) - R <= (await s._sampler.sampleDirsCarved(Float32Array.from([...d, 0])))[0]) { at = d; break; }
+        }
+        if (!at) { out.push({ name: view.name, error: 'no ground hit' }); continue; }
+        let best = null;
+        for (const [id, rec] of s.riverRecs) {
+            const P = rec.points, st = rec.stride;
+            for (let k = 0; k < P.length / st; k++) {
+                const dist = R * Math.acos(Math.min(1, P[k * st] * at[0] + P[k * st + 1] * at[1] + P[k * st + 2] * at[2]));
+                if (!best || dist < best.dist) best = { id, k, n: P.length / st, dist, rec };
+            }
+        }
+        const P = best.rec.points, st = best.rec.stride, a = best.k * st, lake = g.waterGpuData.lakeAt?.(at);
+        out.push({ name: view.name, river: best.id, k: best.k, n: best.n, distM: Math.round(best.dist), hw: +P[a + 4].toFixed(1), eta: +P[a + 3].toFixed(2),
+            waterDepth: +P[a + 5].toFixed(2), pool: P[a + 9], src: best.rec.src, dest: best.rec.dest, approach: best.rec.approach ?? null, lake: lake ?? null });
+    }
+    return out;
+}
