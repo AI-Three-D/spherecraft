@@ -322,9 +322,6 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // most; deltas not below minDepthM (at 60 % the mouths' water was 0.7 m
     // and read as wet mud, owner 2026-10-26).
     minReachDepthShare: 0.8,
-    // Leaving its lake, a river's water deepens by at most this a point
-    // (stepM, 20 m) until its own depth (waterWorkerCore.js solveRiver).
-    outletDeepenM: 0.4,
     manning: 0.035,
     depthVar: 0.45,
     junctionWidthScale: 2.3,
@@ -341,8 +338,19 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // Its bed also deepens over that length to the lake's depth just past
     // the shore (frontDepthM of water at most, near opaque): from a shallow
     // river onto a lake shelving steeply the water's colour changed at the
-    // shoreline, a muddy rim across the mouth (owner 2026-10-26).
-    delta: Object.freeze({ scale: [1.6, 2.4], bigShare: 0.35, bigScale: [3, 4], lengthWidths: [6, 12], minLengthM: 100, shapeExp: 1.6, frontDepthM: 3,
+    // shoreline, a muddy rim across the mouth (owner 2026-10-26). At least
+    // frontMinM: the lake in front is a basin that deep (riverCarve.wgsl.js
+    // BASIN_WATER_M); by a shallow shelf alone deltas reached it with 1 m
+    // of water over mud (owner 2026-10-28: neither muddy nor shallow).
+    // It spreads over low ground only (riverDeltaHalfWidth): no wider than
+    // where the ground beside it stands floorRiseM above its lake's level
+    // (probed every floorStepM). Flared to 39 m into a
+    // mountain stream's V valley it dug a terrace 5-7 m deep into the valley's
+    // sides, their rise a dark band diverging from the river (owner
+    // 2026-10-28, "delta sides"). Its half-width changes by at most
+    // widthRate (m per m) along it (waterWorkerCore.js solveRiver).
+    delta: Object.freeze({ scale: [1.6, 2.4], bigShare: 0.35, bigScale: [3, 4], lengthWidths: [6, 12], minLengthM: 100, shapeExp: 1.6, frontDepthM: 3, frontMinM: 1.5,
+        floorRiseM: 3, floorStepM: 2, widthRate: 0.25,
         salts: Object.freeze({ big: 0x3d51, scale: 0x6a2f, length: 0x1b77 }) }),
     sourceInsetM: 100,
     islands: false,
@@ -363,6 +371,34 @@ export function riverDelta(s, end, river, typicalWidthM, D = RIVER_SHAPE_DEFAULT
     const big = riverHash(river, D.salts.big) < D.bigShare;
     const scale = lerp(big ? D.bigScale : D.scale, riverHash(river, D.salts.scale));
     return 1 + (scale - 1) * Math.pow(riverDeltaProgress(s, end, river, typicalWidthM, D), D.shapeExp);
+}
+
+/**
+ * Half-width (m) of a delta's point limited to low ground: out from the
+ * channel's centre each side ends where the natural ground first stands
+ * D.floorRiseM above its lake's level, and the flare reaches the nearer of
+ * the two, never less than the river's own half-width. (Measured from the
+ * ground at the centre, it flared through a gorge cut 4-8 m below a flat
+ * valley floor.)
+ * @param {object} p
+ * @param {number} p.x, p.y, p.tx, p.ty  the point and its direction (plane, m)
+ * @param {number} p.hw      flared half-width (m)
+ * @param {number} p.hwBase  the river's half-width without the delta (m)
+ * @param {number} p.level   the lake's level (m)
+ * @param {(x: number, y: number) => number} p.groundAt  natural ground (m)
+ * @returns {number}
+ */
+export function riverDeltaHalfWidth({ x, y, tx, ty, hw, hwBase, level, groundAt }, D = RIVER_SHAPE_DEFAULTS.delta) {
+    if (!(hw > hwBase)) return hw;
+    const tl = Math.hypot(tx, ty) || 1, nx = -ty / tl, ny = tx / tl;
+    const top = level + D.floorRiseM;
+    let free = hw;
+    for (const side of [-1, 1]) {
+        for (let o = hwBase; o < free; o += D.floorStepM) {
+            if (groundAt(x + nx * side * o, y + ny * side * o) > top) { free = o; break; }
+        }
+    }
+    return Math.max(hwBase, free);
 }
 
 /**
@@ -420,8 +456,11 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 // fall relative to the water (riverLakeRims wl); 24 = deltas and pools
 // not as shallow; 25 = deltas deepen to the lake's depth; 26-39 = ends
 // re-routed to meet their lakes head-on (riverLakeApproach), held outlets
-// part of their lake (riverHeldDepth), deepening gradually (outletDeepenM).
-export const RIVER_SOLVE_VERSION = 39;
+// part of their lake (riverHeldDepth), deepening gradually (outletDeepenM);
+// 40-47 = deltas only over low ground (riverDeltaHalfWidth), widening
+// gradually, at least frontMinM deep at the shore; held outlets keep their
+// depth (the carve's basin under the lake).
+export const RIVER_SOLVE_VERSION = 47;
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
@@ -488,44 +527,6 @@ export function fitNonIncreasingQuantile(v, w, tau) {
     let k = 0;
     for (const b of blocks) for (let q = 0; q < b.size; q++) out[k++] = b.value;
     return out;
-}
-
-/**
- * The bank-full depth D of a river point held at its source lake's level
- * (riverLakeHold): part of the lake as far as its banks lie under the
- * level, unless the lake within 24 m is as deep as its channel. No channel along a shallow
- * arm of the lake (a full one showed as a groove for 160 m: owner
- * 2026-10-27, rivers meet a lake at an angle); the full channel between dry
- * banks (through the lake's rim; by the ground at its centre, a gully there
- * left 2 cm of water through a rim 0.5-0.9 m high, a mud band between two
- * knobs) and on through a narrow shallow edge into the deep water (without,
- * the edge drew a mud band across the outlet).
- * @param {object} p
- * @param {number} p.x, p.y, p.tx, p.ty  the point and its direction (plane, m)
- * @param {number} p.hw, p.depth          half-width, bank-full depth D (m)
- * @param {(x: number, y: number) => number} p.groundAt  natural ground (m)
- * @param {(x: number, y: number) => boolean} p.inLake  the lake's water there
- * @param {number} p.level                the lake's level (m)
- * @returns {number} D
- */
-export function riverHeldDepth({ x, y, tx, ty, hw, depth, groundAt, inLake, level }, P = RIVER_LEVEL_DEFAULTS) {
-    const tl = Math.hypot(tx, ty) || 1;
-    // Lake water only: ground under the level past the outlet is the
-    // river's own valley (counted, it cut a groove into a bay up to 24 m from it).
-    const lakeDepth = (u, v) => (inLake(u, v) ? Math.max(0, level - groundAt(u, v)) : 0);
-    let wet = 0, deep = 0;
-    for (const side of [-1, 1]) {
-        for (const d of [hw, hw + 0.5 * P.bankBandM, hw + P.bankBandM]) {
-            if (lakeDepth(x - ty / tl * side * d, y + tx / tl * side * d) > 0) wet++;
-        }
-    }
-    for (const r of [8, 16, 24]) {
-        for (let q = 0; q < 8; q++) deep = Math.max(deep, lakeDepth(x + r * Math.cos(q * Math.PI / 4), y + r * Math.sin(q * Math.PI / 4)));
-    }
-    // Into deep water nearby (as deep as its channel): a bay as deep as half
-    // its water, given that depth, kept a faint groove ending in a line.
-    const water = depth * P.waterFrac, t = Math.min(1, Math.max(0, (deep - 0.5 * water) / (0.5 * water)));
-    return Math.min(depth, Math.max(0.02 / P.waterFrac, depth * (1 - wet / 6), depth * t * t * (3 - 2 * t)));
 }
 
 /**

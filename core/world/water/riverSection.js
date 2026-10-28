@@ -57,6 +57,14 @@ export const RIVER_SECTION = Object.freeze({
     minStepM: 2, rampRound: 0.35, maxCurv: 0.45,
     // A step this high or more starts the blend after it (lower: in between).
     stepPresentM: 0.3,
+    // The blend beyond the step rises at most this steeply (at its middle):
+    // where a river runs 6-8 m under its valley's floor (a steep stream's
+    // last reach before its lake) a cut bank's 20 m blend rose at 0.46-0.7
+    // beside slopes of 0.1, dark troughs along both sides of its mouth
+    // (owner 2026-10-28, "delta sides").
+    blendSlope: 0.3,
+    // ...for blends up to this wide (the carve reaches reachM beyond the half-width).
+    blendMaxM: 80,
     softM: 0.5, stepSoftM: 0.25, widthSoftM: 0.5,
     // Ground changes at most this far (m) beyond the half-width.
     reachM: 110,
@@ -211,7 +219,7 @@ export function riverSectionHeight({ n, hw, bed, depth, skew, h0, left, right },
     const stepH = Math.max(0, smin(cut, b.stepM, P.stepSoftM)), rest = cut - stepH;
     const aa = P.rampRound * (1 - P.rampRound);
     const width = smax(smax(P.minStepM, Math.sqrt(Math.max(stepH, 1e-3) / (P.maxCurv * aa)), P.widthSoftM), stepH / ((1 - P.rampRound) * b.slope), P.widthSoftM);
-    const blend = smax(b.blendM, Math.sqrt(Math.max(rest, 1e-3) / (P.maxCurv * aa)), P.widthSoftM);
+    const blend = smax(smax(b.blendM, Math.sqrt(Math.max(rest, 1e-3) / (P.maxCurv * aa)), P.widthSoftM), smin(rest / ((1 - P.rampRound) * P.blendSlope), P.blendMaxM, P.widthSoftM), P.widthSoftM);
     const start = b.terraceM + width * clamp(stepH / P.stepPresentM, 0, 1);
     return h0 - cut + stepH * riverRamp(x / width, P.rampRound) + rest * riverRamp((x - start) / blend, P.rampRound);
 }
@@ -297,7 +305,7 @@ fn riverSection(n: f32, hw: f32, bed: f32, depth: f32, skew: f32, h0: f32, left:
     let stepH = max(0.0, riverSmin(cut, b.stepM, ${f(P.stepSoftM)}));
     let rest = cut - stepH;
     let width = riverSmax(riverSmax(${f(P.minStepM)}, sqrt(max(stepH, 0.001) * ${curv}), ${f(P.widthSoftM)}), stepH / (${f(1 - a)} * b.slope), ${f(P.widthSoftM)});
-    let blend = riverSmax(b.blendM, sqrt(max(rest, 0.001) * ${curv}), ${f(P.widthSoftM)});
+    let blend = riverSmax(riverSmax(b.blendM, sqrt(max(rest, 0.001) * ${curv}), ${f(P.widthSoftM)}), riverSmin(rest / ${f((1 - a) * P.blendSlope)}, ${f(P.blendMaxM)}, ${f(P.widthSoftM)}), ${f(P.widthSoftM)});
     let start = b.terraceM + width * clamp(stepH / ${f(P.stepPresentM)}, 0.0, 1.0);
     return h0 - cut + stepH * riverRamp(x / width) + rest * riverRamp((x - start) / blend);
 }
@@ -342,7 +350,8 @@ fn riverSection_d(n: vec4<f32>, hw: vec4<f32>, bed: vec4<f32>, depth: vec4<f32>,
     let rest = cut - stepH;
     let widthC = dSmoothMax(dConst(${f(P.minStepM)}), dSqrt(dMax(stepH, dConst(0.001)) * ${curv}), ${f(P.widthSoftM)});
     let width = dSmoothMax(widthC, stepH * (1.0 / (${f(1 - a)} * b.slope)), ${f(P.widthSoftM)});
-    let blend = dSmoothMax(dConst(b.blendM), dSqrt(dMax(rest, dConst(0.001)) * ${curv}), ${f(P.widthSoftM)});
+    let blendC = dSmoothMax(dConst(b.blendM), dSqrt(dMax(rest, dConst(0.001)) * ${curv}), ${f(P.widthSoftM)});
+    let blend = dSmoothMax(blendC, dSmoothMin(rest * (1.0 / ${f((1 - a) * P.blendSlope)}), dConst(${f(P.blendMaxM)}), ${f(P.widthSoftM)}), ${f(P.widthSoftM)});
     let start = dConst(b.terraceM) + dMul(width, dClamp(stepH * (1.0 / ${f(P.stepPresentM)}), 0.0, 1.0));
     return h0 - cut + dMul(stepH, riverRamp_d(dDiv(x, width))) + dMul(rest, riverRamp_d(dDiv(x - start, blend)));
 }
