@@ -182,3 +182,76 @@ Screenshots of these come with the new session. Their poses are in
   view ray).
 - When pixels don't change between versions, the cause isn't what you just
   changed — diff the images (`diffMap.mjs`) to find what did change.
+
+## Session 2 (2026-10-28, later): the five problems — causes and fixes
+
+Each cause below was found by switching one term off (A/B) before changing
+anything. Results: `tools/perf/structured-terrain-results/river-2026-10-28/`
+(`base`, `base-sweep` = before; `v47`, `v47-sweep`, `v47-deltas` = after;
+`decision-delta/` = delta width options). `RIVER_SOLVE_VERSION` 47.
+
+1. **Muddy borders, moats, muddy deltas (problems 1, 2, 4)** — the channel
+   met a lake shelf 0.1–1 m deep: its cut faded out within 12 m of the shore
+   (a moat 2–3 m deep ending in a wall), outlets' held runs were kept 0.4 m
+   deep (`riverHeldDepth`, deleted with `outletDeepenM`). Now
+   `riverCarveSegment_d` lowers ground under a lake's drawn water near a
+   river's end into a basin (`BASIN_*` in riverCarve.wgsl.js): flat at the
+   bed, at least 1.5 m of water, sides over max(30 m, 1.5 hw), setting in
+   over 16 m from the waterline (natural depth / slope). Setting it in by the
+   lake mask's inside distance drew a toothed step on steep shores (the mask
+   edge lies metres beyond the waterline). The river's narrower channel under
+   the basin showed as a groove until the basin's soft cut was shifted by
+   half its rounding (k/2). Delta fronts are at least `frontMinM` 1.5 m deep.
+2. **Walls (problem 3)** — the valley field (riverLandscape.js bake on 16 m
+   cells, page texels ~64 m with a C2 B-spline) cut 2–6 m below a reach's
+   water beside its banks: a bank cell takes its level from the nearest
+   channel cell, on a steep bending stream a lower reach downstream, and the
+   texels carry an uphill bank's cut across the river. The carve kept its
+   fine section only within 8 m, so the banks stood as a levee. Now the
+   valley returns over `VALLEY_RETURN_M` 60 m (a slope ~0.1 instead of a 4–6
+   m drop in 12 m). Rejected: clamping the valley to a floor from the river's
+   level (nearest segment: steps of metres where it switches on steep
+   streams, walls and holes; max over segments: terraces and creases where
+   the clamp starts).
+3. **Delta sides (problem 5)** — a flare up to 39 m dug a terrace 5–7 m deep
+   into a gorge's sides, its bank blend rising at 0.46–0.7. Now bank blends
+   rise at most `blendSlope` 0.3 (riverSection.js) and deltas flare only
+   over low ground (`riverDeltaHalfWidth`: sides at most `floorRiseM` 3 m
+   above the lake). The owner accepted narrow, rare deltas: many mouths in
+   the sweep (o26b-delta, o26b-stairs, o26-lake-crease, o26-mouth-band) are
+   now narrow.
+
+Measured (same conditions): frame 11.22 -> 11.12 ms over the six owner views;
+tile generation 267.8 -> 271.7 ms per 80 tiles (repeat spread ±3 %).
+
+### Still open
+
+- **Creases on the inner side of bends** of steep, incised streams (faint
+  light streaks on the bank, `o28-delta-sides` upstream reach, 5–9 luminance
+  units): the carve's own section far field (8–60 m out) — they show with the
+  valley off too (`mouthDepth.js creaseMap`); the 60 m valley return no longer
+  hides them. They run along joints' bisector planes: far out on a bend's
+  inside the joint blend (nearest segment + its two neighbours, ±half a
+  segment) is not a partition of unity. A fix would weight every segment
+  whose zone covers a point and normalise.
+- Narrow mouths meet the lake's shore in a sharp corner (o26b-stairs,
+  o28-delta-sides).
+- From the first list: river ends meeting lakes under 30°, the tan
+  sawtooth, the mouth-blur spike.
+
+### Tools added
+
+`tools/perf/riverBanks/mouthDepth.js`: `depthMap` (water depth / cut seen
+from above in a river's frame), `alongEnd`, `crossAt` (cross-sections with
+the valley or the carve off), `valleyStages` (16 m bake vs shader valley),
+`alongOffsets`, `creaseMap`, `deltaCensus`; `probeBatch.js` (several probes
+in one page load); `deltaPoses-2026-10-28.json`.
+
+### Lessons
+
+- A clamp by height (raise to a floor) draws a crease wherever it starts;
+  a blend weighted by distance does not.
+- A version bump caches traces: an A/B that changes the trace needs a fresh
+  version number each time (a reused one silently served the other arm).
+- Several captures that look like the same artifact can have different
+  causes: map them (crease map, dry views) before attributing.

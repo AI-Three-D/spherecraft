@@ -46,7 +46,7 @@ import { bakeRiverWaterfalls } from './riverFeatures.js';
 import { bakeRiverIncision } from './riverLandscape.js';
 import { continueDrain, findPockets } from './mountainLakes.js';
 import { lakeMaskSdf, lakeSdfAt } from '../water/lakeMaskSdf.js';
-import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverCrestAbove, riverDeltaProgress, riverHeldDepth, riverLakeApproach, riverLakeHold, riverLakeRims, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
+import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverCrestAbove, riverDelta, riverDeltaHalfWidth, riverDeltaProgress, riverLakeApproach, riverLakeHold, riverLakeRims, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
 
 // C2 ramp 0..1 (quintic smoothstep of a clamped value).
 const ramp5 = (t) => { const x = Math.max(0, Math.min(1, t)); return x * x * x * (x * (x * 6 - 15) + 10); };
@@ -677,14 +677,36 @@ export function createWaterWorkerCore() {
         }
         const reachP = { ...shapeP, junctionStartM: sm.s[sourceMouth], junctionEndM: sm.s[deltaEndK], typicalWidthM, deltaLake };
         for (let k = 0; k < n; k++) shapes[k] = riverReachShape(shapes[k], sm.s[k], total, riverId, reachP);
+        // A delta spreads over low ground only (riverDeltaHalfWidth).
+        if (deltaLake) {
+            const DP = shapeP.delta ?? RIVER_SHAPE_DEFAULTS.delta;
+            let kd = n;
+            for (let k = 0; k < n; k++) {
+                const f = riverDelta(sm.s[k], sm.s[deltaEndK], riverId, typicalWidthM, DP);
+                if (!(f > 1)) continue;
+                kd = Math.min(kd, k);
+                const k0 = Math.max(0, k - 1), k1 = Math.min(n - 1, k + 1), hw = shapes[k].width / 2;
+                const free = riverDeltaHalfWidth({ x: sm.x[k], y: sm.y[k], tx: sm.x[k1] - sm.x[k0], ty: sm.y[k1] - sm.y[k0], hw, hwBase: hw / f, level: destLevel, groundAt }, DP);
+                if (free < hw) shapes[k] = { ...shapes[k], width: 2 * free };
+            }
+            // Its half-width changes by at most widthRate per metre along it:
+            // held to low ground on land and whole in the lake (under the
+            // water nothing limits it), it would jump within a segment at the shore.
+            const limit = (k, q) => {
+                const lim = shapes[q].width / 2 + DP.widthRate * Math.abs(sm.s[k] - sm.s[q]);
+                if (shapes[k].width / 2 > lim) shapes[k] = { ...shapes[k], width: 2 * lim };
+            };
+            for (let k = kd + 1; k < n; k++) limit(k, k - 1);
+            for (let k = n - 2; k >= kd; k--) limit(k, k + 1);
+        }
         // The delta's bed deepens to the lake's depth 10-30 m past the shore
-        // (RIVER_SHAPE_DEFAULTS.delta.frontDepthM).
+        // (RIVER_SHAPE_DEFAULTS.delta.frontDepthM, at least frontMinM).
         if (deltaLake && deltaEndK > 0) {
             const DP = shapeP.delta ?? RIVER_SHAPE_DEFAULTS.delta;
             const dx = sm.x[deltaEndK] - sm.x[deltaEndK - 1], dy = sm.y[deltaEndK] - sm.y[deltaEndK - 1], dl = Math.hypot(dx, dy) || 1;
             let lakeDepth = 0;
             for (const o of [10, 20, 30]) lakeDepth = Math.max(lakeDepth, destLevel - groundAt(sm.x[deltaEndK] + dx / dl * o, sm.y[deltaEndK] + dy / dl * o));
-            const front = Math.min(lakeDepth, DP.frontDepthM ?? 3) / levelP.waterFrac;
+            const front = Math.max(Math.min(lakeDepth, DP.frontDepthM ?? 3), DP.frontMinM ?? 0) / levelP.waterFrac;
             for (let k = 0; k < n; k++) {
                 if (!(front > shapes[k].depth)) continue;
                 const u = riverDeltaProgress(sm.s[k], sm.s[deltaEndK], riverId, typicalWidthM, DP);
@@ -747,24 +769,11 @@ export function createWaterWorkerCore() {
         }
         const { eta } = riverValleyLevels({ s: sm.s, ground, free, srcLevel, destLevel, sourceEnd, destStart }, levelP);
         // A river leaving its lake keeps the lake's level while the lake's
-        // water still lies beside it: there it is part of the lake (riverHeldDepth).
-        const holdEnd = riverLakeHold({ eta, held, srcLevel, sourceEnd, destStart });
-        const srcWater = (x, y) => { const c = cellOf(x, y); return c >= 0 && lakeMask[c] === 1 && Math.abs(lakeLevel[c] - srcLevel) < 0.01; };
-        for (let k = 0; k <= holdEnd; k++) {
-            const k0 = Math.max(0, k - 1), k1 = Math.min(n - 1, k + 1);
-            const depth = riverHeldDepth({ x: sm.x[k], y: sm.y[k], tx: sm.x[k1] - sm.x[k0], ty: sm.y[k1] - sm.y[k0], hw: hwArr[k],
-                depth: shapes[k].depth, groundAt, inLake: srcWater, level: srcLevel }, levelP);
-            if (depth < shapes[k].depth) shapes[k] = { ...shapes[k], depth };
-        }
-        // Away from the lake its channel deepens by at most outletDeepenM of
-        // water a point (shapeP): from the lake's floor to its full depth
-        // within a point or two it began in a bowl whose rim drew a line
-        // across a bay (owner 2026-10-27).
-        for (let k = 1; k < n; k++) {
-            const lim = shapes[k - 1].depth + shapeP.outletDeepenM / levelP.waterFrac;
-            if (shapes[k].depth > lim) shapes[k] = { ...shapes[k], depth: lim };
-            else if (k > holdEnd) break;
-        }
+        // water still lies beside it: there it is part of the lake, its own
+        // depth kept (the carve widens it into a basin under the lake's
+        // water, riverCarve.wgsl.js; a channel held shallower there left the
+        // lake's arm 0.4 m deep, a muddy delta: owner 2026-10-28).
+        riverLakeHold({ eta, held, srcLevel, sourceEnd, destStart });
         const dirs = [];
         for (let k = 0; k < n; k++) dirs.push(planeToDir(sm.x[k], sm.y[k], frame, R));
         // Bends: signed curvature (1/m, + = turning left seen from above),

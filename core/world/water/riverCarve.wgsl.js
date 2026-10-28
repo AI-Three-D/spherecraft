@@ -33,6 +33,22 @@ const MICRO_RETURN_M = 8;
 const START_FADE_M = 30;
 // Rivers per point whose containment floor is kept (riverSection.js contain).
 const MAX_FLOORS = 6;
+// The river valley field (riverValley.wgsl.js) returns over this far (m)
+// beyond a river's channel: nearer, the fine section (riverCarveTerrain_d).
+const VALLEY_RETURN_M = 60;
+// A river's end under a lake's drawn water widens into a basin
+// (riverCarveSegment_d): flat at its bed (at least BASIN_WATER_M of water)
+// within its half-width, its sides rising to the lake's level over
+// BASIN_SIDE_M or BASIN_SIDE_SCALE half-widths, whichever is wider; it
+// sets in over BASIN_EDGE_M from the waterline (the natural depth over the
+// ground's slope). Set in by the depth or by the distance inside the
+// lake's mask (whose edge can lie metres beyond the waterline on a steep
+// shore) it dropped 1.5-3 m within a few metres: a step that drew teeth
+// along the shore on the 1 m grid.
+const BASIN_WATER_M = 1.5;
+const BASIN_SIDE_M = 30;
+const BASIN_SIDE_SCALE = 1.5;
+const BASIN_EDGE_M = 16;
 const CONTAIN = RIVER_SECTION.contain;
 
 /**
@@ -109,8 +125,8 @@ fn riverCarveFloorWeight(s: WaterRiverSeg, p: WaterRiverPt) -> f32 {
 }
 
 // The nearest segment's cross-section at unitDir over the natural ground h0, as a height dual.
-// last: s is the river's last segment.
-fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0: vec4<f32>, last: bool) -> vec4<f32> {
+// last: s is the river's last segment; lake: riverCarveLakeWater at unitDir.
+fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0: vec4<f32>, last: bool, lake: vec4<f32>) -> vec4<f32> {
     let c = riverCarveDuals(s, p);
     let nD = c.n;
     let hwD = c.hw;
@@ -130,17 +146,21 @@ fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0
     // 2026-10-26).
     let soft = mix(${RIVER_SECTION.softM.toFixed(2)}, 2.0, max(clamp(-p.pool, 0.0, 1.0), p.guardW));
     var h = riverSection_d(nD, hwD, bed, D, p.skew, h0, riverBankRim(left, p.rimL, fullL), riverBankRim(right, p.rimR, fullR), soft);
-    // In a lake (its source or its destination) the cut fades out once the
-    // lake's own bed is as deep as the channel or 12 m from the shore,
-    // whichever comes first. In it: the coarse flag (pool -1, ramping over
-    // the segment where it changes) or, beside the lake (guardW, at
-    // lakeGuard's level), ground under that level; where the flag covers
-    // dry ground the cut stays, so the river still reaches the water. By
-    // distance alone (20 m) a channel ran on as a groove across shallow lake
-    // beds; over 0.15 m of depth it ended in an underwater wall on steep
-    // shores, a hard line across an outlet (owner 2026-10-26). The shore's
-    // distance is the lake's depth over the natural ground's slope. Duals,
-    // so the normals follow the fade.
+    // In a lake (its source or its destination: the coarse flag, pool -1
+    // ramping over the segment where it changes, or beside the lake,
+    // guardW) the river's end widens under the lake's drawn water into a
+    // basin at its bed's depth, at least ${BASIN_WATER_M} m of water, its sides rising
+    // gently to the lake's level: no groove's walls, and no shelf to cross.
+    // Its cut faded out within 12 m of the shore instead, a delta's channel
+    // was a moat 2-3 m deep ending in a wall on a lake's shelf 0.1-1 m deep;
+    // a shelf at a river's end read as a mud border, an outlet's arm 0.4 m
+    // deep as a muddy delta (owner 2026-10-28). Only ground already under the
+    // water is lowered, so the shoreline stays. Where no lake is drawn (the
+    // sea, lakes not solved) the cut fades out once the lake's own bed is as
+    // deep as the channel or 12 m from the shore (the depth over the
+    // natural ground's slope); by distance alone a channel ran on as a
+    // groove, over 0.15 m of depth it ended in an underwater wall (owner
+    // 2026-10-26). Duals, so the normals follow.
     let inLakeFlag = max(clamp(-p.pool, 0.0, 1.0), p.guardW);
     if (inLakeFlag > 0.0) {
         let lakeLevel = select(p.wl, p.lakeGuard, p.lakeGuard > -1.0e10);
@@ -149,8 +169,20 @@ fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0
         let lakeDepth = dMax(vec4<f32>(lakeLevel - h0.x, -h0.yzw), dConst(0.0));
         let byShore = dSmoothstep(0.0, 12.0, lakeDepth * (1.0 / slope));
         let byDepth = dSmoothstep(0.0, max(D.x, 0.5), lakeDepth);
-        let inLake = dMax(byShore, byDepth) * inLakeFlag;
+        let inLake = dMax(byShore, byDepth) * (inLakeFlag * (1.0 - lake.x));
         if (inLake.x > 0.0) { h = h0 + dMul(h - h0, dConst(1.0) - inLake); }
+        if (lake.x > 0.0) {
+            let fromShore = vec4<f32>(lake.y - h0.x, -h0.yzw) * (1.0 / slope);
+            let wet = dSmoothstep(0.0, ${BASIN_EDGE_M.toFixed(1)}, fromShore) * (min(lake.w, smoothstep(0.0, 8.0, lake.z)) * inLakeFlag);
+            let side = riverRamp_d((nD * select(-1.0, 1.0, nD.x >= 0.0) - hwD) * (1.0 / max(${BASIN_SIDE_M.toFixed(1)}, hwD.x * ${BASIN_SIDE_SCALE.toFixed(1)})));
+            let floorB = dSmoothMin(bed, dConst(lake.y - ${BASIN_WATER_M.toFixed(1)}), 0.5);
+            let basin = floorB + dMul(dConst(lake.y + 0.5) - floorB, side);
+            // At the basin where deeper than 0.25 m (the cut's corner
+            // rounded over 0.5 m): 0.25 m above it, the river's narrower
+            // channel showed through as a groove 0.15 m deep along its line.
+            let lowered = h0 - riverSoftCutK_d(h0 - basin + dConst(0.25), 0.5);
+            h += dMul(select(h, lowered, lowered.x < h.x) - h, wet);
+        }
     }
     // Past a river's last point into its lake the cut fades out as behind
     // its first: a round cap at full depth ended the channel in a bowl wall,
@@ -191,6 +223,10 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
     var fine = original;
     var valleyWeight = dConst(1.0);
     let excavated = h0.x < original.x;
+    // The lake's water here (riverCarveLakeWater), looked up once, for the
+    // first river reaching a lake.
+    var lakeW = vec4<f32>(0.0, -1.0e20, 0.0, 0.0);
+    var lakeKnown = false;
     // Each river's containment floor, its weight, and how far the point is
     // beyond its channel's edge (a floor never fills another river's channel).
     var floors: array<vec4<f32>, ${MAX_FLOORS}>;
@@ -236,10 +272,14 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
         if (up) { pUp = waterRiverPointAt(js.up.k, runStart, first + k, unitDir, true); }
         if (down) { pDown = waterRiverPointAt(js.down.k, runStart, first + k, unitDir, true); }
         let last = !(bestK + 1u < first + k && waterRiverRunsInto(s, waterRivers[bestK + 1u]));
-        let c0 = riverCarveSegment_d(s, pb, unitDir, h0, last);
+        if (!lakeKnown && (max(pb.pool, max(pUp.pool, pDown.pool)) < 0.0 || max(pb.guardW, max(pUp.guardW, pDown.guardW)) > 0.0)) {
+            lakeW = riverCarveLakeWater(unitDir, h0.x);
+            lakeKnown = true;
+        }
+        let c0 = riverCarveSegment_d(s, pb, unitDir, h0, last, lakeW);
         var c = c0;
-        if (up) { c += dMul(riverCarveSegment_d(sUp, pUp, unitDir, h0, false) - c0, wUp); }
-        if (down) { c += dMul(riverCarveSegment_d(sDown, pDown, unitDir, h0, false) - c0, wDown); }
+        if (up) { c += dMul(riverCarveSegment_d(sUp, pUp, unitDir, h0, false, lakeW) - c0, wUp); }
+        if (down) { c += dMul(riverCarveSegment_d(sDown, pDown, unitDir, h0, false, lakeW) - c0, wDown); }
         if (c.x < h.x) { h = c; }
         if (nFloors < ${MAX_FLOORS}u) {
             let cd = riverCarveDuals(s, pb);
@@ -273,10 +313,10 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
             // an upstream bank. Near the channel, use the fine section cut
             // from the original terrain instead. This restores excavation;
             // it never constructs a bank above the original ground.
-            let section0 = riverCarveSegment_d(s, pb, unitDir, original, last);
+            let section0 = riverCarveSegment_d(s, pb, unitDir, original, last, lakeW);
             var section = section0;
-            if (up) { section += dMul(riverCarveSegment_d(sUp, pUp, unitDir, original, false) - section0, wUp); }
-            if (down) { section += dMul(riverCarveSegment_d(sDown, pDown, unitDir, original, false) - section0, wDown); }
+            if (up) { section += dMul(riverCarveSegment_d(sUp, pUp, unitDir, original, false, lakeW) - section0, wUp); }
+            if (down) { section += dMul(riverCarveSegment_d(sDown, pDown, unitDir, original, false, lakeW) - section0, wDown); }
             if (section.x < fine.x) { fine = section; }
             let ab = s.p1 - s.p0;
             let tg = select(vec3<f32>(0.0), ab / max(dot(ab, ab), 1.0e-20), p.tRaw > 0.0 && p.tRaw < 1.0);
@@ -284,7 +324,12 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
             let lineGrad = p.v * (waterParams.planetRadius * waterParams.planetRadius / max(p.dLine, 1.0e-3));
             let grad = sign(p.n) * (p.nSign * lineGrad - p.dOff * sg) - p.dHw * sg;
             let edge = vec4<f32>(p.d - p.hw, grad);
-            let weight = dSmoothstep(${(MICRO_RETURN_M * 0.5).toFixed(1)}, ${MICRO_RETURN_M.toFixed(1)}, edge);
+            // Over ${MICRO_RETURN_M} m the valley's lower ground beside a reach left
+            // its banks standing as a levee, a wall 4-6 m high (owner
+            // 2026-10-28): its ~64 m texels carry an uphill bank's cut across
+            // the river, and a steep stream's bank takes its level from a
+            // lower reach downstream (riverLandscape.js). Over ${VALLEY_RETURN_M} m it is a slope.
+            let weight = dSmoothstep(${(MICRO_RETURN_M * 0.5).toFixed(1)}, ${VALLEY_RETURN_M.toFixed(1)}, edge);
             if (weight.x < valleyWeight.x) { valleyWeight = weight; }
         }
     }
@@ -358,9 +403,15 @@ fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 {
 // (over its cover's 1 m a bank's fill stepped at the edge: a line across a
 // bay), 0.1 m under the level to 0.2 m above.
 fn riverCarveUnderLake(dir: vec3<f32>, heightM: f32) -> f32 {
+    return riverCarveLakeWater(dir, heightM).x;
+}
+// The same (x), that lake's level (y), how far inside its drawn water (z,
+// m) and its cover (w).
+fn riverCarveLakeWater(dir: vec3<f32>, heightM: f32) -> vec4<f32> {
     let lake = waterLakeHitView(dir, heightM - 0.2, riverCarveLakeSampler, true);
-    if (lake.level <= WATER_NO_LAKE) { return 0.0; }
-    return min(lake.cover, smoothstep(0.0, 8.0, lake.insideM)) * (1.0 - smoothstep(lake.level - 0.1, lake.level + 0.2, heightM));
+    if (lake.level <= WATER_NO_LAKE) { return vec4<f32>(0.0, -1.0e20, 0.0, 0.0); }
+    let under = min(lake.cover, smoothstep(0.0, 8.0, lake.insideM)) * (1.0 - smoothstep(lake.level - 0.1, lake.level + 0.2, heightM));
+    return vec4<f32>(under, lake.level, lake.insideM, lake.cover);
 }
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> {
     if (!riverCarveShoreEnabled()) { return vec3<f32>(0.0); }
@@ -433,6 +484,7 @@ fn riverCarveRiverShore(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> {
 }` : `fn riverCarveShoreEnabled() -> bool { return false; }
 fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 { return 0.0; }
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> { return vec3<f32>(0.0); }
-fn riverCarveUnderLake(dir: vec3<f32>, heightM: f32) -> f32 { return 0.0; }`}
+fn riverCarveUnderLake(dir: vec3<f32>, heightM: f32) -> f32 { return 0.0; }
+fn riverCarveLakeWater(dir: vec3<f32>, heightM: f32) -> vec4<f32> { return vec4<f32>(0.0, -1.0e20, 0.0, 0.0); }`}
 `;
 }

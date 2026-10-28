@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RIVER_SECTION } from '../water/riverSection.js';
-import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverDelta, riverHeldDepth, riverLakeApproach, riverLakeHold, riverReachShape, riverShape, RIVER_SHAPE_DEFAULTS, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
+import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverDelta, riverDeltaHalfWidth, riverLakeApproach, riverLakeHold, riverReachShape, riverShape, RIVER_SHAPE_DEFAULTS, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
 
 // 60 x 30 patch, 16 m cells, frame origin at (0, 0). A valley runs along
 // j = 15 from a source lake (i < 10, level 50 m) down to a destination lake
@@ -72,23 +72,6 @@ describe('river trace', () => {
         for (const c of path) if (Math.floor(c / nx) >= 12 && water[c]) expect(c % nx).toBe(22);
     });
 
-    it('a river held at its lake\'s level keeps a channel only between dry banks or into deep water', () => {
-        // Lake level 10 m; the river runs along +x at y = 0, 4 m half-width, D 2 m.
-        const at = (groundAt, inLake = (x, y) => groundAt(x, y) < 10) => riverHeldDepth({ x: 0, y: 0, tx: 1, ty: 0, hw: 4, depth: 2, groundAt, inLake, level: 10 });
-        // A long shallow arm: lake 0.1 m deep all around - no channel.
-        expect(at(() => 9.9)).toBeLessThan(0.15 / RIVER_LEVEL_DEFAULTS.waterFrac + 1e-9);
-        // Through the lake's rim: dry banks (0.6 m above) - the full channel.
-        expect(at(() => 10.6)).toBe(2);
-        // A narrow shallow edge (0.1 m) with deep water (3 m) 16 m ahead: the channel goes on into it.
-        expect(at((x) => (x > 12 ? 7 : 9.9))).toBe(2);
-        // One bank dry, one in the shallow lake: half.
-        expect(at((x, y) => (y > 0 ? 10.6 : 9.9))).toBeCloseTo(1, 9);
-        // A bay half as deep as the channel's water (0.7 of 1.5 m) all around: no channel.
-        expect(at(() => 9.3)).toBeLessThan(0.15 / RIVER_LEVEL_DEFAULTS.waterFrac + 1e-9);
-        // Ground under the level that is not the lake (the outlet's own valley ahead): no channel into the arm.
-        expect(at((x) => (x > 12 ? 7 : 9.9), (x) => x <= 12)).toBeLessThan(0.15 / RIVER_LEVEL_DEFAULTS.waterFrac + 1e-9);
-    });
-
     it('returns null when the corridor does not connect the source to the seeds', () => {
         const corridor = corridorMask(frame, [at(10, 15), at(20, 15)], 60);
         const seeds = new Uint8Array(NX * NY); seeds[15 * NX + 55] = 1;
@@ -126,6 +109,23 @@ describe('river levels for the valley', () => {
         expect(beds.some((b, k) => k > 0 && b > beds[k - 1])).toBe(true);
         const mouth = riverReachShape({ width: 40, depth: 3 }, 0, 6000, 17);
         expect(mouth.width).toBeGreaterThan(60);
+    });
+
+    it('spreads a delta over low ground only, not into the valley sides', () => {
+        // Lake level 100 m; a flat floor 30 m wide (half-width 15) between sides rising 0.2 per m.
+        const valley = (x, y) => 100 + 0.2 * Math.max(0, Math.abs(y) - 15);
+        const p = { x: 0, y: 0, tx: 1, ty: 0, hwBase: 6, level: 100, groundAt: valley };
+        // The sides stand floorRiseM above the lake floorRiseM / 0.2 beyond the floor's edge.
+        const D = RIVER_SHAPE_DEFAULTS.delta, edge = 15 + D.floorRiseM / 0.2;
+        expect(riverDeltaHalfWidth({ ...p, hw: 40 })).toBeGreaterThanOrEqual(edge - D.floorStepM);
+        expect(riverDeltaHalfWidth({ ...p, hw: 40 })).toBeLessThanOrEqual(edge + D.floorStepM);
+        // On a floor at the lake's level the flare stays; never under the river's own width.
+        expect(riverDeltaHalfWidth({ ...p, hw: 40, groundAt: () => 100.5 })).toBe(40);
+        expect(riverDeltaHalfWidth({ ...p, hw: 40, groundAt: (x, y) => 100 + 2 * Math.abs(y) })).toBe(6);
+        // A flat valley floor 4 m above the lake (a gorge down to it): no flare.
+        expect(riverDeltaHalfWidth({ ...p, hw: 40, groundAt: () => 104 })).toBe(6);
+        // One steep side limits both (the flare is symmetric about the line).
+        expect(riverDeltaHalfWidth({ ...p, hw: 40, groundAt: (x, y) => (y > 0 ? 100 + 0.5 * y : 100) })).toBeLessThanOrEqual(8);
     });
 
     it('widens into a lake as a delta, 1.6-4 x, a third of the rivers 3-4 x, at full depth', () => {

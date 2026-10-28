@@ -3,5 +3,6 @@
  {"name": "o28-muddy-delta", "pos": [-131758.1, -3053.6, 4414.8], "look": [-131753.3, -3057.0, 4418.0], "note": "delta muddy and too shallow"},
  {"name": "o28-muddy-border", "pos": [-131968.0, -956.9, 670.8], "look": [-131964.0, -956.3, 676.2], "note": "muddy border in the water (arrow)"},
  {"name": "o28-wall", "pos": [-131849.3, -4408.2, 3815.6], "look": [-131847.3, -4405.5, 3809.8], "note": "river with a wall around it (arrow)"},
- {"name": "o28-delta-sides", "pos": [-131935.9, 2082.7, 1424.2], "look": [-131932.7, 2077.9, 1420.6], "note": "unnatural geometry at the delta's sides (red arrow)"}
+ {"name": "o28-delta-sides", "pos": [-131935.9, 2082.7, 1424.2], "look": [-131932.7, 2077.9, 1420.6], "note": "unnatural geometry at the delta's sides (red arrow)"},
+ {"name": "o28-moat-end-b", "pos": [-131915.4, -1373.9, -418.6], "look": [-131910.3, -1372.0, -414.6], "note": "dark deep channel ending abruptly in the lighter lake (arrow); sixth screenshot of 2026-10-28"}
 ]
