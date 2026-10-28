@@ -255,3 +255,47 @@ in one page load); `deltaPoses-2026-10-28.json`.
   version number each time (a reused one silently served the other arm).
 - Several captures that look like the same artifact can have different
   causes: map them (crease map, dry views) before attributing.
+
+## Session 3 (2026-10-28, evening): rivers into lakes — walls and the line at the bed's end
+
+Owner views `ownerViews-2026-10-28b.json` (o28b-seam-a: river 2566 leaving
+lake 2825; o28b-seam-b: river 2563 leaving an arm of lake 2822). Measured with
+`depthMap` mode `below` (depth under the lake's level, plan view, 2 m cells)
+and A/B'd one term at a time. Results: `seam-base` (before), `seam-final`.
+
+1. **Bank walls running on past the rim** — where an outlet falls below its
+   lake's level before the rim, the lake lookup gives way to the river over
+   the channel's last metre (`waterLakeGiveWay`: which water is *drawn*). The
+   carve used that lookup for where the lake's *bed* is, so the basin cut deep
+   just outside the channel while its rounded edges stayed: ridges 0.5–1 m
+   high, 10–18 m into the lake. Now `waterLakeHitView`/`waterLakeHitIn` take
+   `giveWay`; the carve's lookups (`riverCarveLakeWater`, the basin and the
+   bank fill's `riverCarveUnderLake`) pass `false`. With the give-way off,
+   the basin narrows into the channel in a funnel, depth monotone from the
+   channel outward. It also skips a nested river search per carve lookup.
+2. **The line at the end of the river bed** (seam-b) — the fade for undrawn
+   lakes (sea, unsolved lakes) fired just past the drawn lake's edge, where
+   the outlet is only *beside* the lake (`guardW`): the channel filled into a
+   sill 0.9 m high across. It now applies only in the lake (`pool`).
+
+Measured (same conditions, base worktree at 6fc9ffe interleaved): frame
+11.11 -> 11.13 ms over the six owner views; tile generation 265.6/252.1 ->
+265.3/252.8 ms per 80 tiles (repeat 265.0/261.8 -> 265.5/264.5). Owner views,
+the 15-pose sweep and the deltas (`v48*` vs `v47*`): dry views unchanged; the
+wet differences are the sun highlight, which moves between captures taken
+hours apart (sky and water away from junctions identical within 1-4 units).
+
+Rejected on the way: widening the basin's sides with the distance inside the
+water (a funnel by width: steep 1 m sides along a narrow arm's shore, where
+neither depth/slope nor the mask's inside distance measures the visible
+shore), a faster onset beside the channel (a toothed crease on a bank), and
+handing the river's side mud to the lake's shore band (no visible change at
+either seam once the geometry was fixed).
+
+`depthMap` now poses the camera over the river (without it the river was
+not on the GPU and the cut read 0), takes `atS` (arc length) instead of `k`,
+and mode `below` with `ref` (a level).
+
+Lesson: a lookup that decides which water is drawn is not a statement about
+the ground. When geometry is gated by a rendering rule, the rule's edges show
+up as terrain.
