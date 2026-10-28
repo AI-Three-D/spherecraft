@@ -519,7 +519,9 @@ fn waterLakeGiveWay(lake: WaterLake, river: WaterRiverHit, F: f32) -> f32 {
 
 // Level of lake slot s (1-based, 0 = none) if it covers dir at heightM.
 // levelOnly: lakes without a solved shore (no mask layer) count too.
-fn waterLakeHitIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool) -> WaterLakeHit {
+// giveWay: the lake gives way to a river below it (waterLakeGiveWay): which
+// water is drawn there, not where the lake's bed lies (riverCarve.wgsl.js).
+fn waterLakeHitIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool, giveWay: bool) -> WaterLakeHit {
     let miss=WaterLakeHit(WATER_NO_LAKE,0.0,0.0,0.0);
     if (slot == 0u) { return miss; }
     let lake = waterLakes[slot - 1u];
@@ -549,7 +551,7 @@ fn waterLakeHitIn(slot: u32, dir: vec3<f32>, heightM: f32, samp: sampler, levelO
         let F=m*255.0-128.0;
         if(F<=lake.surfaceDepthRangeM) { return miss; }
         var cover = waterLakeEdgeCover(lake, F);
-        if(F<0.0) { cover *= 1.0 - waterLakeGiveWay(lake, waterRiverAt(dir, heightM), F); }
+        if(giveWay && F<0.0) { cover *= 1.0 - waterLakeGiveWay(lake, waterRiverAt(dir, heightM), F); }
         if(cover <= 0.0) { return miss; }
         return WaterLakeHit(lake.level,lake.level-heightM,cover,F-lake.surfaceDepthRangeM);
     }
@@ -570,7 +572,7 @@ fn waterLakeLevelAt(dir: vec3<f32>, heightM: f32, samp: sampler) -> f32 {
     return waterLakeLevelView(dir, heightM, samp, true);
 }
 fn waterLakeLevelView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool) -> f32 {
-    return waterLakeHitView(dir,heightM,samp,levelOnly).level;
+    return waterLakeHitView(dir,heightM,samp,levelOnly,true).level;
 }
 // The lake as its sheet sees it on the view ray from cam through wp (world
 // positions, planet centre origin): each candidate tested where the ray
@@ -596,12 +598,12 @@ fn waterLakeHitOnRay(origin: vec3<f32>, cam: vec3<f32>, wp: vec3<f32>, samp: sam
             let t = select(-b + sqrt(disc), near, near > 0.0);
             if (t > 0.0) { dir = normalize(o + ray * t); }
         }
-        let h = waterLakeHitIn(slot, dir, -1.0e30, samp, false);
+        let h = waterLakeHitIn(slot, dir, -1.0e30, samp, false, true);
         if (h.level > WATER_NO_LAKE) { return h; }
     }
     return WaterLakeHit(WATER_NO_LAKE, 0.0, 0.0, 0.0);
 }
-fn waterLakeHitView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool) -> WaterLakeHit {
+fn waterLakeHitView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool, giveWay: bool) -> WaterLakeHit {
     let n = waterParams.gridN;
     let cell = waterDirToCell(dir, n);
     let e = waterIndex[cell];
@@ -612,17 +614,17 @@ fn waterLakeHitView(dir: vec3<f32>, heightM: f32, samp: sampler, levelOnly: bool
         let at = e & 0x3fffffffu;
         let count = waterIndex[at];
         for (var k = 0u; k < count; k++) {
-            let h = waterLakeHitIn(waterIndex[at + 1u + k], dir, heightM, samp, levelOnly);
+            let h = waterLakeHitIn(waterIndex[at + 1u + k], dir, heightM, samp, levelOnly, giveWay);
             if (h.level > WATER_NO_LAKE) { return h; }
         }
         return WaterLakeHit(WATER_NO_LAKE, 0.0, 0.0, 0.0);
     }
-    let a = waterLakeHitIn(e & 0x7fffu, dir, heightM, samp, levelOnly);
+    let a = waterLakeHitIn(e & 0x7fffu, dir, heightM, samp, levelOnly, giveWay);
     if (a.level > WATER_NO_LAKE) { return a; }
-    let b = waterLakeHitIn((e >> 15u) & 0x7fffu, dir, heightM, samp, levelOnly);
+    let b = waterLakeHitIn((e >> 15u) & 0x7fffu, dir, heightM, samp, levelOnly, giveWay);
     if (b.level > WATER_NO_LAKE) { return b; }
     // A third lake in the cell (in its second word, above the river block).
-    return waterLakeHitIn(waterIndex[6u * n * n + cell] >> 17u, dir, heightM, samp, levelOnly);
+    return waterLakeHitIn(waterIndex[6u * n * n + cell] >> 17u, dir, heightM, samp, levelOnly, giveWay);
 }
 
 struct WaterRiverHit {
@@ -947,7 +949,7 @@ fn applyWater(
         if (w9.a < 0.5) { return bedColor * 0.25; }
         return w9.rgb * 0.85;
     }
-    let lakeHit=waterLakeHitView(up,heightM,samp,dist>waterParams.riverLook.w);
+    let lakeHit=waterLakeHitView(up,heightM,samp,dist>waterParams.riverLook.w,true);
     let level = lakeHit.level;
     // Debug views 6 and 7 (river redesign R1): who draws the water, in flat
     // colours. The terrain shader returns them before aerial perspective;

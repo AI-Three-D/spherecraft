@@ -7,7 +7,8 @@
 // the water above it (the CPU lake mask's level, else the river's level
 // within its half-width + 2 m). Rows are along (downstream at the top).
 // mode 'depth': water depth (dm, '.' dry); 'cut': natural - carved (dm,
-// '-' where carved is above natural: fill); 'rel': carved - ref (dm).
+// '-' where carved is above natural: fill); 'rel': carved - ref (dm);
+// 'below': ref - carved (dm, '.' at or above ref: a level's depth).
 // River id's record at the current solve version: traced now if it is not
 // yet (after a RIVER_SOLVE_VERSION bump rivers re-trace in the background),
 // then a few seconds for its segments to reach the GPU (the carve).
@@ -19,9 +20,14 @@ async function ensureRiver(id) {
     return svc.riverRecs.get(id);
 }
 
-export async function depthMap({ id, k, alongM = [-60, 120], acrossM = 60, stepM = 4, ref = null, beyondEnd = true, mode = 'depth', withCells = false }) {
+export async function depthMap({ id, k, atS = null, alongM = [-60, 120], acrossM = 60, stepM = 4, ref = null, beyondEnd = true, mode = 'depth', withCells = false }) {
     const g = window.gameEngine, s = g.waterService, w = g.waterGpuData, R = g.planetConfig.radius;
-    const rec = await ensureRiver(id), P = rec.points, st = rec.stride, n = P.length / st;
+    const rec0 = await ensureRiver(id);
+    // atS: the point nearest that arc length (m from the first point) instead of k.
+    if (atS != null) { const arc = w._arcLengths(rec0); k = arc.reduce((b, v, q) => Math.abs(v - atS) < Math.abs(arc[b] - atS) ? q : b, 0); }
+    // The camera over the river: only rivers near it reach the GPU (the carve).
+    await (await import('/tools/perf/waterStepReview/qualityScene.js')).riverView(id, k / (rec0.points.length / rec0.stride - 1), { height: 200, back: 150 });
+    const rec = s.riverRecs.get(id), P = rec.points, st = rec.stride, n = P.length / st;
     const at = q => [P[q * st], P[q * st + 1], P[q * st + 2]];
     const norm = a => { const l = Math.hypot(...a) || 1; return a.map(v => v / l); };
     const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -64,7 +70,9 @@ export async function depthMap({ id, k, alongM = [-60, 120], acrossM = 60, stepM
         const depth = wl - carved[i];
         const v = ref != null ? (carved[i] - ref) * 10 : (natural[i] - carved[i]) * 10;
         depthRows.push({ a, c, carved: +carved[i].toFixed(2), natural: +natural[i].toFixed(2), wl: wl > -1e8 ? +wl.toFixed(2) : null, lake: lake ?? null });
-        const cellStr = ref != null || mode === 'cut'
+        const below = mode === 'below' ? (ref - carved[i]) * 10 : 0;
+        const cellStr = mode === 'below' ? (below > 0.5 ? String(Math.min(99, Math.round(below))) : '.')
+            : ref != null || mode === 'cut'
             ? (v < -0.5 ? '-' + String(Math.min(9, Math.round(-v))) : String(Math.min(99, Math.round(v))))
             : (depth > 0 ? String(Math.min(99, Math.round(depth * 10))) : '.');
         row += cellStr.padStart(4);
