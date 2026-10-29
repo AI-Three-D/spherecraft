@@ -1,5 +1,8 @@
 # River work handoff — 2026-10-28
 
+Entry point since 2026-10-29: `RIVER_HANDOFF_2026-10-29.md` (current state,
+open problems); this file stays the reference for the rules, tools and history.
+
 For the next session (Claude or Astra) continuing the river/lake work on
 branch `water-ponds`. Read this first, then `IMPLEMENTATION_PLAN.md` (the live
 roadmap). The older `WATER_ATTEMPT_HANDOFF_2026-10-22.md` describes Astra's
