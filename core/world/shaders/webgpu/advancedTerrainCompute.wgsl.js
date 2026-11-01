@@ -452,8 +452,8 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
         dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
-    // No micro detail in river channels (it would raise the carved bed).
-    let microH = regionalValleyMicro(micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(dir, baseH * maxTerrainHeightM()) * regionalBasinMicroKeep(dir), dir);
+    // No micro detail in river channels (it would raise the carved bed), none crossing the water's level beside them.
+    let microH = regionalValleyMicro(riverCarveMicroAt(dir, baseH * maxTerrainHeightM(), micro * dispMeters * microGain * regionalBasinMicroKeep(dir)) / maxTerrainHeightM(), dir);
     return softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
 }
 
@@ -1578,7 +1578,7 @@ else if (uniforms.outputType == 4) {
         dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
     );
     let microGain = clamp(profile.microGain, 0.0, 5.0);
-    let microH = regionalValleyMicro(micro * (dispMeters / maxTerrainHeightM()) * microGain * riverCarveMicroKeep(unitDir, baseH * maxTerrainHeightM()) * regionalBasinMicroKeep(unitDir), unitDir);
+    let microH = regionalValleyMicro(riverCarveMicroAt(unitDir, baseH * maxTerrainHeightM(), micro * dispMeters * microGain * regionalBasinMicroKeep(unitDir)) / maxTerrainHeightM(), unitDir);
     let finalH = softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
     output = vec4<f32>(finalH, 0.0, 0.0, 1.0);
 }

@@ -29,6 +29,16 @@ export const RIVER_CARVE_GROUP = 1;
 export const RIVER_CARVE_BINDINGS = Object.freeze({ index: 1, params: 2, rivers: 3, lakes: 7, masks: 8, sampler: 9 });
 // Terrain micro detail returns over this far (m) beyond a river's half-width.
 const MICRO_RETURN_M = 8;
+// Near water the micro detail may not cross its level (riverCarveMicroAt):
+// within MICRO_LEVEL_REACH_M of a river's or mouth's water (none beyond
+// twice that), a dip stops MICRO_LEVEL_MARGIN_M above the level and a bump
+// as far below it, both rounded over MICRO_LEVEL_SOFT_M; the detail fades
+// out within MICRO_LEVEL_FADE_M (height) of the level, so the shoreline
+// stays where the carve put it.
+const MICRO_LEVEL_REACH_M = 16;
+const MICRO_LEVEL_MARGIN_M = 0.1;
+const MICRO_LEVEL_SOFT_M = 0.25;
+const MICRO_LEVEL_FADE_M = 0.35;
 // The cut fades out over this far (m) behind a river's first point, and
 // past its last point into a lake.
 const START_FADE_M = 30;
@@ -44,7 +54,7 @@ const MOUTH = RIVER_SECTION.mouth;
  * @param {object} [o]
  * @param {boolean} [o.enabled=true]  false: pass-through stubs (no bindings)
  * @param {boolean} [o.bankDetail=false] compile the shore materials
- * @returns {string} WGSL: riverCarveTerrain_d(natural, excavated, unitDir), riverCarveMicroKeep(unitDir)
+ * @returns {string} WGSL: riverCarveTerrain_d(natural, excavated, unitDir), riverCarveMicroAt(unitDir, heightM, microM)
  */
 export function createRiverCarveWgsl({ enabled = true, bankDetail = false, junctionFields = false } = {}) {
     if (!enabled) {
@@ -52,7 +62,7 @@ export function createRiverCarveWgsl({ enabled = true, bankDetail = false, junct
 // River carve off in this shader (riverCarve.wgsl.js).
 fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> { return hd; }
 fn riverCarveTerrain_d(natural: vec4<f32>, excavated: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> { return excavated; }
-fn riverCarveMicroKeep(unitDir: vec3<f32>, heightM: f32) -> f32 { return 1.0; }
+fn riverCarveMicroAt(unitDir: vec3<f32>, heightM: f32, microM: f32) -> f32 { return microM; }
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> { return vec3<f32>(0.0); }
 fn riverCarveShoreEnabled() -> bool { return false; }
 fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 { return 0.0; }
@@ -396,37 +406,62 @@ fn riverCarve_d(hd: vec4<f32>, unitDir: vec3<f32>) -> vec4<f32> {
     return riverCarveTerrain_d(hd, hd, unitDir);
 }
 
-// Share of the per-tile micro detail kept at unitDir (ground at heightM): 0
-// in the channel, back to 1 by MICRO_RETURN_M beyond it (the banks keep the
-// terrain's detail). Only where the river cuts one: not in its lake (pool
-// -1), where it is too shallow to (a held outlet, riverLakeHold) nor under a
-// lake's water (riverCarveUnderLake). Taken there, the detail left a smooth
-// strip that drew the river's line down a bay, and the rim of a mouth's
-// flare across it (owner 2026-10-27).
-fn riverCarveMicroKeep(unitDir: vec3<f32>, heightM: f32) -> f32 {
+fn riverMicroSmin(a: f32, b: f32, k: f32) -> f32 {
+    let h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+
+// The per-tile micro detail (microM, m) at unitDir over carved ground at
+// heightM. None in a river's channel, back by MICRO_RETURN_M beyond it (the
+// banks keep the terrain's detail). Only where the river cuts one: not in
+// its lake (pool -1), where it is too shallow to (a held outlet,
+// riverLakeHold) nor under a lake's water (riverCarveUnderLake). Taken
+// there, the detail left a smooth strip that drew the river's line down a
+// bay (owner 2026-10-27). Near the water (a river's or its mouth fan's
+// level, a junction field's) the detail may not cross the level: switched
+// off over a mouth's whole fan instead, it left the banks smooth as plastic
+// around every mouth; kept as it was, its dips held puddles (2026-11-01).
+fn riverCarveMicroAt(unitDir: vec3<f32>, heightM: f32, microM: f32) -> f32 {
     let e = riverCarveCellEntry(unitDir);
     let count = min(e & 0xffu, ${RIVER_MAX_SEGS_PER_CELL}u);
-    if (count == 0u) { return 1.0; }
     let first = e >> 8u;
     var keep = 1.0;
-    var mouthKeep = 1.0;
+    // The nearest water's level (x) and how much it holds the detail (y).
+    var level = vec2<f32>(0.0, 0.0);
+    var nearest = 1.0e20;
     for (var k = 0u; k < count; k++) {
         let s = waterRivers[first+k];
         let p = waterRiverPoint(s, unitDir);
         let cuts = smoothstep(0.05, 0.3, p.eta - p.bed) * (1.0 - clamp(-p.pool, 0.0, 1.0));
         keep = min(keep, mix(1.0, smoothstep(p.hw + ${(MICRO_RETURN_M * 0.5).toFixed(1)}, p.hw + ${MICRO_RETURN_M.toFixed(1)}, p.d), cuts));
-        let mouth = waterRiverMouthShape(p.mouth,p.mouthArc,p.hw);
-        if(mouth.y>0.0) {
-            let ab=s.p1-s.p0;
-            let n=abs(dot(unitDir-s.p0,normalize(cross(s.p0,ab)))*waterParams.planetRadius-(p.nSign*p.dLine-p.n));
-            let wet=mouth.x*sqrt(1.0+${(MOUTH.bankSoftM*.5).toFixed(2)}/max(p.eta-p.bed,.6));
-            let side=1.0-smoothstep(wet+2.0,wet+${MOUTH.microReturnM.toFixed(2)},n);
-            let along=smoothstep(0.0,${MOUTH.microOnAt.toFixed(2)},mouth.y)*(1.0-smoothstep(${MOUTH.lakeM.toFixed(2)},${(MOUTH.lakeM*1.3).toFixed(2)},mouth.w));
-            mouthKeep=min(mouthKeep,1.0-side*along);
+        let edge = p.d - waterRiverMouthShape(p.mouth, p.mouthArc, p.hw).x;
+        if (edge < nearest) {
+            nearest = edge;
+            level = vec2<f32>(p.wl, 1.0 - smoothstep(${MICRO_LEVEL_REACH_M.toFixed(1)}, ${(2 * MICRO_LEVEL_REACH_M).toFixed(1)}, edge));
         }
     }
-    if (keep >= 1.0) { return mouthKeep; }
-    return min(mouthKeep,mix(keep, 1.0, riverCarveUnderLake(unitDir, heightM)));
+    if (keep < 1.0 || level.y > 0.0) {
+        let lake = riverCarveLakeWater(unitDir, heightM);
+        keep = mix(keep, 1.0, lake.x);
+        // The level of the water drawn here: the river's surface over its
+        // footprint (a mouth's whole fan), else the lake's. The highest of
+        // them made the banks beside an outlet, below its lake's level but
+        // above the river's, count as under water: their dips held puddles.
+        let drawn = riverCarveDrawnRiverLevel(unitDir);
+        if (drawn.y > 0.0) {
+            level = vec2<f32>(drawn.x, 1.0);
+        } else if (lake.w > 0.0) {
+            level = vec2<f32>(mix(level.x, lake.y, lake.w), max(level.y, lake.w));
+        }
+    }
+    let m = microM * keep;
+    if (level.y <= 0.0) { return m; }
+    let d = heightM - level.x;
+    let room = max(abs(d) - ${MICRO_LEVEL_MARGIN_M.toFixed(2)}, 0.0);
+    // Above the water a dip stops short of it; below, a bump.
+    var held = select(-riverMicroSmin(-m, room, ${MICRO_LEVEL_SOFT_M.toFixed(2)}), riverMicroSmin(m, room, ${MICRO_LEVEL_SOFT_M.toFixed(2)}), d < 0.0);
+    held *= smoothstep(0.0, ${MICRO_LEVEL_FADE_M.toFixed(2)}, abs(d));
+    return mix(m, held, level.y);
 }
 
 ${bankDetail ? `${createWaterLookupWgsl(RIVER_CARVE_GROUP, RIVER_CARVE_BINDINGS)}
@@ -455,6 +490,11 @@ fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 {
 // into the lake (owner 2026-10-28: walls running on past the rim).
 fn riverCarveUnderLake(dir: vec3<f32>, heightM: f32) -> f32 {
     return riverCarveLakeWater(dir, heightM).x;
+}
+// The level (x) of the river surface drawn at dir, if one is (y = 1).
+fn riverCarveDrawnRiverLevel(dir: vec3<f32>) -> vec2<f32> {
+    let hit = waterRiverSurfaceAt(dir);
+    return select(vec2<f32>(0.0), vec2<f32>(hit.etaM, 1.0), hit.near);
 }
 // The same (x), that lake's level (y), how far inside its drawn water (z,
 // m) and its cover (w).
@@ -566,6 +606,7 @@ fn riverCarveRiverShore(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> {
 fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 { return 0.0; }
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> { return vec3<f32>(0.0); }
 fn riverCarveUnderLake(dir: vec3<f32>, heightM: f32) -> f32 { return 0.0; }
-fn riverCarveLakeWater(dir: vec3<f32>, heightM: f32) -> vec4<f32> { return vec4<f32>(0.0, -1.0e20, 0.0, 0.0); }`}
+fn riverCarveLakeWater(dir: vec3<f32>, heightM: f32) -> vec4<f32> { return vec4<f32>(0.0, -1.0e20, 0.0, 0.0); }
+fn riverCarveDrawnRiverLevel(dir: vec3<f32>) -> vec2<f32> { return vec2<f32>(0.0); }`}
 `;
 }

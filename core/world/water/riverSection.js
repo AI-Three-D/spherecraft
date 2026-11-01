@@ -76,7 +76,6 @@ export const RIVER_SECTION = Object.freeze({
     mouth: Object.freeze({
         lakeM: 96, widthScale: 1.8, widthExtraM: 8, bankSoftM: 6, bankBlendM: 48,
         sheetTransitionM: [0.1, 0.3], sheetCoreM: 32, sheetEdgeBlendM: 4, lookupAboveM: 3,
-        microReturnM: 16, microOnAt: 0.25,
     }),
     // Ground changes at most this far (m) beyond the half-width.
     reachM: 110, surfaceDepthReserveM: 0.5,
