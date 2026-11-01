@@ -183,3 +183,49 @@ and widens by 0.5 m per m beyond. Sweep `station-sweep` (15 views + top
 view, wet and dry): dry views within 0.5 mean difference of HEAD, no pixel
 over 24; stripes gone; tile generation 511-519 ms vs 501-546 ms (base/new/
 base); no GPU errors.
+
+## Round 3: the pinch (2026-11-02)
+
+Owner: "do whatever necessary to fix this" (narrow river opening into a
+cone with hard shoulders at the hillside mouth, river 453 into lake 2820).
+
+Found by one-term A/B on the owner's crop (`river-2026-11-01/neck-cause`):
+both water-surface shortcuts off: pinch unchanged; the junction field's
+terrain off: pinch gone (smooth funnel). The shoulders sat 63-66 m up the
+river (`pixelsToRiver`), at the field's 64 m blend radius: the field cut
+its flared opening into the steep hillside (27 % stream). Fix
+(JUNCTION_LOW_GROUND): the field's influence fades where the natural
+ground stands 2-6 m above its lake; there the carve's analytic fan shapes
+the mouth, which is a smooth funnel on this slope. Gentle mouths (moat,
+corner) lie low and keep the field.
+
+Tried and rejected this round (patches in `river-2026-11-01/attempts/`):
+- Designed outline (trumpet + fillet + bank, `outline-design`): canal-like
+  benches across the hillside.
+- Round fillet between river and lake water (`fillet2`): cut only the two
+  corner tips, a few metres; pinch unchanged.
+- Width taper toward the mouth (`taper`, trace v52): the trace widths were
+  not the cause; pinch unchanged.
+- Fan blended by width instead of heights (`width-blend`): unchanged.
+- River surface discarded in the field's basin only at lake level
+  (`owner-river`): unchanged; ownership was not the cause.
+- Field channel at the fan's width (`fan-channel`): wider cone, worse.
+- Field reach by distance from the basin (`shore-reach*`): fixed the
+  hillside but brought pale shelves back at the moat and a dark cut bank
+  at the corner, at 40, 52 and 64 m.
+- Flare radius by the river's height above the lake (`backwater`) or by
+  ground height (`low-flare`): bulge mid-way, then a pinch and a sharp tip
+  at the lake.
+
+Lesson: my plan-view probe's ground (hydrology sampler) did not include the
+field's terrain at this mouth, so maps "identical" between field on and
+off misled two rounds. Capture A/B decided it.
+
+Verification (`low-ground-sweep`, 15 owner views + top view, wet and dry,
+base/new/base): the hillside neck is a smooth funnel; moat, corner, both
+banks, bottom, accordion, scales, reach and rims within noise of HEAD; the
+wide-rim bank changed (17 % of pixels): its smoothed straight crest is now
+the carve's rounded slope (the field no longer reshapes that high ground).
+Frame time within noise on every view; 80-tile generation 511-523 ms vs
+503-519 ms; no GPU errors. One run of the sweep lost its page (Chrome
+"Target closed") after 7 views; the retry completed.

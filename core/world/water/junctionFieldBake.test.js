@@ -24,8 +24,10 @@ it.each([undefined,[NaN,NaN,NaN]])('keeps lake levels fixed without usable prefe
     expect(lakeCells).toBeGreaterThan(100);
     expect(Math.max(...Array.from({length:n},(_,i)=>r.field[4*i]))).toBeGreaterThan(10);
     const influence=x=>r.field[4*(8*width+x)+2];
-    expect(influence(16)).toBe(1);expect(influence(1)).toBe(0);
-    expect(influence(22)).toBeCloseTo(.5,4);
+    // Land 4 m above the lake (x >= 16): the low-ground fade halves it.
+    expect(influence(15)).toBe(1);expect(influence(16)).toBeCloseTo(.5,6);
+    expect(influence(1)).toBe(0);
+    expect(influence(22)).toBeCloseTo(.25,4);
 });
 
 it('connects two basins while retaining both prescribed lake levels',()=>{
