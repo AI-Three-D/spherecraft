@@ -74,9 +74,9 @@ export function createEngineConfig() {
     vertexSpacingMeters,
     splatConfig: {
       splatDensity: 8,
-      // Keep the live splat kernel local enough that 1-4 tile authored
-      // grass/sand islands remain visible instead of being averaged away.
-      splatKernelSize: 1,
+      // Reconstruct shore and slope blends across neighbouring samples:
+      // a point kernel drew repeating teeth along diagonal banks.
+      splatKernelSize: 5,
       // Stabilize sparse material ID slots across the 2x2 bilinear footprint
       // without widening the visible blend weights.
       slotSupportExpansionTexels: 1.5,

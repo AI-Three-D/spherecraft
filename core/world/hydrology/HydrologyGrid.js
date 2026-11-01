@@ -147,6 +147,16 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     const seaLevelM = uv.getFloat32(116, true) * maxH;
 
     const regionalGroups = new Map();
+    const junctionGroups = new Map();
+    const setJunctions=(pass,pipeline,original=false)=>{
+        const store=terrainGenerator.junctionFields;if(!store)return;
+        const resources=original?store.empty:store.resources;
+        let byResources=junctionGroups.get(pipeline);
+        if(!byResources){byResources=new WeakMap();junctionGroups.set(pipeline,byResources);}
+        let group=byResources.get(resources);
+        if(!group){group=device.createBindGroup({layout:pipeline.getBindGroupLayout(3),entries:resources.entries});byResources.set(resources,group);}
+        pass.setBindGroup(3,group);
+    };
     const assertRegionalCurrent = () => {
         if (!usesRegionalTerrain) return;
         const inputs = terrainGenerator.regionalTerrain;
@@ -169,7 +179,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     };
     const setBiome = (pass, pipeline) => {
         setRegional(pass, pipeline);
-        try { terrainGenerator._setTerrainBiomeBindGroup(pass, { regional: false }); return true; } catch { return false; /* entry point may not use group 1 */ }
+        try { terrainGenerator._setTerrainBiomeBindGroup(pass, { regional: false, junctions: false }); return true; } catch { return false; /* entry point may not use group 1 */ }
     };
 
     async function sampleGrid(N) {
@@ -264,6 +274,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
             if (carve) {
                 pass.setBindGroup(1, carveGroup);
                 setRegional(pass, pipeline);
+                setJunctions(pass,pipeline);
             }
             else setBiome(pass, pipeline);
             pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(rows / 8), 1);
@@ -335,7 +346,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
      * One dispatch (callers keep it to tens of thousands of directions).
      */
     let naturalDirsPipeline = null;
-    async function sampleDirs(dirs4, { carved = false } = {}) {
+    async function sampleDirs(dirs4, { carved = false, original = false } = {}) {
         assertRegionalCurrent();
         if (carved) {
             await ensureCarveGroups();
@@ -370,6 +381,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         if (carved) {
             pass.setBindGroup(1, carveDirsGroup);
             setRegional(pass, pipeline);
+            setJunctions(pass,pipeline,original);
         } else setBiome(pass, pipeline);
         pass.dispatchWorkgroups(Math.ceil(count / 64));
         pass.end();
@@ -386,6 +398,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         sampleGrid, samplePatch,
         sampleDirsNatural: dirs => sampleDirs(dirs),
         sampleDirsCarved: dirs => sampleDirs(dirs, { carved: true }),
+        sampleDirsCarvedOriginal: dirs => sampleDirs(dirs, { carved: true, original: true }),
         setWaterCarveResources, setRiverValleyResources, maxH, seaLevelM,
         // Compiles the carved variant ahead of its first use (background).
         warmCarved: ensureCarveGroups,

@@ -43,9 +43,19 @@ describe('river ribbons', () => {
         const p = point(points, rowOf(4));                             // river point 4
         expect(p[3]).toBe(7);                                          // river id
         expect(p[7]).toBeCloseTo(52, 5);                               // level
+        expect(p[8]).toBe(52);                                       // conservative river ceiling
         expect(Math.hypot(p[0], p[1], p[2])).toBeCloseTo(R + 52, 2);   // left edge on the level
         expect(Math.hypot(p[4], p[5], p[6])).toBeCloseTo(R + 52, 2);
         expect(Math.hypot(p[0] - p[4], p[1] - p[5], p[2] - p[6])).toBeCloseTo(2 * (10 + 2), 1);
+    });
+
+    it('keeps every refined row and cap below its published river ceiling',()=>{
+        const rec=straightRiver(10,k=>70-k*2);
+        const {points}=buildRiverRibbons({...base,rivers:[[1,rec]],camera:{x:0,y:0,z:R+60},rangeM:1000});
+        for(let i=0;i<points.length;i+=RIBBON_POINT_FLOATS) {
+            expect(points[i+8]).toBe(70);
+            expect(points[i+7]).toBeLessThanOrEqual(points[i+8]);
+        }
     });
 
     it('only the stretches within range, one more point at each end', () => {

@@ -45,3 +45,45 @@ export async function regenGpu({ view, tiles = 80 }) {
     const total = Object.values(by).reduce((a, b) => a + b, 0);
     return { tiles: n, totalMs: +total.toFixed(1), perLabel: Object.fromEntries(Object.entries(by).map(([k, v]) => [k, +v.toFixed(1)]).sort((a, b) => b[1] - a[1]).slice(0, 10)) };
 }
+
+// Generate exactly the same tile addresses in successive shader arms. This
+// avoids comparing different resident-map insertion orders after a camera
+// sweep. Generation uses the streamer's normal geometry/refinement outputs.
+export async function fixedTilesGpu({ view, tiles = 80, tileKeys = null }) {
+    const q = await import('/tools/perf/waterStepReview/qualityScene.js');
+    const { TileAddress } = await import('/core/world/quadtree/tileAddress.js');
+    await q.poseView(view);
+    const g = window.gameEngine, ts = g.renderer.quadtreeTileManager.tileStreamer;
+    const T = window.__gpuTimer, queue = g.waterGpuData.device.queue;
+    if (!T?.supported) throw new Error('Fixed tile timing requires timestamp-query');
+    const keys = tileKeys ?? [...new Map((ts._lastVisibleTilesList ?? []).map(t => {
+        const a = [t.face ?? t[0], t.depth ?? t[1], t.x ?? t[2], t.y ?? t[3]];
+        return [a.join('/'), a];
+    })).values()].sort((a,b)=>b[1]-a[1]||a[0]-b[0]||a[2]-b[2]||a[3]-b[3]).slice(0,tiles);
+    if (keys.length !== tiles) throw new Error(`Expected ${tiles} fixed tiles, got ${keys.length}`);
+    const render = g.render;
+    g.render = async () => {};
+    T.passes.length = 0;
+    try {
+        while (g._renderInFlight) await new Promise(r=>setTimeout(r,5));
+        await queue.onSubmittedWorkDone();
+        T.enabled = true;
+        for (const [face,depth,x,y] of keys) {
+            const addr = new TileAddress(face,depth,x,y);
+            const types = [...new Set([...ts._geometryTypes,...ts._refinementTypesFor(addr)])];
+            const textures = await ts.tileGenerator.generateTile(addr,null,types);
+            await queue.onSubmittedWorkDone();
+            ts._destroyGeneratedTextures(textures);
+        }
+    } finally {
+        T.enabled = false;
+        g.render = render;
+    }
+    await T.drain();
+    const by = {};
+    for (const p of T.passes) {
+        if (!/^Gen|Compute|Splat|Resolved/i.test(p.label)) continue;
+        by[p.label] = (by[p.label] ?? 0) + (p.end-p.begin)/1e6;
+    }
+    return {tiles:keys.length,tileKeys:keys,totalMs:+Object.values(by).reduce((a,b)=>a+b,0).toFixed(2),perLabel:by};
+}

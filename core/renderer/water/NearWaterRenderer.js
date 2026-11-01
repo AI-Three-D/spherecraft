@@ -61,14 +61,25 @@ export class NearWaterRenderer {
         this._listedAt = null;
     }
 
-    _material(name,vs,fs,groups=[]) { return createNearWaterMaterial(name,vs,fs,this._uniforms,groups); }
+    _material(name,vs,fs,groups=[]) {
+        const extras=[...groups];
+        if(this.water?.junctionFields) {
+            while(extras.length<1)extras.push({label:'NearWater-empty-group2',entries:[]});
+            extras.push({label:'NearWater-junctions',entries:[
+                {binding:0,visibility:'fragment',name:'junctionSetParams',buffer:{type:'uniform'}},
+                {binding:1,visibility:'fragment',name:'junctionSetTexels',buffer:{type:'read-only-storage'}},
+            ]});
+        }
+        const m=createNearWaterMaterial(name,vs,fs,this._uniforms,extras);m.depthCompare='less-equal';return m;
+    }
 
     _ensure() {
         if (this._lakeMaterial) return;
-        this._lakeMaterial = this._material('NearWaterSurface', buildNearWaterVertexShader(), buildNearWaterFragmentShader());
+        const shaderOptions={junctionFields:!!this.water?.junctionFields};
+        this._lakeMaterial = this._material('NearWaterSurface', buildNearWaterVertexShader(), buildNearWaterFragmentShader(shaderOptions));
         this._lakeGeometry = new Geometry();
         this._lakeGeometry.setIndex(gridIndices(GRID_N, GRID_N));
-        this._riverMaterial = this._material('NearRiverSurface', buildNearRiverVertexShader(), buildNearRiverFragmentShader(), [{
+        this._riverMaterial = this._material('NearRiverSurface', buildNearRiverVertexShader(), buildNearRiverFragmentShader(shaderOptions), [{
             label: 'NearRiverSurface-Ribbons',
             entries: [
                 { binding: NEAR_RIVER_POINTS_BINDING, visibility: 'vertex', name: 'ribbonPoints', buffer: { type: 'read-only-storage' } },
@@ -138,6 +149,10 @@ export class NearWaterRenderer {
         const res = water.resources;
         for (const m of [this._lakeMaterial, this._riverMaterial]) {
             m.storageBuffers = { waterIndex: res.index, waterLakes: res.lakes, waterRivers: res.rivers };
+            if(water.junctionFields) {
+                m.storageBuffers.junctionSetTexels=water.junctionFields.resources.data;
+                m.uniforms.junctionSetParams={value:water.junctionFields.resources.paramsData};
+            }
             const params = m.uniforms.waterParams;
             if (params.value?.buffer !== water.paramsData) params.value = new Float32Array(water.paramsData);
             m.uniforms.waterLakeMasks.value = res.masks;

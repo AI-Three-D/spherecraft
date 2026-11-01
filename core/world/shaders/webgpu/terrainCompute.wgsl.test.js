@@ -93,6 +93,11 @@ describe('terrain generation compute shader', () => {
         heightInputBaseHeight: { hasHeightBindings: true, hasBaseHeightBinding: true },
         smoothSplatPair: { hasHeightBindings: true, hasSmoothSplatIdsBinding: true, outputFormat: 'rgba8unorm' }
     };
+    it('compiles shared junction terrain in every generation variant',()=>{
+        for(const extra of Object.values(variants))expect(compile(createAdvancedTerrainComputeShader({
+            ...base,...extra,waterCarve:true,riverBankDetail:true,junctionFields:true,regionalTerrain:true,
+        }))).toBeNull();
+    });
     for (const [name, extra] of Object.entries(variants)) {
         it(`${name} variant compiles with persistent regional input`, () => {
             const code = createAdvancedTerrainComputeShader({ ...base, ...extra,

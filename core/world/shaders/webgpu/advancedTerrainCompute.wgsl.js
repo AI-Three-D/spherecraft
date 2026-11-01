@@ -637,7 +637,7 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     // options.waterCarve: river channels in the height (group 1 bindings 1-3,
     // riverCarve.wgsl.js; with riverBankDetail the shore materials and lake
     // beds add the lakes, 7-9); otherwise pass-through stubs.
-    createRiverCarveWgsl({ enabled: options?.waterCarve === true, bankDetail: options?.riverBankDetail === true }),
+    createRiverCarveWgsl({ enabled: options?.waterCarve === true, bankDetail: options?.riverBankDetail === true, junctionFields: options?.junctionFields === true }),
     // options.riverValley: river valleys in the height (group 1 bindings 4-7,
     // riverValley.wgsl.js); otherwise pass-through stubs.
     createRiverValleyWgsl({ enabled: options?.riverValley === true, page: options?.riverValleyPage ?? 32 }),
@@ -1535,10 +1535,9 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
             for (var k=0u; k<4u; k++) {
                 insertSmoothSplatTileTop4(u32(round(splatIds[k]*255.0)), splatWeights[k]*(1.0-coverage), &payload);
             }
-            let mineral = max(shore.x + shore.y, 0.00001);
-            // One mud for the bed and its shore strip (riverCarveShoreWeights).
-            insertSmoothSplatTileTop4(SURFACE_MUD_BASE, coverage * shore.x / mineral, &payload);
-            insertSmoothSplatTileTop4(SURFACE_ROCK_BASE, coverage * shore.y / mineral, &payload);
+            // Bed mud fades into the terrain's existing biome at the waterline.
+            insertSmoothSplatTileTop4(SURFACE_MUD_BASE, shore.x, &payload);
+            insertSmoothSplatTileTop4(SURFACE_ROCK_BASE, shore.y, &payload);
             let total = max(payload.weights[0]+payload.weights[1]+payload.weights[2]+payload.weights[3], 0.00001);
             for (var k=0u; k<4u; k++) {
                 splatWeights[k]=payload.weights[k]/total;

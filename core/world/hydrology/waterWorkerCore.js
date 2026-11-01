@@ -43,6 +43,7 @@ import { buildWaterGraph, cellDir, dirToCell, dirToCellSub } from './waterGraph.
 import { bakeValleyPages, RIVER_VALLEY_DEFAULTS, valleyRiverFromRecord, valleyRiverIncisionPages } from '../water/riverValley.js';
 import { dirToPlane, lakeMask, lakePatchFrame, lakeSeed, planeToDir, polylinePatchFrame, solveLakePatch } from './lakeRefine.js';
 import { bakeRiverWaterfalls } from './riverFeatures.js';
+import { riverMouthsFromTerrain, insertRiverMouthAnchors, riverMouthAt, riverMouthShape, riverMouthIndexReach } from '../water/riverMouth.js';
 import { bakeRiverIncision } from './riverLandscape.js';
 import { continueDrain, findPockets } from './mountainLakes.js';
 import { lakeMaskSdf, lakeSdfAt } from '../water/lakeMaskSdf.js';
@@ -823,6 +824,50 @@ export function createWaterWorkerCore() {
         }
         const features = bakeRiverWaterfalls(points, stride, sm.s, shapeP.waterfalls);
         points = features.points; n = points.length / stride;
+        const mouthRecord={points,stride,src:plan.src,dest:plan.dest};
+        const {mouths,arc:initialMouthArc}=riverMouthsFromTerrain(mouthRecord,R,d=>{
+            const xy=dirToPlane(d,frame,R);return groundAt(xy[0],xy[1]);
+        });
+        const anchored=insertRiverMouthAnchors(mouthRecord,mouths,initialMouthArc,R);
+        points=anchored.points;n=points.length/stride;
+        const mouthArc=anchored.arc;
+        const mouthLevels=Float64Array.from({length:n},(_,k)=>points[k*stride+16]);
+        const mouthGround=Float64Array.from({length:n},(_,k)=>points[k*stride+13]);
+        const mouthFree=Float64Array.from({length:n},(_,k)=>points[k*stride+5]*(1-levelP.waterFrac)/levelP.waterFrac*ramp5(mouthArc[k]/levelP.outletRampM));
+        // Refit only the short land-side approaches. Waterfalls and the
+        // rest of the reach retain their solved levels. Fit under the
+        // widened banks instead of raising a flat lake plane over low land.
+        for(let k=0;k<n;k++) {
+            const m=riverMouthAt(mouths,mouthArc[k]);if(!m)continue;
+            const ms=riverMouthShape(m,mouthArc[k],points[k*stride+4]);
+            if(ms.x>=0||ms.influence<=0)continue;
+            const a=Math.max(0,k-1),b=Math.min(n-1,k+1);
+            const xy=dirToPlane(Array.from(points.subarray(k*stride,k*stride+3)),frame,R);
+            const A=dirToPlane(Array.from(points.subarray(a*stride,a*stride+3)),frame,R);
+            const B=dirToPlane(Array.from(points.subarray(b*stride,b*stride+3)),frame,R);
+            const dx=B[0]-A[0],dy=B[1]-A[1],len=Math.hypot(dx,dy)||1;
+            let lo=Infinity;
+            for(const side of [-1,1])for(const extra of [0,2,4]) {
+                const w=ms.width+extra;
+                lo=Math.min(lo,groundAt(xy[0]-dy/len*w*side,xy[1]+dx/len*w*side));
+            }
+            mouthGround[k]=lo;
+        }
+        for(const m of mouths) {
+            let a=m.index,b=m.index;
+            if(m.sign<0){a=0;while(b+1<n&&mouthArc[b]<m.s+m.landM)b++;}
+            else {b=n-1;while(a>0&&mouthArc[a]>m.s-m.landM)a--;}
+            if(b<=a)continue;
+            const fitted=riverValleyLevels({s:Array.from(mouthArc.slice(a,b+1),s=>s-mouthArc[a]),
+                ground:mouthGround.slice(a,b+1),free:mouthFree.slice(a,b+1),
+                srcLevel:m.sign<0?m.level:mouthLevels[a],destLevel:m.sign>0?m.level:mouthLevels[b],
+                sourceEnd:m.sign<0?m.index-a:0,destStart:m.sign>0?m.index-a:b-a},levelP).eta;
+            mouthLevels.set(fitted,a);
+        }
+        for(let k=0;k<n;k++) {
+            const shift=mouthLevels[k]-points[k*stride+16];
+            points[k*stride+3]+=shift;points[k*stride+16]=mouthLevels[k];
+        }
         // Fine lip samples share the existing channel indexing and valley bake.
         const line = Array.from({ length: n }, (_, k) => dirToPlane([points[k * stride], points[k * stride + 1], points[k * stride + 2]], frame, R));
         // Sub-cells each segment reaches: channel, banks and their blend into
@@ -834,13 +879,16 @@ export function createWaterWorkerCore() {
         for (let k = 0; k + 1 < n; k++) {
             segCellStart[k] = segCellList.length;
             const a = k * stride, b = (k + 1) * stride;
-            const reach = Math.max(points[a + 4], points[b + 4]) * reachScale + reachExtra;
+            const hw=Math.max(points[a+4],points[b+4]);
+            const m=riverMouthAt(mouths,.5*(mouthArc[k]+mouthArc[k+1]));
+            const reach=riverMouthIndexReach(m,mouthArc[k],mouthArc[k+1],hw,
+                Math.min(points[a+5],points[b+5]),hw*reachScale+reachExtra);
             for (const c of segmentCells(line[k][0], line[k][1], line[k + 1][0], line[k + 1][1], reach, cellAt, { stepM: 20, marginM: 20 })) segCellList.push(c);
         }
         segCellStart[n - 1] = segCellList.length;
         const segCells = Int32Array.from(segCellList);
         const tLandscape = performance.now();
-        const landscape = bakeRiverIncision({ frame, heights: h, points, stride, arc: features.arc, R, river: riverId,
+        const landscape = bakeRiverIncision({ frame, heights: h, points, stride, arc: mouthArc, R, river: riverId,
             shape: { waterFrac: levelP.waterFrac, widthVar: 0.4, wobble: 0.3, bankVar: 0.55, ...msg.shapeNoise }, options: msg.landscape });
         // The worker retains the sparse field; reply buffers are independent.
         valleyRivers.set(riverId, valleyRiverFromRecord({ points, stride, riverId, landscape }, R));
@@ -849,9 +897,9 @@ export function createWaterWorkerCore() {
         return {
             reply: {
                 type: 'riverSolved', riverId, status: 'ok', dest: plan.dest, src: plan.src, dependencyFrame: frame,
-                lengthM: total, points, stride, segCellStart, segCells,
+                lengthM: total, points, stride, segCellStart, segCells, mouths, mouthLevelsBaked:true,
                 waterfalls: features.waterfalls, landscape: replyLandscape, landscapeMs,
-                startLevel: sm.fill[0], endLevel: sm.fill[n - 1], destLevel: plan.destLevel, approach: approachWhy,
+                startLevel: sm.fill[0], endLevel: sm.fill[sm.fill.length - 1], destLevel: plan.destLevel, approach: approachWhy,
             },
             transfer: [points.buffer, segCellStart.buffer, segCells.buffer, replyLandscape.cells.buffer, replyLandscape.cuts.buffer],
         };

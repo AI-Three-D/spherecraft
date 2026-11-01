@@ -18,4 +18,8 @@ describe('near water surface WGSL', () => {
     it('river fragment shader validates', () => {
         expect(() => validate(parseWgsl(buildNearRiverFragmentShader()))).not.toThrow();
     });
+    it('lake and river fragments validate with shared junction ownership',()=>{
+        for(const build of [buildNearWaterFragmentShader,buildNearRiverFragmentShader])
+            expect(()=>validate(parseWgsl(build({junctionFields:true})))).not.toThrow();
+    });
 });

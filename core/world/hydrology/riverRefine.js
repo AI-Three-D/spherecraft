@@ -460,7 +460,7 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 // 40-47 = deltas only over low ground (riverDeltaHalfWidth), widening
 // gradually, at least frontMinM deep at the shore; held outlets keep their
 // depth (the carve's basin under the lake).
-export const RIVER_SOLVE_VERSION = 47;
+export const RIVER_SOLVE_VERSION = 49;
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).
