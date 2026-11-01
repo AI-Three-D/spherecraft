@@ -119,20 +119,31 @@ export function solveJunctionField({ width, height, spacingM=1, natural, levelGu
         bed[i] = wetDistance[i] > -p.bankCollarM ? bedTarget[i] : ground[i];
     }
     let residual = Infinity, iteration = 0;
-    const relax = (values, guide, fixed, screening, cutOnly) => {
+    // The relaxed cells of each colour, in scan order (most of a patch is
+    // fixed or outside the domain: scanning all of it every iteration was
+    // most of the solve).
+    const activeCells = (fixed, cutOnly) => [0, 1].map(color => {
+        const cells = [];
+        for (let y = 1; y + 1 < height; y++) for (let x = 1 + ((y + color) & 1); x + 1 < width; x += 2) {
+            const i = y * width + x;
+            const active=cutOnly?wetDistance[i]>-p.bankCollarM:wetDistance[i]>0;
+            if (active && !fixed[i]) cells.push(i);
+        }
+        return Int32Array.from(cells);
+    });
+    const levelCells = activeCells(fixedLevel, false), bedCells = activeCells(fixedBed, true);
+    const relax = (values, guide, lists, screening, cutOnly) => {
         let change = 0;
-        for (let color = 0; color < 2; color++) {
-            for (let y = 1; y + 1 < height; y++) for (let x = 1 + ((y + color) & 1); x + 1 < width; x += 2) {
-                const i = y * width + x;
-                const active=cutOnly?wetDistance[i]>-p.bankCollarM:wetDistance[i]>0;
-                if (!active || fixed[i]) continue;
+        for (const cells of lists) {
+            for (let c = 0; c < cells.length; c++) {
+                const i = cells[c];
                 let sum = screening * guide[i], weight = screening;
-                for (const j of [i - 1, i + 1, i - width, i + width]) {
-                    // No flux across a dry water-surface boundary. The bed
-                    // instead meets the prescribed natural bank there.
-                    if (!cutOnly && wetDistance[j] <= 0) continue;
-                    sum += values[j]; weight++;
-                }
+                // No flux across a dry water-surface boundary. The bed
+                // instead meets the prescribed natural bank there.
+                if (cutOnly || wetDistance[i - 1] > 0) { sum += values[i - 1]; weight++; }
+                if (cutOnly || wetDistance[i + 1] > 0) { sum += values[i + 1]; weight++; }
+                if (cutOnly || wetDistance[i - width] > 0) { sum += values[i - width]; weight++; }
+                if (cutOnly || wetDistance[i + width] > 0) { sum += values[i + width]; weight++; }
                 if (weight === 0) continue;
                 let value = sum / weight;
                 // A smooth bed is still required to carry its prescribed
@@ -151,15 +162,16 @@ export function solveJunctionField({ width, height, spacingM=1, natural, levelGu
     };
     for (; iteration < p.iterations; iteration++) {
         residual = Math.max(
-            relax(level, levelTarget, fixedLevel, Math.max(0, p.levelScreening)*spacingM*spacingM, false),
-            relax(bed, bedTarget, fixedBed, Math.max(0, p.bedScreening)*spacingM*spacingM, true),
+            relax(level, levelTarget, levelCells, Math.max(0, p.levelScreening)*spacingM*spacingM, false),
+            relax(bed, bedTarget, bedCells, Math.max(0, p.bedScreening)*spacingM*spacingM, true),
         );
         if (residual <= p.toleranceM) { iteration++; break; }
     }
     extendSurface(level,width,height,wetDistance,Math.max(8,p.bankCollarM+4*spacingM));
     const field = new Float32Array(n * 4);
-    for (let i = 0; i < n; i++) field.set([
-        level[i] + datum, bed[i] + datum, wetDistance[i], natural[i],
-    ], i * 4);
+    for (let i = 0; i < n; i++) {
+        field[4*i] = level[i] + datum; field[4*i+1] = bed[i] + datum;
+        field[4*i+2] = wetDistance[i]; field[4*i+3] = natural[i];
+    }
     return { width, height, field, iterations: iteration, residualM: residual, converged: residual <= p.toleranceM };
 }

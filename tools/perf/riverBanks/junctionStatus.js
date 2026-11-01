@@ -9,5 +9,5 @@ export function junctionStatus() {
 export function junctionBakeTimes() {
     const s=window.gameEngine.junctionFieldService;
     return {clusters:s?.clusters.length,failed:s?[...s.failed]:null,
-        fields:s?[...s.cache.entries()].map(([key,e])=>({key,ms:Math.round(e.ms),cells:e.field.width*e.field.height})):null};
+        fields:s?[...s.cache.entries()].map(([key,e])=>({key,ms:Math.round(e.ms),cells:e.field.width*e.field.height,iterations:e.iterations,timing:e.timing&&Object.fromEntries(Object.entries(e.timing).map(([k,v])=>[k,Math.round(v)]))})):null};
 }
