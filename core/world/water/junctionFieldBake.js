@@ -65,7 +65,9 @@ export function bakeJunctionSamples({frame,radiusM,natural,oldBed,dirs,data,lake
         // corner filled the outlet before it reached deeper lake ground.
         const fan=1-smooth(Math.max(0,ld)/blendRadiusM);
         const guideBed=levelGuide[i]-depth*toe*fan;
-        bedGuide[i]=guard?oldBed[i]:!known?natural[i]:Math.min(natural[i],guideBed);
+        // Away from the river the ground stays as carved (valleys included):
+        // the natural samples have no valleys, and a step showed where they began.
+        bedGuide[i]=guard||!known?oldBed[i]:Math.min(natural[i],guideBed);
         if(!guard&&known&&wet<=0) {
             const rise=Math.max(0,natural[i]-levelGuide[i]);
             const bankWidthM=Math.max(8,Math.min(40,6+rise/.7));

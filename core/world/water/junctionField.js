@@ -116,7 +116,10 @@ export function solveJunctionField({ width, height, spacingM=1, natural, levelGu
         level[i] = levelTarget[i] = levelGuide[i] - datum;
         bedTarget[i] = Math.min(natural[i], bedGuide[i]) - datum;
         requiredDepth[i] = Math.max(0, levelGuide[i] - bedGuide[i]);
-        bed[i] = wetDistance[i] > -p.bankCollarM ? bedTarget[i] : ground[i];
+        // Every cell starts at its target: cells beyond the collar keep it.
+        // Starting them on the natural ground (no river valley) left a step
+        // where the collar ended, a dark arc across hillsides (2026-11-01).
+        bed[i] = bedTarget[i];
     }
     let residual = Infinity, iteration = 0;
     // The relaxed cells of each colour, in scan order (most of a patch is
