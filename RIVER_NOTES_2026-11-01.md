@@ -131,3 +131,55 @@ listed so nobody repeats them):
 
 Open: frame cost at mouths; startup baking and the 16-patch churn; the
 analytic fan + field overlap; owner's look at the mouths (8/10 gate).
+
+## Round 2 (owner on the hillside capture: "not sufficient")
+
+Owner marked a pinch where the river opens into the mouth fan, and stripes
+on the hillside inside the bend.
+
+**Pinch.** Lighting-only (debug 91) and base-colour (43) views: the ground
+at the neck is smooth; the pinch is the water's outline. The river surface
+stays narrow at its level down the slope; the lake's flat water floods
+where the field cut below lake level; the result is a bottle with hard
+shoulders. Tried and rejected (captures under `river-2026-11-01/`):
+
+- Longer transition (`blend-radius`, 96 m / 128 m): a straight-sided
+  triangle, then a canal with near-vertical walls cut into the hill.
+- Field wet domain = the fan width the river surface is drawn over
+  (`fan-domain`): the same view unchanged; the moat mouth got a wide flat
+  trumpet with patchy edges.
+- Deposited fan deltas (`delta-fans`, patch `delta-fan-attempt.patch`):
+  built ground into the lake beside the mouth, but the river's channel
+  follows the shore there and the fan formed a land spit and a hooked
+  channel (top-down `pinch-top`); not visible from the owner's camera.
+
+Conclusion: at a mouth three things decide where water is drawn (river
+ribbon width, lake sheet over ground below its level, the field's level),
+and any widening shows where they disagree. Reshaping the ground does
+not fix that. Proper fix: the field owns the water at a mouth (outline and
+a level falling from river to lake), the ribbon and the lake sheet take
+their extent from it, the analytic fan goes. Not built yet.
+
+**Stripes.** Not shore mud (lake and river shore materials off: unchanged).
+Carve off: gone. Joint blend off: one stripe per joint, much stronger. They
+are the carve's steps where its nearest segment switches on the inside of
+a bend: there both neighbours' joint weights are non-zero, so the blend
+depends on which segment is nearest (10-29 handoff, open item 3). The
+steps are small (lighting view smooth) but tip the slope-driven rock
+weight: bands of rock, the owner's 10-25 "tiger stripes".
+Fix (riverCarveStation): every joint of the run near the point gives its
+share; their sum is a continuous station along the run; the two segments
+it lies between are blended. With one joint in play it is exactly the old
+joint blend (channel, water and earlier fixes unchanged).
+
+Result: the station blend alone changed nothing on the hillside (pixel-
+identical: no switching step there). Joint blend off showed one stripe per
+joint, so the stripes are the joints themselves: each turns the hillside's
+slope over a band only half a segment long. Wider bands (3x, 6x) removed
+them, and the station blend is what lets a band exceed a segment without
+steps. Kept: the band is unchanged within the channel + 8 m (where the
+water's joint blend uses it: the 10-26 "stairs" were the two disagreeing)
+and widens by 0.5 m per m beyond. Sweep `station-sweep` (15 views + top
+view, wet and dry): dry views within 0.5 mean difference of HEAD, no pixel
+over 24; stripes gone; tile generation 511-519 ms vs 501-546 ms (base/new/
+base); no GPU errors.

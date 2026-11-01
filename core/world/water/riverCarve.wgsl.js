@@ -47,6 +47,10 @@ const MAX_FLOORS = 6;
 // The river valley field (riverValley.wgsl.js) returns over this far (m)
 // beyond a river's channel: nearer, the fine section (riverCarveTerrain_d).
 const VALLEY_RETURN_M = 60;
+// The carve's joint blend widens by JOINT_BAND_GROWTH m per m beyond a
+// river's channel + JOINT_BAND_NEAR_M (riverCarveJointShare).
+const JOINT_BAND_NEAR_M = 8;
+const JOINT_BAND_GROWTH = 0.5;
 const CONTAIN = RIVER_SECTION.contain;
 const MOUTH = RIVER_SECTION.mouth;
 
@@ -238,6 +242,58 @@ fn riverCarveSegment_d(s: WaterRiverSeg, p: WaterRiverPt, unitDir: vec3<f32>, h0
     return h;
 }
 
+// Segment j's share over segment j - 1 of the list at dir (x) and its
+// gradient: the joint blend's weight (waterRiverJointAt) seen from j's
+// side. Past a joint that barely turns a plain switch at its bisector
+// plane; between list entries that do not join, to the nearer one.
+fn riverCarveJointShare(j: u32, dir: vec3<f32>) -> vec4<f32> {
+    let a = waterRivers[j - 1u];
+    let b = waterRivers[j];
+    if (!waterRiverRunsInto(a, b)) {
+        let ta = clamp(dot(dir - a.p0, a.p1 - a.p0) / max(dot(a.p1 - a.p0, a.p1 - a.p0), 1.0e-20), 0.0, 1.0);
+        let tb = clamp(dot(dir - b.p0, b.p1 - b.p0) / max(dot(b.p1 - b.p0, b.p1 - b.p0), 1.0e-20), 0.0, 1.0);
+        let nearer = length(dir - (b.p0 + (b.p1 - b.p0) * tb)) < length(dir - (a.p0 + (a.p1 - a.p0) * ta));
+        return vec4<f32>(select(0.0, 1.0, nearer), vec3<f32>(0.0));
+    }
+    let ua = normalize(a.p1 - a.p0);
+    let ub = normalize(b.p1 - b.p0);
+    let nb = normalize(ua + ub);
+    let R = waterParams.planetRadius;
+    let x0 = dot(dir - a.p1, nb) * R;
+    let past = select(0.0, 1.0, x0 > 0.0);
+    let turnW = smoothstep(1.4e-5, 1.5e-4, 1.0 - dot(ua, ub));
+    let band0 = 0.5 * min(a.s1 - a.s0, b.s1 - b.s0);
+    if (turnW <= 0.0 || band0 <= 0.0) { return vec4<f32>(past, vec3<f32>(0.0)); }
+    // The band widens away from the river (beyond its channel + ${JOINT_BAND_NEAR_M} m, where
+    // the water's joint blend, waterRiverJointAt, has the same band): over
+    // half a segment each joint left a band of changed slope down the
+    // hillside, drawn as rock by the slope-driven materials (owner
+    // 2026-10-25 "tiger stripes", 11-01). A wider band only stays
+    // continuous summed along the run (riverCarveStation).
+    let side = normalize(cross(a.p1, nb));
+    let lateral = dot(dir - a.p1, side) * R;
+    let grow = abs(lateral) - max(a.hw1, b.hw0) - ${JOINT_BAND_NEAR_M.toFixed(1)};
+    let band = band0 + ${JOINT_BAND_GROWTH.toFixed(2)} * max(grow, 0.0);
+    let dBand = select(vec3<f32>(0.0), side * (${JOINT_BAND_GROWTH.toFixed(2)} * R * sign(lateral)), grow > 0.0);
+    let x = clamp(x0 / band, -1.0, 1.0);
+    let w = 0.5 + 0.5 * (3.0 * x * abs(x) - 2.0 * x * x * x);
+    let dx = (nb * R - dBand * x) / band;
+    let dw = select(vec3<f32>(0.0), dx * (0.5 * (6.0 * abs(x) - 6.0 * x * x)), abs(x0) < band);
+    return vec4<f32>(mix(past, w, turnW), dw * turnW);
+}
+// Where dir lies along the run [runStart, runEnd) of one river's segments
+// (x: 0 on the first, i + f between segments i and i + 1) and its gradient:
+// the sum of every joint's share. Alone at a joint it gives the joint
+// blend; the nearest segment and its two neighbours' weights instead did not
+// add up where the bisector planes converge, on the inside of bends, and the
+// banks stepped where the nearest segment switched: radial stripes of rock
+// on the hillside inside a bend (owner 2026-10-25 "tiger stripes", 11-01).
+fn riverCarveStation(runStart: u32, runEnd: u32, dir: vec3<f32>) -> vec4<f32> {
+    var station = vec4<f32>(0.0);
+    for (var j = runStart + 1u; j < runEnd; j++) { station += riverCarveJointShare(j, dir); }
+    return station;
+}
+
 // Each river's section from its closest traced segment (as waterRiverAt),
 // blended into its neighbours' toward their joints (waterRiverJoints),
 // the lowest of the rivers'. Every section only cuts, so the ground stays
@@ -299,51 +355,46 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
         if (bestD * waterParams.planetRadius >= reach) { continue; }
         let p = waterRiverPointAt(bestK, runStart, first + k, unitDir, false);
         if (p.d >= riverCarveReach(p)) { continue; }
-        let js = waterRiverJoints(bestK, runStart, first + k, s, unitDir);
-        let wUp = vec4<f32>(js.up.w, js.up.dw);
-        let wDown = vec4<f32>(js.down.w, js.down.dw);
-        let up = js.up.w > 0.0;
-        let down = js.down.w > 0.0;
-        let sUp = waterRivers[js.up.k];
-        let sDown = waterRivers[js.down.k];
-        var pb = p;
-        var pUp = p;
-        var pDown = p;
-        if (up || down) { pb = waterRiverPointAt(bestK, runStart, first + k, unitDir, true); }
-        if (up) { pUp = waterRiverPointAt(js.up.k, runStart, first + k, unitDir, true); }
-        if (down) { pDown = waterRiverPointAt(js.down.k, runStart, first + k, unitDir, true); }
-        let last = !(bestK + 1u < first + k && waterRiverRunsInto(s, waterRivers[bestK + 1u]));
-        if (!lakeKnown && (max(pb.pool, max(pUp.pool, pDown.pool)) < 0.0 || max(pb.lakeGuard, max(pUp.lakeGuard, pDown.lakeGuard)) > -1.0e10)) {
+        // Where along its run the point lies (riverCarveStation): blend the
+        // sections of the two segments it lies between.
+        let station = riverCarveStation(runStart, first + k, unitDir);
+        let iA = runStart + u32(clamp(floor(station.x), 0.0, f32(first + k - runStart - 1u)));
+        let iB = min(iA + 1u, first + k - 1u);
+        let t = clamp(station.x - f32(iA - runStart), 0.0, 1.0);
+        let blend = iB != iA && t > 0.0 && t < 1.0;
+        let wB = vec4<f32>(t, select(vec3<f32>(0.0), station.yzw, blend));
+        let sA = waterRivers[iA];
+        let sB = waterRivers[iB];
+        var pA = p;
+        if (blend || iA != bestK) { pA = waterRiverPointAt(iA, runStart, first + k, unitDir, true); }
+        var pB = pA;
+        if (blend) { pB = waterRiverPointAt(iB, runStart, first + k, unitDir, true); }
+        let lastA = !(iA + 1u < first + k && waterRiverRunsInto(sA, waterRivers[iA + 1u]));
+        let lastB = !(iB + 1u < first + k && waterRiverRunsInto(sB, waterRivers[iB + 1u]));
+        if (!lakeKnown && (max(pA.pool, pB.pool) < 0.0 || max(pA.lakeGuard, pB.lakeGuard) > -1.0e10)) {
             lakeW = riverCarveLakeWater(unitDir, h0.x);
             lakeKnown = true;
         }
-        let c0 = riverCarveSegment_d(s, pb, unitDir, h0, last, lakeW);
+        let c0 = riverCarveSegment_d(sA, pA, unitDir, h0, lastA, lakeW);
         var c = c0;
-        if (up) { c += dMul(riverCarveSegment_d(sUp, pUp, unitDir, h0, false, lakeW) - c0, wUp); }
-        if (down) { c += dMul(riverCarveSegment_d(sDown, pDown, unitDir, h0, false, lakeW) - c0, wDown); }
+        if (blend) { c += dMul(riverCarveSegment_d(sB, pB, unitDir, h0, lastB, lakeW) - c0, wB); }
         if (c.x < h.x) { h = c; }
         if (nFloors < ${MAX_FLOORS}u) {
-            let cd = riverCarveDuals(s, pb);
-            let floor0 = riverCarveFloor_d(cd, pb);
+            let cd = riverCarveDuals(sA, pA);
+            let floor0 = riverCarveFloor_d(cd, pA);
             var floor = floor0;
             var water = cd.wl;
-            if (up) {
-                let co = riverCarveDuals(sUp, pUp);
-                floor += dMul(riverCarveFloor_d(co, pUp) - floor0, wUp);
-                water += dMul(co.wl - cd.wl, wUp);
-            }
-            if (down) {
-                let co = riverCarveDuals(sDown, pDown);
-                floor += dMul(riverCarveFloor_d(co, pDown) - floor0, wDown);
-                water += dMul(co.wl - cd.wl, wDown);
+            if (blend) {
+                let co = riverCarveDuals(sB, pB);
+                floor += dMul(riverCarveFloor_d(co, pB) - floor0, wB);
+                water += dMul(co.wl - cd.wl, wB);
             }
             floors[nFloors] = floor;
             floorWater[nFloors] = water;
-            floorWeight[nFloors] = riverCarveFloorWeight(s, p) * (1.0 - waterRiverMouthShape(pb.mouth, pb.mouthArc, pb.hw).y);
-            var gw = pb.guardW;
-            var lg = pb.lakeGuard;
-            if (up) { gw += (pUp.guardW - pb.guardW) * js.up.w; lg = max(lg, pUp.lakeGuard); }
-            if (down) { gw += (pDown.guardW - pb.guardW) * js.down.w; lg = max(lg, pDown.lakeGuard); }
+            floorWeight[nFloors] = riverCarveFloorWeight(s, p) * (1.0 - waterRiverMouthShape(pA.mouth, pA.mouthArc, pA.hw).y);
+            var gw = pA.guardW;
+            var lg = pA.lakeGuard;
+            if (blend) { gw += (pB.guardW - pA.guardW) * t; lg = max(lg, pB.lakeGuard); }
             floorLake[nFloors] = lg;
             floorGuardW[nFloors] = gw;
             beyond[nFloors] = p.d - p.hw;
@@ -354,23 +405,17 @@ fn riverCarveTerrain_d(natural: vec4<f32>, hd: vec4<f32>, unitDir: vec3<f32>) ->
             // an upstream bank. Near the channel, use the fine section cut
             // from the original terrain instead. This restores excavation;
             // it never constructs a bank above the original ground.
-            let section0 = riverCarveSegment_d(s, pb, unitDir, original, last, lakeW);
+            let section0 = riverCarveSegment_d(sA, pA, unitDir, original, lastA, lakeW);
             var section = section0;
-            if (up) { section += dMul(riverCarveSegment_d(sUp, pUp, unitDir, original, false, lakeW) - section0, wUp); }
-            if (down) { section += dMul(riverCarveSegment_d(sDown, pDown, unitDir, original, false, lakeW) - section0, wDown); }
+            if (blend) { section += dMul(riverCarveSegment_d(sB, pB, unitDir, original, lastB, lakeW) - section0, wB); }
             if (section.x < fine.x) { fine = section; }
-            // The valley handover must use the same joint blend as the
-            // sections above. The nearest segment alone gives a different
-            // width/wobble on either side of a bend's bisector, stepping
-            // the handover even when both section heights agree.
-            let edge0 = riverCarveEdge_d(s,pb,unitDir);
+            // The valley handover uses the same blend as the sections above:
+            // the nearest segment alone gives a different width/wobble on
+            // either side of a bend's bisector, stepping the handover even
+            // when both section heights agree.
+            let edge0 = riverCarveEdge_d(sA, pA, unitDir);
             var edge = edge0;
-            if (up) {
-                edge += dMul(riverCarveEdge_d(sUp,pUp,unitDir)-edge0,wUp);
-            }
-            if (down) {
-                edge += dMul(riverCarveEdge_d(sDown,pDown,unitDir)-edge0,wDown);
-            }
+            if (blend) { edge += dMul(riverCarveEdge_d(sB, pB, unitDir) - edge0, wB); }
             // Over ${MICRO_RETURN_M} m the valley's lower ground beside a reach left
             // its banks standing as a levee, a wall 4-6 m high (owner
             // 2026-10-28): its ~64 m texels carry an uphill bank's cut across
