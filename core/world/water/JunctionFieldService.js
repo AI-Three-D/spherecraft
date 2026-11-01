@@ -51,8 +51,10 @@ export class JunctionFieldService {
         this.isIdle=candidates.length===0;
         if(candidates.length)void this._build(candidates[0].cluster);
     }
+    // Each batch waits for a frame and a readback (about 40 ms): 4096 per
+    // batch spent 0.8-2.6 s of a field's bake there (2026-11-01).
     async _samples(fn,dirs) {
-        const result=new Float32Array(dirs.length/4),count=4096;
+        const result=new Float32Array(dirs.length/4),count=8192;
         for(let i=0;i<result.length;i+=count) {
             if(this.disposed)throw new Error('Junction service disposed');
             const sample=await fn(dirs.subarray(i*4,Math.min(result.length,i+count)*4));
@@ -86,7 +88,7 @@ export class JunctionFieldService {
             if(!field.converged)throw new Error(`Junction solve did not converge (${field.residualM})`);
             const compact={key:cluster.key,lakeId:field.lakeId,frame:field.frame,width:field.width,height:field.height,field:field.field};
             this.cache.set(cluster.key,{field:compact,records:new Set(cluster.sites.map(s=>s.rec)),
-                lakes:new Map(basins.map(b=>[b.id,b.record])),ms:performance.now()-start});
+                lakes:new Map(basins.map(b=>[b.id,b.record])),ms:performance.now()-start,timing:field.timing,iterations:field.iterations});
             this._publish();
             Logger.debug(`[Water] junction ${cluster.key}: ${field.width}x${field.height}, ${field.iterations} iterations`);
         } catch(error) {

@@ -19,14 +19,16 @@ async function bakeJunctionSamplesAsync(input) {
 // segment lists, ribbon tessellation and view-dependent ownership tests.
 export async function buildJunctionField({ device, resources, sampler, radiusM,
     frame, lakeId, lakeBasin, basins=null,influenceSites=null,influenceCoreM=128,influenceFadeM=48,referenceLevelM,sampleNatural,sampleCarved,
-    blendRadiusM=32, lakewardSign=-1, solveOptions={},yieldBetween=null,guideRowsPerBatch=16 }) {
+    blendRadiusM=32, lakewardSign=-1, solveOptions={},yieldBetween=null,guideRowsPerBatch=32 }) {
     const {c,e1,e2,width,height,spacingM,x0,y0}=frame,n=width*height;
     const dirs=new Float32Array(n*4);
     for(let y=0;y<height;y++)for(let x=0;x<width;x++) {
         const px=x0+x*spacingM,py=y0+y*spacingM;
         dirs.set(normalize(c.map((v,j)=>v+(e1[j]*px+e2[j]*py)/radiusM)),(y*width+x)*4);
     }
-    const natural=await sampleNatural(dirs),oldBed=await sampleCarved(dirs);
+    const t0=performance.now();
+    const [natural,oldBed]=await Promise.all([sampleNatural(dirs),sampleCarved(dirs)]);
+    const t1=performance.now();
     if(!natural||!oldBed)throw new Error('Junction terrain samples unavailable');
     const terrain=new Float32Array(n*4);
     for(let y=0;y<height;y++)for(let x=0;x<width;x++) {
@@ -72,11 +74,13 @@ export async function buildJunctionField({ device, resources, sampler, radiusM,
         await read.mapAsync(GPUMapMode.READ);data=new Float32Array(read.getMappedRange().slice(0));read.unmap();
     } finally {allocated.forEach(b=>b.destroy());}
     const compact=record=>({frame:record.frame,mask:record.mask});
+    const t2=performance.now();
     const baked=await bakeJunctionSamplesAsync({frame,radiusM,natural,oldBed,dirs,data,
         lakeBasin:lakeBasin?compact(lakeBasin):null,
         basins:basins?.map(b=>({...b,record:compact(b.record)}))??null,
         referenceLevelM,lakewardSign,blendRadiusM,solveOptions,influenceSites,influenceCoreM,influenceFadeM});
-    return {...baked,lakeId:basins?.length>1?-1:lakeId};
+    const t3=performance.now();
+    return {...baked,lakeId:basins?.length>1?-1:lakeId,timing:{sampleMs:t1-t0,guideMs:t2-t1,solveMs:t3-t2}};
 }
 
 export function createJunctionGuideWgsl() {
