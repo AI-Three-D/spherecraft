@@ -111,7 +111,7 @@ match the terrain the tiles draw. What it needs next:
 | c0c1db0 | Codex's work committed as WIP (revert target 457ef72) | — |
 | 10be9d0 | Micro detail kept at mouths, never crossing the drawn water's level | `river-2026-11-01/micro-level-v4`, `micro-perf` |
 | 92eaa66 | Field bake 2–3x faster (batches, active-cell solve; same output) | `bake-timing*` |
-| (next) | Field cells start at their target; cells away from the river stay carved | `arc-probe`, `init-target-carved`, `final-sweep` |
+| 7d5ab7a | Field cells start at their target; cells away from the river stay carved | `arc-probe`, `init-target-carved`, `final-sweep` |
 
 How each cause was found (one-term A/B each; guesses that failed are
 listed so nobody repeats them):
