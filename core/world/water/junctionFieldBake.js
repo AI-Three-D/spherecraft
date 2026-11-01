@@ -4,6 +4,9 @@ import { lakeMaskSdf } from './lakeMaskSdf.js';
 const clamp01 = x => Math.max(0,Math.min(1,x));
 const smooth = x => {const t=clamp01(x);return t*t*(3-2*t);};
 const basinFields=new WeakMap();
+// A field applies in full where the natural ground lies at most fullM
+// above its lake's level, not at all fadeM higher.
+export const JUNCTION_LOW_GROUND = Object.freeze({ fullM: 2, fadeM: 4 });
 
 function originalBasinMembership(lake,dirs,radiusM) {
     if(!lake?.mask||!lake.frame)throw new Error('Junction field requires the original solved lake basin');
@@ -92,6 +95,12 @@ export function bakeJunctionSamples({frame,radiusM,natural,oldBed,dirs,data,lake
             for(const site of influenceSites)nearest=Math.min(nearest,Math.hypot(dirs[4*i]-site[0],dirs[4*i+1]-site[1],dirs[4*i+2]-site[2])*radiusM);
             influence=1-smooth((nearest-influenceCoreM)/Math.max(.001,influenceFadeM));
         }
+        // Only over low ground: where the natural ground stands more than
+        // JUNCTION_LOW_GROUND above the lake, the carve's own mouth (its fan)
+        // shapes it. Cutting this field's widening into a steep hillside drew
+        // a bottle, a narrow stream opening into a cone with hard shoulders
+        // (owner 2026-11-01); gentle mouths lie low and keep the field.
+        influence*=1-smooth((natural[i]-basin.level[i]-JUNCTION_LOW_GROUND.fullM)/JUNCTION_LOW_GROUND.fadeM);
         solved.field[4*i+2]=influence;solved.field[4*i+3]=basin.distance[i];
     }
     return {...solved,frame,natural,oldBed,levelGuide,bedGuide,fixedLevel,fixedBed,basinDistance:basin.distance};
