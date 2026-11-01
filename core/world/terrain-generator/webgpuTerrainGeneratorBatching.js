@@ -343,7 +343,9 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
 
         _computeSplatPaddingTexels() {
                 const kernelRadius = Math.max(0.5, 0.5 * Math.max(this.splatKernelSize, 1));
-                const slotExpansion = Math.max(0.0, this.splatSlotSupportExpansionTexels ?? 0.0);
+                const slotExpansion = this.splatFixedMaterialFamiliesEnabled === true
+                    ? 0
+                    : Math.max(0.0, this.splatSlotSupportExpansionTexels ?? 0.0);
                 return Math.ceil(kernelRadius + slotExpansion) + 1;
             },
 

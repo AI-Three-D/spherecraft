@@ -54,6 +54,7 @@ import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terr
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
 import { WaterGpuData, lakeMaskAtlasPlan, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
+import { JunctionFieldService } from '../core/world/water/JunctionFieldService.js';
 import {structuredWaterGpuCapacity} from '../core/world/water/structuredWaterGpuCapacity.js';
 import { WaterRiverSim } from '../core/world/water/WaterRiverSim.js';
 import { createRiverStrip } from '../core/world/water/riverStrip.js';
@@ -1001,6 +1002,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.frameLoop?.stop();
         this.waterRiverSim?.destroy();
         this.waterRiverSim = null;
+        this.junctionFieldService?.dispose();
+        this.junctionFieldService=null;
         this.waterService?.dispose();
         this.waterService = null;
         this.inputManager.stop();
@@ -1475,6 +1478,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             structuredRiverSurface:cfg.gpu.structuredRiverSurface,
             ...extra,
         });
+        this.waterGpuData.junctionFields=terrainGenerator.junctionFields??null;
         if (terrainGenerator.regionalTerrainActive && this.waterService.state === 'ready') {
             const origin = this.planetConfig.origin || {x:0,y:0,z:0}, cam = this.camera?.position;
             const basin = terrainGenerator.regionalTerrain.basins[0];
@@ -1499,6 +1503,11 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             terrainGenerator.setRiverValleyResources(this.waterGpuData.valleyResources);
             this.waterService.setRiverValleyResources(this.waterGpuData.valleyResources);
         }
+        if(cfg.junctions.enabled&&terrainGenerator.junctionFields) {
+            this.junctionFieldService=new JunctionFieldService({water:this.waterGpuData,service:this.waterService,
+                terrainGenerator,config:cfg.junctions,yieldBetween:waitForVisibleFrame,
+                onChanged:cells=>this._regenerateWaterCells(cells)});
+        }
     }
 
     _tickWaterFrame() {
@@ -1508,18 +1517,21 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             const rel = { x: cam.x - origin.x, y: cam.y - origin.y, z: cam.z - origin.z };
             this._tickWaterSim(rel);
             this.waterGpuData.update(this.waterService, rel, performance.now() / 1000);
+            this.junctionFieldService?.update(rel);
             // Where rivers changed the carve changed: regenerate those tiles in
             // place (tiles still generating with the old data notice the version).
             const changed = this.waterGpuData.takeChangedCells();
-            if (changed && this._waterCarveGenerator) {
-                this._waterCarveGenerator.markWaterCarveChanged();
-                const touchesChangedCells = tilesTouchingCells(changed, this.waterGpuData.N);
-                const tileManager = this.renderer?.quadtreeTileManager;
-                tileManager?.markTerrainRegionsChanged?.(touchesChangedCells);
-                const queued = tileManager?.regenerateTiles?.(touchesChangedCells) ?? 0;
-                Logger.debug(`[Water] rivers changed in ${changed.size} cells: ${queued} resident tiles regenerating`);
-            }
+            this._regenerateWaterCells(changed);
         }
+    }
+
+    _regenerateWaterCells(changed) {
+        if(!changed?.size||!this._waterCarveGenerator)return;
+        this._waterCarveGenerator.markWaterCarveChanged();
+        const touchesChangedCells=tilesTouchingCells(changed,this.waterGpuData.N),tileManager=this.renderer?.quadtreeTileManager;
+        tileManager?.markTerrainRegionsChanged?.(touchesChangedCells);
+        const queued=tileManager?.regenerateTiles?.(touchesChangedCells)??0;
+        Logger.debug(`[Water] terrain changed in ${changed.size} cells: ${queued} resident tiles regenerating`);
     }
 
     /**

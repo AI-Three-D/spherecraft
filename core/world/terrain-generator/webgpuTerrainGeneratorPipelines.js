@@ -10,6 +10,7 @@ import { RIVER_CARVE_BINDINGS } from '../water/riverCarve.wgsl.js';
 import { RIVER_VALLEY_BINDINGS } from '../water/riverValley.wgsl.js';
 import { valleyParamsData } from '../water/riverValley.js';
 import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_SEG_FLOATS } from '../water/waterWgsl.js';
+import { JunctionFieldStore } from '../water/junctionFieldStore.js';
 
 const SPLAT_STEP_PREFIX = '[TerrainStep] [SplatStep]';
 
@@ -18,6 +19,10 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         WebGPUTerrainGenerator.prototype,
         Object.getOwnPropertyDescriptors({
         async initializePipelines() {
+                if(this.waterCarve===true) {
+                    this.junctionFields??=new JunctionFieldStore(this.device,this.planetConfig.radius);
+                    this._junctionEmptyGroup2??=this.device.createBindGroupLayout({label:'Terrain-empty-group2',entries:[]});
+                }
 
                 // ── Standard terrain shader (base height / macro) ─────────
                 const terrainShaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions());
@@ -445,6 +450,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                     erosionFilter: this.erosionFilter,
                     waterCarve: this.waterCarve === true,
+                    junctionFields: !!this.junctionFields,
                     riverBankDetail: this.terrainConfig.waterGraph?.carve?.bankDetail > 0,
                     riverValley: this.riverValley === true,
                     riverValleyPage: this.riverValleyPage ?? 32,
@@ -1322,10 +1328,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 this.waterCarveVersion = (this.waterCarveVersion ?? 0) + 1;
             },
 
-        _setTerrainBiomeBindGroup(pass, { regional = true } = {}) {
+        _setTerrainBiomeBindGroup(pass, { regional = true, junctions = true } = {}) {
                 if (pass && this.biomeBindGroup) {
                     pass.setBindGroup(1, this.biomeBindGroup);
                     if (regional && this.regionalTerrainActive) pass.setBindGroup(2, this.regionalTerrain.bindGroup);
+                    if (junctions && this.junctionFields) pass.setBindGroup(3,this.junctionFields.resources.bindGroup);
                 }
             },
 

@@ -17,12 +17,14 @@
 //
 // Output (world positions with the terrain's arithmetic: origin + dir (R + level)):
 // - points: RIBBON_POINT_FLOATS per ribbon point: left edge xyz, river id,
-//   right edge xyz, level (m);
+//   right edge xyz, level (m), maximum river level and three reserved floats;
 // - quads: the first point of each quad (point k to k + 1).
 
 import { riverShapeAt } from './riverShapeNoise.js';
+import { riverMouths, riverMouthAt, riverMouthShape, riverMouthLevels } from './riverMouth.js';
+import { RIVER_SECTION } from './riverSection.js';
 
-export const RIBBON_POINT_FLOATS = 8;
+export const RIBBON_POINT_FLOATS = 12;
 
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -57,7 +59,7 @@ export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
     // lake, then propagate its level upstream. River 2576 was lifted by
     // 7.64 m this way while its bed stayed at the solved height. Changes to
     // an actual endpoint lake must invalidate/re-solve the trace instead.
-    if (st >= 20) return Float64Array.from({ length: n }, (_, k) => P[k * st + 16]);
+    if (st >= 20) return riverMouthLevels(rec, arc, Float64Array.from({ length: n }, (_, k) => P[k * st + 16]));
     const out = new Float64Array(n), toLake = new Float64Array(n).fill(Infinity), lakeLevel = new Float64Array(n);
     for (let k = 0; k < n; k++) {
         out[k] = P[k * st + 3];
@@ -153,6 +155,8 @@ export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, sh
         if (!any) continue;
         const arc = arcOf(rec);
         const levels = riverWaterLevels(rec, arc, lakeAt, easeM);
+        let maxLevel=-Infinity;for(const level of levels)maxLevel=Math.max(maxLevel,level);
+        const mouths = riverMouths(rec, arc);
 
         // Ribbon point at point k; cap -1 / +1: moved back / on along the
         // river by the half-width (over the round end of the channel's water).
@@ -164,7 +168,9 @@ export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, sh
             // The shader evaluates bank detail continuously between 20 m
             // ribbon rows. Cover its excursions; dry banks clip the excess.
             const cover = 0.5 * baseHw * (Math.abs(shape.widthVar) + Math.abs(shape.wobble));
-            const hw = Math.max(sh.hw, 0.5) + marginM + cover;
+            const ms = riverMouthShape(riverMouthAt(mouths,arc[k]),arc[k],sh.hw);
+            const mouthWidth = ms.width * (1+(Math.sqrt(1+.5*RIVER_SECTION.mouth.bankSoftM/Math.max(P[k*st+5],.6))-1)*ms.influence);
+            const hw = Math.max(mouthWidth, 0.5) + marginM + cover;
             const d = capSign ? norm([p[0] + tangent[0] * capSign * hw / R, p[1] + tangent[1] * capSign * hw / R, p[2] + tangent[2] * capSign * hw / R]) : p;
             const left = norm(cross(d, tangent));
             // Bend: radius from the turn at this point; the inner edge stays inside it.
@@ -216,7 +222,7 @@ export function buildRiverRibbons({ rivers, arcOf, camera, rangeM, R, origin, sh
                 }
                 if (k === n) run.push(ribbonPoint(n - 1, 1));
                 const base = pts.length / RIBBON_POINT_FLOATS;
-                run.forEach((p, i) => { pts.push(...p); if (i > 0) quads.push(base + i - 1); });
+                run.forEach((p, i) => { pts.push(...p,maxLevel,0,0,0); if (i > 0) quads.push(base + i - 1); });
                 runStart = -1;
             }
         }

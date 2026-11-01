@@ -1,0 +1,8 @@
+[
+ {"name":"o29-mouth-corners","pos":[-131682.2,357.4,5337.0],"look":[-131676.7,356.5,5341.4],"note":"attached image: two bank corners extend into the lake"},
+ {"name":"o29-tan-saw","pos":[-131823.9,673.2,4569.8],"look":[-131819.6,672.3,4575.4],"note":"attached image: sawtooth material edge on tan hillside"},
+ {"name":"o29-hillside-pinch","pos":[-131906.2,2089.8,1383.3],"look":[-131902.4,2084.1,1381.1],"note":"attached image: pinching beside the incised river"},
+ {"name":"o29-mouth-bottom","pos":[-131844.2,2232.1,2702.8],"look":[-131838.5,2235.1,2699.9],"note":"attached image: mud visible through the mouth"},
+ {"name":"o29-wide-rim","pos":[-131850.4,1438.7,3207.1],"look":[-131844.8,1440.4,3211.0],"note":"attached image: wide uniform brown shore band"},
+ {"name":"o29-owner-waterline","pos":[-131958.1,-638.7,1799.9],"look":[-131953.8,-637.2,1794.5],"up":[0,1,0],"note":"owner's latest lake shoreline: sawtooth waterline and broad uniform mud rim; mud should be underwater"}
+]

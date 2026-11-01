@@ -6,7 +6,7 @@
   },
   "splatConfig": {
     "splatDensity": 8,
-    "splatKernelSize": 1,
+    "splatKernelSize": 5,
     "slotSupportExpansionTexels": 1.5,
     "transitionSharpness": 2.5,
     "transitionDominanceStart": 0.05,

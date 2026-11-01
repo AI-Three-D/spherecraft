@@ -673,6 +673,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
+    let centerCategory = dominantSmoothSourceCategory(centerCoord, centerTileId);
+
+    // Family IDs are fixed, so they need no sparse-ID support halo. Keep
+    // only the visible reconstruction filter, without the extra reads for
+    // an unused halo around it.
+    if (USE_FIXED_MATERIAL_FAMILIES) {
+        let fixedWeights = fixedMaterialFamilyWeights(&categoryScores, centerCategory);
+        storeFixedMaterialFamilySplat(vec2<i32>(global_id.xy), fixedWeights, fixedMaterialBedShare(&categoryScores, centerCategory));
+        return;
+    }
+
     // The visible weight field stays local to kernelRadius.  The ID slot field
     // gets a small support halo so adjacent splat texels can agree on the same
     // material IDs before a neighbor's weight becomes visible.
@@ -707,14 +718,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 &ignoredTotal
             );
         }
-    }
-
-    let centerCategory = dominantSmoothSourceCategory(centerCoord, centerTileId);
-
-    if (USE_FIXED_MATERIAL_FAMILIES) {
-        let fixedWeights = fixedMaterialFamilyWeights(&categoryScores, centerCategory);
-        storeFixedMaterialFamilySplat(vec2<i32>(global_id.xy), fixedWeights, fixedMaterialBedShare(&categoryScores, centerCategory));
-        return;
     }
 
     var topCategories: array<u32, 4> = array<u32, 4>(

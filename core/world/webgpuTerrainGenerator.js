@@ -337,7 +337,12 @@ export class WebGPUTerrainGenerator {
     }
 
     _terrainPipelineLayouts(layouts) {
-        return this.regionalTerrainActive ? [...layouts, this.regionalTerrain.bindGroupLayout] : layouts;
+        const result=this.regionalTerrainActive?[...layouts,this.regionalTerrain.bindGroupLayout]:[...layouts];
+        if(this.junctionFields) {
+            while(result.length<3)result.push(this._junctionEmptyGroup2);
+            result.push(this.junctionFields.bindGroupLayout);
+        }
+        return result;
     }
 
     initializeStreamedTypes() {

@@ -66,8 +66,20 @@ export const RIVER_SECTION = Object.freeze({
     // ...for blends up to this wide (the carve reaches reachM beyond the half-width).
     blendMaxM: 80,
     softM: 0.5, stepSoftM: 0.25, widthSoftM: 0.5,
+    // The visible edge stays grassy; broad noise varies the depth at which
+    // the submerged bed becomes mud. Slopes retain their biome rock.
+    shore: Object.freeze({
+        mudStartDepthM: [0.0, 0.05], mudFullDepthM: [0.15, 0.45],
+    }),
+    // A whole river/lake transition: gradual widening on land, then a fan
+    // whose floor returns to the natural lake bed over lakeM.
+    mouth: Object.freeze({
+        lakeM: 96, widthScale: 1.8, widthExtraM: 8, bankSoftM: 6, bankBlendM: 48,
+        sheetTransitionM: [0.1, 0.3], sheetCoreM: 32, sheetEdgeBlendM: 4, lookupAboveM: 3,
+        microReturnM: 16, microOnAt: 0.25,
+    }),
     // Ground changes at most this far (m) beyond the half-width.
-    reachM: 110,
+    reachM: 110, surfaceDepthReserveM: 0.5,
     // Lake rims (riverBankRim): a bank keeps lakeMarginM above drawn water
     // within lakeBandM of the river's line, lakeSlope (per m) lower farther
     // away. The band covers the lake's 16 m shore band beyond its 32 m solve

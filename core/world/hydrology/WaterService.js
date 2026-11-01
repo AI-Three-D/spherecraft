@@ -28,6 +28,7 @@ import { RIVER_VALLEY_DEFAULTS } from '../water/riverValley.js';
 import { RIVER_LANDSCAPE_DEFAULTS } from './riverLandscape.js';
 import { regionalWaterModel,regionalWaterGridN } from './regionalWater.js';
 import { MOUNTAIN_LAKE_DEFAULTS, MOUNTAIN_LAKE_VERSION, chooseMountainLakes, drainFrame, mountainBlockFrame, mountainBlocks, pocketSolveFrame } from './mountainLakes.js';
+import { JUNCTION_FIELDS_DEFAULTS } from '../water/junctionFieldClusters.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
 export const WATER_ALGO_VERSION = 'water-v20';   // v20: preserve fine lake seeds and merge only the actual basin
@@ -57,6 +58,7 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
     // overrides), baked from each traced river; compiled in with the carve
     // unless terrain.waterGraph.valley.enabled is false.
     valley: {},
+    junctions: JUNCTION_FIELDS_DEFAULTS,
     landscape: RIVER_LANDSCAPE_DEFAULTS,
     refine: {
         enabled: true,
@@ -91,6 +93,7 @@ function mergeConfig(cfg = {}) {
         rivers: { ...WATER_SERVICE_DEFAULTS.rivers, ...(cfg.rivers ?? {}) },
         carve: { ...WATER_SERVICE_DEFAULTS.carve, ...(cfg.carve ?? {}) },
         valley: { ...RIVER_VALLEY_DEFAULTS, ...(cfg.valley ?? {}) },
+        junctions: { ...JUNCTION_FIELDS_DEFAULTS, ...(cfg.junctions ?? {}) },
         landscape: { ...RIVER_LANDSCAPE_DEFAULTS, ...(cfg.landscape ?? {}) },
     };
 }

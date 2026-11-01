@@ -6,7 +6,7 @@
 //   the graph-river debug bit; a lake first covers its graph cells, once
 //   refined the cells under its 16 m mask; (2) per cell, the traced river
 //   segments listed in it (first << 8 | count). Uploads only changed rows;
-// - river segments: rebuilt whenever traced rivers change (48 bytes each,
+// - river segments: rebuilt whenever traced rivers change (160 bytes each,
 //   a segment repeated in every cell its water can reach);
 // - lake table: level, mask layer, tangent-plane frame (whole table per
 //   change, 64 bytes a lake);
@@ -28,15 +28,14 @@ import {resampleLakeSurfaceMask} from './lakeSurfaceField.js';
 import {WATER_GPU_CAPACITY_DEFAULTS as CAPACITY} from './structuredWaterGpuCapacity.js';
 import { RIVER_VALLEY_DEFAULTS, valleyLayout, valleyPageCells, valleyParamsData } from './riverValley.js';
 import { RIVER_CARVE_DEFAULTS } from './riverShapeNoise.js';
+import { riverMouths, riverMouthAt, lakeMouthSurface } from './riverMouth.js';
 
 export const WATER_LOOK_DEFAULTS = Object.freeze({
     deepColor: [0.02, 0.10, 0.09],    // albedo of deep water (lit by sky + sun); Whitewater's water tint
     reflection: 1.4,                  // sky reflection strength (x sky radiance)
-    // Per metre of water path (r, g, b): clear water, the bed shows through a
-    // few metres (owner 2026-10-06: see-through close up). Whitewater's
-    // murky [1.6, 0.8, 0.6] hid it below ~2 m; [0.45, 0.2, 0.15] let a
-    // shallow river all but vanish over its bed (owner 2026-10-25: slightly
-    // less transparent). qtDiag.water.look({ absorption }) to tune.
+    // Per metre of water path (r, g, b). Keep the wet toe visible, but
+    // attenuate the broad brown bed in shallow lake mouths (2026-10-29).
+    // qtDiag.water.look({ absorption }) tunes the existing body treatment.
     absorption: [0.9, 0.4, 0.3],
     rippleFadeM: 800,                 // ripples fade out by this camera distance
     shoreSoftM: 0.15,                 // waterline fade-in depth
@@ -118,6 +117,8 @@ export class WaterGpuData {
         // Lake masks as drawn: the shore band cleared beside rivers outside
         // lakes (lakeBand.js), lake id -> mask; the carve's reach for it.
         this._maskOf = new Map();
+        this._surfaceOf = new Map();
+        this._mouthLakeCells = new Map();
         this._carveReach = riverCarveReach(carve ?? {});
 
         const cells = 6 * gridN * gridN;
@@ -304,6 +305,9 @@ export class WaterGpuData {
         for (const c of rec ? rec.maskCells : this._lakeCellsOf(svc, id)) this._clearSlot(c, id + 1);
         this._applied.delete(id);
         this._maskOf.delete(id);
+        this._surfaceOf.delete(id);
+        for(const c of this._mouthLakeCells.get(id)??[])this._clearSlot(c,id+1);
+        this._mouthLakeCells.delete(id);
         const layer = this._layerOf.get(id);
         if (layer !== undefined) { this._layerOwner[layer] = -1; this._layerOf.delete(id); }
     }
@@ -382,9 +386,29 @@ export class WaterGpuData {
         for (const [id, rec] of this._applied) {
             const layer = this._layerOf.get(id);
             if (!changedRivers.some(r => riverNearLake(r, rec, this.R))) continue;
-            this._maskOf.set(id, trimLakeBand(rec, this._appliedRivers.values(), this.R, this._carveReach));
-            if (layer >= 0) this._uploadMask(rec, layer, this._maskOf.get(id));
+            const surface=this._lakeSurface(id,rec);
+            if (layer >= 0) this._uploadMask(surface, layer, surface.mask);
         }
+    }
+
+    _lakeSurface(id,rec) {
+        const base=new Set(rec.maskCells??[]);
+        for(const c of this._mouthLakeCells.get(id)??[])if(!base.has(c)) {
+            this._clearSlot(c,id+1);this._changedCells.add(c);
+        }
+        const mask=trimLakeBand(rec,this._appliedRivers.values(),this.R,this._carveReach);
+        const surface=lakeMouthSurface(rec,id,this._appliedRivers.values(),this.R,r=>this._arcLengths(r),mask);
+        const extra=new Set(),fr=surface.frame;
+        for(const k of surface.mouthCells??[]) {
+            const d=planeToDir(fr.x0+(k%fr.nx+.5)*fr.spacing,fr.y0+(Math.floor(k/fr.nx)+.5)*fr.spacing,fr,this.R);
+            const c=dirToCell(d,this.N);this._setSlot(c,id+1);
+            if(!base.has(c))extra.add(c);
+            this._changedCells.add(c);
+        }
+        this._mouthLakeCells.set(id,extra);
+        this._surfaceOf.set(id,surface);
+        this._maskOf.set(id,surface.mask);
+        return surface;
     }
 
     _uploadMask(rec, layer, mask = rec.mask) {
@@ -434,7 +458,7 @@ export class WaterGpuData {
             if (id >= this.maxLakes) break;
             const o = id * F;
             const rec = this._applied.get(id);
-            const fr = rec?.frame ?? lake.frame;
+            const fr = this._surfaceOf.get(id)?.frame ?? rec?.frame ?? lake.frame;
             t[o] = rec?.level ?? lake.level;
             ti[o + 1] = rec ? (this._layerOf.get(id) ?? -1) : -1;
             if (ti[o + 1] >= 0 && this._slots) {
@@ -475,8 +499,8 @@ export class WaterGpuData {
                     for (const m of rec.merged ?? []) this._unapply(svc, m);
                     for (const c of rec.maskCells) this._setSlot(c, id + 1);
                     const layer = this._allocLayer(svc, id, camDir, rec);
-                    this._maskOf.set(id, trimLakeBand(rec, this._appliedRivers.values(), this.R, this._carveReach));
-                    if (layer >= 0) this._uploadMask(rec, layer, this._maskOf.get(id));
+                    const surface=this._lakeSurface(id,rec);
+                    if (layer >= 0) this._uploadMask(surface, layer, surface.mask);
                     this._applied.set(id, rec);
                 }
                 let riversChanged = false;
@@ -562,7 +586,7 @@ export class WaterGpuData {
         const found = [];
         for (const [id, rec] of this._applied) {
             if (!(this._layerOf.get(id) >= 0)) continue;
-            const fr = rec.frame;
+            const fr = this._surfaceOf.get(id)?.frame ?? rec.frame;
             const k = d[0] * fr.c[0] + d[1] * fr.c[1] + d[2] * fr.c[2];
             if (k <= 0) continue;
             // The camera in the lake's tangent plane, its distance from the patch.
@@ -586,7 +610,7 @@ export class WaterGpuData {
         for (const slot of this._lakeSlots(cell)) {
             const id = slot - 1, rec = slot ? this._applied.get(id) : null;
             if (!rec || !(this._layerOf.get(id) >= 0)) continue;
-            const fr = rec.frame;
+            const fr = this._surfaceOf.get(id)?.frame ?? rec.frame;
             const k = dir[0] * fr.c[0] + dir[1] * fr.c[1] + dir[2] * fr.c[2];
             if (k <= 0) continue;
             const i = Math.floor(((dir[0] * fr.e1[0] + dir[1] * fr.e1[1] + dir[2] * fr.e1[2]) / k * this.R - fr.x0) / fr.spacing);
@@ -605,7 +629,7 @@ export class WaterGpuData {
      * distant big rivers out of the full buffer (lake-recovery run 23).
      */
     _rebuildRivers(camDir) {
-        const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map(), levelsOf = new Map();
+        const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map(), levelsOf = new Map(), mouthsOf = new Map();
         const narrowCos = Math.cos(NARROW_RIVER_DRAW_M / this.R);
         let beyond = 0;
         // Nearest rivers first, by their nearest point (a river's source can
@@ -665,6 +689,9 @@ export class WaterGpuData {
                 let wl = levelsOf.get(rec);
                 if (!wl) levelsOf.set(rec, (wl = riverWaterLevels(rec, arc, (d) => this.lakeAt(d))));
                 const wlA = wl[k], wlB = wl[k + 1];
+                let mouths=mouthsOf.get(rec);
+                if(!mouths)mouthsOf.set(rec,(mouths=riverMouths(rec,arc)));
+                const mouth=riverMouthAt(mouths,.5*(arc[k]+arc[k+1]));
                 this._segs.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
                     P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5],
                     ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
@@ -682,7 +709,8 @@ export class WaterGpuData {
                     wlA, wlB, st >= 20 ? P[a + 18] : -1e20, st >= 20 ? P[b + 18] : -1e20,
                     st >= 20 ? P[a + 19] : 0, st >= 20 ? P[b + 19] : 0, st >= 20 ? P[a + 12] : 0, st >= 20 ? P[b + 12] : 0,
                     // Lake rims of the banks (14 left, 15 right; none on older records).
-                    st >= 20 ? P[a + 14] : -1e4, st >= 20 ? P[b + 14] : -1e4, st >= 20 ? P[a + 15] : -1e4, st >= 20 ? P[b + 15] : -1e4], o);
+                    st >= 20 ? P[a + 14] : -1e4, st >= 20 ? P[b + 14] : -1e4, st >= 20 ? P[a + 15] : -1e4, st >= 20 ? P[b + 15] : -1e4,
+                    ...(mouth?[mouth.s,mouth.level,mouth.sign*mouth.hw,mouth.landM]:[0,0,0,0])], o);
                 next++;
             }
             this.index[2 * this.cells + block * SS + (id % SS)] = (first << 8) | (list.length / 2);
