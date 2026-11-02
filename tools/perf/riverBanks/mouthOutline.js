@@ -178,3 +178,22 @@ export async function pixelsToRiver({ pixels, river, maxM = 600, stepM = 0.5 }) 
             mouth: m && { s: +m.s.toFixed(1), sign: m.sign, level: +m.level.toFixed(2), landM: +m.landM.toFixed(0), fromMouthM: +((best.s - m.s) * m.sign).toFixed(1) } };
     });
 }
+
+// Segments shorter than minM in the traced rivers, with their distance to the
+// river's nearest mouth station (riverMouth.js insertRiverMouthAnchors).
+export async function shortSegments({ minM = 2 } = {}) {
+    const g = window.gameEngine, w = g.waterGpuData, { riverMouths } = await import('/core/world/water/riverMouth.js');
+    const out = [];
+    let segments = 0;
+    for (const [id, rec] of g.waterService.riverRecs) {
+        const arc = w._arcLengths(rec), mouths = riverMouths(rec, arc);
+        for (let k = 0; k + 1 < arc.length; k++) {
+            segments++;
+            const len = arc[k + 1] - arc[k];
+            if (len >= minM) continue;
+            const m = mouths.reduce((a, b) => !a || Math.abs(b.s - arc[k]) < Math.abs(a.s - arc[k]) ? b : a, null);
+            out.push({ id, k, lenM: +len.toFixed(3), fromMouthM: m ? +(arc[k] - m.s).toFixed(2) : null });
+        }
+    }
+    return { segments, short: out.length, nearMouth: out.filter(s => s.fromMouthM !== null && Math.abs(s.fromMouthM) < 3).length, sample: out.slice(0, 12) };
+}

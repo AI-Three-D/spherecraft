@@ -1,0 +1,12 @@
+{
+  "note": "Owner 2026-11-02 evening after 2647530: 'Don't report back until EVERYTHING is fixed.'",
+  "views": [
+    { "name": "o03-corner-wing", "pos": [-131836.9, -1956.9, 3747.8], "look": [-131830.2, -1955.2, 3749.5], "up": [0, 1, 0], "note": "lake mouth: straight-edged pale wing at the right shore, dark crease line in the lake" },
+    { "name": "o03-ribbon-steps", "pos": [-131775.3, -2070.3, 3977.9], "look": [-131769.9, -2073.0, 3981.5], "up": [0, 1, 0], "note": "river: water outline in straight steps along the left bank" },
+    { "name": "o03-berm", "pos": [-131764.4, -2178.5, 4033.6], "look": [-131759.7, -2181.0, 4038.2], "up": [0, 1, 0], "note": "river: brown band on the left bank, raised berm on the right" },
+    { "name": "o03-tip-sliver", "pos": [-131809.8, -2366.7, 4231.0], "look": [-131804.8, -2371.1, 4233.3], "up": [0, 1, 0], "note": "arrow: pale water sliver with a straight edge at a point's shore" },
+    { "name": "o03-zipper", "pos": [-131740.0, -3259.7, 4568.8], "look": [-131736.0, -3255.4, 4572.7], "up": [0, 1, 0], "note": "arrow: zipper/dotted line down the grass hillside" },
+    { "name": "o03-zigzag", "pos": [-131737.1, -3299.4, 4766.6], "look": [-131733.8, -3297.9, 4760.5], "up": [0, 1, 0], "note": "dark zigzag band across the hillside; brown shore" },
+    { "name": "o03-thalweg", "pos": [-131627.5, -4035.6, 4797.0], "look": [-131621.1, -4038.5, 4796.7], "up": [0, 1, 0], "note": "arrow: dark line along the water near the mouth" }
+  ]
+}

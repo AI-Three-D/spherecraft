@@ -47,10 +47,6 @@ const MAX_FLOORS = 6;
 // The river valley field (riverValley.wgsl.js) returns over this far (m)
 // beyond a river's channel: nearer, the fine section (riverCarveTerrain_d).
 const VALLEY_RETURN_M = 60;
-// The carve's joint blend widens by JOINT_BAND_GROWTH m per m beyond a
-// river's channel + JOINT_BAND_NEAR_M (riverCarveJointShare).
-const JOINT_BAND_NEAR_M = 8;
-const JOINT_BAND_GROWTH = 0.5;
 const CONTAIN = RIVER_SECTION.contain;
 const MOUTH = RIVER_SECTION.mouth;
 
@@ -262,32 +258,20 @@ fn riverCarveJointShare(j: u32, dir: vec3<f32>) -> vec4<f32> {
     let x0 = dot(dir - a.p1, nb) * R;
     let past = select(0.0, 1.0, x0 > 0.0);
     let turnW = smoothstep(1.4e-5, 1.5e-4, 1.0 - dot(ua, ub));
-    let band0 = 0.5 * min(a.s1 - a.s0, b.s1 - b.s0);
-    if (turnW <= 0.0 || band0 <= 0.0) { return vec4<f32>(past, vec3<f32>(0.0)); }
-    // The band widens away from the river (beyond its channel + ${JOINT_BAND_NEAR_M} m, where
-    // the water's joint blend, waterRiverJointAt, has the same band): over
-    // half a segment each joint left a band of changed slope down the
-    // hillside, drawn as rock by the slope-driven materials (owner
-    // 2026-10-25 "tiger stripes", 11-01). A wider band only stays
-    // continuous summed along the run (riverCarveStation).
-    let side = normalize(cross(a.p1, nb));
-    let lateral = dot(dir - a.p1, side) * R;
-    let grow = abs(lateral) - max(a.hw1, b.hw0) - ${JOINT_BAND_NEAR_M.toFixed(1)};
-    let band = band0 + ${JOINT_BAND_GROWTH.toFixed(2)} * max(grow, 0.0);
-    let dBand = select(vec3<f32>(0.0), side * (${JOINT_BAND_GROWTH.toFixed(2)} * R * sign(lateral)), grow > 0.0);
+    let band = 0.5 * min(a.s1 - a.s0, b.s1 - b.s0);
+    if (turnW <= 0.0 || band <= 0.0) { return vec4<f32>(past, vec3<f32>(0.0)); }
     let x = clamp(x0 / band, -1.0, 1.0);
     let w = 0.5 + 0.5 * (3.0 * x * abs(x) - 2.0 * x * x * x);
-    let dx = (nb * R - dBand * x) / band;
-    let dw = select(vec3<f32>(0.0), dx * (0.5 * (6.0 * abs(x) - 6.0 * x * x)), abs(x0) < band);
+    let dw = select(vec3<f32>(0.0), nb * (R / band) * (0.5 * (6.0 * abs(x) - 6.0 * x * x)), abs(x0) < band);
     return vec4<f32>(mix(past, w, turnW), dw * turnW);
 }
 // Where dir lies along the run [runStart, runEnd) of one river's segments
 // (x: 0 on the first, i + f between segments i and i + 1) and its gradient:
 // the sum of every joint's share. Alone at a joint it gives the joint
-// blend; the nearest segment and its two neighbours' weights instead did not
-// add up where the bisector planes converge, on the inside of bends, and the
-// banks stepped where the nearest segment switched: radial stripes of rock
-// on the hillside inside a bend (owner 2026-10-25 "tiger stripes", 11-01).
+// blend (half the shorter segment either side). Bands widening away from
+// the river (to soften slope changes far out) drew zipper lines and
+// straight cracks up hillsides: a point's sum then depends on joints whose
+// segments its cell may not list (owner 2026-11-02).
 fn riverCarveStation(runStart: u32, runEnd: u32, dir: vec3<f32>) -> vec4<f32> {
     var station = vec4<f32>(0.0);
     for (var j = runStart + 1u; j < runEnd; j++) { station += riverCarveJointShare(j, dir); }
