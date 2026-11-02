@@ -265,3 +265,51 @@ by the coarse mask (originalBasinMembership); its straight edges become
 the shoreline. A shoreline from the ground contour needs the lake sheet's
 coverage inside a field patch from the field's own wet domain (stored at
 bake time), not the 32 m mask.
+
+## Round 5 (2026-11-02/03, owner: "don't report back until EVERYTHING is fixed")
+
+Owner poses `tools/perf/riverBanks/ownerViews-2026-11-03.json` (7). Evidence
+`river-2026-11-03/`. Grid tool `tools/perf/riverMetrics/grid.mjs` (one image
+per pose: wet, dry, fields off / lighting 91, base colour 43, owner w7).
+
+Causes found (one-term A/B each):
+- **Zipper line up the hillside** (o03-zipper): my 81c0662 station blend's
+  band growth (growth 0: gone). Mechanism: 73 micro segments (0.2-2 m) at
+  mouth anchors (riverMouth.js insertRiverMouthAnchors); float32 unit
+  directions (~8 mm) make their direction off by up to ~2 degrees, and a
+  wide band evaluates their extended line 100 m out. Fix: mouth stations
+  snap to a point within 0.3 of its segment (max 5 m) (MOUTH_ANCHOR_SNAP,
+  RIVER_SOLVE_VERSION 53): 1 zero-length segment left of 20324; zipper
+  much fainter, a thin line remained, and dotted straight lines on the
+  scales and hillside views were also the growth (a point's station sum
+  depends on joints whose segments its cell may not list). Band growth
+  removed (bands half the shorter segment again): zipper and lines gone
+  (`fix-sweep`, 22 views dry, last commit vs new: elsewhere unchanged,
+  frame and tile generation within noise). The round-2 stripes did not
+  visibly return in the hillside crop.
+  Rejected: every joint blended (turnW 1), station over the joined sub-run
+  only, neighbours listed in each segment's cells (made an L-shaped
+  cell-edge line), uniform 3x band, growth capped at +25 m.
+- **Zigzag band across the hillside** (o03-zigzag): the river valley field
+  (riverValley.wgsl.js). Its lake guard (texel-centre-in-lake flag,
+  ~50 m texels) multiplied by 8 cuts the valley off along the texel
+  staircase. Guard x2 / x1: the band moves and turns into scallops; the
+  cut is metres deep next to the lake and any texel-based cut-off shows.
+  Next: taper the cut itself near lakes at bake time (distance to lake
+  texels), not by a texel guard.
+- **Berm / dark ridge beside the river** (o03-berm), **dark groove along the
+  channel** (o03-thalweg), **groove at the point** (o03-tip-sliver): carve
+  terms; not containment, not valley, not joints. Next: bank types
+  (riverSection cut bank / ledge) and the thalweg skew.
+- **Stepped water outline** (o03-ribbon-steps): ground beside the channel
+  near the mouth lies below the river's water level (w7 yellow); the
+  ribbon mesh edge then shows. A wider ribbon only moves the steps out.
+  Next: the mouth level refit / banks there.
+- **Straight-edged wing at a mouth corner** (o03-corner-wing): see round 4
+  (lake mask edges inside field patches).
+- **Thin crease line in the lake at a mouth** (o03-corner-wing lighting): not
+  yet isolated.
+Runs crashed twice (Chrome "frame detached" on valley-off, then a 15 min
+load timeout); a fresh run worked. Seen in two later runs only: an L-shaped
+dark crack on the scales hillside and a dotted line on the hillside-pinch
+view; suspected stale tiles after river data changes (not yet verified).

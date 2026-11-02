@@ -92,9 +92,22 @@ export function riverMouthsFromTerrain(rec,R,groundAt) {
     return {mouths,arc};
 }
 
+// A mouth station within this share of its segment (at most maxM) of an
+// existing point moves to that point instead of adding one. The points are
+// float32 unit directions (~8 mm on a 131 km planet): a 0.2-2 m segment's
+// direction was off by up to ~2 degrees, and where the carve blended its
+// section 100 m from the river the ground stepped along a line up the
+// hillside (owner 2026-11-02, "zipper").
+export const MOUTH_ANCHOR_SNAP = Object.freeze({ share: 0.3, maxM: 5 });
 export function insertRiverMouthAnchors(rec, mouths, arc, R) {
     const P=rec.points,st=rec.stride,stations=[...arc];
-    for(const m of mouths)if(!stations.some(s=>Math.abs(s-m.s)<.001))stations.push(m.s);
+    for(const m of mouths) {
+        let k=0;while(k+2<arc.length&&arc[k+1]<m.s)k++;
+        const snap=Math.min(MOUTH_ANCHOR_SNAP.maxM,MOUTH_ANCHOR_SNAP.share*(arc[k+1]-arc[k]));
+        const near=[k,k+1].reduce((a,i)=>Math.abs(arc[i]-m.s)<Math.abs(arc[a]-m.s)?i:a,k);
+        if(Math.abs(arc[near]-m.s)<=Math.max(snap,.001)) m.s=arc[near];
+        else stations.push(m.s);
+    }
     stations.sort((a,b)=>a-b);
     const points=new Float32Array(stations.length*st),nextArc=new Float64Array(stations.length);
     let k=0;
