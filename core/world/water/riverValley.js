@@ -99,6 +99,9 @@ export function valleyRiverFromRecord(rec, R) {
         field: rec.landscape ? riverIncisionSampler(rec.landscape, R) : null };
 }
 
+// The valley cut fades out over this many texels toward a lake (bakeValleyPages).
+export const VALLEY_LAKE_TAPER = 3;
+
 /** Packed ValleyParams uniform, 64 bytes. The unused words stay zero. */
 export function valleyParamsData(opts = RIVER_VALLEY_DEFAULTS, on = true) {
     const { T, P, PE } = valleyLayout(opts);
@@ -119,11 +122,26 @@ export function bakeValleyPages(pageIds, rivers, { R, lakeLevelAt = null }, opts
         const face = Math.floor(pid / (PE * PE)), pj = Math.floor((pid % (PE * PE)) / PE), pi = pid % PE;
         const i0 = pi * P - 2, j0 = pj * P - 2;
         const localFields = fields.filter(f => f.pages.has(pid));
+        // Lake texels around the page, VALLEY_LAKE_TAPER texels beyond it.
+        const r = VALLEY_LAKE_TAPER, W = ST + 2 * r, lakes = new Uint8Array(W * W);
+        if (lakeLevelAt) for (let j = 0; j < W; j++) for (let i = 0; i < W; i++) {
+            lakes[j * W + i] = Number.isFinite(lakeLevelAt(faceUVToDir(face, (i0 + i - r + 0.5) / T, (j0 + j - r + 0.5) / T))) ? 1 : 0;
+        }
         for (let j = 0; j < ST; j++) for (let i = 0; i < ST; i++) {
             const dir = faceUVToDir(face, (i0 + i + 0.5) / T, (j0 + j + 0.5) / T);
-            const lake = lakeLevelAt && Number.isFinite(lakeLevelAt(dir));
+            const lake = lakes[(j + r) * W + i + r] === 1;
+            // The cut fades to nothing toward lake texels over r texels: cut
+            // off by the shader's lake guard alone, it ended along the
+            // texels' staircase, a zigzag terrace across the hillside above
+            // a lake (owner 2026-11-02).
+            let near = r * r + 1;
+            for (let dj = -r; dj <= r; dj++) for (let di = -r; di <= r; di++) {
+                if (lakes[(j + r + dj) * W + i + r + di]) near = Math.min(near, di * di + dj * dj);
+            }
+            const t = Math.max(0, Math.min(1, (Math.sqrt(near) - 1) / (r - 1)));
             let cut = 0;
             if (!lake) for (const field of localFields) cut = Math.max(cut, field.sample(dir));
+            cut *= t * t * (3 - 2 * t);
             const w = (slot * TEX + j * ST + i) * 4;
             texels[w] = f32bits(cut);
             texels[w + 2] = lake ? 0x80000000 : 0;
