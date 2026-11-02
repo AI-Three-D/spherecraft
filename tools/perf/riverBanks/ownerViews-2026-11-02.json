@@ -1,0 +1,8 @@
+{
+  "note": "Owner 2026-11-02 after c83e6ec: 'still bad glitches at some river mouths and hillsides; all moats have edges extending into the delta'. A fourth crop (arrows at dark edges continuing into the delta) came without a pose.",
+  "views": [
+    { "name": "o02-mouth-hill", "pos": [-131889.4, 2064.1, 1369.3], "look": [-131884.9, 2059.1, 1371.6], "up": [0, 1, 0], "note": "mouth from above; dotted line across the hillside; shore corner" },
+    { "name": "o02-bank-ridge", "pos": [-131875.5, 3056.8, 540.8], "look": [-131870.8, 3054.1, 545.3], "up": [0, 1, 0], "note": "river from above with a ridge along its bank, widening into the lake" },
+    { "name": "o02-close-blocks", "pos": [-131834.2, 2985.9, 151.3], "look": [-131829.0, 2990.3, 149.8], "up": [0, 1, 0], "note": "close: blocky straight-edged water shapes" }
+  ]
+}

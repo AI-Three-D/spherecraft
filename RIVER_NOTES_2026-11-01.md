@@ -229,3 +229,39 @@ the carve's rounded slope (the field no longer reshapes that high ground).
 Frame time within noise on every view; 80-tile generation 511-523 ms vs
 503-519 ms; no GPU errors. One run of the sweep lost its page (Chrome
 "Target closed") after 7 views; the retry completed.
+
+## Round 4 (2026-11-02, owner: glitches at mouths and hillsides, "moats have edges extending into the delta")
+
+Owner poses: `tools/perf/riverBanks/ownerViews-2026-11-02.json` (o02-mouth-hill,
+o02-bank-ridge, o02-close-blocks). Evidence `river-2026-11-02/`.
+
+Fixed: **diagonal line across the water at a steep stream's mouth**
+(o02-mouth-hill). It was there with the junction fields off and with their
+water shortcuts off: the old river/lake hand-over, whose lake share ramps
+over the mask's last 3 m (LAKE_EDGE_RAMP_M), drew a line where the river
+surface meets the lake. The share now ramps over 24 m inside the lake's
+drawn edge (nearShareCover, SHARE_RAMP_M). Cost ~0.3-0.4 ms at mouths
+(moat measured twice, base/new/base/new); other views within noise.
+
+Not fixed: **straight-edged "wings" beside the moat-type mouths**
+(o02-close-blocks, and the owner's unposed crop). What is known:
+- Junction fields off: gone. Water shortcuts off, analytic fan off,
+  micro-detail clamp off, JUNCTION_LOW_GROUND off, influence radius
+  64/200 m: unchanged. blendRadiusM 32: smaller detached mud patches;
+  20: gone, but broad pale shelves return at the moat mouth.
+- Water owner view (w7): the lake's water is drawn in the wings, ending in
+  the lake mask's straight edges. So: the field's fillet (blendRadiusM)
+  cuts ground below the lake's level into the coarse mask's coverage,
+  shallow water shows there, and its outline is the mask's edge.
+- Rejected: lowering ground back above the water outside the drawn water
+  (`candidate`: spike of land at the hillside mouth, wings unchanged); the
+  lake drawn wherever the field's bed is below its level
+  (`candidate2/lake-by-bed`: floods grass); a flat delta shelf in the
+  analytic fan (`shelf`: no change); ending the channel past the shore
+  (`shore-end`: no change at the bank-ridge view, whose edge is the
+  river 2557 approach 55-80 m above its mouth).
+Next lead: the field's lake basin is the flood of natural ground clipped
+by the coarse mask (originalBasinMembership); its straight edges become
+the shoreline. A shoreline from the ground contour needs the lake sheet's
+coverage inside a field patch from the field's own wet domain (stored at
+bake time), not the 32 m mask.
