@@ -17,7 +17,7 @@ const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1
 // river: { id, sign }: the grid follows that river instead, x = arc length
 // from its mouth station (lakeward positive), y = offset to the left of
 // the traced line (riverMouth.js riverMouths).
-export async function mouthOutline({ view = null, river = null, x0 = 20, x1 = 260, halfY = 90, stepM = 2, printStepM = 4, rows = null } = {}) {
+export async function mouthOutline({ fieldInfluence = false, view = null, river = null, x0 = 20, x1 = 260, halfY = 90, stepM = 2, printStepM = 4, rows = null } = {}) {
     const g = window.gameEngine, w = g.waterGpuData, R = w.R, device = w.device;
     if (view) await (await import('/tools/perf/waterStepReview/qualityScene.js')).poseView(view);
     const nx = Math.round((x1 - x0) / stepM) + 1, ny = Math.round(2 * halfY / stepM) + 1, n = nx * ny;
@@ -109,7 +109,8 @@ fn probeMain(@builtin(global_invocation_id) gid: vec3<u32>) {
             const c = cell(i, j), inRiver = c.river.near && c.river.d < c.river.hw;
             const R_ = inRiver && c.ground < c.river.eta, L_ = c.lake.level > -1e9 && c.lake.cover > 0.5 && c.ground < c.lake.level;
             a += R_ && L_ ? 'B' : R_ ? 'R' : L_ ? 'L' : inRiver ? 'r' : '.';
-            if (!c.field.found || c.field.influence < 0.5) b += ' ';
+            if (fieldInfluence && c.field.found) b += c.field.influence >= 0.999 ? '#' : c.field.influence > 0 ? String(Math.min(9, Math.floor(c.field.influence * 10))) : '.';
+            else if (!c.field.found || c.field.influence < 0.5) b += ' ';
             else { const dz = c.ground - c.field.level; b += dz < 0 ? '-' : dz >= 1 ? '+' : String(Math.floor(dz * 10)); }
         }
         map.push(a); fieldMap.push(b);
@@ -151,21 +152,29 @@ export async function pixelsToRiver({ pixels, river, maxM = 600, stepM = 0.5 }) 
         dirs.set([p[0] / len, p[1] / len, p[2] / len, 0], (r * steps + k) * 4); radii.push(len);
     } });
     const ground = await g.waterService._sampler.sampleDirsCarved(dirs);
-    const rec = g.waterService.riverRecs.get(river.id), RP = rec.points, st = rec.stride, arc = w._arcLengths(rec);
     const { riverMouths } = await import('/core/world/water/riverMouth.js');
-    const mouth = riverMouths(rec, arc).find(m => m.sign === river.sign);
+    // river null: the nearest traced river to each hit, its mouths' stations.
+    const recs = river ? [[river.id, g.waterService.riverRecs.get(river.id)]] : [...g.waterService.riverRecs.entries()];
     return rays.map((ray, r) => {
         let k = 0; while (k < steps && radii[r * steps + k] - R > ground[r * steps + k]) k++;
         if (k >= steps) return { pixel: pixels[r], hit: null };
         const d = Array.from(dirs.subarray((r * steps + k) * 4, (r * steps + k) * 4 + 3));
         let best = { dist: Infinity };
-        for (let q = 0; q + 1 < arc.length; q++) {
-            const A = Array.from(RP.subarray(q * st, q * st + 3)), B = Array.from(RP.subarray((q + 1) * st, (q + 1) * st + 3));
-            const ab = B.map((v, i) => v - A[i]), t = Math.max(0, Math.min(1, d.reduce((a, v, i) => a + (v - A[i]) * ab[i], 0) / ab.reduce((a, v) => a + v * v, 0)));
-            const foot = A.map((v, i) => v + ab[i] * t), dist = Math.hypot(...d.map((v, i) => v - foot[i])) * R;
-            if (dist < best.dist) { const side = Math.sign(d.reduce((a, v, i) => a + (v - foot[i]) * cross(foot, ab)[i], 0)); best = { dist, s: arc[q] + (arc[q + 1] - arc[q]) * t, side }; }
+        for (const [id, rec] of recs) {
+            const RP = rec.points, st = rec.stride, arc = w._arcLengths(rec);
+            for (let q = 0; q + 1 < arc.length; q++) {
+                const A = Array.from(RP.subarray(q * st, q * st + 3)), B = Array.from(RP.subarray((q + 1) * st, (q + 1) * st + 3));
+                const ab = B.map((v, i) => v - A[i]), t = Math.max(0, Math.min(1, d.reduce((a, v, i) => a + (v - A[i]) * ab[i], 0) / ab.reduce((a, v) => a + v * v, 0)));
+                const foot = A.map((v, i) => v + ab[i] * t), dist = Math.hypot(...d.map((v, i) => v - foot[i])) * R;
+                if (dist < best.dist) {
+                    const side = Math.sign(d.reduce((a, v, i) => a + (v - foot[i]) * cross(foot, ab)[i], 0));
+                    best = { dist, s: arc[q] + (arc[q + 1] - arc[q]) * t, side, id, q, hw: RP[q * st + 4], level: RP[q * st + 16], length: arc[arc.length - 1], mouths: riverMouths(rec, arc) };
+                }
+            }
         }
-        return { pixel: pixels[r], groundM: +ground[r * steps + k].toFixed(2), rangeM: k * stepM,
-            fromMouthM: +((best.s - mouth.s) * mouth.sign).toFixed(1), offsetM: +(best.dist * best.side * mouth.sign).toFixed(1) };
+        const m = best.mouths.reduce((a, b) => !a || Math.abs(b.s - best.s) < Math.abs(a.s - best.s) ? b : a, null);
+        return { pixel: pixels[r], groundM: +ground[r * steps + k].toFixed(2), rangeM: k * stepM, river: best.id, s: +best.s.toFixed(1), lengthM: +best.length.toFixed(0),
+            hw: +best.hw.toFixed(1), level: +best.level.toFixed(2), offsetM: +(best.dist * best.side).toFixed(1),
+            mouth: m && { s: +m.s.toFixed(1), sign: m.sign, level: +m.level.toFixed(2), landM: +m.landM.toFixed(0), fromMouthM: +((best.s - m.s) * m.sign).toFixed(1) } };
     });
 }

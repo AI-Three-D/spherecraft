@@ -32,6 +32,8 @@ import { getAerialPerspectiveWGSL } from '../atmosphere/shaders/aerialPerspectiv
 // A river's surface ends this far (m) beyond its channel's edge, half a
 // metre inside the banks' containment crest.
 const SURFACE_EDGE_M = RIVER_SECTION.contain.crestM - 0.5;
+// The river/lake hand-over ramp at a mouth (nearShareCover).
+const SHARE_RAMP_M = 24;
 
 export const NEAR_WATER_MAX_LAKES = 16;
 export const NEAR_WATER_UNIFORM_FLOATS = 16 + 16 + 4 + 4 + 4 + NEAR_WATER_MAX_LAKES + 7 * 4 + NEAR_WATER_MAX_LAKES;
@@ -108,6 +110,13 @@ fn nearRiverEdge(hit: WaterRiverSurface) -> f32 {
 }
 // The river's shallow side hands over before the ribbon ends. Both sheets
 // use the same share, so a raised film cannot end in a straight cyan edge.
+// The lake's share of a river mouth's water by how far (m) inside its drawn
+// edge the point lies: over ${SHARE_RAMP_M} m instead of the edge cover's 3 m. Over
+// 3 m the two surfaces handed over in a line across the mouth, a diagonal
+// crease at a steep stream's mouth (owner 2026-11-02).
+fn nearShareCover(cover: f32, insideM: f32) -> f32 {
+    return cover * smoothstep(0.0, ${SHARE_RAMP_M.toFixed(1)}, insideM) / max(smoothstep(0.0, 3.0, insideM), 1.0e-4);
+}
 fn nearRiverLakeShare(hit: WaterRiverSurface, level: f32, cover: f32) -> f32 {
     let lateral = 1.0 - smoothstep(max(0.0, hit.halfWidthM - ${RIVER_SECTION.mouth.sheetEdgeBlendM.toFixed(2)}), hit.halfWidthM + nearRiverEdge(hit), hit.distM);
     return nearRiverShare(hit.etaM - level, cover) * mix(1.0, lateral, cover);
@@ -291,7 +300,7 @@ fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
             // by the same cover as the river surfaces' lookup (WaterLakeHit).
             let below = select(0.0, waterLakeGiveWay(lake, river, F), F < 0.0);
             if (river.near && river.distM < river.halfWidthM + nearRiverEdge(river)) {
-                sheetW = 1.0 - nearRiverLakeShare(river, lake.level, waterLakeEdgeCover(lake, F) * (1.0 - below));
+                sheetW = 1.0 - nearRiverLakeShare(river, lake.level, nearShareCover(waterLakeEdgeCover(lake, F), F - lake.surfaceDepthRangeM) * (1.0 - below));
             } else {
                 sheetW = 1.0 - below;
             }
@@ -398,7 +407,7 @@ fn main(in: NearRiverVOut) -> @location(0) vec4<f32> {
     if(hit.hasLake) {
         lh=waterLakeHitOnRay(U.origin,U.cameraPos,wp,nearWaterSampler,hit);
     }
-    let riverW=select(1.0,nearRiverLakeShare(hit, lh.level, lh.cover),lh.level>WATER_NO_LAKE);
+    let riverW=select(1.0,nearRiverLakeShare(hit, lh.level, nearShareCover(lh.cover, lh.insideM)),lh.level>WATER_NO_LAKE);
     if(riverW<=0.0) {discard;}
     let first=hit.listFirst;
     let end=hit.listEnd;
