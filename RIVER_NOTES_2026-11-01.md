@@ -313,3 +313,29 @@ Runs crashed twice (Chrome "frame detached" on valley-off, then a 15 min
 load timeout); a fresh run worked. Seen in two later runs only: an L-shaped
 dark crack on the scales hillside and a dotted line on the hillside-pinch
 view; suspected stale tiles after river data changes (not yet verified).
+
+Round 5, later (2026-11-03). Committed: 249a062 (zipper), 415e859 (valley
+cut tapers toward lakes; zigzag terrace much fainter, a faint line remains).
+
+Still open, with what is ruled out (`river-2026-11-03/`, dry lighting view
+91 with water off is the reliable test: these are shape, not colour):
+- **Dark line along the shore at a mouth** (o03-thalweg) and **gash at the
+  point** (o03-tip-sliver): river 2566's own shaping (skipping it in the
+  carve removes it), lying on the lake-level contour. NOT: junction field,
+  analytic fan, skew, end fade, containment, valley, joints, micro clamp,
+  micro detail (feature off), bank type, lake rims, soft cut (3 m). At the
+  mouth the ground comes from the field (core) or, with fields off, the
+  fan, so section terms cannot change it; the line survives all three
+  representations. The hydrology sampler's ground along a row through it
+  shows no trench (mouthOutline pixelsToRiver), so either the tiles' ground
+  differs from the sampler's there or the normals do. Next: compare the
+  tile's own height texels with the sampler at that spot (read back the
+  tile), and the normal texture with finite differences of the heights.
+- **Berm along the river** (o03-berm): the cut bank's face (all banks "none":
+  much softer). A gentler cut bank (step 2 m, slope 0.8, blend 30 m) barely
+  changes it; not committed.
+- **Stepped water outline** (o03-ribbon-steps), **straight-edged wing**
+  (o03-corner-wing), **crease line in the lake** (o03-corner-wing lighting):
+  open, as above.
+Harness: in one run the second patched arm often loses its page (Chrome
+"frame detached"); run arms one per invocation.
