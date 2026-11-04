@@ -12,18 +12,21 @@
 import { createWaterCommonWgsl, createWaterLookupWgsl } from './waterWgsl.js';
 import { RIVER_SECTION } from './riverSection.js';
 import { createRiverFieldWgsl } from './riverField.wgsl.js';
+import { RIVER_FIELD } from './riverField.js';
 
 // Group 1 of the terrain generator's pipelines (binding 0 is its biome uniform).
 // lakes, masks and sampler: the lake lookup of the shore materials (bankDetail).
 export const RIVER_CARVE_GROUP = 1;
 export const RIVER_CARVE_BINDINGS = Object.freeze({ index: 1, params: 2, lakes: 7, masks: 8, sampler: 9 });
 // Near water the micro detail may not cross its level (riverCarveMicroAt):
-// within MICRO_LEVEL_REACH_M of the water's edge (none beyond twice that), a
+// within MICRO_LEVEL_REACH_M of the water's edge (none beyond twice that, which
+// is as far as the field's signed distance goes: any more and it held
+// everywhere, flattening patches far from a river along its level's contour), a
 // dip stops MICRO_LEVEL_MARGIN_M above the level and a bump as far below it,
 // both rounded over MICRO_LEVEL_SOFT_M; the detail fades out within
 // MICRO_LEVEL_FADE_M (height) of the level, so the shoreline stays where the
 // field put it (puddles beside the channel, islands in it otherwise).
-const MICRO_LEVEL_REACH_M = 16;
+const MICRO_LEVEL_REACH_M = RIVER_FIELD.sdfM / 2;
 const MICRO_LEVEL_MARGIN_M = 0.1;
 const MICRO_LEVEL_SOFT_M = 0.25;
 const MICRO_LEVEL_FADE_M = 0.35;

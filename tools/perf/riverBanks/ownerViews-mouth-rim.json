@@ -1,0 +1,6 @@
+{
+  "views": [
+    { "name": "rim-t-mouth", "pos": [-131955.5, 1047.3, 2700.1], "look": [-131951.1, 1052.8, 2700.5], "up": [0, 1, 0], "note": "owner arrow: muddy band across the mouth where the river meets the lake" },
+    { "name": "rim-fan", "pos": [-131878.9, 2067.1, 1363.2], "look": [-131874.4, 2061.8, 1362.2], "up": [0, 1, 0], "note": "owner: muddy rim shining through at the river's end" }
+  ]
+}

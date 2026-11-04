@@ -318,8 +318,25 @@ reshaped hills far beyond any river; deleting it removed that too.
 **Tools added:** `riverMetrics/waterCracks.mjs` (thin gaps in the water, needs
 `w10` captures), `fieldProbe.js` `fieldLakeEdges`, `fieldWaterSteps`, `fieldCliffs`
 (slope the bake adds; top pages and steepest), `fieldAlong`, `fieldRiversNear`,
-`fieldGrid`, `fieldHitch` (frame gaps during a forced bake); bake stats `spilled`,
+`fieldGrid`, `fieldHitch` (frame gaps during a forced bake), `fieldMouthProfile`,
+`fieldSills` (bars at river ends, all rivers); bake stats `spilled`, `widest`,
 `ms.longest`.
+
+**After d7ee2a0 (uncommitted, for the owner's look):**
+- Muddy rim at river ends: a real bar of ground across the mouth. Traces stop at the
+  shore, the channel's depth faded by distance, and the lake's shelf stood in front
+  of it (depth 2.9 -> 1.6 -> 6.7 m). Rivers are now carried on into their lakes
+  (`extendRiverEnds`) and the channel fades by the lake's depth (`mouthFadeDepth`).
+  The last station now lies in real water, so level easing runs at ends where it
+  never did (rim-fan: 3.3 m drop in 6 m). Poses: `ownerViews-mouth-rim.json`.
+- Width: `riverWidthFactor` (river's own factor x reaches, at most 6x), each bank
+  limited by the ground so the level is not dragged down, steep rivers unchanged.
+  Depth grows with the root of the width; the bed flattens with width (`widenFlat`),
+  as a parabola's shallow margin grows with it and wide and shallow reads as mud.
+- Micro detail hold never ended: it reached past the signed distance's clamp
+  (`sdfM`), so it held across every page and flattened patches along W's contour.
+
+**Next (owner):** visual simplifications so coarse lakes and rivers load instantly and rendering costs a fraction of today.
 
 **Open:** rivers beyond the field radius have neither cut nor water. The default
 world (no `regionalTerrain=0`) has 234 regional rivers and no terrain sampler, so

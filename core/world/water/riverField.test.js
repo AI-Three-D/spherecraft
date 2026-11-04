@@ -1,5 +1,5 @@
-import { expect, it } from 'vitest';
-import { bakeRiverField, fieldCoords, fieldDir, pageKey, pageOf, riverFieldLayout, riverFieldTexelSdf, sampleRiverField, RIVER_FIELD } from './riverField.js';
+import { describe, expect, it } from 'vitest';
+import { bakeRiverField, extendRiverEnds, riverWidthFactor, fieldCoords, fieldDir, pageKey, pageOf, riverFieldLayout, riverFieldTexelSdf, sampleRiverField, RIVER_FIELD } from './riverField.js';
 import { buildRiverFieldTable, riverFieldHash } from './riverField.wgsl.js';
 
 const R = 131000;
@@ -52,7 +52,7 @@ it('cuts a channel under its level, keeps the water connected and only cuts', as
         return out;
     };
     const r = await bakeRiverField({ rivers: [{ rec: { points, stride: st, mouths: [] }, arc, rid: 7, levels }], L, sampleNatural, lakeAt: () => null, debug: true,
-        o: { ...RIVER_FIELD, meanderAmp: 0 } });
+        o: { ...RIVER_FIELD, meanderAmp: 0, widenRiver: 1, widenReach: 1 } });
     expect(r.stats.pages).toBeGreaterThan(10);
     // Sample the debug arrays at plane points.
     const valueAt = (x, y, arr) => {
@@ -268,4 +268,43 @@ it('continues the water\'s level on the dry ground beside it', async () => {
     // Just outside the lake's shore, far from the channel: the lake's level.
     expect(valueAt(146, 60, r.wet)).toBe(0);
     expect(Math.abs(valueAt(146, 60, r.level) - lakeLevel)).toBeLessThan(0.1);
+});
+
+describe('river ends in lakes', () => {
+    const R = 131072, st = 12;
+    const river = (extra) => {
+        const points = new Float32Array(3 * st);
+        [[0, 0, 1], [100 / R, 0, 1], [200 / R, 0, 1]].forEach((d, k) => {
+            const l = Math.hypot(...d);
+            points.set([d[0] / l, d[1] / l, d[2] / l, 50 - k, 8], k * st);
+        });
+        return { rec: { points, stride: st, mouths: [{ s: 200, sign: 1 }] }, arc: [0, 100, 200], levels: [50, 49, 48], rid: 1, ...extra };
+    };
+    it('carries only the ends that have a lake, straight on, at its level', () => {
+        expect(extendRiverEnds(river({}), R)).toEqual(river({}));
+        const e = extendRiverEnds(river({ destLevel: 47 }), R), n = e.rec.points.length / st;
+        expect(n).toBe(4);
+        expect(e.levels[3]).toBe(47);
+        expect(e.arc[3] - e.arc[2]).toBeCloseTo(60 + 2 * 8);
+        expect(e.rec.points[3 * st] * R).toBeCloseTo(276, 0);
+    });
+    it('shifts arc lengths and mouths past a carried source', () => {
+        const e = extendRiverEnds(river({ srcLevel: 51 }), R);
+        expect(e.arc[1]).toBeCloseTo(76);
+        expect(e.rec.mouths[0].s).toBeCloseTo(276);
+        expect(e.levels[0]).toBe(51);
+    });
+});
+
+describe('river width', () => {
+    it('is never narrower than traced, varies along a river and stays within widenMax', () => {
+        const seen = [];
+        for (let rid = 0; rid < 40; rid++) for (let x = 0; x <= 4000; x += 25) seen.push(riverWidthFactor(rid, x, 4000));
+        expect(Math.min(...seen)).toBeGreaterThanOrEqual(1);
+        expect(Math.max(...seen)).toBeLessThanOrEqual(RIVER_FIELD.widenMax);
+        expect(Math.max(...seen)).toBeGreaterThan(4);
+    });
+    it('comes back to the river\'s own width at its ends', () => {
+        expect(riverWidthFactor(3, 0, 4000)).toBeCloseTo(riverWidthFactor(3, 4000, 4000), 6);
+    });
 });
