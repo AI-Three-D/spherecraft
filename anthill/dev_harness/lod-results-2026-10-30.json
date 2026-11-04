@@ -1,0 +1,659 @@
+{
+  "date": "2026-10-30T13:30:37.830Z",
+  "method": "Frozen lighting, alternating density/mesh batches, GPU completion and timestamps; 1000 × 700 pixels",
+  "cases": [
+    {
+      "name": "overview",
+      "warmedMs": 7009.89999999851,
+      "stats": {
+        "completed": 72,
+        "discarded": 0,
+        "resident": 72,
+        "eligible": 54,
+        "triangles": 100308,
+        "fullTriangles": 101418,
+        "bytes": 9853776,
+        "workerMs": 9.800000004470348,
+        "maxWorkerMs": 26.100000001490116,
+        "maintenanceMs": 0.20000000298023224,
+        "maxMaintenanceMs": 1.0999999940395355,
+        "error": null
+      },
+      "levels": {
+        "0": 41,
+        "1": 13
+      },
+      "image": {
+        "pixels": 700000,
+        "different": 29,
+        "large": 1,
+        "max": 141,
+        "meanMaximumChannel": 0.00024142857142857142
+      },
+      "maintenance": {
+        "p50": 0.19999999552965164,
+        "p95": 0.30000000447034836,
+        "max": 0.9000000059604645
+      },
+      "densityMs": {
+        "p50": 7.600000001490116,
+        "p95": 8.300000004470348,
+        "max": 8.899999998509884
+      },
+      "meshMs": {
+        "p50": 8.100000001490116,
+        "p95": 9.5,
+        "max": 15.5
+      },
+      "gpuMs": {
+        "density": {
+          "p50": 6.766564,
+          "p95": 7.223932,
+          "max": 7.546135
+        },
+        "mesh": {
+          "p50": 6.891353,
+          "p95": 8.11421,
+          "max": 11.279078
+        }
+      },
+      "cpuMs": {
+        "density": {
+          "p50": 0.10000000149011612,
+          "p95": 0.29999999701976776,
+          "max": 0.30000000447034836
+        },
+        "mesh": {
+          "p50": 0.20000000298023224,
+          "p95": 0.4000000059604645,
+          "max": 1
+        }
+      },
+      "passes": {
+        "density Voxel ray search": {
+          "p50": 3.385116,
+          "p95": 3.77815,
+          "max": 3.860732
+        },
+        "density render": {
+          "p50": 6.694439,
+          "p95": 7.116392,
+          "max": 7.412762
+        },
+        "mesh Voxel geometry LOD hits": {
+          "p50": 0.082081,
+          "p95": 0.115832,
+          "max": 0.19758
+        },
+        "mesh Voxel ray search": {
+          "p50": 3.406615,
+          "p95": 4.293727,
+          "max": 5.68633
+        },
+        "mesh render": {
+          "p50": 6.79898,
+          "p95": 7.965086,
+          "max": 11.187537
+        }
+      }
+    },
+    {
+      "name": "cutaway",
+      "warmedMs": 7004.60000000149,
+      "stats": {
+        "completed": 172,
+        "discarded": 0,
+        "resident": 171,
+        "eligible": 85,
+        "triangles": 150923,
+        "fullTriangles": 156107,
+        "bytes": 23036712,
+        "workerMs": 7.299999997019768,
+        "maxWorkerMs": 36.399999998509884,
+        "maintenanceMs": 0.10000000149011612,
+        "maxMaintenanceMs": 1.0999999940395355,
+        "error": null
+      },
+      "levels": {
+        "0": 57,
+        "1": 28
+      },
+      "image": {
+        "pixels": 700000,
+        "different": 28,
+        "large": 0,
+        "max": 1,
+        "meanMaximumChannel": 0.00004
+      },
+      "maintenance": {
+        "p50": 0.19999999552965164,
+        "p95": 0.30000000447034836,
+        "max": 0.6000000014901161
+      },
+      "densityMs": {
+        "p50": 4.800000004470348,
+        "p95": 5.100000001490116,
+        "max": 5.600000001490116
+      },
+      "meshMs": {
+        "p50": 5.299999997019768,
+        "p95": 8.900000005960464,
+        "max": 11.299999997019768
+      },
+      "gpuMs": {
+        "density": {
+          "p50": 4.05048,
+          "p95": 4.23356,
+          "max": 4.54289
+        },
+        "mesh": {
+          "p50": 4.219019,
+          "p95": 6.798354,
+          "max": 7.504094
+        }
+      },
+      "cpuMs": {
+        "density": {
+          "p50": 0.10000000149011612,
+          "p95": 0.20000000298023224,
+          "max": 0.30000000447034836
+        },
+        "mesh": {
+          "p50": 0.20000000298023224,
+          "p95": 0.5,
+          "max": 1.2999999970197678
+        }
+      },
+      "passes": {
+        "density Voxel ray search": {
+          "p50": 2.057927,
+          "p95": 2.077509,
+          "max": 2.251591
+        },
+        "density render": {
+          "p50": 3.987314,
+          "p95": 4.154144,
+          "max": 4.460724
+        },
+        "mesh Voxel geometry LOD hits": {
+          "p50": 0.106748,
+          "p95": 0.149955,
+          "max": 0.246537
+        },
+        "mesh Voxel ray search": {
+          "p50": 2.071136,
+          "p95": 3.38174,
+          "max": 4.113145
+        },
+        "mesh render": {
+          "p50": 4.155437,
+          "p95": 6.616399,
+          "max": 7.432429
+        }
+      }
+    },
+    {
+      "name": "anthill",
+      "warmedMs": 7006.39999999851,
+      "stats": {
+        "completed": 218,
+        "discarded": 0,
+        "resident": 217,
+        "eligible": 66,
+        "triangles": 85642,
+        "fullTriangles": 85662,
+        "bytes": 28390736,
+        "workerMs": 15,
+        "maxWorkerMs": 36.399999998509884,
+        "maintenanceMs": 0,
+        "maxMaintenanceMs": 1.0999999940395355,
+        "error": null
+      },
+      "levels": {
+        "0": 65,
+        "1": 1
+      },
+      "image": {
+        "pixels": 700000,
+        "different": 266,
+        "large": 0,
+        "max": 2,
+        "meanMaximumChannel": 0.00038714285714285717
+      },
+      "maintenance": {
+        "p50": 0.10000000149011612,
+        "p95": 0.29999999701976776,
+        "max": 0.4000000059604645
+      },
+      "densityMs": {
+        "p50": 4.600000001490116,
+        "p95": 4.899999998509884,
+        "max": 5.199999995529652
+      },
+      "meshMs": {
+        "p50": 5.100000001490116,
+        "p95": 9.399999998509884,
+        "max": 10
+      },
+      "gpuMs": {
+        "density": {
+          "p50": 3.900857,
+          "p95": 4.152145,
+          "max": 4.274019
+        },
+        "mesh": {
+          "p50": 4.066021,
+          "p95": 6.799729,
+          "max": 8.29404
+        }
+      },
+      "cpuMs": {
+        "density": {
+          "p50": 0.10000000149011612,
+          "p95": 0.20000000298023224,
+          "max": 0.20000000298023224
+        },
+        "mesh": {
+          "p50": 0.20000000298023224,
+          "p95": 0.3999999985098839,
+          "max": 0.6999999955296516
+        }
+      },
+      "passes": {
+        "density Voxel ray search": {
+          "p50": 1.447312,
+          "p95": 1.472477,
+          "max": 1.624558
+        },
+        "density render": {
+          "p50": 3.857816,
+          "p95": 4.099812,
+          "max": 4.206061
+        },
+        "mesh Voxel geometry LOD hits": {
+          "p50": 0.078207,
+          "p95": 0.140039,
+          "max": 0.364204
+        },
+        "mesh Voxel ray search": {
+          "p50": 1.468686,
+          "p95": 2.80654,
+          "max": 2.957289
+        },
+        "mesh render": {
+          "p50": 4.022231,
+          "p95": 6.659523,
+          "max": 8.195
+        }
+      }
+    },
+    {
+      "name": "chamber",
+      "warmedMs": 7012.89999999851,
+      "stats": {
+        "completed": 218,
+        "discarded": 0,
+        "resident": 217,
+        "eligible": 0,
+        "triangles": 0,
+        "fullTriangles": 0,
+        "bytes": 28390736,
+        "workerMs": 15,
+        "maxWorkerMs": 36.399999998509884,
+        "maintenanceMs": 0,
+        "maxMaintenanceMs": 2.3000000044703484,
+        "error": null
+      },
+      "levels": {},
+      "image": {
+        "pixels": 700000,
+        "different": 0,
+        "large": 0,
+        "max": 0,
+        "meanMaximumChannel": 0
+      },
+      "maintenance": {
+        "p50": 0,
+        "p95": 0.10000000149011612,
+        "max": 0.30000000447034836
+      },
+      "densityMs": {
+        "p50": 13.899999998509884,
+        "p95": 17.299999997019768,
+        "max": 18.400000005960464
+      },
+      "meshMs": {
+        "p50": 14,
+        "p95": 16.299999997019768,
+        "max": 17.200000002980232
+      },
+      "gpuMs": {
+        "density": {
+          "p50": 12.958386,
+          "p95": 15.637178,
+          "max": 16.378
+        },
+        "mesh": {
+          "p50": 12.948762,
+          "p95": 15.150185,
+          "max": 15.371057
+        }
+      },
+      "cpuMs": {
+        "density": {
+          "p50": 0.19999999552965164,
+          "p95": 0.29999999701976776,
+          "max": 0.4000000059604645
+        },
+        "mesh": {
+          "p50": 0.19999999552965164,
+          "p95": 0.5,
+          "max": 0.6000000014901161
+        }
+      },
+      "passes": {
+        "density Voxel ray search": {
+          "p50": 4.539889,
+          "p95": 5.59608,
+          "max": 6.414236
+        },
+        "density render": {
+          "p50": 12.900553,
+          "p95": 15.515014,
+          "max": 16.25721
+        },
+        "mesh Voxel ray search": {
+          "p50": 4.538347,
+          "p95": 5.29521,
+          "max": 5.712955
+        },
+        "mesh render": {
+          "p50": 12.872929,
+          "p95": 15.022146,
+          "max": 15.318266
+        }
+      }
+    },
+    {
+      "name": "long-tunnel",
+      "warmedMs": 7016,
+      "stats": {
+        "completed": 436,
+        "discarded": 0,
+        "resident": 431,
+        "eligible": 186,
+        "triangles": 264398,
+        "fullTriangles": 265878,
+        "bytes": 51075232,
+        "workerMs": 4.0999999940395355,
+        "maxWorkerMs": 36.399999998509884,
+        "maintenanceMs": 0.4000000059604645,
+        "maxMaintenanceMs": 2.3000000044703484,
+        "error": null
+      },
+      "levels": {
+        "0": 169,
+        "1": 17
+      },
+      "image": {
+        "pixels": 700000,
+        "different": 113,
+        "large": 0,
+        "max": 2,
+        "meanMaximumChannel": 0.00016571428571428572
+      },
+      "maintenance": {
+        "p50": 0.30000000447034836,
+        "p95": 0.5,
+        "max": 0.8000000044703484
+      },
+      "densityMs": {
+        "p50": 19.799999997019768,
+        "p95": 22.30000000447035,
+        "max": 23.100000001490116
+      },
+      "meshMs": {
+        "p50": 21.299999997019768,
+        "p95": 23.5,
+        "max": 24.399999998509884
+      },
+      "gpuMs": {
+        "density": {
+          "p50": 18.409053,
+          "p95": 20.837432,
+          "max": 21.58342
+        },
+        "mesh": {
+          "p50": 18.814172,
+          "p95": 21.289842,
+          "max": 22.045871
+        }
+      },
+      "cpuMs": {
+        "density": {
+          "p50": 0.20000000298023224,
+          "p95": 0.30000000447034836,
+          "max": 0.3999999985098839
+        },
+        "mesh": {
+          "p50": 0.5,
+          "p95": 0.6000000014901161,
+          "max": 1.4000000059604645
+        }
+      },
+      "passes": {
+        "density Voxel ray search": {
+          "p50": 8.935322,
+          "p95": 10.256344,
+          "max": 11.172579
+        },
+        "density render": {
+          "p50": 18.316386,
+          "p95": 20.782015,
+          "max": 21.457339
+        },
+        "mesh Voxel geometry LOD hits": {
+          "p50": 0.169997,
+          "p95": 0.188581,
+          "max": 0.224329
+        },
+        "mesh Voxel ray search": {
+          "p50": 9.159986,
+          "p95": 10.349593,
+          "max": 11.427867
+        },
+        "mesh render": {
+          "p50": 18.680215,
+          "p95": 21.197051,
+          "max": 21.947707
+        }
+      }
+    }
+  ],
+  "device": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "description": "Apple M1 Pro",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36",
+    "timestamps": true
+  },
+  "editVisibility": {
+    "changed": 8787,
+    "before": [
+      -111.234375,
+      -35.20930099487305,
+      -0.20930807292461395,
+      1
+    ],
+    "immediate": [
+      66.79768371582031,
+      -35.031211853027344,
+      -0.031213304027915,
+      1
+    ],
+    "reference": [
+      66.79768371582031,
+      -35.031211853027344,
+      -0.03121332824230194,
+      1
+    ],
+    "error": 2.421438694000244e-8,
+    "passed": true
+  },
+  "transitions": {
+    "reveal": [
+      {
+        "fraction": 0,
+        "pixels": 700000,
+        "different": 0,
+        "large": 0,
+        "max": 0,
+        "active": 0,
+        "maxCoverage": 0
+      },
+      {
+        "fraction": 0.25,
+        "pixels": 700000,
+        "different": 30,
+        "large": 1,
+        "max": 141,
+        "active": 371,
+        "maxCoverage": 0.25
+      },
+      {
+        "fraction": 0.5,
+        "pixels": 700000,
+        "different": 30,
+        "large": 1,
+        "max": 141,
+        "active": 371,
+        "maxCoverage": 0.5
+      },
+      {
+        "fraction": 0.75,
+        "pixels": 700000,
+        "different": 32,
+        "large": 1,
+        "max": 141,
+        "active": 371,
+        "maxCoverage": 0.75
+      },
+      {
+        "fraction": 1,
+        "pixels": 700000,
+        "different": 33,
+        "large": 1,
+        "max": 141,
+        "active": 371,
+        "maxCoverage": 1
+      }
+    ],
+    "stable": {
+      "pixels": 700000,
+      "different": 0,
+      "large": 0,
+      "max": 0
+    },
+    "zoom": [
+      {
+        "mpp": 0.21,
+        "pixels": 700000,
+        "different": 84,
+        "large": 0,
+        "max": 1,
+        "levels": [
+          0,
+          1,
+          2
+        ],
+        "active": 312
+      },
+      {
+        "mpp": 0.42,
+        "pixels": 700000,
+        "different": 33,
+        "large": 1,
+        "max": 141,
+        "levels": [
+          1,
+          0,
+          2
+        ],
+        "active": 371
+      },
+      {
+        "mpp": 0.84,
+        "pixels": 700000,
+        "different": 9,
+        "large": 0,
+        "max": 1,
+        "levels": [
+          1,
+          0,
+          2
+        ],
+        "active": 395
+      },
+      {
+        "mpp": 1.68,
+        "pixels": 700000,
+        "different": 16,
+        "large": 0,
+        "max": 1,
+        "levels": [
+          2,
+          1,
+          0
+        ],
+        "active": 400
+      },
+      {
+        "mpp": 0.84,
+        "pixels": 700000,
+        "different": 9,
+        "large": 0,
+        "max": 1,
+        "levels": [
+          1,
+          0,
+          2
+        ],
+        "active": 395
+      },
+      {
+        "mpp": 0.42,
+        "pixels": 700000,
+        "different": 33,
+        "large": 1,
+        "max": 141,
+        "levels": [
+          1,
+          0,
+          2
+        ],
+        "active": 371
+      },
+      {
+        "mpp": 0.21,
+        "pixels": 700000,
+        "different": 84,
+        "large": 0,
+        "max": 1,
+        "levels": [
+          0,
+          1,
+          2
+        ],
+        "active": 312
+      }
+    ]
+  },
+  "races": {
+    "raced": true,
+    "discarded": 1,
+    "error": null,
+    "bytes": 49935312,
+    "budget": 67108864
+  },
+  "errors": []
+}

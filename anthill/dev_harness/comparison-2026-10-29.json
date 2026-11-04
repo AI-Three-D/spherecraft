@@ -1,0 +1,169 @@
+{
+  "date": "2026-10-29T19:55:48.242Z",
+  "method": "Interleaved original/optimized batches; completed frames and GPU timestamps; fixed cameras and lighting",
+  "cases": [
+    {
+      "digs": 0,
+      "mode": "overview",
+      "before": {
+        "frameMs": 18.7171874998603,
+        "gpuP50": 15.408473,
+        "gpuPassP50": {
+          "Voxel ray search": 8.714909,
+          "render": 12.94897
+        }
+      },
+      "after": {
+        "frameMs": 15.390625,
+        "gpuP50": 13.44642,
+        "gpuPassP50": {
+          "Voxel ray search": 6.591049,
+          "render": 11.025749
+        }
+      },
+      "state": {
+        "hasAdditions": false,
+        "baselineSafe": 1,
+        "normalBytes": 23887872,
+        "densityBytes": 4194304
+      }
+    },
+    {
+      "digs": 1024,
+      "mode": "overview",
+      "before": {
+        "frameMs": 17.26250000006985,
+        "gpuP50": 16.026297,
+        "gpuPassP50": {
+          "Voxel ray search": 7.29593,
+          "render": 12.002692
+        }
+      },
+      "after": {
+        "frameMs": 15.685937499860302,
+        "gpuP50": 14.13116,
+        "gpuPassP50": {
+          "Voxel ray search": 8.068669,
+          "render": 11.608697
+        }
+      },
+      "state": {
+        "hasAdditions": false,
+        "baselineSafe": 1,
+        "normalBytes": 66998016,
+        "densityBytes": 134217728
+      }
+    },
+    {
+      "digs": 1024,
+      "mode": "overview",
+      "reuse": true,
+      "before": {
+        "frameMs": 18.370312500046566,
+        "gpuP50": 15.333141,
+        "gpuPassP50": {
+          "Voxel ray search": 8.323332,
+          "render": 12.484267
+        }
+      },
+      "after": {
+        "frameMs": 9.685937499976717,
+        "gpuP50": 5.983284,
+        "gpuPassP50": {
+          "render": 5.983284
+        }
+      },
+      "state": {
+        "hasAdditions": false,
+        "baselineSafe": 1,
+        "normalBytes": 66998016,
+        "densityBytes": 134217728
+      }
+    },
+    {
+      "digs": 1024,
+      "mode": "chamber",
+      "before": {
+        "frameMs": 39.332812499953434,
+        "gpuP50": 35.994242,
+        "gpuPassP50": {
+          "Voxel ray search": 17.634898,
+          "render": 33.19041
+        }
+      },
+      "after": {
+        "frameMs": 26.514062500093132,
+        "gpuP50": 25.816023,
+        "gpuPassP50": {
+          "Voxel ray search": 11.153121,
+          "render": 23.008232
+        }
+      },
+      "state": {
+        "hasAdditions": false,
+        "baselineSafe": 1,
+        "normalBytes": 66998016,
+        "densityBytes": 134217728
+      }
+    },
+    {
+      "digs": 1024,
+      "mode": "tunnel",
+      "length": 16,
+      "before": {
+        "frameMs": 31.671875,
+        "gpuP50": 29.134973,
+        "gpuPassP50": {
+          "Voxel ray search": 14.444987,
+          "render": 26.675759
+        }
+      },
+      "after": {
+        "frameMs": 31.9140625,
+        "gpuP50": 30.156956,
+        "gpuPassP50": {
+          "Voxel ray search": 15.105685,
+          "render": 27.651745
+        }
+      },
+      "state": {
+        "hasAdditions": false,
+        "baselineSafe": 1,
+        "normalBytes": 66998016,
+        "densityBytes": 134217728
+      }
+    },
+    {
+      "digs": 1024,
+      "mode": "tunnel",
+      "length": 192,
+      "before": {
+        "frameMs": 34.601562500116415,
+        "gpuP50": 31.979637,
+        "gpuPassP50": {
+          "Voxel ray search": 15.796634,
+          "render": 29.934001
+        }
+      },
+      "after": {
+        "frameMs": 33.37656250002328,
+        "gpuP50": 31.818931,
+        "gpuPassP50": {
+          "Voxel ray search": 15.69901,
+          "render": 29.484842
+        }
+      },
+      "state": {
+        "hasAdditions": false,
+        "baselineSafe": 1,
+        "normalBytes": 66998016,
+        "densityBytes": 134217728
+      }
+    }
+  ],
+  "errors": [],
+  "device": {
+    "description": "Apple M1 Pro",
+    "timestamps": true
+  }
+}
