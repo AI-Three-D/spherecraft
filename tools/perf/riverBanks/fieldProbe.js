@@ -218,3 +218,94 @@ export async function fieldHitch({ idleMs = 2000 } = {}) {
     const during = await gaps(() => done);
     return { ran: svc.stats !== stamp, idle: facts(idle), during: facts(during), bakeMs: Math.round(performance.now() - t1), ms: svc.stats?.ms ?? null };
 }
+// Where a view's centre hits water, the river nearest it, and that river's
+// profile through the hit every stepM: metres along, level, ground, water depth,
+// natural ground, lake level there (null: none), signed distance.
+export async function fieldMouthProfile({ pos, look, spanM = 160, stepM = 6 }) {
+    const { sampleRiverField } = await import('/core/world/water/riverField.js');
+    const g = window.gameEngine, s = g.waterService, w = g.waterGpuData, svc = g.riverFieldService, L = svc.layout, R = L.R;
+    const l0 = Math.hypot(...look.map((v, i) => v - pos[i])), f = look.map((v, i) => (v - pos[i]) / l0);
+    let hit = null;
+    for (let t = 0; t < 3000 && !hit; t += 1) {
+        const p = pos.map((v, i) => v + f[i] * t), r = Math.hypot(...p), d = p.map(v => v / r);
+        const a = sampleRiverField(svc.pages, L, d), lake = w.lakeEdgeAt(d);
+        const level = a.found && a.sdf > 0 ? a.W : lake && lake.inside > 0 ? lake.level : null;
+        if (level !== null && r - R <= level) hit = d;
+    }
+    if (!hit) return { hit: null };
+    let best = null;
+    for (const [id, rec] of s.riverRecs) {
+        const P = rec.points, st = rec.stride, n = P.length / st;
+        for (let k = 0; k < n; k++) {
+            const c = P[k * st] * hit[0] + P[k * st + 1] * hit[1] + P[k * st + 2] * hit[2];
+            if (!best || c > best.c) best = { c, id, k, rec };
+        }
+    }
+    const { rec, id, k } = best, P = rec.points, st = rec.stride, n = P.length / st, arc = g.waterGpuData._arcLengths(rec);
+    const dirs = [], at = [];
+    for (let q = arc[k] - spanM; q <= arc[k] + spanM; q += stepM) {
+        if (q < 0) continue;
+        let i = 0;
+        while (i < n - 2 && arc[i + 1] < q) i++;
+        // Past the trace's end: straight on along its last segment.
+        const t = (q - arc[i]) / Math.max(arc[i + 1] - arc[i], 1e-6), d0 = [0, 1, 2].map(c => P[i * st + c] + (P[(i + 1) * st + c] - P[i * st + c]) * t), l = Math.hypot(...d0);
+        dirs.push(d0[0] / l, d0[1] / l, d0[2] / l, 0); at.push(q);
+    }
+    const nat = await s._sampler.sampleDirsNatural(Float32Array.from(dirs));
+    const rows = at.map((q, i) => {
+        const d = [dirs[i * 4], dirs[i * 4 + 1], dirs[i * 4 + 2]], a = sampleRiverField(svc.pages, L, d), lake = w.lakeEdgeAt(d), ground = nat[i] + a.delta;
+        return [Math.round(q - arc[k]), +a.W.toFixed(2), +ground.toFixed(2), +(a.W - ground).toFixed(2), +nat[i].toFixed(2), lake && lake.inside > 0 ? +lake.level.toFixed(2) : null, +a.sdf.toFixed(1)];
+    });
+    return { id, length: Math.round(arc[n - 1]), atS: Math.round(arc[k]), offM: +(Math.acos(Math.min(1, best.c)) * R).toFixed(1), cols: 's W ground depth natural lake sdf', rows };
+}
+// The hump of ground at river ends in lakes: along every baked river's traced
+// line, from backM before its end to aheadM straight on past it, the largest
+// loss of water depth that recovers again (a bar across the mouth, m).
+export async function fieldSills({ backM = 50, aheadM = 80, stepM = 3 } = {}) {
+    const { sampleRiverField } = await import('/core/world/water/riverField.js');
+    const g = window.gameEngine, s = g.waterService, w = g.waterGpuData, svc = g.riverFieldService, L = svc.layout;
+    const lines = [], dirs = [];
+    for (const id of svc.rivers.keys()) {
+        const rec = s.riverRecs.get(id);
+        if (!rec) continue;
+        const P = rec.points, st = rec.stride, n = P.length / st, arc = w._arcLengths(rec), total = arc[n - 1];
+        for (const end of ['dest', 'source']) {
+            if (end === 'dest' ? rec.dest?.type !== 'lake' : !(s.rivers[id]?.fromLake >= 0)) continue;
+            if (total < backM) continue;
+            const line = { id, end, from: dirs.length / 4, count: 0 };
+            for (let q = -backM; q <= aheadM; q += stepM) {
+                // q: metres past the end, along the river toward its lake.
+                const a = end === 'dest' ? total + q : -q;
+                let i = 0;
+                while (i < n - 2 && arc[i + 1] < a) i++;
+                const t = (a - arc[i]) / Math.max(arc[i + 1] - arc[i], 1e-6), d0 = [0, 1, 2].map(c => P[i * st + c] + (P[(i + 1) * st + c] - P[i * st + c]) * t), l = Math.hypot(...d0);
+                dirs.push(d0[0] / l, d0[1] / l, d0[2] / l, 0); line.count++;
+            }
+            lines.push(line);
+        }
+    }
+    const nat = await s._sampler.sampleDirsNatural(Float32Array.from(dirs));
+    const out = [];
+    for (const line of lines) {
+        const depth = [];
+        for (let k = 0; k < line.count; k++) {
+            const o = line.from + k, d = [dirs[o * 4], dirs[o * 4 + 1], dirs[o * 4 + 2]], a = sampleRiverField(svc.pages, L, d);
+            depth.push(a.found && a.sdf > 0 ? a.W - (nat[o] + a.delta) : NaN);
+        }
+        // Largest min(left max, right max) - depth at a point.
+        let hump = 0, at = 0, lo = 0, where = 0;
+        const right = new Float64Array(depth.length + 1).fill(-Infinity);
+        for (let k = depth.length - 1; k >= 0; k--) right[k] = Math.max(right[k + 1], Number.isFinite(depth[k]) ? depth[k] : -Infinity);
+        let left = -Infinity;
+        for (let k = 0; k < depth.length; k++) {
+            if (!Number.isFinite(depth[k])) continue;
+            const h = Math.min(left, right[k + 1]) - depth[k];
+            if (h > hump) { hump = h; at = -backM + k * stepM; lo = depth[k]; where = line.from + k; }
+            left = Math.max(left, depth[k]);
+        }
+        out.push({ id: line.id, end: line.end, hump: +hump.toFixed(2), atM: at, depthThere: +lo.toFixed(2), dir: [dirs[where * 4], dirs[where * 4 + 1], dirs[where * 4 + 2]].map(v => +v.toFixed(7)) });
+    }
+    out.sort((a, b) => b.hump - a.hump);
+    const v = out.map(x => x.hump).sort((a, b) => a - b), q = f => v.length ? v[Math.min(v.length - 1, Math.floor(f * v.length))] : null;
+    return { ends: out.length, p50: q(.5), p90: q(.9), max: q(1), over05: v.filter(x => x > .5).length, over1: v.filter(x => x > 1).length, shallow: out.filter(x => x.hump > .5 && x.depthThere < 1.5).length, top: out.slice(0, 8) };
+}

@@ -66,9 +66,15 @@ export const RIVER_FIELD = Object.freeze({
     mouthBankM: 24, mouthNearM: 80,
     // Smooth min with the natural ground (m of height): cuts only.
     sminK: 0.3,
-    // Into a lake the channel fades out over fadeM + fadePerHw x hw (m) and
-    // widens by fadeWiden.
+    // Into a lake the channel fades out and widens by fadeWiden: as the lake's
+    // bed goes below it (mouthFadeDepth: lake depth in channel depths), so no bar
+    // stands across its mouth, the mud showing through on top (owner's muddy
+    // rim). Traces stop at the shore, so rivers are carried on into their lakes
+    // (extendRiverEnds), mouthCarryM + mouthCarryPerHw x hw (m), all faded out
+    // mouthTailM before the end. Without lake water at an end: over fadeM +
+    // fadePerHw x hw (m) from the mouth.
     fadeM: 30, fadePerHw: 3, fadeWiden: 0.6,
+    mouthFadeDepth: [0.6, 1.2], mouthCarryM: 60, mouthCarryPerHw: 2, mouthTailM: 16,
     // Gaussian blur of Δ (sigma, m), fully from the water's edge, none blurFromM inside it.
     blurM: 1.5, blurFromM: 3,
     // Signed distance clamp (m).
@@ -77,6 +83,17 @@ export const RIVER_FIELD = Object.freeze({
     // own, two octaves (m): even banks read as dug (owner 2026-11-04: shores
     // were too smooth in many places; ragged is good).
     shoreAmp: 0.22, shoreWaveM: [37, 14],
+    // Width: never narrower than traced. A river's own factor up to widenRiver
+    // (squared: few are that wide) times reaches up to widenReach, widenMax at
+    // most, in waves of widenWaveM (m), toward the ends widenEndM back to the
+    // river's own. Each bank goes only as far as the ground stays above the water
+    // (forced wider, the level would drop for all that lies downstream), and
+    // steep rivers stay as they are (fall widenFall[0]..[1] fades it out).
+    // Depth grows with the root of the width, and the bed flattens toward
+    // widenFlat (the cross-section's power, 2 at the traced width, full at 3x):
+    // a parabola's shallow margin grows with the width, and wide and shallow
+    // is mud.
+    widenRiver: 3, widenReach: 4, widenMax: 6, widenWaveM: [250, 700], widenEndM: 120, widenFall: [0.04, 0.15], widenFlat: 4,
     // Meanders: the centre swings meanderAmp river widths either way over
     // meanderWave widths (two octaves), on flat ground only (cross slope
     // meanderFlat[0]..[1] fades it out), tapered over half a wavelength
@@ -154,6 +171,33 @@ function riverPlane(river, R) {
 }
 
 /**
+ * A river with its ends in lakes carried on straight into them: { rec, arc,
+ * levels, srcLevel, destLevel, ... }, one more point at each such end.
+ */
+export function extendRiverEnds(river, R, o = RIVER_FIELD) {
+    const { rec, arc, levels } = river, P = rec.points, st = rec.stride, n = P.length / st;
+    if (n < 2) return river;
+    const carry = (a, b) => {
+        const t = [P[a * st] - P[b * st], P[a * st + 1] - P[b * st + 1], P[a * st + 2] - P[b * st + 2]], l = Math.hypot(t[0], t[1], t[2]);
+        if (!(l > 0)) return null;
+        const len = o.mouthCarryM + o.mouthCarryPerHw * P[a * st + 4], row = P.slice(a * st, (a + 1) * st);
+        const d = norm([P[a * st] + t[0] / l * len / R, P[a * st + 1] + t[1] / l * len / R, P[a * st + 2] + t[2] / l * len / R]);
+        row[0] = d[0]; row[1] = d[1]; row[2] = d[2];
+        return { row, len };
+    };
+    const head = Number.isFinite(river.srcLevel) ? carry(0, 1) : null, tail = Number.isFinite(river.destLevel) ? carry(n - 1, n - 2) : null;
+    if (!head && !tail) return river;
+    const m = n + (head ? 1 : 0) + (tail ? 1 : 0), off = head ? 1 : 0, shift = head ? head.len : 0;
+    const points = new P.constructor(m * st), arc2 = new Float64Array(m), levels2 = new Float64Array(m);
+    points.set(P, off * st);
+    for (let k = 0; k < n; k++) { arc2[k + off] = arc[k] + shift; levels2[k + off] = levels[k]; }
+    if (head) { points.set(head.row, 0); levels2[0] = river.srcLevel; }
+    if (tail) { points.set(tail.row, (m - 1) * st); arc2[m - 1] = arc2[m - 2] + tail.len; levels2[m - 1] = river.destLevel; }
+    const mouths = (rec.mouths ?? []).map(q => ({ ...q, s: q.s + shift }));
+    return { ...river, rec: { ...rec, points, mouths }, arc: arc2, levels: levels2 };
+}
+
+/**
  * Pages a set of rivers needs: within reach of every segment and around
  * every end. rivers: [{ rec, arc }]. Returns Map key -> Set of river indices.
  */
@@ -173,7 +217,8 @@ export function riverFieldPages(rivers, L, o = RIVER_FIELD) {
             const d = [P[k * st], P[k * st + 1], P[k * st + 2]];
             const hw = P[k * st + 4], end = k === 0 || k === n - 1;
             const fade = end ? o.fadeM + o.fadePerHw * hw : 0;
-            const ext = hw * (1 + 2 * o.meanderAmp + o.fadeWiden + o.shoreAmp) + o.reachM + o.marginM + fade;   // meanders: up to amp x width
+            const wider = riverWidthFactor(river.rid ?? 0, river.arc[k], river.arc[n - 1], o) - 1;
+            const ext = hw * (1 + 2 * o.meanderAmp + o.fadeWiden + o.shoreAmp + wider * (1 + o.shoreAmp)) + o.reachM + o.marginM + fade;   // meanders: up to amp x width
             const ref = Math.abs(d[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
             const e1 = norm(cross(ref, d)), e2 = cross(d, e1);
             // Along the segment to the next point too.
@@ -192,6 +237,23 @@ export function riverFieldPages(rivers, L, o = RIVER_FIELD) {
 }
 
 // Pool-adjacent-violators: the non-increasing least-squares fit of v.
+// Value noise along a river, -1..1.
+function vn(x, sd) {
+    const i0 = Math.floor(x), f = x - i0, q = f * f * f * (f * (f * 6 - 15) + 10);
+    const a = riverHash(i0, sd), b = riverHash(i0 + 1, sd);
+    return (a + (b - a) * q) * 2 - 1;
+}
+
+// How many times wider than traced a river wants to be at s (m) of total.
+export function riverWidthFactor(rid, s, total, o = RIVER_FIELD) {
+    const seed = ((rid | 0) * 48271 + 0x3a91) >>> 0, r = riverHash(0, seed), w = riverHash(1, seed);
+    const own = 1 + (o.widenRiver - 1) * r * r;
+    const lambda = o.widenWaveM[0] + (o.widenWaveM[1] - o.widenWaveM[0]) * w;
+    const n = 0.65 * vn(s / lambda, seed + 3) + 0.35 * vn(s / (0.37 * lambda), seed + 7);
+    const reach = (o.widenReach - 1) * smoothstep(-0.05, 0.7, n) * smoothstep(0, o.widenEndM, Math.min(s, total - s));
+    return Math.min(o.widenMax, own * (1 + reach));
+}
+
 // A moving average along stations, twice, ends held: keeps a level non-increasing.
 function smoothAlong(v, h) {
     const n = v.length, t = new Float64Array(n);
@@ -218,8 +280,8 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
     // ds > 0 even for a degenerate trace (a zero spacing made the smoothing windows infinite).
     const S = { m, ds: Math.max(L / (m - 1), 1e-3), s: new Float64Array(m), x: new Float64Array(m), y: new Float64Array(m), tx: new Float64Array(m), ty: new Float64Array(m),
         hw: new Float64Array(m), hwL: new Float64Array(m), hwR: new Float64Array(m), D: new Float64Array(m), W: new Float64Array(m), skew: new Float64Array(m),
-        BL: new Float64Array(m), BR: new Float64Array(m), EL: new Float64Array(m), ER: new Float64Array(m), fade: new Float64Array(m), mouth: new Float64Array(m), lake: new Uint8Array(m) };
-    const tauL = new Float64Array(m), tauR = new Float64Array(m), relax = new Float64Array(m);
+        BL: new Float64Array(m), BR: new Float64Array(m), EL: new Float64Array(m), ER: new Float64Array(m), wide: new Float64Array(m).fill(1), fade: new Float64Array(m), mouth: new Float64Array(m), lake: new Uint8Array(m) };
+    const tauL = new Float64Array(m), tauR = new Float64Array(m), relax = new Float64Array(m), past = new Uint8Array(m);
     const mouths = rec.mouths ?? [];
     let k = 0;
     const wl = levels;
@@ -249,11 +311,6 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
     }
     const hs = Math.max(1, Math.round(o.profileSmoothM / S.ds / 2));
     smoothAlong(S.W, hs); smoothAlong(S.D, hs);
-    const vn = (x, sd) => {
-        const i0 = Math.floor(x), f = x - i0, q = f * f * f * (f * (f * 6 - 15) + 10);
-        const a = riverHash(i0, sd), b = riverHash(i0 + 1, sd);
-        return (a + (b - a) * q) * 2 - 1;
-    };
     // Each bank's own line.
     {
         const seed = ((rid | 0) * 104729 + 0x2f6b) >>> 0, [w0, w1] = o.shoreWaveM;
@@ -305,6 +362,40 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
             S.tx[i] = dx / l; S.ty[i] = dy / l;
         }
     }
+    // Width, on the final line. Per bank: as far as asked, or where the ground
+    // would no longer hold the water.
+    let widened = 1;
+    {
+        const total = S.s[m - 1], keep = [new Float64Array(m), new Float64Array(m)], step = 4;
+        for (let i = 0; i < m; i++) {
+            const a = Math.max(0, i - 8), b = Math.min(m - 1, i + 8), fall = Math.abs(S.W[a] - S.W[b]) / Math.max(S.s[b] - S.s[a], S.ds);
+            const want = (riverWidthFactor(rid, S.s[i], total, o) - 1) * (1 - smoothstep(o.widenFall[0], o.widenFall[1], fall)) * S.hw[i];
+            const nx = -S.ty[i], ny = S.tx[i];
+            [1, -1].forEach((side, k2) => {
+                const edge = side > 0 ? S.hwL[i] : S.hwR[i], last = Math.max(...o.containProbeM);
+                let room = 0;
+                for (let d = step; d <= want + last + step; d += step) {
+                    if (!(groundAt(S.x[i] + nx * side * (edge + d), S.y[i] + ny * side * (edge + d)) >= S.W[i] + o.containM)) break;
+                    room = d;
+                }
+                keep[k2][i] = Math.min(want, Math.max(0, room - last));
+            });
+        }
+        const held = keep.map(v => Float64Array.from(v));
+        const h = Math.max(1, Math.round(o.widenEndM / 4 / S.ds));
+        for (const v of keep) smoothAlong(v, h);
+        for (let i = 0; i < m; i++) {
+            // The smoothing may not pass the ground's limit by much: a little
+            // the containment takes up, more would lower the level for good.
+            const hw = S.hw[i], most = (o.widenMax - 1) * hw;
+            const l = Math.min(keep[0][i], held[0][i] + 2 * S.ds, most), r = Math.min(keep[1][i], held[1][i] + 2 * S.ds, most);
+            S.hwL[i] += l; S.hwR[i] += r;
+            const f = 1 + (l + r) / (2 * hw);
+            S.hw[i] = hw * f; S.D[i] *= Math.sqrt(f); S.wide[i] = f;
+            widened = Math.max(widened, f);
+        }
+    }
+    S.widened = widened;
     // Where the centre enters its end lakes' water (the run of lake water from
     // each end, gaps of a few stations for shore wiggles): the channel fades
     // from there, not from the trace's mouth station, which can lie on land
@@ -320,18 +411,34 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
     };
     const eDest = Number.isFinite(river.destLevel) ? runEnd(m - 1, -1) : -1, eSrc = Number.isFinite(river.srcLevel) ? runEnd(0, 1) : -1;
     const ends = [];
-    if (eDest >= 0) ends.push({ s: S.s[eDest], sign: 1 });
-    if (eSrc >= 0) ends.push({ s: S.s[eSrc], sign: -1 });
+    if (eDest >= 0) ends.push({ s: S.s[eDest], sign: 1, level: river.destLevel });
+    if (eSrc >= 0) ends.push({ s: S.s[eSrc], sign: -1, level: river.srcLevel });
     for (const mo of mouths) if ((mo.sign > 0 ? eDest : eSrc) < 0) ends.push({ s: mo.s, sign: mo.sign });
     for (let i = 0; i < m; i++) {
         let fade = 0, near = 0, relaxW = 1;
         for (const end of ends) {
             const x = (S.s[i] - end.s) * end.sign;    // metres past the shore
-            if (x > 0) fade = Math.max(fade, smoothstep(0, o.fadeM + o.fadePerHw * S.hw[i], x));
+            if (x > 0) {
+                past[i] = 1;
+                if (end.level === undefined) fade = Math.max(fade, smoothstep(0, o.fadeM + o.fadePerHw * S.hw[i], x));
+                else {
+                    const [a, b] = o.mouthFadeDepth;
+                    fade = Math.max(fade, smoothstep(a * S.D[i], b * S.D[i], end.level - groundAt(S.x[i], S.y[i])), 1 - smoothstep(0, o.mouthTailM, end.sign > 0 ? S.s[m - 1] - S.s[i] : S.s[i]));
+                }
+            }
             near = Math.max(near, 1 - smoothstep(0, o.mouthNearM, -x));
             if (x <= 0) relaxW = Math.min(relaxW, smoothstep(o.mouthRelaxM[0], o.mouthRelaxM[1], -x));
         }
         S.fade[i] = fade; S.mouth[i] = near; relax[i] = relaxW;
+    }
+    // Once faded, faded: the lake's bed may rise again farther out.
+    for (const end of ends) {
+        if (end.level === undefined) continue;
+        let top = 0;
+        for (let i = end.sign > 0 ? 0 : m - 1; i >= 0 && i < m; i += end.sign) {
+            if ((S.s[i] - end.s) * end.sign <= 0) continue;
+            top = Math.max(top, S.fade[i]); S.fade[i] = top;
+        }
     }
     // Containment: W at most the ground beside the channel minus containM,
     // narrow notches ignored, never rising downstream, between the lakes.
@@ -344,7 +451,7 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
             const hw = side > 0 ? S.hwL[i] : S.hwR[i];
             let lo = Infinity;
             for (const d of o.containProbeM) lo = Math.min(lo, groundAt(S.x[i] + nx * side * (hw + d), S.y[i] + ny * side * (hw + d)));
-            if (S.fade[i] <= 0 && !S.lake[i]) cap[i] = Math.min(cap[i], lo - o.containM);
+            if (!past[i] && !S.lake[i]) cap[i] = Math.min(cap[i], lo - o.containM);
         }
     }
     // Ignore notches: the cap's max over a window of notchM.
@@ -491,11 +598,12 @@ function riverGround(S, index, cellM, px, py, nat, o) {
     // Channel: the thalweg toward the outer bank (skew), the bed at W - D.
     const sk = clamp(lerp(S.skew), -0.35, 0.35), u = n / hw;
     const de = u < sk ? (u - sk) / (1 + sk) : (u - sk) / (1 - sk);
+    const power = 2 + (o.widenFlat - 2) * smoothstep(1, 3, lerp(S.wide));
     let target;
-    if (edge < 0) target = W - D * (1 - de * de);
+    if (edge < 0) target = W - D * (1 - Math.abs(de) ** power);
     else {
         // Toe: the channel's edge slope; then the C2 ramp to natural ground.
-        const e = Math.min(o.toeSlopeMax, 2 * D / (hw * (n >= 0 ? 1 - sk : 1 + sk)));
+        const e = Math.min(o.toeSlopeMax, power * D / (hw * (n >= 0 ? 1 - sk : 1 + sk)));
         const t = edge / B, r = t * t * t * (t * (t * 6 - 15) + 10);
         // On a hillside the bank follows the hill: a depth measured at the water's
         // edge, fading out. To a level instead, the texels sharing a station on
@@ -669,11 +777,13 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     };
     // Stations and indices per river.
     onProgress?.('stations', { pages: keys.length });
+    const widest = [];
     const prepared = rivers.map((river, ri) => {
         const plane = riverPlane(river, R);
         const fromPlane = (x, y) => norm([plane.frame.c[0] + (x * plane.frame.e1[0] + y * plane.frame.e2[0]) / R,
             plane.frame.c[1] + (x * plane.frame.e1[1] + y * plane.frame.e2[1]) / R, plane.frame.c[2] + (x * plane.frame.e1[2] + y * plane.frame.e2[2]) / R]);
         const S = riverStations(river, plane, (x, y) => groundAtDir(fromPlane(x, y)), (x, y) => lakeWaterAtDir(fromPlane(x, y)), o);
+        widest.push(S.widened);
         const cellM = 32;
         let maxHw = 0;
         for (let i = 0; i < S.m; i++) maxHw = Math.max(maxHw, S.hw[i]);
@@ -833,7 +943,9 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
         out.set(keys[p], data);
     }
     const t8 = performance.now();
+    widest.sort((a, b) => a - b);
     const stats = { pages: N, texels: N * PP, rivers: rivers.length, spilled,
+        widest: { median: widest[widest.length >> 1] ?? 1, p90: widest[Math.floor(widest.length * 0.9)] ?? 1, max: widest[widest.length - 1] ?? 1 },
         ms: { stations: t3 - t2, texels: t4 - t3, blur: t5 - t4, wet: t6 - t5, sdf: t7 - t6, pack: t8 - t7, finish: t8 - t2 } };
     const result = { pages: out, stats };
     if (debug) Object.assign(result, { keys, pageInfo, nat, ground, level, wet, sdf, delta, owner, lakeLevel, prepared });

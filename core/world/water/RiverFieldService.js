@@ -9,7 +9,7 @@
 import { Logger } from '../../../shared/Logger.js';
 import { dirToCell } from '../hydrology/waterGraph.js';
 import { riverWaterLevels } from './riverMouth.js';
-import { fieldDir, finishRiverFieldBake, pageOf, prepareRiverFieldBake, riverFieldLakeCandidates, riverFieldLayout, riverFieldPageFacts, RIVER_FIELD, RIVER_FIELD_WORDS } from './riverField.js';
+import { extendRiverEnds, fieldDir, finishRiverFieldBake, pageOf, prepareRiverFieldBake, riverFieldLakeCandidates, riverFieldLayout, riverFieldPageFacts, RIVER_FIELD, RIVER_FIELD_WORDS } from './riverField.js';
 import { buildRiverFieldTable, riverFieldParamsData, RIVER_FIELD_PARAMS_BYTES } from './riverField.wgsl.js';
 
 // The lake pass runs on the main thread (it needs the masks): at most this long (ms) per task.
@@ -128,7 +128,8 @@ export class RiverFieldService {
             for (const m of rec.mouths ?? []) {
                 if (m.sign < 0) srcLevel = m.level; else destLevel = m.level;
             }
-            return { rec, arc, rid, levels, srcLevel, destLevel };
+            // trace: the river as the water service has it (a river is known by that).
+            return { ...extendRiverEnds({ rec, arc, rid, levels, srcLevel, destLevel }, w.R), trace: rec };
         });
     }
 
@@ -216,7 +217,7 @@ export class RiverFieldService {
             const t4 = performance.now();
             const hashes = this._hashes;
             this._publish(result.pages, result.facts);
-            this.rivers = new Map(rivers.map(r => [r.rid, r.rec]));
+            this.rivers = new Map(rivers.map(r => [r.rid, r.trace]));
             // Pages that changed: new, gone or different.
             const changed = [];
             for (const [key, hash] of this._hashes) if (hashes.get(key) !== hash) changed.push(key);
