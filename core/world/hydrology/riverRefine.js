@@ -556,7 +556,7 @@ export function riverLakeHold({ eta, held, srcLevel, sourceEnd, destStart }) {
 }
 
 /**
- * Water level along a river for the valley (riverValley.js): a smooth
+ * Water level along a river: a smooth
  * curve falling at least minSlope per metre from the source lake's level
  * to the destination's, below the natural ground beside the river where it
  * can be (floor = level + freeboard stays marginM under it; fill on about

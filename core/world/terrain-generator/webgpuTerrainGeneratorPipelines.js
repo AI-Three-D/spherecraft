@@ -7,10 +7,8 @@ import { createSplatComputeShader } from '../shaders/webgpu/splatCompute.wgsl.js
 import { createSplatPaletteComputeShader } from '../shaders/webgpu/splatPaletteCompute.wgsl.js';
 import { createSplatValidityComputeShader } from '../shaders/webgpu/splatValidityCompute.wgsl.js';
 import { RIVER_CARVE_BINDINGS } from '../water/riverCarve.wgsl.js';
-import { RIVER_VALLEY_BINDINGS } from '../water/riverValley.wgsl.js';
-import { valleyParamsData } from '../water/riverValley.js';
-import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_SEG_FLOATS } from '../water/waterWgsl.js';
-import { JunctionFieldStore } from '../water/junctionFieldStore.js';
+import { RIVER_FIELD_BINDINGS, RIVER_FIELD_PARAMS_BYTES } from '../water/riverField.wgsl.js';
+import { LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS } from '../water/waterWgsl.js';
 
 const SPLAT_STEP_PREFIX = '[TerrainStep] [SplatStep]';
 
@@ -19,11 +17,6 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         WebGPUTerrainGenerator.prototype,
         Object.getOwnPropertyDescriptors({
         async initializePipelines() {
-                if(this.waterCarve===true) {
-                    this.junctionFields??=new JunctionFieldStore(this.device,this.planetConfig.radius);
-                    this._junctionEmptyGroup2??=this.device.createBindGroupLayout({label:'Terrain-empty-group2',entries:[]});
-                }
-
                 // ── Standard terrain shader (base height / macro) ─────────
                 const terrainShaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions());
                 this.terrainShaderModule = this.device.createShaderModule({
@@ -129,11 +122,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
                 });
                 // Group 1 of every terrain pipeline: the biome uniform, the
-                // river carve's water data with the lakes for the lake beds
-                // (riverCarve.wgsl.js) and the river valleys' field
-                // (riverValley.wgsl.js); placeholders until
-                // setWaterCarveResources / setRiverValleyResources.
-                const C = RIVER_CARVE_BINDINGS, V = RIVER_VALLEY_BINDINGS;
+                // water data with the lakes for the lake beds
+                // (riverCarve.wgsl.js) and the river field
+                // (riverField.wgsl.js); placeholders until
+                // setWaterCarveResources / setRiverFieldResources.
+                const C = RIVER_CARVE_BINDINGS, V = RIVER_FIELD_BINDINGS;
                 this.biomeBindGroupLayout = this.device.createBindGroupLayout({
                     entries: [
                         {
@@ -143,11 +136,10 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                         },
                         { binding: C.index, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                         { binding: C.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                        { binding: C.rivers, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                         { binding: C.lakes, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                         { binding: C.masks, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d-array' } },
                         { binding: C.sampler, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
-                        { binding: V.pages, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                        { binding: V.table, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                         { binding: V.texels, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                         { binding: V.params, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
                     ]
@@ -156,19 +148,16 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 this._waterCarvePlaceholder = {
                     index: this.device.createBuffer({ label: 'RiverCarve-index-none', size: 16, usage: GPUBufferUsage.STORAGE }),
                     params: this.device.createBuffer({ label: 'RiverCarve-params-none', size: LAKE_PARAMS_FLOATS * 4, usage: GPUBufferUsage.UNIFORM }),
-                    rivers: this.device.createBuffer({ label: 'RiverCarve-rivers-none', size: RIVER_SEG_FLOATS * 4, usage: GPUBufferUsage.STORAGE }),
                     lakes: this.device.createBuffer({ label: 'RiverCarve-lakes-none', size: LAKE_RECORD_FLOATS * 4, usage: GPUBufferUsage.STORAGE }),
                     masks: this.device.createTexture({ label: 'RiverCarve-masks-none', size: [1, 1, 1], format: 'r8unorm',
                         usage: GPUTextureUsage.TEXTURE_BINDING }).createView({ dimension: '2d-array' }),
                 };
                 this._lakeMaskSampler = this.device.createSampler({ label: 'RiverCarve-lake-masks', magFilter: 'linear', minFilter: 'linear' });
-                // Valley params with on = 0: the valleys pass through.
-                const valleyParams = this.device.createBuffer({ label: 'RiverValley-params-none', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-                this.device.queue.writeBuffer(valleyParams, 0, valleyParamsData(undefined, false));
-                this._riverValleyPlaceholder = {
-                    pages: this.device.createBuffer({ label: 'RiverValley-pages-none', size: 16, usage: GPUBufferUsage.STORAGE }),
-                    texels: this.device.createBuffer({ label: 'RiverValley-texels-none', size: 16, usage: GPUBufferUsage.STORAGE }),
-                    params: valleyParams,
+                // Zero params (on = 0): no pages, the field passes through.
+                this._riverFieldPlaceholder = {
+                    pages: this.device.createBuffer({ label: 'RiverField-table-none', size: 16, usage: GPUBufferUsage.STORAGE }),
+                    texels: this.device.createBuffer({ label: 'RiverField-texels-none', size: 16, usage: GPUBufferUsage.STORAGE }),
+                    params: this.device.createBuffer({ label: 'RiverField-params-none', size: RIVER_FIELD_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM }),
                 };
                 this.setWaterCarveResources(null);
                 this._uploadPackedBiomeUniforms();
@@ -450,10 +439,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     fixedMaterialFamiliesEnabled: this.splatFixedMaterialFamiliesEnabled,
                     erosionFilter: this.erosionFilter,
                     waterCarve: this.waterCarve === true,
-                    junctionFields: !!this.junctionFields,
                     riverBankDetail: this.terrainConfig.waterGraph?.carve?.bankDetail > 0,
-                    riverValley: this.riverValley === true,
-                    riverValleyPage: this.riverValleyPage ?? 32,
                     regionalTerrain: this.regionalTerrainActive === true,
                     regionalValleyFeature: !!this.regionalTerrain?.valleyConfig,
                     regionalShape: !!this.regionalTerrain?.shapeData,
@@ -1288,20 +1274,18 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
             },
 
         /**
-         * River valley field for tiles generated from now on (riverValley.js;
-         * WaterGpuData valley resources { pages, texels, params }), or null
-         * for none.
+         * River field for tiles generated from now on (RiverFieldService.js
+         * resources { pages, texels, params }), or null for none.
          */
-        setRiverValleyResources(res) {
-                this._riverValleyResources = res ?? null;
-                this.riverValleyBound = !!res;
+        setRiverFieldResources(res) {
+                this._riverFieldResources = res ?? null;
                 this._rebuildTerrainGroup1();
             },
 
         _rebuildTerrainGroup1() {
-                const C = RIVER_CARVE_BINDINGS, V = RIVER_VALLEY_BINDINGS;
+                const C = RIVER_CARVE_BINDINGS, V = RIVER_FIELD_BINDINGS;
                 const r = this._waterCarveResources ?? this._waterCarvePlaceholder;
-                const v = this._riverValleyResources ?? this._riverValleyPlaceholder;
+                const v = this._riverFieldResources ?? this._riverFieldPlaceholder;
                 this.biomeBindGroup = this.device.createBindGroup({
                     label: 'Terrain-group1',
                     layout: this.biomeBindGroupLayout,
@@ -1309,11 +1293,10 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                         { binding: 0, resource: { buffer: this.biomeUniformBuffer } },
                         { binding: C.index, resource: { buffer: r.index } },
                         { binding: C.params, resource: { buffer: r.params } },
-                        { binding: C.rivers, resource: { buffer: r.rivers } },
                         { binding: C.lakes, resource: { buffer: r.lakes } },
                         { binding: C.masks, resource: r.masks },
                         { binding: C.sampler, resource: this._lakeMaskSampler },
-                        { binding: V.pages, resource: { buffer: v.pages } },
+                        { binding: V.table, resource: { buffer: v.pages } },
                         { binding: V.texels, resource: { buffer: v.texels } },
                         { binding: V.params, resource: { buffer: v.params } },
                     ]
@@ -1328,11 +1311,10 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 this.waterCarveVersion = (this.waterCarveVersion ?? 0) + 1;
             },
 
-        _setTerrainBiomeBindGroup(pass, { regional = true, junctions = true } = {}) {
+        _setTerrainBiomeBindGroup(pass, { regional = true } = {}) {
                 if (pass && this.biomeBindGroup) {
                     pass.setBindGroup(1, this.biomeBindGroup);
                     if (regional && this.regionalTerrainActive) pass.setBindGroup(2, this.regionalTerrain.bindGroup);
-                    if (junctions && this.junctionFields) pass.setBindGroup(3,this.junctionFields.resources.bindGroup);
                 }
             },
 

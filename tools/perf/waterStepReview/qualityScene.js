@@ -4,12 +4,15 @@ export async function settle(timeoutMs=120000) {
     let idleAt=0;
     while(performance.now()<until){
         const g=window.gameEngine,r=window.__lr.residency(),s=g.waterService;
-        const idle=r?.visibleTiles>0&&r.exactVisibleRatio===1&&!r.pendingGenerations&&!r.activeGenerations&&!r.pendingCopies&&!s._busy&&!s._client?._pending.size&&g.junctionFieldService?.isIdle!==false&&
+        const idle=r?.visibleTiles>0&&r.exactVisibleRatio===1&&!r.pendingGenerations&&!r.activeGenerations&&!r.pendingCopies&&!s._busy&&!s._client?._pending.size&&g.riverFieldService?.isIdle!==false&&g.riverFieldService?.busy!==true&&
             !g.renderer.quadtreeTileManager.tileStreamer.getRegenerationStats().pending;
         if(idle){idleAt||=performance.now();if(performance.now()-idleAt>1500)return r;}else idleAt=0;
         await new Promise(r=>setTimeout(r,100));
     }
-    throw new Error('Scene did not settle: '+JSON.stringify(window.__lr.residency()));
+    const g=window.gameEngine,s=g.waterService,f=g.riverFieldService;
+    throw new Error('Scene did not settle: '+JSON.stringify({residency:window.__lr.residency(),waterBusy:s._busy,waterCalls:s._client?._pending.size,
+        field:f?{busy:f.busy,idle:f.isIdle,pending:f._pending,rivers:f.rivers?.size,last:f.history?.at(-1)}:null,
+        regen:g.renderer.quadtreeTileManager.tileStreamer.getRegenerationStats()}));
 }
 export async function riverView(id,fraction,{height=24,back=30,side=0}={}){
     const g=window.gameEngine,s=g.waterService;

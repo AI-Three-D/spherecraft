@@ -53,7 +53,7 @@ for(const p of proposals) {
     sites.push(p);if(sites.length===32) break;
 }
 const compileStart=performance.now();
-const code=createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({regionalTerrain:true,waterCarve:false,riverValley:false}))
+const code=createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({regionalTerrain:true,waterCarve:false}))
     +createRegionalBasinCertificateWgsl(gen.erosionFilter,regional.budgets);
 const pipeline=await device.createComputePipelineAsync({layout:'auto',compute:{module:device.createShaderModule({code}),entryPoint:'basinCertificateMain'}});
 const certificateCompileMs=performance.now()-compileStart;

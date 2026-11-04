@@ -34,7 +34,7 @@ export function regionalValleyContract({anchorM,options,basinOptions,globalMicro
 export async function createRegionalValleyFeature({device,gen,data,uniformBytes,options,basinOptions}) {
     const started=performance.now(),seed=regionalValleySeed({seed:gen.seed,cells:data.cells,options});
     const code=createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({regionalTerrain:true,
-        regionalValleyFeature:false,waterCarve:false,riverValley:false}))+createRegionalValleyAnchorWgsl();
+        regionalValleyFeature:false,waterCarve:false}))+createRegionalValleyAnchorWgsl();
     const pipeline=await device.createComputePipelineAsync({layout:'auto',compute:{module:device.createShaderModule({code}),entryPoint:'regionalValleyAnchorMain'}});
     const compileMs=performance.now()-started;
     const ub=device.createBuffer({size:uniformBytes.byteLength,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});

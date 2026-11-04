@@ -1,0 +1,309 @@
+{
+  "note": "Owner 2026-11-05 screenshots ('here are some failure modes') sent while the field rework started.",
+  "views": [
+    {
+      "name": "o05-bend-bands",
+      "pos": [
+        -131238.0,
+        -7255.4,
+        8497.4
+      ],
+      "look": [
+        -131231.7,
+        -7259.3,
+        8497.9
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "bend from above: brown bank bands, dark line along the right bank"
+    },
+    {
+      "name": "o05-groove-terrace",
+      "pos": [
+        -131223.7,
+        -7454.7,
+        8546.0
+      ],
+      "look": [
+        -131218.6,
+        -7459.5,
+        8548.2
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "dark groove along the right bank; arrows: straight-edged dark band on the slope"
+    },
+    {
+      "name": "o05-mouth-trumpet",
+      "pos": [
+        -131215.4,
+        -5605.3,
+        11080.4
+      ],
+      "look": [
+        -131208.8,
+        -5607.3,
+        11082.7
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "mouth widening as a trumpet, pale rim"
+    },
+    {
+      "name": "o05-mouth-lines",
+      "pos": [
+        -131137.5,
+        -5880.2,
+        11280.4
+      ],
+      "look": [
+        -131130.3,
+        -5880.4,
+        11282.1
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "mouth: brown bands, straight lines across the water"
+    },
+    {
+      "name": "o05-mouth-top",
+      "pos": [
+        -131039.7,
+        -6869.9,
+        11844.3
+      ],
+      "look": [
+        -131032.3,
+        -6870.2,
+        11844.6
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "top view: river into lake, trumpet, brown bands"
+    },
+    {
+      "name": "o05-sand-wall",
+      "pos": [
+        -130879.7,
+        -7108.8,
+        11833.7
+      ],
+      "look": [
+        -130874.1,
+        -7113.5,
+        11833.2
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "close: steep dark wall at the water on sandy ground"
+    },
+    {
+      "name": "o05-side-trench",
+      "pos": [
+        -130894.4,
+        -7459.5,
+        11910.4
+      ],
+      "look": [
+        -130888.7,
+        -7464.0,
+        11910.9
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "dark trench parallel to the right bank, pale shelf on the left"
+    },
+    {
+      "name": "o05-mouth-edge",
+      "pos": [
+        -130935.0,
+        -7805.7,
+        12058.3
+      ],
+      "look": [
+        -130928.5,
+        -7804.1,
+        12061.3
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "river widening into lake: dark lower edge, pink band on the upper bank"
+    },
+    {
+      "name": "o05-water-streaks",
+      "pos": [
+        -130907.3,
+        -8011.4,
+        12222.6
+      ],
+      "look": [
+        -130901.5,
+        -8007.1,
+        12221.2
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "arrows: pale streaks/edges inside the water"
+    },
+    {
+      "name": "o05-hill-terrace",
+      "pos": [
+        -131947.8,
+        -4449.3,
+        3516.1
+      ],
+      "look": [
+        -131944.5,
+        -4447.0,
+        3509.9
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "arrow: straight bench along the hillside above the river"
+    },
+    {
+      "name": "o05-lake-crease",
+      "pos": [
+        -131794.3,
+        -1881.4,
+        3752.7
+      ],
+      "look": [
+        -131789.9,
+        -1887.3,
+        3753.2
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "lake: straight water edge and a zigzag dark crease in the water"
+    },
+    {
+      "name": "o05-poly-shore",
+      "pos": [
+        -131582.0,
+        -4251.5,
+        6224.5
+      ],
+      "look": [
+        -131576.3,
+        -4248.7,
+        6220.8
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "straight-edged water polygon along the far shore"
+    },
+    {
+      "name": "o05-poly-wedge",
+      "pos": [
+        -131302.9,
+        -7462.5,
+        7941.8
+      ],
+      "look": [
+        -131296.3,
+        -7463.5,
+        7944.0
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "wedge of brighter water with straight edges at a bank"
+    },
+    {
+      "name": "o05-poly-diagonal",
+      "pos": [
+        -131423.6,
+        -3860.8,
+        8395.0
+      ],
+      "look": [
+        -131418.6,
+        -3856.0,
+        8396.1
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "straight diagonal water edge across a shore"
+    },
+    {
+      "name": "o05-poly-corner",
+      "pos": [
+        -131372.1,
+        -3685.4,
+        8505.6
+      ],
+      "look": [
+        -131367.1,
+        -3680.5,
+        8507.0
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "triangle of water with straight edges over the bank"
+    },
+    {
+      "name": "o05-poly-triangles",
+      "pos": [
+        -131588.2,
+        419.1,
+        6249.8
+      ],
+      "look": [
+        -131584.1,
+        413.5,
+        6251.1
+      ],
+      "up": [
+        0,
+        1,
+        0
+      ],
+      "note": "several water triangles/wedges at a lake shore"
+    }
+  ]
+}

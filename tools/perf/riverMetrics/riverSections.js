@@ -16,7 +16,7 @@ const norm = (x, y, z) => { const l = Math.hypot(x, y, z) || 1; return [x / l, y
  * @param {Float32Array|number[]} o.points  traced record points (dir.xyz at 0..2, half-width at 4, pool at 9 when stride >= 20)
  * @param {number} o.stride
  * @param {Float64Array|number[]} o.arc     arc length (m) at each point (WaterGpuData._arcLengths)
- * @param {Float64Array|number[]} o.levels  water level (m) at each point (riverRibbon.js riverWaterLevels)
+ * @param {Float64Array|number[]} o.levels  water level (m) at each point (riverMouth.js riverWaterLevels)
  * @param {number} [o.stepM=4]              station spacing along the line (m)
  * @param {number} [o.tangentM=8]           the line's direction from the points this far before and after (m)
  * @returns {{ count, s: Float64Array, dir: Float64Array, left: Float64Array, wl: Float64Array, hw: Float64Array, pool: Float64Array }}

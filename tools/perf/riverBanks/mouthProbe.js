@@ -156,50 +156,6 @@ export async function rimsOf({ id, k0 = 0, k1 = 1e9 }) {
     return { id, cols: 'k wl rimL rimR lakeGuard hw', rows };
 }
 
-// Along river id between points k0 and k1, every stepM: the carved ground
-// across the channel (every acrossStepM out to halfM each side, from the
-// straight line between the points) and the water level there as the
-// shaders blend it (riverRibbon.js riverJointValue): the wet width (ground
-// below the level, contiguous around the centre) and the lowest ground.
-export async function wetAlong({ id, k0, k1, stepM = 1, halfM = 20, acrossStepM = 0.25 }) {
-    const g = window.gameEngine, svc = g.waterService, R = g.planetConfig.radius;
-    for (let t = 0; t < 240 && !svc.riverRecs?.get(id); t++) await new Promise(r => setTimeout(r, 500));
-    const { riverJointValue } = await import('/core/world/water/riverRibbon.js');
-    const rec = svc.riverRecs.get(id), P = rec.points, st = rec.stride, n = P.length / st, arc = g.waterGpuData._arcLengths(rec);
-    const wl = Float64Array.from({ length: n }, (_, k) => P[k * st + 16]);
-    const norm = a => { const l = Math.hypot(...a); return a.map(v => v / l); };
-    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-    const rows = [], dirs = [], m = Math.round(2 * halfM / acrossStepM) + 1;
-    for (let k = k0; k < k1; k++) {
-        const a = [P[k * st], P[k * st + 1], P[k * st + 2]], b = [P[(k + 1) * st], P[(k + 1) * st + 1], P[(k + 1) * st + 2]];
-        const L = arc[k + 1] - arc[k], left = norm(cross(a, norm(b.map((v, i) => v - a[i]))));
-        for (let x = 0; x < L; x += stepM) {
-            const t = x / L, c = norm(a.map((v, i) => v + (b[i] - v) * t));
-            rows.push({ s: +(arc[k] + x).toFixed(1), level: riverJointValue(wl, arc, k, t) });
-            for (let j = 0; j < m; j++) {
-                const o = -halfM + j * acrossStepM, d = norm(c.map((v, i) => v + left[i] * o / R));
-                dirs.push(d[0], d[1], d[2], 0);
-            }
-        }
-    }
-    const h = Array.from(await svc._sampler.sampleDirsCarved(Float32Array.from(dirs)));
-    const mid = (m - 1) / 2;
-    rows.forEach((r, i) => {
-        const row = h.slice(i * m, (i + 1) * m);
-        let lo = 0;
-        for (let j = 1; j < m; j++) if (row[j] < row[lo]) lo = j;
-        let a = lo, b = lo;
-        while (a > 0 && row[a - 1] < r.level) a--;
-        while (b < m - 1 && row[b + 1] < r.level) b++;
-        r.wet = row[lo] < r.level ? +((b - a + 1) * acrossStepM).toFixed(2) : 0;
-        r.lowest = +row[lo].toFixed(3);
-        r.depth = +(r.level - row[lo]).toFixed(3);
-        r.offset = +((lo - mid) * acrossStepM).toFixed(2);
-        r.level = +r.level.toFixed(3);
-    });
-    return { id, joints: arc.slice(k0, k1 + 1).map(v => +v.toFixed(1)), rows };
-}
-
 // Turn angle (degrees) at every joint of every traced river: quantiles.
 export async function jointAngles() {
     const svc = window.gameEngine.waterService, a = [];

@@ -104,7 +104,7 @@ export async function createRegionalTerrainData({ device, terrainGenerator: gen,
     const budgets = terrainDisplacementBudgets({ erosionFilter: gen.erosionFilter,
         microGain: new DataView(uniformBytes).getFloat32(220, true), features: gen.terrainFeatures });
     const source = createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({
-        regionalTerrain: false, regionalShape:false,regionalValleyFeature:false, waterCarve: false, riverValley: false,
+        regionalTerrain: false, regionalShape:false,regionalValleyFeature:false, waterCarve: false,
     })) + createRegionalTerrainBakeWgsl() + createRegionalTerrainBoundsWgsl(budgets, seamCells);
     const sourceSetupMs=performance.now()-t0;
     const acquired=await acquireRegionalTerrainFoundation({device,source,uniformBytes,cells,seamCells,budgets,

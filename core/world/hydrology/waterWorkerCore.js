@@ -14,9 +14,6 @@
 //     -> { type: 'restored', lakeId, downstream }
 //   { type: 'planRiver', riverId, spacing, corridorM }
 //     -> { type: 'riverPlan', riverId, status, frame, dest }   (route + corridor frame)
-//   { type: 'restoreRiver', riverId, points, stride }   (a cached trace, for the valleys)
-//   { type: 'bakeValley', riverIds, opts }
-//     -> { type: 'valleyBaked', pageIds, texels }   (riverValley.js)
 //   { type: 'solveRiver', riverId, frame, heights, shape, levels, reachM, sub }
 //     -> { type: 'riverSolved', riverId, status, points, stride, segCellStart, segCells, ... }
 //     points, stride 20 (riverRefine.js RIVER_POINT_STRIDE): dir.xyz, water
@@ -40,11 +37,9 @@
 // two-lake cycles).
 
 import { buildWaterGraph, cellDir, dirToCell, dirToCellSub } from './waterGraph.js';
-import { bakeValleyPages, RIVER_VALLEY_DEFAULTS, valleyRiverFromRecord, valleyRiverIncisionPages } from '../water/riverValley.js';
 import { dirToPlane, lakeMask, lakePatchFrame, lakeSeed, planeToDir, polylinePatchFrame, solveLakePatch } from './lakeRefine.js';
 import { bakeRiverWaterfalls } from './riverFeatures.js';
 import { riverMouthsFromTerrain, insertRiverMouthAnchors, riverMouthAt, riverMouthShape, riverMouthIndexReach } from '../water/riverMouth.js';
-import { bakeRiverIncision } from './riverLandscape.js';
 import { continueDrain, findPockets } from './mountainLakes.js';
 import { lakeMaskSdf, lakeSdfAt } from '../water/lakeMaskSdf.js';
 import { corridorMask, RIVER_LEVEL_DEFAULTS, RIVER_POINT_STRIDE, RIVER_SHAPE_DEFAULTS, riverCrestAbove, riverDelta, riverDeltaHalfWidth, riverDeltaProgress, riverLakeApproach, riverLakeHold, riverLakeRims, riverReachShape, riverShape, riverValleyLevels, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
@@ -148,7 +143,6 @@ export function createWaterWorkerCore() {
     let N = 0, R = 0, seaLevelM = 0;
     let heights = null;
     const refined = new Map();   // lakeId -> { level, exitDir, frame, region }
-    const valleyRivers = new Map();   // riverId -> valley line (riverValley.js valleyRiverFromRecord)
     const mergedInto = new Map(); // lakeId -> lakeId it is part of
 
     const rep = (id) => { while (mergedInto.has(id)) id = mergedInto.get(id); return id; };
@@ -868,7 +862,6 @@ export function createWaterWorkerCore() {
             const shift=mouthLevels[k]-points[k*stride+16];
             points[k*stride+3]+=shift;points[k*stride+16]=mouthLevels[k];
         }
-        // Fine lip samples share the existing channel indexing and valley bake.
         const line = Array.from({ length: n }, (_, k) => dirToPlane([points[k * stride], points[k * stride + 1], points[k * stride + 2]], frame, R));
         // Sub-cells each segment reaches: channel, banks and their blend into
         // the terrain (the carve), or its filled hollow, whichever is wider.
@@ -887,100 +880,26 @@ export function createWaterWorkerCore() {
         }
         segCellStart[n - 1] = segCellList.length;
         const segCells = Int32Array.from(segCellList);
-        const tLandscape = performance.now();
-        const landscape = bakeRiverIncision({ frame, heights: h, points, stride, arc: mouthArc, R, river: riverId,
-            shape: { waterFrac: levelP.waterFrac, widthVar: 0.4, wobble: 0.3, bankVar: 0.55, ...msg.shapeNoise }, options: msg.landscape });
-        // The worker retains the sparse field; reply buffers are independent.
-        valleyRivers.set(riverId, valleyRiverFromRecord({ points, stride, riverId, landscape }, R));
-        const replyLandscape = { ...landscape, cells: landscape.cells.slice(), cuts: landscape.cuts.slice() };
-        const landscapeMs = performance.now() - tLandscape;
         return {
             reply: {
                 type: 'riverSolved', riverId, status: 'ok', dest: plan.dest, src: plan.src, dependencyFrame: frame,
                 lengthM: total, points, stride, segCellStart, segCells, mouths, mouthLevelsBaked:true,
-                waterfalls: features.waterfalls, landscape: replyLandscape, landscapeMs,
+                waterfalls: features.waterfalls,
                 startLevel: sm.fill[0], endLevel: sm.fill[sm.fill.length - 1], destLevel: plan.destLevel, approach: approachWhy,
             },
-            transfer: [points.buffer, segCellStart.buffer, segCells.buffer, replyLandscape.cells.buffer, replyLandscape.cuts.buffer],
-        };
-    }
-
-    // ---- River valleys (riverValley.js) ----
-    function restoreRiver(msg) {
-        valleyRivers.set(msg.riverId, valleyRiverFromRecord({ points: msg.points, stride: msg.stride, riverId: msg.riverId, landscape: msg.landscape }, R));
-        return { reply: { type: 'riverRestored', riverId: msg.riverId } };
-    }
-
-    // Level of lake or sea water at a unit direction on the natural terrain,
-    // NaN where dry: refined lakes by their solved region (lakes: candidate
-    // records), others by their graph cells, the sea by the grid.
-    function lakeLevelAtFor(lakes) {
-        return (dir) => {
-            const c = dirToCell(dir, N);
-            if (isOcean(c)) return seaLevelM;
-            for (const { rr, cosR } of lakes) {
-                const f = rr.frame, k = dir[0] * f.c[0] + dir[1] * f.c[1] + dir[2] * f.c[2];
-                if (k < cosR) continue;
-                const [x, y] = dirToPlane(dir, f, R);
-                const i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
-                if (i >= 0 && j >= 0 && i < f.nx && j < f.ny && rr.region[j * f.nx + i] === 1) return rr.level;
-            }
-            const l0 = g.lakeOf[c];
-            if (l0 === -1) return NaN;
-            const l = rep(l0);
-            return refined.get(l)?.region ? NaN : levelOf(l);
-        };
-    }
-
-    function bakeValley(msg) {
-        const opts = { ...RIVER_VALLEY_DEFAULTS, ...(msg.opts ?? {}) };
-        const pages = new Set();
-        const affectedRivers = msg.affectedRivers ?? msg.riverIds.map(rid => valleyRivers.get(rid)).filter(Boolean);
-        for (const rv of affectedRivers) {
-            if (!rv) continue;
-            if (rv.landscape) for (const p of valleyRiverIncisionPages(rv, R, opts)) pages.add(p);
-        }
-        const pageIds = Int32Array.from([...pages].sort((a, b) => a - b));
-        // Every known river can reach these pages (the bake keeps the nearest).
-        const rivers = [...valleyRivers.values()];
-        // Refined lakes near the baked rivers (their frames within reach).
-        const lakes = [];
-        const reachM = opts.dBig + 3000;
-        for (const rr of refined.values()) {
-            if (!rr.region) continue;
-            const f = rr.frame, half = 0.5 * Math.hypot(f.nx, f.ny) * f.spacing;
-            let near = false;
-            for (const rv of affectedRivers) {
-                if (!rv) continue;
-                for (let k = 0; k < rv.dirs.length && !near; k += 25) {
-                    const d = rv.dirs[k], cosA = d[0] * f.c[0] + d[1] * f.c[1] + d[2] * f.c[2];
-                    if (Math.acos(Math.max(-1, Math.min(1, cosA))) * R < half + reachM) near = true;
-                }
-                if (near) break;
-            }
-            if (near) lakes.push({ rr, cosR: Math.cos(Math.min(Math.PI / 2, (half + 200) / R)) });
-        }
-        const { texels } = bakeValleyPages(Array.from(pageIds), rivers, { R, lakeLevelAt: lakeLevelAtFor(lakes) }, opts);
-        return {
-            reply: { type: 'valleyBaked', pageIds, texels },
-            transfer: [pageIds.buffer, texels.buffer],
+            transfer: [points.buffer, segCellStart.buffer, segCells.buffer],
         };
     }
 
     function removeRivers(msg) {
-        const affectedRivers = msg.riverIds.map(id => valleyRivers.get(id)).filter(Boolean);
-        for (const id of msg.riverIds) { valleyRivers.delete(id); plans.delete(id); }
-        // Bake the former footprints using only surviving rivers. Empty
-        // texels explicitly clear old cuts; overlapping trunks are retained.
-        return bakeValley({...msg, affectedRivers});
+        for (const id of msg.riverIds) plans.delete(id);
+        return { reply: { type: 'riversRemoved' } };
     }
 
     return {
         handle(msg) {
             if (msg.type === 'build') return build(msg);
-            if (msg.type === 'restoreRiver') return restoreRiver(msg);
             if (msg.type === 'removeRivers') return removeRivers(msg);
-            if (msg.type === 'bakeValley') return bakeValley(msg);
             if (msg.type === 'solveLake') return solveLake(msg);
             if (msg.type === 'restoreLake') return restoreLake(msg);
             if (msg.type === 'downstream') return { reply: { type: 'downstream', downstream: allDownstream() } };

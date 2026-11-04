@@ -3,7 +3,6 @@ import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
 import { createTerrainFeatureToggleWgsl } from '../../terrain-generator/terrainFeatureToggles.js';
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
 import { createRiverCarveWgsl } from '../../water/riverCarve.wgsl.js';
-import { createRiverValleyWgsl } from '../../water/riverValley.wgsl.js';
 import { createRegionalTerrainWgsl } from '../../terrain-generator/regionalTerrain.wgsl.js';
 import { createRegionalShapeWgsl } from '../../terrain-generator/regionalShape.wgsl.js';
 
@@ -634,13 +633,10 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createTerrainFeatureMesoDetail(),
     createTerrainFeatureRivers(),
     createTerrainFeatureErosionSeeds(),
-    // options.waterCarve: river channels in the height (group 1 bindings 1-3,
-    // riverCarve.wgsl.js; with riverBankDetail the shore materials and lake
-    // beds add the lakes, 7-9); otherwise pass-through stubs.
-    createRiverCarveWgsl({ enabled: options?.waterCarve === true, bankDetail: options?.riverBankDetail === true, junctionFields: options?.junctionFields === true }),
-    // options.riverValley: river valleys in the height (group 1 bindings 4-7,
-    // riverValley.wgsl.js); otherwise pass-through stubs.
-    createRiverValleyWgsl({ enabled: options?.riverValley === true, page: options?.riverValleyPage ?? 32 }),
+    // options.waterCarve: the rivers' baked field in the height (group 1
+    // bindings 1-2 and 4-6, riverCarve.wgsl.js; with riverBankDetail the shore
+    // materials add the lakes, 7-9); otherwise pass-through stubs.
+    createRiverCarveWgsl({ enabled: options?.waterCarve === true, bankDetail: options?.riverBankDetail === true }),
     createRegionalTerrainWgsl({ enabled: options.regionalTerrain === true, valleyFeature: options.regionalValleyFeature === true, shape: options.regionalShape === true }),
     options.regionalShape===true?createRegionalShapeWgsl():'',
     base.base(options),

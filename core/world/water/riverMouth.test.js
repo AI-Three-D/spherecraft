@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {riverMouthsFromTerrain,insertRiverMouthAnchors,riverMouthLevels,riverMouthAt,riverMouthShape,riverMouthIndexReach,lakeMouthSurface} from './riverMouth.js';
+import {riverMouthsFromTerrain,insertRiverMouthAnchors,riverMouthLevels,riverMouthAt,riverMouthShape,riverMouthIndexReach} from './riverMouth.js';
 
 const R=10000,st=20;
 function river() {
@@ -59,24 +59,6 @@ describe('river/lake junction publication',()=>{
             const m=riverMouthAt(mouths,s);
             expect(riverMouthShape(m,s,12).influence).toBe(0);
         }
-    });
-    it('extends the surface frame and region together, without flooding the descending reach',()=>{
-        const rec=river(),{mouths,arc}=riverMouthsFromTerrain(rec,R,ground);rec.mouths=mouths;
-        const frame={c:[0,0,1],e1:[1,0,0],e2:[0,1,0],x0:-100,y0:-60,nx:18,ny:12,spacing:10};
-        const mask=Uint8Array.from({length:18*12},(_,k)=>k%18<17?2:0);
-        const lake={frame,mask,level:10};
-        const view=lakeMouthSurface(lake,0,[rec],R,()=>arc);
-        const at=(x,y)=>{
-            const f=view.frame,i=Math.floor((x-f.x0)/10),j=Math.floor((y-f.y0)/10);
-            return i<0||j<0||i>=f.nx||j>=f.ny?0:view.mask[j*f.nx+i];
-        };
-        expect(view.frame.x0+view.frame.nx*10).toBeGreaterThan(80);
-        expect(view.mouthCells.length).toBeGreaterThan(0);
-        expect(at(75,0)).toBe(2);
-        expect(at(85,0)).toBe(0);
-        expect(at(-75,0)).toBe(2);
-        expect(at(140,0)).toBe(0);
-        expect(lake.frame).toBe(frame);expect(lake.mask).toBe(mask);
     });
 });
 

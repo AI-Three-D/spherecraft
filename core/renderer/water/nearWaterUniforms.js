@@ -27,16 +27,6 @@ export function fillNearWaterUniforms(u, {viewMatrix, projectionMatrix, planetCo
         ...vec3Of(g.fogColor?.value, [0.7, 0.8, 1.0]), numOf(g.fogDensity?.value, 0.00005),
         numOf(g.atmosphereSunIntensity?.value, 20), apFade.start, apFade.end, 0], 60);
 
-    // Select relevant field slots once per draw. Fragments walk set bits,
-    // instead of scanning every published patch to discover its lake owner.
-    const owners=new Map();let allOwners=0;
-    for(const [slot,field]of (water.junctionFields?.fields??[]).entries())if(field.lakeId>=0) {
-        const bit=1<<slot;allOwners|=bit;
-        owners.set(field.lakeId,(owners.get(field.lakeId)??0)|bit);
-    }
-    u[42]=allOwners;u.fill(0,88,104);
-    for(let i=0;i<Math.min(16,lakes.length);i++)u[88+i]=owners.get(lakes[i])??0;
-
     return u;
 }
 export { NEAR_WATER_UNIFORM_FLOATS };

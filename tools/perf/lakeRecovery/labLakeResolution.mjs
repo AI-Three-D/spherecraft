@@ -27,7 +27,7 @@ const { device, gen, imp } = lab;
 const { createHydrologySampler } = await imp('core/world/hydrology/HydrologyGrid.js');
 const { buildWaterGraph, dirToCell, makeNeighbors } = await imp('core/world/hydrology/waterGraph.js');
 const { lakePatchFrame, growPatchFrame, limitPatchCells, lakeSeed, solveLakePatch, planeToDir, lakeMask } = await imp('core/world/hydrology/lakeRefine.js');
-log('[lab] regionalTerrainActive', gen.regionalTerrainActive === true, 'waterCarve', gen.waterCarve, 'riverValley', gen.riverValley);
+log('[lab] regionalTerrainActive', gen.regionalTerrainActive === true, 'waterCarve', gen.waterCarve);
 if (gen.regionalTerrainActive) throw new Error('regional terrain active: not the original world');
 
 const R = lab.planetConfig.radius, N = 512, MAX_CELLS = 4e6, BAND_M = 6;

@@ -71,7 +71,7 @@ const publish=async()=>{const service=new WaterService({device,terrainGenerator:
     config:{cache:false,gpu:{structuredCapacity:compactPools,structuredLakeGridN:lakeGridN}}});
     await service.start();const before=memory.liveBytes;
     const gpu=new WaterGpuData(device,{gridN:service.config.gridN,planetRadius:R,
-        carve:gen.waterCarve?service.config.carve:null,valley:gen.riverValley?service.config.valley:null,
+        carve:gen.waterCarve?service.config.carve:null,
         ...(compactPools?structuredWaterGpuCapacity(service):{})});
     gpu.update(service,camera.position,0);await device.queue.onSubmittedWorkDone();return {service,gpu,gpuBytes:memory.liveBytes-before};};
 let water=(await timed(publish));const firstWaterMs=water.wallMs,firstWaterTimings=water.value.service.timings;
@@ -222,7 +222,7 @@ const surfaceEstimate=pixels.length?{kind:'conservative-render-depth-texel-estim
     lengthM:(Math.max(...pixels.map(k=>Math.floor(k/b.frame.nx)))-Math.min(...pixels.map(k=>Math.floor(k/b.frame.nx)))+1)*b.frame.spacing}:null;
 const report={setupMs,completeFirstMs,firstRootMs:root.wallMs,firstRootTimings:root.value.timings,quadtreeInitMs:qtInit.wallMs,
     firstFineMs:firstFine.wallMs,firstWaterMs,firstWaterTimings,regeneration:regen,surfaceCosts,poolCosts,contextCosts,gridCosts,seedCosts,potentialCosts,foundationCosts,surfaceEstimate,
-    publication:{compactPools,gridN:water.value.service.N,waterCarve:gen.waterCarve,riverValley:gen.riverValley,waterGpuBytes:water.value.gpuBytes},
+    publication:{compactPools,gridN:water.value.service.N,waterCarve:gen.waterCarve,waterGpuBytes:water.value.gpuBytes},
     equivalentNineFine:comparisons,addresses:addresses.map(a=>a.toString()),
     shape:{options:o,bytes:d.shapeData.byteLength,cpuBytes:d.shapeData.cpuBytes,plan:d.shapeData.lakePlan,basin:d.basins[0]??null},
     audit:{points,maxInterpolationErrorM,maxShapeDifferenceM,maxBedCutM,raised,exteriorChanges,finalSamples,coreSamples,coreFailures,rimFailures,minCoreDepthM,minRimM,

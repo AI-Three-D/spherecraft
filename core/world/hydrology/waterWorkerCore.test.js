@@ -109,19 +109,9 @@ describe('water worker core', () => {
         const traced=core.handle({type:'solveRiver',riverId,frame:plan.frame,heights:patchHeights(plan.frame),stepM:20}).reply;
         expect(traced.status).toBe('ok');expect(traced.dest.id).toBe(representative);
     });
-    it('clears removed river excavation while keeping overlapping surviving excavation', () => {
-        const {core}=buildCore(),frame={c:[0,0,1],e1:[1,0,0],e2:[0,1,0],x0:-128,y0:-128,spacing:16,nx:16,ny:16};
-        const points=new Float32Array([0,0,1,50,4,1,0,0,0,0,0,0,.001,0,1,49,4,1,0,0,0,0,0,0]);
-        const landscape=cut=>({frame,cells:Uint32Array.from({length:256},(_,i)=>i),cuts:new Float32Array(256).fill(cut)});
-        for(const [riverId,cut] of [[0,8],[1,3]])core.handle({type:'restoreRiver',riverId,points,stride:12,landscape:landscape(cut)});
-        const opts={texels:4096,page:32};
-        const before=core.handle({type:'bakeValley',riverIds:[0,1],opts}).reply;
-        const after=core.handle({type:'removeRivers',riverIds:[0],opts}).reply;
-        const cuts=r=>new Float32Array(r.texels.buffer).filter((_,i)=>i%4===0);
-        expect(Math.max(...cuts(before))).toBeCloseTo(8);
-        expect(Math.max(...cuts(after))).toBeCloseTo(3);
-        const empty=core.handle({type:'removeRivers',riverIds:[1],opts}).reply;
-        expect(empty.pageIds.length).toBeGreaterThan(0);expect(cuts(empty).every(v=>v===0)).toBe(true);
+    it('forgets removed rivers', () => {
+        const {core}=buildCore();
+        expect(core.handle({type:'removeRivers',riverIds:[0,1]}).reply).toEqual({type:'riversRemoved'});
     });
     it('traces from inside source water with a descending surface and varying depth', () => {
         const { core, built } = buildCore();
