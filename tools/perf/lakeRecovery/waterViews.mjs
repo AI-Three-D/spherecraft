@@ -214,7 +214,7 @@ async function riverMetrics(v, rid) {
         const s = window.gameEngine.waterService, g = window.gameEngine.waterGpuData, rec = s.riverRecs.get(rid);
         if (!rec) return null;
         for (let i = 0; i < 50 && !g._inGpu?.has(rid); i++) await new Promise(r => setTimeout(r, 100));
-        const { riverWaterLevels } = await import('/core/world/water/riverRibbon.js');
+        const { riverWaterLevels } = await import('/core/world/water/riverMouth.js');
         const arc = g._arcLengths(rec), levels = riverWaterLevels(rec, arc, (d) => g.lakeAt(d));
         const b64 = (a) => { const u = new Uint8Array(a.buffer, a.byteOffset, a.byteLength); let t = ''; for (let i = 0; i < u.length; i += 0x8000) t += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(t); };
         const qt = window.gameEngine.renderer?.quadtreeTileManager;

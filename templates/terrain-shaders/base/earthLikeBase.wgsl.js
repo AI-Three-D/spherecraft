@@ -219,13 +219,11 @@ fn calculateTerrainHeight(wx: f32, wy: f32, seed: i32, unitDir: vec3<f32>) -> f3
 // skips as calculateTerrainHeight, so the height matches it (to float
 // rounding where the compiler fuses differently); the gradient is analytic.
 // Callers project the gradient onto the tangent plane (terrainSurfaceGradient).
-// After the existing terrain stack: cut-only bank retreat and river channels
-// (core/world/water/riverCarve.wgsl.js; pass-throughs when disabled).
+// After the existing terrain stack: the rivers' baked ground change
+// (core/world/water/riverCarve.wgsl.js; a pass-through when disabled).
 fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     let natural = calculateTerrainHeightBaseD(seed, unitDir);
-    let basin = regionalBasinApply_d(natural, unitDir);
-    let excavated = valleyApply_d(valleyShapeAt(unitDir), basin);
-    return riverCarveTerrain_d(basin, excavated, unitDir);
+    return riverCarveTerrain_d(regionalBasinApply_d(natural, unitDir), unitDir);
 }
 
 // The terrain before the river carve.

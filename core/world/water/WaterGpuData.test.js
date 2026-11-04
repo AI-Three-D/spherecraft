@@ -41,17 +41,16 @@ const slots = (gpu, c) => [gpu.index[c] & 0x7fff, (gpu.index[c] >>> 15) & 0x7fff
 const cam = { x: 0, y: 0, z: 200000 };
 
 describe('WaterGpuData', () => {
-    it('removes invalidated river segments and invalidates their former terrain cells', () => {
+    it('removes invalidated river segments', () => {
         const gpu=new WaterGpuData(stubDevice(),{gridN:4,planetRadius:131072,maxMaskLayers:2});
         const svc=fakeService(),points=new Float32Array(40);
         points.set([0,0,1,105,4,1.5],0);points[16]=105;
         points.set([.001,0,1,104,4,1.5],20);points[36]=104;
         svc.riverRecs.set(0,{points,stride:20,segCellStart:new Int32Array([0,1]),segCells:new Int32Array([64])});
-        gpu.update(svc,cam,0);expect(gpu.riverSegCount).toBe(1);gpu.takeChangedCells();
+        gpu.update(svc,cam,0);expect(gpu.riverSegCount).toBe(1);
         svc.riverRecs.delete(0);svc.version++;gpu.update(svc,cam,1);
         expect(gpu.riverSegCount).toBe(0);expect(gpu._appliedRivers.has(0)).toBe(false);
         expect(gpu.index[gpu.cells+4]&0x1ffff).toBe(0);
-        expect(gpu.takeChangedCells().has(4)).toBe(true);
     });
     it('keeps crowded lake cells in a sparse list and preserves the river block through compaction', () => {
         const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072, maxRiverCells: 4, maxRiverSegs: 4 });
@@ -162,7 +161,7 @@ describe('WaterGpuData', () => {
         svc.refined.set(0,replacement);svc.version++;gpu.update(svc,cam,0);
         expect(gpu._table[15]).toBe(0);expect([...uploads.at(-1)]).toEqual(new Array(64).fill(255));
     });
-    it('repeated water publication releases its valley allocations as well as lake/river data', () => {
+    it('repeated water publication releases its lake and river data', () => {
         const dev=stubDevice();let liveBytes=0;
         for(const method of ['createBuffer','createTexture']) {
             const original=dev[method];
@@ -174,7 +173,7 @@ describe('WaterGpuData', () => {
             };
         }
         for(let i=0;i<3;i++) {
-            const gpu=new WaterGpuData(dev,{gridN:4,planetRadius:131072,valley:{enabled:true},maxValleyPages:3});
+            const gpu=new WaterGpuData(dev,{gridN:4,planetRadius:131072});
             expect(liveBytes).toBeGreaterThan(0);gpu.destroy();expect(liveBytes).toBe(0);
         }
     });
@@ -286,7 +285,7 @@ describe('WaterGpuData', () => {
         expect(gpu._segs[o + 22]).toBe(0);
     });
 
-    it('full buffer: rivers nearest the camera (by their nearest point) win; one leaving marks its cells changed', () => {
+    it('full buffer: rivers nearest the camera (by their nearest point) win', () => {
         const dev = stubDevice();
         const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2, maxRiverSegs: 2 });
         const svc = fakeService();
@@ -302,16 +301,13 @@ describe('WaterGpuData', () => {
         gpu.update(svc, cam, 0);
         expect(gpu.isRiverDrawn(0)).toBe(true);
         expect(gpu.isRiverDrawn(1)).toBe(false);
-        gpu.takeChangedCells();
         // The camera moves over river 1 (> 2 km): layout again, river 0 leaves.
         gpu.update(svc, { x: 200000 * r, y: 0, z: 200000 * r }, 0);
         expect(gpu.isRiverDrawn(1)).toBe(true);
         expect(gpu.isRiverDrawn(0)).toBe(false);
-        const changed = gpu.takeChangedCells();
-        expect([...changed].sort((a, b) => a - b)).toEqual([7, 8, 20, 21]);
     });
 
-    it('narrow streams are listed only within their draw radius; crossing it regenerates nothing', () => {
+    it('narrow streams are listed only within their draw radius', () => {
         const dev = stubDevice();
         const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2, maxRiverSegs: 8 });
         const svc = fakeService();
@@ -324,20 +320,27 @@ describe('WaterGpuData', () => {
         svc.version++;
         gpu.update(svc, cam, 0);
         expect(gpu.isRiverDrawn(0)).toBe(false);
-        gpu.takeChangedCells();
-        // Over it: listed, without regenerating its cells; and away again.
+        // Over it: listed; and away again.
         gpu.update(svc, { x: 200000 * r, y: 0, z: 200000 * r }, 0);
         expect(gpu.isRiverDrawn(0)).toBe(true);
-        expect(gpu.takeChangedCells()).toBe(null);
-        // Away again: it leaves at the next layout (here a new river's), and
-        // only the new river's cells change.
+        // Away again: it leaves at the next layout (here a new river's).
         const wide = pts([0, 0, 1], [0, 0.01, 1]).map((v, i) => (i % 12 === 4 ? 15 : v));
         svc.riverRecs.set(1, { points: wide, stride: 12, segCellStart: Int32Array.from([0, 2]), segCells: Int32Array.from([16 * 7, 16 * 8]) });
         svc.version++;
         gpu.update(svc, cam, 0);
         expect(gpu.isRiverDrawn(0)).toBe(false);
         expect(gpu.isRiverDrawn(1)).toBe(true);
-        expect([...gpu.takeChangedCells()].sort((a, b) => a - b)).toEqual([7, 8]);
+    });
+
+    it('lakeEdgeAt: the higher of overlapping lakes, whichever is listed first', () => {
+        const frame = { c: [0, 0, 1], e1: [1, 0, 0], e2: [0, 1, 0], x0: -64, y0: -64, spacing: 16, nx: 8, ny: 8 };
+        const rec = level => ({ level, frame, mask: new Uint8Array(64).fill(2) });
+        for (const order of [[1, 2], [2, 1]]) {
+            const gpu = Object.create(WaterGpuData.prototype);
+            Object.assign(gpu, { N: 4, R: 131072, _applied: new Map([[0, rec(657)], [1, rec(674)]]), _layerOf: new Map([[0, 0], [1, 1]]),
+                _lakeSlots: () => order, _sdfMasks: () => false });
+            expect(gpu.lakeEdgeAt([0, 0, 1]).level).toBe(674);
+        }
     });
 
     it('lakesNear: lakes with a mask layer whose patch comes within range, nearest first', () => {
@@ -356,35 +359,6 @@ describe('WaterGpuData', () => {
         expect(gpu.lakesNear(eye, 400, 1)).toEqual([2]);
         gpu._layerOf.delete(2);    // gave its mask layer up: level-only, no mesh
         expect(gpu.lakesNear(eye, 400)).toEqual([0]);
-    });
-
-    it('a river traced beside a lake clears its shore band there (mask re-uploaded, lakeAt agrees)', () => {
-        const dev = stubDevice();
-        const gpu = new WaterGpuData(dev, { gridN: 4, planetRadius: 131072, maxMaskLayers: 2, carve: { bankW: 12, blendW: 30 } });
-        const svc = fakeService();
-        gpu.update(svc, cam, 0);
-        // Lake 2 under (0, 0, 1): water in columns 0..3 (x < 0), band in 4 and 5.
-        const mask = new Uint8Array(64);
-        for (let j = 0; j < 8; j++) for (let i = 0; i < 6; i++) mask[j * 8 + i] = i < 4 ? 2 : 1;
-        const frame = { c: [0, 0, 1], e1: [1, 0, 0], e2: [0, 1, 0], x0: -64, y0: -64, spacing: 16, nx: 8, ny: 8 };
-        svc.refined.set(2, { level: 100, frame, mask, maskCells: Int32Array.from([50]), merged: [] });
-        svc.version++;
-        gpu.update(svc, cam, 0);
-        const at = (xM) => gpu.lakeAt([xM / 131072, 0, 1].map((v, _, a) => v / Math.hypot(...a)))?.id ?? null;
-        // lakeAt reads the index (cell of the direction): put lake 2 in the
-        // cells either side of x = 0 (a cell boundary at this grid size).
-        for (const xM of [-8, 8]) gpu._setSlot(dirToCell([xM / 131072, 0, 1], 4), 3);
-        expect(at(8)).toBe(2);                         // band
-        const uploads = dev.log.textures.length;
-        // A river along x = 60 m on open land (pool 0).
-        const P = new Float32Array(9 * 12);
-        for (let k = 0; k < 9; k++) { const d = [60 / 131072, (-64 + 16 * k) / 131072, 1], l = Math.hypot(...d); P.set([d[0] / l, d[1] / l, d[2] / l, 100, 5, 2, 1, 0, 0, 0, 0, 0], k * 12); }
-        svc.riverRecs.set(0, { points: P, stride: 12, segCellStart: Int32Array.from([0, 0, 0, 0, 0, 0, 0, 0, 0]), segCells: new Int32Array(0) });
-        svc.version++;
-        gpu.update(svc, cam, 0);
-        expect(dev.log.textures.length).toBe(uploads + 1);   // lake 2's layer again
-        expect(at(8)).toBe(null);                      // band cleared beside the river
-        expect(at(-8)).toBe(2);                        // water kept
     });
 
     it('near water: switch and fade distances go to the params', () => {

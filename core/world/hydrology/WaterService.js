@@ -24,11 +24,8 @@ import { RIVER_SUB } from '../water/waterWgsl.js';
 import { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } from '../water/riverShapeNoise.js';
 import { RIVER_SECTION } from '../water/riverSection.js';
 import { RIVER_LEVEL_DEFAULTS, RIVER_SOLVE_VERSION } from './riverRefine.js';
-import { RIVER_VALLEY_DEFAULTS } from '../water/riverValley.js';
-import { RIVER_LANDSCAPE_DEFAULTS } from './riverLandscape.js';
 import { regionalWaterModel,regionalWaterGridN } from './regionalWater.js';
 import { MOUNTAIN_LAKE_DEFAULTS, MOUNTAIN_LAKE_VERSION, chooseMountainLakes, drainFrame, mountainBlockFrame, mountainBlocks, pocketSolveFrame } from './mountainLakes.js';
-import { JUNCTION_FIELDS_DEFAULTS } from '../water/junctionFieldClusters.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
 export const WATER_ALGO_VERSION = 'water-v20';   // v20: preserve fine lake seeds and merge only the actual basin
@@ -54,12 +51,6 @@ export const WATER_SERVICE_DEFAULTS = Object.freeze({
     // Whitewater's cross-section: channel, banks rising beyond its edge,
     // blend into the natural terrain. x = metres beyond the channel's edge.
     carve: RIVER_CARVE_DEFAULTS,
-    // River valleys in the terrain (riverValley.js; RIVER_VALLEY_DEFAULTS
-    // overrides), baked from each traced river; compiled in with the carve
-    // unless terrain.waterGraph.valley.enabled is false.
-    valley: {},
-    junctions: JUNCTION_FIELDS_DEFAULTS,
-    landscape: RIVER_LANDSCAPE_DEFAULTS,
     refine: {
         enabled: true,
         spacingM: 16,      // lab: 16 m and 4 m solves agree within 0.2 m
@@ -92,9 +83,6 @@ function mergeConfig(cfg = {}) {
         refine: { ...WATER_SERVICE_DEFAULTS.refine, ...(cfg.refine ?? {}) },
         rivers: { ...WATER_SERVICE_DEFAULTS.rivers, ...(cfg.rivers ?? {}) },
         carve: { ...WATER_SERVICE_DEFAULTS.carve, ...(cfg.carve ?? {}) },
-        valley: { ...RIVER_VALLEY_DEFAULTS, ...(cfg.valley ?? {}) },
-        junctions: { ...JUNCTION_FIELDS_DEFAULTS, ...(cfg.junctions ?? {}) },
-        landscape: { ...RIVER_LANDSCAPE_DEFAULTS, ...(cfg.landscape ?? {}) },
     };
 }
 
@@ -174,9 +162,6 @@ export class WaterService {
         this._failedRivers = new Set();
         this._lakeRegrown = new Set();
         this.refined = new Map();    // lakeId -> solve record
-        // Baked valley pages waiting for the GPU (WaterGpuData drains it):
-        // [{ pageIds, texels }] (riverValley.js).
-        this.valleyUpdates = [];
         this.mergedInto = new Map(); // lakeId -> representative lake id
         this.version = 0;            // bumps whenever lake data changes
         this.timings = {};
@@ -224,7 +209,7 @@ export class WaterService {
                 eagerCarved: !pre && this.config.sim?.enabled !== false,
             });
             if (this._carveResources) this._sampler.setWaterCarveResources(this._carveResources);
-            if (this._valleyResources) this._sampler.setRiverValleyResources(this._valleyResources);
+            if (this._fieldResources) this._sampler.setRiverFieldResources(this._fieldResources);
             const N = this.config.gridN;
             this._key = hashParts([
                 WATER_ALGO_VERSION, N, this.radius, this.config.params,
@@ -938,7 +923,7 @@ export class WaterService {
             const destKey = plan.dest.type === 'lake' ? `lake${plan.dest.id}` : plan.dest.type === 'river' ? `river${plan.dest.id}-${trunk.key}` : 'sea';
             const shapeKey = hashParts([
                 RIVER_SOLVE_VERSION, shape, { ...RIVER_LEVEL_DEFAULTS, ...RC.levels },
-                RC.stepM, RC.smoothPasses, this.config.carve, this.config.landscape,
+                RC.stepM, RC.smoothPasses, this.config.carve,
             ]);
             // A lake can grow or merge after a river has been cached. IDs
             // alone do not identify its shoreline, exit or water level.
@@ -964,8 +949,6 @@ export class WaterService {
                     const r = await this._client.call({
                         type: 'solveRiver', riverId, frame, heights, shape,
                         levels: { ...RC.levels, waterFrac: CV.waterFrac },
-                        // The shader's shape: no shore scallops (riverSection.js banks).
-                        landscape: { ...this.config.landscape, enabled: this.valleyOn && this.config.landscape.enabled }, shapeNoise: { ...CV, bankDetail: 0 },
                         // The carve's reach beyond the half-width (riverCarve.wgsl.js) + margin,
                         // the half-width as wide as the shape noise makes it.
                         reachM: CV.enabled ? RIVER_SECTION.reachM + 8 : 0,
@@ -999,7 +982,6 @@ export class WaterService {
             if (!fromCache && this.config.cache) { const { ms: _ms, ...stored } = rec; this._cache.put(riverKey, stored); }
             this.riverRecs.set(riverId, rec);
             this.version++;
-            await this._bakeValley(riverId, rec, fromCache);
             Logger.debug(`[Water] river ${riverId}: ${(rec.lengthM / 1000).toFixed(1)} km to ${destKey}, ` +
                 `${fromCache ? 'cache' : 'traced'} ${rec.ms.toFixed(0)} ms`);
             return this.riverRecs.get(riverId) ?? null;
@@ -1007,48 +989,6 @@ export class WaterService {
             this._failedRivers.add(riverId);
             Logger.warn(`[Water] river ${riverId} refine failed: ${err?.message || err}`);
             return null;
-        }
-    }
-
-    /** River valleys are baked when the terrain shader has them (riverValley.wgsl.js). */
-    get valleyOn() { return this.terrainGenerator?.riverValley === true && this.config.valley?.enabled !== false; }
-
-    /**
-     * Bakes the valley pages along a traced river (riverValley.js, in the
-     * worker): the lakes near it are solved first (their rims are kept), a
-     * cached trace is handed to the worker; the pages wait in valleyUpdates.
-     */
-    async _bakeValley(riverId, rec, fromCache) {
-        if (!this.valleyOn) return;
-        try {
-            if (fromCache) {
-                const points = rec.points.slice();
-                await this._client.call({ type: 'restoreRiver', riverId, points, stride: rec.stride, landscape: rec.landscape }, [points.buffer]);
-            }
-            // Lakes within reach of the valley (nearest few), so their rims are known.
-            const P = rec.points, st = rec.stride, n = P.length / st;
-            const reachM = this.config.valley.dBig + 500;
-            const cand = [];
-            for (const lake of this.lakes) {
-                if (this.rep(lake.id) !== lake.id || this.refined.has(lake.id) || this._failed.has(lake.id)) continue;
-                const half = 0.5 * Math.hypot(lake.frame.nx, lake.frame.ny) * lake.frame.spacing;
-                let best = Infinity;
-                for (let k = 0; k < n; k += 10) {
-                    const cosA = P[k * st] * lake.frame.c[0] + P[k * st + 1] * lake.frame.c[1] + P[k * st + 2] * lake.frame.c[2];
-                    best = Math.min(best, Math.acos(Math.max(-1, Math.min(1, cosA))) * this.radius - half);
-                }
-                if (best < reachM) cand.push({ id: lake.id, d: best });
-            }
-            cand.sort((a, b) => a.d - b.d);
-            for (const c of cand.slice(0, 6)) await this._refineLake(c.id);
-            if (this.riverRecs.get(riverId) !== rec) return;
-            const t0 = performance.now();
-            const r = await this._client.call({ type: 'bakeValley', riverIds: [riverId], opts: this.config.valley });
-            this.valleyUpdates.push({ pageIds: r.pageIds, texels: r.texels });
-            this.version++;
-            Logger.debug(`[Water] river ${riverId}: valley ${r.pageIds.length} pages baked in ${(performance.now() - t0).toFixed(0)} ms`);
-        } catch (err) {
-            Logger.warn(`[Water] river ${riverId} valley bake failed: ${err?.message || err}`);
         }
     }
 
@@ -1137,10 +1077,7 @@ export class WaterService {
         }
         this.version++;
         if (invalid.size) {
-            // Remove old incision pages too; rebuilding just the water mesh
-            // would leave the former river cut into the terrain.
-            const update = await this._client.call({type:'removeRivers', riverIds:[...invalid], opts:this.config.valley});
-            if (this.valleyOn && update.pageIds.length) this.valleyUpdates.push(update);
+            await this._client.call({type:'removeRivers', riverIds:[...invalid]});
             this.version++;
         }
     }
@@ -1154,10 +1091,10 @@ export class WaterService {
         this._sampler?.setWaterCarveResources(res);
     }
 
-    /** River valley field (WaterGpuData valley resources) for carved samples. */
-    setRiverValleyResources(res) {
-        this._valleyResources = res;
-        this._sampler?.setRiverValleyResources?.(res);
+    /** River field (RiverFieldService resources) for carved samples. */
+    setRiverFieldResources(res) {
+        this._fieldResources = res;
+        this._sampler?.setRiverFieldResources?.(res);
     }
 
     /** Structured placement needs no sampled height grid. Only a close
@@ -1167,7 +1104,7 @@ export class WaterService {
             this._simSamplerPromise ??= createHydrologySampler({device:this.device,terrainGenerator:this.terrainGenerator,directionsOnly:true});
             this._sampler=await this._simSamplerPromise;
             await this._sampler.setWaterCarveResources(this._carveResources);
-            await this._sampler.setRiverValleyResources(this._valleyResources);
+            await this._sampler.setRiverFieldResources(this._fieldResources);
         }
         return this._sampler.sampleDirsCarved(dirs);
     }

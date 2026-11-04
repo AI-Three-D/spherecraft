@@ -17,7 +17,7 @@ export function regionalRimCapRadius(radiusM, segments, tight = false) {
 export async function createRegionalBasinCertifier({device,gen,data,uniformBytes,withHeights=false,slopeAware=false,withPlacement=false,routeHeightSource='natural'}) {
     const compileStarted = performance.now();
     const shape=!!data.shapeData;
-    const code = createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({regionalTerrain:true,regionalShape:shape,waterCarve:false,riverValley:false}))
+    const code = createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({regionalTerrain:true,regionalShape:shape,waterCarve:false}))
         + createRegionalBasinCertificateWgsl(gen.erosionFilter,data.budgets,{slopeAware}) + (withHeights ? createRegionalRouteHeightWgsl({source:routeHeightSource,shape}) : '')+(withPlacement?createRegionalPlacementSurveyWgsl():'');
     const entries=['basinCertificateMain',...(withHeights?['regionalRouteHeightMain']:[]),...(withPlacement?['regionalPlacementSurveyMain']:[])];
     const {pipelines,cacheHit}=await regionalComputePipelines(device,code,entries,{reuse:gen._regionalCertificateReuse!==false});

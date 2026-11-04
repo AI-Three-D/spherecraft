@@ -20,7 +20,7 @@ gen._fillTerrainUniformScratch(0,0,128,1,0);const uniformBytes=gen._terrainUnifo
 const options=regionalTerrainOptions({basins:{enabled:true,...HIGHLAND_BASIN_CASE}}).basins;
 const sites=JSON.parse(fs.readFileSync('tools/perf/structured-terrain-results/basin-pocket/placement-audit.json')).cases[0].sites;
 const compileStart=performance.now();
-const code=createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({regionalTerrain:true,waterCarve:false,riverValley:false}))
+const code=createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({regionalTerrain:true,waterCarve:false}))
     +createRegionalBasinCertificateWgsl(gen.erosionFilter,regional.budgets,{slopeAware:true});
 const pipeline=await device.createComputePipelineAsync({layout:'auto',compute:{module:device.createShaderModule({code}),entryPoint:'basinCertificateMain'}});
 const certificateCompileMs=performance.now()-compileStart;

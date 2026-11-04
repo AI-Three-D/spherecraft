@@ -23,20 +23,17 @@ const { limitPatchCells, growPatchFrame } = await imp('core/world/hydrology/lake
 const { cellDir } = await imp('core/world/hydrology/waterGraph.js');
 const { RIVER_SUB } = await imp('core/world/water/waterWgsl.js');
 const { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } = await imp('core/world/water/riverShapeNoise.js');
-const { RIVER_VALLEY_DEFAULTS } = await imp('core/world/water/riverValley.js');
-const { RIVER_LANDSCAPE_DEFAULTS } = await imp('core/world/hydrology/riverLandscape.js');
 if (gen.regionalTerrainActive) throw new Error('regional terrain active: not the original world');
 
 const R = lab.planetConfig.radius, N = 512, SPACING = 32, BAND = 6, MAX_CELLS = 4e6;
 const RC = WATER_SERVICE_DEFAULTS.rivers;
 const CV = { ...RIVER_CARVE_DEFAULTS, bankDetail: 0 };   // ?regionalBanks=legacy
-const landscape = { ...RIVER_LANDSCAPE_DEFAULTS, enabled: gen.riverValley === true };
 const sampler = await createHydrologySampler({ device, terrainGenerator: gen, eagerCarved: false });
 const grid = await sampler.sampleGrid(N);
 const core = createWaterWorkerCore();
 const tb = performance.now();
 const built = core.handle({ type: 'build', N, heights: grid.heights, precip: grid.precip, seaLevelM: grid.seaLevelM, radius: R, spacing: SPACING }).reply;
-const summary = { buildMs: performance.now() - tb, lakes: built.lakes.length, rivers: built.rivers.length, gen: { waterCarve: gen.waterCarve, riverValley: gen.riverValley } };
+const summary = { buildMs: performance.now() - tb, lakes: built.lakes.length, rivers: built.rivers.length, gen: { waterCarve: gen.waterCarve } };
 
 // All lakes at 32 m (sequential precompute order by id; merges as in the service).
 const merged = new Map();
@@ -94,7 +91,7 @@ for (const river of built.rivers) {
         const heights = await sampler.samplePatch(frame, R);
         const tsol = performance.now();
         const r = core.handle({ type: 'solveRiver', riverId: river.id, frame, heights, shape: RC.shape,
-            levels: { ...RC.levels, waterFrac: CV.waterFrac, bankH: CV.bankH }, landscape, shapeNoise: CV,
+            levels: { ...RC.levels, waterFrac: CV.waterFrac, bankH: CV.bankH }, shapeNoise: CV,
             reachM: CV.enabled ? CV.bankW + CV.blendW + 8 : 0, reachScale: riverShapeMaxScale(CV),
             stepM: RC.stepM, smoothPasses: RC.smoothPasses, sub: RIVER_SUB, trunk }).reply;
         row.sampleMs = (row.sampleMs ?? 0) + (tsol - ts);
@@ -111,8 +108,6 @@ for (const river of built.rivers) {
         row.lengthKm = rec.lengthM / 1000; row.points = rec.points.length / rec.stride; row.segCells = rec.segCells.length;
         row.dest = rec.dest.type;
         const tv = performance.now();
-        const v = core.handle({ type: 'bakeValley', riverIds: [river.id], opts: RIVER_VALLEY_DEFAULTS }).reply;
-        row.valleyMs = performance.now() - tv; row.valleyPages = v.pageIds.length;
         sum.ok++;
     }
     for (const k of ['planMs', 'sampleMs', 'solveMs', 'landscapeMs', 'valleyMs', 'corridorCells']) sum[k] += row[k] ?? 0;

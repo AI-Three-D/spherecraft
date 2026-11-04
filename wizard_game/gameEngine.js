@@ -54,7 +54,7 @@ import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terr
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
 import { WaterGpuData, lakeMaskAtlasPlan, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
-import { JunctionFieldService } from '../core/world/water/JunctionFieldService.js';
+import { RiverFieldService } from '../core/world/water/RiverFieldService.js';
 import {structuredWaterGpuCapacity} from '../core/world/water/structuredWaterGpuCapacity.js';
 import { WaterRiverSim } from '../core/world/water/WaterRiverSim.js';
 import { createRiverStrip } from '../core/world/water/riverStrip.js';
@@ -370,6 +370,14 @@ export class GameEngine {
         const config = this.engineConfig?.ui?.initialLoad ?? {};
         const stats = this.renderer?.getInitialLoadStatus?.() ?? null;
         state.stats = stats;
+        // The river field near the spawn is baked and its tiles regenerated
+        // before the reveal (core/world/water/RiverFieldService.js).
+        const field = this.riverFieldService;
+        const fieldOn = (this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator ?? this.terrainGenerator)?.waterCarve === true
+            && this.waterService?.state !== 'failed';
+        const waterReady = !fieldOn || (!!field && field.readyForReveal() &&
+            !(this.renderer?.quadtreeTileManager?.tileStreamer?.getRegenerationStats?.().pending > 0));
+        state.waterPending = fieldOn && !waterReady;
 
         if (!stats?.hasVisibleReadback) {
             state.phase = 'surveying';
@@ -405,7 +413,7 @@ export class GameEngine {
                 stats.activeGenerations <= (config.maxActiveGenerations ?? 8) &&
                 stats.pendingCopies <= (config.maxPendingCopies ?? 0);
 
-            if (residentReady && exactReady && visibleReady && queueReady) {
+            if (residentReady && exactReady && visibleReady && queueReady && waterReady) {
                 state.stableFrames++;
                 state.phase = 'locking';
                 state.title = 'Locking terrain residency';
@@ -416,7 +424,11 @@ export class GameEngine {
                 );
             } else {
                 state.stableFrames = 0;
-                if (stats.pendingGenerations + stats.activeGenerations > 0) {
+                if (state.waterPending && residentReady && queueReady) {
+                    state.phase = 'water';
+                    state.title = 'Shaping rivers';
+                    state.detail = 'Tracing the rivers near you and baking their ground and water.';
+                } else if (stats.pendingGenerations + stats.activeGenerations > 0) {
                     state.phase = 'streaming';
                     state.title = 'Streaming terrain tiles';
                     state.detail = `${stats.residentVisibleTiles}/${stats.visibleTiles} visible tiles resident, ${stats.pendingGenerations + stats.activeGenerations} generations in flight.`;
@@ -434,7 +446,8 @@ export class GameEngine {
 
         const elapsedMs = performance.now() - state.startedAt;
         const minOverlayMs = Math.max(0, config.minOverlayMs ?? 0);
-        const maxWaitMs = Math.max(minOverlayMs + 1, config.maxWaitMs ?? 12000);
+        // Water work belongs to startup: wait longer while the river field is pending.
+        const maxWaitMs = Math.max(minOverlayMs + 1, config.maxWaitMs ?? 12000, state.waterPending ? (config.maxWaterWaitMs ?? 120000) : 0);
         const stableReady = state.stableFrames >= state.stableFramesRequired;
 
         if (stableReady && elapsedMs >= minOverlayMs) {
@@ -1002,8 +1015,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.frameLoop?.stop();
         this.waterRiverSim?.destroy();
         this.waterRiverSim = null;
-        this.junctionFieldService?.dispose();
-        this.junctionFieldService=null;
+        this.riverFieldService?.dispose();
+        this.riverFieldService=null;
         this.waterService?.dispose();
         this.waterService = null;
         this.inputManager.stop();
@@ -1473,12 +1486,10 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         this.waterGpuData = new WaterGpuData(device, {
             gridN: cfg.gridN, planetRadius: this.planetConfig.radius,
             carve: terrainGenerator.waterCarve ? cfg.carve : null,
-            valley: terrainGenerator.riverValley ? cfg.valley : null,
             ...(cfg.gpu.structuredCapacity?structuredWaterGpuCapacity(this.waterService):{}),
             structuredRiverSurface:cfg.gpu.structuredRiverSurface,
             ...extra,
         });
-        this.waterGpuData.junctionFields=terrainGenerator.junctionFields??null;
         if (terrainGenerator.regionalTerrainActive && this.waterService.state === 'ready') {
             const origin = this.planetConfig.origin || {x:0,y:0,z:0}, cam = this.camera?.position;
             const basin = terrainGenerator.regionalTerrain.basins[0];
@@ -1486,27 +1497,17 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             const rel = cam ? {x:cam.x-origin.x,y:cam.y-origin.y,z:cam.z-origin.z}
                 : {x:(basin?.centre[0]??1)*radius,y:(basin?.centre[1]??0)*radius,z:(basin?.centre[2]??0)*radius};
             this.waterGpuData.update(this.waterService, rel, performance.now()/1000);
-            // No render tiles exist before quadtree initialization. These
-            // initial uploads are generation inputs, not terrain changes.
-            if (!this.renderer?.quadtreeTileManager?.tileStreamer) this.waterGpuData.takeChangedCells();
         }
         this.renderer?.setWaterData?.(this.waterGpuData);
-        // River channels carved into tiles generated from now on, and into
-        // the simulation's bed (core/world/water/riverCarve.wgsl.js).
+        // Rivers in tiles generated from now on, and in the simulation's bed:
+        // the baked river field (core/world/water/riverField.js).
         if (terrainGenerator.waterCarve) {
             terrainGenerator.setWaterCarveResources(this.waterGpuData.resources);
             this.waterService.setWaterCarveResources(this.waterGpuData.resources);
             this._waterCarveGenerator = terrainGenerator;
-        }
-        // River valleys shaped into the terrain before erosion (core/world/water/riverValley.js).
-        if (terrainGenerator.riverValley) {
-            terrainGenerator.setRiverValleyResources(this.waterGpuData.valleyResources);
-            this.waterService.setRiverValleyResources(this.waterGpuData.valleyResources);
-        }
-        if(cfg.junctions.enabled&&terrainGenerator.junctionFields) {
-            this.junctionFieldService=new JunctionFieldService({water:this.waterGpuData,service:this.waterService,
-                terrainGenerator,config:cfg.junctions,yieldBetween:waitForVisibleFrame,
+            this.riverFieldService=new RiverFieldService({water:this.waterGpuData,service:this.waterService,terrainGenerator,
                 onChanged:cells=>this._regenerateWaterCells(cells)});
+            this.waterGpuData.riverField=this.riverFieldService;
         }
     }
 
@@ -1517,11 +1518,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             const rel = { x: cam.x - origin.x, y: cam.y - origin.y, z: cam.z - origin.z };
             this._tickWaterSim(rel);
             this.waterGpuData.update(this.waterService, rel, performance.now() / 1000);
-            this.junctionFieldService?.update(rel);
-            // Where rivers changed the carve changed: regenerate those tiles in
-            // place (tiles still generating with the old data notice the version).
-            const changed = this.waterGpuData.takeChangedCells();
-            this._regenerateWaterCells(changed);
+            this.riverFieldService?.update(rel);
         }
     }
 
@@ -1620,7 +1617,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             state: gen.waterCarveBound ? 'bound' : 'waiting for the water system',
             version: gen.waterCarveVersion ?? 0,
             rivers: this.waterGpuData?._appliedRivers?.size ?? 0,
-            valleyPages: this.waterGpuData?.valleyPageCount ?? 0,
+            field: this.riverFieldService?.summary?.() ?? null,
             regeneration: this.renderer?.quadtreeTileManager?.tileStreamer?.getRegenerationStats?.() ?? null,
         };
     }

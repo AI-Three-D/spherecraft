@@ -1132,7 +1132,7 @@ ${hasCoarseColorTexture ? `@group(1) @binding(10) var coarseColorTexture: ${chun
 @group(3) @binding(7) var transmittanceLUT: texture_2d<f32>;
 @group(3) @binding(8) var transmittanceSampler: sampler;
 ${shadowBindings}
-${enableLakeWater ? createWaterWgsl({ group: 3 }) : ''}
+${enableLakeWater ? createWaterWgsl({ group: 3, riverField: true }) : ''}
 struct FragmentInput {
     @builtin(position) clipPosition: vec4<f32>,
     @location(0) vUv: vec2<f32>,

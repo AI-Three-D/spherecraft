@@ -10,7 +10,7 @@ struct SimRenderU {
 `;
 
 export function buildWaterSimVertexShader() {
-    return commonWgsl() + SIM_RENDER_UNIFORMS + /* wgsl */`
+    return commonWgsl({ segments: true }) + SIM_RENDER_UNIFORMS + /* wgsl */`
 @group(2) @binding(0) var<storage, read> B: array<f32>;
 @group(2) @binding(1) var<storage, read> S: array<vec4<f32>>;
 @group(2) @binding(2) var<storage, read> K: array<f32>;
@@ -97,7 +97,7 @@ fn main(@builtin(vertex_index) vi: u32) -> SimVOut {
 }
 
 export function buildWaterSimFragmentShader() {
-    return commonWgsl() + shadeWgsl() + SIM_RENDER_UNIFORMS + /* wgsl */`
+    return commonWgsl({ segments: true }) + shadeWgsl() + SIM_RENDER_UNIFORMS + /* wgsl */`
 fn hash21(p: vec2<f32>) -> f32 {
     var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);

@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseWgsl, validate } from 'naga-wasm';
-import {
-    buildNearRiverFragmentShader, buildNearRiverVertexShader, buildNearWaterFragmentShader, buildNearWaterVertexShader,
-} from './nearWaterSurface.wgsl.js';
+import { buildNearWaterFragmentShader, buildNearWaterVertexShader } from './nearWaterSurface.wgsl.js';
+import { buildFieldWaterFragmentShader, buildFieldWaterVertexShader } from './fieldWaterSurface.wgsl.js';
 
 // WGSL check without a GPU (naga). Drawn by NearWaterRenderer.js.
 describe('near water surface WGSL', () => {
@@ -12,14 +11,10 @@ describe('near water surface WGSL', () => {
     it('lake fragment shader validates', () => {
         expect(() => validate(parseWgsl(buildNearWaterFragmentShader()))).not.toThrow();
     });
-    it('river vertex shader validates', () => {
-        expect(() => validate(parseWgsl(buildNearRiverVertexShader()))).not.toThrow();
+    it('river field water vertex shader validates', () => {
+        expect(() => validate(parseWgsl(buildFieldWaterVertexShader()))).not.toThrow();
     });
-    it('river fragment shader validates', () => {
-        expect(() => validate(parseWgsl(buildNearRiverFragmentShader()))).not.toThrow();
-    });
-    it('lake and river fragments validate with shared junction ownership',()=>{
-        for(const build of [buildNearWaterFragmentShader,buildNearRiverFragmentShader])
-            expect(()=>validate(parseWgsl(build({junctionFields:true})))).not.toThrow();
+    it('river field water fragment shader validates', () => {
+        expect(() => validate(parseWgsl(buildFieldWaterFragmentShader()))).not.toThrow();
     });
 });

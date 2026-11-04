@@ -72,7 +72,6 @@
             LR.serviceCreatedAt = now();
             wrapAsync(s, '_refineLake', 'lake', a => ({ id: a[0] }));
             wrapAsync(s, '_refineRiver', 'river', a => ({ id: a[0], depth: a[1] }));
-            wrapAsync(s, '_bakeValley', 'valley', a => ({ id: a[0], fromCache: a[2] }));
             wrapAsync(s, '_resolveLakeIncluding', 'regrow', a => ({ id: a[0] }));
         }
         if (s._sampler && !s._sampler.__lr) {

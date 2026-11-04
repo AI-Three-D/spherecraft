@@ -88,6 +88,25 @@ export function lakeSdfAt(F, frame, x, y) {
 }
 
 /**
+ * The same with a cubic B-spline, as the shader samples its atlas tile
+ * (waterLakeMaskSampleSmooth): the shore as a smooth curve.
+ */
+export function lakeSdfSmoothAt(F, frame, x, y) {
+    const { nx, ny, spacing, x0, y0 } = frame;
+    const u = (x - x0) / spacing - 0.5, v = (y - y0) / spacing - 0.5;
+    if (!(u >= -0.5 && v >= -0.5 && u <= nx - 0.5 && v <= ny - 0.5)) return -LAKE_SDF_RANGE_M;
+    const i = Math.floor(u), j = Math.floor(v), a = u - i, b = v - j;
+    const w = (f) => { const f2 = f * f, f3 = f2 * f; return [(1 - 3 * f + 3 * f2 - f3) / 6, (4 - 6 * f2 + 3 * f3) / 6, (1 + 3 * f + 3 * f2 - 3 * f3) / 6, f3 / 6]; };
+    const wx = w(a), wy = w(b);
+    let sum = 0;
+    for (let q = 0; q < 4; q++) {
+        const row = Math.max(0, Math.min(ny - 1, j + q - 1)) * nx;
+        for (let p = 0; p < 4; p++) sum += F[row + Math.max(0, Math.min(nx - 1, i + p - 1))] * wx[p] * wy[q];
+    }
+    return sum;
+}
+
+/**
  * The field on an S x S atlas tile over the same extent: bilinear where
  * the tile is as fine as the mask or finer; where it is coarser, the
  * largest value of the cells under each texel (keeps narrow water, as the

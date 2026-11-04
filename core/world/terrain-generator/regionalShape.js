@@ -119,7 +119,7 @@ export async function createSingleRegionalShapeData({device,gen,data,uniformByte
     const buffer=(label,size,usage)=>{const b=device.createBuffer({label,size,usage});scratch.push(b);return b;};
     try {
         const source=createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({regionalTerrain:true,
-            regionalShape:false,regionalValleyFeature:false,waterCarve:false,riverValley:false}))+createRegionalShapeBakeWgsl();
+            regionalShape:false,regionalValleyFeature:false,waterCarve:false}))+createRegionalShapeBakeWgsl();
         const compileStarted=performance.now();
         const {pipelines:[pipeline],cacheHit}=await regionalComputePipelines(device,source,['regionalShapeBakeMain']);
         const compileMs=performance.now()-compileStarted;

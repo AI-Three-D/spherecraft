@@ -5,6 +5,8 @@ import { RIVER_SECTION } from './riverSection.js';
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 const smooth = (a, b, x) => { const t = clamp((x-a)/(b-a), 0, 1); return t*t*(3-2*t); };
 
+const smoothstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
 export function riverMouths(rec, arc) {
     const P=rec.points, st=rec.stride, n=P.length/st, out=[];
     if (st<20 || n<2 || rec.src == null || rec.structured===true) return out;
@@ -127,68 +129,47 @@ export function insertRiverMouthAnchors(rec, mouths, arc, R) {
     return {points,arc:nextArc};
 }
 
-// Publish the fan in the existing lake distance-field atlas. The lake mesh,
-// terrain material and ribbon handover then share one footprint; no extra
-// river search is needed in a lake fragment.
-export function lakeMouthSurface(lake, lakeId, rivers, R, arcOf, baseMask=lake.mask) {
-    if(lake.surfaceDepthMask)return {...lake,mask:baseMask};
-    const fr=lake.frame, step=fr.spacing, strips=[];
-    const plane=d=>{const k=d[0]*fr.c[0]+d[1]*fr.c[1]+d[2]*fr.c[2];return [
-        (d[0]*fr.e1[0]+d[1]*fr.e1[1]+d[2]*fr.e1[2])*R/k,
-        (d[0]*fr.e2[0]+d[1]*fr.e2[1]+d[2]*fr.e2[2])*R/k];};
-    for(const rec of rivers) {
-        if(rec.src!==lakeId && !(rec.dest?.type==='lake'&&rec.dest.id===lakeId))continue;
-        const arc=arcOf(rec),P=rec.points,st=rec.stride,n=arc.length;
-        for(const m of riverMouths(rec,arc)) {
-            if(Math.abs(m.level-lake.level)>.05)continue;
-            if((m.sign<0?rec.src:rec.dest?.id)!==lakeId)continue;
-            const sample=x=>{
-                const s=m.s+m.sign*x;
-                let k=0;while(k+2<n&&arc[k+1]<s)k++;
-                const t=(s-arc[k])/Math.max(arc[k+1]-arc[k],.001),a=k*st,b=a+st;
-                const d=[0,1,2].map(i=>P[a+i]+(P[b+i]-P[a+i])*t);
-                const hw=P[a+4]+(P[b+4]-P[a+4])*clamp(t,0,1);
-                const depth=Math.max(.6,P[a+5]+(P[b+5]-P[a+5])*clamp(t,0,1));
-                const width=riverMouthShape(m,s,hw).width*Math.sqrt(1+.5*RIVER_SECTION.mouth.bankSoftM/depth)+step*.75;
-                return {p:plane(d),width};
-            };
-            const x0=0,x1=RIVER_SECTION.mouth.lakeM*1.2;
-            const count=Math.ceil((x1-x0)/(step*.5));
-            let a=sample(x0);
-            for(let q=1;q<=count;q++) {
-                const b=sample(x0+(x1-x0)*q/count);strips.push({a,b});a=b;
-            }
+/**
+ * Water level (m) at each point of a traced river (points 16, or the design
+ * level 3 on older records), eased to the level of a lake whose mask covers
+ * a point over easeM of arc from it, so river and lake surfaces meet.
+ * @param {(dir: number[]) => ({ level: number } | null)} lakeAt
+ */
+export function riverWaterLevels(rec, arc, lakeAt, easeM = 80) {
+    const P = rec.points, st = rec.stride, n = P.length / st;
+    // Modern traces already contain the surface used to design their bed.
+    // Re-anchoring that solution to render masks can select a neighbouring
+    // lake, then propagate its level upstream. River 2576 was lifted by
+    // 7.64 m this way while its bed stayed at the solved height. Changes to
+    // an actual endpoint lake must invalidate/re-solve the trace instead.
+    if (st >= 20) return riverMouthLevels(rec, arc, Float64Array.from({ length: n }, (_, k) => P[k * st + 16]));
+    const out = new Float64Array(n), toLake = new Float64Array(n).fill(Infinity), lakeLevel = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+        out[k] = P[k * st + 3];
+        const l = lakeAt([P[k * st], P[k * st + 1], P[k * st + 2]]);
+        if (l) { toLake[k] = 0; lakeLevel[k] = l.level; }
+    }
+    for (let k = 1; k < n; k++) {
+        const d = toLake[k - 1] + arc[k] - arc[k - 1];
+        if (d < toLake[k]) { toLake[k] = d; lakeLevel[k] = lakeLevel[k - 1]; }
+    }
+    for (let k = n - 2; k >= 0; k--) {
+        const d = toLake[k + 1] + arc[k + 1] - arc[k];
+        if (d < toLake[k]) { toLake[k] = d; lakeLevel[k] = lakeLevel[k + 1]; }
+    }
+    for (let k = 0; k < n; k++) {
+        if (Number.isFinite(toLake[k])) {
+            out[k] = lakeLevel[k] + (out[k] - lakeLevel[k]) * smoothstep(0, easeM, toLake[k]);
         }
     }
-    if(!strips.length)return {...lake,mask:baseMask};
-    let loX=fr.x0,loY=fr.y0,hiX=fr.x0+fr.nx*step,hiY=fr.y0+fr.ny*step;
-    for(const {a,b} of strips)for(const z of [a,b]) {
-        loX=Math.min(loX,z.p[0]-z.width-step);hiX=Math.max(hiX,z.p[0]+z.width+step);
-        loY=Math.min(loY,z.p[1]-z.width-step);hiY=Math.max(hiY,z.p[1]+z.width+step);
+    // Easing toward a lake must never introduce a local upstream slope.
+    // First respect downstream lake anchors, then impose the upstream
+    // ceiling. This also handles a winding outlet passing near its lake twice.
+    let floor = -Infinity;
+    for (let k = n - 1; k >= 0; k--) {
+        if (toLake[k] === 0) floor = Math.max(floor, lakeLevel[k]);
+        out[k] = Math.max(out[k], floor);
     }
-    const dx=Math.ceil((fr.x0-loX)/step),dy=Math.ceil((fr.y0-loY)/step);
-    const nx=fr.nx+dx+Math.ceil((hiX-fr.x0-fr.nx*step)/step);
-    const ny=fr.ny+dy+Math.ceil((hiY-fr.y0-fr.ny*step)/step);
-    const frame={...fr,x0:fr.x0-dx*step,y0:fr.y0-dy*step,nx,ny};
-    const mask=new Uint8Array(nx*ny),mouthCells=[];
-    for(let j=0;j<fr.ny;j++)mask.set(baseMask.subarray(j*fr.nx,(j+1)*fr.nx),(j+dy)*nx+dx);
-    for(const {a,b} of strips) {
-        const vx=b.p[0]-a.p[0],vy=b.p[1]-a.p[1],len2=vx*vx+vy*vy;
-        if(len2<1e-8)continue;
-        const radius=Math.max(a.width,b.width);
-        const i0=Math.max(0,Math.floor((Math.min(a.p[0],b.p[0])-radius-frame.x0)/step));
-        const i1=Math.min(nx-1,Math.ceil((Math.max(a.p[0],b.p[0])+radius-frame.x0)/step));
-        const j0=Math.max(0,Math.floor((Math.min(a.p[1],b.p[1])-radius-frame.y0)/step));
-        const j1=Math.min(ny-1,Math.ceil((Math.max(a.p[1],b.p[1])+radius-frame.y0)/step));
-        for(let j=j0;j<=j1;j++)for(let i=i0;i<=i1;i++) {
-            const x=frame.x0+(i+.5)*step-a.p[0],y=frame.y0+(j+.5)*step-a.p[1];
-            const t=(x*vx+y*vy)/len2;
-            if(t<0||t>1)continue;
-            const width=a.width+(b.width-a.width)*t;
-            if(Math.abs(x*vy-y*vx)>width*Math.sqrt(len2))continue;
-            const k=j*nx+i;
-            if(mask[k]!==2){mouthCells.push(k);mask[k]=2;}
-        }
-    }
-    return {...lake,frame,mask,mouthCells};
+    for (let k = 1; k < n; k++) out[k] = Math.min(out[k], out[k - 1]);
+    return out;
 }

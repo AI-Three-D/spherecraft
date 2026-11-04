@@ -1,7 +1,7 @@
 import {RIVER_SUB} from './waterWgsl.js';
 
 export const WATER_GPU_CAPACITY_DEFAULTS=Object.freeze({maxLakes:8192,maskLayerSize:512,maxMaskLayers:96,
-    maxRiverSegs:262144,maxRiverCells:65536,maxValleyPages:3072});
+    maxRiverSegs:262144,maxRiverCells:65536});
 export const STRUCTURED_WATER_GPU_LIMITS=Object.freeze({...WATER_GPU_CAPACITY_DEFAULTS,maxMaskLayers:4096,maxRiverSegs:1048576});
 
 // Structured records are immutable for a published terrain generation. Size
@@ -25,8 +25,5 @@ export function structuredWaterGpuCapacity(service,limits=STRUCTURED_WATER_GPU_L
     return {maxLakes:Math.min(slots,limits.maxLakes),maxMaskLayers:Math.max(1,Math.min(service.lakes.length,limits.maxMaskLayers)),
         ...(service.lakes.length>96?{maskTilesPerAxis:4}:{}),
         maskLayerSize:Math.min(2**Math.ceil(Math.log2(maskSize)),limits.maskLayerSize),
-        maxRiverSegs:Math.max(1,Math.min(segments,limits.maxRiverSegs)),maxRiverCells:Math.max(1,Math.min(riverCells.size,limits.maxRiverCells)),
-        // Structured terrain owns its bed; this service never bakes legacy
-        // valley pages. No duplicate terrain representation is needed.
-        valley:null};
+        maxRiverSegs:Math.max(1,Math.min(segments,limits.maxRiverSegs)),maxRiverCells:Math.max(1,Math.min(riverCells.size,limits.maxRiverCells))};
 }

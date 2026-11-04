@@ -15,18 +15,19 @@ describe('terrain water resource replacement',()=>{
             _buildTextureKey:()=>'',_getOrCreateDummyTextureView:()=>texture,_getOrCreateDummyArrayTextureView:()=>array,
             _getOrCreateDummyDepthTextureView:()=>depth,_getOrCreateDummyStorageBuffer:()=>storage,
         });
-        const resources={index:{},lakes:{},masks:{},params:{},rivers:{}};
-        const u={_waterData:{value:{resources}},heightScale:{value:2000},chunksPerFace:{value:64}},m={id:1,bindingAdapter:terrainBindingAdapter,_gpuPipeline:{bindGroupLayouts:[{},{},{},{}]}};
+        const resources={index:{},lakes:{},masks:{},params:{}},field={pages:{},texels:{},params:{}};
+        const u={_waterData:{value:{resources,riverField:{resources:field}}},heightScale:{value:2000},chunksPerFace:{value:64}},m={id:1,bindingAdapter:terrainBindingAdapter,_gpuPipeline:{bindGroupLayouts:[{},{},{},{}]}};
         const first=b._createBindGroups(m,u,{});
         expect(b._createBindGroups(m,u,{})[3]).toBe(first[3]);expect(groupsCreated).toBe(4);
         let previous=first[3];
-        for(const [key,binding] of [['index',12],['lakes',13],['masks',14],['params',15],['rivers',16]]) {
-            resources[key]={};const next=b._createBindGroups(m,u,{})[3];
+        for(const [from,key,binding] of [[resources,'index',12],[resources,'lakes',13],[resources,'masks',14],[resources,'params',15],
+            [field,'pages',17],[field,'texels',18],[field,'params',19]]) {
+            from[key]={};const next=b._createBindGroups(m,u,{})[3];
             expect(next).not.toBe(previous);
             const entry=next.entries.find(e=>e.binding===binding);
-            expect(binding===14?entry.resource:entry.resource.buffer).toBe(resources[key]);
+            expect(binding===14?entry.resource:entry.resource.buffer).toBe(from[key]);
             expect(b._createBindGroups(m,u,{})[3]).toBe(next);previous=next;
         }
-        expect(groupsCreated).toBe(9);
+        expect(groupsCreated).toBe(11);
     });
 });

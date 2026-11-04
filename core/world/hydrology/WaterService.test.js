@@ -4,8 +4,8 @@ import {WaterService} from './WaterService.js';
 function service() {
     const s=Object.create(WaterService.prototype);
     Object.assign(s,{refined:new Map(),mergedInto:new Map(),riverRecs:new Map(),rivers:[],lakes:[],
-        _failedRivers:new Set(),version:0,valleyUpdates:[],config:{valley:{enabled:true}},terrainGenerator:{riverValley:true},
-        _client:{call:vi.fn(async()=>({pageIds:new Int32Array([7]),texels:new Uint32Array(4)}))}});
+        _failedRivers:new Set(),version:0,config:{},terrainGenerator:{},
+        _client:{call:vi.fn(async()=>({type:'riversRemoved'}))}});
     return s;
 }
 
@@ -36,8 +36,7 @@ describe('lake changes invalidate dependent rivers',()=>{
         expect([...s.riverRecs.keys()]).toEqual([13]);
         expect(s.rep(3)).toBe(6);expect(s.refined.has(3)).toBe(false);
         expect([...s._failedRivers]).toEqual([99]);
-        expect(s._client.call).toHaveBeenCalledWith({type:'removeRivers',riverIds:[10,11,12],opts:{enabled:true}});
-        expect(s.valleyUpdates[0].pageIds[0]).toBe(7);
+        expect(s._client.call).toHaveBeenCalledWith({type:'removeRivers',riverIds:[10,11,12]});
     });
     it('changes cache identity when level, shoreline or representative changes, including after restart',async()=>{
         const s=service(),rec={level:10,frame:{nx:2,ny:2},mask:new Uint8Array([2,0,0,0]),exitDir:[0,0,1]};

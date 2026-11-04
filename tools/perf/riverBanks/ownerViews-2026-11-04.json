@@ -1,0 +1,13 @@
+{
+  "note": "Owner 2026-11-03/04 after 5ad0fe9: 'river mouths are not very good; rivers mostly have an edge wall; unnatural geometry on hillsides; mouths still have the same old issues; dotted line of puddles (new). Do not commit; do not report back until fixed; no old failed attempts.'",
+  "views": [
+    { "name": "o04-river-sun", "pos": [-130149.2, -20233.0, -2313.5], "look": [-130144.4, -20231.5, -2318.5], "up": [0, 1, 0], "note": "river from above: straight saw-toothed left water edge, brown bank bands" },
+    { "name": "o04-mouth-corner", "pos": [-130186.5, -20150.6, -2642.7], "look": [-130180.7, -20147.6, -2645.6], "up": [0, 1, 0], "note": "mouth: pointed right corner, straight water edge" },
+    { "name": "o04-walls", "pos": [-130285.2, -20102.3, -2735.4], "look": [-130279.9, -20099.3, -2738.9], "up": [0, 1, 0], "note": "red arrows: edge walls along both banks" },
+    { "name": "o04-hill-facet", "pos": [-130357.4, -19907.9, -3027.0], "look": [-130353.5, -19902.8, -3029.9], "up": [0, 1, 0], "note": "blue arrow: straight-edged dark band on the hillside; walls along the river" },
+    { "name": "o04-mouth-yellow", "pos": [-130481.8, -18881.2, -3619.7], "look": [-130478.6, -18876.3, -3623.7], "up": [0, 1, 0], "note": "yellow arrow: mouth issue (pale shelf / edge); blue arrow: hillside band" },
+    { "name": "o04-puddles", "pos": [-130504.9, -18697.4, -3934.2], "look": [-130500.9, -18694.0, -3938.9], "up": [0, 1, 0], "note": "dotted line of puddles: a disconnected river (new)" },
+    { "name": "o04-mouth-poly", "pos": [-130565.1, -18413.7, -4314.1], "look": [-130559.9, -18412.0, -4318.6], "up": [0, 1, 0], "note": "mouth: straight polygon water edges, dark crease" },
+    { "name": "o04-lake-poly", "pos": [-130620.5, -18124.0, -4517.8], "look": [-130615.6, -18121.8, -4522.5], "up": [0, 1, 0], "note": "lake: straight-edged water polygons with red-brown edges" }
+  ]
+}

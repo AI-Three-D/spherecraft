@@ -8,9 +8,9 @@ describe('immutable structured water capacity',()=>{
         const c=structuredWaterGpuCapacity(service());
         expect(c.maxLakes).toBe(1);expect(c.maxMaskLayers).toBe(1);expect(c.maxRiverSegs).toBe(1);expect(c.maxRiverCells).toBe(1);
     });
-    it('sizes one known pond instead of reserving future legacy water and valley pools',()=>{
+    it('sizes one known pond instead of reserving future legacy water pools',()=>{
         const c=structuredWaterGpuCapacity(service([{id:0,frame:{nx:64,ny:64}}]));
-        expect(c).toEqual({maxLakes:1,maxMaskLayers:1,maskLayerSize:64,maxRiverSegs:1,maxRiverCells:1,valley:null});
+        expect(c).toEqual({maxLakes:1,maxMaskLayers:1,maskLayerSize:64,maxRiverSegs:1,maxRiverCells:1});
     });
     it('counts repeated segments and distinct cell blocks rather than just river points',()=>{
         const s=service([{id:0,frame:{nx:32,ny:32}},{id:1,frame:{nx:48,ny:40}}],

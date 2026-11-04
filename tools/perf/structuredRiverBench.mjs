@@ -120,7 +120,7 @@ async function water() {
     await svc.start();const before=memory.liveBytes;
     const gpu=new WaterGpuData(device,{gridN:svc.config.gridN,planetRadius:R,
         structuredRiverSurface,
-        carve:gen.waterCarve?svc.config.carve:null,valley:gen.riverValley?svc.config.valley:null,
+        carve:gen.waterCarve?svc.config.carve:null,
         ...(process.env.WATER_POOLS==='legacy'?{}:structuredWaterGpuCapacity(svc))});
     gpu.look.structuredRiverBody=structuredRiverBody;gpu.update(svc,camera.position,0);await device.queue.onSubmittedWorkDone();
     gen.setWaterCarveResources(gpu.resources);gen.setRiverValleyResources(gpu.valleyResources);
@@ -395,7 +395,7 @@ const report={setupWallMs,completeColdThroughTenFineMs,roots:cost(roots),rootTim
     quadtreeInitialization:cost(quadtreeInitialization),quadtreeBufferBytes:qt.getStats().gpuMemoryBytes,
     waterPublication:cost(waterFirst),firstTenCompleteTiles:cost(firstFine),completeRegeneration:regen,
     publication:{compactPools:process.env.WATER_POOLS!=='legacy',waterGpuBytes:liveWater.gpuBytes,
-        waterCarve:gen.waterCarve,riverValley:gen.riverValley,droppedRivers:liveWater.gpu._droppedRivers,
+        waterCarve:gen.waterCarve,droppedRivers:liveWater.gpu._droppedRivers,
         listedRiverCells:liveWater.gpu._riverCells.size,structuredRiverSurface,bankDetail},certificateCosts,surfaceCosts,readbackCosts,lodCosts,foundationCosts,routingCosts,bankCosts,
     basins:regional.basins,river:{points:count,lengthM:rec.lengthM,segments:liveWater.gpu.riverSegCount,gridN:rec.gridN,profile:rec.profile},
     outputDigests,bankAudit,contract:{samples:carved.length,wetFailures,raised,maxCutM,minDepthM,downstreamRises,

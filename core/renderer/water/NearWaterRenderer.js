@@ -7,8 +7,8 @@
 // earlier plane lakes), with the same look. Shaders: nearWaterSurface.wgsl.js.
 // - Lakes: one grid mesh drawn once per lake whose solved patch comes within
 //   the near range, in one instanced draw.
-// - Rivers: ribbons along the stretches within range (core/world/water/
-//   riverRibbon.js), rebuilt on the CPU as the camera moves, in one draw.
+// - Rivers, and lakes inside the river field's pages: one small grid per
+//   field page with water (fieldWaterSurface.wgsl.js), in one instanced draw.
 // Farther away the terrain shader draws the water. Near geometry uses the
 // existing water colour and surface terms; it fades to that terrain shading
 // over the handover range. Depth test on, no depth write, drawn after opaque
@@ -18,14 +18,13 @@
 import { Material } from '../resources/material.js';
 import { Geometry } from '../resources/geometry.js';
 import { WATER_BINDINGS, WATER_DEBUG_DRY } from '../../world/water/waterWgsl.js';
-import { buildRiverRibbons } from '../../world/water/riverRibbon.js';
 import { gridIndices } from './waterGrid.js';
+import { buildFieldWaterFragmentShader, buildFieldWaterVertexShader, FIELD_WATER_BINDINGS, FIELD_WATER_GRID } from './fieldWaterSurface.wgsl.js';
 import { fillNearWaterUniforms } from './nearWaterUniforms.js';
 import { aerialFadeRange } from '../terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import {
-    NEAR_RIVER_POINTS_BINDING, NEAR_RIVER_QUADS_BINDING,
     NEAR_WATER_MAX_LAKES, NEAR_WATER_SAMPLER_BINDING, NEAR_WATER_TRANSMITTANCE_BINDING, NEAR_WATER_SCENE_DEPTH_BINDING, NEAR_WATER_UNIFORM_FLOATS,
-    buildNearRiverFragmentShader, buildNearRiverVertexShader, buildNearWaterFragmentShader, buildNearWaterVertexShader,
+    buildNearWaterFragmentShader, buildNearWaterVertexShader,
 } from './nearWaterSurface.wgsl.js';
 
 // Grid vertices per side (odd: a row and a column through the camera). At
@@ -46,13 +45,15 @@ export class NearWaterRenderer {
         this._uniforms = new Float32Array(NEAR_WATER_UNIFORM_FLOATS);
         this._lakeGeometry = null;
         this._lakeMaterial = null;
-        this._riverGeometry = null;
-        this._riverMaterial = null;
-        this._riverBuffers = { points: null, quads: null };
         this._lakes = [];
-        this._quadCount = 0;
         this._listedAt = null;
         this._listedVersion = -1;
+        // River field water (fieldWaterSurface.wgsl.js): pages listed near the camera.
+        this._fieldMaterial = null;
+        this._fieldGeometry = null;
+        this._fieldPages = null;
+        this._fieldCount = 0;
+        this._fieldVersion = -1;
     }
 
     /** WaterGpuData (or null). */
@@ -63,63 +64,51 @@ export class NearWaterRenderer {
 
     _material(name,vs,fs,groups=[]) {
         const extras=[...groups];
-        if(this.water?.junctionFields) {
-            while(extras.length<1)extras.push({label:'NearWater-empty-group2',entries:[]});
-            extras.push({label:'NearWater-junctions',entries:[
-                {binding:0,visibility:'fragment',name:'junctionSetParams',buffer:{type:'uniform'}},
-                {binding:1,visibility:'fragment',name:'junctionSetTexels',buffer:{type:'read-only-storage'}},
-            ]});
-        }
+        while(extras.length<1)extras.push({label:'NearWater-empty-group2',entries:[]});
+        extras.push({label:'NearWater-riverField',entries:[
+            {binding:FIELD_WATER_BINDINGS.table,visibility:'vertex|fragment',name:'riverFieldTable',buffer:{type:'read-only-storage'}},
+            {binding:FIELD_WATER_BINDINGS.texels,visibility:'vertex|fragment',name:'riverFieldTexels',buffer:{type:'read-only-storage'}},
+            {binding:FIELD_WATER_BINDINGS.params,visibility:'vertex|fragment',name:'riverFieldParams',buffer:{type:'uniform'}},
+        ]});
         const m=createNearWaterMaterial(name,vs,fs,this._uniforms,extras);m.depthCompare='less-equal';return m;
     }
 
     _ensure() {
         if (this._lakeMaterial) return;
-        const shaderOptions={junctionFields:!!this.water?.junctionFields};
-        this._lakeMaterial = this._material('NearWaterSurface', buildNearWaterVertexShader(), buildNearWaterFragmentShader(shaderOptions));
+        this._lakeMaterial = this._material('NearWaterSurface', buildNearWaterVertexShader(), buildNearWaterFragmentShader());
         this._lakeGeometry = new Geometry();
         this._lakeGeometry.setIndex(gridIndices(GRID_N, GRID_N));
-        this._riverMaterial = this._material('NearRiverSurface', buildNearRiverVertexShader(), buildNearRiverFragmentShader(shaderOptions), [{
-            label: 'NearRiverSurface-Ribbons',
-            entries: [
-                { binding: NEAR_RIVER_POINTS_BINDING, visibility: 'vertex', name: 'ribbonPoints', buffer: { type: 'read-only-storage' } },
-                { binding: NEAR_RIVER_QUADS_BINDING, visibility: 'vertex', name: 'ribbonQuads', buffer: { type: 'read-only-storage' } },
-            ],
+        this._fieldMaterial = this._material('NearFieldWater', buildFieldWaterVertexShader(), buildFieldWaterFragmentShader(), [{
+            label: 'NearFieldWater-Pages',
+            entries: [{ binding: 0, visibility: 'vertex', name: 'fieldWaterPages', buffer: { type: 'read-only-storage' } }],
         }]);
-        this._riverGeometry = new Geometry();
+        this._fieldGeometry = new Geometry();
+        this._fieldGeometry.setIndex(gridIndices(FIELD_WATER_GRID, FIELD_WATER_GRID));
     }
 
-    // Uploads ribbon data, growing the buffers when needed.
-    _upload(name, data) {
-        const device = this.backend.device;
-        let buf = this._riverBuffers[name];
-        if (!buf || buf.size < data.byteLength) {
-            buf?.destroy();
-            buf = this._riverBuffers[name] = device.createBuffer({
-                label: `NearRiver-${name}`, size: Math.max(256, 2 ** Math.ceil(Math.log2(data.byteLength))),
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
-        }
-        if (data.byteLength) device.queue.writeBuffer(buf, 0, data);
-    }
-
-    // Lakes and river stretches within range of the camera (planet-centred).
+    // Lakes and field pages within range of the camera (planet-centred).
     _list(rel, range) {
-        const water = this.water;
-        this._lakes = water.lakesNear(rel, range + RELIST_M, NEAR_WATER_MAX_LAKES);
-        const C = water.carve ?? {};
-        const rivers = [...water._appliedRivers].filter(([rid]) => water.isRiverDrawn(rid));
-        const { points, quads } = buildRiverRibbons({
-            rivers, arcOf: (rec) => water._arcLengths(rec), camera: rel, rangeM: range + RELIST_M,
-            R: water.R, origin: this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 },
-            shape: C,
-            lakeAt: (dir) => water.lakeAt(dir),
-        });
-        this._quadCount = quads.length;
-        if (quads.length) {
-            this._upload('points', points);
-            this._upload('quads', quads);
+        this._lakes = this.water.lakesNear(rel, range + RELIST_M, NEAR_WATER_MAX_LAKES);
+        this._listField(rel, range);
+    }
+
+    // Field pages with water within range of the camera (planet-centred): face, pi, pj, slot.
+    _listField(rel, range) {
+        const f = this.water.riverField, R = this.water.R, l = Math.hypot(rel.x, rel.y, rel.z) || 1;
+        if (!f) { this._fieldCount = 0; return; }
+        const c = [rel.x / l, rel.y / l, rel.z / l], cosR = Math.cos((range + 100) / R);
+        const list = [];
+        for (const p of f.wetPages ?? []) if (p.dir[0] * c[0] + p.dir[1] * c[1] + p.dir[2] * c[2] > cosR) list.push(p.face, p.pi, p.pj, p.slot);
+        this._fieldCount = list.length / 4;
+        this._fieldVersion = f.version;
+        if (!this._fieldCount) return;
+        const data = new Uint32Array(list), device = this.backend.device;
+        if (!this._fieldPages || this._fieldPages.size < data.byteLength) {
+            this._fieldPages?.destroy();
+            this._fieldPages = device.createBuffer({ label: 'NearFieldWater-pages', size: Math.max(256, 2 ** Math.ceil(Math.log2(data.byteLength))),
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         }
+        device.queue.writeBuffer(this._fieldPages, 0, data);
     }
 
     render(camera, viewMatrix, projectionMatrix) {
@@ -134,24 +123,26 @@ export class NearWaterRenderer {
         const rel = { x: cam.x - o.x, y: cam.y - o.y, z: cam.z - o.z };
         const range = near.fadeEndM;
         const at = this._listedAt;
-        if (!at || water._appliedVersion !== this._listedVersion || Math.hypot(rel.x - at.x, rel.y - at.y, rel.z - at.z) > RELIST_M) {
+        if (!at || water._appliedVersion !== this._listedVersion || Math.hypot(rel.x - at.x, rel.y - at.y, rel.z - at.z) > RELIST_M
+            || (water.riverField && water.riverField.version !== this._fieldVersion)) {
             this._ensure();
             this._list(rel, range);
             this._listedAt = rel;
             this._listedVersion = water._appliedVersion;
         }
-        if (!this._lakes.length && !this._quadCount) return;
+        if (!this._lakes.length && !this._fieldCount) return;
 
         fillNearWaterUniforms(this._uniforms, {viewMatrix,projectionMatrix,planetConfig:this.planetConfig,
             uniformManager:this.uniformManager,camera,water,lakes:this._lakes,apFade:this.apFade});
         const g=this.uniformManager?.uniforms??{};
 
         const res = water.resources;
-        for (const m of [this._lakeMaterial, this._riverMaterial]) {
+        for (const m of [this._lakeMaterial, this._fieldMaterial]) {
             m.storageBuffers = { waterIndex: res.index, waterLakes: res.lakes, waterRivers: res.rivers };
-            if(water.junctionFields) {
-                m.storageBuffers.junctionSetTexels=water.junctionFields.resources.data;
-                m.uniforms.junctionSetParams={value:water.junctionFields.resources.paramsData};
+            if (water.riverField?.resources) {
+                m.storageBuffers.riverFieldTable = water.riverField.resources.pages;
+                m.storageBuffers.riverFieldTexels = water.riverField.resources.texels;
+                m.uniforms.riverFieldParams = { value: water.riverField.paramsData };
             }
             const params = m.uniforms.waterParams;
             if (params.value?.buffer !== water.paramsData) params.value = new Float32Array(water.paramsData);
@@ -165,22 +156,19 @@ export class NearWaterRenderer {
             this._lakeGeometry.instanceCount = this._lakes.length;
             this.backend.draw(this._lakeGeometry, this._lakeMaterial);
         }
-        if (this._quadCount) {
-            this._riverMaterial.storageBuffers.ribbonPoints = this._riverBuffers.points;
-            this._riverMaterial.storageBuffers.ribbonQuads = this._riverBuffers.quads;
-            this._riverGeometry.setDrawRange(0, this._quadCount * 6);
-            this.backend.draw(this._riverGeometry, this._riverMaterial);
+        if (this._fieldCount) {
+            this._fieldMaterial.storageBuffers.fieldWaterPages = this._fieldPages;
+            this._fieldGeometry.instanceCount = this._fieldCount;
+            this.backend.draw(this._fieldGeometry, this._fieldMaterial);
         }
         this.backend.endRenderPassForCompute();
         this.backend.resumeRenderPass();
     }
 
     dispose() {
-        for (const x of [this._lakeGeometry, this._lakeMaterial, this._riverGeometry, this._riverMaterial]) x?.dispose?.();
-        this._riverBuffers.points?.destroy();
-        this._riverBuffers.quads?.destroy();
-        this._lakeGeometry = this._lakeMaterial = this._riverGeometry = this._riverMaterial = null;
-        this._riverBuffers = { points: null, quads: null };
+        for (const x of [this._lakeGeometry, this._lakeMaterial, this._fieldGeometry, this._fieldMaterial]) x?.dispose?.();
+        this._fieldPages?.destroy(); this._fieldPages = null;
+        this._lakeGeometry = this._lakeMaterial = this._fieldGeometry = this._fieldMaterial = null;
     }
 }
 

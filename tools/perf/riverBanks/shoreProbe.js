@@ -28,7 +28,7 @@ export async function shoreTransect({ view, halfM = 25, stepM = 0.5 }) {
         data.set([...dir,section.carved[i],slope,0,0,0],8*i);
         return slope;
     });
-    const terrainSource = createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({ waterCarve:true, riverBankDetail:true, riverValley:false }));
+    const terrainSource = createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({ waterCarve:true, riverBankDetail:true }));
     const hasGrassFringe = terrainSource.includes('fn riverCarveShoreProfile');
     const source = terrainSource+`
 struct ShoreReviewInput { point: vec4<f32>, params: vec4<f32>, }

@@ -145,9 +145,5 @@ export class PlanetTerrainModule extends TerrainModule {
     }
 
     placeRiver(position, direction = null) { this.rivers?.setAnchor(position, direction); }
-    afterSubmit() {
-        super.afterSubmit();
-        this.options.terrainGenerator.junctionFields?.afterSubmit();
-    }
     setLakes(lakes) { this.lakes?.setLakes(lakes); }
 }
