@@ -90,15 +90,15 @@ export class RiverFieldService {
 
     async _finish(msg) {
         if (!this._worker) {
-            const { pages, stats } = finishRiverFieldBake(msg);
-            return { pages, stats, facts: riverFieldPageFacts([...pages.keys()], pages, this.layout) };
+            const { pages, stats, flow, rocks } = finishRiverFieldBake(msg);
+            return { pages, stats, flow, rocks, facts: riverFieldPageFacts([...pages.keys()], pages, this.layout) };
         }
         const reply = await this._call(msg, [msg.dirs4.buffer, msg.nat.buffer, msg.lakeCand.buffer]);
         const pages = new Map();
         reply.keys.forEach((k, i) => pages.set(k, reply.data.subarray(i * reply.size, (i + 1) * reply.size)));
         // The pages in key order, one array: uploaded as is (no 100 MB copy).
         pages.packed = reply.data;
-        return { pages, stats: reply.stats, facts: { hash: reply.hash, wet: reply.wet } };
+        return { pages, stats: reply.stats, flow: reply.flow, rocks: reply.rocks, facts: { hash: reply.hash, wet: reply.wet } };
     }
 
     // Traced rivers with a point within the radius of the camera (all of
@@ -216,7 +216,7 @@ export class RiverFieldService {
             this.stage = 'publish';
             const t4 = performance.now();
             const hashes = this._hashes;
-            this._publish(result.pages, result.facts);
+            this._publish(result.pages, result.facts, result.flow, result.rocks);
             this.rivers = new Map(rivers.map(r => [r.rid, r.trace]));
             // Pages that changed: new, gone or different.
             const changed = [];
@@ -249,7 +249,7 @@ export class RiverFieldService {
         return cells;
     }
 
-    _publish(pages, facts = { hash: new Uint32Array(0), wet: new Uint8Array(0) }) {
+    _publish(pages, facts = { hash: new Uint32Array(0), wet: new Uint8Array(0) }, flow = new Uint32Array(4), rocks = new Float32Array(0)) {
         const L = this.layout, device = this.device, keys = [...pages.keys()];
         const { table, size } = buildRiverFieldTable(keys);
         let texels = pages.packed;
@@ -263,9 +263,11 @@ export class RiverFieldService {
             pages: device.createBuffer({ label: 'RiverField-table', size: Math.max(16, table.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
             texels: device.createBuffer({ label: 'RiverField-texels', size: texels.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
             params: device.createBuffer({ label: 'RiverField-params', size: RIVER_FIELD_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+            flow: device.createBuffer({ label: 'RiverField-flow', size: Math.max(16, flow.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
         };
         device.queue.writeBuffer(res.pages, 0, table);
         device.queue.writeBuffer(res.texels, 0, texels);
+        device.queue.writeBuffer(res.flow, 0, flow);
         const params = riverFieldParamsData(L, size, keys.length > 0, RIVER_FIELD.sdfM);
         device.queue.writeBuffer(res.params, 0, params);
         // Pages with water (the near water draws them): face, pi, pj, slot and centre.
@@ -276,10 +278,12 @@ export class RiverFieldService {
             const { face, pi, pj } = pageOf(key, L);
             wet.push({ face, pi, pj, slot, dir: fieldDir(face, (pi + 0.5) * L.P, (pj + 0.5) * L.P, L) });
         });
-        this._hashes = hashes; this.wetPages = wet; this.paramsData = new Float32Array(params); this.version = (this.version ?? 0) + 1;
+        this._hashes = hashes; this.pageHashes = hashes; this.wetPages = wet; this.paramsData = new Float32Array(params); this.version = (this.version ?? 0) + 1;
         if (this.resources) this.retired.push(this.resources);
         this.resources = res; this.pages = pages;
-        this.bytes = texels.byteLength + table.byteLength;
+        // Flow words per page in slot order, and the rocks (riverFlow.js), for the near simulation.
+        this.flow = flow; this.rocks = rocks; this.slots = new Map(keys.map((k, i) => [k, i]));
+        this.bytes = texels.byteLength + table.byteLength + flow.byteLength;
         this.generator.setRiverFieldResources(res);
         this.service.setRiverFieldResources?.(res);
         this._retire();
@@ -289,7 +293,7 @@ export class RiverFieldService {
         const retired = this.retired.splice(0);
         if (!retired.length) return;
         this.device.queue.onSubmittedWorkDone().catch(() => {}).then(() => {
-            for (const r of retired) { r.pages.destroy(); r.texels.destroy(); r.params.destroy(); }
+            for (const r of retired) { r.pages.destroy(); r.texels.destroy(); r.params.destroy(); r.flow.destroy(); }
         });
     }
 

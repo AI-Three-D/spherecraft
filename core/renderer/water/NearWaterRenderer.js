@@ -21,6 +21,9 @@ import { WATER_BINDINGS, WATER_DEBUG_DRY } from '../../world/water/waterWgsl.js'
 import { gridIndices } from './waterGrid.js';
 import { buildFieldWaterFragmentShader, buildFieldWaterVertexShader, FIELD_WATER_BINDINGS, FIELD_WATER_GRID } from './fieldWaterSurface.wgsl.js';
 import { fillNearWaterUniforms } from './nearWaterUniforms.js';
+import { WHITE_UNIFORM_FLOATS } from './whitewaterLook.wgsl.js';
+import { buildWhitewaterFragmentShader, buildWhitewaterVertexShader, WHITE_GRID } from './whitewaterSurface.wgsl.js';
+import { buildRockFragmentShader, buildRockVertexShader, buildSprayFragmentShader, buildSprayVertexShader, ROCK_GRID } from './whitewaterProps.wgsl.js';
 import { aerialFadeRange } from '../terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import {
     NEAR_WATER_MAX_LAKES, NEAR_WATER_SAMPLER_BINDING, NEAR_WATER_TRANSMITTANCE_BINDING, NEAR_WATER_SCENE_DEPTH_BINDING, NEAR_WATER_UNIFORM_FLOATS,
@@ -62,13 +65,14 @@ export class NearWaterRenderer {
         this._listedAt = null;
     }
 
-    _material(name,vs,fs,groups=[]) {
+    _material(name,vs,fs,groups=[],field=true) {
         const extras=[...groups];
         while(extras.length<1)extras.push({label:'NearWater-empty-group2',entries:[]});
-        extras.push({label:'NearWater-riverField',entries:[
+        if(field)extras.push({label:'NearWater-riverField',entries:[
             {binding:FIELD_WATER_BINDINGS.table,visibility:'vertex|fragment',name:'riverFieldTable',buffer:{type:'read-only-storage'}},
             {binding:FIELD_WATER_BINDINGS.texels,visibility:'vertex|fragment',name:'riverFieldTexels',buffer:{type:'read-only-storage'}},
             {binding:FIELD_WATER_BINDINGS.params,visibility:'vertex|fragment',name:'riverFieldParams',buffer:{type:'uniform'}},
+            {binding:FIELD_WATER_BINDINGS.flow,visibility:'vertex|fragment',name:'riverFieldFlow',buffer:{type:'read-only-storage'}},
         ]});
         const m=createNearWaterMaterial(name,vs,fs,this._uniforms,extras);m.depthCompare='less-equal';return m;
     }
@@ -80,10 +84,50 @@ export class NearWaterRenderer {
         this._lakeGeometry.setIndex(gridIndices(GRID_N, GRID_N));
         this._fieldMaterial = this._material('NearFieldWater', buildFieldWaterVertexShader(), buildFieldWaterFragmentShader(), [{
             label: 'NearFieldWater-Pages',
-            entries: [{ binding: 0, visibility: 'vertex', name: 'fieldWaterPages', buffer: { type: 'read-only-storage' } }],
+            entries: [
+                { binding: 0, visibility: 'vertex', name: 'fieldWaterPages', buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: 'vertex|fragment', name: 'whiteU', buffer: { type: 'uniform' } },
+                { binding: 2, visibility: 'fragment', name: 'whiteCover', buffer: { type: 'read-only-storage' } },
+            ],
         }]);
+        this._whiteUniforms = new Float32Array(WHITE_UNIFORM_FLOATS);
+        this._whiteCoverNone = this.backend.device.createBuffer({ label: 'NearFieldWater-no-cover', size: 16, usage: GPUBufferUsage.STORAGE });
         this._fieldGeometry = new Geometry();
         this._fieldGeometry.setIndex(gridIndices(FIELD_WATER_GRID, FIELD_WATER_GRID));
+        // The near simulation's surface (whitewaterSurface.wgsl.js).
+        const ro = { type: 'read-only-storage' };
+        this._whiteMaterial = this._material('NearWhitewater', buildWhitewaterVertexShader(), buildWhitewaterFragmentShader(), [{
+            label: 'NearWhitewater-Sim',
+            entries: [
+                { binding: 0, visibility: 'vertex|fragment', name: 'whiteU', buffer: { type: 'uniform' } },
+                { binding: 1, visibility: 'vertex', name: 'whiteBlocks', buffer: ro },
+                { binding: 2, visibility: 'vertex|fragment', name: 'whiteGrid', buffer: ro },
+                { binding: 3, visibility: 'vertex', name: 'whiteStatic', buffer: ro },
+                { binding: 4, visibility: 'vertex', name: 'whiteState', buffer: ro },
+                { binding: 5, visibility: 'vertex', name: 'whiteK', buffer: ro },
+            ],
+        }], false);
+        this._whiteGeometry = new Geometry();
+        this._whiteGeometry.setIndex(gridIndices(WHITE_GRID, WHITE_GRID));
+        // Rocks (opaque, before the water) and spray (after it).
+        const air = [
+            { binding: 3, visibility: 'fragment', name: 'transmittanceLUT', texture: { sampleType: 'float', viewDimension: '2d' } },
+            { binding: 4, visibility: 'fragment', name: 'nearWaterSampler', sampler: { type: 'filtering' } },
+        ];
+        const prop = (name, vs, fs, buffers, options) => new Material({ name, vertexShader: vs, fragmentShader: fs, vertexLayout: [], side: 'double', depthTest: true, ...options,
+            uniforms: { nearWaterUniforms: { value: this._uniforms }, transmittanceLUT: { value: null } },
+            bindGroupLayoutSpec: [
+                { label: `${name}-Uniforms`, entries: [{ binding: 0, visibility: 'vertex|fragment', name: 'nearWaterUniforms', buffer: { type: 'uniform' } }] },
+                { label: `${name}-Data`, entries: [{ binding: 0, visibility: 'vertex|fragment', name: 'whiteU', buffer: { type: 'uniform' } }, ...buffers] },
+            ] });
+        this._rockMaterial = prop('WhitewaterRocks', buildRockVertexShader(), buildRockFragmentShader(),
+            [{ binding: 1, visibility: 'vertex', name: 'whiteRocks', buffer: ro }, { binding: 2, visibility: 'vertex', name: 'whiteRockList', buffer: ro }, ...air], { depthWrite: true, depthCompare: 'less' });
+        this._rockGeometry = new Geometry();
+        this._rockGeometry.setIndex(gridIndices(ROCK_GRID[0], ROCK_GRID[1]));
+        this._sprayMaterial = prop('WhitewaterSpray', buildSprayVertexShader(), buildSprayFragmentShader(),
+            [{ binding: 1, visibility: 'vertex', name: 'whiteSpray', buffer: ro }], { transparent: true, depthWrite: false, depthCompare: 'less-equal', blending: 'premultiplied' });
+        this._sprayGeometry = new Geometry();
+        this._sprayGeometry.setIndex(new Uint32Array([0, 1, 2, 2, 1, 3]));
     }
 
     // Lakes and field pages within range of the camera (planet-centred).
@@ -136,12 +180,13 @@ export class NearWaterRenderer {
             uniformManager:this.uniformManager,camera,water,lakes:this._lakes,apFade:this.apFade});
         const g=this.uniformManager?.uniforms??{};
 
-        const res = water.resources;
-        for (const m of [this._lakeMaterial, this._fieldMaterial]) {
+        const res = water.resources, white = water.whitewater;
+        for (const m of [this._lakeMaterial, this._fieldMaterial, this._whiteMaterial]) {
             m.storageBuffers = { waterIndex: res.index, waterLakes: res.lakes, waterRivers: res.rivers };
             if (water.riverField?.resources) {
                 m.storageBuffers.riverFieldTable = water.riverField.resources.pages;
                 m.storageBuffers.riverFieldTexels = water.riverField.resources.texels;
+                m.storageBuffers.riverFieldFlow = water.riverField.resources.flow;
                 m.uniforms.riverFieldParams = { value: water.riverField.paramsData };
             }
             const params = m.uniforms.waterParams;
@@ -149,6 +194,15 @@ export class NearWaterRenderer {
             m.uniforms.waterLakeMasks.value = res.masks;
             m.uniforms.transmittanceLUT.value = g.transmittanceLUT?.value ?? null;
             m.uniforms.nearWaterSceneDepth.value = this.backend.getDepthTextureView();
+        }
+        // Rocks first: they are scene depth for the water.
+        if (white?.rocksToDraw) {
+            const m = this._rockMaterial;
+            m.uniforms.whiteU = { value: white.uniforms };
+            m.uniforms.transmittanceLUT.value = g.transmittanceLUT?.value ?? null;
+            Object.assign(m.storageBuffers, { whiteRocks: white.rocksBuf, whiteRockList: white.rockListBuf });
+            this._rockGeometry.instanceCount = white.rocksToDraw;
+            this.backend.draw(this._rockGeometry, m);
         }
         this.backend.endRenderPassForCompute();
         this.backend.resumeRenderPass({ depthReadOnly: true });
@@ -158,17 +212,36 @@ export class NearWaterRenderer {
         }
         if (this._fieldCount) {
             this._fieldMaterial.storageBuffers.fieldWaterPages = this._fieldPages;
+            this._fieldMaterial.uniforms.whiteU = { value: white?.uniforms ?? this._whiteUniforms };
+            this._fieldMaterial.storageBuffers.whiteCover = white?.coverBuf ?? this._whiteCoverNone;
             this._fieldGeometry.instanceCount = this._fieldCount;
             this.backend.draw(this._fieldGeometry, this._fieldMaterial);
+        }
+        if (white?.drawCount) {
+            const m = this._whiteMaterial;
+            m.uniforms.whiteU = { value: white.uniforms };
+            Object.assign(m.storageBuffers, { whiteBlocks: white.blocksBuf, whiteGrid: white.gridBuf, whiteStatic: white.staticBuf, whiteState: white.stateBufs[0], whiteK: white.kBufs[0] });
+            this._whiteGeometry.instanceCount = white.drawCount;
+            this.backend.draw(this._whiteGeometry, m);
+        }
+        if (white?.sprayToDraw) {
+            const m = this._sprayMaterial;
+            m.uniforms.whiteU = { value: white.uniforms };
+            m.storageBuffers.whiteSpray = white.sprayBuf;
+            this._sprayGeometry.instanceCount = white.sprayToDraw;
+            this.backend.draw(this._sprayGeometry, m);
         }
         this.backend.endRenderPassForCompute();
         this.backend.resumeRenderPass();
     }
 
     dispose() {
-        for (const x of [this._lakeGeometry, this._lakeMaterial, this._fieldGeometry, this._fieldMaterial]) x?.dispose?.();
+        for (const x of [this._lakeGeometry, this._lakeMaterial, this._fieldGeometry, this._fieldMaterial, this._whiteGeometry, this._whiteMaterial,
+            this._rockGeometry, this._rockMaterial, this._sprayGeometry, this._sprayMaterial]) x?.dispose?.();
         this._fieldPages?.destroy(); this._fieldPages = null;
-        this._lakeGeometry = this._lakeMaterial = this._fieldGeometry = this._fieldMaterial = null;
+        this._whiteCoverNone?.destroy(); this._whiteCoverNone = null;
+        this._lakeGeometry = this._lakeMaterial = this._fieldGeometry = this._fieldMaterial = this._whiteGeometry = this._whiteMaterial = null;
+        this._rockGeometry = this._rockMaterial = this._sprayGeometry = this._sprayMaterial = null;
     }
 }
 

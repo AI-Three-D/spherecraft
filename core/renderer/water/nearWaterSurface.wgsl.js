@@ -32,8 +32,7 @@ export const NEAR_WATER_SCENE_DEPTH_BINDING = 19;
 // Height (m) a lake sheet's overlap under a field page's edge covers.
 const FIELD_OVERLAP_M = 0.02;
 
-export function commonWgsl({ segments = false } = {}) {
-    return createWaterWgsl({ group: 1, segments }) + /* wgsl */`
+export const NEAR_WATER_U_WGSL = /* wgsl */`
 struct NearWaterU {
     viewMatrix: mat4x4<f32>,
     projectionMatrix: mat4x4<f32>,
@@ -50,15 +49,9 @@ struct NearWaterU {
     fog: vec4<f32>,                      // fog colour, density (aerial perspective off)
     ap: vec4<f32>,                       // atmosphere sun intensity, fade start, fade end (m), unused
 };
-@group(0) @binding(0) var<uniform> U: NearWaterU;
-@group(1) @binding(${NEAR_WATER_SAMPLER_BINDING}) var nearWaterSampler: sampler;
+`;
 
-struct NearWaterVOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) wp: vec3<f32>,
-    @location(1) @interpolate(flat) lake: u32,
-};
-
+export const NEAR_WATER_RASTER_WGSL = /* wgsl */`
 // Permit hardware rejection of hidden banks while reserving half a metre
 // of view depth for the fragment's continuous-surface correction. Only the
 // comparison depth moves; all physical positions and shading stay unchanged.
@@ -70,6 +63,21 @@ fn nearWaterRasterPosition(wp: vec3<f32>) -> vec4<f32> {
     }
     return pos;
 }
+`;
+
+export function commonWgsl({ segments = false } = {}) {
+    return createWaterWgsl({ group: 1, segments }) + /* wgsl */`
+${NEAR_WATER_U_WGSL}
+@group(0) @binding(0) var<uniform> U: NearWaterU;
+@group(1) @binding(${NEAR_WATER_SAMPLER_BINDING}) var nearWaterSampler: sampler;
+
+struct NearWaterVOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) wp: vec3<f32>,
+    @location(1) @interpolate(flat) lake: u32,
+};
+
+${NEAR_WATER_RASTER_WGSL}
 `;
 }
 
@@ -107,6 +115,8 @@ export function shadeWgsl() {
 @group(1) @binding(${NEAR_WATER_TRANSMITTANCE_BINDING}) var transmittanceLUT: texture_2d<f32>;
 @group(1) @binding(${NEAR_WATER_SCENE_DEPTH_BINDING}) var nearWaterSceneDepth: texture_depth_2d;
 
+// Share of this fragment that is foam (whitewaterLook.wgsl.js).
+var<private> nearWaterHardShore: f32 = 0.0;
 // Opaque depth converted to distance behind this point along the view ray.
 fn nearWaterBehind(wp:vec3<f32>,pixel:vec2<f32>)->f32 {
     let dimensions=vec2<i32>(textureDimensions(nearWaterSceneDepth));
@@ -162,7 +172,9 @@ fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>
     let transmission = exp(-path * extinction) * select(1.0, ${WATER_WET_BED}, above);
     // Continuous contact removes opaque depth-fighting speckles at grazing
     // shores. Foreground opaque geometry still completely hides the water.
-    let contact = smoothstep(0.0, waterParams.shoreSoftM, behind * max(abs(dot(V, up)), 0.05));
+    // Foam ends where it ends: faded like clear water it smeared over the bank.
+    let contactDepth = behind * max(abs(dot(V, up)), 0.05);
+    let contact = mix(smoothstep(0.0, waterParams.shoreSoftM, contactDepth), smoothstep(0.0, 0.05, contactDepth), nearWaterHardShore);
     let body = waterParams.deepColor.rgb * (sky + sun * max(dot(up, L), 0.0));
     let a = (1.0 - transmission * (1.0 - s.a)) * w * contact;
     let add = (body * (1.0 - transmission) * (1.0 - s.a) + s.rgb) * w * contact;

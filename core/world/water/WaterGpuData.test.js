@@ -119,13 +119,12 @@ describe('WaterGpuData', () => {
         }
         gpu.update(svc,{x:200000,y:0,z:0},1);expect(gpu._layerOf.size).toBe(112);expect(uploads).toHaveLength(112);
     });
-    it('shares bank detail and cut limits without overwriting the simulation fade',()=>{
+    it('shares bank detail and cut limits',()=>{
         const gpu=new WaterGpuData(stubDevice(),{gridN:4,planetRadius:131072,maxMaskLayers:2,
             carve:{enabled:true,bankDetail:1,bankCutM:6}});
-        gpu.site={river:0,s0:10,s1:100,halfM:5,endFadeM:8,sideFadeM:1,fade:.7};
         gpu.update(fakeService(),cam,0);
         const values=new Float32Array(gpu.paramsData);
-        expect(values[22]).toBe(6);expect(values[23]).toBeCloseTo(.7);expect(values[35]).toBe(1);
+        expect(values[22]).toBe(6);expect(values[35]).toBe(1);
     });
     it('marks distant bed coverage for carved reaches without islands, traced or structured',()=>{
         const gpu=new WaterGpuData(stubDevice(),{gridN:4,planetRadius:131072,maxMaskLayers:2,carve:{enabled:true}});

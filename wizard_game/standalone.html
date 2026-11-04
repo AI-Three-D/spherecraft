@@ -3800,9 +3800,6 @@
         }
         installQuadtreeDiagnostics(gameEngine);
 
-        window.riverDiag = () => gameEngine?.renderer?.riverSystem?.getDebugInfo?.() ?? null;
-        window.riverState = () => gameEngine?.renderer?.riverSystem?.debugReadState?.() ?? Promise.resolve(null);
-        window.riverBed = () => gameEngine?.renderer?.riverSystem?.debugBedInfo?.() ?? null;
         window.lakeHeightDiag = (lakeIndex = 0) => gameEngine?.debugLakeHeightProbe?.(lakeIndex) ?? Promise.resolve(null);
         window.lakeReport = () => gameEngine?.renderer?.lakeWaterSystem?.getDebugPlacementReport?.() ?? null;
         window.flyToLake = (readyIndex = 0, hoverAltitudeM = 60) => gameEngine?.debugFlyToLake?.(readyIndex, hoverAltitudeM) ?? null;
@@ -3817,7 +3814,7 @@
             tint(mode = 1) { return gameEngine?.setWaterDebugMode?.(mode) ?? null; },
             look(look = {}) { const r = gameEngine?.setWaterLook?.(look) ?? null; console.info('[Water] look', r); return r; },
             nearMesh(near = true) { const r = gameEngine?.setWaterNear?.(near) ?? null; console.info('[Water] near', r); return r; },
-            sim() { const r = gameEngine?.waterSimStatus?.() ?? null; console.info('[Water] sim', r); return r; },
+            whitewater(on) { const r = gameEngine?.setWhitewater?.(on) ?? null; console.info('[Water] whitewater', r); return r; },
             carve() { const r = gameEngine?.waterCarveStatus?.() ?? null; console.info('[Water] carve', r); return r; },
         };
 
@@ -4135,11 +4132,10 @@
                             carve:{...planet.terrain.waterGraph?.carve,bankDetail:regionalBankMode==='organic'?1:0}};
                     }
                 }
-                const riverSimMode=new URLSearchParams(location.search).get('riverSim');
-                if(riverSimMode==='whitewater'||riverSimMode==='off') {
+                // Whitewater (core/world/water/WhitewaterSim.js) is on unless ?whitewater=off.
+                if(new URLSearchParams(location.search).get('whitewater')==='off') {
                     for(const planet of gameDataConfig.planets) if(planet.enabled) {
-                        planet.terrain.waterGraph={...planet.terrain.waterGraph,sim:{...planet.terrain.waterGraph?.sim,
-                            enabled:riverSimMode==='whitewater',lengthM:256,activateAltitudeM:150,activateDistanceM:120}};
+                        planet.terrain.waterGraph={...planet.terrain.waterGraph,whitewater:{...planet.terrain.waterGraph?.whitewater,enabled:false}};
                     }
                 }
                 // Original (terrain-sampled) lakes, every lake solved at 32 m

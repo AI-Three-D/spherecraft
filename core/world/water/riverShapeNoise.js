@@ -7,7 +7,7 @@
 // of arc length s; optional bank relief also varies across the channel.
 // Seeded by the river's id, these fields are continuous across segments and
 // same wherever it is evaluated: the terrain carve and the water shading
-// (waterWgsl.js waterRiverPoint), the simulation strip (WaterRiverSim.js)
+// (waterWgsl.js waterRiverPoint), the bake (riverField.js)
 // and the lab's CPU mirrors. Integer hashing (no sin hash), so the GPU and
 // JavaScript use the same hashing and interpolation equations.
 

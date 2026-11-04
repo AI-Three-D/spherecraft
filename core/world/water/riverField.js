@@ -30,6 +30,7 @@
 import { dirToFaceUV, faceUVToDir } from '../hydrology/waterGraph.js';
 import { riverHash } from './riverShapeNoise.js';
 import { riverBankType } from './riverSection.js';
+import { packFlowTexel, riverFlowDesign, riverRocks, RIVER_FLOW, RIVER_ROCK_FLOATS } from './riverFlow.js';
 
 export const RIVER_FIELD = Object.freeze({
     texelM: 2,
@@ -594,7 +595,7 @@ function riverGround(S, index, cellM, px, py, nat, o) {
     const hw = lerp(n >= 0 ? S.hwL : S.hwR) * (1 + o.fadeWiden * fade), W = lerp(S.W), D = lerp(S.D) * (1 - fade);
     const d = Math.abs(n), edge = d - hw;
     const B = n >= 0 ? lerp(S.BL) : lerp(S.BR);
-    if (edge >= B) return { h: nat, W, edge };
+    if (edge >= B) return { h: nat, W, edge, st: i + tc };
     // Channel: the thalweg toward the outer bank (skew), the bed at W - D.
     const sk = clamp(lerp(S.skew), -0.35, 0.35), u = n / hw;
     const de = u < sk ? (u - sk) / (1 + sk) : (u - sk) / (1 - sk);
@@ -612,7 +613,7 @@ function riverGround(S, index, cellM, px, py, nat, o) {
         const foot = lerp(n >= 0 ? S.EL : S.ER);
         target = Math.max((W + e * edge) * (1 - r) + nat * r, nat + (W + e * edge - foot) * (1 - r));
     }
-    return { h: smin(nat, target, o.sminK), W, edge };
+    return { h: smin(nat, target, o.sminK), W, edge, st: i + tc };
 }
 
 // Gaussian blur weights (sigma in texels), radius ceil(2.5 sigma).
@@ -784,6 +785,8 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
             plane.frame.c[1] + (x * plane.frame.e1[1] + y * plane.frame.e2[1]) / R, plane.frame.c[2] + (x * plane.frame.e1[2] + y * plane.frame.e2[2]) / R]);
         const S = riverStations(river, plane, (x, y) => groundAtDir(fromPlane(x, y)), (x, y) => lakeWaterAtDir(fromPlane(x, y)), o);
         widest.push(S.widened);
+        S.rid = river.rid ?? 0;
+        riverFlowDesign(S, S.rid);
         const cellM = 32;
         let maxHw = 0;
         for (let i = 0; i < S.m; i++) maxHw = Math.max(maxHw, S.hw[i]);
@@ -792,13 +795,13 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
         for (const l of index.cells.values()) refs += l.length;
         for (let i = 0; i < S.m; i++) { x0 = Math.min(x0, S.x[i], S.y[i]); x1 = Math.max(x1, S.x[i], S.y[i]); }
         onProgress?.('river', { ri, rid: river.rid, stations: S.m, cells: index.cells.size, refs, span: x1 - x0 });
-        return { plane, S, index, cellM };
+        return { plane, S, index, cellM, fromPlane };
     });
     const t3 = performance.now();
     onProgress?.('texels', { ms: t3 - t2 });
     // Per texel: ground, W, owner over the rivers listed for its page.
     const ground = new Float32Array(N * PP), W = new Float32Array(N * PP).fill(NaN), owner = new Int16Array(N * PP).fill(-1);
-    const edgeOf = new Float32Array(N * PP).fill(Infinity);
+    const edgeOf = new Float32Array(N * PP).fill(Infinity), ownerSt = new Float32Array(N * PP);
     for (let p = 0; p < N; p++) {
         const list = pageRiverList[p];
         for (let t = 0; t < PP; t++) {
@@ -810,7 +813,7 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
                 const px = (dx * e1[0] + dy * e1[1] + dz * e1[2]) * kk, py = (dx * e2[0] + dy * e2[1] + dz * e2[2]) * kk;
                 const r = riverGround(S, index, cellM, px, py, nat[g], o);
                 if (!r) continue;
-                if (r.edge < edgeOf[g]) { edgeOf[g] = r.edge; W[g] = r.W; owner[g] = ri; }
+                if (r.edge < edgeOf[g]) { edgeOf[g] = r.edge; W[g] = r.W; owner[g] = ri; ownerSt[g] = r.st; }
                 h = Math.min(h, r.h);
             }
             ground[g] = h;
@@ -925,10 +928,14 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
         }
     }
     const t7 = performance.now();
-    onProgress?.('pack', { ms: t7 - t6 });
+    onProgress?.('flow', { ms: t7 - t6 });
+    const { flowA, flowB, foam, manning, rocks } = riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt, level, ground, wet, lakeLevel });
+    const t7b = performance.now();
+    onProgress?.('pack', { ms: t7b - t7 });
     // GPU pages with aprons, 2 words a texel (RIVER_FIELD_WORDS): level W
-    // (f32 bits), Δ and sdf (two f16).
+    // (f32 bits), Δ and sdf (two f16). Flow: one word (riverFlow.js).
     const A = L.A, ST = L.ST, out = new Map();
+    const flow = new Uint32Array(N * ST * ST);
     for (let p = 0; p < N; p++) {
         const data = new Uint32Array(ST * ST * RIVER_FIELD_WORDS);
         for (let j = 0; j < ST; j++) for (let i = 0; i < ST; i++) {
@@ -939,6 +946,7 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
             if (q < 0) q = p * PP + clamp(j - A, 0, P - 1) * P + clamp(i - A, 0, P - 1);
             data[w] = f32bits(Number.isFinite(level[q]) ? level[q] : -1e4);
             data[w + 1] = packHalf2(delta[q], sdf[q]);
+            flow[p * ST * ST + j * ST + i] = packFlowTexel(flowA[q], flowB[q], foam[q], manning[q]);
         }
         out.set(keys[p], data);
     }
@@ -946,10 +954,69 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     widest.sort((a, b) => a - b);
     const stats = { pages: N, texels: N * PP, rivers: rivers.length, spilled,
         widest: { median: widest[widest.length >> 1] ?? 1, p90: widest[Math.floor(widest.length * 0.9)] ?? 1, max: widest[widest.length - 1] ?? 1 },
-        ms: { stations: t3 - t2, texels: t4 - t3, blur: t5 - t4, wet: t6 - t5, sdf: t7 - t6, pack: t8 - t7, finish: t8 - t2 } };
-    const result = { pages: out, stats };
+        ms: { stations: t3 - t2, texels: t4 - t3, blur: t5 - t4, wet: t6 - t5, sdf: t7 - t6, flow: t7b - t7, pack: t8 - t7b, finish: t8 - t2 },
+        rocks: rocks.length / RIVER_ROCK_FLOATS };
+    const result = { pages: out, stats, flow, rocks };
     if (debug) Object.assign(result, { keys, pageInfo, nat, ground, level, wet, sdf, delta, owner, lakeLevel, prepared });
     return result;
+}
+
+// Velocity, foam and Manning's n per texel, and the rocks with the foam behind
+// them (riverFlow.js). Velocity falls off with the local depth as Whitewater's
+// starting state does: Vc (h / D)^(2/3), which keeps n constant across the
+// section, so the texels stay in balance at W. Components are dot products with
+// the unit tangents of the raster's axes at the page's centre.
+function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt, level, ground, wet, lakeLevel }) {
+    const o = RIVER_FLOW, flowA = new Float32Array(N * PP), flowB = new Float32Array(N * PP), foam = new Float32Array(N * PP), manning = new Float32Array(N * PP);
+    const axes = (face, pi, pj) => {
+        const cx = (pi + 0.5) * P, cy = (pj + 0.5) * P, a = fieldDir(face, cx - 1, cy, L), b = fieldDir(face, cx + 1, cy, L), c = fieldDir(face, cx, cy - 1, L), d = fieldDir(face, cx, cy + 1, L);
+        return [norm([b[0] - a[0], b[1] - a[1], b[2] - a[2]]), norm([d[0] - c[0], d[1] - c[1], d[2] - c[2]])];
+    };
+    const pageAxes = pageInfo.map(q => axes(q.face, q.pi, q.pj));
+    for (let p = 0; p < N; p++) {
+        const [ax, ay] = pageAxes[p];
+        for (let t = 0; t < PP; t++) {
+            const g = p * PP + t, ri = owner[g];
+            if (ri < 0) continue;
+            const { S, plane } = prepared[ri], e1 = plane.frame.e1, e2 = plane.frame.e2;
+            const i = Math.min(Math.floor(ownerSt[g]), S.m - 2), c = ownerSt[g] - i;
+            const lerp = (a) => a[i] + (a[i + 1] - a[i]) * c;
+            manning[g] = lerp(S.n);
+            if (!wet[g]) continue;
+            const depth = Math.max(lerp(S.D) * (1 - lerp(S.fade)), o.leastDepthM);
+            const v = lerp(S.V) * Math.min(1, Math.max(level[g] - ground[g], 0) / depth) ** (2 / 3);
+            const tx = lerp(S.tx), ty = lerp(S.ty);
+            const wx = e1[0] * tx + e2[0] * ty, wy = e1[1] * tx + e2[1] * ty, wz = e1[2] * tx + e2[2] * ty;
+            flowA[g] = v * (wx * ax[0] + wy * ax[1] + wz * ax[2]);
+            flowB[g] = v * (wx * ay[0] + wy * ay[1] + wz * ay[2]);
+            // Foam is the river's: where its level eases into a lake's the fall
+            // read as a rapid, a white wedge on the lake at every outlet.
+            foam[g] = Number.isFinite(lakeLevel[g]) ? 0 : lerp(S.foam);
+        }
+    }
+    // Rocks to directions, and foam streaming from those near the surface.
+    const texelAt = (dir) => {
+        const q = fieldCoords(dir, L), i = Math.floor(q.x), j = Math.floor(q.y), pi = Math.floor(i / P), pj = Math.floor(j / P);
+        const p = slot.get(pageKey(q.face, pi, pj, L));
+        return p === undefined ? -1 : p * PP + (j - pj * P) * P + i - pi * P;
+    };
+    const list = [];
+    prepared.forEach(({ S, fromPlane }) => {
+        for (const r of riverRocks(S, S.rid)) {
+            const dir = fromPlane(r.x, r.y);
+            list.push(dir[0], dir[1], dir[2], r.r, r.top, r.base, r.seed, r.W);
+            if (r.top < r.W - o.wakeDepthM) continue;
+            const nx = -r.ty, ny = r.tx, len = o.wakeLen * r.r;
+            for (let d = 0; d < len; d += 1.5) {
+                const half = r.r * (0.6 + 0.5 * d / len), strength = Math.exp(-2.2 * d / len);
+                for (let e = -half; e <= half; e += 1.5) {
+                    const g = texelAt(fromPlane(r.x + r.tx * d + nx * e, r.y + r.ty * d + ny * e));
+                    if (g >= 0 && wet[g] && !Number.isFinite(lakeLevel[g])) foam[g] = Math.max(foam[g], Math.min(1, foam[g] + 0.55 * strength * (1 - Math.abs(e) / (half + 0.5))));
+                }
+            }
+        }
+    });
+    return { flowA, flowB, foam, manning, rocks: Float32Array.from(list) };
 }
 
 // Texel words (2): f32 level, f16 pair (Δ, sdf) as WGSL unpack2x16float reads them.

@@ -8,7 +8,6 @@ const cells = Number(process.argv[3] ?? 256);
 const { device, gen, imp } = await setupLab(process.argv[2] ?? '.');
 const { TileGenerator } = await imp('core/world/quadtree/tileGenerator.js');
 const { TileAddress } = await imp('core/world/quadtree/tileAddress.js');
-const { RiverBedBake } = await imp('core/renderer/rivers/riverBedBake.js');
 const errors = [], diagnostics = [], diagnosticFailures = [];
 device.addEventListener('uncapturederror', e => errors.push(e.error.message));
 if (cells) await gen.prepareRegionalTerrain({ cells, seamCells: 4 });
@@ -39,11 +38,6 @@ release();
 await Promise.all(diagnostics);
 if (diagnostics.length !== 3) throw new Error(`Expected three startup diagnostics; got ${diagnostics.length}`);
 
-const bake = new RiverBedBake(device, { gridW: 8, gridL: 8 });
-bake.initialize();
-await device.queue.onSubmittedWorkDone();
-await new Promise(resolve => setTimeout(resolve, 0));
-bake.dispose();
 const report = { cells, wallMs: performance.now() - started, diagnostics: diagnostics.length,
     diagnosticFailures, gpuErrors: errors, outputsDisposedBeforeReadback: true };
 fs.writeFileSync(`/tmp/spherecraft-gpu-health-${cells}.json`, JSON.stringify(report, null, 2));

@@ -33,7 +33,7 @@ import { createRiverFieldWgsl } from './riverField.wgsl.js';
 
 export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, params: 15, rivers: 16 });
 // The river field (riverField.wgsl.js) in the terrain shading's water group.
-export const WATER_FIELD_BINDINGS = Object.freeze({ table: 17, texels: 18, params: 19 });
+export const WATER_FIELD_BINDINGS = Object.freeze({ table: 17, texels: 18, params: 19, flow: 20 });
 
 // WaterLake: 4 x vec4 (64 bytes). WaterParams: 11 x vec4. WaterRiverSeg: 10 x vec4 (160 bytes).
 export const LAKE_RECORD_FLOATS = 16;
@@ -80,13 +80,11 @@ struct WaterParams {
     planetRadius: f32, time: f32, rippleFade: f32, shoreSoftM: f32,
     deepColor: vec4<f32>,      // rgb; a = reflection strength
     absorption: vec4<f32>,     // rgb per metre of water path; a unused
-    // Active simulation strip (WaterRiverSim.js): along it the simulated
-    // surface draws the water, so the static water fades out (waterSimCover).
-    simRiver: vec4<f32>,       // river id, arc lengths s0, s1 of the window (m), half-width (m)
-    simFade: vec4<f32>,        // end fade, side fade, dry-bank cut cap (m), simulation fade 0..1
-    // x, y, z unused; w: unsolved lakes are not drawn
-    // closer than this (m) (their grid-cell outline and coarse level look
-    // wrong up close).
+    simRiver: vec4<f32>,       // unused
+    simFade: vec4<f32>,        // z: dry-bank cut cap (m)
+    // x: 1 whitewater look on; y unused; z: far water from here (m); w: unsolved
+    // lakes are not drawn closer than this (m) (their grid-cell outline and coarse
+    // level look wrong up close).
     riverLook: vec4<f32>,
     // River cross-section (waterRiverProfile, riverCarve.wgsl.js), x = metres
     // beyond the channel's edge: carve = (on 0/1, bankW: the terrain is the
@@ -891,21 +889,6 @@ fn waterTint(id: f32) -> vec3<f32> {
     return fract(vec3<f32>(id * 0.618034, id * 0.381966 + 0.3, id * 0.7548777 + 0.6));
 }
 
-${segments ? `// How much of the static water the simulation strip replaces at a point
-// (0..1), from the river there (waterRiverAt): its river, inside the
-// strip's window along it and across it.
-fn waterSimCover(river: WaterRiverSurface) -> f32 {
-    let fade = waterParams.simFade.w;
-    if (fade <= 0.0 || !river.near || abs(river.river - waterParams.simRiver.x) > 0.5) { return 0.0; }
-    let s0 = waterParams.simRiver.y;
-    let s1 = waterParams.simRiver.z;
-    let endFade = max(waterParams.simFade.x, 1.0);
-    let along = smoothstep(s0, s0 + endFade, river.sM) * (1.0 - smoothstep(s1 - endFade, s1, river.sM));
-    let half = waterParams.simRiver.w;
-    let across = 1.0 - smoothstep(half - max(waterParams.simFade.y, 0.5), half, river.distM);
-    return fade * along * across;
-}
-` : ''}
 
 // Share of a lake's surface the near mesh draws at a camera distance (m):
 // 1 closer than near.x, 0 beyond near.y, 0 with the near mesh off.
@@ -969,6 +952,19 @@ fn applyWater(
             let surfaceF = waterSurfaceTerms(worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance);
             let bodyF = waterParams.deepColor.rgb * (skyRadiance + sunRadiance * max(dot(up, lightDir), 0.0));
             colF = mix(colF, mix(bedColor, bodyF * (1.0 - surfaceF.a) + surfaceF.rgb, smoothstep(0.0, waterParams.shoreSoftM, depthF)), wFarF);
+        }
+        // Whitewater far away: the foam the fall of the water makes
+        // (riverFlow.js), still, broken by slow noise so it is not painted on.
+        // Near meshes draw their own over their share.
+        if (waterParams.riverLook.x > 0.5) {
+            let foamF = riverFlowAt(up).z * (1.0 - nearF);
+            if (foamF > 0.004) {
+                let q = vec2<f32>(worldPos.x + worldPos.y, worldPos.z - worldPos.y);
+                let broken = 0.6 * waterNoise(q * 0.07) + 0.4 * waterNoise(q * 0.21);
+                let cover = smoothstep(0.03, 0.55, foamF * (0.55 + 0.9 * broken));
+                let litF = skyRadiance * 0.9 + sunRadiance * (0.35 + 0.65 * max(dot(up, lightDir), 0.0));
+                colF = mix(colF, vec3<f32>(0.90, 0.94, 0.97) * litF * 0.3, cover * smoothstep(0.0, waterParams.shoreSoftM, depthF));
+            }
         }
         return colF;
     }` : ''}

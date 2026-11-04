@@ -15,12 +15,12 @@ self.onmessage = (e) => {
             self.postMessage({ id, reply: prep }, [prep.dirs4.buffer]);
             return;
         }
-        const { pages, stats } = finishRiverFieldBake({ ...msg, onProgress: (stage, info) => self.postMessage({ id, progress: { stage, info } }) });
+        const { pages, stats, flow, rocks } = finishRiverFieldBake({ ...msg, onProgress: (stage, info) => self.postMessage({ id, progress: { stage, info } }) });
         const keys = [...pages.keys()], size = keys.length ? pages.get(keys[0]).length : 0;
         const data = new Uint32Array(keys.length * size);
         keys.forEach((k, i) => data.set(pages.get(k), i * size));
         const { hash, wet } = riverFieldPageFacts(keys, pages, msg.L);
-        self.postMessage({ id, reply: { keys, size, data, stats, hash, wet } }, [data.buffer, hash.buffer, wet.buffer]);
+        self.postMessage({ id, reply: { keys, size, data, stats, hash, wet, flow, rocks } }, [data.buffer, hash.buffer, wet.buffer, flow.buffer, rocks.buffer]);
     } catch (error) {
         self.postMessage({ id, error: String(error?.stack || error) });
     }

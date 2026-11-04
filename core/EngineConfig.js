@@ -551,7 +551,6 @@ export class EngineConfig {
       cloudParticles:   requireBool(features.cloudParticles   ?? true, 'features.cloudParticles'),
       fogParticles:     requireBool(features.fogParticles     ?? true, 'features.fogParticles'),
       skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
-      rivers:           requireBool(features.rivers           ?? true, 'features.rivers'),
       lakes:            requireBool(features.lakes            ?? true, 'features.lakes'),
     };
 

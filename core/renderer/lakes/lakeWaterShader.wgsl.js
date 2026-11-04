@@ -9,7 +9,7 @@
 // for a consistent look, simplified (no flow velocity, no foam — lakes
 // don't flow).
 
-import { RIVER_WGSL_NOISE } from '../rivers/shaders/riverNoise.wgsl.js';
+import { LAKE_WGSL_NOISE } from './shaders/lakeNoise.wgsl.js';
 
 export function buildLakeWaterVertexShader() {
     return /* wgsl */`
@@ -58,7 +58,7 @@ fn main(input: VertexInput) -> LVOut {
 }
 
 export function buildLakeWaterFragmentShader() {
-    return RIVER_WGSL_NOISE + /* wgsl */`
+    return LAKE_WGSL_NOISE + /* wgsl */`
 struct LakeFragmentUniforms {
     sunDirection:   vec3<f32>, sunIntensity: f32,
     sunColor:       vec3<f32>, ambientIntensity: f32,

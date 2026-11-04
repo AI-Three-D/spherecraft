@@ -2,7 +2,7 @@
 //
 // Shared WGSL snippet: world-direction -> cube face/UV -> loaded-tile hash
 // lookup -> resident array-texture layer. Extracted verbatim from
-// core/renderer/rivers/shaders/riverBedBakeShader.wgsl.js so the lake
+// the former river bed bake so the lake
 // height diagnostic/sampler (core/renderer/lakes/shaders/) resolves
 // residency through the exact same walk instead of a third, subtly
 // different lookup — see CODEX_RIVER_LAKE_HANDOFF.md's non-negotiable

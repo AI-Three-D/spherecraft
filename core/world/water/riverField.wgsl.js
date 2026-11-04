@@ -4,9 +4,16 @@
 // raster found through an open-addressing hash table, sampled with a cubic
 // B-spline (C2, value and gradient for the height's dual numbers). The
 // terrain generator binds it in group 1 (bindings 4-6); water and material
-// shaders bind their own copy (group, bindings as arguments).
+// shaders bind their own copy (group, bindings as arguments), those that need
+// the flow (riverFlow.js) with b.flow.
+
+import { RIVER_FLOW } from './riverFlow.js';
 
 export const RIVER_FIELD_BINDINGS = Object.freeze({ table: 4, texels: 5, params: 6 });
+// Encoded range of the flow word's velocity and Manning's n: riverFlow.js.
+const SPEED_RANGE = RIVER_FLOW.speedRangeM.toFixed(1);
+const MANNING_MIN = RIVER_FLOW.manning[0].toFixed(4);
+const MANNING_LOG = Math.log(RIVER_FLOW.manning[1] / RIVER_FLOW.manning[0]).toFixed(6);
 export const RIVER_FIELD_PARAMS_BYTES = 32;
 // Probes before a lookup gives up (the table is at most half full).
 const MAX_PROBES = 64;
@@ -255,6 +262,50 @@ fn riverFieldDelta_d(dir: vec3<f32>) -> vec4<f32> {
     let s = riverFieldAt(dir);
     if (!s.found) { return vec4<f32>(0.0); }
     return vec4<f32>(s.value.x, s.grad);
+}
+${b.flow !== undefined ? riverFlowWgsl(group, b.flow, ST) : ''}`;
+}
+
+// Flow lookup (riverFlow.js): one word a texel in the pages' slots.
+function riverFlowWgsl(group, binding, ST) {
+    return /* wgsl */`
+@group(${group}) @binding(${binding}) var<storage, read> riverFieldFlow: array<u32>;
+// x, y: velocity (m/s, along the raster's axes); z foam 0..1; w: Manning's n.
+fn riverFlowUnpack(q: u32) -> vec4<f32> {
+    let a = unpack4x8snorm(q);
+    return vec4<f32>(a.xy * ${SPEED_RANGE}, f32((q >> 16u) & 255u) / 255.0, ${MANNING_MIN} * exp(f32(q >> 24u) / 255.0 * ${MANNING_LOG}));
+}
+// Bilinear inside a page, at a stencil corner li, lj (apron coordinates).
+fn riverFlowBilinear(slot: i32, li: i32, lj: i32, fx: f32, fy: f32) -> vec4<f32> {
+    let base = slot * ${ST * ST} + lj * ${ST} + li;
+    return mix(mix(riverFlowUnpack(riverFieldFlow[base]), riverFlowUnpack(riverFieldFlow[base + 1]), fx),
+        mix(riverFlowUnpack(riverFieldFlow[base + ${ST}]), riverFlowUnpack(riverFieldFlow[base + ${ST + 1}]), fx), fy);
+}
+// The flow at a direction, zero outside the pages.
+fn riverFlowAt(dir: vec3<f32>) -> vec4<f32> {
+    let r = riverFieldLocate(dir);
+    if (r.slot < 0) { return vec4<f32>(0.0); }
+    let P = i32(riverFieldP.P);
+    let li = clamp(i32(floor(r.tx)) + 2 - r.pi * P, 0, ${ST - 2});
+    let lj = clamp(i32(floor(r.ty)) + 2 - r.pj * P, 0, ${ST - 2});
+    return riverFlowBilinear(r.slot, li, lj, r.tx - floor(r.tx), r.ty - floor(r.ty));
+}
+// The flow at continuous texel coordinates from one page's own texels.
+fn riverFlowInPage(slot: u32, pi: u32, pj: u32, tx: f32, ty: f32) -> vec4<f32> {
+    let x = tx - 0.5; let y = ty - 0.5;
+    let P = i32(riverFieldP.P);
+    let li = clamp(i32(floor(x)) + 2 - i32(pi) * P, 0, ${ST - 2});
+    let lj = clamp(i32(floor(y)) + 2 - i32(pj) * P, 0, ${ST - 2});
+    return riverFlowBilinear(i32(slot), li, lj, x - floor(x), y - floor(y));
+}
+// Unit tangents of the raster's axes in world space at a direction on a face, and
+// the world velocity of flow components taken as dot products with them (exact
+// on the skewed axes near a cube corner).
+fn riverFlowWorld(face: u32, tx: f32, ty: f32, a: f32, b: f32) -> vec3<f32> {
+    let ax = normalize(riverFieldDir(face, tx + 1.0, ty) - riverFieldDir(face, tx - 1.0, ty));
+    let ay = normalize(riverFieldDir(face, tx, ty + 1.0) - riverFieldDir(face, tx, ty - 1.0));
+    let c = dot(ax, ay);
+    return (ax * (a - c * b) + ay * (b - c * a)) / max(1.0 - c * c, 0.25);
 }
 `;
 }

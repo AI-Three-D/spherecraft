@@ -1,9 +1,9 @@
-// core/renderer/rivers/shaders/riverNoise.wgsl.js
+// core/renderer/lakes/shaders/lakeNoise.wgsl.js
 //
-// Hash/value-noise helpers shared by the river sim and water shaders.
+// Hash/value-noise helpers of the lake water shader.
 // Ported verbatim from whitewater's WGSL_NOISE.
 
-export const RIVER_WGSL_NOISE = /* wgsl */`
+export const LAKE_WGSL_NOISE = /* wgsl */`
 fn hash21(p: vec2f) -> f32 {
   var p3 = fract(vec3f(p.xyx) * 0.1031);
   p3 += dot(p3, p3.yzx + 33.33);

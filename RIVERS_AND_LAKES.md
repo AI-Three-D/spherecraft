@@ -42,7 +42,8 @@ minimum ... preferably much much better". Rivers and lakes are one part of it.
 
 ## 2. The system today (branch `water-ponds`; field rework uncommitted on 5ad0fe9)
 
-Game URL: `wizard_game/standalone.html?regionalTerrain=0&regionalBanks=organic&riverSim=off&waterPrecompute=1&lodHeight=ground`
+Game URL: `wizard_game/standalone.html?regionalTerrain=0&regionalBanks=organic&waterPrecompute=1&lodHeight=ground`
+(whitewater is on: `&whitewater=off` for without it, section 9).
 
 | Stage | Where | What it does |
 |---|---|---|
@@ -50,7 +51,7 @@ Game URL: `wizard_game/standalone.html?regionalTerrain=0&regionalBanks=organic&r
 | River traces | `waterWorkerCore.js` solveRiver, `riverRefine.js` (RIVER_SOLVE_VERSION 53) | Graph route refined on a 16 m natural-terrain patch near the camera; levels fitted to ground, monotone; shape noise (width, wobble, islands), mouth stations (`riverMouth.js`). |
 | Ground and water | `core/world/water/riverField.js` (bake), `riverField.wgsl.js` (lookup), `RiverFieldService.js` + `riverFieldWorker.js` | One baked field per area: 2 m paged raster on the cube faces holding water level W, ground change Δ and signed distance. Rivers within 6 km of the camera, kept to 8.4 km; the reveal waits for it. |
 | Terrain | `core/world/water/riverCarve.wgsl.js` | Last step of the height function: natural + Δ, so tiles, normals and the simulation's bed agree. Micro detail is held against W. |
-| Water drawing | `waterWgsl.js` applyWater (terrain shader, far: field first, then lakes), `NearWaterRenderer.js` + `nearWaterSurface.wgsl.js` (lake sheets), `fieldWaterSurface.wgsl.js` (per-wet-page meshes at W) | Rivers draw from the field; a lake sheet gives way wherever a field page exists; the depth test draws the shoreline. Segments remain only for the simulation (`segments: true`). |
+| Water drawing | `waterWgsl.js` applyWater (terrain shader, far: field first, then lakes), `NearWaterRenderer.js` + `nearWaterSurface.wgsl.js` (lake sheets), `fieldWaterSurface.wgsl.js` (per-wet-page meshes at W) | Rivers draw from the field; a lake sheet gives way wherever a field page exists; the depth test draws the shoreline. The segment lists now serve nothing (the old simulation was the last user): dead weight to delete. |
 | Bed material | `riverCarveShoreWeights`, splat passes, MUD tiles in `wizard_game/world/biomes.json` | In field pages, mud by depth under W; elsewhere the lakes' rule. Grass to the waterline; splat filter 5 (engine.json). |
 
 ## 3. What helped (keep unless the new foundation replaces it)
@@ -88,8 +89,9 @@ Architecture-level:
   deferred by the owner).
 - Codex's single regular-grid water mesh at junctions: clipped domain drew
   polygon cut-outs, unclipped flooded unrelated hollows.
-- Near-river shallow-water simulation (WaterRiverSim) is broken; keep
-  `riverSim=off` until the geometry is accepted.
+- Near-river shallow-water simulation along a straightened strip
+  (WaterRiverSim) and the earlier demo patch (RiverSystem): broken, deleted.
+  Section 9 replaced them.
 
 Local patches that did not fix their target (each was a one-term change):
 - Mouths: longer transition radius (canals, triangles), field wet domain =
@@ -351,6 +353,8 @@ the hill are narrower and steeper, and the steeper face takes grass).
 
 ## 8. Tools and pitfalls
 
+Whitewater's own tools are in section 9.
+
 - Capture runner: `tools/perf/riverBanks/armReview.mjs CONFIG.json`
   (system Chrome, own server on :8232, arms with source patches applied to
   an experiment copy of the repo, modes `w10` dry, `91` lighting, `43` base
@@ -374,3 +378,84 @@ the hill are narrower and steeper, and the steeper face takes grass).
   (the Mac crashed once on back-to-back long runs); close browsers after.
 - `tools/perf/structured-terrain-results/` (untracked, large) holds all
   earlier captures.
+
+## 9. Whitewater (2026-11-04, uncommitted, for the owner's look)
+
+Whitewater (`../whitewater`) is the bare minimum for the look. Three tiers, one
+baked flow state, so they agree where they hand over. **Switch:** `&whitewater=off`
+(nothing is created), or at any time `qtDiag.water.whitewater(false)` (foam, flow,
+simulation, rocks, spray all go at once; tiles never hold any of it).
+
+| Tier | Range | What draws it |
+|---|---|---|
+| Far | beyond ~1.6 km | still foam in the terrain shading (`waterWgsl.js` applyWater, field branch), from the fall of W |
+| Mid | to ~150 m | field page mesh, still geometry, foam and ripples moving with the baked flow (`whitewaterLook.wgsl.js`) |
+| Near | under ~150 m | the solver on 0.5 m cells: moving geometry, foam, turbulence, spray, rocks (`WhitewaterSim.js`, `whitewaterSim.wgsl.js`, `whitewaterSurface.wgsl.js`, `whitewaterProps.wgsl.js`) |
+
+**What the world's rivers are like (measured, `wwRiverStats`):** median slopes 4-17 %,
+peaks 30-67 % (Whitewater: 3 %). The traces' discharge is 0.005-0.3 m3/s and their
+speed sits at its 0.05 m/s clamp, against channels 1-3 m deep and 8-30 m wide: a
+solver fed by them just drains. So `riverFlow.js` designs the flow from the baked
+channel: speed from Jarrett's high-gradient law, one discharge per river (speed
+follows the section), and a Manning n per station that puts exactly that flow in
+balance at W.
+
+**Warm-up.** Whitewater runs 900 hidden steps because it starts from a state that
+is not a solution. Here friction is solved so that the baked state is one. From a
+cold reset of every block (`wwWarmup`, river 2553): level RMS 0.008 m at 0.1 s,
+speed 2.713 against 2.712 baked, 132 blocks full in 0.25 s. There is no wave to
+hide; what grows is local detail and foam, over seconds. Each block eases in over
+1 + 1.5 s (the mid tier stays until then) stepping one extra step a frame, and
+blocks fill well beyond the drawn radius, so walking never reaches cold water.
+
+**Handover.** Blocks have a weight, 0 at the edge of what steps, 1 inside, fading
+with distance. The solver pulls to the baked state where it is low (sponge: inflow
+and outflow in one, no walls or inflow rows, any river angle), and the mesh mixes
+height, foam and speed to the mid tier's, so where it ends it already matches the
+field mesh, which discards exactly on stepped blocks (`whiteCover`). Debug water
+views: 11 speed, 12 foam, 13 turbulence, 14 Froude, 15 who draws (magenta near, green mid).
+
+**Window.** A ring of 768 x 768 cells on a tangent plane (frame re-anchors after 8 km),
+blocks of 32 cells. Only flowing blocks near the camera, and the wet ones beside
+them, step, so lakes in the window cost nothing. Rocks are in the solver's bed and
+drawn as meshes, never in tiles. The bed is the terrain itself: `HydrologyGrid.js`
+`carvedDirsEncoder` (no readback), roughened under falling water.
+
+**Costs** (M1 Pro, 2160 x 1350, fenced GPU span, on against `whitewater=off`, same
+poses, run to run noise ~0.5 ms): close +1.8 to +3.9 ms (10-11 -> 12-15 ms), mid +2 to +2.9 ms,
+gentle river +1.1 ms, far +0.3 ms. Parts at one close pose, measured before the single
+solver step and the smaller spray: surface 1.9, solver 0.9, spray 0.8, rocks ~0.4; not
+measured again after them. Flight at 30 m/s: no frame over 16.8 ms, same as off (8 frames at
+33 ms before the fill budget). At 120 m/s: none, measured before the last changes. Memory
+(from the buffer sizes): 55 MB of simulation buffers; flow texels 4 bytes each, ~25 MB at 4782
+pages (field total 74.5 MB there). Bake: +76 ms in the worker.
+
+**Found the hard way:**
+- Foam mean baked vs settled is close (0.80/0.82, 0.32/0.26), but simulated foam is
+  patchy where baked is even; coverage is nonlinear, so they differ by eye a little.
+- Same buffer read and written in one dispatch is invalid even on disjoint ranges:
+  three state buffers, plus a `spread` kernel so the fill stays under 10 storage bindings.
+- `queue.writeBuffer` lands before a later submit: one params write a frame.
+- Screen derivatives of world positions are noise at 131 km: rocks use local metres.
+- `HydroPatch-carve` was invalid since the field rework ('auto' layout had dropped the old
+  carve bindings): a carved GPU sample had not worked since. Fixed.
+- A wet but slow bank block left out of the step set zeroed every neighbour: straight cuts.
+- Hard shoreline: the solver's bed is not the rendered ground to the centimetre. Thin
+  water fades by the solver's depth (Whitewater's `present`).
+- Rocks at a bank drew lines over the grass; on a 60 % slope they hung in the air until
+  their base went down by the fall across their radius.
+- Deleting `core/renderer/rivers` broke the live lake shader's noise import; tests did
+  not catch it (lakes have none). After deletions, check every relative import.
+
+**Open:** near tier not in the loading gate (fills after the reveal, ~1 s, then eases in). No
+readback for floating things (Whitewater's band copy). Rocks are placeholders: one
+lumpy shape, one colour, no collision. Density and sizes (`riverFlow.js`: 0.01 per m2, radius
+0.4-3.8 m long-tailed, half under 0.65 m) were set by the owner's eye: 0.03 and 0.9-2.7 m read as a field of equal stones. On the steepest
+reaches water runs narrower than the channel, so the mud bed shows beside it. Surface
+fragments are the largest cost; a noise texture instead of hashes and half-density far blocks
+are the next savings. Far brown stretches are the older far-water gap (same with it off).
+
+**Tools:** `tools/perf/whitewater/wwProbe.js` (`wwRiverStats`, `wwStatus`, `wwReadback`,
+`wwWarmup`, `wwFlight`, `wwCost`), `views.json`; `w.debugOff = { rocks, spray, surface, solver }`.
+Poses by `river`/`fraction`: on steep rivers use negative `back` (from downstream),
+or the camera lands inside the hill. Evidence: `tools/perf/structured-terrain-results/whitewater-2026-11-04/`.
