@@ -1,0 +1,245 @@
+{
+  "date": "2026-10-29T19:57:35.299Z",
+  "method": "GPU timestamps across compute and shading; each frame awaits GPU completion",
+  "cases": [
+    {
+      "name": "overview after 0 digs (trace every frame)",
+      "fps": 92.59259259204312,
+      "frameMs": 10.800000000064092,
+      "frameP95": 11.5,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 93,
+      "gpuP50": 9.414231,
+      "gpuP95": 10.20948,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "overview after 0 digs (reuse hits)",
+      "fps": 91.26984126984127,
+      "frameMs": 10.956521739130435,
+      "frameP95": 11.399999998509884,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 92,
+      "gpuP50": 9.709101,
+      "gpuP95": 10.298968,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "chamber after 0 offscreen digs",
+      "fps": 32.50911240267122,
+      "frameMs": 30.760606060651217,
+      "frameP95": 33.30000000447035,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 33,
+      "gpuP50": 28.82131,
+      "gpuP95": 31.799348,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "overview after 256 digs (trace every frame)",
+      "fps": 91.85303514363332,
+      "frameMs": 10.886956521755327,
+      "frameP95": 13.399999998509884,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 92,
+      "gpuP50": 9.323608,
+      "gpuP95": 9.451605,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "overview after 256 digs (reuse hits)",
+      "fps": 95.63658099251347,
+      "frameMs": 10.456249999968955,
+      "frameP95": 10.899999998509884,
+      "cpuP50": 0.19999999552965164,
+      "gpuCount": 96,
+      "gpuP50": 9.335316,
+      "gpuP95": 9.508813,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "chamber after 256 offscreen digs",
+      "fps": 33.2323331052199,
+      "frameMs": 30.091176470632064,
+      "frameP95": 31.5,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 34,
+      "gpuP50": 28.765395,
+      "gpuP95": 29.170388,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "overview after 1024 digs (trace every frame)",
+      "fps": 97.59984065317654,
+      "frameMs": 10.245918367362144,
+      "frameP95": 10.600000001490116,
+      "cpuP50": 0.10000000149011612,
+      "gpuCount": 98,
+      "gpuP50": 9.312733,
+      "gpuP95": 9.55302,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "overview after 1024 digs (reuse hits)",
+      "fps": 90.80023947356406,
+      "frameMs": 11.013186813137688,
+      "frameP95": 13.800000004470348,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 91,
+      "gpuP50": 9.343607,
+      "gpuP95": 9.596604,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "chamber after 1024 offscreen digs",
+      "fps": 33.44481605346268,
+      "frameMs": 29.90000000004383,
+      "frameP95": 30.19999999552965,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 34,
+      "gpuP50": 28.784019,
+      "gpuP95": 29.088431,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "tunnel 16 m (trace every frame)",
+      "fps": 41.58827606669187,
+      "frameMs": 24.04523809538001,
+      "frameP95": 26.5,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 42,
+      "gpuP50": 22.365784,
+      "gpuP95": 22.808902,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "tunnel 64 m (trace every frame)",
+      "fps": 41.80768465085526,
+      "frameMs": 23.919047618905704,
+      "frameP95": 24.30000000447035,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 42,
+      "gpuP50": 22.77557,
+      "gpuP95": 23.326061,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "tunnel 192 m (trace every frame)",
+      "fps": 39.55696202549133,
+      "frameMs": 25.27999999988824,
+      "frameP95": 26.100000001490116,
+      "cpuP50": 0.19999999552965164,
+      "gpuCount": 40,
+      "gpuP50": 24.120257,
+      "gpuP95": 24.737957,
+      "pixels": [
+        1264,
+        791
+      ]
+    }
+  ],
+  "device": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "device": "0x0000",
+    "description": "Apple M1 Pro",
+    "timestamps": true,
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36"
+  },
+  "stress": [
+    {
+      "digs": 0,
+      "allocatedChunks": 99,
+      "cpuDensityBytes": 3244032,
+      "hasAdditions": null,
+      "gpuDensityBytes": 4194304,
+      "gpuNormalBytes": 23887872,
+      "editMs": {
+        "p50": 0.29999999701976776,
+        "p95": 0.6000000014901161,
+        "mean": 0.23437500069849193
+      },
+      "syncMs": {
+        "p50": 0.8999999985098839,
+        "p95": 1.2999999970197678,
+        "mean": 0.8906249993015081
+      },
+      "uploadedBytesPerEdit": 134202.875,
+      "writesPerEdit": 4.03125
+    },
+    {
+      "digs": 256,
+      "allocatedChunks": 809,
+      "cpuDensityBytes": 26509312,
+      "hasAdditions": null,
+      "gpuDensityBytes": 33554432,
+      "gpuNormalBytes": 191102976,
+      "editMs": {
+        "p50": 0.19999999552965164,
+        "p95": 0.3999999985098839,
+        "mean": 0.19374999892897904
+      },
+      "syncMs": {
+        "p50": 0.8000000044703484,
+        "p95": 1,
+        "mean": 0.8656250010244548
+      },
+      "uploadedBytesPerEdit": 131072,
+      "writesPerEdit": 4
+    },
+    {
+      "digs": 1024,
+      "allocatedChunks": 2274,
+      "cpuDensityBytes": 74514432,
+      "hasAdditions": null,
+      "gpuDensityBytes": 134217728,
+      "gpuNormalBytes": 764411904,
+      "editMs": {
+        "p50": 0.20000000298023224,
+        "p95": 0.4000000059604645,
+        "mean": 0.19062499981373549
+      },
+      "syncMs": {
+        "p50": 0.8999999985098839,
+        "p95": 1,
+        "mean": 0.9125000003259629
+      },
+      "uploadedBytesPerEdit": 131072,
+      "writesPerEdit": 4
+    }
+  ],
+  "errors": []
+}

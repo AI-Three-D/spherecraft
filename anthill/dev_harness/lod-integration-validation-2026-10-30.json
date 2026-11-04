@@ -1,0 +1,95 @@
+{
+  "date": "2026-10-30T13:36:18.138391+00:00",
+  "cpu": {
+    "command": "npm test",
+    "tests": 149,
+    "passed": 149,
+    "failed": 0
+  },
+  "lighting": {
+    "passed": true,
+    "flamePixels": 10,
+    "gpu": {
+      "sealed": [
+        0,
+        0,
+        1,
+        1
+      ],
+      "opened": [
+        1,
+        0,
+        1,
+        1
+      ],
+      "daylight": 1.5199999809265137,
+      "night": 0.019999999552965164,
+      "angled": 0.019999999552965164,
+      "body": [
+        1,
+        0
+      ],
+      "penumbra": [
+        0,
+        0.49525386095046997,
+        1,
+        1
+      ],
+      "normalContinuity": [
+        0,
+        1.3824424058839213e-05,
+        1.3782084351987578e-05,
+        1
+      ],
+      "installed": 0.10233531892299652,
+      "thinWall": [
+        0,
+        0
+      ],
+      "blocked": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "normalRelocation": true
+    },
+    "checks": [
+      "visible carried torch",
+      "voxel shadow rays",
+      "sun shaft",
+      "day/night",
+      "cutaway isolation",
+      "soft body shadow",
+      "source/body overlap",
+      "smooth voxel normals",
+      "normal cache invalidation",
+      "edit invalidation",
+      "carried torch movement",
+      "installed light persistence",
+      "steady lantern",
+      "removal",
+      "fragment fallback"
+    ]
+  },
+  "camera": {
+    "passed": true,
+    "pixels": {
+      "terrain": 737797,
+      "different": 2439,
+      "total": 760000
+    },
+    "frames": 75,
+    "checks": [
+      "first/third-person UI",
+      "camera-relative WASD and preserved aim",
+      "digging and blur reset",
+      "pointer lock/look/mouse mining/Esc",
+      "third-person zoom",
+      "perspective compute/fragment rendering",
+      "edited terrain boom collision",
+      "respawn preserves mode",
+      "side/inspection/overview restored"
+    ]
+  }
+}

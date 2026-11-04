@@ -1,0 +1,577 @@
+{
+  "date": "2026-10-30T18:01:47.439Z",
+  "method": "Alternating 500 ms slices, live maintenance and hit reuse, GPU completion per frame, 1000 × 700",
+  "cases": [
+    {
+      "scene": "overview",
+      "moving": false,
+      "before": {
+        "frameCount": 422,
+        "elapsedMs": 6391.29999999702,
+        "traces": 319,
+        "meshPasses": 318,
+        "workerJobs": 42,
+        "workerMs": 4055.9999999701977,
+        "cpu": {
+          "p50": 0.8000000044703484,
+          "p95": 3.2999999970197678,
+          "max": 14
+        },
+        "frames": {
+          "p50": 11.800000004470348,
+          "p95": 26.100000001490116,
+          "max": 280.40000000596046
+        },
+        "maintenance": {
+          "p50": 0.29999999701976776,
+          "p95": 1,
+          "max": 8.899999998509884
+        },
+        "gpu": {
+          "p50": 7.494344,
+          "p95": 12.605808,
+          "max": 19.092375
+        },
+        "stats": {
+          "completed": 42,
+          "discarded": 0,
+          "resident": 41,
+          "eligible": 36,
+          "triangles": 58487,
+          "fullTriangles": 58995,
+          "bytes": 5010592,
+          "workerMs": 29.299999997019768,
+          "maxWorkerMs": 776.6999999955297,
+          "maintenanceMs": 0.10000000149011612,
+          "maxMaintenanceMs": 8.899999998509884,
+          "error": null,
+          "densityBytes": 3112960,
+          "allocatedChunks": 95
+        }
+      },
+      "after": {
+        "frameCount": 1032,
+        "elapsedMs": 6165.500000007451,
+        "traces": 1,
+        "meshPasses": 0,
+        "workerJobs": 1,
+        "workerMs": 12.799999997019768,
+        "cpu": {
+          "p50": 0.20000000298023224,
+          "p95": 0.6000000014901161,
+          "max": 2.2999999970197678
+        },
+        "frames": {
+          "p50": 5,
+          "p95": 9.299999997019768,
+          "max": 17.200000002980232
+        },
+        "maintenance": {
+          "p50": 0,
+          "p95": 0.10000000149011612,
+          "max": 0.7000000029802322
+        },
+        "gpu": {
+          "p50": 3.689485,
+          "p95": 6.608847,
+          "max": 11.691459
+        },
+        "stats": {
+          "completed": 1,
+          "discarded": 0,
+          "resident": 1,
+          "eligible": 1,
+          "triangles": 473,
+          "fullTriangles": 517,
+          "bytes": 36848,
+          "workerMs": 12.799999997019768,
+          "maxWorkerMs": 12.799999997019768,
+          "maintenanceMs": 0,
+          "maxMaintenanceMs": 0.7000000029802322,
+          "ticks": 60,
+          "submitted": 1,
+          "deferred": 0,
+          "error": null,
+          "densityBytes": 3112960,
+          "allocatedChunks": 95
+        }
+      }
+    },
+    {
+      "scene": "overview",
+      "moving": true,
+      "before": {
+        "frameCount": 420,
+        "elapsedMs": 6329.399999976158,
+        "traces": 419,
+        "meshPasses": 419,
+        "workerJobs": 29,
+        "workerMs": 2057.1000000163913,
+        "cpu": {
+          "p50": 1,
+          "p95": 3.899999998509884,
+          "max": 25.5
+        },
+        "frames": {
+          "p50": 11.5,
+          "p95": 25.799999997019768,
+          "max": 119.29999999701977
+        },
+        "maintenance": {
+          "p50": 0.3999999985098839,
+          "p95": 1.6000000014901161,
+          "max": 24.799999997019768
+        },
+        "gpu": {
+          "p50": 7.523385,
+          "p95": 11.979983,
+          "max": 19.505245
+        },
+        "stats": {
+          "completed": 71,
+          "discarded": 0,
+          "resident": 71,
+          "eligible": 56,
+          "triangles": 104043,
+          "fullTriangles": 106115,
+          "bytes": 9713248,
+          "workerMs": 71.10000000149012,
+          "maxWorkerMs": 776.6999999955297,
+          "maintenanceMs": 0.20000000298023224,
+          "maxMaintenanceMs": 24.799999997019768,
+          "error": null,
+          "densityBytes": 3112960,
+          "allocatedChunks": 95
+        }
+      },
+      "after": {
+        "frameCount": 697,
+        "elapsedMs": 6173.900000013411,
+        "traces": 696,
+        "meshPasses": 696,
+        "workerJobs": 5,
+        "workerMs": 50.69999999552965,
+        "cpu": {
+          "p50": 0.20000000298023224,
+          "p95": 0.6000000014901161,
+          "max": 1.2000000029802322
+        },
+        "frames": {
+          "p50": 8.299999997019768,
+          "p95": 10.899999998509884,
+          "max": 19.5
+        },
+        "maintenance": {
+          "p50": 0,
+          "p95": 0.20000000298023224,
+          "max": 0.7000000029802322
+        },
+        "gpu": {
+          "p50": 6.907729,
+          "p95": 7.73609,
+          "max": 16.950741
+        },
+        "stats": {
+          "completed": 6,
+          "discarded": 0,
+          "resident": 5,
+          "eligible": 5,
+          "triangles": 3033,
+          "fullTriangles": 3109,
+          "bytes": 229600,
+          "workerMs": 20.399999998509884,
+          "maxWorkerMs": 20.399999998509884,
+          "maintenanceMs": 0,
+          "maxMaintenanceMs": 0.7000000029802322,
+          "ticks": 120,
+          "submitted": 6,
+          "deferred": 0,
+          "error": null,
+          "densityBytes": 3112960,
+          "allocatedChunks": 95
+        }
+      }
+    },
+    {
+      "scene": "long-tunnel",
+      "moving": false,
+      "before": {
+        "frameCount": 414,
+        "elapsedMs": 6206.5,
+        "traces": 42,
+        "meshPasses": 41,
+        "workerJobs": 62,
+        "workerMs": 2806.800000011921,
+        "cpu": {
+          "p50": 0.8000000044703484,
+          "p95": 2.899999998509884,
+          "max": 16.899999998509884
+        },
+        "frames": {
+          "p50": 12.899999998509884,
+          "p95": 22.700000002980232,
+          "max": 85.29999999701977
+        },
+        "maintenance": {
+          "p50": 0.20000000298023224,
+          "p95": 1,
+          "max": 4.600000001490116
+        },
+        "gpu": {
+          "p50": 8.999822,
+          "p95": 18.503634,
+          "max": 20.668394
+        },
+        "stats": {
+          "completed": 62,
+          "discarded": 0,
+          "resident": 62,
+          "eligible": 6,
+          "triangles": 3264,
+          "fullTriangles": 3264,
+          "bytes": 6689776,
+          "workerMs": 24.799999997019768,
+          "maxWorkerMs": 173.19999999552965,
+          "maintenanceMs": 0.30000000447034836,
+          "maxMaintenanceMs": 4.600000001490116,
+          "error": null,
+          "densityBytes": 6422528,
+          "allocatedChunks": 196
+        }
+      },
+      "after": {
+        "frameCount": 550,
+        "elapsedMs": 6199.5999999940395,
+        "traces": 1,
+        "meshPasses": 0,
+        "workerJobs": 9,
+        "workerMs": 88.80000000447035,
+        "cpu": {
+          "p50": 0.20000000298023224,
+          "p95": 0.6000000014901161,
+          "max": 16.100000001490116
+        },
+        "frames": {
+          "p50": 10.399999998509884,
+          "p95": 13.299999997019768,
+          "max": 40.79999999701977
+        },
+        "maintenance": {
+          "p50": 0,
+          "p95": 0.3999999985098839,
+          "max": 0.7000000029802322
+        },
+        "gpu": {
+          "p50": 8.939364,
+          "p95": 10.180262,
+          "max": 22.741863
+        },
+        "stats": {
+          "completed": 9,
+          "discarded": 0,
+          "resident": 5,
+          "eligible": 5,
+          "triangles": 9520,
+          "fullTriangles": 9520,
+          "bytes": 628720,
+          "workerMs": 13.399999998509884,
+          "maxWorkerMs": 20.899999998509884,
+          "maintenanceMs": 0,
+          "maxMaintenanceMs": 0.7000000029802322,
+          "ticks": 60,
+          "submitted": 9,
+          "deferred": 3,
+          "error": null,
+          "densityBytes": 6422528,
+          "allocatedChunks": 196
+        }
+      }
+    },
+    {
+      "scene": "long-tunnel",
+      "moving": true,
+      "before": {
+        "frameCount": 257,
+        "elapsedMs": 6573.39999999851,
+        "traces": 257,
+        "meshPasses": 257,
+        "workerJobs": 29,
+        "workerMs": 887.8999999985099,
+        "cpu": {
+          "p50": 1.1999999955296516,
+          "p95": 4.600000001490116,
+          "max": 407.5
+        },
+        "frames": {
+          "p50": 21.80000000447035,
+          "p95": 30.19999999552965,
+          "max": 443.3999999985099
+        },
+        "maintenance": {
+          "p50": 0.5999999940395355,
+          "p95": 2.5,
+          "max": 82.80000000447035
+        },
+        "gpu": {
+          "p50": 18.417135,
+          "p95": 19.561161,
+          "max": 27.717952
+        },
+        "stats": {
+          "completed": 91,
+          "discarded": 0,
+          "resident": 91,
+          "eligible": 31,
+          "triangles": 38592,
+          "fullTriangles": 38592,
+          "bytes": 9558608,
+          "workerMs": 12.899999998509884,
+          "maxWorkerMs": 173.19999999552965,
+          "maintenanceMs": 0.5,
+          "maxMaintenanceMs": 82.80000000447035,
+          "error": null,
+          "densityBytes": 6422528,
+          "allocatedChunks": 196
+        }
+      },
+      "after": {
+        "frameCount": 300,
+        "elapsedMs": 6262.299999982119,
+        "traces": 299,
+        "meshPasses": 299,
+        "workerJobs": 11,
+        "workerMs": 66.90000000596046,
+        "cpu": {
+          "p50": 0.29999999701976776,
+          "p95": 0.6999999955296516,
+          "max": 1.1000000014901161
+        },
+        "frames": {
+          "p50": 20.299999997019768,
+          "p95": 22.399999998509884,
+          "max": 25.600000001490116
+        },
+        "maintenance": {
+          "p50": 0,
+          "p95": 0.20000000298023224,
+          "max": 0.4000000059604645
+        },
+        "gpu": {
+          "p50": 18.641757,
+          "p95": 19.647658,
+          "max": 21.041679
+        },
+        "stats": {
+          "completed": 20,
+          "discarded": 0,
+          "resident": 9,
+          "eligible": 9,
+          "triangles": 19440,
+          "fullTriangles": 19440,
+          "bytes": 1266912,
+          "workerMs": 13.700000002980232,
+          "maxWorkerMs": 20.899999998509884,
+          "maintenanceMs": 0,
+          "maxMaintenanceMs": 0.7000000029802322,
+          "ticks": 120,
+          "submitted": 20,
+          "deferred": 10,
+          "error": null,
+          "densityBytes": 6422528,
+          "allocatedChunks": 196
+        }
+      }
+    },
+    {
+      "scene": "large-network",
+      "moving": false,
+      "before": {
+        "frameCount": 318,
+        "elapsedMs": 7065.0999999940395,
+        "traces": 189,
+        "meshPasses": 188,
+        "workerJobs": 24,
+        "workerMs": 3161.0000000298023,
+        "cpu": {
+          "p50": 1.3999999985098839,
+          "p95": 3.899999998509884,
+          "max": 291.20000000298023
+        },
+        "frames": {
+          "p50": 11.299999997019768,
+          "p95": 32.399999998509884,
+          "max": 542.1999999955297
+        },
+        "maintenance": {
+          "p50": 0.8999999985098839,
+          "p95": 1.7000000029802322,
+          "max": 44.30000000447035
+        },
+        "gpu": {
+          "p50": 6.951185,
+          "p95": 12.168773,
+          "max": 17.648773
+        },
+        "stats": {
+          "completed": 24,
+          "discarded": 0,
+          "resident": 24,
+          "eligible": 23,
+          "triangles": 46142,
+          "fullTriangles": 46578,
+          "bytes": 3371904,
+          "workerMs": 12,
+          "maxWorkerMs": 1036.9000000059605,
+          "maintenanceMs": 1,
+          "maxMaintenanceMs": 44.30000000447035,
+          "error": null,
+          "densityBytes": 74383360,
+          "allocatedChunks": 2270
+        }
+      },
+      "after": {
+        "frameCount": 1098,
+        "elapsedMs": 6160.4000000059605,
+        "traces": 1,
+        "meshPasses": 0,
+        "workerJobs": 10,
+        "workerMs": 57.00000000745058,
+        "cpu": {
+          "p50": 0.19999999552965164,
+          "p95": 0.5,
+          "max": 201.19999999552965
+        },
+        "frames": {
+          "p50": 4.799999997019768,
+          "p95": 8.300000004470348,
+          "max": 225.29999999701977
+        },
+        "maintenance": {
+          "p50": 0,
+          "p95": 0.20000000298023224,
+          "max": 0.7000000029802322
+        },
+        "gpu": {
+          "p50": 3.476572,
+          "p95": 5.517666,
+          "max": 22.197859
+        },
+        "stats": {
+          "completed": 10,
+          "discarded": 0,
+          "resident": 10,
+          "eligible": 10,
+          "triangles": 4314,
+          "fullTriangles": 4338,
+          "bytes": 293240,
+          "workerMs": 2.7000000029802322,
+          "maxWorkerMs": 11.399999998509884,
+          "maintenanceMs": 0,
+          "maxMaintenanceMs": 0.7000000029802322,
+          "ticks": 58,
+          "submitted": 10,
+          "deferred": 0,
+          "error": null,
+          "densityBytes": 74383360,
+          "allocatedChunks": 2270
+        }
+      }
+    },
+    {
+      "scene": "large-network",
+      "moving": true,
+      "before": {
+        "frameCount": 320,
+        "elapsedMs": 6260.19999999553,
+        "traces": 320,
+        "meshPasses": 320,
+        "workerJobs": 19,
+        "workerMs": 649.8999999910593,
+        "cpu": {
+          "p50": 1.5,
+          "p95": 3.600000001490116,
+          "max": 12.5
+        },
+        "frames": {
+          "p50": 18.299999997019768,
+          "p95": 29.69999999552965,
+          "max": 54.19999999552965
+        },
+        "maintenance": {
+          "p50": 0.8000000044703484,
+          "p95": 2,
+          "max": 12
+        },
+        "gpu": {
+          "p50": 13.386713,
+          "p95": 22.772277,
+          "max": 29.598258
+        },
+        "stats": {
+          "completed": 43,
+          "discarded": 0,
+          "resident": 43,
+          "eligible": 36,
+          "triangles": 58487,
+          "fullTriangles": 58995,
+          "bytes": 5306720,
+          "workerMs": 32.20000000298023,
+          "maxWorkerMs": 1036.9000000059605,
+          "maintenanceMs": 0.6000000014901161,
+          "maxMaintenanceMs": 44.30000000447035,
+          "error": null,
+          "densityBytes": 74383360,
+          "allocatedChunks": 2270
+        }
+      },
+      "after": {
+        "frameCount": 393,
+        "elapsedMs": 6219.899999991059,
+        "traces": 392,
+        "meshPasses": 392,
+        "workerJobs": 8,
+        "workerMs": 37.900000005960464,
+        "cpu": {
+          "p50": 0.29999999701976776,
+          "p95": 0.9000000059604645,
+          "max": 3
+        },
+        "frames": {
+          "p50": 14.899999998509884,
+          "p95": 24.19999999552965,
+          "max": 32.29999999701977
+        },
+        "maintenance": {
+          "p50": 0.09999999403953552,
+          "p95": 0.3999999985098839,
+          "max": 0.8999999985098839
+        },
+        "gpu": {
+          "p50": 12.504643,
+          "p95": 21.385924,
+          "max": 28.485231
+        },
+        "stats": {
+          "completed": 18,
+          "discarded": 0,
+          "resident": 18,
+          "eligible": 18,
+          "triangles": 8372,
+          "fullTriangles": 8432,
+          "bytes": 568680,
+          "workerMs": 1.3999999985098839,
+          "maxWorkerMs": 11.399999998509884,
+          "maintenanceMs": 0,
+          "maxMaintenanceMs": 0.8999999985098839,
+          "ticks": 118,
+          "submitted": 18,
+          "deferred": 0,
+          "error": null,
+          "densityBytes": 74383360,
+          "allocatedChunks": 2270
+        }
+      }
+    }
+  ],
+  "errors": []
+}

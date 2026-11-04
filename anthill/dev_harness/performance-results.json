@@ -1,0 +1,163 @@
+{
+  "date": "2026-10-29T20:00:14.996Z",
+  "method": "GPU timestamps across compute and shading; each frame awaits GPU completion",
+  "cases": [
+    {
+      "name": "anthill",
+      "fps": 237.51309814861838,
+      "frameMs": 4.210294117650189,
+      "frameP95": 6.299999997019768,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 476,
+      "gpuP50": 2.777,
+      "gpuP95": 4.395975,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "cutaway",
+      "fps": 176.5586034912718,
+      "frameMs": 5.663841807909605,
+      "frameP95": 7.200000002980232,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 354,
+      "gpuP50": 4.032438,
+      "gpuP95": 4.68372,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "complete volume",
+      "fps": 122.17623298232375,
+      "frameMs": 8.184897959201919,
+      "frameP95": 10.100000001490116,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 245,
+      "gpuP50": 6.357694,
+      "gpuP95": 7.667049,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "complete volume orbit",
+      "fps": 80.76577924032341,
+      "frameMs": 12.381481481463085,
+      "frameP95": 14.400000005960464,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 162,
+      "gpuP50": 10.733586,
+      "gpuP95": 12.853386,
+      "pixels": [
+        1264,
+        791
+      ]
+    },
+    {
+      "name": "complete volume moving budget",
+      "fps": 161.13744075829385,
+      "frameMs": 6.205882352941177,
+      "frameP95": 7.299999997019768,
+      "cpuP50": 0.20000000298023224,
+      "gpuCount": 323,
+      "gpuP50": 4.911633,
+      "gpuP95": 5.760662,
+      "pixels": [
+        758,
+        475
+      ]
+    }
+  ],
+  "device": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "device": "0x0000",
+    "description": "Apple M1 Pro",
+    "timestamps": true,
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36"
+  },
+  "numerical": {
+    "count": 8192,
+    "densityError": 0,
+    "signMismatches": 0,
+    "noiseError": 0.001303369179368019,
+    "gradientError": 0.001842378405854106,
+    "materialError": 0
+  },
+  "imageChecks": [
+    {
+      "yaw": 0,
+      "pitch": 0,
+      "clip": true,
+      "skip": {
+        "pixels": 999824,
+        "different": 0,
+        "maxDifference": 0,
+        "largeDifferences": 0
+      },
+      "split": {
+        "pixels": 999824,
+        "different": 42,
+        "maxDifference": 117,
+        "largeDifferences": 9
+      }
+    },
+    {
+      "yaw": 0.45,
+      "pitch": 0.65,
+      "clip": false,
+      "skip": {
+        "pixels": 999824,
+        "different": 0,
+        "maxDifference": 0,
+        "largeDifferences": 0
+      },
+      "split": {
+        "pixels": 999824,
+        "different": 84,
+        "maxDifference": 115,
+        "largeDifferences": 9
+      }
+    },
+    {
+      "yaw": -1.2,
+      "pitch": -0.35,
+      "clip": false,
+      "skip": {
+        "pixels": 999824,
+        "different": 0,
+        "maxDifference": 0,
+        "largeDifferences": 0
+      },
+      "split": {
+        "pixels": 999824,
+        "different": 112,
+        "maxDifference": 118,
+        "largeDifferences": 54
+      }
+    },
+    {
+      "yaw": 2.2,
+      "pitch": 0.9,
+      "clip": false,
+      "skip": {
+        "pixels": 999824,
+        "different": 0,
+        "maxDifference": 0,
+        "largeDifferences": 0
+      },
+      "split": {
+        "pixels": 999824,
+        "different": 27,
+        "maxDifference": 1,
+        "largeDifferences": 0
+      }
+    }
+  ],
+  "errors": []
+}

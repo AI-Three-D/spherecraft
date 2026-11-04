@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anthill · mine character sandbox</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; background: #111a29; color: #eef2ff; font: 15px system-ui; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  aside { position: absolute; top: 16px; left: 20px; pointer-events: none; max-width: 640px;
+          background: rgba(10, 16, 28, 0.72); padding: 4px 12px; border-radius: 6px; }
+  h1 { font-size: 20px; margin-bottom: 6px; }
+  p { line-height: 1.5; margin: 6px 0; }
+  #status { color: #b9d8cb; white-space: pre-wrap; font: 13px ui-monospace, monospace; }
+  .captured { color: #ffc254; } .queried { color: #6bccff; }
+  .controls { pointer-events: auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  button, select { background: #263c50; border: 1px solid #57728c; border-radius: 4px; color: #eef2ff; padding: 5px 10px; cursor: pointer; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  input { accent-color: #ffc254; vertical-align: middle; }
+  #dig-angle { width: 145px; }
+  #angle-value { display: inline-block; min-width: 36px; color: #ffc254; }
+  #miner-status { color: #8ee9ef; font: 13px ui-monospace, monospace; }
+  #miner-status.dead { color: #ff8c7d; }
+  #crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+               color: #fff; text-shadow: 0 1px 3px #000; pointer-events: none; font: 22px monospace; }
+  details { pointer-events: auto; margin: 6px 0; }
+  details p { font-size: 12px; }
+  summary { cursor: pointer; color: #a8b9ce; font-size: 12px; }
+  @media (max-height: 650px) { aside { top: 6px; left: 8px; } h1 { margin: 5px 0; } p { font-size: 12px; } #status { font-size: 10px; } }
+</style>
+<script type="importmap">
+{"imports": {"engine/": "../core/"}}
+</script>
+<canvas aria-label="Side view of the voxel region"></canvas>
+<div id="crosshair" hidden aria-hidden="true">+</div>
+<aside>
+  <h1>Anthill · mine character sandbox</h1>
+  <p id="movement-help">← / → walk · Space jump · <strong>Hold D to dig</strong> · ↑ / ↓ or I / K aim up / down</p>
+  <p id="camera-help">F free view / return · Free view: arrows walk in 3D, I / K aim · Drag orbit · Shift+drag pan · C cutaway / hillside</p>
+  <p class="controls">
+    <label>Camera <select id="camera-mode">
+      <option value="anthill">Side view</option><option value="inspection">Free inspection</option>
+      <option value="first-person">1st person</option><option value="third-person">3rd person</option>
+    </select></label>
+    <span>V switches 1st / 3rd person</span>
+  </p>
+  <p class="controls">
+    <label>Dig angle <input id="dig-angle" type="range" min="-90" max="90" step="1" value="0" aria-label="Dig angle in degrees"><output id="angle-value">0°</output></label>
+    <label><input id="follow-miner" type="checkbox" checked> Follow</label>
+    <button id="focus-miner">Focus (T)</button><button id="respawn-miner">Respawn (P)</button><button id="overview">Overview</button>
+  </p>
+  <p id="miner-status">Miner starting on the hillside…</p>
+  <p class="controls">
+    <label>Time <input id="time-of-day" type="range" min="0" max="23.99" step="0.01" value="9" aria-label="Time of day"><output id="time-value">09:00</output></label>
+    <label><input id="day-cycle" type="checkbox" checked> Day cycle</label>
+    <label><input id="carried-torch" type="checkbox" checked> Carried torch</label>
+  </p>
+  <p class="controls">
+    <select id="light-kind" aria-label="Installed light type"><option value="torch">Flickering torch</option><option value="lantern">Steady lantern</option></select>
+    <button id="install-light">Place light here</button><button id="remove-light" disabled>Remove last light</button>
+  </p>
+  <details>
+    <summary>Terrain tools &amp; diagnostics</summary>
+  <p class="controls"><label><input id="geometry-lod" type="checkbox" checked> Geometry LOD and background remodeling</label></p>
+  <p><span class="captured">━ captured ground</span> · <span class="queried">━ queried ground beyond the region</span></p>
+  <p>Drag pan · Wheel zoom · Click carve · Shift+click fill · [ / ] brush size · 1 / 2 seams · Q / E smooth 90° turns · W / S move cut (Shift = fine) · B query bias · R reset view</p>
+  <p id="status">Starting WebGPU…</p>
+  </details>
+</aside>
+<script type="module" src="./voxelMain.js"></script>
+</html>
