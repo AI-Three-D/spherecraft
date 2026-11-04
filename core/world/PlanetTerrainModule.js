@@ -2,7 +2,6 @@ import { TerrainModule } from '../renderer/terrain/TerrainModule.js';
 import { QuadtreeTileManager } from './quadtree/GPUQuadtreeTerrain.js';
 import { QuadtreeTerrainRenderer } from '../renderer/terrain/QuadtreeTerrainRenderer.js';
 import { NearWaterRenderer } from '../renderer/water/NearWaterRenderer.js';
-import { WaterSimRenderer } from '../renderer/water/WaterSimRenderer.js';
 
 /**
  * Production composition of a planetary terrain world and its water layers.
@@ -27,10 +26,8 @@ export class PlanetTerrainModule extends TerrainModule {
         super({ source, renderer, ownsSource: true, initializeSource: true });
         this.options = options;
         this.ocean = null;
-        this.rivers = null;
         this.lakes = null;
         this.nearWater = null;
-        this.simWater = null;
         this.environmentState = null;
 
         const render = (target, frame) => target?.render(
@@ -47,12 +44,6 @@ export class PlanetTerrainModule extends TerrainModule {
                 dispose: () => { this.ocean?.dispose(); this.ocean = null; },
             },
             {
-                initialize: () => this.initializeRivers(),
-                compute: (frame, encoder) => this.rivers?.update(encoder, frame.deltaTime),
-                render: frame => { if (this.rivers?.isReady()) render(this.rivers, frame); },
-                dispose: () => { this.rivers?.dispose(); this.rivers = null; },
-            },
-            {
                 initialize: () => this.initializeLakes(),
                 compute: frame => this.lakes?.update(frame.deltaTime),
                 render: frame => render(this.lakes, frame),
@@ -65,10 +56,6 @@ export class PlanetTerrainModule extends TerrainModule {
                 },
                 render: frame => render(this.nearWater, frame),
                 dispose: () => { this.nearWater?.dispose(); this.nearWater = null; },
-            },
-            {
-                render: frame => render(this.simWater, frame),
-                dispose: () => { this.simWater?.dispose(); this.simWater = null; },
             },
         ];
     }
@@ -99,20 +86,6 @@ export class PlanetTerrainModule extends TerrainModule {
         await this.ocean.initialize();
     }
 
-    async initializeRivers() {
-        if (this.options.engineConfig.features?.rivers === false) return;
-        const { RiverSystem } = await import('../renderer/rivers/riverSystem.js');
-        const { DEFAULT_RIVER_CONFIG } = await import('../../templates/configs/riverConfig.js');
-        this.rivers = new RiverSystem({
-            ...this.options,
-            device: this.options.backend.device,
-            quadtreeGPU: this.source.quadtreeGPU,
-            tileStreamer: this.source.tileStreamer,
-            riverConfig: this.options.riverConfig ?? DEFAULT_RIVER_CONFIG,
-        });
-        await this.rivers.initialize();
-    }
-
     async initializeLakes() {
         if (this.options.engineConfig.features?.lakes === false) return;
         const { LakeWaterSystem } = await import('../renderer/lakes/lakeWaterSystem.js');
@@ -138,12 +111,6 @@ export class PlanetTerrainModule extends TerrainModule {
         });
     }
 
-    setWaterSimSite(site, water) {
-        if (!site && !this.simWater) return;
-        this.simWater ??= new WaterSimRenderer(this.options);
-        this.simWater.setSite(site, water);
-    }
 
-    placeRiver(position, direction = null) { this.rivers?.setAnchor(position, direction); }
     setLakes(lakes) { this.lakes?.setLakes(lakes); }
 }

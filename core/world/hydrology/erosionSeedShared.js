@@ -181,7 +181,7 @@ export function drawErosionSizeClassScale(regionX, regionY, seed) {
 }
 
 // Cheap 2D value noise (own small implementation — same spirit as
-// RIVER_WGSL_NOISE's noise2, not a port of it) used only by
+// the lake water shader's noise2, not a port of it) used only by
 // erosionBlobRadiusAt below.
 function hash2(x, y) {
     const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;

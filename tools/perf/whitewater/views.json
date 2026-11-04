@@ -1,0 +1,7 @@
+[
+ {"name":"s460","river":460,"fraction":0.33,"height":6,"back":-20,"side":2},
+ {"name":"s458-up","river":458,"fraction":0.72,"height":9,"back":-26,"side":3},
+ {"name":"s458-mid","river":458,"fraction":0.72,"height":60,"back":-140},
+ {"name":"s458-far","river":458,"fraction":0.72,"height":400,"back":-1500},
+ {"name":"g2553-near","river":2553,"fraction":0.7,"height":6,"back":18}
+]

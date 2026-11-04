@@ -297,29 +297,13 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         carveGroupsStale = false;
         if (!carveRes) { carveGroup = carveDirsGroup = null; return; }
         if (!(await carvedReady())) return;
-        const C = RIVER_CARVE_BINDINGS, V = RIVER_FIELD_BINDINGS;
+        // The height alone reads the field: 'auto' layouts drop every other binding.
+        const V = RIVER_FIELD_BINDINGS, v = fieldRes ?? terrainGenerator._riverFieldPlaceholder;
         const entries = [
-            { binding: C.index, resource: { buffer: carveRes.index } },
-            { binding: C.params, resource: { buffer: carveRes.params } },
+            { binding: V.table, resource: { buffer: v.pages } },
+            { binding: V.texels, resource: { buffer: v.texels } },
+            { binding: V.params, resource: { buffer: v.params } },
         ];
-        // With the shore materials compiled in, the carve looks up the lakes
-        // too (riverCarveUnderLake: no bank fill under a lake's water).
-        if (terrainGenerator.terrainConfig.waterGraph?.carve?.bankDetail > 0) {
-            const r = carveRes.lakes ? carveRes : terrainGenerator._waterCarvePlaceholder;
-            entries.push(
-                { binding: C.lakes, resource: { buffer: r.lakes } },
-                { binding: C.masks, resource: r.masks },
-                { binding: C.sampler, resource: terrainGenerator._lakeMaskSampler },
-            );
-        }
-        {
-            const v = fieldRes ?? terrainGenerator._riverFieldPlaceholder;
-            entries.push(
-                { binding: V.table, resource: { buffer: v.pages } },
-                { binding: V.texels, resource: { buffer: v.texels } },
-                { binding: V.params, resource: { buffer: v.params } },
-            );
-        }
         if(carvedPipeline)carveGroup = device.createBindGroup({ label: 'HydroPatch-carve', layout: carvedPipeline.getBindGroupLayout(1), entries });
         carveDirsGroup = device.createBindGroup({ label: 'HydroDirs-carve', layout: carvedDirsPipeline.getBindGroupLayout(1), entries });
     }
@@ -380,8 +364,45 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         return heights;
     }
 
+    /**
+     * Carved heights without a readback, for consumers on the GPU: encode(enc,
+     * count) samples the first count directions of `dirs` (vec4) into `heights`
+     * (f32). ready() false: the river field is being rebound, try next frame.
+     */
+    async function carvedDirsEncoder({ dirs, heights }) {
+        await ensureCarveGroups();
+        if (!carvedDirsPipeline) return null;
+        const params = device.createBuffer({ label: 'HydroDirs-GpuParams', size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const bindGroup = device.createBindGroup({
+            layout: carvedDirsPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: dirsParams, resource: { buffer: params } },
+                { binding: dirsIn, resource: { buffer: dirs } },
+                { binding: dirsOut, resource: { buffer: heights } },
+            ],
+        });
+        const p = new ArrayBuffer(16), pv = new DataView(p);
+        return {
+            ready: () => !carveGroupsStale && !!carveDirsGroup,
+            encode(enc, count) {
+                if (carveGroupsStale || !carveDirsGroup) return false;
+                pv.setUint32(0, count, true); pv.setFloat32(4, maxH, true);
+                device.queue.writeBuffer(params, 0, p);
+                const pass = enc.beginComputePass({ label: 'HydroDirs-Gpu' });
+                pass.setPipeline(carvedDirsPipeline);
+                pass.setBindGroup(0, bindGroup);
+                pass.setBindGroup(1, carveDirsGroup);
+                setRegional(pass, carvedDirsPipeline);
+                pass.dispatchWorkgroups(Math.ceil(count / 64));
+                pass.end();
+                return true;
+            },
+        };
+    }
+
     return {
-        sampleGrid, samplePatch,
+        sampleGrid, samplePatch, carvedDirsEncoder,
         sampleDirsNatural: dirs => sampleDirs(dirs),
         sampleDirsCarved: dirs => sampleDirs(dirs, { carved: true }),
         setWaterCarveResources, setRiverFieldResources, maxH, seaLevelM,

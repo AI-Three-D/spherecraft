@@ -411,7 +411,6 @@ export function createEngineConfig() {
       cloudParticles:    false,   // low/peak atmospheric bank particle clouds
       fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
       skyEffects:        true,    // sky, stars, moon
-      rivers:            true,    // walking-skeleton river/shallow-water demo
     },
 
     gpuQuadtree: {
@@ -961,13 +960,6 @@ export function createGameDataConfig() {
 	      // ~170m valley rather than a ~50m scratch.
 	      halfWidthM: 24,
 	      depthM: 6,
-	      // Deliberately much longer than the 128m water-simulation patch
-	      // (templates/configs/riverConfig.js's grid.W/L): the terrain carve
-	      // itself isn't tied to the water sim's extent, so keeping this
-	      // short made the channel taper to 0 depth *inside* the visible
-	      // patch, reading as a closed pond instead of a flowing channel.
-	      // With this much longer, the carve sits at full depth everywhere
-	      // within the water patch, and only tapers off far outside it.
 	      lengthM: 1000,
 	    },
     // Terrain feature toggles (core/world/terrain-generator/terrainFeatureToggles.js).
@@ -983,20 +975,10 @@ export function createGameDataConfig() {
       enabled: true,
       // Independent shoreline variation, bank relief and shore splat materials.
       carve: { bankDetail: 1 },
-      // Near-field shallow-water simulation (core/world/water/WaterRiverSim.js):
-      // a strip of 1 m cells along the nearest traced river (256 m of it,
-      // scrolling with the camera) while the camera is within
-      // activateAltitudeM of the river level and activateDistanceM of the river.
-      // Enabled by default; ?riverSim=off disables it for comparisons.
-      // Prescribed mean flow plus local SWE
-      // disturbances, on displaced geometry using the current water material.
-      sim: {
-        enabled: true,
-        activateAltitudeM: 150,
-        activateDistanceM: 120,
-        dx: 1.0,
-        lengthM: 256,
-      },
+      // Whitewater (core/world/water/WhitewaterSim.js): foam far away, animated
+      // flow in the middle distance, the shallow-water simulation close by.
+      // ?whitewater=off, or at any time qtDiag.water.whitewater(false).
+      whitewater: { enabled: true },
     },
     /*
     erosion: {

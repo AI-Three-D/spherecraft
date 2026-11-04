@@ -1097,16 +1097,16 @@ export class WaterService {
         this._sampler?.setRiverFieldResources?.(res);
     }
 
-    /** Structured placement needs no sampled height grid. Only a close
-     * simulation requests this bounded, lazy carved-direction sampler. */
-    async sampleSimulationBed(dirs) {
+    /** The sampler the near simulation's bed comes from. Structured placement
+     * has none of its own: a lazy carved-direction sampler then. */
+    async simulationBedSampler() {
         if(!this._sampler) {
             this._simSamplerPromise ??= createHydrologySampler({device:this.device,terrainGenerator:this.terrainGenerator,directionsOnly:true});
             this._sampler=await this._simSamplerPromise;
             await this._sampler.setWaterCarveResources(this._carveResources);
             await this._sampler.setRiverFieldResources(this._fieldResources);
         }
-        return this._sampler.sampleDirsCarved(dirs);
+        return this._sampler;
     }
 
     /** Terrain heights (m) on a tangent-plane patch; carved: with the river channels. */

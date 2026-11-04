@@ -1,0 +1,175 @@
+// core/world/water/riverFlow.js
+//
+// The flow of the baked rivers (riverField.js), for whitewater: what the far
+// foam, the animated mid-range water and the near simulation all read, so the
+// three agree where they hand over.
+//
+// The traces' own discharge is no use here: it comes from the catchment on a
+// coarse grid (0.005-0.3 m3/s) while the drawn channels are 1-3 m deep and
+// 8-30 m wide on slopes of 4-50 %. Left to that discharge a simulated channel
+// would simply drain. So the flow is designed from the channel as baked:
+// - a speed from Jarrett's high-gradient law V = C Rh^0.83 S^0.12 (Manning with
+//   a constant n reaches 15 m/s at these slopes; real step-pool streams do not,
+//   they spend the head on turbulence), held to one discharge per river so the
+//   water is conserved where the width changes (Whitewater's per-row discharge
+//   matching: without it bends and pinches start with the wrong flux and launch
+//   a wave downstream);
+// - a Manning n per station chosen so that exactly this flow is in balance at
+//   the baked level W: gravity down the surface = friction. The simulation
+//   then starts on its own steady state, which is the answer to Whitewater's
+//   900-step warm-up (WhitewaterSim.js).
+// Foam is gradient based, from the fall of W and the Froude number. Rocks, in
+// the channel where it falls, are kept apart from the ground: tiles never hold
+// them, the simulation's bed and a mesh do (riverRocks.js in the renderer).
+
+import { riverHash } from './riverShapeNoise.js';
+
+export const RIVER_FLOW = Object.freeze({
+    // The fall is measured over this much river (m) and smoothed over as much again.
+    slopeM: 24,
+    // Jarrett's C (m/s; his own fit is 2.56), flows of a fast mountain river.
+    jarrettC: 3.4,
+    // Centre speed (m/s) kept within this, and the share of the channel's
+    // bounding rectangle that holds water (a parabola's 2/3).
+    speedM: [0.25, 5.5], areaShape: 0.66, leastDepthM: 0.3,
+    // Manning's n kept within this.
+    manning: [0.02, 0.8],
+    // Texel encoding: velocity components up to speedRangeM (m/s).
+    speedRangeM: 8,
+    // Foam: from the fall (slope) and the Froude number, each 0..1 between
+    // its two values, the higher wins; riffles and runs of foamWaveM (m).
+    foamSlope: [0.012, 0.09], foamFroude: [0.95, 1.8], foamWaveM: 41, foamWaveAmp: 0.3,
+    // Rocks: per m2 of channel from rockSlope[0] to rockSlope[1]. Radius (m)
+    // long-tailed, r0 (r1 / r0)^(a^rockRadiusTail) for a in 0..1: half under
+    // 0.65 m, one in ten over 2.4 m. A share of them above the water, tops up to
+    // emergentM over it or submergedM under, but at most rockTallest radii over
+    // the bed: small stones in deep water stay under it, not pillars reaching up.
+    rockDensity: 0.01, rockSlope: [0.012, 0.07], rockRadiusM: [0.4, 3.8], rockRadiusTail: 2.2, rockEmergent: 0.5, rockTallest: 1.8,
+    rockEmergentM: [0.25, 0.95], rockSubmergedM: [0.1, 0.5], rockAcross: 0.8, rockMaxHw: 0.45, rockBankM: 0.3, rockLeastM: 0.35,
+    // Ledges: a broken lip of low rocks across the channel every ledgeGapM (m)
+    // where it falls faster than ledgeSlope.
+    ledgeSlope: 0.03, ledgeGapM: [70, 200], ledgeRadiusM: [0.6, 2.1], ledgeStepM: 2.2, ledgeTopM: [0.12, 0.3], ledgeMiss: 0.45,
+    // Foam behind a rock whose top is at most wakeDepthM under the water, wakeLen radii long.
+    wakeDepthM: 0.35, wakeLen: 7,
+});
+
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const smoothstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+function boxAlong(v, h) {
+    const n = v.length, t = new Float64Array(n);
+    let acc = 0;
+    for (let i = -h; i <= h; i++) acc += v[clamp(i, 0, n - 1)];
+    for (let i = 0; i < n; i++) {
+        t[i] = acc / (2 * h + 1);
+        acc += v[clamp(i + h + 1, 0, n - 1)] - v[clamp(i - h, 0, n - 1)];
+    }
+    v.set(t);
+}
+
+// Value noise along a river, 0..1.
+function along(x, seed) {
+    const i = Math.floor(x), f = x - i, q = f * f * (3 - 2 * f);
+    return riverHash(i, seed) * (1 - q) + riverHash(i + 1, seed) * q;
+}
+
+/**
+ * Adds to stations S (riverField.js riverStations): slope (fall of W per m), V
+ * (centre speed, m/s), n (Manning), foam (0..1), Rh (hydraulic depth, m).
+ */
+export function riverFlowDesign(S, rid, o = RIVER_FLOW) {
+    const m = S.m, seed = ((rid | 0) * 92821 + 0x6d2b) >>> 0;
+    const h = Math.max(1, Math.round(o.slopeM / S.ds / 2));
+    S.slope = new Float64Array(m); S.V = new Float64Array(m); S.n = new Float64Array(m); S.foam = new Float64Array(m); S.Rh = new Float64Array(m);
+    for (let i = 0; i < m; i++) {
+        const a = Math.max(0, i - h), b = Math.min(m - 1, i + h);
+        S.slope[i] = Math.max(0, (S.W[a] - S.W[b]) / Math.max(S.s[b] - S.s[a], S.ds));
+    }
+    boxAlong(S.slope, h);
+    const area = new Float64Array(m), discharge = [];
+    for (let i = 0; i < m; i++) {
+        const depth = Math.max(S.D[i] * (1 - S.fade[i]), o.leastDepthM);
+        S.Rh[i] = o.areaShape * depth;
+        area[i] = S.Rh[i] * (S.hwL[i] + S.hwR[i]);
+        if (S.fade[i] < 0.5) discharge.push(o.jarrettC * S.Rh[i] ** 0.83 * Math.max(S.slope[i], 1e-4) ** 0.12 * area[i]);
+    }
+    // One discharge for the river: speed follows the section it passes through.
+    discharge.sort((a, b) => a - b);
+    const Q = discharge[discharge.length >> 1] ?? 0;
+    S.Q = Q;
+    for (let i = 0; i < m; i++) S.V[i] = clamp(Q / Math.max(area[i], 1e-3), o.speedM[0], o.speedM[1]);
+    boxAlong(S.V, h);
+    for (let i = 0; i < m; i++) {
+        const fade = S.fade[i];
+        S.n[i] = clamp(S.Rh[i] ** (2 / 3) * Math.sqrt(Math.max(S.slope[i], 1e-6)) / S.V[i], o.manning[0], o.manning[1]);
+        const froude = S.V[i] / Math.sqrt(9.81 * S.Rh[i]);
+        const white = Math.max(smoothstep(o.foamSlope[0], o.foamSlope[1], S.slope[i]), smoothstep(o.foamFroude[0], o.foamFroude[1], froude));
+        S.foam[i] = white * (1 - o.foamWaveAmp + o.foamWaveAmp * along(S.s[i] / o.foamWaveM, seed)) * (1 - fade);
+        S.V[i] *= 1 - fade;
+    }
+}
+
+// Rock record: dir xyz, radius (m), top, base (m above the sphere), seed 0..1, the water's level there.
+export const RIVER_ROCK_FLOATS = 8;
+
+/**
+ * The rocks of a river from its stations (after riverFlowDesign): array of
+ * { x, y (river plane), r, top, base, seed, kind, tx, ty }. Deterministic per river.
+ */
+export function riverRocks(S, rid, o = RIVER_FLOW) {
+    const rocks = [], m = S.m, seed = ((rid | 0) * 69069 + 0x1b873593) >>> 0;
+    let k = 0;
+    const rnd = () => riverHash(k++, seed);
+    const place = (i, u, rWanted, topAbove, kind) => {
+        const hw = u >= 0 ? S.hwL[i] : S.hwR[i], nx = -S.ty[i], ny = S.tx[i], n = u * hw;
+        // Inside the channel: a dome reaching the bank drew a line over the grass.
+        const r = Math.min(rWanted, (1 - Math.abs(u)) * hw + o.rockBankM);
+        if (r < o.rockLeastM) return;
+        // The bed falls away under its downhill half: a dome on a level base hung
+        // in the air on a cascade, water showing under it (river 458, 60 % slope).
+        const bed = S.W[i] - S.D[i] * (1 - Math.min(1, Math.abs(u)) ** 2);
+        const base = bed - 1.2 * S.slope[i] * r;
+        const top = Math.max(Math.min(S.W[i] + topAbove, bed + o.rockTallest * r), bed + 0.25);
+        rocks.push({ x: S.x[i] + nx * n, y: S.y[i] + ny * n, r, top, base, seed: rnd(), kind, tx: S.tx[i], ty: S.ty[i], W: S.W[i] });
+    };
+    let owed = rnd(), ledgeAt = o.ledgeGapM[0] * rnd();
+    for (let i = 0; i < m; i++) {
+        if (S.fade[i] > 0.02 || S.mouth[i] > 0.5) continue;
+        const steep = smoothstep(o.rockSlope[0], o.rockSlope[1], S.slope[i]);
+        const width = S.hwL[i] + S.hwR[i];
+        owed += o.rockDensity * steep * width * S.ds;
+        while (owed >= 1) {
+            owed -= 1;
+            const a = rnd(), b = rnd(), hw = 0.5 * width;
+            const r = Math.min(o.rockRadiusM[0] * (o.rockRadiusM[1] / o.rockRadiusM[0]) ** (a ** o.rockRadiusTail), o.rockMaxHw * hw);
+            const out = rnd() < o.rockEmergent;
+            const top = out ? o.rockEmergentM[0] + (o.rockEmergentM[1] - o.rockEmergentM[0]) * b : -(o.rockSubmergedM[0] + (o.rockSubmergedM[1] - o.rockSubmergedM[0]) * b);
+            place(i, (rnd() * 2 - 1) * o.rockAcross, r, top, 0);
+        }
+        if (S.slope[i] > o.ledgeSlope && S.s[i] >= ledgeAt) {
+            ledgeAt = S.s[i] + o.ledgeGapM[0] + (o.ledgeGapM[1] - o.ledgeGapM[0]) * rnd();
+            const count = Math.max(2, Math.round(width / o.ledgeStepM)), lip = -(o.ledgeTopM[0] + (o.ledgeTopM[1] - o.ledgeTopM[0]) * rnd());
+            for (let c = 0; c < count; c++) {
+                const u = ((c + 0.5) / count * 2 - 1) * 0.85;
+                if (rnd() < o.ledgeMiss) continue;
+                place(i, u, o.ledgeRadiusM[0] + (o.ledgeRadiusM[1] - o.ledgeRadiusM[0]) * rnd(), lip + 0.1 * (rnd() - 0.5), 1);
+            }
+        }
+    }
+    return rocks;
+}
+
+// Flow texel (one word): velocity along the raster's two axes (snorm8 of
+// speedRangeM, as dot products with the axes' unit tangents), foam (unorm8),
+// Manning's n (unorm8, log scale). WGSL: riverField.wgsl.js riverFlowUnpack.
+const MANNING_LOG = Math.log(RIVER_FLOW.manning[1] / RIVER_FLOW.manning[0]);
+export function packFlowTexel(a, b, foam, n, o = RIVER_FLOW) {
+    const s8 = (v) => Math.round(clamp(v / o.speedRangeM, -1, 1) * 127) & 0xff;
+    const u8 = (v) => Math.round(clamp(v, 0, 1) * 255);
+    const nq = n > 0 ? Math.log(clamp(n, o.manning[0], o.manning[1]) / o.manning[0]) / MANNING_LOG : 0;
+    return (s8(a) | (s8(b) << 8) | (u8(foam) << 16) | (u8(nq) << 24)) >>> 0;
+}
+export function unpackFlowTexel(w, o = RIVER_FLOW) {
+    const s8 = (v) => { const x = (v & 0xff) << 24 >> 24; return Math.max(x / 127, -1) * o.speedRangeM; };
+    return { a: s8(w), b: s8(w >>> 8), foam: ((w >>> 16) & 0xff) / 255, n: o.manning[0] * Math.exp(((w >>> 24) & 0xff) / 255 * MANNING_LOG) };
+}

@@ -102,10 +102,6 @@ export class WaterGpuData {
         }
         this.enabled = true;
         this.debugMode = 0;
-        // Active simulation strip { river, s0, s1, halfM, endFadeM, sideFadeM,
-        // fade } (WaterRiverSim coverage) or null: the terrain shader hides
-        // static water under it (waterSimCover).
-        this.site = null;
         this.look = { ...WATER_LOOK_DEFAULTS,structuredRiverSurface };
         this.near = { ...WATER_NEAR_DEFAULTS };
         // River carve parameters (WaterService config.carve; riverCarve.wgsl.js), or null: no carve.
@@ -435,14 +431,8 @@ export class WaterGpuData {
         f[4] = this.R; f[5] = time; f[6] = L.rippleFadeM; f[7] = L.shoreSoftM;
         f.set([L.deepColor[0], L.deepColor[1], L.deepColor[2], L.reflection], 8);
         f.set([L.absorption[0], L.absorption[1], L.absorption[2], 0], 12);
-        const site = this.site;
-        if (site && site.fade > 0) {
-            f.set([site.river, site.s0, site.s1, site.halfM], 16);
-            f.set([site.endFadeM, site.sideFadeM, 0, site.fade], 20);
-        } else {
-            f.fill(0, 16, 24);
-        }
-        f.set([L.structuredRiverSurface?1:0,L.structuredRiverBody?1:0,L.structuredRiverSurfaceStartM,L.unsolvedLakeHideM ?? 2500], 24);
+        f.fill(0, 16, 24);
+        f.set([this.whitewaterLook ? 1 : 0, 0, L.structuredRiverSurfaceStartM, L.unsolvedLakeHideM ?? 2500], 24);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.
         const C = { ...RIVER_CARVE_DEFAULTS, ...(this.carve ?? {}) };

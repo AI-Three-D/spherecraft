@@ -154,6 +154,7 @@ const slotSampleType = (type) =>
             { binding: 17, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
             { binding: 18, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
             { binding: 19, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
+            { binding: 20, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
         ]
     }));
 
@@ -328,6 +329,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
     const fieldTableBuf = field?.pages || dummyStorage;
     const fieldTexelsBuf = field?.texels || dummyStorage;
     const fieldParamsBuf = field?.params || this._getOrCreateUniformBuffer('_river_field_params_dummy', new Float32Array(8));
+    const fieldFlowBuf = field?.flow || dummyStorage;
 
     // Build cache key including shadow state
     const shadowKey = shadowRenderer ? 'shadow' : 'noshadow';
@@ -339,7 +341,8 @@ function createTerrainBindGroups(material, uniforms, geometry) {
     const g3BufferChanged = g3Record?.buffer !== storageBuffer;
     const g3WaterChanged = g3Record?.waterIndex !== waterIndexBuf || g3Record?.waterLakes !== waterLakesBuf
         || g3Record?.waterMasks !== waterMasksView || g3Record?.waterParams !== waterParamsBuf
-        || g3Record?.fieldTable !== fieldTableBuf || g3Record?.fieldTexels !== fieldTexelsBuf || g3Record?.fieldParams !== fieldParamsBuf;
+        || g3Record?.fieldTable !== fieldTableBuf || g3Record?.fieldTexels !== fieldTexelsBuf || g3Record?.fieldParams !== fieldParamsBuf
+        || g3Record?.fieldFlow !== fieldFlowBuf;
 
     if (!g3Record || g3ViewChanged || g3BufferChanged || g3PipelineChanged || g3WaterChanged) {
         const entries = [
@@ -363,6 +366,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             { binding: 17, resource: { buffer: fieldTableBuf } },
             { binding: 18, resource: { buffer: fieldTexelsBuf } },
             { binding: 19, resource: { buffer: fieldParamsBuf } },
+            { binding: 20, resource: { buffer: fieldFlowBuf } },
         ];
         const group = this.device.createBindGroup({
             layout: material._gpuPipeline.bindGroupLayouts[3],
@@ -376,7 +380,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             pipeline: material._gpuPipeline,
             waterIndex:waterIndexBuf,waterLakes:waterLakesBuf,waterMasks:waterMasksView,
             waterParams:waterParamsBuf,
-            fieldTable:fieldTableBuf,fieldTexels:fieldTexelsBuf,fieldParams:fieldParamsBuf,
+            fieldTable:fieldTableBuf,fieldTexels:fieldTexelsBuf,fieldParams:fieldParamsBuf,fieldFlow:fieldFlowBuf,
         };
         materialCache.set(g3CacheKey, g3Record);
     }

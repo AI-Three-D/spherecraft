@@ -97,12 +97,9 @@ export class Frontend {
     get quadtreeTileManager() { return this.terrainModule?.source ?? null; }
     get quadtreeTerrainRenderer() { return this.terrainModule?.renderer ?? null; }
     get globalOceanRenderer() { return this.terrainModule?.ocean ?? null; }
-    get riverSystem() { return this.terrainModule?.rivers ?? null; }
     get lakeWaterSystem() { return this.terrainModule?.lakes ?? null; }
     get nearWaterRenderer() { return this.terrainModule?.nearWater ?? null; }
-    get waterSimRenderer() { return this.terrainModule?.simWater ?? null; }
 
-    setWaterSimSite(site, water) { this.terrainModule?.setWaterSimSite(site, water); }
 
     setWaterData(data) {
         this._waterData = data ?? null;
@@ -1056,10 +1053,6 @@ updateLighting(starSystem) {
             this._renderAtmoBanks(bankEncoder);
             this.backend.resumeRenderPass();
         }
-    }
-
-    placeDemoRiver(worldPos, channelDir = null) {
-        this.terrainModule?.placeRiver(worldPos, channelDir);
     }
 
     setLakes(confirmedLakes) {
