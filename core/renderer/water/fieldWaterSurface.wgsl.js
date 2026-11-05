@@ -32,6 +32,7 @@ struct FieldWaterVOut {
     @location(1) sdf: f32,
     @location(2) xy: vec2<f32>,
     @location(3) flow: vec4<f32>,
+    @location(4) plane: vec3<f32>,
 };
 @group(2) @binding(0) var<storage, read> fieldWaterPages: array<vec4<u32>>;
 @group(2) @binding(1) var<uniform> W: WhiteU;
@@ -63,6 +64,16 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Fie
     let fl = riverFlowInPage(pg.w, pg.y, pg.z, tx, ty);
     let vel = riverFlowWorld(pg.x, tx, ty, fl.x, fl.y);
     o.flow = vec4<f32>(dot(vel, W.e1), dot(vel, W.e2), fl.z, fl.w);
+    // The surface's own plane, tilted by its fall: water falling toward the camera stands
+    // above its eye, and by the planet's up alone that is the water's underside: no body,
+    // the bed showing through beyond a line at eye height (owner 2026-11-05).
+    let run = ${FIELD_WATER_STEP}.0;
+    let a = riverFieldInPage(pg.w, pg.y, pg.z, tx + run, ty);
+    let b = riverFieldInPage(pg.w, pg.y, pg.z, tx, ty + run);
+    let e1 = normalize(riverFieldDir(pg.x, tx + run, ty) - dir);
+    let e2 = normalize(riverFieldDir(pg.x, tx, ty + run) - dir);
+    let m = run * ${RIVER_FIELD.texelM.toFixed(1)};
+    o.plane = normalize(dir - e1 * ((a.y - v.y) / m) - e2 * ((b.y - v.y) / m));
     return o;
 }
 `;
@@ -96,12 +107,13 @@ fn main(in: FieldWaterVOut) -> @location(0) vec4<f32> {
         return whiteDebug(waterParams.debugMode, in.flow.xy, in.flow.z, in.flow.z * 0.6, 1.0, vec3<f32>(0.1, 0.9, 0.25));
     }
     var c: vec4<f32>;
+    nearWaterShoreM = waterShoreM(dir, waterFootM(length(U.cameraPos - in.wp), in.wp, U.cameraPos, dir)) * clamp(-in.flow.w, 0.0, 1.0) * (1.0 - smoothstep(0.1, 0.6, length(in.flow.xy)));
     let foam = whiteBakedFoam(in.flow.z, in.xy) * smoothstep(0.0, 2.5, in.sdf);
     if ((W.flags & ${WHITE_FLAG_LOOK}u) != 0u && (foam > 0.003 || dot(in.flow.xy, in.flow.xy) > 0.01)) {
         let turb = clamp(foam * 0.9 + 0.12 * length(in.flow.xy), 0.0, 1.0);
-        c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, dir, in.xy, in.flow.xy, foam, turb), in.pos.xy, dir);
+        c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, dir, in.xy, in.flow.xy, foam, turb), in.pos.xy, in.plane);
     } else {
-        c = nearWaterShade(in.wp, in.pos.xy, dir);
+        c = nearWaterShade(in.wp, in.pos.xy, in.plane);
     }
     if (c.a <= 0.0) { discard; }
     return c;

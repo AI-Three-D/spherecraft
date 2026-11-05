@@ -30,7 +30,7 @@
 import { dirToFaceUV, faceUVToDir } from '../hydrology/waterGraph.js';
 import { riverHash } from './riverShapeNoise.js';
 import { riverBankType } from './riverSection.js';
-import { packFlowTexel, riverFlowDesign, riverRocks, RIVER_FLOW, RIVER_ROCK_FLOATS } from './riverFlow.js';
+import { packFlowTexel, plumeAt, riverFlowDesign, riverPlumes, riverRocks, RIVER_FLOW, RIVER_ROCK_FLOATS } from './riverFlow.js';
 
 export const RIVER_FIELD = Object.freeze({
     texelM: 2,
@@ -415,6 +415,7 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
     if (eDest >= 0) ends.push({ s: S.s[eDest], sign: 1, level: river.destLevel });
     if (eSrc >= 0) ends.push({ s: S.s[eSrc], sign: -1, level: river.srcLevel });
     for (const mo of mouths) if ((mo.sign > 0 ? eDest : eSrc) < 0) ends.push({ s: mo.s, sign: mo.sign });
+    S.ends = ends;
     for (let i = 0; i < m; i++) {
         let fade = 0, near = 0, relaxW = 1;
         for (const end of ends) {
@@ -929,7 +930,7 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     }
     const t7 = performance.now();
     onProgress?.('flow', { ms: t7 - t6 });
-    const { flowA, flowB, foam, manning, rocks } = riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt, level, ground, wet, lakeLevel });
+    const { flowA, flowB, foam, manning, rocks } = riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt, edgeOf, level, ground, wet, lakeLevel });
     const t7b = performance.now();
     onProgress?.('pack', { ms: t7b - t7 });
     // GPU pages with aprons, 2 words a texel (RIVER_FIELD_WORDS): level W
@@ -966,7 +967,7 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
 // starting state does: Vc (h / D)^(2/3), which keeps n constant across the
 // section, so the texels stay in balance at W. Components are dot products with
 // the unit tangents of the raster's axes at the page's centre.
-function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt, level, ground, wet, lakeLevel }) {
+function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt, edgeOf, level, ground, wet, lakeLevel }) {
     const o = RIVER_FLOW, flowA = new Float32Array(N * PP), flowB = new Float32Array(N * PP), foam = new Float32Array(N * PP), manning = new Float32Array(N * PP);
     const axes = (face, pi, pj) => {
         const cx = (pi + 0.5) * P, cy = (pj + 0.5) * P, a = fieldDir(face, cx - 1, cy, L), b = fieldDir(face, cx + 1, cy, L), c = fieldDir(face, cx, cy - 1, L), d = fieldDir(face, cx, cy + 1, L);
@@ -981,10 +982,15 @@ function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt,
             const { S, plane } = prepared[ri], e1 = plane.frame.e1, e2 = plane.frame.e2;
             const i = Math.min(Math.floor(ownerSt[g]), S.m - 2), c = ownerSt[g] - i;
             const lerp = (a) => a[i] + (a[i + 1] - a[i]) * c;
-            manning[g] = lerp(S.n);
+            // Lake water carries no n: the solver holds it to the lake's level.
+            manning[g] = Number.isFinite(lakeLevel[g]) ? 0 : lerp(S.n);
             if (!wet[g]) continue;
             const depth = Math.max(lerp(S.D) * (1 - lerp(S.fade)), o.leastDepthM);
-            const v = lerp(S.V) * Math.min(1, Math.max(level[g] - ground[g], 0) / depth) ** (2 / 3);
+            // In a lake nothing else ends the flow sideways: at full speed out to the
+            // edge of what the river owns, it stopped on straight lines.
+            const half = 0.5 * (lerp(S.hwL) + lerp(S.hwR));
+            const side = Number.isFinite(lakeLevel[g]) ? 1 - smoothstep(-0.6 * half, 0.2 * half, edgeOf[g]) : 1;
+            const v = lerp(S.V) * side * Math.min(1, Math.max(level[g] - ground[g], 0) / depth) ** (2 / 3);
             const tx = lerp(S.tx), ty = lerp(S.ty);
             const wx = e1[0] * tx + e2[0] * ty, wy = e1[1] * tx + e2[1] * ty, wz = e1[2] * tx + e2[2] * ty;
             flowA[g] = v * (wx * ax[0] + wy * ax[1] + wz * ax[2]);
@@ -1004,7 +1010,7 @@ function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt,
     prepared.forEach(({ S, fromPlane }) => {
         for (const r of riverRocks(S, S.rid)) {
             const dir = fromPlane(r.x, r.y);
-            list.push(dir[0], dir[1], dir[2], r.r, r.top, r.base, r.seed, r.W);
+            list.push(dir[0], dir[1], dir[2], r.r, r.top, r.base, r.seed, r.W, r.solid ? 1 : 0);
             if (r.top < r.W - o.wakeDepthM) continue;
             const nx = -r.ty, ny = r.tx, len = o.wakeLen * r.r;
             for (let d = 0; d < len; d += 1.5) {
@@ -1012,6 +1018,30 @@ function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt,
                 for (let e = -half; e <= half; e += 1.5) {
                     const g = texelAt(fromPlane(r.x + r.tx * d + nx * e, r.y + r.ty * d + ny * e));
                     if (g >= 0 && wet[g] && !Number.isFinite(lakeLevel[g])) foam[g] = Math.max(foam[g], Math.min(1, foam[g] + 0.55 * strength * (1 - Math.abs(e) / (half + 0.5))));
+                }
+            }
+        }
+    });
+    // Plumes: flow only, so the ground never hears of them, and on lake water only.
+    prepared.forEach(({ S, plane, fromPlane }) => {
+        const e1 = plane.frame.e1, e2 = plane.frame.e2;
+        for (const q of riverPlumes(S, S.rid)) {
+            const nx = -q.ty, ny = q.tx;
+            // From a little above the shore: the lake's water starts before the station
+            // that stands for it, and the river's speed fades there.
+            for (let a = -2 * q.b; a <= q.length; a += 1.5) {
+                const { width, off, turn } = plumeAt(q, a, 0), half = 2.2 * width;
+                for (let r = -half; r <= half; r += 1.5) {
+                    const n = r + off, g = texelAt(fromPlane(q.x + q.tx * a + nx * n, q.y + q.ty * a + ny * n));
+                    if (g < 0 || !wet[g] || !Number.isFinite(lakeLevel[g])) continue;
+                    const v = plumeAt(q, a, r).speed * Math.min(1, Math.max(level[g] - ground[g], 0) / o.plumeDepthM) ** (2 / 3);
+                    if (v * v <= flowA[g] * flowA[g] + flowB[g] * flowB[g]) continue;
+                    const out = o.plumeFan * r / width + turn, dl = Math.hypot(1, out), dx = (q.tx + nx * out) / dl, dy = (q.ty + ny * out) / dl;
+                    const wx = e1[0] * dx + e2[0] * dy, wy = e1[1] * dx + e2[1] * dy, wz = e1[2] * dx + e2[2] * dy;
+                    const [ax, ay] = pageAxes[Math.floor(g / PP)];
+                    flowA[g] = v * (wx * ax[0] + wy * ax[1] + wz * ax[2]);
+                    flowB[g] = v * (wx * ay[0] + wy * ay[1] + wz * ay[2]);
+                    foam[g] = Math.max(foam[g], o.plumeFoam * q.foam * (v / q.V) ** 3);
                 }
             }
         }

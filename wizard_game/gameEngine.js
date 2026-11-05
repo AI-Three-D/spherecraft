@@ -1590,7 +1590,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         return this.waterGpuData.debugMode;
     }
 
-    /** qtDiag.water.look({ deepColor, reflection, absorption, rippleFadeM, shoreSoftM, enabled }) */
+    /** qtDiag.water.look({ deepColor, openColor, skyColor, reflection, wind, absorption, rippleFadeM, shoreSoftM, enabled }) */
     setWaterLook(look = {}) {
         if (!this.waterGpuData) return null;
         const { enabled, ...rest } = look;

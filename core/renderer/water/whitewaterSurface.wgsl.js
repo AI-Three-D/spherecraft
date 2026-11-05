@@ -12,7 +12,7 @@
 
 import { commonWgsl, shadeWgsl } from './nearWaterSurface.wgsl.js';
 import { WHITE_UNIFORMS_WGSL, whitewaterLookWgsl } from './whitewaterLook.wgsl.js';
-import { WHITE_BLOCK } from '../../world/water/whitewaterSim.wgsl.js';
+import { WHITE_BAKED_WORD_WGSL, WHITE_BLOCK } from '../../world/water/whitewaterSim.wgsl.js';
 
 export const WHITE_GRID = WHITE_BLOCK + 1;
 // Baked water is kept this far (m) beyond the field's water, as the middle tier's.
@@ -25,7 +25,7 @@ struct WhiteVOut {
     @location(1) xy: vec2<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) flow: vec4<f32>,   // velocity, foam, turbulence
-    @location(4) wet: vec3<f32>,    // depth (m), signed distance (m), simulated share
+    @location(4) wet: vec4<f32>,    // depth (m), signed distance (m), simulated share, lake's share
 };
 @group(2) @binding(0) var<uniform> W: WhiteU;
 @group(2) @binding(1) var<storage, read> BLOCKS: array<vec4<i32>>;
@@ -38,6 +38,7 @@ export function buildWhitewaterVertexShader() {
 @group(2) @binding(3) var<storage, read> ST: array<vec4<f32>>;
 @group(2) @binding(4) var<storage, read> S: array<vec4<f32>>;
 @group(2) @binding(5) var<storage, read> K: array<f32>;
+${WHITE_BAKED_WORD_WGSL}
 
 fn whiteBakedFoam(foam: f32, xy: vec2<f32>) -> f32 {
     return foam * W.foamGain * (0.45 + 1.1 * waterNoise(xy * 0.085 + 3.1));
@@ -104,15 +105,16 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Whi
 
     let dir = whiteFrameDir(xy);
     let height = mix(baked.x, eta + chop, draw);
-    let foamBaked = whiteBakedFoam(baked.w, xy);
+    let foam0 = bakedFoam(baked.w);
+    let foamBaked = whiteBakedFoam(foam0, xy);
     let wp = U.origin + dir * (U.R + height);
     var o: WhiteVOut;
     o.pos = nearWaterRasterPosition(wp);
     o.wp = wp;
     o.xy = xy;
     o.normal = normalize(dir - (W.e1 * gx + W.e2 * gy) * draw);
-    o.flow = vec4<f32>(mix(baked.yz, vec2<f32>(uc, vc), draw), mix(foamBaked, s.w, draw), mix(baked.w * 0.6, k, draw));
-    o.wet = vec3<f32>(h, mix(st.w, select(-16.0, 16.0, wet), draw), draw);
+    o.flow = vec4<f32>(mix(baked.yz, vec2<f32>(uc, vc), draw), mix(foamBaked, s.w, draw), mix(foam0 * 0.6, k, draw));
+    o.wet = vec4<f32>(h, mix(st.w, select(-16.0, 16.0, wet), draw), draw, bakedLake(baked.w));
     return o;
 }
 `;
@@ -133,7 +135,8 @@ fn main(in: WhiteVOut) -> @location(0) vec4<f32> {
     let N = normalize(in.normal);
     // Shallow water at the edges carries little foam.
     let foam = in.flow.z * smoothstep(0.03, 0.4, in.wet.x);
-    let c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, N, in.xy, in.flow.xy, foam, in.flow.w), in.pos.xy, dir);
+    nearWaterShoreM = waterShoreM(dir, waterFootM(length(U.cameraPos - in.wp), in.wp, U.cameraPos, dir)) * in.wet.w * (1.0 - smoothstep(0.1, 0.6, length(in.flow.xy)));
+    let c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, N, in.xy, in.flow.xy, foam, in.flow.w), in.pos.xy, N);
     if (c.a <= 0.0) { discard; }
     // Thin water fades by its own depth, as Whitewater's does: the solver's bed
     // is not the rendered ground to the centimetre, and without this the surface

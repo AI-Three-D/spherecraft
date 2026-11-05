@@ -117,6 +117,10 @@ export function shadeWgsl() {
 
 // Share of this fragment that is foam (whitewaterLook.wgsl.js).
 var<private> nearWaterHardShore: f32 = 0.0;
+// Depth (m) at which this fragment's water starts: a lake's shore (waterShoreM), 0 for rivers.
+var<private> nearWaterShoreM: f32 = 0.0;
+// How full of air this water is, 0..1 (whitewaterLook.wgsl.js): fast water is not clear.
+var<private> nearWaterAerated: f32 = 0.0;
 // Opaque depth converted to distance behind this point along the view ray.
 fn nearWaterBehind(wp:vec3<f32>,pixel:vec2<f32>)->f32 {
     let dimensions=vec2<i32>(textureDimensions(nearWaterSceneDepth));
@@ -136,8 +140,7 @@ fn nearWaterShade(wp: vec3<f32>, pixel: vec2<f32>, plane: vec3<f32>) -> vec4<f32
     let L = normalize(U.sunDir);
     let sun = U.sunColor * U.sunIntensity;
     let sky = U.ambientColor * U.ambientIntensity;
-    let facing = up * select(-1.0, 1.0, dot(U.cameraPos - wp, plane) >= 0.0);
-    let s = waterSurfaceTerms(wp, facing, U.cameraPos, L, sun, sky);
+    let s = waterSurfaceTerms(wp, up, U.cameraPos, L, sun, sky);
 
     return nearWaterCompose(wp, up, s, pixel, plane);
 }
@@ -166,17 +169,26 @@ fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>
     // is above its eye height upstream, and by the planet's up alone its
     // water there was shaded as seen from below (no body): a line across the
     // river where it crosses the eye height (owner 2026-10-26, "stairs").
-    let above = dot(V, plane) >= 0.0;
-    let path = select(0.0, behind, above);
+    // A ramp, well past edge-on: a hard test at zero turned whole mesh facets to
+    // the underside wherever they leaned away, in straight-edged panels (owner
+    // 2026-11-05). Only an eye clearly under the water sees its underside.
+    let above = smoothstep(-0.35, -0.1, dot(V, plane));
+    let path = behind * above;
     let extinction = dot(waterParams.absorption.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let transmission = exp(-path * extinction) * select(1.0, ${WATER_WET_BED}, above);
+    // Through clear water each cross-wave of fast shallow flow, a step in depth,
+    // drew a straight line against the bed.
+    let transmission = exp(-path * extinction) * mix(1.0, ${WATER_WET_BED}, above) * (1.0 - 0.85 * nearWaterAerated);
     // Continuous contact removes opaque depth-fighting speckles at grazing
     // shores. Foreground opaque geometry still completely hides the water.
     // Foam ends where it ends: faded like clear water it smeared over the bank.
     let contactDepth = behind * max(abs(dot(V, up)), 0.05);
-    let contact = mix(smoothstep(0.0, waterParams.shoreSoftM, contactDepth), smoothstep(0.0, 0.05, contactDepth), nearWaterHardShore);
-    let body = waterParams.deepColor.rgb * (sky + sun * max(dot(up, L), 0.0));
-    let a = (1.0 - transmission * (1.0 - s.a)) * w * contact;
+    let waterDepth = contactDepth - nearWaterShoreM;
+    let contact = mix(smoothstep(0.0, waterParams.shoreSoftM, waterDepth), smoothstep(0.0, 0.05, waterDepth), nearWaterHardShore);
+    // The strip the water leaves is wet ground: black over it at this share.
+    let wetFilm = select(0.0, waterShoreWet(contactDepth, nearWaterShoreM, dist) * (1.0 - contact) * w, nearWaterShoreM > 0.0);
+    let body = waterBodyLight(contactDepth, dist, up, L, sun, sky);
+    let aWater = (1.0 - transmission * (1.0 - s.a)) * w * contact;
+    let a = aWater + wetFilm * (1.0 - aWater);
     let add = (body * (1.0 - transmission) * (1.0 - s.a) + s.rgb) * w * contact;
 
     // Aerial perspective (or fog), as the terrain shading applies it after
@@ -228,6 +240,7 @@ fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
         // level, instead of over lower ground past a sill (floating edges).
         if (m * 255.0 - 128.0 <= lake.surfaceDepthRangeM) { discard; }
     } else if (m < select(0.5,63.5/255.0,lake.surfaceDepthRangeM>0.0)) { discard; }
+    nearWaterShoreM = waterShoreM(dir, waterFootM(length(U.cameraPos - in.wp), in.wp, U.cameraPos, dir));
     let c = nearWaterShade(in.wp, in.pos.xy, dir);
     if (c.a <= 0.0) { discard; }
     // Water debug views 6 and 7 (waterWgsl.js applyWater): alpha 0 adds

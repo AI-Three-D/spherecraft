@@ -20,7 +20,8 @@
 //   900-step warm-up (WhitewaterSim.js).
 // Foam is gradient based, from the fall of W and the Froude number. Rocks, in
 // the channel where it falls, are kept apart from the ground: tiles never hold
-// them, the simulation's bed and a mesh do (riverRocks.js in the renderer).
+// them, a mesh does (riverRocks.js in the renderer), and the simulation's bed
+// where the water is supercritical (rockSolidFroude).
 
 import { riverHash } from './riverShapeNoise.js';
 
@@ -36,6 +37,40 @@ export const RIVER_FLOW = Object.freeze({
     manning: [0.02, 0.8],
     // Texel encoding: velocity components up to speedRangeM (m/s).
     speedRangeM: 8,
+    // Steep reaches run shallow and fast. Jarrett's law is fitted below 4 %, and a wide
+    // channel at the river's one discharge crawled: 1.9 m/s down a 44 % fall, friction
+    // n 0.34 holding it there (river 453, owner 2026-11-05). So a channel falling faster
+    // than steepSlope[0] is filled up to the normal depth of a rough bed (Manning
+    // steepManning), fully from steepSlope[1]: same discharge, less section.
+    steepManning: 0.1, steepSlope: [0.02, 0.08],
+    // A river's momentum goes on into its lake as a plume, flow only (riverField.js
+    // riverFieldFlow): its core plumeCore half-widths long, then a plane jet's
+    // 1 / sqrt(x), spreading by plumeSpread per metre, fanning out by plumeFan,
+    // wandering by plumeWander of its length. plumeLength half-widths long at 2 m/s,
+    // within plumeRangeM: pages reach about 200 m past a shore, and flow cut off at a
+    // page's edge would be a straight line. Its speed is the fastest over the last
+    // plumeBackM (m) of river, its depth full from plumeDepthM. Slower than plumeLeastV
+    // (m/s), a river makes none. Its foam is plumeFoam of the river's, falling with the
+    // cube of its speed: without any the white stopped dead at the lake's edge.
+    plumeCore: 6, plumeSpread: 0.16, plumeFan: 0.2, plumeWander: 0.08, plumeLength: 14, plumeRangeM: [50, 200],
+    plumeBackM: 60, plumeDepthM: 1.2, plumeLeastV: 0.6, plumeFoam: 0.5,
+    // Past a lake's shore, or once its level is within endLevelM of the lake's, a river's
+    // own speed is gone by endFadeM + endFadePerHw x hw (m), whatever the channel does:
+    // a narrow end ran at the limit on flat lake water (5.4 m/s at river 2557's outlet).
+    // Leaving a lake water has only the fall so far to speed up with, sqrt(2 g fall) +
+    // endLeastV: the same outlet ran into its river and raised a bulge of 0.3 m.
+    endFadeM: 20, endFadePerHw: 2, endLevelM: 0.05, endLeastV: 0.3,
+    // A river out of a lake carries what its outlet can pass: the section times that
+    // speed, least over the stretch from a fall of outletFallM[0] to outletFallM[1] (m).
+    // Designed for more, the solver found out on arrival, and the difference drained
+    // down the river as a fall of 0.3 m.
+    outletFallM: [0.25, 1.5],
+    // Rocks stop water. Upstream of supercritical flow nothing can hear them, but where
+    // the Froude number is under rockSolidFroude they dam the river: 0.5 m of head that
+    // the baked level does not know, going up the river as a slow wave on arrival (owner
+    // 2026-11-05: rocks out of the bed, wave gone). There they are drawn, with their
+    // wake, and are not in the solver's bed.
+    rockSolidFroude: 1.2,
     // Foam: from the fall (slope) and the Froude number, each 0..1 between
     // its two values, the higher wins; riffles and runs of foamWaveM (m).
     foamSlope: [0.012, 0.09], foamFroude: [0.95, 1.8], foamWaveM: 41, foamWaveAmp: 0.3,
@@ -95,26 +130,97 @@ export function riverFlowDesign(S, rid, o = RIVER_FLOW) {
     }
     // One discharge for the river: speed follows the section it passes through.
     discharge.sort((a, b) => a - b);
-    const Q = discharge[discharge.length >> 1] ?? 0;
+    let Q = discharge[discharge.length >> 1] ?? 0;
+    for (const end of S.ends ?? []) {
+        if (end.level === undefined || end.sign > 0) continue;
+        for (let i = 0; i < m; i++) {
+            const fall = end.level - S.W[i];
+            if (fall < o.outletFallM[0]) continue;
+            if (fall > o.outletFallM[1]) break;
+            Q = Math.min(Q, (o.endLeastV + Math.sqrt(2 * 9.81 * fall)) * o.areaShape * Math.max(S.D[i], o.leastDepthM) * (S.hwL[i] + S.hwR[i]));
+        }
+    }
     S.Q = Q;
-    for (let i = 0; i < m; i++) S.V[i] = clamp(Q / Math.max(area[i], 1e-3), o.speedM[0], o.speedM[1]);
+    const shallower = new Float64Array(m);
+    for (let i = 0; i < m; i++) {
+        const normal = (Q * o.steepManning / ((S.hwL[i] + S.hwR[i]) * Math.sqrt(Math.max(S.slope[i], 1e-4)))) ** 0.6 / o.areaShape;
+        shallower[i] = smoothstep(o.steepSlope[0], o.steepSlope[1], S.slope[i]) * Math.max(S.D[i] - Math.max(normal, 2 * o.leastDepthM), 0);
+    }
+    boxAlong(shallower, h);
+    for (let i = 0; i < m; i++) {
+        S.D[i] -= Math.min(shallower[i], Math.max(S.D[i] - 2 * o.leastDepthM, 0));
+        S.Rh[i] = o.areaShape * Math.max(S.D[i] * (1 - S.fade[i]), o.leastDepthM);
+        // The river's own section, not the faded one: the channel fades out into a lake
+        // because the lake is deep, and by that smaller area water sped up to the limit
+        // on flat lake water and stopped dead, on straight lines (owner's triangle),
+        // sending a wave back up the river.
+        area[i] = o.areaShape * Math.max(S.D[i], o.leastDepthM) * (S.hwL[i] + S.hwR[i]);
+        S.V[i] = clamp(Q / Math.max(area[i], 1e-3), o.speedM[0], o.speedM[1]);
+    }
     boxAlong(S.V, h);
+    for (const end of S.ends ?? []) {
+        if (end.level === undefined || end.sign > 0) continue;
+        for (let i = 0; i < m; i++) S.V[i] = Math.min(S.V[i], o.endLeastV + Math.sqrt(2 * 9.81 * Math.max(end.level - S.W[i], 0)));
+    }
     for (let i = 0; i < m; i++) {
         const fade = S.fade[i];
-        S.n[i] = clamp(S.Rh[i] ** (2 / 3) * Math.sqrt(Math.max(S.slope[i], 1e-6)) / S.V[i], o.manning[0], o.manning[1]);
+        // By the depth, not the hydraulic depth: the raster's speed V (h / D)^(2/3) with
+        // the solver's friction n^2 v^2 / h^(4/3) comes to n^2 V^2 / D^(4/3) at every
+        // point of the section. With Rh friction was 57 % of gravity: the river ran away
+        // from its baked state, and the fall in level went up it as a slow wave.
+        S.n[i] = clamp((S.Rh[i] / o.areaShape) ** (2 / 3) * Math.sqrt(Math.max(S.slope[i], 1e-6)) / S.V[i], o.manning[0], o.manning[1]);
         const froude = S.V[i] / Math.sqrt(9.81 * S.Rh[i]);
         const white = Math.max(smoothstep(o.foamSlope[0], o.foamSlope[1], S.slope[i]), smoothstep(o.foamFroude[0], o.foamFroude[1], froude));
         S.foam[i] = white * (1 - o.foamWaveAmp + o.foamWaveAmp * along(S.s[i] / o.foamWaveM, seed)) * (1 - fade);
         S.V[i] *= 1 - fade;
     }
+    for (const end of S.ends ?? []) {
+        if (end.level === undefined) continue;
+        // Where the level leaves the lake's, walking in from the lake.
+        let edge = end.sign > 0 ? m - 1 : 0;
+        while (edge >= 0 && edge < m && Math.abs(S.W[edge] - end.level) <= o.endLevelM) edge -= end.sign;
+        edge = clamp(edge, 0, m - 1);
+        for (let i = 0; i < m; i++) {
+            const past = Math.max((S.s[i] - end.s) * end.sign, (S.s[i] - S.s[edge]) * end.sign);
+            if (past > 0) S.V[i] *= 1 - smoothstep(0, o.endFadeM + o.endFadePerHw * 0.5 * (S.hwL[i] + S.hwR[i]), past);
+        }
+    }
 }
 
-// Rock record: dir xyz, radius (m), top, base (m above the sphere), seed 0..1, the water's level there.
-export const RIVER_ROCK_FLOATS = 8;
+/** The plumes of a river into its lakes, from its stations (after riverFlowDesign). */
+export function riverPlumes(S, rid, o = RIVER_FLOW) {
+    const out = [];
+    for (const end of S.ends ?? []) {
+        if (end.sign <= 0 || end.level === undefined) continue;
+        let shore = 0;
+        while (shore < S.m - 1 && S.s[shore] < end.s) shore++;
+        let V = 0, foam = 0, tx = 0, ty = 0;
+        for (let i = Math.max(0, shore - Math.round(o.plumeBackM / S.ds)); i <= shore; i++) {
+            V = Math.max(V, S.V[i]); foam = Math.max(foam, S.foam[i]); tx += S.tx[i]; ty += S.ty[i];
+        }
+        if (V < o.plumeLeastV) continue;
+        const l = Math.hypot(tx, ty) || 1, b = 0.5 * (S.hwL[shore] + S.hwR[shore]);
+        out.push({ x: S.x[shore], y: S.y[shore], tx: tx / l, ty: ty / l, b, V, foam,
+            length: clamp(o.plumeLength * b * Math.sqrt(V / 2), o.plumeRangeM[0], o.plumeRangeM[1]), seed: riverHash(shore, rid >>> 0) });
+    }
+    return out;
+}
+
+/** Plume p at a metres along it, r across: { speed, width, off: its centre's offset, turn: of its centre per m }. */
+export function plumeAt(p, a, r, o = RIVER_FLOW) {
+    const width = p.b + o.plumeSpread * Math.max(a, 0), w = 2 * Math.PI / (0.7 * p.length), phase = p.seed * 6.2832;
+    const grow = o.plumeWander * Math.min(Math.max(a, 0), p.length);
+    const core = Math.min(1, Math.sqrt(o.plumeCore * p.b / Math.max(a, 1)));
+    return { speed: p.V * core * Math.exp(-((r / width) ** 2)) * (1 - smoothstep(0.45 * p.length, p.length, a)), width,
+        off: grow * Math.sin(a * w + phase), turn: o.plumeWander * Math.sin(a * w + phase) + grow * w * Math.cos(a * w + phase) };
+}
+
+// Rock record: dir xyz, radius (m), top, base (m above the sphere), seed 0..1, the water's level there, 1 if in the solver's bed.
+export const RIVER_ROCK_FLOATS = 9;
 
 /**
  * The rocks of a river from its stations (after riverFlowDesign): array of
- * { x, y (river plane), r, top, base, seed, kind, tx, ty }. Deterministic per river.
+ * { x, y (river plane), r, top, base, seed, kind, tx, ty, W, solid }. Deterministic per river.
  */
 export function riverRocks(S, rid, o = RIVER_FLOW) {
     const rocks = [], m = S.m, seed = ((rid | 0) * 69069 + 0x1b873593) >>> 0;
@@ -130,7 +236,8 @@ export function riverRocks(S, rid, o = RIVER_FLOW) {
         const bed = S.W[i] - S.D[i] * (1 - Math.min(1, Math.abs(u)) ** 2);
         const base = bed - 1.2 * S.slope[i] * r;
         const top = Math.max(Math.min(S.W[i] + topAbove, bed + o.rockTallest * r), bed + 0.25);
-        rocks.push({ x: S.x[i] + nx * n, y: S.y[i] + ny * n, r, top, base, seed: rnd(), kind, tx: S.tx[i], ty: S.ty[i], W: S.W[i] });
+        const solid = S.V[i] / Math.sqrt(9.81 * Math.max(S.D[i], o.leastDepthM)) >= o.rockSolidFroude;
+        rocks.push({ x: S.x[i] + nx * n, y: S.y[i] + ny * n, r, top, base, seed: rnd(), kind, tx: S.tx[i], ty: S.ty[i], W: S.W[i], solid });
     };
     let owed = rnd(), ledgeAt = o.ledgeGapM[0] * rnd();
     for (let i = 0; i < m; i++) {
@@ -161,15 +268,17 @@ export function riverRocks(S, rid, o = RIVER_FLOW) {
 
 // Flow texel (one word): velocity along the raster's two axes (snorm8 of
 // speedRangeM, as dot products with the axes' unit tangents), foam (unorm8),
-// Manning's n (unorm8, log scale). WGSL: riverField.wgsl.js riverFlowUnpack.
+// Manning's n (unorm8: 0 lake water, n = 0 here; else log scale from 1).
+// WGSL: riverField.wgsl.js riverFlowUnpack.
 const MANNING_LOG = Math.log(RIVER_FLOW.manning[1] / RIVER_FLOW.manning[0]);
 export function packFlowTexel(a, b, foam, n, o = RIVER_FLOW) {
     const s8 = (v) => Math.round(clamp(v / o.speedRangeM, -1, 1) * 127) & 0xff;
     const u8 = (v) => Math.round(clamp(v, 0, 1) * 255);
-    const nq = n > 0 ? Math.log(clamp(n, o.manning[0], o.manning[1]) / o.manning[0]) / MANNING_LOG : 0;
-    return (s8(a) | (s8(b) << 8) | (u8(foam) << 16) | (u8(nq) << 24)) >>> 0;
+    const nq = n > 0 ? 1 + Math.round(Math.log(clamp(n, o.manning[0], o.manning[1]) / o.manning[0]) / MANNING_LOG * 254) : 0;
+    return (s8(a) | (s8(b) << 8) | (u8(foam) << 16) | (nq << 24)) >>> 0;
 }
 export function unpackFlowTexel(w, o = RIVER_FLOW) {
     const s8 = (v) => { const x = (v & 0xff) << 24 >> 24; return Math.max(x / 127, -1) * o.speedRangeM; };
-    return { a: s8(w), b: s8(w >>> 8), foam: ((w >>> 16) & 0xff) / 255, n: o.manning[0] * Math.exp(((w >>> 24) & 0xff) / 255 * MANNING_LOG) };
+    const nq = (w >>> 24) & 0xff;
+    return { a: s8(w), b: s8(w >>> 8), foam: ((w >>> 16) & 0xff) / 255, n: nq ? o.manning[0] * Math.exp((nq - 1) / 254 * MANNING_LOG) : 0 };
 }

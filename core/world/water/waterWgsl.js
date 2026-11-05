@@ -37,7 +37,7 @@ export const WATER_FIELD_BINDINGS = Object.freeze({ table: 17, texels: 18, param
 
 // WaterLake: 4 x vec4 (64 bytes). WaterParams: 11 x vec4. WaterRiverSeg: 10 x vec4 (160 bytes).
 export const LAKE_RECORD_FLOATS = 16;
-export const LAKE_PARAMS_FLOATS = 44;
+export const LAKE_PARAMS_FLOATS = 48;
 export const RIVER_SEG_FLOATS = 40;
 export const RIVER_MAX_SEGS_PER_CELL = 255;
 // River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
@@ -80,7 +80,9 @@ struct WaterParams {
     planetRadius: f32, time: f32, rippleFade: f32, shoreSoftM: f32,
     deepColor: vec4<f32>,      // rgb; a = reflection strength
     absorption: vec4<f32>,     // rgb per metre of water path; a unused
-    simRiver: vec4<f32>,       // unused
+    // rgb: the sky the water reflects, at full day (the sky pass draws this; the
+    // lighting's ambient colour is neither its colour nor its level); a: wind.
+    sky: vec4<f32>,
     simFade: vec4<f32>,        // z: dry-bank cut cap (m)
     // x: 1 whitewater look on; y unused; z: far water from here (m); w: unsolved
     // lakes are not drawn closer than this (m) (their grid-cell outline and coarse
@@ -102,6 +104,7 @@ struct WaterParams {
     // terrain shading keeps only the water's body, faded in from near.x;
     // z = 1 on, 0 off (the terrain shading draws all of the water).
     near: vec4<f32>,
+    open: vec4<f32>,           // rgb: albedo of open water, where no bed shows
 };
 ${segments ? `// A piece of a traced river between two points (unit directions); values
 // interpolate along it: design level (the channel's waterline) and thalweg
@@ -128,6 +131,43 @@ struct WaterRiverSeg {
 ${segments ? `@group(${group}) @binding(${b.rivers}) var<storage, read> waterRivers: array<WaterRiverSeg>;` : ''}
 
 const WATER_RIVER_SUB: u32 = ${RIVER_SUB}u;
+
+// Lake shores. A lake's outline follows the terrain's contours, and those are smooth
+// from 10 to 300 m, so lakes read as blobs; tiles cannot know where a shore is, the
+// lakes being solved apart from them. So water here starts this many metres of depth
+// in from the true waterline: bays and points on gentle shores, islets in the shallows,
+// little on steep ones, and no tile changes. The same value moves the bed's mud
+// (riverCarve.wgsl.js), or the strip it uncovers would be a brown ring. Always at least
+// a little: that strip is the wet ground between land and water. footM: a pixel's
+// length on the ground; a band goes before it reaches it, or the edge would shimmer.
+fn waterShoreBand(p: vec3<f32>, k: vec3<f32>, phase: f32) -> f32 {
+    return sin(6.2831853 * fract(dot(p, k) + phase));
+}
+fn waterShoreM(dir: vec3<f32>, footM: f32) -> f32 {
+    let p = dir * waterParams.planetRadius;
+    let a = waterShoreBand(p, vec3<f32>(0.83, 0.31, 0.47) / 420.0, 0.0) + waterShoreBand(p, vec3<f32>(-0.38, 0.86, 0.34) / 300.0, 0.3);
+    let b = waterShoreBand(p, vec3<f32>(0.29, -0.52, 0.80) / 150.0, 0.25 * a) + waterShoreBand(p, vec3<f32>(0.61, 0.70, -0.37) / 110.0, 0.2 * a);
+    var v = 2.4 + 1.3 * a + 1.0 * b;
+    if (footM < 24.0) {
+        let c = waterShoreBand(p, vec3<f32>(-0.72, 0.21, 0.66) / 55.0, 0.3 * b) + waterShoreBand(p, vec3<f32>(0.44, -0.83, -0.34) / 41.0, 0.2 * a);
+        v += 0.5 * c * (1.0 - smoothstep(10.0, 24.0, footM));
+        if (footM < 8.0) {
+            let d = waterShoreBand(p, vec3<f32>(0.15, 0.93, -0.33) / 19.0, 0.4 * c) + waterShoreBand(p, vec3<f32>(0.90, -0.12, 0.42) / 14.0, 0.3 * c);
+            v += 0.22 * d * (1.0 - smoothstep(3.5, 8.0, footM));
+            if (footM < 2.6) {
+                v += 0.09 * (waterShoreBand(p, vec3<f32>(-0.55, 0.47, 0.69) / 7.0, 0.5 * d) + waterShoreBand(p, vec3<f32>(0.33, 0.62, 0.71) / 5.0, 0.4 * d)) * (1.0 - smoothstep(1.2, 2.6, footM));
+            }
+        }
+    }
+    return 0.3 + max(v, 0.0);
+}
+// The wet strip between the true waterline and the water: how dark, 0 at the true
+// line (so nothing shows where the ground meets the level), full by the water. It
+// stays near the water's edge, and goes with distance: stronger, or kept far off, it
+// drew every lake with a dark outline.
+fn waterShoreWet(depthM: f32, shoreM: f32, dist: f32) -> f32 {
+    return 0.24 * smoothstep(max(shoreM - 0.8, 0.0), shoreM, depthM) * (1.0 - 0.85 * smoothstep(120.0, 900.0, dist));
+}
 
 // Cube-grid cell of a unit direction and its sub-cell (0 .. SUB^2 - 1);
 // same mapping as waterGraph.js dirToCell / dirToCellSub.
@@ -829,23 +869,139 @@ fn waterNoiseGrad(p: vec2<f32>) -> vec2<f32> {
     return du*vec2<f32>(mix(b-a,d-c,u.y),mix(c-a,d-b,u.x));
 }
 
+// Noise in space: a slice of it along the planet's surface needs no tangent
+// frame, so it has no seams, poles or stretching. Tangents cannot do this from
+// the world position: on a planet at the origin it has no tangential part, and
+// the lakes' ripples were one tilt shared by every pixel.
+fn waterHash3(p: vec3<f32>) -> f32 {
+    var q = fract(p * 0.1031);
+    q += dot(q, q.zyx + 31.32);
+    return fract((q.x + q.y) * q.z);
+}
+fn waterNoise3Grad(p: vec3<f32>) -> vec3<f32> {
+    let i = floor(p); let f = p - i;
+    let u = f * f * (3.0 - 2.0 * f);
+    let du = 6.0 * f * (1.0 - f);
+    let e = vec2<f32>(1.0, 0.0);
+    let a = waterHash3(i); let b = waterHash3(i + e.xyy); let c = waterHash3(i + e.yxy); let d = waterHash3(i + e.xxy);
+    let g = waterHash3(i + e.yyx); let h = waterHash3(i + e.xyx); let k = waterHash3(i + e.yxx); let l = waterHash3(i + e.xxx);
+    return du * vec3<f32>(
+        mix(mix(b - a, d - c, u.y), mix(h - g, l - k, u.y), u.z),
+        mix(mix(c - a, d - b, u.x), mix(k - g, l - h, u.x), u.z),
+        mix(mix(g - a, h - b, u.x), mix(k - c, l - d, u.x), u.y));
+}
+
+// Wind at the last surface point shaded: 0 calm, 1 ruffled (waterSurfaceTerms).
+var<private> waterWindNow: f32 = 0.5;
+
+// One wave of the wind's field: k in cycles per metre, a phase in cycles. The
+// phase wraps before sin: the products reach thousands of cycles out here.
+fn waterSwell(p: vec3<f32>, k: vec3<f32>, phase: f32) -> f32 {
+    return sin(6.2831853 * fract(dot(p, k) + phase));
+}
+// Three waves at unrelated angles: two would draw a lattice.
+fn waterSwells(p: vec3<f32>, invM: f32, phase: f32, rate: f32) -> f32 {
+    let t = waterParams.time * rate * 2.0;
+    return (waterSwell(p, vec3<f32>(0.83, 0.31, 0.47) * invM, phase + t)
+        + waterSwell(p, vec3<f32>(-0.38, 0.86, 0.34) * invM, phase * 0.7 - 0.61 * t)
+        + waterSwell(p, vec3<f32>(0.29, -0.52, 0.80) * invM, phase * 1.3 + 0.37 * t)) * 0.3333;
+}
+
+// How ruffled the water is, 0 calm .. 1: gusts of a few hundred metres drifting
+// over it, long across the wind. This is most of what distant water shows.
+// Each band bends the next finer one's phase, so no wave stays straight.
+// footM: a pixel's length on the water. A band leaves before it reaches it.
+// Sines, not noise: hashed noise takes eight hashes a band.
+fn waterWind(p: vec3<f32>, footM: f32) -> f32 {
+    let axis = vec3<f32>(0.62, 0.35, -0.70);
+    let s = p + axis * (dot(p, axis) * 1.6);
+    let big = waterSwells(s, 1.0 / 1100.0, 0.0, 0.0012);
+    var v = 0.5 + 0.20 * big * (1.0 - smoothstep(280.0, 660.0, footM));
+    if (footM < 230.0) {
+        let mid = waterSwells(s, 1.0 / 380.0, 0.9 * big, 0.0055);
+        v += 0.16 * mid * (1.0 - smoothstep(95.0, 230.0, footM));
+        if (footM < 72.0) {
+            let small = waterSwells(s, 1.0 / 120.0, 0.8 * mid + 0.4 * big, 0.02);
+            v += 0.11 * small * (1.0 - smoothstep(30.0, 72.0, footM));
+            if (footM < 22.0) {
+                v += 0.07 * waterSwells(s, 1.0 / 36.0, 0.8 * small, 0.09) * (1.0 - smoothstep(9.0, 22.0, footM));
+            }
+        }
+    }
+    return smoothstep(0.24, 0.76, v);
+}
+
+// The sky a surface reflects. elevation: of the reflected ray, 0 horizon .. 1
+// zenith. Follows the sky pass, measured on screen by sun height: day's level
+// 1, 0.98, 0.81, 0.50 at 0.75, 0.4, 0.15, 0.03; below that a tan dusk, brightest
+// low in the sky, from about 0.05 down to -0.33, gone by -0.5. The lighting's
+// ambient does neither: it stays the same from noon to dusk.
+fn waterSkyColor(up: vec3<f32>, elevation: f32, lightDir: vec3<f32>, skyRadiance: vec3<f32>) -> vec3<f32> {
+    let sunUp = dot(up, lightDir);
+    let day = smoothstep(-0.25, 0.3, sunUp);
+    let dusk = (1.0 - smoothstep(-0.15, 0.05, sunUp)) * smoothstep(-0.5, -0.33, sunUp);
+    let low = 1.0 - clamp(elevation, 0.0, 1.0);
+    let horizon = low * low * low;
+    return waterParams.sky.rgb * day * (1.0 + 0.5 * (1.0 - day) * horizon)
+        + vec3<f32>(0.225, 0.165, 0.105) * dusk * (0.45 + 0.55 * horizon)
+        + skyRadiance * 0.1;
+}
+
+// The light the water's column sends back: the deep colour over shallows, the
+// darker colour of open water where no bed shows. Far away the depth comes from
+// coarse triangles, so distance alone decides (see applyWater).
+fn waterBodyLight(
+    depthM: f32, dist: f32, up: vec3<f32>,
+    lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>,
+) -> vec3<f32> {
+    let open = max(smoothstep(1.0, 7.0, depthM), smoothstep(400.0, 1000.0, dist));
+    let albedo = mix(waterParams.deepColor.rgb, waterParams.open.rgb, open);
+    return albedo * (skyRadiance + sunRadiance * max(dot(up, lightDir), 0.0)) * (0.84 + 0.32 * waterWindNow);
+}
+
 // The water's body over a bed, without its surface: the bed seen through
 // the water column along the view ray (V: toward the camera), toward the
 // deep water's colour.
 fn waterBodyColor(
-    bedColor: vec3<f32>, depthM: f32, V: vec3<f32>, up: vec3<f32>,
+    bedColor: vec3<f32>, depthM: f32, dist: f32, V: vec3<f32>, up: vec3<f32>,
     lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>,
 ) -> vec3<f32> {
     let cosV = max(dot(V, up), 0.02);
     let transmit = exp(-(depthM / cosV) * waterParams.absorption.rgb) * ${WATER_WET_BED};
-    let sunUp = max(dot(up, lightDir), 0.0);
-    let deep = waterParams.deepColor.rgb * (skyRadiance + sunRadiance * sunUp);
-    return mix(deep, bedColor, transmit);
+    return mix(waterBodyLight(depthM, dist, up, lightDir, sunRadiance, skyRadiance), bedColor, transmit);
 }
 
-// The water's surface over its body: sky reflection (Fresnel), sun glint,
-// ripples near the camera. Lakes and rivers alike (owner 2026-10-06: the
-// same water everywhere first; the flow's look comes with the simulation).
+// A pixel's length on the ground (m), as whitewaterLook.wgsl.js has it.
+fn waterFootM(dist: f32, worldPos: vec3<f32>, cameraPos: vec3<f32>, up: vec3<f32>) -> f32 {
+    return dist * 0.0011 / max(abs(dot(normalize(cameraPos - worldPos), up)), 0.03);
+}
+
+// How much of a river's foam shows at a distance: white threads from high up drew
+// every river as a sharp line. All tiers take it, or they would step at the handover.
+fn waterFoamFar(dist: f32) -> f32 {
+    return 1.0 - 0.9 * smoothstep(250.0, 1400.0, dist);
+}
+
+// Sun glitter: how much of the surface has the slope that mirrors the sun (a
+// Gaussian in slope, sigma their RMS), times the sun's radiance. Every tier adds it:
+// where only the lake's surface did, the glare stopped on the river's flow lines.
+fn waterGlitter(V: vec3<f32>, up: vec3<f32>, N: vec3<f32>, lightDir: vec3<f32>, sigma: f32) -> f32 {
+    let H = normalize(V + lightDir);
+    let cosH = max(dot(H, N), 0.05);
+    let s = sigma + 0.012;
+    let tan2 = (1.0 - cosH * cosH) / (cosH * cosH);
+    let slopes = exp(-tan2 / (2.0 * s * s)) / (6.2832 * s * s * cosH * cosH * cosH * cosH);
+    let fresSun = 0.02 + 0.98 * pow(1.0 - max(dot(H, V), 0.0), 5.0);
+    return 0.16 * slopes * fresSun / (4.0 * max(abs(dot(N, V)), 0.1)) * smoothstep(0.0, 0.08, dot(up, lightDir));
+}
+
+// The water's surface over its body: sky reflection, sun glitter, ripples near
+// the camera. Lakes and rivers alike (owner 2026-10-06: the same water
+// everywhere first; the flow's look comes with the simulation). Past a few
+// hundred metres no wave is a pixel, so the surface is its slopes' statistics:
+// sigma, their RMS, set by the wind. A flat mirror's Fresnel reaches 0.6 at 300 m
+// from 30 m up and one colour takes the lake; slopes keep it from saturating,
+// and their change from gust to gust is what shows.
 // rgb is added over the body, a (the Fresnel term) is how much of the body
 // it hides: colour = body (1 - a) + rgb. Also drawn by the near water
 // meshes (core/renderer/water/nearWaterSurface.wgsl.js).
@@ -856,20 +1012,30 @@ fn waterSurfaceTerms(
     let toCam = cameraPos - worldPos;
     let dist = length(toCam);
     let V = toCam / dist;
-    var N = up;
-    let ripple = 1.0 - smoothstep(0.0, waterParams.rippleFade, dist);
+    // A pixel's length on the water (m), as whitewaterLook.wgsl.js has it.
+    let footM = dist * 0.0011 / max(abs(dot(V, up)), 0.03);
+    // up is the planet's. Seen from under its plane (the eye below water falling
+    // toward it, or diving) the surface turns over; the sky and the sun do not. With a
+    // flipped up the sky read as night, a dark river above a line at eye height.
+    let face = up * select(-1.0, 1.0, dot(V, up) >= 0.0);
+    var N = face;
+    // Ripples are 2.9 m: gone before a pixel is half that, or they shimmer.
+    let ripple = (1.0 - smoothstep(0.0, waterParams.rippleFade, dist)) * (1.0 - smoothstep(0.4, 1.2, footM));
     if (ripple > 0.001) {
-        let t1 = normalize(cross(up, vec3<f32>(0.0, 1.0, 0.0001)));
-        let t2 = cross(up, t1);
-        let q = vec2<f32>(dot(worldPos, t1), dot(worldPos, t2)) * 0.35;
         let tm = waterParams.time;
-        let g = waterNoiseGrad(q + vec2<f32>(tm * 0.11, -tm * 0.07));
-        N = normalize(up + (t1 * g.x + t2 * g.y) * 0.08 * ripple);
+        let g = waterNoise3Grad(worldPos * 0.35 + vec3<f32>(tm * 0.22, -tm * 0.14, tm * 0.10));
+        N = normalize(face + (g - up * dot(g, up)) * 0.08 * ripple);
     }
-    let fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
-    let R = reflect(-V, N);
-    let spec = pow(max(dot(R, lightDir), 0.0), 600.0) * 3.0;
-    return vec4<f32>(skyRadiance * waterParams.deepColor.a * fres + sunRadiance * spec, fres);
+    waterWindNow = waterWind(worldPos, footM);
+    let sigma = (0.05 + 0.09 * waterWindNow) * waterParams.sky.a;
+    let cosN = max(dot(N, V), 0.0);
+    let cosRough = min(sqrt(cosN * cosN + 2.56 * sigma * sigma), 1.0);
+    let fres = 0.02 + 0.98 * pow(1.0 - cosRough, 5.0);
+    // Rough water shows a higher sky than its mirror direction does.
+    let elevation = sqrt(pow(max(dot(reflect(-V, N), face), 0.0), 2.0) + 4.0 * sigma * sigma);
+    // Close by this would be a smooth blob: waves have to draw it (not yet).
+    let glitter = (1.0 - 0.8 * ripple) * waterGlitter(V, up, N, lightDir, sigma);
+    return vec4<f32>(waterSkyColor(up, elevation, lightDir, skyRadiance) * waterParams.deepColor.a * fres + sunRadiance * glitter, fres);
 }
 
 // Water colour over a bed: its body (the bed seen through the water column
@@ -878,8 +1044,8 @@ fn waterSurfaceColor(
     bedColor: vec3<f32>, depthM: f32, worldPos: vec3<f32>, up: vec3<f32>, cameraPos: vec3<f32>,
     lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>,
 ) -> vec3<f32> {
-    let body = waterBodyColor(bedColor, depthM, normalize(cameraPos - worldPos), up, lightDir, sunRadiance, skyRadiance);
     let s = waterSurfaceTerms(worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance);
+    let body = waterBodyColor(bedColor, depthM, length(cameraPos - worldPos), normalize(cameraPos - worldPos), up, lightDir, sunRadiance, skyRadiance);
     let col = body * (1.0 - s.a) + s.rgb;
     // Soft waterline: the first centimetres of depth fade in.
     return mix(bedColor, col, smoothstep(0.0, waterParams.shoreSoftM, depthM));
@@ -942,16 +1108,23 @@ fn applyWater(
         if (dbg == 6u) { return vec3<f32>(select(0.0, WATER_OWNER_ON, wetF), 0.0, 0.0); }
         if (dbg == 7u) { return vec3<f32>(0.0, select(0.0, WATER_OWNER_ON, wetF), 0.0); }
         if (!wetF) { return bedColor; }
-        let depthF = fieldHit.y - heightM;
+        // Lake water in the pages keeps the lakes' shore; moving water runs to its bank.
+        let flowS = riverFlowAt(up);
+        let shoreF = waterShoreM(up, waterFootM(dist, worldPos, cameraPos, up)) * clamp(-flowS.w, 0.0, 1.0) * (1.0 - smoothstep(0.1, 0.6, length(flowS.xy)));
+        let trueDepthF = fieldHit.y - heightM;
+        let depthF = trueDepthF - shoreF;
+        let bedF = bedColor * (1.0 - waterShoreWet(trueDepthF, shoreF, dist));
+        if (depthF <= 0.0) { return bedF; }
         let nearF = waterNearWeight(dist);
         let switchF = max(waterParams.near.y, waterParams.riverLook.z);
         let farStartF = select(switchF, waterParams.near.x, waterParams.near.z > 0.5);
-        var colF = waterNearFarColor(bedColor, depthF + max(dist - farStartF, 0.0) * ${LAKE_FAR_DEPTH_PER_M}, worldPos, up, cameraPos, dist, nearF, lightDir, sunRadiance, skyRadiance);
-        let wFarF = smoothstep(farStartF, switchF * 1.5, dist);
+        let wFarF = smoothstep(farStartF, mix(farStartF, switchF * 1.5, 0.15), dist);
+        var colF = bedF;
+        if (wFarF < 1.0) { colF = waterNearFarColor(bedF, depthF + max(dist - farStartF, 0.0) * ${LAKE_FAR_DEPTH_PER_M}, worldPos, up, cameraPos, dist, nearF, lightDir, sunRadiance, skyRadiance); }
         if (wFarF > 0.0) {
             let surfaceF = waterSurfaceTerms(worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance);
-            let bodyF = waterParams.deepColor.rgb * (skyRadiance + sunRadiance * max(dot(up, lightDir), 0.0));
-            colF = mix(colF, mix(bedColor, bodyF * (1.0 - surfaceF.a) + surfaceF.rgb, smoothstep(0.0, waterParams.shoreSoftM, depthF)), wFarF);
+            let bodyF = waterBodyLight(depthF, dist, up, lightDir, sunRadiance, skyRadiance);
+            colF = mix(colF, mix(bedF, bodyF * (1.0 - surfaceF.a) + surfaceF.rgb, smoothstep(0.0, waterParams.shoreSoftM, depthF)), wFarF);
         }
         // Whitewater far away: the foam the fall of the water makes
         // (riverFlow.js), still, broken by slow noise so it is not painted on.
@@ -961,9 +1134,11 @@ fn applyWater(
             if (foamF > 0.004) {
                 let q = vec2<f32>(worldPos.x + worldPos.y, worldPos.z - worldPos.y);
                 let broken = 0.6 * waterNoise(q * 0.07) + 0.4 * waterNoise(q * 0.21);
-                let cover = smoothstep(0.03, 0.55, foamF * (0.55 + 0.9 * broken));
+                // Far off a rapid is a pale streak: at full strength a few pixels of it
+                // read as a sharp white dot on the landscape (owner 2026-11-05).
+                let cover = smoothstep(0.03, 0.55, foamF * (0.55 + 0.9 * broken)) * waterFoamFar(dist);
                 let litF = skyRadiance * 0.9 + sunRadiance * (0.35 + 0.65 * max(dot(up, lightDir), 0.0));
-                colF = mix(colF, vec3<f32>(0.90, 0.94, 0.97) * litF * 0.3, cover * smoothstep(0.0, waterParams.shoreSoftM, depthF));
+                colF = mix(colF, vec3<f32>(0.90, 0.94, 0.97) * litF * 0.22, cover * smoothstep(0.0, waterParams.shoreSoftM, depthF));
             }
         }
         return colF;
@@ -987,7 +1162,10 @@ fn applyWater(
     if (dbg == 6u) { return vec3<f32>(0.0); }
     if (dbg == 7u) { return vec3<f32>(0.0, 0.0, select(0.0, WATER_OWNER_ON, level > WATER_NO_LAKE)); }
     if (level > WATER_NO_LAKE) {
-        let depthM = lakeHit.depthM;
+        let shoreL = waterShoreM(up, waterFootM(dist, worldPos, cameraPos, up));
+        let depthM = lakeHit.depthM - shoreL;
+        let bedL = bedColor * (1.0 - waterShoreWet(lakeHit.depthM, shoreL, dist));
+        if (dbg == 0u && depthM <= 0.0) { return bedL; }
         if (dbg == 1u || dbg == 2u) {
             let slot = waterLakeCandidate(waterDirToCell(up, waterParams.gridN), 0u);
             return mix(waterTint(f32(slot)), vec3<f32>(0.0, 0.1, 0.6), clamp(depthM / 40.0, 0.0, 0.8));
@@ -1004,7 +1182,9 @@ fn applyWater(
         // water reads as deeper than those triangles by LAKE_FAR_DEPTH_PER_M
         // per metre, so the bed fades out within a few hundred metres (a 2.5x
         // blend alone left the shores blurred at 2.5 km, v15), and the body
-        // turns opaque by 1.5x the switch distance.
+        // turns opaque soon after the near mesh starts fading: this colour shows
+        // through the share it gives up, and a bed in it left a brown band
+        // across lakes at 1-1.6 km.
         // Both start where the near mesh starts handing over (near.x,
         // 1 km), not at the switch (1.6 km): from 1.2-1.9 km neither the
         // mesh nor this fade covered the coarse depth, and the islands and
@@ -1013,12 +1193,13 @@ fn applyWater(
         let switchM=max(waterParams.near.y,waterParams.riverLook.z);
         let farStartM=select(switchM,waterParams.near.x,waterParams.near.z>0.5);
         let farDepthM=depthM+max(dist-farStartM,0.0)*${LAKE_FAR_DEPTH_PER_M};
-        var lakeCol = waterNearFarColor(bedColor, farDepthM, worldPos, up, cameraPos, dist, nearW, lightDir, sunRadiance, skyRadiance);
-        let wFar=smoothstep(farStartM,switchM*1.5,dist);
+        let wFar=smoothstep(farStartM,mix(farStartM,switchM*1.5,0.15),dist);
+        var lakeCol=bedL;
+        if(wFar<1.0) {lakeCol=waterNearFarColor(bedL,farDepthM,worldPos,up,cameraPos,dist,nearW,lightDir,sunRadiance,skyRadiance);}
         if(wFar>0.0) {
             let surface=waterSurfaceTerms(worldPos,up,cameraPos,lightDir,sunRadiance,skyRadiance);
-            let body=waterParams.deepColor.rgb*(skyRadiance+sunRadiance*max(dot(up,lightDir),0.0));
-            let opaque=mix(bedColor,body*(1.0-surface.a)+surface.rgb,smoothstep(0.0,waterParams.shoreSoftM,depthM));
+            let body=waterBodyLight(depthM,dist,up,lightDir,sunRadiance,skyRadiance);
+            let opaque=mix(bedL,body*(1.0-surface.a)+surface.rgb,smoothstep(0.0,waterParams.shoreSoftM,depthM));
             lakeCol=mix(lakeCol,opaque,wFar);
         }
         return lakeCol;
