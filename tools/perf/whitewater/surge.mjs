@@ -53,6 +53,7 @@ try {
                 if ((config.shotAt ?? []).includes(t)) await page.screenshot({ path: path.join(config.out, `${view.name}-${arm.name}-t${t}.png`) });
                 rows.push({ t, ...r });
             }
+            if (config.rises) console.log('RISES ' + JSON.stringify(await page.evaluate(async () => (await import('/tools/perf/whitewater/wwProbe.js')).wwRiseCells({}))));
             await page.evaluate(() => window.__ff.release());
             const late = rows.filter(r => r.t >= shownAfter && r.still?.n > 50), worst = (f) => late.length ? +Math.max(...late.map(f)).toFixed(3) : null;
             const line = { view: view.name, arm: arm.name, blocks: rows.at(-1).active, stillCells: rows.at(-1).still?.n ?? 0, rise: worst(r => r.still.p99), drop: worst(r => -r.still.p1), steep: worst(r => r.still.slope99), moved: worst(r => r.still.moved99), riverMoved: worst(r => r.river?.moved99 ?? 0), riverSpeed: rows.at(-1).river?.speed };

@@ -35,9 +35,15 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     // Per metre of water path (r, g, b). Keep the wet toe visible, but
     // attenuate the broad brown bed in shallow lake mouths (2026-10-29).
     // qtDiag.water.look({ absorption }) tunes the existing body treatment.
-    absorption: [0.9, 0.4, 0.3],
-    rippleFadeM: 800,                 // ripples fade out by this camera distance
-    shoreSoftM: 0.45,                 // waterline fade-in depth
+    absorption: [0.6, 0.26, 0.2],
+    // Level of detail of still water: closer than this (m) it has the surface moving water
+    // has (whitewaterLook.wgsl.js), fading into the distant water's statistics from 55 % of it.
+    // Under the near meshes' fadeStartM: the terrain shading draws only the distant surface.
+    lakeDetailM: 900,
+    // Close still water: how ruffled, and how much lace it shows in the gusts, 0..1.
+    closeRuffle: 0.35,
+    closeLace: 0.2,
+    shoreSoftM: 0.06,                 // waterline fade-in depth: crisp, the ground draws the shore
     // Lakes whose shore is not solved yet are hidden closer than this (m).
     unsolvedLakeHideM: 2500,
     structuredRiverSurface: true,
@@ -433,9 +439,9 @@ export class WaterGpuData {
         }
         const p = this._params, u = new Uint32Array(p), f = new Float32Array(p), L = this.look;
         u[0] = this.N; u[1] = this.enabled && this._ready ? 1 : 0; u[2] = this.debugMode >>> 0; u[3] = this._appliedRivers.size;
-        f[4] = this.R; f[5] = time; f[6] = L.rippleFadeM; f[7] = L.shoreSoftM;
+        f[4] = this.R; f[5] = time; f[6] = L.lakeDetailM; f[7] = L.shoreSoftM;
         f.set([L.deepColor[0], L.deepColor[1], L.deepColor[2], L.reflection], 8);
-        f.set([L.absorption[0], L.absorption[1], L.absorption[2], 0], 12);
+        f.set([L.absorption[0], L.absorption[1], L.absorption[2], L.closeLace], 12);
         f.fill(0, 16, 24);
         f.set([L.skyColor[0], L.skyColor[1], L.skyColor[2], L.wind], 16);
         f.set([this.whitewaterLook ? 1 : 0, 0, L.structuredRiverSurfaceStartM, L.unsolvedLakeHideM ?? 2500], 24);
@@ -448,7 +454,7 @@ export class WaterGpuData {
         f.set([C.widthVar, C.wobble, C.bankVar, C.islandHeightM], 36);
         const nr = this.near;
         f.set(nr.enabled ? [nr.fadeStartM, nr.fadeEndM, 1, 0] : [0, 0, 0, 0], 40);
-        f.set([L.openColor[0], L.openColor[1], L.openColor[2], 0], 44);
+        f.set([L.openColor[0], L.openColor[1], L.openColor[2], L.closeRuffle], 44);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
     }
 

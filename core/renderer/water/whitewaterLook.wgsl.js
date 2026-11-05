@@ -1,13 +1,16 @@
 // core/renderer/water/whitewaterLook.wgsl.js
 //
-// The moving water's surface: what the mid-range mesh (fieldWaterSurface.wgsl.js,
-// baked flow) and the near simulation's mesh (whitewaterSurface.wgsl.js) both
-// draw, so the two only differ in their inputs. From Whitewater's fsWater: two
-// phases of noise carried along the velocity and cross-faded, so the pattern
-// moves with the water without ever stretching out; ripples and foam from it.
-// Beyond Whitewater: octaves fade by the pixel's footprint and foam turns into
-// plain coverage with distance (no shimmer), foam has body (shaded by its own
-// pattern, tinted by the sky), and a lit edge where it thins.
+// The surface of all water near the camera: what the lake sheets
+// (nearWaterSurface.wgsl.js), the mid-range mesh (fieldWaterSurface.wgsl.js, baked
+// flow) and the near simulation's mesh (whitewaterSurface.wgsl.js) all draw, so they
+// only differ in their inputs. The camera picks the level of detail, not the water:
+// within lakeDetailM still water has this surface too, and past it the distant
+// water's statistics (waterWgsl.js waterSurfaceTerms) take over.
+// From Whitewater's fsWater: two phases of noise carried along the velocity and
+// cross-faded, so the pattern moves with the water without ever stretching out;
+// ripples and foam from it. Beyond Whitewater: octaves fade by the pixel's footprint
+// and foam turns into plain coverage with distance (no shimmer), foam has body
+// (shaded by its own pattern, tinted by the sky), and a lit edge where it thins.
 
 // Keep in step with WhitewaterSim.js whitewaterUniforms.
 export const WHITE_UNIFORM_FLOATS = 32;
@@ -65,10 +68,58 @@ fn whiteDebug(mode: u32, vel: vec2<f32>, foam: f32, turb: f32, h: f32, tier: vec
     return vec4<f32>(c, 1.0);
 }
 
+// Still water. No flow carries a pattern here, and the two phases of moving water
+// would boil on the spot at these speeds, so each scale drifts its own way and their
+// sum keeps changing, at half the noise. Laid out in the frame, as moving water is:
+// the same at every tier's edge.
+fn whiteRippleBand(q: vec2<f32>, invM: f32, c: f32, s: f32, drift: vec2<f32>) -> vec2<f32> {
+    let r = vec2<f32>(c * q.x - s * q.y, s * q.x + c * q.y) * invM + drift * W.time;
+    let g = waterNoiseGrad(r);
+    return vec2<f32>(c * g.x + s * g.y, -s * g.x + c * g.y);
+}
+// Its slope, in two parts: waves of 2 to 14 m, which all calm close water has, moving or
+// not, and the scales of moving water up close (ruffle: their strength), which moving
+// water has of its own. Each goes before a pixel reaches it.
+fn whiteCoarseSlope(xy: vec2<f32>, px: f32) -> vec2<f32> {
+    let a = 1.0 - smoothstep(3.0, 8.0, px);
+    if (a <= 0.0) { return vec2<f32>(0.0); }
+    var g = whiteRippleBand(xy, 1.0 / 14.0, 0.8, 0.6, vec2<f32>(0.11, -0.05)) * (0.075 * a);
+    let b = 1.0 - smoothstep(1.2, 3.2, px);
+    if (b <= 0.0) { return g; }
+    g += whiteRippleBand(xy, 1.0 / 5.3, 0.28, 0.96, vec2<f32>(-0.17, 0.12)) * (0.07 * b);
+    let c = 1.0 - smoothstep(0.45, 1.2, px);
+    if (c > 0.0) { g += whiteRippleBand(xy, 0.5, -0.6, 0.8, vec2<f32>(0.22, 0.26)) * (0.05 * c); }
+    return g;
+}
+fn whiteFineSlope(xy: vec2<f32>, px: f32, ruffle: f32) -> vec2<f32> {
+    let d = 1.0 - smoothstep(0.15, 0.6, px);
+    if (d <= 0.0) { return vec2<f32>(0.0); }
+    var g = whiteRippleBand(xy, 1.6, 0.96, -0.28, vec2<f32>(-0.36, 0.3)) * (ruffle * d);
+    let e = 1.0 - smoothstep(0.05, 0.18, px);
+    if (e > 0.0) { g += whiteRippleBand(xy, 4.3, 0.6, 0.8, vec2<f32>(0.5, -0.42)) * (0.45 * ruffle * e); }
+    return g;
+}
+// Its lace, as a change to the pattern: moving water's without the phases, each octave on
+// its own drift. A web three times coarser (cc) takes over as the fine one goes: ending, it
+// drew a ring around the camera. Each web keeps plain noise of about its own size for as
+// long as it shows: bare ridges, the finer noise gone, read as a jigsaw from above.
+fn whiteCoarseLace(xy: vec2<f32>, cc: f32) -> f32 {
+    return (whiteRidge(xy * 0.17 + vec2<f32>(-0.016, 0.021) * W.time + 9.4) - 0.65) * (0.62 * cc)
+        + (waterNoise(xy * 0.23 + vec2<f32>(0.021, 0.017) * W.time + 4.6) - 0.5) * (0.55 * cc);
+}
+fn whiteFineLace(xy: vec2<f32>, c0: f32, c1: f32, c2: f32) -> f32 {
+    if (c0 <= 0.0) { return 0.0; }
+    var pat = (whiteRidge(xy * 0.55 + vec2<f32>(0.05, -0.03) * W.time) - 0.65) * (0.62 * c0);
+    pat += (waterNoise(xy * 0.71 + vec2<f32>(0.06, 0.05) * W.time + 8.3) - 0.5) * (0.55 * c0 * (1.0 - c1));
+    if (c1 > 0.0) { pat += (waterNoise(xy * 1.7 + 3.0 + vec2<f32>(-0.09, 0.07) * W.time) - 0.5) * (0.46 * c1); }
+    if (c2 > 0.0) { pat += (waterNoise(xy * 5.5 + 7.0 + vec2<f32>(0.13, 0.11) * W.time) - 0.5) * (0.22 * c2); }
+    return pat;
+}
+
 // Surface terms over the body (nearWaterCompose): rgb added, a how much of the
 // body it hides. N0: the surface's normal before ripples. vel: m/s, xy: m, in the
-// frame. foam 0..1, turb 0..1.
-fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foam: f32, turb: f32) -> vec4<f32> {
+// frame. foam 0..1, turb 0..1. pixel: the fragment's, for the depth under it.
+fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foam: f32, turb: f32, pixel: vec2<f32>) -> vec4<f32> {
     let toCam = U.cameraPos - wp;
     let dist = length(toCam);
     let V = toCam / dist;
@@ -77,6 +128,20 @@ fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foa
     let sky = U.ambientColor * U.ambientIntensity;
     // A pixel's width on the water (m), wider at grazing angles.
     let px = dist * 0.0011 / max(abs(dot(V, N0)), 0.12);
+    let level = normalize(wp - U.origin);
+    // How much of this is still water, and of that how much is close enough for
+    // this surface (close), the rest being far enough for the distant one (far). What
+    // moves keeps its own surface at any distance. Close by (near) all water has at least
+    // the ruffle and lace of still water, and calm water its coarse scales: without, the
+    // slow edge of a plume, moving but carrying no foam, was a smooth patch.
+    let near = waterCloseShare(dist);
+    let calm = near * (1.0 - smoothstep(0.0, 0.3, foam));
+    let still = 1.0 - smoothstep(0.05, 0.6, length(vel));
+    let close = still * near;
+    let far = still - close;
+    var gust = 0.5;
+    if (still > 0.001) { gust = waterWind(wp, dist * 0.0011 / max(abs(dot(V, level)), 0.03)); }
+    let ruffle = near * waterParams.open.a * (0.4 + 1.2 * gust);
     // How long the pattern travels before it fades into its other phase. Longer is
     // calmer; too long and shear between vertices draws it into zigzags.
     let T = 1.2;
@@ -97,38 +162,39 @@ fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foa
     let o0 = 1.0 - smoothstep(0.15, 0.6, px);
     let o1 = 1.0 - smoothstep(0.05, 0.18, px);
     var g = vec2<f32>(0.0);
-    if (o0 > 0.0) {
+    if (o0 > 0.0 && still < 0.999) {
         g = mix(waterNoiseGrad(uvA * 1.6), waterNoiseGrad(uvB * 1.6), blend) * (o0 * contrast);
         if (o1 > 0.0) { g += mix(waterNoiseGrad(uvA * 4.3 + 9.0), waterNoiseGrad(uvB * 4.3 + 9.0), blend) * (0.45 * o1 * contrast); }
     }
-    let strength = 0.03 + 0.14 * max(turb, 0.09 * length(vel));
+    g *= 0.03 + 0.14 * max(max(turb, ruffle), 0.09 * length(vel));
+    if (close > 0.001) { g = mix(g, whiteFineSlope(xy, px, 0.03 + 0.14 * ruffle), close); }
+    if (calm > 0.001) { g += whiteCoarseSlope(xy, px) * calm; }
     let e1 = normalize(W.e1 - N0 * dot(W.e1, N0));
     let e2 = normalize(W.e2 - N0 * dot(W.e2, N0));
-    let N = normalize(N0 - (e1 * g.x + e2 * g.y) * strength);
+    let N = normalize(N0 - e1 * g.x - e2 * g.y);
+    // Seen from above the sky's reflection is weak and ripples hardly touch it, and close
+    // water read as a flat colour: its slopes shade the body as well.
+    nearWaterRelief = 1.0 + near * clamp(2.0 * dot(N - N0, L), -0.2, 0.3);
     let Nf = N * select(-1.0, 1.0, dot(N, V) >= 0.0);
     var fres = 0.02 + 0.98 * pow(1.0 - max(dot(Nf, V), 0.0), 5.0);
     let R = reflect(-V, Nf);
     let spec = pow(max(dot(R, L), 0.0), 240.0) * 1.6;
     // Glitter is the statistics of the whole surface: on the solver's normal it stopped
     // at every cross-wave, in a straight line.
-    let level = normalize(wp - U.origin);
     var reflected = waterSkyColor(level, abs(dot(R, N0)), L, sky) * waterParams.deepColor.a * fres + sun * (spec + (0.2 + 0.8 * smoothstep(0.4, 1.2, px)) * waterGlitter(V, level, level, L, 0.1));
-    // Still water is the lakes' surface whichever tier draws it: the solver's blocks
+    // Far still water is the distant surface whichever tier draws it: the solver's blocks
     // and the field's pages end in straight lines across a lake.
-    let still = 1.0 - smoothstep(0.05, 0.6, length(vel));
     nearWaterAerated = smoothstep(0.8, 2.5, length(vel));
-    if (still > 0.001) {
+    if (far > 0.001) {
         let lake = waterSurfaceTerms(wp, level, U.cameraPos, L, sun, sky);
-        reflected = mix(reflected, lake.rgb, still);
-        fres = mix(fres, lake.a, still);
-        waterWindNow = mix(0.5, waterWindNow, still);
+        reflected = mix(reflected, lake.rgb, far);
+        fres = mix(fres, lake.a, far);
     }
+    waterWindNow = mix(0.5, gust, still);
 
     // Foam: coverage rises with foam; the moving pattern, ridged first (plain noise
     // alone, thresholded, made cow spots), cuts it into lace and wisps, fading to plain
     // coverage as pixels outgrow them.
-    let fa = clamp(foam, 0.0, 1.0);
-    if (fa <= 0.002) { return vec4<f32>(reflected, fres); }
     // Octaves go before their finest features reach pixel size. A ridged octave's
     // filaments are a fraction of its lattice: left in, a filament a pixel wide lights
     // a pixel for one frame as it passes, which reads as flicker from above.
@@ -137,19 +203,33 @@ fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foa
     // The finest also when it moves so far a frame that it strobes (at the game's
     // 30 FPS when still: from ~2 m/s).
     let c2 = (1.0 - smoothstep(0.03, 0.09, px)) * (1.0 - smoothstep(0.07, 0.16, length(vel) * W.frameS));
+    let cc = (1.0 - c0) * (1.0 - smoothstep(0.8, 2.6, px));
+    // Close still water has lace of its own, more of it in the gusts: none in the shallows,
+    // where the bed shows, and gone before the pattern is, or it would turn into a pale haze.
+    var fa = clamp(foam, 0.0, 1.0);
+    let reach = max(c0, 0.45 * cc);
+    if (near * reach > 0.001) {
+        let depth = nearWaterBehind(wp, pixel) * max(abs(dot(V, level)), 0.05);
+        fa = max(fa, waterParams.absorption.a * near * reach * (0.45 + 0.55 * smoothstep(0.1, 0.9, gust)) * smoothstep(0.2, 1.6, depth));
+    }
+    if (fa <= 0.002) { return vec4<f32>(reflected, fres); }
     var pat = 0.62;
-    if (c0 > 0.0) {
+    if (c0 > 0.0 && still < 0.999) {
         pat += (mix(whiteRidge(uvA * 0.55), whiteRidge(uvB * 0.55), blend) - 0.65) * (0.62 * c0 * contrast);
         // Plain noise breaks the ridges into wisps: two ridged octaves drew cracks in glass.
         if (c1 > 0.0) { pat += (mix(waterNoise(uvA * 1.7 + 3.0), waterNoise(uvB * 1.7 + 3.0), blend) - 0.5) * (0.46 * c1 * contrast); }
         if (c2 > 0.0) { pat += (mix(waterNoise(uvA * 5.5 + 7.0), waterNoise(uvB * 5.5 + 7.0), blend) - 0.5) * (0.22 * c2 * contrast); }
     }
+    if (close > 0.001) { pat = mix(pat, 0.62 + whiteFineLace(xy, c0, c1, c2), close); }
+    if (cc * calm > 0.001) { pat += whiteCoarseLace(xy, cc) * calm; }
     // Never quite closed: even a cascade shows dark water between its foam.
     let cut = 1.0 - 0.52 * fa;
     // Antialiased: the pattern changes by about 2 per metre, so a hard edge seen from
     // above is a coin toss per pixel, and shimmers as it moves.
-    let soft = 0.035 + min(1.8 * px, 0.45);
-    let mask = smoothstep(cut - soft, cut + soft, pat) * smoothstep(0.0, 0.12, fa) * waterFoamFar(dist);
+    let soft = 0.035 + min(1.8 * mix(1.0, 0.33, calm * (1.0 - c0)) * px, 0.45);
+    // Lace is a thin film, not foam: what water carries keeps its body.
+    let film = 1.0 - 0.6 * calm;
+    let mask = smoothstep(cut - soft, cut + soft, pat) * smoothstep(0.0, 0.12, fa) * waterFoamFar(dist) * film;
     // Foam is not a white sheet: thin lace lets the water through and goes grey,
     // thick foam is bright, and the sun models it by the surface's own slope.
     let lit = sky * 0.85 + sun * (0.1 + 0.9 * max(dot(N, L), 0.0));

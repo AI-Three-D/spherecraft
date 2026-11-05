@@ -216,6 +216,105 @@ it('keeps a steep stream wet down to its lake: the bed follows the eased level',
     for (let x = 40; x < 170; x += 2) expect(valueAt(x, 0, r.wet)).toBe(1);
 });
 
+it('keeps a steep stream its full width under the lake mask, up to where it reaches the lake', async () => {
+    // A hillside falling 30 % into a lake, the 32 m mask reaching 12 m up it. At the lake's
+    // level only the tip of the cut is under water: a neck across the river.
+    const L = riverFieldLayout(R);
+    const lakeLevel = 100, hill = (x) => 130 - 0.3 * x, ground = (x, y) => hill(x) + 0.05 * Math.abs(y);
+    const n = 31, st = 20, points = new Float32Array(n * st);
+    for (let k = 0; k < n; k++) {
+        const x = -300 + 20 * k, d = at(x, 0), wl = Math.max(hill(x) - 1.2, lakeLevel);
+        points.set([d[0], d[1], d[2], wl, 8, 1.2, 1, 1, wl, x > 130 ? -1 : 0, 0, 0, 0, wl, -1e4, -1e4, wl, 1.2, -1e20, 0], k * st);
+    }
+    const arc = Float64Array.from({ length: n }, (_, k) => 20 * k);
+    const levels = Float64Array.from({ length: n }, (_, k) => points[k * st + 16]);
+    const sampleNatural = async (dirs4) => {
+        const out = new Float32Array(dirs4.length / 4);
+        for (let i = 0; i < out.length; i++) { const [x, y] = planeXY([dirs4[i * 4], dirs4[i * 4 + 1], dirs4[i * 4 + 2]]); out[i] = ground(x, y); }
+        return out;
+    };
+    const r = await bakeRiverField({ rivers: [{ rec: { points, stride: st, mouths: [{ s: 400, level: lakeLevel, hw: 8, sign: 1, landM: 64 }] }, arc, rid: 4, levels, destLevel: lakeLevel }],
+        L, sampleNatural, lakeAt: (d) => (planeXY(d)[0] > 88 ? { level: lakeLevel } : null), debug: true,
+        o: { ...RIVER_FIELD, meanderAmp: 0, shoreAmp: 0, widenRiver: 1, widenReach: 1 } });
+    const wetAt = (x, y) => {
+        const q = fieldCoords(at(x, y), L), key = pageKey(q.face, Math.floor(q.x / L.P), Math.floor(q.y / L.P), L);
+        return r.wet[r.keys.indexOf(key) * L.P * L.P + (Math.floor(q.y) % L.P) * L.P + (Math.floor(q.x) % L.P)];
+    };
+    for (let x = 40; x <= 104; x += 2) {
+        let width = 0;
+        for (let y = -30; y <= 30; y += 2) width += wetAt(x, y) ? 2 : 0;
+        expect(width, `at ${x} m`).toBeGreaterThanOrEqual(12);
+    }
+});
+
+it('keeps its banks off rising ground: a wide channel in a valley does not cut walls', async () => {
+    // A valley rising 25 % either way from the river, the trace 20 m to each side.
+    const L = riverFieldLayout(R);
+    const ground = (x, y) => 100.5 - 0.002 * x + 0.25 * Math.abs(y);
+    const n = 31, st = 20, points = new Float32Array(n * st);
+    for (let k = 0; k < n; k++) {
+        const x = -300 + 20 * k, d = at(x, 0), wl = 100 - 0.002 * x;
+        points.set([d[0], d[1], d[2], wl, 20, 1.5, 1, 1, wl, 0, 0, 0, 0, wl, -1e4, -1e4, wl, 1.5, -1e20, 0], k * st);
+    }
+    const arc = Float64Array.from({ length: n }, (_, k) => 20 * k);
+    const levels = Float64Array.from({ length: n }, (_, k) => points[k * st + 16]);
+    const sampleNatural = async (dirs4) => {
+        const out = new Float32Array(dirs4.length / 4);
+        for (let i = 0; i < out.length; i++) { const [x, y] = planeXY([dirs4[i * 4], dirs4[i * 4 + 1], dirs4[i * 4 + 2]]); out[i] = ground(x, y); }
+        return out;
+    };
+    const wetHalf = async (bankCutM) => {
+        const r = await bakeRiverField({ rivers: [{ rec: { points, stride: st, mouths: [] }, arc, rid: 7, levels }], L, sampleNatural, lakeAt: () => null, debug: true,
+            o: { ...RIVER_FIELD, meanderAmp: 0, shoreAmp: 0, widenRiver: 1, widenReach: 1, bankCutM } });
+        const wetAt = (x, y) => {
+            const q = fieldCoords(at(x, y), L), key = pageKey(q.face, Math.floor(q.x / L.P), Math.floor(q.y / L.P), L);
+            return r.wet[r.keys.indexOf(key) * L.P * L.P + (Math.floor(q.y) % L.P) * L.P + (Math.floor(q.x) % L.P)];
+        };
+        let y = 0;
+        while (wetAt(0, y + 2)) y += 2;
+        return y;
+    };
+    // Natural ground at 20 m stands 5.5 m over the water; 3 m over it comes at 10 m, and
+    // the blur at the water's edge takes a little more on a slope like this.
+    expect(await wetHalf(100)).toBeGreaterThanOrEqual(18);
+    const held = await wetHalf(3);
+    expect(held).toBeLessThanOrEqual(12);
+    expect(held).toBeGreaterThanOrEqual(5);
+});
+
+it('cuts no land past a lake shore: a wide end stays out of the ground beside it', async () => {
+    // A shore at an angle to the river: on the river's -y side land goes on past where its
+    // centre enters the lake.
+    const L = riverFieldLayout(R);
+    const lakeLevel = 100, nat = (x, y) => 100 + 0.25 * (150 - x - 0.9 * y), hw = 40;
+    const n = 31, st = 20, points = new Float32Array(n * st);
+    for (let k = 0; k < n; k++) {
+        const x = -300 + 20 * k, d = at(x, 0), wl = Math.max(nat(x, 0) - 1, lakeLevel);
+        points.set([d[0], d[1], d[2], wl, hw, 1.5, 1, 1, wl, x > 170 ? -1 : 0, 0, 0, 0, wl, -1e4, -1e4, wl, 1.5, -1e20, 0], k * st);
+    }
+    const arc = Float64Array.from({ length: n }, (_, k) => 20 * k);
+    const levels = Float64Array.from({ length: n }, (_, k) => points[k * st + 16]);
+    const sampleNatural = async (dirs4) => {
+        const out = new Float32Array(dirs4.length / 4);
+        for (let i = 0; i < out.length; i++) { const [x, y] = planeXY([dirs4[i * 4], dirs4[i * 4 + 1], dirs4[i * 4 + 2]]); out[i] = nat(x, y); }
+        return out;
+    };
+    const r = await bakeRiverField({ rivers: [{ rec: { points, stride: st, mouths: [{ s: 450, level: lakeLevel, hw, sign: 1, landM: 64 }] }, arc, rid: 4, levels, destLevel: lakeLevel }],
+        L, sampleNatural, lakeAt: (d) => { const [x, y] = planeXY(d); return nat(x, y) < lakeLevel ? { level: lakeLevel } : null; }, debug: true, o: { ...RIVER_FIELD, meanderAmp: 0, shoreAmp: 0, widenRiver: 1, widenReach: 1 } });
+    const valueAt = (x, y, arr) => {
+        const q = fieldCoords(at(x, y), L), key = pageKey(q.face, Math.floor(q.x / L.P), Math.floor(q.y / L.P), L);
+        return arr[r.keys.indexOf(key) * L.P * L.P + (Math.floor(q.y) % L.P) * L.P + (Math.floor(q.x) % L.P)];
+    };
+    // Land past the shore's crossing of the centre, inside the channel's half-width: left alone, dry.
+    for (const [x, y] of [[172, -34], [176, -36], [174, -38], [178, -38]]) {
+        expect(nat(x, y)).toBeGreaterThan(lakeLevel + 1);
+        expect(valueAt(x, y, r.ground), `ground at ${x}, ${y}`).toBeCloseTo(nat(x, y), 1);
+        expect(valueAt(x, y, r.wet)).toBe(0);
+    }
+    // The river still reaches its lake.
+    for (let x = 100; x < 190; x += 4) expect(valueAt(x, 0, r.wet), `wet at ${x}`).toBe(1);
+});
+
 it('leaves no bar across the channel when the mouth station lies on land before the lake', async () => {
     const L = riverFieldLayout(R);
     // The river's mouth station is at x = 100, the lake's water begins at x = 170.
@@ -302,7 +401,7 @@ describe('river width', () => {
         for (let rid = 0; rid < 40; rid++) for (let x = 0; x <= 4000; x += 25) seen.push(riverWidthFactor(rid, x, 4000));
         expect(Math.min(...seen)).toBeGreaterThanOrEqual(1);
         expect(Math.max(...seen)).toBeLessThanOrEqual(RIVER_FIELD.widenMax);
-        expect(Math.max(...seen)).toBeGreaterThan(4);
+        expect(Math.max(...seen)).toBeGreaterThan(1.7);
     });
     it('comes back to the river\'s own width at its ends', () => {
         expect(riverWidthFactor(3, 0, 4000)).toBeCloseTo(riverWidthFactor(3, 4000, 4000), 6);

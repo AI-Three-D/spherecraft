@@ -7,9 +7,9 @@
 // connected water is (no puddles in hollows beside it). Same shading as the
 // lake sheets (nearWaterSurface.wgsl.js nearWaterShade), so where a lake's
 // water continues past the field's pages nothing changes but who draws it.
-// Where the baked flow moves, the surface is whitewater's middle tier: still
-// geometry, animated by the flow (whitewaterLook.wgsl.js). Where the near
-// simulation draws (WhitewaterSim.js, whiteCover) this mesh gives way.
+// Where the baked flow moves, and on any water close to the camera, the surface is
+// whitewater's middle tier: still geometry, animated (whitewaterLook.wgsl.js). Where
+// the near simulation draws (WhitewaterSim.js, whiteCover) this mesh gives way.
 
 import { commonWgsl, shadeWgsl } from './nearWaterSurface.wgsl.js';
 import { WHITE_UNIFORMS_WGSL, WHITE_FLAG_LOOK, WHITE_FLAG_NEAR, whitewaterLookWgsl } from './whitewaterLook.wgsl.js';
@@ -107,11 +107,10 @@ fn main(in: FieldWaterVOut) -> @location(0) vec4<f32> {
         return whiteDebug(waterParams.debugMode, in.flow.xy, in.flow.z, in.flow.z * 0.6, 1.0, vec3<f32>(0.1, 0.9, 0.25));
     }
     var c: vec4<f32>;
-    nearWaterShoreM = waterShoreM(dir, waterFootM(length(U.cameraPos - in.wp), in.wp, U.cameraPos, dir)) * clamp(-in.flow.w, 0.0, 1.0) * (1.0 - smoothstep(0.1, 0.6, length(in.flow.xy)));
     let foam = whiteBakedFoam(in.flow.z, in.xy) * smoothstep(0.0, 2.5, in.sdf);
-    if ((W.flags & ${WHITE_FLAG_LOOK}u) != 0u && (foam > 0.003 || dot(in.flow.xy, in.flow.xy) > 0.01)) {
+    if ((W.flags & ${WHITE_FLAG_LOOK}u) != 0u && (foam > 0.003 || dot(in.flow.xy, in.flow.xy) > 0.01 || length(U.cameraPos - in.wp) < waterParams.lakeDetailM)) {
         let turb = clamp(foam * 0.9 + 0.12 * length(in.flow.xy), 0.0, 1.0);
-        c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, dir, in.xy, in.flow.xy, foam, turb), in.pos.xy, in.plane);
+        c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, dir, in.xy, in.flow.xy, foam, turb, in.pos.xy), in.pos.xy, in.plane);
     } else {
         c = nearWaterShade(in.wp, in.pos.xy, in.plane);
     }

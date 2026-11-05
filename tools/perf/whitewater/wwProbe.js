@@ -249,13 +249,13 @@ export async function wwAlong({ river, stepM = 8, rangeM = 170, half = 3 }) {
             const f = seg > 0 ? (next - acc) / seg : 0, q = p0.map((v, i) => v + (p1[i] - v) * f), m = Math.hypot(...q), [x, y] = w._frameXY(q.map(v => v / m));
             if (Math.hypot(x - cx, y - cy) < rangeM) {
                 const ci = Math.floor(x / dx), cj = Math.floor(y / dx);
-                let dev = 0, sp = 0, c = 0;
+                let dev = 0, sp = 0, c = 0, bk = 0, hs = 0, hb = 0;
                 for (let v = -half; v <= half; v++) for (let u = -half; u <= half; u++) {
                     const e = id(ci + u, cj + v), h = S[e * 4];
                     if (!(h > 0.1)) continue;
-                    dev += T[e * 8] + h - T[e * 8 + 4]; sp += Math.hypot(S[e * 4 + 1], S[e * 4 + 2]); c++;
+                    dev += T[e * 8] + h - T[e * 8 + 4]; sp += Math.hypot(S[e * 4 + 1], S[e * 4 + 2]); bk += Math.hypot(T[e * 8 + 5], T[e * 8 + 6]); hs += h; hb += T[e * 8 + 4] - T[e * 8]; c++;
                 }
-                if (c > 4) out.push({ s: Math.round(next), dev: Math.round(100 * dev / c), v: +(sp / c).toFixed(1) });
+                if (c > 4) out.push({ s: Math.round(next), dev: Math.round(100 * dev / c), v: +(sp / c).toFixed(1), vb: +(bk / c).toFixed(1), h: +(hs / c).toFixed(2), hb: +(hb / c).toFixed(2), W: +(T[id(ci, cj) * 8 + 4]).toFixed(2) });
             }
             next += stepM;
         }
@@ -263,4 +263,33 @@ export async function wwAlong({ river, stepM = 8, rangeM = 170, half = 3 }) {
     }
     a.unmap(); b.unmap(); a.destroy(); b.destroy();
     return out;
+}
+
+// Where still water stands off its baked level: the cells of wwSurge's still zone with the
+// largest rise, grouped by 8 m, each with its place (metres from the camera, along the
+// frame), solver and baked depth, speed, and whether the baked state calls it lake.
+export async function wwRiseCells({ stillSpeed = 0.3, deep = 0.3, top = 8 } = {}) {
+    const g = window.gameEngine, w = g.whitewater, d = w.device, N = w.N, B = 32, dx = w.config.dx, cells = N * N;
+    const st = d.createBuffer({ size: cells * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }), bk = d.createBuffer({ size: cells * 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = d.createCommandEncoder();
+    enc.copyBufferToBuffer(w.stateBufs[0], 0, st, 0, cells * 16); enc.copyBufferToBuffer(w.staticBuf, 0, bk, 0, cells * 32);
+    d.queue.submit([enc.finish()]);
+    await Promise.all([st.mapAsync(GPUMapMode.READ), bk.mapAsync(GPUMapMode.READ)]);
+    const S = new Float32Array(st.getMappedRange()), T = new Float32Array(bk.getMappedRange());
+    const wrap = (a) => (a + N) % N, id = (i, j) => wrap(j) * N + wrap(i);
+    const cam = g.camera.position, l = Math.hypot(cam.x, cam.y, cam.z), [cx, cy] = w._frameXY([cam.x / l, cam.y / l, cam.z / l]);
+    const groups = new Map();
+    for (let b = 0; b < w.activeCount; b++) {
+        const rx = w._blockData[b * 4 + 2], ry = w._blockData[b * 4 + 3], gx = w._blockData[b * 4] * B, gy = w._blockData[b * 4 + 1] * B;
+        for (let lj = 0; lj < B; lj += 2) for (let li = 0; li < B; li += 2) {
+            const c = id(rx * B + li, ry * B + lj), h = S[c * 4];
+            if (!(h > deep) || Math.hypot(T[c * 8 + 5], T[c * 8 + 6]) >= stillSpeed) continue;
+            const rise = T[c * 8] + h - T[c * 8 + 4];
+            const x = (gx + li) * dx, y = (gy + lj) * dx, key = Math.round(x / 8) * 100000 + Math.round(y / 8);
+            const q = groups.get(key);
+            if (!q || rise > q.rise) groups.set(key, { rise: +rise.toFixed(2), x: Math.round(x - cx), y: Math.round(y - cy), h: +h.toFixed(2), hb: +(T[c * 8 + 4] - T[c * 8]).toFixed(2), W: +T[c * 8 + 4].toFixed(2), bed: +T[c * 8].toFixed(2), bakedV: +Math.hypot(T[c * 8 + 5], T[c * 8 + 6]).toFixed(2), v: +Math.hypot(S[c * 4 + 1], S[c * 4 + 2]).toFixed(2), w7: +T[c * 8 + 7].toFixed(2) });
+        }
+    }
+    st.unmap(); bk.unmap(); st.destroy(); bk.destroy();
+    return [...groups.values()].sort((a, b) => b.rise - a.rise).slice(0, top);
 }

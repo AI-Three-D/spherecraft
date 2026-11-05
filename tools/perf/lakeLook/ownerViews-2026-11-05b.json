@@ -247,6 +247,82 @@
     0
    ],
    "note": "rivers as white shaped lines from high up; lakes as smooth blobs; sharp shoreline"
+  },
+  {
+   "name": "o-blocks",
+   "pos": [
+    -131933.7,
+    79.0,
+    2475.3
+   ],
+   "look": [
+    -131931.1,
+    75.1,
+    2470.1
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "close: blocky pixelated waterline"
+  },
+  {
+   "name": "o-blur",
+   "pos": [
+    -131936.4,
+    62.5,
+    2482.9
+   ],
+   "look": [
+    -131932.5,
+    67.5,
+    2479.7
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "close: ground blurring into water"
+  },
+  {
+   "name": "o-bars",
+   "pos": [
+    -131916.0,
+    -2177.8,
+    2913.3
+   ],
+   "look": [
+    -131911.1,
+    -2176.2,
+    2918.1
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "brown land and green blobs in the water at a river's end"
+  },
+  {
+   "name": "o-bridge",
+   "pos": [
+    -131913.2,
+    -1979.5,
+    3731.2
+   ],
+   "look": [
+    -131908.3,
+    -1978.4,
+    3736.1
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "land bridges at both ends of a river; border at the plume"
   }
  ]
 }

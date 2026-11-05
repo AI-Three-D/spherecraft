@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RIVER_SECTION } from '../water/riverSection.js';
-import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverDelta, riverDeltaHalfWidth, riverLakeApproach, riverLakeHold, riverReachShape, riverShape, RIVER_SHAPE_DEFAULTS, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
+import { corridorMask, fitNonIncreasingQuantile, RIVER_LEVEL_DEFAULTS, riverCrestAbove, riverDelta, riverDeltaHalfWidth, riverLakeApproach, riverLakeHold, riverReachShape, riverShape, riverThinScale, RIVER_SHAPE_DEFAULTS, riverValleyLevels, riverLakeRims, segmentCells, smoothRiverPath, traceRiverPatch, trunkLevelAt } from './riverRefine.js';
 
 // 60 x 30 patch, 16 m cells, frame origin at (0, 0). A valley runs along
 // j = 15 from a source lake (i < 10, level 50 m) down to a destination lake
@@ -149,12 +149,29 @@ describe('river levels for the valley', () => {
     });
 
     it('narrows the smallest rivers to minReachWidthM at most', () => {
-        const small = riverShape(0, 0.001);
-        expect(small.width).toBe(12);
+        const small = riverShape(0, 0.001), P = RIVER_SHAPE_DEFAULTS;
+        expect(small.width).toBe(P.minWidthM);
+        expect(riverThinScale(17)).toBe(1);
         const widths = [];
         for (let s = 500; s < 5000; s += 10) widths.push(riverReachShape(small, s, 6000, 17).width);
-        expect(Math.min(...widths)).toBe(8);
-        expect(Math.max(...widths)).toBeGreaterThan(12);
+        expect(Math.min(...widths)).toBe(P.minReachWidthM);
+        expect(Math.max(...widths)).toBeGreaterThan(P.minWidthM);
+    });
+
+    it('makes the usual small river at least 24 m wide, and thin ones a minority', () => {
+        const small = riverShape(0, 0.001), P = RIVER_SHAPE_DEFAULTS, medians = [];
+        for (let river = 0; river < 400; river++) {
+            const widths = [];
+            for (let s = 500; s < 5000; s += 50) widths.push(riverReachShape(small, s, 6000, river).width);
+            medians.push(widths.sort((a, b) => a - b)[widths.length >> 1]);
+        }
+        medians.sort((a, b) => a - b);
+        expect(medians[200]).toBeGreaterThanOrEqual(24);
+        const thin = medians.filter(w => w < 16).length / 400;
+        expect(thin).toBeGreaterThan(0.06);
+        expect(thin).toBeLessThan(0.18);
+        // Never so thin that a bed turns into beads on coarser tiles (owner 2026-10-26).
+        expect(P.thinScale * P.minReachWidthM).toBeGreaterThanOrEqual(7.9);
     });
 
     it('keeps lake overlaps flat and a positive slope even with a tiny total drop', () => {

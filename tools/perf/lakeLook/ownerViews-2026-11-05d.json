@@ -1,0 +1,10 @@
+{
+ "note": "Owner 2026-11-05, fifth look: rivers still read as barely 10 m, broken parts, weird steps; white patch far off that is calm close by (green stars).",
+ "views": [
+  { "name": "g-slit", "pos": [-132065.8, -743.0, 959.7], "look": [-132061.7, -748.2, 962.0], "note": "green arrow: water notch with a straight edge, ghost band up the hill, black blotches" },
+  { "name": "g-wedge", "pos": [-131915.3, -1409.4, -524.7], "look": [-131911.1, -1408.9, -519.1], "note": "smooth dark triangle with straight edges in the water, stepped edge between white and lace at the top" },
+  { "name": "g-star-far", "pos": [-131899.5, -2201.6, 3123.8], "look": [-131894.7, -2200.7, 3128.9], "note": "white foam patch among rocks, seen from a distance" },
+  { "name": "g-star-near", "pos": [-131897.5, -2195.3, 3211.3], "look": [-131891.0, -2194.1, 3213.7], "note": "the same spot from close: calm, few flecks" },
+  { "name": "g-notch", "pos": [-131833.3, -1990.7, 3920.2], "look": [-131829.0, -1990.2, 3925.8], "note": "green arrow: V of smooth ground in the lake beside a notch of water" }
+ ]
+}
