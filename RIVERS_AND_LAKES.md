@@ -379,7 +379,7 @@ Whitewater's own tools are in section 9.
 - `tools/perf/structured-terrain-results/` (untracked, large) holds all
   earlier captures.
 
-## 9. Whitewater (2026-11-04, uncommitted, for the owner's look)
+## 9. Whitewater (2026-11-04, a6038d6 and after)
 
 Whitewater (`../whitewater`) is the bare minimum for the look. Three tiers, one
 baked flow state, so they agree where they hand over. **Switch:** `&whitewater=off`
@@ -400,13 +400,23 @@ channel: speed from Jarrett's high-gradient law, one discharge per river (speed
 follows the section), and a Manning n per station that puts exactly that flow in
 balance at W.
 
-**Warm-up.** Whitewater runs 900 hidden steps because it starts from a state that
-is not a solution. Here friction is solved so that the baked state is one. From a
-cold reset of every block (`wwWarmup`, river 2553): level RMS 0.008 m at 0.1 s,
-speed 2.713 against 2.712 baked, 132 blocks full in 0.25 s. There is no wave to
-hide; what grows is local detail and foam, over seconds. Each block eases in over
-1 + 1.5 s (the mid tier stays until then) stepping one extra step a frame, and
-blocks fill well beyond the drawn radius, so walking never reaches cold water.
+**Warm-up.** (Corrected 2026-11-05: the balance below was not true at the time; see section 10.)
+Whitewater runs 900 hidden steps because it starts from a state that
+is not a solution. Here friction is solved so that the baked state is one along the
+river. From a cold reset of every block (`wwWarmup`, river 2553, mid reach): level RMS
+0.008 m at 0.1 s, speed 2.713 against 2.712 baked, 132 blocks full in 0.25 s. What
+grows is local detail and foam, over seconds. Each block eases in over 1 + 1.5 s (the
+mid tier stays until then) stepping one extra step a frame, and blocks fill well beyond
+the drawn radius, so walking never reaches cold water.
+
+River ends are the exception, and were a real surge until lakes held their level: the
+baked flow stops inside a lake, so the start state is not mass-consistent there. Water
+piled up at the mouth and ran back up the river on arrival (owner; `surge.mjs` at
+o-mouth-surge: +0.27 / -0.29 m over ~10 s, front steepness 0.15). A lake is a reservoir,
+so lake texels (flow word's n = 0) hold their level (`lakeHold`) and take a river's
+momentum and foam away (`lakeDrag`). Level movement in still water, top 1 %: 0.154 -> 0.002 m,
+0.143 -> 0.008, 0.179 -> 0.014. Rivers leaving lakes were as bad (src-2551: white across the
+reach, gone). `wwWarmup` could not have seen any of it: it measured mid-river.
 
 **Handover.** Blocks have a weight, 0 at the edge of what steps, 1 inside, fading
 with distance. The solver pulls to the baked state where it is low (sponge: inflow
@@ -422,13 +432,22 @@ drawn as meshes, never in tiles. The bed is the terrain itself: `HydrologyGrid.j
 `carvedDirsEncoder` (no readback), roughened under falling water.
 
 **Costs** (M1 Pro, 2160 x 1350, fenced GPU span, on against `whitewater=off`, same
-poses, run to run noise ~0.5 ms): close +1.8 to +3.9 ms (10-11 -> 12-15 ms), mid +2 to +2.9 ms,
-gentle river +1.1 ms, far +0.3 ms. Parts at one close pose, measured before the single
-solver step and the smaller spray: surface 1.9, solver 0.9, spray 0.8, rocks ~0.4; not
-measured again after them. Flight at 30 m/s: no frame over 16.8 ms, same as off (8 frames at
-33 ms before the fill budget). At 120 m/s: none, measured before the last changes. Memory
-(from the buffer sizes): 55 MB of simulation buffers; flow texels 4 bytes each, ~25 MB at 4782
-pages (field total 74.5 MB there). Bake: +76 ms in the worker.
+poses, run to run noise ~0.5 ms): close +1.6 to +1.9 ms (10-11 -> 11.6-13.3 ms), mid +1.0 ms, gentle
+river +0.8 ms, far +0.4 ms. Fading octaves by pixel size saved more than the rest of the polish cost.
+Those were on a free GPU, before lakes held their level. After it, with the owner's game open on
+the same GPU (off itself rose to 15.6-19.4 ms), on against off back to back: far +0.26 ms, close
++3.7 to +5.4 ms, and flight at 30 m/s p50 33 ms: not comparable, and low FPS also buys extra solver
+steps by design. Measure again on a free GPU before trusting either; check `uptime` and Chrome first.
+Parts at one close pose, measured early, before the single solver step and the smaller spray:
+surface 1.9, solver 0.9, spray 0.8, rocks ~0.4. Flight at 30 m/s: no frame over 16.8 ms, same as
+off. Memory (from the buffer sizes): 55 MB of simulation buffers; flow texels 4 bytes each, ~25 MB
+at 4782 pages. Bake: +76 ms in the worker. Steps follow real time, so at the idle 30 FPS the solver
+takes two steps a frame.
+
+**Flicker, measured** (`flicker.mjs`, o-flicker, 30 FPS): a6038d6 hf 3.00, blinks 0.67 %, coverage
+beat at 0.4 s, by image rows far to near 1.51, 1.92, 1.25, 3.84. Now hf 1.45, blinks 0.22 %, no beat at
+the cycle's rate, rows 0.47, 0.58, 1.20, 2.10. At 60 FPS: hf 0.63, blinks 0.06 %. With the pattern held
+still hf is ~0.3, the solver's own floor; the near rows' rest is largely foam edges really moving.
 
 **Found the hard way:**
 - Foam mean baked vs settled is close (0.80/0.82, 0.32/0.26), but simulated foam is
@@ -444,6 +463,25 @@ pages (field total 74.5 MB there). Bake: +76 ms in the worker.
   water fades by the solver's depth (Whitewater's `present`).
 - Rocks at a bank drew lines over the grass; on a 60 % slope they hung in the air until
   their base went down by the fall across their radius.
+- Flicker (owner, seen from above at the idle 30 FPS): all in the surface pattern, not the
+  solver (`flicker.mjs`, pattern held still: hf 2.96 -> 0.34). Foam coverage beat at exactly half
+  the flow cycle: mixing two noises loses contrast half way, and a threshold turns that into
+  coverage; `contrast` holds the variance through the fade. Then a hard foam edge at 11 cm pixels
+  (`soft` now grows with the pixel), octaves left in past pixel size (ridged filaments are a
+  fraction of their lattice), and an octave moving half its size a frame at 30 FPS.
+- The game idles at 30 FPS by design: a fixed step a frame ran the water at half speed. Steps
+  follow real time now. Test what the owner sees, at 30 as well as 60.
+- The beach line (owner): a standing line of foam, not a wave (lake level RMS flat over 6 s).
+  My first suspect, the "rock" term for dry neighbours, was the smallest source; `wwFoamSources`
+  showed the Froude term, in water 0.16 m deep half a metre outside the baked shore: thin water
+  is supercritical at any speed. Foam now needs depth and a baked current. Foam cells in the
+  lake zone: 1264 -> 146, river unchanged.
+- Ridged noise on one lattice shows it: a maze of rounded squares from above. Two lattices at
+  unrelated angles do not line up; a second ridged octave drew cracks in glass, plain noise wisps.
+- A level off the baked one is not a surge: the level beside a river near a mouth is the
+  lake's, so the river's own surface reads 0.6-0.9 m "high" for ever. `moved99` (how far cells move
+  between samples) tells them apart. Holding lakes left foam gathering in a line where the
+  flow stalls at the stepped blocks' edge: foam decays in lake water.
 - Deleting `core/renderer/rivers` broke the live lake shader's noise import; tests did
   not catch it (lakes have none). After deletions, check every relative import.
 
@@ -451,11 +489,156 @@ pages (field total 74.5 MB there). Bake: +76 ms in the worker.
 readback for floating things (Whitewater's band copy). Rocks are placeholders: one
 lumpy shape, one colour, no collision. Density and sizes (`riverFlow.js`: 0.01 per m2, radius
 0.4-3.8 m long-tailed, half under 0.65 m) were set by the owner's eye: 0.03 and 0.9-2.7 m read as a field of equal stones. On the steepest
-reaches water runs narrower than the channel, so the mud bed shows beside it. Surface
+reaches water runs narrower than the channel, so the mud bed shows beside it. With fewer rocks
+steep reaches settle ~20 % faster than baked (3.1 against 2.5 m/s): rocks were part of the drag. Surface
 fragments are the largest cost; a noise texture instead of hashes and half-density far blocks
 are the next savings. Far brown stretches are the older far-water gap (same with it off).
 
 **Tools:** `tools/perf/whitewater/wwProbe.js` (`wwRiverStats`, `wwStatus`, `wwReadback`,
-`wwWarmup`, `wwFlight`, `wwCost`), `views.json`; `w.debugOff = { rocks, spray, surface, solver }`.
+`wwWarmup`, `wwFlight`, `wwCost`, `wwFoamSources`, `wwLakeWave`, `wwSurge`), `surge.mjs` (arrive at
+poses on a virtual clock, level series, arms over `whitewater.config`), `flicker.mjs` (exact frames on a
+virtual clock: second differences, blinks, coverage beat, a heat map; its score includes foam edges
+really moving, so read it by image rows), `views.json`, `ownerViews-2026-11-05.json`;
+`w.debugOff = { rocks, spray, surface, solver, pattern }`.
 Poses by `river`/`fraction`: on steep rivers use negative `back` (from downstream),
 or the camera lands inside the hill. Evidence: `tools/perf/structured-terrain-results/whitewater-2026-11-04/`.
+
+## 10. Distant water (2026-11-05, uncommitted, waiting for the owner's look)
+
+Owner: lakes turn an ugly flat colour at a short distance; distant water first, waves close by
+later. Evidence: `tools/perf/structured-terrain-results/lake-look-2026-11-05/` (`before-after.png`
+first; `baseline/`, `final/`, `checks-final/` for mouths and sun heights).
+
+**Why it was flat.** Four causes, each measured:
+- Lake ripples never existed. `waterSurfaceTerms` took tangent coordinates from the world position,
+  and on a planet at the origin that has no tangential part: every pixel of a lake got one tilt that
+  only changed with time. Ripple detail with the coordinates fixed rose from 0.5-1.0 to 1.1-1.7
+  codes close by and did nothing past 600 m, so this alone was never the answer.
+- A flat mirror: Fresnel is already 0.6 at 300 m from 30 m up, and from there one colour takes the lake.
+- That colour was the lighting's ambient, not the sky: R/G 0.91 against the sky's 0.59 (the purple
+  band), a third of its level, and it does not change from noon to dusk.
+- From above the water was one teal body. With reflection off the far band went black and the teal
+  stayed: two flat colours, one per viewing angle.
+
+**What it is now** (`waterWgsl.js`). Past a few hundred metres no wave is a pixel, so the surface is
+the statistics of its slopes. `waterWind` is gusts drifting over the water (twelve phase-modulated
+sines in space, no tangent frame, so no seams; bands leave before a pixel reaches them). Wind sets
+sigma, sigma keeps Fresnel from saturating, and its change from gust to gust is what shows.
+`waterSkyColor` is the sky measured on screen by sun height, with a dusk term. Sun glitter is a
+Gaussian in slope, not `pow 600`. `waterBodyLight` is teal in the shallows, slate in open water;
+past 1 km distance alone decides, since depth there is coarse triangles (owner 2026-10-12).
+Tuning: `qtDiag.water.look({ openColor, skyColor, wind, reflection })`.
+
+**Measured** (`tools/perf/lakeLook/`): detail along an image row, sRGB codes, 12 views of 3 lakes
+(spawn 2814, alpine 639, plateau 180): 0.04-2.1 before, 1.3-16 after, median about 5. Hue of the far
+band now follows the sky. Flicker at 30 FPS (`flicker.mjs`, `minTop: 0`): hf 0.022 against 0.015,
+blinks 0 %; foam scores 0.6-1.5 on the same measure.
+
+**Cost**, in the same page, old surface against new, taken in turn (`costAB.js`), 6 rounds:
+-0.1, +0.35, +0.7, +1.7 ms (`lake2814-shore`, `-high`, `-low`, `lake180-shore`), spread within one
+state 1-3 ms. The ripple's hashed gradient is the next saving; the wave work will replace it.
+
+**Found the hard way:**
+- **Compare cost in one page.** Across page loads the same code moved 2 ms and more, and a patch to
+  code that cannot run on those pixels moved `lake180-shore` by 2.1 ms. Across loads this view read
+  +3.9 ms, most of it not the water.
+- **The tiers must agree.** The solver's blocks and the field's pages end in straight lines across
+  lakes (debug view 15). Lake water drawn by `whiteSurface` showed one (owner's views at mouths, not
+  the lake views). Still water is now the lakes' surface in every tier, by flow speed.
+- A term that exists only in one branch steps at that branch's edge: `waterWindNow` stayed at its
+  default past the `still` test and drew a curved contour along a speed line.
+- The brown band across lakes at 1-1.6 km was the bed: the terrain kept a share of it and the near mesh
+  covers only its own share, leaking about a fifth mid-handover. The far body now turns opaque by
+  1.2 km. Red through the band: 70 74 73 65 -> 68 64 61 59.
+- Do not extrapolate the sky: my first level curve went to black at sun -0.3 under a bright tan sky.
+- Hashed 3D noise for the wind was four bands of 8 hashes; sines look as good for gusts.
+- `flicker.mjs` hangs on a second view (the page's clock is taken over): one view per run.
+  There is no `timeout` on macOS, and zsh does not split `$VAR` in a `for`.
+
+**Open:**
+- No terrain in the reflection: real lakes show a dark band under their far shore. The largest
+  thing still missing. Beyond 2.5 km there is no mask, so it needs a new idea there.
+- `skyColor` is measured for this atmosphere in clear weather: it does not follow weather or another
+  planet's sky. Wind is one fixed field, not tied to weather either.
+- Close by the water changed too (slate over deep water, soft glitter): the waves are still to do.
+
+### Rivers against the baked state (2026-11-05, same day, uncommitted)
+
+Owner's views: `tools/perf/lakeLook/ownerViews-2026-11-05b.json` (far dots, seams at both ends,
+cyan, slow steep water, flow stopping at the lake, an upstream wave on arrival, a triangle in the
+glare). Before/after: `rivers-before-after.png` in the same results folder.
+
+**The upstream wave.** Measured with a distance-time map (`wwAlong`, `surge.mjs` with `along`):
+level against baked along the river, one row a second; a wave going up is a diagonal. Three causes,
+found in this order, each proved by the map:
+- Friction used the hydraulic depth; the raster's speed and the solver's friction meet at the depth.
+  n^2 V^2 / D^(4/3) came to 57 % of gravity, so the river ran away from its baked state (+10 %,
+  still climbing at 30 s). The test had the same Rh in it, so it passed. Section 9's "level RMS
+  0.008 m at 0.1 s" could not see this: it looked at 0.1 s.
+- Rocks are in the solver's bed and not in W: a ledge at s = 416 of river 2557 held +52 cm and sent
+  a 15-20 cm step up the river at ~3 m/s. With rocks out of the bed it was gone. Now solid only where
+  Froude >= 1.2: in supercritical water nothing goes upstream. Elsewhere they are drawn, wake included.
+- The design discharge was more than the outlet can pass (Q from the wide middle, a narrow neck on
+  flat water): a jet of 5.4 m/s on lake water, then a bulge, or once capped, 0.3 m draining down the
+  river. Q is now what the outlet passes on the fall available.
+Arrival at the owner's spot: rise 0.70 -> 0.003 m, front steepness 0.19 -> 0.04, lake level movement
+0.10 -> 0, river's 0.34 -> 0.16 m, solver speed against baked +10 % -> -4 %. Rivers 453 and 2560: rise
+0.07 and 0.007 m, no stripe. Left: a sag of 0.2-0.3 m near outlets, stable; a slow even rise of
+~1 cm/s on river 2560.
+
+**Wrong turns, do not repeat.** A longer hidden warm-up changes nothing: the level has nowhere
+steady to go. Releasing blocks from the baked state over 10 s delays the wave and makes it bigger
+(river movement 0.48 m at 14 s): when solver and baked disagree, hiding moves the problem. The fake
+jet looked like the cause and was not: old and new code had the same wave. The centroid of
+moving cells mixes rapids into it: use the map.
+
+**Speed at river ends.** One discharge through a section 2.7x wider made 1.9 m/s down a 44 % fall,
+n 0.34 holding it there. Steep channels are now filled to the normal depth of a rough bed (Manning
+0.1): the bed rises, same discharge, 3.9 m/s there, n 0.10.
+
+**Into lakes.** Speed came from the faded channel's area, so it rose to the limit on flat lake
+water, then stopped on straight lines (the owner's triangle): now the river's own section, faded
+past the shore and on water at the lake's level, and fading sideways. `riverPlumes`: flow only,
+stamped on lake water after the bake, 4 m/s for 80 m at river 453, gone by ~190 m; pages end about
+200 m past a shore, so longer needs more pages. Its foam falls with the cube of its speed. Lake water
+used to have no baked foam, and the solver's last word held foam or the lake's share, so plume foam
+stopped in a zigzag at the blocks, and with none the white stopped dead at the shore: the word now
+holds both (`bakedWord`, `bakedFoam`, `bakedLake`) and lake water decays toward its baked foam.
+
+**Eye height.** Water falling toward the camera stands above its eye. Three things took that for
+the water's underside, each drawing a straight line level on the owner's screen: Fresnel in
+`whiteSurface`; `above` in `nearWaterCompose`, which every river tier fed the planet's up; and the sky,
+which judged the sun's height from a flipped up and went black. Each tier now passes its surface's
+plane, `above` is a ramp past edge-on, and `waterSurfaceTerms` takes the planet's up and turns the
+surface over itself. Capture poses with `up` [0, 1, 0] are
+rolled here: the same line runs diagonally in them, so look for it there too.
+
+**Fast water is not clear** (`nearWaterAerated`): through clear water each cross-wave of fast
+shallow flow, a step in depth, drew a line against the bed. Probably oblique standing waves: straight,
+changing with time, only in the fast water. That reading is not proved.
+
+**Cost** (old against new, 2 rounds, across loads): GPU +0.1-0.4 ms, bake +90 ms in the worker,
+main thread the same; stepped blocks 56 -> 132 at o-steep-red, 85 -> 106 at o-plume-green. Measured
+before the last shading changes.
+
+**Shores** (owner: blobs without meso or micro detail; shoreline too sharp). Lakes are solved
+apart from the terrain, and terrain contours are smooth from 10 to 300 m, so `waterShoreM` moves the
+water instead: water starts that many metres of depth in from the true waterline, bands from 420 m
+to 5 m, each gone before a pixel reaches it. Lake water only, none where water moves. The bed's mud
+starts from the same value (`riverCarveShoreWeights`), or the strip would be a brown ring: the owner's
+rule that the waterline stays grassy holds. Water fades in over `shoreSoftM` 0.45, and a wet film near
+it fades with distance: stronger it drew every lake with a dark outline. Near, the mesh draws the film,
+so near terrain takes no lake lookup. Outline over root area at o-high-threads 9.9 -> 11.9, lake2814-mid
+9.0 -> 10.1; the eye sees more, since the gain is all on gentle shores. Cost in one page, on against
+off: -0.6 to +0.1 ms. Depth is the only safe measure: moved by distance on a steep shore, water would
+end in mid-air. So steep shores stay smooth, and only the terrain stack can change that. Not
+tested with a moving camera.
+
+**Far rivers:** foam fades with distance the same way in every tier (`waterFoamFar`), or it steps at
+the handover.
+
+**Open:** faint straight lines remain in fast water close by. No vortices yet: the plume gives
+the solver moving water, but lake drag (0.8/s) damps eddies in about a second. Gentle reaches run
+slower than before (2.6 -> 2.0 m/s on river 2557), and a rapid there lost its white. Rocks in
+subcritical water stand in it without moving it. The mud bank beside steep water shows more
+now the cyan has gone.

@@ -1,0 +1,252 @@
+{
+ "note": "Owner 2026-11-05, after the distant water: far foam dots, seams at both river ends, cyan against river blue, slow steep water at river ends, flow stopping at the lake.",
+ "views": [
+  {
+   "name": "o-far-dots",
+   "pos": [
+    -132526.8,
+    499.6,
+    168.3
+   ],
+   "look": [
+    -132522.3,
+    505.1,
+    168.6
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "rivers stand out as sharp white dots from distance"
+  },
+  {
+   "name": "o-river-reach",
+   "pos": [
+    -132001.6,
+    1683.1,
+    1405.4
+   ],
+   "look": [
+    -131995.9,
+    1686.1,
+    1402.4
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "river widening into water, foam above"
+  },
+  {
+   "name": "o-mouth-wide",
+   "pos": [
+    -131845.5,
+    2089.8,
+    1344.5
+   ],
+   "look": [
+    -131841.8,
+    2084.7,
+    1347.6
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "river end from above; bluish water beside cyan"
+  },
+  {
+   "name": "o-seam-yellow",
+   "pos": [
+    -131844.9,
+    2039.0,
+    1366.3
+   ],
+   "look": [
+    -131842.5,
+    2032.6,
+    1368.0
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "straight seam across the river near its end; bluish above, cyan below"
+  },
+  {
+   "name": "o-steep-red",
+   "pos": [
+    -131839.9,
+    2021.1,
+    1379.4
+   ],
+   "look": [
+    -131838.1,
+    2019.4,
+    1372.8
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "very steep water flowing slowly near the river's end"
+  },
+  {
+   "name": "o-outlet-blue",
+   "pos": [
+    -131849.7,
+    2156.5,
+    2723.0
+   ],
+   "look": [
+    -131846.3,
+    2153.2,
+    2728.2
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "edge across the water where the river starts at a lake"
+  },
+  {
+   "name": "o-plume-green",
+   "pos": [
+    -131832.1,
+    2161.5,
+    2698.7
+   ],
+   "look": [
+    -131831.0,
+    2168.0,
+    2701.2
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "ripples end right where the flat lake starts; steep rivers should flow far into lakes"
+  },
+  {
+   "name": "o-upstream-black",
+   "pos": [
+    -131828.2,
+    3013.3,
+    679.3
+   ],
+   "look": [
+    -131824.8,
+    3010.9,
+    673.6
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "on arrival a thick slow wave moving upstream, white on it"
+  },
+  {
+   "name": "o-glare-purple",
+   "pos": [
+    -131883.5,
+    3133.3,
+    297.4
+   ],
+   "look": [
+    -131880.0,
+    3130.3,
+    292.0
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "white glare with a hard straight edge and a wedge corner"
+  },
+  {
+   "name": "o-triangle",
+   "pos": [
+    -131856.0,
+    2600.7,
+    82.3
+   ],
+   "look": [
+    -131852.9,
+    2596.9,
+    77.2
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "dark triangle cut out of the sun's glare on the lake"
+  },
+  {
+   "name": "o-mouth-cut",
+   "pos": [
+    -131981.1,
+    1937.9,
+    1304.0
+   ],
+   "look": [
+    -131976.2,
+    1939.8,
+    1308.7
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "river's white stops dead at the lake's edge, from a little height"
+  },
+  {
+   "name": "o-line-purple2",
+   "pos": [
+    -131875.0,
+    2080.3,
+    1348.5
+   ],
+   "look": [
+    -131874.8,
+    2073.8,
+    1345.8
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "hard line across the river at eye height, dark above it"
+  },
+  {
+   "name": "o-high-threads",
+   "pos": [
+    -132774.0,
+    2989.4,
+    1807.5
+   ],
+   "look": [
+    -132769.3,
+    2984.3,
+    1808.8
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "rivers as white shaped lines from high up; lakes as smooth blobs; sharp shoreline"
+  }
+ ]
+}

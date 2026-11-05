@@ -1,0 +1,80 @@
+{
+ "views": [
+  {
+   "name": "o-beach-wave",
+   "pos": [
+    -131931.2,
+    1091.2,
+    2646.3
+   ],
+   "look": [
+    -131926.5,
+    1095.4,
+    2649.5
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "owner: beach aligned wave along the lake's shore at the mouth"
+  },
+  {
+   "name": "o-flicker",
+   "pos": [
+    -131975.0,
+    844.0,
+    2677.8
+   ],
+   "look": [
+    -131969.4,
+    848.0,
+    2679.4
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "owner: foam flickers seen from above; foam along the shore at the bottom right"
+  },
+  {
+   "name": "o-mouth-surge",
+   "pos": [
+    -131837.5,
+    1990.6,
+    3022.7
+   ],
+   "look": [
+    -131834.0,
+    1992.6,
+    3016.9
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "owner: on arrival water surges back from the lake toward the river at its downstream end, then settles"
+  },
+  {
+   "name": "o-mouth-surge-high",
+   "pos": [
+    -131837.5,
+    1990.6,
+    3022.7
+   ],
+   "look": [
+    -131834.2,
+    1989.7,
+    3016.5
+   ],
+   "up": [
+    0,
+    1,
+    0
+   ],
+   "note": "same spot, the owner's after-settling shot"
+  }
+ ]
+}

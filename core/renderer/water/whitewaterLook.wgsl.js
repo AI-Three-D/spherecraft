@@ -24,7 +24,7 @@ struct WhiteU {
     N: u32, flags: u32, blockCells: u32, gridBlocks: u32,
     originBlock: vec2<i32>, hmin: f32, waveAmp: f32,
     cameraXY: vec2<f32>, nearFadeM: vec2<f32>,
-    foamGain: f32, rockDrawM: f32, pad1: f32, pad2: f32,
+    foamGain: f32, rockDrawM: f32, frameS: f32, pad2: f32,
     pad3: vec4<f32>,
 };
 fn whiteFrameXY(dir: vec3<f32>) -> vec2<f32> {
@@ -38,7 +38,14 @@ fn whiteFrameDir(xy: vec2<f32>) -> vec3<f32> {
 
 export function whitewaterLookWgsl() {
     return /* wgsl */`
-fn whiteRidge(p: vec2<f32>) -> f32 { return 1.0 - abs(2.0 * waterNoise(p) - 1.0); }
+// Ridged noise. Ridges of one lattice follow it: from above the foam was a maze of
+// rounded squares. Two lattices at unrelated angles do not line up. 1.4 keeps the
+// mean and spread of a single ridge, 0.65 and 0.24.
+fn whiteRidge(p: vec2<f32>) -> f32 {
+    let a = waterNoise(vec2<f32>(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y) + 5.2);
+    let b = waterNoise(vec2<f32>(0.28 * p.x + 0.96 * p.y, -0.96 * p.x + 0.28 * p.y) * 1.31 + 1.7);
+    return max(0.0, 1.0 - 1.4 * abs(a + b - 1.0));
+}
 // Baked foam stands in patches: a rapid is not white from bank to bank.
 fn whiteBakedFoam(foam: f32, xy: vec2<f32>) -> f32 {
     return foam * W.foamGain * (0.45 + 1.1 * waterNoise(xy * 0.085 + 3.1));
@@ -70,52 +77,79 @@ fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foa
     let sky = U.ambientColor * U.ambientIntensity;
     // A pixel's width on the water (m), wider at grazing angles.
     let px = dist * 0.0011 / max(abs(dot(V, N0)), 0.12);
-    // A short cycle: over Whitewater's 1.5 s the pattern travels 5-10 m here,
-    // and shear between neighbouring vertices drew it into zigzags.
-    let T = 0.8;
+    // How long the pattern travels before it fades into its other phase. Longer is
+    // calmer; too long and shear between vertices draws it into zigzags.
+    let T = 1.2;
     let t = W.time;
     let ph0 = fract(t / T);
     let ph1 = fract(t / T + 0.5);
     let blend = abs(2.0 * ph0 - 1.0);
+    // Mixing two noises loses contrast half way through. Thresholded, that made
+    // the foam's coverage pulse at twice the cycle's rate: the owner's flicker
+    // (flicker.mjs: beat at exactly T / 2, gone with the pattern held still).
+    // Scaling back up holds the variance through the fade.
+    let contrast = inverseSqrt(blend * blend + (1.0 - blend) * (1.0 - blend));
     let uvA = xy - vel * (ph0 * T);
     let uvB = xy - vel * (ph1 * T) + vec2<f32>(37.0, 11.0);
 
-    // Ripples: two octaves, the finer one gone by a few hundred metres.
-    let o0 = 1.0 - smoothstep(0.35, 1.2, px);
-    let o1 = 1.0 - smoothstep(0.12, 0.45, px);
+    // Ripples: two octaves, faded before they reach pixel size: under a sharp sun
+    // highlight, a sub-pixel ripple is a glint that blinks.
+    let o0 = 1.0 - smoothstep(0.15, 0.6, px);
+    let o1 = 1.0 - smoothstep(0.05, 0.18, px);
     var g = vec2<f32>(0.0);
     if (o0 > 0.0) {
-        g = mix(waterNoiseGrad(uvA * 1.6), waterNoiseGrad(uvB * 1.6), blend) * o0;
-        if (o1 > 0.0) { g += mix(waterNoiseGrad(uvA * 4.3 + 9.0), waterNoiseGrad(uvB * 4.3 + 9.0), blend) * (0.45 * o1); }
+        g = mix(waterNoiseGrad(uvA * 1.6), waterNoiseGrad(uvB * 1.6), blend) * (o0 * contrast);
+        if (o1 > 0.0) { g += mix(waterNoiseGrad(uvA * 4.3 + 9.0), waterNoiseGrad(uvB * 4.3 + 9.0), blend) * (0.45 * o1 * contrast); }
     }
     let strength = 0.03 + 0.14 * max(turb, 0.09 * length(vel));
     let e1 = normalize(W.e1 - N0 * dot(W.e1, N0));
     let e2 = normalize(W.e2 - N0 * dot(W.e2, N0));
     let N = normalize(N0 - (e1 * g.x + e2 * g.y) * strength);
     let Nf = N * select(-1.0, 1.0, dot(N, V) >= 0.0);
-    let fres = 0.02 + 0.98 * pow(1.0 - max(dot(Nf, V), 0.0), 5.0);
+    var fres = 0.02 + 0.98 * pow(1.0 - max(dot(Nf, V), 0.0), 5.0);
     let R = reflect(-V, Nf);
     let spec = pow(max(dot(R, L), 0.0), 240.0) * 1.6;
-    let reflected = sky * waterParams.deepColor.a * fres + sun * spec;
+    // Glitter is the statistics of the whole surface: on the solver's normal it stopped
+    // at every cross-wave, in a straight line.
+    let level = normalize(wp - U.origin);
+    var reflected = waterSkyColor(level, abs(dot(R, N0)), L, sky) * waterParams.deepColor.a * fres + sun * (spec + (0.2 + 0.8 * smoothstep(0.4, 1.2, px)) * waterGlitter(V, level, level, L, 0.1));
+    // Still water is the lakes' surface whichever tier draws it: the solver's blocks
+    // and the field's pages end in straight lines across a lake.
+    let still = 1.0 - smoothstep(0.05, 0.6, length(vel));
+    nearWaterAerated = smoothstep(0.8, 2.5, length(vel));
+    if (still > 0.001) {
+        let lake = waterSurfaceTerms(wp, level, U.cameraPos, L, sun, sky);
+        reflected = mix(reflected, lake.rgb, still);
+        fres = mix(fres, lake.a, still);
+        waterWindNow = mix(0.5, waterWindNow, still);
+    }
 
-    // Foam: coverage rises with foam; ridged octaves of the moving pattern cut it
-    // into lace and filaments (plain noise, thresholded, made cow spots), fading
-    // to plain coverage as pixels outgrow them.
+    // Foam: coverage rises with foam; the moving pattern, ridged first (plain noise
+    // alone, thresholded, made cow spots), cuts it into lace and wisps, fading to plain
+    // coverage as pixels outgrow them.
     let fa = clamp(foam, 0.0, 1.0);
     if (fa <= 0.002) { return vec4<f32>(reflected, fres); }
-    let c0 = 1.0 - smoothstep(0.5, 1.8, px);
-    let c1 = 1.0 - smoothstep(0.18, 0.6, px);
-    let c2 = 1.0 - smoothstep(0.07, 0.22, px);
+    // Octaves go before their finest features reach pixel size. A ridged octave's
+    // filaments are a fraction of its lattice: left in, a filament a pixel wide lights
+    // a pixel for one frame as it passes, which reads as flicker from above.
+    let c0 = 1.0 - smoothstep(0.2, 0.7, px);
+    let c1 = 1.0 - smoothstep(0.06, 0.2, px);
+    // The finest also when it moves so far a frame that it strobes (at the game's
+    // 30 FPS when still: from ~2 m/s).
+    let c2 = (1.0 - smoothstep(0.03, 0.09, px)) * (1.0 - smoothstep(0.07, 0.16, length(vel) * W.frameS));
     var pat = 0.62;
     if (c0 > 0.0) {
-        pat = mix(pat, mix(whiteRidge(uvA * 0.55), whiteRidge(uvB * 0.55), blend), 0.62 * c0);
-        if (c1 > 0.0) { pat += (mix(whiteRidge(uvA * 1.7 + 3.0), whiteRidge(uvB * 1.7 + 3.0), blend) - 0.62) * (0.42 * c1); }
-        if (c2 > 0.0) { pat += (mix(waterNoise(uvA * 5.5 + 7.0), waterNoise(uvB * 5.5 + 7.0), blend) - 0.5) * (0.22 * c2); }
+        pat += (mix(whiteRidge(uvA * 0.55), whiteRidge(uvB * 0.55), blend) - 0.65) * (0.62 * c0 * contrast);
+        // Plain noise breaks the ridges into wisps: two ridged octaves drew cracks in glass.
+        if (c1 > 0.0) { pat += (mix(waterNoise(uvA * 1.7 + 3.0), waterNoise(uvB * 1.7 + 3.0), blend) - 0.5) * (0.46 * c1 * contrast); }
+        if (c2 > 0.0) { pat += (mix(waterNoise(uvA * 5.5 + 7.0), waterNoise(uvB * 5.5 + 7.0), blend) - 0.5) * (0.22 * c2 * contrast); }
     }
     // Never quite closed: even a cascade shows dark water between its foam.
     let cut = 1.0 - 0.52 * fa;
-    let soft = 0.035 + 0.3 * (1.0 - c1) + 0.25 * (1.0 - c0);
-    let mask = smoothstep(cut - soft, cut + soft, pat) * smoothstep(0.0, 0.12, fa);
+    // Antialiased: the pattern changes by about 2 per metre, so a hard edge seen from
+    // above is a coin toss per pixel, and shimmers as it moves.
+    let soft = 0.035 + min(1.8 * px, 0.45);
+    let mask = smoothstep(cut - soft, cut + soft, pat) * smoothstep(0.0, 0.12, fa) * waterFoamFar(dist);
     // Foam is not a white sheet: thin lace lets the water through and goes grey,
     // thick foam is bright, and the sun models it by the surface's own slope.
     let lit = sky * 0.85 + sun * (0.1 + 0.9 * max(dot(N, L), 0.0));

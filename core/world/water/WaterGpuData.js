@@ -25,14 +25,19 @@ import { RIVER_CARVE_DEFAULTS } from './riverShapeNoise.js';
 import { riverMouths, riverMouthAt, riverWaterLevels } from './riverMouth.js';
 
 export const WATER_LOOK_DEFAULTS = Object.freeze({
-    deepColor: [0.02, 0.10, 0.09],    // albedo of deep water (lit by sky + sun); Whitewater's water tint
-    reflection: 1.4,                  // sky reflection strength (x sky radiance)
+    deepColor: [0.02, 0.07, 0.082],   // albedo of shallow water (lit by sky + sun); toned from Whitewater's cyan by the owner
+    openColor: [0.018, 0.040, 0.060], // albedo of open water, where no bed shows
+    // The sky as the sky pass draws it at full day, before tone mapping (measured
+    // over this atmosphere: sRGB 140 177 196 at exposure 0.75).
+    skyColor: [0.24, 0.405, 0.55],
+    reflection: 1,                    // sky reflection strength (x skyColor)
+    wind: 1,                          // scales the slopes wind gives the water (waterWgsl.js waterWind)
     // Per metre of water path (r, g, b). Keep the wet toe visible, but
     // attenuate the broad brown bed in shallow lake mouths (2026-10-29).
     // qtDiag.water.look({ absorption }) tunes the existing body treatment.
     absorption: [0.9, 0.4, 0.3],
     rippleFadeM: 800,                 // ripples fade out by this camera distance
-    shoreSoftM: 0.15,                 // waterline fade-in depth
+    shoreSoftM: 0.45,                 // waterline fade-in depth
     // Lakes whose shore is not solved yet are hidden closer than this (m).
     unsolvedLakeHideM: 2500,
     structuredRiverSurface: true,
@@ -432,6 +437,7 @@ export class WaterGpuData {
         f.set([L.deepColor[0], L.deepColor[1], L.deepColor[2], L.reflection], 8);
         f.set([L.absorption[0], L.absorption[1], L.absorption[2], 0], 12);
         f.fill(0, 16, 24);
+        f.set([L.skyColor[0], L.skyColor[1], L.skyColor[2], L.wind], 16);
         f.set([this.whitewaterLook ? 1 : 0, 0, L.structuredRiverSurfaceStartM, L.unsolvedLakeHideM ?? 2500], 24);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.
@@ -442,6 +448,7 @@ export class WaterGpuData {
         f.set([C.widthVar, C.wobble, C.bankVar, C.islandHeightM], 36);
         const nr = this.near;
         f.set(nr.enabled ? [nr.fadeStartM, nr.fadeEndM, 1, 0] : [0, 0, 0, 0], 40);
+        f.set([L.openColor[0], L.openColor[1], L.openColor[2], 0], 44);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
     }
 

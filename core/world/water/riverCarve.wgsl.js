@@ -113,12 +113,18 @@ fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 {
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> {
     if (!riverCarveShoreEnabled()) { return vec3<f32>(0.0); }
     let field = riverFieldAt(dir);
-    if (field.found) { return riverCarveShoreProfile(-field.value.z, field.value.y - heightM, riverCarveShoreVariation(dir)); }
+    // The mud starts from where the water does (waterShoreM): lake water only, a
+    // river's own level being off the lake's.
+    let shoreM = waterShoreM(dir, 0.0);
     let lake = waterLakeHitView(dir, heightM - 3.0, riverCarveLakeSampler, true);
+    if (field.found) {
+        let onLake = select(0.0, 1.0 - smoothstep(0.05, 0.4, abs(field.value.y - lake.level)), lake.level > WATER_NO_LAKE);
+        return riverCarveShoreProfile(-field.value.z, field.value.y - heightM - shoreM * onLake, riverCarveShoreVariation(dir));
+    }
     if (lake.level <= WATER_NO_LAKE) { return vec3<f32>(0.0); }
     let s = clamp(slope, 0.0, 0.99);
     let fromShore = (lake.level - heightM) / max(s / sqrt(1.0 - s * s), 0.02);
-    return riverCarveShoreProfile(-fromShore, lake.level - heightM, riverCarveShoreVariation(dir)) * lake.cover;
+    return riverCarveShoreProfile(-fromShore, lake.level - heightM - shoreM, riverCarveShoreVariation(dir)) * lake.cover;
 }` : `fn riverCarveShoreEnabled() -> bool { return false; }
 fn riverCarveShoreNoise(dir: vec3<f32>) -> f32 { return 0.0; }
 fn riverCarveShoreWeights(dir: vec3<f32>, heightM: f32, slope: f32) -> vec3<f32> { return vec3<f32>(0.0); }`}

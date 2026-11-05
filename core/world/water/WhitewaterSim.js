@@ -37,13 +37,15 @@ export const WHITEWATER_DEFAULTS = Object.freeze({
     // Blocks within this of the camera step, and the drawn surface fades out
     // between these (m). The camera farther than stepM from all water: no cost.
     stepM: 176, drawM: [96, 144],
-    // Whitewater's solver settings, but one step of 1/60 s a frame where it takes
-    // two of 1/120: its second step serves the boat's physics; the water is stable
-    // (CFL 0.4 at the speed limit) and costs half.
-    dt: 1 / 60, substeps: 1, g: 9.81, hmin: 0.02, umax: 12, macCormack: 1, turbA: 0.6, turbL: 3, turbT: 0.8,
+    // Whitewater's solver settings, but steps of 1/60 s where it takes 1/120: that
+    // serves its boat's physics; the water is stable (CFL 0.4 at the speed limit) and
+    // costs half. Steps follow real time, at most maxSteps a frame: the game idles at
+    // 30 FPS, and a step a frame ran the water at half speed under a real-time pattern.
+    dt: 1 / 60, maxSteps: 3, g: 9.81, hmin: 0.02, umax: 12, macCormack: 1, turbA: 0.6, turbL: 3, turbT: 0.8,
     foamDecay: 0.35, kDecay: 0.8, kGen: 1, foamGen: 1, maxRise: 3, maxFall: 3,
-    // Sponge toward the baked state (1/s at weight 0).
-    sponge: 8,
+    // Sponge toward the baked state (1/s at weight 0). Lake water holds its level at
+    // lakeHold and loses a river's momentum at lakeDrag (1/s).
+    sponge: 8, lakeHold: 3, lakeDrag: 0.8,
     // Bed roughness (m) under falling water, and the drawn chop (m at k = 1).
     roughM: 0.35, waveAmp: 0.06,
     // A block eases in over this (s) once it has stepped warmDelayS, stepping
@@ -237,6 +239,7 @@ export class WhitewaterSim {
             const o = i * RIVER_ROCK_FLOATS, d = [list[o], list[o + 1], list[o + 2]], [x, y] = this._frameXY(d), r = list[o + 3];
             data.set([x, y, r, list[o + 4], list[o + 5], list[o + 6], list[o + 7], 0], i * 8);
             rocks.set([x, y, r, list[o + 4], list[o + 5], list[o + 6], list[o + 7], 0], i * 8);
+            if (list[o + 8] < 0.5) continue;
             for (let by = Math.floor((y - r) / B); by <= Math.floor((y + r) / B); by++) for (let bx = Math.floor((x - r) / B); bx <= Math.floor((x + r) / B); bx++) {
                 const key = bx * 65536 + by;
                 if (!byBlock.has(key)) byBlock.set(key, []);
@@ -274,7 +277,7 @@ export class WhitewaterSim {
         const c = this.config, f = this._pf;
         this._pi[0] = this.N; this._pi[1] = this.G; this._pu[2] = count;
         f.set([c.dx, dt, c.g, c.hmin, c.umax, this._time, c.macCormack, c.turbA, c.turbL, c.turbT, c.foamDecay, c.kDecay,
-            c.kGen, c.foamGen, c.maxRise, c.maxFall, c.sponge, c.roughM], 4);
+            c.kGen, c.foamGen, c.maxRise, c.maxFall, c.sponge, c.roughM, c.lakeHold, c.lakeDrag], 4);
         this.device.queue.writeBuffer(this.simU, 0, this.params);
     }
 
@@ -344,9 +347,11 @@ export class WhitewaterSim {
         this._lastNow = nowS;
         const [camX, camY] = this._frameXY(dir);
         const { c: fc, e1, e2 } = this.frame, u = this.uniforms;
-        u.set([fc[0], fc[1], fc[2], this.R, e1[0], e1[1], e1[2], nowS % 3600, e2[0], e2[1], e2[2], c.dx], 0);
+        // debugOff.pattern holds the surface pattern still (tools/perf/whitewater/flicker.mjs).
+        if (!this.debugOff?.pattern) this._patternS = nowS % 3600;
+        u.set([fc[0], fc[1], fc[2], this.R, e1[0], e1[1], e1[2], this._patternS, e2[0], e2[1], e2[2], c.dx], 0);
         this._u32[12] = this.N; this._u32[14] = WHITE_BLOCK; this._u32[15] = this.G;
-        u[18] = c.hmin; u[19] = c.waveAmp; u[20] = camX; u[21] = camY; u[22] = c.drawM[0]; u[23] = c.drawM[1]; u[24] = c.foamGain; u[25] = c.rockDrawM;
+        u[18] = c.hmin; u[19] = c.waveAmp; u[20] = camX; u[21] = camY; u[22] = c.drawM[0]; u[23] = c.drawM[1]; u[24] = c.foamGain; u[25] = c.rockDrawM; u[26] = Math.min(Math.max(dtReal, 1 / 240), 0.05);
         // On the queue before this frame's fills read it.
         this.device.queue.writeBuffer(this.frameU, 0, u);
         const nearOn = this._simulate(camX, camY, l - this.R, dtReal, field);
@@ -429,7 +434,10 @@ export class WhitewaterSim {
             d.writeBuffer(this.blocksBuf, 0, blocks, 0, count * 4);
             d.writeBuffer(this.gridBuf, 0, grid);
             d.writeBuffer(this.coverBuf, 0, this._coverData);
-            const steps = this.debugOff?.solver ? 0 : c.substeps + (young ? c.youngSubsteps : 0);
+            this._stepOwed = Math.min((this._stepOwed ?? 0) + dtReal, c.dt * c.maxSteps);
+            const due = Math.floor(this._stepOwed / c.dt);
+            this._stepOwed -= due * c.dt;
+            const steps = this.debugOff?.solver ? 0 : due + (young ? c.youngSubsteps : 0);
             this._time += c.dt * steps;
             for (let s = 0; s < steps; s++) {
                 const pass = enc.beginComputePass({ label: 'Whitewater-step' });

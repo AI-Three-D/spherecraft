@@ -28,14 +28,23 @@ export const WHITE_BLOCK = 32;
 export const WHITE_SIM_PARAM_FLOATS = 24;
 const WORKGROUPS_PER_BLOCK = (WHITE_BLOCK / 8) ** 2;
 
+// The baked state's last word: foam 0..1 on river water; on lake water minus (the
+// lake's share 0..1 + twice the foam in 256ths), so a plume's foam survives the lake.
+export const WHITE_BAKED_WORD_WGSL = /* wgsl */`
+fn bakedWord(foam: f32, lake: f32) -> f32 { return select(foam, -(lake + 2.0 * round(foam * 255.0)), lake > 0.0); }
+fn bakedFoam(w: f32) -> f32 { return select(w, floor(-w * 0.5) / 255.0, w < 0.0); }
+fn bakedLake(w: f32) -> f32 { return select(0.0, -w - 2.0 * floor(-w * 0.5), w < 0.0); }
+`;
+
 const SIM_PARAMS = /* wgsl */`
+${WHITE_BAKED_WORD_WGSL}
 struct SimP {
   N: i32, G: i32, count: u32, pad0: u32,
   dx: f32, dt: f32, g: f32, hmin: f32,
   umax: f32, time: f32, macCormack: f32, turbA: f32,
   turbL: f32, turbT: f32, foamDecay: f32, kDecay: f32,
   kGen: f32, foamGen: f32, maxRise: f32, maxFall: f32,
-  sponge: f32, roughM: f32, pad1: f32, pad2: f32,
+  sponge: f32, roughM: f32, lakeHold: f32, lakeDrag: f32,
 };
 @group(0) @binding(0) var<uniform> P: SimP;
 fn wrapC(a: i32) -> i32 { return select(select(a, a - P.N, a >= P.N), a + P.N, a < 0); }
@@ -70,7 +79,8 @@ fn noise3(p: vec3f) -> f32 {
 }
 `;
 
-// Stepping: ST = (bed, n^2, h0, sdf) at 2 id, (W, u0, v0, foam0) at 2 id + 1.
+// Stepping: ST = (bed, n^2, h0, sdf) at 2 id, (W, u0, v0, foam0) at 2 id + 1;
+// foam0 is minus the share of lake water where there is any (lakes have no foam).
 export const WHITE_SIM_WGSL = SIM_PARAMS + NOISE + /* wgsl */`
 @group(0) @binding(1) var<storage, read> ST: array<vec4f>;
 @group(0) @binding(2) var<storage, read> SI: array<vec4f>;
@@ -282,15 +292,21 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
     let shear = abs(dudy) + abs(dvdx);
     let eta = b + h;
     var rock = 0.0;
-    if ((sR.x <= P.hmin && bR > eta) || (hL <= P.hmin && bL > eta) || (sT.x <= P.hmin && bT > eta) || (hB <= P.hmin && bB > eta)) { rock = 1.0; }
+    // A face, not a beach: a shore rises a few centimetres a cell.
+    let face = eta + 0.15;
+    if ((sR.x <= P.hmin && bR > face) || (hL <= P.hmin && bL > face) || (sT.x <= P.hmin && bT > face) || (hB <= P.hmin && bB > face)) { rock = 1.0; }
     let eR = select(eta, bR + sR.x, sR.x > P.hmin); let eL2 = select(eta, bL + hL, hL > P.hmin);
     let eT = select(eta, bT + sT.x, sT.x > P.hmin); let eB2 = select(eta, bB + hB, hB > P.hmin);
     let slopeMag = length(vec2f(eR - eL2, eT - eB2)) / (2.0 * dx);
     // Whitewater's foam sources. Its rivers fall 3 %; here the mean fall reaches
     // 50 %, so only the fall beyond the reach's own (baked foam stands for it) counts.
-    let slopeFloor = 0.15 + 0.5 * baked.w;
-    let foamSrc = P.foamGen * (max(0.0, Fr - 0.8) * 1.2 + max(0.0, -div) * 0.6
-                               + max(0.0, slopeMag - slopeFloor) * 3.0 + rock * 0.8 * min(spd, 3.0) / 3.0);
+    let slopeFloor = 0.15 + 0.5 * bakedFoam(baked.w);
+    // Foam needs depth and a current. Thin water reads as supercritical at any
+    // speed, and on a lake's beach that drew a standing line of foam along the shore,
+    // half a metre out of the water (wwFoamSources: Froude term, median depth 0.16 m).
+    let body = smoothstep(0.12, 0.5, h) * smoothstep(0.1, 0.5, length(baked.yz));
+    let foamSrc = P.foamGen * (body * (max(0.0, Fr - 0.8) * 1.2 + max(0.0, -div) * 0.6
+                               + max(0.0, slopeMag - slopeFloor) * 3.0) + rock * 0.8 * min(spd, 3.0) / 3.0);
     foam = min(1.5, foam * exp(-P.foamDecay * dt) + dt * foamSrc);
     let kSrc = P.kGen * (shear * 0.4 + max(0.0, Fr - 0.6) * 0.6 + rock * 0.8 + max(0.0, -div) * 0.5
                          + 0.12 * min(spd * spd / 16.0, 1.0));
@@ -298,10 +314,24 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
   } else { foam *= 0.9; k *= 0.8; }
   // Toward the edge of the stepped blocks the baked state takes over.
   let held = heldAt(i, j);
+  let foam0 = bakedFoam(baked.w);
   var hOut = h;
   if (held > 0.001) {
     let a = 1.0 - exp(-P.sponge * held * dt);
-    hOut = mix(h, st0.z, a); u = mix(u, baked.y, a); v = mix(v, baked.z, a); foam = mix(foam, baked.w, a); k = mix(k, baked.w * 0.6, a);
+    hOut = mix(h, st0.z, a); u = mix(u, baked.y, a); v = mix(v, baked.z, a); foam = mix(foam, foam0, a); k = mix(k, foam0 * 0.6, a);
+  }
+  // A lake is a reservoir: its level does not answer to a river. The baked flow stops in
+  // it, and with the water kept here it piled up at the mouth on arrival and ran back up
+  // the river as a surge (wwSurge: +-0.3 m for 10 s). The river's momentum dies out more slowly.
+  let lake = bakedLake(baked.w);
+  if (lake > 0.0) {
+    hOut = mix(hOut, st0.z, 1.0 - exp(-P.lakeHold * lake * dt));
+    let drag = 1.0 - exp(-P.lakeDrag * lake * dt);
+    u = mix(u, baked.y, drag); v = mix(v, baked.z, drag);
+    // Foam goes with it: carried on, it gathered in a line where the flow stalls at the
+    // edge of the stepped blocks, across the lake.
+    let fade = exp(-1.5 * P.lakeDrag * lake * dt);
+    foam = mix(foam0, foam, fade); k = mix(foam0 * 0.6, k, fade);
   }
   SO[id] = vec4f(hOut, u, v, foam);
   KO[id] = k;
@@ -355,7 +385,7 @@ fn init(@builtin(global_invocation_id) gid: vec3u) {
   let ground = HEIGHTS[k];
   let spot = riverFieldLocate(dir);
   var level = ground - 1.0; var sdf = -16.0;
-  var vel = vec2f(0.0); var foam = 0.0; var manning = 0.035;
+  var vel = vec2f(0.0); var foam = 0.0; var manning = 0.035; var lake = 0.0;
   if (spot.slot >= 0) {
     let f = riverFieldWater(dir);
     level = f.y; sdf = f.z;
@@ -363,7 +393,7 @@ fn init(@builtin(global_invocation_id) gid: vec3u) {
     let fu = riverFieldFace(dir);
     let world = riverFlowWorld(u32(fu.face), spot.tx + 0.5, spot.ty + 0.5, fl.x, fl.y);
     vel = vec2f(dot(world, W.e1), dot(world, W.e2));
-    foam = fl.z; manning = fl.w;
+    foam = fl.z; manning = max(fl.w, 0.02); lake = clamp(-fl.w, 0.0, 1.0);
   }
   // The solver's own bed: the tiles' ground, roughened where the water falls
   // (submerged, so the tiles need not show it), and the rocks.
@@ -383,7 +413,7 @@ fn init(@builtin(global_invocation_id) gid: vec3u) {
   let wet = select(0.0, 1.0, h0 > 0.0);
   let state = vec4f(h0, vel.x * wet, vel.y * wet, foam * wet);
   ST[id * 2u] = vec4f(bed, manning * manning, h0, sdf);
-  ST[id * 2u + 1u] = vec4f(level, vel.x * wet, vel.y * wet, foam * wet);
+  ST[id * 2u + 1u] = vec4f(level, vel.x * wet, vel.y * wet, bakedWord(foam * wet, lake));
   STATE[id] = state;
   KALL[id] = foam * wet * 0.6;
 }

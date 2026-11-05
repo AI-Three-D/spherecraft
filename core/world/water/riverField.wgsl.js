@@ -270,10 +270,12 @@ ${b.flow !== undefined ? riverFlowWgsl(group, b.flow, ST) : ''}`;
 function riverFlowWgsl(group, binding, ST) {
     return /* wgsl */`
 @group(${group}) @binding(${binding}) var<storage, read> riverFieldFlow: array<u32>;
-// x, y: velocity (m/s, along the raster's axes); z foam 0..1; w: Manning's n.
+// x, y: velocity (m/s, along the raster's axes); z foam 0..1; w: Manning's n, or
+// -1 in lake water (interpolated, how far below zero says how much of it is lake).
 fn riverFlowUnpack(q: u32) -> vec4<f32> {
     let a = unpack4x8snorm(q);
-    return vec4<f32>(a.xy * ${SPEED_RANGE}, f32((q >> 16u) & 255u) / 255.0, ${MANNING_MIN} * exp(f32(q >> 24u) / 255.0 * ${MANNING_LOG}));
+    let n = f32(q >> 24u);
+    return vec4<f32>(a.xy * ${SPEED_RANGE}, f32((q >> 16u) & 255u) / 255.0, select(${MANNING_MIN} * exp((n - 1.0) / 254.0 * ${MANNING_LOG}), -1.0, n < 0.5));
 }
 // Bilinear inside a page, at a stencil corner li, lj (apron coordinates).
 fn riverFlowBilinear(slot: i32, li: i32, lj: i32, fx: f32, fy: f32) -> vec4<f32> {
