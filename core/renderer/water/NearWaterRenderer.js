@@ -79,7 +79,10 @@ export class NearWaterRenderer {
 
     _ensure() {
         if (this._lakeMaterial) return;
-        this._lakeMaterial = this._material('NearWaterSurface', buildNearWaterVertexShader(), buildNearWaterFragmentShader());
+        this._lakeMaterial = this._material('NearWaterSurface', buildNearWaterVertexShader(), buildNearWaterFragmentShader(), [{
+            label: 'NearWaterSurface-Frame',
+            entries: [{ binding: 0, visibility: 'vertex|fragment', name: 'whiteU', buffer: { type: 'uniform' } }],
+        }]);
         this._lakeGeometry = new Geometry();
         this._lakeGeometry.setIndex(gridIndices(GRID_N, GRID_N));
         this._fieldMaterial = this._material('NearFieldWater', buildFieldWaterVertexShader(), buildFieldWaterFragmentShader(), [{
@@ -207,6 +210,7 @@ export class NearWaterRenderer {
         this.backend.endRenderPassForCompute();
         this.backend.resumeRenderPass({ depthReadOnly: true });
         if (this._lakes.length) {
+            this._lakeMaterial.uniforms.whiteU = { value: white?.uniforms ?? this._whiteUniforms };
             this._lakeGeometry.instanceCount = this._lakes.length;
             this.backend.draw(this._lakeGeometry, this._lakeMaterial);
         }

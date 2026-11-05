@@ -5,8 +5,8 @@ handoff and experiment report (2026-10-05 .. 11-03; all in git history up to
 5ad0fe9). Read it completely before touching water code.
 
 **Status in one line:** closer than ever before, still far from visually
-acceptable. The owner's latest screenshots (`tools/perf/riverBanks/ownerViews-2026-11-04.json`)
-show edge walls along rivers, straight-edged water polygons and pointed
+acceptable; section 10 ends with the latest. The owner's screenshots of 11-04 (`tools/perf/riverBanks/ownerViews-2026-11-04.json`)
+showed edge walls along rivers, straight-edged water polygons and pointed
 corners at mouths, a pale shelf at mouths, a straight-edged band on a
 hillside, and a river drawn only as a dotted line of puddles.
 
@@ -560,7 +560,7 @@ state 1-3 ms. The ripple's hashed gradient is the next saving; the wave work wil
   thing still missing. Beyond 2.5 km there is no mask, so it needs a new idea there.
 - `skyColor` is measured for this atmosphere in clear weather: it does not follow weather or another
   planet's sky. Wind is one fixed field, not tied to weather either.
-- Close by the water changed too (slate over deep water, soft glitter): the waves are still to do.
+- Close by the water changed too: the waves are still to do.
 
 ### Rivers against the baked state (2026-11-05, same day, uncommitted)
 
@@ -600,7 +600,8 @@ n 0.34 holding it there. Steep channels are now filled to the normal depth of a 
 water, then stopped on straight lines (the owner's triangle): now the river's own section, faded
 past the shore and on water at the lake's level, and fading sideways. `riverPlumes`: flow only,
 stamped on lake water after the bake, 4 m/s for 80 m at river 453, gone by ~190 m; pages end about
-200 m past a shore, so longer needs more pages. Its foam falls with the cube of its speed. Lake water
+200 m past a shore, so longer needs more pages. Its foam starts as the river's and falls away over
+`plumeFoamM` of its length. Lake water
 used to have no baked foam, and the solver's last word held foam or the lake's share, so plume foam
 stopped in a zigzag at the blocks, and with none the white stopped dead at the shore: the word now
 holds both (`bakedWord`, `bakedFoam`, `bakedLake`) and lake water decays toward its baked foam.
@@ -621,18 +622,16 @@ changing with time, only in the fast water. That reading is not proved.
 main thread the same; stepped blocks 56 -> 132 at o-steep-red, 85 -> 106 at o-plume-green. Measured
 before the last shading changes.
 
-**Shores** (owner: blobs without meso or micro detail; shoreline too sharp). Lakes are solved
-apart from the terrain, and terrain contours are smooth from 10 to 300 m, so `waterShoreM` moves the
-water instead: water starts that many metres of depth in from the true waterline, bands from 420 m
-to 5 m, each gone before a pixel reaches it. Lake water only, none where water moves. The bed's mud
-starts from the same value (`riverCarveShoreWeights`), or the strip would be a brown ring: the owner's
-rule that the waterline stays grassy holds. Water fades in over `shoreSoftM` 0.45, and a wet film near
-it fades with distance: stronger it drew every lake with a dark outline. Near, the mesh draws the film,
-so near terrain takes no lake lookup. Outline over root area at o-high-threads 9.9 -> 11.9, lake2814-mid
-9.0 -> 10.1; the eye sees more, since the gain is all on gentle shores. Cost in one page, on against
-off: -0.6 to +0.1 ms. Depth is the only safe measure: moved by distance on a steep shore, water would
-end in mid-air. So steep shores stay smooth, and only the terrain stack can change that. Not
-tested with a moving camera.
+**Shores.** Removed (owner's fourth look, below). Lake outlines are the terrain's contours again.
+Do not repeat:
+- A fragment shoreline (`waterShoreM`, water starting at a noise depth, a wet film, a soft fade). It
+  blurred ground into water, showed the terrain's grid in blocks close up, and exposed ground at river
+  ends as land bridges. The owner expected geometry.
+- Shores as geometry in the height function (`lakeShoreDelta_d`: ground raised by noise near a lake's
+  level, in bands from 430 to 13 m). Ribs and waffles on every shore, and it stood a river's bed above
+  its water wherever it passed a lake's level: a land bridge of 300 m at `o-bridge`, beyond the last
+  160 m of river it was kept clear of. A term that moves ground near a level cannot know what else is
+  near that level.
 
 **Far rivers:** foam fades with distance the same way in every tier (`waterFoamFar`), or it steps at
 the handover.
@@ -642,3 +641,96 @@ the solver moving water, but lake drag (0.8/s) damps eddies in about a second. G
 slower than before (2.6 -> 2.0 m/s on river 2557), and a rapid there lost its white. Rocks in
 subcritical water stand in it without moving it. The mud bank beside steep water shows more
 now the cyan has gone.
+
+### Near water by distance, wider rivers (2026-11-05, fourth look, uncommitted)
+
+Owner's views: `tools/perf/lakeLook/ownerViews-2026-11-05c.json`. Evidence:
+`tools/perf/structured-terrain-results/water-lod-2026-11-05/` (`baseline`, `fin`, `fin2`, `cmp-base`, `costab`,
+`flicker-new`, `surge-*`).
+
+**One surface, the camera decides.** The owner had asked for a level of detail; I had extended the fine area
+at river ends. What they saw at the purple star is `whiteSurface`, and it stopped there because everything under
+0.6 m/s was handed to the distant model, by flow and not by distance. Now all near tiers (lake sheets, field pages,
+solver mesh) draw `whiteSurface` in one frame on one clock, so nothing changes at a tier's edge. The lake sheets bind
+`whiteU` for it. `lakeDetailM` (900 m, fade from 55 %, under the near meshes' `fadeStartM`) is the only handover:
+`waterSurfaceTerms` is the distant model alone now. With `whitewater=off` lakes keep the distant model.
+- Still water has no flow to carry a pattern, and the two phases boil on the spot at its speeds, so each scale drifts
+  its own way, at half the noise (`whiteFineSlope`, `whiteCoarseSlope`, `whiteFineLace`, `whiteCoarseLace`).
+- Close water that moves has at least still water's ruffle and lace, and calm water its coarse scales, moving or
+  not. Gated on still alone, the slow rim of a plume was a smooth patch beside the camera, and from higher up a dark blob.
+- A web three times coarser takes over as the fine one goes, or the web ends in a ring around the camera. Each web
+  keeps plain noise of its own size: bare ridges read as a jigsaw from above.
+- From above the sky's reflection is weak, so slopes shade the body as well (`nearWaterRelief`).
+- `qtDiag.water.look({ closeLace, closeRuffle, lakeDetailM })` tunes it. Lace is by my eye against the star.
+
+Cost, in one page, `lakeDetailM` 1 against 900 (`costAB.js`, 6 rounds, owner's game open): o-star +0.90, o-waffles +0.78,
+lake2814-low +0.61, lake180-low +0.36 ms. Flicker at 30 FPS (lake180-low, `minTop: 0`): hf 0.064, blinks 0 %, no beat.
+
+**Width.** The traces' discharge is so small that nearly every river sat on `minWidthM`, and steep rivers get nothing
+from the bake's widening, so the usual river was thin. `minWidthM` 12 -> 36 (`streamShape` too), constrictions 8 -> 24 at
+least, `minDepthM` 1.6 -> 2.6. Thin rivers are the exception: `thinShare` 12 %, by hash, take `thinScale` 0.34 of width,
+12 m and 8 m at least (narrower beds drew as beads). The width noise's wide side goes by its root in `riverReachShape`
+(up to 5 x made reaches of 180 m), the bake's widening came down (`widenMax` 6 -> 2), so the widest reaches stay what they
+were, and `meanderAmp` 1.5 -> 1 (still twice the old swing, and pages reach by it). The owner judged the result sufficient.
+Same poses, old against new (`bakedWidths`): typical river 18 -> 36 m, along rivers 20 -> 34 m, under 16 m 31 -> 12 %, top 1 %
+108 -> 116 m. Traced, all rivers: typical 12.6 -> 34.6 m, thinnest tenth 9.2 -> 24 m.
+What those numbers are: the bake's data, weighted to the short rivers between lakes, which were the thin ones. In drawn
+pixels (`drawnWidths.mjs`, straight down, water = frame against dry frame; agrees with the trace at the 24 m floor), the long
+rivers, away from their ends, went 38 -> 42 m at the median: they were wide already. Their thin end is what moved: thinnest
+tenth 10 -> 25 m, under 16 m 19 -> 3 %. Do not quote a width without saying which of these it is.
+
+**Banks do not climb** (`bankCutM`, `bankLeast`, `bankLeastM`). Width alone raised cuts everywhere: 13 m walls on a hill.
+Where natural ground at a bank's edge stands over 3 m above the water that bank comes in, to 40 % at the least. Cuts at
+the real water's edge (`bankCuts.js`): along rivers p90 3.1 -> 3.3 m, p99 6.1 -> 5.9 m, worst 14 -> 9 m. It also took away the point
+of land and dark face at outlets.
+
+**The neck at mouths** (owner's blue arrow). A steep stream's channel under the 32 m mask took the lake's level, so only
+the tip of its cut was under water. A channel still above the lake keeps its own level until it reaches it
+(`keeps a steep stream its full width`, fails on the old bake). `bakedWidths` also counts pinches now: 8 -> 4, none missing water.
+
+**Outlets.** `n` came from the speed capped by the fall, too much friction where the solver must carry Q / area: from the
+uncapped speed now. Measured at `o-upstream-black`, 14 s after arrival, against the accepted state: no diagonal in the map (no wave
+going upstream), river movement 0.20 -> 0.23, speed 2.0 -> 2.1 m/s, sag under baked 33 -> 40-46 cm, 18 -> 20 % of the depth.
+
+**Wrong turns, do not repeat.**
+- Flaring mouths to round the points of land: it dug further into the hill, black slits and straight-edged trumpets.
+- `wwSurge` `rise` of 1.5 m looked like the wave back. Its top cells were thin sheets over banks baked dry (`hb` < 0), not
+  still water: `wwRiseCells` says where. Find the cells before believing the number.
+- Reading that sag three times: an energy limit (`0.7 sqrt(2 g fall)`), the drop missing from W, then depth. Each moved it
+  little. The map plus baked against solver depth and speed along the river (`wwAlong` `vb`, `hb`) showed a sill: a lake's exit is a
+  weir, q = 1.705 E^1.5. A wider river needs a deeper exit.
+- Capping Q at that sill: same water through three times the width is a third of the speed, and rivers stopped at 0.3 m/s.
+- Keeping the old depth: the exit is then too shallow for the width (sag -50 to -65 cm).
+- Do not read frame cost across page loads with the owner's game open: one run read everything double.
+
+**Cost of the width:** same poses: field pages +41 % (6512 -> 9164), 101 -> 143 MB, worker bake 6.2 -> 8.5 s, main thread 154 -> 218 ms
+per bake, solver blocks 129 -> 155 at o-upstream-black. Pages reach by half-width times about five: the next saving if memory matters.
+
+### Fifth look (2026-11-05, same day, uncommitted)
+
+Owner's views: `tools/perf/lakeLook/ownerViews-2026-11-05d.json`. Evidence: the same folder (`g-base`, `g-new`, `plan`, `fin3`,
+`cmp-base` against `cmp-fin`, `flicker-foam`, `px-*`).
+
+**A white patch far off, calm close by** (green stars). Foam heat view (water debug 12), same spot: 0.7-1.0 from afar, 0.1-0.3 close.
+The far tiers' foam comes from the fall, the solver's from the Froude number, and on a wide deep reach that falls fast water
+is not supercritical. The difference also drew the stepped white edge along solver blocks. The near mesh now takes the far
+tiers' foam as a floor (`whitewaterSurface.wgsl.js`). Flicker on heavy foam at 30 FPS: hf 1.10, blinks 0.07 %.
+
+**Slots of water, points of land, black cuts, ghost bands** (green arrows). From low down they look huge: from above (poses
+`plan-*`) they are slivers. A river's end is wide, and it runs on past the shore: its centre is under the lake, but where the shore
+curves away its side cut on through the land at the lake's level. Past a shore a channel now cuts no ground over the lake's level
+(`mouthHoldM`, `mouthHoldRiseM`, test `cuts no land past a lake shore`, fails on the old bake).
+
+**A dark line across the foam** just before a lake: the channel rule above took a river's last metres off lake water, and plumes
+stamped on lake water only, so the speed died before the plume began. A plume now covers its own river's last channel too.
+
+**Wrong turns, do not repeat.**
+- Reading those shapes from a low oblique view. Holes in the water, then floods, then deltas: all wrong. `w7` said it was ground, a
+  view straight down said how big. Look from above before explaining a shape.
+- Scaling mouth flares and deltas down with the width: no visible change at the poses it was for. Reverted.
+- Trusting `bakedWidths` for what the eye gets, and reporting "2 x" from it.
+
+**Open:** the sag near outlets (20 % of depth), which needs exits deep enough for their flow. A dip of 16 cm going up from a river's
+end on arrival, gone in 6 s, since plumes cover their channel. Thin sheets over banks on steep bends (`rise` 0.6 m in `wwSurge`,
+h 0.3-0.5 m), not visible in the settled frame at o-upstream-black. Close by at eye height the lace is soft flecks. Lake outlines are
+plain contours again: the owner's "blobs" stand until they decide.

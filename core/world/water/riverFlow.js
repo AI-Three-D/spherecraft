@@ -50,10 +50,11 @@ export const RIVER_FLOW = Object.freeze({
     // within plumeRangeM: pages reach about 200 m past a shore, and flow cut off at a
     // page's edge would be a straight line. Its speed is the fastest over the last
     // plumeBackM (m) of river, its depth full from plumeDepthM. Slower than plumeLeastV
-    // (m/s), a river makes none. Its foam is plumeFoam of the river's, falling with the
-    // cube of its speed: without any the white stopped dead at the lake's edge.
+    // (m/s), a river makes none. Its foam starts as the river's, or the shore shows a
+    // border, and falls away over plumeFoamM of its length: a long way out it was a
+    // white tongue.
     plumeCore: 6, plumeSpread: 0.16, plumeFan: 0.2, plumeWander: 0.08, plumeLength: 14, plumeRangeM: [50, 200],
-    plumeBackM: 60, plumeDepthM: 1.2, plumeLeastV: 0.6, plumeFoam: 0.5,
+    plumeBackM: 60, plumeDepthM: 1.2, plumeLeastV: 0.6, plumeFoamM: 0.22,
     // Past a lake's shore, or once its level is within endLevelM of the lake's, a river's
     // own speed is gone by endFadeM + endFadePerHw x hw (m), whatever the channel does:
     // a narrow end ran at the limit on flat lake water (5.4 m/s at river 2557's outlet).
@@ -158,6 +159,10 @@ export function riverFlowDesign(S, rid, o = RIVER_FLOW) {
         S.V[i] = clamp(Q / Math.max(area[i], 1e-3), o.speedM[0], o.speedM[1]);
     }
     boxAlong(S.V, h);
+    // Friction comes from this speed, not from the capped one below: mass makes the solver
+    // carry Q / area past an outlet, and n from a capped V is too much friction for that
+    // (river 2557: 12 cm more sag under the baked level for its first 100 m).
+    const free = Float64Array.from(S.V);
     for (const end of S.ends ?? []) {
         if (end.level === undefined || end.sign > 0) continue;
         for (let i = 0; i < m; i++) S.V[i] = Math.min(S.V[i], o.endLeastV + Math.sqrt(2 * 9.81 * Math.max(end.level - S.W[i], 0)));
@@ -168,7 +173,7 @@ export function riverFlowDesign(S, rid, o = RIVER_FLOW) {
         // the solver's friction n^2 v^2 / h^(4/3) comes to n^2 V^2 / D^(4/3) at every
         // point of the section. With Rh friction was 57 % of gravity: the river ran away
         // from its baked state, and the fall in level went up it as a slow wave.
-        S.n[i] = clamp((S.Rh[i] / o.areaShape) ** (2 / 3) * Math.sqrt(Math.max(S.slope[i], 1e-6)) / S.V[i], o.manning[0], o.manning[1]);
+        S.n[i] = clamp((S.Rh[i] / o.areaShape) ** (2 / 3) * Math.sqrt(Math.max(S.slope[i], 1e-6)) / free[i], o.manning[0], o.manning[1]);
         const froude = S.V[i] / Math.sqrt(9.81 * S.Rh[i]);
         const white = Math.max(smoothstep(o.foamSlope[0], o.foamSlope[1], S.slope[i]), smoothstep(o.foamFroude[0], o.foamFroude[1], froude));
         S.foam[i] = white * (1 - o.foamWaveAmp + o.foamWaveAmp * along(S.s[i] / o.foamWaveM, seed)) * (1 - fade);

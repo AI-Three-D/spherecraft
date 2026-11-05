@@ -1,0 +1,10 @@
+{
+ "note": "Owner 2026-11-05, fourth look: waffles and ribs on lake shores, land bridges, the fine water only where a river ends (purple star), rivers too thin (yellow arrow), mouth (blue arrow). Up left to the planet's: the on-screen camera block says 0,1,0.",
+ "views": [
+  { "name": "o-waffles", "pos": [-132061.8, -1706.1, 1895.4], "look": [-132057.7, -1710.9, 1898.4], "note": "shore in ribs and waffles" },
+  { "name": "o-bridge", "pos": [-131847.5, -2204.9, 4029.8], "look": [-131841.6, -2207.5, 4032.7], "note": "river stops short at a land bridge; blurred water" },
+  { "name": "o-star", "pos": [-131625.1, -4116.6, 4859.7], "look": [-131622.4, -4118.9, 4853.6], "note": "fine water only near the river's end, blurred elsewhere; the fine look is what all near water should have" },
+  { "name": "o-yellow", "pos": [-131719.3, -3700.2, 4975.4], "look": [-131715.6, -3695.0, 4972.3], "note": "the usual thin river; should be at least twice as wide" },
+  { "name": "o-blue", "pos": [-132067.7, -2081.0, 3634.9], "look": [-132062.6, -2078.0, 3638.7], "note": "line across the neck where the river enters the lake" }
+ ]
+}

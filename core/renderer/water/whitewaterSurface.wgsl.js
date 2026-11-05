@@ -25,7 +25,7 @@ struct WhiteVOut {
     @location(1) xy: vec2<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) flow: vec4<f32>,   // velocity, foam, turbulence
-    @location(4) wet: vec4<f32>,    // depth (m), signed distance (m), simulated share, lake's share
+    @location(4) wet: vec3<f32>,    // depth (m), signed distance (m), simulated share
 };
 @group(2) @binding(0) var<uniform> W: WhiteU;
 @group(2) @binding(1) var<storage, read> BLOCKS: array<vec4<i32>>;
@@ -113,8 +113,11 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Whi
     o.wp = wp;
     o.xy = xy;
     o.normal = normalize(dir - (W.e1 * gx + W.e2 * gy) * draw);
-    o.flow = vec4<f32>(mix(baked.yz, vec2<f32>(uc, vc), draw), mix(foamBaked, s.w, draw), mix(foam0 * 0.6, k, draw));
-    o.wet = vec4<f32>(h, mix(st.w, select(-16.0, 16.0, wet), draw), draw, bakedLake(baked.w));
+    // The solver's foam comes from the Froude number, the far tier's from the fall: on a wide deep
+    // reach that fell fast the far tier was white and this one calm, four times less foam on the same
+    // spot, with block edges between them (owner 2026-11-05, green star). So the far tier's is a floor.
+    o.flow = vec4<f32>(mix(baked.yz, vec2<f32>(uc, vc), draw), mix(foamBaked, max(s.w, foamBaked), draw), mix(foam0 * 0.6, max(k, foam0 * 0.6), draw));
+    o.wet = vec3<f32>(h, mix(st.w, select(-16.0, 16.0, wet), draw), draw);
     return o;
 }
 `;
@@ -135,8 +138,7 @@ fn main(in: WhiteVOut) -> @location(0) vec4<f32> {
     let N = normalize(in.normal);
     // Shallow water at the edges carries little foam.
     let foam = in.flow.z * smoothstep(0.03, 0.4, in.wet.x);
-    nearWaterShoreM = waterShoreM(dir, waterFootM(length(U.cameraPos - in.wp), in.wp, U.cameraPos, dir)) * in.wet.w * (1.0 - smoothstep(0.1, 0.6, length(in.flow.xy)));
-    let c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, N, in.xy, in.flow.xy, foam, in.flow.w), in.pos.xy, N);
+    let c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, N, in.xy, in.flow.xy, foam, in.flow.w, in.pos.xy), in.pos.xy, N);
     if (c.a <= 0.0) { discard; }
     // Thin water fades by its own depth, as Whitewater's does: the solver's bed
     // is not the rendered ground to the centimetre, and without this the surface

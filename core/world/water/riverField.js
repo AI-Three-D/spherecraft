@@ -65,6 +65,12 @@ export const RIVER_FIELD = Object.freeze({
     // Banks are at least mouthBankM wide at a mouth, back to their own
     // width mouthNearM up the river.
     mouthBankM: 24, mouthNearM: 80,
+    // Past a lake's shore a channel cuts no land: over mouthHoldM (m) from the shore it stops
+    // cutting ground over the lake's level (fully mouthHoldRiseM above it). Its centre is
+    // under the lake there, but its sides are wide and went on through the land where the shore
+    // curved away: thin slots of lake water with a black cut at their tip, and points of land
+    // between them and the lake (owner 2026-11-05, g-wedge, g-notch).
+    mouthHoldM: 20, mouthHoldRiseM: 1,
     // Smooth min with the natural ground (m of height): cuts only.
     sminK: 0.3,
     // Into a lake the channel fades out and widens by fadeWiden: as the lake's
@@ -94,12 +100,19 @@ export const RIVER_FIELD = Object.freeze({
     // widenFlat (the cross-section's power, 2 at the traced width, full at 3x):
     // a parabola's shallow margin grows with the width, and wide and shallow
     // is mud.
-    widenRiver: 3, widenReach: 4, widenMax: 6, widenWaveM: [250, 700], widenEndM: 120, widenFall: [0.04, 0.15], widenFlat: 4,
+    widenRiver: 1.5, widenReach: 1.6, widenMax: 2, widenWaveM: [250, 700], widenEndM: 120, widenFall: [0.04, 0.15], widenFlat: 4,
+    // Banks do not climb: where the natural ground at a bank's edge stands more than
+    // bankCutM over the water that bank comes in, to bankLeast of its width or bankLeastM
+    // at the least. A wide channel on a hillside is a one-sided cut: 13 m walls along
+    // rivers, and at outlets, the level held at the lake's, a point of land and a dark
+    // face (owner's edge walls, 2026-11-05 o-blue). Flaring mouths instead dug further in.
+    bankCutM: 3, bankLeast: 0.4, bankLeastM: 4,
     // Meanders: the centre swings meanderAmp river widths either way over
     // meanderWave widths (two octaves), on flat ground only (cross slope
     // meanderFlat[0]..[1] fades it out), tapered over half a wavelength
-    // toward ends and mouths (the river meets its lakes where traced).
-    meanderAmp: 1.5, meanderWave: 12, meanderWaveM: [60, 900], meanderFlat: [0.03, 0.12],
+    // toward ends and mouths (the river meets its lakes where traced). 1 (was 1.5
+    // of narrower rivers): twice the old swing, and the pages' reach goes by it.
+    meanderAmp: 1, meanderWave: 12, meanderWaveM: [60, 900], meanderFlat: [0.03, 0.12],
     // Levels and depths are linear between trace points: smoothed over this
     // along the river, or each segment's slope drew a band across the bed, seen
     // through the water too (the accordion, o29c-accordion). Before containment,
@@ -281,7 +294,7 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
     // ds > 0 even for a degenerate trace (a zero spacing made the smoothing windows infinite).
     const S = { m, ds: Math.max(L / (m - 1), 1e-3), s: new Float64Array(m), x: new Float64Array(m), y: new Float64Array(m), tx: new Float64Array(m), ty: new Float64Array(m),
         hw: new Float64Array(m), hwL: new Float64Array(m), hwR: new Float64Array(m), D: new Float64Array(m), W: new Float64Array(m), skew: new Float64Array(m),
-        BL: new Float64Array(m), BR: new Float64Array(m), EL: new Float64Array(m), ER: new Float64Array(m), wide: new Float64Array(m).fill(1), fade: new Float64Array(m), mouth: new Float64Array(m), lake: new Uint8Array(m) };
+        BL: new Float64Array(m), BR: new Float64Array(m), EL: new Float64Array(m), ER: new Float64Array(m), wide: new Float64Array(m).fill(1), fade: new Float64Array(m), mouth: new Float64Array(m), lake: new Uint8Array(m), hold: new Float64Array(m), holdLevel: new Float64Array(m) };
     const tauL = new Float64Array(m), tauR = new Float64Array(m), relax = new Float64Array(m), past = new Uint8Array(m);
     const mouths = rec.mouths ?? [];
     let k = 0;
@@ -397,6 +410,29 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
         }
     }
     S.widened = widened;
+    // Banks do not climb. The widest pull over bankSmoothM, then smoothed: each station
+    // keeps what its neighbours need, and a bank's line stays a line.
+    {
+        const pull = [new Float64Array(m), new Float64Array(m)], step = 2, h = Math.max(1, Math.round(o.bankSmoothM / S.ds / 2));
+        for (let i = 0; i < m; i++) {
+            const nx = -S.ty[i], ny = S.tx[i];
+            [1, -1].forEach((side, k2) => {
+                const edge = side > 0 ? S.hwL[i] : S.hwR[i], least = Math.min(edge, Math.max(o.bankLeast * edge, o.bankLeastM));
+                let e = edge;
+                while (e > least && groundAt(S.x[i] + nx * side * e, S.y[i] + ny * side * e) > S.W[i] + o.bankCutM) e -= step;
+                pull[k2][i] = edge - Math.max(e, least);
+            });
+        }
+        for (const v of pull) {
+            const held = Float64Array.from(v);
+            for (let i = 0; i < m; i++) { let top = 0; for (let j = Math.max(0, i - h); j <= Math.min(m - 1, i + h); j++) top = Math.max(top, held[j]); v[i] = top; }
+            smoothAlong(v, h);
+        }
+        for (let i = 0; i < m; i++) {
+            const l = Math.min(pull[0][i], S.hwL[i] - Math.min(S.hwL[i], o.bankLeastM)), r = Math.min(pull[1][i], S.hwR[i] - Math.min(S.hwR[i], o.bankLeastM));
+            S.hwL[i] -= l; S.hwR[i] -= r; S.hw[i] -= (l + r) / 2;
+        }
+    }
     // Where the centre enters its end lakes' water (the run of lake water from
     // each end, gaps of a few stations for shore wiggles): the channel fades
     // from there, not from the trace's mouth station, which can lie on land
@@ -426,6 +462,8 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
                 else {
                     const [a, b] = o.mouthFadeDepth;
                     fade = Math.max(fade, smoothstep(a * S.D[i], b * S.D[i], end.level - groundAt(S.x[i], S.y[i])), 1 - smoothstep(0, o.mouthTailM, end.sign > 0 ? S.s[m - 1] - S.s[i] : S.s[i]));
+                    const hold = smoothstep(0, o.mouthHoldM, x);
+                    if (hold > S.hold[i]) { S.hold[i] = hold; S.holdLevel[i] = end.level; }
                 }
             }
             near = Math.max(near, 1 - smoothstep(0, o.mouthNearM, -x));
@@ -614,7 +652,8 @@ function riverGround(S, index, cellM, px, py, nat, o) {
         const foot = lerp(n >= 0 ? S.EL : S.ER);
         target = Math.max((W + e * edge) * (1 - r) + nat * r, nat + (W + e * edge - foot) * (1 - r));
     }
-    return { h: smin(nat, target, o.sminK), W, edge, st: i + tc };
+    const cut = smin(nat, target, o.sminK), hold = lerp(S.hold);
+    return { h: hold > 0 ? cut + (nat - cut) * hold * smoothstep(0, o.mouthHoldRiseM, nat - S.holdLevel[i + (S.hold[i] > 0 ? 0 : 1)]) : cut, W, edge, st: i + tc };
 }
 
 // Gaussian blur weights (sigma in texels), radius ceil(2.5 sigma).
@@ -861,9 +900,13 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     }
     const t5 = performance.now();
     onProgress?.('lakes', { ms: t5 - t4 });
-    // Lakes: level where a lake's mask covers the texel and the ground is low.
+    // Lakes: level where a lake's mask covers the texel and the ground is low. Not
+    // in a channel still above the lake: the 32 m mask reaches up a steep stream's
+    // last metres, and at the lake's level only the tip of its cut is under water, a
+    // neck across the river just before its lake (owner 2026-11-05, o-blue). The
+    // stations bring W down to the lake's level where the river really reaches it.
     const lakeLevel = new Float32Array(N * PP).fill(NaN);
-    for (let g = 0; g < N * PP; g++) if (ground[g] < lakeCand[g] + 1) lakeLevel[g] = lakeCand[g];
+    for (let g = 0; g < N * PP; g++) if (ground[g] < lakeCand[g] + 1 && !(edgeOf[g] < 0 && W[g] > lakeCand[g] + 0.02)) lakeLevel[g] = lakeCand[g];
     // Water level per texel: a lake's where it covers, else the owning river's.
     const level = new Float32Array(N * PP);
     for (let g = 0; g < N * PP; g++) level[g] = Number.isFinite(lakeLevel[g]) ? lakeLevel[g] : W[g];
@@ -1022,8 +1065,10 @@ function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt,
             }
         }
     });
-    // Plumes: flow only, so the ground never hears of them, and on lake water only.
-    prepared.forEach(({ S, plane, fromPlane }) => {
+    // Plumes: flow only, so the ground never hears of them, on lake water and on their own
+    // river's last channel: a channel above the lake keeps its level, not lake water, and
+    // the speed fading out there before the plume began drew a dark line across the foam.
+    prepared.forEach(({ S, plane, fromPlane }, ri) => {
         const e1 = plane.frame.e1, e2 = plane.frame.e2;
         for (const q of riverPlumes(S, S.rid)) {
             const nx = -q.ty, ny = q.tx;
@@ -1033,7 +1078,7 @@ function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt,
                 const { width, off, turn } = plumeAt(q, a, 0), half = 2.2 * width;
                 for (let r = -half; r <= half; r += 1.5) {
                     const n = r + off, g = texelAt(fromPlane(q.x + q.tx * a + nx * n, q.y + q.ty * a + ny * n));
-                    if (g < 0 || !wet[g] || !Number.isFinite(lakeLevel[g])) continue;
+                    if (g < 0 || !wet[g] || (!Number.isFinite(lakeLevel[g]) && owner[g] !== ri)) continue;
                     const v = plumeAt(q, a, r).speed * Math.min(1, Math.max(level[g] - ground[g], 0) / o.plumeDepthM) ** (2 / 3);
                     if (v * v <= flowA[g] * flowA[g] + flowB[g] * flowB[g]) continue;
                     const out = o.plumeFan * r / width + turn, dl = Math.hypot(1, out), dx = (q.tx + nx * out) / dl, dy = (q.ty + ny * out) / dl;
@@ -1041,7 +1086,7 @@ function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt,
                     const [ax, ay] = pageAxes[Math.floor(g / PP)];
                     flowA[g] = v * (wx * ax[0] + wy * ax[1] + wz * ax[2]);
                     flowB[g] = v * (wx * ay[0] + wy * ay[1] + wz * ay[2]);
-                    foam[g] = Math.max(foam[g], o.plumeFoam * q.foam * (v / q.V) ** 3);
+                    foam[g] = Math.max(foam[g], q.foam * (v / q.V) ** 2 * Math.exp(-Math.max(a, 0) / (o.plumeFoamM * q.length)));
                 }
             }
         }

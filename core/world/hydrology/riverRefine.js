@@ -307,17 +307,27 @@ export const RIVER_SHAPE_DEFAULTS = Object.freeze({
     // 1.4 m, when only lakes with Q >= 1200 had rivers (waterGraph.js minRiverQ).
     // 12 m (was 8): narrower beds were one or two splat texels wide on
     // coarser tiles and drew as beads (owner 2026-10-26, 50 % wider).
-    minWidthM: 12,
+    // 36 m (owner 2026-11-05): the traces' discharge is so small that nearly every
+    // river sat on this floor, and steep ones get nothing from the bake's widening
+    // (riverField.js widenFall), so the usual river read as thin. It is at least
+    // twice as wide now as drawn (banks keep off rising ground: riverField.js bankCutM),
+    // and thin ones are the exception: thinShare of the rivers, by hash, take thinScale
+    // of width and the root of that of depth.
+    minWidthM: 36,
     // Constrictions (riverReachShape's width factor) narrow a reach to this
     // at least (they went to 3.3 m).
-    minReachWidthM: 8,
+    minReachWidthM: 24,
+    thinShare: 0.12, thinScale: 0.34, thinSalt: 0x7e1d,
     // Bank-full depth D (thalweg to the channel's edge); the water fills
     // waterFrac of it (RIVER_LEVEL_DEFAULTS). Twice the first design (0.6,
     // 0.8 m): the water was 0.4-0.6 m deep, the banks' fixed margins took
     // much of it and deltas were dry mud (owner 2026-10-26).
     depthCoef: 1.0,       // D = depthCoef * Q^0.4 (m), at least minDepthM
     depthExp: 0.4,
-    minDepthM: 1.6,
+    // With the root of the width (riverField.js widening): wide and shallow is mud, and a
+    // lake's exit is a weir, q = 1.705 E^1.5 at most (E the depth over the sill): shallower,
+    // a wide river's outlet passed half its design flow and the reach below it ran low.
+    minDepthM: 2.6,
     // Pools and constrictions shallow a reach to this share of minDepthM at
     // most; deltas not below minDepthM (at 60 % the mouths' water was 0.7 m
     // and read as wet mud, owner 2026-10-26).
@@ -401,6 +411,9 @@ export function riverDeltaHalfWidth({ x, y, tx, ty, hw, hwBase, level, groundAt 
     return Math.max(hwBase, free);
 }
 
+/** Width factor of a whole river: 1, or thinScale for the exceptions. */
+export const riverThinScale = (river, P = RIVER_SHAPE_DEFAULTS) => (riverHash(river, P.thinSalt ?? 0) < (P.thinShare ?? 0) ? P.thinScale : 1);
+
 /**
  * Baked pools/constrictions and lake mouths. Depth never sets the surface
  * slope. The width varies 2-3x along a river, more in some rivers than in
@@ -414,9 +427,12 @@ export function riverReachShape(shape, s, length, river, P = RIVER_SHAPE_DEFAULT
     const start = P.junctionStartM ?? 0, end = P.junctionEndM ?? length;
     const delta = P.deltaLake ? riverDelta(s, end, river, P.typicalWidthM ?? shape.width, P.delta ?? RIVER_SHAPE_DEFAULTS.delta) : 1;
     const mouth = 1 - quintic01(Math.min(Math.abs(s - start), P.deltaLake ? Infinity : Math.abs(end - s)) / joinM);
-    const width = Math.max(P.minReachWidthM ?? 0, shape.width * riverWidthFactor(s, river, P.typicalWidthM ?? shape.width).f) * (1 + (P.junctionWidthScale - 1) * mouth) * delta;
+    const thin = riverThinScale(river, P);
+    // The wide side goes by its root: at up to 5 x a 36 m river had reaches of 180 m, flooding hillsides.
+    const wf = riverWidthFactor(s, river, P.typicalWidthM ?? shape.width).f;
+    const width = thin * Math.max(P.minReachWidthM ?? 0, shape.width * (wf > 1 ? Math.sqrt(wf) : wf)) * (1 + (P.junctionWidthScale - 1) * mouth) * delta;
     const floor = P.minDepthM * ((P.minReachDepthShare ?? 0) + (1 - (P.minReachDepthShare ?? 0)) * Math.min(1, (delta - 1) / 0.2));
-    const depth = Math.max(floor, shape.depth * Math.max(0.45, 1 + P.depthVar * pool) * Math.pow(shape.width / width * delta, 0.25));
+    const depth = Math.sqrt(thin) * Math.max(floor, shape.depth * Math.max(0.45, 1 + P.depthVar * pool) * Math.pow(thin * shape.width / width * delta, 0.25));
     const island = P.islands && s > 2 * joinM && length - s > 2 * joinM
         ? quintic01((reach - P.islandThreshold) / 0.3) * (1 - quintic01(((shape.slope ?? 0) - 0.004) / 0.008)) : 0;
     return { ...shape, width, depth, island };
@@ -459,8 +475,9 @@ export function riverShape(Qm3s, slope, P = RIVER_SHAPE_DEFAULTS, waterFrac = 0.
 // part of their lake (riverHeldDepth), deepening gradually (outletDeepenM);
 // 40-47 = deltas only over low ground (riverDeltaHalfWidth), widening
 // gradually, at least frontMinM deep at the shore; held outlets keep their
-// depth (the carve's basin under the lake).
-export const RIVER_SOLVE_VERSION = 53;
+// depth (the carve's basin under the lake); 54 = the usual river twice as wide,
+// thin ones the exception (minWidthM, thinShare).
+export const RIVER_SOLVE_VERSION = 54;
 
 export const RIVER_LEVEL_DEFAULTS = Object.freeze({
     // Water fills this fraction of the bank-full depth (Whitewater: 0.75).

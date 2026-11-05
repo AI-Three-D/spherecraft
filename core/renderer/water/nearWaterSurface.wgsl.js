@@ -22,6 +22,7 @@ import { createWaterWgsl, WATER_WET_BED } from '../../world/water/waterWgsl.js';
 import { RIVER_SECTION } from '../../world/water/riverSection.js';
 import { RIVER_FIELD } from '../../world/water/riverField.js';
 import { fieldWaterLookupWgsl } from './fieldWaterSurface.wgsl.js';
+import { WHITE_FLAG_LOOK, WHITE_UNIFORMS_WGSL, whitewaterLookWgsl } from './whitewaterLook.wgsl.js';
 import { getAerialPerspectiveWGSL } from '../atmosphere/shaders/aerialPerspectiveCommon.js';
 
 export const NEAR_WATER_MAX_LAKES = 16;
@@ -75,14 +76,22 @@ struct NearWaterVOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) wp: vec3<f32>,
     @location(1) @interpolate(flat) lake: u32,
+    @location(2) xy: vec2<f32>,
 };
 
 ${NEAR_WATER_RASTER_WGSL}
 `;
 }
 
+// The frame the close surface is laid out in, shared with the river tiers: the
+// pattern runs on across a page's edge (whitewaterLook.wgsl.js).
+const LAKE_WHITE_WGSL = /* wgsl */`
+@group(2) @binding(0) var<uniform> W: WhiteU;
+${WHITE_UNIFORMS_WGSL}
+`;
+
 export function buildNearWaterVertexShader() {
-    return commonWgsl() + /* wgsl */`
+    return commonWgsl() + LAKE_WHITE_WGSL + /* wgsl */`
 @vertex
 fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> NearWaterVOut {
     let slot = u32(U.lakes[ii / 4u][ii % 4u] + 0.5);
@@ -102,6 +111,7 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Nea
     o.pos = nearWaterRasterPosition(wp);
     o.wp = wp;
     o.lake = slot;
+    o.xy = whiteFrameXY(dir);
     return o;
 }
 `;
@@ -117,10 +127,10 @@ export function shadeWgsl() {
 
 // Share of this fragment that is foam (whitewaterLook.wgsl.js).
 var<private> nearWaterHardShore: f32 = 0.0;
-// Depth (m) at which this fragment's water starts: a lake's shore (waterShoreM), 0 for rivers.
-var<private> nearWaterShoreM: f32 = 0.0;
 // How full of air this water is, 0..1 (whitewaterLook.wgsl.js): fast water is not clear.
 var<private> nearWaterAerated: f32 = 0.0;
+// The body's light from the surface's slopes, around 1 (whitewaterLook.wgsl.js).
+var<private> nearWaterRelief: f32 = 1.0;
 // Opaque depth converted to distance behind this point along the view ray.
 fn nearWaterBehind(wp:vec3<f32>,pixel:vec2<f32>)->f32 {
     let dimensions=vec2<i32>(textureDimensions(nearWaterSceneDepth));
@@ -182,13 +192,9 @@ fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>
     // shores. Foreground opaque geometry still completely hides the water.
     // Foam ends where it ends: faded like clear water it smeared over the bank.
     let contactDepth = behind * max(abs(dot(V, up)), 0.05);
-    let waterDepth = contactDepth - nearWaterShoreM;
-    let contact = mix(smoothstep(0.0, waterParams.shoreSoftM, waterDepth), smoothstep(0.0, 0.05, waterDepth), nearWaterHardShore);
-    // The strip the water leaves is wet ground: black over it at this share.
-    let wetFilm = select(0.0, waterShoreWet(contactDepth, nearWaterShoreM, dist) * (1.0 - contact) * w, nearWaterShoreM > 0.0);
-    let body = waterBodyLight(contactDepth, dist, up, L, sun, sky);
-    let aWater = (1.0 - transmission * (1.0 - s.a)) * w * contact;
-    let a = aWater + wetFilm * (1.0 - aWater);
+    let contact = mix(smoothstep(0.0, waterParams.shoreSoftM, contactDepth), smoothstep(0.0, 0.05, contactDepth), nearWaterHardShore);
+    let body = waterBodyLight(contactDepth, dist, up, L, sun, sky) * nearWaterRelief;
+    let a = (1.0 - transmission * (1.0 - s.a)) * w * contact;
     let add = (body * (1.0 - transmission) * (1.0 - s.a) + s.rgb) * w * contact;
 
     // Aerial perspective (or fog), as the terrain shading applies it after
@@ -218,7 +224,7 @@ fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>
 }
 
 export function buildNearWaterFragmentShader() {
-    return commonWgsl() + shadeWgsl() + fieldWaterLookupWgsl() + /* wgsl */`
+    return commonWgsl() + LAKE_WHITE_WGSL + shadeWgsl() + fieldWaterLookupWgsl() + whitewaterLookWgsl() + /* wgsl */`
 @fragment
 fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
     if(nearWaterBehind(in.wp,in.pos.xy)<=0.0) {discard;}
@@ -240,8 +246,13 @@ fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
         // level, instead of over lower ground past a sill (floating edges).
         if (m * 255.0 - 128.0 <= lake.surfaceDepthRangeM) { discard; }
     } else if (m < select(0.5,63.5/255.0,lake.surfaceDepthRangeM>0.0)) { discard; }
-    nearWaterShoreM = waterShoreM(dir, waterFootM(length(U.cameraPos - in.wp), in.wp, U.cameraPos, dir));
-    let c = nearWaterShade(in.wp, in.pos.xy, dir);
+    // Close water has the surface of the rivers; past lakeDetailM that comes to the distant one.
+    var c: vec4<f32>;
+    if ((W.flags & ${WHITE_FLAG_LOOK}u) != 0u && length(U.cameraPos - in.wp) < waterParams.lakeDetailM) {
+        c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, dir, in.xy, vec2<f32>(0.0), 0.0, 0.0, in.pos.xy), in.pos.xy, dir);
+    } else {
+        c = nearWaterShade(in.wp, in.pos.xy, dir);
+    }
     if (c.a <= 0.0) { discard; }
     // Water debug views 6 and 7 (waterWgsl.js applyWater): alpha 0 adds
     // the flat colour to what is below (premultiplied blending).
