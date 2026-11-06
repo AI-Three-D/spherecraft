@@ -55,6 +55,12 @@ export const RIVER_FLOW = Object.freeze({
     // white tongue.
     plumeCore: 6, plumeSpread: 0.16, plumeFan: 0.2, plumeWander: 0.08, plumeLength: 14, plumeRangeM: [50, 200],
     plumeBackM: 60, plumeDepthM: 1.2, plumeLeastV: 0.6, plumeFoamM: 0.22,
+    // A river's start draws on its lake the same way, reversed: water converges on the outlet
+    // through a section widening by up to intakeSpread per metre, easing in from the exit, so its
+    // speed falls with that width, gone by intakeLength half-widths (within plumeRangeM). Without
+    // one the flow stopped dead on a line across the water (owner 2026-11-05, u-start), and the lake,
+    // giving nothing at the outlet, left the river's first 100 m 50 cm low. No foam: water being drawn.
+    intakeLength: 12, intakeSpread: 0.3, intakeFan: 0.5,
     // Past a lake's shore, or once its level is within endLevelM of the lake's, a river's
     // own speed is gone by endFadeM + endFadePerHw x hw (m), whatever the channel does:
     // a narrow end ran at the limit on flat lake water (5.4 m/s at river 2557's outlet).
@@ -192,27 +198,36 @@ export function riverFlowDesign(S, rid, o = RIVER_FLOW) {
     }
 }
 
-/** The plumes of a river into its lakes, from its stations (after riverFlowDesign). */
+/**
+ * The plumes of a river into its lakes and the intakes at its starts, from its stations (after
+ * riverFlowDesign). Both run from the shore out into the lake: tx, ty point that way, and an
+ * intake's water flows the other way along them.
+ */
 export function riverPlumes(S, rid, o = RIVER_FLOW) {
-    const out = [];
+    const out = [], back = Math.round(o.plumeBackM / S.ds);
     for (const end of S.ends ?? []) {
-        if (end.sign <= 0 || end.level === undefined) continue;
+        if (end.level === undefined) continue;
+        const intake = end.sign < 0;
         let shore = 0;
         while (shore < S.m - 1 && S.s[shore] < end.s) shore++;
         let V = 0, foam = 0, tx = 0, ty = 0;
-        for (let i = Math.max(0, shore - Math.round(o.plumeBackM / S.ds)); i <= shore; i++) {
+        for (let i = intake ? shore : Math.max(0, shore - back); i <= (intake ? Math.min(S.m - 1, shore + back) : shore); i++) {
             V = Math.max(V, S.V[i]); foam = Math.max(foam, S.foam[i]); tx += S.tx[i]; ty += S.ty[i];
         }
         if (V < o.plumeLeastV) continue;
-        const l = Math.hypot(tx, ty) || 1, b = 0.5 * (S.hwL[shore] + S.hwR[shore]);
-        out.push({ x: S.x[shore], y: S.y[shore], tx: tx / l, ty: ty / l, b, V, foam,
-            length: clamp(o.plumeLength * b * Math.sqrt(V / 2), o.plumeRangeM[0], o.plumeRangeM[1]), seed: riverHash(shore, rid >>> 0) });
+        const l = (Math.hypot(tx, ty) || 1) * (intake ? -1 : 1), b = 0.5 * (S.hwL[shore] + S.hwR[shore]);
+        out.push({ x: S.x[shore], y: S.y[shore], tx: tx / l, ty: ty / l, b, V, foam: intake ? 0 : foam, intake,
+            length: clamp((intake ? o.intakeLength * b : o.plumeLength * b * Math.sqrt(V / 2)), o.plumeRangeM[0], o.plumeRangeM[1]), seed: riverHash(shore, rid >>> 0) });
     }
     return out;
 }
 
 /** Plume p at a metres along it, r across: { speed, width, off: its centre's offset, turn: of its centre per m }. */
 export function plumeAt(p, a, r, o = RIVER_FLOW) {
+    if (p.intake) {
+        const up = Math.max(a, 0), width = p.b + o.intakeSpread * up * up / (up + p.b);
+        return { speed: p.V * (p.b / width) * Math.exp(-((r / width) ** 2)) * (1 - smoothstep(0.45 * p.length, p.length, a)), width, off: 0, turn: 0 };
+    }
     const width = p.b + o.plumeSpread * Math.max(a, 0), w = 2 * Math.PI / (0.7 * p.length), phase = p.seed * 6.2832;
     const grow = o.plumeWander * Math.min(Math.max(a, 0), p.length);
     const core = Math.min(1, Math.sqrt(o.plumeCore * p.b / Math.max(a, 1)));

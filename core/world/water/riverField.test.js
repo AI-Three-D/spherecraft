@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bakeRiverField, extendRiverEnds, riverWidthFactor, fieldCoords, fieldDir, pageKey, pageOf, riverFieldLayout, riverFieldTexelSdf, sampleRiverField, RIVER_FIELD } from './riverField.js';
+import { bakeRiverField, extendRiverEnds, riverWidthFactor, fieldCoords, fieldDir, pageKey, pageOf, riverFieldLayout, riverFieldPageDirections, riverFieldTexelSdf, sampleRiverField, RIVER_FIELD } from './riverField.js';
 import { buildRiverFieldTable, riverFieldHash } from './riverField.wgsl.js';
 
 const R = 131000;
@@ -34,6 +34,22 @@ it('finds every page through the hash table', () => {
     });
 });
 
+it('generates the same directions on every face, including cube edges', () => {
+    const L = riverFieldLayout(R), keys = [];
+    for (let face = 0; face < 6; face++) {
+        for (const [x, y] of [[0, 0], [L.PE - 1, L.PE - 1], [L.PE >> 1, L.PE >> 1]]) keys.push(pageKey(face, x, y, L));
+    }
+    const dirs = riverFieldPageDirections(keys, L);
+    for (let p = 0; p < keys.length; p++) {
+        const { face, pi, pj } = pageOf(keys[p], L);
+        for (let j = 0; j < L.P; j++) for (let i = 0; i < L.P; i++) {
+            const expected = fieldDir(face, pi * L.P + i + 0.5, pj * L.P + j + 0.5, L);
+            const offset = (p * L.P * L.P + j * L.P + i) * 4;
+            for (let k = 0; k < 3; k++) expect(dirs[offset + k]).toBe(Math.fround(expected[k]));
+        }
+    }
+});
+
 it('cuts a channel under its level, keeps the water connected and only cuts', async () => {
     const L = riverFieldLayout(R);
     // A river along x from -300 to 300 m on ground sloping across (y) and
@@ -54,6 +70,33 @@ it('cuts a channel under its level, keeps the water connected and only cuts', as
     const r = await bakeRiverField({ rivers: [{ rec: { points, stride: st, mouths: [] }, arc, rid: 7, levels }], L, sampleNatural, lakeAt: () => null, debug: true,
         o: { ...RIVER_FIELD, meanderAmp: 0, widenRiver: 1, widenReach: 1 } });
     expect(r.stats.pages).toBeGreaterThan(10);
+    expect(r.stats.drySdfPages).toBeGreaterThan(0);
+    expect(r.pages.packed.length).toBe(r.pages.size * L.TEX * 2);
+    for (const page of r.pages.values()) expect(page.buffer).toBe(r.pages.packed.buffer);
+    // Independently check distances on both sides of page boundaries. Dry
+    // pages can skip the transform only when their entire halo is dry.
+    const PP = L.P * L.P, halo = Math.ceil(RIVER_FIELD.sdfM / RIVER_FIELD.texelM);
+    const slots = new Map(r.keys.map((key, i) => [key, i]));
+    for (let p = 0; p < r.keys.length; p++) {
+        const { face, pi, pj } = r.pageInfo[p];
+        const wetAt = (i, j) => {
+            const x = pi * L.P + i, y = pj * L.P + j;
+            if (x < 0 || y < 0 || x >= L.T || y >= L.T) return 0;
+            const px = Math.floor(x / L.P), py = Math.floor(y / L.P);
+            const slot = slots.get(pageKey(face, px, py, L));
+            return slot === undefined ? 0 : r.wet[slot * PP + (y - py * L.P) * L.P + x - px * L.P];
+        };
+        for (const [i, j] of [[0, 0], [L.P - 1, 0], [0, L.P - 1], [L.P - 1, L.P - 1], [L.P >> 1, L.P >> 1]]) {
+            const wet = wetAt(i, j);
+            let nearest2 = 1e12;
+            for (let y = -halo; y < L.P + halo; y++) for (let x = -halo; x < L.P + halo; x++) {
+                if (wetAt(x, y) !== wet) nearest2 = Math.min(nearest2, (x - i) ** 2 + (y - j) ** 2);
+            }
+            const signed = (Math.sqrt(nearest2) - 0.5) * RIVER_FIELD.texelM * (wet ? 1 : -1);
+            const expected = Math.max(-RIVER_FIELD.sdfM, Math.min(RIVER_FIELD.sdfM, signed));
+            expect(r.sdf[p * PP + j * L.P + i]).toBeCloseTo(expected, 4);
+        }
+    }
     // Sample the debug arrays at plane points.
     const valueAt = (x, y, arr) => {
         const q = fieldCoords(at(x, y), L), key = pageKey(q.face, Math.floor(q.x / L.P), Math.floor(q.y / L.P), L);

@@ -4,16 +4,14 @@
 // camera and publishes it to the GPU (riverField.wgsl.js): a hash table of
 // pages, their texels and the parameters, bound in the terrain generator's
 // group 1, the carved hydrology sampler, the near water and the terrain shading.
-// Tiles touching changed pages regenerate (onChanged: water grid cells).
+// Tiles touching changed pages regenerate (onChanged: water grid cells and pages).
 
 import { Logger } from '../../../shared/Logger.js';
 import { dirToCell } from '../hydrology/waterGraph.js';
 import { riverWaterLevels } from './riverMouth.js';
 import { extendRiverEnds, fieldDir, finishRiverFieldBake, pageOf, prepareRiverFieldBake, riverFieldLakeCandidates, riverFieldLayout, riverFieldPageFacts, RIVER_FIELD, RIVER_FIELD_WORDS } from './riverField.js';
 import { buildRiverFieldTable, riverFieldParamsData, RIVER_FIELD_PARAMS_BYTES } from './riverField.wgsl.js';
-
-// The lake pass runs on the main thread (it needs the masks): at most this long (ms) per task.
-const LAKE_SLICE_MS = 3;
+import { NaturalTerrainPageCache, sampleNaturalFieldPages } from './NaturalTerrainPageCache.js';
 
 export const RIVER_FIELD_SERVICE_DEFAULTS = Object.freeze({
     // Rivers whose nearest point is this close to the camera are baked.
@@ -24,6 +22,12 @@ export const RIVER_FIELD_SERVICE_DEFAULTS = Object.freeze({
     minIntervalMs: 3000,
     // Baked rivers stay until this many radii away.
     keepScale: 1.4,
+    // Extra CPU memory for reusing uncarved heights across overlapping bakes.
+    // Set to 0 to disable, or adjust for the device's memory budget.
+    naturalCacheBytes: 16 * 1024 * 1024,
+    // Lake masks are currently read on the main thread. Yield between slices.
+    lakeSliceMs: 3,
+    lakeSliceMsLoading: 8,
 });
 
 export class RiverFieldService {
@@ -36,6 +40,7 @@ export class RiverFieldService {
         this.busy = false; this.isIdle = false; this.disposed = false;
         this.revision = -1; this.bakedAt = null; this.rivers = new Map();
         this.pages = new Map();
+        this.naturalCache = new NaturalTerrainPageCache(this.config.naturalCacheBytes);
         this.stats = null; this.retired = [];
         this.resources = null;
         // The bake's CPU part runs in a module worker (in-process without one).
@@ -135,8 +140,8 @@ export class RiverFieldService {
 
     /**
      * True once every river within the radius of the camera is traced (or
-     * failed) and the field is baked for them: the loading screen waits for
-     * it (startup is the place for water work; no river pops in after it).
+     * failed) and the field is baked for them. This is a progress diagnostic;
+     * the initial terrain reveal no longer waits for the entire radius.
      */
     readyForReveal() {
         const svc = this.service, dir = this._lastDir;
@@ -191,24 +196,26 @@ export class RiverFieldService {
             const t1 = performance.now();
             // At most 2^21 directions per dispatch (one 64-wide workgroup each:
             // past 65535 workgroups the dispatch is invalid and never reads back).
-            const count = prep.dirs4.length / 4, nat = new Float32Array(count), CHUNK = 1 << 21;
-            for (let i = 0; i < count; i += CHUNK) {
-                const part = await sampler.sampleDirsNatural(prep.dirs4.subarray(i * 4, Math.min(count, i + CHUNK) * 4));
-                if (!part) throw new Error('natural ground unavailable');
-                nat.set(part, i);
-            }
+            this.naturalCache.setSource(sampler, this.generator._regionalTerrainInputRevision ?? 0);
+            const sampled = await sampleNaturalFieldPages({ keys: prep.keys, dirs4: prep.dirs4,
+                pageSamples: L.P * L.P, sampler, cache: this.naturalCache });
+            const nat = sampled.nat;
             const t2 = performance.now();
             this.stage = 'lakes';
             // Between frames, a slice at a time: this needs the lake masks here.
-            let slice = performance.now(), busy = 0, longest = 0;
+            let slice = performance.now(), busy = 0, longest = 0, yields = 0;
             const pause = async () => {
                 const ran = performance.now() - slice;
-                if (ran < LAKE_SLICE_MS) return;
+                const budget = this.service._loading?.() ? this.config.lakeSliceMsLoading : this.config.lakeSliceMs;
+                if (ran < budget) return;
                 busy += ran; longest = Math.max(longest, ran);
+                yields++;
                 await new Promise(r => setTimeout(r, 0));
                 slice = performance.now();
             };
             const lakeCand = await riverFieldLakeCandidates({ rivers, dirs4: prep.dirs4, nat, lakeAt: d => this.water.lakeEdgeAt(d), pause });
+            const lastSlice = performance.now() - slice;
+            busy += lastSlice; longest = Math.max(longest, lastSlice);
             this.stage = 'worker';
             const t3 = performance.now();
             const result = await this._finish({ rivers: plain, L, keys: prep.keys, pageRivers: prep.pageRivers, dirs4: prep.dirs4, nat, lakeCand });
@@ -222,10 +229,13 @@ export class RiverFieldService {
             const changed = [];
             for (const [key, hash] of this._hashes) if (hashes.get(key) !== hash) changed.push(key);
             for (const key of hashes.keys()) if (!this._hashes.has(key)) changed.push(key);
-            this.onChanged?.(this._cellsOf(changed));
+            this.onChanged?.(this._cellsOf(changed), changed);
             // Main-thread time (the rest ran in the worker): longest, the longest stretch without a frame.
             const publish = performance.now() - t4;
             result.stats.ms = { ...result.stats.ms, dirs: t1 - t0, sample: t2 - t1, lakes: t3 - t2, publish, main: busy + publish, longest: Math.max(longest, publish), total: performance.now() - t0 };
+            result.stats.naturalCache = { sampledPages: sampled.sampledPages, reusedPages: sampled.reusedPages,
+                bytes: this.naturalCache.bytes, maxBytes: this.naturalCache.maxBytes };
+            result.stats.lakeSlices = { yields, activeMs: busy, longestMs: longest };
             this.bakedAt = dir; this.stats = result.stats;
             (this.history ??= []).push({ at: Math.round(performance.now()), rivers: rivers.length, ...result.stats.ms, pages: result.stats.pages });
             if (this.history.length > 40) this.history.shift();
@@ -304,6 +314,7 @@ export class RiverFieldService {
     dispose() {
         this.disposed = true;
         this._worker?.terminate(); this._worker = null;
+        this.naturalCache.clear();
         if (this.resources) { this.retired.push(this.resources); this.resources = null; }
         this._retire();
     }

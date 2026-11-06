@@ -905,8 +905,9 @@ export function createEngineConfig() {
 
 export function createGameDataConfig() {
   const terrain = new TerrainGenerationConfig({
-    // Shared planet-wide water inputs are complete before the first tiles.
-    regionalTerrain: {enabled:true,cells:256,seamCells:4,basins:{enabled:true},world:{enabled:true,maxLakes:1200,maxRivers:320}},
+    // Use natural terrain and terrain-sampled water by default. The older
+    // regional placement remains available for explicit comparisons.
+    regionalTerrain: {enabled:false,cells:256,seamCells:4,basins:{enabled:true},world:{enabled:true,maxLakes:1200,maxRivers:320}},
     continents: {
       enabled: true,
       count: 4,
@@ -973,6 +974,9 @@ export function createGameDataConfig() {
     // qtDiag.water.stats() / .near() / .goto(id). See WaterService.js.
     waterGraph: {
       enabled: true,
+      // CPU memory for reusing natural ground between river bakes. Set to 0
+      // for minimum memory, or raise it to retain more pages between bakes.
+      riverField: { naturalCacheBytes: 16 * 1024 * 1024 },
       // Independent shoreline variation, bank relief and shore splat materials.
       carve: { bankDetail: 1 },
       // Whitewater (core/world/water/WhitewaterSim.js): foam far away, animated

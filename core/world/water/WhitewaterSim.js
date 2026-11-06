@@ -48,6 +48,8 @@ export const WHITEWATER_DEFAULTS = Object.freeze({
     sponge: 8, lakeHold: 3, lakeDrag: 0.8,
     // Bed roughness (m) under falling water, and the drawn chop (m at k = 1).
     roughM: 0.35, waveAmp: 0.06,
+    // Local velocity steering around rocks that are not solid solver-bed obstacles.
+    rockSteerRate: 0.6,
     // A block eases in over this (s) once it has stepped warmDelayS, stepping
     // youngSubsteps extra meanwhile.
     warmDelayS: 1.0, warmS: 1.5, youngSubsteps: 1,
@@ -237,10 +239,14 @@ export class WhitewaterSim {
         const rocks = new Float32Array(n * 8);
         for (let i = 0; i < n; i++) {
             const o = i * RIVER_ROCK_FLOATS, d = [list[o], list[o + 1], list[o + 2]], [x, y] = this._frameXY(d), r = list[o + 3];
-            data.set([x, y, r, list[o + 4], list[o + 5], list[o + 6], list[o + 7], 0], i * 8);
-            rocks.set([x, y, r, list[o + 4], list[o + 5], list[o + 6], list[o + 7], 0], i * 8);
-            if (list[o + 8] < 0.5) continue;
-            for (let by = Math.floor((y - r) / B); by <= Math.floor((y + r) / B); by++) for (let bx = Math.floor((x - r) / B); bx <= Math.floor((x + r) / B); bx++) {
+            const solid = list[o + 8] >= 0.5;
+            data.set([x, y, r, list[o + 4], list[o + 5], list[o + 6], list[o + 7], solid ? 1 : 0], i * 8);
+            rocks.set([x, y, r, list[o + 4], list[o + 5], list[o + 6], list[o + 7], solid ? 1 : 0], i * 8);
+            // Non-solid rocks still steer water near their surface, without
+            // placing a dam in the shallow-water solver's bed.
+            if (!solid && list[o + 4] < list[o + 7] - 0.35) continue;
+            const reach = solid ? r : 4 * r;
+            for (let by = Math.floor((y - reach) / B); by <= Math.floor((y + reach) / B); by++) for (let bx = Math.floor((x - reach) / B); bx <= Math.floor((x + reach) / B); bx++) {
                 const key = bx * 65536 + by;
                 if (!byBlock.has(key)) byBlock.set(key, []);
                 byBlock.get(key).push(i);
@@ -278,6 +284,7 @@ export class WhitewaterSim {
         this._pi[0] = this.N; this._pi[1] = this.G; this._pu[2] = count;
         f.set([c.dx, dt, c.g, c.hmin, c.umax, this._time, c.macCormack, c.turbA, c.turbL, c.turbT, c.foamDecay, c.kDecay,
             c.kGen, c.foamGen, c.maxRise, c.maxFall, c.sponge, c.roughM, c.lakeHold, c.lakeDrag], 4);
+        f[24] = Math.max(0, c.rockSteerRate);
         this.device.queue.writeBuffer(this.simU, 0, this.params);
     }
 

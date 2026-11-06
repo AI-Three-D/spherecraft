@@ -4,6 +4,8 @@
 handoff and experiment report (2026-10-05 .. 11-03; all in git history up to
 5ad0fe9). Read it completely before touching water code.
 
+**Next:** optimization, [RIVER_LAKE_OPTIMIZATION_PLAN.md](RIVER_LAKE_OPTIMIZATION_PLAN.md).
+
 **Status in one line:** closer than ever before, still far from visually
 acceptable; section 10 ends with the latest. The owner's screenshots of 11-04 (`tools/perf/riverBanks/ownerViews-2026-11-04.json`)
 showed edge walls along rivers, straight-edged water polygons and pointed
@@ -208,9 +210,8 @@ JunctionFieldService does):
 - Materials: mud by depth below W and wet distance with broad noise; grass
   on dry ground.
 
-**Publication.** Bake the rivers near the spawn during the loading screen
-(the game already waits for `getLoadingStatus().complete`); later rivers
-bake before their fine tiles are requested, or their tiles regenerate once.
+**Publication.** Begin baking rivers near the spawn during loading and continue
+after terrain is revealed; later rivers trigger regeneration of affected tiles.
 Measure: bake ms per km of river, memory, tile generation ms, frame ms.
 
 **Phases and gates** (owner poses, dry and wet, lighting view 91 dry):
@@ -642,7 +643,7 @@ slower than before (2.6 -> 2.0 m/s on river 2557), and a rapid there lost its wh
 subcritical water stand in it without moving it. The mud bank beside steep water shows more
 now the cyan has gone.
 
-### Near water by distance, wider rivers (2026-11-05, fourth look, uncommitted)
+### Near water by distance, wider rivers (2026-11-05, fourth look, ced2946)
 
 Owner's views: `tools/perf/lakeLook/ownerViews-2026-11-05c.json`. Evidence:
 `tools/perf/structured-terrain-results/water-lod-2026-11-05/` (`baseline`, `fin`, `fin2`, `cmp-base`, `costab`,
@@ -703,10 +704,10 @@ going upstream), river movement 0.20 -> 0.23, speed 2.0 -> 2.1 m/s, sag under ba
 - Keeping the old depth: the exit is then too shallow for the width (sag -50 to -65 cm).
 - Do not read frame cost across page loads with the owner's game open: one run read everything double.
 
-**Cost of the width:** same poses: field pages +41 % (6512 -> 9164), 101 -> 143 MB, worker bake 6.2 -> 8.5 s, main thread 154 -> 218 ms
+**Cost of the width:** same poses: field pages +41 % (6512 -> 9164), 101 -> 143 MB, whole bake 6.2 -> 8.5 s (its worker stages 4.2 -> 5.7 s), main thread 154 -> 218 ms
 per bake, solver blocks 129 -> 155 at o-upstream-black. Pages reach by half-width times about five: the next saving if memory matters.
 
-### Fifth look (2026-11-05, same day, uncommitted)
+### Fifth look (2026-11-05, same day, ced2946)
 
 Owner's views: `tools/perf/lakeLook/ownerViews-2026-11-05d.json`. Evidence: the same folder (`g-base`, `g-new`, `plan`, `fin3`,
 `cmp-base` against `cmp-fin`, `flicker-foam`, `px-*`).
@@ -730,7 +731,226 @@ stamped on lake water only, so the speed died before the plume began. A plume no
 - Scaling mouth flares and deltas down with the width: no visible change at the poses it was for. Reverted.
 - Trusting `bakedWidths` for what the eye gets, and reporting "2 x" from it.
 
-**Open:** the sag near outlets (20 % of depth), which needs exits deep enough for their flow. A dip of 16 cm going up from a river's
+### Sixth look: river starts (2026-11-05, same day, uncommitted)
+
+Owner's view: `tools/perf/lakeLook/ownerViews-2026-11-05e.json`. A hard line where moving water met static water at a river's start: the
+flow should reach on up the lake and slow gradually. Plumes existed only where rivers enter lakes, so past an outlet the lake had no
+flow at all, and the solver held it there.
+
+**Intakes** (`riverPlumes`, `plumeAt`, `intakeLength`, `intakeSpread`, `intakeFan`): a plume reversed. Water closes in on the outlet through a
+section widening with distance, easing in from the exit, so speed falls with that width, gone by 12 half-widths (within `plumeRangeM`), no
+foam. The stamping and the lake's hold needed no change: lake cells drag toward the baked velocity, so they now deliver water.
+
+The sag below outlets was the same thing: the lake gave nothing at the exit, so the river ran low. Earlier attempts on it (section above) were
+all on the river's side of the line. Maps, 14 s after arrival:
+
+| | Speed up the lake from the exit (m/s) | Sag under baked |
+|---|---|---|
+| River 454, before | 2.3, 0.9, 0.1, 0.1, 0 | -50 cm |
+| River 454, intake | 2.6, 2.0, 1.9, 1.7, 1.5, 1.3, then fading | -14 cm |
+| River 2557, before | | -46 cm |
+| River 2557, intake | | -10 cm |
+
+Solver against baked in the lake: within 0.1 m/s. River level movement 0.21 -> 0.09 at u-start. Flicker at u-start (30 FPS, `minTop: 0`): hf 0.37,
+blinks 0.02 %, no beat. `wwSurge`'s still-water figures can read null near outlets now: too few cells count as still. Read the map.
+A wide outlet draws hard: 2.6 m/s at the lake's edge at river 2557. It reads as calm water on screen, but a deep lake should slow it faster;
+speed could fall with depth as well.
+
+**Open:** a small sag near outlets remains (10-15 cm). A dip of 16 cm going up from a river's
 end on arrival, gone in 6 s, since plumes cover their channel. Thin sheets over banks on steep bends (`rise` 0.6 m in `wwSurge`,
 h 0.3-0.5 m), not visible in the settled frame at o-upstream-black. Close by at eye height the lace is soft flecks. Lake outlines are
 plain contours again: the owner's "blobs" stand until they decide.
+
+## 2026-11-06: optimization restart
+
+The owner chose natural terrain as the default and wants the design reconsidered,
+not just the current implementation tuned. `runtimeConfigs.js` now disables
+regional terrain by default, retaining the old code for possible comparison or
+later removal. The bare URL is not yet equivalent to the reviewed URL above:
+`waterPrecompute=1` enables 32 m precomputed lakes and mountain lakes, and
+`lodHeight=ground` changes terrain detail selection. Mode selection remains to
+be implemented in settings; no automatic planet-size choice is intended.
+
+Initial CPU-only bake changes keep a full halo when deciding whether distance
+transforms can be skipped, and skip blur passes only where their entire input
+neighbourhood is zero. Output pages are also constructed directly in the
+contiguous worker-transfer array, avoiding an additional full page-data copy.
+`stats.drySdfPages` and `stats.emptyBlurPages` count the skipped page work (the
+latter counts horizontal and vertical passes separately).
+
+Reproduce with `node tools/perf/riverBanks/fieldCpuBench.mjs`. The synthetic
+4 km river produces 403 pages; 275 have a dry distance halo without a lake,
+and 259 with the synthetic lake. The old and new packed page/flow/rock SHA-256
+hashes match for both cases. Three post-warmup Node runs before the changes had
+SDF times of 56–58 ms (no lake) and 55–62 ms (lake); after, runs were about
+29–32 ms and 31–35 ms respectively. This is a small synthetic CPU comparison,
+not a GPU or full loading-time result; concurrent work and runtime variation
+make total timings noisy. The same fixture skipped 418 of 806 blur page passes.
+The removed worker-side copy is 10,368 bytes per page: about 90.6 MiB for the
+9,164-page historical case, a calculated transient CPU allocation reduction,
+not a measured total-memory or GPU-memory saving.
+
+No headless browser or GPU test was run: the recorded working rule requires the
+owner's permission because the GPU is shared. The reviewed poses, actual loading
+floor, visual appearance of the default, full-size runtime gains and teleport/
+flight coverage are therefore not yet verified. The baseline's ~8.5 s full
+bake and repeated regeneration remain architectural problems, not solved by
+these local changes. Next investigate progressive, bounded regional data and
+reuse/cancellation against a representative GPU baseline; compare alternatives
+before committing to the current field or a replacement.
+
+### GPU review and repeated natural sampling
+
+With the owner's permission, a headless Chrome run of the reviewed URL at
+`g-wedge` and `g-notch` produced an 8,003-page field (41 rivers). Its last
+full bake took 6,668 ms, including 452 ms natural-ground sampling, 939 ms
+lake candidates and 4,742 ms worker finish; this is a single run, not a
+controlled comparison with older page loads. It skipped 4,373 dry-halo SDF
+transforms and 10,612 of 16,006 blur passes. The lake-edge probe found zero
+dry lake pages, median baked width per river was 36 m, and worst bank cut
+was 8.98 m. The report has one 404 resource error and no GPU errors.
+
+A bounded natural-ground cache now keeps page heights across bakes. It defaults
+to 16 MiB; set `waterGraph.riverField.naturalCacheBytes` to change the limit or
+0 to disable it. It is invalidated when the sampler or terrain-input revision
+changes; it stores no water-derived values. In a same-page comparison of three
+forced identical 5,126-page bakes, cache off sampled all pages in 168 ms; a
+warm 16 MiB cache reused 4,096 and sampled 1,030 in 34 ms. The full bake was
+3,810 ms off and 3,423 ms warm, though the other stages varied substantially.
+Page hashes, flow and rocks matched exactly. This improves repeated overlapping
+bakes, not first-time generation, and intentionally uses up to the configured
+extra CPU memory. No claim is made about a full fast-flight path yet.
+
+Page-direction generation now reuses per-axis angular coordinates. A 2,000-page
+Node comparison took 81–83 ms before and 42–57 ms after, with identical output
+hashes; a test also checks every texel on six faces, including cube edges.
+
+For the lake-mask pass, a same-page 5,126-page comparison used a 3 ms slice
+and an 8 ms slice: 253 ms versus 152 ms elapsed, with 32 versus 11 yields;
+main-thread active time was 99 versus 95 ms, and the longest lake slice was
+3.3 versus 8 ms. Packed-page hashes, flow and rocks matched. Loading now uses
+the 8 ms slice; in play it remains 3 ms. This comparison did not measure the
+effect on the complete loading screen or concurrent terrain work. The limits
+are configurable with `waterGraph.riverField.lakeSliceMsLoading` and
+`lakeSliceMs`. An additional per-segment precomputation was tried in a
+1,260-page alternating CPU comparison but did not produce a clear benefit, so
+it was discarded rather than adding its temporary memory.
+
+### Incremental-bake investigation
+
+A diagnostic groups pages that touch (including corners) or share a river.
+At `g-notch` it found 12 candidate groups for 8,003 pages / 41 rivers; the
+largest has 2,062 pages (25.8%). A synthetic test baked separated groups and
+matched the full field and flow byte for byte. A further headless comparison
+recomputed each candidate group against the already published real scene: all
+8,003 pages and flow pages matched, and the same rock records were produced;
+the water revision was stable. The group worker times totalled 5,441 ms in
+that run, so merely splitting a cold bake is not a demonstrated speedup.
+
+This is evidence for, not proof of, safe incremental caching. In particular,
+plumes and rock wakes may reach pages across gaps; lake candidate inputs,
+river order, changes that merge or split groups, page halos and cached rock
+ordering also need explicit dependencies and invalidation. No production group
+cache or parallel/group publication is enabled. Diagnostic code is in
+`tools/perf/riverBanks/fieldGroups.js` and `groupComparison.js`.
+
+## 2026-11-06: river arrival and regeneration
+
+The owner reported that rivers appeared very late and passed through a detached,
+brown-bed state. The bare URL uses on-demand water; the reviewed URL above uses
+precompute and mountain lakes. Those are not yet equivalent modes: in particular,
+the current on-demand path does not create the precomputed mountain lakes/streams.
+
+The normal-launch probe found a startup cycle: on-demand water waited for initial
+loading to complete while initial loading waited for water. After nearly 20 s of
+loading-screen time, discovery had not started. Water discovery now starts
+alongside terrain loading. In the follow-up run the loading screen completed
+around 5.9 s after its own start, with water discovery already active (about
+12.4 s after navigation). These are single runs on this machine, not a universal
+startup budget.
+
+In on-demand mode a second scheduling problem kept a traced river waiting while
+more distant lake/river jobs started first. A fixed-view run had a traced nearby
+river but no baked pages for over 30 s; with field bakes given the next turn,
+the same river began baking in about 2 s and the field was published roughly
+4–6 s after positioning. Discovery is paused during that bake to keep its lake
+masks stable. The reviewed precompute path now also gives a ready field priority.
+The first river in this probe is 32.8 km long and produces 7,361 field pages;
+adding a second, 36.7 km river brought the field to 14,991 pages and an 8.4 s
+bake. Work still scales with whole river length, not just the visible section.
+
+A lake refinement invalidated that river and its tributary even though the lake
+was outside the long, narrow solve patch: the former overlap test used only
+bounding circles. On-demand invalidation now also checks conservative projected
+patch rectangles. A repeat retained the river when that lake appeared. Existing
+cache identity and precompute invalidation rules remain unchanged. Uncertain
+frames fall back to the conservative result. Unit tests cover true overlaps,
+separated patches, off-centre/rotated frames, and sampled overlap cases.
+
+The per-texel river stage now skips page/river pairs whose projected page cannot
+reach any indexed section. On the 8,003-page reviewed scene, 4,573 pages needed
+no per-texel river evaluation; a same-page comparison showed 1,313 ms with the
+check versus 1,527 ms without. All packed pages, flow and rocks matched exactly.
+An additional six-face, 1,000 km-radius unit comparison also matches the original.
+
+Terrain invalidation now selects changed field pages with a conservative margin
+for the tile's sampling footprint instead of expanding everything by one whole
+water-grid cell; cube-face boundary cases retain the old predicate. A resident
+coverage comparison selected 326 of the 461 tiles selected by the old method,
+with no newly selected tiles in that scene. Tests cover padded samples, cube
+edges and two planet scales. This is a coverage count, not a measured frame-time
+improvement.
+
+A conservative census requiring unchanged ground, saturated dry distance, zero
+flow and no nearby indexed lake found only 11 removable pages out of 7,412; page
+removal was not enabled. In the first-river captures, the new surface still
+briefly shows a large old-terrain triangle before tile regeneration settles. The
+narrower invalidation region does not make publication atomic; the detached
+transition is **not fixed**. The 32–37 km whole-river bakes, high memory and
+multi-second generation remain the main performance problem. Terrain-compute
+lake ideas are deferred to the next iteration at the owner's request.
+
+Visual caveat: the later precompute capture at `g-notch` has a different rock
+arrangement and its per-river median baked width is 34 m, versus 36 m in an
+earlier capture. Those were separate page loads with different cached tracing
+history, so the cause is not established. The same-input field-cull comparison
+matched byte for byte, and precompute invalidation rules were restored,
+but that does not prove that the overall precomputed scene is visually identical.
+Compare `/private/tmp/river-optimization-latest-review/current/g-notch.png` and
+`/private/tmp/river-current-look/current/g-notch.png` before treating the look as
+verified. The normal on-demand arrival artifact is visible in
+`/private/tmp/river-arrival-final-8s.png`.
+
+### Near-first startup investigation (2026-11-06)
+
+The owner's actual test is `standalone.html?regionalTerrain=0&regionalBanks=organic&riverSim=off&waterPrecompute=1&lodHeight=ground` (`riverSim` is not read by this runtime). At the reported camera pose, the water is predominantly mountain lakes, ponds and mountain streams. A cold precompute run waited for the whole mountain phase and then kept tracing new rivers ahead of the field: the first published river field appeared around 104 s after navigation. These are individual headless runs, not stable benchmark averages.
+
+Mountain discovery/solving now overlaps graph-lake refinement, while drainage waits for the graph masks. Graph masks retain priority over mountain masks where they overlap. Mountain lakes are registered as solved in a fixed distance order; in addition, the first 12 choices can be solved during discovery if conservative bounds on every unfinished block and the greedy selection's dependencies prove them to be the same prefix as the final selection. The first nearby mountain solve finished 0.8–0.9 s after the mountain phase began in two fresh-cache runs. The visible foreground lake was present in `/private/tmp/reported-local-cold-10s.png`; the larger lakes at the top of that view are drainage ponds and still arrived much later. A check after full discovery verifies the early choices, and randomized tests compare the settled prefix against full selection. The early order is fixed at the camera position when discovery begins; adapting it during rapid movement remains future work.
+
+Precompute now lets a ready river field bake before starting the next trace, and stable terrain no longer waits for the entire 6 km water radius before revealing. Fresh-cache runs published an initial field at about 72–74 s instead of roughly 104 s in a preceding run; warmed-cache repeats published one around 14–19 s after navigation. The early field was only one river and can appear before terrain regeneration completes; the detached/rough transition has not been proven fixed. A repeat visit revealed terrain around 19 s instead of 25 s in separate warm runs, with substantial run-to-run variation. The reported view's final 38 nearby river IDs and lengths matched the earlier run, but that is not a complete visual-equivalence test.
+
+In one warm arrival capture at the reported view, screenshots taken at approximately 300 ms intervals show the field initially hidden by old terrain and then a continuous detailed river (`/private/tmp/reported-priority-warm-arrival-1.png` and `-arrival-3.png`). This is a single pose and does not rule out the detached segments reported elsewhere.
+
+The global work still prevents the requested near-instant rivers and scales poorly. One fresh-cache audit processed 4,747 mountain discovery blocks, 2,194 mountain lakes, 2,581 continuation patches and 3,056 ponds before completing precompute. Under concurrent test load it spent about 32 s on discovery, 13 s on continuation and 23 s solving ponds; selection checks had a longest observed main-thread slice of 3.7 ms. The remedy needs a region-based drainage/pond and river pipeline, not just the early lake selection. A prototype local field bake at this pose matched all 643 pages within 2 km but differed on 60 outer pages and 19 flow pages; it was not enabled because its boundary and connected-water behavior need a safe handoff. No claim of identical final appearance or fast flight/teleport support is made.
+
+### Reported lake and distant-river visuals (2026-11-06)
+
+At the owner's high-altitude lake pose, the regular pattern came from the distant wind shading: replacing wind with a constant removed it in a same-page A/B. The wind now combines spatially warped, differently scaled waves. The captured view has less regular repetition while retaining visible variation (`/private/tmp/lake-wind-cost/current/pattern.png`). On that pose a three-round same-page GPU comparison was noisy: the former shader measured 6.5–8.1 ms per frame and the revised shader 7.2–7.7 ms, so it does not establish a cost improvement or a reliable regression. Close-range `g-notch` and `u-start` views were also inspected.
+
+The 30 FPS `u-start` flicker check with the earlier `minTop: 0` setting reported hf 0.365 and blinks 0.018%, close to the earlier recorded 0.37 and 0.02%; no WebGPU errors were reported. This is one pose, not a global guarantee.
+
+At the reported stacked-lake pose, two independent pond patches had levels of 534.12 m and 543.39 m; the smaller was entirely under the other. Solving both seeds on a larger 309 x 426 terrain patch found one connected basin at about 550.42 m. Pond and mountain overlaps are now solved on a common grid, with the new spillways followed and crossed hollows checked again. If the common grid instead resolves distinct, non-overlapping basins, both are kept. Lower mountain pockets almost completely inside an already-refined higher graph lake are assigned to that graph lake; an absorbed mountain ID remains an alias so its water and streams have one owner after a cached reload. This is a bounded sampled-grid reconciliation, not a proof for every seed or planet. The reported camera at 541.36 m is now below the corrected surface, and the renderer has no separate underwater-fog treatment.
+
+The mountain-lake cache version was bumped. The first visit after this change must regenerate it, can shift water and river identities, and has extra basin and drainage work; this is a quality fix, not a startup-speed improvement. The global startup and near-first work described above remains necessary.
+
+On the reported seed, the headless cold and cached-reload censuses found zero overlapping sampled wet areas among the 5,260 active mountain/pond records, and zero against the 605 active graph-lake records. The cold solve absorbed 49 graph-submerged mountain pockets and left no pending rebuilt drains; both runs gave the reported basin as 550.410 m. The cold and reload review scripts took about 96 s and 36 s respectively including browser startup, scene settling, capture and census, so these are not timings for first visible water. See `/private/tmp/final-water-census/overlap/report.json` and `/private/tmp/final-water-reload/overlap/report.json`. No WebGPU validation errors were reported; the page also produced a resource 404.
+
+The reported distant river's gaps were terrain-shader pixels where coarse terrain lay above the field's water level, although the fine field marked the direction connected and wet. Beyond the near-water handover, the terrain shader now uses the baked wet area to give those pixels a water depth; nearby water still uses the original geometric test. At the owner's pose the large brown gaps disappeared in `/private/tmp/water-visual-candidate/current/river-high.png`; dry and water-owner captures are alongside it. This does not change the terrain, river field or water levels, and other causes of missing water remain possible.
+
+The owner then requested a terrain-generation lake plan: [LAKES_IN_TERRAIN_GENERATION_PLAN.md](LAKES_IN_TERRAIN_GENERATION_PLAN.md). It is an investigation/prototype plan, not an implementation or a commitment to restore the disabled regional-terrain approach.
+
+### Rock influence on stream flow (2026-11-06)
+
+Previously only rocks in sufficiently fast flow became solid obstacles in the shallow-water solver; other visible rocks merely added a foam wake, so velocity and the animated texture could continue through them. The baked river flow now turns around near-surface rocks and rejoins downstream. In the near simulation, solid obstacles still affect the bed, while the other rocks gently steer the simulated velocity toward that local flow without raising the bed into a dam. This is a bounded approximation, not a fully resolved fluid/obstacle simulation.
+
+At one real rock in the `g-notch` reach, a same-page GPU probe with steering on, off, then on again showed a repeatable sideways velocity change of roughly 0.3–0.4 m/s at sampled cells and corresponding foam changes (`/private/tmp/rock-impact-review/current/report.json`). In a separate arrival test at `u-start`, the 99th-percentile rise on the upstream still-water cells was 0.004 m both with and without steering (`/private/tmp/rock-steer-surge/summary.json`); this checks one known problematic location, not every river. No WebGPU validation errors were reported in those runs.

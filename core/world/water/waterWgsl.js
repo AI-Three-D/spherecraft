@@ -840,12 +840,14 @@ var<private> waterWindNow: f32 = 0.5;
 fn waterSwell(p: vec3<f32>, k: vec3<f32>, phase: f32) -> f32 {
     return sin(6.2831853 * fract(dot(p, k) + phase));
 }
-// Three waves at unrelated angles: two would draw a lattice.
+// Warped waves at unrelated angles and wavelengths. Fixed-frequency sums
+// make a visibly repeating lattice over a large lake viewed from above.
 fn waterSwells(p: vec3<f32>, invM: f32, phase: f32, rate: f32) -> f32 {
     let t = waterParams.time * rate * 2.0;
-    return (waterSwell(p, vec3<f32>(0.83, 0.31, 0.47) * invM, phase + t)
-        + waterSwell(p, vec3<f32>(-0.38, 0.86, 0.34) * invM, phase * 0.7 - 0.61 * t)
-        + waterSwell(p, vec3<f32>(0.29, -0.52, 0.80) * invM, phase * 1.3 + 0.37 * t)) * 0.3333;
+    let warp = waterSwell(p, vec3<f32>(0.19, 0.58, -0.61) * invM * 0.31, phase * 0.43 + 0.13 * t);
+    return (waterSwell(p, vec3<f32>(0.83, 0.31, 0.47) * invM, phase + t + 0.75 * warp)
+        + waterSwell(p, vec3<f32>(-0.38, 0.86, 0.34) * invM * 1.19, phase * 0.7 - 0.61 * t - 0.56 * warp)
+        + waterSwell(p, vec3<f32>(0.29, -0.52, 0.80) * invM * 0.83, phase * 1.3 + 0.37 * t + 0.42 * warp)) * 0.3333;
 }
 
 // How ruffled the water is, 0 calm .. 1: gusts of a few hundred metres drifting
@@ -1034,11 +1036,17 @@ fn applyWater(
     // level W, the same rule its near surface uses (fieldWaterSurface.wgsl.js).
     let fieldHit = riverFieldWater(up);
     if (fieldHit.x > 0.5) {
-        let wetF = fieldHit.z > -1.5 && heightM < fieldHit.y;
+        // At distance, coarse terrain triangles can cross above the river's
+        // baked surface even though the fine field says this point is wet.
+        // Shade those connected wet texels as water rather than exposing the
+        // muddy bed; keep the actual geometry test for nearby water.
+        let coarseStart = max(max(waterParams.near.y, waterParams.riverLook.z), 1.0);
+        let coarseDepth = smoothstep(coarseStart, coarseStart * 1.5, dist) * smoothstep(0.0, 1.0, fieldHit.z);
+        let wetF = fieldHit.z > -1.5 && (heightM < fieldHit.y || coarseDepth > 0.01);
         if (dbg == 6u) { return vec3<f32>(select(0.0, WATER_OWNER_ON, wetF), 0.0, 0.0); }
         if (dbg == 7u) { return vec3<f32>(0.0, select(0.0, WATER_OWNER_ON, wetF), 0.0); }
         if (!wetF) { return bedColor; }
-        let depthF = fieldHit.y - heightM;
+        let depthF = max(fieldHit.y - heightM, coarseDepth);
         let nearF = waterNearWeight(dist);
         let switchF = max(waterParams.near.y, waterParams.riverLook.z);
         let farStartF = select(switchF, waterParams.near.x, waterParams.near.z > 0.5);

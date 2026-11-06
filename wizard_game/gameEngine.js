@@ -54,6 +54,7 @@ import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terr
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
 import { WaterGpuData, lakeMaskAtlasPlan, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
+import { tilesTouchingRiverFieldPages } from '../core/world/water/riverFieldTiles.js';
 import { RiverFieldService } from '../core/world/water/RiverFieldService.js';
 import {structuredWaterGpuCapacity} from '../core/world/water/structuredWaterGpuCapacity.js';
 import { WhitewaterSim } from '../core/world/water/WhitewaterSim.js';
@@ -369,8 +370,8 @@ export class GameEngine {
         const config = this.engineConfig?.ui?.initialLoad ?? {};
         const stats = this.renderer?.getInitialLoadStatus?.() ?? null;
         state.stats = stats;
-        // The river field near the spawn is baked and its tiles regenerated
-        // before the reveal (core/world/water/RiverFieldService.js).
+        // Track water separately; nearby water keeps streaming after the
+        // terrain reveal instead of holding the player on the loading screen.
         const field = this.riverFieldService;
         const fieldOn = (this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator ?? this.terrainGenerator)?.waterCarve === true
             && this.waterService?.state !== 'failed';
@@ -412,7 +413,7 @@ export class GameEngine {
                 stats.activeGenerations <= (config.maxActiveGenerations ?? 8) &&
                 stats.pendingCopies <= (config.maxPendingCopies ?? 0);
 
-            if (residentReady && exactReady && visibleReady && queueReady && waterReady) {
+            if (residentReady && exactReady && visibleReady && queueReady) {
                 state.stableFrames++;
                 state.phase = 'locking';
                 state.title = 'Locking terrain residency';
@@ -445,8 +446,7 @@ export class GameEngine {
 
         const elapsedMs = performance.now() - state.startedAt;
         const minOverlayMs = Math.max(0, config.minOverlayMs ?? 0);
-        // Water work belongs to startup: wait longer while the river field is pending.
-        const maxWaitMs = Math.max(minOverlayMs + 1, config.maxWaitMs ?? 12000, state.waterPending ? (config.maxWaterWaitMs ?? 120000) : 0);
+        const maxWaitMs = Math.max(minOverlayMs + 1, config.maxWaitMs ?? 12000);
         const stableReady = state.stableFrames >= state.stableFramesRequired;
 
         if (stableReady && elapsedMs >= minOverlayMs) {
@@ -1039,9 +1039,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
 
         if (!this.isInitialLoadComplete()) {
             this._tickInitialLoadState();
-            // Structured water already owns a coarse basin plan; publish it
-            // while refined terrain is loading. Legacy discovery keeps its
-            // existing initial-load guard in _tickWater.
+            // Start water discovery alongside terrain loading in either mode.
             this._tickWater();
             this.gameTime.update();
             this._syncStarSystemTimeScale();
@@ -1434,8 +1432,8 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     }
 
     /**
-     * Legacy water starts after initial terrain load and refines nearby lakes.
-     * Structured water publishes its completed placement before quadtree
+     * Terrain-sampled water discovers and refines nearby lakes while terrain
+     * loads. Structured water publishes its completed placement before quadtree
      * initialization so first terrain outputs already contain its carve.
      * Both paths require terrain.waterGraph.enabled.
      */
@@ -1446,7 +1444,6 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         const precompute = this.planetConfig.terrainGeneration.waterGraph.refine?.precompute === true;
         if (!this.waterService) {
             const terrainGenerator = this.renderer?.quadtreeTileManager?.tileStreamer?.terrainGenerator ?? this.terrainGenerator;
-            if (!this.isInitialLoadComplete() && !terrainGenerator?.regionalTerrain?.basinsConfig && !precompute) return;
             const device = this.renderer?.backend?.device;
             if (!terrainGenerator || !device) return;
             this.waterService = new WaterService({
@@ -1465,8 +1462,9 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.waterService.update(this.camera?.position);   // camera for the precompute's order
             if (this.waterService.state !== 'ready') return;
             const terrainGenerator = this.waterService.terrainGenerator;
+            const mountainCount = this.waterService.lakes.filter(lake => lake.mountain).length;
             this._createWaterGpuData(terrainGenerator, this.renderer.backend.device,
-                { maskAtlas: lakeMaskAtlasPlan(this.waterService.lakes, { reserve: this.waterService.mountainReserve ?? 0 }) });
+                { maskAtlas: lakeMaskAtlasPlan(this.waterService.lakes, { reserve: Math.max(0, (this.waterService.mountainReserve ?? 0) - mountainCount) }) });
             // Only solved lakes are drawn: no grid-cell outlines at any distance.
             this.waterGpuData.look.unsolvedLakeHideM = 1e12;
             // Initial water debug view (URL water=off: the dry view, WATER_DEBUG_DRY).
@@ -1502,28 +1500,42 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
             this.waterService.setWaterCarveResources(this.waterGpuData.resources);
             this._waterCarveGenerator = terrainGenerator;
             this.riverFieldService=new RiverFieldService({water:this.waterGpuData,service:this.waterService,terrainGenerator,
-                onChanged:cells=>this._regenerateWaterCells(cells)});
+                config:this.waterService.config.riverField ?? {},
+                onChanged:(cells,pages)=>this._regenerateWaterCells(cells,pages)});
             this.waterGpuData.riverField=this.riverFieldService;
         }
     }
 
     _tickWaterFrame() {
-        this.waterService.update(this.camera?.position);
         const cam = this.camera?.position, origin = this.planetConfig.origin || { x: 0, y: 0, z: 0 };
+        // Let ready river fields bake before starting the next trace in both
+        // modes. Otherwise precompute can keep tracing distant rivers for
+        // tens of seconds while the river at the camera is ready but invisible.
+        const precompute = this.waterService.config?.refine?.precompute === true;
         if (cam && this.waterGpuData) {
             const rel = { x: cam.x - origin.x, y: cam.y - origin.y, z: cam.z - origin.z };
-            this._tickWhitewater(rel);
+            if (precompute) this._tickWhitewater(rel);
             this.waterGpuData.update(this.waterService, rel, performance.now() / 1000);
             this.riverFieldService?.update(rel);
+            if (!precompute) this._tickWhitewater(rel);
         }
+        // Let a ready field bake start before scheduling another discovery job.
+        // A bake reads the current lake masks, so keep them stable until it
+        // finishes; discovery resumes immediately afterward.
+        if (!this.riverFieldService?.busy) this.waterService.update(cam);
     }
 
-    _regenerateWaterCells(changed) {
+    _regenerateWaterCells(changed, pages = null) {
         if(!changed?.size||!this._waterCarveGenerator)return;
         this._waterCarveGenerator.markWaterCarveChanged();
-        const touchesChangedCells=tilesTouchingCells(changed,this.waterGpuData.N),tileManager=this.renderer?.quadtreeTileManager;
-        tileManager?.markTerrainRegionsChanged?.(touchesChangedCells);
-        const queued=tileManager?.regenerateTiles?.(touchesChangedCells)??0;
+        const legacy=tilesTouchingCells(changed,this.waterGpuData.N),tileManager=this.renderer?.quadtreeTileManager;
+        const size=tileManager?.tileStreamer?.tileGenerator?.textureSize;
+        const padding=this._waterCarveGenerator._computeSplatPaddingTexels?.();
+        const layout=this.riverFieldService?.layout;
+        const touches=pages?.length&&layout&&Number.isFinite(size)&&size>=2&&Number.isFinite(padding)&&padding>=0
+            ? tilesTouchingRiverFieldPages(pages,layout,size,padding,legacy) : legacy;
+        tileManager?.markTerrainRegionsChanged?.(touches);
+        const queued=tileManager?.regenerateTiles?.(touches)??0;
         Logger.debug(`[Water] terrain changed in ${changed.size} cells: ${queued} resident tiles regenerating`);
     }
 

@@ -18,7 +18,7 @@ import { MinHeap, faceUVToDir, makeNeighbors } from './waterGraph.js';
 import { tangentBasis, dirToPlane, planeToDir } from './lakeRefine.js';
 
 // Bump on any change to discovery, choice or the drainage paths (cache key).
-export const MOUNTAIN_LAKE_VERSION = 4;
+export const MOUNTAIN_LAKE_VERSION = 10;
 
 export const MOUNTAIN_LAKE_DEFAULTS = Object.freeze({
     enabled: true,
