@@ -4,8 +4,8 @@ import { createWaterWgsl, LAKE_PARAMS_FLOATS, LAKE_RECORD_FLOATS, RIVER_SEG_FLOA
 import { cellDir, dirToCell, dirToCellSub, faceUVToDir } from '../hydrology/waterGraph.js';
 
 describe('water WGSL', () => {
-    it('validates inside a fragment shader', () => {
-        const src = createWaterWgsl({ group: 3 }) + `
+    it.each([false, true])('validates inside a fragment shader with river field %s', riverField => {
+        const src = createWaterWgsl({ group: 3, riverField }) + `
 @group(3) @binding(8) var linearSampler: sampler;
 @fragment
 fn main(@location(0) wp: vec3<f32>) -> @location(0) vec4<f32> {

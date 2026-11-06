@@ -25,7 +25,7 @@ import { RIVER_FIELD } from './riverField.js';
 import { WHITE_UNIFORMS_WGSL } from '../../renderer/water/whitewaterLook.wgsl.js';
 
 export const WHITE_BLOCK = 32;
-export const WHITE_SIM_PARAM_FLOATS = 24;
+export const WHITE_SIM_PARAM_FLOATS = 28;
 const WORKGROUPS_PER_BLOCK = (WHITE_BLOCK / 8) ** 2;
 
 // The baked state's last word: foam 0..1 on river water; on lake water minus (the
@@ -45,8 +45,13 @@ struct SimP {
   turbL: f32, turbT: f32, foamDecay: f32, kDecay: f32,
   kGen: f32, foamGen: f32, maxRise: f32, maxFall: f32,
   sponge: f32, roughM: f32, lakeHold: f32, lakeDrag: f32,
+  rockSteerRate: f32, pad1: f32, pad2: f32, pad3: f32,
 };
 @group(0) @binding(0) var<uniform> P: SimP;
+// n^2 is under 2; the integer part stores an 8-bit rock-steering weight.
+// This keeps the solver's existing static buffer and bind-group footprint.
+fn whiteFriction(encoded: f32) -> f32 { return encoded - 2.0 * floor(encoded * 0.5); }
+fn whiteRockSteer(encoded: f32) -> f32 { return floor(encoded * 0.5) / 255.0; }
 fn wrapC(a: i32) -> i32 { return select(select(a, a - P.N, a >= P.N), a + P.N, a < 0); }
 fn ci(i: i32, j: i32) -> u32 { return u32(wrapC(j)) * u32(P.N) + u32(wrapC(i)); }
 `;
@@ -212,7 +217,7 @@ fn noiseGrad(p: vec2f, t: f32) -> vec2f {
   return vec2f(px, py);
 }
 fn bedOf(i: i32, j: i32) -> f32 { return ST[ci(i, j) * 2u].x; }
-fn frictionOf(i: i32, j: i32) -> f32 { return ST[ci(i, j) * 2u].y; }
+fn frictionOf(i: i32, j: i32) -> f32 { return whiteFriction(ST[ci(i, j) * 2u].y); }
 // How far a cell is held to the baked state, 0 free .. 1 held: the stepped
 // blocks' weights, bilinear between block centres.
 fn heldAt(i: i32, j: i32) -> f32 {
@@ -248,7 +253,7 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
     let vavg = 0.25 * (sL.z + SI[ci(i-1, j+1)].z + s.z + SI[ci(i, j+1)].z);
     let hf = max(0.5 * (hL + h), P.hmin);
     let spd = sqrt(u * u + vavg * vavg);
-    let n2 = 0.5 * (frictionOf(i-1, j) + st0.y);
+    let n2 = 0.5 * (frictionOf(i-1, j) + whiteFriction(st0.y));
     u = u / (1.0 + dt * g * n2 * spd / pow(hf, 1.3333));
     let kf = 0.5 * (KI[ci(i-1, j)] + KI[id]);
     if (P.turbA > 1e-4 && kf > 0.02 && wetL && wetR) {
@@ -269,7 +274,7 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
     let uavg = 0.25 * (sB.y + SI[ci(i+1, j-1)].y + s.y + SI[ci(i+1, j)].y);
     let hf = max(0.5 * (hB + h), P.hmin);
     let spd = sqrt(v * v + uavg * uavg);
-    let n2 = 0.5 * (frictionOf(i, j-1) + st0.y);
+    let n2 = 0.5 * (frictionOf(i, j-1) + whiteFriction(st0.y));
     v = v / (1.0 + dt * g * n2 * spd / pow(hf, 1.3333));
     let kf = 0.5 * (KI[ci(i, j-1)] + KI[id]);
     if (P.turbA > 1e-4 && kf > 0.02 && wetB && wetT) {
@@ -279,6 +284,14 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
     v = clamp(v, -P.umax, P.umax);
   }
   let baked = ST[id * 2u + 1u];
+  // A soft local steering field keeps subcritical rocks in the flow without
+  // raising the solver bed into a dam. Solid rocks still use physical bed
+  // obstacles. The baked target turns around the rock and rejoins downstream.
+  let rockSteer = whiteRockSteer(st0.y);
+  if (rockSteer > 0.0 && h > P.hmin) {
+    let a = 1.0 - exp(-P.rockSteerRate * rockSteer * dt);
+    u = mix(u, baked.y, a); v = mix(v, baked.z, a);
+  }
   var foam = s.w; var k = KI[id];
   if (h > P.hmin) {
     let sR = SI[ci(i+1, j)]; let sT = SI[ci(i, j+1)];
@@ -364,7 +377,7 @@ export const WHITE_INIT_WGSL = SIM_PARAMS + NOISE + WHITE_UNIFORMS_WGSL
 @group(0) @binding(1) var<uniform> W: WhiteU;
 @group(0) @binding(2) var<storage, read> BATCH: array<i32>;
 @group(0) @binding(3) var<storage, read> HEIGHTS: array<f32>;
-// Rocks in the frame: x, y, radius, top; base, seed, water level, 0.
+// Rocks in the frame: x, y, radius, top; base, seed, water level, solid flag.
 @group(0) @binding(4) var<storage, read> ROCKS: array<vec4f>;
 @group(0) @binding(5) var<storage, read_write> ST: array<vec4f>;
 @group(0) @binding(6) var<storage, read_write> STATE: array<vec4f>;
@@ -401,18 +414,31 @@ fn init(@builtin(global_invocation_id) gid: vec3u) {
   let rough = P.roughM * smoothstep(0.05, 0.6, foam) * smoothstep(0.2, 1.2, level - ground);
   bed += rough * ((noise2(xy * 0.31) - 0.5) * 1.4 + (noise2(xy * 0.83 + 7.0) - 0.5) * 0.7);
   let first = BATCH[bi * 8u + 4u]; let count = BATCH[bi * 8u + 5u];
+  var steer = 0.0;
   for (var r = 0; r < count; r++) {
     let q = BATCH[first + r];
     let a = ROCKS[q * 2]; let b = ROCKS[q * 2 + 1];
     let d = length(xy - a.xy) / a.z;
-    if (d < 1.0) { bed = max(bed, b.x + (a.w - b.x) * sqrt(1.0 - d * d)); }
+    if (b.w > 0.5) {
+      if (d < 1.0) { bed = max(bed, b.x + (a.w - b.x) * sqrt(1.0 - d * d)); }
+    } else if (d < 4.0 && length(vel) > 0.05) {
+      let strength = 1.0 - smoothstep(-0.15, 0.35, b.z - a.w);
+      let falloff = 1.0 - smoothstep(2.0, 4.0, d);
+      let direction = normalize(vel); let side = vec2f(-direction.y, direction.x);
+      let relative = xy - a.xy; let x = dot(relative, direction); let y = dot(relative, side);
+      let den = max(dot(relative, relative), a.z * a.z);
+      let k = min(0.25, 0.25 * strength * falloff * a.z * a.z / den);
+      let dx = -k * (x * x - y * y) / den; let dy = -2.0 * k * x * y / den;
+      vel += length(vel) * (direction * dx + side * dy);
+      steer = max(steer, strength * falloff);
+    }
   }
   var h0 = 0.0;
   if (sdf > -1.5) { h0 = max(level - bed, 0.0); }
   if (h0 < 0.05) { h0 = 0.0; }
   let wet = select(0.0, 1.0, h0 > 0.0);
   let state = vec4f(h0, vel.x * wet, vel.y * wet, foam * wet);
-  ST[id * 2u] = vec4f(bed, manning * manning, h0, sdf);
+  ST[id * 2u] = vec4f(bed, manning * manning + 2.0 * round(clamp(steer, 0.0, 1.0) * 255.0), h0, sdf);
   ST[id * 2u + 1u] = vec4f(level, vel.x * wet, vel.y * wet, bakedWord(foam * wet, lake));
   STATE[id] = state;
   KALL[id] = foam * wet * 0.6;

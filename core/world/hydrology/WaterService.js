@@ -18,7 +18,7 @@ import { Logger } from '../../../shared/Logger.js';
 import { createHydrologySampler } from './HydrologyGrid.js';
 import { WaterCache, hashParts } from './waterCache.js';
 import { createWaterWorkerCore } from './waterWorkerCore.js';
-import { dirToPlane, growPatchFrame, limitPatchCells, tangentBasis } from './lakeRefine.js';
+import { dirToPlane, growPatchFrame, limitPatchCells, planeToDir, tangentBasis } from './lakeRefine.js';
 import { cellDir, dirToCell } from './waterGraph.js';
 import { RIVER_SUB } from '../water/waterWgsl.js';
 import { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } from '../water/riverShapeNoise.js';
@@ -26,6 +26,9 @@ import { RIVER_SECTION } from '../water/riverSection.js';
 import { RIVER_LEVEL_DEFAULTS, RIVER_SOLVE_VERSION } from './riverRefine.js';
 import { regionalWaterModel,regionalWaterGridN } from './regionalWater.js';
 import { MOUNTAIN_LAKE_DEFAULTS, MOUNTAIN_LAKE_VERSION, chooseMountainLakes, drainFrame, mountainBlockFrame, mountainBlocks, pocketSolveFrame } from './mountainLakes.js';
+import { settledMountainPrefix } from './mountainStreaming.js';
+import { pondOverlapGroups, sharedPondFrame } from './pondOverlapGroups.js';
+import { patchRectsMayOverlap } from './patchOverlap.js';
 
 // Bump on any change to the graph, the lake solve or the sampling.
 export const WATER_ALGO_VERSION = 'water-v20';   // v20: preserve fine lake seeds and merge only the actual basin
@@ -439,6 +442,14 @@ export class WaterService {
                 if (++solved === 1) this.timings.firstLakeMs = performance.now() - t0;
             }
         };
+        // Mountain pocket discovery and solving only depend on the original
+        // graph and natural terrain. Run them alongside graph-lake refinement;
+        // their drainage still waits for all graph-lake masks below.
+        let graphComplete;
+        const graphReady = new Promise(resolve => { graphComplete = resolve; });
+        const mountainJob = this._mountainBlocks
+            ? this._mountainLakes({ takeWorker, releaseWorker, poolSize, graphReady }).then(() => null, error => error)
+            : null;
         try {
             const running = new Set();
             for (;;) {
@@ -457,13 +468,18 @@ export class WaterService {
             await adoptReady();
             this.timings.precomputeWorkers = poolSize;
             this.timings.lakesMs = performance.now() - t0;
-            if (this._mountainBlocks) await this._mountainLakes({ takeWorker, releaseWorker, poolSize });
+            graphComplete();
+            const mountainError = await mountainJob;
+            if (mountainError) throw mountainError;
             const { downstream } = await this._client.call({ type: 'downstream' });
             for (const [lid, down] of Object.entries(downstream)) {
                 const r = this.refined.get(Number(lid));
                 if (r) r.downstream = down;
             }
         } finally {
+            graphComplete();
+            // Do not terminate shared workers while mountain jobs use them.
+            if (mountainJob) await mountainJob;
             for (const w of pool) w.terminate();
             this.timings.precomputeMs = performance.now() - t0;
             this.precomputed = true;
@@ -482,47 +498,51 @@ export class WaterService {
      * after the graph's (ids from lakes.length; no graph river of their own
      * yet). The solved lakes are cached as one record.
      */
-    async _mountainLakes({ takeWorker, releaseWorker, poolSize }) {
+    async _mountainLakes({ takeWorker, releaseWorker, poolSize, graphReady = Promise.resolve() }) {
         const t0 = performance.now();
         const P = { ...MOUNTAIN_LAKE_DEFAULTS, ...this.config.refine.mountain };
         const N = this.N, Rp = this.radius, sea = this._sampler.seaLevelM, NN = N * N;
+        const base = this.lakes.length;
         const key = `mlakes:${this._key}:${hashParts([MOUNTAIN_LAKE_VERSION, P, this.config.refine.bandM])}`;
         let solved = this.config.cache ? await this._cache.get(key) : null;
         const fromCache = !!solved;
         const runBounded = async (items, job) => {
             const running = new Set();
-            for (const item of items) {
-                while (running.size >= (this._loading?.() ? 1 : poolSize) + 1) await Promise.race(running);
-                const p = job(item).then(() => running.delete(p));
-                running.add(p);
+            let failure = null;
+            try {
+                for (const item of items) {
+                    while (running.size >= (this._loading?.() ? 1 : poolSize) + 1) {
+                        await Promise.race(running);
+                        if (failure) throw failure;
+                    }
+                    const p = Promise.resolve().then(() => job(item)).catch(error => { failure ??= error; }).finally(() => running.delete(p));
+                    running.add(p);
+                }
+                await Promise.all(running);
+                if (failure) throw failure;
+            } catch (error) {
+                await Promise.allSettled(running);
+                throw error;
             }
-            await Promise.all(running);
         };
         if (!solved) {
-            const dist = (d) => (this._camDir ? Math.acos(Math.max(-1, Math.min(1, d[0] * this._camDir[0] + d[1] * this._camDir[1] + d[2] * this._camDir[2]))) : 0);
+            // Keep one ordering for dispatch and registration even if the
+            // camera moves while workers are solving the selected pockets.
+            const originDir = this._camDir?.slice();
+            const dist = (d) => (originDir ? Math.acos(Math.max(-1, Math.min(1, d[0] * originDir[0] + d[1] * originDir[1] + d[2] * originDir[2]))) : 0);
             const blocks = this._mountainBlocks.map(b => ({ ...b, frame: mountainBlockFrame(b, N, Rp, P.discoverySpacingM, P) }))
                 .sort((a, b) => dist(a.frame.c) - dist(b.frame.c));
             const B = P.blockCells, cands = [];
-            const owns = (b, cell) => { const f = Math.floor(cell / NN), k = cell % NN; return f === b.f && Math.floor((k % N) / B) === b.bi && Math.floor(Math.floor(k / N) / B) === b.bj; };
-            // Not in a graph lake, and clear of the graph's river cells (their
-            // traces run through such pockets).
-            const clear = (cell) => {
-                if (this.lakeOf[cell] !== -1 || this.riverOf[cell] !== -1) return false;
-                return true;
-            };
-            await runBounded(blocks, async (b) => {
-                const heights = await this._sampler.samplePatch(b.frame, Rp);
-                const worker = await takeWorker();
-                let r;
-                try { r = await worker.call({ type: 'findPockets', frame: b.frame, heights, R: Rp, seaLevelM: sea, params: P }, [heights.buffer]); }
-                finally { releaseWorker(worker); }
-                for (const p of r.pockets) { const cell = dirToCell(p.dir, N); if (owns(b, cell) && clear(cell)) cands.push(p); }
-            });
-            this.timings.mountainDiscoveryMs = performance.now() - t0;
-            const picks = chooseMountainLakes(cands, Rp, P).sort((a, b) => dist(a.dir) - dist(b.dir));
-            const empty = new Float64Array(0);
+            const pending = new Map(blocks.map(b => {
+                const f = b.frame;
+                const x = Math.max(Math.abs(f.x0), Math.abs(f.x0 + f.nx * f.spacing));
+                const y = Math.max(Math.abs(f.y0), Math.abs(f.y0 + f.ny * f.spacing));
+                return [b, { c: f.c, pointRadiusM: Math.hypot(x, y), maxRadiusM: Math.sqrt(f.nx * f.ny / Math.PI) * f.spacing }];
+            }));
+            const empty = new Float64Array(0), early = [];
             solved = [];
-            await runBounded(picks, async (p) => {
+            let earlyChain = Promise.resolve(), earlyError = null, discovered = 0;
+            const solvePocket = async p => {
                 let frame = pocketSolveFrame(p, Rp, P);
                 for (let grows = 0; grows <= 2; grows++) {
                     const heights = await this._sampler.samplePatch(frame, Rp);
@@ -530,17 +550,92 @@ export class WaterService {
                     let rec;
                     try { rec = await worker.call({ type: 'solvePatchLake', lakeId: -1, frame, heights, bandM: this.config.refine.bandM, N, R: Rp, seedDir: p.dir, others: empty }, [heights.buffer]); }
                     finally { releaseWorker(worker); }
-                    if (rec.status === 'ok') { solved.push({ dir: p.dir, rec, path: p.path, pathH: p.pathH, pits: p.pits }); return; }
-                    if (rec.status !== 'grow') return;
+                    if (rec.status === 'ok') return { dir: p.dir, rec, path: p.path, pathH: p.pathH, pits: p.pits };
+                    if (rec.status !== 'grow') break;
                     frame = growPatchFrame(frame, 1.6);
                 }
+                return null;
+            };
+            const publishSolved = items => {
+                const ready = items.filter(Boolean);
+                if (!ready.length) return;
+                solved.push(...ready);
+                this._addLakes(ready.map(value => ({ dir: value.dir, rec: value.rec, mountain: true })));
+                this.timings.firstMountainLakeMs ??= performance.now() - t0;
+            };
+            const startSettled = () => {
+                const started = performance.now();
+                const prefix = settledMountainPrefix(cands, [...pending.values()], originDir, Rp, P);
+                this.timings.mountainSelectionLongestMs = Math.max(this.timings.mountainSelectionLongestMs ?? 0, performance.now() - started);
+                for (let i = 0; i < early.length; i++) {
+                    if (prefix[i]?.dir !== early[i].dir) throw new Error('settled mountain lake prefix changed');
+                }
+                for (const p of prefix.slice(early.length, 12)) {
+                    early.push(p);
+                    earlyChain = earlyChain.then(async () => {
+                        if (!earlyError) try { publishSolved([await solvePocket(p)]); } catch (error) { earlyError = error; }
+                    });
+                }
+            };
+            const owns = (b, cell) => { const f = Math.floor(cell / NN), k = cell % NN; return f === b.f && Math.floor((k % N) / B) === b.bi && Math.floor(Math.floor(k / N) / B) === b.bj; };
+            // Not in a graph lake, and clear of the graph's river cells (their
+            // traces run through such pockets).
+            const clear = (cell) => {
+                if (this.lakeOf[cell] !== -1 || this.riverOf[cell] !== -1) return false;
+                return true;
+            };
+            try {
+                await runBounded(blocks, async (b) => {
+                    const heights = await this._sampler.samplePatch(b.frame, Rp);
+                    const worker = await takeWorker();
+                    let r;
+                    try { r = await worker.call({ type: 'findPockets', frame: b.frame, heights, R: Rp, seaLevelM: sea, params: P }, [heights.buffer]); }
+                    finally { releaseWorker(worker); }
+                    for (const p of r.pockets) { const cell = dirToCell(p.dir, N); if (owns(b, cell) && clear(cell)) cands.push(p); }
+                    pending.delete(b);
+                    discovered++;
+                    // Only inspect the first local blocks: if no choice is yet
+                    // provable, normal global discovery remains the fallback.
+                    if (discovered <= 128 && discovered % 8 === 0 && early.length < 12) startSettled();
+                });
+            } catch (error) {
+                await earlyChain;
+                throw error;
+            }
+            this.timings.mountainDiscoveryMs = performance.now() - t0;
+            const picks = chooseMountainLakes(cands, Rp, P).sort((a, b) => dist(a.dir) - dist(b.dir) || a.dir[0] - b.dir[0] || a.dir[1] - b.dir[1]);
+            await earlyChain;
+            if (earlyError) throw earlyError;
+            for (let i = 0; i < early.length; i++) if (picks[i]?.dir !== early[i].dir) throw new Error('early mountain lake choice differs from full discovery');
+            // Register completed lakes in dispatch order, so nearby lakes
+            // can render while more distant pockets are still being solved.
+            // Worker completion order must not assign lake IDs.
+            const completed = new Map();
+            let next = 0;
+            await runBounded(picks.slice(early.length).map((p, i) => ({ p, i })), async ({ p, i }) => {
+                const item = await solvePocket(p);
+                completed.set(i, item);
+                const ready = [];
+                while (completed.has(next)) {
+                    const value = completed.get(next);
+                    completed.delete(next++);
+                    if (value) ready.push(value);
+                }
+                publishSolved(ready);
             });
-            // Registration order must not depend on worker timing.
-            solved.sort((a, b) => dist(a.dir) - dist(b.dir) || a.dir[0] - b.dir[0] || a.dir[1] - b.dir[1]);
-            this.mountainStats = { blocks: blocks.length, candidates: cands.length, picks: picks.length, solved: solved.length };
+            this.mountainStats = { blocks: blocks.length, candidates: cands.length, picks: picks.length, solved: solved.length, early: early.length };
         }
-        const base = this.lakes.length;
-        this._addLakes(solved.map(({ dir, rec }) => ({ dir, rec, mountain: true })));
+        if (fromCache) {
+            this._addLakes(solved.map(({ dir, rec }) => ({ dir, rec, mountain: true })));
+            // Absorbed mountain IDs are retained for stable stream IDs, but
+            // they must not be rendered or considered separate water.
+            solved.forEach((it, k) => {
+                const to = it.aliasLakeId ?? (it.aliasOf != null ? base + it.aliasOf : null);
+                if (to != null) { this.mergedInto.set(base + k, to); this.refined.delete(base + k); }
+            });
+        }
+        // Drainages and joins use the complete set of graph lakes.
+        await graphReady;
         // Streams follow each lake's fine drainage (from its sill, 64 m) to
         // the first lower water on it; the graph worker takes them as rivers
         // (waterWorkerCore addLakes). A drainage that left its discovery
@@ -575,7 +670,11 @@ export class WaterService {
             // follows the rest of the drainage. Cutting through the rims made
             // slots up to tens of metres deep (52 % of the streams crossed a
             // hollow, 411 of them by over 12 m: water-look v33).
-            const ponds = await this._mountainPonds(solved, walk, P, { runBounded, takeWorker, releaseWorker });
+            this.timings.mountainContinuationMs = performance.now() - t1;
+            let ponds = await this._mountainPonds(solved, walk, P, { runBounded, takeWorker, releaseWorker });
+            ponds = await this._mergeMountainPonds(solved, ponds, base, P, { takeWorker, releaseWorker });
+            ponds = await this._finishMergedPonds(solved, ponds, base, P, { runBounded, takeWorker, releaseWorker });
+            this._absorbGraphSubmergedMountains(solved, base);
             if (ponds.length) {
                 solved.push(...ponds);
                 this._addLakes(ponds.map(({ dir, rec }) => ({ dir, rec, mountain: true })));
@@ -624,10 +723,12 @@ export class WaterService {
      * that drainage (from the hollow's exit) as its own.
      * @returns {Promise<object[]>} solved items { dir, rec, path, pathH, pits, pond }
      */
-    async _mountainPonds(solved, walk, P, { runBounded, takeWorker, releaseWorker }) {
+    async _mountainPonds(solved, walk, P, { runBounded, takeWorker, releaseWorker, only = null }) {
+        const t0 = performance.now();
         const Rp = this.radius, picks = [], cell = (d) => d.map(x => Math.floor(x * Rp / 300)).join(',');
         const seen = new Map();
         solved.forEach((it, k) => {
+            if (only && !only.has(k)) return;
             const end = walk(k).end;
             for (const t of it.pits ?? []) {
                 if (t.entry >= end || t.depth < P.pondMinDepthM || !(t.level < it.rec.level - 0.5) || walk.waterAt(t.dir)) continue;
@@ -643,6 +744,7 @@ export class WaterService {
                 }
             }
         });
+        this.timings.mountainPondSelectMs = performance.now() - t0;
         const empty = new Float64Array(0), out = [];
         await runBounded(picks, async (t) => {
             const half = Math.max(500, t.cells * P.discoverySpacingM * 0.6 + P.solveMarginM), s = P.solveSpacingM, n = Math.ceil(2 * half / s);
@@ -658,6 +760,8 @@ export class WaterService {
                 frame = growPatchFrame(frame, 1.6);
             }
         });
+        this.timings.mountainPondSolveMs = performance.now() - t0 - this.timings.mountainPondSelectMs;
+        const dedupStart = performance.now();
         // Registration order must not depend on worker timing; a pond whose
         // seed lies in an earlier pond's water is that pond.
         out.sort((a, b) => a.dir[0] - b.dir[0] || a.dir[1] - b.dir[1] || a.dir[2] - b.dir[2]);
@@ -665,13 +769,247 @@ export class WaterService {
         for (const p of out) {
             const inside = kept.some(({ rec }) => {
                 const f = rec.frame, k = p.dir[0] * f.c[0] + p.dir[1] * f.c[1] + p.dir[2] * f.c[2];
-                if (k <= 0) return false;
+                if (k <= 0 || Math.abs(rec.level - p.rec.level) > 0.05) return false;
                 const [x, y] = dirToPlane(p.dir, f, Rp), i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
                 return i >= 0 && j >= 0 && i < f.nx && j < f.ny && rec.mask[j * f.nx + i] === 2;
             });
             if (!inside) kept.push(p);
         }
-        return kept;
+        const visible = await this._resolvePondOverlaps(kept, P, { takeWorker, releaseWorker });
+        this.timings.mountainPondDedupMs = performance.now() - dedupStart;
+        this.mountainStats.mergedPonds = (this.mountainStats.mergedPonds ?? 0) + kept.length - visible.length;
+        return visible;
+    }
+
+    // A re-solved pond has a new spillway. Continue that drainage just like
+    // the original mountain outlets, then fill any new hollows it crosses.
+    // Pond masks are visible to the walk before publication, so a drainage
+    // stops at another pond without publishing a transient overlapping lake.
+    async _finishMergedPonds(solved, input, base, P, workers) {
+        const { runBounded, takeWorker, releaseWorker } = workers, Rp = this.radius;
+        let ponds = input, extended = 0, added = 0;
+        const processed = new WeakSet();
+        for (let round = 0; round < 8; round++) {
+            const pending = [...solved, ...ponds].filter(p => p.mergedPond && p.aliasOf == null && !processed.has(p));
+            if (!pending.length) break;
+            const all = [...solved, ...ponds], walk = this._mountainDrainWalk(all, base, P, ponds);
+            const indexes = pending.map(p => all.indexOf(p)), stuck = new Set();
+            for (let n = 0; n < P.drainRounds; n++) {
+                const open = indexes.filter(k => !stuck.has(k) && walk(k).open);
+                if (!open.length) break;
+                await runBounded(open, async k => {
+                    const it = all[k], end = it.path.at(-1), prev = it.path.at(-2) ?? it.dir;
+                    const frame = drainFrame(end, prev, Rp, P), heights = await this._sampler.samplePatch(frame, Rp);
+                    const worker = await takeWorker();
+                    let r;
+                    try { r = await worker.call({ type: 'continueDrain', frame, heights, R: Rp, start: end, params: P }, [heights.buffer]); }
+                    finally { releaseWorker(worker); }
+                    if (!r.path.length) stuck.add(k);
+                    const off = it.path.length;
+                    it.pits = (it.pits ?? []).concat(r.pits.map(t => ({ ...t, entry: Math.max(0, t.entry + off), exit: t.exit + off })));
+                    it.path.push(...r.path); it.pathH.push(...r.pathH); extended++;
+                });
+            }
+            pending.forEach(p => processed.add(p));
+            const extra = await this._mountainPonds(all, walk, P, { ...workers, only: new Set(indexes) });
+            if (extra.length) {
+                added += extra.length;
+                ponds = await this._resolvePondOverlaps([...ponds, ...extra], P, { takeWorker, releaseWorker });
+                ponds = await this._mergeMountainPonds(solved, ponds, base, P, { takeWorker, releaseWorker });
+            }
+        }
+        this.mountainStats.mergedDrainPatches = extended;
+        this.mountainStats.mergedDrainPonds = added;
+        this.mountainStats.pendingMergedDrains = [...solved, ...ponds].filter(p => p.mergedPond && p.aliasOf == null && !processed.has(p)).length;
+        return ponds;
+    }
+
+    // Mountain lakes can have been displayed already. Keep their stable IDs
+    // while replacing their masks and making absorbed IDs aliases; cache the
+    // aliases so a reload has precisely the same water and stream identities.
+    async _mergeMountainPonds(solved, input, base, P, workers) {
+        let ponds = input, merged = 0;
+        for (let pass = 0; pass < 8; pass++) {
+            const mountains = solved.map((item, index) => ({ item, index })).filter(x => x.item.aliasOf == null);
+            const all = [...mountains.map(x => x.item), ...ponds], n = mountains.length;
+            const groups = pondOverlapGroups(all, this.radius).filter(g => g.some(i => i < n) && (g.length > 1));
+            if (!groups.length) break;
+            const removed = new Set(); let changed = 0;
+            for (const group of groups) {
+                const originals = group.filter(i => i < n).map(i => mountains[i].index);
+                const result = await this._resolvePondOverlaps(group.map(i => all[i]), P, workers);
+                if (result.length !== 1) continue;
+                const rep = Math.min(...originals), item = { ...result[0], pond: false }, aliases = originals.filter(i => i !== rep);
+                item.rec.merged = aliases.map(i => base + i);
+                solved[rep] = item;
+                for (const i of aliases) {
+                    const old = solved[i];
+                    solved[i] = { ...old, aliasOf: rep, mergedPond: false, path: [], pathH: [], pits: [],
+                        rec: { ...old.rec, mask: new Uint8Array(old.rec.mask.length), maskCells: new Int32Array(0) } };
+                }
+                await this._apply(base + rep, item.rec);
+                Object.assign(this.lakes[base + rep], { level: item.rec.level, maxDepth: item.rec.maxDepth,
+                    centreDir: item.dir, frame: item.rec.patchFrame ?? item.rec.frame, cellCount: item.rec.maskCells.length });
+                for (const i of group) if (i >= n) removed.add(i - n);
+                changed++; merged += group.length - 1;
+            }
+            ponds = ponds.filter((_, i) => !removed.has(i));
+            if (!changed) break;
+            this._rebuildMountainCells(solved, base);
+        }
+        this.mountainStats.mergedMountainOverlaps = (this.mountainStats.mergedMountainOverlaps ?? 0) + merged;
+        return ponds;
+    }
+
+    _rebuildMountainCells(solved, base) {
+        const lists = this.lakes.map((_, id) => id >= base && id < base + solved.length
+            ? solved[id - base].rec.maskCells
+            : this.lakeCells.subarray(this.lakeCellStart[id], this.lakeCellStart[id + 1]));
+        const start = new Int32Array(lists.length + 1);
+        lists.forEach((list, i) => { start[i + 1] = start[i] + list.length; });
+        const cells = new Int32Array(start.at(-1));
+        lists.forEach((list, i) => cells.set(list, start[i]));
+        this.lakeCells = cells; this.lakeCellStart = start; this.version++;
+    }
+
+    // A graph lake is already authoritative for its water and its graph
+    // rivers. If a lower mountain pocket lies entirely within it, absorb the
+    // pocket into that lake, keeping its ID as an alias. Allow only a small
+    // sampled shoreline discrepancy next to the graph lake's wet cells.
+    _absorbGraphSubmergedMountains(solved, base) {
+        const Rp = this.radius;
+        const extent = f => Math.hypot(Math.max(Math.abs(f.x0), Math.abs(f.x0 + f.nx * f.spacing)),
+            Math.max(Math.abs(f.y0), Math.abs(f.y0 + f.ny * f.spacing)));
+        const graphs = [...this.refined].filter(([id, r]) => id < base && this.rep(id) === id && r.frame && r.mask)
+            .map(([id, rec]) => ({ id, rec, extent: extent(rec.frame) }));
+        let absorbed = 0;
+        for (let k = 0; k < solved.length; k++) {
+            const item = solved[k];
+            if (item.aliasOf != null || item.aliasLakeId != null) continue;
+            const f = item.rec.frame, bound = extent(f), mask = item.rec.mask;
+            for (const graph of graphs) {
+                const g = graph.rec.frame;
+                if (!(graph.rec.level > item.rec.level) || Math.hypot(f.c[0] - g.c[0], f.c[1] - g.c[1], f.c[2] - g.c[2]) * Rp > bound + graph.extent + 1 ||
+                    !patchRectsMayOverlap(f, g, Rp)) continue;
+                let wet = 0, covered = 0, boundary = 0;
+                const wetAt = (a, b) => a >= 0 && b >= 0 && a < g.nx && b < g.ny && graph.rec.mask[b * g.nx + a] === 2;
+                for (let q = 0; q < mask.length; q++) {
+                    if (mask[q] !== 2) continue;
+                    wet++;
+                    const d = planeToDir(f.x0 + (q % f.nx + .5) * f.spacing, f.y0 + (Math.floor(q / f.nx) + .5) * f.spacing, f, Rp);
+                    const den = d[0] * g.c[0] + d[1] * g.c[1] + d[2] * g.c[2];
+                    if (den <= 0) continue;
+                    const [x, y] = dirToPlane(d, g, Rp), i = Math.floor((x - g.x0) / g.spacing), j = Math.floor((y - g.y0) / g.spacing);
+                    if (wetAt(i, j)) { covered++; continue; }
+                    let near = false;
+                    for (let y2 = -2; y2 <= 2 && !near; y2++) for (let x2 = -2; x2 <= 2; x2++) if (wetAt(i + x2, j + y2)) { near = true; break; }
+                    if (near) boundary++;
+                }
+                if (!wet || covered < wet * 0.97 || covered + boundary !== wet) continue;
+                const id = base + k;
+                solved[k] = { ...item, aliasLakeId: graph.id, mergedPond: false, path: [], pathH: [], pits: [],
+                    rec: { ...item.rec, mask: new Uint8Array(mask.length), maskCells: new Int32Array(0) } };
+                this.mergedInto.set(id, graph.id); this.refined.delete(id); absorbed++;
+                break;
+            }
+        }
+        if (absorbed) this._rebuildMountainCells(solved, base);
+        this.mountainStats.graphSubmergedMountains = absorbed;
+    }
+
+    // Re-solve genuinely overlapping ponds on a common grid, then rebuild the
+    // drainage from that solution's actual spillway. Keep the originals if a
+    // bounded solve cannot prove that all members share the same basin.
+    async _resolvePondOverlaps(input, P, { takeWorker, releaseWorker }) {
+        const Rp = this.radius, empty = new Float64Array(0), maxCells = this.config.refine.maxCells;
+        let ponds = input, pass = 0, unresolved = 0;
+        const solve = async members => {
+            let frame = sharedPondFrame(members, Rp, P.solveSpacingM);
+            const anchor = members.reduce((a, b) => a.rec.mask.length >= b.rec.mask.length ? a : b);
+            for (let grow = 0; grow <= this.config.refine.maxGrows; grow++) {
+                if (frame.nx * frame.ny > maxCells) return null;
+                const heights = await this._sampler.samplePatch(frame, Rp);
+                const worker = await takeWorker();
+                let rec;
+                try {
+                    const h = heights.slice();
+                    rec = await worker.call({ type: 'solvePatchLake', lakeId: -1, frame, heights: h,
+                        bandM: this.config.refine.bandM, N: this.N, R: Rp, seedDir: anchor.dir, others: empty }, [h.buffer]);
+                    if (rec.status === 'grow') { frame = growPatchFrame(frame, 1.6); continue; }
+                    if (rec.status !== 'ok') return null;
+                    const covers = member => {
+                        const f = member.rec.frame, mask = member.rec.mask;
+                        const wet = mask.reduce((n, value) => n + (value === 2 ? 1 : 0), 0);
+                        if (!wet) return false;
+                        // The first wet texel is usually on the shoreline and
+                        // can move when the shared grid is sampled. Require
+                        // most of each original basin, not that one edge cell.
+                        const needed = Math.ceil(wet * 0.8);
+                        let covered = 0;
+                        for (let k = 0; k < mask.length; k++) {
+                            if (mask[k] !== 2) continue;
+                            const d = planeToDir(f.x0 + (k % f.nx + .5) * f.spacing, f.y0 + (Math.floor(k / f.nx) + .5) * f.spacing, f, Rp);
+                            const den = d[0] * rec.frame.c[0] + d[1] * rec.frame.c[1] + d[2] * rec.frame.c[2];
+                            if (den <= 0) continue;
+                            const [x, y] = dirToPlane(d, rec.frame, Rp), i = Math.floor((x - rec.frame.x0) / rec.frame.spacing), j = Math.floor((y - rec.frame.y0) / rec.frame.spacing);
+                            if (i >= 0 && j >= 0 && i < rec.frame.nx && j < rec.frame.ny && rec.mask[j * rec.frame.nx + i] === 2 && ++covered >= needed) return true;
+                        }
+                        return false;
+                    };
+                    let basins = [{ dir: anchor.dir, rec }];
+                    if (!members.every(covers)) {
+                        // Independent grids can make two adjacent basins
+                        // overlap. Solve every seed on this same grid: truly
+                        // separate basins remain separate, while identical
+                        // connected solutions become one lake.
+                        for (const member of members) {
+                            if (member === anchor) continue;
+                            const copy = heights.slice();
+                            const other = await worker.call({ type: 'solvePatchLake', lakeId: -1, frame, heights: copy,
+                                bandM: this.config.refine.bandM, N: this.N, R: Rp, seedDir: member.dir, others: empty }, [copy.buffer]);
+                            if (other.status !== 'ok') return null;
+                            const identical = basins.some(({ rec: a }) => {
+                                const x = a.frame, y = other.frame;
+                                return a.level === other.level && x.x0 === y.x0 && x.y0 === y.y0 && x.nx === y.nx && x.ny === y.ny &&
+                                    a.mask.length === other.mask.length && a.mask.every((v, i) => v === other.mask[i]);
+                            });
+                            if (!identical) basins.push({ dir: member.dir, rec: other });
+                        }
+                        if (pondOverlapGroups(basins, Rp).length) return null;
+                    }
+                    const result = [];
+                    for (const basin of basins) {
+                        const h2 = heights.slice();
+                        const drainage = await worker.call({ type: 'continueDrain', frame, heights: h2, R: Rp,
+                            start: basin.rec.exitDir, params: P }, [h2.buffer]);
+                        const [x, y] = dirToPlane(basin.rec.exitDir, frame, Rp), i = Math.max(0, Math.min(frame.nx - 1, Math.floor((x - frame.x0) / frame.spacing)));
+                        const j = Math.max(0, Math.min(frame.ny - 1, Math.floor((y - frame.y0) / frame.spacing)));
+                        result.push({ ...basin, path: [basin.rec.exitDir, ...drainage.path], pathH: [heights[j * frame.nx + i], ...drainage.pathH],
+                            pits: drainage.pits.map(p => ({ ...p, entry: Math.max(0, p.entry + 1), exit: p.exit + 1 })), pond: true, mergedPond: true });
+                    }
+                    return result;
+                } finally { releaseWorker(worker); }
+            }
+            return null;
+        };
+        while (pass++ < 8) {
+            const groups = pondOverlapGroups(ponds, Rp);
+            if (!groups.length) break;
+            const results = [];
+            // Large common patches are memory intensive: at most two at once.
+            for (let i = 0; i < groups.length; i += 2) results.push(...await Promise.all(groups.slice(i, i + 2).map(g => solve(g.map(k => ponds[k])))));
+            const replacement = new Map(), omitted = new Set();
+            groups.forEach((g, i) => {
+                if (!results[i]) { unresolved++; return; }
+                replacement.set(g[0], results[i]);
+                for (const k of g.slice(1)) omitted.add(k);
+            });
+            if (!replacement.size) break;
+            ponds = ponds.flatMap((p, i) => omitted.has(i) ? [] : replacement.get(i) ?? [p]);
+        }
+        if (unresolved) Logger.warn(`[Water] could not prove a shared basin for ${unresolved} overlapping pond groups`);
+        this.mountainStats.unresolvedPondGroups = pondOverlapGroups(ponds, Rp).length;
+        return ponds;
     }
 
     /**
@@ -684,15 +1022,20 @@ export class WaterService {
      * point it stopped at. walk.waterAt(dir): the lake water there, if any.
      * @returns {(k: number) => { stream?: { lake, dirs, to, lengthM }, open?: boolean, long?: boolean, end: number }}
      */
-    _mountainDrainWalk(solved, base, P) {
+    _mountainDrainWalk(solved, base, P, unpublished = []) {
         const N = this.N, Rp = this.radius, sea = this._sampler.seaLevelM, byCell = new Map();
-        for (const [id, rec] of this.refined) {
+        // Mountain masks may arrive while graph lakes are still being solved.
+        // Preserve the original graph-first lookup order for overlapping masks.
+        const records = [...this.refined].sort(([a], [b]) => Number(!!this.lakes[a]?.mountain) - Number(!!this.lakes[b]?.mountain));
+        for (let i = 0; i < unpublished.length; i++) records.push([base + solved.length - unpublished.length + i, unpublished[i].rec]);
+        const recordMap = new Map(records);
+        for (const [id, rec] of records) {
             if (!rec.maskCells || !rec.mask) continue;
             for (const c of rec.maskCells) { let l = byCell.get(c); if (!l) byCell.set(c, (l = [])); l.push(id); }
         }
         const waterAt = (d, cell) => {
             for (const id of byCell.get(cell) ?? []) {
-                const rec = this.refined.get(id), f = rec.frame, k = d[0] * f.c[0] + d[1] * f.c[1] + d[2] * f.c[2];
+                const rec = recordMap.get(id), f = rec.frame, k = d[0] * f.c[0] + d[1] * f.c[1] + d[2] * f.c[2];
                 if (k <= 0) continue;
                 const [x, y] = dirToPlane(d, f, Rp);
                 const i = Math.floor((x - f.x0) / f.spacing), j = Math.floor((y - f.y0) / f.spacing);
@@ -702,6 +1045,7 @@ export class WaterService {
         };
         const walk = (k) => {
             const { rec, path = [], pathH = [] } = solved[k], id = base + k, dirs = [];
+            if (solved[k].aliasOf != null || solved[k].aliasLakeId != null) return { end: 0 };
             let lengthM = 0;
             for (let p = 0; p < path.length; p++) {
                 const d = path[p];
@@ -1029,11 +1373,12 @@ export class WaterService {
         return hashParts([representative, r.level, r.frame, r.exitDir ?? null, r.mask ?? null]);
     }
 
-    _patchesOverlap(a, b) {
+    _patchesOverlap(a, b, precise = false) {
         if (!a?.c || !b?.c) return false;
         const radius = f => 0.5 * Math.hypot(f.nx, f.ny) * f.spacing;
         const cos = a.c.reduce((sum, v, k) => sum + v * b.c[k], 0);
-        return Math.acos(Math.max(-1, Math.min(1, cos))) * this.radius < radius(a) + radius(b);
+        return Math.acos(Math.max(-1, Math.min(1, cos))) * this.radius < radius(a) + radius(b)
+            && (!precise || patchRectsMayOverlap(a, b, this.radius));
     }
 
     _riverLakeIdentity(frame) {
@@ -1046,6 +1391,9 @@ export class WaterService {
     async _apply(id, rec) {
         const affected = new Set([id, ...(rec.merged ?? [])]);
         const invalid = new Set();
+        // Precomputed water retains its established invalidation order and
+        // cache behavior; refine the overlap only for on-demand discovery.
+        const precise = this.config.refine?.precompute !== true;
         // Include tributaries of an invalidated trunk. A source absorbed by
         // another lake no longer has a separate outlet river at all.
         let changed = true;
@@ -1054,8 +1402,8 @@ export class WaterService {
             for (const [rid, river] of this.riverRecs) {
                 if (invalid.has(rid)) continue;
                 if (affected.has(river.src) || (river.dest?.type === 'lake' && affected.has(river.dest.id)) ||
-                    this._patchesOverlap(river.dependencyFrame, rec.frame) ||
-                    [...affected].some(lid => this._patchesOverlap(river.dependencyFrame, this.refined.get(lid)?.frame)) ||
+                    this._patchesOverlap(river.dependencyFrame, rec.frame, precise) ||
+                    [...affected].some(lid => this._patchesOverlap(river.dependencyFrame, this.refined.get(lid)?.frame, precise)) ||
                     (river.dest?.type === 'river' && invalid.has(river.dest.id))) {
                     invalid.add(rid); changed = true;
                 }

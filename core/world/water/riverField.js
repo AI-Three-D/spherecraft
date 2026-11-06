@@ -31,6 +31,7 @@ import { dirToFaceUV, faceUVToDir } from '../hydrology/waterGraph.js';
 import { riverHash } from './riverShapeNoise.js';
 import { riverBankType } from './riverSection.js';
 import { packFlowTexel, plumeAt, riverFlowDesign, riverPlumes, riverRocks, RIVER_FLOW, RIVER_ROCK_FLOATS } from './riverFlow.js';
+import { rockFlowDeflection } from './rockFlow.js';
 
 export const RIVER_FIELD = Object.freeze({
     texelM: 2,
@@ -711,19 +712,41 @@ export async function bakeRiverField({ rivers, L, sampleNatural, lakeAt, o = RIV
 
 /** Main thread, step 1: the pages and their texels' directions (dirs4: x, y, z, 0). */
 export function prepareRiverFieldBake({ rivers, L, o = RIVER_FIELD }) {
-    const P = L.P, PP = P * P;
     const pageRivers = riverFieldPages(rivers, L, o);
     const keys = [...pageRivers.keys()];
+    const dirs4 = riverFieldPageDirections(keys, L);
+    return { keys, pageRivers: keys.map(k => [...pageRivers.get(k)]), dirs4 };
+}
+
+/** Unit directions at page texel centres, in key order. */
+export function riverFieldPageDirections(keys, L) {
+    const P = L.P, PP = P * P;
     const N = keys.length;
     const dirs4 = new Float32Array(N * PP * 4);
+    // Equal-angle coordinates depend on just one axis. Many pages share the
+    // same row or column; calculate each tangent once instead of per texel.
+    const axes = new Map();
+    const axis = (page) => {
+        let values = axes.get(page);
+        if (!values) {
+            values = new Float64Array(P);
+            for (let i = 0; i < P; i++) {
+                const a = (page * P + i + 0.5) / L.T * 2 - 1;
+                values[i] = (Math.tan(a * QUARTER_PI) + 1) * 0.5;
+            }
+            axes.set(page, values);
+        }
+        return values;
+    };
     for (let p = 0; p < N; p++) {
         const { face, pi, pj } = pageOf(keys[p], L);
+        const u = axis(pi), v = axis(pj);
         for (let j = 0; j < P; j++) for (let i = 0; i < P; i++) {
-            const d = fieldDir(face, pi * P + i + 0.5, pj * P + j + 0.5, L), w = (p * PP + j * P + i) * 4;
+            const d = faceUVToDir(face, u[i], v[j]), w = (p * PP + j * P + i) * 4;
             dirs4[w] = d[0]; dirs4[w + 1] = d[1]; dirs4[w + 2] = d[2];
         }
     }
-    return { keys, pageRivers: keys.map(k => [...pageRivers.get(k)]), dirs4 };
+    return dirs4;
 }
 
 // Lake blocks farther than this (m) from the drawn edge are all in or all out.
@@ -783,7 +806,7 @@ export function riverFieldPageFacts(keys, pages, L) {
 }
 
 /** Step 3 (a worker, riverFieldWorker.js): everything else. */
-export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverList, dirs4, nat, lakeCand, o = RIVER_FIELD, debug = false, onProgress = null }) {
+export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverList, dirs4, nat, lakeCand, o = RIVER_FIELD, debug = false, onProgress = null, cullPages = true }) {
     const t2 = performance.now(), P = L.P, PP = P * P, R = L.R;
     const slot = new Map(keys.map((k, i) => [k, i]));
     const N = keys.length;
@@ -839,11 +862,50 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     });
     const t3 = performance.now();
     onProgress?.('texels', { ms: t3 - t2 });
+    // Most pages exist for station ground probes, beyond all indexed river
+    // sections. Project the four page corners into each river plane; the
+    // gnomonic projection is linear-fractional, so its extrema are at the
+    // corners while the denominator is positive. Expand the bounds for the
+    // Float32 direction rounding used below. Ambiguous cases are kept.
+    let culledPageRivers = 0, emptyTexelPages = 0;
+    const pageCandidates = cullPages ? pageRiverList.map((list, p) => {
+        const { face, pi, pj } = pageInfo[p];
+        const x0 = pi * P + 0.5, x1 = (pi + 1) * P - 0.5, y0 = pj * P + 0.5, y1 = (pj + 1) * P - 0.5;
+        const corners = [fieldDir(face, x0, y0, L), fieldDir(face, x1, y0, L), fieldDir(face, x0, y1, L), fieldDir(face, x1, y1, L)];
+        return list.filter(ri => {
+            const { plane, index, cellM } = prepared[ri], { c, e1, e2 } = plane.frame;
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minD = Infinity;
+            for (const d of corners) {
+                const den = dot(d, c);
+                minD = Math.min(minD, den);
+                if (den <= 1e-5) return true;
+                const x = dot(d, e1) / den, y = dot(d, e2) / den;
+                minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+            }
+            const minDen = minD / Math.sqrt(3) - 1e-6;
+            if (minDen <= 0) return true;
+            const margin = R * 1e-6 * (1 + Math.max(Math.abs(minX), Math.abs(maxX), Math.abs(minY), Math.abs(maxY))) / minDen + 1e-6;
+            const i0 = Math.floor((R * minX - margin) / cellM), i1 = Math.floor((R * maxX + margin) / cellM);
+            const j0 = Math.floor((R * minY - margin) / cellM), j1 = Math.floor((R * maxY + margin) / cellM);
+            if ((i1 - i0 + 1) * (j1 - j0 + 1) > 256) return true;
+            for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+                if (index.cells.has(i * 1e6 + j)) return true;
+            }
+            culledPageRivers++;
+            return false;
+        });
+    }) : pageRiverList;
     // Per texel: ground, W, owner over the rivers listed for its page.
     const ground = new Float32Array(N * PP), W = new Float32Array(N * PP).fill(NaN), owner = new Int16Array(N * PP).fill(-1);
     const edgeOf = new Float32Array(N * PP).fill(Infinity), ownerSt = new Float32Array(N * PP);
     for (let p = 0; p < N; p++) {
-        const list = pageRiverList[p];
+        const list = pageCandidates[p];
+        if (!list.length) {
+            ground.set(nat.subarray(p * PP, (p + 1) * PP), p * PP);
+            emptyTexelPages++;
+            continue;
+        }
         for (let t = 0; t < PP; t++) {
             const g = p * PP + t, w = g * 4, dx = dirs4[w], dy = dirs4[w + 1], dz = dirs4[w + 2];
             let h = nat[g];
@@ -867,7 +929,8 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
         for (let g = 0; g < N * PP; g++) if (Number.isFinite(W[g])) q[t0q++] = g;
         while (h0 < t0q) {
             const g = q[h0++], p = Math.floor(g / PP), t = g - p * PP, i = t % P, j = (t - i) / P;
-            for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            for (let side = 0; side < 4; side++) {
+                const di = (side === 0) - (side === 1), dj = (side === 2) - (side === 3);
                 const n2 = texel(p, i + di, j + dj);
                 if (n2 < 0 || Number.isFinite(W[n2])) continue;
                 W[n2] = W[g]; q[t0q++] = n2;
@@ -880,11 +943,36 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     const delta = new Float32Array(N * PP);
     for (let g = 0; g < N * PP; g++) delta[g] = ground[g] - nat[g];
     const G = gaussian(o.blurM / o.texelM), tmp = new Float32Array(N * PP);
+    let emptyBlurPages = 0;
     for (const [dx, dy, src, dst] of [[1, 0, delta, tmp], [0, 1, tmp, delta]]) {
-        for (let p = 0; p < N; p++) for (let j = 0; j < P; j++) for (let i = 0; i < P; i++) {
-            let v = 0;
-            for (let k = -G.r; k <= G.r; k++) { const q = texel(p, i + dx * k, j + dy * k); if (q >= 0) v += G.w[k + G.r] * src[q]; }
-            dst[p * PP + j * P + i] = v;
+        const nonzero = new Uint8Array(N);
+        for (let p = 0; p < N; p++) {
+            for (let g = p * PP; g < (p + 1) * PP; g++) {
+                if (src[g] !== 0) { nonzero[p] = 1; break; }
+            }
+        }
+        for (let p = 0; p < N; p++) {
+            const { face, pi, pj } = pageInfo[p], reach = Math.ceil(G.r / P);
+            let occupied = false;
+            for (let k = -reach; k <= reach; k++) {
+                const x = pi + dx * k, y = pj + dy * k;
+                if (x < 0 || y < 0 || x >= L.PE || y >= L.PE) continue;
+                const neighbour = slot.get(pageKey(face, x, y, L));
+                if (neighbour !== undefined && nonzero[neighbour]) { occupied = true; break; }
+            }
+            if (!occupied) {
+                // The second pass writes back into delta, which may already
+                // contain values. An empty horizontal neighbourhood guarantees
+                // the first pass wrote zero there, but clear it explicitly.
+                dst.fill(0, p * PP, (p + 1) * PP);
+                emptyBlurPages++;
+                continue;
+            }
+            for (let j = 0; j < P; j++) for (let i = 0; i < P; i++) {
+                let v = 0;
+                for (let k = -G.r; k <= G.r; k++) { const q = texel(p, i + dx * k, j + dy * k); if (q >= 0) v += G.w[k + G.r] * src[q]; }
+                dst[p * PP + j * P + i] = v;
+            }
         }
     }
     // Deep in the channel the ground stays exact, smooth by construction: over
@@ -919,7 +1007,8 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     }
     while (qh < qt) {
         const g = queue[qh++], p = Math.floor(g / PP), t = g - p * PP, i = t % P, j = (t - i) / P;
-        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        for (let side = 0; side < 4; side++) {
+            const di = (side === 0) - (side === 1), dj = (side === 2) - (side === 3);
             const q = texel(p, i + di, j + dj);
             if (q < 0 || wet[q] || !(ground[q] < level[q])) continue;
             // River water reaches only so far beyond its channel: texels past
@@ -943,7 +1032,8 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
         for (let g = 0; g < N * PP; g++) if (wet[g]) { queue[t2q++] = g; fromLake[g] = Number.isFinite(lakeLevel[g]) ? 1 : 0; }
         while (h2 < t2q) {
             const g = queue[h2++], p = Math.floor(g / PP), t = g - p * PP, i = t % P, j = (t - i) / P;
-            for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            for (let side = 0; side < 4; side++) {
+                const di = (side === 0) - (side === 1), dj = (side === 2) - (side === 3);
                 const q = texel(p, i + di, j + dj);
                 if (q < 0 || seen[q]) continue;
                 seen[q] = 1; fromLake[q] = fromLake[g];
@@ -958,10 +1048,41 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     const sdf = new Float32Array(N * PP);
     const H = Math.ceil(o.sdfM / o.texelM), WW = P + 2 * H;
     const inside = new Uint8Array(WW * WW), outside = new Uint8Array(WW * WW);
+    const wetPage = new Uint8Array(N);
     for (let p = 0; p < N; p++) {
+        for (let g = p * PP; g < (p + 1) * PP; g++) {
+            if (wet[g]) { wetPage[p] = 1; break; }
+        }
+    }
+    let drySdfPages = 0;
+    for (let p = 0; p < N; p++) {
+        // Whole-page occupancy is conservative: an occupied neighbour may
+        // have water outside this halo, but an empty neighbourhood cannot.
+        const { face, pi, pj } = pageInfo[p], reach = Math.ceil(H / P);
+        let occupied = false;
+        for (let y = pj - reach; y <= pj + reach && !occupied; y++) for (let x = pi - reach; x <= pi + reach; x++) {
+            if (x < 0 || y < 0 || x >= L.PE || y >= L.PE) continue;
+            const neighbour = slot.get(pageKey(face, x, y, L));
+            if (neighbour !== undefined && wetPage[neighbour]) { occupied = true; break; }
+        }
+        if (!occupied && o.sdfM <= (1e6 - 0.5) * o.texelM) {
+            sdf.fill(-o.sdfM, p * PP, (p + 1) * PP);
+            drySdfPages++;
+            continue;
+        }
+        let anyWet = false;
         for (let j = 0; j < WW; j++) for (let i = 0; i < WW; i++) {
             const q = texel(p, i - H, j - H), v = q >= 0 ? wet[q] : 0;
             inside[j * WW + i] = v; outside[j * WW + i] = 1 - v;
+            anyWet ||= v !== 0;
+        }
+        // With no wet texel in the complete distance halo, the distance
+        // transform can only produce the clamped dry value. Keep the halo:
+        // a dry page beside water still needs its exact shoreline distances.
+        if (!anyWet && o.sdfM <= (1e6 - 0.5) * o.texelM) {
+            sdf.fill(-o.sdfM, p * PP, (p + 1) * PP);
+            drySdfPages++;
+            continue;
         }
         const dIn = edt2(inside, WW, WW), dOut = edt2(outside, WW, WW);
         for (let j = 0; j < P; j++) for (let i = 0; i < P; i++) {
@@ -979,9 +1100,14 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     // GPU pages with aprons, 2 words a texel (RIVER_FIELD_WORDS): level W
     // (f32 bits), Δ and sdf (two f16). Flow: one word (riverFlow.js).
     const A = L.A, ST = L.ST, out = new Map();
+    // The worker transfers one contiguous buffer. Build the page views in
+    // that buffer directly instead of allocating and copying it a second time.
+    const wordsPerPage = ST * ST * RIVER_FIELD_WORDS;
+    const packed = new Uint32Array(N * wordsPerPage);
+    out.packed = packed;
     const flow = new Uint32Array(N * ST * ST);
     for (let p = 0; p < N; p++) {
-        const data = new Uint32Array(ST * ST * RIVER_FIELD_WORDS);
+        const data = packed.subarray(p * wordsPerPage, (p + 1) * wordsPerPage);
         for (let j = 0; j < ST; j++) for (let i = 0; i < ST; i++) {
             let q = texel(p, i - A, j - A);
             const w = (j * ST + i) * RIVER_FIELD_WORDS;
@@ -996,7 +1122,7 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     }
     const t8 = performance.now();
     widest.sort((a, b) => a - b);
-    const stats = { pages: N, texels: N * PP, rivers: rivers.length, spilled,
+    const stats = { pages: N, drySdfPages, emptyBlurPages, culledPageRivers, emptyTexelPages, texels: N * PP, rivers: rivers.length, spilled,
         widest: { median: widest[widest.length >> 1] ?? 1, p90: widest[Math.floor(widest.length * 0.9)] ?? 1, max: widest[widest.length - 1] ?? 1 },
         ms: { stations: t3 - t2, texels: t4 - t3, blur: t5 - t4, wet: t6 - t5, sdf: t7 - t6, flow: t7b - t7, pack: t8 - t7b, finish: t8 - t2 },
         rocks: rocks.length / RIVER_ROCK_FLOATS };
@@ -1050,12 +1176,33 @@ function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt,
         return p === undefined ? -1 : p * PP + (j - pj * P) * P + i - pi * P;
     };
     const list = [];
-    prepared.forEach(({ S, fromPlane }) => {
+    prepared.forEach(({ S, plane, fromPlane }, ri) => {
         for (const r of riverRocks(S, S.rid)) {
             const dir = fromPlane(r.x, r.y);
             list.push(dir[0], dir[1], dir[2], r.r, r.top, r.base, r.seed, r.W, r.solid ? 1 : 0);
             if (r.top < r.W - o.wakeDepthM) continue;
             const nx = -r.ty, ny = r.tx, len = o.wakeLen * r.r;
+            // Deflect the baked velocity around the rock as well as adding
+            // foam. The old wake only changed brightness, so animated water
+            // kept travelling straight through visible rocks in the mid tier.
+            const strength = 1 - smoothstep(-0.15, o.wakeDepthM, r.W - r.top), seen = new Set();
+            const reach = 4 * r.r, step = L.texelM ?? o.texelM ?? 2;
+            for (let a = -reach; a <= reach; a += step) for (let b = -reach; b <= reach; b += step) {
+                const turn = rockFlowDeflection(a, b, r.r, strength);
+                if (turn.weight <= 0) continue;
+                const g = texelAt(fromPlane(r.x + r.tx * a + nx * b, r.y + r.ty * a + ny * b));
+                if (g < 0 || seen.has(g) || !wet[g] || owner[g] !== ri || Number.isFinite(lakeLevel[g])) continue;
+                seen.add(g);
+                const [ax, ay] = pageAxes[Math.floor(g / PP)], cos = dot(ax, ay), den = Math.max(1 - cos * cos, 0.25);
+                const wa = (flowA[g] - cos * flowB[g]) / den, wb = (flowB[g] - cos * flowA[g]) / den;
+                const world = [ax[0] * wa + ay[0] * wb, ax[1] * wa + ay[1] * wb, ax[2] * wa + ay[2] * wb];
+                const { e1, e2 } = plane.frame, along = (dot(world, e1) * r.tx + dot(world, e2) * r.ty);
+                if (along <= 0) continue;
+                const da = along * (turn.along - 1), db = along * turn.across;
+                const dx = r.tx * da + nx * db, dy = r.ty * da + ny * db;
+                const change = [e1[0] * dx + e2[0] * dy, e1[1] * dx + e2[1] * dy, e1[2] * dx + e2[2] * dy];
+                flowA[g] += dot(change, ax); flowB[g] += dot(change, ay);
+            }
             for (let d = 0; d < len; d += 1.5) {
                 const half = r.r * (0.6 + 0.5 * d / len), strength = Math.exp(-2.2 * d / len);
                 for (let e = -half; e <= half; e += 1.5) {
@@ -1081,7 +1228,8 @@ function riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt,
                     if (g < 0 || !wet[g] || (!Number.isFinite(lakeLevel[g]) && owner[g] !== ri)) continue;
                     const v = plumeAt(q, a, r).speed * Math.min(1, Math.max(level[g] - ground[g], 0) / o.plumeDepthM) ** (2 / 3);
                     if (v * v <= flowA[g] * flowA[g] + flowB[g] * flowB[g]) continue;
-                    const out = o.plumeFan * r / width + turn, dl = Math.hypot(1, out), dx = (q.tx + nx * out) / dl, dy = (q.ty + ny * out) / dl;
+                    // An intake's water runs back along it, closing in on its axis.
+                    const out = (q.intake ? o.intakeFan : o.plumeFan) * r / width + turn, dl = Math.hypot(1, out) * (q.intake ? -1 : 1), dx = (q.tx + nx * out) / dl, dy = (q.ty + ny * out) / dl;
                     const wx = e1[0] * dx + e2[0] * dy, wy = e1[1] * dx + e2[1] * dy, wz = e1[2] * dx + e2[2] * dy;
                     const [ax, ay] = pageAxes[Math.floor(g / PP)];
                     flowA[g] = v * (wx * ax[0] + wy * ax[1] + wz * ax[2]);

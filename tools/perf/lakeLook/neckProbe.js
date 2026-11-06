@@ -10,8 +10,21 @@ export async function neck({ pos, look, sx, sy, w = 1440, h = 900, fov = 75, lev
     const f = unit(look.map((v, i) => v - pos[i])), up = unit(pos), right = unit(cross(f, up)), camUp = cross(right, f);
     const k = (h / 2) / Math.tan(fov * Math.PI / 360);
     const ray = unit(f.map((v, i) => v + right[i] * (sx - w / 2) / k - camUp[i] * (sy - h / 2) / k));
-    // Hit a sphere at the level (nearest lake's when not given).
-    const lv = levelM ?? wd.lakesNear({ x: pos[0], y: pos[1], z: pos[2] }, 4000, 1).map(i => wd.lakeInfo?.(i)?.level)[0] ?? 0;
+    // Hit a sphere at the level; without one, the level of the river point nearest the ray.
+    let lv = levelM;
+    if (lv === null) {
+        let near = Infinity;
+        for (const [rid, r] of s.riverRecs) {
+            if (!svc.rivers.has(rid)) continue;
+            const Q = r.points, q = r.stride;
+            for (let k = 0; k < Q.length / q; k++) {
+                const p = [0, 1, 2].map(c => Q[k * q + c] * (R + Q[k * q + 16]) - pos[c]), along = dot(p, ray);
+                if (along < 0) continue;
+                const off = Math.hypot(...p.map((v, c) => v - ray[c] * along));
+                if (off < near) { near = off; lv = Q[k * q + 16]; }
+            }
+        }
+    }
     let t = 0;
     for (let i = 0; i < 40; i++) t += (Math.hypot(...pos.map((v, j) => v + ray[j] * t)) - (R + lv));
     const hit = unit(pos.map((v, j) => v + ray[j] * t));

@@ -113,7 +113,7 @@ describe('design flow', () => {
         const S = stations({ L: 400, slope: () => 0.1, hw: () => 8, D: () => 1.4 });
         riverFlowDesign(S, 3);
         S.ends = [{ s: 300, sign: 1, level: 700 }, { s: 20, sign: -1, level: 900 }];
-        const plumes = riverPlumes(S, 3);
+        const plumes = riverPlumes(S, 3).filter(q => !q.intake);
         expect(plumes.length).toBe(1);
         const p = plumes[0], at = (a, r = 0) => plumeAt(p, a, r);
         expect(p.length).toBeGreaterThanOrEqual(RIVER_FLOW.plumeRangeM[0]);
@@ -126,10 +126,32 @@ describe('design flow', () => {
         expect(at(20, 3 * at(20).width).speed).toBeLessThan(0.001 * at(20).speed);
     });
 
-    it('makes no plume from a lake it leaves, or from a river too slow to carry one', () => {
-        const S = stations({ L: 400, slope: () => 0.0005, hw: () => 40, D: () => 3 });
+    it('draws on the lake it leaves: water closes in on the outlet, slowing gradually up the lake', () => {
+        const S = stations({ L: 400, slope: () => 0.1, hw: () => 8, D: () => 1.4 });
         riverFlowDesign(S, 3);
         S.ends = [{ s: 20, sign: -1, level: 900 }];
+        const [p] = riverPlumes(S, 3), at = (a, r = 0) => plumeAt(p, a, r);
+        expect(p.intake).toBe(true);
+        expect(p.foam).toBe(0);
+        // It points up the lake, against the river's flow.
+        expect(p.tx * S.tx[20] + p.ty * S.ty[20]).toBeLessThan(0);
+        expect(at(0).speed).toBeCloseTo(p.V, 5);
+        expect(at(p.length).speed).toBe(0);
+        // No line anywhere along it: never more than a sixth of the speed in 8 m.
+        let last = at(0).speed;
+        for (let a = 8; a <= p.length; a += 8) {
+            expect(at(a).speed).toBeLessThanOrEqual(last);
+            expect(last - at(a).speed).toBeLessThan(p.V / 6);
+            last = at(a).speed;
+        }
+        expect(at(20, 3 * at(20).width).speed).toBeLessThan(0.001 * at(20).speed);
+    });
+
+    it('makes no plume from a river too slow to carry one', () => {
+        const S = stations({ L: 400, slope: () => 0.0005, hw: () => 40, D: () => 3 });
+        riverFlowDesign(S, 3);
+        S.V.fill(0.3);
+        S.ends = [{ s: 300, sign: 1, level: 700 }, { s: 20, sign: -1, level: 900 }];
         expect(riverPlumes(S, 3).length).toBe(0);
     });
 
