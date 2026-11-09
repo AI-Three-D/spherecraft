@@ -363,9 +363,9 @@ export class WaterService {
         L.plannedAt = dir;
         (async () => {
             for (;;) {
-                const before = L.rivers.stats.planned;
+                const before = L.rivers.changes;
                 if (!(await L.rivers.plan([...L.known.values()], 6, this._camDir))) break;
-                if (L.rivers.stats.planned !== before) this._publishLakeCells();
+                if (L.rivers.changes !== before) this._publishLakeCells();
             }
         })().catch(err => Logger.warn(`[Water] lake-cell rivers failed: ${err?.message || err}`))
             .finally(() => { L.planning = false; });

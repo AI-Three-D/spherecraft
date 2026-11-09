@@ -63,6 +63,9 @@ export const RIVER_FIELD = Object.freeze({
     // walls (f4a line probes, o04-walls).
     bankB0: [16, 10, 5], bankC: [8, 5, 3.2], bankProbeM: [6, 12, 24, 48, 72, 96], bankSmoothM: 24, bankOpen: 0.5,
     toeSlopeMax: 0.3,
+    // Bank widths vary along each side: exp(a N(s / L1) + b N(s / L2)) within
+    // bankVaryRange, a bank no steeper than bankSteepMax (the 1 m grid).
+    bankVary: [0.55, 0.3], bankVaryM: [350, 90], bankVaryRange: [0.5, 2.3], bankSteepMax: 0.6,
     // Banks are at least mouthBankM wide at a mouth, back to their own
     // width mouthNearM up the river.
     mouthBankM: 24, mouthNearM: 80,
@@ -267,6 +270,13 @@ export function riverWidthFactor(rid, s, total, o = RIVER_FIELD) {
     const n = 0.65 * vn(s / lambda, seed + 3) + 0.35 * vn(s / (0.37 * lambda), seed + 7);
     const reach = (o.widenReach - 1) * smoothstep(-0.05, 0.7, n) * smoothstep(0, o.widenEndM, Math.min(s, total - s));
     return Math.min(o.widenMax, own * (1 + reach));
+}
+
+// Smooth value noise (-1..1) along a bank, x in wavelengths.
+function bankNoise(x, seed) {
+    const h = (i) => { let v = Math.imul((i | 0) ^ Math.imul(seed | 0, 0x27d4eb2d), 0x9e3779b1); v ^= v >>> 15; v = Math.imul(v, 0x85ebca6b); v ^= v >>> 13; return ((v >>> 0) / 4294967296) * 2 - 1; };
+    const i = Math.floor(x), f = x - i, t = f * f * (3 - 2 * f);
+    return h(i) + (h(i + 1) - h(i)) * t;
 }
 
 // A moving average along stations, twice, ends held: keeps a level non-increasing.
@@ -552,7 +562,13 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
             // Toward a mouth the banks open out (a channel cut steeply into
             // its lake's shore drew a dark face along it: o03-thalweg).
             const open = o.mouthBankM * S.mouth[i];
-            raw2[k2][i] = Math.min(o.reachM, Math.max(bankLerp(o.bankB0, tau) + need, open));
+            // Each side's own width at two scales (gentle long slopes, steeper
+            // short ones), never steeper than bankSteepMax: one bank type for
+            // a whole river read as a uniform moat (owner 2026-11-09).
+            const vary = Math.exp(o.bankVary[0] * bankNoise(S.s[i] / o.bankVaryM[0], rid * 2 + k2) + o.bankVary[1] * bankNoise(S.s[i] / o.bankVaryM[1], rid * 2 + k2 + 101));
+            const height = Number.isFinite(atEdge) ? Math.max(0, atEdge - S.W[i]) : 0;
+            const width = Math.max((bankLerp(o.bankB0, tau) + need) * clamp(vary, o.bankVaryRange[0], o.bankVaryRange[1]), height / o.bankSteepMax);
+            raw2[k2][i] = Math.min(o.reachM, Math.max(width, open));
         }
     }
     const hb = Math.min(m, Math.max(1, Math.round(o.bankSmoothM / S.ds / 2)));

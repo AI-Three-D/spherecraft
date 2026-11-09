@@ -4329,14 +4329,17 @@
                     const P = L.rivers, st = P?.stats;
                     const planner = P ? `planner: ${st.planned} planned ${JSON.stringify(st.byDest)}, no river ${JSON.stringify(st.none)}, failed ${st.failed}` +
                         `${st.lastError ? ` (last: ${st.lastError})` : ''}; ${L.known.size} lakes known, planning ${L.planning ? 'running' : 'idle'}` +
-                        `\nlake tables: tiles ${L.table.stats.records} records, ${L.table.stats.evicted} evicted; rivers ${P.table?.stats.records ?? '-'} records, ${P.table?.stats.evicted ?? '-'} evicted`
+                        `\nlake tables: tiles ${L.table.stats.records} records, ${L.table.stats.evicted} evicted (${L.table.stats.evictedRecent} recent); rivers ${P.table?.stats.records ?? '-'} records, ${P.table?.stats.evicted ?? '-'} evicted`
                         : 'river planner off (waterGraph.rivers.enabled)';
                     const recs = [...(svc.riverRecs?.values?.() ?? [])];
                     if (!recs.length) return { sites: [], why: `No rivers published yet.\n${planner}` };
                     const c = gameEngine.camera.position, o = gameEngine.planetConfig.origin ?? { x: 0, y: 0, z: 0 };
                     const v = [c.x - o.x, c.y - o.y, c.z - o.z], l = Math.hypot(...v) || 1, R = gameEngine.planetConfig.radius;
                     const mid = r => { const k = Math.floor(r.points.length / r.stride / 2) * r.stride; return (r.points[k] * v[0] + r.points[k + 1] * v[1] + r.points[k + 2] * v[2]) / l; };
-                    const near = [...recs].sort((a, b) => mid(b) - mid(a)).slice(0, count);
+                    const sorted = [...recs].sort((a, b) => mid(b) - mid(a)), near = sorted.slice(0, count);
+                    // Always one with a rapid (lakeCellRivers.js _rapids), the nearest.
+                    const rapid = sorted.find(r => r.rapid);
+                    if (rapid && !near.includes(rapid)) near[near.length - 1] = rapid;
                     return { sites: near.map(rec => ({
                         go() {
                             const index = [...(svc.riverRecs?.values?.() ?? [])].indexOf(rec);
@@ -4345,7 +4348,8 @@
                         },
                         text: () => {
                             const hw = rec.points[Math.floor(rec.points.length / rec.stride / 2) * rec.stride + 4];
-                            return `river ending in ${rec.dest?.kind ?? '?'}, ${(rec.lengthM / 1000).toFixed(1)} km long, about ${Math.round(2 * hw)} m wide ` +
+                            return `river ending in ${rec.dest?.kind ?? '?'}, ${(rec.lengthM / 1000).toFixed(1)} km long, about ${Math.round(2 * hw)} m wide` +
+                                (rec.rapid ? `, a rapid of ${rec.rapid.dropM.toFixed(0)} m over ${rec.rapid.lengthM.toFixed(0)} m from ${(rec.rapid.startM / 1000).toFixed(1)} km` : '') + ' ' +
                                 `(${(Math.acos(Math.min(1, mid(rec))) * R / 1000).toFixed(1)} km from where the sites were picked). ` +
                                 `Its water and carve appear once the river field bakes (a few seconds).\n${planner}`;
                         },

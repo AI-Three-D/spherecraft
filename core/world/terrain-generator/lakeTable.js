@@ -46,8 +46,11 @@ const BUILD_SRC = `
     if (gid.x >= lakePass.x) { return; } lakeBuildActive(lakeWork[gid.x], uniforms.seed); }`;
 
 
+// Ensure calls whose records eviction keeps (tiles in flight).
+const EVICT_KEEP_CALLS = 512;
+
 export class LakeTable {
-    constructor(gen, { records = 16384, batch = 1024 } = {}) {
+    constructor(gen, { records = 32768, batch = 1024 } = {}) {
         this.gen = gen;
         this.device = gen.device;
         this.R = gen.worldScale;
@@ -60,7 +63,7 @@ export class LakeTable {
         this.index = new Map();          // key string -> { rec, used, complete }
         this.free = Array.from({ length: records }, (_, i) => records - 1 - i);
         this.frame = 0;
-        this.stats = { builds: 0, records: 0, evicted: 0, lastMs: 0, lastNew: 0 };
+        this.stats = { builds: 0, records: 0, evicted: 0, evictedRecent: 0, lastMs: 0, lastNew: 0 };
         const S = GPUShaderStage.COMPUTE, d = this.device;
         this.entryBuffer = d.createBuffer({ label: 'LakeTable-entries', size: this.entries.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         this.recordBuffer = d.createBuffer({ label: 'LakeTable-records', size: records * LAKE_RECORD_VEC4 * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -216,9 +219,16 @@ export class LakeTable {
     }
 
     _evict() {
-        // Reuse the least recently used quarter of the table.
+        // Reuse the least recently used quarter of the table, never records
+        // asked for in the last EVICT_KEEP_CALLS ensure calls: tiles asked for
+        // then may not be generated yet, and without their records they lose
+        // their lakes (a height step along their borders). Only when nothing
+        // older is left, the oldest anyway (counted: evictedRecent).
         const all = [...this.index.entries()].sort((a, b) => a[1].used - b[1].used);
-        for (const [k, e] of all.slice(0, Math.max(1, all.length >> 2))) {
+        const old = all.filter(([, e]) => e.used < this.frame - EVICT_KEEP_CALLS);
+        const take = (old.length ? old : all).slice(0, Math.max(1, all.length >> 2));
+        if (!old.length) { this.stats.evictedRecent += take.length; console.warn(`[LakeTable] full of recent records: ${take.length} evicted that tiles may still read`); }
+        for (const [k, e] of take) {
             this.index.delete(k); this.free.push(e.rec); this.stats.evicted++;
         }
         this._dirtyEntries = true;

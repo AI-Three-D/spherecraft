@@ -54,7 +54,7 @@ describe('lake-cell rivers', () => {
     it('drain a lake on a slope downhill to the sea, out of the low side of its rim', async () => {
         // Land falls 1 % toward +x and meets the sea (0 m) at x = 15 km.
         const { gen, lakeRecs } = world({ ground: (x) => 150 - 0.01 * x, lakes: [{ x: 0, y: 0, r: 500, level: 140, depth: 8 }] });
-        const rivers = new LakeCellRivers({ device: null, gen, table: gen.lakeTable, options: { lengthPerExtent: 100 } });
+        const rivers = new LakeCellRivers({ device: null, gen, table: gen.lakeTable, options: { lengthPerSqrtQ: 1e6 } });
         await rivers.plan(lakeRecs, 6, lakeRecs[0].centre);
         const v = rivers.byKey.get('lake0');
         expect(rivers.stats.lastError).toBe(null);
@@ -74,11 +74,26 @@ describe('lake-cell rivers', () => {
         const a = new LakeCellRivers({ device: null, gen: far.gen, table: far.gen.lakeTable });
         await a.plan(far.lakeRecs, 6, far.lakeRecs[0].centre);
         expect(a.byKey.get('lake0').none).toBe('enclosed');
-        const near = world({ ground, lakes: [{ x: 0, y: 0, r: 500, level: 140, depth: 8 }, { x: 1500, y: 0, r: 400, level: 124, depth: 6 }] });
+        const near = world({ ground, lakes: [{ x: 0, y: 0, r: 500, level: 140, depth: 8 }, { x: 1800, y: 0, r: 700, level: 124, depth: 6 }] });
         const b = new LakeCellRivers({ device: null, gen: near.gen, table: near.gen.lakeTable });
         await b.plan(near.lakeRecs, 6, near.lakeRecs[0].centre);
         expect(b.byKey.get('lake0').dest).toMatchObject({ kind: 'lake', key: 'lake1' });
-        expect(b.byKey.get('lake0').river.lengthM).toBeLessThan(1750);
+        expect(b.byKey.get('lake0').river.lengthM).toBeLessThan(3000);
+    });
+
+    it('end no river in a lake too small for it that cannot drain, and narrow the rivers of small lakes', async () => {
+        // A 500 m lake drains to a 300 m lake 1.5 km down a 1 % slope; the sea is 15 km off.
+        const ground = (x) => 150 - 0.01 * x;
+        const w = world({ ground, lakes: [{ x: 0, y: 0, r: 500, level: 140, depth: 8 }, { x: 1500, y: 0, r: 300, level: 127, depth: 5 }] });
+        const r = new LakeCellRivers({ device: null, gen: w.gen, table: w.gen.lakeTable });
+        await r.plan(w.lakeRecs, 6, w.lakeRecs[0].centre);
+        // The small lake cannot reach the sea with what flows into it: the river into it goes.
+        expect(r.byKey.get('lake1').none).toBeTruthy();
+        expect(r.byKey.get('lake0').none).toBe('smallSink');
+        expect(r.recordsFor(new Map([['lake0', 0], ['lake1', 1]]))).toEqual([]);
+        // Width by discharge, the same for every lake from medium size up.
+        expect(r._halfWidth(r._ownQ({ shape: { extent: 300 } }))).toBeLessThan(4);
+        expect(r._halfWidth(r._ownQ({ shape: { extent: 1500 } }))).toBe(r._halfWidth(r._ownQ({ shape: { extent: 6000 } })));
     });
 
     it('leave a lake in a bowl walled higher than the cut budget without a river', async () => {
@@ -93,7 +108,7 @@ describe('lake-cell rivers', () => {
         // A valley along y = 0 falling toward +x, the sea at x = 20 km.
         const ground = (x, y) => 200 - 0.01 * x + 0.02 * Math.abs(y);
         const { gen, lakeRecs } = world({ ground, lakes: [{ x: 0, y: 0, r: 500, level: 190, depth: 8 }, { x: 4000, y: 2500, r: 400, level: 200, depth: 6 }] });
-        const rivers = new LakeCellRivers({ device: null, gen, table: gen.lakeTable, options: { lengthPerExtent: 100 } });
+        const rivers = new LakeCellRivers({ device: null, gen, table: gen.lakeTable, options: { lengthPerSqrtQ: 1e6 } });
         await rivers.plan([lakeRecs[0]], 6, lakeRecs[0].centre);
         await rivers.plan(lakeRecs, 6, lakeRecs[0].centre);
         expect(rivers.byKey.get('lake0').dest.kind).toBe('sea');

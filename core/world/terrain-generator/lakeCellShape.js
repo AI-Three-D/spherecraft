@@ -24,7 +24,9 @@ export function lakeShapeU(shape, x, y) {
 // lie here) where the whole cell is inside the containment curve, else 0.
 // The terrain's depth decides where the water shows inside it.
 export function lakeCellMask(lake, n = 64) {
-    const reach = lake.shape.extent * 1.05 + lake.uC * lake.shape.stretch;
+    // Past the curve in every direction (the smooth union lies up to ks / 4
+    // under its parts: featureLakeCells.wgsl.js lakeCurveRadius).
+    const reach = lake.shape.extent * 1.05 + (lake.uC + 0.25 * lake.shape.ks) * lake.shape.stretch;
     const spacing = 2 * reach / n, x0 = -reach, y0 = -reach;
     const mask = new Uint8Array(n * n), inset = 0.75 * spacing * lake.shape.stretch;
     for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {

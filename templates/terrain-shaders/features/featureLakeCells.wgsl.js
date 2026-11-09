@@ -68,27 +68,27 @@
 export const LAKE_CELL_TIERS = Object.freeze([
     { name: 'giant', salt: 0, cellM: 55000, chance: 0.8, lenMin: 5000, lenMax: 14000, sizeBias: 1, families: [0.15, 0.2, 0.25, 0.15],
         outline: 0.40, scallop: 0.12, u0Frac: 0.15, u0Min: 250, depthMin: 10, depthMax: 40,
-        gentleMin: 0.015, gentleMax: 0.04, cliffMin: 10, cliffMax: 80, steepMin: 0.25, steepMax: 0.8,
+        gentleMin: 0.015, gentleMax: 0.04, cliffMin: 8, cliffMax: 45, steepMin: 0.25, steepMax: 0.45,
         fadeSlope: 0.06, fadeMin: 1500, fadeMax: 8000, headMax: 600, coarseBands: 1, rimSamples: 128 },
     { name: 'big', salt: 5, cellM: 29500, chance: 1.0, lenMin: 3000, lenMax: 6000, sizeBias: 1, families: [0.15, 0.2, 0.25, 0.15],
         outline: 0.40, scallop: 0.12, u0Frac: 0.18, u0Min: 180, depthMin: 8, depthMax: 30,
-        gentleMin: 0.018, gentleMax: 0.045, cliffMin: 10, cliffMax: 60, steepMin: 0.25, steepMax: 0.8,
-        fadeSlope: 0.065, fadeMin: 800, fadeMax: 6000, headMax: 500, coarseBands: 1, rimSamples: 112 },
+        gentleMin: 0.018, gentleMax: 0.045, cliffMin: 8, cliffMax: 35, steepMin: 0.25, steepMax: 0.45,
+        fadeSlope: 0.065, fadeMin: 800, fadeMax: 5950, headMax: 500, coarseBands: 1, rimSamples: 112 },
     { name: 'large', salt: 1, cellM: 14000, chance: 1.0, lenMin: 1500, lenMax: 3500, sizeBias: 1, families: [0.15, 0.2, 0.25, 0.15],
         outline: 0.40, scallop: 0.12, u0Frac: 0.20, u0Min: 120, depthMin: 6, depthMax: 25,
-        gentleMin: 0.02, gentleMax: 0.05, cliffMin: 8, cliffMax: 50, steepMin: 0.25, steepMax: 0.8,
-        fadeSlope: 0.07, fadeMin: 500, fadeMax: 2000, headMax: 400, coarseBands: 1, rimSamples: 96 },
+        gentleMin: 0.02, gentleMax: 0.05, cliffMin: 6, cliffMax: 30, steepMin: 0.25, steepMax: 0.45,
+        fadeSlope: 0.07, fadeMin: 500, fadeMax: 1950, headMax: 400, coarseBands: 1, rimSamples: 96 },
     { name: 'medium', salt: 2, cellM: 10000, chance: 1.0, lenMin: 700, lenMax: 1400, sizeBias: 2, families: [0.2, 0.2, 0.25, 0.15],
         outline: 0.30, scallop: 0.10, u0Frac: 0.25, u0Min: 80, depthMin: 4, depthMax: 15,
-        gentleMin: 0.025, gentleMax: 0.06, cliffMin: 5, cliffMax: 30, steepMin: 0.25, steepMax: 0.8,
+        gentleMin: 0.025, gentleMax: 0.06, cliffMin: 4, cliffMax: 18, steepMin: 0.25, steepMax: 0.45,
         fadeSlope: 0.05, fadeMin: 300, fadeMax: 1500, headMax: 200, coarseBands: 2, rimSamples: 64 },
     { name: 'pond', salt: 3, cellM: 4500, chance: 1.0, lenMin: 350, lenMax: 700, sizeBias: 2, families: [0.3, 0.25, 0.2, 0.15],
         outline: 0.25, scallop: 0.08, u0Frac: 0.25, u0Min: 60, depthMin: 3, depthMax: 12,
-        gentleMin: 0.03, gentleMax: 0.07, cliffMin: 4, cliffMax: 20, steepMin: 0.25, steepMax: 0.8,
+        gentleMin: 0.03, gentleMax: 0.07, cliffMin: 3, cliffMax: 12, steepMin: 0.25, steepMax: 0.45,
         fadeSlope: 0.05, fadeMin: 200, fadeMax: 800, headMax: 150, coarseBands: 2, rimSamples: 48 },
     { name: 'small', salt: 4, cellM: 3500, chance: 0.6, lenMin: 120, lenMax: 350, sizeBias: 2, families: [0.45, 0.3, 0.1, 0.1],
         outline: 0.25, scallop: 0.08, u0Frac: 0.30, u0Min: 40, depthMin: 1.5, depthMax: 6,
-        gentleMin: 0.04, gentleMax: 0.08, cliffMin: 2, cliffMax: 8, steepMin: 0.25, steepMax: 0.7,
+        gentleMin: 0.04, gentleMax: 0.08, cliffMin: 2, cliffMax: 6, steepMin: 0.25, steepMax: 0.4,
         fadeSlope: 0.05, fadeMin: 100, fadeMax: 400, headMax: 60, coarseBands: 3, rimSamples: 32 },
 ]);
 
@@ -97,12 +97,15 @@ const SUPPORT_FRACTION = 0.95;
 // 1 / 2.1 as fast as the true distance (ellipses up to 4:1).
 const EXTENT_FACTOR = 1.05;
 const STRETCH_FACTOR = 2.1;
+// A smooth union's shape distance lies up to ks / 4 under its parts' (ks at
+// most 0.12 len, lakeShapeOf).
+const KS_QUARTER = 0.03;
 // The fade's width varies around a lake by this range of factors.
 const FADE_VARY = [0.6, 1.6];
 
 export function lakeCellTierLimits(t) {
     const L = t.lenMax;
-    const reach = EXTENT_FACTOR * L + (Math.max(t.u0Frac * L, t.u0Min) + (t.outline + t.scallop) * L + t.fadeMax) * STRETCH_FACTOR;
+    const reach = EXTENT_FACTOR * L + (Math.max(t.u0Frac * L, t.u0Min) + (t.outline + t.scallop + KS_QUARTER) * L + t.fadeMax) * STRETCH_FACTOR;
     return { reach, rbMax: SUPPORT_FRACTION * t.cellM };
 }
 
@@ -136,7 +139,7 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
     // to stand above the level wherever the fine terrain dips there (the
     // cliff counts where it is). Kept per point for the lowering below.
 @NESTED@    // The larger lakes whose lowering reaches this lake's containment curve.
-    let larger = lakeLargerFind(tier, c, LAKE_EXTENT_FACTOR * a.shape.extent + a.uC * a.shape.stretch, seed);
+    let larger = lakeLargerFind(tier, c, LAKE_EXTENT_FACTOR * a.shape.extent + (a.uC + 0.25 * a.shape.ks) * a.shape.stretch, seed);
 @END@
     var pts: array<vec4<f32>, 128>;
     var tMin = 1.0e30;
@@ -165,7 +168,7 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
         let nS = clamp(fbmAuto_d(dk, 0.18 * w / 1000.0, 2, seedN + 5, 2.0, 0.5).x, -1.0, 1.0);
         let u = max(a.uC - (nO * t.outline + nS * t.scallop) * w, a.u0);
         let cliff = lakeCliff_d(a, lakeBankNoise(seed, tier, dk, c.len)).x * a.cliffH * (1.0 - exp(-u / a.cliffW));
-        need = max(need, (dip + LAKE_MARGIN_M + 0.5 - cliff) / u);
+        need = max(need, (dip + LAKE_MARGIN_M + 0.5 + 0.25 * lakeCreaseM(c.len) - cliff) / u);
         tMin = min(tMin, total);
         fNeg = max(fNeg, dip);
         pts[k] = vec4<f32>(coarse, cliff, u, 0.0);
@@ -184,7 +187,7 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
         let q = pts[k];
         climb += max(0.0, q.x - a.level - q.y) / q.z;
     }
-    a.gentle = min(max(a.gentle, mix(0.5, 1.0, g2.w) * climb / f32(t.rimSamples)), 0.6);
+    a.gentle = min(max(a.gentle, mix(0.5, 1.0, g2.w) * climb / f32(t.rimSamples)), LAKE_GENTLE_MAX);
 
     // How far the lowering reaches: the largest lowering on the curve.
     var head = 0.0;
@@ -194,9 +197,17 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
     }
     if (head > t.fadeSlope * t.fadeMax / LAKE_FADE_MAX) { a.reason = 5; return a; }
     a.fade = clamp(head / t.fadeSlope, t.fadeMin, t.fadeMax / LAKE_FADE_MAX);
+    // The lowering must end inside the candidate's support: shapes stretched
+    // past the tier's bound (narrow arms) get a shorter fade. Cut off there it
+    // drew a step on a circle round the lake (owner 2026-11-09, crop circles).
+    // The shape distance of a smooth union lies up to ks / 4 under its parts'.
+    let fadeFit = ((c.rb - LAKE_EXTENT_FACTOR * a.shape.extent) / a.shape.stretch - a.uC - 0.25 * a.shape.ks) / LAKE_FADE_MAX;
+    // A much shorter fade would be a steep wall: no lake then.
+    if (fadeFit < 0.6 * a.fade) { a.reason = 5; return a; }
+    a.fade = min(a.fade, fadeFit);
     a.band = max(0.25 * a.u0, 10.0);
-    a.core = LAKE_EXTENT_FACTOR * a.shape.extent + (a.uC + a.band) * a.shape.stretch;
-    a.rb = min(LAKE_EXTENT_FACTOR * a.shape.extent + (a.uC + a.fade * LAKE_FADE_MAX) * a.shape.stretch, c.rb);
+    a.core = LAKE_EXTENT_FACTOR * a.shape.extent + (a.uC + a.band + 0.25 * a.shape.ks) * a.shape.stretch;
+    a.rb = min(LAKE_EXTENT_FACTOR * a.shape.extent + (a.uC + 0.25 * a.shape.ks + a.fade * LAKE_FADE_MAX) * a.shape.stretch, c.rb);
 
     // Inside: the coarse relief the bed replaces, and the fine bands' highest
     // bump, which the bed sinks below (so the fine bands make islands and
@@ -264,6 +275,13 @@ const LAKE_TIER_COUNT: i32 = ${tiers.length};
 const LAKE_MARGIN_M: f32 = 0.5;
 const LAKE_EXTENT_FACTOR: f32 = ${num(EXTENT_FACTOR)};
 const LAKE_STRETCH_FACTOR: f32 = ${num(STRETCH_FACTOR)};
+const LAKE_KS_QUARTER: f32 = ${num(KS_QUARTER)};
+// Banks: the gentle slope (following the hills) and the bed at most these
+// steep, so the 1 m grid draws them without stretching (owner 2026-11-09).
+const LAKE_GENTLE_MAX: f32 = 0.35;
+const LAKE_BED_SLOPE_MAX: f32 = 0.6;
+// Width (m) of the crease where a bank meets the land: rounded, 3-25 m.
+fn lakeCreaseM(len: f32) -> f32 { return clamp(0.03 * len, 3.0, 25.0); }
 const LAKE_FADE_MIN: f32 = ${num(FADE_VARY[0])};
 const LAKE_FADE_MAX: f32 = ${num(FADE_VARY[1])};
 
@@ -338,7 +356,7 @@ fn lakeCandidate(tier: i32, t: LakeTier, cell: vec3<i32>, seed: i32) -> LakeCand
     c.dir = dir;
     c.len = mix(t.lenMin, t.lenMax, pow(g.x, t.sizeBias));
     // Upper bound of the support; the actual one is LakeAssess.rb.
-    c.rb = min(LAKE_EXTENT_FACTOR * c.len + (lakeU0(t, c.len) + (t.outline + t.scallop) * c.len + t.fadeMax) * LAKE_STRETCH_FACTOR, t.rbMax);
+    c.rb = min(LAKE_EXTENT_FACTOR * c.len + (lakeU0(t, c.len) + (t.outline + t.scallop + LAKE_KS_QUARTER) * c.len + t.fadeMax) * LAKE_STRETCH_FACTOR, t.rbMax);
     c.prio = f32(LAKE_TIER_COUNT - tier) * 1.0e6 + c.len + g.z;
     return c;
 }
@@ -392,17 +410,25 @@ fn lakeShapeOf(t: LakeTier, tier: i32, cell: vec3<i32>, seed: i32, L: f32) -> La
         }
         s.ks = 0.12 * L;
     } else if (h.x < t.fChain) {
-        // A chain of three or four basins with narrows between them.
+        // A chain of three or four basins along a bending axis, each long
+        // along it and of its own size, overlapping by a third to a half of
+        // the lake's length: the narrows between them are straits that hold
+        // water. Touching only at their tips they were round blobs on thin
+        // necks, often dry (owner 2026-11-09).
         s.n = select(3, 4, g.w > 0.5);
-        let step = select(0.62, 0.46, s.n == 4) * L;
+        let four = s.n == 4;
+        let step = select(0.5, 0.38, four) * L;
+        let bend = (h.y - 0.5) * 0.9;
         for (var j = 0; j < 6; j++) {
             if (j >= s.n) { break; }
             let jit = fract(vec3<f32>(g.x, g.y, g.z) + f32(j) * vec3<f32>(0.37, 0.61, 0.29));
-            comp[j] = vec4<f32>((f32(j) - 0.5 * f32(s.n - 1)) * step, (jit.x - 0.5) * 0.3 * L,
-                select(0.38, 0.3, s.n == 4) * L, mix(0.15, 0.3, jit.y) * L);
-            rot[j] = (jit.z - 0.5) * 0.6;
+            let t = f32(j) - 0.5 * f32(s.n - 1);
+            let ang = bend * t / f32(s.n - 1);
+            comp[j] = vec4<f32>(t * step * cos(ang), t * step * sin(ang) + (jit.x - 0.5) * 0.12 * L,
+                mix(0.42, 0.52, jit.y) * select(1.0, 0.8, four) * L, mix(0.2, 0.34, jit.z) * select(1.0, 0.85, four) * L);
+            rot[j] = ang + (jit.z - 0.5) * 0.35;
         }
-        s.ks = 0.05 * L;
+        s.ks = 0.1 * L;
     } else {
         // Arms: a body and two to five long narrow arms (fjord and finger
         // lakes), unevenly spaced and of different lengths.
@@ -471,7 +497,10 @@ fn lakeCurveRadius(s: LakeShape, th: f32, uC: f32) -> f32 {
     let cx = cos(th);
     let cy = sin(th);
     var lo = 0.0;
-    var hi = s.extent + uC * LAKE_STRETCH_FACTOR + 1.0;
+    // Past the curve in every direction: the shape's own stretch, and the
+    // smooth union's ks / 4 (a bound of the tier's stretch fell short of
+    // shapes with narrow arms: points inside the curve sampled as on it).
+    var hi = LAKE_EXTENT_FACTOR * s.extent + (uC + 0.25 * s.ks) * max(s.stretch, LAKE_STRETCH_FACTOR) + 1.0;
     for (var i = 0; i < 16; i++) {
         let mid = 0.5 * (lo + hi);
         if (lakeShapeU_d(s, cx * mid, cy * mid, vec3<f32>(0.0), vec3<f32>(0.0)).x < uC) { lo = mid; } else { hi = mid; }
@@ -507,6 +536,26 @@ fn lakeFrame(c: LakeCand, cell: vec3<i32>, tier: i32, seed: i32) -> array<vec3<f
     return array<vec3<f32>, 2>(a1, cross(c.dir, a1));
 }
 
+// Two lakes' lowerings (m, dual) where their supports overlap:
+// (a^6 + b^6)^(1/6), smooth, and the larger alone where the other is zero.
+// A smooth maximum of fixed width added a quarter of it there (0.5 m), and
+// that step stood on every lake's support circle (owner's crop circles).
+fn lakeLowerUnion(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    let x = max(a.x, 0.0);
+    let y = max(b.x, 0.0);
+    let m = max(x, y);
+    if (m <= 1.0e-6) { return select(b, a, a.x >= b.x); }
+    // Scaled by the larger, so the powers stay in range.
+    let p = x / m;
+    let q = y / m;
+    let p5 = p * p * p * p * p;
+    let q5 = q * q * q * q * q;
+    let s = p5 * p + q5 * q;
+    let f = pow(s, 1.0 / 6.0);
+    let f5 = f * f * f * f * f;
+    return vec4<f32>(m * f, (a.yzw * p5 + b.yzw * q5) / f5);
+}
+
 fn lakeLocalDir(c: LakeCand, a: LakeAssess, x: f32, y: f32) -> vec3<f32> {
     return normalize(c.dir + (a.a1 * x + a.a2 * y) / noiseReferenceRadiusM());
 }
@@ -530,7 +579,7 @@ fn lakeBankNoise(seed: i32, tier: i32, dir: vec3<f32>, len: f32) -> vec4<f32> {
 
 // How much of a cliff the shore has at dir (dual, 0..1), by the bank noise.
 fn lakeCliff_d(a: LakeAssess, nB: vec4<f32>) -> vec4<f32> {
-    return dSmoothstep(a.steepAt - 0.15, a.steepAt + 0.15, nB);
+    return dSmoothstep(a.steepAt - 0.3, a.steepAt + 0.3, nB);
 }
 
 // Bank height above the level at shore distance u >= 0 (dual): the gentle
@@ -658,7 +707,7 @@ fn lakeEvaluate(tier: i32, t: LakeTier, c: LakeCand, a: LakeAssess, dir: vec3<f3
     } else {
         // The bed leaves the shore at the bank's slope (or steeper, so that
         // small lakes reach their depth).
-        let kBed = max(a.gentle + cliff.x * a.cliffH / a.cliffW, 2.5 * a.depth / w);
+        let kBed = min(max(a.gentle + cliff.x * a.cliffH / a.cliffW, 2.5 * a.depth / w), LAKE_BED_SLOPE_MAX);
         bank = dConst(a.level) + (dExp(u * (kBed / a.depth)) - dConst(1.0)) * a.depth;
     }
     // The fade's width varies around the lake: narrow and steep in places,
@@ -667,7 +716,9 @@ fn lakeEvaluate(tier: i32, t: LakeTier, c: LakeCand, a: LakeAssess, dir: vec3<f3
     let fadeW = (dConst(LAKE_FADE_MIN) + dSmoothstep(-0.45, 0.45, nF) * (LAKE_FADE_MAX - LAKE_FADE_MIN)) * a.fade;
     let fade = dConst(1.0) - dSmoothstepDual(dConst(a.uC), dConst(a.uC) + fadeW, ug);
     var out: LakeAt;
-    out.lower = dMul(fade, dSmoothMax(coarseP * H - bank, dConst(0.0), 1.0));
+    // The bank meets the land in a rounded crease, not an edge (the
+    // assessment's climb allows for the quarter width this lowers more).
+    out.lower = dMul(fade, dSmoothMax(coarseP * H - bank, dConst(0.0), lakeCreaseM(c.len)));
     out.ug = ug.x;
     out.rel = (ug.x + a.shape.extent) / (a.uC + a.shape.extent);
     return out;
@@ -702,7 +753,7 @@ fn lakeCellFind(seed: i32, dir: vec3<f32>, bandsP: LandBands) -> LakeHit {
                 continue;
             }
             let e = lakeEvaluate(tier, t, c, a, dir, seed, lakeBandsCoarse(bandsP, t.coarseBands));
-            hit.lower = select(dSmoothMax(hit.lower, e.lower, 2.0), e.lower, !hit.any) ;
+            hit.lower = select(lakeLowerUnion(hit.lower, e.lower), e.lower, !hit.any);
             hit.any = true;
             if (e.ug < a.uC + a.band) {
                 hit.found = true;
@@ -887,7 +938,7 @@ fn lakeCellFindTable(seed: i32, dir: vec3<f32>, bandsP: LandBands) -> LakeHit {
                 continue;
             }
             let e = lakeEvaluate(tier, t, c, a, dir, seed, lakeBandsCoarse(bandsP, t.coarseBands));
-            hit.lower = select(dSmoothMax(hit.lower, e.lower, 2.0), e.lower, !hit.any);
+            hit.lower = select(lakeLowerUnion(hit.lower, e.lower), e.lower, !hit.any);
             hit.any = true;
             if (e.ug < a.uC + a.band) {
                 hit.found = true; hit.reason = 0; hit.tier = tier; hit.coarseBands = t.coarseBands;

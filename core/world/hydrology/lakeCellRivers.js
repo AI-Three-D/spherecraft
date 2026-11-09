@@ -18,24 +18,41 @@ import { regionalRiverCourse } from '../terrain-generator/regionalRiverCourse.js
 import { packRegionalRiver } from '../terrain-generator/regionalDrainage.js';
 import { lakeCellMask } from '../terrain-generator/lakeCellShape.js';
 import { LakeTable } from '../terrain-generator/lakeTable.js';
+import { RIVER_SHAPE_DEFAULTS, riverReachShape } from './riverRefine.js';
 
 export const LAKE_CELL_RIVER_OPTIONS = Object.freeze({ enabled: true, carve: true,
     // Flood: grid cell (m, at a face centre), tile edge (cells), the drop to
     // a receiving lake, lakes too small for a river (shape extent, m), and
     // budgets per river; the flood yields after sliceMs.
-    cellM: 128, tileCells: 32, minimumDropM: 2, minLakeExtentM: 200, maxLengthM: 40000, maxVisited: 200000,
-    // A lake drains no farther than lengthPerExtent x its half-length (shape
-    // extent): small lakes feed short rivers to nearby lakes, long rivers run
-    // between big ones (owner 2026-11-09: tiny lakes cannot drain 10+ km).
-    lengthPerExtent: 6,
+    cellM: 128, tileCells: 32, minimumDropM: 2, minLakeExtentM: 350, maxLengthM: 40000, maxVisited: 200000,
+    // Discharge (relative): a lake's own share (its half-length in km,
+    // squared: its catchment, roughly) plus the rivers flowing into it. A
+    // river reaches no farther than lengthPerSqrtQ x sqrt(Q) (minLengthM up)
+    // and is 2 x (halfWidthMinM + halfWidthPerSqrtQ x sqrt(Q)) wide, up to
+    // halfWidthMaxM: small lakes feed short narrow rivers, the width stops
+    // growing at medium lakes, chains of small lakes carry their inflow on
+    // (owner 2026-11-09: tiny lakes cannot drain 10+ km, rivers in
+    // proportion to their lakes).
+    lengthPerSqrtQ: 6000, minLengthM: 800,
+    // A lake that cannot drain takes no river bigger than its own share x
+    // sinkShare: rivers end in lakes large enough for them.
+    sinkShare: 1,
     // Lakes planned when within this of the camera, nearest first.
     planRadiusM: 40000,
     sliceMs: 4, maxTiles: 2000,
     // Records of its own lake table (the generator's pipelines, its own
     // records: planning never evicts what terrain tiles are about to read).
     tableRecords: 32768,
-    // Half-width by the source lake's size: min + perM x extent, up to max.
-    halfWidthMinM: 3, halfWidthPerM: 0.003, halfWidthMaxM: 18,
+    halfWidthMinM: 2, halfWidthPerSqrtQ: 5, halfWidthMaxM: 8,
+    // Along a river (riverReachShape, as the pre-Codex tracer): constrictions
+    // to minReachWidth of its width at least, mouths flared junctionWidthScale
+    // times, islands rare (islandThreshold of the reach noise, 0..1).
+    minReachWidth: 0.6, junctionWidthScale: 1.6, islandThreshold: 0.8,
+    // Rapids: rapidShare of the rivers with rapidMinDropM of drop or more
+    // take part of it (rapidDropShare, at most rapidMaxDropM, within the cut
+    // budget) in one steep reach of rapidLengthM, early in their course, and
+    // run under the land after it until it comes down to them.
+    rapidShare: 0.4, rapidMinDropM: 4, rapidDropShare: 0.55, rapidMaxDropM: 14, rapidLengthM: [120, 300],
     // The regional planner's course and profile.
     // The flood cuts at most maxChannelCutM - floodCutMarginM through rises on
     // its cells (the smoothed course and its banks cut a little more).
@@ -48,6 +65,13 @@ const OWN_LEVEL_EPS = 0.001;
 const LENGTH_KEY = 0.001;
 
 const yieldFrame = () => new Promise(r => setTimeout(r, 0));
+
+// Smooth value noise along a river (-1..1), x in wavelengths.
+function lakeRiverNoise(x, seed) {
+    const h = i => { let v = Math.imul((i | 0) ^ Math.imul(seed | 0, 0x27d4eb2d), 0x9e3779b1); v ^= v >>> 15; v = Math.imul(v, 0x85ebca6b); v ^= v >>> 13; return ((v >>> 0) / 4294967296) * 2 - 1; };
+    const i = Math.floor(x), f = x - i, t = f * f * (3 - 2 * f);
+    return h(i) + (h(i + 1) - h(i)) * t;
+}
 
 // Heights and lake water on cube-face cells, sampled in tiles on demand.
 export class RiverHeightGrid {
@@ -136,15 +160,20 @@ export class LakeCellRivers {
         gen._fillTerrainUniformScratch(0, 0, 128, 1, 0);
         const uv = new DataView(gen._terrainUniformScratch);
         this.seaLevelM = uv.getFloat32(116, true) * Math.max(uv.getFloat32(184, true), 1);
-        this.byKey = new Map();       // source lake key -> { river, dest } | { none } | { failed }
+        this.byKey = new Map();       // source lake key -> { river, dest, q } | { none } | { failed }
+        this.inflowQ = new Map();     // lake key -> discharge of the rivers ending in it
+        this.changes = 0;             // rivers planned or withdrawn (publication)
         this.riverCells = new Map();  // grid cell -> { key, level, dir }: where earlier rivers run
         this.stats = { planned: 0, byDest: { lake: 0, sea: 0, river: 0 }, none: {}, failed: 0, lastError: null,
             lengthsM: [], floodCells: 0, floodCellsByOutcome: {}, ms: 0, longestSliceMs: 0, longestCourseMs: 0, longestIndexMs: 0 };
     }
 
-    _halfWidth(lake) {
+    // A lake's own discharge share, and with its inflow.
+    _ownQ(lake) { return (lake.shape.extent / 1000) ** 2; }
+    _q(lake) { return this._ownQ(lake) + (this.inflowQ.get(lake.key) ?? 0); }
+    _halfWidth(q) {
         const o = this.options;
-        return Math.min(o.halfWidthMaxM, o.halfWidthMinM + o.halfWidthPerM * lake.shape.extent);
+        return Math.min(o.halfWidthMaxM, o.halfWidthMinM + o.halfWidthPerSqrtQ * Math.sqrt(q));
     }
 
     // Plans rivers for up to `budget` lakes without one: within planRadiusM
@@ -155,6 +184,9 @@ export class LakeCellRivers {
         return this._ready;
     }
 
+    // Plans rivers for up to `budget` lakes without one, highest first (a
+    // lake's inflow is known before it drains); within planRadiusM of
+    // nearDir (a unit direction) when given. Returns how many it took.
     async plan(lakes, budget = 6, nearDir = null) {
         await this._ready;
         this.grid ??= new RiverHeightGrid(this.table, this.R, this.options);
@@ -162,37 +194,71 @@ export class LakeCellRivers {
         let todo = lakes.filter(l => !this.byKey.has(l.key));
         if (nearDir) {
             const dist = l => Math.acos(Math.min(1, l.centre[0] * nearDir[0] + l.centre[1] * nearDir[1] + l.centre[2] * nearDir[2])) * R;
-            todo = todo.map(l => [l, dist(l)]).filter(([, d]) => d <= o.planRadiusM).sort((a, b) => a[1] - b[1]).map(([l]) => l);
-        } else todo.sort((a, b) => b.level - a.level);
-        todo = todo.slice(0, budget);
+            todo = todo.filter(l => dist(l) <= o.planRadiusM);
+        }
+        todo = todo.sort((a, b) => b.level - a.level).slice(0, budget);
         for (const src of todo) {
-            if (src.shape.extent < o.minLakeExtentM) { this.byKey.set(src.key, { none: 'small' }); this._none('small'); continue; }
-            const t0 = performance.now();
+            const inflow = this.inflowQ.get(src.key) ?? 0;
+            if (src.shape.extent < o.minLakeExtentM && !inflow) { this.byKey.set(src.key, { none: 'small' }); this._none('small'); continue; }
+            const t0 = performance.now(), q = this._q(src);
             try {
-                const flood = await this._flood(src);
-                if (flood.none) { this.byKey.set(src.key, { none: flood.none }); this._none(flood.none); continue; }
-                const built = await this._build(src, flood, lakes);
+                const flood = await this._flood(src, q);
+                if (flood.none) {
+                    this.byKey.set(src.key, { none: flood.none }); this._none(flood.none);
+                    // A lake that cannot drain keeps no river bigger than itself.
+                    if (inflow > o.sinkShare * this._ownQ(src)) this._withdrawInto(src.key);
+                    continue;
+                }
+                const built = await this._build(src, flood, lakes, q);
                 this.byKey.set(src.key, built);
+                this.changes++;
                 this.stats.planned++;
                 this.stats.byDest[built.dest.kind]++;
                 this.stats.lengthsM.push(Math.round(built.river.lengthM));
                 this._markRiver(src.key, built.river);
+                // Its water flows on into the receiving lake (a lake still to
+                // plan, or planned without it, plans again with it).
+                const into = built.dest.kind === 'lake' ? built.dest.key : null;
+                if (into) {
+                    this.inflowQ.set(into, (this.inflowQ.get(into) ?? 0) + q);
+                    if (this.byKey.get(into) && !this.byKey.get(into).river) this.byKey.delete(into);
+                }
             } catch (e) {
                 this.byKey.set(src.key, { failed: true });
                 this.stats.failed++;
                 this.stats.lastError = String(e?.message ?? e);
+                if (inflow > o.sinkShare * this._ownQ(src)) this._withdrawInto(src.key);
             } finally { this.stats.ms += performance.now() - t0; this.grid.trim(); }
         }
         return todo.length;
+    }
+
+    // Withdraws the rivers ending in a lake that cannot carry them on, and,
+    // the same way, those ending in their source lakes when these are left
+    // too small for what flows into them.
+    _withdrawInto(key) {
+        const o = this.options;
+        for (const [src, v] of this.byKey) {
+            if (!v.river || v.dest.kind !== 'lake' || v.dest.key !== key) continue;
+            this.byKey.set(src, { none: 'smallSink' });
+            this._none('smallSink');
+            this.stats.planned--;
+            this.stats.byDest.lake--;
+            this.changes++;
+            this.inflowQ.set(key, Math.max(0, (this.inflowQ.get(key) ?? 0) - v.q));
+            for (const [cell, r] of this.riverCells) if (r.key === src) this.riverCells.delete(cell);
+            const inflow = this.inflowQ.get(src) ?? 0, lake = v.lake;
+            if (inflow > o.sinkShare * (lake ? this._ownQ(lake) : 0)) this._withdrawInto(src);
+        }
     }
 
     _none(why) { this.stats.none[why] = (this.stats.none[why] ?? 0) + 1; }
 
     // The flood from the lake's water: { path (cells, lake to receiver),
     // kind, level, ... } or { none: why }.
-    async _flood(src) {
+    async _flood(src, q) {
         const g = this.grid, o = this.options, R = this.R, sea = this.seaLevelM;
-        const maxLengthM = Math.min(o.maxLengthM, o.lengthPerExtent * src.shape.extent);
+        const maxLengthM = Math.min(o.maxLengthM, Math.max(o.minLengthM, o.lengthPerSqrtQ * Math.sqrt(q)));
         const own = lv => Math.abs(lv - src.level) < OWN_LEVEL_EPS;
         // Cells under the lake's containment area (its mask) and its centre.
         const { mask, frame } = lakeCellMask(src), cand = new Set([g.cellOf(src.centre)]);
@@ -264,8 +330,8 @@ export class LakeCellRivers {
     }
 
     // Course, profile and record of a flood's path.
-    async _build(src, flood, lakes) {
-        const g = this.grid, o = this.options, R = this.R, halfWidthM = this._halfWidth(src), t0 = performance.now();
+    async _build(src, flood, lakes, q) {
+        const g = this.grid, o = this.options, R = this.R, halfWidthM = this._halfWidth(q), t0 = performance.now();
         const cells = flood.path.slice();
         // Into the receiver past its edge (the river's end hides in its water):
         // along the lowest bed of the receiving lake or the sea.
@@ -355,7 +421,108 @@ export class LakeCellRivers {
         river.mouths = [{ s: portals.source.arcM, level: src.level, hw: halfWidthM, sign: -1, landM }];
         if (flood.kind !== 'river') river.mouths.push({ s: portals.receiver.arcM, level: flood.level, hw: halfWidthM, sign: 1, landM });
         if (river.mouths.length === 2) for (const m of river.mouths) m.landM = Math.min(m.landM, Math.max(1, 0.45 * Math.abs(river.mouths[1].s - river.mouths[0].s)));
-        return { river, dest };
+        this._shapeRiver(river, src.key, halfWidthM, portals.source.arcM, flood.kind === 'river' ? null : portals.receiver.arcM);
+        await this._rapids(river, src.key, portals.source.arcM, flood.kind === 'river' ? null : portals.receiver.arcM);
+        return { river, dest, q, lake: src };
+    }
+
+    // Per point, as the pre-Codex tracer (waterWorkerCore.js solveRiver):
+    // width and depth varied along the river (riverReachShape: wider pools,
+    // constrictions, flared mouths, a rare island), the bends' curvature
+    // (riverField.js bank types: cut banks outside), the thalweg toward the
+    // outer bank, foam where steeper, speed from slope and depth. Codex's
+    // packing left these constant: one width, one bank, foam down the middle
+    // (owner 2026-11-09).
+    _shapeRiver(river, key, halfWidthM, sourceS, destS) {
+        const o = this.options, P = river.points, st = river.stride, n = P.length / st, R = this.R;
+        let seed = 2166136261;
+        for (let i = 0; i < key.length; i++) seed = Math.imul(seed ^ key.charCodeAt(i), 16777619);
+        const rid = (seed >>> 0) % 1000003;
+        const dir = k => [P[k * st], P[k * st + 1], P[k * st + 2]];
+        const s = new Float64Array(n);
+        for (let k = 1; k < n; k++) { const a = dir(k - 1), b = dir(k); s[k] = s[k - 1] + Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) * R; }
+        const kappaRaw = new Float64Array(n);
+        for (let k = 1; k + 1 < n; k++) {
+            const a = dir(k - 1), d = dir(k), b = dir(k + 1);
+            const f0 = [d[0] - a[0], d[1] - a[1], d[2] - a[2]], f1 = [b[0] - d[0], b[1] - d[1], b[2] - d[2]];
+            const l0 = Math.hypot(...f0), l1 = Math.hypot(...f1);
+            if (!(l0 > 0 && l1 > 0)) continue;
+            const cr = [f0[1] * f1[2] - f0[2] * f1[1], f0[2] * f1[0] - f0[0] * f1[2], f0[0] * f1[1] - f0[1] * f1[0]];
+            kappaRaw[k] = ((cr[0] * d[0] + cr[1] * d[1] + cr[2] * d[2]) / (l0 * l1)) / (0.5 * (l0 + l1) * R);
+        }
+        const slopeAt = k => {
+            let k0 = k, k1 = k;
+            while (k0 > 0 && s[k] - s[k0] < 100) k0--;
+            while (k1 < n - 1 && s[k1] - s[k] < 100) k1++;
+            return Math.max(0, (P[k0 * st + 3] - P[k1 * st + 3]) / Math.max(1, s[k1] - s[k0]));
+        };
+        const width0 = 2 * halfWidthM;
+        const reachP = { ...RIVER_SHAPE_DEFAULTS, minWidthM: 0, minReachWidthM: o.minReachWidth * width0, thinShare: 0,
+            junctionStartM: sourceS, junctionEndM: destS ?? s[n - 1], junctionWidthScale: o.junctionWidthScale,
+            typicalWidthM: width0, deltaLake: false, islands: true, islandThreshold: o.islandThreshold };
+        for (let k = 0; k < n; k++) {
+            const a = k * st, slope = slopeAt(k), depth0 = P[a + 5];
+            const sh = riverReachShape({ width: width0, depth: depth0, slope }, s[k], s[n - 1], rid, reachP);
+            let kappa = 0, m = 0;
+            for (let q = Math.max(0, k - 3); q <= Math.min(n - 1, k + 3); q++) { kappa += kappaRaw[q]; m++; }
+            kappa /= m;
+            // Pools and constrictions at walking scale too (80-400 m), its own
+            // per river: the reach shape alone varied over kilometres, and a
+            // 2-3 km river read as one width (owner 2026-11-09).
+            const local = Math.exp(0.38 * lakeRiverNoise(s[k] / (220 + 180 * ((rid % 97) / 97)), rid) + 0.2 * lakeRiverNoise(s[k] / 85, rid + 7));
+            const fade = Math.min(1, Math.min(s[k] - sourceS, (destS ?? s[n - 1]) - s[k]) / 60);
+            const hw = sh.width / 2 * Math.min(1.8, Math.max(0.55, 1 + (local - 1) * Math.max(0, fade))), inLake = P[a + 9] < 0;
+            P[a + 4] = hw;
+            P[a + 5] = sh.depth;
+            P[a + 6] = Math.max(0.3, Math.min(3.5, Math.pow(0.75 * sh.depth, 2 / 3) * Math.sqrt(Math.max(slope, 1e-5)) / 0.035));
+            // Discharge (m^3/s) of that width by the old law (riverShape: width 12 Q^0.5).
+            P[a + 7] = (hw / 6) ** 2;
+            P[a + 10] = Math.max(-0.35, Math.min(0.35, -0.7 * kappa * hw));
+            P[a + 11] = Math.max(0, Math.min(1, (slope - 0.004) / 0.03));
+            P[a + 12] = kappa;
+            P[a + 17] = sh.depth;
+            P[a + 19] = inLake ? 0 : sh.island;
+        }
+    }
+
+    // A rapid on some rivers (rapidShare, by hash): part of the drop in one
+    // steep reach, the water under the land after it (more cut, within the
+    // budget, measured on the natural heights). Levels stay non-increasing and
+    // end at the receiver's. river.rapid: { startM, lengthM, dropM } or none.
+    async _rapids(river, key, sourceS, destS) {
+        const o = this.options, P = river.points, st = river.stride, n = P.length / st, R = this.R;
+        let h = 2166136261;
+        for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 16777619);
+        const r = k => { let v = Math.imul((h ^ (k * 0x9e3779b1)) >>> 0, 0x85ebca6b); v ^= v >>> 13; return (v >>> 0) / 4294967296; };
+        if (r(1) >= o.rapidShare) return;
+        const s = new Float64Array(n);
+        for (let k = 1; k < n; k++) s[k] = s[k - 1] + Math.hypot(P[k * st] - P[(k - 1) * st], P[k * st + 1] - P[(k - 1) * st + 1], P[k * st + 2] - P[(k - 1) * st + 2]) * R;
+        const end = destS ?? s[n - 1], span = end - sourceS, lvl = k => P[k * st + 3];
+        const drop = lvl(0) - lvl(n - 1);
+        if (drop < o.rapidMinDropM || span < 600) return;
+        const len = o.rapidLengthM[0] + (o.rapidLengthM[1] - o.rapidLengthM[0]) * r(2);
+        const s0 = sourceS + span * (0.15 + 0.35 * r(3));
+        if (s0 + len > end - 150) return;
+        // Natural ground at the points: the cut may grow by the budget's rest.
+        const d4 = new Float32Array(n * 4);
+        for (let k = 0; k < n; k++) d4.set([P[k * st], P[k * st + 1], P[k * st + 2], 0], k * 4);
+        const nat = await this.table.sampleHeights(d4);
+        let room = Infinity;
+        for (let k = 0; k < n; k++) if (s[k] >= s0 && s[k] <= end) room = Math.min(room, o.maxChannelCutM - (nat[k] - lvl(k) + P[k * st + 5]));
+        const levelAt0 = (() => { let k = 0; while (k + 1 < n && s[k + 1] < s0) k++; return lvl(k); })();
+        const target = lvl(n - 1);
+        const D = Math.min(o.rapidMaxDropM, o.rapidDropShare * (levelAt0 - target), room);
+        if (!(D >= 2)) return;
+        for (let k = 0; k < n; k++) {
+            if (s[k] <= s0 || P[k * st + 9] < 0) continue;
+            const t = Math.min(1, (s[k] - s0) / len), f = t * t * (3 - 2 * t);
+            const next = Math.max(target, lvl(k) - D * f);
+            const dl = lvl(k) - next;
+            for (const j of [3, 8, 16]) P[k * st + j] -= dl;
+            if (t < 1) { P[k * st + 4] *= 0.8; P[k * st + 11] = Math.max(P[k * st + 11], 0.8); P[k * st + 6] = Math.max(P[k * st + 6], 2.5); }
+        }
+        river.rapid = { startM: s0, lengthM: len, dropM: D };
+        this.stats.rapids = (this.stats.rapids ?? 0) + 1;
     }
 
     // The receiving lake's key in a lake list (same level and tier, nearest), or null.
