@@ -44,8 +44,21 @@ export function regionalRiverCourse({line,frame,heights,halfWidthM,sourceLevelM,
     if(course.x.length>maxPoints)throw new Error('Regional river course sampling budget exceeded');
     // Reject folded/self-crossing courses rather than opening a shortcut
     // between reaches with different water elevations.
+    // Only segments sharing a grid bucket can cross (pairs, not all n^2).
     const cross=(ax,ay,bx,by,cx,cy)=>(bx-ax)*(cy-ay)-(by-ay)*(cx-ax);
-    for(let i=0;i+1<course.x.length;i++)for(let j=i+2;j+1<course.x.length;j++) {
+    const m=course.x.length-1,cell=Math.max(1,2*stepM),buckets=new Map();
+    for(let i=0;i<m;i++) {
+        const x0=Math.floor(Math.min(course.x[i],course.x[i+1])/cell),x1=Math.floor(Math.max(course.x[i],course.x[i+1])/cell);
+        const y0=Math.floor(Math.min(course.y[i],course.y[i+1])/cell),y1=Math.floor(Math.max(course.y[i],course.y[i+1])/cell);
+        for(let bx=x0;bx<=x1;bx++)for(let by=y0;by<=y1;by++) {
+            const key=`${bx},${by}`;let list=buckets.get(key);
+            if(!list)buckets.set(key,list=[]);
+            list.push(i);
+        }
+    }
+    for(const list of buckets.values())for(let p=0;p<list.length;p++)for(let q=p+1;q<list.length;q++) {
+        const i=Math.min(list[p],list[q]),j=Math.max(list[p],list[q]);
+        if(j<i+2)continue;
         const ax=course.x[i],ay=course.y[i],bx=course.x[i+1],by=course.y[i+1],
             cx=course.x[j],cy=course.y[j],dx=course.x[j+1],dy=course.y[j+1];
         if(Math.max(ax,bx)<Math.min(cx,dx)||Math.max(cx,dx)<Math.min(ax,bx)

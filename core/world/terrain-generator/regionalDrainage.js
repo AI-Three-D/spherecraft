@@ -87,13 +87,34 @@ export async function planRegionalDrainage({device,gen,data,uniformBytes,basinOp
         maxChannelCutM:options.maxChannelCutM,stepM:options.profile==='terrain'?options.profileStepM:32,
         maxPoints:options.maxProfilePoints})
         :smoothRiverPath(line.map(p=>p[0]),line.map(p=>p[1]),line.map(()=>source.levelM),{stepM:options.profile==='terrain'?options.profileStepM:64,passes:3});
-    let profile=null,profileSampled=null,rows=null;
     const lengthM=sm.s.at(-1);
     const portals=options.course==='organic'?{
         source:regionalLakePortal({course:sm,basin:source,planetRadius:R,planeToDir,frame}),
         receiver:regionalLakePortal({course:sm,basin:receiver,planetRadius:R,planeToDir,frame,fromStart:false})}:null;
     const sourceEndM=portals?.source.arcM??source.radiusM+8,targetStartM=portals?.receiver.arcM??lengthM-receiver.radiusM-8;
     if(targetStartM-sourceEndM<options.halfWidthM*4)throw new Error('Regional course has insufficient dry reach between lake portals');
+    const packed=await packRegionalRiver({gen,frame,sm,source,receiver,portals,sourceEndM,targetStartM,options,certifier});
+    const {river,profileSampled}=packed,points=river.points,segCellStart=river.segCellStart;
+    const routeMs=performance.now()-routeStart-packed.indexMs;
+    return {receiver,receiverPlan,rivers:[river],topology:{frame,heights,path:routed.path,cost:routed.cost,visited:routed.visited},
+        cpuBytes:heights.byteLength+routed.path.byteLength+points.byteLength+segCellStart.byteLength+river.segCells.byteLength+river.cells.byteLength,
+        timings:{totalMs:performance.now()-started,receiverMs:receiverPlan.timings.totalMs,receiverPlanning:receiverPlan.timings,
+            heightSamplingMs:sampled.wallMs,heightSamples:sites.length,
+            profileSamplingMs:profileSampled?.wallMs??0,profileSamples:profileSampled?profileSampled.output.length/4:0,
+            uploadBytes:receiverPlan.timings.uploadBytes+sampled.uploadBytes+(profileSampled?.uploadBytes??0),
+            readbackBytes:receiverPlan.timings.readbackBytes+sampled.output.byteLength+(profileSampled?.output.byteLength??0),routeMs,indexMs:packed.indexMs}};
+}
+
+// The river record of a course (sm: plane coordinates x, y and arc s in
+// frame) between a source and a receiver: the terrain profile sampled
+// through the certifier (options.profile 'terrain'), the points
+// (RIVER_POINT_STRIDE) and the water-grid segment cells. portals: where the
+// course leaves the source's water and meets the receiver's (arcM), or null.
+// dest: the record's destination (default the receiver lake). pause: awaited
+// between groups of segments while indexing (long rivers, between frames).
+export async function packRegionalRiver({gen,frame,sm,source,receiver,portals,sourceEndM,targetStartM,options,certifier,dest=null,pause=null}) {
+    const R=gen.planetConfig.radius,lengthM=sm.s.at(-1);
+    let profile=null,profileSampled=null,rows=null;
     if(options.profile==='terrain') {
         if(sm.x.length>options.maxProfilePoints) throw new Error('Regional river profile sampling budget exceeded');
         const sites=[];
@@ -134,11 +155,13 @@ export async function planRegionalDrainage({device,gen,data,uniformBytes,basinOp
         points.set([...d,level,width,depth,.4*(1-.8*flare),2,level,inLake?-1:0,0,0,0,0,0,0,level,depth,
             arc<=sourceEndM?source.levelM:arc>=targetStartM?receiver.levelM:-1e20,0],k*RIVER_POINT_STRIDE);
     }
-    const routeMs=performance.now()-routeStart,indexStart=performance.now(),gridN=gen.terrainConfig.waterGraph?.gridN??512;
+    const indexStart=performance.now(),gridN=gen.terrainConfig.waterGraph?.gridN??512;
     const segCellStart=new Int32Array(count),ids=[],coarseCells=new Set(),
         C={...RIVER_CARVE_DEFAULTS,...gen.terrainConfig.waterGraph?.carve};
     const reach=maxWidth*riverShapeMaxScale(C)+C.bankW+C.blendW+1;
+    let indexMs=0,since=performance.now();
     for(let k=0;k<count-1;k++) {
+        if(pause&&performance.now()-since>4) {indexMs=Math.max(indexMs,performance.now()-since);await pause();since=performance.now();}
         segCellStart[k]=ids.length;
         for(const id of segmentCells(packedRows[k].x,packedRows[k].y,packedRows[k+1].x,packedRows[k+1].y,reach,
             (x,y)=>dirToCellSub(planeToDir(x,y,frame,R),gridN,4),{stepM:20,marginM:20})) ids.push(id);
@@ -146,18 +169,12 @@ export async function planRegionalDrainage({device,gen,data,uniformBytes,basinOp
     }
     segCellStart[count-1]=ids.length;
     const packedLengthM=packedRows.at(-1).s-packedRows[0].s;
-    const river={id:options.riverId??0,riverId:options.riverId??0,fromLake:source.id,dest:{kind:'lake',id:receiver.id},lengthM:packedLengthM,points,stride:RIVER_POINT_STRIDE,
+    const river={id:options.riverId??0,riverId:options.riverId??0,fromLake:source.id,dest:dest??{kind:'lake',id:receiver.id},lengthM:packedLengthM,points,stride:RIVER_POINT_STRIDE,
         segCellStart,segCells:Int32Array.from(ids),cells:Int32Array.from(coarseCells).sort(),gridN,
         structured:true,representation:'coarse-regional-route-v1',...(options.course==='organic'?{course:{kind:sm.kind,
             maximumOffsetM:sm.maximumOffsetM,wavelengthM:sm.wavelengthM,heightSource:options.heightSource,
             portals:portals?Object.fromEntries(Object.entries(portals).map(([k,p])=>[k,{...p,arcM:p.arcM-packedRows[0].s}])):null}}:{}),...(profile?{profile:{kind:profile.kind,
             falls:profile.falls.map(f=>({...f,startM:f.startM-packedRows[0].s,endM:f.endM-packedRows[0].s})),
             maxCutM:profile.maxCutM,maxSlope:profile.maxSlope,descentM:profile.descentM,sampled:true}}:{})};
-    return {receiver,receiverPlan,rivers:[river],topology:{frame,heights,path:routed.path,cost:routed.cost,visited:routed.visited},
-        cpuBytes:heights.byteLength+routed.path.byteLength+points.byteLength+segCellStart.byteLength+river.segCells.byteLength+river.cells.byteLength,
-        timings:{totalMs:performance.now()-started,receiverMs:receiverPlan.timings.totalMs,receiverPlanning:receiverPlan.timings,
-            heightSamplingMs:sampled.wallMs,heightSamples:sites.length,
-            profileSamplingMs:profileSampled?.wallMs??0,profileSamples:profileSampled?profileSampled.output.length/4:0,
-            uploadBytes:receiverPlan.timings.uploadBytes+sampled.uploadBytes+(profileSampled?.uploadBytes??0),
-            readbackBytes:receiverPlan.timings.readbackBytes+sampled.output.byteLength+(profileSampled?.output.byteLength??0),routeMs,indexMs:performance.now()-indexStart}};
+    return {river,profileSampled,indexMs:pause?Math.max(indexMs,performance.now()-since):performance.now()-indexStart};
 }

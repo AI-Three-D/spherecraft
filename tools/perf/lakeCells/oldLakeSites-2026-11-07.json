@@ -1,0 +1,1384 @@
+{
+  "seed": 12345,
+  "planetRadiusM": 131072,
+  "siteMode": "48 equal-area spherical sites",
+  "observationRadiusM": 5000,
+  "sampleSpacingM": 150,
+  "landFilter": "old terrain coarse hydrology grid above sea level",
+  "oldWetSamples": 13888,
+  "newWetSamples": 13107,
+  "landSamples": 111882,
+  "equivalentRadiusBinsM": [
+    0,
+    100,
+    250,
+    500,
+    1000,
+    2500,
+    5000
+  ],
+  "oldLakeCounts": [
+    6,
+    63,
+    32,
+    12,
+    11,
+    0,
+    1
+  ],
+  "newLakeCounts": [
+    135,
+    137,
+    91,
+    25,
+    10,
+    3,
+    0
+  ],
+  "sites": [
+    {
+      "direction": [
+        0.12812475197093992,
+        0.9791666666666666,
+        0.15753312928166596
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 692,
+      "newWetSamples": 394,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.34426493528042024,
+        0.9375,
+        -0.05074844171369245
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 246,
+      "newWetSamples": 392,
+      "oldLakeCounts": [
+        0,
+        3,
+        4,
+        0,
+        1,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        2,
+        3,
+        0,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.3679531893768072,
+        0.8958333333333334,
+        -0.24918484969260132
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 523,
+      "newWetSamples": 1078,
+      "oldLakeCounts": [
+        0,
+        4,
+        2,
+        0,
+        1,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        4,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.12051903905454159,
+        0.8541666666666666,
+        0.5058403570109106
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 2293,
+      "newWetSamples": 1314,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+      ],
+      "newLakeCounts": [
+        3,
+        3,
+        0,
+        0,
+        0,
+        1,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.28343526869242935,
+        0.8125,
+        -0.5094194720083346
+      ],
+      "landSamples": 2894,
+      "oldWetSamples": 2,
+      "newWetSamples": 69,
+      "oldLakeCounts": [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        1,
+        2,
+        4,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.6044103936327986,
+        0.7708333333333334,
+        0.2012561757831737
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 27,
+      "newWetSamples": 235,
+      "oldLakeCounts": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        16,
+        8,
+        7,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.6248046519370837,
+        0.7291666666666667,
+        0.2791686213384338
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 274,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        5,
+        5,
+        3,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.2887773402605592,
+        0.6875,
+        -0.6662967790347161
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.24932026721098013,
+        0.6458333333333333,
+        0.7216222764808476
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 1207,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        9,
+        3,
+        3,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.7006388856436108,
+        0.6041666666666667,
+        -0.3795889761478435
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 552,
+      "newWetSamples": 191,
+      "oldLakeCounts": [
+        0,
+        9,
+        1,
+        2,
+        1,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        3,
+        4,
+        3,
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.8020823260012648,
+        0.5625,
+        -0.20064319653653992
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 821,
+      "newWetSamples": 200,
+      "oldLakeCounts": [
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        1,
+        3,
+        3,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.4707092885351618,
+        0.5208333333333333,
+        0.7121554637686991
+      ],
+      "landSamples": 3484,
+      "oldWetSamples": 1122,
+      "newWetSamples": 265,
+      "oldLakeCounts": [
+        1,
+        11,
+        5,
+        5,
+        3,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        10,
+        10,
+        6,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.13774441822181002,
+        0.47916666666666663,
+        -0.8668481878646864
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 66,
+      "newWetSamples": 569,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        1,
+        0,
+        2,
+        1,
+        2,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.7039426853675967,
+        0.4375,
+        0.5595162604584935
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 11,
+      "newWetSamples": 476,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        10,
+        4,
+        5,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.9160703401139899,
+        0.39583333333333337,
+        0.06427366634680991
+      ],
+      "landSamples": 2683,
+      "oldWetSamples": 43,
+      "newWetSamples": 41,
+      "oldLakeCounts": [
+        1,
+        3,
+        2,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        2,
+        5,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.6436699366299231,
+        0.35416666666666663,
+        -0.6784209496330822
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 245,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        18,
+        8,
+        9,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.016613120356735386,
+        0.3125,
+        0.9497724749812518
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 335,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        1,
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.6377313557433129,
+        0.27083333333333337,
+        -0.7210742149441706
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 848,
+      "newWetSamples": 907,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        2,
+        6,
+        2,
+        0,
+        0,
+        1,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.9680235363328478,
+        0.22916666666666663,
+        0.10204446087140971
+      ],
+      "landSamples": 2380,
+      "oldWetSamples": 0,
+      "newWetSamples": 78,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.7898589731993446,
+        0.1875,
+        0.5839234131771709
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 557,
+      "newWetSamples": 154,
+      "oldLakeCounts": [
+        0,
+        2,
+        2,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        10,
+        9,
+        4,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.18933099514346008,
+        0.14583333333333337,
+        -0.9710233844593424
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 210,
+      "newWetSamples": 95,
+      "oldLakeCounts": [
+        1,
+        10,
+        4,
+        1,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        2,
+        0,
+        4,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.5190503644671266,
+        0.10416666666666663,
+        0.8483725742279147
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 444,
+      "newWetSamples": 186,
+      "oldLakeCounts": [
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        1,
+        2,
+        3,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.9591483088347461,
+        0.0625,
+        -0.2759135220670534
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 3220,
+      "newWetSamples": 497,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        1,
+        3,
+        1,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.8951791765452974,
+        0.02083333333333337,
+        -0.44521928765711116
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 888,
+      "newWetSamples": 213,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        1,
+        8,
+        3,
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.3593359574578741,
+        -0.02083333333333326,
+        0.9329756920199236
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.3646179261332638,
+        -0.0625,
+        -0.9290573275865585
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 949,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.8932968529603733,
+        -0.10416666666666674,
+        0.4372299601429995
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.948997162956448,
+        -0.14583333333333326,
+        0.27953000481075696
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 743,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        1,
+        1,
+        2,
+        2,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.507302911496076,
+        -0.1875,
+        -0.8411227651107801
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 255,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        6,
+        13,
+        1,
+        3,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.1923466615876209,
+        -0.22916666666666674,
+        0.954193586577161
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.7776854089667271,
+        -0.27083333333333326,
+        -0.5673224041370216
+      ],
+      "landSamples": 1522,
+      "oldWetSamples": 0,
+      "newWetSamples": 166,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        1,
+        0,
+        2,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.9440320426598361,
+        -0.3125,
+        -0.10558054949420086
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 146,
+      "newWetSamples": 349,
+      "oldLakeCounts": [
+        0,
+        1,
+        3,
+        1,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        4,
+        7,
+        2,
+        1,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.6150893983813073,
+        -0.35416666666666674,
+        0.7044366573519181
+      ],
+      "landSamples": 449,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.021890447395625307,
+        -0.39583333333333326,
+        -0.9180614252516232
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 35,
+      "newWetSamples": 120,
+      "oldLakeCounts": [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        4,
+        2,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.623046255850025,
+        -0.4375,
+        0.6483880883169163
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.8759438945148644,
+        -0.47916666666666674,
+        -0.0558712736358092
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 358,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        3,
+        7,
+        3,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.6648902962298947,
+        -0.5208333333333333,
+        -0.5354003482145037
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.12456479530104819,
+        -0.5625,
+        0.8173599952111725
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.4436016732020761,
+        -0.6041666666666667,
+        -0.6619669133885826
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.741817751662187,
+        -0.6458333333333333,
+        0.18057056480615358
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 851,
+      "newWetSamples": 154,
+      "oldLakeCounts": [
+        0,
+        4,
+        2,
+        0,
+        2,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        5,
+        6,
+        4,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.6362895914048025,
+        -0.6875,
+        0.3499704357083745
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 291,
+      "newWetSamples": 319,
+      "oldLakeCounts": [
+        2,
+        11,
+        6,
+        3,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        14,
+        12,
+        8,
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.21936405547391677,
+        -0.7291666666666667,
+        -0.6482247938703505
+      ],
+      "landSamples": 3505,
+      "oldWetSamples": 0,
+      "newWetSamples": 279,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        4,
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.2570329183095451,
+        -0.7708333333333333,
+        0.5828808206893593
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.5337477858526675,
+        -0.8125,
+        -0.23442920274013465
+      ],
+      "landSamples": 330,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.4923139613949687,
+        -0.8541666666666667,
+        -0.16741048046985793
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.21359200711164325,
+        -0.8958333333333333,
+        0.3896935891016284
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        -0.0827995666606041,
+        -0.9375,
+        -0.33799109716206455
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "direction": [
+        0.16885094427680106,
+        -0.9791666666666667,
+        0.11279183261974848
+      ],
+      "landSamples": 0,
+      "oldWetSamples": 0,
+      "newWetSamples": 0,
+      "oldLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "newLakeCounts": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

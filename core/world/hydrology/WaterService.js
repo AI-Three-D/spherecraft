@@ -24,7 +24,9 @@ import { RIVER_SUB } from '../water/waterWgsl.js';
 import { RIVER_CARVE_DEFAULTS, riverShapeMaxScale } from '../water/riverShapeNoise.js';
 import { RIVER_SECTION } from '../water/riverSection.js';
 import { RIVER_LEVEL_DEFAULTS, RIVER_SOLVE_VERSION } from './riverRefine.js';
-import { regionalWaterModel,regionalWaterGridN } from './regionalWater.js';
+import { regionalWaterModel,regionalWaterGridN,lakeMaskCells } from './regionalWater.js';
+import { lakeCellMask } from '../terrain-generator/lakeCellShape.js';
+import { LakeCellRivers } from './lakeCellRivers.js';
 import { MOUNTAIN_LAKE_DEFAULTS, MOUNTAIN_LAKE_VERSION, chooseMountainLakes, drainFrame, mountainBlockFrame, mountainBlocks, pocketSolveFrame } from './mountainLakes.js';
 import { settledMountainPrefix } from './mountainStreaming.js';
 import { pondOverlapGroups, sharedPondFrame } from './pondOverlapGroups.js';
@@ -183,6 +185,23 @@ export class WaterService {
         if (this.state !== 'idle') return;
         const t0 = performance.now();
         try {
+            // Lakes of the 'lakeLand' terrain (lake table): published as they
+            // arrive with the terrain, no graph (_tickLakeCells).
+            if (this.terrainGenerator.lakeTable) {
+                this._lakeCells = { table: this.terrainGenerator.lakeTable, builds: -1, cache: new Map(), known: new Map(), recs: new Map(),
+                    rivers: this.config.rivers.enabled ? new LakeCellRivers({ device: this.device, gen: this.terrainGenerator }) : null };
+                this._publishLakeCells();
+                this.state = 'ready';
+                Logger.info('[Water] lake-cell water: lakes arrive with the terrain');
+                // The river field bakes on the lake terrain: the river planner's
+                // own lake table, which its floods fill along every river.
+                if (this._lakeCells.rivers) {
+                    const lakeTable = await this._lakeCells.rivers.ready();
+                    this._sampler = await createHydrologySampler({ device: this.device, terrainGenerator: this.terrainGenerator,
+                        directionsOnly: true, eagerCarved: false, lakeTable });
+                }
+                return;
+            }
             const regional=this.terrainGenerator.regionalTerrain;
             if(this.terrainGenerator.regionalTerrainActive && regional?.basinsConfig) {
                 if(this.terrainGenerator._regionalTerrainDirty) throw new Error('Regional terrain is stale; regenerate before publishing water');
@@ -310,7 +329,83 @@ export class WaterService {
      * a river's from its nearest graph cell. The next piece starts the
      * frame after one finishes.
      */
+    // Lake cells: republish the table's active lakes after its builds (each
+    // lake's mask computed once).
+    _tickLakeCells() {
+        const L = this._lakeCells;
+        if (L.reading || L.table.stats.builds === L.builds) return;
+        const builds = L.table.stats.builds;
+        L.reading = true;
+        L.table.readLakes().then(async list => {
+            if (!list) return;
+            L.builds = builds;
+            // A published lake keeps its id (its place in publication order)
+            // and its record: new lakes come after, and a republication only
+            // carries what changed (WaterGpuData re-applied every lake, 90 ms
+            // for 620, when ids were places in a sorted list).
+            const fresh = list.filter(l => !L.known.has(l.key)).sort((a, b) => (a.key < b.key ? -1 : 1));
+            for (const l of fresh) L.known.set(l.key, l);
+            if (fresh.length) this._publishLakeCells();
+        }).catch(err => Logger.warn(`[Water] lake-cell publication failed: ${err?.message || err}`))
+            .finally(() => { L.reading = false; });
+    }
+
+    // Rivers for the lakes near the camera that have none yet, published as
+    // they come; apart from the lakes' reads, which never wait for rivers.
+    // Starts again when lakes were added or the camera moved 2 km.
+    _tickLakeCellRivers() {
+        const L = this._lakeCells, dir = this._camDir;
+        if (!L.rivers || L.planning || !dir) return;
+        const moved = !L.plannedAt || Math.acos(Math.min(1, dir[0] * L.plannedAt[0] + dir[1] * L.plannedAt[1] + dir[2] * L.plannedAt[2])) * this.radius > 2000;
+        if (L.known.size === L.plannedKnown && !moved) return;
+        L.planning = true;
+        L.plannedKnown = L.known.size;
+        L.plannedAt = dir;
+        (async () => {
+            for (;;) {
+                const before = L.rivers.stats.planned;
+                if (!(await L.rivers.plan([...L.known.values()], 6, this._camDir))) break;
+                if (L.rivers.stats.planned !== before) this._publishLakeCells();
+            }
+        })().catch(err => Logger.warn(`[Water] lake-cell rivers failed: ${err?.message || err}`))
+            .finally(() => { L.planning = false; });
+    }
+
+    _publishLakeCells() {
+        const L = this._lakeCells, idOf = new Map(), keys = [], basins = [];
+        for (const l of L.known.values()) {
+            if (!L.cache.has(l.key)) {
+                const m = lakeCellMask(l);
+                L.cache.set(l.key, { ...m, maskCells: lakeMaskCells(m.frame, m.mask, this.radius, this.config.gridN) });
+            }
+            const m = L.cache.get(l.key), id = keys.length;
+            idOf.set(l.key, id);
+            keys.push(l.key);
+            basins.push({ id, centre: l.centre, levelM: l.level, radiusM: m.radiusM, frame: m.frame, mask: m.mask, maskCells: m.maskCells });
+        }
+        const rivers = L.rivers?.recordsFor(idOf, [...L.known.values()]) ?? [];
+        const model = regionalWaterModel({ sourceKey: 'lakeCells', basins,
+            drainageConfig: rivers.length ? { carve: true } : null, drainagePlan: { rivers } }, this.radius, this.config.gridN);
+        // Lakes already published keep their record objects (applied once).
+        for (const [id, rec] of model.refined) {
+            const old = L.recs.get(keys[id]);
+            if (old && old.level === rec.level && old.maskCells === rec.maskCells) model.refined.set(id, old);
+            else L.recs.set(keys[id], rec);
+        }
+        Object.assign(this, model);
+        this.version++;
+    }
+
     update(cameraPosition) {
+        if (this._lakeCells) {
+            if (cameraPosition) {
+                const o = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
+                const v = [cameraPosition.x - o.x, cameraPosition.y - o.y, cameraPosition.z - o.z], l = Math.hypot(...v) || 1;
+                this._camDir = [v[0] / l, v[1] / l, v[2] / l];
+            }
+            if (this.state === 'ready') { this._tickLakeCells(); this._tickLakeCellRivers(); }
+            return;
+        }
         if (cameraPosition) {
             const o = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
             const v = [cameraPosition.x - o.x, cameraPosition.y - o.y, cameraPosition.z - o.z], l = Math.hypot(...v) || 1;

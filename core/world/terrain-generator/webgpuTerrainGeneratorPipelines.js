@@ -443,6 +443,8 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     regionalTerrain: this.regionalTerrainActive === true,
                     regionalValleyFeature: !!this.regionalTerrain?.valleyConfig,
                     regionalShape: !!this.regionalTerrain?.shapeData,
+                    // 'lakeLand': heights read the lake table (lakeTable.js).
+                    lakeTable: this.lakeTable ? 'read' : null,
                     ...extra,
                 };
             },
@@ -1311,10 +1313,16 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 this.waterCarveVersion = (this.waterCarveVersion ?? 0) + 1;
             },
 
-        _setTerrainBiomeBindGroup(pass, { regional = true } = {}) {
+        _setTerrainBiomeBindGroup(pass, { regional = true, lakes = true } = {}) {
                 if (pass && this.biomeBindGroup) {
                     pass.setBindGroup(1, this.biomeBindGroup);
                     if (regional && this.regionalTerrainActive) pass.setBindGroup(2, this.regionalTerrain.bindGroup);
+                    // The lake table at group 3 (lakeTable.js); group 2 empty
+                    // when no regional terrain fills it.
+                    if (lakes && this.lakeTable) {
+                        if (regional && !this.regionalTerrainActive) pass.setBindGroup(2, this.lakeTable.emptyBindGroup);
+                        pass.setBindGroup(3, this.lakeTable.readBindGroup);
+                    }
                 }
             },
 

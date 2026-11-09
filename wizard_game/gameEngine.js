@@ -51,6 +51,7 @@ import { createTerrainFeatureRivers } from '../templates/terrain-shaders/feature
 import { createTerrainFeatureErosionSeeds } from '../templates/terrain-shaders/features/featureErosionSeeds.wgsl.js';
 import { createTerrainFeatureErosionFilter } from '../templates/terrain-shaders/features/featureErosionFilter.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
+import { createLakeLandConstants, createLakeLandBase } from '../templates/terrain-shaders/base/lakeLandBase.wgsl.js';
 import { HydrologyPrecompute } from '../core/world/hydrology/HydrologyPrecompute.js';
 import { WaterService } from '../core/world/hydrology/WaterService.js';
 import { WaterGpuData, lakeMaskAtlasPlan, tilesTouchingCells } from '../core/world/water/WaterGpuData.js';
@@ -170,6 +171,11 @@ const TERRAIN_SHADER_BUNDLE = {
         earthLike: {
             constants: createEarthlikeConstants,
             base: createEarthlikeBase,
+        },
+        // Lakes in the terrain function (LAKE_CELLS_PLAN.md; ?lakeCells=1).
+        lakeLand: {
+            constants: createLakeLandConstants,
+            base: createLakeLandBase,
         },
     },
 };
@@ -1005,6 +1011,14 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
         Logger.info('[GameEngine] Initialization complete');
     }
 
+    // Debug: freeze or resume the day-night cycle (the game clock and the
+    // planet's rotation). Returns whether it is frozen.
+    setDayNightFrozen(frozen = !this.gameTime?.frozen) {
+        this.gameTime?.setFrozen(frozen);
+        if (this.starSystem) this.starSystem.paused = frozen;
+        return frozen;
+    }
+
     stop() {
         this.isGameActive = false;
         this.frameLoop?.stop();
@@ -1455,7 +1469,10 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 loading: () => !this.isInitialLoadComplete(),
             });
             this.waterService.start();
-            if (!precompute) this._createWaterGpuData(terrainGenerator, device);
+            // Lake cells: capacity for the lakes near the camera, which come
+            // and go with the terrain.
+            if (terrainGenerator.lakeTable) this._createWaterGpuData(terrainGenerator, device, { maxLakes: 4096, maskLayerSize: 64, maskTilesPerAxis: 8, maxMaskLayers: 4096 });
+            else if (!precompute) this._createWaterGpuData(terrainGenerator, device);
             return;
         }
         if (!this.waterGpuData) {

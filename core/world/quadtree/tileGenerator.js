@@ -268,6 +268,9 @@ this._maxGpuFencesObserved = 0;
 
     async _generateTileInternal(tileAddr, options = {}) {
         const startTime = performance.now();
+        // 'lakeLand': the lakes this tile reads, assessed ahead of it
+        // (lakeTable.js; submitted before the tile's passes).
+        this.terrainGen.lakeTable?.ensureTile(tileAddr);
         // The prototype's six macro roots are pinned independently of the
         // render pool. A fine tile never substitutes a render fallback for
         // generation input or depends on intervening render LOD residency.

@@ -1,6 +1,7 @@
 // js/world/webgpuTerrainGenerator.js
 
 import { Logger } from '../../shared/Logger.js';
+import { LakeTable } from './terrain-generator/lakeTable.js';
 import { clamp01 } from '../../shared/math/index.js';
 import { installWebGPUTerrainGeneratorAtlasMethods } from './terrain-generator/webgpuTerrainGeneratorAtlas.js';
 import { installWebGPUTerrainGeneratorBatchMethods } from './terrain-generator/webgpuTerrainGeneratorBatching.js';
@@ -277,7 +278,11 @@ export class WebGPUTerrainGenerator {
 
     async initialize() {
         if (this.initialized) return;
+        // 'lakeLand': the lake table (lakeTable.js) before the pipelines, so
+        // their layouts and shaders include it.
+        if (this.baseGenerator === 'lakeLand' && !this.lakeTable) this.lakeTable = new LakeTable(this);
         await this.initializePipelines();
+        if (this.lakeTable && !this.lakeTable.pipelines) await this.lakeTable.initialize();
         if (this.terrainConfig.regionalTerrain?.enabled === true) await this.prepareRegionalTerrain();
         this.initialized = true;
     }
@@ -333,7 +338,14 @@ export class WebGPUTerrainGenerator {
     }
 
     _terrainPipelineLayouts(layouts) {
-        return this.regionalTerrainActive?[...layouts,this.regionalTerrain.bindGroupLayout]:[...layouts];
+        const out = this.regionalTerrainActive ? [...layouts, this.regionalTerrain.bindGroupLayout] : [...layouts];
+        // The lake table at group 3 (lakeTable.js), group 2 empty without
+        // regional terrain.
+        if (this.lakeTable) {
+            while (out.length < 3) out.push(this.lakeTable.emptyLayout);
+            out.push(this.lakeTable.readLayout);
+        }
+        return out;
     }
 
     initializeStreamedTypes() {

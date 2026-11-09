@@ -97,7 +97,9 @@ const DEFAULT_SAMPLES_PER_DISPATCH = 131072;
  * Work is split into dispatches of at most samplesPerDispatch terrain
  * evaluations; yieldBetween (e.g. one animation frame) runs between them.
  */
-export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null, directionsOnly = false, eagerCarved = true }) {
+// lakeTable: the lake table its samples read (lake terrain; default the
+// generator's): lake-cell rivers pass their own, which covers their areas.
+export async function createHydrologySampler({ device, terrainGenerator, samplesPerDispatch = DEFAULT_SAMPLES_PER_DISPATCH, yieldBetween = null, directionsOnly = false, eagerCarved = true, lakeTable = terrainGenerator.lakeTable }) {
     // The natural terrain, before the rivers (the water graph, lakes and
     // river traces are found on it).
     const usesRegionalTerrain = terrainGenerator.regionalTerrainActive === true;
@@ -136,7 +138,12 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
 
     // face 0: any face >= 0 selects the sphere terrain path; the entry
     // points pass their own directions.
-    terrainGenerator._fillTerrainUniformScratch(0, 0, 128, 1, 0);
+    // Grid size 2^20: the lake cells' LOD rule (featureLakeCells.wgsl.js, the
+    // only reader) keeps every lake tier. At 1 a texel was ~1.6 km and all but
+    // the giant and big lakes were left out of the river field's ground: no
+    // lake water in its pages (half a lake missing near a river), river ends
+    // short of their lakes (owner 2026-11-09; lakeRiverEndCheck.mjs).
+    terrainGenerator._fillTerrainUniformScratch(0, 0, 128, 1 << 20, 0);
     const uniformBytes = terrainGenerator._terrainUniformScratch.slice(0);
     const uniformBuffer = device.createBuffer({ label: 'Hydro-Uniforms', size: uniformBytes.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(uniformBuffer, 0, uniformBytes);
@@ -169,7 +176,9 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
     };
     const setBiome = (pass, pipeline) => {
         setRegional(pass, pipeline);
-        try { terrainGenerator._setTerrainBiomeBindGroup(pass, { regional: false }); return true; } catch { return false; /* entry point may not use group 1 */ }
+        // The lake table (lakeLand terrain) through this pipeline's own layout.
+        if (lakeTable) pass.setBindGroup(3, lakeTable.bindGroupFor(pipeline));
+        try { terrainGenerator._setTerrainBiomeBindGroup(pass, { regional: false, lakes: false }); return true; } catch { return false; /* entry point may not use group 1 */ }
     };
 
     async function sampleGrid(N) {

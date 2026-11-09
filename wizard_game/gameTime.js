@@ -2,7 +2,7 @@ export class GameTime {
 
     constructor(gameEngine) {
         this.gameEngine = gameEngine; 
-        this.dayDurationMs = 1 * 60 * 1000; // 24 minutes real time = 1 game day
+        this.dayDurationMs = 1 * 60 * 1000; // One minute of real time per game day.
         this.startDay = 190;
         this.currentDay = this.startDay;
         const startHour = 12; // Start near noon for brighter initial lighting
@@ -44,8 +44,18 @@ export class GameTime {
         return [this.seasonData[0].length, this.seasonData[0]]; // fallback, should not reach
     }
 
+    // Debug: hold the time of day (setFrozen(true)); unfreezing resumes from
+    // the same moment.
+    setFrozen(frozen) {
+        if (frozen === this.frozen) return;
+        if (frozen) this._frozenAt = Date.now();
+        else { this.dayStartTime += Date.now() - this._frozenAt; this._frozenAt = null; }
+    }
+
+    get frozen() { return this._frozenAt != null; }
+
     update() {
-        const elapsed = 10000;//Date.now() - this.dayStartTime;
+        const elapsed = (this._frozenAt ?? Date.now()) - this.dayStartTime;
         const daysPassed = Math.floor(elapsed / this.dayDurationMs);
         this.currentDay = this.startDay + daysPassed;
         const dayProgress = (elapsed % this.dayDurationMs) / this.dayDurationMs;

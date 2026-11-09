@@ -507,7 +507,12 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here)
+    </div>
+    <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
+    <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
+        <div id="river-goto-status" style="display:none;max-width:420px;padding:6px 8px;background:rgba(0,0,0,.65);color:#cfe;border-radius:4px;white-space:pre-wrap;"></div>
+        <button id="river-goto" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Next site (R)</button>
     </div>
 
     <!-- Game modules -->
@@ -3821,6 +3826,14 @@
         // Copy an existing useful view between baseline and regional preview.
         // This keeps live comparisons at the same pose without teleporting
         // the reviewer to a different part of the planet.
+        // Debug: the day-night cycle (also the T key).
+        window.qtDiag.time = {
+            freeze() { return gameEngine?.setDayNightFrozen(true); },
+            resume() { return gameEngine?.setDayNightFrozen(false); },
+            toggle() { return gameEngine?.setDayNightFrozen(); },
+            get frozen() { return gameEngine?.gameTime?.frozen ?? false; },
+        };
+
         window.qtDiag.regional = {
             daylight(enabled = true) {
                 const s=gameEngine?.starSystem,body=s?.currentBody;
@@ -3856,9 +3869,19 @@
                 }
                 return this.useCamera(pose);
             },
-            river(fraction = .5, altitudeM = 200, backM = 350) {
-                const rec=gameEngine?.terrainGenerator?.regionalTerrain?.drainagePlan?.rivers?.[0];
-                if(!rec) throw new Error('Regional river is not ready');
+            river(fraction = .5, altitudeM = 200, backM = 350, index = null) {
+                // Lake-cell rivers (?lakeCells=1): the one nearest the camera,
+                // or recs[index]; otherwise the regional plan's first river.
+                const recs=[...(gameEngine?.waterService?._lakeCells ? gameEngine.waterService.riverRecs?.values?.() ?? [] : [])];
+                let rec=gameEngine?.terrainGenerator?.regionalTerrain?.drainagePlan?.rivers?.[0];
+                if(recs.length) {
+                    const c=gameEngine.camera.position,o0=gameEngine.planetConfig.origin??{x:0,y:0,z:0};
+                    const v=[c.x-o0.x,c.y-o0.y,c.z-o0.z],l=Math.hypot(...v)||1;
+                    const mid=r=>{const k=Math.floor(r.points.length/r.stride/2)*r.stride;return (r.points[k]*v[0]+r.points[k+1]*v[1]+r.points[k+2]*v[2])/l;};
+                    rec=index!=null?recs[index]:recs.reduce((a,b)=>mid(b)>mid(a)?b:a);
+                    console.log(`[qtDiag] river ${rec?.id} of ${recs.length} lake-cell rivers`);
+                }
+                if(!rec) throw new Error('No river is ready');
                 const stride=rec.stride,k=Math.round(Math.min(1,Math.max(0,fraction))*(rec.points.length/stride-1)),offset=k*stride;
                 const d=Array.from(rec.points.slice(offset,offset+3)),h=rec.points[offset+3];
                 const next=Math.min(k+1,rec.points.length/stride-1),prev=Math.max(0,k-1);
@@ -4026,6 +4049,16 @@
                 const regionalPreview = new URLSearchParams(location.search).get('regionalTerrain');
                 // Fixed historical comparison cases keep their original inputs.
                 const placementQueries=new URLSearchParams(location.search);
+                // Lakes in the terrain function (LAKE_CELLS_PLAN.md): base
+                // generator lakeLand, regional terrain off; the water service
+                // publishes the lake table's lakes instead of solving a graph.
+                if (placementQueries.get('lakeCells') === '1') {
+                    for (const planet of gameDataConfig.planets) if (planet.enabled) {
+                        planet.terrain.baseGenerator = 'lakeLand';
+                        planet.terrain.regionalTerrain = { ...planet.terrain.regionalTerrain, enabled: false };
+                        planet.terrain.waterGraph = { ...planet.terrain.waterGraph, enabled: true };
+                    }
+                }
                 if(['regionalTerrain','regionalBasins','regionalWhitewater','regionalLargeLake','regionalOrganicRiver'].some(k=>placementQueries.has(k))) {
                     for(const planet of gameDataConfig.planets)if(planet.enabled) {
                         planet.terrain.regionalTerrain={...planet.terrain.regionalTerrain,world:{enabled:false},basins:{enabled:false}};
@@ -4282,11 +4315,78 @@
             }
         }
         
+        // Debug sites: the button (or R) flies to the next of a few viewing
+        // sites, round and round; Shift+R picks new ones around the camera.
+        // Each kind lists its sites nearest the camera; add kinds to
+        // DEBUG_SITE_KINDS (today the lake-cell rivers of ?lakeCells=1).
+        const DEBUG_SITE_COUNT = 4;
+        const DEBUG_SITE_KINDS = {
+            rivers: {
+                // Sites: the rivers nearest the camera, each seen at its middle.
+                sites(count) {
+                    const svc = gameEngine?.waterService, L = svc?._lakeCells;
+                    if (!L) return { sites: [], why: 'Rivers here come with ?lakeCells=1.' };
+                    const P = L.rivers, st = P?.stats;
+                    const planner = P ? `planner: ${st.planned} planned ${JSON.stringify(st.byDest)}, no river ${JSON.stringify(st.none)}, failed ${st.failed}` +
+                        `${st.lastError ? ` (last: ${st.lastError})` : ''}; ${L.known.size} lakes known, planning ${L.planning ? 'running' : 'idle'}` +
+                        `\nlake tables: tiles ${L.table.stats.records} records, ${L.table.stats.evicted} evicted; rivers ${P.table?.stats.records ?? '-'} records, ${P.table?.stats.evicted ?? '-'} evicted`
+                        : 'river planner off (waterGraph.rivers.enabled)';
+                    const recs = [...(svc.riverRecs?.values?.() ?? [])];
+                    if (!recs.length) return { sites: [], why: `No rivers published yet.\n${planner}` };
+                    const c = gameEngine.camera.position, o = gameEngine.planetConfig.origin ?? { x: 0, y: 0, z: 0 };
+                    const v = [c.x - o.x, c.y - o.y, c.z - o.z], l = Math.hypot(...v) || 1, R = gameEngine.planetConfig.radius;
+                    const mid = r => { const k = Math.floor(r.points.length / r.stride / 2) * r.stride; return (r.points[k] * v[0] + r.points[k + 1] * v[1] + r.points[k + 2] * v[2]) / l; };
+                    const near = [...recs].sort((a, b) => mid(b) - mid(a)).slice(0, count);
+                    return { sites: near.map(rec => ({
+                        go() {
+                            const index = [...(svc.riverRecs?.values?.() ?? [])].indexOf(rec);
+                            if (index < 0) throw new Error('That river is no longer published');
+                            window.qtDiag.regional.river(0.5, 150, 300, index);
+                        },
+                        text: () => {
+                            const hw = rec.points[Math.floor(rec.points.length / rec.stride / 2) * rec.stride + 4];
+                            return `river ending in ${rec.dest?.kind ?? '?'}, ${(rec.lengthM / 1000).toFixed(1)} km long, about ${Math.round(2 * hw)} m wide ` +
+                                `(${(Math.acos(Math.min(1, mid(rec))) * R / 1000).toFixed(1)} km from where the sites were picked). ` +
+                                `Its water and carve appear once the river field bakes (a few seconds).\n${planner}`;
+                        },
+                    })) };
+                },
+            },
+        };
+        const debugTour = { kind: 'rivers', sites: [], i: -1 };
+        function debugSiteStep(fresh = false) {
+            const box = document.getElementById('river-goto-status');
+            const say = (text) => { box.textContent = text; box.style.display = 'block'; console.info(`[Sites] ${text}`); };
+            // A new set when asked, when there is none, or when the last one was short and more exist now.
+            if (fresh || !debugTour.sites.length || (debugTour.sites.length < DEBUG_SITE_COUNT && debugTour.i + 1 >= debugTour.sites.length)) {
+                const found = DEBUG_SITE_KINDS[debugTour.kind].sites(DEBUG_SITE_COUNT);
+                if (!found.sites.length) { debugTour.sites = []; return say(found.why); }
+                debugTour.sites = found.sites;
+                debugTour.i = -1;
+            }
+            debugTour.i = (debugTour.i + 1) % debugTour.sites.length;
+            const site = debugTour.sites[debugTour.i];
+            site.go();
+            say(`Site ${debugTour.i + 1} of ${debugTour.sites.length}: ${site.text()}`);
+        }
+        document.getElementById('river-goto').addEventListener('click', () => {
+            try { debugSiteStep(false); } catch (err) { console.warn('[Sites]', err); }
+        });
+
         // Keyboard controls
         window.addEventListener('keydown', (e) => {
             if (e.key.toLowerCase() === 'd') {
                 debugMode = !debugMode;
                 debugPanel.style.display = debugMode ? 'block' : 'none';
+            }
+            // Debug: fly to the next viewing site (Shift: new sites around here).
+            if (e.key.toLowerCase() === 'r' && !e.repeat && !e.target?.closest?.('input, textarea')) {
+                try { debugSiteStep(e.shiftKey); } catch (err) { console.warn('[Sites]', err); }
+            }
+            // Debug: freeze or resume the day-night cycle.
+            if (e.key.toLowerCase() === 't' && !e.repeat && gameEngine?.setDayNightFrozen) {
+                const frozen = gameEngine.setDayNightFrozen();
+                console.info(`[Time] day-night cycle ${frozen ? 'frozen' : 'running'}`);
             }
         });
         

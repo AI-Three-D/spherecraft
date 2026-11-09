@@ -553,7 +553,7 @@ export class WaterGpuData {
      * distant big rivers out of the full buffer (lake-recovery run 23).
      */
     _rebuildRivers(camDir) {
-        const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map(), levelsOf = new Map(), mouthsOf = new Map();
+        const F = RIVER_SEG_FLOATS, SS = this.subPerCell, lists = new Map(), rowsOf = new Map();
         const narrowCos = Math.cos(NARROW_RIVER_DRAW_M / this.R);
         let beyond = 0;
         // Nearest rivers first, by their nearest point (a river's source can
@@ -601,40 +601,11 @@ export class WaterGpuData {
             }
             const list = lists.get(id), first = next;
             for (let m = 0; m < list.length; m += 2) {
-                const rec = list[m], k = list[m + 1], P = rec.points, st = rec.stride, a = k * st, b = (k + 1) * st, o = next * F;
-                const arc = this._arcLengths(rec);
-                // WaterRiverSeg (waterWgsl.js): p0, eta0, p1, eta1, hw, thalweg,
-                // pool, skew, speed, foam, arc length at both ends, river id,
-                // water level, lake guard, island, bend curvature, lake rims (points: waterWorkerCore.js).
-                const ext = st >= 12;
-                // Water level (points 16 on records that have it, else the design
-                // level), eased to the lakes at the river's ends (riverWaterLevels,
-                // as the near ribbons have it).
-                let wl = levelsOf.get(rec);
-                if (!wl) levelsOf.set(rec, (wl = riverWaterLevels(rec, arc, (d) => this.lakeAt(d))));
-                const wlA = wl[k], wlB = wl[k + 1];
-                let mouths=mouthsOf.get(rec);
-                if(!mouths)mouthsOf.set(rec,(mouths=riverMouths(rec,arc)));
-                const mouth=riverMouthAt(mouths,.5*(arc[k]+arc[k+1]));
-                this._segs.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
-                    P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5],
-                    ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
-                    P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0,
-                    arc[k], arc[k + 1], ridOf.get(rec) ?? -1,
-                    // Distant coverage from the channel profile (waterRiverAtView):
-                    // the carve cuts every listed segment's wet core to that
-                    // profile (riverCarveSegment_d), traced or structured, while
-                    // coarse triangles miss the channel (rivers drew as a brown
-                    // strip with cyan spots from the air, owner 2026-10-11).
-                    // 2: structured (opaque far body), 1: traced (ground seen through it).
-                    this.carve?.enabled===true&&st>=20&&P[a+19]===0&&P[b+19]===0
-                        &&Math.max(Math.abs(wlA),Math.abs(wlB),Math.abs(P[a+3]-P[a+5]),Math.abs(P[b+3]-P[b+5]))<=10000
-                        ?(rec.structured===true?2:1):0,
-                    wlA, wlB, st >= 20 ? P[a + 18] : -1e20, st >= 20 ? P[b + 18] : -1e20,
-                    st >= 20 ? P[a + 19] : 0, st >= 20 ? P[b + 19] : 0, st >= 20 ? P[a + 12] : 0, st >= 20 ? P[b + 12] : 0,
-                    // Lake rims of the banks (14 left, 15 right; none on older records).
-                    st >= 20 ? P[a + 14] : -1e4, st >= 20 ? P[b + 14] : -1e4, st >= 20 ? P[a + 15] : -1e4, st >= 20 ? P[b + 15] : -1e4,
-                    ...(mouth?[mouth.s,mouth.level,mouth.sign*mouth.hw,mouth.landM]:[0,0,0,0])], o);
+                const rec = list[m], k = list[m + 1], o = next * F;
+                let rows = rowsOf.get(rec);
+                if (!rows) rowsOf.set(rec, (rows = this._riverRows(rec)));
+                this._segs.set(rows.subarray(k * F, (k + 1) * F), o);
+                this._segs[o + 22] = ridOf.get(rec) ?? -1;
                 next++;
             }
             this.index[2 * this.cells + block * SS + (id % SS)] = (first << 8) | (list.length / 2);
@@ -660,6 +631,53 @@ export class WaterGpuData {
         this._droppedRivers = dropped + beyond;
         this._layoutDir = camDir;
         if (dropped) console.warn(`[Water] river segment buffer full: ${dropped} far rivers not drawn`);
+    }
+
+    /**
+     * A river's segment rows (WaterRiverSeg, RIVER_SEG_FLOATS each; the
+     * river id is the caller's). Cached per record when they depend on it
+     * alone: stride >= 20 records carry their water levels (riverWaterLevels);
+     * older traces read the applied lakes. Built per segment, not per listing.
+     */
+    _riverRows(rec) {
+        let rows = rec.stride >= 20 ? this._rowCache?.get(rec) : null;
+        if (rows) return rows;
+        const F = RIVER_SEG_FLOATS, P = rec.points, st = rec.stride, n = P.length / st, arc = this._arcLengths(rec);
+        const wl = riverWaterLevels(rec, arc, (d) => this.lakeAt(d)), mouths = riverMouths(rec, arc);
+        rows = new Float32Array(Math.max(0, n - 1) * F);
+        for (let k = 0; k + 1 < n; k++) {
+            const a = k * st, b = (k + 1) * st;
+            // WaterRiverSeg (waterWgsl.js): p0, eta0, p1, eta1, hw, thalweg,
+            // pool, skew, speed, foam, arc length at both ends, river id,
+            // water level, lake guard, island, bend curvature, lake rims (points: waterWorkerCore.js).
+            const ext = st >= 12;
+            // Water level (points 16 on records that have it, else the design
+            // level), eased to the lakes at the river's ends (riverWaterLevels,
+            // as the near ribbons have it).
+            const wlA = wl[k], wlB = wl[k + 1];
+            const mouth=riverMouthAt(mouths,.5*(arc[k]+arc[k+1]));
+            rows.set([P[a], P[a + 1], P[a + 2], P[a + 3], P[b], P[b + 1], P[b + 2], P[b + 3],
+                P[a + 4], P[b + 4], P[a + 3] - P[a + 5], P[b + 3] - P[b + 5],
+                ext ? P[a + 9] : 0, ext ? P[b + 9] : 0, ext ? P[a + 10] : 0, ext ? P[b + 10] : 0,
+                P[a + 6], P[b + 6], ext ? P[a + 11] : 0, ext ? P[b + 11] : 0,
+                arc[k], arc[k + 1], -1,
+                // Distant coverage from the channel profile (waterRiverAtView):
+                // the carve cuts every listed segment's wet core to that
+                // profile (riverCarveSegment_d), traced or structured, while
+                // coarse triangles miss the channel (rivers drew as a brown
+                // strip with cyan spots from the air, owner 2026-10-11).
+                // 2: structured (opaque far body), 1: traced (ground seen through it).
+                this.carve?.enabled===true&&st>=20&&P[a+19]===0&&P[b+19]===0
+                    &&Math.max(Math.abs(wlA),Math.abs(wlB),Math.abs(P[a+3]-P[a+5]),Math.abs(P[b+3]-P[b+5]))<=10000
+                    ?(rec.structured===true?2:1):0,
+                wlA, wlB, st >= 20 ? P[a + 18] : -1e20, st >= 20 ? P[b + 18] : -1e20,
+                st >= 20 ? P[a + 19] : 0, st >= 20 ? P[b + 19] : 0, st >= 20 ? P[a + 12] : 0, st >= 20 ? P[b + 12] : 0,
+                // Lake rims of the banks (14 left, 15 right; none on older records).
+                st >= 20 ? P[a + 14] : -1e4, st >= 20 ? P[b + 14] : -1e4, st >= 20 ? P[a + 15] : -1e4, st >= 20 ? P[b + 15] : -1e4,
+                ...(mouth?[mouth.s,mouth.level,mouth.sign*mouth.hw,mouth.landM]:[0,0,0,0])], k * F);
+        }
+        if (st >= 20) (this._rowCache ??= new WeakMap()).set(rec, rows);
+        return rows;
     }
 
     /** Every point's half-width below NARROW_RIVER_HW_M (cached per record). */

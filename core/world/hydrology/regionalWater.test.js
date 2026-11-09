@@ -1,9 +1,28 @@
 import {describe,it,expect} from 'vitest';
-import {regionalWaterModel,regionalWaterGridN} from './regionalWater.js';
+import {regionalWaterModel,regionalWaterGridN,lakeMaskCells} from './regionalWater.js';
 import {dirToCell} from './waterGraph.js';
-import {planeToDir} from './lakeRefine.js';
+import {planeToDir,tangentBasis} from './lakeRefine.js';
 
 describe('published regional basin water',()=>{
+    it('lists a lake in every cell its mask texels cover, texels wider than a cell or not (the checkerboard)',()=>{
+        const R=131072,N=512;
+        // Rotated frames near a face corner and centre, texels from 18 m to 520 m.
+        for(const [c,spacing] of [[[1,0,0],520],[[0.6,0.55,0.58],430],[[0.58,-0.57,0.58],150],[[0.3,0.49,-0.81],18]]) {
+            const l=Math.hypot(...c),cn=c.map(v=>v/l),n=64;
+            const frame={c:cn,...tangentBasis(cn),x0:-n/2*spacing,y0:-n/2*spacing,spacing,nx:n,ny:n};
+            const mask=new Uint8Array(n*n);
+            for(let j=0;j<n;j++) for(let i=0;i<n;i++) if(Math.hypot(i-n/2+0.5,(j-n/2+0.5)*1.7)<n/2-2&&(i*7+j*3)%11) mask[j*n+i]=2;
+            const listed=new Set(lakeMaskCells(frame,mask,R,N));
+            const k=8;
+            for(let j=0;j<n;j++) for(let i=0;i<n;i++) {
+                if(!mask[j*n+i]) continue;
+                for(let s=0;s<k;s++) for(let t=0;t<k;t++) {
+                    const cell=dirToCell(planeToDir(frame.x0+(i+(s+0.5)/k)*spacing,frame.y0+(j+(t+0.5)/k)*spacing,frame,R),N);
+                    expect(listed.has(cell)).toBe(true);
+                }
+            }
+        }
+    });
     it('keeps contour and level detail when a two-lake lookup is coarse, and retains network resolution',()=>{
         const basins=[{id:0,centre:[1,0,0],radiusM:100,levelM:530},
             {id:1,centre:[1,0,0],radiusM:60,levelM:520}];

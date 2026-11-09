@@ -1,0 +1,187 @@
+# Lakes in the terrain function: lake cells
+
+2026-11-08. Entry point for lakes made by the terrain function itself. Earlier attempts: Codex's streamed regional lakes are on branch `codex-terrain-lakes` (3cf8897, not accepted); the solver-based lakes and rivers of the committed system are described in [RIVERS_AND_LAKES.md](RIVERS_AND_LAKES.md).
+
+## What the owner asked for
+
+- A noise function in the terrain compute marks an area as a lake and shapes the ground into a basin, blended into the land around it, with a check whether the basin works. Rivers may come separately.
+- No dams. Dams were the main problem of earlier noise lakes (the erosion-seed pits had a raised rim).
+- One mechanism for flat and hilly land, no special case for mountain lakes.
+- Lakes and rivers appear almost instantly near the viewer, planets of 1000+ km radius, coarser water at altitude, smaller lakes and rivers dropped at coarse levels, coarser content near the viewer when generation falls behind.
+- Terrain changes only as far as lakes and rivers need them. The land rework (macro ranges, meso detail, erosion) comes later; lake work must not obstruct it.
+
+Owner's look at the first images (2026-11-08):
+- Small water pits are mostly useless: a tenth as many. They also pressed dents into hills.
+- Big lakes had decent ragged shores but too few shape types: add narrow and elongated parts, bays, capes. The blobs stay as one type.
+- A lake may change the land over a much larger area (100-500 m and more). The containment must blend so far that there is no wall or dam and no depression pressed into a hill.
+- The blend's width and shape should vary organically and strongly.
+- Banks should vary: some lakes rise very gradually, big lakes mix long gentle rises with steep cliffs to the water.
+- Some even bigger lakes. Later: rivers through canyons, valley lakes, a lot of variety.
+
+## The idea
+
+The land is a sum of size bands. For a lake of a given size, the bands longer than the lake are its **coarse** terrain, the rest its **fine** terrain. The fine terrain is never changed (except a backstop described below), so shores are where the real terrain crosses the level: as ragged as the terrain, with islands and coves.
+
+**Shape.** Up to four ellipses joined smoothly, of four kinds: a blob; a long lake bent in the middle with one narrower arm; a lobed lake (bays between the lobes, capes between the bays); a chain of three basins with narrows. Outline noise and scallops at the scale of the lake's narrowest part.
+
+**Ground.** The lake defines a bank surface: its bed below the shoreline and above it a gentle slope (per lake 1.5-8 %), plus cliffs at the shore of bounded height (2-8 m for small lakes, up to 80 m for giant ones) wherever a noise field around the lake says so; each lake has its own share of cliffs. The coarse terrain becomes the lower of itself and the bank surface, and that lowering fades back to the natural land over a width set by how much the lake lowers (100-300 m for small lakes, up to 8 km for giant ones) and varied around the lake by another noise field, 0.35-1.65 times. Where the land already lies below the bank surface nothing changes, so there is never a levee.
+
+**Containment.** On a closed curve around the lake that follows its shape, the full land is sampled. The level sits below the lowest coarse height there by the deepest dip of the fine terrain plus a margin, and the gentle slope is at least steep enough to climb that dip before the curve. So on that curve both the land and the bank surface stand above the water: **the water cannot leave, by construction, with nothing added on top of the land**. A narrow band on the curve keeps the fine terrain from dipping deeper than what was sampled (a backstop between samples).
+
+Each lake size has its own jittered lattice of candidate sites. Whether a site holds a lake is a pure function of the seed and the terrain bands: centre, ring and interior samples. A lake is left out when an overlapping lake of a larger size, or a higher-priority one of its size, would form. That rule reads the other site's own assessment, not its selection, so there are no chains: the answer is the same for every tile, LOD, camera path and request order.
+
+## What it needs from the terrain stack
+
+This is the contract any land stack must keep (today's and the reworked one):
+
+1. **Size bands.** The height is a sum of bands ordered by wavelength, each evaluable at any point. Done for the experiment as base generator `lakeLand`: b0 macro (continents, regions, lone hills, mountains, inland uplift), b1 foothills and the erosion filter's change, b2 rolling hills and meso's 750 m octave, b3 meso's 375 m and 187 m octaves. The same terms and inputs as `earthLike`: with lakes off they match it to 0.0005 m.
+2. **A lake insertion point between bands.** The lake lowers the coarse bands of its size toward its bank surface; everything finer is added after it unchanged. Lake sizes map to bands: giant and large lakes reshape b0, medium b0 + b1, small b0 + b1 + b2.
+3. **Every later height term respects the containment curves.** The per-tile micro detail pass (`microDetail`) runs after this and is not sampled by the lakes: it must stay non-negative on a lake's containment band or its amplitude must sit inside the margin. Not done yet.
+4. **Sites the land can host.** A lake forms only where the fine terrain on its containment curve is calm enough for a gentle bank to climb its dips, and where the coarse terrain lowers no more than the fade can hide. How many lakes a planet gets is therefore a property of the land stack. See "What limits the lakes today".
+
+Nothing here is specific to `earthLike`: any base generator that exposes its bands this way gets lakes. A new noise stack only has to say which of its terms belong to which band.
+
+## Results so far (lab, no browser)
+
+`node tools/perf/lakeCells/lakeCellsLab.mjs <outDir>` on the GPU in Node (terrain-lab); `LAKE_QUICK=1` for metrics only (about 2 minutes), `LAKE_IMAGES=0` to skip the top-down images (the views alone take about 8 minutes). Seed 12345, 131 km planet, the 48 equal-area sites of the old system's census (5 km disks, 150 m spacing; `tools/perf/lakeCells/oldLakeSites-2026-11-07.json`).
+
+**Views** in [docs/reference/lake-cells-2026-11-08/](docs/reference/lake-cells-2026-11-08/): oblique aerial views, lakes off above and on below, flat water at each lake's level, from about 600-1500 m (`view-largest-1/2`, `view-medium`, `view-owner-camera-11-06`). They are lab renders of the height function with simple shading, not game screenshots.
+
+Changes since the owner's look at the top-down images, in order:
+- Bank surface instead of a flat basin (no dents), long fades of varying width, gentle slope plus bounded cliffs (no radial creases), four shape kinds, a tenth of the small lakes, giant lakes up to about 28 km long.
+- The level is the lowest point of the real terrain on the containment curve; the bank only has to clear the dip at each point (cliffs count where they are); on the curve the ground is lifted exactly to the level plus the margin where needed, between samples too.
+- Lakes may sit in a larger or higher-priority lake's fade; their levels follow the lowered land. Only containment areas must stay clear of other lakes' supports.
+- Six tiers (giant, big, large, medium, pond, small) matched to the old size mix with fewer tiny lakes (big added 2026-11-09).
+- In hills the bank climbs with the land (each lake follows 35-90 % of the slope from its water to the land on its curve) instead of cutting the hill down: the first medium view had a dark pit pressed into hills; it is gone. Fades: base slope 5 %, width 0.6-1.6x around the lake.
+
+| | Lake cells (latest) | Old system |
+|---|---|---|
+| Containment: lakes whose curve dips below the water, final heights | **0 of 51**; lowest 0.50 m above the water (the margin) | (solved, not guaranteed) |
+| Raise above the land without lakes | p50 0.0 m, p90 0.5 m, max 10 m (the exact lift on a curve, see below) | none |
+| Lowering | p50 26 m, p90 131 m, max 513 m (other lakes' fades included) | none |
+| Dry lakes | 0 | |
+| Lakes with centres in the disks (planet-wide about 1,200) | 51: giant 1, large 7, medium 10, pond 14, small 19 | 125 (5,926) |
+| Lakes by equivalent radius <100 / 100-250 / 250-500 / 500-1000 / 1-2.5k / 2.5-5k / 5k+ m | 9 / 12 / 17 / 9 / 3 / 1 / 0 | 6 / 63 / 32 / 12 / 11 / 0 / 1 |
+| Water share of land | 2.0 % | 12.4 % |
+| GPU per million height samples | 23 ms off, 30,600 ms on (nothing cached) | |
+
+The owner: about 1,300 lakes on this planet is good. The water share stays low mainly because lakes of 1-2.5 km equivalent radius are rare (3 against 11): long, lobed and chain shapes hold less water than a blob of the same length.
+
+Open: the largest raise (10 m) is the exact lift where the terrain on a containment curve dips below the level between rim samples, or where a larger lake's lowering was estimated without the lakes above it. It is a small dam at that spot. More rim samples, or setting the level from the lowest of a denser curve, would shrink it.
+
+The cost is a lab figure with nothing cached: every sample re-assesses its lakes and their neighbours. In the game each lake would be assessed once per tile or region and kept in a small table; that has not been built or measured.
+
+## What limits the lakes today
+
+Assessment outcomes of the sites with centres in the 48 disks (latest run):
+
+| Tier | Lakes | Lowering too large / relief inside | Too rough | Blocked | Ocean or sea level |
+|---|---|---|---|---|---|
+| giant (cells 60 km, half-length 5-14 km) | 1 | 1 | 0 | 0 | 0 |
+| large (14 km, 1.5-3.5 km) | 7 | 4 | 0 | 0 | 2 |
+| medium (12 km, 0.7-1.4 km) | 10 | 10 | 0 | 2 | 4 |
+| pond (7.5 km, 350-700 m) | 14 | 15 | 2 | 12 | 7 |
+| small (5 km, 120-350 m, 60 % of cells) | 19 | 36 | 3 | 7 | 3 |
+
+The water is short mainly because lakes of 1-2.5 km equivalent radius (most of the old system's area) are rare; most rejections now are sites whose lowering would need a longer fade than the tier allows. Today's land tilts by more than 2 % across a big lake almost everywhere outside the plateaus, and its meso band (up to 135 m) is rough over most of the land. Options:
+
+- **A. Let lakes change more land.** Larger lowering over longer fades, rougher sites. More lakes in today's land, more of the land around them reshaped. Cheap to try.
+- **B. Make the land host lakes.** As part of (or ahead of) the land rework: near-level basins and plateaus in the macro band, calm patches in the meso band where lakes are meant to be. The lake code does not change; it finds more sites. This is the "lake-supporting features" direction.
+- **C. Both,** A now for testing and B with the land rework.
+
+One open question to measure: the land's own closed hollows (natural pits) stay dry, because only lake cells carry water. The old system filled them, which is much of its 12 %. How much of the land sits in dry pits is not measured yet.
+
+## Next steps, in order
+
+Each with its metric; each stops for the owner's look.
+
+Owner, after the views (2026-11-08 night): the views look quite good; put it behind a URL. Asked how fast it will be in the game and what it adds to a tile's generation. Answer given: as written (every sample re-assesses its lakes) about 1,300x slower than plain terrain, unusable; with the lake table below, estimated +20-50 % on a tile's height pass where lakes are near and a one-time cost per area (about 200 lake records, like 10-20 tiles), no tile regeneration. To be measured before the URL.
+
+Owner's first look in the game (2026-11-09, `?lakeCells=1`, orbital screenshots old vs new): it works; likes the slowly rising land in places and steep drops in others. But the shapes are still quite homogeneous (blobs) against the old lakes' large irregular shapes with arms and islands; the size mix could improve; the water look should be the old one (its texturing and shading worked decently); rivers on. Shore and bank tuning later. Also seen: the tile pool full (2048/2048) with 174 tiles queued in the lake run, against 696/2048 in the old run: watch the tile load.
+
+Next run, in order:
+1. **Shapes and sizes.** More shape kinds: arms (a body with 2-5 long narrow arms: fjord and finger lakes), more lobes (up to 6 ellipses), stronger multi-scale outline noise on large lakes, archipelago lakes (shallower beds, so the land's own bumps make islands: depth factor 0.3-1.6 of the interior bumps). More and larger lakes in the large tier.
+2. **The old water look.** Publish the table's active lakes through `regionalWaterModel` (core/world/hydrology/regionalWater.js): per lake a basin { centre, level, frame (centre, a1, a2), mask = inside the containment curve }, then WaterGpuData and the renderer's water data as the old system had (far water in the terrain shading, near water). The terrain depth hides dry ground, so the mask can be the whole containment area. Republish after table builds. The interim LakeCellWaterRenderer then goes.
+3. **Rivers.** Each lake's outlet is the lowest point of its containment curve. Plan rivers from outlets downhill to a lower lake or the sea, publish them as river records with the lakes (regionalWaterModel carries drainagePlan rivers), and let the existing river field bake them (RiverFieldService). Find what of regionalDrainage.js (Codex's lake-to-lake planner) can be reused.
+
+Done (2026-11-09):
+- Shapes: up to six ellipses; new kind with arms (fjord and finger lakes); lobed lakes with up to five lobes, chains of three or four; rougher outlines on large and giant lakes; archipelago lakes (bed depth 0.4-1.6x the interior bumps); giant cells 55 km, large and giant sizes no longer biased small; banks follow the hills 50-100 %. Records 32 vec4. Table heights still equal the direct evaluation (0.0000 m).
+- The old water look: WaterService has a lake-cell mode (the lake table on the generator): it starts ready and republishes the table's active lakes after its builds through regionalWaterModel (a 64x64 mask per lake marking cells inside the containment curve, cached per lake; ids are places in the publication). The engine sizes WaterGpuData for it (2048 lakes, 64x64 masks packed 8x8 per layer). The URL keeps the water graph on, so the old water path runs (far water in the terrain shading, near water), fed by the table. The interim LakeCellWaterRenderer is deleted. Node check: 142 lakes published around the spawn, WaterGpuData ready, no GPU errors.
+- Debug: T or qtDiag.time.freeze() / resume() / toggle() freezes the day-night cycle (game clock and the planet's rotation).
+- Rivers: `LakeCellRivers` (core/world/hydrology/lakeCellRivers.js). Each lake drains to the nearest lake at least 2 m lower and 1.5-6 km away (up to three tried), routed and packed by Codex's planRegionalDrainage with heights from the lake terrain (LakeTable.sampleHeights, ensureArea). Rivers are planned once per lake key; each publication remaps their lake ids. WaterService publishes them with the lakes (regionalWaterModel drainagePlan) and has a hydrology sampler that reads the lake table (HydrologyGrid binds it at group 3 through each pipeline's own layout), so the river field can bake and carve them. Node check around the spawn: 142 lakes, 50 rivers, 76 lakes without a lower lake in reach, 16 courses refused (mostly an incision above 24 m), no GPU errors. Not yet: rivers to the sea, longer rivers.
+
+Owner's second look in the game (2026-11-09, three screenshots): lake shapes good now. A checkerboard of water and dry squares inside a long giant lake (camera -42852, 68395, -112324 at 7.2 km); the same lake from under its water (camera -39752, 63613, -108175 at 566 m) showed the squares in the bed colour and the water overhead. More size variation wanted: plenty of small-medium lakes, few individual larger ones (a blue line in the orbital view marks a good larger size); the old orbital view had more. Frame rate stutters in fast flight and at altitude (it used to be smooth there); small and tiny lakes may be cut further if that helps speed. Order: visuals, then rivers, then optimization.
+
+Done (2026-11-09, second run):
+- **Checkerboard, cause proven:** the water lookup grid (512 per face, about 400 m cells here) listed a lake only in cells holding one of its mask texels' centres. A giant lake's 64x64 mask has texels of 420-520 m, wider than a cell, so cells between texel centres never listed the lake and its water and bed shading dropped out in a regular pattern. Measured (`node tools/perf/lakeCells/lakeWaterIndexCheck.mjs`, the 184 lakes within 40 km of that camera): 85 lakes with unlisted cells, 2,365 cells, up to 57 % of the giant lake's. Fix: `lakeMaskCells` (core/world/hydrology/regionalWater.js) lists every cell a water texel's footprint touches (footprints split to half the smallest cell; a piece touches a cell by one of its corners in the cell or one of the cell's corners in the piece). Now 0 unlisted cells; about 0.4 ms per lake, cached per lake key with its mask (WaterService). Unit test with frames from 18 to 520 m texels; the old listing fails it (up to 3,472 cells per lake).
+- **Size mix:** planet-wide census of the big tiers (`node tools/perf/lakeCells/lakeBigCensus.mjs`, the lake table at 1 km texels; equivalent radius of the water: mask texels below the level). Before: giant 13, large 276; by equivalent radius 0.5-1 km 94, 1-2.5 km 174, 2.5-5 km 17, over 5 km 2; big-lake water 2,197 km2. A new tier **big** between giant and large (half-length 3-6 km, 29.5 km cells, fades up to 6 km); every tier has a fixed salt id for its sites and noise, so the other tiers' lakes did not move. Blocking now measures the distance to the larger lake's containment band by its shape distance (`lakeCoreGap`: the shape distance grows at most `stretch` times as fast as distance in the lake's plane, which never exceeds the chord) instead of a circle round it, which kept long and armed lakes' neighbours tens of km away. After: giant 13, big 64, large 202; 0.5-1 km 76, 1-2.5 km 165, 2.5-5 km 34, over 5 km 2; water 2,877 km2 (+31 %). Pond and small chances lowered (0.75, 0.45) to keep their counts as before (lab disks: 44 lakes against 40, ponds 13, small 16). Containment violations 0, ring min 0.4998 m. Rejections on land are almost all the fade limit (headwall, reason 5: big 80, large 379); the inside-relief test now has its own reason (8) and rejects none.
+- **Tile cost** (lakeTileTest.mjs): medians 3.58-4.09 ms at depths 7-13 (3.45-4.03 before), depth 4 36 ms (28) for the one-time table fill. 0 GPU errors. All tests pass (the river field page-cull test times out under parallel load and passes alone).
+- **Rivers, found:** they are planned and reach WaterGpuData (41 near the spawn), and the river field bakes them when the camera is near (Node: camera over a river, 2 rivers, 291 wet pages, 1.6 s, no GPU errors; lakeTileTest.mjs). But the field bakes only within 6 km of the camera, and the rivers are few and short: only lake to a lower lake 1.5-6 km away (75 of 126 lakes near the spawn have none). `qtDiag.regional.river(fraction, altitudeM, backM, index)` now flies to the lake-cell river nearest the camera.
+
+Owner (2026-11-09): proceed with rivers. The sea is an old system to be reworked later; rivers may end in it as it is. Caching simple lake, river and even terrain-tile data is welcome if it helps speed (100-200 MB for a 1000 km planet, configurable, evicting sooner when small; a planet-scale precompute or a local cache much wider than the visible tiles, so revisiting is cheaper). Only if it brings gains.
+
+Done (2026-11-09, rivers):
+- **Rivers out of every lake** (`core/world/hydrology/lakeCellRivers.js`, rewritten). A priority flood from all of a lake's water over a shared height grid (128 m cells on the cube faces, the lake terrain sampled in 32x32-cell tiles through the lake table as the flood reaches them: `LakeTable.sampleWater` gives height, lake level and tier per point), lowest ground first, cutting through rises of at most 20 m (24 m less a 4 m margin for the smoothed course and its banks), to the first lower lake (2 m), ground below the sea, or an earlier river in its cell or next to it. So a river leaves at the lowest point of the rim, follows the valleys and crosses ridges at their lowest saddle. Course, profile and record from the regional planner's steps (`regionalRiverCourse`, and `packRegionalRiver`, the record packing taken out of `planRegionalDrainage` unchanged). Half-width 3-18 m by the source lake's size; lakes under 300 m extent get none. Planned nearest the camera first within 40 km, once per lake. Unit tests on synthetic terrain: drains to the sea from the low side of the rim, a lake in a high-walled bowl gets none, a later river joins an earlier one in the same valley (it ran beside it a cell away before the neighbour rule).
+- **Measured** (`lakeTileTest.mjs`, within 40 km of the spawn): 26 rivers (15 to lakes, 5 to the sea, 6 joining rivers) against 41 lake-to-lake ones within 6 km before but over the whole table; median length 9.5 km, p90 22 km, max 32 km (6 km before). 17 lakes enclosed (their water cannot leave within the cut: today's terrain has many hollows deeper than 20 m, no erosion yet), 29 too small, 5 failed (the profile cut 24-28 m). Planning 1.7 s busy for them, never more than ~5 ms without a yield (flood slices 4 ms, course 5 ms after bucketing `regionalRiverCourse`'s self-crossing check, which compared every pair of segments; record indexing yields every 4 ms). The river field bakes them (Node: 1,100 wet pages, no GPU errors). Map: `node tools/perf/lakeCells/lakeRiverMap.mjs` (shaded terrain, lakes, rivers by end, enclosed lakes).
+- **Deeper cuts drain more lakes** (40 km around the spawn, 162 lakes large enough): 24 m 56 %, 36 m 69 %, 48 m 79 %. Kept at 24 m: the river field's banks reach 96 m beyond the water (riverField.js reachM), and a cut bank for more than ~28 m needs wider, so deeper cuts would likely end in a step (walls). Canyons need that first. The owner's call.
+- **Publication cost, a stutter source:** lake ids were places in a sorted list and every publication made new records, so WaterGpuData re-applied every lake each time: 90 ms of main thread for 620 lakes, after every table build (while flying) and every river batch. Now a published lake keeps its id (publication order) and record, rivers keep theirs: an unchanged republication 0.2 ms, 79 new lakes 7 ms. River planning no longer holds up lake publication (separate task). WaterGpuData caches each river's segment rows per record (rows per segment, not per listing): rebuilding the river lists 43 -> 14 ms for 26 rivers. Still open: the first apply when water appears (about 50-75 ms at once for 126 lakes), and published lakes are never dropped (fine for this planet's ~1,600; bigger planets need eviction).
+
+Owner, after a run (2026-11-09): it felt smoother; could not find any rivers anywhere. Added a debug site tour to `standalone.html`: the **Next site (R)** button flies to the next of 4 viewing sites, round and round; Shift+R picks new ones around the camera. Today the sites are the 4 rivers nearest the camera, seen 150 m above the middle reach. With none, it shows the river planner's counts and last error. Other kinds of site go in `DEBUG_SITE_KINDS`.
+
+Owner's look at the rivers (2026-11-09, screenshots): rivers show. Open: a river's start does not reach its lake; its end stops short of the next lake, and floats in one spot; a wall under water where two rivers join; one width everywhere (wants wider calm stretches and narrow constrictions; that one not thinner); foam only down the middle, calm water along the banks; a light line across the land perpendicular to a river; a lake half empty with a straight edge; rocks the water passes through (asked before, unconfirmed); tiny lakes draining 10+ km rivers (cap by size; more small-medium lakes for 0.5-2+ km rivers between them; long rivers between big lakes, with width variation). Reference for river ends, junctions and the plume into the lake downstream: the pre-Codex version (c86c6f7 and before).
+
+Found and fixed (Node, `node tools/perf/lakeCells/lakeRiverEndCheck.mjs`: along a river and past both ends, the ground, the record and the baked river field):
+- **The river field's ground had no lakes but the giant and big ones.** The hydrology sampler (HydrologyGrid) filled the shader's uniforms with grid size 1, so the lake tiers' LOD rule (the only reader) took a texel as ~1.6 km and left out every smaller lake: 570-578 m where the lake terrain is 550-555 m. So the field's pages held no lake water: the lake sheet gives way to the pages near a river, and nothing drew the lake there (the half-empty lake, its straight edge a page edge); river ends were cut and carved against ground that is not there (carve 12-23 m at a mouth). Now 2^20: the sampler matches the lake table's probe; the lake water inside the pages is wet; the mouth's carve 1-2 m.
+- **The river's level fell 4.5 m under its own lake at the outlet**: the profile keeps the water under the lower bank, and beside the outlet the banks were the lake's bed. Heights for the profile are now the water's surface where a lake's water lies. The river leaves at the lake's level and cuts the rim (~7.6 m); the lake's sheet and the river meet (the floating end was likely that sheet over the trench).
+- **Mouths**: the records had none (Codex's do not either), so the field had no lake ends and no lake water at all (riverFieldLakeCandidates looks below the rivers' end levels only). Each river now has mouths where it leaves its source's water and enters the receiver's, measured on its course points with the probe (not the 128 m grid).
+- **Length by lake size**: a lake drains at most 6 x its half-length (small lakes ~1-2 km, ponds 2-4 km, medium to 8 km, large 9-21 km, big and giant up to 40 km); lakes from 200 m half-length feed rivers. Pond cells 4.5 km (were 7.5, chance 1), medium 10 km (were 12), small 3.5 km at 0.6 (were 5 km at 0.45): about 50 % more lakes around the spawn (233 -> 352), most of them ponds and small. WaterGpuData sized for 4,096 lakes. Around the spawn: 26 rivers, median 2.8 km, p10 1.0 km, p90 6 km (cap 10: 52 rivers, median 3 km). Many small lakes have no lower lake within their cap (103 'enclosed'): more short rivers need more lakes or a longer cap, the owner's choice.
+- Tests: the cap (a small lake drains to a lake 1.5 km away, not to the sea 15 km away).
+
+Still open: the junction wall (to check again: the carve was wrong before), width variation along rivers (pools and constrictions), foam across the river, rocks in the flow, the perpendicular line (to check again).
+
+Owner's next look (2026-11-09, three screenshots): a long light dotted line across the land where a river abruptly narrows (asks: tile or cube-face border?); at site 3 a chain lake as three almost separate blobs with a similar seam behind it; a long straight scarp beside a river (site 4); river banks with one uniform gradient: they want variation at several scales, like the lakes'.
+- Not a cube face (camera direction about (-0.99, 0.06, 0.12)).
+- Not the containment lift: densely sampled, the curves near both views are held at the floor over 0-1.5 % of their length (`node tools/perf/lakeCells/lakeRingLiftCheck.mjs`).
+- The table still equals direct evaluation (0.0000 m, lakeTableLab.mjs).
+- Likely (not proven): tiles generated without some lakes' records, a height step along tile borders (a big lake lowers land km around it). Records can be evicted between a tile's ensure and its dispatch, and river planning had started filling the same table over large areas. River planning now has its own lake table (`LakeTable.initialize({ share })`: the generator's pipelines, its own 32,768 records); the river field's sampler reads it (createHydrologySampler lakeTable). The tiles' table no longer grows with planning (3,150 records, 0 evicted in Node). The R status box shows both tables' records and evictions, to confirm in the game.
+- Uniform banks, one width, foam down the middle (and perhaps rocks): the records from Codex's packing carry constants where the pre-Codex tracer filled each point: width and depth from discharge (riverShape), pools and constrictions along the river (riverReachShape), bend curvature (bank types), lake rims, skew, foam. Next: give the lake-cell rivers that per-point shape (the pre-Codex reference), with discharge from the source lake's size and joins.
+- Chain lakes: their narrows can be dry, leaving separate blobs; to make the narrows hold water.
+
+Next: owner's look at the rivers in the game (`?lakeCells=1`, R). Then the stutter in fast flight and at altitude: measure first (tile pool full 2048/2048, table builds, river field bakes, the first water apply), then decide on caches.
+
+### The lake table (design)
+
+- **Record per candidate** (tier, lattice cell), on the GPU: viable/active flags, centre, frame, shape (ellipses, extent, stretch), level, depth, gentle slope, cliff height and width, cliff balance, u0, uC, band, fade, support rb, core radius, priority. About 70 floats.
+- **Index:** a GPU hash table keyed by (tier, cell), fixed capacity (thousands of records), open addressing, each entry stamped with the frame it was last used; old entries are reused when it fills (bounded memory at any planet size).
+- **Prepass before a batch of tiles**, on the GPU in tier order, largest first: (1) the CPU lists the lattice cells each tile's lakes can come from (within the tier's reach) plus their neighbours for blocking and nesting, skipping cached ones; (2) one thread per key: candidate and base assessment; (3) nested assessment (lowering of larger lakes read from the table); (4) blocking (the active flag) from the table.
+- **Height function:** lattice lookup per tier as now, then a table probe; only active records whose support holds the point are evaluated (shape, bank, fade). A missing record means no lake (a bug, counted).
+- **Water:** the terrain's water shading and the near water read level and containment from the same records.
+- **LOD:** coarse tiles skip tiers whose lakes are smaller than a few texels.
+- **Metric:** GPU time of the height pass for 128x128 tiles at several LODs with lakes on against earthLike, prepass time per new area, table bytes; containment re-checked on tile heights.
+
+**Measured (2026-11-08, `node tools/perf/lakeCells/lakeTableLab.mjs`, M1 Pro, lab):**
+- Heights read from the table equal the direct evaluation exactly: max difference 0.0000 m over 16,384 samples, 10,676 of them changed by lakes.
+- Table for an area: 600-1,260 keys (lattice cells), 300-600 KB, three passes 17 + 14 + 1 ms (32 km area: 21 + 21 + 2 ms) wall time including about 20 submissions each. Once per area.
+- Height evaluation of a 128x128 tile (spans 0.5, 4 and 32 km, at the spawn and at a lake): 0.72-1.05 ms with lakes against 0.26-0.59 ms for earthLike, about +0.4-0.55 ms per tile (2-3x the height evaluation alone). A whole tile in the game takes about 5 ms (11-05 measurement), so roughly +10 % per height evaluation the tile does; how many passes evaluate heights is to be counted in the game.
+- Most of the added cost is the lookup itself (135 table probes per sample, paid even where no lake is near). Next optimization: a per-tile list of the active lakes whose support touches the tile, so tiles without lakes pay nearly nothing.
+
+**In the game's tile generator (2026-11-08, `node tools/perf/lakeCells/lakeTileTest.mjs`, Node lab, real TileGenerator tiles of 128x128 around the spawn, 9 per depth):** 0 GPU errors. Median tile time with lakes 3.45-4.03 ms at depths 7-13 against 3.80-4.53 ms for earthLike (the lakeLand base leaves out the 25 m hollows, erosion-seed pits and the demo river channel, which pays for the lake lookups). Depth 4 tiles 28 ms against 5 ms: the first coarse tiles fill the table (2,034 records for the spawn area, every tier of it), once. First tile about 7 s either way (shader compile).
+
+Done for the game: `lakeLand` registered in the game's shader bundle; `?lakeCells=1` in standalone.html (base generator lakeLand, regional terrain and the old water graph off); `LakeTable` (core/world/terrain-generator/lakeTable.js) created by the generator for lakeLand, group 3 in every terrain pipeline layout and bind, `ensureTile` at the start of each tile's generation, the shader's tier LOD rule. Water: `LakeCellWaterRenderer` (core/renderer/lakes/lakeCellWaterRenderer.js), a water layer of PlanetTerrainModule when the generator has a lake table: active records read back after each table build, one sheet per lake at its level out to its containment curve, bent with the planet (the erosion-seed lake shader now takes z along up), cut by the terrain's depth, drawn with the erosion-seed lakes' material. The legacy hydrology and erosion-seed shaders compile without the table. Not yet run in a browser. Not done: per-tile lake lists, the near-water look (the old lakes' near water and whitewater), rivers.
+
+**Game integration, in order:** (1) register `lakeLand` in the game's shader bundle and a `?lakeCells=1` preview (base generator `lakeLand`, old water service off: no rivers yet); (2) a lake table manager: bounded GPU table, keys for each tile batch, the three passes before the batch, group 3 bound on every terrain pipeline that evaluates heights; (3) water: the tile generation writes each texel's lake (level, inside the containment curve) so the terrain's water shading and the near water read it, no per-pixel lake search; (4) per-tile lake lists; (5) measure tile generation and frame time against earthLike in the browser.
+
+Owner, after the nested-lake run (57 lakes in the 48 disks, about 1,300 on the planet, 2.6 % water): about 1,300 lakes on this planet is good; small lakes add less, so their numbers stay low.
+
+1. **Density and size mix** toward the old census at the 48 sites: water share of land, the size table, rejections per tier. The two levers measured to matter: lakes blocking each other over their long fades (let fades overlap where neither lake's containment curve is touched), and rough sites (a gentle bank must climb the fine terrain's deepest dip on the curve; a wider shore band or cliffs counted where they are certain would admit more). Then the owner's decision on A / B / C below, and the dry-pit share (priority flood on the patches).
+2. **Cache the assessments** (a lake table per tile or region, filled by a small GPU pass before the tile) and measure tile generation time against `earthLike`: target a small multiple at most, coarse tiles skip the small tiers.
+3. **Micro detail pass** keeps the containment curves (contract item 3); containment checked on final tile heights.
+4. **Water from the same function**: the water shaders look up the lake (level, containment curve) by the same lattice, flat water at the level cut by the ground, no masks. LOD: coarse tiles carry the big lakes, small tiers are skipped at coarse levels, and fallback tiles carry their lakes with them.
+5. **In the game** behind `baseGenerator: 'lakeLand'`, with the old water service off for that world. Then the owner tests.
+6. **Rivers**: each lake has a natural outlet at its containment curve's lowest point, at its level. Rivers start there and run downhill; how they connect lakes (a coarse drainage summary, per-region refinement) is the next design step. The owner's longer aim: rivers through canyons, valley lakes, much variety. The band contract is meant to carry those too: a river or canyon is another feature that reshapes the bands coarser than itself along a path.
+
+## Files
+
+- [templates/terrain-shaders/features/featureLakeCells.wgsl.js](templates/terrain-shaders/features/featureLakeCells.wgsl.js): tiers, sites, assessment, basin, `lakeCellQuery` for water. Tests next to it.
+- [templates/terrain-shaders/base/lakeLandBase.wgsl.js](templates/terrain-shaders/base/lakeLandBase.wgsl.js): the `earthLike` land in bands, with the lake insertion point. Only the lab registers it (in the shader bundle's `baseGenerators`); the game's bundle does not yet, so the game is unchanged, and a planet asking for `lakeLand` would get `earthLike`.
+- [tools/perf/lakeCells/lakeCellsLab.mjs](tools/perf/lakeCells/lakeCellsLab.mjs): all measurements and images above. `LAKE_IMAGES=0` skips the images.

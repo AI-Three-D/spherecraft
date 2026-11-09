@@ -75,7 +75,7 @@ export class ErosionSeedVerifier {
 
         const candidates = this._computeCandidates({ refPos, refRight, refForward, seed: terrainGenerator.seed });
 
-        const baseOptions = terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: false });
+        const baseOptions = terrainGenerator._getAdvancedTerrainShaderOptions({ waterCarve: false, lakeTable: null });
         const baseSource = createAdvancedTerrainComputeShader(baseOptions);
         const used = new Set();
         for (const m of baseSource.matchAll(/@group\(0\)\s*@binding\((\d+)\)/g)) used.add(Number(m[1]));
