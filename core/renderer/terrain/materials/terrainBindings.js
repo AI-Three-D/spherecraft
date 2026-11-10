@@ -22,7 +22,7 @@ function getScratch(backend) {
 }
 
 export const terrainBindingAdapter = {
-    cacheKey: 'terrain-v19',
+    cacheKey: 'terrain-v20',
     getCacheKey(material) { return JSON.stringify(material._chunkTextureFormats || {}); },
     createLayouts(backend, material) {
         return createTerrainLayouts.call(backend,
@@ -155,6 +155,8 @@ const slotSampleType = (type) =>
             { binding: 18, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
             { binding: 19, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
             { binding: 20, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
+            // LOD seam stitching (instanceBufferBuilder.wgsl.js edgeStitchFor).
+            { binding: 21, visibility: GPUShaderStage.VERTEX,   buffer:  { type: 'read-only-storage' } },
         ]
     }));
 
@@ -291,6 +293,9 @@ function createTerrainBindGroups(material, uniforms, geometry) {
     
     const storageHandle = material.storageBuffers?.chunkInstances;
     const storageBuffer = storageHandle?.gpuBuffer || storageHandle || this._getOrCreateDummyStorageBuffer();
+    // Zeroed dummy when absent: every record reads "no stitch".
+    const stitchHandle = material.storageBuffers?.edgeStitch;
+    const edgeStitchBuffer = stitchHandle?.gpuBuffer || stitchHandle || this._getOrCreateDummyStorageBuffer();
     const g3Key = this._buildTextureKey(uniforms, ['transmittanceLUT']);
     const g3View = getView('transmittanceLUT', '2d');
 
@@ -338,7 +343,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
     let g3Record = materialCache.get(g3CacheKey);
     const g3PipelineChanged = g3Record?.pipeline !== material._gpuPipeline;
     const g3ViewChanged = g3Record?.view !== g3View;
-    const g3BufferChanged = g3Record?.buffer !== storageBuffer;
+    const g3BufferChanged = g3Record?.buffer !== storageBuffer || g3Record?.edgeStitch !== edgeStitchBuffer;
     const g3WaterChanged = g3Record?.waterIndex !== waterIndexBuf || g3Record?.waterLakes !== waterLakesBuf
         || g3Record?.waterMasks !== waterMasksView || g3Record?.waterParams !== waterParamsBuf
         || g3Record?.fieldTable !== fieldTableBuf || g3Record?.fieldTexels !== fieldTexelsBuf || g3Record?.fieldParams !== fieldParamsBuf
@@ -367,6 +372,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             { binding: 18, resource: { buffer: fieldTexelsBuf } },
             { binding: 19, resource: { buffer: fieldParamsBuf } },
             { binding: 20, resource: { buffer: fieldFlowBuf } },
+            { binding: 21, resource: { buffer: edgeStitchBuffer } },
         ];
         const group = this.device.createBindGroup({
             layout: material._gpuPipeline.bindGroupLayouts[3],
@@ -377,6 +383,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             key: g3Key,
             view: g3View,
             buffer: storageBuffer,
+            edgeStitch: edgeStitchBuffer,
             pipeline: material._gpuPipeline,
             waterIndex:waterIndexBuf,waterLakes:waterLakesBuf,waterMasks:waterMasksView,
             waterParams:waterParamsBuf,

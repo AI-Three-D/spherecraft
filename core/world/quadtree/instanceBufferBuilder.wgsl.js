@@ -10,18 +10,24 @@
 //   - Write indirect draw args (one per geometry LOD)
 //   - Emit feedback requests for missing tiles
 
+// Bytes per instance in the edge stitch buffer (two vec4<u32>, see edgeStitchFor).
+export const EDGE_STITCH_RECORD_BYTES = 32;
+
 /**
  * Build the WGSL source for the instance buffer builder.
  *
  * @param {object} [config]
  * @param {number}   [config.workgroupSize=64]
  * @param {number}   [config.maxGeomLOD=6]
+ * @param {boolean}  [config.edgeStitch=false] also write the per-instance
+ *   edge stitch records (binding 9, EDGE_STITCH_RECORD_BYTES each)
  * @returns {string}
  */
 export function buildInstanceBuilderShaderSource(config = {}) {
     const WG = config.workgroupSize ?? 64;
     const maxGeomLOD = config.maxGeomLOD ?? 6;
     const lodLevels = maxGeomLOD + 1;
+    const edgeStitch = config.edgeStitch === true;
 
     return /* wgsl */`
 // ─── Quadtree Instance Builder ────────────────────────────────────────────
@@ -110,7 +116,9 @@ struct MetaData {
 @group(0) @binding(6) var<storage, read_write> metaData : MetaData;
 @group(0) @binding(7) var<storage, read_write> feedbackBuffer : array<vec4<u32>>;
 @group(0) @binding(8) var<storage, read> lodIndexCounts : array<u32>;
-
+${edgeStitch ? `// Two vec4<u32> per instance, same index as instanceBuffer (see edgeStitchFor).
+@group(0) @binding(9) var<storage, read_write> edgeStitch : array<vec4<u32>>;
+` : ''}
 const WORKGROUP_SIZE : u32 = ${WG}u;
 
 fn makeKeyLo(x : u32, y : u32) -> u32 {
@@ -413,6 +421,59 @@ fn findCoveringDepth(face : u32, depth : u32, x : u32, y : u32) -> u32 {
     return depth;
 }
 
+// ─── Edge stitching (read by terrainChunkVertexShaderBuilder.js) ─────────
+// Two tiles sharing an edge must draw the same line there. Each tile's
+// heights are its own 128 texels spanning it edge to edge, so a neighbour of
+// another depth interpolates the shared edge from a different texel grid:
+// the edges differ by up to the amplitude of the detail between texels
+// (metres with micro detail), which opens cracks. The finer tile therefore
+// draws its edge vertices on the neighbour's drawn edge, sampled from the
+// neighbour's own geometry layer the way the neighbour samples it.
+//
+// Who follows whom on an edge:
+//   - neighbour drawn coarser (covering tile above this depth): this tile;
+//   - neighbour subdivided (finer, covering lookup misses): the neighbour;
+//   - same depth: the tile whose height data is finer follows the other
+//     (data from an ancestor while its own layer streams in); equal data
+//     depth from different ancestor layers: the higher layer follows.
+//
+// Per edge (left, right, bottom, top) one u32 in each of two vec4<u32>:
+//   [0] bit 31 stitch, bits 0-11 neighbour geometry layer, bits 12-16 levels
+//       from this tile up to the neighbour's tile, bits 17-21 levels from the
+//       neighbour up to its geometry layer, bits 22-24 neighbour face
+//   [1] neighbour tile x | y << 16, at the neighbour's depth
+const EDGE_STITCH_FLAG : u32 = 0x80000000u;
+
+fn edgeStitchFor(nb : vec3<u32>, depth : u32, cover : vec2<u32>,
+                 dataDepth : u32, layer : u32) -> vec2<u32> {
+    if ((cover.y & 0x8000u) != 0u) {
+        return vec2<u32>(0u);
+    }
+    let coverDepth = cover.x;
+    let levels = depth - coverDepth;
+    let nx = nb.y >> levels;
+    let ny = nb.z >> levels;
+    let source = resolveGeometrySource(nb.x, coverDepth, nx, ny);
+    if (source.z == 0u || source.x > 0xFFFu) {
+        return vec2<u32>(0u);
+    }
+    var follow = levels > 0u;
+    if (levels == 0u) {
+        follow = source.y < dataDepth
+            || (source.y == dataDepth && source.y < depth && source.x < layer);
+    }
+    if (!follow) {
+        return vec2<u32>(0u);
+    }
+    let dataLevels = coverDepth - source.y;
+    let info = EDGE_STITCH_FLAG
+        | (source.x & 0xFFFu)
+        | (min(levels, 31u) << 12u)
+        | (min(dataLevels, 31u) << 17u)
+        | ((nb.x & 7u) << 22u);
+    return vec2<u32>(info, (nx & 0xFFFFu) | ((ny & 0xFFFFu) << 16u));
+}
+
 @compute @workgroup_size(${WG})
 fn main(@builtin(local_invocation_id) lid : vec3<u32>) {
     let tid = lid.x;
@@ -624,7 +685,15 @@ if (tid == 0u) {
             useLayer,
             edgeMask
         );
-    }
+${edgeStitch ? `
+        let dataDepth = geometrySource.y;
+        let stitchL = edgeStitchFor(leftCoord, depth, leftDiag, dataDepth, useLayer);
+        let stitchR = edgeStitchFor(rightCoord, depth, rightDiag, dataDepth, useLayer);
+        let stitchB = edgeStitchFor(bottomCoord, depth, bottomDiag, dataDepth, useLayer);
+        let stitchT = edgeStitchFor(topCoord, depth, topDiag, dataDepth, useLayer);
+        edgeStitch[instanceIndex * 2u] = vec4<u32>(stitchL.x, stitchR.x, stitchB.x, stitchT.x);
+        edgeStitch[instanceIndex * 2u + 1u] = vec4<u32>(stitchL.y, stitchR.y, stitchB.y, stitchT.y);
+` : ''}    }
 
     // ── Post-build: correct instanceCount to actual written count ─────────
     // The indirectArgs.instanceCount was set to the total visible tile count

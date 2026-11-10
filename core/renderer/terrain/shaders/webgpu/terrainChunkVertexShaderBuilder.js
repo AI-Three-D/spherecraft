@@ -33,6 +33,11 @@ export function buildTerrainChunkVertexShader(options = {}) {
         return Number.isFinite(candidate) ? candidate : value;
     });
     const segmentLiteral = segments.map(value => `${Math.max(2, Math.floor(value))}.0`).join(', ');
+    // LOD seam stitching needs every tile's edge to have the same vertex
+    // count: transition topology builds every LOD on the finest grid
+    // (terrainGeometryBuilder.js _resolveTransitionBaseSegments).
+    const edgeStitch = instanced && useStorageBuffer && useTransitionTopology;
+    const edgeSegments = Math.max(...segments.map(value => Math.max(2, Math.floor(value))));
 
     const instanceInputs = instanced && !useStorageBuffer ? `
 struct InstanceInput {
@@ -63,6 +68,172 @@ struct ChunkInstance {
 }
 
 @group(3) @binding(0) var<storage, read> chunks: array<ChunkInstance>;
+${edgeStitch ? `// Two vec4<u32> per instance (instanceBufferBuilder.wgsl.js edgeStitchFor).
+@group(3) @binding(21) var<storage, read> edgeStitch: array<vec4<u32>>;
+` : ''}` : '';
+
+    const edgeStitchHelpers = edgeStitch ? `
+const EDGE_SEGMENTS : f32 = ${edgeSegments}.0;
+const EDGE_STITCH_FLAG : u32 = 0x80000000u;
+
+struct EdgeStitchResult {
+    applied: bool,
+    worldPosition: vec3<f32>,
+    height: f32,
+}
+
+// Inverse of getCubePoint: face UV of a cube-surface point on that face.
+// Exact for the dyadic UVs of tile vertices, so a vertex on a cube edge maps
+// to the bit-identical UV the tile across the edge uses.
+fn cubePointToFaceUV(face: i32, p: vec3<f32>) -> vec2<f32> {
+    var xy = vec2<f32>(-p.x, p.y);
+    if (face == 0) { xy = vec2<f32>(-p.z, p.y); }
+    else if (face == 1) { xy = vec2<f32>(p.z, p.y); }
+    else if (face == 2) { xy = vec2<f32>(p.x, -p.z); }
+    else if (face == 3) { xy = vec2<f32>(p.x, p.z); }
+    else if (face == 4) { xy = vec2<f32>(p.x, p.y); }
+    return (xy + 1.0) * 0.5;
+}
+
+// A vertex of a neighbour tile, computed as that tile's own vertex shader
+// computes it (main below): same layer, same UV transform, same arithmetic.
+fn neighbourEdgeVertex(face: i32, location: vec2<f32>, sizeUV: f32, uv: vec2<f32>,
+                       offset: vec2<f32>, scale: f32, layer: i32, heightMultiplier: f32) -> vec4<f32> {
+    let h = sampleHeightChunkLocal(uv, offset, scale, layer);
+    let faceUV = location + uv * sizeUV;
+    let dir = normalize(getCubePoint(face, faceUV));
+    let p = uniforms.planetOrigin + dir * (uniforms.planetRadius + h * heightMultiplier);
+    return vec4<f32>(p, h);
+}
+
+// LOD seam stitching. A tile whose neighbour across an edge is drawn
+// coarser (or from coarser height data) puts its vertices on that edge onto
+// the neighbour's drawn edge: on the neighbour's vertex where one coincides
+// (bit-identical position), else on the straight line between the two
+// neighbour vertices around it. Sampling its own texels instead cannot
+// match: the two tiles' 128 texels span them edge to edge, so they
+// interpolate the shared edge from different texel grids, and the per-tile
+// micro detail makes those differ by metres (TERRAIN_SEAM_CRACK_FINDINGS.md).
+//
+// The neighbour's drawn edge at the point uv (on this tile's edge 'edge':
+// 0 left, 1 right, 2 bottom, 3 top), from that edge's stitch record.
+fn stitchOnEdge(uv: vec2<f32>, edge: i32, w: u32, c: u32, face: i32, location: vec2<f32>,
+                sizeUV: f32, heightMultiplier: f32) -> EdgeStitchResult {
+    var result: EdgeStitchResult;
+    let layer = i32(w & 0xFFFu);
+    let levels = (w >> 12u) & 31u;
+    let dataLevels = (w >> 17u) & 31u;
+    let nFace = i32((w >> 22u) & 7u);
+    let nx = c & 0xFFFFu;
+    let ny = c >> 16u;
+
+    // The neighbour tile as the instance builder lays it out.
+    let grid = u32(round(1.0 / sizeUV));
+    let nGrid = f32(max(grid >> levels, 1u));
+    let nLocation = vec2<f32>(f32(nx) / nGrid, f32(ny) / nGrid);
+    let nSizeUV = 1.0 / nGrid;
+    let span = 1u << dataLevels;
+    let nScale = 1.0 / f32(span);
+    let nOffset = vec2<f32>(f32(nx & (span - 1u)), f32(ny & (span - 1u))) * nScale;
+
+    // The point and this edge's midpoint in the neighbour's tile-local UV.
+    let midUV = select(vec2<f32>(0.5, uv.y), vec2<f32>(uv.x, 0.5), edge < 2);
+    var faceUV = location + uv * sizeUV;
+    var midFaceUV = location + midUV * sizeUV;
+    if (nFace != face) {
+        faceUV = cubePointToFaceUV(nFace, getCubePoint(face, faceUV));
+        midFaceUV = cubePointToFaceUV(nFace, getCubePoint(face, midFaceUV));
+    }
+    let vertexLocal = (faceUV - nLocation) * nGrid;
+    let midLocal = (midFaceUV - nLocation) * nGrid;
+    // The neighbour's edge we lie on: our edge's midpoint is strictly inside
+    // it along the edge and at 0 or 1 across it.
+    let acrossIsX = min(abs(midLocal.x), abs(1.0 - midLocal.x)) < min(abs(midLocal.y), abs(1.0 - midLocal.y));
+    let across = select(round(midLocal.y), round(midLocal.x), acrossIsX);
+    let along = clamp(select(vertexLocal.x, vertexLocal.y, acrossIsX), 0.0, 1.0);
+
+    let s = along * EDGE_SEGMENTS;
+    let i0 = min(floor(s), EDGE_SEGMENTS);
+    let f = s - i0;
+    let t0 = i0 / EDGE_SEGMENTS;
+    let uv0 = select(vec2<f32>(t0, across), vec2<f32>(across, t0), acrossIsX);
+    let p0 = neighbourEdgeVertex(nFace, nLocation, nSizeUV, uv0, nOffset, nScale, layer, heightMultiplier);
+    result.applied = true;
+    if (f <= 0.0) {
+        result.worldPosition = p0.xyz;
+        result.height = p0.w;
+        return result;
+    }
+    let t1 = min(i0 + 1.0, EDGE_SEGMENTS) / EDGE_SEGMENTS;
+    let uv1 = select(vec2<f32>(t1, across), vec2<f32>(across, t1), acrossIsX);
+    let p1 = neighbourEdgeVertex(nFace, nLocation, nSizeUV, uv1, nOffset, nScale, layer, heightMultiplier);
+    result.worldPosition = mix(p0.xyz, p1.xyz, f);
+    result.height = mix(p0.w, p1.w, f);
+    return result;
+}
+
+// The stitched edge a vertex follows (0 left, 1 right, 2 bottom, 3 top), or
+// -1. A corner on two stitched edges follows the coarser neighbour: if the
+// corner lies inside a neighbour's edge, that neighbour is the coarser one
+// and every tile touching the point follows it.
+fn stitchedEdgeOf(uv: vec2<f32>, info: vec4<u32>) -> i32 {
+    let onEdge = vec4<bool>(uv.x == 0.0, uv.x == 1.0, uv.y == 0.0, uv.y == 1.0);
+    var edge = -1;
+    var edgeLevels = 0u;
+    for (var e = 0; e < 4; e++) {
+        let w = info[e];
+        if (onEdge[e] && (w & EDGE_STITCH_FLAG) != 0u) {
+            let levels = (w >> 12u) & 31u;
+            if (edge < 0 || levels > edgeLevels) {
+                edge = e;
+                edgeLevels = levels;
+            }
+        }
+    }
+    return edge;
+}
+
+// T-junctions: a vertex on a stitched edge between two of the coarser
+// neighbour's vertices becomes a copy of the neighbour vertex before it
+// (this tile's own vertex there, every 2^levels vertices along the edge):
+// same UV, so the same height, position and material. Its edge triangles
+// collapse to zero area and the edge is exactly the neighbour's, vertex for
+// vertex. Left on the neighbour's edge line instead, the vertex lands a
+// rounding error off it and antialiasing samples fall through the sliver
+// (sky-coloured pinholes along far seams).
+fn snapToStitchedVertex(uv: vec2<f32>, instanceIdx: u32) -> vec2<f32> {
+    let info = edgeStitch[instanceIdx * 2u];
+    let edge = stitchedEdgeOf(uv, info);
+    if (edge < 0) {
+        return uv;
+    }
+    let levels = (info[edge] >> 12u) & 31u;
+    let step = f32(1u << levels);
+    // Same depth (levels 0): the vertices coincide already. A neighbour more
+    // than EDGE_SEGMENTS times larger has no vertex on this edge's span to
+    // snap to: stitchOnEdge then keeps the vertex on its edge line.
+    if (levels == 0u || step > EDGE_SEGMENTS) {
+        return uv;
+    }
+    let along = select(uv.x, uv.y, edge < 2) * EDGE_SEGMENTS;
+    let snapped = floor(along / step) * step / EDGE_SEGMENTS;
+    return select(vec2<f32>(snapped, uv.y), vec2<f32>(uv.x, snapped), edge < 2);
+}
+
+// A vertex on a stitched edge: exactly on the neighbour's drawn edge.
+fn stitchEdgeVertex(uv: vec2<f32>, instanceIdx: u32, face: i32, location: vec2<f32>,
+                    sizeUV: f32, heightMultiplier: f32) -> EdgeStitchResult {
+    var result: EdgeStitchResult;
+    result.applied = false;
+    let info = edgeStitch[instanceIdx * 2u];
+    let edge = stitchedEdgeOf(uv, info);
+    if (edge < 0) {
+        return result;
+    }
+    return stitchOnEdge(uv, edge, info[edge], edgeStitch[instanceIdx * 2u + 1u][edge],
+                        face, location, sizeUV, heightMultiplier);
+}
+
 ` : '';
 
     const storageHelpers = useStorageBuffer ? `
@@ -224,6 +395,7 @@ fn loadHeightTex(coord: vec2<i32>, _layer: i32) -> f32 {
 }
 `}
 ${storageHelpers}
+${edgeStitchHelpers}
 
 fn getCubePoint(face: i32, uv: vec2<f32>) -> vec3<f32> {
     let xy = uv * 2.0 - 1.0;
@@ -581,8 +753,12 @@ fn main(input: VertexInput${instanceParam}) -> VertexOutput {
     if (useInstancing) {
 ${instancingBlock}
     }
-    let finalUV = input.uv;
-    var positionUV = finalUV;
+${edgeStitch ? `    var finalUV = input.uv;
+    if (useInstancing && DEBUG_VERTEX_MODE != 1) {
+        finalUV = snapToStitchedVertex(finalUV, instanceIdx);
+    }
+` : `    let finalUV = input.uv;
+`}    var positionUV = finalUV;
     var sampleLOD = selfLOD;
     var height: f32 = 0.0;
     var debugEdge: vec4<f32> = vec4<f32>(0.0);
@@ -687,7 +863,18 @@ ${instancingBlock}
         }
     }
 
-    output.vWorldPosition = worldPosition;
+${edgeStitch ? `    if (useInstancing && DEBUG_VERTEX_MODE != 1 && !FORCE_HEIGHT_TEST) {
+        let stitchedEdge = stitchEdgeVertex(finalUV, instanceIdx, chunkFace, chunkLocation, chunkSizeUVLocal, heightMultiplier);
+        if (stitchedEdge.applied) {
+            height = stitchedEdge.height;
+            displacement = height * heightMultiplier;
+            worldPosition = stitchedEdge.worldPosition;
+            sphereDir = normalize(worldPosition - uniforms.planetOrigin);
+            sphereDirOut = sphereDir;
+            normal = sphereDir;
+        }
+    }
+` : ''}    output.vWorldPosition = worldPosition;
 
     let viewPos = uniforms.viewMatrix * vec4<f32>(worldPosition, 1.0);
     output.vViewPosition = viewPos.xyz;
