@@ -1,0 +1,898 @@
+import { Texture, TextureFormat, TextureFilter, TextureWrap } from '../renderer/resources/texture.js';
+import { TileTransitionTableBuilder } from '../world/tileTransitionTableBuilder.js'
+import { TEXTURE_LOOKUP_TILE_COUNT } from './tileTextureLimits.js';
+import { getAllProceduralVariantsForLevel } from './webgpu/textureGenerator.js';
+
+function stableStringify(obj) {
+    if (Array.isArray(obj)) {
+        return '[' + obj.map(stableStringify).join(',') + ']';
+    } else if (obj && typeof obj === 'object') {
+        return '{' + Object.keys(obj).sort().map(
+            key => `"${key}":${stableStringify(obj[key])}`
+        ).join(',') + '}';
+    } else {
+        return JSON.stringify(obj);
+    }
+}
+
+function djb2Hash(str) {
+    let hash = 5381;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) + hash) + str.charCodeAt(i);
+    }
+    return hash >>> 0;
+}
+
+function getLayerConfigHash(layers) {
+    const stable = stableStringify(layers) + (layers?.[0]?.uniqueId || '');
+    return djb2Hash(stable).toString(36);
+}
+
+export class TextureAtlasManager {
+    constructor(_enableDebug = false, gpuDevice = null, proceduralTextureGenerator = null, tileTheme = null) {
+        if (!tileTheme) {
+            throw new Error('TextureAtlasManager requires tileTheme (TILE_CONFIG, TEXTURE_LEVELS, ATLAS_CONFIG, TEXTURE_CONFIG, TextureConfigHelper, SEASONS, TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES)');
+        }
+        this.TILE_CONFIG = tileTheme.TILE_CONFIG;
+        this.TEXTURE_LEVELS = tileTheme.TEXTURE_LEVELS;
+        this.ATLAS_CONFIG = tileTheme.ATLAS_CONFIG;
+        this.TEXTURE_CONFIG = tileTheme.TEXTURE_CONFIG;
+        this.TextureConfigHelper = tileTheme.TextureConfigHelper;
+        this.SEASONS = tileTheme.SEASONS;
+        this.TILE_LAYER_HEIGHTS = tileTheme.TILE_LAYER_HEIGHTS;
+        this.TILE_TRANSITION_RULES = tileTheme.TILE_TRANSITION_RULES;
+        this.gpuDevice = gpuDevice;
+        this.proceduralTextureGenerator = proceduralTextureGenerator;
+        this._backend = null;
+        this._busy = false;
+        this.atlases = new Map();
+        this.currentSeason = this.SEASONS.SUMMER;
+        this.PADDING = 32;
+    
+        this._uvCache = new Map();
+        this._initialized = false;
+
+        // Per-raw-tile-id average color of its generated MICRO texture, in
+        // linear 0-1 RGB. Populated once during createProceduralAtlas(MICRO)
+        // so callers (e.g. the coarse solid-color LOD tier) can use the real
+        // authored texture's average tone instead of a hand-picked guess.
+        this.tileMicroAverageColors = new Map();
+    
+        Object.values(this.TEXTURE_LEVELS).forEach(level => {
+            this.atlases.set(level, {
+                texture: null,
+                canvas: null,
+                context: null,
+                layout: null,
+                textureMap: new Map(),
+                seasonalTextureMap: new Map(),
+            });
+        });
+    
+        this.loaded = false;
+        window.SEASONS = this.SEASONS;
+        window.ATLAS = this;
+        window.TEXTURE_LEVELS = this.TEXTURE_LEVELS;
+    
+        this.lookupTables = {
+            tileTypeLookup: null,
+            macroTileTypeLookup: null,
+            numVariantsTex: null,
+            blendModeTable: null,
+            tileLayerHeights: null,
+        };
+    
+        this._lookupTablesReady = false;
+    }
+
+    set backend(value) {
+        this._backend = value;
+        
+        // If lookup tables exist but weren't uploaded, upload them now
+        if (this._lookupTablesReady && this.lookupTables.tileTypeLookup && !this.lookupTables.tileTypeLookup._gpuTexture) {
+            
+            this._uploadLookupTablesToGPU();
+        }
+    }
+    get backend() {
+        return this._backend;
+    }
+    initializeLookupTables() {
+        if (this._lookupTablesReady) {
+            
+            return;
+        }
+
+        
+
+        const maxTileTypes = TEXTURE_LOOKUP_TILE_COUNT;
+        const maxMicroVariants = 8;
+        const maxMacroVariants = 8;
+
+        const seasons = [
+            this.SEASONS.SPRING,
+            this.SEASONS.SUMMER,
+            this.SEASONS.AUTUMN,
+            this.SEASONS.WINTER
+        ];
+
+        const transitionBuilder = new TileTransitionTableBuilder(this.gpuDevice);
+        const { blendModeTable, tileLayerHeights: layerHeightsTex } =
+            transitionBuilder.build({
+                tileTransitionRules: this.TILE_TRANSITION_RULES,
+                tileLayerHeights: this.TILE_LAYER_HEIGHTS,
+            });
+        this.lookupTables.blendModeTable = blendModeTable;
+        this.lookupTables.tileLayerHeights = layerHeightsTex;
+
+        this.lookupTables.tileTypeLookup = this._buildTileTypeLookup(
+            maxTileTypes,
+            maxMicroVariants,
+            this.TEXTURE_LEVELS.MICRO,
+            seasons
+        );
+
+        this.lookupTables.macroTileTypeLookup = this._buildTileTypeLookup(
+            maxTileTypes,
+            maxMacroVariants,
+            this.TEXTURE_LEVELS.MACRO,
+            seasons
+        );
+
+        this.lookupTables.numVariantsTex = this._buildNumVariantsTexture(
+            maxTileTypes,
+            seasons
+        );
+        
+        this._lookupTablesReady = true;
+        
+        // Only upload if backend is available
+        if (this._backend) {
+            this._uploadLookupTablesToGPU();
+        }
+    }
+    _uploadLookupTablesToGPU() {
+        if (!this._backend) {
+            
+            return;
+        }
+        
+    
+        
+        if (this.lookupTables.blendModeTable && !this.lookupTables.blendModeTable._gpuTexture) {
+            this._backend.createTexture(this.lookupTables.blendModeTable);
+        }
+        
+        if (this.lookupTables.layerHeightsTex && !this.lookupTables.layerHeightsTex._gpuTexture) {
+            this._backend.createTexture(this.lookupTables.layerHeightsTex);
+        }
+        
+        // Use backend's createTexture instead of direct GPU calls
+        if (this.lookupTables.tileTypeLookup && !this.lookupTables.tileTypeLookup._gpuTexture) {
+            this._backend.createTexture(this.lookupTables.tileTypeLookup);
+        }
+        
+        if (this.lookupTables.macroTileTypeLookup && !this.lookupTables.macroTileTypeLookup._gpuTexture) {
+            this._backend.createTexture(this.lookupTables.macroTileTypeLookup);
+        }
+        
+        if (this.lookupTables.numVariantsTex && !this.lookupTables.numVariantsTex._gpuTexture) {
+            this._backend.createTexture(this.lookupTables.numVariantsTex);
+        }
+        
+        
+    }
+    
+    _buildNumVariantsTexture(maxTileTypes, seasons) {
+        const numSeasons = seasons.length;
+        const numVariants = new Uint8Array(maxTileTypes * numSeasons);
+
+        for (let s = 0; s < numSeasons; s++) {
+            for (let t = 0; t < maxTileTypes; t++) {
+                const varCount = this.getNumVariants(t, seasons[s], this.TEXTURE_LEVELS.MICRO) || 1;
+                numVariants[s * maxTileTypes + t] = varCount;
+            }
+        }
+
+        const texture = new Texture({
+            width: maxTileTypes,
+            height: numSeasons,
+            format: TextureFormat.R8,
+            minFilter: TextureFilter.NEAREST,
+            magFilter: TextureFilter.NEAREST,
+            wrapS: TextureWrap.CLAMP,
+            wrapT: TextureWrap.CLAMP,
+            generateMipmaps: false,
+            data: numVariants
+        });
+
+        return texture;
+    }
+
+    getLookupTables() {
+        if (!this.loaded && this.atlases.get('micro').seasonalTextureMap.size === 0) {
+            
+            return this.lookupTables;
+        }
+
+        if (!this._lookupTablesReady) {
+            
+            this.initializeLookupTables();
+        }
+        return this.lookupTables;
+    }
+
+    calculateLayout(numTextures, atlasSize, textureSize) {
+        const paddedTextureSize = textureSize + (this.PADDING * 2);
+        const maxTilesPerSide = Math.floor(atlasSize / paddedTextureSize);
+        const maxTotalTiles = maxTilesPerSide * maxTilesPerSide;
+
+        const tilesPerRow = maxTilesPerSide;
+        const rows = Math.ceil(numTextures / tilesPerRow);
+
+        return {
+            tilesPerRow: tilesPerRow,
+            rows: Math.min(rows, maxTilesPerSide),
+            totalTextures: Math.min(numTextures, maxTotalTiles),
+            maxCapacity: maxTotalTiles,
+            paddedTextureSize: paddedTextureSize,
+            atlasSize: atlasSize,
+            textureSize: textureSize
+        };
+    }
+
+    extendPadding(ctx, x, y, textureSize, padding) {
+        const topEdge = ctx.getImageData(x, y, textureSize, 1);
+        for (let i = 1; i <= padding; i++) {
+            ctx.putImageData(topEdge, x, y - i);
+        }
+
+        const bottomEdge = ctx.getImageData(x, y + textureSize - 1, textureSize, 1);
+        for (let i = 1; i <= padding; i++) {
+            ctx.putImageData(bottomEdge, x, y + textureSize - 1 + i);
+        }
+
+        const leftEdge = ctx.getImageData(x, y, 1, textureSize);
+        for (let i = 1; i <= padding; i++) {
+            ctx.putImageData(leftEdge, x - i, y);
+        }
+
+        const rightEdge = ctx.getImageData(x + textureSize - 1, y, 1, textureSize);
+        for (let i = 1; i <= padding; i++) {
+            ctx.putImageData(rightEdge, x + textureSize - 1 + i, y);
+        }
+
+        const tlCorner = ctx.getImageData(x, y, 1, 1);
+        ctx.fillStyle = `rgba(${tlCorner.data[0]},${tlCorner.data[1]},${tlCorner.data[2]},${tlCorner.data[3] / 255})`;
+        ctx.fillRect(x - padding, y - padding, padding, padding);
+
+        const trCorner = ctx.getImageData(x + textureSize - 1, y, 1, 1);
+        ctx.fillStyle = `rgba(${trCorner.data[0]},${trCorner.data[1]},${trCorner.data[2]},${trCorner.data[3] / 255})`;
+        ctx.fillRect(x + textureSize, y - padding, padding, padding);
+
+        const blCorner = ctx.getImageData(x, y + textureSize - 1, 1, 1);
+        ctx.fillStyle = `rgba(${blCorner.data[0]},${blCorner.data[1]},${blCorner.data[2]},${blCorner.data[3] / 255})`;
+        ctx.fillRect(x - padding, y + textureSize, padding, padding);
+
+        const brCorner = ctx.getImageData(x + textureSize - 1, y + textureSize - 1, 1, 1);
+        ctx.fillStyle = `rgba(${brCorner.data[0]},${brCorner.data[1]},${brCorner.data[2]},${brCorner.data[3] / 255})`;
+        ctx.fillRect(x + textureSize, y + textureSize, padding, padding);
+    }
+
+    addTextureToAtlas(level, image, index, _texturePath = null) {
+        const atlas = this.atlases.get(level);
+        const layout = atlas.layout;
+        const padding = layout.padding !== undefined ? layout.padding : this.PADDING;
+
+        const row = Math.floor(index / layout.tilesPerRow);
+        const col = index % layout.tilesPerRow;
+
+        const x = col * layout.paddedTextureSize + padding;
+        const y = row * layout.paddedTextureSize + padding;
+
+        atlas.context.drawImage(
+            image,
+            0, 0, image.width, image.height,
+            x, y, layout.textureSize, layout.textureSize
+        );
+
+        this.extendPadding(atlas.context, x, y, layout.textureSize, padding);
+    }
+
+    createPlaceholderTexture(level, index, _texturePath) {
+        const atlas = this.atlases.get(level);
+        const layout = atlas.layout;
+
+        const row = Math.floor(index / layout.tilesPerRow);
+        const col = index % layout.tilesPerRow;
+
+        const x = col * layout.paddedTextureSize + this.PADDING;
+        const y = row * layout.paddedTextureSize + this.PADDING;
+
+        atlas.context.fillStyle = `hsl(${(index * 137.5) % 360}, 50%, 50%)`;
+        atlas.context.fillRect(x, y, layout.textureSize, layout.textureSize);
+
+        atlas.context.fillStyle = 'rgba(255, 255, 255, 0.3)';
+        atlas.context.fillRect(x, y, layout.textureSize / 2, layout.textureSize / 2);
+        atlas.context.fillRect(x + layout.textureSize / 2, y + layout.textureSize / 2,
+            layout.textureSize / 2, layout.textureSize / 2);
+
+        
+    }
+
+    calculateUVFromIndex(level, index) {
+        const cacheKey = `${level}_${index}`;
+        if (this._uvCache.has(cacheKey)) {
+            return this._uvCache.get(cacheKey);
+        }
+
+        const atlas = this.atlases.get(level);
+        if (!atlas || !atlas.layout) return null;
+        const layout = atlas.layout;
+
+        const row = Math.floor(index / layout.tilesPerRow);
+        const col = index % layout.tilesPerRow;
+
+        const textureSize = layout.textureSize;
+        const paddedTextureSize = layout.paddedTextureSize;
+        const atlasSize = layout.atlasSize;
+        const padding = layout.padding !== undefined ? layout.padding : this.PADDING;
+
+        const x1 = col * paddedTextureSize + padding;
+        const y1 = row * paddedTextureSize + padding;
+
+        const x2 = x1 + textureSize;
+        const y2 = y1 + textureSize;
+        const inset = 1.5;
+
+        const u1 = (x1 + inset) / atlasSize;
+        const v1 = (y1 + inset) / atlasSize;
+
+        const u2 = (x2 - inset) / atlasSize;
+        const v2 = (y2 - inset) / atlasSize;
+
+        const result = { u1, v1, u2, v2 };
+        this._uvCache.set(cacheKey, result);
+
+        return result;
+    }
+
+    updateSeasonData(gameTime) {
+        const [, newSeason] = gameTime.getRunningSeasonInfo();
+
+        if (this.currentSeason !== newSeason) {
+            this.currentSeason = newSeason;
+            
+        }
+    }
+
+    async initializeAtlases(procedural = false) {
+        // Sequential — the shared generator is stateful and cannot be used
+        // concurrently across atlas levels.
+        for (const level of Object.values(this.TEXTURE_LEVELS)) {
+            if (procedural) {
+                await this.createProceduralAtlas(level);
+            } else {
+                await this.createAtlas(level);
+            }
+        }
+    
+        this._lookupTablesReady = false;
+    
+        if (this.lookupTables.tileTypeLookup?._gpuTexture) {
+            this.lookupTables.tileTypeLookup = null;
+        }
+        if (this.lookupTables.macroTileTypeLookup?._gpuTexture) {
+            this.lookupTables.macroTileTypeLookup = null;
+        }
+        if (this.lookupTables.numVariantsTex?._gpuTexture) {
+            this.lookupTables.numVariantsTex = null;
+        }
+    
+        this.initializeLookupTables();
+        this.loaded = true;
+    }
+    async createProceduralAtlas(level) {
+        const config = this.ATLAS_CONFIG[level];
+        const atlas = this.atlases.get(level);
+        const hasTransparent = (level === this.TEXTURE_LEVELS.MICRO);
+    
+        const variants = getAllProceduralVariantsForLevel(level, this.TEXTURE_CONFIG, this.SEASONS);
+        if (!variants || variants.length === 0) return null;
+    
+        const gen = this.proceduralTextureGenerator;
+        if (!gen) {
+            throw new Error('[TextureAtlasManager] proceduralTextureGenerator not injected');
+        }
+    
+        const startIndex = hasTransparent ? 1 : 0;
+        const { uniqueVariants, variantIndexToUniqueIndex } =
+            this._dedupeProceduralVariants(variants, startIndex);
+    
+        const textureSize = config.proceduralTextureSize || config.textureSize;
+        const totalLayers = uniqueVariants.length + startIndex;
+        const bytesPerLayer = textureSize * textureSize * 4; // RGBA8
+        const allLayerData = new Uint8Array(totalLayers * bytesPerLayer);
+    
+        if (hasTransparent) {
+            this._fillTransparentPlaceholderLayer(allLayerData, textureSize);
+        }
+    
+        this._configureProceduralGenerator(gen, config, textureSize);
+    
+        const atlasIndexAverageColor = new Map();
+        for (let i = 0; i < uniqueVariants.length; i++) {
+            const atlasIndex = i + startIndex;
+            const layerOffset = atlasIndex * bytesPerLayer;
+            try {
+                const avg = await this._writeProceduralVariantLayer(
+                    gen,
+                    uniqueVariants[i].layers,
+                    allLayerData,
+                    layerOffset,
+                    textureSize,
+                    atlasIndex
+                );
+                if (avg) atlasIndexAverageColor.set(atlasIndex, avg);
+            } catch {
+                this._fillProceduralFallback(allLayerData, layerOffset, textureSize, atlasIndex);
+            }
+        }
+
+        if (level === this.TEXTURE_LEVELS.MICRO) {
+            for (let i = 0; i < variants.length; i++) {
+                const tileId = variants[i].tileType;
+                if (this.tileMicroAverageColors.has(tileId)) continue;
+                const atlasIndex = variantIndexToUniqueIndex.get(i);
+                const avg = atlasIndexAverageColor.get(atlasIndex);
+                if (avg) this.tileMicroAverageColors.set(tileId, avg);
+            }
+        }
+
+        this._populateSeasonalTextureMap(atlas, variants, variantIndexToUniqueIndex);
+    
+        // Create array texture — each layer is independent, mipmaps per layer.
+        atlas.texture = new Texture({
+            width: textureSize,
+            height: textureSize,
+            depth: totalLayers,
+            format: TextureFormat.RGBA8,
+            minFilter: TextureFilter.LINEAR_MIPMAP_LINEAR,
+            magFilter: TextureFilter.LINEAR,
+            wrapS: TextureWrap.REPEAT,
+            wrapT: TextureWrap.REPEAT,
+            generateMipmaps: true,
+            data: allLayerData,
+            _isArray: true
+        });
+    
+        if (this._backend) {
+            this._backend.createTexture(atlas.texture);
+        }
+    
+        return atlas.texture;
+    }
+
+    _dedupeProceduralVariants(variants, startIndex) {
+        const hashToUniqueIndex = new Map();
+        const uniqueVariants = [];
+        const variantIndexToUniqueIndex = new Map();
+
+        for (let i = 0; i < variants.length; i++) {
+            const variant = variants[i];
+            const hash = getLayerConfigHash(variant.layers);
+            let uniqueIdx = hashToUniqueIndex.get(hash);
+            if (uniqueIdx === undefined) {
+                uniqueIdx = uniqueVariants.length + startIndex;
+                hashToUniqueIndex.set(hash, uniqueIdx);
+                uniqueVariants.push({
+                    hash,
+                    layers: variant.layers,
+                    firstTileType: variant.tileType,
+                    firstSeason: variant.season,
+                    firstVariant: variant.variant
+                });
+            }
+            variantIndexToUniqueIndex.set(i, uniqueIdx);
+        }
+
+        return { uniqueVariants, variantIndexToUniqueIndex };
+    }
+
+    _fillTransparentPlaceholderLayer(buffer, textureSize) {
+        for (let i = 0; i < textureSize * textureSize; i++) {
+            buffer[i * 4 + 0] = 128;
+            buffer[i * 4 + 1] = 128;
+            buffer[i * 4 + 2] = 128;
+            buffer[i * 4 + 3] = 255;
+        }
+    }
+
+    _configureProceduralGenerator(generator, config, textureSize) {
+        generator.setSize(textureSize, textureSize);
+        if (config.seamless && typeof generator.configureSeamless === 'function') {
+            generator.configureSeamless(config.seamless);
+        }
+    }
+
+    async _writeProceduralVariantLayer(generator, layers, buffer, layerOffset, textureSize, atlasIndex) {
+        if (!Array.isArray(layers)) {
+            this._fillProceduralFallback(buffer, layerOffset, textureSize, atlasIndex);
+            return null;
+        }
+
+        generator.clearLayers();
+        layers.forEach(layerConfig => generator.addLayer(layerConfig));
+        const textureCanvas = await generator.generate();
+
+        const copyCanvas = document.createElement('canvas');
+        copyCanvas.width = textureSize;
+        copyCanvas.height = textureSize;
+        const copyCtx = copyCanvas.getContext('2d');
+        copyCtx.drawImage(textureCanvas, 0, 0);
+        const imageData = copyCtx.getImageData(0, 0, textureSize, textureSize);
+        buffer.set(new Uint8Array(imageData.data.buffer), layerOffset);
+        return this._computeAverageColor(imageData);
+    }
+
+    _computeAverageColor(imageData) {
+        const data = imageData.data;
+        let r = 0, g = 0, b = 0;
+        const pixelCount = data.length / 4;
+        for (let p = 0; p < data.length; p += 4) {
+            r += data[p];
+            g += data[p + 1];
+            b += data[p + 2];
+        }
+        return [r / pixelCount / 255, g / pixelCount / 255, b / pixelCount / 255];
+    }
+
+    _populateSeasonalTextureMap(atlas, variants, variantIndexToUniqueIndex) {
+        for (let i = 0; i < variants.length; i++) {
+            const { tileType, season, variant } = variants[i];
+            const key = `${tileType}:${season}:${variant}`;
+            atlas.seasonalTextureMap.set(key, variantIndexToUniqueIndex.get(i));
+        }
+    }
+    
+    _fillProceduralFallback(buffer, offset, size, index) {
+        const r = Math.floor((index * 137.5) % 256);
+        for (let p = 0; p < size * size; p++) {
+            buffer[offset + p * 4 + 0] = r;
+            buffer[offset + p * 4 + 1] = 64;
+            buffer[offset + p * 4 + 2] = 64;
+            buffer[offset + p * 4 + 3] = 255;
+        }
+    }
+    
+    // Lookup table now writes layer indices. The RGBA32F format is kept for
+    // GPU compatibility but only .r is meaningful for the active renderer.
+    //
+    // Legacy note: runtime texture variants are intentionally not used for
+    // terrain. The authored config collapses variants to one canonical layer
+    // because independently generated variants are not edge-compatible with
+    // one another. The renderer may still rotate that single layer per tile.
+    _buildTileTypeLookup(maxTileTypes, maxVariants, level, seasons) {
+        const numSeasons = seasons.length;
+        const width  = numSeasons * maxVariants;
+        const height = maxTileTypes;
+        const lookupData = new Float32Array(width * height * 4);
+    
+        const atlas = this.atlases.get(level);
+    
+        for (let tileId = 0; tileId < maxTileTypes; tileId++) {
+            for (let s = 0; s < numSeasons; s++) {
+                const season = seasons[s];
+                const variantCount = this.getNumVariants(tileId, season, level);
+    
+                for (let v = 0; v < maxVariants; v++) {
+                    const safeVar = Math.min(v, Math.max(variantCount - 1, 0));
+                    const x   = s * maxVariants + v;
+                    const idx = (tileId * width + x) * 4;
+    
+                    const key = `${tileId}:${season}:${safeVar}`;
+                    const layerIndex = atlas ? atlas.seasonalTextureMap.get(key) : undefined;
+    
+                    if (layerIndex !== undefined) {
+                        lookupData[idx + 0] = layerIndex;  // layer index
+                        lookupData[idx + 1] = 0;
+                        lookupData[idx + 2] = 0;
+                        lookupData[idx + 3] = 0;
+                    } else {
+                        // Layer 0 is the grey placeholder — safe fallback.
+                        lookupData[idx + 0] = 0;
+                        lookupData[idx + 1] = 0;
+                        lookupData[idx + 2] = 0;
+                        lookupData[idx + 3] = 0;
+                    }
+                }
+            }
+        }
+    
+        const texture = new Texture({
+            width: width,
+            height: height,
+            format: TextureFormat.RGBA32F,
+            minFilter: TextureFilter.NEAREST,
+            magFilter: TextureFilter.NEAREST,
+            wrapS: TextureWrap.CLAMP,
+            wrapT: TextureWrap.CLAMP,
+            generateMipmaps: false,
+            data: lookupData
+        });
+    
+        return texture;
+    }
+    async createAtlas(level) {
+        const config = this.ATLAS_CONFIG[level];
+        const atlas = this.atlases.get(level);
+
+        const allTextures = this.TextureConfigHelper.getAllTexturesForLevel(level);
+        atlas.layout = this.calculateLayout(allTextures.length, config.atlasSize, config.textureSize);
+
+        atlas.layout.padding = this.PADDING;
+
+        atlas.canvas = document.createElement('canvas');
+        atlas.canvas.width = atlas.layout.atlasSize;
+        atlas.canvas.height = atlas.layout.atlasSize;
+        atlas.context = atlas.canvas.getContext('2d');
+
+        if (level === this.TEXTURE_LEVELS.MICRO) {
+            atlas.context.fillStyle = '#888888';
+            atlas.context.fillRect(0, 0, atlas.canvas.width, atlas.canvas.height);
+        }
+        
+        atlas.texture = this._canvasToTexture(atlas.canvas, {
+            minFilter: TextureFilter.LINEAR_MIPMAP_LINEAR,
+            magFilter: TextureFilter.LINEAR,
+            generateMipmaps: true
+        });
+        
+        // CRITICAL: Use backend to upload
+        if (this._backend) {
+            this._backend.createTexture(atlas.texture);
+        }
+        await this.loadTexturesForLevel(level);
+        return atlas.texture;
+    }
+
+    _canvasToTexture(canvas, options = {}) {
+        const ctx = canvas.getContext('2d');
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+        const texture = new Texture({
+            width: canvas.width,
+            height: canvas.height,
+            format: TextureFormat.RGBA8,
+            minFilter: options.minFilter || TextureFilter.LINEAR_MIPMAP_LINEAR,
+            magFilter: options.magFilter || TextureFilter.LINEAR,
+            wrapS: options.wrapS || TextureWrap.CLAMP,
+            wrapT: options.wrapT || TextureWrap.CLAMP,
+            generateMipmaps: options.generateMipmaps !== false,
+            data: new Uint8Array(imageData.data.buffer)
+        });
+        
+        texture.image = {
+            width: canvas.width,
+            height: canvas.height
+        };
+        
+        return texture;
+    }
+
+    async loadTexturesForLevel(level) {
+        const atlas = this.atlases.get(level);
+        const allTexturePaths = this.TextureConfigHelper.getAllTexturesForLevel(level);
+
+        let currentIndex = 0;
+
+        for (const texturePath of allTexturePaths) {
+            if (currentIndex >= atlas.layout.maxCapacity) {
+                
+                continue;
+            }
+            try {
+                const img = await this.loadImage(texturePath);
+                this.addTextureToAtlas(level, img, currentIndex, texturePath);
+                atlas.textureMap.set(texturePath, currentIndex);
+                currentIndex++;
+            } catch {
+                this.createPlaceholderTexture(level, currentIndex, texturePath);
+                atlas.textureMap.set(texturePath, currentIndex);
+                currentIndex++;
+            }
+        }
+
+        for (const tileConfig of this.TILE_CONFIG) {
+            for (const season of Object.values(this.SEASONS)) {
+                const textures = this.TextureConfigHelper.getTexturesForSeason(tileConfig.id, season, level);
+                for (let variant = 0; variant < textures.length; variant++) {
+                    const texturePath = textures[variant];
+                    const key = `${tileConfig.id}:${season}:${variant}`;
+                    const index = atlas.textureMap.get(texturePath);
+                    atlas.seasonalTextureMap.set(key, index);
+                }
+            }
+        }
+
+        atlas.texture.needsUpdate = true;
+        
+    }
+
+    loadImage(src) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => resolve(img);
+            img.onerror = (err) => reject(err);
+            img.src = src;
+        });
+    }
+
+    getSeasonalTextureUV(tileType, season, variant, level) {
+        const cacheKey = `${level}_${tileType}_${season}_${variant}`;
+        if (this._uvCache.has(cacheKey)) {
+            return this._uvCache.get(cacheKey);
+        }
+
+        const atlas = this.atlases.get(level);
+
+        if (!atlas) {
+            
+            return null;
+        }
+
+        const key = `${tileType}:${season}:${variant}`;
+        const index = atlas.seasonalTextureMap.get(key);
+
+        if (index === undefined) {
+            return null;
+        }
+
+        const result = this.calculateUVFromIndex(level, index);
+
+        if (result) {
+            this._uvCache.set(cacheKey, result);
+        }
+
+        return result;
+    }
+
+    getNumVariants(tileType, season, level) {
+        const atlas = this.atlases.get(level);
+
+        if (!atlas) {
+            
+            return 0;
+        }
+
+        let count = 0;
+        for (let v = 0; v < 16; v++) {
+            const key = `${tileType}:${season}:${v}`;
+            if (atlas.seasonalTextureMap.has(key)) {
+                count++;
+            } else {
+                break;
+            }
+        }
+        return count;
+    }
+
+    getAtlasTexture(level) {
+        const atlas = this.atlases.get(level);
+        return atlas ? atlas.texture : null;
+    }
+
+    // Averages the real generated MICRO texture color across every raw tile
+    // id inside each runtime category's ranges, for categories built from
+    // the running planet's tileCatalog (id/name/ranges — see
+    // core/world/tileCatalogRuntime.js). Returns Map<categoryId, [r,g,b]>;
+    // a category with no matching generated tiles is simply absent, and the
+    // caller falls back to its own default color for that id.
+    getCategoryAverageColorMap(tileCategories) {
+        const result = new Map();
+        if (!Array.isArray(tileCategories)) return result;
+
+        for (const category of tileCategories) {
+            if (!Number.isFinite(category?.id) || !Array.isArray(category.ranges)) continue;
+            let r = 0, g = 0, b = 0, count = 0;
+            for (const [minId, maxId] of category.ranges) {
+                for (let tileId = minId; tileId <= maxId; tileId++) {
+                    const avg = this.tileMicroAverageColors.get(tileId);
+                    if (!avg) continue;
+                    r += avg[0]; g += avg[1]; b += avg[2];
+                    count++;
+                }
+            }
+            if (count > 0) {
+                result.set(category.id, [r / count, g / count, b / count]);
+            }
+        }
+        return result;
+    }
+
+    getNextSeason(currentSeason) {
+        const seasons = Object.values(this.SEASONS);
+        const currentIndex = seasons.indexOf(currentSeason);
+        return seasons[(currentIndex + 1) % seasons.length];
+    }
+
+    getTextureIndex(level, texturePath) {
+        const atlas = this.atlases.get(level);
+        return atlas ? atlas.textureMap.get(texturePath) ?? -1 : -1;
+    }
+
+    getTextureUV(level, texturePath) {
+        const index = this.getTextureIndex(level, texturePath);
+        if (index === -1) return null;
+        return this.calculateUVFromIndex(level, index);
+    }
+
+    getAtlasUtilization(level) {
+        const atlas = this.atlases.get(level);
+        if (!atlas || !atlas.layout) return null;
+
+        const used = atlas.textureMap.size || atlas.seasonalTextureMap.size;
+        const capacity = atlas.layout.maxCapacity;
+
+        return {
+            used: used,
+            capacity: capacity,
+            utilization: (used / capacity * 100).toFixed(1) + '%',
+            tilesPerRow: atlas.layout.tilesPerRow,
+            rows: atlas.layout.rows
+        };
+    }
+
+    getAtlasInfo(level) {
+        const atlas = this.atlases.get(level);
+        if (!atlas || !atlas.layout) return null;
+
+        return {
+            level: level,
+            atlasSize: atlas.layout.atlasSize,
+            textureSize: atlas.layout.textureSize,
+            paddedTextureSize: atlas.layout.paddedTextureSize,
+            padding: this.PADDING,
+            layout: atlas.layout,
+            utilization: this.getAtlasUtilization(level),
+            seasonalTextures: atlas.seasonalTextureMap.size,
+            totalTextures: atlas.textureMap.size
+        };
+    }
+
+    getPropAtlasTexture() {
+        return this.getAtlasTexture(this.TEXTURE_LEVELS.PROP);
+    }
+
+    getPropUV(propType) {
+        const path = this.TextureConfigHelper.getPropTexturePath(propType);
+        if (!path) return null;
+        return this.getTextureUV(this.TEXTURE_LEVELS.PROP, path);
+    }
+
+    cleanup() {
+        this.atlases.forEach(atlas => {
+            if (atlas.texture) {
+                atlas.texture.dispose();
+            }
+            if (atlas.canvas) {
+                atlas.canvas = null;
+                atlas.context = null;
+            }
+        });
+        this.atlases.clear();
+
+        if (this.lookupTables.tileTypeLookup) {
+            this.lookupTables.tileTypeLookup.dispose();
+        }
+        if (this.lookupTables.macroTileTypeLookup) {
+            this.lookupTables.macroTileTypeLookup.dispose();
+        }
+        if (this.lookupTables.numVariantsTex) {
+            this.lookupTables.numVariantsTex.dispose();
+        }
+
+        this._uvCache.clear();
+    }
+}

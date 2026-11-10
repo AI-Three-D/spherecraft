@@ -1,0 +1,84 @@
+{
+  "_comment": "Engine rendering and quality configuration. Changes here take effect on next load (most require restart). Postprocessing is in postprocessing.json.",
+  "macroConfig": {
+    "biomeScale":  0.001,
+    "regionScale": 0.0005
+  },
+  "splatConfig": {
+    "splatDensity": 8,
+    "splatKernelSize": 1,
+    "slotSupportExpansionTexels": 1.5,
+    "transitionSharpness": 2.5,
+    "transitionDominanceStart": 0.05,
+    "transitionDominanceEnd": 0.9,
+    "centerCategoryBias": 0.0,
+    "transitionBreakupScale": 0.48,
+    "transitionBreakupWarpScale": 0.155,
+    "transitionBreakupWarpStrength": 0.65,
+    "transitionBreakupStrength": 0.10,
+    "sourceMinorityCutoff": 0.18,
+    "sourceMinorityFade": 0.10,
+    "sourceWinnerSnapStart": 0.55,
+    "sourceWinnerSnapEnd": 0.70,
+    "chunkPaletteEnabled": false
+  },
+  "nightSky": {
+    "detailLevel": "low"
+  },
+  "camera": {
+    "fov":       75,
+    "near":      0.1,
+    "far":       150000,
+    "moveSpeed": 80,
+    "maxBoost":  160
+  },
+  "lighting": {
+    "ambient": {
+      "intensityMultiplier":      1.0,
+      "minIntensity":             0.028,
+      "maxIntensity":             0.30,
+      "sunContributionScale":     0.22,
+      "moonContributionScale":    0.05,
+      "moonNormalizationIntensity": 0.15
+    },
+    "sun": {
+      "twilightStartDot": -0.14,
+      "twilightEndDot": 0.04
+    },
+    "fog": {
+      "densityMultiplier": 0.40,
+      "maxBaseDensity": 0.00055,
+      "dayDensityScale": 0.85,
+      "nightDensityScale": 0.42,
+      "minBrightness": 0.05,
+      "maxBrightness": 0.82,
+      "moonBrightnessScale": 0.10,
+      "sunTintStrength": 0.12
+    }
+  },
+  "terrainShader": {
+    "aerialFadeStartMeters": 400,
+    "aerialFadeEndMeters":   600
+  },
+  "terrainAO": {
+    "enabled": false,
+    "sampleStrength": 1.0,
+    "directStrength": 0.7,
+    "ambientFloor": 0.65
+  },
+  "gpuQuadtree": {
+    "lodErrorThreshold":       512,
+    "maxVisibleTiles":         2048,
+    "tilePoolSize":            2048,
+    "visibleReadbackInterval": 2
+  },
+  "ui": {
+    "initialLoad": {
+      "exactVisibleRatio":      0.9,
+      "residentVisibleRatio":   0.95,
+      "maxPendingGenerations":  6,
+      "maxActiveGenerations":   2,
+      "stableFramesRequired":   20
+    }
+  }
+}

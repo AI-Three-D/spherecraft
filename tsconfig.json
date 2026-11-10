@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "types": ["@webgpu/types"],
+    "strict": true,
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "skipLibCheck": false
+  },
+  "include": [
+    "core/renderer/Renderer.js",
+    "core/renderer/terrain/TerrainModule.js",
+    "core/renderer/**/*.d.ts",
+    "tests/contracts/**/*.ts"
+  ]
+}

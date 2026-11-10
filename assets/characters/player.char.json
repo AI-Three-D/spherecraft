@@ -1,0 +1,10 @@
+{
+    "model": "../../assets/models/wizard.model.json",
+    "scale": 1.0,
+    "moveSpeed": 4.0,
+    "sprintMultiplier": 1.75,
+    "collisionRadius": 0.4,
+    "maxSlopeDeg": 45,
+    "health": 100,
+    "maxHealth": 100
+  }

@@ -1,0 +1,4811 @@
+// js/renderer/terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js
+
+import { getAerialPerspectiveWGSL } from '../../../../renderer/atmosphere/shaders/aerialPerspectiveCommon.js';
+import { getProceduralDetailWGSL } from './prroceduralDetailNoise.wgsl.js';
+import { getClusteredLightingWGSL } from '../../../../lighting/shaders/clusteredLighting.wgsl.js';
+import { buildFixedMaterialFamilyFragmentWGSL } from '../../../../world/materialFamilies.js';
+import { buildCoarseCategoryColorFragmentWGSL } from '../../../../world/tileCategoryColors.js';
+import { createWaterWgsl } from '../../../../world/water/waterWgsl.js';
+
+const blendModeBlock = /* wgsl */`
+// ============================================================================
+// Blend mode + break style constants
+// (Must match BLEND_MODES / BREAK_STYLES in tileTransitionTableBuilder.js)
+// ============================================================================
+
+const BREAK_NONE:         i32 = 0;
+const BREAK_SMOOTH_CURVE: i32 = 1;
+const BREAK_UNEVEN:       i32 = 2;
+const BREAK_STREAKY:      i32 = 3;
+const BREAK_TURBULENT:    i32 = 4;
+
+
+// ============================================================================
+// Transition parameter lookup
+// ============================================================================
+
+
+struct TransitionParams {
+    mode:          i32,
+    breakStyle:    i32,
+    breakStrength: f32,
+}
+
+fn lookupTransitionParams(tileId1: f32, tileId2: f32) -> TransitionParams {
+    let t1 = clamp(i32(round(tileId1)), 0, 255);
+    let t2 = clamp(i32(round(tileId2)), 0, 255);
+    let s  = textureLoad(blendModeTable, vec2<i32>(t1, t2), 0);
+    var p: TransitionParams;
+    p.mode          = i32(round(s.r * 255.0));
+    p.breakStyle    = i32(round(s.g * 255.0));
+    p.breakStrength = s.b;
+    return p;
+}
+
+
+// ============================================================================
+// Per-material noise
+//
+// Called separately for material 1 (seed 0.31) and material 2 (seed 0.71).
+// The different seeds produce fully independent noise fields so each material
+// can extend its territory independently — this is what creates genuine
+// protrusions rather than edge-parallel slices.
+// ============================================================================
+
+fn materialNoise(worldPos: vec2<f32>, style: i32, seed: f32) -> f32 {
+    // Fold seed into a stable 2-D offset. Different seeds → different fields.
+    let s = vec2<f32>(
+        fract(seed * 127.1 + 0.5) * 91.0 + 7.0,
+        fract(seed * 311.7 + 0.5) * 91.0 + 13.0
+    );
+
+    if (style == BREAK_SMOOTH_CURVE) {
+        // Very low-frequency, gently curving patches.
+        let n0 = edgeNoise(worldPos * 0.045 + s);
+        let n1 = edgeNoise(worldPos * 0.095 + s * 1.73);
+        return n0 * 0.78 + n1 * 0.22;
+    }
+
+    if (style == BREAK_UNEVEN) {
+        // Multi-octave blobs with some mid/high-frequency roughness.
+        let n0 = edgeNoise(worldPos * 0.12 + s);
+        let n1 = edgeNoise(worldPos * 0.31 + s * 1.57);
+        let n2 = edgeNoise(worldPos * 0.68 + s * 2.31);
+        let n3 = edgeNoise(worldPos * 1.25 + s * 3.09);
+        return n0 * 0.52 + n1 * 0.25 + n2 * 0.15 + n3 * 0.08;
+    }
+
+    if (style == BREAK_STREAKY) {
+        // Anisotropic: long bands with a slight orientation offset per seed.
+        let angle = seed * 6.2831853;
+        let c = cos(angle);
+        let ss = sin(angle);
+        let rot = vec2<f32>(
+            worldPos.x * c  - worldPos.y * ss,
+            worldPos.x * ss + worldPos.y * c
+        );
+        let q = rot * vec2<f32>(0.05, 0.28) + s;
+        let n0 = edgeNoise(q);
+        let n1 = edgeNoise(q * vec2<f32>(1.0, 2.4) + s * 0.73);
+        let n2 = edgeNoise(q * vec2<f32>(0.35, 3.1) + s * 1.11);
+        return n0 * 0.60 + n1 * 0.25 + n2 * 0.15;
+    }
+
+    if (style == BREAK_TURBULENT) {
+        // Domain warp to fold edges back on themselves (fault-like cuts).
+        let warpScale = 7.0;
+        let wx = (edgeNoise(worldPos * 0.09 + s)               - 0.5) * warpScale;
+        let wy = (edgeNoise(worldPos * 0.09 + s + vec2<f32>(7.3, 3.1)) - 0.5) * warpScale;
+        let warped = worldPos + vec2<f32>(wx, wy);
+        let n0 = edgeNoise(warped * 0.16 + s * 1.41);
+        let n1 = edgeNoise(warped * 0.33 + s * 2.07);
+        return n0 * 0.68 + n1 * 0.32;
+    }
+
+    // BREAK_NONE — neutral (no territory extension for either material)
+    return 0.5;
+}
+
+// ============================================================================
+// Blend mode lookup
+// ============================================================================
+
+/// Returns the blend mode integer for a given tile-type pair.
+/// Symmetric: lookupBlendMode(a,b) == lookupBlendMode(b,a).
+/// Default (all-zero table) returns BLEND_SOFT.
+fn lookupBlendMode(tileId1: f32, tileId2: f32) -> i32 {
+    let t1 = clamp(i32(round(tileId1)), 0, 255);
+    let t2 = clamp(i32(round(tileId2)), 0, 255);
+    let s = textureLoad(blendModeTable, vec2<i32>(t1, t2), 0);
+    return i32(round(s.r * 255.0));
+}
+
+fn lookupLayerHeight(tileId: f32) -> f32 {
+    let _t = clamp(i32(round(tileId)), 0, 255);
+    return 0.0;
+}
+// ============================================================================
+// Smooth value noise  (C1-continuous — avoids derivative discontinuities)
+// ============================================================================
+
+
+fn edgeNoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash12(i),                        hash12(i + vec2<f32>(1.0, 0.0)), u.x),
+        mix(hash12(i + vec2<f32>(0.0, 1.0)), hash12(i + vec2<f32>(1.0, 1.0)), u.x),
+        u.y
+    );
+}
+// ============================================================================
+// Break style implementations
+//
+// Each returns a value in [0, 1] representing the local noise field at
+// worldPos for the chosen style.  The caller maps this to a signed offset:
+//   breakOffset = (n - 0.5) * breakStrength
+// which is then added to the normalised blend position t = w1/(w1+w2).
+// ============================================================================
+
+/// BREAK_SMOOTH_CURVE
+/// Single low-frequency octave.  The boundary follows gently sweeping
+/// arcs with no abrupt corners.  Appropriate for biome-scale gradients
+/// (snow, tundra, forest edge).
+fn breakSmoothCurve(worldPos: vec2<f32>) -> f32 {
+    return edgeNoise(worldPos * 0.07 + vec2<f32>(7.3, 2.1));
+}
+
+/// BREAK_UNEVEN
+/// Three octaves at medium frequencies with strongly unequal weights.
+/// The dominant octave drives large blobs; the finer ones roughen their
+/// edges into irregular protrusions.  Good for organic material boundaries
+/// (grass patches on bare earth, marshy ground, clumped forest floor).
+fn breakUneven(worldPos: vec2<f32>) -> f32 {
+    let n0 = edgeNoise(worldPos * 0.13 + vec2<f32>( 3.7, 11.3));
+    let n1 = edgeNoise(worldPos * 0.34 + vec2<f32>(17.1,  5.9));
+    let n2 = edgeNoise(worldPos * 0.79 + vec2<f32>(29.3, 41.7));
+    return n0 * 0.55 + n1 * 0.30 + n2 * 0.15;
+}
+
+/// BREAK_STREAKY
+/// Anisotropic: the sample grid is compressed on Y and stretched on X,
+/// then a second harmonic adds fine cross-fibre texture.
+/// Produces bands / veins / strata running roughly along one world axis.
+/// Appropriate for geological layering, wind-blown sand, lava flow channels.
+fn breakStreaky(worldPos: vec2<f32>) -> f32 {
+    let p  = worldPos * vec2<f32>(0.035, 0.27);
+    let n0 = edgeNoise(p                       + vec2<f32>( 5.3, 0.7));
+    let n1 = edgeNoise(p * vec2<f32>(2.8, 1.9) + vec2<f32>(11.9, 3.1));
+    return n0 * 0.68 + n1 * 0.32;
+}
+
+/// BREAK_TURBULENT
+/// Domain-warped noise: a secondary noise field displaces the sample
+/// coordinate before the primary evaluation, folding the boundary back
+/// on itself.  The warp magnitude scales with breakStrength so the effect
+/// is subtle at low strength and dramatic at high strength.
+/// Appropriate for geological faults, magma intrusions, violent contact zones.
+fn breakTurbulent(worldPos: vec2<f32>, strength: f32) -> f32 {
+    let warpMag = strength * 6.0;
+    let wx = (edgeNoise(worldPos * 0.10 + vec2<f32>(1.7, 9.2)) - 0.5) * warpMag;
+    let wy = (edgeNoise(worldPos * 0.10 + vec2<f32>(8.3, 2.4)) - 0.5) * warpMag;
+    return edgeNoise((worldPos + vec2<f32>(wx, wy)) * 0.14 + vec2<f32>(3.1, 7.6));
+}
+
+/// Compute the signed offset that is added to the blend position t.
+/// Returns 0 when style == BREAK_NONE or strength < epsilon.
+/// The raw noise value n is mapped from [0,1] to [-0.5, 0.5] and then
+/// scaled by breakStrength so that at strength=1 the boundary can shift
+/// up to ±0.5 in normalised weight space.
+fn computeBreakOffset(worldPos: vec2<f32>, style: i32, strength: f32) -> f32 {
+    if (style == BREAK_NONE || strength < 0.001) { return 0.0; }
+
+    var n: f32;
+    if (style == BREAK_SMOOTH_CURVE) {
+        n = breakSmoothCurve(worldPos);
+    } else if (style == BREAK_UNEVEN) {
+        n = breakUneven(worldPos);
+    } else if (style == BREAK_STREAKY) {
+        n = breakStreaky(worldPos);
+    } else {
+        // BREAK_TURBULENT (default for any unknown style)
+        n = breakTurbulent(worldPos, strength);
+    }
+
+    return (n - 0.5) * strength;
+}
+
+// ============================================================================
+// Blend mode implementations
+// Each receives the pre-computed breakOffset from computeBreakOffset.
+// ============================================================================
+
+const SEED_MAT1: f32 = 0.31;
+const SEED_MAT2: f32 = 0.71;
+
+fn edgeMaskFromWeights(w1: f32, w2: f32) -> f32 {
+    // 0 at interior, 1 at the boundary (w1 ≈ w2).
+    let d = abs(w1 - w2);
+    return 1.0 - smoothstep(0.18, 0.60, d);
+}
+
+fn computeHeights(
+    w1: f32, w2: f32,
+    worldPos: vec2<f32>,
+    style: i32, strength: f32
+) -> vec2<f32> {
+    if (style == BREAK_NONE || strength < 0.001) {
+        return vec2<f32>(w1, w2);
+    }
+    let edge = edgeMaskFromWeights(w1, w2);
+    let amp = strength * edge;
+    let n1 = materialNoise(worldPos, style, SEED_MAT1);
+    let n2 = materialNoise(worldPos, style, SEED_MAT2);
+    return vec2<f32>(
+        w1 + (n1 - 0.5) * amp,
+        w2 + (n2 - 0.5) * amp
+    );
+}
+ // ── blend_soft ────────────────────────────────────────────────────────────────
+// Wide crossing band: [-0.35, +0.35] in height-difference space.
+// The boundary is noise-modulated; across it the transition is gradual.
+// At strength = 0, this is a clean smooth gradient.
+fn applyBlendSoft(
+    color1: vec4<f32>, color2: vec4<f32>,
+    w1: f32, w2: f32,
+    worldPos: vec2<f32>, style: i32, strength: f32
+) -> vec4<f32> {
+    let h    = computeHeights(w1, w2, worldPos, style, strength);
+    let d    = h.x - h.y;
+    // Visible crossing band ≈ 0.70 in h-space. Produces clearly visible
+    // gradients even when the underlying splat boundary is narrow.
+    let t    = smoothstep(-0.35, 0.35, d);
+    return vec4<f32>(mix(color2.rgb, color1.rgb, t), max(color1.a, color2.a));
+}
+
+// ── blend_hard ────────────────────────────────────────────────────────────────
+// Narrow crossing band: [-0.06, +0.06] in height-difference space.
+// The boundary is noise-modulated; across it the transition is sharp.
+// Visually distinct from blend_soft: materials stay nearly pure up to the edge.
+fn applyBlendHard(
+    color1: vec4<f32>, color2: vec4<f32>,
+    w1: f32, w2: f32,
+    worldPos: vec2<f32>, style: i32, strength: f32
+) -> vec4<f32> {
+    let h    = computeHeights(w1, w2, worldPos, style, strength);
+    let d    = h.x - h.y;
+    let t    = smoothstep(-0.06, 0.06, d);
+    return vec4<f32>(mix(color2.rgb, color1.rgb, t), max(color1.a, color2.a));
+}
+
+// ── step_overlay ──────────────────────────────────────────────────────────────
+// Height-priority blend. Per-tile layer heights bias the competition so the
+// "taller" material dominates at boundary edges, creating a visible lip.
+// Noise independently shifts each material's height before the priority calc.
+fn applyStepOverlay(
+    color1: vec4<f32>, color2: vec4<f32>,
+    w1: f32, w2: f32,
+    tileId1: f32, tileId2: f32,
+    worldPos: vec2<f32>, style: i32, strength: f32
+) -> vec4<f32> {
+    let lh1 = lookupLayerHeight(tileId1);
+    let lh2 = lookupLayerHeight(tileId2);
+    let h   = computeHeights(w1, w2, worldPos, style, strength);
+    // Add the physical layer height on top of the noise-modulated weight.
+    let hb1 = h.x + lh1;
+    let hb2 = h.y + lh2;
+    // OVERLAP: controls how wide the lip transition is.
+    // Smaller → sharper lip. 0.2 is a good starting point.
+    let OVERLAP = 0.2;
+    let ma  = max(hb1, hb2) - OVERLAP;
+    let a1  = max(hb1 - ma, 0.0);
+    let a2  = max(hb2 - ma, 0.0);
+    let den = max(a1 + a2, 0.0001);
+    let out = color1 * (a1 / den) + color2 * (a2 / den);
+    return vec4<f32>(out.rgb, max(color1.a, color2.a));
+}
+// ── Dispatcher ────────────────────────────────────────────────────────────────
+fn blendTileColors(
+    color1: vec4<f32>, color2: vec4<f32>,
+    w1: f32, w2: f32,
+    tileId1: f32, tileId2: f32,
+    worldPos: vec2<f32>
+) -> vec4<f32> {
+    let p = lookupTransitionParams(tileId1, tileId2);
+
+    if (p.mode == BLEND_HARD) {
+        return applyBlendHard(
+            color1, color2, w1, w2,
+            worldPos, p.breakStyle, p.breakStrength
+        );
+    }
+    if (p.mode == STEP_OVERLAY) {
+        return applyStepOverlay(
+            color1, color2, w1, w2, tileId1, tileId2,
+            worldPos, p.breakStyle, p.breakStrength
+        );
+    }
+    return applyBlendSoft(
+        color1, color2, w1, w2,
+        worldPos, p.breakStyle, p.breakStrength
+    );
+}
+`;
+const blendModeBlockSimple = /* wgsl */`
+fn blendTileColorsSimple(
+    color1: vec4<f32>, color2: vec4<f32>,
+    w1: f32, w2: f32
+) -> vec4<f32> {
+    let total = max(w1 + w2, 0.0001);
+    let tRaw = w1 / total;
+    let t = smoothstep(0.35, 0.65, tRaw);
+    return vec4<f32>(mix(color2.rgb, color1.rgb, t), max(color1.a, color2.a));
+}
+`;
+const shadowBindings = `
+@group(3) @binding(5)  var shadowCascade0: texture_depth_2d;
+@group(3) @binding(6)  var shadowCascade1: texture_depth_2d;
+@group(3) @binding(9)  var shadowCascade2: texture_depth_2d;
+@group(3) @binding(10) var shadowSampler:  sampler_comparison;
+
+struct ShadowUniforms {
+    cascadeVP0: mat4x4<f32>,
+    cascadeVP1: mat4x4<f32>,
+    cascadeVP2: mat4x4<f32>,
+    splits:     vec4<f32>,   // [split0, split1, split2, 0]
+    params:     vec4<f32>,   // [bias, normalBias, mapSize, enabled]
+}
+@group(3) @binding(11) var<uniform> shadowUniforms: ShadowUniforms;
+`;
+
+const shadowSamplingCode = `
+// ────────────────────────────────────────────────────────────────────
+// Cascaded Shadow Map Sampling
+// ────────────────────────────────────────────────────────────────────
+
+fn getShadowCascadeVP(cascade: i32) -> mat4x4<f32> {
+    if (cascade == 0) { return shadowUniforms.cascadeVP0; }
+    if (cascade == 1) { return shadowUniforms.cascadeVP1; }
+    return shadowUniforms.cascadeVP2;
+}
+
+fn sampleShadowMap(cascade: i32, uv: vec2<f32>, compareDepth: f32) -> f32 {
+    // Use the explicit-level compare variant so debug-mode branches earlier in
+    // the terrain fragment shader do not violate WGSL's uniform-control rule
+    // for implicit shadow comparisons.
+    // Explicit-level comparisons also allow a varying cascade branch. Only
+    // sample the selected map; select() evaluates all three texture reads.
+    if (cascade == 0) {
+        return textureSampleCompareLevel(shadowCascade0, shadowSampler, uv, compareDepth);
+    }
+    if (cascade == 1) {
+        return textureSampleCompareLevel(shadowCascade1, shadowSampler, uv, compareDepth);
+    }
+    return textureSampleCompareLevel(shadowCascade2, shadowSampler, uv, compareDepth);
+}
+    fn sampleCascadePCF(
+    cascade: i32,
+    uv: vec2<f32>,
+    compareDepth: f32,
+    texelSize: f32
+) -> f32 {
+    if (SHADOW_MODE == 0) {
+        return 1.0;
+    }
+    if (SHADOW_MODE == 1) {
+        return sampleShadowMap(cascade, uv, compareDepth);
+    }
+    if (SHADOW_MODE == 2) {
+        let offsets = array<vec2<f32>, 4>(
+            vec2<f32>(-0.5, -0.5),
+            vec2<f32>( 0.5, -0.5),
+            vec2<f32>(-0.5,  0.5),
+            vec2<f32>( 0.5,  0.5)
+        );
+        var sum: f32 = 0.0;
+        for (var i = 0u; i < 4u; i++) {
+            let sampleUV = uv + offsets[i] * texelSize;
+            sum += sampleShadowMap(cascade, sampleUV, compareDepth);
+        }
+        return sum * 0.25;
+    }
+
+    // 9-tap PCF with Poisson-like distribution for smoother edges
+    let offsets = array<vec2<f32>, 9>(
+        vec2<f32>( 0.0,  0.0),
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 0.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  0.0),
+        vec2<f32>( 1.0,  0.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 0.0,  1.0),
+        vec2<f32>( 1.0,  1.0)
+    );
+    
+    // Weight center sample more heavily for sharper core, softer edges
+    let weights = array<f32, 9>(
+        0.25,  // center
+        0.0625, 0.125, 0.0625,  // top row
+        0.125,         0.125,   // middle sides
+        0.0625, 0.125, 0.0625   // bottom row
+    );
+
+    var sum: f32 = 0.0;
+    for (var i = 0u; i < 9u; i++) {
+        let sampleUV = uv + offsets[i] * texelSize;
+        sum += sampleShadowMap(cascade, sampleUV, compareDepth) * weights[i];
+    }
+
+    return sum;
+}
+    
+fn computeShadow(worldPos: vec3<f32>, viewPos: vec3<f32>, worldNormal: vec3<f32>) -> f32 {
+    if (SHADOW_MODE == 0) { return 1.0; }
+    if (shadowUniforms.params.w < 0.5) { return 1.0; }
+
+    // FIX: use view-space depth, not euclidean distance
+    let viewZ = -viewPos.z;
+
+    let bias       = shadowUniforms.params.x;
+    let normalBias = shadowUniforms.params.y;
+    let mapSize    = shadowUniforms.params.z;
+
+    var cascadeIdx: i32 = 2;
+    if (viewZ < shadowUniforms.splits.x) { cascadeIdx = 0; }
+    else if (viewZ < shadowUniforms.splits.y) { cascadeIdx = 1; }
+
+    var vp: mat4x4<f32> = shadowUniforms.cascadeVP2;
+    if (cascadeIdx == 0) { vp = shadowUniforms.cascadeVP0; }
+    else if (cascadeIdx == 1) { vp = shadowUniforms.cascadeVP1; }
+
+    let biasedPos  = worldPos + worldNormal * normalBias;
+    let shadowClip = vp * vec4<f32>(biasedPos, 1.0);
+    let w          = max(abs(shadowClip.w), 0.0001);
+    let shadowNDC  = shadowClip.xyz / w;
+
+    let shadowUV_raw = shadowNDC.xy * 0.5 + 0.5;
+    let uv           = vec2<f32>(shadowUV_raw.x, 1.0 - shadowUV_raw.y);
+    let compareDepth = shadowNDC.z - bias;
+    let texelSize    = 1.0 / mapSize;
+
+    // FIX: check Z bounds as well as XY bounds
+    let outOfBounds = uv.x < 0.0 || uv.x > 1.0
+                   || uv.y < 0.0 || uv.y > 1.0
+                   || shadowNDC.z < 0.0 || shadowNDC.z > 1.0;
+
+    // These pixels already returned fully lit. Avoid their PCF reads too.
+    if (outOfBounds) { return 1.0; }
+    let shadow = sampleCascadePCF(cascadeIdx, uv, compareDepth, texelSize);
+
+    let splitDist = select(
+        select(shadowUniforms.splits.z, shadowUniforms.splits.y, cascadeIdx == 1),
+        shadowUniforms.splits.x,
+        cascadeIdx == 0
+    );
+    let fadeStart   = splitDist * 0.9;
+    let cascadeFade = 1.0 - smoothstep(fadeStart, splitDist, viewZ);
+    return mix(1.0, shadow, max(cascadeFade, select(0.0, 1.0, cascadeIdx == 2)));
+}
+`;
+
+/**
+ * Camera distances (m) over which the aerial perspective fades in
+ * (rendering.terrainShader.aerialFadeStartMeters / aerialFadeEndMeters).
+ * Shared with shaders drawn over the terrain (NearWaterRenderer.js).
+ */
+export function aerialFadeRange(terrainShaderConfig = {}) {
+    const cfg = terrainShaderConfig || {};
+    const start = Number.isFinite(cfg.aerialFadeStartMeters) ? Math.max(0, cfg.aerialFadeStartMeters) : 400;
+    const end = Number.isFinite(cfg.aerialFadeEndMeters) ? Math.max(start + 1, cfg.aerialFadeEndMeters) : 500;
+    return { start, end };
+}
+
+export function buildTerrainChunkFragmentShader(options = {}) {
+    const normalTextureFilterable = options.normalTextureFilterable === true;
+
+    const enableTerrainAO = options.enableTerrainAO !== false;
+    const enableGroundField = options.enableGroundField === true;
+    const enableResolvedColor = options.enableResolvedColor === true;
+    const enableResolvedColorDebugBinding = options.enableResolvedColorDebugBinding === true;
+    // Compile-time per-LOD constant, exactly like enableResolvedColor above —
+    // NOT a per-fragment/per-layer runtime check. That distinction matters:
+    // an earlier attempt at a similar tier gated on a per-tile splat-layer
+    // read inside a uniform-control-flow-sensitive function, which broke
+    // WGSL compilation (dpdx must only be called from uniform control flow)
+    // and, once patched around with select(), ran its expensive fallback
+    // unconditionally anyway. Gating per-LOD like this instead means each
+    // compiled shader variant is simply true or false, decided once at
+    // build time by the caller (terrainMaterialBuilder.js) from the chunk's
+    // own lod — no runtime branching risk at all.
+    const enableSolidColorTier = options.enableSolidColorTier === true;
+    const enableLodEdgeToSolidColor = options.enableLodEdgeToSolidColor === true;
+    const lodEdgeToSolidColorStrength = Number.isFinite(options.lodEdgeToSolidColorStrength)
+        ? options.lodEdgeToSolidColorStrength
+        : 0.0;
+    const lodEdgeToSolidColorFadeStartMeters = Number.isFinite(options.lodEdgeToSolidColorFadeStartMeters)
+        ? options.lodEdgeToSolidColorFadeStartMeters
+        : 3000.0;
+    const lodEdgeToSolidColorFadeEndMeters = Number.isFinite(options.lodEdgeToSolidColorFadeEndMeters)
+        ? options.lodEdgeToSolidColorFadeEndMeters
+        : 6000.0;
+    // In-tile blend into the solid-color tier (see terrainMaterialBuilder):
+    // compiled only into the LOD just before the tier. The ramp is computed
+    // per pixel from vUv and the instance's geometry-LOD coarser-neighbour
+    // mask (forwarded by the vertex stage in vDebugSample.z).
+    const enableTierEdgeBlend = options.enableTierEdgeBlend === true;
+    const tierEdgeBlendWidth = Number.isFinite(options.tierEdgeBlendWidth)
+        ? Math.min(1.0, Math.max(0.01, options.tierEdgeBlendWidth))
+        : 0.5;
+    const tierEdgeBlendStrength = Number.isFinite(options.tierEdgeBlendStrength)
+        ? Math.min(1.0, Math.max(0.0, options.tierEdgeBlendStrength))
+        : 1.0;
+    // Camera-distance ramp into the solid tier, compiled into every LOD below
+    // it; the weight uses fragUniforms.tierFadeStart/tierFadeEnd (per frame).
+    const enableTierDistanceFade = options.enableTierDistanceFade === true;
+    // Draw the solid tier's flat color when the instance's drawn layer has
+    // no detail material (instance flag bit 4, see instanceBufferBuilder).
+    const enableIncompleteSourceFlat = options.enableIncompleteSourceFlat === true;
+    // Baked flat-tier color array (group 1 binding 10), mipmapped by the pool.
+    const hasCoarseColorTexture = options.hasCoarseColorTexture === true;
+    // World-size averaging window of the solid-tier color (0 = legacy 35 %
+    // of the tile) and the cube-face size used to convert it to tile UV.
+    const solidColorAverageWindowMeters = Number.isFinite(options.solidColorAverageWindowMeters)
+        ? Math.max(0, options.solidColorAverageWindowMeters)
+        : 0;
+    const faceSizeMeters = Number.isFinite(options.faceSizeMeters)
+        ? Math.max(0, options.faceSizeMeters)
+        : 0;
+    const maxLightIndices = options.maxLightIndices || 8192;
+    const useArrayTextures = options.useArrayTextures === true;
+    const aerialPerspectiveCode = getAerialPerspectiveWGSL();
+    const chunkTextureType = useArrayTextures ? 'texture_2d_array<f32>' : 'texture_2d<f32>';
+    const debugMode =  Number.isFinite(options.debugMode) ? Math.floor(options.debugMode) : 0;
+    const lod = Number.isFinite(options.lod) ? Math.max(0, Math.floor(options.lod)) : 0;
+    const terrainShaderConfig = options.terrainShaderConfig || {};
+    const solidColorSampleGrid = Number.isFinite(terrainShaderConfig.solidColorSampleGrid)
+        ? Math.max(1, Math.min(8, Math.floor(terrainShaderConfig.solidColorSampleGrid)))
+        : 8;
+    const fixedMaterialFamiliesEnabled = options.fixedMaterialFamiliesEnabled === true;
+    const fixedMaterialFamilyWGSL = buildFixedMaterialFamilyFragmentWGSL(options.tileCategories || []);
+    const coarseCategoryColorWGSL = buildCoarseCategoryColorFragmentWGSL(
+        options.tileCategories || [],
+        options.tileAverageColors || null
+    );
+    const fullMaxLod = Number.isFinite(terrainShaderConfig.fullMaxLOD)
+        ? Math.max(0, Math.floor(terrainShaderConfig.fullMaxLOD))
+        : 0;
+    const nearMaxLod = Number.isFinite(terrainShaderConfig.nearMaxLOD)
+        ? Math.max(fullMaxLod, Math.floor(terrainShaderConfig.nearMaxLOD))
+        : 2;
+    const midMaxLod = Number.isFinite(terrainShaderConfig.midMaxLOD)
+        ? Math.max(nearMaxLod, Math.floor(terrainShaderConfig.midMaxLOD))
+        : 4;
+    const nearToMidFadeStartChunks = Number.isFinite(terrainShaderConfig.nearToMidFadeStartChunks)
+        ? Math.max(0.0, terrainShaderConfig.nearToMidFadeStartChunks)
+        : 2.5;
+    const nearToMidFadeEndChunks = Number.isFinite(terrainShaderConfig.nearToMidFadeEndChunks)
+        ? Math.max(nearToMidFadeStartChunks + 0.01, terrainShaderConfig.nearToMidFadeEndChunks)
+        : 4.0;
+    const lod0ResolvedColorFadeStartMeters = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.lod0ResolvedColorFadeStartMeters)
+        : 8.0;
+    const lod0ResolvedColorFadeEndMeters = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeEndMeters)
+        ? Math.max(lod0ResolvedColorFadeStartMeters + 1.0, terrainShaderConfig.lod0ResolvedColorFadeEndMeters)
+        : 40.0;
+    // Chunk-relative variant used by the ACTUAL LOD4->5 resolved-color
+    // blend (computeLod0ResolvedColorFade). An absolute-meters window
+    // (lod0ResolvedColorFadeStartMeters/EndMeters above, still used only as
+    // lod0AOFade's fallback default — unrelated LOD0 contact-AO feature,
+    // left untouched) turned out impossible to guess correctly: LOD4's
+    // real switch-to-LOD5 distance depends on chunk size, which varies by
+    // depth, so a fixed meters value only ever happens to work for one
+    // specific chunk size/altitude combination. Mirrors the same pattern
+    // already used by nearToMidFadeStartChunks/EndChunks (multiplied by
+    // fragUniforms.chunkWidth at runtime in WGSL) so this scales correctly
+    // regardless of chunk size. Still a first guess — needs visual tuning.
+    const lod0ResolvedColorFadeStartChunks = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeStartChunks)
+        ? Math.max(0.0, terrainShaderConfig.lod0ResolvedColorFadeStartChunks)
+        : 10.0;
+    const lod0ResolvedColorFadeEndChunks = Number.isFinite(terrainShaderConfig.lod0ResolvedColorFadeEndChunks)
+        ? Math.max(lod0ResolvedColorFadeStartChunks + 0.01, terrainShaderConfig.lod0ResolvedColorFadeEndChunks)
+        : 25.0;
+    const enableLod0AOFade =
+        terrainShaderConfig.lod0AOFadeEnabled === true &&
+        lod === 0;
+    const lod0AOFadeStartMeters = Number.isFinite(terrainShaderConfig.lod0AOFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.lod0AOFadeStartMeters)
+        : lod0ResolvedColorFadeStartMeters;
+    const lod0AOFadeEndMeters = Number.isFinite(terrainShaderConfig.lod0AOFadeEndMeters)
+        ? Math.max(lod0AOFadeStartMeters + 1.0, terrainShaderConfig.lod0AOFadeEndMeters)
+        : lod0ResolvedColorFadeEndMeters;
+    const lodEdgeFadeMaxLod = Number.isFinite(terrainShaderConfig.lodEdgeFadeMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.lodEdgeFadeMaxLod))
+        : 4;
+    const enableLodEdgeFade =
+        terrainShaderConfig.lodEdgeFadeEnabled === true &&
+        lodEdgeFadeMaxLod >= 0 &&
+        lod <= lodEdgeFadeMaxLod;
+    const enableLodEdgeAOFade =
+        (terrainShaderConfig.lodEdgeAOFadeEnabled === true ||
+         terrainShaderConfig.lodEdgeFadeEnabled === true) &&
+        lodEdgeFadeMaxLod >= 0 &&
+        lod <= lodEdgeFadeMaxLod;
+    const enableAnyLodEdgeFade = enableLodEdgeFade || enableLodEdgeAOFade;
+    const lodEdgeColorStrength = Number.isFinite(terrainShaderConfig.lodEdgeColorStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeColorStrength))
+        : 0.0;
+    const lodEdgeAOStrength = Number.isFinite(terrainShaderConfig.lodEdgeAOStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeAOStrength))
+        : 1.0;
+    const lodEdgeNormalStrength = Number.isFinite(terrainShaderConfig.lodEdgeNormalStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeNormalStrength))
+        : 1.0;
+    const lodEdgeShadowStrength = Number.isFinite(terrainShaderConfig.lodEdgeShadowStrength)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.lodEdgeShadowStrength))
+        : 1.0;
+    const pointSampleLodStart = Number.isFinite(terrainShaderConfig.pointSampleLodStart)
+        ? Math.max(0, Math.floor(terrainShaderConfig.pointSampleLodStart))
+        : 2;
+    const macroStartLod = Number.isFinite(terrainShaderConfig.macroStartLod)
+        ? Math.max(0, Math.floor(terrainShaderConfig.macroStartLod))
+        : 2;
+    const splatTop2MaxLod = Number.isFinite(terrainShaderConfig.splatTop2MaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.splatTop2MaxLod))
+        : 2;
+    const splatTop2MinWeight = Number.isFinite(terrainShaderConfig.splatTop2MinWeight)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.splatTop2MinWeight))
+        : 0.75;
+    const splatDominantMinWeight = Number.isFinite(terrainShaderConfig.splatDominantMinWeight)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.splatDominantMinWeight))
+        : 0.85;
+    const forceMacroOverlay = terrainShaderConfig.forceMacroOverlay === true;
+    const clusteredMaxLod = Number.isFinite(terrainShaderConfig.clusteredMaxLod)
+        ? Math.max(0, Math.floor(terrainShaderConfig.clusteredMaxLod))
+        : 1;
+    const aerialMaxLod = Number.isFinite(terrainShaderConfig.aerialMaxLod)
+        ? Math.max(0, Math.floor(terrainShaderConfig.aerialMaxLod))
+        : 2;
+    const normalMapMaxLod = Number.isFinite(terrainShaderConfig.normalMapMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.normalMapMaxLod))
+        : 2;
+    const normalMapDistanceBaseMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceBaseMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceBaseMeters)
+        : 4500.0;
+    const normalMapDistanceAltitudeScaleMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceAltitudeScaleMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceAltitudeScaleMeters)
+        : 1000.0;
+    const normalMapDistanceMaxMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceMaxMeters)
+        ? Math.max(normalMapDistanceBaseMeters, terrainShaderConfig.normalMapDistanceMaxMeters)
+        : 28000.0;
+    const normalMapDistanceFadeMeters = Number.isFinite(terrainShaderConfig.normalMapDistanceFadeMeters)
+        ? Math.max(1.0, terrainShaderConfig.normalMapDistanceFadeMeters)
+        : 2500.0;
+    const altitudeNormalMinMeters = Number.isFinite(terrainShaderConfig.altitudeNormalMinMeters)
+        ? Math.max(0, terrainShaderConfig.altitudeNormalMinMeters)
+        : 8000;
+    const altitudeShadowMinMeters = Number.isFinite(terrainShaderConfig.altitudeShadowMinMeters)
+        ? Math.max(0, terrainShaderConfig.altitudeShadowMinMeters)
+        : 12000;
+    const shadowMaxLod = Number.isFinite(terrainShaderConfig.shadowMaxLod)
+        ? Math.max(0, Math.floor(terrainShaderConfig.shadowMaxLod))
+        : null;
+    const variantRotationMaxLod = Number.isFinite(terrainShaderConfig.variantRotationMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.variantRotationMaxLod))
+        : nearMaxLod;
+    // Mild negative mip bias for the live near atlas path; aggressive values shimmer while moving.
+    const nearMipSharpenMaxLod = Number.isFinite(terrainShaderConfig.nearMipSharpenMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.nearMipSharpenMaxLod))
+        : 0;
+    const nearMipSharpenScale = Number.isFinite(terrainShaderConfig.nearMipSharpenScale)
+        ? Math.min(1.0, Math.max(0.35, terrainShaderConfig.nearMipSharpenScale))
+        : 0.75;
+    const nearMipSharpenFadeStartMeters = Number.isFinite(terrainShaderConfig.nearMipSharpenFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.nearMipSharpenFadeStartMeters)
+        : 60.0;
+    const nearMipSharpenFadeEndMeters = Number.isFinite(terrainShaderConfig.nearMipSharpenFadeEndMeters)
+        ? Math.max(nearMipSharpenFadeStartMeters + 1.0, terrainShaderConfig.nearMipSharpenFadeEndMeters)
+        : 120.0;
+    const nearDetailMaxLod = Number.isFinite(terrainShaderConfig.nearDetailMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.nearDetailMaxLod))
+        : 1;
+    const nearDetailStrength = Number.isFinite(terrainShaderConfig.nearDetailStrength)
+        ? Math.min(0.18, Math.max(0.0, terrainShaderConfig.nearDetailStrength))
+        : 0.055;
+    const nearDetailScaleMeters = Number.isFinite(terrainShaderConfig.nearDetailScaleMeters)
+        ? Math.min(2.0, Math.max(0.08, terrainShaderConfig.nearDetailScaleMeters))
+        : 0.32;
+    const nearDetailCreviceWidth = Number.isFinite(terrainShaderConfig.nearDetailCreviceWidth)
+        ? Math.min(0.14, Math.max(0.01, terrainShaderConfig.nearDetailCreviceWidth))
+        : 0.045;
+    const nearDetailCreviceCoverage = Number.isFinite(terrainShaderConfig.nearDetailCreviceCoverage)
+        ? Math.min(1.0, Math.max(0.0, terrainShaderConfig.nearDetailCreviceCoverage))
+        : 0.38;
+    const nearDetailFadeStartMeters = Number.isFinite(terrainShaderConfig.nearDetailFadeStartMeters)
+        ? Math.max(0.0, terrainShaderConfig.nearDetailFadeStartMeters)
+        : 45.0;
+    const nearDetailFadeEndMeters = Number.isFinite(terrainShaderConfig.nearDetailFadeEndMeters)
+        ? Math.max(nearDetailFadeStartMeters + 1.0, terrainShaderConfig.nearDetailFadeEndMeters)
+        : 80.0;
+    const nearDetailEnabled = terrainShaderConfig.nearDetailEnabled !== false &&
+        nearDetailMaxLod >= 0 &&
+        lod <= nearDetailMaxLod &&
+        nearDetailStrength > 0.0001;
+    const useSplatTop2FastPath = splatTop2MaxLod >= 0 && lod <= splatTop2MaxLod && splatTop2MinWeight < 0.9999;
+
+    const useVariantRotation = variantRotationMaxLod >= 0 && lod <= variantRotationMaxLod;
+    const enableNearMipSharpen = nearMipSharpenMaxLod >= 0 && lod <= nearMipSharpenMaxLod && nearMipSharpenScale < 0.9999;
+    const enableSplat = lod <= nearMaxLod;
+    const splatBlendMaxLod = Number.isFinite(terrainShaderConfig.splatBlendMaxLod)
+    ? Math.max(0, Math.floor(terrainShaderConfig.splatBlendMaxLod))
+    : 1;
+    let splatTier = 0;
+    if (enableSplat && lod <= splatBlendMaxLod) {
+        splatTier = 2;
+    } else if (enableSplat) {
+        splatTier = 1;
+    }
+    const enableNearToMidFade = lod === nearMaxLod;
+    const enableMacroOverlay = forceMacroOverlay || lod >= macroStartLod;
+    const usePointSampling = false;//lod >= pointSampleLodStart;
+    const enableClusteredLights = true;//lod <= clusteredMaxLod;
+    const enableAerialPerspective = lod <= aerialMaxLod;
+    // Lake and river water drawn in the terrain's own shading (core/world/
+    // water/waterWgsl.js; WaterGpuData switches it on at runtime once water
+    // exists). terrainShader.lakeWater: false removes it from the shader.
+    const enableLakeWater = terrainShaderConfig.lakeWater !== false;
+    const enablePointSplat = false;
+    
+    const enableNormalMap = lod <= normalMapMaxLod;
+    const enableLighting = true;
+    const enableLod0ResolvedColor =
+        options.enableLod0ResolvedColor === true &&
+        !enableResolvedColor;
+    const enableLodEdgeResolvedColor =
+        options.enableLodEdgeResolvedColor === true &&
+        enableLodEdgeFade &&
+        !enableResolvedColor;
+
+    const { start: apFadeStartMeters, end: apFadeEndMeters } = aerialFadeRange(terrainShaderConfig);
+    let shadowMode = 0;
+    if (lod == 0) {
+        shadowMode = 3;
+    } else if (lod == 1) {
+        shadowMode = 2;
+    } else if (lod == 2) {
+        shadowMode = 1;
+    }
+    if (shadowMaxLod !== null && lod > shadowMaxLod) {
+        shadowMode = 0;
+    }
+    const rawGrassIds = Array.isArray(options.grassTileTypeIds) ? options.grassTileTypeIds : [];
+    const filteredGrassIds = rawGrassIds
+        .filter((value) => Number.isFinite(value))
+        .map((value) => Math.max(-1, Math.min(255, Math.round(value))));
+    const grassTileIds = filteredGrassIds.length > 0 ? filteredGrassIds : [-1];
+    const grassTileCount = grassTileIds.length;
+    let grassShadowStrength = 0.18;
+    if (Number.isFinite(options.grassShadowStrength)) {
+        grassShadowStrength = Math.min(1, Math.max(0, options.grassShadowStrength));
+    }
+    let terrainAOAmbientFloor = 0.65;
+    if (Number.isFinite(options.terrainAOAmbientFloor)) {
+        terrainAOAmbientFloor = Math.min(1, Math.max(0, options.terrainAOAmbientFloor));
+    }
+    let groundFieldTintStrength = 0.32;
+    if (Number.isFinite(options.groundFieldTintStrength)) {
+        groundFieldTintStrength = Math.min(1, Math.max(0, options.groundFieldTintStrength));
+    }
+    const normalizeTint = (value, fallback) => {
+        if (!Array.isArray(value) || value.length < 3) return fallback;
+        return value.slice(0, 3).map((v, i) => {
+            const f = Number.isFinite(v) ? v : fallback[i];
+            return Math.min(1, Math.max(0, f));
+        });
+    };
+    const groundFieldGrassTint = normalizeTint(options.groundFieldGrassTint, [0.22, 0.33, 0.12]);
+    const groundFieldFernTint = normalizeTint(options.groundFieldFernTint, [0.10, 0.24, 0.07]);
+    const clusteredLightingCode = getClusteredLightingWGSL();
+    const proceduralDetailCode = getProceduralDetailWGSL();
+    const terrainAOBindingDecl = enableTerrainAO
+        ? `@group(1) @binding(7) var terrainAOMask: ${chunkTextureType};`
+        : '';
+    const groundFieldBindingDecl = enableGroundField
+        ? `@group(1) @binding(8) var groundFieldMask: ${chunkTextureType};`
+        : '';
+    const includeResolvedColorBinding =
+        enableResolvedColor ||
+        enableLod0ResolvedColor ||
+        enableLodEdgeResolvedColor ||
+        enableResolvedColorDebugBinding;
+    const resolvedColorBindingDecl = includeResolvedColorBinding
+        ? `@group(1) @binding(9) var resolvedColorTexture: ${chunkTextureType};`
+        : '';
+    const resolvedColorCode = includeResolvedColorBinding ? `
+fn sampleResolvedTerrainColor(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vMaterialUv.xy, input.vMaterialUv.z);
+    return ${useArrayTextures
+        ? 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, layer, 0.0)'
+        : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
+    };
+}
+
+fn sampleResolvedTerrainColorImplicit(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vMaterialUv.xy, input.vMaterialUv.z);
+    return ${useArrayTextures
+        ? 'textureSample(resolvedColorTexture, chunkLinearSampler, uv, layer)'
+        : 'textureSample(resolvedColorTexture, chunkLinearSampler, uv)'
+    };
+}
+
+fn sampleResolvedTerrainColorLevel(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vMaterialUv.xy, input.vMaterialUv.z);
+    return ${useArrayTextures
+        ? 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, layer, 0.0)'
+        : 'textureSampleLevel(resolvedColorTexture, chunkLinearSampler, uv, 0.0)'
+    };
+}
+
+fn sampleResolvedTerrainColorNearest(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, resolvedColorTexture, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let texSize = vec2<i32>(textureDimensions(resolvedColorTexture));
+    let coord = clamp(
+        vec2<i32>(floor(uv * vec2<f32>(texSize))),
+        vec2<i32>(0),
+        texSize - vec2<i32>(1)
+    );
+    return ${useArrayTextures
+        ? 'textureLoad(resolvedColorTexture, coord, layer, 0)'
+        : 'textureLoad(resolvedColorTexture, coord, 0)'
+    };
+}
+` : `
+fn sampleResolvedTerrainColor(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn sampleResolvedTerrainColorImplicit(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn sampleResolvedTerrainColorLevel(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+fn sampleResolvedTerrainColorNearest(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+`;
+    const terrainAOCode = enableTerrainAO ? `
+fn sampleTerrainAO(input: FragmentInput, layer: i32) -> f32 {
+    let uv = applyChunkAtlasUV(
+        input.vUv, terrainAOMask,
+        input.vAtlasOffset, input.vAtlasScale
+    );
+    // r32float is unfilterable on most hardware — manual bilinear.
+    // The mask is low-frequency so this is the only filter it needs.
+    return clamp(sampleRGBA32FBilinear(terrainAOMask, uv, layer).r, 0.0, 1.0);
+}
+` : `
+fn sampleTerrainAO(_input: FragmentInput, _layer: i32) -> f32 {
+    return 1.0;
+}
+`;
+    const groundFieldCode = enableGroundField ? `
+fn sampleGroundField(input: FragmentInput, layer: i32) -> vec4<f32> {
+    let uv = applyChunkAtlasUV(
+        input.vUv, groundFieldMask,
+        input.vAtlasOffset, input.vAtlasScale
+    );
+    return clamp(
+        sampleRGBA32FBilinear(groundFieldMask, uv, layer),
+        vec4<f32>(0.0, 0.0, 0.0, 0.0),
+        vec4<f32>(1.0, 1.0, 1.0, 1.0)
+    );
+}
+
+fn applyGroundFieldFallback(baseColor: vec3<f32>, input: FragmentInput, layer: i32) -> vec3<f32> {
+    let field = sampleGroundField(input, layer);
+    let grass = clamp(field.r, 0.0, 1.0);
+    let fern = clamp(field.g, 0.0, 1.0);
+    let weight = clamp(max(grass, fern) * GROUND_FIELD_TINT_STRENGTH, 0.0, 1.0);
+    if (weight <= 0.0001) {
+        return baseColor;
+    }
+    let total = max(grass + fern, 0.0001);
+    let tint = (GROUND_FIELD_GRASS_TINT * grass + GROUND_FIELD_FERN_TINT * fern) / total;
+    let tintTarget = mix(baseColor, tint, 0.30);
+    return mix(baseColor, tintTarget, weight);
+}
+` : `
+fn sampleGroundField(_input: FragmentInput, _layer: i32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+fn applyGroundFieldFallback(baseColor: vec3<f32>, _input: FragmentInput, _layer: i32) -> vec3<f32> {
+    return baseColor;
+}
+`;
+    const grassConstants = `
+const GRASS_TILE_ID_COUNT: i32 = ${grassTileCount};
+const GRASS_TILE_IDS: array<i32, ${grassTileCount}> = array<i32, ${grassTileCount}>(${grassTileIds.join(', ')});
+const GRASS_SHADOW_STRENGTH: f32 = ${grassShadowStrength.toFixed(3)};
+`;
+    return `
+const NORMAL_TEXTURE_FILTERABLE: bool = ${normalTextureFilterable ? 'true' : 'false'};
+
+const ENABLE_TERRAIN_AO: bool = ${enableTerrainAO ? 'true' : 'false'};
+const ENABLE_GROUND_FIELD: bool = ${enableGroundField ? 'true' : 'false'};
+const TERRAIN_AO_AMBIENT_FLOOR: f32 = ${terrainAOAmbientFloor.toFixed(3)};
+const GROUND_FIELD_TINT_STRENGTH: f32 = ${groundFieldTintStrength.toFixed(3)};
+const GROUND_FIELD_GRASS_TINT: vec3<f32> = vec3<f32>(
+    ${groundFieldGrassTint[0].toFixed(3)},
+    ${groundFieldGrassTint[1].toFixed(3)},
+    ${groundFieldGrassTint[2].toFixed(3)}
+);
+const GROUND_FIELD_FERN_TINT: vec3<f32> = vec3<f32>(
+    ${groundFieldFernTint[0].toFixed(3)},
+    ${groundFieldFernTint[1].toFixed(3)},
+    ${groundFieldFernTint[2].toFixed(3)}
+);
+
+const DEBUG_EDGE_EPS: f32 = 0.02;
+const DEBUG_MAX_LOD: f32 = 6.0;
+const SHADER_LOD: i32 = ${lod};
+const USE_SPLAT_TOP2_FAST_PATH: bool = ${useSplatTop2FastPath ? 'true' : 'false'};
+const SPLAT_TOP2_MIN_WEIGHT: f32 = ${splatTop2MinWeight.toFixed(4)};
+const SPLAT_DOMINANT_MIN_WEIGHT: f32 = ${splatDominantMinWeight.toFixed(4)};
+const USE_VARIANT_ROTATION: bool = ${useVariantRotation ? 'true' : 'false'};
+const ENABLE_NEAR_MIP_SHARPEN: bool = ${enableNearMipSharpen ? 'true' : 'false'};
+const NEAR_MIP_SHARPEN_SCALE: f32 = ${nearMipSharpenScale.toFixed(4)};
+const NEAR_MIP_SHARPEN_FADE_START: f32 = ${nearMipSharpenFadeStartMeters.toFixed(1)};
+const NEAR_MIP_SHARPEN_FADE_END: f32 = ${nearMipSharpenFadeEndMeters.toFixed(1)};
+const ENABLE_NEAR_DETAIL: bool = ${nearDetailEnabled ? 'true' : 'false'};
+const NEAR_DETAIL_STRENGTH: f32 = ${nearDetailStrength.toFixed(4)};
+const NEAR_DETAIL_SCALE_METERS: f32 = ${nearDetailScaleMeters.toFixed(4)};
+const NEAR_DETAIL_CREVICE_WIDTH: f32 = ${nearDetailCreviceWidth.toFixed(4)};
+const NEAR_DETAIL_CREVICE_COVERAGE: f32 = ${nearDetailCreviceCoverage.toFixed(4)};
+const NEAR_DETAIL_FADE_START: f32 = ${nearDetailFadeStartMeters.toFixed(1)};
+const NEAR_DETAIL_FADE_END: f32 = ${nearDetailFadeEndMeters.toFixed(1)};
+const ENABLE_LOD0_RESOLVED_COLOR: bool = ${enableLod0ResolvedColor ? 'true' : 'false'};
+const LOD0_RESOLVED_COLOR_FADE_START_CHUNKS: f32 = ${lod0ResolvedColorFadeStartChunks.toFixed(3)};
+const LOD0_RESOLVED_COLOR_FADE_END_CHUNKS: f32 = ${lod0ResolvedColorFadeEndChunks.toFixed(3)};
+const ENABLE_LOD0_AO_FADE: bool = ${enableLod0AOFade ? 'true' : 'false'};
+const LOD0_AO_FADE_START: f32 = ${lod0AOFadeStartMeters.toFixed(1)};
+const LOD0_AO_FADE_END: f32 = ${lod0AOFadeEndMeters.toFixed(1)};
+const ENABLE_ANY_LOD_EDGE_FADE: bool = ${enableAnyLodEdgeFade ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_FADE: bool = ${enableLodEdgeFade ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_AO_FADE: bool = ${enableLodEdgeAOFade ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_RESOLVED_COLOR: bool = ${enableLodEdgeResolvedColor ? 'true' : 'false'};
+const LOD_EDGE_COLOR_STRENGTH: f32 = ${lodEdgeColorStrength.toFixed(4)};
+const LOD_EDGE_AO_STRENGTH: f32 = ${lodEdgeAOStrength.toFixed(4)};
+const LOD_EDGE_NORMAL_STRENGTH: f32 = ${lodEdgeNormalStrength.toFixed(4)};
+const LOD_EDGE_SHADOW_STRENGTH: f32 = ${lodEdgeShadowStrength.toFixed(4)};
+const USE_POINT_SAMPLING: bool = ${usePointSampling ? 'true' : 'false'};
+const USE_POINT_SPLAT: bool = ${enablePointSplat ? 'true' : 'false'};
+const AP_FADE_START: f32 = ${apFadeStartMeters.toFixed(1)};
+const AP_FADE_END: f32 = ${apFadeEndMeters.toFixed(1)};
+
+const ENABLE_SPLAT: bool = ${enableSplat ? 'true' : 'false'};
+const USE_FIXED_MATERIAL_FAMILIES: bool = ${fixedMaterialFamiliesEnabled ? 'true' : 'false'};
+const SPLAT_TIER: i32 = ${splatTier};
+const ENABLE_NEAR_TO_MID_FADE: bool = ${enableNearToMidFade ? 'true' : 'false'};
+const NEAR_TO_MID_FADE_START_CHUNKS: f32 = ${nearToMidFadeStartChunks.toFixed(2)};
+const NEAR_TO_MID_FADE_END_CHUNKS: f32 = ${nearToMidFadeEndChunks.toFixed(2)};
+const ENABLE_MACRO_OVERLAY: bool = ${enableMacroOverlay ? 'true' : 'false'};
+const ENABLE_RESOLVED_COLOR: bool = ${enableResolvedColor ? 'true' : 'false'};
+const ENABLE_SOLID_COLOR_TIER: bool = ${enableSolidColorTier ? 'true' : 'false'};
+const ENABLE_LOD_EDGE_TO_SOLID_COLOR: bool = ${enableLodEdgeToSolidColor ? 'true' : 'false'};
+const LOD_EDGE_TO_SOLID_COLOR_STRENGTH: f32 = ${lodEdgeToSolidColorStrength.toFixed(4)};
+const LOD_EDGE_TO_SOLID_COLOR_FADE_START: f32 = ${lodEdgeToSolidColorFadeStartMeters.toFixed(2)};
+const LOD_EDGE_TO_SOLID_COLOR_FADE_END: f32 = ${lodEdgeToSolidColorFadeEndMeters.toFixed(2)};
+const ENABLE_TIER_EDGE_BLEND: bool = ${enableTierEdgeBlend ? 'true' : 'false'};
+const TIER_EDGE_BLEND_WIDTH: f32 = ${tierEdgeBlendWidth.toFixed(4)};
+const TIER_EDGE_BLEND_STRENGTH: f32 = ${tierEdgeBlendStrength.toFixed(4)};
+const ENABLE_TIER_DISTANCE_FADE: bool = ${enableTierDistanceFade ? 'true' : 'false'};
+const ENABLE_INCOMPLETE_SOURCE_FLAT: bool = ${enableIncompleteSourceFlat ? 'true' : 'false'};
+const HAS_COARSE_COLOR_TEXTURE: bool = ${hasCoarseColorTexture ? 'true' : 'false'};
+// Averaging window of sampleChunkAverageCoarseColor, in metres of ground
+// (0 = legacy: 35 % of the tile's own UV span), and the cube-face size used
+// to convert it into each instance's tile UV.
+const SOLID_COLOR_WINDOW_METERS: f32 = ${solidColorAverageWindowMeters.toFixed(2)};
+// Samples per axis of the flat-color average (N x N texture loads/pixel).
+const SOLID_COLOR_SAMPLE_GRID: i32 = ${solidColorSampleGrid};
+const FACE_SIZE_METERS: f32 = ${faceSizeMeters.toFixed(2)};
+const HAS_RESOLVED_COLOR_TEXTURE: bool = ${includeResolvedColorBinding ? 'true' : 'false'};
+const ENABLE_CLUSTERED_LIGHTS: bool = ${enableClusteredLights ? 'true' : 'false'};
+const ENABLE_AERIAL_PERSPECTIVE: bool = ${enableAerialPerspective ? 'true' : 'false'};
+const ENABLE_NORMAL_MAP: bool = ${enableNormalMap ? 'true' : 'false'};
+const ENABLE_LIGHTING: bool = ${enableLighting ? 'true' : 'false'};
+const SHADOW_MODE: i32 = ${shadowMode};
+const NORMAL_MAP_DISTANCE_BASE: f32 = ${normalMapDistanceBaseMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_ALTITUDE_SCALE: f32 = ${normalMapDistanceAltitudeScaleMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_MAX: f32 = ${normalMapDistanceMaxMeters.toFixed(1)};
+const NORMAL_MAP_DISTANCE_FADE: f32 = ${normalMapDistanceFadeMeters.toFixed(1)};
+const ALTITUDE_NORMAL_MIN: f32 = ${altitudeNormalMinMeters.toFixed(2)};
+const ALTITUDE_SHADOW_MIN: f32 = ${altitudeShadowMinMeters.toFixed(2)};
+const DEBUG_LOD_COLORS: array<vec3<f32>, 7> = array<vec3<f32>, 7>(
+    vec3<f32>(0.2, 0.8, 1.0),
+    vec3<f32>(0.2, 1.0, 0.5),
+    vec3<f32>(0.8, 1.0, 0.2),
+    vec3<f32>(1.0, 0.8, 0.2),
+    vec3<f32>(1.0, 0.5, 0.2),
+    vec3<f32>(1.0, 0.2, 0.5),
+    vec3<f32>(0.8, 0.2, 1.0)
+);
+
+
+${grassConstants}
+${fixedMaterialFamilyWGSL}
+${coarseCategoryColorWGSL}
+${aerialPerspectiveCode}
+${clusteredLightingCode}
+struct FragmentUniforms {
+    cameraPosition: vec3<f32>,
+    time: f32,
+
+    chunkOffset: vec2<f32>,
+    chunkWidth: f32,
+    chunkHeight: f32,
+
+    lightDirection: vec3<f32>,
+    sunLightIntensity: f32,
+
+    lightColor: vec3<f32>,
+    terrainAODirectStrength: f32, 
+
+    ambientColor: vec3<f32>,
+    ambientLightIntensity: f32,
+
+    enableSplatLayer: f32,
+    enableMacroLayer: f32,
+    geometryLOD: i32,
+    currentSeason: i32,
+
+    nextSeason: i32,
+    seasonTransition: f32,
+    atlasTextureSize: f32,
+    terrainAOStrength: f32, 
+
+    atlasUVOffset: vec2<f32>,
+    atlasUVScale: f32,
+    useAtlasMode: i32,
+
+    isFeature: f32,
+    aerialPerspectiveEnabled: f32,
+    macroScale: f32,
+    macroMaxLOD: i32,
+
+    planetCenter: vec3<f32>,
+    atmospherePlanetRadius: f32,
+
+    atmosphereRadius: f32,
+    atmosphereScaleHeightRayleigh: f32,
+    atmosphereScaleHeightMie: f32,
+    atmosphereMieAnisotropy: f32,
+
+    atmosphereRayleighScattering: vec3<f32>,
+    atmosphereMieScattering: f32,
+
+    atmosphereSunIntensity: f32,
+    fogDensity: f32,
+    fogScaleHeight: f32,
+    level2Blend: f32,
+
+    fogColor: vec3<f32>,
+    macroNoiseWeight: f32,
+    terrainDebugMode: i32,
+    terrainLayerViewMode: i32,
+    // Distance ramp into the solid-color tier (camera distance, m), written
+    // each frame by QuadtreeTerrainRenderer. Formerly _debugPad1/_debugPad2.
+    tierFadeStart: f32,
+    tierFadeEnd: f32,
+};
+
+@group(0) @binding(1) var<uniform> fragUniforms: FragmentUniforms;
+
+@group(1) @binding(0) var heightTexture_f: ${chunkTextureType};
+@group(1) @binding(1) var normalTexture: ${chunkTextureType};
+@group(1) @binding(2) var tileTexture: ${chunkTextureType};
+@group(1) @binding(3) var splatDataMap: ${chunkTextureType};      // top-4 weights
+@group(1) @binding(4) var splatIndexMap: ${chunkTextureType};     // top-4 representative tile ids
+@group(1) @binding(5) var splatValidMap: ${chunkTextureType};     // precomputed bilinear-valid mask
+@group(1) @binding(6) var macroMaskTexture: ${chunkTextureType};
+${terrainAOBindingDecl}
+${groundFieldBindingDecl}
+${resolvedColorBindingDecl}
+${hasCoarseColorTexture ? `@group(1) @binding(10) var coarseColorTexture: ${chunkTextureType};` : ''}
+
+@group(2) @binding(0) var atlasTexture: texture_2d_array<f32>;
+@group(2) @binding(1) var level2AtlasTexture: texture_2d_array<f32>;
+@group(2) @binding(2) var tileTypeLookup: texture_2d<f32>;
+@group(2) @binding(3) var macroTileTypeLookup: texture_2d<f32>;
+// Legacy binding retained to keep the atlas bind-group layout stable. The
+// terrain shader no longer reads runtime texture-variant counts.
+@group(2) @binding(4) var numVariantsTex: texture_2d<f32>;
+@group(2) @binding(5) var textureSampler: sampler;
+@group(2) @binding(6) var nearestSampler: sampler;
+
+@group(2) @binding(7) var blendModeTable:   texture_2d<f32>;
+@group(2) @binding(8) var chunkLinearSampler: sampler;
+@group(3) @binding(7) var transmittanceLUT: texture_2d<f32>;
+@group(3) @binding(8) var transmittanceSampler: sampler;
+${shadowBindings}
+${enableLakeWater ? createWaterWgsl({ group: 3 }) : ''}
+struct FragmentInput {
+    @builtin(position) clipPosition: vec4<f32>,
+    @location(0) vUv: vec2<f32>,
+    @location(1) vNormal: vec3<f32>,
+    @location(2) vWorldPosition: vec3<f32>,
+    @location(3) vViewPosition: vec3<f32>,
+    @location(4) vDistanceToCamera: f32,
+    // Material source (uvOffset.xy, uvScale, layer): every splat / prebaked-
+    // color read uses this instead of vAtlasOffset/vAtlasScale/vLayer, so a
+    // tile awaiting refinement shows its refined ancestor's material on top
+    // of its own geometry (see instanceBufferBuilder.wgsl.js).
+    @location(5) vMaterialUv: vec4<f32>,
+    @location(6) vWorldPos: vec2<f32>,
+    @location(7) vSphereDir: vec3<f32>,
+    @location(8) vHeight: f32,
+    @location(9) vDisplacement: f32,
+    @location(10) vAtlasOffset: vec2<f32>,
+    @location(11) vAtlasScale: f32,
+    @location(12) vLayer: f32,
+    @location(13) vDebugEdge: vec4<f32>,
+    @location(14) vDebugSample: vec4<f32>,
+    @location(15) vFaceInfo: vec4<f32>,
+};
+
+${resolvedColorCode}
+
+// ----------------------------------------------------------------------------
+// Chunk-texture helpers
+// ----------------------------------------------------------------------------
+
+fn sampleRGBA32FNearest(tex: texture_2d_array<f32>, uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    let texSize = vec2<f32>(textureDimensions(tex));
+    let coord = vec2<i32>(floor(uv * texSize));
+    let maxCoord = vec2<i32>(texSize) - vec2<i32>(1);
+    return textureLoad(tex, clamp(coord, vec2<i32>(0), maxCoord), layer, 0);
+}
+
+fn sampleRGBA32FBilinear(tex: texture_2d_array<f32>, uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(tex));
+    let coord = uv * size - 0.5;
+    let base = floor(coord);
+    let f = fract(coord);
+    let maxCoord = vec2<i32>(textureDimensions(tex)) - vec2<i32>(1);
+
+    let c00 = textureLoad(tex, clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord), layer, 0);
+    let c10 = textureLoad(tex, clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord), layer, 0);
+    let c01 = textureLoad(tex, clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord), layer, 0);
+    let c11 = textureLoad(tex, clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord), layer, 0);
+
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+fn hemiOctDecode(e: vec2<f32>) -> vec3<f32> {
+    // e is in [-1,1]². Recover z from the L1 constraint; z ≥ 0 always.
+    // normalize() absorbs the small off-sphere drift from bilinear/trilinear
+    // interpolation between stored octahedral values.
+    let z = 1.0 - abs(e.x) - abs(e.y);
+    return normalize(vec3<f32>(e, z));
+}
+
+fn applyChunkAtlasUV(uv: vec2<f32>, tex: texture_2d_array<f32>, atlasOffset: vec2<f32>, atlasScale: f32) -> vec2<f32> {
+    if (fragUniforms.useAtlasMode == 0) { return uv; }
+    let texSize = vec2<f32>(textureDimensions(tex));
+    let parentLocalUV = atlasOffset
+                      + clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * atlasScale;
+
+
+    let maxF = max(texSize - vec2<f32>(1.0), vec2<f32>(1.0));
+    return (parentLocalUV * maxF + vec2<f32>(0.5)) / texSize;
+}
+
+// Same as applyChunkAtlasUV, but does NOT clamp the incoming chunk-local uv
+// to [0,1] before applying atlasOffset/atlasScale. Many chunks of the same
+// quadtree tile share ONE underlying tile texture, each mapped to its own
+// sub-rectangle via atlasOffset/atlasScale — so a uv slightly outside this
+// chunk's own [0,1] range still lands in a valid, meaningful region of that
+// SAME shared texture (the neighboring chunk's sub-rectangle), not garbage.
+// applyChunkAtlasUV's internal clamp prevents ever reaching that region,
+// which is exactly why sampleChunkAverageCoarseColor's box filter produced
+// a hard, chunk-shaped edge: every chunk's average was silently clipped to
+// only its own footprint, so neighboring chunks' independently-clipped
+// averages didn't agree at the shared boundary. The final atlas-space texel
+// coordinate is still safely clamped to the whole physical texture by
+// sampleRGBA32FNearest's own bounds check, so this can't read out of bounds.
+fn applyChunkAtlasUVUnbounded(uv: vec2<f32>, tex: texture_2d_array<f32>, atlasOffset: vec2<f32>, atlasScale: f32) -> vec2<f32> {
+    if (fragUniforms.useAtlasMode == 0) { return uv; }
+    let texSize = vec2<f32>(textureDimensions(tex));
+    let parentLocalUV = atlasOffset + uv * atlasScale;
+    let maxF = max(texSize - vec2<f32>(1.0), vec2<f32>(1.0));
+    return (parentLocalUV * maxF + vec2<f32>(0.5)) / texSize;
+}
+
+// Single source of truth for "read resolvedColor safely to blend with
+// something else." resolvedColor is a refinement-stage output; any
+// not-yet-refined tile leaves it zero-filled (black, alpha=0 — confirmed via
+// resolvedTerrainColorCompute.wgsl.js: real writes always store alpha=1).
+// Every one of the several LOD0/LOD-edge resolved-color blend sites in this
+// file needs to treat alpha<0.5 as "not ready" and fall back to whatever
+// color it would otherwise have kept, instead of silently mixing toward
+// black. That check was present in the main ENABLE_RESOLVED_COLOR tier
+// (fixed earlier) but had been independently duplicated — and missed — at
+// every other call site. Centralizing it here means fixing it once instead
+// of matching this exact check at each new call site by hand.
+fn sampleResolvedColorOrFallback(input: FragmentInput, layer: i32, fallback: vec3<f32>) -> vec3<f32> {
+    let sampled = sampleResolvedTerrainColorLevel(input, layer);
+    if (sampled.a < 0.5) {
+        return fallback;
+    }
+    return sampled.rgb;
+}
+
+fn applyChunkAtlasUV_2d(uv: vec2<f32>, texSize: vec2<f32>, atlasOffset: vec2<f32>, atlasScale: f32) -> vec2<f32> {
+    if (fragUniforms.useAtlasMode == 0) { return uv; }
+    let parentLocalUV = atlasOffset
+                      + clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * atlasScale;
+    let maxF = max(texSize - vec2<f32>(1.0), vec2<f32>(1.0));
+    return (parentLocalUV * maxF + vec2<f32>(0.5)) / texSize;
+}
+
+fn decodeDebugEdgeMask(packedTopAndMask: f32) -> i32 {
+    let packed = fract(packedTopAndMask);
+    return clamp(i32(round(packed * 4096.0)), 0, 4095);
+}
+
+fn computeChunkAtlasRect(texSize: vec2<i32>, atlasOffset: vec2<f32>, atlasScale: f32) -> vec4<i32> {
+    let texSizeF = vec2<f32>(texSize);
+    let width = max(1, i32(floor(texSizeF.x * atlasScale + 0.5)));
+    let height = max(1, i32(floor(texSizeF.y * atlasScale + 0.5)));
+    let minX = clamp(i32(floor(atlasOffset.x * texSizeF.x + 0.5)), 0, texSize.x - 1);
+    let minY = clamp(i32(floor(atlasOffset.y * texSizeF.y + 0.5)), 0, texSize.y - 1);
+    let maxX = clamp(minX + width - 1, minX, texSize.x - 1);
+    let maxY = clamp(minY + height - 1, minY, texSize.y - 1);
+    return vec4<i32>(minX, minY, maxX, maxY);
+}
+
+struct AtlasLeakRisk {
+    any: bool,
+    leakX: bool,
+    leakY: bool,
+    isFallback: bool,
+};
+
+fn computeAtlasBilinearLeakRisk(
+    uv: vec2<f32>,
+    tex: texture_2d_array<f32>,
+    atlasOffset: vec2<f32>,
+    atlasScale: f32
+) -> AtlasLeakRisk {
+    let texSizeI = vec2<i32>(textureDimensions(tex));
+    let texSizeF = vec2<f32>(texSizeI);
+    let rect = computeChunkAtlasRect(texSizeI, atlasOffset, atlasScale);
+    let atlasUV = applyChunkAtlasUV_2d(uv, texSizeF, atlasOffset, atlasScale);
+    let coord = atlasUV * texSizeF - 0.5;
+    let base = floor(coord);
+    let leakX = base.x < f32(rect.x) || (base.x + 1.0) > f32(rect.z);
+    let leakY = base.y < f32(rect.y) || (base.y + 1.0) > f32(rect.w);
+
+    var risk: AtlasLeakRisk;
+    risk.any = leakX || leakY;
+    risk.leakX = leakX;
+    risk.leakY = leakY;
+    risk.isFallback = atlasScale < 0.999;
+    return risk;
+}
+
+fn snappedTileCenterUV(uv01: vec2<f32>, tilesPerSide: f32) -> vec2<f32> {
+    let t = uv01 * vec2<f32>(tilesPerSide, tilesPerSide);
+    let idx = clamp(floor(t), vec2<f32>(0.0), vec2<f32>(tilesPerSide - 1.0));
+    return (idx + 0.5) / vec2<f32>(tilesPerSide, tilesPerSide);
+}
+
+fn decodeTileId(r: f32) -> f32 {
+    return select(r * 255.0, r, r > 1.0);
+}
+
+fn sampleChunkTileId(input: FragmentInput, layer: i32) -> f32 {
+    let tilesPerSide = fragUniforms.chunkWidth;
+    let tileUV = snappedTileCenterUV(input.vUv, tilesPerSide);
+    let uv = applyChunkAtlasUV(tileUV, tileTexture, input.vAtlasOffset, input.vAtlasScale);
+    let s = sampleRGBA32FNearest(tileTexture, uv, layer);
+    return decodeTileId(s.r);
+}
+
+// Diagnostic/first-pass fix for LOD6 horizon grain: sampleChunkTileId takes
+// exactly ONE nearest-neighbor texel from the full-resolution tile texture,
+// so a single stray texel (e.g. one sand id inside an otherwise-grass area)
+// makes the sampled region snap to that one material's color, and real
+// small coherent patches can be missed entirely if the sample misses them.
+//
+// First attempt here SNAPPED the sample window to the chunk cell (same
+// fixed window for every fragment in that chunk) — that only blurred the
+// existing chunk-block artifact in place, since every fragment in a chunk
+// still computed the identical average. This version instead centers a
+// window on each fragment's OWN vUv, so it slides continuously and no
+// longer aligns to chunk boundaries, and uses a denser 8x8 grid (64
+// samples) since the underlying speckle noise is sparser/finer than one
+// chunk cell. Per-category COLOR is averaged, never the raw id, since ids
+// are categorical and can't be interpolated meaningfully — large coherent
+// regions still dominate the average; small isolated ones blend in instead
+// of aliasing. Uses only the always-ready geometry-pass tile texture, so
+// this keeps the solid-color tier's zero-refinement-wait property; no
+// splat/resolvedColor dependency added. 64 texture loads/fragment is fine
+// for this diagnostic; the persistent fix should precompute a small
+// per-tile color texture instead of doing this live every frame.
+${hasCoarseColorTexture ? '' : `
+fn sampleChunkAverageCoarseColorLegacy(input: FragmentInput, layer: i32) -> vec3<f32> {
+    // NOTE: fragUniforms.chunkWidth is NOT a subdivision count — it's
+    // chunkSizeMeters (world-space meters) reused as-is for an unrelated
+    // texel-snap in sampleChunkTileId. Using 1/chunkWidth here as a window
+    // size was a units bug: it produced a window a small fraction of one
+    // geometry chunk's own local UV span — far too small to contain any
+    // real variation, which is why more samples changed nothing. Using an
+    // explicit large fraction of the chunk's local UV span instead, sized
+    // for this diagnostic to unambiguously prove/disprove whether real
+    // small-scale variation exists in the tile texture at all.
+    // World-size window when configured, so every tier (and every tile size
+    // drawn by the same LOD variant) averages the same ground area and the
+    // color does not change when a tile splits or merges. vFaceInfo.z is the
+    // instance's own tile size in face UV.
+    var windowSize = 0.35;
+    if (SOLID_COLOR_WINDOW_METERS > 0.0 && FACE_SIZE_METERS > 0.0) {
+        let tileMeters = max(input.vFaceInfo.z * FACE_SIZE_METERS, 1.0);
+        windowSize = SOLID_COLOR_WINDOW_METERS / tileMeters;
+    }
+    let center = input.vUv;
+
+    var colorSum = vec3<f32>(0.0, 0.0, 0.0);
+    for (var gy: i32 = 0; gy < SOLID_COLOR_SAMPLE_GRID; gy = gy + 1) {
+        for (var gx: i32 = 0; gx < SOLID_COLOR_SAMPLE_GRID; gx = gx + 1) {
+            let cellCenter = (vec2<f32>(f32(gx), f32(gy)) + vec2<f32>(0.5, 0.5)) / f32(SOLID_COLOR_SAMPLE_GRID) - vec2<f32>(0.5, 0.5);
+            // Per-sample jitter (self-contained hash, no dependency on any
+            // other function's declaration order) so the sample positions
+            // aren't a perfectly regular grid — a rigid grid beats against
+            // the tile texture's own spatial pattern as the window slides
+            // continuously across fragments, producing visible moiré
+            // stripes. Jittering each sample within its own cell breaks
+            // that coherent beat into unstructured (much less visible)
+            // noise instead.
+            let jitterSeed = input.vWorldPos.xy * 0.173
+                + vec2<f32>(f32(gx) * 12.9898, f32(gy) * 78.233);
+            let jx = fract(sin(dot(jitterSeed, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
+            let jy = fract(sin(dot(jitterSeed, vec2<f32>(39.346, 11.135))) * 24634.6345) - 0.5;
+            // NOT clamped to [0,1] here — deliberately allowed to extend
+            // into a neighboring chunk's own sub-rectangle of the same
+            // shared tile texture (see applyChunkAtlasUVUnbounded above).
+            // Clamping here was the cause of the hard, chunk-shaped seam:
+            // every chunk's average was clipped to its own footprint only,
+            // so adjacent chunks' independently-clipped averages disagreed
+            // right at the shared edge.
+            let sampleUV01 = center + (cellCenter + vec2<f32>(jx, jy) * 0.5) * windowSize;
+            let uv = applyChunkAtlasUVUnbounded(sampleUV01, tileTexture, input.vAtlasOffset, input.vAtlasScale);
+            let s = sampleRGBA32FNearest(tileTexture, uv, layer);
+            let tileId = decodeTileId(s.r);
+            colorSum = colorSum + coarseTileColor(tileId);
+        }
+    }
+    return colorSum / f32(SOLID_COLOR_SAMPLE_GRID * SOLID_COLOR_SAMPLE_GRID);
+}
+
+
+`}
+// In-tile ramp into the solid-color tier, for the LOD just before it.
+// 1.0 exactly at a tile edge whose neighbour is drawn by a coarser geometry
+// LOD (and therefore renders the solid tier), falling smoothly to 0.0 at
+// TIER_EDGE_BLEND_WIDTH of the tile away from that edge. The coarser-
+// neighbour mask is constant per instance and arrives in vDebugSample.z:
+// left=8 (u=0), right=2 (u=1), bottom=4 (v=0), top=1 (v=1), the same layout
+// computeLodEdgeFade uses for the mode-100 band.
+fn computeTierEdgeBlend(input: FragmentInput) -> f32 {
+    if (!ENABLE_TIER_EDGE_BLEND) {
+        return 0.0;
+    }
+    let mask = u32(round(clamp(input.vDebugSample.z, 0.0, 31.0))) & 15u;
+    if (mask == 0u) {
+        return 0.0;
+    }
+    let uv = clamp(input.vUv, vec2<f32>(0.0), vec2<f32>(1.0));
+    var edgeDistance = 2.0;
+    if ((mask & 8u) != 0u) { edgeDistance = min(edgeDistance, uv.x); }
+    if ((mask & 2u) != 0u) { edgeDistance = min(edgeDistance, 1.0 - uv.x); }
+    if ((mask & 4u) != 0u) { edgeDistance = min(edgeDistance, uv.y); }
+    if ((mask & 1u) != 0u) { edgeDistance = min(edgeDistance, 1.0 - uv.y); }
+    let ramp = 1.0 - smoothstep(0.0, max(TIER_EDGE_BLEND_WIDTH, 0.0001), edgeDistance);
+    return clamp(ramp * TIER_EDGE_BLEND_STRENGTH, 0.0, 1.0);
+}
+
+// True when this instance's drawn layer has no detail material (instance
+// flag bit 4): geometry-only layer at a cold start, or a flat-tier ancestor
+// that never generates splat/prebaked color. The flat color needs only the
+// tile ids every resident layer has, so it is always valid.
+fn tierSourceIncomplete(input: FragmentInput) -> bool {
+    if (!ENABLE_INCOMPLETE_SOURCE_FLAT) {
+        return false;
+    }
+    let flags = u32(round(clamp(input.vDebugSample.z, 0.0, 31.0)));
+    return (flags & 16u) != 0u;
+}
+
+// Camera-distance ramp into the solid-color tier. Every LOD below the tier
+// evaluates exactly this, so the weight at a point does not depend on which
+// tile draws it. tierFadeEnd is where the nearest solid-tier pixel can
+// appear (derived per frame from the traversal's LOD metric), so the
+// weight is 1 wherever a solid-tier tile can border this one.
+fn computeTierDistanceFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_TIER_DISTANCE_FADE) {
+        return 0.0;
+    }
+    let fadeStart = fragUniforms.tierFadeStart;
+    let fadeEnd = fragUniforms.tierFadeEnd;
+    if (fadeEnd <= fadeStart) {
+        return 0.0;
+    }
+    return smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
+}
+
+// Flat (solid-tier) color around this fragment: the baked per-tile
+// window average when available, else the per-pixel average (legacy).
+fn sampleChunkAverageCoarseColor(input: FragmentInput, layer: i32) -> vec3<f32> {
+    var windowSize = 0.35;
+    if (SOLID_COLOR_WINDOW_METERS > 0.0 && FACE_SIZE_METERS > 0.0) {
+        let tileMeters = max(input.vFaceInfo.z * FACE_SIZE_METERS, 1.0);
+        windowSize = SOLID_COLOR_WINDOW_METERS / tileMeters;
+    }
+    let center = input.vUv;
+${hasCoarseColorTexture ? `
+    // Baked path: the generator stored this exact window average per texel
+    // (TileGenerator._runCoarseColorPass), so one bilinear sample replaces
+    // the 64 tile-id loads per pixel of the legacy path below.
+    let coarseUv = applyChunkAtlasUV(center, coarseColorTexture, input.vAtlasOffset, input.vAtlasScale);
+    return textureSampleLevel(coarseColorTexture, chunkLinearSampler, coarseUv, layer, 0.0).rgb;
+` : ''}
+${hasCoarseColorTexture ? '' : '    return sampleChunkAverageCoarseColorLegacy(input, layer);'}
+}
+
+fn debugHash12(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn debugTileIdColor(tileId: f32) -> vec3<f32> {
+    let tid = floor(tileId + 0.5);
+    let h0 = debugHash12(vec2<f32>(tid, 1.0));
+    let h1 = debugHash12(vec2<f32>(tid, 7.0));
+    let h2 = debugHash12(vec2<f32>(tid, 17.0));
+    return vec3<f32>(
+        0.2 + 0.8 * h0,
+        0.2 + 0.8 * h1,
+        0.2 + 0.8 * h2
+    );
+}
+
+fn debugTileCategory(tileId: f32) -> i32 {
+    let tid = i32(round(tileId));
+    if (tid >= 0 && tid <= 3) { return 0; }
+    if (tid >= 10 && tid <= 29) { return 1; }
+    if (tid >= 30 && tid <= 41) { return 2; }
+    if (tid >= 42 && tid <= 53) { return 3; }
+    if (tid >= 54 && tid <= 65) { return 4; }
+    if ((tid >= 66 && tid <= 81) || (tid >= 142 && tid <= 149)) { return 5; }
+    if (tid >= 82 && tid <= 93) { return 6; }
+    if (tid >= 94 && tid <= 105) { return 7; }
+    if (tid >= 106 && tid <= 117) { return 8; }
+    if (tid >= 118 && tid <= 129) { return 9; }
+    if (tid >= 130 && tid <= 141) { return 10; }
+    if (tid >= 150 && tid <= 165) { return 11; }
+    return -1;
+}
+
+fn debugCategoryColor(cat: i32) -> vec3<f32> {
+    if (cat == 0) { return vec3<f32>(0.15, 0.35, 0.85); }
+    if (cat == 1) { return vec3<f32>(0.20, 0.60, 0.20); }
+    if (cat == 2) { return vec3<f32>(0.82, 0.72, 0.42); }
+    if (cat == 3) { return vec3<f32>(0.55, 0.55, 0.60); }
+    if (cat == 4) { return vec3<f32>(0.50, 0.72, 0.32); }
+    if (cat == 5) { return vec3<f32>(0.10, 0.38, 0.16); }
+    if (cat == 6) { return vec3<f32>(0.14, 0.32, 0.22); }
+    if (cat == 7) { return vec3<f32>(0.58, 0.40, 0.22); }
+    if (cat == 8) { return vec3<f32>(0.45, 0.28, 0.22); }
+    if (cat == 9) { return vec3<f32>(0.36, 0.14, 0.12); }
+    if (cat == 10) { return vec3<f32>(0.85, 0.87, 0.92); }
+    if (cat == 11) { return vec3<f32>(0.72, 0.58, 0.24); }
+    return vec3<f32>(1.0, 0.0, 1.0);
+}
+
+// ----------------------------------------------------------------------------
+// Splat data sampling (top-4 sparse local mixture)
+// ----------------------------------------------------------------------------
+struct SplatData {
+    tileIds:     vec4<f32>,
+    weights:     vec4<f32>,
+    cellLocal:   vec2<f32>,
+    hasBoundary: bool,
+    bilinearValid: bool,
+};
+
+
+fn sortTop4ByTileId(
+    topIds: ptr<function, array<i32, 4>>,
+    topWeights: ptr<function, array<f32, 4>>
+) {
+    for (var i: i32 = 0; i < 3; i += 1) {
+        for (var j: i32 = i + 1; j < 4; j += 1) {
+            let vi = (*topIds)[i] < 255;
+            let vj = (*topIds)[j] < 255;
+            let doSwap =
+                (vj && !vi) ||
+                (vi && vj && (*topIds)[j] < (*topIds)[i]);
+
+            if (doSwap) {
+                let tmpId = (*topIds)[i];
+                (*topIds)[i] = (*topIds)[j];
+                (*topIds)[j] = tmpId;
+
+                let tmpW = (*topWeights)[i];
+                (*topWeights)[i] = (*topWeights)[j];
+                (*topWeights)[j] = tmpW;
+            }
+        }
+    }
+}
+
+fn splatDominantWeight(splat: SplatData) -> f32 {
+    return max(
+        max(splat.weights.x, splat.weights.y),
+        max(splat.weights.z, splat.weights.w)
+    );
+}
+
+fn splatDominantTileId(splat: SplatData) -> f32 {
+    var bestId = splat.tileIds.x;
+    var bestW  = splat.weights.x;
+
+    if (splat.weights.y > bestW || (abs(splat.weights.y - bestW) <= 0.0001 && splat.tileIds.y < bestId)) {
+        bestW = splat.weights.y;
+        bestId = splat.tileIds.y;
+    }
+    if (splat.weights.z > bestW || (abs(splat.weights.z - bestW) <= 0.0001 && splat.tileIds.z < bestId)) {
+        bestW = splat.weights.z;
+        bestId = splat.tileIds.z;
+    }
+    if (splat.weights.w > bestW || (abs(splat.weights.w - bestW) <= 0.0001 && splat.tileIds.w < bestId)) {
+        bestW = splat.weights.w;
+        bestId = splat.tileIds.w;
+    }
+
+    return bestId;
+}
+
+fn splatHasMeaningfulBlend(splat: SplatData) -> bool {
+    let dominant = splatDominantWeight(splat);
+    let rest = 1.0 - dominant;
+    return rest > 0.001;
+}
+
+fn splatChannelUsable(tileId: f32, weight: f32) -> bool {
+    return tileId >= 0.0 && tileId < 255.0 && weight > 0.001;
+}
+
+
+fn grassHash(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn grassValueNoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let n00 = grassHash(i);
+    let n10 = grassHash(i + vec2<f32>(1.0, 0.0));
+    let n01 = grassHash(i + vec2<f32>(0.0, 1.0));
+    let n11 = grassHash(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(n00, n10, u.x), mix(n01, n11, u.x), u.y);
+}
+
+fn grassPatchMask(worldPos: vec2<f32>) -> f32 {
+    let n1 = grassValueNoise(worldPos * 0.018 + vec2<f32>(3.7, 11.2));
+    let n2 = grassValueNoise(worldPos * 0.047 + vec2<f32>(17.3, 31.9));
+    let n3 = grassValueNoise(worldPos * 0.13 + vec2<f32>(53.1, 11.7));
+    let n4 = grassValueNoise(worldPos * 0.31 + vec2<f32>(89.3, 67.1));
+    let combined = n1 * 0.4 + n2 * 0.3 + n3 * 0.2 + n4 * 0.1;
+    let coarse = smoothstep(0.3, 0.7, combined);
+    let fine = mix(0.7, 1.0, n4);
+    return coarse * fine;
+}
+
+fn isGrassTileId(tileId: f32) -> f32 {
+    let tid = i32(round(tileId));
+    var mask: f32 = 0.0;
+    for (var i: i32 = 0; i < GRASS_TILE_ID_COUNT; i += 1) {
+        if (tid == GRASS_TILE_IDS[i]) {
+            mask = 1.0;
+        }
+    }
+    return mask;
+}
+
+fn addTypeWeight(
+    tid: i32,
+    w: f32,
+    types: ptr<function, array<i32, 8>>,
+    weights: ptr<function, array<f32, 8>>,
+    count: ptr<function, i32>
+) {
+    if (w <= 0.0) { return; }
+    if (tid < 0 || tid >= 100) { return; }
+
+    let n = *count;
+    for (var i = 0; i < n; i += 1) {
+        if ((*types)[i] == tid) {
+            (*weights)[i] += w;
+            return;
+        }
+    }
+
+    if (n < 8) {
+        (*types)[n] = tid;
+        (*weights)[n] = w;
+        *count = n + 1;
+    }
+}
+
+fn decodeSplatTileId(encoded: f32) -> i32 {
+    return i32(floor(encoded * 255.0 + 0.5));
+}
+
+fn splatEntryValid(tileId: i32, weight: f32) -> bool {
+    return tileId >= 0 && tileId < 255 && weight > 0.0001;
+}
+
+fn addAccumWeight(
+    tileId: i32,
+    weight: f32,
+    ids: ptr<function, array<i32, 16>>,
+    weights: ptr<function, array<f32, 16>>,
+    count: ptr<function, i32>
+) {
+    if (!splatEntryValid(tileId, weight)) {
+        return;
+    }
+
+    let n = *count;
+    for (var i = 0; i < n; i += 1) {
+        if ((*ids)[i] == tileId) {
+            (*weights)[i] = (*weights)[i] + weight;
+            return;
+        }
+    }
+
+    if (n < 16) {
+        (*ids)[n] = tileId;
+        (*weights)[n] = weight;
+        *count = n + 1;
+    }
+}
+
+fn insertTop4Accum(
+    tileId: i32,
+    weight: f32,
+    topIds: ptr<function, array<i32, 4>>,
+    topWeights: ptr<function, array<f32, 4>>
+) {
+    if (!splatEntryValid(tileId, weight)) {
+        return;
+    }
+
+    var insertAt = -1;
+    for (var i = 0; i < 4; i = i + 1) {
+        let existingId = (*topIds)[i];
+        let existingWeight = (*topWeights)[i];
+        if (
+            weight > existingWeight ||
+            (weight == existingWeight && (!splatEntryValid(existingId, existingWeight) || tileId < existingId))
+        ) {
+            insertAt = i;
+            break;
+        }
+    }
+
+    if (insertAt < 0) {
+        return;
+    }
+
+    for (var i = 3; i > insertAt; i = i - 1) {
+        (*topIds)[i] = (*topIds)[i - 1];
+        (*topWeights)[i] = (*topWeights)[i - 1];
+    }
+
+    (*topIds)[insertAt] = tileId;
+    (*topWeights)[insertAt] = weight;
+}
+
+fn loadSplatWeights(coord: vec2<i32>, layer: i32) -> vec4<f32> {
+    return clamp(textureLoad(splatDataMap, coord, layer, 0), vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
+fn sampleSplatWeightsFiltered(uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    return clamp(
+        ${useArrayTextures
+            ? 'textureSampleLevel(splatDataMap, chunkLinearSampler, uv, layer, 0.0)'
+            : 'textureSampleLevel(splatDataMap, chunkLinearSampler, uv, 0.0)'
+        },
+        vec4<f32>(0.0),
+        vec4<f32>(1.0)
+    );
+}
+
+fn loadSplatIndices(coord: vec2<i32>, layer: i32) -> vec4<i32> {
+    let s = textureLoad(splatIndexMap, coord, layer, 0);
+    return vec4<i32>(
+        decodeSplatTileId(s.r),
+        decodeSplatTileId(s.g),
+        decodeSplatTileId(s.b),
+        decodeSplatTileId(s.a)
+    );
+}
+
+fn loadSplatValidity(coord: vec2<i32>, layer: i32) -> bool {
+    return textureLoad(splatValidMap, coord, layer, 0).r > 0.5;
+}
+
+fn sampleFixedMaterialFamilyData(input: FragmentInput, layer: i32) -> SplatData {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    var weights = sampleSplatWeightsFiltered(uv, layer);
+    let total = weights.x + weights.y + weights.z + weights.w;
+    weights = select(vec4<f32>(1.0, 0.0, 0.0, 0.0), weights / max(total, 0.0001), total > 0.0001);
+
+    var result: SplatData;
+    result.tileIds = FIXED_MATERIAL_FAMILY_TILE_IDS;
+    result.weights = weights;
+    result.cellLocal = fract(uv * splatTexSize);
+    result.hasBoundary = splatHasMeaningfulBlend(result);
+    result.bilinearValid = true;
+    return result;
+}
+
+fn accumulateLoadedCornerMixture(
+    ids4: vec4<i32>,
+    weights4: vec4<f32>,
+    scale: f32,
+    ids: ptr<function, array<i32, 16>>,
+    weights: ptr<function, array<f32, 16>>,
+    count: ptr<function, i32>
+) {
+    let w = weights4 * scale;
+
+    addAccumWeight(ids4.x, w.x, ids, weights, count);
+    addAccumWeight(ids4.y, w.y, ids, weights, count);
+    addAccumWeight(ids4.z, w.z, ids, weights, count);
+    addAccumWeight(ids4.w, w.w, ids, weights, count);
+}
+
+fn splatIdSetsMatch(a: vec4<i32>, b: vec4<i32>) -> bool {
+    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+}
+
+fn buildAccumulatedTop4(
+    ids: ptr<function, array<i32, 16>>,
+    weights: ptr<function, array<f32, 16>>,
+    count: i32,
+    topIds: ptr<function, array<i32, 4>>,
+    topWeights: ptr<function, array<f32, 4>>
+) {
+    for (var i = 0; i < 4; i = i + 1) {
+        (*topIds)[i] = 255;
+        (*topWeights)[i] = 0.0;
+    }
+
+    for (var i = 0; i < count; i = i + 1) {
+        insertTop4Accum((*ids)[i], (*weights)[i], topIds, topWeights);
+    }
+
+    let sumTop =
+        (*topWeights)[0] +
+        (*topWeights)[1] +
+        (*topWeights)[2] +
+        (*topWeights)[3];
+    if (sumTop <= 0.0001) {
+        return;
+    }
+
+    for (var i = 0; i < 4; i = i + 1) {
+        (*topWeights)[i] = (*topWeights)[i] / sumTop;
+    }
+}
+
+fn splatWeightSum(splat: SplatData) -> f32 {
+    return splat.weights.x + splat.weights.y + splat.weights.z + splat.weights.w;
+}
+
+fn splatActiveCount(splat: SplatData) -> i32 {
+    var count = 0;
+    if (splat.weights.x > 0.0001) { count = count + 1; }
+    if (splat.weights.y > 0.0001) { count = count + 1; }
+    if (splat.weights.z > 0.0001) { count = count + 1; }
+    if (splat.weights.w > 0.0001) { count = count + 1; }
+    return count;
+}
+
+fn splatCategoryBlendColor(splat: SplatData) -> vec3<f32> {
+    var accum = vec3<f32>(0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let cat = debugTileCategory(splat.tileIds.x);
+        accum = accum + debugCategoryColor(cat) * splat.weights.x;
+        sum = sum + splat.weights.x;
+    }
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let cat = debugTileCategory(splat.tileIds.y);
+        accum = accum + debugCategoryColor(cat) * splat.weights.y;
+        sum = sum + splat.weights.y;
+    }
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let cat = debugTileCategory(splat.tileIds.z);
+        accum = accum + debugCategoryColor(cat) * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let cat = debugTileCategory(splat.tileIds.w);
+        accum = accum + debugCategoryColor(cat) * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return debugCategoryColor(debugTileCategory(splatDominantTileId(splat)));
+    }
+    return accum / sum;
+}
+
+fn maxAbsVec3(v: vec3<f32>) -> f32 {
+    let a = abs(v);
+    return max(max(a.x, a.y), a.z);
+}
+
+fn buildSplatDataFromRaw(
+    ids: vec4<i32>,
+    rawWeights: vec4<f32>,
+    cellLocal: vec2<f32>,
+    bilinearValid: bool
+) -> SplatData {
+    var weights = clamp(rawWeights, vec4<f32>(0.0), vec4<f32>(1.0));
+    let total = weights.x + weights.y + weights.z + weights.w;
+    if (total > 0.0001) {
+        weights = weights / total;
+    } else {
+        weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    }
+
+    var result: SplatData;
+    result.tileIds = vec4<f32>(
+        f32(ids.x),
+        f32(ids.y),
+        f32(ids.z),
+        f32(ids.w)
+    );
+    result.weights = weights;
+    result.cellLocal = cellLocal;
+    result.hasBoundary = splatHasMeaningfulBlend(result);
+    result.bilinearValid = bilinearValid;
+    return result;
+}
+
+fn splatPrimaryWeight(splat: SplatData, _local: vec2<f32>) -> f32 {
+    return splatDominantWeight(splat);
+}
+
+fn findSplatTop2(
+    splat: SplatData,
+    bestI: ptr<function, i32>,
+    secondI: ptr<function, i32>,
+    top2Sum: ptr<function, f32>
+) -> bool {
+    let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+    let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+
+    var first = -1;
+    var second = -1;
+
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        if (!splatChannelUsable(ids[i], ws[i])) {
+            continue;
+        }
+        if (first < 0 || ws[i] > ws[first]) {
+            second = first;
+            first = i;
+            continue;
+        }
+        if (second < 0 || ws[i] > ws[second]) {
+            second = i;
+        }
+    }
+
+    if (first < 0 || second < 0) {
+        return false;
+    }
+
+    *bestI = first;
+    *secondI = second;
+    *top2Sum = ws[first] + ws[second];
+    return *top2Sum > 0.0001;
+}
+
+fn sampleSplatData(input: FragmentInput, layer: i32) -> SplatData {
+    if (USE_FIXED_MATERIAL_FAMILIES) {
+        return sampleFixedMaterialFamilyData(input, layer);
+    }
+
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let centerCoord = clamp(
+        vec2<i32>(floor(uv * splatTexSize)),
+        vec2<i32>(0),
+        vec2<i32>(splatTexSize) - vec2<i32>(1)
+    );
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let f = fract(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+
+    let c00 = clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord);
+    let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
+    let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
+    let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
+
+    // Runtime ID-set check replaces the precomputed splatValidMap, which had
+    // clamping bugs at chunk edges and could be stale relative to the current
+    // splatIndexMap. Fast path only runs when all 4 footprint corners have
+    // identical ordered ID sets — same condition splatValidityCompute intended.
+    let ids00 = loadSplatIndices(c00, layer);
+    let ids10 = loadSplatIndices(c10, layer);
+    let ids01 = loadSplatIndices(c01, layer);
+    let ids11 = loadSplatIndices(c11, layer);
+    let bilinearValid = splatIdSetsMatch(ids00, ids10) &&
+                        splatIdSetsMatch(ids00, ids01) &&
+                        splatIdSetsMatch(ids00, ids11);
+
+    var topIds: array<i32, 4>;
+    var topWeights: array<f32, 4>;
+
+    if (bilinearValid) {
+        // All 4 corners share the same ordered ID set. Use explicit corner loads
+        // with manual bilinear to match the fallback path numerically. The previous
+        // sampleSplatWeightsFiltered (hardware textureSampleLevel) produced a
+        // systematic per-pixel difference from the manual accumulation path, causing
+        // a visible seam at the bilinearValid boundary (confirmed by mode 88).
+        let weights00 = loadSplatWeights(c00, layer);
+        let weights10 = loadSplatWeights(c10, layer);
+        let weights01 = loadSplatWeights(c01, layer);
+        let weights11 = loadSplatWeights(c11, layer);
+        let w00 = (1.0 - f.x) * (1.0 - f.y);
+        let w10 = f.x * (1.0 - f.y);
+        let w01 = (1.0 - f.x) * f.y;
+        let w11 = f.x * f.y;
+        topIds = array<i32, 4>(ids00.x, ids00.y, ids00.z, ids00.w);
+        topWeights = array<f32, 4>(
+            weights00.x*w00 + weights10.x*w10 + weights01.x*w01 + weights11.x*w11,
+            weights00.y*w00 + weights10.y*w10 + weights01.y*w01 + weights11.y*w11,
+            weights00.z*w00 + weights10.z*w10 + weights01.z*w01 + weights11.z*w11,
+            weights00.w*w00 + weights10.w*w10 + weights01.w*w01 + weights11.w*w11,
+        );
+    } else {
+        // IDs for all 4 corners already loaded above for the validity check.
+        let weights00 = loadSplatWeights(c00, layer);
+        let weights10 = loadSplatWeights(c10, layer);
+        let weights01 = loadSplatWeights(c01, layer);
+        let weights11 = loadSplatWeights(c11, layer);
+
+        var accumIds: array<i32, 16>;
+        var accumWeights: array<f32, 16>;
+        var accumCount: i32 = 0;
+
+        accumulateLoadedCornerMixture(ids00, weights00, (1.0 - f.x) * (1.0 - f.y), &accumIds, &accumWeights, &accumCount);
+        accumulateLoadedCornerMixture(ids10, weights10, f.x * (1.0 - f.y),         &accumIds, &accumWeights, &accumCount);
+        accumulateLoadedCornerMixture(ids01, weights01, (1.0 - f.x) * f.y,         &accumIds, &accumWeights, &accumCount);
+        accumulateLoadedCornerMixture(ids11, weights11, f.x * f.y,                 &accumIds, &accumWeights, &accumCount);
+
+        buildAccumulatedTop4(&accumIds, &accumWeights, accumCount, &topIds, &topWeights);
+
+        // The fallback combines mismatched bilinear corners and can build slots
+        // in accumulation order. Re-sort there so later blend logic sees stable
+        // channel identity. The bilinear-valid path already reads pre-sorted
+        // splatIndexMap channels from generation, so it deliberately skips this
+        // compare/swap network on the hot path.
+        sortTop4ByTileId(&topIds, &topWeights);
+    }
+
+    let topSum = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
+    if (topSum <= 0.0001) {
+        let centerWeights = loadSplatWeights(centerCoord, layer);
+        let centerIds = loadSplatIndices(centerCoord, layer);
+        let centerSum = max(centerWeights.x + centerWeights.y + centerWeights.z + centerWeights.w, 0.0001);
+        topIds = array<i32, 4>(centerIds.x, centerIds.y, centerIds.z, centerIds.w);
+        topWeights = array<f32, 4>(
+            centerWeights.x / centerSum,
+            centerWeights.y / centerSum,
+            centerWeights.z / centerSum,
+            centerWeights.w / centerSum
+        );
+    } else {
+        topWeights = array<f32, 4>(
+            topWeights[0] / topSum,
+            topWeights[1] / topSum,
+            topWeights[2] / topSum,
+            topWeights[3] / topSum
+        );
+    }
+
+    var result: SplatData;
+    result.tileIds = vec4<f32>(
+        f32(topIds[0]),
+        f32(topIds[1]),
+        f32(topIds[2]),
+        f32(topIds[3])
+    );
+    result.weights = vec4<f32>(
+        topWeights[0],
+        topWeights[1],
+        topWeights[2],
+        topWeights[3]
+    );
+
+    let total = splatWeightSum(result);
+    if (total > 0.0001) {
+        result.weights = result.weights / total;
+    } else {
+        result.weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    }
+
+    result.cellLocal = fract(uv * splatTexSize);
+    result.hasBoundary = splatHasMeaningfulBlend(result);
+    result.bilinearValid = bilinearValid;
+    return result;
+}
+
+fn sampleSplatDataUnionReference(input: FragmentInput, layer: i32) -> SplatData {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let centerCoord = clamp(
+        vec2<i32>(floor(uv * splatTexSize)),
+        vec2<i32>(0),
+        vec2<i32>(splatTexSize) - vec2<i32>(1)
+    );
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let f = fract(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+
+    let c00 = clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord);
+    let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
+    let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
+    let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
+
+    let ids00 = loadSplatIndices(c00, layer);
+    let ids10 = loadSplatIndices(c10, layer);
+    let ids01 = loadSplatIndices(c01, layer);
+    let ids11 = loadSplatIndices(c11, layer);
+    let weights00 = loadSplatWeights(c00, layer);
+    let weights10 = loadSplatWeights(c10, layer);
+    let weights01 = loadSplatWeights(c01, layer);
+    let weights11 = loadSplatWeights(c11, layer);
+
+    var accumIds: array<i32, 16>;
+    var accumWeights: array<f32, 16>;
+    var accumCount: i32 = 0;
+
+    accumulateLoadedCornerMixture(ids00, weights00, (1.0 - f.x) * (1.0 - f.y), &accumIds, &accumWeights, &accumCount);
+    accumulateLoadedCornerMixture(ids10, weights10, f.x * (1.0 - f.y),         &accumIds, &accumWeights, &accumCount);
+    accumulateLoadedCornerMixture(ids01, weights01, (1.0 - f.x) * f.y,         &accumIds, &accumWeights, &accumCount);
+    accumulateLoadedCornerMixture(ids11, weights11, f.x * f.y,                 &accumIds, &accumWeights, &accumCount);
+
+    var topIds: array<i32, 4>;
+    var topWeights: array<f32, 4>;
+    buildAccumulatedTop4(&accumIds, &accumWeights, accumCount, &topIds, &topWeights);
+    sortTop4ByTileId(&topIds, &topWeights);
+
+    let topSum = topWeights[0] + topWeights[1] + topWeights[2] + topWeights[3];
+    if (topSum <= 0.0001) {
+        let centerWeights = loadSplatWeights(centerCoord, layer);
+        let centerIds = loadSplatIndices(centerCoord, layer);
+        let centerSum = max(centerWeights.x + centerWeights.y + centerWeights.z + centerWeights.w, 0.0001);
+        topIds = array<i32, 4>(centerIds.x, centerIds.y, centerIds.z, centerIds.w);
+        topWeights = array<f32, 4>(
+            centerWeights.x / centerSum,
+            centerWeights.y / centerSum,
+            centerWeights.z / centerSum,
+            centerWeights.w / centerSum
+        );
+    } else {
+        topWeights = array<f32, 4>(
+            topWeights[0] / topSum,
+            topWeights[1] / topSum,
+            topWeights[2] / topSum,
+            topWeights[3] / topSum
+        );
+    }
+
+    var result: SplatData;
+    result.tileIds = vec4<f32>(
+        f32(topIds[0]),
+        f32(topIds[1]),
+        f32(topIds[2]),
+        f32(topIds[3])
+    );
+    result.weights = vec4<f32>(
+        topWeights[0],
+        topWeights[1],
+        topWeights[2],
+        topWeights[3]
+    );
+
+    let total = splatWeightSum(result);
+    if (total > 0.0001) {
+        result.weights = result.weights / total;
+    } else {
+        result.weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    }
+
+    result.cellLocal = fract(uv * splatTexSize);
+    result.hasBoundary = splatHasMeaningfulBlend(result);
+    result.bilinearValid = splatIdSetsMatch(ids00, ids10) &&
+                           splatIdSetsMatch(ids00, ids01) &&
+                           splatIdSetsMatch(ids00, ids11);
+    return result;
+}
+
+fn sampleStoredSplatTexel(input: FragmentInput, layer: i32) -> SplatData {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = clamp(
+        vec2<i32>(floor(uv * splatTexSize)),
+        vec2<i32>(0),
+        vec2<i32>(splatTexSize) - vec2<i32>(1)
+    );
+    return buildSplatDataFromRaw(
+        loadSplatIndices(coord, layer),
+        loadSplatWeights(coord, layer),
+        fract(uv * splatTexSize),
+        loadSplatValidity(coord, layer)
+    );
+}
+
+fn sampleSplatDataFastReference(input: FragmentInput, layer: i32) -> SplatData {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+    let c00 = clamp(vec2<i32>(base), vec2<i32>(0), maxCoord);
+
+    return buildSplatDataFromRaw(
+        loadSplatIndices(c00, layer),
+        sampleSplatWeightsFiltered(uv, layer),
+        fract(uv * splatTexSize),
+        loadSplatValidity(c00, layer)
+    );
+}
+
+fn splatFootprintPrecomputedValid(input: FragmentInput, layer: i32) -> bool {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+    let c00 = clamp(vec2<i32>(base), vec2<i32>(0), maxCoord);
+    return loadSplatValidity(c00, layer);
+}
+
+fn splatFootprintRuntimeOrderedValid(input: FragmentInput, layer: i32) -> bool {
+    return splatCornerMismatchFactor(input, layer) <= 0.0001;
+}
+
+fn luma709(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn splatGridAmount(input: FragmentInput) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+    let gridCell = fract(uv * splatSize);
+    let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
+    return 1.0 - smoothstep(0.018, 0.045, edgeDist);
+}
+
+fn splatCornerMismatchFactor(input: FragmentInput, layer: i32) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+
+    let c00 = clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord);
+    let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
+    let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
+    let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
+
+    let ids00 = loadSplatIndices(c00, layer);
+    let ids10 = loadSplatIndices(c10, layer);
+    let ids01 = loadSplatIndices(c01, layer);
+    let ids11 = loadSplatIndices(c11, layer);
+
+    var mismatches = 0.0;
+    if (!splatIdSetsMatch(ids00, ids10)) { mismatches = mismatches + 1.0; }
+    if (!splatIdSetsMatch(ids00, ids01)) { mismatches = mismatches + 1.0; }
+    if (!splatIdSetsMatch(ids00, ids11)) { mismatches = mismatches + 1.0; }
+    return mismatches / 3.0;
+}
+
+fn splatIntIdValid(id: i32) -> bool {
+    return id >= 0 && id < 255;
+}
+
+fn splatFloatIdValid(id: f32) -> bool {
+    return splatIntIdValid(i32(floor(id + 0.5)));
+}
+
+fn splatFloatIdsEqual(a: f32, b: f32) -> bool {
+    return i32(floor(a + 0.5)) == i32(floor(b + 0.5));
+}
+
+fn splatContainsFloatId(splat: SplatData, id: f32) -> bool {
+    if (!splatFloatIdValid(id)) { return false; }
+    var found = false;
+    if (splatFloatIdValid(splat.tileIds.x) && splatFloatIdsEqual(splat.tileIds.x, id)) { found = true; }
+    if (splatFloatIdValid(splat.tileIds.y) && splatFloatIdsEqual(splat.tileIds.y, id)) { found = true; }
+    if (splatFloatIdValid(splat.tileIds.z) && splatFloatIdsEqual(splat.tileIds.z, id)) { found = true; }
+    if (splatFloatIdValid(splat.tileIds.w) && splatFloatIdsEqual(splat.tileIds.w, id)) { found = true; }
+    return found;
+}
+
+fn splatWeightForFloatId(splat: SplatData, id: f32) -> f32 {
+    if (!splatFloatIdValid(id)) { return 0.0; }
+    var w = 0.0;
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x) && splatFloatIdsEqual(splat.tileIds.x, id)) {
+        w = w + splat.weights.x;
+    }
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y) && splatFloatIdsEqual(splat.tileIds.y, id)) {
+        w = w + splat.weights.y;
+    }
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z) && splatFloatIdsEqual(splat.tileIds.z, id)) {
+        w = w + splat.weights.z;
+    }
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w) && splatFloatIdsEqual(splat.tileIds.w, id)) {
+        w = w + splat.weights.w;
+    }
+    return w;
+}
+
+fn splatIdAwareWeightDelta(a: SplatData, b: SplatData) -> f32 {
+    var delta = 0.0;
+
+    if (splatChannelUsable(a.tileIds.x, a.weights.x)) {
+        delta = delta + abs(a.weights.x - splatWeightForFloatId(b, a.tileIds.x));
+    }
+    if (splatChannelUsable(a.tileIds.y, a.weights.y)) {
+        delta = delta + abs(a.weights.y - splatWeightForFloatId(b, a.tileIds.y));
+    }
+    if (splatChannelUsable(a.tileIds.z, a.weights.z)) {
+        delta = delta + abs(a.weights.z - splatWeightForFloatId(b, a.tileIds.z));
+    }
+    if (splatChannelUsable(a.tileIds.w, a.weights.w)) {
+        delta = delta + abs(a.weights.w - splatWeightForFloatId(b, a.tileIds.w));
+    }
+
+    if (splatChannelUsable(b.tileIds.x, b.weights.x) && !splatContainsFloatId(a, b.tileIds.x)) {
+        delta = delta + b.weights.x;
+    }
+    if (splatChannelUsable(b.tileIds.y, b.weights.y) && !splatContainsFloatId(a, b.tileIds.y)) {
+        delta = delta + b.weights.y;
+    }
+    if (splatChannelUsable(b.tileIds.z, b.weights.z) && !splatContainsFloatId(a, b.tileIds.z)) {
+        delta = delta + b.weights.z;
+    }
+    if (splatChannelUsable(b.tileIds.w, b.weights.w) && !splatContainsFloatId(a, b.tileIds.w)) {
+        delta = delta + b.weights.w;
+    }
+
+    // L1 distance between normalized mixtures ranges from 0 to 2.
+    return clamp(delta * 0.5, 0.0, 1.0);
+}
+
+fn splatDominantCategoryDiff(a: SplatData, b: SplatData) -> f32 {
+    let ca = debugTileCategory(splatDominantTileId(a));
+    let cb = debugTileCategory(splatDominantTileId(b));
+    return select(0.0, 1.0, ca != cb);
+}
+
+fn splatIdSetContains(ids: vec4<i32>, id: i32) -> bool {
+    if (!splatIntIdValid(id)) { return false; }
+    return ids.x == id || ids.y == id || ids.z == id || ids.w == id;
+}
+
+fn splatIdSetsEquivalent(a: vec4<i32>, b: vec4<i32>) -> bool {
+    var ok = true;
+    if (splatIntIdValid(a.x) && !splatIdSetContains(b, a.x)) { ok = false; }
+    if (splatIntIdValid(a.y) && !splatIdSetContains(b, a.y)) { ok = false; }
+    if (splatIntIdValid(a.z) && !splatIdSetContains(b, a.z)) { ok = false; }
+    if (splatIntIdValid(a.w) && !splatIdSetContains(b, a.w)) { ok = false; }
+    if (splatIntIdValid(b.x) && !splatIdSetContains(a, b.x)) { ok = false; }
+    if (splatIntIdValid(b.y) && !splatIdSetContains(a, b.y)) { ok = false; }
+    if (splatIntIdValid(b.z) && !splatIdSetContains(a, b.z)) { ok = false; }
+    if (splatIntIdValid(b.w) && !splatIdSetContains(a, b.w)) { ok = false; }
+    return ok;
+}
+
+fn splatCornerUnorderedMismatchFactor(input: FragmentInput, layer: i32) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+    let splatTexSize = vec2<f32>(textureDimensions(splatDataMap));
+    let coord = uv * splatTexSize - 0.5;
+    let base = floor(coord);
+    let maxCoord = vec2<i32>(splatTexSize) - vec2<i32>(1);
+
+    let c00 = clamp(vec2<i32>(base),                  vec2<i32>(0), maxCoord);
+    let c10 = clamp(vec2<i32>(base) + vec2<i32>(1,0), vec2<i32>(0), maxCoord);
+    let c01 = clamp(vec2<i32>(base) + vec2<i32>(0,1), vec2<i32>(0), maxCoord);
+    let c11 = clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord);
+
+    let ids00 = loadSplatIndices(c00, layer);
+    let ids10 = loadSplatIndices(c10, layer);
+    let ids01 = loadSplatIndices(c01, layer);
+    let ids11 = loadSplatIndices(c11, layer);
+
+    var mismatches = 0.0;
+    if (!splatIdSetsEquivalent(ids00, ids10)) { mismatches = mismatches + 1.0; }
+    if (!splatIdSetsEquivalent(ids00, ids01)) { mismatches = mismatches + 1.0; }
+    if (!splatIdSetsEquivalent(ids00, ids11)) { mismatches = mismatches + 1.0; }
+    return mismatches / 3.0;
+}
+
+fn buildSphericalTBN(sphereDir: vec3<f32>) -> mat3x3<f32> {
+    let up = normalize(sphereDir);
+    var reference = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(dot(up, reference)) > 0.99) {
+        reference = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let tangent = normalize(cross(up, reference));
+    let bitangent = normalize(cross(up, tangent));
+    return mat3x3<f32>(tangent, bitangent, up);
+}
+
+fn calculateGeometricNormal(input: FragmentInput) -> vec3<f32> {
+    let dpdxWorld = dpdx(input.vWorldPosition);
+    let dpdyWorld = dpdy(input.vWorldPosition);
+    var n = normalize(cross(dpdyWorld, dpdxWorld));
+    if (dot(n, n) < 0.01) {
+        n = normalize(input.vSphereDir);
+    }
+    if (dot(n, input.vSphereDir) < 0.0) {
+        n = -n;
+    }
+    return n;
+}
+
+fn calculateNormal(input: FragmentInput, layer: i32) -> vec3<f32> {
+    let uv = applyChunkAtlasUV(input.vUv, normalTexture, input.vAtlasOffset, input.vAtlasScale);
+    ${normalTextureFilterable
+        ? `
+    // Diagnostic: force mip 0 to test whether border seams are being widened
+    // by normal-map mip generation / trilinear blending across inconsistent tiles.
+    let s = textureSampleLevel(normalTexture, chunkLinearSampler, uv, layer, 0.0);`
+        : `
+    let s = sampleRGBA32FBilinear(normalTexture, uv, layer);`
+    }
+    let tangentNormal = hemiOctDecode(s.rg * 2.0 - 1.0);
+    let TBN = buildSphericalTBN(input.vSphereDir);
+    var worldNormal = normalize(TBN * tangentNormal);
+    if (dot(worldNormal, worldNormal) < 0.01) {
+        worldNormal = normalize(input.vSphereDir);
+    }
+    if (dot(worldNormal, input.vSphereDir) < 0.0) {
+        worldNormal = -worldNormal;
+    }
+    return worldNormal;
+}
+
+fn sampleSlope(input: FragmentInput, layer: i32) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, normalTexture, input.vAtlasOffset, input.vAtlasScale);
+    ${normalTextureFilterable
+        ? `return textureSampleLevel(normalTexture, chunkLinearSampler, uv, layer, 0.0).b;`
+        : `return sampleRGBA32FBilinear(normalTexture, uv, layer).b;`
+    }
+}
+
+fn sampleHeightDebug(input: FragmentInput, layer: i32) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, heightTexture_f, input.vAtlasOffset, input.vAtlasScale);
+    let h = sampleRGBA32FNearest(heightTexture_f, uv, layer).r;
+    return clamp(h * 2.0 + 0.5, 0.0, 1.0);
+}
+// ----------------------------------------------------------------------------
+// Tile variant selection helpers
+// ----------------------------------------------------------------------------
+
+fn hash12(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Sample the zone mask at the snapped tile center — used for micro variant selection
+// so that the variant is stable per tile.
+fn sampleChunkZoneMask(input: FragmentInput, layer: i32) -> f32 {
+    let tilesPerSide = fragUniforms.chunkWidth;
+    let tileUV = snappedTileCenterUV(input.vUv, tilesPerSide);
+    let uv = applyChunkAtlasUV(tileUV, macroMaskTexture, input.vAtlasOffset, input.vAtlasScale);
+    let s = sampleRGBA32FNearest(macroMaskTexture, uv, layer);
+    return clamp(s.r, 0.0, 1.0);
+}
+
+// Sample the zone mask with BILINEAR filtering at the fragment's actual UV —
+// used for smooth macro blending that doesn't snap to tile boundaries.
+fn sampleZoneMaskSmooth(input: FragmentInput, layer: i32) -> f32 {
+    let uv = applyChunkAtlasUV(input.vUv, macroMaskTexture, input.vAtlasOffset, input.vAtlasScale);
+    let s = sampleRGBA32FBilinear(macroMaskTexture, uv, layer);
+    return clamp(s.r, 0.0, 1.0);
+}
+
+fn calculateRotationQuarter(worldTileCoord: vec2<f32>, tileId: f32, season: i32, seed: f32) -> i32 {
+    let h = hash12(worldTileCoord + vec2<f32>(tileId * 0.17, seed + f32(season) * 0.19));
+    return clamp(i32(floor(h * 4.0)), 0, 3);
+}
+
+fn rotateUVQuarter(uv: vec2<f32>, quarterTurn: i32) -> vec2<f32> {
+    if (quarterTurn == 1) {
+        return vec2<f32>(1.0 - uv.y, uv.x);
+    }
+    if (quarterTurn == 2) {
+        return vec2<f32>(1.0 - uv.x, 1.0 - uv.y);
+    }
+    if (quarterTurn == 3) {
+        return vec2<f32>(uv.y, 1.0 - uv.x);
+    }
+    return uv;
+}
+
+fn rotateDerivQuarter(v: vec2<f32>, quarterTurn: i32) -> vec2<f32> {
+    if (quarterTurn == 1) {
+        return vec2<f32>(-v.y, v.x);
+    }
+    if (quarterTurn == 2) {
+        return vec2<f32>(-v.x, -v.y);
+    }
+    if (quarterTurn == 3) {
+        return vec2<f32>(v.y, -v.x);
+    }
+    return v;
+}
+
+// ----------------------------------------------------------------------------
+// Procedural noise for macro masking
+// ----------------------------------------------------------------------------
+
+fn fade(t: f32) -> f32 {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn perlin2D(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let n00 = hash12(i);
+    let n01 = hash12(i + vec2<f32>(0.0, 1.0));
+    let n10 = hash12(i + vec2<f32>(1.0, 0.0));
+    let n11 = hash12(i + vec2<f32>(1.0, 1.0));
+    let u = vec2<f32>(fade(f.x), fade(f.y));
+    return mix(mix(n00, n10, u.x), mix(n01, n11, u.x), u.y) * 2.0 - 1.0;
+}
+
+fn octaveNoise(p: vec2<f32>, octaves: i32) -> f32 {
+    var v: f32 = 0.0;
+    var amp: f32 = 1.0;
+    var freq: f32 = 1.0;
+    var norm: f32 = 0.0;
+    for (var i: i32 = 0; i < octaves; i += 1) {
+        v += perlin2D(p * freq) * amp;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return v / norm;
+}
+fn macroVariationNoise(worldPos: vec2<f32>) -> f32 {
+    let p = worldPos + vec2<f32>(7919.0, 10007.0);
+    let n1 = octaveNoise(p * 0.0002, 3);
+    let n2 = octaveNoise(p * 0.0007 + vec2<f32>(173.7, 291.3), 3);
+    let n3 = octaveNoise(p * 0.003 + vec2<f32>(571.1, 839.7), 2);
+    let combined = n1 * 0.5 + n2 * 0.3 + n3 * 0.2;
+    let normalized = combined * 0.5 + 0.5;
+    return smoothstep(0.1, 0.9, normalized);
+}
+${proceduralDetailCode}
+
+// Helper to determine micro pattern style from tile ID
+fn getMicroPatternStyle(tileId: f32) -> i32 {
+    let tid = i32(round(tileId));
+    /*
+    // Rock types (example IDs - adjust to your tile type mapping)
+    if (tid == 4 || tid == 5 || tid == 14 || tid == 15) {
+        return 1; // Cracks
+    }
+    
+    // Grass/forest types
+    if (tid == 1 || tid == 2 || tid == 6 || tid == 7 || tid == 10 || tid == 11) {
+        return 2; // Ditches
+    }
+    
+    // Sand types
+    if (tid == 3 || tid == 8 || tid == 12 || tid == 16) {
+        return 3; // Waves
+    }
+    */
+    // Default for all others
+    return 0; // General micro
+}
+
+fn nearDetailPatternCoord(worldPos: vec2<f32>, patternStyle: i32) -> vec2<f32> {
+    let scale = max(NEAR_DETAIL_SCALE_METERS, 0.01);
+    var p = vec2<f32>(
+        worldPos.x * 0.86 + worldPos.y * 0.31,
+        -worldPos.x * 0.23 + worldPos.y * 0.93
+    ) / scale;
+    // Pattern styles are intentionally cheap coordinate transforms. The hash
+    // core stays shared so biome-specific detail can expand without adding new
+    // texture reads or divergent atlas paths.
+    if (patternStyle == 1) {
+        p = vec2<f32>(worldPos.x * 0.72 + worldPos.y * 0.16, worldPos.y * 1.55) / scale;
+    } else if (patternStyle == 2) {
+        p = vec2<f32>(worldPos.x * 0.48, worldPos.x * 0.10 + worldPos.y * 2.10) / scale;
+    } else if (patternStyle == 3) {
+        p = vec2<f32>(worldPos.x * 1.80 + worldPos.y * 0.22, worldPos.y * 0.62) / scale;
+    }
+    return p;
+}
+
+fn nearDetailCrevice(worldPos: vec2<f32>, patternStyle: i32) -> f32 {
+    let p = nearDetailPatternCoord(worldPos + vec2<f32>(113.7, 271.9), patternStyle);
+    let cell = floor(p);
+    let local = fract(p) - vec2<f32>(0.5);
+
+    let activeHash = hash12(cell + vec2<f32>(5.0, 17.0));
+    let creviceCellMask = smoothstep(1.0 - NEAR_DETAIL_CREVICE_COVERAGE, 1.0, activeHash);
+
+    let orientHash = hash12(cell + vec2<f32>(23.0, 41.0));
+    var dir = vec2<f32>(1.0, 0.0);
+    if (orientHash > 0.25 && orientHash <= 0.5) {
+        dir = vec2<f32>(0.7071, 0.7071);
+    } else if (orientHash > 0.5 && orientHash <= 0.75) {
+        dir = vec2<f32>(0.0, 1.0);
+    } else if (orientHash > 0.75) {
+        dir = vec2<f32>(-0.7071, 0.7071);
+    }
+    let side = vec2<f32>(-dir.y, dir.x);
+
+    let offset = vec2<f32>(
+        hash12(cell + vec2<f32>(71.0, 13.0)) - 0.5,
+        hash12(cell + vec2<f32>(29.0, 97.0)) - 0.5
+    ) * 0.32;
+    let q = local - offset;
+    let distToLine = abs(dot(q, side));
+    let alongLine = abs(dot(q, dir));
+    let width = NEAR_DETAIL_CREVICE_WIDTH;
+    let line = 1.0 - smoothstep(width, width + 0.018, distToLine);
+    let segment = 1.0 - smoothstep(0.28, 0.48, alongLine);
+    let strengthHash = hash12(cell + vec2<f32>(131.0, 193.0));
+    return creviceCellMask * line * segment * mix(0.55, 1.0, strengthHash);
+}
+
+fn applyNearProceduralDetail(
+    color: vec3<f32>,
+    worldPos: vec2<f32>,
+    distanceToCamera: f32,
+    patternStyle: i32
+) -> vec3<f32> {
+    let fade = 1.0 - smoothstep(NEAR_DETAIL_FADE_START, NEAR_DETAIL_FADE_END, distanceToCamera);
+    let crevice = nearDetailCrevice(worldPos, patternStyle);
+    let detail = 1.0 - crevice * NEAR_DETAIL_STRENGTH * fade;
+    return clamp(color * detail, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+// ----------------------------------------------------------------------------
+// Atlas layer lookup and sampling
+// ----------------------------------------------------------------------------
+
+fn textureLookupRow(tileId: f32, rowCount: i32) -> i32 {
+    return clamp(i32(round(tileId)), 0, max(rowCount - 1, 0));
+}
+
+// Runtime texture variants are deliberately bypassed in the terrain hot path.
+// The config writes a collapsed canonical texture row for every generated tile
+// ID, so this lookup can use the tile ID directly without shader-side category
+// remapping. Keep cheap rotational variety; add richer variety through
+// world-space detail or prebaked resolved colors.
+fn lookupTileLayer(tileId: f32, season: i32) -> i32 {
+    let lookupSize = vec2<i32>(textureDimensions(tileTypeLookup));
+    let maxVariants = lookupSize.x / 4;
+    let x = (season * maxVariants) % lookupSize.x;
+    let y = textureLookupRow(tileId, lookupSize.y);
+    let sample = textureLoad(tileTypeLookup, vec2<i32>(x, y), 0);
+    return i32(round(sample.r));
+}
+
+fn lookupMacroTileLayer(tileId: f32, season: i32) -> i32 {
+    let lookupSize = vec2<i32>(textureDimensions(macroTileTypeLookup));
+    let maxVariants = lookupSize.x / 4;
+    let x = (season * maxVariants) % lookupSize.x;
+    let y = textureLookupRow(tileId, lookupSize.y);
+    let sample = textureLoad(macroTileTypeLookup, vec2<i32>(x, y), 0);
+    return i32(round(sample.r));
+}
+
+fn sampleAtlasLayer(
+    layer: i32,
+    tileUv: vec2<f32>,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>
+) -> vec4<f32> {
+    if (USE_POINT_SAMPLING) {
+        return textureSampleGrad(atlasTexture, nearestSampler, tileUv, layer, ddx_vUv, ddy_vUv);
+    }
+    return textureSampleGrad(atlasTexture, textureSampler, tileUv, layer, ddx_vUv, ddy_vUv);
+}
+
+fn sampleMacroAtlasLayer(
+    layer: i32,
+    tileUv: vec2<f32>,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>
+) -> vec4<f32> {
+    if (USE_POINT_SAMPLING) {
+        return textureSampleGrad(level2AtlasTexture, nearestSampler, tileUv, layer, ddx_vUv, ddy_vUv);
+    }
+    return textureSampleGrad(level2AtlasTexture, textureSampler, tileUv, layer, ddx_vUv, ddy_vUv);
+}
+
+fn sampleTileColor(
+    tileId: f32,
+    worldTileCoord: vec2<f32>,
+    localUV: vec2<f32>,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>
+) -> vec4<f32> {
+    var atlasLayer = lookupTileLayer(tileId, activeSeason);
+    var rotatedLocal = localUV;
+    var ddx_rot = ddx_vUv;
+    var ddy_rot = ddy_vUv;
+    if (USE_VARIANT_ROTATION) {
+        let r = calculateRotationQuarter(worldTileCoord, tileId, activeSeason, 9547.0);
+        rotatedLocal = rotateUVQuarter(localUV, r);
+        ddx_rot = rotateDerivQuarter(ddx_vUv, r);
+        ddy_rot = rotateDerivQuarter(ddy_vUv, r);
+    }
+    return sampleAtlasLayer(atlasLayer, rotatedLocal, ddx_rot, ddy_rot);
+}
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Contact AO
+//
+// The AO mask is baked per-tile by TerrainAOBaker from the same
+// deterministic placement grid the scatter shader uses. Each tree that
+// would scatter darkens the mask around its base; ground cover adds
+// smaller pockets. We sample with the standard atlas UV transform so
+// fallback tiles correctly read their parent's AO.
+//
+// AO modulates AMBIENT only. Direct sun light already has proper
+// shadow-map occlusion; applying AO to it would double-darken.
+// ────────────────────────────────────────────────────────────────────────
+${terrainAOCode}
+${groundFieldCode}
+
+// Sample macro (level2) atlas for a given tile type.
+// Uses a different rotation seed and hash-based variant selection
+// so the macro pattern doesn't align with the micro pattern.
+fn sampleMacroTileColor(
+    tileId: f32,
+    worldTileCoord: vec2<f32>,
+    localUV: vec2<f32>,
+    activeSeason: i32,
+    ddx_uv: vec2<f32>,
+    ddy_uv: vec2<f32>
+) -> vec4<f32> {
+    let r = calculateRotationQuarter(worldTileCoord, tileId, activeSeason, 100.0);
+
+    let macroLayer = lookupMacroTileLayer(tileId, activeSeason);
+    let rotatedLocal = rotateUVQuarter(localUV, r);
+
+    let ddx_rot = rotateDerivQuarter(ddx_uv, r);
+    let ddy_rot = rotateDerivQuarter(ddy_uv, r);
+
+    return sampleMacroAtlasLayer(macroLayer, rotatedLocal, ddx_rot, ddy_rot);
+}
+
+fn sampleMicroTexture(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32
+) -> vec4<f32> {
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+    let tileId = sampleChunkTileId(input, layer);
+    return sampleTileColor(tileId, worldTileCoord, local, activeSeason, ddx_vUv, ddy_vUv);
+}
+
+fn computeNearToMidDetailFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_NEAR_TO_MID_FADE) {
+        return 1.0;
+    }
+    let fadeStart = max(fragUniforms.chunkWidth * NEAR_TO_MID_FADE_START_CHUNKS, 0.0);
+    let fadeEnd = max(fragUniforms.chunkWidth * NEAR_TO_MID_FADE_END_CHUNKS, fadeStart + 0.001);
+    return 1.0 - smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
+}
+
+fn computeLod0ResolvedColorFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_LOD0_RESOLVED_COLOR) {
+        return 0.0;
+    }
+    // Chunk-relative, not a fixed meters window — mode-83 diagnostic
+    // (2026-09-30) showed a fixed-meters window was always either fully
+    // 0 or fully 1 across every visible LOD4 chunk, because LOD4's actual
+    // switch-to-LOD5 distance scales with chunk size (varies by depth) and
+    // a hardcoded meters value only ever matches one specific case. Mirrors
+    // computeNearToMidDetailFade's existing chunkWidth-relative pattern.
+    let fadeStart = max(fragUniforms.chunkWidth * LOD0_RESOLVED_COLOR_FADE_START_CHUNKS, 0.0);
+    let fadeEnd = max(fragUniforms.chunkWidth * LOD0_RESOLVED_COLOR_FADE_END_CHUNKS, fadeStart + 0.001);
+    return smoothstep(fadeStart, fadeEnd, input.vDistanceToCamera);
+}
+
+fn computeLod0AOFade(input: FragmentInput) -> f32 {
+    if (!ENABLE_LOD0_AO_FADE) {
+        return 0.0;
+    }
+    return smoothstep(
+        LOD0_AO_FADE_START,
+        LOD0_AO_FADE_END,
+        input.vDistanceToCamera
+    );
+}
+
+fn computeNormalMapBlend(input: FragmentInput) -> f32 {
+    if (!ENABLE_NORMAL_MAP) {
+        return 0.0;
+    }
+    let viewerAltitude = max(
+        0.0,
+        length(fragUniforms.cameraPosition - fragUniforms.planetCenter) - fragUniforms.atmospherePlanetRadius
+    );
+    let altitudeScale = 1.0 + viewerAltitude / NORMAL_MAP_DISTANCE_ALTITUDE_SCALE;
+    let normalDistance = min(NORMAL_MAP_DISTANCE_MAX, NORMAL_MAP_DISTANCE_BASE * altitudeScale);
+    let fadeEnd = normalDistance + NORMAL_MAP_DISTANCE_FADE;
+    return 1.0 - smoothstep(normalDistance, fadeEnd, input.vDistanceToCamera);
+}
+
+fn sampleMicroTextureWithSplat(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32,
+    splat: SplatData
+) -> vec4<f32> {
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+
+    let dominantId = splatDominantTileId(splat);
+    let dominantW = splatDominantWeight(splat);
+
+    // Cheap fast path for almost-pure texels.
+    if (!splat.hasBoundary || dominantW >= SPLAT_DOMINANT_MIN_WEIGHT) {
+        return sampleTileColor(
+            dominantId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+    }
+
+    if (USE_SPLAT_TOP2_FAST_PATH && splat.bilinearValid) {
+        var bestI: i32 = -1;
+        var secondI: i32 = -1;
+        var top2Sum = 0.0;
+        if (findSplatTop2(splat, &bestI, &secondI, &top2Sum) && top2Sum >= SPLAT_TOP2_MIN_WEIGHT) {
+            let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+            let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+            let invTop2 = 1.0 / max(top2Sum, 0.0001);
+            let w1 = ws[bestI] * invTop2;
+            let w2 = ws[secondI] * invTop2;
+
+            let color1 = sampleTileColor(
+                ids[bestI], worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            let color2 = sampleTileColor(
+                ids[secondI], worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            return color1 * w1 + color2 * w2;
+        }
+    }
+
+    // Current live path: stable weighted multi-way blend.
+    var accum = vec4<f32>(0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let c = sampleTileColor(
+            splat.tileIds.x, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.x;
+        sum = sum + splat.weights.x;
+    }
+
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let c = sampleTileColor(
+            splat.tileIds.y, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.y;
+        sum = sum + splat.weights.y;
+    }
+
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let c = sampleTileColor(
+            splat.tileIds.z, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let c = sampleTileColor(
+            splat.tileIds.w, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return sampleTileColor(
+            dominantId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+    }
+
+    return accum / sum;
+}
+
+fn sampleMicroTextureWithSplatFull(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32,
+    splat: SplatData
+) -> vec4<f32> {
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+    let dominantId = splatDominantTileId(splat);
+
+    var accum = vec4<f32>(0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let c = sampleTileColor(
+            splat.tileIds.x, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.x;
+        sum = sum + splat.weights.x;
+    }
+
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let c = sampleTileColor(
+            splat.tileIds.y, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.y;
+        sum = sum + splat.weights.y;
+    }
+
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let c = sampleTileColor(
+            splat.tileIds.z, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let c = sampleTileColor(
+            splat.tileIds.w, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        accum = accum + c * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return sampleTileColor(
+            dominantId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+    }
+
+    return accum / sum;
+}
+
+fn sampleMicroTextureWithFixedMaterialFamilies(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32,
+    splat: SplatData
+) -> vec4<f32> {
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+    let dominantId = splatDominantTileId(splat);
+    let dominantW = splatDominantWeight(splat);
+
+    if (!splat.hasBoundary || dominantW >= SPLAT_DOMINANT_MIN_WEIGHT) {
+        return sampleTileColor(
+            dominantId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+    }
+
+    var bestI: i32 = -1;
+    var secondI: i32 = -1;
+    var top2Sum = 0.0;
+    if (USE_SPLAT_TOP2_FAST_PATH && findSplatTop2(splat, &bestI, &secondI, &top2Sum) && top2Sum >= SPLAT_TOP2_MIN_WEIGHT) {
+        let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+        let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+        let invTop2 = 1.0 / max(top2Sum, 0.0001);
+        let w1 = ws[bestI] * invTop2;
+        let w2 = ws[secondI] * invTop2;
+
+        let color1 = sampleTileColor(
+            ids[bestI], worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        let color2 = sampleTileColor(
+            ids[secondI], worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        return color1 * w1 + color2 * w2;
+    }
+
+    return sampleMicroTextureWithSplatFull(
+        input, activeSeason, ddx_vUv, ddy_vUv, layer, splat
+    );
+}
+
+fn sampleDebugNonResolvedMicro(
+    input: FragmentInput,
+    activeSeason: i32,
+    ddx_vUv: vec2<f32>,
+    ddy_vUv: vec2<f32>,
+    layer: i32
+) -> vec3<f32> {
+    let fallbackTileId = sampleChunkTileId(input, layer);
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+
+    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+        let splat = sampleSplatData(input, i32(round(input.vMaterialUv.w)));
+        return sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splat
+        ).rgb;
+    }
+
+    return sampleTileColor(
+        fallbackTileId, worldTileCoord, local,
+        activeSeason, ddx_vUv, ddy_vUv
+    ).rgb;
+}
+
+fn normalizeMacroTileId(tileId: f32) -> f32 {
+    return select(tileId, tileId - 100.0, tileId >= 100.0);
+}
+
+fn sampleMacroTileColorBilinear(
+    tileId: f32,
+    macroWorld: vec2<f32>,
+    local: vec2<f32>,
+    activeSeason: i32,
+    ddx_uv: vec2<f32>,
+    ddy_uv: vec2<f32>
+) -> vec3<f32> {
+    let id = normalizeMacroTileId(tileId);
+    let shifted = macroWorld - 0.5;
+    let base = floor(shifted);
+    let f = smoothstep(vec2<f32>(0.0), vec2<f32>(1.0), fract(shifted));
+
+    let c00 = sampleMacroTileColor(id, base,                       local, activeSeason, ddx_uv, ddy_uv).rgb;
+    let c10 = sampleMacroTileColor(id, base + vec2<f32>(1.0, 0.0), local, activeSeason, ddx_uv, ddy_uv).rgb;
+    let c01 = sampleMacroTileColor(id, base + vec2<f32>(0.0, 1.0), local, activeSeason, ddx_uv, ddy_uv).rgb;
+    let c11 = sampleMacroTileColor(id, base + vec2<f32>(1.0, 1.0), local, activeSeason, ddx_uv, ddy_uv).rgb;
+
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+fn sampleMacroOverlaySplat(
+    input: FragmentInput,
+    activeSeason: i32,
+    layer: i32,
+    splat: SplatData
+) -> vec3<f32> {
+    let macroScale = max(fragUniforms.macroScale, 0.0001);
+    let macroWorld = input.vWorldPos * macroScale;
+    let local = fract(macroWorld);
+    let ddx_uv = dpdx(macroWorld);
+    let ddy_uv = dpdy(macroWorld);
+
+    let dominantId = splatDominantTileId(splat);
+    let dominantW = splatDominantWeight(splat);
+
+    if (!splat.hasBoundary || dominantW >= SPLAT_DOMINANT_MIN_WEIGHT) {
+        return sampleMacroOverlaySimplePrepared(
+            macroWorld,
+            local,
+            activeSeason,
+            ddx_uv,
+            ddy_uv,
+            dominantId
+        );
+    }
+
+    if (USE_SPLAT_TOP2_FAST_PATH && splat.bilinearValid) {
+        var bestI: i32 = -1;
+        var secondI: i32 = -1;
+        var top2Sum = 0.0;
+        if (findSplatTop2(splat, &bestI, &secondI, &top2Sum) && top2Sum >= SPLAT_TOP2_MIN_WEIGHT) {
+            let ws = array<f32, 4>(splat.weights.x, splat.weights.y, splat.weights.z, splat.weights.w);
+            let ids = array<f32, 4>(splat.tileIds.x, splat.tileIds.y, splat.tileIds.z, splat.tileIds.w);
+            let invTop2 = 1.0 / max(top2Sum, 0.0001);
+            let w1 = ws[bestI] * invTop2;
+            let w2 = ws[secondI] * invTop2;
+
+            let color1 = sampleMacroTileColorBilinear(
+                ids[bestI], macroWorld, local, activeSeason, ddx_uv, ddy_uv
+            );
+            let color2 = sampleMacroTileColorBilinear(
+                ids[secondI], macroWorld, local, activeSeason, ddx_uv, ddy_uv
+            );
+            return color1 * w1 + color2 * w2;
+        }
+    }
+
+    var accum = vec3<f32>(0.0, 0.0, 0.0);
+    var sum = 0.0;
+
+    if (splatChannelUsable(splat.tileIds.x, splat.weights.x)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.x, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.x;
+        sum = sum + splat.weights.x;
+    }
+
+    if (splatChannelUsable(splat.tileIds.y, splat.weights.y)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.y, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.y;
+        sum = sum + splat.weights.y;
+    }
+
+    if (splatChannelUsable(splat.tileIds.z, splat.weights.z)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.z, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.z;
+        sum = sum + splat.weights.z;
+    }
+
+    if (splatChannelUsable(splat.tileIds.w, splat.weights.w)) {
+        let c = sampleMacroTileColorBilinear(
+            splat.tileIds.w, macroWorld, local, activeSeason, ddx_uv, ddy_uv
+        );
+        accum = accum + c * splat.weights.w;
+        sum = sum + splat.weights.w;
+    }
+
+    if (sum <= 0.0001) {
+        return sampleMacroOverlaySimplePrepared(
+            macroWorld,
+            local,
+            activeSeason,
+            ddx_uv,
+            ddy_uv,
+            dominantId
+        );
+    }
+
+    return accum / sum;
+}
+
+fn sampleMacroOverlaySimplePrepared(
+    macroWorld: vec2<f32>,
+    local: vec2<f32>,
+    activeSeason: i32,
+    ddx_uv: vec2<f32>,
+    ddy_uv: vec2<f32>,
+    tileId: f32
+) -> vec3<f32> {
+    var id = tileId;
+    if (id >= 100.0) { id -= 100.0; }
+
+    let macroTileCoord = floor(macroWorld);
+    return sampleMacroTileColor(id, macroTileCoord, local, activeSeason, ddx_uv, ddy_uv).rgb;
+}
+
+fn sampleMacroOverlaySimple(
+    input: FragmentInput,
+    activeSeason: i32,
+    tileId: f32
+) -> vec3<f32> {
+    let macroScale = max(fragUniforms.macroScale, 0.0001);
+    let macroWorld = input.vWorldPos * macroScale;
+    let local = fract(macroWorld);
+    let ddx_uv = dpdx(macroWorld);
+    let ddy_uv = dpdy(macroWorld);
+    return sampleMacroOverlaySimplePrepared(
+        macroWorld,
+        local,
+        activeSeason,
+        ddx_uv,
+        ddy_uv,
+        tileId
+    );
+}
+fn computeMacroBlendStrength(
+    input: FragmentInput,
+    layer: i32,
+    macroAlpha: f32
+) -> f32 {
+    // Use world-space noise instead of the per-chunk macroMaskTexture so the
+    // blend strength is continuous across chunk and LOD boundaries.
+    let macroMask = macroVariationNoise(input.vWorldPos);
+    let flatBlend = smoothstep(0.15, 0.9, macroMask);
+    let baseOpacity = clamp(fragUniforms.level2Blend, 0.0, 1.0);
+    let alpha = clamp(macroAlpha, 0.0, 1.0);
+    return clamp(flatBlend * baseOpacity * alpha, 0.0, 0.9);
+}
+
+fn applyDitchDarkening(macroColor: vec3<f32>, worldPos: vec2<f32>) -> vec3<f32> {
+    let ditchScale: f32 = 1.0;
+    let cosD: f32 = 0.94;
+    let sinD: f32 = 0.34;
+    let rotatedDitch = vec2<f32>(
+        worldPos.x * cosD - worldPos.y * sinD,
+        worldPos.x * sinD + worldPos.y * cosD
+    );
+    let ditchNoise = octaveNoise(rotatedDitch * ditchScale, 3);
+    let ditchWidth: f32 = 0.01;
+    let ditchMask = 1.0 - smoothstep(-ditchWidth, ditchWidth, ditchNoise);
+    let ditchDarken: f32 = 0.8;
+    let luminanceMask = mix(1.0, ditchDarken, ditchMask);
+    return macroColor * luminanceMask;
+}
+
+${shadowSamplingCode}
+// ----------------------------------------------------------------------------
+// FRAGMENT MAIN
+// ----------------------------------------------------------------------------
+
+@fragment
+fn main(input: FragmentInput) -> @location(0) vec4<f32> {
+//return vec4((f32(fragUniforms.geometryLOD) + 1.0)/6.0, 0.0, 0.0, 0.5);
+    let activeSeason = select(fragUniforms.nextSeason, fragUniforms.currentSeason, fragUniforms.seasonTransition < 0.5);
+    let layer = i32(round(input.vLayer));
+    let materialLayer = i32(round(input.vMaterialUv.w));
+    let debugMode = fragUniforms.terrainDebugMode;
+    let layerViewMode = fragUniforms.terrainLayerViewMode;
+    // Mode 90: geometryLOD by color — verifies which LOD's compiled shader
+    // variant is actually rendering a given on-screen tile, independent of
+    // any of the color/lighting debug modes below.
+    if (debugMode == 90) {
+        let lodColors = array<vec3<f32>, 8>(
+            vec3<f32>(1.0, 0.0, 0.0),   // LOD0 red
+            vec3<f32>(1.0, 0.5, 0.0),   // LOD1 orange
+            vec3<f32>(1.0, 1.0, 0.0),   // LOD2 yellow
+            vec3<f32>(0.0, 1.0, 0.0),   // LOD3 green
+            vec3<f32>(0.0, 1.0, 1.0),   // LOD4 cyan
+            vec3<f32>(0.0, 0.0, 1.0),   // LOD5 blue
+            vec3<f32>(1.0, 0.0, 1.0),   // LOD6 magenta
+            vec3<f32>(1.0, 1.0, 1.0)    // LOD7+ white
+        );
+        let lodIndex = clamp(fragUniforms.geometryLOD, 0, 7);
+        return vec4<f32>(lodColors[lodIndex], 1.0);
+    }
+    let lodEdgeFade = clamp(input.vDebugSample.y, 0.0, 1.0);
+    let lodEdgeAmount = select(0.0, 1.0 - lodEdgeFade, ENABLE_ANY_LOD_EDGE_FADE);
+
+    // Mode 100: LOD4/5 transition-edge seam highlight. Reuses the existing
+    // per-vertex neighbor-LOD edge signal (lodEdgeAmount — proximity to an
+    // edge bordering a COARSER neighbor; already live for LOD4 today via
+    // lodEdgeAOFadeEnabled+lodEdgeFadeMaxLod=4, unrelated to the broken
+    // color fade). Bright magenta exactly where geometryLOD==4 borders a
+    // coarser neighbor (LOD5, the only coarser tier adjacent to LOD4) —
+    // confirms we are actually looking at the LOD4/LOD5 boundary and not
+    // some other transition, independent of any color-path logic.
+    if (debugMode == 100) {
+        let isLod4 = fragUniforms.geometryLOD == 4;
+        let edgeGlow = select(0.0, lodEdgeAmount, isLod4);
+        let base = select(vec3<f32>(0.08, 0.08, 0.08), vec3<f32>(0.0, 0.55, 0.12), isLod4);
+        let seamColor = vec3<f32>(1.0, 0.0, 1.0);
+        return vec4<f32>(mix(base, seamColor, clamp(edgeGlow * 3.0, 0.0, 1.0)), 1.0);
+    }
+    // Mode 101: raw input.vDistanceToCamera as a red gradient, unscaled by
+    // any fade logic — proves distance-to-camera actually varies smoothly
+    // per-fragment WITHIN a single tile's own footprint (not just per-tile
+    // or per-chunk), which any future distance-based fade depends on.
+    // Scaled so a full 0-2000m range maps to black-to-red; adjust divisor
+    // if testing at very different altitudes.
+    if (debugMode == 101) {
+        let g = clamp(input.vDistanceToCamera / 2000.0, 0.0, 1.0);
+        return vec4<f32>(g, 0.0, 0.0, 1.0);
+    }
+    // Mode 103: order-of-magnitude bucket of the SAME raw vDistanceToCamera
+    // mode 101 reads, since mode 101 was reported solid red even standing
+    // ~100m from terrain — i.e. saturated past 2000m at a distance that
+    // should read near-black. This reads out roughly which decade the real
+    // value falls in, to tell a "still too small a divisor" explanation
+    // apart from "the value itself is wrong" (e.g. tens of thousands+,
+    // consistent with a planet-scale float32 precision problem in the
+    // view-space transform feeding it).
+    //   black        < 10m
+    //   blue         10-100m
+    //   green        100-1,000m
+    //   yellow       1,000-10,000m
+    //   orange       10,000-100,000m
+    //   red          100,000-1,000,000m
+    //   white        >= 1,000,000m
+    // Mode 104: blend weights into the solid-color tier.
+    // Red = camera-distance ramp, green = in-tile safety-net ramp (red and
+    // green together read as yellow). Black = detail material untouched.
+    // Tiles of the solid tier itself are dark blue, so the LOD boundary
+    // stays visible. Magenta = detail tile drawn from a layer without detail
+    // material (shown as the flat color in normal rendering).
+    if (debugMode == 104) {
+        let wDistance = computeTierDistanceFade(input);
+        let wEdge = computeTierEdgeBlend(input);
+        var c = vec3<f32>(0.04, 0.04, 0.04) + vec3<f32>(wDistance, wEdge * 0.85, 0.0);
+        if (tierSourceIncomplete(input)) {
+            c = vec3<f32>(1.0, 0.0, 1.0);
+        }
+        if (ENABLE_SOLID_COLOR_TIER) {
+            c = vec3<f32>(0.05, 0.10, 0.45);
+        }
+        return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    }
+    // Mode 105: the flat (solid-tier) color as used, unlit (baked texture,
+    // or the per-pixel average when solidColorBakedTexture is false).
+    if (debugMode == 105) {
+        return vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
+    }
+    if (debugMode == 103) {
+        let d = input.vDistanceToCamera;
+        var color = vec3<f32>(0.0, 0.0, 0.0);
+        if (d >= 1000000.0) { color = vec3<f32>(1.0, 1.0, 1.0); }
+        else if (d >= 100000.0) { color = vec3<f32>(1.0, 0.0, 0.0); }
+        else if (d >= 10000.0) { color = vec3<f32>(1.0, 0.5, 0.0); }
+        else if (d >= 1000.0) { color = vec3<f32>(1.0, 1.0, 0.0); }
+        else if (d >= 100.0) { color = vec3<f32>(0.0, 1.0, 0.0); }
+        else if (d >= 10.0) { color = vec3<f32>(0.0, 0.3, 1.0); }
+        return vec4<f32>(color, 1.0);
+    }
+
+    let segDims = vec2<f32>(fragUniforms.chunkWidth, fragUniforms.chunkHeight);
+    var ddx_vUv = dpdx(input.vUv) * segDims;
+    var ddy_vUv = dpdy(input.vUv) * segDims;
+    if (ENABLE_NEAR_MIP_SHARPEN) {
+        let sharpenFade = 1.0 - smoothstep(
+            NEAR_MIP_SHARPEN_FADE_START,
+            NEAR_MIP_SHARPEN_FADE_END,
+            input.vDistanceToCamera
+        );
+        let sharpenScale = mix(1.0, NEAR_MIP_SHARPEN_SCALE, sharpenFade);
+        ddx_vUv = ddx_vUv * sharpenScale;
+        ddy_vUv = ddy_vUv * sharpenScale;
+    }
+
+    if (debugMode == 1) {
+        let tileId = sampleChunkTileId(input, layer);
+        let v_dbg = fract(tileId * 0.137);
+        return vec4<f32>(v_dbg, v_dbg, v_dbg, 1.0);
+    }
+    if (debugMode == 8) {
+        let tileId = sampleChunkTileId(input, layer);
+        let v = clamp(tileId / 255.0, 0.0, 1.0);
+        return vec4<f32>(v, v, v, 1.0);
+    }
+    if (debugMode == 9) {
+        let tileId = sampleChunkTileId(input, layer);
+        let water = select(0.0, 1.0, tileId < 0.5);
+        return vec4<f32>(water, 0.0, 0.0, 1.0);
+    }
+    if (debugMode == 10) {
+        let loc = clamp(input.vFaceInfo.xy, vec2<f32>(0.0), vec2<f32>(1.0));
+        let size = clamp(input.vFaceInfo.z * 8.0, 0.0, 1.0);
+        return vec4<f32>(loc.x, loc.y, size, 1.0);
+    }
+    if (debugMode == 11) {
+        var layers = 1.0;
+        ${useArrayTextures ? 'layers = max(1.0, f32(textureNumLayers(tileTexture)));' : ''}
+        let denom = max(layers - 1.0, 1.0);
+        let v = clamp(f32(layer) / denom, 0.0, 1.0);
+        return vec4<f32>(v, v, v, 1.0);
+    }
+    if (debugMode == 12) {
+        let off = fract(input.vAtlasOffset);
+        let scale = clamp(input.vAtlasScale, 0.0, 1.0);
+        return vec4<f32>(off.x, off.y, scale, 1.0);
+    }
+    if (debugMode == 13) {
+        let t = input.vFaceInfo.w;
+        let r = fract(t * 0.1031);
+        let g = fract(t * 0.1137 + 0.1);
+        let b = fract(t * 0.1379 + 0.3);
+        return vec4<f32>(r, g, b, 1.0);
+    }
+    if (debugMode == 14) {
+        let left = input.vDebugEdge.x;
+        let right = input.vDebugEdge.y;
+        let bottom = input.vDebugEdge.z;
+        var top = floor(input.vDebugEdge.w);
+        let maxLod = DEBUG_MAX_LOD;
+        let invalid =
+            (left > maxLod) || (right > maxLod) ||
+            (bottom > maxLod) || (top > maxLod);
+        let sentinel =
+            (left >= 15.0) || (right >= 15.0) ||
+            (bottom >= 15.0) || (top >= 15.0);
+        let r = clamp(left / maxLod, 0.0, 1.0);
+        let g = clamp(right / maxLod, 0.0, 1.0);
+        let b = clamp(bottom / maxLod, 0.0, 1.0);
+        var col = vec3<f32>(r, g, b);
+        col = select(col, vec3<f32>(1.0, 0.0, 0.0), sentinel);
+        col = select(col, vec3<f32>(1.0, 0.0, 1.0), invalid);
+        return vec4<f32>(col, 1.0);
+    }
+    if (debugMode == 15) {
+        let selfLod = input.vDebugSample.x;
+        let sampleLod = input.vDebugSample.w;
+        let axis = input.vDebugSample.z; // 0=none, 1=x-edge, 2=y-edge
+        let r = clamp(sampleLod / DEBUG_MAX_LOD, 0.0, 1.0);
+        let g = clamp(selfLod / DEBUG_MAX_LOD, 0.0, 1.0);
+        let b = clamp(axis / 2.0, 0.0, 1.0);
+        return vec4<f32>(r, g, b, 1.0);
+    }
+    if (debugMode == 16) {
+     /*   let ao = sampleTerrainAO(input, layer);
+        return vec4<f32>(ao, ao, ao, 1.0);*/
+    }
+    if (debugMode == 2) {
+        let splat = sampleSplatData(input, materialLayer);
+        let weight = splatPrimaryWeight(splat, splat.cellLocal);
+        let pairChange = select(0.0, 1.0, splat.hasBoundary);
+        let bilinearValid = select(0.0, 1.0, splat.bilinearValid);
+        return vec4<f32>(weight, pairChange, bilinearValid, 1.0);
+    }
+    if (debugMode == 3) {
+        let splat = sampleSplatData(input, materialLayer);
+        let weight = splatPrimaryWeight(splat, splat.cellLocal);
+        return vec4<f32>(weight, weight, weight, 1.0);
+    }
+    if (debugMode == 4) {
+        let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+        let tileSize = vec2<f32>(textureDimensions(tileTexture));
+        return vec4<f32>(splatSize.x / 1024.0, tileSize.x / 1024.0, 0.0, 1.0);
+    }
+    if (debugMode == 25) {
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+        let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+        let cell = fract(uv * splatSize);
+        let edgeDist = min(min(cell.x, cell.y), min(1.0 - cell.x, 1.0 - cell.y));
+        let grid = 1.0 - smoothstep(0.02, 0.05, edgeDist);
+        let splat = sampleSplatData(input, materialLayer);
+        let w = splatPrimaryWeight(splat, splat.cellLocal);
+        let base = vec3<f32>(w, w, w);
+        return vec4<f32>(mix(base, vec3<f32>(1.0, 0.1, 0.1), grid), 1.0);
+    }
+    if (debugMode == 26) {
+        let splat = sampleSplatData(input, materialLayer);
+        return vec4<f32>(debugTileIdColor(splat.tileIds.x), 1.0);
+    }
+    if (debugMode == 27) {
+        let splat = sampleSplatData(input, materialLayer);
+        return vec4<f32>(debugTileIdColor(splat.tileIds.y), 1.0);
+    }
+    if (debugMode == 28) {
+        let tileId = sampleChunkTileId(input, layer);
+        let cat = debugTileCategory(tileId);
+        return vec4<f32>(debugCategoryColor(cat), 1.0);
+    }
+    if (debugMode == 29) {
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+        let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+        let gridCell = fract(uv * splatSize);
+        let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
+        let grid = 1.0 - smoothstep(0.02, 0.05, edgeDist);
+        let splat = sampleSplatData(input, materialLayer);
+        let baseColor = select(
+            vec3<f32>(0.08, 0.08, 0.08),
+            vec3<f32>(1.0, 0.2, 0.2),
+            splat.hasBoundary
+        );
+        return vec4<f32>(mix(baseColor, vec3<f32>(1.0, 1.0, 1.0), grid * 0.45), 1.0);
+    }
+    if (debugMode == 30) {
+        let h = sampleHeightDebug(input, layer);
+        return vec4<f32>(h, h, h, 1.0);
+    }
+    if (debugMode == 31) {
+        let splat = sampleSplatData(input, materialLayer);
+        let weight = splatPrimaryWeight(splat, splat.cellLocal);
+        return vec4<f32>(weight, weight, weight, 1.0);
+    }
+    if (debugMode == 32) {
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+        let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+        let gridCell = fract(uv * splatSize);
+        let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
+        let grid = 1.0 - smoothstep(0.02, 0.05, edgeDist);
+        let splat = sampleSplatData(input, materialLayer);
+        let v = select(0.0, 1.0, splat.bilinearValid);
+        let base = vec3<f32>(v, v, v);
+        return vec4<f32>(mix(base, vec3<f32>(0.1, 0.6, 1.0), grid * 0.35), 1.0);
+    }
+    if (debugMode == 33) {
+        let edgeMask = decodeDebugEdgeMask(input.vDebugEdge.w);
+        let isFallback = input.vAtlasScale < 0.999;
+        let hasEdgeMask = edgeMask != 0;
+        let edgeDist = min(min(input.vUv.x, input.vUv.y), min(1.0 - input.vUv.x, 1.0 - input.vUv.y));
+        let edgeGlow = 1.0 - smoothstep(0.03, 0.07, edgeDist);
+        var base = vec3<f32>(0.10, 0.62, 0.16);
+        if (!isFallback && hasEdgeMask) {
+            base = vec3<f32>(0.10, 0.72, 0.92);
+        }
+        if (isFallback && hasEdgeMask) {
+            base = vec3<f32>(0.95, 0.58, 0.16);
+        }
+        if (isFallback && !hasEdgeMask) {
+            base = vec3<f32>(1.0, 0.18, 0.18);
+        }
+        return vec4<f32>(mix(base, vec3<f32>(1.0), edgeGlow * 0.18), 1.0);
+    }
+    if (debugMode == 34) {
+        let risk = computeAtlasBilinearLeakRisk(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+        let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+        let gridCell = fract(uv * splatSize);
+        let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
+        let grid = 1.0 - smoothstep(0.02, 0.05, edgeDist);
+        var base = vec3<f32>(0.05, 0.10, 0.05);
+        if (risk.isFallback) {
+            base = vec3<f32>(0.28, 0.22, 0.08);
+        }
+        if (risk.leakX && !risk.leakY) {
+            base = vec3<f32>(1.0, 0.18, 0.18);
+        }
+        if (risk.leakY && !risk.leakX) {
+            base = vec3<f32>(0.18, 0.55, 1.0);
+        }
+        if (risk.leakX && risk.leakY) {
+            base = vec3<f32>(1.0, 0.0, 1.0);
+        }
+        return vec4<f32>(mix(base, vec3<f32>(1.0), grid * 0.18), 1.0);
+    }
+    if (debugMode == 35) {
+        return vec4<f32>(lodEdgeAmount, lodEdgeFade, 0.0, 1.0);
+    }
+    if (debugMode == 36) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColor(input, materialLayer).rgb, 1.0);
+    }
+    if (debugMode == 37) {
+        let liveColor = sampleDebugNonResolvedMicro(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer
+        );
+        return vec4<f32>(liveColor, 1.0);
+    }
+    if (debugMode == 38) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let resolvedColor = sampleResolvedTerrainColor(input, materialLayer).rgb;
+        let liveColor = sampleDebugNonResolvedMicro(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer
+        );
+        let delta = abs(resolvedColor - liveColor);
+        let heat = clamp(max(max(delta.r, delta.g), delta.b) * 5.0, 0.0, 1.0);
+        return vec4<f32>(heat, 1.0 - heat, 0.0, 1.0);
+    }
+    if (debugMode == 39) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let resolvedColor = sampleResolvedTerrainColor(input, materialLayer).rgb;
+        let edgeDist = min(min(input.vUv.x, input.vUv.y), min(1.0 - input.vUv.x, 1.0 - input.vUv.y));
+        let grid = 1.0 - smoothstep(0.008, 0.025, edgeDist);
+        return vec4<f32>(mix(resolvedColor, vec3<f32>(1.0, 0.0, 1.0), grid * 0.65), 1.0);
+    }
+    if (debugMode == 40) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColorLevel(input, materialLayer).rgb, 1.0);
+    }
+    if (debugMode == 41) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        let implicitColor = sampleResolvedTerrainColorImplicit(input, materialLayer).rgb;
+        let mip0Color = sampleResolvedTerrainColorLevel(input, materialLayer).rgb;
+        let delta = abs(implicitColor - mip0Color);
+        let heat = clamp(max(max(delta.r, delta.g), delta.b) * 8.0, 0.0, 1.0);
+        return vec4<f32>(heat, 1.0 - heat, 0.0, 1.0);
+    }
+    if (debugMode == 42) {
+        if (!HAS_RESOLVED_COLOR_TEXTURE) {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        return vec4<f32>(sampleResolvedTerrainColorNearest(input, materialLayer).rgb, 1.0);
+    }
+    // Mode 99: the NEW spatially-averaged LOD6 color (horizon-grain fix),
+    // isolated the same way mode 96 isolates the OLD single-sample color —
+    // direct before/after comparison at the same camera position. Compare
+    // against mode 96 to confirm grain disappears while large coherent
+    // regions look the same.
+    if (debugMode == 99) {
+        return vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
+    }
+    if (debugMode == 5) {
+        let zm = sampleZoneMaskSmooth(input, layer);
+        return vec4<f32>(zm, zm, zm, 1.0);
+    }
+    if (debugMode == 6) {
+        let dbgTileId = sampleChunkTileId(input, layer);
+        let macroScaleDbg = max(fragUniforms.macroScale, 0.0001);
+        let macroWorldDbg = input.vWorldPos * macroScaleDbg;
+        let ddxDbg = dpdx(macroWorldDbg);
+        let ddyDbg = dpdy(macroWorldDbg);
+        var dbgId = dbgTileId;
+        if (dbgId >= 100.0) { dbgId -= 100.0; }
+        let macroSample = sampleMacroTileColor(dbgId, floor(macroWorldDbg), fract(macroWorldDbg), activeSeason, ddxDbg, ddyDbg);
+        return vec4<f32>(macroSample.rgb, 1.0);
+    }
+    if (debugMode == 7) {
+        let strength = computeMacroBlendStrength(input, layer, 1.0);
+        return vec4<f32>(strength, strength, strength, 1.0);
+    }
+
+if (debugMode == 16) {
+ /*   let ao = sampleTerrainAO(input, layer);
+    let occ = clamp((1.0 - ao) * 12.0, 0.0, 1.0);
+    return vec4<f32>(occ, 1.0 - occ, 0.0, 1.0);*/
+}
+    if (debugMode == 17) {
+        let ao = sampleTerrainAO(input, layer);
+        let occ = clamp((1.0 - ao) * 5.0, 0.0, 1.0);
+        return vec4<f32>(occ, 1.0 - occ, 0.0, 1.0);
+    }
+
+    if (debugMode == 18) {
+        let s = clamp(fragUniforms.terrainAOStrength, 0.0, 1.0);
+        return vec4<f32>(s, s, s, 1.0);
+    }
+
+    if (debugMode == 19) {
+    /*
+        if (!ENABLE_TERRAIN_AO) {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        let dims = textureDimensions(terrainAOMask);
+        let v = f32(dims.x) / 256.0;
+        return vec4<f32>(v, v, v, 1.0);
+        */
+    }
+
+    if (debugMode == 20) {
+   /*     if (!ENABLE_TERRAIN_AO) {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        let dims = vec2<i32>(textureDimensions(terrainAOMask));
+        let mc = dims - vec2<i32>(1);
+        let c  = clamp(vec2<i32>(input.vUv * vec2<f32>(dims)), vec2<i32>(0), mc);
+        let ao = textureLoad(terrainAOMask, c, layer, 0).r;
+        return vec4<f32>(ao, ao, ao, 1.0);  */
+    }
+
+    if (debugMode == 21) {
+        if (ENABLE_TERRAIN_AO) {
+            return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+        }
+        return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    }
+
+    if (debugMode == 22) {
+        var worldNormal = normalize(input.vSphereDir);
+        let normalMapBlend = computeNormalMapBlend(input);
+        if (normalMapBlend > 0.001) {
+            let detailNormal = calculateNormal(input, layer);
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
+            if (dot(worldNormal, input.vSphereDir) < 0.0) { worldNormal = -worldNormal; }
+        }
+        let lightDir = normalize(fragUniforms.lightDirection);
+        let NdotL_d = max(dot(worldNormal, lightDir), 0.0);
+
+        let ambL = dot(fragUniforms.ambientColor, vec3<f32>(0.2126, 0.7152, 0.0722))
+                 * fragUniforms.ambientLightIntensity;
+        let sunL = dot(fragUniforms.lightColor, vec3<f32>(0.2126, 0.7152, 0.0722))
+                 * fragUniforms.sunLightIntensity * NdotL_d;
+
+        let headroom = ambL / max(ambL + sunL, 0.0001);
+        return vec4<f32>(headroom, headroom, headroom, 1.0);
+    }
+
+    if (debugMode == 23) {
+        let albedo = sampleMicroTexture(input, activeSeason, ddx_vUv, ddy_vUv, layer).rgb;
+        let ao = sampleTerrainAO(input, layer);
+        let amb = fragUniforms.ambientColor * fragUniforms.ambientLightIntensity;
+        return vec4<f32>(albedo * amb * ao, 1.0);
+    }
+
+    if (debugMode == 24) {
+        var worldNormal = normalize(input.vSphereDir);
+        let normalMapBlend = computeNormalMapBlend(input);
+        if (normalMapBlend > 0.001) {
+            let detailNormal = calculateNormal(input, layer);
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
+            if (dot(worldNormal, input.vSphereDir) < 0.0) { worldNormal = -worldNormal; }
+        }
+        let lightDir = normalize(fragUniforms.lightDirection);
+        let NdotL_d = max(dot(worldNormal, lightDir), 0.0);
+
+        let ambient = fragUniforms.ambientColor * fragUniforms.ambientLightIntensity;
+        let sunDiffuse = fragUniforms.lightColor * fragUniforms.sunLightIntensity * NdotL_d;
+        let ao = sampleTerrainAO(input, layer);
+        let aoF = mix(1.0, ao, clamp(fragUniforms.terrainAOStrength, 0.0, 1.0));
+
+        let albedo = sampleMicroTexture(input, activeSeason, ddx_vUv, ddy_vUv, layer).rgb;
+        return vec4<f32>(albedo * (ambient + sunDiffuse) * aoF, 1.0);
+    }
+
+    var microSample: vec4<f32>;
+    let nearToMidDetailFade = computeNearToMidDetailFade(input);
+    let lod0ResolvedColorFade = computeLod0ResolvedColorFade(input);
+    let lod0AOFade = computeLod0AOFade(input);
+    // Mode 83: raw lod0ResolvedColorFade value as a heatmap (black=0/pure
+    // live detail, red=1/pure resolvedColor, green=mid-transition) — proves
+    // what the fade actually is at a given point instead of guessing from
+    // the visual result. If this LOD4 chunk is uniformly black or uniformly
+    // red across its whole visible area, the fade-distance window
+    // (lod0ResolvedColorFadeStart/EndMeters) doesn't overlap this chunk's
+    // actual camera-distance range at all — no partial blend is possible
+    // for any fragment in it, regardless of the shader logic being correct.
+    if (debugMode == 83) {
+        let heat = clamp(lod0ResolvedColorFade, 0.0, 1.0);
+        let color = mix(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), heat);
+        let midGlow = 1.0 - abs(heat - 0.5) * 2.0;
+        return vec4<f32>(color + vec3<f32>(0.0, max(midGlow, 0.0) * 0.6, 0.0), 1.0);
+    }
+
+    let fallbackTileId = sampleChunkTileId(input, layer);
+    let worldTileCoord = floor(input.vWorldPos);
+    let local = fract(input.vWorldPos);
+    // Mode 96: raw coarseTileColor(fallbackTileId) output, isolated from
+    // everything else (macro overlay, ground field, lighting) — the direct,
+    // unambiguous test of whether the flat-color function itself is
+    // producing the wrong color, vs. something downstream altering it.
+    if (debugMode == 96) {
+        return vec4<f32>(coarseTileColor(fallbackTileId), 1.0);
+    }
+    // Mode 97: raw fallbackTileId as grayscale (tileId / 255) — sanity check
+    // that the id itself is a sane, in-range value at this LOD.
+    if (debugMode == 97) {
+        let g = clamp(fallbackTileId / 255.0, 0.0, 1.0);
+        return vec4<f32>(g, g, g, 1.0);
+    }
+    // Mode 98: matched category id as a discrete color — bypasses the color
+    // palette entirely, so this tells us WHICH category (or none) actually
+    // matches, independent of what color it's assigned.
+    if (debugMode == 98) {
+        let catId = tileCategory(u32(round(fallbackTileId)));
+        let catColors = array<vec3<f32>, 8>(
+            vec3<f32>(1.0, 0.0, 0.0),   // 0 WATER red
+            vec3<f32>(1.0, 0.5, 0.0),   // 1 GRASS orange
+            vec3<f32>(1.0, 1.0, 0.0),   // 2 ROCK yellow
+            vec3<f32>(0.0, 1.0, 0.0),   // 3 FOREST green
+            vec3<f32>(0.0, 1.0, 1.0),   // 4 SNOW cyan
+            vec3<f32>(0.0, 0.0, 1.0),   // 5 DESERT blue
+            vec3<f32>(0.6, 0.6, 0.6),   // 6 unused gray
+            vec3<f32>(1.0, 0.0, 1.0)    // 7+/255 unmatched magenta
+        );
+        let idx = select(7u, min(catId, 6u), catId <= 6u);
+        return vec4<f32>(catColors[idx], 1.0);
+    }
+
+    var splatResult: SplatData;
+    splatResult.tileIds = vec4<f32>(fallbackTileId, fallbackTileId, fallbackTileId, fallbackTileId);
+    splatResult.weights = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    splatResult.cellLocal = vec2<f32>(0.0, 0.0);
+    splatResult.hasBoundary = false;
+    splatResult.bilinearValid = true;
+    var hasLiveSplat = false;
+    var dominantTileId = fallbackTileId;
+    // 0=raw-tile, 1=lod0-fade-prebake, 2=lod-prebake, 3=live-splat  (for mode 46)
+    var microColorPath: i32 = 0;
+
+    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+        splatResult = sampleSplatData(input, materialLayer);
+        hasLiveSplat = true;
+        dominantTileId = splatDominantTileId(splatResult);
+    }
+
+    // Mode 102: force LOD4 through the EXACT same resolvedColor path LOD5
+    // uses (ENABLE_RESOLVED_COLOR's own branch body, copied verbatim,
+    // including its alpha-validity fallback), then falls through to the
+    // normal lighting/fog pipeline below like any other tier — a true
+    // "what would LOD4 look like if it were LOD5" render, not just a color-
+    // path code. A runtime check (fragUniforms.geometryLOD), not a compile-
+    // time flag, so it needs no JS/config wiring at all. Only affects
+    // LOD4's own draws; LOD5 renders normally for side-by-side comparison.
+    // Two possible outcomes:
+    //   - LOD4 visibly flattens to match LOD5's look  -> resolvedColor data
+    //     IS valid for LOD4 tiles; the fade logic itself is what's broken.
+    //   - LOD4 still looks textured/detailed (same as mode 0) -> the alpha
+    //     fallback is firing, i.e. resolvedColor is NOT valid for LOD4
+    //     tiles — confirms the handoff doc's leading hypothesis directly.
+    if (debugMode == 102 && fragUniforms.geometryLOD == 4) {
+        microSample = sampleResolvedTerrainColor(input, materialLayer);
+        if (microSample.a < 0.5) {
+            microSample = sampleTileColor(
+                fallbackTileId, worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            microColorPath = 0;
+        } else {
+            microColorPath = 2;
+        }
+    } else if (ENABLE_SOLID_COLOR_TIER) {
+        // Flat category color for the single coarsest LOD (small first
+        // increment — see solidColorStartLod). Depends only on
+        // fallbackTileId, a geometry-pass output that's always ready with
+        // zero refinement wait, so this tier can never show the "resident
+        // but unrefined" artifacts the resolvedColor/splat tiers can. Gets
+        // lit by the exact same ambient/diffuse/shadow/AO block every other
+        // tier already goes through below, using the real per-tile normal
+        // (now extending to orbital distance) — that's what actually makes
+        // this worth doing over a plain unlit flat color.
+        microSample = vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
+        microColorPath = 0;
+    } else if (ENABLE_RESOLVED_COLOR) {
+        // Resolved-color path: one chunk-local prebaked color sample replaces
+        // runtime splat decoding plus repeated atlas sampling. Procedural detail
+        // can be layered on top later without bringing back atlas fan-out.
+        microSample = sampleResolvedTerrainColor(input, materialLayer);
+        // resolvedColor is a refinement-stage output (generated in the
+        // background, same as splat), so a tile can be resident with this
+        // texture still zero-filled. Unlike splatIndex, zero-fill here isn't
+        // a decode issue — it's literally black with alpha=0, and real
+        // writes always store alpha=1 (see resolvedTerrainColorCompute.wgsl.js
+        // textureStore call). This tier covers a growing share of the screen
+        // as altitude increases (near/live band shrinks as a fraction of the
+        // visible dome), so an unrefined tile here was showing as expanding
+        // black area with altitude — confirmed by observation, not assumed.
+        // Fall back to the geometry pass's own raw tile color (always ready,
+        // no refinement wait) instead of black.
+        if (microSample.a < 0.5) {
+            microSample = sampleTileColor(
+                fallbackTileId, worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            microColorPath = 0;
+        } else {
+            microColorPath = 2;
+        }
+    } else if (lod0ResolvedColorFade > 0.999) {
+        // This branch varies per fragment, so use explicit-level sampling.
+        // WGSL forbids derivative-taking textureSample in non-uniform control.
+        // Same not-yet-refined-tile fallback as the ENABLE_RESOLVED_COLOR
+        // branch above — this is a direct overwrite (not a mix), so a
+        // missing check here doesn't just tint the blend, it replaces the
+        // whole fragment with solid black outright.
+        let resolvedSample = sampleResolvedTerrainColorLevel(input, materialLayer);
+        if (resolvedSample.a < 0.5) {
+            microSample = sampleTileColor(
+                fallbackTileId, worldTileCoord, local,
+                activeSeason, ddx_vUv, ddy_vUv
+            );
+            microColorPath = 0;
+        } else {
+            microSample = resolvedSample;
+            microColorPath = 1;
+        }
+    } else if (hasLiveSplat) {
+        if (USE_FIXED_MATERIAL_FAMILIES) {
+            microSample = sampleMicroTextureWithFixedMaterialFamilies(
+                input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+            );
+        } else {
+            microSample = sampleMicroTextureWithSplat(
+                input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+            );
+        }
+        microColorPath = 3;
+    } else {
+        microSample = sampleTileColor(
+            fallbackTileId, worldTileCoord, local,
+            activeSeason, ddx_vUv, ddy_vUv
+        );
+        microColorPath = 0;
+    }
+
+    // ── Debug mode 46: path diagnostic ──────────────────────────────────────
+    // Shows which micro-color branch ran and whether splat blending is active.
+    //
+    // Color key (read before lighting/AO):
+    //   RED    (1,0,0)          ENABLE_RESOLVED_COLOR prebake (compile-time LOD gate)
+    //   YELLOW (1,1,0)          lod0 distance-fade prebake (> fadeEnd from camera)
+    //   BLUE   (0,0,1)          raw tile fallback — ENABLE_SPLAT=false for this LOD
+    //                           or enableSplatLayer uniform=0
+    //   BRIGHT GREEN (0,1,0)    live splat AND hasBoundary=true  (blend zone active)
+    //   DARK GREEN   (0,.35,0)  live splat AND hasBoundary=false (pure dominant, may
+    //                           indicate threshold cutoff suppressed blending)
+    //   +cyan tint on greens    bilinearValid=true (neighboring ID slots match;
+    //                           renderer can use hardware-filtered weights)
+    //   +blue tint on all       brightness encodes geometryLOD (dim=LOD0, bright=LOD6)
+    if (debugMode == 46) {
+        // path 0 = raw-tile (blue);  1 = lod0-fade prebake (yellow);
+        // path 2 = LOD prebake (red); 3 = live splat (green shades)
+        var pathColor = vec3<f32>(0.0);
+        if (microColorPath == 0) {
+            pathColor = vec3<f32>(0.02, 0.08, 0.95);   // saturated blue
+        }
+        if (microColorPath == 1) {
+            pathColor = vec3<f32>(0.95, 0.88, 0.02);   // saturated yellow
+        }
+        if (microColorPath == 2) {
+            pathColor = vec3<f32>(0.95, 0.04, 0.02);   // saturated red
+        }
+        if (microColorPath == 3) {
+            // Bright green = hasBoundary (blend zone active)
+            // Dark green   = pure dominant (possible threshold suppression)
+            // Cyan tint    = bilinearValid (neighboring ID slots match)
+            let gBright = select(0.35, 0.95, splatResult.hasBoundary);
+            let cyanTint = select(0.0, 0.35, splatResult.bilinearValid);
+            pathColor = vec3<f32>(cyanTint, gBright, cyanTint);
+        }
+        // Subtle LOD brightness offset: dim=LOD0, brighter=farther LODs.
+        let lodFraction = clamp(f32(fragUniforms.geometryLOD) / 6.0, 0.0, 1.0);
+        pathColor = mix(pathColor, vec3<f32>(1.0), lodFraction * 0.18);
+        return vec4<f32>(pathColor, 1.0);
+    }
+
+    if (debugMode == 47) {
+        let splatColor = splatCategoryBlendColor(splatResult);
+        return vec4<f32>(splatColor, 1.0);
+    }
+
+    if (debugMode == 48) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let productionColor = splatCategoryBlendColor(splatResult);
+        let unionColor = splatCategoryBlendColor(unionSplat);
+        let reconstructionDelta = maxAbsVec3(productionColor - unionColor);
+        let heat = clamp(reconstructionDelta * 8.0, 0.0, 1.0);
+
+        let uv = applyChunkAtlasUV(input.vUv, splatDataMap, input.vMaterialUv.xy, input.vMaterialUv.z);
+        let splatSize = vec2<f32>(textureDimensions(splatDataMap));
+        let gridCell = fract(uv * splatSize);
+        let edgeDist = min(min(gridCell.x, gridCell.y), min(1.0 - gridCell.x, 1.0 - gridCell.y));
+        let grid = 1.0 - smoothstep(0.018, 0.045, edgeDist);
+
+        var base = vec3<f32>(0.03, 0.04, 0.05);
+        if (splatResult.hasBoundary) {
+            base = vec3<f32>(0.02, 0.18, 0.05);
+        }
+        if (!splatResult.bilinearValid) {
+            base = vec3<f32>(0.02, 0.08, 0.45);
+        }
+        let heatColor = mix(vec3<f32>(0.08, 0.0, 0.10), vec3<f32>(1.0, 0.05, 0.0), heat);
+        var outColor = mix(base, heatColor, heat);
+        outColor = mix(outColor, vec3<f32>(0.0, 0.65, 1.0), grid * 0.25);
+        return vec4<f32>(outColor, 1.0);
+    }
+
+    // ── Debug mode 49: stored splat texel category blend ────────────────────
+    // Nearest raw splatData/splatIndex texel, no bilinear filtering, no union,
+    // no validity branch. If the rim is visible here, it is already baked into
+    // the generated splat payload.
+    if (debugMode == 49) {
+        let storedSplat = sampleStoredSplatTexel(input, materialLayer);
+        let storedColor = splatCategoryBlendColor(storedSplat);
+        let grid = splatGridAmount(input);
+        return vec4<f32>(mix(storedColor, vec3<f32>(1.0), grid * 0.22), 1.0);
+    }
+
+    // ── Debug mode 50: stored splat minority-weight heat ────────────────────
+    // Green = pure dominant material. Yellow/red = meaningful secondary
+    // material exists in the stored texel. This isolates stored weights from
+    // texture atlas colors.
+    if (debugMode == 50) {
+        let storedSplat = sampleStoredSplatTexel(input, materialLayer);
+        let minority = clamp(1.0 - splatDominantWeight(storedSplat), 0.0, 1.0);
+        let heat = clamp(minority * 8.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.55, 0.04), vec3<f32>(1.0, 0.05, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 51: forced fast-path category blend ──────────────────────
+    // Uses c00 IDs plus hardware-filtered weights regardless of splatValidMap.
+    // Compare with 52. If 51 shows a rim and 52 does not, channel identity /
+    // fast-path reconstruction is the problem.
+    if (debugMode == 51) {
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let fastColor = splatCategoryBlendColor(fastSplat);
+        let grid = splatGridAmount(input);
+        return vec4<f32>(mix(fastColor, vec3<f32>(0.0, 0.65, 1.0), grid * 0.18), 1.0);
+    }
+
+    // ── Debug mode 52: forced union-reference category blend ────────────────
+    // Always reconstructs the 2x2 footprint manually. If 49 and 52 both show
+    // the same rim, the source/generator payload is the likely cause. If only
+    // 52 differs, sparse top-four reconstruction is losing information.
+    if (debugMode == 52) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let unionColor = splatCategoryBlendColor(unionSplat);
+        let grid = splatGridAmount(input);
+        return vec4<f32>(mix(unionColor, vec3<f32>(0.0, 0.65, 1.0), grid * 0.18), 1.0);
+    }
+
+    // ── Debug mode 53: raw tile category vs generated splat dominant ────────
+    // Base color is the current discrete tile category. Magenta overlay means
+    // the nearest stored splat texel's dominant category disagrees with that
+    // discrete tile. This checks whether the splat contour tracks the tile
+    // source field rather than material sampling or lighting.
+    if (debugMode == 53) {
+        let tileId = sampleChunkTileId(input, layer);
+        let tileCat = debugTileCategory(tileId);
+        let storedSplat = sampleStoredSplatTexel(input, materialLayer);
+        let splatCat = debugTileCategory(splatDominantTileId(storedSplat));
+        let mismatch = select(0.0, 1.0, tileCat != splatCat);
+        let grid = splatGridAmount(input);
+        var color = debugCategoryColor(tileCat);
+        color = mix(color, vec3<f32>(1.0, 0.0, 1.0), mismatch * 0.78);
+        color = mix(color, vec3<f32>(1.0), grid * 0.16);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 54: splat ID-slot validity / 2x2 mismatch ────────────────
+    // Green = splatValidMap true for this footprint. Red = ordered ID set
+    // mismatches among the 2x2 footprint. If this contour matches the rim but
+    // modes 49/52 do not, validity/slot stability is still suspect.
+    if (debugMode == 54) {
+        let mismatch = splatCornerMismatchFactor(input, materialLayer);
+        let valid = select(0.0, 1.0, splatFootprintPrecomputedValid(input, materialLayer));
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(mismatch, valid, 1.0 - valid);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 55: production vs union weight delta ────────────────────
+    // ID-aware L1 distance between the production splat payload and the
+    // always-union reference. Red on the visual rim means normal rendering is
+    // using different material weights than the union reconstruction.
+    if (debugMode == 55) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let delta = splatIdAwareWeightDelta(splatResult, unionSplat);
+        let heat = clamp(delta * 10.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 56: production vs union material delta ──────────────────
+    // Same comparison as 55, but after exact all-channel tile texture sampling.
+    // This is closest to the visible pre-lighting albedo consequence.
+    if (debugMode == 56) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let productionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let delta = maxAbsVec3(productionColor - unionColor);
+        let heat = clamp(delta * 12.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 57: forced fast vs union weight delta ───────────────────
+    // Isolates the unsafe hardware-filtered-channel assumption, independent of
+    // whether production currently chose the fast or fallback branch.
+    if (debugMode == 57) {
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let delta = splatIdAwareWeightDelta(fastSplat, unionSplat);
+        let heat = clamp(delta * 10.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 58: forced fast vs union material delta ─────────────────
+    // Actual material-color consequence of the fast-path assumption.
+    if (debugMode == 58) {
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let fastColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, fastSplat
+        ).rgb;
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let delta = maxAbsVec3(fastColor - unionColor);
+        let heat = clamp(delta * 12.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 59: ordered vs unordered ID-set mismatch ────────────────
+    // Green = ordered 2x2 ID slots match. Yellow = same unordered ID set but
+    // different slot order. Red = actual neighboring top-4 ID set changes.
+    if (debugMode == 59) {
+        let orderedMismatch = splatCornerMismatchFactor(input, materialLayer);
+        let unorderedMismatch = splatCornerUnorderedMismatchFactor(input, materialLayer);
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(0.0, 0.85, 0.08);
+        if (orderedMismatch > 0.001 && unorderedMismatch <= 0.001) {
+            color = vec3<f32>(1.0, 0.82, 0.02);
+        }
+        if (unorderedMismatch > 0.001) {
+            color = mix(vec3<f32>(0.35, 0.0, 0.04), vec3<f32>(1.0, 0.0, 0.0), clamp(unorderedMismatch, 0.0, 1.0));
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 60: dominant category reconstruction verdict ────────────
+    // Red = production dominant category differs from union reference.
+    // Green = forced fast dominant category differs from union reference.
+    // Yellow = both differ. Black/dim = dominant category agrees.
+    if (debugMode == 60) {
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let productionDiff = splatDominantCategoryDiff(splatResult, unionSplat);
+        let fastDiff = splatDominantCategoryDiff(fastSplat, unionSplat);
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(productionDiff, fastDiff, 0.05 * max(productionDiff, fastDiff));
+        color = max(color, vec3<f32>(0.02, 0.02, 0.025));
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 61: production full material albedo ─────────────────────
+    // Actual atlas material sampling from the production splat reconstruction,
+    // but with pure-dominant and top-2 shortcuts disabled. Compare with 43.
+    if (debugMode == 61) {
+        if (!hasLiveSplat) {
+            return vec4<f32>(0.02, 0.08, 0.95, 1.0);
+        }
+        let color = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 62: union-reference full material albedo ────────────────
+    // Actual atlas material sampling from always-union 2x2 reconstruction.
+    // If the rim is absent here but present in 43/61, the production
+    // reconstruction path is the cause. If the rim is still present here, it is
+    // in the stored splat payload plus real material colors.
+    if (debugMode == 62) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let color = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 63: forced-fast full material albedo ────────────────────
+    // Actual atlas material sampling from c00 IDs plus hardware-filtered
+    // weights. This renders the fast-path assumption directly.
+    if (debugMode == 63) {
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let color = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, fastSplat
+        ).rgb;
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 64: nearest stored splat full material albedo ───────────
+    // Actual atlas material sampling from the nearest stored splat texel, with
+    // no bilinear filtering, no union, and no validity branch.
+    if (debugMode == 64) {
+        let storedSplat = sampleStoredSplatTexel(input, materialLayer);
+        let color = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, storedSplat
+        ).rgb;
+        let grid = splatGridAmount(input);
+        return vec4<f32>(mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.16), 1.0);
+    }
+
+    // ── Debug mode 65: production shortcut material delta ─────────────────
+    // Heat = current production material sampling (pure/top2 shortcuts enabled)
+    // minus exact all-channel material sampling of the same production splat.
+    // Hot pixels identify sampleMicroTextureWithSplat() shortcut artifacts.
+    if (debugMode == 65) {
+        if (!hasLiveSplat) {
+            return vec4<f32>(0.02, 0.08, 0.95, 1.0);
+        }
+        let shortcutColor = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let fullColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let delta = maxAbsVec3(shortcutColor - fullColor);
+        let heat = clamp(delta * 16.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 66: precomputed vs runtime validity agreement ──────────
+    // Green = both valid. Blue = both invalid. Red = splatValidMap says valid
+    // but the fragment's actual 2x2 IDs do not match. Yellow = splatValidMap
+    // says invalid but the runtime 2x2 IDs match.
+    if (debugMode == 66) {
+        let precomputed = splatFootprintPrecomputedValid(input, materialLayer);
+        let runtime = splatFootprintRuntimeOrderedValid(input, materialLayer);
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(0.0, 0.85, 0.08);
+        if (!precomputed && !runtime) {
+            color = vec3<f32>(0.02, 0.08, 0.95);
+        }
+        if (precomputed && !runtime) {
+            color = vec3<f32>(1.0, 0.0, 0.0);
+        }
+        if (!precomputed && runtime) {
+            color = vec3<f32>(1.0, 0.85, 0.0);
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.16);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 67: production-vs-union delta branch attribution ───────
+    // Red heat = production differs from union while production used the fast
+    // path. Blue heat = production differs from union while production used the
+    // fallback path. Blue heat should be near-zero; if not, fallback and union
+    // are not equivalent.
+    if (debugMode == 67) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let productionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let heat = clamp(maxAbsVec3(productionColor - unionColor) * 12.0, 0.0, 1.0);
+        let fastBranch = splatResult.bilinearValid;
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(0.02, 0.03, 0.06);
+        if (fastBranch) {
+            color = mix(color, vec3<f32>(1.0, 0.04, 0.0), heat);
+        } else {
+            color = mix(color, vec3<f32>(0.0, 0.18, 1.0), heat);
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 68: union minority material darkening/brightening ───────
+    // Shows the actual luminance effect of all non-dominant channels in the
+    // always-union reference. Red = union blend is darker than pure dominant;
+    // cyan = union blend is brighter than pure dominant.
+    if (debugMode == 68) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let dominantColor = sampleTileColor(
+            splatDominantTileId(unionSplat),
+            worldTileCoord,
+            local,
+            activeSeason,
+            ddx_vUv,
+            ddy_vUv
+        ).rgb;
+        let signedDelta = luma709(dominantColor) - luma709(unionColor);
+        let heat = clamp(abs(signedDelta) * 12.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        if (signedDelta < 0.0) {
+            color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 69: union vs raw discrete tile material delta ───────────
+    // Heat = actual material difference between the always-union splat blend
+    // and the raw center tile. Hot pixels mean the stored splat payload is
+    // intentionally mixing materials there, independent of production branch.
+    if (debugMode == 69) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let rawColor = sampleTileColor(
+            fallbackTileId,
+            worldTileCoord,
+            local,
+            activeSeason,
+            ddx_vUv,
+            ddy_vUv
+        ).rgb;
+        let heat = clamp(maxAbsVec3(unionColor - rawColor) * 10.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 70: splat reconstruction verdict ───────────────────────
+    // Categorical version of the production/union/forced-fast comparison.
+    //
+    // Black/dim = production and union agree.
+    // Red       = production fast path differs from union, dominant category same.
+    // Yellow    = production fast path differs from union, dominant category differs.
+    // Blue      = production fallback differs from union, dominant category same.
+    // Magenta   = production fallback differs from union, dominant category differs.
+    // Cyan      = production matches union, but forced-fast differs. This explains
+    //             forced-fast-only artifacts such as mode 63 without blaming
+    //             production.
+    // Green     = production matches union, but forced-fast dominant category differs.
+    if (debugMode == 70) {
+        if (!hasLiveSplat) {
+            return vec4<f32>(0.02, 0.08, 0.95, 1.0);
+        }
+
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let fastSplat = sampleSplatDataFastReference(input, materialLayer);
+        let productionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, splatResult
+        ).rgb;
+        let unionColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let fastColor = sampleMicroTextureWithSplatFull(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, fastSplat
+        ).rgb;
+
+        let productionDelta = maxAbsVec3(productionColor - unionColor);
+        let fastDelta = maxAbsVec3(fastColor - unionColor);
+        let threshold = 0.01;
+        let productionHot = productionDelta > threshold;
+        let fastHot = fastDelta > threshold;
+        let productionDominantDiff = splatDominantCategoryDiff(splatResult, unionSplat) > 0.5;
+        let fastDominantDiff = splatDominantCategoryDiff(fastSplat, unionSplat) > 0.5;
+        let grid = splatGridAmount(input);
+
+        var color = vec3<f32>(0.02, 0.03, 0.06);
+        if (productionHot) {
+            if (splatResult.bilinearValid) {
+                color = vec3<f32>(1.0, 0.04, 0.0);
+                if (productionDominantDiff) {
+                    color = vec3<f32>(1.0, 0.85, 0.0);
+                }
+            } else {
+                color = vec3<f32>(0.0, 0.18, 1.0);
+                if (productionDominantDiff) {
+                    color = vec3<f32>(1.0, 0.0, 1.0);
+                }
+            }
+        } else if (fastHot) {
+            color = vec3<f32>(0.0, 0.82, 1.0);
+            if (fastDominantDiff) {
+                color = vec3<f32>(0.0, 1.0, 0.24);
+            }
+        }
+
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.16);
+        return vec4<f32>(color, 1.0);
+    }
+
+    if (microSample.a < 0.0) {
+        discard;
+    }
+
+    // ── Debug mode 86: exact current micro vs forced-union micro delta ─────
+    // This uses the same shortcut-capable material sampling as normal mode 43,
+    // not the full all-channel sampler used by modes 56/67. Red heat means the
+    // current production fast branch differs from union; blue heat means the
+    // fallback branch differs from union. A clean 86 with a visible 43 rim means
+    // the source is after the micro material sample.
+    if (debugMode == 86) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let unionMicro = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        let delta = maxAbsVec3(microSample.rgb - unionMicro);
+        let heat = clamp(delta * 16.0, 0.0, 1.0);
+        let grid = splatGridAmount(input);
+        var color = vec3<f32>(0.02, 0.03, 0.06);
+        if (splatResult.bilinearValid) {
+            color = mix(color, vec3<f32>(1.0, 0.04, 0.0), heat);
+        } else {
+            color = mix(color, vec3<f32>(0.0, 0.18, 1.0), heat);
+        }
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.20);
+        return vec4<f32>(color, 1.0);
+    }
+
+    // ── Debug mode 89: bilinearValid branch map ────────────────────────────
+    // Green = fast path (bilinearValid true, hardware-filtered weights).
+    // Red   = fallback path (bilinearValid false, manual 4-corner accumulation).
+    // Overlay this against mode 43/37 to check whether the visible rim boundary
+    // aligns exactly with the bilinearValid==false region.
+    if (debugMode == 89) {
+        let grid = splatGridAmount(input);
+        var color = select(vec3<f32>(0.65, 0.10, 0.06), vec3<f32>(0.08, 0.55, 0.12), splatResult.bilinearValid);
+        color = mix(color, vec3<f32>(0.0, 0.65, 1.0), grid * 0.16);
+        return vec4<f32>(color, 1.0);
+    }
+
+    let microPatternStyle = getMicroPatternStyle(dominantTileId);
+    var baseColor = microSample.rgb;
+
+    if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+        let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, baseColor);
+        baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
+    }
+    if (debugMode == 84) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        var unionBase = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+            let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, unionBase);
+            unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
+        }
+        return vec4<f32>(unionBase, 1.0);
+    }
+    // ── Debug modes 87/88: branch isolation ──────────────────────────────
+    // sampleMicroTextureWithSplat uses derivative-based texture sampling, so it
+    // cannot be called inside non-uniform control flow (conditioned on bilinearValid).
+    // Both modes compute union micro unconditionally, then select with the non-uniform
+    // bilinearValid flag as a data operation rather than a control-flow branch.
+    //
+    // Mode 87: union for fallback pixels, production for fast pixels.
+    //   If the rim disappears vs mode 43, the fallback accumulation path is the source.
+    //   If the rim persists, look at the fast path.
+    // Mode 88: union for fast pixels, production for fallback pixels.
+    //   If the rim disappears vs mode 43, hardware-filtered weights differ from manual
+    //   accumulation at the boundary — the method-switch seam hypothesis confirmed.
+    if (debugMode == 87 || debugMode == 88) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        var unionBase = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+            let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, unionBase);
+            unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
+        }
+        // Mode 87: swap union in for fallback (!bilinearValid) pixels.
+        // Mode 88: swap union in for fast (bilinearValid) pixels.
+        let useUnion = select(splatResult.bilinearValid, !splatResult.bilinearValid, debugMode == 87);
+        return vec4<f32>(select(baseColor, unionBase, useUnion), 1.0);
+    }
+    if (debugMode == 43) {
+        return vec4<f32>(baseColor, 1.0);
+    }
+
+    let macroForcedVisible = layerViewMode == 2;
+    let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
+    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
+        var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
+        if (!ENABLE_RESOLVED_COLOR && hasLiveSplat) {
+            let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);
+            let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
+            macroColor = mix(macroColor, detailedMacro, macroFade);
+        }
+        if (macroForcedVisible) {
+            baseColor = macroColor;
+        } else if (layerViewMode != 1) {
+            let macroStrength = computeMacroBlendStrength(input, layer, 1.0);
+            baseColor = mix(baseColor, macroColor, macroStrength);
+        }
+    }
+    if (debugMode == 44) {
+        return vec4<f32>(baseColor, 1.0);
+    }
+
+    if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+        let resolvedEdgeColor = sampleResolvedColorOrFallback(input, materialLayer, baseColor);
+        baseColor = mix(
+            baseColor,
+            resolvedEdgeColor,
+            clamp(lodEdgeAmount * LOD_EDGE_COLOR_STRENGTH, 0.0, 1.0)
+        );
+    }
+    // Only compiled true for the single LOD immediately before the solid-
+    // color tier starts (e.g. LOD5 when solidColorStartLod=6). Fades this
+    // LOD's real detailed/lit color toward the SAME spatially-averaged color
+    // the solid-color tier itself renders, purely as a function of camera
+    // distance — NOT tile/chunk boundaries (deliberately not lodEdgeAmount):
+    // a per-chunk edge fade visibly traces the chunk grid as a seam shape,
+    // while a distance-based smoothstep is a plain camera-centered shell,
+    // cheaper too (no per-vertex neighbor-LOD data needed). Should finish
+    // fading to solid color at/before the real LOD5->LOD6 mesh transition
+    // distance so both tiers already agree on color by the time that seam
+    // is reached; tune via lodEdgeToSolidColorFadeStart/EndMeters.
+    if (ENABLE_LOD_EDGE_TO_SOLID_COLOR && LOD_EDGE_TO_SOLID_COLOR_STRENGTH > 0.0001) {
+        let solidColorDistanceFade = smoothstep(
+            LOD_EDGE_TO_SOLID_COLOR_FADE_START,
+            LOD_EDGE_TO_SOLID_COLOR_FADE_END,
+            input.vDistanceToCamera
+        );
+        if (solidColorDistanceFade > 0.0001) {
+            let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
+            baseColor = mix(
+                baseColor,
+                solidEdgeColor,
+                clamp(solidColorDistanceFade * LOD_EDGE_TO_SOLID_COLOR_STRENGTH, 0.0, 1.0)
+            );
+        }
+    }
+    // Blend into the solid tier's color. Main ramp: camera distance, the same
+    // in every LOD below the tier. Safety net: an in-tile ramp toward edges
+    // shared with a solid-tier neighbour, for the rare tile drawn nearer
+    // than the distance ramp's end. The larger of the two wins. Replaces the
+    // older LOD5-only distance fade above when either is enabled.
+    if (ENABLE_TIER_DISTANCE_FADE || ENABLE_TIER_EDGE_BLEND || ENABLE_INCOMPLETE_SOURCE_FLAT) {
+        var tierBlend = max(computeTierDistanceFade(input), computeTierEdgeBlend(input));
+        if (tierSourceIncomplete(input)) {
+            tierBlend = 1.0;
+        }
+        if (tierBlend > 0.0001) {
+            let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
+            baseColor = mix(baseColor, solidEdgeColor, tierBlend);
+        }
+    }
+    if (ENABLE_GROUND_FIELD) {
+        baseColor = applyGroundFieldFallback(baseColor, input, layer);
+    }
+    if (debugMode == 85) {
+        let unionSplat = sampleSplatDataUnionReference(input, materialLayer);
+        let unionDominantTileId = splatDominantTileId(unionSplat);
+        var unionBase = sampleMicroTextureWithSplat(
+            input, activeSeason, ddx_vUv, ddy_vUv, layer, unionSplat
+        ).rgb;
+        if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+            let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, unionBase);
+            unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
+        }
+        if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
+            var unionMacroColor = sampleMacroOverlaySimple(input, activeSeason, unionDominantTileId);
+            if (!ENABLE_RESOLVED_COLOR) {
+                let detailedUnionMacro = sampleMacroOverlaySplat(input, activeSeason, layer, unionSplat);
+                let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
+                unionMacroColor = mix(unionMacroColor, detailedUnionMacro, macroFade);
+            }
+            if (macroForcedVisible) {
+                unionBase = unionMacroColor;
+            } else if (layerViewMode != 1) {
+                let macroStrength = computeMacroBlendStrength(input, layer, 1.0);
+                unionBase = mix(unionBase, unionMacroColor, macroStrength);
+            }
+        }
+        if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+            let resolvedEdgeColor = sampleResolvedColorOrFallback(input, materialLayer, unionBase);
+            unionBase = mix(
+                unionBase,
+                resolvedEdgeColor,
+                clamp(lodEdgeAmount * LOD_EDGE_COLOR_STRENGTH, 0.0, 1.0)
+            );
+        }
+        if (ENABLE_GROUND_FIELD) {
+            unionBase = applyGroundFieldFallback(unionBase, input, layer);
+        }
+        return vec4<f32>(unionBase, 1.0);
+    }
+    if (debugMode == 45) {
+        return vec4<f32>(baseColor, 1.0);
+    }
+    // NEAR PROCEDURAL DETAIL DISABLED FOR FPS A/B:
+    // This crevice/detail layer looked better but caused a large FPS drop on
+    // near terrain. Re-enable this block to test it again after optimizing or
+    // prebaking the detail path.
+    // if (ENABLE_NEAR_DETAIL) {
+    //     baseColor = applyNearProceduralDetail(baseColor, input.vWorldPos, input.vDistanceToCamera, microPatternStyle);
+    // }
+
+    var finalColor = baseColor;
+    var NdotL: f32 = 1.0;
+    if (ENABLE_LIGHTING || ENABLE_AERIAL_PERSPECTIVE) {
+        var worldNormal = normalize(input.vSphereDir);
+        let normalMapBlend = computeNormalMapBlend(input);
+        // Debug-only: raw decoded detail normal, before the sphereDir sign
+        // correction below, and before it's ever mixed into worldNormal —
+        // so mode 93 shows exactly what calculateNormal() decoded from the
+        // normal texture for this fragment, with no fallback/correction
+        // masking a bad value.
+        var rawDetailNormal = vec3<f32>(0.0, 0.0, 0.0);
+        if (normalMapBlend > 0.001) {
+            var detailNormal = calculateNormal(input, layer);
+            rawDetailNormal = detailNormal;
+            if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_NORMAL_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                detailNormal = normalize(mix(
+                    detailNormal,
+                    normalize(input.vSphereDir),
+                    clamp(lodEdgeAmount * LOD_EDGE_NORMAL_STRENGTH, 0.0, 1.0)
+                ));
+            }
+            worldNormal = normalize(mix(worldNormal, detailNormal, normalMapBlend));
+        }
+        if (dot(worldNormal, input.vSphereDir) < 0.0) {
+            worldNormal = -worldNormal;
+        }
+        let lightDir = normalize(fragUniforms.lightDirection);
+        NdotL = max(dot(worldNormal, lightDir), 0.0);
+        // Diagnostic modes (2026-09-29): isolating a per-tile "no directional
+        // light at all" defect that survives back to a9cd2ff, predating this
+        // session's LOD/altitude work. Each returns raw, unprocessed data —
+        // no fallback masking — so a screenshot from the exact spot where a
+        // tile looks unlit tells us which stage is actually wrong.
+        if (debugMode == 91) {
+            // Raw NdotL, grayscale. If an unlit-looking tile reads ~0 here
+            // while its lit neighbor reads >0 in the same frame (same
+            // fragUniforms.lightDirection for both), the defect is in
+            // worldNormal for that tile, not in lighting application below.
+            return vec4<f32>(vec3<f32>(NdotL), 1.0);
+        }
+        if (debugMode == 92) {
+            // Final worldNormal (post fallback/correction), packed to
+            // [0,1]. Should read as a smoothly-varying color across the
+            // whole visible dome, matching local "up" — a flat, uniform
+            // color across an entire tile (vs. gradient) points at a
+            // per-tile-constant normal (e.g. stuck on the sphereDir
+            // fallback) rather than per-texel sampled data.
+            return vec4<f32>(worldNormal * 0.5 + 0.5, 1.0);
+        }
+        if (debugMode == 93) {
+            // Raw detail normal as decoded from the normal texture, BEFORE
+            // any fallback/correction/blend — magenta (1,0,1) where
+            // normalMapBlend was too low to sample it at all (not a real
+            // decoded value). Anything else appearing wrong/uniform here
+            // (not magenta, not a plausible unit-ish color) means the
+            // normal TEXTURE ITSELF is bad for this tile, not the lighting
+            // math consuming it.
+            let shown = select(vec3<f32>(1.0, 0.0, 1.0), rawDetailNormal * 0.5 + 0.5, normalMapBlend > 0.001);
+            return vec4<f32>(shown, 1.0);
+        }
+        if (debugMode == 94) {
+            // normalMapBlend, grayscale (0=pure sphereDir fallback, 1=pure
+            // sampled detail normal). Confirms whether an unlit tile is even
+            // reaching the detail-normal path, or is rendering purely off
+            // the (otherwise-correct-by-construction) sphereDir fallback.
+            return vec4<f32>(vec3<f32>(normalMapBlend), 1.0);
+        }
+        if (debugMode == 95) {
+            // fragUniforms.lightDirection itself, packed as color. This is a
+            // frame-global uniform, not per-tile, so it must render as one
+            // flat, unchanging color across every tile in the same
+            // screenshot. If it visibly differs between a "lit" and "unlit"
+            // tile in the same frame, the bug is upstream of this shader
+            // entirely (the uniform itself, or which bind group a given
+            // draw call is reading it from).
+            return vec4<f32>(normalize(fragUniforms.lightDirection) * 0.5 + 0.5, 1.0);
+        }
+        if (debugMode == 72) {
+            let sphereNdotL = max(dot(normalize(input.vSphereDir), lightDir), 0.0);
+            let heat = clamp(abs(NdotL - sphereNdotL) * 10.0, 0.0, 1.0);
+            let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+            return vec4<f32>(color, 1.0);
+        }
+
+        if (ENABLE_LIGHTING) {
+            let ambient = fragUniforms.ambientColor * fragUniforms.ambientLightIntensity;
+            let sunDiffuse = fragUniforms.lightColor * fragUniforms.sunLightIntensity * NdotL;
+
+            var clusteredLight = vec3<f32>(0.0);
+            if (ENABLE_CLUSTERED_LIGHTS) {
+                clusteredLight = evaluateClusteredLights(
+                    input.vWorldPosition,
+                    input.vViewPosition,
+                    worldNormal,
+                    baseColor
+                );
+            }
+
+            var shadowFactor: f32 = 1.0;
+            if (SHADOW_MODE != 0) {
+                let shadowBiasNormal = normalize(input.vSphereDir);
+                let rawShadow = computeShadow(input.vWorldPosition, input.vViewPosition, shadowBiasNormal);
+
+                const minShadow: f32 = 0.35;
+                const shadowSoftness: f32 = 0.15;
+
+                let softShadow = smoothstep(0.0, shadowSoftness, rawShadow);
+                shadowFactor = mix(minShadow, 1.0, softShadow);
+            }
+            if (ENABLE_LOD_EDGE_FADE && LOD_EDGE_SHADOW_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                shadowFactor = mix(
+                    shadowFactor,
+                    1.0,
+                    clamp(lodEdgeAmount * LOD_EDGE_SHADOW_STRENGTH, 0.0, 1.0)
+                );
+            }
+            if (debugMode == 73) {
+                let litNoShadowAo = baseColor * (ambient + sunDiffuse) + clusteredLight;
+                return vec4<f32>(litNoShadowAo, 1.0);
+            }
+            if (debugMode == 74) {
+                let heat = clamp((1.0 - shadowFactor) * 3.0, 0.0, 1.0);
+                let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                return vec4<f32>(color, 1.0);
+            }
+
+            var aoAmbient: f32 = 1.0;
+            var aoDirect:  f32 = 1.0;
+            if (ENABLE_TERRAIN_AO) {
+                let rawAO = sampleTerrainAO(input, layer);
+                var ao = rawAO;
+                var aoNeutralFade = lod0AOFade;
+                var splatAOTransitionFade = 0.0;
+                if (hasLiveSplat && splatResult.hasBoundary) {
+                    let transitionWeight = 1.0 - splatDominantWeight(splatResult);
+                    splatAOTransitionFade = smoothstep(0.005, 0.20, transitionWeight);
+                    aoNeutralFade = max(
+                        aoNeutralFade,
+                        splatAOTransitionFade
+                    );
+                }
+                var lodEdgeAOFade = 0.0;
+                if (ENABLE_LOD_EDGE_AO_FADE && LOD_EDGE_AO_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+                    lodEdgeAOFade = clamp(lodEdgeAmount * LOD_EDGE_AO_STRENGTH, 0.0, 1.0);
+                    aoNeutralFade = max(
+                        aoNeutralFade,
+                        lodEdgeAOFade
+                    );
+                }
+                if (aoNeutralFade > 0.0001) {
+                    ao = mix(ao, 1.0, clamp(aoNeutralFade, 0.0, 1.0));
+                }
+                if (debugMode == 76) {
+                    let heat = clamp((1.0 - rawAO) * 4.0, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                if (debugMode == 77) {
+                    let heat = clamp((1.0 - ao) * 4.0, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                if (debugMode == 78) {
+                    let heat = clamp(aoNeutralFade, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                if (debugMode == 79) {
+                    let heat = clamp(splatAOTransitionFade, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                if (debugMode == 80) {
+                    let heat = clamp(lodEdgeAOFade, 0.0, 1.0);
+                    let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+                    return vec4<f32>(color, 1.0);
+                }
+                let master = clamp(fragUniforms.terrainAOStrength, 0.0, 1.0);
+                aoAmbient = max(TERRAIN_AO_AMBIENT_FLOOR, mix(1.0, ao, master));
+                aoDirect = mix(
+                    1.0, ao,
+                    clamp(fragUniforms.terrainAODirectStrength, 0.0, 1.0) * master
+                );
+            }
+            if (debugMode == 75) {
+                let aoAttenuation = max(1.0 - aoAmbient, 1.0 - aoDirect);
+                let heat = clamp(aoAttenuation * 4.0, 0.0, 1.0);
+                let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                return vec4<f32>(color, 1.0);
+            }
+        
+            finalColor = baseColor
+                       * (ambient * aoAmbient + sunDiffuse * shadowFactor * aoDirect)
+                       + clusteredLight;
+
+            // Night-visibility floor: ambient*AO*baseColor is too small to survive ACES
+            // tonemapping when the sun is below the horizon (pitch-black terrain).
+            // This albedo-scaled floor guarantees a minimum HDR signal (~0.045 for
+            // average grass) that maps to ~14% sRGB at exposure=0.75.
+            finalColor = max(finalColor, baseColor * 0.30);
+            if (debugMode == 71) {
+                return vec4<f32>(finalColor, 1.0);
+            }
+            if (debugMode == 82) {
+                let heat = clamp(maxAbsVec3(finalColor - baseColor) * 5.0, 0.0, 1.0);
+                let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(1.0, 0.04, 0.0), heat);
+                return vec4<f32>(color, 1.0);
+            }
+        }
+    }
+
+${enableLakeWater ? `
+    // Lake and river water (exact shoreline per pixel).
+    finalColor = applyWater(
+        finalColor, input.vWorldPosition, fragUniforms.cameraPosition, fragUniforms.planetCenter,
+        normalize(fragUniforms.lightDirection),
+        fragUniforms.lightColor * fragUniforms.sunLightIntensity,
+        fragUniforms.ambientColor * fragUniforms.ambientLightIntensity,
+        transmittanceSampler
+    );
+` : ''}
+    var foggedColor = finalColor;
+
+    if (ENABLE_AERIAL_PERSPECTIVE && fragUniforms.aerialPerspectiveEnabled > 0.5) {
+        let apBlend = smoothstep(AP_FADE_START, AP_FADE_END, input.vDistanceToCamera);
+
+        if (apBlend > 0.001) {
+            var ap = ap_computeSimple(
+                transmittanceLUT,
+                transmittanceSampler,
+                input.vWorldPosition,
+                fragUniforms.cameraPosition,
+                normalize(fragUniforms.lightDirection),
+                fragUniforms.planetCenter,
+                fragUniforms.atmospherePlanetRadius,
+                fragUniforms.atmosphereRadius,
+                fragUniforms.atmosphereScaleHeightRayleigh,
+                fragUniforms.atmosphereScaleHeightMie,
+                fragUniforms.atmosphereRayleighScattering,
+                fragUniforms.atmosphereMieScattering,
+                fragUniforms.atmosphereMieAnisotropy,
+                fragUniforms.atmosphereSunIntensity
+            );
+            let apSunVis = smoothstep(0.0, 0.2, NdotL);
+            ap.inscatter *= mix(0.2, 1.0, apSunVis);
+            foggedColor = ap_applyWithBlend(finalColor, ap, apBlend);
+        }
+    } else {
+        let fogFactor = (1.0 - exp(-input.vDistanceToCamera * fragUniforms.fogDensity));
+        foggedColor = mix(finalColor, fragUniforms.fogColor, clamp(fogFactor, 0.0, 1.0));
+    }
+
+    if (debugMode == 81) {
+        let heat = clamp(maxAbsVec3(foggedColor - finalColor) * 5.0, 0.0, 1.0);
+        let color = mix(vec3<f32>(0.02, 0.03, 0.06), vec3<f32>(0.0, 0.85, 1.0), heat);
+        return vec4<f32>(color, 1.0);
+    }
+
+    return vec4<f32>(foggedColor, 1.0);
+}
+
+`;
+}

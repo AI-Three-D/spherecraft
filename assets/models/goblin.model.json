@@ -1,0 +1,41 @@
+{
+    "glb": "../goblin2.glb",
+    "yawOffsetDeg": 0,
+    "rendering": {
+      "materialTuning": {
+        "decodeBaseColorSRGB": true,
+        "decodeEmissiveSRGB": true,
+        "metallicScale": 0.03,
+        "metallicMax": 0.04,
+        "roughnessScale": 1.0,
+        "roughnessMin": 0.76,
+        "roughnessMax": 1.0,
+        "specularStrength": 0.10,
+        "ambientStrength": 0.48,
+        "sunStrength": 0.95,
+        "localLightStrength": 1.0,
+        "normalScaleMultiplier": 0.75
+      },
+      "shadows": {
+        "castCascaded": true,
+        "receiveCascaded": true,
+        "shadowStrength": 1.0
+      }
+    },
+
+    "rootMotion": {
+      "nodeName": "mixamorig:Hips",
+      "mask": { "x": true, "y": false, "z": true }
+    },
+  
+    "blendDefaults": { "in": 0.12, "out": 0.10 },
+  
+    "animations": {
+      "IDLE":         { "clip": "Idling",       "loop": true,  "blendIn": 0.18 },
+      "WALKING":      { "clip": "Walking",      "loop": true                   },
+      "RUNNING":      { "clip": "Running",      "loop": true                   },
+      "DEAD":         { "clip": "Dying",        "loop": false, "blendIn": 0.08 },
+      "ATTACK_LIGHT": { "clip": "Punching",     "loop": false, "blendIn": 0.06 },
+      "ATTACK_HEAVY": { "clip": "Power_attack", "loop": false, "blendIn": 0.06 }
+    }
+  }

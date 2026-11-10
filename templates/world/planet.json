@@ -1,0 +1,36 @@
+{
+  "_doc": "Planet, atmosphere, time and spawn configuration. atmosphereOptions update in real-time; other parameters require regeneration.",
+  "name": "DefaultPlanet",
+  "hasAtmosphere": true,
+  "atmosphereHeightRatio": 0.2,
+  "atmosphereOptions": {
+    "scaleHeightRayleighRatio": 0.1,
+    "scaleHeightMieRatio":      0.015,
+    "mieAnisotropy":            0.76,
+    "visualDensity":            0.5,
+    "sunIntensity":             20.0
+  },
+  "altitudeZones": {
+    "surface":    2000,
+    "low":        20000,
+    "transition": 100000,
+    "orbital":    400000
+  },
+  "macroTileSpan": 16,
+  "macroMaxLOD":   3,
+  "starSystem": {
+    "sunIntensity": 20,
+    "timeScale":    10
+  },
+  "time": {
+    "dayDurationMs": 60000,
+    "startDay":      190,
+    "startHour":     12
+  },
+  "spawn": {
+    "height":   800,
+    "defaultX": 0,
+    "defaultY": 800,
+    "defaultZ": 0
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "_comment": "Forest fog pockets and valley mist only. Low/peak atmospheric-bank clouds are intentionally not authored for this world.",
+  "placement": {
+    "maxRenderDist": 1600,
+    "lodNearDistance": 200,
+    "lodFarDistance": 1500,
+    "lodMinScale": 0.1,
+    "distanceCutoff": 1600,
+    "clusterCellSize": 350,
+    "clusterScanRadius": 5,
+    "clusterProbability": 0.25,
+    "clusterSizeMin": 8,
+    "clusterSizeMax": 75,
+    "emitterSpacing": 7,
+    "shapeWarp": 0.55,
+    "maxEmittersPerCluster": 2048,
+    "localDistanceFog": {
+      "enabled": true,
+      "largeEmitterMinSize": 120,
+      "densityBoost": 0.00016,
+      "radiusScale": 0.92,
+      "heightScale": 0.10,
+      "minHeight": 3,
+      "heightMax": 14
+    }
+  },
+  "types": [
+    {
+      "id": "valley_mist",
+      "type": "VALLEY_MIST",
+      "displayName": "Valley Mist",
+      "noiseScale": 0.08,
+      "noiseSpeed": 0.004,
+      "densityBase": 0.30,
+      "windResponse": 0.0,
+      "lifetime": { "min": 60, "max": 120 },
+      "size": { "min": 8, "max": 21 },
+      "color": [0.75, 0.78, 0.82, 0.125],
+      "fadeNearStart": 20,
+      "fadeFarStart": 1200,
+      "fadeFarEnd": 2000,
+      "densityThreshold": 0.56,
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
+      "verticalScale": 1.0,
+      "horizontalScale": 1.0,
+      "heightMax": 14,
+      "centerLiftScale": 1.0,
+      "riseSpeed": 0.02,
+      "topNoiseFade": 0.35
+    },
+    {
+      "id": "fog_pocket",
+      "type": "FOG_POCKET",
+      "displayName": "Fog Pocket",
+      "noiseScale": 0.024,
+      "noiseSpeed": 0.008,
+      "densityBase": 0.35,
+      "windResponse": 0.0,
+      "lifetime": { "min": 30, "max": 80 },
+      "size": { "min": 4, "max": 13 },
+      "color": [0.72, 0.75, 0.80, 0.05],
+      "fadeNearStart": 10,
+      "fadeFarStart": 800,
+      "fadeFarEnd": 1500,
+      "densityThreshold": 0.44,
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
+      "verticalScale": 1.0,
+      "horizontalScale": 1.0,
+      "heightMax": 0,
+      "centerLiftScale": 1.0,
+      "riseSpeed": 0.02,
+      "topNoiseFade": 0.35
+    }
+  ],
+  "scatterRules": [
+    {
+      "id": "forest_fog_banks",
+      "type": "FOG_POCKET",
+      "tileCategories": ["FOREST"],
+      "excludeTileCategories": ["WATER", "DESERT"],
+      "biomeTags": ["woodland"],
+      "slope": { "min": 0.0, "max": 0.25, "weight": 1.0 },
+      "elevation": { "min": 0.0, "max": 0.14 },
+      "probability": 0.06,
+      "weatherWeight": 0.45,
+      "fogWeight": 0.3,
+      "weatherFloor": 0.30,
+      "color": [0.72, 0.75, 0.80, 0.35],
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
+      "spawnBudget": 1,
+      "cluster": {
+        "radius": { "min": 55, "max": 420 }
+      }
+    },
+    {
+      "id": "forest_fog_pockets",
+      "enabled": false,
+      "type": "FOG_POCKET",
+      "tileCategories": ["FOREST"],
+      "excludeTileCategories": ["WATER", "DESERT"],
+      "biomeTags": ["woodland"],
+      "slope": { "min": 0.0, "max": 0.25, "weight": 1.0 },
+      "elevation": { "min": 0.0, "max": 0.14 },
+      "probability": 0.03,
+      "weatherWeight": 0.45,
+      "fogWeight": 0.3,
+      "weatherFloor": 0.30,
+      "color": [0.72, 0.75, 0.80, 0.25],
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
+      "spawnBudget": 2,
+      "cluster": {
+        "radius": { "min": 6, "max": 14 },
+        "emitterCount": { "min": 1, "max": 3 }
+      }
+    },
+    {
+      "id": "depression_valley_mist",
+      "type": "VALLEY_MIST",
+      "excludeTileCategories": ["WATER", "DESERT"],
+      "terrainShape": {
+        "kind": "depression",
+        "neighborRadiusTexels": 3,
+        "minDepthMeters": 1.0,
+        "maxDepthMeters": 10.0
+      },
+      "slope": { "min": 0.0, "max": 0.15, "weight": 1.0 },
+      "elevation": { "min": 0.0, "max": 0.14 },
+      "probability": 0.045,
+      "weatherWeight": 0.45,
+      "fogWeight": 0.3,
+      "weatherFloor": 0.32,
+      "color": [0.75, 0.78, 0.82, 0.125],
+      "altitudeOffset": { "min": 0.35, "max": 0.75 },
+      "spawnBudget": 1,
+      "cluster": {
+        "radius": { "min": 60, "max": 460 }
+      }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+name: LLM PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  llm-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    # Skip draft PRs — uncomment to enable reviews on drafts
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Review PR with LLM
+        run: node .github/scripts/llm-review.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-2.5-flash-lite
+          GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+      - name: Upload review instructions for agent consumption
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-instructions-pr${{ github.event.pull_request.number }}
+          path: ai-review-output/review-instructions.md
+          if-no-files-found: ignore

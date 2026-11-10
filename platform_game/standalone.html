@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spherecraft Platform Jumper — Dev</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: 'Trebuchet MS', 'Avenir Next', 'Segoe UI', sans-serif;
+            color: #eaf3ff;
+        }
+        #gameCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            cursor: crosshair;
+        }
+        #hud {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            background: rgba(6, 14, 28, 0.55);
+            border: 1px solid rgba(170, 220, 255, 0.25);
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            z-index: 100;
+            pointer-events: none;
+        }
+        #hud .label { color: #91c7ff; }
+        #loading {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #05080f 0%, #0a1426 55%, #07121a 100%);
+            color: #dceaff;
+            z-index: 300;
+            transition: opacity 0.6s ease, visibility 0.6s ease;
+        }
+        #loading h1 {
+            font-weight: 300;
+            letter-spacing: 0.08em;
+            font-size: 22px;
+            color: #d2e4ff;
+        }
+        #loading .sub {
+            margin-top: 10px;
+            font-size: 13px;
+            color: rgba(210, 228, 255, 0.7);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="hud">
+        <div><span class="label">Platform Jumper</span> — Turn 1</div>
+        <div><span class="label">Move:</span> WASD &nbsp; <span class="label">Look:</span> Right-drag</div>
+        <div><span class="label">FPS:</span> <span id="fps">–</span></div>
+    </div>
+
+    <div id="loading">
+        <div style="text-align:center">
+            <h1>Frostspire · Loading</h1>
+            <div class="sub">Generating the cold, mountainous world…</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { PlatformGameEngine } from './gameEngine.js';
+        import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
+
+        const engineConfig = createEngineConfig();
+        const gameDataConfig = createGameDataConfig();
+        const gameEngine = new PlatformGameEngine('gameCanvas', engineConfig, gameDataConfig);
+        window.gameEngine = gameEngine;
+
+        const fpsEl = document.getElementById('fps');
+        const loadingEl = document.getElementById('loading');
+
+        async function init() {
+            try {
+                await gameEngine.start();
+                console.log('[platform_game] engine started');
+
+                let lastTime = performance.now();
+                let frameCount = 0;
+                let fpsTime = 0;
+                let loadingHidden = false;
+
+                function loop(now) {
+                    const dt = (now - lastTime) / 1000;
+                    lastTime = now;
+
+                    frameCount++;
+                    fpsTime += dt;
+                    if (fpsTime >= 1.0) {
+                        fpsEl.textContent = Math.round(frameCount / fpsTime);
+                        frameCount = 0;
+                        fpsTime = 0;
+                    }
+
+                    const clamped = Math.min(dt, 0.1);
+                    gameEngine.update(clamped);
+                    gameEngine.render(clamped);
+
+                    const status = gameEngine.getLoadingStatus?.();
+                    if (status?.complete && !loadingHidden) {
+                        loadingHidden = true;
+                        loadingEl.style.opacity = '0';
+                        loadingEl.style.visibility = 'hidden';
+                        setTimeout(() => { loadingEl.style.display = 'none'; }, 640);
+                    }
+
+                    requestAnimationFrame(loop);
+                }
+                requestAnimationFrame(loop);
+            } catch (err) {
+                console.error('[platform_game] failed to initialize:', err);
+                loadingEl.innerHTML =
+                    `<div style="color:#ff8080;text-align:center">
+                        <h1>Failed to Initialize</h1>
+                        <div class="sub">${err.message}</div>
+                     </div>`;
+            }
+        }
+
+        window.addEventListener('resize', () => gameEngine.handleResize());
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>

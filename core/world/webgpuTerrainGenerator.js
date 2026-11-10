@@ -1,0 +1,351 @@
+// js/world/webgpuTerrainGenerator.js
+
+import { Logger } from '../../shared/Logger.js';
+import { clamp01 } from '../../shared/math/index.js';
+import { installWebGPUTerrainGeneratorAtlasMethods } from './terrain-generator/webgpuTerrainGeneratorAtlas.js';
+import { installWebGPUTerrainGeneratorBatchMethods } from './terrain-generator/webgpuTerrainGeneratorBatching.js';
+import { installWebGPUTerrainGeneratorPipelineMethods } from './terrain-generator/webgpuTerrainGeneratorPipelines.js';
+import { requireInt, requireNumber, requireObject } from './terrain-generator/webgpuTerrainGeneratorDebugUtils.js';
+import { createRegionalTerrainData, regionalTerrainOptions } from './terrain-generator/regionalTerrain.js';
+import {
+    describeTerrainFeatures,
+    normalizeTerrainFeatures,
+    terrainFeatureDisableMask,
+} from './terrain-generator/terrainFeatureToggles.js';
+
+
+
+export class WebGPUTerrainGenerator {
+    constructor(device, seed, chunkSize, macroConfig, splatConfig, textureCache, options = {}) {
+        if (!options.terrainTheme) {
+            throw new Error('WebGPUTerrainGenerator requires options.terrainTheme (TILE_CATEGORIES, buildTileCategoryLookupWGSL, terrainShaderBundle)');
+        }
+        if (!options.terrainTheme.terrainShaderBundle) {
+            throw new Error('WebGPUTerrainGenerator requires options.terrainTheme.terrainShaderBundle');
+        }
+        this.terrainTheme = options.terrainTheme;
+        this.tileTypes = options.terrainTheme.TILE_TYPES ?? {};
+        this.tileCategories = options.terrainTheme.TILE_CATEGORIES;
+        this.buildTileCategoryLookupWGSL = options.terrainTheme.buildTileCategoryLookupWGSL;
+        this.terrainShaderBundle = options.terrainTheme.terrainShaderBundle;
+
+        this.debugMode = 0;
+
+        this.device = requireObject(device, 'device');
+        this.seed = requireInt(seed, 'seed', 0);
+        this.chunkSize = requireNumber(chunkSize, 'chunkSize');
+        const macro = requireObject(macroConfig, 'macroConfig');
+        this.macroConfig = {
+            biomeScale: requireNumber(macro.biomeScale, 'macroConfig.biomeScale'),
+            regionScale: requireNumber(macro.regionScale, 'macroConfig.regionScale')
+        };
+        const splat = requireObject(splatConfig, 'splatConfig');
+        this.splatDensity = requireInt(splat.splatDensity, 'splatConfig.splatDensity', 1);
+        this.splatKernelSize = requireInt(splat.splatKernelSize, 'splatConfig.splatKernelSize', 1);
+        this.splatSlotSupportExpansionTexels = Math.max(
+            0.0,
+            requireNumber(
+                splat.slotSupportExpansionTexels ?? 1.5,
+                'splatConfig.slotSupportExpansionTexels'
+            )
+        );
+        this.splatTransitionSharpness = Math.max(
+            1.0,
+            requireNumber(
+                splat.transitionSharpness ?? 1.9,
+                'splatConfig.transitionSharpness'
+            )
+        );
+        this.splatTransitionDominanceStart = clamp01(
+            requireNumber(
+                splat.transitionDominanceStart ?? 0.55,
+                'splatConfig.transitionDominanceStart'
+            )
+        );
+        this.splatTransitionDominanceEnd = Math.max(
+            this.splatTransitionDominanceStart + 0.001,
+            clamp01(
+                requireNumber(
+                    splat.transitionDominanceEnd ?? 0.9,
+                    'splatConfig.transitionDominanceEnd'
+                )
+            )
+        );
+        this.splatCenterCategoryBias = Math.max(
+            0.0,
+            requireNumber(
+                splat.centerCategoryBias ?? 0.0,
+                'splatConfig.centerCategoryBias'
+            )
+        );
+        this.splatTransitionBreakupScale = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupScale ?? 0.018,
+                'splatConfig.transitionBreakupScale'
+            )
+        );
+        this.splatTransitionBreakupWarpScale = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupWarpScale ?? 0.055,
+                'splatConfig.transitionBreakupWarpScale'
+            )
+        );
+        this.splatTransitionBreakupWarpStrength = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupWarpStrength ?? 0.65,
+                'splatConfig.transitionBreakupWarpStrength'
+            )
+        );
+        this.splatTransitionBreakupStrength = Math.max(
+            0.0,
+            requireNumber(
+                splat.transitionBreakupStrength ?? 0.10,
+                'splatConfig.transitionBreakupStrength'
+            )
+        );
+        this.authoredSplatSourceMinProbability = clamp01(
+            requireNumber(
+                splat.sourceMinorityCutoff ?? 0.18,
+                'splatConfig.sourceMinorityCutoff'
+            )
+        );
+        this.authoredSplatSourceMinProbabilityFade = Math.max(
+            0.001,
+            requireNumber(
+                splat.sourceMinorityFade ?? 0.10,
+                'splatConfig.sourceMinorityFade'
+            )
+        );
+        this.authoredSplatSourceWinnerSnapStart = clamp01(
+            requireNumber(
+                splat.sourceWinnerSnapStart ?? 0.55,
+                'splatConfig.sourceWinnerSnapStart'
+            )
+        );
+        this.authoredSplatSourceWinnerSnapEnd = Math.max(
+            this.authoredSplatSourceWinnerSnapStart + 0.001,
+            clamp01(
+                requireNumber(
+                    splat.sourceWinnerSnapEnd ?? 0.70,
+                    'splatConfig.sourceWinnerSnapEnd'
+                )
+            )
+        );
+        this.splatFixedMaterialFamiliesEnabled = splat.fixedMaterialFamiliesEnabled === true;
+        this.splatChunkPaletteEnabled = splat.chunkPaletteEnabled !== false;
+        this.splatChunkPaletteMinCoverage = clamp01(
+            Number.isFinite(splat.chunkPaletteMinCoverage)
+                ? splat.chunkPaletteMinCoverage
+                : 0.9
+        );
+        this.splatChunkPaletteBorderTexels = Math.max(
+            0,
+            requireInt(
+                splat.chunkPaletteBorderTexels ?? 2,
+                'splatConfig.chunkPaletteBorderTexels',
+                0
+            )
+        );
+        this.textureCache = requireObject(textureCache, 'textureCache');
+        this.arrayPools = new Map();
+        this.useTextureArrays = true;
+        this.maxArrayBytesPerType = 512 * 1024 * 1024;
+        this.maxGpuBiomes = Math.max(1, requireInt(options.maxGpuBiomes ?? 16, 'maxGpuBiomes', 1));
+
+        this.detailScale = 0.08;
+        this.ridgeScale = 0.02;
+        this.plateauScale = 0.005;
+        this.valleyScale = 0.012;
+
+        this.streamedTypes = new Map();
+        this.initializeStreamedTypes();
+        this.initialized = false;
+        this._continentsEnabled = true;
+        this._useSmallPlanetMode = false;
+        this.smallPlanetRadiusThreshold = requireNumber(
+            options.smallPlanetRadiusThreshold ?? 500000,
+            'smallPlanetRadiusThreshold'
+        );
+        this.planetConfig = requireObject(options.planetConfig, 'planetConfig');
+        this.setPlanetConfig(this.planetConfig);
+
+        this._debugAtlasLogCount = 0;
+        this._debugAtlasLogBudget = 24;
+
+        this.debugMode = 0;
+        this._logUniformsOnNextPass = false;
+        this._packedBiomeUniforms = null;
+        this.biomeUniformBuffer = null;
+        this.biomeBindGroupLayout = null;
+        this.biomeBindGroup = null;
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    setPlanetConfig(config) {
+        this._regionalTerrainInputRevision = (this._regionalTerrainInputRevision ?? 0) + 1;
+        this._regionalTerrainDirty = true;
+        const planetConfig = requireObject(config, 'planetConfig');
+        this.planetConfig = planetConfig;
+        this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
+        this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
+        this.erosionFilter = requireObject(this.terrainConfig.erosionFilter, 'planetConfig.terrainGeneration.erosionFilter');
+        // River channels carved into the height (riverCarve.wgsl.js), from the
+        // water graph's traced rivers (setWaterCarveResources).
+        const waterGraph = this.terrainConfig.waterGraph ?? {};
+        this.waterCarve = waterGraph.enabled === true && waterGraph.carve?.enabled !== false;
+        // River valleys shaped into the height before erosion (riverValley.wgsl.js),
+        // from the same rivers (setRiverValleyResources).
+        this.riverValley = this.waterCarve && waterGraph.valley?.enabled !== false;
+        this.riverValleyPage = waterGraph.valley?.page ?? 32;
+        this._applyTerrainFeatures(this.terrainConfig?.features ?? {}, null);
+        this.worldScale = requireNumber(planetConfig.radius, 'planetConfig.radius');
+        const radiusM = this.worldScale;
+        const continentsEnabled = this.terrainConfig?.continents?.enabled ?? true;
+        this._useSmallPlanetMode = radiusM < this.smallPlanetRadiusThreshold;
+        // Continents only for larger planets; small planets use alternate path in shader.
+        this._continentsEnabled = continentsEnabled && !this._useSmallPlanetMode;
+        const refRadius = this.terrainConfig.noiseReferenceRadiusM;
+        const baseReference = Number.isFinite(refRadius) ? refRadius : radiusM;
+        this.noiseReferenceRadiusM = radiusM >= 50000
+            ? Math.min(baseReference, radiusM * 1.5)
+            : baseReference;
+        // The packed data is cached here even before the GPU buffer exists.
+        // initializePipelines uploads it once biomeUniformBuffer is allocated.
+        this._refreshPackedBiomeUniforms();
+        Logger.info(`WebGPUTerrainGenerator: Set worldScale to planet radius ${this.worldScale}`);
+        Logger.info(`WebGPUTerrainGenerator: noiseReferenceRadiusM ${this.noiseReferenceRadiusM}`);
+        if (this._useSmallPlanetMode) {
+            Logger.info(`WebGPUTerrainGenerator: small planet mode enabled (radius ${radiusM} < ${this.smallPlanetRadiusThreshold})`);
+        }
+    }
+
+    setDebugMode(mode) {
+        this.debugMode = mode;
+    }
+
+    _applyTerrainFeatures(features, base) {
+        const { features: normalized, unknown } = normalizeTerrainFeatures(features, base);
+        if (unknown.length) {
+            Logger.warn(`WebGPUTerrainGenerator: unknown terrain features ignored: ${unknown.join(', ')}`);
+        }
+        this.terrainFeatures = normalized;
+        this.terrainFeatureDisableMask = terrainFeatureDisableMask(normalized);
+        return unknown;
+    }
+
+    /**
+     * Switches terrain height-function terms on or off for tiles generated
+     * from now on, e.g. { rollingHills: false, meso2: false }. Keys not given keep
+     * their state. The caller regenerates resident tiles (qtDiag does it via
+     * GPUQuadtreeTerrain.refreshTiles). Returns the full on/off table.
+     */
+    setTerrainFeatures(features = {}) {
+        this._applyTerrainFeatures(features, this.terrainFeatures);
+        this._regionalTerrainInputRevision = (this._regionalTerrainInputRevision ?? 0) + 1;
+        this._regionalTerrainDirty = true;
+        return describeTerrainFeatures(this.terrainFeatures);
+    }
+
+    getTerrainFeatures() {
+        return describeTerrainFeatures(this.terrainFeatures);
+    }
+
+    /**
+     * Request logging of uniforms on the next height map generation pass.
+     * The flag is cleared after logging.
+     */
+    requestUniformLogging() {
+        this._logUniformsOnNextPass = true;
+
+    }
+
+
+    async initialize() {
+        if (this.initialized) return;
+        await this.initializePipelines();
+        if (this.terrainConfig.regionalTerrain?.enabled === true) await this.prepareRegionalTerrain();
+        this.initialized = true;
+    }
+
+    /**
+     * Generate dependencies before fine work; publish one immutable version.
+     * Feature configuration changes share unchanged terrain foundation inputs.
+     * regenerate:true remains a full rebuild; explicitly reuseFoundation:true
+     * to regenerate only dependent features and preserve the foundation.
+     */
+    async prepareRegionalTerrain(options = this.terrainConfig.regionalTerrain, { regenerate = false, reuseFoundation = !regenerate } = {}) {
+        const opts = regionalTerrainOptions(options);
+        if (this._regionalTerrainPreparing) {
+            // Coalesce matching requests; a different resolution must wait for
+            // its own inputs rather than receiving the preceding request's data.
+            const pending = await this._regionalTerrainPreparing;
+            if (!this._regionalTerrainDirty && pending.cells === opts.cells && pending.seamCells === opts.seamCells
+                && JSON.stringify(pending.basinsConfig??null)===JSON.stringify(opts.basins)
+                && JSON.stringify(pending.drainageConfig??null)===JSON.stringify(opts.drainage)
+                && JSON.stringify(pending.placementConfig??null)===JSON.stringify(opts.placement)
+                && JSON.stringify(pending.valleyConfig??null)===JSON.stringify(opts.valley)
+                && JSON.stringify(pending.shapeConfig??null)===JSON.stringify(opts.shape)
+                && JSON.stringify(pending.worldConfig??null)===JSON.stringify(opts.world)) return pending;
+        }
+        if (!regenerate && !this._regionalTerrainDirty && this.regionalTerrain && this.regionalTerrain.cells === opts.cells
+            && this.regionalTerrain.seamCells === opts.seamCells
+            && JSON.stringify(this.regionalTerrain.basinsConfig??null)===JSON.stringify(opts.basins)
+            && JSON.stringify(this.regionalTerrain.drainageConfig??null)===JSON.stringify(opts.drainage)
+            && JSON.stringify(this.regionalTerrain.placementConfig??null)===JSON.stringify(opts.placement)
+            && JSON.stringify(this.regionalTerrain.valleyConfig??null)===JSON.stringify(opts.valley)
+            && JSON.stringify(this.regionalTerrain.shapeConfig??null)===JSON.stringify(opts.shape)
+            && JSON.stringify(this.regionalTerrain.worldConfig??null)===JSON.stringify(opts.world)) {
+            this.regionalTerrainActive = true;
+            return this.regionalTerrain;
+        }
+        this._regionalTerrainPreparing = (async () => {
+            const old = this.regionalTerrain;
+            const revision = this._regionalTerrainInputRevision ?? 0;
+            const next = await createRegionalTerrainData({ device: this.device, terrainGenerator: this,
+                options: opts, version: (old?.version ?? 0) + 1, previousFoundation: reuseFoundation ? old?.foundation : null });
+            if (revision !== (this._regionalTerrainInputRevision ?? 0)) {
+                await next.destroy();
+                throw new Error('Regional terrain inputs changed during generation; retry with current inputs');
+            }
+            this.regionalTerrain = next;
+            this.regionalTerrainActive = true;
+            this._regionalTerrainDirty = false;
+            if (old) await old.destroy();
+            return next;
+        })();
+        try { return await this._regionalTerrainPreparing; }
+        finally { this._regionalTerrainPreparing = null; }
+    }
+
+    _terrainPipelineLayouts(layouts) {
+        return this.regionalTerrainActive ? [...layouts, this.regionalTerrain.bindGroupLayout] : layouts;
+    }
+
+    initializeStreamedTypes() {
+
+    }
+
+}
+
+installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator);
+installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenerator);
+installWebGPUTerrainGeneratorAtlasMethods(WebGPUTerrainGenerator);

@@ -1,0 +1,1084 @@
+import { EngineConfig } from '../core/EngineConfig.js';
+import { GameDataConfig } from './GameDataConfig.js';
+import { LogLevel } from '../shared/Logger.js';
+import { TerrainGenerationConfig } from '../templates/configs/terrainGenerationConfig.js';
+import { TILE_CONFIG } from '../templates/configs/TileConfig.js';
+import { TEXTURE_CONFIG } from '../templates/configs/atlasConfig.js';
+import { GRASS_QUALITY_LEVELS, GRASS_TYPES } from '../templates/configs/grassConfig.js';
+import { TILE_LAYER_HEIGHTS, TILE_TRANSITION_RULES } from '../templates/configs/tileTransitionConfig.js';
+import { resolveTreeConfig } from '../templates/configs/treeConfigResolver.js';
+import { WEATHER_CONFIG } from '../templates/configs/weatherConfig.js';
+
+const ATLAS_TEXTURE_TYPES = ['height', 'normal', 'tile', 'splatData', 'macro'];
+
+function  buildLodPoolConfig(baseChunkSize, worldCoverage, maxLODLevels, slotsByLod) {
+  if (!Array.isArray(slotsByLod) || slotsByLod.length !== maxLODLevels) {
+    throw new Error('buildLodPoolConfig requires slotsByLod for each LOD level');
+  }
+  const chunksPerAtlas = worldCoverage / baseChunkSize;
+  const poolConfig = {};
+
+  for (let lod = 0; lod < maxLODLevels; lod++) {
+    const divisor = Math.pow(2, lod);
+    const gridSegments = Math.max(4, Math.floor(baseChunkSize / divisor));
+    const chunkSamples = gridSegments + 1;
+    const textureSize = chunksPerAtlas * chunkSamples;
+    poolConfig[lod] = {
+      slots: slotsByLod[lod],
+      textureSize
+    };
+  }
+
+  return poolConfig;
+}
+function nextPow2(n) {
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+export function createEngineConfig() {
+  const vertexSpacingMeters = 1;
+  const chunkSegments = 128;
+
+  const chunksPerAtlas = 8;
+  const chunkSizeMeters = vertexSpacingMeters * chunkSegments; // 128 (derived)
+  const samplesPerChunk = chunkSegments + 1;           // 129 (derived)
+  const minAtlasSize = chunksPerAtlas * samplesPerChunk; // 1032 (derived)
+  const textureSize = nextPow2(minAtlasSize);          // 2048 (derived)
+  const chunkSizeTex = textureSize / chunksPerAtlas;   // 256 (derived)
+
+
+  const maxLODLevels = 14;
+
+  const worldCoverage = chunkSizeMeters * chunksPerAtlas;
+  const lodDistancesMeters = [4000, 8000, 16000, 32000, 64000, 128000, 256000, 512000, 1024000, Infinity];
+  const lodPoolSlots = [64, 48, 32, 24, 16, 12, 6, 6, 4, 4, 4, 4, 4, 4];
+  const lodPoolConfig = buildLodPoolConfig(
+    chunkSizeMeters,
+    worldCoverage,
+    maxLODLevels,
+    lodPoolSlots
+  );
+
+  return new EngineConfig({
+    logLevel: LogLevel.INFO,
+    seed: 12345,
+    chunkSegments,
+     macroConfig: {
+      biomeScale: 0.001,
+      regionScale: 0.0005
+    },
+    nightSky: {
+      detailLevel: 'low'  // or 'medium' or 'low'
+    },
+    vertexSpacingMeters,
+    splatConfig: {
+      splatDensity: 8,
+      // Keep the live splat kernel local enough that 1-4 tile authored
+      // grass/sand islands remain visible instead of being averaged away.
+      splatKernelSize: 1,
+      // Stabilize sparse material ID slots across the 2x2 bilinear footprint
+      // without widening the visible blend weights.
+      slotSupportExpansionTexels: 1.5,
+      transitionSharpness: 4.5,
+      transitionDominanceStart: 0.05,
+      transitionDominanceEnd: 0.75,
+      centerCategoryBias: 0.0,
+      transitionBreakupScale: 0.48,
+      transitionBreakupWarpScale: 0.155,
+      transitionBreakupWarpStrength: 0.65,
+      transitionBreakupStrength: 0.10,
+      sourceMinorityCutoff: 0.18,
+      sourceMinorityFade: 0.10,
+      sourceWinnerSnapStart: 0.51,
+      sourceWinnerSnapEnd: 0.58,
+      // Performance-first splat representation: splatData stores fixed
+      // ORGANIC/MINERAL/SOIL_ARID/COLD weights. The renderer can use one
+      // hardware-filtered RGBA weight sample with no splatIndex reads.
+      fixedMaterialFamiliesEnabled: true,
+      chunkPaletteEnabled: false,
+  },
+    lod: {
+      distancesMeters: lodDistancesMeters,
+      radiusCaps: [12, 24, 48, 96, 160, 256],
+      maxChunks: [512, 2048, 4096, 8192, 8192, 8192],
+      maxVisibleSelection: 8192,
+      autoScalePoolToVisible: false,
+      blockWhenPoolFull: false
+    },
+
+    rendering: {
+      maxPoolSlots: 2048,
+      lighting: {
+        ambient: {
+          // Global ambient tuning for all terrain/asset materials.
+          intensityMultiplier: 1.0,
+          minIntensity: 0.08,
+          maxIntensity: 0.30,
+          sunContributionScale: 0.22,
+          moonContributionScale: 0.08,
+          moonNormalizationIntensity: 0.15
+        },
+        sun: {
+          // Keep dawn/dusk readable for the neutral baseline without
+          // turning nights into a full-time blue fill light.
+          twilightStartDot: -0.14,
+          twilightEndDot: 0.04
+        },
+        fog: {
+          densityMultiplier: 0.40,
+          maxBaseDensity: 0.00055,
+          dayDensityScale: 0.85,
+          nightDensityScale: 0.42,
+          minBrightness: 0.05,
+          maxBrightness: 0.82,
+          moonBrightnessScale: 0.10,
+          sunTintStrength: 0.12
+        }
+      },
+      distortion: {
+        sourceCutoffs: {
+          // Third-person camera starts around 7.8 m but zoom/orbit pushes the
+          // effective camera-to-fire distance higher, so 10 m was too brittle.
+          campfire: 30.0,
+          shockwave: 200.0
+        }
+      },
+      atmoBankParticles: {
+        offscreen: {
+          enabled: true,
+          resolutionScale: 0.5, // set to 0.25 for quarter-resolution
+        },
+      },
+      terrainShader: {
+        aerialFadeStartMeters: 400,
+        aerialFadeEndMeters: 600,
+        fullMaxLOD: 0,
+        nearMaxLOD: 4,
+        midMaxLOD: 4,
+        nearToMidFadeStartChunks: 2.5,
+        nearToMidFadeEndChunks: 4.0,
+        lodEdgeFadeEnabled: false,
+        lodEdgeFadeMaxLod: 4,
+        // AO masks are baked per tile, so adjacent geometry LODs can expose
+        // different mask frequencies. Fade AO toward neutral only at cross-LOD
+        // borders; leave color, normals, and shadows on their normal paths.
+        lodEdgeAOFadeEnabled: true,
+        lodEdgeFadeWidth: 0.08,
+        lodEdgeColorStrength: 0.0,
+        lodEdgeResolvedColorEnabled: false,
+        lodEdgeAOStrength: 1.0,
+        lodEdgeNormalStrength: 1.0,
+        lodEdgeShadowStrength: 1.0,
+        // LOD5-only: fade its baseColor toward the same spatially-averaged
+        // coarse color LOD6 uses (sampleChunkAverageCoarseColor), purely as
+        // a function of camera distance (not tile/chunk boundaries — a
+        // simple smoothstep on distanceToCamera, cheaper than the tile-edge
+        // lodEdgeAmount mechanism and doesn't visually trace the chunk grid).
+        // Placeholder distances — tune by eye: should finish fading to solid
+        // color at or before the point LOD5 geometry actually switches to
+        // LOD6, so the two tiers already agree on color by the time the
+        // real mesh seam is reached.
+        lodEdgeToSolidColorStrength: 1.0,
+        lodEdgeToSolidColorFadeStartMeters: 3000.0,
+        lodEdgeToSolidColorFadeEndMeters: 6000.0,
+        enableMacroLayer: false,
+        forceMacroOverlay: false,
+        pointSampleLodStart: 2,
+        macroStartLod: 99,
+        resolvedColorEnabled: true,
+        resolvedColorStartLod: 5,
+        // Small first increment of the coarse-tier rework: only the single
+        // coarsest LOD (6 of 0-6) uses the flat, lit solid-color tier
+        // instead of resolved-color. LOD 5 (and everything nearer) is
+        // completely untouched. Widen later once this is confirmed good.
+        solidColorTierEnabled: true,
+        // Experiment (2026-10-02): LOD5 renders the flat solid-color tier
+        // (previously LOD6+ only). The prebaked LOD5 tier is still in the
+        // code: set this back to 6 to restore it.
+        solidColorStartLod: 5,
+        // Distance ramp into the solid tier: every LOD below the tier mixes
+        // its color toward the tier's flat color by camera distance. Start
+        // and end are recomputed every frame from the traversal's LOD metric
+        // (QuadtreeTerrainRenderer._computeTierFadeDistances), so the ramp
+        // keeps its place relative to the LOD bands on any canvas size and
+        // moves smoothly with the camera instead of jumping with tile splits.
+        // It ends where the nearest solid-tier pixel can appear, so both
+        // sides of the LOD boundary are fully flat where they meet.
+        solidColorTierDistanceFadeEnabled: true,
+        // Ramp length, as a fraction of the solid tier's split distance.
+        solidColorTierDistanceFadeBandFraction: 0.3,
+        // Terrain-height allowance (m) in the "nearest possible solid-tier
+        // pixel" bound.
+        solidColorTierDistanceFadeHeightMarginMeters: 1000,
+        // 1.0 = the ramp always completes before any solid-tier pixel can
+        // appear (worst-case geometry). Lower values push detail farther out
+        // and rely on the edge safety net below where a solid-tier tile is
+        // drawn nearer. 0.5 measured seamless at the LOD4/5 line while
+        // flattening 5 % of LOD4 pixels vs 12 % at 1.0 (2880x1800 canvas,
+        // 4 km altitude; see LOD4_LOD5_BLEND_ANALYSIS.md section 10).
+        solidColorTierDistanceFadeEndSafety: 0.5,
+        // In-tile ramp toward edges shared with a solid-tier neighbour.
+        // Now a narrow safety net: combined with the distance ramp by max().
+        solidColorTierEdgeBlendEnabled: true,
+        // Fraction of the tile, from the shared edge, the safety-net ramp spans.
+        solidColorTierEdgeBlendWidth: 0.15,
+        solidColorTierEdgeBlendStrength: 1.0,
+        // World-size averaging window (m) of the flat color, identical in
+        // every tier so the color does not change when a tile splits or
+        // merges. Was 35 % of each tile (1434 m on LOD5, 2867 m on LOD6).
+        // 0 = legacy 35 %-of-tile window.
+        solidColorAverageWindowMeters: 1434,
+        // Was disabled: "prebaked resolved-color exposes hard category-mask
+        // contours because the prebake does not reproduce the fragment
+        // shader's live splat reconstruction." Re-testing (2026-09-30) at
+        // the user's request; the black-tile regression that first caused
+        // (missing resolvedColor alpha-validity check, mirrored from a bug
+        // fixed earlier today in a different call site) is now fixed at a
+        // shared helper (sampleResolvedColorOrFallback) covering every
+        // call site instead of one. Note: resolvedColor is baked from live
+        // splat data via a separate compute pass (resolvedTerrainColorCompute),
+        // NOT the category-average colors added earlier today for the
+        // solid-color tier — a different code path, so this isn't
+        // guaranteed to be the same already-fixed issue either way.
+        lod0ResolvedColorEnabled: true,
+        // These two (meters) are now used only as lod0AOFade's fallback
+        // default if lod0AOFadeStartMeters/EndMeters were unset — they no
+        // longer control the color blend itself, left at their original
+        // values. See lod0ResolvedColorFadeStartChunks/EndChunks below for
+        // the fade the color blend actually uses now.
+        lod0ResolvedColorFadeStartMeters: 8,
+        lod0ResolvedColorFadeEndMeters: 40,
+        // Mode-83 diagnostic (2026-09-30) showed 1500-3500m (and my
+        // "chunk-relative" 10-25 chunks, which at chunkSizeMeters=128 is
+        // 1280-3200m — barely different, my mistake) both sat entirely past
+        // where LOD4 actually switches to LOD5: fade was already fully
+        // saturated at 1.0 everywhere visible. Tightened per user request
+        // to a ~50m gradient (this is just a detail-level transition, not a
+        // large-scale effect): 1.0-1.4 chunks at chunkSizeMeters=128 ≈
+        // 128-180m.
+        lod0ResolvedColorFadeStartChunks: 1.0,
+        lod0ResolvedColorFadeEndChunks: 1.4,
+        // AO has the same near-vs-prebaked frequency mismatch as albedo.
+        // Fade LOD0 contact AO out over the same range so its tile-local
+        // darkening does not stop abruptly where LOD1 takes over.
+        lod0AOFadeEnabled: true,
+        lod0AOFadeStartMeters: 128,
+        lod0AOFadeEndMeters: 256,
+        splatBlendMaxLod: 4,
+        splatTop2MaxLod: -1,
+        splatDominantMinWeight: 1.0,
+        nearMipSharpenMaxLod: -1,
+        variantRotationMaxLod: 2,
+        clusteredMaxLod: 1,
+        // Geometry shader variants currently run through LOD6, so this keeps
+        // aerial perspective capped while avoiding an in-view AP cutoff seam.
+        aerialMaxLod: 6,
+        // Compile normals for farther LOD variants, but the shader samples
+        // them only inside an altitude-scaled distance radius. Ground-level
+        // cost stays bounded; aerial views keep directional terrain lighting.
+        // normalMapDistanceMaxMeters was a fixed 28000m regardless of
+        // altitude, so real terrain-shape normals never got sampled past
+        // that distance no matter how high up the camera went — the whole
+        // sphere fell back to the flat geometric sphere normal from orbit,
+        // which is why ridges/mountains went dull and flat (confirmed by
+        // observation: normal-map sampling itself was already proven
+        // correct earlier — this is purely the distance ceiling cutting it
+        // off). The altitude-scaled base (4500 * (1 + altitude/1000))
+        // already grows far past this old cap at any real altitude, so
+        // raising just the ceiling is the whole fix — no change to the
+        // scaling formula itself.
+        normalMapMaxLod: 7,
+        normalMapDistanceBaseMeters: 4500,
+        normalMapDistanceAltitudeScaleMeters: 1000,
+        normalMapDistanceMaxMeters: 1000000,
+        normalMapDistanceFadeMeters: 2500,
+        altitudeNormalMinMeters: 8000,
+        altitudeShadowMinMeters: 12000,
+        shadowDistanceMaxMeters: 1000,
+        ambientScale: 1.3,
+        sunWrap: 0.18
+      }
+    },
+
+    ui: {
+      updateIntervalMs: 250,
+      initialLoad: {
+        enabled: true,
+        minOverlayMs: 1800,
+        maxWaitMs: 18000,
+        stableFramesRequired: 45,
+        residentVisibleRatio: 0.97,
+        exactVisibleRatio: 0.92,
+        minVisibleTiles: 64,
+        maxPendingGenerations: 4,
+        maxActiveGenerations: 2,
+        maxPendingCopies: 0
+      }
+    },
+
+    player: {
+      baseMoveSpeed: 4.0,
+      sprintMultiplier: 1.7,
+      staminaMax: 100,
+      staminaRegenPerSec: 5.5,
+      staminaSprintDrainPerSec: 16,
+      staminaTemperaturePenaltyMax: 3.5,
+      sprintResumeThreshold: 12,
+      hungerMax: 100,
+      hungerDrainPerSec: 0.08,
+      temperatureMin: 0,
+      temperatureMax: 100,
+      temperatureNeutral: 50,
+      temperatureRecoverPerSec: 0.6,
+      temperatureColdWarn: 35,
+      temperatureColdDanger: 20,
+      temperatureHotWarn: 65,
+      temperatureHotDanger: 80,
+      exhaustedAnimationSpeed: 1.0,
+      exhaustedFallbackDurationSec: 1.6,
+      exhaustedRegenMultiplier: 2.5
+    },
+
+    camera: {
+      fov: 75,
+      near: 0.1,
+      far: 150000,
+      distance: 12,
+      height: 6,
+      lookAtSmoothing: 0.15,
+      lookAheadDistance: 10,
+      lookAheadHeight: 2,
+      characterFollow: {
+        followHeight: 6,
+        followDistance: 5,
+        walkFollowPitchDeg: 30,
+        walkPitchApproachSpeed: 0.8,
+        stopPitchApproachSpeed: 0.4,
+        stopPitchReturnFraction: 0.2,
+        snapBackOnRelease: true,
+        snapBackSpeed: 3.0,
+        orbitSensitivity: 0.005,
+        smoothing: 8.0,
+        maxTotalPitchDeg: 75
+      },
+      dynamicFarPlane: {
+        enabled: true,
+        minMeters: 2000,
+        horizonFactor: 1.25,
+        altitudeFactor: 0.5,
+        maxRadiusFactor: 2.5
+      }
+    },
+
+    manualCamera: {
+      baseSpeed: 20,
+      maxBoost: 160 ,
+      accelerationRate: 8,
+      decelerationRate: 8
+    },
+
+    debug: {
+      disableQuadtree: false,
+      terrainFragmentDebugMode: 0,
+      terrainVertexDebugMode: 0,
+      terrainForceDirectDraw: false,
+    },
+
+    features: {
+      shadows:           false,
+      clusteredLighting: false,
+      treesNear:         false,   // individual trees with leaves/branches
+      treesMid:          false,   // hull trees (140–700 m)
+      treesFar:          false,   // coarse canopy hulls (500–4000 m)
+      streamedAssets:    false,   // all streamed ground cover, props, etc.
+      particles:         false,   // campfire/leaves/fireflies particle system
+      actors:            false,   // wizard, goblins, skinned mesh actors
+      clouds:            true,    // high/cirrus WebGPUCloudRenderer
+      lowClouds:         false,   // low weather cloud shell
+      midClouds:         false,   // mid weather cloud shell
+      highClouds:        true,    // high cirrus/cirrostratus layers
+      cloudParticles:    false,   // low/peak atmospheric bank particle clouds
+      fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
+      skyEffects:        true,    // sky, stars, moon
+      rivers:            true,    // walking-skeleton river/shallow-water demo
+    },
+
+    gpuQuadtree: {
+      enabled: true,
+      tileTextureSize: 128,
+      minTileSizeMeters: 128,
+      maxVisibleTiles: 2048,//2048,
+      queueCapacity: 131072,
+      tilePoolSize: 2048,           // was 1024 — halves eviction pressure at high speed
+      tileHashCapacity: 8192 * 4,   // keep (already 2× pool, which is fine)
+      feedbackReadbackInterval: 1,  // was 2 — halves feedback latency
+      visibleReadbackInterval: 2,
+
+      tilePoolMaxBytes: 512 * 1024 * 1024 * 4,
+
+      visibleTableCapacity: 2048,
+      feedbackCapacity: 4096,
+      lodErrorThreshold:  512,  //512,
+      // Visible tiles draw from the nearest layer whose material is finished
+      // (own or ancestor), so a tile never flashes a geometry-only
+      // placeholder while its refinement is pending. false = old behaviour.
+      preferCompleteMaterialLayers: true,
+      // Tiles drawn by the flat solid-color tier (rendering.terrainShader.
+      // solidColorStartLod and coarser) skip the splat and prebaked-color
+      // refinement outputs, which they never draw (~12 of ~17.5 ms GPU per
+      // refinement). Scatter/climate are still generated for vegetation.
+      solidTierSkipsDetailMaterial: true,
+      // Tile streamer switches (see EngineConfig gpuQuadtree.streamerFlags).
+      // Toggle at runtime: qtDiag.setStreamerFlags({ diagnostics: true }).
+      streamerFlags: {
+        indexedVisibility: true,
+        refinementBudgetCountsGeometryStarts: true,
+        refinementTickWhenGeometryBlocked: true,
+        skipRefinementBeyondFlatFade: true,
+        flatFadeSkipMarginFraction: 0.1,
+        diagnostics: false
+      },
+      workgroupSize: 128,
+
+      // 8 instead of 4: allows more tile generations to be in-flight
+      // simultaneously, cutting burst latency roughly in half.
+      gpuBackpressureLimit: 8,
+
+      // ── Speed-adaptive LOD ────────────────────────────────────
+      // Scales lodErrorThreshold with camera speed. Higher threshold
+      // → shallower subdivision → fewer tile requests.
+      adaptiveLod: {
+          enabled: true,
+          speedFloorMps: 150,   // no adaptation below this speed
+          speedRefMps: 600,     // each +600 m/s over floor → +1.0 scale
+          maxScale: 3.0,        // cap: threshold never > 3× base
+          smoothUp: 0.15,       // speeding up: respond in ~7 frames
+          smoothDown: 0.03,     // slowing: ease back over ~30 frames
+          holdWhenGpuBacklogged: true
+      },
+
+      enableFrustumCulling: true,
+      // Horizon culling hides tiles below the geometric horizon.
+      enableHorizonCulling: true,
+      horizonCulling: {
+        groundCos: 1.0,
+        blendScale: 1.25
+      },
+
+      visibleReadbackMax: 8192,
+      textureFormats: {
+        height: 'r32float',
+        normal: 'rgba8unorm',
+        // r8unorm cuts resident tile/scatter bandwidth 4x. Generation
+        // resolves through a storage-compatible staging texture.
+        tile: 'r8unorm',
+        splatData: 'rgba8unorm',
+        scatter: 'r8unorm'
+      },
+      // ── Predictive tile streaming ─────────────────────────────────
+      // Pre-queues tiles in the direction of camera movement so they are
+      // ready before the GPU feedback pipeline discovers them.
+      //
+      // Neighborhood sizing: the neighbor radius is not fixed — it shrinks
+      // as depth increases so that the queued world-space footprint stays
+      // roughly constant across LOD levels.  At coarse depths (few tiles
+      // cover the whole frustum) a radius of 4-5 is needed; at fine depths
+      // radius 1-2 is sufficient.  The runtime computes:
+      //   radius(depth) = round(neighborRadiusCoarse * 2^(depthMin-depth))
+      // clamped to [1, neighborRadiusCoarse].
+      predictiveStreaming: {
+          enabled: true,
+
+          // Minimum speed before any prefetching is done (m/s).
+          speedThresholdMps: 50,
+
+          // Maximum look-ahead time (seconds).
+          // At 600 m/s: 1.5 s × 600 = 900 m ahead.
+          lookAheadTimeMaxSec: 1.5,
+
+          // lookAheadSec = speed × this, clamped to lookAheadTimeMaxSec.
+          // 0.0025: at 600 m/s → 1.5 s, at 300 m/s → 0.75 s.
+          lookAheadSpeedScale: 0.0025,
+
+          // EMA weight for velocity smoothing (~7-frame / 115 ms response).
+          // Tracks airplane-speed turns (several seconds) without jitter.
+          velocitySmoothAlpha: 0.15,
+
+          // Tile neighborhood radius at the coarsest prefetch depth.
+          // Shrinks automatically for deeper (finer) depths so the queued
+          // world-space footprint stays roughly constant.
+          // 4 → 9×9 patch at depthMin covers a wide frustum sweep.
+          neighborRadiusCoarse: 4,
+
+          // Quadtree depth range to prefetch.
+          // depthMax is clamped to quadtreeGPU.maxDepth at runtime.
+          // Using maxDepth-2 as default so we don't over-queue leaf tiles.
+          depthMin: 4,
+          depthMax: 11,
+      },
+
+      debugProfile: {
+        enabled:          false,    // flip to true to activate
+        warmupFrames:     300,      // run normally for this many frames first
+        freezeGeneration: false,    // stop starting new tile generation tasks
+        freezeFeedback:   false,    // stop feedback readback (no new tile requests)
+        freezeTraversal:  false,    // stop GPU quadtree traversal compute
+        freezeInstances:  false,    // stop GPU instance buffer building
+        freezeUniforms:   false,    // stop camera/LOD uniform uploads
+      },
+      // ── Stitching diagnostics ─────────────────────────────────────
+      // Enables targeted logging to pinpoint cracks/holes.
+      diagnosticsEnabled: false,
+      diagnosticsIntervalFrames: 1,
+      diagnosticsSampleInstances: 64,
+      // Enable heavy per-readback snapshot logging (includes ScatterDebug).
+      diagnosticSnapshotIntervalFrames: 0,
+      logStats: false,
+    },
+    generationQueue: {
+      maxConcurrentTasks: 32,
+      // 16 instead of 8: a burst of 50 tiles entering the frustum at once
+      // now takes 3 frames to fully start instead of 6.
+      maxStartsPerFrame: 16,
+      timeBudgetMs: 8,
+      maxQueueSize: 1024,
+      minStartIntervalMs: 0,
+      staleRequestAgeMs: 200,
+      staleRequestMinDepth: 5,
+      priorityRefreshIntervalMs: 100,
+      // At capacity, current demand can replace a less urgent queued tile.
+      // Prewarm, coarse fallbacks and current visible demand are protected.
+      replaceLowerPriority: true
+    },
+    weather: WEATHER_CONFIG,
+
+    trees: resolveTreeConfig({
+      flags: {
+          useMidTier: true,
+          keepLegacyMidNear: false,
+          useFarTierClone: true,
+          useClusterFarTier: false,
+          enableLeafRendering: true,
+          enableLeafWind: false,
+          enableBranchWind: false,
+      },
+
+      // ═══════════════════════════════════════════════════════════════
+      //  TIER RANGES — master distance bands
+      // ═══════════════════════════════════════════════════════════════
+      //  Individual-tree tiers (near + mid) share one source pipeline.
+      //  The coarse far-tree tier reuses the old cluster producer, but it
+      //  renders packed low-res canopy hulls instead of blob coverage.
+      //
+      //  Everything under nearTier.* derives its outer cutoff from near.end.
+      //  Tree LOD distances and quotas are derived from these ranges.
+      tierRanges: {
+          // Near tier now runs 20m farther and crossfades with the mid hull
+          // across an 80m handoff window [140, 220].
+          near:    { start: 0,    end: 220,  fadeOutWidth: 80 },
+          mid:     { start: 140,  end: 700, fadeInWidth: 80,  fadeOutWidth: 320 },
+          farTrees:{ start: 500,  end: 4000, fadeInWidth: 200, fadeOutWidth: 300 },
+          // Legacy tree far patch tier disabled. Tree rendering now stops
+          // at the simplified far hull tier instead of switching to blobs.
+          far:     { start: 0,    end: 0,    fadeInWidth: 0,   fadeOutWidth: 0 },
+      },
+
+      // ── Individual-tree source baking range (nominal tile distance) ───
+      // null → auto-derived from the actual gather radius, not a separate
+      // hand-tuned distance ladder.
+      sourceNominalRange: null,
+
+      // ── Master tree density ───────────────────────────────────────────
+      // Single source of truth for practical tree density. The resolver
+      // converts this into:
+      //   - source-bake densityScale
+      //   - tree LOD distances
+      //   - per-LOD legacy densities
+      //   - near / mid / foliage quotas
+      density: {
+          maxTreesPerSquareMeter: 0.0072,
+      },
+
+      // ── Individual-tree scatter (feeds near + mid ONLY) ──────────────
+      // These are the low-level bake-pattern controls only. Runtime LOD
+      // bands, densities, and quotas are derived from `density` plus the
+      // tier ranges above.
+      scatter: {
+          cellSize: 16.0,
+          maxPerCell: 4,
+          clusterProbability: 0.95,
+          jitterScale: 0.85,
+      },
+
+      sourceBake: {
+          enabled: true,
+          perLayerCapacity: 1024,
+          maxBakesPerFrame: 16,
+          logDispatches: false,
+      },
+
+      billboards: {
+          lodStart: 3, lodEnd: 4,
+          fadeStartRatio: 0.7, fadeEndRatio: 1.0,
+      },
+
+      // ─── Near tier ────────────────────────────────────────────────────
+      // null budgets are auto-derived from `density`.
+      nearTier: {
+          maxCloseTrees: null,
+          maxTotalLeaves: 360000,
+          maxTotalClusters: 10000000,
+
+          maxBranchDetailLevel: 0,
+          branchGeometryLOD: 1,
+          branchTrunkRadialSegments: 6,
+          branchBranchRadialSegments: 4,
+          branchLODBands: [
+              { distance: 20, maxLevel: 2 },
+              { distance: 36, maxLevel: 1 },
+          ],
+          branchTerminalLevel: 1,
+          branchFadeMargin: 8,
+
+          leafBands: [
+              { start:   0, end:  36 },
+              { start:  28, end:  82 },
+              { start:  66, end: 150 },
+              { start: 128 },
+          ],
+          leafFadeStartRatio: 0.86,
+          leafBandBudgetFractions: [0.42, 0.30, 0.18, 0.10],
+
+          leafCounts: {
+              generic: [5000, 1800, 600, 160],
+              0:       [2400, 900, 300, 100],
+              1:       [2400, 900, 300, 100],
+          },
+          leafSizeScale: [1.0, 1.36, 2.0, 2.0],
+
+          birch: {
+              nearDistance: 55.0,
+              closeSize: 0.24, settledSize: 0.40, aspect: 1.5,
+              closeLeaves: 9000,
+              closeCardsPerAnchor: 4,
+              settledCardsPerAnchor: 1,
+              l0SettledLeaves: 4500,
+              l1CardsPerAnchor: 16,
+              l2CardsPerAnchor: 10,
+              l3CardsPerAnchor: 6,
+          },
+      },
+
+      // ─── Mid tier ─────────────────────────────────────────────────────
+      midTier: {
+          maxTrees: null,
+          // 1.0 = no distance thinning. 0.5 = keep about half as many
+          // trees by the far end of the mid tier, with a linear ramp.
+          endDensityScale: 0.1,
+          hull: {
+              lonSegments: 12, latSegments: 8,
+              vsAnchorSamples: 8, inflation: 0.95, shrinkWrap: 0.55,
+              verticalBias: 1.15, topShrinkStart: 0.60, topShrinkStrength: 0.35,
+              gapShrink: 0.68,
+              lumpNearScale: 1.8,
+              lumpFarScale: 1.0,
+              lumpNearDistance: 250,
+              lumpFarDistance: 550,
+          },
+          hullFrag: {
+            // ── [TIER 1] Sub-band coverage ────────────────────────────────
+            // Near sub-band (~180–450m) gets noticeably lower base coverage
+            // — this is the single biggest "too solid" fix. Far sub-band
+            // (~450–1000m) stays close to the old 0.72: tiny trees at 800m
+            // alias if they're too porous.
+            //
+            // Backward compat: if you revert to a single `baseCoverage` field,
+            // the shader builder treats both near and far as that value and
+            // the sub-band gradient becomes a no-op.
+            baseCoverageNear: 0.56,
+            baseCoverageFar:  0.74,
+            subbandSplit: 450,         // m; centre of the near→far transition
+            subbandBlend: 120,         // m; width of the transition
+            subbandFarDamp: 0.65,      // how much to damp near-only effects at far (0 = no damping)
+
+            // Existing noise/lighting knobs — unchanged.
+            coverageNoiseAmp: 0.25,
+            coverageNoiseScale: 2.8,
+            bumpStrength: 0.12,
+            brightness: 1.05,
+
+            // ── [TIER 1] Macro-gap noise ──────────────────────────────────
+            // Very low frequency holes faking anchor-sparse regions. One
+            // cycle is roughly canopy-sized at the default scale. Set
+            // strength = 0 to disable.
+            macroGapScale: 0.55,
+            macroGapStrength: 0.22,
+
+            // ── [TIER 1] Noise-modulated edge erosion ─────────────────────
+            // Erosion threshold varies per-fragment: [edgeStartBase,
+            // edgeStartBase + edgeNoiseAmp]. Old fixed behaviour ≈
+            // { edgeStartBase: 0.58, edgeNoiseAmp: 0.0, edgeBaseThin: 0.05 }.
+            // Lower base = erosion reaches deeper into the canopy; higher
+            // amp = more irregular silhouette boundary.
+            edgeStartBase: 0.40,
+            edgeNoiseAmp:  0.22,
+            edgeBaseThin:  0.12,
+            edgeRimBoost:  0.14,       // extra bite at the very rim
+
+            // ── [TIER 1] Bottom breakup ───────────────────────────────────
+            // Ragged lowest-branch zone. Set to 0 to disable.
+            bottomBreak: 0.14,
+        },
+          trunk: {
+              visibleHeightFrac: 0.38, baseRadiusFrac: 0.025,
+              taperTop: 0.60, fadeEnd: 400,
+          },
+      },
+      // Coarse far-tree tier. Internally this still reuses the cluster
+      // producer/cache, but each instance now draws packed low-res canopy
+      // hulls instead of terrain-scale grove blobs.
+      farTreeTier: {
+        maxInstances: 120000,
+        densityMatchScale: 1.0,
+        endDensityScale: 1.0,
+
+        // ── Which tiles get far-hull instances ─────────────────────
+        // Nominal tile-distance gate (same units as sourceNominalRange).
+        // null → auto-derived from tierRanges.farTrees.
+        //   start: farTrees.start × 0.8  (pre-bake before reaching range)
+        //   end:   farTrees.end   × 1.5  (cover subdivision latency)
+        sourceNominalRange: { start: null, end: null },
+
+        // ── Bake grid: LOD-scaled ─────────────────────────────────
+        // gridDim × gridDim cells per tile. One cell becomes one far-tree
+        // instance, and each instance can pack several low-res hull trees.
+        // Keep this materially denser than the old blob settings.
+        bake: {
+            gridByTileSize: [
+                { tileSize:  128, gridDim: 12 },  //  11m cells
+                { tileSize:  256, gridDim: 12 },  //  21m cells
+                { tileSize:  512, gridDim: 12 },  //  43m cells
+                { tileSize: 1024, gridDim: 10 },  // 102m cells
+                { tileSize: 2048, gridDim:  8 },  // 256m cells
+                { tileSize: 4096, gridDim:  6 },  // 683m cells
+            ],
+            minGridDim: 5,
+            maxGridDim: 12,
+
+            // Forest eligibility (coarse re-evaluation; same logic as
+            // fine scatter, sampled at cell positions)
+            maxAltitude: 2200.0,
+            maxSlope:    0.65,
+            minDensity:  0.05,   // keep sparse far hulls from collapsing into holes
+
+            // When a tile has individual-tree scatter already baked
+            // (RUNTIME_TREE representation), sample that eligibility
+            // signal and weight far-hull emission by it. Biases far trees
+            // toward the same high-density regions as mid-tier trees.
+            // Tiles without scatter data fall back to pure eligibility.
+            useEligibilityWeighting: true,
+            eligibilityWeight: 0.6,   // 0 = ignore, 1 = full gate
+
+            // Placement and packing controls for the baked far instances.
+            jitterScale: 0.72,
+            neighborhoodRadius: 1.6,
+            gradientNudge: 0.08,
+            canopyFootprintMinScale: 0.90,
+            canopyFootprintMaxScale: 1.14,
+            groupRadiusMinFrac: 0.05,
+            groupRadiusMaxFrac: 0.10,
+
+            perLayerCapacity: 160,
+            maxBakesPerFrame: 8,
+        },
+
+        // ── Hull geometry ─────────────────────────────────────────
+        // Same hull builder as the mid tier, but lower resolution and a
+        // much simpler shader. Several separate trees can be packed into a
+        // single far instance.
+        hull: {
+            lonSegments: 6,
+            latSegments: 4,
+            maxPackedTrees: 4,
+
+            // Silhouette blend endpoints (lerp by coniferFrac)
+            coniferTopSharpness: 0.65,   // 0=dome, 1=perfect cone
+            coniferTaper:        0.35,   // base narrowing
+            deciduousSpread:     0.18,   // mid-height bulge
+
+            // Canopy sits on an implied trunk. Fraction of total height
+            // that is trunk (invisible — just an offset).
+            trunkHeightFrac:  0.10,
+            sideLobeAmp: 0.16,
+        },
+
+        frag: {
+            ambient:     0.34,
+            sunStrength: 0.60,
+            topTint:     0.08,
+            distDesat:   0.10,
+        },
+
+        // Tree size derivation. Height varies with altitude; width
+        // derived from height × species ratio.
+        heightRange: { min: 8.0, max: 22.0 },
+        widthToHeightRatio: { conifer: 0.25, deciduous: 0.45 },
+    },
+
+    // ─── Patch tier: one volumetric instance per tile ─────────────────
+    // At 2.5–12km, individual clusters are sub-pixel. The patch tier
+    // renders forest as a terrain-following shell: tile geometry
+    // extruded upward by local canopy height, masked by forest coverage.
+    //
+    // Source: per-tile statistics baked during terrain generation
+    // (parallel to LayerMeta). No separate cache — stats are tiny.
+    //
+    // Render: separate pipeline from cluster. Tessellated shell over
+    // tile; VS extrudes by coverage × height; FS discards below
+    // coverage threshold. Terrain-following → no altitude issues.
+    //
+    // Implementation deferred — this section defines what stats the
+    // terrain gen pass needs to produce so we can wire it later.
+    patchTier: {
+        maxPatches: 512,
+
+        // Per-tile stats (baked alongside terrain, stored in/near LayerMeta)
+        statsSchema: {
+            forestCoverage:   'f32',   // fraction [0,1] of tile with trees
+            coniferFraction:  'f32',   // shape/color blend
+            meanCanopyHeight: 'f32',   // extrusion amplitude
+            // Coarse coverage grid for shell masking. 8×8 = 64 texels.
+            // Packed into a small per-tile texture or storage array.
+            coverageGridRes:  8,
+        },
+
+        shell: {
+            // Shell tessellation over tile footprint
+            tessSegments: 16,
+            // Silhouette softening at forest edges
+            edgeFadeWidthFrac: 0.1,
+        },
+    },
+      speciesProfiles: {
+          0: { heightFracStart: 0.08, heightFracEnd: 0.98, radialFrac: 0.22, label: 'spruce', conical: true },
+          1: { heightFracStart: 0.12, heightFracEnd: 0.98, radialFrac: 0.20, label: 'pine',   conical: true },
+          2: { heightFracStart: 0.32, heightFracEnd: 0.98, radialFrac: 0.26, label: 'birch' },
+          3: { heightFracStart: 0.25, heightFracEnd: 0.92, radialFrac: 0.30, label: 'alder' },
+          4: { heightFracStart: 0.20, heightFracEnd: 0.95, radialFrac: 0.42, label: 'oak' },
+          5: { heightFracStart: 0.22, heightFracEnd: 0.96, radialFrac: 0.38, label: 'beech' },
+          default: { heightFracStart: 0.28, heightFracEnd: 0.95, radialFrac: 0.32, label: 'generic' },
+      },
+  }),
+    lodAtlas: {
+      worldCoverage,
+      baseTextureSize: 128,
+      baseChunkSize: chunkSizeMeters,
+      maxLODLevels,
+      atlasTextureTypes: ATLAS_TEXTURE_TYPES,
+      poolConfig: lodPoolConfig,
+      lodDistances: lodDistancesMeters
+    },
+
+
+    dataTexture: {
+      textureSize: 2048,
+      chunkSize: 128,
+      atlasTextureTypes: ATLAS_TEXTURE_TYPES
+    }
+  });
+}
+
+export function createGameDataConfig() {
+  const terrain = new TerrainGenerationConfig({
+    // Shared planet-wide water inputs are complete before the first tiles.
+    regionalTerrain: {enabled:true,cells:256,seamCells:4,basins:{enabled:true},world:{enabled:true,maxLakes:1200,maxRivers:320}},
+    continents: {
+      enabled: true,
+      count: 4,
+      averageSize: 0.25,
+      coastalComplexity: 0.8
+    },
+    tectonics: {
+      enabled: true,
+      plateCount: 8,
+      mountainBuildingRate: 1.2,
+      riftValleyDepth: 0.7
+    },
+    volcanism: {
+      enabled: true,
+      plateBoundaryActivity: 0.7,
+      hotspotDensity: 0.00002,
+      averageHeight: 1200
+    },
+	    water: {
+	      hasOceans: true,
+	      // NOTE: In WebGPU terrain generation, heights are normalized (~[-1.1..1.8]) and later
+	      // converted to meters by multiplying with `maxTerrainHeight` (PlanetConfig.heightScale).
+	      // Keep `oceanLevel` in the same normalized height units (e.g. 0.1 * 2000m = 200m).
+	      oceanLevel: -0.01,
+	      averageOceanDepth: 2000,
+	      // Visual attenuation range for the water renderer (meters). Lower values make water
+	      // become "deep"/opaque faster when looking down.
+	      visualDepthRange: 240
+	    },
+	    // Walking-skeleton demo river: carved directly into terrain height at
+	    // generation time (see templates/terrain-shaders/features/featureRivers.wgsl.js).
+	    // anchorDir/channelDir MUST exactly match DEMO_RIVER_ANCHOR_DIR/
+	    // DEMO_RIVER_CHANNEL_DIR in wizard_game/gameEngine.js — that's what
+	    // places the demo player spawn (and the water simulation's own
+	    // tangent frame) at this same fixed point. A tile's height is baked
+	    // once and never invalidated (see RIVER_WALKING_SKELETON_LOG.md,
+	    // Session 4), so this can't be computed dynamically from wherever
+	    // the player happens to spawn — both sides read this one fixed
+	    // value instead, duplicated (not imported) only because this is a
+	    // hardcoded walking-skeleton demo with no authoring system yet.
+	    river: {
+	      // Off: the walking-skeleton demo river (straight 16-point carve +
+	      // simulated water patch) read as a ditch across the eroded terrain.
+	      // The water graph (core/world/hydrology/waterGraph.js) replaces it.
+	      enabled: false,
+	      anchorDir: { x: -1, y: 0, z: 0 },
+	      channelDir: { x: 0, y: 1, z: 0 },
+	      // Bed half-width; featureRiverHeight() now tapers out to 3.5x this
+	      // for the banks (a flat-bottomed valley, not a narrow groove) —
+	      // total valley width is roughly halfWidthM*7, so this reads as a
+	      // ~170m valley rather than a ~50m scratch.
+	      halfWidthM: 24,
+	      depthM: 6,
+	      // Deliberately much longer than the 128m water-simulation patch
+	      // (templates/configs/riverConfig.js's grid.W/L): the terrain carve
+	      // itself isn't tied to the water sim's extent, so keeping this
+	      // short made the channel taper to 0 depth *inside* the visible
+	      // patch, reading as a closed pond instead of a flowing channel.
+	      // With this much longer, the carve sits at full depth everywhere
+	      // within the water patch, and only tapers off far outside it.
+	      lengthM: 1000,
+	    },
+    // Terrain feature toggles (core/world/terrain-generator/terrainFeatureToggles.js).
+    // Erosion-seed pits off (owner, 2026-10-04): the water graph's lakes come
+    // from the terrain's own basins; the pits (30 m, 2 m deep) and the old
+    // verified-lake meshes that sit in them are retired.
+    features: {
+      erosionSeeds: false,
+    },
+    // Water graph, lake refinement and nearby river visuals:
+    // qtDiag.water.stats() / .near() / .goto(id). See WaterService.js.
+    waterGraph: {
+      enabled: true,
+      // Independent shoreline variation, bank relief and shore splat materials.
+      carve: { bankDetail: 1 },
+      // Near-field shallow-water simulation (core/world/water/WaterRiverSim.js):
+      // a strip of 1 m cells along the nearest traced river (256 m of it,
+      // scrolling with the camera) while the camera is within
+      // activateAltitudeM of the river level and activateDistanceM of the river.
+      // Enabled by default; ?riverSim=off disables it for comparisons.
+      // Prescribed mean flow plus local SWE
+      // disturbances, on displaced geometry using the current water material.
+      sim: {
+        enabled: true,
+        activateAltitudeM: 150,
+        activateDistanceM: 120,
+        dx: 1.0,
+        lengthM: 256,
+      },
+    },
+    /*
+    erosion: {
+      enabled: true,
+      globalRate: 0.6,
+      hydraulicRate: 0.7,
+      thermalRate: 0.4
+    },
+    */
+    erosion: {
+      enabled: true,
+      globalRate: 0.10,
+      hydraulicRate: 0.3,
+      thermalRate: 0.1
+    },
+    impacts: {
+      enabled: true,
+      craterDensity: 0.0002
+    },
+    surface: {
+      rockCoverageMin: 0.02,   // 2% minimum (rare outcrops on flat ground)
+      rockCoverageMax: 0.85,   // 85% maximum (steep slopes still show some vegetation)
+      rockSlopeStart: 0.35,    // Rock starts at 35% slope (~19 degrees)
+      rockSlopeFull: 0.75      // Rock dominates at 75% slope (~37 degrees)
+    }
+  });
+
+  return new GameDataConfig({
+    starSystem: {
+      name: 'TestSystem',
+      timeScale: 10,
+      autoTimeScale: true,
+      useGameTimeRotation: true,
+      sunIntensity: 20,
+      planets: [
+        {
+          id: 'test-planet',
+          enabled: true,
+          name: 'TestPlanet',
+          chunksPerFace: 2048,
+          origin: { x: 0, y: 0, z: 0 },
+          hasAtmosphere: true,
+          atmosphereHeightRatio: 0.2,
+          atmosphereOptions: {
+            scaleHeightRayleighRatio: 0.1,  // Fraction of atmosphere thickness where density drops to 1/e
+            scaleHeightMieRatio: 0.015,     // Same for Mie scattering (typically thinner)
+            mieAnisotropy: 0.76,            // Forward scattering preference (0.76 = Earth-like)
+            visualDensity: 0.5,             // 1.0 = Earth-like, 1.5-2 = hazier, 0.5 = thinner
+            sunIntensity: 20.0              // Sun brightness multiplier
+          },
+          altitudeZones: {
+            surface: 2000,
+            low: 20000,
+            transition: 100000,
+            orbital: 400000
+          },
+          maxTerrainHeight: 5000,
+          seed: 12345,
+          terrain: terrain,
+          tileConfig: TILE_CONFIG,
+          atlasConfig: TEXTURE_CONFIG,
+          grassConfig: {
+            types: GRASS_TYPES,
+            qualityLevels: GRASS_QUALITY_LEVELS,
+            terrainShadowStrength: 0.18
+          },
+          macroTileSpan: 16,   // macro texture covers 16x16 micro tiles (macroScale = 1/macroTileSpan)
+          macroMaxLOD: 3,     // upper LOD bound for macro overlay (lower bound in rendering.terrainShader.macroStartLod)
+          // ── Tile transition blend rules ──────────────────────────────────────
+          // Each entry selects which blend algorithm to use when two tile types
+          // meet.  Pairs not listed here default to blend_soft.
+          // `mode` must be one of: 'blend_soft' | 'blend_hard' | 'step_overlay' | 'stochastic'
+          tileTransitionRules: TILE_TRANSITION_RULES,
+
+          // ── Per-tile layer heights ───────────────────────────────────────────
+          // Used only by the step_overlay blend mode.  Each key is a tile type
+          // integer (from the authored/default tile catalog). Value is a normalized height in [0, 1]
+          // representing how far "above" ground level this surface visually sits.
+          // Higher values make the tile appear to sit on top at transition edges.
+          tileLayerHeights: TILE_LAYER_HEIGHTS,
+          terrainAO: {
+            enabled: true,
+          },
+        }
+      ]
+    },
+    time: {
+      dayDurationMs: 60 * 1000,
+      startDay: 190,
+      startHour: 12
+    },
+    spawn: {
+      height: 800,
+      spawnOnSunSide: true,
+      defaultX: 0,
+      defaultY: 800,
+      defaultZ: 800
+    }
+  });
+}

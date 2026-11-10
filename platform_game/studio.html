@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spherecraft Studio — Platform Jumper</title>
+    <link rel="stylesheet" href="../tools/studio/studio.css">
+</head>
+<body>
+    <div id="studio-root">
+
+        <div id="topbar">
+            <div id="studio-wordmark">Spherecraft Studio · Platform Jumper</div>
+            <div id="tab-bar"></div>
+        </div>
+
+        <div id="studio-body">
+
+            <div id="sidebar-left">
+                <div class="sidebar-header" id="sidebar-left-title">Controls</div>
+                <div class="sidebar-content" id="sidebar-left-content"></div>
+            </div>
+
+            <div id="viewport-wrap">
+                <canvas id="studio-canvas"></canvas>
+                <div id="viewport-placeholder">
+                    <div class="placeholder-icon">🏔️</div>
+                    <div class="placeholder-label">Loading Frostspire…</div>
+                </div>
+            </div>
+
+            <div id="sidebar-right">
+                <div class="sidebar-header" id="sidebar-right-title">Properties</div>
+                <div class="sidebar-content" id="sidebar-right-content"></div>
+            </div>
+
+        </div>
+
+        <div id="statusbar">
+            <div class="status-item accent">
+                <span class="label">FPS</span>
+                <span class="value" id="stat-fps">—</span>
+            </div>
+            <div class="status-item">
+                <span class="label">Frame</span>
+                <span class="value" id="stat-frame">—</span>
+            </div>
+            <div class="status-item" id="stat-extra"></div>
+            <div id="status-view-name">—</div>
+        </div>
+
+    </div>
+
+    <div id="toast"></div>
+
+    <script type="module" src="./studio-entry.js"></script>
+</body>
+</html>
