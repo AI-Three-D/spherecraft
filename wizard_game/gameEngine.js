@@ -172,7 +172,7 @@ const TERRAIN_SHADER_BUNDLE = {
             constants: createEarthlikeConstants,
             base: createEarthlikeBase,
         },
-        // Lakes in the terrain function (LAKE_CELLS_PLAN.md; ?lakeCells=1).
+        // Lakes in the terrain function (LAKE_CELLS_PLAN.md; the default, ?lakeCells=0 off).
         lakeLand: {
             constants: createLakeLandConstants,
             base: createLakeLandBase,

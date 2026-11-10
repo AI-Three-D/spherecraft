@@ -5,8 +5,9 @@ in the terrain function; the ocean is still the old system. Day-by-day notes
 and measurements: `LAKE_CELLS_PLAN.md`. Open terrain issue found on the way:
 `TERRAIN_SEAM_CRACK_FINDINGS.md`.
 
-Test: `http://localhost:8000/wizard_game/standalone.html?lakeCells=1`
-(`python3 server.py`). R: next river site (Shift+R: new sites here), Y: rock
+Test: `http://localhost:8000/wizard_game/standalone.html` (lake cells are the
+default since 2026-11-10; `?lakeCells=0` brings back the older terrain and
+water; `python3 server.py`). R: next river site (Shift+R: new sites here), Y: rock
 mode in the near simulation, T: freeze day and night.
 
 ## Lakes (lake cells)

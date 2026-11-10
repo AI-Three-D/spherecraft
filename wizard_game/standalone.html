@@ -3873,7 +3873,7 @@
                 return this.useCamera(pose);
             },
             river(fraction = .5, altitudeM = 200, backM = 350, index = null) {
-                // Lake-cell rivers (?lakeCells=1): the one nearest the camera,
+                // Lake-cell rivers (the default terrain): the one nearest the camera,
                 // or recs[index]; otherwise the regional plan's first river.
                 const recs=[...(gameEngine?.waterService?._lakeCells ? gameEngine.waterService.riverRecs?.values?.() ?? [] : [])];
                 let rec=gameEngine?.terrainGenerator?.regionalTerrain?.drainagePlan?.rivers?.[0];
@@ -4055,7 +4055,10 @@
                 // Lakes in the terrain function (LAKE_CELLS_PLAN.md): base
                 // generator lakeLand, regional terrain off; the water service
                 // publishes the lake table's lakes instead of solving a graph.
-                if (placementQueries.get('lakeCells') === '1') {
+                // The default since 2026-11-10; ?lakeCells=0 or a regional
+                // comparison parameter brings back the older terrain and water.
+                const regionalComparison=['regionalTerrain','regionalBasins','regionalWhitewater','regionalLargeLake','regionalOrganicRiver','waterPrecompute'].some(k=>placementQueries.has(k));
+                if (placementQueries.get('lakeCells') !== '0' && !regionalComparison) {
                     for (const planet of gameDataConfig.planets) if (planet.enabled) {
                         planet.terrain.baseGenerator = 'lakeLand';
                         planet.terrain.regionalTerrain = { ...planet.terrain.regionalTerrain, enabled: false };
@@ -4328,14 +4331,14 @@
         // Debug sites: the button (or R) flies to the next of a few viewing
         // sites, round and round; Shift+R picks new ones around the camera.
         // Each kind lists its sites nearest the camera; add kinds to
-        // DEBUG_SITE_KINDS (today the lake-cell rivers of ?lakeCells=1).
+        // DEBUG_SITE_KINDS (today the lake-cell rivers of the default terrain).
         const DEBUG_SITE_COUNT = 4;
         const DEBUG_SITE_KINDS = {
             rivers: {
                 // Sites: the rivers nearest the camera, each seen at its middle.
                 sites(count) {
                     const svc = gameEngine?.waterService, L = svc?._lakeCells;
-                    if (!L) return { sites: [], why: 'Rivers here come with ?lakeCells=1.' };
+                    if (!L) return { sites: [], why: 'Rivers here come with the lake-cell terrain (not with ?lakeCells=0).' };
                     const P = L.rivers, st = P?.stats;
                     const planner = P ? `planner: ${st.planned} planned ${JSON.stringify(st.byDest)}, no river ${JSON.stringify(st.none)}, failed ${st.failed}` +
                         `${st.lastError ? ` (last: ${st.lastError})` : ''}; ${L.known.size} lakes known, planning ${L.planning ? 'running' : 'idle'}` +
