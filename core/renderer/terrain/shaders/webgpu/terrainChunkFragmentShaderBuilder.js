@@ -3329,6 +3329,12 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     if (debugMode == 105) {
         return vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
     }
+    // Mode 107: one flat colour per tile (from its face location and size),
+    // for the tile-edge mask of tools/perf/flatTierLab.
+    if (debugMode == 107) {
+        let k = vec2<f32>(input.vFaceInfo.x * 8192.0 + input.vFaceInfo.z * 977.0, input.vFaceInfo.y * 8192.0 + input.vFaceInfo.z * 613.0);
+        return vec4<f32>(debugHash12(k), debugHash12(k + vec2<f32>(17.0, 59.0)), debugHash12(k + vec2<f32>(83.0, 31.0)), 1.0);
+    }
     if (debugMode == 103) {
         let d = input.vDistanceToCamera;
         var color = vec3<f32>(0.0, 0.0, 0.0);

@@ -507,11 +507,12 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | G: Terrain fix prototype
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
         <div id="river-goto-status" style="display:none;max-width:420px;padding:6px 8px;background:rgba(0,0,0,.65);color:#cfe;border-radius:4px;white-space:pre-wrap;"></div>
+        <button id="terrain-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Terrain fix (G)</button>
         <button id="rock-mode" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Rocks: wall (Y)</button>
         <button id="river-goto" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Next site (R)</button>
     </div>
@@ -522,6 +523,7 @@
         import { FrameLoop } from './FrameLoop.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
+        import { TERRAIN_FIX_PROTOTYPES, applyTerrainFixToConfig, applyTerrainFixLive, terrainFixIndexOf } from './terrainFixPrototypes.js';
         import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
         import { TerrainRaycaster } from './actors/nav/TerrainRaycaster.js';
         import { CubeSphereCoords } from '../core/planet/cubeSphereCoords.js';
@@ -4211,6 +4213,18 @@
                             structuredRiverSurface:false}};
                     }
                 }
+                // Lab captures (tools/perf/flatTierLab): no cloud or fog layers
+                // over the terrain, so image diffs measure the terrain alone.
+                if (new URLSearchParams(location.search).has('labNoClouds') && engineConfig.features) {
+                    Object.assign(engineConfig.features, { clouds: false, highClouds: false, lowClouds: false, midClouds: false, fogParticles: false, cloudParticles: false });
+                }
+                // Far-terrain fix prototype at start (?terrainFix=N, see G below).
+                const terrainFixQuery = new URLSearchParams(location.search).get('terrainFix');
+                if (terrainFixQuery !== null && engineConfig.rendering?.terrainShader) {
+                    const proto = applyTerrainFixToConfig(engineConfig.rendering.terrainShader, Number(terrainFixQuery));
+                    if (proto) console.info(`[TerrainFix] start with ${terrainFixQuery}: ${proto.name}`);
+                    else console.warn(`[TerrainFix] no prototype ${terrainFixQuery} (0-${TERRAIN_FIX_PROTOTYPES.length - 1})`);
+                }
                 gameEngine = new GameEngine('gameCanvas', engineConfig, gameDataConfig);
                 window.gameEngine = gameEngine;
                 installQuadtreeDiagnostics(gameEngine);
@@ -4414,6 +4428,40 @@
         document.getElementById('rock-mode').addEventListener('click', () => rockModeStep());
         setInterval(rockModeShow, 2000);
 
+        // Debug: far-terrain fix prototypes in turn (terrainFixPrototypes.js,
+        // TERRAIN_FLAT_TIER_FINDINGS.md). Generator changes regenerate the
+        // visible tiles, which takes a few seconds.
+        let terrainFixBusy = false;
+        function terrainFixShow() {
+            const ts = gameEngine?.engineConfig?.rendering?.terrainShader;
+            if (!ts) return -1;
+            const i = terrainFixIndexOf(ts);
+            document.getElementById('terrain-fix').textContent = i >= 0
+                ? `Terrain fix ${i}: ${TERRAIN_FIX_PROTOTYPES[i].name} (G)`
+                : 'Terrain fix: custom (G)';
+            return i;
+        }
+        async function terrainFixStep() {
+            if (terrainFixBusy) return;
+            terrainFixBusy = true;
+            const box = document.getElementById('river-goto-status');
+            try {
+                const next = (terrainFixShow() + 1) % TERRAIN_FIX_PROTOTYPES.length;
+                const { proto, regenerated } = await applyTerrainFixLive(gameEngine, next);
+                terrainFixShow();
+                box.textContent = `Terrain fix ${next} of ${TERRAIN_FIX_PROTOTYPES.length - 1}: ${proto.name}. ${proto.text}.` +
+                    (regenerated ? ' The tiles regenerate in a few seconds.' : '');
+                box.style.display = 'block';
+                console.info(`[TerrainFix] ${next}: ${proto.name}`);
+            } catch (err) {
+                console.warn('[TerrainFix]', err);
+            } finally {
+                terrainFixBusy = false;
+            }
+        }
+        document.getElementById('terrain-fix').addEventListener('click', () => terrainFixStep());
+        setInterval(terrainFixShow, 2000);
+
         // Keyboard controls
         window.addEventListener('keydown', (e) => {
             if (e.key.toLowerCase() === 'd') {
@@ -4427,6 +4475,10 @@
             // Debug: rocks in the near simulation, the next prototype.
             if (e.key.toLowerCase() === 'y' && !e.repeat && !e.target?.closest?.('input, textarea')) {
                 try { rockModeStep(); } catch (err) { console.warn('[Rocks]', err); }
+            }
+            // Debug: far-terrain fix prototypes, the next one.
+            if (e.key.toLowerCase() === 'g' && !e.repeat && !e.target?.closest?.('input, textarea')) {
+                terrainFixStep();
             }
             // Debug: freeze or resume the day-night cycle.
             if (e.key.toLowerCase() === 't' && !e.repeat && gameEngine?.setDayNightFrozen) {

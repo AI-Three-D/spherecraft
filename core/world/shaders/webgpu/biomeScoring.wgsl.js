@@ -384,6 +384,11 @@ struct BiomeResult {
     treeWeight: f32,
 };
 
+// The two most probable biomes of the last selectBiomeFromDefs draw: (tile
+// id A, tile id B, share of A between the two). The terrain compute turns it
+// into the flat-tier colour bake's input (gTileDraw, surfaceCommon).
+var<private> gBiomeTop2: vec3<f32> = vec3<f32>(0.0, 0.0, 1.0);
+
 fn selectBiomeFromDefs(
     elevation: f32, humidity: f32, temperature: f32, slope: f32,
     wx: f32, wy: f32, biomeUniforms: BiomeUniforms
@@ -412,6 +417,18 @@ fn selectBiomeFromDefs(
     result.treeWeight = 0.0;
 
     if (totalScore <= 0.0 || count == 0u) { return result; }
+    var topA = 0u;
+    var topB = 0u;
+    for (var i = 1u; i < count; i++) {
+        if (scores[i] > scores[topA]) { topB = topA; topA = i; }
+        else if (topB == topA || scores[i] > scores[topB]) { topB = i; }
+    }
+    let pairScore = scores[topA] + select(scores[topB], 0.0, topB == topA);
+    gBiomeTop2 = vec3<f32>(
+        f32(biomeUniforms.biomes[topA].tileId),
+        f32(biomeUniforms.biomes[topB].tileId),
+        select(scores[topA] / max(pairScore, 1e-6), 1.0, topB == topA)
+    );
 
     let r = biomeSelectionHash(wx, wy, seed);
     var cumulative = 0.0;

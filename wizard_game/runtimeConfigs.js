@@ -227,10 +227,14 @@ export function createEngineConfig() {
         // drawn nearer. 0.5 measured seamless at the LOD4/5 line while
         // flattening 5 % of LOD4 pixels vs 12 % at 1.0 (2880x1800 canvas,
         // 4 km altitude; see LOD4_LOD5_BLEND_ANALYSIS.md section 10).
-        solidColorTierDistanceFadeEndSafety: 0.5,
+        // 1.0 (prototype 2): the camera-distance blend always completes before
+        // the first flat tile can appear, so no per-tile edge ramp is needed.
+        solidColorTierDistanceFadeEndSafety: 1.0,
         // In-tile ramp toward edges shared with a solid-tier neighbour.
         // Now a narrow safety net: combined with the distance ramp by max().
-        solidColorTierEdgeBlendEnabled: true,
+        // Off (prototype 2): it is a per-tile blend that switches on and off
+        // when a neighbour tile splits or merges.
+        solidColorTierEdgeBlendEnabled: false,
         // Fraction of the tile, from the shared edge, the safety-net ramp spans.
         solidColorTierEdgeBlendWidth: 0.15,
         solidColorTierEdgeBlendStrength: 1.0,
@@ -239,6 +243,13 @@ export function createEngineConfig() {
         // merges. Was 35 % of each tile (1434 m on LOD5, 2867 m on LOD6).
         // 0 = legacy 35 %-of-tile window.
         solidColorAverageWindowMeters: 1434,
+        // Flat-tier fixes (TERRAIN_FLAT_TIER_FINDINGS.md). Prototypes cycle
+        // with G in standalone.html (or ?terrainFix=N); these defaults, with
+        // the two distance-fade values below, are prototype 2.
+        // Flat color = expected colour of the dithered tile draw: a function
+        // of position only, so no tile-edge seams and the same at every LOD.
+        // 'window' = the 1434 m window above (clamped at tile edges).
+        coarseColorSource: 'draw',
         // Was disabled: "prebaked resolved-color exposes hard category-mask
         // contours because the prebake does not reproduce the fragment
         // shader's live splat reconstruction." Re-testing (2026-09-30) at

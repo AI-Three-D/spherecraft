@@ -1264,6 +1264,36 @@ fn validateTileType(tileType: u32) -> u32 {
     return SURFACE_GRASS_BASE;
 }
 
+// The two candidates of the last tile draw and the first one's share
+// (resolveTileTypeFromWeights, or the authored-biome path in the terrain
+// compute): (tile id A, tile id B, weight of A). The tile pass stores them for
+// the flat-tier colour bake, which draws the expected colour of the dithered
+// choice, wA * colour(A) + (1 - wA) * colour(B): a function of position only,
+// so the same at every LOD and on both sides of every tile edge.
+// gTileDrawValid is false when the last id was not such a draw.
+var<private> gTileDraw: vec3<f32> = vec3<f32>(0.0, 0.0, 1.0);
+var<private> gTileDrawValid: bool = false;
+
+// Tile id the fallback classifier picks for surface family idx
+// (surfaceWeightAt order), with the same selectors as resolveTileTypeFromWeights.
+fn surfaceFamilyTileId(
+    idx: u32, wx: f32, wy: f32, unitDir: vec3<f32>, seed: i32,
+    elevation: f32, slope: f32, variant: u32
+) -> u32 {
+    switch (idx) {
+        case 1u: { return validateTileType(selectForestFloorBase(wx, wy, unitDir, seed, elevation) + variant); }
+        case 2u: { return validateTileType(SURFACE_ROCK_BASE + variant); }
+        case 3u: { return validateTileType(selectSandBase(wx, wy, unitDir, seed, elevation, slope) + variant); }
+        case 4u: { return validateTileType(selectDirtBase(wx, wy, unitDir, seed, elevation) + variant); }
+        case 5u: { return validateTileType(selectSnowBase(wx, wy, unitDir, seed, elevation) + variant); }
+        case 6u: { return validateTileType(selectTundraBase(wx, wy, unitDir, seed, elevation) + variant); }
+        case 7u: { return validateTileType(selectMudBase(wx, wy, unitDir, seed, elevation) + variant); }
+        case 8u: { return validateTileType(SURFACE_SWAMP_BASE + variant); }
+        case 9u: { return validateTileType(SURFACE_VOLCANIC_BASE + variant); }
+        default: { return validateTileType(selectGrassBase(wx, wy, unitDir, seed) + variant); }
+    }
+}
+
 fn resolveTileTypeFromWeights(
     weights: SurfaceWeights,
     wx: f32, wy: f32, unitDir: vec3<f32>,
@@ -1298,6 +1328,22 @@ fn resolveTileTypeFromWeights(
     
     // Select tile variant (0-3)
     let variant = selectTileVariant(wx, wy, unitDir, seed);
+
+    // The two families competing here (restrictToTopTwoSurfaceWeights leaves
+    // at most two non-zero) and their shares, for the flat-tier colour bake.
+    var famA = 10u;
+    var famB = 10u;
+    for (var i = 0u; i < 10u; i++) {
+        if (surfaceWeightAt(normalized, i) > 0.0) {
+            if (famA == 10u) { famA = i; } else if (famB == 10u) { famB = i; }
+        }
+    }
+    if (famA == 10u) { famA = 0u; }
+    let wA = select(1.0, surfaceWeightAt(normalized, famA), famB != 10u);
+    let idA = surfaceFamilyTileId(famA, wx, wy, unitDir, seed, elevation, slope, variant);
+    let idB = select(idA, surfaceFamilyTileId(famB, wx, wy, unitDir, seed, elevation, slope, variant), famB != 10u);
+    gTileDraw = vec3<f32>(f32(idA), f32(idB), wA);
+    gTileDrawValid = true;
     
     // Accumulate weights and select surface type
     var cumulative = 0.0;
