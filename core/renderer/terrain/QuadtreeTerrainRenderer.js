@@ -176,6 +176,8 @@ export class QuadtreeTerrainRenderer {
     _bindChunkInstances(material, instanceBuffer) {
         if (!material.storageBuffers) material.storageBuffers = {};
         material.storageBuffers.chunkInstances = instanceBuffer;
+        // LOD seam stitching (bind group 3, binding 21; null = a zeroed dummy, no stitching).
+        material.storageBuffers.edgeStitch = this.tileManager.getEdgeStitchBuffer?.() ?? null;
         // Lake water for the terrain shader (bind group 3, bindings 12-15).
         if (material.uniforms) material.uniforms._waterData = this._waterData ?? { value: null };
     }

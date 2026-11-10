@@ -898,6 +898,11 @@ export class QuadtreeTileManager {
         return this.quadtreeGPU.getInstanceBuffer();
     }
 
+    /** Per-instance edge stitch records for the terrain vertex shader (or null). */
+    getEdgeStitchBuffer() {
+        return this.quadtreeGPU.getEdgeStitchBuffer?.() ?? null;
+    }
+
     getIndirectArgsBuffer() {
         return this.quadtreeGPU.getIndirectArgsBuffer();
     }
