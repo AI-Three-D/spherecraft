@@ -212,6 +212,17 @@ export class EngineConfig {
           terrainShader.solidColorAverageWindowMeters ?? 0,
           'rendering.terrainShader.solidColorAverageWindowMeters'
         ),
+        // Flat-tier color fixes (TERRAIN_FLAT_TIER_FINDINGS.md).
+        // 'draw': bake the flat color as the expected colour of the dithered
+        // tile draw (a function of position: no window, so no tile-edge seams,
+        // the same at every LOD); 'window': the window average above.
+        coarseColorSource: (() => {
+          const v = terrainShader.coarseColorSource ?? 'window';
+          if (v !== 'window' && v !== 'draw') {
+            throw new Error(`rendering.terrainShader.coarseColorSource must be 'window' or 'draw', got ${v}`);
+          }
+          return v;
+        })(),
         lod0ResolvedColorEnabled: requireBool(
           terrainShader.lod0ResolvedColorEnabled ?? false,
           'rendering.terrainShader.lod0ResolvedColorEnabled'
