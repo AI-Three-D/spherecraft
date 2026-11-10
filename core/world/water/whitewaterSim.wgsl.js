@@ -45,10 +45,11 @@ struct SimP {
   turbL: f32, turbT: f32, foamDecay: f32, kDecay: f32,
   kGen: f32, foamGen: f32, maxRise: f32, maxFall: f32,
   sponge: f32, roughM: f32, lakeHold: f32, lakeDrag: f32,
-  rockSteerRate: f32, pad1: f32, pad2: f32, pad3: f32,
+  rockSteerRate: f32, rockMode: f32, rockDragRate: f32, pad3: f32,
 };
 @group(0) @binding(0) var<uniform> P: SimP;
-// n^2 is under 2; the integer part stores an 8-bit rock-steering weight.
+// n^2 is under 2; the integer part stores an 8-bit rock weight: steering, or with
+// rockMode drag (2) how much rock stands in the water there.
 // This keeps the solver's existing static buffer and bind-group footprint.
 fn whiteFriction(encoded: f32) -> f32 { return encoded - 2.0 * floor(encoded * 0.5); }
 fn whiteRockSteer(encoded: f32) -> f32 { return floor(encoded * 0.5) / 255.0; }
@@ -284,13 +285,19 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
     v = clamp(v, -P.umax, P.umax);
   }
   let baked = ST[id * 2u + 1u];
-  // A soft local steering field keeps subcritical rocks in the flow without
-  // raising the solver bed into a dam. Solid rocks still use physical bed
-  // obstacles. The baked target turns around the rock and rejoins downstream.
   let rockSteer = whiteRockSteer(st0.y);
   if (rockSteer > 0.0 && h > P.hmin) {
-    let a = 1.0 - exp(-P.rockSteerRate * rockSteer * dt);
-    u = mix(u, baked.y, a); v = mix(v, baked.z, a);
+    if (P.rockMode > 1.5) {
+      // Drag: the rock standing in the water holds it still; the flow goes round.
+      let a = exp(-P.rockDragRate * rockSteer * dt);
+      u *= a; v *= a;
+    } else {
+      // Steer: a soft local field keeps subcritical rocks in the flow without
+      // raising the solver bed into a dam. Solid rocks still use physical bed
+      // obstacles. The baked target turns around the rock and rejoins downstream.
+      let a = 1.0 - exp(-P.rockSteerRate * rockSteer * dt);
+      u = mix(u, baked.y, a); v = mix(v, baked.z, a);
+    }
   }
   var foam = s.w; var k = KI[id];
   if (h > P.hmin) {
@@ -308,6 +315,8 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
     // A face, not a beach: a shore rises a few centimetres a cell.
     let face = eta + 0.15;
     if ((sR.x <= P.hmin && bR > face) || (hL <= P.hmin && bL > face) || (sT.x <= P.hmin && bT > face) || (hB <= P.hmin && bB > face)) { rock = 1.0; }
+    // A drag rock (rockMode drag) has no dry face: where it stands in the water.
+    if (P.rockMode > 1.5) { rock = max(rock, rockSteer); }
     let eR = select(eta, bR + sR.x, sR.x > P.hmin); let eL2 = select(eta, bL + hL, hL > P.hmin);
     let eT = select(eta, bT + sT.x, sT.x > P.hmin); let eB2 = select(eta, bB + hB, hB > P.hmin);
     let slopeMag = length(vec2f(eR - eL2, eT - eB2)) / (2.0 * dx);
@@ -377,8 +386,11 @@ export const WHITE_INIT_WGSL = SIM_PARAMS + NOISE + WHITE_UNIFORMS_WGSL
 @group(0) @binding(1) var<uniform> W: WhiteU;
 @group(0) @binding(2) var<storage, read> BATCH: array<i32>;
 @group(0) @binding(3) var<storage, read> HEIGHTS: array<f32>;
-// Rocks in the frame: x, y, radius, top; base, seed, water level, solid flag.
+// Rocks in the frame: x, y, radius, top; base, seed, water level, kind (0 steered,
+// 1 a wall in the bed, 2 drag: WhitewaterSim.js rockMode).
 @group(0) @binding(4) var<storage, read> ROCKS: array<vec4f>;
+// Water kept over a drag rock's cap (m): the cells stay wet.
+const ROCK_KEEP_M: f32 = 0.1;
 @group(0) @binding(5) var<storage, read_write> ST: array<vec4f>;
 @group(0) @binding(6) var<storage, read_write> STATE: array<vec4f>;
 @group(0) @binding(7) var<storage, read_write> KALL: array<f32>;
@@ -419,7 +431,16 @@ fn init(@builtin(global_invocation_id) gid: vec3u) {
     let q = BATCH[first + r];
     let a = ROCKS[q * 2]; let b = ROCKS[q * 2 + 1];
     let d = length(xy - a.xy) / a.z;
-    if (b.w > 0.5) {
+    if (b.w > 1.5) {
+      // Drag: the dome capped ROCK_KEEP_M under the water, so the cells stay wet; how far
+      // the rock stands above that is its weight (the momentum step damps the flow by it).
+      if (d < 1.0) {
+        let dome = b.x + (a.w - b.x) * sqrt(1.0 - d * d);
+        let cap = level - ROCK_KEEP_M;
+        bed = max(bed, min(dome, cap));
+        steer = max(steer, smoothstep(0.0, 0.25, dome - cap));
+      }
+    } else if (b.w > 0.5) {
       if (d < 1.0) { bed = max(bed, b.x + (a.w - b.x) * sqrt(1.0 - d * d)); }
     } else if (d < 4.0 && length(vel) > 0.05) {
       let strength = 1.0 - smoothstep(-0.15, 0.35, b.z - a.w);

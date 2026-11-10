@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { LakeCellRivers } from './lakeCellRivers.js';
+import { LakeCellRivers, LAKE_CELL_RIVER_OPTIONS } from './lakeCellRivers.js';
 import { tangentBasis, dirToPlane } from './lakeRefine.js';
 
 // Synthetic terrain in the tangent plane at [-1, 0, 0] (metres), lakes as
@@ -91,8 +91,8 @@ describe('lake-cell rivers', () => {
         expect(r.byKey.get('lake1').none).toBeTruthy();
         expect(r.byKey.get('lake0').none).toBe('smallSink');
         expect(r.recordsFor(new Map([['lake0', 0], ['lake1', 1]]))).toEqual([]);
-        // Width by discharge, the same for every lake from medium size up.
-        expect(r._halfWidth(r._ownQ({ shape: { extent: 300 } }))).toBeLessThan(4);
+        // Width by discharge: a small lake's river under half the widest, the same for every lake from medium size up.
+        expect(r._halfWidth(r._ownQ({ shape: { extent: 300 } }))).toBeLessThan(LAKE_CELL_RIVER_OPTIONS.halfWidthMaxM / 2);
         expect(r._halfWidth(r._ownQ({ shape: { extent: 1500 } }))).toBe(r._halfWidth(r._ownQ({ shape: { extent: 6000 } })));
     });
 

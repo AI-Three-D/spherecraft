@@ -19,10 +19,12 @@ await water.start();
 const L = water._lakeCells;
 for (let k = 0; k < 3000 && (!water.lakes?.length || L.reading || L.planning || L.plannedKnown !== L.known.size); k++) { water.update(spawn); await new Promise(r => setTimeout(r, 100)); }
 const recs = [...water.riverRecs.values()];
-const pick = +(process.argv[2] ?? recs.findIndex(r => r.dest?.kind === 'lake'));
+const pick = process.argv[2] === 'rapid' ? recs.findIndex(r => r.rapid) : +(process.argv[2] ?? recs.findIndex(r => r.dest?.kind === 'lake'));
 const rec = recs[pick], P = rec.points, st = rec.stride, n = P.length / st;
 const gpu = new WaterGpuData(device, { gridN: water.config.gridN, planetRadius: R, carve: water.config.carve, maxLakes: 4096, maskLayerSize: 64, maskTilesPerAxis: 8, maxMaskLayers: 4096 });
-const camAt = k => ({ x: P[k * st] * (R + 300), y: P[k * st + 1] * (R + 300), z: P[k * st + 2] * (R + 300) });
+const camAt0 = k => ({ x: P[k * st] * (R + 300), y: P[k * st + 1] * (R + 300), z: P[k * st + 2] * (R + 300) });
+const rk = (() => { if (!rec.rapid) return 0; let s0 = 0, k = 0; for (; k + 1 < n; k++) { s0 += Math.hypot(P[(k+1)*st]-P[k*st],P[(k+1)*st+1]-P[k*st+1],P[(k+1)*st+2]-P[k*st+2]) * R; if (s0 > rec.rapid.startM) break; } return k; })();
+const camAt = () => camAt0(rk);
 gpu.update(water, camAt(0), 0);
 const field = new RiverFieldService({ water: gpu, service: water, terrainGenerator: gen, config: water.config.riverField ?? {} });
 for (let k = 0; k < 600 && !(field.stats && !field.busy); k++) { field.update(camAt(0)); await new Promise(r => setTimeout(r, 50)); }
@@ -43,12 +45,23 @@ rows.forEach((r, i) => d4.set([...r.d, 0], i * 4));
 const wat = await gen.lakeTable.sampleWater(d4);
 const show = rows.filter((r, i) => i < 5 || i >= rows.length - 5 || r.k % Math.max(1, Math.floor(n / 40)) === 0 || r.k < 12 || r.k > n - 13);
 console.log(`river ${pick} of ${recs.length}: dest ${JSON.stringify(rec.dest)}, ${n} points, ${(s / 1000).toFixed(2)} km, field ${field.rivers.size} rivers, ${field.wetPages?.length ?? 0} wet pages`);
-console.log('    s m   ground  lakeLvl | inLake recLevel width | field: W      delta   sdf');
+if (rec.rapid) console.log(`rapid from ${rec.rapid.startM.toFixed(0)} m, ${rec.rapid.lengthM.toFixed(0)} m long, ${rec.rapid.dropM.toFixed(1)} m drop`);
+console.log('    s m   ground  lakeLvl | inLake recLevel width | field: W      delta   sdf  carved-W');
 for (const r of show) {
     const i = rows.indexOf(r), f = sampleRiverField(field.pages, field.layout, r.d);
     const h = wat[i * 3], lv = wat[i * 3 + 1];
     const rl = r.k >= 0 ? `${String(P[r.k * st + 9]).padStart(6)} ${P[r.k * st + 3].toFixed(1).padStart(8)} ${P[r.k * st + 4].toFixed(1).padStart(5)}` : '     -        -     -';
-    console.log(`${r.s.toFixed(0).padStart(7)} ${h.toFixed(1).padStart(8)} ${(lv > -1e8 ? lv.toFixed(1) : '-').padStart(8)} | ${rl} | ${f.found ? `${f.W.toFixed(1).padStart(7)} ${f.delta.toFixed(1).padStart(7)} ${f.sdf.toFixed(1).padStart(6)}` : 'no page'}`);
+    console.log(`${r.s.toFixed(0).padStart(7)} ${h.toFixed(1).padStart(8)} ${(lv > -1e8 ? lv.toFixed(1) : '-').padStart(8)} | ${rl} | ${f.found ? `${f.W.toFixed(1).padStart(7)} ${f.delta.toFixed(1).padStart(7)} ${f.sdf.toFixed(1).padStart(6)} ${(h + f.delta - f.W).toFixed(1).padStart(7)}` : 'no page'}`);
+}
+// Across the river at given arcs (LAKE_END_ACROSS="382,2420"): sdf and carved - W every 2 m.
+if (process.env.LAKE_END_ACROSS) for (const at of process.env.LAKE_END_ACROSS.split(',').map(Number)) {
+    const r0 = rows.reduce((a, b) => (Math.abs(b.s - at) < Math.abs(a.s - at) ? b : a)), k = r0.k;
+    const t = norm(pt(Math.min(n - 1, k + 1)).map((v, i) => v - pt(Math.max(0, k - 1))[i])), up = pt(k);
+    const side = norm([up[1] * t[2] - up[2] * t[1], up[2] * t[0] - up[0] * t[2], up[0] * t[1] - up[1] * t[0]]);
+    const ds = [], dd = new Float32Array(31 * 4);
+    for (let j = -15; j <= 15; j++) { const d = norm(up.map((v, i) => v + side[i] * j * 2 / R)); ds.push(d); dd.set([...d, 0], (j + 15) * 4); }
+    const hh = await gen.lakeTable.sampleHeights(dd);
+    console.log(`across at ${r0.s.toFixed(0)} m (record hw ${P[k * st + 4].toFixed(1)}): ` + ds.map((d, j) => { const f = sampleRiverField(field.pages, field.layout, d); return `${(j - 15) * 2}:${f.sdf.toFixed(0)}/${(hh[j] + f.delta - f.W).toFixed(1)}`; }).join(' '));
 }
 // The field's natural ground (the water service's hydrology sampler) against the lake table's probe.
 if (process.env.LAKE_END_DEBUG) {

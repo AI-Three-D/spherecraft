@@ -174,10 +174,12 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         }
         pass.setBindGroup(2, record.group);
     };
+    // The lake table (lakeLand terrain) through this pipeline's own layout:
+    // the carved variants read it too.
+    const setLakeTable = (pass, pipeline) => { if (lakeTable) pass.setBindGroup(3, lakeTable.bindGroupFor(pipeline)); };
     const setBiome = (pass, pipeline) => {
         setRegional(pass, pipeline);
-        // The lake table (lakeLand terrain) through this pipeline's own layout.
-        if (lakeTable) pass.setBindGroup(3, lakeTable.bindGroupFor(pipeline));
+        setLakeTable(pass, pipeline);
         try { terrainGenerator._setTerrainBiomeBindGroup(pass, { regional: false, lakes: false }); return true; } catch { return false; /* entry point may not use group 1 */ }
     };
 
@@ -361,6 +363,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
         if (carved) {
             pass.setBindGroup(1, carveDirsGroup);
             setRegional(pass, pipeline);
+            setLakeTable(pass, pipeline);
         } else setBiome(pass, pipeline);
         pass.dispatchWorkgroups(Math.ceil(count / 64));
         pass.end();
@@ -403,6 +406,7 @@ export async function createHydrologySampler({ device, terrainGenerator, samples
                 pass.setBindGroup(0, bindGroup);
                 pass.setBindGroup(1, carveDirsGroup);
                 setRegional(pass, carvedDirsPipeline);
+                setLakeTable(pass, carvedDirsPipeline);
                 pass.dispatchWorkgroups(Math.ceil(count / 64));
                 pass.end();
                 return true;

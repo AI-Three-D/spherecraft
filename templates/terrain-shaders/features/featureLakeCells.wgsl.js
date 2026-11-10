@@ -43,7 +43,8 @@
 //
 // Not a lake (reason): centre or curve over the ocean (1, 2), fine bands too
 // rough for a bank slope of steepMin (3), level within 3 m of the sea (4), lowering
-// too large for the fade (5), coarse relief inside above headMax (8). A lake is
+// too large for the fade (5), coarse relief inside above headMax (8), a quarter
+// or more of its interior points over the level (9). A lake is
 // left out when an overlapping candidate of a larger tier, or of its tier
 // with a higher priority, would be a lake too (7). That test reads the other
 // candidate's own assessment, not its selection, so there are no chains: the
@@ -82,10 +83,10 @@ export const LAKE_CELL_TIERS = Object.freeze([
         outline: 0.30, scallop: 0.10, u0Frac: 0.25, u0Min: 80, depthMin: 4, depthMax: 15,
         gentleMin: 0.025, gentleMax: 0.06, cliffMin: 4, cliffMax: 18, steepMin: 0.25, steepMax: 0.45,
         fadeSlope: 0.05, fadeMin: 300, fadeMax: 1500, headMax: 200, coarseBands: 2, rimSamples: 64 },
-    { name: 'pond', salt: 3, cellM: 4500, chance: 1.0, lenMin: 350, lenMax: 700, sizeBias: 2, families: [0.3, 0.25, 0.2, 0.15],
+    { name: 'pond', salt: 3, cellM: 3700, chance: 1.0, lenMin: 350, lenMax: 700, sizeBias: 2, families: [0.3, 0.25, 0.2, 0.15],
         outline: 0.25, scallop: 0.08, u0Frac: 0.25, u0Min: 60, depthMin: 3, depthMax: 12,
         gentleMin: 0.03, gentleMax: 0.07, cliffMin: 3, cliffMax: 12, steepMin: 0.25, steepMax: 0.45,
-        fadeSlope: 0.05, fadeMin: 200, fadeMax: 800, headMax: 150, coarseBands: 2, rimSamples: 48 },
+        fadeSlope: 0.05, fadeMin: 200, fadeMax: 800, headMax: 150, coarseBands: 3, rimSamples: 48 },
     { name: 'small', salt: 4, cellM: 3500, chance: 0.6, lenMin: 120, lenMax: 350, sizeBias: 2, families: [0.45, 0.3, 0.1, 0.1],
         outline: 0.25, scallop: 0.08, u0Frac: 0.30, u0Min: 40, depthMin: 1.5, depthMax: 6,
         gentleMin: 0.04, gentleMax: 0.08, cliffMin: 2, cliffMax: 6, steepMin: 0.25, steepMax: 0.4,
@@ -216,6 +217,8 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
     var inMax = lakeBandsCoarse(Bc, t.coarseBands).x * H;
     var comp = a.shape.comp;
     var rot = a.shape.rot;
+    // The interior points: x, y in the lake's frame, coarse and fine height (m).
+    var inPts: array<vec4<f32>, 30>;
     for (var j = 0; j < 6; j++) {
         if (j >= a.shape.n) { break; }
         for (var q = 0; q < 5; q++) {
@@ -226,13 +229,30 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
             let y = e.y + ox * sin(rot[j]) + oy * cos(rot[j]);
             let B = landBands_d(seed, lakeLocalDir(c, a, x, y));
             let coarse = lakeBandsCoarse(B, t.coarseBands).x * H;
-            fPos = max(fPos, lakeBandsTotal(B).x * H - coarse);
+            let fine = lakeBandsTotal(B).x * H - coarse;
+            fPos = max(fPos, fine);
             inMax = max(inMax, coarse);
+            inPts[j * 5 + q] = vec4<f32>(x, y, coarse, fine);
         }
     }
     if (inMax - a.level > t.headMax) { a.reason = 8; return a; }
     // Some lakes shallow (the land's own bumps make islands), some deep.
     a.depth = mix(t.depthMin, t.depthMax, g2.y) + fPos * mix(0.4, 1.6, g2.z);
+    // Most of the core holds water: at the interior points the bed (the coarse
+    // bands down to the bank surface, as lakeEvaluate without cliffs) plus the
+    // fine bands lies under the level. Lakes on rough ground kept bumps of up
+    // to hundreds of metres as fine bands: dry lobes and a puddle or two that
+    // still sent out a river (owner 2026-11-09).
+    let kBed = min(max(a.gentle, 2.5 * a.depth / w), LAKE_BED_SLOPE_MAX);
+    var wetN = 0;
+    for (var k = 0; k < 30; k++) {
+        if (k >= a.shape.n * 5) { break; }
+        let p = inPts[k];
+        let u = lakeShapeU_d(a.shape, p.x, p.y, vec3<f32>(0.0), vec3<f32>(0.0)).x;
+        let bank = select(a.level + a.gentle * u, a.level + (exp(u * kBed / a.depth) - 1.0) * a.depth, u < 0.0);
+        if (min(p.z, bank) + p.w < a.level - LAKE_MARGIN_M) { wetN++; }
+    }
+    if (f32(wetN) < LAKE_WET_SHARE * f32(a.shape.n * 5)) { a.reason = 9; return a; }
     a.ok = true;
     return a;
 }
@@ -280,6 +300,8 @@ const LAKE_KS_QUARTER: f32 = ${num(KS_QUARTER)};
 // steep, so the 1 m grid draws them without stretching (owner 2026-11-09).
 const LAKE_GENTLE_MAX: f32 = 0.35;
 const LAKE_BED_SLOPE_MAX: f32 = 0.6;
+// Share of a lake's interior points that must lie under its level (lakeAssess).
+const LAKE_WET_SHARE: f32 = 0.75;
 // Width (m) of the crease where a bank meets the land: rounded, 3-25 m.
 fn lakeCreaseM(len: f32) -> f32 { return clamp(0.03 * len, 3.0, 25.0); }
 const LAKE_FADE_MIN: f32 = ${num(FADE_VARY[0])};

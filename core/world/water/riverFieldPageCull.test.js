@@ -2,6 +2,7 @@ import { expect, it } from 'vitest';
 import { faceUVToDir } from '../hydrology/waterGraph.js';
 import { finishRiverFieldBake, prepareRiverFieldBake, riverFieldLayout } from './riverField.js';
 
+// Two full bakes of six rivers: about 5 s.
 it('matches an uncullled bake on all cube faces and near face edges at large planet scale', () => {
     const radius = 1_000_000, L = riverFieldLayout(radius), stride = 20, count = 9;
     const rivers = Array.from({ length: 6 }, (_, face) => {
@@ -20,4 +21,4 @@ it('matches an uncullled bake on all cube faces and near face edges at large pla
     for (const key of prep.keys) expect(fast.pages.get(key)).toEqual(full.pages.get(key));
     expect(fast.flow).toEqual(full.flow);
     expect(fast.rocks).toEqual(full.rocks);
-});
+}, 20000);

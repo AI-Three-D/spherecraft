@@ -39,7 +39,7 @@ export const RIVER_FIELD = Object.freeze({
     apron: 2,
     // How far beyond the water's edge the banks may cut (m), and the
     // corridor's margin beyond that (pages).
-    reachM: 96,
+    reachM: 160,
     marginM: 16,
     // W stays at least this far (m) under the ground beside the channel,
     // probed this far beyond the water's edge on both sides.
@@ -65,7 +65,9 @@ export const RIVER_FIELD = Object.freeze({
     toeSlopeMax: 0.3,
     // Bank widths vary along each side: exp(a N(s / L1) + b N(s / L2)) within
     // bankVaryRange, a bank no steeper than bankSteepMax (the 1 m grid).
-    bankVary: [0.55, 0.3], bankVaryM: [350, 90], bankVaryRange: [0.5, 2.3], bankSteepMax: 0.6,
+    // Owner 2026-11-09: banks should vary outwards much more (reaches of broad
+    // floodplain beside tight ones): the long wave swings further, up to 4 times.
+    bankVary: [0.75, 0.3], bankVaryM: [350, 90], bankVaryRange: [0.5, 4], bankSteepMax: 0.6,
     // Banks are at least mouthBankM wide at a mouth, back to their own
     // width mouthNearM up the river.
     mouthBankM: 24, mouthNearM: 80,
@@ -430,7 +432,12 @@ function riverStations(river, plane, groundAt, lakeWaterAt, o) {
             [1, -1].forEach((side, k2) => {
                 const edge = side > 0 ? S.hwL[i] : S.hwR[i], least = Math.min(edge, Math.max(o.bankLeast * edge, o.bankLeastM));
                 let e = edge;
-                while (e > least && groundAt(S.x[i] + nx * side * e, S.y[i] + ny * side * e) > S.W[i] + o.bankCutM) e -= step;
+                // Rising against the river's own centre line: through a cut
+                // (the land high on both sides) measured against the water
+                // every station was pinched to its least width, the water in
+                // dry-separated pieces (owner 2026-11-09, lake-cell rapids).
+                const centre = groundAt(S.x[i], S.y[i]), ref = Number.isFinite(centre) ? Math.max(S.W[i], centre) : S.W[i];
+                while (e > least && groundAt(S.x[i] + nx * side * e, S.y[i] + ny * side * e) > ref + o.bankCutM) e -= step;
                 pull[k2][i] = edge - Math.max(e, least);
             });
         }

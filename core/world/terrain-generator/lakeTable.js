@@ -312,7 +312,7 @@ export class LakeTable {
     }
 
     // The active lakes in the table, read back (for the water renderer):
-    // [{ key, tier, centre, a1, a2, level, uC, shape: { n, comp, rot, ks,
+    // [{ key, tier, centre, a1, a2, level, depth, uC, shape: { n, comp, rot, ks,
     // extent } }]. Resolves null while an earlier read is pending.
     async readLakes() {
         if (this._reading) return null;
@@ -336,7 +336,7 @@ export class LakeTable {
                 if (!((flags & 8) && (flags & 4))) continue;
                 const a = b + 17 * 4, v = k => f.subarray(a + k * 4, a + k * 4 + 4);
                 lakes.push({ key, tier: e.cell[3], centre: Array.from(f.subarray(b, b + 3)),
-                    level: v(0)[2], uC: v(1)[3], a1: Array.from(v(4).subarray(0, 3)), a2: Array.from(v(5).subarray(0, 3)),
+                    level: v(0)[2], depth: v(0)[3], uC: v(1)[3], a1: Array.from(v(4).subarray(0, 3)), a2: Array.from(v(5).subarray(0, 3)),
                     shape: { n: v(4)[3], extent: v(5)[3], minAxis: v(6)[0], ks: v(6)[1], stretch: v(6)[2], rot: [...v(7), v(8)[0], v(8)[1]],
                         comp: [9, 10, 11, 12, 13, 14].map(k => Array.from(v(k))) } });
             }

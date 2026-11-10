@@ -1039,8 +1039,11 @@ fn applyWater(
         // At distance, coarse terrain triangles can cross above the river's
         // baked surface even though the fine field says this point is wet.
         // Shade those connected wet texels as water rather than exposing the
-        // muddy bed; keep the actual geometry test for nearby water.
-        let coarseStart = max(max(waterParams.near.y, waterParams.riverLook.z), 1.0);
+        // muddy bed; keep the actual geometry test for nearby water. With the
+        // near meshes from where they hand over (near.x): they cover such
+        // triangles in their share (fieldWaterSurface.wgsl.js), and from
+        // 1600 m only the terrain's share left teeth at 1-1.6 km.
+        let coarseStart = select(max(max(waterParams.near.y, waterParams.riverLook.z), 1.0), max(waterParams.near.x, 1.0), waterParams.near.z > 0.5);
         let coarseDepth = smoothstep(coarseStart, coarseStart * 1.5, dist) * smoothstep(0.0, 1.0, fieldHit.z);
         let wetF = fieldHit.z > -1.5 && (heightM < fieldHit.y || coarseDepth > 0.01);
         if (dbg == 6u) { return vec3<f32>(select(0.0, WATER_OWNER_ON, wetF), 0.0, 0.0); }

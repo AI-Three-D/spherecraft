@@ -27,7 +27,7 @@ struct WhiteU {
     N: u32, flags: u32, blockCells: u32, gridBlocks: u32,
     originBlock: vec2<i32>, hmin: f32, waveAmp: f32,
     cameraXY: vec2<f32>, nearFadeM: vec2<f32>,
-    foamGain: f32, rockDrawM: f32, frameS: f32, pad2: f32,
+    foamGain: f32, rockDrawM: f32, frameS: f32, simFoamFloor: f32,   // share of the baked foam kept under the solver's
     pad3: vec4<f32>,
 };
 fn whiteFrameXY(dir: vec3<f32>) -> vec2<f32> {
@@ -41,6 +41,9 @@ fn whiteFrameDir(xy: vec2<f32>) -> vec3<f32> {
 
 export function whitewaterLookWgsl() {
     return /* wgsl */`
+// The velocity's gradient (1/s) where the solver draws (whitewaterSurface.wgsl.js);
+// the baked tiers' flow is smooth.
+var<private> nearWaterShear: f32 = 0.0;
 // Ridged noise. Ridges of one lattice follow it: from above the foam was a maze of
 // rounded squares. Two lattices at unrelated angles do not line up. 1.4 keeps the
 // mean and spread of a single ridge, 0.65 and 0.24.
@@ -48,6 +51,34 @@ fn whiteRidge(p: vec2<f32>) -> f32 {
     let a = waterNoise(vec2<f32>(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y) + 5.2);
     let b = waterNoise(vec2<f32>(0.28 * p.x + 0.96 * p.y, -0.96 * p.x + 0.28 * p.y) * 1.31 + 1.7);
     return max(0.0, 1.0 - 1.4 * abs(a + b - 1.0));
+}
+// Foam's bubble walls: cellular noise (Worley), F2 - F1 of a jittered unit grid, 0 on
+// a wall between two cells, up to about 1 in a cell's middle. Thresholded noise alone
+// drew soft blobs (owner 2026-11-09: stretched and blurred, not sharp enough); walls
+// make the patches' edges lace and leave holes in thick foam.
+fn whiteCellHash(c: vec2<f32>) -> vec2<f32> {
+    var v = vec2<u32>(bitcast<u32>(i32(c.x)), bitcast<u32>(i32(c.y)));
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return vec2<f32>(v & vec2<u32>(0xffffu)) * (0.8 / 65535.0) + 0.1;
+}
+fn whiteCellWalls(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    var d1 = 9.0;
+    var d2 = 9.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let o = vec2<f32>(f32(x), f32(y));
+            let r = o + whiteCellHash(i + o) - f;
+            let d = dot(r, r);
+            if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) { d2 = d; }
+        }
+    }
+    return sqrt(d2) - sqrt(d1);
 }
 // Baked foam stands in patches: a rapid is not white from bank to bank.
 fn whiteBakedFoam(foam: f32, xy: vec2<f32>) -> f32 {
@@ -222,11 +253,29 @@ fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foa
     }
     if (close > 0.001) { pat = mix(pat, 0.62 + whiteFineLace(xy, c0, c1, c2), close); }
     if (cc * calm > 0.001) { pat += whiteCoarseLace(xy, cc) * calm; }
+    // Bubble walls (whiteCellWalls) of 1.6 m cells, carried in both phases, gone
+    // before they reach pixel size: the patches' edges become lace, thick foam
+    // keeps holes. Finer cells (0.45 m) combed into parallel
+    // stripes wherever eddies shear the carried pattern.
+    // Where eddies shear the carried pattern within a phase (shear x T), sharp walls
+    // drew it as combed stripes: they go there (the noise patches stay). In patches,
+    // or the cells read as a net.
+    var walls = 0.0;
+    let sp = length(vel);
+    let wallW = c0 * (1.0 - smoothstep(0.15, 0.4, nearWaterShear * T)) * smoothstep(0.25, 0.55, waterNoise(xy * 0.11 + 2.7));
+    if (wallW > 0.0) {
+        // Round cells: stretched along the flow, a direction that turns round an eddy
+        // drew concentric stripes like a fingerprint.
+        let wc = mix(whiteCellWalls(uvA / 1.6), whiteCellWalls((uvB + 5.3) / 1.6), blend);
+        walls = (0.32 - wc) * (0.75 * wallW * contrast);
+    }
+    pat += walls;
     // Never quite closed: even a cascade shows dark water between its foam.
     let cut = 1.0 - 0.52 * fa;
-    // Antialiased: the pattern changes by about 2 per metre, so a hard edge seen from
-    // above is a coin toss per pixel, and shimmers as it moves.
-    let soft = 0.035 + min(1.8 * mix(1.0, 0.33, calm * (1.0 - c0)) * px, 0.45);
+    // Antialiased: the pattern changes by about 2 per metre (more where the walls
+    // are), so a hard edge seen from above is a coin toss per pixel, and shimmers as
+    // it moves; up close the edge is crisp.
+    let soft = 0.012 + min(2.4 * mix(1.0, 0.33, calm * (1.0 - c0)) * px, 0.45);
     // Lace is a thin film, not foam: what water carries keeps its body.
     let film = 1.0 - 0.6 * calm;
     let mask = smoothstep(cut - soft, cut + soft, pat) * smoothstep(0.0, 0.12, fa) * waterFoamFar(dist) * film;
@@ -234,7 +283,7 @@ fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foa
     // thick foam is bright, and the sun models it by the surface's own slope.
     let lit = sky * 0.85 + sun * (0.1 + 0.9 * max(dot(N, L), 0.0));
     // Far away the pattern is gone and only its average brightness is left.
-    let thick = mix(0.82, smoothstep(cut, cut + 0.32, pat), c1);
+    let thick = mix(0.82, smoothstep(cut, cut + 0.2, pat), c1);
     let foamCol = vec3<f32>(0.90, 0.94, 0.97) * lit * mix(0.13, 0.36, thick);
     nearWaterHardShore = mask;
     return vec4<f32>(mix(reflected, foamCol, mask), mix(fres, 1.0, mask));

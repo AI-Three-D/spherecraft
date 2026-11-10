@@ -26,6 +26,7 @@ struct WhiteVOut {
     @location(2) normal: vec3<f32>,
     @location(3) flow: vec4<f32>,   // velocity, foam, turbulence
     @location(4) wet: vec3<f32>,    // depth (m), signed distance (m), simulated share
+    @location(5) shear: f32,        // the velocity's gradient (1/s), drawn share
 };
 @group(2) @binding(0) var<uniform> W: WhiteU;
 @group(2) @binding(1) var<storage, read> BLOCKS: array<vec4<i32>>;
@@ -90,6 +91,9 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Whi
     // The pattern's velocity, averaged over a few cells for the same reason.
     let sE = S[ci(i + 2, j)]; let sW = S[ci(i - 2, j)]; let sN = S[ci(i, j + 2)]; let sS = S[ci(i, j - 2)];
     let uc = 0.2 * (s.y + sE.y + sW.y + sN.y + sS.y); let vc = 0.2 * (s.z + sE.z + sW.z + sN.z + sS.z);
+    // How fast neighbouring water parts (eddies, the wake behind a rock): the
+    // carried foam pattern shears by this over its cycle (whitewaterLook.wgsl.js).
+    let dU = vec4<f32>(sE.y - sW.y, sN.y - sS.y, sE.z - sW.z, sN.z - sS.z) / (4.0 * dx);
     let k = K[id];
     let draw = drawnAt(i, j);
 
@@ -116,8 +120,9 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Whi
     // The solver's foam comes from the Froude number, the far tier's from the fall: on a wide deep
     // reach that fell fast the far tier was white and this one calm, four times less foam on the same
     // spot, with block edges between them (owner 2026-11-05, green star). So the far tier's is a floor.
-    o.flow = vec4<f32>(mix(baked.yz, vec2<f32>(uc, vc), draw), mix(foamBaked, max(s.w, foamBaked), draw), mix(foam0 * 0.6, max(k, foam0 * 0.6), draw));
+    o.flow = vec4<f32>(mix(baked.yz, vec2<f32>(uc, vc), draw), mix(foamBaked, max(s.w, foamBaked * W.simFoamFloor), draw), mix(foam0 * 0.6, max(k, foam0 * 0.6), draw));
     o.wet = vec3<f32>(h, mix(st.w, select(-16.0, 16.0, wet), draw), draw);
+    o.shear = length(dU) * draw;
     return o;
 }
 `;
@@ -138,6 +143,7 @@ fn main(in: WhiteVOut) -> @location(0) vec4<f32> {
     let N = normalize(in.normal);
     // Shallow water at the edges carries little foam.
     let foam = in.flow.z * smoothstep(0.03, 0.4, in.wet.x);
+    nearWaterShear = in.shear;
     let c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, N, in.xy, in.flow.xy, foam, in.flow.w, in.pos.xy), in.pos.xy, N);
     if (c.a <= 0.0) { discard; }
     // Thin water fades by its own depth, as Whitewater's does: the solver's bed

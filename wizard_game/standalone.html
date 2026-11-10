@@ -507,11 +507,12 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here)
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
         <div id="river-goto-status" style="display:none;max-width:420px;padding:6px 8px;background:rgba(0,0,0,.65);color:#cfe;border-radius:4px;white-space:pre-wrap;"></div>
+        <button id="rock-mode" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Rocks: wall (Y)</button>
         <button id="river-goto" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Next site (R)</button>
     </div>
 
@@ -3820,6 +3821,8 @@
             look(look = {}) { const r = gameEngine?.setWaterLook?.(look) ?? null; console.info('[Water] look', r); return r; },
             nearMesh(near = true) { const r = gameEngine?.setWaterNear?.(near) ?? null; console.info('[Water] near', r); return r; },
             whitewater(on) { const r = gameEngine?.setWhitewater?.(on) ?? null; console.info('[Water] whitewater', r); return r; },
+            // Rocks in the near simulation: 'steer', 'wall' or 'drag' (WhitewaterSim.js rockMode; also Y, ?rocks=).
+            rocks(mode) { const w = gameEngine?.whitewater; if (!w) return null; const r = mode ? w.setRockMode(mode) : w.config.rockMode; console.info('[Water] rocks', r); return r; },
             carve() { const r = gameEngine?.waterCarveStatus?.() ?? null; console.info('[Water] carve', r); return r; },
         };
 
@@ -4171,6 +4174,13 @@
                         planet.terrain.waterGraph={...planet.terrain.waterGraph,whitewater:{...planet.terrain.waterGraph?.whitewater,enabled:false}};
                     }
                 }
+                // Rocks in its solver: ?rocks=steer|wall|drag (prototypes; Y cycles them in the game).
+                const rockMode=new URLSearchParams(location.search).get('rocks');
+                if(rockMode) {
+                    for(const planet of gameDataConfig.planets) if(planet.enabled) {
+                        planet.terrain.waterGraph={...planet.terrain.waterGraph,whitewater:{...planet.terrain.waterGraph?.whitewater,rockMode}};
+                    }
+                }
                 // Original (terrain-sampled) lakes, every lake solved at 32 m
                 // before it is drawn (WaterService refine.precompute).
                 if(new URLSearchParams(location.search).get('waterPrecompute')==='1') {
@@ -4376,6 +4386,30 @@
         document.getElementById('river-goto').addEventListener('click', () => {
             try { debugSiteStep(false); } catch (err) { console.warn('[Sites]', err); }
         });
+        // Debug: rocks in the near simulation, the prototypes in turn (WhitewaterSim.js rockMode).
+        const ROCK_MODES = ['steer', 'wall', 'drag'];
+        const ROCK_MODE_TEXT = {
+            steer: 'steer: solid only in fast (supercritical) water, elsewhere a fixed nudge round them (as before)',
+            wall: 'wall: every rock a dome in the solver\'s bed, dry above the water',
+            drag: 'drag: every rock holds the water still where it stands in it (soft edges)',
+        };
+        function rockModeShow() {
+            const mode = gameEngine?.whitewater?.config?.rockMode ?? 'wall';
+            document.getElementById('rock-mode').textContent = `Rocks: ${mode} (Y)`;
+            return mode;
+        }
+        function rockModeStep() {
+            const w = gameEngine?.whitewater;
+            if (!w) { console.warn('[Rocks] the near simulation is not running'); return; }
+            const mode = w.setRockMode(ROCK_MODES[(ROCK_MODES.indexOf(w.config.rockMode) + 1) % ROCK_MODES.length]);
+            rockModeShow();
+            const box = document.getElementById('river-goto-status');
+            box.textContent = `Rocks ${ROCK_MODE_TEXT[mode]}. The simulated water refills in a few seconds.`;
+            box.style.display = 'block';
+            console.info(`[Rocks] ${mode}`);
+        }
+        document.getElementById('rock-mode').addEventListener('click', () => rockModeStep());
+        setInterval(rockModeShow, 2000);
 
         // Keyboard controls
         window.addEventListener('keydown', (e) => {
@@ -4386,6 +4420,10 @@
             // Debug: fly to the next viewing site (Shift: new sites around here).
             if (e.key.toLowerCase() === 'r' && !e.repeat && !e.target?.closest?.('input, textarea')) {
                 try { debugSiteStep(e.shiftKey); } catch (err) { console.warn('[Sites]', err); }
+            }
+            // Debug: rocks in the near simulation, the next prototype.
+            if (e.key.toLowerCase() === 'y' && !e.repeat && !e.target?.closest?.('input, textarea')) {
+                try { rockModeStep(); } catch (err) { console.warn('[Rocks]', err); }
             }
             // Debug: freeze or resume the day-night cycle.
             if (e.key.toLowerCase() === 't' && !e.repeat && gameEngine?.setDayNightFrozen) {

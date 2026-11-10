@@ -199,6 +199,12 @@ export class WaterService {
                     const lakeTable = await this._lakeCells.rivers.ready();
                     this._sampler = await createHydrologySampler({ device: this.device, terrainGenerator: this.terrainGenerator,
                         directionsOnly: true, eagerCarved: false, lakeTable });
+                    // The river data reached setWaterCarveResources before the sampler
+                    // existed: without it the simulation's bed never became ready, and
+                    // the near simulation never ran (no moving surface, spray or rocks
+                    // in the flow; owner 2026-11-09).
+                    if (this._carveResources) await this._sampler.setWaterCarveResources(this._carveResources);
+                    if (this._fieldResources) await this._sampler.setRiverFieldResources(this._fieldResources);
                 }
                 return;
             }

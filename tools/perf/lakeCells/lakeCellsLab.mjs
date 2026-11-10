@@ -206,7 +206,7 @@ for (const site of ref.sites) {
 }
 results.coverage = { landSamples: landN, wetSamples: wetN, wetShareOfLand: wetN / landN,
     old: { landSamples: ref.landSamples, wetSamples: ref.oldWetSamples, wetShareOfLand: ref.oldWetSamples / ref.landSamples } };
-const REASONS = ['', 'centre ocean', 'rim ocean', 'too rough', 'level at sea', 'headwall', 'shore slope', 'blocked', 'relief inside'];
+const REASONS = ['', 'centre ocean', 'rim ocean', 'too rough', 'level at sea', 'headwall', 'shore slope', 'blocked', 'relief inside', 'dry inside'];
 results.rejected = LAKE_CELL_TIERS.map((t, i) => ({ tier: t.name, accepted: [...lakes.values()].filter(l => l.tier === i).length,
     ...Object.fromEntries(REASONS.slice(1).map((r, k) => [r, [...rejected.values()].filter(x => x.tier === i && x.reason === k + 1).length])) }));
 console.log(`[lab] candidates by tier: ${JSON.stringify(results.rejected)}`);

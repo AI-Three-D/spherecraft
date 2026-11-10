@@ -43,7 +43,11 @@ export const LAKE_CELL_RIVER_OPTIONS = Object.freeze({ enabled: true, carve: tru
     // Records of its own lake table (the generator's pipelines, its own
     // records: planning never evicts what terrain tiles are about to read).
     tableRecords: 32768,
-    halfWidthMinM: 2, halfWidthPerSqrtQ: 5, halfWidthMaxM: 8,
+    // 2.5 times v1's (2, 5, 8): narrower than the terrain tiles' vertices a
+    // few hundred metres off (12.6 m, then 50 m), coarse triangles stood in the water
+    // in teeth along the banks (owner 2026-11-09: rivers were narrow anyway;
+    // past the rocks fieldWaterSurface.wgsl.js covers what remains).
+    halfWidthMinM: 5, halfWidthPerSqrtQ: 12.5, halfWidthMaxM: 20,
     // Along a river (riverReachShape, as the pre-Codex tracer): constrictions
     // to minReachWidth of its width at least, mouths flared junctionWidthScale
     // times, islands rare (islandThreshold of the reach noise, 0..1).
@@ -52,7 +56,7 @@ export const LAKE_CELL_RIVER_OPTIONS = Object.freeze({ enabled: true, carve: tru
     // take part of it (rapidDropShare, at most rapidMaxDropM, within the cut
     // budget) in one steep reach of rapidLengthM, early in their course, and
     // run under the land after it until it comes down to them.
-    rapidShare: 0.4, rapidMinDropM: 4, rapidDropShare: 0.55, rapidMaxDropM: 14, rapidLengthM: [120, 300],
+    rapidShare: 0.4, rapidMinDropM: 4, rapidDropShare: 0.55, rapidMaxDropM: 14, rapidLengthM: [120, 300], rapidRecoverM: 400,
     // The regional planner's course and profile.
     // The flood cuts at most maxChannelCutM - floodCutMarginM through rises on
     // its cells (the smoothed course and its banks cut a little more).
@@ -511,14 +515,21 @@ export class LakeCellRivers {
         for (let k = 0; k < n; k++) if (s[k] >= s0 && s[k] <= end) room = Math.min(room, o.maxChannelCutM - (nat[k] - lvl(k) + P[k * st + 5]));
         const levelAt0 = (() => { let k = 0; while (k + 1 < n && s[k + 1] < s0) k++; return lvl(k); })();
         const target = lvl(n - 1);
-        const D = Math.min(o.rapidMaxDropM, o.rapidDropShare * (levelAt0 - target), room);
+        // No more than the land itself falls within rapidRecoverM below the
+        // rapid: after it the water comes back to the land's slope (holding
+        // it D under to the end ran a trench of up to 14 m for kilometres).
+        const levelAfter = (() => { let k = 0; while (k + 1 < n && s[k] < s0 + len + o.rapidRecoverM) k++; return lvl(k); })();
+        const D = Math.min(o.rapidMaxDropM, o.rapidDropShare * (levelAt0 - target), room, levelAt0 - levelAfter);
         if (!(D >= 2)) return;
+        let prev = Infinity;
         for (let k = 0; k < n; k++) {
-            if (s[k] <= s0 || P[k * st + 9] < 0) continue;
-            const t = Math.min(1, (s[k] - s0) / len), f = t * t * (3 - 2 * t);
-            const next = Math.max(target, lvl(k) - D * f);
+            if (s[k] <= s0 || P[k * st + 9] < 0) { prev = Math.min(prev, lvl(k)); continue; }
+            const t = Math.min(1, (s[k] - s0) / len), up = t * t * (3 - 2 * t);
+            const r2 = Math.min(1, Math.max(0, (s[k] - s0 - len) / o.rapidRecoverM)), down = 1 - r2 * r2 * (3 - 2 * r2);
+            const next = Math.max(target, Math.min(prev, lvl(k) - D * up * down));
             const dl = lvl(k) - next;
             for (const j of [3, 8, 16]) P[k * st + j] -= dl;
+            prev = next;
             if (t < 1) { P[k * st + 4] *= 0.8; P[k * st + 11] = Math.max(P[k * st + 11], 0.8); P[k * st + 6] = Math.max(P[k * st + 6], 2.5); }
         }
         river.rapid = { startM: s0, lengthM: len, dropM: D };

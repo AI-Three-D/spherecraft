@@ -56,13 +56,15 @@ export const NEAR_WATER_RASTER_WGSL = /* wgsl */`
 // Permit hardware rejection of hidden banks while reserving half a metre
 // of view depth for the fragment's continuous-surface correction. Only the
 // comparison depth moves; all physical positions and shading stay unchanged.
-fn nearWaterRasterPosition(wp: vec3<f32>) -> vec4<f32> {
+fn nearWaterRasterPositionReserve(wp: vec3<f32>, reserve: f32) -> vec4<f32> {
     var pos = U.projectionMatrix * (U.viewMatrix * vec4<f32>(wp, 1.0));
-    let reserve = ${RIVER_SECTION.surfaceDepthReserveM.toFixed(2)};
     if (pos.w > 0.0) {
         pos.z = max(0.0, pos.z + U.projectionMatrix[3].z * reserve / max(pos.w - reserve, 0.01));
     }
     return pos;
+}
+fn nearWaterRasterPosition(wp: vec3<f32>) -> vec4<f32> {
+    return nearWaterRasterPositionReserve(wp, ${RIVER_SECTION.surfaceDepthReserveM.toFixed(2)});
 }
 `;
 
@@ -131,14 +133,24 @@ var<private> nearWaterHardShore: f32 = 0.0;
 var<private> nearWaterAerated: f32 = 0.0;
 // The body's light from the surface's slopes, around 1 (whitewaterLook.wgsl.js).
 var<private> nearWaterRelief: f32 = 1.0;
-// Opaque depth converted to distance behind this point along the view ray.
-fn nearWaterBehind(wp:vec3<f32>,pixel:vec2<f32>)->f32 {
+// The bed's distance behind this point along the view ray when the opaque
+// depth does not tell it (>= 0; fieldWaterSurface.wgsl.js: water over a
+// coarse tile's triangle standing in the river).
+var<private> nearWaterBedOverride: f32 = -1.0;
+// Opaque depth converted to distance along the view ray, signed: + behind
+// this point, - in front of it.
+fn nearWaterFront(wp:vec3<f32>,pixel:vec2<f32>)->f32 {
     let dimensions=vec2<i32>(textureDimensions(nearWaterSceneDepth));
     let xy=clamp(vec2<i32>(pixel),vec2<i32>(0),dimensions-vec2<i32>(1));
     let depth=textureLoad(nearWaterSceneDepth,xy,0);
     let viewZ=(U.viewMatrix*vec4<f32>(wp,1.0)).z;
     let bedZ=-U.projectionMatrix[3].z/(depth+U.projectionMatrix[2].z);
-    return max((viewZ-bedZ)*length(U.cameraPos-wp)/max(-viewZ,.001),0.0);
+    return (viewZ-bedZ)*length(U.cameraPos-wp)/max(-viewZ,.001);
+}
+// Opaque depth converted to distance behind this point along the view ray.
+fn nearWaterBehind(wp:vec3<f32>,pixel:vec2<f32>)->f32 {
+    if (nearWaterBedOverride >= 0.0) { return nearWaterBedOverride; }
+    return max(nearWaterFront(wp,pixel),0.0);
 }
 // plane: the surface's normal for telling its top from its underside (the
 // planet's up for lakes; a river's is tilted by its fall).
@@ -173,7 +185,7 @@ fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>
     let viewZ = (U.viewMatrix * vec4<f32>(wp, 1.0)).z;
     let bedZ = -U.projectionMatrix[3].z / (depth + U.projectionMatrix[2].z);
     let rayScale = dist / max(-viewZ, 0.001);
-    let behind = max((viewZ - bedZ) * rayScale, 0.0);
+    let behind = select(max((viewZ - bedZ) * rayScale, 0.0), nearWaterBedOverride, nearWaterBedOverride >= 0.0);
     let V = normalize(U.cameraPos - wp);
     // Seen from above the surface's plane: a river falling toward the camera
     // is above its eye height upstream, and by the planet's up alone its
@@ -192,7 +204,13 @@ fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>
     // shores. Foreground opaque geometry still completely hides the water.
     // Foam ends where it ends: faded like clear water it smeared over the bank.
     let contactDepth = behind * max(abs(dot(V, up)), 0.05);
-    let contact = mix(smoothstep(0.0, waterParams.shoreSoftM, contactDepth), smoothstep(0.0, 0.05, contactDepth), nearWaterHardShore);
+    // And over a pixel and a half at least, by the ground's distance behind the surface
+    // along the ray: seen low over a bank, those few centimetres of depth were a fraction
+    // of a pixel, a hard stepped waterline that flickered as soon as the solver moved the
+    // water (owner 2026-11-10, z-fighting along the waterline).
+    let pixelM = 2.0 * dist / (U.projectionMatrix[1][1] * f32(dimensions.y));
+    let edge = smoothstep(0.0, 1.5 * pixelM, behind);
+    let contact = mix(smoothstep(0.0, waterParams.shoreSoftM, contactDepth), smoothstep(0.0, 0.05, contactDepth), nearWaterHardShore) * edge;
     let body = waterBodyLight(contactDepth, dist, up, L, sun, sky) * nearWaterRelief;
     let a = (1.0 - transmission * (1.0 - s.a)) * w * contact;
     let add = (body * (1.0 - transmission) * (1.0 - s.a) + s.rgb) * w * contact;
