@@ -35,9 +35,9 @@ export const WATER_BINDINGS = Object.freeze({ index: 12, lakes: 13, masks: 14, p
 // The river field (riverField.wgsl.js) in the terrain shading's water group.
 export const WATER_FIELD_BINDINGS = Object.freeze({ table: 17, texels: 18, params: 19, flow: 20 });
 
-// WaterLake: 4 x vec4 (64 bytes). WaterParams: 11 x vec4. WaterRiverSeg: 10 x vec4 (160 bytes).
+// WaterLake: 4 x vec4 (64 bytes). WaterParams: 13 x vec4. WaterRiverSeg: 10 x vec4 (160 bytes).
 export const LAKE_RECORD_FLOATS = 16;
-export const LAKE_PARAMS_FLOATS = 48;
+export const LAKE_PARAMS_FLOATS = 52;
 export const RIVER_SEG_FLOATS = 40;
 export const RIVER_MAX_SEGS_PER_CELL = 255;
 // River segment lists per 4 x 4 sub-cells of a grid cell (~100 m at gridN
@@ -105,6 +105,10 @@ struct WaterParams {
     // z = 1 on, 0 off (the terrain shading draws all of the water).
     near: vec4<f32>,
     open: vec4<f32>,           // rgb: albedo of open water, where no bed shows; a: how ruffled close still water is, 0..1
+    // The sea (WaterGpuData.sea): x its level (m above the sphere), y 1 on; z metres
+    // per unit of the tiles' height texture (0 unknown); w 1: past the near meshes,
+    // which ground is under water is read from that texture, not the triangles.
+    sea: vec4<f32>,
 };
 ${segments ? `// A piece of a traced river between two points (unit directions); values
 // interpolate along it: design level (the channel's waterline) and thalweg
@@ -1016,10 +1020,23 @@ fn waterOwnerTint(nearW: f32, depthM: f32) -> vec3<f32> {
     return mix(vec3<f32>(0.1, 0.75, 1.0), vec3<f32>(1.0, 0.2, 0.85), nearW) * mix(1.0, 0.4, clamp(depthM / 20.0, 0.0, 1.0));
 }
 
-// Shades a terrain fragment under lake or river water; unchanged elsewhere.
+// Height (m) that decides which ground is under water. Far tiles have a few
+// triangles over a hundred texels: their interpolated height misses whole lake
+// beds and shallows, whose mud the texels paint, so lakes and coasts read as mud
+// from high up. Past the near meshes' handover (which meet the ground by its
+// triangles, through depth) it is the tile's height texture there.
+// texHeight: that texture at the fragment (its units), or below -1e29: none.
+fn waterCoverHeight(heightM: f32, texHeight: f32, dist: f32) -> f32 {
+    if (waterParams.sea.w < 0.5 || waterParams.sea.z <= 0.0 || texHeight < -1.0e29) { return heightM; }
+    let t = smoothstep(max(waterParams.near.x, 1.0), max(waterParams.near.y, waterParams.near.x + 1.0), dist);
+    return mix(heightM, texHeight * waterParams.sea.z, t);
+}
+
+// Shades a terrain fragment under lake, river or sea water; unchanged elsewhere.
+// texHeight: see waterCoverHeight.
 fn applyWater(
     bedColor: vec3<f32>, worldPos: vec3<f32>, cameraPos: vec3<f32>, planetCenter: vec3<f32>,
-    lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>, samp: sampler,
+    lightDir: vec3<f32>, sunRadiance: vec3<f32>, skyRadiance: vec3<f32>, samp: sampler, texHeight: f32,
 ) -> vec3<f32> {
     if (waterParams.enabled == 0u || waterParams.debugMode == ${WATER_DEBUG_DRY}u) { return bedColor; }
     let rel = worldPos - planetCenter;
@@ -1029,6 +1046,9 @@ fn applyWater(
     let dbg = waterParams.debugMode;
 
     let dist = length(cameraPos - worldPos);
+    let hW = waterCoverHeight(heightM, texHeight, dist);
+    // Under sea level: the sea (WaterGpuData.sea), below lakes and rivers.
+    let seaHere = waterParams.sea.y > 0.5 && hW < waterParams.sea.x;
     // Close water is drawn at its surface, with transmission from scene depth.
     // The bed stays terrain, including when the camera is underwater.
     if (dbg == 0u && waterNearWeight(dist) >= 1.0) { return bedColor; }
@@ -1048,54 +1068,57 @@ fn applyWater(
         let wetF = fieldHit.z > -1.5 && (heightM < fieldHit.y || coarseDepth > 0.01);
         if (dbg == 6u) { return vec3<f32>(select(0.0, WATER_OWNER_ON, wetF), 0.0, 0.0); }
         if (dbg == 7u) { return vec3<f32>(0.0, select(0.0, WATER_OWNER_ON, wetF), 0.0); }
-        if (!wetF) { return bedColor; }
-        let depthF = max(fieldHit.y - heightM, coarseDepth);
-        let nearF = waterNearWeight(dist);
-        let switchF = max(waterParams.near.y, waterParams.riverLook.z);
-        let farStartF = select(switchF, waterParams.near.x, waterParams.near.z > 0.5);
-        let wFarF = smoothstep(farStartF, mix(farStartF, switchF * 1.5, 0.15), dist);
-        var colF = bedColor;
-        if (wFarF < 1.0) { colF = waterNearFarColor(bedColor, depthF + max(dist - farStartF, 0.0) * ${LAKE_FAR_DEPTH_PER_M}, worldPos, up, cameraPos, dist, nearF, lightDir, sunRadiance, skyRadiance); }
-        if (wFarF > 0.0) {
-            let surfaceF = waterSurfaceTerms(worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance);
-            let bodyF = waterBodyLight(depthF, dist, up, lightDir, sunRadiance, skyRadiance);
-            colF = mix(colF, mix(bedColor, bodyF * (1.0 - surfaceF.a) + surfaceF.rgb, smoothstep(0.0, waterParams.shoreSoftM, depthF)), wFarF);
-        }
-        // Whitewater far away: the foam the fall of the water makes
-        // (riverFlow.js), still, broken by slow noise so it is not painted on.
-        // Near meshes draw their own over their share.
-        if (waterParams.riverLook.x > 0.5) {
-            let foamF = riverFlowAt(up).z * (1.0 - nearF);
-            if (foamF > 0.004) {
-                let q = vec2<f32>(worldPos.x + worldPos.y, worldPos.z - worldPos.y);
-                let broken = 0.6 * waterNoise(q * 0.07) + 0.4 * waterNoise(q * 0.21);
-                // Far off a rapid is a pale streak: at full strength a few pixels of it
-                // read as a sharp white dot on the landscape (owner 2026-11-05).
-                let cover = smoothstep(0.03, 0.55, foamF * (0.55 + 0.9 * broken)) * waterFoamFar(dist);
-                let litF = skyRadiance * 0.9 + sunRadiance * (0.35 + 0.65 * max(dot(up, lightDir), 0.0));
-                colF = mix(colF, vec3<f32>(0.90, 0.94, 0.97) * litF * 0.22, cover * smoothstep(0.0, waterParams.shoreSoftM, depthF));
+        // The field holds rivers and lakes, not the sea: past its water the sea's below.
+        if (!wetF && !seaHere) { return bedColor; }
+        if (wetF) {
+            let depthF = max(fieldHit.y - heightM, coarseDepth);
+            let nearF = waterNearWeight(dist);
+            let switchF = max(waterParams.near.y, waterParams.riverLook.z);
+            let farStartF = select(switchF, waterParams.near.x, waterParams.near.z > 0.5);
+            let wFarF = smoothstep(farStartF, mix(farStartF, switchF * 1.5, 0.15), dist);
+            var colF = bedColor;
+            if (wFarF < 1.0) { colF = waterNearFarColor(bedColor, depthF + max(dist - farStartF, 0.0) * ${LAKE_FAR_DEPTH_PER_M}, worldPos, up, cameraPos, dist, nearF, lightDir, sunRadiance, skyRadiance); }
+            if (wFarF > 0.0) {
+                let surfaceF = waterSurfaceTerms(worldPos, up, cameraPos, lightDir, sunRadiance, skyRadiance);
+                let bodyF = waterBodyLight(depthF, dist, up, lightDir, sunRadiance, skyRadiance);
+                colF = mix(colF, mix(bedColor, bodyF * (1.0 - surfaceF.a) + surfaceF.rgb, smoothstep(0.0, waterParams.shoreSoftM, depthF)), wFarF);
             }
+            // Whitewater far away: the foam the fall of the water makes
+            // (riverFlow.js), still, broken by slow noise so it is not painted on.
+            // Near meshes draw their own over their share.
+            if (waterParams.riverLook.x > 0.5) {
+                let foamF = riverFlowAt(up).z * (1.0 - nearF);
+                if (foamF > 0.004) {
+                    let q = vec2<f32>(worldPos.x + worldPos.y, worldPos.z - worldPos.y);
+                    let broken = 0.6 * waterNoise(q * 0.07) + 0.4 * waterNoise(q * 0.21);
+                    // Far off a rapid is a pale streak: at full strength a few pixels of it
+                    // read as a sharp white dot on the landscape (owner 2026-11-05).
+                    let cover = smoothstep(0.03, 0.55, foamF * (0.55 + 0.9 * broken)) * waterFoamFar(dist);
+                    let litF = skyRadiance * 0.9 + sunRadiance * (0.35 + 0.65 * max(dot(up, lightDir), 0.0));
+                    colF = mix(colF, vec3<f32>(0.90, 0.94, 0.97) * litF * 0.22, cover * smoothstep(0.0, waterParams.shoreSoftM, depthF));
+                }
+            }
+            return colF;
         }
-        return colF;
     }` : ''}
     if (dbg == 9u) {
         let c9 = waterDirToCell(up, waterParams.gridN);
         var w9 = vec4<f32>(0.0);
         for (var k9 = 0u; k9 < waterLakeCandidateCount(c9); k9++) {
-            w9 = waterLakeDebugWhy(waterLakeCandidate(c9, k9), up, heightM, samp);
+            w9 = waterLakeDebugWhy(waterLakeCandidate(c9, k9), up, hW, samp);
             if (w9.a >= 0.5) { break; }
         }
         if (w9.a < 0.5) { return bedColor * 0.25; }
         return w9.rgb * 0.85;
     }
-    let lakeHit=waterLakeHitView(up,heightM,samp,dist>waterParams.riverLook.w);
+    let lakeHit=waterLakeHitView(up,hW,samp,dist>waterParams.riverLook.w);
     let level = lakeHit.level;
     // Debug views 6 and 7: who draws the water, in flat colours, before aerial
     // perspective; the near meshes keep drawing and add theirs
     // (fieldWaterSurface.wgsl.js, nearWaterSurface.wgsl.js). Outside the river
     // field's pages: blue lake water (this shading or a lake sheet).
     if (dbg == 6u) { return vec3<f32>(0.0); }
-    if (dbg == 7u) { return vec3<f32>(0.0, 0.0, select(0.0, WATER_OWNER_ON, level > WATER_NO_LAKE)); }
+    if (dbg == 7u) { return vec3<f32>(0.0, 0.0, select(0.0, WATER_OWNER_ON, level > WATER_NO_LAKE || seaHere)); }
     if (level > WATER_NO_LAKE) {
         let depthM = lakeHit.depthM;
         if (dbg == 1u || dbg == 2u) {
@@ -1135,6 +1158,38 @@ fn applyWater(
             lakeCol=mix(lakeCol,opaque,wFar);
         }
         return lakeCol;
+    }
+
+    // The sea (WaterGpuData.sea): all ground under sea level is ocean, inland
+    // too (waterGraph.js). Drawn as a lake's water is: close by, the surface pass
+    // (seaSurface.wgsl.js) draws it from the surface itself, as the lake sheets
+    // do; farther, this shading, where only the ground's own height can place a
+    // shore; the pass adds water that is clearly deep, or has no ground behind it.
+    if (seaHere) {
+        let seaDepthM = waterParams.sea.x - hW;
+        if (dbg == 1u || dbg == 2u || dbg == 3u) { return mix(vec3<f32>(0.6, 1.0, 1.0), vec3<f32>(0.0, 0.0, 0.3), clamp(seaDepthM / 50.0, 0.0, 1.0)); }
+        // The surface on this pixel's ray: wind, sky and sun are taken there,
+        // where the surface pass takes them, so the two meet without a seam.
+        let V = (cameraPos - worldPos) / max(dist, 0.001);
+        let pathM = min(max(waterParams.sea.x - heightM, 0.0) / max(dot(V, up), 0.02), dist * 0.999);
+        let wpS = worldPos + V * pathM;
+        let distS = dist - pathM;
+        let upS = normalize(wpS - planetCenter);
+        let nearW = waterNearWeight(distS);
+        if (dbg == 4u) { return waterOwnerTint(nearW, seaDepthM); }
+        let switchM=max(waterParams.near.y,waterParams.riverLook.z);
+        let farStartM=select(switchM,waterParams.near.x,waterParams.near.z>0.5);
+        let farDepthM=seaDepthM+max(distS-farStartM,0.0)*${LAKE_FAR_DEPTH_PER_M};
+        let wFar=smoothstep(farStartM,mix(farStartM,switchM*1.5,0.15),distS);
+        var seaCol=bedColor;
+        if(wFar<1.0) {seaCol=waterNearFarColor(bedColor,farDepthM,wpS,upS,cameraPos,distS,nearW,lightDir,sunRadiance,skyRadiance);}
+        if(wFar>0.0) {
+            let surface=waterSurfaceTerms(wpS,upS,cameraPos,lightDir,sunRadiance,skyRadiance);
+            let body=waterBodyLight(seaDepthM,distS,upS,lightDir,sunRadiance,skyRadiance);
+            let opaque=mix(bedColor,body*(1.0-surface.a)+surface.rgb,smoothstep(0.0,waterParams.shoreSoftM,seaDepthM));
+            seaCol=mix(seaCol,opaque,wFar);
+        }
+        return seaCol;
     }
 
     if (dbg == 2u) {

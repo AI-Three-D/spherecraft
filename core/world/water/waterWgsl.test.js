@@ -10,7 +10,7 @@ describe('water WGSL', () => {
 @fragment
 fn main(@location(0) wp: vec3<f32>) -> @location(0) vec4<f32> {
     let c = applyWater(vec3<f32>(0.3, 0.4, 0.2), wp, vec3<f32>(0.0, 140000.0, 0.0), vec3<f32>(0.0),
-        vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0), vec3<f32>(0.3, 0.4, 0.6), linearSampler);
+        vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0), vec3<f32>(0.3, 0.4, 0.6), linearSampler, -1.0e30);
     return vec4<f32>(c, 1.0);
 }`;
         expect(() => validate(parseWgsl(src))).not.toThrow();

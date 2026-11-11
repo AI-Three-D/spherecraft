@@ -507,11 +507,12 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | G: Terrain fix prototype
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | G: Terrain fix prototype | H: Sea and far water prototype
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
         <div id="river-goto-status" style="display:none;max-width:420px;padding:6px 8px;background:rgba(0,0,0,.65);color:#cfe;border-radius:4px;white-space:pre-wrap;"></div>
+        <button id="water-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Water fix (H)</button>
         <button id="terrain-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Terrain fix (G)</button>
         <button id="rock-mode" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Rocks: wall (Y)</button>
         <button id="river-goto" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Next site (R)</button>
@@ -524,6 +525,7 @@
         import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
         import { TERRAIN_FIX_PROTOTYPES, applyTerrainFixToConfig, applyTerrainFixLive, terrainFixIndexOf } from './terrainFixPrototypes.js';
+        import { WATER_FIX_PROTOTYPES, applyWaterFixLive, waterFixIndexOf } from './waterFixPrototypes.js';
         import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
         import { TerrainRaycaster } from './actors/nav/TerrainRaycaster.js';
         import { CubeSphereCoords } from '../core/planet/cubeSphereCoords.js';
@@ -4462,6 +4464,42 @@
         document.getElementById('terrain-fix').addEventListener('click', () => terrainFixStep());
         setInterval(terrainFixShow, 2000);
 
+        // Debug: sea and far water prototypes in turn (waterFixPrototypes.js,
+        // WATER_STATUS.md). Live: no rebuild or regeneration. ?waterFix=N picks
+        // one as soon as the water data exists.
+        function waterFixShow() {
+            const i = waterFixIndexOf(gameEngine);
+            document.getElementById('water-fix').textContent = i >= 0
+                ? `Water fix ${i}: ${WATER_FIX_PROTOTYPES[i].name} (H)`
+                : (gameEngine?.waterGpuData ? 'Water fix: custom (H)' : 'Water fix (H)');
+            return i;
+        }
+        function waterFixStep(index = null) {
+            const box = document.getElementById('river-goto-status');
+            try {
+                const next = index ?? (Math.max(waterFixShow(), 0) + 1) % WATER_FIX_PROTOTYPES.length;
+                const proto = applyWaterFixLive(gameEngine, next);
+                waterFixShow();
+                box.textContent = `Water fix ${next} of ${WATER_FIX_PROTOTYPES.length - 1}: ${proto.name}. ${proto.text}.`;
+                box.style.display = 'block';
+                console.info(`[WaterFix] ${next}: ${proto.name}`);
+            } catch (err) {
+                console.warn('[WaterFix]', err);
+            }
+        }
+        document.getElementById('water-fix').addEventListener('click', () => waterFixStep());
+        setInterval(waterFixShow, 2000);
+        {
+            const waterFixQuery = new URLSearchParams(location.search).get('waterFix');
+            if (waterFixQuery !== null) {
+                const waitForWater = setInterval(() => {
+                    if (!gameEngine?.waterGpuData || !gameEngine.renderer?.terrainModule?.ocean) return;
+                    clearInterval(waitForWater);
+                    waterFixStep(Number(waterFixQuery));
+                }, 250);
+            }
+        }
+
         // Keyboard controls
         window.addEventListener('keydown', (e) => {
             if (e.key.toLowerCase() === 'd') {
@@ -4479,6 +4517,10 @@
             // Debug: far-terrain fix prototypes, the next one.
             if (e.key.toLowerCase() === 'g' && !e.repeat && !e.target?.closest?.('input, textarea')) {
                 terrainFixStep();
+            }
+            // Debug: sea and far water prototypes, the next one.
+            if (e.key.toLowerCase() === 'h' && !e.repeat && !e.target?.closest?.('input, textarea')) {
+                waterFixStep();
             }
             // Debug: freeze or resume the day-night cycle.
             if (e.key.toLowerCase() === 't' && !e.repeat && gameEngine?.setDayNightFrozen) {

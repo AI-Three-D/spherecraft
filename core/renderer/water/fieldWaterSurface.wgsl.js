@@ -21,7 +21,9 @@ export const FIELD_WATER_STEP = 2;
 export const FIELD_WATER_GRID = RIVER_FIELD.page / FIELD_WATER_STEP + 1;
 // Water is kept this far (m) beyond the field's connected water (its
 // signed distance is texel-accurate; the depth test draws the shoreline).
-const KEEP_M = 1.5;
+// The sea gives way there (seaSurface.wgsl.js).
+export const FIELD_WATER_KEEP_M = 1.5;
+const KEEP_M = FIELD_WATER_KEEP_M;
 // Coarse tiles' triangles across a river (fieldWaterOverTooth): ground at
 // most TOOTH_AHEAD_M in front of the water along the ray (also the depth
 // test's reserve: hardware rejects only what is further in front), at most

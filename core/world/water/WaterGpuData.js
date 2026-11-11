@@ -49,6 +49,18 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     structuredRiverSurface: true,
     structuredRiverBody: true,
     structuredRiverSurfaceStartM: 1600,
+    // Past the near meshes, which ground is under water comes from the tiles'
+    // height texture, not their triangles (waterWgsl.js waterCoverHeight): far
+    // tiles have a few triangles over a hundred texels, and the lake beds' and
+    // shallows' mud showed from high up where the triangles stood above the water.
+    farTexelCover: true,
+});
+
+// The sea: its level (m above the sphere). Set from the planet's oceanLevel
+// (gameEngine.js _createWaterGpuData).
+export const WATER_SEA_DEFAULTS = Object.freeze({
+    levelM: 0,
+    enabled: true,
 });
 
 // Near water (core/renderer/water/NearWaterRenderer.js): lakes and rivers
@@ -84,7 +96,7 @@ export class WaterGpuData {
     constructor(device, { gridN = 512, planetRadius, maxLakes = CAPACITY.maxLakes, maskLayerSize = CAPACITY.maskLayerSize,
         maxMaskLayers = CAPACITY.maxMaskLayers, maskTilesPerAxis = 1, maxRiverSegs = CAPACITY.maxRiverSegs, maxRiverCells = CAPACITY.maxRiverCells,
         carve = null, structuredRiverSurface = true, maskAtlas = null,
-        maxLakeOverlapEntries = maxLakes * 16 } = {}) {
+        maxLakeOverlapEntries = maxLakes * 16, sea = null, heightScale = 0 } = {}) {
         this.device = device;
         this.N = gridN;
         this.R = planetRadius;
@@ -115,6 +127,13 @@ export class WaterGpuData {
         this.debugMode = 0;
         this.look = { ...WATER_LOOK_DEFAULTS,structuredRiverSurface };
         this.near = { ...WATER_NEAR_DEFAULTS };
+        // The sea (seaSurface.wgsl.js, waterWgsl.js applyWater): everything under
+        // levelM is ocean. available: the planet has a sea; enabled: drawn now
+        // (the 'o' key, the old renderer's comparison: PlanetTerrainModule).
+        this.sea = { ...WATER_SEA_DEFAULTS, ...(sea ?? {}), available: !!sea };
+        this.sea.enabled = this.sea.available && this.sea.enabled !== false;
+        // Metres per unit of the tiles' height texture (planetConfig.heightScale; 0 unknown).
+        this.heightScale = Number.isFinite(heightScale) ? heightScale : 0;
         // River carve parameters (WaterService config.carve; riverCarve.wgsl.js), or null: no carve.
         this.carve = carve;
         const cells = 6 * gridN * gridN;
@@ -455,6 +474,8 @@ export class WaterGpuData {
         const nr = this.near;
         f.set(nr.enabled ? [nr.fadeStartM, nr.fadeEndM, 1, 0] : [0, 0, 0, 0], 40);
         f.set([L.openColor[0], L.openColor[1], L.openColor[2], L.closeRuffle], 44);
+        const sea = this.sea;
+        f.set([sea.levelM, sea.available && sea.enabled ? 1 : 0, this.heightScale, L.farTexelCover ? 1 : 0], 48);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, p);
     }
 

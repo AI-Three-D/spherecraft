@@ -1494,7 +1494,13 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
     _createWaterGpuData(terrainGenerator, device, extra = {}) {
         // Lakes and rivers drawn in the terrain shading (core/world/water/waterWgsl.js).
         const cfg = this.waterService.config;
+        // The sea, drawn as the lakes are (WaterGpuData.sea): under the planet's
+        // ocean level (normalized height units, as the terrain generator's).
+        const planetWater = this.planetConfig.terrainGeneration?.water ?? {};
+        const heightScale = this.planetConfig.heightScale;
         this.waterGpuData = new WaterGpuData(device, {
+            sea: planetWater.hasOceans === false ? null : { levelM: (planetWater.oceanLevel ?? 0) * heightScale },
+            heightScale,
             gridN: cfg.gridN, planetRadius: this.planetConfig.radius,
             carve: terrainGenerator.waterCarve ? cfg.carve : null,
             ...(cfg.gpu.structuredCapacity?structuredWaterGpuCapacity(this.waterService):{}),
