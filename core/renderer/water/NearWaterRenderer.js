@@ -9,6 +9,9 @@
 //   the near range, in one instanced draw.
 // - Rivers, and lakes inside the river field's pages: one small grid per
 //   field page with water (fieldWaterSurface.wgsl.js), in one instanced draw.
+// - The sea (WaterGpuData.sea): one triangle over the screen, each pixel's ray
+//   meeting the sea's sphere (seaSurface.wgsl.js). It draws the sea close by as
+//   the lake sheets draw lakes, and at any distance where the sea is clearly deep.
 // Farther away the terrain shader draws the water. Near geometry uses the
 // existing water colour and surface terms; it fades to that terrain shading
 // over the handover range. Depth test on, no depth write, drawn after opaque
@@ -24,6 +27,7 @@ import { fillNearWaterUniforms } from './nearWaterUniforms.js';
 import { WHITE_UNIFORM_FLOATS } from './whitewaterLook.wgsl.js';
 import { buildWhitewaterFragmentShader, buildWhitewaterVertexShader, WHITE_GRID } from './whitewaterSurface.wgsl.js';
 import { buildRockFragmentShader, buildRockVertexShader, buildSprayFragmentShader, buildSprayVertexShader, ROCK_GRID } from './whitewaterProps.wgsl.js';
+import { buildSeaFragmentShader, buildSeaVertexShader } from './seaSurface.wgsl.js';
 import { aerialFadeRange } from '../terrain/shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import {
     NEAR_WATER_MAX_LAKES, NEAR_WATER_SAMPLER_BINDING, NEAR_WATER_TRANSMITTANCE_BINDING, NEAR_WATER_SCENE_DEPTH_BINDING, NEAR_WATER_UNIFORM_FLOATS,
@@ -85,6 +89,14 @@ export class NearWaterRenderer {
         }]);
         this._lakeGeometry = new Geometry();
         this._lakeGeometry.setIndex(gridIndices(GRID_N, GRID_N));
+        // The sea: the lakes' frame group (the close surface's pattern frame).
+        this._seaMaterial = this._material('NearSeaSurface', buildSeaVertexShader(), buildSeaFragmentShader(), [{
+            label: 'NearSeaSurface-Frame',
+            entries: [{ binding: 0, visibility: 'vertex|fragment', name: 'whiteU', buffer: { type: 'uniform' } }],
+        }]);
+        this._seaMaterial.depthCompare = 'always';
+        this._seaGeometry = new Geometry();
+        this._seaGeometry.setDrawRange(0, 3);
         this._fieldMaterial = this._material('NearFieldWater', buildFieldWaterVertexShader(), buildFieldWaterFragmentShader(), [{
             label: 'NearFieldWater-Pages',
             entries: [
@@ -164,27 +176,34 @@ export class NearWaterRenderer {
         // in 6 and 7 (who draws the water) these meshes add their colour; the
         // dry view draws no water at all.
         const tintOnly = (water?.debugMode > 0 && water.debugMode < 6) || water?.debugMode === WATER_DEBUG_DRY;
-        if (!near?.enabled || !water.enabled || !water._ready || tintOnly || !camera?.position) return;
+        if (!water?.enabled || !water._ready || tintOnly || !camera?.position) return;
+        // The sea is drawn without the near meshes too: its deep water is this pass's alone.
+        const sea = water.sea?.available && water.sea.enabled;
+        if (!near?.enabled && !sea) return;
         const o = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
         const cam = camera.position;
         const rel = { x: cam.x - o.x, y: cam.y - o.y, z: cam.z - o.z };
-        const range = near.fadeEndM;
+        const range = near?.fadeEndM ?? 0;
         const at = this._listedAt;
-        if (!at || water._appliedVersion !== this._listedVersion || Math.hypot(rel.x - at.x, rel.y - at.y, rel.z - at.z) > RELIST_M
+        this._ensure();
+        if (!near?.enabled) {
+            this._lakes = [];
+            this._fieldCount = 0;
+            this._listedAt = null;
+        } else if (!at || water._appliedVersion !== this._listedVersion || Math.hypot(rel.x - at.x, rel.y - at.y, rel.z - at.z) > RELIST_M
             || (water.riverField && water.riverField.version !== this._fieldVersion)) {
-            this._ensure();
             this._list(rel, range);
             this._listedAt = rel;
             this._listedVersion = water._appliedVersion;
         }
-        if (!this._lakes.length && !this._fieldCount) return;
+        if (!this._lakes.length && !this._fieldCount && !sea) return;
 
         fillNearWaterUniforms(this._uniforms, {viewMatrix,projectionMatrix,planetConfig:this.planetConfig,
             uniformManager:this.uniformManager,camera,water,lakes:this._lakes,apFade:this.apFade});
         const g=this.uniformManager?.uniforms??{};
 
         const res = water.resources, white = water.whitewater;
-        for (const m of [this._lakeMaterial, this._fieldMaterial, this._whiteMaterial]) {
+        for (const m of [this._seaMaterial, this._lakeMaterial, this._fieldMaterial, this._whiteMaterial]) {
             m.storageBuffers = { waterIndex: res.index, waterLakes: res.lakes, waterRivers: res.rivers };
             if (water.riverField?.resources) {
                 m.storageBuffers.riverFieldTable = water.riverField.resources.pages;
@@ -209,6 +228,10 @@ export class NearWaterRenderer {
         }
         this.backend.endRenderPassForCompute();
         this.backend.resumeRenderPass({ depthReadOnly: true });
+        if (sea) {
+            this._seaMaterial.uniforms.whiteU = { value: white?.uniforms ?? this._whiteUniforms };
+            this.backend.draw(this._seaGeometry, this._seaMaterial);
+        }
         if (this._lakes.length) {
             this._lakeMaterial.uniforms.whiteU = { value: white?.uniforms ?? this._whiteUniforms };
             this._lakeGeometry.instanceCount = this._lakes.length;
@@ -241,11 +264,12 @@ export class NearWaterRenderer {
 
     dispose() {
         for (const x of [this._lakeGeometry, this._lakeMaterial, this._fieldGeometry, this._fieldMaterial, this._whiteGeometry, this._whiteMaterial,
-            this._rockGeometry, this._rockMaterial, this._sprayGeometry, this._sprayMaterial]) x?.dispose?.();
+            this._rockGeometry, this._rockMaterial, this._sprayGeometry, this._sprayMaterial, this._seaGeometry, this._seaMaterial]) x?.dispose?.();
         this._fieldPages?.destroy(); this._fieldPages = null;
         this._whiteCoverNone?.destroy(); this._whiteCoverNone = null;
         this._lakeGeometry = this._lakeMaterial = this._fieldGeometry = this._fieldMaterial = this._whiteGeometry = this._whiteMaterial = null;
         this._rockGeometry = this._rockMaterial = this._sprayGeometry = this._sprayMaterial = null;
+        this._seaGeometry = this._seaMaterial = null;
     }
 }
 

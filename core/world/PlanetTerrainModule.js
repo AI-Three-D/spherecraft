@@ -4,6 +4,36 @@ import { QuadtreeTerrainRenderer } from '../renderer/terrain/QuadtreeTerrainRend
 import { NearWaterRenderer } from '../renderer/water/NearWaterRenderer.js';
 
 /**
+ * The sea's switches. The sea is drawn as the lakes are, from the water data
+ * (WaterGpuData.sea): the terrain shading far away, NearWaterRenderer's sea pass
+ * close by and where it is deep. enabled: the 'o' key. legacy: the old global
+ * ocean renderer instead (globalOceanRenderer.js), kept only to compare with.
+ */
+export class SeaControl {
+    constructor(module) {
+        this.module = module;
+        this._enabled = true;
+        this._legacy = false;
+        /** The old renderer, created when legacy is first asked for. */
+        this.legacyRenderer = null;
+    }
+    get enabled() { return this._enabled; }
+    set enabled(on) { this._enabled = !!on; this.module._applySea(); }
+    get legacy() { return this._legacy; }
+    set legacy(on) {
+        this._legacy = !!on;
+        if (this._legacy && !this.legacyRenderer) {
+            this._legacyPending ??= this.module.initializeLegacyOcean().catch(err => console.warn('[Ocean] legacy renderer:', err));
+        }
+        this.module._applySea();
+    }
+    /** Whether the planet has a sea. */
+    get available() { return this.module.options.planetConfig.terrainGeneration?.water?.hasOceans !== false; }
+    isReady() { return this.available; }
+    dispose() { this.legacyRenderer?.dispose(); this.legacyRenderer = null; }
+}
+
+/**
  * Production composition of a planetary terrain world and its water layers.
  * This is the only assembly point that knows both the world implementation and
  * the terrain/water draw implementations. Assets, actors and sky belong to the app.
@@ -25,7 +55,8 @@ export class PlanetTerrainModule extends TerrainModule {
         renderer.setAtmosphereLUT(options.atmosphereLUT ?? null);
         super({ source, renderer, ownsSource: true, initializeSource: true });
         this.options = options;
-        this.ocean = null;
+        // The sea (SeaControl; its water is drawn by the water data's layers).
+        this.ocean = new SeaControl(this);
         this.lakes = null;
         this.nearWater = null;
         this.environmentState = null;
@@ -35,13 +66,15 @@ export class PlanetTerrainModule extends TerrainModule {
         );
         this.waterLayers = [
             {
-                initialize: () => this.initializeOcean(),
+                setWaterData: () => this._applySea(),
+                // Only the old renderer draws here; the sea itself is the near water's pass.
                 render: frame => {
-                    if (!this.ocean?.isReady()) return;
-                    this.ocean.render(frame.camera, frame.camera.matrixWorldInverse, frame.camera.projectionMatrix,
+                    const sea = this.ocean, old = sea?.legacyRenderer;
+                    if (!sea?.legacy || !sea.enabled || !old?.isReady()) return;
+                    old.render(frame.camera, frame.camera.matrixWorldInverse, frame.camera.projectionMatrix,
                         source.getInstanceBuffer(), source.getIndirectArgsBuffer(), frame.deltaTime);
                 },
-                dispose: () => { this.ocean?.dispose(); this.ocean = null; },
+                dispose: () => { this.ocean?.dispose(); },
             },
             {
                 initialize: () => this.initializeLakes(),
@@ -60,14 +93,21 @@ export class PlanetTerrainModule extends TerrainModule {
         ];
     }
 
-    async initializeOcean() {
+    /** The sea in the water data follows the switches (SeaControl). */
+    _applySea() {
+        const sea = this.waterData?.sea, ctl = this.ocean;
+        if (sea && ctl) sea.enabled = sea.available && ctl.enabled && !ctl.legacy;
+    }
+
+    /** The old global ocean renderer, for comparison only (SeaControl.legacy). */
+    async initializeLegacyOcean() {
         const { backend, planetConfig, uniformManager } = this.options;
         const water = planetConfig.terrainGeneration?.water ?? {};
-        if (water.hasOceans === false) return;
+        if (water.hasOceans === false || this.ocean.legacyRenderer) return;
         const { GlobalOceanRenderer } = await import('../renderer/water/globalOceanRenderer.js');
         const depth = Number.isFinite(water.averageOceanDepth) ? water.averageOceanDepth : 2000;
         const heightScale = planetConfig.heightScale ?? 2000;
-        this.ocean = new GlobalOceanRenderer({
+        const old = new GlobalOceanRenderer({
             backend, planetConfig, uniformManager,
             quadtreeGPU: this.source.quadtreeGPU,
             terrainGeometries: this.renderer.geometries,
@@ -83,7 +123,9 @@ export class PlanetTerrainModule extends TerrainModule {
                 colorShallow: 0x154550, colorDeep: 0x001525, maxWaveLOD: 5, maxFoamLOD: 4,
             },
         });
-        await this.ocean.initialize();
+        await old.initialize();
+        this.ocean.legacyRenderer = old;
+        if (this.environmentState) this.setEnvironmentState(this.environmentState);
     }
 
     async initializeLakes() {
@@ -100,8 +142,9 @@ export class PlanetTerrainModule extends TerrainModule {
 
     setEnvironmentState(state) {
         this.environmentState = state;
-        if (!state?.water || !this.ocean) return;
-        this.ocean.setWaterConfig({
+        const old = this.ocean?.legacyRenderer;
+        if (!state?.water || !old) return;
+        old.setWaterConfig({
             windDirection: [state.windDirection.x, state.windDirection.y],
             windSpeed: state.windSpeed,
             waveHeight: state.water.waveHeight,
