@@ -11,7 +11,7 @@
 // terrain's depth draws the shoreline wherever the surface meets the ground.
 
 import { commonWgsl, shadeWgsl } from './nearWaterSurface.wgsl.js';
-import { WHITE_UNIFORMS_WGSL, whitewaterLookWgsl } from './whitewaterLook.wgsl.js';
+import { WHITE_FLAG_WALLS, WHITE_UNIFORMS_WGSL, whitewaterLookWgsl } from './whitewaterLook.wgsl.js';
 import { WHITE_BAKED_WORD_WGSL, WHITE_BLOCK } from '../../world/water/whitewaterSim.wgsl.js';
 
 export const WHITE_GRID = WHITE_BLOCK + 1;
@@ -43,6 +43,21 @@ ${WHITE_BAKED_WORD_WGSL}
 
 fn whiteBakedFoam(foam: f32, xy: vec2<f32>) -> f32 {
     return foam * W.foamGain * (0.45 + 1.1 * waterNoise(xy * 0.085 + 3.1));
+}
+// Chop where the water is turbulent: (height, d/dx, d/dy) at unit amplitude. Three octaves
+// of value noise in frames at unrelated angles, drifting at 1.6-2.4 m/s as the waves before
+// them. Three fixed sines tiled into a lattice that repeated every few metres (owner
+// 2026-11-10). Matched to the sines' spread: height RMS 1.08 (sines 1.09), slope RMS 3.1 (3.3).
+fn whiteChopOctave(xy: vec2<f32>, t: f32, f: f32, ang: f32, drift: vec2<f32>, w: f32) -> vec3<f32> {
+    let c = cos(ang); let s = sin(ang);
+    let q = vec2<f32>(c * xy.x - s * xy.y, s * xy.x + c * xy.y) * f + drift * f * t;
+    let g = waterNoiseGrad(q);
+    return w * vec3<f32>(waterNoise(q) - 0.5, f * (g.x * c + g.y * s), f * (g.y * c - g.x * s));
+}
+fn whiteChop(xy: vec2<f32>, t: f32) -> vec3<f32> {
+    return 3.9 * (whiteChopOctave(xy, t, 0.66, 0.37, vec2<f32>(2.2, 0.9), 1.0)
+        + whiteChopOctave(xy, t + 37.0, 1.17, 1.91, vec2<f32>(-0.7, 1.7), 0.7)
+        + whiteChopOctave(xy, t + 71.0, 2.27, 4.13, vec2<f32>(1.1, -1.2), 0.45));
 }
 fn wrapC(a: i32) -> i32 { let n = i32(W.N); return select(select(a, a - n, a >= n), a + n, a < 0); }
 fn ci(i: i32, j: i32) -> u32 { return u32(wrapC(j)) * W.N + u32(wrapC(i)); }
@@ -100,12 +115,10 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Whi
     // Chop on the surface where the water is turbulent (Whitewater's vsWater).
     let camD = distance(xy, W.cameraXY);
     let amp = W.waveAmp * k * smoothstep(0.08, 0.45, k) * smoothstep(0.0, 0.35, h) * draw * (1.0 - smoothstep(0.6 * W.nearFadeM.x, W.nearFadeM.x, camD));
-    let a1 = dot(xy, vec2<f32>(2.3, 0.9)) - W.time * 6.0;
-    let a2 = dot(xy, vec2<f32>(-1.1, 2.4)) - W.time * 4.7;
-    let a3 = dot(xy, vec2<f32>(3.9, 3.3)) - W.time * 8.1;
-    let chop = amp * (sin(a1) + sin(a2) + 0.6 * sin(a3));
-    let gx = (eR - eL) / (2.0 * dx) + amp * (2.3 * cos(a1) - 1.1 * cos(a2) + 2.34 * cos(a3));
-    let gy = (eU - eD) / (2.0 * dx) + amp * (0.9 * cos(a1) + 2.4 * cos(a2) + 1.98 * cos(a3));
+    let cw = whiteChop(xy, W.time);
+    let chop = amp * cw.x;
+    let gx = (eR - eL) / (2.0 * dx) + amp * cw.y;
+    let gy = (eU - eD) / (2.0 * dx) + amp * cw.z;
 
     let dir = whiteFrameDir(xy);
     let height = mix(baked.x, eta + chop, draw);
@@ -121,7 +134,13 @@ fn main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Whi
     // reach that fell fast the far tier was white and this one calm, four times less foam on the same
     // spot, with block edges between them (owner 2026-11-05, green star). So the far tier's is a floor.
     o.flow = vec4<f32>(mix(baked.yz, vec2<f32>(uc, vc), draw), mix(foamBaked, max(s.w, foamBaked * W.simFoamFloor), draw), mix(foam0 * 0.6, max(k, foam0 * 0.6), draw));
-    o.wet = vec3<f32>(h, mix(st.w, select(-16.0, 16.0, wet), draw), draw);
+    // Use the continuous shoreline distance for both tiers. Turning each
+    // simulated cell into +/-16 here makes its wet/dry grid visible as a
+    // staircase; dry cells still fade by depth and stay beneath the terrain.
+    // The free solver may flood beyond the baked shoreline; keep its own
+    // wet/dry boundary in that mode.
+    let shore = select(mix(st.w, select(-16.0, 16.0, wet), draw), st.w, (W.flags & ${WHITE_FLAG_WALLS}u) != 0u);
+    o.wet = vec3<f32>(h, shore, draw);
     o.shear = length(dU) * draw;
     return o;
 }

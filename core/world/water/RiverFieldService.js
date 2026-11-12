@@ -30,6 +30,16 @@ export const RIVER_FIELD_SERVICE_DEFAULTS = Object.freeze({
     lakeSliceMsLoading: 8,
 });
 
+// An optional visual comparison, not the normal river generation settings.
+// The broader corridor is deliberately paid for only while this preview is on.
+export const RIVER_BANK_PREVIEWS = Object.freeze({
+    existing: null,
+    wide: Object.freeze({ reachM: 320, meanM: 260, variationM: 45, waveM: 350,
+        taperStart: 0.45, valleySlope: 0.03,
+        riseVariationM: 2.5, riseWaveM: 240, riseStartM: 12, riseFullM: 85,
+        nearBlurM: 5, blurM: 10, blurFadeM: [20, 60] }),
+});
+
 export class RiverFieldService {
     constructor({ water, service, terrainGenerator, config = {}, onChanged }) {
         this.water = water; this.service = service; this.generator = terrainGenerator;
@@ -39,6 +49,7 @@ export class RiverFieldService {
         this.layout = riverFieldLayout(water.R);
         this.busy = false; this.isIdle = false; this.disposed = false;
         this.revision = -1; this.bakedAt = null; this.rivers = new Map();
+        this.bankPreview = 'existing'; this._bakedBankPreview = 'existing';
         this.pages = new Map();
         this.naturalCache = new NaturalTerrainPageCache(this.config.naturalCacheBytes);
         this.stats = null; this.retired = [];
@@ -89,8 +100,18 @@ export class RiverFieldService {
         });
     }
 
-    _prepare(rivers) {
-        return this._worker ? this._call({ prepare: true, rivers, L: this.layout }, []) : prepareRiverFieldBake({ rivers, L: this.layout });
+    _prepare(rivers, o) {
+        return this._worker ? this._call({ prepare: true, rivers, L: this.layout, o }, []) : prepareRiverFieldBake({ rivers, L: this.layout, o });
+    }
+
+    setBankPreview(mode) {
+        if (!Object.hasOwn(RIVER_BANK_PREVIEWS, mode)) throw new Error(`Unknown river bank preview: ${mode}`);
+        if (mode !== this.bankPreview) {
+            this.bankPreview = mode;
+            this._pending = true;
+            this.isIdle = false;
+        }
+        return mode;
     }
 
     async _finish(msg) {
@@ -172,7 +193,7 @@ export class RiverFieldService {
         this.revision = w._appliedVersion;
         const near = this._nearRivers(dir);
         const same = near.length === this.rivers.size && near.every(([rid, rec]) => this.rivers.get(rid) === rec);
-        if (same) { this.bakedAt = dir; this._pending = false; this.isIdle = true; return; }
+        if (same && this._bakedBankPreview === this.bankPreview) { this.bakedAt = dir; this._pending = false; this.isIdle = true; return; }
         this._pending = true; this.isIdle = false;
         // Bake once the water service has traced what it is tracing (one bake
         // for a batch of rivers), and the main thread's part at most a fifth
@@ -181,17 +202,20 @@ export class RiverFieldService {
         const gap = Math.max(this.config.minIntervalMs, 4 * (this.stats?.ms.main ?? this.stats?.ms.total ?? 0));
         if (this._bakedTime && performance.now() - this._bakedTime < gap) return;
         this._pending = false;
-        void this._bake(this._riverInputs(near), dir);
+        void this._bake(this._riverInputs(near), dir, this.bankPreview);
     }
 
-    async _bake(rivers, dir) {
+    async _bake(rivers, dir, bankPreview = this.bankPreview) {
         this.busy = true;
+        this.lastError = null;
         try {
             const sampler = this.service._sampler, L = this.layout, t0 = performance.now();
+            const preview = RIVER_BANK_PREVIEWS[bankPreview];
+            const o = preview ? { ...RIVER_FIELD, reachM: preview.reachM, bankPreview: preview } : RIVER_FIELD;
             const plain = rivers.map(r => ({ rec: { points: r.rec.points, stride: r.rec.stride, mouths: r.rec.mouths ?? [] },
                 arc: r.arc, rid: r.rid, levels: r.levels, srcLevel: r.srcLevel, destLevel: r.destLevel }));
             this.stage = 'prepare';
-            const prep = await this._prepare(plain);
+            const prep = await this._prepare(plain, o);
             this.stage = `sample ${prep.keys.length} pages`;
             const t1 = performance.now();
             // At most 2^21 directions per dispatch (one 64-wide workgroup each:
@@ -218,13 +242,14 @@ export class RiverFieldService {
             busy += lastSlice; longest = Math.max(longest, lastSlice);
             this.stage = 'worker';
             const t3 = performance.now();
-            const result = await this._finish({ rivers: plain, L, keys: prep.keys, pageRivers: prep.pageRivers, dirs4: prep.dirs4, nat, lakeCand });
+            const result = await this._finish({ rivers: plain, L, keys: prep.keys, pageRivers: prep.pageRivers, dirs4: prep.dirs4, nat, lakeCand, o });
             if (this.disposed) return;
             this.stage = 'publish';
             const t4 = performance.now();
             const hashes = this._hashes;
             this._publish(result.pages, result.facts, result.flow, result.rocks);
             this.rivers = new Map(rivers.map(r => [r.rid, r.trace]));
+            this._bakedBankPreview = bankPreview;
             // Pages that changed: new, gone or different.
             const changed = [];
             for (const [key, hash] of this._hashes) if (hashes.get(key) !== hash) changed.push(key);

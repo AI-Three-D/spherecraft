@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bakeRiverField, extendRiverEnds, riverWidthFactor, fieldCoords, fieldDir, pageKey, pageOf, riverFieldLayout, riverFieldPageDirections, riverFieldTexelSdf, sampleRiverField, RIVER_FIELD } from './riverField.js';
+import { bakeRiverField, extendRiverEnds, riverWidthFactor, fieldCoords, fieldDir, pageKey, pageOf, riverFieldLayout, riverFieldPageDirections, riverFieldTexelSdf, sampleRiverField, toHalf, RIVER_FIELD } from './riverField.js';
 import { buildRiverFieldTable, riverFieldHash } from './riverField.wgsl.js';
 
 const R = 131000;
@@ -8,6 +8,13 @@ const norm = (v) => { const l = Math.hypot(...v); return v.map(x => x / l); };
 const C = [-1, 0, 0], E1 = [0, 0, 1], E2 = [0, 1, 0];
 const at = (x, y) => norm([C[0] + (x * E1[0] + y * E2[0]) / R, C[1] + (x * E1[1] + y * E2[1]) / R, C[2] + (x * E1[2] + y * E2[2]) / R]);
 const planeXY = (d) => { const k = -d[0]; return [d[2] / k * R, d[1] / k * R]; };
+
+it('carries half-float rounding into the exponent for large terrain fills', () => {
+    for (const value of [2, 4, 8, 16, 32, 64, 128]) {
+        expect(toHalf(value - value / 8192)).toBe(toHalf(value));
+        expect(toHalf(-value + value / 8192)).toBe(toHalf(-value));
+    }
+});
 
 it('maps texel coordinates and directions both ways', () => {
     const L = riverFieldLayout(R);
@@ -232,6 +239,52 @@ it('does not flood low ground beyond a river\'s reach', async () => {
     };
     expect(valueAt(150, 0, r.wet)).toBe(1);
     expect(valueAt(0, 80, r.wet)).toBe(0);
+    // Joined to the water by low ground, the hollow is left as it was (the terrain draws the water over
+    // it): neither cut off as behind a crest nor its level moved (owner 2026-11-11: a floating platform).
+    expect(valueAt(0, 80, r.leftDry)).toBe(0);
+    expect(valueAt(0, 80, r.level)).toBeCloseTo(100, 3);
+});
+
+it('cuts the water\'s strip off behind a bank\'s crest, and nowhere else', async () => {
+    const L = riverFieldLayout(R);
+    // A river along x at 100 m; a crest 0.3 m over the water 14-18 m from its centre, a hollow
+    // 1.5 m under the water behind it (owner 2026-11-10: a see-through sheet over such a hollow).
+    const ground = (x, y) => { const a = Math.abs(y); return a < 14 ? 100.5 : a < 18 ? 100.3 : 98.5; };
+    const n = 31, st = 20, points = new Float32Array(n * st);
+    for (let k = 0; k < n; k++) {
+        const x = -300 + 20 * k, d = at(x, 0);
+        points.set([d[0], d[1], d[2], 100, 6, 1.5, 1, 1, 100, 0, 0, 0, 0, 100, -1e4, -1e4, 100, 1.5, -1e20, 0], k * st);
+    }
+    const arc = Float64Array.from({ length: n }, (_, k) => 20 * k);
+    const levels = Float64Array.from({ length: n }, (_, k) => points[k * st + 16]);
+    const sampleNatural = async (dirs4) => {
+        const out = new Float32Array(dirs4.length / 4);
+        for (let i = 0; i < out.length; i++) { const [x, y] = planeXY([dirs4[i * 4], dirs4[i * 4 + 1], dirs4[i * 4 + 2]]); out[i] = ground(x, y); }
+        return out;
+    };
+    const r = await bakeRiverField({ rivers: [{ rec: { points, stride: st, mouths: [] }, arc, rid: 12, levels }], L, sampleNatural, lakeAt: () => null, debug: true,
+        o: { ...RIVER_FIELD, meanderAmp: 0 } });
+    const valueAt = (x, y, arr) => {
+        const q = fieldCoords(at(x, y), L), key = pageKey(q.face, Math.floor(q.x / L.P), Math.floor(q.y / L.P), L);
+        const p = r.keys.indexOf(key);
+        return arr[p * L.P * L.P + (Math.floor(q.y) % L.P) * L.P + (Math.floor(q.x) % L.P)];
+    };
+    expect(valueAt(0, 0, r.wet)).toBe(1);
+    expect(valueAt(0, 0, r.level)).toBeCloseTo(100, 3);
+    // The hollow behind the crest reads far outside (no strip drawn over it, a wall to the near
+    // simulation), its level kept; the crest and the shore before it as they were.
+    for (const y of [-26, 26]) {
+        expect(valueAt(0, y, r.wet)).toBe(0);
+        expect(valueAt(0, y, r.leftDry)).toBe(1);
+        expect(valueAt(0, y, r.sdf)).toBe(-RIVER_FIELD.sdfM);
+        expect(valueAt(0, y, r.level)).toBeCloseTo(100, 3);
+    }
+    expect(valueAt(0, 16, r.leftDry)).toBe(0);
+    expect(valueAt(0, 16, r.level)).toBeCloseTo(100, 3);
+    // Only behind a crest: every flagged texel is cut off from the water by ground over its level.
+    let flagged = 0;
+    for (let g = 0; g < r.leftDry.length; g++) if (r.leftDry[g]) { flagged++; expect(r.wet[g]).toBe(0); expect(r.ground[g]).toBeLessThan(r.level[g]); }
+    expect(flagged).toBeGreaterThan(0);
 });
 
 it('keeps a steep stream wet down to its lake: the bed follows the eased level', async () => {
