@@ -16,6 +16,7 @@
 export const WHITE_UNIFORM_FLOATS = 32;
 export const WHITE_FLAG_LOOK = 1;
 export const WHITE_FLAG_NEAR = 2;
+export const WHITE_FLAG_WALLS = 4;
 
 export const WHITE_UNIFORMS_WGSL = /* wgsl */`
 // Frame of the near simulation (a tangent plane; also the coordinates the

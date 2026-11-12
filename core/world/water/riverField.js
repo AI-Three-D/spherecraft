@@ -658,7 +658,7 @@ function riverGround(S, index, cellM, px, py, nat, o) {
     const hw = lerp(n >= 0 ? S.hwL : S.hwR) * (1 + o.fadeWiden * fade), W = lerp(S.W), D = lerp(S.D) * (1 - fade);
     const d = Math.abs(n), edge = d - hw;
     const B = n >= 0 ? lerp(S.BL) : lerp(S.BR);
-    if (edge >= B) return { h: nat, W, edge, st: i + tc };
+    if (edge >= B) return { h: nat, W, edge, st: i + tc, side, fade };
     // Channel: the thalweg toward the outer bank (skew), the bed at W - D.
     const sk = clamp(lerp(S.skew), -0.35, 0.35), u = n / hw;
     const de = u < sk ? (u - sk) / (1 + sk) : (u - sk) / (1 - sk);
@@ -677,7 +677,7 @@ function riverGround(S, index, cellM, px, py, nat, o) {
         target = Math.max((W + e * edge) * (1 - r) + nat * r, nat + (W + e * edge - foot) * (1 - r));
     }
     const cut = smin(nat, target, o.sminK), hold = lerp(S.hold);
-    return { h: hold > 0 ? cut + (nat - cut) * hold * smoothstep(0, o.mouthHoldRiseM, nat - S.holdLevel[i + (S.hold[i] > 0 ? 0 : 1)]) : cut, W, edge, st: i + tc };
+    return { h: hold > 0 ? cut + (nat - cut) * hold * smoothstep(0, o.mouthHoldRiseM, nat - S.holdLevel[i + (S.hold[i] > 0 ? 0 : 1)]) : cut, W, edge, st: i + tc, target, side, fade };
 }
 
 // Gaussian blur weights (sigma in texels), radius ceil(2.5 sigma).
@@ -873,10 +873,25 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
         widest.push(S.widened);
         S.rid = river.rid ?? 0;
         riverFlowDesign(S, S.rid);
+        // Bank noise varies over hundreds of metres, while stations are about
+        // two metres apart. Evaluate it once per station and interpolate at
+        // texels instead of hashing twice for every point in the wide corridor.
+        if (o.bankPreview) {
+            const b = o.bankPreview;
+            S.previewReachL = new Float32Array(S.m); S.previewReachR = new Float32Array(S.m);
+            S.previewRiseL = new Float32Array(S.m); S.previewRiseR = new Float32Array(S.m);
+            for (let i = 0; i < S.m; i++) {
+                for (const [reach, rise, side] of [[S.previewReachL, S.previewRiseL, 1], [S.previewReachR, S.previewRiseR, -1]]) {
+                    reach[i] = b.meanM + b.variationM * bankNoise(S.s[i] / b.waveM, S.rid * 2 + (side > 0 ? 791 : 792));
+                    rise[i] = b.riseVariationM * smoothstep(-0.35, 0.75,
+                        bankNoise(S.s[i] / b.riseWaveM, S.rid * 2 + (side > 0 ? 1247 : 1248)));
+                }
+            }
+        }
         const cellM = 32;
         let maxHw = 0;
         for (let i = 0; i < S.m; i++) maxHw = Math.max(maxHw, S.hw[i]);
-        const index = stationIndex(S, cellM, (i) => S.hw[i] * (1 + o.shoreAmp) * (1 + o.fadeWiden) + Math.max(S.BL[i], S.BR[i], S.BL[i + 1], S.BR[i + 1]) + 4);
+        const index = stationIndex(S, cellM, (i) => S.hw[i] * (1 + o.shoreAmp) * (1 + o.fadeWiden) + Math.max(o.bankPreview?.reachM ?? 0, S.BL[i], S.BR[i], S.BL[i + 1], S.BR[i + 1]) + 4);
         let refs = 0, x0 = Infinity, x1 = -Infinity;
         for (const l of index.cells.values()) refs += l.length;
         for (let i = 0; i < S.m; i++) { x0 = Math.min(x0, S.x[i], S.y[i]); x1 = Math.max(x1, S.x[i], S.y[i]); }
@@ -931,7 +946,7 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
         }
         for (let t = 0; t < PP; t++) {
             const g = p * PP + t, w = g * 4, dx = dirs4[w], dy = dirs4[w + 1], dz = dirs4[w + 2];
-            let h = nat[g];
+            let h = nat[g], lift = 0, wetLift = 0, channelCount = 0;
             for (const ri of list) {
                 const { plane, S, index, cellM } = prepared[ri];
                 const { c, e1, e2 } = plane.frame, kk = R / (dx * c[0] + dy * c[1] + dz * c[2]);
@@ -940,8 +955,32 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
                 if (!r) continue;
                 if (r.edge < edgeOf[g]) { edgeOf[g] = r.edge; W[g] = r.W; owner[g] = ri; ownerSt[g] = r.st; }
                 h = Math.min(h, r.h);
+                if (r.edge < 0) channelCount++;
+                const preview = o.bankPreview;
+                if (!preview || nat[g] < lakeCand[g]) continue;
+                // The preview can support a river above the surrounding terrain. Leave lake beds
+                // and overlapping channels alone; a lake or confluence owns those cross-sections.
+                if (r.edge < 0 && Number.isFinite(r.target)) {
+                    wetLift = Math.max(wetLift, Math.max(0, r.target - nat[g]) * (1 - r.fade));
+                } else if (r.edge > 0 && r.edge < preview.reachM) {
+                    const si = Math.min(S.m - 2, Math.floor(r.st));
+                    const f = r.st - si;
+                    const reaches = r.side > 0 ? S.previewReachL : S.previewReachR;
+                    const rises = r.side > 0 ? S.previewRiseL : S.previewRiseR;
+                    const reach = reaches[si] + (reaches[si + 1] - reaches[si]) * f;
+                    const taper = 1 - smoothstep(preview.taperStart * reach, reach, r.edge);
+                    // Meet the supported channel at water level and rise gently away
+                    // from it. A crest at the edge creates a conspicuous levee.
+                    // Long, independent waves on each side create occasional
+                    // higher ground, fading in away from the waterline so the
+                    // shore remains continuous with the supported channel.
+                    const rise = (rises[si] + (rises[si + 1] - rises[si]) * f)
+                        * smoothstep(preview.riseStartM, preview.riseFullM, r.edge);
+                    const target = r.W + preview.valleySlope * r.edge + rise;
+                    lift = Math.max(lift, Math.max(0, target - r.h) * taper * (1 - r.fade));
+                }
             }
-            ground[g] = h;
+            ground[g] = channelCount ? (channelCount === 1 && wetLift > 0 ? nat[g] + wetLift : h) : h + lift;
         }
     }
     // Texels beyond every river's reach take the nearest owned texel's W
@@ -965,37 +1004,50 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     // Blur Δ (separable, within the page set; missing neighbours count as no change).
     const delta = new Float32Array(N * PP);
     for (let g = 0; g < N * PP; g++) delta[g] = ground[g] - nat[g];
-    const G = gaussian(o.blurM / o.texelM), tmp = new Float32Array(N * PP);
+    const tmp = new Float32Array(N * PP);
     let emptyBlurPages = 0;
-    for (const [dx, dy, src, dst] of [[1, 0, delta, tmp], [0, 1, tmp, delta]]) {
-        const nonzero = new Uint8Array(N);
-        for (let p = 0; p < N; p++) {
-            for (let g = p * PP; g < (p + 1) * PP; g++) {
-                if (src[g] !== 0) { nonzero[p] = 1; break; }
+    const blur = (G) => {
+        for (const [dx, dy, src, dst] of [[1, 0, delta, tmp], [0, 1, tmp, delta]]) {
+            const nonzero = new Uint8Array(N);
+            for (let p = 0; p < N; p++) {
+                for (let g = p * PP; g < (p + 1) * PP; g++) {
+                    if (src[g] !== 0) { nonzero[p] = 1; break; }
+                }
+            }
+            for (let p = 0; p < N; p++) {
+                const { face, pi, pj } = pageInfo[p], reach = Math.ceil(G.r / P);
+                let occupied = false;
+                for (let k = -reach; k <= reach; k++) {
+                    const x = pi + dx * k, y = pj + dy * k;
+                    if (x < 0 || y < 0 || x >= L.PE || y >= L.PE) continue;
+                    const neighbour = slot.get(pageKey(face, x, y, L));
+                    if (neighbour !== undefined && nonzero[neighbour]) { occupied = true; break; }
+                }
+                if (!occupied) {
+                    // The second pass writes back into delta, which may already
+                    // contain values. An empty horizontal neighbourhood guarantees
+                    // the first pass wrote zero there, but clear it explicitly.
+                    dst.fill(0, p * PP, (p + 1) * PP);
+                    emptyBlurPages++;
+                    continue;
+                }
+                for (let j = 0; j < P; j++) for (let i = 0; i < P; i++) {
+                    let v = 0;
+                    for (let k = -G.r; k <= G.r; k++) { const q = texel(p, i + dx * k, j + dy * k); if (q >= 0) v += G.w[k + G.r] * src[q]; }
+                    dst[p * PP + j * P + i] = v;
+                }
             }
         }
-        for (let p = 0; p < N; p++) {
-            const { face, pi, pj } = pageInfo[p], reach = Math.ceil(G.r / P);
-            let occupied = false;
-            for (let k = -reach; k <= reach; k++) {
-                const x = pi + dx * k, y = pj + dy * k;
-                if (x < 0 || y < 0 || x >= L.PE || y >= L.PE) continue;
-                const neighbour = slot.get(pageKey(face, x, y, L));
-                if (neighbour !== undefined && nonzero[neighbour]) { occupied = true; break; }
-            }
-            if (!occupied) {
-                // The second pass writes back into delta, which may already
-                // contain values. An empty horizontal neighbourhood guarantees
-                // the first pass wrote zero there, but clear it explicitly.
-                dst.fill(0, p * PP, (p + 1) * PP);
-                emptyBlurPages++;
-                continue;
-            }
-            for (let j = 0; j < P; j++) for (let i = 0; i < P; i++) {
-                let v = 0;
-                for (let k = -G.r; k <= G.r; k++) { const q = texel(p, i + dx * k, j + dy * k); if (q >= 0) v += G.w[k + G.r] * src[q]; }
-                dst[p * PP + j * P + i] = v;
-            }
+    };
+    const preview = o.bankPreview;
+    blur(gaussian((preview?.blurM ?? o.blurM) / o.texelM));
+    if (preview?.nearBlurM != null && preview.nearBlurM < preview.blurM) {
+        const broad = delta.slice();
+        for (let g = 0; g < N * PP; g++) delta[g] = ground[g] - nat[g];
+        blur(gaussian(preview.nearBlurM / o.texelM));
+        for (let g = 0; g < N * PP; g++) {
+            const w = smoothstep(preview.blurFadeM[0], preview.blurFadeM[1], edgeOf[g]);
+            delta[g] += (broad[g] - delta[g]) * w;
         }
     }
     // Deep in the channel the ground stays exact, smooth by construction: over
@@ -1007,6 +1059,9 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
     for (let g = 0; g < N * PP; g++) {
         const w = smoothstep(-o.blurFromM, 0, edgeOf[g]);
         delta[g] = (ground[g] - nat[g]) * (1 - w) + delta[g] * w;
+        // Do not smear a raised preview bank into a lake's submerged ground.
+        // Preserve the unblurred lake/channel result for those texels.
+        if (o.bankPreview && nat[g] < lakeCand[g]) delta[g] = ground[g] - nat[g];
         ground[g] = nat[g] + delta[g];
     }
     const t5 = performance.now();
@@ -1065,6 +1120,30 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
             }
         }
     }
+    // Dry ground under the water's level that a crest cuts off from the water (owner 2026-11-10: a
+    // crest 5 cm over a lake's level, a hollow 1.8 m deep behind it): the meshes draw the water KEEP_M
+    // past its edge, for the terrain's depth to cut the shoreline, and over such a hollow that strip
+    // stood in the air beyond the crest, a see-through sheet. It reads far outside (signed distance,
+    // below): no strip there, and a wall to the near simulation. Its level stays. Low ground straight
+    // beside the water is left as it was: the terrain draws the water over it at the level, and with
+    // its level lowered instead the river's water stood over it as a floating platform (owner
+    // 2026-11-11), with ground lifted under it as an embankment (owner: "horrible").
+    const leftDry = new Uint8Array(N * PP);
+    {
+        const open = new Uint8Array(N * PP);
+        let h = 0, t = 0;
+        for (let g = 0; g < N * PP; g++) if (wet[g]) { open[g] = 1; queue[t++] = g; }
+        while (h < t) {
+            const g = queue[h++], p = Math.floor(g / PP), r = g - p * PP, i = r % P, j = (r - i) / P;
+            for (let side = 0; side < 4; side++) {
+                const di = (side === 0) - (side === 1), dj = (side === 2) - (side === 3);
+                const q = texel(p, i + di, j + dj);
+                if (q < 0 || open[q] || !(ground[q] < level[q])) continue;
+                open[q] = 1; queue[t++] = q;
+            }
+        }
+        for (let g = 0; g < N * PP; g++) if (!wet[g] && !open[g] && ground[g] < level[g]) leftDry[g] = 1;
+    }
     const t6 = performance.now();
     onProgress?.('sdf', { ms: t6 - t5 });
     // Signed distance to the wet region's edge (m, + inside), per page with a halo.
@@ -1115,6 +1194,7 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
             sdf[p * PP + j * P + i] = clamp(v * o.texelM, -o.sdfM, o.sdfM);
         }
     }
+    for (let g = 0; g < N * PP; g++) if (leftDry[g]) sdf[g] = -o.sdfM;
     const t7 = performance.now();
     onProgress?.('flow', { ms: t7 - t6 });
     const { flowA, flowB, foam, manning, rocks } = riverFieldFlow({ prepared, L, N, PP, P, pageInfo, slot, owner, ownerSt, edgeOf, level, ground, wet, lakeLevel });
@@ -1150,7 +1230,7 @@ export function finishRiverFieldBake({ rivers, L, keys, pageRivers: pageRiverLis
         ms: { stations: t3 - t2, texels: t4 - t3, blur: t5 - t4, wet: t6 - t5, sdf: t7 - t6, flow: t7b - t7, pack: t8 - t7b, finish: t8 - t2 },
         rocks: rocks.length / RIVER_ROCK_FLOATS };
     const result = { pages: out, stats, flow, rocks };
-    if (debug) Object.assign(result, { keys, pageInfo, nat, ground, level, wet, sdf, delta, owner, lakeLevel, prepared });
+    if (debug) Object.assign(result, { keys, pageInfo, nat, ground, level, wet, sdf, delta, owner, lakeLevel, leftDry, prepared });
     return result;
 }
 
@@ -1272,12 +1352,15 @@ const f32bits = (x) => { f32b[0] = x; return u32b[0]; };
 const bitsf32 = (u) => { u32b[0] = u; return f32b[0]; };
 /** Signed distance (m) of texel k of a packed page. */
 export const riverFieldTexelSdf = (data, k) => fromHalf(data[k * RIVER_FIELD_WORDS + 1] >>> 16);
-function toHalf(x) {
+export function toHalf(x) {
     f32b[0] = x; const b = u32b[0], sign = (b >>> 16) & 0x8000;
     let e = ((b >>> 23) & 0xff) - 127 + 15, m = b & 0x7fffff;
     if (e >= 31) return sign | 0x7bff;                       // clamp to the largest finite half
     if (e <= 0) { if (e < -10) return sign; m |= 0x800000; const sh = 14 - e; return sign | ((m + (1 << (sh - 1))) >> sh); }
-    const h = sign | (e << 10) | ((m + 0x1000) >> 13);
+    // Rounding the mantissa can carry into the exponent. OR loses that
+    // carry when the exponent's low bit is already set (e.g. just below
+    // 32 m becomes 16 m), leaving holes in strongly lifted banks.
+    const h = sign | ((e << 10) + ((m + 0x1000) >> 13));
     return (h & 0x7c00) === 0x7c00 ? sign | 0x7bff : h;
 }
 function fromHalf(h) {

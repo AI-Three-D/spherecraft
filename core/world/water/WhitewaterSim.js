@@ -27,8 +27,8 @@
 
 import { fieldCoords, pageKey, riverFieldTexelSdf } from './riverField.js';
 import { RIVER_ROCK_FLOATS, unpackFlowTexel } from './riverFlow.js';
-import { WHITE_BLOCK, WHITE_DIRS_WGSL, WHITE_INIT_WGSL, WHITE_SIM_PARAM_FLOATS, WHITE_SIM_WGSL, WHITE_SPREAD_WGSL } from './whitewaterSim.wgsl.js';
-import { WHITE_FLAG_LOOK, WHITE_FLAG_NEAR, WHITE_UNIFORM_FLOATS } from '../../renderer/water/whitewaterLook.wgsl.js';
+import { WHITE_BLOCK, WHITE_DIRS_WGSL, WHITE_DRY_SDF, WHITE_INIT_WGSL, WHITE_MEAN_WGSL, WHITE_SIM_PARAM_FLOATS, WHITE_SIM_WGSL, WHITE_SPREAD_WGSL } from './whitewaterSim.wgsl.js';
+import { WHITE_FLAG_LOOK, WHITE_FLAG_NEAR, WHITE_FLAG_WALLS, WHITE_UNIFORM_FLOATS } from '../../renderer/water/whitewaterLook.wgsl.js';
 import { WHITE_SPRAY_BYTES, WHITE_SPRAY_PARTICLES, WHITE_SPRAY_WGSL } from '../../renderer/water/whitewaterProps.wgsl.js';
 
 export const WHITEWATER_DEFAULTS = Object.freeze({
@@ -46,6 +46,12 @@ export const WHITEWATER_DEFAULTS = Object.freeze({
     // Sponge toward the baked state (1/s at weight 0). Lake water holds its level at
     // lakeHold and loses a river's momentum at lakeDrag (1/s).
     sponge: 8, lakeHold: 3, lakeDrag: 0.8,
+    // Containment (owner 2026-11-10: water over the banks, a pit in a river's surface; the
+    // river's surface must fall downstream, the rocks' pile-ups, wakes and foam stay).
+    // Cells the bake keeps dry are walls (walls); each block's mean level over the baked one
+    // drains at levelHold (1/s; 0 off; a deficit stays). whitewaterSim.wgsl.js momentum,
+    // WHITE_MEAN_WGSL.
+    walls: true, levelHold: 1,
     // Bed roughness (m) under falling water, and the drawn chop (m at k = 1).
     roughM: 0.35, waveAmp: 0.06,
     // Rocks in the solver (owner 2026-11-10: water and foam went through them; a
@@ -124,6 +130,9 @@ export class WhitewaterSim {
         this.blocksBuf = buffer('blocks', G2 * 16, S | C);
         this.gridBuf = buffer('grid', G2 * 8, S | C);
         this.coverBuf = buffer('cover', G2 * 4, S | C);
+        // Per ring block: its mean level over the baked one (WHITE_MEAN_WGSL), cleared each frame.
+        this.devBuf = buffer('dev', G2 * 4, S | C);
+        this._devZero = new Float32Array(G2);
         this.fill = WHITE_BLOCK * WHITE_BLOCK * this.config.fillPerFrame;
         this.batchBuf = buffer('batch', (this.config.fillPerFrame * BATCH_WORDS + ROCK_LIST_MAX) * 4, S | C);
         this.dirsBuf = buffer('dirs', this.fill * 16, S);
@@ -142,20 +151,27 @@ export class WhitewaterSim {
         const carved = await sampler.carvedDirsEncoder({ dirs: this.dirsBuf, heights: this.heightsBuf, capacity: this.fill });
         if (!carved) return false;
         this.bed = carved;
-        const [dirsModule, initModule, spreadModule, simModule, sprayModule] = [WHITE_DIRS_WGSL, WHITE_INIT_WGSL, WHITE_SPREAD_WGSL, WHITE_SIM_WGSL, WHITE_SPRAY_WGSL(WHITE_BLOCK)].map((code, i) =>
-            d.createShaderModule({ label: `Whitewater-${['dirs', 'init', 'spread', 'sim', 'spray'][i]}`, code }));
+        const [dirsModule, initModule, spreadModule, simModule, sprayModule, meanModule] = [WHITE_DIRS_WGSL, WHITE_INIT_WGSL, WHITE_SPREAD_WGSL, WHITE_SIM_WGSL, WHITE_SPRAY_WGSL(WHITE_BLOCK), WHITE_MEAN_WGSL].map((code, i) =>
+            d.createShaderModule({ label: `Whitewater-${['dirs', 'init', 'spread', 'sim', 'spray', 'mean'][i]}`, code }));
         const C = GPUShaderStage.COMPUTE;
         const entry = (binding, type) => ({ binding, visibility: C, buffer: { type } });
         const simLayout = d.createBindGroupLayout({ label: 'Whitewater-sim', entries: [entry(0, 'uniform'), entry(1, 'read-only-storage'), entry(2, 'read-only-storage'), entry(3, 'storage'),
-            entry(4, 'read-only-storage'), entry(5, 'storage'), entry(6, 'read-only-storage'), entry(7, 'read-only-storage')] });
+            entry(4, 'read-only-storage'), entry(5, 'storage'), entry(6, 'read-only-storage'), entry(7, 'read-only-storage'), entry(8, 'read-only-storage')] });
         const layout = d.createPipelineLayout({ bindGroupLayouts: [simLayout] });
-        const [advect, height, momentum, dirs, init, spread, spray] = await Promise.all([
+        const [advect, height, momentum, dirs, init, spread, spray, mean] = await Promise.all([
             ...['advect', 'height', 'momentum'].map(entryPoint => d.createComputePipelineAsync({ layout, compute: { module: simModule, entryPoint } })),
             d.createComputePipelineAsync({ layout: 'auto', compute: { module: dirsModule, entryPoint: 'dirs' } }),
             d.createComputePipelineAsync({ layout: 'auto', compute: { module: initModule, entryPoint: 'init' } }),
             d.createComputePipelineAsync({ layout: 'auto', compute: { module: spreadModule, entryPoint: 'spread' } }),
             d.createComputePipelineAsync({ layout: 'auto', compute: { module: sprayModule, entryPoint: 'spray' } }),
+            d.createComputePipelineAsync({ layout: 'auto', compute: { module: meanModule, entryPoint: 'blockMean' } }),
         ]);
+        this.meanPipe = mean;
+        this.meanGroup = d.createBindGroup({ layout: mean.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: this.simU } }, { binding: 1, resource: { buffer: this.staticBuf } },
+            { binding: 2, resource: { buffer: this.stateBufs[0] } }, { binding: 3, resource: { buffer: this.blocksBuf } },
+            { binding: 4, resource: { buffer: this.devBuf } },
+        ] });
         this.sprayPipe = spray;
         this.sprayGroup = d.createBindGroup({ layout: spray.getBindGroupLayout(0), entries: [
             { binding: 0, resource: { buffer: this.sprayU } }, { binding: 1, resource: { buffer: this.staticBuf } },
@@ -169,6 +185,7 @@ export class WhitewaterSim {
             { binding: 2, resource: { buffer: this.stateBufs[a] } }, { binding: 3, resource: { buffer: this.stateBufs[b] } },
             { binding: 4, resource: { buffer: this.kBufs[a] } }, { binding: 5, resource: { buffer: this.kBufs[b] } },
             { binding: 6, resource: { buffer: this.blocksBuf } }, { binding: 7, resource: { buffer: this.gridBuf } },
+            { binding: 8, resource: { buffer: this.devBuf } },
         ] }));
         this.dirsGroup = d.createBindGroup({ layout: dirs.getBindGroupLayout(0), entries: [
             { binding: 0, resource: { buffer: this.simU } }, { binding: 1, resource: { buffer: this.frameU } },
@@ -299,6 +316,8 @@ export class WhitewaterSim {
             c.kGen, c.foamGen, c.maxRise, c.maxFall, c.sponge, c.roughM, c.lakeHold, c.lakeDrag], 4);
         f[24] = Math.max(0, c.rockSteerRate);
         f[25] = Math.max(0, WHITE_ROCK_MODES.indexOf(c.rockMode)); f[26] = Math.max(0, c.rockDragRate);
+        // No walls and no hold leave the solver free, as before 2026-11-10 (A/B).
+        f[27] = Math.max(0, c.levelHold || 0); f[28] = c.walls ? WHITE_DRY_SDF : -1e6;
         this.device.queue.writeBuffer(this.simU, 0, this.params);
     }
 
@@ -378,7 +397,7 @@ export class WhitewaterSim {
         // On the queue before this frame's fills read it.
         this.device.queue.writeBuffer(this.frameU, 0, u);
         const nearOn = this._simulate(camX, camY, l - this.R, dtReal, field);
-        this._u32[13] = (this.enabled ? WHITE_FLAG_LOOK : 0) | (nearOn ? WHITE_FLAG_NEAR : 0);
+        this._u32[13] = (this.enabled ? WHITE_FLAG_LOOK : 0) | (nearOn ? WHITE_FLAG_NEAR : 0) | (this.config.walls ? WHITE_FLAG_WALLS : 0);
         this._i32[16] = this._origin?.[0] ?? 0; this._i32[17] = this._origin?.[1] ?? 0;
     }
 
@@ -462,6 +481,12 @@ export class WhitewaterSim {
             this._stepOwed -= due * c.dt;
             const steps = this.debugOff?.solver ? 0 : due + (young ? c.youngSubsteps : 0);
             this._time += c.dt * steps;
+            // Each stepped block's mean level over the baked one, from the state the steps start on.
+            d.writeBuffer(this.devBuf, 0, this._devZero);
+            if (steps && c.levelHold > 0) {
+                const pass = enc.beginComputePass({ label: 'Whitewater-mean' });
+                pass.setPipeline(this.meanPipe); pass.setBindGroup(0, this.meanGroup); pass.dispatchWorkgroups(count); pass.end();
+            }
             for (let s = 0; s < steps; s++) {
                 const pass = enc.beginComputePass({ label: 'Whitewater-step' });
                 for (let k = 0; k < 3; k++) {
@@ -523,7 +548,7 @@ export class WhitewaterSim {
     }
 
     dispose() {
-        for (const b of [this.simU, this.frameU, this.staticBuf, ...this.stateBufs, ...this.kBufs, this.blocksBuf, this.gridBuf, this.coverBuf, this.rockListBuf, this.sprayBuf, this.sprayU, this.batchBuf, this.dirsBuf, this.heightsBuf, this.rocksBuf]) b?.destroy();
+        for (const b of [this.simU, this.frameU, this.staticBuf, ...this.stateBufs, ...this.kBufs, this.blocksBuf, this.gridBuf, this.coverBuf, this.devBuf, this.rockListBuf, this.sprayBuf, this.sprayU, this.batchBuf, this.dirsBuf, this.heightsBuf, this.rocksBuf]) b?.destroy();
     }
 }
 

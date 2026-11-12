@@ -25,7 +25,10 @@ import { RIVER_FIELD } from './riverField.js';
 import { WHITE_UNIFORMS_WGSL } from '../../renderer/water/whitewaterLook.wgsl.js';
 
 export const WHITE_BLOCK = 32;
-export const WHITE_SIM_PARAM_FLOATS = 28;
+export const WHITE_SIM_PARAM_FLOATS = 32;
+// Cells farther than this (signed distance, m) outside the baked water start dry, and
+// with walls on they stay dry: the solver's water stays where the bake has water.
+export const WHITE_DRY_SDF = -1.5;
 const WORKGROUPS_PER_BLOCK = (WHITE_BLOCK / 8) ** 2;
 
 // The baked state's last word: foam 0..1 on river water; on lake water minus (the
@@ -45,7 +48,8 @@ struct SimP {
   turbL: f32, turbT: f32, foamDecay: f32, kDecay: f32,
   kGen: f32, foamGen: f32, maxRise: f32, maxFall: f32,
   sponge: f32, roughM: f32, lakeHold: f32, lakeDrag: f32,
-  rockSteerRate: f32, rockMode: f32, rockDragRate: f32, pad3: f32,
+  rockSteerRate: f32, rockMode: f32, rockDragRate: f32, levelHold: f32,
+  wallSdf: f32, pad5: f32, pad6: f32, pad7: f32,
 };
 @group(0) @binding(0) var<uniform> P: SimP;
 // n^2 is under 2; the integer part stores an 8-bit rock weight: steering, or with
@@ -97,6 +101,9 @@ export const WHITE_SIM_WGSL = SIM_PARAMS + NOISE + /* wgsl */`
 @group(0) @binding(6) var<storage, read> BLOCKS: array<vec4i>;
 // Per ring block: x how fully simulated (1) or held to the baked state (0), y as drawn.
 @group(0) @binding(7) var<storage, read> GRID: array<vec2f>;
+// Per ring block: the mean of the level over the baked level in its baked water, this
+// frame (WHITE_MEAN_WGSL); 0 where a block does not step.
+@group(0) @binding(8) var<storage, read> DEV: array<f32>;
 
 struct Cell { i: i32, j: i32, x: f32, y: f32 };
 fn cellOf(wg: u32, l: vec2u) -> Cell {
@@ -129,6 +136,15 @@ fn bilinK(gx: f32, gy: f32) -> f32 {
   let i0 = i32(x0); let j0 = i32(y0);
   return mix(mix(KI[ci(i0,j0)], KI[ci(i0+1,j0)], fx), mix(KI[ci(i0,j0+1)], KI[ci(i0+1,j0+1)], fx), fy);
 }
+// Containment (owner 2026-11-10: water over the banks, a pit in the river). The bake
+// leaves dry, on purpose, low ground connected to a river past its reach (riverField.js
+// wet fill, spillM); without walls the solver's water ran into such basins, draining
+// the river into a pit 1-2 m under its level, and spread over the banks wherever its
+// level rose. A cell the bake keeps dry (signed distance under wallSdf) is a wall:
+// velocity on its faces is zero, so no water crosses into it.
+fn wallAt(i: i32, j: i32) -> bool { return ST[ci(i, j) * 2u].w < P.wallSdf; }
+fn closedU(i: i32, j: i32) -> bool { return wallAt(i - 1, j) || wallAt(i, j); }
+fn closedV(i: i32, j: i32) -> bool { return wallAt(i, j - 1) || wallAt(i, j); }
 // Positions here are in cells of the ring.
 fn velAt(p: vec2f) -> vec2f { return vec2f(bilinU(p.x, p.y - 0.5), bilinV(p.x - 0.5, p.y)); }
 fn facePosU(i: i32, j: i32) -> vec2f { return vec2f(f32(i), f32(j) + 0.5); }
@@ -172,6 +188,8 @@ fn advect(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: vec
   }
   let pc = vec2f(f32(i) + 0.5, f32(j) + 0.5);
   let pcb = pc - cfl * velAt(pc);
+  // Closed faces stay closed through the height pass that follows.
+  u = select(u, 0.0, closedU(i, j)); v = select(v, 0.0, closedV(i, j));
   SO[id] = vec4f(s.x, u, v, bilinF(pcb.x - 0.5, pcb.y - 0.5));
   KO[id] = bilinK(pcb.x - 0.5, pcb.y - 0.5);
 }
@@ -232,6 +250,17 @@ fn heldAt(i: i32, j: i32) -> f32 {
   let w = mix(mix(GRID[by * G + ax].x, GRID[by * G + ax1].x, fx), mix(GRID[by1 * G + ax].x, GRID[by1 * G + ax1].x, fx), fy);
   return 1.0 - w;
 }
+// The blocks' mean level over the baked one, bilinear between block centres.
+fn devAt(i: i32, j: i32) -> f32 {
+  let B = f32(${WHITE_BLOCK});
+  let gx = (f32(i) + 0.5) / B - 0.5; let gy = (f32(j) + 0.5) / B - 0.5;
+  let x0 = floor(gx); let y0 = floor(gy); let fx = gx - x0; let fy = gy - y0;
+  let G = P.G;
+  let a = i32(x0); let b = i32(y0);
+  let ax = select(select(a, a - G, a >= G), a + G, a < 0); let ax1 = select(ax + 1, 0, ax + 1 >= G);
+  let by = select(select(b, b - G, b >= G), b + G, b < 0); let by1 = select(by + 1, 0, by + 1 >= G);
+  return mix(mix(DEV[by * G + ax], DEV[by * G + ax1], fx), mix(DEV[by1 * G + ax], DEV[by1 * G + ax1], fx), fy);
+}
 
 @compute @workgroup_size(8, 8)
 fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: vec3u) {
@@ -242,7 +271,9 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
   let st0 = ST[id * 2u];
   let h = s.x; let b = st0.x;
   let dx = P.dx; let dt = P.dt; let g = P.g;
-  let sL = SI[ci(i-1, j)]; let hL = sL.x; let bL = bedOf(i-1, j);
+  // The left and lower cells' static rows: their bed, and their signed distance for the walls.
+  let stL = ST[ci(i-1, j) * 2u]; let stB = ST[ci(i, j-1) * 2u];
+  let sL = SI[ci(i-1, j)]; let hL = sL.x; let bL = stL.x;
   var u = s.y;
   {
     let wetL = hL > P.hmin; let wetR = h > P.hmin;
@@ -263,7 +294,7 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
     }
     u = clamp(u, -P.umax, P.umax);
   }
-  let sB = SI[ci(i, j-1)]; let hB = sB.x; let bB = bedOf(i, j-1);
+  let sB = SI[ci(i, j-1)]; let hB = sB.x; let bB = stB.x;
   var v = s.z;
   {
     let wetB = hB > P.hmin; let wetT = h > P.hmin;
@@ -355,8 +386,55 @@ fn momentum(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) l: v
     let fade = exp(-1.5 * P.lakeDrag * lake * dt);
     foam = mix(foam0, foam, fade); k = mix(foam0 * 0.6, k, fade);
   }
+  // The level held to the baked one on average only (owner 2026-11-10: water piling against
+  // rocks, flowing round them, wakes and foam are what the solver is for; a band, a monotone cap
+  // and a backflow clamp per cell flattened all of it). The baked state is not quite the solver's
+  // steady state: on a reach held flat at its lake's level, with rocks in the bed, the level rose
+  // 0.25-0.35 m (+13 % of the water in 40 s), ran uphill along the river and over the banks. A
+  // block's mean over the baked level drains at levelHold (1/s): a rock's pile-up and its wake
+  // hardly move a 16 m block's mean, a whole reach's rise does. A deficit stays: rapids run
+  // shallower and faster than baked (21 % less water in 40 s), their rocks out of the water, the
+  // look the owner chose; filled to the baked level, those rocks sank to dark discs.
+  if (P.levelHold > 0.0 && hOut > 0.0 && st0.z > 0.0) {
+    hOut = max(0.0, hOut - (1.0 - exp(-P.levelHold * dt)) * max(devAt(i, j), 0.0));
+  }
+  // Walls hold no water, and the sponge or a lake's drag must not open their faces.
+  let wall = st0.w < P.wallSdf;
+  if (wall) { hOut = 0.0; }
+  u = select(u, 0.0, wall || stL.w < P.wallSdf); v = select(v, 0.0, wall || stB.w < P.wallSdf);
   SO[id] = vec4f(hOut, u, v, foam);
   KO[id] = k;
+}
+`;
+
+// Per stepped block, once a frame: the mean of the level over the baked level W in its
+// baked water (h0 > 0, wet now), into DEV at its ring slot (WhitewaterSim.js clears DEV
+// first, so blocks that do not step read 0).
+export const WHITE_MEAN_WGSL = SIM_PARAMS + /* wgsl */`
+@group(0) @binding(1) var<storage, read> ST: array<vec4f>;
+@group(0) @binding(2) var<storage, read> S: array<vec4f>;
+@group(0) @binding(3) var<storage, read> BLOCKS: array<vec4i>;
+@group(0) @binding(4) var<storage, read_write> DEV: array<f32>;
+var<workgroup> acc: array<vec2f, 256>;
+@compute @workgroup_size(256)
+fn blockMean(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u32) {
+  let b = BLOCKS[wg.x];
+  var s = vec2f(0.0);
+  for (var k = 0u; k < ${WHITE_BLOCK * WHITE_BLOCK / 256}u; k++) {
+    let t = li * ${WHITE_BLOCK * WHITE_BLOCK / 256}u + k;
+    let id = ci(b.z * ${WHITE_BLOCK} + i32(t % ${WHITE_BLOCK}u), b.w * ${WHITE_BLOCK} + i32(t / ${WHITE_BLOCK}u));
+    let h = S[id].x; let st0 = ST[id * 2u];
+    // Each cell counts at most 0.5 m either way: a few odd cells (a sliver of baked water over a
+    // hollow, filled from the river) cannot move a block's mean, and drain the river with it.
+    if (h > P.hmin && st0.z > 0.0) { s += vec2f(clamp(st0.x + h - ST[id * 2u + 1u].x, -0.5, 0.5), 1.0); }
+  }
+  acc[li] = s;
+  workgroupBarrier();
+  for (var w = 128u; w > 0u; w = w >> 1u) {
+    if (li < w) { acc[li] += acc[li + w]; }
+    workgroupBarrier();
+  }
+  if (li == 0u) { DEV[u32(b.w) * u32(P.G) + u32(b.z)] = select(0.0, acc[0].x / max(acc[0].y, 1.0), acc[0].y > 0.0); }
 }
 `;
 
@@ -455,7 +533,7 @@ fn init(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
   var h0 = 0.0;
-  if (sdf > -1.5) { h0 = max(level - bed, 0.0); }
+  if (sdf > ${WHITE_DRY_SDF.toFixed(2)}) { h0 = max(level - bed, 0.0); }
   if (h0 < 0.05) { h0 = 0.0; }
   let wet = select(0.0, 1.0, h0 > 0.0);
   let state = vec4f(h0, vel.x * wet, vel.y * wet, foam * wet);

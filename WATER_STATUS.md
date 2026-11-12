@@ -58,6 +58,73 @@ prototypes (`wizard_game/waterFixPrototypes.js`; `?waterFix=N`), O: sea off/on.
 - Foam is drawn as a noise pattern (ridged noise plus cellular bubble walls)
   carried in two phases 1.2 s along the flow; how much shows is the solver's
   foam, with part of the baked foam as a floor.
+- Containment (branch `river-containment`, 2026-11-10; owner: water over the
+  banks, a pit in a river's surface; "the surface may be flat, but the water
+  must never flow backwards"). Causes, measured at the owner's poses with
+  `tools/perf/whitewater/containment.mjs` (`wwContain`, `wwAlong`):
+  - The bake leaves low ground beside a river dry on purpose (past `spillM`
+    from its channel: no flooded bays). The solver had no walls: river water ran
+    into such a basin 1.3-3.6 m under its level, the sponge emptied it again, and
+    the river's surface sank up to 1.65 m into a pit. Now every cell the bake
+    keeps dry (signed distance under `WHITE_DRY_SDF`, -1.5 m, where blocks
+    already started dry) is a wall: no flow crosses its faces.
+  - The baked state is not the solver's steady state everywhere: on a reach held
+    flat at its lake's level, with rocks in the bed, the solver gained 13 % water
+    in 40 s and stood 0.25-0.35 m over the baked level (wall rocks about double
+    it; bed roughness and turbulence play no part), rising along the river and
+    over the 0.25 m bank margin.
+  - Now (`whitewaterSim.wgsl.js`, switches in `WHITEWATER_DEFAULTS`): walls as
+    above, and each 16 m block's mean level over the baked one drains at
+    `levelHold` (1/s; `WHITE_MEAN_WGSL` measures the means once a frame, each cell
+    counted within +-0.5 m). A rock's pile-up and wake hardly move a block's mean; a
+    reach's rise does. A deficit stays: rapids run shallower and faster than baked
+    (21 % less water after 40 s, still falling), their rocks out of the water; filled
+    to the baked level those rocks sank to dark discs, which the owner did not want.
+    Both off is the free solver of before.
+  - Tried and removed the same day: a band around the baked level per cell, a
+    monotone cap along the flow and a backflow clamp. They held the surface to the
+    rule cell by cell and flattened what the solver is for: water piling on rocks,
+    flowing round them, wakes, foam forming at rocks (owner: "WAAY better" before).
+    The rule is about the river's profile, not a rock's wake.
+  - Measured 40 s from a cold start, free -> now (final, 2026-11-10): owner's spill
+    pose water past the start-dry line 2,250 -> 0 cells, water gained +13.9 ->
+    -0.8 %, block-mean drift 0.27 -> 0.09 m, rises along the river (8.5 m means) 5
+    (10 cm) -> 1 (4 cm), foam unchanged, wakes kept; pit site 11,443 -> 0 (with the
+    bank below even the free solver leaks only 198); rapids unchanged from free.
+    Solver step +9 % (Node Dawn, 120 blocks), plus one mean pass a frame.
+- The chop drawn on turbulent water (`whitewaterSurface.wgsl.js` `whiteChop`) was three
+  fixed sines (2.5, 2.4, 1.2 m) whose lattice repeated (owner, 2026-11-10); now three
+  octaves of value noise at unrelated angles, matched to the sines' height (RMS
+  1.08 / 1.09) and slope (3.1 / 3.3).
+- The baked water's strip past its edge (`KEEP_M`, 1.5 m, so the terrain cuts the
+  shoreline) stood in the air beyond a low crest: a see-through sheet beside a
+  river, solver on or off (owner's spill pose: a crest 5 cm over a lake's level, a
+  hollow 1.8 m deep behind it). The bake now gives dry ground under the level it
+  inherits (behind a crest, past a river's reach) a level `dryUnderM` (0.1 m)
+  under that ground and a signed distance of far outside (riverField.js `leftDry`,
+  tests in riverField.test.js): no strip is kept there, and the near simulation
+  takes it for a wall. With the level lowered alone, the solver flooded such a
+  strip 4.6 m deep from the river, and those cells skewed the block means until
+  the hold drained the river 0.25-0.3 m under its level.
+- Banks were tried and removed the same day: raising the ground where the water meets
+  ground under its level made an embankment however it was shaped (a 4 m dike, a flat
+  bank ending on a cliff, a wide shouldered bank: owner, "horrible" from the air). The
+  river at the owner's site runs along a hillside, not in a valley: over 350 m the land
+  on one side lies 2-6 m under its water 80 m out, and past its mouth its level is held
+  flat at its lake's (327 m) for over 700 m with the land on the other side 5-20 m under
+  it (`perchProbe.js` measure, 2026-11-10). That is where the river is laid (the planner's
+  128 m grid route, the bake's hold at the lake's level), not something banks can hide.
+  Open: lay such rivers in the valley, or carve them into the slope.
+- Wide-bank preview (J): a broader, gently rising fill supports perched reaches,
+  with slow variation along each side. It remains opt-in because it costs more
+  to bake and has not been assessed across all river and lake configurations.
+  Separate shoreline and wider upland smoothing reduces streaks without
+  spreading the fill into submerged lake ground. Half-float rounding carries
+  correctly at powers of two, avoiding pits in large terrain fills.
+- With containment walls enabled, the near water uses the continuous baked
+  shoreline distance for clipping instead of the solver's binary wet/dry grid.
+  The free solver retains its own wet boundary. The intermittent stepped edge
+  reported by the owner could not be reproduced exactly and needs further review.
 
 ## What is missing
 

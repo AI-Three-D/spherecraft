@@ -507,11 +507,12 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | G: Terrain fix prototype | H: Sea and far water prototype
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
         <div id="river-goto-status" style="display:none;max-width:420px;padding:6px 8px;background:rgba(0,0,0,.65);color:#cfe;border-radius:4px;white-space:pre-wrap;"></div>
+        <button id="bank-preview" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Banks: existing (J)</button>
         <button id="water-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Water fix (H)</button>
         <button id="terrain-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Terrain fix (G)</button>
         <button id="rock-mode" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Rocks: wall (Y)</button>
@@ -4430,6 +4431,22 @@
         document.getElementById('rock-mode').addEventListener('click', () => rockModeStep());
         setInterval(rockModeShow, 2000);
 
+        function bankPreviewShow() {
+            const f = gameEngine?.riverFieldService;
+            const mode = f?.bankPreview ?? 'existing';
+            const waiting = f && (f.busy || f._bakedBankPreview !== mode);
+            const status = waiting ? (f.lastError && !f.busy ? ' (failed)' : ' (updating)') : '';
+            document.getElementById('bank-preview').textContent = `Banks: ${mode === 'wide' ? 'wide taper' : 'existing'}${status} (J)`;
+        }
+        function bankPreviewStep() {
+            const f = gameEngine?.riverFieldService;
+            if (!f) return;
+            f.setBankPreview(f.bankPreview === 'wide' ? 'existing' : 'wide');
+            bankPreviewShow();
+        }
+        document.getElementById('bank-preview').addEventListener('click', bankPreviewStep);
+        setInterval(bankPreviewShow, 500);
+
         // Debug: far-terrain fix prototypes in turn (terrainFixPrototypes.js,
         // TERRAIN_FLAT_TIER_FINDINGS.md). Generator changes regenerate the
         // visible tiles, which takes a few seconds.
@@ -4513,6 +4530,9 @@
             // Debug: rocks in the near simulation, the next prototype.
             if (e.key.toLowerCase() === 'y' && !e.repeat && !e.target?.closest?.('input, textarea')) {
                 try { rockModeStep(); } catch (err) { console.warn('[Rocks]', err); }
+            }
+            if (e.key.toLowerCase() === 'j' && !e.repeat && !e.target?.closest?.('input, textarea')) {
+                try { bankPreviewStep(); } catch (err) { console.warn('[Banks]', err); }
             }
             // Debug: far-terrain fix prototypes, the next one.
             if (e.key.toLowerCase() === 'g' && !e.repeat && !e.target?.closest?.('input, textarea')) {
