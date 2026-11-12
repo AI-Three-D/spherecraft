@@ -370,6 +370,16 @@ describe('WaterGpuData', () => {
         expect([...new Float32Array(gpu.paramsData, 160, 4)]).toEqual([0, 0, 0, 0]);
     });
 
+    it('packs a valid altitude range for distant water motion', () => {
+        const gpu = new WaterGpuData(stubDevice(), { gridN: 4, planetRadius: 131072 });
+        const svc = fakeService();
+        gpu.update(svc, cam, 0);
+        expect([...new Float32Array(gpu.paramsData, 80, 2)]).toEqual([12000, 30000]);
+        Object.assign(gpu.look, { distantMotionFadeStartM: 20000, distantMotionFadeEndM: 10000 });
+        gpu.update(svc, cam, 0);
+        expect([...new Float32Array(gpu.paramsData, 80, 2)]).toEqual([20000, 20001]);
+    });
+
     it('tilesTouchingCells picks the tiles over (or next to) changed cells', () => {
         const N = 8, cell = 2 * N * N + 5 * N + 3;            // face 2, i 3, j 5
         const touches = tilesTouchingCells(new Set([cell]), N);
