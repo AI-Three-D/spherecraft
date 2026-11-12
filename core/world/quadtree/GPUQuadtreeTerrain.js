@@ -272,6 +272,7 @@ export class QuadtreeTileManager {
               tileCategories: this.tileCategories,
               coarseColorWindowMeters: terrainShaderConfig.solidColorAverageWindowMeters ?? 0,
               coarseColorFaceSizeMeters: 2 * (this.planetConfig?.radius ?? 0),
+              coarseColorSource: terrainShaderConfig.coarseColorSource ?? 'window',
               // Flat solid-color tier start: those tiles skip the splat and
               // prebaked-color refinement outputs they never draw.
               solidTierStartLod: (() => {
@@ -896,6 +897,11 @@ export class QuadtreeTileManager {
 
     getInstanceBuffer() {
         return this.quadtreeGPU.getInstanceBuffer();
+    }
+
+    /** Per-instance edge stitch records for the terrain vertex shader (or null). */
+    getEdgeStitchBuffer() {
+        return this.quadtreeGPU.getEdgeStitchBuffer?.() ?? null;
     }
 
     getIndirectArgsBuffer() {

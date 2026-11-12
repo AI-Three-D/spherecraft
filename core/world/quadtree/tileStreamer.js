@@ -265,8 +265,9 @@ class TileArrayPool {
         const neverMipmapByType = (type) =>
             wantsNearestByType(type) ||
             type === 'resolvedColor' ||
-            // Already a ~1.4 km window average and only magnified on
-            // screen (LOD selection keeps texels >= 1 px): no mips needed.
+            // Sampled at mip 0 only. Mip-filtered sampling was measured worse
+            // (TERRAIN_FLAT_TIER_FINDINGS.md): the mip level follows the
+            // tile's texel size, so the blur changes at every LOD boundary.
             type === 'coarseColor';
 
         const fullMipCount = Math.floor(Math.log2(tileSize)) + 1;
@@ -775,6 +776,7 @@ export class TileStreamer {
         this._tileCategories = Array.isArray(options.tileCategories) ? options.tileCategories : null;
         this._coarseColorWindowMeters = options.coarseColorWindowMeters;
         this._coarseColorFaceSizeMeters = options.coarseColorFaceSizeMeters;
+        this._coarseColorSource = options.coarseColorSource;
         this._tilesStartedWindowCount = 0;
 
         // ── Phase 0 instrumentation state (plan §0) ──────────────────────
@@ -1118,6 +1120,7 @@ drainScatterCommitQueue() {
             tileCategories: this._tileCategories,
             coarseColorWindowMeters: this._coarseColorWindowMeters,
             coarseColorFaceSizeMeters: this._coarseColorFaceSizeMeters,
+            coarseColorSource: this._coarseColorSource,
             logStats:       this._logStatsEnabled,
             onGenerationTelemetry: (telemetry) => this._finalizeFenceTelemetry(telemetry)
         });

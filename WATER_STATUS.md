@@ -1,13 +1,15 @@
-# Water: where it stands (2026-11-10)
+# Water: where it stands (2026-11-11)
 
 How water works in SphereCraft today, and what is missing. Lakes and rivers run
-in the terrain function; the ocean is still the old system. Day-by-day notes
+in the terrain function; the sea is drawn as the lakes are (since 2026-11-11). Day-by-day notes
 and measurements: `LAKE_CELLS_PLAN.md`. Open terrain issue found on the way:
 `TERRAIN_SEAM_CRACK_FINDINGS.md`.
 
-Test: `http://localhost:8000/wizard_game/standalone.html?lakeCells=1`
-(`python3 server.py`). R: next river site (Shift+R: new sites here), Y: rock
-mode in the near simulation, T: freeze day and night.
+Test: `http://localhost:8000/wizard_game/standalone.html` (lake cells are the
+default since 2026-11-10; `?lakeCells=0` brings back the older terrain and
+water; `python3 server.py`). R: next river site (Shift+R: new sites here), Y: rock
+mode in the near simulation, T: freeze day and night, H: sea and far water
+prototypes (`wizard_game/waterFixPrototypes.js`; `?waterFix=N`), O: sea off/on.
 
 ## Lakes (lake cells)
 
@@ -126,21 +128,47 @@ mode in the near simulation, T: freeze day and night.
 
 ## What is missing
 
-### Ocean (the largest gap)
+### Ocean
 
-- The ocean is the old global renderer (`core/renderer/water/globalOceanRenderer.js`,
-  `waterShader.wgsl.js`, unchanged since May 2026): a sea-level surface drawn on
-  the terrain tiles' geometry, with its own shading. It shares nothing with the
-  lake and river water: not the near meshes, the shading (`waterWgsl.js`,
-  `whitewaterLook.wgsl.js`), the distant look, nor the near simulation.
-- Coasts: no shore model (the lakes have bank surfaces, the sea only meets the
-  terrain where it happens to be below sea level), no beaches or surf, no
-  waves or swell, no tides.
-- Rivers that reach the sea end at the shoreline: no estuary, delta or plume
-  into the sea as they have into lakes.
-- Sea level is one number (`oceanLevel` in the planet config); the lake
-  assessment and the river planner treat everything under it as the sea.
-- Owner: "the sea is an old system and we need to rework that too".
+Since 2026-11-11 the sea is drawn as the lakes are (`?waterFix=0` or H brings
+back the old renderer to compare):
+
+- Everything under sea level is ocean (`WaterGpuData.sea`, level from the
+  planet's `oceanLevel`; the lake assessment and the river planner already
+  treated it so). Its look is the lakes': the same body, sky, glitter, wind and,
+  close by, the same close surface (`whitewaterLook.wgsl.js`).
+- Close by, `NearWaterRenderer` draws it in a sea pass (`seaSurface.wgsl.js`):
+  one triangle over the screen, each pixel's ray meeting the sea's sphere, so the
+  surface is exact to the horizon with no mesh or LOD seams. Depth of water and
+  shoreline come from the opaque depth, as for the lake sheets.
+- Past the near meshes' handover the terrain shading draws it
+  (`waterWgsl.js applyWater`), with the shore from the ground's own height; the
+  depth buffer is metres coarse there. The pass still adds water that is clearly
+  deep (past a few depth steps) and water with nothing behind it: a ray into the
+  sea at a low angle can leave the 2 km deep sea shell without meeting the bed.
+- Rivers' water near their mouths stays the river field's; past it, the sea.
+- 'o' turns the sea off and on (`PlanetTerrainModule.ocean`, `SeaControl`).
+- The old renderer (`globalOceanRenderer.js`, `waterShader.wgsl.js`) is kept
+  only for that comparison: it drew the bays as pale seabed and left a black
+  band along the horizon.
+- Still missing: beaches and surf, waves or swell you can see in the geometry,
+  tides, estuaries and plumes where rivers meet the sea, an underwater view.
+  Water at night is near black (lakes and sea alike: no night floor such as the
+  terrain's).
+
+### Far water from orbit (lake beds' mud)
+
+Far tiles have a few triangles over a hundred texels (geometry LOD 5-6: 4
+segments a tile; from orbit vertices about 1 km apart, texels a few tens of
+metres; from the config, not measured). Lake water was
+placed where those triangles are under the level, while the bed's mud is
+painted from the texels, so from high up lakes showed mud and polygon shapes.
+Past the near meshes' handover (1-1.6 km) the terrain shading now reads the
+ground's height for water from the tile's height texture
+(`waterWgsl.js waterCoverHeight`, `WATER_LOOK_DEFAULTS.farTexelCover`): lakes
+and the sea cover the texels under their level, as the mud does. `?waterFix=2`
+or H shows the old triangle cover beside the new sea. Rivers keep their own
+far cover (the river field's wet area).
 
 ### Rivers and near water
 

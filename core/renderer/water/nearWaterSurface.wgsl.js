@@ -87,7 +87,7 @@ ${NEAR_WATER_RASTER_WGSL}
 
 // The frame the close surface is laid out in, shared with the river tiers: the
 // pattern runs on across a page's edge (whitewaterLook.wgsl.js).
-const LAKE_WHITE_WGSL = /* wgsl */`
+export const LAKE_WHITE_WGSL = /* wgsl */`
 @group(2) @binding(0) var<uniform> W: WhiteU;
 ${WHITE_UNIFORMS_WGSL}
 `;
@@ -170,8 +170,14 @@ fn nearWaterShade(wp: vec3<f32>, pixel: vec2<f32>, plane: vec3<f32>) -> vec4<f32
 // Shared premultiplied surface/body and atmosphere treatment. Simulation
 // supplies flow normals and foam but keeps the same lighting and handover.
 fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>, plane: vec3<f32>) -> vec4<f32> {
+    return nearWaterComposeAs(wp, up, s, pixel, plane, waterNearWeight(length(U.cameraPos - wp)), 0.0);
+}
+
+// The same with the share of the water this surface draws (w; the near meshes:
+// their handover) and how opaque its body is (0 the bed shows through by its
+// depth, 1 none: far water, where the terrain shading's body is opaque too).
+fn nearWaterComposeAs(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>, plane: vec3<f32>, w: f32, opaque: f32) -> vec4<f32> {
     let dist = length(U.cameraPos - wp);
-    let w = waterNearWeight(dist);
     let L = normalize(U.sunDir);
     let sun = U.sunColor * U.sunIntensity;
     let sky = U.ambientColor * U.ambientIntensity;
@@ -199,7 +205,7 @@ fn nearWaterCompose(wp: vec3<f32>, up: vec3<f32>, s: vec4<f32>, pixel: vec2<f32>
     let extinction = dot(waterParams.absorption.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
     // Through clear water each cross-wave of fast shallow flow, a step in depth,
     // drew a straight line against the bed.
-    let transmission = exp(-path * extinction) * mix(1.0, ${WATER_WET_BED}, above) * (1.0 - 0.85 * nearWaterAerated);
+    let transmission = exp(-path * extinction) * mix(1.0, ${WATER_WET_BED}, above) * (1.0 - 0.85 * nearWaterAerated) * (1.0 - opaque);
     // Continuous contact removes opaque depth-fighting speckles at grazing
     // shores. Foreground opaque geometry still completely hides the water.
     // Foam ends where it ends: faded like clear water it smeared over the bank.

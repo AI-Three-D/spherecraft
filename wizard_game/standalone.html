@@ -507,12 +507,14 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
         <div id="river-goto-status" style="display:none;max-width:420px;padding:6px 8px;background:rgba(0,0,0,.65);color:#cfe;border-radius:4px;white-space:pre-wrap;"></div>
         <button id="bank-preview" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Banks: existing (J)</button>
+        <button id="water-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Water fix (H)</button>
+        <button id="terrain-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Terrain fix (G)</button>
         <button id="rock-mode" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Rocks: wall (Y)</button>
         <button id="river-goto" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Next site (R)</button>
     </div>
@@ -523,6 +525,8 @@
         import { FrameLoop } from './FrameLoop.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
+        import { TERRAIN_FIX_PROTOTYPES, applyTerrainFixToConfig, applyTerrainFixLive, terrainFixIndexOf } from './terrainFixPrototypes.js';
+        import { WATER_FIX_PROTOTYPES, applyWaterFixLive, waterFixIndexOf } from './waterFixPrototypes.js';
         import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
         import { TerrainRaycaster } from './actors/nav/TerrainRaycaster.js';
         import { CubeSphereCoords } from '../core/planet/cubeSphereCoords.js';
@@ -3874,7 +3878,7 @@
                 return this.useCamera(pose);
             },
             river(fraction = .5, altitudeM = 200, backM = 350, index = null) {
-                // Lake-cell rivers (?lakeCells=1): the one nearest the camera,
+                // Lake-cell rivers (the default terrain): the one nearest the camera,
                 // or recs[index]; otherwise the regional plan's first river.
                 const recs=[...(gameEngine?.waterService?._lakeCells ? gameEngine.waterService.riverRecs?.values?.() ?? [] : [])];
                 let rec=gameEngine?.terrainGenerator?.regionalTerrain?.drainagePlan?.rivers?.[0];
@@ -4056,7 +4060,10 @@
                 // Lakes in the terrain function (LAKE_CELLS_PLAN.md): base
                 // generator lakeLand, regional terrain off; the water service
                 // publishes the lake table's lakes instead of solving a graph.
-                if (placementQueries.get('lakeCells') === '1') {
+                // The default since 2026-11-10; ?lakeCells=0 or a regional
+                // comparison parameter brings back the older terrain and water.
+                const regionalComparison=['regionalTerrain','regionalBasins','regionalWhitewater','regionalLargeLake','regionalOrganicRiver','waterPrecompute'].some(k=>placementQueries.has(k));
+                if (placementQueries.get('lakeCells') !== '0' && !regionalComparison) {
                     for (const planet of gameDataConfig.planets) if (planet.enabled) {
                         planet.terrain.baseGenerator = 'lakeLand';
                         planet.terrain.regionalTerrain = { ...planet.terrain.regionalTerrain, enabled: false };
@@ -4209,6 +4216,18 @@
                             structuredRiverSurface:false}};
                     }
                 }
+                // Lab captures (tools/perf/flatTierLab): no cloud or fog layers
+                // over the terrain, so image diffs measure the terrain alone.
+                if (new URLSearchParams(location.search).has('labNoClouds') && engineConfig.features) {
+                    Object.assign(engineConfig.features, { clouds: false, highClouds: false, lowClouds: false, midClouds: false, fogParticles: false, cloudParticles: false });
+                }
+                // Far-terrain fix prototype at start (?terrainFix=N, see G below).
+                const terrainFixQuery = new URLSearchParams(location.search).get('terrainFix');
+                if (terrainFixQuery !== null && engineConfig.rendering?.terrainShader) {
+                    const proto = applyTerrainFixToConfig(engineConfig.rendering.terrainShader, Number(terrainFixQuery));
+                    if (proto) console.info(`[TerrainFix] start with ${terrainFixQuery}: ${proto.name}`);
+                    else console.warn(`[TerrainFix] no prototype ${terrainFixQuery} (0-${TERRAIN_FIX_PROTOTYPES.length - 1})`);
+                }
                 gameEngine = new GameEngine('gameCanvas', engineConfig, gameDataConfig);
                 window.gameEngine = gameEngine;
                 installQuadtreeDiagnostics(gameEngine);
@@ -4329,14 +4348,14 @@
         // Debug sites: the button (or R) flies to the next of a few viewing
         // sites, round and round; Shift+R picks new ones around the camera.
         // Each kind lists its sites nearest the camera; add kinds to
-        // DEBUG_SITE_KINDS (today the lake-cell rivers of ?lakeCells=1).
+        // DEBUG_SITE_KINDS (today the lake-cell rivers of the default terrain).
         const DEBUG_SITE_COUNT = 4;
         const DEBUG_SITE_KINDS = {
             rivers: {
                 // Sites: the rivers nearest the camera, each seen at its middle.
                 sites(count) {
                     const svc = gameEngine?.waterService, L = svc?._lakeCells;
-                    if (!L) return { sites: [], why: 'Rivers here come with ?lakeCells=1.' };
+                    if (!L) return { sites: [], why: 'Rivers here come with the lake-cell terrain (not with ?lakeCells=0).' };
                     const P = L.rivers, st = P?.stats;
                     const planner = P ? `planner: ${st.planned} planned ${JSON.stringify(st.byDest)}, no river ${JSON.stringify(st.none)}, failed ${st.failed}` +
                         `${st.lastError ? ` (last: ${st.lastError})` : ''}; ${L.known.size} lakes known, planning ${L.planning ? 'running' : 'idle'}` +
@@ -4428,6 +4447,76 @@
         document.getElementById('bank-preview').addEventListener('click', bankPreviewStep);
         setInterval(bankPreviewShow, 500);
 
+        // Debug: far-terrain fix prototypes in turn (terrainFixPrototypes.js,
+        // TERRAIN_FLAT_TIER_FINDINGS.md). Generator changes regenerate the
+        // visible tiles, which takes a few seconds.
+        let terrainFixBusy = false;
+        function terrainFixShow() {
+            const ts = gameEngine?.engineConfig?.rendering?.terrainShader;
+            if (!ts) return -1;
+            const i = terrainFixIndexOf(ts);
+            document.getElementById('terrain-fix').textContent = i >= 0
+                ? `Terrain fix ${i}: ${TERRAIN_FIX_PROTOTYPES[i].name} (G)`
+                : 'Terrain fix: custom (G)';
+            return i;
+        }
+        async function terrainFixStep() {
+            if (terrainFixBusy) return;
+            terrainFixBusy = true;
+            const box = document.getElementById('river-goto-status');
+            try {
+                const next = (terrainFixShow() + 1) % TERRAIN_FIX_PROTOTYPES.length;
+                const { proto, regenerated } = await applyTerrainFixLive(gameEngine, next);
+                terrainFixShow();
+                box.textContent = `Terrain fix ${next} of ${TERRAIN_FIX_PROTOTYPES.length - 1}: ${proto.name}. ${proto.text}.` +
+                    (regenerated ? ' The tiles regenerate in a few seconds.' : '');
+                box.style.display = 'block';
+                console.info(`[TerrainFix] ${next}: ${proto.name}`);
+            } catch (err) {
+                console.warn('[TerrainFix]', err);
+            } finally {
+                terrainFixBusy = false;
+            }
+        }
+        document.getElementById('terrain-fix').addEventListener('click', () => terrainFixStep());
+        setInterval(terrainFixShow, 2000);
+
+        // Debug: sea and far water prototypes in turn (waterFixPrototypes.js,
+        // WATER_STATUS.md). Live: no rebuild or regeneration. ?waterFix=N picks
+        // one as soon as the water data exists.
+        function waterFixShow() {
+            const i = waterFixIndexOf(gameEngine);
+            document.getElementById('water-fix').textContent = i >= 0
+                ? `Water fix ${i}: ${WATER_FIX_PROTOTYPES[i].name} (H)`
+                : (gameEngine?.waterGpuData ? 'Water fix: custom (H)' : 'Water fix (H)');
+            return i;
+        }
+        function waterFixStep(index = null) {
+            const box = document.getElementById('river-goto-status');
+            try {
+                const next = index ?? (Math.max(waterFixShow(), 0) + 1) % WATER_FIX_PROTOTYPES.length;
+                const proto = applyWaterFixLive(gameEngine, next);
+                waterFixShow();
+                box.textContent = `Water fix ${next} of ${WATER_FIX_PROTOTYPES.length - 1}: ${proto.name}. ${proto.text}.`;
+                box.style.display = 'block';
+                console.info(`[WaterFix] ${next}: ${proto.name}`);
+            } catch (err) {
+                console.warn('[WaterFix]', err);
+            }
+        }
+        document.getElementById('water-fix').addEventListener('click', () => waterFixStep());
+        setInterval(waterFixShow, 2000);
+        {
+            const waterFixQuery = new URLSearchParams(location.search).get('waterFix');
+            if (waterFixQuery !== null) {
+                const waitForWater = setInterval(() => {
+                    if (!gameEngine?.waterGpuData || !gameEngine.renderer?.terrainModule?.ocean) return;
+                    clearInterval(waitForWater);
+                    waterFixStep(Number(waterFixQuery));
+                }, 250);
+            }
+        }
+
         // Keyboard controls
         window.addEventListener('keydown', (e) => {
             if (e.key.toLowerCase() === 'd') {
@@ -4444,6 +4533,14 @@
             }
             if (e.key.toLowerCase() === 'j' && !e.repeat && !e.target?.closest?.('input, textarea')) {
                 try { bankPreviewStep(); } catch (err) { console.warn('[Banks]', err); }
+            }
+            // Debug: far-terrain fix prototypes, the next one.
+            if (e.key.toLowerCase() === 'g' && !e.repeat && !e.target?.closest?.('input, textarea')) {
+                terrainFixStep();
+            }
+            // Debug: sea and far water prototypes, the next one.
+            if (e.key.toLowerCase() === 'h' && !e.repeat && !e.target?.closest?.('input, textarea')) {
+                waterFixStep();
             }
             // Debug: freeze or resume the day-night cycle.
             if (e.key.toLowerCase() === 't' && !e.repeat && gameEngine?.setDayNightFrozen) {

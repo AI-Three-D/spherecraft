@@ -3329,6 +3329,12 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     if (debugMode == 105) {
         return vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
     }
+    // Mode 107: one flat colour per tile (from its face location and size),
+    // for the tile-edge mask of tools/perf/flatTierLab.
+    if (debugMode == 107) {
+        let k = vec2<f32>(input.vFaceInfo.x * 8192.0 + input.vFaceInfo.z * 977.0, input.vFaceInfo.y * 8192.0 + input.vFaceInfo.z * 613.0);
+        return vec4<f32>(debugHash12(k), debugHash12(k + vec2<f32>(17.0, 59.0)), debugHash12(k + vec2<f32>(83.0, 31.0)), 1.0);
+    }
     if (debugMode == 103) {
         let d = input.vDistanceToCamera;
         var color = vec3<f32>(0.0, 0.0, 0.0);
@@ -4806,13 +4812,20 @@ if (debugMode == 16) {
     }
 
 ${enableLakeWater ? `
-    // Lake and river water (exact shoreline per pixel).
-    finalColor = applyWater(
+    // Lake, river and sea water (exact shoreline per pixel). Past the near
+    // meshes the ground's height for it is the tile's texel height, not the
+    // triangles' (waterWgsl.js waterCoverHeight).
+    var waterTexHeight = -1.0e30;
+${useArrayTextures ? `    if (waterParams.sea.w > 0.5 && input.vDistanceToCamera > waterParams.near.x) {
+        let waterHeightUv = applyChunkAtlasUV(input.vUv, heightTexture_f, input.vAtlasOffset, input.vAtlasScale);
+        waterTexHeight = sampleRGBA32FBilinear(heightTexture_f, waterHeightUv, layer).r;
+    }
+` : ''}    finalColor = applyWater(
         finalColor, input.vWorldPosition, fragUniforms.cameraPosition, fragUniforms.planetCenter,
         normalize(fragUniforms.lightDirection),
         fragUniforms.lightColor * fragUniforms.sunLightIntensity,
         fragUniforms.ambientColor * fragUniforms.ambientLightIntensity,
-        transmittanceSampler
+        transmittanceSampler, waterTexHeight
     );
     // Water debug views 6 and 7 (who draws the water): flat colours, no haze.
     if (waterParams.debugMode == 6u || waterParams.debugMode == 7u) { return vec4<f32>(finalColor, 1.0); }

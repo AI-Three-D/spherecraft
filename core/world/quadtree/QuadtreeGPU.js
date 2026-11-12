@@ -25,7 +25,7 @@ import { TileAddress } from './tileAddress.js';
 import {gpuDeviceLoss,reportGpuAsyncFailure} from '../../../shared/gpuDeviceState.js';
 import { Logger } from '../../../shared/Logger.js';
 import { buildTraversalShaderSource } from './quadtreeTraversal.wgsl.js?regionalTerrainApi=1';
-import { buildInstanceBuilderShaderSource } from './instanceBufferBuilder.wgsl.js';
+import { buildInstanceBuilderShaderSource, EDGE_STITCH_RECORD_BYTES } from './instanceBufferBuilder.wgsl.js';
 
 // ─── Uniform layout constants ─────────────────────────────────────────────
 // Matches the TraversalParams struct in the WGSL shader.
@@ -197,6 +197,7 @@ this._instanceStageBytes = 0;
         this._visibleTableBuffer   = null;
         this._loadedTableBuffer    = null;
         this._instanceBuffer       = null;
+        this._edgeStitchBuffer     = null;
         this._metaBuffer           = null;
         this._feedbackBuffer       = null;
         this._lodIndexBuffer       = null;
@@ -386,6 +387,7 @@ async _withDebugReadbackLock(fn) {
         destroy(this._visibleTableBuffer);
         destroy(this._loadedTableBuffer);
         destroy(this._instanceBuffer);
+        destroy(this._edgeStitchBuffer);
         destroy(this._metaBuffer);
         destroy(this._feedbackBuffer);
         destroy(this._lodIndexBuffer);
@@ -405,6 +407,7 @@ async _withDebugReadbackLock(fn) {
         this._visibleTableBuffer   = null;
         this._loadedTableBuffer    = null;
         this._instanceBuffer       = null;
+        this._edgeStitchBuffer     = null;
         this._metaBuffer           = null;
         this._feedbackBuffer       = null;
         this._lodIndexBuffer       = null;
@@ -1188,6 +1191,9 @@ _logTraversalSeeds(seeds, tag = "QT-Seeds") {
     /** Instance buffer (combined LODs) */
     getInstanceBuffer() { return this._instanceBuffer; }
 
+    /** Edge stitch records (same index as the instance buffer), or null when off */
+    getEdgeStitchBuffer() { return this._edgeStitchBuffer; }
+
     /** Indirect args buffer (5 u32 per LOD) */
     getIndirectArgsBuffer() { return this._metaBuffer; }
 
@@ -1316,6 +1322,22 @@ _logTraversalSeeds(seeds, tag = "QT-Seeds") {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
         });
         totalBytes += instanceBytes;
+
+        // Edge stitch records, one per instance slot (instanceBufferBuilder.wgsl.js
+        // edgeStitchFor; read by the terrain vertex shader). A ninth storage
+        // buffer in the instance builder: only when the device allows it.
+        this._edgeStitchEnabled = (this.device.limits?.maxStorageBuffersPerShaderStage ?? 8) >= 9;
+        if (this._edgeStitchEnabled) {
+            const edgeStitchBytes = this.maxVisibleTiles * EDGE_STITCH_RECORD_BYTES;
+            this._edgeStitchBuffer = this.device.createBuffer({
+                label: 'QT-EdgeStitch',
+                size:  edgeStitchBytes,
+                usage: GPUBufferUsage.STORAGE
+            });
+            totalBytes += edgeStitchBytes;
+        } else {
+            Logger.warn('[QuadtreeGPU] maxStorageBuffersPerShaderStage < 9: terrain edge stitching off (LOD seams may crack)');
+        }
 
         // Meta buffer (counts + offsets + indirect args + feedback count + diagnostics)
         const metaU32Count = (this.lodLevels * 8) + 5;
@@ -1576,7 +1598,8 @@ if (!this._loggedTraversalVariant) {
     _createInstancePipeline() {
         const shaderSource = buildInstanceBuilderShaderSource({
             workgroupSize: this.workgroupSize,
-            maxGeomLOD: this.maxGeomLOD
+            maxGeomLOD: this.maxGeomLOD,
+            edgeStitch: this._edgeStitchEnabled === true
         });
 
         const shaderModule = this.device.createShaderModule({
@@ -1595,7 +1618,10 @@ if (!this._loggedTraversalVariant) {
                 { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
                 { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
                 { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-                { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }
+                { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                ...(this._edgeStitchEnabled
+                    ? [{ binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }]
+                    : [])
             ]
         });
 
@@ -1651,7 +1677,10 @@ if (!this._loggedTraversalVariant) {
                 { binding: 5, resource: { buffer: this._instanceBuffer } },
                 { binding: 6, resource: { buffer: this._metaBuffer } },
                 { binding: 7, resource: { buffer: this._feedbackBuffer } },
-                { binding: 8, resource: { buffer: this._lodIndexBuffer } }
+                { binding: 8, resource: { buffer: this._lodIndexBuffer } },
+                ...(this._edgeStitchEnabled
+                    ? [{ binding: 9, resource: { buffer: this._edgeStitchBuffer } }]
+                    : [])
             ]
         });
     }

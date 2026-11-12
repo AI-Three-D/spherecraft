@@ -445,11 +445,11 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
         dispMeters = 0.0;
     }
 
-    let micro = select(
-        0.0,
-        tileMicroDetail(wx, wy, dir, uniforms.seed, slope, profile, tileType),
-        dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
-    );
+    // if, not select(): select evaluates tileMicroDetail even when unused.
+    var micro = 0.0;
+    if (dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)) {
+        micro = tileMicroDetail(wx, wy, dir, uniforms.seed, slope, profile, tileType);
+    }
     let microGain = clamp(profile.microGain, 0.0, 5.0);
     // No micro detail in river channels (it would raise the carved bed), none crossing the water's level beside them.
     let microH = regionalValleyMicro(riverCarveMicroAt(dir, baseH * maxTerrainHeightM(), micro * dispMeters * microGain * regionalBasinMicroKeep(dir)) / maxTerrainHeightM(), dir);
@@ -739,10 +739,13 @@ fn authoredBiomeSpatialCoords(
     return vec2<f32>(metricPos.x, metricPos.z);
 }
 
+// gTileDraw / gTileDrawValid (surfaceCommon): set by the fallback classifier
+// or, below, by the authored-biome draw; not by water or the rock override.
 fn determineTileType(
     h: f32, slope: f32, wx: f32, wy: f32,
     unitDir: vec3<f32>, seed: i32
 ) -> u32 {
+    gTileDrawValid = false;
     let oceanLevel = uniforms.waterParams.y;
 
     if (h <= oceanLevel) {
@@ -780,6 +783,12 @@ fn determineTileType(
         return validateTileType(SURFACE_ROCK_BASE + variant);
     }
 
+    gTileDraw = vec3<f32>(
+        f32(resolveAuthoredBiomeTileType(u32(gBiomeTop2.x), variant)),
+        f32(resolveAuthoredBiomeTileType(u32(gBiomeTop2.y), variant)),
+        gBiomeTop2.z
+    );
+    gTileDrawValid = true;
     return resolveAuthoredBiomeTileType(biome.tileId, variant);
 }
 
@@ -1401,21 +1410,37 @@ if (uniforms.outputType == 0) {
         return;
     }
 
+    // .gba: the dithered draw behind the id, (id A / 255, id B / 255, share
+    // of A), for the flat-tier colour bake (TileGenerator, coarseColorSource
+    // 'draw'); (id, id, 1) where the id is not a dithered draw (water, rock
+    // override, river shore). Only that bake reads them, from this pass's rgba
+    // staging texture; every tile id reader decodes .r only, and the resident
+    // r8unorm copy keeps .r only.
+    var draw = vec3<f32>(0.0, 0.0, 1.0);
+    var drawValid = false;
     if (h <= oceanLevel) {
         tileType = SURFACE_WATER;
     } else {
         tileType = determineTileType(h, slope, wx, wy, unitDir, uniforms.seed);
+        let drawnTile = tileType;
+        drawValid = gTileDrawValid;
+        draw = gTileDraw;
         if (riverCarveShoreEnabled()) {
             tileType = riverShoreTile(tileType, riverCarveShoreWeights(unitDir, h * maxTerrainHeightM(), slope));
         }
+        drawValid = drawValid && tileType == drawnTile;
     }
 
     let forced = debugForcedTileType();
     if (forced != 0xffffffffu) {
         tileType = forced;
+        drawValid = false;
+    }
+    if (!drawValid) {
+        draw = vec3<f32>(f32(tileType), f32(tileType), 1.0);
     }
 
-    output = vec4<f32>(f32(tileType) / 255.0, 0.0, 0.0, 1.0);
+    output = vec4<f32>(f32(tileType) / 255.0, draw.x / 255.0, draw.y / 255.0, draw.z);
 
 }
 
@@ -1568,11 +1593,12 @@ else if (uniforms.outputType == 4) {
         dispMeters = 0.0;
     }
 
-    var micro = select(
-        0.0,
-        tileMicroDetail(wx, wy, unitDir, uniforms.seed, slope, profile, tileId),
-        dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)
-    );
+    // if, not select(): select evaluates tileMicroDetail even where it is
+    // unused (water).
+    var micro = 0.0;
+    if (dispMeters > 0.0 && terrainFeatureOn(TF_MICRO_DETAIL)) {
+        micro = tileMicroDetail(wx, wy, unitDir, uniforms.seed, slope, profile, tileId);
+    }
     let microGain = clamp(profile.microGain, 0.0, 5.0);
     let microH = regionalValleyMicro(riverCarveMicroAt(unitDir, baseH * maxTerrainHeightM(), micro * dispMeters * microGain * regionalBasinMicroKeep(unitDir)) / maxTerrainHeightM(), unitDir);
     let finalH = softClampHeight(baseH + microH, -1.1, 1.8, 0.25);

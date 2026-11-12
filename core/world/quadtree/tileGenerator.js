@@ -85,6 +85,70 @@ const DEFAULT_TEXTURE_FORMATS = {
     scatter: 'r8unorm'
 };
 
+/**
+ * WGSL of the flat-tier color bake (TileGenerator._runCoarseColorPass):
+ * tile ids in, per-texel category-color average out.
+ */
+export function buildCoarseColorBakeWGSL(tileCategories, averageColors = null) {
+    return `${buildCoarseCategoryColorFragmentWGSL(tileCategories, averageColors)}
+
+struct CoarseBakeParams {
+    windowUV: f32,
+    tileX: f32,
+    tileY: f32,
+    tileUVSize: f32,
+    faceSize: f32,
+    // 1: expected colour of the dithered tile draw (see _runCoarseColorPass);
+    // 0: window average.
+    mode: f32,
+    _pad1: f32,
+    _pad2: f32,
+};
+
+@group(0) @binding(0) var tileIds: texture_2d<f32>;
+@group(0) @binding(1) var outColor: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> params: CoarseBakeParams;
+
+const GRID: i32 = 8;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = textureDimensions(outColor);
+    if (gid.x >= size.x || gid.y >= size.y) { return; }
+    let maxCoord = vec2<i32>(textureDimensions(tileIds)) - vec2<i32>(1);
+    if (params.mode > 0.5) {
+        // tileIds is the tile pass's rgba staging output: .r the drawn id,
+        // .gba the draw behind it (id A / 255, id B / 255, share of A).
+        let s = textureLoad(tileIds, vec2<i32>(gid.xy), 0);
+        let wA = clamp(s.a, 0.0, 1.0);
+        let color = wA * coarseTileColor(round(s.g * 255.0))
+                  + (1.0 - wA) * coarseTileColor(round(s.b * 255.0));
+        textureStore(outColor, vec2<i32>(gid.xy), vec4<f32>(color, 1.0));
+        return;
+    }
+    // Tile textures are vertex-aligned: texel i sits at tile UV i/(size-1).
+    let denom = max(f32(size.x) - 1.0, 1.0);
+    let center = vec2<f32>(gid.xy) / denom;
+    let worldPos = (vec2<f32>(params.tileX, params.tileY) + center) * params.tileUVSize * params.faceSize;
+    var colorSum = vec3<f32>(0.0);
+    for (var gy: i32 = 0; gy < GRID; gy = gy + 1) {
+        for (var gx: i32 = 0; gx < GRID; gx = gx + 1) {
+            let cellCenter = (vec2<f32>(f32(gx), f32(gy)) + vec2<f32>(0.5, 0.5)) / f32(GRID) - vec2<f32>(0.5, 0.5);
+            let jitterSeed = worldPos * 0.173 + vec2<f32>(f32(gx) * 12.9898, f32(gy) * 78.233);
+            let jx = fract(sin(dot(jitterSeed, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
+            let jy = fract(sin(dot(jitterSeed, vec2<f32>(39.346, 11.135))) * 24634.6345) - 0.5;
+            let sampleUV = center + (cellCenter + vec2<f32>(jx, jy) * 0.5) * params.windowUV;
+            let coord = clamp(vec2<i32>(floor(sampleUV * denom + 0.5)), vec2<i32>(0), maxCoord);
+            let s = textureLoad(tileIds, coord, 0);
+            let tileId = select(s.r * 255.0, s.r, s.r > 1.0);
+            colorSum = colorSum + coarseTileColor(tileId);
+        }
+    }
+    textureStore(outColor, vec2<i32>(gid.xy), vec4<f32>(colorSum / f32(GRID * GRID), 1.0));
+}
+`;
+}
+
 export class TileGenerator {
     /**
      * @param {WebGPUTerrainGenerator} terrainGenerator  The compute-shader generator
@@ -119,6 +183,10 @@ this._maxGpuFencesObserved = 0;
         // matching the terrain shader's solidColorAverageWindowMeters.
         this.coarseColorWindowMeters = Number.isFinite(options.coarseColorWindowMeters) ? options.coarseColorWindowMeters : 0;
         this.coarseColorFaceSizeMeters = Number.isFinite(options.coarseColorFaceSizeMeters) ? options.coarseColorFaceSizeMeters : 0;
+        // 'draw': bake the expected colour of the tile draw instead of the
+        // window average (see _runCoarseColorPass). Applies to tiles
+        // generated after a change (refreshTiles).
+        this.coarseColorSource = options.coarseColorSource === 'draw' ? 'draw' : 'window';
         this.enableSplat  = options.enableSplat     ?? this.requiredTypes.includes('splatData');
         this.splatKernelSize = options.splatKernelSize ?? 3;
         this.textureFormats = {
@@ -565,7 +633,7 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
         // copy, so the terrain shader averages with one filtered sample.
         let gpuCoarseColor = null;
         if (requiredTypes.includes('coarseColor') && gpuTile) {
-            gpuCoarseColor = this._runCoarseColorPass(gpuTile, tileAddr);
+            gpuCoarseColor = this._runCoarseColorPass(gpuTile, tileAddr, tileTarget?.storageTexture ?? null);
         }
 
         if (telemetry) telemetry.computeSubmitted = performance.now();
@@ -721,57 +789,27 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
     // one bilinear sample. Category colors come from the same WGSL function
     // as the shader (buildCoarseCategoryColorFragmentWGSL with the same
     // categories and atlas average colors).
-    _runCoarseColorPass(tileTexture, tileAddr) {
+    //
+    // That window is clamped at the tile edge, so the two tiles on either side
+    // of an edge average different ground there: with 1434 m on a 4 km tile,
+    // up to 717 m into each tile is biased toward its own side (the
+    // checkerboard). Its 64 jittered samples of a dithered field leave noise
+    // (grain), and its sin() hash gets arguments in the millions.
+    //
+    // coarseColorSource 'draw' bakes instead, per texel, the expected colour
+    // of the tile id. The classifier picks between (at most) two candidates
+    // at random per cell, with shares that vary smoothly; the tile pass stores
+    // both candidates and the share next to the id (gTileDraw). Their
+    // weighted category colour is what any window average of the ids
+    // estimates, without the noise and without a window: a function of the
+    // position only, so the same at every LOD and on both sides of every tile
+    // edge.
+    _runCoarseColorPass(tileTexture, tileAddr, drawTexture = null) {
         const device = this.terrainGen?.device;
         if (!device || !this.tileCategories) return null;
         if (!this._coarseColorPipeline) {
             const averageColors = this.textureManager?.getCategoryAverageColorMap?.(this.tileCategories) || null;
-            const code = `
-${buildCoarseCategoryColorFragmentWGSL(this.tileCategories, averageColors)}
-
-struct CoarseBakeParams {
-    windowUV: f32,
-    tileX: f32,
-    tileY: f32,
-    tileUVSize: f32,
-    faceSize: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
-};
-
-@group(0) @binding(0) var tileIds: texture_2d<f32>;
-@group(0) @binding(1) var outColor: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(2) var<uniform> params: CoarseBakeParams;
-
-const GRID: i32 = 8;
-
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let size = textureDimensions(outColor);
-    if (gid.x >= size.x || gid.y >= size.y) { return; }
-    let maxCoord = vec2<i32>(textureDimensions(tileIds)) - vec2<i32>(1);
-    // Tile textures are vertex-aligned: texel i sits at tile UV i/(size-1).
-    let denom = max(f32(size.x) - 1.0, 1.0);
-    let center = vec2<f32>(gid.xy) / denom;
-    let worldPos = (vec2<f32>(params.tileX, params.tileY) + center) * params.tileUVSize * params.faceSize;
-    var colorSum = vec3<f32>(0.0);
-    for (var gy: i32 = 0; gy < GRID; gy = gy + 1) {
-        for (var gx: i32 = 0; gx < GRID; gx = gx + 1) {
-            let cellCenter = (vec2<f32>(f32(gx), f32(gy)) + vec2<f32>(0.5, 0.5)) / f32(GRID) - vec2<f32>(0.5, 0.5);
-            let jitterSeed = worldPos * 0.173 + vec2<f32>(f32(gx) * 12.9898, f32(gy) * 78.233);
-            let jx = fract(sin(dot(jitterSeed, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
-            let jy = fract(sin(dot(jitterSeed, vec2<f32>(39.346, 11.135))) * 24634.6345) - 0.5;
-            let sampleUV = center + (cellCenter + vec2<f32>(jx, jy) * 0.5) * params.windowUV;
-            let coord = clamp(vec2<i32>(floor(sampleUV * denom + 0.5)), vec2<i32>(0), maxCoord);
-            let s = textureLoad(tileIds, coord, 0);
-            let tileId = select(s.r * 255.0, s.r, s.r > 1.0);
-            colorSum = colorSum + coarseTileColor(tileId);
-        }
-    }
-    textureStore(outColor, vec2<i32>(gid.xy), vec4<f32>(colorSum / f32(GRID * GRID), 1.0));
-}
-`;
+            const code = buildCoarseColorBakeWGSL(this.tileCategories, averageColors);
             this._coarseColorPipeline = device.createComputePipeline({
                 label: 'CoarseColorBake',
                 layout: 'auto',
@@ -790,9 +828,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         const windowUV = (this.coarseColorWindowMeters > 0 && tileMeters > 0)
             ? this.coarseColorWindowMeters / tileMeters
             : 0.35;
+        // 'draw' needs the tile pass's rgba staging output (drawTexture);
+        // without it (ids copied from the resident r8 layer) the window
+        // average as before.
+        const useDraw = this.coarseColorSource === 'draw' && !!drawTexture;
+        if (this.coarseColorSource === 'draw' && !drawTexture && !this._warnedNoDrawTexture) {
+            this._warnedNoDrawTexture = true;
+            Logger.warn('[TileGenerator] coarseColorSource draw: no tile-pass staging texture, window average used');
+        }
         device.queue.writeBuffer(this._coarseColorParams, 0, new Float32Array([
-            windowUV, tileAddr.x, tileAddr.y, 1 / gridSize, faceSize, 0, 0, 0
+            windowUV, tileAddr.x, tileAddr.y, 1 / gridSize, faceSize,
+            useDraw ? 1 : 0, 0, 0
         ]));
+        const source = useDraw ? drawTexture : tileTexture;
         const out = this._createGPUTexture(this.textureSize, this.textureSize, 'rgba8unorm');
         const enc = device.createCommandEncoder({ label: 'CoarseColorBake' });
         const pass = enc.beginComputePass({ label: 'CoarseColorBake' });
@@ -800,7 +848,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         pass.setBindGroup(0, device.createBindGroup({
             layout: this._coarseColorPipeline.getBindGroupLayout(0),
             entries: [
-                { binding: 0, resource: tileTexture.createView() },
+                { binding: 0, resource: source.createView() },
                 { binding: 1, resource: out.createView() },
                 { binding: 2, resource: { buffer: this._coarseColorParams } }
             ]
