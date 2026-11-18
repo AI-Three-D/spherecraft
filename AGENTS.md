@@ -72,11 +72,7 @@ Short map of the current code so agents can jump to the right place and make saf
 ## Atmosphere, Sky, Clouds & Water
 - Atmosphere implementations live in `core/renderer/atmosphere`; `Frontend` wires the active LUTs/renderers into terrain and sky.
 - `core/renderer/sky/SkyRenderer.js` and `core/renderer/sky/MoonRenderer.js` handle sky dome and moon rendering.
-- `core/renderer/clouds` contains the cloud stack:
-  - `cloudRenderer.js` is the shared abstraction/uniform logic
-  - `webgpuCloudRenderer.js` is the main active volumetric path
-  - `cloudNoiseGenerator.js` builds cloud noise resources
-  - `cloudTypeDefinitions.js` and `cloudLayerDefinition.js` define weather-driven cloud layering
+- `core/renderer/clouds` is the cirrus layer (a textured shell drawn with the sky, before terrain; `features.clouds`). `core/renderer/volumetricClouds` holds the volumetric cumulus layer (`features.volumetricClouds`): `VolumetricCloudsModule` raymarches it into its own target and `CloudCompositePass` blends it (with ground shadows and the host's aerial perspective) into the HDR scene after opaque and transparent geometry. `Frontend` drives coverage from the weather's `cloudCoverage`; options are under `rendering.volumetricClouds`. `cloud_lab/` is a standalone tuning harness.
 - `PlanetTerrainModule` plugs ocean, river simulation, lake surfaces, near-water and simulated-water draw layers into the optional terrain module. Blended water follows opaque geometry. Shared water data is owned by the application.
 
 ## Assets, Meshes & Streaming

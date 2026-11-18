@@ -166,52 +166,72 @@ fn ap_computeSimple(
     let toFragment  = worldPos - cameraPos;
     let distance    = length(toFragment);
     let viewDir     = toFragment / max(distance, 0.001);
+    let atmosphereHeight = atmosphereRadius - planetRadius;
 
+    let upCam   = normalize(cameraPos - planetCenter);
+    let upFrag  = normalize(worldPos - planetCenter);
     let cameraAltitude   = length(cameraPos - planetCenter) - planetRadius;
     let fragmentAltitude = length(worldPos  - planetCenter) - planetRadius;
-    let avgAltitude      = max(0.0, (cameraAltitude + fragmentAltitude) * 0.5);
 
-    let density         = ap_getDensity(avgAltitude, scaleHeightR, scaleHeightM);
-    let extinctionR     = rayleighScattering * density.x;
-    let extinctionM     = vec3<f32>(mieScattering * density.y);
-    let totalExtinction = extinctionR + extinctionM;
-    result.transmittance = exp(-totalExtinction * distance);
+    // ── Transmittance from the LUT ───────────────────────────────────────────
+    // T(camera, fragment) = T(lower end → top) / T(upper end → top), both along the direction
+    // pointing up-path from the lower end, so neither lookup runs into the ground. This counts
+    // the whole column of air; the mean-altitude density it replaces was ~0 for a camera in
+    // orbit (mean altitude above the atmosphere), so terrain seen from space had no haze at all.
+    var lowAlt = fragmentAltitude;
+    var highAlt = cameraAltitude;
+    var dirUp = -viewDir;
+    var upLow = upFrag;
+    var upHigh = upCam;
+    if (cameraAltitude < fragmentAltitude) {
+        lowAlt = cameraAltitude;
+        highAlt = fragmentAltitude;
+        dirUp = viewDir;
+        upLow = upCam;
+        upHigh = upFrag;
+    }
+    let tLow = ap_sampleTransmittance(
+        transmittanceTex, transmittanceSampler,
+        clamp(lowAlt, 0.0, atmosphereHeight), dot(dirUp, upLow), planetRadius, atmosphereRadius);
+    var tHigh = vec3<f32>(1.0);
+    if (highAlt < atmosphereHeight) {
+        tHigh = ap_sampleTransmittance(
+            transmittanceTex, transmittanceSampler,
+            max(highAlt, 0.0), dot(dirUp, upHigh), planetRadius, atmosphereRadius);
+    }
+    result.transmittance = clamp(tLow / max(tHigh, vec3<f32>(1.0e-4)), vec3<f32>(0.0), vec3<f32>(1.0));
 
-    // ── Sun direction at the fragment surface point ───────────────────────────
-    // Use the surface normal (outward from planet) dot sunDir as the occlusion
-    // signal. This is the same quantity NdotL uses for diffuse lighting, so the
-    // aerial-perspective inscatter fade tracks the diffuse terminator exactly.
-    let surfaceNormal  = normalize(worldPos - planetCenter);
-    let cosSunSurface  = dot(sunDir, surfaceNormal);
+    // ── Rayleigh/Mie mix of the path ─────────────────────────────────────────
+    // Each species' share of the optical depth: density at the dense (low) end times the path
+    // length it stays dense over, at most one scale height measured vertically.
+    let cosVert = max(abs(dot(viewDir, upLow)), 0.02);
+    let dLow = ap_getDensity(max(lowAlt, 0.0), scaleHeightR, scaleHeightM);
+    let wR = rayleighScattering * dLow.x * min(distance, scaleHeightR / cosVert);
+    let wM = vec3<f32>(mieScattering * dLow.y * min(distance, scaleHeightM / cosVert));
 
-    // Smooth width: wide enough that the transition is invisible below ~1 km.
-    // ~0.08 ≈ 4.6° in angle space, which on a 50 km planet spans ~4 km on the
-    // ground — far too gradual to see as a line from 200–300 m altitude.
-    let smoothWidth = 0.08;
-    let sunOcclusion = smoothstep(-smoothWidth, smoothWidth, cosSunSurface);
-
-    // ── Sun transmittance at mid-ray ─────────────────────────────────────────
-    let midPos       = cameraPos + viewDir * distance * 0.5;
-    let upAtMid      = normalize(midPos - planetCenter);
-    let cosSunAtMid  = dot(sunDir, upAtMid);
-
+    // ── Sun at the middle of the in-atmosphere part of the path ──────────────
+    let oc = cameraPos - planetCenter;
+    let b = dot(oc, viewDir);
+    let disc = b * b - (dot(oc, oc) - atmosphereRadius * atmosphereRadius);
+    var tEnter = 0.0;
+    if (disc > 0.0) { tEnter = clamp(-b - sqrt(disc), 0.0, distance); }
+    let midPos = cameraPos + viewDir * (0.5 * (tEnter + distance));
+    let upAtMid = normalize(midPos - planetCenter);
+    let midAltitude = clamp(length(midPos - planetCenter) - planetRadius, 0.0, atmosphereHeight);
+    // Fade across the terminator with the surface normal, as NdotL does for the diffuse light.
+    let sunOcclusion = smoothstep(-0.08, 0.08, dot(sunDir, upFrag));
     let transmittanceToSun = ap_sampleTransmittance(
         transmittanceTex, transmittanceSampler,
-        avgAltitude, cosSunAtMid,
+        midAltitude, dot(sunDir, upAtMid),
         planetRadius, atmosphereRadius
-    ) * sunOcclusion;    // ← fades smoothly across the terminator
+    ) * sunOcclusion;
 
     let cosSun = dot(viewDir, sunDir);
     let phaseR = ap_rayleighPhase(cosSun);
     let phaseM = ap_miePhase(cosSun, mieAnisotropy);
+    let mixPhase = (wR * phaseR + wM * phaseM) / max(wR + wM, vec3<f32>(1.0e-12));
 
-    let safeExt      = max(totalExtinction, vec3<f32>(1e-7));
-    let inscatterInt = (vec3<f32>(1.0) - result.transmittance) / safeExt;
-
-    let scatterR = rayleighScattering * density.x * phaseR;
-    let scatterM = vec3<f32>(mieScattering * density.y * phaseM);
-
-    result.inscatter = (scatterR + scatterM) * transmittanceToSun * inscatterInt * sunIntensity;
+    result.inscatter = mixPhase * (vec3<f32>(1.0) - result.transmittance) * transmittanceToSun * sunIntensity;
 
     return result;
 }

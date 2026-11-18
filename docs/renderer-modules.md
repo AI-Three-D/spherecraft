@@ -37,6 +37,12 @@ The existing `Frontend` is the game composition layer. It uses `Renderer` to run
 
 ## Minimal renderer
 
+For a runnable example without terrain or the game frontend, see
+[`dev_harness/README.md`](../dev_harness/README.md). It includes an orbit camera,
+a procedurally textured mesh module, and Python tools that collect the import
+closure into one readable text bundle and reconstruct it without overwriting
+existing files. No Node installation or build step is needed to run that page.
+
 Package entry points are `t0/renderer`, `t0/terrain`, and `t0/resources`. Relative `.js` imports work directly in a browser. Type-only interfaces are exported by the matching declarations.
 
 ```ts

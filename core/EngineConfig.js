@@ -388,7 +388,8 @@ export class EngineConfig {
             'rendering.atmoBankParticles.offscreen.resolutionScale'
           )))
         }
-      }
+      },
+      volumetricClouds: createVolumetricCloudsConfig(rendering.volumetricClouds),
     };
 
 
@@ -559,6 +560,7 @@ export class EngineConfig {
       lowClouds:        requireBool(features.lowClouds        ?? true, 'features.lowClouds'),
       midClouds:        requireBool(features.midClouds        ?? true, 'features.midClouds'),
       highClouds:       requireBool(features.highClouds       ?? true, 'features.highClouds'),
+      volumetricClouds: requireBool(features.volumetricClouds ?? true, 'features.volumetricClouds'),
       cloudParticles:   requireBool(features.cloudParticles   ?? true, 'features.cloudParticles'),
       fogParticles:     requireBool(features.fogParticles     ?? true, 'features.fogParticles'),
       skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
@@ -822,4 +824,27 @@ export class EngineConfig {
     }
     return Math.max(0, arr.length - 1);
   }
+}
+
+/**
+ * Volumetric cloud options. `settings` overrides DEFAULT_CLOUD_SETTINGS in
+ * core/renderer/volumetricClouds/VolumetricCloudsModule.js (distances in km).
+ * `coverageFromWeather` maps the weather's cloudCoverage (0..1) onto the cloud
+ * coverage range { min, max }; false keeps settings.coverage fixed.
+ */
+function createVolumetricCloudsConfig(raw = {}) {
+  const config = requireObject(raw ?? {}, 'rendering.volumetricClouds');
+  const weather = config.coverageFromWeather ?? { min: 0.22, max: 0.78 };
+  return {
+    settings: { ...requireObject(config.settings ?? {}, 'rendering.volumetricClouds.settings') },
+    coverageFromWeather: weather === false ? false : {
+      min: requireNumber(weather.min, 'rendering.volumetricClouds.coverageFromWeather.min'),
+      max: requireNumber(weather.max, 'rendering.volumetricClouds.coverageFromWeather.max'),
+    },
+    brightness: requireNumber(config.brightness ?? 1, 'rendering.volumetricClouds.brightness'),
+    shadowStrength: requireNumber(config.shadowStrength ?? 0.6, 'rendering.volumetricClouds.shadowStrength'),
+    shadowFloor: requireNumber(config.shadowFloor ?? 0.45, 'rendering.volumetricClouds.shadowFloor'),
+    nightAmbient: requireNumber(config.nightAmbient ?? 1, 'rendering.volumetricClouds.nightAmbient'),
+    moonlight: requireNumber(config.moonlight ?? 1, 'rendering.volumetricClouds.moonlight'),
+  };
 }

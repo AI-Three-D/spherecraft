@@ -8,7 +8,7 @@
     "scaleHeightRayleighRatio": 0.1,
     "scaleHeightMieRatio":      0.015,
     "mieAnisotropy":            0.76,
-    "visualDensity":            0.5,
+    "visualDensity":            0.65,
     "sunIntensity":             20.0
   },
   "altitudeZones": {

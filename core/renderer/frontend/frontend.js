@@ -401,7 +401,7 @@ export class Frontend {
             }
             this.cloudRenderer.enabled = true;
         } else {
-            Logger.info('[Frontend] Clouds disabled by features.clouds');
+            Logger.info('[Frontend] Cloud layers (cirrus) disabled by features.clouds');
         }
 
         const weatherConfig = options.weatherConfig || {};
@@ -451,6 +451,12 @@ export class Frontend {
             });
             this.postProcessing.initialize();
 
+            if (this.engineConfig?.features?.volumetricClouds === false) {
+                Logger.info('[Frontend] Volumetric clouds disabled by features.volumetricClouds');
+            } else if (this.atmosphereSettings) {
+                await this._initVolumetricClouds();
+            }
+
             // Heat haze distortion emitter (renders into the distortion map).
             this.heatHazeEmitter = new HeatHazeEmitter(this.backend.device, {});
             this.heatHazeEmitter.initialize('depth24plus');
@@ -491,6 +497,10 @@ export class Frontend {
                     renderConfig: this.engineConfig?.rendering?.atmoBankParticles,
                 });
                 await this.atmoBankSystem.initialize();
+                // Bank particles shape themselves with cloud noise; the cirrus renderer supplies it each
+                // frame, the volumetric module's volumes stand in when cirrus is off.
+                const cloudNoise = !this.cloudRenderer && this.volumetricClouds?.getNoiseViews();
+                if (cloudNoise) this.atmoBankSystem.setNoiseTextures(cloudNoise.shape, cloudNoise.detail);
                 if (this.quadtreeTileManager?.tileStreamer) {
                     this.atmoBankSystem.setTileStreamer(this.quadtreeTileManager.tileStreamer);
                     Logger.info('[AtmoBank] GPU tile streamer linked');
@@ -818,7 +828,12 @@ updateLighting(starSystem) {
                 this.starRenderer.render();
             }
 
-            if (this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds) {
+            // Cirrus is a thin shell drawn without depth. From below it belongs to the sky, behind the
+            // terrain; from above it lies over everything, so it is drawn after the scene (drawn first,
+            // the planet covered it and only a halo against space was left).
+            const cirrusOn = !!(this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds);
+            const cirrusOnTop = cirrusOn && this._cameraAboveCirrus();
+            if (cirrusOn && !cirrusOnTop) {
                 this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager);
             }
 
@@ -835,6 +850,16 @@ updateLighting(starSystem) {
                         ng.getDetailTextureView()
                     );
                 }
+            }
+
+            // The composite multiplies the scene by the cloud transmittance, so it must not run on a
+            // stale output when the module is switched off.
+            if (this.volumetricClouds?.enabled && !environmentState?.disableClouds) {
+                this._renderVolumetricClouds(frame, environmentState);
+            }
+
+            if (cirrusOnTop) {
+                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager);
             }
 
             if (postEffectsActive) {
@@ -908,6 +933,128 @@ updateLighting(starSystem) {
         }
     }
 
+
+    // From inside the lowest active cirrus layer's slab upwards, cirrus lies in front of the ground.
+    // Switching at the middle of the layer hid the sheet below the camera behind the terrain there,
+    // leaving only the far side of the layer in the sky between the deck's horizon and the limb.
+    _cameraAboveCirrus() {
+        const layers = (this.cloudRenderer?._renderLayers ?? []).filter(l => l.coverage > 0.005 && l.altMax > l.altMin);
+        if (!layers.length || !this.planetConfig) return false;
+        const o = this.planetConfig.origin ?? { x: 0, y: 0, z: 0 };
+        const p = this.camera.position;
+        const altitude = Math.hypot(p.x - o.x, p.y - o.y, p.z - o.z) - this.planetConfig.radius;
+        const slab = this.cloudRenderer?.cirrusSlabFraction ?? 0;
+        return altitude > Math.min(...layers.map(l => 0.5 * (l.altMin + l.altMax) - 0.5 * slab * (l.altMax - l.altMin)));
+    }
+
+    /** Planet frame and atmosphere for the cloud module, in km, from the host's metre-based settings. */
+    _cloudPlanet() {
+        const a = this.atmosphereSettings;
+        const o = this.planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
+        const r = a.rayleighScattering;
+        const oz = a.ozoneAbsorption ?? { x: 6.5e-7, y: 1.881e-6, z: 8.5e-8 };
+        return {
+            radiusKm: a.planetRadius / 1000,
+            atmosphereHeightKm: a.atmosphereHeight / 1000,
+            unitsPerKm: 1000,
+            center: [o.x, o.y, o.z],
+            atmosphere: {
+                rayleighPerKm: [r.x * 1000, r.y * 1000, r.z * 1000],
+                rayleighScaleHeightKm: a.scaleHeightRayleigh / 1000,
+                // The sky's transmittance LUT counts Mie extinction equal to scattering.
+                miePerKm: a.mieScattering * 1000,
+                mieExtinctionPerKm: a.mieScattering * 1000,
+                mieScaleHeightKm: a.scaleHeightMie / 1000,
+                mieG: a.mieAnisotropy,
+                ozonePerKm: [oz.x * 1000, oz.y * 1000, oz.z * 1000],
+                ozonePeakKm: 25,
+                ozoneHalfWidthKm: 15,
+                groundAlbedo: a.groundAlbedo ?? 0.3,
+            },
+        };
+    }
+
+    async _initVolumetricClouds() {
+        const config = this.engineConfig?.rendering?.volumetricClouds ?? {};
+        const vp = this.backend._viewport;
+        try {
+            const { VolumetricCloudsModule } = await import('../volumetricClouds/VolumetricCloudsModule.js');
+            const { CloudCompositePass } = await import('../volumetricClouds/CloudCompositePass.js');
+            const clouds = new VolumetricCloudsModule({ settings: config.settings, planet: this._cloudPlanet() });
+            await clouds.initialize({ device: this.backend.device, viewport: { width: vp.width, height: vp.height } });
+            const composite = new CloudCompositePass(clouds, {
+                colorFormat: HDR_FORMAT,
+                shadowStrength: config.shadowStrength,
+                shadowFloor: config.shadowFloor,
+            });
+            await composite.initialize(this.backend.device);
+            this.volumetricClouds = clouds;
+            this.cloudComposite = composite;
+            this._cloudConfig = config;
+            if (typeof window !== 'undefined') window.volumetricClouds = clouds;
+        } catch (e) {
+            Logger.warn(`[Frontend] Volumetric clouds init failed: ${e?.message || e}`);
+            this.volumetricClouds = null;
+            this.cloudComposite = null;
+        }
+    }
+
+    // After the opaque and transparent scene: the raymarch stops at this frame's scene depth,
+    // then the composite blends the clouds (and their ground shadows) into the HDR target.
+    _renderVolumetricClouds(frame, environmentState) {
+        const pp = this.postProcessing;
+        const lutTexture = this.atmosphereLUT?.transmittanceLUT?._gpuTexture;
+        if (!pp?.hdrTextureView || !pp.depthTextureView || !lutTexture?.view) return;
+        const clouds = this.volumetricClouds;
+        const config = this._cloudConfig;
+        const a = this.atmosphereSettings;
+        const vp = this.backend._viewport;
+
+        const sun = environmentState?.sunLightDirection || this.uniformManager.uniforms.sunLightDirection.value;
+        const sunLength = Math.hypot(sun.x, sun.y, sun.z) || 1;
+        clouds.sunDirection = [sun.x / sunLength, sun.y / sunLength, sun.z / sunLength];
+        clouds.sunIlluminance = a.sunIntensity * (config.brightness ?? 1);
+        const wind = environmentState?.windDirection;
+        if (wind && Math.hypot(wind.x, wind.y) > 1e-6) {
+            const l = Math.hypot(wind.x, wind.y);
+            clouds.windDirection = [wind.x / l, 0, wind.y / l];
+        }
+        // Night light: the moon as a directional light (shaded tops and sides, like the sun by day)
+        // plus the host's night-sky ambient as a faint fill.
+        const lc = this.lightingController;
+        const night = 1 - Math.max(0, Math.min(1, lc.getSunVisibility?.() ?? 1));
+        const ambColor = this.uniformManager.uniforms.ambientLightColor?.value;
+        const ambI = (this.uniformManager.uniforms.ambientLightIntensity?.value ?? 0) * night;
+        clouds.ambientFloor = ['r', 'g', 'b'].map(ch => (ambColor?.[ch] ?? 0) * ambI * (config.nightAmbient ?? 1));
+        const moon = lc.getMoonDirection?.();
+        if (moon) clouds.moonDirection = [moon.x, moon.y, moon.z];
+        clouds.moonIlluminance = clouds.sunIlluminance * (lc.getMoonIntensity?.() ?? 0) * (config.moonlight ?? 1);
+
+        const weather = config.coverageFromWeather;
+        if (weather && Number.isFinite(environmentState?.cloudCoverage)) {
+            clouds.settings.coverage = weather.min + (weather.max - weather.min) * environmentState.cloudCoverage;
+        }
+
+        clouds.update({ ...frame, viewport: { width: vp.width, height: vp.height } });
+        this.backend.endRenderPassForCompute();
+        const encoder = this.backend.getCommandEncoder();
+        clouds.setSceneDepth(pp.depthTextureView);
+        clouds.compute(frame, encoder);
+        this.cloudComposite.render(encoder, {
+            colorView: pp.hdrTextureView, depthView: pp.depthTextureView, width: vp.width, height: vp.height,
+        }, {
+            transmittanceView: lutTexture.view,
+            planetRadius: a.planetRadius,
+            atmosphereRadius: a.atmosphereRadius ?? a.planetRadius + a.atmosphereHeight,
+            scaleHeightRayleigh: a.scaleHeightRayleigh,
+            scaleHeightMie: a.scaleHeightMie,
+            rayleighScattering: [a.rayleighScattering.x, a.rayleighScattering.y, a.rayleighScattering.z],
+            mieScattering: a.mieScattering,
+            mieAnisotropy: a.mieAnisotropy,
+            sunIntensity: a.sunIntensity,
+        });
+        this.backend.resumeRenderPass();
+    }
 
     async _maybeInitGPUShadows() {
         if (this.gpuShadowRenderer) return;
@@ -1089,6 +1236,10 @@ updateLighting(starSystem) {
         if (this.atmosphereLUT) {
             this.atmosphereLUT.invalidate();
         }
+        if (this.volumetricClouds) {
+            Object.assign(this.volumetricClouds.planet, this._cloudPlanet());
+            this.volumetricClouds.resetHistory();
+        }
     }
 
     async switchPlanetPreset(presetName) {
@@ -1115,6 +1266,8 @@ updateLighting(starSystem) {
         this.starRenderer?.dispose?.();
         this.skyRenderer?.dispose?.();
         this.cloudRenderer?.dispose?.();
+        this.cloudComposite?.dispose?.();
+        this.volumetricClouds?.dispose?.();
         this.heatHazeEmitter?.dispose?.();
         this.postProcessing?.dispose?.();
         this.weatherController?.dispose?.();

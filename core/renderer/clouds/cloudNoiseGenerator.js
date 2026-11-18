@@ -3,6 +3,9 @@
 
 import { Vector3 } from '../../../shared/math/index.js';
 import { createCloudNoiseComputeShader } from './shaders/cloudNoiseCompute.wgsl.js';
+import { DOWNSAMPLE_3D_WGSL } from '../volumetricClouds/shaders/cloudNoise.wgsl.js';
+
+const mipCount = (size) => Math.floor(Math.log2(size)) + 1;
 
 export class CloudNoiseGenerator {
     constructor(backend, options = {}) {
@@ -27,11 +30,14 @@ export class CloudNoiseGenerator {
         if (!device) return;
 
         for (const [name, size] of Object.entries(this.dimensions)) {
+            // Mipmapped: distant cirrus sampled level 0 only aliased into speckles that flickered with
+            // every camera move.
             this.noiseTextures[name] = device.createTexture({
                 label: `CloudNoise_${name}_${size}`,
                 size: [size, size, size],
                 dimension: '3d',
                 format: 'rgba8unorm',
+                mipLevelCount: mipCount(size),
                 usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
             });
             this.textureViews[name] = this.noiseTextures[name].createView({ dimension: '3d' });
@@ -57,12 +63,41 @@ export class CloudNoiseGenerator {
             compute: { module: shaderModule, entryPoint: 'main' }
         });
 
+        this._downsampleLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '3d' } }
+            ]
+        });
+        this._downsamplePipeline = device.createComputePipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [this._downsampleLayout] }),
+            compute: { module: device.createShaderModule({ code: DOWNSAMPLE_3D_WGSL }), entryPoint: 'main' }
+        });
+        const mipView = (tex, level) => tex.createView({ dimension: '3d', baseMipLevel: level, mipLevelCount: 1 });
+        this._mipSteps = [];
+        for (const [name, size] of Object.entries(this.dimensions)) {
+            const tex = this.noiseTextures[name];
+            for (let level = 1; level < tex.mipLevelCount; level++) {
+                this._mipSteps.push({
+                    bindGroup: device.createBindGroup({
+                        layout: this._downsampleLayout,
+                        entries: [
+                            { binding: 0, resource: mipView(tex, level - 1) },
+                            { binding: 1, resource: mipView(tex, level) }
+                        ]
+                    }),
+                    size: Math.max(1, size >> level)
+                });
+            }
+        }
+
         for (const name of Object.keys(this.dimensions)) {
             this.bindGroups[name] = device.createBindGroup({
                 layout: bindGroupLayout,
                 entries: [
                     { binding: 0, resource: { buffer: this.uniformBuffers[name] } },
-                    { binding: 1, resource: this.textureViews[name] }
+                    { binding: 1, resource: this.noiseTextures[name].createView({ dimension: '3d', baseMipLevel: 0, mipLevelCount: 1 }) }
                 ]
             });
         }
@@ -119,6 +154,12 @@ export class CloudNoiseGenerator {
         for (const entry of this._dispatchList) {
             computePass.setBindGroup(0, entry.bindGroup);
             const wg = Math.ceil(entry.size / 4);
+            computePass.dispatchWorkgroups(wg, wg, wg);
+        }
+        computePass.setPipeline(this._downsamplePipeline);
+        for (const step of this._mipSteps) {
+            computePass.setBindGroup(0, step.bindGroup);
+            const wg = Math.ceil(step.size / 4);
             computePass.dispatchWorkgroups(wg, wg, wg);
         }
         computePass.end();

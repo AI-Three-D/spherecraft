@@ -4219,7 +4219,7 @@
                 // Lab captures (tools/perf/flatTierLab): no cloud or fog layers
                 // over the terrain, so image diffs measure the terrain alone.
                 if (new URLSearchParams(location.search).has('labNoClouds') && engineConfig.features) {
-                    Object.assign(engineConfig.features, { clouds: false, highClouds: false, lowClouds: false, midClouds: false, fogParticles: false, cloudParticles: false });
+                    Object.assign(engineConfig.features, { clouds: false, highClouds: false, lowClouds: false, midClouds: false, volumetricClouds: false, fogParticles: false, cloudParticles: false });
                 }
                 // Far-terrain fix prototype at start (?terrainFix=N, see G below).
                 const terrainFixQuery = new URLSearchParams(location.search).get('terrainFix');

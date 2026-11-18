@@ -395,7 +395,7 @@ export class WeatherController {
 
         if (envState.forceCirrusOnly) {
             return [{
-                name: 'high', altMin: atmosphereHeight * 0.35, altMax: atmosphereHeight * 0.8,
+                name: 'high', altMin: atmosphereHeight * 0.38, altMax: atmosphereHeight * 0.72,
                 coverage: 0.45, densityMultiplier: 0.16, noiseScale: 2.2,
                 verticalStretch: 2.6, worleyInfluence: 0.25, edgeSoftness: 0.95,
                 extinction: 0.012, albedo: 0.95, precipitation: 0.0, darkness: 0.0

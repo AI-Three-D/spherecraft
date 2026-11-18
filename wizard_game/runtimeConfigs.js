@@ -160,6 +160,65 @@ export function createEngineConfig() {
           resolutionScale: 0.5, // set to 0.25 for quarter-resolution
         },
       },
+      volumetricClouds: {
+        // Overrides of DEFAULT_CLOUD_SETTINGS in core/renderer/volumetricClouds/VolumetricCloudsModule.js (km).
+        settings: {
+          cloudBottomKm: 2.0,
+          cloudTopKm: 6.8,
+          // The planet is ~820 km around; Earth-sized system and weather tiles
+          // would leave one weather state over the whole planet.
+          systemTileKm: 500,
+          largeWeatherTileKm: 260,
+          weatherTileKm: 90,
+          // Matches the terrain's twilight band, so dusk dims the deck gradually instead of a
+          // lit/dark front sweeping across the sky.
+          twilightSoftness: 0.1,
+          // Temporal reconstruction. Cloud target = resolutionScale × canvas; interleave 2 marches a
+          // quarter of it per frame and reprojects the rest, and fullRateOnMotion marches all of it
+          // while the camera moves faster than motionThresholdPx (costs ~4× the raymarch then).
+          // temporalBlend: weight of each new sample; historyClip: how far (in neighbourhood
+          // standard deviations) history may differ from new samples (lower = less ghosting, more shimmer).
+          resolutionScale: 0.5,
+          // false = no history at all: every pixel marched every frame, fixed jitter + 3x3 filter.
+          // No smear, shimmer or interleave artefacts from reprojection; the raymarch costs ~1.9x
+          // (lab: 1.3 → 2.5 ms at a 600x400 cloud target). true = interleaved + reprojected history.
+          temporal: false,
+                // Inside the layer, rays near the horizon need long marches; at 192 they ran out and the
+                // rest of the path fell back to the averaged density (a smooth band that moved with height).
+                maxSteps: 256,
+          interleave: 2,
+          fullRateOnMotion: true,
+          motionThresholdPx: 1.5,
+          temporalBlend: 0.08,
+          // While moving, fresh samples weigh at least this much (less smear, a little more noise).
+          motionBlend: 0.5,
+          historyClip: 1.25,
+          // Far LOD: from proxyStartKm above the cloud tops the raymarch crossfades into a cheap
+          // 8-slab proxy, complete at proxyEndKm. It puts clouds in the same places but shades them
+          // flatter, so it only takes over where clouds are small on screen. Once it has taken over,
+          // the cloud target uses orbitResolutionScale instead.
+          farProxy: true,
+          proxyStartKm: 60,
+          proxyEndKm: 150,
+          orbitResolutionScale: 0.8,
+          // Noise is blurred to at least this fraction of the march step (anti-aliasing along rays).
+          stepFootprint: 1.0,
+          // Time evolution: the weather pattern morphs and cloud shapes rise (km/s, real time).
+          weatherEvolveKmS: 0.02,
+          boilKmS: 0.004,
+        },
+        // Cloud coverage follows the weather's cloudCoverage (clear 0.08 … storm 0.98) over this range.
+        coverageFromWeather: { min: 0.08, max: 0.28 },
+        // Cloud radiance scale on top of the sky's sunIntensity; 0.65 matches the cloud lab's look at exposure 0.75.
+        brightness: 0.65,
+        // Ground under thick cloud keeps shadowFloor of its light.
+        shadowStrength: 0.6,
+        shadowFloor: 0.45,
+        // Night: the moon lights the clouds as a directional light (illuminance = sun illuminance x the
+        // host's moon intensity x moonlight); nightAmbient scales the host's night-sky fill.
+        nightAmbient: 1.0,
+        moonlight: 1.0,
+      },
       terrainShader: {
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
@@ -419,6 +478,7 @@ export function createEngineConfig() {
       lowClouds:         false,   // low weather cloud shell
       midClouds:         false,   // mid weather cloud shell
       highClouds:        true,    // high cirrus/cirrostratus layers
+      volumetricClouds:  true,    // raymarched cumulus layer (rendering.volumetricClouds)
       cloudParticles:    false,   // low/peak atmospheric bank particle clouds
       fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
       skyEffects:        true,    // sky, stars, moon
@@ -1041,7 +1101,7 @@ export function createGameDataConfig() {
             scaleHeightRayleighRatio: 0.1,  // Fraction of atmosphere thickness where density drops to 1/e
             scaleHeightMieRatio: 0.015,     // Same for Mie scattering (typically thinner)
             mieAnisotropy: 0.76,            // Forward scattering preference (0.76 = Earth-like)
-            visualDensity: 0.5,             // 1.0 = Earth-like, 1.5-2 = hazier, 0.5 = thinner
+            visualDensity: 0.65,            // 1.0 = Earth-like, 1.5-2 = hazier, 0.5 = thinner
             sunIntensity: 20.0              // Sun brightness multiplier
           },
           altitudeZones: {

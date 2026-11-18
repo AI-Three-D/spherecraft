@@ -6,8 +6,10 @@ import { TextureFormat } from '../resources/texture.js';
 import { Logger } from '../../../shared/Logger.js';
 import {gpuDeviceLoss,reportGpuAsyncFailure} from '../../../shared/gpuDeviceState.js';
 export class WebGPUBackend extends Backend {
-    constructor(canvas) {
+    /** @param {{ optionalFeatures?: string[] }} [options] features requested only when the adapter has them */
+    constructor(canvas, options = {}) {
         super(canvas);
+        this.optionalFeatures = options.optionalFeatures ?? [];
         this.device = null;
         this.adapter = null;
         this.context = null;
@@ -117,6 +119,9 @@ export class WebGPUBackend extends Backend {
             requiredFeatures.push('indirect-first-instance');
         } else {
             Logger.warn('[WebGPU] Adapter missing indirect-first-instance; indirect draws will ignore firstInstance.');
+        }
+        for (const feature of this.optionalFeatures) {
+            if (this.adapter.features?.has?.(feature) && !requiredFeatures.includes(feature)) requiredFeatures.push(feature);
         }
 
         this.device = await this.adapter.requestDevice({
