@@ -95,6 +95,12 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
     farProxy: false,
     proxyStartKm: 25,
     proxyEndKm: 70,
+    // Use the proxy below this camera altitude too (km; 0 = off), crossfading into the raymarch
+    // over the next groundProxyBlendKm (0 = abrupt switch).
+    groundProxyBelowKm: 0,
+    groundProxyBlendKm: 0.4,
+    // Without temporal reconstruction: strength of a 3x3 tent over the cloud target (0 = off, 1 = full).
+    spatialFilter: 1,
     /** Cloud target scale once the far proxy has fully taken over (it is ~5x cheaper per pixel); null keeps resolutionScale. */
     orbitResolutionScale: null,
     /**
@@ -176,6 +182,7 @@ export class VolumetricCloudsModule {
         this.shadowFade = 1;
         /** Current far-proxy weight (0 raymarch .. 1 proxy). */
         this.proxyWeight = 0;
+        this.farProxyWeight = 0;
         /** Radiance added to the clouds' ambient light (e.g. night sky and moonlight), linear RGB. */
         this.ambientFloor = [0, 0, 0];
         /** Moon as a second directional light (used while the sun is dim); illuminance 0 = off. */
@@ -429,10 +436,12 @@ export class VolumetricCloudsModule {
 
     _ensureTargets() {
         const s = this.settings;
-        // Switch resolution with hysteresis once the cheap far proxy has fully taken over.
+        // Switch resolution with hysteresis once the cheap far proxy has fully taken over. Only the
+        // far (orbital) proxy: the near-ground proxy keeps resolutionScale, so it is as sharp as the
+        // raymarch it crossfades into (at the orbit scale it was visibly crisper).
         if (s.farProxy && Number.isFinite(s.orbitResolutionScale)) {
-            if (this.proxyWeight >= 0.999) this._orbitRes = true;
-            else if (this.proxyWeight < 0.95) this._orbitRes = false;
+            if (this.farProxyWeight >= 0.999) this._orbitRes = true;
+            else if (this.farProxyWeight < 0.95) this._orbitRes = false;
         } else {
             this._orbitRes = false;
         }
@@ -570,7 +579,14 @@ export class VolumetricCloudsModule {
         const extent = s.shadowExtentKm;
         const aboveTops = altitude - s.cloudTopKm;
         this.shadowFade = 1 - smoothstep(s.shadowFadeStartKm, s.shadowFadeEndKm, aboveTops);
-        this.proxyWeight = s.farProxy ? smoothstep(s.proxyStartKm, s.proxyEndKm, aboveTops) : 0;
+        this.farProxyWeight = s.farProxy ? smoothstep(s.proxyStartKm, s.proxyEndKm, aboveTops) : 0;
+        this.proxyWeight = this.farProxyWeight;
+        if (s.groundProxyBelowKm > 0) {
+            const ground = s.groundProxyBlendKm > 0
+                ? 1 - smoothstep(s.groundProxyBelowKm, s.groundProxyBelowKm + s.groundProxyBlendKm, altitude)
+                : (altitude < s.groundProxyBelowKm ? 1 : 0);
+            this.proxyWeight = Math.max(this.proxyWeight, ground);
+        }
         const ground = normalize(cam.pos).map(x => x * R);
         let sf = this._shadowFrame;
         if (!sf || sf.extent !== extent || sf.R !== R || Math.hypot(...sub(ground, sf.anchor)) > extent * 0.15) {
@@ -612,7 +628,7 @@ export class VolumetricCloudsModule {
             1 / s.shapeTileKm, 1 / s.detailTileKm, 1 / s.weatherTileKm, 1 / s.largeWeatherTileKm,
             s.coverage, s.weatherContrast, s.cloudType, s.typeVariance,
             s.extinction, s.detailErosion, s.detailWarp, s.albedo,
-            ...this._windShape, 0,
+            ...this._windShape, s.spatialFilter,
             ...this._windDetail, s.windSkewKm,
             s.phaseForward, s.phaseBack, s.backLobeWeight, s.powder,
             s.ambient, s.msExtinction, s.msScattering, s.msPhase,

@@ -18,7 +18,7 @@ struct CloudUniforms {
     scales: vec4f,      // 1/shape tile, 1/detail tile, 1/weather tile, 1/large weather tile
     coverage: vec4f,    // coverage, weather contrast, cloud type, type variance
     density: vec4f,     // extinction per km, detail erosion, detail warp, scattering albedo
-    windShape: vec4f,   // xyz shape noise offset
+    windShape: vec4f,   // xyz shape noise offset, w spatial filter strength (no-temporal mode)
     windDetail: vec4f,  // xyz detail noise offset, w top skew (km)
     phase: vec4f,       // forward g, back g, back lobe weight, powder strength
     light: vec4f,       // ambient strength, multi-scatter extinction, scattering, phase factors

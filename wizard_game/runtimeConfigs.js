@@ -163,8 +163,12 @@ export function createEngineConfig() {
       volumetricClouds: {
         // Overrides of DEFAULT_CLOUD_SETTINGS in core/renderer/volumetricClouds/VolumetricCloudsModule.js (km).
         settings: {
-          cloudBottomKm: 2.0,
-          cloudTopKm: 6.8,
+          cloudBottomKm: 4.0,
+          cloudTopKm: 7.0,
+          // Near the ground the cumulus is the proxy (no raymarch); from 2.0 km it crossfades into the
+          // raymarch, complete at 2.4 km.
+          groundProxyBelowKm: 2.0,
+          groundProxyBlendKm: 0.4,
           // The planet is ~820 km around; Earth-sized system and weather tiles
           // would leave one weather state over the whole planet.
           systemTileKm: 500,

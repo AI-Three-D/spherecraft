@@ -260,6 +260,48 @@ fn directLight(p: vec3f, footprint: f32, weather: Weather, dir: vec3f, lightT: v
     return lightT * ms * mix(1.0, powder, powderWeight);
 }
 
+// Light scattered toward the camera per unit length at p (sun, moon, sky and ground light), shared
+// by the march and the near-ground proxy so both light clouds identically.
+fn cloudSource(p: vec3f, rd: vec3f, footprint: f32, weather: Weather, base: CloudBase, density: f32,
+               cosTheta: f32, powderWeight: f32) -> vec3f {
+    let r = length(p);
+    let muS = dot(p / r, u.sun.xyz);
+    let sigmaT = density * u.density.x;
+    let sigmaS = sigmaT * u.density.w;
+    let sunT = sunTransmittance(transLut, lutSampler, r, muS, u.planet.x, u.planet.w) * u.sun.w;
+    let sunMax = max(sunT.r, max(sunT.g, sunT.b));
+    var sunL = vec3f(0.0);
+    if (sunMax > 1.0e-5) {
+        sunL = directLight(p, footprint, weather, u.sun.xyz, sunT, cosTheta, sigmaT, powderWeight);
+    }
+    let skyAmb = textureSampleLevel(ambientLut, lutSampler, ambientUv(muS, 0.0), 0.0).rgb;
+    let groundAmb = textureSampleLevel(ambientLut, lutSampler, ambientUv(muS, 1.0), 0.0).rgb;
+    let skyMix = saturate(0.25 + base.h);
+    // Sky light is blocked by the cloud above: two cheap upward samples darken crevices,
+    // undersides and the insides of towers, so cloud relief shows even without direct light
+    // (at night with the moon down the clouds otherwise looked like flat sheets).
+    let skyVis = skyVisibility(p, weather, footprint);
+    var amb = mix(groundAmb, skyAmb * skyVis, skyMix) * (u.sun.w * u.light.x) + u.ambientFloor.rgb * skyVis;
+    // Moonlight: a second directional light with its own light march and moonlit sky,
+    // evaluated only while the sun is dim (no extra cost by day). Without it, night clouds
+    // only had a uniform fill and read as flat grey from above.
+    if (u.moon.w > 0.0) {
+        let muM = dot(p / r, u.moon.xyz);
+        let moonT = sunTransmittance(transLut, lutSampler, r, muM, u.planet.x, u.planet.w) * u.moon.w;
+        let moonMax = max(moonT.r, max(moonT.g, moonT.b));
+        if (moonMax > 1.0e-5 && sunMax < moonMax * 20.0) {
+            let cosM = dot(rd, u.moon.xyz);
+            let powderM = u.phase.w * saturate(0.6 - 0.6 * cosM);
+            sunL += directLight(p, footprint, weather, u.moon.xyz, moonT, cosM, sigmaT, powderM);
+            let skyAmbM = textureSampleLevel(ambientLut, lutSampler, ambientUv(muM, 0.0), 0.0).rgb;
+            let groundAmbM = textureSampleLevel(ambientLut, lutSampler, ambientUv(muM, 1.0), 0.0).rgb;
+            amb += mix(groundAmbM, skyAmbM * skyVis, skyMix) * (u.moon.w * u.light.x);
+        }
+    }
+    let S = (sunL + amb) * sigmaS;
+    return S;
+}
+
 struct MarchResult {
     color: vec4f,
     depth: f32,
@@ -403,41 +445,8 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
             if (base.density > 0.0 && farW < 0.999) { density = cloudDetail(p, base, footprint); }
             density = mix(density, meanD, farW);
             if (density > 0.0) {
-                let r = length(p);
-                let muS = dot(p / r, u.sun.xyz);
                 let sigmaT = density * u.density.x;
-                let sigmaS = sigmaT * u.density.w;
-                let sunT = sunTransmittance(transLut, lutSampler, r, muS, u.planet.x, u.planet.w) * u.sun.w;
-                let sunMax = max(sunT.r, max(sunT.g, sunT.b));
-                var sunL = vec3f(0.0);
-                if (sunMax > 1.0e-5) {
-                    sunL = directLight(p, footprint, weather, u.sun.xyz, sunT, cosTheta, sigmaT, powderWeight);
-                }
-                let skyAmb = textureSampleLevel(ambientLut, lutSampler, ambientUv(muS, 0.0), 0.0).rgb;
-                let groundAmb = textureSampleLevel(ambientLut, lutSampler, ambientUv(muS, 1.0), 0.0).rgb;
-                let skyMix = saturate(0.25 + base.h);
-                // Sky light is blocked by the cloud above: two cheap upward samples darken crevices,
-                // undersides and the insides of towers, so cloud relief shows even without direct light
-                // (at night with the moon down the clouds otherwise looked like flat sheets).
-                let skyVis = skyVisibility(p, weather, footprint);
-                var amb = mix(groundAmb, skyAmb * skyVis, skyMix) * (u.sun.w * u.light.x) + u.ambientFloor.rgb * skyVis;
-                // Moonlight: a second directional light with its own light march and moonlit sky,
-                // evaluated only while the sun is dim (no extra cost by day). Without it, night clouds
-                // only had a uniform fill and read as flat grey from above.
-                if (u.moon.w > 0.0) {
-                    let muM = dot(p / r, u.moon.xyz);
-                    let moonT = sunTransmittance(transLut, lutSampler, r, muM, u.planet.x, u.planet.w) * u.moon.w;
-                    let moonMax = max(moonT.r, max(moonT.g, moonT.b));
-                    if (moonMax > 1.0e-5 && sunMax < moonMax * 20.0) {
-                        let cosM = dot(rd, u.moon.xyz);
-                        let powderM = u.phase.w * saturate(0.6 - 0.6 * cosM);
-                        sunL += directLight(p, footprint, weather, u.moon.xyz, moonT, cosM, sigmaT, powderM);
-                        let skyAmbM = textureSampleLevel(ambientLut, lutSampler, ambientUv(muM, 0.0), 0.0).rgb;
-                        let groundAmbM = textureSampleLevel(ambientLut, lutSampler, ambientUv(muM, 1.0), 0.0).rgb;
-                        amb += mix(groundAmbM, skyAmbM * skyVis, skyMix) * (u.moon.w * u.light.x);
-                    }
-                }
-                let S = (sunL + amb) * sigmaS;
+                let S = cloudSource(p, rd, footprint, weather, base, density, cosTheta, powderWeight);
                 let stepT = exp(-sigmaT * dt);
                 L += T * (S - S * stepT) / max(sigmaT, 1.0e-5);
                 let w = T * (1.0 - stepT);
@@ -465,6 +474,8 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
 // analytically so the bright sunlit skin survives the long slab, plus one density sample towards
 // the sun so clouds keep a lit and a shaded side.
 const PROXY_SLABS: i32 = 8;
+// Fixed-height slices of the near-ground proxy (camera below the layer).
+const PROXY_SHELLS: i32 = 16;
 const PROXY_SUN_KM: f32 = 0.7;
 
 fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
@@ -474,7 +485,9 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     let outer = raySphere(ro, rd, u.planet.z);
     if (outer.x > outer.y || outer.y <= 0.0) { return res; }
     let inner = raySphere(ro, rd, u.planet.y);
-    let t0 = max(outer.x, 0.0);
+    var t0 = max(outer.x, 0.0);
+    // From below the layer, the path through it starts where the ray leaves the base sphere.
+    if (dot(ro, ro) < u.planet.y * u.planet.y) { t0 = max(t0, inner.y); }
     var t1 = outer.y;
     if (inner.x < inner.y && inner.x > t0) { t1 = inner.x; }
     t1 = min(t1, tScene);
@@ -524,6 +537,58 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     var weightSum = 0.0;
     var odUp = 0.0;
     let upPerView = max(-dot(rd, up), 0.05);
+    // From below the layer (the near-ground proxy): one sample per fixed-height slice the ray
+    // crosses, weighted by its exact length, lit with the raymarch's own cloudSource (light marches
+    // toward the sun and moon, sky visibility). The slices sit at the same world heights for every
+    // pixel and camera position, so shapes match the raymarch and stay put while moving; the shared
+    // lighting keeps dusk and night the same (a slab model lit through the column above went dark at
+    // low sun while the raymarch lights clouds through the gaps).
+    if (dot(ro, ro) < u.planet.y * u.planet.y) {
+        let bq = dot(ro, rd);
+        let cq = dot(ro, ro);
+        let dr = (u.planet.z - u.planet.y) / f32(PROXY_SHELLS);
+        // Stop at the planet as well as the scene depth (water does not write depth): rays that
+        // pointed down otherwise passed through the planet and showed the layer on the far side.
+        var tEnd = tScene;
+        let ground = raySphere(ro, rd, u.planet.x);
+        if (ground.x < ground.y && ground.y > 0.0) { tEnd = min(tEnd, max(ground.x, 0.0)); }
+        let cosTheta = dot(rd, u.sun.xyz);
+        let powderWeight = u.phase.w * saturate(0.6 - 0.6 * cosTheta);
+        var T = 1.0;
+        var L = vec3f(0.0);
+        var depthSum = 0.0;
+        var weightSum = 0.0;
+        for (var k = 0; k < PROXY_SHELLS; k++) {
+            if (T < 0.003) { break; }
+            let rLo = u.planet.y + f32(k) * dr;
+            let rHi = rLo + dr;
+            let a = max(-bq + sqrt(max(bq * bq - cq + rLo * rLo, 0.0)), 0.0);
+            let b = min(-bq + sqrt(max(bq * bq - cq + rHi * rHi, 0.0)), tEnd);
+            if (b <= a) { continue; }
+            let len = b - a;
+            let t = 0.5 * (a + b);
+            let p = ro + rd * t;
+            let footprint = max(t * u.march2.y, min(len * 0.25, u.march.w * 0.5));
+            let weather = sampleWeather(p, t * u.march2.y);
+            let base = cloudBaseWithWeather(p, heightFraction(length(p)), weather, footprint);
+            let farW = farAverageWeight(p, rd, t * u.march2.y);
+            var density = 0.0;
+            if (base.density > 0.0 && farW < 0.999) { density = cloudDetail(p, base, footprint); }
+            density = mix(density, meanCloudDensity(weather, base.h), farW);
+            if (density <= 0.0) { continue; }
+            let sigmaT = density * u.density.x;
+            let S = cloudSource(p, rd, footprint, weather, base, density, cosTheta, powderWeight);
+            let stepT = exp(-sigmaT * len);
+            L += T * (S - S * stepT) / max(sigmaT, 1.0e-5);
+            let w = T * (1.0 - stepT);
+            depthSum += t * w;
+            weightSum += w;
+            T *= stepT;
+        }
+        res.color = vec4f(L, T);
+        if (weightSum > 1.0e-4) { res.depth = depthSum / weightSum; }
+        return res;
+    }
     for (var i = 0; i < PROXY_SLABS; i++) {
         let t = t0 + (f32(i) + jitter) * dt;
         let p = ro + rd * t;
@@ -639,7 +704,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let blend = u.march2.z;
     if (blend >= 0.999) {
         if (u.atmoExtra.w > 0.5) {
-            // No temporal reconstruction: soften the fixed jitter with a 3x3 tent instead.
+            // No temporal reconstruction: optionally soften with a 3x3 tent (spatialFilter, 0..1).
+            // Samples sit at fixed midpoints then, so there is no jitter to hide and the tent only
+            // blurs; at half resolution it softened distant clouds noticeably.
             var sum = vec4f(0.0);
             for (var y = -1; y <= 1; y++) {
                 for (var x = -1; x <= 1; x++) {
@@ -647,7 +714,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
                     sum += textureLoad(curColor, clamp(q + vec2i(x, y), vec2i(0), blocks - 1), 0) * w;
                 }
             }
-            spatial = sum / 16.0;
+            spatial = mix(cur, sum / 16.0, saturate(u.windShape.w));
         }
         textureStore(outHistory, pi, spatial);
         return;
