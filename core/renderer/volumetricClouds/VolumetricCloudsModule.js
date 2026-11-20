@@ -115,6 +115,72 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
      */
     refineEntry: true,
     /**
+     * Steps normally grow with distance only (stepGrowth). With layerStepFit > 0, a ray that crosses
+     * the layer in a short stretch (from above, or steeply) steps no coarser than its path through
+     * the layer / (maxSteps × layerStepFit), so it uses that share of the step budget there. Costs more
+     * samples on those rays; 0 = off.
+     */
+    layerStepFit: 0,
+    /**
+     * Where the per-region shape-noise offset (which keeps cloud cells off a grid) comes from.
+     * 'regional': fast weather channels (suspected cause of shimmering vertical curtains through
+     * clouds); 'slow': a blurred planet-scale lookup, varying over 50-200 km; 'none': no offset (test).
+     */
+    shapeOffset: 'regional',
+    /**
+     * Light sharing: the lighting (light march, sky visibility, ambient; most of a cloud sample's
+     * cost) is computed at the first cloud sample after clear air and then every lightReuseSteps-th
+     * sample, and reused in between. Shapes and density stay per sample. 1 = every sample.
+     */
+    lightReuseSteps: 1,
+    /** Lighting is also recomputed once it is this far (km) behind along the ray: the far band's averaged density never clears, so a count alone could reuse it for kilometres. */
+    lightReuseMaxKm: 1.0,
+    /**
+     * Extra atmospheric depth for the sunlight reaching clouds when the sun is low (1 = physical). A
+     * planet with a scaled-down atmosphere reddens a low sun much less than Earth; raise this for
+     * Earth-like dawn and dusk colours on the clouds. The sun from ~30 degrees up is unaffected.
+     */
+    sunsetDepth: 1,
+    /**
+     * Clouds' sunlight colour is read at this fraction of their altitude (1 = physical). A small planet's
+     * air thins within a few km, so tall clouds sat above nearly all of it and stayed white at dusk.
+     */
+    sunsetAltitudeScale: 1,
+    /**
+     * 'cut': shape times height profile, then the coverage threshold (flat tops at one height, near
+     * vertical sides at low coverage). 'domes': coverage on the shape, then the profile erodes from the
+     * top, so each cloud's height follows its core density (rounded tops of varied height).
+     */
+    cloudShape: 'cut',
+    /** Height scale of 'domes' clouds (1 = the cut profile's top; taller for towering fair-weather cumulus). */
+    domeHeight: 1,
+    /**
+     * 'domes' only. Giant cells: the shape noise at giantScale x the shape tile gives a few much wider
+     * clouds, taking giantShare of the coverage (0 = off), and their cores are scaled by giantHeight so
+     * they also build taller. Mixes popcorn with cauliflower towers instead of one size of cloud.
+     */
+    giantShare: 0,
+    giantHeight: 2.5,
+    giantScale: 3,
+    /** 'domes' only: typical height of small clouds above the base (km), so a thick layer for giants does not make them all tall. */
+    popcornTopKm: 1.6,
+    /** 'domes' only: how abruptly density rises at a cloud's edge (gain on the shape core; higher = crisper, fewer billows). */
+    domeEdgeSharpness: 1.5,
+    /** 'domes' only: strength of the 0.5-1 km cauliflower heads on cloud surfaces (0 = off). */
+    domeHeads: 0.6,
+    /** Extra sky light on clouds around sunset (0 = none): shaded sides mauve and blue-grey instead of brown. */
+    duskSkyBoost: 0,
+    /**
+     * Horizon Zero Dawn's in-scattering probability (0 = off, 1 = full): less light scattered toward the
+     * eye where the cloud is thin (more so toward its top) and near its base. Dark grooves between
+     * billows and dark undersides.
+     */
+    inScatter: 0,
+    /** Brightness compensation for inScatter (the probability is well below 1 on most of the visible skin). */
+    inScatterGain: 2.5,
+    /** Sky-light occlusion from the sides as well as above (0 = off, 1 = on; 3 more density samples per lit sample). */
+    aoSide: 0,
+    /**
      * Far, grazing samples fade from individual clouds to their average density as the pixel's
      * footprint along the layer (km, footprint / sin of the grazing angle) grows from farAverageStartKm
      * to farAverageEndKm. Sub-pixel clouds there otherwise alias and flicker as the camera moves.
@@ -263,7 +329,7 @@ export class VolumetricCloudsModule {
     compute(frame, encoder) {
         if (!this.enabled) return;
         const lutKey = JSON.stringify([this.planet.radiusKm, this.planet.atmosphereHeightKm, this.planet.atmosphere,
-            this.settings.cloudBottomKm, this.settings.cloudTopKm, this.settings.twilightSoftness]);
+            this.settings.cloudBottomKm, this.settings.cloudTopKm, this.settings.twilightSoftness, this.settings.sunsetDepth]);
         if (lutKey !== this._lutKey) {
             this._lutKey = lutKey;
             this._dispatch(encoder, 'transmittance', this._bindGroups.transmittance, 256 / 8, 64 / 8);
@@ -636,8 +702,8 @@ export class VolumetricCloudsModule {
             s.lightStepKm, 2 / (cam.proj[1] * height), blend, s.debugSteps ? 1 : 0,
             ...e1, extent,
             ...e2, 0,
-            0, R, this.shadowFade, 0,
-            ...this.windDirection, 0,
+            0, R, this.shadowFade, Math.max(0, s.layerStepFit || 0),
+            ...this.windDirection, { slow: 1, none: 2 }[s.shapeOffset] ?? 0,
             1 / s.systemTileKm, s.systemStrength, s.systemWarp, s.systemOffset,
             k, ox, oy, Math.max(1, Math.round(s.lightSteps)),
             this.proxyWeight, this._evolve, this._boil, s.historyClip,
@@ -649,6 +715,11 @@ export class VolumetricCloudsModule {
             ...this.ambientFloor, s.stepFootprint,
             s.refineEntry ? 1 : 0, s.farAverageStartKm, s.farAverageEndKm, s.farAverageDensity,
             ...normalize(this.moonDirection), this.moonIlluminance,
+            Math.max(1, Math.round(s.lightReuseSteps || 1)), Math.max(0, s.lightReuseMaxKm ?? 1), s.cloudShape === 'domes' ? Math.max(0.6, s.domeHeight ?? 1) : 0, Math.max(0.1, s.sunsetDepth ?? 1),
+            Math.max(0, s.giantShare ?? 0), Math.max(1, s.giantHeight ?? 2.5), Math.max(1, s.giantScale ?? 3),
+            Math.min(0.92, Math.max(0.05, (s.popcornTopKm ?? 1.6) / Math.max(0.1, s.cloudTopKm - s.cloudBottomKm))),
+            Math.max(0, s.inScatter ?? 0), Math.max(0, s.aoSide ?? 0), Math.max(0, s.inScatterGain ?? 2.5), Math.max(0.05, s.sunsetAltitudeScale ?? 1),
+            Math.max(0.5, s.domeEdgeSharpness ?? 1.5), Math.max(0, s.domeHeads ?? 0.6), Math.max(0, s.duskSkyBoost ?? 0), 0,
         ]);
         this.device.queue.writeBuffer(this._uniformBuffer, 0, data);
         this._prev = cam;

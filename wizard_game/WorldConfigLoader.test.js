@@ -15,7 +15,8 @@ describe('rendering power settings', () => {
   const adaptive = loader._buildEngineConfig({}, {}, { rendering: { adaptive: { stationaryFps: 24, motionPixelRatio: 0.8 } } });
   expect(adaptive.rendering.adaptive.stationaryFps).toBe(24);
   expect(adaptive.rendering.adaptive.motionPixelRatio).toBe(0.8);
-  expect(adaptive.rendering.adaptive.fastMotionPixelRatio).toBe(0.7);
+  // Default: no resolution drop while moving (fast motion stays at the still ratio).
+  expect(adaptive.rendering.adaptive.fastMotionPixelRatio).toBe(1.5);
  });
  it('rejects invalid pixel ratios and FPS limits from world JSON', () => {
   const loader = new WorldConfigLoader();

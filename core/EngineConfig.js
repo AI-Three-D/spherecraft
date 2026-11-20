@@ -390,6 +390,16 @@ export class EngineConfig {
         }
       },
       volumetricClouds: createVolumetricCloudsConfig(rendering.volumetricClouds),
+      // Night look in the tonemap (0 = off): at full night colour moves `grade` (0..1) of the way
+      // toward blue night vision, and exposure changes by `exposure` (+1 doubles, -0.2 is 20 % darker).
+      nightLook: {
+        grade: requireNumber(rendering.nightLook?.grade ?? 0, 'rendering.nightLook.grade'),
+        exposure: requireNumber(rendering.nightLook?.exposure ?? 0, 'rendering.nightLook.exposure'),
+        // Brightness of the moonlit sky (1 = physical share of the moon), separate from the scene.
+        sky: requireNumber(rendering.nightLook?.sky ?? 1, 'rendering.nightLook.sky'),
+        // Brightness of moonlit clouds (scales their moonlight and night fill; 1 = as lit by the moon).
+        clouds: requireNumber(rendering.nightLook?.clouds ?? 1, 'rendering.nightLook.clouds'),
+      },
     };
 
 

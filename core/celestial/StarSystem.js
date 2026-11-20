@@ -261,7 +261,7 @@ export class StarSystem {
      */
     getMoonInfo(localPos = { x: 0, y: 0, z: 0 }, moonOrId = null) {
         if (!this.currentBody) {
-            return this._getDefaultMoonInfo();
+            return this._getDefaultMoonInfo(localPos);
         }
         
         // Get the moon
@@ -275,7 +275,7 @@ export class StarSystem {
         }
         
         if (!moon) {
-            return this._getDefaultMoonInfo();
+            return this._getDefaultMoonInfo(localPos);
         }
         
         // Calculate moon direction (similar to star direction in CelestialBody)
@@ -328,13 +328,30 @@ export class StarSystem {
         };
     }
 
-    _getDefaultMoonInfo() {
+    /**
+     * Stand-in when the body has no moon: a full moon, placed where a full moon is, about opposite the
+     * sun (5 degrees off, towards the body's rotation axis, so the two never line up exactly). It rises
+     * at sunset, is highest around midnight and sets at sunrise. It used to be a fixed body-local
+     * direction (0, 0.5, 0.5) with a hard-coded elevation: it never moved, and for most places it sat
+     * on the horizon, lighting clouds only at grazing angles.
+     */
+    _getDefaultMoonInfo(localPos = { x: 0, y: 0, z: 0 }) {
+        let direction = new Vector3(0, 0.5, 0.5).normalize();
+        if (this.currentBody && this.primaryStar) {
+            const sun = this.currentBody.getStarDirection(this.primaryStar, localPos).direction;
+            const axis = this.currentBody.rotationAxis ?? new Vector3(0, 1, 0);
+            direction = new Vector3(-sun.x + axis.x * 0.09, -sun.y + axis.y * 0.09, -sun.z + axis.z * 0.09).normalize();
+        }
+        const up = new Vector3(localPos.x, localPos.y, localPos.z);
+        if (up.lengthSq() < 1e-8) up.set(0, 1, 0);
+        up.normalize();
+        const elevation = Math.asin(Math.max(-1, Math.min(1, direction.dot(up))));
         return {
-            direction: new Vector3(0, 0.5, 0.5).normalize(),
+            direction,
             distance: 384400000,
             angularDiameter: 0.009,
-            elevation: 0.5,
-            isAboveHorizon: true,
+            elevation,
+            isAboveHorizon: elevation > -0.0145,
             phase: 0.5,
             illumination: 1.0,
             phaseName: 'Full Moon'

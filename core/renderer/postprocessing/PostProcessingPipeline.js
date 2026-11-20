@@ -240,6 +240,8 @@ export class PostProcessingPipeline {
 
     get exposure() { return this.toneMappingPass?.exposure ?? 1.0; }
     set exposure(v) { if (this.toneMappingPass) this.toneMappingPass.exposure = v; }
+    /** Night look for the tonemap (see ToneMappingPass.setNight). */
+    setNight(amount, grade = 0, exposure = 0) { this.toneMappingPass?.setNight(amount, grade, exposure); }
 
     // --- Internal ---
 

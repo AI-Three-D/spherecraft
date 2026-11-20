@@ -128,7 +128,7 @@ fn main(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_id) 
         if (lab.flags.x > 0.5) {
             let dims = vec2f(textureDimensions(cloudDepth));
             let uv = pix / vec2f(size);
-            split = clamp(textureLoad(cloudDepth, vec2i(clamp(uv * dims, vec2f(0.0), dims - 1.0)), 0).r, t0, tEnd);
+            split = clamp(abs(textureLoad(cloudDepth, vec2i(clamp(uv * dims, vec2f(0.0), dims - 1.0)), 0).r), t0, tEnd);
         }
         // Animated so the sampling pattern reads as fine grain instead of a fixed stipple.
         let jitter = fract(ign(pix) + lab.viewport.w * 0.61803398875);

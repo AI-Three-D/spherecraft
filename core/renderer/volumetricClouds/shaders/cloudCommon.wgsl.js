@@ -26,8 +26,8 @@ struct CloudUniforms {
     march2: vec4f,      // first light step, radians per cloud pixel, temporal blend, debug mode
     shadowE1: vec4f,    // xyz shadow-map axis, w extent
     shadowE2: vec4f,    // xyz shadow-map axis, w centre along e1; map plane normal is cross(e1, e2)
-    shadowInfo: vec4f,  // x centre along e2, y plane offset along its normal, z shadow fade (0 = off, map not updated)
-    windDir: vec4f,     // xyz unit wind direction
+    shadowInfo: vec4f,  // x centre along e2, y plane offset along its normal, z shadow fade (0 = off, map not updated), w layer step fit (fraction of maxSteps; 0 = off)
+    windDir: vec4f,     // xyz unit wind direction, w shape offset mode (0 regional channels, 1 slow, 2 none)
     systems: vec4f,     // x 1/weather-system tile, y system strength, z system warp, w pattern offset
     quality: vec4f,     // x interleave factor, yz this frame's interleave offset, w light steps
     lod: vec4f,         // x far-proxy weight (0 raymarch .. 1 slab proxy), y weather evolution (km), z boil rise (km), w history clip (sigmas)
@@ -39,10 +39,14 @@ struct CloudUniforms {
     ambientFloor: vec4f, // rgb radiance added to cloud ambient (night sky, moon); host supplied. w step footprint factor
     extra: vec4f,       // x 1 = refine cloud entry surfaces, yz far-average footprint range (km, z 0 = off), w far-average density scale
     moon: vec4f,        // xyz direction to the moon, w illuminance (0 = no moonlight)
+    march3: vec4f,      // x light sharing (cloud samples per lighting evaluation; 1 = every sample), y longest reuse along the ray (km), z cloud shape (0 cut, > 0 domes of that height scale), w sunset depth (transmittance LUT; 1 = physical)
+    shape2: vec4f,      // x giant share of coverage (0 = off), y giant height (core scale), z giant size (x shape tile), w popcorn top (layer fraction)
+    look: vec4f,        // x in-scattering probability strength (HZD; 0 = off), y sideways sky occlusion (0 = off), z in-scattering gain, w sunlight-colour altitude scale (1 = physical)
+    look2: vec4f,       // x dome edge sharpness (density gain), y cauliflower head strength, z dusk sky-light boost, w unused
 }
 `;
 
-export const CLOUD_UNIFORM_VEC4_COUNT = 35;
+export const CLOUD_UNIFORM_VEC4_COUNT = 39;
 
 export const CLOUD_MATH_WGSL = /* wgsl */`
 const PI: f32 = 3.14159265358979;
@@ -280,6 +284,7 @@ struct CloudBase {
     skew: vec3f,
     variety: f32,   // 0..1 per cloud: picks billow size and erosion strength
     rise: vec3f,    // boil offset of the shape lookup, reused (faster) for detail
+    localH: f32,    // 0 at this cloud's base .. 1 at its top (lighting: dark bases, billowy tops)
 }
 
 struct Weather {
@@ -327,15 +332,47 @@ fn sampleWeather(p: vec3f, footprint: f32) -> Weather {
     // to a quarter of the layer, as it does with humidity in nature.
     weather.lift = saturate(w2.a * 1.6 - 0.5) * 0.25;
     weather.shift = (vec3f(w1.g, w1.b, w2.a) - 0.5) * 1.2;
+    // Shape offset mode (windDir.w): 0 as above, 1 slow, 2 none (test). The channels above vary over a
+    // few km (w2.a is 8-64 cycles per large tile, w1.b Worley creases) while the offset spans +-0.6
+    // shape tiles: where they change fast the offset outruns the shape noise's own rate (1/16 tile per
+    // km) and squeezes or folds it sideways but not vertically, into thin vertical sheets through the
+    // cloud that shimmer as they alias. Slow: the smooth Perlin channels of the planet-scale lookup at
+    // mip 3 (~40 km texels), so the offset varies over 50-200 km as intended and never folds.
+    if (u.windDir.w > 1.5) {
+        weather.shift = vec3f(0.0);
+    } else if (u.windDir.w > 0.5) {
+        let slow = textureSampleLevel(weatherTex, noiseSampler, sysP * 0.83 + vec3f(0.29, 0.71, 0.13), 3.0);
+        weather.shift = vec3f(slow.r - 0.5, slow.g - 0.5, (slow.r - slow.g) * 0.7) * 1.2;
+    }
     return weather;
 }
 
+// Worley value (1 - distance to the nearest cell point) to a round head: sqrt(1 - d^2) over ~0.67 of
+// the cell. The raw value is a cone around each point: as bumps it made peaks and ridges (rock), not
+// the rounded heads with creases between them that cumulus are made of.
+fn roundBump(w: f32) -> f32 {
+    let d = 1.0 - w;
+    return sqrt(saturate(1.0 - d * d * 2.2));
+}
+
+// Polynomial smooth minimum: rounds the crease where two surfaces meet (k in their units).
+fn sminK(a: f32, b: f32, k: f32) -> f32 {
+    let h = saturate(0.5 + 0.5 * (b - a) / k);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
 // Flat bases, rounded tops. Denser regions build taller towers.
-fn heightProfile(h: f32, kind: f32, coverage: f32) -> f32 {
+fn profileRise(h: f32, kind: f32) -> f32 {
+    return smoothstep(0.0, mix(0.04, 0.1, kind), h);
+}
+
+fn profileFall(h: f32, kind: f32, coverage: f32) -> f32 {
     let top = mix(0.2, 1.0, kind) * mix(0.55, 1.0, coverage);
-    let rise = smoothstep(0.0, mix(0.04, 0.1, kind), h);
-    let fall = 1.0 - smoothstep(top * mix(0.35, 0.55, kind), top, h);
-    return rise * fall;
+    return 1.0 - smoothstep(top * mix(0.35, 0.55, kind), top, h);
+}
+
+fn heightProfile(h: f32, kind: f32, coverage: f32) -> f32 {
+    return profileRise(h, kind) * profileFall(h, kind, coverage);
 }
 
 // Weather is height-invariant and smooth, so callers may reuse one sample for nearby points.
@@ -344,20 +381,101 @@ fn cloudBaseWithWeather(p: vec3f, h: f32, weather: Weather, footprint: f32) -> C
     b.density = 0.0;
     b.h = h;
     if (h <= 0.0 || h >= 1.0 || weather.coverage <= 0.001) { return b; }
-    let profile = heightProfile((b.h - weather.lift) / (1.0 - weather.lift), weather.kind, weather.coverage);
-    if (profile <= 0.0) { return b; }
+    let hRel = (b.h - weather.lift) / (1.0 - weather.lift);
+    let profile = heightProfile(hRel, weather.kind, weather.coverage);
+    // Domes (march3.z > 0, its value the height scale; see below) reach higher than the cut profile:
+    // its early-out sliced them flat at the cut profile's top.
+    let domes = u.march3.z > 0.5;
+    // Popcorn tops: shape2.w is the popcorn height as a fraction of the layer (host sets it in km), so a
+    // thick layer for towering giants does not make every small cloud tall too.
+    let smallTop = min(0.92, u.shape2.w * mix(0.6, 1.4, weather.kind) * mix(0.75, 1.0, weather.coverage) * u.march3.z);
+    let domeTop = select(smallTop, 0.92, u.shape2.x > 0.0);
+    if (select(profile <= 0.0, hRel <= 0.0 || hRel >= domeTop, domes)) { return b; }
     b.skew = u.windDir.xyz * (b.h * u.windDetail.w);
     let lod = max(0.0, log2(footprint * u.scales.x * SHAPE_TEXELS));
     // Shapes rise through the layer over time (sampled lower and lower), so cumulus slowly boil.
     let rise = normalize(p) * u.lod.z;
-    let shapeP = ROT_SHAPE * ((p + u.windShape.xyz + b.skew - rise) * u.scales.x) + weather.shift;
+    // Domes: the shape varies 1.18x slower with height than across (1.6x stretched tower heads into vertical rock-like ribs), so a cloud stays one connected column
+    // from base to top (at the same rate, strong patches at mid height floated as separate balls).
+    let upN = normalize(p);
+    let pS = select(p, p - upN * ((length(p) - u.planet.y) * 0.15), u.march3.z > 0.5);
+    let shapeP = ROT_SHAPE * ((pS + u.windShape.xyz + b.skew - rise) * u.scales.x) + weather.shift;
     let n = textureSampleLevel(shapeTex, noiseSampler, shapeP, lod);
     let lowFbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
     // Perlin-Worley eroded by low-frequency Worley lands in ~[0.45, 0.95]; stretch it to
     // ~[0, 1] so coverage maps to a proportional cloud fraction instead of an on/off switch.
-    let shape = remapSat(remap(n.r, lowFbm - 1.0, 1.0, 0.0, 1.0), 0.5, 0.95, 0.0, 1.0) * profile;
-    // Coverage decides where clouds exist; small fair-weather clouds stay dense.
-    b.density = remapSat(shape, 1.0 - weather.coverage, 1.0, 0.0, 1.0) * mix(0.6, 1.0, weather.coverage);
+    let raw = remapSat(remap(n.r, lowFbm - 1.0, 1.0, 0.0, 1.0), 0.5, 0.95, 0.0, 1.0);
+    if (domes) {
+        // Domes: coverage picks where clouds stand from the shape alone, then the top part of the
+        // height profile erodes them from above, so only dense cores reach high and each cloud's
+        // height follows its core: rounded tops of varied height. The base stays a flat cut (rise).
+        // Multiplying the shape by the profile before the high coverage threshold (0.72-0.92) kept
+        // only heights where the profile is ~1: flat tops at one height and vertical sides (mesas).
+        // Height follows the unclamped shape (peaks keep varying; the clamped one had flat plateaus at
+        // 1, and every column on a plateau rose to the same height: flat tops again). core is 0 at the
+        // cloud's edge and up to ~1.6 at the strongest peaks.
+        let rawU = remap(remap(n.r, lowFbm - 1.0, 1.0, 0.0, 1.0), 0.5, 0.95, 0.0, 1.0);
+        // Cauliflower heads (look2.y): round 1 km and 0.5 km cells of the shape noise (already fetched)
+        // raise the core around their centres and sink it between them, so the surface is made of heads
+        // with creases between, each lit on its sun side. Without them the body between the km-scale shape
+        // and the fine detail was smooth and evenly shaded (cotton balls).
+        // Centred near roundBump's mean (~0.72) so the heads reshape clouds without adding coverage.
+        let heads = ((roundBump(n.b) - 0.72) * 0.6 + (roundBump(n.a) - 0.72) * 0.4) * u.look2.y;
+        let core = max(rawU - (1.0 - weather.coverage), 0.0) / max(weather.coverage, 0.01) + heads;
+        // Popcorn: rounded heads up to smallTop. Weak cores are also eroded from below, so small clouds
+        // float a little higher with rounded undersides while big ones keep the flat base at the
+        // condensation level (one flat cut for every cloud looked uniform).
+        // Concave ramp: weak cores stop low, so small clouds come out wider than tall (humilis) and only
+        // strong ones build into heads. The base lift is small: lifted far (0.35 of the top), weak clouds
+        // got rounded undersides and floated as balls.
+        let erodeTop = 2.0 * pow(smoothstep(smallTop * mix(0.15, 0.3, weather.kind), smallTop, hRel), 0.7);
+        let erodeBase = 0.3 * (1.0 - smoothstep(0.0, smallTop * 0.12, hRel));
+        // Edge sharpness (look2.x): the core rises slowly across a cloud (km-scale noise), so without it the
+        // density ramped up over hundreds of metres and the edge was a soft fog (blurry, solid-looking
+        // blobs). Cumulus edges are abrupt; the detail erosion then carves billows into that edge.
+        var d = saturate((core - erodeTop - erodeBase) * u.look2.x);
+        b.localH = saturate(hRel / max(smallTop, 0.01));
+        // Giants (shape2.x share of the coverage; 0 = off): the shape noise at shape2.z times the tile, in
+        // its own rotation, so a few cells grow several times wider, with cores scaled by shape2.y so they
+        // tower up to the layer top (height grows with size, as in nature). The core is bumped by the
+        // popcorn-scale shape, so a giant's outline is made of heads the size of whole small clouds
+        // (cauliflower), with the detail billows on top of those.
+        if (u.shape2.x > 0.0) {
+            let invG = u.scales.x / max(u.shape2.z, 1.0);
+            let pG = ROT_REGIONAL * ((p + u.windShape.xyz + b.skew - rise) * invG) + weather.shift * 0.5
+                + vec3f(0.37, 0.11, 0.53);
+            let nG = textureSampleLevel(shapeTex, noiseSampler, pG, max(0.0, log2(footprint * invG * SHAPE_TEXELS)));
+            let lowG = nG.g * 0.625 + nG.b * 0.25 + nG.a * 0.125;
+            let rawG = remap(remap(nG.r, lowG - 1.0, 1.0, 0.0, 1.0), 0.5, 0.95, 0.0, 1.0);
+            let cG = max(weather.coverage * u.shape2.x, 0.005);
+            // 0 at the giant's edge, 1 at its strongest core.
+            let coreG = saturate((rawG - (1.0 - cG)) / cG / 1.6);
+            // The giant cell is a local weather map (as in Nubis): inside it the coverage of the popcorn
+            // shape noise rises toward 0.9, so the giant is built from that 3D billowy noise itself: its
+            // outline is whole 1-2 km noise cells (heads on heads), not a surface with bumps on it.
+            // Earlier versions shaped the giant as a heightfield envelope plus bumps, and it read as a
+            // mountain or rock with snow on it.
+            let maskG = smoothstep(0.0, 0.45, coreG);
+            let covL = mix(weather.coverage, 0.9, maskG);
+            let coreL = max(rawU - (1.0 - covL), 0.0) / max(covL, 0.01) + heads;
+            // Tower height grows with the mask (wider part of the giant = taller), scaled by shape2.y / 3.
+            let topG = 0.08 + 0.82 * maskG * (0.8 + 0.2 * coreG) * min(u.shape2.y / 3.0, 1.0);
+            // Erosion by height, held back until ~60 % of the tower (a massive column) and rising fast
+            // above, so only the strongest noise cores reach the top: big rounded billowy heads, and the
+            // base cut flat at the condensation level. (Eroding from 20 % up thinned towers into spires.)
+            let erodeG = 1.4 * pow(smoothstep(topG * 0.3, topG, hRel), 1.6)
+                + 0.3 * (1.0 - smoothstep(0.0, 0.025, hRel));
+            let dG = saturate((coreL - erodeG) * u.look2.x) * maskG;
+            if (dG > d) { b.localH = saturate(hRel / max(topG, 0.01)); }
+            d = max(d, dG);
+        }
+        b.density = d * smoothstep(0.0, max(smallTop * 0.08, 0.005), hRel) * mix(0.6, 1.0, weather.coverage);
+    } else {
+        let shape = raw * profile;
+        b.localH = saturate(hRel / max(mix(0.2, 1.0, weather.kind) * mix(0.55, 1.0, weather.coverage), 0.01));
+        // Coverage decides where clouds exist; small fair-weather clouds stay dense.
+        b.density = remapSat(shape, 1.0 - weather.coverage, 1.0, 0.0, 1.0) * mix(0.6, 1.0, weather.coverage);
+    }
     b.warp = n.gba - 0.5;
     b.rise = rise;
     // Varies over the 1-4 km Worley cells, so neighbouring clouds get different billows.
@@ -386,7 +504,13 @@ fn cloudDetail(p: vec3f, b: CloudBase, footprint: f32) -> f32 {
     let large = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
     let small = dn.g * 0.6 + dn.b * 0.4;
     let fbm = mix(large, small, b.variety);
-    let modifier = mix(fbm, 1.0 - fbm, saturate(b.h * 6.0));
+    // Wispy (fbm) low, billowy higher up: eroding by 1 - roundBump keeps round heads around the cell
+    // points with creases between (1 - fbm made sharp cone-shaped tufts that read as rock).
+    let billow = 1.0 - mix(roundBump(dn.g), roundBump(dn.b), b.variety * 0.6 + 0.2);
+    // Wispy-to-billowy by height: within each cloud for domes (bottom ~quarter wispy). By the layer's
+    // height fraction, every small dome sat in the wispy bottom sixth and its edges looked like fur.
+    let wispyToBillow = select(saturate(b.h * 6.0), saturate(b.localH * 4.0), u.march3.z > 0.5);
+    let modifier = mix(fbm, billow, wispyToBillow);
     return remapSat(b.density, modifier * u.density.y * mix(0.6, 1.15, b.variety), 1.0, 0.0, 1.0);
 }
 

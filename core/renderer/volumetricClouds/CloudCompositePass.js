@@ -180,6 +180,12 @@ fn hazeTo(roKm: vec3f, rd: vec3f, distKm: f32) -> Haze {
     let cosSun = dot(rd, u.sun.xyz);
     let phaseR = ap_rayleighPhase(cosSun);
     let phaseM = ap_miePhase(cosSun, cu.atmo2.x);
+    // Moonlit air: the moon's share of the haze, relative to the sun (u.moon.w / u.sun.w). Sun-only
+    // haze went to black at night, so far clouds kept full contrast and read as cut-outs.
+    let moonScale = select(0.0, u.moon.w / max(u.sun.w, 1.0e-6), u.moon.w > 0.0 && u.sun.w > 1.0e-3);
+    let cosMoon = dot(rd, u.moon.xyz);
+    let phaseRMoon = ap_rayleighPhase(cosMoon);
+    let phaseMMoon = ap_miePhase(cosMoon, cu.atmo2.x);
     let H = Ra - R;
     for (var i = 0; i < ${HAZE_STEPS}; i++) {
         let p = ro + rd * (t0 + (f32(i) + 0.5) * dt);
@@ -193,7 +199,13 @@ fn hazeTo(roKm: vec3f, rd: vec3f, distKm: f32) -> Haze {
         let cosSun = dot(p / r, u.sun.xyz);
         let sunT = ap_sampleTransmittance(transmittanceLut, linearSampler, alt, cosSun, R, Ra)
             * smoothstep(-0.08, 0.08, cosSun);
-        let S = (scatR * phaseR + vec3f(scatM * phaseM)) * sunT;
+        var S = (scatR * phaseR + vec3f(scatM * phaseM)) * sunT;
+        if (moonScale > 0.0) {
+            let cosMoonZ = dot(p / r, u.moon.xyz);
+            let moonT = ap_sampleTransmittance(transmittanceLut, linearSampler, alt, cosMoonZ, R, Ra)
+                * smoothstep(-0.08, 0.08, cosMoonZ) * moonScale;
+            S += (scatR * phaseRMoon + vec3f(scatM * phaseMMoon)) * moonT;
+        }
         let stepT = exp(-ext * dt);
         h.L += h.T * S * (1.0 - stepT) / max(ext, vec3f(1.0e-12));
         h.T *= stepT;
@@ -229,12 +241,36 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     }
 
     // Bicubic upsample; the raymarch already stopped at the nearest surface under each cloud pixel.
-    let c = sampleCatmullRom(cloudColor, linearSampler, uv);
-    let cloud = vec4f(max(c.rgb, vec3f(0.0)), saturate(c.a));
     let blocks = vec2i(textureDimensions(cloudDepth));
     let k = max(i32(u.quality.x), 1);
+    let cloudSize = vec2i(textureDimensions(cloudColor));
+    // Texels whose ray stopped at an opaque surface store a negative depth. Across a silhouette the
+    // upsample mixed them with sky texels, so sky pixels next to terrain got the terrain texels' "no
+    // cloud": a line of bare sky between clouds and every ridge. Where the 2x2 texels around this pixel
+    // disagree, blend only those of this pixel's kind (opaque or sky).
+    let sp = uv * vec2f(cloudSize) - 0.5;
+    let i0 = vec2i(floor(sp));
+    let f = sp - floor(sp);
+    let w4 = array<f32, 4>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+    let o4 = array<vec2i, 4>(vec2i(0, 0), vec2i(1, 0), vec2i(0, 1), vec2i(1, 1));
+    var sumW = 0.0;
+    var sumC = vec4f(0.0);
+    var mixed = false;
+    for (var i = 0; i < 4; i++) {
+        let tp = clamp(i0 + o4[i], vec2i(0), cloudSize - 1);
+        let texelOpaque = textureLoad(cloudDepth, clamp(tp / k, vec2i(0), blocks - 1), 0).r < 0.0;
+        if (texelOpaque != opaque) {
+            mixed = true;
+            continue;
+        }
+        sumW += w4[i];
+        sumC += textureLoad(cloudColor, tp, 0) * w4[i];
+    }
+    var c = sampleCatmullRom(cloudColor, linearSampler, uv);
+    if (mixed && sumW > 1.0e-4) { c = sumC / sumW; }
+    let cloud = vec4f(max(c.rgb, vec3f(0.0)), saturate(c.a));
     let cloudPix = vec2i(uv * u.frameInfo.zw);
-    let cloudKm = textureLoad(cloudDepth, clamp(cloudPix / k, vec2i(0), blocks - 1), 0).r;
+    let cloudKm = abs(textureLoad(cloudDepth, clamp(cloudPix / k, vec2i(0), blocks - 1), 0).r);
 
     var shadow = 1.0;
     if (opaque && cu.viewport.z > 0.0 && u.shadowInfo.z > 0.0) {

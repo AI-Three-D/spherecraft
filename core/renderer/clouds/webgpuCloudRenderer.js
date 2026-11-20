@@ -70,8 +70,12 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             blending: 'premultiplied'
         });
 
-        this.cirrusMaterial = new Material({
-            name: 'CirrusShell_WebGPU',
+        // Two materials with the same shader: the far part of each ray (drawn behind the scene) and
+        // the near part (drawn over it, see renderCirrus). Uniform buffers belong to a material and
+        // are written at draw time, so one material drawn twice in a frame would give both draws
+        // the last draw's parameters.
+        const makeCirrusMaterial = (name) => new Material({
+            name,
             vertexShader: this._getVertexShader(),
             fragmentShader: this._getCirrusFragmentShader(),
             vertexLayout: [],
@@ -113,6 +117,8 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             depthCompare: 'always',
             blending: 'premultiplied'
         });
+        this.cirrusMaterial = makeCirrusMaterial('CirrusShell_WebGPU');
+        this.cirrusNearMaterial = makeCirrusMaterial('CirrusShellNear_WebGPU');
 
         this.initialized = true;
     }
@@ -206,15 +212,17 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             const bv = this.noiseGenerator.getBaseTextureView?.();
             const dv = this.noiseGenerator.getDetailTextureView?.();
             const ev = this.noiseGenerator.getErosionTextureView?.();
-            if (bv) this.cirrusMaterial.uniforms.noiseBase.value   = { _isGPUTextureView: true, view: bv };
-            if (dv) this.cirrusMaterial.uniforms.noiseDetail.value = { _isGPUTextureView: true, view: dv };
-            if (ev) this.cirrusMaterial.uniforms.noiseErosion.value = { _isGPUTextureView: true, view: ev };
+            for (const m of this._cirrusMaterials()) {
+                if (bv) m.uniforms.noiseBase.value   = { _isGPUTextureView: true, view: bv };
+                if (dv) m.uniforms.noiseDetail.value = { _isGPUTextureView: true, view: dv };
+                if (ev) m.uniforms.noiseErosion.value = { _isGPUTextureView: true, view: ev };
+            }
         }
 
         if (uniformManager?.uniforms?.transmittanceLUT?.value) {
             const tLUT = uniformManager.uniforms.transmittanceLUT.value;
             if (tLUT?._gpuTexture) {
-                this.cirrusMaterial.uniforms.transmittanceLUT.value = tLUT;
+                for (const m of this._cirrusMaterials()) m.uniforms.transmittanceLUT.value = tLUT;
             }
         }
 
@@ -226,9 +234,18 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         }
 
         // Push typed arrays into material uniforms.
-        this.cirrusMaterial.uniforms.matrixUniforms.value   = mat;
-        this.cirrusMaterial.uniforms.cirrusParams.value     = cp;
-        this.cirrusMaterial.uniforms.atmosphereParams.value = this._atmosphereData;
+        // The near material gets its own parameter array (it differs in the ray part, see renderCirrus).
+        this._cirrusNearParamData ??= new Float32Array(CIRRUS_PARAM_FLOATS);
+        this._cirrusNearParamData.set(cp);
+        for (const m of this._cirrusMaterials()) {
+            m.uniforms.matrixUniforms.value   = mat;
+            m.uniforms.cirrusParams.value     = m === this.cirrusNearMaterial ? this._cirrusNearParamData : cp;
+            m.uniforms.atmosphereParams.value = this._atmosphereData;
+        }
+    }
+
+    _cirrusMaterials() {
+        return [this.cirrusMaterial, this.cirrusNearMaterial].filter(Boolean);
     }
 
     // ---------------------------------------------------------------
@@ -244,12 +261,22 @@ export class WebGPUCloudRenderer extends CloudRenderer {
     }
 
     // ---------------------------------------------------------------
-    //  renderCirrus() — draws the cirrus shell (called before terrain)
+    //  renderCirrus() — draws the cirrus shell
     // ---------------------------------------------------------------
 
-    renderCirrus(camera, environmentState, uniformManager) {
-        if (!this.initialized || !this.cirrusMaterial || !this.noiseGenerator) return;
-        if (!this.cirrusMaterial.uniforms.noiseBase.value) return;
+    /**
+     * part: 'far' draws only the cirrus beyond each ray's closest approach to the planet (behind any
+     * lower cloud and ground on that ray; drawn before the scene), 'near' only the cirrus before it
+     * (in front of them; drawn after the scene and the volumetric clouds), anything else the whole ray.
+     * Cirrus lies above the cumulus, so on the way down a ray meets cirrus first and on the way up
+     * cumulus first: the split is exact for every camera height.
+     */
+    renderCirrus(camera, environmentState, uniformManager, part = 'all') {
+        const material = part === 'near' ? this.cirrusNearMaterial : this.cirrusMaterial;
+        const partCode = part === 'near' ? 1 : part === 'far' ? 2 : 0;
+        if (!this.initialized || !material || !this.noiseGenerator) return;
+        if (!material.uniforms.noiseBase.value) return;
+        const params = material.uniforms.cirrusParams.value;
 
         const layers = this._renderLayers.filter((layer) => layer.coverage > 0.005 && layer.altMax > layer.altMin);
         if (layers.length === 0) return;
@@ -269,8 +296,8 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             this.backend.setViewport(0, 0, tw, th);
             this.backend.clear(true, false);
             for (const layer of layers) {
-                this._writeLayerParams(layer);
-                this.backend.draw(this.fullscreenGeometry, this.cirrusMaterial);
+                this._writeLayerParams(layer, partCode, params);
+                this.backend.draw(this.fullscreenGeometry, material);
             }
 
             this.backend.setRenderTarget(null);
@@ -291,8 +318,8 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         }
 
         for (const layer of layers) {
-            this._writeLayerParams(layer);
-            this.backend.draw(this.fullscreenGeometry, this.cirrusMaterial);
+            this._writeLayerParams(layer, partCode, params);
+            this.backend.draw(this.fullscreenGeometry, material);
         }
     }
 
@@ -310,10 +337,12 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         const changed = this._cirrusQualitySettings?.key !== settings.key;
         this._cirrusQualitySettings = settings;
 
-        if (changed && this.cirrusMaterial) {
-            this.cirrusMaterial.fragmentShader = this._getCirrusFragmentShader();
-            this.cirrusMaterial._needsCompile = true;
-            this.cirrusMaterial._gpuPipeline  = null;
+        if (changed) {
+            for (const m of this._cirrusMaterials()) {
+                m.fragmentShader = this._getCirrusFragmentShader();
+                m._needsCompile = true;
+                m._gpuPipeline  = null;
+            }
         }
         return settings.key;
     }
@@ -441,14 +470,14 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         current.darkness += (target.darkness - current.darkness) * t;
     }
 
-    _writeLayerParams(layer) {
+    /** part: 0 the whole ray, 1 its near part, 2 its far part (see renderCirrus). */
+    _writeLayerParams(layer, part = 0, cp = this._cirrusParamData) {
         const ctx = this._layerParamContext || {};
         const origin = ctx.origin || this.planetConfig?.origin || new Vector3(0, 0, 0);
         const planetRadius = ctx.planetRadius || this.planetConfig?.radius || 2048;
         const sunDir = ctx.sunDir || new Vector3(0, 1, 0);
         const atmosphereHeight = this.planetConfig?.atmosphereHeight || planetRadius * 0.2;
         const baseTileSize = ctx.baseTileSize || Math.max(atmosphereHeight * 0.12, 8000.0);
-        const cp = this._cirrusParamData;
         let i = 0;
 
         cp[i++] = origin.x;  cp[i++] = origin.y;  cp[i++] = origin.z;  cp[i++] = planetRadius;
@@ -458,7 +487,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         cp[i++] = layer.altMin;  cp[i++] = layer.altMax;  cp[i++] = layer.coverage;  cp[i++] = layer.noiseScale;
         cp[i++] = layer.albedo;  cp[i++] = layer.densityMultiplier;  cp[i++] = layer.verticalStretch;  cp[i++] = layer.worleyInfluence;
         cp[i++] = layer.edgeSoftness;  cp[i++] = layer.extinction;  cp[i++] = layer.precipitation;  cp[i++] = layer.darkness;
-        cp[i++] = layer.layerKind;  cp[i++] = layer.cauliflower;  cp[i++] = 0.0;  cp[i++] = 0.0;
+        cp[i++] = layer.layerKind;  cp[i++] = layer.cauliflower;  cp[i++] = part;  cp[i++] = 0.0;
     }
 
     // ---------------------------------------------------------------
@@ -592,7 +621,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
 
         layerKind: f32,
         cauliflower: f32,
-        _pad3: f32,
+        part: f32,          // 0 whole ray, 1 before its closest approach to the planet, 2 after
         _pad4: f32,
     };
 
@@ -819,6 +848,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         else if (tMid1 > 0.01) { tSample = tMid1; }
         else { return vec4<f32>(0.0); }
         if (tSample > tPlanet) { return vec4<f32>(0.0); }
+        if (!inRayPart(tSample, -bCoeff)) { return vec4<f32>(0.0); }
 
         let pos = rayOrigin + rayDir * tSample;
         // Footprint on the shell, stretched at grazing angles.
@@ -845,6 +875,26 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         return vec4<f32>(c.rgb * alpha, alpha);
     }
 
+    // Near or far part of the ray (cp.part; see renderCirrus). tStar: closest approach to the planet.
+    fn inRayPart(t: f32, tStar: f32) -> bool {
+        if (cp.part > 1.5) { return t > tStar; }
+        if (cp.part > 0.5) { return t <= tStar; }
+        return true;
+    }
+
+    // Mean of the sheet profile 1 - d^2 (0 outside |d| < 1) over [d0, d1]. Evaluated at one height
+    // per shell, the profile became a staircase that showed as faint horizontal bands wherever rays
+    // cross the sheet at a shallow angle (from below and near the layer).
+    fn sheetProfileMean(d0: f32, d1: f32) -> f32 {
+        if (d1 - d0 < 1.0e-4) {
+            let d = 0.5 * (d0 + d1);
+            return max(1.0 - d * d, 0.0);
+        }
+        let x0 = clamp(d0, -1.0, 1.0);
+        let x1 = clamp(d1, -1.0, 1.0);
+        return ((x1 - x1 * x1 * x1 / 3.0) - (x0 - x0 * x0 * x0 / 3.0)) / (d1 - d0);
+    }
+
     fn sphereHit(oc: vec3<f32>, rd: vec3<f32>, r: f32) -> vec2<f32> {
         let b = dot(oc, rd);
         let d = b * b - (dot(oc, oc) - r * r);
@@ -867,10 +917,16 @@ export class WebGPUCloudRenderer extends CloudRenderer {
 // Brightness of the sunlit top relative to the underside (see cirrusAt).
 const CIRRUS_TOP_GAIN: f32 = 3.0;
 
+    // A smooth swell from three plane waves on the sphere (wavelengths ~16-40 km for the high layer).
+    // It was a linear lookup on mip 3 of the 64^3 base noise: a ~5 km grid with a break in the
+    // sheet's tilt at every texel. The path through a thin sheet seen nearly edge-on follows its
+    // tilt, so each break showed as a straight seam across the cirrus.
     fn sheetCenterOffset(p: vec3<f32>, tileSize: f32, slab: f32, sheet: f32) -> f32 {
-        let up = normalize(p - cp.planetCenter);
-        let n = sampleNoise3D(noiseBase, up * (cp.planetRadius / (tileSize * 2.2)) + vec3<f32>(0.71, 0.29, 0.53), 3.0).r;
-        return (smoothstep(0.2, 0.8, n) - 0.5) * (slab - sheet);
+        let x = normalize(p - cp.planetCenter) * (cp.planetRadius / (tileSize * 2.2));
+        let w = sin(dot(x, vec3<f32>(0.62, 0.48, -0.62)) * 6.3 + 0.4) * 0.45
+              + sin(dot(x, vec3<f32>(-0.27, 0.83, 0.49)) * 9.7 + 2.1) * 0.33
+              + sin(dot(x, vec3<f32>(0.71, -0.36, 0.60)) * 15.1 + 4.7) * 0.22;
+        return (smoothstep(0.2, 0.8, 0.5 + 0.5 * w) - 0.5) * (slab - sheet);
     }
 
     fn volumeSample(rayOrigin: vec3<f32>, rayDir: vec3<f32>, sunDir: vec3<f32>, tPlanet: f32, pixAngle: f32) -> vec4<f32> {
@@ -894,6 +950,8 @@ const CIRRUS_TOP_GAIN: f32 = 3.0;
         let tLimit = min(tPlanet, CIRRUS_MAX_DISTANCE);
         let bq = dot(oc, rayDir);
         let cq = dot(oc, oc);
+        let tStar = -bq;
+        let rClosest = sqrt(max(cq - bq * bq, 0.0));
         let dr = slab / f32(CIRRUS_VOLUME_STEPS);
         var tau = 0.0;
         var colorSum = vec3<f32>(0.0);
@@ -915,16 +973,25 @@ const CIRRUS_TOP_GAIN: f32 = 3.0;
                 spans[0] = vec2<f32>(-bq - hiS, -bq + hiS);
             }
             for (var j = 0; j < spanCount; j++) {
-                let a = max(spans[j].x, 0.0);
-                let b = min(spans[j].y, tLimit);
+                var a = max(spans[j].x, 0.0);
+                var b = min(spans[j].y, tLimit);
+                if (cp.part > 1.5) { a = max(a, tStar); }
+                else if (cp.part > 0.5) { b = min(b, tStar); }
                 if (b <= a) { continue; }
                 let len = b - a;
                 let t = 0.5 * (a + b);
                 let p = rayOrigin + rayDir * t;
                 let r = length(p - cp.planetCenter);
                 let center = midR + sheetCenterOffset(p, tileSize, slab, sheet);
-                let h = (r - center) / sheet + 0.5;
-                if (h <= 0.0 || h >= 1.0) { continue; }
+                // Heights the stretch covers: its ends, down to the closest approach when the ray
+                // turns inside it.
+                let rA = length(oc + rayDir * a);
+                let rB = length(oc + rayDir * b);
+                var rLow = min(rA, rB);
+                if (tStar > a && tStar < b) { rLow = rClosest; }
+                let h0 = (rLow - center) / sheet + 0.5;
+                let h1 = (max(rA, rB) - center) / sheet + 0.5;
+                if (h1 <= 0.0 || h0 >= 1.0) { continue; }
                 // Prefilter along the ray by at most half a sheet (a whole far, edge-on stretch would
                 // average the pattern away and no ray could thread through a gap).
                 // The wisp pattern is read at the slab's middle radius, the same for every shell: read at
@@ -938,8 +1005,7 @@ const CIRRUS_TOP_GAIN: f32 = 3.0;
                 // seen from below (as cumulus shapes come from their own noise), not a cut sphere. The
                 // floor keeps thin wisps thicker than the shell spacing.
                 let w = mix(0.4, 1.0, smoothstep(0.05, 0.5, c.a));
-                let d = (2.0 * h - 1.0) / w;
-                let profile = 1.0 - d * d;
+                let profile = sheetProfileMean((2.0 * h0 - 1.0) / w, (2.0 * h1 - 1.0) / w);
                 if (profile <= 0.0) { continue; }
                 // Column optical depth -ln(1 - a), spread over the profile (its integral is 2/3 w sheets).
                 let dTau = -log(1.0 - min(c.a, 0.98)) / (sheet * w) * profile * 1.5 * len;

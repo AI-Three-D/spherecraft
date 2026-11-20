@@ -813,6 +813,8 @@ updateLighting(starSystem) {
 
 
             if (this.skyRenderer && this.atmosphereSettings) {
+                // Night look: the moonlit sky's own brightness (sky darker than the ground at night).
+                this.skyRenderer.moonSkyScale = (this.nightLook ?? this.engineConfig?.rendering?.nightLook)?.sky ?? 1;
                 const sunDir = environmentState?.sunLightDirection ||
                     this.uniformManager.uniforms.sunLightDirection.value;
                 this.skyRenderer.render(
@@ -828,19 +830,24 @@ updateLighting(starSystem) {
                 this.starRenderer.render();
             }
 
-            // Cirrus is a thin shell drawn without depth. From below it belongs to the sky, behind the
-            // terrain; from above it lies over everything, so it is drawn after the scene (drawn first,
-            // the planet covered it and only a halo against space was left).
+            // Cirrus is drawn without depth, in two parts split at each ray's closest approach to the
+            // planet. Past it the ray climbs, so it has met any cumulus and ground before the cirrus:
+            // that part goes behind the scene and the volumetric clouds. Before it the ray descends and
+            // meets the cirrus first: that part goes over everything, and exists only from the cirrus
+            // slab upwards. (Drawing all of it on top from there put the cirrus beyond the limb over
+            // the cumulus along the horizon.)
             const cirrusOn = !!(this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds);
             const cirrusOnTop = cirrusOn && this._cameraAboveCirrus();
-            if (cirrusOn && !cirrusOnTop) {
-                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager);
+            if (cirrusOn) {
+                // Before either part, so both use this frame's camera: they meet at the split, and a
+                // far part a frame behind would tear from the near part while turning.
+                this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
+                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'far');
             }
 
             this.renderTerrain(frame);
 
-            if (this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds) {
-                this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
+            if (cirrusOn) {
                 this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
 
                 if (this.atmoBankSystem && this.cloudRenderer.noiseGenerator) {
@@ -859,7 +866,7 @@ updateLighting(starSystem) {
             }
 
             if (cirrusOnTop) {
-                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager);
+                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'near');
             }
 
             if (postEffectsActive) {
@@ -920,6 +927,11 @@ updateLighting(starSystem) {
                 }
 
                 if (dp) dp.hasActiveSources = hazeRendered;
+                // Night look (tonemap): grade strength and extra exposure at full night, from
+                // rendering.nightLook; this.nightLook stays live-tunable.
+                this.nightLook ??= { grade: 0, exposure: 0, ...(this.engineConfig?.rendering?.nightLook ?? {}) };
+                const nightAmount = 1 - Math.max(0, Math.min(1, this.lightingController?.getSunVisibility?.() ?? 1));
+                this.postProcessing.setNight?.(nightAmount, this.nightLook.grade ?? 0, this.nightLook.exposure ?? 0);
                 this.postProcessing.execute(this.backend);
             }
 
@@ -1025,10 +1037,12 @@ updateLighting(starSystem) {
         const night = 1 - Math.max(0, Math.min(1, lc.getSunVisibility?.() ?? 1));
         const ambColor = this.uniformManager.uniforms.ambientLightColor?.value;
         const ambI = (this.uniformManager.uniforms.ambientLightIntensity?.value ?? 0) * night;
-        clouds.ambientFloor = ['r', 'g', 'b'].map(ch => (ambColor?.[ch] ?? 0) * ambI * (config.nightAmbient ?? 1));
+        // Night look: the clouds' own share of moonlight and night fill (1 = as lit by the moon).
+        const cloudNight = Math.max(0, (this.nightLook ?? this.engineConfig?.rendering?.nightLook)?.clouds ?? 1);
+        clouds.ambientFloor = ['r', 'g', 'b'].map(ch => (ambColor?.[ch] ?? 0) * ambI * (config.nightAmbient ?? 1) * cloudNight);
         const moon = lc.getMoonDirection?.();
         if (moon) clouds.moonDirection = [moon.x, moon.y, moon.z];
-        clouds.moonIlluminance = clouds.sunIlluminance * (lc.getMoonIntensity?.() ?? 0) * (config.moonlight ?? 1);
+        clouds.moonIlluminance = clouds.sunIlluminance * (lc.getMoonIntensity?.() ?? 0) * (config.moonlight ?? 1) * cloudNight;
 
         const weather = config.coverageFromWeather;
         if (weather && Number.isFinite(environmentState?.cloudCoverage)) {

@@ -108,6 +108,12 @@ export function createEngineConfig() {
     },
 
     rendering: {
+      // Night look in the tonemap: at full night colour moves `grade` of the way toward blue night
+      // vision, and exposure changes by `exposure`; `sky` scales the moonlit sky alone. Kept close to the
+      // plain moonlit colours (a full grade washed them out to grey); the sky darker than the ground.
+      // `clouds` scales the moonlit clouds' brightness.
+      // Baseline picked in game; darker suits survival play (a torch to see by at night).
+      nightLook: { grade: 0.2, exposure: -0.05, sky: 0.35, clouds: 0.3 },
       pixelRatio: 1.5,
       maxFps: 60, // 0 = unlimited; adjustable in the in-game Settings.
       adaptive: {
@@ -115,8 +121,10 @@ export function createEngineConfig() {
         stationaryFps: 30,
         stationaryDelayMs: 250,
         stationaryPixelRatio: 1.5,
-        motionPixelRatio: 0.85,
-        fastMotionPixelRatio: 0.70,
+        // Same as still: dropping the ratio while moving (0.85 / 0.70) blurred and re-aliased
+        // everything, the clouds most. Lower these only if profiling shows the gain is worth it.
+        motionPixelRatio: 1.5,
+        fastMotionPixelRatio: 1.5,
       },
       maxPoolSlots: 2048,
       lighting: {
@@ -168,6 +176,13 @@ export function createEngineConfig() {
           // Near the ground the cumulus is the proxy (no raymarch); from 2.0 km it crossfades into the
           // raymarch, complete at 2.4 km.
           groundProxyBelowKm: 2.0,
+          // Rays that cross the layer in a short stretch (seen from above) step no coarser than
+          // their path through it / (maxSteps × 0.5). Distance-only steps (0.56 km from ~40 km up)
+          // missed small clouds between sampled shells: ripples, comb-toothed edges and glitter.
+          layerStepFit: 0.5,
+          // Earth-like dawn and dusk colours on the clouds: this planet's thin, scaled-down air left the
+          // low sun almost white (see sunsetDepth in VolumetricCloudsModule).
+          sunsetDepth: 4,
           groundProxyBlendKm: 0.4,
           // The planet is ~820 km around; Earth-sized system and weather tiles
           // would leave one weather state over the whole planet.
