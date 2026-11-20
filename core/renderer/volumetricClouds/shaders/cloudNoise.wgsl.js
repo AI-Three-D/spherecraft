@@ -87,9 +87,16 @@ fn worleyFbm(p: vec3f, freq: i32, seed: u32) -> f32 {
 }
 `;
 
-const kernel = (body) => /* wgsl */`
+/**
+ * Shape and detail volumes are 16-bit float: the dome cloud shape amplifies them ~20-30x through its
+ * coverage, edge and erosion remaps, and at 8 bits thin cloud showed ~10 density levels as fingerprint
+ * contour rings. Weather stays 8-bit (smooth, low gain).
+ */
+export const NOISE_HQ_FORMAT = 'rgba16float';
+
+const kernel = (body, format = 'rgba8unorm') => /* wgsl */`
 ${NOISE_LIB_WGSL}
-@group(0) @binding(0) var outVolume: texture_storage_3d<rgba8unorm, write>;
+@group(0) @binding(0) var outVolume: texture_storage_3d<${format}, write>;
 
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -108,7 +115,7 @@ export const SHAPE_NOISE_WGSL = kernel(/* wgsl */`
     let a = worleyFbm(p, 16, 41u);
     let perlinWorley = remap01(perlin, g);
     textureStore(outVolume, vec3i(id), vec4f(perlinWorley, g, b, a));
-`);
+`, NOISE_HQ_FORMAT);
 
 /** 64^3: RGB Worley fBm at increasing frequency for edge erosion. */
 export const DETAIL_NOISE_WGSL = kernel(/* wgsl */`
@@ -116,7 +123,7 @@ export const DETAIL_NOISE_WGSL = kernel(/* wgsl */`
     let g = worleyFbm(p, 4, 61u);
     let b = worleyFbm(p, 8, 71u);
     textureStore(outVolume, vec3i(id), vec4f(r, g, b, 1.0));
-`);
+`, NOISE_HQ_FORMAT);
 
 /** 128^3 weather: R coverage, G cloud type, B clumps, A fine variation. */
 export const WEATHER_NOISE_WGSL = kernel(/* wgsl */`
@@ -128,9 +135,9 @@ export const WEATHER_NOISE_WGSL = kernel(/* wgsl */`
 `);
 
 /** 2x2x2 box filter from one mip to the next. */
-export const DOWNSAMPLE_3D_WGSL = /* wgsl */`
+const downsample3d = (format) => /* wgsl */`
 @group(0) @binding(0) var src: texture_3d<f32>;
-@group(0) @binding(1) var dst: texture_storage_3d<rgba8unorm, write>;
+@group(0) @binding(1) var dst: texture_storage_3d<${format}, write>;
 
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -145,3 +152,5 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     textureStore(dst, vec3i(id), sum * 0.125);
 }
 `;
+export const DOWNSAMPLE_3D_WGSL = downsample3d('rgba8unorm');
+export const DOWNSAMPLE_3D_HQ_WGSL = downsample3d(NOISE_HQ_FORMAT);

@@ -186,7 +186,7 @@ fn cloudPhase(cosTheta: f32, scale: f32) -> f32 {
 }
 
 // Cloud optical depth (unit density * km) towards the sun with doubling steps
-// (6 steps reach ~3 km). Near samples reuse the primary sample's weather and
+// (6 steps reach ~3 km). All steps reuse the primary sample's weather and
 // only the first two add detail erosion.
 fn lightOpticalDepth(p: vec3f, footprint: f32, weather: Weather, dir: vec3f) -> f32 {
     var od = 0.0;
@@ -197,12 +197,12 @@ fn lightOpticalDepth(p: vec3f, footprint: f32, weather: Weather, dir: vec3f) -> 
         let lp = p + dir * (t + stepLen * 0.5);
         let fp = max(footprint, stepLen * 0.5);
         let h = heightFraction(length(lp));
-        var b: CloudBase;
-        if (i < 3) {
-            b = cloudBaseWithWeather(lp, h, weather, fp);
-        } else {
-            b = cloudBase(lp, fp);
-        }
+        // The primary sample's weather for every step: weather varies over tens of km, the light path is
+        // at most ~3 km, and re-sampling it (4 fetches plus warps) in steps 3-5 was a third of the cost of
+        // lighting for no visible change.
+        var b = cloudBaseWithWeather(lp, h, weather, fp);
+        // Profiling only (look3.z): the old per-step weather re-sampling in steps 3-5.
+        if (u.look3.z > 0.5 && i >= 3) { b = cloudBase(lp, fp); }
         var d = b.density;
         if (i < 2 && d > 0.0) { d = cloudDetail(lp, b, fp); }
         od += d * stepLen;
@@ -242,6 +242,8 @@ fn skyVisibility(p: vec3f, weather: Weather, footprint: f32) -> f32 {
 // sub-pixel cloud and any camera move changes which one: the far band flickered when climbing.
 // Steps each march segment keeps in reserve to reach the end of the layer (see the march loop).
 const MARCH_TAIL_STEPS: i32 = 6;
+// Light sharing (march3.x) applies only where the transmittance to the camera is below this.
+const LIGHT_REUSE_MAX_T: f32 = 0.4;
 
 fn farAverageWeight(p: vec3f, rd: vec3f, footprint: f32) -> f32 {
     if (u.extra.z <= 0.0) { return 0.0; }
@@ -382,7 +384,21 @@ struct MarchResult {
 // frames; without it (atmoExtra.w) nothing would average it, and the screen-space pattern would
 // swim over the clouds as the camera moves, so samples sit at step/slab midpoints instead.
 fn sampleJitter(pix: vec2f) -> f32 {
-    if (u.atmoExtra.w > 0.5) { return 0.5; }
+    if (u.atmoExtra.w > 0.5) {
+        // Stratified (look2.w): a 2x2 ordered pattern of step phases. The 3x3 tent of the spatial filter
+        // gives each phase class of a 2x2 pattern exactly a quarter of the weight, so it averages four
+        // step phases per pixel: surfaces no longer snap to step positions (combed streaks on crisp
+        // cloud skins), and the pattern itself cancels instead of swimming over the clouds.
+        // look2.w 2: interleaved gradient noise instead, whose 3x3 neighbourhoods cover the range
+        // evenly: many phases, so beats between the step and the noise grid (bullseye rings in thin cloud
+        // near the camera, larger than the tent) break up into fine grain that the tent smooths.
+        if (u.look2.w > 1.5) { return ign(pix); }
+        if (u.look2.w > 0.5) {
+            let q = vec2u(pix);
+            return (f32(((q.x & 1u) * 2u + (q.y & 1u) * 3u) % 4u) + 0.5) * 0.25;
+        }
+        return 0.5;
+    }
     return rayJitter(vec2u(pix));
 }
 
@@ -438,6 +454,11 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     var J = vec3f(0.0);
     var lightAge = 0;   // cloud samples since J was computed; 0 forces a fresh one
     var lightT = 0.0;   // where along the ray J was computed
+    // Weather reuse along the ray (look4.x km; 0 = every sample): weather varies over tens of km, so it
+    // is re-sampled (4-5 fetches) only after the ray moved that far or the footprint doubled.
+    var wCache: Weather;
+    var wPos = vec3f(1.0e9);
+    var wFp = 0.0;
 
     for (var si = 0; si < segCount; si++) {
         let seg = vec2f(segs[si].x, min(segs[si].y, tGround));
@@ -457,14 +478,21 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
         // slides each sample within its plane instead of dragging step slices through the cloud,
         // which showed as boxes up close and a crawling pattern when climbing or descending. The
         // jitter only shifts the grid's phase (per pixel and frame with temporal reconstruction).
-        let rayOffset = dot(ro, rd);
+        // Anchor (look3.x > 0): the camera snapped to a lattice that wide (km). At the planet centre the
+        // grid phase dot(camera, ray) mod step changes by several fine steps per pixel near the camera:
+        // a zone plate that showed as fingerprint rings in thin cloud. Near the camera it varies slowly,
+        // and stepStratify supplies the per-pixel phases instead (the planes jump once per lattice cell).
+        var anchor = vec3f(0.0);
+        if (u.look3.x > 0.0) { anchor = round(ro / u.look3.x) * u.look3.x; }
+        let rayOffset = dot(ro - anchor, rd);
         var t = seg.x;
         // Midpoint of the last empty coarse sample, and the fine-step span after a found surface.
         var lastEmpty = -1.0;
         var fineUntil = -1.0;
         var fineStep = 0.0;
         loop {
-            if (t >= seg.y || steps >= segLimit || T < 0.003) { break; }
+            // 1 % left is invisible behind the skin; marching on to 0.3 % cost many samples in dense giants.
+            if (t >= seg.y || steps >= segLimit || T < select(0.01, 0.003, u.look3.z > 0.5)) { break; }
             steps++;
             // Running out of steps before the end of the layer: cover the rest in even coarse steps
             // with the far average. Stopping there left long in-layer paths near the horizon empty (a
@@ -483,7 +511,11 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
             } else if (fine) {
                 cellEnd = min(t + fineStep, fineUntil);
             } else {
-                let phase = rayOffset + jitter * dq;
+                // With stratified phases (look2.w) the coarse search keeps one grid for all pixels: staggered,
+                // a fringe thinner than a step was found by only some pixels of each 2x2 (specks of dust).
+                // The phases then apply to the fine steps through the skin, where they remove the hair.
+                let coarseJitter = select(jitter, 0.5, u.look2.w > 0.5 && u.atmoExtra.w > 0.5);
+                let phase = rayOffset + coarseJitter * dq;
                 cellEnd = dq * (floor((t + phase) / dq) + 1.0) - phase;
                 if (cellEnd - t < dq * 0.01) { cellEnd += dq; }
             }
@@ -495,7 +527,12 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
             // In the quarter steps behind a found surface (fine), blur to that step: the visible skin keeps
             // its fine billows (blurred to the coarse step they were lost, and clouds looked smooth).
             let footprint = max(tm * u.march2.y, select(select(dq, dt, tail), dt, fine) * u.ambientFloor.w);
-            let weather = sampleWeather(p, footprint);
+            if (u.look4.x <= 0.0 || distance(p, wPos) > u.look4.x || footprint > wFp * 2.0) {
+                wCache = sampleWeather(p, footprint);
+                wPos = p;
+                wFp = footprint;
+            }
+            let weather = wCache;
             // The far-average weight keeps its own measure (half a step), independent of the prefilter
             // width: tying it to stepFootprint switched the surface refinement below off at medium range,
             // and the step planes then cut the cloud tops into terraces that slid as moire stripes.
@@ -529,16 +566,29 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
                 }
                 fineStep = dq * 0.25;
                 fineUntil = lo + dq;
-                t = lo;
+                // Fine samples sit at lo + (k + jitter) * fineStep (k + 0.5 without stratification). The
+                // stratified offset fades out from 6 to 15 km: far fringes are thinner than a step there and
+                // per-pixel phases turned them into dither dots instead of smoothing them.
+                let strat = 1.0 - smoothstep(6.0, 15.0, lo);
+                t = lo + (jitter - 0.5) * fineStep * strat;
                 lastEmpty = -1.0;
                 continue;
             }
             var density = 0.0;
-            if (base.density > 0.0 && farW < 0.999) { density = cloudDetail(p, base, footprint); }
+            // Detail at least look3.y pixels wide: sharper, it put isolated bright specks in thin fringes.
+            let detailFp = max(footprint, tm * u.march2.y * u.look3.y);
+            // Detail only where it can show (look4.y): once under that much light reaches the camera from
+            // here, the base density stands in for the eroded one (a fetch and its remaps saved).
+            if (base.density > 0.0 && farW < 0.999) {
+                density = select(base.density, cloudDetail(p, base, detailFp), T > u.look4.y);
+            }
             density = mix(density, meanD, farW);
             if (density > 0.0) {
                 let sigmaT = density * u.density.x;
-                if (lightAge == 0 || lightAge >= lightReuse || tm - lightT > u.march3.y) {
+                // Shared only behind the visible skin (T below LIGHT_REUSE_MAX_T). Shared on the skin, the
+                // lighting snapped between sample depths on crisp clouds (woven stripes, "hair"), and a thin
+                // first sample's dim lighting carried onto the denser ones behind it (dark seams).
+                if (lightAge == 0 || lightAge >= lightReuse || tm - lightT > u.march3.y || T > LIGHT_REUSE_MAX_T) {
                     J = cloudSource(p, rd, footprint, weather, base, density, cosTheta, powderWeight)
                         / max(sigmaT, 1.0e-5);
                     lightAge = 0;

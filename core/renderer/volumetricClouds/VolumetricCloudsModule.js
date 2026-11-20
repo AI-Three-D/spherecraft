@@ -1,6 +1,8 @@
 // @ts-nocheck
 import { CLOUD_UNIFORM_VEC4_COUNT } from './shaders/cloudCommon.wgsl.js';
-import { SHAPE_NOISE_WGSL, DETAIL_NOISE_WGSL, WEATHER_NOISE_WGSL, DOWNSAMPLE_3D_WGSL } from './shaders/cloudNoise.wgsl.js';
+import {
+    SHAPE_NOISE_WGSL, DETAIL_NOISE_WGSL, WEATHER_NOISE_WGSL, DOWNSAMPLE_3D_WGSL, DOWNSAMPLE_3D_HQ_WGSL, NOISE_HQ_FORMAT,
+} from './shaders/cloudNoise.wgsl.js';
 import {
     TRANSMITTANCE_LUT_WGSL, AMBIENT_LUT_WGSL, CLOUD_SHADOW_WGSL, CLOUD_RAYMARCH_WGSL, CLOUD_TEMPORAL_WGSL,
 } from './shaders/cloudPasses.wgsl.js';
@@ -171,6 +173,27 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
     /** Extra sky light on clouds around sunset (0 = none): shaded sides mauve and blue-grey instead of brown. */
     duskSkyBoost: 0,
     /**
+     * Without temporal reconstruction: give neighbouring pixels four different step phases (2x2 ordered
+     * pattern). With spatialFilter 1 the 3x3 tent averages them exactly, so surfaces stop snapping to
+     * step positions. Use with spatialFilter 1.
+     */
+    stepStratify: false,
+    /**
+     * Step planes anchored at the camera snapped to a lattice this wide (km); 0 = planet centre. The
+     * planet-centre anchor draws fingerprint rings in thin cloud near the camera (the step phase aliases
+     * across pixels). Use with stepStratify; the planes jump once when the camera crosses a cell.
+     */
+    stepAnchorKm: 0,
+    /** Detail noise is blurred to at least this many pixels (0 = off): sharper, thin fringes sparkle. */
+    detailPixelFootprint: 0,
+    /** Cross-cutting cost savings (every tier). Weather re-sampled along a ray only every this many km (0 = every sample). */
+    weatherReuseKm: 0.3,
+    /**
+     * Detail noise skipped once less than this fraction of light reaches the camera from the sample (0 = never
+     * skip). Off: measured -3 % at ground views but +8 % from above (uneroded density lights more samples).
+     */
+    detailMinTransmittance: 0,
+    /**
      * Horizon Zero Dawn's in-scattering probability (0 = off, 1 = full): less light scattered toward the
      * eye where the cloud is thin (more so toward its top) and near its base. Dark grooves between
      * billows and dark undersides.
@@ -305,7 +328,7 @@ export class VolumetricCloudsModule {
         if (this._sets) this._buildRaymarchGroup();
     }
 
-    /** The shape and detail noise volumes (3D, rgba8unorm, R = Perlin-Worley / Worley fBm), for reuse by other effects. */
+    /** The shape and detail noise volumes (3D, rgba16float, R = Perlin-Worley / Worley fBm), for reuse by other effects. */
     getNoiseViews() {
         return { shape: this._shapeView, detail: this._detailView };
     }
@@ -399,12 +422,12 @@ export class VolumetricCloudsModule {
 
     _createVolumes() {
         const device = this.device;
-        const volume = (label, size, mips) => device.createTexture({
-            label, size: [size, size, size], dimension: '3d', format: 'rgba8unorm', mipLevelCount: mips,
+        const volume = (label, size, mips, format = 'rgba8unorm') => device.createTexture({
+            label, size: [size, size, size], dimension: '3d', format, mipLevelCount: mips,
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
         });
-        this._shape = volume('clouds shape noise', SHAPE_SIZE, Math.log2(SHAPE_SIZE) + 1);
-        this._detail = volume('clouds detail noise', DETAIL_SIZE, Math.log2(DETAIL_SIZE) + 1);
+        this._shape = volume('clouds shape noise', SHAPE_SIZE, Math.log2(SHAPE_SIZE) + 1, NOISE_HQ_FORMAT);
+        this._detail = volume('clouds detail noise', DETAIL_SIZE, Math.log2(DETAIL_SIZE) + 1, NOISE_HQ_FORMAT);
         this._weather = volume('clouds weather noise', WEATHER_SIZE, Math.log2(WEATHER_SIZE) + 1);
         const lut = (label, width, height) => device.createTexture({
             label, size: [width, height], format: 'rgba16float',
@@ -442,6 +465,8 @@ export class VolumetricCloudsModule {
         this._layouts = {
             volume: layout([store('rgba8unorm', '3d')]),
             downsample: layout([tex3d, store('rgba8unorm', '3d')]),
+            volumeHQ: layout([store(NOISE_HQ_FORMAT, '3d')]),
+            downsampleHQ: layout([tex3d, store(NOISE_HQ_FORMAT, '3d')]),
             transmittance: layout([uniform, store('rgba16float')]),
             ambient: layout([uniform, tex2d, sampler, store('rgba16float')]),
             shadow: layout([...noise, store('rgba16float')]),
@@ -449,10 +474,11 @@ export class VolumetricCloudsModule {
             temporal: layout([uniform, tex2d, texUnfilterable, tex2d, sampler, store('rgba16float')]),
         };
         const sources = {
-            shapeNoise: [SHAPE_NOISE_WGSL, 'volume'],
-            detailNoise: [DETAIL_NOISE_WGSL, 'volume'],
+            shapeNoise: [SHAPE_NOISE_WGSL, 'volumeHQ'],
+            detailNoise: [DETAIL_NOISE_WGSL, 'volumeHQ'],
             weatherNoise: [WEATHER_NOISE_WGSL, 'volume'],
             downsample: [DOWNSAMPLE_3D_WGSL, 'downsample'],
+            downsampleHQ: [DOWNSAMPLE_3D_HQ_WGSL, 'downsampleHQ'],
             transmittance: [TRANSMITTANCE_LUT_WGSL, 'transmittance'],
             ambient: [AMBIENT_LUT_WGSL, 'ambient'],
             shadow: [CLOUD_SHADOW_WGSL, 'shadow'],
@@ -570,16 +596,18 @@ export class VolumetricCloudsModule {
         const device = this.device;
         const encoder = device.createCommandEncoder({ label: 'clouds noise generation' });
         const pass = encoder.beginComputePass();
+        const hq = (texture) => texture.format === NOISE_HQ_FORMAT;
         const generate = (pipeline, texture, size) => {
             pass.setPipeline(this._pipelines[pipeline]);
-            pass.setBindGroup(0, this._group('volume', [texture.createView({ dimension: '3d', baseMipLevel: 0, mipLevelCount: 1 })]));
+            pass.setBindGroup(0, this._group(hq(texture) ? 'volumeHQ' : 'volume',
+                [texture.createView({ dimension: '3d', baseMipLevel: 0, mipLevelCount: 1 })]));
             pass.dispatchWorkgroups(size / 4, size / 4, size / 4);
         };
         const mips = (texture, size) => {
-            pass.setPipeline(this._pipelines.downsample);
+            pass.setPipeline(this._pipelines[hq(texture) ? 'downsampleHQ' : 'downsample']);
             for (let level = 1; level < texture.mipLevelCount; level++) {
                 const view = (mip) => texture.createView({ dimension: '3d', baseMipLevel: mip, mipLevelCount: 1 });
-                pass.setBindGroup(0, this._group('downsample', [view(level - 1), view(level)]));
+                pass.setBindGroup(0, this._group(hq(texture) ? 'downsampleHQ' : 'downsample', [view(level - 1), view(level)]));
                 const n = Math.max(1, Math.ceil((size >> level) / 4));
                 pass.dispatchWorkgroups(n, n, n);
             }
@@ -719,7 +747,10 @@ export class VolumetricCloudsModule {
             Math.max(0, s.giantShare ?? 0), Math.max(1, s.giantHeight ?? 2.5), Math.max(1, s.giantScale ?? 3),
             Math.min(0.92, Math.max(0.05, (s.popcornTopKm ?? 1.6) / Math.max(0.1, s.cloudTopKm - s.cloudBottomKm))),
             Math.max(0, s.inScatter ?? 0), Math.max(0, s.aoSide ?? 0), Math.max(0, s.inScatterGain ?? 2.5), Math.max(0.05, s.sunsetAltitudeScale ?? 1),
-            Math.max(0.5, s.domeEdgeSharpness ?? 1.5), Math.max(0, s.domeHeads ?? 0.6), Math.max(0, s.duskSkyBoost ?? 0), 0,
+            Math.max(0.5, s.domeEdgeSharpness ?? 1.5), Math.max(0, s.domeHeads ?? 0.6), Math.max(0, s.duskSkyBoost ?? 0), s.stepStratify === 'ign' ? 2 : s.stepStratify ? 1 : 0,
+            Math.max(0, s.stepAnchorKm ?? 0), Math.max(0, s.detailPixelFootprint ?? 0),
+            s._profileOldLight ? 1 : 0, s._profileOldHeads ? 1 : 0,
+            Math.max(0, s.weatherReuseKm ?? 0.3), Math.max(0, s.detailMinTransmittance ?? 0), 0, 0,
         ]);
         this.device.queue.writeBuffer(this._uniformBuffer, 0, data);
         this._prev = cam;

@@ -507,7 +507,7 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | P: Cloud shape offset | F: Cloud step size | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud shape
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | P: Cloud shape offset | F: Cloud step size | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
@@ -518,7 +518,7 @@
         <button id="cloud-fit" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud step size (F)</button>
         <button id="cloud-ground" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Near-ground clouds (I)</button>
         <button id="night-look" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Night look (Shift+M)</button>
-        <button id="cloud-shape" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud shape (Shift+P)</button>
+        <button id="cloud-shape" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud tier (Shift+P)</button>
         <button id="sunset-depth" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Sunset colour (Shift+N)</button>
         <button id="cloud-lights" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud lights (M)</button>
         <button id="bank-preview" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Banks: existing (J)</button>
@@ -4682,20 +4682,27 @@
         const LOOK_PICK = {
             cloudShape: 'domes', domeHeight: 1.5, shapeTileKm: 8, giantShare: 0.6, giantHeight: 3, giantScale: 5,
             popcornTopKm: 1.6, cloudTopKm: 12, domeEdgeSharpness: 1.5, domeHeads: 1.0,
-            ambient: 0.4, msScattering: 0.35, msExtinction: 0.12, extinction: 80, detailErosion: 0.75,
+            ambient: 0.4, msScattering: 0.35, msExtinction: 0.12, extinction: 50, detailErosion: 0.75,
             aoSide: 1, inScatter: 0, sunsetDepth: 10, sunsetAltitudeScale: 0.35, duskSkyBoost: 1,
-            stepFootprint: 0.35, spatialFilter: 0, resolutionScale: 1.0,
+            // Anti-aliasing (2026-11-20): detail blurred to the step, a 3x3 tent, and stratified step
+            // phases that the tent averages. Removes the "hair", grain and step streaks.
+            stepFootprint: 1.0, spatialFilter: 1, stepStratify: true, resolutionScale: 1.0,
+            // Fingerprint rings and fringe specks: step planes anchored near the camera, detail >= 2 px.
+            stepAnchorKm: 2, detailPixelFootprint: 2, lightSteps: 6, layerStepFit: 0.5,
         };
+        // Quality tiers (CLOUD_PERFORMANCE_PLAN.md 1.7). Costs relative to ultra, measured in the lab.
         const CLOUD_SHAPE_MODES = [
             { name: 'game settings (current)', set: null },
-            { name: 'look pick: crisp cauliflower + giants (slow)', set: LOOK_PICK },
-            { name: 'look pick at half resolution (faster, softer)', set: { ...LOOK_PICK, resolutionScale: 0.5, spatialFilter: 1 } },
+            { name: 'ULTRA: full look, full res (1.0x)', set: LOOK_PICK },
+            { name: 'HIGH: 0.67 res, no side AO, 5 light steps (~0.4x)', set: { ...LOOK_PICK, resolutionScale: 0.67, aoSide: 0, lightSteps: 5 } },
+            { name: 'MEDIUM: 0.33 res, popcorn only (~0.07x, draft)', set: { ...LOOK_PICK, resolutionScale: 0.33, giantShare: 0, aoSide: 0, lightSteps: 4, layerStepFit: 0.25 } },
+            { name: 'LOW: no volumetric clouds, cirrus only', set: null, off: true },
         ];
         let cloudShapeMode = 0;
         let cloudShapeGameSettings = null;
         function cloudShapeIndex() { return cloudShapeMode; }
         function cloudShapeShow() {
-            document.getElementById('cloud-shape').textContent = `Cloud shape: ${CLOUD_SHAPE_MODES[cloudShapeIndex()].name} (Shift+P)`;
+            document.getElementById('cloud-shape').textContent = `Cloud tier: ${CLOUD_SHAPE_MODES[cloudShapeIndex()].name} (Shift+P)`;
         }
         function cloudShapeStep() {
             const s = window.volumetricClouds?.settings;
@@ -4705,8 +4712,9 @@
             cloudShapeMode = (cloudShapeMode + 1) % CLOUD_SHAPE_MODES.length;
             const m = CLOUD_SHAPE_MODES[cloudShapeMode];
             Object.assign(s, m.set ?? cloudShapeGameSettings);
+            window.volumetricClouds.enabled = !m.off;
             cloudShapeShow();
-            debugSay(`Cloud shape: ${m.name}.`, 'CloudShape');
+            debugSay(`Cloud tier: ${m.name}. Watch the FPS counter.`, 'CloudTier');
         }
         document.getElementById('cloud-shape').addEventListener('click', cloudShapeStep);
         setInterval(cloudShapeShow, 1000);

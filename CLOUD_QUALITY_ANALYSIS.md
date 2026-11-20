@@ -53,6 +53,32 @@ Tuned in the running game (manual camera, frozen clock), not the lab. Screenshot
 - **Far horizon:** the far band still shows layered strips (the far average).
 - **Night sky band:** the vertical light band at night is the night sky's galaxy layer (`SkyRenderer`), not the clouds.
 
+## Hair, grain and dark seams (2026-11-20, tested in game)
+
+These were reproduced at your camera position: 10 km up, looking down at cumulus. Screenshots 12–16 in `screenshots/cloud_look_2026-11-20/`.
+
+| Cause | Fix |
+|---|---|
+| **Light sharing on the visible skin.** Lighting held for 4 samples snapped between sample depths on crisp clouds, which showed as woven stripes and hair. A thin first sample's dim lighting was also carried onto the denser samples behind it, giving dark seams. | Light is shared only behind the skin, where the transmittance to the camera is below 0.4 (`LIGHT_REUSE_MAX_T`). It stays fresh where it shows, and most of the saving is kept. |
+| **Detail noise sharper than the step along the ray** (`stepFootprint` 0.35). Each pixel sampled unrelated detail, which showed as combed strands. | `stepFootprint` 1.0. It also reads coarser mips, which is cheaper. |
+| **Each step nearly opaque at extinction 80.** The surface snapped to step positions, giving streaks that radiate from below the camera. | Extinction 50, so the skin spreads over a few steps. |
+| **Pixel-scale aliasing** at full resolution with no filter (grain from afar). | `spatialFilter` 1 (3×3 tent) plus `stepStratify`. Neighbouring pixels use four step phases in a 2×2 ordered pattern, and the tent gives each phase exactly a quarter of the weight, so it averages four depth samples per pixel at no extra cost. |
+
+Result: soft billows with fine detail, as in the HZD reference. Distant towers are no longer craggy.
+
+Left over:
+- Faint arc moiré in thin cloud seen at grazing angles.
+- Layered strips in the far band.
+
+## Rings, dust and grain (2026-11-20, second pass)
+
+| Defect | Cause | Fix |
+|---|---|---|
+| Fingerprint rings in thin cloud near the camera, short-lived while moving | (a) 8-bit shape and detail noise: the dome shape amplifies them about 20–30×, so thin cloud showed about 10 density levels as contours. (b) A zone plate: the step phase `dot(camera, ray) mod step` changes by several fine steps per pixel near the camera. | (a) Shape and detail volumes are now `rgba16float` (`NOISE_HQ_FORMAT`; weather stays 8-bit). (b) `stepAnchorKm` 2 (look3.x): step planes anchored at the camera snapped to a 2 km lattice, with `stepStratify` for the per-pixel phases. No stripes from 40 km. |
+| Dust of specks around clouds | (a) The `heads` term added density in clear air. (b) Giant rims were faded by scaling density down. (c) Stratified phases on the coarse search and on far fine steps: thin fringes were found by only some pixels. | (a) Heads only inside existing cloud. (b) Rims fade by erosion. (c) One coarse grid for all pixels; fine-step stratification fades out from 6 to 15 km. Far detail erosion also fades once its cells are sub-pixel, and `detailPixelFootprint` is 2. |
+
+A few faint specks remain near mid-distance cloud fringes. Side effect: the raymarch got about 3× faster (see `CLOUD_PERFORMANCE_PLAN.md`, section 1.5).
+
 ## Target: Horizon Zero Dawn (2026-11-19, lab only)
 
 The user set HZD's clouds (Schneider, SIGGRAPH 2015 and Nubis 2017) as the target. In the lab, behind settings, with the game default unchanged:
