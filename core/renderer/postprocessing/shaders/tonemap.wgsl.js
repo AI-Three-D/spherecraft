@@ -11,9 +11,9 @@ ${fullscreenQuadVertexWGSL}
 
 struct TonemapParams {
     exposure: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    night: f32,          // 0 day .. 1 full night
+    nightGrade: f32,     // how far colour moves toward night vision at full night (0..1)
+    nightExposure: f32,  // exposure change at full night (+1 = twice as bright, -0.2 = 20 % darker)
 };
 
 @group(0) @binding(0) var hdrTexture: texture_2d<f32>;
@@ -41,7 +41,16 @@ fn linearToSrgb(c: vec3<f32>) -> vec3<f32> {
 fn fs_tonemap(in: FullscreenVsOut) -> @location(0) vec4<f32> {
     let hdr = max(textureSample(hdrTexture, hdrSampler, in.uv).rgb, vec3<f32>(0.0));
 
-    let exposed = hdr * params.exposure;
+    var exposed = hdr * params.exposure;
+    // Night vision: as the light fails, colour drains and what is left shifts toward blue (the rods'
+    // response peaks in blue-green and is blind to red). Without it a moonlit scene rendered as dim
+    // daylight, with the warm daytime colours of clouds and ground intact.
+    if (params.night > 0.0) {
+        let rods = dot(exposed, vec3<f32>(0.05, 0.55, 0.40));
+        let nightColor = vec3<f32>(rods) * vec3<f32>(0.70, 0.92, 1.35);
+        exposed = mix(exposed, nightColor, params.night * params.nightGrade)
+            * max(1.0 + params.night * params.nightExposure, 0.05);
+    }
     let mapped  = acesTonemap(exposed);
     let srgb    = linearToSrgb(mapped);
 

@@ -8,7 +8,7 @@
     "scaleHeightRayleighRatio": 0.1,
     "scaleHeightMieRatio":      0.015,
     "mieAnisotropy":            0.76,
-    "visualDensity":            0.5,
+    "visualDensity":            0.65,
     "sunIntensity":             20.0
   },
   "altitudeZones": {
@@ -25,6 +25,7 @@
   },
   "spawn": {
     "height":       800,
+    "lakeCellDirection": [-0.93, -0.16, 0.33],
     "spawnOnSunSide": true,
     "defaultX":     0,
     "defaultY":     800,

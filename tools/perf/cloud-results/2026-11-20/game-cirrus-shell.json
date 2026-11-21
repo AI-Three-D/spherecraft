@@ -1,0 +1,1065 @@
+{
+  "before": "http://127.0.0.1:8765",
+  "after": "http://127.0.0.1:8766",
+  "chrome": "Chrome/157.0.8103.79",
+  "width": 1024,
+  "height": 640,
+  "dpr": 1.5,
+  "tier": "ultra",
+  "scale": 1,
+  "afterScale": 1,
+  "game": true,
+  "sampleFrames": 24,
+  "warmFrames": 22,
+  "rounds": 2,
+  "cases": {
+    "cirrus-shell-day": {
+      "name": "cirrus-shell-day",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "cumulusOff": true
+      },
+      "before": [
+        {
+          "fps": 44.8933782272121,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 8.155409333333333,
+              "p95": 18.723797,
+              "last": 2.158759
+            },
+            {
+              "name": "total",
+              "avg": 2.6504317619047617,
+              "p95": 6.937602,
+              "last": 0.460743
+            }
+          ],
+          "samples": 21,
+          "conditions": {
+            "sunElevation": 35.0000002294618,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.366263625,
+                "p95": 0.401744,
+                "last": 0.475534
+              },
+              {
+                "name": "total",
+                "avg": 4.3112260434782606,
+                "p95": 24.742997,
+                "last": 0.373828
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 5.9625000000620885
+          }
+        },
+        {
+          "fps": 52.93339214838747,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 7.1843605238095245,
+              "p95": 37.788924,
+              "last": 1.00011
+            },
+            {
+              "name": "total",
+              "avg": 8.04482315,
+              "p95": 37.760674,
+              "last": 1.234648
+            }
+          ],
+          "samples": 21,
+          "conditions": {
+            "sunElevation": 35.0000002294618,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.36307770833333336,
+                "p95": 0.388828,
+                "last": 0.375077
+              },
+              {
+                "name": "total",
+                "avg": 4.5991224583333326,
+                "p95": 23.637682,
+                "last": 0.300537
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 6.858333333084981
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 36.177268616300736,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 12.023581050000002,
+              "p95": 36.701024,
+              "last": 0.401535
+            },
+            {
+              "name": "total",
+              "avg": 6.993666300000001,
+              "p95": 40.559048,
+              "last": 2.366589
+            }
+          ],
+          "samples": 20,
+          "conditions": {
+            "sunElevation": 35.00000023358407,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.2929974166666666,
+                "p95": 0.324787,
+                "last": 0.280703
+              },
+              {
+                "name": "total",
+                "avg": 2.268967391304348,
+                "p95": 9.608729,
+                "last": 0.366827
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 11.545833333395422
+          }
+        },
+        {
+          "fps": 49.079754601226995,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 4.767813590909092,
+              "p95": 12.99826,
+              "last": 3.025496
+            },
+            {
+              "name": "total",
+              "avg": 8.531134954545454,
+              "p95": 22.006164,
+              "last": 4.996423
+            }
+          ],
+          "samples": 22,
+          "conditions": {
+            "sunElevation": 35.00000023358407,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.30009445833333326,
+                "p95": 0.372287,
+                "last": 0.278496
+              },
+              {
+                "name": "total",
+                "avg": 0.47941127272727263,
+                "p95": 0.827655,
+                "last": 0.384036
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 7.6291666667287545
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 3.3806993272569446,
+        "p95": 6,
+        "p99": 126,
+        "fractionOver5": 0.05505032009548611
+      }
+    },
+    "cirrus-shell-dawn": {
+      "name": "cirrus-shell-dawn",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": 3,
+      "azimuth": 55,
+      "moon": false,
+      "extra": {
+        "cumulusOff": true
+      },
+      "before": [
+        {
+          "fps": 42.5758382115897,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 17.94748926315789,
+              "p95": 70.780128,
+              "last": 13.349712
+            },
+            {
+              "name": "total",
+              "avg": 7.999579736842105,
+              "p95": 29.024265,
+              "last": 16.137795
+            }
+          ],
+          "samples": 19,
+          "conditions": {
+            "sunElevation": 3.0000000131869777,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.3814872916666667,
+                "p95": 0.386827,
+                "last": 0.37166
+              },
+              {
+                "name": "total",
+                "avg": 0.3515745833333333,
+                "p95": 0.459076,
+                "last": 0.309578
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.0250000000620882
+          }
+        },
+        {
+          "fps": 53.98110661250463,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 5.731226833333333,
+              "p95": 16.329043,
+              "last": 1.12469
+            },
+            {
+              "name": "total",
+              "avg": 2.4181350416666665,
+              "p95": 6.934727,
+              "last": 2.881456
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": 3.0000000131869777,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.37626154166666664,
+                "p95": 0.381744,
+                "last": 0.381744
+              },
+              {
+                "name": "total",
+                "avg": 0.314489875,
+                "p95": 0.319786,
+                "last": 0.312329
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 0.8916666666045785
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 40.719375635828456,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 6.66708480952381,
+              "p95": 26.40468,
+              "last": 1.026609
+            },
+            {
+              "name": "total",
+              "avg": 13.57848919047619,
+              "p95": 71.967193,
+              "last": 3.418864
+            }
+          ],
+          "samples": 21,
+          "conditions": {
+            "sunElevation": 3.0000000134955127,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.8541555,
+                "p95": 0.914194,
+                "last": 0.562574
+              },
+              {
+                "name": "total",
+                "avg": 0.7912572916666668,
+                "p95": 0.965527,
+                "last": 0.499742
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.4041666664804022
+          }
+        },
+        {
+          "fps": 59.05511811045275,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 3.735779708333333,
+              "p95": 14.874023,
+              "last": 1.021192
+            },
+            {
+              "name": "total",
+              "avg": 2.5032706250000003,
+              "p95": 8.604369,
+              "last": 4.11102
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": 3.0000000134955127,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.3058633333333333,
+                "p95": 0.31737,
+                "last": 0.31087
+              },
+              {
+                "name": "total",
+                "avg": 0.26687958333333345,
+                "p95": 0.363036,
+                "last": 0.247371
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 0.8125
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 0.005541314019097222,
+        "p95": 0,
+        "p99": 0,
+        "fractionOver5": 0.00004340277777777778
+      }
+    },
+    "cirrus-shell-dusk": {
+      "name": "cirrus-shell-dusk",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": 5,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "cumulusOff": true
+      },
+      "before": [
+        {
+          "fps": 55.26134008787633,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 8.725959772727276,
+              "p95": 25.788399,
+              "last": 20.315524
+            },
+            {
+              "name": "total",
+              "avg": 10.249423136363637,
+              "p95": 30.495035,
+              "last": 23.561725
+            }
+          ],
+          "samples": 22,
+          "conditions": {
+            "sunElevation": 4.999999559699244,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 1.0199775416666668,
+                "p95": 1.130442,
+                "last": 0.839112
+              },
+              {
+                "name": "total",
+                "avg": 0.9618915833333332,
+                "p95": 1.175898,
+                "last": 0.759113
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.6083333333954215
+          }
+        },
+        {
+          "fps": 30.35669112061063,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 1.7546902500000003,
+              "p95": 2.416796,
+              "last": 1.718639
+            },
+            {
+              "name": "total",
+              "avg": 1.9244552499999996,
+              "p95": 2.624668,
+              "last": 1.925678
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": 4.999999559699244,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.5796718333333332,
+                "p95": 0.700614,
+                "last": 0.727489
+              },
+              {
+                "name": "total",
+                "avg": 0.5540575416666667,
+                "p95": 0.69549,
+                "last": 0.621241
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.3666666668529313
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 52.65467310258211,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 8.247313363636364,
+              "p95": 31.040317,
+              "last": 26.289015
+            },
+            {
+              "name": "total",
+              "avg": 10.888549727272729,
+              "p95": 46.229795,
+              "last": 28.623771
+            }
+          ],
+          "samples": 22,
+          "conditions": {
+            "sunElevation": 4.999999560214309,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.8111074166666664,
+                "p95": 0.911361,
+                "last": 0.562116
+              },
+              {
+                "name": "total",
+                "avg": 0.7118934583333333,
+                "p95": 0.83382,
+                "last": 0.497492
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.3666666665424902
+          }
+        },
+        {
+          "fps": 58.99705014792484,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 2.3086835000000003,
+              "p95": 2.285507,
+              "last": 1.042609
+            },
+            {
+              "name": "total",
+              "avg": 1.934736083333333,
+              "p95": 3.885898,
+              "last": 1.065901
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": 4.999999560214309,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.310931,
+                "p95": 0.31612,
+                "last": 0.314038
+              },
+              {
+                "name": "total",
+                "avg": 0.2582060833333334,
+                "p95": 0.364745,
+                "last": 0.248039
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 0.8208333334575096
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 0.00040757921006944446,
+        "p95": 0,
+        "p99": 0,
+        "fractionOver5": 0
+      }
+    },
+    "cirrus-shell-night": {
+      "name": "cirrus-shell-night",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": -35,
+      "azimuth": 235,
+      "moon": true,
+      "extra": {
+        "cumulusOff": true
+      },
+      "before": [
+        {
+          "fps": 30.022516887721714,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 2.2965534583333334,
+              "p95": 3.159202,
+              "last": 1.898054
+            },
+            {
+              "name": "total",
+              "avg": 2.3828107499999995,
+              "p95": 3.183411,
+              "last": 2.131176
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": -35.0000002294618,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 1.076381125,
+                "p95": 1.126108,
+                "last": 0.928693
+              },
+              {
+                "name": "total",
+                "avg": 0.9840180833333333,
+                "p95": 1.0594,
+                "last": 0.855987
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.6374999998758237
+          }
+        },
+        {
+          "fps": 29.921456177478387,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 2.3266295833333337,
+              "p95": 3.024454,
+              "last": 2.976704
+            },
+            {
+              "name": "total",
+              "avg": 2.4043210416666665,
+              "p95": 3.078328,
+              "last": 3.028079
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": -35.0000002294618,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.731257875,
+                "p95": 0.930903,
+                "last": 0.939695
+              },
+              {
+                "name": "total",
+                "avg": 0.67999825,
+                "p95": 0.865612,
+                "last": 0.842612
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.5625
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 30.101592875787578,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 2.3573008750000004,
+              "p95": 3.368823,
+              "last": 1.859222
+            },
+            {
+              "name": "total",
+              "avg": 2.462191666666667,
+              "p95": 3.613027,
+              "last": 1.881889
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": -35.00000023358407,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.8962015833333333,
+                "p95": 0.911277,
+                "last": 0.891527
+              },
+              {
+                "name": "total",
+                "avg": 0.8351017916666664,
+                "p95": 0.968735,
+                "last": 0.826362
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.4583333333333333
+          }
+        },
+        {
+          "fps": 30.158331239117715,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 2.131214041666667,
+              "p95": 3.052869,
+              "last": 1.883679
+            },
+            {
+              "name": "total",
+              "avg": 2.269605916666667,
+              "p95": 3.058911,
+              "last": 1.881137
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": -35.00000023358407,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.41017779166666674,
+                "p95": 0.505284,
+                "last": 0.510868
+              },
+              {
+                "name": "total",
+                "avg": 0.4085230833333333,
+                "p95": 0.583032,
+                "last": 0.41466
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.120833333581686
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 0.007223171657986111,
+        "p95": 0,
+        "p99": 0,
+        "fractionOver5": 0.00040554470486111113
+      }
+    },
+    "cirrus-orbit-day": {
+      "name": "cirrus-orbit-day",
+      "view": {
+        "altitudeKm": 125,
+        "headingDeg": 55,
+        "pitchDeg": -56
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "cumulusOff": true
+      },
+      "before": [
+        {
+          "fps": 29.973772948837258,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 1.8853896666666667,
+              "p95": 2.651293,
+              "last": 1.917888
+            },
+            {
+              "name": "cirrus near",
+              "avg": 6.147586791666666,
+              "p95": 7.953545,
+              "last": 6.846895
+            },
+            {
+              "name": "total",
+              "avg": 7.9239554583333325,
+              "p95": 10.315634,
+              "last": 8.647951
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": 35.0000002294618,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.30052137500000004,
+                "p95": 0.356828,
+                "last": 0.247372
+              },
+              {
+                "name": "cirrus near",
+                "avg": 0.7398689583333332,
+                "p95": 0.887321,
+                "last": 0.565367
+              },
+              {
+                "name": "total",
+                "avg": 0.6713717083333334,
+                "p95": 0.897236,
+                "last": 0.460326
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.316666666418314
+          }
+        },
+        {
+          "fps": 29.90281584871447,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 2.104938375,
+              "p95": 2.844666,
+              "last": 1.749765
+            },
+            {
+              "name": "cirrus near",
+              "avg": 6.195655458333333,
+              "p95": 8.644451,
+              "last": 6.28432
+            },
+            {
+              "name": "total",
+              "avg": 8.118112083333333,
+              "p95": 10.762711,
+              "last": 8.107001
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": 35.0000002294618,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.2703429583333333,
+                "p95": 0.328495,
+                "last": 0.270037
+              },
+              {
+                "name": "cirrus near",
+                "avg": 0.6665837083333334,
+                "p95": 0.819237,
+                "last": 0.784322
+              },
+              {
+                "name": "total",
+                "avg": 0.7133641666666667,
+                "p95": 0.917153,
+                "last": 0.880278
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.5249999997516472
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 29.84703395122236,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 1.8365813333333334,
+              "p95": 2.612544,
+              "last": 2.612544
+            },
+            {
+              "name": "cirrus near",
+              "avg": 6.33021775,
+              "p95": 8.363164,
+              "last": 8.299498
+            },
+            {
+              "name": "total",
+              "avg": 8.079769166666667,
+              "p95": 10.710461,
+              "last": 10.79071
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": 35.00000023358407,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.2614369583333332,
+                "p95": 0.28633,
+                "last": 0.28633
+              },
+              {
+                "name": "cirrus near",
+                "avg": 0.6244157083333334,
+                "p95": 0.686865,
+                "last": 0.686865
+              },
+              {
+                "name": "total",
+                "avg": 0.5800032916666668,
+                "p95": 0.700532,
+                "last": 0.564742
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.3666666665424902
+          }
+        },
+        {
+          "fps": 30.048829347577872,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 1.9149171249999999,
+              "p95": 2.710542,
+              "last": 1.780014
+            },
+            {
+              "name": "cirrus near",
+              "avg": 6.0610185,
+              "p95": 8.079544,
+              "last": 5.947492
+            },
+            {
+              "name": "total",
+              "avg": 7.995532625,
+              "p95": 10.319342,
+              "last": 7.585051
+            }
+          ],
+          "samples": 24,
+          "conditions": {
+            "sunElevation": 35.00000023358407,
+            "moonIlluminance": null,
+            "cloudSize": null,
+            "spatialStride": null,
+            "interleave": null,
+            "proxyWeight": null
+          },
+          "isolatedCirrus": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.20972775,
+                "p95": 0.254205,
+                "last": 0.242121
+              },
+              {
+                "name": "cirrus near",
+                "avg": 0.4794580416666667,
+                "p95": 0.637658,
+                "last": 0.632365
+              },
+              {
+                "name": "total",
+                "avg": 0.5408562916666667,
+                "p95": 0.727614,
+                "last": 0.714864
+              }
+            ],
+            "samples": 24,
+            "meanWallMs": 1.3499999999379118
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 0.016982693142361113,
+        "p95": 0,
+        "p99": 0,
+        "fractionOver5": 0.0007893880208333333
+      }
+    }
+  }
+}

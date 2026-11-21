@@ -1,5 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {WorldConfigLoader} from './WorldConfigLoader.js';
+import worldPlanet from './world/planet.json';
 import worldTerrain from './world/terrain.json';
 describe('rendering power settings', () => {
  it('uses the configured default pixel ratio and 60 FPS, with validated world overrides', () => {
@@ -16,7 +17,8 @@ describe('rendering power settings', () => {
   const adaptive = loader._buildEngineConfig({}, {}, { rendering: { adaptive: { stationaryFps: 24, motionPixelRatio: 0.8 } } });
   expect(adaptive.rendering.adaptive.stationaryFps).toBe(24);
   expect(adaptive.rendering.adaptive.motionPixelRatio).toBe(0.8);
-  expect(adaptive.rendering.adaptive.fastMotionPixelRatio).toBe(0.7);
+  // Default: no resolution drop while moving (fast motion stays at the still ratio).
+  expect(adaptive.rendering.adaptive.fastMotionPixelRatio).toBe(1.5);
  });
  it('rejects invalid pixel ratios and FPS limits from world JSON', () => {
   const loader = new WorldConfigLoader();
@@ -29,6 +31,17 @@ describe('rendering power settings', () => {
  });
 });
 describe('world water authoring configuration',()=>{
+ it('loads an optional lake-cell spawn direction from the world',()=>{
+  const loader=new WorldConfigLoader();
+  const direction=loader._buildGameDataConfig(worldTerrain, worldPlanet, {}).spawn.lakeCellDirection;
+  expect(Math.hypot(...direction)).toBeCloseTo(1);
+  const expected=worldPlanet.spawn.lakeCellDirection;
+  expect(direction).toEqual(expected.map(component=>component/Math.hypot(...expected)));
+  expect(loader._buildGameDataConfig({}, {}, {}).spawn.lakeCellDirection).toBeUndefined();
+  for (const lakeCellDirection of [[0,0,0], [1,2], [1,2,3,4], [1,2,NaN]]) {
+   expect(()=>loader._buildGameDataConfig({}, {spawn:{lakeCellDirection}}, {})).toThrow('spawn.lakeCellDirection');
+  }
+ });
  it('selects the startup mountain model without changing subsequent worlds',()=>{
   const loader=new WorldConfigLoader();
   expect(loader._buildGameDataConfig({mountainRangeModel:'directional'}, {}, {}).planets[0].terrain.mountainRangeModel).toBe('directional');

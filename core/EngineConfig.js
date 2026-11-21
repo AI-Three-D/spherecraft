@@ -388,7 +388,19 @@ export class EngineConfig {
             'rendering.atmoBankParticles.offscreen.resolutionScale'
           )))
         }
-      }
+      },
+      volumetricClouds: createVolumetricCloudsConfig(rendering.volumetricClouds),
+      skyColorContrast: requireNumber(rendering.skyColorContrast ?? 0, 'rendering.skyColorContrast'),
+      // Night look in the tonemap (0 = off): at full night colour moves `grade` (0..1) of the way
+      // toward blue night vision, and exposure changes by `exposure` (+1 doubles, -0.2 is 20 % darker).
+      nightLook: {
+        grade: requireNumber(rendering.nightLook?.grade ?? 0, 'rendering.nightLook.grade'),
+        exposure: requireNumber(rendering.nightLook?.exposure ?? 0, 'rendering.nightLook.exposure'),
+        // Brightness of the moonlit sky (1 = physical share of the moon), separate from the scene.
+        sky: requireNumber(rendering.nightLook?.sky ?? 1, 'rendering.nightLook.sky'),
+        // Brightness of moonlit clouds (scales their moonlight and night fill; 1 = as lit by the moon).
+        clouds: requireNumber(rendering.nightLook?.clouds ?? 1, 'rendering.nightLook.clouds'),
+      },
     };
 
 
@@ -554,11 +566,13 @@ export class EngineConfig {
       treesFar:         requireBool(features.treesFar         ?? true, 'features.treesFar'),
       streamedAssets:   requireBool(features.streamedAssets   ?? true, 'features.streamedAssets'),
       particles:        requireBool(features.particles        ?? true, 'features.particles'),
+      rainParticles:    requireBool(features.rainParticles    ?? false, 'features.rainParticles'),
       actors:           requireBool(features.actors           ?? true, 'features.actors'),
       clouds:           requireBool(features.clouds           ?? true, 'features.clouds'),
       lowClouds:        requireBool(features.lowClouds        ?? true, 'features.lowClouds'),
       midClouds:        requireBool(features.midClouds        ?? true, 'features.midClouds'),
       highClouds:       requireBool(features.highClouds       ?? true, 'features.highClouds'),
+      volumetricClouds: requireBool(features.volumetricClouds ?? true, 'features.volumetricClouds'),
       cloudParticles:   requireBool(features.cloudParticles   ?? true, 'features.cloudParticles'),
       fogParticles:     requireBool(features.fogParticles     ?? true, 'features.fogParticles'),
       skyEffects:       requireBool(features.skyEffects       ?? true, 'features.skyEffects'),
@@ -822,4 +836,27 @@ export class EngineConfig {
     }
     return Math.max(0, arr.length - 1);
   }
+}
+
+/**
+ * Volumetric cloud options. `settings` overrides DEFAULT_CLOUD_SETTINGS in
+ * core/renderer/volumetricClouds/VolumetricCloudsModule.js (distances in km).
+ * `coverageFromWeather` maps the weather's cloudCoverage (0..1) onto the cloud
+ * coverage range { min, max }; false keeps settings.coverage fixed.
+ */
+function createVolumetricCloudsConfig(raw = {}) {
+  const config = requireObject(raw ?? {}, 'rendering.volumetricClouds');
+  const weather = config.coverageFromWeather ?? { min: 0.22, max: 0.78 };
+  return {
+    settings: { ...requireObject(config.settings ?? {}, 'rendering.volumetricClouds.settings') },
+    coverageFromWeather: weather === false ? false : {
+      min: requireNumber(weather.min, 'rendering.volumetricClouds.coverageFromWeather.min'),
+      max: requireNumber(weather.max, 'rendering.volumetricClouds.coverageFromWeather.max'),
+    },
+    brightness: requireNumber(config.brightness ?? 1, 'rendering.volumetricClouds.brightness'),
+    shadowStrength: requireNumber(config.shadowStrength ?? 0.6, 'rendering.volumetricClouds.shadowStrength'),
+    shadowFloor: requireNumber(config.shadowFloor ?? 0.45, 'rendering.volumetricClouds.shadowFloor'),
+    nightAmbient: requireNumber(config.nightAmbient ?? 1, 'rendering.volumetricClouds.nightAmbient'),
+    moonlight: requireNumber(config.moonlight ?? 1, 'rendering.volumetricClouds.moonlight'),
+  };
 }

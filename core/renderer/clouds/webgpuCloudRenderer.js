@@ -4,7 +4,13 @@ import { RenderTarget } from '../resources/renderTarget.js';
 import { Vector2, Vector3, Matrix4 } from '../../../shared/math/index.js';
 import { AERIAL_PERSPECTIVE_WGSL } from '../atmosphere/shaders/aerialPerspectiveCommon.js'
 
+// Fraction of the cirrus band that the volume's slab spans (the shader's CIRRUS_SLAB_FRACTION). The
+// frontend draws the cirrus over the scene once the camera is inside the slab.
+export const CIRRUS_SLAB_FRACTION = 0.42;
+
 export class WebGPUCloudRenderer extends CloudRenderer {
+    get cirrusSlabFraction() { return CIRRUS_SLAB_FRACTION; }
+
 
     // ---------------------------------------------------------------
     //  Lifecycle
@@ -49,13 +55,13 @@ export class WebGPUCloudRenderer extends CloudRenderer {
                 entries: [
                     { binding: 0, visibility: 'fragment', texture: { sampleType: 'float', viewDimension: '2d' }, name: 'sourceTexture' },
                     { binding: 1, visibility: 'fragment', sampler: { type: 'filtering' }, name: 'sourceSampler' },
-                    { binding: 2, visibility: 'fragment', buffer: { type: 'uniform' }, name: 'blitParams' }
+                    { binding: 2, visibility: 'fragment', buffer: { type: 'uniform' }, name: 'blitParams' },
                 ]
             }],
             uniforms: {
                 sourceTexture: { value: null },
                 sourceSampler: { value: 'linear' },
-                blitParams:    { value: new Float32Array(4) }
+                blitParams: { value: new Float32Array(4) },
             },
             transparent: true,
             depthTest: true,
@@ -64,10 +70,14 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             blending: 'premultiplied'
         });
 
-        this.cirrusMaterial = new Material({
-            name: 'CirrusShell_WebGPU',
+        // Two materials with the same shader: the far part of each ray (drawn behind the scene) and
+        // the near part (drawn over it, see renderCirrus). Uniform buffers belong to a material and
+        // are written at draw time, so one material drawn twice in a frame would give both draws
+        // the last draw's parameters.
+        const makeCirrusMaterial = (name, shellOnly = false) => new Material({
+            name,
             vertexShader: this._getVertexShader(),
-            fragmentShader: this._getCirrusFragmentShader(),
+            fragmentShader: this._getCirrusFragmentShader(shellOnly),
             vertexLayout: [],
             bindGroupLayoutSpec: [
                 {
@@ -107,6 +117,10 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             depthCompare: 'always',
             blending: 'premultiplied'
         });
+        this.cirrusMaterial = makeCirrusMaterial('CirrusLayer_WebGPU');
+        this.cirrusNearMaterial = makeCirrusMaterial('CirrusLayerNear_WebGPU');
+        this.cirrusShellMaterial = makeCirrusMaterial('CirrusShell_WebGPU', true);
+        this.cirrusShellNearMaterial = makeCirrusMaterial('CirrusShellNear_WebGPU', true);
 
         this.initialized = true;
     }
@@ -200,15 +214,17 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             const bv = this.noiseGenerator.getBaseTextureView?.();
             const dv = this.noiseGenerator.getDetailTextureView?.();
             const ev = this.noiseGenerator.getErosionTextureView?.();
-            if (bv) this.cirrusMaterial.uniforms.noiseBase.value   = { _isGPUTextureView: true, view: bv };
-            if (dv) this.cirrusMaterial.uniforms.noiseDetail.value = { _isGPUTextureView: true, view: dv };
-            if (ev) this.cirrusMaterial.uniforms.noiseErosion.value = { _isGPUTextureView: true, view: ev };
+            for (const m of this._cirrusMaterials()) {
+                if (bv) m.uniforms.noiseBase.value   = { _isGPUTextureView: true, view: bv };
+                if (dv) m.uniforms.noiseDetail.value = { _isGPUTextureView: true, view: dv };
+                if (ev) m.uniforms.noiseErosion.value = { _isGPUTextureView: true, view: ev };
+            }
         }
 
         if (uniformManager?.uniforms?.transmittanceLUT?.value) {
             const tLUT = uniformManager.uniforms.transmittanceLUT.value;
             if (tLUT?._gpuTexture) {
-                this.cirrusMaterial.uniforms.transmittanceLUT.value = tLUT;
+                for (const m of this._cirrusMaterials()) m.uniforms.transmittanceLUT.value = tLUT;
             }
         }
 
@@ -220,9 +236,20 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         }
 
         // Push typed arrays into material uniforms.
-        this.cirrusMaterial.uniforms.matrixUniforms.value   = mat;
-        this.cirrusMaterial.uniforms.cirrusParams.value     = cp;
-        this.cirrusMaterial.uniforms.atmosphereParams.value = this._atmosphereData;
+        // The near material gets its own parameter array (it differs in the ray part, see renderCirrus).
+        this._cirrusNearParamData ??= new Float32Array(CIRRUS_PARAM_FLOATS);
+        this._cirrusNearParamData.set(cp);
+        for (const m of this._cirrusMaterials()) {
+            m.uniforms.matrixUniforms.value   = mat;
+            const near = m === this.cirrusNearMaterial || m === this.cirrusShellNearMaterial;
+            m.uniforms.cirrusParams.value     = near ? this._cirrusNearParamData : cp;
+            m.uniforms.atmosphereParams.value = this._atmosphereData;
+        }
+    }
+
+    _cirrusMaterials() {
+        return [this.cirrusMaterial, this.cirrusNearMaterial, this.cirrusShellMaterial,
+            this.cirrusShellNearMaterial].filter(Boolean);
     }
 
     // ---------------------------------------------------------------
@@ -230,7 +257,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
     // ---------------------------------------------------------------
 
     render(camera, environmentState, uniformManager) {
-        if (!this.initialized || !this.noiseGenerator) return;
+        if (!this.initialized || !this.noiseGenerator?.needsDispatch) return;
         this.backend.endRenderPassForCompute();
         const commandEncoder = this.backend.getCommandEncoder();
         this.noiseGenerator.dispatch(commandEncoder);
@@ -238,55 +265,75 @@ export class WebGPUCloudRenderer extends CloudRenderer {
     }
 
     // ---------------------------------------------------------------
-    //  renderCirrus() — draws the cirrus shell (called before terrain)
+    //  renderCirrus() — draws the cirrus shell
     // ---------------------------------------------------------------
 
-    renderCirrus(camera, environmentState, uniformManager) {
-        if (!this.initialized || !this.cirrusMaterial || !this.noiseGenerator) return;
-        if (!this.cirrusMaterial.uniforms.noiseBase.value) return;
+    /**
+     * part: 'far' draws only the cirrus beyond each ray's closest approach to the planet (behind any
+     * lower cloud and ground on that ray; drawn before the scene), 'near' only the cirrus before it
+     * (in front of them; drawn after the scene and the volumetric clouds), anything else the whole ray.
+     * Cirrus lies above the cumulus, so on the way down a ray meets cirrus first and on the way up
+     * cumulus first: the split is exact for every camera height.
+     */
+    renderCirrus(camera, environmentState, uniformManager, part = 'all') {
+        const partCode = part === 'near' ? 1 : part === 'far' ? 2 : 0;
+        if (!this.initialized || !this.noiseGenerator) return;
 
-        const layers = this._renderLayers.filter((layer) => layer.coverage > 0.005 && layer.altMax > layer.altMin);
+        const layers = this._renderLayers.filter((layer) => layer.coverage > 0.01 && layer.altMax > layer.altMin);
         if (layers.length === 0) return;
 
-        const settings    = this._cirrusQualitySettings || this._getCirrusQualitySettings();
-        const renderScale = settings.renderScale ?? 1.0;
+        const settings = this._cirrusQualitySettings || this._getCirrusQualitySettings();
+        const center = this._layerParamContext.origin;
+        const altitude = Math.hypot(camera.position.x - center.x, camera.position.y - center.y,
+            camera.position.z - center.z) - this._layerParamContext.planetRadius;
+        const hasVolume = layers.some(layer => {
+            const band = layer.altMax - layer.altMin;
+            const middle = (layer.altMin + layer.altMax) * 0.5;
+            const halfSlab = band * CIRRUS_SLAB_FRACTION * 0.5;
+            return altitude > middle - halfSlab - band * 0.6 && altitude < middle + halfSlab + band * 5;
+        });
+        const material = hasVolume
+            ? (partCode === 1 ? this.cirrusNearMaterial : this.cirrusMaterial)
+            : (partCode === 1 ? this.cirrusShellNearMaterial : this.cirrusShellMaterial);
+        if (!material?.uniforms.noiseBase.value) return;
+        const params = material.uniforms.cirrusParams.value;
+        const renderScale = hasVolume ? Math.min(settings.renderScale, this.config.cirrusVolumeScale) : settings.renderScale;
 
         if (renderScale < 0.99) {
-            const fullWidth  = this.backend._viewport?.width  || this.backend.canvas.width;
-            const fullHeight = this.backend._viewport?.height || this.backend.canvas.height;
-            this._ensureCirrusTarget(fullWidth, fullHeight, renderScale);
-
-            const tw = this.cirrusTargetWidth;
-            const th = this.cirrusTargetHeight;
-            this.backend.setClearColor(0.0, 0.0, 0.0, 0.0);
-            this.backend.setRenderTarget(this.cirrusTarget);
-            this.backend.setViewport(0, 0, tw, th);
-            this.backend.clear(true, false);
-            for (const layer of layers) {
-                this._writeLayerParams(layer);
-                this.backend.draw(this.fullscreenGeometry, this.cirrusMaterial);
-            }
-
-            this.backend.setRenderTarget(null);
-            this.backend.setViewport(0, 0, fullWidth, fullHeight);
-            this.backend.setClearColor(0.0, 0.0, 0.0, 1.0);
-            this.backend.clear(false, true);
-
-            if (this.cirrusTarget._gpuRenderTarget) {
-                const srcView = this.cirrusTarget._gpuRenderTarget.colorViews[0];
-                if (srcView) {
-                    this.blitMaterial.uniforms.sourceTexture.value = { _isGPUTextureView: true, view: srcView };
+            const backend = this.backend;
+            const viewport = backend._viewport;
+            const sceneTarget = backend._currentRenderTarget;
+            const clearColor = backend._clearColor;
+            this._ensureCirrusTarget(viewport.width, viewport.height, renderScale);
+            try {
+                backend.setRenderTarget(this.cirrusTarget);
+                this.cirrusTarget._needsSetup = false;
+                // This viewport is local to the cirrus target. setViewport would reallocate
+                // the canvas depth texture both here and on the return to the HDR scene.
+                backend._viewport = { x: 0, y: 0, width: this.cirrusTargetWidth, height: this.cirrusTargetHeight };
+                backend.setClearColor(0.0, 0.0, 0.0, 0.0);
+                backend.clear(true, false);
+                for (const layer of layers) {
+                    this._writeLayerParams(layer, partCode, params);
+                    backend.draw(this.fullscreenGeometry, material);
                 }
+            } finally {
+                backend._viewport = viewport;
+                backend.setRenderTarget(sceneTarget);
+                backend.setClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
             }
-            const bp = this.blitMaterial.uniforms.blitParams.value;
-            bp[0] = 1.0 / tw;  bp[1] = 1.0 / th;  bp[2] = 0.0;  bp[3] = 0.0;
-            this.backend.draw(this.fullscreenGeometry, this.blitMaterial);
+
+            const srcView = this.cirrusTarget._gpuRenderTarget.colorViews[0];
+            this.blitMaterial.uniforms.sourceTexture.value = { _isGPUTextureView: true, view: srcView };
+            this.blitMaterial.uniforms.blitParams.value[0] = settings.renderScale < 0.99 ? 1 : 0;
+            backend.resumeRenderPass();
+            backend.draw(this.fullscreenGeometry, this.blitMaterial);
             return;
         }
 
         for (const layer of layers) {
-            this._writeLayerParams(layer);
-            this.backend.draw(this.fullscreenGeometry, this.cirrusMaterial);
+            this._writeLayerParams(layer, partCode, params);
+            this.backend.draw(this.fullscreenGeometry, material);
         }
     }
 
@@ -304,10 +351,12 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         const changed = this._cirrusQualitySettings?.key !== settings.key;
         this._cirrusQualitySettings = settings;
 
-        if (changed && this.cirrusMaterial) {
-            this.cirrusMaterial.fragmentShader = this._getCirrusFragmentShader();
-            this.cirrusMaterial._needsCompile = true;
-            this.cirrusMaterial._gpuPipeline  = null;
+        if (changed) {
+            for (const m of this._cirrusMaterials()) {
+                m.fragmentShader = this._getCirrusFragmentShader(m === this.cirrusShellMaterial || m === this.cirrusShellNearMaterial);
+                m._needsCompile = true;
+                m._gpuPipeline  = null;
+            }
         }
         return settings.key;
     }
@@ -349,6 +398,18 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             depthBuffer: true,
             format: this.backend.sceneFormat || this.backend.format || 'rgba8unorm'
         });
+    }
+
+    dispose() {
+        if (this.cirrusTarget) {
+            this.backend.deleteRenderTarget(this.cirrusTarget);
+            this.cirrusTarget.dispose();
+            this.cirrusTarget = null;
+        }
+        for (const material of [...this._cirrusMaterials(), this.blitMaterial]) {
+            if (material) this.backend.destroyMaterial(material);
+        }
+        super.dispose();
     }
 
     _syncCloudLayers(targetLayers, t) {
@@ -435,14 +496,14 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         current.darkness += (target.darkness - current.darkness) * t;
     }
 
-    _writeLayerParams(layer) {
+    /** part: 0 the whole ray, 1 its near part, 2 its far part (see renderCirrus). */
+    _writeLayerParams(layer, part = 0, cp = this._cirrusParamData) {
         const ctx = this._layerParamContext || {};
         const origin = ctx.origin || this.planetConfig?.origin || new Vector3(0, 0, 0);
         const planetRadius = ctx.planetRadius || this.planetConfig?.radius || 2048;
         const sunDir = ctx.sunDir || new Vector3(0, 1, 0);
         const atmosphereHeight = this.planetConfig?.atmosphereHeight || planetRadius * 0.2;
         const baseTileSize = ctx.baseTileSize || Math.max(atmosphereHeight * 0.12, 8000.0);
-        const cp = this._cirrusParamData;
         let i = 0;
 
         cp[i++] = origin.x;  cp[i++] = origin.y;  cp[i++] = origin.z;  cp[i++] = planetRadius;
@@ -452,7 +513,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         cp[i++] = layer.altMin;  cp[i++] = layer.altMax;  cp[i++] = layer.coverage;  cp[i++] = layer.noiseScale;
         cp[i++] = layer.albedo;  cp[i++] = layer.densityMultiplier;  cp[i++] = layer.verticalStretch;  cp[i++] = layer.worleyInfluence;
         cp[i++] = layer.edgeSoftness;  cp[i++] = layer.extinction;  cp[i++] = layer.precipitation;  cp[i++] = layer.darkness;
-        cp[i++] = layer.layerKind;  cp[i++] = layer.cauliflower;  cp[i++] = 0.0;  cp[i++] = 0.0;
+        cp[i++] = layer.layerKind;  cp[i++] = layer.cauliflower;  cp[i++] = part;  cp[i++] = 0.0;
     }
 
     // ---------------------------------------------------------------
@@ -512,31 +573,31 @@ export class WebGPUCloudRenderer extends CloudRenderer {
 
     _getBlitFragmentShader() {
         return /* wgsl */`
-        struct BlitParams { texelWidth: f32, texelHeight: f32, _pad0: f32, _pad1: f32 };
         @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
         @group(0) @binding(1) var sourceSampler: sampler;
-        @group(0) @binding(2) var<uniform> params: BlitParams;
+        @group(0) @binding(2) var<uniform> blitParams: vec4f;
 
         @fragment
         fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             let flippedUV = vec2<f32>(uv.x, 1.0 - uv.y);
-            let tx = params.texelWidth;
-            let ty = params.texelHeight;
-            let c  = textureSampleLevel(sourceTexture, sourceSampler, flippedUV, 0.0);
-            let l  = textureSampleLevel(sourceTexture, sourceSampler, flippedUV + vec2<f32>(-tx, 0.0), 0.0);
-            let r  = textureSampleLevel(sourceTexture, sourceSampler, flippedUV + vec2<f32>( tx, 0.0), 0.0);
-            let u  = textureSampleLevel(sourceTexture, sourceSampler, flippedUV + vec2<f32>(0.0, -ty), 0.0);
-            let d  = textureSampleLevel(sourceTexture, sourceSampler, flippedUV + vec2<f32>(0.0,  ty), 0.0);
-            let tl = textureSampleLevel(sourceTexture, sourceSampler, flippedUV + vec2<f32>(-tx, -ty), 0.0);
-            let tr = textureSampleLevel(sourceTexture, sourceSampler, flippedUV + vec2<f32>( tx, -ty), 0.0);
-            let bl = textureSampleLevel(sourceTexture, sourceSampler, flippedUV + vec2<f32>(-tx,  ty), 0.0);
-            let br = textureSampleLevel(sourceTexture, sourceSampler, flippedUV + vec2<f32>( tx,  ty), 0.0);
-            return c * 0.25 + (l + r + u + d) * 0.125 + (tl + tr + bl + br) * 0.0625;
+            if (blitParams.x < 0.5) { return textureSampleLevel(sourceTexture, sourceSampler, flippedUV, 0.0); }
+            // The low preset's existing 3x3 tent, grouped into four bilinear samples.
+            let size = vec2f(textureDimensions(sourceTexture));
+            let p = flippedUV * size - 0.5;
+            let f = fract(p);
+            let a = 0.75 - 0.5 * f;
+            let b = 1.0 - a;
+            let lo = (floor(p) - 0.5 + (0.5 - 0.25 * f) / a) / size;
+            let hi = (floor(p) + 1.5 + 0.25 * f / b) / size;
+            return textureSampleLevel(sourceTexture, sourceSampler, lo, 0.0) * (a.x * a.y)
+                 + textureSampleLevel(sourceTexture, sourceSampler, vec2f(hi.x, lo.y), 0.0) * (b.x * a.y)
+                 + textureSampleLevel(sourceTexture, sourceSampler, vec2f(lo.x, hi.y), 0.0) * (a.x * b.y)
+                 + textureSampleLevel(sourceTexture, sourceSampler, hi, 0.0) * (b.x * b.y);
         }
         `;
     }
 
-    _getCirrusFragmentShader() {
+    _getCirrusFragmentShader(shellOnly = false) {
         const settings = this._cirrusQualitySettings || this._getCirrusQualitySettings();
         this._cirrusQualitySettings = settings;
 
@@ -586,7 +647,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
 
         layerKind: f32,
         cauliflower: f32,
-        _pad3: f32,
+        part: f32,          // 0 whole ray, 1 before its closest approach to the planet, 2 after
         _pad4: f32,
     };
 
@@ -661,76 +722,21 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         return length(worldPos - cp.planetCenter) - cp.planetRadius;
     }
 
-    @fragment
-    fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-        let rayDir = getRayDirection(uv);
-        let rayOrigin = matrices.cameraPosition;
-        let sunDir = normalize(cp.sunDir);
-
-        if (cp.coverage <= 0.01 || cp.altMax <= cp.altMin) {
-            return vec4<f32>(0.0);
-        }
-
-        let innerR = cp.planetRadius + cp.altMin;
-        let outerR = cp.planetRadius + cp.altMax;
-        let band   = outerR - innerR;
-        let midR   = (innerR + outerR) * 0.5;
-        let camAlt = getAltitude(rayOrigin);
-        let distToCenter = length(rayOrigin - cp.planetCenter);
-
-        let oc     = rayOrigin - cp.planetCenter;
-        let bCoeff = dot(oc, rayDir);
-        let cCoeff = dot(oc, oc) - midR * midR;
-        let disc   = bCoeff * bCoeff - cCoeff;
-        if (disc < 0.0) { return vec4<f32>(0.0); }
-
-        let sqrtDisc = sqrt(disc);
-        let tMid0 = -bCoeff - sqrtDisc;
-        let tMid1 = -bCoeff + sqrtDisc;
-
-        var tSample: f32;
-        if (tMid0 > 0.01) { tSample = tMid0; }
-        else if (tMid1 > 0.01) { tSample = tMid1; }
-        else { return vec4<f32>(0.0); }
-
-        let cOuter = dot(oc, oc) - outerR * outerR;
-        let discOuter = bCoeff * bCoeff - cOuter;
-        if (discOuter < 0.0) { return vec4<f32>(0.0); }
-
-        let cPlanet = dot(oc, oc) - cp.planetRadius * cp.planetRadius;
-        let discPlanet = bCoeff * bCoeff - cPlanet;
-        if (discPlanet >= 0.0) {
-            let tPlanet = -bCoeff - sqrt(discPlanet);
-            if (tPlanet > 0.0 && tPlanet < tSample) { return vec4<f32>(0.0); }
-        }
-
-        let pos = rayOrigin + rayDir * tSample;
-
+    // Colour and column opacity of the cirrus pattern at pos (shared by the shell and the volume).
+    // footprint: size of the pixel (or sample) at pos in world units; picks noise mip levels.
+    fn cirrusAt(up: vec3<f32>, radius: f32, rayDir: vec3<f32>, sunDir: vec3<f32>, intensity: f32, footprint: f32) -> vec4<f32> {
         // ---- Noise sampling ----
         let nsScale  = max(cp.noiseScale, 0.1);
         let denseLayer = clamp(cp.layerKind * 0.5, 0.0, 1.0);
         let tileSize = cp.baseTileSize * mix(5.0, 1.8, denseLayer) / nsScale;
 
-        let rel   = pos - cp.planetCenter;
-        let upDir = normalize(rel);
-
-        var east = cross(vec3<f32>(0.0, 1.0, 0.0), upDir);
-        if (length(east) < 0.1) { east = cross(vec3<f32>(1.0, 0.0, 0.0), upDir); }
-        east = normalize(east);
-        let north = normalize(cross(upDir, east));
-
-        let wind2   = normalize(vec2<f32>(cp.windOffsetX, cp.windOffsetY) + vec2<f32>(0.001, 0.0));
-        let windDir = normalize(east * wind2.x + north * wind2.y);
-        let sideDir = normalize(cross(upDir, windDir));
-
-        let along    = dot(rel, windDir);
-        let across   = dot(rel, sideDir);
-        let vertical = dot(rel, upDir);
+        let rel = up * radius;
 
         let streakScale = mix(4.0, 1.15, denseLayer);
         let sideScale = mix(0.5, 1.2, denseLayer);
         let verticalScale = max(0.05, cp.verticalStretch * mix(0.35, 0.55, denseLayer));
-        let p = windDir * along * streakScale + sideDir * across * sideScale + upDir * vertical * verticalScale;
+        // The radial position has zero projection onto both local wind tangents.
+        let p = rel * verticalScale;
 
         let cirrusTime = cp.time * TIME_SCALE;
         let windDrift  = vec3<f32>(cp.windOffsetX * 0.0001, 0.0, cp.windOffsetY * 0.0001);
@@ -742,14 +748,22 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         if (CIRRUS_FLOW_PASSES >= 2) { flowCoord = flowAdvect(flowCoord + vec3<f32>(0.5, 0.3, 0.7), cirrusTime * 0.08, 0.3, 0.2); }
         if (CIRRUS_FLOW_PASSES >= 3) { flowCoord = flowAdvect(flowCoord + vec3<f32>(0.17, 0.53, 0.31), cirrusTime * 0.05, 0.25, 0.15); }
 
-        let n0 = sampleNoise3D(noiseBase, flowCoord + vec3<f32>(0.17, 0.23, 0.13), CIRRUS_BASE_LOD).r;
-        var n1 = sampleNoise3D(noiseDetail, flowCoord * CIRRUS_DETAIL_FREQ + vec3<f32>(0.51, 0.07, 0.29), CIRRUS_DETAIL_LOD).r;
+        // Mip levels from the footprint (in noise-texture texels, along the streak axis where the
+        // pattern is finest). Fixed levels sampled the full-resolution noise at any distance, which
+        // aliased into speckles that flickered as the camera moved.
+        let minif = max(footprint, 1.0e-3) * max(streakScale, sideScale) / tileSize;
+        let n0 = sampleNoise3D(noiseBase, flowCoord + vec3<f32>(0.17, 0.23, 0.13),
+            max(CIRRUS_BASE_LOD, log2(minif * 64.0))).r;
+        var n1 = sampleNoise3D(noiseDetail, flowCoord * CIRRUS_DETAIL_FREQ + vec3<f32>(0.51, 0.07, 0.29),
+            max(CIRRUS_DETAIL_LOD, log2(minif * CIRRUS_DETAIL_FREQ * 96.0))).r;
         var n2: f32 = 0.5;
         if (CIRRUS_USE_EROSION) {
-            n2 = sampleNoise3D(noiseErosion, flowCoord * CIRRUS_EROSION_FREQ + vec3<f32>(0.11, 0.67, 0.41), CIRRUS_EROSION_LOD).r;
+            n2 = sampleNoise3D(noiseErosion, flowCoord * CIRRUS_EROSION_FREQ + vec3<f32>(0.11, 0.67, 0.41),
+                max(CIRRUS_EROSION_LOD, log2(minif * CIRRUS_EROSION_FREQ * 128.0))).r;
         }
         if (CIRRUS_EXTRA_DETAIL) {
-            let n1b = sampleNoise3D(noiseDetail, flowCoord * CIRRUS_EXTRA_DETAIL_FREQ + vec3<f32>(0.21, 0.61, 0.43), CIRRUS_EXTRA_DETAIL_LOD).r;
+            let n1b = sampleNoise3D(noiseDetail, flowCoord * CIRRUS_EXTRA_DETAIL_FREQ + vec3<f32>(0.21, 0.61, 0.43),
+                max(CIRRUS_EXTRA_DETAIL_LOD, log2(minif * CIRRUS_EXTRA_DETAIL_FREQ * 96.0))).r;
             n1 = mix(n1, n1b, CIRRUS_EXTRA_DETAIL_WEIGHT);
         }
 
@@ -771,54 +785,295 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         shape = mix(shape, max(shape, smoothstep(thresh - 0.08, thresh + 0.25, n0)), denseLayer * 0.45);
 
         // ---- Lighting ----
-        let alt = getAltitude(pos);
-        let up  = normalize(pos - cp.planetCenter);
+        let alt = radius - cp.planetRadius;
         let sunZenith = dot(up, sunDir);
         let sunTransRaw = ap_sampleTransmittance(transmittanceLUT, noiseSamplerClamp, alt, sunZenith, cp.planetRadius, atmo.atmosphereRadius);
         let sunTrans = softenSunTransmittance(alt, sunZenith, sunTransRaw);
 
-        let cosAngle = dot(rayDir, sunDir);
-        let phase    = ap_miePhase(cosAngle, cp.cloudAnisotropy);
-        let intensity = mix(0.7, 1.2, phase);
         let stormShade = clamp(cp.darkness + cp.precipitation * 0.28 + cp.extinction * 4.0, 0.0, 0.88);
         let ambientCirrus = mix(vec3<f32>(0.6, 0.65, 0.7), vec3<f32>(0.22, 0.25, 0.30), stormShade);
 
         let sunBrightness = max(max(sunTrans.r, sunTrans.g), sunTrans.b);
         let neutralSunTrans = mix(vec3<f32>(sunBrightness), sunTrans, 0.35);
         let litColor = max(neutralSunTrans, vec3<f32>(0.22)) * cp.albedo * intensity;
-        let color = mix(litColor + ambientCirrus * 0.45, litColor * 0.36 + ambientCirrus * 0.78, stormShade);
+        // Lit and ambient terms have fixed floors, so dim the whole colour with the sun: at night the
+        // cirrus glowed bright grey.
+        let daylight = mix(0.07, 1.0, smoothstep(0.02, 0.35, sunBrightness));
+        var color = mix(litColor + ambientCirrus * 0.45, litColor * 0.36 + ambientCirrus * 0.78, stormShade) * daylight;
+        // Seen from above, the sunlit top reflects sunlight like other cloud tops. Without this the
+        // layer was about as bright as the sunlit ground under it and vanished from above, while
+        // from below (against the sky) the same colour reads white.
+        let lookingDown = smoothstep(0.0, 0.3, -dot(rayDir, up));
+        color *= mix(1.0, CIRRUS_TOP_GAIN, lookingDown * smoothstep(0.0, 0.25, sunZenith));
 
-        var alpha = shape * coverage * (0.75 + clamp(cp.densityMultiplier, 0.0, 2.5) * 0.75);
+        // Large-scale breakup (fields a few tiles across): real cirrus comes in bands and patches with
+        // clear sky between, not one even veil; from above it read as a uniform sheet.
+        let breakCoord = rel / (tileSize * 3.0) + windDrift * cirrusTime * 0.3 + vec3<f32>(0.37, 0.11, 0.71);
+        let breakN = sampleNoise3D(noiseBase, breakCoord, max(0.5, log2(max(footprint, 1.0e-3) / (tileSize * 3.0) * 64.0))).r;
+        let breakN2 = sampleNoise3D(noiseBase, breakCoord * 2.7 + vec3<f32>(0.53, 0.19, 0.83),
+            max(0.5, log2(max(footprint, 1.0e-3) / (tileSize * 3.0) * 64.0 * 2.7))).r;
+        // Clumped rather than thinned: opacity gathers into patches with clear gaps between them, so
+        // the layer has structure from above instead of reading as an even veil.
+        let breakup = mix(0.05, 1.5, smoothstep(0.42, 0.62, breakN * 0.7 + breakN2 * 0.3));
+        let alpha = shape * breakup * coverage * (0.75 + clamp(cp.densityMultiplier, 0.0, 2.5) * 0.75);
+        return vec4<f32>(color, clamp(alpha, 0.0, 1.0));
+    }
 
-        // ---- Horizon fade ----
+    // Horizon fade shared by shell and volume.
+    fn horizonFadeFor(rayOrigin: vec3<f32>, rayDir: vec3<f32>) -> f32 {
+        let camAlt = getAltitude(rayOrigin);
+        let distToCenter = length(rayOrigin - cp.planetCenter);
         let camUp = normalize(rayOrigin - cp.planetCenter);
         let cosViewUp = dot(rayDir, camUp);
         let cosGeoHorizon = -sqrt(max(0.0, 1.0 - (cp.planetRadius / distToCenter) * (cp.planetRadius / distToCenter)));
         let cirrusAltFrac = clamp(camAlt / max(cp.altMax, 1.0), 0.0, 1.0);
         let cirrusFadeW   = mix(0.06, 0.005, sqrt(cirrusAltFrac));
-        let horizonFade   = smoothstep(cosGeoHorizon - cirrusFadeW, cosGeoHorizon + cirrusFadeW * 2.0, cosViewUp);
-        alpha *= horizonFade;
+        return smoothstep(cosGeoHorizon - cirrusFadeW, cosGeoHorizon + cirrusFadeW * 2.0, cosViewUp);
+    }
 
-        // ---- Altitude fade ----
-        let transitionW = band * 0.35;
-        if (camAlt > cp.altMin && camAlt < cp.altMax) {
-            let distToNearBound = min(camAlt - cp.altMin, cp.altMax - camAlt);
-            alpha *= smoothstep(0.0, transitionW, distToNearBound) * 0.3;
-        } else if (camAlt <= cp.altMin) {
-            let distBelow = cp.altMin - camAlt;
-            alpha *= mix(0.3, 1.0, smoothstep(0.0, transitionW * 0.3, distBelow));
-        } else {
-            let distAbove = camAlt - cp.altMax;
-            alpha *= mix(0.3, 1.0, smoothstep(0.0, transitionW * 0.3, distAbove));
+    // 1 for rays from above that miss the planet (they cross the layer edge-on and drew a ring
+    // around the planet from orbit), 0 otherwise.
+    fn missesPlanet(oc: vec3<f32>, bCoeff: f32, band: f32) -> f32 {
+        let closestAlt = sqrt(max(dot(oc, oc) - bCoeff * bCoeff, 0.0)) - cp.planetRadius;
+        return select(1.0, smoothstep(-band * 0.02, 0.0, closestAlt), bCoeff < 0.0);
+    }
+
+    // The layer drawn as one surface at its mid radius: right from the ground and from far above.
+    fn shellSample(rayOrigin: vec3<f32>, rayDir: vec3<f32>, sunDir: vec3<f32>, intensity: f32, tPlanet: f32, pixAngle: f32) -> vec4<f32> {
+        let innerR = cp.planetRadius + cp.altMin;
+        let outerR = cp.planetRadius + cp.altMax;
+        let band   = outerR - innerR;
+        let midR   = (innerR + outerR) * 0.5;
+        let camAlt = getAltitude(rayOrigin);
+        let oc     = rayOrigin - cp.planetCenter;
+        let bCoeff = dot(oc, rayDir);
+        let disc   = bCoeff * bCoeff - (dot(oc, oc) - midR * midR);
+        if (disc < 0.0) { return vec4<f32>(0.0); }
+        let sqrtDisc = sqrt(disc);
+        let tMid0 = -bCoeff - sqrtDisc;
+        let tMid1 = -bCoeff + sqrtDisc;
+        var tSample: f32;
+        if (tMid0 > 0.01) { tSample = tMid0; }
+        else if (tMid1 > 0.01) { tSample = tMid1; }
+        else { return vec4<f32>(0.0); }
+        if (tSample > tPlanet) { return vec4<f32>(0.0); }
+        if (!inRayPart(tSample, -bCoeff)) { return vec4<f32>(0.0); }
+
+        let up = normalize(oc + rayDir * tSample);
+        // Footprint on the shell, stretched at grazing angles.
+        let cosN = abs(dot(rayDir, up));
+        let c = cirrusAt(up, midR, rayDir, sunDir, intensity, tSample * pixAngle / max(cosN, 0.12));
+        let midAlt = 0.5 * (cp.altMin + cp.altMax);
+        // The horizon fade hides rays below the horizon, which from below the layer hit the planet
+        // first. From above those rays look down onto the layer, so it must not apply there: it left
+        // the cirrus visible only against space.
+        let belowLayer = 1.0 - smoothstep(midAlt - band * 0.2, midAlt + band * 0.2, camAlt);
+        // Seen from above (where the shell takes over from the volume, far above the layer), a slanted
+        // ray crosses more of the layer, as the volume integrates it, and the edge-on part at the limb
+        // stays: fading it there (and against space) erased the layer the volume had just shown.
+        let fromAbove = smoothstep(midAlt, midAlt + band * 0.35, camAlt);
+        let slant = mix(1.0, 1.0 / max(cosN, 0.05), fromAbove);
+        var alpha = 1.0 - pow(1.0 - min(c.a, 0.98), slant);
+        if (belowLayer > 0.0) { alpha *= mix(1.0, horizonFadeFor(rayOrigin, rayDir), belowLayer); }
+
+        // Fade as the camera nears the surface, so flying through it does not pop.
+        alpha *= smoothstep(0.0, band * 0.35, abs(camAlt - midAlt));
+        // Grazing rays from below.
+        alpha *= mix(smoothstep(0.0, 0.08, cosN), 1.0, fromAbove);
+        alpha = clamp(alpha, 0.0, 1.0);
+        return vec4<f32>(c.rgb * alpha, alpha);
+    }
+
+    // Near or far part of the ray (cp.part; see renderCirrus). tStar: closest approach to the planet.
+    fn inRayPart(t: f32, tStar: f32) -> bool {
+        if (cp.part > 1.5) { return t > tStar; }
+        if (cp.part > 0.5) { return t <= tStar; }
+        return true;
+    }
+
+    // Mean of the sheet profile 1 - d^2 (0 outside |d| < 1) over [d0, d1]. Evaluated at one height
+    // per shell, the profile became a staircase that showed as faint horizontal bands wherever rays
+    // cross the sheet at a shallow angle (from below and near the layer).
+    fn sheetProfileMean(d0: f32, d1: f32) -> f32 {
+        if (d1 - d0 < 1.0e-4) {
+            let d = 0.5 * (d0 + d1);
+            return max(1.0 - d * d, 0.0);
         }
+        let x0 = clamp(d0, -1.0, 1.0);
+        let x1 = clamp(d1, -1.0, 1.0);
+        return ((x1 - x1 * x1 * x1 / 3.0) - (x0 - x0 * x0 * x0 / 3.0)) / (d1 - d0);
+    }
 
-        // ---- Grazing-ray fade ----
-        let surfaceNormal = normalize(pos - cp.planetCenter);
-        let grazingAngle  = abs(dot(rayDir, surfaceNormal));
-        alpha *= smoothstep(0.0, 0.08, grazingAngle);
+    fn sphereHit(oc: vec3<f32>, rd: vec3<f32>, r: f32) -> vec2<f32> {
+        let b = dot(oc, rd);
+        let d = b * b - (dot(oc, oc) - r * r);
+        if (d < 0.0) { return vec2<f32>(1.0e30, -1.0e30); }
+        let s = sqrt(d);
+        return vec2<f32>(-b - s, -b + s);
+    }
 
-        let finalAlpha = clamp(alpha, 0.0, 1.0);
-        return vec4<f32>(color * finalAlpha, finalAlpha);
+    // The layer as a volume, for a camera near it: the same pattern, in a sheet about
+    // CIRRUS_SHEET_FRACTION of the band thick whose height wanders (by a low-frequency noise) through a
+    // slab CIRRUS_SLAB_FRACTION of the band thick. A sheet at one radius had a perfectly spherical
+    // base and top; seen edge-on from near them they drew a clear band and seams along the horizon.
+    // Fixed-radius shells the slab is cut into for sampling (see volumeSample).
+    const CIRRUS_VOLUME_STEPS: i32 = 24;
+    const CIRRUS_SLAB_FRACTION: f32 = ${CIRRUS_SLAB_FRACTION};
+    const CIRRUS_SHEET_FRACTION: f32 = 0.16;
+    // Distance from the camera (world units) the volume is integrated to: past every edge-on view
+    // below the hand-off back to the shell, so the layer converges to the horizon like a real deck.
+    const CIRRUS_MAX_DISTANCE: f32 = 400000.0;
+// Brightness of the sunlit top relative to the underside (see cirrusAt).
+const CIRRUS_TOP_GAIN: f32 = 3.0;
+
+    // A smooth swell from three plane waves on the sphere (wavelengths ~16-40 km for the high layer).
+    // It was a linear lookup on mip 3 of the 64^3 base noise: a ~5 km grid with a break in the
+    // sheet's tilt at every texel. The path through a thin sheet seen nearly edge-on follows its
+    // tilt, so each break showed as a straight seam across the cirrus.
+    fn sheetCenterOffset(up: vec3<f32>, tileSize: f32, slab: f32, sheet: f32) -> f32 {
+        let x = up * (cp.planetRadius / (tileSize * 2.2));
+        let w = sin(dot(x, vec3<f32>(0.62, 0.48, -0.62)) * 6.3 + 0.4) * 0.45
+              + sin(dot(x, vec3<f32>(-0.27, 0.83, 0.49)) * 9.7 + 2.1) * 0.33
+              + sin(dot(x, vec3<f32>(0.71, -0.36, 0.60)) * 15.1 + 4.7) * 0.22;
+        return (smoothstep(0.2, 0.8, 0.5 + 0.5 * w) - 0.5) * (slab - sheet);
+    }
+
+    fn volumeSample(rayOrigin: vec3<f32>, rayDir: vec3<f32>, sunDir: vec3<f32>, intensity: f32, tPlanet: f32, pixAngle: f32) -> vec4<f32> {
+        let midR   = cp.planetRadius + 0.5 * (cp.altMin + cp.altMax);
+        let slab   = (cp.altMax - cp.altMin) * CIRRUS_SLAB_FRACTION;
+        let sheet  = (cp.altMax - cp.altMin) * CIRRUS_SHEET_FRACTION;
+        let innerR = midR - 0.5 * slab;
+        let outerR = midR + 0.5 * slab;
+        let nsScale = max(cp.noiseScale, 0.1);
+        let tileSize = cp.baseTileSize * mix(5.0, 1.8, clamp(cp.layerKind * 0.5, 0.0, 1.0)) / nsScale;
+        let oc     = rayOrigin - cp.planetCenter;
+        // World-anchored sampling, like the cumulus steps: the slab is cut into CIRRUS_VOLUME_STEPS
+        // shells of fixed radius, and each stretch of the ray between two shells (one, or two where the
+        // ray dips into the shell and comes back out) gets one sample weighted by its exact length.
+        // Moving the camera slides each sample along its shell instead of re-spacing samples along the
+        // ray, which shuffled the streaks while climbing or descending; and the stretches change
+        // continuously with the ray, so neighbouring rays never split differently (no seams).
+        let bq = dot(oc, rayDir);
+        let cq = dot(oc, oc);
+        let tStar = -bq;
+        let closestSquared = cq - bq * bq;
+        let outerD = outerR * outerR - closestSquared;
+        if (outerD <= 0.0) { return vec4<f32>(0.0); }
+        let outerS = sqrt(outerD);
+        var rayStart = max(tStar - outerS, 0.0);
+        var rayEnd = min(tStar + outerS, min(tPlanet, CIRRUS_MAX_DISTANCE));
+        if (cp.part > 1.5) { rayStart = max(rayStart, tStar); }
+        else if (cp.part > 0.5) { rayEnd = min(rayEnd, tStar); }
+        if (rayEnd <= rayStart) { return vec4<f32>(0.0); }
+
+        let rClosest = sqrt(max(closestSquared, 0.0));
+        let dr = slab / f32(CIRRUS_VOLUME_STEPS);
+        var tau = 0.0;
+        var colorSum = vec3<f32>(0.0);
+        var prevD = innerR * innerR - closestSquared;
+        var prevS = sqrt(max(prevD, 0.0));
+        for (var k = 0; k < CIRRUS_VOLUME_STEPS; k++) {
+            let rHi = innerR + f32(k + 1) * dr;
+            let hiD = rHi * rHi - closestSquared;
+            let loD = prevD;
+            let loS = prevS;
+            let hiS = sqrt(max(hiD, 0.0));
+            prevD = hiD;
+            prevS = hiS;
+            if (hiD <= 0.0) { continue; }
+            var spans: array<vec2<f32>, 2>;
+            var spanCount = 1;
+            if (loD > 0.0) {
+                let descend = vec2<f32>(-bq - hiS, -bq - loS);
+                let ascend = vec2<f32>(-bq + loS, -bq + hiS);
+                spans[0] = select(descend, ascend, rayStart >= tStar);
+                if (rayStart < tStar && rayEnd > tStar) {
+                    spans[1] = ascend;
+                    spanCount = 2;
+                }
+            } else {
+                spans[0] = vec2<f32>(-bq - hiS, -bq + hiS);
+            }
+            for (var j = 0; j < spanCount; j++) {
+                let a = max(spans[j].x, rayStart);
+                let b = min(spans[j].y, rayEnd);
+                if (b <= a) { continue; }
+                let len = b - a;
+                let t = 0.5 * (a + b);
+                let up = normalize(oc + rayDir * t);
+                let center = midR + sheetCenterOffset(up, tileSize, slab, sheet);
+                // Heights the stretch covers: its ends, down to the closest approach when the ray
+                // turns inside it.
+                let rA = length(oc + rayDir * a);
+                let rB = length(oc + rayDir * b);
+                var rLow = min(rA, rB);
+                if (tStar > a && tStar < b) { rLow = rClosest; }
+                let h0 = (rLow - center) / sheet + 0.5;
+                let h1 = (max(rA, rB) - center) / sheet + 0.5;
+                if (h1 <= 0.0 || h0 >= 1.0) { continue; }
+                // Prefilter along the ray by at most half a sheet (a whole far, edge-on stretch would
+                // average the pattern away and no ray could thread through a gap).
+                // The wisp pattern is read at the slab's middle radius, the same for every shell: read at
+                // each shell's own radius, the noise's variation with height made the shells show as bands
+                // edge-on that squeezed and stretched (an accordion) as the camera moved vertically. The
+                // sheet's thickness below still follows this pattern, so its edges stay ragged.
+                let c = cirrusAt(up, midR, rayDir, sunDir, intensity, max(t * pixAngle, min(len * 0.5, sheet * 0.5)));
+                // The sheet is as thick as the pattern is dense: dense patches fill it, thin wisps are thin
+                // and clear gaps have none. So its top and base are the ragged edges of the same wisps
+                // seen from below (as cumulus shapes come from their own noise), not a cut sphere. The
+                // floor keeps thin wisps thicker than the shell spacing.
+                let w = mix(0.4, 1.0, smoothstep(0.05, 0.5, c.a));
+                let profile = sheetProfileMean((2.0 * h0 - 1.0) / w, (2.0 * h1 - 1.0) / w);
+                if (profile <= 0.0) { continue; }
+                // Column optical depth -ln(1 - a), spread over the profile (its integral is 2/3 w sheets).
+                let dTau = -log(1.0 - min(c.a, 0.98)) / (sheet * w) * profile * 1.5 * len;
+                tau += dTau;
+                colorSum += c.rgb * dTau;
+            }
+        }
+        if (tau <= 0.0) { return vec4<f32>(0.0); }
+        // A thin layer of nearly uniform colour: composited order-independently.
+        let T = exp(-tau);
+        let L = colorSum / tau * (1.0 - T);
+        // No limb fade: the layer seen edge-on against space is the same cirrus as over the planet.
+        // Fading it (an old fix for a halo when cirrus showed only against space) erased the layer
+        // while climbing through it.
+        return vec4<f32>(L, 1.0 - T);
+    }
+
+    @fragment
+    fn main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+        let rayDir = getRayDirection(uv);
+        // Angle covered by one pixel (uniform control flow, before any branch).
+        let pixAngle = max(length(fwidth(rayDir)), 1.0e-5);
+        let rayOrigin = matrices.cameraPosition;
+        let sunDir = normalize(cp.sunDir);
+        if (cp.coverage <= 0.01 || cp.altMax <= cp.altMin) {
+            return vec4<f32>(0.0);
+        }
+        let band = cp.altMax - cp.altMin;
+        let camAlt = getAltitude(rayOrigin);
+        let oc = rayOrigin - cp.planetCenter;
+        let planet = sphereHit(oc, rayDir, cp.planetRadius);
+        var tPlanet = 1.0e30;
+        if (planet.x < planet.y && planet.x > 0.0) { tPlanet = planet.x; }
+        let intensity = mix(0.7, 1.2, ap_miePhase(dot(rayDir, sunDir), cp.cloudAnisotropy));
+        if (${shellOnly}) { return shellSample(rayOrigin, rayDir, sunDir, intensity, tPlanet, pixAngle); }
+
+        // From the ground the layer is a shell. Well below it (just above the cumulus tops) it turns into
+        // the real volume with the same pattern, which can be flown through; it hands back to the shell
+        // only far above the layer (as the cumulus hands over to its proxy). Both hand-offs happen far
+        // from the layer.
+        let midAlt = 0.5 * (cp.altMin + cp.altMax);
+        let halfSlab = 0.5 * band * CIRRUS_SLAB_FRACTION;
+        let volMix = smoothstep(midAlt - halfSlab - band * 0.6, midAlt - halfSlab - band * 0.3, camAlt)
+                   * (1.0 - smoothstep(midAlt + halfSlab + band * 3.0, midAlt + halfSlab + band * 5.0, camAlt));
+        var result = vec4<f32>(0.0);
+        if (volMix < 0.999) { result = shellSample(rayOrigin, rayDir, sunDir, intensity, tPlanet, pixAngle); }
+        if (volMix > 0.001) {
+            result = mix(result, volumeSample(rayOrigin, rayDir, sunDir, intensity, tPlanet, pixAngle), volMix);
+        }
+        return result;
     }
         `;
     }

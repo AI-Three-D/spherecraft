@@ -166,6 +166,13 @@ export class GameUI {
         `;
         settings.innerHTML = `
             <summary style="cursor: pointer;">Settings</summary>
+            <label for="weather-preview" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px;">
+                Weather
+                <select id="weather-preview" aria-describedby="weather-preview-status">
+                    <option value="auto">Automatic</option>
+                </select>
+            </label>
+            <div id="weather-preview-status" style="margin-top: 4px; opacity: 0.8;"></div>
             <label for="max-fps-setting" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px;">
                 Active FPS cap
                 <select id="max-fps-setting">
@@ -194,6 +201,19 @@ export class GameUI {
             <div style="margin-top: 8px; opacity: 0.8;">1.0 is the default resolution; lower values save power. Resolution changes blend smoothly.</div>
             <div id="adaptive-quality-status" style="margin-top: 8px;"></div>
         `;
+        const weather = this.engine.renderer?.weatherController;
+        const weatherSelect = settings.querySelector('#weather-preview');
+        this._weatherPreviewStatus = settings.querySelector('#weather-preview-status');
+        weatherSelect.disabled = !weather?.config.enabled;
+        for (const effect of Object.values(weather?.effects ?? {})) {
+            const option = document.createElement('option');
+            option.value = effect.name;
+            option.textContent = effect.label;
+            weatherSelect.appendChild(option);
+        }
+        weatherSelect.value = weather?.getWeatherPreview().selected ?? 'auto';
+        weatherSelect.addEventListener('change', () => weather?.setWeatherPreview(weatherSelect.value));
+        weatherSelect.addEventListener('keydown', event => event.stopPropagation());
         const fpsSelect = settings.querySelector('#max-fps-setting');
         const maxFps = this.engine.engineConfig.rendering.maxFps;
         if (![...fpsSelect.options].some(option => Number(option.value) === maxFps)) {
@@ -522,6 +542,14 @@ export class GameUI {
      * @param {Object|null} params.camera - { position, target, up } of the view camera
      */
     update({ fps, cameraMode, shipState, zoneInfo, playerStatus, perfHud, camera }) {
+        const weather = this.engine?.renderer?.weatherController;
+        if (this._weatherPreviewStatus && weather?.config.enabled) {
+            const { target, progress } = weather.getWeatherPreview();
+            const label = weather.effects[target]?.label ?? target;
+            this._weatherPreviewStatus.textContent = progress < 1
+                ? `Transitioning to ${label} · ${Math.floor(progress * 100)}%`
+                : label;
+        }
         const quality = this.engine?.adaptiveQuality?.state;
         if (quality && this._adaptiveQualityStatus) {
             const cap = quality.maxFps > 0 ? `${quality.maxFps} FPS cap` : 'Unlimited FPS';
@@ -1103,6 +1131,7 @@ export class GameUI {
         }
         this._hudContent = null;
         this._adaptiveQualityStatus = null;
+        this._weatherPreviewStatus = null;
         this._debugToggleButton = null;
         if (this.crashScreen) {
             this.crashScreen.remove();

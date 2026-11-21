@@ -4,7 +4,8 @@ import type { Material } from '../resources/material.js';
 import type { RenderTarget } from '../resources/renderTarget.js';
 /** Public WebGPU boundary. Implementation remains JavaScript. */
 export class WebGPUBackend implements RendererBackend {
-    constructor(canvas: HTMLCanvasElement);
+    /** optionalFeatures are requested only when the adapter supports them. */
+    constructor(canvas: HTMLCanvasElement, options?: { optionalFeatures?: GPUFeatureName[] });
     readonly device: GPUDevice | null;
     readonly deviceLoss: GPUDeviceLostInfo | null;
     readonly format: GPUTextureFormat | null;

@@ -17,6 +17,9 @@ export class ToneMappingPass {
         this.paramsBuffer = null;
 
         this._exposure = 0.75;
+        this._night = 0;
+        this._nightGrade = 0;
+        this._nightExposure = 0;
         this._paramsDirty = true;
     }
 
@@ -24,6 +27,22 @@ export class ToneMappingPass {
     set exposure(v) {
         if (v !== this._exposure) {
             this._exposure = v;
+            this._paramsDirty = true;
+        }
+    }
+
+    /**
+     * Night look: amount (0 day .. 1 full night), grade (how far colour moves toward night vision at
+     * full night, 0..1) and exposure change at full night (+1 doubles, -0.2 is 20 % darker).
+     */
+    setNight(amount, grade = 0, exposure = 0) {
+        const a = Math.max(0, Math.min(1, amount || 0));
+        const g = Math.max(0, Math.min(1, grade || 0));
+        const e = Math.max(-0.9, exposure || 0);
+        if (a !== this._night || g !== this._nightGrade || e !== this._nightExposure) {
+            this._night = a;
+            this._nightGrade = g;
+            this._nightExposure = e;
             this._paramsDirty = true;
         }
     }
@@ -95,7 +114,7 @@ export class ToneMappingPass {
     }
 
     _uploadParams() {
-        const data = new Float32Array([this._exposure, 0, 0, 0]);
+        const data = new Float32Array([this._exposure, this._night, this._nightGrade, this._nightExposure]);
         this.device.queue.writeBuffer(this.paramsBuffer, 0, data);
         this._paramsDirty = false;
     }

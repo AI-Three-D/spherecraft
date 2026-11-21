@@ -13,6 +13,7 @@ export class CloudRenderer {
         this.config = {
             cloudAnisotropy: config.cloudAnisotropy ?? 0.75,
             cirrusQuality:   config.cirrusQuality   ?? 'high',
+            cirrusVolumeScale: config.cirrusVolumeScale ?? 0.5,
             lowClouds:       config.lowClouds       !== false,
             midClouds:       config.midClouds       !== false,
             highClouds:      config.highClouds      !== false,

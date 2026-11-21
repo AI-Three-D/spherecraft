@@ -59,6 +59,16 @@ function normalizeRainParticles(raw = {}, precipitationIntensity = 0) {
     };
 }
 
+function normalizeCloudEffect(raw = {}) {
+    return {
+        presence: finiteNumber(raw.presence, 1, 0, 1),
+        deck: finiteNumber(raw.deck, 0, 0, 1),
+        rainShade: finiteNumber(raw.rainShade, 0, 0, 1),
+        low: finiteNumber(raw.low, 0, 0, 1),
+        mist: finiteNumber(raw.mist, 0, 0, 1),
+    };
+}
+
 function normalizeWeatherEffects(rawEffects = {}) {
     const source = rawEffects && typeof rawEffects === 'object' ? rawEffects : {};
     const effects = {};
@@ -67,12 +77,14 @@ function normalizeWeatherEffects(rawEffects = {}) {
         const precipitation = finiteNumber(raw.precipitationIntensity, 0, 0, 1);
         effects[name] = {
             name,
+            label: typeof raw.label === 'string' ? raw.label : name,
             weight: finiteNumber(raw.weight, 1, 0, 1000),
             intensity: finiteNumber(raw.intensity, 0, 0, 1),
             cloudCoverage: finiteNumber(raw.cloudCoverage, 0, 0, 1),
             precipitationIntensity: precipitation,
             fogDensity: finiteNumber(raw.fogDensity, 0, 0, 1),
             fogMultiplier: finiteNumber(raw.fogMultiplier, 1, 0, 10),
+            clouds: normalizeCloudEffect(raw.clouds ?? {}),
             water: normalizeWaterEffect(raw.water || {}),
             rainParticles: normalizeRainParticles(raw.rainParticles || {}, precipitation),
         };
@@ -120,12 +132,15 @@ export class WeatherController {
             noiseScale: merged.noiseScale ?? 2.0,
             initialWeather: merged.initialWeather ?? 'clear',
             transitionDurationSeconds: finiteNumber(merged.transitionDurationSeconds, 90, 0.1, 3600),
+            previewTransitionSeconds: finiteNumber(merged.previewTransitionSeconds, 12, 0.1, 3600),
+            rainLeadFraction: finiteNumber(merged.rainLeadFraction, 0.32, 0, 0.85),
             weatherChangeChancePerSecond: finiteNumber(merged.weatherChangeChancePerSecond, 0.06, 0, 10),
             windChangeChancePerSecond: finiteNumber(merged.windChangeChancePerSecond, 0.30, 0, 10),
             windSpeedRange: Array.isArray(merged.windSpeedRange)
                 ? [finiteNumber(merged.windSpeedRange[0], 2, 0, 1000), finiteNumber(merged.windSpeedRange[1], 22, 0, 1000)]
                 : [2, 22],
             cloudLayerRefreshHz: finiteNumber(merged.cloudLayerRefreshHz, 1.0, 0.05, 60),
+            transitions: merged.transitions,
         };
         if (this.config.windSpeedRange[0] > this.config.windSpeedRange[1]) {
             this.config.windSpeedRange.reverse();
@@ -142,8 +157,12 @@ export class WeatherController {
             ? this.config.initialWeather
             : (this._weatherKeys[0] || 'clear');
         this._transitionProgress = 1.0;
+        this._transitionDuration = this.config.transitionDurationSeconds;
+        this._previewWeather = null;
         this._startEffectSnapshot = this._createEffectSnapshot(this._targetWeather);
         this._currentEffectSnapshot = this._createEffectSnapshot(this._targetWeather);
+        this._startCloudLayers = null;
+        this._currentCloudLayers = null;
         this._lastCloudLayerUpdateTime = -Infinity;
 
         // Wind Logic
@@ -233,9 +252,9 @@ export class WeatherController {
      * Main update loop. Updates both GPU simulation and modifies EnvironmentState.
      */
     update(deltaTime, environmentState) {
-        if (!this._initialized) return;
-
-        this._updateGPUSimulation(deltaTime);
+        if (!this.config.enabled) return;
+        if (this._initialized) this._updateGPUSimulation(deltaTime);
+        else this._time += deltaTime;
 
         if (environmentState) {
             this._updateWeatherLogic(deltaTime, environmentState);
@@ -260,9 +279,9 @@ export class WeatherController {
     }
 
     _updateWeatherLogic(deltaTime, envState) {
-        if (this._transitionProgress >= 1.0 &&
+        if (this._previewWeather === null && this._transitionProgress >= 1.0 &&
             Math.random() < this.config.weatherChangeChancePerSecond * deltaTime) {
-            this._pickNewWeatherTarget(envState);
+            this._pickNewWeatherTarget();
         }
         if (Math.random() < this.config.windChangeChancePerSecond * deltaTime) {
             this._pickNewWindTarget();
@@ -273,16 +292,26 @@ export class WeatherController {
         if (this._transitionProgress < 1.0) {
             this._transitionProgress = Math.min(
                 1.0,
-                this._transitionProgress + deltaTime / this.config.transitionDurationSeconds
+                this._transitionProgress + deltaTime / this._transitionDuration
             );
         }
 
         const targetEffect = this._createEffectSnapshot(this._targetWeather);
         const blendT = this._smoothstep(this._transitionProgress);
+        const lead = this.config.rainLeadFraction;
+        const arrivingRain = targetEffect.precipitationIntensity > this._startEffectSnapshot.precipitationIntensity;
+        const rainProgress = arrivingRain
+            ? (this._transitionProgress - lead) / (1 - lead)
+            : this._transitionProgress / (1 - lead);
+        const shadeProgress = targetEffect.clouds.rainShade > this._startEffectSnapshot.clouds.rainShade
+            ? this._transitionProgress / (1 - lead)
+            : this._transitionProgress;
         const blendedEffect = this._blendEffectSnapshots(
-            this._startEffectSnapshot || targetEffect,
+            this._startEffectSnapshot,
             targetEffect,
-            blendT
+            blendT,
+            this._smoothstep(finiteNumber(rainProgress, 0, 0, 1)),
+            this._smoothstep(finiteNumber(shadeProgress, 0, 0, 1))
         );
         this._currentEffectSnapshot = blendedEffect;
 
@@ -307,10 +336,11 @@ export class WeatherController {
         if (
             envState.forceCirrusOnly ||
             this._time - this._lastCloudLayerUpdateTime >= layerInterval ||
+            this._transitionProgress < 1.0 ||
             !Array.isArray(envState.cloudLayers) ||
             envState.cloudLayers.length === 0
         ) {
-            envState.cloudLayers = this._computeCloudLayers(envState);
+            envState.cloudLayers = this._computeCloudLayers(envState, targetEffect, blendT);
             this._lastCloudLayerUpdateTime = this._time;
         }
     }
@@ -360,19 +390,21 @@ export class WeatherController {
             water.foamDepthEnd + rainFactor * water.foamDepthWeatherScale + Math.max(0, targetHeight - 0.2) * 0.5;
     }
 
-    _pickNewWeatherTarget(envState) {
+    _pickNewWeatherTarget() {
         const next = this._pickWeightedWeather();
         if (!next || next === this._targetWeather) return;
 
-        this._startEffectSnapshot = this._currentEffectSnapshot || this._snapshotEnvironment(envState);
-        this._targetWeather = next;
-        this._transitionProgress = 0.0;
+        this.setWeather(next);
     }
 
     _pickWeightedWeather() {
-        const candidates = this._weatherKeys
+        const neighbors = this.config.transitions?.[this._targetWeather];
+        let candidates = (Array.isArray(neighbors) ? neighbors : this._weatherKeys)
             .map((name) => this.effects[name])
             .filter((effect) => effect && effect.weight > 0);
+        if (candidates.length === 0 && Array.isArray(neighbors)) {
+            candidates = Object.values(this.effects).filter(effect => effect.weight > 0);
+        }
         if (candidates.length === 0) return this._targetWeather;
 
         const total = candidates.reduce((sum, effect) => sum + effect.weight, 0);
@@ -390,18 +422,36 @@ export class WeatherController {
         this._targetWindSpeed = minSpeed + Math.random() * (maxSpeed - minSpeed);
     }
 
-    _computeCloudLayers(envState) {
+    _computeCloudLayers(envState, targetEffect, t) {
         const atmosphereHeight = envState.planetConfig?.atmosphereHeight || 100000;
 
         if (envState.forceCirrusOnly) {
             return [{
-                name: 'high', altMin: atmosphereHeight * 0.35, altMax: atmosphereHeight * 0.8,
+                name: 'high', altMin: atmosphereHeight * 0.38, altMax: atmosphereHeight * 0.72,
                 coverage: 0.45, densityMultiplier: 0.16, noiseScale: 2.2,
                 verticalStretch: 2.6, worleyInfluence: 0.25, edgeSoftness: 0.95,
                 extinction: 0.012, albedo: 0.95, precipitation: 0.0, darkness: 0.0
             }];
         }
-        return this._cloudLayerProvider(envState.currentWeather, envState.weatherIntensity, atmosphereHeight);
+        const target = this._cloudLayerProvider(targetEffect.name, targetEffect.intensity, atmosphereHeight);
+        if (t >= 1) {
+            this._currentCloudLayers = target;
+            return target;
+        }
+        const sourceEffect = this._startEffectSnapshot;
+        const sourceLayers = this._startCloudLayers
+            ?? this._cloudLayerProvider(sourceEffect.name, sourceEffect.intensity, atmosphereHeight);
+        const sources = new Map(sourceLayers.map(layer => [layer.name, layer]));
+        const destinations = new Map(target.map(layer => [layer.name, layer]));
+        const names = new Set([...sources.keys(), ...destinations.keys()]);
+        this._currentCloudLayers = Array.from(names, name => {
+            const a = sources.get(name);
+            const b = destinations.get(name);
+            const start = a ?? { ...b, coverage: 0 };
+            const end = b ?? { ...a, coverage: 0 };
+            return { ...start, ...blendObjectNumbers(start, end, t), name };
+        });
+        return this._currentCloudLayers;
     }
 
     _createEffectSnapshot(weather) {
@@ -412,6 +462,7 @@ export class WeatherController {
             precipitationIntensity: 0,
             fogDensity: 0,
             fogMultiplier: 1,
+            clouds: normalizeCloudEffect(),
             water: normalizeWaterEffect(),
             rainParticles: normalizeRainParticles({}, 0),
         };
@@ -422,25 +473,13 @@ export class WeatherController {
             precipitationIntensity: effect.precipitationIntensity,
             fogDensity: effect.fogDensity,
             fogMultiplier: effect.fogMultiplier,
+            clouds: { ...effect.clouds },
             water: { ...effect.water },
             rainParticles: { ...effect.rainParticles },
         };
     }
 
-    _snapshotEnvironment(envState) {
-        return {
-            name: envState.currentWeather || this._targetWeather,
-            intensity: envState.weatherIntensity ?? 0,
-            cloudCoverage: envState.cloudCoverage ?? 0,
-            precipitationIntensity: envState.precipitationIntensity ?? 0,
-            fogDensity: envState.fogDensity ?? 0,
-            fogMultiplier: envState.weatherFogMultiplier ?? 1,
-            water: { ...(this._currentEffectSnapshot?.water || normalizeWaterEffect()) },
-            rainParticles: { ...(envState.rainParticles || normalizeRainParticles({}, 0)) },
-        };
-    }
-
-    _blendEffectSnapshots(a, b, t) {
+    _blendEffectSnapshots(a, b, t, precipitationT, shadeT) {
         const rainParticles = (b.rainParticles?.enabled || t >= 0.98)
             ? b.rainParticles
             : (a.rainParticles?.enabled ? a.rainParticles : b.rainParticles);
@@ -448,9 +487,13 @@ export class WeatherController {
             name: b.name,
             intensity: blendNumber(a.intensity, b.intensity, t),
             cloudCoverage: blendNumber(a.cloudCoverage, b.cloudCoverage, t),
-            precipitationIntensity: blendNumber(a.precipitationIntensity, b.precipitationIntensity, t),
+            precipitationIntensity: blendNumber(a.precipitationIntensity, b.precipitationIntensity, precipitationT),
             fogDensity: blendNumber(a.fogDensity, b.fogDensity, t),
             fogMultiplier: blendNumber(a.fogMultiplier, b.fogMultiplier, t),
+            clouds: {
+                ...blendObjectNumbers(a.clouds, b.clouds, t),
+                rainShade: blendNumber(a.clouds.rainShade, b.clouds.rainShade, shadeT),
+            },
             water: blendObjectNumbers(a.water, b.water, t),
             rainParticles: { ...rainParticles },
         };
@@ -503,16 +546,34 @@ export class WeatherController {
         pass.end();
     }
 
-    setWeather(weatherName, immediate = false) {
-        if (!this.effects[weatherName]) return false;
-        this._startEffectSnapshot = this._currentEffectSnapshot || this._createEffectSnapshot(this._targetWeather);
+    setWeather(weatherName, immediate = false, duration = this.config.transitionDurationSeconds) {
+        if (!Object.hasOwn(this.effects, weatherName)) return false;
+        this._startEffectSnapshot = this._currentEffectSnapshot;
+        this._startCloudLayers = this._currentCloudLayers;
         this._targetWeather = weatherName;
+        this._transitionDuration = finiteNumber(duration, this.config.transitionDurationSeconds, 0.1, 3600);
         this._transitionProgress = immediate ? 1.0 : 0.0;
+        this._lastCloudLayerUpdateTime = -Infinity;
         if (immediate) {
             this._currentEffectSnapshot = this._createEffectSnapshot(weatherName);
             this._startEffectSnapshot = this._currentEffectSnapshot;
         }
         return true;
+    }
+
+    setWeatherPreview(name) {
+        if (name === 'auto') {
+            this._previewWeather = null;
+            return true;
+        }
+        if (!Object.hasOwn(this.effects, name)) return false;
+        this._previewWeather = name;
+        if (this._targetWeather !== name) this.setWeather(name, false, this.config.previewTransitionSeconds);
+        return true;
+    }
+
+    getWeatherPreview() {
+        return { selected: this._previewWeather ?? 'auto', target: this._targetWeather, progress: this._transitionProgress };
     }
 
     getCurrentView() { return this._weatherViews[this._currentIndex]; }

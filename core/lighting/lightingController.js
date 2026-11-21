@@ -94,7 +94,7 @@ export class LightingController {
         }
 
         // === Moon Lighting ===
-        this._updateMoonLighting(starSystem, cache);
+        this._updateMoonLighting(starSystem, cache, cameraWorldPosition, planetConfig);
 
         return cache;
     }
@@ -102,9 +102,13 @@ export class LightingController {
     /**
      * Update moon lighting based on phase and sun position.
      */
-    _updateMoonLighting(starSystem, cache) {
-        // Get moon info from star system
-        const moonInfo = starSystem.getMoonInfo({ x: 0, y: 0, z: 0 });
+    _updateMoonLighting(starSystem, cache, cameraWorldPosition = null, planetConfig = null) {
+        // Moon as seen from the camera: its horizon is the camera's. The planet centre gave the +Y
+        // pole's horizon, so the moon light switched on and off with a horizon that isn't yours.
+        const o = planetConfig?.origin ?? { x: 0, y: 0, z: 0 };
+        const c = cameraWorldPosition;
+        const localPos = c ? { x: c.x - (o.x || 0), y: c.y - (o.y || 0), z: c.z - (o.z || 0) } : { x: 0, y: 0, z: 0 };
+        const moonInfo = starSystem.getMoonInfo(localPos);
         
         if (!moonInfo || !moonInfo.isAboveHorizon) {
             cache.moonVisible = false;

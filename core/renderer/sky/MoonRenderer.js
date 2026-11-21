@@ -243,7 +243,8 @@ fn main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
         let baseColor = moon.color * moon.intensity * moon.illumination;
         let shadedColor = baseColor * phaseShading * limbDarkening;
     
-        let glowAmount = smoothstep(1.0, 0.7, distFromCenter) * phaseShading * 0.1;
+        // smoothstep(1.0, 0.7, d) (low > high) is a WGSL shader-creation error: the disc never drew.
+        let glowAmount = (1.0 - smoothstep(0.7, 1.0, distFromCenter)) * phaseShading * 0.1;
         let finalColor = shadedColor + moon.color * glowAmount;
     
         let alpha = discMask * moon.opacity;

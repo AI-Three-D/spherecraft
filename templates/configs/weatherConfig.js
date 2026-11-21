@@ -17,13 +17,26 @@ export const WEATHER_CONFIG = Object.freeze({
 
   initialWeather: 'clear',
   transitionDurationSeconds: 90,
+  previewTransitionSeconds: 12,
+  rainLeadFraction: 0.32,
   weatherChangeChancePerSecond: 0.06,
   windChangeChancePerSecond: 0.30,
   windSpeedRange: [2.0, 22.0],
   cloudLayerRefreshHz: 1.0,
+  transitions: {
+    clear: ['partly_cloudy', 'foggy'],
+    partly_cloudy: ['clear', 'cloudy', 'foggy'],
+    cloudy: ['partly_cloudy', 'overcast', 'foggy'],
+    overcast: ['cloudy', 'rain', 'foggy'],
+    rain: ['overcast', 'storm', 'foggy'],
+    storm: ['rain', 'overcast'],
+    foggy: ['clear', 'partly_cloudy', 'cloudy', 'overcast'],
+  },
 
   effects: {
     clear: {
+      label: 'Clear sky',
+      clouds: { presence: 0, mist: 0.025 },
       weight: 3.0,
       intensity: 0.0,
       cloudCoverage: 0.08,
@@ -47,6 +60,8 @@ export const WEATHER_CONFIG = Object.freeze({
     },
 
     partly_cloudy: {
+      label: 'Scattered clouds',
+      clouds: { mist: 0.08 },
       weight: 2.6,
       intensity: 0.30,
       cloudCoverage: 0.40,
@@ -70,6 +85,8 @@ export const WEATHER_CONFIG = Object.freeze({
     },
 
     cloudy: {
+      label: 'Cloudy',
+      clouds: { deck: 0.27, mist: 0.16 },
       weight: 2.2,
       intensity: 0.50,
       cloudCoverage: 0.62,
@@ -93,10 +110,12 @@ export const WEATHER_CONFIG = Object.freeze({
     },
 
     overcast: {
+      label: 'Overcast',
+      clouds: { deck: 0.86, rainShade: 0.22, mist: 0.23 },
       weight: 1.4,
       intensity: 0.68,
       cloudCoverage: 0.88,
-      precipitationIntensity: 0.08,
+      precipitationIntensity: 0,
       fogDensity: 0.16,
       fogMultiplier: 1.24,
       water: {
@@ -116,6 +135,8 @@ export const WEATHER_CONFIG = Object.freeze({
     },
 
     rain: {
+      label: 'Rain',
+      clouds: { deck: 0.96, rainShade: 0.85, low: 0.08, mist: 0.52 },
       weight: 1.0,
       intensity: 0.74,
       cloudCoverage: 0.94,
@@ -142,11 +163,13 @@ export const WEATHER_CONFIG = Object.freeze({
         lodNearDistance: 22.0,
         lodFarDistance: 95.0,
         lodMinScale: 0.38,
-        maxCameraAltitude: 24000.0
+        maxCameraAltitude: 4800
       }
     },
 
     storm: {
+      label: 'Storm',
+      clouds: { deck: 0.72, rainShade: 1, low: 0.20, mist: 0.70 },
       weight: 0.55,
       intensity: 0.92,
       cloudCoverage: 0.98,
@@ -173,11 +196,13 @@ export const WEATHER_CONFIG = Object.freeze({
         lodNearDistance: 25.0,
         lodFarDistance: 110.0,
         lodMinScale: 0.45,
-        maxCameraAltitude: 28000.0
+        maxCameraAltitude: 5600
       }
     },
 
     foggy: {
+      label: 'Low clouds and mist',
+      clouds: { presence: 0.6, deck: 0.12, low: 0.92, mist: 0.76 },
       weight: 0.9,
       intensity: 0.44,
       cloudCoverage: 0.55,

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloud lab</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; background: #05070b; color: #e8edf6; font: 13px system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  .overlay { position: absolute; background: rgba(8, 12, 20, 0.72); backdrop-filter: blur(6px); border-radius: 8px; }
+  #top { top: 12px; left: 12px; right: 312px; padding: 8px 12px; }
+  #top h1 { font-size: 14px; margin: 0 0 4px; font-weight: 600; }
+  #status { color: #b9d8cb; }
+  #status.error { color: #ffb7a8; }
+  #hud { color: #9fb2cc; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  #presets { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  button { background: #1b2638; color: #e8edf6; border: 1px solid #2c3b55; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+  button:hover { background: #26344c; }
+  #side { top: 12px; right: 12px; width: 288px; max-height: calc(100% - 24px); overflow-y: auto; padding: 6px 10px 10px; box-sizing: border-box; }
+  #side header { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; }
+  details { border-top: 1px solid #1f2a3c; padding: 4px 0; }
+  summary { cursor: pointer; font-weight: 600; padding: 3px 0; }
+  .row { display: grid; grid-template-columns: 112px 1fr 42px; align-items: center; gap: 6px; margin: 3px 0; }
+  .row span { color: #b8c4d8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row input[type=range] { width: 100%; }
+  .row output { text-align: right; font-variant-numeric: tabular-nums; color: #9fb2cc; }
+  .row select { width: 100%; background: #1b2638; color: inherit; border: 1px solid #2c3b55; border-radius: 4px; }
+  #perf { left: 12px; bottom: 12px; min-width: 290px; max-width: calc(100% - 336px); max-height: calc(100% - 140px); overflow: auto; box-sizing: border-box; padding: 8px 10px; font-variant-numeric: tabular-nums; }
+  .perf-head { display: flex; align-items: baseline; gap: 6px; }
+  .perf-fps { font-size: 26px; font-weight: 700; color: #fff; }
+  .perf-unit { color: #9fb2cc; }
+  .perf-ms { margin-left: auto; color: #9fb2cc; }
+  .perf-busy { color: #9fb2cc; font-size: 12px; }
+  .perf-cap { color: #ffcf9e; font-size: 12px; max-width: 270px; }
+  .perf-cap:empty { display: none; }
+  .perf-graph { width: 270px; height: 60px; display: block; margin: 4px 0 2px; cursor: default; }
+  .perf-legend { color: #8494ad; font-size: 11px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .perf-legend i { display: inline-block; width: 10px; height: 3px; }
+  .perf-legend i.cpu { background: #7fb8ff; }
+  .perf-legend i.gpu { background: #ffb35c; margin-left: 6px; }
+  .perf-legend span { margin-left: auto; }
+  #perf table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+  #perf th { text-align: left; color: #8494ad; font-weight: 500; }
+  #perf td, #perf th { padding: 1px 4px 1px 0; white-space: nowrap; }
+  #perf td.bar { width: 40%; }
+  #perf td.bar span { display: block; height: 6px; background: #ffb35c; border-radius: 3px; }
+  #perf tr.total td { border-top: 1px solid #2c3b55; font-weight: 600; }
+  .perf-note { color: #ffcf9e; font-size: 12px; }
+  .perf-actions { margin-top: 6px; }
+  .perf-profile { font-size: 11px !important; }
+  body.hide-ui .overlay { display: none; }
+  body.hide-ui #perf { display: block; }
+  @media (max-width: 700px) { #top { right: 12px; } #side { top: auto; bottom: 12px; max-height: 45%; width: calc(100% - 24px); } }
+</style>
+<!-- Same single engine prefix as dev_harness. -->
+<script type="importmap">
+{"imports": {"engine/": "../core/"}}
+</script>
+<canvas tabindex="0" aria-label="Volumetric cloud lab"></canvas>
+<div id="top" class="overlay">
+  <h1>Volumetric cloud lab</h1>
+  <div id="status">Loading…</div>
+  <div id="hud"></div>
+  <div id="presets"></div>
+</div>
+<section id="perf" class="overlay" aria-label="Performance"></section>
+<aside id="side" class="overlay">
+  <header><strong>Cloud settings</strong><button id="reset" type="button">Reset</button></header>
+  <div id="panel"></div>
+</aside>
+<script type="module" src="./main.js"></script>
+</html>

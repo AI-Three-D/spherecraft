@@ -225,7 +225,8 @@ export function getCloudLayers(weather, intensity, atmosphereHeight) {
     const layers = {
         low: { coverage: 0, types: [], altMin: 0, altMax: 0.25 },
         mid: { coverage: 0, types: [], altMin: 0.2, altMax: 0.55 },
-        high: { coverage: 0, types: [], altMin: 0.5, altMax: 1.0 }
+        // Rendered as the cirrus layer (core/renderer/clouds): ~10-19 km on the 26 km atmosphere.
+        high: { coverage: 0, types: [], altMin: 0.38, altMax: 0.72 }
     };
 
     for (const { type, coverage } of cloudTypes) {
