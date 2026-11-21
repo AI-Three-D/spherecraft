@@ -2,6 +2,11 @@
 
 import { Logger } from '../../shared/Logger.js';
 import { LakeTable } from './terrain-generator/lakeTable.js';
+import { normalizeFoothillsConfig } from './terrain-generator/foothillsConfig.js';
+import { normalizeCalderaConfig } from './terrain-generator/calderaConfig.js';
+import { normalizeInlandLandforms } from './terrain-generator/inlandLandformConfig.js';
+import { normalizeLandformDetails } from './terrain-generator/landformDetailsConfig.js';
+import { normalizeTectonicRelief } from './terrain-generator/tectonicReliefConfig.js';
 import { clamp01 } from '../../shared/math/index.js';
 import { installWebGPUTerrainGeneratorAtlasMethods } from './terrain-generator/webgpuTerrainGeneratorAtlas.js';
 import { installWebGPUTerrainGeneratorBatchMethods } from './terrain-generator/webgpuTerrainGeneratorBatching.js';
@@ -208,6 +213,16 @@ export class WebGPUTerrainGenerator {
         this.planetConfig = planetConfig;
         this.terrainConfig = requireObject(planetConfig.terrainGeneration, 'planetConfig.terrainGeneration');
         this.baseGenerator = this.terrainConfig?.baseGenerator ?? 'earthLike';
+        this.mountainRangeModel = this.terrainConfig?.mountainRangeModel ?? 'legacy';
+        if (!['legacy', 'directional'].includes(this.mountainRangeModel)) {
+            throw new Error(`Unknown mountain range model: ${this.mountainRangeModel}`);
+        }
+        this.foothills = normalizeFoothillsConfig(this.terrainConfig?.foothills);
+        this.landformDetails = normalizeLandformDetails(this.terrainConfig?.landformDetails);
+        this.tectonicRelief = normalizeTectonicRelief(this.terrainConfig?.tectonicRelief);
+        this.calderas = normalizeCalderaConfig(this.terrainConfig?.calderas);
+        this.inlandLandforms = normalizeInlandLandforms(this.terrainConfig?.inlandLandforms);
+        this.fjords = this.terrainConfig.fjords === true;
         this.erosionFilter = requireObject(this.terrainConfig.erosionFilter, 'planetConfig.terrainGeneration.erosionFilter');
         // Rivers in the height (riverCarve.wgsl.js): the baked river field
         // (riverField.js, setRiverFieldResources) of the traced rivers.

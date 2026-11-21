@@ -428,6 +428,14 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         _getAdvancedTerrainShaderOptions(extra = {}) {
                 return {
                     baseGenerator: this.baseGenerator,
+                    mountainRangeModel: this.mountainRangeModel,
+                    foothills: this.foothills,
+                    landformDetails: this.landformDetails,
+                    tectonicRelief: this.tectonicRelief,
+                    terrainSeed: this.seed,
+                    calderas: this.calderas,
+                    inlandLandforms: this.inlandLandforms,
+                    fjords: this.fjords,
                     maxBiomes: this.maxGpuBiomes,
                     terrainShaderBundle: this.terrainShaderBundle,
                     tileCategories: this.tileCategories,

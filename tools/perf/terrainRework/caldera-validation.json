@@ -1,0 +1,518 @@
+{
+  "date": "2026-11-20",
+  "seed": 12345,
+  "sourceSha256": {
+    "core/world/terrain-generator/calderaConfig.js": "fdb1169bea889b6821e235bdd3efa081a5d16b64fa6b1a3fc277739f63fe6864",
+    "templates/terrain-shaders/features/featureCalderas.wgsl.js": "7f602a1f8e8e0d6796325379c6f23d963ed53a89bb3371552aa98e80004f685b",
+    "templates/terrain-shaders/base/earthLikeBase.wgsl.js": "f78d48a570308a0e053c93c5dccbc788efc562537243281d765ba562c9232927",
+    "templates/terrain-shaders/base/lakeLandBase.wgsl.js": "a3f886f4e6f93fa709a381b1e61b3b99f17bea78084e32ec1aa272f29305fff8"
+  },
+  "preset": {
+    "enabled": true,
+    "cellSizeM": 60000,
+    "densityPerKm2": 0.00018,
+    "minRadiusM": 8000,
+    "maxRadiusM": 10500,
+    "minHeightM": 1200,
+    "maxHeightM": 1600,
+    "craterDepth": 0.72
+  },
+  "naturalTerrainMaps": {
+    "scope": "Natural land before lakes, rivers and render micro detail; central differences at the stated grid spacing, not a global bound",
+    "maps": [
+      {
+        "map": "caldera-01.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 15319,
+        "loweredSamples": 0,
+        "maxGainM": 1608.7221984863281,
+        "maxAffectedSlope": 1.0937672094858921,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-02.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 22149,
+        "loweredSamples": 0,
+        "maxGainM": 1506.3262329101562,
+        "maxAffectedSlope": 0.6945156654883576,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-03.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 19858,
+        "loweredSamples": 0,
+        "maxGainM": 1632.2084350585938,
+        "maxAffectedSlope": 2.165392341516294,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-04.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 17830,
+        "loweredSamples": 0,
+        "maxGainM": 1527.6823120117188,
+        "maxAffectedSlope": 0.7247424631786601,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-05.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 20939,
+        "loweredSamples": 0,
+        "maxGainM": 1317.3906936645508,
+        "maxAffectedSlope": 1.2860737878186643,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-06.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 19278,
+        "loweredSamples": 0,
+        "maxGainM": 1488.5965576171875,
+        "maxAffectedSlope": 0.6457011419542883,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-07.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 13669,
+        "loweredSamples": 0,
+        "maxGainM": 1246.8897705078125,
+        "maxAffectedSlope": 0.7405306247001439,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-08.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 22925,
+        "loweredSamples": 0,
+        "maxGainM": 1396.5362548828125,
+        "maxAffectedSlope": 0.5455448313352693,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-09.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 22734,
+        "loweredSamples": 0,
+        "maxGainM": 1359.701171875,
+        "maxAffectedSlope": 0.5850594377111427,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-10.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 21968,
+        "loweredSamples": 0,
+        "maxGainM": 1488.2003173828125,
+        "maxAffectedSlope": 0.5585130050504348,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-11.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 22537,
+        "loweredSamples": 0,
+        "maxGainM": 1332.5205078125,
+        "maxAffectedSlope": 0.5440968024147425,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-12.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 22147,
+        "loweredSamples": 0,
+        "maxGainM": 1514.0885391235352,
+        "maxAffectedSlope": 0.608480738834528,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-13.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 16699,
+        "loweredSamples": 0,
+        "maxGainM": 1377.3514709472656,
+        "maxAffectedSlope": 0.6093574282824841,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-14.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 24473,
+        "loweredSamples": 0,
+        "maxGainM": 1546.8435821533203,
+        "maxAffectedSlope": 0.979795278805432,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-15.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 22403,
+        "loweredSamples": 0,
+        "maxGainM": 1559.8694458007812,
+        "maxAffectedSlope": 0.7074271442604888,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-16.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 19879,
+        "loweredSamples": 0,
+        "maxGainM": 1402.6119079589844,
+        "maxAffectedSlope": 1.140754751307067,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-17.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 16610,
+        "loweredSamples": 0,
+        "maxGainM": 1606.8108215332031,
+        "maxAffectedSlope": 0.7816829379412678,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-18.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 18543,
+        "loweredSamples": 0,
+        "maxGainM": 1578.896484375,
+        "maxAffectedSlope": 0.6336209347704547,
+        "newAboveOne": 0
+      },
+      {
+        "map": "caldera-19.json",
+        "points": 65536,
+        "cellM": 125.49019607843137,
+        "affectedSamples": 21193,
+        "loweredSamples": 0,
+        "maxGainM": 1376.9207153320312,
+        "maxAffectedSlope": 0.6352923071242326,
+        "newAboveOne": 0
+      },
+      {
+        "map": "spawn.json",
+        "points": 65536,
+        "cellM": 94.11764705882354,
+        "affectedSamples": 0,
+        "loweredSamples": 0,
+        "maxGainM": 0,
+        "maxAffectedSlope": 0,
+        "newAboveOne": 0
+      }
+    ],
+    "totals": {
+      "points": 1310720,
+      "affectedSamples": 381153,
+      "loweredSamples": 0,
+      "newAboveOne": 0
+    }
+  },
+  "isolatedGradient": {
+    "field": "calderaShape",
+    "points": 4864,
+    "active": 3360,
+    "maxSlope": 0.7332441395715587,
+    "maxError": 0.0011445076973371653,
+    "stepM": 2
+  },
+  "waterSampling": {
+    "points": [
+      [
+        -0.5475960849288737,
+        0.03798600589140205,
+        -0.8358801296400028
+      ],
+      [
+        -74702.20749812722,
+        4978.90176419785,
+        -107642.5098004
+      ],
+      [
+        -68846.82058946745,
+        4978.90176419785,
+        -111478.45090394889
+      ],
+      [
+        0.15707592851963056,
+        -0.03888898230283375,
+        -0.9868205509286609
+      ],
+      [
+        17131.76947184511,
+        -5097.256688397025,
+        -129894.72519319694
+      ],
+      [
+        24044.742734004925,
+        -5097.256688397025,
+        -128794.36130944596
+      ],
+      [
+        0.009739999887990004,
+        -0.8013219907847973,
+        -0.5981539931212292
+      ],
+      [
+        -2222.894814158339,
+        -105030.87597614495,
+        -78458.22464425798
+      ],
+      [
+        4776.177344795591,
+        -105030.87597614495,
+        -78344.25572851353
+      ],
+      [
+        -0.8181240631505898,
+        -0.5703020440213313,
+        -0.07367900568724582
+      ],
+      [
+        -107547.0913535597,
+        -74750.62951396394,
+        -6171.362301403715
+      ],
+      [
+        -106919.22305698851,
+        -74750.62951396394,
+        -13143.146965473654
+      ],
+      [
+        -0.9991055152856616,
+        0.04220191772118901,
+        -0.0026772124358509825
+      ]
+    ],
+    "results": [
+      {
+        "scenario": "off",
+        "enabled": false,
+        "key": "04ff915b",
+        "terrain": [
+          403.2579040527344,
+          396.4996337890625,
+          1160.35986328125,
+          878.4049072265625,
+          872.2910766601562,
+          893.3142700195312,
+          390.2571716308594,
+          344.111328125,
+          398.75030517578125,
+          663.770751953125,
+          713.3203125,
+          606.0958862304688,
+          698.8042602539062
+        ],
+        "water": [
+          403.2579040527344,
+          396.4996337890625,
+          1160.35986328125,
+          878.4049072265625,
+          872.2910766601562,
+          893.3142700195312,
+          390.2571716308594,
+          344.111328125,
+          398.75030517578125,
+          663.770751953125,
+          713.3203125,
+          606.0958862304688,
+          698.8042602539062
+        ],
+        "differences": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "scenario": "on",
+        "enabled": true,
+        "key": "0b411fc9",
+        "terrain": [
+          829.0238037109375,
+          1655.873779296875,
+          1160.35986328125,
+          1269.8470458984375,
+          1890.190185546875,
+          2202.92724609375,
+          820.388427734375,
+          1773.7354736328125,
+          1642.30126953125,
+          1046.609375,
+          2051.46484375,
+          1484.05517578125,
+          698.8042602539062
+        ],
+        "water": [
+          829.0238037109375,
+          1655.873779296875,
+          1160.35986328125,
+          1269.8470458984375,
+          1890.190185546875,
+          2202.92724609375,
+          820.388427734375,
+          1773.7354736328125,
+          1642.30126953125,
+          1046.609375,
+          2051.46484375,
+          1484.05517578125,
+          698.8042602539062
+        ],
+        "differences": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "scenario": "stack",
+        "enabled": true,
+        "key": "44ea624e",
+        "terrain": [
+          995.2645263671875,
+          1655.873779296875,
+          1831.7630615234375,
+          1269.8470458984375,
+          1890.190185546875,
+          2202.92724609375,
+          820.6885986328125,
+          1901.5936279296875,
+          1642.30126953125,
+          1054.9610595703125,
+          2051.46484375,
+          1484.05517578125,
+          998.6616821289062
+        ],
+        "water": [
+          995.2645263671875,
+          1655.873779296875,
+          1831.7630615234375,
+          1269.8470458984375,
+          1890.190185546875,
+          2202.92724609375,
+          820.6885986328125,
+          1901.5936279296875,
+          1642.30126953125,
+          1054.9610595703125,
+          2051.46484375,
+          1484.05517578125,
+          998.6616821289062
+        ],
+        "differences": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ]
+  },
+  "pairedTiming": [
+    {
+      "enabled": true,
+      "tiles": 24,
+      "textureSize": 128,
+      "roundsMsPerTile": [
+        12.523923749999994,
+        12.86553987499993,
+        13.523187500000176,
+        13.695250083333235,
+        12.793133749999924
+      ],
+      "medianMsPerTile": 12.86553987499993,
+      "paired": true,
+      "includes": "height, normal, material, splat IDs and weights; CPU submission and GPU fence; warm lake table"
+    },
+    {
+      "enabled": false,
+      "tiles": 24,
+      "textureSize": 128,
+      "roundsMsPerTile": [
+        11.63667358333339,
+        13.287131958333399,
+        12.161949666666638,
+        14.293724083333359,
+        12.590814124999989
+      ],
+      "medianMsPerTile": 12.590814124999989,
+      "paired": true,
+      "includes": "height, normal, material, splat IDs and weights; CPU submission and GPU fence; warm lake table"
+    }
+  ],
+  "checks": {
+    "tests": {
+      "command": "npm test -- --maxWorkers=2",
+      "files": 123,
+      "tests": 629,
+      "passed": true
+    },
+    "typecheck": true,
+    "targetedLint": true,
+    "previewToggle": {
+      "passed": true,
+      "cameraPreserved": true,
+      "pageErrors": []
+    }
+  },
+  "images": [
+    "caldera-before.png",
+    "caldera-after.png",
+    "caldera-rim.png"
+  ],
+  "limitations": [
+    "Sampled natural land comparisons precede lakes, river carving and render micro detail; not a global slope bound.",
+    "Shared water sampling checks 13 directions in three startup configurations, not planet-wide hydrology.",
+    "Paired timing uses 24 tiles at two caldera sites and spawn, with warm lake tables; excludes cold construction, streaming and production river fields.",
+    "Existing materials and climate colour the volcano; there is no new volcanic biome or forced crater lake."
+  ]
+}
