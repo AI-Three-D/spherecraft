@@ -15,6 +15,7 @@ export class SkyRenderer {
 
         this.backend = backend;
         this.atmosphereLUT = atmosphereLUT;
+        this.colorContrast = options.colorContrast ?? 0;
         this.enabled = true;
         this.numSamples = 16;
         this.initialized = false;
@@ -244,7 +245,7 @@ export class SkyRenderer {
         u[24] = this._time;  // Time uniform
         u[25] = this._currentSpaceLOD;  // Space LOD (0 = ground, 1 = space)
 
-        u[26] = 0.0;  // Reserved
+        u[26] = this.colorContrast;
         u[27] = 0.0;  // Reserved
         // Moonlit sky: the lighting controller's moon (direction, and intensity relative to the sun).
         const moonDir = uniformManager?.uniforms?.moonLightDirection?.value;
@@ -345,7 +346,7 @@ struct SkyUniforms {
     sunDiskFade: f32,
     time: f32,
     spaceLOD: f32,
-    _pad0: f32,
+    colorContrast: f32,
     _pad1: f32,
     moonDirection: vec3<f32>,
     moonIntensity: f32,     // moon light relative to the sun (0 when it is down)
@@ -396,7 +397,7 @@ struct SkyUniforms {
     sunDiskFade: f32,
     time: f32,
     spaceLOD: f32,
-    _pad0: f32,
+    colorContrast: f32,
     _pad1: f32,
     moonDirection: vec3<f32>,
     moonIntensity: f32,     // moon light relative to the sun (0 when it is down)
@@ -962,13 +963,25 @@ fn main(input: VertexOutput) -> @location(0) vec4<f32> {
     let sunDirHorizon = select(vec3<f32>(0.0), sunDirFlat / sunDirFlatLen, sunDirFlatLen > 0.001);
 
     let towardsSunHorizon = dot(rayDir, sunDirHorizon);
-    let sunSideOnly = smoothstep(-0.2, 0.4, towardsSunHorizon);
+    let sunSideOnly = mix(smoothstep(-0.2, 0.4, towardsSunHorizon),
+        smoothstep(0.25, 0.9, towardsSunHorizon), clamp(uniforms.colorContrast, 0.0, 1.0));
 
     let twilightColor = vec3<f32>(1.0, 0.55, 0.25);
     let horizonFactor = pow(lookingHorizon, 1.5) * (1.0 - lookingUp * 0.8);
     let twilightAmount = twilightFactor * horizonFactor * sunSideOnly;
 
     skyColor = mix(skyColor, twilightColor * uniforms.sunIntensity * 0.25, twilightAmount * 0.6);
+
+    // Retain the light horizon and sun halo. Farther above the limb, reduce the
+    // veiling radiance so the blue sky stays distinct from the clouds.
+    let aboveLimb = max(0.0, cosViewUp + sin(horizonDip));
+    let upperSky = smoothstep(0.025, 0.44, aboveLimb);
+    let awayFromSun = 1.0 - smoothstep(0.82, 0.997, cosTheta);
+    let skyGrade = clamp(uniforms.colorContrast, 0.0, 1.0) * upperSky * awayFromSun
+        * smoothstep(-0.23, -0.02, cosSunZenithCamera) * (1.0 - smoothstep(0.1, 0.6, uniforms.viewerAltitude / atmoHeight));
+    skyColor *= mix(vec3f(1.0), vec3f(0.31, 0.51, 0.72), skyGrade);
+    let blueHour = smoothstep(-0.18, -0.025, cosSunZenithCamera) * (1.0 - smoothstep(0.02, 0.25, cosSunZenithCamera));
+    skyColor += vec3f(0.13, 0.30, 0.53) * (0.018 * uniforms.sunIntensity * blueHour * skyGrade * atmoMask);
 
     // ========== NIGHT SKY ==========
     

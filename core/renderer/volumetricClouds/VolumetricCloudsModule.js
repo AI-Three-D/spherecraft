@@ -5,12 +5,15 @@ import {
 } from './shaders/cloudNoise.wgsl.js';
 import {
     TRANSMITTANCE_LUT_WGSL, AMBIENT_LUT_WGSL, CLOUD_SHADOW_WGSL, CLOUD_RAYMARCH_WGSL, CLOUD_TEMPORAL_WGSL,
+    CLOUD_SPATIAL_WGSL,
 } from './shaders/cloudPasses.wgsl.js';
 
 const SHAPE_SIZE = 128;
 const DETAIL_SIZE = 64;
 const WEATHER_SIZE = 128;
 const SHADOW_SIZE = 256;
+// A shorter workgroup was faster for dense flat decks on the benchmark GPU.
+const rayGroupHeight = pipeline => pipeline === 'raymarchCut' ? 4 : 8;
 /** Order in which the pixels of a 2x2 block are refreshed (ordered dither). */
 const INTERLEAVE_ORDER = [[0, 0], [1, 1], [1, 0], [0, 1]];
 
@@ -44,6 +47,22 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
     backLobeWeight: 0.3,
     powder: 0.55,
     ambient: 1.0,
+    /** Additional sky radiance per unit of sunlight, attenuated by cloud occlusion. */
+    daylightSkyFill: 0,
+    /** Gain on direct sunlight in clouds, adding slightly warm daylight. Fades toward 1 near the terminator. */
+    daylightSunGain: 1,
+    /** Softens and restores the energy of sunset light on clouds in the scaled atmosphere. */
+    twilightCloudLight: 0,
+    /** Fraction of distant cumulus replaced by a filtered, broken bank field. */
+    distantBanks: 0,
+    distantBanksStartKm: 15,
+    distantBanksEndKm: 42,
+    distantBanksTileKm: 18,
+    /** Strength, heights, and horizontal scale of the broken altocumulus layer. */
+    altoClouds: 0,
+    altoBottomKm: 7.2,
+    altoTopKm: 9,
+    altoTileKm: 19,
     msExtinction: 0.3,
     msScattering: 0.6,
     msPhase: 0.5,
@@ -103,6 +122,10 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
     groundProxyBlendKm: 0.4,
     // Without temporal reconstruction: strength of a 3x3 tent over the cloud target (0 = off, 1 = full).
     spatialFilter: 1,
+    /** Reconstruct the full-size spatially filtered cloud target from a sparser ray grid. */
+    spatialSampling: true,
+    /** Largest angular spacing of the square ray grid. Coarser targets use a checkerboard. */
+    spatialMaxRayAngle: 0.00325,
     /** Cloud target scale once the far proxy has fully taken over (it is ~5x cheaper per pixel); null keeps resolutionScale. */
     orbitResolutionScale: null,
     /**
@@ -115,7 +138,7 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
      * steps from it for one coarse step, so a deck's top is not cut into terraces along the step
      * planes (they slide as the camera moves). Costs a few samples per cloud entry.
      */
-    refineEntry: true,
+    edgeSoftness: 0.045,
     /**
      * Steps normally grow with distance only (stepGrowth). With layerStepFit > 0, a ray that crosses
      * the layer in a short stretch (from above, or steeply) steps no coarser than its path through
@@ -187,6 +210,17 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
     /** Detail noise is blurred to at least this many pixels (0 = off): sharper, thin fringes sparkle. */
     detailPixelFootprint: 0,
     /** Cross-cutting cost savings (every tier). Weather re-sampled along a ray only every this many km (0 = every sample). */
+    /** 'domes': the outer shell of each cloud is eroded with wispy noise (0 = off, 1 = full) instead of round billows. */
+    edgeWisps: 0,
+    /**
+     * Multiplier on the coverage the host sets (weather). A soft, translucent look (low extinction,
+     * strong erosion) moves each cloud's visible outline inward; this restores their apparent size.
+     */
+    coverageGain: 1,
+    /** 'domes': density thins between puffs inside clouds (0 = uniform body, 1 = see-through pockets). */
+    densityVariation: 0,
+    /** 'domes': suppress small puffs without nearby support from the broader shape field (0 = off). */
+    isolatedPuffSuppression: 0,
     weatherReuseKm: 0.3,
     /**
      * Detail noise skipped once less than this fraction of light reaches the camera from the sample (0 = never
@@ -291,6 +325,7 @@ export class VolumetricCloudsModule {
         this._historyIndex = 0;
         this._frame = 0;
         this._lutKey = '';
+        this._lastShadowInputs = null;
         this._targetSize = [0, 0];
         this._sceneDepthView = null;
     }
@@ -361,10 +396,27 @@ export class VolumetricCloudsModule {
         const [w, h] = this._targetSize;
         const set = this._sets[this._activeK];
         const [bw, bh] = set.blocks;
-        const write = this._historyIndex;
-        if (this.shadowFade > 0) this._dispatch(encoder, 'shadow', this._bindGroups.shadow, SHADOW_SIZE / 8, SHADOW_SIZE / 8);
-        this._dispatch(encoder, 'raymarch', set.raymarch, Math.ceil(bw / 8), Math.ceil(bh / 8));
-        this._dispatch(encoder, 'temporal', set.temporal[write], Math.ceil(w / 8), Math.ceil(h / 8));
+        const write = this.settings.temporal ? this._historyIndex : 0;
+        if (this.shadowFade > 0 && this._shadowInputs !== this._lastShadowInputs) {
+            this._dispatch(encoder, 'shadow', this._bindGroups.shadow, SHADOW_SIZE / 8, SHADOW_SIZE / 8);
+            this._lastShadowInputs = this._shadowInputs;
+        }
+        let ray = 'raymarch';
+        if (this.proxyWeight >= 0.999) ray = 'raymarchProxy';
+        else if (this.proxyWeight <= 0.001) {
+            if (this.settings.cloudShape !== 'domes') ray = 'raymarchCut';
+            else ray = this.settings.giantShare > 0 ? 'raymarchGiants' : 'raymarchDomes';
+        }
+        const groupHeight = rayGroupHeight(ray);
+        if (this._spatialStride) {
+            const sparse = this._spatialTargets;
+            this._dispatch(encoder, ray, sparse.raymarch, Math.ceil(sparse.width / 8),
+                Math.ceil(sparse.height / groupHeight), 'raymarch');
+            this._dispatch(encoder, 'spatial', sparse.reconstruct, Math.ceil(w / 8), Math.ceil(h / 8));
+        } else {
+            this._dispatch(encoder, ray, set.raymarch, Math.ceil(bw / 8), Math.ceil(bh / groupHeight), 'raymarch');
+            this._dispatch(encoder, 'temporal', set.temporal[write], Math.ceil(w / 8), Math.ceil(h / 8));
+        }
         this._outputIndex = write;
         this._historyIndex = 1 - write;
         this._resetHistory = false;
@@ -396,7 +448,7 @@ export class VolumetricCloudsModule {
 
     dispose() {
         const textures = [
-            this._shape, this._detail, this._weather, this._transmittance, this._ambient, this._shadow,
+            this._shape, this._detail, this._weather, this._transmittance, this._cloudLight, this._ambient, this._shadow,
             this._dummyDepth, ...this._setTextures(), ...(this._history ?? []),
         ];
         for (const texture of textures) texture?.destroy();
@@ -434,9 +486,11 @@ export class VolumetricCloudsModule {
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
         });
         this._transmittance = lut('clouds transmittance LUT', 256, 64);
+        this._cloudLight = lut('clouds direct light LUT', 256, 64);
         this._ambient = lut('clouds ambient LUT', 64, 3);
         this._shadow = lut('clouds shadow map', SHADOW_SIZE, SHADOW_SIZE);
         this._transmittanceView = this._transmittance.createView();
+        this._cloudLightView = this._cloudLight.createView();
         this._ambientView = this._ambient.createView();
         this._shadowView = this._shadow.createView();
         this._shapeView = this._shape.createView({ dimension: '3d' });
@@ -467,11 +521,12 @@ export class VolumetricCloudsModule {
             downsample: layout([tex3d, store('rgba8unorm', '3d')]),
             volumeHQ: layout([store(NOISE_HQ_FORMAT, '3d')]),
             downsampleHQ: layout([tex3d, store(NOISE_HQ_FORMAT, '3d')]),
-            transmittance: layout([uniform, store('rgba16float')]),
+            transmittance: layout([uniform, store('rgba16float'), store('rgba16float')]),
             ambient: layout([uniform, tex2d, sampler, store('rgba16float')]),
             shadow: layout([...noise, store('rgba16float')]),
             raymarch: layout([...noise, tex2d, tex2d, sampler, store('rgba16float'), store('r32float'), texDepth]),
             temporal: layout([uniform, tex2d, texUnfilterable, tex2d, sampler, store('rgba16float')]),
+            spatial: layout([uniform, tex2d, texUnfilterable, texDepth, store('rgba16float'), store('r32float')]),
         };
         const sources = {
             shapeNoise: [SHAPE_NOISE_WGSL, 'volumeHQ'],
@@ -484,6 +539,7 @@ export class VolumetricCloudsModule {
             shadow: [CLOUD_SHADOW_WGSL, 'shadow'],
             raymarch: [CLOUD_RAYMARCH_WGSL, 'raymarch'],
             temporal: [CLOUD_TEMPORAL_WGSL, 'temporal'],
+            spatial: [CLOUD_SPATIAL_WGSL, 'spatial'],
         };
         this._pipelines = {};
         await Promise.all(Object.entries(sources).map(async ([name, [code, layoutName]]) => {
@@ -493,11 +549,21 @@ export class VolumetricCloudsModule {
             if (errors.length) {
                 throw new Error(`clouds ${name} WGSL: ${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join('; ')}`);
             }
-            this._pipelines[name] = await device.createComputePipelineAsync({
-                label: `clouds ${name}`,
-                layout: device.createPipelineLayout({ bindGroupLayouts: [this._layouts[layoutName]] }),
-                compute: { module, entryPoint: 'main' },
-            });
+            const layout = device.createPipelineLayout({ bindGroupLayouts: [this._layouts[layoutName]] });
+            const build = async (key, constants) => {
+                this._pipelines[key] = await device.createComputePipelineAsync({
+                    label: `clouds ${key}`, layout, compute: { module, entryPoint: 'main', constants },
+                });
+            };
+            if (name !== 'raymarch') {
+                await build(name);
+                return;
+            }
+            await Promise.all([
+                ['raymarch', 0, 0], ['raymarchCut', 1, 1], ['raymarchDomes', 1, 2],
+                ['raymarchGiants', 1, 3], ['raymarchProxy', 2, 0],
+            ].map(([key, path, shape]) => build(key,
+                { RAY_PATH: path, CLOUD_SHAPE: shape, RAY_GROUP_HEIGHT: rayGroupHeight(key) })));
         }));
     }
 
@@ -515,7 +581,9 @@ export class VolumetricCloudsModule {
             this._noiseSampler,
         ];
         this._bindGroups = {
-            transmittance: group('transmittance', [{ buffer: this._uniformBuffer }, this._transmittanceView]),
+            transmittance: group('transmittance', [
+                { buffer: this._uniformBuffer }, this._transmittanceView, this._cloudLightView,
+            ]),
             ambient: group('ambient', [{ buffer: this._uniformBuffer }, this._transmittanceView, this._lutSampler, this._ambientView]),
             shadow: group('shadow', [...this._noiseResources, this._shadowView]),
         };
@@ -523,7 +591,15 @@ export class VolumetricCloudsModule {
     }
 
     _setTextures() {
-        return Object.values(this._sets ?? {}).flatMap(set => [set.color, set.depth]);
+        return [...Object.values(this._sets ?? {}).flatMap(set => [set.color, set.depth]),
+            ...(this._spatialTargets?.textures ?? [])];
+    }
+
+    _createTarget(label, format, width, height) {
+        return this.device.createTexture({
+            label, size: [width, height], format,
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+        });
     }
 
     _ensureTargets() {
@@ -544,19 +620,16 @@ export class VolumetricCloudsModule {
         const k = this._interleave();
         if (width === this._targetSize[0] && height === this._targetSize[1] && k === this._blockFactor) return;
         for (const texture of [...this._setTextures(), ...(this._history ?? [])]) texture?.destroy();
-        const target = (label, format, w = width, h = height) => this.device.createTexture({
-            label, size: [w, h], format,
-            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
-        });
-        this._history = [target('clouds history A', 'rgba16float'), target('clouds history B', 'rgba16float')];
+        this._spatialTargets = null;
+        this._history = ['A', 'B'].map(name => this._createTarget(`clouds history ${name}`, 'rgba16float', width, height));
         const historyViews = this._historyViews = this._history.map(texture => texture.createView());
         // The raymarch writes one sample per k x k block of the cloud target. With interleave 2 a
         // full-rate set (k = 1) is kept as well, for frames with fast camera motion.
         this._sets = {};
         for (const sk of k === 2 ? [1, 2] : [1]) {
             const blocks = [Math.ceil(width / sk), Math.ceil(height / sk)];
-            const color = target(`clouds raymarch color k${sk}`, 'rgba16float', ...blocks);
-            const depth = target(`clouds raymarch depth k${sk}`, 'r32float', ...blocks);
+            const color = this._createTarget(`clouds raymarch color k${sk}`, 'rgba16float', ...blocks);
+            const depth = this._createTarget(`clouds raymarch depth k${sk}`, 'r32float', ...blocks);
             const set = { k: sk, blocks, color, depth, colorView: color.createView(), depthView: depth.createView() };
             set.temporal = [0, 1].map(write => this._group('temporal', [
                 { buffer: this._uniformBuffer }, set.colorView, set.depthView, historyViews[1 - write], this._linearSampler,
@@ -574,12 +647,31 @@ export class VolumetricCloudsModule {
     }
 
     _buildRaymarchGroup() {
+        const scene = this._sceneDepthView ?? this._dummyDepthView;
+        const common = [...this._noiseResources, this._cloudLightView, this._ambientView, this._lutSampler];
         for (const set of Object.values(this._sets ?? {})) {
-            set.raymarch = this._group('raymarch', [
-                ...this._noiseResources, this._transmittanceView, this._ambientView, this._lutSampler,
-                set.colorView, set.depthView, this._sceneDepthView ?? this._dummyDepthView,
+            set.raymarch = this._group('raymarch', [...common, set.colorView, set.depthView, scene]);
+        }
+        const sparse = this._spatialTargets;
+        if (sparse) {
+            sparse.raymarch = this._group('raymarch', [...common, ...sparse.views, scene]);
+            sparse.reconstruct = this._group('spatial', [
+                { buffer: this._uniformBuffer }, ...sparse.views, scene, this._historyViews[0], this._sets[1].depthView,
             ]);
         }
+    }
+
+    _ensureSpatialTargets(stride) {
+        if (this._spatialTargets?.stride === stride) return;
+        for (const texture of this._spatialTargets?.textures ?? []) texture.destroy();
+        const width = Math.ceil(this._targetSize[0] / Math.max(2, stride));
+        const height = Math.ceil(this._targetSize[1] / stride);
+        const textures = [
+            this._createTarget('clouds spatial ray color', 'rgba16float', width, height),
+            this._createTarget('clouds spatial ray depth', 'r32float', width, height),
+        ];
+        this._spatialTargets = { stride, width, height, textures, views: textures.map(texture => texture.createView()) };
+        this._buildRaymarchGroup();
     }
 
     // Rough screen motion of the cloud layer since last frame, in cloud-target pixels.
@@ -624,8 +716,8 @@ export class VolumetricCloudsModule {
 
     _interleave() { return this.settings.interleave >= 2 ? 2 : 1; }
 
-    _dispatch(encoder, pipeline, bindGroup, x, y) {
-        const label = `clouds ${pipeline}`;
+    _dispatch(encoder, pipeline, bindGroup, x, y, name = pipeline) {
+        const label = `clouds ${name}`;
         const pass = encoder.beginComputePass({ label, timestampWrites: this.gpuTimer?.timestampWrites(label) });
         pass.setPipeline(this._pipelines[pipeline]);
         pass.setBindGroup(0, bindGroup);
@@ -689,6 +781,19 @@ export class VolumetricCloudsModule {
             sf = this._shadowFrame = { anchor: ground, e1, e2: cross(n, e1), extent, R };
         }
         const { e1, e2 } = sf;
+        if (dot(sun, cross(e1, e2)) < 0.0199) this.shadowFade = 0;
+        // Only the shadow plane, sun, and base density field affect this texture. Reuse it
+        // when the camera, moon, exposure, or reconstruction are the only things changing.
+        if (this.shadowFade > 0) {
+            this._shadowInputs = JSON.stringify([
+                R, bottom, s.cloudTopKm, e1, e2, extent, sun, this._windShape, this.windDirection, s.windSkewKm,
+                this._evolve, this._boil, s.systemTileKm, s.systemStrength, s.systemWarp, s.systemOffset,
+                s.weatherTileKm, s.largeWeatherTileKm, s.coverage, s.coverageGain, s.weatherContrast, s.cloudType, s.typeVariance,
+                s.shapeTileKm, s.shapeOffset, s.cloudShape, s.domeHeight, s.domeHeads, s.domeEdgeSharpness,
+                s.giantShare, s.giantHeight, s.giantScale, s.popcornTopKm, s._profileOldHeads, s.densityVariation,
+                s.isolatedPuffSuppression, s.altoClouds, s.altoBottomKm, s.altoTopKm, s.altoTileKm,
+            ]);
+        }
 
         const d = sub(cam.pos, prev.pos);
         const baseK = this._blockFactor;
@@ -706,6 +811,13 @@ export class VolumetricCloudsModule {
         // constant; while moving, fresh samples weigh at least motionBlend.
         const restBlend = Math.min(1, s.temporalBlend * baseK * baseK);
         const blend = this._resetHistory || !s.temporal ? 1 : (moving ? Math.max(restBlend, s.motionBlend) : restBlend);
+        const pixelAngle = 2 / (cam.proj[1] * height);
+        this._spatialStride = 0;
+        if (s.spatialSampling && !s.temporal && s.spatialFilter >= 0.999 && !s.debugSteps && this.farProxyWeight <= 0.001) {
+            this._spatialStride = Math.max(1, Math.min(3, Math.floor(s.spatialMaxRayAngle / pixelAngle)));
+            this._ensureSpatialTargets(this._spatialStride);
+        }
+        const rayFootprint = pixelAngle * Math.max(1, this._spatialStride * 0.9);
         const data = this._uniformData;
         data.set([
             ...cam.pos, frame.time,
@@ -720,14 +832,14 @@ export class VolumetricCloudsModule {
             ...sun, this.sunIlluminance,
             R, R + bottom, R + s.cloudTopKm, R + this.planet.atmosphereHeightKm,
             1 / s.shapeTileKm, 1 / s.detailTileKm, 1 / s.weatherTileKm, 1 / s.largeWeatherTileKm,
-            s.coverage, s.weatherContrast, s.cloudType, s.typeVariance,
+            Math.min(1, s.coverage * (s.coverageGain ?? 1)), s.weatherContrast, s.cloudType, s.typeVariance,
             s.extinction, s.detailErosion, s.detailWarp, s.albedo,
             ...this._windShape, s.spatialFilter,
             ...this._windDetail, s.windSkewKm,
             s.phaseForward, s.phaseBack, s.backLobeWeight, s.powder,
             s.ambient, s.msExtinction, s.msScattering, s.msPhase,
             s.maxSteps, s.minStepKm, s.stepGrowth, s.maxStepKm,
-            s.lightStepKm, 2 / (cam.proj[1] * height), blend, s.debugSteps ? 1 : 0,
+            s.lightStepKm, rayFootprint, blend, s.debugSteps ? 1 : 0,
             ...e1, extent,
             ...e2, 0,
             0, R, this.shadowFade, Math.max(0, s.layerStepFit || 0),
@@ -741,7 +853,7 @@ export class VolumetricCloudsModule {
             atmo.ozoneHalfWidthKm, atmo.groundAlbedo, s.twilightSoftness, s.temporal ? 0 : 1,
             cam.proj[4], cam.proj[5], 1 / this.planet.unitsPerKm, this._sceneDepthView ? 1 : 0,
             ...this.ambientFloor, s.stepFootprint,
-            s.refineEntry ? 1 : 0, s.farAverageStartKm, s.farAverageEndKm, s.farAverageDensity,
+            Math.max(0, s.edgeSoftness), s.farAverageStartKm, s.farAverageEndKm, s.farAverageDensity,
             ...normalize(this.moonDirection), this.moonIlluminance,
             Math.max(1, Math.round(s.lightReuseSteps || 1)), Math.max(0, s.lightReuseMaxKm ?? 1), s.cloudShape === 'domes' ? Math.max(0.6, s.domeHeight ?? 1) : 0, Math.max(0.1, s.sunsetDepth ?? 1),
             Math.max(0, s.giantShare ?? 0), Math.max(1, s.giantHeight ?? 2.5), Math.max(1, s.giantScale ?? 3),
@@ -750,7 +862,16 @@ export class VolumetricCloudsModule {
             Math.max(0.5, s.domeEdgeSharpness ?? 1.5), Math.max(0, s.domeHeads ?? 0.6), Math.max(0, s.duskSkyBoost ?? 0), s.stepStratify === 'ign' ? 2 : s.stepStratify ? 1 : 0,
             Math.max(0, s.stepAnchorKm ?? 0), Math.max(0, s.detailPixelFootprint ?? 0),
             s._profileOldLight ? 1 : 0, s._profileOldHeads ? 1 : 0,
-            Math.max(0, s.weatherReuseKm ?? 0.3), Math.max(0, s.detailMinTransmittance ?? 0), 0, 0,
+            Math.min(1, Math.max(0, s.twilightCloudLight)), Math.max(0, s.detailMinTransmittance ?? 0), this._spatialStride, Math.max(0, s.edgeWisps ?? 0),
+            Math.max(0, Math.min(1, s.densityVariation ?? 0)),
+            Math.max(0, Math.min(1, s.isolatedPuffSuppression ?? 0)),
+            Math.max(0, s.daylightSkyFill ?? 0), Math.max(1, s.daylightSunGain ?? 1),
+            Math.min(1, Math.max(0, s.distantBanks)),
+            Math.max(0, s.distantBanksStartKm),
+            Math.max(s.distantBanksStartKm + 0.01, s.distantBanksEndKm),
+            1 / Math.max(1, s.distantBanksTileKm),
+            Math.max(0, s.altoClouds), R + s.altoBottomKm, R + Math.max(s.altoBottomKm + 0.01, s.altoTopKm),
+            1 / Math.max(1, s.altoTileKm),
         ]);
         this.device.queue.writeBuffer(this._uniformBuffer, 0, data);
         this._prev = cam;

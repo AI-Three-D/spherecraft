@@ -4,6 +4,8 @@
 
 **Baseline:** the Shift+P look pick runs at 2.5–3.5 fps in the game (user's screenshots, MacBook, 1.5× canvas pixel ratio, cloud target at full canvas resolution). The look is now right, so this plan is about getting the speed back without losing it.
 
+See [section 9](#9-general-optimization-pass-2026-11-20) for the current implementation, before-and-after timings and browser comparisons.
+
 The cost analysis in section 2 comes from reading the shaders. Section 1 is how to measure it, and the measured numbers go in section 1.5.
 
 ---
@@ -363,3 +365,282 @@ Why the detail skip lost from above: uneroded base density fills the holes the e
   1. Giant fetch only where the weather allows giants (needs the baked weather map's giant-mask channel).
   2. Deep shadow map for the far light steps.
   3. Detail skip retried once lighting behind the skin is cheap.
+
+---
+
+## 9. General optimization pass (2026-11-20)
+
+Compared against `787e912` on a 16-core Apple M1 Pro on AC power, Chrome 157 with WebGPU on Metal. The browser rendered both revisions at the same viewport, sun position, camera path, and weather phase. This pass kept the authored Ultra, High, Medium, and Low settings. It retained the existing maximum step counts, shape and detail volumes, cloud layer heights, giant towers, light steps, and sky occlusion.
+
+### Changes
+
+- The spatially filtered cumulus path now shades a checkerboard or one ray per 2×2 or 3×3 block. The renderer chooses the largest square grid with a nominal angular spacing at most 0.00325 radians, up to 3×3. The spatial pass reconstructs colour and signed cloud depth at the original target size. Terrain and sky taps are filtered by the current pixel's scene-depth class. Raw samples, temporal accumulation, the step heatmap, and the distant orbital proxy use their original sampling modes.
+- Dedicated shader variants remove the unused shell-proxy or march path outside the crossfade and specialize the cut, dome and giant shapes. Full-resolution scene depth takes one fetch. Terrain-occluded rays and explicitly clear weather can finish early. Fully averaged, distant samples use the existing mean density directly when individual local height is irrelevant.
+- The atmosphere bake also produces the direct cloud-light LUT. It evaluates the dusk tint and brightness compensation once per atmosphere change. The ground shadow map reuses valid data when the sun, field and projection plane are static and skips the pass below the shadow horizon. A full-size cloud composite reads the centre texel directly. At smaller sizes it loads colour for the blend across terrain silhouettes only where the depth classes disagree.
+- The cirrus volume keeps all 24 radial shells and the existing depth ordering at half linear resolution. It reuses radial intersections between shells and clips to the requested half of the ray before sampling. The shell uses the existing preset resolution. The Low preset's tent uses four equivalent bilinear taps. The offscreen pass preserves the scene depth and avoids reallocating the canvas depth texture as its viewport changes. Noise generation only interrupts the frame when it has work.
+
+### Measurement and review method
+
+The [benchmark runner](tools/perf/cloudBenchmark.mjs) alternates before/after, then after/before, with one tab drawing at a time. The main lab matrix uses a 1536×960 canvas (1024×640 CSS at 1.5×), eight warm-up frames and 16 sampled frames per run. Static views freeze wind, boiling and weather evolution. The scripted flight translates, climbs and turns while moving the cloud field. The direct raymarch timestamps are the primary measure. Total GPU spans can vary with GPU scheduling, and end-to-end game FPS also includes terrain and CPU work.
+
+Screenshots come from Chrome after the same warm-up and sample count. Pixel differences use the largest absolute RGB channel difference at each pixel on an 8-bit scale. The image sheets show baseline, optimized, and the difference amplified 8×. Terrain streaming and stars can differ slightly between game runs, so the lab comparisons are the reference for cloud-edge differences.
+
+To rerun, serve a clean checkout of `787e912` and the working tree on separate ports. Install this repository's development dependencies, then run:
+
+```sh
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8765 http://127.0.0.1:8766 /tmp/cloud-ab
+CLOUD_BENCH_GAME=1 node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8765 http://127.0.0.1:8766 /tmp/cloud-game-ab
+```
+
+`CLOUD_BENCH_CASES` selects names by regular expression. `CLOUD_BENCH_TIER=high` or `medium` uses the corresponding look-pick preset. `CLOUD_BENCH_SCALE`, `CLOUD_BENCH_WIDTH` and `CLOUD_BENCH_HEIGHT` control the cloud scale and CSS viewport. `CLOUD_BENCH_CHECKER=0` renders the optimized shaders with every ray for a direct comparison. `CLOUD_BENCH_CHECKER=1` limits spatial sampling to the checkerboard. `CLOUD_BENCH_HEADFUL=1` opens Chrome on the desktop. `CLOUD_BENCH_FLIGHT_FRAMES` captures additional frames of the flight.
+
+### Experiments and decisions
+
+| Experiment | Result | Decision |
+|---|---|---|
+| March 2×2 anchors, then march every disagreeing pixel | Half-scale lab total 38.1 → 40.1 ms on the ground and 71.7 → 81.7 ms above. Refinement left sparse active lanes in expensive workgroups. | Removed |
+| Hoist the ray lighting coefficients and split density math behind more early-outs | Half-scale total 38.4 → 40.4 ms on the ground and 71.3 → 77.8 ms above. | Removed |
+| Bake nearby mip-zero weather into two 512×512 textures over 48 km | Raymarch 25.9 → 24.2 ms on the ground and 51.5 → 49.3 ms above, but 9.9 → 10.3 ms in stratus. Dusk shifted enough outline pixels to put 4.7% of the image above five RGB levels even against the already optimized renderer. | Removed |
+| 8×4 vs. 8×8 workgroups | 8×8 was 2–3% faster for towers and faster for popcorn on this GPU. 8×4 was faster for stratus and dense cut decks. | Use the measured shape-specific sizes |
+| Lower the internal target to 0.707× and also shade the checkerboard | About 4.7× faster raymarch on the ground and above. It slightly softened edges and changed the target's sampling grid. | Use a 2×2 spatial ray grid and reconstruct to the full target instead |
+
+### Lab results
+
+At 1536×960, the Ultra target reconstructed from 2×2 blocks. The raymarch was **4.0–5.4× faster** across the lit volumetric shapes and **4.7× faster** on the moving dusk path. At 2100×1230, 3×3 blocks brought the five matched ground and above-cloud views to **9.6–10.0× faster**. The raw-ray check isolated a **1.4–1.7×** improvement from the shader and pass changes with the original ray grid. Its 99th-percentile image differences were at most one RGB level.
+
+#### Ultra at 1536×960
+
+Each row averages the two runs on each side. The raymarch column is a direct pass timestamp. GPU frame time includes the lab's own atmosphere and composite. RGB values are the p95 and p99 display differences.
+
+| View | Raymarch GPU ms | Raymarch speedup | GPU frame ms | Completed FPS | RGB p95 / p99 |
+|---|---:|---:|---:|---:|---:|
+| Ground day | 116.3 → 25.5 | 4.57× | 133.1 → 29.7 | 8.4 → 35.7 | 5 / 12 |
+| Ground dawn | 115.9 → 25.4 | 4.56× | 131.1 → 29.6 | 8.4 → 35.7 | 6 / 22 |
+| Ground dusk | 115.8 → 25.4 | 4.57× | 130.6 → 31.8 | 8.4 → 35.8 | 4 / 11 |
+| Ground night | 116.6 → 25.2 | 4.62× | 136.6 → 28.4 | 8.4 → 36.2 | 3 / 8 |
+| Ground moonless | 88.3 → 19.0 | 4.65× | 96.8 → 21.8 | 11.0 → 45.0 | 0 / 0 |
+| Horizon day | 145.1 → 31.6 | 4.59× | 168.7 → 35.2 | 6.8 → 29.2 | 5 / 12 |
+| Inside day | 213.7 → 45.0 | 4.75× | 256.9 → 52.2 | 4.6 → 21.0 | 3 / 10 |
+| Inside night | 214.6 → 44.5 | 4.82× | 249.4 → 48.3 | 4.6 → 21.3 | 1 / 4 |
+| Above day | 232.8 → 48.9 | 4.76× | 279.8 → 53.6 | 4.2 → 19.2 | 4 / 9 |
+| Above dawn | 233.2 → 49.2 | 4.74× | 280.5 → 55.5 | 4.2 → 19.1 | 5 / 12 |
+| Above dusk | 231.9 → 48.9 | 4.75× | 259.9 → 55.4 | 4.2 → 19.2 | 4 / 10 |
+| Above night | 235.8 → 48.8 | 4.83× | 274.1 → 57.3 | 4.2 → 19.3 | 1 / 4 |
+| Popcorn day | 58.6 → 11.5 | 5.11× | 63.3 → 13.8 | 16.2 → 58.2 | 5 / 11 |
+| Popcorn dawn | 58.7 → 11.5 | 5.13× | 70.1 → 13.8 | 16.3 → 60.3 | 6 / 22 |
+| Popcorn dusk | 117.5 → 22.4 | 5.24× | 137.5 → 28.0 | 8.3 → 39.1 | 3 / 10 |
+| Popcorn night | 58.9 → 11.6 | 5.08× | 63.4 → 13.8 | 16.3 → 59.7 | 2 / 7 |
+| Stratus day | 52.6 → 10.5 | 5.00× | 65.2 → 12.9 | 18.1 → 60.1 | 4 / 9 |
+| Stratus dawn | 52.8 → 10.5 | 5.02× | 63.2 → 12.9 | 18.0 → 60.3 | 7 / 21 |
+| Stratus dusk | 52.4 → 10.5 | 5.01× | 54.9 → 12.8 | 18.1 → 59.6 | 3 / 8 |
+| Stratus night | 52.7 → 10.9 | 4.85× | 60.5 → 13.1 | 18.1 → 59.8 | 2 / 5 |
+| Stratocumulus day | 145.3 → 27.1 | 5.36× | 170.2 → 31.9 | 6.7 → 33.0 | 2 / 3 |
+| Stratocumulus dawn | 145.4 → 27.2 | 5.34× | 172.1 → 31.2 | 6.7 → 32.9 | 2 / 3 |
+| Stratocumulus dusk | 67.2 → 13.5 | 4.99× | 79.6 → 15.9 | 14.3 → 58.1 | 2 / 5 |
+| Stratocumulus night | 70.8 → 14.8 | 4.79× | 75.7 → 17.1 | 13.6 → 57.3 | 1 / 2 |
+| Nimbostratus day | 36.5 → 8.4 | 4.33× | 42.9 → 11.4 | 25.4 → 59.8 | 2 / 3 |
+| Nimbostratus dawn | 36.3 → 8.7 | 4.19× | 44.1 → 11.4 | 25.6 → 59.6 | 2 / 4 |
+| Nimbostratus dusk | 35.9 → 8.7 | 4.13× | 42.5 → 11.6 | 25.8 → 59.9 | 2 / 5 |
+| Nimbostratus night | 36.6 → 9.1 | 4.04× | 44.2 → 11.7 | 25.4 → 59.7 | 1 / 1 |
+| Storm day | 297.5 → 61.0 | 4.88× | 369.7 → 66.0 | 3.3 → 15.6 | 4 / 9 |
+| Storm dawn | 297.5 → 61.0 | 4.88× | 345.1 → 66.0 | 3.3 → 15.6 | 3 / 7 |
+| Storm dusk | 297.5 → 60.9 | 4.89× | 332.0 → 73.0 | 3.3 → 15.6 | 4 / 9 |
+| Storm night | 301.1 → 60.6 | 4.97× | 340.5 → 67.5 | 3.3 → 15.7 | 1 / 3 |
+| Ground proxy | 19.7 → 6.9 | 2.83× | 22.9 → 10.1 | 44.4 → 60.5 | 6 / 15 |
+| Orbit proxy | 4.3 → 3.5 | 1.22× | 7.7 → 6.6 | 61.3 → 60.0 | 1 / 1 |
+| Temporal day | 38.4 → 27.1 | 1.42× | 42.7 → 31.7 | 24.1 → 33.5 | 1 / 1 |
+| Flight dusk | 207.5 → 43.8 | 4.73× | 243.5 → 51.4 | 4.7 → 21.4 | 2 / 8 |
+| Clear day | 45.9 → 0.1 | 336.53× | 54.2 → 7.1 | 20.3 → 59.8 | 2 / 2 |
+
+[Raw Ultra measurements](tools/perf/cloud-results/2026-11-20/lab-ultra.json), [lighting A/B](tools/perf/cloud-results/2026-11-20/lab-lighting.jpg), [cloud-type A/B](tools/perf/cloud-results/2026-11-20/lab-cloud-types.jpg), [2× detail crops](tools/perf/cloud-results/2026-11-20/lab-crops.jpg).
+
+#### Ultra at 2100×1230
+
+| View | Raymarch GPU ms | Raymarch speedup | GPU frame ms | Completed FPS | RGB p95 / p99 |
+|---|---:|---:|---:|---:|---:|
+| Ground day | 195.1 → 20.3 | 9.63× | 228.3 → 24.2 | 5.0 → 40.5 | 6 / 16 |
+| Ground dawn | 194.9 → 20.1 | 9.67× | 217.2 → 25.1 | 5.0 → 41.1 | 7 / 29 |
+| Above day | 397.3 → 40.0 | 9.93× | 461.2 → 45.0 | 2.5 → 22.1 | 4 / 11 |
+| Above dusk | 393.3 → 39.9 | 9.85× | 434.6 → 49.1 | 2.5 → 22.1 | 5 / 13 |
+| Above night | 402.1 → 40.8 | 9.87× | 444.2 → 49.5 | 2.5 → 21.9 | 2 / 5 |
+
+[Raw 2100×1230 measurements](tools/perf/cloud-results/2026-11-20/lab-native.json), [full-frame A/B](tools/perf/cloud-results/2026-11-20/native.jpg), [2× detail crops](tools/perf/cloud-results/2026-11-20/native-crops.jpg).
+
+#### High, Medium and original ray-grid controls
+
+High and Medium use their authored 0.67× and 0.33× cloud targets on the same 1536×960 canvas. The original-ray-grid control uses the Ultra look at 0.5× with spatial ray reduction disabled on the optimized side.
+
+| Preset | View | Raymarch GPU ms | Raymarch speedup | GPU frame ms | Completed FPS | RGB p95 / p99 |
+|---|---|---:|---:|---:|---:|---:|
+| High | Ground day | 49.1 → 19.3 | 2.55× | 56.3 → 22.0 | 19.3 → 44.8 | 3 / 6 |
+| High | Ground dawn | 49.4 → 19.1 | 2.58× | 56.4 → 21.3 | 19.2 → 46.4 | 4 / 11 |
+| High | Above dusk | 93.0 → 37.4 | 2.49× | 101.7 → 42.5 | 10.4 → 24.7 | 2 / 5 |
+| High | Above night | 94.8 → 37.6 | 2.52× | 103.5 → 41.4 | 10.2 → 24.7 | 1 / 2 |
+| Medium | Ground day | 9.4 → 6.2 | 1.50× | 11.8 → 10.6 | 58.8 → 59.9 | 3 / 9 |
+| Medium | Ground dawn | 8.7 → 5.4 | 1.60× | 10.9 → 9.3 | 60.1 → 60.3 | 6 / 19 |
+| Medium | Above dusk | 16.5 → 6.8 | 2.43× | 19.8 → 9.8 | 51.2 → 60.0 | 3 / 8 |
+| Medium | Above night | 16.9 → 6.7 | 2.52× | 20.0 → 9.4 | 49.4 → 59.8 | 1 / 3 |
+| Original grid | Ground day | 35.7 → 24.0 | 1.49× | 41.9 → 26.9 | 26.1 → 38.1 | 0 / 0 |
+| Original grid | Ground dawn | 35.7 → 24.2 | 1.48× | 39.1 → 28.4 | 26.2 → 37.9 | 0 / 1 |
+| Original grid | Above day | 68.4 → 48.0 | 1.43× | 75.8 → 55.3 | 14.0 → 19.6 | 0 / 0 |
+| Original grid | Above dusk | 67.8 → 47.8 | 1.42× | 79.8 → 56.7 | 14.1 → 19.7 | 0 / 1 |
+| Original grid | Above night | 70.2 → 49.2 | 1.43× | 77.9 → 54.8 | 13.6 → 19.2 | 0 / 0 |
+| Original grid | Stratus day | 16.1 → 9.6 | 1.68× | 18.4 → 11.6 | 53.6 → 59.9 | 0 / 0 |
+
+[High measurements](tools/perf/cloud-results/2026-11-20/lab-high.json), [Medium measurements](tools/perf/cloud-results/2026-11-20/lab-medium.json), [Original grid measurements](tools/perf/cloud-results/2026-11-20/lab-full-rays.json), [tier A/B](tools/perf/cloud-results/2026-11-20/tiers.jpg).
+
+#### Visual review
+
+The most visible differences were thin, backlit rims, small isolated wisps, and a few distant frayed edges. At 2×, the larger block grid softens some rims and shifts the internal detail of a few small patches. The larger formations, internal folds, dusk colour and moonlit relief read the same in the full frames. Dawn is the hardest comparison. At 2100×1230 its ground frame reached p95 7 and p99 29 RGB levels. The above-cloud dusk view reached 5 and 13. The moonless control in the lab is fully dark, so moonlit rows carry the useful night-quality comparison.
+
+### Game results
+
+The production HDR composite, terrain and cirrus were active here. The 1536×960 game camera has a 75° field of view. The final angular limit selected 2×2 blocks throughout this matrix. The earlier checkerboard run is included in the cirrus file. These are completed frame rates, which include terrain streaming, browser cadence and CPU work.
+
+| Ultra view | Raymarch GPU ms | Raymarch speedup | Completed FPS |
+|---|---:|---:|---:|
+| Ground day | 56.7 → 12.0 | 4.73× | 13.8 → 32.2 |
+| Ground dawn | 53.1 → 11.9 | 4.46× | 13.8 → 31.2 |
+| Ground dusk | 51.6 → 11.8 | 4.39× | 15.4 → 29.3 |
+| Ground night | 51.7 → 10.9 | 4.75× | 16.4 → 30.2 |
+| Above day | 147.0 → 31.1 | 4.73× | 6.4 → 26.6 |
+| Above dusk | 144.7 → 30.6 | 4.73× | 6.5 → 27.0 |
+| Above night | 148.1 → 30.7 | 4.82× | 6.3 → 26.9 |
+
+[Raw game measurements](tools/perf/cloud-results/2026-11-20/game-ultra.json), [game A/B](tools/perf/cloud-results/2026-11-20/game.jpg). The game sheet uses a separate ground-day capture with 110 warm-up frames so the terrain could settle. That run measured 14.4 → 34.3 completed FPS and p95 3 / p99 14 RGB levels. [Ground-day settling run](tools/perf/cloud-results/2026-11-20/game-ground-settled.json).
+
+#### Cirrus volume in the game
+
+The lower and mid legacy deck flags were at their game defaults. The captures cover the cirrus surface from ground and orbit, the volume from below, inside and above, the low, medium, high and ultra cirrus shaders, and separately authored cirrocumulus and cirrostratus profiles. The isolated draw timings submit the renderer's real far and near passes and wait for the GPU before the next sample. GPU spans reflect tile-pass overlap. Submit-to-complete time includes the small overhead of preparing and submitting the isolated draw.
+
+| View | Isolated GPU span (ms) | Submit to complete (ms) | RGB p95 / p99 |
+|---|---:|---:|---:|
+| Below dawn | 6.01 → 2.47 | 6.85 → 3.26 | 1 / 1 |
+| Volume day | 5.87 → 2.29 | 6.75 → 3.18 | 1 / 2 |
+| Volume low | 3.05 → 2.67 | 4.10 → 3.57 | 0 / 1 |
+| Volume medium | 5.79 → 2.25 | 6.56 → 3.14 | 1 / 1 |
+| Volume ultra | 6.08 → 2.11 | 6.87 → 2.96 | 1 / 2 |
+| Volume dusk | 5.92 → 2.09 | 6.74 → 2.88 | 1 / 1 |
+| Volume night | 5.94 → 1.94 | 6.78 → 2.69 | 0 / 1 |
+| Above day | 4.90 → 1.91 | 5.71 → 2.69 | 1 / 2 |
+| Cirrocumulus day | 6.50 → 2.74 | 7.40 → 3.64 | 0 / 1 |
+| Cirrostratus dusk | 6.33 → 2.23 | 7.26 → 3.04 | 1 / 2 |
+
+The half-resolution volume is slightly softer along the bright limb. The radial extent and near/far ordering match in the below-layer, through-layer and above-layer captures. The no-cirrus control was p99 0. [Raw cirrus data and 75° checkerboard control](tools/perf/cloud-results/2026-11-20/game-cirrus-and-checker.json), [cirrus A/B](tools/perf/cloud-results/2026-11-20/cirrus.jpg).
+
+#### Cirrus surface shader
+
+The shell uses its own shader variant outside the volume transition. The settled daytime draw fell from about 0.39 to 0.31 ms of GPU time. The direct pass timestamps are more stable in these light scenes than GPU frame markers and queue waits. Raw data retains all three measures. [Surface lighting matrix](tools/perf/cloud-results/2026-11-20/game-cirrus-shell.json), [settled daytime control](tools/perf/cloud-results/2026-11-20/game-cirrus-shell-settled.json).
+
+| View | Far shell draw (ms) | Near shell draw (ms) | RGB p95 / p99 |
+|---|---:|---:|---:|
+| Shell day | 0.39 → 0.31 | 0.00 → 0.00 | 0 / 2 |
+| Shell dawn | 0.38 → 0.58 | 0.00 → 0.00 | 0 / 0 |
+| Shell dusk | 0.80 → 0.56 | 0.00 → 0.00 | 0 / 0 |
+| Shell night | 0.90 → 0.65 | 0.00 → 0.00 | 0 / 0 |
+| Orbit day | 0.29 → 0.24 | 0.70 → 0.55 | 0 / 0 |
+
+### Flight and verification
+
+The headed Chrome flight check used an odd-sized 1539×963 target. Four paired images show the moving dusk scene at the reference frame and 3, 9 and 15 frames later. The camera and cloud movement matched in the captures, including the distant red rims and the blue shadowed edges. The first image pair measured p95 2 and p99 8. [Flight A/B sequence](tools/perf/cloud-results/2026-11-20/flight.jpg), [flight timings](tools/perf/cloud-results/2026-11-20/lab-flight.json).
+
+All 642 tests passed with a 20-second test timeout and the TypeScript checks passed. The first default-timeout run reached the five-second cap in the unrelated river-bank prototype test.
+
+Raw exploratory measurements are available for the [adaptive anchor pass](tools/perf/cloud-results/2026-11-20/experiment-adaptive.json), [lighting and density refactor](tools/perf/cloud-results/2026-11-20/experiment-exact.json), [weather texture](tools/perf/cloud-results/2026-11-20/experiment-weather.json), [workgroup sizes](tools/perf/cloud-results/2026-11-20/experiment-groups.json) and [0.707× target probe](tools/perf/cloud-results/2026-11-20/experiment-quarter-probe.json).
+
+---
+
+## 10. Puffier, wispier look (2026-11-20, after section 9)
+
+**First attempt, a mistake:** an "edge feather" with softer settings only blurred the outline. The user saw it as more blurry and less detailed but just as solid. That comparison used shots from different sessions, so it was not like for like. The feather is removed.
+
+**Why the clouds look solid:**
+- At cumulus extinction (40–50 per km), a ray grazing even the outer 20 m of a 1 km cloud is already opaque, so the translucent fringe is only metres wide.
+- With a sharp edge ramp, the detail erosion only touches a thin shell, so the surface has no deep billows.
+- Translucent fringes need lower extinction and a wider ramp. Puffiness needs full erosion carving into that wider ramp, plus sharper detail.
+- Both move the visible outline inward, so the size has to be given back with coverage.
+
+**New settings:**
+- `edgeWisps` (look4.w): the outer shell is eroded with the wispy fbm instead of round billows.
+- `coverageGain`: a multiplier on the weather's coverage (also in the shadow-map cache key).
+
+**Variants, compared on frozen clouds in one game session** (Shift+F in the game; screenshots 25–27 are 2× crops against A):
+
+| Variant | Settings | Look |
+|---|---|---|
+| A (previous) | sharpness 1.5, ext 50, erosion 0.75, detail px 2, step fp 1.0 | Crisp, solid bodies |
+| E | 0.8, ext 20, erosion 0.95, wisps 1, detail px 0.75, step fp 0.5, cov ×1.6 | Very translucent and wispy, but a flat grey body |
+| G | 1.1, ext 30, erosion 0.9, wisps 1, 0.75, 0.5, cov ×1.4 | Mass kept, translucent fringes |
+| H (previous default) | 0.9, ext 32, erosion 1.0, wisps 0.4, heads 1.5, detail px 0.5, step fp 0.5, cov ×1.45 | Puffiest: small clouds become cauliflower; large bodies still fairly uniform grey |
+
+**Cost** (directional, `P.ab` at half res in the lab):
+- G is +35 % at V1 and +18 % at V4.
+- Without the coverage gain, G costs **0.99×**. The extra coverage is the entire cost; the look changes are free.
+- Sharper detail adds about 5 %.
+- The cheap way to fill the sky would be bigger clouds, not more of them. Not tried yet.
+
+**Honest gap to the HZD reference:** in large bodies, the reference's bright sunlit puffs against blue-grey shaded ones (strong contrast between billows) is still missing. That is the lighting: the self-shadowing between billows and blue sky ambient in the folds. It is not the density.
+
+## 11. Grouped cumulus visual pass
+
+The supplied Horizon screenshots favor broad cumulus masses separated by clear sky, with small wisps around the edges. The puffy H look scattered many similarly sized low domes between the larger forms. Claude's later interior-density experiment showed that aggressive thinning also fragments the good bodies, so the grouped look starts with the same extinction and keeps H's interior density.
+
+The cumulus shader raises the density threshold for fine peaks whose surrounding shape field is weak. It reads the existing 3D shape volume at a fixed coarse mip, about 1.4 km per texel for the 8 km shape tile. The fade also applies to the outer margins of tall towers and leaves their broad cores on the original profile. The fine shape and detail still supply the edges. The same density feeds direct-light occlusion, the proxies and ground shadows. This setting applies to domed cumulus and defaults to zero in the shared module.
+
+In the game, Shift+P selects the tuned Ultra, High and Medium presets. They use the grouped look at 0.5 suppression and the slow planet-scale shape offset used in the user's comparison. Shift+F still cycles through the previous H, G, E and A looks for a live comparison. The selected look uses slightly more wispy fringe erosion and reduced round head strength, with modestly brighter bounced light and less powder darkening. The existing sampling, history and reconstruction settings are the same in the comparison.
+
+### Frozen game comparison
+
+One Chrome WebGPU session, full-size 1575×975 Ultra cloud target, same camera, weather seed and sun or moon for each pair. Coverage was pinned at 0.28 before the look gain, wind and evolution were frozen, cirrus was disabled to expose the cumulus, and the moonlit case used the bright night look. The ground examples use the shell proxy. The flight examples use the raymarch at 4.85 km and the above-layer example looks down from 11 km. [Daylight A/B](screenshots/cloud_look_2026-11-20/28_grouped_cumulus_day.jpg), [dawn, dusk and moonlight A/B](screenshots/cloud_look_2026-11-20/28_grouped_cumulus_low-light.jpg).
+
+The component count comes from the 8-connected opacity mask at 25% opacity. Small islands are 10–614 pixels at this target size. It is a screen-space measure, so overlapping clouds count together and opening gaps can split a large component. GPU timings are short, single-order samples from the capture session. A small change in cloud visibility can expose more of the expensive cloud behind it. These readings are kept for the next performance pass.
+
+| Scene | Small islands H → grouped | Frame area at ≥25% opacity H → grouped | Cloud pass ms H → grouped |
+|---|---:|---:|---:|
+| Ground day | 72 → 30 | 22.7% → 16.2% | 9.3 → 14.6 |
+| Flight day | 31 → 31 | 19.6% → 14.8% | 97.7 → 126.3 |
+| Above layer day | 18 → 0 | 19.5% → 18.1% | 110.3 → 114.7 |
+| Ground dawn | 22 → 8 | 8.8% → 6.2% | 10.1 → 7.4 |
+| Flight dusk | 33 → 34 | 19.6% → 14.7% | 99.9 → 113.8 |
+| Flight moonlight | 26 → 40 | 19.5% → 14.6% | 95.7 → 110.9 |
+
+From the ground and above the layer, the mask confirms fewer detached puffs. In flight, the near layer breaks into larger visible groups, exposing portions of the farther layer. The night image still has some small fragments between those groups. A weak threshold and filtering the tower margins alone barely touched the scatter. Changing the shape tile from 8 to 11 km moved the major clouds, and higher suppression could empty too much sky. Stronger bounce lighting flattened shaded faces, so the preset uses a smaller lighting adjustment.
+
+The white average-density band is still visible from above when looking along the layer. Reducing its density to 0.018 had little effect in that composition, and zero visibly removed a strip of distant cloud. The selected look uses 0.1 with the existing distance blend. The shell proxy can still show horizontal sampling lines from below, especially at dawn. Both features are visible in the saved pairs.
+
+### Camera motion
+
+The game rendered 17 matched frames per side at 1425×885 for a 0.07°/frame pan from the ground at dawn, a 0.07°/frame turn in daylight flight, a 1.5°/frame turn in daylight flight, and a translating dusk climb at 75 m/frame and 0.85°/frame. I reviewed the paired frames, including the same large edges during the slow and fast turns. I saw no new blur or flicker in those sequences. Rotation-corrected max-channel RGB residuals below include the reconstructed sky and some foreground. The dusk climb was compared visually because translation changes the view through the cloud volume.
+
+| Rotation | p95 H → grouped | p99 H → grouped | Pixels with residual >4 |
+|---|---:|---:|---:|
+| Slow, ground dawn | 1 → 1 | 2 → 2 | 0.36% → 0.27% |
+| Slow, flight day | 1 → 1 | 6 → 6 | 1.46% → 1.46% |
+| Fast, flight day | 1 → 1 | 8 → 8 | 1.81% → 1.85% |
+
+Chrome also verified the look and tier controls, including switching back to the game's original settings. All 642 tests and TypeScript checks passed.
+
+## 12. Cloud lighting on the E look
+
+The 2015 Guerrilla slides separate direct solar color, height-weighted sky fill, and atmospheric attenuation over distance. They also use directional scattering for backlit rims. Our atmosphere already attenuates clouds by depth. The tuned clouds looked too grey where the weak local sky and direct terms were both dim, and the former sunset preset drove the direct term strongly red. [Guerrilla's presentation, slides 52–69 and 88](https://www.guerrilla-games.com/read/the-real-time-volumetric-cloudscapes-of-horizon-zero-dawn).
+
+The game now uses a slightly warm direct sun boost (1.42 gain, reduced near the forward-scattering peak) and a cool sky fill (0.05 radiance per unit sun illuminance). The fill increases with cloud height and uses the existing occlusion, which preserves shaded relief. Both fade near the terminator. The tuned tiers use sunset depth 7 and dusk fill 1.18 for peach highlights at low sun. Shift+N still exposes the previous redder depth-10 preset. This pass changes radiance only. It uses the existing density and light samples on both cloud paths. The cloud lab has both daylight controls. [Full-sky proposal](CLOUD_QUALITY_ANALYSIS.md#full-sky-cloudscape-proposal).
+
+### Browser comparison
+
+Chrome WebGPU, same camera and frozen E weather within each pair at 1590×960 Ultra with cirrus enabled. The matched-pixel statistic uses the upper 73% of the frame and selects pixels with at least 70% cumulus opacity in both captures. Luma is display-space RGB weighted by Rec.709 coefficients, on a 0–255 scale. These GPU readings are five-frame samples in fixed order with other desktop workloads present, suitable only as capture conditions.
+
+| View | Median cloud luma before → after | 90th percentile cloud luma before → after | Cloud pass ms before → after |
+|---|---:|---:|---:|
+| From below, daylight | 142 → 166 | 156 → 179 | 400 → 358 |
+| Cloud-layer edge, daylight | 153 → 176 | 171 → 190 | 210 → 196 |
+| Ground proxy, daylight | 182 → 195 | 191 → 206 | 18.1 → 15.5 |
+| Above the layer, daylight | 184 → 210 | 203 → 226 | 128 → 134 |
+| Dawn with backlighting | 197 → 208 | 217 → 223 | 134 → 135 |
+| Cloud-layer edge, dusk | 52 → 64 | 83 → 100 | 197 → 184 |
+| Flight, late dusk | 46 → 59 | 188 → 200 | 176 → 141 |
+| Flight, moonlight | 28 → 28 | 41 → 41 | 143 → 128 |
+
+A brighter fill and stronger multiple scattering flattened some shaded faces. The chosen balance retains contrast around the billows and gives the fringes more light. Near-facing undersides still read relatively grey, and the distant grazing band remains. [Daylight crops](screenshots/cloud_look_2026-11-20/29_cumulus_lighting_day.jpg), [dawn, dusk and moonlight crops](screenshots/cloud_look_2026-11-20/29_cumulus_lighting_twilight.jpg).
+
+Readback with camera, volume and scene depth locked produced byte-identical 8-bit opacity in daylight raymarch, ground proxy, dusk and moonlight. The 14-frame slow and fast turns each retained p99 1 in rotation-compensated RGB residual. I reviewed the dusk climb frames and saw no additional blur or shimmer. The High tier was also checked with E in two daylight views and at dusk. All 642 tests and the TypeScript checks passed.

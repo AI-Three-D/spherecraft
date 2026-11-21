@@ -11,6 +11,50 @@ import { WEATHER_CONFIG } from '../templates/configs/weatherConfig.js';
 
 const ATLAS_TEXTURE_TYPES = ['height', 'normal', 'tile', 'splatData', 'macro'];
 
+export const FAIR_WEATHER_CLOUD_LOOK = Object.freeze({
+  cloudShape: 'domes',
+  cloudBottomKm: 4,
+  cloudTopKm: 12,
+  domeHeight: 1.5,
+  shapeTileKm: 8,
+  giantShare: 0.6,
+  giantHeight: 3,
+  giantScale: 5,
+  popcornTopKm: 1.6,
+  shapeOffset: 'slow',
+  extinction: 26,
+  domeEdgeSharpness: 0.91,
+  domeHeads: 1.18,
+  detailErosion: 0.95,
+  edgeWisps: 0.9,
+  coverageGain: 1.6,
+  isolatedPuffSuppression: 0.12,
+  detailPixelFootprint: 0.85,
+  stepFootprint: 0.6,
+  farAverageDensity: 0.12,
+  distantBanks: 1,
+  distantBanksStartKm: 15,
+  distantBanksEndKm: 36,
+  distantBanksTileKm: 21,
+  altoClouds: 0.72,
+  altoBottomKm: 6.9,
+  altoTopKm: 9.1,
+  altoTileKm: 19,
+  ambient: 0.4,
+  aoSide: 0.8,
+  phaseBack: -0.36,
+  backLobeWeight: 0.4,
+  powder: 0.28,
+  msScattering: 0.43,
+  msExtinction: 0.22,
+  daylightSunGain: 1.89,
+  daylightSkyFill: 0.048,
+  sunsetDepth: 4,
+  sunsetAltitudeScale: 0.35,
+  twilightCloudLight: 0.95,
+  duskSkyBoost: 0.94,
+});
+
 function  buildLodPoolConfig(baseChunkSize, worldCoverage, maxLODLevels, slotsByLod) {
   if (!Array.isArray(slotsByLod) || slotsByLod.length !== maxLODLevels) {
     throw new Error('buildLodPoolConfig requires slotsByLod for each LOD level');
@@ -114,6 +158,7 @@ export function createEngineConfig() {
       // `clouds` scales the moonlit clouds' brightness.
       // Baseline picked in game; darker suits survival play (a torch to see by at night).
       nightLook: { grade: 0.2, exposure: -0.05, sky: 0.35, clouds: 0.3 },
+      skyColorContrast: 0.95,
       pixelRatio: 1.5,
       maxFps: 60, // 0 = unlimited; adjustable in the in-game Settings.
       adaptive: {
@@ -171,19 +216,13 @@ export function createEngineConfig() {
       volumetricClouds: {
         // Overrides of DEFAULT_CLOUD_SETTINGS in core/renderer/volumetricClouds/VolumetricCloudsModule.js (km).
         settings: {
-          cloudBottomKm: 4.0,
-          cloudTopKm: 7.0,
-          // Near the ground the cumulus is the proxy (no raymarch); from 2.0 km it crossfades into the
-          // raymarch, complete at 2.4 km.
-          groundProxyBelowKm: 2.0,
+          ...FAIR_WEATHER_CLOUD_LOOK,
+          groundProxyBelowKm: 1.6,
           // Rays that cross the layer in a short stretch (seen from above) step no coarser than
           // their path through it / (maxSteps × 0.5). Distance-only steps (0.56 km from ~40 km up)
           // missed small clouds between sampled shells: ripples, comb-toothed edges and glitter.
           layerStepFit: 0.5,
-          // Earth-like dawn and dusk colours on the clouds: this planet's thin, scaled-down air left the
-          // low sun almost white (see sunsetDepth in VolumetricCloudsModule).
-          sunsetDepth: 4,
-          groundProxyBlendKm: 0.4,
+          groundProxyBlendKm: 0.7,
           // The planet is ~820 km around; Earth-sized system and weather tiles
           // would leave one weather state over the whole planet.
           systemTileKm: 500,
@@ -220,8 +259,6 @@ export function createEngineConfig() {
           proxyStartKm: 60,
           proxyEndKm: 150,
           orbitResolutionScale: 0.8,
-          // Noise is blurred to at least this fraction of the march step (anti-aliasing along rays).
-          stepFootprint: 1.0,
           // Time evolution: the weather pattern morphs and cloud shapes rise (km/s, real time).
           weatherEvolveKmS: 0.02,
           boilKmS: 0.004,

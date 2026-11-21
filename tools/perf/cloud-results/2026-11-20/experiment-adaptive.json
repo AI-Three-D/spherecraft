@@ -1,0 +1,1290 @@
+{
+  "before": "http://127.0.0.1:8765",
+  "after": "http://127.0.0.1:8766",
+  "chrome": "Chrome/157.0.8103.79",
+  "width": 1024,
+  "height": 640,
+  "dpr": 1.5,
+  "scale": 0.5,
+  "game": false,
+  "sampleFrames": 16,
+  "warmFrames": 8,
+  "rounds": 1,
+  "cases": {
+    "ground-day": {
+      "name": "ground-day",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "before": [
+        {
+          "fps": 24.9376558605808,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.34546187500000003,
+              "p95": 0.365995,
+              "last": 0.344119
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 35.6667656875,
+              "p95": 36.047991,
+              "last": 35.723039
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06637118750000001,
+              "p95": 0.071665,
+              "last": 0.064791
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3085493750000001,
+              "p95": 1.311564,
+              "last": 1.307646
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.5039196875,
+              "p95": 0.513944,
+              "last": 0.497284
+            },
+            {
+              "name": "total",
+              "avg": 38.056858375,
+              "p95": 38.437914,
+              "last": 38.083503
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 24.031240612904202,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.3535984000000001,
+              "p95": 0.376405,
+              "last": 0.349287
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 12.172205,
+              "p95": 12.485119,
+              "last": 11.993692
+            },
+            {
+              "name": "clouds refine",
+              "avg": 25.427898933333328,
+              "p95": 25.821356,
+              "last": 25.441946
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.0676766,
+              "p95": 0.074208,
+              "last": 0.064457
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3228562666666668,
+              "p95": 1.328979,
+              "last": 1.325104
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.5059925333333333,
+              "p95": 0.517492,
+              "last": 0.499909
+            },
+            {
+              "name": "total",
+              "avg": 40.06688166666666,
+              "p95": 40.40835,
+              "last": 39.870184
+            }
+          ],
+          "samples": 15
+        }
+      ]
+    },
+    "ground-dawn": {
+      "name": "ground-dawn",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": 3,
+      "azimuth": 55,
+      "moon": false,
+      "extra": {},
+      "before": [
+        {
+          "fps": 25.32847870812809,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.23720206250000003,
+              "p95": 0.248996,
+              "last": 0.239704
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 35.612443750000004,
+              "p95": 36.008535,
+              "last": 35.593332
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.064967875,
+              "p95": 0.070124,
+              "last": 0.061416
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3051050625000002,
+              "p95": 1.31273,
+              "last": 1.305105
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.5019295625,
+              "p95": 0.506825,
+              "last": 0.501242
+            },
+            {
+              "name": "total",
+              "avg": 37.890549375,
+              "p95": 38.282415,
+              "last": 37.838715
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 22.82779283758587,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.236824625,
+              "p95": 0.243537,
+              "last": 0.237413
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 13.056967125000002,
+              "p95": 15.72651,
+              "last": 15.046478
+            },
+            {
+              "name": "clouds refine",
+              "avg": 26.828801562499997,
+              "p95": 32.376339,
+              "last": 31.793015
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.0942615,
+              "p95": 0.274412,
+              "last": 0.274412
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.324492875,
+              "p95": 1.363479,
+              "last": 1.360854
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.50319025,
+              "p95": 0.513825,
+              "last": 0.511826
+            },
+            {
+              "name": "total",
+              "avg": 42.2338685,
+              "p95": 50.391273,
+              "last": 49.356997
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "ground-dusk": {
+      "name": "ground-dusk",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": 5,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "before": [
+        {
+          "fps": 24.016811768398924,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.25099875,
+              "p95": 0.271746,
+              "last": 0.251121
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 37.69674775,
+              "p95": 38.216251,
+              "last": 38.216251
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.0677566875,
+              "p95": 0.073457,
+              "last": 0.069207
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3553518125,
+              "p95": 1.459853,
+              "last": 1.308064
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.51462225,
+              "p95": 0.587866,
+              "last": 0.517534
+            },
+            {
+              "name": "total",
+              "avg": 40.02291275,
+              "p95": 40.501924,
+              "last": 40.501924
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 23.927022581020925,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.2548399375,
+              "p95": 0.327828,
+              "last": 0.244496
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 12.2418861875,
+              "p95": 14.189742,
+              "last": 12.083566
+            },
+            {
+              "name": "clouds refine",
+              "avg": 25.6685485,
+              "p95": 26.723717,
+              "last": 26.723717
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06731406250000001,
+              "p95": 0.071957,
+              "last": 0.068791
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3224274374999998,
+              "p95": 1.334396,
+              "last": 1.320646
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.5023283125,
+              "p95": 0.511367,
+              "last": 0.501326
+            },
+            {
+              "name": "total",
+              "avg": 40.249003124999994,
+              "p95": 41.576241,
+              "last": 41.139456
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "ground-night": {
+      "name": "ground-night",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": -35,
+      "azimuth": 235,
+      "moon": true,
+      "extra": {},
+      "before": [
+        {
+          "fps": 25.232613152440308,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.38521281250000006,
+              "p95": 0.432494,
+              "last": 0.388244
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 36.06201475,
+              "p95": 36.919229,
+              "last": 36.105824
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.0679415625,
+              "p95": 0.107831,
+              "last": 0.069914
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.1718076875,
+              "p95": 1.174107,
+              "last": 1.172357
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.493047125,
+              "p95": 0.504367,
+              "last": 0.504367
+            },
+            {
+              "name": "total",
+              "avg": 38.349768999999995,
+              "p95": 39.181235,
+              "last": 38.399456
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 24.71042471042471,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.39481712499999994,
+              "p95": 0.48966,
+              "last": 0.401827
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 12.307996937499999,
+              "p95": 12.738346,
+              "last": 12.393061
+            },
+            {
+              "name": "clouds refine",
+              "avg": 24.6054448125,
+              "p95": 25.956229,
+              "last": 24.925745
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.0667878125,
+              "p95": 0.073998,
+              "last": 0.065124
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.1970965,
+              "p95": 1.410186,
+              "last": 1.184857
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.49468237499999995,
+              "p95": 0.505243,
+              "last": 0.48866
+            },
+            {
+              "name": "total",
+              "avg": 39.286142562500004,
+              "p95": 40.533299,
+              "last": 39.643312
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "ground-moonless": {
+      "name": "ground-moonless",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": -35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "before": [
+        {
+          "fps": 32.06412825651302,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.3818742500000001,
+              "p95": 0.391619,
+              "last": 0.372078
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 26.911381000000006,
+              "p95": 27.920491,
+              "last": 27.016921
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06505625000000001,
+              "p95": 0.067666,
+              "last": 0.064499
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.1869088125000002,
+              "p95": 1.410937,
+              "last": 1.170857
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.49269318749999996,
+              "p95": 0.504867,
+              "last": 0.48391
+            },
+            {
+              "name": "total",
+              "avg": 29.221791250000003,
+              "p95": 30.18708,
+              "last": 29.28397
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 31.936127744510976,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.38416093749999997,
+              "p95": 0.394036,
+              "last": 0.381453
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 9.156198812500001,
+              "p95": 10.160928,
+              "last": 9.278525
+            },
+            {
+              "name": "clouds refine",
+              "avg": 17.1698449375,
+              "p95": 18.501552,
+              "last": 17.285278
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06597299999999999,
+              "p95": 0.072749,
+              "last": 0.065541
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.1825914374999997,
+              "p95": 1.187274,
+              "last": 1.181399
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.49122674999999993,
+              "p95": 0.507492,
+              "last": 0.494701
+            },
+            {
+              "name": "total",
+              "avg": 28.6836509375,
+              "p95": 30.101833,
+              "last": 28.894226
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "inside-day": {
+      "name": "inside-day",
+      "view": {
+        "altitudeKm": 6,
+        "headingDeg": 55,
+        "pitchDeg": 2
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "before": [
+        {
+          "fps": 15.1128742798409,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.351906,
+              "p95": 0.364995,
+              "last": 0.342036
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 62.281047125,
+              "p95": 64.079855,
+              "last": 61.136442
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06788187500000001,
+              "p95": 0.073082,
+              "last": 0.065666
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.4380561875,
+              "p95": 1.44077,
+              "last": 1.438228
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.5134529999999999,
+              "p95": 0.520242,
+              "last": 0.507492
+            },
+            {
+              "name": "total",
+              "avg": 64.8305471875,
+              "p95": 66.591401,
+              "last": 63.658737
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 14.432617716018846,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.349921875,
+              "p95": 0.359412,
+              "last": 0.341536
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 19.910206562500004,
+              "p95": 20.767017,
+              "last": 19.88553
+            },
+            {
+              "name": "clouds refine",
+              "avg": 45.528789499999995,
+              "p95": 47.612273,
+              "last": 45.181019
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.087329375,
+              "p95": 0.315995,
+              "last": 0.068207
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.4515350624999999,
+              "p95": 1.611475,
+              "last": 1.44302
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.5126433125,
+              "p95": 0.518909,
+              "last": 0.514117
+            },
+            {
+              "name": "total",
+              "avg": 68.03983156250001,
+              "p95": 70.258469,
+              "last": 67.624552
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "above-day": {
+      "name": "above-day",
+      "view": {
+        "altitudeKm": 10,
+        "headingDeg": 55,
+        "pitchDeg": -35
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "before": [
+        {
+          "fps": 13.69628488269062,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.3532168666666667,
+              "p95": 0.368828,
+              "last": 0.355535
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 68.51312426666667,
+              "p95": 71.020625,
+              "last": 67.505762
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06685733333333332,
+              "p95": 0.075416,
+              "last": 0.065207
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.4438418666666666,
+              "p95": 1.460894,
+              "last": 1.44356
+            },
+            {
+              "name": "lab composite",
+              "avg": 1.1123493333333334,
+              "p95": 1.125315,
+              "last": 1.1124
+            },
+            {
+              "name": "total",
+              "avg": 71.66551460000001,
+              "p95": 74.264825,
+              "last": 70.669547
+            }
+          ],
+          "samples": 15
+        }
+      ],
+      "after": [
+        {
+          "fps": 12.034599473486274,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.3499032500000001,
+              "p95": 0.362077,
+              "last": 0.344578
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 21.9657870625,
+              "p95": 23.395059,
+              "last": 21.607379
+            },
+            {
+              "name": "clouds refine",
+              "avg": 56.4949035,
+              "p95": 57.994907,
+              "last": 57.994907
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06660325,
+              "p95": 0.075916,
+              "last": 0.074874
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.444415375,
+              "p95": 1.457228,
+              "last": 1.441728
+            },
+            {
+              "name": "lab composite",
+              "avg": 1.1118086875000002,
+              "p95": 1.118733,
+              "last": 1.107983
+            },
+            {
+              "name": "total",
+              "avg": 81.6482671875,
+              "p95": 82.967818,
+              "last": 82.783569
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "above-dawn": {
+      "name": "above-dawn",
+      "view": {
+        "altitudeKm": 10,
+        "headingDeg": 55,
+        "pitchDeg": -35
+      },
+      "elevation": 3,
+      "azimuth": 55,
+      "moon": false,
+      "extra": {},
+      "before": [
+        {
+          "fps": 13.599660008499786,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.2406343125,
+              "p95": 0.257871,
+              "last": 0.237414
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 68.33047574999999,
+              "p95": 70.623465,
+              "last": 69.867059
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06803287499999999,
+              "p95": 0.076457,
+              "last": 0.076457
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.4244315,
+              "p95": 1.433562,
+              "last": 1.426478
+            },
+            {
+              "name": "lab composite",
+              "avg": 1.1112904375,
+              "p95": 1.117066,
+              "last": 1.109317
+            },
+            {
+              "name": "total",
+              "avg": 71.33750243749999,
+              "p95": 73.637376,
+              "last": 72.868513
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 11.93495449797271,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.2376919375,
+              "p95": 0.252037,
+              "last": 0.239163
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 21.869015125000008,
+              "p95": 22.682404,
+              "last": 21.903499
+            },
+            {
+              "name": "clouds refine",
+              "avg": 57.462503375,
+              "p95": 59.723214,
+              "last": 57.435624
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.0663636875,
+              "p95": 0.072791,
+              "last": 0.065416
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.4259155625000002,
+              "p95": 1.449644,
+              "last": 1.424353
+            },
+            {
+              "name": "lab composite",
+              "avg": 1.1086132499999999,
+              "p95": 1.115024,
+              "last": 1.112108
+            },
+            {
+              "name": "total",
+              "avg": 82.3682145,
+              "p95": 84.438171,
+              "last": 82.376243
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "above-dusk": {
+      "name": "above-dusk",
+      "view": {
+        "altitudeKm": 10,
+        "headingDeg": 55,
+        "pitchDeg": -35
+      },
+      "elevation": 5,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "before": [
+        {
+          "fps": 13.802622498239186,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.25195706250000005,
+              "p95": 0.257663,
+              "last": 0.257663
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 68.0861276875,
+              "p95": 70.726171,
+              "last": 67.540178
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.066613375,
+              "p95": 0.07304,
+              "last": 0.07304
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.4324415625000002,
+              "p95": 1.437769,
+              "last": 1.431145
+            },
+            {
+              "name": "lab composite",
+              "avg": 1.1121706875000001,
+              "p95": 1.119525,
+              "last": 1.105025
+            },
+            {
+              "name": "total",
+              "avg": 71.103107875,
+              "p95": 73.741458,
+              "last": 70.556173
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 12.2165381385467,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.25506612500000003,
+              "p95": 0.294995,
+              "last": 0.247205
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 21.753412687500003,
+              "p95": 23.354685,
+              "last": 21.575921
+            },
+            {
+              "name": "clouds refine",
+              "avg": 55.626484500000004,
+              "p95": 57.045379,
+              "last": 55.67061
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06597031250000002,
+              "p95": 0.070874,
+              "last": 0.062166
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.4327125625000001,
+              "p95": 1.43602,
+              "last": 1.431562
+            },
+            {
+              "name": "lab composite",
+              "avg": 1.11105575,
+              "p95": 1.118941,
+              "last": 1.107316
+            },
+            {
+              "name": "total",
+              "avg": 80.44979599999999,
+              "p95": 83.454602,
+              "last": 80.40544
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "above-night": {
+      "name": "above-night",
+      "view": {
+        "altitudeKm": 10,
+        "headingDeg": 55,
+        "pitchDeg": -35
+      },
+      "elevation": -35,
+      "azimuth": 235,
+      "moon": true,
+      "extra": {},
+      "before": [
+        {
+          "fps": 13.469147234632604,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.38578312500000006,
+              "p95": 0.417952,
+              "last": 0.397619
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 69.714311125,
+              "p95": 72.897429,
+              "last": 71.116749
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06778031250000001,
+              "p95": 0.075416,
+              "last": 0.066124
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.2867095624999998,
+              "p95": 1.312105,
+              "last": 1.283606
+            },
+            {
+              "name": "lab composite",
+              "avg": 1.0917880625,
+              "p95": 1.328064,
+              "last": 1.074776
+            },
+            {
+              "name": "total",
+              "avg": 72.727716,
+              "p95": 75.993966,
+              "last": 74.085579
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 12.09189842802597,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.38292564285714287,
+              "p95": 0.395119,
+              "last": 0.380037
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 22.293966357142857,
+              "p95": 22.902068,
+              "last": 22.762569
+            },
+            {
+              "name": "clouds refine",
+              "avg": 55.258915714285706,
+              "p95": 57.440165,
+              "last": 54.130715
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06578478571428571,
+              "p95": 0.071499,
+              "last": 0.069166
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3042272142857143,
+              "p95": 1.544518,
+              "last": 1.544518
+            },
+            {
+              "name": "lab composite",
+              "avg": 1.0761025714285712,
+              "p95": 1.078484,
+              "last": 1.077817
+            },
+            {
+              "name": "total",
+              "avg": 80.59196064285713,
+              "p95": 83.314562,
+              "last": 80.151402
+            }
+          ],
+          "samples": 14
+        }
+      ]
+    },
+    "stratus-day": {
+      "name": "stratus-day",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "cloudShape": "cut",
+        "cloudType": 0,
+        "typeVariance": 0,
+        "giantShare": 0,
+        "coverage": 0.55,
+        "inScatter": 0.7
+      },
+      "before": [
+        {
+          "fps": 53.944706675386435,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.16456781249999997,
+              "p95": 0.185915,
+              "last": 0.149873
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 15.330943,
+              "p95": 15.460098,
+              "last": 15.38839
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06549100000000001,
+              "p95": 0.067999,
+              "last": 0.067999
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3105399374999998,
+              "p95": 1.313147,
+              "last": 1.309813
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.5052529375,
+              "p95": 0.524867,
+              "last": 0.498284
+            },
+            {
+              "name": "total",
+              "avg": 17.5389669375,
+              "p95": 17.66973,
+              "last": 17.545024
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 54.20054200624084,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.1616744375,
+              "p95": 0.180373,
+              "last": 0.171747
+            },
+            {
+              "name": "clouds anchors",
+              "avg": 4.96204925,
+              "p95": 5.347751,
+              "last": 4.916009
+            },
+            {
+              "name": "clouds refine",
+              "avg": 9.720085875000002,
+              "p95": 10.346676,
+              "last": 9.895265
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.068064125,
+              "p95": 0.074291,
+              "last": 0.071749
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3232948125,
+              "p95": 1.328063,
+              "last": 1.325147
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.5035573125,
+              "p95": 0.515533,
+              "last": 0.507951
+            },
+            {
+              "name": "total",
+              "avg": 16.980079312500003,
+              "p95": 17.602232,
+              "last": 17.118614
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    },
+    "ground-proxy": {
+      "name": "ground-proxy",
+      "view": {
+        "altitudeKm": 1,
+        "headingDeg": 40,
+        "pitchDeg": 14
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "groundProxyBelowKm": 2.3
+      },
+      "before": [
+        {
+          "fps": 59.857837636282795,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.4375505625,
+              "p95": 0.589907,
+              "last": 0.523159
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 6.4240428125,
+              "p95": 8.823324,
+              "last": 5.965451
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.08699862499999998,
+              "p95": 0.234996,
+              "last": 0.066416
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.5845278125,
+              "p95": 2.625835,
+              "last": 1.309605
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.601818875,
+              "p95": 1.019443,
+              "last": 0.506701
+            },
+            {
+              "name": "total",
+              "avg": 9.2982748125,
+              "p95": 12.813388,
+              "last": 8.497163
+            }
+          ],
+          "samples": 16
+        }
+      ],
+      "after": [
+        {
+          "fps": 59.612518629243034,
+          "passes": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.37464268749999996,
+              "p95": 0.54045,
+              "last": 0.368785
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 5.53257675,
+              "p95": 5.664371,
+              "last": 5.550624
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.06371249999999999,
+              "p95": 0.068207,
+              "last": 0.063166
+            },
+            {
+              "name": "lab atmosphere",
+              "avg": 1.3092873124999997,
+              "p95": 1.313022,
+              "last": 1.308396
+            },
+            {
+              "name": "lab composite",
+              "avg": 0.50751025,
+              "p95": 0.516742,
+              "last": 0.501534
+            },
+            {
+              "name": "total",
+              "avg": 7.9340245,
+              "p95": 8.135126,
+              "last": 7.957587
+            }
+          ],
+          "samples": 16
+        }
+      ]
+    }
+  }
+}

@@ -507,7 +507,7 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | P: Cloud shape offset | F: Cloud step size | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | P: Cloud shape offset | F: Cloud step size | Shift+F: Cloud look | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
@@ -515,6 +515,7 @@
         <!-- Debug: checks from CLOUD_QUALITY_ANALYSIS.md (sections 1-3). -->
         <button id="motion-res" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Res while moving (N)</button>
         <button id="cloud-offset" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud shape offset (P)</button>
+        <button id="cloud-look" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud look (Shift+F)</button>
         <button id="cloud-fit" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud step size (F)</button>
         <button id="cloud-ground" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Near-ground clouds (I)</button>
         <button id="night-look" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Night look (Shift+M)</button>
@@ -533,7 +534,7 @@
         import { GameEngine } from './gameEngine.js';
         import { FrameLoop } from './FrameLoop.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
-        import { createEngineConfig, createGameDataConfig } from './runtimeConfigs.js';
+        import { createEngineConfig, createGameDataConfig, FAIR_WEATHER_CLOUD_LOOK } from './runtimeConfigs.js';
         import { TERRAIN_FIX_PROTOTYPES, applyTerrainFixToConfig, applyTerrainFixLive, terrainFixIndexOf } from './terrainFixPrototypes.js';
         import { WATER_FIX_PROTOTYPES, applyWaterFixLive, waterFixIndexOf } from './waterFixPrototypes.js';
         import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
@@ -4568,8 +4569,8 @@
         // weather channels, suspected cause of the shimmering vertical curtains. Slow: blurred
         // planet-scale lookup. None: no offset (test only; the 16 km shape tile may repeat visibly).
         const CLOUD_OFFSET_MODES = [
-            { key: 'regional', name: 'regional (current)' },
-            { key: 'slow', name: 'slow, planet scale (candidate fix)' },
+            { key: 'regional', name: 'regional' },
+            { key: 'slow', name: 'slow, planet scale' },
             { key: 'none', name: 'none (test only)' },
         ];
         function cloudOffsetShow() {
@@ -4589,6 +4590,45 @@
         }
         document.getElementById('cloud-offset').addEventListener('click', cloudOffsetStep);
         setInterval(cloudOffsetShow, 2000);
+
+        // Cloud shape variants on top of the current quality tier.
+        const PUFFY_CUMULUS_LOOK = {
+            domeEdgeSharpness: 0.9, extinction: 32, detailErosion: 1.0, edgeWisps: 0.4, domeHeads: 1.5,
+            detailPixelFootprint: 0.5, stepFootprint: 0.5, coverageGain: 1.45,
+            ambient: 0.4, msScattering: 0.35, powder: 0.55, isolatedPuffSuppression: 0, farAverageDensity: 0.2,
+            distantBanks: 0, altoClouds: 0,
+        };
+        const FAIR_WEATHER_SHAPE = Object.fromEntries(
+            Object.keys(PUFFY_CUMULUS_LOOK).map(key => [key, FAIR_WEATHER_CLOUD_LOOK[key]]),
+        );
+        const GROUPED_CUMULUS_LOOK = {
+            ...PUFFY_CUMULUS_LOOK,
+            isolatedPuffSuppression: 0.5, farAverageDensity: 0.1, edgeWisps: 0.65, domeHeads: 1.2,
+            ambient: 0.48, msScattering: 0.41, powder: 0.42,
+        };
+        const CLOUD_LOOK_MODES = [
+            { name: 'Layered clouds (default)', set: FAIR_WEATHER_SHAPE },
+            { name: 'Grouped cumulus', set: GROUPED_CUMULUS_LOOK },
+            { name: 'H: puffy + wispy fringes', set: PUFFY_CUMULUS_LOOK },
+            { name: 'G: soft translucent fringes', set: { ...PUFFY_CUMULUS_LOOK, domeEdgeSharpness: 1.1, extinction: 30, detailErosion: 0.9, edgeWisps: 1, domeHeads: 1.0, detailPixelFootprint: 0.75, coverageGain: 1.4 } },
+            { name: 'E: very wispy, thin (flatter body)', set: { ...PUFFY_CUMULUS_LOOK, domeEdgeSharpness: 0.8, extinction: 20, detailErosion: 0.95, edgeWisps: 1, domeHeads: 1.0, detailPixelFootprint: 0.75, coverageGain: 1.6 } },
+            { name: 'A: crisp solid', set: { ...PUFFY_CUMULUS_LOOK, domeEdgeSharpness: 1.5, extinction: 50, detailErosion: 0.75, edgeWisps: 0, domeHeads: 1.0, detailPixelFootprint: 2, stepFootprint: 1.0, coverageGain: 1 } },
+        ];
+        let cloudLookMode = 0;
+        function cloudLookShow() {
+            const name = CLOUD_LOOK_MODES[cloudLookMode]?.name ?? 'game settings';
+            document.getElementById('cloud-look').textContent = `Cloud look: ${name} (Shift+F)`;
+        }
+        function cloudLookStep() {
+            const s = window.volumetricClouds?.settings;
+            if (!s) return;
+            cloudLookMode = (cloudLookMode + 1) % CLOUD_LOOK_MODES.length;
+            Object.assign(s, CLOUD_LOOK_MODES[cloudLookMode].set);
+            cloudLookShow();
+            debugSay(`Cloud look: ${CLOUD_LOOK_MODES[cloudLookMode].name}.`, 'CloudLook');
+        }
+        document.getElementById('cloud-look').addEventListener('click', cloudLookStep);
+        setInterval(cloudLookShow, 2000);
 
         // 2b. Cloud step size (VolumetricCloudsModule settings.layerStepFit). By distance: steps grow with
         // distance only (0.56 km from ~40 km up, 1.1 km in clear air). Fit to layer: rays that cross
@@ -4615,12 +4655,9 @@
         document.getElementById('cloud-fit').addEventListener('click', cloudFitStep);
         setInterval(cloudFitShow, 2000);
 
-        // 2c. Near-ground cumulus and light sharing. The shell proxy samples fixed heights, so from below
-        // at low angles each pixel row samples ~0.1 km deeper than the last: toothed outlines. The
-        // raymarch samples fixed distances. Light sharing keeps the proxy's saving (few lighting
-        // evaluations) on the raymarch's samples; it applies at every height while selected.
+        // 2c. The shorter ground march shares lighting within each ray interval.
         const CLOUD_GROUND_MODES = [
-            { proxyKm: 2.0, reuse: 1, name: 'shell proxy below 2 km (current)' },
+            { proxyKm: 1.6, reuse: 1, name: 'shorter raymarch below 1.6 km (default)' },
             { proxyKm: 0, reuse: 1, name: 'raymarch, light every sample' },
             { proxyKm: 0, reuse: 4, name: 'raymarch, light every 4th sample (all heights)' },
             { proxyKm: 0, reuse: 8, name: 'raymarch, light every 8th sample (all heights)' },
@@ -4673,29 +4710,14 @@
         document.getElementById('night-look').addEventListener('click', nightLookStep);
         setInterval(nightLookShow, 1000);
 
-        // 6. Cloud shape (VolumetricCloudsModule cloudShape / domeHeight / shapeTileKm). 'cut' gives flat tops
-        // and vertical sides (pancakes, slabs at low sun); domes let each cloud's height follow its core.
-        // light: ambient / backLobeWeight / msPhase. 'contrast' brightens sunlit faces seen with the sun
-        // behind (more back-scattering, more even many-bounce light) and lowers the sky fill in the folds.
-        // Look pick (2026-11-20, tuned in game): crisp edges, cauliflower heads, towering giants, side sky
-        // occlusion, HZD-like dusk colour. Full-resolution cloud target: slow until optimized.
-        const LOOK_PICK = {
-            cloudShape: 'domes', domeHeight: 1.5, shapeTileKm: 8, giantShare: 0.6, giantHeight: 3, giantScale: 5,
-            popcornTopKm: 1.6, cloudTopKm: 12, domeEdgeSharpness: 1.5, domeHeads: 1.0,
-            ambient: 0.4, msScattering: 0.35, msExtinction: 0.12, extinction: 50, detailErosion: 0.75,
-            aoSide: 1, inScatter: 0, sunsetDepth: 10, sunsetAltitudeScale: 0.35, duskSkyBoost: 1,
-            // Anti-aliasing (2026-11-20): detail blurred to the step, a 3x3 tent, and stratified step
-            // phases that the tent averages. Removes the "hair", grain and step streaks.
-            stepFootprint: 1.0, spatialFilter: 1, stepStratify: true, resolutionScale: 1.0,
-            // Fingerprint rings and fringe specks: step planes anchored near the camera, detail >= 2 px.
-            stepAnchorKm: 2, detailPixelFootprint: 2, lightSteps: 6, layerStepFit: 0.5,
-        };
-        // Quality tiers (CLOUD_PERFORMANCE_PLAN.md 1.7). Costs relative to ultra, measured in the lab.
+        // Quality tiers share the current cloud look.
         const CLOUD_SHAPE_MODES = [
-            { name: 'game settings (current)', set: null },
-            { name: 'ULTRA: full look, full res (1.0x)', set: LOOK_PICK },
-            { name: 'HIGH: 0.67 res, no side AO, 5 light steps (~0.4x)', set: { ...LOOK_PICK, resolutionScale: 0.67, aoSide: 0, lightSteps: 5 } },
-            { name: 'MEDIUM: 0.33 res, popcorn only (~0.07x, draft)', set: { ...LOOK_PICK, resolutionScale: 0.33, giantShare: 0, aoSide: 0, lightSteps: 4, layerStepFit: 0.25 } },
+            { name: 'game settings (0.5x)', set: null },
+            { name: 'ULTRA: full resolution (1.0x)', set: { resolutionScale: 1 } },
+            { name: 'HIGH: 0.67x, no side AO, 5 light steps', set: { resolutionScale: 0.67, aoSide: 0, lightSteps: 5 } },
+            { name: 'MEDIUM: 0.33x, small cumulus, 4 light steps', set: {
+                resolutionScale: 0.33, giantShare: 0, aoSide: 0, lightSteps: 4, layerStepFit: 0.25,
+            } },
             { name: 'LOW: no volumetric clouds, cirrus only', set: null, off: true },
         ];
         let cloudShapeMode = 0;
@@ -4707,11 +4729,13 @@
         function cloudShapeStep() {
             const s = window.volumetricClouds?.settings;
             if (!s) return;
-            // Snapshot the game's own values first, so the first step restores them exactly.
-            cloudShapeGameSettings ??= Object.fromEntries(Object.keys(LOOK_PICK).map(k => [k, s[k]]));
+            cloudShapeGameSettings ??= {
+                resolutionScale: s.resolutionScale, giantShare: s.giantShare, aoSide: s.aoSide,
+                lightSteps: s.lightSteps, layerStepFit: s.layerStepFit,
+            };
             cloudShapeMode = (cloudShapeMode + 1) % CLOUD_SHAPE_MODES.length;
             const m = CLOUD_SHAPE_MODES[cloudShapeMode];
-            Object.assign(s, m.set ?? cloudShapeGameSettings);
+            Object.assign(s, cloudShapeGameSettings, m.set);
             window.volumetricClouds.enabled = !m.off;
             cloudShapeShow();
             debugSay(`Cloud tier: ${m.name}. Watch the FPS counter.`, 'CloudTier');
@@ -4722,14 +4746,17 @@
         // 5. Sunset colour on clouds (VolumetricCloudsModule settings.sunsetDepth): extra atmospheric depth
         // for a low sun's light. 1 is this planet's physical (thin) air.
         const SUNSET_MODES = [
-            { depth: 4, alt: 1, name: 'deeper (default)' },
-            { depth: 10, alt: 0.35, name: 'Earth-like, HZD (lab pick)' },
-            { depth: 7, alt: 1, name: 'deepest' },
-            { depth: 1, alt: 1, name: 'physical, thin air (old)' },
+            { depth: FAIR_WEATHER_CLOUD_LOOK.sunsetDepth, alt: FAIR_WEATHER_CLOUD_LOOK.sunsetAltitudeScale,
+                light: FAIR_WEATHER_CLOUD_LOOK.twilightCloudLight, name: 'peach twilight (default)' },
+            { depth: 7, alt: 0.35, light: 0, name: 'warm twilight (previous)' },
+            { depth: 10, alt: 0.35, light: 0, name: 'strong red (previous lab pick)' },
+            { depth: 7, alt: 1, light: 0, name: 'deeper, physical altitude' },
+            { depth: 1, alt: 1, light: 0, name: 'physical, thin air' },
         ];
         function sunsetIndex() {
             const st = window.volumetricClouds?.settings;
-            const i = SUNSET_MODES.findIndex(m => m.depth === st?.sunsetDepth && m.alt === (st?.sunsetAltitudeScale ?? 1));
+            const i = SUNSET_MODES.findIndex(m => m.depth === st?.sunsetDepth && m.alt === st?.sunsetAltitudeScale
+                && m.light === st?.twilightCloudLight);
             return i < 0 ? 0 : i;
         }
         function sunsetShow() {
@@ -4742,6 +4769,7 @@
             const m = SUNSET_MODES[(sunsetIndex() + 1) % SUNSET_MODES.length];
             s.sunsetDepth = m.depth;
             s.sunsetAltitudeScale = m.alt;
+            s.twilightCloudLight = m.light;
             sunsetShow();
             debugSay(`Sunset colour on clouds: ${m.name}.`, 'Sunset');
         }
@@ -4824,7 +4852,7 @@
                 if (k === 'n') (e.shiftKey ? sunsetStep : motionResStep)();
                 if (k === 'i') cloudGroundStep();
                 if (k === 'p') (e.shiftKey ? cloudShapeStep : cloudOffsetStep)();
-                if (k === 'f') cloudFitStep();
+                if (k === 'f') (e.shiftKey ? cloudLookStep : cloudFitStep)();
                 if (k === 'm') (e.shiftKey ? nightLookStep : cloudLightsStep)();
             }
             // Debug: freeze or resume the day-night cycle.

@@ -93,6 +93,8 @@ const sections = [
         setting('Back lobe weight', 'backLobeWeight', 0, 1),
         setting('Powder', 'powder', 0, 1),
         setting('Ambient', 'ambient', 0, 3),
+        setting('Daylight sun gain', 'daylightSunGain', 1, 2),
+        setting('Daylight sky fill', 'daylightSkyFill', 0, 0.15, { digits: 3 }),
         setting('MS extinction', 'msExtinction', 0.05, 1),
         setting('MS scattering', 'msScattering', 0, 1),
         setting('MS phase', 'msPhase', 0, 1),

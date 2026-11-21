@@ -367,6 +367,7 @@ export class Frontend {
                 this.skyRenderer = new SkyRenderer(this.backend, this.atmosphereLUT, {
                     spaceLODThreshold,
                     nightSkyTheme: this._nightSkyTheme,
+                    colorContrast: this.engineConfig?.rendering?.skyColorContrast,
                 });
                 await this.skyRenderer.initialize();
             }
@@ -842,14 +843,13 @@ updateLighting(starSystem) {
                 // Before either part, so both use this frame's camera: they meet at the split, and a
                 // far part a frame behind would tear from the near part while turning.
                 this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
+                this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
                 this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'far');
             }
 
             this.renderTerrain(frame);
 
             if (cirrusOn) {
-                this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
-
                 if (this.atmoBankSystem && this.cloudRenderer.noiseGenerator) {
                     const ng = this.cloudRenderer.noiseGenerator;
                     this.atmoBankSystem.setNoiseTextures(

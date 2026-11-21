@@ -224,6 +224,38 @@ fn surfaceVisibility(roKm: vec3f, rd: vec3f, distKm: f32) -> f32 {
     return dot(exp(-ext * distKm * cu.viewport.w), vec3f(0.2126, 0.7152, 0.0722));
 }
 
+// Bicubic upsample; the raymarch already stopped at the nearest surface under each cloud pixel.
+fn upsampleCloud(uv: vec2f, cloudSize: vec2i, blocks: vec2i, k: i32, opaque: bool) -> vec4f {
+    // Texels whose ray stopped at an opaque surface store a negative depth. Across a silhouette the
+    // upsample mixed them with sky texels, so sky pixels next to terrain got the terrain texels' "no
+    // cloud": a line of bare sky between clouds and every ridge. Where the 2x2 texels around this pixel
+    // disagree, blend only those of this pixel's kind (opaque or sky).
+    let sp = uv * vec2f(cloudSize) - 0.5;
+    let i0 = vec2i(floor(sp));
+    let f = sp - floor(sp);
+    let w4 = array<f32, 4>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+    let o4 = array<vec2i, 4>(vec2i(0, 0), vec2i(1, 0), vec2i(0, 1), vec2i(1, 1));
+    var sumW = 0.0;
+    var sumC = vec4f(0.0);
+    var matching = 0u;
+    for (var i = 0; i < 4; i++) {
+        let tp = clamp(i0 + o4[i], vec2i(0), cloudSize - 1);
+        let texelOpaque = textureLoad(cloudDepth, clamp(tp / k, vec2i(0), blocks - 1), 0).r < 0.0;
+        if (texelOpaque != opaque) { continue; }
+        matching |= 1u << u32(i);
+        sumW += w4[i];
+    }
+    if (matching != 15u && sumW > 1.0e-4) {
+        for (var i = 0; i < 4; i++) {
+            if ((matching & (1u << u32(i))) == 0u) { continue; }
+            let tp = clamp(i0 + o4[i], vec2i(0), cloudSize - 1);
+            sumC += textureLoad(cloudColor, tp, 0) * w4[i];
+        }
+        return sumC / sumW;
+    }
+    return sampleCatmullRom(cloudColor, linearSampler, uv);
+}
+
 @fragment
 fn fsMain(input: VsOut) -> @location(0) vec4f {
     let pix = input.pos.xy;
@@ -240,51 +272,41 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
         sceneKm = viewDepth * u.sceneDepth.z / max(-dot(rd, u.camBack.xyz), 1.0e-4);
     }
 
-    // Bicubic upsample; the raymarch already stopped at the nearest surface under each cloud pixel.
     let blocks = vec2i(textureDimensions(cloudDepth));
     let k = max(i32(u.quality.x), 1);
     let cloudSize = vec2i(textureDimensions(cloudColor));
-    // Texels whose ray stopped at an opaque surface store a negative depth. Across a silhouette the
-    // upsample mixed them with sky texels, so sky pixels next to terrain got the terrain texels' "no
-    // cloud": a line of bare sky between clouds and every ridge. Where the 2x2 texels around this pixel
-    // disagree, blend only those of this pixel's kind (opaque or sky).
-    let sp = uv * vec2f(cloudSize) - 0.5;
-    let i0 = vec2i(floor(sp));
-    let f = sp - floor(sp);
-    let w4 = array<f32, 4>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
-    let o4 = array<vec2i, 4>(vec2i(0, 0), vec2i(1, 0), vec2i(0, 1), vec2i(1, 1));
-    var sumW = 0.0;
-    var sumC = vec4f(0.0);
-    var mixed = false;
-    for (var i = 0; i < 4; i++) {
-        let tp = clamp(i0 + o4[i], vec2i(0), cloudSize - 1);
-        let texelOpaque = textureLoad(cloudDepth, clamp(tp / k, vec2i(0), blocks - 1), 0).r < 0.0;
-        if (texelOpaque != opaque) {
-            mixed = true;
-            continue;
-        }
-        sumW += w4[i];
-        sumC += textureLoad(cloudColor, tp, 0) * w4[i];
+    var c: vec4f;
+    if (all(cloudSize == vec2i(size))) {
+        // Pixel centres coincide. Only the centre tap has nonzero weight.
+        c = textureLoad(cloudColor, vec2i(pix), 0);
+    } else {
+        c = upsampleCloud(uv, cloudSize, blocks, k, opaque);
     }
-    var c = sampleCatmullRom(cloudColor, linearSampler, uv);
-    if (mixed && sumW > 1.0e-4) { c = sumC / sumW; }
     let cloud = vec4f(max(c.rgb, vec3f(0.0)), saturate(c.a));
-    let cloudPix = vec2i(uv * u.frameInfo.zw);
-    let cloudKm = abs(textureLoad(cloudDepth, clamp(cloudPix / k, vec2i(0), blocks - 1), 0).r);
 
     var shadow = 1.0;
     if (opaque && cu.viewport.z > 0.0 && u.shadowInfo.z > 0.0) {
         let lit = cloudShadowSmoothAt(ro + rd * sceneKm, cu.viewport.z);
-        shadow = mix(1.0, mix(cu.atmo2.z, 1.0, lit), surfaceVisibility(ro, rd, sceneKm));
+        if (lit < 1.0) { shadow = mix(1.0, mix(cu.atmo2.z, 1.0, lit), surfaceVisibility(ro, rd, sceneKm)); }
     }
     if (cloud.a > 0.999 && shadow > 0.999) { discard; }
 
     var color = vec3f(0.0);
+    var transmittance = cloud.a;
     if (cloud.a < 0.999) {
+        let cloudPix = vec2i(uv * u.frameInfo.zw);
+        let cloudKm = abs(textureLoad(cloudDepth, clamp(cloudPix / k, vec2i(0), blocks - 1), 0).r);
         let haze = hazeTo(ro, rd, min(cloudKm, sceneKm));
-        color = haze.T * cloud.rgb + (1.0 - cloud.a) * haze.L;
+        // Toward the horizon the distant cloud field loses contrast into the
+        // host sky. Fade its premultiplied colour and opacity together.
+        let cloudHeight = (length(ro) - u.planet.y) / (u.planet.z - u.planet.y);
+        let below = 1.0 - smoothstep(0.0, 0.45, cloudHeight);
+        let distant = smoothstep(u.banks.z * 0.64, u.banks.z * 1.8, cloudKm);
+        let visible = 1.0 - 0.78 * u.banks.x * below * distant;
+        color = (haze.T * cloud.rgb + (1.0 - cloud.a) * haze.L) * visible;
+        transmittance = 1.0 - (1.0 - cloud.a) * visible;
     }
-    return vec4f(color, cloud.a * shadow);
+    return vec4f(color, transmittance * shadow);
 }
 `;
 }

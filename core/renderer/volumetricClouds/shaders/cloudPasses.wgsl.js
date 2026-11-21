@@ -15,6 +15,7 @@ const NOISE_BINDINGS = /* wgsl */`
 export const TRANSMITTANCE_LUT_WGSL = /* wgsl */`${HEADER}
 @group(0) @binding(0) var<uniform> u: CloudUniforms;
 @group(0) @binding(1) var outLut: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var outCloudLight: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -43,7 +44,18 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // while the sky drew an orange twilight. Extra depth for a low sun only; from ~12 deg up unchanged (from 30 deg clouds turned pink at mid-afternoon).
     let k = select(1.0, u.march3.w, u.march3.w > 0.0);
     let lowSun = 1.0 - smoothstep(0.0, 0.2, mu);
-    textureStore(outLut, vec2i(id.xy), vec4f(exp(-od * mix(1.0, k, lowSun)), 1.0));
+    let depthScale = mix(1.0, k, lowSun);
+    let transmittance = exp(-od * depthScale);
+    let physical = exp(-od);
+    textureStore(outLut, vec2i(id.xy), vec4f(physical, 1.0));
+    // Recover most of the brightness lost to deeper dusk tint, keeping the hue. Bake
+    // this once per atmosphere edit instead of applying the power curve at every lit sample.
+    var cloudLight = transmittance;
+    if (depthScale > 1.001) {
+        let lumW = vec3f(0.2126, 0.7152, 0.0722);
+        cloudLight *= pow(dot(physical, lumW) / max(dot(transmittance, lumW), 1.0e-6), 0.8);
+    }
+    textureStore(outCloudLight, vec2i(id.xy), vec4f(cloudLight, dot(physical, vec3f(0.2126, 0.7152, 0.0722))));
 }
 `;
 
@@ -153,7 +165,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 `;
 
 export const CLOUD_RAYMARCH_WGSL = /* wgsl */`${HEADER}${NOISE_BINDINGS}
-@group(0) @binding(5) var transLut: texture_2d<f32>;
+@group(0) @binding(5) var cloudLightLut: texture_2d<f32>;
 @group(0) @binding(6) var ambientLut: texture_2d<f32>;
 @group(0) @binding(7) var lutSampler: sampler;
 @group(0) @binding(8) var outColor: texture_storage_2d<rgba16float, write>;
@@ -164,15 +176,9 @@ ${CLOUD_DENSITY_WGSL}
 // Distance (km) along rd to the nearest opaque surface under this cloud pixel, or 1e30 for sky.
 // Nearest, so cloud behind a silhouette never bleeds onto it after upsampling; the cost is a
 // sub-pixel gap in the clouds right along the silhouette.
-fn sceneDistance(pixel: vec2u, size: vec2u, rd: vec3f) -> f32 {
+fn sceneDistance(first: vec2u, last: vec2u, size: vec2u, rd: vec3f) -> f32 {
     if (u.sceneDepth.w < 0.5) { return 1.0e30; }
-    let dims = textureDimensions(sceneDepth);
-    let lo = (pixel * dims) / size;
-    let hi = max(lo, ((pixel + 1u) * dims) / size - 1u);
-    let top = dims - 1u;
-    let z = min(
-        min(textureLoad(sceneDepth, min(lo, top), 0), textureLoad(sceneDepth, min(vec2u(hi.x, lo.y), top), 0)),
-        min(textureLoad(sceneDepth, min(vec2u(lo.x, hi.y), top), 0), textureLoad(sceneDepth, min(hi, top), 0)));
+    let z = nearestSceneDepth(sceneDepth, first, last, size);
     if (z >= 1.0) { return 1.0e30; }
     // View depth from the [0, 1] perspective depth, then along the ray.
     let viewDepth = u.sceneDepth.y / (z + u.sceneDepth.x);
@@ -196,7 +202,8 @@ fn lightOpticalDepth(p: vec3f, footprint: f32, weather: Weather, dir: vec3f) -> 
     for (var i = 0; i < steps; i++) {
         let lp = p + dir * (t + stepLen * 0.5);
         let fp = max(footprint, stepLen * 0.5);
-        let h = heightFraction(length(lp));
+        let r = length(lp);
+        let h = heightFraction(r);
         // The primary sample's weather for every step: weather varies over tens of km, the light path is
         // at most ~3 km, and re-sampling it (4 fetches plus warps) in steps 3-5 was a third of the cost of
         // lighting for no visible change.
@@ -205,7 +212,7 @@ fn lightOpticalDepth(p: vec3f, footprint: f32, weather: Weather, dir: vec3f) -> 
         if (u.look3.z > 0.5 && i >= 3) { b = cloudBase(lp, fp); }
         var d = b.density;
         if (i < 2 && d > 0.0) { d = cloudDetail(lp, b, fp); }
-        od += d * stepLen;
+        od += (d + altoDensity(lp, r, weather, fp)) * stepLen;
         t += stepLen;
         stepLen *= 2.0;
     }
@@ -261,6 +268,29 @@ fn meanCloudDensity(weather: Weather, h: f32) -> f32 {
     return 0.5 * c * c * mix(0.6, 1.0, weather.coverage) * u.extra.w;
 }
 
+fn distantBankWeight(t: f32, cameraRadius: f32) -> f32 {
+    let inside = (cameraRadius - u.planet.y) / (u.planet.z - u.planet.y);
+    return u.banks.x * smoothstep(u.banks.y, u.banks.z, t) * (1.0 - smoothstep(0.0, 0.45, inside));
+}
+
+// The detailed layer loses its small puffs over distance. Filter broader masses in
+// planet-relative space so the replacement retains clear gaps at grazing angles.
+fn distantBankDensity(p: vec3f, h: f32, weather: Weather, footprint: f32) -> f32 {
+    let localH = (h - weather.lift) / (1.0 - weather.lift);
+    if (localH <= 0.0 || localH >= 0.52) { return 0.0; }
+    let surface = normalize(p) * u.planet.y;
+    let advected = mix(surface, p, 0.55) + u.windShape.xyz;
+    let q = (ROT_LARGE * advected) * (vec3f(0.58, 1.0, 1.0) * u.banks.w) + weather.shift * 0.37;
+    let lod = max(0.0, log2(footprint * u.banks.w * SHAPE_TEXELS));
+    let n = textureSampleLevel(shapeTex, noiseSampler, q, lod);
+    let coverage = smoothstep(0.02, 0.26, weather.coverage);
+    let billows = shapeSignal(n) + 0.17 * (n.b - 0.65);
+    let core = smoothstep(mix(0.92, 0.66, coverage), mix(1.16, 0.93, coverage), billows);
+    let top = 0.11 + 0.32 * core * mix(0.55, 1.0, weather.kind);
+    let profile = smoothstep(0.0, 0.04, localH) * (1.0 - smoothstep(top * 0.65, top, localH));
+    return core * core * profile * coverage * 0.085;
+}
+
 // Radius at which a cloud's sunlight colour is read (look.w; 1 = physical). The air thins out within a
 // few km on a small planet (scale height ~2.6 km), so clouds at 6-12 km sit above almost all of it and
 // a low sun stayed white on them; read lower, they redden at dusk as Earth's clouds do.
@@ -268,24 +298,56 @@ fn cloudLightR(r: f32) -> f32 {
     return u.planet.x + (r - u.planet.x) * select(1.0, u.look.w, u.look.w > 0.0);
 }
 
-// Sunlight reaching a cloud at radius r for sun zenith cosine mu, from the LUT (deepened at low sun by
-// march3.w, see TRANSMITTANCE_LUT_WGSL) at cloudLightR(r). The deepening is for colour: it also dimmed
-// the light, so dusk clouds turned darker than the sky behind them (sunlit ones should be brighter).
-// The physical value is recoverable (T^(1/k)); most of its brightness is restored, keeping the hue.
-fn cloudSunTransmittance(r: f32, mu: f32) -> vec3f {
+// Use a common hue through the local twilight sky. On a 131 km planet the
+// zenith direction can rotate tens of degrees across one view. Actual planet
+// occlusion still uses the height and sun angle of each sample.
+fn cloudSunHueAngle(mu: f32, cameraSun: f32, cameraRadius: f32) -> f32 {
+    let twilight = 1.0 - smoothstep(0.14, 0.38, abs(cameraSun));
+    let high = smoothstep(u.planet.y + 1.0, u.planet.z, cameraRadius);
+    return mix(mu, cameraSun, u.look4.x * 0.77 * twilight * (1.0 - high));
+}
+
+// Sunlight reaching a cloud at radius r for sun zenith cosine mu, including the planet's penumbra.
+fn cloudLightTransmittance(r: f32, mu: f32, hueAngle: f32, solar: bool) -> vec3f {
     let R = u.planet.x;
     let Rt = u.planet.w;
     let rc = clamp(cloudLightR(r), R, Rt);
-    var t = textureSampleLevel(transLut, lutSampler, transmittanceUv(rc, mu, R, Rt), 0.0).rgb;
-    let k = select(1.0, mix(1.0, u.march3.w, 1.0 - smoothstep(0.0, 0.2, mu)), u.march3.w > 0.0);
-    if (k > 1.001) {
-        let lumW = vec3f(0.2126, 0.7152, 0.0722);
-        let tp = pow(max(t, vec3f(1.0e-6)), vec3f(1.0 / k));
-        t *= pow(dot(tp, lumW) / max(dot(t, lumW), 1.0e-6), 0.8);
-    }
-    let sinHorizon = R / rc;
+    // Changing the optical depth for a hue also moved the old cloud shadow
+    // boundary. The planet only blocks a light according to the true height.
+    let sinHorizon = R / clamp(r, R, Rt);
     let muHorizon = -sqrt(max(0.0, 1.0 - sinHorizon * sinHorizon));
-    return t * smoothstep(-u.atmoExtra.z, u.atmoExtra.z, mu - muHorizon);
+    let visibility = smoothstep(-u.atmoExtra.z, u.atmoExtra.z, mu - muHorizon);
+    if (visibility <= 0.0) { return vec3f(0.0); }
+    let sampleR = select(clamp(r, R, Rt), rc, solar);
+    let light = textureSampleLevel(cloudLightLut, lutSampler, transmittanceUv(sampleR, mu, R, Rt), 0.0);
+    if (!solar) { return vec3f(light.a) * visibility; }
+    let sunset = 1.0 - smoothstep(0.035, 0.29, hueAngle);
+    let peach = mix(vec3f(1.0, 0.34, 0.14), vec3f(1.0, 0.84, 0.61), smoothstep(-0.025, 0.29, hueAngle));
+    let warm = peach * mix(0.66, 1.10, smoothstep(-0.28, 0.09, hueAngle));
+    return mix(light.rgb, warm, u.look4.x * sunset) * visibility;
+}
+
+fn daylightSunGain(mu: f32, cosTheta: f32) -> vec3f {
+    // The forward phase already gives backlit edges a strong silver lining.
+    let gain = (u.look5.w - 1.0) * smoothstep(-0.1, 0.35, mu)
+        * (1.0 - 0.55 * smoothstep(0.7, 0.98, cosTheta));
+    let sunset = smoothstep(-0.26, 0.0, mu) * (1.0 - smoothstep(0.06, 0.34, mu));
+    return vec3f(1.0 + u.look4.x * 0.82 * sunset) + gain * vec3f(1.14, 1.0, 0.83);
+}
+
+// Broad sky fill restores the blue light missing in the thin atmosphere. The existing
+// occlusion still gives creases and bases their depth. Moonlight uses its own fill.
+fn daylightSkyFill(mu: f32, skyVis: f32, skyMix: f32) -> vec3f {
+    let day = mix(smoothstep(-0.17, 0.16, mu), smoothstep(-0.11, 0.23, mu), u.look4.x);
+    let blue = mix(vec3f(0.57, 0.70, 1.0), vec3f(0.76, 0.87, 1.0), smoothstep(0.0, 0.55, mu));
+    return blue * (u.look5.z * u.sun.w * day * skyVis * mix(0.45, 1.0, skyMix));
+}
+
+fn twilightSkyFill(mu: f32, hueAngle: f32, skyVis: f32) -> vec3f {
+    let duskW = (1.0 - smoothstep(0.025, 0.30, hueAngle)) * smoothstep(-0.29, -0.06, hueAngle);
+    let localDaylight = mix(0.25, 1.0, smoothstep(-0.42, -0.15, mu));
+    let fill = vec3f(0.36, 0.45, 0.63) * mix(0.27, 1.0, skyVis);
+    return fill * (duskW * localDaylight * u.look2.z * 0.065 * u.sun.w);
 }
 
 // Horizon Zero Dawn's in-scattering probability (Schneider, Nubis 2017): light scattered toward the
@@ -320,16 +382,18 @@ fn directLight(p: vec3f, footprint: f32, weather: Weather, dir: vec3f, lightT: v
 // Light scattered toward the camera per unit length at p (sun, moon, sky and ground light), shared
 // by the march and the near-ground proxy so both light clouds identically.
 fn cloudSource(p: vec3f, rd: vec3f, footprint: f32, weather: Weather, base: CloudBase, density: f32,
-               cosTheta: f32, powderWeight: f32) -> vec3f {
+               cosTheta: f32, powderWeight: f32, cameraRadius: f32, cameraSun: f32) -> vec3f {
     let r = length(p);
     let muS = dot(p / r, u.sun.xyz);
     let sigmaT = density * u.density.x;
     let sigmaS = sigmaT * u.density.w;
-    let sunT = cloudSunTransmittance(r, muS) * u.sun.w;
+    let hueAngle = cloudSunHueAngle(muS, cameraSun, cameraRadius);
+    let sunT = cloudLightTransmittance(r, muS, hueAngle, true) * u.sun.w;
     let sunMax = max(sunT.r, max(sunT.g, sunT.b));
     var sunL = vec3f(0.0);
     if (sunMax > 1.0e-5) {
-        sunL = directLight(p, footprint, weather, u.sun.xyz, sunT, cosTheta, sigmaT, powderWeight);
+        sunL = directLight(p, footprint, weather, u.sun.xyz,
+            sunT * daylightSunGain(hueAngle, cosTheta), cosTheta, sigmaT, powderWeight);
     }
     let skyAmb = textureSampleLevel(ambientLut, lutSampler, ambientUv(muS, 0.0), 0.0).rgb;
     let groundAmb = textureSampleLevel(ambientLut, lutSampler, ambientUv(muS, 1.0), 0.0).rgb;
@@ -345,22 +409,20 @@ fn cloudSource(p: vec3f, rd: vec3f, footprint: f32, weather: Weather, base: Clou
     // undersides and the insides of towers, so cloud relief shows even without direct light
     // (at night with the moon down the clouds otherwise looked like flat sheets).
     let skyVis = skyVisibility(p, weather, footprint);
-    var amb = mix(groundAmb, skyAmb * skyVis, skyMix) * (u.sun.w * u.light.x) + u.ambientFloor.rgb * skyVis;
+    var amb = mix(groundAmb, skyAmb * skyVis, skyMix) * (u.sun.w * u.light.x)
+        + u.ambientFloor.rgb * skyVis + daylightSkyFill(hueAngle, skyVis, skyMix);
     // Dusk sky light (look2.z): with the sun low, the direct light is red and dim while the whole sky
     // still lights the shaded sides blue-lavender. This planet's thin air gives almost no sky light
     // (the ambient LUT is small even by day; cloud shading comes from light scattered inside them), so
     // at dusk the red inner light alone made shadows muddy brown or black. Adds a twilight-sky fill in
     // units of the sun's illuminance, peaking around sunset and gone by ~7 deg below the horizon.
-    if (u.look2.z > 0.0) {
-        let duskW = (1.0 - smoothstep(0.0, 0.3, muS)) * smoothstep(-0.12, 0.0, muS);
-        amb += vec3f(0.32, 0.36, 0.55) * skyVis * (duskW * u.look2.z * 0.05 * u.sun.w);
-    }
+    amb += twilightSkyFill(muS, hueAngle, skyVis);
     // Moonlight: a second directional light with its own light march and moonlit sky,
     // evaluated only while the sun is dim (no extra cost by day). Without it, night clouds
     // only had a uniform fill and read as flat grey from above.
     if (u.moon.w > 0.0) {
         let muM = dot(p / r, u.moon.xyz);
-        let moonT = cloudSunTransmittance(r, muM) * u.moon.w;
+        let moonT = cloudLightTransmittance(r, muM, muM, false) * u.moon.w;
         let moonMax = max(moonT.r, max(moonT.g, moonT.b));
         if (moonMax > 1.0e-5 && sunMax < moonMax * 20.0) {
             let cosM = dot(rd, u.moon.xyz);
@@ -375,34 +437,112 @@ fn cloudSource(p: vec3f, rd: vec3f, footprint: f32, weather: Weather, base: Clou
     return S;
 }
 
+// One sun-facing probe lights the shadows in the two broader cloud fields.
+// Return radiance per unit extinction, matching the detailed march integrator.
+fn backdropLight(p: vec3f, weather: Weather, footprint: f32, cosTheta: f32,
+                 cameraRadius: f32, cameraSun: f32, shares: vec2f) -> vec3f {
+    let r = length(p);
+    let up = p / r;
+    let muS = dot(up, u.sun.xyz);
+    let hue = cloudSunHueAngle(muS, cameraSun, cameraRadius);
+    let sunT = cloudLightTransmittance(r, muS, hue, true) * u.sun.w;
+    let q = p + u.sun.xyz * 1.1;
+    let probeRadius = length(q);
+    var od = 0.0;
+    if (shares.x > 0.001) { od += 18.0 * distantBankDensity(q, heightFraction(probeRadius), weather, footprint); }
+    if (shares.y > 0.001) {
+        let near = p + u.sun.xyz * 0.38;
+        od += 16.0 * altoDensity(near, length(near), weather, footprint)
+            + 12.0 * altoDensity(q, probeRadius, weather, footprint);
+    }
+    let shade = exp(-od);
+    let rim = clamp(cloudPhase(cosTheta, 1.0), 0.03, 0.4);
+    let daylight = daylightSkyFill(hue, shade, 0.6);
+    let twilight = twilightSkyFill(muS, hue, shade);
+    let muM = dot(up, u.moon.xyz);
+    let moon = cloudLightTransmittance(r, muM, muM, false) * (u.moon.w * 0.06);
+    return (sunT * (0.037 + 0.52 * rim) * shade + daylight + twilight + moon + u.ambientFloor.rgb) * u.density.w;
+}
+
 struct MarchResult {
     color: vec4f,
     depth: f32,
 }
 
-// Sample offset along the ray. With temporal reconstruction a per-pixel jitter is averaged over
-// frames; without it (atmoExtra.w) nothing would average it, and the screen-space pattern would
-// swim over the clouds as the camera moves, so samples sit at step/slab midpoints instead.
-fn sampleJitter(pix: vec2f) -> f32 {
-    if (u.atmoExtra.w > 0.5) {
-        // Stratified (look2.w): a 2x2 ordered pattern of step phases. The 3x3 tent of the spatial filter
-        // gives each phase class of a 2x2 pattern exactly a quarter of the weight, so it averages four
-        // step phases per pixel: surfaces no longer snap to step positions (combed streaks on crisp
-        // cloud skins), and the pattern itself cancels instead of swimming over the clouds.
-        // look2.w 2: interleaved gradient noise instead, whose 3x3 neighbourhoods cover the range
-        // evenly: many phases, so beats between the step and the noise grid (bullseye rings in thin cloud
-        // near the camera, larger than the tent) break up into fine grain that the tent smooths.
-        if (u.look2.w > 1.5) { return ign(pix); }
-        if (u.look2.w > 0.5) {
-            let q = vec2u(pix);
-            return (f32(((q.x & 1u) * 2u + (q.y & 1u) * 3u) % 4u) + 0.5) * 0.25;
-        }
-        return 0.5;
-    }
-    return rayJitter(vec2u(pix));
+fn clearWeather() -> bool {
+    return u.coverage.x <= 0.001 && u.coverage.y == 0.0;
 }
 
-fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
+// Integral of 1/step for a step that grows with distance and is clamped to [minimum, cap].
+fn stepCountAt(t: f32, minimum: f32, cap: f32, growth: f32) -> f32 {
+    let nearEnd = minimum / growth;
+    let farStart = cap / growth;
+    return min(t, nearEnd) / minimum
+        + log(max(1.0, min(t, farStart) / nearEnd)) / growth
+        + max(0.0, t - farStart) / cap;
+}
+
+struct ViewDensity {
+    weather: Weather,
+    base: CloudBase,
+    density: f32,
+    backdropShare: vec2f, // stratocumulus, altocumulus
+}
+
+// Relative optical densities of the main field and the two broader cloud fields.
+fn layerDensities(p: vec3f, r: f32, weather: Weather, footprint: f32, bankW: f32, detailed: f32) -> vec3f {
+    var bank = 0.0;
+    if (bankW > 0.001) { bank = distantBankDensity(p, heightFraction(r), weather, footprint) * bankW; }
+    return vec3f(detailed * (1.0 - bankW), bank, altoDensity(p, r, weather, footprint));
+}
+
+fn viewDensity(p: vec3f, rd: vec3f, t: f32, footprint: f32, farStep: f32, tail: bool, T: f32,
+               cameraRadius: f32) -> ViewDensity {
+    var sample: ViewDensity;
+    sample.weather = sampleWeather(p, footprint);
+    let r = length(p);
+    let h = heightFraction(r);
+    sample.base.h = h;
+    if (sample.weather.coverage <= 0.001) { return sample; }
+    let bankW = distantBankWeight(t, cameraRadius);
+    var detailed = 0.0;
+    if (bankW < 0.999) {
+        let farW = select(farAverageWeight(p, rd, max(t * u.march2.y, farStep * 0.35)), 1.0, tail);
+        var mean = 0.0;
+        if (farW > 0.001) { mean = meanCloudDensity(sample.weather, h); }
+        if (farW < 0.999 || u.look.x > 0.0) {
+            sample.base = cloudBaseWithWeather(p, h, sample.weather, footprint);
+        }
+        if (sample.base.density > 0.0 && farW < 0.999) {
+            let detailFp = max(footprint, t * u.march2.y * u.look3.y);
+            detailed = sample.base.density;
+            if (T > u.look4.y) { detailed = cloudDetail(p, sample.base, detailFp); }
+        }
+        detailed = mix(detailed, mean, farW);
+    }
+    let layers = layerDensities(p, r, sample.weather, footprint, bankW, detailed);
+    sample.density = layers.x + layers.y + layers.z;
+    sample.backdropShare = layers.yz / max(sample.density, 1.0e-6);
+    return sample;
+}
+
+fn viewCloudLight(sample: ViewDensity, p: vec3f, rd: vec3f, footprint: f32, cosTheta: f32,
+                  powderWeight: f32, cameraRadius: f32, cameraSun: f32) -> vec3f {
+    let backdrop = sample.backdropShare.x + sample.backdropShare.y;
+    let detailed = 1.0 - backdrop;
+    var light = vec3f(0.0);
+    if (detailed > 0.001) {
+        let density = sample.density * detailed;
+        light = cloudSource(p, rd, footprint, sample.weather, sample.base, density,
+            cosTheta, powderWeight, cameraRadius, cameraSun) / max(density * u.density.x, 1.0e-5) * detailed;
+    }
+    if (backdrop > 0.001) {
+        light += backdropLight(p, sample.weather, footprint, cosTheta, cameraRadius, cameraSun, sample.backdropShare) * backdrop;
+    }
+    return light;
+}
+
+fn march(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
     var res: MarchResult;
     res.color = vec4f(0.0, 0.0, 0.0, 1.0);
     res.depth = FAR_DEPTH;
@@ -434,11 +574,17 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     if (tGround < 1.0e29) { res.depth = tGround; }
     if (segCount > 0) {
         let first = vec2f(segs[0].x, min(segs[0].y, tGround));
-        if (first.y > first.x) { res.depth = first.x + min(0.5 * (first.y - first.x), u.planet.z - u.planet.y); }
+        if (first.y > first.x) {
+            res.depth = first.x + min(0.5 * (first.y - first.x), u.planet.z - u.planet.y);
+        } else if (u.march2.w < 0.5) {
+            return res;
+        }
     }
+    if (clearWeather() && u.march2.w < 0.5) { return res; }
 
     let cosTheta = dot(rd, u.sun.xyz);
-    let jitter = sampleJitter(pix);
+    let cameraRadius = length(ro);
+    let cameraSun = dot(ro / cameraRadius, u.sun.xyz);
     let maxSteps = i32(u.march.x);
     // Powder darkening matters most when looking away from the sun.
     let powderWeight = u.phase.w * saturate(0.6 - 0.6 * cosTheta);
@@ -454,12 +600,6 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     var J = vec3f(0.0);
     var lightAge = 0;   // cloud samples since J was computed; 0 forces a fresh one
     var lightT = 0.0;   // where along the ray J was computed
-    // Weather reuse along the ray (look4.x km; 0 = every sample): weather varies over tens of km, so it
-    // is re-sampled (4-5 fetches) only after the ray moved that far or the footprint doubled.
-    var wCache: Weather;
-    var wPos = vec3f(1.0e9);
-    var wFp = 0.0;
-
     for (var si = 0; si < segCount; si++) {
         let seg = vec2f(segs[si].x, min(segs[si].y, tGround));
         if (seg.y <= seg.x) { continue; }
@@ -473,136 +613,82 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
         // air), so small clouds were hit only where they crossed a sampled shell.
         var fitStep = 1.0e9;
         if (u.shadowInfo.w > 0.0) { fitStep = max((seg.y - seg.x) / (u.march.x * u.shadowInfo.w), u.march.y); }
-        // Steps end on planes across the ray at fixed world offsets (dot(p, rd) = n * dq), with dq a
-        // power-of-two multiple of the minimum step that grows with distance. Moving the camera then
-        // slides each sample within its plane instead of dragging step slices through the cloud,
-        // which showed as boxes up close and a crawling pattern when climbing or descending. The
-        // jitter only shifts the grid's phase (per pixel and frame with temporal reconstruction).
-        // Anchor (look3.x > 0): the camera snapped to a lattice that wide (km). At the planet centre the
-        // grid phase dot(camera, ray) mod step changes by several fine steps per pixel near the camera:
-        // a zone plate that showed as fingerprint rings in thin cloud. Near the camera it varies slowly,
-        // and stepStratify supplies the per-pixel phases instead (the planes jump once per lattice cell).
-        var anchor = vec3f(0.0);
-        if (u.look3.x > 0.0) { anchor = round(ro / u.look3.x) * u.look3.x; }
-        let rayOffset = dot(ro - anchor, rd);
+        // Integrate a linearly varying density on a continuously spaced grid. Anchor the first
+        // interval at the visible shell entry. Every interval is visited, so crossing a
+        // density threshold cannot change the positions of subsequent samples.
+        let minimum = u.march.y;
+        let cap = max(minimum, min(maxStep, fitStep));
+        let growth = max(u.march.z, 1.0e-5);
+        let estimate = stepCountAt(seg.y, minimum, cap, growth) - stepCountAt(seg.x, minimum, cap, growth);
+        let stride = max(1.0, estimate / f32(max(segLimit - steps - MARCH_TAIL_STEPS, 1)));
         var t = seg.x;
-        // Midpoint of the last empty coarse sample, and the fine-step span after a found surface.
-        var lastEmpty = -1.0;
-        var fineUntil = -1.0;
-        var fineStep = 0.0;
+        let firstStep = min(clamp(t * growth, minimum, maxStep), cap) * stride;
+        let firstFp = max(t * u.march2.y, firstStep * u.ambientFloor.w * 0.75);
+        let p0 = ro + rd * t;
+        let front = viewDensity(p0, rd, t, firstFp, firstStep, false, T, cameraRadius);
+        var previousDensity = front.density;
+        var previousBase = front.base.density;
+        var previousLight = vec3f(0.0);
+        if (previousDensity > 0.0) {
+            previousLight = viewCloudLight(front, p0, rd, firstFp, cosTheta, powderWeight, cameraRadius, cameraSun);
+        }
+        lightAge = 0;
         loop {
-            // 1 % left is invisible behind the skin; marching on to 0.3 % cost many samples in dense giants.
             if (t >= seg.y || steps >= segLimit || T < select(0.01, 0.003, u.look3.z > 0.5)) { break; }
             steps++;
-            // Running out of steps before the end of the layer: cover the rest in even coarse steps
-            // with the far average. Stopping there left long in-layer paths near the horizon empty (a
-            // band of clear sky through the clouds), and the cut moved with the camera height.
             let tail = steps > segLimit - MARCH_TAIL_STEPS;
-            let wantFar = clamp(t * u.march.z, u.march.y, maxStep);
-            let want = clamp(min(wantFar, fitStep), u.march.y, maxStep);
-            let dq = u.march.y * exp2(floor(log2(want / u.march.y)));
-            // The far-average switch keeps measuring the distance-based step, so finer steps do not
-            // bring back the far grazing band it calms.
-            let dqFar = u.march.y * exp2(floor(log2(wantFar / u.march.y)));
-            let fine = t < fineUntil && !tail;
-            var cellEnd: f32;
-            if (tail) {
-                cellEnd = t + (seg.y - t) / f32(segLimit - steps + 1);
-            } else if (fine) {
-                cellEnd = min(t + fineStep, fineUntil);
-            } else {
-                // With stratified phases (look2.w) the coarse search keeps one grid for all pixels: staggered,
-                // a fringe thinner than a step was found by only some pixels of each 2x2 (specks of dust).
-                // The phases then apply to the fine steps through the skin, where they remove the hair.
-                let coarseJitter = select(jitter, 0.5, u.look2.w > 0.5 && u.atmoExtra.w > 0.5);
-                let phase = rayOffset + coarseJitter * dq;
-                cellEnd = dq * (floor((t + phase) / dq) + 1.0) - phase;
-                if (cellEnd - t < dq * 0.01) { cellEnd += dq; }
-            }
-            cellEnd = min(cellEnd, seg.y);
-            let dt = max(cellEnd - t, 1.0e-4);
-            let tm = t + 0.5 * dt;
-            let p = ro + rd * tm;
-            // Prefilter to the step as well as the pixel cone, so long distant steps do not alias.
-            // In the quarter steps behind a found surface (fine), blur to that step: the visible skin keeps
-            // its fine billows (blurred to the coarse step they were lost, and clouds looked smooth).
-            let footprint = max(tm * u.march2.y, select(select(dq, dt, tail), dt, fine) * u.ambientFloor.w);
-            if (u.look4.x <= 0.0 || distance(p, wPos) > u.look4.x || footprint > wFp * 2.0) {
-                wCache = sampleWeather(p, footprint);
-                wPos = p;
-                wFp = footprint;
-            }
-            let weather = wCache;
-            // The far-average weight keeps its own measure (half a step), independent of the prefilter
-            // width: tying it to stepFootprint switched the surface refinement below off at medium range,
-            // and the step planes then cut the cloud tops into terraces that slid as moire stripes.
-            let farW = select(farAverageWeight(p, rd, max(tm * u.march2.y, dqFar * 0.5)), 1.0, tail);
-            var base = cloudBaseWithWeather(p, heightFraction(length(p)), weather, footprint);
-            // Far, grazing samples fade from individual clouds to their average density (see
-            // farAverageWeight), so the far band does not alias while the camera moves.
-            let meanD = select(0.0, meanCloudDensity(weather, base.h), farW > 0.001);
-            if (base.density <= 0.0 && meanD * farW <= 0.0) {
-                lastEmpty = tm;
-                lightAge = 0;
-                t = select(cellEnd + dq, cellEnd, fine || tail);
-                continue;
-            }
-            // Stepping from empty air into cloud on the coarse grid: bisect for the surface between the
-            // two samples and march quarter steps from it for one coarse step. Coarse samples alone
-            // cut a dense deck's top into terraces along the step planes, and those slid (moire) as
-            // the camera moved; the skin is what shows, deeper samples sit behind opaque cloud.
-            // Refine wherever a sharp top can still show (until the far average has nearly taken over).
-            if (!fine && !tail && lastEmpty >= 0.0 && u.extra.x > 0.5 && farW < 0.9) {
-                var lo = lastEmpty;
-                var hi = tm;
-                for (var b = 0; b < 5; b++) {
-                    let mid = 0.5 * (lo + hi);
-                    let q = ro + rd * mid;
-                    if (cloudBaseWithWeather(q, heightFraction(length(q)), weather, footprint).density > 0.0) {
-                        hi = mid;
-                    } else {
-                        lo = mid;
+            let stepWidth = clamp(t * growth, minimum, cap) * stride;
+            let cellEnd = min(t + max(stepWidth, 1.0e-4), seg.y);
+            let end = select(cellEnd, t + (seg.y - t) / f32(segLimit - steps + 1), tail);
+            let dt = end - t;
+            let footprint = max(end * u.march2.y, max(stepWidth, dt) * u.ambientFloor.w * 0.75);
+            let bound = viewDensity(ro + rd * end, rd, end, footprint,
+                clamp(end * growth, minimum, maxStep), tail, T, cameraRadius);
+            // Resolve the lit skin inside its coarse interval. Refinement never changes the
+            // next interval's position, even when a small wisp enters or leaves the view.
+            let subdivisions = select(1, 4, !tail && T > 0.06 && previousBase + bound.base.density > 0.0);
+            let subDt = dt / f32(subdivisions);
+            for (var substep = 1; substep <= subdivisions; substep++) {
+                if (T < select(0.01, 0.003, u.look3.z > 0.5)) { break; }
+                let sampleT = mix(t, end, f32(substep) / f32(subdivisions));
+                let p = ro + rd * sampleT;
+                var current = bound;
+                if (substep < subdivisions) {
+                    current = viewDensity(p, rd, sampleT, footprint,
+                        clamp(sampleT * growth, minimum, maxStep), tail, T, cameraRadius);
+                }
+                let density = current.density;
+                let densitySum = previousDensity + density;
+                if (densitySum > 0.0) {
+                    var light = previousLight;
+                    if (density > 0.0) {
+                        // Share lighting only behind the visible skin. The endpoints of a
+                        // visible interval each contribute in proportion to their density.
+                        if (lightAge == 0 || lightAge >= lightReuse || sampleT - lightT > u.march3.y || T > LIGHT_REUSE_MAX_T) {
+                            J = viewCloudLight(current, p, rd, footprint, cosTheta, powderWeight, cameraRadius, cameraSun);
+                            lightAge = 0;
+                            lightT = sampleT;
+                        }
+                        lightAge++;
+                        light = J;
                     }
+                    let shareBack = density / densitySum;
+                    let stepT = exp(-densitySum * (0.5 * u.density.x * subDt));
+                    let w = T * (1.0 - stepT);
+                    L += mix(previousLight, light, shareBack) * w;
+                    depthSum += (sampleT - subDt * ((2.0 - shareBack) / 3.0)) * w;
+                    weightSum += w;
+                    T *= stepT;
+                    previousLight = light;
                 }
-                fineStep = dq * 0.25;
-                fineUntil = lo + dq;
-                // Fine samples sit at lo + (k + jitter) * fineStep (k + 0.5 without stratification). The
-                // stratified offset fades out from 6 to 15 km: far fringes are thinner than a step there and
-                // per-pixel phases turned them into dither dots instead of smoothing them.
-                let strat = 1.0 - smoothstep(6.0, 15.0, lo);
-                t = lo + (jitter - 0.5) * fineStep * strat;
-                lastEmpty = -1.0;
-                continue;
-            }
-            var density = 0.0;
-            // Detail at least look3.y pixels wide: sharper, it put isolated bright specks in thin fringes.
-            let detailFp = max(footprint, tm * u.march2.y * u.look3.y);
-            // Detail only where it can show (look4.y): once under that much light reaches the camera from
-            // here, the base density stands in for the eroded one (a fetch and its remaps saved).
-            if (base.density > 0.0 && farW < 0.999) {
-                density = select(base.density, cloudDetail(p, base, detailFp), T > u.look4.y);
-            }
-            density = mix(density, meanD, farW);
-            if (density > 0.0) {
-                let sigmaT = density * u.density.x;
-                // Shared only behind the visible skin (T below LIGHT_REUSE_MAX_T). Shared on the skin, the
-                // lighting snapped between sample depths on crisp clouds (woven stripes, "hair"), and a thin
-                // first sample's dim lighting carried onto the denser ones behind it (dark seams).
-                if (lightAge == 0 || lightAge >= lightReuse || tm - lightT > u.march3.y || T > LIGHT_REUSE_MAX_T) {
-                    J = cloudSource(p, rd, footprint, weather, base, density, cosTheta, powderWeight)
-                        / max(sigmaT, 1.0e-5);
+                if (density <= 0.0) {
                     lightAge = 0;
-                    lightT = tm;
+                    previousLight = vec3f(0.0);
                 }
-                lightAge++;
-                let stepT = exp(-sigmaT * dt);
-                L += T * J * (1.0 - stepT);
-                let w = T * (1.0 - stepT);
-                depthSum += tm * w;
-                weightSum += w;
-                T *= stepT;
+                previousDensity = density;
             }
-            t = cellEnd;
+            previousBase = bound.base.density;
+            t = end;
         }
     }
 
@@ -622,13 +708,13 @@ fn march(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
 // analytically so the bright sunlit skin survives the long slab, plus one density sample towards
 // the sun so clouds keep a lit and a shaded side.
 const PROXY_SLABS: i32 = 8;
-// Fixed-height slices of the near-ground proxy (camera below the layer).
-const PROXY_SHELLS: i32 = 16;
-// Density samples per shell crossing (lighting stays at one per crossing).
+// Below the clouds, use short ray intervals with several density samples per
+// lighting evaluation. A fixed number of spherical slices produced horizontal ribs.
+const GROUND_INTERVALS: i32 = 32;
 const PROXY_SUBSAMPLES: i32 = 4;
 const PROXY_SUN_KM: f32 = 0.7;
 
-fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
+fn proxyLayer(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
     var res: MarchResult;
     res.color = vec4f(0.0, 0.0, 0.0, 1.0);
     res.depth = FAR_DEPTH;
@@ -650,10 +736,15 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
         res.color = vec4f(0.45, 0.0, 0.45, 0.0);
         return res;
     }
+    if (clearWeather()) { return res; }
 
     let mid = ro + rd * (0.5 * (t0 + t1));
     let rMid = length(mid);
     let up = mid / rMid;
+    let muS = dot(up, u.sun.xyz);
+    let cameraRadius = length(ro);
+    let cameraSun = dot(ro / cameraRadius, u.sun.xyz);
+    let solarHue = cloudSunHueAngle(muS, cameraSun, cameraRadius);
     // Lights: [0] sun, [1] moon (only while the sun is dim).
     var dirs = array<vec3f, 2>(u.sun.xyz, u.moon.xyz);
     var lightT = array<vec3f, 2>(vec3f(0.0), vec3f(0.0));
@@ -667,7 +758,7 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     let illum = array<f32, 2>(u.sun.w, u.moon.w);
     for (var li = 0; li < 2; li++) {
         let mu = dot(up, dirs[li]);
-        lightT[li] = cloudSunTransmittance(rMid, mu) * illum[li];
+        lightT[li] = cloudLightTransmittance(rMid, mu, select(mu, solarHue, li == 0), li == 0) * illum[li];
         // Sun path length per unit of view path inside a horizontal slab.
         perView[li] = max(-dot(rd, up), 0.05) / max(mu, 0.05);
         cosL[li] = dot(rd, dirs[li]);
@@ -678,8 +769,8 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     let sunMax = max(lightT[0].r, max(lightT[0].g, lightT[0].b));
     let moonMax = max(lightT[1].r, max(lightT[1].g, lightT[1].b));
     if (!(moonMax > 1.0e-5 && sunMax < moonMax * 20.0)) { lightT[1] = vec3f(0.0); }
+    lightT[0] *= daylightSunGain(solarHue, cosL[0]);
     let dt = (t1 - t0) / f32(PROXY_SLABS);
-    let jitter = sampleJitter(pix);
 
     var T = 1.0;
     var L = vec3f(0.0);
@@ -687,65 +778,56 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     var weightSum = 0.0;
     var odUp = 0.0;
     let upPerView = max(-dot(rd, up), 0.05);
-    // From below the layer (the near-ground proxy): one sample per fixed-height slice the ray
-    // crosses, weighted by its exact length, lit with the raymarch's own cloudSource (light marches
-    // toward the sun and moon, sky visibility). The slices sit at the same world heights for every
-    // pixel and camera position, so shapes match the raymarch and stay put while moving; the shared
-    // lighting keeps dusk and night the same (a slab model lit through the column above went dark at
-    // low sun while the raymarch lights clouds through the gaps).
+    // From below the layer, anchor intervals at the ray's entry into the cloud
+    // volume and use the main march's lighting. The interval lengths vary
+    // continuously with the camera. At the horizon that avoids the long jumps
+    // between adjacent samples of a fixed-height slice.
     if (dot(ro, ro) < u.planet.y * u.planet.y) {
-        let bq = dot(ro, rd);
-        let cq = dot(ro, ro);
-        let dr = (u.planet.z - u.planet.y) / f32(PROXY_SHELLS);
         // Stop at the planet as well as the scene depth (water does not write depth): rays that
         // pointed down otherwise passed through the planet and showed the layer on the far side.
-        var tEnd = tScene;
+        var tEnd = t1;
         let ground = raySphere(ro, rd, u.planet.x);
         if (ground.x < ground.y && ground.y > 0.0) { tEnd = min(tEnd, max(ground.x, 0.0)); }
         let cosTheta = dot(rd, u.sun.xyz);
         let powderWeight = u.phase.w * saturate(0.6 - 0.6 * cosTheta);
+        let interval = max(tEnd - t0, 0.0) / f32(GROUND_INTERVALS);
+        if (interval <= 0.0) { return res; }
+        let sub = interval / f32(PROXY_SUBSAMPLES);
         var T = 1.0;
         var L = vec3f(0.0);
         var depthSum = 0.0;
         var weightSum = 0.0;
-        for (var k = 0; k < PROXY_SHELLS; k++) {
+        for (var k = 0; k < GROUND_INTERVALS; k++) {
             if (T < 0.003) { break; }
-            let rLo = u.planet.y + f32(k) * dr;
-            let rHi = rLo + dr;
-            let a = max(-bq + sqrt(max(bq * bq - cq + rLo * rLo, 0.0)), 0.0);
-            let b = min(-bq + sqrt(max(bq * bq - cq + rHi * rHi, 0.0)), tEnd);
-            if (b <= a) { continue; }
-            let len = b - a;
-            let t = 0.5 * (a + b);
-            // Noise blurred as the raymarch blurs it at this distance (its step times stepFootprint,
-            // continuous here), so the proxy is as soft and wispy as the raymarch above it.
-            let footprint = max(t * u.march2.y,
-                clamp(t * u.march.z, u.march.y, u.march.w) * u.ambientFloor.w);
+            let a = t0 + f32(k) * interval;
+            let t = a + 0.5 * interval;
+            let footprint = max(t * u.march2.y, sub * 0.85);
             let weather = sampleWeather(ro + rd * t, t * u.march2.y);
-            // Density in PROXY_SUBSAMPLES stretches of the crossing (cheap: shape and detail, one weather
-            // lookup), light once (cloudSource, the expensive part) at their extinction-weighted
-            // position. One density sample per crossing drew each shell as a flat slice: horizontal
-            // stripes and toothed outlines.
-            let sub = len / f32(PROXY_SUBSAMPLES);
+            // Light the samples together at their extinction-weighted position.
             let tIn = T;
             var pSum = vec3f(0.0);
-            var dSum = 0.0;
-            var hSum = 0.0;
+            var densitySum = 0.0;
+            var heightSum = 0.0;
+            var backdropSum = vec2f(0.0);
             var wSum = 0.0;
             for (var i = 0; i < PROXY_SUBSAMPLES; i++) {
                 let ti = a + (f32(i) + 0.5) * sub;
                 let p = ro + rd * ti;
-                let base = cloudBaseWithWeather(p, heightFraction(length(p)), weather, footprint);
+                let r = length(p);
+                let base = cloudBaseWithWeather(p, heightFraction(r), weather, footprint);
                 let farW = farAverageWeight(p, rd, ti * u.march2.y);
                 var density = 0.0;
                 if (base.density > 0.0 && farW < 0.999) { density = cloudDetail(p, base, footprint); }
-                density = mix(density, meanCloudDensity(weather, base.h), farW);
+                let layers = layerDensities(p, r, weather, footprint, distantBankWeight(ti, cameraRadius),
+                    mix(density, meanCloudDensity(weather, base.h), farW));
+                density = layers.x + layers.y + layers.z;
                 if (density <= 0.0) { continue; }
                 let stepT = exp(-density * u.density.x * sub);
                 let w = T * (1.0 - stepT);
                 pSum += p * w;
-                dSum += density * w;
-                hSum += base.localH * w;
+                densitySum += density * w;
+                heightSum += base.localH * w;
+                backdropSum += layers.yz * w;
                 wSum += w;
                 depthSum += ti * w;
                 weightSum += w;
@@ -753,22 +835,20 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
             }
             if (wSum <= 1.0e-6) { continue; }
             let pL = pSum / wSum;
-            let dL = dSum / wSum;
-            // cloudSource reads only the height fractions from the base.
-            var baseL: CloudBase;
-            baseL.h = heightFraction(length(pL));
-            baseL.localH = hSum / wSum;
-            let S = cloudSource(pL, rd, footprint, weather, baseL, dL, cosTheta, powderWeight);
-            // S is per unit length; per unit extinction it is the source each stretch scatters with
-            // weight T (1 - stepT), and those weights sum to tIn - T.
-            L += S / max(dL * u.density.x, 1.0e-5) * (tIn - T);
+            var sample: ViewDensity;
+            sample.weather = weather;
+            sample.density = densitySum / wSum;
+            sample.base.h = heightFraction(length(pL));
+            sample.base.localH = heightSum / wSum;
+            sample.backdropShare = backdropSum / densitySum;
+            L += viewCloudLight(sample, pL, rd, footprint, cosTheta, powderWeight, cameraRadius, cameraSun) * (tIn - T);
         }
         res.color = vec4f(L, T);
         if (weightSum > 1.0e-4) { res.depth = depthSum / weightSum; }
         return res;
     }
     for (var i = 0; i < PROXY_SLABS; i++) {
-        let t = t0 + (f32(i) + jitter) * dt;
+        let t = t0 + (f32(i) + 0.5) * dt;
         let p = ro + rd * t;
         // Noise blur capped at what the raymarch uses (half its 0.6 km max step). Coverage is a
         // threshold on the noise, so a blurrier lookup (a quarter of a multi-km slab) thinned the
@@ -782,7 +862,7 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
         let farW = farAverageWeight(p, rd, t * u.march2.y);
         var density = 0.0;
         if (base.density > 0.0 && farW < 0.999) { density = cloudDetail(p, base, footprint); }
-        density = mix(density, meanCloudDensity(weather, base.h), farW);
+        density = mix(density, meanCloudDensity(weather, base.h), farW) + altoDensity(p, length(p), weather, footprint);
         if (density <= 0.0) { continue; }
         let sigmaT = density * u.density.x;
         let sigmaS = sigmaT * u.density.w;
@@ -791,7 +871,9 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
         for (var li = 0; li < 2; li++) {
             if (max(lightT[li].r, max(lightT[li].g, lightT[li].b)) <= 1.0e-5) { continue; }
             let sp = p + dirs[li] * PROXY_SUN_KM;
-            let side = cloudBaseWithWeather(sp, heightFraction(length(sp)), weather, footprint).density;
+            let sideR = length(sp);
+            let side = cloudBaseWithWeather(sp, heightFraction(sideR), weather, footprint).density
+                + altoDensity(sp, sideR, weather, footprint);
             let odL = odAbove[li] + side * u.density.x * PROXY_SUN_KM;
             var a = 1.0;
             var b = 1.0;
@@ -810,7 +892,9 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
             directL += lightL * mix(1.0, powder, powderW[li]);
         }
         let skyVis = mix(0.25, 1.0, exp(-odUp * 0.35));
-        let ambient = (mix(ambGround, ambSky * skyVis, saturate(0.25 + base.h)) * u.light.x + amb * skyVis);
+        let skyMix = saturate(0.25 + base.h);
+        let ambient = mix(ambGround, ambSky * skyVis, skyMix) * u.light.x + amb * skyVis
+            + daylightSkyFill(solarHue, skyVis, skyMix) + twilightSkyFill(muS, solarHue, skyVis);
         L += T * sigmaS * (directL + ambient * (1.0 - stepT) / sigmaT);
         let w = T * (1.0 - stepT);
         depthSum += t * w;
@@ -825,23 +909,36 @@ fn proxyLayer(ro: vec3f, rd: vec3f, pix: vec2f, tScene: f32) -> MarchResult {
     return res;
 }
 
-// One invocation per interleave block: renders this frame's pixel of the k x k block.
-@compute @workgroup_size(8, 8)
+// Strip the unused path when the proxy crossfade is idle.
+override RAY_PATH: u32 = 0u; // 0 both, 1 march only, 2 proxy only
+override RAY_GROUP_HEIGHT: u32 = 8u;
+
+// One invocation per ray. The dispatch grid is full size, interleaved or sparse.
+@compute @workgroup_size(8, RAY_GROUP_HEIGHT)
 fn main(@builtin(global_invocation_id) id: vec3u) {
     let blocks = textureDimensions(outColor);
     if (id.x >= blocks.x || id.y >= blocks.y) { return; }
     let size = vec2u(u.frameInfo.zw);
-    let pixel = min(id.xy * u32(u.quality.x) + vec2u(u.quality.yz), size - 1u);
-    let pix = vec2f(pixel) + 0.5;
+    var pixel = min(id.xy * u32(u.quality.x) + vec2u(u.quality.yz), size - 1u);
+    var last = pixel;
+    let stride = u32(u.look4.z);
+    if (stride >= 2u) {
+        pixel = id.xy * stride;
+        last = min(pixel + stride - 1u, size - 1u);
+    } else if (stride == 1u) {
+        pixel.x = min(2u * id.x + (id.y & 1u), size.x - 1u);
+        last = pixel;
+    }
+    let pix = (vec2f(pixel) + vec2f(last)) * 0.5 + 0.5;
     let rd = cameraRay(pix, vec2f(size), u.camRight, u.camUp, u.camBack, u.frameInfo.x);
     // Far-proxy weight comes from camera height; both paths run only inside the crossfade band.
     let proxyWeight = u.lod.x;
-    let tScene = sceneDistance(pixel, size, rd);
+    let tScene = sceneDistance(pixel, last, size, rd);
     var result: MarchResult;
-    if (proxyWeight < 0.999) { result = march(u.camPos.xyz, rd, pix, tScene); }
-    if (proxyWeight > 0.001) {
-        let proxy = proxyLayer(u.camPos.xyz, rd, pix, tScene);
-        if (proxyWeight >= 0.999) {
+    if (RAY_PATH == 1u || (RAY_PATH == 0u && proxyWeight < 0.999)) { result = march(u.camPos.xyz, rd, tScene); }
+    if (RAY_PATH == 2u || (RAY_PATH == 0u && proxyWeight > 0.001)) {
+        let proxy = proxyLayer(u.camPos.xyz, rd, tScene);
+        if (RAY_PATH == 2u || proxyWeight >= 0.999) {
             result = proxy;
         } else {
             result.color = mix(result.color, proxy.color, proxyWeight);
@@ -853,6 +950,82 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // upsamples such texels only into opaque pixels, and sky texels only into sky pixels.
     let depthOut = select(result.depth, -max(result.depth, 1.0e-3), tScene < 1.0e29);
     textureStore(outDepth, vec2i(id.xy), vec4f(depthOut, 0.0, 0.0, 0.0));
+}
+`;
+
+// Reconstruct full-size colour and depth from the spatial ray grid. On a checkerboard
+// the sampled parity has a centre and diagonals; missing pixels have four axial taps.
+export const CLOUD_SPATIAL_WGSL = /* wgsl */`${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}
+@group(0) @binding(0) var<uniform> u: CloudUniforms;
+@group(0) @binding(1) var rayColor: texture_2d<f32>;
+@group(0) @binding(2) var rayDepth: texture_2d<f32>;
+@group(0) @binding(3) var sceneDepth: texture_depth_2d;
+@group(0) @binding(4) var outColor: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var outDepth: texture_storage_2d<r32float, write>;
+
+fn isOpaque(pixel: vec2u, size: vec2u) -> bool {
+    if (u.sceneDepth.w < 0.5) { return false; }
+    return nearestSceneDepth(sceneDepth, pixel, pixel, size) < 1.0;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    let size = textureDimensions(outColor);
+    if (any(id.xy >= size)) { return; }
+    let p = vec2i(id.xy);
+    let packed = p / vec2i(2, 1);
+    let squareGrid = u.look4.z > 1.5;
+    let sampled = !squareGrid && ((p.x ^ p.y) & 1) == 0;
+    var coords: array<vec2i, 4>;
+    var weights = vec4f(1.0);
+    var sum = vec4f(0.0);
+    var weight = 0.0;
+    var closest = 1.0e6;
+    var depthSum = 0.0;
+    var depthWeight = 0.0;
+    var centreDepth = 1.0e6;
+    var opaque: bool;
+    if (squareGrid) {
+        let aboveLeft = (vec2f(p) + 0.5) / u.look4.z - 0.5;
+        let q = vec2i(floor(aboveLeft));
+        let f = fract(aboveLeft);
+        let maxTap = vec2i(textureDimensions(rayColor)) - 1;
+        coords = array<vec2i, 4>(q, q + vec2i(1, 0), q + vec2i(0, 1), q + 1);
+        for (var i = 0; i < 4; i++) { coords[i] = clamp(coords[i], vec2i(0), maxTap); }
+        weights = vec4f((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+        opaque = isOpaque(id.xy, size);
+    } else if (sampled) {
+        coords = array<vec2i, 4>(p + vec2i(-1, -1), p + vec2i(1, -1), p + vec2i(-1, 1), p + vec2i(1, 1));
+        let c = textureLoad(rayColor, packed, 0);
+        centreDepth = textureLoad(rayDepth, packed, 0).r;
+        opaque = centreDepth < 0.0;
+        sum = c * 4.0;
+        weight = 4.0;
+    } else {
+        coords = array<vec2i, 4>(p + vec2i(-1, 0), p + vec2i(1, 0), p + vec2i(0, -1), p + vec2i(0, 1));
+        opaque = isOpaque(id.xy, size);
+    }
+    for (var i = 0; i < 4; i++) {
+        let coord = coords[i];
+        if (any(coord < vec2i(0)) || any(coord >= vec2i(size))) { continue; }
+        let tap = select(coord / vec2i(2, 1), coord, squareGrid);
+        let d = textureLoad(rayDepth, tap, 0).r;
+        if ((d < 0.0) != opaque) { continue; }
+        let c = textureLoad(rayColor, tap, 0);
+        sum += c * weights[i];
+        weight += weights[i];
+        closest = min(closest, abs(d));
+        let a = max(1.0 - c.a, 0.0) * weights[i];
+        depthSum += abs(d) * a;
+        depthWeight += a;
+    }
+    var color = vec4f(0.0, 0.0, 0.0, 1.0);
+    if (weight > 0.0) { color = sum / weight; }
+    var depth = select(closest, depthSum / max(depthWeight, 1.0e-5), depthWeight > 1.0e-5);
+    depth = select(depth, -max(depth, 1.0e-3), opaque);
+    if (sampled) { depth = centreDepth; }
+    textureStore(outColor, p, color);
+    textureStore(outDepth, p, vec4f(depth, 0.0, 0.0, 0.0));
 }
 `;
 
@@ -884,7 +1057,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
     let blend = u.march2.z;
     if (blend >= 0.999) {
-        if (u.atmoExtra.w > 0.5) {
+        if (u.atmoExtra.w > 0.5 && u.windShape.w > 0.0) {
             // No temporal reconstruction: optionally soften with a 3x3 tent (spatialFilter, 0..1).
             // Samples sit at fixed midpoints then, so there is no jitter to hide and the tent only
             // blurs; at half resolution it softened distant clouds noticeably.

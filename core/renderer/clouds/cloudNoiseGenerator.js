@@ -108,6 +108,7 @@ export class CloudNoiseGenerator {
     getBaseTextureView()    { return this.textureViews.base; }
     getDetailTextureView()  { return this.textureViews.detail; }
     getErosionTextureView() { return this.textureViews.erosion; }
+    get needsDispatch() { return this._needsDispatch; }
 
     update(camera, environmentState, uniformManager, planetConfig) {
         if (!this._initialized) return;

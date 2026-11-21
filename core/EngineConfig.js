@@ -390,6 +390,7 @@ export class EngineConfig {
         }
       },
       volumetricClouds: createVolumetricCloudsConfig(rendering.volumetricClouds),
+      skyColorContrast: requireNumber(rendering.skyColorContrast ?? 0, 'rendering.skyColorContrast'),
       // Night look in the tonemap (0 = off): at full night colour moves `grade` (0..1) of the way
       // toward blue night vision, and exposure changes by `exposure` (+1 doubles, -0.2 is 20 % darker).
       nightLook: {

@@ -79,6 +79,15 @@ Left over:
 
 A few faint specks remain near mid-distance cloud fringes. Side effect: the raymarch got about 3× faster (see `CLOUD_PERFORMANCE_PLAN.md`, section 1.5).
 
+## Puffier, wispier edges (2026-11-20)
+
+The first "softer edges" attempt only blurred the outline, so it was replaced.
+
+- **Default look now:** H.
+- **New settings:** `edgeWisps`, `coverageGain`.
+- **Comparison:** variants on Shift+F in the game.
+- **Analysis, costs and the remaining gap:** `CLOUD_PERFORMANCE_PLAN.md`, section 10.
+
 ## Target: Horizon Zero Dawn (2026-11-19, lab only)
 
 The user set HZD's clouds (Schneider, SIGGRAPH 2015 and Nubis 2017) as the target. In the lab, behind settings, with the game default unchanged:
@@ -341,10 +350,35 @@ Causes, most important first:
 | Key | Toggle |
 |---|---|
 | N | Resolution while moving: as configured (now = still), toned down, off |
-| P | Cloud shape offset: regional (current), slow planet-scale (candidate fix), none (test) |
+| P | Cloud shape offset between regional, slow planet-scale (selected by tuned cumulus tiers) and none (test) |
 | F | Cloud step size: fit to layer crossing (**default now**, `layerStepFit` 0.5) or by distance (old) |
 | I | Near-ground clouds: shell proxy (default), raymarch, or raymarch with light every 4th, 8th or 16th sample (applies at all heights; reuse is also capped at `lightReuseMaxKm` 1 km along the ray). You found the 4th-sample version indistinguishable from the full raymarch. |
 | Shift+M | Night look (`rendering.nightLook`: grade, exposure, sky = moonlit sky brightness, clouds = moonlit cloud brightness): clouds 30 % / sky 35 % (default, picked in game), very dark, 60/50, bright, off |
-| Shift+P | Look: game settings (current), look pick (crisp cauliflower + giants, full-res, slow), look pick at half resolution. Earlier description:  cut (current, flat tops), fluffy domes 1.5× with an 8 km shape tile (lab pick), domes with an 11 km tile, domes with a 16 km tile. Lab screenshots: `screenshots/cloud_shape_2026-11-19/` (5–7 = fluffy). |
+| Shift+P | Game settings, Ultra, High, Medium and Low. The three tuned volumetric tiers share the grouped cumulus look. |
+| Shift+F | Compare Grouped cumulus with the previous H, G, E and A looks at the selected tier. |
 | Shift+N | Sunset colour on clouds: deeper 4 (default), deepest 7, physical 1 (old) |
 | M | Cloud lights: sun + moon, no moon, no sun. At night it also shows the moon-gate check ("← WRONG"). |
+
+The browser comparisons, opacity measurements and motion checks for the grouped cumulus look are in [the visual-pass log](CLOUD_PERFORMANCE_PLAN.md#11-grouped-cumulus-visual-pass).
+
+## Full-sky cloudscape proposal
+
+In the later visual review, the isolated towers in the grouped look left too much empty sky. The older E look had better continuity because its smaller clouds and thin fringes blended into the distant sky. The lighting pass uses that E look as the control. The proposal below keeps that role for the smaller clouds.
+
+Guerrilla's 2015 presentation shows a 35 km radius around the player and a transition toward roughly 50% cumulus coverage starting 15 km out (printed slide 45). It already uses curved cloud layers, with low volumetric clouds and higher textured alto and cirrus (slides 71–74 and 86–88). The plain fBm example (slides 24–27) has convincing soft, connected coverage. The developers add more shape cues for rising cloud bodies. Those two qualities can serve different layers in the same sky. [Guerrilla's presentation](https://www.guerrilla-games.com/read/the-real-time-volumetric-cloudscapes-of-horizon-zero-dawn).
+
+On our approximately 131 km radius planet, a horizontal ray from the surface reaches the 4 km cloud base at roughly 33 km and a 12 km top at 57 km. A ray that skims the planet from around 6 km up can reach the far side of the layer about 97 km away. The detailed march and the visible cloud distance can therefore have separate budgets.
+
+1. Keep the nearby cumulus volume for fly-through, parallax, terrain occlusion and the larger sunlit forms. Keep connected banks and scattered translucent smaller clouds wherever the weather calls for them.
+2. Continue the same spherical weather field into the mid and far sky. Represent distant coverage with a lower-frequency fBm field and shallower stratus or stratocumulus profiles. Let the weather set coverage, type and thickness so filler fades naturally in clear regions. Blend detail by the world-space view footprint and grazing angle, preserving cloud positions, approximate opacity and lighting across the transition.
+3. Use a prefiltered spherical representation for the farthest intersections and retain alto and cirrus higher up. Store or approximate transmittance across a coarse footprint so clear gaps still transmit light. Exponentiating a mean density can turn intermittent thick clouds into an opaque ring. Composite the layers by their actual ray distances and reuse aerial perspective so the distant forms take on the sky's color. Ground shadows and orbital cloud cover should read from the same weather field.
+
+Larger, smoother bodies and broad filler are good candidates for a coarser screen grid. A 2×2 grid traces one quarter as many rays as a full-rate grid. A 3×3 grid traces about one ninth, before reconstruction and fixed pass costs. A large cloud can still contain a thin rim or sharp optical-depth transition, so filter density, opacity and lighting to the coarser footprint and keep finer sampling for nearby sharp regions. Along-ray steps need their own check, especially at grazing angles.
+
+### Layered cloudscape in the game
+
+The default game view uses detailed cumulus nearby and transitions into broad stratocumulus banks from 15 to 36 km away when the camera is below the clouds. The banks use the same spherical weather field. Cloud colour and opacity fade together into the atmosphere at the horizon. A broken altocumulus volume between 6.9 and 9.1 km adds a second set of forms, casts shadows, and can be flown through. The sky stays brighter near the limb and deeper blue higher up. Sunset light has a common warm tint across the local sky while the planet still occludes the sun at the true cloud altitude.
+
+Chrome WebGPU comparisons show the previous E preset on the left and the new default on the right. Camera, sun, cloud coverage, and the 705 × 473 cloud target are matched. [Daylight](screenshots/cloud_look_2026-11-21/user-day.jpg) · [Twilight](screenshots/cloud_look_2026-11-21/user-twilight.jpg) · [Ground at sunset](screenshots/cloud_look_2026-11-21/ground-sunset.jpg)
+
+In 14-frame pans, the 99th-percentile rotation-compensated RGB error at 900 m fell from 8 to 2 levels on the slow turn and from 5 to 4 on the fast turn. At 3 km it stayed at 2 for both turns. The new shorter ground march took 13–14 ms in the ground daylight and sunset views, compared with about 4 ms for the old shell proxy and 62–67 ms for the full march. The ground path can still show faint bands at grazing angles. Close cloud surfaces also read softer than the references. [Climb across the ground march transition](screenshots/cloud_look_2026-11-21/ground-climb.mp4)
