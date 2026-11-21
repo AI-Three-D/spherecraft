@@ -4062,18 +4062,83 @@
                     worldConfigLoader = null;
                 }
 
-                // Startup-only comparison: terrain and hydrology must share
-                // the same macro inputs and cache key throughout the run.
-                const regionalPreview = new URLSearchParams(location.search).get('regionalTerrain');
-                // Fixed historical comparison cases keep their original inputs.
-                const placementQueries=new URLSearchParams(location.search);
+                // Apply review switches before terrain and water initialize.
+                const placementQueries = new URLSearchParams(location.search);
+                const regionalPreview = placementQueries.get('regionalTerrain');
+                const regionalComparison = ['regionalTerrain', 'regionalBasins', 'regionalWhitewater',
+                    'regionalLargeLake', 'regionalOrganicRiver', 'waterPrecompute'].some(k => placementQueries.has(k));
+                const historicalTerrain = placementQueries.get('lakeCells') === '0' || regionalComparison;
+                const previewFeatures = placementQueries.has('terrainRework')
+                    ? new Set(placementQueries.get('terrainRework').split(',').filter(Boolean)) : null;
+                const reviewFeatures = ['mountains', 'foothills', 'valleys', 'rolling', 'coast', 'coves', 'canyon', 'dunes'];
+                if (previewFeatures && [...previewFeatures].some(feature => !reviewFeatures.includes(feature))) {
+                    throw new Error('terrainRework accepts ' + reviewFeatures.join(','));
+                }
+                if (previewFeatures || historicalTerrain) {
+                    for (const planet of gameDataConfig.planets) if (planet.enabled) {
+                        planet.terrain.landformDetails = {
+                            rangeValleys: previewFeatures?.has('valleys') ?? false,
+                            regionalRollingHills: previewFeatures?.has('rolling') ?? false,
+                            coastalHills: previewFeatures?.has('coast') ?? false,
+                            coves: previewFeatures?.has('coves') ?? false,
+                        };
+                    }
+                }
+                const tectonicRelief = placementQueries.get('tectonicRelief') ?? (previewFeatures || historicalTerrain ? '0' : null);
+                if (tectonicRelief !== null) {
+                    if (!['0', '1'].includes(tectonicRelief)) throw new Error('tectonicRelief must be 0 or 1');
+                    for (const planet of gameDataConfig.planets) if (planet.enabled) {
+                        planet.terrain.tectonicRelief = { ...planet.terrain.tectonicRelief, enabled: tectonicRelief === '1' };
+                    }
+                }
+                const rangeModel = previewFeatures
+                    ? (previewFeatures.has('mountains') ? 'directional' : 'legacy')
+                    : placementQueries.get('mountainRangeModel') ?? (historicalTerrain ? 'legacy' : null);
+                for (const feature of ['mesas', 'cuestas', 'fells', 'fjords']) {
+                    const historicalDefault = historicalTerrain && (feature === 'fells' || feature === 'fjords') ? '0' : null;
+                    const selection = placementQueries.get(feature) ?? historicalDefault;
+                    if (selection === null) continue;
+                    if (selection !== '0' && selection !== '1') throw new Error(feature + ' must be 0 or 1');
+                    for (const planet of gameDataConfig.planets) if (planet.enabled) {
+                        if (feature === 'fjords') {
+                            planet.terrain.fjords = selection === '1';
+                        } else {
+                            planet.terrain.inlandLandforms = { ...planet.terrain.inlandLandforms, [feature]: selection === '1' };
+                        }
+                    }
+                }
+                const calderas = placementQueries.get('calderas');
+                if (calderas !== null) {
+                    if (!['0', '1'].includes(calderas)) throw new Error('calderas must be 0 or 1');
+                    for (const planet of gameDataConfig.planets) if (planet.enabled) {
+                        planet.terrain.calderas = { ...planet.terrain.calderas, enabled: calderas === '1' };
+                    }
+                }
+                if (rangeModel !== null) {
+                    if (!['legacy', 'directional'].includes(rangeModel)) {
+                        throw new Error('mountainRangeModel must be legacy or directional');
+                    }
+                    for (const planet of gameDataConfig.planets) if (planet.enabled) {
+                        planet.terrain.mountainRangeModel = rangeModel;
+                    }
+                }
+                const foothillModel = previewFeatures
+                    ? (previewFeatures.has('foothills') ? 'regional' : 'legacy')
+                    : placementQueries.get('foothillModel') ?? (historicalTerrain ? 'legacy' : null);
+                if (foothillModel !== null) {
+                    if (!['legacy', 'regional'].includes(foothillModel)) {
+                        throw new Error('foothillModel must be legacy or regional');
+                    }
+                    for (const planet of gameDataConfig.planets) if (planet.enabled) {
+                        planet.terrain.foothills = { ...planet.terrain.foothills, model: foothillModel };
+                    }
+                }
                 // Lakes in the terrain function (LAKE_CELLS_PLAN.md): base
                 // generator lakeLand, regional terrain off; the water service
                 // publishes the lake table's lakes instead of solving a graph.
                 // The default since 2026-11-10; ?lakeCells=0 or a regional
                 // comparison parameter brings back the older terrain and water.
-                const regionalComparison=['regionalTerrain','regionalBasins','regionalWhitewater','regionalLargeLake','regionalOrganicRiver','waterPrecompute'].some(k=>placementQueries.has(k));
-                if (placementQueries.get('lakeCells') !== '0' && !regionalComparison) {
+                if (!historicalTerrain) {
                     for (const planet of gameDataConfig.planets) if (planet.enabled) {
                         planet.terrain.baseGenerator = 'lakeLand';
                         planet.terrain.regionalTerrain = { ...planet.terrain.regionalTerrain, enabled: false };

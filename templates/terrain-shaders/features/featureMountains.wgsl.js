@@ -1,7 +1,7 @@
 // templates/terrain-shaders/features/featureMountains.wgsl.js
 //
 // Mountains: uncommon massifs, rare landmark massifs, and mountain ranges.
-// Cheap by construction (no noise in the shapes):
+// Sparse placement limits the cost of shape evaluation:
 // - Placement: a grid of cells on each cube face, sized in metres (the cell
 //   count per face follows the planet radius), so the density per km² is
 //   the same on any planet. A cell holds at most one feature, with
@@ -10,16 +10,20 @@
 //   only its own cell: one or two integer hashes outside features.
 // - Highlands (landRegions) are favoured: chance and height scale with the
 //   region at the feature's centre, read only inside a footprint.
-// - Shapes: smooth (C2) analytic profiles in a tangent plane at the centre
-//   (elliptic peaks with rounded summits and concave flanks, summed into
-//   massifs; a range is a bent spine with a peaked cross-section, tapered
-//   ends and summits along the crest). They count as relief, so the erosion
-//   filter carves their ridges and gullies.
+// - Shapes use a tangent plane at the centre: analytic massifs and a
+//   selectable legacy or directional range. They count as relief, so the
+//   erosion filter carves their ridges and gullies.
 //
 // Heights and sizes in METERS, planet-independent (constants in
 // earthLikeBase).
 
-export function createTerrainFeatureMountains() {
+import { createDirectionalMountainRange } from './featureMountainRangeDirectional.wgsl.js';
+import { mountainValleysWgsl } from './featureMountainValleys.wgsl.js';
+
+export function createTerrainFeatureMountains({ rangeModel = 'legacy', rangeValleys = false } = {}) {
+  if (rangeModel !== 'legacy' && rangeModel !== 'directional') {
+    throw new Error(`Unknown mountain range model: ${rangeModel}`);
+  }
   return `
 // ==================== Feature: Mountains ====================
 
@@ -262,7 +266,7 @@ fn mtnSpineSlope(t: f32, L: f32, bend: f32, wig: f32, wigPhase: f32) -> f32 {
     return (-2.0 * bend * t + cos(t * 4.712389 + wigPhase) * wig * 4.712389) * (2.0 / L);
 }
 
-// A mountain range (metres, dual): a spine of length L along X, bowed
+${rangeModel === 'directional' ? '// Directional range: multiscale relief within the existing bounded footprint.\n' + createDirectionalMountainRange() : `// A mountain range (metres, dual): a spine of length L along X, bowed
 // sideways (bend) with a wiggle, the local plane warped for an organic
 // crest line; ends tapered. A backbone ridge (half-width W, varying +-20 %
 // along, over a low apron 2.2 W wide) whose crest height varies along the
@@ -334,7 +338,8 @@ fn mtnRange_d(p: vec3<f32>, site: MtnSite, seed: i32) -> vec4<f32> {
     }
     let ends = dConst(1.0) - dQuintic(dClamp((t2 - dConst(0.3)) * (1.0 / 0.7), 0.0, 1.0));
     return dMul(sum, ends) * H;
-}
+}`}
+${rangeValleys ? mountainValleysWgsl : ''}
 
 // All mountains (dual, normalized height). Heights are the MTN_* metres as
 // they are: noiseProfile.mountainBias (2.65 on the demo planet, raised when
@@ -358,7 +363,12 @@ fn featureMountainsHeight_d(unitDir: vec3<f32>, seed: i32) -> vec4<f32> {
     if (terrainFeatureOn(TF_MOUNTAIN_RANGE)) {
         let s = mtnSite(fp, MTN_RANGE_CELL_M, MTN_RANGE_DENSITY_PER_KM2 * 1e-6, 0x967a889bu);
         if (s.ok) {
-            total += mtnRange_d(unitDir, s, seed);
+            ${rangeValleys ? `var mountain = mtnRange_d(unitDir, s, seed);
+            if (mountain.x > 0.0) {
+                let channel = valleyRange_d(unitDir, s, seed);
+                mountain = dMul(mountain, dConst(1.0) - channel * 0.72);
+            }
+            total += mountain;` : 'total += mtnRange_d(unitDir, s, seed);'}
         }
     }
     return total * (1.0 / maxTerrainHeightM());

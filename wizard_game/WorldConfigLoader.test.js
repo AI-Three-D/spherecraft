@@ -1,5 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {WorldConfigLoader} from './WorldConfigLoader.js';
+import worldTerrain from './world/terrain.json';
 describe('rendering power settings', () => {
  it('uses the configured default pixel ratio and 60 FPS, with validated world overrides', () => {
   const loader = new WorldConfigLoader();
@@ -29,11 +30,53 @@ describe('rendering power settings', () => {
  });
 });
 describe('world water authoring configuration',()=>{
+ it('selects the startup mountain model without changing subsequent worlds',()=>{
+  const loader=new WorldConfigLoader();
+  expect(loader._buildGameDataConfig({mountainRangeModel:'directional'}, {}, {}).planets[0].terrain.mountainRangeModel).toBe('directional');
+  expect(loader._buildGameDataConfig({}, {}, {}).planets[0].terrain.mountainRangeModel).toBe('legacy');
+  expect(()=>loader._buildGameDataConfig({mountainRangeModel:'invalid'}, {}, {})).toThrow('Unknown mountain range model');
+ });
+ it('merges and validates the startup foothill settings',()=>{
+  const loader=new WorldConfigLoader();
+  const chosen=loader._buildGameDataConfig({foothills:{model:'regional',strength:1.2}}, {}, {}).planets[0].terrain.foothills;
+  expect(chosen.model).toBe('regional');expect(chosen.strength).toBe(1.2);expect(chosen.broadScaleKm).toBe(7);
+  expect(loader._buildGameDataConfig({}, {}, {}).planets[0].terrain.foothills.model).toBe('legacy');
+  expect(()=>loader._buildGameDataConfig({foothills:{model:'invalid'}}, {}, {})).toThrow('Unknown foothill model');
+  expect(()=>loader._buildGameDataConfig({foothills:{coverageStart:0.7}}, {}, {})).toThrow();
+  expect(()=>loader._buildGameDataConfig({foothills:{broadScaleKm:0}}, {}, {})).toThrow();
+ });
  it('uses terrain-sampled water by default while allowing regional placement to be enabled explicitly',()=>{
   const loader=new WorldConfigLoader();
   expect(loader._buildGameDataConfig({}, {}, {}).planets[0].terrain.regionalTerrain.enabled).toBe(false);
   expect(loader._buildGameDataConfig({regionalTerrain:{enabled:true}}, {}, {}).planets[0].terrain.regionalTerrain.enabled).toBe(true);
   expect(loader._buildGameDataConfig({}, {}, {}).planets[0].terrain.regionalTerrain.enabled).toBe(false);
+ });
+ it('loads the unified world landforms and validates individual detail switches',()=>{
+  const loader=new WorldConfigLoader();
+  const terrain=loader._buildGameDataConfig(worldTerrain, {}, {}).planets[0].terrain;
+  expect(terrain.mountainRangeModel).toBe('directional');
+  expect(terrain.foothills.model).toBe('regional');
+  expect(terrain.landformDetails).toEqual({
+   rangeValleys:true, regionalRollingHills:true, coastalHills:true, coves:true,
+  });
+  expect(terrain.calderas.enabled).toBe(true);
+  expect(terrain.fjords).toBe(true);
+  expect(terrain.tectonicRelief).toEqual({enabled:true,plateCount:18,mountainReliefM:2400,interiorReliefM:560});
+  expect(terrain.inlandLandforms).toEqual({ fells:true, mesas:false, cuestas:false });
+  expect(()=>loader._buildGameDataConfig({landformDetails:[]}, {}, {})).toThrow('landformDetails must be an object');
+  expect(()=>loader._buildGameDataConfig({landformDetails:{coves:1}}, {}, {})).toThrow('landformDetails.coves must be a boolean');
+  expect(()=>loader._buildGameDataConfig({tectonicRelief:{enabled:true,plateCount:0}}, {}, {})).toThrow('tectonicRelief.plateCount');
+ });
+ it('authors calderas at startup and rejects terrain-grid-breaking presets',()=>{
+  const loader=new WorldConfigLoader();
+  const terrain=loader._buildGameDataConfig({calderas:{enabled:true,minHeightM:800,maxHeightM:1200}}, {}, {}).planets[0].terrain;
+  expect(terrain.calderas.enabled).toBe(true);
+  expect(terrain.calderas.maxHeightM).toBe(1200);
+  expect(terrain.calderas.minRadiusM).toBe(8000);
+  expect(loader._buildGameDataConfig({}, {}, {}).planets[0].terrain.calderas.enabled).toBe(false);
+  for(const calderas of [[],1,{enabled:'true'},{maxHeightM:3000},{minRadiusM:12000},{densityPerKm2:NaN}]) {
+   expect(()=>loader._buildGameDataConfig({calderas}, {}, {})).toThrow();
+  }
  });
  it('merges partial world placement and water changes without discarding nested defaults',()=>{
   const cfg=new WorldConfigLoader()._buildGameDataConfig({regionalTerrain:{world:{maxRegions:24}},waterGraph:{sim:{lengthM:128},carve:{bankCutM:3}}},{},{});

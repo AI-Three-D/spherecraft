@@ -1,3 +1,9 @@
+import { normalizeFoothillsConfig } from '../../core/world/terrain-generator/foothillsConfig.js';
+import { normalizeCalderaConfig } from '../../core/world/terrain-generator/calderaConfig.js';
+import { normalizeInlandLandforms } from '../../core/world/terrain-generator/inlandLandformConfig.js';
+import { normalizeLandformDetails } from '../../core/world/terrain-generator/landformDetailsConfig.js';
+import { normalizeTectonicRelief } from '../../core/world/terrain-generator/tectonicReliefConfig.js';
+
 export class TerrainGenerationConfig {
     constructor(options = {}) {
         // Noise reference radius in meters (optional override; default uses planet radius).
@@ -8,6 +14,17 @@ export class TerrainGenerationConfig {
 
         // Base generator selection (used by WebGPU terrain shader assembly).
         this.baseGenerator = options.baseGenerator ?? 'earthLike';
+        // Startup-only: terrain tiles and hydrology must use the same shape.
+        this.mountainRangeModel = options.mountainRangeModel ?? 'legacy';
+        if (!['legacy', 'directional'].includes(this.mountainRangeModel)) {
+            throw new Error(`Unknown mountain range model: ${this.mountainRangeModel}`);
+        }
+        this.foothills = normalizeFoothillsConfig(options.foothills);
+        this.landformDetails = normalizeLandformDetails(options.landformDetails);
+        this.tectonicRelief = normalizeTectonicRelief(options.tectonicRelief);
+        this.calderas = normalizeCalderaConfig(options.calderas);
+        this.inlandLandforms = normalizeInlandLandforms(options.inlandLandforms);
+        this.fjords = options.fjords === true;
         // Smooth-splat weights and IDs share one payload evaluation. false
         // retains separate passes for performance/visual comparisons.
         this.fuseSmoothSplatSource = options.fuseSmoothSplatSource !== false;

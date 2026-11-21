@@ -10,7 +10,9 @@
 //
 // Heights defined in METERS, converted at runtime via maxTerrainHeightM().
 
-export function createTerrainFeatureLoneHills() {
+import { regionalRollingHillsWgsl } from './featureRollingHillsRegional.wgsl.js';
+
+export function createTerrainFeatureLoneHills({ regionalRollingHills = false } = {}) {
     return `
   // ==================== Feature: Lone Hills & Rolling Hills ====================
   // Height and gradient as dual numbers vec4(value, d/d unitDir) (sphere).
@@ -89,7 +91,7 @@ export function createTerrainFeatureLoneHills() {
       return totalHeight;
   }
 
-  // Rolling hill chains (added after erosion).
+  ${regionalRollingHills ? regionalRollingHillsWgsl : `// Rolling hill chains (added after erosion).
   fn featureRollingHillsHeight_d(
       unitDir: vec3<f32>, seed: i32,
       regional: RegionalInfoD, profile: TerrainProfile, amp: TerrainAmplitudes
@@ -129,7 +131,7 @@ export function createTerrainFeatureLoneHills() {
       let h = dMul(corridor, lump);
       let presenceW = dGateRamp(rollingPresence, 0.01);
       return dMul(dMul(h, presenceW) * (HEIGHT_ROLLING_HILLS / maxTerrainHeightM()), loneHillSizeMod_d(unitDir, seed)) * hillAmp;
-  }
+  }`}
 
   // ==================== Lone Hills Surface ====================
 
