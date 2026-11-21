@@ -1,0 +1,74 @@
+[
+  {
+    "name": "caldera-aerial",
+    "position": [
+      -133789.9,
+      -31404.9,
+      14286.1
+    ],
+    "target": [
+      -127877,
+      -25906.5,
+      20819.7
+    ],
+    "info": {
+      "clearanceM": 1202,
+      "distM": 8208
+    },
+    "fov": 60
+  },
+  {
+    "name": "caldera-rim",
+    "position": [
+      -129271.3,
+      -25518.7,
+      23305.9
+    ],
+    "target": [
+      -128323.9,
+      -25997,
+      20892.4
+    ],
+    "info": {
+      "clearanceM": 852,
+      "distM": 2298
+    },
+    "fov": 60
+  },
+  {
+    "name": "caldera-approach",
+    "position": [
+      -127995.2,
+      -32975.6,
+      13795.4
+    ],
+    "target": [
+      -128196.2,
+      -25971.1,
+      20871.7
+    ],
+    "info": {
+      "clearanceM": 321,
+      "distM": 9849
+    },
+    "fov": 60
+  },
+  {
+    "name": "caldera-orbit",
+    "position": [
+      -156100.1,
+      -38941,
+      15759.6
+    ],
+    "target": [
+      -127430.1,
+      -25815.9,
+      20746.9
+    ],
+    "info": {
+      "clearanceM": 2968,
+      "distM": 9849
+    },
+    "fov": 60
+  }
+]

@@ -1,5 +1,28 @@
 {
   "_comment": "Terrain generation parameters for wizard_game world. All params here require world regeneration when changed.",
+  "mountainRangeModel": "directional",
+  "foothills": {
+    "model": "regional"
+  },
+  "landformDetails": {
+    "rangeValleys": true,
+    "regionalRollingHills": true,
+    "coastalHills": true,
+    "coves": true
+  },
+  "tectonicRelief": {
+    "enabled": true,
+    "plateCount": 18,
+    "mountainReliefM": 2400,
+    "interiorReliefM": 560
+  },
+  "calderas": {
+    "enabled": true
+  },
+  "fjords": true,
+  "inlandLandforms": {
+    "fells": true
+  },
   "noiseProfile": {
     "mountainBias": 2.65,
     "hillBias": 2.3

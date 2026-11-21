@@ -24,6 +24,11 @@ import { buildAtmoBankAuthoringRuntime } from '../core/renderer/atmosphere-banks
 import { buildParticleAuthoringRuntime } from '../core/renderer/particles/ParticleAuthoringRuntime.js';
 import { requireInt, requireNumber } from '../shared/requireUtil.js';
 import { createAdaptiveQualityConfig } from '../core/AdaptiveQuality.js';
+import { normalizeFoothillsConfig } from '../core/world/terrain-generator/foothillsConfig.js';
+import { normalizeCalderaConfig } from '../core/world/terrain-generator/calderaConfig.js';
+import { normalizeInlandLandforms } from '../core/world/terrain-generator/inlandLandformConfig.js';
+import { normalizeLandformDetails } from '../core/world/terrain-generator/landformDetailsConfig.js';
+import { normalizeTectonicRelief } from '../core/world/terrain-generator/tectonicReliefConfig.js';
 
 function cloneJSONValue(value) {
     if (Array.isArray(value)) {
@@ -302,6 +307,38 @@ export class WorldConfigLoader {
             if (terrain.water)                Object.assign(t.water,        terrain.water);
             if (terrain.surface)              Object.assign(t.surface,      terrain.surface);
             if (terrain.erosionFilter)        Object.assign(t.erosionFilter, terrain.erosionFilter);
+            if (terrain.foothills != null) {
+                if (typeof terrain.foothills !== 'object' || Array.isArray(terrain.foothills)) {
+                    throw new Error('foothills must be an object');
+                }
+                t.foothills = normalizeFoothillsConfig({ ...t.foothills, ...terrain.foothills });
+            }
+            if (Object.hasOwn(terrain, 'landformDetails')) {
+                t.landformDetails = normalizeLandformDetails(terrain.landformDetails);
+            }
+            if (Object.hasOwn(terrain, 'tectonicRelief')) {
+                t.tectonicRelief = normalizeTectonicRelief(terrain.tectonicRelief);
+            }
+            if (terrain.calderas != null) {
+                if (typeof terrain.calderas !== 'object' || Array.isArray(terrain.calderas)) throw new Error('calderas must be an object');
+                t.calderas = normalizeCalderaConfig({ ...t.calderas, ...terrain.calderas });
+            }
+            if (terrain.inlandLandforms != null) {
+                if (typeof terrain.inlandLandforms !== 'object' || Array.isArray(terrain.inlandLandforms)) {
+                    throw new Error('inlandLandforms must be an object');
+                }
+                t.inlandLandforms = normalizeInlandLandforms({ ...t.inlandLandforms, ...terrain.inlandLandforms });
+            }
+            if (Object.hasOwn(terrain, 'fjords')) {
+                if (typeof terrain.fjords !== 'boolean') throw new Error('fjords must be a boolean');
+                t.fjords = terrain.fjords;
+            }
+            if (terrain.mountainRangeModel != null) {
+                if (!['legacy', 'directional'].includes(terrain.mountainRangeModel)) {
+                    throw new Error(`Unknown mountain range model: ${terrain.mountainRangeModel}`);
+                }
+                t.mountainRangeModel = terrain.mountainRangeModel;
+            }
             if (terrain.features)             t.features = { ...(t.features ?? {}), ...terrain.features };
             if (terrain.regionalTerrain)      t.regionalTerrain = mergePlainConfig(t.regionalTerrain, terrain.regionalTerrain);
             if (terrain.waterGraph)           t.waterGraph = mergePlainConfig(t.waterGraph, terrain.waterGraph);

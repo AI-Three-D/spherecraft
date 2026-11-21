@@ -1,0 +1,80 @@
+{
+  "base": "http://127.0.0.1:8775",
+  "selection": "",
+  "query": {
+    "calderas": "1"
+  },
+  "sun": 0.4,
+  "features": {
+    "mountains": false,
+    "mountainLandmark": false,
+    "mountainRange": false,
+    "foothills": false,
+    "loneHillsVeryRare": false,
+    "loneHillsLandmark": false,
+    "rollingHills": false,
+    "meso2": false,
+    "microDetail": false
+  },
+  "terrain": {
+    "erosionFilter": {
+      "strength": 0
+    }
+  },
+  "poses": [
+    {
+      "name": "caldera-aerial",
+      "position": [
+        -133789.9,
+        -31404.9,
+        14286.1
+      ],
+      "target": [
+        -127877,
+        -25906.5,
+        20819.7
+      ],
+      "info": {
+        "clearanceM": 1202,
+        "distM": 8208
+      },
+      "fov": 60
+    },
+    {
+      "name": "caldera-approach",
+      "position": [
+        -127995.2,
+        -32975.6,
+        13795.4
+      ],
+      "target": [
+        -128196.2,
+        -25971.1,
+        20871.7
+      ],
+      "info": {
+        "clearanceM": 321,
+        "distM": 9849
+      },
+      "fov": 60
+    },
+    {
+      "name": "caldera-orbit",
+      "position": [
+        -156100.1,
+        -38941,
+        15759.6
+      ],
+      "target": [
+        -127430.1,
+        -25815.9,
+        20746.9
+      ],
+      "info": {
+        "clearanceM": 2968,
+        "distM": 9849
+      },
+      "fov": 60
+    }
+  ]
+}

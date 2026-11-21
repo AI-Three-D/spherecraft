@@ -15,8 +15,10 @@ import { createTerrainFeatureRivers } from '../../../../templates/terrain-shader
 import { createTerrainFeatureErosionSeeds } from '../../../../templates/terrain-shaders/features/featureErosionSeeds.wgsl.js';
 import { createTerrainFeatureErosionFilter } from '../../../../templates/terrain-shaders/features/featureErosionFilter.wgsl.js';
 import { createEarthlikeConstants, createEarthlikeBase } from '../../../../templates/terrain-shaders/base/earthLikeBase.wgsl.js';
+import { createLakeLandConstants, createLakeLandBase } from '../../../../templates/terrain-shaders/base/lakeLandBase.wgsl.js';
 import { TILE_TYPES, TILE_CATEGORIES } from '../../../../templates/configs/tileTypes.js';
 import { TerrainGenerationConfig } from '../../../../templates/configs/terrainGenerationConfig.js';
+import worldTerrain from '../../../../wizard_game/world/terrain.json';
 import { createRegionalTerrainBakeWgsl, createRegionalTerrainBoundsWgsl } from '../../terrain-generator/regionalTerrain.wgsl.js';
 import {createRegionalValleyAnchorWgsl} from '../../terrain-generator/regionalValleyFeature.wgsl.js';
 import {createRegionalShapeBakeWgsl} from '../../terrain-generator/regionalShape.wgsl.js';
@@ -44,7 +46,8 @@ const TERRAIN_SHADER_BUNDLE = {
     createTerrainFeatureErosionSeeds,
     createTerrainFeatureErosionFilter,
     baseGenerators: {
-        earthLike: { constants: createEarthlikeConstants, base: createEarthlikeBase }
+        earthLike: { constants: createEarthlikeConstants, base: createEarthlikeBase },
+        lakeLand: { constants: createLakeLandConstants, base: createLakeLandBase }
     }
 };
 
@@ -90,6 +93,77 @@ describe('terrain generation compute shader', () => {
         heightInputBaseHeight: { hasHeightBindings: true, hasBaseHeightBinding: true },
         smoothSplatPair: { hasHeightBindings: true, hasSmoothSplatIdsBinding: true, outputFormat: 'rgba8unorm' }
     };
+    it('compiles the selected mountain model for terrain and lake sampling', () => {
+        for (const baseGenerator of ['earthLike', 'lakeLand']) {
+            for (const lakeTable of baseGenerator === 'lakeLand' ? ['build', 'read'] : [null]) {
+                const options = { ...base, baseGenerator, lakeTable, mountainRangeModel: 'directional' };
+                const source = createAdvancedTerrainComputeShader(options);
+                expect(source).toContain('fn rangeDirectionalNoise_d');
+                expect(compile(source)).toBeNull();
+            }
+        }
+        const oldSource = createAdvancedTerrainComputeShader(base);
+        expect(oldSource).not.toContain('fn rangeDirectionalNoise_d');
+        expect(createAdvancedTerrainComputeShader({ ...base, mountainRangeModel: 'directional' })).not.toBe(oldSource);
+        expect(() => createAdvancedTerrainComputeShader({ ...base, mountainRangeModel: 'invalid' })).toThrow();
+    });
+    it('compiles regional foothills in terrain and lake-table variants', () => {
+        for (const baseGenerator of ['earthLike', 'lakeLand']) {
+            for (const lakeTable of baseGenerator === 'lakeLand' ? ['build', 'read'] : [null]) {
+                const src = createAdvancedTerrainComputeShader({ ...base, baseGenerator, lakeTable,
+                    foothills: { model: 'regional' }, mountainRangeModel: 'directional', waterCarve: true });
+                expect(src).toContain('let broadStretch = vec3<f32>(0.48, 1.0, 1.0)');
+                expect(compile(src)).toBeNull();
+            }
+        }
+        expect(createAdvancedTerrainComputeShader(base)).not.toContain('let broadStretch = vec3<f32>(0.48, 1.0, 1.0)');
+        expect(() => createAdvancedTerrainComputeShader({ ...base, foothills: { model: 'regional', strength: -1 } })).toThrow();
+    });
+    it('compiles calderas in terrain, lake construction and all fine consumers', () => {
+        for (const baseGenerator of ['earthLike', 'lakeLand']) {
+            for (const lakeTable of baseGenerator === 'lakeLand' ? [null, 'build', 'read'] : [null]) {
+                for (const extra of Object.values(variants)) {
+                    const source = createAdvancedTerrainComputeShader({ ...base, ...extra, baseGenerator, lakeTable,
+                        calderas: { enabled: true }, mountainRangeModel: 'directional', foothills: { model: 'regional' }, waterCarve: true });
+                    expect(compile(source)).toBeNull();
+                }
+            }
+        }
+        expect(createAdvancedTerrainComputeShader(base)).not.toContain('fn calderaShape_d(');
+    });
+    it('assembles inland landforms independently and compiles them with the shared water paths', () => {
+        const onlyMesas = createAdvancedTerrainComputeShader({ ...base, inlandLandforms: { mesas: true } });
+        const onlyCuestas = createAdvancedTerrainComputeShader({ ...base, inlandLandforms: { cuestas: true } });
+        expect(onlyMesas).not.toContain('fn cuestaProvince_d');
+        expect(onlyCuestas).not.toContain('fn mesaProvince_d');
+        expect(compile(onlyMesas)).toBeNull();
+        expect(compile(onlyCuestas)).toBeNull();
+        for (const lakeTable of ['build', 'read']) {
+            const source = createAdvancedTerrainComputeShader({ ...base, baseGenerator: 'lakeLand', lakeTable,
+                waterCarve: true, calderas: { enabled: true }, inlandLandforms: { mesas: true, cuestas: true },
+                mountainRangeModel: 'directional', foothills: { model: 'regional' } });
+            expect(compile(source)).toBeNull();
+        }
+    });
+    it('compiles the default world landforms together in terrain and lake table variants', () => {
+        const options = { ...base, ...worldTerrain, terrainSeed: 12345, waterCarve: true };
+        for (const baseGenerator of ['earthLike', 'lakeLand']) {
+            for (const lakeTable of baseGenerator === 'lakeLand' ? ['build', 'read'] : [null]) {
+                const source = createAdvancedTerrainComputeShader({ ...options, baseGenerator, lakeTable });
+                expect(compile(source)).toBeNull();
+                expect(source).toContain('fn valleyRange_d(');
+                expect(source).toContain('fn coastalHillsHeight_d(');
+                expect(source).toContain('fn coastalCoves_d(');
+                expect(source).toContain('fn tectonicConvergence_d(');
+                expect(source).not.toContain('fn mesaProvince_d(');
+                expect(source).not.toContain('fn cuestaProvince_d(');
+            }
+        }
+        const combined = createAdvancedTerrainComputeShader(options);
+        expect(createAdvancedTerrainComputeShader({ ...options, terrainSeed: 12346 })).not.toBe(combined);
+        const terrainWithoutPlates = createAdvancedTerrainComputeShader({ ...options, tectonicRelief: { enabled: false } });
+        expect(terrainWithoutPlates).not.toContain('fn tectonicConvergence_d(');
+    });
     it('compiles the river field and shore materials in every generation variant',()=>{
         for(const extra of Object.values(variants))expect(compile(createAdvancedTerrainComputeShader({
             ...base,...extra,waterCarve:true,riverBankDetail:true,regionalTerrain:true,

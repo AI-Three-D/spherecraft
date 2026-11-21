@@ -1,5 +1,13 @@
 // js/world/shaders/webgpu/terrain/base/earthLikeBase.wgsl.js
 
+import { createFoothillWgsl } from '../features/featureFoothills.wgsl.js';
+import { createTerrainFeatureCalderas } from '../features/featureCalderas.wgsl.js';
+import { createInlandLandformWgsl } from '../features/featureInlandLandforms.wgsl.js';
+import { fellsWgsl } from '../features/featureFells.wgsl.js';
+import { fjordsWgsl } from '../features/featureFjords.wgsl.js';
+import { coastalCovesWgsl, coastalHillsWgsl } from '../features/featureCoast.wgsl.js';
+import { createTectonicReliefWgsl } from '../features/featureTectonicRelief.wgsl.js';
+
 export function createEarthlikeConstants() {
   return `
 // ==================== Terrain Constants (Earthlike) ====================
@@ -180,9 +188,22 @@ const FOOTHILL_TT_FULL: f32 = 0.56;
 `;
 }
 
-export function createEarthlikeBase({regionalShape=false}={}) {
+export function createEarthlikeBase({
+  regionalShape = false, foothills, calderas, inlandLandforms, fjords, landformDetails, tectonicRelief, terrainSeed,
+} = {}) {
+  const foothill = createFoothillWgsl(foothills);
+  const inlandWgsl = createInlandLandformWgsl(inlandLandforms);
+  const { coastalHills, coves } = landformDetails ?? {};
+  const tectonicWgsl = createTectonicReliefWgsl(tectonicRelief, terrainSeed);
   return `
 // ==================== Base: Earthlike ====================
+${createTerrainFeatureCalderas(calderas)}
+${inlandWgsl}
+${inlandLandforms?.fells === true ? fellsWgsl : ''}
+${fjords === true ? fjordsWgsl : ''}
+${coastalHills ? coastalHillsWgsl : ''}
+${coves ? coastalCovesWgsl : ''}
+${tectonicWgsl}
 
 fn getTerrainAmplitudes(profile: TerrainProfile) -> TerrainAmplitudes {
     var amp: TerrainAmplitudes;
@@ -239,12 +260,13 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
     let amp = getTerrainAmplitudes(profile);
 
     let foundationData = terrainMacro_d(unitDir, seed, profile);
-    let regional = foundationData.regional;
+    let regional = ${coves ? 'coastalCoves_d(unitDir, seed, foundationData.regional)' : 'foundationData.regional'};
     let landBlend = dSmoothstep(0.15, 0.45, regional.landMask);
 
     var landHeight = dConst(0.0);
     if (landBlend.x > 0.0) {
         landHeight = select(dConst(0.0), regional.baseElevation * amp.continentalShelf, terrainFeatureOn(TF_CONTINENT_RELIEF));
+        ${coastalHills ? 'landHeight += coastalHillsHeight_d(unitDir, seed, regional);' : ''}
 
         // Regional landform: plains / uplands / highlands (see
         // landRegions_d); its relief multiplier damps the local detail.
@@ -257,8 +279,12 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
             landHeight += region.height;
         }
 
+        let mountainsH = featureMountainsHeight_d(unitDir, seed);
+        ${tectonicWgsl ? `let tectonic = tectonicRelief_d(unitDir, seed, regional.landMask, mountainsH);
+        landHeight += tectonic.upland;` : ''}
         // Erosion style by location, 0 = rounded .. 1 = jagged (strength
         // and rounding of the erosion filter).
+        let calderaFoundation = landHeight;
         let style = terrainStyle_d(unitDir);
 
         // Foothills: 3 km hills over the most rugged quarter of the land.
@@ -266,10 +292,9 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
         // relief.
         var foothillsH = dConst(0.0);
         if (terrainFeatureOn(TF_FOOTHILLS)) {
-            let footBand = dSmoothstep(FOOTHILL_TT_START, FOOTHILL_TT_FULL, regional.terrainType);
+            let footBand = ${foothill.band};
             if (footBand.x > 0.0) {
-                let hillN = fbmAuto_d(unitDir, SCALE_FOOTHILLS, 3, seed + 1950, 2.0, 0.5);
-                foothillsH = dMul(footBand, dSmoothstep(-0.3, 0.6, hillN)) * ((HEIGHT_FOOTHILLS / maxTerrainHeightM()) * amp.mountainHeight);
+                ${foothill.calculation}
                 landHeight += foothillsH;
             }
         }
@@ -281,17 +306,20 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
             // carved features (river channel, erosion-seed pits) come after,
             // so erosion does not fill them.
             let bigHillsH = featureBigHillsHeight_d(unitDir, seed, amp);
-            let mountainsH = featureMountainsHeight_d(unitDir, seed);
-            let relief = foothillsH + bigHillsH + mountainsH;
+            let relief = foothillsH + bigHillsH + mountainsH${tectonicWgsl ? ' + tectonic.upland + tectonic.mountains' : ''};
+            ${tectonicWgsl ? 'landHeight += tectonic.mountains;' : ''}
             landHeight += bigHillsH + mountainsH;
             // Mountains are always carved: erosion's regional variation is
             // raised to full from MTN_EROSION_FULL_M of mountain height.
-            let mtnCarve = dQuintic(dClamp((mountainsH * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
+            let mountainRelief = mountainsH${tectonicWgsl ? ' + tectonic.mountains' : ''};
+            let mtnCarve = dQuintic(dClamp((mountainRelief * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
             let er = erosionFilterLand_d(unitDir, landHeight, relief, style, mtnCarve);
             landHeight += er.delta;
+            ${inlandLandforms?.fells === true ? 'landHeight += fellRelief_d(unitDir, seed, regional.landMask, bigHillsH + mountainRelief);' : ''}
             // Rolling hill chains are added after erosion: eroding their steep
             // corridor walls cut thin grooves along them.
             landHeight += dMul(featureRollingHillsHeight_d(unitDir, seed, regional, profile, amp), region.rough);
+            ${tectonicWgsl ? 'landHeight += tectonic.localHills;' : ''}
             // meso2 goes on top of the eroded terrain, faded where erosion is
             // strong. micro2 (DISP_MICRO2 = 0) contributes nothing; see
             // featureMesoDetail_d.
@@ -302,6 +330,11 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
                 landHeight += dMul(meso2, mesoW) * (DISP_MESO2 / maxTerrainHeightM());
             }
         }
+        landHeight = calderaSurface_d(unitDir, seed, landHeight, calderaFoundation);
+        ${inlandWgsl ? `
+        let inland = inlandLandformBlend_d(unitDir, seed, regional.landMask, landHeight, calderaFoundation);
+        landHeight = dMix(landHeight, inland.surface, inland.weight) + inland.rounding;
+        ` : ''}
         if (terrainFeatureOn(TF_LAKE_BASINS)) {
             landHeight += featureLakeBasinsHeight_d(unitDir, seed, region);
         }
@@ -317,6 +350,12 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
             let detailBudget = amp.microGain + 0.005;
             landHeight += interior * detailBudget;
         }
+        ${fjords === true ? `
+        let fjord = fjordProfile_d(unitDir, seed, profile, regional.landMask);
+        landHeight += fjord.shoulders;
+        let floor = fjordFloor();
+        landHeight = dMix(landHeight, floor, dMul(fjord.cut, fjordCutWeight_d(landHeight, floor)));
+        ` : ''}
     }
     if (landBlend.x >= 1.0) {
         return regionalValleyApply_d(softClampHeight_d(landHeight, -1.1, 1.8, 0.25),unitDir,foundationData);
