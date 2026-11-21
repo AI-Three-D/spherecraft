@@ -529,6 +529,7 @@ export function createEngineConfig() {
       treesFar:          false,   // coarse canopy hulls (500–4000 m)
       streamedAssets:    false,   // all streamed ground cover, props, etc.
       particles:         false,   // campfire/leaves/fireflies particle system
+      rainParticles:     true,    // weather-driven rain when ambient particles are off
       actors:            false,   // wizard, goblins, skinned mesh actors
       clouds:            true,    // high/cirrus WebGPUCloudRenderer
       lowClouds:         false,   // low weather cloud shell
@@ -536,7 +537,7 @@ export function createEngineConfig() {
       highClouds:        true,    // high cirrus/cirrostratus layers
       volumetricClouds:  true,    // raymarched cumulus layer (rendering.volumetricClouds)
       cloudParticles:    false,   // low/peak atmospheric bank particle clouds
-      fogParticles:      true,    // valley mist/fog-pocket atmospheric particles
+      fogParticles:      false,   // weather mist uses depth-aware volumetric haze
       skyEffects:        true,    // sky, stars, moon
     },
 
@@ -692,7 +693,7 @@ export function createEngineConfig() {
       // Prewarm, coarse fallbacks and current visible demand are protected.
       replaceLowerPriority: true
     },
-    weather: WEATHER_CONFIG,
+    weather: { ...WEATHER_CONFIG, initialWeather: 'partly_cloudy' },
 
     trees: resolveTreeConfig({
       flags: {

@@ -462,7 +462,9 @@ export class Frontend {
             this.heatHazeEmitter = new HeatHazeEmitter(this.backend.device, {});
             this.heatHazeEmitter.initialize('depth24plus');
 
-            if (this.engineConfig?.features?.particles !== false) {
+            const ambientParticles = this.engineConfig?.features?.particles !== false;
+            this._weatherParticlesOnly = !ambientParticles && this.engineConfig?.features?.rainParticles === true;
+            if (ambientParticles || this._weatherParticlesOnly) {
                 const { ParticleSystem } = await import('../particles/ParticleSystem.js');
                 this.particleSystem = new ParticleSystem({
                     device: this.backend.device,
@@ -868,6 +870,9 @@ updateLighting(starSystem) {
             if (cirrusOnTop) {
                 this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'near');
             }
+            if (this._weatherParticlesOnly && this.backend._renderPassEncoder) {
+                this.particleSystem.render(this.backend._renderPassEncoder);
+            }
 
             if (postEffectsActive) {
                 this.postProcessing.beginBloomSourcePass(this.backend);
@@ -1048,6 +1053,7 @@ updateLighting(starSystem) {
         if (weather && Number.isFinite(environmentState?.cloudCoverage)) {
             clouds.settings.coverage = weather.min + (weather.max - weather.min) * environmentState.cloudCoverage;
         }
+        clouds.weather = environmentState?.weatherEffect?.clouds ?? null;
 
         clouds.update({ ...frame, viewport: { width: vp.width, height: vp.height } });
         this.backend.endRenderPassForCompute();
@@ -1204,7 +1210,9 @@ updateLighting(starSystem) {
         }
 
         this.rendererCore.renderTransparent(frame);
-        if (this.particleSystem && this.backend.getRenderPassEncoder()) this.particleSystem.render(this.backend.getRenderPassEncoder());
+        if (this.particleSystem && !this._weatherParticlesOnly && this.backend.getRenderPassEncoder()) {
+            this.particleSystem.render(this.backend.getRenderPassEncoder());
+        }
         if (this.atmoBankSystem) {
             this.backend.endRenderPassForCompute();
             const bankEncoder = this.backend.getCommandEncoder();

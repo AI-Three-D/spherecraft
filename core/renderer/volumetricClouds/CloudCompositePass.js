@@ -224,6 +224,40 @@ fn surfaceVisibility(roKm: vec3f, rd: vec3f, distKm: f32) -> f32 {
     return dot(exp(-ext * distKm * cu.viewport.w), vec3f(0.2126, 0.7152, 0.0722));
 }
 
+// Optical depth up to the cloud and up to the camera's opaque scene hit.
+// Integrating the curved boundary layer makes nearby hills break through the
+// haze while longer rays through the low country accumulate more of it.
+fn groundMistDepths(ro: vec3f, rd: vec3f, sceneKm: f32, cloudKm: f32) -> vec2f {
+    let layer = raySphere(ro, rd, u.groundMist.y);
+    let ground = raySphere(ro, rd, u.planet.x);
+    let start = max(layer.x, 0.0);
+    var end = min(layer.y, sceneKm);
+    if (ground.x < ground.y && ground.y > 0.0) { end = min(end, max(0.0, ground.x)); }
+    if (start >= end) { return vec2f(0.0); }
+    let step = (end - start) / 8.0;
+    let height = u.groundMist.y - u.planet.x;
+    var path = vec2f(0.0);
+    for (var i = 0; i < 8; i++) {
+        let a = start + f32(i) * step;
+        let altitude = max(0.0, length(ro + rd * (a + 0.5 * step)) - u.planet.x);
+        let density = exp(-altitude / u.groundMist.z) * (1.0 - smoothstep(0.65 * height, height, altitude));
+        path += density * vec2f(clamp(cloudKm - a, 0.0, step), step);
+    }
+    return path * (u.groundMist.x * u.groundMist.w);
+}
+
+fn groundMistLight(ro: vec3f, rd: vec3f) -> vec3f {
+    let up = normalize(ro);
+    let sunAbove = dot(up, u.sun.xyz);
+    let day = smoothstep(-0.12, 0.19, sunAbove);
+    let warm = (1.0 - smoothstep(0.01, 0.28, sunAbove)) * smoothstep(-0.12, 0.02, sunAbove);
+    let daylight = mix(vec3f(0.030, 0.037, 0.043), vec3f(0.060, 0.043, 0.034), warm);
+    let forward = 1.0 + 0.32 * pow(max(0.0, dot(rd, u.sun.xyz)), 5.0);
+    let sun = daylight * (cu.atmo2.y * day * forward * (1.0 - 0.48 * u.weatherStyle.y));
+    let moon = vec3f(0.08, 0.10, 0.15) * (u.moon.w * smoothstep(-0.08, 0.25, dot(up, u.moon.xyz)));
+    return sun + moon + u.ambientFloor.rgb;
+}
+
 // Bicubic upsample; the raymarch already stopped at the nearest surface under each cloud pixel.
 fn upsampleCloud(uv: vec2f, cloudSize: vec2i, blocks: vec2i, k: i32, opaque: bool) -> vec4f {
     // Texels whose ray stopped at an opaque surface store a negative depth. Across a silhouette the
@@ -289,22 +323,34 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
         let lit = cloudShadowSmoothAt(ro + rd * sceneKm, cu.viewport.z);
         if (lit < 1.0) { shadow = mix(1.0, mix(cu.atmo2.z, 1.0, lit), surfaceVisibility(ro, rd, sceneKm)); }
     }
-    if (cloud.a > 0.999 && shadow > 0.999) { discard; }
+    let mistOn = u.groundMist.x > 0.001 && u.groundMist.w > 0.0;
+    if (cloud.a > 0.999 && shadow > 0.999 && !mistOn) { discard; }
 
     var color = vec3f(0.0);
     var transmittance = cloud.a;
+    var cloudKm = sceneKm;
     if (cloud.a < 0.999) {
         let cloudPix = vec2i(uv * u.frameInfo.zw);
-        let cloudKm = abs(textureLoad(cloudDepth, clamp(cloudPix / k, vec2i(0), blocks - 1), 0).r);
-        let haze = hazeTo(ro, rd, min(cloudKm, sceneKm));
+        cloudKm = min(sceneKm, abs(textureLoad(cloudDepth, clamp(cloudPix / k, vec2i(0), blocks - 1), 0).r));
+        let haze = hazeTo(ro, rd, cloudKm);
         // Toward the horizon the distant cloud field loses contrast into the
         // host sky. Fade its premultiplied colour and opacity together.
         let cloudHeight = (length(ro) - u.planet.y) / (u.planet.z - u.planet.y);
         let below = 1.0 - smoothstep(0.0, 0.45, cloudHeight);
         let distant = smoothstep(u.banks.z * 0.64, u.banks.z * 1.8, cloudKm);
-        let visible = 1.0 - 0.78 * u.banks.x * below * distant;
+        let visible = 1.0 - 0.78 * u.banks.x * below * distant * (1.0 - 0.84 * u.weatherStyle.y);
         color = (haze.T * cloud.rgb + (1.0 - cloud.a) * haze.L) * visible;
         transmittance = 1.0 - (1.0 - cloud.a) * visible;
+    }
+    if (mistOn) {
+        let depths = groundMistDepths(ro, rd, sceneKm, cloudKm);
+        if (depths.y > 0.001) {
+            let T = exp(-depths);
+            // Part of the mist lies behind the clouds and is masked by their opacity.
+            let veil = mix(1.0 - T.x, 1.0 - T.y, transmittance);
+            color = color * T.x + groundMistLight(ro, rd) * veil;
+            transmittance *= T.y;
+        }
     }
     return vec4f(color, transmittance * shadow);
 }

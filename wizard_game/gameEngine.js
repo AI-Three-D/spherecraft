@@ -1872,7 +1872,7 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
      * to survive the night. Subclasses can override to return a no-op.
      */
     _registerAmbiance({ spawnX, spawnY, spawnZ }) {
-        if (!this.renderer?.particleSystem) return;
+        if (this.engineConfig.features?.particles === false || !this.renderer?.particleSystem) return;
         const actorManager = this.actorManager;
         const campfireEmitter = this.renderer.particleSystem.addCampfire(
             { x: spawnX, y: spawnY, z: spawnZ },

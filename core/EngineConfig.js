@@ -566,6 +566,7 @@ export class EngineConfig {
       treesFar:         requireBool(features.treesFar         ?? true, 'features.treesFar'),
       streamedAssets:   requireBool(features.streamedAssets   ?? true, 'features.streamedAssets'),
       particles:        requireBool(features.particles        ?? true, 'features.particles'),
+      rainParticles:    requireBool(features.rainParticles    ?? false, 'features.rainParticles'),
       actors:           requireBool(features.actors           ?? true, 'features.actors'),
       clouds:           requireBool(features.clouds           ?? true, 'features.clouds'),
       lowClouds:        requireBool(features.lowClouds        ?? true, 'features.lowClouds'),

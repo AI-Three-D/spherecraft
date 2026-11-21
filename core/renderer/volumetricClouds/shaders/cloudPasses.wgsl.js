@@ -265,12 +265,16 @@ fn meanCloudDensity(weather: Weather, h: f32) -> f32 {
     if (h <= 0.0 || h >= 1.0 || weather.coverage <= 0.001) { return 0.0; }
     let profile = heightProfile((h - weather.lift) / (1.0 - weather.lift), weather.kind, weather.coverage);
     let c = saturate(weather.coverage * profile * 1.4);
-    return 0.5 * c * c * mix(0.6, 1.0, weather.coverage) * u.extra.w;
+    let dh = deckHeight(h, weather);
+    let deck = smoothstep(0.0, 0.21, dh) * (1.0 - smoothstep(0.42, 0.87, dh));
+    return 0.5 * c * c * mix(0.6, 1.0, weather.coverage) * u.extra.w
+        + deck * u.weatherStyle.y * weather.coverage * 0.11;
 }
 
 fn distantBankWeight(t: f32, cameraRadius: f32) -> f32 {
     let inside = (cameraRadius - u.planet.y) / (u.planet.z - u.planet.y);
-    return u.banks.x * smoothstep(u.banks.y, u.banks.z, t) * (1.0 - smoothstep(0.0, 0.45, inside));
+    return u.banks.x * (1.0 - u.weatherStyle.y) * smoothstep(u.banks.y, u.banks.z, t)
+        * (1.0 - smoothstep(0.0, 0.45, inside));
 }
 
 // The detailed layer loses its small puffs over distance. Filter broader masses in
@@ -348,6 +352,16 @@ fn twilightSkyFill(mu: f32, hueAngle: f32, skyVis: f32) -> vec3f {
     let localDaylight = mix(0.25, 1.0, smoothstep(-0.42, -0.15, mu));
     let fill = vec3f(0.36, 0.45, 0.63) * mix(0.27, 1.0, skyVis);
     return fill * (duskW * localDaylight * u.look2.z * 0.065 * u.sun.w);
+}
+
+fn rainCloudRadiance(light: vec3f, localH: f32, sunAngle: f32) -> vec3f {
+    let rain = u.weatherStyle.z;
+    let underside = 1.0 - smoothstep(0.12, 0.82, localH);
+    let contrast = 1.0 - rain * mix(0.12, 0.52, underside);
+    // The darker base is usually lit by the cool diffuse sky. A low sun and
+    // moonlight have their own colours, so the cool bias recedes at night.
+    let cool = rain * underside * smoothstep(-0.06, 0.37, sunAngle);
+    return light * contrast * mix(vec3f(1.0), vec3f(0.83, 0.93, 1.0), cool);
 }
 
 // Horizon Zero Dawn's in-scattering probability (Schneider, Nubis 2017): light scattered toward the
@@ -433,7 +447,7 @@ fn cloudSource(p: vec3f, rd: vec3f, footprint: f32, weather: Weather, base: Clou
             amb += mix(groundAmbM, skyAmbM * skyVis, skyMix) * (u.moon.w * u.light.x);
         }
     }
-    let S = (sunL * inScatter + amb) * sigmaS;
+    let S = rainCloudRadiance(sunL * inScatter + amb, base.localH, hueAngle) * sigmaS;
     return S;
 }
 
@@ -461,7 +475,8 @@ fn backdropLight(p: vec3f, weather: Weather, footprint: f32, cosTheta: f32,
     let twilight = twilightSkyFill(muS, hue, shade);
     let muM = dot(up, u.moon.xyz);
     let moon = cloudLightTransmittance(r, muM, muM, false) * (u.moon.w * 0.06);
-    return (sunT * (0.037 + 0.52 * rim) * shade + daylight + twilight + moon + u.ambientFloor.rgb) * u.density.w;
+    let light = sunT * (0.037 + 0.52 * rim) * shade + daylight + twilight + moon + u.ambientFloor.rgb;
+    return rainCloudRadiance(light, heightFraction(r), hue) * u.density.w;
 }
 
 struct MarchResult {
@@ -470,7 +485,7 @@ struct MarchResult {
 }
 
 fn clearWeather() -> bool {
-    return u.coverage.x <= 0.001 && u.coverage.y == 0.0;
+    return u.weatherStyle.x <= 0.001 || (u.coverage.x <= 0.001 && u.coverage.y == 0.0 && u.weatherStyle.y <= 0.001);
 }
 
 // Integral of 1/step for a step that grows with distance and is clamped to [minimum, cap].
@@ -895,7 +910,7 @@ fn proxyLayer(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
         let skyMix = saturate(0.25 + base.h);
         let ambient = mix(ambGround, ambSky * skyVis, skyMix) * u.light.x + amb * skyVis
             + daylightSkyFill(solarHue, skyVis, skyMix) + twilightSkyFill(muS, solarHue, skyVis);
-        L += T * sigmaS * (directL + ambient * (1.0 - stepT) / sigmaT);
+        L += T * sigmaS * rainCloudRadiance(directL + ambient * (1.0 - stepT) / sigmaT, base.localH, solarHue);
         let w = T * (1.0 - stepT);
         depthSum += t * w;
         weightSum += w;
@@ -907,6 +922,69 @@ fn proxyLayer(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
     res.color = vec4f(L, T);
     if (weightSum > 1.0e-4) { res.depth = depthSum / weightSum; }
     return res;
+}
+
+// A second spherical stratus volume. It uses the same scene depth as the
+// high banks, so peaks can project through it and slopes inside it are muted.
+fn marchLowClouds(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
+    var result = MarchResult(vec4f(0.0, 0.0, 0.0, 1.0), FAR_DEPTH);
+    let outer = raySphere(ro, rd, u.lowCloud.y);
+    if (outer.x >= outer.y || outer.y <= 0.0) { return result; }
+    let ground = raySphere(ro, rd, u.planet.x);
+    var limit = min(outer.y, tScene);
+    if (ground.x < ground.y && ground.y > 0.0) { limit = min(limit, max(ground.x, 0.0)); }
+    let inner = raySphere(ro, rd, u.lowCloud.x);
+    let start = max(0.0, outer.x);
+    let splits = inner.x < inner.y && inner.y > start;
+    let ends = vec2f(select(limit, min(limit, inner.x), splits), limit);
+    let starts = vec2f(start, select(limit, max(start, inner.y), splits));
+    let viewSun = clamp(cloudPhase(dot(rd, u.sun.xyz), 1.0), 0.045, 0.23);
+    var depth = 0.0;
+    for (var leg = 0; leg < 2; leg++) {
+        let dt = (ends[leg] - starts[leg]) / 24.0;
+        if (dt <= 0.0 || result.color.a < 0.004) { continue; }
+        let middle = ro + rd * (0.5 * (ends[leg] + starts[leg]));
+        let radius = length(middle);
+        let up = middle / radius;
+        let muS = dot(up, u.sun.xyz);
+        let muM = dot(up, u.moon.xyz);
+        let cameraRadius = length(ro);
+        let hue = cloudSunHueAngle(muS, dot(ro / cameraRadius, u.sun.xyz), cameraRadius);
+        let sun = cloudLightTransmittance(radius, muS, hue, true) * (u.sun.w * (1.0 - 0.58 * u.weatherStyle.y));
+        let moon = cloudLightTransmittance(radius, muM, muM, false) * (u.moon.w * 0.075);
+        let diffuse = daylightSkyFill(hue, 0.82, 0.7) + twilightSkyFill(muS, hue, 0.7)
+            + u.ambientFloor.rgb + moon;
+        let footprint = max((starts[leg] + 12.0 * dt) * u.march2.y, dt * 0.62);
+        var weather: Weather;
+        for (var i = 0; i < 24; i++) {
+            let t = starts[leg] + (f32(i) + 0.5) * dt;
+            let p = ro + rd * t;
+            if (i % 4 == 0) { weather = sampleWeather(ro + rd * min(t + 1.5 * dt, ends[leg]), footprint); }
+            let r = length(p);
+            let density = lowStratusDensity(p, r, weather, footprint);
+            if (density <= 0.0) { continue; }
+            let localH = saturate((r - u.lowCloud.x) / (u.lowCloud.y - u.lowCloud.x));
+            let selfShade = exp(-density * (1.0 - localH) * 7.0);
+            let light = rainCloudRadiance(sun * (0.046 + 0.38 * viewSun) * selfShade + diffuse, localH, hue);
+            let T = exp(-density * u.density.x * dt);
+            let absorbed = (1.0 - T) * result.color.a;
+            result.color = vec4f(result.color.rgb + light * absorbed, result.color.a * T);
+            depth += t * absorbed;
+            if (result.color.a < 0.004) { break; }
+        }
+    }
+    if (result.color.a < 0.9999) { result.depth = depth / (1.0 - result.color.a); }
+    return result;
+}
+
+fn blendCloudLayers(front: MarchResult, back: MarchResult) -> MarchResult {
+    if (front.color.a >= 0.9999) { return back; }
+    if (back.color.a >= 0.9999) { return front; }
+    let T = front.color.a * back.color.a;
+    let nearWeight = 1.0 - front.color.a;
+    let farWeight = front.color.a * (1.0 - back.color.a);
+    let depth = (nearWeight * front.depth + farWeight * back.depth) / max(1.0 - T, 1.0e-5);
+    return MarchResult(vec4f(front.color.rgb + front.color.a * back.color.rgb, T), depth);
 }
 
 // Strip the unused path when the proxy crossfade is idle.
@@ -943,6 +1021,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         } else {
             result.color = mix(result.color, proxy.color, proxyWeight);
             result.depth = mix(result.depth, proxy.depth, proxyWeight);
+        }
+    }
+    if (u.weatherStyle.w > 0.001 && u.march2.w < 0.5) {
+        let low = marchLowClouds(u.camPos.xyz, rd, tScene);
+        if (low.depth < result.depth) {
+            result = blendCloudLayers(low, result);
+        } else {
+            result = blendCloudLayers(result, low);
         }
     }
     textureStore(outColor, vec2i(id.xy), result.color);

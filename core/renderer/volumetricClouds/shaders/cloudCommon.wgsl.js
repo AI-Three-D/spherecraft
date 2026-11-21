@@ -48,10 +48,13 @@ struct CloudUniforms {
     look5: vec4f,       // x interior density variation, y isolated puff suppression, z daylight sky fill, w daylight sun gain
     banks: vec4f,       // x distant bank strength, yz transition distances (km), w inverse bank tile size
     alto: vec4f,        // x altocumulus strength, yz base and top radii, w inverse tile size
+    weatherStyle: vec4f, // cloud presence, stratiform deck, rain shading, low stratus
+    lowCloud: vec4f,    // base radius, top radius, inverse tile size
+    groundMist: vec4f,  // strength, top radius, scale height, extinction (1/km)
 }
 `;
 
-export const CLOUD_UNIFORM_VEC4_COUNT = 44;
+export const CLOUD_UNIFORM_VEC4_COUNT = 47;
 
 export const CLOUD_MATH_WGSL = /* wgsl */`
 const PI: f32 = 3.14159265358979;
@@ -314,6 +317,7 @@ struct CloudBase {
     variety: f32,   // 0..1 per cloud: picks billow size and erosion strength
     rise: vec3f,    // boil offset of the shape lookup, reused (faster) for detail
     localH: f32,    // 0 at this cloud's base .. 1 at its top (lighting: dark bases, billowy tops)
+    stratiform: f32, // optically thick deck fraction, with less erosion than cumulus
 }
 
 struct Weather {
@@ -354,7 +358,8 @@ fn sampleWeather(p: vec3f, footprint: f32) -> Weather {
     let regional = mix(w1.r, w1.b, 0.35) * 0.6 + w2.r * 0.4 + (w1.a - 0.5) * 0.2;
     let field = (sys.r - 0.5) * u.systems.y + (regional - 0.5);
     var weather: Weather;
-    weather.coverage = saturate(u.coverage.x + field * u.coverage.y);
+    let scattered = saturate(u.coverage.x + field * u.coverage.y);
+    weather.coverage = mix(scattered, max(scattered, 0.58), u.weatherStyle.y * 0.85) * u.weatherStyle.x;
     // Clusters of taller towers (Worley clumps, tens of km apart) among shallower fields.
     weather.kind = saturate(u.coverage.z + (w1.g * 0.5 + sys.g * 0.5 - 0.5) * u.coverage.w + (w1.b - 0.5) * 0.9);
     // Bases are flat per cloud but their height (the condensation level) drifts across regions by up
@@ -443,7 +448,7 @@ fn altoDensity(p: vec3f, r: f32, weather: Weather, footprint: f32) -> f32 {
 }
 
 // Weather is height-invariant and smooth, so callers may reuse one sample for nearby points.
-fn cloudBaseWithWeather(p: vec3f, h: f32, weather: Weather, footprint: f32) -> CloudBase {
+fn cumulusBase(p: vec3f, h: f32, weather: Weather, footprint: f32) -> CloudBase {
     var b: CloudBase;
     b.density = 0.0;
     b.h = h;
@@ -574,6 +579,52 @@ fn cloudBaseWithWeather(p: vec3f, h: f32, weather: Weather, footprint: f32) -> C
     return b;
 }
 
+// Sheet clouds fill the gaps between cumulus as moist weather gathers. Their
+// nearly continuous bases lower as the layer thickens toward rain.
+fn deckHeight(h: f32, weather: Weather) -> f32 {
+    let base = mix(0.16, 0.035, u.weatherStyle.z) + 0.32 * weather.lift;
+    let depth = mix(0.24, 0.49, u.weatherStyle.z);
+    return (h - base) / depth;
+}
+
+fn cloudBaseWithWeather(p: vec3f, h: f32, weather: Weather, footprint: f32) -> CloudBase {
+    var b = cumulusBase(p, h, weather, footprint);
+    if (u.weatherStyle.y <= 0.001 || weather.coverage <= 0.001) { return b; }
+    b.density *= 1.0 - 0.78 * u.weatherStyle.y;
+    let deckH = deckHeight(h, weather);
+    if (deckH <= 0.0 || deckH >= 1.0) { return b; }
+    let up = normalize(p);
+    let q = ROT_LARGE * ((up * u.planet.y + up * (length(p) - u.planet.y) * 0.32 + u.windShape.xyz) / 22.0)
+        + weather.shift * 0.3;
+    let n = textureSampleLevel(shapeTex, noiseSampler, q, max(0.0, log2(footprint * SHAPE_TEXELS / 22.0)));
+    let humidity = smoothstep(0.10, 0.56, weather.coverage);
+    let core = smoothstep(mix(0.83, 0.51, humidity), mix(1.03, 0.81, humidity), shapeSignal(n));
+    let top = mix(0.48, 1.0, core);
+    let profile = smoothstep(0.0, 0.15, deckH) * (1.0 - smoothstep(top * 0.52, top, deckH));
+    let deck = core * profile * u.weatherStyle.y * mix(0.30, 0.53, u.weatherStyle.z);
+    let total = b.density + deck;
+    b.density = saturate(total);
+    b.stratiform = deck / max(total, 1.0e-5);
+    b.localH = mix(b.localH, saturate(deckH / top), b.stratiform);
+    return b;
+}
+
+fn lowStratusDensity(p: vec3f, r: f32, weather: Weather, footprint: f32) -> f32 {
+    if (u.weatherStyle.w <= 0.001 || r <= u.lowCloud.x || r >= u.lowCloud.y) { return 0.0; }
+    let up = p / r;
+    let h = (r - u.lowCloud.x) / (u.lowCloud.y - u.lowCloud.x);
+    let flow = u.windShape.xyz * 0.58;
+    let q = ROT_REGIONAL * ((up * u.lowCloud.x + up * (r - u.lowCloud.x) * 0.46 + flow) * u.lowCloud.z)
+        + weather.shift * 0.5 + vec3f(0.2, 0.44, 0.67);
+    let n = textureSampleLevel(shapeTex, noiseSampler, q, max(0.0, log2(footprint * u.lowCloud.z * SHAPE_TEXELS)));
+    let humid = smoothstep(0.12, 0.51, weather.coverage + u.weatherStyle.w * 0.22);
+    let base = mix(0.05, 0.34, n.b);
+    let top = mix(0.54, 0.98, n.g) + 0.06 * (n.a - 0.64);
+    let profile = smoothstep(base, base + 0.17, h) * (1.0 - smoothstep(top - 0.25, top, h));
+    let coverage = smoothstep(mix(0.95, 0.70, humid), mix(1.09, 0.89, humid), shapeSignal(n) + 0.26 * (n.a - 0.62));
+    return 0.16 * coverage * profile * u.weatherStyle.w;
+}
+
 fn cloudBase(p: vec3f, footprint: f32) -> CloudBase {
     let h = heightFraction(length(p));
     if (h <= 0.0 || h >= 1.0) {
@@ -610,7 +661,7 @@ fn cloudDetail(p: vec3f, b: CloudBase, footprint: f32) -> f32 {
     // footprint over a detail texel). Thresholding sub-pixel detail cut far clouds' thin fringes into
     // single-pixel islands (dust); their silhouettes come from the base shape at that distance anyway.
     let far = select(1.0, 1.0 - smoothstep(2.5, 4.5, lod), usesDomes());
-    let cut = modifier * u.density.y * mix(0.6, 1.15, b.variety) * far;
+    let cut = modifier * u.density.y * mix(0.6, 1.15, b.variety) * far * mix(1.0, 0.32, b.stratiform);
     let delta = b.density - cut;
     // Smooth the hard erosion threshold only within the thin edge. This leaves the
     // dense interior intact and lets fragments fade into transparent wisps.
@@ -624,8 +675,10 @@ fn cloudDetail(p: vec3f, b: CloudBase, footprint: f32) -> f32 {
 fn cloudDensity(p: vec3f, footprint: f32, withDetail: bool) -> f32 {
     let r = length(p);
     let h = heightFraction(r);
-    if (h <= 0.0 || h >= 1.0) { return 0.0; }
+    let inLowLayer = u.weatherStyle.w > 0.001 && r > u.lowCloud.x && r < u.lowCloud.y;
+    if (h >= 1.0 || (h <= 0.0 && !inLowLayer)) { return 0.0; }
     let weather = sampleWeather(p, footprint);
+    if (h <= 0.0) { return lowStratusDensity(p, r, weather, footprint); }
     let b = cloudBaseWithWeather(p, h, weather, footprint);
     var density = b.density;
     if (withDetail && density > 0.0) { density = cloudDetail(p, b, footprint); }

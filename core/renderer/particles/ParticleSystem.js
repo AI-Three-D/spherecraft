@@ -411,10 +411,12 @@ export class ParticleSystem {
             ? rain.maxCameraAltitude
             : Math.max(12000, this._atmosphereHeight * 0.24);
         const cameraAltitude = this._computeCameraAltitude(camera);
+        const altitudeWeight = Math.max(0, Math.min(1, (maxAltitude - cameraAltitude) / (0.15 * maxAltitude)));
+        const spawnBudget = Math.max(0, Math.round((rain?.spawnBudgetPerFrame ?? 0) * altitudeWeight));
         const enabled =
             rain?.enabled === true &&
-            intensity > 0.02 &&
-            cameraAltitude <= maxAltitude;
+            intensity * altitudeWeight > 0.02 &&
+            spawnBudget > 0;
 
         if (!enabled) {
             if (this._weatherRainEmitter) {
@@ -440,7 +442,7 @@ export class ParticleSystem {
                 position: camera.position,
                 preset: 'rain_shower',
                 overrides: {
-                    spawnBudgetPerFrame: rain.spawnBudgetPerFrame,
+                    spawnBudgetPerFrame: spawnBudget,
                     distanceCutoff: rain.distanceCutoff,
                     lodNearDistance: rain.lodNearDistance,
                     lodFarDistance: rain.lodFarDistance,
@@ -458,7 +460,7 @@ export class ParticleSystem {
         emitter.position.x = camera.position.x;
         emitter.position.y = camera.position.y;
         emitter.position.z = camera.position.z;
-        emitter.spawnBudgetPerFrame = Math.max(0, Math.trunc(rain.spawnBudgetPerFrame ?? 0));
+        emitter.spawnBudgetPerFrame = spawnBudget;
         emitter.distanceCutoff = rain.distanceCutoff ?? emitter.distanceCutoff;
         emitter.lodNearDistance = rain.lodNearDistance ?? emitter.lodNearDistance;
         emitter.lodFarDistance = rain.lodFarDistance ?? emitter.lodFarDistance;

@@ -63,6 +63,14 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
     altoBottomKm: 7.2,
     altoTopKm: 9,
     altoTileKm: 19,
+    /** Separate stratus volume for low-cloud weather, measured above sea level. */
+    lowCloudBottomKm: 0.78,
+    lowCloudTopKm: 2.05,
+    lowCloudTileKm: 11,
+    /** Ground haze uses a thinner exponential profile than the main atmosphere. */
+    groundMistTopKm: 1.35,
+    groundMistScaleKm: 0.36,
+    groundMistExtinction: 1.6,
     msExtinction: 0.3,
     msScattering: 0.6,
     msPhase: 0.5,
@@ -294,6 +302,7 @@ export class VolumetricCloudsModule {
         this.settings = { ...DEFAULT_CLOUD_SETTINGS, ...settings };
         this.planet = { ...DEFAULT_CLOUD_PLANET, ...planet };
         this.planet.atmosphere = { ...DEFAULT_CLOUD_ATMOSPHERE, ...planet.atmosphere };
+        this.weather = null;
         this.sunDirection = normalize(sunDirection);
         this.sunIlluminance = sunIlluminance;
         this.windDirection = normalize(windDirection);
@@ -743,6 +752,7 @@ export class VolumetricCloudsModule {
 
     _writeUniforms(frame) {
         const s = this.settings;
+        const weather = this.weather;
         const R = this.planet.radiusKm;
         const atmo = this.planet.atmosphere;
         const cam = this._cameraState(frame.camera);
@@ -792,6 +802,8 @@ export class VolumetricCloudsModule {
                 s.shapeTileKm, s.shapeOffset, s.cloudShape, s.domeHeight, s.domeHeads, s.domeEdgeSharpness,
                 s.giantShare, s.giantHeight, s.giantScale, s.popcornTopKm, s._profileOldHeads, s.densityVariation,
                 s.isolatedPuffSuppression, s.altoClouds, s.altoBottomKm, s.altoTopKm, s.altoTileKm,
+                weather?.presence, weather?.deck, weather?.rainShade, weather?.low,
+                s.lowCloudBottomKm, s.lowCloudTopKm, s.lowCloudTileKm,
             ]);
         }
 
@@ -872,6 +884,11 @@ export class VolumetricCloudsModule {
             1 / Math.max(1, s.distantBanksTileKm),
             Math.max(0, s.altoClouds), R + s.altoBottomKm, R + Math.max(s.altoBottomKm + 0.01, s.altoTopKm),
             1 / Math.max(1, s.altoTileKm),
+            weather?.presence ?? 1, weather?.deck ?? 0, weather?.rainShade ?? 0, weather?.low ?? 0,
+            R + s.lowCloudBottomKm, R + Math.max(s.lowCloudBottomKm + 0.01, s.lowCloudTopKm),
+            1 / Math.max(1, s.lowCloudTileKm), 0,
+            weather?.mist ?? 0, R + Math.max(0.01, s.groundMistTopKm),
+            Math.max(0.01, s.groundMistScaleKm), Math.max(0, s.groundMistExtinction),
         ]);
         this.device.queue.writeBuffer(this._uniformBuffer, 0, data);
         this._prev = cam;
