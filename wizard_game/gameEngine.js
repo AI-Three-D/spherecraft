@@ -917,13 +917,14 @@ this.renderer.leafNormalTextureManager = this.leafNormalTextureManager;
                 }
             }
 
-            // Spawn above wherever the river actually ended up, not the
-            // independent default spawn config: the fixed straight-line
-            // demo only ever looked connected because DEMO_RIVER_ANCHOR_DIR
-            // and the spawn config happened to be manually kept pointed at
-            // the same spot. Hydrology can place the channel anywhere in a
-            // multi-km search area, so without this the player spawns with
-            // no way to find it. See RIVER_CARVE_ZERO_HEIGHT_BUG.md.
+            // For lake-cell terrain, start in the authored drainage basin.
+            // The legacy demo uses the fixed anchor or its verified channel.
+            const lakeCellDirection = this.gameDataConfig?.spawn?.lakeCellDirection;
+            if (terrainGenerator?.lakeTable && lakeCellDirection && !riverFound) {
+                dir = new Vector3(...lakeCellDirection);
+                anchorPos = new Vector3(origin.x, origin.y, origin.z)
+                    .add(dir.clone().multiplyScalar(this.planetConfig.radius));
+            }
             const spawnHeight = this.gameDataConfig?.spawn?.height ?? 800;
             const spawnPos = new Vector3(origin.x, origin.y, origin.z)
                 .add(dir.clone().multiplyScalar(this.planetConfig.radius + spawnHeight));

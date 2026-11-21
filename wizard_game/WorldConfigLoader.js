@@ -22,7 +22,7 @@ import { DEFAULT_TILE_CATALOG } from '../templates/configs/defaultTileCatalog.js
 import { buildWorldAuthoringRuntime } from '../core/world/biomeRuntime.js';
 import { buildAtmoBankAuthoringRuntime } from '../core/renderer/atmosphere-banks/AtmoBankAuthoringRuntime.js';
 import { buildParticleAuthoringRuntime } from '../core/renderer/particles/ParticleAuthoringRuntime.js';
-import { requireInt, requireNumber } from '../shared/requireUtil.js';
+import { requireInt, requireNumber, requireNumberArray } from '../shared/requireUtil.js';
 import { createAdaptiveQualityConfig } from '../core/AdaptiveQuality.js';
 import { normalizeFoothillsConfig } from '../core/world/terrain-generator/foothillsConfig.js';
 import { normalizeCalderaConfig } from '../core/world/terrain-generator/calderaConfig.js';
@@ -370,7 +370,17 @@ export class WorldConfigLoader {
             Object.assign(base.time, planet.time);
         }
         if (planet?.spawn) {
-            Object.assign(base.spawn, planet.spawn);
+            const { lakeCellDirection, ...spawn } = planet.spawn;
+            Object.assign(base.spawn, spawn);
+            if (lakeCellDirection != null) {
+                const direction = requireNumberArray(lakeCellDirection, 'spawn.lakeCellDirection', 3);
+                const [x, y, z] = direction;
+                const length = Math.hypot(x, y, z);
+                if (direction.length !== 3 || !Number.isFinite(length) || length === 0) {
+                    throw new Error('spawn.lakeCellDirection must be a nonzero 3D vector');
+                }
+                base.spawn.lakeCellDirection = direction.map(component => component / length);
+            }
         }
 
         return base;

@@ -25,6 +25,7 @@
   },
   "spawn": {
     "height":       800,
+    "lakeCellDirection": [-0.93, -0.16, 0.33],
     "spawnOnSunSide": true,
     "defaultX":     0,
     "defaultY":     800,

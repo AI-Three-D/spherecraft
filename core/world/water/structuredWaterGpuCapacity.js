@@ -6,9 +6,10 @@ export const STRUCTURED_WATER_GPU_LIMITS=Object.freeze({...WATER_GPU_CAPACITY_DE
 
 // Structured records are immutable for a published terrain generation. Size
 // their pools once; a changed generation replaces resources. Legacy services
-// can grow/refine asynchronously and retain the existing capacity policy.
+// and lake-cell services can grow asynchronously and need capacity for
+// records that arrive after startup.
 export function structuredWaterGpuCapacity(service,limits=STRUCTURED_WATER_GPU_LIMITS) {
-    if(service.stats?.structured!==true) return {};
+    if(service.terrainGenerator?.lakeTable || service.stats?.structured!==true) return {};
     const records=[...service.riverRecs.values()],riverCells=new Set();
     let segments=0,slots=1,maskSize=32;
     for(const r of records) {
