@@ -172,7 +172,10 @@ fn whiteSurface(wp: vec3<f32>, N0: vec3<f32>, xy: vec2<f32>, vel: vec2<f32>, foa
     let close = still * near;
     let far = still - close;
     var gust = 0.5;
-    if (still > 0.001) { gust = waterWind(wp, dist * 0.0011 / max(abs(dot(V, level)), 0.03)); }
+    if (still > 0.001) {
+        let cameraHeight = length(U.cameraPos - U.origin) - waterParams.planetRadius;
+        gust = waterWind(wp, dist * 0.0011 / max(abs(dot(V, level)), 0.03), cameraHeight);
+    }
     let ruffle = near * waterParams.open.a * (0.4 + 1.2 * gust);
     // How long the pattern travels before it fades into its other phase. Longer is
     // calmer; too long and shear between vertices draws it into zigzags.

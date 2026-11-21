@@ -32,6 +32,8 @@ export const WATER_LOOK_DEFAULTS = Object.freeze({
     skyColor: [0.24, 0.405, 0.55],
     reflection: 1,                    // sky reflection strength (x skyColor)
     wind: 1,                          // scales the slopes wind gives the water (waterWgsl.js waterWind)
+    distantMotionFadeStartM: 12000,    // camera altitude at which distant wind motion starts fading
+    distantMotionFadeEndM: 30000,      // orbital water is stationary beyond this altitude
     // Per metre of water path (r, g, b). Keep the wet toe visible, but
     // attenuate the broad brown bed in shallow lake mouths (2026-10-29).
     // qtDiag.water.look({ absorption }) tunes the existing body treatment.
@@ -463,6 +465,8 @@ export class WaterGpuData {
         f.set([L.absorption[0], L.absorption[1], L.absorption[2], L.closeLace], 12);
         f.fill(0, 16, 24);
         f.set([L.skyColor[0], L.skyColor[1], L.skyColor[2], L.wind], 16);
+        f[20] = Math.max(0, L.distantMotionFadeStartM);
+        f[21] = Math.max(f[20] + 1, L.distantMotionFadeEndM);
         f.set([this.whitewaterLook ? 1 : 0, 0, L.structuredRiverSurfaceStartM, L.unsolvedLakeHideM ?? 2500], 24);
         // River cross-section (waterWgsl.js WaterParams.carve / .bank). The
         // shading uses it too, so it is set even with the carve off.

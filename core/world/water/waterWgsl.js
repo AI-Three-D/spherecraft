@@ -83,7 +83,7 @@ struct WaterParams {
     // rgb: the sky the water reflects, at full day (the sky pass draws this; the
     // lighting's ambient colour is neither its colour nor its level); a: wind.
     sky: vec4<f32>,
-    simFade: vec4<f32>,        // z: dry-bank cut cap (m)
+    simFade: vec4<f32>,        // xy: distant motion altitude fade (m); z: dry-bank cut cap (m)
     // x: 1 whitewater look on; y unused; z: far water from here (m); w: unsolved
     // lakes are not drawn closer than this (m) (their grid-cell outline and coarse
     // level look wrong up close).
@@ -839,41 +839,29 @@ fn waterNoiseGrad(p: vec2<f32>) -> vec2<f32> {
 // Wind at the last surface point shaded: 0 calm, 1 ruffled (waterSurfaceTerms).
 var<private> waterWindNow: f32 = 0.5;
 
-// One wave of the wind's field: k in cycles per metre, a phase in cycles. The
-// phase wraps before sin: the products reach thousands of cycles out here.
-fn waterSwell(p: vec3<f32>, k: vec3<f32>, phase: f32) -> f32 {
-    return sin(6.2831853 * fract(dot(p, k) + phase));
-}
-// Warped waves at unrelated angles and wavelengths. Fixed-frequency sums
-// make a visibly repeating lattice over a large lake viewed from above.
-fn waterSwells(p: vec3<f32>, invM: f32, phase: f32, rate: f32) -> f32 {
-    let t = waterParams.time * rate * 2.0;
-    let warp = waterSwell(p, vec3<f32>(0.19, 0.58, -0.61) * invM * 0.31, phase * 0.43 + 0.13 * t);
-    return (waterSwell(p, vec3<f32>(0.83, 0.31, 0.47) * invM, phase + t + 0.75 * warp)
-        + waterSwell(p, vec3<f32>(-0.38, 0.86, 0.34) * invM * 1.19, phase * 0.7 - 0.61 * t - 0.56 * warp)
-        + waterSwell(p, vec3<f32>(0.29, -0.52, 0.80) * invM * 0.83, phase * 1.3 + 0.37 * t + 0.42 * warp)) * 0.3333;
+// Continuous 3D value noise avoids both periodic wave lattices and cube-face
+// seams. Coordinates are in world space so every water pass sees the same field.
+fn waterWindNoise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = waterNoise(i.xy + vec2<f32>(37.0, 113.0) * i.z + f.xy);
+    let b = waterNoise(i.xy + vec2<f32>(37.0, 113.0) * (i.z + 1.0) + f.xy);
+    return mix(a, b, u.z);
 }
 
-// How ruffled the water is, 0 calm .. 1: gusts of a few hundred metres drifting
-// over it, long across the wind. This is most of what distant water shows.
-// Each band bends the next finer one's phase, so no wave stays straight.
-// footM: a pixel's length on the water. A band leaves before it reaches it.
-// Sines, not noise: hashed noise takes eight hashes a band.
-fn waterWind(p: vec3<f32>, footM: f32) -> f32 {
-    let axis = vec3<f32>(0.62, 0.35, -0.70);
-    let s = p + axis * (dot(p, axis) * 1.6);
-    let big = waterSwells(s, 1.0 / 1100.0, 0.0, 0.0012);
-    var v = 0.5 + 0.20 * big * (1.0 - smoothstep(280.0, 660.0, footM));
-    if (footM < 230.0) {
-        let mid = waterSwells(s, 1.0 / 380.0, 0.9 * big, 0.0055);
-        v += 0.16 * mid * (1.0 - smoothstep(95.0, 230.0, footM));
-        if (footM < 72.0) {
-            let small = waterSwells(s, 1.0 / 120.0, 0.8 * mid + 0.4 * big, 0.02);
-            v += 0.11 * small * (1.0 - smoothstep(30.0, 72.0, footM));
-            if (footM < 22.0) {
-                v += 0.07 * waterSwells(s, 1.0 / 36.0, 0.8 * small, 0.09) * (1.0 - smoothstep(9.0, 22.0, footM));
-            }
-        }
+// Broad, stationary variation remains at orbital height; a finer field drifts
+// at intermediate heights. Fade its contribution, not its clock, so changing
+// altitude never rewinds or speeds up the animation. Filter each scale before
+// it becomes smaller than a pixel.
+fn waterWind(p: vec3<f32>, footM: f32, cameraHeight: f32) -> f32 {
+    let broad = waterWindNoise(p / 1100.0) - 0.5;
+    var v = 0.5 + 0.48 * broad * (1.0 - smoothstep(280.0, 660.0, footM));
+    let motion = 1.0 - smoothstep(waterParams.simFade.x, waterParams.simFade.y, cameraHeight);
+    if (footM < 230.0 && motion > 0.0) {
+        let drift = vec3<f32>(0.75, 0.23, -0.58) * waterParams.time;
+        let gust = waterWindNoise((p + drift) / 380.0) - 0.5;
+        v += 0.42 * gust * motion * (1.0 - smoothstep(95.0, 230.0, footM));
     }
     return smoothstep(0.24, 0.76, v);
 }
@@ -964,7 +952,10 @@ fn waterSurfaceTerms(
     // toward it, or diving) the surface turns over; the sky and the sun do not. With a
     // flipped up the sky read as night, a dark river above a line at eye height.
     let face = up * select(-1.0, 1.0, dot(V, up) >= 0.0);
-    waterWindNow = waterWind(worldPos, footM);
+    // Recover the planet centre from the local up vector; a lake's elevation
+    // only changes this altitude estimate by its height above the reference sphere.
+    let cameraHeight = length(cameraPos - (worldPos - up * waterParams.planetRadius)) - waterParams.planetRadius;
+    waterWindNow = waterWind(worldPos, footM, cameraHeight);
     let sigma = (0.05 + 0.09 * waterWindNow) * waterParams.sky.a;
     let cosN = max(dot(face, V), 0.0);
     let cosRough = min(sqrt(cosN * cosN + 2.56 * sigma * sigma), 1.0);
