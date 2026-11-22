@@ -11,6 +11,13 @@ import { WEATHER_CONFIG } from '../templates/configs/weatherConfig.js';
 
 const ATLAS_TEXTURE_TYPES = ['height', 'normal', 'tile', 'splatData', 'macro'];
 
+export const ORBITAL_CLOUD_PREVIEW = Object.freeze({
+  proxyStartKm: 40,
+  proxyEndKm: 80,
+  orbitResolutionScale: 0.5,
+  orbitalProxySlabs: 24,
+});
+
 export const FAIR_WEATHER_CLOUD_LOOK = Object.freeze({
   cloudShape: 'domes',
   cloudBottomKm: 4,

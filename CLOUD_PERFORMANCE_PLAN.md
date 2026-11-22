@@ -958,3 +958,49 @@ The reference is the selected detailed renderer from section 20, including the 2
 Chrome WebGPU on the M1 Pro at 1536×960 with a 768×480 cloud target. Values are the mean of the cloud-stack GPU medians across two alternating replays of 14 frames each. The ground figure uses three dedicated alternating replays of 28 frames each. Each ground replay saved 0.22–0.26 ms in the raymarch alone. The long-tail ground spikes are retained in the raw timings.
 
 Ten matched frames per view measured zero p99 opacity difference and zero p99 change in frame-to-frame opacity. Rain opacity and resolved cloud depth were identical. The displayed sky differed by one 8-bit level at p99 in steady rain and three in the fast turn. The ground, broken-cloud and overcast captures had zero p99 display difference. [Selected timings](tools/perf/cloud-results/2026-11-22/final-squeeze/selected-timings.json) · [Ground repeat](tools/perf/cloud-results/2026-11-22/final-squeeze/ground-repeat.json) · [Matched motion measurements](tools/perf/cloud-results/2026-11-22/final-squeeze/selected-motion.json).
+
+## 22. Renderer redesign
+
+The detailed renderer and the earlier experiments are preserved at `f7bbe56` on `clouds/detailed-renderer-checkpoint`. The redesign uses cloud GPU time at 1536×960 with the existing 768×480 cloud target. The replay includes cirrus, cloud shadows and the composite. The lighting bake is forced on each timed replay frame. The live benchmark also records its cost as the cloud state animates.
+
+The original Horizon Zero Dawn's published cloud timing is for a volumetric skybox. Guerrilla's later flight renderer uses a separate voxel representation, distance fields for ray-step acceleration, and its own lighting acceleration. The production examples establish that the representation matters. Their settings and timings do not specify the budget for this game's orbit, lighting, weather or complete frame. [Nubis, Evolved](https://www.guerrilla-games.com/read/nubis-evolved) · [Nubis³](https://www.guerrilla-games.com/read/nubis-cubed).
+
+The matched weather tests replayed the same camera paths in full overcast and rain. The overcast preset took 359 ms at the stationary 6 km view and 205 ms in the turn. Rain took 69 and 153 ms. In a separate diagnostic replacing shading with a constant, the fixed overcast view fell from 351 to 44 ms. The rain turn fell from 151 to 34 ms. The diagnostic leaves the density march live. Its timings are also a reason to address density and traversal after reducing lighting cost. [Matched weather](tools/perf/cloud-results/2026-11-22/renderer-redesign/matched-weather.json) · [Lighting ablation](tools/perf/cloud-results/2026-11-22/renderer-redesign/no-light.json).
+
+### Tested representations
+
+| Candidate | Result |
+|---|---|
+| Shared solar, lunar and sky transport | A 128×128×48 spherical patch stores sun and moon optical depth and sky visibility. It reuses the same lighting across the screen. The first fixed overcast trial was 392 → 175 ms, including a 2.6 ms bake. Its matched screenshot differed by 6/255 at p99. |
+| Dense voxel field over the same patch | Cached density and lighting reduced the overcast turn from 213 to 90 ms. The grid softened and moved silhouettes in the turns. The still-image p99 difference reached 123/255 in rain. Removed from the preview. |
+| Four samples across the ray's opacity distribution | Fixed overcast fell from 359 to 65 ms. Averaging points across separated cloud regions also produced a curved brightness band near the cloud base. Removed from the preview. |
+| One lighting evaluation per spatial interval | Keeps the original density samples and shades each contiguous interval at its opacity-weighted centre. The first fixed overcast trial was 360 → 87 ms and the rain turn was 160 → 60 ms. The screenshot p99 differences were six and five levels. |
+| Half density refinement inside dense intervals | Saved 2.7 ms in fixed rain. The other cases gained less than 1 ms. The selected interval preview uses the original density refinement. |
+| Earlier orbital slab handoff | The 125 km orbital pan fell from about 42 ms to 1.6 ms. Rotation-compensated p99 frame-to-frame RGB increased from 6/255 to 8/255 in the eight-slab trial. |
+
+[Shared lighting field pilot](tools/perf/cloud-results/2026-11-22/renderer-redesign/transport-pilot.json) · [Voxel density pilot](tools/perf/cloud-results/2026-11-22/renderer-redesign/voxels-pilot.json) · [Opacity bands pilot](tools/perf/cloud-results/2026-11-22/renderer-redesign/layered-pilot.json) · [Spatial intervals pilot](tools/perf/cloud-results/2026-11-22/renderer-redesign/interval-pilot.json) · [Interior refinement](tools/perf/cloud-results/2026-11-22/renderer-redesign/interval-refinement.json) · [Orbital handoff and climb](tools/perf/cloud-results/2026-11-22/renderer-redesign/orbital-motion.json).
+
+### In-game previews
+
+**Shift+U** now cycles interval lighting and the shared lighting field through the existing cloud-cache control. The game still starts with the checkpoint renderer. **Shift+O** runs the 24-slab orbital preview, with a smooth handoff 40–80 km above the cloud tops. The ground proxy and the orbital preview can run without the local lighting bake. The complete set of weather presets remains selectable.
+
+| View | Checkpoint | Interval lighting |
+|---|---:|---:|
+| Dense rain, fixed camera | 68.75 ms | 41.26 ms |
+| Fast rain turn and climb | 151.65 ms | 58.51 ms |
+| Full overcast, fixed camera | 359.99 ms | 89.34 ms |
+| Full overcast, fast turn and climb | 203.18 ms | 59.47 ms |
+| Broken-cloud flight across the cache anchor | 19.56 ms | 16.34 ms |
+| Flight at dusk | 37.75 ms | 30.01 ms |
+
+Times average the two 14-frame replay medians. The replay forces a fresh bake, which costs roughly 2.6–3.0 ms in the dense weather cases. The interval renderer showed zero p99 opacity difference and zero p99 frame-to-frame opacity difference in the matched ten-frame clips. The displayed sky differed by up to seven levels at p99. Added frame-to-frame display difference was at most three levels at p99 in the rain and overcast clips and reached five levels in the dusk flight. The dense scenes still exceed the target GPU budgets. [Selected timestamps](tools/perf/cloud-results/2026-11-22/renderer-redesign/selected-timings.json) · [Matched motion measurements](tools/perf/cloud-results/2026-11-22/renderer-redesign/selected-motion.json).
+
+The confirmed orbital preview averaged 47.5 → 3.3 ms in the pan and 53.2 → 3.4 ms at the final pose of the climb. The 24-slab motion trial measured p99 rotation-compensated RGB change of 6/255 on both renderers, with the share of samples changing by more than four levels falling from 1.52% to 1.47%. The displayed cloud pattern differs, especially during the altitude handoff. The earlier handoff remains a preview. [Orbital preview timings](tools/perf/cloud-results/2026-11-22/renderer-redesign/orbital-preview.json) · [Slab count comparison](tools/perf/cloud-results/2026-11-22/renderer-redesign/orbital-refined.json) · [Orbital pan measurements](tools/perf/cloud-results/2026-11-22/renderer-redesign/orbital-rotation.json).
+
+### Neural lighting experiment
+
+A practical first model would predict higher-order scattering at the interval shading points or when generating the shared lighting field. Direct lighting, density, depth and opacity can stay explicit. The main question is whether small, cheap spatial descriptors can capture the relevant variation in overcast and close flight. Grassi evaluated a 13–16–16–3 network of 512 multiply-accumulates per sample and reported about 20% extra GPU time for a single cloud on his setup. Disney's work used a multiscale density descriptor to learn higher-order radiance from path-traced samples across cloud exemplars. A 2026 real-time paper also shows a different route, with relightable mesh and triplane assets trained from path-traced supervision. Those asset results are relevant to the distant tier. [Grassi's experiment](https://charlesgrassi.dev/blog/neural-volumetric-clouds/) · [Disney Research Deep Scattering](https://la.disneyresearch.com/publication/deep-scattering/) · [Environmental volumetric neural shading of clouds](https://portal.research.lu.se/en/publications/environmental-volumetric-neural-shading-of-clouds-for-real-time-r/).
+
+Build the teacher from snapshots of the game's extinction field. Keep the shapes, material and atmosphere stable during each sample. Use converged offline numerical integration for direct optical depth and a volumetric path tracer that records second-and-higher-order scattering separately, with sun and sky contributions isolated where useful. Record linear HDR targets and estimator variance. Sample visible ray intervals, wisps and optically thick interiors. Hold out whole weather seeds and flight sequences, including crepuscular lighting and full overcast, for evaluation.
+
+Package small, versioned weight and normalization buffers with the engine once a model beats an analytical or tabulated baseline at matched quality and cost. Time the feature extraction, inference, and any cache refresh together on WebGPU. Compare HDR radiance, sky color and temporal error through a sun sweep and a fixed set of flight paths. Scaling 512 MACs across the current 128×128×48 cache would amount to about 403 million MACs per full refresh. The evaluation budget should account for update frequency and where the network runs. The 34–44 ms lighting-disabled measurements in the heavy views give an independent reason to redesign density traversal. Neural lighting alone leaves that cost in the frame.

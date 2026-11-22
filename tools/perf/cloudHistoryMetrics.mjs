@@ -65,6 +65,7 @@ function analyse(name) {
     const rgbaError = histogram();
     const opacityError = histogram();
     const displayError = histogram(1);
+    const displayMotionError = histogram(1);
     const radianceMotionError = histogram();
     const opacityMotionError = histogram();
     const visibleDepthErrorMeters = histogram(1000);
@@ -74,6 +75,7 @@ function analyse(name) {
     let changedFiniteDepths = 0;
     let maxDepthShiftMeters = 0;
     let last;
+    let lastDisplay;
     for (let i = 0; i < poses[0].length; i++) {
         if (JSON.stringify(poses[0][i].view) !== JSON.stringify(poses[1][i].view) ||
             JSON.stringify(poses[0][i].projection) !== JSON.stringify(poses[1][i].projection)) {
@@ -125,6 +127,16 @@ function analyse(name) {
                         Math.abs(a.data[pixel + 1] - b.data[pixel + 1]),
                         Math.abs(a.data[pixel + 2] - b.data[pixel + 2]),
                     ));
+                    if (lastDisplay && last.every(frame => frame.sky[p] > 0 && frame.sky[p] <= maxDepthKm)) {
+                        const [priorA, priorB] = lastDisplay;
+                        let difference = 0;
+                        for (let c = pixel; c < pixel + 3; c++) {
+                            const changeA = a.data[c] - priorA.data[c];
+                            const changeB = b.data[c] - priorB.data[c];
+                            difference = Math.max(difference, Math.abs(changeA - changeB));
+                        }
+                        displayMotionError.add(difference);
+                    }
                 }
             }
             if (before.sky[p] < 5e5 && after.sky[p] < 5e5 && Math.max(half[before.rgba[alpha]], half[after.rgba[alpha]]) < 0.95) {
@@ -156,6 +168,7 @@ function analyse(name) {
             }
         }
         last = frames;
+        lastDisplay = display;
     }
     return {
         frames: poses[0].length,
@@ -163,6 +176,7 @@ function analyse(name) {
         rgbaError: rgbaError.summary(),
         opacityError: opacityError.summary(),
         displayError: compareDisplay ? displayError.summary() : undefined,
+        displayMotionError: compareDisplay ? displayMotionError.summary() : undefined,
         radianceMotionError: radianceMotionError.summary(),
         opacityMotionError: opacityMotionError.summary(),
         peakFrameMotionError: peakMotion,

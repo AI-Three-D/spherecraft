@@ -524,6 +524,7 @@
         <button id="cloud-budget" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud budget preview: current renderer (Shift+K)</button>
         <button id="cloud-history" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud history preview: off (U)</button>
         <button id="cloud-cache" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud cache preview: off (Shift+U)</button>
+        <button id="cloud-orbit" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Orbital cloud preview: off (Shift+O)</button>
         <button id="sunset-depth" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Sunset colour (Shift+N)</button>
         <button id="cloud-lights" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud lights (M)</button>
         <button id="bank-preview" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Banks: existing (J)</button>
@@ -538,7 +539,7 @@
         import { GameEngine } from './gameEngine.js';
         import { FrameLoop } from './FrameLoop.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
-        import { createEngineConfig, createGameDataConfig, FAIR_WEATHER_CLOUD_LOOK } from './runtimeConfigs.js';
+        import { createEngineConfig, createGameDataConfig, FAIR_WEATHER_CLOUD_LOOK, ORBITAL_CLOUD_PREVIEW } from './runtimeConfigs.js';
         import { CLOUD_BUDGET_TIERS } from '../core/renderer/volumetricClouds/cloudBudgetTiers.js';
         import { TERRAIN_FIX_PROTOTYPES, applyTerrainFixToConfig, applyTerrainFixLive, terrainFixIndexOf } from './terrainFixPrototypes.js';
         import { WATER_FIX_PROTOTYPES, applyWaterFixLive, waterFixIndexOf } from './waterFixPrototypes.js';
@@ -4876,7 +4877,8 @@
 
         const cloudCacheButton = document.getElementById('cloud-cache');
         const cloudCacheModes = [
-            ['off', 'off'], ['light', 'cached sunlight'], ['weather', 'baked weather'], ['phase', 'per-ray scattering'],
+            ['off', 'off'], ['layered', 'interval lighting'], ['transport', 'shared lighting field'],
+            ['light', 'cached sunlight'], ['weather', 'baked weather'], ['phase', 'per-ray scattering'],
         ];
         async function stepCloudCache() {
             const clouds = window.volumetricClouds;
@@ -4892,6 +4894,17 @@
             cloudCacheButton.textContent = `Cloud cache preview: ${ready ? label : 'unavailable'} (Shift+U)`;
         }
         cloudCacheButton.addEventListener('click', stepCloudCache);
+
+        const cloudOrbitButton = document.getElementById('cloud-orbit');
+        function toggleCloudOrbit() {
+            const clouds = window.volumetricClouds;
+            if (!clouds) return;
+            const enabled = !clouds.settings.orbitalPreview;
+            clouds.settings.orbitalPreview = enabled ? ORBITAL_CLOUD_PREVIEW : null;
+            clouds.resetHistory();
+            cloudOrbitButton.textContent = `Orbital cloud preview: ${enabled ? 'on' : 'off'} (Shift+O)`;
+        }
+        cloudOrbitButton.addEventListener('click', toggleCloudOrbit);
 
         // 5. Sunset colour on clouds (VolumetricCloudsModule settings.sunsetDepth): extra atmospheric depth
         // for a low sun's light. 1 is this planet's physical (thin) air.
@@ -5003,6 +5016,7 @@
                 if (k === 'i') cloudGroundStep();
                 if (k === 'k' && !e.ctrlKey && !e.altKey && !e.metaKey) (e.shiftKey ? cloudBudgetStep : toggleCloudDeck)();
                 if (k === 'u' && !e.ctrlKey && !e.altKey && !e.metaKey) (e.shiftKey ? stepCloudCache : toggleCloudHistory)();
+                if (k === 'o' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) toggleCloudOrbit();
                 if (k === 'p') (e.shiftKey ? cloudShapeStep : cloudOffsetStep)();
                 if (k === 'f') (e.shiftKey ? cloudLookStep : cloudFitStep)();
                 if (k === 'm') (e.shiftKey ? nightLookStep : cloudLightsStep)();

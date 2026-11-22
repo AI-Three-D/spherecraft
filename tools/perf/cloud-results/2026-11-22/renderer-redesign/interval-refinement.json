@@ -1,0 +1,1161 @@
+{
+  "before": "http://127.0.0.1:8000",
+  "after": "http://127.0.0.1:8000",
+  "chrome": "Chrome/158.0.8127.36",
+  "width": 1024,
+  "height": 640,
+  "dpr": 1.5,
+  "tier": "ultra",
+  "scale": 0.5,
+  "afterScale": 0.5,
+  "game": true,
+  "runtimeLook": true,
+  "beforeSettings": {
+    "cloudCacheMode": "layered"
+  },
+  "afterSettings": {
+    "cloudCacheMode": "layered",
+    "cloudIntervalRefinement": true
+  },
+  "sampleFrames": 9,
+  "warmFrames": 5,
+  "rounds": 1,
+  "cases": {
+    "game-history-turn": {
+      "name": "game-history-turn",
+      "view": {
+        "altitudeKm": 6.54,
+        "latDeg": -6.81,
+        "lonDeg": 19.64,
+        "headingDeg": 4.07,
+        "pitchDeg": -3.61
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "weatherPreset": "rain"
+      },
+      "motion": {
+        "headingPerFrame": 0.8,
+        "climbPerFrame": 0.015,
+        "longitudePerFrame": 0.001,
+        "latitudePerFrame": 0
+      },
+      "cloudDeltaSeconds": 0.03333333333333333,
+      "before": [
+        {
+          "fps": 9.758213162776842,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 36.73920728571429,
+              "p95": 179.340846,
+              "last": 31.592768
+            },
+            {
+              "name": "clouds shadow",
+              "avg": 0.29857285714285714,
+              "p95": 0.376411,
+              "last": 0.287121
+            },
+            {
+              "name": "clouds layered cache",
+              "avg": 3.3935611428571426,
+              "p95": 4.546388,
+              "last": 3.055036
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 61.03517614285714,
+              "p95": 69.299693,
+              "last": 61.517395
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.14661057142857145,
+              "p95": 0.415452,
+              "last": 0.100456
+            },
+            {
+              "name": "clouds composite",
+              "avg": 66.18214485714284,
+              "p95": 73.33938,
+              "last": 66.087783
+            },
+            {
+              "name": "total",
+              "avg": 115.47193471428571,
+              "p95": 249.750773,
+              "last": 70.114098
+            }
+          ],
+          "samples": 7,
+          "conditions": {
+            "sunElevation": 15.2361888233116,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.268,
+            "weather": {
+              "presence": 1,
+              "deck": 0.96,
+              "rainShade": 0.85,
+              "low": 0.08,
+              "mist": 0.52
+            },
+            "towerMode": "off",
+            "historyReuseActive": false,
+            "cloudCacheMode": "layered",
+            "cloudBudgetMode": "off"
+          },
+          "isolatedCloudStack": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.35326224999999994,
+                "p95": 0.461743,
+                "last": 0.33712,
+                "p50": 0.33712
+              },
+              {
+                "name": "clouds shadow",
+                "avg": 0.45218416666666666,
+                "p95": 0.495827,
+                "last": 0.387244,
+                "p50": 0.4812
+              },
+              {
+                "name": "clouds layered cache",
+                "avg": 2.963680416666666,
+                "p95": 2.990163,
+                "last": 2.958372,
+                "p50": 2.965163
+              },
+              {
+                "name": "clouds raymarch",
+                "avg": 56.496360333333335,
+                "p95": 58.466608,
+                "last": 58.217862,
+                "p50": 55.952939
+              },
+              {
+                "name": "clouds spatial",
+                "avg": 0.10087691666666666,
+                "p95": 0.108748,
+                "last": 0.100873,
+                "p50": 0.100873
+              },
+              {
+                "name": "clouds composite",
+                "avg": 61.23491641666667,
+                "p95": 63.261035,
+                "last": 62.850375,
+                "p50": 60.764698
+              },
+              {
+                "name": "total",
+                "avg": 61.30643274999999,
+                "p95": 63.339618,
+                "last": 62.924415,
+                "p50": 60.84403
+              }
+            ],
+            "samples": 12,
+            "meanWallMs": 62.375
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 10.413051023985922,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 24.387145999999998,
+              "p95": 112.468284,
+              "last": 25.478696
+            },
+            {
+              "name": "clouds shadow",
+              "avg": 0.3298875714285714,
+              "p95": 0.388077,
+              "last": 0.30387
+            },
+            {
+              "name": "clouds layered cache",
+              "avg": 8.226076857142859,
+              "p95": 10.016972,
+              "last": 6.223697
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 59.884211,
+              "p95": 63.689361,
+              "last": 57.010088
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.11894428571428571,
+              "p95": 0.12179,
+              "last": 0.119039
+            },
+            {
+              "name": "clouds composite",
+              "avg": 67.59770714285715,
+              "p95": 72.581934,
+              "last": 61.426438
+            },
+            {
+              "name": "total",
+              "avg": 97.04378742857143,
+              "p95": 180.460456,
+              "last": 68.600495
+            }
+          ],
+          "samples": 7,
+          "conditions": {
+            "sunElevation": 15.2361888233116,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.268,
+            "weather": {
+              "presence": 1,
+              "deck": 0.96,
+              "rainShade": 0.85,
+              "low": 0.08,
+              "mist": 0.52
+            },
+            "towerMode": "off",
+            "historyReuseActive": false,
+            "cloudCacheMode": "layered",
+            "cloudBudgetMode": "off"
+          },
+          "isolatedCloudStack": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.4980201666666666,
+                "p95": 1.111108,
+                "last": 0.371744,
+                "p50": 0.508534
+              },
+              {
+                "name": "clouds shadow",
+                "avg": 0.5128290000000001,
+                "p95": 1.172773,
+                "last": 0.482576,
+                "p50": 0.482576
+              },
+              {
+                "name": "clouds layered cache",
+                "avg": 3.0254053333333335,
+                "p95": 3.16416,
+                "last": 2.949747,
+                "p50": 3.000371
+              },
+              {
+                "name": "clouds raymarch",
+                "avg": 55.98435758333333,
+                "p95": 57.214044,
+                "last": 55.186366,
+                "p50": 55.948314
+              },
+              {
+                "name": "clouds spatial",
+                "avg": 0.12102241666666665,
+                "p95": 0.321578,
+                "last": 0.100416,
+                "p50": 0.106748
+              },
+              {
+                "name": "clouds composite",
+                "avg": 60.76766658333332,
+                "p95": 61.923764,
+                "last": 59.954419,
+                "p50": 61.202774
+              },
+              {
+                "name": "total",
+                "avg": 54.792580750000006,
+                "p95": 61.83414,
+                "last": 60.034126,
+                "p50": 60.55866
+              }
+            ],
+            "samples": 12,
+            "meanWallMs": 62.82499999925494
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 0.01585761176215278,
+        "p95": 0,
+        "p99": 1,
+        "fractionOver5": 0
+      }
+    },
+    "game-history-rain-10hz": {
+      "name": "game-history-rain-10hz",
+      "view": {
+        "altitudeKm": 6,
+        "headingDeg": 55,
+        "pitchDeg": 2
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "weatherPreset": "rain"
+      },
+      "motion": {
+        "headingPerFrame": 0,
+        "climbPerFrame": 0,
+        "longitudePerFrame": 0,
+        "latitudePerFrame": 0
+      },
+      "cloudDeltaSeconds": 0.1,
+      "before": [
+        {
+          "fps": 13.964313421256788,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 12.272979571428575,
+              "p95": 40.569965,
+              "last": 2.930997
+            },
+            {
+              "name": "clouds shadow",
+              "avg": 0.5153672857142857,
+              "p95": 0.788863,
+              "last": 0.788863
+            },
+            {
+              "name": "clouds layered cache",
+              "avg": 5.164665142857143,
+              "p95": 5.712787,
+              "last": 4.891509
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 42.891946714285716,
+              "p95": 63.144995,
+              "last": 57.733077
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.13963442857142858,
+              "p95": 0.245455,
+              "last": 0.241537
+            },
+            {
+              "name": "clouds composite",
+              "avg": 49.61065971428571,
+              "p95": 70.506049,
+              "last": 63.087538
+            },
+            {
+              "name": "total",
+              "avg": 57.56409785714285,
+              "p95": 114.123717,
+              "last": 68.130253
+            }
+          ],
+          "samples": 7,
+          "conditions": {
+            "sunElevation": 35.0000002294618,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.268,
+            "weather": {
+              "presence": 1,
+              "deck": 0.96,
+              "rainShade": 0.85,
+              "low": 0.08,
+              "mist": 0.52
+            },
+            "towerMode": "off",
+            "historyReuseActive": false,
+            "cloudCacheMode": "layered",
+            "cloudBudgetMode": "off"
+          },
+          "isolatedCloudStack": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.3969143333333333,
+                "p95": 0.574492,
+                "last": 0.5177,
+                "p50": 0.343161
+              },
+              {
+                "name": "clouds shadow",
+                "avg": 0.5589010833333332,
+                "p95": 0.597408,
+                "last": 0.565407,
+                "p50": 0.565407
+              },
+              {
+                "name": "clouds layered cache",
+                "avg": 2.91399375,
+                "p95": 3.09391,
+                "last": 2.927705,
+                "p50": 2.893456
+              },
+              {
+                "name": "clouds raymarch",
+                "avg": 36.09456016666667,
+                "p95": 37.501428,
+                "last": 35.870494,
+                "p50": 35.846453
+              },
+              {
+                "name": "clouds spatial",
+                "avg": 0.09790816666666664,
+                "p95": 0.103165,
+                "last": 0.093373,
+                "p50": 0.098914
+              },
+              {
+                "name": "clouds composite",
+                "avg": 40.91337933333333,
+                "p95": 42.244605,
+                "last": 40.743878,
+                "p50": 40.743878
+              },
+              {
+                "name": "total",
+                "avg": 40.99189891666666,
+                "p95": 42.325396,
+                "last": 40.839085,
+                "p50": 40.827169
+              }
+            ],
+            "samples": 12,
+            "meanWallMs": 42.125
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 16.0199359203413,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 17.832578571428574,
+              "p95": 68.43808,
+              "last": 2.697084
+            },
+            {
+              "name": "clouds shadow",
+              "avg": 0.3734107142857143,
+              "p95": 0.419285,
+              "last": 0.347786
+            },
+            {
+              "name": "clouds layered cache",
+              "avg": 4.260690857142857,
+              "p95": 6.098615,
+              "last": 2.93133
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 33.95642828571429,
+              "p95": 36.460776,
+              "last": 36.460776
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.09968285714285716,
+              "p95": 0.115789,
+              "last": 0.115789
+            },
+            {
+              "name": "clouds composite",
+              "avg": 40.72741442857143,
+              "p95": 44.311698,
+              "last": 41.356869
+            },
+            {
+              "name": "total",
+              "avg": 50.548806285714285,
+              "p95": 84.597918,
+              "last": 45.528306
+            }
+          ],
+          "samples": 7,
+          "conditions": {
+            "sunElevation": 35.0000002294618,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.268,
+            "weather": {
+              "presence": 1,
+              "deck": 0.96,
+              "rainShade": 0.85,
+              "low": 0.08,
+              "mist": 0.52
+            },
+            "towerMode": "off",
+            "historyReuseActive": false,
+            "cloudCacheMode": "layered",
+            "cloudBudgetMode": "off"
+          },
+          "isolatedCloudStack": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.42411150000000003,
+                "p95": 1.010234,
+                "last": 0.341287,
+                "p50": 0.341287
+              },
+              {
+                "name": "clouds shadow",
+                "avg": 0.53707825,
+                "p95": 0.576241,
+                "last": 0.469826,
+                "p50": 0.554867
+              },
+              {
+                "name": "clouds layered cache",
+                "avg": 2.8953620833333336,
+                "p95": 2.944871,
+                "last": 2.913998,
+                "p50": 2.890205
+              },
+              {
+                "name": "clouds raymarch",
+                "avg": 33.47351041666666,
+                "p95": 34.929675,
+                "last": 34.218228,
+                "p50": 33.293992
+              },
+              {
+                "name": "clouds spatial",
+                "avg": 0.11228283333333333,
+                "p95": 0.317704,
+                "last": 0.099956,
+                "p50": 0.094374
+              },
+              {
+                "name": "clouds composite",
+                "avg": 38.269343166666665,
+                "p95": 39.722394,
+                "last": 38.920073,
+                "p50": 38.059627
+              },
+              {
+                "name": "total",
+                "avg": 38.36311958333334,
+                "p95": 39.806726,
+                "last": 38.990989,
+                "p50": 38.17
+              }
+            ],
+            "samples": 12,
+            "meanWallMs": 39.375
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 0.03421834309895833,
+        "p95": 0,
+        "p99": 1,
+        "fractionOver5": 0.000010850694444444445
+      }
+    },
+    "game-weather-overcast-turn": {
+      "name": "game-weather-overcast-turn",
+      "view": {
+        "altitudeKm": 6.54,
+        "latDeg": -6.81,
+        "lonDeg": 19.64,
+        "headingDeg": 4.07,
+        "pitchDeg": -3.61
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "weatherPreset": "overcast"
+      },
+      "motion": {
+        "headingPerFrame": 0.8,
+        "climbPerFrame": 0.015,
+        "longitudePerFrame": 0.001,
+        "latitudePerFrame": 0
+      },
+      "cloudDeltaSeconds": 0.03333333333333333,
+      "before": [
+        {
+          "fps": 11.44310235219326,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 14.438517428571428,
+              "p95": 57.777119,
+              "last": 18.541342
+            },
+            {
+              "name": "clouds shadow",
+              "avg": 0.8667547142857143,
+              "p95": 2.473921,
+              "last": 0.247746
+            },
+            {
+              "name": "clouds layered cache",
+              "avg": 4.4150339999999995,
+              "p95": 6.479151,
+              "last": 2.68575
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 61.858068571428575,
+              "p95": 65.68154,
+              "last": 59.071724
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.10164157142857143,
+              "p95": 0.106039,
+              "last": 0.101541
+            },
+            {
+              "name": "clouds composite",
+              "avg": 68.48582385714286,
+              "p95": 73.1718,
+              "last": 63.598405
+            },
+            {
+              "name": "total",
+              "avg": 89.98462085714287,
+              "p95": 136.624498,
+              "last": 67.095226
+            }
+          ],
+          "samples": 7,
+          "conditions": {
+            "sunElevation": 15.2361888233116,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.256,
+            "weather": {
+              "presence": 1,
+              "deck": 0.86,
+              "rainShade": 0.22,
+              "low": 0,
+              "mist": 0.23
+            },
+            "towerMode": "off",
+            "historyReuseActive": false,
+            "cloudCacheMode": "layered",
+            "cloudBudgetMode": "off"
+          },
+          "isolatedCloudStack": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.3738310833333333,
+                "p95": 0.495367,
+                "last": 0.320328,
+                "p50": 0.326953
+              },
+              {
+                "name": "clouds shadow",
+                "avg": 0.44658708333333336,
+                "p95": 0.472451,
+                "last": 0.44891,
+                "p50": 0.460702
+              },
+              {
+                "name": "clouds layered cache",
+                "avg": 2.6619523333333333,
+                "p95": 2.680126,
+                "last": 2.661085,
+                "p50": 2.661085
+              },
+              {
+                "name": "clouds raymarch",
+                "avg": 57.792173749999996,
+                "p95": 60.257498,
+                "last": 57.481956,
+                "p50": 57.524289
+              },
+              {
+                "name": "clouds spatial",
+                "avg": 0.09829341666666665,
+                "p95": 0.104539,
+                "last": 0.104539,
+                "p50": 0.099999
+              },
+              {
+                "name": "clouds composite",
+                "avg": 62.18234291666666,
+                "p95": 64.501808,
+                "last": 61.87864,
+                "p50": 61.914638
+              },
+              {
+                "name": "total",
+                "avg": 62.26125125000001,
+                "p95": 64.575182,
+                "last": 61.959138,
+                "p50": 61.998469
+              }
+            ],
+            "samples": 12,
+            "meanWallMs": 63.30000000074506
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 13.208100968478535,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 3.5868621111111114,
+              "p95": 10.18747,
+              "last": 1.447061
+            },
+            {
+              "name": "clouds shadow",
+              "avg": 0.539139888888889,
+              "p95": 2.437171,
+              "last": 0.362745
+            },
+            {
+              "name": "clouds layered cache",
+              "avg": 4.863698888888889,
+              "p95": 6.052408,
+              "last": 5.806328
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 62.82116633333333,
+              "p95": 75.110312,
+              "last": 56.971631
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.10567433333333334,
+              "p95": 0.111541,
+              "last": 0.10704
+            },
+            {
+              "name": "clouds composite",
+              "avg": 69.38734422222223,
+              "p95": 82.375577,
+              "last": 63.957775
+            },
+            {
+              "name": "total",
+              "avg": 71.46502077777778,
+              "p95": 85.683693,
+              "last": 65.094507
+            }
+          ],
+          "samples": 9,
+          "conditions": {
+            "sunElevation": 15.2361888233116,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.256,
+            "weather": {
+              "presence": 1,
+              "deck": 0.86,
+              "rainShade": 0.22,
+              "low": 0,
+              "mist": 0.23
+            },
+            "towerMode": "off",
+            "historyReuseActive": false,
+            "cloudCacheMode": "layered",
+            "cloudBudgetMode": "off"
+          },
+          "isolatedCloudStack": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.3791400833333333,
+                "p95": 0.481493,
+                "last": 0.266704,
+                "p50": 0.362162
+              },
+              {
+                "name": "clouds shadow",
+                "avg": 0.43053491666666677,
+                "p95": 0.476201,
+                "last": 0.441576,
+                "p50": 0.448285
+              },
+              {
+                "name": "clouds layered cache",
+                "avg": 2.6606604999999997,
+                "p95": 2.676125,
+                "last": 2.661917,
+                "p50": 2.661917
+              },
+              {
+                "name": "clouds raymarch",
+                "avg": 57.59548541666666,
+                "p95": 59.758838,
+                "last": 57.16271,
+                "p50": 57.272626
+              },
+              {
+                "name": "clouds spatial",
+                "avg": 0.09973116666666666,
+                "p95": 0.104873,
+                "last": 0.100123,
+                "p50": 0.100123
+              },
+              {
+                "name": "clouds composite",
+                "avg": 61.95609291666667,
+                "p95": 64.089022,
+                "last": 61.501894,
+                "p50": 61.694976
+              },
+              {
+                "name": "total",
+                "avg": 62.044035916666665,
+                "p95": 64.228853,
+                "last": 61.624517,
+                "p50": 61.779141
+              }
+            ],
+            "samples": 12,
+            "meanWallMs": 63.083333333333336
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 0.07756618923611111,
+        "p95": 0,
+        "p99": 1,
+        "fractionOver5": 0.002112494574652778
+      }
+    },
+    "game-weather-overcast-fixed": {
+      "name": "game-weather-overcast-fixed",
+      "view": {
+        "altitudeKm": 6,
+        "headingDeg": 55,
+        "pitchDeg": 2
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {
+        "weatherPreset": "overcast"
+      },
+      "motion": {
+        "headingPerFrame": 0,
+        "climbPerFrame": 0,
+        "longitudePerFrame": 0,
+        "latitudePerFrame": 0
+      },
+      "cloudDeltaSeconds": 0.1,
+      "before": [
+        {
+          "fps": 9.421124254043432,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 12.166277444444445,
+              "p95": 35.121547,
+              "last": 1.950553
+            },
+            {
+              "name": "clouds shadow",
+              "avg": 0.5297606666666667,
+              "p95": 1.769598,
+              "last": 0.338203
+            },
+            {
+              "name": "clouds layered cache",
+              "avg": 4.104113444444444,
+              "p95": 5.779954,
+              "last": 3.844192
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 84.42987877777779,
+              "p95": 88.588233,
+              "last": 83.963094
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.097485,
+              "p95": 0.103415,
+              "last": 0.096666
+            },
+            {
+              "name": "clouds composite",
+              "avg": 90.55773822222223,
+              "p95": 95.269755,
+              "last": 90.694699
+            },
+            {
+              "name": "total",
+              "avg": 92.67595166666666,
+              "p95": 97.064102,
+              "last": 92.298634
+            }
+          ],
+          "samples": 9,
+          "conditions": {
+            "sunElevation": 35.0000002294618,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.256,
+            "weather": {
+              "presence": 1,
+              "deck": 0.86,
+              "rainShade": 0.22,
+              "low": 0,
+              "mist": 0.23
+            },
+            "towerMode": "off",
+            "historyReuseActive": false,
+            "cloudCacheMode": "layered",
+            "cloudBudgetMode": "off"
+          },
+          "isolatedCloudStack": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.37221991666666665,
+                "p95": 0.5412,
+                "last": 0.5412,
+                "p50": 0.339911
+              },
+              {
+                "name": "clouds shadow",
+                "avg": 0.4988153333333332,
+                "p95": 0.534242,
+                "last": 0.526284,
+                "p50": 0.520617
+              },
+              {
+                "name": "clouds layered cache",
+                "avg": 2.590946666666667,
+                "p95": 2.603335,
+                "last": 2.603335,
+                "p50": 2.592003
+              },
+              {
+                "name": "clouds raymarch",
+                "avg": 84.82168816666668,
+                "p95": 87.312834,
+                "last": 84.976161,
+                "p50": 84.976161
+              },
+              {
+                "name": "clouds spatial",
+                "avg": 0.10169658333333333,
+                "p95": 0.107458,
+                "last": 0.100082,
+                "p50": 0.102207
+              },
+              {
+                "name": "clouds composite",
+                "avg": 89.26679741666668,
+                "p95": 91.782434,
+                "last": 89.44426,
+                "p50": 89.44426
+              },
+              {
+                "name": "total",
+                "avg": 89.34724775,
+                "p95": 91.856641,
+                "last": 89.521884,
+                "p50": 89.521884
+              }
+            ],
+            "samples": 12,
+            "meanWallMs": 90.41666666666667
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 10.30809758339416,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 3.715422375,
+              "p95": 14.561862,
+              "last": 2.171633
+            },
+            {
+              "name": "clouds shadow",
+              "avg": 0.352989375,
+              "p95": 0.417784,
+              "last": 0.35562
+            },
+            {
+              "name": "clouds layered cache",
+              "avg": 4.462166375,
+              "p95": 6.398611,
+              "last": 3.530614
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 83.857491375,
+              "p95": 87.554372,
+              "last": 83.019733
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.1007695,
+              "p95": 0.106624,
+              "last": 0.093665
+            },
+            {
+              "name": "clouds composite",
+              "avg": 90.04568375000001,
+              "p95": 93.576032,
+              "last": 89.172598
+            },
+            {
+              "name": "total",
+              "avg": 103.197237875,
+              "p95": 180.866282,
+              "last": 91.103277
+            }
+          ],
+          "samples": 8,
+          "conditions": {
+            "sunElevation": 35.0000002294618,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.256,
+            "weather": {
+              "presence": 1,
+              "deck": 0.86,
+              "rainShade": 0.22,
+              "low": 0,
+              "mist": 0.23
+            },
+            "towerMode": "off",
+            "historyReuseActive": false,
+            "cloudCacheMode": "layered",
+            "cloudBudgetMode": "off"
+          },
+          "isolatedCloudStack": {
+            "passes": [
+              {
+                "name": "cirrus far",
+                "avg": 0.37829625,
+                "p95": 0.541076,
+                "last": 0.309246,
+                "p50": 0.342453
+              },
+              {
+                "name": "clouds shadow",
+                "avg": 0.51929775,
+                "p95": 0.678156,
+                "last": 0.506409,
+                "p50": 0.517326
+              },
+              {
+                "name": "clouds layered cache",
+                "avg": 2.6511437499999997,
+                "p95": 3.337866,
+                "last": 3.337866,
+                "p50": 2.585961
+              },
+              {
+                "name": "clouds raymarch",
+                "avg": 84.81707083333335,
+                "p95": 88.781604,
+                "last": 86.719927,
+                "p50": 84.136508
+              },
+              {
+                "name": "clouds spatial",
+                "avg": 0.10275516666666666,
+                "p95": 0.109831,
+                "last": 0.104623,
+                "p50": 0.104165
+              },
+              {
+                "name": "clouds composite",
+                "avg": 89.33011933333334,
+                "p95": 93.274035,
+                "last": 91.853848,
+                "p50": 88.602106
+              },
+              {
+                "name": "total",
+                "avg": 89.41790966666666,
+                "p95": 93.355076,
+                "last": 92.058345,
+                "p50": 88.68298
+              }
+            ],
+            "samples": 12,
+            "meanWallMs": 90.49166666716337
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 0.138885498046875,
+        "p95": 1,
+        "p99": 3,
+        "fractionOver5": 0.003848605685763889
+      }
+    }
+  }
+}

@@ -159,7 +159,13 @@ const gameCases = [
     { ...motion(entry('game-history-wind', horizon, 35, { weatherPreset: 'overcast' }), 0), cloudDeltaSeconds: 1 / 30 },
     { ...motion(entry('game-history-turn', grazing, 35, { weatherPreset: 'rain' }), 0.8, 0.015, 0.001), cloudDeltaSeconds: 1 / 30 },
     { ...motion(entry('game-history-rain-10hz', inside, 35, { weatherPreset: 'rain' }), 0), cloudDeltaSeconds: 0.1 },
+    { ...motion(entry('game-weather-overcast-turn', grazing, 35, { weatherPreset: 'overcast' }), 0.8, 0.015, 0.001), cloudDeltaSeconds: 1 / 30 },
+    { ...motion(entry('game-weather-overcast-fixed', inside, 35, { weatherPreset: 'overcast' }), 0), cloudDeltaSeconds: 0.1 },
+    entry('game-orbit-clouds', orbit, 35),
+    motion(entry('game-orbit-cloud-pan', orbit, 35), 0.25),
+    motion(entry('game-orbit-cloud-climb', { ...orbit, altitudeKm: 65 }, 35), 0.10, 2.5),
     { ...motion(entry('game-cache-weather-handoff', { ...horizon, lonDeg: 2.3 }, 35), 0.12, 0, 0.10), cloudDeltaSeconds: 1 / 30 },
+    { ...motion(entry('game-cloud-cache-face-crossing', { ...horizon, lonDeg: 44.7 }, 35), 0.12, 0, 0.10), cloudDeltaSeconds: 1 / 30 },
     entry('game-budget-above-cirrus', { ...above, altitudeKm: 16, pitchDeg: -28 }, 35),
     motion(entry('game-motion-flight-dusk', { ...inside, pitchDeg: -7 }, 5), 0.8, 0.06, 0.032),
     motion(entry('game-motion-reference', {
@@ -412,6 +418,8 @@ async function setupGame(page) {
                         // per-frame lookup and shadow costs of a moving, animated scene.
                         clouds._lastShadowInputs = null;
                         cloudComposite._hazeKey = null;
+                        const cache = clouds._sampleCache?.variants.get(clouds._activeCacheMode);
+                        if (cache) cache.key = null;
                         clouds.compute(null, encoder);
                         composite.call(cloudComposite, encoder, ...compositeInputs);
                     }

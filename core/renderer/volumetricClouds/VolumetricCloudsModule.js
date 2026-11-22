@@ -101,6 +101,8 @@ export const DEFAULT_CLOUD_SETTINGS = Object.freeze({
     conservativeTemporal: false,
     /** Debug preview for per-ray scattering, baked weather, or cached sun optical depth. */
     cloudCacheMode: 'off',
+    orbitalProxySlabs: 8,
+    orbitalPreview: null,
     cloudBudgetMode: 'off',
     /** 1 marches every pixel each frame; 2 marches one pixel per 2x2 block and reconstructs the rest. */
     interleave: 2,
@@ -659,8 +661,8 @@ export class VolumetricCloudsModule {
         };
         this._makeSampleCacheLayouts = (mode, count) => {
             if (mode === 'phase') return { raymarch: this._layouts.raymarch };
-            const dimension = mode === 'light' ? '3d' : '2d';
-            const sampled = Array(count).fill(mode === 'light' ? tex3d : tex2d);
+            const dimension = mode === 'weather' ? '2d' : '3d';
+            const sampled = Array(count).fill(dimension === '3d' ? tex3d : tex2d);
             const storage = Array(count).fill(store('rgba16float', dimension));
             return { dimension, raymarch: layout([...raymarch, ...sampled]), bake: layout([...noise, ...storage]) };
         };
@@ -788,13 +790,14 @@ export class VolumetricCloudsModule {
         // Switch resolution with hysteresis once the cheap far proxy has fully taken over. Only the
         // far (orbital) proxy: the near-ground proxy keeps resolutionScale, so it is as sharp as the
         // raymarch it crossfades into (at the orbit scale it was visibly crisper).
-        if (s.farProxy && Number.isFinite(s.orbitResolutionScale)) {
+        const orbitScale = s.orbitalPreview?.orbitResolutionScale ?? s.orbitResolutionScale;
+        if (s.farProxy && Number.isFinite(orbitScale)) {
             if (this.farProxyWeight >= 0.999) this._orbitRes = true;
             else if (this.farProxyWeight < 0.95) this._orbitRes = false;
         } else {
             this._orbitRes = false;
         }
-        const wanted = this._orbitRes ? s.orbitResolutionScale : s.resolutionScale;
+        const wanted = this._orbitRes ? orbitScale : s.resolutionScale;
         const budget = this.budgetTier;
         let scale = Math.min(1, Math.max(0.2, wanted));
         if (budget) {
@@ -1093,7 +1096,10 @@ export class VolumetricCloudsModule {
         const extent = s.shadowExtentKm;
         const aboveTops = altitude - s.cloudTopKm;
         this.shadowFade = 1 - smoothstep(s.shadowFadeStartKm, s.shadowFadeEndKm, aboveTops);
-        this.farProxyWeight = s.farProxy ? smoothstep(s.proxyStartKm, s.proxyEndKm, aboveTops) : 0;
+        const orbitStart = s.orbitalPreview?.proxyStartKm ?? s.proxyStartKm;
+        const orbitEnd = s.orbitalPreview?.proxyEndKm ?? s.proxyEndKm;
+        const orbitSlabs = s.orbitalPreview?.orbitalProxySlabs ?? s.orbitalProxySlabs;
+        this.farProxyWeight = s.farProxy ? smoothstep(orbitStart, orbitEnd, aboveTops) : 0;
         this.proxyWeight = this.farProxyWeight;
         if (s.groundProxyBelowKm > 0) {
             const ground = s.groundProxyBlendKm > 0
@@ -1205,7 +1211,7 @@ export class VolumetricCloudsModule {
             Math.max(0, s.inScatter ?? 0), Math.max(0, s.aoSide ?? 0), Math.max(0, s.inScatterGain ?? 2.5), Math.max(0.05, s.sunsetAltitudeScale ?? 1),
             Math.max(0.5, s.domeEdgeSharpness ?? 1.5), Math.max(0, s.domeHeads ?? 0.6), Math.max(0, s.duskSkyBoost ?? 0), s.stepStratify === 'ign' ? 2 : s.stepStratify ? 1 : 0,
             Math.max(0, s.stepAnchorKm ?? 0), Math.max(0, s.detailPixelFootprint ?? 0),
-            0, 0,
+            Math.max(1, Math.min(32, Math.round(orbitSlabs))), 0,
             Math.min(1, Math.max(0, s.twilightCloudLight)), Math.max(0, s.detailMinTransmittance ?? 0), this._spatialStride, Math.max(0, s.edgeWisps ?? 0),
             Math.max(0, Math.min(1, s.densityVariation ?? 0)),
             Math.max(0, Math.min(1, s.isolatedPuffSuppression ?? 0)),
@@ -1224,8 +1230,8 @@ export class VolumetricCloudsModule {
             Math.min(1, Math.max(0, reuseBelow)), this._proxyCrossfade ? 1 : 0, stretchMode ? 1 : 0, deckMode ? 1 : 0,
         ]);
         this._updateRayHistory(cam, prev, altitude, moon, weatherStyle);
-        if (s.cloudCacheMode === 'weather' || s.cloudCacheMode === 'light') {
-            this._cacheGrid = cloudCacheGrid(cam.pos, R);
+        if (s.cloudCacheMode !== 'off' && s.cloudCacheMode !== 'phase') {
+            this._cacheGrid = cloudCacheGrid(cam.pos, R, s.cloudCacheMode);
             data.set(this._cacheGrid, 50 * 4);
         }
         if (budget) {

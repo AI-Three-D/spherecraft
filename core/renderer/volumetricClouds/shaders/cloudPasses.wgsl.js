@@ -1,7 +1,7 @@
 import {
     CLOUD_UNIFORMS_WGSL, CLOUD_MATH_WGSL, CLOUD_ATMOSPHERE_WGSL, CLOUD_DENSITY_WGSL, CLOUD_RAY_INPUT_WGSL, CLOUD_LAYER_BLEND_WGSL,
 } from './cloudCommon.wgsl.js';
-import { CLOUD_CACHE_COORDS, CLOUD_LIGHT_PROBES } from './cloudCaches.wgsl.js';
+import { CLOUD_CACHE_COORDS, CLOUD_LIGHT_PROBES, CLOUD_SKY_PROBES } from './cloudCaches.wgsl.js';
 
 const HEADER = `${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}${CLOUD_ATMOSPHERE_WGSL}`;
 
@@ -249,7 +249,24 @@ fn lightOpticalDepth(p: vec3f, footprint: f32, weather: Weather, dir: vec3f, sun
 }
 `;
 
+const TRANSPORT_CACHE_WGSL = /* wgsl */`
+@group(0) @binding(11) var cachedTransport: texture_3d<f32>;
+
+// xyz are solar optical depth, sky visibility, and lunar optical depth.
+// The last component blends into live evaluation at the bounds of the field.
+fn cloudTransportAt(p: vec3f) -> vec4f {
+    let h = heightFraction(length(p));
+    if (h < 0.0 || h > 1.0) { return vec4f(0.0); }
+    let plane = cachePlane(p);
+    let uv = (plane.xy - u.cacheGrid.xy) / u.cacheGrid.w + 0.5;
+    let weight = cacheWeight(plane, uv);
+    if (weight <= 0.0) { return vec4f(0.0); }
+    return vec4f(textureSampleLevel(cachedTransport, lutSampler, vec3f(uv, h), 0.0).xyz, weight);
+}
+`;
+
 function cloudRaymarchShader({ blendProxy = false, reuse = false, cache = '', budgetStage = '' } = {}) {
+    const layered = cache === 'layered';
     return /* wgsl */`${HEADER}${NOISE_BINDINGS}
 @group(0) @binding(5) var cloudLightLut: texture_2d<f32>;
 @group(0) @binding(6) var ambientLut: texture_2d<f32>;
@@ -267,7 +284,10 @@ ${budgetStage === 'finish' ? /* wgsl */`
 ` : ''}
 ${CLOUD_DENSITY_WGSL}${CLOUD_RAY_INPUT_WGSL}${CLOUD_LAYER_BLEND_WGSL}
 ${reuse ? REUSE_RAY_WGSL : ''}
-${CLOUD_LIGHT_PROBES}${cache ? CLOUD_CACHE_COORDS : ''}
+${CLOUD_LIGHT_PROBES}${CLOUD_SKY_PROBES}${cache ? CLOUD_CACHE_COORDS : ''}
+${cache === 'transport' || layered ? TRANSPORT_CACHE_WGSL : /* wgsl */`
+fn cloudTransportAt(p: vec3f) -> vec4f { return vec4f(0.0); }
+`}
 ${cache === 'weather' ? WEATHER_CACHE_WGSL : /* wgsl */`
 fn rayWeather(p: vec3f, footprint: f32) -> Weather { return sampleWeather(p, footprint); }
 `}
@@ -314,32 +334,6 @@ fn rayScattering(rd: vec3f) -> RayScattering {
         if (u.moon.w > 0.0) { phase.moonWeights = scatteringWeights(dot(rd, u.moon.xyz)); }
     }
     return phase;
-}
-
-// Fraction of sky light reaching p: base density 0.25 and 0.8 km straight up, and 0.35 km out in three
-// directions 120 deg apart, 30 deg up. The sideways samples darken folds between cloud heads, which are
-// surrounded by cloud on the sides too (sampling only upward lit grooves like bulges: flat-looking cumulus).
-// The directions are fixed in the local world frame, so the darkening does not crawl as the view turns.
-fn skyVisibility(p: vec3f, weather: Weather, footprint: f32) -> f32 {
-    let up = normalize(p);
-    let a = p + up * 0.25;
-    let b = p + up * 0.8;
-    let da = cloudBaseWithWeather(a, heightFraction(length(a)), weather, max(footprint, 0.125)).density;
-    let db = cloudBaseWithWeather(b, heightFraction(length(b)), weather, max(footprint, 0.4)).density;
-    var dl = 0.0;
-    if (u.look.y > 0.0) {
-        let east = normalize(cross(select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(up.y) > 0.9), up));
-        let north = cross(up, east);
-        let angles = array<vec2f, 3>(vec2f(1.0, 0.0), vec2f(-0.5, 0.8660254), vec2f(-0.5, -0.8660254));
-        for (var k = 0; k < 3; k++) {
-            let ang = f32(k) * 2.0943951;
-            let direction = select(vec2f(cos(ang), sin(ang)), angles[k], SKIP_UNUSED_DENSITY);
-            let q = p + (east * direction.x * 0.87 + north * direction.y * 0.87 + up * 0.5) * 0.35;
-            dl += cloudBaseWithWeather(q, heightFraction(length(q)), weather, max(footprint, 0.15)).density;
-        }
-    }
-    let od = (da * 0.4 + db * 0.6 + dl * 0.45 * u.look.y) * u.density.x;
-    return mix(select(0.25, 0.15, u.look.y > 0.0), 1.0, exp(-od * 0.35));
 }
 
 // Weight (0..1) of a sample's switch from individual clouds to their average density. Far away and
@@ -474,8 +468,13 @@ fn inScatterProbability(localH: f32, density: f32) -> f32 {
 // Light from one direction (sun or moon) reaching p: light march plus Wrenninge-style
 // multiple-scattering octaves and the powder term.
 fn directLight(p: vec3f, footprint: f32, weather: Weather, dir: vec3f, lightT: vec3f, cosTheta: f32,
-               sigmaT: f32, powderWeight: f32, weights: vec4f, sun: bool) -> vec3f {
-    let od = lightOpticalDepth(p, footprint, weather, dir, sun) * u.density.x;
+               sigmaT: f32, powderWeight: f32, weights: vec4f, sun: bool, transport: vec4f) -> vec3f {
+    let baked = select(transport.z, transport.x, sun);
+    var distance = baked;
+    if (transport.w < 1.0) {
+        distance = mix(lightOpticalDepth(p, footprint, weather, dir, sun), baked, transport.w);
+    }
+    let od = distance * u.density.x;
     var a = 1.0;
     var b = 1.0;
     var c = 1.0;
@@ -500,13 +499,14 @@ fn cloudSource(p: vec3f, rd: vec3f, footprint: f32, weather: Weather, base: Clou
     let muS = dot(p / r, u.sun.xyz);
     let sigmaT = density * u.density.x;
     let sigmaS = sigmaT * u.density.w;
+    let transport = cloudTransportAt(p);
     let hueAngle = cloudSunHueAngle(muS, cameraSun, cameraRadius);
     let sunT = cloudLightTransmittance(r, muS, hueAngle, true) * u.sun.w;
     let sunMax = max(sunT.r, max(sunT.g, sunT.b));
     var sunL = vec3f(0.0);
     if (sunMax > 1.0e-5) {
         sunL = directLight(p, footprint, weather, u.sun.xyz,
-            sunT * daylightSunGain(hueAngle, phase.sunCosine), phase.sunCosine, sigmaT, phase.sunPowder, phase.sunWeights, true);
+            sunT * daylightSunGain(hueAngle, phase.sunCosine), phase.sunCosine, sigmaT, phase.sunPowder, phase.sunWeights, true, transport);
     }
     let skyAmb = textureSampleLevel(ambientLut, lutSampler, ambientUv(muS, 0.0), 0.0).rgb;
     let groundAmb = textureSampleLevel(ambientLut, lutSampler, ambientUv(muS, 1.0), 0.0).rgb;
@@ -524,7 +524,10 @@ fn cloudSource(p: vec3f, rd: vec3f, footprint: f32, weather: Weather, base: Clou
     // Sky light is blocked by the cloud above: two cheap upward samples darken crevices,
     // undersides and the insides of towers, so cloud relief shows even without direct light
     // (at night with the moon down the clouds otherwise looked like flat sheets).
-    let skyVis = skyVisibility(p, weather, footprint);
+    var skyVis = transport.y;
+    if (transport.w < 1.0) {
+        skyVis = mix(probeSkyVisibility(p, weather, footprint), transport.y, transport.w);
+    }
     var amb = mix(groundAmb, skyAmb * skyVis, skyMix) * (u.sun.w * u.light.x)
         + u.ambientFloor.rgb * skyVis + daylightSkyFill(hueAngle, skyVis, skyMix);
     // Dusk sky light (look2.z): with the sun low, the direct light is red and dim while the whole sky
@@ -543,7 +546,7 @@ fn cloudSource(p: vec3f, rd: vec3f, footprint: f32, weather: Weather, base: Clou
         if (moonMax > 1.0e-5 && sunMax < moonMax * 20.0) {
             let cosM = dot(rd, u.moon.xyz);
             let powderM = u.phase.w * saturate(0.6 - 0.6 * cosM);
-            sunL += directLight(p, footprint, weather, u.moon.xyz, moonT, cosM, sigmaT, powderM, phase.moonWeights, false);
+            sunL += directLight(p, footprint, weather, u.moon.xyz, moonT, cosM, sigmaT, powderM, phase.moonWeights, false, transport);
             let skyAmbM = textureSampleLevel(ambientLut, lutSampler, ambientUv(muM, 0.0), 0.0).rgb;
             let groundAmbM = textureSampleLevel(ambientLut, lutSampler, ambientUv(muM, 1.0), 0.0).rgb;
             amb += mix(groundAmbM, skyAmbM * skyVis, skyMix) * (u.moon.w * u.light.x);
@@ -721,15 +724,17 @@ fn march(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
     var depthSum = 0.0;
     var weightSum = 0.0;
     var steps = 0;
+    let cutoff = 0.01;
+    ${layered ? '' : /* wgsl */`
     // Light sharing (march3.x): light per unit extinction, computed fresh at the first cloud sample
     // after clear air and then every lightReuse-th sample, reused in between. The visible skin is
     // always lit fresh; deeper samples sit behind it.
     let lightReuse = max(i32(u.march3.x), 1);
-    let cutoff = 0.01;
     var J = vec3f(0.0);
     var lightAge = 0;   // cloud samples since J was computed; 0 forces a fresh one
     var lightT = 0.0;   // where along the ray J was computed
     var lightMoment = 0.0;
+    `}
     for (var si = 0; si < segCount; si++) {
         let seg = segs[si];
         let segLimit = maxSteps - (segCount - 1 - si) * MARCH_TAIL_STEPS;
@@ -742,12 +747,17 @@ fn march(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
         let front = viewDensity(p0, rd, t, firstFp, firstStep, false, T, cameraRadius);
         var previousDensity = front.density;
         var previousBase = front.base.density;
+        ${layered ? /* wgsl */`
+        var previousHeight = front.base.localH;
+        var previousBackdrop = front.backdropShare;
+        ` : /* wgsl */`
         var previousLight = vec3f(0.0);
         if (previousDensity > 0.0) {
             previousLight = viewCloudLight(front, p0, rd, firstFp, phase, cameraRadius, cameraSun);
         }
         lightAge = 0;
         lightMoment = 0.0;
+        `}
         loop {
             if (t >= seg.y || steps >= segLimit || T < cutoff) { break; }
             steps++;
@@ -763,6 +773,10 @@ fn march(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
             // next interval's position, even when a small wisp enters or leaves the view.
             let subdivisions = select(1, 4, !tail && T > 0.06 && previousBase + bound.base.density > 0.0);
             let subDt = dt / f32(subdivisions);
+            ${layered ? /* wgsl */`
+            var interval = vec4f(0.0); // opacity, weighted distance, density and local height
+            var intervalBackdrop = vec2f(0.0);
+            ` : ''}
             for (var substep = 1; substep <= subdivisions; substep++) {
                 if (T < cutoff) { break; }
                 let sampleT = mix(t, end, f32(substep) / f32(subdivisions));
@@ -778,6 +792,12 @@ fn march(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
                     let shareBack = density / densitySum;
                     let stepT = exp(-densitySum * (0.5 * u.density.x * subDt));
                     let w = T * (1.0 - stepT);
+                    ${layered ? /* wgsl */`
+                    let centroid = sampleT - subDt * ((2.0 - shareBack) / 3.0);
+                    interval += w * vec4f(1.0, centroid, mix(previousDensity, density, shareBack),
+                        mix(previousHeight, current.base.localH, shareBack));
+                    intervalBackdrop += w * mix(previousBackdrop, current.backdropShare, shareBack);
+                    ` : /* wgsl */`
                     var light = previousLight;
                     if (density > 0.0) {
                         // Share lighting only behind the visible skin. The endpoints of a
@@ -804,17 +824,40 @@ fn march(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
                         light = J;
                     }
                     L += mix(previousLight, light, shareBack) * w;
+                    `}
                     depthSum += (sampleT - subDt * ((2.0 - shareBack) / 3.0)) * w;
                     weightSum += w;
                     T *= stepT;
-                    previousLight = light;
+                    ${layered ? '' : 'previousLight = light;'}
                 }
+                ${layered ? /* wgsl */`
+                previousHeight = current.base.localH;
+                previousBackdrop = current.backdropShare;
+                ` : /* wgsl */`
                 if (density <= 0.0) {
                     lightAge = 0;
                     previousLight = vec3f(0.0);
                 }
+                `}
                 previousDensity = density;
             }
+            ${layered ? /* wgsl */`
+            // Light only the contribution from this spatial interval. Keeping
+            // each shell leg and each interval separate retains depth ordering
+            // when a ray crosses a foreground cloud and a distant bank.
+            if (interval.x > 1.0e-6) {
+                let inverse = 1.0 / interval.x;
+                let depth = interval.y * inverse;
+                let p = ro + rd * depth;
+                var sample: ViewDensity;
+                sample.weather = bound.weather;
+                sample.base.h = heightFraction(length(p));
+                sample.base.localH = interval.w * inverse;
+                sample.density = interval.z * inverse;
+                sample.backdropShare = intervalBackdrop * inverse;
+                L += interval.x * viewCloudLight(sample, p, rd, footprint, phase, cameraRadius, cameraSun);
+            }
+            ` : ''}
             previousBase = bound.base.density;
             t = end;
         }
@@ -835,7 +878,6 @@ fn march(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
 // light march: each slab is a horizontal layer lit through the column above it, integrated
 // analytically so the bright sunlit skin survives the long slab, plus one density sample towards
 // the sun so clouds keep a lit and a shaded side.
-const PROXY_SLABS: i32 = 8;
 // Below the clouds, use short ray intervals with several density samples per
 // lighting evaluation. A fixed number of spherical slices produced horizontal ribs.
 const GROUND_INTERVALS: i32 = 32;
@@ -973,7 +1015,8 @@ fn proxyLayer(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
     let moonMax = max(lightT[1].r, max(lightT[1].g, lightT[1].b));
     if (!(moonMax > 1.0e-5 && sunMax < moonMax * 20.0)) { lightT[1] = vec3f(0.0); }
     lightT[0] *= daylightSunGain(solarHue, cosL[0]);
-    let dt = (t1 - t0) / f32(PROXY_SLABS);
+    let slabs = i32(u.look3.z);
+    let dt = (t1 - t0) / f32(slabs);
 
     var T = 1.0;
     var L = vec3f(0.0);
@@ -981,7 +1024,7 @@ fn proxyLayer(ro: vec3f, rd: vec3f, tScene: f32) -> MarchResult {
     var weightSum = 0.0;
     var odUp = 0.0;
     let upPerView = max(-dot(rd, up), 0.05);
-    for (var i = 0; i < PROXY_SLABS; i++) {
+    for (var i = 0; i < slabs; i++) {
         let t = t0 + (f32(i) + 0.5) * dt;
         let p = ro + rd * t;
         // Noise blur capped at what the raymarch uses (half its 0.6 km max step). Coverage is a
@@ -1408,6 +1451,8 @@ export const CLOUD_PROXY_BLEND_WGSL = cloudRaymarchShader({ blendProxy: true });
 export const CLOUD_HISTORY_RAYMARCH_WGSL = cloudRaymarchShader({ reuse: true });
 export const CLOUD_WEATHER_CACHE_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'weather' });
 export const CLOUD_LIGHT_CACHE_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'light' });
+export const CLOUD_TRANSPORT_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'transport' });
+export const CLOUD_LAYERED_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'layered' });
 export const CLOUD_BUDGET_NEAR_WGSL = cloudRaymarchShader({ budgetStage: 'near' });
 export const CLOUD_BUDGET_FINISH_WGSL = cloudRaymarchShader({ budgetStage: 'finish' });
 

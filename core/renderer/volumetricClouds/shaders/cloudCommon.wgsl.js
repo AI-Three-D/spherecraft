@@ -43,7 +43,7 @@ struct CloudUniforms {
     shape2: vec4f,      // x giant share of coverage (0 = off), y giant height (core scale), z giant size (x shape tile), w popcorn top (layer fraction)
     look: vec4f,        // x in-scattering probability strength (HZD; 0 = off), y sideways sky occlusion (0 = off), z in-scattering gain, w sunlight-colour altitude scale (1 = physical)
     look2: vec4f,       // x dome edge sharpness (density gain), y cauliflower head strength, z dusk sky-light boost, w 1 = stratified step phases (no-temporal mode)
-    look3: vec4f,       // x step-plane anchor lattice (km; 0 = planet centre), y detail pixel-footprint factor (0 = off)
+    look3: vec4f,       // x step-plane anchor lattice (km), y detail pixel-footprint factor, z orbital proxy slabs
     look4: vec4f,       // x twilight light strength, y detail transmittance cutoff, z spatial grid (0 full, 1 checkerboard, 2–3 block width), w edge wisps (0 = off)
     look5: vec4f,       // x interior density variation, y isolated puff suppression, z daylight sky fill, w daylight sun gain
     banks: vec4f,       // x distant bank strength, yz transition distances (km), w inverse bank tile size
