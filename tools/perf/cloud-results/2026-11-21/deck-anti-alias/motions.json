@@ -1,0 +1,488 @@
+{
+  "before": "http://127.0.0.1:8765",
+  "after": "http://127.0.0.1:8000",
+  "chrome": "Chrome/158.0.8127.36",
+  "width": 1024,
+  "height": 640,
+  "dpr": 1.5,
+  "tier": "ultra",
+  "scale": 0.5,
+  "afterScale": 0.5,
+  "game": true,
+  "runtimeLook": true,
+  "beforeSettings": {
+    "towerDebugMode": "deck"
+  },
+  "afterSettings": {
+    "towerDebugMode": "deck"
+  },
+  "sampleFrames": 16,
+  "warmFrames": 14,
+  "rounds": 1,
+  "cases": {
+    "game-grazing-climb": {
+      "name": "game-grazing-climb",
+      "view": {
+        "altitudeKm": 6.18,
+        "latDeg": -6.81,
+        "lonDeg": 19.64,
+        "headingDeg": 4.07,
+        "pitchDeg": -3.61
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "motion": {
+        "headingPerFrame": 0.12,
+        "climbPerFrame": 0.04,
+        "longitudePerFrame": 0,
+        "latitudePerFrame": 0
+      },
+      "before": [
+        {
+          "fps": 32.141422257646276,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 21.70675208333333,
+              "p95": 90.173624,
+              "last": 4.3065180000000005
+            },
+            {
+              "name": "clouds deck geometry",
+              "avg": 0.34750875,
+              "p95": 1.004193,
+              "last": 0.275496
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.08888033333333334,
+              "p95": 0.114707,
+              "last": 0.085165
+            },
+            {
+              "name": "clouds composite",
+              "avg": 4.215067500000001,
+              "p95": 5.063339,
+              "last": 4.712178
+            },
+            {
+              "name": "total",
+              "avg": 8.8668335,
+              "p95": 29.83946,
+              "last": 5.907077
+            }
+          ],
+          "samples": 12,
+          "conditions": {
+            "sunElevation": 15.24909027610976,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "deck"
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 30.08649868346277,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 28.965228500000006,
+              "p95": 113.549227,
+              "last": 4.671887
+            },
+            {
+              "name": "clouds deck geometry",
+              "avg": 0.9726137500000002,
+              "p95": 1.084734,
+              "last": 0.955068
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.1443000833333333,
+              "p95": 0.975652,
+              "last": 0.071083
+            },
+            {
+              "name": "clouds composite",
+              "avg": 6.651860416666666,
+              "p95": 24.28663,
+              "last": 4.648596
+            },
+            {
+              "name": "total",
+              "avg": 12.364130833333332,
+              "p95": 34.07423,
+              "last": 6.255155
+            }
+          ],
+          "samples": 12,
+          "conditions": {
+            "sunElevation": 15.24912399159333,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 0,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "deck"
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 3.3293809678819444,
+        "p95": 20,
+        "p99": 53,
+        "fractionOver5": 0.1339959038628472
+      }
+    },
+    "game-deck-ground-pan": {
+      "name": "game-deck-ground-pan",
+      "view": {
+        "altitudeKm": 1.45,
+        "latDeg": -6.81,
+        "lonDeg": 19.64,
+        "headingDeg": 11,
+        "pitchDeg": 14
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "motion": {
+        "headingPerFrame": 0.2,
+        "climbPerFrame": 0,
+        "longitudePerFrame": 0,
+        "latitudePerFrame": 0
+      },
+      "before": [
+        {
+          "fps": 53.05039787903251,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 5.4883799375,
+              "p95": 33.937857,
+              "last": 1.0819
+            },
+            {
+              "name": "clouds deck geometry",
+              "avg": 0.40651462499999996,
+              "p95": 1.332855,
+              "last": 0.278371
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.12374550000000001,
+              "p95": 0.579366,
+              "last": 0.084082
+            },
+            {
+              "name": "clouds composite",
+              "avg": 6.114094187500002,
+              "p95": 10.69967,
+              "last": 4.104105
+            },
+            {
+              "name": "total",
+              "avg": 9.4999876875,
+              "p95": 22.116079,
+              "last": 5.708246
+            }
+          ],
+          "samples": 16,
+          "conditions": {
+            "sunElevation": 15.24909027610976,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 1,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "deck"
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 54.440285811776526,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 4.587479375,
+              "p95": 26.785091,
+              "last": 26.785091
+            },
+            {
+              "name": "clouds deck geometry",
+              "avg": 0.8887599375,
+              "p95": 2.884039,
+              "last": 0.696406
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.1322949375,
+              "p95": 1.094943,
+              "last": 0.057499
+            },
+            {
+              "name": "clouds composite",
+              "avg": 6.0470043124999995,
+              "p95": 11.820904,
+              "last": 4.49189
+            },
+            {
+              "name": "total",
+              "avg": 10.2852389375,
+              "p95": 31.600476,
+              "last": 31.600476
+            }
+          ],
+          "samples": 16,
+          "conditions": {
+            "sunElevation": 15.249123991593322,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 0,
+            "interleave": 1,
+            "proxyWeight": 1,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "deck"
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 2.962560356987847,
+        "p95": 16,
+        "p99": 32,
+        "fractionOver5": 0.12967936197916666
+      }
+    },
+    "game-deck-grazing-pan": {
+      "name": "game-deck-grazing-pan",
+      "view": {
+        "altitudeKm": 6.54,
+        "latDeg": -6.81,
+        "lonDeg": 19.64,
+        "headingDeg": 4.07,
+        "pitchDeg": -3.61
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "motion": {
+        "headingPerFrame": 0.2,
+        "climbPerFrame": 0,
+        "longitudePerFrame": 0,
+        "latitudePerFrame": 0
+      },
+      "before": [
+        {
+          "fps": 44.2967884824695,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 15.413895125000002,
+              "p95": 51.699086,
+              "last": 14.568362
+            },
+            {
+              "name": "clouds deck geometry",
+              "avg": 0.26633718750000007,
+              "p95": 0.289496,
+              "last": 0.262246
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.09588912499999998,
+              "p95": 0.252413,
+              "last": 0.084915
+            },
+            {
+              "name": "clouds composite",
+              "avg": 4.7159698125,
+              "p95": 7.339597,
+              "last": 4.450807
+            },
+            {
+              "name": "total",
+              "avg": 12.0796776875,
+              "p95": 56.841674,
+              "last": 5.13213
+            }
+          ],
+          "samples": 16,
+          "conditions": {
+            "sunElevation": 15.249090276109758,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "deck"
+          }
+        }
+      ],
+      "after": [
+        {
+          "fps": 43.39571467282525,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 12.317917533333334,
+              "p95": 54.016718,
+              "last": 17.012032
+            },
+            {
+              "name": "clouds deck geometry",
+              "avg": 0.9578688666666667,
+              "p95": 1.506686,
+              "last": 0.898529
+            },
+            {
+              "name": "clouds temporal",
+              "avg": 0.07640713333333334,
+              "p95": 0.283912,
+              "last": 0.061749
+            },
+            {
+              "name": "clouds composite",
+              "avg": 5.603797933333333,
+              "p95": 7.983044,
+              "last": 5.175755
+            },
+            {
+              "name": "total",
+              "avg": 15.988450666666669,
+              "p95": 60.575118,
+              "last": 6.075699
+            }
+          ],
+          "samples": 15,
+          "conditions": {
+            "sunElevation": 15.249123991593322,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 0,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "deck"
+          }
+        }
+      ],
+      "image": {
+        "meanMaxRgb": 3.055580647786458,
+        "p95": 16,
+        "p99": 43,
+        "fractionOver5": 0.1365329318576389
+      }
+    }
+  },
+  "rotationCompensatedRgb": {
+    "game-deck-ground-pan": {
+      "before": {
+        "frames": 19,
+        "pixels": 17936640,
+        "meanMaxRgb": 0.30185012498282127,
+        "p95": 1,
+        "p99": 2,
+        "fractionOver4": 0.006263714943266966
+      },
+      "after": {
+        "frames": 19,
+        "pixels": 17936640,
+        "meanMaxRgb": 0.28130735875465507,
+        "p95": 1,
+        "p99": 2,
+        "fractionOver4": 0.006815156015842432
+      }
+    },
+    "game-deck-grazing-pan": {
+      "before": {
+        "frames": 19,
+        "pixels": 17936640,
+        "meanMaxRgb": 0.25971110601145225,
+        "p95": 1,
+        "p99": 2,
+        "fractionOver4": 0.004926842485549133
+      },
+      "after": {
+        "frames": 19,
+        "pixels": 17936640,
+        "meanMaxRgb": 0.21861285872000555,
+        "p95": 1,
+        "p99": 2,
+        "fractionOver4": 0.0039706990829943625
+      }
+    }
+  }
+}

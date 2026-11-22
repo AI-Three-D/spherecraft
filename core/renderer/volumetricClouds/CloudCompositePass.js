@@ -5,6 +5,7 @@ import {
 import { AERIAL_PERSPECTIVE_WGSL } from '../atmosphere/shaders/aerialPerspectiveCommon.js';
 
 const HAZE_STEPS = 8;
+const HAZE_GRID = [48, 30, 24];
 
 /**
  * Composites VolumetricCloudsModule output into a host's HDR scene colour, after the opaque
@@ -47,13 +48,13 @@ export class CloudCompositePass {
             { texture: { sampleType: 'float' } },
             { sampler: { type: 'filtering' } },
         ];
-        this._layout = device.createBindGroupLayout({
-            label: 'clouds composite',
-            entries: entries.map((entry, binding) => ({ binding, visibility: F, ...entry })),
+        const layout = bindings => device.createBindGroupLayout({
+            entries: bindings.map((entry, binding) => ({ binding, visibility: F, ...entry })),
         });
-        this._pipeline = await device.createRenderPipelineAsync({
+        this._layout = layout(entries);
+        const render = (module, bindGroupLayout) => device.createRenderPipelineAsync({
             label: 'clouds composite',
-            layout: device.createPipelineLayout({ bindGroupLayouts: [this._layout] }),
+            layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
             vertex: { module, entryPoint: 'vsMain' },
             fragment: {
                 module, entryPoint: 'fsMain',
@@ -67,10 +68,54 @@ export class CloudCompositePass {
             },
             primitive: { topology: 'triangle-list' },
         });
+        const budget = device.createShaderModule({ label: 'clouds composite with haze lookup', code: buildCloudCompositeShader(true) });
+        const hazeTexture = { texture: { sampleType: 'float', viewDimension: '3d' } };
+        this._budgetLayout = layout([...entries, hazeTexture, hazeTexture]);
+        [this._pipeline, this._budgetPipeline, this._hazePipeline] = await Promise.all([
+            render(module, this._layout), render(budget, this._budgetLayout),
+            device.createComputePipelineAsync({ label: 'clouds haze lookup', layout: 'auto', compute: { module: budget, entryPoint: 'bakeHaze' } }),
+        ]);
         this._uniformBuffer = device.createBuffer({
             label: 'clouds composite uniforms', size: this._uniforms.byteLength,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
+    }
+
+    _bakeHaze(encoder, out, a) {
+        if (!this._hazeTextures) {
+            this._hazeTextures = ['radiance', 'transmittance'].map(label => this.device.createTexture({
+                label: `cloud haze ${label}`, size: HAZE_GRID, dimension: '3d', format: 'rgba16float',
+                usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+            }));
+            this._hazeViews = this._hazeTextures.map(texture => texture.createView());
+        }
+        const inputs = [out.uniformBuffer, a.transmittanceView, out.linearSampler];
+        if (!this._hazeGroup || inputs.some((input, i) => input !== this._hazeInputs[i])) {
+            this._hazeInputs = inputs;
+            this._hazeKey = null;
+            this._hazeGroup = this.device.createBindGroup({
+                layout: this._hazePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: out.uniformBuffer } },
+                    { binding: 1, resource: { buffer: this._uniformBuffer } },
+                    { binding: 6, resource: a.transmittanceView },
+                    { binding: 7, resource: out.linearSampler },
+                    { binding: 10, resource: this._hazeViews[0] },
+                    { binding: 11, resource: this._hazeViews[1] },
+                ],
+            });
+        }
+        const c = this.clouds;
+        const key = JSON.stringify([c._prev, c.sunDirection, c.sunIlluminance, c.moonDirection, c.moonIlluminance,
+            a.planetRadius, a.atmosphereRadius, a.scaleHeightRayleigh, a.scaleHeightMie, a.rayleighScattering,
+            a.mieScattering, a.mieAnisotropy, a.sunIntensity]);
+        if (key === this._hazeKey) return;
+        this._hazeKey = key;
+        const pass = encoder.beginComputePass({ label: 'clouds haze lookup', timestampWrites: this.gpuTimer?.timestampWrites('clouds haze lookup') });
+        pass.setPipeline(this._hazePipeline);
+        pass.setBindGroup(0, this._hazeGroup);
+        pass.dispatchWorkgroups(Math.ceil(HAZE_GRID[0] / 8), Math.ceil(HAZE_GRID[1] / 4), HAZE_GRID[2]);
+        pass.end();
     }
 
     /**
@@ -84,13 +129,17 @@ export class CloudCompositePass {
     render(encoder, { colorView, depthView, width, height }, atmosphere) {
         const out = this.clouds.getOutputs();
         const a = atmosphere;
+        const budget = !!this.clouds.budgetTier;
+        const unitsPerKm = this.clouds.planet.unitsPerKm;
         this._uniforms.set([
-            width, height, this.shadowStrength, this.clouds.planet.unitsPerKm,
+            width, height, this.shadowStrength, unitsPerKm,
             a.planetRadius, a.atmosphereRadius, a.scaleHeightRayleigh, a.scaleHeightMie,
             ...a.rayleighScattering, a.mieScattering,
-            a.mieAnisotropy, a.sunIntensity, this.shadowFloor, 0,
+            a.mieAnisotropy, a.sunIntensity, this.shadowFloor,
+            budget ? Math.max(64, a.atmosphereRadius / unitsPerKm + Math.hypot(...this.clouds._prev.pos)) : 0,
         ]);
         this.device.queue.writeBuffer(this._uniformBuffer, 0, this._uniforms);
+        if (budget) this._bakeHaze(encoder, out, a);
         // The cloud history ping-pongs (and may switch interleave), so a few groups are kept per input set.
         const inputs = [depthView, a.transmittanceView];
         if (inputs.some((v, i) => v !== this._groupInputs[i]) || this._groups.size > 8) {
@@ -103,8 +152,9 @@ export class CloudCompositePass {
                 { buffer: out.uniformBuffer }, { buffer: this._uniformBuffer },
                 out.colorView, out.depthView, depthView, out.shadowView, a.transmittanceView, out.linearSampler,
             ];
+            if (budget) resources.push(...this._hazeViews);
             group = this.device.createBindGroup({
-                label: 'clouds composite', layout: this._layout,
+                label: 'clouds composite', layout: budget ? this._budgetLayout : this._layout,
                 entries: resources.map((resource, binding) => ({ binding, resource })),
             });
             this._groups.set(out.version, group);
@@ -115,7 +165,7 @@ export class CloudCompositePass {
             timestampWrites: this.gpuTimer?.timestampWrites('clouds composite'),
         });
         pass.setViewport(0, 0, width, height, 0, 1);
-        pass.setPipeline(this._pipeline);
+        pass.setPipeline(budget ? this._budgetPipeline : this._pipeline);
         pass.setBindGroup(0, group);
         pass.draw(3);
         pass.end();
@@ -123,11 +173,12 @@ export class CloudCompositePass {
 
     dispose() {
         this._uniformBuffer?.destroy();
+        for (const texture of this._hazeTextures ?? []) texture.destroy();
         this._groups.clear();
     }
 }
 
-export function buildCloudCompositeShader() {
+export function buildCloudCompositeShader(budget = false) {
     return /* wgsl */`${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}${AERIAL_PERSPECTIVE_WGSL}
 struct CompositeUniforms {
     viewport: vec4f,  // width, height, shadow strength, world units per km
@@ -144,6 +195,12 @@ struct CompositeUniforms {
 @group(0) @binding(5) var shadowMap: texture_2d<f32>;
 @group(0) @binding(6) var transmittanceLut: texture_2d<f32>;
 @group(0) @binding(7) var linearSampler: sampler;
+${budget ? /* wgsl */`
+@group(0) @binding(8) var hazeRadiance: texture_3d<f32>;
+@group(0) @binding(9) var hazeTransmittance: texture_3d<f32>;
+@group(0) @binding(10) var outHazeL: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(11) var outHazeT: texture_storage_3d<rgba16float, write>;
+` : ''}
 ${CLOUD_SHADOW_LOOKUP_WGSL}
 
 struct VsOut {
@@ -214,6 +271,29 @@ fn hazeTo(roKm: vec3f, rd: vec3f, distKm: f32) -> Haze {
     return h;
 }
 
+${budget ? /* wgsl */`
+@compute @workgroup_size(8, 4)
+fn bakeHaze(@builtin(global_invocation_id) id: vec3u) {
+    let size = textureDimensions(outHazeL);
+    if (any(id >= size)) { return; }
+    let uv = (vec2f(id.xy) + 0.5) / vec2f(size.xy);
+    let rd = cameraRay(uv, vec2f(1.0), u.camRight, u.camUp, u.camBack, u.frameInfo.x);
+    let slice = f32(id.z) / f32(size.z - 1u);
+    let depth = exp2(slice * log2(1.0 + cu.atmo2.w)) - 1.0;
+    let haze = hazeTo(u.camPos.xyz, rd, depth);
+    textureStore(outHazeL, id, vec4f(haze.L, 0.0));
+    textureStore(outHazeT, id, vec4f(haze.T, 0.0));
+}
+
+fn lookupHaze(uv: vec2f, distance: f32) -> Haze {
+    let count = f32(textureDimensions(hazeRadiance).z);
+    let depth = log2(1.0 + clamp(distance, 0.0, cu.atmo2.w)) / log2(1.0 + cu.atmo2.w);
+    let uvw = vec3f(uv, (0.5 + depth * (count - 1.0)) / count);
+    return Haze(textureSampleLevel(hazeTransmittance, linearSampler, uvw, 0.0).rgb,
+        textureSampleLevel(hazeRadiance, linearSampler, uvw, 0.0).rgb);
+}
+` : ''}
+
 // Rough luminance transmittance to a surface (mean-altitude density): how much of the pixel is
 // the surface itself rather than haze in front of it.
 fn surfaceVisibility(roKm: vec3f, rd: vec3f, distKm: f32) -> f32 {
@@ -267,25 +347,25 @@ fn upsampleCloud(uv: vec2f, cloudSize: vec2i, blocks: vec2i, k: i32, opaque: boo
     let sp = uv * vec2f(cloudSize) - 0.5;
     let i0 = vec2i(floor(sp));
     let f = sp - floor(sp);
-    let w4 = array<f32, 4>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
     let o4 = array<vec2i, 4>(vec2i(0, 0), vec2i(1, 0), vec2i(0, 1), vec2i(1, 1));
-    var sumW = 0.0;
-    var sumC = vec4f(0.0);
     var matching = 0u;
     for (var i = 0; i < 4; i++) {
         let tp = clamp(i0 + o4[i], vec2i(0), cloudSize - 1);
-        let texelOpaque = textureLoad(cloudDepth, clamp(tp / k, vec2i(0), blocks - 1), 0).r < 0.0;
+        let texelOpaque = textureLoad(cloudDepth, ${budget ? 'tp' : 'clamp(tp / k, vec2i(0), blocks - 1)'}, 0).r < 0.0;
         if (texelOpaque != opaque) { continue; }
         matching |= 1u << u32(i);
-        sumW += w4[i];
     }
-    if (matching != 15u && sumW > 1.0e-4) {
+    if (matching != 0u && matching != 15u) {
+        let w4 = array<f32, 4>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
+        var sumW = 0.0;
+        var sumC = vec4f(0.0);
         for (var i = 0; i < 4; i++) {
             if ((matching & (1u << u32(i))) == 0u) { continue; }
             let tp = clamp(i0 + o4[i], vec2i(0), cloudSize - 1);
+            sumW += w4[i];
             sumC += textureLoad(cloudColor, tp, 0) * w4[i];
         }
-        return sumC / sumW;
+        if (sumW > 1.0e-4) { return sumC / sumW; }
     }
     return sampleCatmullRom(cloudColor, linearSampler, uv);
 }
@@ -295,20 +375,13 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     let pix = input.pos.xy;
     let size = cu.viewport.xy;
     let uv = pix / size;
-    let rd = cameraRay(pix, size, u.camRight, u.camUp, u.camBack, u.frameInfo.x);
     let ro = u.camPos.xyz;
 
     let z = textureLoad(sceneDepth, vec2i(pix), 0);
     let opaque = z < 1.0;
-    var sceneKm = 1.0e30;
-    if (opaque) {
-        let viewDepth = u.sceneDepth.y / (z + u.sceneDepth.x);
-        sceneKm = viewDepth * u.sceneDepth.z / max(-dot(rd, u.camBack.xyz), 1.0e-4);
-    }
-
-    let blocks = vec2i(textureDimensions(cloudDepth));
-    let k = max(i32(u.quality.x), 1);
     let cloudSize = vec2i(textureDimensions(cloudColor));
+    let blocks = ${budget ? 'cloudSize' : 'vec2i(textureDimensions(cloudDepth))'};
+    let k = ${budget ? '1' : 'max(i32(u.quality.x), 1)'};
     var c: vec4f;
     if (all(cloudSize == vec2i(size))) {
         // Pixel centres coincide. Only the centre tap has nonzero weight.
@@ -318,12 +391,26 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     }
     let cloud = vec4f(max(c.rgb, vec3f(0.0)), saturate(c.a));
 
+    let shadowsOn = opaque && cu.viewport.z > 0.0 && u.shadowInfo.z > 0.0;
+    let mistOn = u.groundMist.x > 0.001 && u.groundMist.w > 0.0;
+    if (cloud.a > 0.999 && !shadowsOn && !mistOn) { discard; }
+    ${budget ? /* wgsl */`
+    var rd = vec3f(0.0);
+    if (opaque || mistOn) { rd = cameraRay(pix, size, u.camRight, u.camUp, u.camBack, u.frameInfo.x); }
+    ` : /* wgsl */`
+    let rd = cameraRay(pix, size, u.camRight, u.camUp, u.camBack, u.frameInfo.x);
+    `}
+    var sceneKm = 1.0e30;
+    if (opaque) {
+        let viewDepth = u.sceneDepth.y / (z + u.sceneDepth.x);
+        sceneKm = viewDepth * u.sceneDepth.z / max(-dot(rd, u.camBack.xyz), 1.0e-4);
+    }
+
     var shadow = 1.0;
-    if (opaque && cu.viewport.z > 0.0 && u.shadowInfo.z > 0.0) {
+    if (shadowsOn) {
         let lit = cloudShadowSmoothAt(ro + rd * sceneKm, cu.viewport.z);
         if (lit < 1.0) { shadow = mix(1.0, mix(cu.atmo2.z, 1.0, lit), surfaceVisibility(ro, rd, sceneKm)); }
     }
-    let mistOn = u.groundMist.x > 0.001 && u.groundMist.w > 0.0;
     if (cloud.a > 0.999 && shadow > 0.999 && !mistOn) { discard; }
 
     var color = vec3f(0.0);
@@ -332,7 +419,7 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     if (cloud.a < 0.999) {
         let cloudPix = vec2i(uv * u.frameInfo.zw);
         cloudKm = min(sceneKm, abs(textureLoad(cloudDepth, clamp(cloudPix / k, vec2i(0), blocks - 1), 0).r));
-        let haze = hazeTo(ro, rd, cloudKm);
+        let haze = ${budget ? 'lookupHaze(uv, cloudKm)' : 'hazeTo(ro, rd, cloudKm)'};
         // Toward the horizon the distant cloud field loses contrast into the
         // host sky. Fade its premultiplied colour and opacity together.
         let cloudHeight = (length(ro) - u.planet.y) / (u.planet.z - u.planet.y);

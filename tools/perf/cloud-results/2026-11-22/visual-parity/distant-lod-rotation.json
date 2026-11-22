@@ -1,0 +1,38 @@
+{
+  "game-deck-ground-pan-distant-30": {
+    "before": {
+      "frames": 10,
+      "pixels": 8968320,
+      "meanMaxRgb": 0.49194717157474577,
+      "p95": 1,
+      "p99": 3,
+      "fractionOver4": 0.008343926175693999
+    },
+    "after": {
+      "frames": 10,
+      "pixels": 8968320,
+      "meanMaxRgb": 0.4336766073047406,
+      "p95": 1,
+      "p99": 3,
+      "fractionOver4": 0.007622832369942196
+    }
+  },
+  "game-deck-ground-pan-distant-34": {
+    "before": {
+      "frames": 10,
+      "pixels": 8968320,
+      "meanMaxRgb": 0.40177308111494386,
+      "p95": 1,
+      "p99": 3,
+      "fractionOver4": 0.007193431991721972
+    },
+    "after": {
+      "frames": 10,
+      "pixels": 8968320,
+      "meanMaxRgb": 0.4091164496889883,
+      "p95": 1,
+      "p99": 3,
+      "fractionOver4": 0.007523036644544351
+    }
+  }
+}

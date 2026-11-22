@@ -644,3 +644,317 @@ Chrome WebGPU, same camera and frozen E weather within each pair at 1590×960 Ul
 A brighter fill and stronger multiple scattering flattened some shaded faces. The chosen balance retains contrast around the billows and gives the fringes more light. Near-facing undersides still read relatively grey, and the distant grazing band remains. [Daylight crops](screenshots/cloud_look_2026-11-20/29_cumulus_lighting_day.jpg), [dawn, dusk and moonlight crops](screenshots/cloud_look_2026-11-20/29_cumulus_lighting_twilight.jpg).
 
 Readback with camera, volume and scene depth locked produced byte-identical 8-bit opacity in daylight raymarch, ground proxy, dusk and moonlight. The 14-frame slow and fast turns each retained p99 1 in rotation-compensated RGB residual. I reviewed the dusk climb frames and saw no additional blur or shimmer. The High tier was also checked with E in two daylight views and at dusk. All 642 tests and the TypeScript checks passed.
+
+## 13. Dense weather performance (2026-11-21)
+
+The near-ground transition used one large compute shader for the detailed march and the proxy. The renderer now dispatches the specialized detailed shader first, then blends its color and depth with the proxy before adding low stratus. Both passes use the same ray positions, depth limits, and blend weight. The ground proxy skips detailed density work when the distant bank already supplies the entire interval. Clear weather skips the cloud shadow map while both cloud layers are absent.
+
+Rain decks reuse lighting for up to four samples within 120 m along a ray once view transmittance drops below 0.88. The threshold ramps in as the stratiform deck fills. Density, transmittance, and depth still integrate at the original sample positions. The cirrus path and the ray grid use the existing settings.
+
+### Uncapped game A/B
+
+Chrome 158 on an Apple M1 Pro with WebGPU on Metal, a 1536×960 canvas and a 768×480 cloud target. The baseline is `f418840`. Two rounds alternate which revision renders first, with 19 warm-up and 15 measured frames per run. The benchmark locks the camera, time, wind and weather in the static cases and disables the frame caps. GPU time is the timestamped raymarch span, summed across both dispatches inside the crossfade. Completed FPS includes the rest of the game. The p95 column averages the two per-run p95 values. [Raw game timings](tools/perf/cloud-results/2026-11-21/game.json).
+
+| View | Average cloud GPU ms | p95 cloud GPU ms | Completed FPS |
+|---|---:|---:|---:|
+| Daylight proxy transition, 1.95 km | 114.2 → 61.8 | 124.3 → 65.1 | 7.7 → 13.9 |
+| Overcast proxy transition, 1.95 km | 260.6 → 153.0 | 269.8 → 156.8 | 3.7 → 6.3 |
+| Inside rain, 6 km | 263.1 → 149.7 | 268.2 → 153.7 | 3.7 → 6.4 |
+| Above storm, 10 km | 225.9 → 222.1 | 231.9 → 226.8 | 4.3 → 4.4 |
+| Overcast horizon, 3 km | 124.0 → 120.0 | 128.0 → 123.1 | 7.6 → 7.9 |
+| Above scattered clouds, 10 km | 65.2 → 66.8 | 69.0 → 71.2 | 10.6 → 11.1 |
+| Inside scattered clouds, 6 km | 65.9 → 66.6 | 69.5 → 71.2 | 12.4 → 12.4 |
+| Ground in rain, 1 km | 11.9 → 10.8 | 13.3 → 11.7 | 47.4 → 58.5 |
+
+The ground daylight raymarch dropped from 16.0 to 11.9 ms. Its completed FPS varied as terrain streamed into view. The cirrus-only ground reference ran at 52.2 FPS on the baseline and 46.7 FPS in the comparison, which gives a measure of the frame-to-frame variation outside the cloud shader. In both crossfades and in rain, 99% of pixels differed by at most one level on the 8-bit display captures.
+
+### Motion checks
+
+The lab rendered 19 matched frames per side for a pan through small cumulus, a turn inside rain, and a climb from 1.55 km through the ground proxy transition. The rotation-compensated p99 difference between successive frames was four levels for small cumulus and one for rain on both revisions. In the upper 60% of the climb captures, 99% of pixels differed by at most one RGB level between revisions. The p99 difference in frame-to-frame changes was also one level there. The lab rain turn had similar GPU cost on both revisions, so the large rain saving in the game is view-dependent. [Motion metrics and lab timings](tools/perf/cloud-results/2026-11-21/motion.json).
+
+To reproduce the default-settings profile, serve `f418840` on port 8765 and the working checkout on port 8000. Run the benchmark with both frame caps disabled by its game harness.
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 \
+CLOUD_BENCH_CASES='^game-(ground-day|ground-cirrus-only|crossfade-day|above-day|inside-day|ground-rain|crossfade-overcast|horizon-overcast|inside-rain|above-storm)$' \
+CLOUD_BENCH_WARM=19 CLOUD_BENCH_FRAMES=15 \
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8765 http://127.0.0.1:8000 /tmp/cloud-dense-weather
+```
+
+### 30 km detailed-volume experiment
+
+Disabling the ground proxy and letting the existing distant banks fully take over by 30 km cost 42.0 ms from the ground, up from 11.8 ms with the optimized proxy. At 1.95 km it avoided the transition and fell from 62.4 to 44.3 ms. That view changed by more than five RGB levels over 8.8% of the frame. The default keeps the proxy and its existing transition. This experiment uses the fair-weather bank path, whose distance blend already weakens as the stratiform deck fills. [Raw distance-LOD timings](tools/perf/cloud-results/2026-11-21/30km.json).
+
+### Tower cost
+
+Setting `giantShare` to zero at the same resolution and light settings reduced 228.2 → 131.9 ms above the storm, 124.8 → 86.4 ms along the overcast horizon, and 66.2 → 35.9 ms above scattered clouds. The above-layer images show visibly flatter banks and fewer tall silhouettes. The tested switch removes towers at all distances. A distance-limited version would need its own timing and motion review. [Raw tower timings](tools/perf/cloud-results/2026-11-21/no-towers.json).
+
+### Grazing shell fix
+
+Tall towers are now disabled in the game's default cloud look. At the reported 6.54 km camera altitude, rays that graze the cloud base can leave the layer and re-enter it. The near leg could spend almost the entire step budget, leaving the distant leg on the average-density fallback and drawing a bright arc. Both visible legs now share a step spacing fitted to their combined path length, using the original maximum step count. The distant cloud texture continues through the former arc in the fixed-camera capture and the 19-frame climb from 6.18 to 6.90 km. [Before and after, top and bottom](tools/perf/cloud-results/2026-11-21/grazing-shell.jpg).
+
+With towers off in both builds, the shared budget cost 50.8 → 56.4 ms at the fixed view and 45.3 → 51.7 ms in the climb on the M1 Pro at a 1920×975 canvas. The timestamps are for the cloud raymarch. [Raw timings](tools/perf/cloud-results/2026-11-21/grazing-shell.json).
+
+Compared with the previous default with towers enabled, both changes together reduced raymarch time from 96.3 to 65.6 ms at the reported camera and from 90.1 to 50.9 ms at the 10 km control view. [Combined A/B timings](tools/perf/cloud-results/2026-11-21/grazing-shell-net.json).
+
+## 14. Tower and deck experiments
+
+During the tower comparison, **K** cycled through the previews below. The benchmark commands still reproduce them. Section 15 describes the current in-game control.
+
+The stretch mode reuses regional weather and the ordinary cumulus shape lookup to raise selected cloud groups. The bounded modes use the same six planet-fixed sites and a shared 48³ density volume, baked from joined billows. Each ray clips to the tower's envelope before sampling density. The cached mode interpolates optical depth in a 20³ grid per tower, refreshed after 0.7° of light movement. The impostor mode uses the same cached volume nearby and interpolates front and back depths and integrated density from six baked views across the 24–38 km transition. All tower previews use the existing ray grid and opaque scene depth. The separate towers have their own self-shadowing. The ground shadow map covers the main cloud field.
+
+The broad deck replaces the detailed cumulus with one shallow curved volume shaped by a coarse world-space density field. A continuous lattice and a directional lighting probe give it depth and visible gaps. It also supplies the density for the normal cloud shadow pass. The broad look trades individual billows and close fly-through detail for a much cheaper overcast or background layer. [Ground comparison in reading order, off, stretched, cached towers, broad deck](tools/perf/cloud-results/2026-11-21/tower-experiments/ground-look.jpg).
+
+### WebGPU timestamps
+
+Chrome 158 on an Apple M1 Pro, 1536×960 canvas and 768×480 cloud target. The near and far runs alternate A/B order over two rounds. The ground run has one round. Each run warms for 13 frames and samples 15. The table reports shader spans. The base renderer continues to run in the three bounded modes. Other game work remains visible in completed FPS.
+
+| Component | Near flight | Far view | Ground |
+|---|---:|---:|---:|
+| Tower-free base raymarch | 67–69 ms | 37–40 ms | 7–8 ms |
+| Original procedural giants | 158.67 ms | — | 12.08 ms |
+| Stretched cumulus, full raymarch | 89.93 ms | — | 7.67 ms |
+| Added tower bounds and composition control | 0.31 ms | — | — |
+| Added tower density, with unlit shading | 0.37 ms | — | — |
+| Added bounded tower pass, live lighting | 0.51 ms | 0.31 ms | — |
+| Added bounded tower pass, cached lighting | 0.33 ms | 0.31 ms | 0.39 ms |
+| Added distance impostor pass | — | 0.29 ms | — |
+| Broad deck, whole cumulus replacement | 0.30 ms | 0.32 ms | 0.42 ms |
+
+The bounds and unlit timings are standalone shader controls. The near cached pass used 35% less GPU time than the live-lit pass on the same baked shape. In the far scene both were near the cost of dispatching the layer and checking bounds. The sparse scene shows little gain from the atlas itself. The broad deck reached 48.7 completed FPS in the near view, with about 0.09 ms of ray reconstruction and 4.13 ms in the cloud composite span. The timestamped composite can include GPU dependencies.
+
+Forced updates measured 0.12–0.34 ms for the density bake in most runs, 0.04–0.05 ms for the light cache in most runs, and 0.07 ms for the one-time impostor bake. The raw captures retain longer single-update spans as well. The ground shadow map measured 0.07–0.09 ms in deck mode and typically 0.19–0.47 ms for the detailed field in these views. [Near timings](tools/perf/cloud-results/2026-11-21/tower-experiments/near.json), [far timings](tools/perf/cloud-results/2026-11-21/tower-experiments/far.json), [ground timings](tools/perf/cloud-results/2026-11-21/tower-experiments/ground.json).
+
+### Isolated tower passes
+
+The final tower shaders were also run against the last frame's input buffers with the game paused. These are the medians of 24 individually submitted draws per mode, with 12 repeated submits for the bakes. This removes the base cloud march and terrain from the measurements. The final march adds a partial endpoint step as the visible chord grows. The compositor fades between depth orders where the tower and main cloud layer overlap.
+
+| Component | Near flight | Far view |
+|---|---:|---:|
+| Bounds and composition control | 0.250 ms | — |
+| Density with unlit shading | 0.256 ms | — |
+| Live-lit volume | 0.507 ms | 0.269 ms |
+| Cached volume | 0.282 ms | 0.221 ms |
+| Depth impostor | — | 0.223 ms |
+| Density bake | 0.071–0.104 ms | 0.071–0.204 ms |
+| Light cache bake | 0.038 ms | 0.037–0.117 ms |
+| Impostor atlas bake | — | 0.177 ms |
+
+The isolated close view puts the cached pass 44% below live lighting. Cached and impostor rendering cost about the same in the sparse far view. The 19-frame flight from about 44 to 23 km shows the same tower through the 24–38 km handoff, with gradual silhouette and shading changes. [Isolated near samples](tools/perf/cloud-results/2026-11-21/tower-experiments/isolated-near.json), [isolated far samples](tools/perf/cloud-results/2026-11-21/tower-experiments/isolated-far.json), [handoff frames](tools/perf/cloud-results/2026-11-21/tower-experiments/handoff.jpg).
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 \
+CLOUD_BENCH_CASES='^game-tower-near$' CLOUD_BENCH_TOWER_VARIANTS=bounded,cached,stretched,deck,density,bounds,original \
+CLOUD_BENCH_WARM=13 CLOUD_BENCH_FRAMES=15 \
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8000 http://127.0.0.1:8000 /tmp/cloud-tower-benchmark
+```
+
+## 15. Filtered deck preview
+
+**K** and the Cloud deck preview button now toggle between the normal clouds and the filtered deck. The game starts with the normal, tower-free look. The stretched and tower prototypes are available to the benchmark.
+
+The first broad deck sampled thin density at discrete depths. At grazing angles the roof could pass between samples, drawing repeated ridges into the sky. Clipping rays to each column's thickness helped, although constant columns still produced bands. The selected shader samples adjacent, prefiltered columns on a continuous ray grid. It interpolates their floor, roof and density and integrates through the resulting volume. The deck traces every pixel in its existing cloud target, so the checkerboard also stays out of the preview.
+
+At 1536×960 with a 768×480 cloud target on the M1 Pro, two Chrome WebGPU rounds gave the deck pass **0.34 → 0.97 ms** from the ground and **0.44 → 1.13 ms** at the 6.54 km grazing view. The previous deck is at the top of the paired image. The new deck is at the bottom. [Before and after](tools/perf/cloud-results/2026-11-21/deck-anti-alias/grazing.jpg), [GPU timestamps](tools/perf/cloud-results/2026-11-21/deck-anti-alias/steady.json).
+
+In the 19-frame grazing pan, mean rotation-compensated RGB error fell from 0.260 to 0.219 on an 8-bit scale. The share of pixels with more than four levels of change fell from 0.49% to 0.40%. The ground pan's mean fell from 0.302 to 0.281, and the share above four levels moved from 0.63% to 0.68%. Both pans measured p99 of two levels on both implementations. The climb was reviewed visually because translation introduces parallax. [Motion measurements](tools/perf/cloud-results/2026-11-21/deck-anti-alias/motions.json).
+
+An 18–34 km fade from near detailed clouds into the deck saved **48.1 → 43.3 ms** in one flight view. It cost **6.8 → 45.1 ms** on the ground and **86.5 → 103.8 ms** on the overcast horizon. The near path spent too much time on the detailed march, especially where the ground proxy had been fast. The current preview uses the filtered deck by itself. [Hybrid trial](tools/perf/cloud-results/2026-11-21/deck-anti-alias/hybrid-trial.json).
+
+## 16. Conservative cloud history preview
+
+The game starts with `temporal: false` and spatial reconstruction. The cloud lab starts with the original interleaved reprojection. In the game, **U** toggles the new history preview, which also starts off.
+
+The preview alternates workgroups eligible for one-frame reuse on the existing spatial grid. It predicts screen motion from camera translation, turning and the last screen-space motion vector. Within an eligible group, each sky ray projects its depth through the previous camera and accounts for wind, shape evolution and the faster-moving detail noise. The threshold is tightest for thin and clear rays. Accepted rays carry forward their previous unfiltered sample exactly once. Fast turns, terrain occlusion, abrupt weather or lighting changes, and cloud or proxy transitions use fresh rays.
+
+| Game view | Standard raymarch | History preview | Change |
+|---|---:|---:|---:|
+| Ground, proxy | 7.80 ms | 4.23 ms | −46% |
+| 6.54 km grazing | 47.43 ms | 29.69 ms | −37% |
+| Above the layer | 38.95 ms | 29.86 ms | −23% |
+| Overcast, steady camera, 33 ms cloud animation delta | 86.32 ms | 49.75 ms | −42% |
+| Slow pan and translation, 33 ms cloud animation delta | 25.77 ms | 20.94 ms | −19% |
+
+These are WebGPU pass means over two alternating runs on the M1 Pro at 1536×960 with a 768×480 cloud target. In the 15-frame captures, slow pan added 1.125/255 at p99 to the frame-to-frame opacity change. Horizontal opacity edge contrast changed by 0.011%. The fast turn and climb generated identical resolved sky RGBA buffers with the preview on and off. [GPU timestamps](tools/perf/cloud-results/2026-11-21/conservative-history/timings.json), [matched cloud-buffer results](tools/perf/cloud-results/2026-11-21/conservative-history/motion.json).
+
+The first rain run with the game's maximum 100 ms animation delta spent 6% more time in the raymarch. Per-ray rejection left too little work to skip. The preview now bypasses the history dispatch when relative cloud evolution exceeds 2.5 m since the previous render. A retest used fresh samples for all 15 captured rain frames and matched the standard sky RGBA buffer exactly. The two-round raymarch averages were 114.12 ms with the preview off and 115.93 ms with it on. [Initial stress trial](tools/perf/cloud-results/2026-11-21/conservative-history/rain-10hz-trial.json), [final GPU timings](tools/perf/cloud-results/2026-11-21/conservative-history/guard-timings.json), [final matched frames](tools/perf/cloud-results/2026-11-21/conservative-history/guard-motion.json).
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 CLOUD_BENCH_CASES='^game-history-' \
+CLOUD_BENCH_AFTER_SETTINGS='{"conservativeTemporal":true}' CLOUD_BENCH_MOTION_FRAMES=15 \
+CLOUD_BENCH_CLOUD_BUFFER=1 CLOUD_BENCH_CAPTURE=0 \
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8000 http://127.0.0.1:8000 /tmp/cloud-history
+node tools/perf/cloudHistoryMetrics.mjs /tmp/cloud-history game-history-slow-pan game-history-wind game-history-turn game-history-rain-10hz
+```
+
+## 17. Baked cloud samples
+
+**Shift+U** cycles cached sunlight, baked weather, per-ray scattering and off. The previews start off and apply to the detailed, tower-free raymarch. The sunlight and weather bakes use world-aligned grids with overlapping texels fixed across camera movement. A cache boundary fades into procedural sampling. The bakes refresh when their inputs change, including during the animated rain and flight tests.
+
+The sunlight preview bakes the farther probes of direct sun optical depth into a 128×128×40 volume over 32 km. It retains the first three probes, sky occlusion, moonlight and the original view-ray density. The 512×512 weather bake stores coverage, type, base lift and shape offset over 96 km. The ray samples the bake where the original shader would use the first weather mip and falls back to the procedural field at larger footprints. Every view-ray interval is still tested for cloud. The per-ray scattering preview computes the sun and moon phase weights up front and uses the original density-dependent attenuation.
+
+| Trial | View | Standard raymarch | Preview raymarch plus bake | Change |
+|---|---|---:|---:|---:|
+| Refined sunlight | Dense rain, 100 ms animation delta | 112.62 ms | 109.68 ms | −2.6% |
+| Refined sunlight | Fast rain turn and climb | 196.28 ms | 185.19 ms | −5.6% |
+| Baked weather | Broken clouds, flight across cache anchor | 25.38 ms | 23.03 ms | −9.3% |
+| Baked weather | Fast rain turn and climb | 186.36 ms | 204.04 ms | +9.5% |
+| Per-ray scattering | Dense rain | 113.33 ms | 130.82 ms | +15.4% |
+
+These are means over two alternating Chrome WebGPU runs on the M1 Pro at 1536×960 with a 768×480 cloud target. The refined light bake averaged 0.88–1.02 ms in rain and reached 2.60 ms at p95. Baked weather also regressed during the fast rain turn, while the scattering variant was slower in all three comparisons. [Refined timings](tools/perf/cloud-results/2026-11-21/sample-caches/timings.json), [coarse and scattering trials](tools/perf/cloud-results/2026-11-21/sample-caches/coarse-and-scattering-timings.json).
+
+The coarse sunlight trial saved 13.5% in dense rain. It changed fast-flight radiance by 49.2/255 at p99 in the linear cloud buffer. The refined grid and extra live probe reduced that to 18.6/255. Its p99 frame-to-frame opacity difference was zero in both rain clips. Crossing the weather cache anchor added 1.06/255 at p99 to frame-to-frame opacity change, with a change of less than 0.05% in horizontal opacity edge contrast. These results support inspecting the caches with the debug control. [Matched cloud buffers](tools/perf/cloud-results/2026-11-21/sample-caches/motion.json), [coarse and scattering quality](tools/perf/cloud-results/2026-11-21/sample-caches/coarse-and-scattering-motion.json).
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 CLOUD_BENCH_CACHE_VARIANTS=light,weather,phase \
+CLOUD_BENCH_CASES='^game-(history-turn|history-rain-10hz|cache-weather-handoff)$' \
+CLOUD_BENCH_WARM=10 CLOUD_BENCH_FRAMES=17 CLOUD_BENCH_ROUNDS=2 CLOUD_BENCH_CAPTURE=0 \
+CLOUD_BENCH_MOTION_FRAMES=12 CLOUD_BENCH_CLOUD_BUFFER=1 \
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8000 http://127.0.0.1:8000 /tmp/cloud-caches
+node tools/perf/cloudHistoryMetrics.mjs /tmp/cloud-caches game-history-turn-light game-cache-weather-handoff-weather
+```
+
+## 18. Cloud budget tiers
+
+**Shift+K** or the Cloud budget button cycles **current renderer → Medium → High → Ultra → current renderer**. The game starts on the current renderer. **K** selects the earlier deck preview and **Shift+P** controls the earlier quality presets.
+
+The budget tiers integrate curved rain decks and shallower broken-cloud banks over the full ray. When the camera is close enough to the cloud layer, a bounded foreground pass samples the procedural cloud density and blends it into the bank before tracing the rest of the ray. The thresholds are continuous with weather and distance. The tiers trace at most 368,640 fresh cloud rays per frame and use a view-and-distance lookup for atmospheric haze. Medium and High use cirrus shells. Ultra retains volumetric cirrus and uses fuller local cloud lighting where the deck is sparse.
+
+| Preview | Maximum foreground samples per ray | Foreground distance from rain to fair weather |
+|---|---:|---:|
+| Medium | 6 | 0.84–1.0 km |
+| High | 22 | 2.4–6.5 km |
+| Ultra | 36 | 4.2–10.0 km |
+
+| M1 Pro cloud stack p95 | Medium | High | Ultra |
+|---|---:|---:|---:|
+| Dense rain, 100 ms animation delta | 5.55–5.73 ms | 7.65–8.12 ms | 16.04–16.31 ms |
+| Fast rain turn and climb, replayed poses | 5.49–23.45 ms | 7.02–7.03 ms | 14.78–14.98 ms |
+| Broken-cloud flight, replayed poses | 2.05–2.19 ms | 2.55–2.57 ms | 4.07–4.12 ms |
+| Above cirrus at 16 km | 2.18–3.72 ms | 2.71–5.00 ms | 4.86–6.13 ms |
+
+Chrome WebGPU on the M1 Pro at 1536×960 with a 768×480 cloud target. Each range covers two runs of 24 isolated replay frames at the final pose of the live A/B. The replay draws cirrus and cumulus and forces active shadow and haze updates. The fast turn's Medium replay medians were 4.11 and 4.13 ms. The log retains the 23.45 ms outlier and the live game timings, which also include terrain and the rest of the scene. The fast turn's live volume-pass means were 3.6–3.9 ms on Medium, 6.3–6.5 ms on High and 14.3 ms on Ultra. These tiers simplify distant silhouettes and lighting, most visibly in broken clouds. [GPU timestamps](tools/perf/cloud-results/2026-11-21/budget-tiers/timings.json).
+
+In the 15-frame grazing pan, the rotation-compensated frame-to-frame RGB difference fell from 6–8 levels at p99 to 3 on all three budget tiers. This capture includes the combined effects of stable sampling and smoother cloud shapes. [Motion measurements](tools/perf/cloud-results/2026-11-21/budget-tiers/motion.json).
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 CLOUD_BENCH_BUDGET_VARIANTS=medium,high,ultra \
+CLOUD_BENCH_CASES='^game-(history-turn|history-rain-10hz|cache-weather-handoff|budget-above-cirrus)$' \
+CLOUD_BENCH_WARM=9 CLOUD_BENCH_FRAMES=15 CLOUD_BENCH_ROUNDS=2 CLOUD_BENCH_ISOLATED_STACK_FRAMES=24 \
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8000 http://127.0.0.1:8000 /tmp/cloud-budget
+```
+
+## 19. Budget tier optimization at matched quality
+
+The budget tiers now trace the near interval and finish the bank and lower stratus in separate compute passes. The near result and continuation use 32-bit storage so the split does not quantize the in-flight radiance, transmittance or depth. The bulk-only pipeline handles views where the near ray cannot reach the cloud shell. Dense rain uses a specialized variant when the existing fair-weather lighting weight is exactly zero. The near loop hoists the per-ray scattering terms and skips bank samples and light probes when their blend weight is zero. Shadow integration skips empty taps above the bank, and the composite calculates depth-aware blend weights only at mixed sky and terrain edges. The tier resolutions, distance limits, sample counts and lighting formulas are the same in this A/B.
+
+| Isolated cloud stack median | Medium | High | Ultra |
+|---|---:|---:|---:|
+| Dense rain at 100 ms animation delta | 4.75 → 3.69 ms | 6.96 → 5.40 ms | 15.24 → 6.71 ms |
+| Fast rain turn and climb | 4.01 → 3.08 ms | 6.88 → 5.20 ms | 13.88 → 6.09 ms |
+| Broken-cloud flight | 2.12 → 1.83 ms | 2.42 → 2.00 ms | 3.91 → 2.54 ms |
+| Above cirrus at 16 km | 1.75 → 1.43 ms | 2.85 → 1.95 ms | 4.48 → 3.42 ms |
+
+Chrome WebGPU on the M1 Pro at 1536×960, with the 768×480 cloud target on both sides. Values average two alternating replay medians, each with six warm-up and 24 measured frames. The replay draws cirrus and clouds and forces active shadow and haze refreshes. The live flight samples are also recorded. Dense-rain p95 across the two optimized replays was 4.10–4.47 ms for Medium, 5.47–5.81 ms for High and 7.85–8.13 ms for Ultra. [Final GPU timestamps](tools/perf/cloud-results/2026-11-21/budget-tier-optimization/timings.json).
+
+The 12 paired display captures measured zero maximum-channel RGB difference at p99 on an 8-bit scale. In nine 12-frame clips, p99 sky-buffer RGBA and frame-to-frame opacity error were at most 0.125/255. Visible cloud depth, measured where both buffers had at least 5% opacity, differed by at most 0.5 m at p99 across those clips. The near pass adds 8.44 MiB of intermediate texture storage at the tested cloud resolution. [Matched motion and depth measurements](tools/perf/cloud-results/2026-11-21/budget-tier-optimization/motion.json).
+
+The corrected same-build comparison cleared experimental settings between runs and isolated the split dispatch from the other changes. Splitting saved 10–16% in rain and 25–37% in broken clouds in that comparison. The paired Medium workgroup trial measured 4.44 ms with 8×8 and 4.49 ms with 8×4. The selected budget pipelines use 8×8. [Split dispatch experiment](tools/perf/cloud-results/2026-11-21/budget-tier-optimization/split-ab.json).
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 CLOUD_BENCH_BUDGET_VARIANTS=medium,high,ultra \
+CLOUD_BENCH_COMPARE_BUDGET=1 CLOUD_BENCH_CASES='^game-(history-turn|history-rain-10hz|cache-weather-handoff|budget-above-cirrus)$' \
+CLOUD_BENCH_WARM=9 CLOUD_BENCH_FRAMES=15 CLOUD_BENCH_ROUNDS=2 CLOUD_BENCH_ISOLATED_STACK_FRAMES=24 \
+CLOUD_BENCH_MOTION_FRAMES=12 CLOUD_BENCH_CLOUD_BUFFER=1 \
+node tools/perf/cloudBenchmark.mjs "$BASELINE_URL" http://127.0.0.1:8000 /tmp/cloud-budget-optimization
+```
+
+## 20. Visual parity with the detailed renderer
+
+The reference for this round is the tower-free detailed game renderer with spatial reconstruction. The benchmark compares paired camera poses and weather, including a fast turn and climb through rain, a stationary rain view with 100 ms cloud-animation steps, a grazing pan, and flight through broken clouds. The display comparison uses maximum-channel RGB error on an 8-bit scale. The motion comparison reads the linear cloud buffer and compares opacity, depth, and frame-to-frame radiance at corresponding poses.
+
+| Trial | GPU result | Visual cost and decision |
+|---|---|---|
+| Richer large banks and rain deck | At 1536×960 the richer Medium, High and Ultra replays reached roughly 5.9, 11.8 and 23.6 ms p95 in dense rain. | High cost. Silhouettes and gaps in broken clouds still moved. The refreshed bank profiles were dropped. |
+| Stationary rain with short-range lighting reuse | 112.74 → 87.70 ms cloud stack median in two alternating replays. | Low cost. The displayed image changed by one level at p99 in rain. |
+| Uninterpolated lighting reuse over longer spans | 110.29 → 65.47 ms in steady rain and 186.02 → 151.68 ms during the fast rain turn in the screening replay. | Low static cost in rain. Extending reuse into broken clouds added visible lighting variation in the grazing pan. |
+| Atmospheric haze lookup | 8.46 → 8.19 ms at ground-level dawn. Savings were inconsistent across the other views and the bake reached 0.6 ms above the layer at night. | Low cost. One RGB level at p99. Kept the original detailed composite. |
+| Four sunlight probes or upward-only ambient occlusion | Removing the three side probes cut about 16% from the live dense-rain volume pass. Shortening the sunlight march cut about 7%. | High cost. Dense-rain p99 RGB changed by 22 and 63 levels respectively. |
+| Skip detail erosion once the ray is 78% opaque | 117.61 → 80.56 ms in steady rain in the screening replay. | Medium cost. Dense-rain p99 RGB changed by 16 levels and the fast turn reached 14 levels. |
+| Coarser intervals through the layer | 24.46 → 21.56 ms in broken-cloud flight, with an approximately 8% regression in the fast rain turn. | Low static cost in the stills. The mixed timing results did not justify a change to the sampling grid. |
+| Original ground proxy versus forcing volume | 7.39 → 28.19 ms in the ground-pan raymarch when forcing volume. | Forcing volume changed the displayed image by 39 levels at p99. Keep the original ground proxy. |
+| Interpolated weather within nearby sample intervals and fewer rain-interior refinements | The pilot builds added grazing-view cost. The weather trial also produced larger image differences there. | No consistent gain. Both prototypes were removed. |
+
+The first bank screen compared each tier to the detailed renderer in the same scene. In broken-cloud flight, even the richer Ultra changed the image by 117 levels at p99, while its two cloud volume passes took 3.83 ms. The prior cost-focused modes remain available under **Shift+K** as approximate previews for comparison.
+
+[Proxy and lighting screen](tools/perf/cloud-results/2026-11-22/visual-parity/proxy-and-lighting-screen.json) · [Haze and lighting replay](tools/perf/cloud-results/2026-11-22/visual-parity/haze-and-lighting.json) · [Far LOD, hidden detail and interval screen](tools/perf/cloud-results/2026-11-22/visual-parity/far-lod-and-density-screen.json) · [Interval and weather prototype pilot](tools/perf/cloud-results/2026-11-22/visual-parity/interval-prototypes-partial.json) · [Richer bank timings](tools/perf/cloud-results/2026-11-22/visual-parity/richer-bank-tiers.json) · [Shared-light GPU timings](tools/perf/cloud-results/2026-11-22/visual-parity/shared-light-timings.json) · [Shared-light motion results](tools/perf/cloud-results/2026-11-22/visual-parity/shared-light-motion.json).
+
+### Selected detailed path
+
+The rain-specific dome pipeline lights the first occupied sample after clear air and samples with more than 98.5% view transmittance directly. It shares the expensive lighting over up to eight samples, refreshing it when the distance from the last evaluated source exceeds 250 m. When the next source is available, it uses the distance moment of the already-integrated samples to interpolate between the two sources. Each sample still contributes its original density, transmittance, and depth. The game uses a smooth lighting-reuse threshold from deck weight 0.86 to 0.94. The fair-weather pipeline compiles without the interpolation. Spatial ray sampling stays fixed.
+
+| View | Detailed reference median | Selected median | Selected p95 | Matched sky RGB p99 |
+|---|---:|---:|---:|---:|
+| Steady dense rain | 114.08 ms | 73.06 ms | 74.81–75.16 ms | 1/255 |
+| Fast rain turn and climb | 180.89 ms | 160.63 ms | 163.70–165.42 ms | 6/255 |
+| Grazing pan at 6.54 km | 45.28 ms | 45.92 ms | 47.65–48.15 ms | 0/255 |
+| Broken-cloud flight | 24.48 ms | 24.54 ms | 25.10–25.80 ms | 0/255 |
+| Overcast climb across ground-proxy boundary | 99.68 ms | 98.57 ms | 101.01–104.36 ms | 0/255 |
+| Ground pan | 8.05–8.10 ms | 8.03–11.54 ms | 8.54–50.61 ms | 0/255 |
+
+Chrome WebGPU on the M1 Pro at 1536×960 with a 768×480 cloud target. The isolated stack draws cirrus and cumulus, forces shadow and haze updates when active, and includes the cloud composite. Medians average two runs of 14 measured poses replayed after six warm-up submissions, except for the ground pan where the table retains both medians. The GPU timer records overlapping pass spans, so use the total marker for stack comparisons. At these rain poses, cirrus and the shadow refresh each take roughly 0.4–0.6 ms and spatial resolve roughly 0.1 ms. The raymarch drives the overruns.
+
+In the six matched ten-frame captures, p99 snapshot opacity error and p99 frame-to-frame opacity error were both zero. Rain opacity and depth agreed at every matched sky ray. The fast turn added 2.38/255 p99 and 5.44/255 p99.9 frame-to-frame radiance difference in the linear cloud buffer. At ground level, terrain streaming differed between some captures, so the display measurement samples the matched sky away from terrain boundaries. Dense rain and rapid turns still exceed the requested tier budgets with this fidelity.
+
+[Final GPU timestamps](tools/perf/cloud-results/2026-11-22/visual-parity/final-timings.json) · [Matched sky and motion measurements](tools/perf/cloud-results/2026-11-22/visual-parity/final-motion.json) · [Interpolated lighting pilot](tools/perf/cloud-results/2026-11-22/visual-parity/interpolated-light-pilot.json).
+
+### Distance blend below the cloud layer
+
+The 20–30 km blend keeps the individual-cloud field for the first 20 km and lets the broader bank field take over beyond that range. The blend also weakens with altitude and with increasing rain coverage. A 22–34 km alternative saved less GPU time. The selected 20–30 km transition trades detail in the horizon for lower cost.
+
+| Same-build A/B | Earlier 15–36 km | Selected 20–30 km | Change |
+|---|---:|---:|---:|
+| Ground pan | 8.05 ms | 7.48 ms | −7% |
+| Slow pan and translation at 3 km altitude | 26.21 ms | 23.65 ms | −10% |
+| Broken clouds during flight | 24.60 ms | 21.17 ms | −14% |
+
+Each number averages two isolated GPU replay medians. In the ground pan, rotation-compensated display change held at 3/255 at p99. The fraction above four levels fell from 0.83% to 0.76%. For matched sky rays whose resolved cloud depth was within 20 km, the three clips had at most 3/255 p99 display difference and 0.5/255 p99 additional frame-to-frame opacity difference. Including the distant bank, p99 display differences were 16–32/255. The distance filter uses the ray's opacity-weighted cloud depth, so a foreground cloud and the bank can contribute to the same ray.
+
+[Distance blend GPU timings](tools/perf/cloud-results/2026-11-22/visual-parity/distant-lod-timings.json) · [Full-range motion](tools/perf/cloud-results/2026-11-22/visual-parity/distant-lod-motion.json) · [Motion within 20 km](tools/perf/cloud-results/2026-11-22/visual-parity/distant-lod-within-20km.json).
+
+With both selected changes active at game startup, a fresh replay measured 8.19 → 7.52 ms on the ground, 24.55 → 21.16 ms in broken-cloud flight, 113.43 → 73.01 ms in steady rain, and 181.60 → 158.02 ms in the fast rain turn. The ground runs included an isolated p95 spike on each configuration. Dense-rain and fast-turn opacity and depth matched exactly across the eight-frame clips. Within 20 km, the broken-cloud and ground clips stayed at three or fewer 8-bit levels of display error at p99, with at most 0.625/255 of additional opacity change between frames. [Combined GPU timings](tools/perf/cloud-results/2026-11-22/visual-parity/combined-timings.json) · [Combined motion](tools/perf/cloud-results/2026-11-22/visual-parity/combined-motion.json) · [Combined motion within 20 km](tools/perf/cloud-results/2026-11-22/visual-parity/combined-within-20km.json) · [Rotation-compensated ground pan](tools/perf/cloud-results/2026-11-22/visual-parity/distant-lod-rotation.json).
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 CLOUD_BENCH_WARM=6 CLOUD_BENCH_FRAMES=12 \
+CLOUD_BENCH_ISOLATED_STACK_FRAMES=12 CLOUD_BENCH_MOTION_FRAMES=8 CLOUD_BENCH_CLOUD_BUFFER=1 \
+CLOUD_BENCH_CASES='^game-(deck-ground-pan|history-turn|history-rain-10hz|cache-weather-handoff)$' \
+node tools/perf/cloudBenchmark.mjs "$REFERENCE_URL" http://127.0.0.1:8000 /tmp/cloud-parity
+CLOUD_METRIC_DISPLAY=1 node tools/perf/cloudHistoryMetrics.mjs /tmp/cloud-parity \
+  game-deck-ground-pan game-history-turn game-history-rain-10hz game-cache-weather-handoff
+```
+
+## 21. Final detailed-cloud pass
+
+The reference is the selected detailed renderer from section 20, including the 20–30 km blend. The near-ground proxy now accumulates one opacity-weighted distance per interval and reconstructs its lighting position on the original ray. The proxy and regular dome shaders skip the dome profile of empty cores and skip the erosion texture when its multiplier is zero. The original probe directions come from constants. The regular dome pipeline uses 8×4 workgroups. The proxy and rain pipelines use 8×8. Dense rain shares an interpolated light source over ten samples and refreshes after 300 m, with the same 98.5% transmittance threshold for the lit skin.
+
+| Trial | Result |
+|---|---|
+| 4×8 and 8×4 workgroup screen | Both smaller groups cost about 0.3 ms on the ground and about 5 ms in steady rain. The 8×4 regular dome variant saved 1.1 ms in broken clouds. |
+| Shader arithmetic changes across all raymarch variants | Saved 0.38 ms on the ground and 1.38 ms in broken clouds. The fast rain turn cost 12.4 ms more. The selected paths limit the changes to the shaders where they helped. |
+| Skip samples outside the detailed field's altitude bounds | Fast-turn replay went from 165.6 to 198.5 ms. The extra checks outweighed the skipped sampling on this GPU. |
+| Smaller per-sample state and deferred layer weighting | Added ground cost and produced no repeatable gain in the other replays. |
+| Ten light samples over 250 or 300 m | The 300 m variant saved 4.1 ms in steady rain and 9.3 ms in the fast-turn screen, with at most two levels of still-image RGB error at p99. |
+
+[Workgroup screen](tools/perf/cloud-results/2026-11-22/final-squeeze/groups.json) · [Shader arithmetic screen](tools/perf/cloud-results/2026-11-22/final-squeeze/math.json) · [Altitude bounds trial](tools/perf/cloud-results/2026-11-22/final-squeeze/bounds.json) · [Sample state trial](tools/perf/cloud-results/2026-11-22/final-squeeze/compact.json) · [Rain lighting screen](tools/perf/cloud-results/2026-11-22/final-squeeze/rain-light.json).
+
+| View | Reference | Selected | Saved |
+|---|---:|---:|---:|
+| Ground pan | 7.56 ms | 7.31 ms | 0.26 ms |
+| Broken-cloud flight | 21.28 ms | 19.74 ms | 1.54 ms |
+| Steady dense rain | 73.15 ms | 69.28 ms | 3.86 ms |
+| Fast rain turn and climb | 158.91 ms | 153.78 ms | 5.13 ms |
+| Overcast climb across the ground-proxy boundary | 100.64 ms | 100.08 ms | Within replay spread |
+
+Chrome WebGPU on the M1 Pro at 1536×960 with a 768×480 cloud target. Values are the mean of the cloud-stack GPU medians across two alternating replays of 14 frames each. The ground figure uses three dedicated alternating replays of 28 frames each. Each ground replay saved 0.22–0.26 ms in the raymarch alone. The long-tail ground spikes are retained in the raw timings.
+
+Ten matched frames per view measured zero p99 opacity difference and zero p99 change in frame-to-frame opacity. Rain opacity and resolved cloud depth were identical. The displayed sky differed by one 8-bit level at p99 in steady rain and three in the fast turn. The ground, broken-cloud and overcast captures had zero p99 display difference. [Selected timings](tools/perf/cloud-results/2026-11-22/final-squeeze/selected-timings.json) · [Ground repeat](tools/perf/cloud-results/2026-11-22/final-squeeze/ground-repeat.json) · [Matched motion measurements](tools/perf/cloud-results/2026-11-22/final-squeeze/selected-motion.json).

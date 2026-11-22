@@ -841,12 +841,14 @@ updateLighting(starSystem) {
             // the cumulus along the horizon.)
             const cirrusOn = !!(this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds);
             const cirrusOnTop = cirrusOn && this._cameraAboveCirrus();
+            const budgetTier = this.volumetricClouds?.enabled ? this.volumetricClouds.budgetTier : null;
+            const cirrusShell = budgetTier?.cirrusVolume === false;
             if (cirrusOn) {
                 // Before either part, so both use this frame's camera: they meet at the split, and a
                 // far part a frame behind would tear from the near part while turning.
                 this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
                 this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
-                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'far');
+                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'far', cirrusShell);
             }
 
             this.renderTerrain(frame);
@@ -868,7 +870,7 @@ updateLighting(starSystem) {
             }
 
             if (cirrusOnTop) {
-                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'near');
+                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'near', cirrusShell);
             }
             if (this._weatherParticlesOnly && this.backend._renderPassEncoder) {
                 this.particleSystem.render(this.backend._renderPassEncoder);

@@ -1,0 +1,53 @@
+{
+  "game-history-slow-pan": {
+    "frames": 15,
+    "reuseFrames": 14,
+    "rgbaError": {
+      "count": 3018650,
+      "mean": 0.07565131007123388,
+      "p99": 1.375,
+      "p999": 3
+    },
+    "opacityMotionError": {
+      "count": 2817296,
+      "mean": 0.058320983012604403,
+      "p99": 1.125,
+      "p999": 2.75
+    },
+    "horizontalOpacityEdgeEnergyRatio": 0.9998913293123209
+  },
+  "game-history-wind": {
+    "frames": 15,
+    "reuseFrames": 14,
+    "rgbaError": {
+      "count": 3018990,
+      "mean": 0.025483795580867694,
+      "p99": 0.25,
+      "p999": 0.5
+    },
+    "opacityMotionError": {
+      "count": 2817724,
+      "mean": 0.016347343975939493,
+      "p99": 0.25,
+      "p999": 0.625
+    },
+    "horizontalOpacityEdgeEnergyRatio": 0.9999914895237492
+  },
+  "game-history-turn": {
+    "frames": 15,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3812788,
+      "mean": 0,
+      "p99": 0,
+      "p999": 0
+    },
+    "opacityMotionError": {
+      "count": 3555339,
+      "mean": 0,
+      "p99": 0,
+      "p999": 0
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1
+  }
+}

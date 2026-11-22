@@ -507,7 +507,7 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | P: Cloud shape offset | F: Cloud step size | Shift+F: Cloud look | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | P: Cloud shape offset | F: Cloud step size | Shift+F: Cloud look | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier | K: Cloud deck | Shift+K: Cloud budgets | U: Cloud history | Shift+U: Cloud caches
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
@@ -520,6 +520,10 @@
         <button id="cloud-ground" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Near-ground clouds (I)</button>
         <button id="night-look" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Night look (Shift+M)</button>
         <button id="cloud-shape" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud tier (Shift+P)</button>
+        <button id="cloud-experiment" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud deck preview: off (K)</button>
+        <button id="cloud-budget" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud budget preview: current renderer (Shift+K)</button>
+        <button id="cloud-history" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud history preview: off (U)</button>
+        <button id="cloud-cache" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud cache preview: off (Shift+U)</button>
         <button id="sunset-depth" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Sunset colour (Shift+N)</button>
         <button id="cloud-lights" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud lights (M)</button>
         <button id="bank-preview" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Banks: existing (J)</button>
@@ -535,6 +539,7 @@
         import { FrameLoop } from './FrameLoop.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig, FAIR_WEATHER_CLOUD_LOOK } from './runtimeConfigs.js';
+        import { CLOUD_BUDGET_TIERS } from '../core/renderer/volumetricClouds/cloudBudgetTiers.js';
         import { TERRAIN_FIX_PROTOTYPES, applyTerrainFixToConfig, applyTerrainFixLive, terrainFixIndexOf } from './terrainFixPrototypes.js';
         import { WATER_FIX_PROTOTYPES, applyWaterFixLive, waterFixIndexOf } from './waterFixPrototypes.js';
         import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
@@ -4801,12 +4806,92 @@
             cloudShapeMode = (cloudShapeMode + 1) % CLOUD_SHAPE_MODES.length;
             const m = CLOUD_SHAPE_MODES[cloudShapeMode];
             Object.assign(s, cloudShapeGameSettings, m.set);
+            s.cloudBudgetMode = 'off';
             window.volumetricClouds.enabled = !m.off;
+            cloudBudgetShow();
             cloudShapeShow();
             debugSay(`Cloud tier: ${m.name}. Watch the FPS counter.`, 'CloudTier');
         }
         document.getElementById('cloud-shape').addEventListener('click', cloudShapeStep);
         setInterval(cloudShapeShow, 1000);
+
+        const cloudExperimentButton = document.getElementById('cloud-experiment');
+        function toggleCloudDeck() {
+            const clouds = window.volumetricClouds;
+            if (!clouds) return;
+            if (clouds.budgetTier) {
+                clouds.settings.cloudBudgetMode = 'off';
+                clouds.enabled = !CLOUD_SHAPE_MODES[cloudShapeMode].off;
+                cloudBudgetShow();
+            }
+            const deck = clouds.settings.towerDebugMode !== 'deck';
+            clouds.settings.towerDebugMode = deck ? 'deck' : 'off';
+            const label = deck ? 'on' : 'off';
+            const status = deck && !clouds.enabled ? ' · volumetric clouds disabled' : '';
+            cloudExperimentButton.textContent = `Cloud deck preview: ${label}${status} (K)`;
+            debugSay(`Cloud deck preview ${label}.`, 'CloudExperiment');
+        }
+        cloudExperimentButton.addEventListener('click', toggleCloudDeck);
+
+        const cloudBudgetButton = document.getElementById('cloud-budget');
+        const cloudBudgetModes = ['off', ...Object.keys(CLOUD_BUDGET_TIERS)];
+        function cloudBudgetShow() {
+            const mode = window.volumetricClouds?.settings.cloudBudgetMode ?? 'off';
+            const budget = CLOUD_BUDGET_TIERS[mode];
+            const label = budget ? `${mode[0].toUpperCase()}${mode.slice(1)} (approximate)` : 'current renderer';
+            cloudBudgetButton.textContent = `Cloud budget preview: ${label} (Shift+K)`;
+        }
+        function cloudBudgetStep() {
+            const clouds = window.volumetricClouds;
+            if (!clouds) return;
+            const index = cloudBudgetModes.indexOf(clouds.settings.cloudBudgetMode);
+            const mode = cloudBudgetModes[(index + 1) % cloudBudgetModes.length];
+            clouds.settings.cloudBudgetMode = mode;
+            if (mode !== 'off' && clouds.settings.towerDebugMode === 'deck') {
+                clouds.settings.towerDebugMode = 'off';
+                cloudExperimentButton.textContent = 'Cloud deck preview: off (K)';
+            }
+            clouds.enabled = mode !== 'off' || !CLOUD_SHAPE_MODES[cloudShapeMode].off;
+            clouds.resetHistory();
+            cloudBudgetShow();
+        }
+        cloudBudgetButton.addEventListener('click', cloudBudgetStep);
+
+        const cloudHistoryButton = document.getElementById('cloud-history');
+        async function toggleCloudHistory() {
+            const clouds = window.volumetricClouds;
+            if (!clouds) return;
+            const enabled = !clouds.settings.conservativeTemporal;
+            clouds.settings.conservativeTemporal = enabled;
+            clouds.resetHistory();
+            cloudHistoryButton.textContent = `Cloud history preview: ${enabled ? 'loading' : 'off'} (U)`;
+            if (enabled && await clouds.prepareConservativeHistory() && clouds.settings.conservativeTemporal) {
+                cloudHistoryButton.textContent = 'Cloud history preview: on (U)';
+            } else if (clouds.settings.conservativeTemporal) {
+                clouds.settings.conservativeTemporal = false;
+                cloudHistoryButton.textContent = 'Cloud history preview: unavailable (U)';
+            }
+        }
+        cloudHistoryButton.addEventListener('click', toggleCloudHistory);
+
+        const cloudCacheButton = document.getElementById('cloud-cache');
+        const cloudCacheModes = [
+            ['off', 'off'], ['light', 'cached sunlight'], ['weather', 'baked weather'], ['phase', 'per-ray scattering'],
+        ];
+        async function stepCloudCache() {
+            const clouds = window.volumetricClouds;
+            if (!clouds) return;
+            const index = cloudCacheModes.findIndex(([mode]) => mode === clouds.settings.cloudCacheMode);
+            const [mode, label] = cloudCacheModes[(index + 1) % cloudCacheModes.length];
+            clouds.settings.cloudCacheMode = mode;
+            clouds.resetHistory();
+            cloudCacheButton.textContent = `Cloud cache preview: ${mode === 'off' ? label : 'loading'} (Shift+U)`;
+            const ready = mode === 'off' || await clouds.prepareSampleCache(mode);
+            if (clouds.settings.cloudCacheMode !== mode) return;
+            if (!ready) clouds.settings.cloudCacheMode = 'off';
+            cloudCacheButton.textContent = `Cloud cache preview: ${ready ? label : 'unavailable'} (Shift+U)`;
+        }
+        cloudCacheButton.addEventListener('click', stepCloudCache);
 
         // 5. Sunset colour on clouds (VolumetricCloudsModule settings.sunsetDepth): extra atmospheric depth
         // for a low sun's light. 1 is this planet's physical (thin) air.
@@ -4916,6 +5001,8 @@
                 const k = e.key.toLowerCase();
                 if (k === 'n') (e.shiftKey ? sunsetStep : motionResStep)();
                 if (k === 'i') cloudGroundStep();
+                if (k === 'k' && !e.ctrlKey && !e.altKey && !e.metaKey) (e.shiftKey ? cloudBudgetStep : toggleCloudDeck)();
+                if (k === 'u' && !e.ctrlKey && !e.altKey && !e.metaKey) (e.shiftKey ? stepCloudCache : toggleCloudHistory)();
                 if (k === 'p') (e.shiftKey ? cloudShapeStep : cloudOffsetStep)();
                 if (k === 'f') (e.shiftKey ? cloudLookStep : cloudFitStep)();
                 if (k === 'm') (e.shiftKey ? nightLookStep : cloudLightsStep)();

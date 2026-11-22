@@ -275,7 +275,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
      * Cirrus lies above the cumulus, so on the way down a ray meets cirrus first and on the way up
      * cumulus first: the split is exact for every camera height.
      */
-    renderCirrus(camera, environmentState, uniformManager, part = 'all') {
+    renderCirrus(camera, environmentState, uniformManager, part = 'all', forceShell = false) {
         const partCode = part === 'near' ? 1 : part === 'far' ? 2 : 0;
         if (!this.initialized || !this.noiseGenerator) return;
 
@@ -286,7 +286,7 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         const center = this._layerParamContext.origin;
         const altitude = Math.hypot(camera.position.x - center.x, camera.position.y - center.y,
             camera.position.z - center.z) - this._layerParamContext.planetRadius;
-        const hasVolume = layers.some(layer => {
+        const hasVolume = !forceShell && layers.some(layer => {
             const band = layer.altMax - layer.altMin;
             const middle = (layer.altMin + layer.altMax) * 0.5;
             const halfSlab = band * CIRRUS_SLAB_FRACTION * 0.5;

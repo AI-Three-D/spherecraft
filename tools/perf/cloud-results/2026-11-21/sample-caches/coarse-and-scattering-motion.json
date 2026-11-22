@@ -1,0 +1,167 @@
+{
+  "game-history-turn-light": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3048180,
+      "mean": 11.058383757948695,
+      "p99": 49.1875,
+      "p999": 55.8125
+    },
+    "radianceMotionError": {
+      "count": 2791578,
+      "mean": 0.8930607446806601,
+      "p99": 5.75,
+      "p999": 8.1875
+    },
+    "opacityMotionError": {
+      "count": 2791578,
+      "mean": 0,
+      "p99": 0,
+      "p999": 0
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 6,
+        "frame": 9
+      },
+      "opacity": {
+        "p99": 0,
+        "frame": null
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1
+  },
+  "game-history-rain-10hz-light": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3299160,
+      "mean": 2.469457607541934,
+      "p99": 9,
+      "p999": 10.125
+    },
+    "radianceMotionError": {
+      "count": 3024230,
+      "mean": 0.0801401196108312,
+      "p99": 0.25,
+      "p999": 0.3125
+    },
+    "opacityMotionError": {
+      "count": 3024230,
+      "mean": 0,
+      "p99": 0,
+      "p999": 0
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0.3125,
+        "frame": 6
+      },
+      "opacity": {
+        "p99": 0,
+        "frame": null
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1
+  },
+  "game-cache-weather-handoff-phase": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 2724709,
+      "mean": 0.0002781804260658708,
+      "p99": 0,
+      "p999": 0
+    },
+    "radianceMotionError": {
+      "count": 2481604,
+      "mean": 0.00011317347393277442,
+      "p99": 0,
+      "p999": 0
+    },
+    "opacityMotionError": {
+      "count": 2481604,
+      "mean": 0.000013695511241816312,
+      "p99": 0,
+      "p999": 0
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0,
+        "frame": null
+      },
+      "opacity": {
+        "p99": 0,
+        "frame": null
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.0000152512903757
+  },
+  "game-history-turn-phase": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3047876,
+      "mean": 0.00006010282278993662,
+      "p99": 0,
+      "p999": 0
+    },
+    "radianceMotionError": {
+      "count": 2791296,
+      "mean": 0.00007064657254803868,
+      "p99": 0,
+      "p999": 0
+    },
+    "opacityMotionError": {
+      "count": 2791296,
+      "mean": 0.00002609308327813804,
+      "p99": 0,
+      "p999": 0
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0,
+        "frame": null
+      },
+      "opacity": {
+        "p99": 0,
+        "frame": null
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.0000047800693332
+  },
+  "game-history-rain-10hz-phase": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3299160,
+      "mean": 0.000006500789156842196,
+      "p99": 0,
+      "p999": 0
+    },
+    "radianceMotionError": {
+      "count": 3024230,
+      "mean": 0.000013216012577995059,
+      "p99": 0,
+      "p999": 0
+    },
+    "opacityMotionError": {
+      "count": 3024230,
+      "mean": 0,
+      "p99": 0,
+      "p999": 0
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0,
+        "frame": null
+      },
+      "opacity": {
+        "p99": 0,
+        "frame": null
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1
+  }
+}

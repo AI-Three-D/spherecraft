@@ -17,7 +17,7 @@ export const FAIR_WEATHER_CLOUD_LOOK = Object.freeze({
   cloudTopKm: 12,
   domeHeight: 1.5,
   shapeTileKm: 8,
-  giantShare: 0.6,
+  giantShare: 0,
   giantHeight: 3,
   giantScale: 5,
   popcornTopKm: 1.6,
@@ -33,8 +33,9 @@ export const FAIR_WEATHER_CLOUD_LOOK = Object.freeze({
   stepFootprint: 0.6,
   farAverageDensity: 0.12,
   distantBanks: 1,
-  distantBanksStartKm: 15,
-  distantBanksEndKm: 36,
+  // Retain individual clouds within 20 km, then blend to broader distant banks.
+  distantBanksStartKm: 20,
+  distantBanksEndKm: 30,
   distantBanksTileKm: 21,
   altoClouds: 0.72,
   altoBottomKm: 6.9,
@@ -217,6 +218,16 @@ export function createEngineConfig() {
         // Overrides of DEFAULT_CLOUD_SETTINGS in core/renderer/volumetricClouds/VolumetricCloudsModule.js (km).
         settings: {
           ...FAIR_WEATHER_CLOUD_LOOK,
+          // Planet-fixed sites used by the in-game tower comparison. All
+          // bounded variants use these same locations and dimensions.
+          towerDebugSites: [
+            { latDeg: 5.7, lonDeg: 4.0, radiusKm: 2.5, heightKm: 7.6, rotationDeg: 18 },
+            { latDeg: 14, lonDeg: 14, radiusKm: 3.1, heightKm: 7.8, rotationDeg: 112 },
+            { latDeg: 0.6, lonDeg: 21, radiusKm: 2.8, heightKm: 7.5, rotationDeg: 51 },
+            { latDeg: 9, lonDeg: 28, radiusKm: 3.2, heightKm: 7.8, rotationDeg: 163 },
+            { latDeg: -5, lonDeg: 36, radiusKm: 2.6, heightKm: 6.6, rotationDeg: 84 },
+            { latDeg: -13, lonDeg: 12, radiusKm: 2.4, heightKm: 7.2, rotationDeg: 137 },
+          ],
           groundProxyBelowKm: 1.6,
           // Rays that cross the layer in a short stretch (seen from above) step no coarser than
           // their path through it / (maxSteps × 0.5). Distance-only steps (0.56 km from ~40 km up)
@@ -237,10 +248,13 @@ export function createEngineConfig() {
           // temporalBlend: weight of each new sample; historyClip: how far (in neighbourhood
           // standard deviations) history may differ from new samples (lower = less ghosting, more shimmer).
           resolutionScale: 0.5,
-          // false = no history at all: every pixel marched every frame, fixed jitter + 3x3 filter.
-          // No smear, shimmer or interleave artefacts from reprojection; the raymarch costs ~1.9x
-          // (lab: 1.3 → 2.5 ms at a 600x400 cloud target). true = interleaved + reprojected history.
+          // The game uses a fixed spatial ray grid. The U debug preview can reuse fresh rays.
           temporal: false,
+          conservativeTemporal: false,
+          // Keep fresh lighting on the first visible skin. Dense rain can
+          // interpolate between lighting samples while tracing the same density.
+          lightReuseInterpolate: true,
+          denseDeckLighting: { startDeck: 0.86, fullDeck: 0.94, steps: 10, maxKm: 0.30, reuseBelow: 0.985 },
                 // Inside the layer, rays near the horizon need long marches; at 192 they ran out and the
                 // rest of the path fell back to the averaged density (a smooth band that moved with height).
                 maxSteps: 256,

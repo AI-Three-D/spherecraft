@@ -1,0 +1,200 @@
+{
+  "game-history-turn-light": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3048167,
+      "mean": 3.295340463705326,
+      "p99": 18.5625,
+      "p999": 24.625
+    },
+    "radianceMotionError": {
+      "count": 2791569,
+      "mean": 0.4673433789693337,
+      "p99": 3.875,
+      "p999": 6.5
+    },
+    "opacityMotionError": {
+      "count": 2791569,
+      "mean": 0.000017767932822518727,
+      "p99": 0,
+      "p999": 0
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 4,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 0,
+        "frame": null
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.0000037946963847
+  },
+  "game-history-turn-weather": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3048180,
+      "mean": 0.22486455857130758,
+      "p99": 1.5,
+      "p999": 3
+    },
+    "radianceMotionError": {
+      "count": 2791578,
+      "mean": 0.19766259638325745,
+      "p99": 1.25,
+      "p999": 3
+    },
+    "opacityMotionError": {
+      "count": 2791578,
+      "mean": 0.05686630919842063,
+      "p99": 0.4375,
+      "p999": 0.75
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 1.375,
+        "frame": 4
+      },
+      "opacity": {
+        "p99": 0.5,
+        "frame": 2
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.000363565354022
+  },
+  "game-history-rain-10hz-light": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3299160,
+      "mean": 0.7510690809453913,
+      "p99": 3.4375,
+      "p999": 4
+    },
+    "radianceMotionError": {
+      "count": 3024230,
+      "mean": 0.06661039141962376,
+      "p99": 0.1875,
+      "p999": 0.25
+    },
+    "opacityMotionError": {
+      "count": 3024230,
+      "mean": 0,
+      "p99": 0,
+      "p999": 0
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0.1875,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 0,
+        "frame": null
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1
+  },
+  "game-history-rain-10hz-weather": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 3299160,
+      "mean": 0.08932777184846553,
+      "p99": 0.375,
+      "p999": 0.5
+    },
+    "radianceMotionError": {
+      "count": 3024230,
+      "mean": 0.06836850192775051,
+      "p99": 0.25,
+      "p999": 0.3125
+    },
+    "opacityMotionError": {
+      "count": 3024230,
+      "mean": 0.03008272411798652,
+      "p99": 0.25,
+      "p999": 0.375
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0.25,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 0.3125,
+        "frame": 3
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 0.9996237645298907
+  },
+  "game-cache-weather-handoff-light": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 2724635,
+      "mean": 0.008540470794975061,
+      "p99": 0,
+      "p999": 2.625
+    },
+    "radianceMotionError": {
+      "count": 2481488,
+      "mean": 0.01075558688069052,
+      "p99": 0.0625,
+      "p999": 3.125
+    },
+    "opacityMotionError": {
+      "count": 2481488,
+      "mean": 0.000257990115266561,
+      "p99": 0,
+      "p999": 0
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0.1875,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 0,
+        "frame": null
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.0000238103643788
+  },
+  "game-cache-weather-handoff-weather": {
+    "frames": 12,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 2724741,
+      "mean": 0.10577516973846256,
+      "p99": 1.5,
+      "p999": 3.75
+    },
+    "radianceMotionError": {
+      "count": 2481624,
+      "mean": 0.11387953222308958,
+      "p99": 1.5,
+      "p999": 3.5
+    },
+    "opacityMotionError": {
+      "count": 2481624,
+      "mean": 0.06187890443180153,
+      "p99": 1.0625,
+      "p999": 2.875
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 1.625,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 1.1875,
+        "frame": 1
+      }
+    },
+    "horizontalOpacityEdgeEnergyRatio": 0.9995075638330524
+  }
+}
