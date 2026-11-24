@@ -7,6 +7,7 @@
 import { Matrix4, Vector4 } from '../../../shared/math/index.js';
 import { TerrainGeometryBuilder } from './geometry/terrainGeometryBuilder.js';
 import { TerrainMaterialBuilder } from './materials/terrainMaterialBuilder.js';
+import { createTerrainSurfaceTexture } from './materials/terrainSurfaceTexture.js';
 import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
 import { Logger } from '../../../shared/Logger.js';
 
@@ -35,6 +36,7 @@ export class QuadtreeTerrainRenderer {
         this._geometries = new Map();
         this._materials = new Map();
         this._overlayMaterials = new Map();
+        this._surfaceTexture = null;
         this._lodIndexCounts = [];
         this._lodSegments = null;
         this._maxGeomLOD = 0;
@@ -56,6 +58,9 @@ export class QuadtreeTerrainRenderer {
         this._maxGeomLOD = this.tileManager?.maxGeomLOD ??
             Math.max(0, this._lodSegments.length - 1);
 
+        if (this.engineConfig.rendering?.terrainShader?.surfaceRelief === true) {
+            this._surfaceTexture ??= createTerrainSurfaceTexture(this.backend.device);
+        }
         await this._buildGeometriesAndMaterials();
 
         // Feed index counts back to the tile manager so indirect draw args are correct
@@ -155,6 +160,19 @@ export class QuadtreeTerrainRenderer {
 
         this._bindChunkInstances(mat, instanceBuffer);
         this._applyMaterialUniforms(mat, camera, viewMatrix, projectionMatrix, lod);
+        const variants = mat._terrainFragmentVariants;
+        if (variants) {
+            // The production pipeline can eliminate the diagnostic branches.
+            // Build their shader on first use and let the backend cache both pipelines.
+            if (mat.uniforms.terrainDebugMode.value !== 0) {
+                variants.diagnostic ??= variants.buildDiagnostic();
+            }
+            const fragment = mat.uniforms.terrainDebugMode.value !== 0 ? variants.diagnostic : variants.production;
+            if (mat.fragmentShader !== fragment) {
+                mat.fragmentShader = fragment;
+                mat._needsCompile = true;
+            }
+        }
 
         const offset = this.tileManager.getIndirectArgsOffsetBytes(lod);
         this.backend.drawIndexedIndirect(geo, mat, indirectBuffer, offset);
@@ -241,7 +259,8 @@ export class QuadtreeTerrainRenderer {
             faceSize: planetConfig.chunksPerFace,
             atlasTextures: {
                 micro: this.textureManager?.getAtlasTexture?.('micro') || null,
-                macro: this.textureManager?.getAtlasTexture?.('macro') || null
+                macro: this.textureManager?.getAtlasTexture?.('macro') || null,
+                surface: this._surfaceTexture
             },
             lookupTables: this.textureManager?.getLookupTables?.() || {},
             cachedTextures: this.tileManager.getArrayTextures(),
@@ -405,6 +424,8 @@ export class QuadtreeTerrainRenderer {
         this._geometries.clear();
         this._materials.clear();
         this._overlayMaterials.clear();
+        this._surfaceTexture?._gpuTexture.texture.destroy();
+        this._surfaceTexture = null;
         this._initialized = false;
     }
 

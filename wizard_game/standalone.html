@@ -4071,6 +4071,12 @@
 
                 // Apply review switches before terrain and water initialize.
                 const placementQueries = new URLSearchParams(location.search);
+                const terrainSurface = placementQueries.get('terrainSurface');
+                if (['baseline', 'candidate', 'detail', 'fast'].includes(terrainSurface)) {
+                    const shader = engineConfig.rendering.terrainShader;
+                    shader.surfaceRelief = terrainSurface === 'candidate' || terrainSurface === 'detail';
+                    shader.skipHiddenMaterial = terrainSurface === 'candidate' || terrainSurface === 'fast';
+                }
                 const regionalPreview = placementQueries.get('regionalTerrain');
                 const regionalComparison = ['regionalTerrain', 'regionalBasins', 'regionalWhitewater',
                     'regionalLargeLake', 'regionalOrganicRiver', 'waterPrecompute'].some(k => placementQueries.has(k));

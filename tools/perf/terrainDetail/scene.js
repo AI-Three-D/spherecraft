@@ -34,6 +34,7 @@ export async function fencedFrames(frames = 40, warm = 5) {
     const render = g.render;
     g.render = async () => {};
     const wall = [], span = [], passes = [];
+    const labeledPasses = new Map();
     try {
         while (g._renderInFlight) await sleep(5);
         await queue.onSubmittedWorkDone();
@@ -51,11 +52,17 @@ export async function fencedFrames(frames = 40, warm = 5) {
             if (T.passes.length) {
                 span.push((Math.max(...T.passes.map(p => p.end)) - Math.min(...T.passes.map(p => p.begin))) / 1e6);
                 passes.push(T.passes.length);
+                for (const { label, begin, end } of T.passes) {
+                    if (label === 'beginRenderPass' || label === 'beginComputePass') continue;
+                    if (!labeledPasses.has(label)) labeledPasses.set(label, []);
+                    labeledPasses.get(label).push((end - begin) / 1e6);
+                }
             }
         }
     } finally { T.enabled = false; g.render = render; }
     const stat = a => { const s = [...a].sort((x, y) => x - y); return s.length ? { median: s[s.length >> 1], p90: s[Math.floor(s.length * 0.9)] } : null; };
-    return { frames, wallMs: stat(wall), gpuSpanMs: stat(span), passes: stat(passes) };
+    return { frames, wallMs: stat(wall), gpuSpanMs: stat(span), passes: stat(passes),
+        passGpuMs: Object.fromEntries(Array.from(labeledPasses, ([label, samples]) => [label, stat(samples)])) };
 }
 
 /**

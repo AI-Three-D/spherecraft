@@ -6,7 +6,7 @@ import { requireNumber, requireInt } from '../../../../shared/requireUtil.js';
 import { LAKE_PARAMS_FLOATS } from '../../../world/water/waterWgsl.js';
 
 const CHUNK_TEXTURE_NAMES = ['heightTexture', 'normalTexture', 'tileTexture', 'splatDataMap', 'splatIndexMap', 'splatValidMap', 'macroMaskTexture'];
-const ATLAS_TEXTURE_NAMES = ['atlasTexture', 'level2AtlasTexture', 'tileTypeLookup', 'macroTileTypeLookup', 'numVariantsTex'];
+const ATLAS_TEXTURE_NAMES = ['atlasTexture', 'level2AtlasTexture', 'tileTypeLookup', 'macroTileTypeLookup', 'terrainSurfaceTexture'];
 const scratchByBackend = new WeakMap();
 function getScratch(backend) {
     let scratch = scratchByBackend.get(backend);
@@ -22,7 +22,7 @@ function getScratch(backend) {
 }
 
 export const terrainBindingAdapter = {
-    cacheKey: 'terrain-v20',
+    cacheKey: 'terrain-v21',
     getCacheKey(material) { return JSON.stringify(material._chunkTextureFormats || {}); },
     createLayouts(backend, material) {
         return createTerrainLayouts.call(backend,
@@ -118,7 +118,7 @@ const slotSampleType = (type) =>
             { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
             { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
             { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
-            { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+            { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
             { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
             { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
             { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
@@ -196,6 +196,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             const view = ensureView(tex, dimension);
         if (view) return view;
         if (dimension === '2d-array') return this._getOrCreateDummyArrayTextureView();
+        if (dimension === '3d') return this._getOrCreateDummy3DTextureView();
         return this._getOrCreateDummyTextureView();
     };
 
@@ -265,7 +266,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
         getView('level2AtlasTexture', '2d-array'),   // ← was '2d'
         getView('tileTypeLookup',     '2d'),
         getView('macroTileTypeLookup','2d'),
-        getView('numVariantsTex',     '2d'),
+        getView('terrainSurfaceTexture', '3d'),
     ];
     const blendModeView = getView('blendModeTable', '2d');
 

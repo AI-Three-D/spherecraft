@@ -13,6 +13,7 @@ describe('terrain water resource replacement',()=>{
             _packVertexUniforms:()=>new Float32Array(4),_packFragmentUniforms:()=>new Float32Array(4),
             _getOrCreateUniformBuffer:key=>{if(!uniforms.has(key))uniforms.set(key,{});return uniforms.get(key);},
             _buildTextureKey:()=>'',_getOrCreateDummyTextureView:()=>texture,_getOrCreateDummyArrayTextureView:()=>array,
+            _getOrCreateDummy3DTextureView:()=>texture,
             _getOrCreateDummyDepthTextureView:()=>depth,_getOrCreateDummyStorageBuffer:()=>storage,
         });
         const resources={index:{},lakes:{},masks:{},params:{}},field={pages:{},texels:{},params:{}};

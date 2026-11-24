@@ -504,6 +504,7 @@ export function aerialFadeRange(terrainShaderConfig = {}) {
 
 export function buildTerrainChunkFragmentShader(options = {}) {
     const normalTextureFilterable = options.normalTextureFilterable === true;
+    const enableSurfaceRelief = options.enableSurfaceRelief === true;
 
     const enableTerrainAO = options.enableTerrainAO !== false;
     const enableGroundField = options.enableGroundField === true;
@@ -759,6 +760,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     
     const enableNormalMap = lod <= normalMapMaxLod;
     const enableLighting = true;
+    const skipHiddenMaterial = terrainShaderConfig.skipHiddenMaterial === true;
     const enableLod0ResolvedColor =
         options.enableLod0ResolvedColor === true &&
         !enableResolvedColor;
@@ -1121,9 +1123,7 @@ ${hasCoarseColorTexture ? `@group(1) @binding(10) var coarseColorTexture: ${chun
 @group(2) @binding(1) var level2AtlasTexture: texture_2d_array<f32>;
 @group(2) @binding(2) var tileTypeLookup: texture_2d<f32>;
 @group(2) @binding(3) var macroTileTypeLookup: texture_2d<f32>;
-// Legacy binding retained to keep the atlas bind-group layout stable. The
-// terrain shader no longer reads runtime texture-variant counts.
-@group(2) @binding(4) var numVariantsTex: texture_2d<f32>;
+${enableSurfaceRelief ? '@group(2) @binding(4) var terrainSurfaceTexture: texture_3d<f32>;' : ''}
 @group(2) @binding(5) var textureSampler: sampler;
 @group(2) @binding(6) var nearestSampler: sampler;
 
@@ -3074,16 +3074,13 @@ fn sampleMacroTileColorBilinear(
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 fn sampleMacroOverlaySplat(
-    input: FragmentInput,
+    macroWorld: vec2<f32>,
     activeSeason: i32,
-    layer: i32,
+    ddx_uv: vec2<f32>,
+    ddy_uv: vec2<f32>,
     splat: SplatData
 ) -> vec3<f32> {
-    let macroScale = max(fragUniforms.macroScale, 0.0001);
-    let macroWorld = input.vWorldPos * macroScale;
     let local = fract(macroWorld);
-    let ddx_uv = dpdx(macroWorld);
-    let ddy_uv = dpdy(macroWorld);
 
     let dominantId = splatDominantTileId(splat);
     let dominantW = splatDominantWeight(splat);
@@ -3184,25 +3181,6 @@ fn sampleMacroOverlaySimplePrepared(
     return sampleMacroTileColor(id, macroTileCoord, local, activeSeason, ddx_uv, ddy_uv).rgb;
 }
 
-fn sampleMacroOverlaySimple(
-    input: FragmentInput,
-    activeSeason: i32,
-    tileId: f32
-) -> vec3<f32> {
-    let macroScale = max(fragUniforms.macroScale, 0.0001);
-    let macroWorld = input.vWorldPos * macroScale;
-    let local = fract(macroWorld);
-    let ddx_uv = dpdx(macroWorld);
-    let ddy_uv = dpdy(macroWorld);
-    return sampleMacroOverlaySimplePrepared(
-        macroWorld,
-        local,
-        activeSeason,
-        ddx_uv,
-        ddy_uv,
-        tileId
-    );
-}
 fn computeMacroBlendStrength(
     input: FragmentInput,
     layer: i32,
@@ -3244,7 +3222,7 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let activeSeason = select(fragUniforms.nextSeason, fragUniforms.currentSeason, fragUniforms.seasonTransition < 0.5);
     let layer = i32(round(input.vLayer));
     let materialLayer = i32(round(input.vMaterialUv.w));
-    let debugMode = fragUniforms.terrainDebugMode;
+    ${options.productionDraw === true ? 'const debugMode: i32 = 0;' : 'let debugMode = fragUniforms.terrainDebugMode;'}
     let layerViewMode = fragUniforms.terrainLayerViewMode;
     // Mode 90: geometryLOD by color — verifies which LOD's compiled shader
     // variant is actually rendering a given on-screen tile, independent of
@@ -3350,6 +3328,13 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let segDims = vec2<f32>(fragUniforms.chunkWidth, fragUniforms.chunkHeight);
     var ddx_vUv = dpdx(input.vUv) * segDims;
     var ddy_vUv = dpdy(input.vUv) * segDims;
+    let macroWorld = input.vWorldPos * max(fragUniforms.macroScale, 0.0001);
+    let macroDx = dpdx(macroWorld);
+    let macroDy = dpdy(macroWorld);
+${enableSurfaceRelief ? `    let surfaceDx = dpdx(input.vWorldPosition);
+    let surfaceDy = dpdy(input.vWorldPosition);
+    let footprintMip = 0.5 * log2(max(max(dot(surfaceDx, surfaceDx), dot(surfaceDy, surfaceDy)), 1.0e-6));
+` : ''}
     if (ENABLE_NEAR_MIP_SHARPEN) {
         let sharpenFade = 1.0 - smoothstep(
             NEAR_MIP_SHARPEN_FADE_START,
@@ -3745,7 +3730,23 @@ if (debugMode == 16) {
         return vec4<f32>(color + vec3<f32>(0.0, max(midGlow, 0.0) * 0.6, 0.0), 1.0);
     }
 
-    let fallbackTileId = sampleChunkTileId(input, layer);
+    let tierBlend = select(
+        max(computeTierDistanceFade(input), computeTierEdgeBlend(input)),
+        1.0,
+        tierSourceIncomplete(input)
+    );
+    // The normal draw needs the splat only for live albedo, a macro
+    // overlay, or the contact AO boundary fade. Keep it for diagnostics.
+    let useMaterialShortcut = ${skipHiddenMaterial ? 'true' : 'false'} && debugMode == 0 && layerViewMode == 0;
+    let fullyCoarse = useMaterialShortcut && (ENABLE_SOLID_COLOR_TIER || tierBlend >= 1.0);
+    let splatForAO = ENABLE_TERRAIN_AO && lod0AOFade < 1.0 && fragUniforms.terrainAOStrength > 0.0;
+    let splatForMacro = !fullyCoarse && ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 &&
+        fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD;
+    let splatForColor = !fullyCoarse && !ENABLE_RESOLVED_COLOR && lod0ResolvedColorFade <= 0.999;
+    var fallbackTileId = 0.0;
+    if (!fullyCoarse) {
+        fallbackTileId = sampleChunkTileId(input, layer);
+    }
     let worldTileCoord = floor(input.vWorldPos);
     let local = fract(input.vWorldPos);
     // Mode 96: raw coarseTileColor(fallbackTileId) output, isolated from
@@ -3791,7 +3792,8 @@ if (debugMode == 16) {
     // 0=raw-tile, 1=lod0-fade-prebake, 2=lod-prebake, 3=live-splat  (for mode 46)
     var microColorPath: i32 = 0;
 
-    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5 &&
+        (!useMaterialShortcut || splatForColor || splatForAO || splatForMacro)) {
         splatResult = sampleSplatData(input, materialLayer);
         hasLiveSplat = true;
         dominantTileId = splatDominantTileId(splatResult);
@@ -3819,7 +3821,9 @@ if (debugMode == 16) {
     //   - LOD4 still looks textured/detailed (same as mode 0) -> the alpha
     //     fallback is firing, i.e. resolvedColor is NOT valid for LOD4
     //     tiles — confirms the handoff doc's leading hypothesis directly.
-    if (debugMode == 102 && fragUniforms.geometryLOD == 4) {
+    if (fullyCoarse) {
+        microSample = vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
+    } else if (debugMode == 102 && fragUniforms.geometryLOD == 4) {
         microSample = sampleResolvedTerrainColor(input, materialLayer);
         if (microSample.a < 0.5) {
             microSample = sampleTileColor(
@@ -4432,10 +4436,9 @@ if (debugMode == 16) {
         return vec4<f32>(color, 1.0);
     }
 
-    let microPatternStyle = getMicroPatternStyle(dominantTileId);
     var baseColor = microSample.rgb;
 
-    if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+    if (!fullyCoarse && ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
         let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, baseColor);
         baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
     }
@@ -4482,10 +4485,10 @@ if (debugMode == 16) {
 
     let macroForcedVisible = layerViewMode == 2;
     let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
-    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
-        var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
+    if (!fullyCoarse && ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
+        var macroColor = sampleMacroOverlaySimplePrepared(macroWorld, fract(macroWorld), activeSeason, macroDx, macroDy, dominantTileId);
         if (!ENABLE_RESOLVED_COLOR && hasLiveSplat) {
-            let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);
+            let detailedMacro = sampleMacroOverlaySplat(macroWorld, activeSeason, macroDx, macroDy, splatResult);
             let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
             macroColor = mix(macroColor, detailedMacro, macroFade);
         }
@@ -4500,7 +4503,7 @@ if (debugMode == 16) {
         return vec4<f32>(baseColor, 1.0);
     }
 
-    if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+    if (!fullyCoarse && ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
         let resolvedEdgeColor = sampleResolvedColorOrFallback(input, materialLayer, baseColor);
         baseColor = mix(
             baseColor,
@@ -4519,7 +4522,7 @@ if (debugMode == 16) {
     // fading to solid color at/before the real LOD5->LOD6 mesh transition
     // distance so both tiers already agree on color by the time that seam
     // is reached; tune via lodEdgeToSolidColorFadeStart/EndMeters.
-    if (ENABLE_LOD_EDGE_TO_SOLID_COLOR && LOD_EDGE_TO_SOLID_COLOR_STRENGTH > 0.0001) {
+    if (!fullyCoarse && ENABLE_LOD_EDGE_TO_SOLID_COLOR && LOD_EDGE_TO_SOLID_COLOR_STRENGTH > 0.0001) {
         let solidColorDistanceFade = smoothstep(
             LOD_EDGE_TO_SOLID_COLOR_FADE_START,
             LOD_EDGE_TO_SOLID_COLOR_FADE_END,
@@ -4539,15 +4542,9 @@ if (debugMode == 16) {
     // shared with a solid-tier neighbour, for the rare tile drawn nearer
     // than the distance ramp's end. The larger of the two wins. Replaces the
     // older LOD5-only distance fade above when either is enabled.
-    if (ENABLE_TIER_DISTANCE_FADE || ENABLE_TIER_EDGE_BLEND || ENABLE_INCOMPLETE_SOURCE_FLAT) {
-        var tierBlend = max(computeTierDistanceFade(input), computeTierEdgeBlend(input));
-        if (tierSourceIncomplete(input)) {
-            tierBlend = 1.0;
-        }
-        if (tierBlend > 0.0001) {
-            let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
-            baseColor = mix(baseColor, solidEdgeColor, tierBlend);
-        }
+    if (!fullyCoarse && tierBlend > 0.0001) {
+        let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
+        baseColor = mix(baseColor, solidEdgeColor, tierBlend);
     }
     if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
@@ -4563,9 +4560,9 @@ if (debugMode == 16) {
             unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
         }
         if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
-            var unionMacroColor = sampleMacroOverlaySimple(input, activeSeason, unionDominantTileId);
+            var unionMacroColor = sampleMacroOverlaySimplePrepared(macroWorld, fract(macroWorld), activeSeason, macroDx, macroDy, unionDominantTileId);
             if (!ENABLE_RESOLVED_COLOR) {
-                let detailedUnionMacro = sampleMacroOverlaySplat(input, activeSeason, layer, unionSplat);
+                let detailedUnionMacro = sampleMacroOverlaySplat(macroWorld, activeSeason, macroDx, macroDy, unionSplat);
                 let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
                 unionMacroColor = mix(unionMacroColor, detailedUnionMacro, macroFade);
             }
@@ -4592,14 +4589,42 @@ if (debugMode == 16) {
     if (debugMode == 45) {
         return vec4<f32>(baseColor, 1.0);
     }
-    // NEAR PROCEDURAL DETAIL DISABLED FOR FPS A/B:
-    // This crevice/detail layer looked better but caused a large FPS drop on
-    // near terrain. Re-enable this block to test it again after optimizing or
-    // prebaking the detail path.
-    // if (ENABLE_NEAR_DETAIL) {
-    //     baseColor = applyNearProceduralDetail(baseColor, input.vWorldPos, input.vDistanceToCamera, microPatternStyle);
-    // }
+    var relief = vec3<f32>(0.0);
+    var reliefContact = 1.0;
+${enableSurfaceRelief ? `
+    if (debugMode == 0 && layerViewMode == 0 && input.vDistanceToCamera < 780.0) {
+        // A planet-relative volume gives continuous projection across cube
+        // faces and keeps detail on steep walls. Each lookup carries all three
+        // components of the prefiltered slope plus a correlated pigment.
+        let p = input.vWorldPosition - fragUniforms.planetCenter;
+        let middleUv = (p + p.yzx * vec3<f32>(0.37, -0.26, 0.42)) / 53.0;
+        let texelScale = f32(textureDimensions(terrainSurfaceTexture, 0).x);
+        // Use the larger axis of the pixel footprint for the mip. The
+        // middle projection stretches lengths by at most 1.42.
+        let middleMip = max(0.0, footprintMip + log2(1.42 * texelScale / 53.0));
+        let middle = textureSampleLevel(terrainSurfaceTexture, textureSampler, middleUv, middleMip);
+        let middleFade = 1.0 - smoothstep(410.0, 780.0, input.vDistanceToCamera);
+        let middleSlope = middle.rgb - 0.5;
+        relief = 0.40 * middleFade *
+            (middleSlope + middleSlope.zxy * vec3<f32>(0.42, 0.37, -0.26));
+        var pigment = (middle.a - 0.48) * middleFade * 0.72;
 
+        if (input.vDistanceToCamera < 165.0) {
+            let fineMip = max(0.0, footprintMip + log2(texelScale / 5.7));
+            let fine = textureSampleLevel(terrainSurfaceTexture, textureSampler, p / 5.7, fineMip);
+            let fineFade = 1.0 - smoothstep(65.0, 165.0, input.vDistanceToCamera);
+            relief += 0.76 * fineFade * (fine.rgb - 0.5);
+            pigment += (fine.a - 0.48) * fineFade * 0.8;
+            reliefContact = 1.0 - 0.21 * fineFade * (1.0 - smoothstep(0.1, 0.45, fine.a));
+        }
+        // Colored pigment keeps light grain and darker mineral/soil pockets
+        // distinct while leaving the biome and river-bed blend underneath.
+        let organic = smoothstep(0.02, 0.09, baseColor.g - baseColor.r);
+        let dryPatches = middleFade * organic * smoothstep(0.48, 0.72, middle.a);
+        baseColor *= vec3<f32>(1.0) + pigment * vec3<f32>(1.22, 1.0, 0.78)
+            + dryPatches * vec3<f32>(0.39, -0.10, -0.12);
+    }
+` : ''}
     var finalColor = baseColor;
     var NdotL: f32 = 1.0;
     if (ENABLE_LIGHTING || ENABLE_AERIAL_PERSPECTIVE) {
@@ -4686,7 +4711,16 @@ if (debugMode == 16) {
 
         if (ENABLE_LIGHTING) {
             let ambient = fragUniforms.ambientColor * fragUniforms.ambientLightIntensity;
-            let sunDiffuse = fragUniforms.lightColor * fragUniforms.sunLightIntensity * NdotL;
+            var surfaceNdotL = NdotL;
+${enableSurfaceRelief ? `
+            if (any(relief != vec3<f32>(0.0))) {
+                let slope = 1.0 - clamp(dot(worldNormal, input.vSphereDir), 0.0, 1.0);
+                let tangentGradient = relief - worldNormal * dot(relief, worldNormal);
+                let surfaceNormal = normalize(worldNormal - tangentGradient * mix(0.72, 1.24, smoothstep(0.08, 0.6, slope)));
+                surfaceNdotL = max(dot(surfaceNormal, lightDir), 0.0);
+            }
+` : ''}
+            let sunDiffuse = fragUniforms.lightColor * fragUniforms.sunLightIntensity * surfaceNdotL;
 
             var clusteredLight = vec3<f32>(0.0);
             if (ENABLE_CLUSTERED_LIGHTS) {
@@ -4728,7 +4762,7 @@ if (debugMode == 16) {
 
             var aoAmbient: f32 = 1.0;
             var aoDirect:  f32 = 1.0;
-            if (ENABLE_TERRAIN_AO) {
+            if (ENABLE_TERRAIN_AO && (!useMaterialShortcut || splatForAO)) {
                 let rawAO = sampleTerrainAO(input, layer);
                 var ao = rawAO;
                 var aoNeutralFade = lod0AOFade;
@@ -4792,14 +4826,14 @@ if (debugMode == 16) {
             }
         
             finalColor = baseColor
-                       * (ambient * aoAmbient + sunDiffuse * shadowFactor * aoDirect)
+                       * (ambient * aoAmbient * reliefContact + sunDiffuse * shadowFactor * aoDirect)
                        + clusteredLight;
 
             // Night-visibility floor: ambient*AO*baseColor is too small to survive ACES
             // tonemapping when the sun is below the horizon (pitch-black terrain).
             // This albedo-scaled floor guarantees a minimum HDR signal (~0.045 for
             // average grass) that maps to ~14% sRGB at exposure=0.75.
-            finalColor = max(finalColor, baseColor * 0.30);
+            finalColor = max(finalColor, baseColor * (0.30 * reliefContact));
             if (debugMode == 71) {
                 return vec4<f32>(finalColor, 1.0);
             }

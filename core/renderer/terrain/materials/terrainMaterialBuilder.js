@@ -328,6 +328,7 @@ export class TerrainMaterialBuilder {
                 solidColorAverageWindowMeters,
                 faceSizeMeters,
                 fixedMaterialFamiliesEnabled,
+                enableSurfaceRelief: !overlayPass && terrainShaderConfig?.surfaceRelief === true && !!atlasTextures.surface,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
             const vertexShader = builders.buildTerrainChunkVertexShader({
@@ -342,9 +343,10 @@ export class TerrainMaterialBuilder {
                 forwardTierFlags: enableIncompleteSourceFlat,
                 debugMode: debugVertexMode
             });
+            const specializeFragment = !overlayPass && terrainShaderConfig?.skipHiddenMaterial === true;
             const fragmentShader = overlayPass
                 ? builders.buildTerrainChunkHoverOverlayFragmentShader(shaderOptions)
-                : builders.buildTerrainChunkFragmentShader(shaderOptions);
+                : builders.buildTerrainChunkFragmentShader({ ...shaderOptions, productionDraw: specializeFragment });
 
             const isSpherical = faceIndex >= 0 && faceIndex <= 5;
             const chunkSizeUV = 1.0 / faceSize;
@@ -447,7 +449,7 @@ coarseColorTexture: { value: cachedTextures.coarseColor ?? null },
             // === LOOKUP TABLES ===
             tileTypeLookup: { value: lookupTables.tileTypeLookup },
             macroTileTypeLookup: { value: lookupTables.macroTileTypeLookup },
-            numVariantsTex: { value: lookupTables.numVariantsTex },
+            terrainSurfaceTexture: { value: atlasTextures.surface },
 
             // === ATLAS TEXTURES ===
             atlasTexture: { value: atlasTextures.micro },
@@ -603,6 +605,13 @@ coarseColorTexture: { value: cachedTextures.coarseColor ?? null },
 
         material._normalTextureFormat = this._getGPUFormatForTexture(cachedTextures.normal) || 'rgba32float';
         material._chunkTextureFormats = chunkTextureFormats;
+        if (specializeFragment) {
+            material._terrainFragmentVariants = {
+                production: fragmentShader,
+                diagnostic: null,
+                buildDiagnostic: () => builders.buildTerrainChunkFragmentShader(shaderOptions),
+            };
+        }
         // Back-compat with the previous simpler field.
         material._normalTextureFormat = chunkTextureFormats.normal;
         return material;

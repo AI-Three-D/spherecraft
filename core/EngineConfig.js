@@ -63,6 +63,8 @@ export class EngineConfig {
       adaptive: createAdaptiveQualityConfig(rendering.adaptive),
       maxPoolSlots: requireInt(rendering.maxPoolSlots, 'rendering.maxPoolSlots', 1),
       terrainShader: {
+        surfaceRelief: requireBool(terrainShader.surfaceRelief ?? false, 'rendering.terrainShader.surfaceRelief'),
+        skipHiddenMaterial: requireBool(terrainShader.skipHiddenMaterial ?? false, 'rendering.terrainShader.skipHiddenMaterial'),
         aerialFadeStartMeters: requireInt(terrainShader.aerialFadeStartMeters ?? 0, 'rendering.terrainShader.aerialFadeStartMeters', 0),
         aerialFadeEndMeters: requireInt(terrainShader.aerialFadeEndMeters ?? 0, 'rendering.terrainShader.aerialFadeEndMeters', 0),
         fullMaxLOD: requireInt(terrainShader.fullMaxLOD ?? 0, 'rendering.terrainShader.fullMaxLOD', 0),

@@ -297,6 +297,8 @@ export function createEngineConfig() {
         moonlight: 1.0,
       },
       terrainShader: {
+        surfaceRelief: true,
+        skipHiddenMaterial: true,
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
         fullMaxLOD: 0,

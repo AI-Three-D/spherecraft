@@ -34,7 +34,7 @@
                 enc[name] = (pd = {}) => {
                     if (pd.timestampWrites || n >= MAX) return begin(pd);
                     slot ??= take();
-                    labels.push(pd.label ?? name);
+                    labels.push(pd.label ?? T.passLabel ?? name);
                     const i = 2 * n++;
                     return begin({ ...pd, timestampWrites: { querySet: slot.qs, beginningOfPassWriteIndex: i, endOfPassWriteIndex: i + 1 } });
                 };

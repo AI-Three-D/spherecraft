@@ -29,4 +29,14 @@ describe('terrain fragment shader, flat-tier color', () => {
             expect(code).toContain('debugMode == 107');
         });
     }
+
+    it.each([false, true])('validates volume relief through the live-to-baked transition with productionDraw=%s', productionDraw => {
+        const code = buildTerrainChunkFragmentShader({
+            lod: 4, useArrayTextures: true, normalTextureFilterable: true, tileCategories: TILE_CATEGORIES,
+            fixedMaterialFamiliesEnabled: true, hasCoarseColorTexture: true,
+            enableTierDistanceFade: true, enableIncompleteSourceFlat: true, enableLod0ResolvedColor: true,
+            enableSurfaceRelief: true, productionDraw, terrainShaderConfig: { skipHiddenMaterial: true },
+        });
+        expect(() => validate(parseWgsl(code))).not.toThrow();
+    });
 });
