@@ -317,7 +317,7 @@ export class Frontend {
             throw new Error('[Frontend] WebGPU not available in this browser.');
         }
 
-        this.backend = new WebGPUBackend(this.canvas);
+        this.backend = new WebGPUBackend(this.canvas, { optionalFeatures: ['shader-f16'] });
         await this.backend.initialize();
         // Set HDR scene format immediately so all renderers compile
         // their pipelines against rgba16float, not the canvas format.
@@ -843,12 +843,14 @@ updateLighting(starSystem) {
             const cirrusOnTop = cirrusOn && this._cameraAboveCirrus();
             const budgetTier = this.volumetricClouds?.enabled ? this.volumetricClouds.budgetTier : null;
             const cirrusShell = budgetTier?.cirrusVolume === false;
+            // The lower detail tiers draw the cirrus small, in the cloud composite (_renderVolumetricClouds).
+            const cirrusDraws = cirrusOn && !budgetTier?.cirrusScale;
             if (cirrusOn) {
                 // Before either part, so both use this frame's camera: they meet at the split, and a
                 // far part a frame behind would tear from the near part while turning.
-                this.cloudRenderer.update(this.camera, environmentState, this.uniformManager);
+                this.cloudRenderer.update(this.camera, budgetTier?.cirrusOnly ? this._cirrusOnlyWeather(environmentState) : environmentState, this.uniformManager);
                 this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
-                this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'far', cirrusShell);
+                if (cirrusDraws) this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'far', cirrusShell);
             }
 
             this.renderTerrain(frame);
@@ -866,10 +868,10 @@ updateLighting(starSystem) {
             // The composite multiplies the scene by the cloud transmittance, so it must not run on a
             // stale output when the module is switched off.
             if (this.volumetricClouds?.enabled && !environmentState?.disableClouds) {
-                this._renderVolumetricClouds(frame, environmentState);
+                this._renderVolumetricClouds(frame, environmentState, cirrusOn, cirrusOnTop);
             }
 
-            if (cirrusOnTop) {
+            if (cirrusOnTop && cirrusDraws) {
                 this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'near', cirrusShell);
             }
             if (this._weatherParticlesOnly && this.backend._renderPassEncoder) {
@@ -956,6 +958,17 @@ updateLighting(starSystem) {
     // From inside the lowest active cirrus layer's slab upwards, cirrus lies in front of the ground.
     // Switching at the middle of the layer hid the sheet below the camera behind the terrain there,
     // leaving only the far side of the layer in the sky between the deck's horizon and the limb.
+    // The low cloud detail has no decks: thicker and darker cirrus as the weather closes in stands in for them.
+    _cirrusOnlyWeather(environmentState) {
+        const weather = environmentState?.weatherEffect?.clouds;
+        const deck = (weather?.deck ?? 0) * (weather?.presence ?? 1);
+        if (!(deck > 0) || !Array.isArray(environmentState.cloudLayers)) return environmentState;
+        const cloudLayers = environmentState.cloudLayers.map(layer => layer.name !== 'high' ? layer : {
+            ...layer, coverage: Math.max(layer.coverage, 0.3 + 0.5 * deck), darkness: Math.max(layer.darkness ?? 0, 0.55 * (weather.rainShade ?? 0)),
+        });
+        return Object.create(environmentState, { cloudLayers: { value: cloudLayers } });
+    }
+
     _cameraAboveCirrus() {
         const layers = (this.cloudRenderer?._renderLayers ?? []).filter(l => l.coverage > 0.005 && l.altMax > l.altMin);
         if (!layers.length || !this.planetConfig) return false;
@@ -1007,6 +1020,11 @@ updateLighting(starSystem) {
                 shadowFloor: config.shadowFloor,
             });
             await composite.initialize(this.backend.device);
+            clouds.setLandSource({
+                tileStreamer: () => this.quadtreeTileManager?.tileStreamer,
+                heightScaleKm: (this.planetConfig?.heightScale ?? 0) / clouds.planet.unitsPerKm,
+                tileCategories: this.planetConfig?.tileCatalog?.tileCategories ?? this.planetConfig?.worldAuthoring?.tileCatalog?.tileCategories,
+            });
             this.volumetricClouds = clouds;
             this.cloudComposite = composite;
             this._cloudConfig = config;
@@ -1020,7 +1038,7 @@ updateLighting(starSystem) {
 
     // After the opaque and transparent scene: the raymarch stops at this frame's scene depth,
     // then the composite blends the clouds (and their ground shadows) into the HDR target.
-    _renderVolumetricClouds(frame, environmentState) {
+    _renderVolumetricClouds(frame, environmentState, cirrusOn = false, cirrusOnTop = false) {
         const pp = this.postProcessing;
         const lutTexture = this.atmosphereLUT?.transmittanceLUT?._gpuTexture;
         if (!pp?.hdrTextureView || !pp.depthTextureView || !lutTexture?.view) return;
@@ -1062,7 +1080,14 @@ updateLighting(starSystem) {
         const encoder = this.backend.getCommandEncoder();
         clouds.setSceneDepth(pp.depthTextureView);
         clouds.compute(frame, encoder);
-        this.cloudComposite.render(encoder, {
+        let cirrus = null;
+        const cirrusScale = clouds.budgetTier?.cirrusScale;
+        if (cirrusOn && cirrusScale) {
+            const draw = part => this.cloudRenderer.renderCirrusTarget?.(this.camera, part, cirrusScale);
+            cirrus = { far: draw('far'), near: cirrusOnTop ? draw('near') : null };
+            this.backend.endRenderPassForCompute();
+        }
+        this.cloudComposite.render(this.backend.getCommandEncoder(), {
             colorView: pp.hdrTextureView, depthView: pp.depthTextureView, width: vp.width, height: vp.height,
         }, {
             transmittanceView: lutTexture.view,
@@ -1074,7 +1099,7 @@ updateLighting(starSystem) {
             mieScattering: a.mieScattering,
             mieAnisotropy: a.mieAnisotropy,
             sunIntensity: a.sunIntensity,
-        });
+        }, cirrus);
         this.backend.resumeRenderPass();
     }
 

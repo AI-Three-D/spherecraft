@@ -43,21 +43,21 @@ struct CloudUniforms {
     shape2: vec4f,      // x giant share of coverage (0 = off), y giant height (core scale), z giant size (x shape tile), w popcorn top (layer fraction)
     look: vec4f,        // x in-scattering probability strength (HZD; 0 = off), y sideways sky occlusion (0 = off), z in-scattering gain, w sunlight-colour altitude scale (1 = physical)
     look2: vec4f,       // x dome edge sharpness (density gain), y cauliflower head strength, z dusk sky-light boost, w 1 = stratified step phases (no-temporal mode)
-    look3: vec4f,       // x step-plane anchor lattice (km), y detail pixel-footprint factor, z orbital proxy slabs
+    look3: vec4f,       // x step-plane anchor lattice (km), y detail pixel-footprint factor, z orbital proxy slabs, w solar reference steps
     look4: vec4f,       // x twilight light strength, y detail transmittance cutoff, z spatial grid (0 full, 1 checkerboard, 2–3 block width), w edge wisps (0 = off)
     look5: vec4f,       // x interior density variation, y isolated puff suppression, z daylight sky fill, w daylight sun gain
     banks: vec4f,       // x distant bank strength, yz transition distances (km), w inverse bank tile size
     alto: vec4f,        // x altocumulus strength, yz base and top radii, w inverse tile size
     weatherStyle: vec4f, // cloud presence, stratiform deck, rain shading, low stratus
-    lowCloud: vec4f,    // base radius, top radius, inverse tile size
+    lowCloud: vec4f,    // base radius, top radius, inverse tile size, w first row of the shadow map to redraw
     groundMist: vec4f,  // strength, top radius, scale height, extinction (1/km)
     march4: vec4f,      // x transmittance threshold for sharing light, y proxy crossfade, z stretched tower preview, w broad deck preview
     historyWind: vec4f, // xyz shape advection since last frame (km), w residual evolution (km)
-    historyMotion: vec4f, // x ray refresh parity, y closest distance at which to test clear rays (km)
+    historyMotion: vec4f, // x ray refresh parity, y closest clear ray test (km), z conventional jitter/history state, w sun shadow strength
     cacheU: vec4f,      // xyz horizontal cache axis
     cacheV: vec4f,      // xyz second horizontal cache axis
     cacheGrid: vec4f,   // xy origin in cache axes (km), z weather extent, w light extent
-    budget: vec4f,     // x near distance (km), y max near samples, z rain interpolation, w tier active
+    budget: vec4f,     // x near distance or focus (km), y step limit, z rain interpolation or low stratus steps, w tier (3 uses legacy sky)
 }
 `;
 
@@ -245,12 +245,9 @@ fn cloudShadowAt(p: vec3f, strength: f32) -> f32 {
     return exp(-textureSampleLevel(shadowMap, linearSampler, uv, 0.0).r * k);
 }
 
-// Cubic B-spline from four bilinear taps, for shadows on the ground. Bilinear optical depth
-// put through exp() draws the texel grid as diamond-shaped shadow edges.
-fn cloudShadowSmoothAt(p: vec3f, strength: f32) -> f32 {
-    let uv = shadowMapUv(p);
-    let k = cloudShadowScale(p, uv, strength);
-    if (k <= 0.0) { return 1.0; }
+// Optical depth with a cubic B-spline from four bilinear taps. Bilinear optical depth put through exp() draws the texel
+// grid as diamond-shaped shadow edges.
+fn shadowDepthSmooth(uv: vec2f) -> f32 {
     let size = vec2f(textureDimensions(shadowMap));
     let x = uv * size - 0.5;
     let i = floor(x);
@@ -269,7 +266,15 @@ fn cloudShadowSmoothAt(p: vec3f, strength: f32) -> f32 {
                    + g1.x * textureSampleLevel(shadowMap, linearSampler, vec2f(uv1.x, uv0.y), 0.0).r)
            + g1.y * (g0.x * textureSampleLevel(shadowMap, linearSampler, vec2f(uv0.x, uv1.y), 0.0).r
                    + g1.x * textureSampleLevel(shadowMap, linearSampler, uv1, 0.0).r);
-    return exp(-od * k);
+    return od;
+}
+
+// For shadows on the ground.
+fn cloudShadowSmoothAt(p: vec3f, strength: f32) -> f32 {
+    let uv = shadowMapUv(p);
+    let k = cloudShadowScale(p, uv, strength);
+    if (k <= 0.0) { return 1.0; }
+    return exp(-shadowDepthSmooth(uv) * k);
 }
 `;
 
@@ -309,13 +314,34 @@ fn blendCloudLayers(front: MarchResult, back: MarchResult) -> MarchResult {
 `;
 
 // Shared by passes that trace the same cloud target, including its packed ray grid.
-export const CLOUD_RAY_INPUT_WGSL = /* wgsl */`
+export const CLOUD_RAY_INPUT_WGSL = buildCloudRayInput();
+
+export function buildCloudRayInput(scanFootprint = false) {
+    return /* wgsl */`${scanFootprint ? /* wgsl */`
+// Nearest scene depth anywhere under the cloud pixel: a thin peak can land between the corners of a downsampled ray.
+// Gathers of 2 x 2 texels. Cloud pixels cover at least that (the budget tiers trace at half size or less).
+fn scanSceneDepth(first: vec2u, last: vec2u, size: vec2u) -> f32 {
+    let dims = textureDimensions(sceneDepth);
+    let lo = (first * dims) / size;
+    let hi = max(lo + 1u, ((last + 1u) * dims) / size) - 1u;
+    if (all(lo == hi)) { return textureLoad(sceneDepth, lo, 0); }
+    var z = 1.0;
+    for (var y = lo.y; y <= hi.y; y += 2u) {
+        for (var x = lo.x; x <= hi.x; x += 2u) {
+            let corner = max(lo, min(vec2u(x, y), hi - min(hi, vec2u(1u))));
+            let four = textureGather(sceneDepth, depthSampler, (vec2f(corner) + 1.0) / vec2f(dims));
+            z = min(z, min(min(four.x, four.y), min(four.z, four.w)));
+        }
+    }
+    return z;
+}
+` : ''}
 // Distance (km) along rd to the nearest opaque surface under this cloud pixel, or 1e30 for sky.
 // Nearest, so cloud behind a silhouette never bleeds onto it after upsampling; the cost is a
 // sub-pixel gap in the clouds right along the silhouette.
 fn sceneDistance(first: vec2u, last: vec2u, size: vec2u, rd: vec3f) -> f32 {
     if (u.sceneDepth.w < 0.5) { return 1.0e30; }
-    let z = nearestSceneDepth(sceneDepth, first, last, size);
+    let z = ${scanFootprint ? 'scanSceneDepth(first, last, size)' : 'nearestSceneDepth(sceneDepth, first, last, size)'};
     if (z >= 1.0) { return 1.0e30; }
     // View depth from the [0, 1] perspective depth, then along the ray.
     let viewDepth = u.sceneDepth.y / (z + u.sceneDepth.x);
@@ -346,8 +372,9 @@ fn cloudRay(id: vec2u) -> CloudRay {
 
 }
 `;
+}
 
-const NOISE_ROTATIONS_WGSL = /* wgsl */`
+export const NOISE_ROTATIONS_WGSL = /* wgsl */`
 const ROT_SHAPE = ${rotationWgsl([-0.52, -0.31, 0.33], 1.02)};
 const ROT_DETAIL = ${rotationWgsl([-0.79, -0.06, 0.39], 2.25)};
 const ROT_SYSTEM = ${rotationWgsl([-0.95, 0.84, 0.02], 1.0)};
@@ -355,15 +382,27 @@ const ROT_REGIONAL = ${rotationWgsl([-0.8, -0.75, -0.05], 1.99)};
 const ROT_LARGE = ${rotationWgsl([-0.02, -0.49, -0.69], 1.13)};
 `;
 
-// Requires: u: CloudUniforms, shapeTex, detailTex, weatherTex (texture_3d), noiseSampler.
-export const CLOUD_DENSITY_WGSL = /* wgsl */`${NOISE_ROTATIONS_WGSL}
+// Cloudiness from a sample of the shape volume (0 to 1).
+export const CLOUD_SHAPE_SIGNAL_WGSL = /* wgsl */`
 const SHAPE_TEXELS: f32 = 128.0;
+
+fn shapeSignal(n: vec4f) -> f32 {
+    let fbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
+    // Expand the useful part of the Perlin-Worley range so coverage can select it.
+    return remap(remap(n.r, fbm - 1.0, 1.0, 0.0, 1.0), 0.5, 0.95, 0.0, 1.0);
+}
+`;
+
+// Requires: u: CloudUniforms, shapeTex, detailTex, weatherTex (texture_3d), noiseSampler.
+export const CLOUD_DENSITY_WGSL = /* wgsl */`${NOISE_ROTATIONS_WGSL}${CLOUD_SHAPE_SIGNAL_WGSL}
 const DETAIL_TEXELS: f32 = 64.0;
 const WEATHER_TEXELS: f32 = 128.0;
 
 // 0 retains live controls, 1 is cut, 2 is domes, 3 is domes with giants, 4 stretches domes.
 override CLOUD_SHAPE: u32 = 0u;
 override SKIP_UNUSED_DENSITY: bool = false;
+// Second octave of the altocumulus sheets.
+override ALTO_DETAIL: bool = true;
 
 fn usesDomes() -> bool {
     return CLOUD_SHAPE >= 2u || (CLOUD_SHAPE == 0u && u.march3.z > 0.5);
@@ -407,13 +446,19 @@ fn weatherLod(footprint: f32, invTile: f32) -> f32 {
     return max(0.0, log2(footprint * invTile * WEATHER_TEXELS) + 1.0);
 }
 
-fn sampleWeather(p: vec3f, footprint: f32) -> Weather {
+struct WeatherField {
+    shape: vec4f, // coverage field, type variation, type offset, base lift
+    shift: vec3f,
+    stretch: f32,
+}
+
+fn sampleWeatherField(p: vec3f, footprint: f32, wind: vec3f, evolve: f32) -> WeatherField {
     let up = normalize(p);
     // Wind slides the pattern; evolution moves the lookup off the sphere, through the noise
     // volume, so systems form and dissolve instead of only drifting.
-    let q = up * (u.planet.y + u.lod.y) + u.windShape.xyz * 0.8;
+    let q = up * (u.planet.y + evolve) + wind * 0.8;
     // Planet-scale systems (fronts, clear highs), domain-warped so they swirl.
-    let sysP = ROT_SYSTEM * ((q - up * (u.lod.y * 0.7)) * u.systems.x) + vec3f(1.0, 0.37, 0.71) * u.systems.w;
+    let sysP = ROT_SYSTEM * ((q - up * (evolve * 0.7)) * u.systems.x) + vec3f(1.0, 0.37, 0.71) * u.systems.w;
     let warp = textureSampleLevel(weatherTex, noiseSampler, sysP * 0.61 + vec3f(0.47, 0.21, 0.83),
         weatherLod(footprint, u.systems.x * 0.61));
     let sys = textureSampleLevel(weatherTex, noiseSampler, sysP + (warp.rga - 0.5) * u.systems.z,
@@ -426,14 +471,12 @@ fn sampleWeather(p: vec3f, footprint: f32) -> Weather {
         weatherLod(footprint, u.scales.z));
     let regional = mix(w1.r, w1.b, 0.35) * 0.6 + w2.r * 0.4 + (w1.a - 0.5) * 0.2;
     let field = (sys.r - 0.5) * u.systems.y + (regional - 0.5);
-    var weather: Weather;
-    let scattered = saturate(u.coverage.x + field * u.coverage.y);
-    weather.coverage = mix(scattered, max(scattered, 0.58), u.weatherStyle.y * 0.85) * u.weatherStyle.x;
+    var weather: WeatherField;
     // Clusters of taller towers (Worley clumps, tens of km apart) among shallower fields.
-    weather.kind = saturate(u.coverage.z + (w1.g * 0.5 + sys.g * 0.5 - 0.5) * u.coverage.w + (w1.b - 0.5) * 0.9);
     // Bases are flat per cloud but their height (the condensation level) drifts across regions by up
     // to a quarter of the layer, as it does with humidity in nature.
-    weather.lift = saturate(w2.a * 1.6 - 0.5) * 0.25;
+    weather.shape = vec4f(field, w1.g * 0.5 + sys.g * 0.5 - 0.5, (w1.b - 0.5) * 0.9,
+        saturate(w2.a * 1.6 - 0.5) * 0.25);
     if (stretchesDomes()) {
         // Already-fetched regional channels select whole cloud groups.
         weather.stretch = smoothstep(0.47, 0.65, 0.62 * sys.g + 0.38 * w2.r);
@@ -452,6 +495,17 @@ fn sampleWeather(p: vec3f, footprint: f32) -> Weather {
         weather.shift = vec3f(slow.r - 0.5, slow.g - 0.5, (slow.r - slow.g) * 0.7) * 1.2;
     }
     return weather;
+}
+
+fn weatherFromField(field: WeatherField) -> Weather {
+    let scattered = saturate(u.coverage.x + field.shape.x * u.coverage.y);
+    let coverage = mix(scattered, max(scattered, 0.58), u.weatherStyle.y * 0.85) * u.weatherStyle.x;
+    let kind = saturate(u.coverage.z + field.shape.y * u.coverage.w + field.shape.z);
+    return Weather(coverage, kind, field.shape.w, field.stretch, field.shift);
+}
+
+fn sampleWeather(p: vec3f, footprint: f32) -> Weather {
+    return weatherFromField(sampleWeatherField(p, footprint, u.windShape.xyz, u.lod.y));
 }
 
 // Worley value (1 - distance to the nearest cell point) to a round head: sqrt(1 - d^2) over ~0.67 of
@@ -482,12 +536,6 @@ fn heightProfile(h: f32, kind: f32, coverage: f32) -> f32 {
     return profileRise(h, kind) * profileFall(h, kind, coverage);
 }
 
-fn shapeSignal(n: vec4f) -> f32 {
-    let fbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
-    // Expand the useful part of the Perlin-Worley range so coverage can select it.
-    return remap(remap(n.r, fbm - 1.0, 1.0, 0.0, 1.0), 0.5, 0.95, 0.0, 1.0);
-}
-
 fn broadShapeSignal(shapeP: vec3f) -> f32 {
     // This mip has ~1.4 km texels on the 8 km cumulus tile.
     return shapeSignal(textureSampleLevel(shapeTex, noiseSampler, shapeP, 4.5));
@@ -510,7 +558,9 @@ fn altoDensity(p: vec3f, r: f32, weather: Weather, footprint: f32) -> f32 {
     // A second octave breaks each sheet into lobes of different thickness.
     // Its short wavelengths fall away with distance; the main cloud remains.
     let detailP = ROT_DETAIL * ((mix(deck, p, 0.35) + flow) * (u.alto.w * 3.4)) + n.gba * 0.21;
-    let detail = textureSampleLevel(shapeTex, noiseSampler, detailP, max(0.0, lod + 1.75));
+    // Without the octave: its mean values.
+    var detail = vec4f(0.64, 0.5, 0.6, 0.6);
+    if (ALTO_DETAIL) { detail = textureSampleLevel(shapeTex, noiseSampler, detailP, max(0.0, lod + 1.75)); }
     let breakup = 0.39 * (detail.r - 0.64) + 0.13 * (detail.b - 0.6) + 0.18 * (n.a - 0.6);
     let core = smoothstep(0.0, 0.17, shoulder + breakup);
     let h = (r - u.alto.y) / (u.alto.z - u.alto.y);
@@ -801,7 +851,7 @@ fn cloudDensity(p: vec3f, footprint: f32, withDetail: bool) -> f32 {
     let h = heightFraction(r);
     let inLowLayer = u.weatherStyle.w > 0.001 && r > u.lowCloud.x && r < u.lowCloud.y;
     if (h >= 1.0 || (h <= 0.0 && !inLowLayer)) { return 0.0; }
-    if (h > 0.0 && u.budget.w > 0.5) {
+    if (h > 0.0 && u.budget.w == 1.0) {
         // The bank column profile is zero past the top of both blended layers.
         // Keep the shadow integration grid and skip only guaranteed zero taps.
         let bankTop = u.planet.y + budgetBankThickness();

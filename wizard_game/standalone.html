@@ -507,7 +507,7 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | P: Cloud shape offset | F: Cloud step size | Shift+F: Cloud look | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier | K: Cloud deck | Shift+K: Cloud budgets | U: Cloud history | Shift+U: Cloud caches
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | Shift+L: Cloud detail | P: Cloud shape offset | F: Cloud step size | Shift+F: Cloud look | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier | K: Cloud deck | Shift+K: Cloud budgets | U: Cloud history | Shift+U: Cloud caches
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
@@ -522,6 +522,7 @@
         <button id="cloud-shape" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud tier (Shift+P)</button>
         <button id="cloud-experiment" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud deck preview: off (K)</button>
         <button id="cloud-budget" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud budget preview: current renderer (Shift+K)</button>
+        <button id="cloud-detail" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud detail (Shift+L)</button>
         <button id="cloud-history" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud history preview: off (U)</button>
         <button id="cloud-cache" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud cache preview: off (Shift+U)</button>
         <button id="cloud-orbit" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Orbital cloud preview: off (Shift+O)</button>
@@ -540,7 +541,7 @@
         import { FrameLoop } from './FrameLoop.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig, FAIR_WEATHER_CLOUD_LOOK, ORBITAL_CLOUD_PREVIEW } from './runtimeConfigs.js';
-        import { CLOUD_BUDGET_TIERS } from '../core/renderer/volumetricClouds/cloudBudgetTiers.js';
+        import { CLOUD_BUDGET_TIERS, CLOUD_DETAIL_TIERS } from '../core/renderer/volumetricClouds/cloudBudgetTiers.js';
         import { TERRAIN_FIX_PROTOTYPES, applyTerrainFixToConfig, applyTerrainFixLive, terrainFixIndexOf } from './terrainFixPrototypes.js';
         import { WATER_FIX_PROTOTYPES, applyWaterFixLive, waterFixIndexOf } from './waterFixPrototypes.js';
         import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
@@ -4839,8 +4840,9 @@
         function cloudBudgetShow() {
             const mode = window.volumetricClouds?.settings.cloudBudgetMode ?? 'off';
             const budget = CLOUD_BUDGET_TIERS[mode];
-            const label = budget ? `${mode[0].toUpperCase()}${mode.slice(1)} (approximate)` : 'current renderer';
+            const label = budget?.neural ? 'Neural lighting' : budget ? `${mode[0].toUpperCase()}${mode.slice(1)} (approximate)` : 'current renderer';
             cloudBudgetButton.textContent = `Cloud budget preview: ${label} (Shift+K)`;
+            cloudHistoryShow();
         }
         function cloudBudgetStep() {
             const clouds = window.volumetricClouds;
@@ -4858,10 +4860,46 @@
         }
         cloudBudgetButton.addEventListener('click', cloudBudgetStep);
 
+        // Detail of Neural lighting: high, medium, low (cirrus only). Turns Neural lighting on when another mode is active.
+        const cloudDetailButton = document.getElementById('cloud-detail');
+        const cloudDetails = Object.keys(CLOUD_DETAIL_TIERS);
+        function cloudDetailShow() {
+            const clouds = window.volumetricClouds;
+            const on = clouds?.budgetTier?.conventional;
+            cloudDetailButton.textContent = `Cloud detail: ${on ? clouds.settings.cloudDetail : 'not used'} (Shift+L)`;
+        }
+        function cloudDetailStep() {
+            const clouds = window.volumetricClouds;
+            if (!clouds) return;
+            const s = clouds.settings;
+            if (clouds.budgetTier?.conventional) s.cloudDetail = cloudDetails[(cloudDetails.indexOf(s.cloudDetail) + 1) % cloudDetails.length];
+            else s.cloudBudgetMode = 'neural';
+            clouds.enabled = true;
+            clouds.resetHistory();
+            cloudBudgetShow();
+            cloudDetailShow();
+            debugSay(`Cloud detail: ${s.cloudDetail}.`, 'CloudDetail');
+        }
+        cloudDetailButton.addEventListener('click', cloudDetailStep);
+        setInterval(cloudDetailShow, 1000);
+
         const cloudHistoryButton = document.getElementById('cloud-history');
+        function cloudHistoryShow() {
+            const clouds = window.volumetricClouds;
+            const conventional = clouds?.budgetTier?.conventional;
+            const enabled = conventional ? clouds.settings.conventionalTemporal : clouds?.settings.conservativeTemporal;
+            const label = conventional ? 'Cloud reprojection' : 'Cloud history preview';
+            cloudHistoryButton.textContent = `${label}: ${enabled ? 'on' : 'off'} (U)`;
+        }
         async function toggleCloudHistory() {
             const clouds = window.volumetricClouds;
             if (!clouds) return;
+            if (clouds.budgetTier?.conventional) {
+                clouds.settings.conventionalTemporal = !clouds.settings.conventionalTemporal;
+                clouds.resetHistory();
+                cloudHistoryShow();
+                return;
+            }
             const enabled = !clouds.settings.conservativeTemporal;
             clouds.settings.conservativeTemporal = enabled;
             clouds.resetHistory();
@@ -5014,6 +5052,7 @@
                 const k = e.key.toLowerCase();
                 if (k === 'n') (e.shiftKey ? sunsetStep : motionResStep)();
                 if (k === 'i') cloudGroundStep();
+                if (k === 'l' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) cloudDetailStep();
                 if (k === 'k' && !e.ctrlKey && !e.altKey && !e.metaKey) (e.shiftKey ? cloudBudgetStep : toggleCloudDeck)();
                 if (k === 'u' && !e.ctrlKey && !e.altKey && !e.metaKey) (e.shiftKey ? stepCloudCache : toggleCloudHistory)();
                 if (k === 'o' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) toggleCloudOrbit();

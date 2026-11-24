@@ -1,0 +1,144 @@
+--- a/tools/perf/cloudBenchmark.mjs
++++ b/tools/perf/cloudBenchmark.mjs
+@@ -7,7 +7,7 @@
+ import { PNG } from 'pngjs';
+ import { installCloudWorkTracking } from './cloudWorkTracking.mjs';
+ import { measureNeuralReference } from './cloudNeuralReference.mjs';
+-import { prepareCloudImageReference, readReferenceSkyMask } from './cloudImageReference.mjs';
++import { prepareCloudImageReference, readCloudHdr, readReferenceSkyMask } from './cloudImageReference.mjs';
+ 
+ // Serve the two revisions with separate HTTP servers. Only one tab renders at a time.
+ const [before, after, output] = process.argv.slice(2);
+@@ -150,7 +150,24 @@
+     motion(entry('motion-proxy-day', ground, 35, { groundProxyBelowKm: 2 }), 0.85, 0.042),
+     motion(entry('motion-small-clouds', horizon, 35, { giantShare: 0 }), 0.3),
+ ];
++const oracleAt = { latDeg: 17, lonDeg: -14 };
++const freshAt = { latDeg: -24, lonDeg: 11 };
+ const gameCases = [
++    ...['partly_cloudy', 'cloudy', 'overcast', 'rain', 'storm'].flatMap(preset => [
++        entry(`fresh-${preset}-ground`, { ...ground, ...freshAt, altitudeKm: 0.8, headingDeg: 70, pitchDeg: 18 }, 30, { weatherPreset: preset }),
++        entry(`fresh-${preset}-above`, { ...above, ...freshAt, altitudeKm: 8.8, headingDeg: 190, pitchDeg: -22 }, 30, { weatherPreset: preset }),
++    ]),
++    entry('fresh-cloudy-inside', { ...inside, ...freshAt, altitudeKm: 5.8, headingDeg: 15, pitchDeg: -4 }, 30, { weatherPreset: 'cloudy' }),
++    entry('fresh-rain-inside', { ...inside, ...freshAt, altitudeKm: 4.6, headingDeg: 15, pitchDeg: 3 }, 30, { weatherPreset: 'rain' }),
++    entry('fresh-storm-late', { ...ground, ...freshAt, headingDeg: 250, pitchDeg: 12 }, 6, { weatherPreset: 'storm' }),
++    entry('fresh-overcast-late', { ...above, ...freshAt, altitudeKm: 9.4, headingDeg: 330, pitchDeg: -12 }, 6, { weatherPreset: 'overcast' }),
++    entry('fresh-partly_cloudy-late', { ...ground, ...freshAt, headingDeg: 110, pitchDeg: 9 }, 6, { weatherPreset: 'partly_cloudy' }),
++    ...['partly_cloudy', 'cloudy', 'overcast', 'rain', 'storm'].flatMap(preset => [
++        entry(`oracle-${preset}-ground`, { ...ground, ...oracleAt, headingDeg: 205 }, 48, { weatherPreset: preset }),
++        entry(`oracle-${preset}-above`, { ...above, ...oracleAt, altitudeKm: 9.2, headingDeg: 120, pitchDeg: -14 }, 48, { weatherPreset: preset }),
++        entry(`oracle-${preset}-inside`, { ...inside, ...oracleAt, altitudeKm: 5.2, headingDeg: 310, pitchDeg: 4 }, 48, { weatherPreset: preset }),
++        entry(`oracle-${preset}-low`, { ...above, ...oracleAt, altitudeKm: 8.2, headingDeg: 250, pitchDeg: -8 }, 24, { weatherPreset: preset }),
++    ]),
+     entry('game-tower-near', { altitudeKm: 7.2, latDeg: -1.05, lonDeg: 21, headingDeg: 0, pitchDeg: 5 }, 35),
+     entry('game-tower-ground', { altitudeKm: 1.45, latDeg: -6.81, lonDeg: 19.64, headingDeg: 11, pitchDeg: 14 }, 35),
+     entry('game-tower-far', { altitudeKm: 6, latDeg: -20.3, lonDeg: 21, headingDeg: 0, pitchDeg: -5 }, 35),
+@@ -1025,8 +1042,13 @@
+                 if (imageReferenceSpp > 0 && round === 0 && !test.motion && metrics.conditions.cloudSize) {
+                     const dimensions = { width: referenceWidth, height: referenceHeight };
+                     skyMasks.push(await page.evaluate(readReferenceSkyMask, dimensions));
++                    const dump = async (side, values) => fs.writeFile(path.join(output, `${test.name}-${side}.hdr.f32`), Buffer.from(new Float32Array(values).buffer));
++                    await dump(label, await page.evaluate(readCloudHdr, dimensions));
++                    await dump(`mask-${label}`, skyMasks.at(-1));
+                     if (index === 1) {
+-                        teacherOpacity = await page.evaluate(prepareCloudImageReference, { ...dimensions, spp: imageReferenceSpp });
++                        const reference = await page.evaluate(prepareCloudImageReference, { ...dimensions, spp: imageReferenceSpp });
++                        teacherOpacity = reference.opacity;
++                        await dump('teacher', reference.hdr);
+                         try {
+                             await page.evaluate(() => cloudBench.run(1, false));
+                             await page.screenshot({ path: path.join(output, `${test.name}-teacher.png`) });
+--- a/tools/perf/cloudImageReference.mjs
++++ b/tools/perf/cloudImageReference.mjs
+@@ -110,7 +110,10 @@
+         if (t < 0.0) { sum[0].w += 1.0; continue; }
+         let point = start + rd * t;
+         let single = cloudPhaseExact(dot(rd, u.sun.xyz)) * sunTransmittance(point);
+-        sum[0] += vec4f(transportToColor(point, single, tracePath(point, rd)), 0.0);
++        let contribution = transportToColor(point, single, tracePath(point, rd));
++        sum[0] += vec4f(contribution, 0.0);
++        let lum = dot(contribution, vec3f(0.2126, 0.7152, 0.0722));
++        sum[1].z += lum; sum[1].w += lum * lum;
+         sum[1].x += t0 + t;
+     }
+     accum[index] = sum;
+@@ -128,7 +131,7 @@
+                 { buffer: accum }, scene, clouds._cloudLightView, out.linearSampler], [Math.ceil(width / 8), Math.ceil(count / 8)]);
+             params.destroy();
+             y += count;
+-            rows = Math.max(8, Math.min(height, 8 * Math.floor((rows + count * 120 / Math.max(ms, 1)) / 16)));
++            rows = Math.max(8, Math.min(height, 8 * Math.floor((rows + count * 40 / Math.max(ms, 1)) / 16)));
+         }
+     }
+ 
+@@ -195,5 +198,32 @@
+         for (const texture of textures) texture.destroy();
+         delete cloudBench.releaseImageReference;
+     };
+-    return opacity;
++    return { opacity, hdr: Array.from(values) };
+ }
++
++// Mean premultiplied radiance and transmittance of the displayed cloud target on the reference grid.
++export async function readCloudHdr({ width, height }) {
++    const clouds = volumetricClouds;
++    const { TeacherGpu } = await import('/neural_lab/teacherGpu.js');
++    const teacher = new TeacherGpu(clouds);
++    const out = clouds.device.createBuffer({ size: width * height * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
++    const params = teacher.uniformBuffer(new Float32Array([width, height, 0, 0]));
++    const pipeline = await teacher.pipeline(`
++@group(0) @binding(0) var color: texture_2d<f32>;
++@group(0) @binding(1) var<uniform> params: vec4f;
++@group(0) @binding(2) var<storage, read_write> outValues: array<vec4f>;
++@compute @workgroup_size(8, 8)
++fn main(@builtin(global_invocation_id) id: vec3u) {
++    let size = vec2u(params.xy);
++    if (any(id.xy >= size)) { return; }
++    let dim = vec2f(textureDimensions(color));
++    let a = vec2i(vec2f(id.xy) * dim / params.xy); let b = vec2i(vec2f(id.xy + 1u) * dim / params.xy);
++    var sum = vec4f(0.0);
++    for (var y = a.y; y < b.y; y++) { for (var x = a.x; x < b.x; x++) { sum += textureLoad(color, vec2i(x, y), 0); } }
++    outValues[id.y * size.x + id.x] = sum / f32(max(1, (b.x - a.x) * (b.y - a.y)));
++}`, 'read cloud hdr');
++    await teacher.run(pipeline, [clouds.getOutputs().colorView, { buffer: params }, { buffer: out }], [Math.ceil(width / 8), Math.ceil(height / 8)]);
++    const values = Array.from(await teacher.read(out, width * height * 16));
++    out.destroy(); params.destroy();
++    return values;
++}
+--- a/tools/perf/cloudNeuralReference.mjs
++++ b/tools/perf/cloudNeuralReference.mjs
+@@ -95,6 +95,7 @@
+         stat.reference += weight * reference;
+     };
+     let valid = 0;
++    const outside = [];
+     let used = 0;
+     for (let i = 0; i < queries.count; i++) {
+         const r = i * RECORD_FLOATS;
+@@ -108,7 +109,17 @@
+         const sky = records[r + 37] / records[r + 41] * albedo;
+         add('bouncedSunAnalyticAll', deployed[c + 4], sun, weight);
+         add('skyAnalyticAll', deployed[c + 5], sky, weight);
+-        if (w < 0.5) continue;
++        if (w < 0.5) {
++            // Outside the cache: the analytic light against what the networks would give on exact inputs.
++            const farO = extras[20 * i + 16];
++            const upO = extras[20 * i + 18];
++            const f = [...records.subarray(r + 8, r + 26), records[r + 27], Math.exp(-farO), Math.log1p(upO), Math.log1p(farO)];
++            add('outSunAnalytic', deployed[c + 4], sun, weight); add('outSunNetwork', predict(set.ms, f), sun, weight);
++            add('outSkyAnalytic', deployed[c + 5], sky, weight); add('outSkyNetwork', predict(set.sky, f), sky, weight);
++            const dist = Math.hypot(records[r] - snapshot.uniforms[0], records[r + 1] - snapshot.uniforms[1], records[r + 2] - snapshot.uniforms[2]);
++            outside.push([dist, records[r + 22], weight]);
++            continue;
++        }
+         used++;
+         const far = extras[20 * i + 16];
+         const up = extras[20 * i + 18];
+@@ -134,5 +145,5 @@
+     }
+     const errors = Object.fromEntries(Object.entries(metrics).map(([name, { error, norm, predicted, reference }]) =>
+         [name, { relativeRmse: Math.sqrt(error / norm), bias: predicted / reference }]));
+-    return { model: modelName, paths, queried: queries.count, cloudy: valid, inCache: used, errors };
++    return { model: modelName, paths, queried: queries.count, cloudy: valid, inCache: used, errors, outside };
+ }

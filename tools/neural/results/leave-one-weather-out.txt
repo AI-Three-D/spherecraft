@@ -1,0 +1,5 @@
+held-out weather target     game  refit  mlp32 mlpCheap  (noise-corrected relative error; bias in parens)
+fair             sun      0.47(0.80) 0.41(1.06) 0.28(1.10) 0.30(1.04)
+cloudy           sun      0.51(0.73) 0.41(0.90) 0.24(0.93) 0.27(0.98)
+overcast         sun      0.54(0.54) 0.42(0.68) 0.41(0.80) 0.40(0.97)
+rain             sun      0.64(0.94) 0.48(1.10) 0.32(1.20) 0.70(1.42)

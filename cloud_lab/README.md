@@ -41,6 +41,45 @@ density samples per pixel, analytic sunlight through the slab column plus one sa
 march. At 166 km it costs about a fifth of the raymarch and looks close to it, slightly grainier in dense areas.
 The step heatmap shows proxy pixels in purple.
 
+## Neural solar lighting
+
+Open [the cloud lab](http://localhost:8000/cloud_lab/?radius=131), expand **Neural solar lighting**,
+then choose **Generate samples**, **Train**, and **Evaluate GPU**. The lab samples the current
+cloud field, fits an 8 → 16 → 16 → 1 network in a worker, and measures error on a held-out spatial
+region. **Save weights** exports JSON with the weights and input normalization. **Load weights**
+can restore that model in a new session. Use **Viewport lighting** to switch among **Standard**,
+**Solar reference**, and **Neural solar**. Keep time and the camera fixed when comparing GPU times
+in the **clouds raymarch** row.
+
+The reference integrates detailed density along 3.15 km of the sun ray using 128 midpoint samples
+by default. It uses the existing procedural field and keeps the weather parameters from the launch point
+along the segment. This is a deterministic teacher for a local direct-sun optical column. A physically
+based teacher for farther transport or multiple scattering would need additional labels. The six-probe
+error in the panel uses the same 3.15 km path regardless of the viewport's light settings. The learned
+preview runs in the detailed raymarch and uses four fixed-distance density probes, Softsign hidden layers,
+and packed WGSL dot products. The experiment takes its fixed physical sampling distances and held-out
+evaluation approach from [Charles Grassi’s tutorial](https://charlesgrassi.dev/blog/neural-volumetric-clouds/).
+
+Run the overcast benchmark with Chrome and GPU timestamp queries enabled.
+
+```sh
+node tools/perf/cloudSolarBenchmark.mjs http://127.0.0.1:8000 /tmp/cloud-solar.json
+```
+
+The M1 Pro run used a stationary camera at 5.7 km and a full-rate 272×177 cloud target. Each mode
+has 20 GPU samples after warm-up.
+
+| Viewport lighting | Raymarch GPU mean | Held-out transmittance RMSE |
+| --- | ---: | ---: |
+| Standard six probes | 17.3 ms | 0.1312 |
+| Neural solar | 21.0 ms | 0.1209 |
+| 128-step solar reference | 143.3 ms | Reference |
+
+The 256-step teacher changed held-out transmittance by 0.00036 RMSE. CPU and WGSL optical-column
+predictions agreed within 0.00000030 km, and batched inference on 2,048 precomputed feature vectors
+took 0.014 ms on the GPU. The viewport timing includes live feature sampling and shading. Motion stability,
+rendered-image parity, and generalization across weather are open for this prototype.
+
 ## What is where
 
 - `VolumetricCloudsModule.js`: engine `RenderModule`. It generates tileable 3D noise (Perlin-Worley shape,

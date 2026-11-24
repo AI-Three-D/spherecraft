@@ -5,6 +5,9 @@ import path from 'node:path';
 import process from 'node:process';
 import puppeteer from 'puppeteer-core';
 import { PNG } from 'pngjs';
+import { installCloudWorkTracking } from './cloudWorkTracking.mjs';
+import { measureNeuralReference } from './cloudNeuralReference.mjs';
+import { prepareCloudImageReference, readReferenceSkyMask } from './cloudImageReference.mjs';
 
 // Serve the two revisions with separate HTTP servers. Only one tab renders at a time.
 const [before, after, output] = process.argv.slice(2);
@@ -26,11 +29,22 @@ const warmFrames = Number(process.env.CLOUD_BENCH_WARM ?? 12);
 const sampleFrames = Number(process.env.CLOUD_BENCH_FRAMES ?? 24);
 const rounds = Number(process.env.CLOUD_BENCH_ROUNDS ?? 2);
 const filter = new RegExp(process.env.CLOUD_BENCH_CASES ?? '.*');
-const capture = process.env.CLOUD_BENCH_CAPTURE !== '0';
+const countWork = process.env.CLOUD_BENCH_WORK === '1';
+const capture = !countWork && process.env.CLOUD_BENCH_CAPTURE !== '0';
 const flightFrames = Number(process.env.CLOUD_BENCH_FLIGHT_FRAMES ?? 0);
 const motionFrames = Number(process.env.CLOUD_BENCH_MOTION_FRAMES ?? 0);
+const motionWarmFrames = Number(process.env.CLOUD_BENCH_MOTION_WARM ?? 0);
 const cloudBufferCapture = process.env.CLOUD_BENCH_CLOUD_BUFFER === '1';
 const isolatedStackFrames = Number(process.env.CLOUD_BENCH_ISOLATED_STACK_FRAMES ?? 0);
+const isolatedStackMode = process.env.CLOUD_BENCH_ISOLATED_MODE ?? null;
+const stallReplayFrames = Number(process.env.CLOUD_BENCH_STALL_FRAMES ?? 0);
+const stallReplayModes = (process.env.CLOUD_BENCH_STALL_MODES ?? 'timed,wall,volume,attachment').split(',');
+const neuralReferencePaths = Number(process.env.CLOUD_BENCH_NEURAL_REFERENCE_PATHS ?? 0);
+const imageReferenceSpp = Number(process.env.CLOUD_BENCH_IMAGE_REFERENCE_SPP ?? 0);
+const [referenceWidth, referenceHeight] = (process.env.CLOUD_BENCH_IMAGE_REFERENCE_SIZE ?? '96x60').split('x').map(Number);
+if (imageReferenceSpp > 0 && (!game || !capture || ![imageReferenceSpp, referenceWidth, referenceHeight].every(n => Number.isInteger(n) && n > 0))) {
+    throw new Error('The image reference needs game screenshots and positive integer resolution and sample counts');
+}
 const towerVariants = (process.env.CLOUD_BENCH_TOWER_VARIANTS ?? '').split(',').filter(Boolean);
 const cacheVariants = (process.env.CLOUD_BENCH_CACHE_VARIANTS ?? '').split(',').filter(Boolean);
 const budgetVariants = (process.env.CLOUD_BENCH_BUDGET_VARIANTS ?? '').split(',').filter(Boolean);
@@ -62,6 +76,9 @@ const horizon = { altitudeKm: 3, headingDeg: 55, pitchDeg: 2 };
 const inside = { altitudeKm: 6, headingDeg: 55, pitchDeg: 2 };
 const above = { altitudeKm: 10, headingDeg: 55, pitchDeg: -35 };
 const grazing = { altitudeKm: 6.54, latDeg: -6.81, lonDeg: 19.64, headingDeg: 4.07, pitchDeg: -3.61 };
+// Free-camera HUD poses from the day and twilight streak reports.
+const reportedClimb = { altitudeKm: 4.95, latDeg: -9.2119, lonDeg: 19.5367, headingDeg: 16.3647, pitchDeg: -10.0762 };
+const reportedLow = { ...reportedClimb, headingDeg: -0.771, pitchDeg: -9.4809 };
 const stratus = { cloudShape: 'cut', cloudType: 0, typeVariance: 0, giantShare: 0, coverage: 0.55, inScatter: 0.7 };
 const stratocumulus = { ...stratus, cloudType: 0.45, coverage: 0.65 };
 const nimbostratus = { ...stratus, cloudType: 0.18, coverage: 0.86, extinction: 70, albedo: 0.8 };
@@ -148,6 +165,19 @@ const gameCases = [
     entry('game-inside-day', inside, 35),
     entry('game-grazing-day', grazing, 35),
     motion(entry('game-grazing-climb', { ...grazing, altitudeKm: 6.18 }, 35), 0.12, 0.04),
+    motion(entry('game-overcast-artifact-climb', { ...grazing, altitudeKm: 3.6 }, 35, { weatherPreset: 'overcast' }),
+        0.05, 0.17),
+    motion(entry('game-overcast-artifact-ridge', { ...grazing, pitchDeg: -10 }, 35, { weatherPreset: 'overcast' }),
+        0.25),
+    motion(entry('game-reported-deck-climb', reportedClimb, 35, { weatherPreset: 'overcast' }), 0, 0.14),
+    motion(entry('game-reported-twilight-climb', reportedClimb, 7, { weatherPreset: 'cloudy' }), 0, 0.14),
+    motion(entry('game-reported-twilight-descent', { ...reportedClimb, altitudeKm: 7.61 }, 7, { weatherPreset: 'cloudy' }),
+        0, -0.14),
+    motion(entry('game-reported-night-low', reportedLow, 7, { weatherPreset: 'cloudy' }), 0.25, 0.012),
+    motion(entry('game-reported-day', { ...reportedClimb, altitudeKm: 6.8835 }, 35, { weatherPreset: 'cloudy' }), 0, 0.028),
+    motion(entry('game-reported-still', { ...reportedClimb, altitudeKm: 6.4424 }, 7, { weatherPreset: 'cloudy' }), 0),
+    motion(entry('game-reported-axis-turn', { ...reportedClimb, altitudeKm: 6.4424, headingDeg: 34 }, 7,
+        { weatherPreset: 'cloudy' }), 1.3),
     motion(entry('game-deck-ground-pan', { altitudeKm: 1.45, latDeg: -6.81, lonDeg: 19.64, headingDeg: 11, pitchDeg: 14 }, 35), 0.20),
     motion(entry('game-deck-grazing-pan', grazing, 35), 0.20),
     entry('game-ground-cirrus-only', ground, 35, { cumulusOff: true }),
@@ -161,6 +191,26 @@ const gameCases = [
     { ...motion(entry('game-history-rain-10hz', inside, 35, { weatherPreset: 'rain' }), 0), cloudDeltaSeconds: 0.1 },
     { ...motion(entry('game-weather-overcast-turn', grazing, 35, { weatherPreset: 'overcast' }), 0.8, 0.015, 0.001), cloudDeltaSeconds: 1 / 30 },
     { ...motion(entry('game-weather-overcast-fixed', inside, 35, { weatherPreset: 'overcast' }), 0), cloudDeltaSeconds: 0.1 },
+    motion(entry('game-weather-overcast-static', inside, 35, { weatherPreset: 'overcast' }), 0),
+    motion(entry('game-weather-fair-static', horizon, 35, { weatherPreset: 'partly_cloudy' }), 0),
+    entry('game-weather-clear-ground', ground, 35, { weatherPreset: 'clear' }),
+    motion(entry('game-weather-cloudy-flight', horizon, 35, { weatherPreset: 'cloudy' }), 0.35, 0.03, 0.005),
+    motion(entry('game-weather-storm-grazing', grazing, 5, { weatherPreset: 'storm' }), 0.8, 0.03, 0.005),
+    entry('game-weather-storm-dawn-reference', { ...above, altitudeKm: 7.4, latDeg: -17, lonDeg: 21, headingDeg: 148 },
+        8, { weatherPreset: 'storm' }, 55),
+    motion(entry('game-weather-foggy-ground', ground, -6, { weatherPreset: 'foggy' }, 235, true), 0.3),
+    motion(entry('game-weather-overcast-orbit', orbit, 35, { weatherPreset: 'overcast' }), 0.25),
+    entry('game-weather-orbital-blend', { ...orbit, altitudeKm: 72 }, 35, { weatherPreset: 'overcast' }),
+    entry('game-weather-orbital-blend-start', { ...orbit, altitudeKm: 55 }, 35, { weatherPreset: 'overcast' }),
+    entry('game-weather-orbital-blend-end', { ...orbit, altitudeKm: 87 }, 35, { weatherPreset: 'overcast' }),
+    motion(entry('game-weather-orbital-climb', { ...orbit, altitudeKm: 54 }, 35, { weatherPreset: 'overcast' }), 0.15, 2.2),
+    entry('game-weather-overcast-dusk', above, 10, { weatherPreset: 'overcast' }),
+    // Decks seen from below, where path-traced references show the largest lighting error.
+    entry('game-weather-overcast-ground', ground, 35, { weatherPreset: 'overcast' }),
+    entry('game-weather-rain-ground', ground, 35, { weatherPreset: 'rain' }),
+    entry('game-weather-storm-ground-dusk', ground, 8, { weatherPreset: 'storm' }),
+    motion(entry('game-weather-storm-ground-pan', ground, 8, { weatherPreset: 'storm' }), 0.41, 0, 0.002),
+    motion(entry('game-weather-rain-ground-pan', ground, 35, { weatherPreset: 'rain' }), 0.41, 0, 0.002),
     entry('game-orbit-clouds', orbit, 35),
     motion(entry('game-orbit-cloud-pan', orbit, 35), 0.25),
     motion(entry('game-orbit-cloud-climb', { ...orbit, altitudeKm: 65 }, 35), 0.10, 2.5),
@@ -220,9 +270,13 @@ async function open(url) {
     const page = await browser.newPage();
     page.on('pageerror', error => console.error(url, error.message));
     page.on('console', message => {
-        if (message.type() === 'error' && !message.text().includes('404')) console.error(url, message.text().slice(0, 700));
+        const line = message.text();
+        if ((message.type() === 'error' && !line.includes('404')) || line.includes('Volumetric clouds init failed')) {
+            console.error(url, line.slice(0, 700));
+        }
     });
     await page.setViewport({ width, height, deviceScaleFactor: 1.5 });
+    if (countWork) await page.evaluateOnNewDocument(installCloudWorkTracking);
     await page.evaluateOnNewDocument((isGame, captureRaw) => {
         if (captureRaw) {
             const create = GPUDevice.prototype.createTexture;
@@ -382,8 +436,21 @@ async function setupGame(page) {
             compositeInputs = [target, atmosphere];
             return composite.call(this, encoder, target, atmosphere);
         };
-        cloudBench.measureCirrus = async (frames, includeVolume = false) => {
+        cloudBench.measureCirrus = async (frames, includeVolume = false, diagnostic = null) => {
             await backend.device.queue.onSubmittedWorkDone();
+            let background;
+            if (diagnostic === 'observe-drained') {
+                const active = () => {
+                    const water = ge.waterService;
+                    return Boolean(water?._busy || water?._lakeCells?.planning || water?._lakeCells?.reading || ge.riverFieldService?.busy);
+                };
+                const start = performance.now();
+                const initiallyActive = active();
+                // A paused frame loop still has outstanding lake and river jobs.
+                while (active() && performance.now() - start < 45000) await new Promise(resolve => setTimeout(resolve, 25));
+                await backend.device.queue.onSubmittedWorkDone();
+                background = { initiallyActive, stillActive: active(), drainMs: performance.now() - start };
+            }
             timer.reset();
             const clouds = window.volumetricClouds;
             const forceShell = clouds.budgetTier?.cirrusVolume === false;
@@ -392,6 +459,54 @@ async function setupGame(page) {
             const target = ge.renderer.postProcessing._fakeRenderTarget();
             backend._defaultRenderTarget = target;
             const nearCirrus = ge.renderer._cameraAboveCirrus();
+            const rows = [];
+            const byPasses = new WeakMap();
+            const ingest = timer._ingest;
+            const timed = timer.enabled;
+            const observe = diagnostic?.startsWith('observe');
+            const compositeOnly = diagnostic === 'observe-composite';
+            const volumeOnly = diagnostic === 'volume' || diagnostic === 'observe-volume';
+            if (diagnostic === 'wall' || observe) timer.enabled = false;
+            const queue = backend.device.queue;
+            const queueOverrides = new Map();
+            let waitingRow;
+            let submittingReplay = false;
+            let heartbeat;
+            if (observe) {
+                for (const name of ['submit', 'writeBuffer', 'writeTexture', 'copyExternalImageToTexture']) {
+                    const method = queue[name];
+                    queueOverrides.set(name, Object.getOwnPropertyDescriptor(queue, name));
+                    queue[name] = function (...args) {
+                        if (waitingRow && !submittingReplay && waitingRow.queueOps.length < 8) {
+                            waitingRow.queueOps.push({ name, caller: new Error().stack.split('\n').slice(2, 5) });
+                        }
+                        return method.apply(this, args);
+                    };
+                }
+                heartbeat = setInterval(() => {
+                    if (!waitingRow) return;
+                    const now = performance.now();
+                    waitingRow.maxEventGapMs = Math.max(waitingRow.maxEventGapMs, now - waitingRow.lastBeat);
+                    waitingRow.lastBeat = now;
+                    waitingRow.heartbeats++;
+                }, 2);
+            }
+            if (diagnostic === 'bracket') {
+                const timestampWrites = timer.timestampWrites;
+                timer.timestampWrites = function (name) {
+                    return name.startsWith('__') ? timestampWrites.call(this, name) : undefined;
+                };
+            }
+            if (diagnostic) timer._ingest = function (passes, stamps) {
+                const row = byPasses.get(passes);
+                if (row) {
+                    const start = stamps[passes[0].end];
+                    row.gpu = passes.map(pass => [pass.name, Number(stamps[pass.begin] - start) / 1e6,
+                        Number(stamps[pass.end] - start) / 1e6]);
+                    row.readbackMs = performance.now() - row.wallStart;
+                }
+                ingest.call(this, passes, stamps);
+            };
             let elapsed = 0;
             const warm = includeVolume ? 6 : 0;
             try {
@@ -399,6 +514,7 @@ async function setupGame(page) {
                     if (i === warm) {
                         await new Promise(resolve => setTimeout(resolve, 0));
                         timer.reset();
+                        if (includeVolume && clouds.budgetTier?.neural) clouds._neuralLighting.reset();
                     }
                     const t0 = performance.now();
                     timer.beginFrame();
@@ -412,8 +528,15 @@ async function setupGame(page) {
                             backend.endRenderPassForCompute();
                         });
                     };
-                    draw('far');
-                    if (includeVolume) {
+                    if (diagnostic === 'attachment') {
+                        const [scene] = compositeInputs;
+                        const pass = encoder.beginRenderPass({ label: 'attachment-only replay',
+                            colorAttachments: [{ view: scene.colorView, loadOp: 'load', storeOp: 'store' }],
+                            timestampWrites: timer.timestampWrites('attachment-only replay'),
+                        });
+                        pass.end();
+                    } else if (!volumeOnly && !compositeOnly) draw('far');
+                    if (includeVolume && diagnostic !== 'attachment' && !compositeOnly) {
                         // Replay the last game pose and force refreshes to include the
                         // per-frame lookup and shadow costs of a moving, animated scene.
                         clouds._lastShadowInputs = null;
@@ -421,23 +544,66 @@ async function setupGame(page) {
                         const cache = clouds._sampleCache?.variants.get(clouds._activeCacheMode);
                         if (cache) cache.key = null;
                         clouds.compute(null, encoder);
+                    }
+                    if (includeVolume && diagnostic !== 'attachment' && !volumeOnly) {
                         composite.call(cloudComposite, encoder, ...compositeInputs);
                     }
-                    if (nearCirrus) draw('near');
+                    if (nearCirrus && diagnostic !== 'attachment' && !volumeOnly && !compositeOnly) draw('near');
                     timer.mark(encoder, '__end');
-                    timer.resolve(encoder);
+                    if (diagnostic === 'resolve-only') {
+                        encoder.resolveQuerySet(timer.querySet, 0, timer._cursor, timer.resolveBuffer, 0);
+                    } else {
+                        timer.resolve(encoder);
+                    }
+                    const row = diagnostic && i >= warm ? { wallStart: t0, encodeMs: performance.now() - t0 } : null;
+                    if (row) byPasses.set(timer._passes, row);
+                    submittingReplay = true;
                     backend.submitCommands();
+                    submittingReplay = false;
+                    if (row) row.submitMs = performance.now() - t0 - row.encodeMs;
+                    if (observe && row) {
+                        waitingRow = row;
+                        Object.assign(row, { lastBeat: performance.now(), heartbeats: 0, maxEventGapMs: 0, queueOps: [] });
+                    }
                     timer.collect();
                     await backend.device.queue.onSubmittedWorkDone();
                     if (i >= warm) elapsed += performance.now() - t0;
+                    if (row) {
+                        row.wallMs = performance.now() - t0;
+                        if (observe) {
+                            row.maxEventGapMs = Math.max(row.maxEventGapMs, performance.now() - row.lastBeat);
+                            delete row.lastBeat;
+                            waitingRow = null;
+                        }
+                        rows.push(row);
+                    }
                 }
                 await new Promise(resolve => setTimeout(resolve, 30));
-                const passes = timer.stats().map(pass => {
-                    const samples = [...timer.samples.get(pass.name)].sort((a, b) => a - b);
-                    return { ...pass, p50: samples[Math.floor(samples.length / 2)] };
+                const passes = [...timer.samples].map(([name, values]) => {
+                    const samples = [...values].sort((a, b) => a - b);
+                    return { name, count: samples.length, avg: values.reduce((sum, ms) => sum + ms, 0) / values.length,
+                        p50: samples[Math.floor(samples.length / 2)], p95: samples[Math.floor(samples.length * 0.95)],
+                        max: samples.at(-1), last: values.at(-1) };
                 });
-                return { passes, samples: timer.frames, meanWallMs: elapsed / frames };
+                for (const row of rows) delete row.wallStart;
+                const wall = rows.map(row => row.wallMs).sort((a, b) => a - b);
+                return { passes, samples: timer.frames, meanWallMs: elapsed / frames,
+                    ...(background ? { background } : {}),
+                    ...(diagnostic ? { rows, wall: { p50: wall[Math.floor(wall.length / 2)], p95: wall[Math.floor(wall.length * 0.95)],
+                        max: wall.at(-1) } } : {}) };
             } finally {
+                if (observe) {
+                    clearInterval(heartbeat);
+                    for (const [name, descriptor] of queueOverrides) {
+                        if (descriptor) Object.defineProperty(queue, name, descriptor);
+                        else delete queue[name];
+                    }
+                }
+                if (diagnostic) {
+                    timer.enabled = timed;
+                    delete timer._ingest;
+                    if (diagnostic === 'bracket') delete timer.timestampWrites;
+                }
                 backend._defaultRenderTarget = priorDefault;
                 backend.setRenderTarget(priorTarget);
             }
@@ -529,6 +695,9 @@ async function setCase(page, test, resolutionScale, overrides) {
         if (c.settings.cloudCacheMode !== 'off' && !await c.prepareSampleCache(c.settings.cloudCacheMode)) {
             throw new Error('Cloud sample cache preview pipelines failed to initialise');
         }
+        if (c.budgetTier?.neural && !await c.prepareNeuralLighting()) {
+            throw new Error('Neural cloud lighting pipelines failed to initialise');
+        }
         if (c.settings.towerDebugMode === 'stretched') await c.prepareStretchedCumulus?.();
         if (['bounded', 'cached', 'impostor'].includes(c.settings.towerDebugMode)) {
             await c.prepareTowerExperiments();
@@ -550,6 +719,7 @@ async function setCase(page, test, resolutionScale, overrides) {
         c._windShape = [0, 0, 0];
         c._windDetail = [0, 0, 0];
         c._shadowFrame = null;
+        c._neuralLighting?.reset();
         c.resetHistory();
         c._frame = 0;
         if (!isGame) {
@@ -654,7 +824,50 @@ async function imageDifference(name) {
         let count = 0;
         return bins.findIndex(bin => (count += bin) >= fraction * pixels);
     }
-    return { meanMaxRgb: sum / pixels, p95: percentile(0.95), p99: percentile(0.99), fractionOver5: over5 / pixels };
+    return { meanMaxRgb: sum / pixels, p95: percentile(0.95), p99: percentile(0.99), p999: percentile(0.999),
+        max: bins.findLastIndex(bin => bin > 0), fractionOver5: over5 / pixels };
+}
+
+async function referenceImageError(name, opacity, skyMasks) {
+    const shots = await Promise.all(['teacher', 'before', 'after'].map(async side =>
+        PNG.sync.read(await fs.readFile(path.join(output, `${name}-${side}.png`)))));
+    const width = referenceWidth;
+    const height = referenceHeight;
+    const sample = (image, x, y) => {
+        const sum = [0, 0, 0];
+        const left = Math.floor(x * image.width / width);
+        const top = Math.floor(y * image.height / height);
+        const right = Math.floor((x + 1) * image.width / width);
+        const bottom = Math.floor((y + 1) * image.height / height);
+        for (let j = top; j < bottom; j++) for (let i = left; i < right; i++) {
+            const p = 4 * (j * image.width + i);
+            for (let c = 0; c < 3; c++) sum[c] += image.data[p + c];
+        }
+        return sum.map(v => v / ((right - left) * (bottom - top)));
+    };
+    const score = (image, minimumOpacity, skyOnly) => {
+        const errors = [];
+        let targetLum = 0;
+        let imageLum = 0;
+        const luma = c => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+            const pixel = y * width + x;
+            if (opacity[pixel] < minimumOpacity || (skyOnly && skyMasks.some(mask => mask[pixel] !== 1))) continue;
+            const a = sample(shots[0], x, y);
+            const b = sample(image, x, y);
+            errors.push(Math.max(...a.map((v, i) => Math.abs(v - b[i]))));
+            targetLum += luma(a);
+            imageLum += luma(b);
+        }
+        if (!errors.length) return { pixels: 0 };
+        errors.sort((a, b) => a - b);
+        return { pixels: errors.length, mae: errors.reduce((sum, v) => sum + v, 0) / errors.length,
+            p95: errors[Math.floor(errors.length * 0.95)], p999: errors[Math.floor(errors.length * 0.999)],
+            max: errors.at(-1), luminanceRatio: imageLum / targetLum };
+    };
+    return { size: [width, height], spp: imageReferenceSpp,
+        all: { before: score(shots[1], 0, false), after: score(shots[2], 0, false) },
+        cloudySky: { before: score(shots[1], 0.2, true), after: score(shots[2], 0.2, true) } };
 }
 
 async function conditions(page) {
@@ -671,10 +884,15 @@ async function conditions(page) {
             sun = ['x', 'y', 'z'].map(axis => direction[axis]);
         }
         const sunCos = p.reduce((sum, x, i) => sum + x * sun[i], 0) / (Math.hypot(...p) * Math.hypot(...sun));
+        const rays = c._spatialStride ? [c._spatialTargets.width, c._spatialTargets.height] : c._sets[c._activeK]?.blocks;
         return {
             sunElevation: Math.asin(Math.min(1, Math.max(-1, sunCos))) * 180 / Math.PI,
             moonIlluminance: c.enabled ? c.moonIlluminance : null,
             cloudSize: c.enabled ? c.getOutputs().size : null,
+            // Pixels of the ray target. With cloudRayPairs only part of them are traced; work runs (CLOUD_BENCH_WORK=1)
+            // count the traced rays.
+            rayTargetPixels: c.enabled && rays ? rays[0] * rays[1] : 0,
+            rayPairs: !!(c.settings.cloudRayPairs && c.budgetTier?.neural),
             spatialStride: c.enabled ? c._spatialStride ?? 0 : null,
             interleave: c.enabled ? c._activeK : null,
             proxyWeight: c.enabled ? c.proxyWeight : null,
@@ -684,12 +902,15 @@ async function conditions(page) {
             historyReuseActive: c._historyReuseActive ?? false,
             cloudCacheMode: c._activeCacheMode ?? 'off',
             cloudBudgetMode: c.settings.cloudBudgetMode ?? 'off',
+            neuralCacheActive: !!c._neuralLighting?.current,
+            conventionalHistory: !!c._conventionalHistoryActive,
         };
     }, game);
 }
 
 async function captureMotion(page, test, side, resolutionScale, settings) {
     await setCase(page, test, resolutionScale, settings);
+    if (motionWarmFrames) await page.evaluate(frames => cloudBench.run(frames, false), motionWarmFrames);
     const folder = path.join(output, test.name, side);
     await fs.mkdir(folder, { recursive: true });
     const poses = [];
@@ -699,14 +920,17 @@ async function captureMotion(page, test, side, resolutionScale, settings) {
             const camera = isGame ? gameEngine.renderer.camera : cloudLab.camera;
             const c = isGame ? window.volumetricClouds : cloudLab.clouds;
             return { view: Array.from(camera.matrixWorldInverse.elements),
-                projection: Array.from(camera.projectionMatrix.elements), historyReuse: c._historyReuseActive ?? false };
+                projection: Array.from(camera.projectionMatrix.elements), cloudCamera: c._prev,
+                historyReuse: c._historyReuseActive ?? false, neuralLighting: !!c._neuralLighting?.current,
+                conventionalHistoryValid: c._uniformData[49 * 4 + 2] === 2 };
         }, game);
         poses.push(pose);
         await page.screenshot({ path: path.join(folder, `${String(frame).padStart(3, '0')}.png`) });
         if (cloudBufferCapture) {
             const raw = await page.evaluate(async isGame => {
                 const c = isGame ? window.volumetricClouds : cloudLab.clouds;
-                const color = c.budgetTier ? c._sets[c._activeK].color : c._history[c._outputIndex];
+                const resolved = !c.budgetTier || c._conventionalHistoryActive;
+                const color = resolved ? c._history[c._outputIndex] : c._sets[c._activeK].color;
                 const depth = c._sets[c._activeK].depth;
                 if (color.width !== depth.width || color.height !== depth.height) throw new Error('Expected full-size resolved cloud depth');
                 const device = c.device;
@@ -744,8 +968,10 @@ try {
     const pages = [firstPage, before === after ? firstPage : await open(after)];
     const result = { before, after, chrome: await browser.version(), width, height, dpr: 1.5,
         tier, scale, afterScale, checker, game, runtimeLook, beforeSettings, afterSettings,
-        sampleFrames, warmFrames, rounds, cases: {} };
+        sampleFrames, warmFrames, rounds, countWork, cases: {} };
     for (const test of cases) {
+        let teacherOpacity;
+        const skyMasks = [];
         const baseline = compareBudgetTiers && test.after?.cloudBudgetMode ? { ...test.after, ...beforeSettings } : beforeSettings;
         const runs = { before: [], after: [] };
         for (let round = 0; round < rounds; round++) {
@@ -754,7 +980,18 @@ try {
                 const label = index ? 'after' : 'before';
                 const settings = index ? { ...test.after, ...afterSettings } : baseline;
                 await setCase(page, test, index ? afterScale : scale, settings);
-                await page.evaluate(frames => cloudBench.run(frames, false), warmFrames);
+                if (warmFrames > 0) await page.evaluate(frames => cloudBench.run(frames, false), warmFrames);
+                if (countWork) {
+                    const totals = await page.evaluate(async (frames, isGame) => {
+                        const clouds = isGame ? window.volumetricClouds : cloudLab.clouds;
+                        window.cloudWork.reset(clouds.device);
+                        await cloudBench.run(frames, false);
+                        return window.cloudWork.read(clouds.device);
+                    }, sampleFrames, game);
+                    if (!totals.rays) throw new Error(`No work counters for ${test.name} (${label})`);
+                    runs[label].push({ totals, frames: sampleFrames, conditions: await conditions(page), passes: [] });
+                    continue;
+                }
                 const metrics = await page.evaluate(frames => cloudBench.run(frames, true), sampleFrames);
                 metrics.conditions = await conditions(page);
                 const rayPass = metrics.conditions.cloudBudgetMode !== 'off' ? 'clouds budget volume'
@@ -788,8 +1025,36 @@ try {
                         }
                     }
                 }
+                if (imageReferenceSpp > 0 && round === 0 && !test.motion && metrics.conditions.cloudSize) {
+                    const dimensions = { width: referenceWidth, height: referenceHeight };
+                    skyMasks.push(await page.evaluate(readReferenceSkyMask, dimensions));
+                    if (index === 1) {
+                        teacherOpacity = await page.evaluate(prepareCloudImageReference, { ...dimensions, spp: imageReferenceSpp });
+                        try {
+                            await page.evaluate(() => cloudBench.run(1, false));
+                            await page.screenshot({ path: path.join(output, `${test.name}-teacher.png`) });
+                            skyMasks.push(await page.evaluate(readReferenceSkyMask, dimensions));
+                        } finally {
+                            await page.evaluate(() => cloudBench.releaseImageReference());
+                        }
+                    }
+                }
                 if (game && isolatedStackFrames > 0 && metrics.conditions.cloudSize) {
-                    metrics.isolatedCloudStack = await page.evaluate(frames => cloudBench.measureCirrus(frames, true), isolatedStackFrames);
+                    metrics.isolatedCloudStack = await page.evaluate((frames, mode) => cloudBench.measureCirrus(frames, true, mode),
+                        isolatedStackFrames, isolatedStackMode);
+                }
+                if (game && stallReplayFrames > 0 && index === 1 && round === 0 && metrics.conditions.cloudSize) {
+                    metrics.stallReplays = await page.evaluate(async (frames, modes) => {
+                        const results = {};
+                        for (const mode of modes) {
+                            const key = Object.hasOwn(results, mode) ? `${mode}-repeat` : mode;
+                            results[key] = await cloudBench.measureCirrus(frames, true, mode);
+                        }
+                        return results;
+                    }, stallReplayFrames, stallReplayModes);
+                }
+                if (game && neuralReferencePaths > 0 && round === 0 && metrics.conditions.neuralCacheActive) {
+                    metrics.neuralReference = await page.evaluate(measureNeuralReference, neuralReferencePaths);
                 }
                 if (test.motion && motionFrames > 0 && round === 0) {
                     await captureMotion(page, test, label, index ? afterScale : scale, settings);
@@ -799,9 +1064,11 @@ try {
                 }
             }
         }
-        result.cases[test.name] = { ...test, ...runs, image: capture ? await imageDifference(test.name) : undefined };
+        result.cases[test.name] = { ...test, ...runs, image: capture ? await imageDifference(test.name) : undefined,
+            imageReference: teacherOpacity ? await referenceImageError(test.name, teacherOpacity, skyMasks) : undefined };
         await fs.writeFile(path.join(output, 'timings.json'), JSON.stringify(result, null, 2) + '\n');
-        const time = side => runs[side].map(run => run.passes.find(pass => pass.name === 'total')?.avg.toFixed(2) ?? run.fps.toFixed(2)).join(', ');
+        const time = side => runs[side].map(run => countWork ? (run.totals.rays / run.frames).toFixed(0)
+            : run.passes.find(pass => pass.name === 'total')?.avg.toFixed(2) ?? run.fps.toFixed(2)).join(', ');
         console.log(`${test.name.padEnd(23)} ${time('before')} -> ${time('after')}`);
     }
 } finally {

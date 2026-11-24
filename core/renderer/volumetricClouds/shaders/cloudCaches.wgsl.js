@@ -25,9 +25,13 @@ const LIVE_SUN_PROBES: i32 = 3;
 
 // The first two probes include small-scale erosion. Farther probes use base density.
 fn probeLight(p: vec3f, footprint: f32, weather: Weather, dir: vec3f, first: i32, end: i32, farWeight: f32) -> f32 {
+    return probeLightFromStep(p, footprint, weather, dir, first, end, farWeight, u.march2.x);
+}
+
+fn probeLightFromStep(p: vec3f, footprint: f32, weather: Weather, dir: vec3f, first: i32, end: i32, farWeight: f32, startingStep: f32) -> f32 {
     var od = 0.0;
-    var stepLen = u.march2.x * exp2(f32(first));
-    var t = stepLen - u.march2.x;
+    var stepLen = startingStep * exp2(f32(first));
+    var t = stepLen - startingStep;
     for (var i = first; i < end; i++) {
         let lp = p + dir * (t + stepLen * 0.5);
         let fp = max(footprint, stepLen * 0.5);

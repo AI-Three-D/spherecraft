@@ -1004,3 +1004,600 @@ A practical first model would predict higher-order scattering at the interval sh
 Build the teacher from snapshots of the game's extinction field. Keep the shapes, material and atmosphere stable during each sample. Use converged offline numerical integration for direct optical depth and a volumetric path tracer that records second-and-higher-order scattering separately, with sun and sky contributions isolated where useful. Record linear HDR targets and estimator variance. Sample visible ray intervals, wisps and optically thick interiors. Hold out whole weather seeds and flight sequences, including crepuscular lighting and full overcast, for evaluation.
 
 Package small, versioned weight and normalization buffers with the engine once a model beats an analytical or tabulated baseline at matched quality and cost. Time the feature extraction, inference, and any cache refresh together on WebGPU. Compare HDR radiance, sky color and temporal error through a sun sweep and a fixed set of flight paths. Scaling 512 MACs across the current 128×128×48 cache would amount to about 403 million MACs per full refresh. The evaluation budget should account for update frequency and where the network runs. The 34–44 ms lighting-disabled measurements in the heavy views give an independent reason to redesign density traversal. Neural lighting alone leaves that cost in the frame.
+
+## 23. Conventional overcast raymarch
+
+The overcast weather preset has a deck weight of 0.86, which was exactly the point where the game's lighting reuse began. The reuse curve now runs from 0.74 to 0.86. Overcast uses the same short-range interpolation as dense rain. The first occupied sample after clear air and the visible skin still receive fresh lighting. The limits remain ten samples and 300 m between lighting evaluations.
+
+| View | Raymarch GPU median before | Raymarch GPU median after | Cloud stack before → after |
+| --- | ---: | ---: | ---: |
+| Fixed overcast | 389.1 ms | 208.3 ms | 391.1 → 210.1 ms |
+| Overcast turn and climb | 225.2 ms | 176.4 ms | 227.0 → 178.1 ms |
+| Fixed rain | 71.4 ms | 69.7 ms | 73.3 → 71.8 ms |
+| Rain turn and climb | 163.0 ms | 160.2 ms | 164.9 → 162.0 ms |
+
+Chrome WebGPU on the M1 Pro at 1536×960 with a 768×480 cloud target. Each value averages two alternating 12-frame GPU replay medians at the final pose. The logs also include the live moving replays. Rain already used the full reuse curve, so the rain timing spread serves as a control. The matched ten-frame overcast clips measured zero p99 opacity and opacity-motion difference. The resolved depth shifted by at most 5.3 cm. The fixed clip measured p99 display error of 1/255, and the turn measured 4/255 with 3/255 p99 added frame-to-frame display difference. [GPU timings](tools/perf/cloud-results/2026-11-22/conventional-raymarch/timings.json) · [Matched motion](tools/perf/cloud-results/2026-11-22/conventional-raymarch/motion.json).
+
+The separate ablations at 384×240 cloud resolution show why the 3 ms target needs more than lighting work. In fixed overcast, disabling the direct sun term reduced the pass from 117.9 to 53.0 ms. Removing the sky occlusion probes reduced it from 120.7 to 80.7 ms. Replacing cloud lighting with a constant reduced it from 108.2 to 13.2 ms. Each ablation is a separate shader build and includes its effect on scheduling and compiler optimization. Fusing sun and sky probes into one loop and calculating phase weights once per ray both increased the dense-view cost in this screen. The wider lighting-reuse test reached 8/255 display error at p99 in the overcast turn. [Screening results](tools/perf/cloud-results/2026-11-22/conventional-raymarch/screening.json).
+
+An instrumented run at 384×240 recorded 368,640 fixed-overcast rays across four frames per side. All entered the march. The mean fell from 220 to 44 lighting evaluations and from about 2,266 to 459 sun and sky probes per ray. Both paths averaged 426 view-density evaluations per ray. Shorter traversal and fewer density evaluations in occupied intervals are the largest remaining opportunities in this view. [Ray work counters](tools/perf/cloud-results/2026-11-22/conventional-raymarch/ray-work.json).
+
+To reproduce the full-size comparison, leave the new game defaults active and override the baseline with the previous curve.
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 CLOUD_BENCH_SCALE=0.5 \
+CLOUD_BENCH_CASES='^game-(weather-overcast-fixed|weather-overcast-turn|history-turn|history-rain-10hz)$' \
+CLOUD_BENCH_WARM=6 CLOUD_BENCH_FRAMES=12 CLOUD_BENCH_ROUNDS=2 CLOUD_BENCH_ISOLATED_STACK_FRAMES=12 \
+CLOUD_BENCH_MOTION_FRAMES=10 CLOUD_BENCH_CLOUD_BUFFER=1 \
+CLOUD_BENCH_BEFORE_SETTINGS='{"denseDeckLighting":{"startDeck":0.86,"fullDeck":0.94,"steps":10,"maxKm":0.3,"reuseBelow":0.985}}' \
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8000 http://127.0.0.1:8000 /tmp/cloud-overcast
+```
+
+## 24. Fast conventional preview
+
+Press **Shift+K** once from **Current renderer** to select **Conventional**. Its target holds up to 207,360 cloud pixels, all traced every frame. At 1536×960 this is a 576×360 target, compared with the original 768×480 target and 184,320 fresh checkerboard rays in the ground and in-layer views. The preview has its own shader and uses the existing depth-aware composite.
+
+Two 256²-per-face cubes cache the planet's weather terms and shape displacement in 6 MiB. The ray reads them with two filtered 2D lookups per density evaluation, and applies coverage, cloud type and deck weight live. The atlas follows wind by advection. Its weather seed is baked at zero radial evolution, so the preview approximates the procedural weather's slow evolution. The normal density functions retain their signatures. The shader keeps the existing distant banks and filters large footprints before looking up detail. It uses a bounded distance grid and adds a density tap at some visible broken-cloud edges. In orbit it blends to the existing 24-slab renderer between 40 and 80 km above the cloud tops. As the slab weight rises, the local raymarch uses fewer intervals.
+
+The local shade evaluates a single opacity-weighted point per visible volume. It returns single-scatter, multiple-scatter and sky terms separately. The single-scatter term combines a near-density sun probe with the projected scene shadow map. That map is a whole-column approximation and fades with the map's coverage and the sun angle. The neural lab's `farOd` feature integrates only the portion beyond the local probes, so its error reduction does not directly measure this runtime approximation. [Neural lab findings](NEURAL_CLOUD_LAB_FINDINGS.md) · [Teacher implementation](neural_lab/teacher.wgsl.js).
+
+The distance-band sampler met the raymarch time target in the initial cases and produced orbital rings. The 48-knot continuous full-rate sampler removed those rings and reached 8.4 ms cloud-stack p95 in fixed overcast. The quarter-rate path with a global weather cube reached roughly 2.4 ms median for fixed overcast and rain turn, with 92,203 and 92,234 rays per frame including repairs. Fixed overcast fell from 903 million 3D texture samples to about 14.8 million. The quarter-rate p99.9 edge-opacity change still reached 18.4/255 during the animated fixed-overcast clip, versus 4.6/255 in the same shader at full rate. The world-aligned grid prototype ran at about 3.1 ms in fixed overcast and showed slice boundaries in scattered ground views. The selected preview runs at full rate and drops those trial shaders. [Screening data](tools/perf/cloud-results/2026-11-22/conventional-six-ms/trials.json).
+
+
+### GPU timings and work per frame
+
+Chrome WebGPU on the M1 Pro at 1536×960. Each row takes the highest p95 and the highest individual sample from the isolated cloud-stack replays. The raymarch, cirrus, shadows, haze lookup and composite all run in those replays. The counters come from separate instrumented live runs, averaged over four frames. A 2D or 3D sample is a shader texture-sampling call. Hardware filtering can touch multiple texels per call. The orbital blend dispatches both paths, so the measured number of rays there is twice the target pixel count.
+
+| View | Rays/frame | Density evals/ray × 3D samples/eval | View + light 3D samples/frame (M) | View + light 2D samples/frame (M) | Stack p95 / max (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Clear ground | 207,360 | 0.0 × 0.00 | 0.00 + 0.00 | 0.00 + 0.00 | 0.81 / 0.83 |
+| Scattered ground pan | 207,360 | 47.1 × 0.84 | 8.23 + 0.04 | 19.54 + 0.24 | 20.02 / 37.78 |
+| Scattered flight | 207,360 | 38.9 × 0.58 | 4.70 + 0.04 | 16.12 + 0.19 | 2.81 / 3.35 |
+| Cloudy flight | 207,360 | 36.5 × 1.50 | 11.39 + 0.09 | 15.14 + 0.36 | 4.53 / 4.60 |
+| Ground overcast | 207,360 | 22.6 × 2.20 | 10.30 + 0.38 | 9.38 + 0.57 | 3.86 / 3.99 |
+| Overcast low climb | 207,360 | 21.9 × 2.12 | 9.64 + 0.38 | 9.07 + 0.56 | 2.87 / 3.42 |
+| Fixed overcast | 207,360 | 53.7 × 2.93 | 32.64 + 0.48 | 22.28 + 0.83 | 4.93 / 5.51 |
+| Overcast turn and climb | 207,360 | 51.5 × 2.96 | 31.61 + 0.36 | 21.34 + 0.72 | 4.34 / 4.35 |
+| Overcast at dusk | 207,360 | 56.8 × 1.04 | 12.24 + 0.21 | 23.56 + 0.64 | 3.63 / 3.70 |
+| Ground rain | 207,360 | 25.8 × 1.61 | 8.62 + 0.42 | 10.69 + 1.03 | 4.09 / 4.12 |
+| Inside rain | 207,360 | 33.7 × 3.31 | 23.12 + 0.62 | 13.98 + 0.93 | 3.64 / 3.69 |
+| Continuous rain | 207,360 | 34.2 × 3.31 | 23.49 + 0.62 | 14.19 + 0.93 | 3.94 / 3.96 |
+| Rain turn and climb | 207,360 | 47.3 × 3.14 | 30.79 + 0.43 | 19.62 + 0.98 | 4.46 / 4.85 |
+| Above storm | 207,360 | 58.6 × 1.14 | 13.82 + 0.25 | 24.29 + 0.87 | 4.53 / 4.84 |
+| Storm grazing | 207,360 | 49.9 × 3.05 | 31.61 + 0.43 | 20.70 + 0.97 | 4.51 / 4.79 |
+| Fog at dusk | 207,360 | 56.5 × 1.21 | 14.13 + 0.05 | 23.42 + 0.32 | 4.63 / 4.63 |
+| Above clouds at night | 207,360 | 63.8 × 0.56 | 7.42 + 0.06 | 26.47 + 0.30 | 3.43 / 4.13 |
+| Orbital blend start | 414,720 | 15.0 × 2.03 | 12.63 + 0.97 | 10.62 + 1.01 | 5.21 / 5.91 |
+| Orbital blend middle | 414,720 | 10.2 × 3.08 | 13.03 + 1.55 | 5.52 + 0.81 | 5.33 / 6.08 |
+| Orbital blend end | 414,720 | 6.7 × 4.61 | 12.83 + 1.87 | 2.09 + 0.67 | 4.77 / 5.17 |
+| Orbital climb | 414,720 | 10.6 × 2.93 | 12.92 + 1.48 | 6.02 + 0.82 | 4.97 / 5.54 |
+| Overcast orbit | 207,360 | 6.0 × 6.33 | 7.82 + 1.31 | 0.00 + 0.31 | 3.39 / 3.75 |
+
+Fixed overcast in the existing renderer dispatched 184,320 rays per frame, averaging 428.3 density evaluations per ray and 8.29 3D samples per evaluation. That was 654.8 million view samples plus 248.0 million lighting samples. The preview dispatches more rays at this view and cuts the combined 3D samples to 33.1 million, about a 27-fold reduction. Rain turn goes from 517.3 million view and 176.5 million lighting samples to 30.8 and 0.43 million. The weather-cube generation runs when the atlas inputs change and is separate from the steady GPU samples. [Timing sweep](tools/perf/cloud-results/2026-11-22/conventional-six-ms/timings.json) · [Ground and orbital repeats](tools/perf/cloud-results/2026-11-22/conventional-six-ms/handoffs.json) · [Instrumented work](tools/perf/cloud-results/2026-11-22/conventional-six-ms/work.json).
+
+The scattered ground pan's three settled repeats had a cloud-stack p95 of 3.40–3.45 ms and a maximum of 4.04 ms. The first repeat still reached 37.78 ms after 28 warm-up frames. Its raymarch maximum was 3.37 ms, while the composite timestamp span reached 38.28 ms. An earlier run put a similar outlier in the cirrus draw span. Pass spans can overlap and include waits. The cause of those stalls remains open, so the logs retain them. The middle orbital handoff had one 6.08 ms sample and a worst p95 of 5.33 ms.
+
+### Motion and projected shadow
+
+Motion comparisons use the same 576×360 cloud target and matched camera poses. The opacity-edge mask selects sky pixels where adjacent cloud texels differ by at least 0.08 opacity. The p99.9 reprojection residual was 20.75 → 20.94/255 on the ground pan, 3.44 → 11.19/255 on the rain turn, and 44.31 → 65.94/255 on the translating scattered flight. It was zero in the frozen scattered view on both paths. The largest orbital opacity residuals lie on the planet limb, reaching 149/255 at p99.9 in the preview. In the displayed orbital pan, rotation-compensated p99.9 RGB change was 60 → 62/255, and the ground pan went from 41 to 24/255. These results support the preview for performance comparison. Scattered-flight and limb opacity still differ in motion. [Motion metrics](tools/perf/cloud-results/2026-11-22/conventional-six-ms/motion.json) · [Displayed pans](tools/perf/cloud-results/2026-11-22/conventional-six-ms/display-motion.json) · [Scattered-flight edge heatmap](tools/perf/cloud-results/2026-11-22/conventional-six-ms/cache-weather-handoff-edges.png) · [Orbital edge heatmap](tools/perf/cloud-results/2026-11-22/conventional-six-ms/weather-overcast-orbit-edges.png).
+
+At 10° sun elevation in overcast, enabling the projected shadow with strength 0.35 changed the displayed image by 57/255 at p99. Median raymarch GPU time was 2.680 ms with strength zero and 2.673 ms with the shadow term. The timing difference is within run variation. The shape inputs and analytic source terms were the same for this pair. [Dusk shadow A/B](tools/perf/cloud-results/2026-11-22/conventional-six-ms/dusk-shadow.json) · [Without projected shadow](tools/perf/cloud-results/2026-11-22/conventional-six-ms/dusk-shadow-before.png) · [With projected shadow](tools/perf/cloud-results/2026-11-22/conventional-six-ms/dusk-shadow-after.png).
+
+### Reproduce
+
+Run once for GPU timing. Run again with `CLOUD_BENCH_WORK=1` and a different output directory for the texture and evaluation counters.
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 CLOUD_BENCH_WARM=10 \
+CLOUD_BENCH_AFTER_SETTINGS='{"cloudBudgetMode":"conventional"}' \
+CLOUD_BENCH_CASES='^game-(history-turn|weather-overcast-fixed|weather-orbital-blend)$' \
+CLOUD_BENCH_ISOLATED_STACK_FRAMES=24 CLOUD_BENCH_CAPTURE=0 \
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8000 http://127.0.0.1:8000 /tmp/cloud-conventional-six-ms
+```
+
+## 25. Lighting cache and specialized raymarch
+
+The **Conventional** and **Neural lighting** previews share the same cloud target, sample positions,
+density field, extinction integration, and layer composite. Both are available through Shift+K. For
+the game's domes without giants, the shader uses 32-thread workgroups and specializes the density
+function. Dense decks use a second specialization because the live transition-refinement weight is
+already zero when the deck weight reaches 0.62. Other cloud shapes retain the generic shader.
+
+Across two runs at 1536×960 on the M1 Pro, workgroup and shape specialization reduced the median
+raymarch by 0.34–0.51 ms in ground pan, cloudy flight, rain turn, and fixed overcast. The dense
+specialization saved another 0.07–0.13 ms in the three dense weather presets. Both experiments kept
+the 576×360 target and the view march's integration rule.
+[Workgroup and shape](tools/perf/cloud-results/2026-11-22/neural-lighting/geometry.json) ·
+[Dense specialization](tools/perf/cloud-results/2026-11-22/neural-lighting/dense.json).
+
+The lighting preview uses the lab's two view-independent 16×16 models for bounced sunlight and
+sky light. Single scattering remains analytic, with six local probes and optical depth through the
+rest of the shell toward the sun. Near and far integration meet at 2.4 km. The cache interpolates
+transmitted light directly, which preserves more light across partly occluded paths than averaging
+optical depth before applying the exponential. The learned sky term modulates the game's sky colour.
+Moonlight, ambient fill, and rain styling stay in the lighting model.
+
+The cache covers a 48 km patch, with 64×64 horizontal cells and 24 height slices. Two
+RGBA16F textures use about 1.5 MiB together. It bakes up to 12 rows per frame, publishes a complete
+patch, and blends over five frames. The cache follows wind horizontally and fades out near its
+edges and at high altitude. Frozen scenes can reuse a complete patch. The view march keeps its
+existing lighting on the low stratus layer, in orbit, and wherever cache confidence is low.
+
+Each radial column uses a workgroup suffix sum for sky optical depth. Every voxel contributes its
+one density sample to the voxels below it. The previous bake independently marched a new sky ray
+at each occupied voxel. The peak bake in the two-run comparison went from 0.924 to 0.577 ms. The
+scattered flight bake averaged about 0.07 ms more with the shared pass. Displayed RGB differences
+between the two bakes were 1/255 at p99 in the five scenes. The source keeps the shared pass.
+[Sky-depth experiment](tools/perf/cloud-results/2026-11-22/neural-lighting/sky-columns.json).
+
+Runtime path-traced point samples identified heavily shadowed storms at low sun as a distinct
+failure case. Both the conventional and uncorrected learned bounce can be several times too bright.
+The preview applies a soft reduction driven by rain shading, local sun elevation, and cached direct
+transmittance. This is a calibration from the game scenes. It is separate from the trained weights
+and the lab's held-out benchmark.
+
+A second atlas lookup was skipped experimentally when the first lookup found a clear cell. The
+branch slowed the ground raymarch by 0.13–0.16 ms and the cloudy-flight raymarch by 0.11 ms. The
+preview uses the original atlas path.
+[Atlas early-out experiment](tools/perf/cloud-results/2026-11-22/neural-lighting/atlas-early-out.json).
+
+### Motion
+
+The preview blends back to the analytic source on translucent rays, where one opacity-weighted
+point is a poor representative of the visible material. In the A/B test this lowered p99.9
+reprojected edge-radiance residual from 54.13 to 50.38 in rain and from 102.94 to 89.88 in the
+grazing storm, in units of 1/255 linear cloud radiance. Conventional had 17.75 and 29.31 in those
+scenes. The learned lighting adds contrast that can change substantially when the view moves
+through a storm, so the motion results support an opt-in preview.
+
+The additional opacity motion error at p99.9 was 0.50/255 on the rain turn, 0.25/255 in fixed
+overcast, 1.25/255 in cloudy flight, 0.50/255 in the storm turn, and 1.44/255 on the cube-face
+crossing. The underlying edge reprojected opacity residual stayed within 0.13/255 of the
+Conventional runs. A high residual in cloudy flight remains visible in both renderers.
+[Motion data](tools/perf/cloud-results/2026-11-22/neural-lighting/motion.json) ·
+[Translucent edge experiment](tools/perf/cloud-results/2026-11-22/neural-lighting/edge-support-motion.json) ·
+[Rain opacity heatmap](tools/perf/cloud-results/2026-11-22/neural-lighting/rain-opacity-motion.png) ·
+[Storm opacity heatmap](tools/perf/cloud-results/2026-11-22/neural-lighting/storm-opacity-motion.png).
+
+The contact sheet shows matched motion frames for rain turn, fixed overcast, and a grazing storm
+from top to bottom, with Conventional on the left and Neural lighting on the right.
+[Contact sheet](tools/perf/cloud-results/2026-11-22/neural-lighting/comparison.png).
+
+### Cloud GPU time and path-traced checks
+
+Chrome WebGPU on the M1 Pro at 1536×960, with a 576×360 cloud target. The isolated replay runs
+cirrus, ground shadows, raymarch, haze, and composite. Neural timings include a cold patch rebuild.
+The table uses the higher p95 and maximum from the two 30-frame runs.
+
+| View | Conventional stack p95 / max (ms) | Neural lighting stack p95 / max (ms) |
+| --- | ---: | ---: |
+| Ground pan | 21.01 / 45.61 | 3.31 / 3.33 |
+| Rain turn and climb | 3.86 / 4.42 | 4.47 / 4.48 |
+| Fixed overcast | 4.24 / 4.32 | 4.55 / 4.56 |
+| Cloudy flight | 3.47 / 3.50 | 3.75 / 3.75 |
+| Grazing storm | 3.60 / 4.11 | 3.79 / 4.52 |
+| Dawn storm | 4.77 / 4.81 | 5.10 / 5.60 |
+| Overcast at dusk | 3.44 / 3.89 | 3.44 / 3.63 |
+| Orbital handoff | 4.01 / 4.17 | 4.01 / 4.02 |
+
+The settled Conventional ground-pan repeat had 3.30 ms p95. The earlier repeat's 45.61 ms
+outlier spans the composite while its raymarch stays close to 2 ms. Similar intermittent spikes
+occurred during screening. Raw pass spans can overlap on the M1 Pro and include dependency waits.
+In the verified fixed-overcast replays, median neural raymarch was 3.44 ms, cirrus 0.34 ms,
+ground shadows 0.51–0.52 ms, haze lookup 0.03 ms, and the six bake slices 0.20–0.21 ms each.
+The highest bake sample in this sweep was 0.56 ms. The earlier detailed timing sweep includes
+2.82 and 3.03 ms bake-span outliers, on replays whose complete cloud stack stayed below 4.4 ms.
+[Verified timings with per-pass data](tools/perf/cloud-results/2026-11-22/neural-lighting/verified.json) ·
+[Earlier per-pass repeats](tools/perf/cloud-results/2026-11-22/neural-lighting/components.json).
+
+An isolated rebuild of the planet-wide weather atlas took 0.111 ms at median and 0.120 ms at
+maximum across 12 samples with the pipeline ready. It runs when the atlas inputs change.
+[Weather atlas and key check](tools/perf/cloud-results/2026-11-22/neural-lighting/key-and-atlas.json).
+
+Path-traced checks use 96 paths per query and a 32×20 grid of contribution-sampled rays. The
+table compares the in-game analytic terms and hybrid lighting at points supported by the deployed
+cache. Errors are opacity-weighted relative RMSE. They quantify lighting coefficients, ahead of
+the atmospheric colour, art exposure, and screen-space cloud composite.
+
+| View | In-cache points | Bounced sunlight | Sky light | Direct sunlight |
+| --- | ---: | ---: | ---: | ---: |
+| Ground pan | 29 | 0.71 → 0.48 | 0.77 → 0.19 | 0.62 → 0.49 |
+| Rain turn and climb | 418 | 0.79 → 0.32 | 0.42 → 0.15 | 1.00 → 0.62 |
+| Fixed overcast | 455 | 0.46 → 0.30 | 0.88 → 0.24 | 0.73 → 0.74 |
+| Cloudy flight | 39 | 0.81 → 0.58 | 0.73 → 0.13 | 0.54 → 0.32 |
+| Grazing storm | 366 | 3.65 → 0.76 | 0.29 → 0.18 | 1063.76 → 90.27 |
+| Dawn storm | 541 | 0.58 → 0.33 | 0.42 → 0.18 | 0.81 → 0.55 |
+| Overcast at dusk | 301 | 0.63 → 0.40 | 0.50 → 0.21 | 0.98 → 0.40 |
+
+The grazing storm's teacher reports almost no direct sunlight, so relative error on that term
+is large. Its hybrid bounce is still about 29% too bright on average. The dawn storm samples a
+different location and angle from the grazing-storm calibration. The point sample sizes for
+ground pan and cloudy flight are small and cover the patch only.
+[Runtime reference and component metrics](tools/perf/cloud-results/2026-11-22/neural-lighting/verified.json).
+
+### Work per frame
+
+The counters average the first 12 frames, including one complete 98,304-voxel lighting bake in
+the Neural lighting preview. View and lighting counts are shader sampling calls. Hardware
+filtering can access several texels per call. Bake calls are reported separately.
+
+| View | Rays/frame | Density evaluations/ray × view 3D calls/evaluation | View 3D + 2D calls/frame (M) | Shade 3D + 2D calls/frame (M) | Bake 3D + 2D calls/frame (M) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ground pan | 207,360 | 47.1 × 0.84 | 8.25 + 19.54 | 0.07 + 0.23 | 0.01 + 0.04 |
+| Rain turn and climb | 207,360 | 47.4 × 3.15 | 31.00 + 19.66 | 0.45 + 0.88 | 0.20 + 0.15 |
+| Fixed overcast | 207,360 | 53.7 × 2.93 | 32.63 + 22.27 | 0.59 + 0.83 | 0.09 + 0.10 |
+| Cloudy flight | 207,360 | 35.7 × 1.51 | 11.18 + 14.82 | 0.13 + 0.34 | 0.03 + 0.04 |
+| Grazing storm | 207,360 | 49.9 × 3.09 | 31.95 + 20.71 | 0.47 + 0.92 | 0.16 + 0.09 |
+| Dawn storm | 207,360 | 50.6 × 3.87 | 40.61 + 20.98 | 0.56 + 1.05 | 0.16 + 0.14 |
+| Overcast at dusk | 207,360 | 56.8 × 1.04 | 12.20 + 23.56 | 0.28 + 0.58 | 0.15 + 0.14 |
+
+The complete bake used 1.31 million base-density evaluations in rain and 0.85 million in fixed
+overcast. The work counters record Conventional and Neural lighting as separate runs. Timing
+comes from an independent run without shader instrumentation.
+[Work counters](tools/perf/cloud-results/2026-11-22/neural-lighting/work.json).
+
+### Reproduce
+
+```sh
+CLOUD_BENCH_GAME=1 CLOUD_BENCH_RUNTIME_LOOK=1 CLOUD_BENCH_SCALE=0.375 \
+CLOUD_BENCH_BEFORE_SETTINGS='{"cloudBudgetMode":"conventional"}' \
+CLOUD_BENCH_AFTER_SETTINGS='{"cloudBudgetMode":"neural"}' \
+CLOUD_BENCH_CASES='^game-(history-turn|weather-overcast-fixed|weather-storm-grazing)$' \
+CLOUD_BENCH_WARM=12 CLOUD_BENCH_FRAMES=16 CLOUD_BENCH_ROUNDS=2 \
+CLOUD_BENCH_ISOLATED_STACK_FRAMES=30 CLOUD_BENCH_NEURAL_REFERENCE_PATHS=96 \
+node tools/perf/cloudBenchmark.mjs http://127.0.0.1:8000 http://127.0.0.1:8000 /tmp/cloud-neural-light
+```
+
+Use `CLOUD_BENCH_WORK=1 CLOUD_BENCH_WARM=0 CLOUD_BENCH_FRAMES=12` in a separate run for work
+counters. Set `CLOUD_BENCH_MOTION_WARM=41 CLOUD_BENCH_MOTION_FRAMES=14 CLOUD_BENCH_CLOUD_BUFFER=1`
+to capture the opacity and radiance sequences through the cache refresh.
+
+## 26. Visual review follow-up
+
+Claude's three-tap sky column and eight-row cache schedule remain in the previews.
+The `conventionalColumnLight` comparison now updates the live uniform. Previously the
+Conventional pipeline captured it at startup and the Neural pipeline used the shader
+default, so changing the setting during a benchmark could leave the GPU on the fitted term.
+
+### GPU stalls
+
+On the M1 Pro, the ground replay reproduced large elapsed-time spikes with per-pass queries.
+The gap occurs after submission, with CPU encoding at 0.20 ms or less and submission at
+0.10 ms or less in the first run. A 46.60 ms wall-time sample put the gap before the
+shadow and raymarch timestamps, while the raymarch itself lasted 2.33 ms. The composite
+span included the gap. Some hardware timestamps also arrived outside the frame's
+begin/end markers. The composite span alone does not identify the expensive operation.
+
+| Replay control | Ground pan wall p50 / p95 / max (ms) | Rain turn wall p50 / p95 / max (ms) |
+| --- | ---: | ---: |
+| All pass queries, first 180 frames | 3.90 / 20.70 / 53.30 | 4.70 / 5.50 / 17.90 |
+| Timestamps off, first 180 frames | 3.70 / 4.00 / 4.60 | 4.40 / 5.30 / 5.80 |
+| All queries, GPU resolve only | 4.00 / 7.60 / 9.00 | 4.30 / 4.70 / 5.30 |
+| Frame markers only | 3.80 / 4.90 / 5.40 | 4.40 / 5.60 / 6.50 |
+| Timestamps off, 180-frame repeat | 3.60 / 3.90 / 4.80 | 4.30 / 5.60 / 6.80 |
+| All pass queries, 180-frame repeat | 4.20 / 5.10 / 5.70 | 4.40 / 4.90 / 5.30 |
+
+The unprofiled game has no pass timer attached. The full timestamp and readback
+path can amplify the measured tail, especially on the first replay. In the earlier
+120-frame controls, a no-query rain replay still had 17.50 and 19.50 ms fence times.
+An attachment-only replay peaked at 1.50 ms and the cloud compute-only replay
+peaked at 5.80 ms across the three views. The browser/driver cause of the remaining
+rare fence delays is unresolved. Budget checks now have a wall-time replay option
+so the pass-query tail can be reported separately.
+
+Use `CLOUD_BENCH_STALL_FRAMES=180` and
+`CLOUD_BENCH_STALL_MODES=timed,wall,resolve-only,bracket,wall,timed` for the controls,
+or `CLOUD_BENCH_ISOLATED_MODE=wall` with `CLOUD_BENCH_ISOLATED_STACK_FRAMES` for a full stack
+run without timestamp queries.
+[120-frame traces](tools/perf/cloud-results/2026-11-23/cloud-review-followup/stall-controls.json.gz) ·
+[180-frame controls](tools/perf/cloud-results/2026-11-23/cloud-review-followup/stall-query-controls.json.gz).
+
+### Analytic sun-column trial
+
+A five-tap march along the sun ray through the spherical layer tested the lab's published
+bounce fit with optical depth available at low sun. Tested at 207,360 view rays per frame,
+the extra taps apply only at the shading point on a ray that uses the analytic fallback.
+
+| View | Analytic bounce relative RMSE before → after | Raymarch median change (ms) |
+| --- | ---: | ---: |
+| Rain turn | 0.78 → 0.54 | +0.13 |
+| Grazing storm | 3.93 → 1.03 | +0.17 |
+| Dawn storm | 0.57 → 0.52 | +0.23 |
+| Ground overcast | 0.58 → 0.58 | +0.23 |
+| Ground rain | 0.96 → 0.94 | +0.19 |
+| Ground storm dusk | 1.83 → 3.82 | +0.16 |
+
+The ground-storm fit worsened the spatial error while mean brightness was still about 3.3 times
+the teacher's. The trial was removed. These measurements leave the fitted vertical sky column
+and the existing bounce model active.
+[Sun-column trial](tools/perf/cloud-results/2026-11-23/cloud-review-followup/sun-column-trial.json).
+
+### Edge hand-over
+
+Holding the fitted sky term fixed, the all-altitude 0.02–0.30 blend increased the p99.9
+reprojected RGB residual from 55.56 to 61.94 in rain and from 89.88 to 102.94 in the
+grazing storm. The paired opacity difference was zero. Moving only direct light onto
+the wider blend recovered a small portion of that increase and kept a separate path
+for translucent rays. That trial was removed.
+
+The preview now uses the 0.02–0.30 range below dense decks and eases to 0.15–0.85
+through the base of the main cloud layer and in lighter weather. The A/B captures
+cover frames 16–29, while the scripted cameras are still turning, at 576×360.
+They use the fitted sky term and eight-row bakes on both sides.
+
+| View | Wide → altitude-aware edge radiance residual p99.9 (×255) | Added edge opacity motion p99.9 (×255) |
+| --- | ---: | ---: |
+| Rain turn and climb | 33.19 → 33.19 | 0 |
+| Grazing storm turn | 87.63 → 87.63 | 0 |
+| Rain ground pan | 52.19 → 52.19 | 0 |
+| Storm ground pan | 24.88 → 24.94 | 0 |
+| Fixed overcast | 7.25 → 7.25 | 0 |
+
+The full display still has higher rare deltas in the ground pans than the cloud
+opacity buffer suggests. These are tracked separately from reprojected cloud edges.
+[Wide versus narrow](tools/perf/cloud-results/2026-11-23/cloud-review-followup/edge-wide-narrow.json) ·
+[Separate direct blend trial](tools/perf/cloud-results/2026-11-23/cloud-review-followup/edge-direct-diffuse.json) ·
+[Altitude-aware motion](tools/perf/cloud-results/2026-11-23/cloud-review-followup/edge-adaptive.json).
+
+### Image-level reference
+
+The benchmark traces the lab's density and transport at the game camera. It clips the
+view ray against real scene depth, uses the game's incident sun and sky colours, and
+feeds premultiplied radiance, transmittance and cloud depth through the normal HDR
+composite and tone mapper. It compares the displayed screenshots at the 96×60 teacher
+grid with 96 paths per pixel. The cloudy-sky mask requires at least 0.20 teacher opacity
+and clear scene-depth samples in all three images. This excludes terrain streaming
+differences from the reported cloud score. The reference retains some Monte Carlo noise.
+
+| Ground view | Conventional → Neural mean max-channel error (out of 255) | Conventional → Neural luminance/reference |
+| --- | ---: | ---: |
+| Fair weather | 46.77 → 44.78 | 1.17 → 1.16 |
+| Overcast | 25.55 → 15.44 | 1.09 → 1.02 |
+| Rain | 51.17 → 21.73 | 1.29 → 1.03 |
+| Storm dusk | 26.38 → 23.24 | 1.10 → 0.95 |
+
+The maximum error in the dusk-storm mask increased from 58.51 to 62.43, while
+its p99.9 decreased from 57.85 to 54.10. The contact sheet is arranged in the
+table's order, with Conventional, Neural lighting, and teacher from left to right.
+Run static cases with `CLOUD_BENCH_IMAGE_REFERENCE_SPP=96 CLOUD_BENCH_IMAGE_REFERENCE_SIZE=96x60`.
+[Image metrics](tools/perf/cloud-results/2026-11-23/cloud-review-followup/final-image-reference.json) ·
+[Contact sheet](tools/perf/cloud-results/2026-11-23/cloud-review-followup/teacher-comparison.png).
+
+The live Conventional toggle was also checked against screenshots composed with the
+same teacher. The fitted sky reduced ground rain error from 66.37 to 49.73 and the
+ground dusk storm from 48.83 to 26.36 in the cloudy-sky mask.
+[Fitted sky A/B image metrics](tools/perf/cloud-results/2026-11-23/cloud-review-followup/fitted-sky-image-reference.json).
+
+### Release check
+
+An identical-shader ground-motion A/A control reproduced large rare display deltas.
+The p99.9 display-motion difference was 47/255 in ground rain and 76/255 in the ground
+storm. The altitude-aware A/B measured 48 and 76/255 there, with essentially the same
+raw cloud edges. These display tails are present in the control and cannot be attributed
+to the new edge blend.
+[Identical-shader control](tools/perf/cloud-results/2026-11-23/cloud-review-followup/ground-motion-control.json).
+
+The final 90-frame no-timestamp replays include two repeats per mode at 1536×960.
+Neural p95 wall times were 4.90 ms in rain turn, 5.40 ms in fixed overcast, 5.80 ms
+in dawn storm, 3.80 ms in the dusk storm from the ground, and 4.80 ms in the orbital
+handoff. Ground pan had 4.40 ms worst Neural p95, with one 42.90 ms fence outlier.
+One Conventional ground replay reached 57.90 ms with all timestamps disabled.
+The isolated wall measurements include CPU submission and fence delivery. The default
+renderer decision stays gated on the remaining stalls. The experimental edge and default checks
+precede any change to sampling footprints or temporal reconstruction.
+[No-query replays](tools/perf/cloud-results/2026-11-23/cloud-review-followup/wall-replay.json.gz).
+
+Queue tracing found lake and river work still running on the same WebGPU queue
+after the benchmark paused game frames. The ground replay recorded 36 frames
+with external lake-table writes or submits. A rain replay had a 17.90 ms fence
+with a 17.90 ms event-loop gap during river-field GPU publication. Several
+ground spikes showed regular browser heartbeats while waiting for the GPU.
+The composite-only ground control peaked at 2.00 ms and the raymarch-plus-shadow
+control at 3.60 ms across 240 frames each.
+
+After 560 ms of waiting for the live hydrology jobs to finish, the first ground
+replay peaked at 4.60 ms with p95 3.90 ms. A 240-frame repeat reached 4.80 ms with
+p95 4.00 ms. Both recorded zero external queue operations. The two drained rain
+runs had p95 4.60 and 6.80 ms, reaching 5.00 and 8.30 ms. This isolates a major
+source of the ground tail and leaves a smaller rain tail to investigate.
+
+Use `CLOUD_BENCH_STALL_MODES=observe,observe-composite,observe-volume,observe`
+and `CLOUD_BENCH_STALL_MODES=observe-drained,observe-drained` with
+`CLOUD_BENCH_STALL_FRAMES=240` for these controls.
+[Queue and heartbeat trace](tools/perf/cloud-results/2026-11-23/cloud-review-followup/fence-activity.json.gz) ·
+[Drained replays](tools/perf/cloud-results/2026-11-23/cloud-review-followup/fence-drained.json.gz).
+
+## 27. Grazing deck and terrain silhouette artifacts
+
+The Conventional and Neural previews now use the projected pixel footprint to
+average dense cloud decks. The ray interval still determines the noise texture
+filter. A gradual transition with deck coverage retains the stronger averaging
+in fair weather. Using the pixel footprint in all weathers exposed much less
+stable edges in the fair-weather grazing pan. Restoring some of the old filter
+between 18 and 32 km lowered the p99.9 opacity residual from 69.25 to 57.13 but
+raised the radiance residual from 96.25 to 103.44, in units of 1/255.
+
+The composite now extends its search by one cloud texel when the four bilinear
+taps have the wrong opaque/sky classification. It weights haze depth by the
+opacity contribution of the selected taps. The two fast preview marchers read
+every scene-depth sample in the ray's footprint. In a GPU fixture with all four
+central rays clipped by terrain, the old reconstruction returned transmittance
+1.057, clamped to clear by the fragment shader. The wider search returned the
+sky samples' transmittance of 0.20 and their 22 km cloud depth. The exact depth
+scan also found a single interior scene sample at 0.30 where the corner scan
+returned 1.0. [GPU fixture](tools/perf/cloud-results/2026-11-23/cloud-artifacts/depth-fixture.json).
+
+The climb replay covers 4.45–6.32 km at the screenshot location. The correction
+changes the broad averaged sheet, and a narrower dark contour remains in the
+climb and some ridge views. Turning off distant banks in the overcast control
+left the contour in place. The ridge comparison is approximate because the
+capture does not provide the exact free-camera pose. [Climb frames](tools/perf/cloud-results/2026-11-23/cloud-artifacts/overcast-climb.png) ·
+[High-resolution ridge](tools/perf/cloud-results/2026-11-23/cloud-artifacts/high-resolution-ridge.png) ·
+[Distant banks control](tools/perf/cloud-results/2026-11-23/cloud-artifacts/distant-banks.png).
+
+### Motion and work
+
+The motion tests reproject the cloud buffers using the captured camera and
+cloud depth. The mask includes opacity edges within 30 km. The 12-frame pairs
+use Neural lighting at a 576×360 cloud target and a 1536×960 scene target.
+
+| Replay | Edge opacity p99.9, out of 255 | Edge radiance p99.9, out of 255 | Rays/frame | Density evaluations/ray | View 3D fetches/evaluation | View 3D / 2D fetches/frame, M | Lighting 3D / 2D fetches/frame, M |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Overcast climb | 89.56 → 89.56 | 76.38 → 75.56 | 207,360 | 51.03 → 50.81 | 2.08 → 2.14 | 21.99 / 21.16 → 22.53 / 21.07 | 1.07 / 0.55 → 1.06 / 0.55 |
+| Overcast ridge | 4.19 → 4.25 | 35.19 → 36.06 | 207,360 | 51.78 → 51.70 | 3.15 → 3.15 | 33.79 / 21.48 → 33.74 / 21.44 | 1.12 / 0.69 → 1.12 / 0.69 |
+| Fair grazing pan | 18.69 → 18.69 | 49.50 → 49.50 | 207,360 | 64.00 → 64.00 | 1.05 → 1.05 | 13.94 / 26.54 → 13.94 / 26.54 | 0.26 / 0.30 → 0.26 / 0.30 |
+| Grazing storm | 35.50 → 35.44 | 90.31 → 91.31 | 207,360 | 49.89 → 49.79 | 3.03 → 3.03 | 31.31 / 20.69 → 31.24 / 20.65 | 1.02 / 0.90 → 1.02 / 0.89 |
+
+The largest opacity residual was 95.20/255 in both versions of the fast climb.
+The exact opaque footprint adds about 0.65 M scene-depth reads per frame at
+1536×960, before counting a possible duplicate first read in each block. These
+reads and the composite neighbourhood are outside the density and lighting
+counters. [Motion data](tools/perf/cloud-results/2026-11-23/cloud-artifacts/neural-motion.json) ·
+[Shader counters](tools/perf/cloud-results/2026-11-23/cloud-artifacts/shader-work.json).
+
+### Slice trials and timing limits
+
+Dense-deck endpoint averaging with the pixel-footprint change left visible
+stacks and raised the climb's p99.9 opacity residual from 103.63 to 108.88 in
+that A/B pair. A separate trial added a midpoint tap only on wide, optically
+contrasting surface intervals. It also left visible stacks. In the ridge A/B
+the p99.9 opacity residual rose from 4.13 to 14.00. The retained shader uses the
+original integration on both dense and sparse clouds. These trials did not use
+temporal accumulation. [Endpoint trial](tools/perf/cloud-results/2026-11-23/cloud-artifacts/endpoint-and-pixel-trial.json) ·
+[Distance filter trial](tools/perf/cloud-results/2026-11-23/cloud-artifacts/far-distance-trial.json) ·
+[Midpoint trial](tools/perf/cloud-results/2026-11-23/cloud-artifacts/surface-refinement-trial.json).
+
+The 32-frame drained Neural replays gave ridge medians of 6.10 → 5.90 ms and
+storm medians of 4.60 → 4.60 ms. The climb measured 5.00 → 6.20 ms, and the fair
+pan measured 4.80 → 14.40 ms despite identical march counters. Lab GPU work was
+concurrent. At 3456×1800, the 630×328 Conventional ridge replay measured
+7.00 → 7.30 ms at median and 7.70 → 8.30 ms at p95. One frame reached 178.90 ms.
+The observed times include submission and fence delivery and cannot establish a
+clean GPU cost for the patch or certify the 6 ms target. [Neural replays](tools/perf/cloud-results/2026-11-23/cloud-artifacts/neural-replay.json) ·
+[Full-size Conventional replay](tools/perf/cloud-results/2026-11-23/cloud-artifacts/conventional-high-resolution.json).
+
+### Remaining ridge contour
+
+The scene-depth capture placed the remaining dark contour above the terrain
+silhouette. It disappeared with constant cloud lighting while the density and
+depth stayed intact. In both previews, the final dense-deck shader lights the
+front and rear contributions separately when their opacity-weighted centres
+are far apart. It retains the full-ray mean depth for haze and compositing.
+The weighting eases in with deck strength, depth separation and rear opacity.
+[Ridge with scene-depth mask](tools/perf/cloud-results/2026-11-23/cloud-artifacts/ridge-geometry-control.png) ·
+[Original lighting, constant light and two positions](tools/perf/cloud-results/2026-11-23/cloud-artifacts/lighting-control.png) ·
+[Final full-size comparison](tools/perf/cloud-results/2026-11-23/cloud-artifacts/final-high-resolution-ridge.png).
+
+In the Neural ridge crop, the p90 luminance jump across the contour fell
+from 83.20 to 21.40 out of 255. This measures 135 columns in the known contour
+region and allows a four-pixel shift in the position of the strongest edge.
+Opacity was identical in the lighting A/B. The near/mid-range p99.9
+reprojected radiance residual was unchanged in the overcast climb and ridge
+pan, and fell from 71.19 to 45.75 in the grazing storm. Some structure remains
+in the climb frames, and cloud-top slicing remains visible.
+[Luminance metric](tools/perf/cloud-results/2026-11-23/cloud-artifacts/ridge-luminance-gradient.json) ·
+[Final lighting motion](tools/perf/cloud-results/2026-11-23/cloud-artifacts/lighting-motion.json).
+
+| Final preview replay | Rays/frame | Density evaluations/ray | View 3D fetches/evaluation | View 3D / 2D fetches/frame, M | Lighting 3D / 2D fetches/frame, M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Overcast climb | 207,360 | 51.03 → 50.82 | 2.08 → 2.14 | 21.99 / 21.16 → 22.54 / 21.08 | 1.07 / 0.55 → 1.37 / 0.72 |
+| Overcast ridge | 207,360 | 51.78 → 51.70 | 3.15 → 3.15 | 33.79 / 21.48 → 33.74 / 21.44 | 1.12 / 0.69 → 1.26 / 0.79 |
+| Grazing storm | 207,360 | 49.89 → 49.79 | 3.03 → 3.03 | 31.31 / 20.69 → 31.24 / 20.65 | 1.02 / 0.90 → 1.19 / 0.99 |
+
+In the lighting-only Neural A/B the ridge median was 5.90 → 6.30 ms and the
+storm median was 4.80 → 5.20 ms. The climb contained stalls longer than 400 ms
+during concurrent lab work. The full-patch Conventional replay at 3456×1800
+measured 7.20 → 7.60 ms at median and 7.30 → 8.20 ms at p95. These were isolated
+submissions on a shared GPU, so this is the observed wall-time cost.
+[Final shader counters](tools/perf/cloud-results/2026-11-23/cloud-artifacts/final-shader-work.json) ·
+[Lighting replay](tools/perf/cloud-results/2026-11-23/cloud-artifacts/lighting-replay.json) ·
+[Final full-size replay](tools/perf/cloud-results/2026-11-23/cloud-artifacts/final-high-resolution.json).
+
+A preliminary staging run served the same shader for two intended variants.
+That run was discarded. The reported variants were rerun from separate files
+and checked by source hash.
+
+## 28. Climb stability and cloud-top slicing
+
+The reported daylight and twilight cameras are at longitude 19.5367° and
+latitude −9.2119°, with captures between 4.95 and 6.88 km. The earlier 30 km
+motion mask missed the distant regression. With the reported camera and a
+30–140 km mask, reverting the deck footprint change alone reduced the
+overcast climb's p99.9 opacity residual from 23.44 to 2.06 out of 255.
+That restored the old averaging but left the artificial sheet in the twilight
+view. [Rollback control](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/rollback-far.json).
+
+The old logarithmic march stretched its samples across each ray's two shell
+segments. Crossing a tangent or rising through a layer could move most of the
+samples and change the density mip footprint in one frame. The new volume
+march uses bounded distance bands and a denser, fixed lattice. Shell and scene
+intersections clip the integration intervals and leave the spacing alone.
+Noise filtering changes continuously with distance. The fast previews also
+hold the distant-bank blend and the composite haze fade steady across atmospheric
+flight altitudes. The old fade could change far opacity by nearly a factor of
+two within the reported climb. The visible blue-hour sheet breaks into
+individual cloud shapes in the paired captures.
+
+The replacement used 172,800 rays at a 576×300 cloud target in the counter
+runs. Each row compares the previous and current Conventional preview at the
+same pose, with the same weather and resolution. View 2D reads include weather
+cube lookups. Scene depth and history texture loads are outside these counters.
+
+| Replay | Rays/frame | Density evaluations/ray | View 3D fetches/evaluation | View 3D / 2D fetches/frame, M | Lighting 3D / 2D fetches/frame, M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Night pan | 172,800 | 64.38 → 70.69 | 1.06 → 1.72 | 11.78 / 22.25 → 21.04 / 24.43 | 0.42 / 0.36 → 0.35 / 0.31 |
+| Day climb | 172,800 | 63.86 → 84.27 | 1.72 → 2.02 | 19.01 / 22.07 → 29.39 / 29.12 | 0.32 / 0.42 → 0.31 / 0.39 |
+| Rain turn and climb | 172,800 | 46.04 → 35.22 | 3.23 → 3.29 | 25.68 / 15.91 → 20.00 / 12.17 | 1.10 / 0.91 → 1.10 / 0.91 |
+| Fixed overcast | 172,800 | 53.15 → 57.07 | 2.96 → 2.78 | 27.18 / 18.37 → 27.41 / 19.72 | 1.66 / 1.12 → 1.66 / 1.12 |
+
+[Shader counters](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/shader-work.json).
+
+Conventional and Neural lighting now use signed depth to validate history
+before blending cloud radiance and transmittance. The reprojection uses both
+camera poses and the cloud's wind displacement. A five-tap variance clamp
+limits premultiplied luminance, chroma and transmittance. Jitter fades out
+once projected motion reaches 0.78 cloud pixels per frame. Depth mismatches,
+fresh holes and terrain rays keep their current samples. Near/far depth
+coefficients can change during a climb without discarding valid XY reprojection.
+`U` toggles cloud reprojection while one of these two previews is active.
+
+| Reported camera replay, 30–150 km | Opacity edge residual p99.9, out of 255 | Radiance edge residual p99.9, out of 255 |
+| --- | ---: | ---: |
+| Twilight climb | 60.13 → 31.88 | 57.31 → 14.38 |
+| Twilight descent | 54.25 → 34.88 | 59.56 → 19.06 |
+| Low night pan | 55.06 → 27.38 | 80.75 → 41.00 |
+
+These 16-frame traces use the Neural preview and match the reported view aspect
+ratio. Weather was held fixed in each trace. The night lighting and cloudiness
+were chosen to reproduce the screenshots because their exact time and weather
+were unavailable. The two largest near-depth residuals in the fast up/down
+tests occurred at 2.5–2.7 km, where the opacity centroid no longer tracks one
+layer as the foremost cloud crosses another. The corresponding consecutive
+image crops keep their shapes. In the fast rotation trace the new result was
+22.06/255 at p99.9, against 21.63/255 for the roughly twice-sampled reference.
+Mean opacity difference from that reference was 0.28/255. Camera-distance
+planes gave similar motion results and took longer in the same raymarch test.
+[Paired images](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/paired-views.png) ·
+[Motion through 150 km](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/reported-motion.json) ·
+[30–150 km edge data](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/reported-motion-far.json) ·
+[Dense rotation reference](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/dense-turn-reference.json).
+
+Wider jitter and blending windows increased motion error in the low night
+view, so the final pass converges at still and subpixel motion speeds. In the
+Conventional control, enabling the final pass left the low night pan and fast
+rotation p99.9 opacity residual unchanged. The fixed camera test had a p99.9
+residual of 4.13/255 with jitter. [History controls](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/reprojection-controls.json).
+
+At 3456×1800, the two isolated Neural daytime replays had median stack times
+of 8.40 and 8.20 ms, from 8.40 and 9.20 ms. The twilight replays had medians of
+8.50 and 9.00 ms, from 8.20 and 8.40 ms. The shared GPU produced long stalls in
+the twilight replay. The full-size measurements include queue submission and
+fence delivery and remain above the 6 ms target.
+[Full-size replay](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/full-size-replay.json).
+
+The 1536×801 smoke replays also exercised the rain turn, fixed overcast,
+grazing storm, atmospheric-to-orbital blend, and full orbital proxy. The
+Conventional rain and overcast stack medians were 4.20 and 5.20 ms. In the
+same shared-GPU series the grazing storm reached a 7.90 ms median and the
+orbital proxy reached 8.20 ms. These timings include fence delivery.
+[Weather and orbit replay](tools/perf/cloud-results/2026-11-23/cloud-climb-stability/weather-replay.json).

@@ -1,0 +1,723 @@
+{
+ "baselines": {
+  "game skyVis + best affine": {
+   "params": {
+    "scale": 0.363729521235562,
+    "offset": 0.3175908295735795
+   },
+   "test": {
+    "logRmse": 0.9071354873532878,
+    "relRmse": 0.4204632310642188,
+    "relRmseNoiseCorrected": 0.4177958886161833,
+    "bias": 1.017573863491676,
+    "labelNoiseRel": 0.04728555944869869
+   },
+   "perScene": {
+    "test-cloudy-above-e28": {
+     "logRmse": 0.31856842218057924,
+     "relRmse": 0.2937322703171618,
+     "relRmseNoiseCorrected": 0.2867376599842071,
+     "bias": 1.2319421586092631,
+     "labelNoiseRel": 0.06371939243633357
+    },
+    "test-cloudy-ground-e42": {
+     "logRmse": 0.2581120702089636,
+     "relRmse": 0.2706205052867285,
+     "relRmseNoiseCorrected": 0.26377842887411357,
+     "bias": 1.124329150127048,
+     "labelNoiseRel": 0.06046815974005187
+    },
+    "test-fair-above-e28": {
+     "logRmse": 0.26318328393868684,
+     "relRmse": 0.23673724614055358,
+     "relRmseNoiseCorrected": 0.22875377957948484,
+     "bias": 1.1075924256813439,
+     "labelNoiseRel": 0.06096090581933243
+    },
+    "test-fair-ground-e42": {
+     "logRmse": 0.22632065924047837,
+     "relRmse": 0.22547226557585565,
+     "relRmseNoiseCorrected": 0.21772054085514833,
+     "bias": 1.0776219394609243,
+     "labelNoiseRel": 0.05861321210828541
+    },
+    "test-overcast-above-e28": {
+     "logRmse": 0.37051444072022904,
+     "relRmse": 0.29735218466586144,
+     "relRmseNoiseCorrected": 0.2947420830023847,
+     "bias": 0.7434151967077954,
+     "labelNoiseRel": 0.039311909556468086
+    },
+    "test-overcast-ground-e42": {
+     "logRmse": 0.7837435407309457,
+     "relRmse": 0.5899785269058111,
+     "relRmseNoiseCorrected": 0.5839657588013023,
+     "bias": 1.42581175993187,
+     "labelNoiseRel": 0.08401580064232035
+    },
+    "test-rain-above-e28": {
+     "logRmse": 0.45790586136160844,
+     "relRmse": 0.3572727757688084,
+     "relRmseNoiseCorrected": 0.3560998066081629,
+     "bias": 0.6627687239040094,
+     "labelNoiseRel": 0.028926873995961045
+    },
+    "test-rain-ground-e42": {
+     "logRmse": 2.0001307064127634,
+     "relRmse": 1.7866775208535153,
+     "relRmseNoiseCorrected": 1.7844797153006269,
+     "bias": 3.3078261141533116,
+     "labelNoiseRel": 0.08859294104982353
+    }
+   }
+  },
+  "sky probes refit to teacher": {
+   "params": [
+    -39.947313705530355,
+    49.5049752281758,
+    25.948466090257607,
+    0.0012492185652231826,
+    0.9331004023819965,
+    13.132785907598144,
+    -12.417088856843252
+   ],
+   "test": {
+    "logRmse": 0.5437802622607949,
+    "relRmse": 0.2943234037153036,
+    "relRmseNoiseCorrected": 0.29050015807600715,
+    "bias": 1.0241685936875056,
+    "labelNoiseRel": 0.04728555944869869
+   },
+   "perScene": {
+    "test-cloudy-above-e28": {
+     "logRmse": 0.3759319048105412,
+     "relRmse": 0.3486035346443216,
+     "relRmseNoiseCorrected": 0.3427305988587235,
+     "bias": 1.3133107578371483,
+     "labelNoiseRel": 0.06371939243633357
+    },
+    "test-cloudy-ground-e42": {
+     "logRmse": 0.28355488380506283,
+     "relRmse": 0.3101923279544038,
+     "relRmseNoiseCorrected": 0.3042414862891384,
+     "bias": 1.197775485892299,
+     "labelNoiseRel": 0.06046815974005187
+    },
+    "test-fair-above-e28": {
+     "logRmse": 0.3071876373165021,
+     "relRmse": 0.27876413610534967,
+     "relRmseNoiseCorrected": 0.2720169324513612,
+     "bias": 1.1895702972375992,
+     "labelNoiseRel": 0.06096090581933243
+    },
+    "test-fair-ground-e42": {
+     "logRmse": 0.245848743226606,
+     "relRmse": 0.2570968802907377,
+     "relRmseNoiseCorrected": 0.25032638139353,
+     "bias": 1.1410591540882267,
+     "labelNoiseRel": 0.05861321210828541
+    },
+    "test-overcast-above-e28": {
+     "logRmse": 0.20272437355796927,
+     "relRmse": 0.17688900425931023,
+     "relRmseNoiseCorrected": 0.17246534027123928,
+     "bias": 0.8591472733480051,
+     "labelNoiseRel": 0.039311909556468086
+    },
+    "test-overcast-ground-e42": {
+     "logRmse": 0.44236893607264816,
+     "relRmse": 0.28108331310451745,
+     "relRmseNoiseCorrected": 0.2682334321971109,
+     "bias": 1.1877793214781571,
+     "labelNoiseRel": 0.08401580064232035
+    },
+    "test-rain-above-e28": {
+     "logRmse": 0.277595026697032,
+     "relRmse": 0.23558558184039796,
+     "relRmseNoiseCorrected": 0.23380291343758025,
+     "bias": 0.777845994357844,
+     "labelNoiseRel": 0.028926873995961045
+    },
+    "test-rain-ground-e42": {
+     "logRmse": 1.1692170449537984,
+     "relRmse": 1.1956268291759862,
+     "relRmseNoiseCorrected": 1.1923400544482121,
+     "bias": 1.9524881343348144,
+     "labelNoiseRel": 0.08859294104982353
+    }
+   }
+  }
+ },
+ "mlp": {
+  "game-probes+view:22-16-16-1": {
+   "macs": 624,
+   "features": [
+    "sun0",
+    "sun1",
+    "sun2",
+    "sun3",
+    "sun4",
+    "sun5",
+    "skyA",
+    "skyB",
+    "side0",
+    "side1",
+    "side2",
+    "density",
+    "baseDensity",
+    "localH",
+    "h",
+    "stratiform",
+    "coverage",
+    "kind",
+    "cosTheta",
+    "muSun",
+    "rdUp",
+    "tauView"
+   ],
+   "trainSec": 64.05647802352905,
+   "test": {
+    "logRmse": 0.2789982442807452,
+    "relRmse": 0.24913964899445368,
+    "relRmseNoiseCorrected": 0.24461120286835425,
+    "bias": 0.8352191877836829,
+    "labelNoiseRel": 0.04728555944869869
+   },
+   "perScene": {
+    "test-cloudy-above-e28": {
+     "logRmse": 0.20423954779271541,
+     "relRmse": 0.1654699670767276,
+     "relRmseNoiseCorrected": 0.15270936131068663,
+     "bias": 1.0312605938847457,
+     "labelNoiseRel": 0.06371939243633357
+    },
+    "test-cloudy-ground-e42": {
+     "logRmse": 0.15152819890602146,
+     "relRmse": 0.13686300311108834,
+     "relRmseNoiseCorrected": 0.12278063071281783,
+     "bias": 0.9522336917080115,
+     "labelNoiseRel": 0.06046815974005187
+    },
+    "test-fair-above-e28": {
+     "logRmse": 0.241903778491568,
+     "relRmse": 0.19422444343624212,
+     "relRmseNoiseCorrected": 0.18440960492828049,
+     "bias": 0.9057107675592683,
+     "labelNoiseRel": 0.06096090581933243
+    },
+    "test-fair-ground-e42": {
+     "logRmse": 0.1494207009634821,
+     "relRmse": 0.1312996912525479,
+     "relRmseNoiseCorrected": 0.11749085193904907,
+     "bias": 0.9289884583084267,
+     "labelNoiseRel": 0.05861321210828541
+    },
+    "test-overcast-above-e28": {
+     "logRmse": 0.30978262086981095,
+     "relRmse": 0.26930196871619033,
+     "relRmseNoiseCorrected": 0.2664171993724129,
+     "bias": 0.7552815030186425,
+     "labelNoiseRel": 0.039311909556468086
+    },
+    "test-overcast-ground-e42": {
+     "logRmse": 0.2462701511888566,
+     "relRmse": 0.22355908712875758,
+     "relRmseNoiseCorrected": 0.2071714523776703,
+     "bias": 0.9230997361392356,
+     "labelNoiseRel": 0.08401580064232035
+    },
+    "test-rain-above-e28": {
+     "logRmse": 0.3261824031608292,
+     "relRmse": 0.2806202194990319,
+     "relRmseNoiseCorrected": 0.27912531872352,
+     "bias": 0.7352851511602622,
+     "labelNoiseRel": 0.028926873995961045
+    },
+    "test-rain-ground-e42": {
+     "logRmse": 0.36276246605506807,
+     "relRmse": 0.23047547817609984,
+     "relRmseNoiseCorrected": 0.21276803527937269,
+     "bias": 0.9220480491160643,
+     "labelNoiseRel": 0.08859294104982353
+    }
+   }
+  },
+  "game-probes+view:22-32-32-1": {
+   "macs": 1760,
+   "features": [
+    "sun0",
+    "sun1",
+    "sun2",
+    "sun3",
+    "sun4",
+    "sun5",
+    "skyA",
+    "skyB",
+    "side0",
+    "side1",
+    "side2",
+    "density",
+    "baseDensity",
+    "localH",
+    "h",
+    "stratiform",
+    "coverage",
+    "kind",
+    "cosTheta",
+    "muSun",
+    "rdUp",
+    "tauView"
+   ],
+   "trainSec": 63.30067205429077,
+   "test": {
+    "logRmse": 0.3690916200490807,
+    "relRmse": 0.3457606907310395,
+    "relRmseNoiseCorrected": 0.3425120890164742,
+    "bias": 0.7542274313586557,
+    "labelNoiseRel": 0.04728555944869869
+   },
+   "perScene": {
+    "test-cloudy-above-e28": {
+     "logRmse": 0.1980074337202908,
+     "relRmse": 0.19284714721349916,
+     "relRmseNoiseCorrected": 0.18201610152931397,
+     "bias": 0.8884368032010249,
+     "labelNoiseRel": 0.06371939243633357
+    },
+    "test-cloudy-ground-e42": {
+     "logRmse": 0.15552191867932766,
+     "relRmse": 0.14474715221857706,
+     "relRmseNoiseCorrected": 0.1315117475096407,
+     "bias": 0.9984425627726473,
+     "labelNoiseRel": 0.06046815974005187
+    },
+    "test-fair-above-e28": {
+     "logRmse": 0.23686541262180166,
+     "relRmse": 0.22374492605231638,
+     "relRmseNoiseCorrected": 0.2152801892786306,
+     "bias": 0.8411525959777829,
+     "labelNoiseRel": 0.06096090581933243
+    },
+    "test-fair-ground-e42": {
+     "logRmse": 0.13799220120879746,
+     "relRmse": 0.13177717980021292,
+     "relRmseNoiseCorrected": 0.11802421989764131,
+     "bias": 0.978024912826336,
+     "labelNoiseRel": 0.05861321210828541
+    },
+    "test-overcast-above-e28": {
+     "logRmse": 0.5201300181610442,
+     "relRmse": 0.4053415653033793,
+     "relRmseNoiseCorrected": 0.4034307354796084,
+     "bias": 0.6062454684731434,
+     "labelNoiseRel": 0.039311909556468086
+    },
+    "test-overcast-ground-e42": {
+     "logRmse": 0.20954245092553025,
+     "relRmse": 0.1777011474960395,
+     "relRmseNoiseCorrected": 0.15658557744517554,
+     "bias": 0.9637714274700138,
+     "labelNoiseRel": 0.08401580064232035
+    },
+    "test-rain-above-e28": {
+     "logRmse": 0.506004761670125,
+     "relRmse": 0.3936639082313647,
+     "relRmseNoiseCorrected": 0.39259967983279626,
+     "bias": 0.6112512278023955,
+     "labelNoiseRel": 0.028926873995961045
+    },
+    "test-rain-ground-e42": {
+     "logRmse": 0.3657464695695401,
+     "relRmse": 0.20365420575154405,
+     "relRmseNoiseCorrected": 0.1833748246527716,
+     "bias": 0.9381096655959992,
+     "labelNoiseRel": 0.08859294104982353
+    }
+   }
+  },
+  "cheap:12-16-16-1": {
+   "macs": 464,
+   "features": [
+    "sun0",
+    "sun2",
+    "sun4",
+    "skyA",
+    "density",
+    "localH",
+    "h",
+    "coverage",
+    "cosTheta",
+    "muSun",
+    "rdUp",
+    "tauView"
+   ],
+   "trainSec": 42.63608503341675,
+   "test": {
+    "logRmse": 0.34776535959468224,
+    "relRmse": 0.2625340478265039,
+    "relRmseNoiseCorrected": 0.25824058963647184,
+    "bias": 0.8755658542604642,
+    "labelNoiseRel": 0.04728555944869869
+   },
+   "perScene": {
+    "test-cloudy-above-e28": {
+     "logRmse": 0.321904450060829,
+     "relRmse": 0.29463292098431615,
+     "relRmseNoiseCorrected": 0.2876602112828515,
+     "bias": 0.8043391932151605,
+     "labelNoiseRel": 0.06371939243633357
+    },
+    "test-cloudy-ground-e42": {
+     "logRmse": 0.17522762518338114,
+     "relRmse": 0.1537022008547175,
+     "relRmseNoiseCorrected": 0.1413080613596956,
+     "bias": 1.0126702068446045,
+     "labelNoiseRel": 0.06046815974005187
+    },
+    "test-fair-above-e28": {
+     "logRmse": 0.3690625728730818,
+     "relRmse": 0.33179610759680517,
+     "relRmseNoiseCorrected": 0.3261478575402224,
+     "bias": 0.722359491063305,
+     "labelNoiseRel": 0.06096090581933243
+    },
+    "test-fair-ground-e42": {
+     "logRmse": 0.15573709339034028,
+     "relRmse": 0.13326396142775684,
+     "relRmseNoiseCorrected": 0.11968197350381471,
+     "bias": 0.9748769121141588,
+     "labelNoiseRel": 0.05861321210828541
+    },
+    "test-overcast-above-e28": {
+     "logRmse": 0.39438563412071737,
+     "relRmse": 0.31265243752839794,
+     "relRmseNoiseCorrected": 0.3101711148051553,
+     "bias": 0.7777826227962749,
+     "labelNoiseRel": 0.039311909556468086
+    },
+    "test-overcast-ground-e42": {
+     "logRmse": 0.29002974964459644,
+     "relRmse": 0.23357725097565835,
+     "relRmseNoiseCorrected": 0.21794420711681137,
+     "bias": 0.9320511695277597,
+     "labelNoiseRel": 0.08401580064232035
+    },
+    "test-rain-above-e28": {
+     "logRmse": 0.28356457401777835,
+     "relRmse": 0.22352540729591563,
+     "relRmseNoiseCorrected": 0.22164576167305064,
+     "bias": 0.9136810934069293,
+     "labelNoiseRel": 0.028926873995961045
+    },
+    "test-rain-ground-e42": {
+     "logRmse": 0.5265180132917956,
+     "relRmse": 0.3048507396021299,
+     "relRmseNoiseCorrected": 0.291693785041965,
+     "bias": 1.0660885946899006,
+     "labelNoiseRel": 0.08859294104982353
+    }
+   }
+  },
+  "cheap:12-32-32-1": {
+   "macs": 1440,
+   "features": [
+    "sun0",
+    "sun2",
+    "sun4",
+    "skyA",
+    "density",
+    "localH",
+    "h",
+    "coverage",
+    "cosTheta",
+    "muSun",
+    "rdUp",
+    "tauView"
+   ],
+   "trainSec": 110.11784791946411,
+   "test": {
+    "logRmse": 0.4466720918077221,
+    "relRmse": 0.3879679460377458,
+    "relRmseNoiseCorrected": 0.3850755809193448,
+    "bias": 0.9392334696663268,
+    "labelNoiseRel": 0.04728555944869869
+   },
+   "perScene": {
+    "test-cloudy-above-e28": {
+     "logRmse": 0.576237078792843,
+     "relRmse": 0.4957895681634089,
+     "relRmseNoiseCorrected": 0.49167787719929396,
+     "bias": 0.8146327834510172,
+     "labelNoiseRel": 0.06371939243633357
+    },
+    "test-cloudy-ground-e42": {
+     "logRmse": 0.16974409764104664,
+     "relRmse": 0.14818698307105377,
+     "relRmseNoiseCorrected": 0.13528851987272367,
+     "bias": 0.9686532906506793,
+     "labelNoiseRel": 0.06046815974005187
+    },
+    "test-fair-above-e28": {
+     "logRmse": 0.5365147207743485,
+     "relRmse": 0.44667749235347715,
+     "relRmseNoiseCorrected": 0.44249807924653994,
+     "bias": 0.7355680738155828,
+     "labelNoiseRel": 0.06096090581933243
+    },
+    "test-fair-ground-e42": {
+     "logRmse": 0.1703093562906696,
+     "relRmse": 0.14277881559681507,
+     "relRmseNoiseCorrected": 0.13019324694306716,
+     "bias": 0.9229634628482566,
+     "labelNoiseRel": 0.05861321210828541
+    },
+    "test-overcast-above-e28": {
+     "logRmse": 0.5902187435051923,
+     "relRmse": 0.49372751989231933,
+     "relRmseNoiseCorrected": 0.4921599716210621,
+     "bias": 0.9994811469538655,
+     "labelNoiseRel": 0.039311909556468086
+    },
+    "test-overcast-ground-e42": {
+     "logRmse": 0.259277934907473,
+     "relRmse": 0.2257140825352337,
+     "relRmseNoiseCorrected": 0.20949508895712132,
+     "bias": 0.9437456238913512,
+     "labelNoiseRel": 0.08401580064232035
+    },
+    "test-rain-above-e28": {
+     "logRmse": 0.425238177241487,
+     "relRmse": 0.3239695016520707,
+     "relRmseNoiseCorrected": 0.3226754932769343,
+     "bias": 0.9466302105323445,
+     "labelNoiseRel": 0.028926873995961045
+    },
+    "test-rain-ground-e42": {
+     "logRmse": 0.5001187575298678,
+     "relRmse": 0.2756044489358585,
+     "relRmseNoiseCorrected": 0.2609772079500061,
+     "bias": 1.0606774564391697,
+     "labelNoiseRel": 0.08859294104982353
+    }
+   }
+  },
+  "descriptor:38-16-16-1": {
+   "macs": 880,
+   "features": [
+    "sun0",
+    "sun1",
+    "sun2",
+    "sun3",
+    "sun4",
+    "sun5",
+    "skyA",
+    "skyB",
+    "side0",
+    "side1",
+    "side2",
+    "density",
+    "baseDensity",
+    "localH",
+    "h",
+    "stratiform",
+    "coverage",
+    "kind",
+    "cosTheta",
+    "muSun",
+    "rdUp",
+    "tauView",
+    "mip0",
+    "mip1",
+    "mip2",
+    "sunMip0",
+    "sunMip1",
+    "sunMip2",
+    "cone0a",
+    "cone0b",
+    "cone0c",
+    "cone0d",
+    "cone1a",
+    "cone1b",
+    "cone1c",
+    "cone1d",
+    "down",
+    "upFar"
+   ],
+   "trainSec": 63.191988945007324,
+   "test": {
+    "logRmse": 0.2934536709634336,
+    "relRmse": 0.2578954107689496,
+    "relRmseNoiseCorrected": 0.2535234087087598,
+    "bias": 0.8971926927915193,
+    "labelNoiseRel": 0.04728555944869869
+   },
+   "perScene": {
+    "test-cloudy-above-e28": {
+     "logRmse": 0.31268789481172754,
+     "relRmse": 0.3039749060741028,
+     "relRmseNoiseCorrected": 0.297221436895632,
+     "bias": 1.2478222410535191,
+     "labelNoiseRel": 0.06371939243633357
+    },
+    "test-cloudy-ground-e42": {
+     "logRmse": 0.1372980422058259,
+     "relRmse": 0.13037319805244654,
+     "relRmseNoiseCorrected": 0.11550226157125246,
+     "bias": 1.0035321623092937,
+     "labelNoiseRel": 0.06046815974005187
+    },
+    "test-fair-above-e28": {
+     "logRmse": 0.2435901064325482,
+     "relRmse": 0.2373250992221783,
+     "relRmseNoiseCorrected": 0.22936209513017455,
+     "bias": 1.118195432741073,
+     "labelNoiseRel": 0.06096090581933243
+    },
+    "test-fair-ground-e42": {
+     "logRmse": 0.1282426777930815,
+     "relRmse": 0.11763846584756746,
+     "relRmseNoiseCorrected": 0.10199656863502046,
+     "bias": 0.9791317008272395,
+     "labelNoiseRel": 0.05861321210828541
+    },
+    "test-overcast-above-e28": {
+     "logRmse": 0.2789440727834579,
+     "relRmse": 0.23205376720498633,
+     "relRmseNoiseCorrected": 0.22869963848036592,
+     "bias": 0.8069925833017714,
+     "labelNoiseRel": 0.039311909556468086
+    },
+    "test-overcast-ground-e42": {
+     "logRmse": 0.26371716277803636,
+     "relRmse": 0.2561202456475902,
+     "relRmseNoiseCorrected": 0.24194818757951428,
+     "bias": 1.0302237416227915,
+     "labelNoiseRel": 0.08401580064232035
+    },
+    "test-rain-above-e28": {
+     "logRmse": 0.37103570426733307,
+     "relRmse": 0.2997397219703434,
+     "relRmseNoiseCorrected": 0.2983406390146681,
+     "bias": 0.718253898701858,
+     "labelNoiseRel": 0.028926873995961045
+    },
+    "test-rain-ground-e42": {
+     "logRmse": 0.36164768955824456,
+     "relRmse": 0.23624048404286255,
+     "relRmseNoiseCorrected": 0.2189996737370823,
+     "bias": 0.960932275613843,
+     "labelNoiseRel": 0.08859294104982353
+    }
+   }
+  },
+  "descriptor:38-32-32-1": {
+   "macs": 2272,
+   "features": [
+    "sun0",
+    "sun1",
+    "sun2",
+    "sun3",
+    "sun4",
+    "sun5",
+    "skyA",
+    "skyB",
+    "side0",
+    "side1",
+    "side2",
+    "density",
+    "baseDensity",
+    "localH",
+    "h",
+    "stratiform",
+    "coverage",
+    "kind",
+    "cosTheta",
+    "muSun",
+    "rdUp",
+    "tauView",
+    "mip0",
+    "mip1",
+    "mip2",
+    "sunMip0",
+    "sunMip1",
+    "sunMip2",
+    "cone0a",
+    "cone0b",
+    "cone0c",
+    "cone0d",
+    "cone1a",
+    "cone1b",
+    "cone1c",
+    "cone1d",
+    "down",
+    "upFar"
+   ],
+   "trainSec": 83.85064911842346,
+   "test": {
+    "logRmse": 0.2926093494202646,
+    "relRmse": 0.2774169869859269,
+    "relRmseNoiseCorrected": 0.2733573861010043,
+    "bias": 0.8161193219505812,
+    "labelNoiseRel": 0.04728555944869869
+   },
+   "perScene": {
+    "test-cloudy-above-e28": {
+     "logRmse": 0.17412991080632792,
+     "relRmse": 0.1395735794269657,
+     "relRmseNoiseCorrected": 0.12417980150410941,
+     "bias": 1.019660645485758,
+     "labelNoiseRel": 0.06371939243633357
+    },
+    "test-cloudy-ground-e42": {
+     "logRmse": 0.1321865211379917,
+     "relRmse": 0.121157798863244,
+     "relRmseNoiseCorrected": 0.10498958940313016,
+     "bias": 0.9856234408546525,
+     "labelNoiseRel": 0.06046815974005187
+    },
+    "test-fair-above-e28": {
+     "logRmse": 0.19585776489740242,
+     "relRmse": 0.1628507701881661,
+     "relRmseNoiseCorrected": 0.1510104013389984,
+     "bias": 0.9239263639933117,
+     "labelNoiseRel": 0.06096090581933243
+    },
+    "test-fair-ground-e42": {
+     "logRmse": 0.12360852753976062,
+     "relRmse": 0.11184907463197391,
+     "relRmseNoiseCorrected": 0.09526125583036378,
+     "bias": 0.9618984618393563,
+     "labelNoiseRel": 0.05861321210828541
+    },
+    "test-overcast-above-e28": {
+     "logRmse": 0.3499854865967999,
+     "relRmse": 0.29750857291950006,
+     "relRmseNoiseCorrected": 0.2948998554214999,
+     "bias": 0.7239634754501653,
+     "labelNoiseRel": 0.039311909556468086
+    },
+    "test-overcast-ground-e42": {
+     "logRmse": 0.21304059155418717,
+     "relRmse": 0.20071154244265615,
+     "relRmseNoiseCorrected": 0.18228128952841005,
+     "bias": 0.9350152396513879,
+     "labelNoiseRel": 0.08401580064232035
+    },
+    "test-rain-above-e28": {
+     "logRmse": 0.40762607008808405,
+     "relRmse": 0.33301376966312196,
+     "relRmseNoiseCorrected": 0.33175504027228375,
+     "bias": 0.6800140592403535,
+     "labelNoiseRel": 0.028926873995961045
+    },
+    "test-rain-ground-e42": {
+     "logRmse": 0.33304930213947687,
+     "relRmse": 0.23821771377212286,
+     "relRmseNoiseCorrected": 0.22113111484130754,
+     "bias": 0.8964482681810946,
+     "labelNoiseRel": 0.08859294104982353
+    }
+   }
+  }
+ }
+}

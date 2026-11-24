@@ -1,0 +1,278 @@
+{
+ "ms no-view+maps [16, 16] seed 2": {
+  "all": {
+   "logRmse": 1.4661981665497077,
+   "relRmse": 0.2788567066611714,
+   "relRmseNoiseCorrected": 0.268693559453862,
+   "bias": 1.1404161484679192,
+   "labelNoiseRel": 0.07459781469941681
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.34206210097368134,
+   "relRmse": 0.2900009486182824,
+   "relRmseNoiseCorrected": 0.2599936222731683,
+   "bias": 0.9900577418537246,
+   "labelNoiseRel": 0.12846737553472767
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 2.0662494267319906,
+   "relRmse": 0.2753558163085085,
+   "relRmseNoiseCorrected": 0.2713004730757468,
+   "bias": 1.359238197935184,
+   "labelNoiseRel": 0.047083743307017485
+  }
+ },
+ "ms no-view+maps [16, 16] seed 3": {
+  "all": {
+   "logRmse": 1.2432205954925408,
+   "relRmse": 0.2682660524436827,
+   "relRmseNoiseCorrected": 0.2576855466179432,
+   "bias": 1.1047357660129966,
+   "labelNoiseRel": 0.07459781469941681
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.3487104608855226,
+   "relRmse": 0.27854218657264224,
+   "relRmseNoiseCorrected": 0.24714749265142846,
+   "bias": 0.9862647923835651,
+   "labelNoiseRel": 0.12846737553472767
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 1.7481412986381444,
+   "relRmse": 0.2650413630012256,
+   "relRmseNoiseCorrected": 0.2608256989212266,
+   "bias": 1.2771508762535113,
+   "labelNoiseRel": 0.047083743307017485
+  }
+ },
+ "ms no-view+maps [16, 16] seed 4": {
+  "all": {
+   "logRmse": 1.3866331095277744,
+   "relRmse": 0.2711479029751722,
+   "relRmseNoiseCorrected": 0.26068439026897045,
+   "bias": 1.1297694879699183,
+   "labelNoiseRel": 0.07459781469941681
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.3443711127618188,
+   "relRmse": 0.28100177002765564,
+   "relRmseNoiseCorrected": 0.2499162423330959,
+   "bias": 1.010940457500327,
+   "labelNoiseRel": 0.12846737553472767
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 1.9535247754071325,
+   "relRmse": 0.2680596829943682,
+   "relRmseNoiseCorrected": 0.2638922408166638,
+   "bias": 1.302705691332886,
+   "labelNoiseRel": 0.047083743307017485
+  }
+ },
+ "sky probes+maps [8, 8] seed 2": {
+  "all": {
+   "logRmse": 0.23496895562813747,
+   "relRmse": 0.1734223355314075,
+   "relRmseNoiseCorrected": 0.16685137796491725,
+   "bias": 0.8909025960068324,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.2795407033571326,
+   "relRmse": 0.1599152733615178,
+   "relRmseNoiseCorrected": 0.14340227111976217,
+   "bias": 0.9203629791562853,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.19591903520341136,
+   "relRmse": 0.17655028341574702,
+   "relRmseNoiseCorrected": 0.17207043501490588,
+   "bias": 0.878482539528565,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ },
+ "sky probes+maps [8, 8] seed 3": {
+  "all": {
+   "logRmse": 0.20947459234160665,
+   "relRmse": 0.16186802845673304,
+   "relRmseNoiseCorrected": 0.15480741101153175,
+   "bias": 0.9159983750029654,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.24156327601835662,
+   "relRmse": 0.14965051685540137,
+   "relRmseNoiseCorrected": 0.13185823411188843,
+   "bias": 0.9566440818348603,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.18390022772420006,
+   "relRmse": 0.16470163268600066,
+   "relRmseNoiseCorrected": 0.1598901492946724,
+   "bias": 0.8988627535179943,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ },
+ "sky probes+maps [8, 8] seed 4": {
+  "all": {
+   "logRmse": 0.24935323978131896,
+   "relRmse": 0.19529231642062267,
+   "relRmseNoiseCorrected": 0.18948130440905295,
+   "bias": 0.8762890675209333,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.2860357699097215,
+   "relRmse": 0.1601318107293561,
+   "relRmseNoiseCorrected": 0.14364370336175242,
+   "bias": 0.9330819401975082,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.22060770179342243,
+   "relRmse": 0.20292246513792106,
+   "relRmseNoiseCorrected": 0.19903707918297317,
+   "bias": 0.8523460426584334,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ },
+ "sky no-view+maps [8, 8] seed 2": {
+  "all": {
+   "logRmse": 0.23848352492723396,
+   "relRmse": 0.17131279661504054,
+   "relRmseNoiseCorrected": 0.16465767565373265,
+   "bias": 0.8976674532375342,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.2951429781857452,
+   "relRmse": 0.17416104396697218,
+   "relRmseNoiseCorrected": 0.15913323330996082,
+   "bias": 0.9061453550067439,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.1837253621203585,
+   "relRmse": 0.1706131008647722,
+   "relRmseNoiseCorrected": 0.165973076788771,
+   "bias": 0.894093296776071,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ },
+ "sky no-view+maps [8, 8] seed 3": {
+  "all": {
+   "logRmse": 0.24367374701775527,
+   "relRmse": 0.1979478778594329,
+   "relRmseNoiseCorrected": 0.19221716420933005,
+   "bias": 0.8967742763097424,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.26007853295294614,
+   "relRmse": 0.1776451273937788,
+   "relRmseNoiseCorrected": 0.1629389701537625,
+   "bias": 0.9151759039465067,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.23444111144990784,
+   "relRmse": 0.2025769219985808,
+   "relRmseNoiseCorrected": 0.19868477887965508,
+   "bias": 0.8890164255926887,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ },
+ "sky no-view+maps [8, 8] seed 4": {
+  "all": {
+   "logRmse": 0.21156546891656833,
+   "relRmse": 0.148365759749573,
+   "relRmseNoiseCorrected": 0.1406288538447626,
+   "bias": 0.9271591077357215,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.2674498419893516,
+   "relRmse": 0.18028701141435524,
+   "relRmseNoiseCorrected": 0.16581532858193979,
+   "bias": 0.9034829867354368,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.15432693168856426,
+   "relRmse": 0.13950506195525797,
+   "relRmseNoiseCorrected": 0.13379048674393376,
+   "bias": 0.9371406058892948,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ },
+ "sky no-view+maps [16, 16] seed 2": {
+  "all": {
+   "logRmse": 0.20753947481041038,
+   "relRmse": 0.13542347112760283,
+   "relRmseNoiseCorrected": 0.12689993065353608,
+   "bias": 0.9748580990498332,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.265481743818384,
+   "relRmse": 0.16941319327613513,
+   "relRmseNoiseCorrected": 0.15392253494545208,
+   "bias": 0.9384474661003671,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.14733017656216224,
+   "relRmse": 0.12577882756492897,
+   "relRmseNoiseCorrected": 0.11940915164109694,
+   "bias": 0.9902082767901468,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ },
+ "sky no-view+maps [16, 16] seed 3": {
+  "all": {
+   "logRmse": 0.20062098625109448,
+   "relRmse": 0.13141958608293774,
+   "relRmseNoiseCorrected": 0.12261803894139828,
+   "bias": 0.9567101222582871,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.25617978408962805,
+   "relRmse": 0.1588666073269639,
+   "relRmseNoiseCorrected": 0.14223190792363205,
+   "bias": 0.9442666066662302,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.1427523863180333,
+   "relRmse": 0.12383023733791294,
+   "relRmseNoiseCorrected": 0.1173548452821706,
+   "bias": 0.9619561221374308,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ },
+ "sky no-view+maps [16, 16] seed 4": {
+  "all": {
+   "logRmse": 0.20995243053875362,
+   "relRmse": 0.1599101593681294,
+   "relRmseNoiseCorrected": 0.15275907480985912,
+   "bias": 0.9208854968494005,
+   "labelNoiseRel": 0.04728555944869869
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.24990822010111471,
+   "relRmse": 0.1571899398287065,
+   "relRmseNoiseCorrected": 0.140356666715084,
+   "bias": 0.933907791858236,
+   "labelNoiseRel": 0.0707720516304508
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 0.17474499154809656,
+   "relRmse": 0.16056457685597222,
+   "relRmseNoiseCorrected": 0.15562524015395368,
+   "bias": 0.9153954922331703,
+   "labelNoiseRel": 0.03951921011307855
+  }
+ }
+}

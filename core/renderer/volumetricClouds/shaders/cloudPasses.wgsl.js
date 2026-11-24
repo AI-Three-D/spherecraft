@@ -2,8 +2,12 @@ import {
     CLOUD_UNIFORMS_WGSL, CLOUD_MATH_WGSL, CLOUD_ATMOSPHERE_WGSL, CLOUD_DENSITY_WGSL, CLOUD_RAY_INPUT_WGSL, CLOUD_LAYER_BLEND_WGSL,
 } from './cloudCommon.wgsl.js';
 import { CLOUD_CACHE_COORDS, CLOUD_LIGHT_PROBES, CLOUD_SKY_PROBES } from './cloudCaches.wgsl.js';
+import { CLOUD_VIEW_FIELDS_WGSL } from './cloudViewFields.wgsl.js';
+import { SOLAR_DENSITY_WGSL, SOLAR_INFERENCE_WGSL, SOLAR_UNIFORM_WGSL } from '../neural/solar.wgsl.js';
 
 const HEADER = `${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}${CLOUD_ATMOSPHERE_WGSL}`;
+
+export const rayGroupHeight = pipeline => (pipeline === 'raymarchCut' || pipeline === 'raymarchDomes') ? 4 : 8;
 
 const NOISE_BINDINGS = /* wgsl */`
 @group(0) @binding(0) var<uniform> u: CloudUniforms;
@@ -267,6 +271,8 @@ fn cloudTransportAt(p: vec3f) -> vec4f {
 
 function cloudRaymarchShader({ blendProxy = false, reuse = false, cache = '', budgetStage = '' } = {}) {
     const layered = cache === 'layered';
+    const neuralSolar = cache === 'neural-solar';
+    const referenceSolar = cache === 'solar-reference';
     return /* wgsl */`${HEADER}${NOISE_BINDINGS}
 @group(0) @binding(5) var cloudLightLut: texture_2d<f32>;
 @group(0) @binding(6) var ambientLut: texture_2d<f32>;
@@ -285,6 +291,12 @@ ${budgetStage === 'finish' ? /* wgsl */`
 ${CLOUD_DENSITY_WGSL}${CLOUD_RAY_INPUT_WGSL}${CLOUD_LAYER_BLEND_WGSL}
 ${reuse ? REUSE_RAY_WGSL : ''}
 ${CLOUD_LIGHT_PROBES}${CLOUD_SKY_PROBES}${cache ? CLOUD_CACHE_COORDS : ''}
+${neuralSolar || referenceSolar ? SOLAR_DENSITY_WGSL : ''}
+${neuralSolar ? /* wgsl */`
+${SOLAR_UNIFORM_WGSL}
+@group(0) @binding(11) var<uniform> solarWeights: SolarModelUniforms;
+${SOLAR_INFERENCE_WGSL}
+` : ''}
 ${cache === 'transport' || layered ? TRANSPORT_CACHE_WGSL : /* wgsl */`
 fn cloudTransportAt(p: vec3f) -> vec4f { return vec4f(0.0); }
 `}
@@ -293,6 +305,8 @@ fn rayWeather(p: vec3f, footprint: f32) -> Weather { return sampleWeather(p, foo
 `}
 ${cache === 'light' ? LIGHT_CACHE_WGSL : /* wgsl */`
 fn lightOpticalDepth(p: vec3f, footprint: f32, weather: Weather, dir: vec3f, sun: bool) -> f32 {
+    ${neuralSolar ? 'if (sun) { return inferSolarMass(solarFeatures(p, footprint, weather, dir)); }' : ''}
+    ${referenceSolar ? 'if (sun) { return referenceSolarMass(p, footprint, weather, dir, u32(u.look3.w)); }' : ''}
     return probeLight(p, footprint, weather, dir, 0, i32(u.quality.w), 1.0);
 }
 `}
@@ -343,48 +357,7 @@ fn rayScattering(rd: vec3f) -> RayScattering {
 // Steps each march segment keeps in reserve to reach the end of the layer (see the march loop).
 const MARCH_TAIL_STEPS: i32 = 6;
 
-fn farAverageWeight(p: vec3f, rd: vec3f, footprint: f32) -> f32 {
-    if (u.extra.z <= 0.0) { return 0.0; }
-    let graze = max(abs(dot(rd, normalize(p))), 0.06);
-    return smoothstep(u.extra.y, u.extra.z, footprint / graze);
-}
-
-// Expected density at height fraction h for this weather: the fraction of the shape field above
-// the coverage threshold (about coverage²) times the mean of the remapped values above it, with
-// the height profile, density scale and a share for detail erosion.
-fn meanCloudDensity(weather: Weather, h: f32) -> f32 {
-    if (h <= 0.0 || h >= 1.0 || weather.coverage <= 0.001) { return 0.0; }
-    let profile = heightProfile((h - weather.lift) / (1.0 - weather.lift), weather.kind, weather.coverage);
-    let c = saturate(weather.coverage * profile * 1.4);
-    let dh = deckHeight(h, weather);
-    let deck = smoothstep(0.0, 0.21, dh) * (1.0 - smoothstep(0.42, 0.87, dh));
-    return 0.5 * c * c * mix(0.6, 1.0, weather.coverage) * u.extra.w
-        + deck * u.weatherStyle.y * weather.coverage * 0.11;
-}
-
-fn distantBankWeight(t: f32, cameraRadius: f32) -> f32 {
-    let inside = (cameraRadius - u.planet.y) / (u.planet.z - u.planet.y);
-    return u.banks.x * (1.0 - u.weatherStyle.y) * smoothstep(u.banks.y, u.banks.z, t)
-        * (1.0 - smoothstep(0.0, 0.45, inside));
-}
-
-// The detailed layer loses its small puffs over distance. Filter broader masses in
-// planet-relative space so the replacement retains clear gaps at grazing angles.
-fn distantBankDensity(p: vec3f, h: f32, weather: Weather, footprint: f32) -> f32 {
-    let localH = (h - weather.lift) / (1.0 - weather.lift);
-    if (localH <= 0.0 || localH >= 0.52) { return 0.0; }
-    let surface = normalize(p) * u.planet.y;
-    let advected = mix(surface, p, 0.55) + u.windShape.xyz;
-    let q = (ROT_LARGE * advected) * (vec3f(0.58, 1.0, 1.0) * u.banks.w) + weather.shift * 0.37;
-    let lod = max(0.0, log2(footprint * u.banks.w * SHAPE_TEXELS));
-    let n = textureSampleLevel(shapeTex, noiseSampler, q, lod);
-    let coverage = smoothstep(0.02, 0.26, weather.coverage);
-    let billows = shapeSignal(n) + 0.17 * (n.b - 0.65);
-    let core = smoothstep(mix(0.92, 0.66, coverage), mix(1.16, 0.93, coverage), billows);
-    let top = 0.11 + 0.32 * core * mix(0.55, 1.0, weather.kind);
-    let profile = smoothstep(0.0, 0.04, localH) * (1.0 - smoothstep(top * 0.65, top, localH));
-    return core * core * profile * coverage * 0.085;
-}
+${CLOUD_VIEW_FIELDS_WGSL}
 
 // Radius at which a cloud's sunlight colour is read (look.w; 1 = physical). The air thins out within a
 // few km on a small planet (scale height ~2.6 km), so clouds at 6-12 km sit above almost all of it and
@@ -1453,6 +1426,8 @@ export const CLOUD_WEATHER_CACHE_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'w
 export const CLOUD_LIGHT_CACHE_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'light' });
 export const CLOUD_TRANSPORT_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'transport' });
 export const CLOUD_LAYERED_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'layered' });
+export const CLOUD_NEURAL_SOLAR_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'neural-solar' });
+export const CLOUD_SOLAR_REFERENCE_RAYMARCH_WGSL = cloudRaymarchShader({ cache: 'solar-reference' });
 export const CLOUD_BUDGET_NEAR_WGSL = cloudRaymarchShader({ budgetStage: 'near' });
 export const CLOUD_BUDGET_FINISH_WGSL = cloudRaymarchShader({ budgetStage: 'finish' });
 

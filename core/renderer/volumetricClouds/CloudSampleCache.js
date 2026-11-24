@@ -1,11 +1,12 @@
 import {
     CLOUD_LAYERED_RAYMARCH_WGSL, CLOUD_LIGHT_CACHE_RAYMARCH_WGSL, CLOUD_RAYMARCH_WGSL,
-    CLOUD_TRANSPORT_RAYMARCH_WGSL,
-    CLOUD_WEATHER_CACHE_RAYMARCH_WGSL,
+    CLOUD_TRANSPORT_RAYMARCH_WGSL, CLOUD_NEURAL_SOLAR_RAYMARCH_WGSL, CLOUD_SOLAR_REFERENCE_RAYMARCH_WGSL,
+    CLOUD_WEATHER_CACHE_RAYMARCH_WGSL, rayGroupHeight,
 } from './shaders/cloudPasses.wgsl.js';
 import {
     CLOUD_LIGHT_BAKE_WGSL, CLOUD_TRANSPORT_BAKE_WGSL, CLOUD_WEATHER_BAKE_WGSL,
 } from './shaders/cloudCaches.wgsl.js';
+import { packSolarModel } from './neural/solarModel.js';
 
 const WEATHER_EXTENT_KM = 96;
 const LIGHT_EXTENT_KM = 32;
@@ -20,6 +21,8 @@ const variants = {
         dimensions: [128, 128, 48], count: 1, group: 4 },
     layered: { ray: CLOUD_LAYERED_RAYMARCH_WGSL, bake: CLOUD_TRANSPORT_BAKE_WGSL,
         dimensions: [128, 128, 48], count: 1, group: 4 },
+    'neural-solar': { ray: CLOUD_NEURAL_SOLAR_RAYMARCH_WGSL, solar: true },
+    'solar-reference': { ray: CLOUD_SOLAR_REFERENCE_RAYMARCH_WGSL, solar: true },
 };
 
 const usesTransport = mode => mode === 'transport' || mode === 'layered';
@@ -52,6 +55,7 @@ export class CloudSampleCache {
 
     prepare(mode) {
         if (!Object.hasOwn(variants, mode)) return Promise.resolve(false);
+        if (mode === 'neural-solar' && !this.solarModelBuffer) return Promise.resolve(false);
         if (!this.preparing.has(mode)) {
             const initialize = this.initialize(mode, variants[mode]).catch(error => {
                 console.error(`Cloud ${mode} cache preview unavailable`, error);
@@ -60,6 +64,15 @@ export class CloudSampleCache {
             this.preparing.set(mode, initialize);
         }
         return this.preparing.get(mode);
+    }
+
+    setSolarModel(model) {
+        const data = packSolarModel(model);
+        this.solarModelBuffer ??= this.device.createBuffer({
+            label: 'cloud solar network', size: data.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(this.solarModelBuffer, 0, data);
     }
 
     async initialize(mode, description) {
@@ -72,11 +85,16 @@ export class CloudSampleCache {
         });
         const rayModule = this.device.createShaderModule({ label: `clouds ${mode} preview`, code: description.ray });
         const pipelines = {};
-        const promises = [['raymarchCut', 1, 4], ['raymarchDomes', 2, 8]].map(async ([ray, shape, height]) => {
+        const rays = [['raymarchCut', 1], ['raymarchDomes', 2]];
+        if (description.solar) rays.push(['raymarchGiants', 3]);
+        const promises = rays.map(async ([ray, shape]) => {
             const key = `cloudsCache:${mode}:${ray}`;
+            // Match the stock pipeline's workgroup and density specialization for solar comparisons.
+            const height = description.solar || ray !== 'raymarchDomes' ? rayGroupHeight(ray) : 8;
             const constants = {
                 RAY_PATH: 1, CLOUD_SHAPE: shape, RAY_GROUP_HEIGHT: height, CACHE_SCATTERING_PHASE: mode === 'phase',
             };
+            if (description.solar) constants.SKIP_UNUSED_DENSITY = ray === 'raymarchDomes';
             if (usesTransport(mode) && mode !== 'layered') constants.INTERPOLATE_SHARED_LIGHT = host.settings.lightReuseInterpolate;
             host._pipelines[key] = await create(key, rayModule, raymarch, constants);
             pipelines[ray] = { key, height };
@@ -91,7 +109,7 @@ export class CloudSampleCache {
         await Promise.all(promises);
         if (this.disposed) return false;
 
-        const views = [];
+        const views = mode === 'neural-solar' ? [{ buffer: this.solarModelBuffer }] : [];
         const groups = description.dimensions?.map(d => Math.ceil(d / description.group));
         for (let i = 0; i < (description.count ?? 0); i++) {
             const texture = this.device.createTexture({
@@ -149,6 +167,7 @@ export class CloudSampleCache {
 
     dispose() {
         this.disposed = true;
+        this.solarModelBuffer?.destroy();
         for (const texture of this.textures) texture.destroy();
         this.textures = [];
     }

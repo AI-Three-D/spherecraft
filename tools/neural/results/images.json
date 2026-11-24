@@ -1,0 +1,1034 @@
+{
+ "test-cloudy-above-e28": {
+  "game": {
+   "sun": {
+    "relRmse": 0.6414892143650035,
+    "meanRatio": 1.9439055699807868
+   },
+   "sky": {
+    "relRmse": 0.23081367962145638,
+    "meanRatio": 1.1898465576322
+   },
+   "total": {
+    "relRmse": 0.4141531417202986,
+    "meanRatio": 1.3950275307938835
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.2784464294863564,
+    "meanRatio": 1.0544182356836507
+   },
+   "sky": {
+    "relRmse": 0.25885171246271005,
+    "meanRatio": 1.2481667527353155
+   },
+   "total": {
+    "relRmse": 0.2123576414338304,
+    "meanRatio": 1.1954473917485973
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.15851523114538255,
+    "meanRatio": 1.055523491032733
+   },
+   "sky": {
+    "relRmse": 0.19246443980490338,
+    "meanRatio": 1.169693857729382
+   },
+   "total": {
+    "relRmse": 0.15909503862299795,
+    "meanRatio": 1.138627871431992
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.40903381737688843,
+    "meanRatio": 1.030985543898451
+   },
+   "sky": {
+    "relRmse": 0.24299931674281872,
+    "meanRatio": 1.0602239002283125
+   },
+   "total": {
+    "relRmse": 0.27102170420424776,
+    "meanRatio": 1.0522680846924382
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.22673316967691678,
+    "meanRatio": 1.053748059693492
+   },
+   "sky": {
+    "relRmse": 0.19761689695630907,
+    "meanRatio": 1.1186189844190615
+   },
+   "total": {
+    "relRmse": 0.18706151813199443,
+    "meanRatio": 1.1009674753897687
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.16684096451767316,
+    "meanRatio": 1.0501121798556068
+   },
+   "sky": {
+    "relRmse": 0.18756999068838934,
+    "meanRatio": 1.1474672531614225
+   },
+   "total": {
+    "relRmse": 0.1606353542514811,
+    "meanRatio": 1.1209767419998375
+   }
+  }
+ },
+ "test-cloudy-ground-e42": {
+  "game": {
+   "sun": {
+    "relRmse": 0.4308871807775746,
+    "meanRatio": 1.3514128276198645
+   },
+   "sky": {
+    "relRmse": 0.17936244697095355,
+    "meanRatio": 1.0852978834656306
+   },
+   "total": {
+    "relRmse": 0.20084841930035505,
+    "meanRatio": 1.1526988449584537
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.6406257358135957,
+    "meanRatio": 1.6511284474357293
+   },
+   "sky": {
+    "relRmse": 0.18786666821603398,
+    "meanRatio": 1.1210423095038842
+   },
+   "total": {
+    "relRmse": 0.2846765069584348,
+    "meanRatio": 1.2553012684818374
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.2209175613330647,
+    "meanRatio": 1.2026407166533044
+   },
+   "sky": {
+    "relRmse": 0.07493002732497854,
+    "meanRatio": 0.9878334607042288
+   },
+   "total": {
+    "relRmse": 0.07704537243386239,
+    "meanRatio": 1.0422393326954364
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.2114092822624859,
+    "meanRatio": 1.1848839206282915
+   },
+   "sky": {
+    "relRmse": 0.08756658225939155,
+    "meanRatio": 0.9669211685946169
+   },
+   "total": {
+    "relRmse": 0.07544176939652787,
+    "meanRatio": 1.0221262571452883
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.21190785405903081,
+    "meanRatio": 1.1913889464433636
+   },
+   "sky": {
+    "relRmse": 0.08278405809486687,
+    "meanRatio": 0.9779168353608987
+   },
+   "total": {
+    "relRmse": 0.0753923104618574,
+    "meanRatio": 1.0319845450289504
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.21927758409124815,
+    "meanRatio": 1.1998459984401335
+   },
+   "sky": {
+    "relRmse": 0.07878757952455905,
+    "meanRatio": 0.9831795108543918
+   },
+   "total": {
+    "relRmse": 0.07745918759814371,
+    "meanRatio": 1.038056284622076
+   }
+  }
+ },
+ "test-fair-above-e28": {
+  "game": {
+   "sun": {
+    "relRmse": 0.5202656090682671,
+    "meanRatio": 1.6663270053507484
+   },
+   "sky": {
+    "relRmse": 0.1737064299020544,
+    "meanRatio": 1.074789512780157
+   },
+   "total": {
+    "relRmse": 0.3368151519231226,
+    "meanRatio": 1.2567852223415934
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.24376688589645454,
+    "meanRatio": 1.0690594039112256
+   },
+   "sky": {
+    "relRmse": 0.22774789535548567,
+    "meanRatio": 1.1989896052468882
+   },
+   "total": {
+    "relRmse": 0.1853408995923937,
+    "meanRatio": 1.1590145580477926
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.16656218915534743,
+    "meanRatio": 1.0848052574781313
+   },
+   "sky": {
+    "relRmse": 0.11492773296926279,
+    "meanRatio": 1.0549204269514458
+   },
+   "total": {
+    "relRmse": 0.117905619600118,
+    "meanRatio": 1.064114959851114
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.6098169258262877,
+    "meanRatio": 1.3756212775261873
+   },
+   "sky": {
+    "relRmse": 0.1955436229692208,
+    "meanRatio": 1.013091281870449
+   },
+   "total": {
+    "relRmse": 0.33807498464215735,
+    "meanRatio": 1.1246292733339351
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.32910380869146916,
+    "meanRatio": 1.2912635396533902
+   },
+   "sky": {
+    "relRmse": 0.13787356180405697,
+    "meanRatio": 1.0443932735640484
+   },
+   "total": {
+    "relRmse": 0.2097958144666646,
+    "meanRatio": 1.1203467504118216
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.21826436569589705,
+    "meanRatio": 1.2199125112078004
+   },
+   "sky": {
+    "relRmse": 0.12162683065295082,
+    "meanRatio": 1.0563775863358125
+   },
+   "total": {
+    "relRmse": 0.15644123086185302,
+    "meanRatio": 1.106691649373164
+   }
+  }
+ },
+ "test-fair-ground-e42": {
+  "game": {
+   "sun": {
+    "relRmse": 0.4702119367740179,
+    "meanRatio": 1.4224450048405457
+   },
+   "sky": {
+    "relRmse": 0.14951576985540757,
+    "meanRatio": 1.041619863100447
+   },
+   "total": {
+    "relRmse": 0.18016047249804026,
+    "meanRatio": 1.1340535184185305
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.657996762915437,
+    "meanRatio": 1.6962681947304306
+   },
+   "sky": {
+    "relRmse": 0.16752930297155696,
+    "meanRatio": 1.0975474774835656
+   },
+   "total": {
+    "relRmse": 0.26385632938075676,
+    "meanRatio": 1.242868619246736
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.2144728279267642,
+    "meanRatio": 1.1923511899655974
+   },
+   "sky": {
+    "relRmse": 0.07948799279434424,
+    "meanRatio": 0.9677460223771792
+   },
+   "total": {
+    "relRmse": 0.07500055267707623,
+    "meanRatio": 1.0222620570818863
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.23643696862038613,
+    "meanRatio": 1.2112628299654054
+   },
+   "sky": {
+    "relRmse": 0.08569512449051223,
+    "meanRatio": 0.956461858311021
+   },
+   "total": {
+    "relRmse": 0.07615691627388384,
+    "meanRatio": 1.0183070008900996
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.22406362448459544,
+    "meanRatio": 1.2034963126927065
+   },
+   "sky": {
+    "relRmse": 0.08200702182210505,
+    "meanRatio": 0.963018729414133
+   },
+   "total": {
+    "relRmse": 0.07547120824320055,
+    "meanRatio": 1.0213873075571893
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.218617554638702,
+    "meanRatio": 1.1976875181695543
+   },
+   "sky": {
+    "relRmse": 0.08105656595171236,
+    "meanRatio": 0.9655431155680068
+   },
+   "total": {
+    "relRmse": 0.07546405164467594,
+    "meanRatio": 1.021889068978662
+   }
+  }
+ },
+ "test-overcast-above-e28": {
+  "game": {
+   "sun": {
+    "relRmse": 0.7653640216554071,
+    "meanRatio": 2.71641659301318
+   },
+   "sky": {
+    "relRmse": 0.29633756857323884,
+    "meanRatio": 0.7252049743349755
+   },
+   "total": {
+    "relRmse": 0.23875665119701966,
+    "meanRatio": 0.8963316519867381
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.26453086982255686,
+    "meanRatio": 1.2013527079330355
+   },
+   "sky": {
+    "relRmse": 0.12501470286443184,
+    "meanRatio": 0.8958400122921073
+   },
+   "total": {
+    "relRmse": 0.11011907428462042,
+    "meanRatio": 0.9220960727203664
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.19843099658395158,
+    "meanRatio": 1.4017511934285067
+   },
+   "sky": {
+    "relRmse": 0.0953110165726673,
+    "meanRatio": 0.9319664299236883
+   },
+   "total": {
+    "relRmse": 0.0718891169188174,
+    "meanRatio": 0.9723401928305985
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.4137272437965871,
+    "meanRatio": 1.3543367650551084
+   },
+   "sky": {
+    "relRmse": 0.11760961571228214,
+    "meanRatio": 0.9568463442086941
+   },
+   "total": {
+    "relRmse": 0.1474779509684622,
+    "meanRatio": 0.9910070604679744
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.2367769024162283,
+    "meanRatio": 1.3969916534565776
+   },
+   "sky": {
+    "relRmse": 0.10222983624924063,
+    "meanRatio": 0.9350609934648679
+   },
+   "total": {
+    "relRmse": 0.0889857030251048,
+    "meanRatio": 0.9747597670198059
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.19345028188029695,
+    "meanRatio": 1.401565773846064
+   },
+   "sky": {
+    "relRmse": 0.094067280248001,
+    "meanRatio": 0.9338054402804239
+   },
+   "total": {
+    "relRmse": 0.07099178891136346,
+    "meanRatio": 0.9740052216946687
+   }
+  }
+ },
+ "test-overcast-ground-e42": {
+  "game": {
+   "sun": {
+    "relRmse": 0.431300272418051,
+    "meanRatio": 0.6449161687925989
+   },
+   "sky": {
+    "relRmse": 0.5675349192177008,
+    "meanRatio": 1.4164614444613224
+   },
+   "total": {
+    "relRmse": 0.327545355972447,
+    "meanRatio": 1.1099302045284876
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.4704849320365227,
+    "meanRatio": 1.3377751958402309
+   },
+   "sky": {
+    "relRmse": 0.24254411711778082,
+    "meanRatio": 1.2007077591937245
+   },
+   "total": {
+    "relRmse": 0.2971893428900605,
+    "meanRatio": 1.2551639947960394
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.168895208940114,
+    "meanRatio": 0.9989207559427695
+   },
+   "sky": {
+    "relRmse": 0.17355540952661205,
+    "meanRatio": 0.8803857930817548
+   },
+   "total": {
+    "relRmse": 0.1366014542178046,
+    "meanRatio": 0.927479165677014
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.18611499934211279,
+    "meanRatio": 1.0177488064475402
+   },
+   "sky": {
+    "relRmse": 0.16968457626078637,
+    "meanRatio": 0.9076010424303718
+   },
+   "total": {
+    "relRmse": 0.13980065131289265,
+    "meanRatio": 0.9513622211256176
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.1714648136494093,
+    "meanRatio": 1.0028628459747784
+   },
+   "sky": {
+    "relRmse": 0.1643966809473639,
+    "meanRatio": 0.8917253958560105
+   },
+   "total": {
+    "relRmse": 0.13238297871782082,
+    "meanRatio": 0.9358797720957618
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.16905080443126413,
+    "meanRatio": 0.998738845189048
+   },
+   "sky": {
+    "relRmse": 0.1691964572374079,
+    "meanRatio": 0.8845437817520142
+   },
+   "total": {
+    "relRmse": 0.13465774273276607,
+    "meanRatio": 0.9299129331076791
+   }
+  }
+ },
+ "test-overcast-ground-e9": {
+  "game": {
+   "sun": {
+    "relRmse": 0.4854187751650038,
+    "meanRatio": 0.621216807826945
+   },
+   "sky": {
+    "relRmse": 0.5678189069047526,
+    "meanRatio": 1.4167665563789702
+   },
+   "total": {
+    "relRmse": 0.38068996396395294,
+    "meanRatio": 1.1387842483039914
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.41414387197706637,
+    "meanRatio": 0.97188756496328
+   },
+   "sky": {
+    "relRmse": 0.24537026081708002,
+    "meanRatio": 1.2010020324581836
+   },
+   "total": {
+    "relRmse": 0.20913899235390368,
+    "meanRatio": 1.1209444765309464
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.1833181495224852,
+    "meanRatio": 1.0396753599649002
+   },
+   "sky": {
+    "relRmse": 0.19351877304558915,
+    "meanRatio": 0.8680606913005641
+   },
+   "total": {
+    "relRmse": 0.13851663334536857,
+    "meanRatio": 0.9280265724810483
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.2062599343011735,
+    "meanRatio": 1.0538079060522676
+   },
+   "sky": {
+    "relRmse": 0.1932461710640091,
+    "meanRatio": 0.8862668960937804
+   },
+   "total": {
+    "relRmse": 0.14427555045434318,
+    "meanRatio": 0.944809352716061
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.18725123038631986,
+    "meanRatio": 1.0410301955369252
+   },
+   "sky": {
+    "relRmse": 0.1857855615219275,
+    "meanRatio": 0.8772215870773986
+   },
+   "total": {
+    "relRmse": 0.1348131055792923,
+    "meanRatio": 0.9344598617987584
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.1834979286739734,
+    "meanRatio": 1.0394694725127194
+   },
+   "sky": {
+    "relRmse": 0.18918151580182715,
+    "meanRatio": 0.8720327975386579
+   },
+   "total": {
+    "relRmse": 0.1357171269103674,
+    "meanRatio": 0.930538797258229
+   }
+  }
+ },
+ "test-rain-above-e28": {
+  "game": {
+   "sun": {
+    "relRmse": 0.5955993438566181,
+    "meanRatio": 2.374396818361507
+   },
+   "sky": {
+    "relRmse": 0.36428232109146247,
+    "meanRatio": 0.6474218469486532
+   },
+   "total": {
+    "relRmse": 0.2748299452382444,
+    "meanRatio": 0.7751062275517712
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.23890490732512742,
+    "meanRatio": 1.04775306548703
+   },
+   "sky": {
+    "relRmse": 0.18686679781167642,
+    "meanRatio": 0.819102841271912
+   },
+   "total": {
+    "relRmse": 0.17400520115597864,
+    "meanRatio": 0.8360081599574436
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.21504459339968227,
+    "meanRatio": 1.4016162445279254
+   },
+   "sky": {
+    "relRmse": 0.06950865996131857,
+    "meanRatio": 0.9720409036430002
+   },
+   "total": {
+    "relRmse": 0.07425022322762975,
+    "meanRatio": 1.003801677383914
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.3702755898631121,
+    "meanRatio": 1.3559869755986638
+   },
+   "sky": {
+    "relRmse": 0.09880620089909266,
+    "meanRatio": 0.9991139600488105
+   },
+   "total": {
+    "relRmse": 0.13053551958017978,
+    "meanRatio": 1.02549946690255
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.23257011246151504,
+    "meanRatio": 1.3843198364502076
+   },
+   "sky": {
+    "relRmse": 0.07558668616988251,
+    "meanRatio": 0.978881724618591
+   },
+   "total": {
+    "relRmse": 0.08531236028004666,
+    "meanRatio": 1.0088579055355418
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.20021668371724405,
+    "meanRatio": 1.3993884555670335
+   },
+   "sky": {
+    "relRmse": 0.06797730612291152,
+    "meanRatio": 0.9745855974553808
+   },
+   "total": {
+    "relRmse": 0.07110003859703437,
+    "meanRatio": 1.0059935163391418
+   }
+  }
+ },
+ "test-rain-ground-e42": {
+  "game": {
+   "sun": {
+    "relRmse": 0.5833261874882025,
+    "meanRatio": 1.0362736486069526
+   },
+   "sky": {
+    "relRmse": 1.7371717170142769,
+    "meanRatio": 3.2447109135036527
+   },
+   "total": {
+    "relRmse": 1.117261393786589,
+    "meanRatio": 2.2691094028876773
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.4837989891363494,
+    "meanRatio": 1.0785361516140104
+   },
+   "sky": {
+    "relRmse": 0.7482708194988578,
+    "meanRatio": 1.9175743173103026
+   },
+   "total": {
+    "relRmse": 0.48341697441218895,
+    "meanRatio": 1.5469199569039864
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.22750289744237318,
+    "meanRatio": 0.9391275255290404
+   },
+   "sky": {
+    "relRmse": 0.2026154852273412,
+    "meanRatio": 0.9185118995761309
+   },
+   "total": {
+    "relRmse": 0.18620813456482196,
+    "meanRatio": 0.9276190796358249
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.3716064408007181,
+    "meanRatio": 0.8956645452177947
+   },
+   "sky": {
+    "relRmse": 0.284048187649936,
+    "meanRatio": 0.9621498634156971
+   },
+   "total": {
+    "relRmse": 0.2944567302507837,
+    "meanRatio": 0.9327792410762433
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.29299492760859314,
+    "meanRatio": 0.9286671667144216
+   },
+   "sky": {
+    "relRmse": 0.2406049043766777,
+    "meanRatio": 0.9510740609751825
+   },
+   "total": {
+    "relRmse": 0.23520800863304556,
+    "meanRatio": 0.9411755683910912
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.25913363351527763,
+    "meanRatio": 0.9456382933857902
+   },
+   "sky": {
+    "relRmse": 0.22053805209105737,
+    "meanRatio": 0.9473364443761906
+   },
+   "total": {
+    "relRmse": 0.21105223170718512,
+    "meanRatio": 0.9465862674534306
+   }
+  }
+ },
+ "test-storm-above-e28": {
+  "game": {
+   "sun": {
+    "relRmse": 0.5352970252510917,
+    "meanRatio": 2.2304557353216787
+   },
+   "sky": {
+    "relRmse": 0.3695660071147685,
+    "meanRatio": 0.6420053642039596
+   },
+   "total": {
+    "relRmse": 0.27897287059212944,
+    "meanRatio": 0.7600261398383241
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.27447703547622443,
+    "meanRatio": 0.8998405035472918
+   },
+   "sky": {
+    "relRmse": 0.20283983740128753,
+    "meanRatio": 0.802287605368837
+   },
+   "total": {
+    "relRmse": 0.2023867796603025,
+    "meanRatio": 0.8095357189503146
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.25409881033763154,
+    "meanRatio": 1.3270094281646885
+   },
+   "sky": {
+    "relRmse": 0.08578679463129064,
+    "meanRatio": 0.9416944453381354
+   },
+   "total": {
+    "relRmse": 0.08480118814919506,
+    "meanRatio": 0.9703230849000583
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.35804500956389407,
+    "meanRatio": 1.2777461182816046
+   },
+   "sky": {
+    "relRmse": 0.09980015630065936,
+    "meanRatio": 0.9684760398961126
+   },
+   "total": {
+    "relRmse": 0.12180952938479522,
+    "meanRatio": 0.9914545950938256
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.2559507872826048,
+    "meanRatio": 1.313978290530238
+   },
+   "sky": {
+    "relRmse": 0.08793138182080232,
+    "meanRatio": 0.9482604192437419
+   },
+   "total": {
+    "relRmse": 0.08804847318986306,
+    "meanRatio": 0.9754330068280865
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.2302465025109494,
+    "meanRatio": 1.328052526496808
+   },
+   "sky": {
+    "relRmse": 0.08438624875033904,
+    "meanRatio": 0.9448167487667304
+   },
+   "total": {
+    "relRmse": 0.07918343611539833,
+    "meanRatio": 0.9732909048127365
+   }
+  }
+ },
+ "test-storm-ground-e42": {
+  "game": {
+   "sun": {
+    "relRmse": 0.7124247838397757,
+    "meanRatio": 1.1486711173103927
+   },
+   "sky": {
+    "relRmse": 1.5241320462422823,
+    "meanRatio": 2.68442485668536
+   },
+   "total": {
+    "relRmse": 1.091724585800289,
+    "meanRatio": 2.031588515950519
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.4111580676147009,
+    "meanRatio": 0.7777483342132454
+   },
+   "sky": {
+    "relRmse": 0.8833861132583889,
+    "meanRatio": 1.8863451981024126
+   },
+   "total": {
+    "relRmse": 0.46854715163202876,
+    "meanRatio": 1.4150897478203417
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.25521679389685953,
+    "meanRatio": 0.8612815538028713
+   },
+   "sky": {
+    "relRmse": 0.24854778060586685,
+    "meanRatio": 0.8491210744877058
+   },
+   "total": {
+    "relRmse": 0.22786092964463198,
+    "meanRatio": 0.8542903946815317
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.39230666520836865,
+    "meanRatio": 0.7957729814863298
+   },
+   "sky": {
+    "relRmse": 0.3035139500330732,
+    "meanRatio": 0.8475737161252992
+   },
+   "total": {
+    "relRmse": 0.3039015737759361,
+    "meanRatio": 0.8255536479450682
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.32321298954497557,
+    "meanRatio": 0.8448214995791934
+   },
+   "sky": {
+    "relRmse": 0.2829069892033841,
+    "meanRatio": 0.8347810856892798
+   },
+   "total": {
+    "relRmse": 0.27362022778992634,
+    "meanRatio": 0.8390491834287144
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.3050302541215527,
+    "meanRatio": 0.8334668416518487
+   },
+   "sky": {
+    "relRmse": 0.28444737274302456,
+    "meanRatio": 0.8265078651081843
+   },
+   "total": {
+    "relRmse": 0.2736312899515144,
+    "meanRatio": 0.8294660690607756
+   }
+  }
+ },
+ "test-storm-ground-e9": {
+  "game": {
+   "sun": {
+    "relRmse": 0.8249501253060028,
+    "meanRatio": 1.176043009827238
+   },
+   "sky": {
+    "relRmse": 1.5208999572669386,
+    "meanRatio": 2.6797304770328223
+   },
+   "total": {
+    "relRmse": 1.1259517156704448,
+    "meanRatio": 2.0635843734708983
+   }
+  },
+  "refit": {
+   "sun": {
+    "relRmse": 0.5030596749302156,
+    "meanRatio": 0.5098423693630331
+   },
+   "sky": {
+    "relRmse": 0.8813290377253352,
+    "meanRatio": 1.8829339357903552
+   },
+   "total": {
+    "relRmse": 0.45501516766137184,
+    "meanRatio": 1.3203003853091742
+   }
+  },
+  "neural": {
+   "sun": {
+    "relRmse": 0.25478485718779403,
+    "meanRatio": 0.8402811481763156
+   },
+   "sky": {
+    "relRmse": 0.24377029913343215,
+    "meanRatio": 0.8488198652213247
+   },
+   "total": {
+    "relRmse": 0.22041776178368389,
+    "meanRatio": 0.8453210681963834
+   }
+  },
+  "neural, 1 point per ray": {
+   "sun": {
+    "relRmse": 0.42844653552624323,
+    "meanRatio": 0.7530965069887758
+   },
+   "sky": {
+    "relRmse": 0.3157896372485079,
+    "meanRatio": 0.8360843681775659
+   },
+   "total": {
+    "relRmse": 0.31717846942306543,
+    "meanRatio": 0.8020795311156234
+   }
+  },
+  "neural, 2 points per ray": {
+   "sun": {
+    "relRmse": 0.3604364275525435,
+    "meanRatio": 0.8054109598223145
+   },
+   "sky": {
+    "relRmse": 0.29751214328164877,
+    "meanRatio": 0.8380083505685573
+   },
+   "total": {
+    "relRmse": 0.2874226116287428,
+    "meanRatio": 0.8246513493747468
+   }
+  },
+  "neural, 4 points per ray": {
+   "sun": {
+    "relRmse": 0.3186098006289655,
+    "meanRatio": 0.8079213327215202
+   },
+   "sky": {
+    "relRmse": 0.2824506549306577,
+    "meanRatio": 0.8406016193725766
+   },
+   "total": {
+    "relRmse": 0.2712992870885114,
+    "meanRatio": 0.8272106510214504
+   }
+  }
+ }
+}

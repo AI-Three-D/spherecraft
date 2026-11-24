@@ -337,6 +337,54 @@ export class WebGPUCloudRenderer extends CloudRenderer {
         }
     }
 
+    /**
+     * Draws one part of the cirrus shell ('far' or 'near', see renderCirrus) into its own target at `scale` of the
+     * viewport, for a compositor that blends it itself. Call between render passes. Returns the view, or null without cirrus.
+     */
+    renderCirrusTarget(camera, part, scale) {
+        if (!this.initialized || !this.noiseGenerator) return null;
+        const layers = this._renderLayers.filter((layer) => layer.coverage > 0.01 && layer.altMax > layer.altMin);
+        const near = part === 'near';
+        const material = near ? this.cirrusShellNearMaterial : this.cirrusShellMaterial;
+        if (layers.length === 0 || !material?.uniforms.noiseBase.value) return null;
+        const backend = this.backend;
+        const viewport = backend._viewport;
+        const width = Math.max(1, Math.ceil(viewport.width * scale));
+        const height = Math.max(1, Math.ceil(viewport.height * scale));
+        this._partTargets ??= {};
+        let target = this._partTargets[part];
+        if (target?.width !== width || target?.height !== height) {
+            this._releaseTarget(target);
+            target = this._partTargets[part] = new RenderTarget(width, height, {
+                colorCount: 1, depthBuffer: true, format: backend.sceneFormat || backend.format || 'rgba8unorm',
+            });
+        }
+        const sceneTarget = backend._currentRenderTarget;
+        const clearColor = backend._clearColor;
+        try {
+            backend.setRenderTarget(target);
+            target._needsSetup = false;
+            backend._viewport = { x: 0, y: 0, width, height };
+            backend.setClearColor(0.0, 0.0, 0.0, 0.0);
+            backend.clear(true, false);
+            for (const layer of layers) {
+                this._writeLayerParams(layer, near ? 1 : 2, material.uniforms.cirrusParams.value);
+                backend.draw(this.fullscreenGeometry, material);
+            }
+        } finally {
+            backend._viewport = viewport;
+            backend.setRenderTarget(sceneTarget);
+            backend.setClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a);
+        }
+        return target._gpuRenderTarget?.colorViews[0] ?? null;
+    }
+
+    _releaseTarget(target) {
+        if (!target) return;
+        this.backend.deleteRenderTarget?.(target);
+        target.dispose?.();
+    }
+
     // ---------------------------------------------------------------
     //  Cirrus quality
     // ---------------------------------------------------------------
@@ -406,6 +454,8 @@ export class WebGPUCloudRenderer extends CloudRenderer {
             this.cirrusTarget.dispose();
             this.cirrusTarget = null;
         }
+        for (const target of Object.values(this._partTargets ?? {})) this._releaseTarget(target);
+        this._partTargets = null;
         for (const material of [...this._cirrusMaterials(), this.blitMaterial]) {
             if (material) this.backend.destroyMaterial(material);
         }

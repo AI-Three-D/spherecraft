@@ -258,10 +258,10 @@ export function createEngineConfig() {
           // The game uses a fixed spatial ray grid. The U debug preview can reuse fresh rays.
           temporal: false,
           conservativeTemporal: false,
-          // Keep fresh lighting on the first visible skin. Dense rain can
-          // interpolate between lighting samples while tracing the same density.
+          // Keep fresh lighting on the first visible skin. Blend in short-range
+          // lighting interpolation as the deck thickens, fully active in overcast and rain.
           lightReuseInterpolate: true,
-          denseDeckLighting: { startDeck: 0.86, fullDeck: 0.94, steps: 10, maxKm: 0.30, reuseBelow: 0.985 },
+          denseDeckLighting: { startDeck: 0.74, fullDeck: 0.86, steps: 10, maxKm: 0.30, reuseBelow: 0.985 },
                 // Inside the layer, rays near the horizon need long marches; at 192 they ran out and the
                 // rest of the path fell back to the averaged density (a smooth band that moved with height).
                 maxSteps: 256,
