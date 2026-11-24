@@ -1,0 +1,746 @@
+{
+  "before": "http://127.0.0.1:8000",
+  "after": "http://127.0.0.1:8000",
+  "chrome": "Chrome/158.0.8127.36",
+  "width": 1024,
+  "height": 640,
+  "dpr": 1.5,
+  "tier": "ultra",
+  "scale": 0.5,
+  "afterScale": 0.5,
+  "game": true,
+  "runtimeLook": true,
+  "beforeSettings": {},
+  "afterSettings": {},
+  "sampleFrames": 12,
+  "warmFrames": 8,
+  "rounds": 1,
+  "cases": {
+    "game-tower-near-bounded": {
+      "name": "game-tower-near-bounded",
+      "view": {
+        "altitudeKm": 7.2,
+        "latDeg": -1.05,
+        "lonDeg": 21,
+        "headingDeg": 0,
+        "pitchDeg": 5
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "after": [
+        {
+          "fps": 11.64935443159173,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 12.390357111111111,
+              "p95": 58.18240300000001,
+              "last": 2.6665
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 69.56328577777778,
+              "p95": 71.118165,
+              "last": 69.211694
+            },
+            {
+              "name": "cloud towers volume",
+              "avg": 0.502168111111111,
+              "p95": 0.549199,
+              "last": 0.498575
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.08415144444444445,
+              "p95": 0.085416,
+              "last": 0.085083
+            },
+            {
+              "name": "clouds composite",
+              "avg": 74.52849722222221,
+              "p95": 75.939217,
+              "last": 74.251909
+            },
+            {
+              "name": "total",
+              "avg": 104.9380331111111,
+              "p95": 146.844467,
+              "last": 146.762928
+            }
+          ],
+          "samples": 9,
+          "conditions": {
+            "sunElevation": 13.997616976095756,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "bounded"
+          },
+          "isolatedTower": [
+            {
+              "name": "cloud towers volume",
+              "avg": 0.5476097499999999,
+              "p95": 1.161025,
+              "last": 0.468368,
+              "p50": 0.50745,
+              "samples": 24
+            }
+          ],
+          "isolatedTowerBakes": [
+            {
+              "name": "cloud towers density bake",
+              "avg": 0.10831425000000001,
+              "p95": 0.205455,
+              "last": 0.091498,
+              "p50": 0.103914,
+              "samples": 12
+            }
+          ],
+          "updatePasses": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.20408,
+              "p95": 0.20408,
+              "last": 0.20408
+            },
+            {
+              "name": "cloud towers density bake",
+              "avg": 0.156997,
+              "p95": 0.156997,
+              "last": 0.156997
+            }
+          ]
+        }
+      ],
+      "before": [
+        {
+          "fps": 10.230179028132993,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 30.760368444444445,
+              "p95": 93.199326,
+              "last": 2.618086
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 70.48623977777778,
+              "p95": 76.251421,
+              "last": 71.018084
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.26106066666666666,
+              "p95": 1.547685,
+              "last": 0.101748
+            },
+            {
+              "name": "clouds composite",
+              "avg": 74.88757044444444,
+              "p95": 81.47859,
+              "last": 75.335351
+            },
+            {
+              "name": "total",
+              "avg": 108.74900744444444,
+              "p95": 176.277352,
+              "last": 152.058221
+            }
+          ],
+          "samples": 9,
+          "conditions": {
+            "sunElevation": 13.997616976095756,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "off"
+          },
+          "updatePasses": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.181373,
+              "p95": 0.181373,
+              "last": 0.181373
+            }
+          ]
+        }
+      ]
+    },
+    "game-tower-near-cached": {
+      "name": "game-tower-near-cached",
+      "view": {
+        "altitudeKm": 7.2,
+        "latDeg": -1.05,
+        "lonDeg": 21,
+        "headingDeg": 0,
+        "pitchDeg": 5
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "after": [
+        {
+          "fps": 10.303967027292328,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 61.49119,
+              "p95": 266.006399,
+              "last": 8.057086
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 70.18595936363636,
+              "p95": 84.011009,
+              "last": 66.90027
+            },
+            {
+              "name": "cloud towers cached volume",
+              "avg": 0.3997516363636363,
+              "p95": 0.962902,
+              "last": 0.342578
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.08452918181818182,
+              "p95": 0.085791,
+              "last": 0.084166
+            },
+            {
+              "name": "clouds composite",
+              "avg": 75.06452481818181,
+              "p95": 88.77877,
+              "last": 72.034901
+            },
+            {
+              "name": "total",
+              "avg": 82.44726081818182,
+              "p95": 142.142706,
+              "last": 72.684349
+            }
+          ],
+          "samples": 11,
+          "conditions": {
+            "sunElevation": 13.997616976095756,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "cached"
+          },
+          "isolatedTower": [
+            {
+              "name": "cloud towers cached volume",
+              "avg": 0.30483583333333325,
+              "p95": 0.461201,
+              "last": 0.278287,
+              "p50": 0.281995,
+              "samples": 24
+            }
+          ],
+          "isolatedTowerBakes": [
+            {
+              "name": "cloud towers density bake",
+              "avg": 0.07690849999999999,
+              "p95": 0.105957,
+              "last": 0.071999,
+              "p50": 0.072415,
+              "samples": 12
+            },
+            {
+              "name": "cloud towers light cache",
+              "avg": 0.03808283333333333,
+              "p95": 0.042084,
+              "last": 0.036374,
+              "p50": 0.037666,
+              "samples": 12
+            }
+          ],
+          "updatePasses": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.724239,
+              "p95": 0.724239,
+              "last": 0.724239
+            },
+            {
+              "name": "cloud towers density bake",
+              "avg": 0.436952,
+              "p95": 0.436952,
+              "last": 0.436952
+            },
+            {
+              "name": "cloud towers light cache",
+              "avg": 0.171331,
+              "p95": 0.171331,
+              "last": 0.171331
+            }
+          ]
+        }
+      ],
+      "before": [
+        {
+          "fps": 10.610079575596817,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 63.50995945454545,
+              "p95": 298.523528,
+              "last": 7.863757
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 67.97324318181818,
+              "p95": 73.826332,
+              "last": 64.472932
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.21375436363636366,
+              "p95": 1.321314,
+              "last": 1.321314
+            },
+            {
+              "name": "clouds composite",
+              "avg": 72.8187978181818,
+              "p95": 78.096016,
+              "last": 69.969391
+            },
+            {
+              "name": "total",
+              "avg": 80.24047645454546,
+              "p95": 135.216562,
+              "last": 70.88321
+            }
+          ],
+          "samples": 11,
+          "conditions": {
+            "sunElevation": 13.997616976095756,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "off"
+          },
+          "updatePasses": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.222121,
+              "p95": 0.222121,
+              "last": 0.222121
+            }
+          ]
+        }
+      ]
+    },
+    "game-tower-near-density": {
+      "name": "game-tower-near-density",
+      "view": {
+        "altitudeKm": 7.2,
+        "latDeg": -1.05,
+        "lonDeg": 21,
+        "headingDeg": 0,
+        "pitchDeg": 5
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "after": [
+        {
+          "fps": 11.26972201355521,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 34.33107366666667,
+              "p95": 136.813871,
+              "last": 2.741375
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 67.04179644444444,
+              "p95": 71.897278,
+              "last": 66.320238
+            },
+            {
+              "name": "cloud towers density only",
+              "avg": 0.31683322222222227,
+              "p95": 0.325828,
+              "last": 0.313245
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.08490166666666668,
+              "p95": 0.086041,
+              "last": 0.083874
+            },
+            {
+              "name": "clouds composite",
+              "avg": 71.81812655555557,
+              "p95": 77.0127,
+              "last": 70.865586
+            },
+            {
+              "name": "total",
+              "avg": 98.74825266666666,
+              "p95": 163.367632,
+              "last": 140.095571
+            }
+          ],
+          "samples": 9,
+          "conditions": {
+            "sunElevation": 13.997616976095756,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "bounded"
+          },
+          "isolatedTower": [
+            {
+              "name": "cloud towers density only",
+              "avg": 0.2594455833333333,
+              "p95": 0.260954,
+              "last": 0.257996,
+              "p50": 0.255955,
+              "samples": 24
+            }
+          ],
+          "isolatedTowerBakes": [
+            {
+              "name": "cloud towers density bake",
+              "avg": 0.07675225000000001,
+              "p95": 0.145455,
+              "last": 0.069957,
+              "p50": 0.070832,
+              "samples": 12
+            }
+          ],
+          "updatePasses": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.21408,
+              "p95": 0.21408,
+              "last": 0.21408
+            },
+            {
+              "name": "cloud towers density bake",
+              "avg": 0.152164,
+              "p95": 0.152164,
+              "last": 0.152164
+            }
+          ]
+        }
+      ],
+      "before": [
+        {
+          "fps": 10.800108001065526,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 43.185883000000004,
+              "p95": 232.770615,
+              "last": 2.562378
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 70.28488555555555,
+              "p95": 72.004443,
+              "last": 71.417576
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.24014466666666662,
+              "p95": 1.32873,
+              "last": 0.120748
+            },
+            {
+              "name": "clouds composite",
+              "avg": 74.69928622222223,
+              "p95": 77.22803,
+              "last": 75.66997
+            },
+            {
+              "name": "total",
+              "avg": 100.54416477777778,
+              "p95": 151.601854,
+              "last": 149.976294
+            }
+          ],
+          "samples": 9,
+          "conditions": {
+            "sunElevation": 13.997616976095756,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "off"
+          },
+          "updatePasses": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.210414,
+              "p95": 0.210414,
+              "last": 0.210414
+            }
+          ]
+        }
+      ]
+    },
+    "game-tower-near-bounds": {
+      "name": "game-tower-near-bounds",
+      "view": {
+        "altitudeKm": 7.2,
+        "latDeg": -1.05,
+        "lonDeg": 21,
+        "headingDeg": 0,
+        "pitchDeg": 5
+      },
+      "elevation": 35,
+      "azimuth": 235,
+      "moon": false,
+      "extra": {},
+      "after": [
+        {
+          "fps": 12.421074423014218,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 38.360867625,
+              "p95": 166.421627,
+              "last": 2.701626
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 65.933535625,
+              "p95": 72.32048,
+              "last": 64.204687
+            },
+            {
+              "name": "cloud towers bounds only",
+              "avg": 0.3122505,
+              "p95": 0.318829,
+              "last": 0.309745
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.08540475,
+              "p95": 0.088248,
+              "last": 0.084248
+            },
+            {
+              "name": "clouds composite",
+              "avg": 70.829408875,
+              "p95": 77.152657,
+              "last": 68.864407
+            },
+            {
+              "name": "total",
+              "avg": 80.473438875,
+              "p95": 139.982364,
+              "last": 69.881184
+            }
+          ],
+          "samples": 8,
+          "conditions": {
+            "sunElevation": 13.997616976095756,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "bounded"
+          },
+          "isolatedTower": [
+            {
+              "name": "cloud towers bounds only",
+              "avg": 0.25267675,
+              "p95": 0.25133,
+              "last": 0.249413,
+              "p50": 0.249746,
+              "samples": 24
+            }
+          ],
+          "isolatedTowerBakes": [
+            {
+              "name": "cloud towers density bake",
+              "avg": 0.07564466666666668,
+              "p95": 0.113541,
+              "last": 0.071624,
+              "p50": 0.071124,
+              "samples": 12
+            }
+          ],
+          "updatePasses": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.21333,
+              "p95": 0.21333,
+              "last": 0.21333
+            },
+            {
+              "name": "cloud towers density bake",
+              "avg": 0.65524,
+              "p95": 0.65524,
+              "last": 0.65524
+            }
+          ]
+        }
+      ],
+      "before": [
+        {
+          "fps": 12.453300124513744,
+          "passes": [
+            {
+              "name": "cirrus far",
+              "avg": 33.96666925,
+              "p95": 157.906799,
+              "last": 2.580043
+            },
+            {
+              "name": "clouds raymarch",
+              "avg": 67.15914725,
+              "p95": 72.623099,
+              "last": 68.004754
+            },
+            {
+              "name": "clouds spatial",
+              "avg": 0.10159275000000001,
+              "p95": 0.107208,
+              "last": 0.103249
+            },
+            {
+              "name": "clouds composite",
+              "avg": 71.537403125,
+              "p95": 76.771869,
+              "last": 72.408145
+            },
+            {
+              "name": "total",
+              "avg": 81.518433375,
+              "p95": 141.959251,
+              "last": 73.285299
+            }
+          ],
+          "samples": 8,
+          "conditions": {
+            "sunElevation": 13.997616976095756,
+            "moonIlluminance": 0,
+            "cloudSize": [
+              768,
+              480
+            ],
+            "spatialStride": 1,
+            "interleave": 1,
+            "proxyWeight": 0,
+            "coverage": 0.2,
+            "weather": {
+              "presence": 1,
+              "deck": 0,
+              "rainShade": 0,
+              "low": 0,
+              "mist": 0.08
+            },
+            "towerMode": "off"
+          },
+          "updatePasses": [
+            {
+              "name": "clouds shadow",
+              "avg": 0.213247,
+              "p95": 0.213247,
+              "last": 0.213247
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

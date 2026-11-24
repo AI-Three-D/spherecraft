@@ -1,0 +1,94 @@
+{
+ "k=1.0 no-view+maps [16, 16]": {
+  "all": {
+   "logRmse": 1.5725035475968758,
+   "relRmse": 90677.46451013713,
+   "relRmseNoiseCorrected": 90677.46451010644,
+   "bias": 3567.144636809067,
+   "labelNoiseRel": 0.07459781469941681
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 1.122800569708284,
+   "relRmse": 187300.20750316358,
+   "relRmseNoiseCorrected": 187300.2075031195,
+   "bias": 5898.1755348914085,
+   "labelNoiseRel": 0.12846737553472767
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 1.9780183455810567,
+   "relRmse": 1434.8500723983811,
+   "relRmseNoiseCorrected": 1434.8500716258688,
+   "bias": 174.7107185731731,
+   "labelNoiseRel": 0.047083743307017485
+  }
+ },
+ "k=1.0 no-view+maps [8, 8]": {
+  "all": {
+   "logRmse": 1.4001913371025803,
+   "relRmse": 544.4364646369305,
+   "relRmseNoiseCorrected": 544.4364595262938,
+   "bias": 31.180483912819398,
+   "labelNoiseRel": 0.07459781469941681
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.964076549316975,
+   "relRmse": 1114.1238822158302,
+   "relRmseNoiseCorrected": 1114.1238748091735,
+   "bias": 43.269978908802415,
+   "labelNoiseRel": 0.12846737553472767
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 1.8009798810021378,
+   "relRmse": 85.03426804528277,
+   "relRmseNoiseCorrected": 85.03425501007294,
+   "bias": 13.586202810644489,
+   "labelNoiseRel": 0.047083743307017485
+  }
+ },
+ "k=0.5 no-view+maps [16, 16]": {
+  "all": {
+   "logRmse": 1.2857807046373706,
+   "relRmse": 10032.35681327451,
+   "relRmseNoiseCorrected": 10032.356812997166,
+   "bias": 374.985154492081,
+   "labelNoiseRel": 0.07459781469941681
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.9498356427420557,
+   "relRmse": 20723.36707214516,
+   "relRmseNoiseCorrected": 20723.367071746965,
+   "bias": 621.5765047742921,
+   "labelNoiseRel": 0.12846737553472767
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 1.622783402080256,
+   "relRmse": 118.44125410661394,
+   "relRmseNoiseCorrected": 118.44124474805477,
+   "bias": 16.111807369502035,
+   "labelNoiseRel": 0.047083743307017485
+  }
+ },
+ "k=0.5 no-view+maps [8, 8]": {
+  "all": {
+   "logRmse": 1.2852737825775062,
+   "relRmse": 5872.663770485745,
+   "relRmseNoiseCorrected": 5872.663770011953,
+   "bias": 244.7347854276946,
+   "labelNoiseRel": 0.07459781469941681
+  },
+  "day (muSun>=0.25)": {
+   "logRmse": 0.9718249910910183,
+   "relRmse": 12127.09838561738,
+   "relRmseNoiseCorrected": 12127.098384936926,
+   "bias": 406.00916452918597,
+   "labelNoiseRel": 0.12846737553472767
+  },
+  "low sun (muSun<0.25)": {
+   "logRmse": 1.616102371548242,
+   "relRmse": 181.43891330051864,
+   "relRmseNoiseCorrected": 181.43890719135803,
+   "bias": 10.02632478205325,
+   "labelNoiseRel": 0.047083743307017485
+  }
+ }
+}

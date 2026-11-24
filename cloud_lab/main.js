@@ -6,6 +6,7 @@ import { LabCompositeModule } from './labComposite.js';
 import { FlyCamera, localFrame } from './flyCamera.js';
 import { buildPanel } from './labPanel.js';
 import { PerfOverlay } from './perfOverlay.js';
+import { attachSolarLab } from './solarLabPanel.js';
 
 const params = new URLSearchParams(location.search);
 const planetRadiusKm = Number(params.get('radius')) || 6360;
@@ -15,7 +16,7 @@ const status = document.querySelector('#status');
 const hud = document.querySelector('#hud');
 const panelRoot = document.querySelector('#panel');
 
-const backend = new WebGPUBackend(canvas, { optionalFeatures: ['timestamp-query'] });
+const backend = new WebGPUBackend(canvas, { optionalFeatures: ['timestamp-query', 'shader-f16'] });
 const renderer = new Renderer({ canvas, backend, ownsBackend: true, clearColor: [0, 0, 0, 1] });
 const timerModule = new GpuTimerModule();
 const camera = new FlyCamera(canvas, { planetRadiusKm });
@@ -128,9 +129,11 @@ const sections = [
     ] },
 ];
 const panel = buildPanel(panelRoot, sections);
+let solar;
 document.querySelector('#reset').addEventListener('click', () => {
     Object.assign(s, DEFAULT_CLOUD_SETTINGS);
     panel.refresh();
+    solar?.refresh();
 });
 
 let stopped = false;
@@ -157,6 +160,7 @@ async function start() {
     clouds.gpuTimer = timerModule.timer;
     composite.gpuTimer = timerModule.timer;
     perf = new PerfOverlay(document.querySelector('#perf'), { timer: timerModule.timer });
+    solar = attachSolarLab(document.querySelector('#solar-lab'), clouds);
     perf.runButton.addEventListener('click', () => runProfile().catch(fail));
     applySun();
     goTo(PRESETS[0]);
@@ -197,7 +201,7 @@ async function start() {
             animation = requestAnimationFrame(tick);
         } catch (error) { fail(error); }
     }
-    window.cloudLab = { renderer, clouds, composite, camera, sun, presets: PRESETS, goTo, timer: timerModule.timer, runProfile };
+    window.cloudLab = { renderer, clouds, composite, camera, sun, solar, presets: PRESETS, goTo, timer: timerModule.timer, runProfile };
     animation = requestAnimationFrame(tick);
 }
 
@@ -258,6 +262,7 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('pagehide', () => {
     stopped = true;
     cancelAnimationFrame(animation);
+    solar?.dispose();
     camera.dispose();
     renderer.dispose();
 }, { once: true });

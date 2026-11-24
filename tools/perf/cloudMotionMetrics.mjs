@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import process from 'node:process';
 import { PNG } from 'pngjs';
 
 const [capture, ...cases] = process.argv.slice(2);
@@ -22,6 +23,7 @@ function compare(directory) {
     let pixels = 0;
     let sum = 0;
     let over4 = 0;
+    let max = 0;
     for (let frame = 1; frame < poses.length; frame++) {
         const current = load(directory, frame);
         const { width, height, data } = current;
@@ -63,6 +65,7 @@ function compare(directory) {
                 }
                 pixels++;
                 sum += error;
+                max = Math.max(max, error);
                 if (error > 4) over4++;
                 count[Math.round(error)]++;
             }
@@ -74,7 +77,7 @@ function compare(directory) {
         return count.findIndex(n => (cumulative += n) >= pixels * fraction);
     };
     return { frames: poses.length, pixels, meanMaxRgb: sum / pixels, p95: percentile(0.95),
-        p99: percentile(0.99), fractionOver4: over4 / pixels };
+        p99: percentile(0.99), p999: percentile(0.999), max, fractionOver4: over4 / pixels };
 }
 
 const result = {};

@@ -1,0 +1,565 @@
+{
+ "direct": {
+  "bake exp(-(near+far))": {
+   "all": {
+    "logRmse": 1.336774696385218,
+    "relRmse": 0.5282505586672078,
+    "relRmseNoiseCorrected": 0.5282505586672078,
+    "bias": 0.7025018566513146,
+    "labelNoiseRel": 0.0
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 1.4629963493472717,
+    "relRmse": 0.5533643907966485,
+    "relRmseNoiseCorrected": 0.5533643907966485,
+    "bias": 0.630148846363558,
+    "labelNoiseRel": 0.0
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.1644967543586913,
+    "relRmse": 0.39535110862228007,
+    "relRmseNoiseCorrected": 0.39535110862228007,
+    "bias": 1.0173618989203104,
+    "labelNoiseRel": 0.0
+   },
+   "storm/low-sun decks": {
+    "logRmse": 1.5049361658117615,
+    "relRmse": 0.6763797936152898,
+    "relRmseNoiseCorrected": 0.6763797936152898,
+    "bias": 0.4049235929212165,
+    "labelNoiseRel": 0.0
+   },
+   "other": {
+    "logRmse": 1.2362899637182976,
+    "relRmse": 0.45114918310392726,
+    "relRmseNoiseCorrected": 0.45114918310392726,
+    "bias": 0.8184611547304151,
+    "labelNoiseRel": 0.0
+   }
+  },
+  "r5-direct-all-16-16-s0.json": {
+   "all": {
+    "logRmse": 0.8752220806641683,
+    "relRmse": 0.3106263323449759,
+    "relRmseNoiseCorrected": 0.3106263323449759,
+    "bias": 1.0305377036072747,
+    "labelNoiseRel": 0.0
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.6435603872600589,
+    "relRmse": 0.30043065521767714,
+    "relRmseNoiseCorrected": 0.30043065521767714,
+    "bias": 1.0039919648567373,
+    "labelNoiseRel": 0.0
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.3062110210188185,
+    "relRmse": 0.3530459116878064,
+    "relRmseNoiseCorrected": 0.3530459116878064,
+    "bias": 1.1460573259673459,
+    "labelNoiseRel": 0.0
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.931819587718016,
+    "relRmse": 0.3628101517132423,
+    "relRmseNoiseCorrected": 0.3628101517132423,
+    "bias": 0.8893134418627152,
+    "labelNoiseRel": 0.0
+   },
+   "other": {
+    "logRmse": 0.858847341685034,
+    "relRmse": 0.2856869585739886,
+    "relRmseNoiseCorrected": 0.2856869585739886,
+    "bias": 1.0855694994728877,
+    "labelNoiseRel": 0.0
+   }
+  },
+  "r5-direct-all-16-16-s1.json": {
+   "all": {
+    "logRmse": 0.7545510692683015,
+    "relRmse": 0.34795476497059424,
+    "relRmseNoiseCorrected": 0.34795476497059424,
+    "bias": 1.110427789860969,
+    "labelNoiseRel": 0.0
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.5465215058934807,
+    "relRmse": 0.34394945828062656,
+    "relRmseNoiseCorrected": 0.34394945828062656,
+    "bias": 1.1072702134400765,
+    "labelNoiseRel": 0.0
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.136148911236022,
+    "relRmse": 0.36550703360313846,
+    "relRmseNoiseCorrected": 0.36550703360313846,
+    "bias": 1.124168678338113,
+    "labelNoiseRel": 0.0
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.7693380189249347,
+    "relRmse": 0.4397727132524382,
+    "relRmseNoiseCorrected": 0.4397727132524382,
+    "bias": 1.160907476717452,
+    "labelNoiseRel": 0.0
+   },
+   "other": {
+    "logRmse": 0.7580789103766981,
+    "relRmse": 0.30077365133309447,
+    "relRmseNoiseCorrected": 0.30077365133309447,
+    "bias": 1.0907570350761377,
+    "labelNoiseRel": 0.0
+   }
+  },
+  "r5-direct-all-16-16-s2.json": {
+   "all": {
+    "logRmse": 0.8474807425855936,
+    "relRmse": 0.32710980057542777,
+    "relRmseNoiseCorrected": 0.32710980057542777,
+    "bias": 1.0588342268317223,
+    "labelNoiseRel": 0.0
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.6933680782523315,
+    "relRmse": 0.3000416996019615,
+    "relRmseNoiseCorrected": 0.3000416996019615,
+    "bias": 1.0455303508845415,
+    "labelNoiseRel": 0.0
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.1647852200710018,
+    "relRmse": 0.4286151058605623,
+    "relRmseNoiseCorrected": 0.4286151058605623,
+    "bias": 1.1167289699310239,
+    "labelNoiseRel": 0.0
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.9545801523114393,
+    "relRmse": 0.39513989124957255,
+    "relRmseNoiseCorrected": 0.39513989124957255,
+    "bias": 1.0573674412072516,
+    "labelNoiseRel": 0.0
+   },
+   "other": {
+    "logRmse": 0.7962249189402777,
+    "relRmse": 0.2936117836354081,
+    "relRmseNoiseCorrected": 0.2936117836354081,
+    "bias": 1.0594057989261156,
+    "labelNoiseRel": 0.0
+   }
+  }
+ },
+ "ms": {
+  "deployed": {
+   "all": {
+    "logRmse": 1.2435060021300275,
+    "relRmse": 0.36173279041691697,
+    "relRmseNoiseCorrected": 0.32414548310731633,
+    "bias": 1.072208627786541,
+    "labelNoiseRel": 0.160562503231401
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.4094438506346157,
+    "relRmse": 0.2861461631509965,
+    "relRmseNoiseCorrected": 0.24054378015634997,
+    "bias": 0.987544407778213,
+    "labelNoiseRel": 0.1549784388685416
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 2.027489114014037,
+    "relRmse": 0.6419931288289441,
+    "relRmseNoiseCorrected": 0.6133949614761146,
+    "bias": 1.4933932713457676,
+    "labelNoiseRel": 0.18947769974140236
+   },
+   "storm/low-sun decks": {
+    "logRmse": 1.1155292930569878,
+    "relRmse": 0.324428862826764,
+    "relRmseNoiseCorrected": 0.283317531379801,
+    "bias": 0.9938474734787608,
+    "labelNoiseRel": 0.1580672750695814
+   },
+   "other": {
+    "logRmse": 1.3270106345513046,
+    "relRmse": 0.3897989606795512,
+    "relRmseNoiseCorrected": 0.3542707357497841,
+    "bias": 1.1312533747132274,
+    "labelNoiseRel": 0.16258989986516678
+   }
+  },
+  "r5-ms-all-16-16-s0.json": {
+   "all": {
+    "logRmse": 0.9765364559342886,
+    "relRmse": 0.40068979890303447,
+    "relRmseNoiseCorrected": 0.3671130582000871,
+    "bias": 1.036473590435345,
+    "labelNoiseRel": 0.160562503231401
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.39728606180120546,
+    "relRmse": 0.3365120108927739,
+    "relRmseNoiseCorrected": 0.29870054730610734,
+    "bias": 1.0574715761953413,
+    "labelNoiseRel": 0.1549784388685416
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.590916534803789,
+    "relRmse": 0.6575158163235801,
+    "relRmseNoiseCorrected": 0.6296231015586793,
+    "bias": 0.9320135346181935,
+    "labelNoiseRel": 0.18947769974140236
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.8926562770938818,
+    "relRmse": 0.3884793691856814,
+    "relRmseNoiseCorrected": 0.35486752011839884,
+    "bias": 1.093188550040204,
+    "labelNoiseRel": 0.1580672750695814
+   },
+   "other": {
+    "logRmse": 1.0323612228489296,
+    "relRmse": 0.4104788230817574,
+    "relRmseNoiseCorrected": 0.37690501278229205,
+    "bias": 0.9937391454618407,
+    "labelNoiseRel": 0.16258989986516678
+   }
+  },
+  "r5-ms-all-16-16-s1.json": {
+   "all": {
+    "logRmse": 0.9528371774755311,
+    "relRmse": 0.4191516332746747,
+    "relRmseNoiseCorrected": 0.3871792533606284,
+    "bias": 1.065618925421884,
+    "labelNoiseRel": 0.160562503231401
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.4138555680918468,
+    "relRmse": 0.37026417000060957,
+    "relRmseNoiseCorrected": 0.3362695928449523,
+    "bias": 1.0848677796823147,
+    "labelNoiseRel": 0.1549784388685416
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.5432423264251192,
+    "relRmse": 0.630377362995076,
+    "relRmseNoiseCorrected": 0.6012269297672326,
+    "bias": 0.9698603887011125,
+    "labelNoiseRel": 0.18947769974140236
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.8665761570262914,
+    "relRmse": 0.43028994968560935,
+    "relRmseNoiseCorrected": 0.4002051690727164,
+    "bias": 1.1196428272070802,
+    "labelNoiseRel": 0.1580672750695814
+   },
+   "other": {
+    "logRmse": 1.0099878914644747,
+    "relRmse": 0.40974570178608233,
+    "relRmseNoiseCorrected": 0.3761064538053078,
+    "bias": 1.0249121793679616,
+    "labelNoiseRel": 0.16258989986516678
+   }
+  },
+  "r5-ms-all-16-16-s2.json": {
+   "all": {
+    "logRmse": 0.8177623787397373,
+    "relRmse": 0.3748672297107367,
+    "relRmseNoiseCorrected": 0.3387404942829667,
+    "bias": 0.9848497015610511,
+    "labelNoiseRel": 0.160562503231401
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.3898669175967926,
+    "relRmse": 0.30819137574489774,
+    "relRmseNoiseCorrected": 0.2663899539573564,
+    "bias": 1.0179907875724694,
+    "labelNoiseRel": 0.1549784388685416
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.3192395863867667,
+    "relRmse": 0.6341463215276103,
+    "relRmseNoiseCorrected": 0.6051774602607952,
+    "bias": 0.8199805691517325,
+    "labelNoiseRel": 0.18947769974140236
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.7399584893965027,
+    "relRmse": 0.3412764698698694,
+    "relRmseNoiseCorrected": 0.30246382500873914,
+    "bias": 1.000226860099197,
+    "labelNoiseRel": 0.1580672750695814
+   },
+   "other": {
+    "logRmse": 0.8691471660144982,
+    "relRmse": 0.4004353192092697,
+    "relRmseNoiseCorrected": 0.3659412102128767,
+    "bias": 0.9732630877297869,
+    "labelNoiseRel": 0.16258989986516678
+   }
+  }
+ },
+ "sky": {
+  "deployed": {
+   "all": {
+    "logRmse": 0.23599072588727374,
+    "relRmse": 0.14235137613908702,
+    "relRmseNoiseCorrected": 0.1339271907161444,
+    "bias": 0.9523518908365483,
+    "labelNoiseRel": 0.048243360948148295
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.2928101032117794,
+    "relRmse": 0.2034086819533389,
+    "relRmseNoiseCorrected": 0.1879070996302667,
+    "bias": 0.9053951284955498,
+    "labelNoiseRel": 0.07788461852340031
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 0.1398170909281459,
+    "relRmse": 0.12143293695002152,
+    "relRmseNoiseCorrected": 0.1157398577556176,
+    "bias": 0.9761026822149524,
+    "labelNoiseRel": 0.036745659648689206
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.27234764934872263,
+    "relRmse": 0.1557778602904073,
+    "relRmseNoiseCorrected": 0.14747542427517596,
+    "bias": 0.9068831475703685,
+    "labelNoiseRel": 0.05017709628420614
+   },
+   "other": {
+    "logRmse": 0.20753947481041038,
+    "relRmse": 0.13542347112760283,
+    "relRmseNoiseCorrected": 0.12689993065353608,
+    "bias": 0.9748580990498332,
+    "labelNoiseRel": 0.04728555944869869
+   }
+  },
+  "r5-sky-all-16-16-s0.json": {
+   "all": {
+    "logRmse": 0.2654493000800406,
+    "relRmse": 0.15626000522242117,
+    "relRmseNoiseCorrected": 0.14862626738412618,
+    "bias": 0.9356616340387068,
+    "labelNoiseRel": 0.048243360948148295
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.32779747017282557,
+    "relRmse": 0.20884750859572918,
+    "relRmseNoiseCorrected": 0.1937814956184093,
+    "bias": 0.9563129967382398,
+    "labelNoiseRel": 0.07788461852340031
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 0.1594720989708224,
+    "relRmse": 0.13927937735605958,
+    "relRmseNoiseCorrected": 0.13434471129774456,
+    "bias": 0.9252161479637843,
+    "labelNoiseRel": 0.036745659648689206
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.31636583160458287,
+    "relRmse": 0.16999089373575071,
+    "relRmseNoiseCorrected": 0.1624166338820159,
+    "bias": 0.9281689270859877,
+    "labelNoiseRel": 0.05017709628420614
+   },
+   "other": {
+    "logRmse": 0.2240783610663033,
+    "relRmse": 0.14920966238082972,
+    "relRmseNoiseCorrected": 0.14151890055898816,
+    "bias": 0.9393703889029404,
+    "labelNoiseRel": 0.04728555944869869
+   }
+  },
+  "r5-sky-all-16-16-s1.json": {
+   "all": {
+    "logRmse": 0.2539689249363816,
+    "relRmse": 0.15730031541017775,
+    "relRmseNoiseCorrected": 0.14971962914918033,
+    "bias": 0.9236541920277415,
+    "labelNoiseRel": 0.048243360948148295
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.3102977267358554,
+    "relRmse": 0.19370247680457786,
+    "relRmseNoiseCorrected": 0.17735454806035403,
+    "bias": 0.9579690887792369,
+    "labelNoiseRel": 0.07788461852340031
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 0.16146976059034793,
+    "relRmse": 0.1463001006980709,
+    "relRmseNoiseCorrected": 0.14161029609900677,
+    "bias": 0.9062976726834627,
+    "labelNoiseRel": 0.036745659648689206
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.3026644479507841,
+    "relRmse": 0.17187703827167664,
+    "relRmseNoiseCorrected": 0.16438970555825233,
+    "bias": 0.9064069442118946,
+    "labelNoiseRel": 0.05017709628420614
+   },
+   "other": {
+    "logRmse": 0.21447762721750324,
+    "relRmse": 0.1497883420121093,
+    "relRmseNoiseCorrected": 0.14212889667608136,
+    "bias": 0.9321912687658684,
+    "labelNoiseRel": 0.04728555944869869
+   }
+  },
+  "r5-sky-all-16-16-s2.json": {
+   "all": {
+    "logRmse": 0.26996837241829624,
+    "relRmse": 0.16796704955427288,
+    "relRmseNoiseCorrected": 0.1608897382072401,
+    "bias": 0.9278484781346704,
+    "labelNoiseRel": 0.048243360948148295
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.3284881166670726,
+    "relRmse": 0.20385253363304212,
+    "relRmseNoiseCorrected": 0.18838747746619194,
+    "bias": 0.9580810239797891,
+    "labelNoiseRel": 0.07788461852340031
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 0.17483332775513144,
+    "relRmse": 0.15724315112691656,
+    "relRmseNoiseCorrected": 0.15288938836068713,
+    "bias": 0.9125568171808973,
+    "labelNoiseRel": 0.036745659648689206
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.3172045987776742,
+    "relRmse": 0.17361946966687758,
+    "relRmseNoiseCorrected": 0.16621064723986045,
+    "bias": 0.9410463121825688,
+    "labelNoiseRel": 0.05017709628420614
+   },
+   "other": {
+    "logRmse": 0.23221971581011705,
+    "relRmse": 0.16518076053339587,
+    "relRmseNoiseCorrected": 0.1582679990333316,
+    "bias": 0.9213157882094725,
+    "labelNoiseRel": 0.04728555944869869
+   }
+  }
+ },
+ "sunTotal": {
+  "deployed (bake T + deployed ms)": {
+   "all": {
+    "logRmse": 1.1833215418813168,
+    "relRmse": 0.27378232913009337,
+    "relRmseNoiseCorrected": 0.26018385329740584,
+    "bias": 1.041778183503311,
+    "labelNoiseRel": 0.08521224223791314
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.39364395807358105,
+    "relRmse": 0.28184184855806527,
+    "relRmseNoiseCorrected": 0.24750913205220673,
+    "bias": 0.949430015602385,
+    "labelNoiseRel": 0.1348111907424257
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.8430954862400344,
+    "relRmse": 0.2699593160641918,
+    "relRmseNoiseCorrected": 0.2658622259276364,
+    "bias": 1.2464951996539626,
+    "labelNoiseRel": 0.04685412633534693
+   },
+   "storm/low-sun decks": {
+    "logRmse": 1.0877839501033257,
+    "relRmse": 0.3124219144995008,
+    "relRmseNoiseCorrected": 0.2927061906548868,
+    "bias": 0.9469414605347403,
+    "labelNoiseRel": 0.10922700495682597
+   },
+   "other": {
+    "logRmse": 1.2428265333024406,
+    "relRmse": 0.2583181739921321,
+    "relRmseNoiseCorrected": 0.24731244420105694,
+    "bias": 1.0980596360613846,
+    "labelNoiseRel": 0.07459781469941681
+   }
+  },
+  "learned T + deployed ms": {
+   "all": {
+    "logRmse": 1.1873382588441777,
+    "relRmse": 0.25227778749178176,
+    "relRmseNoiseCorrected": 0.23745095458754384,
+    "bias": 1.071452961682146,
+    "labelNoiseRel": 0.08521224223791314
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.3863483281736329,
+    "relRmse": 0.2671777724323811,
+    "relRmseNoiseCorrected": 0.23067272255847363,
+    "bias": 0.9911996174380223,
+    "labelNoiseRel": 0.1348111907424257
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.8516888401459852,
+    "relRmse": 0.24505347428739951,
+    "relRmseNoiseCorrected": 0.24053252608675718,
+    "bias": 1.249358225459484,
+    "labelNoiseRel": 0.04685412633534693
+   },
+   "storm/low-sun decks": {
+    "logRmse": 1.0883489768168089,
+    "relRmse": 0.28952258757361254,
+    "relRmseNoiseCorrected": 0.26812830903036267,
+    "bias": 0.9846912308011309,
+    "labelNoiseRel": 0.10922700495682597
+   },
+   "other": {
+    "logRmse": 1.248941424707576,
+    "relRmse": 0.23730448078194144,
+    "relRmseNoiseCorrected": 0.22527446069463422,
+    "bias": 1.1229422591566536,
+    "labelNoiseRel": 0.07459781469941681
+   }
+  },
+  "learned T + new ms": {
+   "all": {
+    "logRmse": 0.7649817156320773,
+    "relRmse": 0.2544666173617163,
+    "relRmseNoiseCorrected": 0.23977517203476537,
+    "bias": 1.0072928386678148,
+    "labelNoiseRel": 0.08521224223791314
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.3664417105559898,
+    "relRmse": 0.2853646777927808,
+    "relRmseNoiseCorrected": 0.2515133041856572,
+    "bias": 1.01821699075174,
+    "labelNoiseRel": 0.1348111907424257
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.161119452061856,
+    "relRmse": 0.2387686563658036,
+    "relRmseNoiseCorrected": 0.2341263806325177,
+    "bias": 0.9830762259354836,
+    "labelNoiseRel": 0.04685412633534693
+   },
+   "storm/low-sun decks": {
+    "logRmse": 0.7209801770820532,
+    "relRmse": 0.2992089900719566,
+    "relRmseNoiseCorrected": 0.2785596545231232,
+    "bias": 0.9900970822661338,
+    "labelNoiseRel": 0.10922700495682597
+   },
+   "other": {
+    "logRmse": 0.7921473481103121,
+    "relRmse": 0.23612258233462524,
+    "relRmseNoiseCorrected": 0.2240291050967337,
+    "bias": 1.017497768971471,
+    "labelNoiseRel": 0.07459781469941681
+   }
+  }
+ }
+}

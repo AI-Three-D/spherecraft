@@ -1,0 +1,50 @@
+{
+ "direct": {
+  "bake exp(-(near+far))": {
+   "all": {
+    "logRmse": 1.2362899637182976,
+    "relRmse": 0.45114918310392726,
+    "relRmseNoiseCorrected": 0.45114918310392726,
+    "bias": 0.8184611547304151,
+    "labelNoiseRel": 0.0
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 1.3284510744824969,
+    "relRmse": 0.46344480385681863,
+    "relRmseNoiseCorrected": 0.46344480385681863,
+    "bias": 0.7554231081228368,
+    "labelNoiseRel": 0.0
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.2261365450644433,
+    "relRmse": 0.4009337273723981,
+    "relRmseNoiseCorrected": 0.4009337273723981,
+    "bias": 1.0506466967400097,
+    "labelNoiseRel": 0.0
+   }
+  },
+  "r5-direct-all-16-16-s0.json": {
+   "all": {
+    "logRmse": 0.8103712898947955,
+    "relRmse": 0.2984136267048905,
+    "relRmseNoiseCorrected": 0.2984136267048905,
+    "bias": 1.0398786758413368,
+    "labelNoiseRel": 0.0
+   },
+   "day (muSun>=0.25)": {
+    "logRmse": 0.41306032144198573,
+    "relRmse": 0.211171908844769,
+    "relRmseNoiseCorrected": 0.211171908844769,
+    "bias": 1.007642415633293,
+    "labelNoiseRel": 0.0
+   },
+   "low sun (muSun<0.25)": {
+    "logRmse": 1.2709770065796895,
+    "relRmse": 0.5081382631331013,
+    "relRmseNoiseCorrected": 0.5081382631331013,
+    "bias": 1.1586132171471757,
+    "labelNoiseRel": 0.0
+   }
+  }
+ }
+}

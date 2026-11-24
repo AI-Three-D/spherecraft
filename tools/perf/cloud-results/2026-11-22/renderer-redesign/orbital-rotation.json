@@ -1,0 +1,38 @@
+{
+  "game-orbit-cloud-pan-slabs16": {
+    "before": {
+      "frames": 10,
+      "pixels": 8968320,
+      "meanMaxRgb": 0.40513534078148944,
+      "p95": 1,
+      "p99": 6,
+      "fractionOver4": 0.015186121815457075
+    },
+    "after": {
+      "frames": 10,
+      "pixels": 8968320,
+      "meanMaxRgb": 0.4186310414563775,
+      "p95": 1,
+      "p99": 7,
+      "fractionOver4": 0.016428940983372584
+    }
+  },
+  "game-orbit-cloud-pan-slabs24": {
+    "before": {
+      "frames": 10,
+      "pixels": 8968320,
+      "meanMaxRgb": 0.40502114534557787,
+      "p95": 1,
+      "p99": 6,
+      "fractionOver4": 0.015194038571326625
+    },
+    "after": {
+      "frames": 10,
+      "pixels": 8968320,
+      "meanMaxRgb": 0.3942763851218327,
+      "p95": 1,
+      "p99": 6,
+      "fractionOver4": 0.01473876935702562
+    }
+  }
+}

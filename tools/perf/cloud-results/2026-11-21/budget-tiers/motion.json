@@ -1,0 +1,56 @@
+{
+  "game-deck-grazing-pan-medium": {
+    "before": {
+      "frames": 15,
+      "pixels": 13950720,
+      "meanMaxRgb": 0.6661359357072125,
+      "p95": 2,
+      "p99": 8,
+      "fractionOver4": 0.020342247568584274
+    },
+    "after": {
+      "frames": 15,
+      "pixels": 13950720,
+      "meanMaxRgb": 0.3111549825576268,
+      "p95": 1,
+      "p99": 3,
+      "fractionOver4": 0.007413094091201028
+    }
+  },
+  "game-deck-grazing-pan-high": {
+    "before": {
+      "frames": 15,
+      "pixels": 13950720,
+      "meanMaxRgb": 0.5559068008570096,
+      "p95": 2,
+      "p99": 6,
+      "fractionOver4": 0.016081392214882098
+    },
+    "after": {
+      "frames": 15,
+      "pixels": 13950720,
+      "meanMaxRgb": 0.3146826103715289,
+      "p95": 1,
+      "p99": 3,
+      "fractionOver4": 0.0071569782778236534
+    }
+  },
+  "game-deck-grazing-pan-ultra": {
+    "before": {
+      "frames": 15,
+      "pixels": 13950720,
+      "meanMaxRgb": 0.5559049718634043,
+      "p95": 2,
+      "p99": 6,
+      "fractionOver4": 0.016081033810441323
+    },
+    "after": {
+      "frames": 15,
+      "pixels": 13950720,
+      "meanMaxRgb": 0.3379803259237707,
+      "p95": 1,
+      "p99": 3,
+      "fractionOver4": 0.007808987636480411
+    }
+  }
+}

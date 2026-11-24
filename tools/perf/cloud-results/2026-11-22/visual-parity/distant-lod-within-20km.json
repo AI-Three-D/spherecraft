@@ -1,0 +1,326 @@
+{
+  "game-deck-ground-pan-distant-30": {
+    "frames": 10,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 1858893,
+      "mean": 0.21500566139383429,
+      "p99": 5.1875,
+      "p999": 39.125
+    },
+    "opacityError": {
+      "count": 1858893,
+      "mean": 0.1527613122085481,
+      "p99": 2.125,
+      "p999": 34.25
+    },
+    "displayError": {
+      "count": 1846583,
+      "mean": 0.10376517058805372,
+      "p99": 2,
+      "p999": 23
+    },
+    "radianceMotionError": {
+      "count": 1669036,
+      "mean": 0.029921788106503276,
+      "p99": 0.75,
+      "p999": 5
+    },
+    "opacityMotionError": {
+      "count": 1669036,
+      "mean": 0.022245143049433386,
+      "p99": 0.375,
+      "p999": 4.25
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0.8125,
+        "frame": 7
+      },
+      "opacity": {
+        "p99": 0.4375,
+        "frame": 8
+      }
+    },
+    "changedDepths": 63721,
+    "changedFiniteDepths": 63721,
+    "maxDepthShiftMeters": 3141.1514282226562,
+    "visibleDepthErrorMeters": {
+      "count": 277538,
+      "mean": 9.202980516001016,
+      "p99": 220.625,
+      "p999": 512
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.0031154769903412
+  },
+  "game-deck-ground-pan-distant-34": {
+    "frames": 10,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 1859852,
+      "mean": 0.2340055908723161,
+      "p99": 5.6875,
+      "p999": 41.875
+    },
+    "opacityError": {
+      "count": 1859852,
+      "mean": 0.16961547625613949,
+      "p99": 2.5,
+      "p999": 36.625
+    },
+    "displayError": {
+      "count": 1847542,
+      "mean": 0.12036965871411855,
+      "p99": 2,
+      "p999": 25
+    },
+    "radianceMotionError": {
+      "count": 1669846,
+      "mean": 0.03460601168478577,
+      "p99": 0.875,
+      "p999": 6.125
+    },
+    "opacityMotionError": {
+      "count": 1669846,
+      "mean": 0.026492427565868174,
+      "p99": 0.5,
+      "p999": 5.5
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0.875,
+        "frame": 2
+      },
+      "opacity": {
+        "p99": 0.5,
+        "frame": 2
+      }
+    },
+    "changedDepths": 64684,
+    "changedFiniteDepths": 64684,
+    "maxDepthShiftMeters": 3141.1514282226562,
+    "visibleDepthErrorMeters": {
+      "count": 277478,
+      "mean": 9.334293409306332,
+      "p99": 220.3125,
+      "p999": 512
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.0009035514500455
+  },
+  "game-history-slow-pan-distant-30": {
+    "frames": 10,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 1596987,
+      "mean": 0.14780184918803044,
+      "p99": 2,
+      "p999": 41.875
+    },
+    "opacityError": {
+      "count": 1596987,
+      "mean": 0.119241080495132,
+      "p99": 0.75,
+      "p999": 37.875
+    },
+    "displayError": {
+      "count": 1582832,
+      "mean": 0.08237829409564629,
+      "p99": 1,
+      "p999": 24
+    },
+    "radianceMotionError": {
+      "count": 1436888,
+      "mean": 0.003533512885693272,
+      "p99": 0.125,
+      "p999": 0.5
+    },
+    "opacityMotionError": {
+      "count": 1436888,
+      "mean": 0.0020330426233822604,
+      "p99": 0.0625,
+      "p999": 0.375
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0.125,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 0.0625,
+        "frame": 1
+      }
+    },
+    "changedDepths": 41138,
+    "changedFiniteDepths": 41138,
+    "maxDepthShiftMeters": 7293.530464172363,
+    "visibleDepthErrorMeters": {
+      "count": 319931,
+      "mean": 19.003759724374458,
+      "p99": 357.1875,
+      "p999": 512
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.00967018901905
+  },
+  "game-history-slow-pan-distant-34": {
+    "frames": 10,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 1596444,
+      "mean": 0.19085065769233187,
+      "p99": 2.125,
+      "p999": 48.9375
+    },
+    "opacityError": {
+      "count": 1596444,
+      "mean": 0.15681623853394452,
+      "p99": 0.8125,
+      "p999": 43.9375
+    },
+    "displayError": {
+      "count": 1582285,
+      "mean": 0.0919511971610677,
+      "p99": 1,
+      "p999": 29
+    },
+    "radianceMotionError": {
+      "count": 1436409,
+      "mean": 0.004288572634306138,
+      "p99": 0.125,
+      "p999": 0.625
+    },
+    "opacityMotionError": {
+      "count": 1436409,
+      "mean": 0.0026834892220222594,
+      "p99": 0.0625,
+      "p999": 0.5625
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 0.125,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 0.0625,
+        "frame": 1
+      }
+    },
+    "changedDepths": 40567,
+    "changedFiniteDepths": 40567,
+    "maxDepthShiftMeters": 7293.530464172363,
+    "visibleDepthErrorMeters": {
+      "count": 319353,
+      "mean": 24.672072596690835,
+      "p99": 512,
+      "p999": 512
+    },
+    "horizontalOpacityEdgeEnergyRatio": 1.0154892324009206
+  },
+  "game-cache-weather-handoff-distant-30": {
+    "frames": 10,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 1606222,
+      "mean": 0.08315544661985413,
+      "p99": 2.375,
+      "p999": 11.0625
+    },
+    "opacityError": {
+      "count": 1606222,
+      "mean": 0.06238193241313565,
+      "p99": 1.75,
+      "p999": 9.1875
+    },
+    "displayError": {
+      "count": 1594340,
+      "mean": 0.09245957574921285,
+      "p99": 3,
+      "p999": 14
+    },
+    "radianceMotionError": {
+      "count": 1434425,
+      "mean": 0.022823359957053313,
+      "p99": 0.75,
+      "p999": 2.5625
+    },
+    "opacityMotionError": {
+      "count": 1434425,
+      "mean": 0.01814266896741098,
+      "p99": 0.5,
+      "p999": 2.375
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 1.1875,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 0.875,
+        "frame": 1
+      }
+    },
+    "changedDepths": 77425,
+    "changedFiniteDepths": 77425,
+    "maxDepthShiftMeters": 5513.375282287598,
+    "visibleDepthErrorMeters": {
+      "count": 108482,
+      "mean": 11.306171310336753,
+      "p99": 198.25,
+      "p999": 512
+    },
+    "horizontalOpacityEdgeEnergyRatio": 0.995947218580549
+  },
+  "game-cache-weather-handoff-distant-34": {
+    "frames": 10,
+    "reuseFrames": 0,
+    "rgbaError": {
+      "count": 1606298,
+      "mean": 0.08713411264602186,
+      "p99": 2.5,
+      "p999": 11.375
+    },
+    "opacityError": {
+      "count": 1606298,
+      "mean": 0.06543461124297259,
+      "p99": 1.875,
+      "p999": 9.4375
+    },
+    "displayError": {
+      "count": 1594411,
+      "mean": 0.0931271798802191,
+      "p99": 3,
+      "p999": 14
+    },
+    "radianceMotionError": {
+      "count": 1434530,
+      "mean": 0.02490358144313081,
+      "p99": 0.8125,
+      "p999": 2.75
+    },
+    "opacityMotionError": {
+      "count": 1434530,
+      "mean": 0.019676793858388258,
+      "p99": 0.5,
+      "p999": 2.5
+    },
+    "peakFrameMotionError": {
+      "radiance": {
+        "p99": 1.25,
+        "frame": 1
+      },
+      "opacity": {
+        "p99": 0.875,
+        "frame": 1
+      }
+    },
+    "changedDepths": 77508,
+    "changedFiniteDepths": 77508,
+    "maxDepthShiftMeters": 7413.209915161133,
+    "visibleDepthErrorMeters": {
+      "count": 108446,
+      "mean": 12.102540410866704,
+      "p99": 215.4375,
+      "p999": 512
+    },
+    "horizontalOpacityEdgeEnergyRatio": 0.9974550876794178
+  }
+}

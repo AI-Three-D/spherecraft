@@ -1,0 +1,162 @@
+{
+ "chrome": "Chrome/158.0.8127.36",
+ "adapter": "apple metal-3 ",
+ "features": [
+  "timestamp-query",
+  "shader-f16"
+ ],
+ "results": {
+  "empty loop": {
+   "medianMs": 0.030958,
+   "minMs": 0.030834,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.010497368706597222
+  },
+  "game octaves (4 HG + 4 exp)": {
+   "medianMs": 0.190833,
+   "minMs": 0.190458,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.06470845540364584
+  },
+  "mlp probes-8 [22-8-8-1] f32": {
+   "medianMs": 1.370375,
+   "minMs": 1.004417,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.4646725124782986
+  },
+  "mlp probes-8 [22-8-8-1] f16": {
+   "medianMs": 1.593788,
+   "minMs": 1.588289,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.5404283311631944
+  },
+  "mlp probes-16 [22-16-16-1] f32": {
+   "medianMs": 1.905254,
+   "minMs": 1.711609,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.6460415310329861
+  },
+  "mlp probes-16 [22-16-16-1] f16": {
+   "medianMs": 1.810056,
+   "minMs": 1.358167,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.6137613932291667
+  },
+  "mlp probes-32 [22-32-32-1] f32": {
+   "medianMs": 5.420377,
+   "minMs": 5.365422,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 1.8379642062717014
+  },
+  "mlp probes-32 [22-32-32-1] f16": {
+   "medianMs": 3.877007,
+   "minMs": 3.86309,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 1.314631822374132
+  },
+  "mlp probes-64 [22-64-64-1] f32": {
+   "medianMs": 17.876622,
+   "minMs": 17.116393,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 6.061680094401042
+  },
+  "mlp probes-64 [22-64-64-1] f16": {
+   "medianMs": 13.678001,
+   "minMs": 13.28813,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 4.637994045681424
+  },
+  "mlp cheap-16 [12-16-16-1] f32": {
+   "medianMs": 1.351354,
+   "minMs": 1.346979,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.45822279188368054
+  },
+  "mlp cheap-16 [12-16-16-1] f16": {
+   "medianMs": 1.072151,
+   "minMs": 1.070234,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.3635494656032986
+  },
+  "mlp cheap-32 [12-32-32-1] f32": {
+   "medianMs": 4.584055,
+   "minMs": 4.457766,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 1.554380628797743
+  },
+  "mlp cheap-32 [12-32-32-1] f16": {
+   "medianMs": 3.341116,
+   "minMs": 3.25745,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 1.1329196506076389
+  },
+  "mlp descriptor-16 [38-16-16-1] f32": {
+   "medianMs": 2.632627,
+   "minMs": 2.569211,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.8926822238498264
+  },
+  "mlp descriptor-16 [38-16-16-1] f16": {
+   "medianMs": 2.50267,
+   "minMs": 1.828931,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.8486158582899306
+  },
+  "mlp descriptor-32 [38-32-32-1] f32": {
+   "medianMs": 7.306263,
+   "minMs": 7.162474,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 2.4774383544921874
+  },
+  "mlp descriptor-32 [38-32-32-1] f16": {
+   "medianMs": 5.072214,
+   "minMs": 4.964424,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 1.7199076334635417
+  },
+  "cloudDensity (game, with detail)": {
+   "medianMs": 1.208398,
+   "minMs": 0.77003,
+   "rays": 184320,
+   "k": 16,
+   "evaluations": 2949120,
+   "nsPerEval": 0.40974867078993055
+  }
+ }
+}
