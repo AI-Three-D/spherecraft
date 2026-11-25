@@ -7,7 +7,8 @@
 import { Matrix4, Vector4 } from '../../../shared/math/index.js';
 import { TerrainGeometryBuilder } from './geometry/terrainGeometryBuilder.js';
 import { TerrainMaterialBuilder } from './materials/terrainMaterialBuilder.js';
-import { createTerrainSurfaceTexture } from './materials/terrainSurfaceTexture.js';
+import { createGroundMaterials } from './materials/groundMaterials.js';
+import { TerrainLightMap } from './light/TerrainLightMap.js';
 import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
 import { Logger } from '../../../shared/Logger.js';
 
@@ -36,7 +37,9 @@ export class QuadtreeTerrainRenderer {
         this._geometries = new Map();
         this._materials = new Map();
         this._overlayMaterials = new Map();
-        this._surfaceTexture = null;
+        this._ground = null;
+        this._landLight = null;
+        this._wetness = 0;
         this._lodIndexCounts = [];
         this._lodSegments = null;
         this._maxGeomLOD = 0;
@@ -58,8 +61,12 @@ export class QuadtreeTerrainRenderer {
         this._maxGeomLOD = this.tileManager?.maxGeomLOD ??
             Math.max(0, this._lodSegments.length - 1);
 
-        if (this.engineConfig.rendering?.terrainShader?.surfaceRelief === true) {
-            this._surfaceTexture ??= createTerrainSurfaceTexture(this.backend.device);
+        if (this.engineConfig.rendering?.terrainShader?.groundMaterials === true) {
+            this._ground ??= await createGroundMaterials(this.backend.device);
+            if (!this._landLight && this.engineConfig.rendering.terrainShader.landLight) {
+                this._landLight = new TerrainLightMap(this.backend.device);
+                await this._landLight.initialize();
+            }
         }
         await this._buildGeometriesAndMaterials();
 
@@ -128,6 +135,22 @@ export class QuadtreeTerrainRenderer {
         this._terrainLayerViewMode = numericMode;
     }
 
+    /** Light over the land (TerrainLightMap), before the terrain is drawn with it. */
+    compute(frame, encoder) {
+        this._updateWetness(frame?.deltaTime);
+        const sun = this.uniformManager?.uniforms?.sunLightDirection?.value;
+        const position = frame?.camera?.position;
+        if (!this._landLight || !sun || !position || !encoder) return;
+        const origin = this.planetConfig.origin ?? { x: 0, y: 0, z: 0 };
+        const length = Math.hypot(sun.x, sun.y, sun.z) || 1;
+        this._landLight.update(encoder, {
+            tileStreamer: this.tileManager?.tileStreamer,
+            camera: [position.x - origin.x, position.y - origin.y, position.z - origin.z],
+            radius: this.planetConfig.radius, heightScale: this.planetConfig.heightScale,
+            sun: [sun.x / length, sun.y / length, sun.z / length],
+        });
+    }
+
     render(camera, viewMatrix, projectionMatrix) {
         if (!this._initialized || !this.tileManager?.isReady()) return;
 
@@ -135,6 +158,7 @@ export class QuadtreeTerrainRenderer {
         const indirectBuffer = this.tileManager.getIndirectArgsBuffer();
         const overlayEnabled = this._isHoverOverlayEnabled();
         this._tierFade = this._computeTierFadeDistances();
+        this._shadersLeft = 1;
 
         for (let lod = 0; lod <= this._maxGeomLOD; lod++) {
             this._drawTerrainLod(
@@ -147,6 +171,43 @@ export class QuadtreeTerrainRenderer {
                 overlayEnabled
             );
         }
+    }
+
+    // The new shader compiles beside the one in use, which draws until it is ready: no hitch when rain sets in.
+    _changeFragment(mat, fragment) {
+        if (mat._nextFragment?.fragmentShader !== fragment) {
+            mat._nextFragment = Object.assign(Object.create(Object.getPrototypeOf(mat)), mat, {
+                fragmentShader: fragment, asyncCompile: true, _needsCompile: true, _gpuPipeline: null, _pipelinePromise: null, _pipelineError: null,
+            });
+        }
+        if (!this.backend.compileShader(mat._nextFragment)) return;
+        mat._nextFragment = null;
+        mat.fragmentShader = fragment;
+        mat._needsCompile = true; // the backend now finds the pipeline in its cache
+    }
+
+    // Whether tiles of this level can lie past where the near water meshes have handed over to the terrain's own water.
+    _drawsFarWater(lod) {
+        const water = this._waterData?.value;
+        if (!water?.enabled) return false;
+        const near = water.near;
+        if (!near?.enabled || water.debugMode > 0) return true;
+        return this._farthestOf(lod) >= near.fadeStartM;
+    }
+
+    // Whether tiles of this level can lie where the ground turns into the far tier's.
+    _reachesFarGround(lod) {
+        return !this._tierFade || this._farthestOf(lod) >= this._tierFade.start;
+    }
+
+    // No pixel of a level's tiles is farther than this: their parent, twice as wide, was near enough to be split
+    // (computeSolidTierFadeDistances). Land within a tile rises at most three quarters of its width.
+    _farthestOf(lod) {
+        const { lodFactor, faceSize, maxDepth, lodErrorThreshold } = this.tileManager?.getTierFadeParameters?.() ?? {};
+        if (![lodFactor, faceSize, maxDepth, lodErrorThreshold].every(Number.isFinite)) return Infinity;
+        const parent = faceSize / 2 ** Math.max(0, maxDepth - lod - 1);
+        const threshold = Math.max(1, 4 * Math.floor(lodErrorThreshold / 4) + 2);
+        return parent * lodFactor / threshold + parent * Math.hypot(Math.SQRT1_2, 0.75);
     }
 
     _isHoverOverlayEnabled() {
@@ -162,15 +223,14 @@ export class QuadtreeTerrainRenderer {
         this._applyMaterialUniforms(mat, camera, viewMatrix, projectionMatrix, lod);
         const variants = mat._terrainFragmentVariants;
         if (variants) {
-            // The production pipeline can eliminate the diagnostic branches.
-            // Build their shader on first use and let the backend cache both pipelines.
-            if (mat.uniforms.terrainDebugMode.value !== 0) {
-                variants.diagnostic ??= variants.buildDiagnostic();
-            }
-            const fragment = mat.uniforms.terrainDebugMode.value !== 0 ? variants.diagnostic : variants.production;
-            if (mat.fragmentShader !== fragment) {
-                mat.fragmentShader = fragment;
-                mat._needsCompile = true;
+            const diagnostic = mat.uniforms.terrainDebugMode.value !== 0 || this._terrainLayerViewMode !== 0;
+            const lit = mat.uniforms._clusterBuffers?.value?.numLights > 0;
+            const key = diagnostic ? 'diagnostic'
+                : [lit && 'lit', this._drawsFarWater(lod) && 'wet', this._wetness > 0 && 'rain', this._reachesFarGround(lod) && 'far'].filter(Boolean).join(' ') || 'plain';
+            // At most one shader is written a frame.
+            if (variants[key] || this._shadersLeft-- > 0) {
+                const fragment = variants.get(key);
+                if (mat.fragmentShader !== fragment) this._changeFragment(mat, fragment);
             }
         }
 
@@ -197,7 +257,10 @@ export class QuadtreeTerrainRenderer {
         // LOD seam stitching (bind group 3, binding 21; null = a zeroed dummy, no stitching).
         material.storageBuffers.edgeStitch = this.tileManager.getEdgeStitchBuffer?.() ?? null;
         // Lake water for the terrain shader (bind group 3, bindings 12-15).
-        if (material.uniforms) material.uniforms._waterData = this._waterData ?? { value: null };
+        if (material.uniforms) {
+            material.uniforms._waterData = this._waterData ?? { value: null };
+            material.uniforms._landLight = { value: this._landLight };
+        }
     }
 
     /** Water data (lakes, rivers: core/world/water/WaterGpuData.js) for the terrain shader, or null. */
@@ -260,7 +323,12 @@ export class QuadtreeTerrainRenderer {
             atlasTextures: {
                 micro: this.textureManager?.getAtlasTexture?.('micro') || null,
                 macro: this.textureManager?.getAtlasTexture?.('macro') || null,
-                surface: this._surfaceTexture
+                ground: this._ground && this.engineConfig.rendering.terrainShader.groundMaterials && {
+                    albedo: { _gpuTexture: { texture: this._ground.albedo }, _isArray: true },
+                    surface: { _gpuTexture: { texture: this._ground.surface }, _isArray: true },
+                    sampler: this._ground.sampler,
+                    wideSampler: this._ground.wideSampler,
+                }
             },
             lookupTables: this.textureManager?.getLookupTables?.() || {},
             cachedTextures: this.tileManager.getArrayTextures(),
@@ -424,8 +492,10 @@ export class QuadtreeTerrainRenderer {
         this._geometries.clear();
         this._materials.clear();
         this._overlayMaterials.clear();
-        this._surfaceTexture?._gpuTexture.texture.destroy();
-        this._surfaceTexture = null;
+        this._ground?.destroy();
+        this._ground = null;
+        this._landLight?.dispose();
+        this._landLight = null;
         this._initialized = false;
     }
 
@@ -474,7 +544,17 @@ export class QuadtreeTerrainRenderer {
         }
     }
 
+    // Ground soaks in under half a minute of rain and dries over a few: seconds of the game's own short days.
+    _updateWetness(deltaTime) {
+        const rain = Math.min(1, Math.max(0, this.uniformManager?.currentEnvironmentState?.precipitationIntensity ?? 0));
+        const target = Math.min(1, rain * 1.6);
+        const dt = Math.min(0.25, Math.max(0, deltaTime || 0));
+        const rate = target > this._wetness ? 1 / 12 : 1 / 45;
+        this._wetness += Math.max(-rate * dt, Math.min(rate * dt, target - this._wetness));
+    }
+
     _applyWeatherUniforms(uniforms, sourceUniforms) {
+        if (uniforms.terrainWetness) uniforms.terrainWetness.value = this._wetness;
         if (uniforms.weatherIntensity && sourceUniforms.weatherIntensity) {
             uniforms.weatherIntensity.value = sourceUniforms.weatherIntensity.value;
         }

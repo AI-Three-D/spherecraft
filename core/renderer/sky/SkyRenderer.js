@@ -848,8 +848,12 @@ fn main(input: VertexOutput) -> @location(0) vec4<f32> {
     let tStart = max(0.0, atmoHit.x) * atmoMask;
     let tEnd = atmoHit.y * atmoMask;
     let marchLength = max(tEnd - tStart, 0.0);
-    let numSteps = i32(uniforms.numSamples);
-    let stepSize = marchLength / max(uniforms.numSamples, 1.0);
+    // Near the ground a ray well under the horizon ends in the land or the sea, drawn over this later.
+    let covered = uniforms.viewerAltitude < 20000.0 &&
+        raySphereIntersect(rayOrigin, rayDir, uniforms.planetCenter, uniforms.planetRadius * 0.996).x > 0.0;
+    let samples = select(max(uniforms.numSamples, 1.0), 1.0, covered);
+    let numSteps = i32(samples);
+    let stepSize = marchLength / samples;
 
     var inscatter = vec3<f32>(0.0);
     var transmittance = vec3<f32>(1.0);

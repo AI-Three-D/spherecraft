@@ -36,6 +36,8 @@ Short map of the current code so agents can jump to the right place and make saf
   - streamed vegetation/props via `renderer/streamer`
 - `core/renderer/terrain/QuadtreeTerrainRenderer.js` is the terrain draw path. It consumes buffers from the quadtree tile manager and owns terrain materials/geometries.
 - `core/renderer/terrain/QuadtreeTerrainRenderer.d.ts` documents its typed configuration and source interface.
+- Close and middle ground is drawn from generated surfaces (`terrain/materials/groundMaterials.js`, shader `terrain/shaders/webgpu/groundSurface.wgsl.js`, lab `terrain_lab/`), lit with `terrain/light/TerrainLightMap.js`. The old atlas path remains for diagnostics.
+- WGSL `discard` is not an early exit and costs hidden-surface removal in opaque draws: return zero in blended passes, and keep it out of the terrain shader.
 - `core/renderer/terrain/materials/terrainBindings.js` owns terrain/water shader bindings and packing. Generic backend materials require an explicit binding specification or adapter.
 
 ## TypeScript Interfaces

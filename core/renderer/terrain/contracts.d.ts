@@ -35,6 +35,8 @@ export interface TerrainSource {
 /** A terrain draw implementation may use the existing quadtree shaders or a fixture-specific material. */
 export interface TerrainDraw {
     initialize(): void | Promise<void>;
+    /** Work to encode before the terrain is drawn. */
+    compute?(frame: RenderFrame, encoder: GPUCommandEncoder): void;
     render(camera: RenderCamera, view: RenderCamera['matrixWorldInverse'], projection: RenderCamera['projectionMatrix']): void;
     setWaterData?(data: TerrainWaterData | null): void;
     dispose(): void;

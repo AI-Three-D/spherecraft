@@ -89,7 +89,7 @@ fn seaSceneDepth(pixel: vec2<f32>) -> f32 {
 
 @fragment
 fn main(in: SeaVOut) -> @location(0) vec4<f32> {
-    if (waterParams.sea.y < 0.5) { discard; }
+    if (waterParams.sea.y < 0.5) { return vec4<f32>(0.0); }
     let d = normalize(in.ray);
     var t = seaRayHit(d);
     if (!(t > 0.0)) {
@@ -102,11 +102,11 @@ fn main(in: SeaVOut) -> @location(0) vec4<f32> {
         let groundR = select(U.R, U.atmoPlanetRadius, U.atmoPlanetRadius > 0.0);
         if (b < 0.0 && length(o - d * b) < groundR && seaSceneDepth(in.pos.xy) >= 1.0) { t = -b; }
     }
-    if (!(t > 0.0)) { discard; }
+    if (!(t > 0.0)) { return vec4<f32>(0.0); }
     let wp = U.cameraPos + d * t;
     // The opaque scene along this ray: in front of the surface hides it.
     let behind = nearWaterFront(wp, in.pos.xy);
-    if (behind <= 0.0) { discard; }
+    if (behind <= 0.0) { return vec4<f32>(0.0); }
     // This pass's share: all of it close by (the near meshes' share); farther,
     // only where the ground is clearly behind the surface, past the depth
     // buffer's steps there (they grow with the square of the distance).
@@ -114,11 +114,11 @@ fn main(in: SeaVOut) -> @location(0) vec4<f32> {
     let stepM = viewZ * t * ${SEA_DEPTH_QUANTUM.toExponential(6)} / max(abs(U.projectionMatrix[3].z), 1.0e-9);
     let deepM = ${SEA_DEEP_BASE_M.toFixed(1)} + ${SEA_DEEP_STEPS.toFixed(1)} * stepM;
     let own = max(waterNearWeight(t), smoothstep(deepM, 2.0 * deepM, behind));
-    if (own <= 0.0) { discard; }
+    if (own <= 0.0) { return vec4<f32>(0.0); }
     let dir = normalize(wp - U.origin);
     // Rivers' water near their mouths is the river field's (fieldWaterSurface.wgsl.js).
     let field = riverFieldWater(dir);
-    if (field.x > 0.5 && field.z > -${FIELD_WATER_KEEP_M.toFixed(2)}) { discard; }
+    if (field.x > 0.5 && field.z > -${FIELD_WATER_KEEP_M.toFixed(2)}) { return vec4<f32>(0.0); }
 
     // Close water has the surface of the lakes' (and rivers') close tier; past
     // lakeDetailM the distant one (as the lake sheets choose).
@@ -133,9 +133,9 @@ fn main(in: SeaVOut) -> @location(0) vec4<f32> {
     let farStartM = select(switchM, waterParams.near.x, waterParams.near.z > 0.5);
     let opaque = smoothstep(farStartM, mix(farStartM, switchM * 1.5, 0.15), t);
     let c = nearWaterComposeAs(wp, dir, s, in.pos.xy, dir, own, opaque);
-    if (c.a <= 0.0) { discard; }
+    if (c.a <= 0.0) { return vec4<f32>(0.0); }
     // Water debug views 6 and 7 (waterWgsl.js applyWater): alpha 0 adds the flat colour.
-    if (waterParams.debugMode == 6u) { discard; }
+    if (waterParams.debugMode == 6u) { return vec4<f32>(0.0); }
     if (waterParams.debugMode == 7u) { return vec4<f32>(0.0, 0.0, WATER_OWNER_ON, 0.0); }
     return c;
 }

@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Ground material lab</title>
+<style>html,body{margin:0;background:#222;height:100%}canvas{width:100vw;height:100vh;display:block}</style>
+<canvas id="c"></canvas>
+<script type="module">
+// Every ground material, tiled and lit. Drag: turn the light. Keys: 1-9 one material, 0 all, Space: albedo / lit, W: wide patterns.
+const bust = new URLSearchParams(location.search).get('v') ?? '';
+const { createGroundMaterials, GROUND_LAYERS, GROUND_WIDE, GROUND_WIDE_LAYERS } = await import('/core/renderer/terrain/materials/groundMaterials.js?' + bust);
+const adapter = await navigator.gpu.requestAdapter();
+const device = await adapter.requestDevice();
+window.gpuErrs = [];
+device.addEventListener('uncapturederror', e => { window.gpuErrs.push(e.error.message.slice(0, 1500)); console.error(e.error.message); });
+const t0 = performance.now();
+const ground = await createGroundMaterials(device);
+window.generationMs = performance.now() - t0;
+const canvas = document.getElementById('c');
+const format = navigator.gpu.getPreferredCanvasFormat();
+const context = canvas.getContext('webgpu');
+context.configure({ device, format });
+const module = device.createShaderModule({ code: /* wgsl */`
+struct U { sun: vec4f, view: vec4f, periods: array<vec4f, 5>, slopes: array<vec4f, 5> };
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var albedoMap: texture_2d_array<f32>;
+@group(0) @binding(2) var surfaceMap: texture_2d_array<f32>;
+@group(0) @binding(3) var s: sampler;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f { return vec4f(f32((i << 1u) & 2u) * 2.0 - 1.0, f32(i & 2u) * 2.0 - 1.0, 0.0, 1.0); }
+fn aces(x: vec3f) -> vec3f { return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0)); }
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let size = u.view.xy;
+    var layer = i32(u.view.z) - 1;
+    var local = pos.xy / size.y * u.view.w;
+    let dx = u.view.w / size.y;
+    if (layer < 0) {
+        let grid = vec2f(size.x / 3.0, size.y / 3.0);
+        let cell = floor(pos.xy / grid);
+        layer = i32(cell.y * 3.0 + cell.x);
+        local = (pos.xy - cell * grid) / grid.y * u.view.w;
+    }
+    let metres = local;
+    let period = u.periods[layer / 4][layer % 4];
+    let slopeScale = u.slopes[layer / 4][layer % 4];
+    let uv = metres / period;
+    let g = vec2f(dx / period, 0.0);
+    var albedo = vec3f(0.3);
+    var surface = textureSampleGrad(surfaceMap, s, uv, min(layer, ${GROUND_WIDE_LAYERS.count - 1}), g, g.yx);
+    if (layer < 9) { albedo = textureSampleGrad(albedoMap, s, uv, layer, g, g.yx).rgb; }
+    let raw = (layer >= 9 && layer < ${GROUND_WIDE_LAYERS.slopes}) || layer == ${GROUND_WIDE_LAYERS.fields};
+    if (raw && u.sun.w > 0.5) { return vec4f(surface.aaa, 1.0); }
+    if (u.sun.w > 1.5) { return vec4f(surface.rgb, 1.0); }
+    if (u.sun.w > 0.5) { return vec4f(pow(albedo, vec3f(1.0 / 2.2)), 1.0); }
+    if (raw) { return vec4f(surface.rgb, 1.0); }
+    let slope = (surface.xy * 2.0 - 1.0) * slopeScale;
+    let n = normalize(vec3f(-slope, 1.0));
+    var ao = surface.a; if (layer >= 9) { ao = surface.z; }
+    let sun = normalize(u.sun.xyz);
+    let ndl = max(dot(n, sun), 0.0) * clamp(dot(n, sun) + ao * 2.0 - 1.0, 0.0, 1.0);
+    let light = vec3f(3.0, 2.85, 2.7) * ndl + vec3f(0.36, 0.42, 0.52) * ao * (0.6 + 0.4 * n.z);
+    return vec4f(pow(aces(albedo * light * 0.75), vec3f(1.0 / 2.2)), 1.0);
+}` });
+const pipeline = await device.createRenderPipelineAsync({ layout: 'auto', vertex: { module }, fragment: { module, targets: [{ format }] } });
+const uniform = device.createBuffer({ size: 32 + 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ buffer: uniform }, ground.albedoView, ground.surfaceView, ground.sampler].map((resource, binding) => ({ binding, resource })) });
+const state = window.lab = { layer: 0, metres: 2.4, mode: 0, sun: [0.6, 0.35, 0.6] };
+const periods = new Float32Array(20), slopes = new Float32Array(20);
+GROUND_LAYERS.forEach((l, i) => { periods[i] = l.periodM; slopes[i] = l.slope; });
+const W = GROUND_WIDE_LAYERS;
+for (let k = W.masks; k < W.count; k++) { const w = GROUND_WIDE[k < W.cliff ? 0 : k < W.fields ? 1 : 2]; periods[k] = w.periodM; slopes[k] = w.slope; }
+state.draw = () => {
+    canvas.width = innerWidth * devicePixelRatio; canvas.height = innerHeight * devicePixelRatio;
+    device.queue.writeBuffer(uniform, 0, new Float32Array([...state.sun, state.mode, canvas.width, canvas.height, state.layer, state.metres, ...periods, ...slopes]));
+    const e = device.createCommandEncoder();
+    const pass = e.beginRenderPass({ colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }] });
+    pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.draw(3); pass.end();
+    device.queue.submit([e.finish()]);
+};
+const frame = () => { state.draw(); requestAnimationFrame(frame); };
+frame();
+addEventListener('keydown', e => {
+    if (e.key >= '0' && e.key <= '9') state.layer = Number(e.key);
+    if (e.key === ' ') state.mode = (state.mode + 1) % 3;
+    if (e.key === 'w') { state.layer = state.layer <= 9 ? 10 : 10 + (state.layer - 9) % (W.count - 9); state.metres = periods[state.layer - 1]; }
+});
+addEventListener('wheel', e => { state.metres *= Math.exp(e.deltaY * 0.001); });
+addEventListener('mousemove', e => { if (e.buttons) state.sun = [e.clientX / innerWidth * 2 - 1, e.clientY / innerHeight * 2 - 1, 0.5]; });
+window.labReady = true;
+</script>

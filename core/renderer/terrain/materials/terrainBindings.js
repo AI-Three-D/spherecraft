@@ -4,9 +4,10 @@ import { gpuFormatSampleType } from '../../resources/texture.js';
 import { Logger } from '../../../../shared/Logger.js';
 import { requireNumber, requireInt } from '../../../../shared/requireUtil.js';
 import { LAKE_PARAMS_FLOATS } from '../../../world/water/waterWgsl.js';
+import { TERRAIN_LIGHT_FRAME_FLOATS } from '../light/terrainLight.wgsl.js';
 
 const CHUNK_TEXTURE_NAMES = ['heightTexture', 'normalTexture', 'tileTexture', 'splatDataMap', 'splatIndexMap', 'splatValidMap', 'macroMaskTexture'];
-const ATLAS_TEXTURE_NAMES = ['atlasTexture', 'level2AtlasTexture', 'tileTypeLookup', 'macroTileTypeLookup', 'terrainSurfaceTexture'];
+const ATLAS_TEXTURE_NAMES = ['atlasTexture', 'level2AtlasTexture', 'tileTypeLookup', 'macroTileTypeLookup', 'groundAlbedo', 'groundSurface'];
 const scratchByBackend = new WeakMap();
 function getScratch(backend) {
     let scratch = scratchByBackend.get(backend);
@@ -22,7 +23,7 @@ function getScratch(backend) {
 }
 
 export const terrainBindingAdapter = {
-    cacheKey: 'terrain-v21',
+    cacheKey: 'terrain-v25',
     getCacheKey(material) { return JSON.stringify(material._chunkTextureFormats || {}); },
     createLayouts(backend, material) {
         return createTerrainLayouts.call(backend,
@@ -118,7 +119,7 @@ const slotSampleType = (type) =>
             { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
             { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
             { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
-            { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
+            { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
             { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
             { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
             { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
@@ -127,6 +128,10 @@ const slotSampleType = (type) =>
             // is repeat-mode for atlas tiling and would wrap across tile edges
             // at mip levels > 0.
             { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+            // Generated ground surfaces (groundMaterials.js).
+            { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+            { binding: 10, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+            { binding: 11, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
         ]
     }));
 
@@ -155,6 +160,10 @@ const slotSampleType = (type) =>
             { binding: 18, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
             { binding: 19, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'uniform' } },
             { binding: 20, visibility: GPUShaderStage.FRAGMENT, buffer:  { type: 'read-only-storage' } },
+            // Light over the land (light/TerrainLightMap.js).
+            { binding: 22, visibility: GPUShaderStage.VERTEX, buffer:  { type: 'uniform' } },
+            { binding: 23, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+            { binding: 24, visibility: GPUShaderStage.VERTEX, sampler: { type: 'filtering' } },
             // LOD seam stitching (instanceBufferBuilder.wgsl.js edgeStitchFor).
             { binding: 21, visibility: GPUShaderStage.VERTEX,   buffer:  { type: 'read-only-storage' } },
         ]
@@ -196,7 +205,6 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             const view = ensureView(tex, dimension);
         if (view) return view;
         if (dimension === '2d-array') return this._getOrCreateDummyArrayTextureView();
-        if (dimension === '3d') return this._getOrCreateDummy3DTextureView();
         return this._getOrCreateDummyTextureView();
     };
 
@@ -266,7 +274,8 @@ function createTerrainBindGroups(material, uniforms, geometry) {
         getView('level2AtlasTexture', '2d-array'),   // ← was '2d'
         getView('tileTypeLookup',     '2d'),
         getView('macroTileTypeLookup','2d'),
-        getView('terrainSurfaceTexture', '3d'),
+        getView('groundAlbedo', '2d-array'),
+        getView('groundSurface', '2d-array'),
     ];
     const blendModeView = getView('blendModeTable', '2d');
 
@@ -282,6 +291,9 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             { binding: 6, resource: this._samplerCache.get('nearest') },
             { binding: 7, resource: blendModeView },
             { binding: 8, resource: this._samplerCache.get('linear') },  // ← clamp, trilinear
+            { binding: 9, resource: g2Views[5] },
+            { binding: 10, resource: uniforms.groundSampler?.value ?? this._samplerCache.get('linear-repeat') },
+            { binding: 11, resource: uniforms.groundWideSampler?.value ?? this._samplerCache.get('linear-repeat') },
         ];
         const group = this.device.createBindGroup({
             layout: material._gpuPipeline.bindGroupLayouts[2],
@@ -337,6 +349,10 @@ function createTerrainBindGroups(material, uniforms, geometry) {
     const fieldParamsBuf = field?.params || this._getOrCreateUniformBuffer('_river_field_params_dummy', new Float32Array(8));
     const fieldFlowBuf = field?.flow || dummyStorage;
 
+    const land = uniforms._landLight?.value?.resources || null;
+    const landFrameBuf = land?.frame || this._getOrCreateUniformBuffer('_land_light_dummy', new Float32Array(TERRAIN_LIGHT_FRAME_FLOATS));
+    const landMapView = land?.map || this._getOrCreateDummyArrayTextureView();
+
     // Build cache key including shadow state
     const shadowKey = shadowRenderer ? 'shadow' : 'noshadow';
     const g3CacheKey = `terrain_g3_${needArray ? 'arr' : '2d'}_${g3Key}_${clusterKey}_${shadowKey}_${water ? 'water' : 'nowater'}`;
@@ -348,7 +364,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
     const g3WaterChanged = g3Record?.waterIndex !== waterIndexBuf || g3Record?.waterLakes !== waterLakesBuf
         || g3Record?.waterMasks !== waterMasksView || g3Record?.waterParams !== waterParamsBuf
         || g3Record?.fieldTable !== fieldTableBuf || g3Record?.fieldTexels !== fieldTexelsBuf || g3Record?.fieldParams !== fieldParamsBuf
-        || g3Record?.fieldFlow !== fieldFlowBuf;
+        || g3Record?.fieldFlow !== fieldFlowBuf || g3Record?.landFrame !== landFrameBuf || g3Record?.landMap !== landMapView;
 
     if (!g3Record || g3ViewChanged || g3BufferChanged || g3PipelineChanged || g3WaterChanged) {
         const entries = [
@@ -374,6 +390,9 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             { binding: 19, resource: { buffer: fieldParamsBuf } },
             { binding: 20, resource: { buffer: fieldFlowBuf } },
             { binding: 21, resource: { buffer: edgeStitchBuffer } },
+            { binding: 22, resource: { buffer: landFrameBuf } },
+            { binding: 23, resource: landMapView },
+            { binding: 24, resource: this._samplerCache.get('linear') },
         ];
         const group = this.device.createBindGroup({
             layout: material._gpuPipeline.bindGroupLayouts[3],
@@ -389,6 +408,7 @@ function createTerrainBindGroups(material, uniforms, geometry) {
             waterIndex:waterIndexBuf,waterLakes:waterLakesBuf,waterMasks:waterMasksView,
             waterParams:waterParamsBuf,
             fieldTable:fieldTableBuf,fieldTexels:fieldTexelsBuf,fieldParams:fieldParamsBuf,fieldFlow:fieldFlowBuf,
+            landFrame: landFrameBuf, landMap: landMapView,
         };
         materialCache.set(g3CacheKey, g3Record);
     }
@@ -547,7 +567,7 @@ function packFragmentUniforms(uniforms) {
     f32[52] = fogCol?.r ?? 0.7;
     f32[53] = fogCol?.g ?? 0.8;
     f32[54] = fogCol?.b ?? 1.0;
-    f32[55] = uniforms.macroNoiseWeight?.value ?? 0.5;
+    f32[55] = uniforms.terrainWetness?.value ?? 0;
     i32[56] = uniforms.terrainDebugMode?.value ?? 0;
     i32[57] = uniforms.terrainLayerViewMode?.value ?? 0;
     // Former padding: distance ramp into the solid-color tier (metres).

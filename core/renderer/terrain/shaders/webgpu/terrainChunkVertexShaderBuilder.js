@@ -1,6 +1,10 @@
 // js/renderer/terrain/shaders/webgpu/terrainChunkVertexShaderBuilder.js
+import { GROUND_WRAP_SHARE } from './groundSurface.wgsl.js';
+import { buildTerrainLightWGSL } from '../../light/terrainLight.wgsl.js';
+
 export function buildTerrainChunkVertexShader(options = {}) {
     const instanced = options.instanced === true;
+    const landLight = options.landLight === true;
     const useArrayTextures = options.useArrayTextures === true;
     const useStorageBuffer = options.useStorageBuffer === true;
     const useTransitionTopology = options.useTransitionTopology === true;
@@ -348,7 +352,8 @@ ${storageBufferDecl}
 struct VertexOutput {
     @builtin(position) clipPosition: vec4<f32>,
     @location(0) vUv: vec2<f32>,
-    @location(1) vNormal: vec3<f32>,
+    // Ground coordinate (m): along the cube face, wrapped at a power-of-two share of it so it stays exact, and the height.
+    @location(1) vGround: vec3<f32>,
     @location(2) vWorldPosition: vec3<f32>,
     @location(3) vViewPosition: vec3<f32>,
     @location(4) vDistanceToCamera: f32,
@@ -358,8 +363,8 @@ struct VertexOutput {
     @location(5) vMaterialUv: vec4<f32>,
     @location(6) vWorldPos: vec2<f32>,
     @location(7) vSphereDir: vec3<f32>,
-    @location(8) vHeight: f32,
-    @location(9) vDisplacement: f32,
+    // Sun over the land and open sky (TerrainLightMap.js).
+    @location(8) vLandLight: vec2<f32>,
     @location(10) vAtlasOffset: vec2<f32>,
     @location(11) vAtlasScale: f32,
     @location(12) vLayer: f32,
@@ -725,6 +730,7 @@ fn computeStitchedPosition(
     return StitchedPositionResult(worldPosition, sphereDir, height, 1u);
 }
 
+${landLight ? buildTerrainLightWGSL(3, 22, 23) + '@group(3) @binding(24) var landLightSampler: sampler;' : ''}
 @vertex
 fn main(input: VertexInput${instanceParam}) -> VertexOutput {
     var output: VertexOutput;
@@ -908,10 +914,10 @@ ${edgeStitch ? `    if (useInstancing && DEBUG_VERTEX_MODE != 1 && !FORCE_HEIGHT
     }
     output.vMaterialUv = materialUv;
     output.vWorldPos = worldPos2D;
-    output.vNormal = normal;
+    let groundWrap = faceSizeWorld * ${GROUND_WRAP_SHARE};
+    output.vGround = vec3<f32>(fract(chunkLocation / ${GROUND_WRAP_SHARE}) * groundWrap + positionUV * chunkSizeUVLocal * faceSizeWorld, displacement);
     output.vSphereDir = sphereDirOut;
-    output.vHeight = height;
-    output.vDisplacement = displacement;
+    output.vLandLight = ${landLight ? 'landLightAt(worldPosition - uniforms.planetOrigin, landLightSampler)' : 'vec2<f32>(1.0)'};
     output.vFaceInfo = vec4<f32>(chunkLocation.x, chunkLocation.y, chunkSizeUVLocal, debugInstanceIndex);
     return output;
 }

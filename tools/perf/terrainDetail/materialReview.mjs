@@ -1,18 +1,18 @@
 // Capture and time the live renderer at fixed poses.
-// node tools/perf/terrainDetail/materialReview.mjs OUT_DIR [compare|candidate|baseline|detail|fast] [both|medium|high]
+// node tools/perf/terrainDetail/materialReview.mjs OUT_DIR [compare|ground|unlit|atlas] [both|medium|high]
+// atlas: the textures of before. ground: the generated surfaces (groundMaterials.js) with the light over the land. unlit: without it.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import puppeteer from 'puppeteer-core';
 
 const [out, arm = 'compare', detail = 'both'] = process.argv.slice(2);
 const variants = {
-    baseline: { surfaceRelief: false, skipHiddenMaterial: false },
-    detail: { surfaceRelief: true, skipHiddenMaterial: false },
-    fast: { surfaceRelief: false, skipHiddenMaterial: true },
-    candidate: { surfaceRelief: true, skipHiddenMaterial: true },
+    atlas: { groundMaterials: false, landLight: false },
+    ground: { groundMaterials: true, landLight: true },
+    unlit: { groundMaterials: true, landLight: false },
 };
 if (!out || (arm !== 'compare' && !Object.hasOwn(variants, arm)) || !['both', 'medium', 'high'].includes(detail)) {
-    throw new Error('Usage: materialReview.mjs OUT_DIR [compare|candidate|baseline|detail|fast] [both|medium|high]');
+    throw new Error('Usage: materialReview.mjs OUT_DIR [compare|ground|unlit|atlas] [both|medium|high]');
 }
 await mkdir(out, { recursive: true });
 const url = new URL('/wizard_game/standalone.html', process.env.TERRAIN_REVIEW_URL ?? 'http://localhost:8000');
@@ -20,6 +20,7 @@ const poses = [
     { name: 'ground', pos: [-122700.50, -18459.63, 44221.32], look: [-122691.53, -18377.12, 44218.02] },
     { name: 'slope', pos: [-122561.86, -18446.60, 46057.79], look: [-122619.88, -18406.43, 46079.44] },
     { name: 'mountains', pos: [-124479.36, -18817.94, 46778.63], look: [-124156.22, -17286.03, 46652.55] },
+    { name: 'eye', pos: [-122698.33, -18459.30, 44220.54], look: [-122686.31, -18372.79, 44269.22] },
 ];
 const browser = await puppeteer.launch({
     executablePath: process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -62,11 +63,11 @@ try {
         return {
             gpu: { vendor: adapter?.vendor, architecture: adapter?.architecture, description: adapter?.description },
             timestamps: window.__gpuTimer.supported,
-            surfaceRelief: game.engineConfig.rendering.terrainShader.surfaceRelief,
+            ground: !!game.renderer.quadtreeTerrainRenderer._ground,
         };
     });
     console.log(JSON.stringify({ arm, detail, ...info }));
-    if (!info.timestamps || !info.surfaceRelief) throw new Error('Benchmark requires WebGPU timestamps and the configured surface relief texture');
+    if (!info.timestamps || !info.ground) throw new Error('Benchmark requires WebGPU timestamps and the generated ground surfaces');
     const report = { arm, detail, chrome: await browser.version(), ...info, cases: [], errors };
     const qualities = detail === 'both' ? ['high', 'medium'] : [detail];
     for (const quality of qualities) {
@@ -103,16 +104,18 @@ try {
                 return { resident, settled: !!idleSince, canvas: [game.canvas.width, game.canvas.height] };
             }, pose);
 
-            const arms = arm === 'compare' ? ['baseline', 'candidate', 'fast', 'baseline'] : [arm];
+            const arms = arm === 'compare' ? ['atlas', 'ground', 'unlit', 'ground', 'atlas'] : [arm];
             const record = { quality, ...pose, ...scene, arms: [] };
             report.cases.push(record);
             for (const variant of arms) {
                 await page.evaluate(async settings => {
                     const game = window.gameEngine;
                     const current = game.engineConfig.rendering.terrainShader;
-                    if (Object.entries(settings).some(([key, value]) => current[key] !== value)) {
-                        Object.assign(current, settings);
-                        await game.renderer.quadtreeTerrainRenderer.rebuildMaterials();
+                    const renderer = game.renderer.quadtreeTerrainRenderer;
+                    if (renderer._landLight) renderer._landLight.enabled = settings.landLight;
+                    if (current.groundMaterials !== settings.groundMaterials) {
+                        current.groundMaterials = settings.groundMaterials;
+                        await renderer.rebuildMaterials();
                     }
                     await new Promise(resolve => setTimeout(resolve, 800));
                 }, variants[variant]);

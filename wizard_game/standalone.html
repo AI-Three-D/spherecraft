@@ -507,7 +507,7 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | H: Sea and far water prototype | N: Res while moving | Shift+L: Cloud detail | P: Cloud shape offset | F: Cloud step size | Shift+F: Cloud look | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier | K: Cloud deck | Shift+K: Cloud budgets | U: Cloud history | Shift+U: Cloud caches
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | Shift+G: Ground surfaces | H: Sea and far water prototype | N: Res while moving | Shift+L: Cloud detail | P: Cloud shape offset | F: Cloud step size | Shift+F: Cloud look | I: Near-ground clouds | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour | Shift+P: Cloud tier | K: Cloud deck | Shift+K: Cloud budgets | U: Cloud history | Shift+U: Cloud caches
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
@@ -530,6 +530,7 @@
         <button id="cloud-lights" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Cloud lights (M)</button>
         <button id="bank-preview" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Banks: existing (J)</button>
         <button id="water-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Water fix (H)</button>
+        <button id="ground-look" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Ground (Shift+G)</button>
         <button id="terrain-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Terrain fix (G)</button>
         <button id="rock-mode" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Rocks: wall (Y)</button>
         <button id="river-goto" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Next site (R)</button>
@@ -4072,11 +4073,8 @@
                 // Apply review switches before terrain and water initialize.
                 const placementQueries = new URLSearchParams(location.search);
                 const terrainSurface = placementQueries.get('terrainSurface');
-                if (['baseline', 'candidate', 'detail', 'fast'].includes(terrainSurface)) {
-                    const shader = engineConfig.rendering.terrainShader;
-                    shader.surfaceRelief = terrainSurface === 'candidate' || terrainSurface === 'detail';
-                    shader.skipHiddenMaterial = terrainSurface === 'candidate' || terrainSurface === 'fast';
-                }
+                // The atlas textures of before instead of the generated ground surfaces.
+                if (terrainSurface === 'atlas') engineConfig.rendering.terrainShader.groundMaterials = false;
                 const regionalPreview = placementQueries.get('regionalTerrain');
                 const regionalComparison = ['regionalTerrain', 'regionalBasins', 'regionalWhitewater',
                     'regionalLargeLake', 'regionalOrganicRiver', 'waterPrecompute'].some(k => placementQueries.has(k));
@@ -4569,6 +4567,27 @@
         document.getElementById('terrain-fix').addEventListener('click', () => terrainFixStep());
         setInterval(terrainFixShow, 2000);
 
+        // Debug: the generated ground (groundMaterials.js) with and without the light over the land (TerrainLightMap.js),
+        // and the atlas textures of before. The far tiers keep the generated ground's colours.
+        const GROUND_LOOKS = ['generated, lit by the land', 'generated, no land light', 'atlas textures (before)'];
+        let groundLook = 0;
+        function groundLookShow() { document.getElementById('ground-look').textContent = `Ground: ${GROUND_LOOKS[groundLook]} (Shift+G)`; }
+        async function groundLookStep() {
+            const renderer = gameEngine?.renderer?.quadtreeTerrainRenderer;
+            if (!renderer?._ground) return;
+            const shader = gameEngine.engineConfig.rendering.terrainShader;
+            groundLook = (groundLook + 1) % GROUND_LOOKS.length;
+            groundLookShow();
+            if (renderer._landLight) renderer._landLight.enabled = groundLook === 0;
+            const generated = groundLook < 2;
+            if (shader.groundMaterials !== generated) {
+                shader.groundMaterials = generated;
+                await renderer.rebuildMaterials();
+            }
+        }
+        document.getElementById('ground-look').addEventListener('click', () => groundLookStep());
+        setTimeout(groundLookShow, 2000);
+
         // Debug: sea and far water prototypes in turn (waterFixPrototypes.js,
         // WATER_STATUS.md). Live: no rebuild or regeneration. ?waterFix=N picks
         // one as soon as the water data exists.
@@ -5047,7 +5066,7 @@
             }
             // Debug: far-terrain fix prototypes, the next one.
             if (e.key.toLowerCase() === 'g' && !e.repeat && !e.target?.closest?.('input, textarea')) {
-                terrainFixStep();
+                (e.shiftKey ? groundLookStep : terrainFixStep)();
             }
             // Debug: sea and far water prototypes, the next one.
             if (e.key.toLowerCase() === 'h' && !e.repeat && !e.target?.closest?.('input, textarea')) {

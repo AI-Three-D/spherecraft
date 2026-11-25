@@ -151,8 +151,8 @@ export function buildWhitewaterFragmentShader() {
     return commonWgsl() + VOUT + shadeWgsl() + whitewaterLookWgsl() + /* wgsl */`
 @fragment
 fn main(in: WhiteVOut) -> @location(0) vec4<f32> {
-    if (nearWaterBehind(in.wp, in.pos.xy) <= 0.0) { discard; }
-    if (in.wet.y < -${KEEP_M.toFixed(2)}) { discard; }
+    if (nearWaterBehind(in.wp, in.pos.xy) <= 0.0) { return vec4<f32>(0.0); }
+    if (in.wet.y < -${KEEP_M.toFixed(2)}) { return vec4<f32>(0.0); }
     if (waterParams.debugMode == 6u) { return vec4<f32>(WATER_OWNER_ON, 0.0, WATER_OWNER_ON, 0.0); }
     if (waterParams.debugMode == 7u) { return vec4<f32>(0.0, 0.0, WATER_OWNER_ON, 0.0); }
     if (waterParams.debugMode >= 11u && waterParams.debugMode <= 15u) {
@@ -164,7 +164,7 @@ fn main(in: WhiteVOut) -> @location(0) vec4<f32> {
     let foam = in.flow.z * smoothstep(0.03, 0.4, in.wet.x);
     nearWaterShear = in.shear;
     let c = nearWaterCompose(in.wp, dir, whiteSurface(in.wp, N, in.xy, in.flow.xy, foam, in.flow.w, in.pos.xy), in.pos.xy, N);
-    if (c.a <= 0.0) { discard; }
+    if (c.a <= 0.0) { return vec4<f32>(0.0); }
     // Thin water fades by its own depth, as Whitewater's does: the solver's bed
     // is not the rendered ground to the centimetre, and without this the surface
     // ended on a hard, stepped line along the banks.

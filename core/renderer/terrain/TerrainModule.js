@@ -40,6 +40,7 @@ export class TerrainModule {
     compute(frame, encoder) {
         if (!this.source.isReady()) return;
         assertSynchronous(this.source.update?.(frame.camera, encoder));
+        assertSynchronous(this.renderer.compute?.(frame, encoder));
         for (const layer of this.waterLayers) assertSynchronous(layer.compute?.(frame, encoder));
     }
 
