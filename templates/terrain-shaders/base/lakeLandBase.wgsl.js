@@ -225,6 +225,6 @@ fn terrainSurfaceGradient(hd: vec4<f32>, unitDir: vec3<f32>) -> vec3<f32> {
     let g = hd.yzw;
     return (g - unitDir * dot(unitDir, g)) / noiseReferenceRadiusM();
 }
-${createLakeCellsWgsl(undefined, { table: options?.lakeTable ?? null })}
+${createLakeCellsWgsl(undefined, { table: options?.lakeTable ?? null, preparedTile: options?.preparedLakeTile === true })}
 `;
 }

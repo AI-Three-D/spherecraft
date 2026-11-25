@@ -200,6 +200,7 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const hasBaseHeightBinding = hasHeightBindings && options?.hasBaseHeightBinding === true;
   const hasSmoothSplatIdsBinding = options?.hasSmoothSplatIdsBinding === true;
   const hasBiomeClimateBinding = options?.hasBiomeClimateBinding === true;
+  const hasBiomeHeightBinding = options?.hasBiomeHeightBinding === true;
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
   const landscape = usesBiomeLandscape(options, baseId) ? options.biomeLandscape : null;
@@ -331,6 +332,7 @@ ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
 ${hasBaseHeightBinding ? '@group(0) @binding(4) var baseHeightMap: texture_2d<f32>;' : ''}
 ${hasSmoothSplatIdsBinding ? '@group(0) @binding(5) var smoothSplatIdsTexture: texture_storage_2d<rgba8unorm, write>;' : ''}
 ${hasBiomeClimateBinding ? '@group(0) @binding(5) var biomeClimateOut: texture_storage_2d<rgba8unorm, write>;' : ''}
+${hasBiomeHeightBinding ? '@group(0) @binding(6) var biomeHeightOut: texture_storage_2d<r32float, write>;' : ''}
 @group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
 
 const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY: f32 = ${wgslFloat(authoredSplatSourceMinProbability, 0.18)};
@@ -419,26 +421,26 @@ fn sampleHeightAt(coord: vec2<i32>) -> f32 {
     return textureLoad(heightMap, coord, 0).r;
 }
 
-// heightMap may be the base-height target with its 1-texel apron (2 texels
-// larger than this pass's output, unpadded passes only): this tile's texel
-// coord is then at +1.
+// Consumers of the tile interior skip the base-height apron. The splat
+// passes cover the entire padded texture, so their offset is zero.
 fn heightInputCoord(coord: vec2<i32>) -> vec2<i32> {
     let d = vec2<i32>(textureDimensions(heightMap)) - vec2<i32>(textureDimensions(outputTexture));
-    let padded = abs(uniforms.uvOffset.x) > 0.0 || abs(uniforms.uvOffset.y) > 0.0;
-    return coord + select(vec2<i32>(0), vec2<i32>(1), (d == vec2<i32>(2)) & vec2<bool>(!padded));
+    return coord + max(d / 2, vec2<i32>(0));
 }
 
 ${landscape ? `
-fn landscapeClimatePayload(ground: vec4<f32>, dir: vec3<f32>, seed: i32) -> vec4<f32> {
-    let climate = ground.zw;
+fn packLandscapeClimate(ground: vec4<f32>, cover: BiomeCover, ice: f32, dir: vec3<f32>, seed: i32) -> vec4<f32> {
     let neutral = 128.0 / 255.0;
-    let heightAboveSea = (ground.r - uniforms.waterParams.y) * maxTerrainHeightM();
-    if (heightAboveSea <= 0.0) { return vec4<f32>(climate, neutral, 0.5); }
-    let cover = biomeCover(climate.x, climate.y, ground.g, ground.r * maxTerrainHeightM(), 0.0);
+    if (ground.r <= uniforms.waterParams.y) { return vec4<f32>(ground.zw, neutral, 0.5); }
     let vegetation = cover.grass + cover.forest + 0.68 * cover.marsh + 0.18 * cover.tundra;
-    let ice = landscapeIceCover(ground.r, ground.g, climate, dir, seed);
     let coverSignal = neutral + vegetation * (1.0 - ice) * (1.0 - neutral) - ice * neutral;
-    return vec4<f32>(climate, coverSignal, biomeProvince_d(dir, seed).x);
+    return vec4<f32>(ground.zw, coverSignal, biomeProvince_d(dir, seed).x);
+}
+
+fn landscapeClimatePayload(ground: vec4<f32>, dir: vec3<f32>, seed: i32) -> vec4<f32> {
+    let cover = biomeCover(ground.z, ground.w, ground.g, ground.r * maxTerrainHeightM(), 0.0);
+    let ice = landscapeIceCover(ground.r, ground.g, ground.zw, dir, seed);
+    return packLandscapeClimate(ground, cover, ice, dir, seed);
 }
 
 fn landscapeMicroM(cover: BiomeCover, dir: vec3<f32>, seed: i32, slope: f32) -> f32 {
@@ -449,6 +451,16 @@ fn landscapeMicroM(cover: BiomeCover, dir: vec3<f32>, seed: i32, slope: f32) -> 
     let amplitude = 2.5 * cover.grass + 4.8 * cover.forest + 1.0 * cover.marsh + 3.3 * cover.tundra
         + 1.1 * cover.snow + 0.55 * cover.sand + 2.7 * cover.rock;
     return (n * 0.72 + mounds * 0.28) * amplitude * (1.0 - 0.26 * slope);
+}
+
+fn landscapeFinalHeight(baseH: f32, slope: f32, cover: BiomeCover, dir: vec3<f32>) -> f32 {
+    var micro = 0.0;
+    if (baseH > uniforms.waterParams.y && terrainFeatureOn(TF_MICRO_DETAIL)) {
+        micro = landscapeMicroM(cover, dir, uniforms.seed, slope);
+    }
+    let gain = clamp(getTerrainProfile().microGain, 0.0, 5.0);
+    let metres = riverCarveMicroAt(dir, baseH * maxTerrainHeightM(), micro * gain * regionalBasinMicroKeep(dir));
+    return softClampHeight(baseH + regionalValleyMicro(metres / maxTerrainHeightM(), dir), -1.1, 1.8, 0.25);
 }
 ` : ''}
 
@@ -528,11 +540,14 @@ fn sampleBaseHeightProcedural(face: i32, u: f32, v: f32) -> f32 {
 // module and may round the terrain function differently.) Across a face edge
 // it falls back to the caller's clamped u, v.
 fn borderBaseHeight(face: i32, u: f32, v: f32, coord: vec2<i32>, maxC: vec2<i32>, preferTexture: bool) -> f32 {
-${hasBaseHeightBinding ? `    // heightBase with its 1-texel apron holds every neighbour, including the
-    // adjacent tiles' texels (written by the same base-pass module on both
-    // sides of an edge, so shared-edge normals agree exactly).
-    if (all(vec2<i32>(textureDimensions(baseHeightMap)) == maxC + vec2<i32>(3))) {
-        return softClampHeight(textureLoad(baseHeightMap, coord + vec2<i32>(1), 0).r, -1.1, 1.8, 0.25);
+${hasBaseHeightBinding ? `    // All neighbouring texels come from the same base pass. A wide splat
+    // apron extends past a cube-face edge, where normals still clamp.
+    let apron = (vec2<i32>(textureDimensions(baseHeightMap)) - (maxC + vec2<i32>(1))) / 2;
+    if (all(apron > vec2<i32>(0))) {
+        let outside = ((coord < vec2<i32>(0)) & (uniforms.chunkCoord <= vec2<i32>(0)))
+            | ((coord > maxC) & (uniforms.chunkCoord >= vec2<i32>(uniforms.chunkGridSize - 1)));
+        let sampleCoord = select(coord, clamp(coord, vec2<i32>(0), maxC), outside);
+        return softClampHeight(textureLoad(baseHeightMap, sampleCoord + apron, 0).r, -1.1, 1.8, 0.25);
     }
     let inside = all(coord >= vec2<i32>(0)) && all(coord <= maxC);
     if (preferTexture && inside) {
@@ -1192,7 +1207,8 @@ fn computeAuthoredSmoothSplatPayload(
 
     return payload;
 }
-
+`,
+    options.includeMain === false ? '' : `
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let texSize = textureDimensions(outputTexture);
@@ -1260,33 +1276,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 u = (chunkCoord.x + localUV.x) / totalChunks;
                 v = (chunkCoord.y + localUV.y) / totalChunks;
             } else {
-                // Base-height apron: a base-pass target 2 texels larger than
-                // the chunk (tileGenerator) also holds, around the tile, the
-                // adjacent tiles' edge-adjacent texels (index -1 is the
-                // previous tile's texel n-2, index n the next tile's texel
-                // 1), computed with that tile's own arithmetic so both tiles
-                // get bit-identical values. Beyond the face edge it repeats
-                // this tile's edge texel. The normal pass reads its border
-                // samples from it instead of evaluating the terrain.
+                // Use each neighbour's local UV arithmetic throughout the
+                // apron. A wide apron also supplies splat samples beyond
+                // the cube face, where splats extend the same projection.
                 let n = max(uniforms.chunkSize, 1);
-                let hasApron = uniforms.outputType == 0 && n > 2
-                    && i32(texSize.x) == n + 2 && i32(texSize.y) == n + 2;
+                let apron = (i32(texSize.x) - n) / 2;
+                let hasApron = uniforms.outputType == 0 && apron > 0 && apron < n
+                    && i32(texSize.x) == i32(texSize.y) && i32(texSize.x) == n + 2 * apron;
                 var px = pixelCoord;
                 var chunkShift = vec2<i32>(0);
                 if (hasApron) {
-                    let idx = vec2<i32>(global_id.xy) - vec2<i32>(1);
+                    let idx = vec2<i32>(global_id.xy) - vec2<i32>(apron);
                     let grid = max(uniforms.chunkGridSize, 1);
                     let below = idx < vec2<i32>(0);
                     let above = idx > vec2<i32>(n - 1);
                     chunkShift = select(vec2<i32>(0), vec2<i32>(-1), below) + select(vec2<i32>(0), vec2<i32>(1), above);
-                    var local = select(select(idx, vec2<i32>(1), above), vec2<i32>(n - 2), below);
+                    var local = idx - chunkShift * (n - 1);
                     let c = uniforms.chunkCoord + chunkShift;
                     let offFace = vec2<bool>(c.x < 0 || c.x >= grid, c.y < 0 || c.y >= grid);
-                    local = select(local, clamp(idx, vec2<i32>(0), vec2<i32>(n - 1)), offFace);
+                    let edge = select(idx, clamp(idx, vec2<i32>(0), vec2<i32>(n - 1)), apron == 1);
+                    local = select(local, edge, offFace);
                     chunkShift = select(chunkShift, vec2<i32>(0), offFace);
                     px = vec2<f32>(local);
                 }
-                let localChunk = floor(px / chunkSizePx);
+                let localChunk = select(floor(px / chunkSizePx), vec2<f32>(0.0), hasApron);
                 let localPixel = px - localChunk * chunkSizePx;
 
                 if (chunkSizePx.x < 2.0) {
@@ -1495,9 +1508,18 @@ if (uniforms.outputType == 0) {
     let coordC = vec2<i32>(global_id.xy);
     // heightMap here is heightBase: .r = height, .g = cached stable slope.
     let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
-    ${hasBiomeClimateBinding ? 'textureStore(biomeClimateOut, coordC, landscapeClimatePayload(heightSample, unitDir, uniforms.seed));' : ''}
     let h = heightSample.r;
     let slope = heightSample.g;
+    ${hasBiomeClimateBinding || hasBiomeHeightBinding ? `
+    var cover: BiomeCover;
+    var ice = 0.0;
+    if (h > oceanLevel) {
+        cover = biomeCover(heightSample.z, heightSample.w, slope, h * maxTerrainHeightM(), 0.0);
+        ice = landscapeIceCover(h, slope, heightSample.zw, unitDir, uniforms.seed);
+    }
+    ${hasBiomeClimateBinding ? 'textureStore(biomeClimateOut, coordC, packLandscapeClimate(heightSample, cover, ice, unitDir, uniforms.seed));' : ''}
+    ${hasBiomeHeightBinding ? 'textureStore(biomeHeightOut, coordC, vec4<f32>(landscapeFinalHeight(h, slope, cover, unitDir)));' : ''}
+    ` : ''}
     ${landscape ? `if (uniforms.face >= 0) {
         gLandscapeClimate = heightSample.zw;
         gLandscapeClimateValid = true;
@@ -1540,7 +1562,11 @@ if (uniforms.outputType == 0) {
     if (h <= oceanLevel) {
         tileType = SURFACE_WATER;
     } else {
-        tileType = determineTileType(h, slope, wx, wy, unitDir, uniforms.seed);
+        ${hasBiomeClimateBinding || hasBiomeHeightBinding ? `if (uniforms.face >= 0) {
+            tileType = selectLandscapeTile(cover, ice, selectTileVariant(wx, wy, unitDir, uniforms.seed), unitDir);
+        } else {
+            tileType = determineTileType(h, slope, wx, wy, unitDir, uniforms.seed);
+        }` : 'tileType = determineTileType(h, slope, wx, wy, unitDir, uniforms.seed);'}
         let drawnTile = tileType;
         drawValid = gTileDrawValid;
         draw = gTileDraw;
@@ -1721,15 +1747,11 @@ else if (uniforms.outputType == 4) {
     let profile = getTerrainProfile();
 ${landscape ? `
     if (uniforms.face >= 0) {
-        var micro = 0.0;
+        var cover: BiomeCover;
         if (baseH > uniforms.waterParams.y && terrainFeatureOn(TF_MICRO_DETAIL)) {
-            let cover = biomeCover(heightSample.z, heightSample.w, slope, baseH * maxTerrainHeightM(), 0.0);
-            micro = landscapeMicroM(cover, unitDir, uniforms.seed, slope);
+            cover = biomeCover(heightSample.z, heightSample.w, slope, baseH * maxTerrainHeightM(), 0.0);
         }
-        let gain = clamp(profile.microGain, 0.0, 5.0);
-        let metres = riverCarveMicroAt(unitDir, baseH * maxTerrainHeightM(), micro * gain * regionalBasinMicroKeep(unitDir));
-        let delta = regionalValleyMicro(metres / maxTerrainHeightM(), unitDir);
-        textureStore(outputTexture, coordC, vec4<f32>(softClampHeight(baseH + delta, -1.1, 1.8, 0.25), 0.0, 0.0, 1.0));
+        textureStore(outputTexture, coordC, vec4<f32>(landscapeFinalHeight(baseH, slope, cover, unitDir), 0.0, 0.0, 1.0));
         return;
     }
 ` : ''}

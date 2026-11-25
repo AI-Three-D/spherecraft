@@ -1184,6 +1184,7 @@ drainScatterCommitQueue() {
         if (this._disposed) return;
         this._disposed = true;
         this._generationEpoch++;
+        this.tileGenerator?.clearSplatBases?.();
         const activeJobs = [];
         for (const queue of [this._generationQueue, this._refinementQueue, this._regenQueue]) {
             for (const entry of queue?.pending?.values() ?? []) {
@@ -1230,6 +1231,7 @@ drainScatterCommitQueue() {
         this._requestFreshness.clear();
 this._freshnessSkipCount = 0;
         this._generationEpoch++;
+        this.tileGenerator?.clearSplatBases?.();
         this._generationQueue.clearPending?.(null);
         this._refinementQueue.clearPending?.(null);
         this._regenQueue.clearPending?.(null);
@@ -1744,6 +1746,7 @@ this._freshnessSkipCount = 0;
         const distance = (Number.isFinite(geom.distanceToCamera) && tileWidth > 0) ? geom.distanceToCamera / tileWidth : null;
         const request = this._regenQueue.request(key, Number.isFinite(distance) ? -distance : 0, async () => {
             if (!this._tileInfo.has(key)) return false;
+            this.tileGenerator._discardSplatBase?.(key);
             const version = this._terrainCarveVersion();
             const refinementTypes = this._refinementTypesFor(tileAddr);
             const types = [...new Set([...this._geometryTypes, ...refinementTypes])];
@@ -2115,11 +2118,14 @@ this._freshnessSkipCount = 0;
                 // remaining configured types follow as a background
                 // refinement pass once this commits.
                 const carveVersion = this._terrainCarveVersion();
-                const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, this._geometryTypes);
+                const retainSplatBase = this._reuseResidentGeometryForRefinement
+                    && this._refinementTypesFor(tileAddr).includes('splatData') && this._refinementChangesPixels(tileAddr);
+                const textures = await this.tileGenerator.generateTile(tileAddr, telemetry, this._geometryTypes, null, retainSplatBase);
                 if (Number.isFinite(telemetry.computeSubmitted)) {
                     this._stageLatency.startToSubmit.push(telemetry.computeSubmitted - telemetry.generationStart);
                 }
                 if (generationEpoch !== this._generationEpoch) {
+                    this.tileGenerator._discardSplatBase?.(key);
                     this._requestTimestamps.delete(key);
                     this._prewarmKeys.delete(key);
                     this._tileState.delete(key);
@@ -2134,6 +2140,7 @@ this._freshnessSkipCount = 0;
                     this._wastedGenerationsWindowCount++;
                 }
                 if (!committed) {
+                    this.tileGenerator._discardSplatBase?.(key);
                     this._requestTimestamps.delete(key);
                     this._tileState.delete(key);
                 } else {
@@ -2237,6 +2244,7 @@ _evictTile(key) {
     }
 
     this._tileInfo.delete(key);
+    this.tileGenerator?._discardSplatBase?.(key);
     this._layerToKey.delete(info.layer);
     this._debugCopyStateByLayer.delete(info.layer);
     this._tileState.delete(key);

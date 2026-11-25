@@ -103,6 +103,9 @@ const STRETCH_FACTOR = 2.1;
 const KS_QUARTER = 0.03;
 // The fade's width varies around a lake by this range of factors.
 const FADE_VARY = [0.6, 1.6];
+const LAKE_RIM_SAMPLES_MAX = Math.max(...LAKE_CELL_TIERS.map(tier => tier.rimSamples));
+export const LAKE_BUILD_SAMPLES = 1 + LAKE_RIM_SAMPLES_MAX + 30;
+export const LAKE_TILE_RECORD_CAPACITY = 128;
 
 export function lakeCellTierLimits(t) {
     const L = t.lenMax;
@@ -117,20 +120,12 @@ function num(v) {
 
 // lakeAssessBase and lakeAssess share this body; only lakeAssess lowers the
 // land by the larger lakes (two functions: WGSL has no recursion).
-const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: LakeCand, seed: i32) -> LakeAssess {
-    var a: LakeAssess;
+const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: LakeCand, seed: i32@PARAMS@) -> LakeAssess {
     let H = maxTerrainHeightM();
     let g2 = lakeHash4(cell, lakeSalt(seed, tier) ^ 0x1b873593u);
     let g3 = lakeHash4(cell, lakeSalt(seed, tier) ^ 0xcc9e2d51u);
-    let fr = lakeFrame(c, cell, tier, seed);
-    a.a1 = fr[0];
-    a.a2 = fr[1];
-    a.shape = lakeShapeOf(t, tier, cell, seed, c.len);
-    a.u0 = lakeU0(t, c.len);
-    a.uC = a.u0 + (t.outline + t.scallop) * a.shape.minAxis;
-
-    let Bc = landBands_d(seed, c.dir);
-    if (Bc.landBlend.x < 0.999) { a.reason = 1; return a; }
+    var a = @SHAPE@;
+    @CENTER@
     a.cliffH = mix(t.cliffMin, t.cliffMax, g3.y);
     a.cliffW = a.cliffH / mix(t.steepMin, t.steepMax, g3.w);
     // Each lake its own balance of gentle shores and cliffs.
@@ -140,22 +135,16 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
     // to stand above the level wherever the fine terrain dips there (the
     // cliff counts where it is). Kept per point for the lowering below.
 @NESTED@    // The larger lakes whose lowering reaches this lake's containment curve.
-    let larger = lakeLargerFind(tier, c, LAKE_EXTENT_FACTOR * a.shape.extent + (a.uC + 0.25 * a.shape.ks) * a.shape.stretch, seed);
+    @LARGER@
 @END@
-    var pts: array<vec4<f32>, 128>;
+    var pts: array<vec4<f32>, LAKE_RIM_SAMPLE_CAPACITY>;
     var tMin = 1.0e30;
     var need = 0.0;
     var fNeg = 0.0;
     let w = a.shape.minAxis;
     let seedN = seed + 9901 + lakeTierId(tier) * 17;
     for (var k = 0; k < t.rimSamples; k++) {
-        let th = 6.2831853 * (f32(k) + 0.5) / f32(t.rimSamples);
-        let r = lakeCurveRadius(a.shape, th, a.uC);
-        let dk = lakeLocalDir(c, a, r * cos(th), r * sin(th));
-        let B = landBands_d(seed, dk);
-        if (B.landBlend.x < 0.999) { a.reason = 2; return a; }
-        var total = lakeBandsTotal(B).x * H;
-        var coarse = lakeBandsCoarse(B, t.coarseBands).x * H;
+        @RIM@
 @NESTED@        if (tier > 0) {
             // A larger lake may lower the land here: the level and banks
             // follow the lowered land.
@@ -165,10 +154,7 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
         }
 @END@
         let dip = max(0.0, coarse - total);
-        let nO = clamp(fbmAuto_d(dk, 0.7 * w / 1000.0, 2, seedN, 2.0, 0.5).x, -1.0, 1.0);
-        let nS = clamp(fbmAuto_d(dk, 0.18 * w / 1000.0, 2, seedN + 5, 2.0, 0.5).x, -1.0, 1.0);
-        let u = max(a.uC - (nO * t.outline + nS * t.scallop) * w, a.u0);
-        let cliff = lakeCliff_d(a, lakeBankNoise(seed, tier, dk, c.len)).x * a.cliffH * (1.0 - exp(-u / a.cliffW));
+        @RIM_BANK@
         need = max(need, (dip + LAKE_MARGIN_M + 0.5 + 0.25 * lakeCreaseM(c.len) - cliff) / u);
         tMin = min(tMin, total);
         fNeg = max(fNeg, dip);
@@ -213,26 +199,19 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
     // Inside: the coarse relief the bed replaces, and the fine bands' highest
     // bump, which the bed sinks below (so the fine bands make islands and
     // coves rather than leaving the lake dry).
-    var fPos = max(0.0, lakeBandsTotal(Bc).x * H - lakeBandsCoarse(Bc, t.coarseBands).x * H);
-    var inMax = lakeBandsCoarse(Bc, t.coarseBands).x * H;
-    var comp = a.shape.comp;
-    var rot = a.shape.rot;
+    var fPos = max(0.0, centerTotal - centerCoarse);
+    var inMax = centerCoarse;
     // The interior points: x, y in the lake's frame, coarse and fine height (m).
     var inPts: array<vec4<f32>, 30>;
     for (var j = 0; j < 6; j++) {
         if (j >= a.shape.n) { break; }
         for (var q = 0; q < 5; q++) {
-            let e = comp[j];
-            let ox = select(0.0, select(-0.5, 0.5, q % 2 == 0) * e.z, q > 0 && q < 3);
-            let oy = select(0.0, select(-0.5, 0.5, q % 2 == 0) * e.w, q >= 3);
-            let x = e.x + ox * cos(rot[j]) - oy * sin(rot[j]);
-            let y = e.y + ox * sin(rot[j]) + oy * cos(rot[j]);
-            let B = landBands_d(seed, lakeLocalDir(c, a, x, y));
-            let coarse = lakeBandsCoarse(B, t.coarseBands).x * H;
-            let fine = lakeBandsTotal(B).x * H - coarse;
+            let xy = lakeInteriorSample(a.shape, j, q);
+            @INTERIOR@
+            let fine = total - coarse;
             fPos = max(fPos, fine);
             inMax = max(inMax, coarse);
-            inPts[j * 5 + q] = vec4<f32>(x, y, coarse, fine);
+            inPts[j * 5 + q] = vec4<f32>(xy, coarse, fine);
         }
     }
     if (inMax - a.level > t.headMax) { a.reason = 8; return a; }
@@ -259,18 +238,45 @@ const LAKE_ASSESS_BODY = `fn @NAME@(tier: i32, t: LakeTier, cell: vec3<i32>, c: 
 
 `;
 
-function lakeAssessFunction(name, nested) {
+function lakeAssessFunction(name, nested, { sampled = false, knownLarger = false } = {}) {
     let out = LAKE_ASSESS_BODY;
     for (let a = out.indexOf('@NESTED@'); a >= 0; a = out.indexOf('@NESTED@')) {
         const b = out.indexOf('@END@\n', a);
         out = out.slice(0, a) + (nested ? out.slice(a + '@NESTED@'.length, b) : '') + out.slice(b + '@END@\n'.length);
     }
-    return out.replace('@NAME@', name);
+    return out.replace('@NAME@', name)
+        .replace('@PARAMS@', sampled ? ', candidate: LakeAssess, slot: u32' : knownLarger ? ', larger: LakeLarger' : '')
+        .replace('@SHAPE@', sampled ? 'candidate' : 'lakeAssessShape(tier, t, cell, c, seed)')
+        .replace('@LARGER@', knownLarger ? '' : `let larger = lakeLargerFind(tier, c,
+        LAKE_EXTENT_FACTOR * a.shape.extent + (a.uC + 0.25 * a.shape.ks) * a.shape.stretch, seed);`)
+        .replace('@CENTER@', sampled ? `let center = lakeBuildSamples[slot * LAKE_BUILD_SAMPLE_COUNT];
+    let centerTotal = center.x;
+    let centerCoarse = center.y;` : `let Bc = landBands_d(seed, c.dir);
+    if (Bc.landBlend.x < 0.999) { a.reason = 1; return a; }
+    let centerTotal = lakeBandsTotal(Bc).x * H;
+    let centerCoarse = lakeBandsCoarse(Bc, t.coarseBands).x * H;`)
+        .replace('@RIM@', sampled ? `let band = lakeBuildSamples[slot * LAKE_BUILD_SAMPLE_COUNT + 1u + u32(k)];
+        if (band.w <= 0.0) { a.reason = 2; return a; }
+        let total = band.x;
+        let coarse = band.y;` : `let dk = lakeRimSample(c, a, t, k);
+        let B = landBands_d(seed, dk);
+        if (B.landBlend.x < 0.999) { a.reason = 2; return a; }
+        var total = lakeBandsTotal(B).x * H;
+        var coarse = lakeBandsCoarse(B, t.coarseBands).x * H;`)
+        .replace('@RIM_BANK@', sampled ? `let u = band.w;
+        let cliff = band.z;` : `let bank = lakeRimBank(c, a, t, tier, dk, seed, seedN);
+        let u = bank.x;
+        let cliff = bank.y;`)
+        .replace('@INTERIOR@', sampled ? `let band = lakeBuildSamples[slot * LAKE_BUILD_SAMPLE_COUNT + LAKE_BUILD_INTERIOR_START + u32(j * 5 + q)];
+            let total = band.x;
+            let coarse = band.y;` : `let B = landBands_d(seed, lakeLocalDir(c, a, xy.x, xy.y));
+            let total = lakeBandsTotal(B).x * H;
+            let coarse = lakeBandsCoarse(B, t.coarseBands).x * H;`);
 }
 
 // table: null (lakes assessed wherever needed: lab checks), 'build' (the
 // passes that fill the lake table) or 'read' (heights read the table).
-export function createLakeCellsWgsl(tiers = LAKE_CELL_TIERS, { table = null } = {}) {
+export function createLakeCellsWgsl(tiers = LAKE_CELL_TIERS, { table = null, preparedTile = false } = {}) {
     if (![null, 'build', 'read'].includes(table)) throw new Error(`lake table mode must be null, 'build' or 'read'`);
     if (!tiers.length) throw new Error('lake cells need at least one tier');
     tiers.forEach((t, i) => {
@@ -291,6 +297,7 @@ export function createLakeCellsWgsl(tiers = LAKE_CELL_TIERS, { table = null } = 
     return `
 // ==================== Feature: lake cells (featureLakeCells.wgsl.js) ====================
 const LAKE_TIER_COUNT: i32 = ${tiers.length};
+const LAKE_RIM_SAMPLE_CAPACITY: u32 = ${Math.max(...tiers.map(tier => tier.rimSamples))}u;
 // The containment curve stays at least this far above the level (metres).
 const LAKE_MARGIN_M: f32 = 0.5;
 const LAKE_EXTENT_FACTOR: f32 = ${num(EXTENT_FACTOR)};
@@ -666,6 +673,40 @@ fn lakeLargerLowerAt(L: LakeLarger, dir: vec3<f32>, B: LandBands, seed: i32) -> 
     return low;
 }
 
+fn lakeAssessShape(tier: i32, t: LakeTier, cell: vec3<i32>, c: LakeCand, seed: i32) -> LakeAssess {
+    var a: LakeAssess;
+    let frame = lakeFrame(c, cell, tier, seed);
+    a.a1 = frame[0];
+    a.a2 = frame[1];
+    a.shape = lakeShapeOf(t, tier, cell, seed, c.len);
+    a.u0 = lakeU0(t, c.len);
+    a.uC = a.u0 + (t.outline + t.scallop) * a.shape.minAxis;
+    return a;
+}
+
+fn lakeRimSample(c: LakeCand, a: LakeAssess, t: LakeTier, k: i32) -> vec3<f32> {
+    let th = 6.2831853 * (f32(k) + 0.5) / f32(t.rimSamples);
+    let r = lakeCurveRadius(a.shape, th, a.uC);
+    return lakeLocalDir(c, a, r * cos(th), r * sin(th));
+}
+
+fn lakeInteriorSample(shape: LakeShape, lobe: i32, sample: i32) -> vec2<f32> {
+    let e = shape.comp[lobe];
+    let angle = shape.rot[lobe];
+    let ox = select(0.0, select(-0.5, 0.5, sample % 2 == 0) * e.z, sample > 0 && sample < 3);
+    let oy = select(0.0, select(-0.5, 0.5, sample % 2 == 0) * e.w, sample >= 3);
+    return vec2<f32>(e.x + ox * cos(angle) - oy * sin(angle), e.y + ox * sin(angle) + oy * cos(angle));
+}
+
+fn lakeRimBank(c: LakeCand, a: LakeAssess, t: LakeTier, tier: i32, dir: vec3<f32>, seed: i32, seedN: i32) -> vec2<f32> {
+    let w = a.shape.minAxis;
+    let nO = clamp(fbmAuto_d(dir, 0.7 * w / 1000.0, 2, seedN, 2.0, 0.5).x, -1.0, 1.0);
+    let nS = clamp(fbmAuto_d(dir, 0.18 * w / 1000.0, 2, seedN + 5, 2.0, 0.5).x, -1.0, 1.0);
+    let u = max(a.uC - (nO * t.outline + nS * t.scallop) * w, a.u0);
+    let cliff = lakeCliff_d(a, lakeBankNoise(seed, tier, dir, c.len)).x * a.cliffH * (1.0 - exp(-u / a.cliffW));
+    return vec2<f32>(u, cliff);
+}
+
 ${lakeAssessFunction('lakeAssessBase', false)}
 ${lakeAssessFunction('lakeAssess', true)}
 
@@ -828,16 +869,16 @@ fn lakeContainmentAt(seed: i32, dir: vec3<f32>, k: i32, n: i32) -> f32 {
     let r = lakeCurveRadius(a.shape, th, a.uC);
     return calculateTerrainHeightD(seed, lakeLocalDir(c, a, r * cos(th), r * sin(th))).x * maxTerrainHeightM() - a.level;
 }
-${table ? lakeTableWgsl(table) : `
+${table ? lakeTableWgsl(table, preparedTile) : `
 fn lakeFind(seed: i32, dir: vec3<f32>, B: LandBands) -> LakeHit { return lakeCellFind(seed, dir, B); }
 fn lakeAssessFor(tier: i32, t: LakeTier, cell: vec3<i32>, c: LakeCand, seed: i32) -> LakeAssess { return lakeAssess(tier, t, cell, c, seed); }
 `}`;
 }
 
 // The lake table (LAKE_CELLS_PLAN.md, "The lake table"): records of the
-// candidates near the tiles being generated, filled in tier order by three
-// passes (base assessment; nested assessment, reading the larger lakes'
-// records; the active flag) and read by the heights. Group 3: binding 0 the
+// candidates near the tiles being generated. A staged base assessment runs
+// first, then nested assessment reads larger base records, and the final
+// pass sets active flags for terrain queries. Group 3: binding 0 the
 // index (open addressing on tier and lattice cell), binding 1 the records,
 // binding 2 the keys to fill (build only).
 export const LAKE_TABLE_GROUP = 3;
@@ -853,13 +894,16 @@ export function lakeTableHash(tier, x, y, z, cap) {
     return h & (cap - 1);
 }
 
-function lakeTableWgsl(mode) {
+function lakeTableWgsl(mode, preparedTile) {
     const recAccess = mode === 'build' ? 'read_write' : 'read';
     return `
 // ---- Lake table (mode ${mode}) ----
 @group(${LAKE_TABLE_GROUP}) @binding(0) var<storage, read> lakeEntries: array<vec4<u32>>;
 @group(${LAKE_TABLE_GROUP}) @binding(1) var<storage, ${recAccess}> lakeRecs: array<vec4<f32>>;
-${mode === 'build' ? `@group(${LAKE_TABLE_GROUP}) @binding(2) var<storage, read> lakeKeys: array<vec4<i32>>;` : ''}
+${mode === 'build' ? `@group(${LAKE_TABLE_GROUP}) @binding(2) var<storage, read> lakeKeys: array<vec4<i32>>;
+@group(2) @binding(2) var<storage, read_write> lakeBuildSamples: array<vec4<f32>>;
+const LAKE_BUILD_INTERIOR_START: u32 = 1u + LAKE_RIM_SAMPLE_CAPACITY;
+const LAKE_BUILD_SAMPLE_COUNT: u32 = LAKE_BUILD_INTERIOR_START + 30u;` : ''}
 const LAKE_REC: u32 = ${LAKE_RECORD_VEC4}u;
 const LAKE_FLAG_CAND: u32 = 1u;
 const LAKE_FLAG_BASE: u32 = 2u;
@@ -918,7 +962,10 @@ fn lakeRecAssess(i: i32, isFinal: bool) -> LakeAssess {
     return a;
 }
 
-fn lakeFind(seed: i32, dir: vec3<f32>, B: LandBands) -> LakeHit { return lakeCellFindTable(seed, dir, B); }
+fn lakeFind(seed: i32, dir: vec3<f32>, B: LandBands) -> LakeHit {
+    ${preparedTile ? 'if (lakeTileRecords[0].x >= 0) { return lakeFindPrepared(seed, dir, B); }' : ''}
+    return lakeCellFindTable(seed, dir, B);
+}
 
 fn lakeAssessFor(tier: i32, t: LakeTier, cell: vec3<i32>, c: LakeCand, seed: i32) -> LakeAssess {
     let i = lakeTableFind(tier, cell);
@@ -972,6 +1019,98 @@ fn lakeCellFindTable(seed: i32, dir: vec3<f32>, bandsP: LandBands) -> LakeHit {
     hit.lower = hit.lower * (1.0 / H);
     return hit;
 }
+${preparedTile ? `
+@group(0) @binding(2) var<storage, read_write> lakeTileRecords: array<vec4<i32>>;
+const LAKE_TILE_RECORD_CAPACITY: i32 = ${LAKE_TILE_RECORD_CAPACITY};
+const LAKE_TILE_LANES: u32 = 32u;
+var<workgroup> lakeTileCandidates: array<vec4<i32>, LAKE_TILE_LANES>;
+
+@compute @workgroup_size(LAKE_TILE_LANES)
+fn prepareLakeTile(@builtin(local_invocation_index) lane: u32) {
+    if (!terrainFeatureOn(TF_LAKE_BASINS)) {
+        if (lane == 0u) { lakeTileRecords[0] = vec4<i32>(0); }
+        return;
+    }
+    let grid = f32(max(uniforms.chunkGridSize, 1));
+    let size = f32(max(uniforms.chunkSize, 2));
+    let uv = (vec2<f32>(uniforms.chunkCoord) + vec2<f32>(0.5)) / grid;
+    let dir = getSpherePoint(uniforms.face, uv.x, uv.y);
+    let R = noiseReferenceRadiusM();
+    let apron = max(f32(textureDimensions(outputTexture).x) - size, 0.0);
+    // Normalizing a cube-face point cannot increase distances in the cube
+    // plane. Its half diagonal covers every sample, including the apron.
+    let radius = 1.414214 * R / grid * (1.0 + apron / (size - 1.0)) + 0.5;
+    let texelM = 1.5707963 * R / grid / size;
+    var count = 0;
+    for (var tier = 0; tier < LAKE_TIER_COUNT; tier++) {
+        let t = lakeTier(tier);
+        if (t.lenMax < ${LAKE_LOD_TEXELS_WGSL} * texelM) { continue; }
+        let cellPos = dir * (R / t.cellM);
+        let reach = (t.rbMax + radius) / t.cellM;
+        let lo = vec3<i32>(floor(cellPos - vec3<f32>(reach)));
+        let hi = vec3<i32>(floor(cellPos + vec3<f32>(reach)));
+        let span = vec3<u32>(hi - lo + vec3<i32>(1));
+        let xy = span.x * span.y;
+        let volume = xy * span.z;
+        for (var base = 0u; base < volume; base += LAKE_TILE_LANES) {
+            let i = base + lane;
+            var candidate = vec4<i32>(0, 0, 0, -1);
+            if (i < volume) {
+                let cell = lo + vec3<i32>(vec3<u32>(i % span.x, (i / span.x) % span.y, i / xy));
+                let index = lakeTableFind(tier, cell);
+                if (index >= 0 && (lakeRecFlags(index) & LAKE_FLAG_ACTIVE) != 0u) {
+                    let rec = u32(index) * LAKE_REC;
+                    let center = lakeRecs[rec].xyz;
+                    let support = lakeRecs[rec + 19u].y;
+                    if (length(dir - center) * R < support + radius) {
+                        candidate = vec4<i32>(cell, index * 8 + tier);
+                    }
+                }
+            }
+            lakeTileCandidates[lane] = candidate;
+            workgroupBarrier();
+            // Compact in the point lookup's tier then z/y/x order.
+            if (lane == 0u) {
+                for (var j = 0u; j < LAKE_TILE_LANES; j++) {
+                    let entry = lakeTileCandidates[j];
+                    if (entry.w < 0) { continue; }
+                    count++;
+                    if (count <= LAKE_TILE_RECORD_CAPACITY) { lakeTileRecords[count] = entry; }
+                }
+            }
+            workgroupBarrier();
+        }
+    }
+    if (lane == 0u) { lakeTileRecords[0] = vec4<i32>(select(-1, count, count <= LAKE_TILE_RECORD_CAPACITY), 0, 0, 0); }
+}
+
+fn lakeFindPrepared(seed: i32, dir: vec3<f32>, bandsP: LandBands) -> LakeHit {
+    var hit: LakeHit;
+    if (bandsP.landBlend.x <= 0.0) { return hit; }
+    let R = noiseReferenceRadiusM();
+    let H = maxTerrainHeightM();
+    let count = lakeTileRecords[0].x;
+    for (var k = 1; k <= count; k++) {
+        let entry = lakeTileRecords[k];
+        let tier = entry.w & 7;
+        let index = entry.w >> 3;
+        let c = lakeRecCand(index);
+        if (length(dir - c.dir) * R >= lakeRecs[u32(index) * LAKE_REC + 19u].y) { continue; }
+        let a = lakeRecAssess(index, true);
+        let t = lakeTier(tier);
+        let e = lakeEvaluate(tier, t, c, a, dir, seed, lakeBandsCoarse(bandsP, t.coarseBands));
+        hit.lower = select(lakeLowerUnion(hit.lower, e.lower), e.lower, !hit.any);
+        hit.any = true;
+        if (e.ug < a.uC + a.band) {
+            hit.found = true; hit.tier = tier; hit.coarseBands = t.coarseBands;
+            hit.cell = entry.xyz; hit.level = a.level; hit.rel = e.rel; hit.rb = a.rb; hit.centre = c.dir;
+            hit.ringW = 1.0 - smoothstep(0.0, a.band, abs(e.ug - a.uC));
+        }
+    }
+    hit.lower = hit.lower * (1.0 / H);
+    return hit;
+}
+` : ''}
 ${mode === 'build' ? `
 fn lakeRecPutAssess(b: u32, a: LakeAssess) {
     lakeRecs[b] = vec4<f32>(select(0.0, 1.0, a.ok), f32(a.reason), a.level, a.depth);
@@ -994,8 +1133,7 @@ fn lakeSetFlags(i: u32, flags: u32) {
     lakeRecs[b] = vec4<f32>(q.x, q.y, f32(flags), q.w);
 }
 
-// Pass 1: the candidate and its assessment on the bands alone.
-fn lakeBuildBase(i: u32, seed: i32) {
+fn lakeBuildCandidate(i: u32, seed: i32) {
     let key = lakeKeys[i];
     let t = lakeTier(key.w);
     let c = lakeCandidate(key.w, t, key.xyz, seed);
@@ -1003,7 +1141,60 @@ fn lakeBuildBase(i: u32, seed: i32) {
     lakeRecs[b] = vec4<f32>(c.dir, c.len);
     lakeRecs[b + 1u] = vec4<f32>(c.rb, c.prio, 0.0, f32(key.w));
     if (!c.ok) { return; }
-    let a = lakeAssessBase(key.w, t, key.xyz, c, seed);
+    var a = lakeAssessShape(key.w, t, key.xyz, c, seed);
+    let g3 = lakeHash4(key.xyz, lakeSalt(seed, key.w) ^ 0xcc9e2d51u);
+    a.cliffH = mix(t.cliffMin, t.cliffMax, g3.y);
+    a.cliffW = a.cliffH / mix(t.steepMin, t.steepMax, g3.w);
+    a.steepAt = mix(-0.45, 0.45, g3.z);
+    lakeRecPutAssess(b + 2u, a);
+    lakeSetFlags(i, LAKE_FLAG_CAND);
+}
+
+// Each lane evaluates one sample. The full terrain has a single call site,
+// so it is compiled once and the rim no longer runs serially in one lane.
+fn lakeBuildSample(i: u32, slot: u32, sample: u32, seed: i32) {
+    if ((lakeRecFlags(i32(i)) & LAKE_FLAG_CAND) == 0u) { return; }
+    let offset = slot * LAKE_BUILD_SAMPLE_COUNT;
+    if (sample > 0u && lakeBuildSamples[offset].w <= 0.0) { return; }
+    let a = lakeRecAssess(i32(i), false);
+    let key = lakeKeys[i];
+    let t = lakeTier(key.w);
+    let c = lakeRecCand(i32(i));
+    var dir = c.dir;
+    let rim = sample > 0u && sample < LAKE_BUILD_INTERIOR_START;
+    if (rim) {
+        if (sample > u32(t.rimSamples)) { return; }
+        dir = lakeRimSample(c, a, t, i32(sample) - 1);
+    } else if (sample >= LAKE_BUILD_INTERIOR_START) {
+        let interior = i32(sample - LAKE_BUILD_INTERIOR_START);
+        if (interior >= a.shape.n * 5) { return; }
+        let xy = lakeInteriorSample(a.shape, interior / 5, interior % 5);
+        dir = lakeLocalDir(c, a, xy.x, xy.y);
+    }
+    let bands = landBands_d(seed, dir);
+    let heightM = maxTerrainHeightM();
+    var bank = vec2<f32>(select(0.0, 1.0, sample == 0u && bands.landBlend.x >= 0.999), 0.0);
+    if (rim && bands.landBlend.x >= 0.999) {
+        let seedN = seed + 9901 + lakeTierId(key.w) * 17;
+        bank = lakeRimBank(c, a, t, key.w, dir, seed, seedN);
+    }
+    lakeBuildSamples[offset + sample] =
+        vec4<f32>(lakeBandsTotal(bands).x * heightM, lakeBandsCoarse(bands, t.coarseBands).x * heightM, bank.y, bank.x);
+}
+
+fn lakeBuildBase(i: u32, slot: u32, seed: i32) {
+    if ((lakeRecFlags(i32(i)) & LAKE_FLAG_CAND) == 0u) { return; }
+    var a = lakeRecAssess(i32(i), false);
+    if (lakeBuildSamples[slot * LAKE_BUILD_SAMPLE_COUNT].w > 0.0) {
+        let key = lakeKeys[i];
+        a = lakeAssessSampled(key.w, lakeTier(key.w), key.xyz, lakeRecCand(i32(i)), seed, a, slot);
+    } else {
+        a.reason = 1;
+        a.cliffH = 0.0;
+        a.cliffW = 0.0;
+        a.steepAt = 0.0;
+    }
+    let b = i * LAKE_REC;
     lakeRecPutAssess(b + 2u, a);
     lakeRecPutAssess(b + 17u, a);
     lakeSetFlags(i, LAKE_FLAG_CAND | select(0u, LAKE_FLAG_BASE | LAKE_FLAG_FINAL, a.ok));
@@ -1016,7 +1207,12 @@ fn lakeBuildNested(i: u32, seed: i32) {
     if (key.w == 0 || (lakeRecFlags(i32(i)) & LAKE_FLAG_CAND) == 0u) { return; }
     let t = lakeTier(key.w);
     let c = lakeRecCand(i32(i));
-    let a = lakeAssessTable(key.w, t, key.xyz, c, seed);
+    let base = lakeRecAssess(i32(i), false);
+    if (base.reason == 1 || base.reason == 2) { return; }
+    let reach = LAKE_EXTENT_FACTOR * base.shape.extent + (base.uC + 0.25 * base.shape.ks) * base.shape.stretch;
+    let larger = lakeLargerFindTable(key.w, c, reach, seed);
+    if (larger.n == 0) { return; }
+    let a = lakeAssessTable(key.w, t, key.xyz, c, seed, larger);
     lakeRecPutAssess(i * LAKE_REC + 17u, a);
     let f = lakeRecFlags(i32(i)) & ~LAKE_FLAG_FINAL;
     lakeSetFlags(i, f | select(0u, LAKE_FLAG_FINAL, a.ok));
@@ -1074,6 +1270,7 @@ fn lakeBlockedTable(tier: i32, cell: vec3<i32>, c: LakeCand, a: LakeAssess) -> b
     }
     return false;
 }
-${lakeAssessFunction('lakeAssessTable', true).replace('let larger = lakeLargerFind(', 'let larger = lakeLargerFindTable(')}
+${lakeAssessFunction('lakeAssessSampled', false, { sampled: true })}
+${lakeAssessFunction('lakeAssessTable', true, { knownLarger: true })}
 ` : ''}`;
 }

@@ -17,32 +17,6 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         WebGPUTerrainGenerator.prototype,
         Object.getOwnPropertyDescriptors({
         async initializePipelines() {
-                // ── Standard terrain shader (base height / macro) ─────────
-                const terrainShaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions());
-                this.terrainShaderModule = this.device.createShaderModule({
-                    label: 'Advanced Terrain Compute',
-                    code: terrainShaderCode
-                });
-
-                // ── Height-input terrain shader (normal + tile from height) ─
-                const heightInputShaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
-                    hasHeightBindings: true,
-                }));
-                this.heightInputShaderModule = this.device.createShaderModule({
-                    label: 'Height Input Terrain Compute',
-                    code: heightInputShaderCode
-                });
-
-                // ── Micro terrain shader (height + tile inputs) ────────────
-                const microShaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
-                    hasHeightBindings: true,
-                    hasTileBindings: true,
-                }));
-                this.microShaderModule = this.device.createShaderModule({
-                    label: 'Micro Terrain Compute',
-                    code: microShaderCode
-                });
-
                 // ── Splat shader ──────────────────────────────────────────
                 const splatShaderCode = createSplatComputeShader({
                     tileCategories: this.tileCategories,
@@ -162,95 +136,10 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 this.setWaterCarveResources(null);
                 this._uploadPackedBiomeUniforms();
 
-                // ── Standard terrain bind group layout (bindings 0,1) ──────
-                this.terrainBindGroupLayout = this.device.createBindGroupLayout({
-                    entries: [
-                        { binding: 0, visibility: GPUShaderStage.COMPUTE,
-                          buffer: { type: 'uniform' } },
-                        { binding: 1, visibility: GPUShaderStage.COMPUTE,
-                          storageTexture: { access: 'write-only',
-                                            format: 'rgba32float',
-                                            viewDimension: '2d' } }
-                    ]
-                });
-                this.terrainPipeline = this.device.createComputePipeline({
-                    layout: this.device.createPipelineLayout({
-                        bindGroupLayouts: this._terrainPipelineLayouts([this.terrainBindGroupLayout, this.biomeBindGroupLayout])
-                    }),
-                    compute: { module: this.terrainShaderModule, entryPoint: 'main' }
-                });
-
-                // ── Height-input bind group layout (bindings 0,1,2) ────────
-                this.heightInputBindGroupLayout = this.device.createBindGroupLayout({
-                    entries: [
-                        { binding: 0, visibility: GPUShaderStage.COMPUTE,
-                          buffer: { type: 'uniform' } },
-                        { binding: 1, visibility: GPUShaderStage.COMPUTE,
-                          storageTexture: { access: 'write-only',
-                                            format: 'rgba32float',
-                                            viewDimension: '2d' } },
-                        { binding: 2, visibility: GPUShaderStage.COMPUTE,
-                          texture: { sampleType: 'unfilterable-float',
-                                     viewDimension: '2d' } }
-                    ]
-                });
-                this.heightInputPipeline = this.device.createComputePipeline({
-                    layout: this.device.createPipelineLayout({
-                        bindGroupLayouts: this._terrainPipelineLayouts([this.heightInputBindGroupLayout, this.biomeBindGroupLayout])
-                    }),
-                    compute: { module: this.heightInputShaderModule, entryPoint: 'main' }
-                });
-
-                // ── Micro bind group layout (bindings 0,1,2,3) ─────────────
-                this.microBindGroupLayout = this.device.createBindGroupLayout({
-                    entries: [
-                        { binding: 0, visibility: GPUShaderStage.COMPUTE,
-                          buffer: { type: 'uniform' } },
-                        { binding: 1, visibility: GPUShaderStage.COMPUTE,
-                          storageTexture: { access: 'write-only',
-                                            format: 'rgba32float',
-                                            viewDimension: '2d' } },
-                        { binding: 2, visibility: GPUShaderStage.COMPUTE,
-                          texture: { sampleType: 'unfilterable-float',
-                                     viewDimension: '2d' } },
-                        { binding: 3, visibility: GPUShaderStage.COMPUTE,
-                          texture: { sampleType: 'unfilterable-float',
-                                     viewDimension: '2d' } }
-                    ]
-                });
-                this.microPipeline = this.device.createComputePipeline({
-                    layout: this.device.createPipelineLayout({
-                        bindGroupLayouts: this._terrainPipelineLayouts([this.microBindGroupLayout, this.biomeBindGroupLayout])
-                    }),
-                    compute: { module: this.microShaderModule, entryPoint: 'main' }
-                });
-
-                // ── Pipeline caches ───────────────────────────────────────
+                // Terrain formats and bindings vary by caller. Build each pipeline on first use.
                 this._terrainPipelineCache = new Map();
-                this._terrainPipelineCache.set('rgba32float', {
-                    pipeline: this.terrainPipeline,
-                    bindGroupLayout: this.terrainBindGroupLayout
-                });
-
-                // Height-input cache (keyed by output format)
                 this._heightInputPipelineCache = new Map();
-                this._heightInputPipelineCache.set(
-                    this._getHeightInputPipelineCacheKey('rgba32float', 'r32float'),
-                    {
-                        pipeline: this.heightInputPipeline,
-                        bindGroupLayout: this.heightInputBindGroupLayout
-                    }
-                );
-
-                // Micro cache (keyed by output format)
                 this._microPipelineCache = new Map();
-                this._microPipelineCache.set(
-                    this._getMicroPipelineCacheKey('rgba32float', 'r32float', 'r32float'),
-                    {
-                        pipeline: this.microPipeline,
-                        bindGroupLayout: this.microBindGroupLayout
-                    }
-                );
 
                 // ── Splat pipeline ────────────────────────────────────────
                 this.splatBindGroupLayout = this.device.createBindGroupLayout({
@@ -465,11 +354,12 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         // withBaseHeight: also binds heightBase (rgba32float, binding 4) so the
         // normal pass reads in-tile border base heights instead of evaluating
         // the terrain function for them.
-        _getHeightInputPipelineForFormat(format, heightFormat = 'r32float', { withBaseHeight = false, withSmoothSplatIds = false, withBiomeClimate = false } = {}) {
+        _getHeightInputPipelineForFormat(format, heightFormat = 'r32float', { withBaseHeight = false, withSmoothSplatIds = false, withBiomeClimate = false, withBiomeHeight = false } = {}) {
                 const fmt = format || 'rgba32float';
                 const inputFmt = heightFormat || 'r32float';
                 const cacheKey = this._getHeightInputPipelineCacheKey(fmt, inputFmt)
-                    + (withBaseHeight ? '|base' : '') + (withSmoothSplatIds ? '|splat-pair' : '') + (withBiomeClimate ? '|climate' : '');
+                    + (withBaseHeight ? '|base' : '') + (withSmoothSplatIds ? '|splat-pair' : '')
+                    + (withBiomeClimate ? '|climate' : '') + (withBiomeHeight ? '|biome-height' : '');
                 const cached = this._heightInputPipelineCache?.get(cacheKey);
                 if (cached) return cached;
 
@@ -479,6 +369,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     hasBaseHeightBinding: withBaseHeight,
                     hasSmoothSplatIdsBinding: withSmoothSplatIds,
                     hasBiomeClimateBinding: withBiomeClimate,
+                    hasBiomeHeightBinding: withBiomeHeight,
                 }));
                 const shaderModule = this.device.createShaderModule({
                     label: `Height Input Terrain Compute (${fmt}${withBaseHeight ? ', base height' : ''})`,
@@ -521,6 +412,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                             binding: 5,
                             visibility: GPUShaderStage.COMPUTE,
                             storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d' }
+                        }] : []),
+                        ...(withBiomeHeight ? [{
+                            binding: 6,
+                            visibility: GPUShaderStage.COMPUTE,
+                            storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' }
                         }] : [])
                     ]
                 });
@@ -1233,14 +1129,16 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                 );
             },
 
-        _getTerrainPipelineForFormat(format) {
+        _getTerrainPipelineForFormat(format, preparedLakeTile = false) {
                 const fmt = format || 'rgba32float';
-                const cacheKey = fmt + (this.regionalTerrainActive ? '|regional' : '')+(this.regionalTerrain?.valleyConfig?'|feature':'')+(this.regionalTerrain?.shapeConfig?'|shape':'')+(this.terrainConfig.waterGraph?.carve?.bankDetail>0?'|banks':'');
+                const cacheKey = fmt + (this.regionalTerrainActive ? '|regional' : '')+(this.regionalTerrain?.valleyConfig?'|feature':'')+(this.regionalTerrain?.shapeConfig?'|shape':'')+(this.terrainConfig.waterGraph?.carve?.bankDetail>0?'|banks':'')
+                    + (preparedLakeTile ? '|lake-tile' : '');
                 const cached = this._terrainPipelineCache?.get(cacheKey);
                 if (cached) return cached;
 
                 const shaderCode = createAdvancedTerrainComputeShader(this._getAdvancedTerrainShaderOptions({
                     outputFormat: fmt,
+                    preparedLakeTile,
                 }));
                 const shaderModule = this.device.createShaderModule({
                     label: `Terrain Compute (${fmt})`,
@@ -1254,19 +1152,24 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                             binding: 1,
                             visibility: GPUShaderStage.COMPUTE,
                             storageTexture: { access: 'write-only', format: fmt, viewDimension: '2d' }
-                        }
+                        },
+                        ...(preparedLakeTile ? [{ binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }] : [])
                     ]
                 });
 
+                const layout = this.device.createPipelineLayout({ bindGroupLayouts: this._terrainPipelineLayouts([bindGroupLayout, this.biomeBindGroupLayout]) });
                 const pipeline = this.device.createComputePipeline({
-                    layout: this.device.createPipelineLayout({ bindGroupLayouts: this._terrainPipelineLayouts([bindGroupLayout, this.biomeBindGroupLayout]) }),
+                    layout,
                     compute: { module: shaderModule, entryPoint: 'main' }
                 });
 
                 if (!this._terrainPipelineCache) {
                     this._terrainPipelineCache = new Map();
                 }
-                const record = { pipeline, bindGroupLayout };
+                const lakePreparation = preparedLakeTile ? this.device.createComputePipeline({
+                    label: 'LakeTable-prepareTile', layout, compute: { module: shaderModule, entryPoint: 'prepareLakeTile' },
+                }) : null;
+                const record = { pipeline, bindGroupLayout, lakePreparation };
                 this._terrainPipelineCache.set(cacheKey, record);
                 return record;
             },

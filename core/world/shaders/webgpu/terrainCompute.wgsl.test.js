@@ -96,7 +96,10 @@ describe('terrain generation compute shader', () => {
     it('compiles glaciers, marsh and optional desert dunes in every landscape tile pipeline', () => {
         const config = new TerrainGenerationConfig({ ...worldTerrain, biomeLandscape: { preset: 'arid' } });
         for (const [baseGenerator, lakeTable] of [['earthLike', null], ['lakeLand', 'build'], ['lakeLand', 'read']]) {
-            const landscapeVariants = [...Object.values(variants), { hasHeightBindings: true, hasBiomeClimateBinding: true, outputFormat: 'rgba8unorm' }];
+            const landscapeVariants = [...Object.values(variants), {
+                hasHeightBindings: true, hasBiomeClimateBinding: true, hasBiomeHeightBinding: true, outputFormat: 'rgba8unorm',
+            }];
+            if (lakeTable === 'read') landscapeVariants.push({ preparedLakeTile: true });
             for (const variant of landscapeVariants) {
                 const source = createAdvancedTerrainComputeShader({
                     ...base, ...config, ...variant, baseGenerator, lakeTable, waterCarve: true, riverBankDetail: true,

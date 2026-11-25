@@ -1,20 +1,24 @@
-// node tools/perf/biomeLandscape/review.mjs OUT [survey|review|timing|full|startup] [world,legacy] [poses.json]
+// node tools/perf/biomeLandscape/review.mjs OUT [survey|review|timing|full|startup|snapshot] [world,legacy] [poses.json]
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import puppeteer from 'puppeteer-core';
 
 const [out, mode = 'review', presets = 'earth,legacy', posesFile] = process.argv.slice(2);
-if (!out || !['survey', 'review', 'timing', 'full', 'startup'].includes(mode)) {
-    throw new Error('Pass an output directory and survey, review, timing, full or startup');
+if (!out || !['survey', 'review', 'timing', 'full', 'startup', 'snapshot'].includes(mode)) {
+    throw new Error('Pass an output directory and survey, review, timing, full, startup or snapshot');
 }
 const defaultPoses = new URL('./poses.json', import.meta.url);
 const poses = ['survey', 'startup'].includes(mode) ? [] : JSON.parse(await readFile(posesFile ?? defaultPoses, 'utf8'));
 const url = new URL('/wizard_game/standalone.html', process.env.BIOME_REVIEW_URL ?? 'http://127.0.0.1:8000');
+const cold = process.env.BIOME_REVIEW_COLD_GPU === '1';
+const saveSnapshot = mode === 'snapshot' || process.env.BIOME_REVIEW_SAVE_SNAPSHOT === '1';
+const terrainOnly = process.env.BIOME_REVIEW_TERRAIN_ONLY === '1';
 await mkdir(out, { recursive: true });
 const browser = await puppeteer.launch({
     executablePath: process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     headless: true,
-    args: ['--enable-unsafe-webgpu', '--disable-background-timer-throttling', '--disable-renderer-backgrounding'],
+    args: ['--enable-unsafe-webgpu', '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
+        ...(cold ? ['--disable-gpu-shader-disk-cache'] : [])],
 });
 try {
     for (const preset of presets.split(',')) {
@@ -52,7 +56,7 @@ try {
             throw new Error('Tile timing requires hardware WebGPU timestamp queries');
         }
         if (mode === 'survey' && !setup.options.enabled) throw new Error('Survey requires a landscape preset');
-        const report = { preset, startupMs, ...setup, cases: [], errors };
+        const report = { preset, startupMs, cold, ...setup, cases: [], errors };
         if (mode === 'survey') {
             report.sites = await page.evaluate(async () => {
                 const { survey } = await import('/tools/perf/biomeLandscape/scene.js');
@@ -60,16 +64,17 @@ try {
             });
         } else if (mode === 'review' || mode === 'full') {
             await page.addStyleTag({ content: 'body > *:not(#gameCanvas){visibility:hidden !important}' });
-            await page.evaluate(() => {
+            await page.evaluate(terrainOnly => {
                 const g = window.gameEngine;
                 const w = g.renderer.weatherController;
                 w._pickNewWeatherTarget = () => {};
                 w.setWeather('clear', true);
                 g.gameTime.setFrozen(true);
+                if (terrainOnly && g.renderer.volumetricClouds) g.renderer.volumetricClouds.enabled = false;
                 Object.assign(g.adaptiveQuality.rendering.adaptive, {
                     stationaryPixelRatio: 1, motionPixelRatio: 1, fastMotionPixelRatio: 1,
                 });
-            });
+            }, terrainOnly);
             for (const pose of poses) {
                 const row = await page.evaluate(async input => {
                     const { setPose } = await import('/tools/perf/biomeLandscape/scene.js');
@@ -95,10 +100,21 @@ try {
             if (mode === 'timing') {
                 report.geometryTiming = await page.evaluate(async input => {
                     const { tiles } = await import('/tools/perf/biomeLandscape/scene.js');
-                    return tiles(input, true);
+                    return tiles(input, 'geometry');
                 }, poses);
                 console.log(preset, 'geometry timing', report.geometryTiming.all);
+                report.splitTiming = await page.evaluate(async input => {
+                    const { tiles } = await import('/tools/perf/biomeLandscape/scene.js');
+                    return tiles(input, 'split');
+                }, poses);
+                console.log(preset, 'geometry plus resident refinement timing', report.splitTiming.all);
             }
+        }
+        if (saveSnapshot) {
+            report.snapshot = await page.evaluate(async input => {
+                const { snapshot } = await import('/tools/perf/biomeLandscape/scene.js');
+                return snapshot(input);
+            }, poses);
         }
         const instrumentation = await page.evaluate(() => ({
             gpuErrors: window.__lr.gpuErrors,

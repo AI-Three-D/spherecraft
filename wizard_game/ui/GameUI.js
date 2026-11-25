@@ -114,12 +114,22 @@ export class GameUI {
             #game-settings .note { color:#a8bec2; font-size:12px; line-height:1.45; }
             #game-hud { position:fixed; top:16px; right:16px; display:flex; flex-direction:column; align-items:flex-end; gap:5px; color:white; text-shadow:0 1px 5px #000; font:600 13px system-ui,sans-serif; pointer-events:none; }
             #game-hud span { background:#101c24a8; border-radius:5px; padding:5px 8px; }
+            #game-hud [data-hud="camera"] { font-family:monospace; white-space:pre-line; }
+            #game-hud [data-hud="camera"]:empty { display:none; }
         `;
         document.head.appendChild(style);
         this._uiStyle = style;
         const ui = document.createElement('div');
         ui.id = 'game-ui';
-        ui.innerHTML = `<button id="settings-toggle" type="button" aria-expanded="true" aria-controls="game-settings">Hide settings</button><div id="game-hud"><span data-hud="detail"></span><span data-hud="fps"></span><span data-hud="weather"></span></div>`;
+        ui.innerHTML = `
+            <button id="settings-toggle" type="button" aria-expanded="true" aria-controls="game-settings">Hide settings</button>
+            <div id="game-hud">
+                <span data-hud="detail"></span>
+                <span data-hud="fps"></span>
+                <span data-hud="camera"></span>
+                <span data-hud="weather"></span>
+            </div>
+        `;
         document.body.appendChild(ui);
         this.uiElement = ui;
         this._hudContent = ui.querySelector('#game-hud');
@@ -543,7 +553,7 @@ export class GameUI {
      *   QuadtreeTileManager.getPerfHudSnapshot(), or null before the first tick
      * @param {Object|null} params.camera - { position, target, up } of the view camera
      */
-    update({ fps }) {
+    update({ fps, camera }) {
         const weather = this.engine?.renderer?.weatherController;
         if (this._weatherPreviewStatus && weather?.config.enabled) {
             const { target, progress } = weather.getWeatherPreview();
@@ -562,25 +572,15 @@ export class GameUI {
 
         this._hudContent.querySelector('[data-hud="detail"]').textContent = this._detailLabel ? this._detailLabel.toUpperCase() : 'CUSTOM';
         this._hudContent.querySelector('[data-hud="fps"]').textContent = `${Number(fps || 0).toFixed(0)} FPS`;
+        this._hudContent.querySelector('[data-hud="camera"]').textContent = this._buildCameraInfo(camera);
         const target = weather?.getWeatherPreview().target;
         this._hudContent.querySelector('[data-hud="weather"]').textContent = weather?.effects[target]?.label ?? target ?? 'Weather unavailable';
     }
 
-    // The view camera's pose, so a screenshot gives the exact view back
-    // (qtDiag.regional.useCamera({ position, target, up, fov })).
     _buildCameraInfo(camera) {
         if (!camera?.position || !camera?.target) return '';
-        const v = (p, d = 1) => `${p.x.toFixed(d)}, ${p.y.toFixed(d)}, ${p.z.toFixed(d)}`;
-        return `
-            <div style="${this._buildInfoCardStyle()}">
-                <strong style="color:#d9f8ff; letter-spacing:0.1em;">CAMERA</strong><br>
-                <div style="font-size: 10px; line-height: 1.5; color: #d7e8ef; margin-top: 6px; font-family: monospace; user-select: text;">
-                    pos ${v(camera.position)}<br>
-                    look ${v(camera.target)}<br>
-                    up ${camera.up ? v(camera.up, 4) : 'n/a'}
-                </div>
-            </div>
-        `;
+        const formatVector = ({ x, y, z }) => `${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}`;
+        return `Position: ${formatVector(camera.position)}\nLook at: ${formatVector(camera.target)}`;
     }
 
     // Phase 0 terrain-streaming instrumentation (SphereCraft_Optimization_
