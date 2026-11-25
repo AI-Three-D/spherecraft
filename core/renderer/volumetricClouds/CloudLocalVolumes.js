@@ -15,7 +15,7 @@ const smoothstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b
 
 /**
  * Small volumes that belong to places: fog on mountains, and mist on marsh, in woods and in hollows. The composite reads both.
- * Tier fields fog and mist (cloudBudgetTiers.js) set their detail.
+ * Tier fields fog and mist (cloudDetailTiers.js) set their detail.
  */
 export class CloudLocalVolumes {
     constructor(host, options) {
@@ -96,7 +96,7 @@ export class CloudLocalVolumes {
         const cameraKm = host._prev.pos;
         const planetRadiusKm = host.planet.radiusKm;
         this.land.update(encoder, { tileStreamer, cameraKm, planetRadiusKm, heightScaleKm });
-        const tier = host.budgetTier;
+        const tier = host.tier;
         const s = host.settings;
         const look = { ...LOCAL_VOLUME_LOOK, ...s.localVolumeLook };
         const weather = host.weather;
@@ -107,13 +107,13 @@ export class CloudLocalVolumes {
         // Fog only in weather that is wet down here. In fair weather, at most a small cloud on a summit.
         const misty = weather?.mist ?? 0;
         const wet = Math.min(1, 1.1 * Math.max(0, misty - 0.18) + 0.4 * (weather?.rainShade ?? 0) * (weather?.deck ?? 0) + 0.3 * (weather?.low ?? 0));
-        const low = s.mountainClouds && tier?.fog && altitude < 16;
+        const low = s.mountainClouds && tier.fog && altitude < 16;
         const fog = low && wet > 0.02 ? wet * look.fogAmount * tier.fog.amount : 0;
         const summits = low ? (1 - smoothstep(0.1, 0.5, wet)) * (0.35 + 0.5 * (weather?.presence ?? 1)) * look.summits * tier.fog.amount : 0;
         // Mist gathers at night and burns off in the sun; wet weather keeps it.
         const hour = 1 - 0.72 * smoothstep(0.05, 0.45, mu);
         const damp = Math.min(1, hour + 0.6 * (weather?.mist ?? 0));
-        const mist = s.localMist && tier?.mist && altitude < 7 ? look.mistAmount * tier.mist.amount : 0;
+        const mist = s.localMist && tier.mist && altitude < 7 ? look.mistAmount * tier.mist.amount : 0;
         this.active = { fog: (fog > 0 || summits > 0) && wide?.version > 0, mist: mist > 0 && near?.version > 0 };
         this.uniforms.set([
             this.active.fog ? fog : 0, look.fogExtinction, look.fogReachKm, look.fogOpacity,
@@ -151,7 +151,7 @@ export class CloudLocalVolumes {
     encodeFog(encoder, haze, compositeBuffer, gpuTimer) {
         if (!this.active?.fog) return null;
         const host = this.host;
-        const tier = host.budgetTier;
+        const tier = host.tier;
         const { grid, FLOW_REACH } = tier.fog;
         const pipeline = this._compile(`mountain fog ${FLOW_REACH}`, this._fogModule, this._fogLayout, { FLOW_REACH });
         if (!pipeline) return null;
@@ -169,7 +169,7 @@ export class CloudLocalVolumes {
     encodeMist(encoder, gpuTimer) {
         if (!this.active?.mist) return null;
         const host = this.host;
-        const { grid } = host.budgetTier.mist;
+        const { grid } = host.tier.mist;
         const pipeline = this._compile('local mist', this._mistModule, this._mistLayout);
         if (!pipeline) return null;
         const view = this._volume('mist', grid);

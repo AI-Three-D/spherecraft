@@ -26,13 +26,6 @@
   .row input[type=range] { width: 100%; }
   .row output { text-align: right; font-variant-numeric: tabular-nums; color: #9fb2cc; }
   .row select { width: 100%; background: #1b2638; color: inherit; border: 1px solid #2c3b55; border-radius: 4px; }
-  #solar-lab .row { grid-template-columns: 112px minmax(0, 1fr); }
-  #solar-lab input { min-width: 0; }
-  .solar-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
-  #solar-lab button:disabled { opacity: 0.5; cursor: default; }
-  .solar-scores { display: grid; grid-template-columns: 1fr max-content; gap: 4px 8px; }
-  .solar-scores dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .solar-note { color: #9fb2cc; }
   #perf { left: 12px; bottom: 12px; min-width: 290px; max-width: calc(100% - 336px); max-height: calc(100% - 140px); overflow: auto; box-sizing: border-box; padding: 8px 10px; font-variant-numeric: tabular-nums; }
   .perf-head { display: flex; align-items: baseline; gap: 6px; }
   .perf-fps { font-size: 26px; font-weight: 700; color: #fff; }
@@ -74,29 +67,6 @@
 <section id="perf" class="overlay" aria-label="Performance"></section>
 <aside id="side" class="overlay">
   <header><strong>Cloud settings</strong><button id="reset" type="button">Reset</button></header>
-  <details id="solar-lab">
-    <summary>Neural solar lighting</summary>
-    <p class="solar-note">Learns direct-sun attenuation over a 3.15 km path. The reference uses the current cloud field.</p>
-    <label class="row"><span>Training samples</span><input data-solar="samples" type="number" min="256" max="65536" step="256" value="8192"></label>
-    <label class="row"><span>Reference steps</span><input data-solar="steps" type="number" min="16" max="512" step="16" value="128"></label>
-    <label class="row"><span>Epochs</span><input data-solar="epochs" type="number" min="1" max="200" value="60"></label>
-    <label class="row"><span>Seed</span><input data-solar="seed" type="number" step="1" value="17"></label>
-    <div class="solar-actions">
-      <button type="button" data-solar="generate" disabled>Generate samples</button>
-      <button type="button" data-solar="train" disabled>Train</button>
-      <button type="button" data-solar="stop" disabled>Stop</button>
-      <button type="button" data-solar="evaluate" disabled>Evaluate GPU</button>
-      <button type="button" data-solar="export" disabled>Save weights</button>
-    </div>
-    <label class="row"><span>Load weights</span><input data-solar="import" type="file" accept=".json,application/json" disabled></label>
-    <label class="row"><span>Viewport lighting</span><select data-solar="mode" disabled>
-      <option value="off">Standard</option>
-      <option value="solar-reference">Solar reference</option>
-      <option value="neural-solar" disabled>Neural solar</option>
-    </select></label>
-    <p class="solar-note" data-solar="status" role="status">Waiting for WebGPU.</p>
-    <dl class="solar-scores" data-solar="scores"></dl>
-  </details>
   <div id="panel"></div>
 </aside>
 <script type="module" src="./main.js"></script>

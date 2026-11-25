@@ -1,4 +1,4 @@
-import { DEFAULT_LIGHTING_MODEL, LIGHTING_MODEL_SETS } from './lightingModels.js';
+import { LIGHTING_MODELS } from './lightingModels.js';
 
 const literal = value => {
     const digits = value.toPrecision(8);
@@ -42,13 +42,7 @@ function shaderNetwork(name, model, raw = false) {
     return `fn ${name}(x: array<vec4f, ${inputs}>) -> f32 {\n    ${declarations.join('\n    ')}\n}\n`;
 }
 
-// WGSL for one model set: inferMultipleScattering, inferSkyScattering and, when the set has
-// one, inferDirectTransmittance. All take the bake's packed feature array.
-export function lightingInferenceWgsl(name = DEFAULT_LIGHTING_MODEL) {
-    const set = LIGHTING_MODEL_SETS[name];
-    if (!set) throw new Error(`Unknown neural lighting model set ${name}`);
-    return shaderNetwork('inferMultipleScattering', set.ms) + shaderNetwork('inferSkyScattering', set.sky)
-        + (set.direct ? shaderNetwork('inferDirectTransmittance', set.direct) : '');
-}
-
-export const CLOUD_LIGHTING_INFERENCE_WGSL = lightingInferenceWgsl();
+// WGSL of the trained networks: inferMultipleScattering, inferSkyScattering and inferDirectTransmittance. All take the bake's
+// packed feature array.
+export const CLOUD_LIGHTING_INFERENCE_WGSL = shaderNetwork('inferMultipleScattering', LIGHTING_MODELS.ms)
+    + shaderNetwork('inferSkyScattering', LIGHTING_MODELS.sky) + shaderNetwork('inferDirectTransmittance', LIGHTING_MODELS.direct);

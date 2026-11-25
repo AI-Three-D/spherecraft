@@ -71,7 +71,7 @@ export const WEATHER_CONFIG = Object.freeze({
       variants: [
         { name: 'A few small clouds', cloudCoverage: 0.26, clouds: { mist: 0.05, alto: 0.3 } },
         { name: 'Many clouds', cloudCoverage: 0.55, clouds: { deck: 0.1, mist: 0.1 } },
-        { name: 'Thin veil among the clouds', weight: 0.7, cloudCoverage: 0.36, clouds: { deck: 0.45, thickness: 0.35, opacity: 0.3, evenness: 0.5, alto: 0.2 } },
+        { name: 'Thin veil among the clouds', weight: 0.7, cloudCoverage: 0.36, clouds: { deck: 0.45, thickness: 0.35, opacity: 0.3, evenness: 0.8, alto: 0.2 } },
       ],
       weight: 2.6,
       intensity: 0.30,
@@ -101,7 +101,7 @@ export const WEATHER_CONFIG = Object.freeze({
       variants: [
         { name: 'Field of cells', clouds: { deck: 0.66, thickness: 0.5, opacity: 0.8, cells: 0.9, alto: 0.15 } },
         { name: 'Large clouds', cloudCoverage: 0.72, clouds: { deck: 0.12, alto: 0.35 } },
-        { name: 'Clouds under a veil', cloudCoverage: 0.5, clouds: { deck: 0.62, thickness: 0.45, opacity: 0.35, evenness: 0.6, alto: 0.2 } },
+        { name: 'Clouds under a veil', cloudCoverage: 0.5, clouds: { deck: 0.62, thickness: 0.45, opacity: 0.35, evenness: 0.85, alto: 0.2 } },
       ],
       weight: 2.2,
       intensity: 0.50,
@@ -127,13 +127,13 @@ export const WEATHER_CONFIG = Object.freeze({
 
     overcast: {
       label: 'Overcast',
-      clouds: { deck: 0.86, rainShade: 0.22, mist: 0.23, evenness: 0.3 },
+      clouds: { deck: 0.86, rainShade: 0.22, mist: 0.23, evenness: 0.4 },
       variants: [
         { name: 'Even grey', weight: 1.2, clouds: { deck: 0.92, rainShade: 0.2, thickness: 0.6, opacity: 0.8, evenness: 0.95 } },
         { name: 'Hazy veil', clouds: { deck: 0.9, rainShade: 0, thickness: 0.6, opacity: 0.09, evenness: 1, alto: 0, mist: 0.18 } },
-        { name: 'Thin high layer', clouds: { deck: 0.88, rainShade: 0.05, thickness: 0.45, opacity: 0.2, evenness: 0.7, cells: 0.4, alto: 0 } },
-        { name: 'Cells', clouds: { deck: 0.9, rainShade: 0.14, thickness: 0.55, opacity: 0.9, evenness: 0.25, cells: 0.95, alto: 0 } },
-        { name: 'Heavy', weight: 0.7, clouds: { deck: 0.92, rainShade: 0.42, thickness: 1, evenness: 0.45 } },
+        { name: 'Thin high layer', clouds: { deck: 0.88, rainShade: 0.05, thickness: 0.45, opacity: 0.2, evenness: 0.9, cells: 0.4, alto: 0 } },
+        { name: 'Cells', clouds: { deck: 0.9, rainShade: 0.14, thickness: 0.55, opacity: 0.9, evenness: 0.4, cells: 0.95, alto: 0 } },
+        { name: 'Heavy', weight: 0.7, clouds: { deck: 0.92, rainShade: 0.42, thickness: 1, evenness: 0.65 } },
       ],
       weight: 1.4,
       intensity: 0.68,
@@ -159,12 +159,12 @@ export const WEATHER_CONFIG = Object.freeze({
 
     rain: {
       label: 'Rain',
-      clouds: { deck: 0.96, rainShade: 0.85, low: 0.08, mist: 0.52, evenness: 0.35 },
+      clouds: { deck: 0.96, rainShade: 0.85, low: 0.08, mist: 0.52, evenness: 0.55 },
       variants: [
         { name: 'Steady rain from an even sky', weight: 1.4, precipitationIntensity: 0.6, clouds: { deck: 0.96, rainShade: 0.5, thickness: 0.65, opacity: 0.8, evenness: 1, low: 0.05 } },
         { name: 'Drizzle from thin grey', precipitationIntensity: 0.34, clouds: { deck: 0.94, rainShade: 0.45, thickness: 0.55, opacity: 0.6, evenness: 0.95, alto: 0, low: 0.04, mist: 0.58 } },
         { name: 'Showers', precipitationIntensity: 0.66, cloudCoverage: 0.8, clouds: { deck: 0.74, rainShade: 0.85, evenness: 0, low: 0.06, mist: 0.36, alto: 0.3 } },
-        { name: 'Low ragged cloud', weight: 0.8, clouds: { deck: 0.95, rainShade: 0.7, thickness: 0.85, evenness: 0.7, low: 0.22, mist: 0.62 } },
+        { name: 'Low ragged cloud', weight: 0.8, clouds: { deck: 0.95, rainShade: 0.7, thickness: 0.85, evenness: 0.9, low: 0.22, mist: 0.62 } },
       ],
       weight: 1.0,
       intensity: 0.74,
@@ -198,11 +198,11 @@ export const WEATHER_CONFIG = Object.freeze({
 
     storm: {
       label: 'Storm',
-      clouds: { deck: 0.78, rainShade: 1, low: 0.20, mist: 0.70, opacity: 1.35, evenness: 0.15 },
+      clouds: { deck: 0.78, rainShade: 1, low: 0.20, mist: 0.70, opacity: 1.35, evenness: 0.5 },
       variants: [
-        { name: 'Black ceiling', clouds: { deck: 0.97, rainShade: 1, thickness: 1.1, opacity: 1.2, evenness: 0.7, low: 0.26 } },
+        { name: 'Black ceiling', clouds: { deck: 0.97, rainShade: 1, thickness: 1.1, opacity: 1.2, evenness: 0.9, low: 0.26 } },
         { name: 'Towers with gaps', clouds: { deck: 0.66, rainShade: 1, thickness: 1.2, evenness: 0, low: 0.12, mist: 0.5, alto: 0 } },
-        { name: 'Squall', clouds: { deck: 0.88, rainShade: 0.9, thickness: 0.9, evenness: 0.35, cells: 0.4, low: 0.24 } },
+        { name: 'Squall', clouds: { deck: 0.88, rainShade: 0.9, thickness: 0.9, evenness: 0.55, cells: 0.4, low: 0.24 } },
       ],
       weight: 0.55,
       intensity: 0.92,

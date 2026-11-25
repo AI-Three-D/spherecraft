@@ -2,7 +2,7 @@ import { AERIAL_PERSPECTIVE_WGSL } from '../../atmosphere/shaders/aerialPerspect
 import { CLOUD_MATH_WGSL, CLOUD_SHADOW_LOOKUP_WGSL, CLOUD_UNIFORMS_WGSL } from './cloudCommon.wgsl.js';
 import {
     CLOUD_HAZE_LOOKUP_WGSL, CLOUD_HAZE_STRUCT_WGSL, CLOUD_MIST_LIGHT_WGSL, CLOUD_MIST_LOOKUP_WGSL, CLOUD_RAY_LOOKUP_WGSL,
-    CLOUD_SURFACE_VISIBILITY_WGSL, buildCloudUpsample,
+    CLOUD_SURFACE_VISIBILITY_WGSL, CLOUD_UPSAMPLE_WGSL,
 } from './cloudCompositeParts.wgsl.js';
 import { CLOUD_COMPOSITE_UNIFORMS_WGSL } from './cloudCompositeUniforms.wgsl.js';
 import { LOCAL_MIST_LOOKUP_WGSL, LOCAL_VOLUME_UNIFORMS_WGSL } from './cloudLocalVolumes.wgsl.js';
@@ -80,7 +80,7 @@ ${clouds ? /* wgsl */`
 @group(0) @binding(3) var cloudDepth: texture_2d<f32>;
 @group(0) @binding(5) var shadowMap: texture_2d<f32>;
 @group(0) @binding(11) var pointSampler: sampler;
-${CLOUD_SHADOW_LOOKUP_WGSL}${buildCloudUpsample(true)}
+${CLOUD_SHADOW_LOOKUP_WGSL}${CLOUD_UPSAMPLE_WGSL}
 @group(0) @binding(13) var localMist: texture_3d<f32>;
 @group(0) @binding(14) var<uniform> local: LocalVolumes;
 @group(0) @binding(15) var mountainFog: texture_3d<f32>;
@@ -127,7 +127,7 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     var seenKm = 1.0e30;
     ${clouds ? /* wgsl */`
     let size = vec2i(textureDimensions(cloudColor));
-    let upsampled = upsampleCloud(uv, size, size, 1, opaque);
+    let upsampled = upsampleCloud(uv, size, opaque);
     cloud = vec4f(max(upsampled.color.rgb, vec3f(0.0)), saturate(upsampled.color.a));
     cloudKm = upsampled.depth;
     ` : ''}

@@ -2,11 +2,11 @@ import { Renderer } from 'engine/renderer/index.js';
 import { WebGPUBackend } from 'engine/renderer/backend/webgpuBackend.js';
 import { GpuTimerModule } from 'engine/renderer/profiling/gpuPassTimer.js';
 import { VolumetricCloudsModule, DEFAULT_CLOUD_SETTINGS } from 'engine/renderer/volumetricClouds/VolumetricCloudsModule.js';
+import { CLOUD_DETAIL_TIERS } from 'engine/renderer/volumetricClouds/cloudDetailTiers.js';
 import { LabCompositeModule } from './labComposite.js';
 import { FlyCamera, localFrame } from './flyCamera.js';
 import { buildPanel } from './labPanel.js';
 import { PerfOverlay } from './perfOverlay.js';
-import { attachSolarLab } from './solarLabPanel.js';
 
 const params = new URLSearchParams(location.search);
 const planetRadiusKm = Number(params.get('radius')) || 6360;
@@ -59,6 +59,7 @@ for (const preset of PRESETS) {
 }
 
 const s = clouds.settings;
+const DETAILS = Object.keys(CLOUD_DETAIL_TIERS);
 // Canvas pixels per CSS pixel. Clouds and sky are soft, so 1× is the default; Retina 2× costs ~4×.
 const view = { pixelRatio: Number(params.get('dpr')) || 1 };
 const bind = (object, key) => ({ get: () => object[key], set: (v) => { object[key] = v; } });
@@ -111,29 +112,20 @@ const sections = [
     ] },
     { title: 'Quality & debug', controls: [
         { label: 'Pixel ratio', type: 'select', options: [[1, '1× (CSS px)'], [1.5, '1.5×'], [2, '2× (Retina)']], ...bind(view, 'pixelRatio') },
-        setting('Resolution scale', 'resolutionScale', 0.25, 1),
-        { label: 'Interleave', type: 'select', options: [[2, '2×2 (¼ rays/frame)'], [1, 'off']], ...bind(s, 'interleave') },
+        { label: 'Detail', type: 'select', options: DETAILS.map((name, i) => [i, name]),
+            get: () => DETAILS.indexOf(s.cloudDetail), set: i => { s.cloudDetail = DETAILS[i]; } },
+        { label: 'Reprojection', type: 'toggle', ...bind(s, 'reprojection') },
         setting('Light steps', 'lightSteps', 2, 10, { step: 1, digits: 0 }),
-        { label: 'Far layer proxy', type: 'toggle', ...bind(s, 'farProxy') },
-        setting('Proxy from (km)', 'proxyStartKm', 2, 200, { digits: 0 }),
-        setting('Proxy full (km)', 'proxyEndKm', 5, 400, { digits: 0 }),
-        setting('Max steps', 'maxSteps', 32, 512, { step: 1, digits: 0 }),
-        setting('Min step (km)', 'minStepKm', 0.01, 0.2, { digits: 3 }),
-        setting('Step growth', 'stepGrowth', 0.002, 0.05, { digits: 3 }),
-        setting('Max step (km)', 'maxStepKm', 0.1, 3),
         setting('Light step (km)', 'lightStepKm', 0.01, 0.3, { digits: 3 }),
-        setting('Temporal blend', 'temporalBlend', 0.02, 1),
+        { label: 'Slabs from orbit', type: 'toggle', ...bind(s, 'farProxy') },
         { label: 'Clouds', type: 'toggle', ...bind(clouds, 'enabled') },
-        { label: 'Step heatmap', type: 'toggle', ...bind(s, 'debugSteps') },
         { label: 'View', type: 'select', options: [[0, 'Final'], [1, 'Clouds only'], [2, 'Cloud opacity'], [3, 'Ground shadow']], ...bind(composite, 'viewMode') },
     ] },
 ];
 const panel = buildPanel(panelRoot, sections);
-let solar;
 document.querySelector('#reset').addEventListener('click', () => {
     Object.assign(s, DEFAULT_CLOUD_SETTINGS);
     panel.refresh();
-    solar?.refresh();
 });
 
 let stopped = false;
@@ -160,7 +152,6 @@ async function start() {
     clouds.gpuTimer = timerModule.timer;
     composite.gpuTimer = timerModule.timer;
     perf = new PerfOverlay(document.querySelector('#perf'), { timer: timerModule.timer });
-    solar = attachSolarLab(document.querySelector('#solar-lab'), clouds);
     perf.runButton.addEventListener('click', () => runProfile().catch(fail));
     applySun();
     goTo(PRESETS[0]);
@@ -193,7 +184,7 @@ async function start() {
             if (now - hudTime > 250) {
                 hudTime = now;
                 const [cw, ch] = clouds.getOutputs().size;
-                const lod = clouds.proxyWeight > 0 ? ` · far proxy ${(clouds.proxyWeight * 100).toFixed(0)}%` : '';
+                const lod = clouds.farProxyWeight > 0 ? ` · slabs ${(clouds.farProxyWeight * 100).toFixed(0)}%` : '';
                 hud.textContent = `altitude ${formatKm(camera.altitudeKm)} · speed ${formatKm(camera.speedKmS)}/s · `
                     + `canvas ${canvas.width}×${canvas.height} · clouds ${cw}×${ch}${lod}`;
             }
@@ -201,7 +192,7 @@ async function start() {
             animation = requestAnimationFrame(tick);
         } catch (error) { fail(error); }
     }
-    window.cloudLab = { renderer, clouds, composite, camera, sun, solar, presets: PRESETS, goTo, timer: timerModule.timer, runProfile };
+    window.cloudLab = { renderer, clouds, composite, camera, sun, presets: PRESETS, goTo, timer: timerModule.timer, runProfile };
     animation = requestAnimationFrame(tick);
 }
 
@@ -225,7 +216,7 @@ async function runProfile({ settleMs = 1500, sampleMs = 2500 } = {}) {
             rows.push({
                 view: preset.name, fps,
                 gpu: byName.total?.avg, gpuP95: byName.total?.p95,
-                raymarch: byName['clouds raymarch']?.avg, temporal: byName['clouds temporal']?.avg,
+                raymarch: byName['clouds raymarch']?.avg, history: byName['clouds history']?.avg,
                 shadow: byName['clouds shadow']?.avg, atmosphere: byName['lab atmosphere']?.avg,
                 composite: byName['lab composite']?.avg,
             });
@@ -237,7 +228,7 @@ async function runProfile({ settleMs = 1500, sampleMs = 2500 } = {}) {
     perf.showProfile(rows, [
         { label: 'fps', format: (row) => row.fps.toFixed(0) },
         { ...ms('gpu'), label: 'GPU ms' }, { ...ms('gpuP95'), label: 'p95' },
-        ms('raymarch'), ms('temporal'), ms('shadow'), ms('atmosphere'), ms('composite'),
+        ms('raymarch'), ms('history'), ms('shadow'), ms('atmosphere'), ms('composite'),
     ]);
     const [cw, ch] = clouds.getOutputs().size;
     const result = { canvas: [canvas.width, canvas.height], clouds: [cw, ch], settings: { ...s }, pixelRatio: view.pixelRatio, rows };
@@ -262,7 +253,6 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('pagehide', () => {
     stopped = true;
     cancelAnimationFrame(animation);
-    solar?.dispose();
     camera.dispose();
     renderer.dispose();
 }, { once: true });

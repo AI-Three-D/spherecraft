@@ -48,8 +48,8 @@ try {
             for (const key of Object.keys(c.settings)) if (!Object.hasOwn(DEFAULT_CLOUD_SETTINGS, key)) delete c.settings[key];
             const preset = WEATHER_CONFIG.effects[scene.preset];
             Object.assign(c.settings, DEFAULT_CLOUD_SETTINGS, runtime, {
-                windSpeedKmS: 0, weatherEvolveKmS: 0, boilKmS: 0, timeScale: 0, cloudBudgetMode: 'conventional',
-                coverage: 0.08 + 0.2 * preset.cloudCoverage, farProxy: false, groundProxyBelowKm: 0,
+                windSpeedKmS: 0, weatherEvolveKmS: 0, boilKmS: 0, timeScale: 0,
+                coverage: 0.08 + 0.2 * preset.cloudCoverage, farProxy: false,
             });
             c.weather = preset.clouds; c.enabled = true;
             c._evolve = 0; c._boil = 0; c._windShape = [0, 0, 0]; c._windDetail = [0, 0, 0];

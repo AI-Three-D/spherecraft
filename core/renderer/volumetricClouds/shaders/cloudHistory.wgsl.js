@@ -1,6 +1,6 @@
 import { CLOUD_MATH_WGSL, CLOUD_UNIFORMS_WGSL } from './cloudCommon.wgsl.js';
 
-export const CLOUD_CONVENTIONAL_HISTORY_WGSL = /* wgsl */`
+export const CLOUD_HISTORY_WGSL = /* wgsl */`
 ${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}
 @group(0) @binding(0) var<uniform> u: CloudUniforms;
 @group(0) @binding(1) var freshColor: texture_2d<f32>;

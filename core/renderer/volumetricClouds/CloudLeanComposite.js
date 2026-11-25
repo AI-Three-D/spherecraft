@@ -2,7 +2,7 @@
 import { buildLeanAirShader, buildLeanCompositeShader } from './shaders/cloudLeanComposite.wgsl.js';
 
 /**
- * The composite of the lower detail tiers (cloudBudgetTiers.js): the air in front of the clouds is added at cloud
+ * The composite of the lower detail tiers (cloudDetailTiers.js): the air in front of the clouds is added at cloud
  * resolution, and the cirrus is read from a smaller texture instead of being drawn over the whole screen.
  * Shares the uniforms and the haze and mist lookups of the CloudCompositePass it belongs to.
  */
