@@ -69,15 +69,20 @@ describe('world water authoring configuration',()=>{
   expect(terrain.mountainRangeModel).toBe('directional');
   expect(terrain.foothills.model).toBe('regional');
   expect(terrain.landformDetails).toEqual({
-   rangeValleys:true, regionalRollingHills:true, coastalHills:true, coves:true,
+   rangeValleys:true, regionalRollingHills:true, coastalHills:true, coves:true, oceanShelves:true,
   });
   expect(terrain.calderas.enabled).toBe(true);
   expect(terrain.fjords).toBe(true);
-  expect(terrain.tectonicRelief).toEqual({enabled:true,plateCount:18,mountainReliefM:2400,interiorReliefM:560});
+  expect(terrain.tectonicRelief).toEqual({
+   enabled:true, plateCount:18, mountainReliefM:2400, interiorReliefM:560, lowlandReliefM:220, coastalReliefM:1050,
+  });
   expect(terrain.inlandLandforms).toEqual({ fells:true, mesas:false, cuestas:false });
   expect(()=>loader._buildGameDataConfig({landformDetails:[]}, {}, {})).toThrow('landformDetails must be an object');
   expect(()=>loader._buildGameDataConfig({landformDetails:{coves:1}}, {}, {})).toThrow('landformDetails.coves must be a boolean');
+  expect(()=>loader._buildGameDataConfig({landformDetails:{oceanShelves:1}}, {}, {})).toThrow('landformDetails.oceanShelves must be a boolean');
   expect(()=>loader._buildGameDataConfig({tectonicRelief:{enabled:true,plateCount:0}}, {}, {})).toThrow('tectonicRelief.plateCount');
+  expect(()=>loader._buildGameDataConfig({tectonicRelief:{lowlandReliefM:500}}, {}, {})).toThrow('tectonicRelief.lowlandReliefM');
+  expect(()=>loader._buildGameDataConfig({tectonicRelief:{coastalReliefM:-1}}, {}, {})).toThrow('tectonicRelief.coastalReliefM');
  });
  it('authors calderas at startup and rejects terrain-grid-breaking presets',()=>{
   const loader=new WorldConfigLoader();

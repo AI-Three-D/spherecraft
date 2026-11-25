@@ -93,20 +93,11 @@ struct ErosionLandResult {
 //   hilltops and valley floors.)
 // Slope deltas are the filter's approximate derivatives (as in the
 // original), plus the first-order terms of the amount and the offset.
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, style: vec4<f32>, variationFloor: vec4<f32>) -> ErosionLandResult {
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, variationFloor: vec4<f32>) -> ErosionLandResult {
     var r: ErosionLandResult;
     r.delta = vec4<f32>(0.0);
     r.amount = vec4<f32>(0.0);
     let maxH = maxTerrainHeightM();
-    let R = noiseReferenceRadiusM();
-    let relief = reliefNorm * maxH;
-    let reliefRamp = erosionReliefRamp_d(reliefNorm);
-    let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
-    let variationN = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
-    // variationFloor (0..1) raises it smoothly toward 1: 1 - (1 - v)(1 - floor).
-    let variation = dConst(1.0) - dMul(dConst(1.0) - variationN, dConst(1.0) - variationFloor);
-    let styleStrength = dConst(${wgslNum(cfg.styleStrength[0])}) + style * ${wgslNum(cfg.styleStrength[1] - cfg.styleStrength[0])};
-    let reliefAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
     // Steepness: full erosion on steep ground, fading out toward flat ground.
     // Summits, saddles and valley floors are where the gully direction spins
     // around a point (pinches, bowties); this keeps gullies away from them
@@ -114,9 +105,20 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     // derivative of the landform) is not tracked.
     let slope = terrainSurfaceGradient(land, unitDir) * maxH;
     let steepness = smoothstep(${wgslNum(cfg.sharpSlopeStart)}, ${wgslNum(cfg.sharpSlopeFull)}, length(slope));
+    if (steepness <= 0.0) { return r; }
+    let style = terrainStyle_d(unitDir);
+    let reliefRamp = erosionReliefRamp_d(reliefNorm);
+    let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
+    let variationN = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
+    // variationFloor (0..1) raises it smoothly toward 1: 1 - (1 - v)(1 - floor).
+    let variation = dConst(1.0) - dMul(dConst(1.0) - variationN, dConst(1.0) - variationFloor);
+    let styleStrength = dConst(${wgslNum(cfg.styleStrength[0])}) + style * ${wgslNum(cfg.styleStrength[1] - cfg.styleStrength[0])};
+    let reliefAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
     let amount = reliefAmount * steepness;
     r.amount = amount;
     if (amount.x <= 0.001) { return r; }
+    let R = noiseReferenceRadiusM();
+    let relief = reliefNorm * maxH;
     var prm = erosionConfiguredParams();
     prm.strength *= amount.x;
     // Light erosion gets rounded ridges and creases: with the default sharp

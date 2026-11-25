@@ -8,13 +8,16 @@
     "rangeValleys": true,
     "regionalRollingHills": true,
     "coastalHills": true,
-    "coves": true
+    "coves": true,
+    "oceanShelves": true
   },
   "tectonicRelief": {
     "enabled": true,
     "plateCount": 18,
     "mountainReliefM": 2400,
-    "interiorReliefM": 560
+    "interiorReliefM": 560,
+    "lowlandReliefM": 220,
+    "coastalReliefM": 1050
   },
   "calderas": {
     "enabled": true
@@ -22,6 +25,14 @@
   "fjords": true,
   "inlandLandforms": {
     "fells": true
+  },
+  "erosionFilter": {
+    "octaves": 4,
+    "gain": 0.45,
+    "sharpSlopeStart": 0.08,
+    "styleStrength": [0.8, 1.14],
+    "styleRidgeRounding": [0.44, 0.27],
+    "styleCreaseRounding": [0.34, 0.16]
   },
   "noiseProfile": {
     "mountainBias": 2.65,

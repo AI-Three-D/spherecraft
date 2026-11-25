@@ -6,7 +6,7 @@
 //
 // Bands (normalized heights, duals):
 //   b0  macro: continental relief, land regions, inland uplift, lone hills,
-//       mountains and tectonic uplift
+//       mountains and tectonic uplift, lowland relief
 //   b1  foothills and the erosion filter's change (eroded from b0 + foothills,
 //       exactly as earthLike)
 //   b2  rolling hills, local knolls and meso2's first octave (750 m)
@@ -25,6 +25,7 @@ import { fellsWgsl } from '../features/featureFells.wgsl.js';
 import { fjordsWgsl } from '../features/featureFjords.wgsl.js';
 import { coastalCovesWgsl, coastalHillsWgsl } from '../features/featureCoast.wgsl.js';
 import { createTectonicReliefWgsl } from '../features/featureTectonicRelief.wgsl.js';
+import { createOceanFloorWgsl } from '../features/featureOceanFloor.wgsl.js';
 
 export function createLakeLandConstants() {
     return createEarthlikeConstants();
@@ -34,8 +35,9 @@ export function createLakeLandConstants() {
 export function createLakeLandBase(options = {}) {
     const foothill = createFoothillWgsl(options.foothills);
     const inlandWgsl = createInlandLandformWgsl(options.inlandLandforms);
-    const { coastalHills, coves } = options.landformDetails ?? {};
+    const { coastalHills, coves, oceanShelves } = options.landformDetails ?? {};
     const tectonicWgsl = createTectonicReliefWgsl(options.tectonicRelief, options.terrainSeed);
+    const lowland = tectonicWgsl && options.tectonicRelief.lowlandReliefM > 0;
     return `
 // ==================== Base: lakeLand ====================
 
@@ -69,6 +71,7 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
 struct LandBands {
     b0: vec4<f32>, b1: vec4<f32>, b2: vec4<f32>, b3: vec4<f32>,
     landBlend: vec4<f32>, ocean: vec4<f32>,
+    ${oceanShelves ? 'landMask: vec4<f32>,' : ''}
 }
 
 ${createTerrainFeatureCalderas(options.calderas)}
@@ -78,6 +81,7 @@ ${options.fjords === true ? fjordsWgsl : ''}
 ${coastalHills ? coastalHillsWgsl : ''}
 ${coves ? coastalCovesWgsl : ''}
 ${tectonicWgsl}
+${createOceanFloorWgsl(oceanShelves)}
 
 // featureMesoDetail_d with its fbm split into the first octave and the other
 // two (the same terms and sum as fbm3D_d: 3 octaves, gain 0.5, lacunarity 2).
@@ -122,10 +126,9 @@ fn landBands_d(seed: i32, unitDir: vec3<f32>) -> LandBands {
             b0 += region.height;
         }
         let mountainsH = featureMountainsHeight_d(unitDir, seed);
-        ${tectonicWgsl ? `let tectonic = tectonicRelief_d(unitDir, seed, regional.landMask, mountainsH);
+        ${tectonicWgsl ? `let tectonic = tectonicRelief_d(unitDir, seed, regional.landMask, mountainsH, region.coord);
         b0 += tectonic.upland;` : ''}
-        let calderaFoundation = b0;
-        let style = terrainStyle_d(unitDir);
+        let calderaFoundation = b0${lowland ? ' + tectonic.lowland' : ''};
         var foothillsH = dConst(0.0);
         if (terrainFeatureOn(TF_FOOTHILLS)) {
             let footBand = ${foothill.band};
@@ -139,7 +142,8 @@ fn landBands_d(seed: i32, unitDir: vec3<f32>) -> LandBands {
         let relief = foothillsH + bigHillsH + mountainsH${tectonicWgsl ? ' + tectonic.upland + tectonic.mountains' : ''};
         let mountainRelief = mountainsH${tectonicWgsl ? ' + tectonic.mountains' : ''};
         let mtnCarve = dQuintic(dClamp((mountainRelief * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
-        let er = erosionFilterLand_d(unitDir, b0 + foothillsH, relief, style, mtnCarve);
+        let er = erosionFilterLand_d(unitDir, b0 + foothillsH, relief, mtnCarve);
+        ${lowland ? 'b0 += tectonic.lowland;' : ''}
         ${options.inlandLandforms?.fells === true ? 'b0 += fellRelief_d(unitDir, seed, regional.landMask, bigHillsH + mountainRelief);' : ''}
         out.b1 = foothillsH + er.delta;
         var b2 = dMul(featureRollingHillsHeight_d(unitDir, seed, regional, profile, amp), region.rough);
@@ -187,14 +191,8 @@ fn landBands_d(seed: i32, unitDir: vec3<f32>) -> LandBands {
         out.b0 = b0;
     }
     if (out.landBlend.x < 1.0) {
-        var oceanVariation = dConst(0.0);
-        if (terrainFeatureOn(TF_OCEAN_FLOOR)) {
-            let n500m = fbmAuto_d(unitDir, 0.5, 4, seed + 1000, 2.0, 0.5);
-            let n100m = fbmAuto_d(unitDir, 0.1, 4, seed + 2000, 2.0, 0.5);
-            let n20m = fbmAuto_d(unitDir, 0.02, 3, seed + 3000, 2.0, 0.5);
-            oceanVariation = n500m * 0.05 + n100m * 0.02 + n20m * 0.005;
-        }
-        out.ocean = dConst(uniforms.waterParams.y + amp.oceanDepth) + oceanVariation;
+        out.ocean = oceanFloorHeight_d(unitDir, seed, amp.oceanDepth);
+        ${oceanShelves ? 'out.landMask = regional.landMask;' : ''}
     }
     return out;
 }
@@ -210,7 +208,8 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
     if (B.landBlend.x >= 1.0) {
         return softClampHeight_d(land, -1.1, 1.8, 0.25);
     }
-    return softClampHeight_d(dMix(B.ocean, land, B.landBlend), -1.1, 1.8, 0.25);
+    let ground = dMix(B.ocean, land, B.landBlend);
+    return softClampHeight_d(${oceanShelves ? 'oceanShelfHeight_d(ground, B.landMask)' : 'ground'}, -1.1, 1.8, 0.25);
 }
 
 fn terrainSurfaceGradient(hd: vec4<f32>, unitDir: vec3<f32>) -> vec3<f32> {
