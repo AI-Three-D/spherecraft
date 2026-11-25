@@ -35,6 +35,7 @@ export function createLakeLandConstants() {
 export function createLakeLandBase(options = {}) {
     const foothill = createFoothillWgsl(options.foothills);
     const inlandWgsl = createInlandLandformWgsl(options.inlandLandforms);
+    const { biomeLandscape } = options;
     const { coastalHills, coves, oceanShelves } = options.landformDetails ?? {};
     const tectonicWgsl = createTectonicReliefWgsl(options.tectonicRelief, options.terrainSeed);
     const lowland = tectonicWgsl && options.tectonicRelief.lowlandReliefM > 0;
@@ -71,6 +72,7 @@ fn calculateTerrainHeightD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
 struct LandBands {
     b0: vec4<f32>, b1: vec4<f32>, b2: vec4<f32>, b3: vec4<f32>,
     landBlend: vec4<f32>, ocean: vec4<f32>,
+    ${biomeLandscape?.enabled ? 'seaClimate: BiomeClimateD,' : ''}
     ${oceanShelves ? 'landMask: vec4<f32>,' : ''}
 }
 
@@ -142,7 +144,10 @@ fn landBands_d(seed: i32, unitDir: vec3<f32>) -> LandBands {
         let relief = foothillsH + bigHillsH + mountainsH${tectonicWgsl ? ' + tectonic.upland + tectonic.mountains' : ''};
         let mountainRelief = mountainsH${tectonicWgsl ? ' + tectonic.mountains' : ''};
         let mtnCarve = dQuintic(dClamp((mountainRelief * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
-        let er = erosionFilterLand_d(unitDir, b0 + foothillsH, relief, mtnCarve);
+        ${biomeLandscape?.enabled ? `out.seaClimate = biomeSeaClimate_d(unitDir, seed);
+        let climate = biomeAtElevation_d(out.seaClimate, b0 + foothillsH);
+        let province = biomeProvince_d(unitDir, seed);` : ''}
+        let er = erosionFilterLand_d(unitDir, b0 + foothillsH, relief, mtnCarve${biomeLandscape?.enabled ? ', climate.humidity, province' : ''});
         ${lowland ? 'b0 += tectonic.lowland;' : ''}
         ${options.inlandLandforms?.fells === true ? 'b0 += fellRelief_d(unitDir, seed, regional.landMask, bigHillsH + mountainRelief);' : ''}
         out.b1 = foothillsH + er.delta;
@@ -155,6 +160,8 @@ fn landBands_d(seed: i32, unitDir: vec3<f32>) -> LandBands {
             b2 += dMul(meso.first, mesoW);
             out.b3 = dMul(meso.rest, mesoW);
         }
+        ${biomeLandscape?.enabled && biomeLandscape.rockReliefM > 0 ? 'b2 += biomeBedrockRelief_d(unitDir, seed, b0 + out.b1, mountainRelief + foothillsH, province);' : ''}
+        ${biomeLandscape?.enabled && biomeLandscape.duneHeightM > 0 ? 'b2 += biomeDunes_d(unitDir, seed, climate, b0 + out.b1 + b2, relief);' : ''}
         out.b2 = b2;
         // Distribute the fill blend across the bands: lake planning can omit
         // the finer bands without exposing their inverse in the macro band.
@@ -205,6 +212,8 @@ fn calculateTerrainHeightBaseD(seed: i32, unitDir: vec3<f32>) -> vec4<f32> {
         let lake = lakeFind(seed, unitDir, B);
         if (lake.any) { land = lakeCellsApply_d(land, B, lake); }
     }
+    ${biomeLandscape?.enabled ? `gLandscapeSeaClimate = B.seaClimate;
+    gLandscapeSeaClimateValid = B.landBlend.x > 0.0;` : ''}
     if (B.landBlend.x >= 1.0) {
         return softClampHeight_d(land, -1.1, 1.8, 0.25);
     }

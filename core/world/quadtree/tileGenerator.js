@@ -20,6 +20,7 @@
 //   At depth 10, gridSize=1024,  so density = 1  texel per face-UV unit.
 //   This is a natural geometric LOD: coarser tiles have lower sampling density.
 
+import { usesBiomeLandscape } from '../terrain-generator/biomeLandscapeConfig.js';
 import { Logger } from '../../../shared/Logger.js';
 import { gpuFormatBytesPerTexel } from '../../renderer/resources/texture.js';
 import { buildCoarseCategoryColorFragmentWGSL } from '../tileCategoryColors.js';
@@ -393,7 +394,9 @@ this._maxGpuFencesObserved = 0;
             sourcePool.formats?.height === heightFormat &&
             sourcePool.formats?.tile === tileFormat &&
             sourcePool.tileSize === this.textureSize;
-        const needsBaseHeight = needsTile && !reuseResidentGeometry;
+        const landscapeClimate = requiredTypes.includes('climate') &&
+            usesBiomeLandscape(this.terrainGen.terrainConfig, this.terrainGen.baseGenerator);
+        const needsBaseHeight = (needsTile && !reuseResidentGeometry) || landscapeClimate;
     
         let gpuHeightBase = null;
         let gpuHeight = null;
@@ -455,6 +458,17 @@ this._maxGpuFencesObserved = 0;
                 this.textureSize, this.textureSize, macroFormat);
         }
     
+        // Climate uses the base-height payload in landscape mode.
+        let gpuClimate = null;
+        let climateTarget = null;
+        const climateFormat = this.textureFormats.climate || 'rgba8unorm';
+        if (landscapeClimate || (requiredTypes.includes('climate') && gpuHeight && gpuTile)) {
+            climateTarget = this.terrainGen.createStorageBackedOutputTarget(
+                this.textureSize, this.textureSize, climateFormat);
+            gpuClimate = climateTarget.finalTexture;
+        }
+        const fuseBiomeClimate = landscapeClimate && tileTarget && climateFormat === 'rgba8unorm';
+
         // ── Build terrain passes in dependency order ───────────────
         const terrainPasses = [];
         if (gpuHeightBase) {
@@ -473,6 +487,7 @@ this._maxGpuFencesObserved = 0;
                 textureSize: this.textureSize,
                 heightTexture: gpuHeightBase,
                 heightTextureFormat: 'rgba32float',
+                biomeClimateTexture: fuseBiomeClimate ? gpuClimate : null,
                 resolveToTexture: tileTarget.requiresResolve ? gpuTile : null,
                 resolveToFormat: tileTarget.requiresResolve ? tileTarget.finalFormat : null
             });
@@ -531,22 +546,16 @@ this._maxGpuFencesObserved = 0;
             });
         }
 
-        // ── Climate bake pass (needs height + tile) ───────────────
-        let gpuClimate = null;
-        let climateTarget = null;
-        const climateFormat = this.textureFormats.climate || 'rgba8unorm';
-        if (requiredTypes.includes('climate') && gpuHeight && gpuTile) {
-            climateTarget = this.terrainGen.createStorageBackedOutputTarget(
-                this.textureSize, this.textureSize, climateFormat);
-            gpuClimate = climateTarget.finalTexture;
+        // Nonstandard storage formats and climate-only requests use a separate dispatch.
+        if (climateTarget && !fuseBiomeClimate) {
             terrainPasses.push({
                 outputType: 6,
                 texture: climateTarget.storageTexture,
                 format: climateTarget.storageFormat,
                 textureSize: this.textureSize,
-                heightTexture: gpuHeight,
-                tileTexture: gpuTile,
-                heightTextureFormat: heightFormat,
+                heightTexture: landscapeClimate ? gpuHeightBase : gpuHeight,
+                tileTexture: landscapeClimate ? null : gpuTile,
+                heightTextureFormat: landscapeClimate ? 'rgba32float' : heightFormat,
                 tileTextureFormat: tileFormat,
                 resolveToTexture: climateTarget.requiresResolve ? gpuClimate : null,
                 resolveToFormat: climateTarget.requiresResolve ? climateTarget.finalFormat : null

@@ -1060,6 +1060,7 @@ export function createEngineConfig() {
 
 export function createGameDataConfig() {
   const terrain = new TerrainGenerationConfig({
+    biomeLandscape: { preset: 'earth' },
     // Use natural terrain and terrain-sampled water by default. The older
     // regional placement remains available for explicit comparisons.
     regionalTerrain: {enabled:false,cells:256,seamCells:4,basins:{enabled:true},world:{enabled:true,maxLakes:1200,maxRivers:320}},

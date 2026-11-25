@@ -24,6 +24,7 @@ import { buildAtmoBankAuthoringRuntime } from '../core/renderer/atmosphere-banks
 import { buildParticleAuthoringRuntime } from '../core/renderer/particles/ParticleAuthoringRuntime.js';
 import { requireInt, requireNumber, requireNumberArray } from '../shared/requireUtil.js';
 import { createAdaptiveQualityConfig } from '../core/AdaptiveQuality.js';
+import { normalizeBiomeLandscape } from '../core/world/terrain-generator/biomeLandscapeConfig.js';
 import { normalizeFoothillsConfig } from '../core/world/terrain-generator/foothillsConfig.js';
 import { normalizeCalderaConfig } from '../core/world/terrain-generator/calderaConfig.js';
 import { normalizeInlandLandforms } from '../core/world/terrain-generator/inlandLandformConfig.js';
@@ -305,6 +306,8 @@ export class WorldConfigLoader {
             if (terrain.erosion)              Object.assign(t.erosion,      terrain.erosion);
             if (terrain.impacts)              Object.assign(t.impacts,      terrain.impacts);
             if (terrain.water)                Object.assign(t.water,        terrain.water);
+            if (terrain.climate)            Object.assign(t.climate, terrain.climate);
+            if (terrain.biomeLandscape)    t.biomeLandscape = normalizeBiomeLandscape(terrain.biomeLandscape);
             if (terrain.surface)              Object.assign(t.surface,      terrain.surface);
             if (terrain.erosionFilter)        Object.assign(t.erosionFilter, terrain.erosionFilter);
             if (terrain.foothills != null) {

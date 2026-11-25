@@ -77,6 +77,7 @@ class FeedbackDedupeSet {
         }
     }
 }
+import { usesBiomeLandscape } from '../terrain-generator/biomeLandscapeConfig.js';
 import { gpuFormatToWrapperFormat } from '../../renderer/resources/texture.js';
 import { MipmapGenerator } from '../../texture/MipmapGenerator.js';
 import { gpuFormatBytesPerTexel } from '../../renderer/resources/texture.js';
@@ -265,6 +266,7 @@ class TileArrayPool {
         const neverMipmapByType = (type) =>
             wantsNearestByType(type) ||
             type === 'resolvedColor' ||
+            type === 'climate' || // Terrain and asset shaders use the shared level-zero field.
             // Sampled at mip 0 only. Mip-filtered sampling was measured worse
             // (TERRAIN_FLAT_TIER_FINDINGS.md): the mip level follows the
             // tile's texel size, so the blur changes at every LOD boundary.
@@ -818,7 +820,8 @@ export class TileStreamer {
         // type (e.g. a minimal ['height','normal','tile'] setup),
         // refinementTypes is empty and the refinement stage is simply
         // never scheduled — no behavior change from before Phase 2.
-        const { geometryTypes, refinementTypes } = splitOutputTypes(this.streamedTypes);
+        const climateInGeometry = usesBiomeLandscape(this.terrainGenerator?.terrainConfig, this.terrainGenerator?.baseGenerator);
+        const { geometryTypes, refinementTypes } = splitOutputTypes(this.streamedTypes, climateInGeometry);
         this._geometryTypes = geometryTypes;
         this._refinementTypes = refinementTypes;
         // Tiles drawn by the flat solid-color tier (geometry LOD >=

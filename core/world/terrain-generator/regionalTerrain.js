@@ -102,7 +102,7 @@ export async function createRegionalTerrainData({ device, terrainGenerator: gen,
         shelfM: (disableMask & 1) ? 0 : .14 * Math.min(5, Math.max(0, uniformView.getFloat32(192, true))) * maxHeightM,
         regionM: (disableMask & 2) ? 0 : maxHeightM };
     const budgets = terrainDisplacementBudgets({ erosionFilter: gen.erosionFilter,
-        microGain: new DataView(uniformBytes).getFloat32(220, true), features: gen.terrainFeatures });
+        microGain: uniformView.getFloat32(220, true), features: gen.terrainFeatures, biomeLandscape: gen.terrainConfig?.biomeLandscape });
     const source = createAdvancedTerrainComputeShader(gen._getAdvancedTerrainShaderOptions({
         regionalTerrain: false, regionalShape:false,regionalValleyFeature:false, waterCarve: false,
     })) + createRegionalTerrainBakeWgsl() + createRegionalTerrainBoundsWgsl(budgets, seamCells);

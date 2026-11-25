@@ -25,7 +25,7 @@ export function reliefErosionLowerBound({ allowanceM: a, lowAmount, startM, full
     return Math.min(...candidates);
 }
 
-export function terrainDisplacementBudgets({ erosionFilter: ef, microGain = 1, features = {} }) {
+export function terrainDisplacementBudgets({ erosionFilter: ef, microGain = 1, features = {}, biomeLandscape = null }) {
     const finite = (name, value, minimum = 0) => {
         if (!Number.isFinite(value) || value < minimum) throw new Error(`Unsupported height contract: ${name}`);
         return value;
@@ -44,13 +44,16 @@ export function terrainDisplacementBudgets({ erosionFilter: ef, microGain = 1, f
     finite('lowAmountRounding', ef.lowAmountRounding);
     let octaveSum = 0, gain = 1;
     for (let i = 0; i < ef.octaves; i++) { octaveSum += gain; gain *= ef.gain; }
-    const maxAmount = Math.max(1, ef.variationMin) * Math.max(1, ef.lowReliefAmount) * Math.max(...ef.styleStrength);
+    const landscapeErosion = biomeLandscape?.enabled === true;
+    const maxWeathering = landscapeErosion ? biomeLandscape.erosion * (1 + biomeLandscape.weatheringContrast) : 1;
+    const landscapeReliefM = biomeLandscape?.enabled ? biomeLandscape.duneHeightM + biomeLandscape.rockReliefM : 0;
+    const maxAmount = Math.max(1, ef.variationMin) * Math.max(1, ef.lowReliefAmount) * Math.max(...ef.styleStrength) * maxWeathering;
     // Phacelle's normalized cosine has magnitude <= 1. After cancelling
     // the initial fade target, q_i = (1-mask_i)q_(i-1) + mask_i*g*cos_i,
     // q_-1 = 0, so |q_i| <= g. No extra fade-target budget is required.
     const erosionM = ef.strength * ef.scale * maxAmount * ef.gullyWeight * octaveSum;
     const reliefErosionLowerM = reliefErosionLowerBound({
-        allowanceM: ef.strength * ef.scale * Math.max(1, ef.variationMin) * Math.max(...ef.styleStrength) * ef.gullyWeight * octaveSum,
+        allowanceM: ef.strength * ef.scale * Math.max(1, ef.variationMin) * Math.max(...ef.styleStrength) * maxWeathering * ef.gullyWeight * octaveSum,
         lowAmount: ef.lowReliefAmount, startM: ef.reliefStartM, fullM: ef.reliefFullM,
     });
     const profileMicroGain = Math.min(5, finite('microGain', microGain));
@@ -65,7 +68,7 @@ export function terrainDisplacementBudgets({ erosionFilter: ef, microGain = 1, f
     // Grass, sand (including dune-envelope overshoot) and generic are lower.
     const microM = features.microDetail === false ? 0 : 24.4 * profileMicroGain;
     return { erosionM, reliefErosionLowerM, mesoM, microM, lakeHollowM: features.lakeBasins === false ? 0 : 25,
-        octaveSum, maxAmount, noiseBound, numericalAllowanceM: 1 };
+        octaveSum, maxAmount, maxWeathering, landscapeErosion, landscapeReliefM, noiseBound, numericalAllowanceM: 1 };
 }
 
 export function softClampTerrainMeters(heightM, maxH) {
@@ -76,7 +79,7 @@ export function softClampTerrainMeters(heightM, maxH) {
 }
 
 export function naturalFinalLowerBound({ foundationMinM, oceanMinM, fullyLand, maxH, budgets }) {
-    const land = foundationMinM + (budgets.reliefErosionLowerM ?? -budgets.erosionM) - budgets.mesoM - budgets.lakeHollowM;
+    const land = foundationMinM + (budgets.reliefErosionLowerM ?? -budgets.erosionM) - budgets.mesoM - budgets.lakeHollowM - (budgets.landscapeReliefM ?? 0);
     const mixed = fullyLand ? land : Math.min(land, oceanMinM);
     // There are TWO soft clamps: natural base and final tile micro height.
     return softClampTerrainMeters(softClampTerrainMeters(mixed, maxH) - budgets.microM, maxH)

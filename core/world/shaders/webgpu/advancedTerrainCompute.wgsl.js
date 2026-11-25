@@ -1,4 +1,6 @@
 // js/world/shaders/webgpu/advancedTerrainCompute.wgsl.js
+import { usesBiomeLandscape } from '../../terrain-generator/biomeLandscapeConfig.js';
+import { biomeLandscapeWGSL } from '../../../../templates/terrain-shaders/biomeLandscape.wgsl.js';
 import { createNoiseLibrary } from "./noiseLibrary.wgsl.js";
 import { createTerrainFeatureToggleWgsl } from '../../terrain-generator/terrainFeatureToggles.js';
 import { createBiomeScoringWGSL } from "./biomeScoring.wgsl.js";
@@ -20,7 +22,7 @@ const wgslVec = (arr) => `vec${arr.length}<f32>(${arr.map(wgslNum).join(', ')})`
 // terrain.erosionFilter: the RuneVision filter applied to the land height in
 // calculateTerrainHeightD (sphere). Always on; cfg holds its parameters
 // (TerrainGenerationConfig.erosionFilter).
-function createErosionFilterLandWgsl(cfg, createFeature) {
+function createErosionFilterLandWgsl(cfg, createFeature, biomeLandscape) {
   if (!cfg || !Number.isFinite(cfg.strength)) {
     throw new Error('createAdvancedTerrainComputeShader requires options.erosionFilter (TerrainGenerationConfig.erosionFilter)');
   }
@@ -93,7 +95,7 @@ struct ErosionLandResult {
 //   hilltops and valley floors.)
 // Slope deltas are the filter's approximate derivatives (as in the
 // original), plus the first-order terms of the amount and the offset.
-fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, variationFloor: vec4<f32>) -> ErosionLandResult {
+fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32>, variationFloor: vec4<f32>${biomeLandscape ? ', humidity: vec4<f32>, province: vec4<f32>' : ''}) -> ErosionLandResult {
     var r: ErosionLandResult;
     r.delta = vec4<f32>(0.0);
     r.amount = vec4<f32>(0.0);
@@ -106,7 +108,7 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let slope = terrainSurfaceGradient(land, unitDir) * maxH;
     let steepness = smoothstep(${wgslNum(cfg.sharpSlopeStart)}, ${wgslNum(cfg.sharpSlopeFull)}, length(slope));
     if (steepness <= 0.0) { return r; }
-    let style = terrainStyle_d(unitDir);
+    let style = ${biomeLandscape ? 'biomeErosionStyle(province)' : 'terrainStyle_d(unitDir)'};
     let reliefRamp = erosionReliefRamp_d(reliefNorm);
     let varN = fbmAuto_d(unitDir, ${wgslNum(cfg.variationScaleM / 1000)}, 3, uniforms.seed + 7100, 2.0, 0.5);
     let variationN = dConst(${wgslNum(cfg.variationMin)}) + dSmoothstep(-0.35, 0.35, varN) * (1.0 - ${wgslNum(cfg.variationMin)});
@@ -114,7 +116,7 @@ fn erosionFilterLand_d(unitDir: vec3<f32>, land: vec4<f32>, reliefNorm: vec4<f32
     let variation = dConst(1.0) - dMul(dConst(1.0) - variationN, dConst(1.0) - variationFloor);
     let styleStrength = dConst(${wgslNum(cfg.styleStrength[0])}) + style * ${wgslNum(cfg.styleStrength[1] - cfg.styleStrength[0])};
     let reliefAmount = dMul(dMul(variation, dConst(${wgslNum(cfg.lowReliefAmount)}) + reliefRamp * (1.0 - ${wgslNum(cfg.lowReliefAmount)})), styleStrength);
-    let amount = reliefAmount * steepness;
+    let amount = ${biomeLandscape ? 'dMul(reliefAmount, biomeWeathering(humidity))' : 'reliefAmount'} * steepness;
     r.amount = amount;
     if (amount.x <= 0.001) { return r; }
     let R = noiseReferenceRadiusM();
@@ -197,9 +199,11 @@ export function createAdvancedTerrainComputeShader(options = {}) {
   const hasTileBindings = options?.hasTileBindings ?? false;
   const hasBaseHeightBinding = hasHeightBindings && options?.hasBaseHeightBinding === true;
   const hasSmoothSplatIdsBinding = options?.hasSmoothSplatIdsBinding === true;
+  const hasBiomeClimateBinding = options?.hasBiomeClimateBinding === true;
   const maxBiomes = options?.maxBiomes ?? 16;
   const useFixedMaterialFamilySplats = options?.fixedMaterialFamiliesEnabled === true;
-  const erosionFilterWgsl = createErosionFilterLandWgsl(options?.erosionFilter, createTerrainFeatureErosionFilter);
+  const landscape = usesBiomeLandscape(options, baseId) ? options.biomeLandscape : null;
+  const erosionFilterWgsl = createErosionFilterLandWgsl(options?.erosionFilter, createTerrainFeatureErosionFilter, landscape);
   const authoredSplatSourceMinProbability = Math.max(
     0.0,
     Math.min(1.0, Number.isFinite(options?.authoredSplatSourceMinProbability)
@@ -326,6 +330,7 @@ ${hasHeightBindings ? '@group(0) @binding(2) var heightMap: texture_2d<f32>;' : 
 ${hasTileBindings ? '@group(0) @binding(3) var tileMap: texture_2d<f32>;' : ''}
 ${hasBaseHeightBinding ? '@group(0) @binding(4) var baseHeightMap: texture_2d<f32>;' : ''}
 ${hasSmoothSplatIdsBinding ? '@group(0) @binding(5) var smoothSplatIdsTexture: texture_storage_2d<rgba8unorm, write>;' : ''}
+${hasBiomeClimateBinding ? '@group(0) @binding(5) var biomeClimateOut: texture_storage_2d<rgba8unorm, write>;' : ''}
 @group(1) @binding(0) var<uniform> biomeConfigUniforms: BiomeUniforms;
 
 const AUTHORED_SPLAT_SOURCE_MIN_PROBABILITY: f32 = ${wgslFloat(authoredSplatSourceMinProbability, 0.18)};
@@ -423,6 +428,30 @@ fn heightInputCoord(coord: vec2<i32>) -> vec2<i32> {
     return coord + select(vec2<i32>(0), vec2<i32>(1), (d == vec2<i32>(2)) & vec2<bool>(!padded));
 }
 
+${landscape ? `
+fn landscapeClimatePayload(ground: vec4<f32>, dir: vec3<f32>, seed: i32) -> vec4<f32> {
+    let climate = ground.zw;
+    let neutral = 128.0 / 255.0;
+    let heightAboveSea = (ground.r - uniforms.waterParams.y) * maxTerrainHeightM();
+    if (heightAboveSea <= 0.0) { return vec4<f32>(climate, neutral, 0.5); }
+    let cover = biomeCover(climate.x, climate.y, ground.g, ground.r * maxTerrainHeightM(), 0.0);
+    let vegetation = cover.grass + cover.forest + 0.68 * cover.marsh + 0.18 * cover.tundra;
+    let ice = landscapeIceCover(ground.r, ground.g, climate, dir, seed);
+    let coverSignal = neutral + vegetation * (1.0 - ice) * (1.0 - neutral) - ice * neutral;
+    return vec4<f32>(climate, coverSignal, biomeProvince_d(dir, seed).x);
+}
+
+fn landscapeMicroM(cover: BiomeCover, dir: vec3<f32>, seed: i32, slope: f32) -> f32 {
+    // One continuous displacement at a biome boundary. The mesh gets the
+    // metre-scale relief; fine litter, ripples and grains are ground normals.
+    let n = fbmAuto(dir.x, dir.z, dir, 0.039, 2, seed + 11241, 2.03, 0.5);
+    let mounds = fbmAuto(dir.x, dir.z, dir, 0.125, 1, seed + 11259, 2.0, 0.5);
+    let amplitude = 2.5 * cover.grass + 4.8 * cover.forest + 1.0 * cover.marsh + 3.3 * cover.tundra
+        + 1.1 * cover.snow + 0.55 * cover.sand + 2.7 * cover.rock;
+    return (n * 0.72 + mounds * 0.28) * amplitude * (1.0 - 0.26 * slope);
+}
+` : ''}
+
 fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f32 {
     let dir = getSpherePoint(face, u, v);
     let wx = dir.x;
@@ -432,6 +461,16 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
     let baseH = hs.h;
     let slope = hs.slope;
 
+${landscape ? `
+    var biomeMicro = 0.0;
+    if (baseH > uniforms.waterParams.y && terrainFeatureOn(TF_MICRO_DETAIL)) {
+        let cover = landscapeCoverAt(baseH, slope, dir, uniforms.seed);
+        biomeMicro = landscapeMicroM(cover, dir, uniforms.seed, slope);
+    }
+    let gain = clamp(getTerrainProfile().microGain, 0.0, 5.0);
+    let delta = riverCarveMicroAt(dir, baseH * maxTerrainHeightM(), biomeMicro * gain * regionalBasinMicroKeep(dir));
+    return softClampHeight(baseH + regionalValleyMicro(delta / maxTerrainHeightM(), dir), -1.1, 1.8, 0.25);
+` : `
     var tileType: u32 = determineTileType(baseH, slope, wx, wy, dir, uniforms.seed);
     let profile = getTerrainProfile();
 
@@ -456,6 +495,7 @@ fn sampleMicroHeightProcedural(face: i32, u: f32, v: f32, du: f32, dv: f32) -> f
     // No micro detail in river channels (it would raise the carved bed), none crossing the water's level beside them.
     let microH = regionalValleyMicro(riverCarveMicroAt(dir, baseH * maxTerrainHeightM(), micro * dispMeters * microGain * regionalBasinMicroKeep(dir)) / maxTerrainHeightM(), dir);
     return softClampHeight(baseH + microH, -1.1, 1.8, 0.25);
+`}
 }
 
 // Stable base-height-only boundary sampler.
@@ -620,6 +660,7 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createNoiseLibrary(),
     createTerrainFeatureToggleWgsl(),
     erosionFilterWgsl,
+    biomeLandscapeWGSL(landscape),
     createTerrainCommon(),
     createSurfaceCommon({
         tileCategories: options.tileCategories,
@@ -644,7 +685,7 @@ fn computeNormalSlopeFromHeightMapFlat(coordC: vec2<i32>) -> NormalSlope {
     createRiverCarveWgsl({ enabled: options?.waterCarve === true, bankDetail: options?.riverBankDetail === true }),
     createRegionalTerrainWgsl({ enabled: options.regionalTerrain === true, valleyFeature: options.regionalValleyFeature === true, shape: options.regionalShape === true }),
     options.regionalShape===true?createRegionalShapeWgsl():'',
-    base.base(options),
+    base.base({ ...options, biomeLandscape: landscape }),
     `
 const WATER_1: u32 = SURFACE_WATER;
 const GRASS_SHORT_1: u32 = SURFACE_GRASS_BASE;
@@ -746,6 +787,62 @@ fn authoredBiomeSpatialCoords(
 
 // gTileDraw / gTileDrawValid (surfaceCommon): set by the fallback classifier
 // or, below, by the authored-biome draw; not by water or the rock override.
+${landscape ? `
+fn landscapeIceCover(h: f32, slope: f32, climate: vec2<f32>, dir: vec3<f32>, seed: i32) -> f32 {
+    ${options.landformDetails?.rangeValleys ? `
+    let aboveSea = (h - uniforms.waterParams.y) * maxTerrainHeightM();
+    let accumulation = biomeGlacierClimate(climate.x, climate.y, aboveSea, slope);
+    if (accumulation > 0.001 && uniforms.face >= 0) {
+        return accumulation * mountainGlacierValley(dir, seed);
+    }
+    ` : ''}
+    return 0.0;
+}
+
+fn landscapeCoverAt(h: f32, slope: f32, dir: vec3<f32>, seed: i32) -> BiomeCover {
+    let climate = biomeClimateAt(dir, h, seed);
+    return biomeCover(climate.x, climate.y, slope, h * maxTerrainHeightM(), 0.0);
+}
+
+const LANDSCAPE_SURFACES: u32 = 8u;
+fn landscapeTileIds() -> array<u32, LANDSCAPE_SURFACES> {
+    return array<u32, LANDSCAPE_SURFACES>(SURFACE_GRASS_BASE, SURFACE_FOREST_FLOOR_BASE, SURFACE_SWAMP_BASE,
+        SURFACE_TUNDRA_LICHEN_BASE, SURFACE_SNOW_BASE, SURFACE_DESERT_DRY_BASE, SURFACE_ROCK_BASE, SURFACE_SNOW_ICE_BASE);
+}
+
+fn landscapeCoverWeights(c: BiomeCover, ice: f32) -> array<f32, LANDSCAPE_SURFACES> {
+    let land = 1.0 - ice;
+    return array<f32, LANDSCAPE_SURFACES>(c.grass * land, c.forest * land, c.marsh * land, c.tundra * land,
+        c.snow * land, c.sand * land, c.rock * land, ice);
+}
+
+fn selectLandscapeTile(c: BiomeCover, ice: f32, variant: u32, dir: vec3<f32>) -> u32 {
+    let weights = landscapeCoverWeights(c, ice);
+    let ids = landscapeTileIds();
+    var a = 0u;
+    var b = 0u;
+    var wA = 0.0;
+    var wB = 0.0;
+    for (var i = 0u; i < LANDSCAPE_SURFACES; i++) {
+        let w = weights[i];
+        if (w > wA) {
+            b = a; wB = wA;
+            a = i; wA = w;
+        } else if (w > wB) {
+            b = i; wB = w;
+        }
+    }
+    let tileA = resolveCatalogTileVariant(ids[a], variant);
+    let tileB = resolveCatalogTileVariant(ids[b], variant);
+    let share = wA / max(wA + wB, 0.00001);
+    gTileDraw = vec3<f32>(f32(tileA), f32(tileB), share);
+    gTileDrawValid = true;
+    let cell = floor(dir * noiseReferenceRadiusM() * 0.20);
+    let draw = fract(dot(fract(cell * vec3<f32>(0.1031, 0.1137, 0.1379)), vec3<f32>(17.1, 51.7, 23.3)));
+    return select(tileB, tileA, draw < share);
+}
+` : ''}
+
 fn determineTileType(
     h: f32, slope: f32, wx: f32, wy: f32,
     unitDir: vec3<f32>, seed: i32
@@ -757,6 +854,11 @@ fn determineTileType(
         return SURFACE_WATER;
     }
 
+    ${landscape ? `if (uniforms.face >= 0) {
+        let cover = landscapeCoverAt(h, slope, unitDir, seed);
+        let ice = landscapeIceCover(h, slope, biomeClimateAt(unitDir, h, seed), unitDir, seed);
+        return selectLandscapeTile(cover, ice, selectTileVariant(wx, wy, unitDir, seed), unitDir);
+    }` : ''}
     if (biomeConfigUniforms.biomeCount == 0u) {
         return determineTileTypeFallback(h, slope, wx, wy, unitDir, seed);
     }
@@ -1276,7 +1378,14 @@ if (uniforms.outputType == 0) {
         let ns = computeNormalSlopeFlat(wx, wy);
         stableSlope = ns.slope;
     }
-    output = vec4<f32>(h, stableSlope, 0.0, 1.0);
+    ${landscape ? `var sea: BiomeClimateD;
+    if (gLandscapeSeaClimateValid) {
+        sea = gLandscapeSeaClimate;
+    } else {
+        sea = biomeSeaClimate_d(unitDir, uniforms.seed);
+    }
+    let biome = biomeAtElevation_d(sea, dConst(h));
+    output = vec4<f32>(h, stableSlope, biome.temperature.x, biome.humidity.x);` : 'output = vec4<f32>(h, stableSlope, 0.0, 1.0);'}
 
 }  else if (uniforms.outputType == 1) {
         ${hasHeightBindings ? `
@@ -1386,8 +1495,13 @@ if (uniforms.outputType == 0) {
     let coordC = vec2<i32>(global_id.xy);
     // heightMap here is heightBase: .r = height, .g = cached stable slope.
     let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
+    ${hasBiomeClimateBinding ? 'textureStore(biomeClimateOut, coordC, landscapeClimatePayload(heightSample, unitDir, uniforms.seed));' : ''}
     let h = heightSample.r;
     let slope = heightSample.g;
+    ${landscape ? `if (uniforms.face >= 0) {
+        gLandscapeClimate = heightSample.zw;
+        gLandscapeClimateValid = true;
+    }` : ''}
     ` : `
     var h: f32;
     var slope: f32;
@@ -1403,14 +1517,14 @@ if (uniforms.outputType == 0) {
     `}
 
     if (uniforms.debugMode == 24) {
-        let climate = getClimate(wx, wy, unitDir, h, uniforms.seed);
-        output = vec4<f32>(climate.precipitation, 0.0, 0.0, 1.0);
+        ${landscape ? 'let value = biomeClimateAt(unitDir, h, uniforms.seed).y;' : 'let value = getClimate(wx, wy, unitDir, h, uniforms.seed).precipitation;'}
+        output = vec4<f32>(value, 0.0, 0.0, 1.0);
         textureStore(outputTexture, vec2<i32>(global_id.xy), output);
         return;
     }
     if (uniforms.debugMode == 25) {
-        let climate = getClimate(wx, wy, unitDir, h, uniforms.seed);
-        output = vec4<f32>(climate.temperature, 0.0, 0.0, 1.0);
+        ${landscape ? 'let value = biomeClimateAt(unitDir, h, uniforms.seed).x;' : 'let value = getClimate(wx, wy, unitDir, h, uniforms.seed).temperature;'}
+        output = vec4<f32>(value, 0.0, 0.0, 1.0);
         textureStore(outputTexture, vec2<i32>(global_id.xy), output);
         return;
     }
@@ -1461,6 +1575,10 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
     let heightSample = textureLoad(heightMap, heightInputCoord(coordC), 0);
     let h = heightSample.r;
     let slope = heightSample.g;
+    ${landscape ? `if (uniforms.face >= 0) {
+        gLandscapeClimate = heightSample.zw;
+        gLandscapeClimateValid = true;
+    }` : ''}
     ` : `
     var h: f32;
     var slope: f32;
@@ -1483,6 +1601,21 @@ else if (uniforms.outputType == 7 || uniforms.outputType == 8) {
             encodeSmoothSplatTileId(255u),
             encodeSmoothSplatTileId(255u)
         );
+    ${landscape ? `} else if (uniforms.face >= 0) {
+        let cover = landscapeCoverAt(h, slope, unitDir, uniforms.seed);
+        let ids = landscapeTileIds();
+        let ice = landscapeIceCover(h, slope, biomeClimateAt(unitDir, h, uniforms.seed), unitDir, uniforms.seed);
+        let weights = landscapeCoverWeights(cover, ice);
+        var payload = SmoothSplatPayload(array<u32, 4>(255u, 255u, 255u, 255u), array<f32, 4>(0.0, 0.0, 0.0, 0.0));
+        for (var i = 0u; i < LANDSCAPE_SURFACES; i++) {
+            insertSmoothSplatTileTop4(ids[i], weights[i], &payload);
+        }
+        let weight = vec4<f32>(payload.weights[0], payload.weights[1], payload.weights[2], payload.weights[3]);
+        splatWeights = weight / max(dot(weight, vec4<f32>(1.0)), 0.00001);
+        splatIds = vec4<f32>(
+            encodeSmoothSplatTileId(payload.tileIds[0]), encodeSmoothSplatTileId(payload.tileIds[1]),
+            encodeSmoothSplatTileId(payload.tileIds[2]), encodeSmoothSplatTileId(payload.tileIds[3]));
+    ` : ''}
     } else if (biomeConfigUniforms.biomeCount > 0u) {
         let payload = computeAuthoredSmoothSplatPayload(slope, h, wx, wy, unitDir, uniforms.seed);
         let totalTop = payload.weights[0] + payload.weights[1] + payload.weights[2] + payload.weights[3];
@@ -1586,6 +1719,20 @@ else if (uniforms.outputType == 4) {
     let tileId = decodeTileId(tileSample);
 
     let profile = getTerrainProfile();
+${landscape ? `
+    if (uniforms.face >= 0) {
+        var micro = 0.0;
+        if (baseH > uniforms.waterParams.y && terrainFeatureOn(TF_MICRO_DETAIL)) {
+            let cover = biomeCover(heightSample.z, heightSample.w, slope, baseH * maxTerrainHeightM(), 0.0);
+            micro = landscapeMicroM(cover, unitDir, uniforms.seed, slope);
+        }
+        let gain = clamp(profile.microGain, 0.0, 5.0);
+        let metres = riverCarveMicroAt(unitDir, baseH * maxTerrainHeightM(), micro * gain * regionalBasinMicroKeep(unitDir));
+        let delta = regionalValleyMicro(metres / maxTerrainHeightM(), unitDir);
+        textureStore(outputTexture, coordC, vec4<f32>(softClampHeight(baseH + delta, -1.1, 1.8, 0.25), 0.0, 0.0, 1.0));
+        return;
+    }
+` : ''}
     var dispMeters = DISP_MICRO_GENERIC;
     if (isForestFloorTile(tileId)) {
         dispMeters = DISP_MICRO_FOREST;
@@ -1637,6 +1784,10 @@ else if (uniforms.outputType == 5) {
     }
 
     if (eligibility > 0.0) {
+        ${landscape ? `if (uniforms.face >= 0) {
+            let cover = landscapeCoverAt(h, slope, unitDir, uniforms.seed);
+            eligibility *= cover.forest + cover.grass * 0.002;
+        } else {` : ''}
         let authoredEligibility = authoredTreeEligibility(h, slope, wx, wy, unitDir, uniforms.seed);
         if (authoredEligibility >= 0.0) {
             eligibility *= authoredEligibility;
@@ -1646,6 +1797,7 @@ else if (uniforms.outputType == 5) {
                 eligibility *= legacyClimateTreeEligibility(h, wx, wy, unitDir, uniforms.seed);
             }
         }
+        ${landscape ? '}' : ''}
     }
 
     if (eligibility > 0.0) {
@@ -1668,20 +1820,10 @@ else if (uniforms.outputType == 5) {
     // r = temperature   [0,1]  (normalized, same as ClimateInfo.temperature)
     // g = precipitation  [0,1]  (same as ClimateInfo.precipitation)
     // b = vegetation suitability [0,1] (coldFade * dryFade * desertFade)
-    // a = 1.0 (reserved)
+    // a = 1.0 (legacy); landscape stores the continuous bedrock field
 
     let coordC = vec2<i32>(global_id.xy);
     let h = sampleHeightAt(coordC);
-
-    var slope: f32 = 0.0;
-    if (uniforms.face >= 0) {
-        let ns = computeNormalSlopeFromHeightMapSphere(
-            uniforms.face, u, v, du, dv, coordC);
-        slope = ns.slope;
-    } else {
-        let ns = computeNormalSlopeFromHeightMapFlat(coordC);
-        slope = ns.slope;
-    }
 
     let climate = getClimate(wx, wy, unitDir, h, uniforms.seed);
 
@@ -1715,6 +1857,12 @@ else if (uniforms.outputType == 5) {
 }
 ` : ''}
 
+${landscape && hasHeightBindings && !hasTileBindings ? `
+else if (uniforms.outputType == 6) {
+    let ground = textureLoad(heightMap, heightInputCoord(vec2<i32>(global_id.xy)), 0);
+    output = landscapeClimatePayload(ground, unitDir, uniforms.seed);
+}
+` : ''}
         else if (uniforms.outputType == 3) {
         let zoneScale = clampMacroScaleToPlanet(SCALE_REGIONAL_ZONES);
         let zoneNoise = fbmAuto(wx, wy, unitDir, zoneScale, 4, uniforms.seed + 400, 2.0, 0.5);

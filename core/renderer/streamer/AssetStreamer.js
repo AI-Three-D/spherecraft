@@ -22,6 +22,7 @@ import { TreeMidSystem } from './TreeMidSystem.js';
 import { ClusterTreeSystem } from './ClusterTreeSystem.js';
 import { LeafMaskBaker } from './LeafMaskBaker.js';
 import { Logger } from '../../../shared/Logger.js';
+import { usesBiomeLandscape } from '../../world/terrain-generator/biomeLandscapeConfig.js';
 import { AssetInstancePool } from './AssetInstancePool.js';
 import { ArchetypeRegistry } from './archetype/ArchetypeRegistry.js';
 import { AssetSelectionBuffer } from './AssetSelectionBuffer.js';
@@ -543,6 +544,8 @@ export class AssetStreamer {
                 textureFormats: this.tileStreamer?.textureFormats,
                 seed: this.engineConfig.seed,
                 fieldConfig: this.engineConfig?.groundFieldBake,
+                biomeLandscape: usesBiomeLandscape(this.tileStreamer?.terrainGenerator?.terrainConfig,
+                    this.tileStreamer?.terrainGenerator?.baseGenerator),
                 logDispatches: this.GROUND_FIELD_BAKE_CONFIG.logDispatches !== true ? false : true,
                 streamerTheme: this._streamerTheme,
             });

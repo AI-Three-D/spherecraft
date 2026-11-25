@@ -540,6 +540,8 @@
 
     <!-- Game modules -->
     <script type="module">
+        import { normalizeBiomeLandscape, usesBiomeLandscape } from '../core/world/terrain-generator/biomeLandscapeConfig.js';
+        import { decodeBiomeSurface } from '../templates/terrain-shaders/biomeLandscape.wgsl.js';
         import { GameEngine } from './gameEngine.js';
         import { FrameLoop } from './FrameLoop.js';
         import { WorldConfigLoader } from './WorldConfigLoader.js';
@@ -2412,6 +2414,7 @@
             }
 
             function buildGenerationWindowRows(points, buffers, sourceSize) {
+                const hasBedrock = buffers.climate?.available && usesBiomeLandscape(gameEngine?.planetConfig?.terrainGeneration);
                 return points.map(point => {
                     const splatIndexValues = readBufferTexelOr(buffers.splatIndex, point.x, point.y, [1, 1, 1, 1]);
                     const splatDataValues = readBufferTexelOr(buffers.splatData, point.x, point.y, [0, 0, 0, 0]);
@@ -2425,6 +2428,7 @@
                     const tileId = decodeSplatId(readBufferTexelOr(buffers.tile, point.x, point.y, [1, 0, 0, 0])[0]);
                     const tileCategory = categoryForTileId(tileId);
                     const climate = readBufferTexelOr(buffers.climate, point.x, point.y, [0, 0, 0, 1]);
+                    const groundCover = hasBedrock ? decodeBiomeSurface(climate[2]) : { vegetation: climate[2], glacierIce: 0 };
                     const terrainAOAvailable = !!buffers.terrainAO?.available;
                     const terrainAOCoord = terrainAOAvailable
                         ? mapSourceTexelToReadback(buffers.terrainAO, sourceSize, point.x, point.y)
@@ -2469,7 +2473,9 @@
                         climate: {
                             temperature: roundForLog(climate[0], 4),
                             precipitation: roundForLog(climate[1], 4),
-                            vegetation: roundForLog(climate[2], 4)
+                            vegetation: roundForLog(groundCover.vegetation, 4),
+                            glacierIce: roundForLog(groundCover.glacierIce, 4),
+                            bedrockProvince: hasBedrock ? roundForLog(climate[3], 4) : null
                         },
                         terrainAO: {
                             available: terrainAOAvailable,
@@ -4074,6 +4080,10 @@
 
                 // Apply review switches before terrain and water initialize.
                 const placementQueries = new URLSearchParams(location.search);
+                if (placementQueries.has('biome')) {
+                    const biome = normalizeBiomeLandscape({ preset: placementQueries.get('biome') });
+                    for (const planet of gameDataConfig.planets) if (planet.enabled) planet.terrain.biomeLandscape = biome;
+                }
                 const terrainSurface = placementQueries.get('terrainSurface');
                 // The atlas textures of before instead of the generated ground surfaces.
                 if (terrainSurface === 'atlas') engineConfig.rendering.terrainShader.groundMaterials = false;

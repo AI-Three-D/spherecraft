@@ -1026,7 +1026,7 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
         _encodeBatchedTerrainPass(enc, terrainPass, uniformBuffer) {
                 const { pipeline, bindGroupLayout, entries } =
                     this._createBatchedTerrainPassResources(terrainPass, uniformBuffer);
-                const pass = enc.beginComputePass();
+                const pass = enc.beginComputePass({ label: `Tile terrain ${terrainPass.outputType}` });
                 pass.setPipeline(pipeline);
                 pass.setBindGroup(0, this.device.createBindGroup({ layout: bindGroupLayout, entries }));
                 this._setTerrainBiomeBindGroup(pass);
@@ -1070,10 +1070,11 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
 
                 if (this._isHeightInputTerrainPass(terrainPass)) {
                     const withBaseHeight = terrainPass.outputType === 1 && !!terrainPass.baseHeightTexture;
+                    const withBiomeClimate = !!terrainPass.biomeClimateTexture;
                     const { pipeline, bindGroupLayout } = this._getHeightInputPipelineForFormat(
                         terrainPass.format,
                         terrainPass.heightTextureFormat,
-                        { withBaseHeight }
+                        { withBaseHeight, withBiomeClimate }
                     );
                     return {
                         pipeline,
@@ -1082,7 +1083,8 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                             { binding: 0, resource: { buffer: uniformBuffer } },
                             { binding: 1, resource: terrainPass.texture.createView() },
                             { binding: 2, resource: terrainPass.heightTexture.createView() },
-                            ...(withBaseHeight ? [{ binding: 4, resource: terrainPass.baseHeightTexture.createView() }] : [])
+                            ...(withBaseHeight ? [{ binding: 4, resource: terrainPass.baseHeightTexture.createView() }] : []),
+                            ...(withBiomeClimate ? [{ binding: 5, resource: terrainPass.biomeClimateTexture.createView() }] : [])
                         ]
                     };
                 }
@@ -1109,6 +1111,7 @@ export function installWebGPUTerrainGeneratorBatchMethods(WebGPUTerrainGenerator
                     && (
                         terrainPass.outputType === 1 ||
                         terrainPass.outputType === 2 ||
+                        terrainPass.outputType === 6 ||
                         terrainPass.outputType === 7 ||
                         terrainPass.outputType === 8
                     )

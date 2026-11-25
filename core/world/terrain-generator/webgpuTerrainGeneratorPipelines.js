@@ -428,6 +428,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         _getAdvancedTerrainShaderOptions(extra = {}) {
                 return {
                     baseGenerator: this.baseGenerator,
+                    biomeLandscape: this.terrainConfig.biomeLandscape,
                     mountainRangeModel: this.mountainRangeModel,
                     foothills: this.foothills,
                     landformDetails: this.landformDetails,
@@ -464,11 +465,11 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
         // withBaseHeight: also binds heightBase (rgba32float, binding 4) so the
         // normal pass reads in-tile border base heights instead of evaluating
         // the terrain function for them.
-        _getHeightInputPipelineForFormat(format, heightFormat = 'r32float', { withBaseHeight = false, withSmoothSplatIds = false } = {}) {
+        _getHeightInputPipelineForFormat(format, heightFormat = 'r32float', { withBaseHeight = false, withSmoothSplatIds = false, withBiomeClimate = false } = {}) {
                 const fmt = format || 'rgba32float';
                 const inputFmt = heightFormat || 'r32float';
                 const cacheKey = this._getHeightInputPipelineCacheKey(fmt, inputFmt)
-                    + (withBaseHeight ? '|base' : '') + (withSmoothSplatIds ? '|splat-pair' : '');
+                    + (withBaseHeight ? '|base' : '') + (withSmoothSplatIds ? '|splat-pair' : '') + (withBiomeClimate ? '|climate' : '');
                 const cached = this._heightInputPipelineCache?.get(cacheKey);
                 if (cached) return cached;
 
@@ -477,6 +478,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                     hasHeightBindings: true,
                     hasBaseHeightBinding: withBaseHeight,
                     hasSmoothSplatIdsBinding: withSmoothSplatIds,
+                    hasBiomeClimateBinding: withBiomeClimate,
                 }));
                 const shaderModule = this.device.createShaderModule({
                     label: `Height Input Terrain Compute (${fmt}${withBaseHeight ? ', base height' : ''})`,
@@ -515,7 +517,7 @@ export function installWebGPUTerrainGeneratorPipelineMethods(WebGPUTerrainGenera
                                 viewDimension: '2d'
                             }
                         }] : []),
-                        ...(withSmoothSplatIds ? [{
+                        ...(withSmoothSplatIds || withBiomeClimate ? [{
                             binding: 5,
                             visibility: GPUShaderStage.COMPUTE,
                             storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d' }
