@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { CLOUD_RAY_MEAN_WGSL, CLOUD_RAY_VOLUME_WGSL, GOD_RAY_SIZES, buildRayTableShader } from './shaders/cloudGodRays.wgsl.js';
+import { CLOUD_RAY_VOLUME_WGSL, GOD_RAY_LEVELS, GOD_RAY_SIZES, buildRayFilterShader, buildRayTableShader } from './shaders/cloudGodRays.wgsl.js';
 
 /** Look of the god rays; settings.godRayLook overrides single values. */
 export const GOD_RAY_LOOK = Object.freeze({
@@ -37,18 +37,20 @@ export class CloudGodRays {
             if (errors.length) throw new Error(`${label} WGSL: ${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join('; ')}`);
             return device.createComputePipelineAsync({ label, layout: 'auto', compute: { module, entryPoint: 'main' } });
         };
-        [this._tablePipeline, this._meanPipeline, this._volumePipeline] = await Promise.all([
-            build('clouds god ray table', buildRayTableShader(this._sizes.table[0])), build('clouds god ray mean', CLOUD_RAY_MEAN_WGSL),
+        const { table, volume } = this._sizes;
+        [this._tablePipeline, this._filterPipeline, this._volumePipeline] = await Promise.all([
+            build('clouds god ray table', buildRayTableShader(table[0])), build('clouds god ray filter', buildRayFilterShader(table[1])),
             build('clouds god rays', CLOUD_RAY_VOLUME_WGSL),
         ]);
         const texture = (label, size, dimension, format) => device.createTexture({
             label, size, dimension, format,
             usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
         });
-        const { table, mean, volume } = this._sizes;
-        this._textures = [texture('cloud ray table', table, '2d', 'r32float'), texture('cloud ray mean', mean, '2d', 'r32float'),
+        this._textures = [texture('cloud ray table', table, '2d', 'r32float'),
+            texture('cloud ray filtered table', [table[0] / 2, table[1] / 2, GOD_RAY_LEVELS], '3d', 'rgba16float'),
             texture('cloud ray volume', volume, '3d', 'rgba16float')];
-        [this._tableView, this._meanView, this.view] = this._textures.map(t => t.createView());
+        [this._tableView, this._filteredView, this.view] = this._textures.map(t => t.createView());
+        this._sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeV: 'repeat' });
         this.ready = true;
     }
 
@@ -87,9 +89,9 @@ export class CloudGodRays {
             const cu = { 1: { buffer: compositeBuffer } };
             this._groups = [
                 group(this._tablePipeline, { ...u, ...cu, 2: shadowView, 3: this._tableView, 4: linearSampler }),
-                group(this._meanPipeline, { 2: this._tableView, 3: this._meanView }),
+                group(this._filterPipeline, { 0: this._tableView, 1: this._filteredView }),
                 group(this._volumePipeline, {
-                    ...u, ...cu, 2: this._tableView, 3: this.view, 4: linearSampler, 5: this._meanView, 6: transmittanceView,
+                    ...u, ...cu, 2: this._filteredView, 3: this.view, 4: linearSampler, 5: this._sampler, 6: transmittanceView,
                     7: cloudLightView,
                 }),
             ];
@@ -100,9 +102,9 @@ export class CloudGodRays {
             pass.setBindGroup(0, group);
             pass.dispatchWorkgroups(...size);
         };
-        const { table, mean, volume } = this._sizes;
+        const { table, volume } = this._sizes;
         run(this._tablePipeline, this._groups[0], table[1]);
-        run(this._meanPipeline, this._groups[1], mean[0] / 8, mean[1] / 8);
+        run(this._filterPipeline, this._groups[1], table[0] / 2);
         run(this._volumePipeline, this._groups[2], Math.ceil(volume[0] / 8), Math.ceil(volume[1] / 8));
         pass.end();
     }

@@ -841,14 +841,14 @@ updateLighting(starSystem) {
             // the cumulus along the horizon.)
             const cirrusOn = !!(this.cloudRenderer && this.cloudRenderer.enabled && !environmentState?.disableClouds);
             const cirrusOnTop = cirrusOn && this._cameraAboveCirrus();
-            const budgetTier = this.volumetricClouds?.enabled ? this.volumetricClouds.budgetTier : null;
-            const cirrusShell = budgetTier?.cirrusVolume === false;
-            // The lower detail tiers draw the cirrus small, in the cloud composite (_renderVolumetricClouds).
-            const cirrusDraws = cirrusOn && !budgetTier?.cirrusScale;
+            const cloudTier = this.volumetricClouds?.enabled ? this.volumetricClouds.tier : null;
+            // With volumetric clouds the cirrus is a shell, drawn small in their composite (_renderVolumetricClouds).
+            const cirrusShell = !!cloudTier;
+            const cirrusDraws = cirrusOn && !cloudTier;
             if (cirrusOn) {
                 // Before either part, so both use this frame's camera: they meet at the split, and a
                 // far part a frame behind would tear from the near part while turning.
-                this.cloudRenderer.update(this.camera, budgetTier?.cirrusOnly ? this._cirrusOnlyWeather(environmentState) : environmentState, this.uniformManager);
+                this.cloudRenderer.update(this.camera, cloudTier?.cirrusOnly ? this._cirrusOnlyWeather(environmentState) : environmentState, this.uniformManager);
                 this.cloudRenderer.render(this.camera, environmentState, this.uniformManager);
                 if (cirrusDraws) this.cloudRenderer.renderCirrus?.(this.camera, environmentState, this.uniformManager, 'far', cirrusShell);
             }
@@ -1056,6 +1056,7 @@ updateLighting(starSystem) {
             const l = Math.hypot(wind.x, wind.y);
             clouds.windDirection = [wind.x / l, 0, wind.y / l];
         }
+        if (Number.isFinite(environmentState?.windSpeed)) clouds.windSpeed = environmentState.windSpeed;
         // Night light: the moon as a directional light (shaded tops and sides, like the sun by day)
         // plus the host's night-sky ambient as a faint fill.
         const lc = this.lightingController;
@@ -1081,7 +1082,7 @@ updateLighting(starSystem) {
         clouds.setSceneDepth(pp.depthTextureView);
         clouds.compute(frame, encoder);
         let cirrus = null;
-        const cirrusScale = clouds.budgetTier?.cirrusScale;
+        const cirrusScale = clouds.tier.cirrusScale;
         if (cirrusOn && cirrusScale) {
             const draw = part => this.cloudRenderer.renderCirrusTarget?.(this.camera, part, cirrusScale);
             cirrus = { far: draw('far'), near: cirrusOnTop ? draw('near') : null };

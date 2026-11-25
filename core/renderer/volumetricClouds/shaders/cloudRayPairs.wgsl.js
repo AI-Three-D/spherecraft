@@ -3,7 +3,7 @@ import { CLOUD_MATH_WGSL, CLOUD_UNIFORMS_WGSL, buildCloudRayInput } from './clou
 // Entry points of the raymarch for the two traced parts of a frame (CloudRayPairs.js): every second ray in a
 // checkerboard, packed to half width, then the rays that CLOUD_RAY_PAIRS_WGSL could not fill in.
 export const CLOUD_RAY_PAIR_ENTRIES_WGSL = /* wgsl */`
-@group(0) @binding(17) var<storage, read> rayList: array<u32>;
+@group(0) @binding(18) var<storage, read> rayList: array<u32>;
 
 @compute @workgroup_size(4, 8)
 fn mainChecker(@builtin(global_invocation_id) id: vec3u) {

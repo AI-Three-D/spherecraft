@@ -1,69 +1,71 @@
-import { cloudCacheGrid } from './CloudSampleCache.js';
 import { CloudRayPairs } from './CloudRayPairs.js';
-import { buildConventionalRaymarch, CONVENTIONAL_DOMES_CONSTANTS } from './shaders/cloudConventional.wgsl.js';
-import { buildNeuralLightBake } from './shaders/cloudNeuralLighting.wgsl.js';
-import { DEFAULT_LIGHTING_MODEL, LIGHTING_MODEL_SETS } from './neural/lightingModels.js';
+import { buildCloudMarch } from './shaders/cloudMarch.wgsl.js';
+import { CLOUD_NEURAL_LIGHT_BAKE_WGSL } from './shaders/cloudNeuralLighting.wgsl.js';
 
 const PATCH_SIZE = [64, 64, 24];
 // Eight of 64 rows keeps the bake under about 0.3 ms on any frame; a patch takes 8 frames.
 const ROWS_PER_FRAME = 8;
 const FADE_FRAMES = 12;
 const MAX_AGE = 36;
-const UNIFORM = { coverage: 12, wind: 14, lod: 26, weather: 44, cache: 50 };
-const RAY_VARIANTS = {
-    '': {}, Domes: CONVENTIONAL_DOMES_CONSTANTS, Dense: { ...CONVENTIONAL_DOMES_CONSTANTS, CONVENTIONAL_DENSE: true },
-};
+const PATCH_EXTENT_KM = 48;
+// A multiple of the texel width keeps the lattice fixed as the patch moves.
+const ANCHOR_STEP_KM = 12;
+const UNIFORM = { coverage: 12, wind: 14, lod: 26, weather: 44, cache: 50, deck: 54 };
 const distance = (a, b) => Math.hypot(...a.map((value, i) => value - b[i]));
 
+/** Axes and centre (km) of the light patch under a position, for the uniforms cacheU, cacheV and cacheGrid. */
+export function cloudPatchGrid(position, radius) {
+    const axis = Math.abs(position[0]) >= Math.abs(position[1]) ? 0 : 1;
+    const face = Math.abs(position[axis]) >= Math.abs(position[2]) ? axis : 2;
+    const u = (face + 1) % 3;
+    const v = (face + 2) % 3;
+    const sign = Math.sign(position[face]) || 1;
+    const axes = [0, 0, 0, 0, 0, 0, 0, 0];
+    axes[u] = 1;
+    axes[4 + v] = sign;
+    const scale = radius / Math.max(1, Math.hypot(...position));
+    const snap = coordinate => Math.round(coordinate * scale / ANCHOR_STEP_KM) * ANCHOR_STEP_KM;
+    return [...axes, snap(position[u]), snap(position[v] * sign), 0, PATCH_EXTENT_KM];
+}
+
+/** The raymarch, and the light inside the clouds that a small network bakes into a patch around the camera. */
 export class CloudNeuralLighting {
     constructor(host) {
         this.host = host;
         this.device = host.device;
         this.resources = [];
         this.groups = new WeakMap();
+        this.compiling = new Set();
     }
 
     async initialize() {
         const host = this.host;
         const device = this.device;
-        const compile = (label, module, layout, constants, entryPoint = 'main') => {
-            return device.createComputePipelineAsync({
-                label, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-                compute: { module, entryPoint, constants },
-            });
-        };
         this.rayPairs = new CloudRayPairs(host);
-        const halfFloats = !!device.features?.has?.('shader-f16');
-        const rayModule = this.rayModule = device.createShaderModule({ label: 'clouds neural lighting raymarch',
-            code: buildConventionalRaymarch(true, halfFloats) });
-        const rayLayout = host._layouts.conventionalNeural;
-        this.compile = compile;
-        this.compiling = new Set();
-        // One bake per trained model set, chosen with settings.neuralLightingModel.
-        this.bakePipelines = Object.fromEntries(await Promise.all(Object.keys(LIGHTING_MODEL_SETS).map(async model => {
-            const code = buildNeuralLightBake(model);
-            const module = device.createShaderModule({ label: `clouds neural light column bake ${model}`, code });
-            const pipeline = await compile(`clouds neural light column bake ${model}`, module, host._layouts.neuralLightBake);
-            host._pipelines[`neuralLightBake_${model}`] = pipeline;
-            return [model, `neuralLightBake_${model}`];
-        })));
-        const rays = await Promise.all(Object.entries(RAY_VARIANTS).map(async ([variant, constants]) =>
-            [variant, await compile(`clouds neural lighting raymarch ${variant}`, rayModule, rayLayout, constants)]));
-        await this.rayPairs.initialize();
-        if (this.disposed) return false;
-        for (const [variant, pipeline] of rays) host._pipelines['conventionalNeural' + variant] = pipeline;
+        this.rayModule = device.createShaderModule({
+            label: 'clouds raymarch', code: buildCloudMarch(!!device.features?.has?.('shader-f16')),
+        });
+        const bake = device.createShaderModule({ label: 'clouds light bake', code: CLOUD_NEURAL_LIGHT_BAKE_WGSL });
+        const tier = host.tier;
+        const [lightBake] = await Promise.all([
+            this._compile('clouds light bake', bake, host._layouts.lightBake),
+            ...['main', 'mainChecker', 'mainList'].map(entryPoint => this._build(tier, entryPoint)),
+            this.rayPairs.initialize(),
+        ]);
+        if (this.disposed) return;
+        this._readyTier = tier;
+        host._pipelines.lightBake = lightBake;
         const uniform = (label, size) => {
             const buffer = device.createBuffer({ label, size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
             this.resources.push(buffer);
             return { buffer };
         };
-        this.uniforms = uniform('cloud neural light bake snapshot', host._uniformData.byteLength);
-        this.rowOffset = uniform('cloud neural light row', 16);
-        this.lookup = uniform('cloud neural light patch pair', 128);
-        const weather = host._ensureConventionalWeather();
+        this.uniforms = uniform('cloud light bake snapshot', host._uniformData.byteLength);
+        this.rowOffset = uniform('cloud light row', 16);
+        this.lookup = uniform('cloud light patch pair', 128);
         this.banks = [0, 1].map(index => {
             const texture = device.createTexture({
-                label: 'cloud neural light patch ' + index,
+                label: 'cloud light patch ' + index,
                 dimension: '3d', size: PATCH_SIZE, format: 'rgba16float',
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
             });
@@ -71,74 +73,91 @@ export class CloudNeuralLighting {
             const view = texture.createView();
             return {
                 index, view,
-                group: host._group('neuralLightBake', [
-                    this.uniforms, ...host._noiseResources.slice(1), host._linearSampler, ...weather.views, view, this.rowOffset,
+                group: host._group('lightBake', [
+                    this.uniforms, ...host._noiseResources.slice(1), host._linearSampler, ...host._weatherCube.views, view, this.rowOffset,
                 ]),
             };
         });
-        return true;
     }
 
-    /** Name of the raymarch pipeline with the preview flags compiled in, or null while it compiles. */
-    _specialised(variant, flags, entryPoint = 'main', tier = null) {
-        const name = `conventionalNeural${variant}_${flags}_${entryPoint}${tier?.march ? `_${tier.detail}` : ''}`;
-        const pipelines = this.host._pipelines;
-        if (pipelines[name]) return name;
-        if (!this.compiling.has(name)) {
+    _compile(label, module, layout, constants, entryPoint = 'main') {
+        return this.device.createComputePipelineAsync({
+            label, layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+            compute: { module, entryPoint, constants },
+        });
+    }
+
+    async _build(tier, entryPoint) {
+        const name = `raymarch_${tier.detail}_${entryPoint}`;
+        const layout = this.host._layouts[entryPoint === 'mainList' ? 'raymarchList' : 'raymarch'];
+        const pipeline = await this._compile(`clouds ${name}`, this.rayModule, layout, tier.march, entryPoint);
+        if (!this.disposed) this.host._pipelines[name] = pipeline;
+    }
+
+    /** Pipeline of a tier's raymarch, or null while it compiles. */
+    _pipeline(tier, entryPoint) {
+        const name = `raymarch_${tier.detail}_${entryPoint}`;
+        const pipeline = this.host._pipelines[name];
+        if (!pipeline && !this.compiling.has(name)) {
             this.compiling.add(name);
-            const layout = this.host._layouts[entryPoint === 'mainList' ? 'conventionalNeuralList' : 'conventionalNeural'];
-            this.compile(name, this.rayModule, layout, { ...RAY_VARIANTS[variant], PREVIEW_FLAGS: flags, ...tier?.march }, entryPoint)
-                .then(pipeline => { if (!this.disposed) pipelines[name] = pipeline; })
-                .catch(error => console.warn('[clouds] specialised raymarch failed to compile', error));
+            this._build(tier, entryPoint).catch(error => console.warn('[clouds] raymarch failed to compile', error));
         }
-        return null;
+        return pipeline ?? null;
     }
 
-    rayPipeline(variant, flags, tier) {
-        return this._specialised(variant, flags, 'main', tier) ?? 'conventionalNeural' + variant;
+    /** The whole raymarch in one pass, for targets that the slabs then blend into. */
+    dispatchMain(encoder, base, resources, width, height, tier) {
+        const pipeline = this._pipeline(tier, 'main') ?? this.host._pipelines[`raymarch_${this._readyTier.detail}_main`];
+        const pass = this.host._beginPass(encoder, 'raymarch');
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, this._group(base, resources));
+        pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 4));
+        pass.end();
     }
 
-    /** Traces half of the rays and the ones that cannot be filled in (CloudRayPairs). False while its pipelines compile. */
-    dispatchPairs(encoder, set, variant, flags, width, height, tier) {
-        const fillAll = !!tier?.pairs?.FILL_ALL;
-        const check = this._specialised(variant, flags, 'mainChecker', tier);
-        const list = fillAll ? null : this._specialised(variant, flags, 'mainList', tier);
-        const resolve = this.rayPairs.pipelineFor(tier);
-        if (!check || !(list || fillAll) || !resolve) return false;
-        const pipelines = this.host._pipelines;
-        this.rayPairs.dispatch(encoder, { check: pipelines[check], list: list && pipelines[list], resolve }, {
-            base: set.conventional, resources: set.conventionalResources, banks: this.banks, lookup: this.lookup,
+    /** Traces half of the rays and the ones that cannot be filled in (CloudRayPairs). */
+    dispatchPairs(encoder, target, width, height, tier) {
+        const fillAll = !!tier.pairs?.FILL_ALL;
+        let check = this._pipeline(tier, 'mainChecker');
+        let list = fillAll ? null : this._pipeline(tier, 'mainList');
+        let resolve = this.rayPairs.pipelineFor(tier);
+        // While a tier compiles, the first one draws.
+        if (!check || !(list || fillAll) || !resolve) {
+            const ready = this._readyTier;
+            check = this._pipeline(ready, 'mainChecker');
+            list = this._pipeline(ready, 'mainList');
+            resolve = this.rayPairs.pipelines.high;
+        }
+        this.rayPairs.dispatch(encoder, { check, list, resolve }, {
+            base: target.raymarch, resources: target.resources, banks: this.banks, lookup: this.lookup,
             bank: this.current?.index ?? 0, width, height,
         });
-        return true;
     }
 
     reset() {
         this.current = this.previous = this.pending = null;
     }
 
-    /** Refreshes the light patch. False when this frame has none; with `analytic` the raymarch then runs without one. */
-    dispatch(encoder, analytic = false) {
-        if (!this.banks) return false;
+    /** Refreshes the light patch. Without one, the fitted light stands in everywhere. */
+    dispatch(encoder) {
         const host = this.host;
         const data = host._uniformData;
         const altitude = Math.hypot(data[0], data[1], data[2]) - host.planet.radiusKm;
         const above = altitude - host.settings.cloudTopKm;
         if (data[UNIFORM.weather * 4] <= 0.001 || host.sunIlluminance <= 0.0 || above >= 24) {
             this.reset();
-            return analytic && data[UNIFORM.weather * 4] > 0.001 && this._withoutCache();
+            this._clearLookup();
+            return;
         }
 
-        const grid = cloudCacheGrid([...data.subarray(0, 3)], host.planet.radiusKm, 'transport');
-        const weatherStyle = Array.from(data.subarray(UNIFORM.weather * 4, UNIFORM.weather * 4 + 3));
+        const grid = cloudPatchGrid([...data.subarray(0, 3)], host.planet.radiusKm);
+        const weatherStyle = [...data.subarray(UNIFORM.weather * 4, UNIFORM.weather * 4 + 3), ...data.subarray(UNIFORM.deck * 4, UNIFORM.deck * 4 + 4)];
         const coverage = data[UNIFORM.coverage * 4];
         const boil = data[UNIFORM.lod * 4 + 2];
         const sun = host.sunDirection;
         const wind = Array.from(data.subarray(UNIFORM.wind * 4, UNIFORM.wind * 4 + 3));
         const s = host.settings;
-        const model = Object.hasOwn(this.bakePipelines, s.neuralLightingModel) ? s.neuralLightingModel : DEFAULT_LIGHTING_MODEL;
-        const key = JSON.stringify([model, s.cloudFarLight, host._conventionalWeather.key, s.cloudTopKm, s.cloudShape, s.giantShare,
-            s.giantHeight, s.giantScale, s.popcornTopKm, s.domeHeight, s.domeEdgeSharpness, s.domeHeads,
+        const key = JSON.stringify([host._weatherCube.key, s.cloudTopKm, s.popcornTopKm, s.domeHeight, s.domeEdgeSharpness, s.domeHeads,
             s.densityVariation, s.isolatedPuffSuppression, s.detailErosion, s.detailWarp, s.edgeWisps,
             s.shapeTileKm, s.detailTileKm, s.windSkewKm, s.extinction, s.albedo, s.lightSteps, s.lightStepKm,
             s.cloudType, s.typeVariance, s.weatherContrast, s.altoClouds, s.altoBottomKm, s.altoTopKm, s.altoTileKm]);
@@ -162,7 +181,7 @@ export class CloudNeuralLighting {
 
         if (!this.pending && !this.previous && refresh) {
             const bank = this.banks[current ? 1 - current.index : 0];
-            Object.assign(bank, { grid, key, model, coverage, boil, sun: [...sun], weatherStyle, wind, row: 0 });
+            Object.assign(bank, { grid, key, coverage, boil, sun: [...sun], weatherStyle, wind, row: 0 });
             const snapshot = data.slice();
             snapshot.set(grid, UNIFORM.cache * 4);
             this.device.queue.writeBuffer(this.uniforms.buffer, 0, snapshot);
@@ -172,7 +191,7 @@ export class CloudNeuralLighting {
             const bank = this.pending;
             this.device.queue.writeBuffer(this.rowOffset.buffer, 0, new Uint32Array([bank.row, 0, 0, 0]));
             const rows = Math.min(PATCH_SIZE[1] - bank.row, ROWS_PER_FRAME);
-            host._dispatch(encoder, this.bakePipelines[bank.model], bank.group, PATCH_SIZE[0] / 4, rows, 'neural light bake');
+            host._dispatch(encoder, 'lightBake', bank.group, PATCH_SIZE[0] / 4, rows, 'light bake');
             bank.row += rows;
             if (bank.row >= PATCH_SIZE[1]) {
                 bank.readyFrame = host._frame;
@@ -182,7 +201,10 @@ export class CloudNeuralLighting {
             }
         }
 
-        if (!this.current) return analytic && this._withoutCache();
+        if (!this.current) {
+            this._clearLookup();
+            return;
+        }
         const fade = Math.min(1, (host._frame - this.current.readyFrame + 1) / FADE_FRAMES);
         const altitudeWeight = Math.min(1, (24 - above) / 8);
         const lookup = new Float32Array(32);
@@ -192,20 +214,17 @@ export class CloudNeuralLighting {
         pack(this.current, fade, 0);
         pack(this.previous, 1 - fade, 16);
         this.device.queue.writeBuffer(this.lookup.buffer, 0, lookup);
-        return true;
     }
 
-    // Analytic light only, from the same pipelines: the plain raymarch has no constants for the lower detail tiers.
-    _withoutCache() {
+    _clearLookup() {
         this.device.queue.writeBuffer(this.lookup.buffer, 0, new Float32Array(32));
-        return true;
     }
 
-    rayGroup(base, resources) {
+    _group(base, resources) {
         let groups = this.groups.get(base);
         if (!groups) {
-            groups = this.banks.map((bank, index) => this.host._group('conventionalNeural', [
-                ...resources, bank.view, this.banks[1 - index].view, this.lookup,
+            groups = this.banks.map((bank, index) => this.host._group('raymarch', [
+                ...resources, bank.view, this.banks[1 - index].view, this.lookup, this.host.landShadeView,
             ]));
             this.groups.set(base, groups);
         }

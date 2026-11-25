@@ -31,64 +31,25 @@ Reading the numbers:
 - Passes without a dependency can overlap, so a pass's span may include waiting. "GPU frame" is first pass
   start to last pass end.
 
-Main cost levers: `Pixel ratio` (canvas pixels; 1× default, Retina 2× is ~4× the work), `Resolution scale`
-(cloud target relative to canvas), `Interleave` (2×2 marches a quarter of the cloud pixels per frame and
-reconstructs the rest temporally) and `Light steps`.
+Main cost levers: `Pixel ratio` (canvas pixels; 1x default, Retina 2x is ~4x the work) and `Detail` (the tiers of
+`cloudDetailTiers.js`: high, medium, and low, which has no volumetric clouds).
 
-`Far layer proxy` (off by default) is a distance LOD for views well above the layer. Between `Proxy from` and
-`Proxy full` (km above the cloud tops) the raymarch crossfades into a 4-slab model: one weather lookup and four
-density samples per pixel, analytic sunlight through the slab column plus one sample towards the sun, no light
-march. At 166 km it costs about a fifth of the raymarch and looks close to it, slightly grainier in dense areas.
-The step heatmap shows proxy pixels in purple.
-
-## Neural solar lighting
-
-Open [the cloud lab](http://localhost:8000/cloud_lab/?radius=131), expand **Neural solar lighting**,
-then choose **Generate samples**, **Train**, and **Evaluate GPU**. The lab samples the current
-cloud field, fits an 8 → 16 → 16 → 1 network in a worker, and measures error on a held-out spatial
-region. **Save weights** exports JSON with the weights and input normalization. **Load weights**
-can restore that model in a new session. Use **Viewport lighting** to switch among **Standard**,
-**Solar reference**, and **Neural solar**. Keep time and the camera fixed when comparing GPU times
-in the **clouds raymarch** row.
-
-The reference integrates detailed density along 3.15 km of the sun ray using 128 midpoint samples
-by default. It uses the existing procedural field and keeps the weather parameters from the launch point
-along the segment. This is a deterministic teacher for a local direct-sun optical column. A physically
-based teacher for farther transport or multiple scattering would need additional labels. The six-probe
-error in the panel uses the same 3.15 km path regardless of the viewport's light settings. The learned
-preview runs in the detailed raymarch and uses four fixed-distance density probes, Softsign hidden layers,
-and packed WGSL dot products. The experiment takes its fixed physical sampling distances and held-out
-evaluation approach from [Charles Grassi’s tutorial](https://charlesgrassi.dev/blog/neural-volumetric-clouds/).
-
-Run the overcast benchmark with Chrome and GPU timestamp queries enabled.
-
-```sh
-node tools/perf/cloudSolarBenchmark.mjs http://127.0.0.1:8000 /tmp/cloud-solar.json
-```
-
-The M1 Pro run used a stationary camera at 5.7 km and a full-rate 272×177 cloud target. Each mode
-has 20 GPU samples after warm-up.
-
-| Viewport lighting | Raymarch GPU mean | Held-out transmittance RMSE |
-| --- | ---: | ---: |
-| Standard six probes | 17.3 ms | 0.1312 |
-| Neural solar | 21.0 ms | 0.1209 |
-| 128-step solar reference | 143.3 ms | Reference |
-
-The 256-step teacher changed held-out transmittance by 0.00036 RMSE. CPU and WGSL optical-column
-predictions agreed within 0.00000030 km, and batched inference on 2,048 precomputed feature vectors
-took 0.014 ms on the GPU. The viewport timing includes live feature sampling and shading. Motion stability,
-rendered-image parity, and generalization across weather are open for this prototype.
+`Slabs from orbit` (off by default in the lab) replaces the raymarch well above the layer with a few lit slabs per ray
+(`cloudOrbit.wgsl.js`), crossfading between 40 and 80 km above the cloud tops.
 
 ## What is where
 
-- `VolumetricCloudsModule.js`: engine `RenderModule`. It generates tileable 3D noise (Perlin-Worley shape,
-  Worley detail, weather) and atmosphere LUTs once, then each frame computes a cloud shadow map, raymarches
-  the spherical cloud shell at `resolutionScale`, and accumulates temporally with depth reprojection.
-  `getOutputs()` returns premultiplied cloud radiance + transmittance, mean cloud depth (km), the shadow map
-  and the LUTs.
+- `VolumetricCloudsModule.js`: engine `RenderModule`. It generates tileable 3D noise (Perlin-Worley shape, Worley detail,
+  weather) and atmosphere LUTs once, then each frame draws a cloud shadow map, raymarches the spherical cloud shell, and
+  accumulates jittered rays with depth-validated reprojection. `getOutputs()` returns premultiplied cloud radiance +
+  transmittance, cloud distance (km), the shadow map and the LUTs.
+- `CloudNeuralLighting.js`: the light inside the clouds. Small networks, trained on a path tracer (`neural_lab/`,
+  `tools/neural/`), bake bounced sun, sky light and sun transmittance into a patch of 64 x 64 x 24 cells around the camera, a
+  few rows per frame. Outside the patch a fitted light stands in (`fittedLight` in `cloudMarch.wgsl.js`).
+- `CloudRayPairs.js`: traces every second ray and fills in the others where their neighbours agree.
 - `shaders/cloudCommon.wgsl.js`: uniforms, atmosphere, and the density function (weather systems → coverage
-  and type → height profile → shape → detail erosion).
+  and type → shape → height → detail erosion, the sheet deck, altocumulus and the low clouds).
+- `shaders/cloudMarch.wgsl.js`: the raymarch, the shadow map and the weather cube.
 - `CloudCompositePass.js`: blends the clouds into a host's HDR scene after opaque geometry, hazed by the
   host's own transmittance LUT and scattering coefficients, and darkens shadowed ground. Spherecraft uses it.
 - `cloud_lab/labComposite.js`: lab-only sky, analytic planet, aerial perspective split at the cloud depth,
@@ -104,31 +65,12 @@ shape noise (`detailWarp`) and each cloud mixes its own billow size and erosion 
 seen from 10–25 km showed equal bubbles on a lattice. The weather volume is mipmapped and sampled at the pixel
 footprint, so from orbit sub-pixel clouds fade instead of popping in and out as the camera drifts.
 
-Temporal reconstruction: each frame marches one pixel per 2×2 block (`interleave`), reprojects the history
-through the cloud depth, clamps it to the fresh neighbourhood (`historyClip` standard deviations) and blends
-(`temporalBlend` per sample). With `fullRateOnMotion`, frames where the clouds move more than
-`motionThresholdPx` on screen (and 8 after) march every pixel instead, since fast motion rejects most history.
-`temporal: false` drops reconstruction entirely: every pixel marched every frame with a fixed jitter and a
-3×3 tent filter. Proxy slabs then sit at their midpoints, and raymarch steps end on planes across the ray at
-fixed world offsets (`dot(p, rd) = n·dq`, dq a power-of-two multiple of the minimum step), so moving the camera
-slides samples within those planes instead of dragging step slices through the cloud. A screen-space jitter with
-nothing to average it swam over the clouds; camera-relative steps showed as slices up close and crawled when
-climbing. In the lab that raised the raymarch from 1.3 to 2.5 ms at a 600×400 cloud target; spherecraft
-uses it, because reprojection artefacts (smear, shimmer, interleave blocks) were worse than the cost.
-The weather pattern evolves (`weatherEvolveKmS`) and cloud shapes rise (`boilKmS`), so cover changes over time
-and not only by drifting with the wind.
-
-History is resampled with a Catmull-Rom filter and composited with a Catmull-Rom upsample; bilinear blurred
-the clouds a little more every frame. Ray-start jitter is per-pixel white noise stepped by the golden ratio
-(interleaved gradient noise left horizontal streaks while moving). `twilightSoftness` widens the planet-shadow
-edge so dusk dims the deck gradually, and `ambientFloor` adds host light (night sky, moon) to the ambient.
-
-When the coarse march steps from air into cloud (`refineEntry`), it bisects for the surface and marches quarter
-steps from there for one coarse step, so a deck's top is not terraced along the step planes. Sky light is
-attenuated by two upward density samples, so crevices and undersides stay darker than tops even under ambient
-light alone, and the moon (`moonDirection`, `moonIlluminance`) lights the clouds as a second directional light
-while the sun is down. Cloud bases drift by up to a quarter of the layer across regions, and clusters of taller
-towers stand among shallower fields.
+Samples lie on planes fixed in the world, with linear density between them, so nothing slices or crawls as the camera moves.
+The weather pattern evolves (`weatherEvolveKmS`) and cloud shapes rise (`boilKmS`), so cover changes over time and not only
+by drifting with the wind. `twilightSoftness` widens the planet-shadow edge so dusk dims the deck gradually, and
+`ambientFloor` adds host light (night sky, moon) to the ambient. The moon (`moonDirection`, `moonIlluminance`) lights the
+clouds as a second directional light. Cloud bases drift by up to a quarter of the layer across regions, and clusters of
+taller towers stand among shallower fields.
 
 ## In spherecraft
 
@@ -146,11 +88,11 @@ half-thicknesses below its middle) it crossfades into a volume slab sampled with
 flown through, and from a few slab half-thicknesses above it turns back into a shell seen from above. Its horizon
 fade only applies from below; from above it had hidden the cirrus over the planet.
 
-## Not done yet (by design for this first look pass)
+## Not done yet
 
-- No distance LOD beyond mip-selected noise, empty-space skipping and 2×2 interleaving.
-- Temporal history is resampled bilinearly, so fast turns soften clouds; Catmull-Rom history sampling would help.
 - Ground shadows in spherecraft are applied in the composite to the whole pixel (direct and ambient alike, with
   a floor), not in the terrain shader's sun term.
-- Full-rate marching while moving costs about 4× the raymarch on those frames.
 - Wind is a single world-space translation, so on the far side of the planet clouds drift the opposite way.
+
+The detailed raymarch that preceded the neural lighting, its cheaper tiers and its experiments are in git, on
+`clouds/detailed-renderer-checkpoint`.

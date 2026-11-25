@@ -2,7 +2,7 @@ import { AERIAL_PERSPECTIVE_WGSL } from '../../atmosphere/shaders/aerialPerspect
 import { CLOUD_MATH_WGSL, CLOUD_SHADOW_LOOKUP_WGSL, CLOUD_UNIFORMS_WGSL } from './cloudCommon.wgsl.js';
 import {
     CLOUD_HAZE_LOOKUP_WGSL, CLOUD_HAZE_STRUCT_WGSL, CLOUD_MIST_LIGHT_WGSL, CLOUD_MIST_LOOKUP_WGSL, CLOUD_RAY_LOOKUP_WGSL,
-    CLOUD_SURFACE_VISIBILITY_WGSL, buildCloudUpsample,
+    CLOUD_SURFACE_VISIBILITY_WGSL, CLOUD_UPSAMPLE_WGSL,
 } from './cloudCompositeParts.wgsl.js';
 import { CLOUD_COMPOSITE_UNIFORMS_WGSL } from './cloudCompositeUniforms.wgsl.js';
 import { LOCAL_MIST_LOOKUP_WGSL, LOCAL_VOLUME_UNIFORMS_WGSL } from './cloudLocalVolumes.wgsl.js';
@@ -80,7 +80,7 @@ ${clouds ? /* wgsl */`
 @group(0) @binding(3) var cloudDepth: texture_2d<f32>;
 @group(0) @binding(5) var shadowMap: texture_2d<f32>;
 @group(0) @binding(11) var pointSampler: sampler;
-${CLOUD_SHADOW_LOOKUP_WGSL}${buildCloudUpsample(true)}
+${CLOUD_SHADOW_LOOKUP_WGSL}${CLOUD_UPSAMPLE_WGSL}
 @group(0) @binding(13) var localMist: texture_3d<f32>;
 @group(0) @binding(14) var<uniform> local: LocalVolumes;
 @group(0) @binding(15) var mountainFog: texture_3d<f32>;
@@ -127,7 +127,7 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     var seenKm = 1.0e30;
     ${clouds ? /* wgsl */`
     let size = vec2i(textureDimensions(cloudColor));
-    let upsampled = upsampleCloud(uv, size, size, 1, opaque);
+    let upsampled = upsampleCloud(uv, size, opaque);
     cloud = vec4f(max(upsampled.color.rgb, vec3f(0.0)), saturate(upsampled.color.a));
     cloudKm = upsampled.depth;
     ` : ''}
@@ -140,7 +140,7 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
         let behind = lookupRays(uv, sceneKm);
         cloud = vec4f(cloud.rgb + behind.rgb * cloud.a, cloud.a * (1.0 - (1.0 - behind.a) * (1.0 - surfaceVisibility(ro, rd, sceneKm))));
         ` : ''}
-        ${clouds ? 'if (local.fog.x > 0.0) { cloud = addMountainFog(cloud, uv, sceneKm, min(sceneKm, cloudKm)); }' : ''}
+        ${clouds ? 'if (max(local.fog.x, local.drift.w) > 0.0) { cloud = addMountainFog(cloud, uv, sceneKm, min(sceneKm, cloudKm)); }' : ''}
         cloud = addMist(cloud, ro, rd, sceneKm, min(sceneKm, cloudKm));
         // The shadow darkens the surface only, after the mist has used the transmittance.
         ${clouds ? /* wgsl */`
@@ -153,7 +153,7 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
         if (shade > 0.0) { cloud.a *= mix(1.0, 1.0 - shade * (1.0 - cu.atmo2.z), surfaceVisibility(ro, rd, sceneKm)); }
         `}
     } else {
-        ${clouds ? /* wgsl */`if (local.fog.x > 0.0) { cloud = addMountainFog(cloud, uv, 1.0e30, cloudKm); }
+        ${clouds ? /* wgsl */`if (max(local.fog.x, local.drift.w) > 0.0) { cloud = addMountainFog(cloud, uv, 1.0e30, cloudKm); }
         cloud = inFront(cloud, cirrus(cirrusFar, uv));` : /* wgsl */`
         let rd = normalize(input.ray);
         // A grey sky stands in for the deck, behind the cirrus, which gives it some structure. It clears from above.

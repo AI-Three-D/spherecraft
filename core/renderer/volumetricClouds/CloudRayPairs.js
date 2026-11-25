@@ -4,8 +4,7 @@ const HEADER_BYTES = 16;
 
 /**
  * Traces every second cloud ray and fills in the others from their four neighbours where they agree
- * (settings.cloudRayPairs, neural preview). The rest are traced from a list. Writes the same targets
- * as the plain raymarch.
+ * The rest are traced from a list. Writes the same targets as the plain raymarch.
  */
 export class CloudRayPairs {
     constructor(host) {
@@ -66,10 +65,10 @@ export class CloudRayPairs {
         packed.splice(8, 2, ...this.views);
         const list = { buffer: this.list };
         const perBank = (layout, inputs, ...extra) => banks.map((bank, i) =>
-            this.host._group(layout, [...inputs, bank.view, banks[1 - i].view, lookup, ...extra]));
+            this.host._group(layout, [...inputs, bank.view, banks[1 - i].view, lookup, this.host.landShadeView, ...extra]));
         groups = {
-            check: perBank('conventionalNeural', packed),
-            list: perBank('conventionalNeuralList', resources, list),
+            check: perBank('raymarch', packed),
+            list: perBank('raymarchList', resources, list),
             resolve: this.host._group('rayPairs', [resources[0], ...this.views, resources[10], resources[8], resources[9], list, resources[6]]),
         };
         this.groups.set(base, groups);
@@ -89,11 +88,11 @@ export class CloudRayPairs {
             pass.end();
         };
         encoder.copyBufferToBuffer(this.empty, 0, this.list, 0, HEADER_BYTES);
-        run('budget volume', check, groups.check[bank],
+        run('raymarch', check, groups.check[bank],
             pass => pass.dispatchWorkgroups(Math.ceil(Math.ceil(width / 2) / 4), Math.ceil(height / 8)));
-        run('budget ray pairs', resolve, groups.resolve,
+        run('ray pairs', resolve, groups.resolve,
             pass => pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16)));
-        if (list) run('budget rest', list, groups.list[bank], pass => pass.dispatchWorkgroupsIndirect(this.list, 0));
+        if (list) run('raymarch rest', list, groups.list[bank], pass => pass.dispatchWorkgroupsIndirect(this.list, 0));
     }
 
     _release() {

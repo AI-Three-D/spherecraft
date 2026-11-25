@@ -11,24 +11,12 @@ import { WEATHER_CONFIG } from '../templates/configs/weatherConfig.js';
 
 const ATLAS_TEXTURE_TYPES = ['height', 'normal', 'tile', 'splatData', 'macro'];
 
-export const ORBITAL_CLOUD_PREVIEW = Object.freeze({
-  proxyStartKm: 40,
-  proxyEndKm: 80,
-  orbitResolutionScale: 0.5,
-  orbitalProxySlabs: 24,
-});
-
 export const FAIR_WEATHER_CLOUD_LOOK = Object.freeze({
-  cloudShape: 'domes',
   cloudBottomKm: 4,
   cloudTopKm: 12,
   domeHeight: 1.5,
   shapeTileKm: 8,
-  giantShare: 0,
-  giantHeight: 3,
-  giantScale: 5,
   popcornTopKm: 1.6,
-  shapeOffset: 'slow',
   extinction: 26,
   domeEdgeSharpness: 0.91,
   domeHeads: 1.18,
@@ -37,7 +25,6 @@ export const FAIR_WEATHER_CLOUD_LOOK = Object.freeze({
   coverageGain: 1.6,
   isolatedPuffSuppression: 0.12,
   detailPixelFootprint: 0.85,
-  stepFootprint: 0.6,
   farAverageDensity: 0.12,
   distantBanks: 1,
   // Retain individual clouds within 20 km, then blend to broader distant banks.
@@ -49,7 +36,6 @@ export const FAIR_WEATHER_CLOUD_LOOK = Object.freeze({
   altoTopKm: 9.1,
   altoTileKm: 19,
   ambient: 0.4,
-  aoSide: 0.8,
   phaseBack: -0.36,
   backLobeWeight: 0.4,
   powder: 0.28,
@@ -225,22 +211,7 @@ export function createEngineConfig() {
         // Overrides of DEFAULT_CLOUD_SETTINGS in core/renderer/volumetricClouds/VolumetricCloudsModule.js (km).
         settings: {
           ...FAIR_WEATHER_CLOUD_LOOK,
-          // Planet-fixed sites used by the in-game tower comparison. All
-          // bounded variants use these same locations and dimensions.
-          towerDebugSites: [
-            { latDeg: 5.7, lonDeg: 4.0, radiusKm: 2.5, heightKm: 7.6, rotationDeg: 18 },
-            { latDeg: 14, lonDeg: 14, radiusKm: 3.1, heightKm: 7.8, rotationDeg: 112 },
-            { latDeg: 0.6, lonDeg: 21, radiusKm: 2.8, heightKm: 7.5, rotationDeg: 51 },
-            { latDeg: 9, lonDeg: 28, radiusKm: 3.2, heightKm: 7.8, rotationDeg: 163 },
-            { latDeg: -5, lonDeg: 36, radiusKm: 2.6, heightKm: 6.6, rotationDeg: 84 },
-            { latDeg: -13, lonDeg: 12, radiusKm: 2.4, heightKm: 7.2, rotationDeg: 137 },
-          ],
-          groundProxyBelowKm: 1.6,
-          // Rays that cross the layer in a short stretch (seen from above) step no coarser than
-          // their path through it / (maxSteps × 0.5). Distance-only steps (0.56 km from ~40 km up)
-          // missed small clouds between sampled shells: ripples, comb-toothed edges and glitter.
-          layerStepFit: 0.5,
-          groundProxyBlendKm: 0.7,
+          cloudDetail: 'high',
           // The planet is ~820 km around; Earth-sized system and weather tiles
           // would leave one weather state over the whole planet.
           systemTileKm: 500,
@@ -249,37 +220,8 @@ export function createEngineConfig() {
           // Matches the terrain's twilight band, so dusk dims the deck gradually instead of a
           // lit/dark front sweeping across the sky.
           twilightSoftness: 0.1,
-          // Temporal reconstruction. Cloud target = resolutionScale × canvas; interleave 2 marches a
-          // quarter of it per frame and reprojects the rest, and fullRateOnMotion marches all of it
-          // while the camera moves faster than motionThresholdPx (costs ~4× the raymarch then).
-          // temporalBlend: weight of each new sample; historyClip: how far (in neighbourhood
-          // standard deviations) history may differ from new samples (lower = less ghosting, more shimmer).
-          resolutionScale: 0.5,
-          // The game uses a fixed spatial ray grid. The U debug preview can reuse fresh rays.
-          temporal: false,
-          conservativeTemporal: false,
-          // Keep fresh lighting on the first visible skin. Blend in short-range
-          // lighting interpolation as the deck thickens, fully active in overcast and rain.
-          lightReuseInterpolate: true,
-          denseDeckLighting: { startDeck: 0.74, fullDeck: 0.86, steps: 10, maxKm: 0.30, reuseBelow: 0.985 },
-                // Inside the layer, rays near the horizon need long marches; at 192 they ran out and the
-                // rest of the path fell back to the averaged density (a smooth band that moved with height).
-                maxSteps: 256,
-          interleave: 2,
-          fullRateOnMotion: true,
-          motionThresholdPx: 1.5,
-          temporalBlend: 0.08,
-          // While moving, fresh samples weigh at least this much (less smear, a little more noise).
-          motionBlend: 0.5,
-          historyClip: 1.25,
-          // Far LOD: from proxyStartKm above the cloud tops the raymarch crossfades into a cheap
-          // 8-slab proxy, complete at proxyEndKm. It puts clouds in the same places but shades them
-          // flatter, so it only takes over where clouds are small on screen. Once it has taken over,
-          // the cloud target uses orbitResolutionScale instead.
+          // From orbit a few slabs replace the raymarch.
           farProxy: true,
-          proxyStartKm: 60,
-          proxyEndKm: 150,
-          orbitResolutionScale: 0.8,
           // Time evolution: the weather pattern morphs and cloud shapes rise (km/s, real time).
           weatherEvolveKmS: 0.02,
           boilKmS: 0.004,

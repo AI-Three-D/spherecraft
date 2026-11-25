@@ -66,7 +66,27 @@ function normalizeCloudEffect(raw = {}) {
         rainShade: finiteNumber(raw.rainShade, 0, 0, 1),
         low: finiteNumber(raw.low, 0, 0, 1),
         mist: finiteNumber(raw.mist, 0, 0, 1),
+        // The sheet cloud of the deck: how thick and how opaque (1 = the full rain deck), how even (1 = no gaps), and how
+        // much of it is cells instead of broad billows.
+        thickness: finiteNumber(raw.thickness, 1, 0.05, 1.5),
+        opacity: finiteNumber(raw.opacity, 1, 0.01, 1.5),
+        evenness: finiteNumber(raw.evenness, 0, 0, 1),
+        cells: finiteNumber(raw.cells, 0, 0, 1),
+        alto: finiteNumber(raw.alto, 1, 0, 1), // share of the altocumulus
     };
+}
+
+// Other forms of the same weather: numbers that differ from it.
+function normalizeVariants(effect, raw) {
+    const number = (source, key) => finiteNumber(source[key], effect[key], 0, 1);
+    return (Array.isArray(raw) ? raw : []).filter(v => v && typeof v === 'object').map(variant => ({
+        name: typeof variant.name === 'string' ? variant.name : '',
+        weight: finiteNumber(variant.weight, 1, 0, 1000),
+        cloudCoverage: number(variant, 'cloudCoverage'),
+        precipitationIntensity: number(variant, 'precipitationIntensity'),
+        fogDensity: number(variant, 'fogDensity'),
+        clouds: normalizeCloudEffect({ ...effect.clouds, ...variant.clouds }),
+    }));
 }
 
 function normalizeWeatherEffects(rawEffects = {}) {
@@ -88,6 +108,7 @@ function normalizeWeatherEffects(rawEffects = {}) {
             water: normalizeWaterEffect(raw.water || {}),
             rainParticles: normalizeRainParticles(raw.rainParticles || {}, precipitation),
         };
+        effects[name].variants = normalizeVariants(effects[name], raw.variants);
     }
     return effects;
 }
@@ -120,6 +141,7 @@ export class WeatherController {
         const merged = mergeConfig(WEATHER_CONFIG, aliasConfig);
 
         this._cloudLayerProvider = config.cloudLayerProvider;
+        this._random = typeof config.random === 'function' ? config.random : Math.random;
         this.config = {
             enabled: merged.enabled ?? true,
             resolution: merged.resolution ?? 128,
@@ -135,6 +157,8 @@ export class WeatherController {
             previewTransitionSeconds: finiteNumber(merged.previewTransitionSeconds, 12, 0.1, 3600),
             rainLeadFraction: finiteNumber(merged.rainLeadFraction, 0.32, 0, 0.85),
             weatherChangeChancePerSecond: finiteNumber(merged.weatherChangeChancePerSecond, 0.06, 0, 10),
+            variantChangeChancePerSecond: finiteNumber(merged.variantChangeChancePerSecond, 0.012, 0, 10),
+            variantTransitionSeconds: finiteNumber(merged.variantTransitionSeconds, 45, 0.1, 3600),
             windChangeChancePerSecond: finiteNumber(merged.windChangeChancePerSecond, 0.30, 0, 10),
             windSpeedRange: Array.isArray(merged.windSpeedRange)
                 ? [finiteNumber(merged.windSpeedRange[0], 2, 0, 1000), finiteNumber(merged.windSpeedRange[1], 22, 0, 1000)]
@@ -159,6 +183,7 @@ export class WeatherController {
         this._transitionProgress = 1.0;
         this._transitionDuration = this.config.transitionDurationSeconds;
         this._previewWeather = null;
+        this._rollVariant();
         this._startEffectSnapshot = this._createEffectSnapshot(this._targetWeather);
         this._currentEffectSnapshot = this._createEffectSnapshot(this._targetWeather);
         this._startCloudLayers = null;
@@ -282,6 +307,10 @@ export class WeatherController {
         if (this._previewWeather === null && this._transitionProgress >= 1.0 &&
             Math.random() < this.config.weatherChangeChancePerSecond * deltaTime) {
             this._pickNewWeatherTarget();
+        }
+        // The same weather takes other forms as it goes on.
+        if (this._transitionProgress >= 1.0 && this._random() < this.config.variantChangeChancePerSecond * deltaTime) {
+            this.nextVariant();
         }
         if (Math.random() < this.config.windChangeChancePerSecond * deltaTime) {
             this._pickNewWindTarget();
@@ -473,10 +502,42 @@ export class WeatherController {
             precipitationIntensity: effect.precipitationIntensity,
             fogDensity: effect.fogDensity,
             fogMultiplier: effect.fogMultiplier,
-            clouds: { ...effect.clouds },
+            ...this._variantOf(effect),
             water: { ...effect.water },
             rainParticles: { ...effect.rainParticles },
         };
+    }
+
+    // Between two forms of the target weather, so that no two spells of it are the same.
+    _rollVariant() {
+        const effect = this.effects[this._targetWeather];
+        const forms = effect ? [effect, ...effect.variants] : [];
+        const pick = () => {
+            let r = this._random() * forms.reduce((sum, form) => sum + (form === effect ? 1 : form.weight), 0);
+            return forms.find(form => (r -= form === effect ? 1 : form.weight) <= 0) ?? forms[0];
+        };
+        const last = this._variant?.form;
+        let form = pick();
+        if (form === last) form = pick();
+        this._variant = { effect, form, other: pick(), share: 0.5 * this._random() };
+    }
+
+    _variantOf(effect) {
+        const variant = this._variant?.effect === effect ? this._variant : null;
+        const { form = effect, other = effect, share = 0 } = variant ?? {};
+        const blend = key => blendNumber(form[key], other[key], share);
+        return {
+            cloudCoverage: blend('cloudCoverage'),
+            precipitationIntensity: blend('precipitationIntensity'),
+            fogDensity: blend('fogDensity'),
+            clouds: blendObjectNumbers(form.clouds, other.clouds, share),
+        };
+    }
+
+    /** Lets the present weather turn into another form of itself. */
+    nextVariant(duration = this.config.variantTransitionSeconds) {
+        if (!this.effects[this._targetWeather]?.variants.length) return false;
+        return this.setWeather(this._targetWeather, false, duration);
     }
 
     _blendEffectSnapshots(a, b, t, precipitationT, shadeT) {
@@ -551,6 +612,7 @@ export class WeatherController {
         this._startEffectSnapshot = this._currentEffectSnapshot;
         this._startCloudLayers = this._currentCloudLayers;
         this._targetWeather = weatherName;
+        this._rollVariant();
         this._transitionDuration = finiteNumber(duration, this.config.transitionDurationSeconds, 0.1, 3600);
         this._transitionProgress = immediate ? 1.0 : 0.0;
         this._lastCloudLayerUpdateTime = -Infinity;
@@ -570,6 +632,12 @@ export class WeatherController {
         this._previewWeather = name;
         if (this._targetWeather !== name) this.setWeather(name, false, this.config.previewTransitionSeconds);
         return true;
+    }
+
+    /** Name of the present form of the weather, or '' for its usual form. */
+    get variantName() {
+        const { effect, form } = this._variant ?? {};
+        return form && form !== effect ? form.name : '';
     }
 
     getWeatherPreview() {

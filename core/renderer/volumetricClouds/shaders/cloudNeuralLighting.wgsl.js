@@ -1,15 +1,8 @@
 import { CLOUD_DENSITY_WGSL, CLOUD_MATH_WGSL, CLOUD_UNIFORMS_WGSL } from './cloudCommon.wgsl.js';
-import { CLOUD_CACHE_COORDS } from './cloudCaches.wgsl.js';
-import { lightingInferenceWgsl } from '../neural/lightingInference.js';
-import { DEFAULT_LIGHTING_MODEL, LIGHTING_MODEL_SETS } from '../neural/lightingModels.js';
+import { CLOUD_LIGHTING_INFERENCE_WGSL } from '../neural/lightingInference.js';
 import { CLOUD_WEATHER_ATLAS_LOOKUP_WGSL } from './cloudViewFields.wgsl.js';
 
-export const CLOUD_NEURAL_LIGHT_BAKE_WGSL = buildNeuralLightBake();
-
-// The bake for one trained model set (LIGHTING_MODEL_SETS in neural/lightingModels.js).
-export function buildNeuralLightBake(model = DEFAULT_LIGHTING_MODEL) {
-    const learnedDirect = !!LIGHTING_MODEL_SETS[model]?.direct;
-    return /* wgsl */`
+export const CLOUD_NEURAL_LIGHT_BAKE_WGSL = /* wgsl */`
 ${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}
 @group(0) @binding(0) var<uniform> u: CloudUniforms;
 @group(0) @binding(1) var shapeTex: texture_3d<f32>;
@@ -22,8 +15,8 @@ ${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}
 @group(0) @binding(8) var outLight: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(9) var<uniform> rowOffset: vec4u;
 
-${CLOUD_DENSITY_WGSL}${CLOUD_CACHE_COORDS}${CLOUD_WEATHER_ATLAS_LOOKUP_WGSL}
-${lightingInferenceWgsl(model)}
+${CLOUD_DENSITY_WGSL}${CLOUD_WEATHER_ATLAS_LOOKUP_WGSL}
+${CLOUD_LIGHTING_INFERENCE_WGSL}
 
 const SUN_COLUMN_SPLIT_KM: f32 = 2.4;
 
@@ -55,15 +48,18 @@ fn lightColumn(p: vec3f, direction: vec3f, start: f32) -> f32 {
 
 fn voxelPosition(voxel: vec3u, size: vec3u) -> vec3f {
     let uvw = (vec3f(voxel) + 0.5) / vec3f(size);
-    return cachePosition(uvw.xy, u.cacheGrid.w, mix(u.planet.y, u.planet.z, uvw.z));
+    let xy = u.cacheGrid.xy + (uvw.xy - 0.5) * u.cacheGrid.w;
+    let normal = cross(u.cacheU.xyz, u.cacheV.xyz);
+    let z = sqrt(max(u.planet.x * u.planet.x - dot(xy, xy), 0.0));
+    return (u.cacheU.xyz * xy.x + u.cacheV.xyz * xy.y + normal * z) * (mix(u.planet.y, u.planet.z, uvw.z) / u.planet.x);
 }
 
 fn bakeLighting(voxel: vec3u, p: vec3f, column: f32) {
     let radius = length(p);
     let up = p / radius;
-    // Below the horizon the column toward the sun ends where it leaves the cloud base, so a light front swept
-    // across the patch. With the fitted far light the sun is held at 6 degrees or higher, as it is there.
-    let setSun = select(0.0, max(0.0, 0.1 - dot(up, u.sun.xyz)), (u32(fract(u.budget.w) * 16.0 + 0.5) & 1u) != 0u);
+    // Below the horizon the column toward the sun ends where it leaves the cloud base, so a light front swept across the patch.
+    // The sun is held at 6 degrees or higher, as in the fitted light outside the patch.
+    let setSun = max(0.0, 0.1 - dot(up, u.sun.xyz));
     let sun = normalize(u.sun.xyz + up * setSun);
     let w = atlasWeather(p);
     let b = cloudBaseWithWeather(p, heightFraction(radius), w, 0.012);
@@ -115,10 +111,10 @@ fn bakeLighting(voxel: vec3u, p: vec3f, column: f32) {
     // exp(-(near + far)) on filtered density is about 0.6x the traced transmittance
     // in daylight (gaps in a clumpy column let light through), so learned sets predict it.
     let formulaDirect = exp(-(nearMass * u.density.x + farOd));
-    ${learnedDirect ? `// bouncedSunScale reads this channel to find shielded decks in late-sun storms, and was
+    // bouncedSunScale reads this channel to find shielded decks in late-sun storms, and was
     // calibrated on the formula there. Keep the formula in that regime only.
     let stormKeep = smoothstep(0.65, 1.0, u.weatherStyle.z) * (1.0 - smoothstep(0.05, 0.22, dot(up, sun)));
-    let direct = mix(min(inferDirectTransmittance(features), 1.0), formulaDirect, stormKeep);` : 'let direct = formulaDirect;'}
+    let direct = mix(min(inferDirectTransmittance(features), 1.0), formulaDirect, stormKeep);
     textureStore(outLight, vec3i(voxel), vec4f(inferMultipleScattering(features),
         inferSkyScattering(features), direct, 1.0) * confidence);
 }
@@ -148,4 +144,3 @@ fn main(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_inde
     if (valid) { bakeLighting(voxel, p, skyColumn[lane] - 0.5 * slab); }
 }
 `;
-}

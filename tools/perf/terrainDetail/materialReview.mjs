@@ -47,7 +47,7 @@ try {
         weather._pickNewWeatherTarget = () => {};
         weather.setWeather('partly_cloudy', true);
         const clouds = game.renderer.volumetricClouds;
-        Object.assign(clouds.settings, { cloudBudgetMode: 'neural', windSpeedKmS: 0, weatherEvolveKmS: 0, boilKmS: 0 });
+        Object.assign(clouds.settings, { windSpeedKmS: 0, weatherEvolveKmS: 0, boilKmS: 0 });
         game.gameTime.setFrozen(true);
         const core = game.renderer.rendererCore;
         const render = core.render;

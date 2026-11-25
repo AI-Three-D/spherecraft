@@ -66,7 +66,7 @@ try {
             const preset = WEATHER_CONFIG.effects[scene.preset];
             Object.assign(c.settings, DEFAULT_CLOUD_SETTINGS, runtime, {
                 windSpeedKmS: 0, weatherEvolveKmS: 0, boilKmS: 0, timeScale: 0,
-                coverage: 0.08 + 0.2 * preset.cloudCoverage, farProxy: false, groundProxyBelowKm: 0,
+                coverage: 0.08 + 0.2 * preset.cloudCoverage, farProxy: false,
             });
             c.weather = preset.clouds;
             c.enabled = true;

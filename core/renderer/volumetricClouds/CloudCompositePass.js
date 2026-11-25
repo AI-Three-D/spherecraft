@@ -4,11 +4,12 @@ import {
 } from './shaders/cloudCommon.wgsl.js';
 import {
     CLOUD_HAZE_LOOKUP_WGSL, CLOUD_HAZE_STRUCT_WGSL, CLOUD_MIST_LIGHT_WGSL, CLOUD_MIST_LOOKUP_WGSL, CLOUD_RAY_LOOKUP_WGSL,
-    CLOUD_SURFACE_VISIBILITY_WGSL, buildCloudUpsample,
+    CLOUD_SURFACE_VISIBILITY_WGSL, CLOUD_UPSAMPLE_WGSL,
 } from './shaders/cloudCompositeParts.wgsl.js';
 import { CLOUD_COMPOSITE_UNIFORMS_WGSL } from './shaders/cloudCompositeUniforms.wgsl.js';
 import { LOCAL_MIST_LOOKUP_WGSL, LOCAL_VOLUME_UNIFORMS_WGSL } from './shaders/cloudLocalVolumes.wgsl.js';
 import { CloudGodRays } from './CloudGodRays.js';
+import { LOCAL_VOLUME_FLOATS } from './CloudLocalVolumes.js';
 import { CloudLeanComposite } from './CloudLeanComposite.js';
 import { AERIAL_PERSPECTIVE_WGSL } from '../atmosphere/shaders/aerialPerspectiveCommon.js';
 
@@ -44,11 +45,8 @@ export class CloudCompositePass {
 
     async initialize(device) {
         this.device = device;
-        const module = device.createShaderModule({ label: 'clouds composite', code: buildCloudCompositeShader() });
-        const info = await module.getCompilationInfo?.();
-        const errors = info?.messages?.filter(m => m.type === 'error') ?? [];
-        if (errors.length) throw new Error(`clouds composite WGSL: ${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join('; ')}`);
         const F = GPUShaderStage.FRAGMENT;
+        const hazeTexture = { texture: { sampleType: 'float', viewDimension: '3d' } };
         const entries = [
             { buffer: { type: 'uniform' }, visibility: F | GPUShaderStage.VERTEX },
             { buffer: { type: 'uniform' } },
@@ -58,11 +56,15 @@ export class CloudCompositePass {
             { texture: { sampleType: 'float' } },
             { texture: { sampleType: 'float' } },
             { sampler: { type: 'filtering' } },
+            hazeTexture, hazeTexture, { texture: { sampleType: 'float' } }, { sampler: { type: 'non-filtering' } },
+            { binding: 16, ...hazeTexture }, { binding: 17, buffer: { type: 'uniform' } },
+            { binding: 18, texture: { sampleType: 'float' } }, { binding: 19, texture: { sampleType: 'float' } }, { binding: 20, ...hazeTexture },
         ];
         const layout = bindings => device.createBindGroupLayout({
             entries: bindings.map((entry, binding) => ({ binding, visibility: F, ...entry })),
         });
         this._layout = layout(entries);
+        this._raysLayout = layout([...entries, { binding: 15, ...hazeTexture }]);
         const render = (module, bindGroupLayout) => device.createRenderPipelineAsync({
             label: 'clouds composite',
             layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
@@ -79,13 +81,10 @@ export class CloudCompositePass {
             },
             primitive: { topology: 'triangle-list' },
         });
-        const budget = device.createShaderModule({ label: 'clouds composite with haze lookup', code: buildCloudCompositeShader(true) });
-        const hazeTexture = { texture: { sampleType: 'float', viewDimension: '3d' } };
-        const budgetEntries = [...entries, hazeTexture, hazeTexture, { texture: { sampleType: 'float' } }, { sampler: { type: 'non-filtering' } }];
-        budgetEntries.push({ binding: 16, ...hazeTexture }, { binding: 17, buffer: { type: 'uniform' } },
-            { binding: 18, texture: { sampleType: 'float' } }, { binding: 19, texture: { sampleType: 'float' } }, { binding: 20, ...hazeTexture });
-        this._budgetLayout = layout(budgetEntries);
-        this._raysLayout = layout([...budgetEntries, { binding: 15, ...hazeTexture }]);
+        const module = device.createShaderModule({ label: 'clouds composite', code: buildCloudCompositeShader() });
+        const info = await module.getCompilationInfo?.();
+        const errors = info?.messages?.filter(m => m.type === 'error') ?? [];
+        if (errors.length) throw new Error(`clouds composite WGSL: ${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join('; ')}`);
         // Stand-ins where there is no mist on the ground.
         this._noMist = device.createTexture({
             label: 'no cloud local mist', size: [1, 1, 1], dimension: '3d', format: 'rgba16float',
@@ -93,16 +92,16 @@ export class CloudCompositePass {
         });
         device.queue.writeTexture({ texture: this._noMist }, new Uint16Array([0, 0, 0, 0x3c00]), { bytesPerRow: 8 }, [1, 1, 1]);
         this._noMistView = this._noMist.createView();
-        this._noLocal = device.createBuffer({ label: 'no cloud local volumes', size: 64, usage: GPUBufferUsage.UNIFORM });
+        this._noLocal = device.createBuffer({ label: 'no cloud local volumes', size: LOCAL_VOLUME_FLOATS * 4, usage: GPUBufferUsage.UNIFORM });
         this._noCirrus = device.createTexture({ label: 'no cirrus', size: [1, 1], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING });
         this._noCirrusView = this._noCirrus.createView();
         this._renderPipeline = render;
         this._pointSampler = device.createSampler();
         const bake = entryPoint => device.createComputePipelineAsync({
-            label: `clouds ${entryPoint}`, layout: 'auto', compute: { module: budget, entryPoint },
+            label: `clouds ${entryPoint}`, layout: 'auto', compute: { module, entryPoint },
         });
-        [this._pipeline, this._budgetPipeline, this._hazePipeline, this._mistPipeline] = await Promise.all([
-            render(module, this._layout), render(budget, this._budgetLayout), bake('bakeHaze'), bake('bakeMist'),
+        [this._pipeline, this._hazePipeline, this._mistPipeline] = await Promise.all([
+            render(module, this._layout), bake('bakeHaze'), bake('bakeMist'),
         ]);
         this._uniformBuffer = device.createBuffer({
             label: 'clouds composite uniforms', size: this._uniforms.byteLength,
@@ -113,7 +112,7 @@ export class CloudCompositePass {
     /** The god rays of this frame, or null. Compiles them the first time they are wanted. */
     _wantedGodRays() {
         const clouds = this.clouds;
-        const tier = clouds.budgetTier;
+        const tier = clouds.tier;
         if (!clouds.settings.godRays || tier.godRays === false || tier.cirrusOnly || !(clouds.shadowFade > 0)) return null;
         this._rayShare = 1;
         if (tier.godRaysBelow) {
@@ -129,7 +128,7 @@ export class CloudCompositePass {
             rays.initialize().catch(error => console.error('God rays are unavailable', error));
         }
         if (!tier.lean && !this._raysCompiling) {
-            const module = this.device.createShaderModule({ label: 'clouds composite with god rays', code: buildCloudCompositeShader(true, true) });
+            const module = this.device.createShaderModule({ label: 'clouds composite with god rays', code: buildCloudCompositeShader(true) });
             this._raysCompiling = this._renderPipeline(module, this._raysLayout).then(pipeline => { this._raysPipeline = pipeline; })
                 .catch(error => console.error('God rays are unavailable', error));
         }
@@ -175,7 +174,7 @@ export class CloudCompositePass {
         const c = this.clouds;
         const mist = c._uniformData.subarray(GROUND_MIST_UNIFORM, GROUND_MIST_UNIFORM + 4);
         // Without clouds only the mist table is read, and it depends on the camera's height alone.
-        const mistOnly = !!c.budgetTier?.cirrusOnly;
+        const mistOnly = !!c.tier.cirrusOnly;
         const key = JSON.stringify(mistOnly ? ['mist', ...this._uniforms.subarray(16, 24), ...mist]
             : [c._prev, c.sunDirection, c.sunIlluminance, c.moonDirection, c.moonIlluminance,
                 a.planetRadius, a.atmosphereRadius, a.scaleHeightRayleigh, a.scaleHeightMie, a.rayleighScattering,
@@ -226,33 +225,32 @@ export class CloudCompositePass {
     render(encoder, { colorView, depthView, width, height }, atmosphere, cirrus = null) {
         const out = this.clouds.getOutputs();
         const a = atmosphere;
-        const budget = !!this.clouds.budgetTier;
         const unitsPerKm = this.clouds.planet.unitsPerKm;
-        const rays = budget ? this._wantedGodRays() : null;
+        const rays = this._wantedGodRays();
         this._uniforms.set([
             width, height, this.shadowStrength, unitsPerKm,
             a.planetRadius, a.atmosphereRadius, a.scaleHeightRayleigh, a.scaleHeightMie,
             ...a.rayleighScattering, a.mieScattering,
             a.mieAnisotropy, a.sunIntensity, this.shadowFloor,
-            budget ? Math.max(64, a.atmosphereRadius / unitsPerKm + Math.hypot(...this.clouds._prev.pos)) : 0,
+            Math.max(64, a.atmosphereRadius / unitsPerKm + Math.hypot(...this.clouds._prev.pos)),
             ...this._mistUniforms(), ...CloudGodRays.uniforms(this.clouds.settings,
                 rays ? rays.nextBlend(this.clouds._prev.pos, this.clouds.sunDirection, this.clouds.frameSeconds) : 1, this._rayShare),
         ]);
         this.device.queue.writeBuffer(this._uniformBuffer, 0, this._uniforms);
-        if (budget) this._bakeHaze(encoder, out, a);
+        this._bakeHaze(encoder, out, a);
         if (rays) {
             rays.encode(encoder, out, this._uniformBuffer, a.transmittanceView,
                 `${this._hazeKey}${this.clouds.shadowVersion}${this._uniforms.subarray(24, 33)}`, this.gpuTimer);
         }
-        const tier = this.clouds.budgetTier;
+        const tier = this.clouds.tier;
         const volumes = this.clouds._localVolumes;
-        const mistView = budget && tier.mist ? volumes?.encodeMist(encoder, this.gpuTimer) : null;
-        const fogView = budget && tier.fog ? volumes?.encodeFog(encoder, this._hazeViews.slice(0, 2), this._uniformBuffer, this.gpuTimer) : null;
+        const mistView = tier.mist ? volumes?.encodeMist(encoder, this.gpuTimer) : null;
+        const fogView = tier.fog ? volumes?.encodeFog(encoder, this._hazeViews.slice(0, 2), this._uniformBuffer, this.gpuTimer) : null;
         const local = {
             view: mistView ?? this._noMistView, fogView: fogView ?? this._noMistView,
             buffer: mistView || fogView ? volumes.uniformBuffer : this._noLocal,
         };
-        if (tier?.lean) {
+        if (tier.lean) {
             this._lean ??= new CloudLeanComposite(this.device, this.colorFormat);
             const screen = this._lean.ready(!tier.cirrusOnly, !!cirrus?.near, !!rays);
             if (screen) {
@@ -264,7 +262,7 @@ export class CloudCompositePass {
             // Without clouds there is nothing for the full composite to draw while the pipeline compiles.
             if (screen || tier.cirrusOnly) return;
         }
-        // The cloud history ping-pongs (and may switch interleave), so a few groups are kept per input set.
+        // The cloud history ping-pongs, so a few groups are kept per input set.
         const inputs = [depthView, a.transmittanceView, local.view, local.fogView, local.buffer, cirrus?.far, cirrus?.near];
         if (inputs.some((v, i) => v !== this._groupInputs[i]) || this._groups.size > 8) {
             this._groupInputs = inputs;
@@ -279,15 +277,14 @@ export class CloudCompositePass {
                 { buffer: out.uniformBuffer }, { buffer: this._uniformBuffer },
                 out.colorView, out.depthView, depthView, out.shadowView, a.transmittanceView, out.linearSampler,
             ];
-            if (budget) resources.push(...this._hazeViews, this._pointSampler);
+            resources.push(...this._hazeViews, this._pointSampler);
             const entries = resources.map((resource, binding) => ({ binding, resource }));
-            if (budget) {
-                entries.push({ binding: 16, resource: local.view }, { binding: 17, resource: { buffer: local.buffer } },
-                    { binding: 18, resource: cirrus?.far ?? this._noCirrusView }, { binding: 19, resource: cirrus?.near ?? this._noCirrusView }, { binding: 20, resource: local.fogView });
-            }
+            entries.push({ binding: 16, resource: local.view }, { binding: 17, resource: { buffer: local.buffer } },
+                { binding: 18, resource: cirrus?.far ?? this._noCirrusView }, { binding: 19, resource: cirrus?.near ?? this._noCirrusView },
+                { binding: 20, resource: local.fogView });
             if (withRays) entries.push({ binding: 15, resource: rays.view });
             group = this.device.createBindGroup({
-                label: 'clouds composite', layout: withRays ? this._raysLayout : budget ? this._budgetLayout : this._layout, entries,
+                label: 'clouds composite', layout: withRays ? this._raysLayout : this._layout, entries,
             });
             this._groups.set(version, group);
         }
@@ -297,7 +294,7 @@ export class CloudCompositePass {
             timestampWrites: this.gpuTimer?.timestampWrites('clouds composite'),
         });
         pass.setViewport(0, 0, width, height, 0, 1);
-        pass.setPipeline(withRays ? this._raysPipeline : budget ? this._budgetPipeline : this._pipeline);
+        pass.setPipeline(withRays ? this._raysPipeline : this._pipeline);
         pass.setBindGroup(0, group);
         pass.draw(3);
         pass.end();
@@ -315,8 +312,8 @@ export class CloudCompositePass {
     }
 }
 
-/** budget: with the haze and mist lookups of the fast previews; godRays (needs budget): with the volume of CloudGodRays. */
-export function buildCloudCompositeShader(budget = false, godRays = false) {
+/** godRays: with the volume of CloudGodRays. */
+export function buildCloudCompositeShader(godRays = false) {
     return /* wgsl */`${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}${CLOUD_COMPOSITE_UNIFORMS_WGSL}${AERIAL_PERSPECTIVE_WGSL}
 @group(0) @binding(0) var<uniform> u: CloudUniforms;
 @group(0) @binding(1) var<uniform> cu: CompositeUniforms;
@@ -326,7 +323,7 @@ export function buildCloudCompositeShader(budget = false, godRays = false) {
 @group(0) @binding(5) var shadowMap: texture_2d<f32>;
 @group(0) @binding(6) var transmittanceLut: texture_2d<f32>;
 @group(0) @binding(7) var linearSampler: sampler;
-${budget ? /* wgsl */`
+
 @group(0) @binding(8) var hazeRadiance: texture_3d<f32>;
 @group(0) @binding(9) var hazeTransmittance: texture_3d<f32>;
 @group(0) @binding(10) var mistTable: texture_2d<f32>;
@@ -341,12 +338,11 @@ ${godRays ? '@group(0) @binding(15) var rayVolume: texture_3d<f32>;' : ''}
 @group(0) @binding(19) var cirrusNear: texture_2d<f32>;
 @group(0) @binding(20) var mountainFog: texture_3d<f32>;
 ${LOCAL_VOLUME_UNIFORMS_WGSL}${LOCAL_MIST_LOOKUP_WGSL}
-` : ''}
 ${CLOUD_SHADOW_LOOKUP_WGSL}
 
 struct VsOut {
     @builtin(position) pos: vec4f,
-    ${budget ? '@location(0) ray: vec3f, // view ray of view depth 1' : ''}
+    @location(0) ray: vec3f, // view ray of view depth 1
 }
 
 @vertex
@@ -354,8 +350,8 @@ fn vsMain(@builtin(vertex_index) i: u32) -> VsOut {
     var o: VsOut;
     let xy = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
     o.pos = vec4f(xy * 2.0 - 1.0, 0.0, 1.0);
-    ${budget ? `o.ray = u.camRight.xyz * ((o.pos.x + u.camBack.w) / u.camRight.w)
-        + u.camUp.xyz * ((o.pos.y + u.frameInfo.x) / u.camUp.w) - u.camBack.xyz;` : ''}
+    o.ray = u.camRight.xyz * ((o.pos.x + u.camBack.w) / u.camRight.w)
+        + u.camUp.xyz * ((o.pos.y + u.frameInfo.x) / u.camUp.w) - u.camBack.xyz;
     return o;
 }
 
@@ -411,7 +407,7 @@ fn hazeTo(roKm: vec3f, rd: vec3f, distKm: f32) -> Haze {
     return h;
 }
 
-${budget ? /* wgsl */`
+
 @compute @workgroup_size(8, 4)
 fn bakeHaze(@builtin(global_invocation_id) id: vec3u) {
     let size = textureDimensions(outHazeL);
@@ -464,35 +460,13 @@ fn bakeMist(@builtin(global_invocation_id) id: vec3u) {
 }
 
 ${CLOUD_MIST_LOOKUP_WGSL}
-${CLOUD_HAZE_LOOKUP_WGSL}` : ''}
+${CLOUD_HAZE_LOOKUP_WGSL}
 
 ${godRays ? CLOUD_RAY_LOOKUP_WGSL : ''}
 
 ${CLOUD_SURFACE_VISIBILITY_WGSL}
-// Optical depth up to the cloud and up to the camera's opaque scene hit.
-// Integrating the curved boundary layer makes nearby hills break through the
-// haze while longer rays through the low country accumulate more of it.
-fn groundMistDepths(ro: vec3f, rd: vec3f, sceneKm: f32, cloudKm: f32) -> vec2f {
-    let layer = raySphere(ro, rd, u.groundMist.y);
-    let ground = raySphere(ro, rd, u.planet.x);
-    let start = max(layer.x, 0.0);
-    var end = min(layer.y, sceneKm);
-    if (ground.x < ground.y && ground.y > 0.0) { end = min(end, max(0.0, ground.x)); }
-    if (start >= end) { return vec2f(0.0); }
-    let step = (end - start) / 8.0;
-    let height = u.groundMist.y - u.planet.x;
-    var path = vec2f(0.0);
-    for (var i = 0; i < 8; i++) {
-        let a = start + f32(i) * step;
-        let altitude = max(0.0, length(ro + rd * (a + 0.5 * step)) - u.planet.x);
-        let density = exp(-altitude / u.groundMist.z) * (1.0 - smoothstep(0.65 * height, height, altitude));
-        path += density * vec2f(clamp(cloudKm - a, 0.0, step), step);
-    }
-    return path * (u.groundMist.x * u.groundMist.w);
-}
-
 ${CLOUD_MIST_LIGHT_WGSL}
-${buildCloudUpsample(budget)}
+${CLOUD_UPSAMPLE_WGSL}
 @fragment
 fn fsMain(input: VsOut) -> @location(0) vec4f {
     let pix = input.pos.xy;
@@ -503,36 +477,30 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     let z = textureLoad(sceneDepth, vec2i(pix), 0);
     let opaque = z < 1.0;
     let cloudSize = vec2i(textureDimensions(cloudColor));
-    let blocks = ${budget ? 'cloudSize' : 'vec2i(textureDimensions(cloudDepth))'};
-    let k = ${budget ? '1' : 'max(i32(u.quality.x), 1)'};
     var cloudSample: UpsampledCloud;
     if (all(cloudSize == vec2i(size))) {
         // Pixel centres coincide. Only the centre tap has nonzero weight.
         let tp = vec2i(pix);
-        cloudSample = UpsampledCloud(textureLoad(cloudColor, tp, 0), abs(cloudDepthAt(tp, blocks, k)));
+        cloudSample = UpsampledCloud(textureLoad(cloudColor, tp, 0), abs(textureLoad(cloudDepth, tp, 0).r));
     } else {
-        cloudSample = upsampleCloud(uv, cloudSize, blocks, k, opaque);
+        cloudSample = upsampleCloud(uv, cloudSize, opaque);
     }
     let c = cloudSample.color;
     let cloud = vec4f(max(c.rgb, vec3f(0.0)), saturate(c.a));
 
     let shadowsOn = opaque && cu.viewport.z > 0.0 && u.shadowInfo.z > 0.0;
-    let mistOn = ${budget ? 'cu.mistRay.z > 0.0' : 'u.groundMist.x > 0.001 && u.groundMist.w > 0.0'};
-    let localOn = ${budget ? 'local.mist.x > 0.0' : 'false'};
-    let fogOn = ${budget ? 'local.fog.x > 0.0' : 'false'};
+    let mistOn = cu.mistRay.z > 0.0;
+    let localOn = local.mist.x > 0.0;
+    let fogOn = max(local.fog.x, local.drift.w) > 0.0;
     // One texel stands for no cirrus, or cirrus drawn by the host.
-    let cirrusOn = ${budget ? 'textureDimensions(cirrusFar).x > 1u || textureDimensions(cirrusNear).x > 1u' : 'false'};
+    let cirrusOn = textureDimensions(cirrusFar).x > 1u || textureDimensions(cirrusNear).x > 1u;
     ${godRays ? '' : 'if (cloud.a > 0.999 && !shadowsOn && !mistOn && !localOn && !fogOn && !cirrusOn) { discard; }'}
-    ${budget ? /* wgsl */`
     let rayLength = length(input.ray);
     let rd = input.ray / rayLength;
-    ` : /* wgsl */`
-    let rd = cameraRay(pix, size, u.camRight, u.camUp, u.camBack, u.frameInfo.x);
-    `}
     var sceneKm = 1.0e30;
     if (opaque) {
         let viewDepth = u.sceneDepth.y / (z + u.sceneDepth.x);
-        sceneKm = viewDepth * u.sceneDepth.z ${budget ? '* rayLength' : '/ max(-dot(rd, u.camBack.xyz), 1.0e-4)'};
+        sceneKm = viewDepth * u.sceneDepth.z * rayLength;
     }
 
     var shadow = 1.0;
@@ -547,12 +515,11 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     var cloudKm = sceneKm;
     if (cloud.a < 0.999) {
         cloudKm = min(sceneKm, cloudSample.depth);
-        let haze = ${budget ? 'lookupHaze(uv, cloudKm)' : 'hazeTo(ro, rd, cloudKm)'};
+        let haze = lookupHaze(uv, cloudKm);
         // Toward the horizon the distant cloud field loses contrast into the
         // host sky. Fade its premultiplied colour and opacity together.
-        let cloudHeight = (length(ro) - u.planet.y) / (u.planet.z - u.planet.y);
-        // Fast previews keep the distant fade independent of eye height within the atmosphere.
-        let below = select(1.0 - smoothstep(0.0, 0.45, cloudHeight), 0.35 * (1.0 - u.lod.x), u.budget.w >= 1.5);
+        // Independent of eye height within the atmosphere.
+        let below = 0.35 * (1.0 - u.lod.x);
         let distant = smoothstep(u.banks.z * 0.64, u.banks.z * 1.8, cloudKm);
         let visible = 1.0 - 0.78 * u.banks.x * below * distant * (1.0 - 0.84 * u.weatherStyle.y);
         ${godRays ? /* wgsl */`let front = lookupRays(uv, cloudKm);
@@ -570,13 +537,13 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
         transmittance *= 1.0 - (1.0 - behind.a) * hazy;
     }
     ` : ''}
-    ${budget ? /* wgsl */`if (fogOn) {
+    if (fogOn) {
         let foggy = addMountainFog(vec4f(color, transmittance), uv, sceneKm, cloudKm);
         color = foggy.rgb;
         transmittance = foggy.a;
-    }` : ''}
+    }
     if (mistOn) {
-        let depths = ${budget ? 'mistDepths' : 'groundMistDepths'}(ro, rd, sceneKm, cloudKm);
+        let depths = mistDepths(ro, rd, sceneKm, cloudKm);
         if (depths.y > 0.001) {
             let T = exp(-depths);
             // Part of the mist lies behind the clouds and is masked by their opacity.
@@ -585,7 +552,6 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
             transmittance *= T.y;
         }
     }
-    ${budget ? /* wgsl */`
     if (localOn) {
         let near = localMistTo(uv, sceneKm);
         color = near.rgb + near.a * color;
@@ -601,7 +567,6 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
         color = over.rgb + (1.0 - over.a) * color;
         transmittance *= 1.0 - over.a;
     }
-    ` : ''}
     return vec4f(color, transmittance * shadow);
 }
 `;

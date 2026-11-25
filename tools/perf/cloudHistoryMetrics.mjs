@@ -257,7 +257,7 @@ function analyse(name) {
     }
     return {
         frames: poses[0].length,
-        reuseFrames: poses[1].filter(p => p.historyReuse).length,
+        reuseFrames: poses[1].filter(p => p.historyValid).length,
         rgbaError: rgbaError.summary(),
         opacityError: opacityError.summary(),
         displayError: compareDisplay ? displayError.summary() : undefined,

@@ -107,6 +107,8 @@ export class GameUI {
             #game-settings h1 { font-size:22px; margin:0 0 20px; }
             #game-settings h2 { font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:#9ab3b9; margin:24px 0 12px; }
             #game-settings label { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:10px 0; }
+            #game-settings .row { display:flex; justify-content:space-between; align-items:center; gap:12px; min-height:36px; }
+            #game-settings .row button { flex:none; }
             #game-settings select, #game-settings input[type=number] { width:130px; box-sizing:border-box; }
             #game-ui button, #game-settings select, #game-settings input[type=number] { color:#ecf5f5; background:#23383e; border:1px solid #526d73; border-radius:6px; padding:7px 9px; font:inherit; }
             #game-ui button { cursor:pointer; }
@@ -133,15 +135,17 @@ export class GameUI {
             <h1>Settings</h1>
             <h2>Weather</h2>
             <label>Weather <select id="weather-preview"><option value="auto">Automatic</option></select></label>
-            <div id="weather-preview-status" class="note"></div>
+            <div class="row">
+                <span id="weather-preview-status" class="note"></span>
+                <button id="weather-next-variant" type="button" title="Another form of the same weather">Next variation</button>
+            </div>
             <h2>Cloud detail</h2>
             <label>Detail level <select id="detail-preset"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="custom" disabled>Custom</option></select></label>
             <div class="note">Presets set cloud rendering and the options below. Changes are applied immediately.</div>
             <label>God rays <input type="checkbox" data-feature="godRays"></label>
             <label>Mountain clouds <input type="checkbox" data-feature="mountainClouds"></label>
             <label>Ground mist <input type="checkbox" data-feature="localMist"></label>
-            <label>Cloud reprojection <input type="checkbox" data-feature="conventionalTemporal"></label>
-            <label>Motion threshold (px) <input type="number" id="cloud-motion" min="0" max="100" step="0.1"></label>
+            <label>Cloud reprojection <input type="checkbox" data-feature="reprojection"></label>
             <div class="note">Low uses cirrus only. Enabling a volumetric effect switches to a custom medium tier.</div>
             <h2>On-screen display</h2>
             <label>Detail level <input type="checkbox" data-display="detail" checked></label>
@@ -180,46 +184,40 @@ export class GameUI {
         }
         weatherSelect.value = weather?.getWeatherPreview().selected ?? 'auto';
         weatherSelect.addEventListener('change', () => weather?.setWeatherPreview(weatherSelect.value));
+        const nextVariant = settings.querySelector('#weather-next-variant');
+        nextVariant.disabled = !weather?.config.enabled;
+        nextVariant.addEventListener('click', () => weather?.nextVariant(weather.config.previewTransitionSeconds));
         const clouds = this.engine.renderer?.volumetricClouds;
         const preset = settings.querySelector('#detail-preset');
         const features = [...settings.querySelectorAll('[data-feature]')];
-        const motion = settings.querySelector('#cloud-motion');
         const presets = {
-            low: { cloudDetail:'low', godRays:false, mountainClouds:false, localMist:false, conventionalTemporal:false, motionThresholdPx:1.5 },
-            medium: { cloudDetail:'medium', godRays:true, mountainClouds:true, localMist:true, conventionalTemporal:true, motionThresholdPx:1.5 },
-            high: { cloudDetail:'high', godRays:true, mountainClouds:true, localMist:true, conventionalTemporal:true, motionThresholdPx:1.5 },
+            low: { cloudDetail:'low', godRays:false, mountainClouds:false, localMist:false, reprojection:false },
+            medium: { cloudDetail:'medium', godRays:true, mountainClouds:true, localMist:true, reprojection:true },
+            high: { cloudDetail:'high', godRays:true, mountainClouds:true, localMist:true, reprojection:true },
         };
         const sync = () => {
             if (!clouds) return;
             const s = clouds.settings;
             for (const input of features) input.checked = !!s[input.dataset.feature];
-            motion.value = String(s.motionThresholdPx);
-            preset.value = clouds.enabled && s.cloudBudgetMode === 'neural'
+            preset.value = clouds.enabled
                 ? Object.keys(presets).find(key => Object.entries(presets[key]).every(([k,v]) => s[k] === v)) ?? 'custom'
                 : 'custom';
             this._detailLabel = preset.value;
         };
         preset.disabled = !clouds;
-        for (const input of [...features, motion]) input.disabled = !clouds;
+        for (const input of features) input.disabled = !clouds;
         preset.addEventListener('change', () => {
             if (!clouds || !presets[preset.value]) return;
-            Object.assign(clouds.settings, presets[preset.value], { cloudBudgetMode:'neural' });
+            Object.assign(clouds.settings, presets[preset.value]);
             clouds.enabled = true;
             clouds.resetHistory();
             sync();
         });
         for (const input of features) input.addEventListener('change', () => {
             const s = clouds.settings;
-            s.cloudBudgetMode = 'neural';
             if (s.cloudDetail === 'low' && input.checked) s.cloudDetail = 'medium';
             s[input.dataset.feature] = input.checked;
             clouds.enabled = true;
-            clouds.resetHistory();
-            sync();
-        });
-        motion.addEventListener('change', () => {
-            if (!motion.checkValidity()) { sync(); return; }
-            clouds.settings.motionThresholdPx = motion.valueAsNumber;
             clouds.resetHistory();
             sync();
         });
@@ -547,7 +545,8 @@ export class GameUI {
         const weather = this.engine?.renderer?.weatherController;
         if (this._weatherPreviewStatus && weather?.config.enabled) {
             const { target, progress } = weather.getWeatherPreview();
-            const label = weather.effects[target]?.label ?? target;
+            const variant = weather.variantName;
+            const label = `${weather.effects[target]?.label ?? target}${variant ? `: ${variant.toLowerCase()}` : ''}`;
             this._weatherPreviewStatus.textContent = progress < 1
                 ? `Transitioning to ${label} · ${Math.floor(progress * 100)}%`
                 : label;

@@ -71,35 +71,22 @@ fn surfaceVisibility(roKm: vec3f, rd: vec3f, distKm: f32) -> f32 {
 }
 `;
 
-// Requires: cloudColor, cloudDepth, linearSampler, and pointSampler when gathering depths.
-export function buildCloudUpsample(budget) {
-    return /* wgsl */`
+// Requires: cloudColor, cloudDepth, linearSampler, pointSampler.
+export const CLOUD_UPSAMPLE_WGSL = /* wgsl */`
 struct UpsampledCloud {
     color: vec4f,
     depth: f32,
 }
 
-fn cloudDepthAt(tp: vec2i, blocks: vec2i, k: i32) -> f32 {
-    return textureLoad(cloudDepth, ${budget ? 'tp' : 'clamp(tp / k, vec2i(0), blocks - 1)'}, 0).r;
-}
-
-fn upsampleCloud(uv: vec2f, cloudSize: vec2i, blocks: vec2i, k: i32, opaque: bool) -> UpsampledCloud {
+fn upsampleCloud(uv: vec2f, cloudSize: vec2i, opaque: bool) -> UpsampledCloud {
     // Negative depths mark rays clipped by opaque geometry. Keep their colours and haze depths
     // on the terrain side of a silhouette, even when all four bilinear taps were clipped.
     let sp = uv * vec2f(cloudSize) - 0.5;
     let i0 = vec2i(floor(sp));
     let f = sp - floor(sp);
     // Vectors throughout: indexing a local array spills it to memory.
-    ${budget ? /* wgsl */`
     // A gather starts at the bottom left and turns counterclockwise.
     let depths = textureGather(0, cloudDepth, pointSampler, (vec2f(i0) + 1.0) / vec2f(cloudSize)).wzxy;
-    ` : /* wgsl */`
-    let lastTexel = cloudSize - 1;
-    let depths = vec4f(cloudDepthAt(clamp(i0, vec2i(0), lastTexel), blocks, k),
-        cloudDepthAt(clamp(i0 + vec2i(1, 0), vec2i(0), lastTexel), blocks, k),
-        cloudDepthAt(clamp(i0 + vec2i(0, 1), vec2i(0), lastTexel), blocks, k),
-        cloudDepthAt(clamp(i0 + 1, vec2i(0), lastTexel), blocks, k));
-    `}
     let matching = (depths < vec4f(0.0)) == vec4<bool>(opaque);
     if (!all(matching)) {
         let gx = vec2f(1.0 - f.x, f.x);
@@ -126,7 +113,7 @@ fn upsampleCloud(uv: vec2f, cloudSize: vec2i, blocks: vec2i, k: i32, opaque: boo
                     if (x >= 0 && x <= 1 && y >= 0 && y <= 1) { continue; }
                     let delta = vec2i(x, y);
                     let tp = clamp(i0 + delta, vec2i(0), cloudSize - 1);
-                    let depth = cloudDepthAt(tp, blocks, k);
+                    let depth = textureLoad(cloudDepth, tp, 0).r;
                     if ((depth < 0.0) != opaque) { continue; }
                     let d = vec2f(delta) - f;
                     let w = exp(-dot(d, d));
@@ -146,7 +133,6 @@ fn upsampleCloud(uv: vec2f, cloudSize: vec2i, blocks: vec2i, k: i32, opaque: boo
     return UpsampledCloud(sampleCatmullRom(cloudColor, linearSampler, uv), abs(select(row.x, row.y, f.x >= 0.5)));
 }
 `;
-}
 
 // Requires: cu, rayVolume (texture_3d), linearSampler.
 export const CLOUD_RAY_LOOKUP_WGSL = /* wgsl */`
