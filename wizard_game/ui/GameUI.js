@@ -98,109 +98,76 @@ export class GameUI {
      * Create the main HUD overlay.
      */
     _createMainUI() {
+        const style = document.createElement('style');
+        style.textContent = `
+            #game-ui { position:fixed; inset:0 auto 0 0; z-index:100; color:#ecf5f5; font:14px system-ui,sans-serif; pointer-events:none; }
+            #settings-toggle { position:fixed; top:16px; left:16px; z-index:102; pointer-events:auto; }
+            #game-settings { position:absolute; top:0; left:0; width:min(340px, 100vw); height:100dvh; box-sizing:border-box; overflow:auto; padding:68px 20px 24px; background:rgba(15,25,30,.94); box-shadow:0 8px 32px #0006; pointer-events:auto; }
+            #game-settings[hidden] { display:none; }
+            #game-settings h1 { font-size:22px; margin:0 0 20px; }
+            #game-settings h2 { font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:#9ab3b9; margin:24px 0 12px; }
+            #game-settings label { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:10px 0; }
+            #game-settings select, #game-settings input[type=number] { width:130px; box-sizing:border-box; }
+            #game-ui button, #game-settings select, #game-settings input[type=number] { color:#ecf5f5; background:#23383e; border:1px solid #526d73; border-radius:6px; padding:7px 9px; font:inherit; }
+            #game-ui button { cursor:pointer; }
+            #game-settings input[type=checkbox] { accent-color:#8ed5c5; }
+            #game-settings .note { color:#a8bec2; font-size:12px; line-height:1.45; }
+            #game-hud { position:fixed; top:16px; right:16px; display:flex; flex-direction:column; align-items:flex-end; gap:5px; color:white; text-shadow:0 1px 5px #000; font:600 13px system-ui,sans-serif; pointer-events:none; }
+            #game-hud span { background:#101c24a8; border-radius:5px; padding:5px 8px; }
+        `;
+        document.head.appendChild(style);
+        this._uiStyle = style;
         const ui = document.createElement('div');
         ui.id = 'game-ui';
-        ui.style.cssText = `
-        position: absolute;
-        top: 10px;
-        right: 10px;
-        width: min(380px, calc(100vw - 20px));
-        max-height: calc(100vh - 20px);
-        display: flex;
-        flex-direction: column;
-        align-items: stretch;
-        gap: 10px;
-        pointer-events: auto;
-        overflow-y: auto;
-        overflow-x: hidden;
-        overscroll-behavior: contain;
-        scrollbar-gutter: stable;
-        z-index: 100;
-    `;
-
-        const hudContent = document.createElement('div');
-        hudContent.style.cssText = 'pointer-events: none;';
-        ui.appendChild(hudContent);
-
-        const debugToggle = document.createElement('button');
-        debugToggle.id = 'debug-toggle-btn';
-        debugToggle.textContent = 'Debug Controls';
-        debugToggle.style.cssText = `
-            align-self: flex-end;
-            pointer-events: auto;
-            border: 1px solid rgba(180, 233, 255, 0.45);
-            border-radius: 999px;
-            padding: 8px 14px;
-            color: #eaf8ff;
-            font-family: Georgia, "Times New Roman", serif;
-            font-size: 12px;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            background:
-                linear-gradient(180deg, rgba(110, 180, 215, 0.28), rgba(10, 28, 40, 0.68)),
-                rgba(6, 14, 22, 0.78);
-            box-shadow:
-                inset 0 1px 0 rgba(255,255,255,0.28),
-                0 10px 24px rgba(0,0,0,0.28);
-            cursor: pointer;
-        `;
-        ui.appendChild(debugToggle);
-
+        ui.innerHTML = `<button id="settings-toggle" type="button" aria-expanded="true" aria-controls="game-settings">Hide settings</button><div id="game-hud"><span data-hud="detail"></span><span data-hud="fps"></span><span data-hud="weather"></span></div>`;
         document.body.appendChild(ui);
         this.uiElement = ui;
-        this._hudContent = hudContent;
-        this._debugToggleButton = debugToggle;
+        this._hudContent = ui.querySelector('#game-hud');
     }
 
     _createSettings() {
         if (!this.engine) return;
-        const settings = document.createElement('details');
+        const settings = document.createElement('aside');
         settings.id = 'game-settings';
-        settings.style.cssText = `
-            padding: 10px 14px;
-            border: 1px solid rgba(180, 233, 255, 0.45);
-            border-radius: 14px;
-            background: rgba(6, 14, 22, 0.88);
-            color: #eaf8ff;
-            font: 12px Georgia, "Times New Roman", serif;
-        `;
         settings.innerHTML = `
-            <summary style="cursor: pointer;">Settings</summary>
-            <label for="weather-preview" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px;">
-                Weather
-                <select id="weather-preview" aria-describedby="weather-preview-status">
-                    <option value="auto">Automatic</option>
-                </select>
-            </label>
-            <div id="weather-preview-status" style="margin-top: 4px; opacity: 0.8;"></div>
-            <label for="max-fps-setting" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px;">
-                Active FPS cap
-                <select id="max-fps-setting">
-                    <option value="0">Unlimited</option>
-                    <option value="30">30 FPS</option>
-                    <option value="60">60 FPS</option>
-                    <option value="90">90 FPS</option>
-                    <option value="120">120 FPS</option>
-                </select>
-            </label>
-            <label style="display: flex; gap: 8px; margin-top: 12px; align-items: center;">
-                <input id="adaptive-quality-enabled" type="checkbox" /> Adaptive power saving
-            </label>
-            <div style="display: grid; grid-template-columns: 1fr 72px; gap: 8px; align-items: center; margin-top: 10px;">
-                <label for="stationary-fps-setting">FPS when still</label>
-                <input id="stationary-fps-setting" type="number" min="1" max="240" step="1" />
-                <label for="stationary-delay-setting">Stillness delay (ms)</label>
-                <input id="stationary-delay-setting" type="number" min="0" max="5000" step="50" />
-                <label for="stationary-pixel-ratio-setting">Resolution when still</label>
-                <input id="stationary-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05" />
-                <label for="motion-pixel-ratio-setting">Resolution in motion</label>
-                <input id="motion-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05" />
-                <label for="fast-pixel-ratio-setting">Resolution in fast motion</label>
-                <input id="fast-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05" />
-            </div>
-            <div style="margin-top: 8px; opacity: 0.8;">1.0 is the default resolution; lower values save power. Resolution changes blend smoothly.</div>
-            <div id="adaptive-quality-status" style="margin-top: 8px;"></div>
+            <h1>Settings</h1>
+            <h2>Weather</h2>
+            <label>Weather <select id="weather-preview"><option value="auto">Automatic</option></select></label>
+            <div id="weather-preview-status" class="note"></div>
+            <h2>Cloud detail</h2>
+            <label>Detail level <select id="detail-preset"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="custom" disabled>Custom</option></select></label>
+            <div class="note">Presets set cloud rendering and the options below. Changes are applied immediately.</div>
+            <label>God rays <input type="checkbox" data-feature="godRays"></label>
+            <label>Mountain clouds <input type="checkbox" data-feature="mountainClouds"></label>
+            <label>Ground mist <input type="checkbox" data-feature="localMist"></label>
+            <label>Cloud reprojection <input type="checkbox" data-feature="conventionalTemporal"></label>
+            <label>Motion threshold (px) <input type="number" id="cloud-motion" min="0" max="100" step="0.1"></label>
+            <div class="note">Low uses cirrus only. Enabling a volumetric effect switches to a custom medium tier.</div>
+            <h2>On-screen display</h2>
+            <label>Detail level <input type="checkbox" data-display="detail" checked></label>
+            <label>FPS <input type="checkbox" data-display="fps" checked></label>
+            <label>Weather <input type="checkbox" data-display="weather" checked></label>
+            <h2>Performance</h2>
+            <label>Active FPS cap <select id="max-fps-setting"><option value="0">Unlimited</option><option value="30">30 FPS</option><option value="60">60 FPS</option><option value="90">90 FPS</option><option value="120">120 FPS</option></select></label>
+            <label>Adaptive power saving <input id="adaptive-quality-enabled" type="checkbox"></label>
+            <label>FPS when still <input id="stationary-fps-setting" type="number" min="1" max="240" step="1"></label>
+            <label>Stillness delay (ms) <input id="stationary-delay-setting" type="number" min="0" max="5000" step="50"></label>
+            <label>Resolution when still <input id="stationary-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05"></label>
+            <label>Resolution in motion <input id="motion-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05"></label>
+            <label>Resolution in fast motion <input id="fast-pixel-ratio-setting" type="number" min="0.25" max="2" step="0.05"></label>
+            <div id="adaptive-quality-status" class="note"></div>
+            <h2>Advanced</h2><button id="debug-toggle-btn" type="button">Debug controls</button>
         `;
+        this.uiElement.appendChild(settings);
+        this._debugToggleButton = settings.querySelector('#debug-toggle-btn');
+        const toggle = this.uiElement.querySelector('#settings-toggle');
+        toggle.addEventListener('click', () => {
+            settings.hidden = !settings.hidden;
+            toggle.textContent = settings.hidden ? 'Settings' : 'Hide settings';
+            toggle.setAttribute('aria-expanded', String(!settings.hidden));
+            if (settings.hidden && this.debugControls) this.debugControls.style.display = 'none';
+        });
+        settings.addEventListener('keydown', event => event.stopPropagation());
         const weather = this.engine.renderer?.weatherController;
         const weatherSelect = settings.querySelector('#weather-preview');
         this._weatherPreviewStatus = settings.querySelector('#weather-preview-status');
@@ -213,42 +180,77 @@ export class GameUI {
         }
         weatherSelect.value = weather?.getWeatherPreview().selected ?? 'auto';
         weatherSelect.addEventListener('change', () => weather?.setWeatherPreview(weatherSelect.value));
-        weatherSelect.addEventListener('keydown', event => event.stopPropagation());
-        const fpsSelect = settings.querySelector('#max-fps-setting');
-        const maxFps = this.engine.engineConfig.rendering.maxFps;
-        if (![...fpsSelect.options].some(option => Number(option.value) === maxFps)) {
-            const option = document.createElement('option');
-            option.value = String(maxFps);
-            option.textContent = `${maxFps} FPS`;
-            fpsSelect.appendChild(option);
-        }
-        fpsSelect.value = String(maxFps);
-        fpsSelect.addEventListener('change', () => {
-            this.engine.engineConfig.rendering.maxFps = Number(fpsSelect.value);
+        const clouds = this.engine.renderer?.volumetricClouds;
+        const preset = settings.querySelector('#detail-preset');
+        const features = [...settings.querySelectorAll('[data-feature]')];
+        const motion = settings.querySelector('#cloud-motion');
+        const presets = {
+            low: { cloudDetail:'low', godRays:false, mountainClouds:false, localMist:false, conventionalTemporal:false, motionThresholdPx:1.5 },
+            medium: { cloudDetail:'medium', godRays:true, mountainClouds:true, localMist:true, conventionalTemporal:true, motionThresholdPx:1.5 },
+            high: { cloudDetail:'high', godRays:true, mountainClouds:true, localMist:true, conventionalTemporal:true, motionThresholdPx:1.5 },
+        };
+        const sync = () => {
+            if (!clouds) return;
+            const s = clouds.settings;
+            for (const input of features) input.checked = !!s[input.dataset.feature];
+            motion.value = String(s.motionThresholdPx);
+            preset.value = clouds.enabled && s.cloudBudgetMode === 'neural'
+                ? Object.keys(presets).find(key => Object.entries(presets[key]).every(([k,v]) => s[k] === v)) ?? 'custom'
+                : 'custom';
+            this._detailLabel = preset.value;
+        };
+        preset.disabled = !clouds;
+        for (const input of [...features, motion]) input.disabled = !clouds;
+        preset.addEventListener('change', () => {
+            if (!clouds || !presets[preset.value]) return;
+            Object.assign(clouds.settings, presets[preset.value], { cloudBudgetMode:'neural' });
+            clouds.enabled = true;
+            clouds.resetHistory();
+            sync();
         });
+        for (const input of features) input.addEventListener('change', () => {
+            const s = clouds.settings;
+            s.cloudBudgetMode = 'neural';
+            if (s.cloudDetail === 'low' && input.checked) s.cloudDetail = 'medium';
+            s[input.dataset.feature] = input.checked;
+            clouds.enabled = true;
+            clouds.resetHistory();
+            sync();
+        });
+        motion.addEventListener('change', () => {
+            if (!motion.checkValidity()) { sync(); return; }
+            clouds.settings.motionThresholdPx = motion.valueAsNumber;
+            clouds.resetHistory();
+            sync();
+        });
+        this._syncDetailSettings = () => { if (!settings.contains(document.activeElement)) sync(); };
+        sync();
+        for (const input of settings.querySelectorAll('[data-display]')) input.addEventListener('change', () => {
+            this._hudContent.querySelector(`[data-hud="${input.dataset.display}"]`).hidden = !input.checked;
+        });
+        const fpsSelect = settings.querySelector('#max-fps-setting');
         const rendering = this.engine.engineConfig.rendering;
+        if (![...fpsSelect.options].some(option => Number(option.value) === rendering.maxFps)) {
+            fpsSelect.add(new Option(`${rendering.maxFps} FPS`, String(rendering.maxFps)));
+        }
+        fpsSelect.value = String(rendering.maxFps);
+        fpsSelect.addEventListener('change', () => { rendering.maxFps = Number(fpsSelect.value); });
         const enabled = settings.querySelector('#adaptive-quality-enabled');
         enabled.checked = rendering.adaptive.enabled;
         enabled.addEventListener('change', () => { rendering.adaptive.enabled = enabled.checked; });
         for (const [id, key] of [
-            ['stationary-fps-setting', 'stationaryFps'],
-            ['stationary-delay-setting', 'stationaryDelayMs'],
-            ['stationary-pixel-ratio-setting', 'stationaryPixelRatio'],
-            ['motion-pixel-ratio-setting', 'motionPixelRatio'],
+            ['stationary-fps-setting', 'stationaryFps'], ['stationary-delay-setting', 'stationaryDelayMs'],
+            ['stationary-pixel-ratio-setting', 'stationaryPixelRatio'], ['motion-pixel-ratio-setting', 'motionPixelRatio'],
             ['fast-pixel-ratio-setting', 'fastMotionPixelRatio'],
         ]) {
             const input = settings.querySelector(`#${id}`);
             input.value = String(rendering.adaptive[key]);
             input.addEventListener('change', () => {
-                if (input.checkValidity()) {
-                    rendering.adaptive = createAdaptiveQualityConfig({ ...rendering.adaptive, [key]: input.valueAsNumber });
-                } else {
-                    input.value = String(rendering.adaptive[key]);
-                }
+                if (input.checkValidity()) rendering.adaptive = createAdaptiveQualityConfig({ ...rendering.adaptive, [key]: input.valueAsNumber });
+                else input.value = String(rendering.adaptive[key]);
             });
         }
         this._adaptiveQualityStatus = settings.querySelector('#adaptive-quality-status');
-        this.uiElement.insertBefore(settings, this._hudContent);
     }
 
     /**
@@ -282,7 +284,7 @@ export class GameUI {
         const debugControls = document.createElement('div');
         debugControls.id = 'debug-controls';
         debugControls.style.cssText = `
-        display: block;
+        display: none;
         pointer-events: auto;
         color: white;
         font-family: Georgia, "Times New Roman", serif;
@@ -305,7 +307,7 @@ export class GameUI {
         scrollbar-gutter: stable;
     `;
         debugControls.innerHTML = this._getDebugControlsHTML();
-        this.uiElement?.appendChild(debugControls);
+        this.uiElement?.querySelector('#game-settings')?.appendChild(debugControls);
         this.debugControls = debugControls;
 
         this._debugToggleButton?.addEventListener('click', () => {
@@ -541,7 +543,7 @@ export class GameUI {
      *   QuadtreeTileManager.getPerfHudSnapshot(), or null before the first tick
      * @param {Object|null} params.camera - { position, target, up } of the view camera
      */
-    update({ fps, cameraMode, shipState, zoneInfo, playerStatus, perfHud, camera }) {
+    update({ fps }) {
         const weather = this.engine?.renderer?.weatherController;
         if (this._weatherPreviewStatus && weather?.config.enabled) {
             const { target, progress } = weather.getWeatherPreview();
@@ -556,18 +558,12 @@ export class GameUI {
             this._adaptiveQualityStatus.textContent = `${quality.mode} · ${cap} · resolution ${quality.pixelRatio.toFixed(2)}`;
         }
         if (!this._hudContent) return;
+        this._syncDetailSettings?.();
 
-        const fpsInfo = this._buildFPSInfo(fps);
-        const vitalsInfo = this._buildVitalsInfo(playerStatus);
-        const controlsInfo = this._buildControlsInfo(cameraMode);
-        const modeInfo = cameraMode === 'character'
-            ? this._buildCharacterInfo(playerStatus)
-            : this._buildFlightInfo(shipState);
-        const altitudeInfo = this._buildAltitudeInfo(zoneInfo);
-        const cameraInfo = this._buildCameraInfo(camera);
-        const perfInfo = this._buildPerfInfo(perfHud);
-
-        this._hudContent.innerHTML = fpsInfo + vitalsInfo + controlsInfo + modeInfo + altitudeInfo + cameraInfo + perfInfo;
+        this._hudContent.querySelector('[data-hud="detail"]').textContent = this._detailLabel ? this._detailLabel.toUpperCase() : 'CUSTOM';
+        this._hudContent.querySelector('[data-hud="fps"]').textContent = `${Number(fps || 0).toFixed(0)} FPS`;
+        const target = weather?.getWeatherPreview().target;
+        this._hudContent.querySelector('[data-hud="weather"]').textContent = weather?.effects[target]?.label ?? target ?? 'Weather unavailable';
     }
 
     // The view camera's pose, so a screenshot gives the exact view back
@@ -1118,7 +1114,7 @@ export class GameUI {
 
         tryBind();
 
-        this.uiElement?.appendChild(panel);
+        this.debugControls?.appendChild(panel);
         this._postProcessPanel = panel;
     }
 
@@ -1129,6 +1125,9 @@ export class GameUI {
             this.uiElement.remove();
             this.uiElement = null;
         }
+        this._uiStyle?.remove();
+        this._uiStyle = null;
+        this._syncDetailSettings = null;
         this._hudContent = null;
         this._adaptiveQualityStatus = null;
         this._weatherPreviewStatus = null;
