@@ -1,5 +1,7 @@
 // @ts-nocheck
-import { CLOUD_LAND_GROUND_WGSL, CLOUD_LAND_RELIEF_WGSL, CLOUD_LAND_SLOPES_WGSL, buildLandMapShader } from './shaders/cloudLandMap.wgsl.js';
+import {
+    CLOUD_LAND_GROUND_WGSL, CLOUD_LAND_RELIEF_WGSL, CLOUD_LAND_SHADE_WGSL, CLOUD_LAND_SLOPES_WGSL, buildLandMapShader,
+} from './shaders/cloudLandMap.wgsl.js';
 
 /** Wide and middle: mountains that can carry fog, far and near. Near: the ground itself, wetland and forest. */
 const MAPS = Object.freeze({
@@ -8,6 +10,10 @@ const MAPS = Object.freeze({
     near: Object.freeze({ extentKm: 3.2, size: 256, refreshFrames: 60 }),
 });
 const FRAME_FLOATS = 16;
+/** Texels across the map of the land's shadow, over the wide map's extent. */
+export const SHADE_SIZE = 128;
+/** The land's shadow is made anew when the sun has moved this far (rad). */
+const SHADE_TURN = 0.001;
 const MAX_TILES = 4096;
 /** Bytes per tile for the GPU: layer, face, depth, x, y and the part of the map it may cover. */
 const TILE_WORDS = 8;
@@ -25,8 +31,10 @@ const faceDirection = (face, u, v) => {
  * Refreshed now and then: when the camera has moved a tenth of a map, and while tiles load.
  */
 export class CloudLandMap {
-    constructor(device, { tileCategories = [] } = {}) {
+    /** shade: texture view (rgba16float) for the land's shadow. */
+    constructor(device, { tileCategories = [], shade } = {}) {
         this.device = device;
+        this._shadeView = shade;
         const named = name => tileCategories.filter(c => c?.name === name).flatMap(c => c.ranges ?? []);
         this._categories = { wet: [...named('SWAMP'), ...named('MUD')], forest: named('FOREST') };
         this.maps = {};
@@ -77,6 +85,8 @@ export class CloudLandMap {
                 frame: buffer(`${name} frame`, FRAME_FLOATS * 4, GPUBufferUsage.UNIFORM), age: Infinity, anchor: null, version: 0,
             };
         }
+        this._shadePipeline = await compute('clouds land shade', CLOUD_LAND_SHADE_WGSL, layout([uniform, float, store, linear]));
+        this._shadeFrame = buffer('shade frame', (FRAME_FLOATS + 4) * 4, GPUBufferUsage.UNIFORM);
         const { wide, middle, near } = this.maps;
         this._reliefTexture = texture('relief', MAPS.wide.size);
         /** Peaks and surroundings, on the wide map. */
@@ -86,6 +96,7 @@ export class CloudLandMap {
             bindGroup: device.createBindGroup({ layout: groupLayout, entries: resources.map((resource, binding) => ({ binding, resource })) }),
         });
         const frame = entry => ({ buffer: entry.frame });
+        this._shadeStep = step(this._shadePipeline, SHADE_SIZE, [{ buffer: this._shadeFrame }, wide.rawView, this._shadeView, this._sampler]);
         near.steps = [step(this._groundPipeline, near.spec.size, [frame(near), near.rawView, near.view])];
         // The relief is the wide map's: a middle map does not reach far enough to tell a mountain from a hill.
         wide.steps = [step(this._reliefPipeline, wide.spec.size, [frame(wide), wide.rawView, this.reliefView])];
@@ -135,6 +146,44 @@ export class CloudLandMap {
         return false;
     }
 
+    /**
+     * Where the land's shadow (CLOUD_LAND_SHADE_WGSL) lies, as the last three vectors of CloudUniforms: axis and extent, axis
+     * and radius of the stored zero, middle and planet radius. null before there is a map. encodeShade() then draws it.
+     */
+    nextShade(sun) {
+        const { wide } = this.maps;
+        if (!this.ready || !wide.version) return null;
+        const last = this._shade;
+        if (!last || last.version !== wide.version || Math.hypot(...sun.map((x, i) => x - last.sun[i])) > SHADE_TURN) {
+            const { e1, e2, up, zeroKm, spec } = wide;
+            const radius = Math.hypot(...wide.anchor);
+            this._shade = {
+                version: wide.version, sun: [...sun], due: true,
+                frame: [...e1, spec.extentKm, ...e2, radius + zeroKm, ...up, radius],
+            };
+            this.device.queue.writeBuffer(this._shadeFrame, 0,
+                new Float32Array([...e1, spec.extentKm, ...e2, zeroKm, ...up, radius, 0, 0, 0, 0, ...sun, 0]));
+        }
+        return this._shade.frame;
+    }
+
+    /** Before anything reads the land's shadow, and before update() moves the map it is made from. */
+    encodeShade(encoder) {
+        if (!this._shade?.due) return;
+        this._shade.due = false;
+        this._run(encoder, 'clouds land shade', [this._shadeStep]);
+    }
+
+    _run(encoder, label, steps) {
+        const pass = encoder.beginComputePass({ label });
+        for (const { pipeline, bindGroup, groups } of steps) {
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.dispatchWorkgroups(groups, groups);
+        }
+        pass.end();
+    }
+
     // Moves a map by whole texels and without turning it, so that the same places keep the same texels: a map sampled in
     // other places comes out a little different, and what lies on it would jump.
     _place(entry, up, moved, radius) {
@@ -166,13 +215,7 @@ export class CloudLandMap {
         }));
         render.draw(6, count);
         render.end();
-        const pass = encoder.beginComputePass({ label: 'clouds land filter' });
-        for (const { pipeline, bindGroup, groups } of entry.steps) {
-            pass.setPipeline(pipeline);
-            pass.setBindGroup(0, bindGroup);
-            pass.dispatchWorkgroups(groups, groups);
-        }
-        pass.end();
+        this._run(encoder, 'clouds land filter', entry.steps);
     }
 
     // The loaded tiles that may touch the map, coarse ones first, so that finer ones are drawn over them.
@@ -224,5 +267,6 @@ export class CloudLandMap {
         for (const { raw, map, frame } of Object.values(this.maps)) for (const r of [raw, map, frame]) r.destroy();
         this._reliefTexture?.destroy();
         this._tiles?.destroy();
+        this._shadeFrame?.destroy();
     }
 }

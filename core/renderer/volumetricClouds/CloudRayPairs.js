@@ -65,7 +65,7 @@ export class CloudRayPairs {
         packed.splice(8, 2, ...this.views);
         const list = { buffer: this.list };
         const perBank = (layout, inputs, ...extra) => banks.map((bank, i) =>
-            this.host._group(layout, [...inputs, bank.view, banks[1 - i].view, lookup, ...extra]));
+            this.host._group(layout, [...inputs, bank.view, banks[1 - i].view, lookup, this.host.landShadeView, ...extra]));
         groups = {
             check: perBank('raymarch', packed),
             list: perBank('raymarchList', resources, list),

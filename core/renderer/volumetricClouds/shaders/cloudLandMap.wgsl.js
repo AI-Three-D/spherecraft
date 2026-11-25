@@ -1,3 +1,19 @@
+// Requires: u, landShade, linearSampler.
+export const CLOUD_LAND_SHADE_LOOKUP_WGSL = /* wgsl */`
+// The sun's share that the land leaves at a place: 0 in the shadow of a mountain (CLOUD_LAND_SHADE_WGSL).
+fn sunOverLand(p: vec3f, radius: f32) -> f32 {
+    if (u.landE1.w <= 0.0) { return 1.0; }
+    let q = p * (u.landUp.w / max(dot(p, u.landUp.xyz), 1.0e-3));
+    let at = vec2f(dot(q, u.landE1.xyz), dot(q, u.landE2.xyz)) / u.landE1.w;
+    let edge = max(abs(at.x), abs(at.y));
+    if (edge >= 0.5) { return 1.0; }
+    let shade = textureSampleLevel(landShade, linearSampler, at + 0.5, 0.0).xy;
+    // The edge softens with the distance to what casts it. Never on what stands above the land.
+    let lit = smoothstep(-0.15 - 0.03 * shade.y, 0.0, radius - u.landE2.w - shade.x);
+    return mix(lit, 1.0, smoothstep(0.42, 0.5, edge));
+}
+`;
+
 /** A map of the land around the camera: tangent plane at an anchor, gnomonic, so a point maps by its direction alone. */
 export const LAND_FRAME_WGSL = /* wgsl */`
 struct LandFrame {
@@ -160,6 +176,41 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         ring += at(p + vec2i(round(vec2f(cos(angle), sin(angle)) * (8.0 + 8.0 * f32(i & 1))))).r / 12.0;
     }
     textureStore(outMap, p, vec4f(peak / peakWeight, mix(ring, mean / weight, 0.3), 0.0, 0.0));
+}
+`;
+
+// How high the land's shadow reaches: x the height below which a place cannot see the sun (as stored, from the frame's zero),
+// y how far off the land is that hides it. Not from the land right there, whose height is too coarse to stand beside.
+export const CLOUD_LAND_SHADE_WGSL = /* wgsl */`${LAND_FRAME_WGSL}
+struct ShadeFrame {
+    wide: LandFrame,
+    sun: vec4f,
+}
+@group(0) @binding(0) var<uniform> frame: ShadeFrame;
+@group(0) @binding(1) var raw: texture_2d<f32>;
+@group(0) @binding(2) var outShade: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var linearSampler: sampler;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    let up = landDirection(frame.wide, (vec2f(id.xy) + 0.5) / vec2f(textureDimensions(outShade)));
+    let sine = dot(up, frame.sun.xyz);
+    let along = frame.sun.xyz - up * sine;
+    let level = max(length(along), 1.0e-3);
+    let slope = sine / level;
+    let radius = frame.wide.up.w;
+    var top = vec2f(-100.0, 0.0);
+    var d = 0.3;
+    for (var i = 0; i < 42; i++) {
+        // A ray to the sun rises with the sun's slope, and the planet falls away under it.
+        let rise = d * slope + d * d / (2.0 * radius);
+        let uv = landUv(frame.wide, up + along * (d / (level * radius)));
+        if (rise > 8.0 || any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { break; }
+        let height = textureSampleLevel(raw, linearSampler, uv, 0.0).r - rise;
+        if (height > top.x) { top = vec2f(height, d); }
+        d += max(0.45, 0.06 * d);
+    }
+    textureStore(outShade, id.xy, vec4f(top, 0.0, 0.0));
 }
 `;
 

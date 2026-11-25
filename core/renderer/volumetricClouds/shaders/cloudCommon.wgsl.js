@@ -62,10 +62,13 @@ struct CloudUniforms {
     cacheGrid: vec4f,   // xy centre of the light patch along its axes (km), w its extent (km)
     budget: vec4f,      // y march steps (the pitch widens below 64)
     deckStyle: vec4f,  // the sheet cloud: x thickness, y opacity (1 = full), z evenness (1 = no gaps), w cells
+    landE1: vec4f,     // map of the land's shadow: xyz axis, w extent (km, 0 = no map)
+    landE2: vec4f,     // xyz axis, w radius of its stored zero
+    landUp: vec4f,     // xyz direction of its middle, w planet radius
 }
 `;
 
-export const CLOUD_UNIFORM_VEC4_COUNT = 55;
+export const CLOUD_UNIFORM_VEC4_COUNT = 58;
 
 export const CLOUD_MATH_WGSL = /* wgsl */`
 const PI: f32 = 3.14159265358979;

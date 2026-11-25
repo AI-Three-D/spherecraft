@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { CLOUD_UNIFORM_VEC4_COUNT } from './shaders/cloudCommon.wgsl.js';
+import { SHADE_SIZE } from './CloudLandMap.js';
 import { CloudLocalVolumes } from './CloudLocalVolumes.js';
 import { CloudNeuralLighting } from './CloudNeuralLighting.js';
 import { CLOUD_DETAIL_TIERS, DEFAULT_CLOUD_DETAIL } from './cloudDetailTiers.js';
@@ -315,6 +316,7 @@ export class VolumetricCloudsModule {
             this._frame++;
             return;
         }
+        this._localVolumes?.land.encodeShade(encoder);
         const [width, height] = this._targetSize;
         const target = this._target;
         const orbit = this.farProxyWeight >= 0.999;
@@ -393,7 +395,7 @@ export class VolumetricCloudsModule {
         const tileStreamer = this._landSource?.tileStreamer();
         if (!tileStreamer || !(tier.fog || tier.mist)) return;
         if (!this._localVolumes) {
-            this._localVolumes = new CloudLocalVolumes(this, { tileCategories: this._landSource.tileCategories });
+            this._localVolumes = new CloudLocalVolumes(this, { tileCategories: this._landSource.tileCategories, shade: this.landShadeView });
             this._localVolumes.initialize().catch(error => console.error('Local cloud volumes are unavailable', error));
         }
         this._localVolumes.update(encoder, { tileStreamer, heightScaleKm: this._landSource.heightScaleKm });
@@ -425,7 +427,7 @@ export class VolumetricCloudsModule {
         this._localVolumes?.dispose();
         const textures = [
             this._shape, this._detail, this._weather, this._transmittance, this._cloudLight, this._ambient, this._shadow,
-            this._dummyDepth, ...this._targetTextures(), ...(this._weatherCube?.textures ?? []),
+            this._landShade, this._dummyDepth, ...this._targetTextures(), ...(this._weatherCube?.textures ?? []),
         ];
         for (const texture of textures) texture?.destroy();
         this._uniformBuffer?.destroy();
@@ -469,6 +471,9 @@ export class VolumetricCloudsModule {
         this._cloudLightView = this._cloudLight.createView();
         this._ambientView = this._ambient.createView();
         this._shadowView = this._shadow.createView();
+        this._landShade = lut('clouds land shade', SHADE_SIZE, SHADE_SIZE);
+        /** How high the land's shadow reaches (CloudLandMap.js), for the light on the low clouds. */
+        this.landShadeView = this._landShade.createView();
         this._shapeView = this._shape.createView({ dimension: '3d' });
         this._detailView = this._detail.createView({ dimension: '3d' });
         // Bound when no scene depth is set; the uniforms then tell the shader to ignore it.
@@ -496,8 +501,8 @@ export class VolumetricCloudsModule {
         const noise = [uniform, tex3d, tex3d, tex3d, sampler];
         const targets = [store('rgba16float'), store('r32float')];
         const orbit = [...noise, tex2d, tex2d, sampler, ...targets, texDepth];
-        // Last the light patches, current and previous, and where they lie.
-        const raymarch = [...noise, tex2d, pointSampler, sampler, ...targets, texDepth, tex2d, cube, cube, tex3d, tex3d, uniform];
+        // Last the light patches, current and previous, where they lie, and the land's shadow.
+        const raymarch = [...noise, tex2d, pointSampler, sampler, ...targets, texDepth, tex2d, cube, cube, tex3d, tex3d, uniform, tex2d];
         this._layouts = {
             volume: layout([store('rgba8unorm', '3d')]),
             downsample: layout([tex3d, store('rgba8unorm', '3d')]),
@@ -801,6 +806,9 @@ export class VolumetricCloudsModule {
         if (dot(sun, cross(e1, e2)) < 0.0199) this.shadowFade = 0;
         if (tier.cirrusOnly || (presence <= 0.001 && (weather?.low ?? 0) <= 0.001)) this.shadowFade = 0;
         const weatherStyle = [presence, weather?.deck ?? 0, weather?.rainShade ?? 0, weather?.low ?? 0];
+        // While hills can hide the sun.
+        const sunHeight = dot(sun, normalize(cam.pos));
+        const landShade = sunHeight > -0.2 && sunHeight < 0.75 ? this._localVolumes?.land.nextShade(sun) : null;
         const deckStyle = [weather?.thickness ?? 1, weather?.opacity ?? 1, weather?.evenness ?? 0, weather?.cells ?? 0];
         // Only the shadow plane, sun, and base density field affect this texture. Reuse it
         // when the camera, moon, exposure, or reconstruction are the only things changing.
@@ -887,7 +895,7 @@ export class VolumetricCloudsModule {
             0, this._crossfade ? 1 : 0, 0, 0,
         ]);
         this._updateHistory(!tier.cirrusOnly && s.reprojection === true && this.farProxyWeight <= 0.001, cam, [...weatherStyle, ...deckStyle]);
-        data.set([0, marchSteps, 0, 0, ...deckStyle], 53 * 4);
+        data.set([0, marchSteps, 0, 0, ...deckStyle, ...(landShade ?? Array(12).fill(0))], 53 * 4);
         this.device.queue.writeBuffer(this._uniformBuffer, 0, data);
         this._prev = cam;
     }

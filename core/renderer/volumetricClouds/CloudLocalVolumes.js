@@ -38,8 +38,8 @@ export class CloudLocalVolumes {
         const layout = entries => device.createBindGroupLayout({ entries: entries.map((e, binding) => ({ binding, visibility: C, ...e })) });
         const f = tex('float');
         const f3 = tex('float', '3d');
-        this._fogLayout = layout([uniform, f3, linear, linear, f, f, f, uniform, uniform, store, f, uniform, f, uniform, f3, f3]);
-        this._mistLayout = layout([uniform, f3, linear, linear, f, f, f, uniform, uniform, store]);
+        this._fogLayout = layout([uniform, f3, linear, linear, f, f, f, uniform, uniform, store, f, uniform, f, uniform, f3, f3, f]);
+        this._mistLayout = layout([uniform, f3, linear, linear, f, f, f, uniform, uniform, store, f]);
         this._fogModule = device.createShaderModule({ label: 'clouds mountain fog', code: CLOUD_MOUNTAIN_FOG_WGSL });
         this._mistModule = device.createShaderModule({ label: 'clouds local mist', code: CLOUD_LOCAL_MIST_WGSL });
         this.uniformBuffer = device.createBuffer({
@@ -161,6 +161,7 @@ export class CloudLocalVolumes {
         this._fill(encoder, 'mountain fog', pipeline, this._fogLayout, grid, [
             u, shape, noiseSampler, host._linearSampler, host._cloudLightView, host._shadowView, wide.view, { buffer: wide.frame },
             { buffer: this.uniformBuffer }, view, middle.view, { buffer: middle.frame }, this.land.reliefView, { buffer: compositeBuffer }, ...haze,
+            host.landShadeView,
         ], gpuTimer);
         return view;
     }
@@ -177,7 +178,7 @@ export class CloudLocalVolumes {
         const [u, shape, , , noiseSampler] = host._noiseResources;
         this._fill(encoder, 'local mist', pipeline, this._mistLayout, grid, [
             u, shape, noiseSampler, host._linearSampler, host._cloudLightView, host._shadowView, near.view, { buffer: near.frame },
-            { buffer: this.uniformBuffer }, view,
+            { buffer: this.uniformBuffer }, view, host.landShadeView,
         ], gpuTimer);
         return view;
     }

@@ -3,6 +3,7 @@ import {
     CLOUD_SHADOW_LOOKUP_WGSL, CLOUD_UNIFORMS_WGSL, buildCloudRayInput,
 } from './cloudCommon.wgsl.js';
 import { CLOUD_DENSITY_CLOSURE_WGSL } from '../neural/densityClosure.js';
+import { CLOUD_LAND_SHADE_LOOKUP_WGSL } from './cloudLandMap.wgsl.js';
 import { CLOUD_RAY_PAIR_ENTRIES_WGSL } from './cloudRayPairs.wgsl.js';
 import {
     CLOUD_NEURAL_LIGHT_LOOKUP_WGSL, CLOUD_TOP_WGSL, CLOUD_VIEW_FIELDS_WGSL, CLOUD_WEATHER_ATLAS_LOOKUP_WGSL,
@@ -34,7 +35,8 @@ ${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}${CLOUD_ATMOSPHERE_WGSL}${CLOUD_LAYER_BL
 @group(0) @binding(11) var shadowMap: texture_2d<f32>;
 @group(0) @binding(12) var weatherField: texture_cube<f32>;
 @group(0) @binding(13) var weatherShift: texture_cube<f32>;
-${CLOUD_DENSITY_WGSL}${buildCloudRayInput(true)}${CLOUD_SHADOW_LOOKUP_WGSL}
+@group(0) @binding(17) var landShade: texture_2d<f32>;
+${CLOUD_DENSITY_WGSL}${buildCloudRayInput(true)}${CLOUD_SHADOW_LOOKUP_WGSL}${CLOUD_LAND_SHADE_LOOKUP_WGSL}
 ${CLOUD_VIEW_FIELDS_WGSL}${CLOUD_WEATHER_ATLAS_LOOKUP_WGSL}${CLOUD_DENSITY_CLOSURE_WGSL}${CLOUD_NEURAL_LIGHT_LOOKUP_WGSL}
 // Coarser sampling for the lower detail tiers (cloudDetailTiers.js): spacing of the samples within 22 km in broken weather
 // and in decks, and beyond 22 km; the first distance band that broken weather widens further; the width of the density
@@ -149,7 +151,9 @@ fn sourceAt(p: vec3f, rd: vec3f, footprint: f32, opacity: f32, low: bool) -> Clo
         let bounceLow = exp(-2.442 - 0.510 * L - 0.049 * m + 0.423 * hLow);
         let skyLow = min(1.0, exp(0.164 - 0.523 * L - 1.227 * m + 0.705 * hLow));
         let directLow = min(1.0, exp(-0.827 - 0.959 * L + 0.331 * m + 1.726 * hLow));
-        return CloudLight(sun * (directLow * scattering * rain), sun * (bounceLow / albedo * rain),
+        // In the shadow of a mountain little but the light of the sky is left.
+        let open = sunOverLand(p, radius);
+        return CloudLight(sun * (directLow * scattering * rain * open), sun * (bounceLow / albedo * rain * mix(0.15, 1.0, open)),
             (baseAmbient + vec3f(0.61, 0.75, 1.0) * (u.look5.z * u.sun.w * smoothstep(-0.25, 0.35, mu) * skyLow / albedo)) * rain);
     }
     let daylight = vec3f(0.61, 0.75, 1.0) * (u.look5.z * u.sun.w * smoothstep(-0.25, 0.35, mu));

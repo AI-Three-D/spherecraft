@@ -224,7 +224,7 @@ export class CloudNeuralLighting {
         let groups = this.groups.get(base);
         if (!groups) {
             groups = this.banks.map((bank, index) => this.host._group('raymarch', [
-                ...resources, bank.view, this.banks[1 - index].view, this.lookup,
+                ...resources, bank.view, this.banks[1 - index].view, this.lookup, this.host.landShadeView,
             ]));
             this.groups.set(base, groups);
         }

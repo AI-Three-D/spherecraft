@@ -3,7 +3,7 @@ import {
 } from './cloudCommon.wgsl.js';
 import { CLOUD_HAZE_LOOKUP_WGSL, CLOUD_HAZE_STRUCT_WGSL } from './cloudCompositeParts.wgsl.js';
 import { CLOUD_COMPOSITE_UNIFORMS_WGSL } from './cloudCompositeUniforms.wgsl.js';
-import { LAND_FRAME_WGSL } from './cloudLandMap.wgsl.js';
+import { CLOUD_LAND_SHADE_LOOKUP_WGSL, LAND_FRAME_WGSL } from './cloudLandMap.wgsl.js';
 
 export const LOCAL_VOLUME_UNIFORMS_WGSL = /* wgsl */`
 struct LocalVolumes {
@@ -17,13 +17,13 @@ struct LocalVolumes {
 `;
 
 const LAND_LOOKUP_WGSL = /* wgsl */`
-// Sunlight below the clouds. The shadow map is gone with the sun at the horizon, where the strength of the deck stands in:
+// Sunlight below the clouds and over the land. The shadow map is gone with the sun at the horizon, where the strength of the deck stands in:
 // without it the fog shone under a dark sky at dusk.
 fn sunlightAt(p: vec3f, r: f32) -> vec3f {
     let mu = dot(p / r, u.sun.xyz);
     let light = sunTransmittance(cloudLightLut, linearSampler, r, mu, u.planet.x, u.planet.w) * u.sun.w;
     let under = mix(1.0, 0.1, deckCover());
-    return light * (mix(under, cloudShadowAt(p, 1.0), smoothstep(0.06, 0.16, mu)) * smoothstep(-0.06, 0.08, mu));
+    return light * (mix(under, cloudShadowAt(p, 1.0), smoothstep(0.06, 0.16, mu)) * smoothstep(-0.06, 0.08, mu) * sunOverLand(p, r));
 }
 
 fn deckCover() -> f32 {
@@ -85,7 +85,8 @@ ${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}${CLOUD_ATMOSPHERE_WGSL}${LAND_FRAME_WGS
 @group(0) @binding(13) var<uniform> cu: CompositeUniforms;
 @group(0) @binding(14) var hazeRadiance: texture_3d<f32>;
 @group(0) @binding(15) var hazeTransmittance: texture_3d<f32>;
-${CLOUD_SHADOW_LOOKUP_WGSL}${LAND_LOOKUP_WGSL}${NOISE_ROTATIONS_WGSL}${CLOUD_SHAPE_SIGNAL_WGSL}${CLOUD_HAZE_STRUCT_WGSL}${CLOUD_HAZE_LOOKUP_WGSL}
+@group(0) @binding(16) var landShade: texture_2d<f32>;
+${CLOUD_SHADOW_LOOKUP_WGSL}${CLOUD_LAND_SHADE_LOOKUP_WGSL}${LAND_LOOKUP_WGSL}${NOISE_ROTATIONS_WGSL}${CLOUD_SHAPE_SIGNAL_WGSL}${CLOUD_HAZE_STRUCT_WGSL}${CLOUD_HAZE_LOOKUP_WGSL}
 // How far away the wisps are carried along (km). Farther off they only drift.
 override FLOW_REACH: f32 = 8.0;
 
@@ -295,7 +296,8 @@ ${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}${CLOUD_ATMOSPHERE_WGSL}${LAND_FRAME_WGS
 @group(0) @binding(7) var<uniform> land: LandFrame;
 @group(0) @binding(8) var<uniform> local: LocalVolumes;
 @group(0) @binding(9) var outMist: texture_storage_3d<rgba16float, write>;
-${CLOUD_SHADOW_LOOKUP_WGSL}${LAND_LOOKUP_WGSL}
+@group(0) @binding(10) var landShade: texture_2d<f32>;
+${CLOUD_SHADOW_LOOKUP_WGSL}${CLOUD_LAND_SHADE_LOOKUP_WGSL}${LAND_LOOKUP_WGSL}
 
 // Integral of the height profile: falling off over H above the ground, and over a quarter of H below it, where the map and
 // the drawn ground may differ a little. Cells behind a hillside must not fill with mist from inside it.
