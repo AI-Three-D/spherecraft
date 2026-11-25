@@ -10,7 +10,7 @@ import { CLOUD_RAY_PAIRS_WGSL } from './shaders/cloudRayPairs.wgsl.js';
 import { CLOUD_MOUNTAIN_FOG_WGSL, CLOUD_LOCAL_MIST_WGSL } from './shaders/cloudLocalVolumes.wgsl.js';
 import { CLOUD_LAND_GROUND_WGSL, CLOUD_LAND_RELIEF_WGSL, CLOUD_LAND_SLOPES_WGSL, buildLandMapShader } from './shaders/cloudLandMap.wgsl.js';
 import { buildLeanAirShader, buildLeanCompositeShader } from './shaders/cloudLeanComposite.wgsl.js';
-import { CLOUD_RAY_MEAN_WGSL, CLOUD_RAY_VOLUME_WGSL, GOD_RAY_SIZES, buildRayTableShader } from './shaders/cloudGodRays.wgsl.js';
+import { CLOUD_RAY_VOLUME_WGSL, GOD_RAY_SIZES, buildRayFilterShader, buildRayTableShader } from './shaders/cloudGodRays.wgsl.js';
 import { CLOUD_NEURAL_LIGHT_BAKE_WGSL } from './shaders/cloudNeuralLighting.wgsl.js';
 import { buildCloudCompositeShader } from './CloudCompositePass.js';
 import { CLOUD_SOLAR_INFERENCE_WGSL, CLOUD_SOLAR_SAMPLES_WGSL } from './neural/solar.wgsl.js';
@@ -18,7 +18,7 @@ import { CLOUD_SOLAR_INFERENCE_WGSL, CLOUD_SOLAR_SAMPLES_WGSL } from './neural/s
 // WGSL check without a GPU (naga). Dispatched by VolumetricCloudsModule.js and CloudCompositePass.js.
 describe('volumetric cloud WGSL', () => {
     const composite = { CLOUD_COMPOSITE_WGSL: buildCloudCompositeShader(), CLOUD_BUDGET_COMPOSITE_WGSL: buildCloudCompositeShader(true),
-        CLOUD_GOD_RAY_COMPOSITE_WGSL: buildCloudCompositeShader(true, true), CLOUD_RAY_TABLE_WGSL: buildRayTableShader(GOD_RAY_SIZES.medium.table[0]), CLOUD_RAY_MEAN_WGSL, CLOUD_RAY_VOLUME_WGSL,
+        CLOUD_GOD_RAY_COMPOSITE_WGSL: buildCloudCompositeShader(true, true), CLOUD_RAY_TABLE_WGSL: buildRayTableShader(GOD_RAY_SIZES.medium.table[0]), CLOUD_RAY_FILTER_WGSL: buildRayFilterShader(GOD_RAY_SIZES.medium.table[1]), CLOUD_RAY_VOLUME_WGSL,
         CLOUD_LEAN_AIR_WGSL: buildLeanAirShader(), CLOUD_LEAN_AIR_RAYS_WGSL: buildLeanAirShader(true),
         CLOUD_LEAN_COMPOSITE_WGSL: buildLeanCompositeShader(true), CLOUD_LEAN_COMPOSITE_RAYS_WGSL: buildLeanCompositeShader(true, true),
         CLOUD_CIRRUS_COMPOSITE_WGSL: buildLeanCompositeShader(false),

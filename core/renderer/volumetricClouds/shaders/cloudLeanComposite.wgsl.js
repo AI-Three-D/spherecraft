@@ -140,7 +140,7 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
         let behind = lookupRays(uv, sceneKm);
         cloud = vec4f(cloud.rgb + behind.rgb * cloud.a, cloud.a * (1.0 - (1.0 - behind.a) * (1.0 - surfaceVisibility(ro, rd, sceneKm))));
         ` : ''}
-        ${clouds ? 'if (local.fog.x > 0.0) { cloud = addMountainFog(cloud, uv, sceneKm, min(sceneKm, cloudKm)); }' : ''}
+        ${clouds ? 'if (max(local.fog.x, local.drift.w) > 0.0) { cloud = addMountainFog(cloud, uv, sceneKm, min(sceneKm, cloudKm)); }' : ''}
         cloud = addMist(cloud, ro, rd, sceneKm, min(sceneKm, cloudKm));
         // The shadow darkens the surface only, after the mist has used the transmittance.
         ${clouds ? /* wgsl */`
@@ -153,7 +153,7 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
         if (shade > 0.0) { cloud.a *= mix(1.0, 1.0 - shade * (1.0 - cu.atmo2.z), surfaceVisibility(ro, rd, sceneKm)); }
         `}
     } else {
-        ${clouds ? /* wgsl */`if (local.fog.x > 0.0) { cloud = addMountainFog(cloud, uv, 1.0e30, cloudKm); }
+        ${clouds ? /* wgsl */`if (max(local.fog.x, local.drift.w) > 0.0) { cloud = addMountainFog(cloud, uv, 1.0e30, cloudKm); }
         cloud = inFront(cloud, cirrus(cirrusFar, uv));` : /* wgsl */`
         let rd = normalize(input.ray);
         // A grey sky stands in for the deck, behind the cirrus, which gives it some structure. It clears from above.

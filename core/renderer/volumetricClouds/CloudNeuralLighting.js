@@ -9,7 +9,7 @@ const PATCH_SIZE = [64, 64, 24];
 const ROWS_PER_FRAME = 8;
 const FADE_FRAMES = 12;
 const MAX_AGE = 36;
-const UNIFORM = { coverage: 12, wind: 14, lod: 26, weather: 44, cache: 50 };
+const UNIFORM = { coverage: 12, wind: 14, lod: 26, weather: 44, cache: 50, deck: 54 };
 const RAY_VARIANTS = {
     '': {}, Domes: CONVENTIONAL_DOMES_CONSTANTS, Dense: { ...CONVENTIONAL_DOMES_CONSTANTS, CONVENTIONAL_DENSE: true },
 };
@@ -130,7 +130,7 @@ export class CloudNeuralLighting {
         }
 
         const grid = cloudCacheGrid([...data.subarray(0, 3)], host.planet.radiusKm, 'transport');
-        const weatherStyle = Array.from(data.subarray(UNIFORM.weather * 4, UNIFORM.weather * 4 + 3));
+        const weatherStyle = [...data.subarray(UNIFORM.weather * 4, UNIFORM.weather * 4 + 3), ...data.subarray(UNIFORM.deck * 4, UNIFORM.deck * 4 + 4)];
         const coverage = data[UNIFORM.coverage * 4];
         const boil = data[UNIFORM.lod * 4 + 2];
         const sun = host.sunDirection;

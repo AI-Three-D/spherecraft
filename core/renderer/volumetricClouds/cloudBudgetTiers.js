@@ -1,7 +1,7 @@
 // These limits bound procedural density work per cloud ray, including in a full storm.
 export const CLOUD_BUDGET_MAX_RAYS = 768 * 480;
 const CONVENTIONAL_CLOUD_BUDGET = Object.freeze({
-    focusKm: 3, steps: 64, lowSteps: 60, weatherCubeSize: 256, maxRays: 576 * 360,
+    focusKm: 3, steps: 64, weatherCubeSize: 256, maxRays: 576 * 360,
     orbitStartKm: 40, orbitEndKm: 80, orbitSlabs: 24,
     cirrusVolume: false, conventional: true,
 });
@@ -26,7 +26,7 @@ export const CLOUD_DETAIL_TIERS = Object.freeze({
     high: Object.freeze({
         cirrusScale: 0.5,
         march: Object.freeze({ BROKEN_BAND: 3, FAR_LIGHT_FILTER: 1 }),
-        fog: Object.freeze({ amount: 1, ROLLING: true, grid: Object.freeze([144, 100, 112]) }),
+        fog: Object.freeze({ amount: 1, FLOW_REACH: 8, grid: Object.freeze([144, 100, 112]) }),
         mist: Object.freeze({ amount: 1, grid: Object.freeze([160, 90, 40]) }),
     }),
     medium: Object.freeze({
@@ -36,7 +36,7 @@ export const CLOUD_DETAIL_TIERS = Object.freeze({
             ALTO_DETAIL: false, FAR_LIGHT_FILTER: 1, DISTANT_BANKS: false,
         }),
         pairs: Object.freeze({ FILL_ALL: true }),
-        fog: Object.freeze({ amount: 0.85, ROLLING: false, grid: Object.freeze([112, 88, 84]) }),
+        fog: Object.freeze({ amount: 0.85, FLOW_REACH: 4, grid: Object.freeze([112, 88, 84]) }),
         mist: Object.freeze({ amount: 0.85, grid: Object.freeze([112, 63, 28]) }),
     }),
     low: Object.freeze({ maxRays: 64 * 36, lean: true, cirrusScale: 0.3, godRays: false, cirrusOnly: true }),

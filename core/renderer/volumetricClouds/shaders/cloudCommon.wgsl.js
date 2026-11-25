@@ -57,11 +57,12 @@ struct CloudUniforms {
     cacheU: vec4f,      // xyz horizontal cache axis
     cacheV: vec4f,      // xyz second horizontal cache axis
     cacheGrid: vec4f,   // xy origin in cache axes (km), z weather extent, w light extent
-    budget: vec4f,     // x near distance or focus (km), y step limit, z rain interpolation or low stratus steps, w tier (3 uses legacy sky)
+    budget: vec4f,     // x near distance or focus (km), y step limit, z rain interpolation, w tier (3 uses legacy sky)
+    deckStyle: vec4f,  // the sheet cloud: x thickness, y opacity (1 = full), z evenness (1 = no gaps), w cells
 }
 `;
 
-export const CLOUD_UNIFORM_VEC4_COUNT = 54;
+export const CLOUD_UNIFORM_VEC4_COUNT = 55;
 
 export const CLOUD_MATH_WGSL = /* wgsl */`
 const PI: f32 = 3.14159265358979;
@@ -710,27 +711,46 @@ fn cumulusBase(p: vec3f, h: f32, weather: Weather, footprint: f32) -> CloudBase 
 
 // Sheet clouds fill the gaps between cumulus as moist weather gathers. Their
 // nearly continuous bases lower as the layer thickens toward rain.
-fn deckHeight(h: f32, weather: Weather) -> f32 {
-    let base = mix(0.16, 0.035, u.weatherStyle.z) + 0.32 * weather.lift;
-    let depth = mix(0.24, 0.49, u.weatherStyle.z);
+fn deckDepth(weather: Weather) -> f32 {
+    // Every sheet is thinner in some regions than in others, but never thinner than the march can sample (about 1 km).
+    return max(0.12, mix(0.24, 0.49, u.weatherStyle.z) * u.deckStyle.x * mix(0.65, 1.0, weather.kind));
+}
+
+// The height fraction above the base of the sheet, for a sheet of that depth.
+fn deckHeight(h: f32, weather: Weather, depth: f32) -> f32 {
+    // Thin sheets float higher.
+    let base = mix(0.16, 0.035, u.weatherStyle.z) + 0.32 * weather.lift + 0.2 * max(0.0, 1.0 - u.deckStyle.x);
     return (h - base) / depth;
 }
 
 fn cloudBaseWithWeather(p: vec3f, h: f32, weather: Weather, footprint: f32) -> CloudBase {
     var b = cumulusBase(p, h, weather, footprint);
     if (u.weatherStyle.y <= 0.001 || weather.coverage <= 0.001) { return b; }
-    b.density *= 1.0 - 0.78 * u.weatherStyle.y;
-    let deckH = deckHeight(h, weather);
+    // An even sheet leaves no single clouds standing in it.
+    let clear = 1.0 - u.weatherStyle.y;
+    b.density *= mix(1.0 - 0.78 * u.weatherStyle.y, clear * clear, u.deckStyle.z);
+    let depth = deckDepth(weather);
+    let deckH = deckHeight(h, weather, depth);
     if (deckH <= 0.0 || deckH >= 1.0) { return b; }
     let up = normalize(p);
     let q = ROT_LARGE * ((up * u.planet.y + up * (length(p) - u.planet.y) * 0.32 + u.windShape.xyz) / 22.0)
         + weather.shift * 0.3;
     let n = textureSampleLevel(shapeTex, noiseSampler, q, max(0.0, log2(footprint * SHAPE_TEXELS / 22.0)));
     let humidity = smoothstep(0.10, 0.56, weather.coverage);
-    let core = smoothstep(mix(0.83, 0.51, humidity), mix(1.03, 0.81, humidity), shapeSignal(n));
-    let top = mix(0.48, 1.0, core);
-    let profile = smoothstep(0.0, 0.15, deckH) * (1.0 - smoothstep(top * 0.52, top, deckH));
-    let deck = core * profile * u.weatherStyle.y * mix(0.30, 0.53, u.weatherStyle.z);
+    // From broad billows to a field of cells, and from broken to without a gap.
+    let signal = mix(shapeSignal(n), 1.35 * (0.6 * n.g + 0.4 * n.b) + 0.08, u.deckStyle.w);
+    let broken = smoothstep(mix(0.83, 0.51, humidity), mix(1.03, 0.81, humidity), signal);
+    let core = mix(broken, 1.0, 0.9 * u.deckStyle.z * smoothstep(0.0, 0.5, humidity));
+    if (core <= 0.0) { return b; }
+    // Towards its gaps a cloud thins from below as well as from above, over an uneven base: an even base up to the edge drew
+    // boxes with flat floors and upright walls.
+    // A thin sheet keeps its depth: a sliver of it would slip between the samples.
+    let thick = smoothstep(0.12, 0.3, depth);
+    let ramp = mix(0.4, 0.15, thick);
+    let top = mix(mix(0.85, 0.45, thick), 1.0, smoothstep(0.0, 0.8, core));
+    let floor_ = thick * (mix(0.3, 0.0, smoothstep(0.0, 0.5, core)) + 0.2 * (0.7 - n.b) * (1.0 - 0.6 * u.deckStyle.z));
+    let profile = smoothstep(floor_, floor_ + ramp, deckH) * (1.0 - smoothstep(max(top * 0.52, floor_ + 0.1), max(top, floor_ + 0.25), deckH));
+    let deck = core * profile * u.weatherStyle.y * mix(0.30, 0.53, u.weatherStyle.z) * u.deckStyle.y;
     let total = b.density + deck;
     b.density = saturate(total);
     b.stratiform = deck / max(total, 1.0e-5);
@@ -747,10 +767,11 @@ fn lowStratusDensity(p: vec3f, r: f32, weather: Weather, footprint: f32) -> f32 
         + weather.shift * 0.5 + vec3f(0.2, 0.44, 0.67);
     let n = textureSampleLevel(shapeTex, noiseSampler, q, max(0.0, log2(footprint * u.lowCloud.z * SHAPE_TEXELS)));
     let humid = smoothstep(0.12, 0.51, weather.coverage + u.weatherStyle.w * 0.22);
-    let base = mix(0.05, 0.34, n.b);
-    let top = mix(0.54, 0.98, n.g) + 0.06 * (n.a - 0.64);
-    let profile = smoothstep(base, base + 0.17, h) * (1.0 - smoothstep(top - 0.25, top, h));
     let coverage = smoothstep(mix(0.95, 0.70, humid), mix(1.09, 0.89, humid), shapeSignal(n) + 0.26 * (n.a - 0.62));
+    // Thinner towards its edges, from both sides, so that it ends rounded and not as a wall.
+    let base = mix(0.05, 0.34, n.b) + 0.16 * (1.0 - coverage);
+    let top = max(base + 0.2, mix(0.48, mix(0.54, 0.98, n.g) + 0.06 * (n.a - 0.64), smoothstep(0.0, 0.8, coverage)));
+    let profile = smoothstep(base, base + 0.2, h) * (1.0 - smoothstep(top - 0.25, top, h));
     return 0.16 * coverage * profile * u.weatherStyle.w;
 }
 
@@ -776,7 +797,9 @@ fn cloudDetail(p: vec3f, b: CloudBase, footprint: f32) -> f32 {
         var wispyToBillow = select(saturate(b.h * 6.0), saturate(b.localH * 4.0), usesDomes());
         wispyToBillow *= mix(1.0, smoothstep(0.05, 0.5, b.density), u.look4.w);
         let modifier = mix(fbm, billow, wispyToBillow);
-        cut = modifier * u.density.y * mix(0.6, 1.15, b.variety) * far * mix(1.0, 0.32, b.stratiform);
+        // An even or a thin sheet has little to erode.
+        let sheet = 0.36 * min(1.0, u.deckStyle.y) * (1.0 - 0.75 * max(u.deckStyle.z, 0.8 * u.deckStyle.w));
+        cut = modifier * u.density.y * mix(0.6, 1.15, b.variety) * far * mix(1.0, sheet, b.stratiform);
     }
     let delta = b.density - cut;
     // Smooth the hard erosion threshold only within the thin edge. This leaves the

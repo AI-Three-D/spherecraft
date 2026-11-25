@@ -172,7 +172,10 @@ export class GameUI {
                     <option value="auto">Automatic</option>
                 </select>
             </label>
-            <div id="weather-preview-status" style="margin-top: 4px; opacity: 0.8;"></div>
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 4px;">
+                <span id="weather-preview-status" style="opacity: 0.8;"></span>
+                <button id="weather-next-variant" type="button" title="Another form of the same weather">Next variation</button>
+            </div>
             <label for="max-fps-setting" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px;">
                 Active FPS cap
                 <select id="max-fps-setting">
@@ -214,6 +217,10 @@ export class GameUI {
         weatherSelect.value = weather?.getWeatherPreview().selected ?? 'auto';
         weatherSelect.addEventListener('change', () => weather?.setWeatherPreview(weatherSelect.value));
         weatherSelect.addEventListener('keydown', event => event.stopPropagation());
+        const nextVariant = settings.querySelector('#weather-next-variant');
+        nextVariant.disabled = !weather?.config.enabled;
+        nextVariant.addEventListener('click', () => weather?.nextVariant(weather.config.previewTransitionSeconds));
+        nextVariant.addEventListener('keydown', event => event.stopPropagation());
         const fpsSelect = settings.querySelector('#max-fps-setting');
         const maxFps = this.engine.engineConfig.rendering.maxFps;
         if (![...fpsSelect.options].some(option => Number(option.value) === maxFps)) {
@@ -545,7 +552,8 @@ export class GameUI {
         const weather = this.engine?.renderer?.weatherController;
         if (this._weatherPreviewStatus && weather?.config.enabled) {
             const { target, progress } = weather.getWeatherPreview();
-            const label = weather.effects[target]?.label ?? target;
+            const variant = weather.variantName;
+            const label = `${weather.effects[target]?.label ?? target}${variant ? `: ${variant.toLowerCase()}` : ''}`;
             this._weatherPreviewStatus.textContent = progress < 1
                 ? `Transitioning to ${label} · ${Math.floor(progress * 100)}%`
                 : label;

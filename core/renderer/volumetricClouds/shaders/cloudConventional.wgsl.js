@@ -10,26 +10,24 @@ import {
 
 // Requires the density functions of CLOUD_DENSITY_WGSL.
 const SCUD_WGSL = /* wgsl */`
-// The low layer. In fog weather it is lowStratusDensity, small dense puffs. Where there is less of it, under a storm or rain
-// deck, those stand out as balls, so there it is scud: thin torn wisps that blend into each other, drawn out along the level.
+// The low layer: soft banks of cloud, torn at their edges and never quite opaque, like the fog on mountains. Dense puffs stood
+// out as balls. The tearing pattern drifts through the banks, so that their wisps form and dissolve.
 fn lowDensity(p: vec3f, r: f32, weather: Weather, footprint: f32) -> f32 {
     if (u.weatherStyle.w <= 0.001 || r <= u.lowCloud.x || r >= u.lowCloud.y) { return 0.0; }
-    let puffs = smoothstep(0.3, 0.7, u.weatherStyle.w);
-    if (puffs >= 1.0) { return lowStratusDensity(p, r, weather, footprint); }
     let up = p / r;
     let h = (r - u.lowCloud.x) / (u.lowCloud.y - u.lowCloud.x);
-    let q = (up * (u.lowCloud.x + (r - u.lowCloud.x) * 1.3) + u.windShape.xyz * 0.58) * u.lowCloud.z;
+    let q = (up * (u.lowCloud.x + (r - u.lowCloud.x) * 0.9) + u.windShape.xyz * 0.58) * u.lowCloud.z;
     let lod = log2(footprint * u.lowCloud.z * SHAPE_TEXELS);
-    let n = textureSampleLevel(shapeTex, noiseSampler, ROT_REGIONAL * q * 0.6 + weather.shift * 0.5 + vec3f(0.2, 0.44, 0.67), max(0.0, lod - 0.74));
-    let n2 = textureSampleLevel(shapeTex, noiseSampler, ROT_SYSTEM * (q * 1.9 + u.windShape.xyz * (0.12 * u.lowCloud.z)) + (n.gba - 0.5) * 0.5, max(0.0, lod + 0.93));
+    let n = textureSampleLevel(shapeTex, noiseSampler, ROT_REGIONAL * q + weather.shift * 0.5 + vec3f(0.2, 0.44, 0.67), max(0.0, lod));
     let humid = smoothstep(0.12, 0.51, weather.coverage + u.weatherStyle.w * 0.22);
-    let body = 0.55 * shapeSignal(n) + 0.45 * shapeSignal(n2);
-    let middle = mix(0.35, 0.62, n.g);
-    let x = (h - middle) / 0.2;
-    let coverage = smoothstep(mix(0.5, 0.28, humid), mix(1.0, 0.9, humid), body);
-    let scud = 0.06 * coverage * exp(-x * x) * smoothstep(0.0, 0.12, h) * (1.0 - smoothstep(0.88, 1.0, h)) * u.weatherStyle.w;
-    if (puffs <= 0.0) { return scud; }
-    return mix(scud, lowStratusDensity(p, r, weather, footprint), puffs);
+    let bank = smoothstep(mix(0.9, 0.68, humid), mix(1.25, 1.1, humid), shapeSignal(n));
+    if (bank <= 0.0) { return 0.0; }
+    let n2 = textureSampleLevel(shapeTex, noiseSampler,
+        ROT_SYSTEM * ((q + u.windShape.xyz * (0.25 * u.lowCloud.z) + up * (u.lod.y * u.lowCloud.z * 0.15)) * 2.9) + (n.gba - 0.5) * 0.55, max(0.0, lod + 1.54));
+    let torn = smoothstep(0.1, 0.95, bank + 1.05 * (shapeSignal(n2) - 0.6)) * smoothstep(0.0, 0.25, bank);
+    // Deeper where it is denser.
+    let x = (h - mix(0.34, 0.58, n.g)) / mix(0.17, 0.28, bank);
+    return 0.036 * torn * exp(-x * x) * smoothstep(0.0, 0.14, h) * (1.0 - smoothstep(0.86, 1.0, h)) * u.weatherStyle.w;
 }
 `;
 
@@ -272,7 +270,8 @@ fn conventionalDensity(p: vec3f, t: f32, rd: vec3f, footprint: f32, weather: Wea
                 // settings.cloudDensityClosure: thin the sample to the average of the full-detail cloud it
                 // stands for. It may only thin: where the filtered cloud is empty, a trace of average
                 // density drew ghost patches in clear sky. Near samples resolve the detail already.
-                let near = smoothstep(0.8, 3.0, t);
+                // An even sheet has no detail to lose.
+                let near = smoothstep(0.8, 3.0, t) * (1.0 - base.stratiform * u.deckStyle.z);
                 if (near > 0.0 && local > 0.0 && densityClosureOn()) {
                     local = mix(local, min(local, densityClosure(local, base.density, log2(footprint / 0.06),
                         base.localH, base.h, base.stratiform)), near);
@@ -305,59 +304,121 @@ fn densityAt(ro: vec3f, rd: vec3f, t: f32, footprint: f32, low: bool) -> f32 {
     return conventionalDensity(p, t, rd, footprint, weather);
 }
 
+// One distance stands for everything along a ray when the composite hazes it. Averaged as what the air lets through, a near
+// cloud keeps its own haze when something far off shows behind it; the plain mean turned it paler along the horizon.
+fn airReach() -> f32 {
+    return 1.0 / max(u.atmoRayleigh.y * exp(-1.5 / u.atmoRayleigh.w) + u.atmoMie.y * exp(-1.5 / u.atmoMie.z), 1.0e-3);
+}
+
+fn hazeDepth(seen: f32) -> f32 {
+    return -airReach() * log(max(seen, 1.0e-20));
+}
+
+// Far end and sample spacing (km) of each distance band of the low layer.
+fn lowBandStop(band: u32) -> f32 {
+    let stops = select(vec4f(62.0, FAR_DEPTH, FAR_DEPTH, FAR_DEPTH), vec4f(2.0, 6.0, 14.0, 30.0), band < 4u);
+    return stops[band & 3u];
+}
+
+fn lowBandPitch(band: u32) -> f32 {
+    let pitches = select(vec4f(2.0, 3.5, 3.5, 3.5), vec4f(0.18, 0.26, 0.46, 1.0), band < 4u);
+    return pitches[band & 3u];
+}
+
+// Samples on planes fixed in the world, with linear density between them, as in marchStable. Spread over the path of each ray,
+// they moved with the camera's height and jumped at the horizon, where the path suddenly doubles: both cut the clouds into discs.
 fn marchLowShell(ro: vec3f, rd: vec3f, scene: f32, ground: f32) -> MarchResult {
     var result = MarchResult(vec4f(0.0, 0.0, 0.0, 1.0), scene);
-    let radius = u.lowCloud.xy;
-    let segments = shellSegments(ro, rd, radius.x, radius.y, ground);
-    let starts = segments[0];
-    let ends = segments[1];
-    // Small puffs are about 0.3 km across. A fixed 12 samples per ray stepped over them at a slant and drew each one
-    // as a stack of discs. The spacing starts at the pitch and grows slowly, and the sample count is a fraction
-    // (the last interval is partial), so nothing pops as it changes over the picture or with the camera.
-    let path = ends - starts;
-    let entry = dot(starts, path) / max(path.x + path.y, 1.0e-4);
-    let focus = u.budget.x + 1.5 * entry;
-    let thick = smoothstep(0.1, 0.5, u.weatherStyle.w); // the faint layer in rain needs fewer samples
-    let pitch = DECK_PITCH_SCALE * (mix(0.26, 0.17, thick) + 0.002 * entry);
-    let logStarts = log(starts + focus);
-    let spans = max(vec2f(0.0), log(ends + focus) - logStarts);
-    let span = spans.x + spans.y;
-    if (span <= 0.0) { return result; }
-    let count = clamp(span * (entry + focus) / pitch, 8.0, u.budget.z * mix(0.5, 1.0, thick));
-    let knots = i32(ceil(count));
-    let step = span / count;
-    let ratio = exp(step);
-    var moment = 0.0;
-    var widthMoment = 0.0;
+    let clip = min(ground, scene);
+    let segments = shellSegments(ro, rd, u.lowCloud.x, u.lowCloud.y, clip);
+    let forward = abs(rd);
+    var axis = 0u;
+    if (forward.y > max(forward.x, forward.z)) { axis = 1u; }
+    else if (forward.z > forward.x) { axis = 2u; }
+    let axisRate = max(abs(rd[axis]), 0.40);
+    let anchor = ro[axis] * sign(rd[axis]) / axisRate;
+    // The faint layer in rain needs fewer samples.
+    let faint = mix(1.9, 1.0, smoothstep(0.1, 0.5, u.weatherStyle.w));
+    // Shaded in groups by distance (groupShares), at their own heights: one point for all of them fell into the empty air
+    // between a near and a far cloud and drew grey outlines.
+    var groupOpacity = Sum3(0.0);
+    var groupDepth = Sum3(0.0);
+    var groupHeight = Sum3(0.0);
     var transmittance = 1.0;
-    for (var leg = 0; leg < 2; leg++) {
-        let hi = min(ends[leg], scene);
-        if (hi <= starts[leg] || transmittance < 0.01) { continue; }
-        if (result.depth >= scene) { result.depth = 0.5 * (starts[leg] + hi); }
-        let cursor = select(0.0, spans.x, leg == 1);
-        let first = min(i32(floor(cursor / step)), knots - 1);
-        let finish = min(i32(ceil((cursor + max(0.0, log(hi + focus) - logStarts[leg])) / step)), knots);
-        var node = exp(logStarts[leg] + f32(first) * step - cursor);
-        for (var i = first; i < finish; i++) {
-            let edge = node * ratio;
-            let a = max(starts[leg], node - focus);
-            let b = min(hi, edge - focus);
-            let width = edge - node;
-            node = edge;
-            if (b <= a) { continue; }
-            let sampleT = 0.5 * (a + b);
-            let footprint = max(sampleT * u.march2.y, width * mix(0.42, 0.72, smoothstep(0.18, 0.92, width)));
-            let density = densityAt(ro, rd, sampleT, footprint, true);
-            if (density <= 0.0) { continue; }
-            let stepT = exp(-density * u.density.x * (b - a));
-            let weight = transmittance * (1.0 - stepT);
-            moment += weight * sampleT;
-            widthMoment += weight * width;
-            transmittance *= stepT;
-            if (transmittance < 0.01) { break; }
+    for (var leg = 0u; leg < 2u; leg++) {
+        var a = segments[0][leg];
+        let limit = segments[1][leg];
+        if (a >= limit || transmittance < 0.01) { continue; }
+        if (result.depth >= scene) { result.depth = 0.5 * (a + limit); }
+        var previousT = a;
+        var previousD = select(0.0, -1.0, a <= 0.0);
+        for (var band = 0u; band < 6u; band++) {
+            let hi = min(limit, lowBandStop(band));
+            if (a >= hi) { continue; }
+            let width = lowBandPitch(band) * DECK_PITCH_SCALE * faint / axisRate;
+            var edge = a + width * (1.0 - fract((a + anchor) / width));
+            for (var interval = 0; interval < 48; interval++) {
+                let b = min(edge, hi);
+                if (b > a) {
+                    let t = 0.5 * (a + b);
+                    let d = densityAt(ro, rd, t, max(t * u.march2.y, 0.45 * width), true);
+                    let d0 = select(previousD, d, previousD < 0.0);
+                    let depthKm = 0.5 * (d0 + d) * (t - previousT);
+                    if (depthKm > 0.0) {
+                        let weight = transmittance * (1.0 - exp(-depthKm * u.density.x));
+                        let at = mix(previousT, t, (d0 + 2.0 * d) / max(3.0 * (d0 + d), 1.0e-6));
+                        let shares = weight * groupShares(at, vec3f(groupDepth));
+                        let grown = vec3f(groupOpacity) + shares;
+                        let part = Sum3(shares / max(grown, vec3f(1.0e-9)));
+                        groupDepth += Sum3(at - vec3f(groupDepth)) * part;
+                        groupHeight += Sum3(lowHeight(ro + rd * at) - vec3f(groupHeight)) * part;
+                        groupOpacity = Sum3(grown);
+                        transmittance -= weight;
+                    }
+                    previousT = t;
+                    previousD = d;
+                }
+                a = b;
+                if (a >= hi || transmittance < 0.01) { break; }
+                edge += width;
+            }
+            if (a >= limit || transmittance < 0.01) { break; }
+        }
+        if (previousD > 0.0 && transmittance >= 0.01) {
+            // To the end of the ray: as dense as the last sample where terrain ends it, else falling to nothing.
+            let weight = transmittance * (1.0 - exp(-previousD * (limit - previousT) * select(0.5, 1.0, limit >= clip) * u.density.x));
+            let at = 0.5 * (previousT + limit);
+            let shares = weight * groupShares(at, vec3f(groupDepth));
+            let grown = vec3f(groupOpacity) + shares;
+            let part = Sum3(shares / max(grown, vec3f(1.0e-9)));
+            groupDepth += Sum3(at - vec3f(groupDepth)) * part;
+            groupHeight += Sum3(lowHeight(ro + rd * at) - vec3f(groupHeight)) * part;
+            groupOpacity = Sum3(grown);
+            transmittance -= weight;
         }
     }
-    return shadeMarch(result, ro, rd, transmittance, moment, widthMoment, 0.0, true);
+    let opacity = 1.0 - transmittance;
+    if (opacity <= 1.0e-5) { return result; }
+    var radiance = vec3f(0.0);
+    var shaded = 0.0;
+    var seen = 0.0;
+    for (var k = 0; k < 3; k++) {
+        let share = f32(groupOpacity[k]);
+        if (share <= min(0.003, opacity * 0.3)) { continue; }
+        let t = f32(groupDepth[k]);
+        let p = normalize(ro + rd * t) * mix(u.lowCloud.x, u.lowCloud.y, f32(groupHeight[k]));
+        let source = sourceAt(p, rd, max(t * u.march2.y, 0.1), 1.0, true);
+        radiance += (source.single + source.multiple + source.sky) * share;
+        seen += exp(-t / airReach()) * share;
+        shaded += share;
+    }
+    result.color = vec4f(radiance * (opacity / max(shaded, 1.0e-5) * u.density.w), transmittance);
+    result.depth = hazeDepth(seen / max(shaded, 1.0e-5));
+    return result;
+}
+
+fn lowHeight(p: vec3f) -> f32 {
+    return (length(p) - u.lowCloud.x) / (u.lowCloud.y - u.lowCloud.x);
 }
 
 fn shadeMarch(integrated: MarchResult, ro: vec3f, rd: vec3f, transmittance: f32,
@@ -400,9 +461,9 @@ fn shadeGroups(integrated: MarchResult, ro: vec3f, rd: vec3f, transmittance: f32
     var result = integrated;
     let opacity = 1.0 - transmittance;
     if (opacity <= 1.0e-5) { return result; }
-    result.depth = moment / opacity;
     var radiance = vec3f(0.0);
     var shaded = 0.0;
+    var seen = 0.0;
     for (var k = 0; k < 3; k++) {
         let share = f32(groupOpacity[k]);
         // Three groups cannot all fall below a third of a faint ray's opacity.
@@ -412,9 +473,11 @@ fn shadeGroups(integrated: MarchResult, ro: vec3f, rd: vec3f, transmittance: f32
         useGroupLight = f32(groupLit[k]) > 1.0e-5;
         let source = sourceAt(ro + rd * t, rd, max(t * u.march2.y, (0.06 + 0.012 * t) * FILTER_SCALE), 1.0, false);
         radiance += (source.single + source.multiple + source.sky) * share;
+        seen += exp(-t / airReach()) * share;
         shaded += share;
     }
     useGroupLight = false;
+    result.depth = hazeDepth(seen / max(shaded, 1.0e-5));
     result.color = vec4f(radiance * (opacity / max(shaded, 1.0e-5) * u.density.w), transmittance);
     return result;
 }
@@ -584,8 +647,16 @@ fn traceAndStore(pixel: vec2u, ray: CloudRay, texel: vec2u) {
     let intermediate = u.march4.y > 0.5;
     if (!intermediate && u.weatherStyle.w > 0.001) {
         let low = marchLowShell(ro, rd, scene, ground);
-        if (low.depth < result.depth) { result = blendCloudLayers(low, result); }
-        else { result = blendCloudLayers(result, low); }
+        // Below the main layer the low one always comes first.
+        let lowFirst = length(ro) < u.planet.y || low.depth < result.depth;
+        if (low.color.a < 0.9999) {
+            let front = select(result.color, low.color, lowFirst);
+            let back = select(low.color, result.color, lowFirst);
+            let depths = select(vec2f(result.depth, low.depth), vec2f(low.depth, result.depth), lowFirst);
+            let shares = vec2f(1.0 - front.a, front.a * (1.0 - back.a));
+            let seen = dot(shares, exp(-depths / airReach())) / max(shares.x + shares.y, 1.0e-5);
+            result = MarchResult(vec4f(front.rgb + front.a * back.rgb, front.a * back.a), hazeDepth(seen));
+        }
     }
     let depth = min(result.depth, FAR_DEPTH);
     textureStore(outColor, vec2i(texel), result.color);

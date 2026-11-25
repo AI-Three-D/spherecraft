@@ -7,6 +7,8 @@ function setup(config = {}) {
         initialWeather: 'clear',
         windChangeChancePerSecond: 0,
         weatherChangeChancePerSecond: 0,
+        variantChangeChancePerSecond: 0,
+        random: () => 0,
         previewTransitionSeconds: 10,
         rainLeadFraction: 0.32,
         cloudLayerProvider: (name) => name === 'clear'
@@ -66,6 +68,22 @@ describe('weather transitions', () => {
         weather.setWeatherPreview('auto');
         advance(2);
         expect(weather.getWeatherPreview()).toMatchObject({ selected: 'auto', target: 'storm' });
+    });
+
+    it('gives a spell of the same weather another form', () => {
+        let roll = 0;
+        const { weather, env, advance } = setup({ random: () => roll, initialWeather: 'rain' });
+        const first = { ...env.weatherEffect.clouds };
+        expect(weather.effects.rain.variants.length).toBeGreaterThan(1);
+        roll = 0.999;
+        expect(weather.nextVariant(10)).toBe(true);
+        advance(0);
+        expect(env.weatherEffect.clouds).toEqual(first);
+        advance(10);
+        const last = weather.effects.rain.variants.at(-1);
+        expect(env.weatherEffect.clouds.thickness).toBeCloseTo(last.clouds.thickness);
+        expect(env.precipitationIntensity).toBeCloseTo(last.precipitationIntensity);
+        expect(env.currentWeather).toBe('rain');
     });
 
     it('lets automatic clear weather develop scattered clouds or mist before severe weather', () => {

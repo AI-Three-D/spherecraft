@@ -1406,7 +1406,8 @@ export class VolumetricCloudsModule {
             // What drifts every frame, in kilometres of shadow movement: the sun, the wind, the boil, then weather
             // (a tenth of its range counts as a texel), and the evolution.
             this._shadowDrift = [...slope, ...this._windShape, this._boil, ...[...this.windDirection, s.coverage, presence,
-                weather?.deck ?? 0, weather?.rainShade ?? 0, weather?.low ?? 0].map(value => value * share), this._evolve];
+                weather?.deck ?? 0, weather?.rainShade ?? 0, weather?.low ?? 0,
+                weather?.thickness ?? 1, weather?.opacity ?? 1, weather?.evenness ?? 0, weather?.cells ?? 0, weather?.alto ?? 1].map(value => value * share), this._evolve];
             this._shadowInputs = JSON.stringify([
                 R, bottom, s.cloudTopKm, e1, e2, extent, s.windSkewKm,
                 s.systemTileKm, s.systemStrength, s.systemWarp, s.systemOffset,
@@ -1453,6 +1454,7 @@ export class VolumetricCloudsModule {
         const data = this._uniformData;
         const moon = normalize(this.moonDirection);
         const weatherStyle = [presence, weather?.deck ?? 0, weather?.rainShade ?? 0, weather?.low ?? 0];
+        const deckStyle = [weather?.thickness ?? 1, weather?.opacity ?? 1, weather?.evenness ?? 0, weather?.cells ?? 0];
         data.set([
             ...cam.pos, frame.time,
             ...cam.right, cam.proj[0],
@@ -1505,7 +1507,8 @@ export class VolumetricCloudsModule {
             Math.max(0, s.distantBanksStartKm),
             Math.max(s.distantBanksStartKm + 0.01, s.distantBanksEndKm),
             1 / Math.max(1, s.distantBanksTileKm),
-            Math.max(0, s.altoClouds), R + s.altoBottomKm, R + Math.max(s.altoBottomKm + 0.01, s.altoTopKm),
+            // An even sheet below hides or replaces them, and not every weather has them.
+            Math.max(0, s.altoClouds) * (weather?.alto ?? 1) * (1 - (weather?.deck ?? 0) * (weather?.evenness ?? 0)), R + s.altoBottomKm, R + Math.max(s.altoBottomKm + 0.01, s.altoTopKm),
             1 / Math.max(1, s.altoTileKm),
             ...weatherStyle,
             R + s.lowCloudBottomKm, R + Math.max(s.lowCloudBottomKm + 0.01, s.lowCloudTopKm),
@@ -1514,9 +1517,9 @@ export class VolumetricCloudsModule {
             Math.max(0.01, s.groundMistScaleKm), Math.max(0, s.groundMistExtinction),
             Math.min(1, Math.max(0, reuseBelow)), this._proxyCrossfade ? 1 : 0, stretchMode ? 1 : 0, deckMode ? 1 : 0,
         ]);
-        this._updateRayHistory(cam, prev, altitude, moon, weatherStyle);
+        this._updateRayHistory(cam, prev, altitude, moon, [...weatherStyle, ...deckStyle]);
         this._updateConventionalHistory(conventional && !budget.cirrusOnly && s.conventionalTemporal === true && this.farProxyWeight <= 0.001,
-            cam, weatherStyle);
+            cam, [...weatherStyle, ...deckStyle]);
         if (['weather', 'light', 'transport', 'layered'].includes(s.cloudCacheMode)) {
             this._cacheGrid = cloudCacheGrid(cam.pos, R, s.cloudCacheMode);
             data.set(this._cacheGrid, 50 * 4);
@@ -1525,7 +1528,7 @@ export class VolumetricCloudsModule {
             this._budgetBulkOnly = false;
             const steps = Math.max(1, Math.round(budget.steps - 2 * this.farProxyWeight * budget.orbitSlabs));
             data[49 * 4 + 3] = Math.max(0, s.conventionalSunShadowStrength);
-            data.set([budget.focusKm, steps, budget.lowSteps, (s.conventionalColumnLight === false ? 3 : 2) + conventionalPreviewFlags(s, budget) / 16], 53 * 4);
+            data.set([budget.focusKm, steps, 0, (s.conventionalColumnLight === false ? 3 : 2) + conventionalPreviewFlags(s, budget) / 16], 53 * 4);
         } else if (budget) {
             const wet = smoothstep(0.25, 0.9, weather?.deck ?? 0);
             const limit = budget.fairKm + (budget.nearKm - budget.fairKm) * wet;
@@ -1533,8 +1536,9 @@ export class VolumetricCloudsModule {
             data.set([limit, budget.nearSteps, wet, 1], 53 * 4);
         } else {
             this._budgetBulkOnly = false;
-            data.fill(0, 53 * 4);
+            data.fill(0, 53 * 4, 54 * 4);
         }
+        data.set(deckStyle, 54 * 4);
         this.device.queue.writeBuffer(this._uniformBuffer, 0, data);
         this._prev = cam;
     }

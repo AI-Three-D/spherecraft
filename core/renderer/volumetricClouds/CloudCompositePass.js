@@ -9,6 +9,7 @@ import {
 import { CLOUD_COMPOSITE_UNIFORMS_WGSL } from './shaders/cloudCompositeUniforms.wgsl.js';
 import { LOCAL_MIST_LOOKUP_WGSL, LOCAL_VOLUME_UNIFORMS_WGSL } from './shaders/cloudLocalVolumes.wgsl.js';
 import { CloudGodRays } from './CloudGodRays.js';
+import { LOCAL_VOLUME_FLOATS } from './CloudLocalVolumes.js';
 import { CloudLeanComposite } from './CloudLeanComposite.js';
 import { AERIAL_PERSPECTIVE_WGSL } from '../atmosphere/shaders/aerialPerspectiveCommon.js';
 
@@ -93,7 +94,7 @@ export class CloudCompositePass {
         });
         device.queue.writeTexture({ texture: this._noMist }, new Uint16Array([0, 0, 0, 0x3c00]), { bytesPerRow: 8 }, [1, 1, 1]);
         this._noMistView = this._noMist.createView();
-        this._noLocal = device.createBuffer({ label: 'no cloud local volumes', size: 64, usage: GPUBufferUsage.UNIFORM });
+        this._noLocal = device.createBuffer({ label: 'no cloud local volumes', size: LOCAL_VOLUME_FLOATS * 4, usage: GPUBufferUsage.UNIFORM });
         this._noCirrus = device.createTexture({ label: 'no cirrus', size: [1, 1], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING });
         this._noCirrusView = this._noCirrus.createView();
         this._renderPipeline = render;
@@ -519,7 +520,7 @@ fn fsMain(input: VsOut) -> @location(0) vec4f {
     let shadowsOn = opaque && cu.viewport.z > 0.0 && u.shadowInfo.z > 0.0;
     let mistOn = ${budget ? 'cu.mistRay.z > 0.0' : 'u.groundMist.x > 0.001 && u.groundMist.w > 0.0'};
     let localOn = ${budget ? 'local.mist.x > 0.0' : 'false'};
-    let fogOn = ${budget ? 'local.fog.x > 0.0' : 'false'};
+    let fogOn = ${budget ? 'max(local.fog.x, local.drift.w) > 0.0' : 'false'};
     // One texel stands for no cirrus, or cirrus drawn by the host.
     let cirrusOn = ${budget ? 'textureDimensions(cirrusFar).x > 1u || textureDimensions(cirrusNear).x > 1u' : 'false'};
     ${godRays ? '' : 'if (cloud.a > 0.999 && !shadowsOn && !mistOn && !localOn && !fogOn && !cirrusOn) { discard; }'}

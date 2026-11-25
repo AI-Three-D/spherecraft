@@ -1056,6 +1056,7 @@ updateLighting(starSystem) {
             const l = Math.hypot(wind.x, wind.y);
             clouds.windDirection = [wind.x / l, 0, wind.y / l];
         }
+        if (Number.isFinite(environmentState?.windSpeed)) clouds.windSpeed = environmentState.windSpeed;
         // Night light: the moon as a directional light (shaded tops and sides, like the sun by day)
         // plus the host's night-sky ambient as a faint fill.
         const lc = this.lightingController;

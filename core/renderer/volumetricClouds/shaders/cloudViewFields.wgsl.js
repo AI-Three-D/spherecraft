@@ -12,10 +12,10 @@ fn meanCloudDensity(weather: Weather, h: f32) -> f32 {
     if (h <= 0.0 || h >= 1.0 || weather.coverage <= 0.001) { return 0.0; }
     let profile = heightProfile((h - weather.lift) / (1.0 - weather.lift), weather.kind, weather.coverage);
     let c = saturate(weather.coverage * profile * 1.4);
-    let dh = deckHeight(h, weather);
+    let dh = deckHeight(h, weather, deckDepth(weather));
     let deck = smoothstep(0.0, 0.21, dh) * (1.0 - smoothstep(0.42, 0.87, dh));
     return 0.5 * c * c * mix(0.6, 1.0, weather.coverage) * u.extra.w
-        + deck * u.weatherStyle.y * weather.coverage * 0.11;
+        + deck * u.weatherStyle.y * weather.coverage * 0.11 * u.deckStyle.y;
 }
 
 fn distantBankWeight(t: f32, cameraRadius: f32) -> f32 {
@@ -50,7 +50,8 @@ fn cumulusTop() -> f32 {
     if (!usesDomes() || usesGiants() || stretchesDomes()) { return u.planet.z; }
     let smallTop = min(0.92, u.shape2.w * 1.4 * u.march3.z);
     let domeTop = mix(0.25, 1.0, smallTop);
-    let deckTop = mix(0.16, 0.035, u.weatherStyle.z) + 0.08 + mix(0.24, 0.49, u.weatherStyle.z);
+    let deckTop = mix(0.16, 0.035, u.weatherStyle.z) + 0.08 + 0.2 * max(0.0, 1.0 - u.deckStyle.x)
+        + max(0.12, mix(0.24, 0.49, u.weatherStyle.z) * u.deckStyle.x);
     return mix(u.planet.y, u.planet.z, max(domeTop, deckTop));
 }
 `;

@@ -3,13 +3,15 @@ import { CLOUD_ATMOSPHERE_WGSL, CLOUD_MATH_WGSL, CLOUD_SHADOW_LOOKUP_WGSL, CLOUD
 import { CLOUD_COMPOSITE_UNIFORMS_WGSL } from './cloudCompositeUniforms.wgsl.js';
 
 /**
- * table: distances in the shadow map by angles around the camera (distances a multiple of 16). mean: the same, averaged over
- * the directions around. volume: screen cells by slices of distance.
+ * table: distances in the shadow map by angles around the camera (distances a multiple of 16). filtered: half of both, by
+ * width of the average over the angles. volume: screen cells by slices of distance.
  */
 export const GOD_RAY_SIZES = Object.freeze({
-    high: Object.freeze({ table: [512, 512], mean: [128, 256], volume: [160, 90, 28] }),
-    medium: Object.freeze({ table: [256, 512], mean: [64, 256], volume: [112, 63, 20] }),
+    high: Object.freeze({ table: [512, 512], volume: [160, 90, 28] }),
+    medium: Object.freeze({ table: [256, 512], volume: [112, 63, 20] }),
 });
+/** Averages of the filtered table: over 2, 4, ... 64 angles of the table. */
+export const GOD_RAY_LEVELS = 6;
 /** Distance covered by the table (km in the shadow map's plane). */
 const TABLE_REACH = 110;
 
@@ -19,20 +21,6 @@ ${CLOUD_UNIFORMS_WGSL}${CLOUD_MATH_WGSL}${CLOUD_COMPOSITE_UNIFORMS_WGSL}
 @group(0) @binding(1) var<uniform> cu: CompositeUniforms;
 @group(0) @binding(4) var linearSampler: sampler;
 const REACH: f32 = ${TABLE_REACH}.0;
-
-// Lit kilometres among the first x of a direction (turns around the camera), from a table of them.
-fn litLength(table: texture_2d<f32>, x: f32, turns: f32) -> f32 {
-    let size = vec2i(textureDimensions(table));
-    let column = min(x / REACH, 1.0) * f32(size.x - 1);
-    let row = turns * f32(size.y) - 0.5;
-    let i = min(i32(column), size.x - 2);
-    let fx = column - f32(i);
-    let j = i32(floor(row));
-    let rows = (vec2i(j, j + 1) + size.y) % size.y;
-    let a = mix(textureLoad(table, vec2i(i, rows.x), 0).r, textureLoad(table, vec2i(i + 1, rows.x), 0).r, fx);
-    let b = mix(textureLoad(table, vec2i(i, rows.y), 0).r, textureLoad(table, vec2i(i + 1, rows.y), 0).r, fx);
-    return mix(a, b, row - f32(j)) + max(0.0, x - REACH);
-}
 
 // A point or direction in the shadow map's plane, seen along the sun (km).
 fn alongSun(v: vec3f) -> vec2f {
@@ -99,45 +87,91 @@ fn main(@builtin(workgroup_id) row: vec3u, @builtin(local_invocation_index) part
 `;
 }
 
+// Part 2. The table averaged over ever wider ranges of angles. Towards the sun a cell of the volume spans many angles: taken
+// at single ones, the edges of the beams came out as teeth. r: shadowed kilometres, averaged over the level's angles;
+// g: over about 20 degrees either way. What differs from that is a beam or a gap. Sums over all angles of a distance give
+// every average from two reads, whatever its width.
+export function buildRayFilterShader(rows) {
+    return /* wgsl */`
+const REACH: f32 = ${TABLE_REACH}.0;
+const ROWS: u32 = ${rows}u;
+const PARTS: u32 = 64u;
+const PART: u32 = ${rows / 64}u;
+@group(0) @binding(0) var table: texture_2d<f32>;
+@group(0) @binding(1) var outFiltered: texture_storage_3d<rgba16float, write>;
+var<workgroup> sums: array<f32, PARTS>;
+var<workgroup> before: array<f32, ${rows + 1}>;
 
-// The average over the directions around, about 20 degrees either way. What differs from it is a beam or a gap.
-export const CLOUD_RAY_MEAN_WGSL = /* wgsl */`
-${COMMON_WGSL}
-@group(0) @binding(2) var table: texture_2d<f32>;
-@group(0) @binding(3) var outMean: texture_storage_2d<r32float, write>;
+// Sum of the rows before this one. The rows go round.
+fn sumBefore(row: i32) -> f32 {
+    let n = i32(ROWS);
+    let turn = i32(floor(f32(row) / f32(n)));
+    return before[row - turn * n] + f32(turn) * before[n];
+}
 
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) id: vec3u) {
-    let size = textureDimensions(outMean);
-    if (any(id.xy >= size)) { return; }
-    let x = f32(id.x) / f32(size.x - 1u) * REACH;
-    let turns = (f32(id.y) + 0.5) / f32(size.y);
+fn average(middle: i32, half: i32) -> f32 {
+    return (sumBefore(middle + half) - sumBefore(middle - half)) / f32(2 * half);
+}
+
+@compute @workgroup_size(PARTS)
+fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_index) part: u32) {
+    let column = group.x * 2u;
+    let x = f32(column) / f32(textureDimensions(table).x - 1u) * REACH;
+    var values: array<f32, PART>;
     var sum = 0.0;
-    var weight = 0.0;
-    for (var i = -12; i <= 12; i++) {
-        let w = 1.0 - abs(f32(i)) / 13.0;
-        sum += w * litLength(table, x, fract(turns + f32(i) / 216.0 + 1.0));
-        weight += w;
+    for (var i = 0u; i < PART; i++) {
+        values[i] = x - textureLoad(table, vec2u(column, part * PART + i), 0).r;
+        sum += values[i];
     }
-    textureStore(outMean, id.xy, vec4f(sum / weight));
+    sums[part] = sum;
+    workgroupBarrier();
+    var total = 0.0;
+    for (var i = 0u; i < part; i++) { total += sums[i]; }
+    for (var i = 0u; i < PART; i++) {
+        before[part * PART + i] = total;
+        total += values[i];
+    }
+    if (part == PARTS - 1u) { before[ROWS] = total; }
+    workgroupBarrier();
+    for (var i = 0u; i < PART / 2u; i++) {
+        let row = part * (PART / 2u) + i;
+        let middle = i32(2u * row + 1u);
+        let around = 0.5 * (average(middle, ${Math.round(rows * 0.027)}) + average(middle, ${Math.round(rows * 0.047)}));
+        for (var level = 0u; level < ${GOD_RAY_LEVELS}u; level++) {
+            textureStore(outFiltered, vec3u(group.x, row, level), vec4f(average(middle, 1 << level), around, 0.0, 0.0));
+        }
+    }
 }
 `;
+}
 
-// Part 2. Light scattered towards the camera up to each slice, from the host's atmosphere (as the lit share of its haze)
+// Part 3. Light scattered towards the camera up to each slice, from the host's atmosphere (as the lit share of its haze)
 // and from a thin haze below the clouds that shows the beams.
 export const CLOUD_RAY_VOLUME_WGSL = /* wgsl */`
 ${COMMON_WGSL}${CLOUD_ATMOSPHERE_WGSL}${AERIAL_PERSPECTIVE_WGSL}
-@group(0) @binding(2) var table: texture_2d<f32>;
+@group(0) @binding(2) var filtered: texture_3d<f32>;
 @group(0) @binding(3) var outRays: texture_storage_3d<rgba16float, write>;
-@group(0) @binding(5) var meanTable: texture_2d<f32>;
+@group(0) @binding(5) var raySampler: sampler; // repeats along y
 @group(0) @binding(6) var transmittanceLut: texture_2d<f32>;
 @group(0) @binding(7) var cloudLightLut: texture_2d<f32>;
+
+fn rayOf(cell: vec2f, cells: vec2f) -> vec3f {
+    return cameraRay(cell / cells, vec2f(1.0), u.camRight, u.camUp, u.camBack, u.frameInfo.x);
+}
+
+// Lit kilometres among the first x of a direction (turns around the camera): averaged over the angles of a level, and around.
+fn litLengths(x: f32, turns: f32, level: f32) -> vec2f {
+    let size = vec3f(textureDimensions(filtered));
+    let reached = min(x, REACH * (1.0 - 0.5 / size.x));
+    let at = vec3f((reached / REACH * (size.x - 0.5) + 0.5) / size.x, turns, (level + 0.5) / size.z);
+    return x - textureSampleLevel(filtered, raySampler, at, 0.0).rg;
+}
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
     let size = textureDimensions(outRays);
     if (any(id.xy >= size.xy)) { return; }
-    let rd = cameraRay((vec2f(id.xy) + 0.5) / vec2f(size.xy), vec2f(1.0), u.camRight, u.camUp, u.camBack, u.frameInfo.x);
+    let rd = rayOf(vec2f(id.xy) + 0.5, vec2f(size.xy));
     let ro = u.camPos.xyz;
     let R = cu.atmo0.x;
     let Ra = cu.atmo0.y;
@@ -145,6 +179,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let mapped = alongSun(rd);
     let rate = length(mapped);
     let turns = fract(atan2(mapped.y, mapped.x) / (2.0 * PI));
+    // The angles that a few cells span: the darkening between the beams makes their edges steeper again.
+    let across = alongSun(rayOf(vec2f(id.xy) + vec2f(1.5, 0.5), vec2f(size.xy)));
+    let down = alongSun(rayOf(vec2f(id.xy) + vec2f(0.5, 1.5), vec2f(size.xy)));
+    let turned = vec2f(mapped.x * across.y - mapped.y * across.x, mapped.x * down.y - mapped.y * down.x);
+    let spanned = length(turned) / max(dot(mapped, mapped) * 2.0 * PI, 1.0e-9);
+    let level = log2(max(4.0 * spanned * f32(textureDimensions(filtered).y), 1.0));
+    // Next to the sun a cell spans more than the widest average: there only the light around is left.
+    let single = 1.0 - smoothstep(f32(textureDimensions(filtered).z) - 1.0, f32(textureDimensions(filtered).z), level);
     let cosSun = dot(rd, u.sun.xyz);
     let phaseR = ap_rayleighPhase(cosSun);
     let phaseM = ap_miePhase(cosSun, cu.atmo2.x);
@@ -152,8 +194,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // The beams are the difference from the light around them, so that they neither veil a fair sky nor lift a grey one.
     let gain = cu.rays.x * phaseBeam * u.sun.w;
     // Towards the sun a stretch of the ray shrinks to a point of the map, so take at least a fifth of a kilometre of it.
-    let litHere = litLength(table, 0.2, turns);
-    let meanHere = litLength(meanTable, 0.2, turns);
+    let here = litLengths(0.2, turns, level);
     var T = vec3f(1.0);
     var beamT = 1.0;
     var all = 0.0;
@@ -161,17 +202,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     var beam = vec3f(0.0);
     var weight = vec3f(0.0);
     var previous = 0.0;
-    var previousLit = 0.0;
-    var previousMean = 0.0;
+    var previousLit = vec2f(0.0);
     textureStore(outRays, vec3u(id.xy, 0u), vec4f(0.0, 0.0, 0.0, 1.0));
     for (var slice = 1u; slice < size.z; slice++) {
         let t = exp2(f32(slice) / f32(size.z - 1u) * log2(1.0 + cu.rays.z)) - 1.0;
-        let litKm = litLength(table, rate * t, turns);
-        let meanKm = litLength(meanTable, rate * t, turns);
+        let litKm = litLengths(rate * t, turns, level);
         let span = rate * (t - previous);
         let near = max(0.0, 0.2 - span) * 5.0;
-        let reached = saturate((litKm - previousLit + near * litHere) / max(span, 0.2));
-        let around = saturate((meanKm - previousMean + near * meanHere) / max(span, 0.2));
+        let shares = saturate((litKm - previousLit + near * here) / max(span, 0.2));
+        let around = shares.y;
+        let reached = mix(around, shares.x, single);
         let p = ro + rd * (0.5 * (previous + t));
         let r = length(p);
         // The map holds the whole column, so let more sunlight in towards the top of the layer.
@@ -201,7 +241,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         T *= stepT;
         previous = t;
         previousLit = litKm;
-        previousMean = meanKm;
         // Darker than average counts as haze that the sun does not reach.
         let dark = saturate(-beam.g / max(weight.g, 1.0e-9));
         let litShare = select(1.0, lit / all, all > 1.0e-9) * (1.0 - min(0.9, cu.rays2.w * dark));
