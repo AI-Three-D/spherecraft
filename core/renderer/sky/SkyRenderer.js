@@ -185,7 +185,8 @@ export class SkyRenderer {
         this._time += deltaMs * 0.001;  // Convert to seconds
         // Determine space LOD based on altitude
         const viewerAltitude = uniformManager?.uniforms?.viewerAltitude?.value ?? 0;
-        this._currentSpaceLOD = viewerAltitude > this._spaceLODThreshold ? 1 : 0;
+        // Fades in, so the extra stars do not pop on while climbing
+        this._currentSpaceLOD = Math.min(1, Math.max(0, 2 * (viewerAltitude / this._spaceLODThreshold - 1)));
 
         this._renderSky(camera, atmosphereSettings, sunDir, uniformManager, sunDiskFade);
     }
@@ -243,7 +244,7 @@ export class SkyRenderer {
         u[22] = hasLUT ? 1.0 : 0.0;
         u[23] = sunDiskFade;
         u[24] = this._time;  // Time uniform
-        u[25] = this._currentSpaceLOD;  // Space LOD (0 = ground, 1 = space)
+        u[25] = this._currentSpaceLOD;  // Space LOD fade (0 = ground, 1 = space)
 
         u[26] = this.colorContrast;
         u[27] = 0.0;  // Reserved
@@ -528,14 +529,6 @@ fn fbmNoise(p: vec2<f32>, seed: f32, octaves: i32) -> f32 {
 // COORDINATE TRANSFORMS
 // ============================================================================
 
-fn dirToUV(dir: vec3<f32>) -> vec2<f32> {
-    let phi = atan2(dir.z, dir.x);
-    let theta = acos(clamp(dir.y, -1.0, 1.0));
-    let u = phi / TAU + 0.5;
-    let v = theta / PI;
-    return vec2<f32>(u, v);
-}
-
 fn dirToSpherical(dir: vec3<f32>) -> vec2<f32> {
     // Returns (longitude, latitude) in range [0,1]
     let phi = atan2(dir.z, dir.x);
@@ -547,9 +540,8 @@ fn dirToSpherical(dir: vec3<f32>) -> vec2<f32> {
 
 fn getRayDirection(uv: vec2<f32>) -> vec3<f32> {
     let ndc = vec4<f32>(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 1.0, 1.0);
-    var worldPos = invViewProjMatrix * ndc;
-    worldPos = worldPos / worldPos.w;
-    return normalize(worldPos.xyz);  // ← removed "- uniforms.cameraPosition"
+    // w only scales the direction, and at the far plane it is a difference of nearly equal numbers.
+    return normalize((invViewProjMatrix * ndc).xyz);
 }
 
 // ============================================================================
@@ -580,84 +572,126 @@ fn getStarColor(seed: f32, colorSeed: f32) -> vec3<f32> {
     }
 }
 
-// Single star layer with configurable parameters
-fn starLayer(uv: vec2<f32>, scale: f32, density: f32, intensity: f32, 
+// Cube face and equal-angle face coordinates (0..1) of a direction. Unlike longitude/latitude the cells
+// keep nearly the same size everywhere, so a star never gets squeezed toward a pole.
+fn dirToCube(dir: vec3<f32>) -> vec3<f32> {
+    let a = abs(dir);
+    var face: f32;
+    var p: vec3<f32>;   // (across, across, major)
+    if (a.x >= a.y && a.x >= a.z) {
+        face = 0.0; p = vec3<f32>(dir.y, dir.z, dir.x);
+    } else if (a.y >= a.z) {
+        face = 1.0; p = vec3<f32>(dir.z, dir.x, dir.y);
+    } else {
+        face = 2.0; p = vec3<f32>(dir.x, dir.y, dir.z);
+    }
+    let st = atan(p.xy / abs(p.z)) * (4.0 / PI);
+    return vec3<f32>(st * 0.5 + 0.5, face * 2.0 + select(0.0, 1.0, p.z < 0.0));
+}
+
+fn cubeToDir(uv: vec2<f32>, face: f32) -> vec3<f32> {
+    let axis = floor(face * 0.5);
+    let st = tan((uv * 2.0 - 1.0) * (PI / 4.0));
+    let p = normalize(vec3<f32>(st, select(1.0, -1.0, face - axis * 2.0 > 0.5)));
+    if (axis < 0.5) { return p.zxy; }
+    if (axis < 1.5) { return p.yzx; }
+    return p;
+}
+
+// A star keeps at least this radius in sky-target pixels. A smaller one falls between the pixel centers
+// in some frames and flickers as the view turns. It is dimmed to compensate, not left out.
+const MIN_STAR_RADIUS_PX: f32 = 1.5;
+// Finer layers use this many cells with a higher density, so the widened star still fits its cell.
+const MAX_STAR_CELLS: f32 = 96.0;
+const STAR_JITTER: f32 = 0.25;
+
+// Single star layer with configurable parameters. fineness sets the star size and, with density, the count.
+fn starLayer(dir: vec3<f32>, cube: vec3<f32>, pixelAngle: f32, fineness: f32, density: f32, intensity: f32,
              starSeed: f32, colorSeed: f32, twinkle: bool, time: f32, densityBoost: f32) -> vec3<f32> {
-    let cell = uv * scale;
-    let ip = floor(cell);
-    let fp = fract(cell);
+    let wantedCells = fineness * 0.326;
+    let cells = floor(min(wantedCells, MAX_STAR_CELLS));
+    let packing = wantedCells / cells;
+    let cell = cube.xy * cells;
+    let ip = min(floor(cell), vec2<f32>(cells - 1.0));
+    let key = vec2<f32>(ip.x + cube.z * 128.0, ip.y);
+
+    // Density check (seeded). Most cells are empty and stop here.
+    let h = seededHash12(key, starSeed + 100.0);
+    if (h < 1.0 - clamp(density * densityBoost * packing, 0.0, 1.0)) {
+        return vec3<f32>(0.0);
+    }
 
     // Seeded random offset for star position within cell
-    let offset = seededHash22(ip, starSeed) * 0.6 - 0.3;
-    let starPos = fp - 0.5 - offset;
-
-    // Density check (seeded)
-    let h = seededHash12(ip, starSeed + 100.0);
-    let boostedDensity = clamp(density * densityBoost, 0.0, 1.0);
-    let star = step(1.0 - boostedDensity, h);
+    let offset = (seededHash22(key, starSeed) * 2.0 - 1.0) * STAR_JITTER;
+    let starDir = cubeToDir((ip + 0.5 + offset) / cells, cube.z);
 
     // Star size varies with brightness
-    let brightnessRand = seededHash12(ip, starSeed + 200.0);
-    let size = mix(0.02, 0.10, brightnessRand * brightnessRand);
-    let dist = length(starPos);
-    let shapeBase = 1.0 - smoothstep(0.0, size, dist);
-    let shape = shapeBase * shapeBase;
+    let brightnessRand = seededHash12(key, starSeed + 200.0);
+    let size = mix(0.02, 0.10, brightnessRand * brightnessRand) * 3.2 / fineness;
+    let room = (0.5 - STAR_JITTER) * (PI * 0.45) / cells;
+    let radius = min(max(size, pixelAngle * MIN_STAR_RADIUS_PX), room);
+    let d = (dir - starDir) / radius;
+    let falloff = 1.0 - dot(d, d);
+    if (falloff <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let shape = falloff * falloff * min(size / radius, 1.0);
 
     // Star color (seeded)
-    let color = getStarColor(seededHash12(ip, starSeed + 300.0), colorSeed);
+    let color = getStarColor(seededHash12(key, starSeed + 300.0), colorSeed);
 
     // Twinkle effect (optional)
     var twinkleFactor = 1.0;
     if (twinkle) {
-        let twinklePhase = seededHash12(ip, starSeed + 400.0) * TAU;
-        let twinkleSpeed = 1.0 + seededHash12(ip, starSeed + 500.0) * 2.0;
+        let twinklePhase = seededHash12(key, starSeed + 400.0) * TAU;
+        let twinkleSpeed = 1.0 + seededHash12(key, starSeed + 500.0) * 2.0;
         twinkleFactor = 0.7 + 0.3 * sin(time * twinkleSpeed + twinklePhase);
     }
 
     // Brightness variation
     let brightnessMult = 0.3 + brightnessRand * 0.7;
 
-    return color * star * shape * intensity * twinkleFactor * brightnessMult;
+    return color * shape * intensity * twinkleFactor * brightnessMult;
 }
 
 // Complete star field with multiple layers
-fn getStarfieldColor(dir: vec3<f32>, starSeed: f32, colorSeed: f32, 
+fn getStarfieldColor(dir: vec3<f32>, pixelAngle: f32, starSeed: f32, colorSeed: f32, 
                      numLayers: i32, maxBrightness: f32, twinkle: bool, 
                      time: f32, spaceLOD: f32, densityBoost: f32) -> vec3<f32> {
-    let uv = dirToUV(dir);
+    let cube = dirToCube(dir);
     var stars = vec3<f32>(0.0);
 
-    // Layer configurations: scale, density, intensity
-    // More layers = more detail, higher scales = finer stars
+    // Layer configurations: fineness, density, intensity
+    // More layers = more detail, higher fineness = finer stars
     
     // Base layers (always present)
     if (numLayers >= 1) {
-        stars = stars + starLayer(uv, 200.0, 0.004, maxBrightness * 0.6, starSeed, colorSeed, twinkle, time, densityBoost);
+        stars = stars + starLayer(dir, cube, pixelAngle, 200.0, 0.004, maxBrightness * 0.6, starSeed, colorSeed, twinkle, time, densityBoost);
     }
     if (numLayers >= 2) {
-        stars = stars + starLayer(uv + vec2<f32>(0.37, 0.71), 400.0, 0.006, maxBrightness * 0.8, starSeed + 1000.0, colorSeed, twinkle, time, densityBoost);
+        stars = stars + starLayer(dir, cube, pixelAngle, 400.0, 0.006, maxBrightness * 0.8, starSeed + 1000.0, colorSeed, twinkle, time, densityBoost);
     }
     
     // Medium detail layers
     if (numLayers >= 3) {
-        stars = stars + starLayer(uv + vec2<f32>(0.13, 0.29), 100.0, 0.002, maxBrightness * 1.2, starSeed + 2000.0, colorSeed, twinkle, time, densityBoost);
+        stars = stars + starLayer(dir, cube, pixelAngle, 100.0, 0.002, maxBrightness * 1.2, starSeed + 2000.0, colorSeed, twinkle, time, densityBoost);
     }
     if (numLayers >= 4) {
-        stars = stars + starLayer(uv + vec2<f32>(0.53, 0.17), 600.0, 0.008, maxBrightness * 0.4, starSeed + 3000.0, colorSeed, twinkle, time, densityBoost);
+        stars = stars + starLayer(dir, cube, pixelAngle, 600.0, 0.008, maxBrightness * 0.4, starSeed + 3000.0, colorSeed, twinkle, time, densityBoost);
     }
     
     // High detail layers (space LOD or high detail setting)
     if (numLayers >= 5) {
-        stars = stars + starLayer(uv + vec2<f32>(0.73, 0.41), 800.0, 0.01, maxBrightness * 0.3, starSeed + 4000.0, colorSeed, twinkle, time, densityBoost);
+        stars = stars + starLayer(dir, cube, pixelAngle, 800.0, 0.01, maxBrightness * 0.3, starSeed + 4000.0, colorSeed, twinkle, time, densityBoost);
     }
     if (numLayers >= 6) {
-        stars = stars + starLayer(uv + vec2<f32>(0.19, 0.83), 50.0, 0.001, maxBrightness * 2.0, starSeed + 5000.0, colorSeed, twinkle, time, densityBoost);
+        stars = stars + starLayer(dir, cube, pixelAngle, 50.0, 0.001, maxBrightness * 2.0, starSeed + 5000.0, colorSeed, twinkle, time, densityBoost);
     }
 
     // Extra detail in space (LOD 1)
-    if (spaceLOD > 0.5 && numLayers >= 4) {
-        stars = stars + starLayer(uv + vec2<f32>(0.31, 0.67), 1000.0, 0.012, maxBrightness * 0.2, starSeed + 6000.0, colorSeed, twinkle, time, densityBoost);
-        stars = stars + starLayer(uv + vec2<f32>(0.89, 0.23), 1200.0, 0.015, maxBrightness * 0.15, starSeed + 7000.0, colorSeed, twinkle, time, densityBoost);
+    if (spaceLOD > 0.0 && numLayers >= 4) {
+        stars = stars + starLayer(dir, cube, pixelAngle, 1000.0, 0.012, maxBrightness * 0.2 * spaceLOD, starSeed + 6000.0, colorSeed, twinkle, time, densityBoost);
+        stars = stars + starLayer(dir, cube, pixelAngle, 1200.0, 0.015, maxBrightness * 0.15 * spaceLOD, starSeed + 7000.0, colorSeed, twinkle, time, densityBoost);
     }
 
     return stars;
@@ -828,6 +862,7 @@ fn getDensity(altitude: f32) -> vec2<f32> {
 @fragment
 fn main(input: VertexOutput) -> @location(0) vec4<f32> {
     let rayDir = getRayDirection(input.uv);
+    let pixelAngle = max(length(dpdx(rayDir)), length(dpdy(rayDir)));
     let rayOrigin = uniforms.cameraPosition;
 
     let planetHit = raySphereIntersect(rayOrigin, rayDir, uniforms.planetCenter, uniforms.planetRadius);
@@ -1019,17 +1054,21 @@ let starVisibility = max(nightFactor, spaceFactor) * starHorizonFade * atmospher
     let galaxySamples = i32(nightDetail.galaxySamples);
 
     // Stars
-    let stars = getStarfieldColor(
-        rayDir, 
-        nightConfig.starSeed, 
-        nightConfig.colorSeed,
-        numStarLayers, 
-        maxBrightness, 
-        twinkleEnabled, 
-        uniforms.time,
-        uniforms.spaceLOD,
-        densityBoost
-    ) * starVisibility * 2.0 * starBoost;
+    var stars = vec3<f32>(0.0);
+    if (starVisibility > 0.0) {
+        stars = getStarfieldColor(
+            rayDir,
+            pixelAngle,
+            nightConfig.starSeed,
+            nightConfig.colorSeed,
+            numStarLayers,
+            maxBrightness,
+            twinkleEnabled,
+            uniforms.time,
+            uniforms.spaceLOD,
+            densityBoost
+        ) * starVisibility * 2.0 * starBoost;
+    }
 
     // Galaxies (if enabled and count > 0)
     var galaxies = vec3<f32>(0.0);
