@@ -20,9 +20,12 @@
 //   At depth 10, gridSize=1024,  so density = 1  texel per face-UV unit.
 //   This is a natural geometric LOD: coarser tiles have lower sampling density.
 
+import { usesBiomeLandscape } from '../terrain-generator/biomeLandscapeConfig.js';
 import { Logger } from '../../../shared/Logger.js';
 import { gpuFormatBytesPerTexel } from '../../renderer/resources/texture.js';
 import { buildCoarseCategoryColorFragmentWGSL } from '../tileCategoryColors.js';
+
+const SPLAT_BASE_CACHE_BYTES = 16 * 1024 * 1024;
 
 function alignTo(value, alignment) {
     return Math.ceil(value / alignment) * alignment;
@@ -202,6 +205,8 @@ this._maxGpuFencesObserved = 0;
 
         // Track in-progress generations to avoid duplicate requests
         this._inProgress = new Map();  // tileAddr.toString() -> Promise
+        this._retainedSplatBases = new Map();
+        this._retainedSplatBaseBytes = 0;
 
         // Stats
         this._stats = {
@@ -251,18 +256,50 @@ this._maxGpuFencesObserved = 0;
     // in as the refinement's inputs instead of re-running the base-height,
     // tile-classification and final-height passes. The caller must ensure
     // the layer's geometry copy has already been submitted to the queue.
-    async generateTile(tileAddr, telemetry = null, outputTypes = null, geometrySource = null) {
+    async generateTile(tileAddr, telemetry = null, outputTypes = null, geometrySource = null, retainSplatBase = false) {
         const key = tileAddr.toString();
 
         // Reuse in-progress generation
         const existing = this._inProgress.get(key);
         if (existing) return existing;
 
-        const promise = this._generateTileInternal(tileAddr, { telemetry, requiredTypes: outputTypes, geometrySource })
+        const promise = this._generateTileInternal(tileAddr, { telemetry, requiredTypes: outputTypes, geometrySource, retainSplatBase })
             .finally(() => this._inProgress.delete(key));
 
         this._inProgress.set(key, promise);
         return promise;
+    }
+
+    _takeSplatBase(key) {
+        const entry = this._retainedSplatBases.get(key);
+        if (entry) {
+            this._retainedSplatBases.delete(key);
+            this._retainedSplatBaseBytes -= entry.bytes;
+        }
+        return entry;
+    }
+
+    _discardSplatBase(key) {
+        const entry = this._takeSplatBase(key);
+        if (!entry) return;
+        this.terrainGen.device.queue.onSubmittedWorkDone().then(() => entry.texture.destroy(), () => entry.texture.destroy());
+    }
+
+    clearSplatBases() {
+        for (const key of this._retainedSplatBases.keys()) this._discardSplatBase(key);
+    }
+
+    _retainSplatBase(key, texture, bytes) {
+        this._discardSplatBase(key);
+        while (this._retainedSplatBaseBytes + bytes > SPLAT_BASE_CACHE_BYTES) {
+            this._discardSplatBase(this._retainedSplatBases.keys().next().value);
+        }
+        this._retainedSplatBases.set(key, {
+            texture, bytes,
+            waterVersion: this.terrainGen.waterCarveVersion,
+            terrainRevision: this.terrainGen._regionalTerrainInputRevision,
+        });
+        this._retainedSplatBaseBytes += bytes;
     }
 
     async generateDiagnosticTile(tileAddr, options = {}) {
@@ -336,9 +373,6 @@ this._maxGpuFencesObserved = 0;
 
     async _generateTileInternal(tileAddr, options = {}) {
         const startTime = performance.now();
-        // 'lakeLand': the lakes this tile reads, assessed ahead of it
-        // (lakeTable.js; submitted before the tile's passes).
-        this.terrainGen.lakeTable?.ensureTile(tileAddr);
         // The prototype's six macro roots are pinned independently of the
         // render pool. A fine tile never substitutes a render fallback for
         // generation input or depends on intervening render LOD residency.
@@ -393,7 +427,9 @@ this._maxGpuFencesObserved = 0;
             sourcePool.formats?.height === heightFormat &&
             sourcePool.formats?.tile === tileFormat &&
             sourcePool.tileSize === this.textureSize;
-        const needsBaseHeight = needsTile && !reuseResidentGeometry;
+        const landscape = usesBiomeLandscape(this.terrainGen.terrainConfig, this.terrainGen.baseGenerator);
+        const landscapeClimate = requiredTypes.includes('climate') && landscape;
+        const needsBaseHeight = (needsTile && !reuseResidentGeometry) || landscapeClimate;
     
         let gpuHeightBase = null;
         let gpuHeight = null;
@@ -431,8 +467,26 @@ this._maxGpuFencesObserved = 0;
         // texels, see advancedTerrainCompute main) so the normal pass needs no
         // terrain evaluations for its border samples. Not when heightBase is
         // returned to the caller (diagnostics expect textureSize^2).
-        const baseHeightApron = needsBaseHeight && !includeBaseHeight;
-        const baseHeightSize = this.textureSize + (baseHeightApron ? 2 : 0);
+        const needsSplat = this.enableSplat && requiredTypes.includes('splatData');
+        const splatPadding = (needsSplat || options.retainSplatBase === true)
+            ? this.terrainGen._computeSplatPaddingTexels() : 0;
+        const splatSize = this.textureSize + 2 * splatPadding;
+        const splatBytes = splatSize * splatSize * 16;
+        const sharedSplatBase = !includeBaseHeight && this.terrainGen.debugMode === 0
+            && this.terrainGen._paddedSplatSharedHeightBase !== false
+            && splatPadding < this.textureSize;
+        const retainSplatBase = sharedSplatBase && !needsSplat && options.retainSplatBase === true
+            && splatBytes <= SPLAT_BASE_CACHE_BYTES && needsBaseHeight;
+        const tileKey = tileAddr.toString();
+        const cached = sharedSplatBase && needsSplat && reuseResidentGeometry ? this._retainedSplatBases.get(tileKey) : null;
+        const reuseSplatBase = cached?.texture.width === splatSize
+            && cached.waterVersion === this.terrainGen.waterCarveVersion
+            && cached.terrainRevision === this.terrainGen._regionalTerrainInputRevision;
+        if (cached && !reuseSplatBase) this._discardSplatBase(tileKey);
+        const wideBaseHeight = needsBaseHeight && sharedSplatBase && !reuseSplatBase && (needsSplat || retainSplatBase);
+        const baseHeightSize = wideBaseHeight ? splatSize : this.textureSize + (needsBaseHeight && !includeBaseHeight ? 2 : 0);
+        // Queue lake assessment only for work that actually samples heights.
+        if (needsBaseHeight || (needsSplat && !reuseSplatBase)) this.terrainGen.lakeTable?.ensureTile(tileAddr, this.textureSize);
         if (needsBaseHeight) {
             gpuHeightBase = this._createGPUTexture(
                 baseHeightSize, baseHeightSize, 'rgba32float');
@@ -455,6 +509,18 @@ this._maxGpuFencesObserved = 0;
                 this.textureSize, this.textureSize, macroFormat);
         }
     
+        // Climate uses the base-height payload in landscape mode.
+        let gpuClimate = null;
+        let climateTarget = null;
+        const climateFormat = this.textureFormats.climate || 'rgba8unorm';
+        if (landscapeClimate || (requiredTypes.includes('climate') && gpuHeight && gpuTile)) {
+            climateTarget = this.terrainGen.createStorageBackedOutputTarget(
+                this.textureSize, this.textureSize, climateFormat);
+            gpuClimate = climateTarget.finalTexture;
+        }
+        const fuseBiomeClimate = landscapeClimate && tileTarget && climateFormat === 'rgba8unorm';
+        const fuseBiomeHeight = landscape && tileTarget && gpuHeight && heightFormat === 'r32float';
+
         // ── Build terrain passes in dependency order ───────────────
         const terrainPasses = [];
         if (gpuHeightBase) {
@@ -462,6 +528,8 @@ this._maxGpuFencesObserved = 0;
                 outputType: 0,
                 texture: gpuHeightBase,
                 format: 'rgba32float',
+                lakeTileRecords: tileAddr.depth >= 6 && this.terrainGen.debugMode === 0
+                    ? this.terrainGen.lakeTable?.tileRecords : null,
                 textureSize: baseHeightSize
             });
         }
@@ -473,11 +541,13 @@ this._maxGpuFencesObserved = 0;
                 textureSize: this.textureSize,
                 heightTexture: gpuHeightBase,
                 heightTextureFormat: 'rgba32float',
+                biomeClimateTexture: fuseBiomeClimate ? gpuClimate : null,
+                biomeHeightTexture: fuseBiomeHeight ? gpuHeight : null,
                 resolveToTexture: tileTarget.requiresResolve ? gpuTile : null,
                 resolveToFormat: tileTarget.requiresResolve ? tileTarget.finalFormat : null
             });
         }
-        if (gpuHeight && !reuseResidentGeometry) {
+        if (gpuHeight && !reuseResidentGeometry && !fuseBiomeHeight) {
             terrainPasses.push({
                 outputType: 4,
                 texture: gpuHeight,
@@ -531,22 +601,16 @@ this._maxGpuFencesObserved = 0;
             });
         }
 
-        // ── Climate bake pass (needs height + tile) ───────────────
-        let gpuClimate = null;
-        let climateTarget = null;
-        const climateFormat = this.textureFormats.climate || 'rgba8unorm';
-        if (requiredTypes.includes('climate') && gpuHeight && gpuTile) {
-            climateTarget = this.terrainGen.createStorageBackedOutputTarget(
-                this.textureSize, this.textureSize, climateFormat);
-            gpuClimate = climateTarget.finalTexture;
+        // Nonstandard storage formats and climate-only requests use a separate dispatch.
+        if (climateTarget && !fuseBiomeClimate) {
             terrainPasses.push({
                 outputType: 6,
                 texture: climateTarget.storageTexture,
                 format: climateTarget.storageFormat,
                 textureSize: this.textureSize,
-                heightTexture: gpuHeight,
-                tileTexture: gpuTile,
-                heightTextureFormat: heightFormat,
+                heightTexture: landscapeClimate ? gpuHeightBase : gpuHeight,
+                tileTexture: landscapeClimate ? null : gpuTile,
+                heightTextureFormat: landscapeClimate ? 'rgba32float' : heightFormat,
                 tileTextureFormat: tileFormat,
                 resolveToTexture: climateTarget.requiresResolve ? gpuClimate : null,
                 resolveToFormat: climateTarget.requiresResolve ? climateTarget.finalFormat : null
@@ -593,6 +657,7 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
 
         splatPass = {
             heightTex: gpuHeight,
+            heightBaseTex: reuseSplatBase ? cached.texture : wideBaseHeight ? gpuHeightBase : null,
             tileTex: gpuTile,
             heightFormat,
             tileFormat,
@@ -649,7 +714,9 @@ if (this.enableSplat && requiredTypes.includes('splatData')) {
         }
 
         const temporaryTextures = [];
-        if (gpuHeightBase && !includeBaseHeight) {
+        if (reuseSplatBase && splatPass) temporaryTextures.push(this._takeSplatBase(tileKey).texture);
+        if (retainSplatBase) this._retainSplatBase(tileKey, gpuHeightBase, splatBytes);
+        else if (gpuHeightBase && !includeBaseHeight) {
             temporaryTextures.push(gpuHeightBase);
         }
         // Final height / tile ids made only as inputs (not requested) were

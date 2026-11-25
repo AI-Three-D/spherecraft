@@ -340,6 +340,16 @@ fn mtnRange_d(p: vec3<f32>, site: MtnSite, seed: i32) -> vec4<f32> {
     return dMul(sum, ends) * H;
 }`}
 ${rangeValleys ? mountainValleysWgsl : ''}
+${rangeValleys ? `
+// The existing valley profile supplies a continuous cross section and
+// taper at both ends, shared by the landform and its glacier cover.
+fn mountainGlacierValley(unitDir: vec3<f32>, seed: i32) -> f32 {
+    if (!terrainFeatureOn(TF_MOUNTAIN_RANGE)) { return 0.0; }
+    let site = mtnSite(mtnFacePos(unitDir), MTN_RANGE_CELL_M, MTN_RANGE_DENSITY_PER_KM2 * 1e-6, 0x967a889bu);
+    if (!site.ok) { return 0.0; }
+    return smoothstep(0.46, 0.78, valleyRange_d(unitDir, site, seed).x);
+}
+` : ''}
 
 // All mountains (dual, normalized height). Heights are the MTN_* metres as
 // they are: noiseProfile.mountainBias (2.65 on the demo planet, raised when

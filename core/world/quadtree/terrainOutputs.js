@@ -38,13 +38,14 @@ export const OUTPUT_PRESETS = Object.freeze({
  * than being silently dropped.
  *
  * @param {string[]} allTypes  e.g. streamedTypes from TileStreamer config
+ * @param {boolean} [climateInGeometry=false]  Baked climate required to draw the landscape
  * @returns {{ geometryTypes: string[], refinementTypes: string[] }}
  */
-export function splitOutputTypes(allTypes) {
+export function splitOutputTypes(allTypes, climateInGeometry = false) {
     const geometryTypes = [];
     const refinementTypes = [];
     for (const type of allTypes) {
-        if (GEOMETRY_TYPES.includes(type)) geometryTypes.push(type);
+        if (GEOMETRY_TYPES.includes(type) || (climateInGeometry && type === 'climate')) geometryTypes.push(type);
         else refinementTypes.push(type);
     }
     return { geometryTypes, refinementTypes };

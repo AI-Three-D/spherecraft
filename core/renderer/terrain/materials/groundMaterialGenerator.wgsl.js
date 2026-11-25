@@ -214,6 +214,25 @@ fn bedOf(layer: Layer, uv: vec2f) -> Bed {
             let h = 0.070 * drift + 0.006 * crust + 0.05 * sastrugi + 0.0016 * grain.id.x;
             return Bed(h, crust, sat(0.6 + 0.4 * drift + 0.3 * (grain.id.y - 0.5)), 0.0);
         }
+        case 9u: { // Frost-heaved mineral soil and lichen cushions.
+            var b = soilBed(uv, P, 0.85, s);
+            let patches = fbm(uv, 7, 3, 0.56, s + 55u);
+            let cushion = worley(uv, vec2i(21, 17), 0.85, s + 56u);
+            let crust = smoothstep(-0.20, 0.18, patches + 0.22 * (1.0 - cushion.f1));
+            b.height += 0.019 * crust + 0.014 * (1.0 - cushion.f1);
+            b.tint = mix(b.tint, 0.43 + 0.55 * cushion.id.z, crust);
+            b.kind = select(0.0, 6.0, crust > 0.56);
+            b.aux = crust;
+            return b;
+        }
+        case 10u: { // Ice with blue fissures and an uneven frost crust.
+            let w = vec2f(fbm(uv, 3, 3, 0.55, s + 61u), fbm(uv, 3, 3, 0.55, s + 62u));
+            let cells = worley(uv + 0.15 * w, vec2i(11, 4), 0.9, s + 63u);
+            let frost = smoothstep(-0.30, 0.25, fbm(uv, 8, 4, 0.56, s + 64u));
+            let exposed = smoothstep(-0.14, 0.32, fbm(uv + 0.08 * w, 9, 3, 0.54, s + 65u));
+            let fissure = exposed * (1.0 - smoothstep(0.01, 0.095, cells.f2 - cells.f1)) * (1.0 - 0.72 * frost);
+            return Bed(0.18 * w.x - 0.22 * fissure, fissure, frost, 0.0);
+        }
         default: { // mud: silt, worn smooth
             let w = vec2f(fbm(uv, 4, 4, 0.5, s + 51u), fbm(uv, 4, 4, 0.5, s + 52u));
             let h = 0.028 * w.x + 0.004 * fbm(uv, 40, 3, 0.5, s + 53u);
@@ -443,11 +462,19 @@ fn colorOf(v: vec4f, uv: vec2f, cavity: f32) -> vec4f { // w roughness
             c = mix(c, mix(vec3f(0.20, 0.21, 0.15), vec3f(0.23, 0.17, 0.06), step(0.6, fract(tint * 9.0))), lichen * 0.7);
             return vec4f(c, 0.75);
         }
-        case 6u: { // moss
+        case 6u: { // moss and exposed lichen cushions
+            if (layer.index == 9u) {
+                let c = mix(vec3f(0.126, 0.147, 0.073), vec3f(0.253, 0.245, 0.137), tint);
+                return vec4f(c, 0.92);
+            }
             let c = mix(vec3f(0.028, 0.042, 0.008), vec3f(0.085, 0.105, 0.020), tint);
             return vec4f(c, 0.9);
         }
-        case 7u: { // clover
+        case 7u: { // clover and low tundra leaves
+            if (layer.index == 9u) {
+                let c = mix(vec3f(0.115, 0.031, 0.025), vec3f(0.297, 0.115, 0.045), tint);
+                return vec4f(c * (0.75 + 0.35 * aux), 0.78);
+            }
             let c = mix(vec3f(0.045, 0.078, 0.020), vec3f(0.075, 0.115, 0.032), tint);
             return vec4f(c * (0.7 + 0.45 * aux), 0.65);
         }
@@ -481,6 +508,10 @@ fn colorOf(v: vec4f, uv: vec2f, cavity: f32) -> vec4f { // w roughness
         case 8u: {
             let c = mix(vec3f(0.050, 0.040, 0.030), vec3f(0.112, 0.092, 0.070), tint);
             return vec4f(c, 0.42);
+        }
+        case 10u: {
+            let c = mix(vec3f(0.15, 0.28, 0.37), vec3f(0.55, 0.65, 0.70), tint);
+            return vec4f(c * (1.0 - 0.57 * aux), mix(0.34, 0.69, tint));
         }
         default: {
             let dead = smoothstep(0.1, 0.35, fbm(uv, 60, 3, 0.6, s + 5u));

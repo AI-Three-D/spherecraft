@@ -1,10 +1,69 @@
-# Biomes And Splatmaps
+# Biomes and splatmaps
 
-This document describes the current active terrain material path. It is written for debugging and tuning, so it separates biome scoring, splat generation, and fragment rendering.
+## Landscape biomes
 
-## Current Mode
+The standalone game uses the `earth` landscape preset. The landscape generator evaluates temperature and effective moisture on the sphere. Temperature falls with elevation. A dry subtropical belt and a wetter storm track are broken up by regional and local noise. Humidity also governs the strength of the existing erosion filter.
 
-The active path is the performance-first fixed material family path:
+| Cover | Where it occurs |
+| --- | --- |
+| Grassland and dry grass | Open terrain from temperate meadows to dry steppe |
+| Forest floor | Moist, mild uplands |
+| Marsh | Damp, nearly level lowlands, with sedges and dark peat |
+| Tundra | Cold ground near and above the treeline |
+| Permanent snow | High summits and colder regions, with exposed rock on steep faces |
+| Glacier ice | Cold, moist floors of high mountain valleys, with frost and crevasses |
+| Desert sand | Hot, very dry terrain with low slopes |
+| Exposed bedrock | Rocky slopes with local basalt, granite or sedimentary relief |
+
+Snow and ice coverage deepen as temperatures fall. Glacier ice follows existing valley profiles as a surface layer. Sandstone ledges form in local outcrops. The `arid` preset adds isolated crescent dunes on gentle, very dry lowland terrain.
+
+Open `wizard_game/standalone.html?biome=arid` after starting `python3 server.py`. Omit the query parameter to use the authored world settings.
+
+| Preset | Character |
+|---|---|
+| `earth` | Balanced climate with localized rock relief |
+| `arid` | Warmer and drier, with localized dunes and more sandstone |
+| `boreal` | Cooler and wetter, wider tundra and treeline transitions |
+| `maritime` | Wetter ground and stronger weathering |
+| `alpine` | Colder slopes, more granite and stronger rock relief |
+| `legacy` | Original JSON biome scoring and terrain shapes |
+
+For persistent tuning, edit `biomeLandscape` in [wizard_game/world/terrain.json](wizard_game/world/terrain.json). This configuration raises the dunes while stretching their spacing and shifting the prevailing wind.
+
+```json
+"biomeLandscape": {
+  "preset": "arid",
+  "duneHeightM": 29,
+  "duneSpacingM": 240,
+  "duneWindDegrees": 85
+}
+```
+
+| Controls | Effect |
+|---|---|
+| `temperatureOffsetC`, `temperatureContrastC`, `temperatureNoiseC` | Global temperature, equator-to-pole contrast, and regional variation |
+| `humidityOffset`, `humidityContrast`, `humidityRegionM`, `humidityLocalM`, `elevationDrying` | Moisture level, regional variation, patch sizes, and drying at elevation |
+| `desertHumidity`, `forestHumidity`, `marshHumidity`, `transitionWidth` | Dry and wet habitat thresholds and the width of blends |
+| `snowTemperatureC`, `treelineTemperatureC`, `glacierTemperatureC` | Persistent snow, treeline, and glacier bands |
+| `erosion`, `weatheringContrast` | Overall erosion strength and how strongly humidity changes it |
+| `bedrockRegionM`, `bedrockContrast`, `graniteBias`, `sandstoneBias` | Size and distribution of rock provinces |
+| `rockReliefM`, `beddingThicknessM` | Rock displacement and thickness of sedimentary layers |
+| `duneHeightM`, `duneSpacingM`, `duneFieldM`, `duneWindDegrees` | Dune amplitude, crest spacing, field size, and wind direction |
+
+Temperature lapse rate and sea-level temperature are set under `climate.temperatureGradient` (°C/km) and `climate.baseTemperature` (°C). Changes apply on reload. The accepted ranges and preset overrides live in [biomeLandscapeConfig.js](core/world/terrain-generator/biomeLandscapeConfig.js).
+
+The base-height pass caches temperature and humidity. Tile IDs and splats distinguish marsh and ice, and tree eligibility uses the forest weight. The generated ground shader shares the cover equations with the generator. The landscape climate texture ships with terrain geometry at every LOD. Red and green carry temperature and humidity, alpha carries bedrock province, and blue carries vegetation suitability above `128/255` or glacier coverage below it. The tile and climate fields are available for future biome-specific placement rules.
+
+The review harness can survey the authored world and capture matching camera views. Pass a pose file to review specific sites.
+
+```sh
+node tools/perf/biomeLandscape/review.mjs /tmp/biome-survey survey world
+node tools/perf/biomeLandscape/review.mjs /tmp/biome-review review world,legacy
+```
+
+## Legacy scoring and the fixed-family atlas path
+
+The atlas path uses fixed material families by default.
 
 ```js
 fixedMaterialFamiliesEnabled: true
@@ -25,7 +84,7 @@ The category-to-family mapping lives in `core/world/materialFamilies.js`.
 
 The important consequence: every texel has the same four channels in the same order. Hardware bilinear filtering is always valid for the weights. The old sparse-ID seam class came from neighboring texels disagreeing about which material ID lived in each channel; fixed families remove that whole failure mode.
 
-## Biome Scoring
+## Legacy biome scoring
 
 Biome scoring runs in `advancedTerrainCompute.wgsl.js` through `scoreBiomeEnv()` from `biomeScoring.wgsl.js`.
 

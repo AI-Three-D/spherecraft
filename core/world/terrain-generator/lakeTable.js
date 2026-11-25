@@ -2,9 +2,9 @@
 //
 // The lake table of the 'lakeLand' base generator (LAKE_CELLS_PLAN.md, "The
 // lake table"): records of the lake candidates near the tiles being
-// generated, filled on the GPU before those tiles by three passes (base
-// assessment; nested assessment reading larger lakes' records; the active
-// flag) and read by every terrain pass that evaluates heights (group 3).
+// generated. The GPU assesses candidates, updates nested lakes using the
+// larger lakes' base records, then resolves active flags before terrain
+// passes read them (group 3).
 //
 // Keys are (tier, lattice cell). For a tile, the cells within one cell of its
 // footprint are its core keys (the heights look them up); the cells two more
@@ -13,7 +13,7 @@
 // active passes ran; a record a tile needs is (re)completed before the tile.
 // Bounded: a fixed number of records, the least recently used reused.
 
-import { LAKE_CELL_TIERS, LAKE_LOD_TEXELS, LAKE_RECORD_VEC4, LAKE_TABLE_GROUP, lakeTableHash } from '../../../templates/terrain-shaders/features/featureLakeCells.wgsl.js';
+import { LAKE_BUILD_SAMPLES, LAKE_CELL_TIERS, LAKE_LOD_TEXELS, LAKE_RECORD_VEC4, LAKE_TABLE_GROUP, LAKE_TILE_RECORD_CAPACITY, lakeTableHash } from '../../../templates/terrain-shaders/features/featureLakeCells.wgsl.js';
 import { createAdvancedTerrainComputeShader } from '../shaders/webgpu/advancedTerrainCompute.wgsl.js';
 import { faceUVToDir } from '../hydrology/waterGraph.js';
 
@@ -38,13 +38,27 @@ const PROBE_SRC = `
 const BUILD_SRC = `
 @group(2) @binding(0) var<uniform> lakePass: vec4<u32>;
 @group(2) @binding(1) var<storage, read> lakeWork: array<u32>;
+@compute @workgroup_size(64) fn lakeBuildCandidatePass(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= lakePass.x) { return; } lakeBuildCandidate(lakeWork[gid.x], uniforms.seed); }
+@compute @workgroup_size(64) fn lakeBuildSamplePass(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let center = lakePass.y != 0u;
+    let slot = select(gid.y, gid.x, center);
+    let sample = select(gid.x + 1u, 0u, center);
+    if (slot >= lakePass.x || sample >= LAKE_BUILD_SAMPLE_COUNT) { return; }
+    lakeBuildSample(lakeWork[slot], slot, sample, uniforms.seed); }
 @compute @workgroup_size(64) fn lakeBuildBasePass(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= lakePass.x) { return; } lakeBuildBase(lakeWork[gid.x], uniforms.seed); }
+    if (gid.x >= lakePass.x) { return; } lakeBuildBase(lakeWork[gid.x], gid.x, uniforms.seed); }
 @compute @workgroup_size(64) fn lakeBuildNestedPass(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= lakePass.x) { return; } lakeBuildNested(lakeWork[gid.x], uniforms.seed); }
 @compute @workgroup_size(64) fn lakeBuildActivePass(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= lakePass.x) { return; } lakeBuildActive(lakeWork[gid.x], uniforms.seed); }`;
 
+const CENTER_PASS = 'lakeBuildCenterPass';
+const SAMPLE_PASS = 'lakeBuildSamplePass';
+const BASE_PIPELINES = ['lakeBuildCandidatePass', SAMPLE_PASS, 'lakeBuildBasePass'];
+const BASE_PASSES = [BASE_PIPELINES[0], CENTER_PASS, SAMPLE_PASS, BASE_PIPELINES[2]];
+const NESTED_PASS = 'lakeBuildNestedPass';
+const ACTIVE_PASS = 'lakeBuildActivePass';
 
 // Ensure calls whose records eviction keeps (tiles in flight).
 const EVICT_KEEP_CALLS = 512;
@@ -91,22 +105,24 @@ export class LakeTable {
         }
         this.g0 = d.createBindGroupLayout({ entries: [{ binding: 0, visibility: S, buffer: { type: 'uniform' } }] });
         this.gPass = d.createBindGroupLayout({ entries: [
-            { binding: 0, visibility: S, buffer: { type: 'uniform' } }, { binding: 1, visibility: S, buffer: { type: 'read-only-storage' } }] });
+            { binding: 0, visibility: S, buffer: { type: 'uniform' } },
+            { binding: 1, visibility: S, buffer: { type: 'read-only-storage' } },
+            { binding: 2, visibility: S, buffer: { type: 'storage' } }] });
         this.gBuild = d.createBindGroupLayout({ entries: [
             { binding: 0, visibility: S, buffer: { type: 'read-only-storage' } }, { binding: 1, visibility: S, buffer: { type: 'storage' } },
             { binding: 2, visibility: S, buffer: { type: 'read-only-storage' } }] });
         this._ownBuffers();
-        const opts = { ...this.gen._getAdvancedTerrainShaderOptions({ outputFormat: 'rgba32float', lakeTable: 'build' }), lakeTable: 'build' };
+        const opts = { ...this.gen._getAdvancedTerrainShaderOptions({ outputFormat: 'rgba32float', lakeTable: 'build' }), lakeTable: 'build', includeMain: false };
         const module = d.createShaderModule({ label: 'LakeTable-build', code: createAdvancedTerrainComputeShader(opts) + BUILD_SRC });
         const layout = d.createPipelineLayout({ bindGroupLayouts: [this.g0, this.gen.biomeBindGroupLayout, this.gPass, this.gBuild] });
         this.pipelines = {};
-        for (const e of ['lakeBuildBasePass', 'lakeBuildNestedPass', 'lakeBuildActivePass']) {
+        for (const e of [...BASE_PIPELINES, NESTED_PASS, ACTIVE_PASS]) {
             this.pipelines[e] = await d.createComputePipelineAsync({ label: e, layout, compute: { module, entryPoint: e } });
         }
         // Heights of the lake terrain at given directions (river planning).
         this.gProbe = d.createBindGroupLayout({ entries: [
             { binding: 0, visibility: S, buffer: { type: 'read-only-storage' } }, { binding: 1, visibility: S, buffer: { type: 'storage' } }] });
-        const readOpts = { ...this.gen._getAdvancedTerrainShaderOptions({ outputFormat: 'rgba32float' }), lakeTable: 'read' };
+        const readOpts = { ...this.gen._getAdvancedTerrainShaderOptions({ outputFormat: 'rgba32float' }), lakeTable: 'read', includeMain: false };
         const probeModule = d.createShaderModule({ label: 'LakeTable-probe', code: createAdvancedTerrainComputeShader(readOpts) + PROBE_SRC });
         const probeLayout = d.createPipelineLayout({ bindGroupLayouts: [this.g0, this.gen.biomeBindGroupLayout, this.gProbe, this.readLayout] });
         this.probePipeline = await d.createComputePipelineAsync({ label: 'LakeTable-probe', layout: probeLayout,
@@ -118,6 +134,10 @@ export class LakeTable {
     _ownBuffers() {
         const d = this.device;
         this.uniformBuffer = d.createBuffer({ size: 4096, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        this.sampleBuffer = d.createBuffer({ label: 'LakeTable-samples', size: this.batch * LAKE_BUILD_SAMPLES * 16,
+            usage: GPUBufferUsage.STORAGE });
+        this.tileRecords = d.createBuffer({ label: 'LakeTable-tileRecords', size: (1 + LAKE_TILE_RECORD_CAPACITY) * 16,
+            usage: GPUBufferUsage.STORAGE });
         this.buildBindGroup = d.createBindGroup({ layout: this.gBuild, entries: [
             { binding: 0, resource: { buffer: this.entryBuffer } }, { binding: 1, resource: { buffer: this.recordBuffer } },
             { binding: 2, resource: { buffer: this.keyBuffer } }] });
@@ -270,25 +290,42 @@ export class LakeTable {
         this.device.queue.writeBuffer(this.uniformBuffer, 0, v.buffer, v.byteOffset, v.byteLength);
         const bg0 = this.device.createBindGroup({ layout: this.g0, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }] });
         const enc = this.device.createCommandEncoder({ label: 'LakeTable-build' });
-        for (const [pass, list] of [['lakeBuildBasePass', fresh], ['lakeBuildNestedPass', redo], ['lakeBuildActivePass', redo]]) {
+        const temporary = [];
+        for (const [passes, list] of [[BASE_PASSES, fresh], [[NESTED_PASS], redo], [[ACTIVE_PASS], redo]]) {
             for (let s = 0; s < list.length; s += this.batch) {
                 const part = new Uint32Array(list.slice(s, s + this.batch));
                 const work = this.device.createBuffer({ size: Math.max(16, part.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
                 this.device.queue.writeBuffer(work, 0, part);
                 const info = this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
                 this.device.queue.writeBuffer(info, 0, new Uint32Array([part.length, 0, 0, 0]));
-                const p = enc.beginComputePass({ label: pass });
-                p.setPipeline(this.pipelines[pass]);
-                p.setBindGroup(0, bg0);
-                this.gen._setTerrainBiomeBindGroup(p, { regional: false, lakes: false });
-                p.setBindGroup(2, this.device.createBindGroup({ layout: this.gPass, entries: [
-                    { binding: 0, resource: { buffer: info } }, { binding: 1, resource: { buffer: work } }] }));
-                p.setBindGroup(LAKE_TABLE_GROUP, this.buildBindGroup);
-                p.dispatchWorkgroups(Math.ceil(part.length / 64));
-                p.end();
+                temporary.push(info, work);
+                const bindInputs = params => this.device.createBindGroup({ layout: this.gPass, entries: [
+                    { binding: 0, resource: { buffer: params } }, { binding: 1, resource: { buffer: work } },
+                    { binding: 2, resource: { buffer: this.sampleBuffer } }] });
+                const inputs = bindInputs(info);
+                for (const pass of passes) {
+                    let bindings = inputs;
+                    if (pass === CENTER_PASS) {
+                        const center = this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+                        this.device.queue.writeBuffer(center, 0, new Uint32Array([part.length, 1, 0, 0]));
+                        temporary.push(center);
+                        bindings = bindInputs(center);
+                    }
+                    const p = enc.beginComputePass({ label: pass });
+                    p.setPipeline(this.pipelines[pass === CENTER_PASS ? SAMPLE_PASS : pass]);
+                    p.setBindGroup(0, bg0);
+                    this.gen._setTerrainBiomeBindGroup(p, { regional: false, lakes: false });
+                    p.setBindGroup(2, bindings);
+                    p.setBindGroup(LAKE_TABLE_GROUP, this.buildBindGroup);
+                    if (pass === SAMPLE_PASS) p.dispatchWorkgroups(Math.ceil((LAKE_BUILD_SAMPLES - 1) / 64), part.length);
+                    else p.dispatchWorkgroups(Math.ceil(part.length / 64));
+                    p.end();
+                }
             }
         }
         this.device.queue.submit([enc.finish()]);
+        const release = () => temporary.forEach(buffer => buffer.destroy());
+        this.device.queue.onSubmittedWorkDone().then(release, release);
         this.stats.builds++;
         this.stats.records = this.index.size;
         this.stats.lastNew = fresh.length;
@@ -346,5 +383,6 @@ export class LakeTable {
 
     destroy() {
         this.entryBuffer.destroy(); this.recordBuffer.destroy(); this.keyBuffer.destroy(); this.uniformBuffer?.destroy();
+        this.sampleBuffer?.destroy(); this.tileRecords?.destroy();
     }
 }

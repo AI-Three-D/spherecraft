@@ -19,6 +19,7 @@ export class GroundFieldBaker {
         this._tileTypeCount = Math.max(1, opts.tileTypeCount ?? 1);
         this._seed = (opts.seed ?? 0) >>> 0;
         this._textureFormats = opts.textureFormats || {};
+        this._biomeLandscape = opts.biomeLandscape === true;
         this._logDispatches = opts.logDispatches !== false;
         this._logEveryNth = opts.logEveryNth ?? 4;
         this._dispatchCount = 0;
@@ -333,6 +334,7 @@ export class GroundFieldBaker {
             resolution: this._cfg.resolution,
             maxBatchSize: this._maxBatch,
             densityChannels: this._channelDescriptors.length,
+            biomeLandscape: this._biomeLandscape,
         });
         const module = this.device.createShaderModule({
             label: 'GroundField-BakeShader',

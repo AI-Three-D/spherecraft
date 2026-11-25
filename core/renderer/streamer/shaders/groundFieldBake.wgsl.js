@@ -124,7 +124,8 @@ fn bake(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let uv = (vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5) / f32(FIELD_RES));
-    let suitability = clamp(sampleClimateSuitability(uv, layer), 0.0, 1.0);
+    let signal = sampleClimateSuitability(uv, layer);
+    let suitability = clamp(${cfg.biomeLandscape ? '(signal * 255.0 - 128.0) / 127.0' : 'signal'}, 0.0, 1.0);
     let tileId = sampleTileId(uv, layer);
 
     ${densityDecls.join('\n    ')}

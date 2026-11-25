@@ -1,3 +1,4 @@
+import { usesBiomeLandscape } from '../../../world/terrain-generator/biomeLandscapeConfig.js';
 import { Vector2, Vector3, Vector4 } from '../../../../shared/math/index.js';
 import { Material } from '../../resources/material.js';
 import { terrainBindingAdapter } from './terrainBindings.js';
@@ -127,6 +128,10 @@ export class TerrainMaterialBuilder {
             const fixedMaterialFamiliesEnabled =
                 planetConfig?.engineConfig?.splatConfig?.fixedMaterialFamiliesEnabled === true;
 
+            const biomeLandscape = planetConfig?.terrainGeneration?.biomeLandscape;
+            const enableBiomeClimate = !overlayPass && useArrayTextures && !!atlasTextures.ground &&
+                usesBiomeLandscape(planetConfig?.terrainGeneration) &&
+                cachedTextures.climate?._isArray === true && cachedTextures.climate._isFilterable === true;
             const readGpuFormat = (tex) =>
                 tex?._gpuFormat ?? tex?._gpuTexture?.format ?? 'rgba32float';
     
@@ -144,6 +149,7 @@ export class TerrainMaterialBuilder {
                 coarseColor: readGpuFormat(cachedTextures.coarseColor),
             };
 
+            if (enableBiomeClimate) chunkTextureFormats.climate = readGpuFormat(cachedTextures.climate);
             if (enableTerrainAO) {
                 chunkTextureFormats.terrainAO = readGpuFormat(cachedTextures.terrainAO);
             }
@@ -328,6 +334,7 @@ export class TerrainMaterialBuilder {
                 solidColorAverageWindowMeters,
                 faceSizeMeters,
                 fixedMaterialFamiliesEnabled,
+                biomeLandscape: enableBiomeClimate ? biomeLandscape : null,
                 enableGroundMaterials: !overlayPass && !!atlasTextures.ground,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
@@ -387,6 +394,7 @@ export class TerrainMaterialBuilder {
             if (enableResolvedColor || enableLod0ResolvedColor || enableLodEdgeResolvedColor || enableResolvedColorDebugBinding) {
                 defines.USE_RESOLVED_COLOR_TEXTURE = true;
             }
+            if (enableBiomeClimate) defines.USE_BIOME_CLIMATE = true;
             if (hasCoarseColorTexture) {
                 defines.USE_COARSE_COLOR_TEXTURE = true;
             }
@@ -397,6 +405,7 @@ export class TerrainMaterialBuilder {
         const uniforms = {
             //AO
             terrainAOMask:     { value: cachedTextures.terrainAO ?? null },
+            biomeClimateMap:  { value: cachedTextures.climate ?? null },
             groundFieldMask:   { value: cachedTextures.groundField ?? null },
             terrainAOStrength: {
                 value: terrainAOConfig.sampleStrength ?? 1.0

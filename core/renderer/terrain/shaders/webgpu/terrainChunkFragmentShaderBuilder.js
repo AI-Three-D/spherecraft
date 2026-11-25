@@ -744,6 +744,7 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const groundBindings = options.enableGroundMaterials === true && fixedMaterialFamiliesEnabled && faceSizeMeters > 0;
     const enableGround = groundBindings && productionDraw && enableSplat;
     const enableGroundFar = groundBindings && productionDraw;
+    const biomeLandscape = enableGroundFar ? options.biomeLandscape : null;
     // Tiles that cannot reach the far tier leave it out (QuadtreeTerrainRenderer).
     const groundReachesFar = !enableGround || options.farGround !== false;
     const splatBlendMaxLod = Number.isFinite(terrainShaderConfig.splatBlendMaxLod)
@@ -1128,6 +1129,7 @@ struct FragmentUniforms {
 ${terrainAOBindingDecl}
 ${groundFieldBindingDecl}
 ${resolvedColorBindingDecl}
+${biomeLandscape ? `@group(1) @binding(11) var biomeClimateMap: ${chunkTextureType};` : ''}
 ${hasCoarseColorTexture ? `@group(1) @binding(10) var coarseColorTexture: ${chunkTextureType};` : ''}
 
 @group(2) @binding(0) var atlasTexture: texture_2d_array<f32>;
@@ -3234,7 +3236,7 @@ fn applyDitchDarkening(macroColor: vec3<f32>, worldPos: vec2<f32>) -> vec3<f32> 
     return macroColor * luminanceMask;
 }
 
-${enableGroundFar ? buildGroundSurfaceWGSL({ faceSizeMeters, fineEndMeters: terrainShaderConfig.groundFineEndMeters, deepEndMeters: lod === 0 ? terrainShaderConfig.groundDeepEndMeters : 0, close: enableGround, farTier: groundReachesFar }) : ''}
+${enableGroundFar ? buildGroundSurfaceWGSL({ faceSizeMeters, fineEndMeters: terrainShaderConfig.groundFineEndMeters, deepEndMeters: lod === 0 ? terrainShaderConfig.groundDeepEndMeters : 0, close: enableGround, farTier: groundReachesFar, biomeLandscape }) : ''}
 ${enableGroundFar ? `
 // Daylight on the ground: the sun, the sky over it and what its surroundings throw back. ambient is the scene's own,
 // which at night is all there is.
@@ -4500,15 +4502,17 @@ ${enableGroundFar ? `
     if (drowned) {
         baseColor = GROUND_MEAN[G_MUD];
     } else${groundReachesFar ? '' : ' if (!fullyCoarse)'} {
+${biomeLandscape ? `        let climateUV = applyChunkAtlasUV(input.vUv, biomeClimateMap, input.vAtlasOffset, input.vAtlasScale);
+        let climate = textureSampleLevel(biomeClimateMap, chunkLinearSampler, climateUV, layer, 0.0);` : ''}
         var families = vec4<f32>(0.0);
         var bed = 0.0;
 ${enableGround ? `        if (!fullyCoarse) {
             families = sampleSplatData(input, materialLayer).weights;
-            if (families.z > 0.02) { bed = sampleFixedMaterialBedShare(input, materialLayer, families.z); }
+            if (families.z > 0.02) { bed = sampleFixedMaterialBedShare(input, materialLayer, ${biomeLandscape ? '1.0' : 'families.z'}); }
 ${groundReachesFar ? '            if (tierBlend > 0.0) { baseColor = sampleChunkAverageCoarseColor(input, layer); }' : ''}
         }
 ` : ''}        ground = shadeGround(groundFrame(input.vGround, input.vWorldPos, groundDx, groundDy, groundUp), families, bed, baseColor, ${!enableGround ? '1.0' : groundReachesFar ? 'select(clamp(tierBlend, 0.0, 1.0), 1.0, fullyCoarse)' : '0.0'},
-            groundTileNormal, normalize(fragUniforms.cameraPosition - input.vWorldPosition), input.vDistanceToCamera);
+            groundTileNormal, normalize(fragUniforms.cameraPosition - input.vWorldPosition), input.vDistanceToCamera${biomeLandscape ? ', climate, input.vGround.z' : ''});
         baseColor = ground.albedo;
     }
 ` : ''}

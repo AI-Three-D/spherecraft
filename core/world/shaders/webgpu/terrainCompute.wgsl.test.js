@@ -93,6 +93,24 @@ describe('terrain generation compute shader', () => {
         heightInputBaseHeight: { hasHeightBindings: true, hasBaseHeightBinding: true },
         smoothSplatPair: { hasHeightBindings: true, hasSmoothSplatIdsBinding: true, outputFormat: 'rgba8unorm' }
     };
+    it('compiles glaciers, marsh and optional desert dunes in every landscape tile pipeline', () => {
+        const config = new TerrainGenerationConfig({ ...worldTerrain, biomeLandscape: { preset: 'arid' } });
+        for (const [baseGenerator, lakeTable] of [['earthLike', null], ['lakeLand', 'build'], ['lakeLand', 'read']]) {
+            const landscapeVariants = [...Object.values(variants), {
+                hasHeightBindings: true, hasBiomeClimateBinding: true, hasBiomeHeightBinding: true, outputFormat: 'rgba8unorm',
+            }];
+            if (lakeTable === 'read') landscapeVariants.push({ preparedLakeTile: true });
+            for (const variant of landscapeVariants) {
+                const source = createAdvancedTerrainComputeShader({
+                    ...base, ...config, ...variant, baseGenerator, lakeTable, waterCarve: true, riverBankDetail: true,
+                });
+                expect(source).toContain('fn biomeDunes_d(');
+                expect(source).toContain('fn mountainGlacierValley(');
+                expect(compile(source)).toBeNull();
+            }
+        }
+    });
+
     it('compiles the selected mountain model for terrain and lake sampling', () => {
         for (const baseGenerator of ['earthLike', 'lakeLand']) {
             for (const lakeTable of baseGenerator === 'lakeLand' ? ['build', 'read'] : [null]) {

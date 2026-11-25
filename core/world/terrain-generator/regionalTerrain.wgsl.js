@@ -271,7 +271,7 @@ export function createRegionalTerrainBoundsWgsl(budgets, seamCells) {
 
 fn regionalNaturalLower(foundationMin: f32, fullyLand: bool, mesoM: f32, hollowM: f32) -> f32 {
     let maxH = maxTerrainHeightM();
-    let land = foundationMin + ${n(budgets.reliefErosionLowerM)} - mesoM - hollowM;
+    let land = foundationMin + ${n(budgets.reliefErosionLowerM)} - mesoM - hollowM - ${n(budgets.landscapeReliefM ?? 0)};
     // Both ocean profiles sum to .075 in noise amplitudes, with |FBM| <= 2.
     // The shelf remap raises submerged ground.
     let ocean = (uniforms.waterParams.y - 0.6 - 0.15) * maxH;

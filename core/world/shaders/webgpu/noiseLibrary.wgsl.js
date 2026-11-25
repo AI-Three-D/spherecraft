@@ -10,6 +10,21 @@
 // - Metric helpers (planet-proof feature size): wavelength_m + sphere/flat metric sampling
 // - Proper domain rotation matrix (dot products) and WGSL-safe operator precedence
 
+// The 16 gradients selected by grad3. Pack each component's magnitude and
+// sign so the analytic path can decode it with shifts instead of branching.
+const GRADIENTS_3D = [
+    [1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0],
+    [2, 0, 0], [0, 0, 0], [0, 0, 0], [-2, 0, 0],
+    [1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0],
+    [0, 1, 1], [1, -1, 0], [0, 1, -1], [-1, -1, 0],
+];
+const packedGradient = (bits, encode) => [0, 1, 2].map(axis => {
+    const packed = GRADIENTS_3D.reduce((value, gradient, i) => value | (encode(gradient[axis]) << (bits * i)), 0);
+    return `0x${(packed >>> 0).toString(16)}u`;
+}).join(', ');
+const GRADIENT_MAGNITUDES = packedGradient(2, Math.abs);
+const GRADIENT_NEGATIVES = packedGradient(1, v => Number(v < 0));
+
 export function createNoiseLibrary() {
     return `
   // =====================================================================================
@@ -465,18 +480,9 @@ fn smoothMin(a: f32, b: f32, k: f32) -> f32 {
   // x otherwise).
   fn grad3vec(h: u32) -> vec3<f32> {
       let hh = h & 15u;
-      let s1 = select(-1.0, 1.0, (hh & 1u) == 0u);
-      let s2 = select(-1.0, 1.0, (hh & 2u) == 0u);
-      var g = vec3<f32>(0.0);
-      if (hh < 8u) { g.x = s1; } else { g.y = s1; }
-      if (hh < 4u) {
-          g.y = g.y + s2;
-      } else if (hh == 12u || hh == 14u) {
-          g.z = g.z + s2;
-      } else {
-          g.x = g.x + s2;
-      }
-      return g;
+      let mag = vec3<f32>((vec3<u32>(${GRADIENT_MAGNITUDES}) >> vec3<u32>(2u * hh)) & vec3<u32>(3u));
+      let neg = ((vec3<u32>(${GRADIENT_NEGATIVES}) >> vec3<u32>(hh)) & vec3<u32>(1u)) != vec3<u32>(0u);
+      return select(mag, -mag, neg);
   }
 
   // Derivative of the quintic fade: 30 t^2 (t - 1)^2.
@@ -501,14 +507,22 @@ fn smoothMin(a: f32, b: f32, k: f32) -> f32 {
       let h011 = hash3d(i + vec3<i32>(0, 1, 1), seed);
       let h111 = hash3d(i + vec3<i32>(1, 1, 1), seed);
 
-      let g000 = grad3(h000, f.x,       f.y,       f.z);
-      let g100 = grad3(h100, f.x - 1.0, f.y,       f.z);
-      let g010 = grad3(h010, f.x,       f.y - 1.0, f.z);
-      let g110 = grad3(h110, f.x - 1.0, f.y - 1.0, f.z);
-      let g001 = grad3(h001, f.x,       f.y,       f.z - 1.0);
-      let g101 = grad3(h101, f.x - 1.0, f.y,       f.z - 1.0);
-      let g011 = grad3(h011, f.x,       f.y - 1.0, f.z - 1.0);
-      let g111 = grad3(h111, f.x - 1.0, f.y - 1.0, f.z - 1.0);
+      let G000 = grad3vec(h000);
+      let G100 = grad3vec(h100);
+      let G010 = grad3vec(h010);
+      let G110 = grad3vec(h110);
+      let G001 = grad3vec(h001);
+      let G101 = grad3vec(h101);
+      let G011 = grad3vec(h011);
+      let G111 = grad3vec(h111);
+      let g000 = dot(G000, f);
+      let g100 = dot(G100, f - vec3<f32>(1.0, 0.0, 0.0));
+      let g010 = dot(G010, f - vec3<f32>(0.0, 1.0, 0.0));
+      let g110 = dot(G110, f - vec3<f32>(1.0, 1.0, 0.0));
+      let g001 = dot(G001, f - vec3<f32>(0.0, 0.0, 1.0));
+      let g101 = dot(G101, f - vec3<f32>(1.0, 0.0, 1.0));
+      let g011 = dot(G011, f - vec3<f32>(0.0, 1.0, 1.0));
+      let g111 = dot(G111, f - vec3<f32>(1.0, 1.0, 1.0));
 
       // Value: the same nested interpolation as perlin3D.
       let x00 = mix(g000, g100, u.x);
@@ -530,14 +544,6 @@ fn smoothMin(a: f32, b: f32, k: f32) -> f32 {
       let k6 = g000 - g100 - g001 + g101;
       let k7 = -g000 + g100 + g010 - g110 + g001 - g101 - g011 + g111;
 
-      let G000 = grad3vec(h000);
-      let G100 = grad3vec(h100);
-      let G010 = grad3vec(h010);
-      let G110 = grad3vec(h110);
-      let G001 = grad3vec(h001);
-      let G101 = grad3vec(h101);
-      let G011 = grad3vec(h011);
-      let G111 = grad3vec(h111);
       let K1 = G100 - G000;
       let K2 = G010 - G000;
       let K3 = G001 - G000;
@@ -678,4 +684,3 @@ fn smoothMin(a: f32, b: f32, k: f32) -> f32 {
   }
   `;
   }
-  
