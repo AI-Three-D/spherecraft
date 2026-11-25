@@ -1,7 +1,7 @@
 // core/renderer/water/seaSurface.wgsl.js
 //
 // The sea's surface (NearWaterRenderer.js), drawn as the lakes are: everything
-// under sea level is ocean (WaterGpuData.sea). One triangle over the screen; each
+// under sea level is ocean (WaterGpuData.sea). A rectangle of the screen; each
 // pixel's ray meets the sea's sphere (planet radius + level), so the surface is
 // exact at any distance, to the horizon, with no mesh or LOD seams. There it has
 // the lakes' surface (the close one within lakeDetailM, the distant statistics
@@ -22,6 +22,7 @@
 import { commonWgsl, shadeWgsl, LAKE_WHITE_WGSL } from './nearWaterSurface.wgsl.js';
 import { FIELD_WATER_KEEP_M, fieldWaterLookupWgsl } from './fieldWaterSurface.wgsl.js';
 import { WHITE_FLAG_LOOK, whitewaterLookWgsl } from './whitewaterLook.wgsl.js';
+import { SEA_VIEW_ONE } from '../terrain/draw/terrainDrawList.wgsl.js';
 
 // The depth buffer's step (depth24plus): a fragment is deep sea where the ground
 // is more than SEA_DEEP_BASE_M + SEA_DEEP_STEPS of those steps behind it along the
@@ -39,10 +40,15 @@ struct SeaVOut {
 
 export function buildSeaVertexShader() {
     return commonWgsl() + SEA_VOUT + /* wgsl */`
+@group(2) @binding(1) var<storage, read> seaView: array<i32>;
 @vertex
 fn main(@builtin(vertex_index) vi: u32) -> SeaVOut {
-    // One triangle covering the screen.
-    let ndc = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+    // The part of the screen the sea can be in (terrainDrawList.wgsl.js); no triangle at all without any.
+    let corner = vec2<f32>(f32(vi == 1u || vi == 2u || vi == 4u), f32(vi == 2u || vi == 4u || vi == 5u));
+    let low = vec2<f32>(f32(seaView[0]), f32(seaView[1])) / ${SEA_VIEW_ONE}.0;
+    let high = vec2<f32>(f32(seaView[2]), f32(seaView[3])) / ${SEA_VIEW_ONE}.0;
+    // Nor for a camera under the ground (seaView[5]).
+    let ndc = select(vec2<f32>(0.0), mix(low, high, corner), all(high > low) && seaView[5] == 0);
     // The view ray through it (on the plane z = -1 in view space), then turned
     // to world space by the view's rotation alone: no large translation in it.
     let P = U.projectionMatrix;

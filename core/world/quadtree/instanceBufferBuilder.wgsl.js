@@ -10,6 +10,9 @@
 //   - Write indirect draw args (one per geometry LOD)
 //   - Emit feedback requests for missing tiles
 
+/** Workgroups of the build step. */
+export const BUILD_WORKGROUPS = 4;
+
 // Bytes per instance in the edge stitch buffer (two vec4<u32>, see edgeStitchFor).
 export const EDGE_STITCH_RECORD_BYTES = 32;
 
@@ -64,9 +67,8 @@ struct TraversalParams {
 };
 
 struct VisibleEntry {
-    keyLo : u32,
-    keyHi : u32,
-    epoch : u32,
+    key : vec2<u32>,   // low, high
+    epoch : atomic<u32>,
     _pad  : u32,
 };
 
@@ -134,22 +136,26 @@ fn hashKey(keyLo : u32, keyHi : u32, mask : u32) -> u32 {
     let h = (kl * 0x9E3779B1u) ^ (kh * 0x85EBCA77u);
     return h & mask;
 }
+// All threads insert at once, each its own tiles: a slot of an earlier frame (or empty, epoch 0) is claimed by its epoch.
 fn insertVisible(face : u32, depth : u32, x : u32, y : u32) {
     let keyLo = makeKeyLo(x, y);
     let keyHi = makeKeyHi(face, depth);
     var idx = hashKey(keyLo, keyHi, params.visibleTableMask);
-    for (var i = 0u; i < params.visibleTableCapacity; i++) {
-        let entry = visibleTable[idx];
-        // Writable if: truly empty, stale epoch, or same key
-        if (entry.keyHi == EMPTY_KEY ||
-            entry.epoch != params.currentEpoch ||
-            (entry.keyHi == keyHi && entry.keyLo == keyLo)) {
-            visibleTable[idx].keyLo = keyLo;
-            visibleTable[idx].keyHi = keyHi;
-            visibleTable[idx].epoch = params.currentEpoch;
-            return;
+    var tries = 0u;
+    loop {
+        if (tries >= params.visibleTableCapacity) { break; }
+        let seen = atomicLoad(&visibleTable[idx].epoch);
+        if (seen != params.currentEpoch) {
+            let claim = atomicCompareExchangeWeak(&visibleTable[idx].epoch, seen, params.currentEpoch);
+            if (claim.exchanged) {
+                visibleTable[idx].key = vec2<u32>(keyLo, keyHi);
+                return;
+            }
+            // Not taken by another: the exchange may fail for no reason.
+            if (claim.old_value == seen) { continue; }
         }
         idx = (idx + 1u) & params.visibleTableMask;
+        tries++;
     }
 }
 
@@ -158,12 +164,12 @@ fn visibleExists(face : u32, depth : u32, x : u32, y : u32) -> bool {
     let keyHi = makeKeyHi(face, depth);
     var idx = hashKey(keyLo, keyHi, params.visibleTableMask);
     for (var i = 0u; i < params.visibleTableCapacity; i++) {
-        let entry = visibleTable[idx];
-        if (entry.keyHi == EMPTY_KEY) {
+        let key = visibleTable[idx].key;
+        if (key.y == EMPTY_KEY) {
             return false;
         }
-        if (entry.epoch == params.currentEpoch &&
-            entry.keyHi == keyHi && entry.keyLo == keyLo) {
+        if (key.y == keyHi && key.x == keyLo &&
+            atomicLoad(&visibleTable[idx].epoch) == params.currentEpoch) {
             return true;
         }
         // Stale entry — skip but continue probing
@@ -309,14 +315,14 @@ fn computeEdgeMask(selfLOD : u32, left : u32, right : u32, bottom : u32, top : u
     return mask;
 }
 
+// A thread's own sums; added to the buffer once (all threads adding to the same three words wait for each other).
+var<private> probeSum : u32 = 0u;
+var<private> probeCount : u32 = 0u;
+var<private> probeMisses : u32 = 0u;
 fn recordCoveringProbe(packed : u32) {
-    let miss = (packed & 0x8000u) != 0u;
-    let probes = packed & 0x7FFFu;
-    atomicAdd(&metaData.coveringProbeSum, probes);
-    atomicAdd(&metaData.coveringProbeCount, 1u);
-    if (miss) {
-        atomicAdd(&metaData.coveringProbeMisses, 1u);
-    }
+    probeSum += packed & 0x7FFFu;
+    probeCount += 1u;
+    probeMisses += packed >> 15u;
 }
 
 fn wrapNeighbor(face : u32, depth : u32, x : i32, y : i32) -> vec3<u32> {
@@ -386,11 +392,11 @@ fn findCoveringDepthDiag(face : u32, depth : u32, x : u32, y : u32) -> vec2<u32>
     var d = depth;
     var tx = x;
     var ty = y;
-    var probeCount : u32 = 0u;
+    var probes : u32 = 0u;
     loop {
-        probeCount = probeCount + 1u;
+        probes = probes + 1u;
         if (visibleExists(face, d, tx, ty)) {
-            return vec2<u32>(d, probeCount);
+            return vec2<u32>(d, probes);
         }
         if (d == 0u) {
             break;
@@ -400,7 +406,7 @@ fn findCoveringDepthDiag(face : u32, depth : u32, x : u32, y : u32) -> vec2<u32>
         d = d - 1u;
     }
     // Fell through to root without finding - return depth with high probe count as flag
-    return vec2<u32>(depth, probeCount | 0x8000u);
+    return vec2<u32>(depth, probes | 0x8000u);
 }
 
 fn findCoveringDepth(face : u32, depth : u32, x : u32, y : u32) -> u32 {
@@ -474,8 +480,10 @@ fn edgeStitchFor(nb : vec3<u32>, depth : u32, cover : vec2<u32>,
     return vec2<u32>(info, (nx & 0xFFFFu) | ((ny & 0xFFFFu) << 16u));
 }
 
+// Three steps, each waiting for the last: what is there, the instances (several workgroups: each thread has a tile or
+// none, and its chains of lookups are the time this takes), their counts.
 @compute @workgroup_size(${WG})
-fn main(@builtin(local_invocation_id) lid : vec3<u32>) {
+fn prepare(@builtin(local_invocation_id) lid : vec3<u32>) {
     let tid = lid.x;
 
 if (tid == 0u) {
@@ -496,9 +504,8 @@ if (tid == 0u) {
     // Clear visible hash table (only every N frames; epoch handles staleness)
     if (params.doVisibleClear != 0u) {
         for (var i = tid; i < params.visibleTableCapacity; i += WORKGROUP_SIZE) {
-            visibleTable[i].keyLo = EMPTY_KEY;
-            visibleTable[i].keyHi = EMPTY_KEY;
-            visibleTable[i].epoch = 0u;
+            visibleTable[i].key = vec2<u32>(EMPTY_KEY);
+            atomicStore(&visibleTable[i].epoch, 0u);
             visibleTable[i]._pad = 0u;
         }
     }
@@ -509,18 +516,11 @@ if (tid == 0u) {
     let visibleCountRaw = atomicLoad(&traversalCounters[2]);
     let visibleCount = min(visibleCountRaw, params.maxVisibleTiles);
 
-    // Insert visible tiles into hash table and count per-LOD (single-threaded to avoid races)
-    if (tid == 0u) {
-        for (var i = 0u; i < visibleCount; i++) {
-            let tile = visibleTiles[i];
-            let face = tile.x;
-            let depth = tile.y;
-            let x = tile.z;
-            let y = tile.w;
-            insertVisible(face, depth, x, y);
-            let lod = computeGeomLOD(depth);
-            atomicAdd(&metaData.lodCounts[lod], 1u);
-        }
+    // Insert visible tiles into hash table and count per-LOD
+    for (var i = tid; i < visibleCount; i += WORKGROUP_SIZE) {
+        let tile = visibleTiles[i];
+        insertVisible(tile.x, tile.y, tile.z, tile.w);
+        atomicAdd(&metaData.lodCounts[computeGeomLOD(tile.y)], 1u);
     }
 
     workgroupBarrier();
@@ -549,11 +549,12 @@ if (tid == 0u) {
         }
     }
 
-    workgroupBarrier();
-    storageBarrier();
+}
 
-    // Build instances
-    for (var i = tid; i < visibleCount; i += WORKGROUP_SIZE) {
+@compute @workgroup_size(${WG})
+fn build(@builtin(global_invocation_id) id : vec3<u32>) {
+    let visibleCount = min(atomicLoad(&traversalCounters[2]), params.maxVisibleTiles);
+    for (var i = id.x; i < visibleCount; i += WORKGROUP_SIZE * ${BUILD_WORKGROUPS}u) {
         let tile = visibleTiles[i];
         let face = tile.x;
         let depth = tile.y;
@@ -695,18 +696,22 @@ ${edgeStitch ? `
         edgeStitch[instanceIndex * 2u + 1u] = vec4<u32>(stitchL.y, stitchR.y, stitchB.y, stitchT.y);
 ` : ''}    }
 
+    atomicAdd(&metaData.coveringProbeSum, probeSum);
+    atomicAdd(&metaData.coveringProbeCount, probeCount);
+    atomicAdd(&metaData.coveringProbeMisses, probeMisses);
+
+}
+
+@compute @workgroup_size(1)
+fn finish() {
     // ── Post-build: correct instanceCount to actual written count ─────────
     // The indirectArgs.instanceCount was set to the total visible tile count
     // per LOD, but tiles without loaded data were skipped during the build.
     // Without this correction, the draw call renders stale/uninitialized
     // instance slots.
-    workgroupBarrier();
-    storageBarrier();
-    if (tid == 0u) {
-        for (var l = 0u; l < MAX_LOD_LEVELS; l++) {
-            let actualCount = atomicLoad(&metaData.lodWrite[l]);
-            metaData.indirectArgs[l * 5u + 1u] = actualCount;
-        }
+    for (var l = 0u; l < MAX_LOD_LEVELS; l++) {
+        let actualCount = atomicLoad(&metaData.lodWrite[l]);
+        metaData.indirectArgs[l * 5u + 1u] = actualCount;
     }
 }
 `;

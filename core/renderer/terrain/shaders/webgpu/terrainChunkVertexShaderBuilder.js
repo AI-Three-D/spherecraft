@@ -2,81 +2,62 @@
 import { GROUND_WRAP_SHARE } from './groundSurface.wgsl.js';
 import { buildTerrainLightWGSL } from '../../light/terrainLight.wgsl.js';
 
-export function buildTerrainChunkVertexShader(options = {}) {
-    const instanced = options.instanced === true;
-    const landLight = options.landLight === true;
-    const useArrayTextures = options.useArrayTextures === true;
-    const useStorageBuffer = options.useStorageBuffer === true;
-    const useTransitionTopology = options.useTransitionTopology === true;
-    const debugMode = Number.isFinite(options.debugMode) ? Math.floor(options.debugMode) : 0;
-    const terrainShaderConfig = options.terrainShaderConfig || {};
-    const lod = Number.isFinite(options.lod) ? Math.max(0, Math.floor(options.lod)) : 0;
-    const lodEdgeFadeMaxLod = Number.isFinite(terrainShaderConfig.lodEdgeFadeMaxLod)
-        ? Math.max(-1, Math.floor(terrainShaderConfig.lodEdgeFadeMaxLod))
-        : 4;
-    const lodEdgeFadeWidth = Number.isFinite(terrainShaderConfig.lodEdgeFadeWidth)
-        ? Math.min(0.30, Math.max(0.001, terrainShaderConfig.lodEdgeFadeWidth))
-        : 0.04;
-    const enableLodEdgeFade =
-        (terrainShaderConfig.lodEdgeFadeEnabled === true ||
-         terrainShaderConfig.lodEdgeAOFadeEnabled === true) &&
-        lodEdgeFadeMaxLod >= 0 &&
-        lod <= lodEdgeFadeMaxLod;
-    // In-tile blend into the solid-color tier (decided per LOD by
-    // terrainMaterialBuilder). The vertex stage only forwards the instance's
-    // geometry-LOD coarser-neighbour mask; the fragment stage computes the
-    // ramp per pixel from vUv, so it stays smooth regardless of mesh density.
-    const enableTierEdgeBlend = options.enableTierEdgeBlend === true;
-    // Detail variants that react to the instance's tier flags (coarser-
-    // neighbour mask bits 0-3, bit 4 = drawn layer has no detail material).
-    const forwardTierFlags = enableTierEdgeBlend || options.forwardTierFlags === true;
-    const defaultSegments = [128, 64, 32, 16, 8, 4, 2];
-    const lodSegments = Array.isArray(options.lodSegments) ? options.lodSegments : defaultSegments;
-    const segments = defaultSegments.map((value, index) => {
-        const candidate = lodSegments[index];
-        return Number.isFinite(candidate) ? candidate : value;
-    });
-    const segmentLiteral = segments.map(value => `${Math.max(2, Math.floor(value))}.0`).join(', ');
-    // LOD seam stitching needs every tile's edge to have the same vertex
-    // count: transition topology builds every LOD on the finest grid
-    // (terrainGeometryBuilder.js _resolveTransitionBaseSegments).
-    const edgeStitch = instanced && useStorageBuffer && useTransitionTopology;
-    const edgeSegments = Math.max(...segments.map(value => Math.max(2, Math.floor(value))));
-
-    const instanceInputs = instanced && !useStorageBuffer ? `
-struct InstanceInput {
-    @location(3) instanceData0: vec4<f32>,
-    @location(4) instanceData1: vec4<f32>,
-    @location(5) instanceData2: vec4<f32>,
-    @location(6) instanceLayer: f32,
+/** The point of the cube's surface at a face UV. */
+export const CUBE_POINT_WGSL = /* wgsl */`
+fn getCubePoint(face: i32, uv: vec2<f32>) -> vec3<f32> {
+    let xy = uv * 2.0 - 1.0;
+    if (face == 0) { return vec3<f32>(1.0, xy.y, -xy.x); }
+    if (face == 1) { return vec3<f32>(-1.0, xy.y, xy.x); }
+    if (face == 2) { return vec3<f32>(xy.x, 1.0, -xy.y); }
+    if (face == 3) { return vec3<f32>(xy.x, -1.0, xy.y); }
+    if (face == 4) { return vec3<f32>(xy.x, xy.y, 1.0); }
+    return vec3<f32>(-xy.x, xy.y, -1.0);
 }
-` : '';
+`;
 
-    const instanceParam = instanced
-        ? (useStorageBuffer ? ', @builtin(instance_index) instanceIdx: u32' : ', instance: InstanceInput')
-        : '';
-    const heightTextureType = useArrayTextures ? 'texture_2d_array<f32>' : 'texture_2d<f32>';
-    const storageBufferDecl = useStorageBuffer ? `
-struct ChunkInstance {
-    position: vec3<f32>,
-    face: u32,
-    chunkLocation: vec2<f32>,
-    chunkSizeUV: f32,
-    _pad: f32,
-    uvOffset: vec2<f32>,
-    uvScale: f32,
-    lod: u32,
-    neighborLODs: vec2<u32>,
-    layer: u32,
-    edgeMask: u32,
+/** Height at a tile's UV, between its texels. Needs heightTexture, loadHeightTex and uniforms.useAtlasMode. */
+export const SAMPLE_HEIGHT_WGSL = /* wgsl */`
+fn sampleHeightChunkLocal(localUV: vec2<f32>, atlasOffset: vec2<f32>, atlasScale: f32, layer: i32) -> f32 {
+    let texSize = vec2<f32>(textureDimensions(heightTexture));
+    let globalMax = vec2<i32>(textureDimensions(heightTexture)) - vec2<i32>(1);
+    var baseOffset = vec2<f32>(0.0);
+    var baseScale = 1.0;
+    if (uniforms.useAtlasMode > 0.5) {
+        baseOffset = atlasOffset;
+        baseScale = atlasScale;
+    }
+    let chunkSizeF = max(texSize * baseScale, vec2<f32>(1.0));
+    let chunkSizeI = vec2<i32>(floor(chunkSizeF + vec2<f32>(0.5)));
+    let maxLocalI = max(chunkSizeI - vec2<i32>(1), vec2<i32>(1));
+    let localCoord = clamp(localUV, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(maxLocalI);
+    let baseCoordI = vec2<i32>(floor(baseOffset * texSize + vec2<f32>(0.5)));
+    let coord = vec2<f32>(baseCoordI) + localCoord;
+    let baseCoord = floor(coord);
+    let f = coord - baseCoord;
+
+    let c00 = vec2<i32>(baseCoord);
+    let c10 = c00 + vec2<i32>(1, 0);
+    let c01 = c00 + vec2<i32>(0, 1);
+    let c11 = c00 + vec2<i32>(1, 1);
+
+    let minCoord = baseCoordI;
+    let maxCoord = min(baseCoordI + maxLocalI, globalMax);
+
+    let h00 = loadHeightTex(clamp(c00, minCoord, maxCoord), layer);
+    let h10 = loadHeightTex(clamp(c10, minCoord, maxCoord), layer);
+    let h01 = loadHeightTex(clamp(c01, minCoord, maxCoord), layer);
+    let h11 = loadHeightTex(clamp(c11, minCoord, maxCoord), layer);
+
+    let h0 = mix(h00, h10, f.x);
+    let h1 = mix(h01, h11, f.x);
+
+    return mix(h0, h1, f.y);
 }
+`;
 
-@group(3) @binding(0) var<storage, read> chunks: array<ChunkInstance>;
-${edgeStitch ? `// Two vec4<u32> per instance (instanceBufferBuilder.wgsl.js edgeStitchFor).
-@group(3) @binding(21) var<storage, read> edgeStitch: array<vec4<u32>>;
-` : ''}` : '';
-
-    const edgeStitchHelpers = edgeStitch ? `
+/** Vertices on a coarser neighbour's edge. Needs the above, edgeStitch, and the planet's origin and radius in uniforms. */
+export function buildEdgeStitchWGSL(edgeSegments) {
+    return /* wgsl */`
 const EDGE_SEGMENTS : f32 = ${edgeSegments}.0;
 const EDGE_STITCH_FLAG : u32 = 0x80000000u;
 
@@ -238,7 +219,84 @@ fn stitchEdgeVertex(uv: vec2<f32>, instanceIdx: u32, face: i32, location: vec2<f
                         face, location, sizeUV, heightMultiplier);
 }
 
+`;
+}
+
+export function buildTerrainChunkVertexShader(options = {}) {
+    const instanced = options.instanced === true;
+    const landLight = options.landLight === true;
+    const useArrayTextures = options.useArrayTextures === true;
+    const useStorageBuffer = options.useStorageBuffer === true;
+    const useTransitionTopology = options.useTransitionTopology === true;
+    const debugMode = Number.isFinite(options.debugMode) ? Math.floor(options.debugMode) : 0;
+    const terrainShaderConfig = options.terrainShaderConfig || {};
+    const lod = Number.isFinite(options.lod) ? Math.max(0, Math.floor(options.lod)) : 0;
+    const lodEdgeFadeMaxLod = Number.isFinite(terrainShaderConfig.lodEdgeFadeMaxLod)
+        ? Math.max(-1, Math.floor(terrainShaderConfig.lodEdgeFadeMaxLod))
+        : 4;
+    const lodEdgeFadeWidth = Number.isFinite(terrainShaderConfig.lodEdgeFadeWidth)
+        ? Math.min(0.30, Math.max(0.001, terrainShaderConfig.lodEdgeFadeWidth))
+        : 0.04;
+    const enableLodEdgeFade =
+        (terrainShaderConfig.lodEdgeFadeEnabled === true ||
+         terrainShaderConfig.lodEdgeAOFadeEnabled === true) &&
+        lodEdgeFadeMaxLod >= 0 &&
+        lod <= lodEdgeFadeMaxLod;
+    // In-tile blend into the solid-color tier (decided per LOD by
+    // terrainMaterialBuilder). The vertex stage only forwards the instance's
+    // geometry-LOD coarser-neighbour mask; the fragment stage computes the
+    // ramp per pixel from vUv, so it stays smooth regardless of mesh density.
+    const enableTierEdgeBlend = options.enableTierEdgeBlend === true;
+    // Detail variants that react to the instance's tier flags (coarser-
+    // neighbour mask bits 0-3, bit 4 = drawn layer has no detail material).
+    const forwardTierFlags = enableTierEdgeBlend || options.forwardTierFlags === true;
+    const defaultSegments = [128, 64, 32, 16, 8, 4, 2];
+    const lodSegments = Array.isArray(options.lodSegments) ? options.lodSegments : defaultSegments;
+    const segments = defaultSegments.map((value, index) => {
+        const candidate = lodSegments[index];
+        return Number.isFinite(candidate) ? candidate : value;
+    });
+    const segmentLiteral = segments.map(value => `${Math.max(2, Math.floor(value))}.0`).join(', ');
+    // LOD seam stitching needs every tile's edge to have the same vertex
+    // count: transition topology builds every LOD on the finest grid
+    // (terrainGeometryBuilder.js _resolveTransitionBaseSegments).
+    const edgeStitch = instanced && useStorageBuffer && useTransitionTopology;
+    const edgeSegments = Math.max(...segments.map(value => Math.max(2, Math.floor(value))));
+
+    const instanceInputs = instanced && !useStorageBuffer ? `
+struct InstanceInput {
+    @location(3) instanceData0: vec4<f32>,
+    @location(4) instanceData1: vec4<f32>,
+    @location(5) instanceData2: vec4<f32>,
+    @location(6) instanceLayer: f32,
+}
 ` : '';
+
+    const instanceParam = instanced
+        ? (useStorageBuffer ? ', @builtin(instance_index) instanceIdx: u32' : ', instance: InstanceInput')
+        : '';
+    const heightTextureType = useArrayTextures ? 'texture_2d_array<f32>' : 'texture_2d<f32>';
+    const storageBufferDecl = useStorageBuffer ? `
+struct ChunkInstance {
+    position: vec3<f32>,
+    face: u32,
+    chunkLocation: vec2<f32>,
+    chunkSizeUV: f32,
+    _pad: f32,
+    uvOffset: vec2<f32>,
+    uvScale: f32,
+    lod: u32,
+    neighborLODs: vec2<u32>,
+    layer: u32,
+    edgeMask: u32,
+}
+
+@group(3) @binding(0) var<storage, read> chunks: array<ChunkInstance>;
+${edgeStitch ? `// Two vec4<u32> per instance (instanceBufferBuilder.wgsl.js edgeStitchFor).
+@group(3) @binding(21) var<storage, read> edgeStitch: array<vec4<u32>>;
+` : ''}` : '';
+
+    const edgeStitchHelpers = edgeStitch ? buildEdgeStitchWGSL(edgeSegments) : '';
 
     const storageHelpers = useStorageBuffer ? `
 fn unpackNeighborLODs(packed: vec2<u32>) -> vec4<f32> {
@@ -402,16 +460,7 @@ fn loadHeightTex(coord: vec2<i32>, _layer: i32) -> f32 {
 ${storageHelpers}
 ${edgeStitchHelpers}
 
-fn getCubePoint(face: i32, uv: vec2<f32>) -> vec3<f32> {
-    let xy = uv * 2.0 - 1.0;
-    if (face == 0) { return vec3<f32>(1.0, xy.y, -xy.x); }
-    if (face == 1) { return vec3<f32>(-1.0, xy.y, xy.x); }
-    if (face == 2) { return vec3<f32>(xy.x, 1.0, -xy.y); }
-    if (face == 3) { return vec3<f32>(xy.x, -1.0, xy.y); }
-    if (face == 4) { return vec3<f32>(xy.x, xy.y, 1.0); }
-    return vec3<f32>(-xy.x, xy.y, -1.0);
-}
-
+${CUBE_POINT_WGSL}
 fn computeEdgeSnappedUV(uv: vec2<f32>, selfLOD: i32, neighborLODs: vec4<f32>) -> SnapResult {
     let lodLeft = i32(neighborLODs.x);
     let lodRight = i32(neighborLODs.y);
@@ -523,43 +572,7 @@ fn sampleHeightNearestChunkLocal(localUV: vec2<f32>, atlasOffset: vec2<f32>, atl
     return loadHeightTex(clampedCoord, layer);
 }
 
-fn sampleHeightChunkLocal(localUV: vec2<f32>, atlasOffset: vec2<f32>, atlasScale: f32, layer: i32) -> f32 {
-    let texSize = vec2<f32>(textureDimensions(heightTexture));
-    let globalMax = vec2<i32>(textureDimensions(heightTexture)) - vec2<i32>(1);
-    var baseOffset = vec2<f32>(0.0);
-    var baseScale = 1.0;
-    if (uniforms.useAtlasMode > 0.5) {
-        baseOffset = atlasOffset;
-        baseScale = atlasScale;
-    }
-    let chunkSizeF = max(texSize * baseScale, vec2<f32>(1.0));
-    let chunkSizeI = vec2<i32>(floor(chunkSizeF + vec2<f32>(0.5)));
-    let maxLocalI = max(chunkSizeI - vec2<i32>(1), vec2<i32>(1));
-    let localCoord = clamp(localUV, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(maxLocalI);
-    let baseCoordI = vec2<i32>(floor(baseOffset * texSize + vec2<f32>(0.5)));
-    let coord = vec2<f32>(baseCoordI) + localCoord;
-    let baseCoord = floor(coord);
-    let f = coord - baseCoord;
-
-    let c00 = vec2<i32>(baseCoord);
-    let c10 = c00 + vec2<i32>(1, 0);
-    let c01 = c00 + vec2<i32>(0, 1);
-    let c11 = c00 + vec2<i32>(1, 1);
-
-    let minCoord = baseCoordI;
-    let maxCoord = min(baseCoordI + maxLocalI, globalMax);
-
-    let h00 = loadHeightTex(clamp(c00, minCoord, maxCoord), layer);
-    let h10 = loadHeightTex(clamp(c10, minCoord, maxCoord), layer);
-    let h01 = loadHeightTex(clamp(c01, minCoord, maxCoord), layer);
-    let h11 = loadHeightTex(clamp(c11, minCoord, maxCoord), layer);
-
-    let h0 = mix(h00, h10, f.x);
-    let h1 = mix(h01, h11, f.x);
-
-    return mix(h0, h1, f.y);
-}
-
+${SAMPLE_HEIGHT_WGSL}
 fn sampleHeightNearest(localUV: vec2<f32>, atlasOffset: vec2<f32>, atlasScale: f32, lod: i32, layer: i32) -> f32 {
     if (DEBUG_SAMPLE_FIX) {
         return sampleHeightNearestChunkLocal(localUV, atlasOffset, atlasScale, layer);

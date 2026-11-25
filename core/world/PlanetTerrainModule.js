@@ -84,7 +84,10 @@ export class PlanetTerrainModule extends TerrainModule {
             },
             {
                 setWaterData: data => {
-                    if (data && !this.nearWater) this.nearWater = new NearWaterRenderer(this.options);
+                    if (data && !this.nearWater) {
+                        this.nearWater = new NearWaterRenderer(this.options);
+                        this.nearWater.seaView = () => this.renderer.getSeaView?.() ?? null;
+                    }
                     this.nearWater?.setWaterData(data);
                 },
                 render: frame => render(this.nearWater, frame),

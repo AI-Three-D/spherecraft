@@ -25,7 +25,7 @@ import { TileAddress } from './tileAddress.js';
 import {gpuDeviceLoss,reportGpuAsyncFailure} from '../../../shared/gpuDeviceState.js';
 import { Logger } from '../../../shared/Logger.js';
 import { buildTraversalShaderSource } from './quadtreeTraversal.wgsl.js?regionalTerrainApi=1';
-import { buildInstanceBuilderShaderSource, EDGE_STITCH_RECORD_BYTES } from './instanceBufferBuilder.wgsl.js';
+import { BUILD_WORKGROUPS, buildInstanceBuilderShaderSource, EDGE_STITCH_RECORD_BYTES } from './instanceBufferBuilder.wgsl.js';
 
 // ─── Uniform layout constants ─────────────────────────────────────────────
 // Matches the TraversalParams struct in the WGSL shader.
@@ -209,6 +209,8 @@ this._instanceStageBytes = 0;
         this._bindGroup       = null;
 
         this._instancePipeline = null;
+        this._instanceBuildPipeline = null;
+        this._instanceFinishPipeline = null;
         this._instanceBindGroupLayout = null;
         this._instanceBindGroup = null;
 
@@ -424,6 +426,8 @@ async _withDebugReadbackLock(fn) {
         this._groundBindGroup = null;
 
         this._instancePipeline = null;
+        this._instanceBuildPipeline = null;
+        this._instanceFinishPipeline = null;
         this._instanceBindGroupLayout = null;
         this._instanceBindGroup = null;
 
@@ -690,8 +694,12 @@ _logTraversalSeeds(seeds, tag = "QT-Seeds") {
         const pass = commandEncoder.beginComputePass({
             label: 'QuadtreeInstanceBuilder'
         });
-        pass.setPipeline(this._instancePipeline);
         pass.setBindGroup(0, this._instanceBindGroup);
+        pass.setPipeline(this._instancePipeline);
+        pass.dispatchWorkgroups(1);
+        pass.setPipeline(this._instanceBuildPipeline);
+        pass.dispatchWorkgroups(BUILD_WORKGROUPS);
+        pass.setPipeline(this._instanceFinishPipeline);
         pass.dispatchWorkgroups(1);
         pass.end();
     }
@@ -1630,14 +1638,12 @@ if (!this._loggedTraversalVariant) {
             bindGroupLayouts: [this._instanceBindGroupLayout]
         });
 
-        this._instancePipeline = this.device.createComputePipeline({
-            label:   'QT-InstanceBuilderPipeline',
-            layout:  pipelineLayout,
-            compute: {
-                module:     shaderModule,
-                entryPoint: 'main'
-            }
-        });
+        [this._instancePipeline, this._instanceBuildPipeline, this._instanceFinishPipeline] = ['prepare', 'build', 'finish'].map(entryPoint =>
+            this.device.createComputePipeline({
+                label:   `QT-InstanceBuilderPipeline-${entryPoint}`,
+                layout:  pipelineLayout,
+                compute: { module: shaderModule, entryPoint }
+            }));
 
         Logger.info('[QuadtreeGPU] Instance builder pipeline created');
     }

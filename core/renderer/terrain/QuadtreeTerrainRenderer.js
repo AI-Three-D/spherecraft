@@ -9,6 +9,8 @@ import { TerrainGeometryBuilder } from './geometry/terrainGeometryBuilder.js';
 import { TerrainMaterialBuilder } from './materials/terrainMaterialBuilder.js';
 import { createGroundMaterials } from './materials/groundMaterials.js';
 import { TerrainLightMap } from './light/TerrainLightMap.js';
+import { TerrainPass } from './draw/TerrainPass.js';
+import { aerialFadeRange } from './shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
 import { Logger } from '../../../shared/Logger.js';
 
@@ -39,6 +41,8 @@ export class QuadtreeTerrainRenderer {
         this._overlayMaterials = new Map();
         this._ground = null;
         this._landLight = null;
+        /** Draws the terrain when it can (TerrainPass.js). */
+        this.pass = null;
         this._wetness = 0;
         this._lodIndexCounts = [];
         this._lodSegments = null;
@@ -69,12 +73,45 @@ export class QuadtreeTerrainRenderer {
             }
         }
         await this._buildGeometriesAndMaterials();
+        await this._createPass();
 
         // Feed index counts back to the tile manager so indirect draw args are correct
         this.tileManager?.updateLodIndexCounts(this._lodIndexCounts);
 
         this._initialized = true;
         Logger.info('[QuadtreeTerrainRenderer] Initialized');
+    }
+
+    async _createPass() {
+        const shader = this.engineConfig.rendering?.terrainShader ?? {};
+        const textures = this.tileManager?.getArrayTextures?.() ?? {};
+        const usable = shader.terrainPass !== false && this._ground && this._landLight && shader.solidColorTierEnabled === true
+            && shader.solidColorTierEdgeBlendEnabled !== true && this.engineConfig.features?.shadows === false
+            && this.planetConfig?.engineConfig?.splatConfig?.fixedMaterialFamiliesEnabled === true
+            && ['height', 'normal', 'splatData', 'splatIndex', 'coarseColor'].every(name => textures[name]?._isArray)
+            && TerrainPass.supported(this.backend.device, this.tileManager);
+        if (!usable) return;
+        const pass = new TerrainPass({
+            device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground, landLight: this._landLight,
+            planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments),
+            meshes: Array.from({ length: this._maxGeomLOD + 1 }, (_, lod) => this._geometries.get(lod).index.data),
+        });
+        try {
+            await pass.initialize();
+            this.pass = pass;
+        } catch (error) {
+            pass.destroy();
+            Logger.warn(`[QTR] terrain pass unavailable, drawing with materials: ${error?.message ?? error}`);
+        }
+    }
+
+    // Whether this frame's terrain is the pass's. Its uniforms are the finest level's, which are made here.
+    _passDraws(camera) {
+        if (!this.pass || this._terrainLayerViewMode !== 0 || !camera || !this.engineConfig.rendering.terrainShader.groundMaterials) return false;
+        const mat = this._materials.get(0);
+        if (!mat) return false;
+        this._applyMaterialUniforms(mat, camera, camera.matrixWorldInverse, camera.projectionMatrix, 0);
+        return this.pass.ready(mat.uniforms);
     }
 
     get geometries() {
@@ -140,6 +177,7 @@ export class QuadtreeTerrainRenderer {
         this._updateWetness(frame?.deltaTime);
         const sun = this.uniformManager?.uniforms?.sunLightDirection?.value;
         const position = frame?.camera?.position;
+        this._drawnByPass = false;
         if (!this._landLight || !sun || !position || !encoder) return;
         const origin = this.planetConfig.origin ?? { x: 0, y: 0, z: 0 };
         const length = Math.hypot(sun.x, sun.y, sun.z) || 1;
@@ -149,6 +187,14 @@ export class QuadtreeTerrainRenderer {
             radius: this.planetConfig.radius, heightScale: this.planetConfig.heightScale,
             sun: [sun.x / length, sun.y / length, sun.z / length],
         });
+        this._tierFade = this._computeTierFadeDistances();
+        this._drawnByPass = this._initialized && this.tileManager?.isReady() && this._passDraws(frame.camera);
+        if (this._drawnByPass) {
+            this.pass.compute(encoder, {
+                u: this._materials.get(0).uniforms, camera: frame.camera, water: this._waterData?.value ?? null,
+                tierFade: this._tierFade, wetness: this._wetness, airFade: aerialFadeRange(this.engineConfig.rendering.terrainShader),
+            });
+        }
     }
 
     render(camera, viewMatrix, projectionMatrix) {
@@ -159,6 +205,18 @@ export class QuadtreeTerrainRenderer {
         const overlayEnabled = this._isHoverOverlayEnabled();
         this._tierFade = this._computeTierFadeDistances();
         this._shadersLeft = 1;
+        if (this._drawnByPass) {
+            const pass = this.backend.getRenderPassEncoder();
+            if (pass) {
+                this.pass.draw(pass);
+                if (overlayEnabled) {
+                    for (let lod = 0; lod <= this._maxGeomLOD; lod++) {
+                        this._drawTerrainOverlay(lod, this._geometries.get(lod), camera, viewMatrix, projectionMatrix, instanceBuffer, indirectBuffer, this.tileManager.getIndirectArgsOffsetBytes(lod));
+                    }
+                }
+                return;
+            }
+        }
 
         for (let lod = 0; lod <= this._maxGeomLOD; lod++) {
             this._drawTerrainLod(
@@ -172,6 +230,13 @@ export class QuadtreeTerrainRenderer {
             );
         }
     }
+
+    /** What the pass knows of the sea: { about, rect: GPUBuffer }, or null when it does not draw. */
+    getSeaView() {
+        return this._drawnByPass ? { about: this.pass.seaAbout, rect: this.pass.seaView } : null;
+    }
+
+    afterSubmit() { if (this._drawnByPass) this.pass.afterSubmit(); }
 
     // The new shader compiles beside the one in use, which draws until it is ready: no hitch when rain sets in.
     _changeFragment(mat, fragment) {
@@ -492,6 +557,8 @@ export class QuadtreeTerrainRenderer {
         this._geometries.clear();
         this._materials.clear();
         this._overlayMaterials.clear();
+        this.pass?.destroy();
+        this.pass = null;
         this._ground?.destroy();
         this._ground = null;
         this._landLight?.dispose();

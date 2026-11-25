@@ -171,6 +171,8 @@ export class WaterGpuData {
         this._tableI32 = new Int32Array(this._table.buffer);
         this._params = new ArrayBuffer(LAKE_PARAMS_FLOATS * 4);
         this._ready = false;
+        // Counts the changes of the cells' lakes (WaterCoverage.js).
+        this.coverageVersion = 0;
         this._appliedVersion = -1;
         this._applied = new Map();     // lakeId -> refined record already in the index
         this._layerOf = new Map();     // lakeId -> mask layer
@@ -277,6 +279,7 @@ export class WaterGpuData {
         }
         this._packLakeOverflow();
         this.device.queue.writeBuffer(this.indexBuffer, 0, this.index);
+        this.coverageVersion++;
         this._dirtyRows.clear();
         this.lakeCount = svc.lakes.length;
     }
@@ -284,6 +287,7 @@ export class WaterGpuData {
     _flushRows() {
         this._packLakeOverflow();
         if (!this._dirtyRows.size) return;
+        this.coverageVersion++;
         const rows = [...this._dirtyRows].sort((x, y) => x - y);
         // Contiguous row runs, one upload each.
         let start = rows[0], prev = rows[0];
