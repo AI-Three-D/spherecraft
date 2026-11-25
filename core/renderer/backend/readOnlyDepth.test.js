@@ -14,12 +14,24 @@ describe('opaque depth reused by transparent geometry',()=>{
         const {backend,begin,depth}=fixture();
         expect(backend.getDepthTextureView()).toBe(depth);
         backend.resumeRenderPass({depthReadOnly:true});
+        backend.getRenderPassEncoder();
         expect(begin.mock.calls[0][0].depthStencilAttachment).toEqual({view:depth,depthReadOnly:true});
         expect(begin.mock.calls[0][0].colorAttachments[0].loadOp).toBe('load');
     });
     it('restores the ordinary depth-writing pass for subsequent draws',()=>{
         const {backend,begin,depth}=fixture();
-        backend.resumeRenderPass({depthReadOnly:true});backend.endRenderPassForCompute();backend.resumeRenderPass();
+        backend.resumeRenderPass({depthReadOnly:true});backend.getRenderPassEncoder();
+        backend.endRenderPassForCompute();backend.resumeRenderPass();backend.getRenderPassEncoder();
         expect(begin.mock.calls[1][0].depthStencilAttachment).toEqual({view:depth,depthClearValue:1,depthLoadOp:'load',depthStoreOp:'store'});
+    });
+    it('begins a resumed pass at its first use, and not at all without one',()=>{
+        const {backend,begin}=fixture();
+        backend.resumeRenderPass();backend.endRenderPassForCompute();
+        expect(begin).not.toHaveBeenCalled();
+        expect(backend.getRenderPassEncoder()).toBeNull();
+        backend.resumeRenderPass();
+        const pass=backend.getRenderPassEncoder();
+        expect(backend.getRenderPassEncoder()).toBe(pass);
+        expect(begin).toHaveBeenCalledTimes(1);
     });
 });

@@ -328,6 +328,7 @@ export class TerrainMaterialBuilder {
                 solidColorAverageWindowMeters,
                 faceSizeMeters,
                 fixedMaterialFamiliesEnabled,
+                enableGroundMaterials: !overlayPass && !!atlasTextures.ground,
             };
             const useStorageBuffer = enableInstancing && useStorageBufferInstancing;
             const vertexShader = builders.buildTerrainChunkVertexShader({
@@ -340,11 +341,13 @@ export class TerrainMaterialBuilder {
                 terrainShaderConfig,
                 enableTierEdgeBlend,
                 forwardTierFlags: enableIncompleteSourceFlat,
+                landLight: !!atlasTextures.ground,
                 debugMode: debugVertexMode
             });
+            const specializeFragment = !overlayPass && terrainShaderConfig?.skipHiddenMaterial === true;
             const fragmentShader = overlayPass
                 ? builders.buildTerrainChunkHoverOverlayFragmentShader(shaderOptions)
-                : builders.buildTerrainChunkFragmentShader(shaderOptions);
+                : builders.buildTerrainChunkFragmentShader({ ...shaderOptions, productionDraw: specializeFragment });
 
             const isSpherical = faceIndex >= 0 && faceIndex <= 5;
             const chunkSizeUV = 1.0 / faceSize;
@@ -447,7 +450,11 @@ coarseColorTexture: { value: cachedTextures.coarseColor ?? null },
             // === LOOKUP TABLES ===
             tileTypeLookup: { value: lookupTables.tileTypeLookup },
             macroTileTypeLookup: { value: lookupTables.macroTileTypeLookup },
-            numVariantsTex: { value: lookupTables.numVariantsTex },
+            terrainWetness: { value: 0 },
+            groundAlbedo: { value: atlasTextures.ground?.albedo ?? null },
+            groundSurface: { value: atlasTextures.ground?.surface ?? null },
+            groundSampler: { value: atlasTextures.ground?.sampler ?? null },
+            groundWideSampler: { value: atlasTextures.ground?.wideSampler ?? null },
 
             // === ATLAS TEXTURES ===
             atlasTexture: { value: atlasTextures.micro },
@@ -603,6 +610,16 @@ coarseColorTexture: { value: cachedTextures.coarseColor ?? null },
 
         material._normalTextureFormat = this._getGPUFormatForTexture(cachedTextures.normal) || 'rgba32float';
         material._chunkTextureFormats = chunkTextureFormats;
+        if (specializeFragment) {
+            // Leaving out what a scene or a level of detail does not use makes the rest faster too (registers):
+            // 'lit' with clustered lights, 'wet' with the far water, 'rain' with wet ground,
+            // 'far' with the way into the far tier. The first is what the material starts with.
+            const build = (key) => (key === 'diagnostic' ? builders.buildTerrainChunkFragmentShader(shaderOptions)
+                : builders.buildTerrainChunkFragmentShader({
+                    ...shaderOptions, productionDraw: true, clusteredLights: key.includes('lit'), farWater: key.includes('wet'), rain: key.includes('rain'), farGround: key.includes('far'),
+                }));
+            material._terrainFragmentVariants = { 'lit wet rain far': fragmentShader, get(key) { return this[key] ??= build(key); } };
+        }
         // Back-compat with the previous simpler field.
         material._normalTextureFormat = chunkTextureFormats.normal;
         return material;

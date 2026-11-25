@@ -1635,8 +1635,28 @@ endRenderPassForCompute() {
     this._endCurrentRenderPass();
 }
 
-resumeRenderPass({ depthReadOnly = false } = {}) {
-    if (this._renderPassEncoder) return;
+// The render pass in use. One that was resumed begins at its first use: a pass loads and stores the whole target even
+// when nothing is drawn in it.
+get _renderPassEncoder() {
+    if (!this._activePass && this._resumeOptions) {
+        const options = this._resumeOptions;
+        this._resumeOptions = null;
+        this._beginResumedPass(options);
+    }
+    return this._activePass ?? null;
+}
+
+set _renderPassEncoder(pass) {
+    this._activePass = pass;
+    this._resumeOptions = null;
+}
+
+resumeRenderPass(options = {}) {
+    if (this._activePass || this._resumeOptions) return;
+    this._resumeOptions = options;
+}
+
+_beginResumedPass({ depthReadOnly = false } = {}) {
     this._ensureCommandEncoder();
     
     let depthView = null;
@@ -1695,10 +1715,8 @@ resumeRenderPass({ depthReadOnly = false } = {}) {
 }
 
 _endCurrentRenderPass() {
-    if (this._renderPassEncoder) {
-        this._renderPassEncoder.end();
-        this._renderPassEncoder = null;
-    }
+    this._activePass?.end();
+    this._renderPassEncoder = null;
 }
 
 submitCommands() {

@@ -153,7 +153,7 @@ fn main(in: FieldWaterVOut) -> @location(0) vec4<f32> {
     var keep = ${KEEP_M.toFixed(2)};
     if (front <= 0.0) {
         let over = fieldWaterOverTooth(in.wp, -front);
-        if (over < 0.0) { discard; }
+        if (over < 0.0) { return vec4<f32>(0.0); }
         nearWaterBedOverride = over;
         // Behind a tooth on the far bank the ray comes down to the water's level past its edge.
         keep = ${TOOTH_KEEP_M.toFixed(1)};
@@ -165,10 +165,10 @@ fn main(in: FieldWaterVOut) -> @location(0) vec4<f32> {
             nearWaterBedOverride = max(front, fieldWaterToe(in.sdf, normalize(U.cameraPos - in.wp), normalize(in.wp - U.origin), ramp));
         }
     }
-    if (whiteCovered(in.xy)) { discard; }
+    if (whiteCovered(in.xy)) { return vec4<f32>(0.0); }
     let dir = normalize(in.wp - U.origin);
     // The signed distance comes from the vertices: no field lookup per fragment.
-    if (in.sdf < -keep) { discard; }
+    if (in.sdf < -keep) { return vec4<f32>(0.0); }
     if (waterParams.debugMode == 6u) { return vec4<f32>(0.0, WATER_OWNER_ON, 0.0, 0.0); }
     if (waterParams.debugMode == 7u) { return vec4<f32>(0.0, 0.0, WATER_OWNER_ON, 0.0); }
     if (waterParams.debugMode >= 11u && waterParams.debugMode <= 15u) {
@@ -182,7 +182,7 @@ fn main(in: FieldWaterVOut) -> @location(0) vec4<f32> {
     } else {
         c = nearWaterShade(in.wp, in.pos.xy, in.plane);
     }
-    if (c.a <= 0.0) { discard; }
+    if (c.a <= 0.0) { return vec4<f32>(0.0); }
     return c;
 }
 `;

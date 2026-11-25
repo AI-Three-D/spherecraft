@@ -6,6 +6,7 @@ import { GameTime } from './gameTime.js';
 import { EnvironmentState } from '../core/environment/EnvironmentState.js';
 import { Vector3 } from '../shared/math/index.js';
 import { TextureAtlasManager } from '../core/texture/TextureManager.js';
+import { groundCategoryColors } from '../core/renderer/terrain/materials/groundMaterials.js';
 import { Spaceship } from './game/spaceShip.js';
 import { SpaceshipModel } from './game/spaceShipModel.js';
 import { AltitudeController } from './game/altitudeController.js';
@@ -625,6 +626,10 @@ this.textureManager = new TextureAtlasManager(false, gpuDevice, this.proceduralT
     TILE_LAYER_HEIGHTS,
     TILE_TRANSITION_RULES
 });
+if (this.engineConfig.rendering?.terrainShader?.groundMaterials) {
+    // Far terrain takes the colour the close ground averages to.
+    this.textureManager.categoryColors = groundCategoryColors();
+}
 this.textureManager.backend = this.renderer.backend;
 this.renderer.textureManager = this.textureManager;
 

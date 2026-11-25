@@ -795,6 +795,12 @@ export class TextureAtlasManager {
 
         for (const category of tileCategories) {
             if (!Number.isFinite(category?.id) || !Array.isArray(category.ranges)) continue;
+            // The generated ground surfaces' own means (groundCategoryColors), by category name.
+            const override = this.categoryColors?.[String(category.name ?? '').toUpperCase()];
+            if (override) {
+                result.set(category.id, override);
+                continue;
+            }
             let r = 0, g = 0, b = 0, count = 0;
             for (const [minId, maxId] of category.ranges) {
                 for (let tileId = minId; tileId <= maxId; tileId++) {

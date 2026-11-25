@@ -29,4 +29,18 @@ describe('terrain fragment shader, flat-tier color', () => {
             expect(code).toContain('debugMode == 107');
         });
     }
+
+    it.each([[0, true], [0, true, false], [4, true], [4, false], [6, true]])('validates the ground materials at LOD%i, productionDraw=%s, farGround=%s', (lod, productionDraw, farGround) => {
+        const code = buildTerrainChunkFragmentShader({
+            lod, useArrayTextures: true, normalTextureFilterable: true, tileCategories: TILE_CATEGORIES,
+            fixedMaterialFamiliesEnabled: true, hasCoarseColorTexture: true, faceSizeMeters: 262144,
+            enableSolidColorTier: lod >= 5, enableTierDistanceFade: lod < 5, enableIncompleteSourceFlat: lod < 5,
+            enableLod0ResolvedColor: true, enableGroundMaterials: true, productionDraw, farGround,
+            terrainShaderConfig: { skipHiddenMaterial: true, nearMaxLOD: 4, normalMapMaxLod: 7 },
+        });
+        expect(() => validate(parseWgsl(code))).not.toThrow();
+        expect(code).not.toMatch(/\bdiscard;/);
+        if (productionDraw) expect(code).toContain('shadeGround(groundFrame(');
+        if (productionDraw && lod <= 4) expect(code.includes('let t = groundFar(')).toBe(farGround !== false);
+    });
 });

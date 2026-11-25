@@ -7,6 +7,8 @@ import { buildFixedMaterialFamilyFragmentWGSL } from '../../../../world/material
 import { buildCoarseCategoryColorFragmentWGSL } from '../../../../world/tileCategoryColors.js';
 import { createWaterWgsl } from '../../../../world/water/waterWgsl.js';
 
+import { buildGroundSurfaceWGSL } from './groundSurface.wgsl.js';
+
 const blendModeBlock = /* wgsl */`
 // ============================================================================
 // Blend mode + break style constants
@@ -504,6 +506,7 @@ export function aerialFadeRange(terrainShaderConfig = {}) {
 
 export function buildTerrainChunkFragmentShader(options = {}) {
     const normalTextureFilterable = options.normalTextureFilterable === true;
+    const productionDraw = options.productionDraw === true;
 
     const enableTerrainAO = options.enableTerrainAO !== false;
     const enableGroundField = options.enableGroundField === true;
@@ -737,6 +740,12 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const useVariantRotation = variantRotationMaxLod >= 0 && lod <= variantRotationMaxLod;
     const enableNearMipSharpen = nearMipSharpenMaxLod >= 0 && lod <= nearMipSharpenMaxLod && nearMipSharpenScale < 0.9999;
     const enableSplat = lod <= nearMaxLod;
+    // Close and middle ground from the generated surfaces (groundSurface.wgsl.js); the diagnostic draw keeps the atlas.
+    const groundBindings = options.enableGroundMaterials === true && fixedMaterialFamiliesEnabled && faceSizeMeters > 0;
+    const enableGround = groundBindings && productionDraw && enableSplat;
+    const enableGroundFar = groundBindings && productionDraw;
+    // Tiles that cannot reach the far tier leave it out (QuadtreeTerrainRenderer).
+    const groundReachesFar = !enableGround || options.farGround !== false;
     const splatBlendMaxLod = Number.isFinite(terrainShaderConfig.splatBlendMaxLod)
     ? Math.max(0, Math.floor(terrainShaderConfig.splatBlendMaxLod))
     : 1;
@@ -749,16 +758,19 @@ export function buildTerrainChunkFragmentShader(options = {}) {
     const enableNearToMidFade = lod === nearMaxLod;
     const enableMacroOverlay = forceMacroOverlay || lod >= macroStartLod;
     const usePointSampling = false;//lod >= pointSampleLodStart;
-    const enableClusteredLights = true;//lod <= clusteredMaxLod;
+    // Without lights in the scene the production draw leaves them out altogether (QuadtreeTerrainRenderer).
+    const enableClusteredLights = options.clusteredLights !== false;
+    const enableRain = options.rain !== false;
     const enableAerialPerspective = lod <= aerialMaxLod;
     // Lake and river water drawn in the terrain's own shading (core/world/
     // water/waterWgsl.js; WaterGpuData switches it on at runtime once water
     // exists). terrainShader.lakeWater: false removes it from the shader.
-    const enableLakeWater = terrainShaderConfig.lakeWater !== false;
+    const enableLakeWater = terrainShaderConfig.lakeWater !== false && options.farWater !== false;
     const enablePointSplat = false;
     
     const enableNormalMap = lod <= normalMapMaxLod;
     const enableLighting = true;
+    const skipHiddenMaterial = terrainShaderConfig.skipHiddenMaterial === true;
     const enableLod0ResolvedColor =
         options.enableLod0ResolvedColor === true &&
         !enableResolvedColor;
@@ -987,6 +999,7 @@ const USE_POINT_SPLAT: bool = ${enablePointSplat ? 'true' : 'false'};
 const AP_FADE_START: f32 = ${apFadeStartMeters.toFixed(1)};
 const AP_FADE_END: f32 = ${apFadeEndMeters.toFixed(1)};
 
+const ENABLE_GROUND: bool = ${enableGround ? 'true' : 'false'};
 const ENABLE_SPLAT: bool = ${enableSplat ? 'true' : 'false'};
 const USE_FIXED_MATERIAL_FAMILIES: bool = ${fixedMaterialFamiliesEnabled ? 'true' : 'false'};
 const SPLAT_TIER: i32 = ${splatTier};
@@ -1094,7 +1107,7 @@ struct FragmentUniforms {
     level2Blend: f32,
 
     fogColor: vec3<f32>,
-    macroNoiseWeight: f32,
+    wetness: f32,
     terrainDebugMode: i32,
     terrainLayerViewMode: i32,
     // Distance ramp into the solid-color tier (camera distance, m), written
@@ -1121,9 +1134,9 @@ ${hasCoarseColorTexture ? `@group(1) @binding(10) var coarseColorTexture: ${chun
 @group(2) @binding(1) var level2AtlasTexture: texture_2d_array<f32>;
 @group(2) @binding(2) var tileTypeLookup: texture_2d<f32>;
 @group(2) @binding(3) var macroTileTypeLookup: texture_2d<f32>;
-// Legacy binding retained to keep the atlas bind-group layout stable. The
-// terrain shader no longer reads runtime texture-variant counts.
-@group(2) @binding(4) var numVariantsTex: texture_2d<f32>;
+${enableGroundFar ? `@group(2) @binding(4) var groundAlbedo: texture_2d_array<f32>;
+@group(2) @binding(9) var groundSurface: texture_2d_array<f32>;
+@group(2) @binding(10) var groundSampler: sampler;\n@group(2) @binding(11) var groundWideSampler: sampler;` : ''}
 @group(2) @binding(5) var textureSampler: sampler;
 @group(2) @binding(6) var nearestSampler: sampler;
 
@@ -1136,7 +1149,8 @@ ${enableLakeWater ? createWaterWgsl({ group: 3, riverField: true }) : ''}
 struct FragmentInput {
     @builtin(position) clipPosition: vec4<f32>,
     @location(0) vUv: vec2<f32>,
-    @location(1) vNormal: vec3<f32>,
+    // Ground coordinate (m): along the cube face, wrapped, and the height (groundSurface.wgsl.js).
+    @location(1) vGround: vec3<f32>,
     @location(2) vWorldPosition: vec3<f32>,
     @location(3) vViewPosition: vec3<f32>,
     @location(4) vDistanceToCamera: f32,
@@ -1147,8 +1161,7 @@ struct FragmentInput {
     @location(5) vMaterialUv: vec4<f32>,
     @location(6) vWorldPos: vec2<f32>,
     @location(7) vSphereDir: vec3<f32>,
-    @location(8) vHeight: f32,
-    @location(9) vDisplacement: f32,
+    @location(8) vLandLight: vec2<f32>,
     @location(10) vAtlasOffset: vec2<f32>,
     @location(11) vAtlasScale: f32,
     @location(12) vLayer: f32,
@@ -1183,6 +1196,16 @@ fn sampleRGBA32FBilinear(tex: texture_2d_array<f32>, uv: vec2<f32>, layer: i32) 
     let c11 = textureLoad(tex, clamp(vec2<i32>(base) + vec2<i32>(1,1), vec2<i32>(0), maxCoord), layer, 0);
 
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+fn sampleHeightBilinear(uv: vec2<f32>, layer: i32) -> f32 {
+    let last = vec2<i32>(textureDimensions(heightTexture_f)) - 1;
+    let at = clamp(uv * vec2<f32>(last + 1) - 0.5, vec2<f32>(0.0), vec2<f32>(last));
+    let a = vec2<i32>(at);
+    let b = min(a + 1, last);
+    let f = fract(at);
+    return mix(mix(textureLoad(heightTexture_f, a, layer, 0).r, textureLoad(heightTexture_f, vec2<i32>(b.x, a.y), layer, 0).r, f.x),
+        mix(textureLoad(heightTexture_f, vec2<i32>(a.x, b.y), layer, 0).r, textureLoad(heightTexture_f, b, layer, 0).r, f.x), f.y);
 }
 
 fn hemiOctDecode(e: vec2<f32>) -> vec3<f32> {
@@ -3074,16 +3097,13 @@ fn sampleMacroTileColorBilinear(
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 fn sampleMacroOverlaySplat(
-    input: FragmentInput,
+    macroWorld: vec2<f32>,
     activeSeason: i32,
-    layer: i32,
+    ddx_uv: vec2<f32>,
+    ddy_uv: vec2<f32>,
     splat: SplatData
 ) -> vec3<f32> {
-    let macroScale = max(fragUniforms.macroScale, 0.0001);
-    let macroWorld = input.vWorldPos * macroScale;
     let local = fract(macroWorld);
-    let ddx_uv = dpdx(macroWorld);
-    let ddy_uv = dpdy(macroWorld);
 
     let dominantId = splatDominantTileId(splat);
     let dominantW = splatDominantWeight(splat);
@@ -3184,25 +3204,6 @@ fn sampleMacroOverlaySimplePrepared(
     return sampleMacroTileColor(id, macroTileCoord, local, activeSeason, ddx_uv, ddy_uv).rgb;
 }
 
-fn sampleMacroOverlaySimple(
-    input: FragmentInput,
-    activeSeason: i32,
-    tileId: f32
-) -> vec3<f32> {
-    let macroScale = max(fragUniforms.macroScale, 0.0001);
-    let macroWorld = input.vWorldPos * macroScale;
-    let local = fract(macroWorld);
-    let ddx_uv = dpdx(macroWorld);
-    let ddy_uv = dpdy(macroWorld);
-    return sampleMacroOverlaySimplePrepared(
-        macroWorld,
-        local,
-        activeSeason,
-        ddx_uv,
-        ddy_uv,
-        tileId
-    );
-}
 fn computeMacroBlendStrength(
     input: FragmentInput,
     layer: i32,
@@ -3233,6 +3234,34 @@ fn applyDitchDarkening(macroColor: vec3<f32>, worldPos: vec2<f32>) -> vec3<f32> 
     return macroColor * luminanceMask;
 }
 
+${enableGroundFar ? buildGroundSurfaceWGSL({ faceSizeMeters, fineEndMeters: terrainShaderConfig.groundFineEndMeters, deepEndMeters: lod === 0 ? terrainShaderConfig.groundDeepEndMeters : 0, close: enableGround, farTier: groundReachesFar }) : ''}
+${enableGroundFar ? `
+// Daylight on the ground: the sun, the sky over it and what its surroundings throw back. ambient is the scene's own,
+// which at night is all there is.
+fn terrainLight(n: vec3<f32>, shape: vec3<f32>, up: vec3<f32>, sunDir: vec3<f32>, sun: vec3<f32>, ambient: vec3<f32>,
+    open: f32, leaf: f32, shadow: f32, land: vec2<f32>) -> vec3<f32> {
+    let sunUp = dot(up, sunDir);
+    let day = smoothstep(-0.10, 0.20, sunUp);
+    let facing = dot(n, sunDir);
+    // Small hollows lose the sun before the surface turns away from it. Leaves pass some light on.
+    var direct = max(facing, 0.0) * clamp(facing + 2.0 * open - 1.0, 0.0, 1.0);
+    direct = mix(direct, max((facing + 0.35) / 1.35, 0.0) * mix(0.75, 1.0, open), 0.6 * leaf);
+    // A face turned from the sun by the land's own shape stays in its shade.
+    direct *= smoothstep(-0.06, 0.18, dot(shape, sunDir)) * land.x;
+    let skyTint = ambient / max(dot(ambient, vec3<f32>(0.333)), 1.0e-4);
+    let overhead = 0.5 + 0.5 * dot(n, up);
+    let sky = dot(sun, vec3<f32>(0.333)) * 0.34 * day * mix(vec3<f32>(1.0), skyTint, 0.8);
+    // The part of the sky the land covers shows sunlit land instead.
+    let covered = 1.0 - land.y;
+    let bounce = sun * max(sunUp, 0.0) * vec3<f32>(0.115, 0.105, 0.070) * mix(0.55, 1.0, land.x) * (covered + (1.0 - overhead) * 0.8);
+    let hollow = mix(open, 1.0, 0.45);
+    var light = sun * direct * shadow + (ambient + sky * overhead * land.y + bounce) * hollow;
+    // The night look's floor (sun under the horizon).
+    let floorLight = mix(0.30, 0.06, day);
+    light = max(light, vec3<f32>(floorLight) * mix(1.0, hollow, day));
+    return light;
+}
+` : ''}
 ${shadowSamplingCode}
 // ----------------------------------------------------------------------------
 // FRAGMENT MAIN
@@ -3244,8 +3273,7 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let activeSeason = select(fragUniforms.nextSeason, fragUniforms.currentSeason, fragUniforms.seasonTransition < 0.5);
     let layer = i32(round(input.vLayer));
     let materialLayer = i32(round(input.vMaterialUv.w));
-    let debugMode = fragUniforms.terrainDebugMode;
-    let layerViewMode = fragUniforms.terrainLayerViewMode;
+    ${productionDraw ? 'const debugMode: i32 = 0;\n    const layerViewMode: i32 = 0;' : 'let debugMode = fragUniforms.terrainDebugMode;\n    let layerViewMode = fragUniforms.terrainLayerViewMode;'}
     // Mode 90: geometryLOD by color — verifies which LOD's compiled shader
     // variant is actually rendering a given on-screen tile, independent of
     // any of the color/lighting debug modes below.
@@ -3350,6 +3378,12 @@ fn main(input: FragmentInput) -> @location(0) vec4<f32> {
     let segDims = vec2<f32>(fragUniforms.chunkWidth, fragUniforms.chunkHeight);
     var ddx_vUv = dpdx(input.vUv) * segDims;
     var ddy_vUv = dpdy(input.vUv) * segDims;
+    let macroWorld = input.vWorldPos * max(fragUniforms.macroScale, 0.0001);
+    let macroDx = dpdx(macroWorld);
+    let macroDy = dpdy(macroWorld);
+${enableGroundFar ? `    let groundDx = dpdx(input.vGround);
+    let groundDy = dpdy(input.vGround);
+` : ''}
     if (ENABLE_NEAR_MIP_SHARPEN) {
         let sharpenFade = 1.0 - smoothstep(
             NEAR_MIP_SHARPEN_FADE_START,
@@ -3745,7 +3779,23 @@ if (debugMode == 16) {
         return vec4<f32>(color + vec3<f32>(0.0, max(midGlow, 0.0) * 0.6, 0.0), 1.0);
     }
 
-    let fallbackTileId = sampleChunkTileId(input, layer);
+    let tierBlend = select(
+        max(computeTierDistanceFade(input), computeTierEdgeBlend(input)),
+        1.0,
+        tierSourceIncomplete(input)
+    );
+    // The normal draw needs the splat only for live albedo, a macro
+    // overlay, or the contact AO boundary fade. Keep it for diagnostics.
+    let useMaterialShortcut = ${skipHiddenMaterial ? 'true' : 'false'} && debugMode == 0 && layerViewMode == 0;
+    let fullyCoarse = useMaterialShortcut && (ENABLE_SOLID_COLOR_TIER || tierBlend >= 1.0);
+    let splatForAO = ENABLE_TERRAIN_AO && lod0AOFade < 1.0 && fragUniforms.terrainAOStrength > 0.0;
+    let splatForMacro = !fullyCoarse && ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 &&
+        fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD;
+    let splatForColor = !fullyCoarse && !ENABLE_GROUND && !ENABLE_RESOLVED_COLOR && lod0ResolvedColorFade <= 0.999;
+    var fallbackTileId = 0.0;
+    if (!fullyCoarse && !ENABLE_GROUND) {
+        fallbackTileId = sampleChunkTileId(input, layer);
+    }
     let worldTileCoord = floor(input.vWorldPos);
     let local = fract(input.vWorldPos);
     // Mode 96: raw coarseTileColor(fallbackTileId) output, isolated from
@@ -3791,7 +3841,8 @@ if (debugMode == 16) {
     // 0=raw-tile, 1=lod0-fade-prebake, 2=lod-prebake, 3=live-splat  (for mode 46)
     var microColorPath: i32 = 0;
 
-    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5) {
+    if (ENABLE_SPLAT && fragUniforms.enableSplatLayer > 0.5 &&
+        (!useMaterialShortcut || splatForColor || splatForAO || splatForMacro)) {
         splatResult = sampleSplatData(input, materialLayer);
         hasLiveSplat = true;
         dominantTileId = splatDominantTileId(splatResult);
@@ -3819,7 +3870,11 @@ if (debugMode == 16) {
     //   - LOD4 still looks textured/detailed (same as mode 0) -> the alpha
     //     fallback is firing, i.e. resolvedColor is NOT valid for LOD4
     //     tiles — confirms the handoff doc's leading hypothesis directly.
-    if (debugMode == 102 && fragUniforms.geometryLOD == 4) {
+    if (fullyCoarse) {
+        microSample = vec4<f32>(sampleChunkAverageCoarseColor(input, layer), 1.0);
+    } else if (ENABLE_GROUND) {
+        microSample = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    } else if (debugMode == 102 && fragUniforms.geometryLOD == 4) {
         microSample = sampleResolvedTerrainColor(input, materialLayer);
         if (microSample.a < 0.5) {
             microSample = sampleTileColor(
@@ -4392,9 +4447,7 @@ if (debugMode == 16) {
         return vec4<f32>(color, 1.0);
     }
 
-    if (microSample.a < 0.0) {
-        discard;
-    }
+    // No discard here: its presence alone makes the GPU shade every hidden terrain layer (Apple).
 
     // ── Debug mode 86: exact current micro vs forced-union micro delta ─────
     // This uses the same shortcut-capable material sampling as normal mode 43,
@@ -4432,10 +4485,35 @@ if (debugMode == 16) {
         return vec4<f32>(color, 1.0);
     }
 
-    let microPatternStyle = getMicroPatternStyle(dominantTileId);
     var baseColor = microSample.rgb;
+${enableGroundFar ? `
+    var ground: Ground;
+    ground.gradient = vec3<f32>(0.0);
+    ground.open = 1.0;
+    ground.leaf = 0.0;
+    ground.wet = 0.35;
+    ground.pool = 0.0;
+    let groundTileNormal = calculateNormal(input, layer);
+    let groundUp = normalize(input.vSphereDir);
+    // Nothing of the sea's bed is seen through this much water.
+    let drowned = ${enableGround && enableLakeWater ? 'waterParams.enabled != 0u && waterParams.sea.y > 0.5 && input.vGround.z < waterParams.sea.x - 60.0' : 'false'};
+    if (drowned) {
+        baseColor = GROUND_MEAN[G_MUD];
+    } else${groundReachesFar ? '' : ' if (!fullyCoarse)'} {
+        var families = vec4<f32>(0.0);
+        var bed = 0.0;
+${enableGround ? `        if (!fullyCoarse) {
+            families = sampleSplatData(input, materialLayer).weights;
+            if (families.z > 0.02) { bed = sampleFixedMaterialBedShare(input, materialLayer, families.z); }
+${groundReachesFar ? '            if (tierBlend > 0.0) { baseColor = sampleChunkAverageCoarseColor(input, layer); }' : ''}
+        }
+` : ''}        ground = shadeGround(groundFrame(input.vGround, input.vWorldPos, groundDx, groundDy, groundUp), families, bed, baseColor, ${!enableGround ? '1.0' : groundReachesFar ? 'select(clamp(tierBlend, 0.0, 1.0), 1.0, fullyCoarse)' : '0.0'},
+            groundTileNormal, normalize(fragUniforms.cameraPosition - input.vWorldPosition), input.vDistanceToCamera);
+        baseColor = ground.albedo;
+    }
+` : ''}
 
-    if (ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
+    if (!fullyCoarse && !ENABLE_GROUND && ENABLE_LOD0_RESOLVED_COLOR && lod0ResolvedColorFade > 0.0001 && lod0ResolvedColorFade < 0.999) {
         let resolvedColor = sampleResolvedColorOrFallback(input, materialLayer, baseColor);
         baseColor = mix(baseColor, resolvedColor, lod0ResolvedColorFade);
     }
@@ -4482,10 +4560,10 @@ if (debugMode == 16) {
 
     let macroForcedVisible = layerViewMode == 2;
     let macroAllowedByLod = fragUniforms.geometryLOD <= fragUniforms.macroMaxLOD || macroForcedVisible;
-    if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
-        var macroColor = sampleMacroOverlaySimple(input, activeSeason, dominantTileId);
+    if (!fullyCoarse && ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
+        var macroColor = sampleMacroOverlaySimplePrepared(macroWorld, fract(macroWorld), activeSeason, macroDx, macroDy, dominantTileId);
         if (!ENABLE_RESOLVED_COLOR && hasLiveSplat) {
-            let detailedMacro = sampleMacroOverlaySplat(input, activeSeason, layer, splatResult);
+            let detailedMacro = sampleMacroOverlaySplat(macroWorld, activeSeason, macroDx, macroDy, splatResult);
             let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
             macroColor = mix(macroColor, detailedMacro, macroFade);
         }
@@ -4500,7 +4578,7 @@ if (debugMode == 16) {
         return vec4<f32>(baseColor, 1.0);
     }
 
-    if (ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
+    if (!fullyCoarse && ENABLE_LOD_EDGE_RESOLVED_COLOR && LOD_EDGE_COLOR_STRENGTH > 0.0001 && lodEdgeAmount > 0.0001) {
         let resolvedEdgeColor = sampleResolvedColorOrFallback(input, materialLayer, baseColor);
         baseColor = mix(
             baseColor,
@@ -4519,7 +4597,7 @@ if (debugMode == 16) {
     // fading to solid color at/before the real LOD5->LOD6 mesh transition
     // distance so both tiers already agree on color by the time that seam
     // is reached; tune via lodEdgeToSolidColorFadeStart/EndMeters.
-    if (ENABLE_LOD_EDGE_TO_SOLID_COLOR && LOD_EDGE_TO_SOLID_COLOR_STRENGTH > 0.0001) {
+    if (!fullyCoarse && ENABLE_LOD_EDGE_TO_SOLID_COLOR && LOD_EDGE_TO_SOLID_COLOR_STRENGTH > 0.0001) {
         let solidColorDistanceFade = smoothstep(
             LOD_EDGE_TO_SOLID_COLOR_FADE_START,
             LOD_EDGE_TO_SOLID_COLOR_FADE_END,
@@ -4539,17 +4617,11 @@ if (debugMode == 16) {
     // shared with a solid-tier neighbour, for the rare tile drawn nearer
     // than the distance ramp's end. The larger of the two wins. Replaces the
     // older LOD5-only distance fade above when either is enabled.
-    if (ENABLE_TIER_DISTANCE_FADE || ENABLE_TIER_EDGE_BLEND || ENABLE_INCOMPLETE_SOURCE_FLAT) {
-        var tierBlend = max(computeTierDistanceFade(input), computeTierEdgeBlend(input));
-        if (tierSourceIncomplete(input)) {
-            tierBlend = 1.0;
-        }
-        if (tierBlend > 0.0001) {
-            let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
-            baseColor = mix(baseColor, solidEdgeColor, tierBlend);
-        }
+${enableGroundFar ? '' : `    if (!fullyCoarse && tierBlend > 0.0001) {
+        let solidEdgeColor = sampleChunkAverageCoarseColor(input, layer);
+        baseColor = mix(baseColor, solidEdgeColor, tierBlend);
     }
-    if (ENABLE_GROUND_FIELD) {
+`}    if (ENABLE_GROUND_FIELD) {
         baseColor = applyGroundFieldFallback(baseColor, input, layer);
     }
     if (debugMode == 85) {
@@ -4563,9 +4635,9 @@ if (debugMode == 16) {
             unionBase = mix(unionBase, resolvedColor, lod0ResolvedColorFade);
         }
         if (ENABLE_MACRO_OVERLAY && fragUniforms.enableMacroLayer > 0.5 && macroAllowedByLod) {
-            var unionMacroColor = sampleMacroOverlaySimple(input, activeSeason, unionDominantTileId);
+            var unionMacroColor = sampleMacroOverlaySimplePrepared(macroWorld, fract(macroWorld), activeSeason, macroDx, macroDy, unionDominantTileId);
             if (!ENABLE_RESOLVED_COLOR) {
-                let detailedUnionMacro = sampleMacroOverlaySplat(input, activeSeason, layer, unionSplat);
+                let detailedUnionMacro = sampleMacroOverlaySplat(macroWorld, activeSeason, macroDx, macroDy, unionSplat);
                 let macroFade = select(1.0, nearToMidDetailFade, ENABLE_NEAR_TO_MID_FADE);
                 unionMacroColor = mix(unionMacroColor, detailedUnionMacro, macroFade);
             }
@@ -4592,14 +4664,6 @@ if (debugMode == 16) {
     if (debugMode == 45) {
         return vec4<f32>(baseColor, 1.0);
     }
-    // NEAR PROCEDURAL DETAIL DISABLED FOR FPS A/B:
-    // This crevice/detail layer looked better but caused a large FPS drop on
-    // near terrain. Re-enable this block to test it again after optimizing or
-    // prebaking the detail path.
-    // if (ENABLE_NEAR_DETAIL) {
-    //     baseColor = applyNearProceduralDetail(baseColor, input.vWorldPos, input.vDistanceToCamera, microPatternStyle);
-    // }
-
     var finalColor = baseColor;
     var NdotL: f32 = 1.0;
     if (ENABLE_LIGHTING || ENABLE_AERIAL_PERSPECTIVE) {
@@ -4627,7 +4691,9 @@ if (debugMode == 16) {
             worldNormal = -worldNormal;
         }
         let lightDir = normalize(fragUniforms.lightDirection);
-        NdotL = max(dot(worldNormal, lightDir), 0.0);
+${enableGroundFar ? `        let coarseNormal = worldNormal;
+        worldNormal = normalize(worldNormal - (ground.gradient - worldNormal * dot(ground.gradient, worldNormal)));
+` : ''}        NdotL = max(dot(worldNormal, lightDir), 0.0);
         // Diagnostic modes (2026-09-29): isolating a per-tile "no directional
         // light at all" defect that survives back to a9cd2ff, predating this
         // session's LOD/altitude work. Each returns raw, unprocessed data —
@@ -4684,6 +4750,15 @@ if (debugMode == 16) {
             return vec4<f32>(color, 1.0);
         }
 
+${enableGroundFar && enableRain ? `
+        // Rain: soaked ground is darker, and lies smooth under its puddles.
+        var pool = 0.0;
+        if (fragUniforms.wetness > 0.0) {
+            pool = ground.pool * smoothstep(0.35, 0.9, fragUniforms.wetness) * (1.0 - clamp(tierBlend, 0.0, 1.0));
+            baseColor *= 1.0 - ground.wet * fragUniforms.wetness - 0.35 * pool;
+            worldNormal = normalize(mix(worldNormal, groundUp, pool));
+        }
+` : ''}
         if (ENABLE_LIGHTING) {
             let ambient = fragUniforms.ambientColor * fragUniforms.ambientLightIntensity;
             let sunDiffuse = fragUniforms.lightColor * fragUniforms.sunLightIntensity * NdotL;
@@ -4728,7 +4803,7 @@ if (debugMode == 16) {
 
             var aoAmbient: f32 = 1.0;
             var aoDirect:  f32 = 1.0;
-            if (ENABLE_TERRAIN_AO) {
+            if (ENABLE_TERRAIN_AO && (!useMaterialShortcut || splatForAO)) {
                 let rawAO = sampleTerrainAO(input, layer);
                 var ao = rawAO;
                 var aoNeutralFade = lod0AOFade;
@@ -4791,6 +4866,24 @@ if (debugMode == 16) {
                 return vec4<f32>(color, 1.0);
             }
         
+${enableGroundFar ? `
+            finalColor = baseColor * terrainLight(worldNormal, coarseNormal, groundUp, lightDir, fragUniforms.lightColor * fragUniforms.sunLightIntensity, ambient, ground.open, ground.leaf, shadowFactor,
+                input.vLandLight)
+                + clusteredLight;
+${enableRain ? `
+            if (fragUniforms.wetness > 0.0) {
+                // A film of water over it, a mirror in the puddles.
+                let toEyeWet = normalize(fragUniforms.cameraPosition - input.vWorldPosition);
+                let grazing = 1.0 - max(dot(worldNormal, toEyeWet), 0.0);
+                let g2 = grazing * grazing;
+                let mirror = 0.02 + 0.98 * g2 * g2 * grazing;
+                let film = fragUniforms.wetness * mix(0.16 * ground.open, 1.0, pool);
+                // The sky is grey while it rains.
+                let skyLight = mix(vec3<f32>(dot(fragUniforms.fogColor, vec3<f32>(0.30, 0.45, 0.25))), fragUniforms.fogColor, 0.25) * (0.5 + 0.5 * input.vLandLight.y);
+                finalColor = mix(finalColor, skyLight, clamp(mirror * film, 0.0, 1.0));
+            }
+` : ''}
+` : `
             finalColor = baseColor
                        * (ambient * aoAmbient + sunDiffuse * shadowFactor * aoDirect)
                        + clusteredLight;
@@ -4800,6 +4893,7 @@ if (debugMode == 16) {
             // This albedo-scaled floor guarantees a minimum HDR signal (~0.045 for
             // average grass) that maps to ~14% sRGB at exposure=0.75.
             finalColor = max(finalColor, baseColor * 0.30);
+`}
             if (debugMode == 71) {
                 return vec4<f32>(finalColor, 1.0);
             }
@@ -4818,7 +4912,7 @@ ${enableLakeWater ? `
     var waterTexHeight = -1.0e30;
 ${useArrayTextures ? `    if (waterParams.sea.w > 0.5 && input.vDistanceToCamera > waterParams.near.x) {
         let waterHeightUv = applyChunkAtlasUV(input.vUv, heightTexture_f, input.vAtlasOffset, input.vAtlasScale);
-        waterTexHeight = sampleRGBA32FBilinear(heightTexture_f, waterHeightUv, layer).r;
+        waterTexHeight = sampleHeightBilinear(waterHeightUv, layer);
     }
 ` : ''}    finalColor = applyWater(
         finalColor, input.vWorldPosition, fragUniforms.cameraPosition, fragUniforms.planetCenter,
@@ -4852,7 +4946,7 @@ ${useArrayTextures ? `    if (waterParams.sea.w > 0.5 && input.vDistanceToCamera
                 fragUniforms.atmosphereMieAnisotropy,
                 fragUniforms.atmosphereSunIntensity
             );
-            let apSunVis = smoothstep(0.0, 0.2, NdotL);
+            let apSunVis = ${enableGroundFar ? 'smoothstep(-0.10, 0.10, dot(groundUp, normalize(fragUniforms.lightDirection)))' : 'smoothstep(0.0, 0.2, NdotL)'};
             ap.inscatter *= mix(0.2, 1.0, apSunVis);
             foggedColor = ap_applyWithBlend(finalColor, ap, apBlend);
         }

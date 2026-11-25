@@ -251,13 +251,13 @@ export function buildNearWaterFragmentShader() {
     return commonWgsl() + LAKE_WHITE_WGSL + shadeWgsl() + fieldWaterLookupWgsl() + whitewaterLookWgsl() + /* wgsl */`
 @fragment
 fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
-    if(nearWaterBehind(in.wp,in.pos.xy)<=0.0) {discard;}
+    if(nearWaterBehind(in.wp,in.pos.xy)<=0.0) { return vec4<f32>(0.0); }
     let dir = normalize(in.wp - U.origin);
     // The river field's pages draw their water themselves (fieldWaterSurface.wgsl.js).
     // The sheet runs just under their edge: world positions round to a centimetre
     // or two out here, and between two meshes that opens a gap at grazing angles.
     let grazing = max(abs(dot(normalize(U.cameraPos - in.wp), dir)), 0.02);
-    if(riverFieldHas(dir, min(${FIELD_OVERLAP_M.toFixed(3)} / grazing, 1.0) / ${RIVER_FIELD.texelM.toFixed(1)})) {discard;}
+    if(riverFieldHas(dir, min(${FIELD_OVERLAP_M.toFixed(3)} / grazing, 1.0) / ${RIVER_FIELD.texelM.toFixed(1)})) { return vec4<f32>(0.0); }
     let lake = waterLakes[in.lake];
     // The mask at the fragment's own direction, projected as waterLakeHitIn does.
     let kd = max(dot(dir, lake.c), 1.0e-6);
@@ -268,8 +268,8 @@ fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
         // Signed-distance mask (lakeMaskSdf.js): the sheet ends half a solve
         // cell beyond the solved water, where the ground is at or above the
         // level, instead of over lower ground past a sill (floating edges).
-        if (m * 255.0 - 128.0 <= lake.surfaceDepthRangeM) { discard; }
-    } else if (m < select(0.5,63.5/255.0,lake.surfaceDepthRangeM>0.0)) { discard; }
+        if (m * 255.0 - 128.0 <= lake.surfaceDepthRangeM) { return vec4<f32>(0.0); }
+    } else if (m < select(0.5,63.5/255.0,lake.surfaceDepthRangeM>0.0)) { return vec4<f32>(0.0); }
     // Close water has the surface of the rivers; past lakeDetailM that comes to the distant one.
     var c: vec4<f32>;
     if ((W.flags & ${WHITE_FLAG_LOOK}u) != 0u && length(U.cameraPos - in.wp) < waterParams.lakeDetailM) {
@@ -277,10 +277,10 @@ fn main(in: NearWaterVOut) -> @location(0) vec4<f32> {
     } else {
         c = nearWaterShade(in.wp, in.pos.xy, dir);
     }
-    if (c.a <= 0.0) { discard; }
+    if (c.a <= 0.0) { return vec4<f32>(0.0); }
     // Water debug views 6 and 7 (waterWgsl.js applyWater): alpha 0 adds
     // the flat colour to what is below (premultiplied blending).
-    if (waterParams.debugMode == 6u) { discard; }
+    if (waterParams.debugMode == 6u) { return vec4<f32>(0.0); }
     if (waterParams.debugMode == 7u) { return vec4<f32>(0.0, 0.0, WATER_OWNER_ON, 0.0); }
     return c;
 }

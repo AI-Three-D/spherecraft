@@ -297,6 +297,12 @@ export function createEngineConfig() {
         moonlight: 1.0,
       },
       terrainShader: {
+        // Generated ground surfaces (groundMaterials.js) and the light over the land (TerrainLightMap.js).
+        groundMaterials: true,
+        landLight: true,
+        groundFineEndMeters: 150,
+        groundDeepEndMeters: 16,
+        skipHiddenMaterial: true,
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
         fullMaxLOD: 0,
