@@ -103,7 +103,7 @@ fn tectonicConvergence_d(dir: vec3<f32>) -> vec4<f32> {
 export function createTectonicReliefWgsl(options, seed = 0) {
     const config = normalizeTectonicRelief(options);
     if (!config.enabled) return '';
-    const { plateCount, mountainReliefM, interiorReliefM } = config;
+    const { plateCount, mountainReliefM, interiorReliefM, lowlandReliefM, coastalReliefM } = config;
     const { sites, spins } = plateVectors(plateCount, seed);
     return `
 ${createPlateContactWgsl(convergentContacts(sites, spins))}
@@ -112,9 +112,10 @@ struct TectonicRelief {
     upland: vec4<f32>,
     mountains: vec4<f32>,
     localHills: vec4<f32>,
+    ${lowlandReliefM > 0 ? 'lowland: vec4<f32>,' : ''}
 }
 
-fn tectonicRelief_d(dir: vec3<f32>, seed: i32, landMask: vec4<f32>, existingPeaks: vec4<f32>) -> TectonicRelief {
+fn tectonicRelief_d(dir: vec3<f32>, seed: i32, landMask: vec4<f32>, existingPeaks: vec4<f32>, regionCoord: vec4<f32>) -> TectonicRelief {
     var out: TectonicRelief;
     let inland = dSmoothstep(0.47, 0.78, landMask);
     if (inland.x <= 0.0) { return out; }
@@ -151,17 +152,40 @@ fn tectonicRelief_d(dir: vec3<f32>, seed: i32, landMask: vec4<f32>, existingPeak
         let ridges = dMul(core, dMul(dConst(0.16) + dMul(peak, peak) * 0.84, dConst(0.24) + arcHeight * 0.76));
         let apronHeight = dMul(apron, dConst(0.08) + rounded * 0.17);
         let peakBlend = dConst(1.0) - dSmoothstep(500.0, 3500.0, existingPeaks * maxH) * 0.52;
+        ${coastalReliefM > 0 ? `
+        // Carry convergent belts toward the shoreline, using the same
+        // shoulders, saddles and massifs as the rest of the range.
+        let coastalUplift = dMul(dSmoothstep(0.47, 0.61, landMask),
+            dConst(1.0) - dSmoothstep(0.74, 0.93, landMask)) * ${coastalReliefM.toFixed(4)};
+        let uplift = inland * ${mountainReliefM.toFixed(4)} + coastalUplift;
+        out.mountains = dMul(dMul(uplift, peakBlend), apronHeight + ridges) * (1.0 / maxH);
+        ` : `
         out.mountains = dMul(dMul(inland, peakBlend), apronHeight + ridges) * (${mountainReliefM.toFixed(4)} / maxH);
+        `}
     }
 
     // Kilometre-scale knolls break up the slopes between the broader hills.
     // Open valley floors and steep alpine ground get a lighter treatment.
     let openCountry = dConst(1.0) - dSmoothstep(340.0, 1350.0, (existingPeaks + out.mountains) * maxH);
+    ${lowlandReliefM > 0 ? `
+    // Raise the shoulders of the existing upland field. Leave its lowest
+    // ground open for drainage and fade out before the first highland climb.
+    let plain = dConst(1.0) - dSmoothstep(0.85, REGION_HIGHLAND_START, regionCoord);
+    let lowlandWeight = dMul(dMul(inland, plain), openCountry);
+    let shoulders = dSmoothstep(0.10, 0.42, upland);
+    let hillCountry = dMul(lowlandWeight, shoulders);
+    out.lowland = hillCountry * (${lowlandReliefM.toFixed(4)} / maxH);
+    ` : ''}
     let hillCover = dMul(openCountry, dSmoothstep(-0.30, 0.26, hills + spurs * 0.32));
-    if (hillCover.x > 0.0) {
+    if (hillCover.x > 0.0${lowlandReliefM > 0 ? ' || hillCountry.x > 0.0' : ''}) {
         let knolls = fbmAuto_d(dir, 1.65, 2, seed + 28381, 2.1, 0.48);
         let shapes = dSmoothstep(-0.45, 0.52, knolls);
         out.localHills = dMul(dMul(inland, hillCover), dMul(shapes, shapes)) * (${(interiorReliefM * 0.21).toFixed(4)} / maxH);
+        ${lowlandReliefM > 0 ? `
+        // Shorter undulations share the existing knoll field and taper
+        // with the broad shoulders before reaching the valley floor.
+        out.localHills += dMul(hillCountry, shapes) * (${(lowlandReliefM * 0.43).toFixed(4)} / maxH);
+        ` : ''}
     }
     return out;
 }

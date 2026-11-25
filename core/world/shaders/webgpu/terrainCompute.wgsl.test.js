@@ -146,7 +146,7 @@ describe('terrain generation compute shader', () => {
         }
     });
     it('compiles the default world landforms together in terrain and lake table variants', () => {
-        const options = { ...base, ...worldTerrain, terrainSeed: 12345, waterCarve: true };
+        const options = { ...base, ...new TerrainGenerationConfig(worldTerrain), terrainSeed: 12345, waterCarve: true };
         for (const baseGenerator of ['earthLike', 'lakeLand']) {
             for (const lakeTable of baseGenerator === 'lakeLand' ? ['build', 'read'] : [null]) {
                 const source = createAdvancedTerrainComputeShader({ ...options, baseGenerator, lakeTable });
@@ -155,6 +155,9 @@ describe('terrain generation compute shader', () => {
                 expect(source).toContain('fn coastalHillsHeight_d(');
                 expect(source).toContain('fn coastalCoves_d(');
                 expect(source).toContain('fn tectonicConvergence_d(');
+                expect(source).toContain('fn oceanShelfHeight_d(');
+                expect(source).toContain('let lowlandWeight =');
+                expect(source).toContain('let coastalUplift =');
                 expect(source).not.toContain('fn mesaProvince_d(');
                 expect(source).not.toContain('fn cuestaProvince_d(');
             }
@@ -163,6 +166,14 @@ describe('terrain generation compute shader', () => {
         expect(createAdvancedTerrainComputeShader({ ...options, terrainSeed: 12346 })).not.toBe(combined);
         const terrainWithoutPlates = createAdvancedTerrainComputeShader({ ...options, tectonicRelief: { enabled: false } });
         expect(terrainWithoutPlates).not.toContain('fn tectonicConvergence_d(');
+        const legacyLandforms = createAdvancedTerrainComputeShader({ ...options,
+            landformDetails: { ...options.landformDetails, oceanShelves: false },
+            tectonicRelief: { ...options.tectonicRelief, lowlandReliefM: 0, coastalReliefM: 0 },
+        });
+        expect(compile(legacyLandforms)).toBeNull();
+        expect(legacyLandforms).not.toContain('fn oceanShelfHeight_d(');
+        expect(legacyLandforms).not.toContain('let lowlandWeight =');
+        expect(legacyLandforms).not.toContain('let coastalUplift =');
     });
     it('compiles the river field and shore materials in every generation variant',()=>{
         for(const extra of Object.values(variants))expect(compile(createAdvancedTerrainComputeShader({
