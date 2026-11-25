@@ -3,7 +3,7 @@ export function normalizeLandformDetails(options = {}) {
         throw new Error('landformDetails must be an object');
     }
     const details = {};
-    for (const key of ['rangeValleys', 'regionalRollingHills', 'coastalHills', 'coves']) {
+    for (const key of ['rangeValleys', 'regionalRollingHills', 'coastalHills', 'coves', 'oceanShelves']) {
         if (options[key] !== undefined && typeof options[key] !== 'boolean') {
             throw new Error(`landformDetails.${key} must be a boolean`);
         }

@@ -7,6 +7,7 @@ import { fellsWgsl } from '../features/featureFells.wgsl.js';
 import { fjordsWgsl } from '../features/featureFjords.wgsl.js';
 import { coastalCovesWgsl, coastalHillsWgsl } from '../features/featureCoast.wgsl.js';
 import { createTectonicReliefWgsl } from '../features/featureTectonicRelief.wgsl.js';
+import { createOceanFloorWgsl } from '../features/featureOceanFloor.wgsl.js';
 
 export function createEarthlikeConstants() {
   return `
@@ -193,8 +194,9 @@ export function createEarthlikeBase({
 } = {}) {
   const foothill = createFoothillWgsl(foothills);
   const inlandWgsl = createInlandLandformWgsl(inlandLandforms);
-  const { coastalHills, coves } = landformDetails ?? {};
+  const { coastalHills, coves, oceanShelves } = landformDetails ?? {};
   const tectonicWgsl = createTectonicReliefWgsl(tectonicRelief, terrainSeed);
+  const lowland = tectonicWgsl && tectonicRelief.lowlandReliefM > 0;
   return `
 // ==================== Base: Earthlike ====================
 ${createTerrainFeatureCalderas(calderas)}
@@ -204,6 +206,7 @@ ${fjords === true ? fjordsWgsl : ''}
 ${coastalHills ? coastalHillsWgsl : ''}
 ${coves ? coastalCovesWgsl : ''}
 ${tectonicWgsl}
+${createOceanFloorWgsl(oceanShelves)}
 
 fn getTerrainAmplitudes(profile: TerrainProfile) -> TerrainAmplitudes {
     var amp: TerrainAmplitudes;
@@ -280,12 +283,9 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
         }
 
         let mountainsH = featureMountainsHeight_d(unitDir, seed);
-        ${tectonicWgsl ? `let tectonic = tectonicRelief_d(unitDir, seed, regional.landMask, mountainsH);
+        ${tectonicWgsl ? `let tectonic = tectonicRelief_d(unitDir, seed, regional.landMask, mountainsH, region.coord);
         landHeight += tectonic.upland;` : ''}
-        // Erosion style by location, 0 = rounded .. 1 = jagged (strength
-        // and rounding of the erosion filter).
-        let calderaFoundation = landHeight;
-        let style = terrainStyle_d(unitDir);
+        let calderaFoundation = landHeight${lowland ? ' + tectonic.lowland' : ''};
 
         // Foothills: 3 km hills over the most rugged quarter of the land.
         // Slope-continuous, so part of the erosion input, and counted as
@@ -313,8 +313,9 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
             // raised to full from MTN_EROSION_FULL_M of mountain height.
             let mountainRelief = mountainsH${tectonicWgsl ? ' + tectonic.mountains' : ''};
             let mtnCarve = dQuintic(dClamp((mountainRelief * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
-            let er = erosionFilterLand_d(unitDir, landHeight, relief, style, mtnCarve);
+            let er = erosionFilterLand_d(unitDir, landHeight, relief, mtnCarve);
             landHeight += er.delta;
+            ${lowland ? 'landHeight += tectonic.lowland;' : ''}
             ${inlandLandforms?.fells === true ? 'landHeight += fellRelief_d(unitDir, seed, regional.landMask, bigHillsH + mountainRelief);' : ''}
             // Rolling hill chains are added after erosion: eroding their steep
             // corridor walls cut thin grooves along them.
@@ -361,17 +362,8 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
         return regionalValleyApply_d(softClampHeight_d(landHeight, -1.1, 1.8, 0.25),unitDir,foundationData);
     }
 
-    var oceanVariation = dConst(0.0);
-    if (terrainFeatureOn(TF_OCEAN_FLOOR)) {
-        let n500m = fbmAuto_d(unitDir, 0.5, 4, seed + 1000, 2.0, 0.5);
-        let n100m = fbmAuto_d(unitDir, 0.1, 4, seed + 2000, 2.0, 0.5);
-        let n20m = fbmAuto_d(unitDir, 0.02, 3, seed + 3000, 2.0, 0.5);
-        oceanVariation = n500m * 0.05 + n100m * 0.02 + n20m * 0.005;
-    }
-    let oceanBase = uniforms.waterParams.y + amp.oceanDepth;
-    let oceanHeight = dConst(oceanBase) + oceanVariation;
-
-    let height = dMix(oceanHeight, landHeight, landBlend);
+    let ground = dMix(oceanFloorHeight_d(unitDir, seed, amp.oceanDepth), landHeight, landBlend);
+    let height = ${oceanShelves ? 'oceanShelfHeight_d(ground, regional.landMask)' : 'ground'};
     return regionalValleyApply_d(softClampHeight_d(height, -1.1, 1.8, 0.25),unitDir,foundationData);
 }
 
