@@ -285,13 +285,9 @@ inv.set(viewProj.clone().invert().elements);
         detailData[2] = preset.starTwinkle ? 1.0 : 0.0;
         detailData[3] = preset.galaxyEnabled ? 1.0 : 0.0;
         detailData[4] = preset.galaxySamples;
-
-        detailData[6] = preset.ditherEnabled ? 1.0 : 0.0;
-        detailData[7] = preset.starBoost ?? 1.0;
-        detailData[8] = preset.starDensityMultiplier ?? 1.0;
-        detailData[9] = 0.0;
-        detailData[10] = 0.0;
-        detailData[11] = 0.0;
+        detailData[5] = preset.ditherEnabled ? 1.0 : 0.0;
+        detailData[6] = preset.starBoost ?? 1.0;
+        detailData[7] = preset.starDensityMultiplier ?? 1.0;
 
         this.skyMaterial.uniforms.transmittanceLUT.value = hasLUT ? this.atmosphereLUT.transmittanceLUT : null;
         this.skyMaterial.uniforms.multiScatterLUT.value = hasLUT ? this.atmosphereLUT.multiScatterLUT : null;

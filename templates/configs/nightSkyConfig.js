@@ -70,8 +70,8 @@ export const NIGHT_SKY_DETAIL_PRESETS = {
         starLayers: 2,
         maxStarBrightness: 1.2,
         starTwinkle: false,
-        starBoost: 2.0,
-        starDensityMultiplier: 25.0,
+        starBoost: 1.0,
+        starDensityMultiplier: 2.0,
         
         // Galaxies
         galaxyEnabled: false,
@@ -86,8 +86,8 @@ export const NIGHT_SKY_DETAIL_PRESETS = {
         starLayers: 4,
         maxStarBrightness: 2.0,
         starTwinkle: true,
-        starBoost: 3.0,
-        starDensityMultiplier: 50.0,
+        starBoost: 1.0,
+        starDensityMultiplier: 3.0,
         
         // Galaxies
         galaxyEnabled: true,
@@ -103,8 +103,8 @@ export const NIGHT_SKY_DETAIL_PRESETS = {
         starLayers: 6,
         maxStarBrightness: 3.0,
         starTwinkle: true,
-        starBoost: 4.0,
-        starDensityMultiplier: 100.0,
+        starBoost: 1.0,
+        starDensityMultiplier: 4.0,
         
         // Galaxies
         galaxyEnabled: true,
