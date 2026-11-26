@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseWgsl, validate } from 'naga-wasm';
 import { buildTerrainChunkFragmentShader } from './terrainChunkFragmentShaderBuilder.js';
+import { normalizeBiomeLandscape } from '../../../../world/terrain-generator/biomeLandscapeConfig.js';
 import { TILE_CATEGORIES } from '../../../../../templates/configs/tileTypes.js';
 
 describe('terrain fragment shader', () => {
@@ -29,6 +30,18 @@ describe('terrain fragment shader, flat-tier color', () => {
             expect(code).toContain('debugMode == 107');
         });
     }
+
+    it.each([0, 4, 6])('validates landscape materials at LOD %i', lod => {
+        const code = buildTerrainChunkFragmentShader({
+            lod, useArrayTextures: true, normalTextureFilterable: true, tileCategories: TILE_CATEGORIES,
+            fixedMaterialFamiliesEnabled: true, hasCoarseColorTexture: true, faceSizeMeters: 262144,
+            enableGroundMaterials: true, productionDraw: true,
+            biomeLandscape: normalizeBiomeLandscape({ preset: 'earth' }),
+            terrainShaderConfig: { nearMaxLOD: 4, normalMapMaxLod: 7 },
+        });
+        expect(code).toContain('var biomeClimateMap');
+        expect(() => validate(parseWgsl(code))).not.toThrow();
+    });
 
     it.each([[0, true], [0, true, false], [4, true], [4, false], [6, true]])('validates the ground materials at LOD%i, productionDraw=%s, farGround=%s', (lod, productionDraw, farGround) => {
         const code = buildTerrainChunkFragmentShader({

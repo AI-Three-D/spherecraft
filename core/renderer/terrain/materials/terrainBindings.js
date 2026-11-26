@@ -23,7 +23,7 @@ function getScratch(backend) {
 }
 
 export const terrainBindingAdapter = {
-    cacheKey: 'terrain-v25',
+    cacheKey: 'terrain-v26',
     getCacheKey(material) { return JSON.stringify(material._chunkTextureFormats || {}); },
     createLayouts(backend, material) {
         return createTerrainLayouts.call(backend,
@@ -32,7 +32,8 @@ export const terrainBindingAdapter = {
             !!material.defines?.USE_GROUND_FIELD,
             !!material.defines?.USE_RESOLVED_COLOR_TEXTURE || !!material.defines?.USE_RESOLVED_COLOR,
             material._chunkTextureFormats || {},
-            !!material.defines?.USE_COARSE_COLOR_TEXTURE);
+            !!material.defines?.USE_COARSE_COLOR_TEXTURE,
+            !!material.defines?.USE_BIOME_CLIMATE);
     },
     createBindGroups(backend, material, uniforms, geometry) {
         return createTerrainBindGroups.call(backend, material, uniforms, geometry);
@@ -45,7 +46,8 @@ function createTerrainLayouts(
     includeGroundField = false,
     includeResolvedColor = false,
     chunkFormats = {},
-    includeCoarseColor = false
+    includeCoarseColor = false,
+    includeBiomeClimate = false
 ) {
     const layouts = [];
     const chunkViewDimension = useArrayTextures ? '2d-array' : '2d';
@@ -109,6 +111,12 @@ const slotSampleType = (type) =>
         group1Entries.push({
             binding: 10, visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: slotSampleType('coarseColor'), viewDimension: chunkViewDimension }
+        });
+    }
+    if (includeBiomeClimate) {
+        group1Entries.push({
+            binding: 11, visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: slotSampleType('climate'), viewDimension: chunkViewDimension }
         });
     }
     layouts.push(this.device.createBindGroupLayout({ entries: group1Entries }));
@@ -242,6 +250,9 @@ function createTerrainBindGroups(material, uniforms, geometry) {
         }
         if (material.defines?.USE_COARSE_COLOR_TEXTURE) {
             chunkTextureBindings.push({ name: 'coarseColorTexture', binding: 10 });
+        }
+        if (material.defines?.USE_BIOME_CLIMATE) {
+            chunkTextureBindings.push({ name: 'biomeClimateMap', binding: 11 });
         }
         const chunkTextureNames = chunkTextureBindings.map(entry => entry.name);
         const g1Key = this._buildTextureKey(uniforms, chunkTextureNames);

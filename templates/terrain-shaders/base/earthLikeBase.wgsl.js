@@ -190,7 +190,7 @@ const FOOTHILL_TT_FULL: f32 = 0.56;
 }
 
 export function createEarthlikeBase({
-  regionalShape = false, foothills, calderas, inlandLandforms, fjords, landformDetails, tectonicRelief, terrainSeed,
+  regionalShape = false, foothills, calderas, inlandLandforms, fjords, landformDetails, tectonicRelief, terrainSeed, biomeLandscape,
 } = {}) {
   const foothill = createFoothillWgsl(foothills);
   const inlandWgsl = createInlandLandformWgsl(inlandLandforms);
@@ -313,8 +313,16 @@ fn calculateTerrainHeightAnalyticBaseD` : 'fn calculateTerrainHeightBaseD'}(seed
             // raised to full from MTN_EROSION_FULL_M of mountain height.
             let mountainRelief = mountainsH${tectonicWgsl ? ' + tectonic.mountains' : ''};
             let mtnCarve = dQuintic(dClamp((mountainRelief * maxTerrainHeightM() - dConst(MTN_EROSION_START_M)) * (1.0 / (MTN_EROSION_FULL_M - MTN_EROSION_START_M)), 0.0, 1.0));
-            let er = erosionFilterLand_d(unitDir, landHeight, relief, mtnCarve);
+            ${biomeLandscape?.enabled ? `let seaClimate = biomeSeaClimate_d(unitDir, seed);
+            let climate = biomeAtElevation_d(seaClimate, landHeight);
+            gLandscapeSeaClimate = seaClimate;
+            gLandscapeSeaClimateValid = true;
+            let province = biomeProvince_d(unitDir, seed);
+` : ''}
+            let er = erosionFilterLand_d(unitDir, landHeight, relief, mtnCarve${biomeLandscape?.enabled ? ', climate.humidity, province' : ''});
             landHeight += er.delta;
+            ${biomeLandscape?.enabled && biomeLandscape.rockReliefM > 0 ? 'landHeight += biomeBedrockRelief_d(unitDir, seed, landHeight, mountainRelief + foothillsH, province);' : ''}
+            ${biomeLandscape?.enabled && biomeLandscape.duneHeightM > 0 ? 'landHeight += biomeDunes_d(unitDir, seed, climate, landHeight, relief);' : ''}
             ${lowland ? 'landHeight += tectonic.lowland;' : ''}
             ${inlandLandforms?.fells === true ? 'landHeight += fellRelief_d(unitDir, seed, regional.landMask, bigHillsH + mountainRelief);' : ''}
             // Rolling hill chains are added after erosion: eroding their steep

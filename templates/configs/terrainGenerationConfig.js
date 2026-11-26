@@ -1,3 +1,4 @@
+import { normalizeBiomeLandscape } from '../../core/world/terrain-generator/biomeLandscapeConfig.js';
 import { normalizeFoothillsConfig } from '../../core/world/terrain-generator/foothillsConfig.js';
 import { normalizeCalderaConfig } from '../../core/world/terrain-generator/calderaConfig.js';
 import { normalizeInlandLandforms } from '../../core/world/terrain-generator/inlandLandformConfig.js';
@@ -19,6 +20,7 @@ export class TerrainGenerationConfig {
         if (!['legacy', 'directional'].includes(this.mountainRangeModel)) {
             throw new Error(`Unknown mountain range model: ${this.mountainRangeModel}`);
         }
+        this.biomeLandscape = normalizeBiomeLandscape(options.biomeLandscape);
         this.foothills = normalizeFoothillsConfig(options.foothills);
         this.landformDetails = normalizeLandformDetails(options.landformDetails);
         this.tectonicRelief = normalizeTectonicRelief(options.tectonicRelief);

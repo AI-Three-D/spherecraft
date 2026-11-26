@@ -18,6 +18,11 @@
       { "name": "ROCK_OUTCROP_3", "id": 44, "category": "ROCK" },
       { "name": "ROCK_OUTCROP_4", "id": 45, "category": "ROCK" },
 
+      { "name": "TUNDRA_LICHEN_1", "id": 58, "category": "TUNDRA" },
+      { "name": "TUNDRA_LICHEN_2", "id": 59, "category": "TUNDRA" },
+      { "name": "TUNDRA_LICHEN_3", "id": 60, "category": "TUNDRA" },
+      { "name": "TUNDRA_LICHEN_4", "id": 61, "category": "TUNDRA" },
+
       { "name": "FOREST_DENSE_SINGLE_1", "id": 66, "category": "FOREST" },
       { "name": "FOREST_DENSE_SINGLE_2", "id": 67, "category": "FOREST" },
       { "name": "FOREST_DENSE_SINGLE_3", "id": 68, "category": "FOREST" },
@@ -42,6 +47,7 @@
       { "name": "WATER", "ranges": [[0, 3]] },
       { "name": "GRASS", "ranges": [[10, 29]] },
       { "name": "ROCK", "ranges": [[42, 53]] },
+      { "name": "TUNDRA", "ranges": [[54, 65]] },
       { "name": "FOREST", "ranges": [[66, 81], [142, 149]] },
       { "name": "SNOW", "ranges": [[130, 141]] },
       { "name": "DESERT", "ranges": [[150, 165]] },

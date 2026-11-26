@@ -191,10 +191,14 @@ fn basinCertificateMain(@builtin(global_invocation_id) id: vec3<u32>) {
     if(mask<0.45 || uniforms.riverAnchor.w>0.5) { basinCertificates[id.x]=vec4<f32>(-1e20,0.0,0.0,0.0); return; }
     let vn = basinNoiseBox(c,rho,${n(ef.variationScaleM/1000)},3,uniforms.seed+7100);
     let variation = ${n(ef.variationMin)} + smoothstep(-0.35,0.35,vn.y)*(1.0-${n(ef.variationMin)});
+    ${budgets.landscapeErosion ? `
+    let styleMax = ${n(Math.max(...ef.styleStrength) * (budgets.maxWeathering ?? 1))};
+    ` : `
     let sn = basinNoiseBox(c,rho,${n(ef.styleScaleM/1000)},3,uniforms.seed+7300);
     let st = smoothstep(vec2<f32>(-0.15),vec2<f32>(0.15),sn+vec2<f32>(${n(ef.styleBias)}));
     let strengths = vec2<f32>(${n(ef.styleStrength[0])})+st*${n(ef.styleStrength[1]-ef.styleStrength[0])};
     let styleMax = max(strengths.x,strengths.y);
+    `}
     let erosionA = ${n(ef.strength*ef.scale*ef.gullyWeight*budgets.octaveSum)}*styleMax;
     // Interval minimization of relief minus erosion, including mountain's
     // variation floor. Mountain height <= total positive relief. Subdivision
@@ -246,7 +250,7 @@ fn basinCertificateMain(@builtin(global_invocation_id) id: vec3<u32>) {
         *fade(clamp((hollowN.y-LAKE_BASIN_FROM)/(LAKE_BASIN_FULL-LAKE_BASIN_FROM),0.0,1.0));
     let uplift = select(0.0,smoothstep(0.55,0.85,mask)*(getTerrainAmplitudes(getTerrainProfile()).microGain+0.005)*maxH,
         terrainFeatureOn(TF_INLAND_UPLIFT));
-    let lowerBase = softClampHeight((foundation+coupled-meso-hollow+uplift)/maxH,-1.1,1.8,0.25);
+    let lowerBase = softClampHeight((foundation+coupled-meso-hollow-${n(budgets.landscapeReliefM ?? 0)}+uplift)/maxH,-1.1,1.8,0.25);
     let micro = min(${n(budgets.microM)},basinMicroAllowance(c,rho));
     let lower = softClampHeight(lowerBase-micro/maxH,-1.1,1.8,0.25)*maxH-${n(budgets.numericalAllowanceM)};
     let centreHeight = calculateTerrainHeightBaseD(uniforms.seed,c).x*maxH;

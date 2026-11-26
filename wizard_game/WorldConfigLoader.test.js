@@ -108,3 +108,17 @@ describe('world water authoring configuration',()=>{
   expect(next.regionalTerrain.enabled).toBe(false);expect(next.waterGraph.sim?.enabled).toBeUndefined();expect(next.waterGraph.whitewater.enabled).toBe(true);expect(next.waterGraph.carve.bankDetail).toBe(1);
  });
 });
+
+describe('landscape authoring', () => {
+    it('loads the default preset and applies authored overrides on top of another preset', () => {
+        const loader = new WorldConfigLoader();
+        expect(loader._buildGameDataConfig(worldTerrain, worldPlanet).planets[0].terrain.biomeLandscape)
+            .toMatchObject({ enabled: true, preset: 'earth' });
+        const custom = { ...worldTerrain, biomeLandscape: { preset: 'arid', duneSpacingM: 270 } };
+        expect(loader._buildGameDataConfig(custom, worldPlanet).planets[0].terrain.biomeLandscape)
+            .toMatchObject({ preset: 'arid', humidityOffset: -0.24, duneSpacingM: 270 });
+        expect(() => loader._buildGameDataConfig({
+            biomeLandscape: { preset: 'earth', duneSpacingM: 0 },
+        }, worldPlanet)).toThrow(/duneSpacingM/);
+    });
+});

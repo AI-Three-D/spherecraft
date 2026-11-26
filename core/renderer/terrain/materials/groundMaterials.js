@@ -69,6 +69,17 @@ export const GROUND_LAYERS = Object.freeze([
         piece('twig', 'twig', 12, { length: [8, 26], width: [0.4, 1.0], root: [-0.2, 0.8], rise: 0.6, curl: 1.0 }),
         piece('leaf', 'leaf', 26, { length: [3, 6], width: [1.6, 3], root: [0.2, 0.9], rise: 0.5, curl: 0.4 }),
     ] },
+    { name: 'tundra', periodM: 3.5, mean: [0.123, 0.106, 0.080], slope: 2.2, look: [0.22, 0.75, 0.7, 10], deepM: 0.04, pieces: [
+        stones(850, [2, 8], [-1.1, 0.6], { angular: 0.65, clump: -0.10 }),
+        stones(170, [8, 21], [-3, 1.5], { angular: 0.75 }),
+        piece('blade', 'straw', 5400, { length: [4, 10], width: [0.24, 0.40], root: [0, 0.7], rise: 1.6, curl: 1.25, clump: 0.24 }),
+        piece('clover', 'clover', 2400, { length: [0.9, 2.2], root: [0.15, 1.1], rise: 0.5, clump: 0.05 }),
+    ] },
+    { name: 'ice', periodM: 23, mean: [0.21, 0.32, 0.41], slope: 1.8, look: [0, 0, 0, 2], pieces: [] },
+    { name: 'marsh', periodM: 5.2, mean: [0.067, 0.077, 0.037], slope: 2.1, look: [0.12, 0.3, 0.45, 6], pieces: [
+        piece('blade', 'straw', 4100, { length: [8, 22], width: [0.24, 0.51], root: [-0.7, 1.0], rise: 3.2, curl: 0.8, clump: 0.20 }),
+        piece('blade', 'blade', 7200, { length: [8, 20], width: [0.32, 0.64], root: [-0.6, 1.5], rise: 4.6, curl: 1.15, tall: 1, clump: 0.16 }),
+    ] },
 ]);
 
 /** Wide patterns: 0 the mosaic of open ground, 1 the face of a cliff, 2 the fields (period in metres). Variants lie side by side in any order, turned around or not. */

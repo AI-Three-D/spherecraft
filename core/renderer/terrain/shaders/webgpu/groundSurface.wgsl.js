@@ -1,3 +1,4 @@
+import { biomeCoverWGSL, unpackBiomeIceWGSL } from '../../../../../templates/terrain-shaders/biomeLandscape.wgsl.js';
 // Close and middle ground (terrainShader.groundMaterials): what the terrain is
 // made of at a pixel, from the textures of groundMaterials.js.
 //
@@ -22,9 +23,9 @@ const vec = (values, n) => `vec${n}<f32>(${values.map(v => Number(v).toFixed(5))
 const table = (name, type, rows) => `const ${name} = array<${type}, ${rows.length}>(${rows.join(', ')});`;
 
 /** close, farTier: with the close ground, with the far tiers' (and the way from one to the other). */
-export function buildGroundSurfaceWGSL({ faceSizeMeters, fineEndMeters = 150, deepEndMeters = 16, close = true, farTier = true }) {
+export function buildGroundSurfaceWGSL({ faceSizeMeters, fineEndMeters = 150, deepEndMeters = 16, close = true, farTier = true, biomeLandscape = null }) {
     const wrap = faceSizeMeters * GROUND_WRAP_SHARE;
-    const turns = [11, 37, 23, 68, 52, 0, 17, 74, 31];
+    const turns = [11, 37, 23, 68, 52, 0, 17, 74, 31, 58, 42, 65];
     const near = GROUND_LAYERS.map((l, i) => lattice(wrap, l.periodM, turns[i]));
     const far = GROUND_LAYERS.map((l, i) => lattice(wrap, l.periodM * 4.7, turns[i] + 33));
     const mosaic = lattice(wrap, GROUND_WIDE[0].periodM, 20);
@@ -34,7 +35,7 @@ export function buildGroundSurfaceWGSL({ faceSizeMeters, fineEndMeters = 150, de
     const cliff = [lattice(wrap, GROUND_WIDE[1].periodM, 0), ...[4.6, 21, 97].map((k, i) => turned(GROUND_WIDE[1].periodM * k, [7, -5, 4][i]))];
     const W = GROUND_WIDE_LAYERS;
     const n = GROUND_LAYERS.length;
-    return /* wgsl */`
+    return (biomeLandscape ? biomeCoverWGSL(biomeLandscape) : '') + /* wgsl */`
 const GROUND_COUNT: i32 = ${n};
 const GROUND_WRAP: f32 = ${wrap.toFixed(4)};
 const GROUND_FINE_END: f32 = ${fineEndMeters.toFixed(1)};
@@ -42,7 +43,8 @@ const GROUND_DEEP_END: f32 = ${deepEndMeters.toFixed(1)};
 // Depth (m) of the relief seen close by; 0 for what has none to show.
 ${table('GROUND_DEPTH', 'f32', GROUND_LAYERS.map(l => (deepEndMeters > 0 ? l.deepM ?? 0 : 0).toFixed(4)))}
 const G_GRASS: i32 = 0; const G_DRY: i32 = 1; const G_FOREST: i32 = 2; const G_DIRT: i32 = 3; const G_GRAVEL: i32 = 4;
-const G_ROCK: i32 = 5; const G_SAND: i32 = 6; const G_SNOW: i32 = 7; const G_MUD: i32 = 8;
+const G_ROCK: i32 = 5; const G_SAND: i32 = 6; const G_SNOW: i32 = 7; const G_MUD: i32 = 8; const G_TUNDRA: i32 = 9;
+const G_ICE: i32 = 10; const G_MARSH: i32 = 11;
 ${table('GROUND_MEAN', 'vec3<f32>', GROUND_LAYERS.map(l => vec(l.mean, 3)))}
 ${table('GROUND_SLOPE', 'f32', GROUND_LAYERS.map(l => l.slope.toFixed(3)))}
 ${table('GROUND_NEAR', 'vec2<f32>', near.map(v => vec(v, 2)))}
@@ -230,7 +232,7 @@ fn groundRank(r: ptr<function, GroundRank>, i: i32, w: f32) {
 // families: organic, mineral, soil, cold. bed: the soil's share under water courses. coarse: the tile's colour.
 // far: 0 the close ground (made of families), 1 the far tiers' (of coarse), between them one turns into the other.
 // The wide patterns and the cliffs are the same in both.
-fn shadeGround(f: GroundFrame, families: vec4<f32>, bed: f32, coarse: vec3<f32>, far: f32, tileNormal: vec3<f32>, toEye: vec3<f32>, distance: f32) -> Ground {
+fn shadeGround(f: GroundFrame, families: vec4<f32>, bed: f32, coarse: vec3<f32>, far: f32, tileNormal: vec3<f32>, toEye: vec3<f32>, distance: f32${biomeLandscape ? ', climate: vec4<f32>, elevation: f32' : ''}) -> Ground {
     let slope = 1.0 - clamp(dot(tileNormal, f.up), 0.0, 1.0);
     let broad = groundBroad(f.q.xy, f.dx.xy, f.dy.xy);
     let b = broad.b;
@@ -246,6 +248,27 @@ fn shadeGround(f: GroundFrame, families: vec4<f32>, bed: f32, coarse: vec3<f32>,
         a = mix(textureSampleGrad(groundSurface, groundWideSampler, uvA, L_MOSAIC + variant, axA, ayA), a, smoothstep(5000.0, 9000.0, distance));
     }
     let edge = 0.6 * (a.x - 0.5) + 0.5 * (b.y - 0.5) + 0.35 * (a.y - 0.5);
+${biomeLandscape ? `
+    let setback = clamp(dot(tileNormal, f.up), 0.0, 1.0);
+    let cover = biomeCover(climate.r, climate.g, sqrt(max(1.0 - setback * setback, 0.0)), elevation, edge);
+    let ice = ${unpackBiomeIceWGSL};
+    let lithology = biomeLithology(climate.a);
+    let mineral = smoothstep(0.30, 0.74, 0.64 * a.x + 0.36 * b.y);
+    let rockTint = lithology.x * vec3<f32>(0.103, 0.107, 0.111)
+        + lithology.y * vec3<f32>(0.158, 0.158, 0.156)
+        + lithology.z * mix(vec3<f32>(0.150, 0.123, 0.099), vec3<f32>(0.204, 0.168, 0.134), mineral);
+    let grainTone = rockTint / GROUND_MEAN[G_ROCK];
+    let sandTone = mix(vec3<f32>(0.68, 0.63, 0.53), vec3<f32>(0.89, 0.82, 0.71),
+        smoothstep(0.24, 0.75, 0.6 * b.y + 0.4 * a.z));
+    let tundraTone = mix(vec3<f32>(0.92, 1.01, 0.91), vec3<f32>(1.21, 0.82, 0.72),
+        smoothstep(0.34, 0.70, 0.47 * a.x + 0.35 * b.w + 0.18 * (1.0 - climate.y)));
+    let dryBias = (0.55 - climate.y) * 0.95;
+    let dryGrass = smoothstep(0.38, 0.73, a.w * 0.45 + b.w * 0.55 + 0.35 * slope + dryBias);
+    let litter = mix(0.78, 1.0, smoothstep(0.3, 0.7, a.x * 0.5 + b.x * 0.5));
+    let shortGrass = cover.grass + cover.forest * (1.0 - litter);
+    let peat = 0.75 * smoothstep(0.39, 0.69, 0.64 * a.y + 0.36 * b.x);
+    let marshColor = mix(GROUND_MEAN[G_MARSH], GROUND_MEAN[G_MUD] * vec3<f32>(0.66, 0.62, 0.53), peat);
+` : ''}
 
     var rock = 0.0;
     var snow = 0.0;
@@ -254,9 +277,18 @@ fn shadeGround(f: GroundFrame, families: vec4<f32>, bed: f32, coarse: vec3<f32>,
     var farColor = vec3<f32>(0.0);
     var farRock = 0.0;
 ${farTier ? `${close ? '    if (far > 0.0) {' : '    {'}
+${biomeLandscape ? `
+        farColor = (shortGrass * mix(GROUND_MEAN[G_GRASS], GROUND_MEAN[G_DRY], dryGrass)
+            + cover.forest * litter * GROUND_MEAN[G_FOREST] + cover.tundra * GROUND_MEAN[G_TUNDRA] * tundraTone
+            + cover.sand * GROUND_MEAN[G_SAND] * sandTone + cover.snow * GROUND_MEAN[G_SNOW]
+            + cover.marsh * marshColor) / max(1.0 - cover.rock, 0.001);
+        farRock = cover.rock;
+        rock = cover.rock * far; leaf = shortGrass * far; snow = cover.snow * far;
+` : `
         let t = groundFar(coarse, a, b, slope, edge);
         farColor = t.color; farRock = t.rock;
         rock = t.rock * far; leaf = t.leaf * far; snow = t.snow * far;
+`}
     }
 ` : ''}${close ? `
     let near = 1.0 - far;
@@ -268,6 +300,24 @@ ${farTier ? `${close ? '    if (far > 0.0) {' : '    {'}
     var w2 = 0.0;
     if (far < 1.0) {
         if (distance < 1400.0) { relief = mix(textureSampleGrad(groundSurface, groundWideSampler, uvA, L_MOSAIC_SLOPE + variant, axA, ayA), relief, smoothstep(900.0, 1400.0, distance)); }
+${biomeLandscape ? `
+        let exposed = 1.0 - bed;
+        let bare = 0.42 * smoothstep(0.64, 0.85, 0.6 * a.y + 0.4 * b.y + slope);
+        let gravel = smoothstep(0.075, 0.25, slope) * smoothstep(0.36, 0.72, 0.6 * a.z + 0.4 * b.y);
+        let meadow = shortGrass * exposed;
+        let turf = meadow * (1.0 - bare) * (1.0 - gravel);
+        let wGrass = turf * (1.0 - dryGrass);
+        let wDry = turf * dryGrass;
+        let wForest = cover.forest * litter * exposed;
+        let wDirt = meadow * bare * (1.0 - gravel);
+        let wGravel = meadow * gravel;
+        let wRock = cover.rock * exposed;
+        let wSand = cover.sand * exposed;
+        let wSnow = cover.snow * exposed;
+        let wTundra = cover.tundra * exposed;
+        let wMarsh = cover.marsh * exposed * (1.0 - peat);
+        let wMud = bed + cover.marsh * exposed * peat;
+` : `
         let steep = groundSteep(slope, edge);
         // What the families are here.
         let bareness = a.y * 0.6 + b.y * 0.4;
@@ -297,6 +347,7 @@ ${farTier ? `${close ? '    if (far > 0.0) {' : '    {'}
         let wSnow = families.w * (1.0 - shed);
         let wMud = soil * bed;
 
+`}
         // The two strongest, and the third to fade them out before they change places.
         var rank = GroundRank(0, 0, 0.0, 0.0, 0.0);
         groundRank(&rank, G_GRASS, wGrass);
@@ -308,20 +359,22 @@ ${farTier ? `${close ? '    if (far > 0.0) {' : '    {'}
         groundRank(&rank, G_SAND, wSand);
         groundRank(&rank, G_SNOW, wSnow);
         groundRank(&rank, G_MUD, wMud);
+${biomeLandscape ? `        groundRank(&rank, G_TUNDRA, wTundra);
+        groundRank(&rank, G_MARSH, wMarsh);` : ''}
         first = rank.first;
         second = rank.second;
         w2 = max(rank.w2 - rank.w3, 0.0);
         w1 = max(rank.w1 - 0.5 * rank.w3, 0.0001);
         nearRock = clamp(wRock, 0.0, 1.0);
         rock += nearRock * near;
-        snow += families.w * near;
+        snow += ${biomeLandscape ? 'wSnow' : 'families.w'} * near;
         leaf += clamp((wGrass + wDry) / max(w1 + w2 + rank.w3, 0.001), 0.0, 1.0) * near;
     }
 ` : ''}
     var cliff = GroundCliff(vec3<f32>(0.0), 1.0, 0.5);
     if (rock > 0.02) { cliff = groundCliff(f, tileNormal, 0.30 * (a.y - 0.5) + 0.20 * (a.w - 0.5), distance); }
     let tone = groundTone(a, b);
-    let rockTone = 0.66 + 0.76 * cliff.tint;
+    let rockTone = (0.66 + 0.76 * cliff.tint)${biomeLandscape ? ' * grainTone' : ''};
     var gradient = vec3<f32>(0.0);
     // What is left of the small hollows' shade where they are not drawn.
     var open = 0.77;
@@ -387,20 +440,53 @@ ${deepEndMeters > 0 ? `        // Close by, stones and rock hide each other: the
         let mean = mix(GROUND_MEAN[first], GROUND_MEAN[second], w2 / (w1 + w2));
         fine.albedo = mix(mean, fine.albedo, fineFade);
         // Broad colour: patches a field or a hillside wide.
-        albedo = fine.albedo * mix(tone, vec3<f32>(rockTone), nearRock) * near;
+        ${biomeLandscape ? `let dampPeat = 0.76 * cover.marsh * peat;
+        let surfaceTone = tone * mix(vec3<f32>(1.0), sandTone, cover.sand) * mix(vec3<f32>(1.0), tundraTone, cover.tundra)
+            * mix(vec3<f32>(1.0), vec3<f32>(0.62, 0.58, 0.49), dampPeat);` : 'let surfaceTone = tone;'}
+        albedo = fine.albedo * mix(surfaceTone, vec3<f32>(rockTone), nearRock) * near;
         let hummocks = latticeSlope(MOSAIC, (relief.xy * 2.0 - 1.0) * (MOSAIC_SLOPE * lie.y));
-        let soft = (1.0 - nearRock) * (1.0 - 0.6 * families.w);
+        let soft = (1.0 - nearRock) * (1.0 - 0.6 * ${biomeLandscape ? 'cover.snow' : 'families.w'});
         gradient = (fine.gradient * (fineFade * mix(0.8, 0.6, nearRock)) + (hummocks.x * f.ud + hummocks.y * f.vd) * (soft * 0.8)) * near;
         open = mix(mix(0.86, fine.open, fineFade) * mix(1.0, relief.z, soft), open, far);
         rough = mix(fine.rough, rough, far);
     }
 ` : ''}
 ${farTier ? '    albedo += mix(farColor * tone, GROUND_MEAN[G_ROCK] * rockTone, farRock) * far;' : ''}
+${biomeLandscape ? `
+    if (ice > 0.005) {
+        var iceColor = GROUND_MEAN[G_ICE];
+        var iceGradient = vec3<f32>(0.0);
+        var iceRough = 0.56;
+        let iceMid = smoothstep(45.0, 180.0, distance) * (1.0 - smoothstep(700.0, 1950.0, distance));
+        if (iceMid > 0.0) {
+            let n = GROUND_FAR[G_ICE];
+            let bend = vec2<f32>(a.x - 0.5, a.y - 0.5) * 31.0;
+            let broadIce = textureSampleGrad(groundAlbedo, groundWideSampler, latticeUv(n, f.g.xy + bend), G_ICE,
+                latticeUv(n, f.dx.xy), latticeUv(n, f.dy.xy));
+            iceColor = mix(iceColor, broadIce.rgb, iceMid * 0.67);
+        }
+${close ? `        let iceDetail = (1.0 - far) * (1.0 - smoothstep(120.0, 340.0, distance));
+        if (iceDetail > 0.0) {
+            let sample = groundFine(G_ICE, f, vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0));
+            iceColor = mix(iceColor, sample.albedo, iceDetail);
+            iceGradient = sample.gradient * iceDetail;
+            iceRough = mix(iceRough, sample.rough, iceDetail);
+        }
+` : ''}        // Firn in the upper accumulation zone layers over darker, exposed ice below.
+        let frost = (1.0 - smoothstep(0.21, 0.37, climate.r)) * smoothstep(0.30, 0.74, 0.68 * a.x + 0.32 * b.x);
+        albedo = mix(albedo, mix(iceColor, GROUND_MEAN[G_SNOW], 0.47 * frost) * tone, ice);
+        gradient = mix(gradient, iceGradient, ice);
+        rough = mix(rough, iceRough, ice);
+        rock *= 1.0 - ice;
+        leaf *= 1.0 - ice;
+        snow = mix(snow, 1.0, ice);
+    }
+` : ''}
 
     var ground: Ground;
     ground.albedo = albedo;
     ground.leaf = leaf;
-    ground.gradient = gradient + cliff.gradient * (0.6 * rock);
+    ground.gradient = gradient + cliff.gradient * (0.6 * rock${biomeLandscape ? ' * dot(lithology, vec3<f32>(0.84, 1.25, 0.70))' : ''});
     ground.open = open * mix(1.0, cliff.open, rock);
     ground.rough = rough;
     let dryable = 1.0 - snow;

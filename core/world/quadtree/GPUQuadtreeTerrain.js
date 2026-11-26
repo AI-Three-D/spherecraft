@@ -8,6 +8,7 @@
 
 // Regional traversal requires the matching quadtree API. A versioned import
 // prevents an older browser-cached module from being mixed with this manager.
+import { usesBiomeLandscape } from '../terrain-generator/biomeLandscapeConfig.js';
 import { QuadtreeGPU } from './QuadtreeGPU.js?regionalTerrainApi=1';
 import { TileStreamer } from './tileStreamer.js';
 import { TileAddress } from './tileAddress.js';
@@ -188,6 +189,9 @@ export class QuadtreeTileManager {
         const requiredTypes = streamedAssetsEnabled
             ? ['height', 'normal', 'tile', 'splatData', 'scatter', 'climate']
             : ['height', 'normal', 'tile', 'splatData'];
+        if (usesBiomeLandscape(this.terrainGenerator?.terrainConfig, this.terrainGenerator?.baseGenerator) && !requiredTypes.includes('climate')) {
+            requiredTypes.push('climate');
+        }
         if (enableResolvedColor) {
             requiredTypes.push('resolvedColor');
         }
