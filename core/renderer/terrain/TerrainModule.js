@@ -64,7 +64,10 @@ export class TerrainModule {
         for (const layer of this.waterLayers) layer.setWaterData?.(data);
     }
 
-    afterSubmit() { assertSynchronous(this.source.resolveFeedbackReadback?.()); }
+    afterSubmit() {
+        assertSynchronous(this.source.resolveFeedbackReadback?.());
+        this.renderer.afterSubmit?.();
+    }
 
     dispose() {
         if (this.disposed) return;

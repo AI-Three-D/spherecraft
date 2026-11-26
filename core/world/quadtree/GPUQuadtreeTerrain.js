@@ -13,6 +13,7 @@ import { QuadtreeGPU } from './QuadtreeGPU.js?regionalTerrainApi=1';
 import { TileStreamer } from './tileStreamer.js';
 import { TileAddress } from './tileAddress.js';
 import { TerrainGeometryBuilder } from '../../renderer/terrain/geometry/terrainGeometryBuilder.js';
+import { TileBounds } from './tileBounds.js';
 import { Logger } from '../../../shared/Logger.js';
 import { installQuadtreeTileManagerDiagnostics } from './gpuQuadtreeTerrainDiagnostics.js';
 
@@ -290,6 +291,12 @@ export class QuadtreeTileManager {
       );
         await this.tileStreamer.initialize();
         this.quadtreeGPU.setLodHeightTexture(this.tileStreamer.arrayPool?.textures.get('height') ?? null);
+        const pool = this.tileStreamer.arrayPool;
+        if (pool?.textures.get('height')) {
+            pool.bounds = new TileBounds(this.device, {
+                heights: pool.textures.get('height'), tileSize: pool.tileSize, capacity: pool.capacity, heightScale: this.planetConfig.heightScale,
+            });
+        }
 
         this._initialized = true;
         Logger.info('[QuadtreeTileManager] Initialized');
@@ -906,6 +913,16 @@ export class QuadtreeTileManager {
     /** Per-instance edge stitch records for the terrain vertex shader (or null). */
     getEdgeStitchBuffer() {
         return this.quadtreeGPU.getEdgeStitchBuffer?.() ?? null;
+    }
+
+    /** Height range of every tile layer (tileBounds.js), or null. */
+    getTileBoundsBuffer() {
+        return this.tileStreamer?.arrayPool?.bounds?.buffer ?? null;
+    }
+
+    /** Lowest ground of every tile layer's blocks (tileBounds.js), or null. */
+    getTileBlocksBuffer() {
+        return this.tileStreamer?.arrayPool?.bounds?.blocks ?? null;
     }
 
     getIndirectArgsBuffer() {

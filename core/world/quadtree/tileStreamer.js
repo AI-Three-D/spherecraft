@@ -477,6 +477,15 @@ class TileArrayPool {
             }
         }
     
+        // Height ranges of the layers whose heights were just copied (tileBounds.js).
+        if (this.bounds) {
+            const heightLayers = new Set();
+            for (let i = 0; i < count; i++) {
+                if (this._pendingCopies[i].textures.height?._gpuTexture?.texture) heightLayers.add(this._pendingCopies[i].layer);
+            }
+            this.bounds.encode(encoder, [...heightLayers]);
+        }
+
         // Mip generation happens in the same command buffer after all
         // copies, so ordering is guaranteed without a separate submit.
         if (this._mipGen && touchedLayers.size > 0) {
@@ -491,6 +500,7 @@ class TileArrayPool {
         }
     
         this.device.queue.submit([encoder.finish()]);
+        this.bounds?.submitted();
         const flushed = this._pendingCopies.splice(0, count);
         const textures = [];
         for (const entry of flushed) {
@@ -1206,6 +1216,7 @@ drainScatterCommitQueue() {
             for (const texture of pool.textures.values()) texture.destroy();
             for (const texture of pool._zeroTextures.values()) texture.destroy();
             pool._splatIndexSentinel?.destroy();
+            pool.bounds?.destroy();
             pool.textures.clear();
             pool.wrappers.clear();
         };

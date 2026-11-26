@@ -38,6 +38,8 @@ export interface TerrainDraw {
     /** Work to encode before the terrain is drawn. */
     compute?(frame: RenderFrame, encoder: GPUCommandEncoder): void;
     render(camera: RenderCamera, view: RenderCamera['matrixWorldInverse'], projection: RenderCamera['projectionMatrix']): void;
+    /** Once the frame's commands have been submitted. */
+    afterSubmit?(): void;
     setWaterData?(data: TerrainWaterData | null): void;
     dispose(): void;
 }

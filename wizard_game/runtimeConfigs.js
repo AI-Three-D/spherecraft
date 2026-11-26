@@ -244,6 +244,10 @@ export function createEngineConfig() {
         landLight: true,
         groundFineEndMeters: 150,
         groundDeepEndMeters: 16,
+        // Drawn by TerrainPass.js (false: by the materials, which also have the debug views).
+        terrainPass: true,
+        // Tiles behind land are left out: 4 of 576 views differ by a pixel; costs 0.12 ms, which terrain alone saves only among steep hills.
+        occlusion: false,
         skipHiddenMaterial: true,
         aerialFadeStartMeters: 400,
         aerialFadeEndMeters: 600,
