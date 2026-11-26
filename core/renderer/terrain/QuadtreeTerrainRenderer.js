@@ -10,6 +10,7 @@ import { TerrainMaterialBuilder } from './materials/terrainMaterialBuilder.js';
 import { createGroundMaterials } from './materials/groundMaterials.js';
 import { TerrainLightMap } from './light/TerrainLightMap.js';
 import { TerrainPass } from './draw/TerrainPass.js';
+import { GrassPass } from '../grass/GrassPass.js';
 import { usesBiomeLandscape } from '../../world/terrain-generator/biomeLandscapeConfig.js';
 import { aerialFadeRange } from './shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
@@ -44,6 +45,8 @@ export class QuadtreeTerrainRenderer {
         this._landLight = null;
         /** Draws the terrain when it can (TerrainPass.js). */
         this.pass = null;
+        /** Grass blades over it (GrassPass.js), with the pass only. */
+        this.grass = null;
         this._wetness = 0;
         this._lodIndexCounts = [];
         this._lodSegments = null;
@@ -106,6 +109,22 @@ export class QuadtreeTerrainRenderer {
         } catch (error) {
             pass.destroy();
             Logger.warn(`[QTR] terrain pass unavailable, drawing with materials: ${error?.message ?? error}`);
+            return;
+        }
+        // Grass blades over the ground the pass draws (rendering.grass).
+        const grassConfig = this.engineConfig.rendering?.grass;
+        if (grassConfig?.enabled && GrassPass.supported(this.backend.device, this.tileManager)) {
+            const grass = new GrassPass({
+                device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground,
+                landLight: this._landLight, planetConfig: this.planetConfig, biome, config: grassConfig,
+            });
+            try {
+                await grass.initialize();
+                this.grass = grass;
+            } catch (error) {
+                grass.destroy();
+                Logger.warn(`[QTR] grass unavailable: ${error?.message ?? error}`);
+            }
         }
     }
 
@@ -194,6 +213,16 @@ export class QuadtreeTerrainRenderer {
         this._tierFade = this._computeTierFadeDistances();
         this._drawnByPass = this._initialized && this.tileManager?.isReady() && this._passDraws(frame.camera);
         if (this._drawnByPass) {
+            if (this.grass) {
+                const water = this._waterData?.value;
+                this.grass.compute(encoder, {
+                    u: this._materials.get(0).uniforms, camera: frame.camera, deltaTime: frame.deltaTime,
+                    environment: this.uniformManager?.currentEnvironmentState ?? null,
+                    seaLevel: water?.sea?.enabled ? water.sea.levelM : null,
+                    viewportHeight: this.backend._viewport?.height ?? this.backend.canvas?.height,
+                });
+            }
+            this.pass.grassReach = this.grass?.drawing ? this.grass.config.distance : 0;
             this.pass.compute(encoder, {
                 u: this._materials.get(0).uniforms, camera: frame.camera, water: this._waterData?.value ?? null,
                 tierFade: this._tierFade, wetness: this._wetness, airFade: aerialFadeRange(this.engineConfig.rendering.terrainShader),
@@ -213,6 +242,7 @@ export class QuadtreeTerrainRenderer {
             const pass = this.backend.getRenderPassEncoder();
             if (pass) {
                 this.pass.draw(pass);
+                this.grass?.draw(pass);
                 if (overlayEnabled) {
                     for (let lod = 0; lod <= this._maxGeomLOD; lod++) {
                         this._drawTerrainOverlay(lod, this._geometries.get(lod), camera, viewMatrix, projectionMatrix, instanceBuffer, indirectBuffer, this.tileManager.getIndirectArgsOffsetBytes(lod));
@@ -563,6 +593,8 @@ export class QuadtreeTerrainRenderer {
         this._overlayMaterials.clear();
         this.pass?.destroy();
         this.pass = null;
+        this.grass?.destroy();
+        this.grass = null;
         this._ground?.destroy();
         this._ground = null;
         this._landLight?.dispose();

@@ -1,0 +1,156 @@
+# Grass
+
+2026-11-26, branch `grass/biome-grass` from main 70b83fe. M1 Pro, Chrome WebGPU, 2400×1350. Pictures: `screenshots/grass_2026-11-26/`.
+
+**Not profiled yet.** The GPU was shared with another job all session, so no timing was taken. The ready-to-run measurement is `tools/perf/grass/grassBench.mjs`; the counts below are what it will be measuring.
+
+## What it is
+
+Grass blades within 46 m of the camera, made on the GPU every frame from the ground the terrain draws. Past them, the ground itself takes the grass canopy's look. Both are tuned so that they meet without a visible line. There is nothing to stream or store: blades are a function of the world position and the tile data already resident.
+
+- `core/renderer/grass/grassWgsl.js`: the scatter (compute) and the blades (vertex and fragment).
+- `core/renderer/grass/GrassPass.js`: the driver, owned by `QuadtreeTerrainRenderer` and drawn right after the terrain pass.
+- `core/renderer/grass/grassHue.wgsl.js`: the grass hue by climate, shared by blades and ground.
+- `terrainPass.wgsl.js` adds:
+  - the climate hue on grass ground;
+  - shade under the blades;
+  - the canopy past the blades.
+
+## Sources and what was taken from each
+
+| Source | Taken |
+| --- | --- |
+| Ghost of Tsushima, Wohllaib GDC 2021 | Voronoi clumps set height, facing and colour; several blades per instance; blades turned to the camera when seen edge-on; rounded normals; one scrolling-noise wind field shared everywhere |
+| AMD GPUOpen mesh-shader grass, 2024 | Bézier blades with length kept, L = (2·L0 + L1)/3; fewer and wider blades far off; grow-in instead of pop |
+| Pesce, Black Ops 4 grass, 2024 | Translucency is what makes grass; a height ramp is its occlusion; thin highlights from a V-shaped normal; velvet-like far shading; every fake fades near and far |
+| Remote sensing canopy models (Beer–Lambert gap fraction, Ross–Li hotspot) | The ground's canopy past the blades: coverage at a slant, light through, hotspot |
+| Weier et al., SIGGRAPH 2023, neural prefiltering for LOD | The plan for the learned part (below) |
+
+## How many: the numbers
+
+A sight line from eye height e reaches the ground at distance d. It runs through a canopy of height H over about H·d/e of horizontal distance. The ground stays hidden (optical depth ~2.5) when blades/m² × blade width ≳ 38/d per metre, for H = 35 cm. This gives:
+
+| Distance | Blades/m² needed | Set (`density` 1500, `thinFrom` 2, `thinPower` 1) |
+| ---: | ---: | ---: |
+| 2 m | ~1460 | 1500 |
+| 10 m | ~290 | 300 |
+| 20 m | ~150 | 150 |
+| 46 m | 40–75 (blades widened to ≥0.7 px) | 65 |
+
+- **Height and clumping.** Density scales with 0.35/H, capped to 0.5–1.6, because tall grass hides the ground sooner. Bunchgrass and thin grass gather into clumps with gaps between them.
+- **Counts read back per view (blades, near/mid/far band):**
+
+  | View | Blades | Vertices | Notes |
+  | --- | --- | ---: | --- |
+  | Meadow with flowers | 46k / 70k / 136k | ~2.0 M | 15 / 9 / 5 vertices per blade |
+  | Forest floor | 18k / 33k / 96k | ~1.05 M | |
+  | Tundra | 22k / 43k / 105k | ~1.2 M | |
+  | Marsh | 13k / 18k / 60k | ~0.6 M | |
+  | Dry grass | 14k / 33k / 95k | ~1.0 M | |
+
+- **First thing to measure.** The meadow at 2 M vertices is the worst case. Whether it fits 2 ms is unknown until profiled.
+
+## The near field: tufts
+
+- **A world-fixed lattice per cube face.** Patches are 2 m (64 per 128 m tile) with 48×48 lattice points each. A point is a tuft: 1–12 blades, plus sometimes a seed stem or a flower.
+  - Per tuft, the compute reads the same rules the terrain draws: climate, slope, the wide fields and the mosaic, `biomeCover`, dryness, bare and gravel patches, river and lake beds. So blades stand exactly where the ground is grass, golden where it is dry grass, and nowhere on rock, sand, snow, ice or beds.
+- **Positions about the camera.** Planet coordinates are 131 km long and step by 1.5 cm in floats, which is wider than a blade. Each face has an anchor whose cube point is exact in floats, and the difference of two sphere directions is computed without subtracting large numbers. A test replays this in 32 bits against 64: under 0.1 mm at 60 m near a face corner (`grassWgsl.test.js`).
+- **Kinds:**
+
+  | Kind | Tuft | Notes |
+  | --- | --- | --- |
+  | Meadow | ~4.5 blades | |
+  | Dry bunchgrass | ~12 blades, arching | |
+  | Woodland | ~2.5 blades | |
+  | Tundra sedge tussocks | ~8 blades | olive-gold to rust |
+  | Marsh reeds | ~5 blades, 0.75–1.3 m | 28 % dead leaves |
+  | Seed stems | | golden or red-brown heads |
+  | Flowers | | round heads with a centre: buttercup, hawkweed, daisy, cornflower, poppy; lupine and pink spikes in wet ground |
+
+- **Variety at three scales.**
+  - Tens of metres: the climate hue (blue-green where cool, deep green where warm and wet, yellow-green where drying), shared with the ground.
+  - Metres: zones within one meadow — taller and shorter stands, yellower and deeper greens, more or less straw.
+  - ~0.6 m: clumps.
+  - Flowers come in patches a few metres wide, one or two kinds per patch, where the fields are lively and moist.
+- **Shape.**
+  - A quadratic Bézier with its length kept.
+  - Outer blades of a tuft arch out, inner ones stand.
+  - Long blades droop.
+  - Blades turn toward the camera when seen edge-on.
+  - No blade is drawn under 0.7 px wide, but flower heads are exempt: widened, they stood as sticks.
+- **Shading.**
+  - Height ramp (the canopy's occlusion), light through from behind, glow toward the sun, a thin waxy highlight.
+  - The sun reaches low parts less, more so with a low sun.
+  - The hotspot: with the sun behind the viewer, shadows hide behind the blades that cast them.
+  - The land's light map, so mountain shadows fall on grass.
+  - Cloud shadows come from the composite: blades write depth.
+- **Wind.**
+  - Gusts are value noise travelling with the wind (11 m and 3.7 m scales), so waves roll across a field.
+  - Each tuft sways; each blade flutters.
+  - A lasting comb leans whole areas one way.
+  - It follows `environmentState.windDirection/windSpeed`. Between frames, pixel change in the lower half of the frame is 20 levels calm and 32 at 12 m/s.
+
+## Past the blades: the canopy, fitted to the blades
+
+At 46 m the blades sink into the ground over the last 40 % of their range. The ground beyond must look like what they were. Measured first, it did not:
+- a 6–8 % brightness step;
+- bare litter beyond sparse grass, which at a slant the blades had hidden.
+
+Three terms were added to the terrain pass, on its grass share:
+- **Coverage at a slant**, 1 − exp(−2·share/cos θ_view). The share it hides of the ground between tufts takes the blades' colour, keeping half the ground's detail.
+- **Velvet light.** The canopy's normal leans halfway toward the viewer from the ground's own slope normal, as the blades' far normals do. A low sun behind the viewer lights a field more than bare ground.
+- **Light through and hotspot**, the same terms as the far blades.
+- These apply from where the blades start to sink, and fade out from 300 m to 1.5 km, where the far tiers' tuned colours take over.
+
+The constants were fitted by measurement: blades (the teacher) against the ground drawn without them (the student). The linear ratio was taken at 30–44 m over 3 sun heights × 4 view turns × 2 eye heights (`grassRig.js teacher()`). Results:
+- From 6 m up: 0.83–1.2.
+- At eye level: 0.85–1.7 in the worst case, a low sun toward the camera. There the band on screen is mostly nearer blades standing up into it.
+
+## The learned part, next
+
+Per-blade networks would not pay: a blade's shading is a few terms, and on this GPU a per-pixel network loses to exact rules (terrain round: 363–706 against 240 instructions). Where learning pays is the aggregate.
+- **Hand-fitted today.** A field of blades seen from 40 m to 2 km, with self-shadowing, hotspot, light through and grazing brightening, is what the analytic canopy above approximates with a few constants. It is the residual that remains at eye level.
+- **The step.** The teacher is our own blades rendered over view, sun, density, height and kind. Fit a small network, then bake it to a lookup texture that the terrain reads per grass pixel. This is the clouds' recipe with near-zero runtime cost, and the hand-over matches by construction rather than by fit.
+- **Weier et al. 2023** do this kind of correlation-aware aggregate learning for vegetation LOD offline.
+
+## Optimizations built in
+
+- **No `discard`, opaque blades.** Apple's hidden-surface removal stays on, so about one blade fragment is shaded per pixel. `discard` alone cost 1.9 ms in the terrain round.
+- **Three distance bands** of 7, 4 and 2 segments per blade.
+- **Density by coverage need (1/d)**, widening to a minimum pixel width, instead of a fixed density.
+- **The ground rules read once per tuft**, not per blade: 6 texture reads and the cover rules shared by up to 12 blades.
+- **Patch culling before any texture read:** level distance, then one tile lookup, one height, and a frustum ball per 2 m patch. The land light is read per patch.
+- **Cheap rejection per lattice point** by rank before reading anything.
+- **Flowers and seed heads stop at 26–38 m**, where they are under a pixel.
+- **No grass work at all** when the camera is higher than the highest land plus the blade range.
+
+Candidates once measured:
+- Reuse the terrain draw list's horizon (occlusion) for patches behind hills.
+- Orientation culling of thin edge-on blades (Jahrmann & Wimmer 2017).
+- Cache tufts across frames while the camera stands still.
+- Workgroup-level appends in place of one global atomic per tuft.
+- Half floats in the blade fragment.
+- 5 segments instead of 7 near.
+- The blade range as a quality setting.
+
+## Not done, not checked
+
+- **Profiling.** None.
+- **`groundSurface.wgsl.js`.** The older materials, drawn for debug views and without the terrain pass, did not get the climate hue or the canopy. Grass needs the terrain pass anyway.
+- **Lake surfaces.** River and lake beds are left bare. A lake whose surface lies above ground that is not its bed was not checked; one lake visited sat on dry gravel.
+- **Night, rain and snow.** Night uses the terrain's floor; there is no moonlight term, no wet look, and no snow cover on blades.
+- **Interaction:** none yet — no trampling and no bending around the player.
+- **Wind waves in the far canopy.** The blades have them; the ground past 46 m does not. The same gust field should modulate the canopy's light there.
+- **Flicker under motion and cube-face edges** were not checked: no flicker metric was run, and no view was taken at a face edge.
+- **Tree shadows.** Blades write depth like any opaque surface, so shadows applied at composite time (as cloud shadows are) or a shadow term in the blade fragment shade grass as in the Skyrim reference.
+
+## Switches
+
+- `rendering.grass` (`enabled`, `distance`, `density`, `thinFrom`, `thinPower`, `bands`, `minPixels`, `maxWiden`). Engine default off; the game turns it on.
+- `B` in the game, or the "Grass blades" button: blades off, leaving the ground with the canopy alone.
+- `GRASS_CANOPY` in `terrainPass.wgsl.js`: the canopy's depth, gain, glow and hotspot.
+- `tools/perf/grass/grassRig.js` drives the camera and sun, and runs the hand-over measurement (`handover`, `teacher`).
+
+## Pictures
+
+`01` before (no blades); `02` first blades; `03` meadow with flowers, sun behind; `04` the same with blades off (canopy alone); `05` toward the sun; `06` close in tall grass; `07` forest floor; `08` marsh reeds; `09` dry grass under cloud; `10` tundra tussocks.

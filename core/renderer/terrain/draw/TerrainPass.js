@@ -45,6 +45,8 @@ export class TerrainPass {
         Object.assign(this, o);
         this.enabled = true;
         /** For measuring: whether off-screen tiles are left out, and those behind land (terrainShader.occlusion sets it first), every tile is taken for wet, half floats are used, the air is worked out per pixel. */
+        /** Where grass blades end this frame (m), 0 without: the ground under them is shaded (GrassPass.js). */
+        this.grassReach = 0;
         this.options = { cull: true, occlusion: o.shaderConfig?.occlusion === true, allWet: false, half: true, exactAir: false };
         this._pipelines = new Map();
         this._pending = new Map();
@@ -246,7 +248,7 @@ export class TerrainPass {
             ...color(u.sunLightColor.value, u.sunLightIntensity.value), tierFade?.start ?? 0,
             ...color(u.ambientLightColor.value, u.ambientLightIntensity.value), tierFade?.end ?? 0,
             ...color(u.fogColor.value, 1), normalFrom,
-            normalFrom + shaderConfig.normalMapDistanceFadeMeters, 1, 0, 0,
+            normalFrom + shaderConfig.normalMapDistanceFadeMeters, 1, this.grassReach ?? 0, 0,
         ], 32);
         this.device.queue.writeBuffer(this._frameBuffer, 0, f);
         this._rain = wetness > 0;
