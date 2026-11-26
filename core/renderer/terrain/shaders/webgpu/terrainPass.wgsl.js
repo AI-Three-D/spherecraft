@@ -9,6 +9,7 @@ import { createWaterWgsl } from '../../../../world/water/waterWgsl.js';
 import { getAerialPerspectiveWGSL } from '../../../atmosphere/shaders/aerialPerspectiveCommon.js';
 import { AIR_FRAME_WGSL, AIR_READ_WGSL, AIR_SUN_WGSL } from '../../draw/TerrainAir.js';
 import { GROUND_WRAP_SHARE } from './groundSurface.wgsl.js';
+import { biomeCoverWGSL, unpackBiomeIceWGSL } from '../../../../../templates/terrain-shaders/biomeLandscape.wgsl.js';
 import { buildEdgeStitchWGSL, CUBE_POINT_WGSL, SAMPLE_HEIGHT_WGSL } from './terrainChunkVertexShaderBuilder.js';
 
 export const TERRAIN_PASS_FLOATS = 60;
@@ -134,7 +135,7 @@ function lattices(faceSizeMeters) {
     };
     // Rounded as groundSurface.wgsl.js prints them: over the planet a last digit moves the patterns by metres.
     const turned = (period, degrees) => [Math.cos(degrees * Math.PI / 180), Math.sin(degrees * Math.PI / 180)].map(x => Number((x * wrap / period).toFixed(5)));
-    const turns = [11, 37, 23, 68, 52, 0, 17, 74, 31];
+    const turns = [11, 37, 23, 68, 52, 0, 17, 74, 31, 58, 42, 65];
     const [mosaic, cliff, fields] = GROUND_WIDE;
     const unit = n => n.map(x => x / Math.hypot(...n));
     return {
@@ -147,6 +148,9 @@ function lattices(faceSizeMeters) {
     };
 }
 
+// The landscape's rules in the shader's own floats: they read 8-bit climate, and their widths are tenths.
+const halfCover = code => code.replace(/vec3<f32>/g, 'h3').replace(/\bf32\b/g, 'h');
+
 const number = (x) => { const s = Number(x).toPrecision(9); return /[.e]/.test(s) ? s : `${s}.0`; };
 const vector = (values, type = 'f32') => `vec${values.length}<${type}>(${values.map(number).join(', ')})`;
 const table = (name, type, rows) => `const ${name} = array<${type}, ${rows.length}>(${rows.join(', ')});`;
@@ -155,15 +159,22 @@ const table = (name, type, rows) => `const ${name} = array<${type}, ${rows.lengt
  * fine: the close surfaces (within fineEndMeters). live: tiles made of the splat's families; else all far tier.
  * far: the far tier's share of live tiles. water: lakes, rivers and the sea where the near meshes do not draw them.
  * half: 16-bit floats where they are enough. exactAir: the air worked out here, not from TerrainAir's tables.
+ * biome: the landscape's rules (biomeLandscapeConfig.js): what the ground is made of follows the tile's climate, not the
+ * splat's families (groundSurface.wgsl.js biomeLandscape).
  */
-export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16 }) {
+export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const deep = fine && deepEndMeters > 0;
     const close = live && fine;
     const farTier = far || !live;
+    // Glacier ice has its own close surface on every tile of families.
+    const fineSurfaces = close || (!!biome && live);
     const mean = name => `h3(${GROUND_LAYERS.find(l => l.name === name).mean.map(number).join(', ')})`;
-    const weights = ['wGrass', 'wDry', 'wForest', 'wDirt', 'wGravel', 'wRock', 'wSand', 'wSnow', 'wMud'];
+    const layerOf = name => GROUND_LAYERS.findIndex(l => l.name === name);
+    // The weights of the close surfaces, with their layers.
+    const weights = [['wGrass', 'grass'], ['wDry', 'dryGrass'], ['wForest', 'forest'], ['wDirt', 'dirt'], ['wGravel', 'gravel'], ['wRock', 'rock'], ['wSand', 'sand'], ['wSnow', 'snow'], ['wMud', 'mud'],
+        ...(biome ? [['wTundra', 'tundra'], ['wMarsh', 'marsh']] : [])].map(([w, name]) => [w, layerOf(name)]);
     return /* wgsl */`${half ? 'enable f16;' : ''}
 alias h = ${half ? 'f16' : 'f32'}; alias h2 = vec2<h>; alias h3 = vec3<h>; alias h4 = vec4<h>;
 ${FRAME_WGSL}${AIR_FRAME_WGSL}
@@ -181,9 +192,12 @@ ${FRAME_WGSL}${AIR_FRAME_WGSL}
 @group(1) @binding(10) var airTable: texture_2d_array<f32>;
 @group(1) @binding(11) var<uniform> air: AirFrame;
 @group(1) @binding(12) var transmittanceLUT: texture_2d<f32>;
+${biome ? '@group(1) @binding(13) var climateMap: texture_2d_array<f32>;' : ''}
 ${exactAir ? getAerialPerspectiveWGSL() : AIR_READ_WGSL}
 ${water ? createWaterWgsl({ group: 2, riverField: true }) : ''}
-const G_ROCK: i32 = 5;
+${biome ? `${halfCover(biomeCoverWGSL(biome))}
+const G_ICE: i32 = ${layerOf('ice')};` : ''}
+const G_ROCK: i32 = ${layerOf('rock')};
 ${table('NEAR', 'vec4<f32>', L.near.map((n, i) => vector([...L.over(n), GROUND_LAYERS[i].slope / Math.hypot(...L.over(n)), deep ? GROUND_LAYERS[i].deepM ?? 0 : 0])))}
 ${table('NEAR_WIDE', 'vec2<f32>', L.far.map(n => vector(L.over(n))))}
 ${table('MEAN', 'vec3<f32>', GROUND_LAYERS.map(l => vector(l.mean)))}
@@ -245,7 +259,7 @@ fn cliffAt(side: Side, distance: f32) -> Cliff {
     return Cliff(slope.x * side.ax + slope.y * side.ay, s.z, s.w);
 }
 
-${close ? `
+${fineSurfaces ? `
 struct Fine { albedo: h3, height: h, gradient: h3, rough: h, open: h };
 fn fineAt(layer: i32, p: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>, ax: h3, ay: h3) -> Fine {
     let n = NEAR[layer];
@@ -330,12 +344,29 @@ fn main(in: In) -> @location(0) vec4<f32> {
             a = mix(h4(textureSampleGrad(groundSurface, wideSampler, uvA, ${W.masks} + i32(lie.x), axA, ayA)), a, h(smoothstep(5000.0, 9000.0, distance)));
         }
         let edge = 0.6 * (a.x - 0.5) + 0.5 * (b.y - 0.5) + 0.35 * (a.y - 0.5);
+        ${biome ? `
+        // What covers the ground follows the tile's climate: temperature, humidity, glacier ice, bedrock (biomeLandscape.wgsl.js).
+        let climate = textureSampleLevel(climateMap, clampSampler, in.uv.xy, layer, 0.0);
+        let level = saturate(dot(tileNormal32, up32));
+        let cover = biomeCover(h(climate.r), h(climate.g), h(sqrt(max(1.0 - level * level, 0.0))), h(in.ground.z), edge);
+        let ice = h(${unpackBiomeIceWGSL});
+        let lithology = biomeLithology(h(climate.a));
+        let mineral = step3(0.30, 0.74, 0.64 * a.x + 0.36 * b.y);
+        let grainTone = (lithology.x * h3(0.103, 0.107, 0.111) + lithology.y * h3(0.158, 0.158, 0.156)
+            + lithology.z * mix(h3(0.150, 0.123, 0.099), h3(0.204, 0.168, 0.134), mineral)) / h3(MEAN[G_ROCK]);
+        let sandTone = mix(h3(0.68, 0.63, 0.53), h3(0.89, 0.82, 0.71), step3(0.24, 0.75, 0.6 * b.y + 0.4 * a.z));
+        let tundraTone = mix(h3(0.92, 1.01, 0.91), h3(1.21, 0.82, 0.72), step3(0.34, 0.70, 0.47 * a.x + 0.35 * b.w + 0.18 * (1.0 - h(climate.y))));
+        let dryGrass = step3(0.38, 0.73, a.w * 0.45 + b.w * 0.55 + 0.35 * slope + (0.55 - h(climate.y)) * 0.95);
+        let litter = mix(h(0.78), 1.0, step3(0.3, 0.7, a.x * 0.5 + b.x * 0.5));
+        let shortGrass = cover.grass + cover.forest * (1.0 - litter);
+        let peat = 0.75 * step3(0.39, 0.69, 0.64 * a.y + 0.36 * b.x);
+        let marshColor = mix(${mean('marsh')}, ${mean('mud')} * h3(0.66, 0.62, 0.53), peat);` : `
         let steep = step3(0.15, 0.31, slope + 0.16 * edge);
         let shed = step3(0.20, 0.40, slope + 0.18 * edge);
         let ledges = step3(0.35, 0.62, 0.55 * a.x + 0.45 * b.x + slope * 1.2);
         let dry = step3(0.39, 0.75, a.w * 0.45 + b.w * 0.55 + 0.35 * slope);
         let bareness = a.y * 0.6 + b.y * 0.4;
-        let woods = b.x * 0.5 + a.x * 0.25 + 0.25 * (1.0 - a.w);
+        let woods = b.x * 0.5 + a.x * 0.25 + 0.25 * (1.0 - a.w);`}
         let tone = (1.0 + 0.34 * (b.x - 0.5) + 0.40 * (a.x - 0.5) + 0.22 * (b.w - 0.5)) * h3(1.0 + 0.16 * (b.w - 0.5), 1.0, 1.0 - 0.18 * (b.w - 0.5));
 
         var rock: h = 0.0;
@@ -344,7 +375,16 @@ fn main(in: In) -> @location(0) vec4<f32> {
         var farRock: h = 0.0;
         ${farTier ? `
         // The far tiers: the fields and the bare rock of the close ground go on in the tile's own colour.
-        ${live ? 'if (farShare > 0.0) ' : ''}{
+        ${live ? 'if (farShare > 0.0) ' : ''}{${biome ? `
+            // Each cover in its mean colour: they share all that is not rock.
+            farColor = (shortGrass * mix(${mean('grass')}, ${mean('dryGrass')}, dryGrass) + cover.forest * litter * ${mean('forest')}
+                + cover.tundra * ${mean('tundra')} * tundraTone + cover.sand * ${mean('sand')} * sandTone + cover.snow * ${mean('snow')}
+                + cover.marsh * marshColor) / max(1.0 - cover.rock, 0.001);
+            farRock = cover.rock;
+            rock = farRock * farShare;
+            leaf = shortGrass * farShare;
+            snow = cover.snow * farShare;
+        }` : `
             let coarse = h3(textureSampleLevel(tileColors, clampSampler, in.uv.xy, layer, 0.0).rgb);
             let bright = dot(coarse, h3(0.3333));
             let hue = coarse.b / max(coarse.g, 0.001);
@@ -360,7 +400,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
             rock = farRock * farShare;
             leaf = 0.85 * organic * (1.0 - steep) * farShare;
             snow = snowy * farShare;
-        }` : ''}
+        }`}` : ''}
         ${live ? `
         let near = 1.0 - farShare;
         var relief = h4(0.5, 0.5, 0.9, 0.5);
@@ -371,16 +411,36 @@ fn main(in: In) -> @location(0) vec4<f32> {
         var w2: h = 0.0;
         var cold: h = 0.0;
         ${farTier ? 'if (farShare < 1.0) ' : ''}{
-            // What the families are here: organic, mineral, soil, cold.
             let materialLayer = i32((in.tile >> 12u) & 4095u);
+            ${biome ? `// Where water runs: the bed's weight, which is never more than the soil's (the old materials read it only where
+            // there is soil, which makes no difference worth a texture read).
+            let bed = saturate(h(textureSampleLevel(tileBeds, clampSampler, in.uv.zw, materialLayer, 0.0).r));` : `// What the families are here: organic, mineral, soil, cold.
             var families = h4(textureSampleLevel(tileFamilies, clampSampler, in.uv.zw, materialLayer, 0.0));
             let total = families.x + families.y + families.z + families.w;
             families = select(h4(1.0, 0.0, 0.0, 0.0), families / max(total, 0.001), total > 0.001);
             var bed: h = 0.0;
-            if (families.z > 0.02) { bed = saturate(h(textureSampleLevel(tileBeds, clampSampler, in.uv.zw, materialLayer, 0.0).r) / families.z); }
+            if (families.z > 0.02) { bed = saturate(h(textureSampleLevel(tileBeds, clampSampler, in.uv.zw, materialLayer, 0.0).r) / families.z); }`}
             if (distance < 1400.0) {
                 relief = mix(h4(textureSampleGrad(groundSurface, wideSampler, uvA, ${W.slopes} + i32(lie.x), axA, ayA)), relief, h(smoothstep(900.0, 1400.0, distance)));
             }
+            ${biome ? `
+            cold = cover.snow;
+            let exposed = 1.0 - bed;
+            let bare = 0.42 * step3(0.64, 0.85, 0.6 * a.y + 0.4 * b.y + slope);
+            let gravel = step3(0.075, 0.25, slope) * step3(0.36, 0.72, 0.6 * a.z + 0.4 * b.y);
+            let meadow = shortGrass * exposed;
+            let turf = meadow * (1.0 - bare) * (1.0 - gravel);
+            let wGrass = turf * (1.0 - dryGrass);
+            let wDry = turf * dryGrass;
+            let wForest = cover.forest * litter * exposed;
+            let wDirt = meadow * bare * (1.0 - gravel);
+            let wGravel = meadow * gravel;
+            let wRock = cover.rock * exposed;
+            let wSand = cover.sand * exposed;
+            let wSnow = cover.snow * exposed;
+            let wTundra = cover.tundra * exposed;
+            let wMarsh = cover.marsh * exposed * (1.0 - peat);
+            let wMud = bed + cover.marsh * exposed * peat;` : `
             cold = families.w;
             let lowland = 1.0 - step3(0.02, 0.10, slope);
             let bare = step3(0.66, 0.78, bareness + 0.9 * slope);
@@ -404,10 +464,10 @@ fn main(in: In) -> @location(0) vec4<f32> {
             let wRock = (families.x + families.y + 0.9 * families.z) * steep + mineral * ledges + families.w * shed;
             let wSand = loose * mix(h(0.25), 1.0, dune);
             let wSnow = families.w * (1.0 - shed);
-            let wMud = soil * bed;
+            let wMud = soil * bed;`}
             // The three largest. A weight and its index are one number, so min and max alone sort them.
             var m1 = 0.0; var m2 = 0.0; var m3 = 0.0; var key = 0.0; var top = 0.0;
-            ${weights.map((w, i) => `key = floor(f32(${w}) * 4096.0) * 16.0 + ${i}.0; top = max(m1, key); key = min(m1, key); m1 = top; top = max(m2, key); key = min(m2, key); m2 = top; m3 = max(m3, key);`).join('\n            ')}
+            ${weights.map(([w, i]) => `key = floor(f32(${w}) * 4096.0) * 16.0 + ${i}.0; top = max(m1, key); key = min(m1, key); m1 = top; top = max(m2, key); key = min(m2, key); m2 = top; m3 = max(m3, key);`).join('\n            ')}
             first = i32(m1) & 15;
             second = i32(m2) & 15;
             let w3 = h(floor(m3 / 16.0) / 4096.0);
@@ -416,7 +476,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
             w1 = max(h(floor(m1 / 16.0) / 4096.0) - 0.5 * w3, 0.0005);
             nearRock = saturate(wRock);
             rock += nearRock * near;
-            snow += cold * near;
+            snow += ${biome ? 'wSnow' : 'cold'} * near;
             leaf += saturate((wGrass + wDry) / max(w1 + w2 + w3, 0.001)) * near;
         }` : ''}
 
@@ -431,7 +491,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
             else if (w.y > w.z) { side = Side(in.ground.xz, q.xz, dx.xz, dy.xz, ud, up, 517.0); }
             cliff = cliffAt(side, distance);
         }
-        let rockTone = 0.66 + 0.76 * cliff.tint;
+        let rockTone = (0.66 + 0.76 * cliff.tint)${biome ? ' * grainTone' : ''};
         // What is left of the small hollows' shade where they are not drawn.
         open = 0.77;
         ${live ? `
@@ -506,13 +566,43 @@ fn main(in: In) -> @location(0) vec4<f32> {
                 grain = fine.rough;
             }` : ''}
             // Broad colour: patches a field or a hillside wide.
-            albedo = color * mix(tone, h3(rockTone), nearRock) * near;
+            ${biome ? `let surfaceTone = tone * mix(h3(1.0), sandTone, cover.sand) * mix(h3(1.0), tundraTone, cover.tundra)
+                * mix(h3(1.0), h3(0.62, 0.58, 0.49), 0.76 * cover.marsh * peat);` : 'let surfaceTone = tone;'}
+            albedo = color * mix(surfaceTone, h3(rockTone), nearRock) * near;
             gradient = bumps * near;
             open = mix(hollows * mix(1.0, relief.z, soft), open, farShare);
             rough = mix(grain, rough, farShare);
         } ${farTier ? 'else { albedo = h3(0.0); }' : ''}` : 'albedo = h3(0.0);'}
         ${farTier ? `albedo += mix(farColor * tone, ${mean('rock')} * rockTone, farRock) * farShare;` : ''}
-        gradient += cliff.gradient * (0.6 * rock);
+        ${biome ? `
+        // Glacier ice; firn in the upper accumulation zone lies over the darker ice below.
+        if (ice > 0.005) {
+            var iceColor = ${mean('ice')};
+            var iceGradient = h3(0.0);
+            var iceRough: h = 0.56;
+            let iceMid = h(smoothstep(45.0, 180.0, distance) * (1.0 - smoothstep(700.0, 1950.0, distance)));
+            if (iceMid > 0.0) {
+                let n = NEAR_WIDE[G_ICE];
+                let bend = (vec2<f32>(a.xy) - 0.5) * 31.0;
+                let wide = h3(textureSampleGrad(groundAlbedo, wideSampler, turnedUv(n, in.ground.xy + bend), G_ICE, turnedUv(n, dx.xy), turnedUv(n, dy.xy)).rgb);
+                iceColor = mix(iceColor, wide, iceMid * 0.67);
+            }${live ? `
+            let iceDetail = (1.0 - farShare) * h(1.0 - smoothstep(120.0, 340.0, distance));
+            if (iceDetail > 0.0) {
+                let sample = fineAt(G_ICE, in.ground.xy, dx.xy, dy.xy, ud, vd);
+                iceColor = mix(iceColor, sample.albedo, iceDetail);
+                iceGradient = sample.gradient * iceDetail;
+                iceRough = mix(iceRough, sample.rough, iceDetail);
+            }` : ''}
+            let frost = (1.0 - step3(0.21, 0.37, h(climate.r))) * step3(0.30, 0.74, 0.68 * a.x + 0.32 * b.x);
+            albedo = mix(albedo, mix(iceColor, ${mean('snow')}, 0.47 * frost) * tone, ice);
+            gradient = mix(gradient, iceGradient, ice);
+            rough = mix(rough, iceRough, ice);
+            rock *= 1.0 - ice;
+            leaf *= 1.0 - ice;
+            snow = mix(snow, 1.0, ice);
+        }` : ''}
+        gradient += cliff.gradient * (0.6 * rock${biome ? ' * dot(lithology, h3(0.84, 1.25, 0.70))' : ''});
         open *= mix(1.0, cliff.open, rock);
         ${rain ? `
         let dryable = 1.0 - snow;

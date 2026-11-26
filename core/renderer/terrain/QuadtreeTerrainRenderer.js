@@ -10,6 +10,7 @@ import { TerrainMaterialBuilder } from './materials/terrainMaterialBuilder.js';
 import { createGroundMaterials } from './materials/groundMaterials.js';
 import { TerrainLightMap } from './light/TerrainLightMap.js';
 import { TerrainPass } from './draw/TerrainPass.js';
+import { usesBiomeLandscape } from '../../world/terrain-generator/biomeLandscapeConfig.js';
 import { aerialFadeRange } from './shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
 import { Logger } from '../../../shared/Logger.js';
@@ -91,9 +92,12 @@ export class QuadtreeTerrainRenderer {
             && ['height', 'normal', 'splatData', 'splatIndex', 'coarseColor'].every(name => textures[name]?._isArray)
             && TerrainPass.supported(this.backend.device, this.tileManager);
         if (!usable) return;
+        // As the materials do (terrainMaterialBuilder.js enableBiomeClimate).
+        const terrain = this.planetConfig?.terrainGeneration;
+        const biome = usesBiomeLandscape(terrain) && textures.climate?._isArray === true && textures.climate._isFilterable === true ? terrain.biomeLandscape : null;
         const pass = new TerrainPass({
             device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground, landLight: this._landLight,
-            planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments),
+            planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments), biome,
             meshes: Array.from({ length: this._maxGeomLOD + 1 }, (_, lod) => this._geometries.get(lod).index.data),
         });
         try {

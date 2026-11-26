@@ -38,7 +38,8 @@ export function stripGridIndices(n, strip = 14) {
 export class TerrainPass {
     /**
      * @param {object} o device, backend, tileManager, ground (createGroundMaterials), landLight (TerrainLightMap),
-     *   planetConfig, shaderConfig (rendering.terrainShader), meshes: index arrays of the levels of detail, segments of a tile
+     *   planetConfig, shaderConfig (rendering.terrainShader), meshes: index arrays of the levels of detail, segments of a tile,
+     *   biome: the landscape's rules when the ground follows the tiles' climate (their climate textures), else null
      */
     constructor(o) {
         Object.assign(this, o);
@@ -97,6 +98,7 @@ export class TerrainPass {
                 ...[1, 2, 3, 4, 5, 6].map(i => at(i, F, array)),
                 ...[7, 8, 9].map(i => at(i, F, { sampler: {} })),
                 at(10, F, array), at(11, F, uniform), at(12, F, { texture: { sampleType: 'float' } }),
+                ...(this.biome ? [at(13, F, array)] : []),
             ]),
             none: layout([]),
             water: layout([
@@ -142,7 +144,7 @@ export class TerrainPass {
         const code = buildTerrainPassFragmentWGSL({
             faceSizeMeters: 2 * this.planetConfig.radius, ...KIND_OPTIONS[kind], water: wet, rain,
             half: this.options.half && device.features.has('shader-f16'), exactAir: this.options.exactAir,
-            fineEndMeters: this.shaderConfig.groundFineEndMeters, deepEndMeters: this.shaderConfig.groundDeepEndMeters,
+            fineEndMeters: this.shaderConfig.groundFineEndMeters, deepEndMeters: this.shaderConfig.groundDeepEndMeters, biome: this.biome ?? null,
         });
         const made = device.createRenderPipelineAsync({
             label: `Terrain ${key}`, layout: wet ? this._wetLayout : this._dryLayout,
@@ -182,13 +184,14 @@ export class TerrainPass {
         const view = name => textures[name]._gpuTexture.view;
         const lut = u.transmittanceLUT.value._gpuTexture.view;
         const views = ['height', 'normal', 'splatData', 'splatIndex', 'coarseColor'].map(view);
+        const climate = this.biome ? [view('climate')] : [];
         const entries = resources => resources.map((resource, binding) => ({ binding, resource: resource instanceof GPUBuffer ? { buffer: resource } : resource }));
         const same = (a, b) => a && a.length === b.length && a.every((x, i) => x === b[i]);
-        const ground = [...views, lut, this.ground];
+        const ground = [...views, ...climate, lut, this.ground];
         if (!same(this._groundOf, ground)) {
             this._groundOf = ground;
             this._groundGroup = device.createBindGroup({ layout: this._layouts.ground, entries: entries([
-                ...views, this.ground.albedoView, this.ground.surfaceView, this.ground.sampler, this.ground.wideSampler, this._sampler, this.air.view, this.air.frame, lut,
+                ...views, this.ground.albedoView, this.ground.surfaceView, this.ground.sampler, this.ground.wideSampler, this._sampler, this.air.view, this.air.frame, lut, ...climate,
             ]) });
         }
         const land = this.landLight.resources;

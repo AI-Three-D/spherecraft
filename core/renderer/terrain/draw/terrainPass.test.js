@@ -5,6 +5,7 @@ import { buildTerrainDrawListWGSL, DRAW_BUCKETS, drawBucket, frustumPlanes, TILE
 import { buildTileBoundsWGSL } from '../../../world/quadtree/tileBounds.js';
 import { airFrame, AIR_HEIGHTS, airUv, buildAirTableWGSL } from './TerrainAir.js';
 import { stripGridIndices } from './TerrainPass.js';
+import { normalizeBiomeLandscape } from '../../../world/terrain-generator/biomeLandscapeConfig.js';
 
 const valid = code => expect(() => validate(parseWgsl(code))).not.toThrow();
 
@@ -19,6 +20,18 @@ describe('terrain pass shaders', () => {
                 // Its presence alone makes the GPU shade every hidden layer.
                 expect(code).not.toMatch(/\bdiscard;/);
                 expect(code.includes('applyWater(')).toBe(water);
+            });
+        }
+    }
+    const biome = normalizeBiomeLandscape({ preset: 'earth' });
+    for (const [name, kind] of Object.entries(kinds)) {
+        for (const half of [false, true]) {
+            it(`validates ${name} of the landscape's climate, half ${half}`, () => {
+                const code = buildTerrainPassFragmentWGSL({ ...options, ...kind, water: true, rain: true, half, biome });
+                valid(code);
+                expect(code).toContain('var climateMap');
+                // The far tier is drawn from the climate, not from the tile's colour.
+                expect(code.includes('tileColors, clampSampler')).toBe(false);
             });
         }
     }

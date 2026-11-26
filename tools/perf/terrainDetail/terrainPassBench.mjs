@@ -5,6 +5,7 @@
 // --parts: also each change left out on its own, to see what it is worth.
 // --no-clouds: without them, whose state differs from session to session by 0.3 ms: for comparing sessions.
 // --root DIR: another checkout, measured as it is (it need not have the pass).
+// --biome: the landscapes of tools/perf/biomeLandscape/poses.json (dunes, tundra, glacier...) instead of these poses.
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -43,7 +44,9 @@ const POSES = [
     { name: 'valley', pos: [20819.291, -37734.965, -130120.57], look: [35073.858, -25052.756, -125263.78] },
 ];
 const wanted = arg('poses', null)?.split(',');
-const poses = POSES.filter(p => !wanted || wanted.includes(p.name));
+const landscapes = process.argv.includes('--biome')
+    ? JSON.parse(await readFile(new URL('../biomeLandscape/poses.json', import.meta.url), 'utf8')).map(p => ({ ...p, landscape: true })) : POSES;
+const poses = landscapes.filter(p => !wanted || wanted.includes(p.name));
 const armNames = plain ? ['plain'] : parts ? Object.keys(ARMS).filter(n => n !== 'plain') : ['before', 'after', 'with occlusion'];
 
 const server = spawn('python3', [path.join(root, 'tools/perf/lakeRecovery/noCacheServer.py'), String(PORT), root], { stdio: 'ignore' });
@@ -152,6 +155,16 @@ try {
             const scene = await page.evaluate(async p => {
                 let { pos, look } = p;
                 const R = window.gameEngine.planetConfig.radius;
+                if (p.landscape) {
+                    // As tools/perf/biomeLandscape/scene.js setPose: so high over the ground, looking down so far, on a bearing.
+                    const l = Math.hypot(...p.dir), up = p.dir.map(x => x / l);
+                    const [ground] = await window.gameEngine.waterService._sampler.sampleDirsNatural(new Float32Array([...up, 0]));
+                    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+                    const eastRaw = cross([0, 1, 0], up), el = Math.hypot(...eastRaw), east = eastRaw.map(x => x / el), north = cross(up, east);
+                    const b = p.bearing * Math.PI / 180, tangent = east.map((x, i) => x * Math.sin(b) + north[i] * Math.cos(b));
+                    pos = up.map(x => x * (R + ground + p.eye));
+                    look = pos.map((x, i) => x + 100 * (tangent[i] - up[i] * p.down));
+                }
                 if (p.up) {
                     const l = Math.hypot(...p.up), up = p.up.map(x => x / l);
                     pos = up.map(x => x * (R + p.height));
@@ -172,8 +185,8 @@ try {
                 }
                 const vector = ([x, y, z]) => ({ x, y, z });
                 const scale = Math.hypot(...pos), up = pos.map(x => x / scale);
-                window.qtDiag.regional.useCamera({ position: vector(pos), target: vector(look), up: vector(up), fov: 75 });
-                window.__lr.daylightAt(up, 0.68);
+                window.qtDiag.regional.useCamera({ position: vector(pos), target: vector(look), up: vector(up), fov: p.landscape ? 68 : 75 });
+                window.__lr.daylightAt(up, p.sun ?? 0.68);
                 await window.__setArm({});
                 let idle = 0;
                 const end = performance.now() + 60000;
