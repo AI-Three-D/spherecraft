@@ -22,6 +22,32 @@ Whole GPU frame, ms, committed code against this, alternating sessions with a st
 - The terrain pass alone: high 3.62 → 2.03, medium 1.62 → 0.97.
 - The target was 2–3 ms on high. Clouds off, two of eight views reach it (mountains, eye level); from 3 km, over the sea and in the valley the whole terrain cost 2.2–3.1 ms, so it cannot be reached there. Were terrain shading free, a frame would drop by another 0.6–1.3 ms.
 
+## Main's biome landscape (2026-11-26)
+
+Main (PR #28) was merged in and its ground ported into the pass: twelve layers, the tiles' climate texture, tundra, marsh, sand, glacier ice and bedrock tones. `groundSurface.wgsl.js` and `terrainPass.wgsl.js` hold the same ground rules twice: a change to one must go into the other. Pictures: `screenshots/terrain_render_cost_2026-11-26/` (old renderer left, pass right).
+
+The poses of `tools/perf/biomeLandscape/poses.json` (`terrainPassBench.mjs --biome --no-clouds`), main's renderer against the pass in the same build and session, whole GPU frame, ms:
+
+| View | High before | High now | Medium before | Medium now |
+| --- | ---: | ---: | ---: | ---: |
+| Dunes | 10.34 | 5.73 | 5.02 | 3.02 |
+| Dunes west | 7.65 | 4.42 | 3.95 | 2.56 |
+| Grassland | 7.13 | 4.58 | 3.91 | 2.47 |
+| Forest floor | 8.55 | 5.40 | 4.57 | 3.08 |
+| Tundra | 9.56 | 5.85 | 4.37 | 2.98 |
+| Granite | 6.90 | 4.60 | 3.12 | 2.47 |
+| Sandstone | 7.78 | 4.38 | 3.58 | 2.46 |
+| Basalt | 7.92 | 4.53 | 4.28 | 2.58 |
+| Marsh | 10.54 | 6.22 | 5.53 | 3.76 |
+| Snow | 5.73 | 3.85 | 2.39 | 2.13 |
+| Glacier | 9.42 | 4.26 | 4.50 | 2.45 |
+| Glacier close | 10.15 | 5.75 | 4.77 | 2.79 |
+| **Mean** | **8.47** | **4.96** | **4.16** | **2.73** |
+
+- Same picture: 0.2–0.9 grey levels on average for dunes, grass, forest, snow and glacier; rock faces 1–2 (drawn from one side, as above). Close marsh mud is 2.2 off with fine grain in its relief shading, not from half floats or the air table; cause not found.
+- The landscape rules cost the shaders about 300 instructions and 4–12 registers. They run in half floats, far tiles no longer read the tile colour, and near tiles skip the families texture (it only gated the bed, whose weight never exceeds the soil's).
+- Not measured: the eight poses above against main checked out on its own.
+
 ## What changed, and what each is worth
 
 - **A shader of its own** (`terrainPass.wgsl.js`, `draw/TerrainPass.js`) beside the old one. The compiler's own count for this GPU: near 2,210 → 1,348 instructions and 36 → 19 texture reads, far 1,149 → 795.
