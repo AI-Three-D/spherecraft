@@ -2,11 +2,11 @@
 
 2026-11-26, branch `grass/biome-grass` from main 70b83fe. M1 Pro, Chrome WebGPU, 2400×1350. Pictures: `screenshots/grass_2026-11-26/`.
 
-**Where it stands (2026-11-27, after the sixth round; the seventh is not profiled):** grass costs 2.3–3.5 ms at high standing still and 3.7 ms walking; 1.4–2.3 ms at medium (2.5 walking). It was 6.7–9.0 ms at high. Budget 2 ms. Section Tuft cache.
+**Where it stands (2026-11-27, after the seventh round):** grass costs 1.9–3.2 ms at high standing still and 3.5 ms walking; 1.4–2.0 ms at medium (2.3 walking). It was 6.7–9.0 ms at high. Budget 2 ms. Sections Seventh round and Tuft cache.
 
-## Seventh round (2026-11-27): less work, not profiled
+## Seventh round (2026-11-27): less work for the same picture
 
-The GPU was in other use (Codex), so these are changes that do less work for the same picture, checked for correctness but not timed. Profile them with `grassBench.mjs` against `3041d77` (the sixth round).
+Written while the GPU was in other use (Codex): changes that do less work for the same picture, checked for correctness first. Timed afterwards against the sixth round (`3041d77`), the two versions run back to back.
 
 | Change | Commit | What it saves | Checked |
 | --- | --- | --- | --- |
@@ -16,6 +16,36 @@ The GPU was in other use (Codex), so these are changes that do less work for the
 | Terrain: hotspot `pow(x, 6)` and glow `pow(x, 5)` as products; tussock grain on the 2× anisotropic sampler | `99b511d`, last | Transcendentals per grass pixel; two of four taps on a pattern 21 m across. | All 48 terrain shader variants validate. |
 | The copy chooses the blades it carries | `82eaaf8` | The select read the whole store a second time each frame; now it reads only the blades just made. | Same drawn counts whether chosen in the copy (cached) or in the select (full remake), at three heights. |
 | Constant divisors in the blade vertex shader | `82eaaf8` | An integer division by a run-time number on every vertex. | Shaders validate; pictures. |
+
+**Results** (`grassBench.mjs`, `results-2026-11-27o-round6` against `-round7`). Grass = full frame minus the terrain without grass, ms:
+
+| View | High, r6 | High, r7 | Medium, r6 | Medium, r7 |
+| --- | ---: | ---: | ---: | ---: |
+| Meadow, root height | 2.99 | 2.67 | 1.95 | 1.83 |
+| Meadow, standing | 3.42 | 3.18 | 2.19 | 2.01 |
+| Toward the sun | 2.54 | 2.36 | 1.74 | 1.60 |
+| From 8 m | 3.05 | 2.89 | 1.75 | 1.63 |
+| From 15 m | 2.98 | 2.77 | 1.60 | 1.44 |
+| Walking 3 m/s | 3.75 | 3.46 | 2.49 | 2.32 |
+| Forest floor | 2.69 | 2.58 | 1.74 | 1.63 |
+| Tundra | 2.14 | 1.91 | 1.52 | 1.40 |
+| Marsh | 2.35 | 2.29 | 1.50 | 1.37 |
+| Dry grass | 2.54 | 2.42 | 1.59 | 1.45 |
+
+- **Every view is faster:** 0.06–0.32 ms at high, 0.11–0.18 ms at medium.
+- **Noise.** The seventh round's high views had more frame spikes than the sixth's (p90 up to 1.7 ms over the median, against 0.1–1.6). The medians hold; single views are good to about ±0.1 ms.
+
+**Passes** (`scatterParts.mjs`, `results-2026-11-27p-*`), ms:
+
+| | Standing, r6 | Standing, r7 | From 8 m, r6 | From 8 m, r7 |
+| --- | ---: | ---: | ---: | ---: |
+| Select | 0.28 | 0.01 | 0.24 | 0.01 |
+| Copy (now also chooses the blades it carries) | 0.34 | 0.35 | 0.29 | 0.30 |
+| Draw | 1.64 | 1.54 | 1.21 | 1.22 |
+| Of it shading (against flat) | 0.89 | 0.89 | 0.45 | 0.48 |
+
+- **Where the gain is:** the select pass is gone (0.25–0.28 ms). The copy costs the same while doing the select's work as well, because the records are a third smaller.
+- **No measurable gain:** the per-frame light in the blade shader, the powers as products, the tussock grain sampler and the constant divisors. Their savings were too small to show; they stay, as they cost nothing.
 
 **Offsets as half floats.** Each patch's corner now sits at the drawn height of the block's middle, not at sea level. Offsets from it stay within metres, about 2 mm precise in a 2 m patch and 8 mm in an 8 m far block.
 
