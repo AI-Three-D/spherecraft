@@ -61,6 +61,8 @@ export class GrassPass {
         Object.assign(this, o);
         this.config = { ...GRASS_DEFAULTS, ...(o.config ?? {}) };
         this.enabled = this.config.enabled !== false;
+        /** For measuring: workgroups per patch made (0: by how many are made, 1-16: fixed). */
+        this.splitMaking = 0;
         /** For measuring: the blades are made but not drawn. */
         this.drawBlades = true;
         this._frame = new ArrayBuffer(FRAME_FLOATS * 4);
@@ -287,7 +289,7 @@ export class GrassPass {
         if (!faces) return;
         // This frame's half of the cache and of the patch table; the other half is last frame's.
         this._parity ^= 1;
-        W.set([this._parity, 0, 0, 0], 84);
+        W.set([this._parity, this.splitMaking ?? 0, 0, 0], 84);
         this.device.queue.writeBuffer(this._frameBuffer, 0, this._frame);
 
         // This frame's counts, where last frame's patches are now, this frame's half of the patch table.
@@ -358,7 +360,7 @@ export class GrassPass {
         const a = new Uint32Array(read.getMappedRange().slice(0)), k = new Uint32Array(readCounters.getMappedRange().slice(0));
         read.destroy();
         readCounters.destroy();
-        return { patches: k[0], blades: [k[1], k[2], k[3]], drawn: [a[5], a[9], a[13]], vertices: [a[4], a[8], a[12]], kept: k[CTRL.STORE], made: k[CTRL.GEN] };
+        return { patches: k[0], blades: [k[1], k[2], k[3]], drawn: [a[5], a[9], a[13]], vertices: [a[4], a[8], a[12]], kept: k[CTRL.STORE], made: k[CTRL.GEN], copied: k[CTRL.COPIED], why: { new: k[CTRL.WHY], nearer: k[CTRL.WHY + 1], farther: k[CTRL.WHY + 2], ground: k[CTRL.WHY + 3] } };
     }
 
     destroy() {

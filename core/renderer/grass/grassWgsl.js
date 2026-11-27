@@ -42,7 +42,7 @@ export const STORE_CAP = 786432;
 export const HASH_CAP = 8192;
 /** The control words: counts (0 patches, 1-3 blades per band, 4 blades kept, 5 patches to make), then the halves' blade
  * counts (kept from frame to frame), the list of patches to make, and where last frame's patches are now. */
-export const CTRL = Object.freeze({ STORE: 4, GEN: 5, PERSIST: 16, GENLIST: 32 });
+export const CTRL = Object.freeze({ STORE: 4, GEN: 5, COPIED: 6, WHY: 7, SPLIT: 11, PERSIST: 16, GENLIST: 32 });
 /** Patches kept in a frame at most: about 15 thousand are in view at 240 m. */
 export const MAX_PATCHES = 65536;
 /** Tallest blade (m) and widest (m) the packed form holds. */
@@ -154,6 +154,9 @@ const MAX_PATCHES: u32 = ${MAX_PATCHES}u;
 const STORE_CAP: u32 = ${STORE_CAP}u;
 const HASH_CAP: u32 = ${HASH_CAP}u;
 const CTRL_STORE: u32 = ${CTRL.STORE}u;
+const CTRL_COPIED: u32 = ${CTRL.COPIED}u;
+const CTRL_WHY: u32 = ${CTRL.WHY}u;
+const CTRL_SPLIT: u32 = ${CTRL.SPLIT}u;
 const CTRL_GEN: u32 = ${CTRL.GEN}u;
 const CTRL_PERSIST: u32 = ${CTRL.PERSIST}u;
 const CTRL_GENLIST: u32 = ${CTRL.GENLIST}u;
@@ -552,6 +555,16 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         let at = atomicAdd(&control[CTRL_GEN], 1u);
         if (at < MAX_PATCHES) { atomicStore(&control[CTRL_GENLIST + at], slotOut); }
+        // Why (counts(), for measuring): new here, its distance step nearer or farther, or the ground under it changed.
+        var why = 0u;
+        if (before >= 0) {
+            let was = atomicLoad(&patchHash[u32(before) + 2u]);
+            why = 3u;
+            if ((was & 0x00FFFFFFu) == (stamp0 & 0x00FFFFFFu) && atomicLoad(&patchHash[u32(before) + 3u]) == stamp1) {
+                why = select(2u, 1u, (was >> 24u) > bucket);
+            }
+        }
+        atomicAdd(&control[CTRL_WHY + why], 1u);
     }
 }
 
@@ -604,8 +617,14 @@ fn dispatchMain() {
     args[0] = (previous + 255u) / 256u;
     args[1] = 1u;
     args[2] = 1u;
-    args[3] = min(atomicLoad(&control[CTRL_GEN]), MAX_PATCHES);
-    args[4] = 1u;
+    // The patches to make, each over several workgroups when they are few: walking makes about 15 a frame, and as many
+    // workgroups, each a long loop over its lattice, left the GPU nearly idle while the frame waited (1 ms for 2 % of
+    // the tufts). Workgroups across a patch's lattice (x), patches (y: at most 65535 a dimension).
+    let made = min(atomicLoad(&control[CTRL_GEN]), 65535u);
+    let split = select(clamp(256u / max(made, 1u), 1u, 16u), frame.cache.y, frame.cache.y != 0u);
+    atomicStore(&control[CTRL_SPLIT], split);
+    args[3] = split;
+    args[4] = made;
     args[5] = 1u;
 }
 
@@ -631,7 +650,10 @@ fn copyMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
         if (now != 0u) { slot = now - 1u; local = atomicAdd(&groupCount, 1u); }
     }
     workgroupBarrier();
-    if (thread == 0u) { groupBase = atomicAdd(&control[CTRL_STORE], atomicLoad(&groupCount)); }
+    if (thread == 0u) {
+        groupBase = atomicAdd(&control[CTRL_STORE], atomicLoad(&groupCount));
+        atomicAdd(&control[CTRL_COPIED], atomicLoad(&groupCount));
+    }
     workgroupBarrier();
     let at = groupBase + local;
     if (local != 0xFFFFFFFFu) {
@@ -829,7 +851,8 @@ fn tuftsBound() -> f32 {
 // are chosen as drawn: selectMain), as offsets from the patch's corner.
 @compute @workgroup_size(64)
 fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) thread: u32) {
-    let at = atomicLoad(&control[CTRL_GENLIST + group.x]);
+    let at = atomicLoad(&control[CTRL_GENLIST + group.y]);
+    let split = atomicLoad(&control[CTRL_SPLIT]);
     let head = patches[at * 4u];
     let more = patches[at * 4u + 1u];
     let origin = bitcast<vec3<f32>>(patches[at * 4u + 2u].xyz);
@@ -882,7 +905,7 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
     for (var k = 1u; k <= 4u; k++) { if (keepMost <= exp2(-2.0 * f32(k))) { level = k; } }
     let stride = 1u << level;
     let points = CELLS * span / stride;
-    for (var k = thread; k < points * points; k += 64u) {
+    for (var k = thread + group.x * 64u; k < points * points; k += 64u * split) {
         let c = vec2<u32>(k % points, k / points) * stride;
         let g = P * CELLS + c;
         let h0 = hash3(g.x, g.y, face);
