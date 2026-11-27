@@ -23,6 +23,9 @@ export async function boot() {
     w.config.windChangeChancePerSecond = 0;
     w.config.variantChangeChancePerSecond = 0;
     w.setWeather('partly_cloudy', true);
+    // Clouds held still: their shadows moving between two pictures would read as a difference.
+    const clouds = g.renderer.volumetricClouds;
+    if (clouds) Object.assign(clouds.settings, { windSpeedKmS: 0, weatherEvolveKmS: 0, boilKmS: 0 });
     window.windMps = 6;
     window.windAngle = 0.6;
     w._updateWind = (dt, env) => { env.windSpeed = window.windMps; env.windDirection.set(Math.cos(window.windAngle), Math.sin(window.windAngle)); };
@@ -105,15 +108,38 @@ export function grab(w = 800, h = 450) {
     });
 }
 
+// The next frame the renderer finishes, read right after its commands are submitted (while the canvas still holds
+// it: a WebGPU canvas is empty again once its frame is shown).
+export function grabNext(w = 800, h = 450) {
+    const core = window.gameEngine.renderer.rendererCore;
+    if (!core.__grabHooked) {
+        const end = core.endFrame.bind(core);
+        core.endFrame = (f) => {
+            const r = end(f);
+            const take = window.__onFrame;
+            if (take) { window.__onFrame = null; take(); }
+            return r;
+        };
+        core.__grabHooked = true;
+    }
+    return new Promise(res => {
+        window.__onFrame = () => {
+            const o = new OffscreenCanvas(w, h), x = o.getContext('2d', { willReadFrequently: true });
+            x.drawImage(window.gameEngine.canvas, 0, 0, w, h);
+            res({ w, h, d: x.getImageData(0, 0, w, h).data });
+        };
+    });
+}
+
 // Distance (m) to the ground along the view ray through each image row at the middle column; null where it misses.
-export async function rowDistances(h = 450, maxM = 120) {
+export async function rowDistances(h = 450, maxM = 260) {
     const g = window.gameEngine, c = g.renderer.camera, R = g.planetConfig.radius;
     const p = [c.position.x, c.position.y, c.position.z];
     const e = c.matrixWorldInverse.elements;
     const upv = [e[1], e[5], e[9]], back = [e[2], e[6], e[10]];
     const tanH = Math.tan(c.fov * Math.PI / 360);
     const steps = [];
-    for (let m = 1; m <= maxM; m += 0.5) steps.push(m);
+    for (let m = 1; m <= maxM; m += m < 60 ? 0.5 : 1.5) steps.push(m);
     const out = [];
     for (let row = 0; row < h; row++) {
         const ny = 1 - 2 * (row + 0.5) / h;
@@ -189,4 +215,41 @@ export async function teacher({ dir = POSES.grassland, aheadM = 150, suns = [0.2
         }
     }
     return out;
+}
+
+// Flicker while the camera moves: time held (no wind motion), the camera stepped stepM per frame along its view on the
+// level, second difference |a - 2b + c| of luminance over the lower part of the picture, mean and 99th percentile.
+// Grass on against off at the same steps: what the grass adds.
+export async function motionFlicker({ dir = POSES.grassland, eye = 1.8, bearing = 0, pitch = -4, aheadM = 150, stepM = 0.03, n = 12 } = {}) {
+    const grass = window.gameEngine.renderer.quadtreeTerrainRenderer.grass;
+    const compute = grass.compute.bind(grass);
+    grass.compute = (enc, o) => compute(enc, { ...o, deltaTime: 0 });
+    const run = async () => {
+        const seq = [], R = [];
+        for (let i = 0; i < n; i++) {
+            await eyeAt(dir, { eye, bearing, pitch, aheadM: aheadM + i * stepM });
+            await grabNext(8, 8);
+            const g = await grabNext(800, 450);
+            const lum = new Float32Array(800 * 450);
+            for (let k = 0; k < lum.length; k++) lum[k] = 0.2126 * g.d[4 * k] + 0.7152 * g.d[4 * k + 1] + 0.0722 * g.d[4 * k + 2];
+            seq.push(lum);
+            if (seq.length > 3) seq.shift();
+            if (seq.length < 3) continue;
+            const [a, b, c] = seq, v = [];
+            let first = 0;
+            for (let k = 800 * 160; k < lum.length; k++) { v.push(Math.abs(a[k] - 2 * b[k] + c[k])); first += Math.abs(c[k] - b[k]); }
+            v.sort((x, y) => x - y);
+            const second = v.reduce((s, x) => s + x, 0) / v.length;
+            first /= v.length;
+            // Second over first difference: near 0 for smooth motion, about 1.4 for pixels that change at random.
+            R.push([second, v[Math.floor(v.length * 0.99)], second / Math.max(first, 1e-6)]);
+        }
+        const med = j => R.map(x => x[j]).sort((x, y) => x - y)[R.length >> 1];
+        return { second: +med(0).toFixed(2), p99: +med(1).toFixed(1), ratio: +med(2).toFixed(3) };
+    };
+    try {
+        grass.enabled = true; const on = await run();
+        grass.enabled = false; const off = await run();
+        return { on, off };
+    } finally { grass.enabled = true; grass.compute = compute; }
 }

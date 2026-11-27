@@ -14,6 +14,26 @@ import { buildEdgeStitchWGSL, CUBE_POINT_WGSL, SAMPLE_HEIGHT_WGSL } from './terr
 import { GRASS_HUE_WGSL } from '../../../grass/grassHue.wgsl.js';
 
 export const TERRAIN_PASS_FLOATS = 60;
+/** The ground's daylight, in the shader's floats h, h2, h3 (the grass blades far off take it too: grassWgsl.js). Needs step3. */
+export const GROUND_LIGHT_WGSL = /* wgsl */`
+// Daylight on the ground (terrainChunkFragmentShaderBuilder.js terrainLight).
+fn lightAt(n: h3, shape: h3, up: h3, sunDir: h3, sun: h3, ambient: h3, open: h, leaf: h, land: h2) -> h3 {
+    let sunUp = dot(up, sunDir);
+    let day = step3(-0.10, 0.20, sunUp);
+    let facing = dot(n, sunDir);
+    var direct = max(facing, 0.0) * saturate(facing + 2.0 * open - 1.0);
+    direct = mix(direct, max((facing + 0.35) / 1.35, 0.0) * mix(h(0.75), 1.0, open), 0.6 * leaf);
+    direct *= step3(-0.06, 0.18, dot(shape, sunDir)) * land.x;
+    let skyTint = ambient / max(dot(ambient, h3(0.333)), 1.0e-4);
+    let overhead = 0.5 + 0.5 * dot(n, up);
+    let sky = dot(sun, h3(0.333)) * 0.34 * day * mix(h3(1.0), skyTint, 0.8);
+    let covered = 1.0 - land.y;
+    let bounce = sun * max(sunUp, 0.0) * h3(0.115, 0.105, 0.070) * mix(h(0.55), 1.0, land.x) * (covered + (1.0 - overhead) * 0.8);
+    let hollow = mix(open, 1.0, 0.45);
+    let light = sun * direct + (ambient + sky * overhead * land.y + bounce) * hollow;
+    return max(light, h3(mix(h(0.30), 0.06, day) * mix(1.0, hollow, day)));
+}
+`;
 /**
  * The grass canopy past the blades (GrassPass.js): how deep a sight line sees into it (blade area met per unit of
  * grass share, Beer-Lambert), and its brightness against the ground's grass colour. Fitted to the blades so that the
@@ -282,24 +302,7 @@ fn fineAt(layer: i32, p: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>, ax: h3, ay: h3
 }
 ` : ''}
 
-// Daylight on the ground (terrainChunkFragmentShaderBuilder.js terrainLight).
-fn lightAt(n: h3, shape: h3, up: h3, sunDir: h3, sun: h3, ambient: h3, open: h, leaf: h, land: h2) -> h3 {
-    let sunUp = dot(up, sunDir);
-    let day = step3(-0.10, 0.20, sunUp);
-    let facing = dot(n, sunDir);
-    var direct = max(facing, 0.0) * saturate(facing + 2.0 * open - 1.0);
-    direct = mix(direct, max((facing + 0.35) / 1.35, 0.0) * mix(h(0.75), 1.0, open), 0.6 * leaf);
-    direct *= step3(-0.06, 0.18, dot(shape, sunDir)) * land.x;
-    let skyTint = ambient / max(dot(ambient, h3(0.333)), 1.0e-4);
-    let overhead = 0.5 + 0.5 * dot(n, up);
-    let sky = dot(sun, h3(0.333)) * 0.34 * day * mix(h3(1.0), skyTint, 0.8);
-    let covered = 1.0 - land.y;
-    let bounce = sun * max(sunUp, 0.0) * h3(0.115, 0.105, 0.070) * mix(h(0.55), 1.0, land.x) * (covered + (1.0 - overhead) * 0.8);
-    let hollow = mix(open, 1.0, 0.45);
-    let light = sun * direct + (ambient + sky * overhead * land.y + bounce) * hollow;
-    return max(light, h3(mix(h(0.30), 0.06, day) * mix(1.0, hollow, day)));
-}
-
+${GROUND_LIGHT_WGSL}
 @fragment
 fn main(in: In) -> @location(0) vec4<f32> {
     let layer = i32(in.tile & 4095u);
@@ -629,9 +632,13 @@ fn main(in: In) -> @location(0) vec4<f32> {
     // Under grass blades (GrassPass.js, out to grassReach m) the ground between them lies in their shade.
     var canopyFade: h = 1.0;
     if (frame.grassReach > 0.0) {
-        let under = saturate(leaf) * h(1.0 - smoothstep(frame.grassReach * 0.55, frame.grassReach, distance));
+        // The far blades take the canopy's colour from a sixth to half their reach (grassWgsl.js farness); the ground
+        // between them takes it a little sooner, as a gap far off is a pixel of the field, not a view down to the soil.
+        // Seen from above, a gap shows the soil in the sun, not the shade deep among the blades.
+        let under = saturate(leaf) * h(1.0 - smoothstep(frame.grassReach * 0.1, frame.grassReach * 0.3, distance))
+            * (1.0 - step3(0.15, 0.5, dot(toEye, up)) * h(smoothstep(6.0, 16.0, distance)));
         albedo *= mix(h3(1.0), h3(0.50, 0.55, 0.46), under);
-        canopyFade = h(smoothstep(frame.grassReach * 0.55, frame.grassReach, distance));
+        canopyFade = h(smoothstep(frame.grassReach * 0.1, frame.grassReach * 0.3, distance));
     }
     // Past the blades the ground takes the grass canopy's look. A sight line at a slant meets blades sooner: the share
     // of them it meets is 1 - exp(-depth share / cos), so at a low angle even thin grass hides the soil between its

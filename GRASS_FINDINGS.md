@@ -4,9 +4,34 @@
 
 **Not profiled yet.** The GPU was shared with another job all session, so no timing was taken. The ready-to-run measurement is `tools/perf/grass/grassBench.mjs`; the counts below are what it will be measuring.
 
+## Second round (2026-11-27): flicker, blades in the ground, and range
+
+Three problems reported from the game, each fixed at its cause:
+
+| Report | Cause | Fix |
+| --- | --- | --- |
+| Grass partly under the ground | The terrain draws coarse meshes even next to the camera on high ground (`lodHeightSource: 'sea'`). At the reported lake bank (1616 m) the tile under the camera drew 4 m triangles, and on the slope (654 m) 2 m ones. Blades stood on the finest loaded heights, so they sat up to decimetres under or over the drawn surface. | Blades stand on the drawn triangles. Each patch finds the tile drawn over it this frame (the quadtree's visible table), its mesh level and the layer its geometry comes from (own or an ancestor's part). It rebuilds that mesh's adaptive cells and fan (`terrainGeometryBuilder.js` transition topology) and interpolates the triangle that holds each tuft. |
+| Violent flicker close by | The sway's phase ran with the gusts' travel: at 22 m/s blades whipped at about 3 Hz, plus a fast flutter. | Sway at the tuft's own pace (0.5–0.8 Hz), smaller and less far off; gusts in broader waves; flutter only within 6–25 m. With time frozen the picture does not change at all, so motion comes only from wind. |
+| Grass ends too close, and its edge shows | 46 m range. | 180 m. Past where a blade is under 0.8 px (about 16 m here), density falls as 1/d² while blades widen as d, so each pixel holds the same share of grass. The lattice ranks its points in nested sets, so a far patch visits only the coarse set it needs (down to every 16th row and column) and the kept set still changes one tuft at a time. |
+
+Frame-to-frame change of a still view in wind, lower 70 % of the picture, grey levels:
+
+| Wind | Before | After |
+| --- | ---: | ---: |
+| 0 m/s | 5.8 | 4.2 |
+| 6 m/s | 12.0 | 6.9 |
+| 15 m/s | 19.3 | 8.7 |
+| 22 m/s | 22.5 | 8.0 |
+
+**The edge at 180 m.** Far blades take the colour the ground past them has, and the ground's own light formula (`GROUND_LIGHT_WGSL`, now shared by both), keeping a third of their own differences. This happens from a sixth to half the range, and also from above, where the ground between blades shows. The ground between blades stops being shaded from 18 m to 54 m, and from above. Blades against the canopy without them, meadow, linear: 80–120 m +1 %, 120–150 m +2 %, with about +2 % exposure offset even where no blades stand; before this, the far blades measured 6–10 % darker than the ground beyond them.
+
+**Counts.** The meadow with flowers at eye level, now to 180 m, draws 47k / 64k / 135k blades (near / mid / far band), about 1.9 M vertices, in 8,600 patches: about what the 46 m version drew. From 15 m up, 141k blades, all in the far band.
+
+**Motion flicker is not measured.** A camera stepped 1 cm a frame gives the terrain alone a second-to-first difference ratio of 1.6: its vertices are placed in 32-bit planet coordinates and jitter by about a centimetre. That hides what the grass adds (1.74 with grass).
+
 ## What it is
 
-Grass blades within 46 m of the camera, made on the GPU every frame from the ground the terrain draws. Past them, the ground itself takes the grass canopy's look. Both are tuned so that they meet without a visible line. There is nothing to stream or store: blades are a function of the world position and the tile data already resident.
+Grass blades within 180 m of the camera, made on the GPU every frame from the ground the terrain draws. Past them, the ground itself takes the grass canopy's look. Both are tuned so that they meet without a visible line. There is nothing to stream or store: blades are a function of the world position and the tile data already resident.
 
 - `core/renderer/grass/grassWgsl.js`: the scatter (compute) and the blades (vertex and fragment).
 - `core/renderer/grass/GrassPass.js`: the driver, owned by `QuadtreeTerrainRenderer` and drawn right after the terrain pass.
@@ -35,7 +60,7 @@ A sight line from eye height e reaches the ground at distance d. It runs through
 | 2 m | ~1460 | 1500 |
 | 10 m | ~290 | 300 |
 | 20 m | ~150 | 150 |
-| 46 m | 40–75 (blades widened to ≥0.7 px) | 65 |
+| 46 m | 40–75 (blades widened to ≥0.7 px) | 65 (round 1); now about 18: past ~16 m it falls as 1/d², widened blades |
 
 - **Height and clumping.** Density scales with 0.35/H, capped to 0.5–1.6, because tall grass hides the ground sooner. Bunchgrass and thin grass gather into clumps with gaps between them.
 - **Counts read back per view (blades, near/mid/far band):**
@@ -92,7 +117,7 @@ A sight line from eye height e reaches the ground at distance d. It runs through
 
 ## Past the blades: the canopy, fitted to the blades
 
-At 46 m the blades sink into the ground over the last 40 % of their range. The ground beyond must look like what they were. Measured first, it did not:
+In the first round (46 m range) the blades sank into the ground over the last 40 % of their range. The ground beyond must look like what they were. Measured first, it did not:
 - a 6–8 % brightness step;
 - bare litter beyond sparse grass, which at a slant the blades had hidden.
 
@@ -140,17 +165,17 @@ Candidates once measured:
 - **Lake surfaces.** River and lake beds are left bare. A lake whose surface lies above ground that is not its bed was not checked; one lake visited sat on dry gravel.
 - **Night, rain and snow.** Night uses the terrain's floor; there is no moonlight term, no wet look, and no snow cover on blades.
 - **Interaction:** none yet — no trampling and no bending around the player.
-- **Wind waves in the far canopy.** The blades have them; the ground past 46 m does not. The same gust field should modulate the canopy's light there.
-- **Flicker under motion and cube-face edges** were not checked: no flicker metric was run, and no view was taken at a face edge.
+- **Wind waves in the far canopy.** The blades have them; the ground past the blades (180 m) does not. The same gust field should modulate the canopy's light there.
+- **Cube-face edges** were not checked. Flicker under camera motion is only judged by eye: the metric is dominated by the terrain's own vertex jitter (see the second round).
 - **Tree shadows.** Blades write depth like any opaque surface, so shadows applied at composite time (as cloud shadows are) or a shadow term in the blade fragment shade grass as in the Skyrim reference.
 
 ## Switches
 
-- `rendering.grass` (`enabled`, `distance`, `density`, `thinFrom`, `thinPower`, `bands`, `minPixels`, `maxWiden`). Engine default off; the game turns it on.
+- `rendering.grass` (`enabled`, `distance` 180, `density` 1500, `thinFrom` 2, `bands`, `minPixels` 0.8, `maxWiden` 16). Engine default off; the game turns it on.
 - `B` in the game, or the "Grass blades" button: blades off, leaving the ground with the canopy alone.
 - `GRASS_CANOPY` in `terrainPass.wgsl.js`: the canopy's depth, gain, glow and hotspot.
 - `tools/perf/grass/grassRig.js` drives the camera and sun, and runs the hand-over measurement (`handover`, `teacher`).
 
 ## Pictures
 
-`01` before (no blades); `02` first blades; `03` meadow with flowers, sun behind; `04` the same with blades off (canopy alone); `05` toward the sun; `06` close in tall grass; `07` forest floor; `08` marsh reeds; `09` dry grass under cloud; `10` tundra tussocks.
+`01` before (no blades); `02` first blades; `03` meadow with flowers, sun behind; `04` the same with blades off (canopy alone); `05` toward the sun; `06` close in tall grass; `07` forest floor; `08` marsh reeds; `09` dry grass under cloud; `10` tundra tussocks. Second round: `11` the reported lake bank, blades on the drawn ground; `12` the reported slope view; `13` meadow, grass to 180 m; `14` from 15 m up.

@@ -30,20 +30,22 @@ const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 /** Defaults of rendering.grass. */
 export const GRASS_DEFAULTS = Object.freeze({
     enabled: true,
-    /** Blades end here (m); the terrain's ground goes on. */
-    distance: 46,
+    /** Blades end here (m); the terrain's grass canopy goes on. */
+    distance: 180,
     /**
      * Blades per square metre close by (grass 35 cm tall), the distance (m) from which they thin, and how fast: as 1 / d
      * the ground stays hidden at all distances (grassWgsl.js).
      */
     density: 1500,
     thinFrom: 2,
-    thinPower: 1,
     /** Distance bands of finer and coarser blades (m). */
     bands: [7, 18],
-    /** No blade drawn thinner than this many pixels (fewer, wider blades far off), widened at most so much. */
-    minPixels: 0.7,
-    maxWiden: 3,
+    /**
+     * No blade drawn thinner than this many pixels, widened at most so much. From where a typical blade (1.1 cm) is that
+     * thin, blades thin out as 1 / d^2 while they widen as d: fewer, wider blades, the same cover.
+     */
+    minPixels: 0.8,
+    maxWiden: 16,
 });
 
 export class GrassPass {
@@ -66,7 +68,7 @@ export class GrassPass {
 
     static supported(device, tileManager) {
         return device.features.has('indirect-first-instance') && !!tileManager?.quadtreeGPU?.getLoadedTileTableBuffer?.()
-            && device.limits.maxStorageBuffersPerShaderStage >= 6;
+            && !!tileManager.quadtreeGPU._visibleTableBuffer && device.limits.maxStorageBuffersPerShaderStage >= 7;
     }
 
     async initialize() {
@@ -75,7 +77,7 @@ export class GrassPass {
         const buffer = (label, size, usage) => device.createBuffer({ label: `Grass ${label}`, size, usage });
         const bladeCount = LOD_CAPACITY.reduce((a, b) => a + b, 0);
         this._frameBuffer = buffer('frame', FRAME_FLOATS * 4, U.UNIFORM | U.COPY_DST);
-        this._patches = buffer('patches', MAX_PATCHES * PATCH_WORDS * 4, U.STORAGE);
+        this._patches = buffer('patches', MAX_PATCHES * PATCH_WORDS * 4, U.STORAGE | U.COPY_SRC);
         this._counters = buffer('counters', COUNTER_WORDS * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC);
         this._blades = buffer('blades', bladeCount * BLADE_WORDS * 4, U.STORAGE);
         // The blades' dispatch, and the bands' draws: two buffers, as one is read while the other is written.
@@ -90,7 +92,7 @@ export class GrassPass {
         this._layouts = {
             work: device.createBindGroupLayout({ entries: [
                 at(0, C, { buffer: { type: 'uniform' } }), at(1, C, { buffer: { type: 'read-only-storage' } }),
-                at(2, C, storage), at(3, C, storage), at(4, C, storage), at(5, C, storage),
+                at(2, C, storage), at(3, C, storage), at(4, C, storage), at(5, C, storage), at(6, C, { buffer: { type: 'read-only-storage' } }),
             ] }),
             ground: device.createBindGroupLayout({ entries: [
                 at(0, C, { texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }),
@@ -119,8 +121,9 @@ export class GrassPass {
         ]);
         this._steps = { patches, dispatch, blades, finish };
         this._render = render;
+        const quadtree = this.tileManager.quadtreeGPU;
         const workGroup = args => device.createBindGroup({ layout: this._layouts.work, entries: [
-            this._frameBuffer, this.tileManager.quadtreeGPU.getLoadedTileTableBuffer(), this._patches, this._counters, this._blades, args,
+            this._frameBuffer, quadtree.getLoadedTileTableBuffer(), this._patches, this._counters, this._blades, args, quadtree._visibleTableBuffer,
         ].map((b, binding) => ({ binding, resource: { buffer: b } })) });
         this._dispatchGroup = workGroup(this._dispatchArgs);
         this._drawArgsGroup = workGroup(this._args);
@@ -196,8 +199,11 @@ export class GrassPass {
         f.set([s.x / sl, s.y / sl, s.z / sl, this._time], 48);
         f.set([sunColor.r * sunI, sunColor.g * sunI, sunColor.b * sunI, windSpeed], 52);
         f.set([amb.r * ambI, amb.g * ambI, amb.b * ambI, pixelAngle], 56);
-        f.set([dot(wind, east), dot(wind, north), clamp(windSpeed / 16, 0, 1.2), 0.03 + 0.05 * clamp(windSpeed / 8, 0, 1)], 60);
-        f.set([c.distance, c.density, c.thinFrom, c.thinPower], 64);
+        // Bend at the tip per metre of height (gusts on top), and the sway's size: grass leans well over in a gale but
+        // never lies flat, and sways a little even in still air.
+        f.set([dot(wind, east), dot(wind, north), 0.75 * clamp(windSpeed / 22, 0, 1), 0.015 + 0.03 * clamp(windSpeed / 12, 0, 1)], 60);
+        const pixelFrom = 0.011 / (c.minPixels * pixelAngle);
+        f.set([c.distance, c.density, c.thinFrom, pixelFrom], 64);
         f.set([c.bands[0], c.bands[1], c.minPixels, c.maxWiden], 68);
         f.set([...camRel, seaLevel ?? -1.0e9], 72);
 
@@ -229,7 +235,7 @@ export class GrassPass {
             widest = Math.max(widest, half);
             const ex = unit(jx), ey = unit(jy);
             const windFace = unit([dot(wind, ex), dot(wind, ey), 0]);
-            const o = 80 + faces * 28;
+            const o = 84 + faces * 28;
             f.set([...ca, la], o);
             f.set([...du, face], o + 4);
             f.set([...dv, Math.max(mx, my)], o + 8);
@@ -241,6 +247,8 @@ export class GrassPass {
         }
         const tableCapacity = quadtree.getLoadedTileTableCapacity();
         W.set([faces, depth, tableCapacity - 1, tableCapacity], 76);
+        // The tiles drawn this frame: the quadtree has built them already in this encoder (TerrainModule.compute).
+        W.set([quadtree.visibleTableMask, quadtree.visibleTableCapacity, quadtree._visibleEpoch, quadtree.maxGeomLOD], 80);
         if (!faces) return;
         this.device.queue.writeBuffer(this._frameBuffer, 0, this._frame);
 

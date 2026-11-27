@@ -17,7 +17,7 @@
 // difference of two directions on the sphere is computed without subtracting large numbers (placeAbout).
 
 import { GROUND_LAYERS, GROUND_WIDE, GROUND_WIDE_LAYERS } from '../terrain/materials/groundMaterials.js';
-import { lattices } from '../terrain/shaders/webgpu/terrainPass.wgsl.js';
+import { GRASS_CANOPY, GROUND_LIGHT_WGSL, lattices } from '../terrain/shaders/webgpu/terrainPass.wgsl.js';
 import { buildTerrainLightWGSL } from '../terrain/light/terrainLight.wgsl.js';
 import { biomeCoverWGSL, unpackBiomeIceWGSL } from '../../../templates/terrain-shaders/biomeLandscape.wgsl.js';
 import { GRASS_HUE_WGSL } from './grassHue.wgsl.js';
@@ -26,17 +26,17 @@ import { GRASS_HUE_WGSL } from './grassHue.wgsl.js';
 export const PATCH_LEVELS = 6;
 export const CELLS = 48;
 export const MAX_FACES = 3;
-export const GRID_MAX = 64;
+export const GRID_MAX = 128;
 /** Strip segments of a blade by distance band, and how many blades each band holds at most. */
 export const LOD_SEGMENTS = [7, 4, 2];
-export const LOD_CAPACITY = [131072, 262144, 393216];
+export const LOD_CAPACITY = [131072, 262144, 524288];
 export const BLADE_WORDS = 8;
 export const PATCH_WORDS = 8;
 export const MAX_PATCHES = MAX_FACES * (2 * GRID_MAX) * (2 * GRID_MAX);
 /** Tallest blade (m) and widest (m) the packed form holds. */
 export const MAX_HEIGHT = 2.0;
 export const MAX_WIDTH = 0.05;
-export const FRAME_FLOATS = 80 + MAX_FACES * 28;
+export const FRAME_FLOATS = 84 + MAX_FACES * 28;
 export const COUNTER_WORDS = 4;
 /** Blade kinds. */
 export const KIND = Object.freeze({ MEADOW: 0, DRY: 1, WOOD: 2, TUNDRA: 3, REED: 4, SEED: 5, BLOSSOM: 6, SPIKE: 7 });
@@ -67,10 +67,12 @@ struct Frame {
     sunColor: vec4<f32>,           // wind speed (m/s)
     ambient: vec4<f32>,            // radians per pixel
     wind: vec4<f32>,               // wind east, north, gust strength, sway
-    dist: vec4<f32>,               // greatest distance, blades per m^2 close by, distance they begin to thin, how fast
+    dist: vec4<f32>,               // greatest distance, blades per m^2 close by, distance they begin to thin (1 / d), from
+                                   // where they are a pixel wide and thin as 1 / d^2 (fewer, wider: the same cover)
     lod: vec4<f32>,                // band edges (m), least width in pixels, most widening
     camera: vec4<f32>,             // from the planet's centre (for the land's light), sea level (m)
     counts: vec4<u32>,             // faces, deepest tile level, hash mask, hash capacity
+    visible: vec4<u32>,            // the drawn tiles' table: mask, capacity, this frame's epoch; coarsest mesh level
     faces: array<Face, ${MAX_FACES}>,
 };
 `;
@@ -98,6 +100,8 @@ export function buildGrassComputeWGSL({ faceSizeMeters, biome }) {
 @group(0) @binding(3) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> blades: array<vec4<u32>>;
 @group(0) @binding(5) var<storage, read_write> args: array<u32>;
+// The quadtree's tiles drawn this frame (instanceBufferBuilder.wgsl.js VisibleEntry: key, epoch, pad).
+@group(0) @binding(6) var<storage, read> visibleTable: array<vec4<u32>>;
 @group(1) @binding(0) var heightTexture: texture_2d_array<f32>;
 @group(1) @binding(1) var tileNormals: texture_2d_array<f32>;
 @group(1) @binding(2) var climateMap: texture_2d_array<f32>;
@@ -157,6 +161,138 @@ fn tileOver(face: u32, p: vec2<u32>) -> vec2<i32> {
 // Where in its tile a point of a patch lies (0..1).
 fn inTile(p: vec2<u32>, shift: u32, f: vec2<f32>) -> vec2<f32> {
     return (vec2<f32>(p & vec2<u32>((1u << shift) - 1u)) + f) / f32(1u << shift);
+}
+
+// ---- the ground as the terrain draws it. Blades stand on the drawn triangles, not on the finest heights loaded: the
+// terrain picks coarser meshes for high ground near the camera (2-16 m fans), and finer heights there leave blades
+// under or over the surface by up to metres.
+fn visibleAt(face: u32, depth: u32, x: u32, y: u32) -> bool {
+    let keyLo = (x & 0xFFFFu) | ((y & 0xFFFFu) << 16u);
+    let keyHi = (depth & 0xFFFFu) | ((face & 0xFFFFu) << 16u);
+    let start = hashKeyVisible(keyLo, keyHi);
+    for (var i = 0u; i < min(frame.visible.y, 128u); i++) {
+        let e = visibleTable[(start + i) & frame.visible.x];
+        if (e.y == 0xFFFFFFFFu) { return false; }
+        if (e.y == keyHi && e.x == keyLo && e.z == frame.visible.z) { return true; }
+    }
+    return false;
+}
+fn hashKeyVisible(keyLo: u32, keyHi: u32) -> u32 {
+    let kl = keyLo ^ (keyLo >> 16u);
+    let kh = keyHi ^ (keyHi >> 16u);
+    return ((kl * 0x9E3779B1u) ^ (kh * 0x85EBCA77u)) & frame.visible.x;
+}
+// The drawn tile over a patch: x its geometry's layer (4096 more when its material is made), y patches per drawn tile
+// edge as a shift, z ancestor levels up to the geometry's layer, w the mesh's level. x -1: none drawn or loaded.
+fn drawnOver(face: u32, p: vec2<u32>) -> vec4<i32> {
+    let deepest = frame.counts.y;
+    var depth = deepest + 1u;
+    for (var k = 0u; k <= 7u && k <= deepest; k++) {
+        let d = deepest - k;
+        let t = p >> vec2<u32>(PATCH_LEVELS + k);
+        if (visibleAt(face, d, t.x, t.y)) { depth = d; break; }
+    }
+    if (depth > deepest) {
+        // Not among the drawn tiles (beside the view): the finest loaded heights.
+        let loaded = tileOver(face, p);
+        return vec4<i32>(loaded.x, loaded.y, 0, 0);
+    }
+    let shift = PATCH_LEVELS + deepest - depth;
+    // Geometry: the nearest loaded layer, own then ancestors (instanceBufferBuilder.wgsl.js).
+    for (var up = 0u; up < 5u && up <= depth; up++) {
+        let t = p >> vec2<u32>(shift + up);
+        let layer = lookupLayer(face, depth - up, t.x, t.y);
+        if (layer >= 0) { return vec4<i32>(layer, i32(shift), i32(up), i32(min(deepest - depth, frame.visible.w))); }
+    }
+    return vec4<i32>(-1, 0, 0, 0);
+}
+// A texel row of the 129 x 129 vertex grid of a drawn tile, as terrainChunkVertexShaderBuilder.js sampleHeightChunkLocal
+// takes it from its layer: own tile (up 0), or the part of an ancestor's.
+fn vertexHeight(layer: i32, up: u32, part: vec2<f32>, v: vec2<f32>) -> f32 {
+    let size = vec2<f32>(textureDimensions(heightTexture));
+    let scale = 1.0 / f32(1u << up);
+    let chunkSize = max(vec2<i32>(floor(size * scale + 0.5)), vec2<i32>(1));
+    let maxLocal = max(chunkSize - 1, vec2<i32>(1));
+    let base = vec2<i32>(floor(part * size + 0.5));
+    let coord = vec2<f32>(base) + clamp(v / 128.0, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(maxLocal);
+    let c0 = floor(coord);
+    let f = coord - c0;
+    let lo = base;
+    let hi = min(base + maxLocal, vec2<i32>(size) - 1);
+    let a = clamp(vec2<i32>(c0), lo, hi);
+    let b = clamp(vec2<i32>(c0) + 1, lo, hi);
+    let h0 = mix(textureLoad(heightTexture, a, layer, 0).r, textureLoad(heightTexture, vec2<i32>(b.x, a.y), layer, 0).r, f.x);
+    let h1 = mix(textureLoad(heightTexture, vec2<i32>(a.x, b.y), layer, 0).r, textureLoad(heightTexture, b, layer, 0).r, f.x);
+    return mix(h0, h1, f.y) * frame.east.w;
+}
+// The adaptive cell of a drawn tile's mesh over grid point g (terrainGeometryBuilder.js _buildAdaptiveCells): x, z, size.
+fn meshCell(g: vec2<f32>, maxStep: i32) -> vec3<i32> {
+    var c = vec3<i32>(0, 0, 128);
+    for (var i = 0; i < 8; i++) {
+        let inset = min(min(c.x, c.y), min(128 - (c.x + c.z), 128 - (c.y + c.z)));
+        if (c.z <= 1 || (c.z <= maxStep && inset >= c.z)) { break; }
+        let half = c.z >> 1u;
+        c = vec3<i32>(c.x + select(0, half, g.x >= f32(c.x + half)), c.y + select(0, half, g.y >= f32(c.y + half)), half);
+    }
+    return c;
+}
+// Height of the drawn surface at a point of a drawn tile (0..1): the triangle of its mesh that holds it.
+fn drawnHeight(layer: i32, up: u32, part: vec2<f32>, lod: u32, local: vec2<f32>) -> f32 {
+    let g = clamp(local, vec2<f32>(0.0), vec2<f32>(0.99999)) * 128.0;
+    let maxStep = min(1 << lod, 128);
+    let cell = meshCell(g, maxStep);
+    let c0 = vec2<f32>(cell.xy);
+    let size = f32(cell.z);
+    if (cell.z <= 1) {
+        // Two triangles split from (x1, z0) to (x0, z1).
+        let f = g - c0;
+        if (f.x + f.y < 1.0) {
+            let h00 = vertexHeight(layer, up, part, c0);
+            return h00 + f.x * (vertexHeight(layer, up, part, c0 + vec2<f32>(1.0, 0.0)) - h00) + f.y * (vertexHeight(layer, up, part, c0 + vec2<f32>(0.0, 1.0)) - h00);
+        }
+        let h11 = vertexHeight(layer, up, part, c0 + 1.0);
+        return h11 + (1.0 - f.x) * (vertexHeight(layer, up, part, c0 + vec2<f32>(0.0, 1.0)) - h11) + (1.0 - f.y) * (vertexHeight(layer, up, part, c0 + vec2<f32>(1.0, 0.0)) - h11);
+    }
+    // A fan about the cell's middle; its rim has a vertex wherever the neighbour beyond an edge is a smaller cell.
+    let centre = c0 + 0.5 * size;
+    let d = g - centre;
+    var a = vec2<f32>(0.0);
+    var b = vec2<f32>(0.0);
+    if (abs(d.x) >= abs(d.y)) {
+        let x = select(c0.x, c0.x + size, d.x > 0.0);
+        let z = centre.y + d.y * (0.5 * size / max(abs(d.x), 1.0e-6));
+        var lo = c0.y;
+        var hi = c0.y + size;
+        let outside = x + select(-0.5, 0.5, d.x > 0.0);
+        if (outside > 0.0 && outside < 128.0) {
+            let n = meshCell(vec2<f32>(outside, clamp(z, c0.y, c0.y + size - 0.001)), maxStep);
+            lo = max(lo, f32(n.y));
+            hi = min(hi, f32(n.y + n.z));
+        }
+        a = vec2<f32>(x, lo);
+        b = vec2<f32>(x, hi);
+    } else {
+        let z = select(c0.y, c0.y + size, d.y > 0.0);
+        let x = centre.x + d.x * (0.5 * size / max(abs(d.y), 1.0e-6));
+        var lo = c0.x;
+        var hi = c0.x + size;
+        let outside = z + select(-0.5, 0.5, d.y > 0.0);
+        if (outside > 0.0 && outside < 128.0) {
+            let n = meshCell(vec2<f32>(clamp(x, c0.x, c0.x + size - 0.001), outside), maxStep);
+            lo = max(lo, f32(n.x));
+            hi = min(hi, f32(n.x + n.z));
+        }
+        a = vec2<f32>(lo, z);
+        b = vec2<f32>(hi, z);
+    }
+    // Barycentric about the triangle centre, a, b.
+    let e1 = a - centre;
+    let e2 = b - centre;
+    let det = e1.x * e2.y - e1.y * e2.x;
+    let wa = (d.x * e2.y - d.y * e2.x) / det;
+    let wb = (e1.x * d.y - e1.y * d.x) / det;
+    let hc = vertexHeight(layer, up, part, centre);
+    return hc + wa * (vertexHeight(layer, up, part, a) - hc) + wb * (vertexHeight(layer, up, part, b) - hc);
 }
 // Ground height (m), between texels, as the terrain's vertices take it.
 fn heightAt(layer: i32, local: vec2<f32>) -> f32 {
@@ -293,9 +429,11 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     if (length(level) - reach > frame.dist.x) { return; }
     let face = u32(F.anchor.z);
     let p = vec2<u32>(P);
-    let tile = tileOver(face, p);
+    let tile = drawnOver(face, p);
     if (tile.x < 0) { return; }
-    let h = heightAt(tile.x & 4095, inTile(p, u32(tile.y), vec2<f32>(0.5)));
+    let up = u32(tile.z);
+    let part = vec2<f32>((p >> vec2<u32>(u32(tile.y))) & vec2<u32>((1u << up) - 1u)) / f32(1u << up);
+    let h = drawnHeight(tile.x & 4095, up, part, u32(tile.w), inTile(p, u32(tile.y), vec2<f32>(0.5)));
     if (h < frame.camera.w) { return; }
     let rel = sea.rel + h * sea.up;
     let distance = length(rel);
@@ -310,7 +448,8 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     if (slotOut >= MAX_PATCHES) { return; }
     let land = landLightAt(frame.camera.xyz + rel, clampSampler);
     let packedD = u32(d.x + 32768) | (u32(d.y + 32768) << 16u);
-    patches[slotOut * 2u] = vec4<u32>(packedD, slot | (u32(tile.y) << 4u), u32(tile.x), bitcast<u32>(max(distance - reach, 0.0)));
+    patches[slotOut * 2u] = vec4<u32>(packedD, slot | (u32(tile.y) << 4u) | (up << 8u) | (u32(tile.w) << 12u), u32(tile.x),
+        bitcast<u32>(max(distance - reach, 0.0)));
     patches[slotOut * 2u + 1u] = vec4<u32>(bitcast<u32>(F.na.w / f32(CELLS * CELLS)), pack2x16unorm(land), 0u, 0u);
 }
 
@@ -321,9 +460,25 @@ fn dispatchMain() {
     args[2] = 1u;
 }
 
-// Blades per square metre at a distance, for grass 35 cm tall.
+// Blades per square metre at a distance, for grass 35 cm tall. Close by the ground hides behind a sight line's run
+// through the canopy, which grows with d: 1 / d. Past frame.dist.w blades are widened to a pixel, which also grows with
+// d: 1 / d^2. Either way the same share of each pixel is grass.
 fn densityAt(d: f32) -> f32 {
-    return frame.dist.y * pow(min(1.0, frame.dist.z / max(d, 0.01)), frame.dist.w);
+    let x = max(d, 0.01);
+    return frame.dist.y * min(1.0, frame.dist.z / x) * min(1.0, frame.dist.w / x);
+}
+
+// Lattice points are ranked so that the coarser ones of a nested set come first: a point on every 2^k-th row and column
+// has a rank under 4^-k. A patch whose ranks kept end under 4^-k needs to visit only those points, and as the camera
+// moves the kept set still changes one point at a time. Level of a point (up to 4, every 16th) and its rank:
+fn latticeLevel(g: vec2<u32>) -> u32 {
+    let m = g.x | g.y | 16u;
+    return countTrailingZeros(m);
+}
+fn latticeRank(level: u32, u: f32) -> f32 {
+    let hi = exp2(-2.0 * f32(level));
+    let lo = select(hi * 0.25, 0.0, level >= 4u);
+    return mix(lo, hi, u);
 }
 
 // Flower colours (linear): buttercup, hawkweed orange, daisy white, cornflower blue, poppy red; spikes: lupine, pink
@@ -360,7 +515,9 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
     let more = patches[at * 2u + 1u];
     let d = vec2<i32>(i32(head.x & 0xFFFFu) - 32768, i32(head.x >> 16u) - 32768);
     let slot = head.y & 15u;
-    let shift = head.y >> 4u;
+    let shift = (head.y >> 4u) & 15u;
+    let ancestor = (head.y >> 8u) & 15u;
+    let lod = (head.y >> 12u) & 15u;
     let layer = i32(head.z & 4095u);
     let beds = head.z >= 4096u;
     let nearest = bitcast<f32>(head.w);
@@ -369,6 +526,9 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
     let F = frame.faces[slot];
     let face = u32(F.anchor.z);
     let P = vec2<u32>(F.anchor.xy + d);
+    // The drawn tile's part of its geometry's layer (an ancestor's quarter, sixteenth...).
+    let part = vec2<f32>((P >> vec2<u32>(shift)) & vec2<u32>((1u << ancestor) - 1u)) / f32(1u << ancestor);
+    let partScale = 1.0 / f32(1u << ancestor);
     // A tuft holds two blades or more: so many lattice points, at most, can hold one.
     let keepMost = densityAt(nearest) * cellArea * 1.6 * 1.9 / 2.0;
     let up = frame.up.xyz;
@@ -379,17 +539,25 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
     let fx3 = normalize(F.du.xyz - up * dot(F.du.xyz, up));
     let faceX = vec2<f32>(dot(fx3, east), dot(fx3, north));
     let faceY = vec2<f32>(-faceX.y, faceX.x);
-    for (var k = thread; k < CELLS * CELLS; k += 64u) {
-        let c = vec2<u32>(k % CELLS, k / CELLS);
+    // Visit only the points of the coarsest set that holds every rank kept here.
+    var level = 0u;
+    for (var k = 1u; k <= 4u; k++) { if (keepMost <= exp2(-2.0 * f32(k))) { level = k; } }
+    let stride = 1u << level;
+    let points = CELLS / stride;
+    for (var k = thread; k < points * points; k += 64u) {
+        let c = vec2<u32>(k % points, k / points) * stride;
         let g = P * CELLS + c;
         let h0 = hash3(g.x, g.y, face);
-        let rank = u01(h0);
+        let own = latticeLevel(g);
+        let rank = latticeRank(own, u01(h0));
         if (rank >= keepMost) { continue; }
         let h1 = pcg(h0);
         let h2 = pcg(h1);
-        let f = (vec2<f32>(c) + vec2<f32>(u01(h1), u01(h2))) / f32(CELLS);
-        let local = inTile(P, shift, f);
-        let height = heightAt(layer, local);
+        // A point of a coarser set lies anywhere in its own block, so that the set does not stand in rows.
+        let f = (vec2<f32>(c) + vec2<f32>(u01(h1), u01(h2)) * f32(1u << own)) / f32(CELLS);
+        let drawn = inTile(P, shift, f);
+        let height = drawnHeight(layer, ancestor, part, lod, drawn);
+        let local = part + drawn * partScale;
         let place = placeAbout(F, vec2<f32>(d) + f, height - 0.03);
         let distance = length(place.rel);
         if (distance > frame.dist.x || rank >= densityAt(distance) * cellArea * 1.52) { continue; }
@@ -486,10 +654,13 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         let along = dot(q, F.wind.xy);
         let across = dot(q, F.wind.zw);
         let speed = frame.sunColor.w;
-        let travel = along - speed * time * 0.9;
-        let gust = vnoise(vec2<f32>(travel / 11.0, across / 17.0), 7u) * 0.7 + vnoise(vec2<f32>(travel / 3.7, across / 5.3), 11u) * 0.3;
-        let push = frame.wind.z * (0.2 + 0.8 * gust * gust);
-        let sway = frame.wind.w * sin(time * mix(2.0, 3.4, r2) + r * 6.2831853 + travel * 0.9) * (0.4 + gust);
+        // Gusts roll on with the wind as broad waves; a tuft sways at its own pace (about 0.5-0.8 Hz, set by its
+        // stiffness, not by the wind's speed), less far off where a blade is a pixel and any motion only flickers.
+        let travel = along - speed * time * 0.6;
+        let gust = vnoise(vec2<f32>(travel / 24.0, across / 30.0), 7u) * 0.75 + vnoise(vec2<f32>(travel / 8.0, across / 10.0), 11u) * 0.25;
+        let push = frame.wind.z * (0.45 + 0.55 * gust);
+        let sway = frame.wind.w * sin(time * mix(3.2, 5.0, r2) + r * 6.2831853 + along * 0.35) * (0.6 + 0.6 * gust)
+            * (1.0 - 0.8 * step3(10.0, 35.0, distance));
         let combTurn = (vnoise(q / 19.0, 31u) - 0.5) * 2.2;
         let comb = 0.12 + 0.35 * vnoise(q / 13.0, 37u);
         let prevailing = frame.wind.xy * cos(combTurn) + vec2<f32>(-frame.wind.y, frame.wind.x) * sin(combTurn);
@@ -526,6 +697,14 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         base *= shade;
         if (kind == 0u || kind == 2u) { base *= mix(vec3<f32>(1.14, 1.05, 0.78), vec3<f32>(0.86, 0.97, 1.08), hueZone); }
         let straw = mix(${mean('dryGrass')} * vec3<f32>(2.2, 2.0, 1.5), vec3<f32>(0.42, 0.38, 0.27), u01(pcg(h5 + 21u)));
+        // Far off, grass takes the colour the ground past the blades has (terrainPass.wgsl.js canopyAlbedo): each blade
+        // keeps part of its own difference from its tuft, so the field keeps its grain but not a shade of its own.
+        let tint = ${biome ? 'mix(hue, vec3<f32>(1.0), 0.7 * grow.dryness)' : 'vec3<f32>(1.0)'};
+        let canopy = mix(${mean('grass')}, ${mean('dryGrass')} * vec3<f32>(1.09, 0.97, 0.69), grow.dryness) * tint * grow.tone * vec3<f32>(1.0, 0.96, 1.07);
+        // Far off, and seen from above (where the ground between blades shows and a blade stands out alone).
+        let steep = dot(-place.rel / max(distance, 0.01), up);
+        // (Steep alone is not enough: from standing height the blades at one's feet are seen steeply, and large.)
+        let farness = select(0.0, max(step3(frame.dist.x * 0.17, frame.dist.x * 0.5, distance), step3(0.2, 0.55, steep) * step3(6.0, 16.0, distance)), kind <= 2u);
         var deadShare = mix(0.02, 0.2, strawZone);
         switch (kind) { case 1u: { deadShare = 0.55; } case 3u: { deadShare = 0.3; } case 4u: { deadShare = 0.28; } default: {} }
 
@@ -568,6 +747,10 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
                     color = blossomColor(bladeKind, fract(u01(pcg(clumpHash + 43u)) + 0.25 * step3(0.7, 1.0, u4)), grow);
                 }
             }
+            if (bladeKind <= 2u && farness > 0.0) {
+                let own = clamp(color / max(base, vec3<f32>(0.002)), vec3<f32>(0.4), vec3<f32>(2.5));
+                color = mix(color, canopy * mix(vec3<f32>(1.0), own, 0.32), farness);
+            }
             writeBlade(start + first + i, root, facing, bladeTall, bend, bladeWidth, lean, crowd, bladeKind, color, u4, land, clump, step3(0.0, 1.0, total));
         }
     }
@@ -597,6 +780,8 @@ export function buildGrassDrawWGSL() {
 const MAX_H: f32 = ${n(MAX_HEIGHT)};
 const MAX_W: f32 = ${n(MAX_WIDTH)};
 fn step3(a: f32, b: f32, x: f32) -> f32 { let t = saturate((x - a) / (b - a)); return t * t * (3.0 - 2.0 * t); }
+alias h = f32; alias h2 = vec2<f32>; alias h3 = vec3<f32>;
+${GROUND_LIGHT_WGSL}
 
 struct Out {
     @builtin(position) clip: vec4<f32>,
@@ -633,7 +818,7 @@ fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance:
     let seed = unpack4x8unorm(b.z).a;
     let angle = shape.x * 6.2831853;
     // Out at the edge the blades sink into the ground: no line where they end.
-    let edgeFade = smoothstep(frame.dist.x, frame.dist.x * 0.6, distance);
+    let edgeFade = smoothstep(frame.dist.x, frame.dist.x * 0.7, distance);
     let tall = shape.y * MAX_H * edgeFade;
     let fdir = cos(angle) * east + sin(angle) * north;
     // Seen edge-on a blade is a sliver: turn it partly toward the camera (Tsushima).
@@ -643,7 +828,7 @@ fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance:
     across = normalize(across - normalize(level2 + up * 1.0e-4) * (dot(across, normalize(level2 + up * 1.0e-4)) * 0.55 * edgeOn));
     let lean = look.y;
     // Each blade's own flutter on top of its tuft's sway.
-    let flutter = 0.03 * frame.wind.w / 0.08 * sin(time * (4.0 + 3.0 * seed) + seed * 40.0);
+    let flutter = 0.012 * frame.wind.w / 0.045 * sin(time * (3.0 + 2.0 * seed) + seed * 40.0) * (1.0 - smoothstep(6.0, 25.0, distance));
     let windV = bend.x * east + bend.y * north + across * flutter;
     // A quadratic curve of about the blade's length (AMD's (2 L0 + L1) / 3): bending lowers the tip.
     var tip = up * (1.0 - 0.55 * lean * lean) + fdir * (lean * 1.05) + windV;
@@ -791,7 +976,22 @@ fn fsMain(in: Out) -> @location(0) vec4<f32> {
     let open = in.light.y;
     let lit = sun * (diffuse * albedo + through + sheen) * sunSeen + albedo * (ambient + sky * overhead * open + bounce);
     let night = albedo * vec3<f32>(mix(0.30, 0.06, day));
-    return vec4<f32>(max(lit, night) * occlusion, 1.0);
+    let own = max(lit, night) * occlusion;
+    // Far off, lit as the ground past the blades lights its grass canopy (terrainPass.wgsl.js): the same light, the
+    // same normal between up and the viewer, the same glow through and hotspot. Then the blades end where the ground
+    // looks as they did.
+    let far = select(0.0, max(step3(frame.dist.x * 0.17, frame.dist.x * 0.5, distance), step3(0.2, 0.55, dot(V, up)) * step3(6.0, 16.0, distance)), kind <= 2u);
+    if (far <= 0.0) { return vec4<f32>(own, 1.0); }
+    let velvet = normalize(V - up * dot(V, up) + up);
+    let nC = normalize(up + 0.5 * (velvet - up));
+    let land = vec2<f32>(in.light.x, open);
+    var ground = albedo * lightAt(nC, up, up, L, sun, ambient, 0.8, 1.0, land);
+    let grassThrough = 0.8 * max(-dot(velvet, L), 0.0) + 0.7 * pow(saturate(dot(-V, L)), 5.0);
+    ground = ground * (1.0 + ${n(GRASS_CANOPY.hotspot)} * pow(saturate(dot(V, L)), 3.0))
+        + sun * land.x * albedo * vec3<f32>(1.15, 1.35, 0.75) * (${n(GRASS_CANOPY.glow)} * grassThrough);
+    // A blade's own light and shade stay a little: the field keeps its grain.
+    let grain = clamp(dot(own, vec3<f32>(0.333)) / max(dot(albedo * lightAt(nC, up, up, L, sun, ambient, 0.8, 1.0, land), vec3<f32>(0.333)), 1.0e-4), 0.6, 1.6);
+    return vec4<f32>(mix(own, ground * mix(1.0, grain, 0.35), far), 1.0);
 }
 `;
 }
