@@ -29,10 +29,12 @@ export const PATCH_LEVELS = 6;
 export const CELLS = 48;
 export const MAX_FACES = 3;
 export const GRID_MAX = 256;
-/** Strip segments of a blade by distance band, and how many blades each band holds at most. Three rows far off, not two:
- * 0.4 ms less at standing height on an M1 Pro, the same from above, the picture the same (GRASS_FINDINGS.md); one row
- * cost 3.5 ms more. */
-export const LOD_SEGMENTS = [7, 4, 3];
+/** Strip segments of a blade by distance band, and how many blades each band holds at most. */
+export const LOD_SEGMENTS = [7, 4, 2];
+/** Blades an instance draws (an index buffer of so many strips). One blade an instance left most of the GPU's vertex
+ * lanes empty: the far band alone cost 1.9 ms, 0.8 ms with 16 (M1 Pro, GRASS_FINDINGS.md), and fewer rows a blade cost
+ * more, not less. Band starts are multiples of it. */
+export const BLADES_PER_INSTANCE = 16;
 export const LOD_CAPACITY = [131072, 262144, 524288];
 /** A tuft's blade as the cache keeps it (3 x vec4<u32>), and a patch's record of this frame (4 x vec4<u32>). */
 export const RECORD_WORDS = 12;
@@ -1155,11 +1157,20 @@ fn finishMain() {
     let segments = array<u32, 3>(${segments.map(s => `${s}u`).join(', ')});
     let caps = array<u32, 3>(BAND0, BAND1, BAND2);
     let starts = array<u32, 3>(0u, BAND0, BAND0 + BAND1);
+    // Indexed draws of ${BLADES_PER_INSTANCE} blades an instance: index count, instances, first index, base vertex, first
+    // instance. The last instance's blades past the count are drawn as nothing (a blade of no size).
     for (var b = 0u; b < 3u; b++) {
-        args[4u + b * 4u] = segments[b] * 2u + 1u;
-        args[5u + b * 4u] = min(atomicLoad(&control[1u + b]), caps[b]);
-        args[6u + b * 4u] = 0u;
-        args[7u + b * 4u] = starts[b];
+        let count = min(atomicLoad(&control[1u + b]), caps[b]);
+        let instances = (count + ${BLADES_PER_INSTANCE - 1}u) / ${BLADES_PER_INSTANCE}u;
+        args[4u + b * 5u] = ${BLADES_PER_INSTANCE}u * 3u * (segments[b] * 2u - 1u);
+        args[5u + b * 5u] = instances;
+        args[6u + b * 5u] = 0u;
+        args[7u + b * 5u] = 0u;
+        args[8u + b * 5u] = starts[b] / ${BLADES_PER_INSTANCE}u;
+        for (var i = count; i < instances * ${BLADES_PER_INSTANCE}u; i++) {
+            drawn[(starts[b] + i) * 2u] = vec4<u32>(0u);
+            drawn[(starts[b] + i) * 2u + 1u] = vec4<u32>(0u);
+        }
     }
     // This half's blades, for the next frame to carry over.
     atomicStore(&control[CTRL_PERSIST + frame.cache.x], min(atomicLoad(&control[CTRL_STORE]), STORE_CAP));
@@ -1196,12 +1207,16 @@ struct Out {
 };
 
 @vertex
-fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> Out {
+fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u32) -> Out {
+    // ${BLADES_PER_INSTANCE} blades an instance (BLADES_PER_INSTANCE): which blade, and which vertex of its strip.
+    var segments = 2u;
+    let first = group * ${BLADES_PER_INSTANCE}u;
+    if (first < ${b0}u) { segments = ${segments[0]}u; } else if (first < ${b0 + b1}u) { segments = ${segments[1]}u; } else { segments = ${segments[2]}u; }
+    let instance = first + corner / (segments * 2u + 1u);
+    let vertex = corner % (segments * 2u + 1u);
     // The blade this frame (selectMain).
     let a = blades[instance * 2u];
     let b = blades[instance * 2u + 1u];
-    var segments = 2u;
-    if (instance < ${b0}u) { segments = ${segments[0]}u; } else if (instance < ${b0 + b1}u) { segments = ${segments[1]}u; } else { segments = ${segments[2]}u; }
     let level = min(vertex >> 1u, segments);
     let sideSign = select(-1.0, 1.0, (vertex & 1u) == 1u);
     let root = bitcast<vec3<f32>>(a.xyz);

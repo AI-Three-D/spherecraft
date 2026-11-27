@@ -5,7 +5,7 @@
 // without discard, so the GPU's hidden-surface removal keeps shading to about one blade fragment a pixel.
 
 import {
-    CONTROL_WORDS, CTRL, CTRL_REMAP, FRAME_FLOATS, GRID_MAX, HASH_CAP, LOD_CAPACITY, LOD_SEGMENTS, MAX_FACES, MAX_PATCHES, PATCH_LEVELS,
+    BLADES_PER_INSTANCE, CONTROL_WORDS, CTRL, CTRL_REMAP, FRAME_FLOATS, GRID_MAX, HASH_CAP, LOD_CAPACITY, LOD_SEGMENTS, MAX_FACES, MAX_PATCHES, PATCH_LEVELS,
     PATCH_WORDS, RECORD_WORDS, STORE_CAP, WAVE_PERIOD,
     buildGrassComputeWGSL, buildGrassDrawWGSL,
 } from './grassWgsl.js';
@@ -95,7 +95,7 @@ export class GrassPass {
         this._parity = 0;
         // The blades' dispatch, and the bands' draws: two buffers, as one is read while the other is written.
         this._dispatchArgs = buffer('dispatch', 16 * 4, U.STORAGE | U.INDIRECT);
-        this._args = buffer('draws', 16 * 4, U.STORAGE | U.INDIRECT | U.COPY_SRC);
+        this._args = buffer('draws', 20 * 4, U.STORAGE | U.INDIRECT | U.COPY_SRC);
         this._clamp = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
 
         const C = GPUShaderStage.COMPUTE, V = GPUShaderStage.VERTEX, F = GPUShaderStage.FRAGMENT;
@@ -130,12 +130,21 @@ export class GrassPass {
                 layout: device.createPipelineLayout({ bindGroupLayouts: [this._layouts.draw] }),
                 vertex: { module, entryPoint: 'vsMain' },
                 fragment: { module, entryPoint: 'fsMain', targets: [{ format: this.backend.sceneFormat || this.backend.format }] },
-                primitive: { topology: 'triangle-strip', cullMode: 'none' },
+                primitive: { topology: 'triangle-list', cullMode: 'none' },
                 depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
             });
         };
         // The far bands' blades are a few pixels wide: lit at their vertices (perVertexFar), the fragment is flat.
         const perVertexFar = this.perVertexFar ?? this.config.perVertexFar ?? false;
+        // Each band's strips as triangles, BLADES_PER_INSTANCE blades an instance.
+        this._indexBuffers?.forEach(b => b.destroy());
+        this._indexBuffers = segments.map(rows => {
+            const n = 2 * rows + 1, triangles = n - 2, index = new Uint16Array(BLADES_PER_INSTANCE * triangles * 3);
+            for (let k = 0; k < BLADES_PER_INSTANCE; k++) for (let i = 0; i < triangles; i++) index.set([k * n + i, k * n + i + 1, k * n + i + 2], (k * triangles + i) * 3);
+            const b = device.createBuffer({ label: 'Grass strips', size: index.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+            device.queue.writeBuffer(b, 0, index);
+            return b;
+        });
         const names = ['patches', 'dispatch', 'copy', 'generate', 'selectDispatch', 'select', 'finish'];
         const made = await Promise.all([
             ...names.map(name => step(`${name}Main`)),
@@ -342,9 +351,13 @@ export class GrassPass {
     draw(pass) {
         if (!this._drawing || !this.drawBlades) return;
         pass.setBindGroup(0, this._drawGroup);
+        // drawBlades: true, or for measuring a mask of the bands drawn (1 near, 2 middle, 4 far).
+        const bands = this.drawBlades === true ? 7 : this.drawBlades;
         for (let band = 0; band < LOD_CAPACITY.length; band++) {
+            if (!(bands & (1 << band))) continue;
             pass.setPipeline(band === 0 ? this._render : this._renderFar);
-            pass.drawIndirect(this._args, 16 + band * 16);
+            pass.setIndexBuffer(this._indexBuffers[band], 'uint16');
+            pass.drawIndexedIndirect(this._args, 16 + band * 20);
         }
     }
 
@@ -354,17 +367,18 @@ export class GrassPass {
         const readCounters = this.device.createBuffer({ size: CTRL.GENLIST * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
         const e = this.device.createCommandEncoder();
         e.copyBufferToBuffer(this._args, 0, read, 0, 64);
+        const segments = this.segments ?? LOD_SEGMENTS;
         e.copyBufferToBuffer(this._control, 0, readCounters, 0, CTRL.GENLIST * 4);
         this.device.queue.submit([e.finish()]);
         await Promise.all([read.mapAsync(GPUMapMode.READ), readCounters.mapAsync(GPUMapMode.READ)]);
         const a = new Uint32Array(read.getMappedRange().slice(0)), k = new Uint32Array(readCounters.getMappedRange().slice(0));
         read.destroy();
         readCounters.destroy();
-        return { patches: k[0], blades: [k[1], k[2], k[3]], drawn: [a[5], a[9], a[13]], vertices: [a[4], a[8], a[12]], kept: k[CTRL.STORE], made: k[CTRL.GEN], copied: k[CTRL.COPIED], why: { new: k[CTRL.WHY], nearer: k[CTRL.WHY + 1], farther: k[CTRL.WHY + 2], ground: k[CTRL.WHY + 3] } };
+        return { patches: k[0], blades: [k[1], k[2], k[3]], drawn: [0, 1, 2].map(b => Math.min(k[1 + b], LOD_CAPACITY[b])), instances: [a[5], a[10], a[15]], vertices: segments.map(r => 2 * r + 1), kept: k[CTRL.STORE], made: k[CTRL.GEN], copied: k[CTRL.COPIED], why: { new: k[CTRL.WHY], nearer: k[CTRL.WHY + 1], farther: k[CTRL.WHY + 2], ground: k[CTRL.WHY + 3] } };
     }
 
     destroy() {
-        for (const b of [this._frameBuffer, this._patches, this._control, this._store, this._bandIndex, this._patchHash, this._dispatchArgs, this._args]) b?.destroy();
+        for (const b of [this._frameBuffer, this._patches, this._control, this._store, this._bandIndex, this._patchHash, this._dispatchArgs, this._args, ...(this._indexBuffers ?? [])]) b?.destroy();
         this._ready = false;
     }
 }

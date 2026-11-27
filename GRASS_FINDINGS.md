@@ -2,23 +2,33 @@
 
 2026-11-26, branch `grass/biome-grass` from main 70b83fe. M1 Pro, Chrome WebGPU, 2400×1350. Pictures: `screenshots/grass_2026-11-26/`.
 
-**Where it stands (2026-11-27, after the tuft cache):** grass costs 3.6–4.6 ms at high and 2.3–3.0 ms at medium in the meadow views, 5.7 / 4.1 ms while walking. Budget 2 ms. Section Tuft cache.
+**Where it stands (2026-11-27, after the sixth round):** grass costs 2.3–3.5 ms at high standing still and 3.7 ms walking; 1.4–2.3 ms at medium (2.5 walking). It was 6.7–9.0 ms at high. Budget 2 ms. Section Tuft cache.
 
 ## Tuft cache and a leaner draw (2026-11-27)
 
-Profiling after the fifth round showed making the blades (3.4–4.5 ms) redone every frame for tufts that rarely change. This round keeps them.
+Profiling after the fifth round showed two costs:
+- making the blades (3.4–4.5 ms), redone every frame for tufts that rarely change;
+- drawing them (1.5–3.8 ms).
+
+This round keeps the tufts and fixes how they are drawn.
 
 **What was built** (`grassWgsl.js`, `GrassPass.js`):
 - **A store of blades kept from frame to frame.** Double-buffered: this frame's half and last frame's. 786,432 blades of 48 bytes in each half, 75 MB in all. Each blade is kept as an offset from its patch's corner, so it stays right as the camera moves.
 - **A table of patches** (2 × 8192 entries), keyed by face, place and block size. Its stamp is what the blades were made for: the tile, mesh level and ancestor under the patch, and the patch's distance in 15 % steps.
   - Same stamp as last frame: the patch's blades are copied on (copy pass).
   - Otherwise: they are made (generate pass, as before but only for those patches).
+- **Few patches made over many workgroups.** Walking makes about 15 patches a frame: 13 a step nearer, 2 new, 0.6 a step farther.
+  - One workgroup each left the GPU idle while they looped over their lattices: 1 ms for 2 % of the tufts.
+  - Now each spreads over up to 16 workgroups. Splits 1, 4 and 16 make the same tufts.
 - **A select pass** picks the blades drawn this frame by distance, rank and frustum. It works out each blade's wind bend, fade-in and far colour once, into a 32-byte record. The vertex shader only builds the strip.
+- **16 blades an instance.** Before, each blade was an instance of 5–15 vertices: the far band alone (194k blades) cost 1.9 ms, nearly all geometry.
+  - An index buffer of 16 strips per band now draws 16 blades an instance. The far band costs 0.8 ms.
+  - With one blade an instance, fewer rows a blade had cost *more*: one row was 3.5 ms slower than two. Most of the GPU's vertex lanes were idle. With 16 an instance, fewer rows cost less again, and the far blades are back at two rows.
 - **Vertex outputs packed**, 31 values to 17. Seven of them were never read: the blade's axis, a side sign, and the per-vertex light written as zeros when lighting is per pixel. On Apple GPUs each output is stored and read back for 2–3 million vertices a frame.
-- **Far blades in 3 rows, not 2.** See the measurements below.
 
 **Making sure it cannot go wrong quietly:**
 - **A full rebuild draws the same blades.** Wiping the table and making everything again gave the same drawn counts (49,736 / 77,266 / 187,719). Standing still, no patch is made again.
+- **After walking,** 0.1 % of near blades are missing against a full rebuild (61 of 57,515). The stamp follows the patch's nearest point, so a tuft can come a little more than 15 % nearer within one step. They are tufts at the fade-in threshold, grown in to almost nothing.
 - **Store overflow.** It was 98 % full at standing height in a meadow (639,858 of 655,360). A patch that did not fit would have kept its hole until it changed.
   - Room is now 20 % larger.
   - The copy and generate passes poison the stamp of a patch that did not fit, so it is made again next frame.
@@ -28,44 +38,55 @@ Profiling after the fifth round showed making the blades (3.4–4.5 ms) redone e
 
 **Results at high** (`grassBench.mjs`, 2592×1350, M1 Pro). Grass = full frame minus the terrain without grass, ms:
 
-| View | Before the cache (`27c`) | Cache (`27f`) | Now (`27i`) | Making | Drawing | Ground look |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Meadow, root height | 8.6 | 5.1 | 4.1 | 0.74 | 2.69 | 0.71 |
-| Meadow, standing | 9.0 | 5.5 | 4.6 | 0.66 | 3.03 | 0.93 |
-| Toward the sun | 8.0 | 4.4 | 3.6 | 0.56 | 2.15 | 0.84 |
-| From 8 m | 7.7 | 4.5 | 4.2 | 0.58 | 2.44 | 1.20 |
-| From 15 m | 6.9 | 4.0 | 3.9 | 0.53 | 1.95 | 1.42 |
-| Walking 3 m/s | 9.0 | 6.7 | 5.7 | 1.64 | 3.12 | 0.94 |
+| View | Before (`27c`) | Cache (`27f`) | Now (`27m`, `27n`) | Making | Drawing | Ground look | of which portraits |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Meadow, root height | 8.6 | 5.1 | 3.1 | 0.73 | 1.68 | 0.71 | 0.31 |
+| Meadow, standing | 9.0 | 5.5 | 3.5 | 0.75 | 1.85 | 0.91 | 0.44 |
+| Toward the sun | 8.0 | 4.4 | 2.7 | 0.70 | 1.11 | 0.87 | 0.27 |
+| From 8 m | 7.7 | 4.5 | 3.3 | 0.64 | 1.41 | 1.21 | 0.63 |
+| From 15 m | 6.9 | 4.0 | 3.1 | 0.57 | 1.10 | 1.39 | 0.72 |
+| Walking 3 m/s | 9.0 | 6.7 | 3.7 | 0.90 | 1.94 | 0.88 | 0.39 |
+| Forest floor | 7.5 | 4.0 | 2.7 | 0.48 | 1.03 | 1.19 | 0.55 |
+| Tundra | 6.7 | 3.7 | 2.3 | 0.59 | 1.33 | 0.34 | 0.16 |
+| Marsh | 7.4 | 3.2 | 2.4 | 0.47 | 0.58 | 1.32 | 0.51 |
+| Dry grass | 7.1 | 3.7 | 2.5 | 0.42 | 1.05 | 1.07 | 0.56 |
 
-- **The other views.** In `27f` the cache alone gave forest floor 4.0 ms, tundra 3.7, marsh 3.2 and dry grass 3.7, against 6.7–7.5 before. In `27i` those views were disturbed by other GPU use (p90 1–1.5 ms over the median, some parts below zero), so they are not given.
-- **Medium (1728×900, `27i`):** meadow views 2.3–3.0 ms, walking 4.1 ms. Before the cache: 4.7–6.4 ms.
-- **Making** fell from 3.4–4.5 ms to 0.5–0.7 ms standing still. That is the patch lattice, the copy (0.3 ms) and the select (0.25 ms).
+- **How measured.** Views where p90 lay more than 1 ms over the median in `27m` (from 8 m, from 15 m, forest, marsh: some other GPU use) were run again alone (`27n`). Those numbers are given; p90 there is within 0.4 ms of the median, marsh 1.5.
+- **Medium** (1728×900, `27m`, p90 within 0.3 ms): 1.4–2.3 ms standing still, 2.5 walking. Before the cache: 4.7–6.4 ms.
 
-**Parts** (`scatterParts.mjs`, standing and from 8 m, `27d`–`27h`):
+  | Medium | Root | Standing | Sun | 8 m | 15 m | Walking | Forest | Tundra | Marsh | Dry |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Grass, ms | 2.1 | 2.3 | 1.8 | 1.8 | 1.7 | 2.5 | 1.8 | 1.7 | 1.4 | 1.6 |
 
-| Change | Standing frame | From 8 m |
+- **Making** (0.4–0.9 ms) is now mostly the copy (0.35 ms) and the select (0.29 ms); the patch lattice is 0.06 ms.
+
+**Steps** (`scatterParts.mjs`, game frame, standing and from 8 m, `27d`–`27l`):
+
+| Change | Standing | From 8 m |
 | --- | ---: | ---: |
-| Cache | 16.32 → 12.41 | 15.08 → 11.51 |
-| Per-blade work in the select pass | → 12.16 | → 11.16 |
-| Packed vertex outputs | → 11.55 | → 10.91 |
+| Before the cache | 16.32 | 15.08 |
+| Cache | 12.41 | 11.51 |
+| Per-blade work in the select pass | 12.16 | 11.16 |
+| Packed vertex outputs | 11.55 | 10.91 |
+| 16 blades an instance (draw 2.79 → 1.79 ms standing) | 10.13 | 10.39* |
 
-- The draw is now 3.2 ms at standing: 1.2 ms shading, 2.0 ms vertices and raster (flat shading).
-- **Rows per blade, by band (near / middle / far)**, standing frame, ms:
+\* That run's baseline was 0.5 ms higher; its draw fell 2.38 → 1.38 ms.
 
-  | Rows | 7/4/1 | 7/4/2 (was) | 7/4/3 (now) | 7/4/4 | 7/3/3 | 7/2/2 |
-  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-  | Standing | 15.43 | 11.72–11.86 | 11.37–11.45 | 11.19–11.31 | 11.23 | 11.06 |
+- **Each band drawn alone, standing,** ms over not drawing:
 
-  - From 8 m the far rows change nothing (10.78–10.95).
-  - More rows far off is *faster* at standing height, and one row (a single triangle) is 3.5 ms slower. Not explained. Mean grey and fine contrast by distance stay the same within 0.2–0.3, so the picture does not change.
-  - 7/4/3 adds a row only where it is cheap. The middle band stays at 4 rows: 3 rows there saved a further 0.2 ms, within noise, and a 1 m blade at 10 m is about 90 px tall.
+  | | Near (to 9.5 m) | Middle (to 24 m) | Far (to 240 m) |
+  | --- | ---: | ---: | ---: |
+  | One blade an instance | 0.63 | 0.93 | 1.89 (1.69 of it not shading) |
+  | 16 an instance | 0.57 | 0.65 | 0.83 |
+
+- **Rows per blade, 16 an instance,** standing frame: 7/4/2 10.03, 7/4/3 10.16, 7/4/4 10.30, 7/4/1 9.96 ms. Two rows far off are kept: one row is a straight triangle, and blades at 24 m are tens of pixels tall.
 
 **Where the time is now, and next:**
-- **Walking.** Making goes to 1.6 ms: a patch is made again whenever its distance crosses a 15 % step, either way. Patches moving away already hold more tufts than they need.
-  - Next: trim them in the copy pass (rank against the density at their new distance), and make again only patches that come nearer than their tufts cover.
-  - Further: make only the missing ranks of an approaching patch.
-- **Drawing,** 2–3 ms: about 1.2 ms shading, the rest vertices and raster.
-- **The ground's look,** 0.7–1.4 ms, of which portraits up to 0.8 ms from above.
+- **The ground's look,** 0.7–1.4 ms: the canopy model and grain on every grass pixel of the terrain, the portraits up to 0.7 ms from above. The largest part from above.
+- **Drawing,** 1.0–1.9 ms: about half of it shading.
+- **The copy,** 0.35 ms: 21 MB of records moved a frame to compact the store. A store that keeps records in place and compacts now and then would save most of it.
+- **The select,** 0.29 ms: it reads every kept record, most of them out of view. A test per patch first would skip them.
+- **Walking,** +0.15–0.3 ms over standing: making only the missing ranks of a patch that comes nearer would save most of it.
 
 ## Profiling after the fifth round (2026-11-27)
 
