@@ -2,7 +2,57 @@
 
 2026-11-26, branch `grass/biome-grass` from main 70b83fe. M1 Pro, Chrome WebGPU, 2400×1350. Pictures: `screenshots/grass_2026-11-26/`.
 
-**Profiled 2026-11-27:** grass costs 6–8 ms at high, 4–6 ms at medium (section Profiling).
+**Profiled 2026-11-27, before the fifth round:** grass cost 6–8 ms at high, 4–6 ms at medium (section Profiling). The fifth round is not profiled yet.
+
+## Fifth round (2026-11-27): no zone around the player
+
+The user's report: a hard edge (that moves with the camera) where blades end, and the grass seeming to vanish a few metres up.
+
+**Measured cause, at the user's pose 7.7 m up.** Mean grey by distance:
+
+| Distance | Blades on | Ground beyond them |
+| --- | ---: | ---: |
+| 24–40 m | 113 | 138 |
+| 40–60 m | 135 | 140 |
+
+- **A dark ring.** A rule for views from above put near blades into the far look, but left blades at 25–60 m in their own dark look: a ring unlike both sides, moving with the camera.
+- **No notion of view angle.** The ground under the blades was darkened soil, so from above it read as bare earth. The far look was a flat bright canopy.
+
+**What replaced them** (`grassHue.wgsl.js grassCanopy`, `grassPortraits.js`):
+
+- **A physical canopy model**, shared by the terrain and the far blades: the gap-fraction and hotspot models of vegetation remote sensing (Nilson 1971; Kuusk 1985).
+  - Blades fill the canopy from the ground to their tips, darker low down by the blades' own ramp. A sight line meets them by Beer–Lambert along its slant.
+  - At grazing angles it sees tips (bright); from above it sees the depths and a little soil (darker).
+  - The sun reaches low parts less, except along the view (the hotspot).
+  - It is closed form, a few exponentials. It follows the view's slant, not the distance, so near and far agree from any height. The ground under blades shows the canopy too, not soil.
+- **Portraits of the field (a BTF made from our own blades).** At load, a 4 m tile of blades made by the blades' rules is rendered from 31 view directions: 6 elevations × 6 azimuths, 256², 4× MSAA, mipmapped, 11 MB.
+  - The terrain wears the portrait seen from its own elevation and way, blending the 4 nearest views, as a structure of mean 1 (the canopy model gives the mean).
+  - Parallax and occlusion are in the views: from above, tuft crowns and gaps; along the ground, blades stacked as strokes standing up on screen. After Boulanger, Pattanaik and Bouatouch's grass terrains.
+  - The far blades take their colour from the same portraits where they stand, and are lit by the same canopy model as they near their end (from 72 m).
+- **Smaller changes:**
+  - Seen from above, a blade's low part takes the canopy's light (it lies within the canopy the ground shows) instead of standing as a dark stick.
+  - Flower and seed stems are green, not near black.
+
+**Result.** Mean grey and fine contrast (mean absolute difference to neighbours) by distance, blades on against the ground alone, clouds frozen:
+
+| | 6–12 | 24–40 | 60–90 | 130–180 | 180–240 | 240–320 m |
+| --- | --- | --- | --- | --- | --- | --- |
+| User's pose 7.7 m, blades | 120 / 18.3 | 133 / 14.1 | 139 / 8.5 | 154 / 10.1 | 152 / 9.6 | 153 / 8.2 |
+| Same, ground only | 116 / 12.7 | 132 / 8.0 | 139 / 7.1 | 154 / 9.5 | 152 / 9.4 | 153 / 8.2 |
+| Standing 1.8 m, blades | 117 / 36 | 134 / 26 | 153 / 12.9 | 153 / 11.9 | 154 / 10.7 | — |
+| Same, ground only | 135 / 10 | 147 / 7 | 156 / 6.9 | 156 / 7.0 | 158 / 6.8 | — |
+
+- **From the user's pose:** blades and ground match in brightness and texture past 60 m.
+- **From standing height:** the brightness matches within 1–3 % past 40 m. The last blades carry somewhat more texture than the ground beyond (about 11 against 7–9): the one open item.
+- **Not profiled.** The GPU was in other use.
+- **Cost of the new parts:**
+  - in the terrain shader: 4 portrait samples and the closed-form canopy per grass pixel;
+  - in the scatter: 4 portrait samples per far tuft;
+  - at load: the bake, about 2 million blade instances at the lowest view.
+
+**Next.**
+- Wind waves through the far field from the same gusts that bend the near blades. A gust bending blades away is the same as seeing them from lower down, so the gust shifts which portrait view is sampled.
+- Then the per-patch tuft cache, and profiling.
 
 ## Fourth round (2026-11-27): toward the references
 

@@ -12,6 +12,7 @@ import { TerrainLightMap } from './light/TerrainLightMap.js';
 import { TerrainPass } from './draw/TerrainPass.js';
 import { GrassPass } from '../grass/GrassPass.js';
 import { createGrassGrain } from '../grass/grassGrain.js';
+import { createGrassPortraits } from '../grass/grassPortraits.js';
 import { usesBiomeLandscape } from '../../world/terrain-generator/biomeLandscapeConfig.js';
 import { aerialFadeRange } from './shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
@@ -102,9 +103,12 @@ export class QuadtreeTerrainRenderer {
         // The grain of grass far off (grassGrain.js): worn by the terrain's grass, and by the far blades.
         const grassConfig = this.engineConfig.rendering?.grass;
         if (grassConfig?.enabled && !this._grain) this._grain = createGrassGrain(this.backend.device);
+        // Portraits of the field, rendered from its own blades (grassPortraits.js): the far grass as the blades look from afar.
+        if (grassConfig?.enabled && !this._portraits) this._portraits = await createGrassPortraits(this.backend.device);
         const pass = new TerrainPass({
             device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground, landLight: this._landLight,
             planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments), biome, grain: this._grain ?? null,
+            portraits: this._portraits ?? null,
             grassLook: !!grassConfig?.enabled,
             meshes: Array.from({ length: this._maxGeomLOD + 1 }, (_, lod) => this._geometries.get(lod).index.data),
         });
@@ -121,6 +125,7 @@ export class QuadtreeTerrainRenderer {
             const grass = new GrassPass({
                 device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground,
                 landLight: this._landLight, planetConfig: this.planetConfig, biome, config: grassConfig, grain: this._grain,
+                portraits: this._portraits,
             });
             try {
                 await grass.initialize();
@@ -601,6 +606,8 @@ export class QuadtreeTerrainRenderer {
         this.grass = null;
         this._grain?.destroy();
         this._grain = null;
+        this._portraits?.destroy();
+        this._portraits = null;
         this._ground?.destroy();
         this._ground = null;
         this._landLight?.dispose();

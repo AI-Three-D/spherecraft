@@ -23,8 +23,6 @@ const VARIANTS = {
     'not drawn': [{}, {}, false],
     'flat shading': [{ shade: true }, {}, true],
     'far: 1 segment': [{}, {}, true, { segments: [7, 4, 1] }],
-    'far: canopy shading': [{}, {}, true, { farCheap: true }],
-    'both': [{}, {}, true, { segments: [7, 4, 1], farCheap: true }],
     'far bands lit per vertex': [{}, {}, true, { perVertexFar: true }],
     'one blade per tuft': [{ oneBlade: true }, {}, false],
     'no tufts (rank test only)': [{ tuft: true }, {}, false],

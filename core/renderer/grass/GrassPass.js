@@ -101,7 +101,7 @@ export class GrassPass {
             ground: device.createBindGroupLayout({ entries: [
                 at(0, C, { texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }),
                 at(1, C, array), at(2, C, array), at(3, C, array), at(4, C, { sampler: {} }), at(5, C, { sampler: {} }),
-                at(6, C, { buffer: { type: 'uniform' } }), at(7, C, array), at(8, C, array), at(9, C, { texture: { sampleType: 'float' } }),
+                at(6, C, { buffer: { type: 'uniform' } }), at(7, C, array), at(8, C, array), at(9, C, { texture: { sampleType: 'float' } }), at(10, C, array),
             ] }),
             draw: device.createBindGroupLayout({ entries: [
                 at(0, V | F, { buffer: { type: 'uniform' } }), at(1, V, { buffer: { type: 'read-only-storage' } }),
@@ -114,7 +114,7 @@ export class GrassPass {
         const layout = device.createPipelineLayout({ bindGroupLayouts: [this._layouts.work, this._layouts.ground] });
         const step = entryPoint => device.createComputePipelineAsync({ label: `Grass ${entryPoint}`, layout, compute: { module: work, entryPoint } });
         const blade = (label, perVertex) => {
-            const module = device.createShaderModule({ label, code: buildGrassDrawWGSL({ skip, segments, farCheap: this.farCheap ?? false, perVertex }) });
+            const module = device.createShaderModule({ label, code: buildGrassDrawWGSL({ skip, segments, perVertex }) });
             return device.createRenderPipelineAsync({
                 label,
                 layout: device.createPipelineLayout({ bindGroupLayouts: [this._layouts.draw] }),
@@ -150,7 +150,7 @@ export class GrassPass {
         const view = name => textures[name]?._gpuTexture?.view;
         const land = this.landLight.resources;
         const parts = [view('height'), view('normal'), (this.biome && view('climate')) || view('normal'), this.ground.surfaceView,
-            this.ground.wideSampler, this._clamp, land.frame, land.map, view('splatIndex'), this.grain.view];
+            this.ground.wideSampler, this._clamp, land.frame, land.map, view('splatIndex'), this.grain.view, this.portraits.view];
         if (parts.some(p => !p)) return false;
         if (this._groundOf && this._groundOf.every((x, i) => x === parts[i])) return true;
         this._groundOf = parts;
@@ -290,11 +290,10 @@ export class GrassPass {
     }
 
     /** For measuring: shaders made again with parts left out (grassWgsl.js skip). */
-    async rebuild(skip = {}, { segments = LOD_SEGMENTS, farCheap = false, perVertexFar = undefined } = {}) {
+    async rebuild(skip = {}, { segments = LOD_SEGMENTS, perVertexFar = undefined } = {}) {
         this.destroy();
         this.skip = skip;
         this.segments = segments;
-        this.farCheap = farCheap;
         this.perVertexFar = perVertexFar;
         this._groundOf = null;
         await this.initialize();

@@ -286,3 +286,47 @@ export async function view(name, { dir = POSES.grassland, turn = 120, aheadM = 1
     await wait(900);
     return window.gpuErrors.length;
 }
+
+// A pose from the game's position / look-at readout.
+export async function poseAt(position, lookAt, fov = 60) {
+    const l = Math.hypot(...position), up = position.map(x => x / l);
+    const v = ([x, y, z]) => ({ x, y, z });
+    window.qtDiag.regional.useCamera({ position: v(position), target: v(lookAt), up: v(up), fov });
+    await settle(30000);
+    await wait(800);
+    return up;
+}
+
+// By distance band: mean grey, and fine contrast (mean absolute difference to the 4 neighbours, grey levels), over the
+// middle 60 % of the picture's width, as rendered (frame grabbed at the end of rendering).
+export async function profile(bands = [[3, 6], [6, 12], [12, 24], [24, 40], [40, 60], [60, 90], [90, 130], [130, 180], [180, 240], [240, 320], [320, 500]]) {
+    const w = 800, h = 450;
+    const rows = await rowDistances(h, 520);
+    const img = await grabNext(w, h);
+    const grey = new Float32Array(w * h);
+    for (let i = 0; i < grey.length; i++) grey[i] = 0.2126 * img.d[4 * i] + 0.7152 * img.d[4 * i + 1] + 0.0722 * img.d[4 * i + 2];
+    return bands.map(([a, b]) => {
+        let s = 0, c = 0, n = 0;
+        rows.forEach((d, r) => {
+            if (d === null || d < a || d >= b || r === 0 || r === h - 1) return;
+            for (let x = Math.floor(w * 0.2); x < w * 0.8; x++) {
+                const i = r * w + x, g = grey[i];
+                s += g;
+                c += (Math.abs(g - grey[i - 1]) + Math.abs(g - grey[i + 1]) + Math.abs(g - grey[i - w]) + Math.abs(g - grey[i + w])) / 4;
+                n++;
+            }
+        });
+        return n ? [a, b, +(s / n).toFixed(1), +(c / n).toFixed(2)] : [a, b, null, null];
+    });
+}
+
+// The profile with blades, with the ground's grass look alone, and with no grass at all.
+export async function profiles() {
+    const qtr = window.gameEngine.renderer.quadtreeTerrainRenderer, pass = qtr.pass, grass = qtr.grass;
+    const set = async (look, blades) => { pass.options.grass = look; await pass.prepare(); grass.enabled = blades; await wait(700); };
+    await set(true, true); const full = await profile();
+    await set(true, false); const ground = await profile();
+    await set(false, false); const none = await profile();
+    await set(true, true);
+    return full.map((f, i) => `${f[0]}-${f[1]} m  full ${f[2]} / ${f[3]}   ground ${ground[i][2]} / ${ground[i][3]}   none ${none[i][2]} / ${none[i][3]}`).join('\n');
+}

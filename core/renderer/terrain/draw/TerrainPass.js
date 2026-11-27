@@ -104,6 +104,7 @@ export class TerrainPass {
                 at(10, F, array), at(11, F, uniform), at(12, F, { texture: { sampleType: 'float' } }),
                 ...(this.biome ? [at(13, F, array)] : []),
                 ...(this.grain ? [at(this._grainBinding(), F, { texture: { sampleType: 'float' } })] : []),
+                ...(this.grain && this.portraits ? [at(this._grainBinding() + 1, F, array)] : []),
             ]),
             none: layout([]),
             water: layout([
@@ -143,7 +144,7 @@ export class TerrainPass {
     /** The grass grain's binding in the ground group (grassGrain.js): after the climate, when there is one. */
     _grainBinding() { return this.biome ? 14 : 13; }
 
-    _key(kind, wet, rain) { return `${kind}${wet ? ' wet' : ''}${rain ? ' rain' : ''}${this.options.half ? '' : ' full'}${this.options.exactAir ? ' exact' : ''}${this.options.grass ? '' : ' plain'}${this.options.grain ? '' : ' nograin'}`; }
+    _key(kind, wet, rain) { return `${kind}${wet ? ' wet' : ''}${rain ? ' rain' : ''}${this.options.half ? '' : ' full'}${this.options.exactAir ? ' exact' : ''}${this.options.grass ? '' : ' plain'}${this.options.grain ? '' : ' nograin'}${this.options.portraits === false ? ' noportraits' : ''}`; }
 
     _build(kind, wet, rain) {
         const key = this._key(kind, wet, rain);
@@ -154,6 +155,7 @@ export class TerrainPass {
             half: this.options.half && device.features.has('shader-f16'), exactAir: this.options.exactAir,
             fineEndMeters: this.shaderConfig.groundFineEndMeters, deepEndMeters: this.shaderConfig.groundDeepEndMeters, biome: this.biome ?? null,
             grain: this.grain && this.options.grass && this.options.grain ? this._grainBinding() : null, grassLook: this.options.grass,
+            portraits: this.grain && this.portraits && this.options.grass && this.options.grain && this.options.portraits !== false ? this._grainBinding() + 1 : null,
         });
         const made = device.createRenderPipelineAsync({
             label: `Terrain ${key}`, layout: wet ? this._wetLayout : this._dryLayout,
@@ -202,6 +204,7 @@ export class TerrainPass {
             this._groundGroup = device.createBindGroup({ layout: this._layouts.ground, entries: entries([
                 ...views, this.ground.albedoView, this.ground.surfaceView, this.ground.sampler, this.ground.wideSampler, this._sampler, this.air.view, this.air.frame, lut, ...climate,
                 ...(this.grain ? [this.grain.view] : []),
+                ...(this.grain && this.portraits ? [this.portraits.view] : []),
             ]) });
         }
         const land = this.landLight.resources;
