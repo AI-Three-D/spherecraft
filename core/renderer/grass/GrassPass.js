@@ -63,6 +63,8 @@ export class GrassPass {
         this.enabled = this.config.enabled !== false;
         /** For measuring: workgroups per patch made (0: by how many are made, 1-16: fixed). */
         this.splitMaking = 0;
+        /** For measuring: the field as it is (no distance shortcuts in the blades' light), drawn zoomed in (grassRig.js zoomTruth). */
+        this.teacher = false;
         /** For measuring: false reads every kept blade in the select, in view or not. */
         this.cullPatches = true;
         /** For measuring: the blades are made but not drawn. */
@@ -92,7 +94,7 @@ export class GrassPass {
         // The kept tufts' blades, two halves: this frame's, made from last frame's.
         this._store = buffer('store', 2 * STORE_CAP * RECORD_WORDS * 4, U.STORAGE);
         // The blades drawn this frame, as the vertex shader takes them (selectMain).
-        this._bandIndex = buffer('drawn', bladeCount * 32, U.STORAGE);
+        this._bandIndex = buffer('drawn', bladeCount * 48, U.STORAGE);
         this._patchHash = buffer('patch table', 2 * HASH_CAP * 8 * 4, U.STORAGE | U.COPY_DST);
         this._parity = 0;
         // The blades' dispatch, and the bands' draws: two buffers, as one is read while the other is written.
@@ -311,7 +313,7 @@ export class GrassPass {
         if (!faces) return;
         // This frame's half of the cache and of the patch table; the other half is last frame's.
         this._parity ^= 1;
-        W.set([this._parity, this.splitMaking ?? 0, this.cullPatches === false ? 1 : 0, 0], 84);
+        W.set([this._parity, this.splitMaking ?? 0, this.cullPatches === false ? 1 : 0, this.teacher ? 1 : 0], 84);
         this.device.queue.writeBuffer(this._frameBuffer, 0, this._frame);
 
         // This frame's counts, where last frame's patches are now, this frame's half of the patch table.

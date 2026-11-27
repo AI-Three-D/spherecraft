@@ -90,7 +90,7 @@ struct Frame {
     camera: vec4<f32>,             // from the planet's centre (for the land's light), sea level (m)
     counts: vec4<u32>,             // faces, deepest tile level, hash mask, hash capacity
     visible: vec4<u32>,            // the drawn tiles' table: mask, capacity, this frame's epoch; coarsest mesh level
-    cache: vec4<u32>,              // which half of the cache is this frame's (0 or 1)
+    cache: vec4<u32>,              // which half of the cache is this frame's (0 or 1); split; patch cull off; teacher
     light: vec4<f32>,              // the same for every blade pixel this frame (GrassPass.js): the sky's light, the day
     bounce: vec4<f32>,             // the ground's bounce (before the depth in the canopy), the sun's depth factor in it
     faces: array<Face, ${MAX_FACES}>,
@@ -135,7 +135,7 @@ export function buildGrassComputeWGSL({ faceSizeMeters, biome, skip = {}, segmen
 // The cache: tufts' blades as offsets from their patch, both halves (this frame's, last frame's).
 @group(0) @binding(4) var<storage, read_write> store: array<vec4<u32>>;
 @group(0) @binding(5) var<storage, read_write> args: array<u32>;
-// The blades drawn this frame, by band, as the vertex shader takes them (2 x vec4<u32>: selectMain).
+// The blades drawn this frame, by band, as the vertex shader takes them (3 x vec4<u32>: chooseBlade).
 @group(0) @binding(7) var<storage, read_write> drawn: array<vec4<u32>>;
 // The patches of this frame and of the last, by key (key, key, stamp, stamp, slot; 8 words), both halves.
 @group(0) @binding(8) var<storage, read_write> patchHash: array<atomic<u32>>;
@@ -552,7 +552,16 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
         let carried = (vec2<f32>(P) + vec2<f32>(f32(c & 1u), f32(c >> 1u)) * sf) * metres - F.wind.xy;
         g[c] = vnoise(carried / 22.0, 7u) * 0.75 + vnoise(carried / 7.5 + 13.1, 11u) * 0.25;
     }
-    patches[slotOut * 4u + 3u] = vec4<u32>(pack2x16float(g.xy), pack2x16float(g.zw), 0u, 0u);
+    // The ground's tilt over the block (the drawn heights half a patch apart), its normal's level part (east, north): the
+    // canopy lies along the ground, so the far light takes the sight line's slant to it (shadeBlade, as the terrain).
+    let hx = drawnHeight(tile.x & 4095, up, part, u32(tile.w), inTile(p, u32(tile.y), vec2<f32>(0.5 * sf + 0.5, 0.5 * sf)));
+    let hy = drawnHeight(tile.x & 4095, up, part, u32(tile.w), inTile(p, u32(tile.y), vec2<f32>(0.5 * sf, 0.5 * sf + 0.5)));
+    let stepM = 0.5 * F.dv.w;
+    let ex = normalize(F.du.xyz - sea.up * dot(sea.up, F.du.xyz));
+    let ey = normalize(F.dv.xyz - sea.up * dot(sea.up, F.dv.xyz));
+    let groundN = normalize(sea.up - ex * ((hx - h) / stepM) - ey * ((hy - h) / stepM));
+    let tilt = vec2<f32>(dot(groundN, frame.east.xyz), dot(groundN, frame.north.xyz));
+    patches[slotOut * 4u + 3u] = vec4<u32>(pack2x16float(g.xy), pack2x16float(g.zw), pack2x16float(tilt), 0u);
     // Its entry in this frame's table. If last frame had it alike (the same tile, mesh and distance step), its tufts are
     // carried over (copyMain); else they are made (generateMain).
     let key0 = ((u32(P.x) & 0x1FFFFu) | (face << 17u) | (u32(span) << 20u)) + 1u;
@@ -643,9 +652,10 @@ fn dispatchMain() {
 // at its distance, in view; what it is this frame, once per blade (its vertices only build it): grown in by its rank,
 // bent by the gusts at its patch's corners (carried with the wind), its tuft's sway and the comb, its colour toward the
 // ground's far off. Band 3: not drawn.
-struct Chosen { band: u32, out0: vec4<u32>, out1: vec4<u32> };
+// out2: the ground's grass colour here (what a sub-pixel blade is mixed toward: shadeBlade).
+struct Chosen { band: u32, out0: vec4<u32>, out1: vec4<u32>, out2: vec4<u32> };
 fn chooseBlade(r0: vec4<u32>, r1: vec4<u32>, owner: u32) -> Chosen {
-    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u));
+    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u), vec4<u32>(0u));
     let offset = vec3<f32>(unpack2x16float(r0.x), unpack2x16float(r0.y).x);
     let rel = bitcast<vec3<f32>>(patches[owner * 4u + 2u].xyz) + offset;
     let distance = length(rel);
@@ -660,8 +670,9 @@ fn chooseBlade(r0: vec4<u32>, r1: vec4<u32>, owner: u32) -> Chosen {
     let kindFlags = u32(look.w * 255.0 + 0.5);
     let kind = kindFlags & 15u;
     let rule = (kindFlags >> 5u) & 3u;
-    if (rule == 1u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.08, frame.dist.x * 0.16, distance); }
-    if (rule == 2u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.12, frame.dist.x * 0.3, distance); }
+    // (Out over a long way, not in a line: thinner than a pixel they are drawn faint, mixed with the field: shadeBlade.)
+    if (rule == 1u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.1, frame.dist.x * 0.35, distance); }
+    if (rule == 2u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.15, frame.dist.x * 0.55, distance); }
     let middle = rel + frame.up.xyz * (tall * 0.5);
     for (var p = 0; p < 5; p++) {
         if (dot(frame.planes[p].xyz, middle) + frame.planes[p].w < -(tall * 0.7 + 0.15)) { keep = false; }
@@ -693,11 +704,17 @@ fn chooseBlade(r0: vec4<u32>, r1: vec4<u32>, owner: u32) -> Chosen {
         let combTurn = (place.x - 0.5) * 2.2;
         let prevailing = frame.wind.xy * cos(combTurn) + vec2<f32>(-frame.wind.y, frame.wind.x) * sin(combTurn);
         let bend = frame.wind.xy * push + vec2<f32>(-frame.wind.y, frame.wind.x) * sway + prevailing * (0.12 + 0.35 * place.y);
-        let farness = select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), kind <= 2u || kind == ${KIND.LEAF}u);
-        chosen.out0 = vec4<u32>(bitcast<vec3<u32>>(rel), pack2x16unorm(vec2<f32>(shape.x, shape.y * fadeIn)));
+        // (Not for the teacher, frame.cache.w: the field as it is, drawn dense and zoomed in: tools/perf/grass/grassRig.js.)
+        let farness = select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), (kind <= 2u || kind == ${KIND.LEAF}u) && frame.cache.w == 0u);
+        // Facing (8 bits, as kept), height grown in (12), the ground's tilt east and north (6 each).
+        let tilt = clamp(unpack2x16float(patches[owner * 4u + 3u].z), vec2<f32>(-0.95), vec2<f32>(0.95));
+        let packedShape = u32(round(shape.x * 255.0)) | (u32(round(saturate(shape.y * fadeIn) * 4095.0)) << 8u)
+            | (u32(round((tilt.x * 0.5 + 0.5) * 63.0)) << 20u) | (u32(round((tilt.y * 0.5 + 0.5) * 63.0)) << 26u);
+        chosen.out0 = vec4<u32>(bitcast<vec3<u32>>(rel), packedShape);
         chosen.out1 = vec4<u32>(pack2x16float(bend), pack4x8unorm(vec4<f32>(look.x * mix(0.5, 1.0, fadeIn), look.yz, f32(kind) / 255.0)),
             pack4x8unorm(vec4<f32>(mix(near.rgb, farC.rgb, farness), near.a)),
             pack4x8unorm(vec4<f32>(unpack2x16unorm(patches[owner * 4u + 1u].y), place.z, farC.a)));
+        chosen.out2 = vec4<u32>(r1.y, 0u, 0u, 0u);
     }
     return chosen;
 }
@@ -711,8 +728,9 @@ fn writeChosen(chosen: Chosen, local: u32) {
         if (chosen.band == 0u) { cap = BAND0; start = 0u; } else if (chosen.band == 1u) { cap = BAND1; start = BAND0; }
         let at = bandBase[chosen.band] + local;
         if (at < cap) {
-            drawn[(start + at) * 2u] = chosen.out0;
-            drawn[(start + at) * 2u + 1u] = chosen.out1;
+            drawn[(start + at) * 3u] = chosen.out0;
+            drawn[(start + at) * 3u + 1u] = chosen.out1;
+            drawn[(start + at) * 3u + 2u] = chosen.out2;
         }
     }
 }
@@ -731,7 +749,7 @@ fn copyMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     var r1 = vec4<u32>(0u);
     var slot = 0u;
     var local = 0xFFFFFFFFu;
-    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u));
+    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u), vec4<u32>(0u));
     var drawnAt = 0u;
     if (id.x < previous) {
         let source = ((1u - frame.cache.x) * STORE_CAP + id.x) * 2u;
@@ -782,7 +800,7 @@ fn selectMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoc
     let first = min(atomicLoad(&control[CTRL_COPIED]), STORE_CAP);
     let count = min(atomicLoad(&control[CTRL_STORE]), STORE_CAP);
     let i = first + id.x;
-    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u));
+    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u), vec4<u32>(0u));
     var local = 0u;
     if (i < count) {
         let index = frame.cache.x * STORE_CAP + i;
@@ -1068,7 +1086,7 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
         let dock = u01(pcg(h5 + 31u)) < 0.025 * dockPatch;
         let seedChance = (0.12 + 0.5 * grow.tall + 0.3 * zone) * select(0.4, 1.0, kind == 1u || kind == 0u) * step3(0.18, 0.4, tall);
         let seedU = u01(pcg(h5 + 9u));
-        let seeds = select(0u, 1u, dock || (seedU < seedChance && step3(frame.dist.x * 0.08, frame.dist.x * 0.16, reachD) < 1.0));
+        let seeds = select(0u, 1u, dock || (seedU < seedChance && step3(frame.dist.x * 0.1, frame.dist.x * 0.35, reachD) < 1.0));
         let seedV = select(seedU / max(seedChance, 1.0e-6), 0.0, dock);
         let flowerPatch = n1.x * 0.65 + n1.y * 0.35;
         let meadow = step3(0.35, 0.75, grow.lively) * step3(0.25, 0.5, grow.wet) * select(0.25, 1.0, kind == 0u) * select(1.0, 0.0, kind >= 3u);
@@ -1076,7 +1094,7 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
         // Seed heads stop where they are under a pixel; flowers go on further, fewer and as dots of colour (their heads
         // are widened to a pixel below), thinning out to the blades' end: patches of colour stay in the far meadow.
         let farOut = 1.0 - step3(frame.dist.x * 0.145, frame.dist.x * 0.21, distance);
-        let flowerOut = 1.0 - step3(frame.dist.x * 0.12, frame.dist.x * 0.3, reachD);
+        let flowerOut = 1.0 - step3(frame.dist.x * 0.15, frame.dist.x * 0.55, reachD);
         let flowerU = u01(pcg(h5 + 13u));
         let blossoms = select(0u, 1u, flowerU < 0.42 * blossomShare && flowerOut > 0.0);
         let flowerV = flowerU / max(0.42 * blossomShare, 1.0e-6);
@@ -1124,6 +1142,10 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
         var grainHere = vec3<f32>(1.0);
         if (kind <= 2u || forb) { grainHere = grainAt(q, place.rel, fx3, cross(up, fx3), distance * frame.ambient.w, distance); }
         var deadShare = select(mix(0.02, 0.11, strawZone), 0.0, forb);
+        // The field's own variation, over its mean, as the terrain puts it on the ground (grassField.wgsl.js).
+        let fieldHere = mix(0.82, 1.2, clump) / 1.01 * mix(0.8, 1.16, step3(0.2, 0.8, n1.w)) / 0.98
+            * mix(vec3<f32>(1.14, 1.05, 0.78), vec3<f32>(0.86, 0.97, 1.08), hueZone) / vec3<f32>(1.0, 1.01, 0.93)
+            * (vec3<f32>(1.0) + (mix(0.02, 0.11, strawZone) - 0.045) * vec3<f32>(2.6, 1.9, 0.4));
         switch (kind) { case 1u: { deadShare = 0.55; } case 3u: { deadShare = 0.3; } case 4u: { deadShare = 0.28; } default: {} }
 
         for (var i = 0u; i < several; i++) {
@@ -1186,12 +1208,13 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
                     color = blossomColor(bladeKind, fract(u01(pcg(clumpHash + 43u)) + 0.25 * step3(0.7, 1.0, u4)), grow);
                 }
             }
-            // Far off a blade takes the canopy's colour with the ground's grain where it stands (the ground past the blades
-            // wears the same), and a little of its own difference: worked out here, blended by distance as drawn.
-            var farColor = color;
+            // The ground's grass colour where it stands, as the terrain draws it (its grain, and the field's clumps,
+            // patches, hue and straw zones: grassField.wgsl.js): what a blade turns to far off, and what any kind is
+            // mixed toward as it covers less than a pixel (shadeBlade). A blade keeps a little of its own difference.
+            var farColor = canopy * ${n(GRASS_CANOPY.gain)} * grainHere * fieldHere;
             if (bladeKind <= 2u || bladeKind == ${KIND.LEAF}u) {
                 let own = clamp(color / max(base, vec3<f32>(0.002)), vec3<f32>(0.4), vec3<f32>(2.5));
-                farColor = canopy * ${n(GRASS_CANOPY.gain)} * grainHere * mix(vec3<f32>(1.0), own, 0.12);
+                farColor *= mix(vec3<f32>(1.0), own, 0.12);
             }
             writeRecord(first + i, root - origin, at, facing, bladeTall, bladeWidth, lean, crowd, bladeKind, color, u4, farColor,
                 step3(0.0, 1.0, total), rank, tuftScale, n2.xy, r2, swayPhase, clump, v, select(0u, 1u, forb) | (rule << 1u));
@@ -1215,8 +1238,9 @@ fn finishMain() {
         args[7u + b * 5u] = 0u;
         args[8u + b * 5u] = starts[b] / ${BLADES_PER_INSTANCE}u;
         for (var i = count; i < instances * ${BLADES_PER_INSTANCE}u; i++) {
-            drawn[(starts[b] + i) * 2u] = vec4<u32>(0u);
-            drawn[(starts[b] + i) * 2u + 1u] = vec4<u32>(0u);
+            drawn[(starts[b] + i) * 3u] = vec4<u32>(0u);
+            drawn[(starts[b] + i) * 3u + 1u] = vec4<u32>(0u);
+            drawn[(starts[b] + i) * 3u + 2u] = vec4<u32>(0u);
         }
     }
     // This half's blades, for the next frame to carry over.
@@ -1249,8 +1273,11 @@ struct Out {
     @location(2) along: vec4<f32>,
     // As selectMain packed them: colour (sqrt) and a random; the land's sun and sky, clump, how grassy; width, lean,
     // crowding, kind. Few outputs: every vertex's are stored and read back (2-3 million a frame).
-    @location(3) @interpolate(flat) look: vec3<u32>,
+    // w: how much of its drawn strip the blade truly covers.
+    @location(3) @interpolate(flat) look: vec4<u32>,
     ${perVertex ? '@location(4) shaded: vec3<f32>,                     // the light worked out at the vertex' : ''}
+    // The ground's grass colour where the blade stands (sqrt, packed): what it is mixed toward as it covers less.
+    @location(5) @interpolate(flat) ground: u32,
 };
 
 @vertex
@@ -1271,12 +1298,14 @@ fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u3
         vertex = corner % ${2 * segments[1] + 1}u;
     }
     // The blade this frame (selectMain).
-    let a = blades[instance * 2u];
-    let b = blades[instance * 2u + 1u];
+    let a = blades[instance * 3u];
+    let b = blades[instance * 3u + 1u];
+    let groundColour = blades[instance * 3u + 2u].x;
     let level = min(vertex >> 1u, segments);
     let sideSign = select(-1.0, 1.0, (vertex & 1u) == 1u);
     let root = bitcast<vec3<f32>>(a.xyz);
-    let shape = unpack2x16unorm(a.w);
+    let shape = vec2<f32>(f32(a.w & 255u) / 255.0, f32((a.w >> 8u) & 4095u) / 4095.0);
+    let groundTilt = vec2<f32>(f32((a.w >> 20u) & 63u), f32(a.w >> 26u)) / 63.0;
     let bend = unpack2x16float(b.x);
     let look = unpack4x8unorm(b.y);
     let kind = u32(look.w * 255.0 + 0.5);
@@ -1298,6 +1327,13 @@ fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u3
     let edgeOn = abs(dot(across, normalize(level2 + up * 1.0e-4)));
     across = normalize(across - normalize(level2 + up * 1.0e-4) * (dot(across, normalize(level2 + up * 1.0e-4)) * 0.55 * edgeOn));
     let lean = look.y;
+    // How much of its widened strip the blade truly covers (1: a pixel or wider). Its own differences are drawn that
+    // much, the rest is the field's mean about it, as a pixel that holds a blade and the gaps beside it does (fsMain;
+    // a field drawn zoomed in and boxed down, grassRig.js zoomTruth: drawn whole, thin blades carried twice its
+    // contrast at 20-90 m, and the line where they gave out was the field's edge).
+    let baseOpen = sqrt(max(1.0 - dot(across, toEye) * dot(across, toEye), 0.0));
+    let basePixels = look.x * MAX_W * mix(0.3, 1.0, edgeFade) * 0.8 * max(baseOpen, 0.25) / (max(distance, 0.05) * frame.ambient.w);
+    let coverage = saturate(basePixels / max(frame.lod.z, 1.0e-3));
     // Each blade's own flutter on top of its tuft's sway.
     let flutter = 0.012 * frame.wind.w / 0.045 * wave(time, 3.0 + 2.0 * seed, seed * 40.0) * (1.0 - smoothstep(6.0, 25.0, distance));
     // Flower stems and spikes are stiffer than blades.
@@ -1381,8 +1417,14 @@ fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u3
     out.clip = frame.clip * vec4<f32>(pos, 1.0);
     out.rel = pos;
     out.normal = normal;
-    out.along = vec4<f32>(select(t, 1.0, flowerDisc && flower > 0.5), flower, petal);
-    out.look = vec3<u32>(b.z, b.w, b.y);
+    // A flower's head shape in zw; for the others, how much of this row the blade truly covers (1 / its widening:
+    // a widened tip, bright and thin, is drawn wider than it is and must not light as wide: shadeBlade).
+    // A pixel point-sampled shows a part 1-2 pixels wide whole, where the field filtered over the pixel (zoomed in and
+    // boxed down: grassRig.js zoomTruth) shows it mixed with what lies beside it: thin pale straw, seed stems and tips
+    // stood as bright speckle. Its width in pixels as it truly is, over 1.6, is how much of its own it shows.
+    out.along = vec4<f32>(select(t, 1.0, flowerDisc && flower > 0.5), flower, select(vec2<f32>(saturate(pixels / 1.6), 0.0), petal, flowerDisc));
+    out.look = vec4<u32>(b.z, b.w, b.y, pack4x8unorm(vec4<f32>(coverage, groundTilt, 0.0)));
+    out.ground = groundColour;
     ${perVertex ? 'out.shaded = shadeBlade(out);' : ''}
     return out;
 }
@@ -1409,7 +1451,7 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let flower = headIn;
     // Far off a blade is a pixel: its own differences only flicker. Toward the mean with distance; the height ramp
     // fades to its mean too (every fake fades far, Black Ops 4).
-    let calm = step3(16.0, 44.0, distance);
+    let calm = select(step3(35.0, 110.0, distance), 0.0, frame.cache.w != 0u);
     // Stems of flowers and seed heads are green.
     var headColor = inAlbedo.rgb;
     if (kind == 6u) {
@@ -1472,18 +1514,34 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     // Toward the end of their reach, lit as the ground beyond lights its grass (terrainPass.wgsl.js, grassHue.wgsl.js
     // grassCanopy): the same canopy seen at the same slant, the same light and glow. Where they sink into the ground it
     // looks as they did. (By distance alone: a rule for views from above made a ring of blades unlike both sides.)
-    let far = select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), kind <= 2u || kind == ${KIND.LEAF}u);
+    // Toward the field's mean light as the blade covers less of what it is drawn over, and toward the ground's colour
+    // at the end of the blades' reach.
+    let lookW = unpack4x8unorm(in.look.w);
+    // Per row as drawn (the root's for flowers: their zw is the head's shape).
+    let coverage = select(in.along.z, lookW.x, kind == 6u);
+    // Blades also toward the ground's colour at the end of their reach; every kind toward the field about it as it covers
+    // less than it is drawn (a widened seed head or blade tip, pale and thin, lit as wide stood as speckle).
+    let ownKind = kind <= 2u || kind == ${KIND.LEAF}u;
+    let far = select(0.0, max(select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), ownKind), 1.0 - coverage), frame.cache.w == 0u);
     if (far <= 0.0) { return own; }
-    let velvet = normalize(V - up * dot(V, up) + up);
-    let nC = normalize(up + 0.5 * (velvet - up));
+    // The canopy lies along the ground (its tilt: patchesMain): the sight line's slant to it, and its velvet normal
+    // about the ground's, as the terrain lights its grass (terrainPass.wgsl.js).
+    let tiltEN = lookW.yz * 2.0 - 1.0;
+    let groundN = normalize(tiltEN.x * frame.east.xyz + tiltEN.y * frame.north.xyz + sqrt(max(1.0 - dot(tiltEN, tiltEN), 0.0)) * up);
+    let canopySlant = max(dot(V, groundN) / max(dot(up, groundN), 0.3), 0.02);
+    let velvet = normalize(V - groundN * dot(V, groundN) + groundN);
+    let nC = normalize(groundN + 0.5 * (velvet - groundN));
     let land = vec2<f32>(inLight.x, open);
     let share = inLight.w;
-    let gc = grassCanopy(${n(GRASS_CANOPY.depth)} * share / max(dot(V, up), 0.02), grassSunDepth(sunUp, share, V, L), ${n(GRASS_CANOPY.ramp)});
+    let gc = grassCanopy(${n(GRASS_CANOPY.depth)} * share / canopySlant, grassSunDepth(sunUp, share, V, L), ${n(GRASS_CANOPY.ramp)});
     let sunShare = 0.65 * land.x * step3(0.0, 0.25, sunUp);
-    let canopyLit = albedo * lightAt(nC, up, up, L, sun, ambient, 0.8, 1.0, land);
+    let groundTone = unpack4x8unorm(in.ground).rgb;
+    let groundAlbedo = groundTone * groundTone * 0.8;
+    let canopyLit = groundAlbedo * lightAt(nC, groundN, up, L, sun, ambient, 0.8, 1.0, land);
     let grassThrough = ${n(GRASS_CANOPY.back)} * max(-dot(velvet, L), 0.0) + ${n(GRASS_CANOPY.toward)} * glow;
-    let ground = canopyLit * mix(gc.x, gc.y, sunShare)
-        + sun * land.x * albedo * ${v3(GRASS_CANOPY.tint)} * (${n(GRASS_CANOPY.glow)} * grassThrough);
+    let ground = (canopyLit * mix(gc.x, gc.y, sunShare)
+        + sun * land.x * groundAlbedo * ${v3(GRASS_CANOPY.tint)} * (${n(GRASS_CANOPY.glow)} * grassThrough))
+        * grassCanopyCorrection(canopySlant, dot(V, L), sunUp, distance);
     // A blade's own light and shade stay a little: the field keeps its grain.
     let grain = clamp(dot(own, vec3<f32>(0.333)) / max(dot(canopyLit, vec3<f32>(0.333)), 1.0e-4), 0.6, 1.6);
     return mix(own, ground * mix(1.0, grain, 0.2), far);

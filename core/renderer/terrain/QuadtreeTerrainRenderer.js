@@ -13,6 +13,7 @@ import { TerrainPass } from './draw/TerrainPass.js';
 import { GrassPass } from '../grass/GrassPass.js';
 import { createGrassGrain } from '../grass/grassGrain.js';
 import { createGrassPortraits } from '../grass/grassPortraits.js';
+import { createGrassSlices } from '../grass/grassSlices.js';
 import { usesBiomeLandscape } from '../../world/terrain-generator/biomeLandscapeConfig.js';
 import { aerialFadeRange } from './shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
@@ -105,10 +106,14 @@ export class QuadtreeTerrainRenderer {
         if (grassConfig?.enabled && !this._grain) this._grain = createGrassGrain(this.backend.device);
         // Portraits of the field, rendered from its own blades (grassPortraits.js): the far grass as the blades look from afar.
         if (grassConfig?.enabled && !this._portraits) this._portraits = await createGrassPortraits(this.backend.device);
+        // Slices of the field, from its own blades (grassSlices.js): past the blades the terrain traces its sight line through
+        // them. An experiment, off: only made when asked for (rendering.grass.slices; TerrainPass options.slices too).
+        if (grassConfig?.enabled && grassConfig.slices === true && !this._slices) this._slices = await createGrassSlices(this.backend.device);
         const pass = new TerrainPass({
             device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground, landLight: this._landLight,
             planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments), biome, grain: this._grain ?? null,
             portraits: this._portraits ?? null,
+            slices: this._slices ?? null,
             grassLook: !!grassConfig?.enabled,
             meshes: Array.from({ length: this._maxGeomLOD + 1 }, (_, lod) => this._geometries.get(lod).index.data),
         });
@@ -608,6 +613,8 @@ export class QuadtreeTerrainRenderer {
         this._grain = null;
         this._portraits?.destroy();
         this._portraits = null;
+        this._slices?.destroy();
+        this._slices = null;
         this._ground?.destroy();
         this._ground = null;
         this._landLight?.dispose();

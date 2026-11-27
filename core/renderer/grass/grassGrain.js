@@ -1,7 +1,8 @@
 // @ts-nocheck
 // The grain of a grass field seen from afar (GrassPass.js, terrainPass.wgsl.js): tufts with lit tips, the dark between
-// them, a share of straw, clumps a little lighter or darker. Made once at load from the same rules as the blades
-// (grassWgsl.js), as a tileable colour factor with mipmaps, so it never flickers. The terrain wears it on its grass at two
+// them, a share of straw; one stand (the clumps are the blades' own, put on by the terrain: grassField.wgsl.js). Made
+// once at load from the same rules as the blades (grassWgsl.js), as a tileable colour factor with mipmaps, so it never
+// flickers. The terrain wears it on its grass at two
 // scales; the far blades take their colour from it at their root. Where the blades end the ground goes on with the same
 // grain, as distant grass in games is drawn from textures made of the grass itself (Skyrim's TexGen HD grass LOD).
 
@@ -21,8 +22,8 @@ const hash = (x, y, s) => {
 /** Linear colour factors (mean 1 in each channel), GRAIN_SIZE x GRAIN_SIZE x 4 (a: how much of it is gap). */
 export function makeGrain(size = GRAIN_SIZE) {
     const out = new Float32Array(size * size * 4);
-    // Tufts on a jittered lattice about 7 cm apart, clumps about 0.6 m.
-    const tuftCells = Math.round(GRAIN_PERIOD_M / 0.07), clumpCells = Math.round(GRAIN_PERIOD_M / 0.6);
+    // Tufts on a jittered lattice about 7 cm apart.
+    const tuftCells = Math.round(GRAIN_PERIOD_M / 0.07);
     const tuft = { n: tuftCells, at: [], look: [] };
     for (let j = 0; j < tuftCells; j++) for (let i = 0; i < tuftCells; i++) {
         tuft.at.push([(i + 0.15 + 0.7 * hash(i, j, 1)) / tuftCells, (j + 0.15 + 0.7 * hash(i, j, 2)) / tuftCells]);
@@ -31,18 +32,6 @@ export function makeGrain(size = GRAIN_SIZE) {
         const warm = hash(i, j, 5) - 0.5;
         tuft.look.push([straw, tone, warm, 0.6 + 0.8 * hash(i, j, 6), hash(i, j, 7) * Math.PI * 2]);
     }
-    const clumpTone = (u, v) => {
-        // Nearest clump centre's lightness, wrapped.
-        const cu = u * clumpCells, cv = v * clumpCells, ci = Math.floor(cu), cj = Math.floor(cv);
-        let best = 9, tone = 1;
-        for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
-            const a = ((ci + x) % clumpCells + clumpCells) % clumpCells, b = ((cj + y) % clumpCells + clumpCells) % clumpCells;
-            const px = ci + x + hash(a, b, 11), py = cj + y + hash(a, b, 12);
-            const d = (px - cu) ** 2 + (py - cv) ** 2;
-            if (d < best) { best = d; tone = 0.72 + 0.56 * hash(a, b, 13); }
-        }
-        return tone;
-    };
     const sum = [0, 0, 0];
     for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
         const u = (x + 0.5) / size, v = (y + 0.5) / size;
@@ -69,7 +58,9 @@ export function makeGrain(size = GRAIN_SIZE) {
             g = light * (straw ? 1.25 : 1);
             b = light * (straw ? 0.85 : 1 - 0.15 * warm);
         }
-        const clump = clumpTone(u, v);
+        // One stand: the clumps are the blades' own, put on by the terrain at their places (grassField.wgsl.js); in the
+        // tile they would repeat every 4 m.
+        const clump = 1;
         // Between the tufts: the shade deep in the canopy.
         const gap = [0.42, 0.46, 0.40];
         const i = (y * size + x) * 4;

@@ -24,9 +24,14 @@ const SEGMENTS = 5;
 const SAMPLES = 4;
 const MAX_HEIGHT = 1.1;
 
-export const BAKE_WGSL = /* wgsl */`
-struct Bake { dir: vec2<f32>, cotE: f32, copies: f32 };
-@group(0) @binding(0) var<uniform> bake: Bake;
+/** Blades in the tile, and how high the tallest reach (m): the volume (grassVolume.js) is made of the same blades. */
+export const FIELD_BLADE_COUNT = TUFTS * TUFTS * BLADES_PER_TUFT;
+export const FIELD_MAX_HEIGHT = MAX_HEIGHT;
+export const FIELD_SEGMENTS = SEGMENTS;
+
+/** The tile's blades, by the blades' rules (grassWgsl.js): fieldBlade(i) and fieldBladeAt(blade, t). Shared by the
+ * portraits and the volume (grassVolume.js), so the two show the same field. */
+export const FIELD_BLADES_WGSL = /* wgsl */`
 const P: f32 = ${PORTRAIT_PERIOD_M}.0;
 const TUFTS: u32 = ${TUFTS}u;
 const BLADES: u32 = ${BLADES_PER_TUFT}u;
@@ -56,6 +61,59 @@ fn pnoise(p: vec2<f32>, n: u32, seed: u32) -> f32 {
     return mix(mix(v[0], v[1], u.x), mix(v[2], v[3], u.x), u.y);
 }
 
+struct FieldBlade { root: vec2<f32>, fdir: vec2<f32>, tall: f32, width: f32, lean: f32, colour: vec3<f32>, kind: u32 };
+fn fieldBlade(blade: u32) -> FieldBlade {
+    let tuft = blade / BLADES;
+    let k = blade % BLADES;
+    let cell = vec2<u32>(tuft % TUFTS, tuft / TUFTS);
+    let h0 = pcg(tuft * 9781u + 17u);
+    let rootT = (vec2<f32>(cell) + vec2<f32>(u01(h0), u01(pcg(h0)))) * (P / f32(TUFTS));
+    // As the blades (grassWgsl.js), but one stand: tufts of their own heights, straw, a few seed heads and rosettes.
+    // The field's zones and clumps are not in the tile (it repeats every 4 m, and so would they): the terrain puts the
+    // blades' own over it, at their places (grassField.wgsl.js).
+    let zone = 0.5;
+    let clump = 0.5;
+    let lush = 0.5;
+    let hk = pcg(h0 + k * 0x9E3779B9u + 5u);
+    let r1 = u01(hk); let r2 = u01(pcg(hk + 1u)); let r3 = u01(pcg(hk + 2u)); let r4 = u01(pcg(hk + 3u));
+    var tall = (0.3 + 0.12 * lush) * mix(0.75, 1.3, zone) * mix(0.75, 1.25, clump) * mix(0.38, 1.06, r3);
+    var width = mix(0.008, 0.015, r1);
+    var lean = mix(0.25, 1.4, sqrt(r2)) * 0.45 + 0.15;
+    let around = r4 * 6.2831853;
+    let spread = 0.035 * sqrt(r2);
+    let root = rootT + vec2<f32>(cos(around), sin(around)) * spread;
+    let facing = around + (r1 - 0.5) * 0.8;
+    let deadShare = 0.045;
+    var colour = vec3<f32>(0.112, 0.143, 0.052) * mix(0.82, 1.2, clump) * mix(vec3<f32>(1.08, 1.03, 0.85), vec3<f32>(0.9, 0.99, 1.06), zone);
+    var kind = 0u;
+    if (u01(pcg(hk + 9u)) < deadShare) { colour = vec3<f32>(0.26, 0.23, 0.17); tall *= 0.75; lean += 0.3; }
+    if (k == 0u && u01(pcg(h0 + 31u)) < 0.12) {
+        // A seed head over the tuft.
+        kind = 1u; tall = max(tall, 0.25) * 1.35 + 0.05; width = 0.006; lean = 0.15;
+        colour = vec3<f32>(0.27, 0.23, 0.15);
+    }
+    if (k == 1u && u01(pcg(h0 + 77u)) < 0.1) { kind = 2u; tall = 0.12; width = 0.03; lean = 0.9; colour = vec3<f32>(0.10, 0.15, 0.055); }
+    return FieldBlade(root, vec2<f32>(cos(facing), sin(facing)), tall, width, lean, colour, kind);
+}
+// A blade at t (0 its root, 1 its tip): where over the ground (m), how high (m), how wide (m). A quadratic curve: up,
+// then out along its facing.
+fn fieldBladeAt(b: FieldBlade, t: f32) -> vec4<f32> {
+    let tipH = 1.0 - 0.55 * min(b.lean, 1.0) * min(b.lean, 1.0);
+    let ctrlH = 0.68;
+    let s = 1.0 - t;
+    let along = b.tall * (2.0 * s * t * (0.22 * b.lean) + t * t * (1.05 * b.lean));
+    let z = b.tall * (2.0 * s * t * ctrlH + t * t * tipH);
+    var w = b.width * (1.0 - pow(t, 1.6));
+    if (b.kind == 1u) { w = select(0.0025, b.width * sin(3.14159 * saturate((t - 0.7) / 0.3)), t >= 0.7); }
+    if (b.kind == 2u) { w = b.width * pow(sin(3.14159 * clamp(t * 0.92 + 0.06, 0.0, 1.0)), 0.75); }
+    return vec4<f32>(b.root + b.fdir * along, z, w);
+}
+`;
+
+export const BAKE_WGSL = /* wgsl */`
+struct Bake { dir: vec2<f32>, cotE: f32, copies: f32 };
+@group(0) @binding(0) var<uniform> bake: Bake;
+${FIELD_BLADES_WGSL}
 struct Out {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) colour: vec3<f32>,
@@ -68,50 +126,15 @@ fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance:
     let copies = u32(bake.copies);
     let blade = instance / (copies * copies);
     let copy = instance % (copies * copies);
-    let tuft = blade / BLADES;
-    let k = blade % BLADES;
-    let cell = vec2<u32>(tuft % TUFTS, tuft / TUFTS);
-    let h0 = pcg(tuft * 9781u + 17u);
-    let rootT = (vec2<f32>(cell) + vec2<f32>(u01(h0), u01(pcg(h0)))) * (P / f32(TUFTS));
-    // As the blades (grassWgsl.js): zones of taller and shorter stands, clumps, straw, a few seed heads and rosettes.
-    let zone = step3(0.3, 0.75, pnoise(rootT, 2u, 51u));
-    let clump = pnoise(rootT, 7u, 3u);
-    let lush = pnoise(rootT, 3u, 9u);
-    let hk = pcg(h0 + k * 0x9E3779B9u + 5u);
-    let r1 = u01(hk); let r2 = u01(pcg(hk + 1u)); let r3 = u01(pcg(hk + 2u)); let r4 = u01(pcg(hk + 3u));
-    var tall = (0.3 + 0.12 * lush) * mix(0.75, 1.3, zone) * mix(0.75, 1.25, clump) * mix(0.38, 1.06, r3);
-    var width = mix(0.008, 0.015, r1);
-    var lean = mix(0.25, 1.4, sqrt(r2)) * 0.45 + 0.15;
-    let around = r4 * 6.2831853;
-    let spread = 0.035 * sqrt(r2);
-    let root = rootT + vec2<f32>(cos(around), sin(around)) * spread;
-    let facing = around + (r1 - 0.5) * 0.8;
-    let deadShare = mix(0.02, 0.11, step3(0.45, 0.9, pnoise(rootT, 3u, 57u)));
-    var colour = vec3<f32>(0.112, 0.143, 0.052) * mix(0.82, 1.2, clump) * mix(vec3<f32>(1.08, 1.03, 0.85), vec3<f32>(0.9, 0.99, 1.06), zone);
-    var kind = 0u;
-    if (u01(pcg(hk + 9u)) < deadShare) { colour = vec3<f32>(0.26, 0.23, 0.17); tall *= 0.75; lean += 0.3; }
-    if (k == 0u && u01(pcg(h0 + 31u)) < 0.12) {
-        // A seed head over the tuft.
-        kind = 1u; tall = max(tall, 0.25) * 1.35 + 0.05; width = 0.006; lean = 0.15;
-        colour = vec3<f32>(0.27, 0.23, 0.15);
-    }
-    if (k == 1u && u01(pcg(h0 + 77u)) < 0.1) { kind = 2u; tall = 0.12; width = 0.03; lean = 0.9; colour = vec3<f32>(0.10, 0.15, 0.055); }
-
+    let b = fieldBlade(blade);
     let level = min(vertex >> 1u, SEGS);
     let side = select(-1.0, 1.0, (vertex & 1u) == 1u);
     let t = f32(level) / f32(SEGS);
-    let fdir = vec2<f32>(cos(facing), sin(facing));
-    // A quadratic curve: up, then out along its facing.
-    let tipH = 1.0 - 0.55 * min(lean, 1.0) * min(lean, 1.0);
-    let ctrlH = 0.68;
-    let s = 1.0 - t;
-    let along = tall * (2.0 * s * t * (0.22 * lean) + t * t * (1.05 * lean));
-    let z = tall * (2.0 * s * t * ctrlH + t * t * tipH);
-    var w = width * (1.0 - pow(t, 1.6));
-    if (kind == 1u) { w = select(0.0025, width * sin(3.14159 * saturate((t - 0.7) / 0.3)), t >= 0.7); }
-    if (kind == 2u) { w = width * pow(sin(3.14159 * clamp(t * 0.92 + 0.06, 0.0, 1.0)), 0.75); }
-    let across = vec2<f32>(-fdir.y, fdir.x);
-    let xy = root + fdir * along + across * (0.5 * w * side);
+    let at = fieldBladeAt(b, t);
+    let z = at.z;
+    let across = vec2<f32>(-b.fdir.y, b.fdir.x);
+    let xy = at.xy + across * (0.5 * at.w * side);
+    let colour = b.colour;
     // The oblique projection, and the copy of the tile this instance draws.
     var q = xy + z * bake.cotE * bake.dir;
     let c = vec2<f32>(f32(copy % copies), f32(copy / copies)) - 1.0;

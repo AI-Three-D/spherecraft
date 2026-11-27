@@ -40,6 +40,28 @@ fn grassCanopy(tau: f32, k: f32, b: f32) -> vec3<f32> {
 }
 // The sun's depth through the canopy per unit of height (the blades' own self-shade: grassWgsl.js), and how much of it
 // the hotspot takes away when the view looks along the sun.
+// What the analytic canopy misses, fitted to its teacher (tools/perf/grass/teacherRun.mjs, teacherFit.py: the field
+// drawn as it is, zoomed in 8 times and boxed down, over 22 views of a meadow and a slope, 10-190 m off): the canopy's
+// colour times this. Seen along the ground from standing height it was up to twice too bright (it is lit as a velvet
+// facing up and toward the eye, where a grazing sight line meets blades' sides), most toward the sun; from above it
+// was about right. log of the factor: a quadratic in log slant, log distance, with the hotspot and the sun's height.
+// slant: the sight line's to the canopy; hot: toward the eye . toward the sun; sunUp; distance (m). Mean error after
+// it, held out by view: 7.6 % (before: 16 %). Refitted per channel over the teacher drawn with it in place (its gaps
+// show the ground, so it moves with it): teacher-2026-11-28b-fit.json, 6.5-8.7 % held out.
+fn grassCanopyCorrection(slant: f32, hot: f32, sunUp: f32, distance: f32) -> vec3<f32> {
+    let ls = log(clamp(slant, 0.008, 1.0));
+    let ld = log(clamp(distance, 10.0, 190.0));
+    let k = vec3<f32>(-0.43629, -0.44574, -0.13078)
+        + vec3<f32>(0.45176, 0.44207, 0.38824) * (ls)
+        + vec3<f32>(0.06529, 0.06235, 0.05885) * (ls * ls)
+        + vec3<f32>(0.17967, 0.16822, 0.15585) * (hot)
+        + vec3<f32>(0.00882, 0.00316, 0.01404) * (hot * ls)
+        + vec3<f32>(-0.23138, -0.25157, -0.24453) * (sunUp)
+        + vec3<f32>(-0.00800, -0.01308, -0.00479) * (sunUp * ls)
+        + vec3<f32>(0.32127, 0.33761, 0.21339) * (ld)
+        + vec3<f32>(-0.02205, -0.02343, -0.01534) * (ld * ld);
+    return clamp(exp(k), vec3<f32>(0.4), vec3<f32>(1.3));
+}
 fn grassSunDepth(sunUp: f32, share: f32, toEye: vec3<f32>, sunDir: vec3<f32>) -> f32 {
     let along = saturate(dot(toEye, sunDir));
     let along3 = along * along * along;
