@@ -37,10 +37,10 @@ export const LOD_SEGMENTS = [7, 4, 2];
 export const BLADES_PER_INSTANCE = 16;
 export const LOD_CAPACITY = [131072, 262144, 524288];
 /** A tuft's blade as the cache keeps it (3 x vec4<u32>), and a patch's record of this frame (4 x vec4<u32>). */
-export const RECORD_WORDS = 12;
+export const RECORD_WORDS = 8;
 export const PATCH_WORDS = 16;
 /** Blades the cache holds, each of its two halves (this frame's, last frame's); entries of each half of its patch table. */
-export const STORE_CAP = 786432;
+export const STORE_CAP = 1048576;
 export const HASH_CAP = 8192;
 /** The control words: counts (0 patches, 1-3 blades per band, 4 blades kept, 5 patches to make), then the halves' blade
  * counts (kept from frame to frame), the list of patches to make, and where last frame's patches are now. */
@@ -534,8 +534,15 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     let bucket = u32(clamp(floor(log(max(nearest, 2.0)) / log(1.15)), 0.0, 63.0));
     patches[slotOut * 4u] = vec4<u32>(packedD, headY, u32(tile.x), bitcast<u32>(nearest));
     patches[slotOut * 4u + 1u] = vec4<u32>(bitcast<u32>(F.na.w / f32(CELLS * CELLS)), pack2x16unorm(land), bucket, 0u);
-    // The block's corner at sea level, from the camera: its tufts are kept as offsets from it.
-    patches[slotOut * 4u + 2u] = vec4<u32>(bitcast<vec3<u32>>(placeAbout(F, vec2<f32>(d), 0.0).rel), 0u);
+    // The block's corner at the drawn height of its middle, from the camera: its tufts are kept as offsets from it, small
+    // enough for half floats (selectMain). The height is the drawn mesh's, which the patch's stamp holds alike.
+    // In view this frame: a ball about every blade's middle with selectMain's margin (relief across the block at most
+    // its reach). Out of it, its blades' records are not read further.
+    var seen = 1u;
+    for (var k = 0; k < 5 && frame.cache.z == 0u; k++) {
+        if (dot(frame.planes[k].xyz, rel) + frame.planes[k].w < -(2.0 * reach + 0.5 * MAX_H + 1.6)) { seen = 0u; }
+    }
+    patches[slotOut * 4u + 2u] = vec4<u32>(bitcast<vec3<u32>>(placeAbout(F, vec2<f32>(d), h).rel), seen);
     // The wind's gusts at the block's corners, this frame (carried with the wind: GrassPass.js).
     let metres = frame.north.w / f32(1u << (frame.counts.y + PATCH_LEVELS));
     var g = vec4<f32>(0.0);
@@ -640,16 +647,13 @@ fn copyMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     let previous = min(atomicLoad(&control[CTRL_PERSIST + 1u - frame.cache.x]), STORE_CAP);
     var r0 = vec4<u32>(0u);
     var r1 = vec4<u32>(0u);
-    var r2 = vec4<u32>(0u);
     var slot = 0u;
     var local = 0xFFFFFFFFu;
     if (id.x < previous) {
-        let source = ((1u - frame.cache.x) * STORE_CAP + id.x) * 3u;
+        let source = ((1u - frame.cache.x) * STORE_CAP + id.x) * 2u;
         r0 = store[source];
-        r1 = store[source + 1u];
-        r2 = store[source + 2u];
-        let now = atomicLoad(&control[CTRL_REMAP + min(r0.w, MAX_PATCHES - 1u)]);
-        if (now != 0u) { slot = now - 1u; local = atomicAdd(&groupCount, 1u); }
+        let now = atomicLoad(&control[CTRL_REMAP + (r0.y >> 16u)]);
+        if (now != 0u) { slot = now - 1u; local = atomicAdd(&groupCount, 1u); r1 = store[source + 1u]; }
     }
     workgroupBarrier();
     if (thread == 0u) {
@@ -660,10 +664,9 @@ fn copyMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     let at = groupBase + local;
     if (local != 0xFFFFFFFFu) {
         if (at < STORE_CAP) {
-            let to = (frame.cache.x * STORE_CAP + at) * 3u;
-            store[to] = vec4<u32>(r0.xyz, slot);
+            let to = (frame.cache.x * STORE_CAP + at) * 2u;
+            store[to] = vec4<u32>(r0.x, (r0.y & 0xFFFFu) | (slot << 16u), r0.zw);
             store[to + 1u] = r1;
-            store[to + 2u] = r2;
         } else {
             incomplete(slot);
         }
@@ -689,19 +692,27 @@ fn selectMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoc
     var local = 0u;
     var out0 = vec4<u32>(0u);
     var out1 = vec4<u32>(0u);
-    if (id.x < count) {
-        let index = frame.cache.x * STORE_CAP + id.x;
-        let r0 = store[index * 3u];
-        let r1 = store[index * 3u + 1u];
-        let r2 = store[index * 3u + 2u];
-        let rel = bitcast<vec3<f32>>(patches[r0.w * 4u + 2u].xyz) + bitcast<vec3<f32>>(r0.xyz);
+    let index = frame.cache.x * STORE_CAP + id.x;
+    let r0 = store[index * 2u * select(0u, 1u, id.x < count)];
+    let owner = r0.y >> 16u;
+    let corner = patches[owner * 4u + 2u];
+    // A blade of a owner out of view: nothing more is read (patchesMain).
+    if (id.x < count && corner.w != 0u) {
+        let r1 = store[index * 2u + 1u];
+        let offset = vec3<f32>(unpack2x16float(r0.x), unpack2x16float(r0.y).x);
+        let rel = bitcast<vec3<f32>>(corner.xyz) + offset;
         let distance = length(rel);
-        let tall = unpack2x16unorm(r1.x).y * MAX_H;
-        let rs = unpack2x16float(r2.x);
+        let shape = unpack4x8unorm(r0.z);
+        let tall = shape.y * MAX_H;
+        let rs = unpack2x16float(r1.z);
         var keep = distance <= frame.dist.x && rs.x < densityAt(distance) * rs.y;
         // Seed heads and flowers end where they would be under a pixel.
-        let v = unpack4x8unorm(r2.z).w;
-        let rule = (r2.w >> 1u) & 3u;
+        let place = unpack4x8unorm(r1.w);
+        let v = place.w;
+        let look = unpack4x8unorm(r0.w);
+        let kindFlags = u32(look.w * 255.0 + 0.5);
+        let kind = kindFlags & 15u;
+        let rule = (kindFlags >> 5u) & 3u;
         if (rule == 1u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.08, frame.dist.x * 0.16, distance); }
         if (rule == 2u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.12, frame.dist.x * 0.3, distance); }
         let middle = rel + frame.up.xyz * (tall * 0.5);
@@ -712,32 +723,35 @@ fn selectMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoc
             band = select(select(2u, 1u, distance < frame.lod.y), 0u, distance < frame.lod.x);
             local = atomicAdd(&bandCount[band], 1u);
             // What the blade is this frame, once per blade (its vertices only build it): grown in by its rank, bent by
-            // the gusts at its patch's corners (carried with the wind), its tuft's sway and the comb, its colour toward
+            // the gusts at its owner's corners (carried with the wind), its tuft's sway and the comb, its colour toward
             // the ground's far off.
-            let look = unpack4x8unorm(r1.y);
-            let near = unpack4x8unorm(r1.z);
-            let farC = unpack4x8unorm(r1.w);
-            let place = unpack4x8unorm(r2.y);
-            let sway4 = unpack4x8unorm(r2.z);
-            let gusts = patches[r0.w * 4u + 3u];
+            let near = unpack4x8unorm(r1.x);
+            let farC = unpack4x8unorm(r1.y);
+            let head = patches[owner * 4u];
+            let gusts = patches[owner * 4u + 3u];
             let tufts = densityAt(distance) * rs.y;
             let fadeIn = saturate((tufts - rs.x) / max(0.3 * tufts, 1.0e-6));
+            // Where in its block the blade stands: its offset along the face's metres per owner (placeAbout), over the
+            // block's patches.
+            let F = frame.faces[head.y & 15u];
+            let toMetres = frame.up.w / F.ca.w;
+            let jx = toMetres * (F.du.xyz - F.na.xyz * dot(F.na.xyz, F.du.xyz));
+            let jy = toMetres * (F.dv.xyz - F.na.xyz * dot(F.na.xyz, F.dv.xyz));
+            let fc = saturate(vec2<f32>(dot(offset, jx) / dot(jx, jx), dot(offset, jy) / dot(jy, jy)) / f32((head.y >> 16u) & 7u));
             let g01 = unpack2x16float(gusts.x);
             let g23 = unpack2x16float(gusts.y);
-            let gust = mix(mix(g01.x, g01.y, place.x), mix(g23.x, g23.y, place.x), place.y);
+            let gust = mix(mix(g01.x, g01.y, fc.x), mix(g23.x, g23.y, fc.x), fc.y);
             let push = frame.wind.z * (0.45 + 0.55 * gust);
-            let sway = frame.wind.w * wave(frame.sunDir.w, mix(3.2, 5.0, sway4.x), sway4.y * 6.2831853) * (0.6 + 0.6 * gust)
+            let sway = frame.wind.w * wave(frame.sunDir.w, mix(3.2, 5.0, shape.z), shape.w * 6.2831853) * (0.6 + 0.6 * gust)
                 * (1.0 - 0.8 * step3(10.0, 35.0, distance));
-            let combTurn = (place.z - 0.5) * 2.2;
+            let combTurn = (place.x - 0.5) * 2.2;
             let prevailing = frame.wind.xy * cos(combTurn) + vec2<f32>(-frame.wind.y, frame.wind.x) * sin(combTurn);
-            let bend = frame.wind.xy * push + vec2<f32>(-frame.wind.y, frame.wind.x) * sway + prevailing * (0.12 + 0.35 * place.w);
-            let kind = u32(look.w * 255.0 + 0.5);
+            let bend = frame.wind.xy * push + vec2<f32>(-frame.wind.y, frame.wind.x) * sway + prevailing * (0.12 + 0.35 * place.y);
             let farness = select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), kind <= 2u || kind == ${KIND.LEAF}u);
-            let shape = unpack2x16unorm(r1.x);
             out0 = vec4<u32>(bitcast<vec3<u32>>(rel), pack2x16unorm(vec2<f32>(shape.x, shape.y * fadeIn)));
-            out1 = vec4<u32>(pack2x16float(bend), pack4x8unorm(vec4<f32>(look.x * mix(0.5, 1.0, fadeIn), look.yzw)),
+            out1 = vec4<u32>(pack2x16float(bend), pack4x8unorm(vec4<f32>(look.x * mix(0.5, 1.0, fadeIn), look.yz, f32(kind) / 255.0)),
                 pack4x8unorm(vec4<f32>(mix(near.rgb, farC.rgb, farness), near.a)),
-                pack4x8unorm(vec4<f32>(unpack2x16unorm(patches[r0.w * 4u + 1u].y), sway4.z, farC.a)));
+                pack4x8unorm(vec4<f32>(unpack2x16unorm(patches[owner * 4u + 1u].y), place.z, farC.a)));
         }
     }
     workgroupBarrier();
@@ -795,18 +809,23 @@ fn blossomColor(kind: u32, pick: f32, g: Growth) -> vec3<f32> {
 // A blade as the cache keeps it (selectMain, vsMain read it): its root as an offset from its patch's corner and the
 // patch's slot of this frame; its shape; its colour near and far; its share of the lattice (rank) and how many tufts its
 // point holds per unit of density (scale); where in the patch it stands (for the gusts), its comb, its sway; flags.
+// A blade as the cache keeps it, 32 bytes (the copy moves every kept blade each frame, the select reads them):
+//   0: offset x, y from the patch's corner (half floats; the corner is at the block's drawn height, so they stay metres)
+//   1: offset z (half), the patch's slot (16 bits)
+//   2: facing, height, sway rate, sway phase     3: width, lean, crowding, kind | flags << 4
+//   4: colour (sqrt), random                      5: far colour (sqrt), how grassy
+//   6: rank, scale (half floats)                  7: comb turn, comb amount, clump, v
+// Where in its block a blade stands (for the gusts at the corners) follows from the offset (selectMain).
 fn writeRecord(index: u32, offset: vec3<f32>, slot: u32, facing: f32, tall: f32, width: f32, lean: f32, crowd: f32, kind: u32,
-               albedo: vec3<f32>, seed: f32, far: vec3<f32>, grassy: f32, rank: f32, scale: f32, fc: vec2<f32>, comb: vec2<f32>,
+               albedo: vec3<f32>, seed: f32, far: vec3<f32>, grassy: f32, rank: f32, scale: f32, comb: vec2<f32>,
                rate: f32, phase: f32, clump: f32, v: f32, flags: u32) {
-    let at = (frame.cache.x * STORE_CAP + index) * 3u;
-    store[at] = vec4<u32>(bitcast<vec3<u32>>(offset), slot);
-    store[at + 1u] = vec4<u32>(
-        pack2x16unorm(vec2<f32>(fract(facing / 6.2831853), saturate(tall / MAX_H))),
-        pack4x8unorm(vec4<f32>(saturate(width / MAX_W), lean, crowd, f32(kind) / 255.0)),
-        pack4x8unorm(vec4<f32>(sqrt(saturate(albedo / 0.8)), seed)),
-        pack4x8unorm(vec4<f32>(sqrt(saturate(far / 0.8)), grassy)));
-    store[at + 2u] = vec4<u32>(pack2x16float(vec2<f32>(rank, scale)), pack4x8unorm(vec4<f32>(fc, comb)),
-        pack4x8unorm(vec4<f32>(rate, phase, clump, saturate(v))), flags);
+    let at = (frame.cache.x * STORE_CAP + index) * 2u;
+    store[at] = vec4<u32>(pack2x16float(offset.xy), (pack2x16float(vec2<f32>(offset.z, 0.0)) & 0xFFFFu) | (slot << 16u),
+        pack4x8unorm(vec4<f32>(fract(facing / 6.2831853), saturate(tall / MAX_H), rate, phase)),
+        pack4x8unorm(vec4<f32>(saturate(width / MAX_W), lean, crowd, f32(kind | (flags << 4u)) / 255.0)));
+    store[at + 1u] = vec4<u32>(pack4x8unorm(vec4<f32>(sqrt(saturate(albedo / 0.8)), seed)),
+        pack4x8unorm(vec4<f32>(sqrt(saturate(far / 0.8)), grassy)), pack2x16float(vec2<f32>(rank, scale)),
+        pack4x8unorm(vec4<f32>(comb, clump, saturate(v))));
 }
 
 // A patch's corners: the ground's rules, the height, and the noises that change over metres, worked out once per patch
@@ -1147,7 +1166,7 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
                 farColor = canopy * ${n(GRASS_CANOPY.gain)} * grainHere * mix(vec3<f32>(1.0), own, 0.12);
             }
             writeRecord(first + i, root - origin, at, facing, bladeTall, bladeWidth, lean, crowd, bladeKind, color, u4, farColor,
-                step3(0.0, 1.0, total), rank, tuftScale, fc, n2.xy, r2, swayPhase, clump, v, select(0u, 1u, forb) | (rule << 1u));
+                step3(0.0, 1.0, total), rank, tuftScale, n2.xy, r2, swayPhase, clump, v, select(0u, 1u, forb) | (rule << 1u));
         }
     }
 }
