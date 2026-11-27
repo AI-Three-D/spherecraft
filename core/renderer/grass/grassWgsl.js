@@ -639,29 +639,119 @@ fn dispatchMain() {
     args[5] = 1u;
 }
 
-// Last frame's blades whose patch is kept alike, into this frame's half (with the patch's slot of this frame).
+// A kept blade this frame (copyMain for those carried over, selectMain for those just made): near enough, dense enough
+// at its distance, in view; what it is this frame, once per blade (its vertices only build it): grown in by its rank,
+// bent by the gusts at its patch's corners (carried with the wind), its tuft's sway and the comb, its colour toward the
+// ground's far off. Band 3: not drawn.
+struct Chosen { band: u32, out0: vec4<u32>, out1: vec4<u32> };
+fn chooseBlade(r0: vec4<u32>, r1: vec4<u32>, owner: u32) -> Chosen {
+    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u));
+    let offset = vec3<f32>(unpack2x16float(r0.x), unpack2x16float(r0.y).x);
+    let rel = bitcast<vec3<f32>>(patches[owner * 4u + 2u].xyz) + offset;
+    let distance = length(rel);
+    let shape = unpack4x8unorm(r0.z);
+    let tall = shape.y * MAX_H;
+    let rs = unpack2x16float(r1.z);
+    var keep = distance <= frame.dist.x && rs.x < densityAt(distance) * rs.y;
+    // Seed heads and flowers end where they would be under a pixel.
+    let place = unpack4x8unorm(r1.w);
+    let v = place.w;
+    let look = unpack4x8unorm(r0.w);
+    let kindFlags = u32(look.w * 255.0 + 0.5);
+    let kind = kindFlags & 15u;
+    let rule = (kindFlags >> 5u) & 3u;
+    if (rule == 1u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.08, frame.dist.x * 0.16, distance); }
+    if (rule == 2u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.12, frame.dist.x * 0.3, distance); }
+    let middle = rel + frame.up.xyz * (tall * 0.5);
+    for (var p = 0; p < 5; p++) {
+        if (dot(frame.planes[p].xyz, middle) + frame.planes[p].w < -(tall * 0.7 + 0.15)) { keep = false; }
+    }
+    if (keep) {
+        chosen.band = select(select(2u, 1u, distance < frame.lod.y), 0u, distance < frame.lod.x);
+        // What the blade is this frame, once per blade (its vertices only build it): grown in by its rank, bent by
+        // the gusts at its owner's corners (carried with the wind), its tuft's sway and the comb, its colour toward
+        // the ground's far off.
+        let near = unpack4x8unorm(r1.x);
+        let farC = unpack4x8unorm(r1.y);
+        let head = patches[owner * 4u];
+        let gusts = patches[owner * 4u + 3u];
+        let tufts = densityAt(distance) * rs.y;
+        let fadeIn = saturate((tufts - rs.x) / max(0.3 * tufts, 1.0e-6));
+        // Where in its block the blade stands: its offset along the face's metres per owner (placeAbout), over the
+        // block's patches.
+        let F = frame.faces[head.y & 15u];
+        let toMetres = frame.up.w / F.ca.w;
+        let jx = toMetres * (F.du.xyz - F.na.xyz * dot(F.na.xyz, F.du.xyz));
+        let jy = toMetres * (F.dv.xyz - F.na.xyz * dot(F.na.xyz, F.dv.xyz));
+        let fc = saturate(vec2<f32>(dot(offset, jx) / dot(jx, jx), dot(offset, jy) / dot(jy, jy)) / f32((head.y >> 16u) & 7u));
+        let g01 = unpack2x16float(gusts.x);
+        let g23 = unpack2x16float(gusts.y);
+        let gust = mix(mix(g01.x, g01.y, fc.x), mix(g23.x, g23.y, fc.x), fc.y);
+        let push = frame.wind.z * (0.45 + 0.55 * gust);
+        let sway = frame.wind.w * wave(frame.sunDir.w, mix(3.2, 5.0, shape.z), shape.w * 6.2831853) * (0.6 + 0.6 * gust)
+            * (1.0 - 0.8 * step3(10.0, 35.0, distance));
+        let combTurn = (place.x - 0.5) * 2.2;
+        let prevailing = frame.wind.xy * cos(combTurn) + vec2<f32>(-frame.wind.y, frame.wind.x) * sin(combTurn);
+        let bend = frame.wind.xy * push + vec2<f32>(-frame.wind.y, frame.wind.x) * sway + prevailing * (0.12 + 0.35 * place.y);
+        let farness = select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), kind <= 2u || kind == ${KIND.LEAF}u);
+        chosen.out0 = vec4<u32>(bitcast<vec3<u32>>(rel), pack2x16unorm(vec2<f32>(shape.x, shape.y * fadeIn)));
+        chosen.out1 = vec4<u32>(pack2x16float(bend), pack4x8unorm(vec4<f32>(look.x * mix(0.5, 1.0, fadeIn), look.yz, f32(kind) / 255.0)),
+            pack4x8unorm(vec4<f32>(mix(near.rgb, farC.rgb, farness), near.a)),
+            pack4x8unorm(vec4<f32>(unpack2x16unorm(patches[owner * 4u + 1u].y), place.z, farC.a)));
+    }
+    return chosen;
+}
+// The chosen blades, by band: a workgroup's count per band is added once (bandBase), each blade written at its place.
+var<workgroup> bandCount: array<atomic<u32>, 3>;
+var<workgroup> bandBase: array<u32, 3>;
+fn writeChosen(chosen: Chosen, local: u32) {
+    if (chosen.band < 3u) {
+        var cap = BAND2;
+        var start = BAND0 + BAND1;
+        if (chosen.band == 0u) { cap = BAND0; start = 0u; } else if (chosen.band == 1u) { cap = BAND1; start = BAND0; }
+        let at = bandBase[chosen.band] + local;
+        if (at < cap) {
+            drawn[(start + at) * 2u] = chosen.out0;
+            drawn[(start + at) * 2u + 1u] = chosen.out1;
+        }
+    }
+}
+
+// Last frame's blades whose patch is kept alike, into this frame's half (with the patch's slot of this frame). Each is
+// chosen for drawing here, while it is in hand: the select then reads only the blades just made.
 var<workgroup> groupCount: atomic<u32>;
 var<workgroup> groupBase: u32;
 @compute @workgroup_size(256)
 fn copyMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) thread: u32) {
     if (thread == 0u) { atomicStore(&groupCount, 0u); }
+    if (thread < 3u) { atomicStore(&bandCount[thread], 0u); }
     workgroupBarrier();
     let previous = min(atomicLoad(&control[CTRL_PERSIST + 1u - frame.cache.x]), STORE_CAP);
     var r0 = vec4<u32>(0u);
     var r1 = vec4<u32>(0u);
     var slot = 0u;
     var local = 0xFFFFFFFFu;
+    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u));
+    var drawnAt = 0u;
     if (id.x < previous) {
         let source = ((1u - frame.cache.x) * STORE_CAP + id.x) * 2u;
         r0 = store[source];
         let now = atomicLoad(&control[CTRL_REMAP + (r0.y >> 16u)]);
-        if (now != 0u) { slot = now - 1u; local = atomicAdd(&groupCount, 1u); r1 = store[source + 1u]; }
+        if (now != 0u) {
+            slot = now - 1u;
+            local = atomicAdd(&groupCount, 1u);
+            r1 = store[source + 1u];
+            // Of a patch out of view: kept, not drawn (patchesMain).
+            if (patches[slot * 4u + 2u].w != 0u) { chosen = chooseBlade(r0, r1, slot); }
+            if (chosen.band < 3u) { drawnAt = atomicAdd(&bandCount[chosen.band], 1u); }
+        }
     }
     workgroupBarrier();
     if (thread == 0u) {
         groupBase = atomicAdd(&control[CTRL_STORE], atomicLoad(&groupCount));
         atomicAdd(&control[CTRL_COPIED], atomicLoad(&groupCount));
     }
+    if (thread < 3u) { bandBase[thread] = atomicAdd(&control[1u + thread], atomicLoad(&bandCount[thread])); }
     workgroupBarrier();
     let at = groupBase + local;
     if (local != 0xFFFFFFFFu) {
@@ -673,102 +763,38 @@ fn copyMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
             incomplete(slot);
         }
     }
+    writeChosen(chosen, drawnAt);
 }
 
 @compute @workgroup_size(1)
 fn selectDispatchMain() {
-    args[6] = (min(atomicLoad(&control[CTRL_STORE]), STORE_CAP) + 255u) / 256u;
+    let first = min(atomicLoad(&control[CTRL_COPIED]), STORE_CAP);
+    args[6] = (min(atomicLoad(&control[CTRL_STORE]), STORE_CAP) - first + 255u) / 256u;
     args[7] = 1u;
     args[8] = 1u;
 }
 
-// This frame's blades: those near enough, dense enough at their distance, in view; into their band's list.
-var<workgroup> bandCount: array<atomic<u32>, 3>;
-var<workgroup> bandBase: array<u32, 3>;
+// The blades just made (generateMain), after those copied: chosen as copyMain chooses the rest.
 @compute @workgroup_size(256)
 fn selectMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) thread: u32) {
     if (thread < 3u) { atomicStore(&bandCount[thread], 0u); }
     workgroupBarrier();
+    let first = min(atomicLoad(&control[CTRL_COPIED]), STORE_CAP);
     let count = min(atomicLoad(&control[CTRL_STORE]), STORE_CAP);
-    var band = 3u;
+    let i = first + id.x;
+    var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u));
     var local = 0u;
-    var out0 = vec4<u32>(0u);
-    var out1 = vec4<u32>(0u);
-    let index = frame.cache.x * STORE_CAP + id.x;
-    let r0 = store[index * 2u * select(0u, 1u, id.x < count)];
-    let owner = r0.y >> 16u;
-    let corner = patches[owner * 4u + 2u];
-    // A blade of a owner out of view: nothing more is read (patchesMain).
-    if (id.x < count && corner.w != 0u) {
-        let r1 = store[index * 2u + 1u];
-        let offset = vec3<f32>(unpack2x16float(r0.x), unpack2x16float(r0.y).x);
-        let rel = bitcast<vec3<f32>>(corner.xyz) + offset;
-        let distance = length(rel);
-        let shape = unpack4x8unorm(r0.z);
-        let tall = shape.y * MAX_H;
-        let rs = unpack2x16float(r1.z);
-        var keep = distance <= frame.dist.x && rs.x < densityAt(distance) * rs.y;
-        // Seed heads and flowers end where they would be under a pixel.
-        let place = unpack4x8unorm(r1.w);
-        let v = place.w;
-        let look = unpack4x8unorm(r0.w);
-        let kindFlags = u32(look.w * 255.0 + 0.5);
-        let kind = kindFlags & 15u;
-        let rule = (kindFlags >> 5u) & 3u;
-        if (rule == 1u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.08, frame.dist.x * 0.16, distance); }
-        if (rule == 2u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.12, frame.dist.x * 0.3, distance); }
-        let middle = rel + frame.up.xyz * (tall * 0.5);
-        for (var p = 0; p < 5; p++) {
-            if (dot(frame.planes[p].xyz, middle) + frame.planes[p].w < -(tall * 0.7 + 0.15)) { keep = false; }
-        }
-        if (keep) {
-            band = select(select(2u, 1u, distance < frame.lod.y), 0u, distance < frame.lod.x);
-            local = atomicAdd(&bandCount[band], 1u);
-            // What the blade is this frame, once per blade (its vertices only build it): grown in by its rank, bent by
-            // the gusts at its owner's corners (carried with the wind), its tuft's sway and the comb, its colour toward
-            // the ground's far off.
-            let near = unpack4x8unorm(r1.x);
-            let farC = unpack4x8unorm(r1.y);
-            let head = patches[owner * 4u];
-            let gusts = patches[owner * 4u + 3u];
-            let tufts = densityAt(distance) * rs.y;
-            let fadeIn = saturate((tufts - rs.x) / max(0.3 * tufts, 1.0e-6));
-            // Where in its block the blade stands: its offset along the face's metres per owner (placeAbout), over the
-            // block's patches.
-            let F = frame.faces[head.y & 15u];
-            let toMetres = frame.up.w / F.ca.w;
-            let jx = toMetres * (F.du.xyz - F.na.xyz * dot(F.na.xyz, F.du.xyz));
-            let jy = toMetres * (F.dv.xyz - F.na.xyz * dot(F.na.xyz, F.dv.xyz));
-            let fc = saturate(vec2<f32>(dot(offset, jx) / dot(jx, jx), dot(offset, jy) / dot(jy, jy)) / f32((head.y >> 16u) & 7u));
-            let g01 = unpack2x16float(gusts.x);
-            let g23 = unpack2x16float(gusts.y);
-            let gust = mix(mix(g01.x, g01.y, fc.x), mix(g23.x, g23.y, fc.x), fc.y);
-            let push = frame.wind.z * (0.45 + 0.55 * gust);
-            let sway = frame.wind.w * wave(frame.sunDir.w, mix(3.2, 5.0, shape.z), shape.w * 6.2831853) * (0.6 + 0.6 * gust)
-                * (1.0 - 0.8 * step3(10.0, 35.0, distance));
-            let combTurn = (place.x - 0.5) * 2.2;
-            let prevailing = frame.wind.xy * cos(combTurn) + vec2<f32>(-frame.wind.y, frame.wind.x) * sin(combTurn);
-            let bend = frame.wind.xy * push + vec2<f32>(-frame.wind.y, frame.wind.x) * sway + prevailing * (0.12 + 0.35 * place.y);
-            let farness = select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), kind <= 2u || kind == ${KIND.LEAF}u);
-            out0 = vec4<u32>(bitcast<vec3<u32>>(rel), pack2x16unorm(vec2<f32>(shape.x, shape.y * fadeIn)));
-            out1 = vec4<u32>(pack2x16float(bend), pack4x8unorm(vec4<f32>(look.x * mix(0.5, 1.0, fadeIn), look.yz, f32(kind) / 255.0)),
-                pack4x8unorm(vec4<f32>(mix(near.rgb, farC.rgb, farness), near.a)),
-                pack4x8unorm(vec4<f32>(unpack2x16unorm(patches[owner * 4u + 1u].y), place.z, farC.a)));
-        }
+    if (i < count) {
+        let index = frame.cache.x * STORE_CAP + i;
+        let r0 = store[index * 2u];
+        let owner = r0.y >> 16u;
+        if (patches[owner * 4u + 2u].w != 0u) { chosen = chooseBlade(r0, store[index * 2u + 1u], owner); }
+        if (chosen.band < 3u) { local = atomicAdd(&bandCount[chosen.band], 1u); }
     }
     workgroupBarrier();
     if (thread < 3u) { bandBase[thread] = atomicAdd(&control[1u + thread], atomicLoad(&bandCount[thread])); }
     workgroupBarrier();
-    if (band < 3u) {
-        var cap = BAND2;
-        var start = BAND0 + BAND1;
-        if (band == 0u) { cap = BAND0; start = 0u; } else if (band == 1u) { cap = BAND1; start = BAND0; }
-        let at = bandBase[band] + local;
-        if (at < cap) {
-            drawn[(start + at) * 2u] = out0;
-            drawn[(start + at) * 2u + 1u] = out1;
-        }
-    }
+    writeChosen(chosen, local);
 }
 
 // Blades per square metre at a distance, for grass 35 cm tall. Close by the ground hides behind a sight line's run
@@ -1230,11 +1256,20 @@ struct Out {
 @vertex
 fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u32) -> Out {
     // ${BLADES_PER_INSTANCE} blades an instance (BLADES_PER_INSTANCE): which blade, and which vertex of its strip.
-    var segments = 2u;
+    // Divisions by constants (a band per draw): an integer division by a number the shader only knows as it runs is slow.
     let first = group * ${BLADES_PER_INSTANCE}u;
-    if (first < ${b0}u) { segments = ${segments[0]}u; } else if (first < ${b0 + b1}u) { segments = ${segments[1]}u; } else { segments = ${segments[2]}u; }
-    let instance = first + corner / (segments * 2u + 1u);
-    let vertex = corner % (segments * 2u + 1u);
+    var segments = ${segments[2]}u;
+    var instance = first + corner / ${2 * segments[2] + 1}u;
+    var vertex = corner % ${2 * segments[2] + 1}u;
+    if (first < ${b0}u) {
+        segments = ${segments[0]}u;
+        instance = first + corner / ${2 * segments[0] + 1}u;
+        vertex = corner % ${2 * segments[0] + 1}u;
+    } else if (first < ${b0 + b1}u) {
+        segments = ${segments[1]}u;
+        instance = first + corner / ${2 * segments[1] + 1}u;
+        vertex = corner % ${2 * segments[1] + 1}u;
+    }
     // The blade this frame (selectMain).
     let a = blades[instance * 2u];
     let b = blades[instance * 2u + 1u];
