@@ -4,6 +4,37 @@
 
 **Profiled 2026-11-27, before the fifth round:** grass cost 6–8 ms at high, 4–6 ms at medium (section Profiling). The fifth round is not profiled yet.
 
+## Profiling after the fifth round (2026-11-27)
+
+Same method as below (`grassBench.mjs`, 96 frames per arm, interleaved). The GPU was otherwise idle (0–11 %); no leftover agent processes.
+
+Grass in all, against the terrain without it:
+- **High:** 6.7–9.0 ms, against 5.6–8.4 before the round.
+- **Medium:** 4.7–6.4 ms.
+
+Its parts at high (`results-2026-11-27c/`), ms:
+
+| View | Without grass | All grass | Making blades | Drawing them | The ground's look | of which the portraits |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Meadow, root height | 5.92 | 8.6 | 4.5 | 3.3 | 0.7 | 0.0 |
+| Meadow, standing | 6.17 | 9.0 | 4.4 | 3.8 | 0.9 | 0.4 |
+| Meadow, toward the sun | 6.77 | 8.0 | 4.3 | 2.8 | 0.9 | 0.2 |
+| Meadow from 8 m | 6.08 | 7.7 | 3.9 | 2.7 | 1.3 | 0.6 |
+| Meadow from 15 m | 6.18 | 6.9 | 3.4 | 2.1 | 1.4 | 0.8 |
+| Walking 3 m/s | 6.51 | 9.0 | 4.4 | 3.7 | 1.0 | 0.5 |
+| Forest floor | 7.49 | 7.5 | 4.0 | 2.3 | 1.2 | 0.6 |
+| Tundra | 7.51 | 6.7 | 3.5 | 2.9 | 0.3 | 0.1 |
+| Marsh | 8.14 | 7.4 | 4.4 | 1.5 | 1.4 | 0.1 |
+| Dry grass | 7.33 | 7.1 | 3.7 | 2.5 | 0.9 | 0.4 |
+
+- **What the fifth round added:** about 0.7 ms at standing height and more from above. The canopy model costs up to 0.8 ms in the ground's look; the portraits up to 0.8 ms, the most from above.
+- **Hitches:** p90 lies 0.2–0.4 ms over the median, except at root height and in the marsh (p90 up to 21 ms). Shader variants were still compiling after an arm switch: hitches to rule out in the game (variants are made at load).
+- **Parts** (`scatterParts.mjs`, standing and from 8 m):
+  - Drawing is 3.3–3.6 ms, about half of it blade shading.
+  - Making blades: 0.1 ms is the lattice; about 3.2 ms is the per-tuft work, 1.1 ms writing its blades.
+  - Range 120 m saves 1.5 ms; density ×0.6 saves 2.1 ms.
+- **Where the time is:** making blades (3.4–4.5 ms, the same at medium) is the largest part, and it is redone every frame for tufts that rarely change. Next: keep each patch's tufts while the patch, its detail level and the terrain under it stay the same.
+
 ## Fifth round (2026-11-27): no zone around the player
 
 The user's report: a hard edge (that moves with the camera) where blades end, and the grass seeming to vanish a few metres up.

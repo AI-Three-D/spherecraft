@@ -8,8 +8,9 @@
 //   none          the terrain as before grass: no grass terms in its shader, no blades
 //   ground        the ground's grass look (hue, canopy past the blades, grain), no blades
 //   scatter       that, and the blades made each frame but not drawn
-//   full          the game
-//   full-nograin  the game without the grass grain on the ground
+//   full              the game
+//   full-noportraits  the ground's fine grass structure from the hand-made grain, not the blades' portraits
+//   full-nograin      neither: the canopy model alone on the ground
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -25,11 +26,12 @@ const PORT = Number(process.env.PORT ?? 8239);
 const detail = arg('detail', 'both'), rounds = Number(arg('rounds', 4)), shots = !process.argv.includes('--no-shots');
 
 const ARMS = {
-    none: { look: false, grain: false, blades: false, draw: false },
-    ground: { look: true, grain: true, blades: false, draw: false },
-    scatter: { look: true, grain: true, blades: true, draw: false },
-    full: { look: true, grain: true, blades: true, draw: true },
-    'full-nograin': { look: true, grain: false, blades: true, draw: true },
+    none: { look: false, grain: false, portraits: false, blades: false, draw: false },
+    ground: { look: true, grain: true, portraits: true, blades: false, draw: false },
+    scatter: { look: true, grain: true, portraits: true, blades: true, draw: false },
+    full: { look: true, grain: true, portraits: true, blades: true, draw: true },
+    'full-noportraits': { look: true, grain: true, portraits: false, blades: true, draw: true },
+    'full-nograin': { look: true, grain: false, portraits: false, blades: true, draw: true },
 };
 // [name, biome pose of tools/perf/biomeLandscape/poses.json, metres ahead, eye height (m), pitch, turn from the sun, walk]
 const VIEWS = [
@@ -74,6 +76,7 @@ try {
             const pass = qtr.pass, grass = qtr.grass;
             pass.options.grass = a.look;
             pass.options.grain = a.grain;
+            pass.options.portraits = a.portraits;
             await pass.prepare();
             grass.enabled = a.blades;
             grass.drawBlades = a.draw;
@@ -152,7 +155,7 @@ try {
                 R.sunAt(p.dir, p.sun ?? 0.55);
                 await R.frames(4);
                 window.__view = { dir: p.dir, eye, pitch, bearing: R.sunBearing(p.dir) + turn, aheadM: ahead };
-                await window.__setArm({ look: true, grain: true, blades: true, draw: true });
+                await window.__setArm({ look: true, grain: true, portraits: true, blades: true, draw: true });
                 await R.eyeAt(p.dir, window.__view);
                 await R.settle(60000);
                 await R.wait(500);
