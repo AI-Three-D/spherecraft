@@ -313,7 +313,7 @@ export class GrassPass {
         if (!faces) return;
         // This frame's half of the cache and of the patch table; the other half is last frame's.
         this._parity ^= 1;
-        W.set([this._parity, this.splitMaking ?? 0, this.cullPatches === false ? 1 : 0, this.teacher ? 1 : 0], 84);
+        W.set([this._parity, this.splitMaking ?? 0, this.cullPatches === false ? 1 : 0, this.teacher === 2 ? 2 : this.teacher ? 1 : 0], 84);
         this.device.queue.writeBuffer(this._frameBuffer, 0, this._frame);
 
         // This frame's counts, where last frame's patches are now, this frame's half of the patch table.

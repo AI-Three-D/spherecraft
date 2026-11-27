@@ -670,12 +670,21 @@ fn fieldLight(rel: vec3<f32>, distance: f32, groundN: vec3<f32>, farC: vec4<f32>
     let nC = normalize(groundN + 0.5 * (velvet - groundN));
     let gc = grassCanopy(${n(GRASS_CANOPY.depth)} * share / canopySlant, grassSunDepth(sunUp, share, V, L), ${n(GRASS_CANOPY.ramp)});
     let sunShare = 0.65 * land.x * step3(0.0, 0.25, sunUp);
-    let canopyLit = albedo * lightAt(nC, groundN, up, L, sun, frame.ambient.rgb, 0.8, 1.0, land);
+    let light = lightAt(nC, groundN, up, L, sun, frame.ambient.rgb, 0.8, 1.0, land);
     let away = saturate(-dot(V, L));
     let away2 = away * away;
     let through = ${n(GRASS_CANOPY.back)} * max(-dot(velvet, L), 0.0) + ${n(GRASS_CANOPY.toward)} * away2 * away2 * away;
-    return (canopyLit * mix(gc.x, gc.y, sunShare) + sun * land.x * albedo * ${v3(GRASS_CANOPY.tint)} * (${n(GRASS_CANOPY.glow)} * through))
-        * grassCanopyCorrection(canopySlant, dot(V, L), sunUp, distance);
+    let correction = grassCanopyCorrection(canopySlant, dot(V, L), sunUp, distance);
+    // As the terrain: where the sight line reaches the ground between the blades it meets soil in their shade
+    // (cover: the grass's share of what it meets), and the light through the blades is the grass's share of it.
+    let cover = share * (1.0 - gc.z);
+    let grass = albedo * mix(gc.x, gc.y, sunShare) * correction;
+    let soil = vec3<f32>(0.12, 0.10, 0.07) * (1.0 - 0.45 * share);
+    // Against what the terrain draws at the same spot (blades drawn as this, grassRig: GrassPass.teacher = 2): this was
+    // 11 % brighter at 10 m, 6 % at 30 m, 3 % at 90 m (the ground's own detail darkens it near): matched in linear light.
+    let matched = clamp(0.77 + 0.07 * log(max(distance, 1.0) / 10.0), 0.7, 1.0);
+    return (mix(soil, grass, cover) * light
+        + sun * land.x * albedo * ${v3(GRASS_CANOPY.tint)} * (${n(GRASS_CANOPY.glow)} * through * cover) * correction) * matched;
 }
 
 // A kept blade this frame (copyMain for those carried over, selectMain for those just made): near enough, dense enough
@@ -1558,10 +1567,12 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     // Blades also toward the ground's colour at the end of their reach; every kind toward the field about it as it covers
     // less than it is drawn (a widened seed head or blade tip, pale and thin, lit as wide stood as speckle).
     let ownKind = kind <= 2u || kind == ${KIND.LEAF}u;
-    let far = select(0.0, max(select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), ownKind), 1.0 - coverage), frame.cache.w == 0u);
-    if (far <= 0.0) { return own; }
+    let far = select(0.0, max(select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), ownKind), 1.0 - coverage), frame.cache.w != 1u);
     // The field about the blade, lit as the ground past the blades lights its grass (chooseBlade fieldLight).
     let ground = vec3<f32>(unpack2x16float(in.ground.x), unpack2x16float(in.ground.y).x);
+    // (For measuring: every blade drawn as the field about it, GrassPass.teacher = 2.)
+    if (frame.cache.w == 2u) { return ground; }
+    if (far <= 0.0) { return own; }
     // A blade's own light and shade stay a little: the field keeps its grain.
     let grain = clamp(dot(own, vec3<f32>(0.333)) / max(dot(ground, vec3<f32>(0.333)), 1.0e-4), 0.6, 1.6);
     return mix(own, ground * mix(1.0, grain, 0.2), far);
