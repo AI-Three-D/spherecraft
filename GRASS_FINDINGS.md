@@ -2,7 +2,31 @@
 
 2026-11-26, branch `grass/biome-grass` from main 70b83fe. M1 Pro, Chrome WebGPU, 2400×1350. Pictures: `screenshots/grass_2026-11-26/`.
 
-**Where it stands (2026-11-27, after the sixth round):** grass costs 2.3–3.5 ms at high standing still and 3.7 ms walking; 1.4–2.3 ms at medium (2.5 walking). It was 6.7–9.0 ms at high. Budget 2 ms. Section Tuft cache.
+**Where it stands (2026-11-27, after the sixth round; the seventh is not profiled):** grass costs 2.3–3.5 ms at high standing still and 3.7 ms walking; 1.4–2.3 ms at medium (2.5 walking). It was 6.7–9.0 ms at high. Budget 2 ms. Section Tuft cache.
+
+## Seventh round (2026-11-27): less work, not profiled
+
+The GPU was in other use (Codex), so these are changes that do less work for the same picture, checked for correctness but not timed. Profile them with `grassBench.mjs` against `c8f403c`.
+
+| Change | Commit | What it saves | Checked |
+| --- | --- | --- | --- |
+| Blade record 48 → 32 bytes | `27b845d` | A third of the copy's and select's memory traffic. The store holds a third more blades (1,048,576 a half) in 64 MB instead of 75. | Drawn counts within 0.1 % of the 48-byte records; full remake equal to cached; pictures at root and from 8 m. |
+| The select skips patches out of view | `27b845d` | Reading the second half of every record outside the view (most of the store: the patches kept for turning). | Same drawn counts with and without (`cullPatches = false`) at root, standing and 8 m. |
+| Per-frame light out of the blade pixel shader | `fa2196d` | Sky light, day, bounce and the canopy's sun factor per pixel. Small powers become products; the highlight is skipped where it is faded out (past 44 m). | Algebraically the same; picture toward the sun. |
+| Terrain: hotspot `pow(x, 6)` and glow `pow(x, 5)` as products; tussock grain on the 2× anisotropic sampler | `99b511d`, last | Transcendentals per grass pixel; two of four taps on a pattern 21 m across. | All 48 terrain shader variants validate. |
+| The copy chooses the blades it carries | `82eaaf8` | The select read the whole store a second time each frame; now it reads only the blades just made. | Same drawn counts whether chosen in the copy (cached) or in the select (full remake), at three heights. |
+| Constant divisors in the blade vertex shader | `82eaaf8` | An integer division by a run-time number on every vertex. | Shaders validate; pictures. |
+
+**Offsets as half floats.** Each patch's corner now sits at the drawn height of the block's middle, not at sea level. Offsets from it stay within metres, about 2 mm precise in a 2 m patch and 8 mm in an 8 m far block.
+
+**Facing and height in a byte each:** 1.4° and 8 mm steps.
+
+**Not done, and why:**
+- **Portraits on the 2× anisotropic sampler** (four taps fewer at grazing angles). This softens the far field's texture one mip sooner, so it needs pictures side by side first.
+- **Rows by on-screen length instead of distance.** Short near blades would get fewer rows. At most about 0.1 ms, against a risk to near blades' curves.
+- **Making only the missing tufts of a patch that comes nearer.** Walking costs 0.15–0.23 ms over standing. This would save most of that, at the cost of patch-wide tuft sets (+20–40 % of the store).
+- **A store that keeps blades in place** (no copy each frame). It needs patch identities that persist across frames: a persistent table with deletion.
+- **Per-vertex light for the far bands** (`perVertexFar`) was worse with one blade an instance. Worth timing again now that vertices are cheap.
 
 ## Tuft cache and a leaner draw (2026-11-27)
 

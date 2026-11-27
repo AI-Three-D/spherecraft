@@ -717,7 +717,9 @@ ${grassLook ? `
     // As the blades far off (grassWgsl.js fsMain): light through them from behind, strongest toward the sun, and the
     // hotspot, where with the sun behind the viewer the canopy's shadows hide behind the blades that cast them.
     let sunDir = h3(frame.sunDir);
-    let grassThrough = h(${number(GRASS_CANOPY.back)}) * max(-dot(velvet, sunDir), 0.0) + h(${number(GRASS_CANOPY.toward)}) * pow(saturate(dot(-toEye, sunDir)), 5.0);
+    let towardSun = saturate(dot(-toEye, sunDir));
+    let towardSun2 = towardSun * towardSun;
+    let grassThrough = h(${number(GRASS_CANOPY.back)}) * max(-dot(velvet, sunDir), 0.0) + h(${number(GRASS_CANOPY.toward)}) * towardSun2 * towardSun2 * towardSun;
     color += h3(frame.sun) * land.x * grassAlbedo * h3(${GRASS_CANOPY.tint.map(number).join(', ')}) * (h(${number(GRASS_CANOPY.glow)}) * grassThrough * canopySeen);
     ` : ``}
     ${rain ? `
