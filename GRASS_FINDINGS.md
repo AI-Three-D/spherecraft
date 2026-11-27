@@ -2,7 +2,52 @@
 
 2026-11-26, branch `grass/biome-grass` from main 70b83fe. M1 Pro, Chrome WebGPU, 2400×1350. Pictures: `screenshots/grass_2026-11-26/`.
 
-**Where it stands (2026-11-27, after the seventh round):** grass costs 1.9–3.2 ms at high standing still and 3.5 ms walking; 1.4–2.0 ms at medium (2.3 walking). It was 6.7–9.0 ms at high. Budget 2 ms. Sections Seventh round and Tuft cache.
+**Where it stands (2026-11-28, eighth round: the near-to-far hand-over; cost not reliably re-measured):** grass costs 1.9–3.2 ms at high standing still and 3.5 ms walking; 1.4–2.0 ms at medium (2.3 walking). It was 6.7–9.0 ms at high. Budget 2 ms. Sections Seventh round and Tuft cache.
+
+## Eighth round (2026-11-28): one field from near to far, against a teacher
+
+The user's report: a hard line where the blades end (about 45 m, moving with the camera), a repeating speckle in the medium-to-far range, and nothing that reads as tufts or strands past the near field. They asked for research-backed aggregate representations, voxels perhaps, and the clouds' approach.
+
+**A teacher** (`grassRig.js zoomTruth`, `teacherPanels`; `teacherRun.mjs` over 22 views):
+- The same spot is drawn with the render camera's view narrowed 8 times. Blades are as dense as for a pixel 8 times smaller, and none is widened. `GrassPass.teacher` removes the blades' distance shortcuts.
+- The result is boxed down to game pixels: the field as it really looks at that resolution, the way the clouds' teacher is the path-traced cloud.
+- The render camera keeps its own field of view (`frontend.js`, 75°); the game camera's is not passed on, so a zoom must set it.
+
+**What the teacher showed:**
+
+| | Before | After |
+| --- | --- | --- |
+| Game's mean colour, against the teacher | right | right |
+| Game's fine contrast, 10-90 m | 2-2.4 times the teacher's, collapsing between 45 and 130 m: the line | 14 down to 6, against the teacher's 10 down to 6 |
+| Analytic canopy (the ground), against the teacher | up to 2 times too bright along the ground, most toward the sun | within 1-7 % |
+| Blades against the ground at the same spot | 10-20 % apart | within 1 % |
+
+**What changed:**
+- **Blades are prefiltered by coverage.** Each row of a blade, seed head or flower shows its own light only as much as it covers: its true width over 1.6 px. The rest is the field's light about it, worked out once per blade (`fieldLight`, in the copy/select pass) and matched to what the terrain draws there.
+- **The canopy correction is fitted to the teacher**, per channel, in two rounds: a quadratic in log slant and log distance, with the hotspot and the sun's height (`grassCanopyCorrection`; 6.5-8.7 % held out by view).
+  - The canopy had been lit as a velvet facing up, where a grazing sight line meets the sides of blades.
+  - The canopy also takes the slope now: its slant to the ground, on the terrain and in the far blades.
+- **Nothing in the tile repeats any more.**
+  - The portraits and the grain are one stand, with no baked clumps.
+  - The field's shade, hue and straw patches go onto the ground from the blades' own noise at their places (`grassField.wgsl.js`, one-round hash shared with the blades), and into the far colour every blade carries.
+  - Hue and straw zones are at half their range; whole, they stood as camouflage from above.
+- **Smaller changes:**
+  - Seed heads and flowers fade over 24-84 m and 36-132 m, not in a line.
+  - The far blades' flattening moved out to 35-110 m.
+
+**Tried and left off** (in the code, `rendering.grass.slices`):
+- A density marched over the ground from the blades' noise: no visible effect, because the ground pixel does not move.
+- Habel-style vertical slices of our blades traced through the grass layer in the terrain shader: it removed the repetition from above, but flattened the field and aliased in bands at grazing angles.
+- Insight: a voxel tile of the field marched per pixel is what the portraits already are (its exact projection along 31 views). It repeats exactly as they do, unless what is in it comes from the world.
+
+**Cost, not reliably measured** (runs differ by 0.5 ms with other GPU use):
+- The draw is about 0.15 ms above the seventh round, the terrain 0.2-0.4 ms.
+- The ground's field colour at first cost 1.5 ms (a Voronoi clump and three three-round hashes per pixel). It was cut to three one-round noises.
+
+**Open:**
+- Near blades are still busier than a filtered field (fine contrast 20 against 13 at 10 m from standing height). That is aliasing; real antialiasing is not available in the pass.
+- Side-on, the canopy stays about 7 % above the teacher.
+- A careful A/B of the cost.
 
 ## Seventh round (2026-11-27): less work for the same picture
 
