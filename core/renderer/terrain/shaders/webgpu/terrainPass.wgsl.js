@@ -678,7 +678,8 @@ ${grassLook ? `
         let azimuth = atan2(dot(toward, vdN), dot(toward, udN)) - GRAIN0_TURN;
         let g0 = grassPortrait(groundSampler, turnedUv(GRAIN0, gp), f32(slant), azimuth, turnedUv(GRAIN0, dx.xy), turnedUv(GRAIN0, dy.xy)).rgb;` : `
         let g0 = textureSampleGrad(grassGrain, groundSampler, turnedUv(GRAIN0, gp), turnedUv(GRAIN0, dx.xy), turnedUv(GRAIN0, dy.xy)).rgb;`}
-        let g1 = textureSampleGrad(grassGrain, groundSampler, turnedUv(GRAIN1, gp), turnedUv(GRAIN1, dx.xy), turnedUv(GRAIN1, dy.xy)).rgb;
+        // Tussocks some 21 m across: the wide sampler, as the ground's other broad fields (two taps, not four).
+        let g1 = textureSampleGrad(grassGrain, wideSampler, turnedUv(GRAIN1, gp), turnedUv(GRAIN1, dx.xy), turnedUv(GRAIN1, dy.xy)).rgb;
         // Far off the mips flatten the field's structure more than the eye does: kept up a little with distance, as the
         // last blades (a pixel wide) keep theirs. Filtered first, so it does not shimmer.
         let keep = h(${portraits !== null ? '1.0' : '1.35'}) * (1.0 + 1.4 * h(smoothstep(40.0, 220.0, distance)));

@@ -41,7 +41,9 @@ fn grassCanopy(tau: f32, k: f32, b: f32) -> vec3<f32> {
 // The sun's depth through the canopy per unit of height (the blades' own self-shade: grassWgsl.js), and how much of it
 // the hotspot takes away when the view looks along the sun.
 fn grassSunDepth(sunUp: f32, share: f32, toEye: vec3<f32>, sunDir: vec3<f32>) -> f32 {
-    let hot = pow(saturate(dot(toEye, sunDir)), 6.0);
+    let along = saturate(dot(toEye, sunDir));
+    let along3 = along * along * along;
+    let hot = along3 * along3;
     return 1.72 * mix(1.6, 0.6, saturate(sunUp)) * share * (1.0 - hot);
 }
 `;
