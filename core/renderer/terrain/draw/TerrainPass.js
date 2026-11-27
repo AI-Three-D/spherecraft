@@ -47,7 +47,9 @@ export class TerrainPass {
         /** For measuring: whether off-screen tiles are left out, and those behind land (terrainShader.occlusion sets it first), every tile is taken for wet, half floats are used, the air is worked out per pixel. */
         /** Where grass blades end this frame (m), 0 without: the ground under them is shaded (GrassPass.js). */
         this.grassReach = 0;
-        this.options = { cull: true, occlusion: o.shaderConfig?.occlusion === true, allWet: false, half: true, exactAir: false };
+        this.options = { cull: true, occlusion: o.shaderConfig?.occlusion === true, allWet: false, half: true, exactAir: false,
+            /** The ground's grass look (hue, the canopy past the blades) and the grass grain (GrassPass.js): off as before grass. */
+            grass: o.grassLook === true, grain: o.grassLook === true && !!o.grain };
         this._pipelines = new Map();
         this._pending = new Map();
         this._ready = false;
@@ -141,7 +143,7 @@ export class TerrainPass {
     /** The grass grain's binding in the ground group (grassGrain.js): after the climate, when there is one. */
     _grainBinding() { return this.biome ? 14 : 13; }
 
-    _key(kind, wet, rain) { return `${kind}${wet ? ' wet' : ''}${rain ? ' rain' : ''}${this.options.half ? '' : ' full'}${this.options.exactAir ? ' exact' : ''}`; }
+    _key(kind, wet, rain) { return `${kind}${wet ? ' wet' : ''}${rain ? ' rain' : ''}${this.options.half ? '' : ' full'}${this.options.exactAir ? ' exact' : ''}${this.options.grass ? '' : ' plain'}${this.options.grain ? '' : ' nograin'}`; }
 
     _build(kind, wet, rain) {
         const key = this._key(kind, wet, rain);
@@ -151,7 +153,7 @@ export class TerrainPass {
             faceSizeMeters: 2 * this.planetConfig.radius, ...KIND_OPTIONS[kind], water: wet, rain,
             half: this.options.half && device.features.has('shader-f16'), exactAir: this.options.exactAir,
             fineEndMeters: this.shaderConfig.groundFineEndMeters, deepEndMeters: this.shaderConfig.groundDeepEndMeters, biome: this.biome ?? null,
-            grain: this.grain ? this._grainBinding() : null,
+            grain: this.grain && this.options.grass && this.options.grain ? this._grainBinding() : null, grassLook: this.options.grass,
         });
         const made = device.createRenderPipelineAsync({
             label: `Terrain ${key}`, layout: wet ? this._wetLayout : this._dryLayout,

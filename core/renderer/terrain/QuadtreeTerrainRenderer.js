@@ -105,6 +105,7 @@ export class QuadtreeTerrainRenderer {
         const pass = new TerrainPass({
             device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground, landLight: this._landLight,
             planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments), biome, grain: this._grain ?? null,
+            grassLook: !!grassConfig?.enabled,
             meshes: Array.from({ length: this._maxGeomLOD + 1 }, (_, lod) => this._geometries.get(lod).index.data),
         });
         try {

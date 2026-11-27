@@ -102,7 +102,12 @@ fn step3(a: f32, b: f32, x: f32) -> f32 { let t = saturate((x - a) / (b - a)); r
 `;
 
 /** Compute: patches about the camera, then tufts in them. */
-export function buildGrassComputeWGSL({ faceSizeMeters, biome }) {
+/**
+ * skip: for measuring only, parts left out (tools/perf/grass/scatterParts.mjs): tuft (all after the rank test), height
+ * (the finest heights, not the drawn triangles), growth (one fixed meadow), noise (value noise constant), clump,
+ * append (no atomic counters), write (no blade records), drawn (patches on the finest loaded tiles).
+ */
+export function buildGrassComputeWGSL({ faceSizeMeters, biome, skip = {}, segments = LOD_SEGMENTS }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const [b0, b1, b2] = LOD_CAPACITY;
@@ -358,6 +363,7 @@ fn lieOf(uv: vec2<f32>, variants: f32) -> vec2<f32> {
 
 // Value noise: the wind's gusts, flower patches.
 fn vnoise(p: vec2<f32>, seed: u32) -> f32 {
+    ${skip.noise ? 'return 0.5;' : ''}
     let i = floor(p);
     let f = p - i;
     let u = f * f * (3.0 - 2.0 * f);
@@ -446,18 +452,30 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     let P = F.anchor.xy + d;
     let edge = 1 << (frame.counts.y + PATCH_LEVELS);
     if (any(P < vec2<i32>(0)) || any(P >= vec2<i32>(edge))) { return; }
-    let reach = F.dv.w * 0.75;
-    let sea = placeAbout(F, vec2<f32>(d) + 0.5, 0.0);
+    // Far off one workgroup takes a block of 2 x 2 or 4 x 4 patches, aligned on the face (the same blocks however the
+    // camera moves, and the same lattice points in them): enough tufts to fill its threads. Every patch of a block
+    // decides alike, by the level distance to the block's middle; only the block's first patch goes on.
+    var span = 1;
+    for (var s = 4; s >= 2; s /= 2) {
+        let B = P & vec2<i32>(~(s - 1));
+        let mid = placeAbout(F, vec2<f32>(B - F.anchor.xy) + 0.5 * f32(s), 0.0).rel;
+        let flat = length(mid - frame.up.xyz * dot(mid, frame.up.xyz));
+        if (flat > frame.dist.x * select(0.17, 0.38, s == 4)) { span = s; break; }
+    }
+    if (any((P & vec2<i32>(span - 1)) != vec2<i32>(0))) { return; }
+    let sf = f32(span);
+    let reach = F.dv.w * 0.75 * sf;
+    let sea = placeAbout(F, vec2<f32>(d) + 0.5 * sf, 0.0);
     // Level distance first: nothing to read for most of the grid.
     let level = sea.rel - frame.up.xyz * dot(sea.rel, frame.up.xyz);
     if (length(level) - reach > frame.dist.x) { return; }
     let face = u32(F.anchor.z);
     let p = vec2<u32>(P);
-    let tile = drawnOver(face, p);
+    let tile = ${skip.drawn ? 'vec4<i32>(tileOver(face, p), 0, 0)' : 'drawnOver(face, p)'};
     if (tile.x < 0) { return; }
     let up = u32(tile.z);
     let part = vec2<f32>((p >> vec2<u32>(u32(tile.y))) & vec2<u32>((1u << up) - 1u)) / f32(1u << up);
-    let h = drawnHeight(tile.x & 4095, up, part, u32(tile.w), inTile(p, u32(tile.y), vec2<f32>(0.5)));
+    let h = drawnHeight(tile.x & 4095, up, part, u32(tile.w), inTile(p, u32(tile.y), vec2<f32>(0.5 * sf)));
     if (h < frame.camera.w) { return; }
     let rel = sea.rel + h * sea.up;
     let distance = length(rel);
@@ -472,7 +490,7 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     if (slotOut >= MAX_PATCHES) { return; }
     let land = landLightAt(frame.camera.xyz + rel, clampSampler);
     let packedD = u32(d.x + 32768) | (u32(d.y + 32768) << 16u);
-    patches[slotOut * 2u] = vec4<u32>(packedD, slot | (u32(tile.y) << 4u) | (up << 8u) | (u32(tile.w) << 12u), u32(tile.x),
+    patches[slotOut * 2u] = vec4<u32>(packedD, slot | (u32(tile.y) << 4u) | (up << 8u) | (u32(tile.w) << 12u) | (u32(span) << 16u), u32(tile.x),
         bitcast<u32>(max(distance - reach, 0.0)));
     patches[slotOut * 2u + 1u] = vec4<u32>(bitcast<u32>(F.na.w / f32(CELLS * CELLS)), pack2x16unorm(land), 0u, 0u);
 }
@@ -532,6 +550,46 @@ fn writeBlade(at: u32, root: vec3<f32>, facing: f32, tall: f32, bend: vec2<f32>,
         pack4x8unorm(vec4<f32>(land, clump, grassy)));
 }
 
+// A patch's corners: the ground's rules, the height, and the noises that change over metres, worked out once per patch
+// for its tufts to take between (about 7 in 8 lattice points that pass the first test are no tuft in the end).
+struct Corner { grow: Growth, height: f32, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32> };
+var<workgroup> corners: array<Corner, 4>;
+fn mixGrowth(a: Growth, b: Growth, t: f32) -> Growth {
+    return Growth(mix(a.grass, b.grass, t), mix(a.dry, b.dry, t), mix(a.forest, b.forest, t), mix(a.tundra, b.tundra, t),
+        mix(a.marsh, b.marsh, t), mix(a.sparse, b.sparse, t), mix(a.lush, b.lush, t), mix(a.lively, b.lively, t),
+        mix(a.tall, b.tall, t), mix(a.temp, b.temp, t), mix(a.wet, b.wet, t), mix(a.slope, b.slope, t), mix(a.dryness, b.dryness, t),
+        mix(a.tone, b.tone, t));
+}
+fn between(a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, e: vec4<f32>, f: vec2<f32>) -> vec4<f32> { return mix(mix(a, b, f.x), mix(c, e, f.x), f.y); }
+// The kinds' weights where the ground is so (grass, dry, woodland, tundra, reed).
+fn kindWeights(g: Growth) -> array<f32, 5> {
+    return array<f32, 5>(g.grass + 0.12 * g.sparse, 0.85 * g.dry, 0.3 * g.forest, 0.55 * g.tundra, 0.9 * g.marsh);
+}
+// At a corner: the kinds' total weight, the fewest blades a tuft of a kind growing there has, how much they gather in
+// clumps (tuftsBound).
+fn tuftTerms(g: Growth) -> vec3<f32> {
+    let w = kindWeights(g);
+    var fewest = 99.0;
+    if (w[0] > 0.0) { fewest = min(fewest, 4.0); }   // meadow (its rosettes)
+    if (w[1] > 0.0) { fewest = min(fewest, 12.0); }
+    if (w[2] > 0.0) { fewest = min(fewest, 2.5); }
+    if (w[3] > 0.0) { fewest = min(fewest, 8.0); }
+    if (w[4] > 0.0) { fewest = min(fewest, 5.0); }
+    let total = w[0] + w[1] + w[2] + w[3] + w[4];
+    return vec3<f32>(total, fewest, max(1.0 - total, select(0.0, 0.8, w[1] > 0.0 || w[3] > 0.0)));
+}
+// Most tufts a lattice point of the patch can hold, over density: every corner's largest weight over the fewest blades,
+// the tallest share for short grass (1.6), the densest clumps. What lies between corners lies between their values.
+fn tuftsBound() -> f32 {
+    let a = tuftTerms(corners[0].grow);
+    let b = tuftTerms(corners[1].grow);
+    let c = tuftTerms(corners[2].grow);
+    let e = tuftTerms(corners[3].grow);
+    let most = max(max(a, b), max(c, e));
+    let fewest = min(min(a.y, b.y), min(c.y, e.y));
+    return most.x * 1.6 * (1.0 + 0.9 * saturate(most.z)) / fewest;
+}
+
 @compute @workgroup_size(64)
 fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) thread: u32) {
     let at = group.x;
@@ -542,6 +600,9 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
     let shift = (head.y >> 4u) & 15u;
     let ancestor = (head.y >> 8u) & 15u;
     let lod = (head.y >> 12u) & 15u;
+    // Patches in this block along each side (1, 2 or 4: patchesMain).
+    let span = (head.y >> 16u) & 7u;
+    let sf = f32(span);
     let layer = i32(head.z & 4095u);
     let beds = head.z >= 4096u;
     let nearest = bitcast<f32>(head.w);
@@ -553,8 +614,22 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
     // The drawn tile's part of its geometry's layer (an ancestor's quarter, sixteenth...).
     let part = vec2<f32>((P >> vec2<u32>(shift)) & vec2<u32>((1u << ancestor) - 1u)) / f32(1u << ancestor);
     let partScale = 1.0 / f32(1u << ancestor);
-    // A tuft holds two blades or more: so many lattice points, at most, can hold one.
-    let keepMost = densityAt(nearest) * cellArea * 1.6 * 1.9 / 2.0;
+    let metres = frame.north.w / f32(1u << (frame.counts.y + PATCH_LEVELS));
+    if (thread < 4u) {
+        let cf = vec2<f32>(f32(thread & 1u), f32(thread >> 1u)) * sf;
+        let localC = part + inTile(P, shift, cf) * partScale;
+        let hC = heightAt(layer, localC);
+        let qC = (vec2<f32>(P) + cf) * metres;
+        let carried = qC - F.wind.xy;
+        corners[thread] = Corner(${skip.growth ? 'Growth(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.3, 0.55, 0.5, 0.05, 0.0, vec3<f32>(1.0))' : 'growthAt(layer, localC, qC, hC)'}, hC,
+            vec4<f32>(vnoise(qC / 8.5, 51u), vnoise(qC / 4.2 + 7.3, 53u), vnoise(qC / 6.1 + 3.1, 57u), vnoise(qC / 11.0 + 5.7, 61u)),
+            vec4<f32>(vnoise(qC / 7.0, 23u), vnoise(qC / 2.3, 29u), vnoise(qC / 4.5, 59u), vnoise(qC / 3.2, 63u)),
+            vec4<f32>(vnoise(qC / 19.0, 31u), vnoise(qC / 13.0, 37u), vnoise(carried / 22.0, 7u), vnoise(carried / 7.5 + 13.1, 11u)));
+    }
+    workgroupBarrier();
+    // Most tufts a lattice point can hold here, over density: the first test, before anything is read for a point.
+    let bound = tuftsBound();
+    let keepMost = densityAt(nearest) * cellArea * bound;
     let up = frame.up.xyz;
     let east = frame.east.xyz;
     let north = frame.north.xyz;
@@ -567,34 +642,38 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
     var level = 0u;
     for (var k = 1u; k <= 4u; k++) { if (keepMost <= exp2(-2.0 * f32(k))) { level = k; } }
     let stride = 1u << level;
-    let points = CELLS / stride;
+    let points = CELLS * span / stride;
     for (var k = thread; k < points * points; k += 64u) {
         let c = vec2<u32>(k % points, k / points) * stride;
         let g = P * CELLS + c;
         let h0 = hash3(g.x, g.y, face);
         let own = latticeLevel(g);
         let rank = latticeRank(own, u01(h0));
-        if (rank >= keepMost) { continue; }
+        if (rank >= keepMost${skip.tuft ? ' || true' : ''}) { continue; }
         let h1 = pcg(h0);
         let h2 = pcg(h1);
         // A point of a coarser set lies anywhere in its own block, so that the set does not stand in rows.
         let f = (vec2<f32>(c) + vec2<f32>(u01(h1), u01(h2)) * f32(1u << own)) / f32(CELLS);
         let drawn = inTile(P, shift, f);
-        let height = drawnHeight(layer, ancestor, part, lod, drawn);
         let local = part + drawn * partScale;
-        let place = placeAbout(F, vec2<f32>(d) + f, height - 0.03);
-        let distance = length(place.rel);
-        if (distance > frame.dist.x || rank >= densityAt(distance) * cellArea * 1.52) { continue; }
+        // The distance from the corners' heights decides; the drawn height only places what is kept.
+        let fc = f / sf;
+        let hApprox = mix(mix(corners[0].height, corners[1].height, fc.x), mix(corners[2].height, corners[3].height, fc.x), fc.y);
+        let distance = length(placeAbout(F, vec2<f32>(d) + f, hApprox - 0.03).rel);
+        if (distance > frame.dist.x || rank >= densityAt(distance) * cellArea * bound) { continue; }
         // Face metres, for the ground's patterns and the wind.
-        let q = (vec2<f32>(P) + f) * (frame.north.w / f32(1u << (frame.counts.y + PATCH_LEVELS)));
-        var grow = growthAt(layer, local, q, height);
+        let q = (vec2<f32>(P) + f) * metres;
+        var grow = mixGrowth(mixGrowth(corners[0].grow, corners[1].grow, fc.x), mixGrowth(corners[2].grow, corners[3].grow, fc.x), fc.y);
+        let n0 = between(corners[0].n0, corners[1].n0, corners[2].n0, corners[3].n0, fc);
+        let n1 = between(corners[0].n1, corners[1].n1, corners[2].n1, corners[3].n1, fc);
+        let n2 = between(corners[0].n2, corners[1].n2, corners[2].n2, corners[3].n2, fc);
         // Nothing grows in the beds of rivers and lakes, as the terrain draws them (its 1 - bed).
         if (beds) {
             let bed = saturate(textureSampleLevel(tileBeds, clampSampler, texelUv(local), layer, 0.0).r);
             let dryLand = 1.0 - bed;
             grow.grass *= dryLand; grow.dry *= dryLand; grow.forest *= dryLand; grow.tundra *= dryLand; grow.marsh *= dryLand; grow.sparse *= dryLand;
         }
-        var w = array<f32, 5>(grow.grass + 0.12 * grow.sparse, 0.85 * grow.dry, 0.3 * grow.forest, 0.55 * grow.tundra, 0.9 * grow.marsh);
+        var w = kindWeights(grow);
         let total = w[0] + w[1] + w[2] + w[3] + w[4];
         if (total < 0.02) { continue; }
 
@@ -605,7 +684,7 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         for (var i = 0u; i < 4u; i++) { if (pick < w[i]) { kind = i; break; } pick -= w[i]; }
 
         // Clumps (Voronoi, about 0.6 m): height, facing and colour shared, blades drawn toward the middle.
-        let cq = q * 1.7;
+        let cq = q * ${skip.clump ? '0.0' : '1.7'};
         let ci = vec2<i32>(floor(cq));
         var best = 9.0;
         var centre = vec2<f32>(0.0);
@@ -646,9 +725,9 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         }
         // Zones a few metres across within one ground: taller and shorter stands, yellower and deeper greens, more or
         // less straw. About mean-neutral, so the ground's own colour still matches far off.
-        let zone = step3(0.3, 0.75, vnoise(q / 8.5, 51u));
-        let hueZone = step3(0.25, 0.75, vnoise(q / 4.2 + 7.3, 53u));
-        let strawZone = step3(0.45, 0.9, vnoise(q / 6.1 + 3.1, 57u));
+        let zone = step3(0.3, 0.75, n0.x);
+        let hueZone = step3(0.25, 0.75, n0.y);
+        let strawZone = step3(0.45, 0.9, n0.z);
         tall *= mix(0.7, 1.12, sqrt(r)) * mix(0.75, 1.25, clump) * mix(0.75, 1.3, zone) * (1.0 - 0.5 * step3(0.15, 0.35, grow.slope));
         // Low broadleaf plants among the grass of a meadow (plantain, clover, young dock): a rosette of a few wide leaves
         // that lie out low. They give the field a lower, darker body of other shapes.
@@ -661,6 +740,8 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         let clumpy = mix(1.0, mix(0.25, 1.9, clump * clump), saturate(gather));
         let tufts = densityAt(distance) * cellArea * total * byHeight * clumpy / perTuft;
         if (rank >= tufts) { continue; }
+        let height = ${skip.height ? 'heightAt(layer, local)' : 'drawnHeight(layer, ancestor, part, lod, drawn)'};
+        let place = placeAbout(F, vec2<f32>(d) + f, height - 0.03);
         // Tufts thin out with distance by their rank: one just kept grows out of the ground, so none pops.
         let fadeIn = saturate((tufts - rank) / max(0.3 * tufts, 1.0e-6));
         tall *= fadeIn;
@@ -669,12 +750,12 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
 
         // Seed heads stand out of tall and dry tufts; flowers in patches a few metres wide, where the meadow is lively.
         // Rusty dock and sorrel in patches a few metres wide.
-        let dockPatch = step3(0.62, 0.85, vnoise(q / 11.0 + 5.7, 61u)) * step3(0.3, 0.6, grow.wet) * select(0.0, 1.0, kind == 0u);
+        let dockPatch = step3(0.62, 0.85, n0.w) * step3(0.3, 0.6, grow.wet) * select(0.0, 1.0, kind == 0u);
         // A tuft is about a 70th of a square metre close by: a plant or two per square metre where dock grows.
         let dock = u01(pcg(h5 + 31u)) < 0.025 * dockPatch;
         let seeds = select(0u, 1u, dock || u01(pcg(h5 + 9u)) < (0.12 + 0.5 * grow.tall + 0.3 * zone) * select(0.4, 1.0, kind == 1u || kind == 0u) * step3(0.18, 0.4, tall)
             * (1.0 - step3(frame.dist.x * 0.08, frame.dist.x * 0.16, distance)));
-        let flowerPatch = vnoise(q / 7.0, 23u) * 0.65 + vnoise(q / 2.3, 29u) * 0.35;
+        let flowerPatch = n1.x * 0.65 + n1.y * 0.35;
         let meadow = step3(0.35, 0.75, grow.lively) * step3(0.25, 0.5, grow.wet) * select(0.25, 1.0, kind == 0u) * select(1.0, 0.0, kind >= 3u);
         let blossomShare = meadow * step3(0.48, 0.78, flowerPatch);
         // Seed heads stop where they are under a pixel; flowers go on further, fewer and as dots of colour (their heads
@@ -688,17 +769,16 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         // The gusts' field is fixed to the ground and moved by how far the wind has carried it, summed frame by frame:
         // a wind that turns changes only where the field drifts next. (Taken as the wind's way times the place, a
         // turn of 0.1 rad/s swept it past a blade 150 km from the face's corner at 15 km/s: violent shaking.)
-        let carried = q - F.wind.xy;
         // Gusts roll on with the wind as broad waves; a tuft sways at its own pace (about 0.5-0.8 Hz, set by its
         // stiffness, not by the wind's speed), less far off where a blade is a pixel and any motion only flickers.
-        let gust = vnoise(carried / 22.0, 7u) * 0.75 + vnoise(carried / 7.5 + 13.1, 11u) * 0.25;
+        let gust = n2.z * 0.75 + n2.w * 0.25;
         let push = frame.wind.z * (0.45 + 0.55 * gust);
         // Neighbours sway nearly together (a phase that changes over metres), each a little on its own.
-        let phase = 6.2831853 * vnoise(q / 4.5, 59u) + r * 1.2;
+        let phase = 6.2831853 * n1.z + r * 1.2;
         let sway = frame.wind.w * wave(time, mix(3.2, 5.0, r2), phase) * (0.6 + 0.6 * gust)
             * (1.0 - 0.8 * step3(10.0, 35.0, distance));
-        let combTurn = (vnoise(q / 19.0, 31u) - 0.5) * 2.2;
-        let comb = 0.12 + 0.35 * vnoise(q / 13.0, 37u);
+        let combTurn = (n2.x - 0.5) * 2.2;
+        let comb = 0.12 + 0.35 * n2.y;
         let prevailing = frame.wind.xy * cos(combTurn) + vec2<f32>(-frame.wind.y, frame.wind.x) * sin(combTurn);
         let bend = frame.wind.xy * push + vec2<f32>(-frame.wind.y, frame.wind.x) * sway + prevailing * comb;
 
@@ -715,7 +795,7 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         var cap = BAND2;
         if (distance < frame.lod.x) { band = 0u; start = 0u; cap = BAND0; }
         else if (distance < frame.lod.y) { band = 1u; start = BAND0; cap = BAND1; }
-        let first = atomicAdd(&counters[1u + band], several);
+        let first = ${skip.append ? '0u' : skip.atomic ? 'pcg(at * 64u + thread + k * 977u) % (cap - 16u)' : 'atomicAdd(&counters[1u + band], several)'};
         if (first + several > cap) { continue; }
 
         // The tuft's colour: the ground's own grass colour (so blades and ground agree), its hue by climate, the
@@ -734,7 +814,7 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         // Muted, as grass is: a little of its own grey.
         base = mix(base, vec3<f32>(dot(base, vec3<f32>(0.2126, 0.7152, 0.0722))), 0.18);
         // Patches a few metres across a little lighter or darker: clumps and their shade, as a meadow is seen from above.
-        base *= shade * mix(0.8, 1.16, step3(0.2, 0.8, vnoise(q / 3.2, 63u)));
+        base *= shade * mix(0.8, 1.16, step3(0.2, 0.8, n1.w));
         if (kind == 0u || kind == 2u) { base *= mix(vec3<f32>(1.14, 1.05, 0.78), vec3<f32>(0.86, 0.97, 1.08), hueZone); }
         let straw = mix(${mean('dryGrass')} * vec3<f32>(1.5, 1.35, 1.0), vec3<f32>(0.22, 0.2, 0.15), u01(pcg(h5 + 21u)));
         // Far off, grass takes the colour the ground past the blades has (terrainPass.wgsl.js canopyAlbedo): each blade
@@ -809,14 +889,14 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
                 let own = clamp(color / max(base, vec3<f32>(0.002)), vec3<f32>(0.4), vec3<f32>(2.5));
                 color = mix(color, canopy * grainHere * mix(vec3<f32>(1.0), own, 0.2), farness);
             }
-            writeBlade(start + first + i, root, facing, bladeTall, bend, bladeWidth, lean, crowd, bladeKind, color, u4, land, clump, step3(0.0, 1.0, total));
+            ${skip.write ? 'if (start + first + i == 0xFFFFFFFFu) { ' : ''}writeBlade(start + first + i, root, facing, bladeTall, bend, bladeWidth, lean, crowd, bladeKind, color, u4, land, clump, step3(0.0, 1.0, total));${skip.write ? ' }' : ''}
         }
     }
 }
 
 @compute @workgroup_size(1)
 fn finishMain() {
-    let segments = array<u32, 3>(${LOD_SEGMENTS.map(s => `${s}u`).join(', ')});
+    let segments = array<u32, 3>(${segments.map(s => `${s}u`).join(', ')});
     let caps = array<u32, 3>(BAND0, BAND1, BAND2);
     let starts = array<u32, 3>(0u, BAND0, BAND0 + BAND1);
     for (var b = 0u; b < 3u; b++) {
@@ -830,7 +910,9 @@ fn finishMain() {
 }
 
 /** The blades drawn: vertex and fragment. */
-export function buildGrassDrawWGSL() {
+/** skip.shade: for measuring only, a flat colour instead of the blades' light. */
+/** segments: strip segments by band (as the scatter's). farCheap: blades wholly in the far look shaded by its formula alone. */
+export function buildGrassDrawWGSL({ skip = {}, segments = LOD_SEGMENTS, farCheap = false } = {}) {
     const [b0, b1] = LOD_CAPACITY;
     return /* wgsl */`${FRAME_WGSL}${WAVE_WGSL}
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -859,7 +941,7 @@ fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance:
     let a = blades[instance * 2u];
     let b = blades[instance * 2u + 1u];
     var segments = 2u;
-    if (instance < ${b0}u) { segments = ${LOD_SEGMENTS[0]}u; } else if (instance < ${b0 + b1}u) { segments = ${LOD_SEGMENTS[1]}u; }
+    if (instance < ${b0}u) { segments = ${segments[0]}u; } else if (instance < ${b0 + b1}u) { segments = ${segments[1]}u; } else { segments = ${segments[2]}u; }
     let level = min(vertex >> 1u, segments);
     let sideSign = select(-1.0, 1.0, (vertex & 1u) == 1u);
     let root = bitcast<vec3<f32>>(a.xyz);
@@ -981,6 +1063,7 @@ fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance:
 
 @fragment
 fn fsMain(in: Out) -> @location(0) vec4<f32> {
+    ${skip.shade ? 'return vec4<f32>(in.albedo.rgb * 2.0, 1.0);' : ''}
     let distance = length(in.rel);
     let V = -in.rel / max(distance, 0.001);
     var N = normalize(in.normal);
@@ -990,6 +1073,22 @@ fn fsMain(in: Out) -> @location(0) vec4<f32> {
     let t = in.along.x;
     let kind = u32(in.kind.x + 0.5);
     let crowd = in.kind.y;
+    ${farCheap ? `
+    // Wholly in the far look: the canopy's formula alone (as the ground past the blades), the height ramp for grain.
+    let farNow = select(0.0, max(step3(frame.dist.x * 0.17, frame.dist.x * 0.5, distance), step3(0.2, 0.55, dot(V, up)) * step3(6.0, 16.0, distance)),
+        kind <= 2u || kind == ${KIND.LEAF}u);
+    if (farNow >= 0.999) {
+        let velvetF = normalize(V - up * dot(V, up) + up);
+        let nF = normalize(up + 0.5 * (velvetF - up));
+        let landF = vec2<f32>(in.light.x, in.light.y);
+        let sunF = frame.sunColor.rgb;
+        let a0 = in.albedo.rgb * 0.95;
+        let throughF = ${n(GRASS_CANOPY.back)} * max(-dot(velvetF, L), 0.0) + ${n(GRASS_CANOPY.toward)} * pow(saturate(dot(-V, L)), 5.0);
+        let groundF = a0 * lightAt(nF, up, up, L, sunF, frame.ambient.rgb, 0.8, 1.0, landF) * (1.0 + ${n(GRASS_CANOPY.hotspot)} * pow(saturate(dot(V, L)), 3.0))
+            + sunF * landF.x * a0 * ${v3(GRASS_CANOPY.tint)} * (${n(GRASS_CANOPY.glow)} * throughF);
+        let rampF = mix(0.16 + 0.12 * (1.0 - crowd), 1.0, pow(saturate(t), 1.15));
+        return vec4<f32>(groundF * mix(1.0, clamp(mix(0.78, rampF, 0.3) / 0.75, 0.6, 1.6), 0.35), 1.0);
+    }` : ''}
     // A flower's head: its colour only there, a centre, the petals' edges a little darker.
     let headIn = select(in.flower, smoothstep(-1.08, -0.92, in.petal.y), kind == 6u);
     let flower = headIn;

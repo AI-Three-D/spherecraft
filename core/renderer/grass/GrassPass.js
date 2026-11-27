@@ -4,7 +4,7 @@
 // hidden-surface removal keeps shading to about one blade fragment a pixel.
 
 import {
-    BLADE_WORDS, COUNTER_WORDS, FRAME_FLOATS, GRID_MAX, LOD_CAPACITY, MAX_FACES, MAX_PATCHES, PATCH_LEVELS, PATCH_WORDS, WAVE_PERIOD,
+    BLADE_WORDS, COUNTER_WORDS, FRAME_FLOATS, GRID_MAX, LOD_CAPACITY, LOD_SEGMENTS, MAX_FACES, MAX_PATCHES, PATCH_LEVELS, PATCH_WORDS, WAVE_PERIOD,
     buildGrassComputeWGSL, buildGrassDrawWGSL,
 } from './grassWgsl.js';
 
@@ -59,6 +59,8 @@ export class GrassPass {
         Object.assign(this, o);
         this.config = { ...GRASS_DEFAULTS, ...(o.config ?? {}) };
         this.enabled = this.config.enabled !== false;
+        /** For measuring: the blades are made but not drawn. */
+        this.drawBlades = true;
         this._frame = new ArrayBuffer(FRAME_FLOATS * 4);
         this._f = new Float32Array(this._frame);
         this._i = new Int32Array(this._frame);
@@ -106,10 +108,12 @@ export class GrassPass {
             ] }),
         };
         const faceSizeMeters = 2 * this.planetConfig.radius;
-        const work = device.createShaderModule({ label: 'Grass scatter', code: buildGrassComputeWGSL({ faceSizeMeters, biome: this.biome ?? null }) });
+        const skip = this.skip ?? {};
+        const segments = this.segments ?? LOD_SEGMENTS;
+        const work = device.createShaderModule({ label: 'Grass scatter', code: buildGrassComputeWGSL({ faceSizeMeters, biome: this.biome ?? null, skip, segments }) });
         const layout = device.createPipelineLayout({ bindGroupLayouts: [this._layouts.work, this._layouts.ground] });
         const step = entryPoint => device.createComputePipelineAsync({ label: `Grass ${entryPoint}`, layout, compute: { module: work, entryPoint } });
-        const draw = device.createShaderModule({ label: 'Grass blades', code: buildGrassDrawWGSL() });
+        const draw = device.createShaderModule({ label: 'Grass blades', code: buildGrassDrawWGSL({ skip, segments, farCheap: this.farCheap ?? false }) });
         const [patches, dispatch, blades, finish, render] = await Promise.all([
             step('patchesMain'), step('dispatchMain'), step('bladesMain'), step('finishMain'),
             device.createRenderPipelineAsync({
@@ -263,12 +267,14 @@ export class GrassPass {
         this.device.queue.writeBuffer(this._frameBuffer, 0, this._frame);
 
         encoder.clearBuffer(this._counters);
-        const pass = encoder.beginComputePass({ label: 'Grass scatter' });
+        // For measuring the steps apart (options.splitPasses): each its own pass, timed by its label.
+        let pass = encoder.beginComputePass({ label: this.splitPasses ? 'Grass patches' : 'Grass scatter' });
         const run = (name, group) => { pass.setPipeline(this._steps[name]); pass.setBindGroup(0, group); pass.setBindGroup(1, this._groundGroup); };
         run('patches', this._dispatchGroup);
         pass.dispatchWorkgroups(Math.ceil((2 * widest) ** 2 / 64), 1, faces);
         run('dispatch', this._dispatchGroup);
         pass.dispatchWorkgroups(1);
+        if (this.splitPasses) { pass.end(); pass = encoder.beginComputePass({ label: 'Grass blades' }); }
         run('blades', this._drawArgsGroup);
         pass.dispatchWorkgroupsIndirect(this._dispatchArgs, 0);
         run('finish', this._drawArgsGroup);
@@ -277,11 +283,21 @@ export class GrassPass {
         this._drawing = true;
     }
 
+    /** For measuring: shaders made again with parts left out (grassWgsl.js skip). */
+    async rebuild(skip = {}, { segments = LOD_SEGMENTS, farCheap = false } = {}) {
+        this.destroy();
+        this.skip = skip;
+        this.segments = segments;
+        this.farCheap = farCheap;
+        this._groundOf = null;
+        await this.initialize();
+    }
+
     /** Whether blades are drawn this frame. */
     get drawing() { return this._drawing; }
 
     draw(pass) {
-        if (!this._drawing) return;
+        if (!this._drawing || !this.drawBlades) return;
         pass.setPipeline(this._render);
         pass.setBindGroup(0, this._drawGroup);
         for (let band = 0; band < LOD_CAPACITY.length; band++) pass.drawIndirect(this._args, 16 + band * 16);

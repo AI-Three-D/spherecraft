@@ -194,7 +194,7 @@ const table = (name, type, rows) => `const ${name} = array<${type}, ${rows.lengt
  * biome: the landscape's rules (biomeLandscapeConfig.js): what the ground is made of follows the tile's climate, not the
  * splat's families (groundSurface.wgsl.js biomeLandscape).
  */
-export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null, grain = null }) {
+export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null, grain = null, grassLook = true }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const deep = fine && deepEndMeters > 0;
@@ -382,7 +382,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
         let sandTone = mix(h3(0.68, 0.63, 0.53), h3(0.89, 0.82, 0.71), step3(0.24, 0.75, 0.6 * b.y + 0.4 * a.z));
         let tundraTone = mix(h3(0.92, 1.01, 0.91), h3(1.21, 0.82, 0.72), step3(0.34, 0.70, 0.47 * a.x + 0.35 * b.w + 0.18 * (1.0 - h(climate.y))));
         let dryGrass = step3(0.38, 0.73, a.w * 0.45 + b.w * 0.55 + 0.35 * slope + (0.55 - h(climate.y)) * 0.95);
-        grassTint = mix(grassHue(h(climate.r), h(climate.g)), h3(1.0), 0.7 * dryGrass);
+        ${grassLook ? 'grassTint = mix(grassHue(h(climate.r), h(climate.g)), h3(1.0), 0.7 * dryGrass);' : ''}
         let litter = mix(h(0.78), 1.0, step3(0.3, 0.7, a.x * 0.5 + b.x * 0.5));
         let shortGrass = cover.grass + cover.forest * (1.0 - litter);
         let peat = 0.75 * step3(0.39, 0.69, 0.64 * a.y + 0.36 * b.x);
@@ -638,6 +638,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
         pool = dryable * (1.0 - rock) * (1.0 - farShare) * (1.0 - step3(0.0015, 0.010, slope)) * (1.0 - step3(0.36, 0.50, 0.6 * a.x + 0.4 * b.x));` : ''}
     }
 
+${grassLook ? `
     albedo *= mix(h3(1.0), grassTint, saturate(leaf));
     // Under grass blades (GrassPass.js, out to grassReach m) the ground between them lies in their shade.
     var canopyFade: h = 1.0;
@@ -677,13 +678,18 @@ fn main(in: In) -> @location(0) vec4<f32> {
         let grain = max(h3(1.0) + h(1.35) * (h3(g0) * mix(h3(1.0), h3(g1), 0.75) - 1.0), h3(0.25));
         albedo *= mix(h3(1.0), grain, grainShare * mix(h(0.65), 1.0, step3(0.05, 0.4, slant)));
     }` : ''}
+    ` : `
+    let canopySeen: h = 0.0;
+    `}
     var shape = mix(up, tileNormal, h(1.0 - smoothstep(frame.normalStart, frame.normalEnd, distance)));
     shape = normalize(select(shape, -shape, dot(shape, up) < 0.0));
     var n = normalize(shape - (gradient - shape * dot(gradient, shape)));
+${grassLook ? `
     // The grass canopy takes light as its blades far off do (grassWgsl.js velvet): seen at a slant, its blades face the
     // viewer, so a low sun behind one lights them more than it lights the ground.
     let velvet = normalize(toEye - shape * dot(toEye, shape) + shape);
     n = normalize(mix(n, velvet, 0.5 * canopySeen));
+    ` : ``}
     let land = h2(in.land);
     ${rain ? `
     // Rain: soaked ground is darker, and lies smooth under its puddles.
@@ -694,6 +700,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
         n = normalize(mix(n, up, pool));
     }` : ''}
     var color = albedo * lightAt(n, shape, up, h3(frame.sunDir), h3(frame.sun), h3(frame.ambient), open, leaf, land);
+${grassLook ? `
     // As the blades far off (grassWgsl.js fsMain): light through them from behind, strongest toward the sun, and the
     // hotspot, where with the sun behind the viewer the canopy's shadows hide behind the blades that cast them.
     let sunDir = h3(frame.sunDir);
@@ -701,6 +708,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
     let hotspot = pow(saturate(dot(toEye, sunDir)), 3.0);
     color = mix(color, color * (1.0 + h(${number(GRASS_CANOPY.hotspot)}) * hotspot), canopySeen)
         + h3(frame.sun) * land.x * canopyAlbedo * h3(${GRASS_CANOPY.tint.map(number).join(', ')}) * (h(${number(GRASS_CANOPY.glow)}) * grassThrough * canopySeen);
+    ` : ``}
     ${rain ? `
     if (wetness > 0.0) {
         // A film of water over it, a mirror in the puddles.
