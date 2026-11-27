@@ -2,7 +2,113 @@
 
 2026-11-26, branch `grass/biome-grass` from main 70b83fe. M1 Pro, Chrome WebGPU, 2400×1350. Pictures: `screenshots/grass_2026-11-26/`.
 
-**Not profiled yet.** The GPU was shared with another job all session, so no timing was taken. The ready-to-run measurement is `tools/perf/grass/grassBench.mjs`; the counts below are what it will be measuring.
+**Profiled 2026-11-27:** grass costs 6–8 ms at high, 4–6 ms at medium (section Profiling).
+
+## Fourth round (2026-11-27): toward the references
+
+After the user's Skyrim and GrassWorks references and Codex's review (`GRASS_REVIEW_FOR_CLAUDE.md`).
+
+**Colour and light:**
+- Muted, cooler greens. The hue is shared with the ground, so far fields lost their lime too.
+- Light through the blades and the highlight are restrained.
+
+**Body and shapes:**
+- Most blades form a low, darker body; fewer stand up out of it.
+- Fallen straw lies lower and is darker.
+- Low broadleaf rosettes grow among the grass.
+- Rare rusty dock spikes in patches (a plant or two per m² where they grow), and more purple spikes.
+- Flowers sit among the grass, not on stalks above it.
+- Seed heads are slim and tan.
+
+**Far off:**
+- Flower and seed stems are never widened (they stood as dark sticks), and their heads at most twice (wider, they stood as strokes).
+- Flowers end by ~72 m and seed heads by ~38 m, before they turn to confetti.
+- **The grain.** The far field wears a grain made at load from the blades' own rules: tufts, gaps, straw, clumps; 256², mean 1, at two scales (4 m and 21 m). It is warped by the ground's mosaic, so its repeats never stand in rows (they did, on a far hill, before the warp). Far blades take their colour from the same grain where they stand.
+
+Pictures `17`–`22`.
+
+## Profiling (2026-11-27, after the fourth visual round)
+
+M1 Pro, Chrome WebGPU (Metal), `shader-f16`. Whole GPU frame from GPU timestamps, median of 96 frames per arm. Each frame follows a steady load, because the GPU lowers its clock between short frames. Arms are interleaved in one session; clouds are on but frozen. The GPU was otherwise idle (`ioreg` utilisation 0–9 %); no leftover agent processes were on it. Scripts: `tools/perf/grass/grassBench.mjs` (views and arms), `tools/perf/grass/scatterParts.mjs` (shader variants with parts left out). Raw results: `tools/perf/grass/results-2026-11-27*/`.
+
+Arms:
+- `none`: the terrain shader without any grass terms, as before grass.
+- `ground`: the ground's grass look (hue, canopy past the blades, grain).
+- `scatter`: that, plus the blades made but not drawn.
+- `full`: the game.
+
+### Where it stands (after the scatter changes below), ms
+
+| View | High: none | + ground | + scatter | full | grass in all | Medium: none | full | grass in all |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Meadow, root height | 6.45 | 6.81 | 10.96 | 14.74 | **8.3** | 3.41 | 9.48 | **6.1** |
+| Meadow, standing | 6.71 | 7.08 | 11.28 | 15.03 | **8.3** | 3.46 | 9.58 | **6.1** |
+| Meadow, toward the sun | 7.15 | 7.55 | 11.65 | 14.70 | 7.6 | 3.78 | 9.30 | 5.5 |
+| Meadow from 8 m | 6.63 | 7.09 | 10.89 | 13.57 | 6.9 | 3.41 | 8.35 | 4.9 |
+| Meadow from 15 m | 6.65 | 7.26 | 10.54 | 12.63 | 6.0 | 3.45 | 7.64 | 4.2 |
+| Meadow, walking 3 m/s | 7.08 | 7.44 | 11.63 | 15.34 | 8.3 | 3.70 | 9.84 | 6.1 |
+| Forest floor | 7.71 | 8.18 | 12.01 | 14.37 | 6.7 | 4.06 | 9.16 | 5.1 |
+| Tundra | 7.86 | 8.05 | 11.44 | 14.37 | 6.5 | 4.07 | 9.12 | 5.1 |
+| Marsh | 8.33 | 8.89 | 13.12 | 14.67 | 6.3 | 4.49 | 9.59 | 5.1 |
+| Dry grass | 7.79 | 8.21 | 11.61 | 13.86 | 6.1 | 3.98 | 8.35 | 4.4 |
+
+- **Spread.** p90 lies 0.15–0.4 ms over the median throughout.
+- **Grain.** The grain alone is 0.05–0.35 ms (`full` against `full-nograin`).
+- **Over budget.** Grass costs 6–8 ms at high and 4–6 ms at medium. That is 3–4 times the 2 ms budget.
+- **Parts at high:**
+  - the ground's look: 0.2–0.6 ms;
+  - the scatter compute: 3.3–4.3 ms, almost the same at medium, as it does not depend on resolution;
+  - drawing: 1.5–3.9 ms, a third less at medium.
+- **No overflow.** No buffer ran full: blades used at most 37 % of a band, and patches 5,008 of 65,536.
+- **Memory.** About 32 MB: 29.4 MB blade records, 2.1 MB patch list, 0.7 MB grain. Making the grain takes ~70 ms at load.
+
+### What the scatter's time was, and what was done
+
+Before, the scatter took 6.5 ms. Meadow standing, blade step of the scatter:
+
+| Variant | ms |
+| --- | ---: |
+| The game | 6.46 |
+| Rank test only, per lattice point | 0.03 |
+| No value noise | 4.87 |
+| Finest heights instead of drawn triangles | 5.09 |
+| Fixed growth | 5.62 |
+| No atomic counters (writes scattered) | 6.48 |
+| No clumps | 6.42 |
+| Patch step | 0.07 |
+
+- **What it was.** Neither memory traffic nor atomics: the per-tuft arithmetic, in a kernel of 4,815 instructions using 124 registers (the Metal compiler's own statistics).
+- **Why it ran badly.** Far patches held a few tufts each, so most of each 64-thread workgroup sat idle.
+- **The first test was loose.** It assumed the worst case, so in a meadow ~7× more lattice points than became tufts went through the expensive part.
+
+Changes:
+- **The ground rules and slow noises** are worked out once per patch, at its 4 corners in workgroup memory. Tufts interpolate them, against a conservative per-patch bound.
+- **The exact drawn height** is computed only for kept tufts.
+- **Far patches are grouped.** One workgroup takes a 2×2 block from 41 m and a 4×4 block from 91 m, aligned on the cube face. The lattice points are the same, so nothing pops when a block changes size.
+- **Result:**
+  - workgroups 15.7k → 1.9k;
+  - scatter 6.5 → 4.2 ms;
+  - whole frame at standing height 17.5 → 15.0 ms.
+
+### Tried, did not pay
+
+| Change | Frame, ms | Why it does not pay |
+| --- | --- | --- |
+| Far blades as single triangles (3 vertices, not 5) | 17.66 against 17.52 | Far vertex count is not the limit. |
+| Far blades shaded by the canopy formula alone | 17.57 | Within noise. |
+| Far and mid bands lit per vertex, flat fragment | **+1.3** | The vertex stage is already costly. |
+| Flat shading everywhere (to price the fragment) | −1.7 | The blade fragment is half the draw. |
+| One blade per tuft (to price the blade loop) | scatter 4.1 → 3.3 | The per-tuft body, not the blades, is the rest. |
+| Range 160 / 120 m | −0.9 / −1.2 | — |
+| Density × 0.6 | −2.4 | Fewer blades everywhere: a visible change. |
+
+### The way to the budget
+
+The remaining scatter (~3.3 ms of per-tuft work plus ~0.9 ms of blade loop) is redone every frame for tufts that rarely change.
+- **Make tufts once per patch, keep them.** Remake a patch only when it enters the range, when its detail level steps (the nested lattice ranks make that a superset or a subset), or when the terrain under it changes its mesh. Each frame, only cull patches and draw.
+- **Animate in the vertex shader.** Wind and the fade by distance move there; they are cheap there.
+- **Estimate.** This should take the scatter from ~4 ms to well under 0.5 ms, standing or walking, with no visible change. It needs a GPU patch pool and its invalidation; it is the largest single item.
+- **After that, the draw (1.5–3.9 ms).** Halve the fragment by reusing the shading of a blade's lower and upper half, and judge with you whether the far ring (120–240 m: ~0.5 ms with its scatter) earns its cost against the canopy alone.
 
 ## Third round (2026-11-27): the shaking was the wind turning, and a third further
 

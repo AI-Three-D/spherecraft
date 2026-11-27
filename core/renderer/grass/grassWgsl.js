@@ -763,7 +763,7 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
         let farOut = 1.0 - step3(frame.dist.x * 0.145, frame.dist.x * 0.21, distance);
         let flowerOut = 1.0 - step3(frame.dist.x * 0.12, frame.dist.x * 0.3, distance);
         let blossoms = select(0u, 1u, u01(pcg(h5 + 13u)) < 0.42 * blossomShare * flowerOut);
-        let several = count + seeds + blossoms;
+        let several = ${skip.oneBlade ? '1u' : 'count + seeds + blossoms'};
 
         // Wind: gusts carried with it (the same field moves the far meadows), each tuft's sway, and a lasting comb.
         // The gusts' field is fixed to the ground and moved by how far the wind has carried it, summed frame by frame:
@@ -912,7 +912,8 @@ fn finishMain() {
 /** The blades drawn: vertex and fragment. */
 /** skip.shade: for measuring only, a flat colour instead of the blades' light. */
 /** segments: strip segments by band (as the scatter's). farCheap: blades wholly in the far look shaded by its formula alone. */
-export function buildGrassDrawWGSL({ skip = {}, segments = LOD_SEGMENTS, farCheap = false } = {}) {
+/** perVertex: the light at the vertices, a flat fragment (blades a few pixels wide: the far bands). */
+export function buildGrassDrawWGSL({ skip = {}, segments = LOD_SEGMENTS, farCheap = false, perVertex = false } = {}) {
     const [b0, b1] = LOD_CAPACITY;
     return /* wgsl */`${FRAME_WGSL}${WAVE_WGSL}
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -934,6 +935,7 @@ struct Out {
     @location(6) flower: f32,                           // 1 on a flower or seed head
     @location(7) axis: vec3<f32>,                       // along the blade
     @location(8) petal: vec2<f32>,                      // on a flower's head: across, up (-1..1); far below on its stem
+    @location(9) shaded: vec3<f32>,                     // the light worked out at the vertex (perVertex)
 };
 
 @vertex
@@ -1058,12 +1060,13 @@ fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance:
     out.flower = flower;
     out.axis = dp;
     out.petal = petal;
+    ${perVertex ? 'out.shaded = shadeBlade(out);' : ''}
     return out;
 }
 
-@fragment
-fn fsMain(in: Out) -> @location(0) vec4<f32> {
-    ${skip.shade ? 'return vec4<f32>(in.albedo.rgb * 2.0, 1.0);' : ''}
+// A blade's light at a point of it (per pixel near; per vertex in the far bands: perVertex).
+fn shadeBlade(in: Out) -> vec3<f32> {
+    ${skip.shade ? 'return in.albedo.rgb * 2.0;' : ''}
     let distance = length(in.rel);
     let V = -in.rel / max(distance, 0.001);
     var N = normalize(in.normal);
@@ -1087,7 +1090,7 @@ fn fsMain(in: Out) -> @location(0) vec4<f32> {
         let groundF = a0 * lightAt(nF, up, up, L, sunF, frame.ambient.rgb, 0.8, 1.0, landF) * (1.0 + ${n(GRASS_CANOPY.hotspot)} * pow(saturate(dot(V, L)), 3.0))
             + sunF * landF.x * a0 * ${v3(GRASS_CANOPY.tint)} * (${n(GRASS_CANOPY.glow)} * throughF);
         let rampF = mix(0.16 + 0.12 * (1.0 - crowd), 1.0, pow(saturate(t), 1.15));
-        return vec4<f32>(groundF * mix(1.0, clamp(mix(0.78, rampF, 0.3) / 0.75, 0.6, 1.6), 0.35), 1.0);
+        return groundF * mix(1.0, clamp(mix(0.78, rampF, 0.3) / 0.75, 0.6, 1.6), 0.35);
     }` : ''}
     // A flower's head: its colour only there, a centre, the petals' edges a little darker.
     let headIn = select(in.flower, smoothstep(-1.08, -0.92, in.petal.y), kind == 6u);
@@ -1149,7 +1152,7 @@ fn fsMain(in: Out) -> @location(0) vec4<f32> {
     // same normal between up and the viewer, the same glow through and hotspot. Then the blades end where the ground
     // looks as they did.
     let far = select(0.0, max(step3(frame.dist.x * 0.17, frame.dist.x * 0.5, distance), step3(0.2, 0.55, dot(V, up)) * step3(6.0, 16.0, distance)), kind <= 2u || kind == ${KIND.LEAF}u);
-    if (far <= 0.0) { return vec4<f32>(own, 1.0); }
+    if (far <= 0.0) { return own; }
     let velvet = normalize(V - up * dot(V, up) + up);
     let nC = normalize(up + 0.5 * (velvet - up));
     let land = vec2<f32>(in.light.x, open);
@@ -1159,7 +1162,12 @@ fn fsMain(in: Out) -> @location(0) vec4<f32> {
         + sun * land.x * albedo * ${v3(GRASS_CANOPY.tint)} * (${n(GRASS_CANOPY.glow)} * grassThrough);
     // A blade's own light and shade stay a little: the field keeps its grain.
     let grain = clamp(dot(own, vec3<f32>(0.333)) / max(dot(albedo * lightAt(nC, up, up, L, sun, ambient, 0.8, 1.0, land), vec3<f32>(0.333)), 1.0e-4), 0.6, 1.6);
-    return vec4<f32>(mix(own, ground * mix(1.0, grain, 0.35), far), 1.0);
+    return mix(own, ground * mix(1.0, grain, 0.35), far);
+}
+
+@fragment
+fn fsMain(in: Out) -> @location(0) vec4<f32> {
+    ${perVertex ? 'return vec4<f32>(in.shaded, 1.0);' : 'return vec4<f32>(shadeBlade(in), 1.0);'}
 }
 `;
 }

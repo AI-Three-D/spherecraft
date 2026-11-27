@@ -113,20 +113,26 @@ export class GrassPass {
         const work = device.createShaderModule({ label: 'Grass scatter', code: buildGrassComputeWGSL({ faceSizeMeters, biome: this.biome ?? null, skip, segments }) });
         const layout = device.createPipelineLayout({ bindGroupLayouts: [this._layouts.work, this._layouts.ground] });
         const step = entryPoint => device.createComputePipelineAsync({ label: `Grass ${entryPoint}`, layout, compute: { module: work, entryPoint } });
-        const draw = device.createShaderModule({ label: 'Grass blades', code: buildGrassDrawWGSL({ skip, segments, farCheap: this.farCheap ?? false }) });
-        const [patches, dispatch, blades, finish, render] = await Promise.all([
-            step('patchesMain'), step('dispatchMain'), step('bladesMain'), step('finishMain'),
-            device.createRenderPipelineAsync({
-                label: 'Grass blades',
+        const blade = (label, perVertex) => {
+            const module = device.createShaderModule({ label, code: buildGrassDrawWGSL({ skip, segments, farCheap: this.farCheap ?? false, perVertex }) });
+            return device.createRenderPipelineAsync({
+                label,
                 layout: device.createPipelineLayout({ bindGroupLayouts: [this._layouts.draw] }),
-                vertex: { module: draw, entryPoint: 'vsMain' },
-                fragment: { module: draw, entryPoint: 'fsMain', targets: [{ format: this.backend.sceneFormat || this.backend.format }] },
+                vertex: { module, entryPoint: 'vsMain' },
+                fragment: { module, entryPoint: 'fsMain', targets: [{ format: this.backend.sceneFormat || this.backend.format }] },
                 primitive: { topology: 'triangle-strip', cullMode: 'none' },
                 depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-            }),
+            });
+        };
+        // The far bands' blades are a few pixels wide: lit at their vertices (perVertexFar), the fragment is flat.
+        const perVertexFar = this.perVertexFar ?? this.config.perVertexFar ?? false;
+        const [patches, dispatch, blades, finish, render, renderFar] = await Promise.all([
+            step('patchesMain'), step('dispatchMain'), step('bladesMain'), step('finishMain'),
+            blade('Grass blades', false), perVertexFar ? blade('Grass blades, far', true) : null,
         ]);
         this._steps = { patches, dispatch, blades, finish };
         this._render = render;
+        this._renderFar = renderFar ?? render;
         const quadtree = this.tileManager.quadtreeGPU;
         const workGroup = args => device.createBindGroup({ layout: this._layouts.work, entries: [
             this._frameBuffer, quadtree.getLoadedTileTableBuffer(), this._patches, this._counters, this._blades, args, quadtree._visibleTableBuffer,
@@ -284,11 +290,12 @@ export class GrassPass {
     }
 
     /** For measuring: shaders made again with parts left out (grassWgsl.js skip). */
-    async rebuild(skip = {}, { segments = LOD_SEGMENTS, farCheap = false } = {}) {
+    async rebuild(skip = {}, { segments = LOD_SEGMENTS, farCheap = false, perVertexFar = undefined } = {}) {
         this.destroy();
         this.skip = skip;
         this.segments = segments;
         this.farCheap = farCheap;
+        this.perVertexFar = perVertexFar;
         this._groundOf = null;
         await this.initialize();
     }
@@ -298,9 +305,11 @@ export class GrassPass {
 
     draw(pass) {
         if (!this._drawing || !this.drawBlades) return;
-        pass.setPipeline(this._render);
         pass.setBindGroup(0, this._drawGroup);
-        for (let band = 0; band < LOD_CAPACITY.length; band++) pass.drawIndirect(this._args, 16 + band * 16);
+        for (let band = 0; band < LOD_CAPACITY.length; band++) {
+            pass.setPipeline(band === 0 ? this._render : this._renderFar);
+            pass.drawIndirect(this._args, 16 + band * 16);
+        }
     }
 
     /** For measuring: patches and blades per band of the last frame (reads back, slow). */
