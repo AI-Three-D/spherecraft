@@ -22,18 +22,8 @@ const VARIANTS = {
     game: [{}, {}, true],
     'not drawn': [{}, {}, false],
     'flat shading': [{ shade: true }, {}, true],
-    'far: 1 segment': [{}, {}, true, { segments: [7, 4, 1] }],
-    'far bands lit per vertex': [{}, {}, true, { perVertexFar: true }],
-    'one blade per tuft': [{ oneBlade: true }, {}, false],
-    'no tufts (rank test only)': [{ tuft: true }, {}, false],
     'finest heights': [{ height: true }, {}, false],
     'fixed growth': [{ growth: true }, {}, false],
-    'no noise': [{ noise: true }, {}, false],
-    'no clumps': [{ clump: true }, {}, false],
-    'no append': [{ append: true, write: true }, {}, false],
-    'no atomics (scattered writes)': [{ atomic: true }, {}, false],
-    'no writes': [{ write: true }, {}, false],
-    'patches on loaded tiles': [{ drawn: true }, {}, false],
     'range 160 m': [{}, { distance: 160 }, true],
     'range 120 m': [{}, { distance: 120 }, true],
     'density x0.6': [{}, { density: 900 }, true],
@@ -83,7 +73,7 @@ try {
         let runs = 2;
         const load = () => { const e = device.createCommandEncoder(), q = e.beginComputePass({ label: 'load' }); q.setPipeline(heat); q.setBindGroup(0, hg); for (let i = 0; i < runs; i++) q.dispatchWorkgroups(1024); q.end(); device.queue.submit([e.finish()]); };
         window.__measure = async (frames, warm) => {
-            const go = g.render, res = { span: [], patches: [], blades: [] };
+            const go = g.render, res = { span: [], patches: [], copy: [], blades: [], select: [] };
             g.render = async () => {};
             const ms = x => x / 1e6;
             try {
@@ -98,7 +88,7 @@ try {
                     if (i < 6) runs = Math.max(1, Math.min(400, Math.round(runs * 9 / Math.max(ms(end - Math.min(...own.map(x => x.begin))), 0.2))));
                     if (i < warm) continue;
                     res.span.push(ms(Math.max(...rest.map(x => x.end)) - Math.max(end, Math.min(...rest.map(x => x.begin)))));
-                    for (const [k, label] of [['patches', 'Grass patches'], ['blades', 'Grass blades']]) {
+                    for (const [k, label] of [['patches', 'Grass patches'], ['copy', 'Grass copy'], ['blades', 'Grass blades'], ['select', 'Grass select']]) {
                         const x = rest.find(y => y.label === label);
                         res[k].push(x ? ms(x.end - x.begin) : 0);
                     }
@@ -111,15 +101,15 @@ try {
     const result = {};
     const only = arg('only', null)?.split(',');
     const names = Object.keys(VARIANTS).filter(n => !only || only.some(o => n.startsWith(o)));
-    for (const n of names) result[n] = { span: [], patches: [], blades: [] };
+    for (const n of names) result[n] = { span: [], patches: [], copy: [], blades: [], select: [] };
     for (let round = 0; round < rounds; round++) {
         for (const n of round % 2 ? [...names].reverse() : names) {
             await page.evaluate(async v => { await window.__variant(v); await new Promise(r => setTimeout(r, 700)); }, VARIANTS[n]);
             const t = await page.evaluate(() => window.__measure(20, 10));
-            for (const k of ['span', 'patches', 'blades']) result[n][k].push(...t[k]);
+            for (const k of ['span', 'patches', 'copy', 'blades', 'select']) result[n][k].push(...t[k]);
         }
     }
-    const lines = names.map(n => `${n.padEnd(28)} frame ${med(result[n].span).toFixed(2)}  patches ${med(result[n].patches).toFixed(2)}  blades ${med(result[n].blades).toFixed(2)}`);
+    const lines = names.map(n => `${n.padEnd(28)} frame ${med(result[n].span).toFixed(2)}  patches ${med(result[n].patches).toFixed(2)}  copy ${med(result[n].copy).toFixed(2)}  made ${med(result[n].blades).toFixed(2)}  select ${med(result[n].select).toFixed(2)}`);
     console.log(lines.join('\n'));
     await writeFile(path.join(out, `parts-${arg('view', 'standing')}.json`), JSON.stringify(result));
     const errors = await page.evaluate(() => window.__lr?.gpuErrors ?? []);

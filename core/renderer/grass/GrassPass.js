@@ -1,10 +1,12 @@
 // @ts-nocheck
-// Grass blades about the camera (grassWgsl.js). Made each frame on the GPU from the ground the terrain draws: no blade
-// is stored between frames, so there is nothing to stream, evict or pop. Drawn opaque without discard, so the GPU's
-// hidden-surface removal keeps shading to about one blade fragment a pixel.
+// Grass blades about the camera (grassWgsl.js). Made on the GPU from the ground the terrain draws, and kept: each frame
+// the patches about the camera are found; a patch alike last frame (the same tile, mesh and distance step) carries its
+// tufts over, others are made anew; then the blades to draw are chosen. Nothing streams from the CPU. Drawn opaque
+// without discard, so the GPU's hidden-surface removal keeps shading to about one blade fragment a pixel.
 
 import {
-    BLADE_WORDS, COUNTER_WORDS, FRAME_FLOATS, GRID_MAX, LOD_CAPACITY, LOD_SEGMENTS, MAX_FACES, MAX_PATCHES, PATCH_LEVELS, PATCH_WORDS, WAVE_PERIOD,
+    CONTROL_WORDS, CTRL, CTRL_REMAP, FRAME_FLOATS, GRID_MAX, HASH_CAP, LOD_CAPACITY, LOD_SEGMENTS, MAX_FACES, MAX_PATCHES, PATCH_LEVELS,
+    PATCH_WORDS, RECORD_WORDS, STORE_CAP, WAVE_PERIOD,
     buildGrassComputeWGSL, buildGrassDrawWGSL,
 } from './grassWgsl.js';
 
@@ -82,8 +84,13 @@ export class GrassPass {
         const bladeCount = LOD_CAPACITY.reduce((a, b) => a + b, 0);
         this._frameBuffer = buffer('frame', FRAME_FLOATS * 4, U.UNIFORM | U.COPY_DST);
         this._patches = buffer('patches', MAX_PATCHES * PATCH_WORDS * 4, U.STORAGE | U.COPY_SRC);
-        this._counters = buffer('counters', COUNTER_WORDS * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC);
-        this._blades = buffer('blades', bladeCount * BLADE_WORDS * 4, U.STORAGE);
+        this._control = buffer('control', CONTROL_WORDS * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC);
+        // The kept tufts' blades, two halves: this frame's, made from last frame's.
+        this._store = buffer('store', 2 * STORE_CAP * RECORD_WORDS * 4, U.STORAGE);
+        // The blades drawn this frame, as the vertex shader takes them (selectMain).
+        this._bandIndex = buffer('drawn', bladeCount * 32, U.STORAGE);
+        this._patchHash = buffer('patch table', 2 * HASH_CAP * 8 * 4, U.STORAGE | U.COPY_DST);
+        this._parity = 0;
         // The blades' dispatch, and the bands' draws: two buffers, as one is read while the other is written.
         this._dispatchArgs = buffer('dispatch', 16 * 4, U.STORAGE | U.INDIRECT);
         this._args = buffer('draws', 16 * 4, U.STORAGE | U.INDIRECT | U.COPY_SRC);
@@ -97,6 +104,7 @@ export class GrassPass {
             work: device.createBindGroupLayout({ entries: [
                 at(0, C, { buffer: { type: 'uniform' } }), at(1, C, { buffer: { type: 'read-only-storage' } }),
                 at(2, C, storage), at(3, C, storage), at(4, C, storage), at(5, C, storage), at(6, C, { buffer: { type: 'read-only-storage' } }),
+                at(7, C, storage), at(8, C, storage),
             ] }),
             ground: device.createBindGroupLayout({ entries: [
                 at(0, C, { texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }),
@@ -126,22 +134,25 @@ export class GrassPass {
         };
         // The far bands' blades are a few pixels wide: lit at their vertices (perVertexFar), the fragment is flat.
         const perVertexFar = this.perVertexFar ?? this.config.perVertexFar ?? false;
-        const [patches, dispatch, blades, finish, render, renderFar] = await Promise.all([
-            step('patchesMain'), step('dispatchMain'), step('bladesMain'), step('finishMain'),
+        const names = ['patches', 'dispatch', 'copy', 'generate', 'selectDispatch', 'select', 'finish'];
+        const made = await Promise.all([
+            ...names.map(name => step(`${name}Main`)),
             blade('Grass blades', false), perVertexFar ? blade('Grass blades, far', true) : null,
         ]);
-        this._steps = { patches, dispatch, blades, finish };
+        this._steps = Object.fromEntries(names.map((name, i) => [name, made[i]]));
+        const [render, renderFar] = made.slice(names.length);
         this._render = render;
         this._renderFar = renderFar ?? render;
         const quadtree = this.tileManager.quadtreeGPU;
         const workGroup = args => device.createBindGroup({ layout: this._layouts.work, entries: [
-            this._frameBuffer, quadtree.getLoadedTileTableBuffer(), this._patches, this._counters, this._blades, args, quadtree._visibleTableBuffer,
+            this._frameBuffer, quadtree.getLoadedTileTableBuffer(), this._patches, this._control, this._store, args, quadtree._visibleTableBuffer,
+            this._bandIndex, this._patchHash,
         ].map((b, binding) => ({ binding, resource: { buffer: b } })) });
         this._dispatchGroup = workGroup(this._dispatchArgs);
         this._drawArgsGroup = workGroup(this._args);
         this._drawGroup = device.createBindGroup({ layout: this._layouts.draw, entries: [
-            { binding: 0, resource: { buffer: this._frameBuffer } }, { binding: 1, resource: { buffer: this._blades } },
-        ] });
+            this._frameBuffer, this._bandIndex,
+        ].map((b, binding) => ({ binding, resource: { buffer: b } })) });
         this._ready = true;
     }
 
@@ -255,7 +266,7 @@ export class GrassPass {
             // The gusts' field is in the face's own metres (grassWgsl.js q): a patch is nominally this long.
             const nominal = 2 * R / patchesPerFace;
             const carried = [dot(this._carried, ex) * nominal / mx, dot(this._carried, ey) * nominal / my];
-            const o = 84 + faces * 28;
+            const o = 88 + faces * 28;
             f.set([...ca, la], o);
             f.set([...du, face], o + 4);
             f.set([...dv, Math.max(mx, my)], o + 8);
@@ -270,19 +281,34 @@ export class GrassPass {
         // The tiles drawn this frame: the quadtree has built them already in this encoder (TerrainModule.compute).
         W.set([quadtree.visibleTableMask, quadtree.visibleTableCapacity, quadtree._visibleEpoch, quadtree.maxGeomLOD], 80);
         if (!faces) return;
+        // This frame's half of the cache and of the patch table; the other half is last frame's.
+        this._parity ^= 1;
+        W.set([this._parity, 0, 0, 0], 84);
         this.device.queue.writeBuffer(this._frameBuffer, 0, this._frame);
 
-        encoder.clearBuffer(this._counters);
-        // For measuring the steps apart (options.splitPasses): each its own pass, timed by its label.
+        // This frame's counts, where last frame's patches are now, this frame's half of the patch table.
+        encoder.clearBuffer(this._control, 0, CTRL.PERSIST * 4);
+        encoder.clearBuffer(this._control, CTRL_REMAP * 4, MAX_PATCHES * 4);
+        encoder.clearBuffer(this._patchHash, this._parity * HASH_CAP * 32, HASH_CAP * 32);
+        // For measuring the steps apart (splitPasses): each its own pass, timed by its label.
         let pass = encoder.beginComputePass({ label: this.splitPasses ? 'Grass patches' : 'Grass scatter' });
         const run = (name, group) => { pass.setPipeline(this._steps[name]); pass.setBindGroup(0, group); pass.setBindGroup(1, this._groundGroup); };
+        const split = label => { if (this.splitPasses) { pass.end(); pass = encoder.beginComputePass({ label }); } };
         run('patches', this._dispatchGroup);
         pass.dispatchWorkgroups(Math.ceil((2 * widest) ** 2 / 64), 1, faces);
         run('dispatch', this._dispatchGroup);
         pass.dispatchWorkgroups(1);
-        if (this.splitPasses) { pass.end(); pass = encoder.beginComputePass({ label: 'Grass blades' }); }
-        run('blades', this._drawArgsGroup);
+        split('Grass copy');
+        run('copy', this._drawArgsGroup);
         pass.dispatchWorkgroupsIndirect(this._dispatchArgs, 0);
+        split('Grass blades');
+        run('generate', this._drawArgsGroup);
+        pass.dispatchWorkgroupsIndirect(this._dispatchArgs, 12);
+        split('Grass select');
+        run('selectDispatch', this._dispatchGroup);
+        pass.dispatchWorkgroups(1);
+        run('select', this._drawArgsGroup);
+        pass.dispatchWorkgroupsIndirect(this._dispatchArgs, 24);
         run('finish', this._drawArgsGroup);
         pass.dispatchWorkgroups(1);
         pass.end();
@@ -314,20 +340,20 @@ export class GrassPass {
     /** For measuring: patches and blades per band of the last frame (reads back, slow). */
     async counts() {
         const read = this.device.createBuffer({ size: 16 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-        const readCounters = this.device.createBuffer({ size: COUNTER_WORDS * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const readCounters = this.device.createBuffer({ size: CTRL.GENLIST * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
         const e = this.device.createCommandEncoder();
         e.copyBufferToBuffer(this._args, 0, read, 0, 64);
-        e.copyBufferToBuffer(this._counters, 0, readCounters, 0, COUNTER_WORDS * 4);
+        e.copyBufferToBuffer(this._control, 0, readCounters, 0, CTRL.GENLIST * 4);
         this.device.queue.submit([e.finish()]);
         await Promise.all([read.mapAsync(GPUMapMode.READ), readCounters.mapAsync(GPUMapMode.READ)]);
         const a = new Uint32Array(read.getMappedRange().slice(0)), k = new Uint32Array(readCounters.getMappedRange().slice(0));
         read.destroy();
         readCounters.destroy();
-        return { patches: k[0], blades: [k[1], k[2], k[3]], drawn: [a[5], a[9], a[13]], vertices: [a[4], a[8], a[12]] };
+        return { patches: k[0], blades: [k[1], k[2], k[3]], drawn: [a[5], a[9], a[13]], vertices: [a[4], a[8], a[12]], kept: k[CTRL.STORE], made: k[CTRL.GEN] };
     }
 
     destroy() {
-        for (const b of [this._frameBuffer, this._patches, this._counters, this._blades, this._dispatchArgs, this._args]) b?.destroy();
+        for (const b of [this._frameBuffer, this._patches, this._control, this._store, this._bandIndex, this._patchHash, this._dispatchArgs, this._args]) b?.destroy();
         this._ready = false;
     }
 }
