@@ -11,6 +11,7 @@ import { createGroundMaterials } from './materials/groundMaterials.js';
 import { TerrainLightMap } from './light/TerrainLightMap.js';
 import { TerrainPass } from './draw/TerrainPass.js';
 import { GrassPass } from '../grass/GrassPass.js';
+import { createGrassGrain } from '../grass/grassGrain.js';
 import { usesBiomeLandscape } from '../../world/terrain-generator/biomeLandscapeConfig.js';
 import { aerialFadeRange } from './shaders/webgpu/terrainChunkFragmentShaderBuilder.js';
 import { computeSolidTierFadeDistances } from '../../world/quadtree/solidTierFade.js';
@@ -98,9 +99,12 @@ export class QuadtreeTerrainRenderer {
         // As the materials do (terrainMaterialBuilder.js enableBiomeClimate).
         const terrain = this.planetConfig?.terrainGeneration;
         const biome = usesBiomeLandscape(terrain) && textures.climate?._isArray === true && textures.climate._isFilterable === true ? terrain.biomeLandscape : null;
+        // The grain of grass far off (grassGrain.js): worn by the terrain's grass, and by the far blades.
+        const grassConfig = this.engineConfig.rendering?.grass;
+        if (grassConfig?.enabled && !this._grain) this._grain = createGrassGrain(this.backend.device);
         const pass = new TerrainPass({
             device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground, landLight: this._landLight,
-            planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments), biome,
+            planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments), biome, grain: this._grain ?? null,
             meshes: Array.from({ length: this._maxGeomLOD + 1 }, (_, lod) => this._geometries.get(lod).index.data),
         });
         try {
@@ -112,11 +116,10 @@ export class QuadtreeTerrainRenderer {
             return;
         }
         // Grass blades over the ground the pass draws (rendering.grass).
-        const grassConfig = this.engineConfig.rendering?.grass;
         if (grassConfig?.enabled && GrassPass.supported(this.backend.device, this.tileManager)) {
             const grass = new GrassPass({
                 device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground,
-                landLight: this._landLight, planetConfig: this.planetConfig, biome, config: grassConfig,
+                landLight: this._landLight, planetConfig: this.planetConfig, biome, config: grassConfig, grain: this._grain,
             });
             try {
                 await grass.initialize();
@@ -595,6 +598,8 @@ export class QuadtreeTerrainRenderer {
         this.pass = null;
         this.grass?.destroy();
         this.grass = null;
+        this._grain?.destroy();
+        this._grain = null;
         this._ground?.destroy();
         this._ground = null;
         this._landLight?.dispose();

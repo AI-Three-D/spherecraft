@@ -101,6 +101,7 @@ export class TerrainPass {
                 ...[7, 8, 9].map(i => at(i, F, { sampler: {} })),
                 at(10, F, array), at(11, F, uniform), at(12, F, { texture: { sampleType: 'float' } }),
                 ...(this.biome ? [at(13, F, array)] : []),
+                ...(this.grain ? [at(this._grainBinding(), F, { texture: { sampleType: 'float' } })] : []),
             ]),
             none: layout([]),
             water: layout([
@@ -137,6 +138,9 @@ export class TerrainPass {
         this._ready = true;
     }
 
+    /** The grass grain's binding in the ground group (grassGrain.js): after the climate, when there is one. */
+    _grainBinding() { return this.biome ? 14 : 13; }
+
     _key(kind, wet, rain) { return `${kind}${wet ? ' wet' : ''}${rain ? ' rain' : ''}${this.options.half ? '' : ' full'}${this.options.exactAir ? ' exact' : ''}`; }
 
     _build(kind, wet, rain) {
@@ -147,6 +151,7 @@ export class TerrainPass {
             faceSizeMeters: 2 * this.planetConfig.radius, ...KIND_OPTIONS[kind], water: wet, rain,
             half: this.options.half && device.features.has('shader-f16'), exactAir: this.options.exactAir,
             fineEndMeters: this.shaderConfig.groundFineEndMeters, deepEndMeters: this.shaderConfig.groundDeepEndMeters, biome: this.biome ?? null,
+            grain: this.grain ? this._grainBinding() : null,
         });
         const made = device.createRenderPipelineAsync({
             label: `Terrain ${key}`, layout: wet ? this._wetLayout : this._dryLayout,
@@ -194,6 +199,7 @@ export class TerrainPass {
             this._groundOf = ground;
             this._groundGroup = device.createBindGroup({ layout: this._layouts.ground, entries: entries([
                 ...views, this.ground.albedoView, this.ground.surfaceView, this.ground.sampler, this.ground.wideSampler, this._sampler, this.air.view, this.air.frame, lut, ...climate,
+                ...(this.grain ? [this.grain.view] : []),
             ]) });
         }
         const land = this.landLight.resources;

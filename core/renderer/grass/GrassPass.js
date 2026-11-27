@@ -53,7 +53,7 @@ export const GRASS_DEFAULTS = Object.freeze({
 export class GrassPass {
     /**
      * @param {object} o device, backend, tileManager, ground (createGroundMaterials), landLight (TerrainLightMap),
-     *   planetConfig, biome (landscape rules or null), config (rendering.grass)
+     *   planetConfig, biome (landscape rules or null), config (rendering.grass), grain (createGrassGrain)
      */
     constructor(o) {
         Object.assign(this, o);
@@ -99,7 +99,7 @@ export class GrassPass {
             ground: device.createBindGroupLayout({ entries: [
                 at(0, C, { texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }),
                 at(1, C, array), at(2, C, array), at(3, C, array), at(4, C, { sampler: {} }), at(5, C, { sampler: {} }),
-                at(6, C, { buffer: { type: 'uniform' } }), at(7, C, array), at(8, C, array),
+                at(6, C, { buffer: { type: 'uniform' } }), at(7, C, array), at(8, C, array), at(9, C, { texture: { sampleType: 'float' } }),
             ] }),
             draw: device.createBindGroupLayout({ entries: [
                 at(0, V | F, { buffer: { type: 'uniform' } }), at(1, V, { buffer: { type: 'read-only-storage' } }),
@@ -140,7 +140,7 @@ export class GrassPass {
         const view = name => textures[name]?._gpuTexture?.view;
         const land = this.landLight.resources;
         const parts = [view('height'), view('normal'), (this.biome && view('climate')) || view('normal'), this.ground.surfaceView,
-            this.ground.wideSampler, this._clamp, land.frame, land.map, view('splatIndex')];
+            this.ground.wideSampler, this._clamp, land.frame, land.map, view('splatIndex'), this.grain.view];
         if (parts.some(p => !p)) return false;
         if (this._groundOf && this._groundOf.every((x, i) => x === parts[i])) return true;
         this._groundOf = parts;

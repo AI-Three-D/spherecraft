@@ -274,3 +274,15 @@ export async function stillChange(frames = 8) {
     }
     return +(s / n).toFixed(2);
 }
+
+// A view at a height over the meadow, bearing turned from the sun: 'root' 0.45 m, 'stand' 1.8 m, 'high' 8 m, 'over' 15 m.
+export const HEIGHTS = { root: [0.45, -3], stand: [1.8, -10], high: [8, -12], over: [15, -16] };
+export async function view(name, { dir = POSES.grassland, turn = 120, aheadM = 150, sun = 0.55 } = {}) {
+    sunAt(dir, sun);
+    await frames(4);
+    const [eye, pitch] = HEIGHTS[name];
+    await eyeAt(dir, { eye, pitch, bearing: sunBearing(dir) + turn, aheadM });
+    await settle(30000);
+    await wait(900);
+    return window.gpuErrors.length;
+}

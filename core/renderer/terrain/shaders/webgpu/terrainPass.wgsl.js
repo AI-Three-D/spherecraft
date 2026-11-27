@@ -12,6 +12,7 @@ import { GROUND_WRAP_SHARE } from './groundSurface.wgsl.js';
 import { biomeCoverWGSL, unpackBiomeIceWGSL } from '../../../../../templates/terrain-shaders/biomeLandscape.wgsl.js';
 import { buildEdgeStitchWGSL, CUBE_POINT_WGSL, SAMPLE_HEIGHT_WGSL } from './terrainChunkVertexShaderBuilder.js';
 import { GRASS_HUE_WGSL } from '../../../grass/grassHue.wgsl.js';
+import { GRAIN_LATTICES } from '../../../grass/grassGrain.js';
 
 export const TERRAIN_PASS_FLOATS = 60;
 /** The ground's daylight, in the shader's floats h, h2, h3 (the grass blades far off take it too: grassWgsl.js). Needs step3. */
@@ -39,7 +40,11 @@ fn lightAt(n: h3, shape: h3, up: h3, sunDir: h3, sun: h3, ambient: h3, open: h, 
  * grass share, Beer-Lambert), and its brightness against the ground's grass colour. Fitted to the blades so that the
  * ground they hand over to looks as they do (tools/perf/grass/).
  */
-export const GRASS_CANOPY = Object.freeze({ depth: 2.0, gain: 1.0, glow: 0.6, hotspot: 0.18 });
+export const GRASS_CANOPY = Object.freeze({
+    depth: 2.0, gain: 1.0, glow: 0.6, hotspot: 0.18,
+    // Light through the blades: from behind (by the facing), toward the sun, and its tint (grassWgsl.js fsMain alike).
+    back: 0.55, toward: 0.45, tint: [1.1, 1.2, 0.8],
+});
 
 const FRAME_WGSL = /* wgsl */`
 struct Frame {
@@ -189,7 +194,7 @@ const table = (name, type, rows) => `const ${name} = array<${type}, ${rows.lengt
  * biome: the landscape's rules (biomeLandscapeConfig.js): what the ground is made of follows the tile's climate, not the
  * splat's families (groundSurface.wgsl.js biomeLandscape).
  */
-export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null }) {
+export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null, grain = null }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const deep = fine && deepEndMeters > 0;
@@ -220,6 +225,8 @@ ${FRAME_WGSL}${AIR_FRAME_WGSL}
 @group(1) @binding(11) var<uniform> air: AirFrame;
 @group(1) @binding(12) var transmittanceLUT: texture_2d<f32>;
 ${biome ? '@group(1) @binding(13) var climateMap: texture_2d_array<f32>;' : ''}
+${grain !== null ? `@group(1) @binding(${grain}) var grassGrain: texture_2d<f32>;
+${GRAIN_LATTICES.map((n, i) => `const GRAIN${i} = ${vector(L.over(n))};`).join('\n')}` : ''}
 ${exactAir ? getAerialPerspectiveWGSL() : AIR_READ_WGSL}
 ${water ? createWaterWgsl({ group: 2, riverField: true }) : ''}
 ${biome ? `${halfCover(biomeCoverWGSL(biome))}
@@ -330,6 +337,8 @@ fn main(in: In) -> @location(0) vec4<f32> {
     var rough: h = 0.8;
     var wet: h = 0.35;
     var pool: h = 0.0;
+    // The grass grain's coordinates bent by the ground's own patterns, so that its repeats never stand in rows.
+    var grainWarp = vec2<f32>(0.0);
     // The hue of the grass by climate, on the grass share (grassWgsl.js grassHue; the blades take it alike).
     var grassTint = h3(1.0);
     // The grass blades' own colour here (grassWgsl.js), for the canopy past them.
@@ -358,6 +367,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
         if (distance < 9000.0) {
             a = mix(h4(textureSampleGrad(groundSurface, wideSampler, uvA, ${W.masks} + i32(lie.x), axA, ayA)), a, h(smoothstep(5000.0, 9000.0, distance)));
         }
+        grainWarp = (vec2<f32>(a.xy) - 0.5) * 14.0 + wideBend * 0.1;
         let edge = 0.6 * (a.x - 0.5) + 0.5 * (b.y - 0.5) + 0.35 * (a.y - 0.5);
         ${biome ? `
         // What covers the ground follows the tile's climate: temperature, humidity, glacier ice, bedrock (biomeLandscape.wgsl.js).
@@ -637,7 +647,7 @@ fn main(in: In) -> @location(0) vec4<f32> {
         // Seen from above, a gap shows the soil in the sun, not the shade deep among the blades.
         let under = saturate(leaf) * h(1.0 - smoothstep(frame.grassReach * 0.1, frame.grassReach * 0.3, distance))
             * (1.0 - step3(0.15, 0.5, dot(toEye, up)) * h(smoothstep(6.0, 16.0, distance)));
-        albedo *= mix(h3(1.0), h3(0.50, 0.55, 0.46), under);
+        albedo *= mix(h3(1.0), h3(0.40, 0.44, 0.36), under);
         canopyFade = h(smoothstep(frame.grassReach * 0.1, frame.grassReach * 0.3, distance));
     }
     // Past the blades the ground takes the grass canopy's look. A sight line at a slant meets blades sooner: the share
@@ -653,6 +663,20 @@ fn main(in: In) -> @location(0) vec4<f32> {
     albedo = mix(albedo, canopyAlbedo * (h(${number(GRASS_CANOPY.gain)}) * mix(h(1.0), detail, 0.5)), max(canopySeen - grassShare * canopyFade, h(0.0)))
         * mix(1.0, h(${number(GRASS_CANOPY.gain)}), grassShare * canopyFade);
     leaf = max(leaf, canopySeen);
+    ${grain !== null ? `
+    // The grain of grass far off (grassGrain.js): tufts, the dark between them, straw and clumps, as the blades past a
+    // sixth of their reach take it too, so that the field stays grassy where they end. Fine, and tussocks; mean 1, so
+    // the mips take it away far off without a change of colour. From above the gaps show more.
+    let grainShare = grassShare * h(smoothstep(frame.grassReach * 0.05, frame.grassReach * 0.2, distance))
+        * h(1.0 - smoothstep(1500.0, 4000.0, distance));
+    if (grainShare > 0.0) {
+        let gp = in.ground.xy + grainWarp;
+        let g0 = textureSampleGrad(grassGrain, groundSampler, turnedUv(GRAIN0, gp), turnedUv(GRAIN0, dx.xy), turnedUv(GRAIN0, dy.xy)).rgb;
+        let g1 = textureSampleGrad(grassGrain, groundSampler, turnedUv(GRAIN1, gp), turnedUv(GRAIN1, dx.xy), turnedUv(GRAIN1, dy.xy)).rgb;
+        // Contrast raised a little: the soft far mips would otherwise flatten it into the field's tone.
+        let grain = max(h3(1.0) + h(1.35) * (h3(g0) * mix(h3(1.0), h3(g1), 0.75) - 1.0), h3(0.25));
+        albedo *= mix(h3(1.0), grain, grainShare * mix(h(0.65), 1.0, step3(0.05, 0.4, slant)));
+    }` : ''}
     var shape = mix(up, tileNormal, h(1.0 - smoothstep(frame.normalStart, frame.normalEnd, distance)));
     shape = normalize(select(shape, -shape, dot(shape, up) < 0.0));
     var n = normalize(shape - (gradient - shape * dot(gradient, shape)));
@@ -673,10 +697,10 @@ fn main(in: In) -> @location(0) vec4<f32> {
     // As the blades far off (grassWgsl.js fsMain): light through them from behind, strongest toward the sun, and the
     // hotspot, where with the sun behind the viewer the canopy's shadows hide behind the blades that cast them.
     let sunDir = h3(frame.sunDir);
-    let grassThrough = 0.8 * max(-dot(velvet, sunDir), 0.0) + 0.7 * pow(saturate(dot(-toEye, sunDir)), 5.0);
+    let grassThrough = h(${number(GRASS_CANOPY.back)}) * max(-dot(velvet, sunDir), 0.0) + h(${number(GRASS_CANOPY.toward)}) * pow(saturate(dot(-toEye, sunDir)), 5.0);
     let hotspot = pow(saturate(dot(toEye, sunDir)), 3.0);
     color = mix(color, color * (1.0 + h(${number(GRASS_CANOPY.hotspot)}) * hotspot), canopySeen)
-        + h3(frame.sun) * land.x * canopyAlbedo * h3(1.15, 1.35, 0.75) * (h(${number(GRASS_CANOPY.glow)}) * grassThrough * canopySeen);
+        + h3(frame.sun) * land.x * canopyAlbedo * h3(${GRASS_CANOPY.tint.map(number).join(', ')}) * (h(${number(GRASS_CANOPY.glow)}) * grassThrough * canopySeen);
     ${rain ? `
     if (wetness > 0.0) {
         // A film of water over it, a mirror in the puddles.
