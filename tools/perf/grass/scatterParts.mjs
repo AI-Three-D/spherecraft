@@ -27,6 +27,14 @@ const VARIANTS = {
     'range 160 m': [{}, { distance: 160 }, true],
     'range 120 m': [{}, { distance: 120 }, true],
     'density x0.6': [{}, { density: 900 }, true],
+    // Rows per blade by band (near, middle, far): how much of the draw is vertices.
+    'rows 7/4/1': [{}, {}, true, { segments: [7, 4, 1] }],
+    'rows 5/3/2': [{}, {}, true, { segments: [5, 3, 2] }],
+    'rows 7/4/3': [{}, {}, true, { segments: [7, 4, 3] }],
+    'rows 7/4/4': [{}, {}, true, { segments: [7, 4, 4] }],
+    'rows 7/2/2': [{}, {}, true, { segments: [7, 2, 2] }],
+    'rows 7/3/3': [{}, {}, true, { segments: [7, 3, 3] }],
+    'rows 6/3/4': [{}, {}, true, { segments: [6, 3, 4] }],
 };
 
 const server = spawn('python3', [path.join(root, 'tools/perf/lakeRecovery/noCacheServer.py'), String(PORT), root], { stdio: 'ignore' });

@@ -29,14 +29,16 @@ export const PATCH_LEVELS = 6;
 export const CELLS = 48;
 export const MAX_FACES = 3;
 export const GRID_MAX = 256;
-/** Strip segments of a blade by distance band, and how many blades each band holds at most. */
-export const LOD_SEGMENTS = [7, 4, 2];
+/** Strip segments of a blade by distance band, and how many blades each band holds at most. Three rows far off, not two:
+ * 0.4 ms less at standing height on an M1 Pro, the same from above, the picture the same (GRASS_FINDINGS.md); one row
+ * cost 3.5 ms more. */
+export const LOD_SEGMENTS = [7, 4, 3];
 export const LOD_CAPACITY = [131072, 262144, 524288];
 /** A tuft's blade as the cache keeps it (3 x vec4<u32>), and a patch's record of this frame (4 x vec4<u32>). */
 export const RECORD_WORDS = 12;
 export const PATCH_WORDS = 16;
 /** Blades the cache holds, each of its two halves (this frame's, last frame's); entries of each half of its patch table. */
-export const STORE_CAP = 655360;
+export const STORE_CAP = 786432;
 export const HASH_CAP = 8192;
 /** The control words: counts (0 patches, 1-3 blades per band, 4 blades kept, 5 patches to make), then the halves' blade
  * counts (kept from frame to frame), the list of patches to make, and where last frame's patches are now. */
@@ -543,7 +545,7 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     let key1 = u32(P.y);
     let stamp0 = (headY & ~15u) | (bucket << 24u);
     let stamp1 = u32(tile.x);
-    insertPatch(key0, key1, stamp0, stamp1, slotOut);
+    patches[slotOut * 4u + 1u].w = insertPatch(key0, key1, stamp0, stamp1, slotOut);
     let before = findPrevious(key0, key1);
     if (before >= 0 && atomicLoad(&patchHash[u32(before) + 2u]) == stamp0 && atomicLoad(&patchHash[u32(before) + 3u]) == stamp1) {
         atomicStore(&control[CTRL_REMAP + atomicLoad(&patchHash[u32(before) + 4u])], slotOut + 1u);
@@ -556,7 +558,9 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
 fn patchHashIndex(key0: u32, key1: u32) -> u32 {
     return ((key0 * 0x9E3779B1u) ^ (key1 * 0x85EBCA77u) ^ (key0 >> 15u)) & (HASH_CAP - 1u);
 }
-fn insertPatch(key0: u32, key1: u32, stamp0: u32, stamp1: u32, slot: u32) {
+// The entry's first word, or NO_ENTRY when the table is full.
+const NO_ENTRY: u32 = 0xFFFFFFFFu;
+fn insertPatch(key0: u32, key1: u32, stamp0: u32, stamp1: u32, slot: u32) -> u32 {
     let base = frame.cache.x * HASH_CAP;
     var i = patchHashIndex(key0, key1);
     for (var n = 0u; n < HASH_CAP; n++) {
@@ -567,11 +571,18 @@ fn insertPatch(key0: u32, key1: u32, stamp0: u32, stamp1: u32, slot: u32) {
             atomicStore(&patchHash[at + 2u], stamp0);
             atomicStore(&patchHash[at + 3u], stamp1);
             atomicStore(&patchHash[at + 4u], slot);
-            return;
+            return at;
         }
         // A weak exchange may fail for no reason: the same entry again.
         if (r.old_value != 0u) { i = (i + 1u) & (HASH_CAP - 1u); }
     }
+    return NO_ENTRY;
+}
+// A patch whose blades did not all fit in the store this frame: next frame it is made again, not carried over with
+// the hole (a stamp no patch has).
+fn incomplete(slot: u32) {
+    let entry = patches[slot * 4u + 1u].w;
+    if (entry != NO_ENTRY) { atomicStore(&patchHash[entry + 2u], NO_ENTRY); }
 }
 // Last frame's entry of a patch (its first word), or -1.
 fn findPrevious(key0: u32, key1: u32) -> i32 {
@@ -623,11 +634,15 @@ fn copyMain(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     if (thread == 0u) { groupBase = atomicAdd(&control[CTRL_STORE], atomicLoad(&groupCount)); }
     workgroupBarrier();
     let at = groupBase + local;
-    if (local != 0xFFFFFFFFu && at < STORE_CAP) {
-        let to = (frame.cache.x * STORE_CAP + at) * 3u;
-        store[to] = vec4<u32>(r0.xyz, slot);
-        store[to + 1u] = r1;
-        store[to + 2u] = r2;
+    if (local != 0xFFFFFFFFu) {
+        if (at < STORE_CAP) {
+            let to = (frame.cache.x * STORE_CAP + at) * 3u;
+            store[to] = vec4<u32>(r0.xyz, slot);
+            store[to + 1u] = r1;
+            store[to + 2u] = r2;
+        } else {
+            incomplete(slot);
+        }
     }
 }
 
@@ -1008,7 +1023,7 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
         // In view? A ball about the tuft.
 
         let first = atomicAdd(&control[CTRL_STORE], several);
-        if (first + several > STORE_CAP) { continue; }
+        if (first + several > STORE_CAP) { incomplete(at); continue; }
 
         // The tuft's colour: the ground's own grass colour (so blades and ground agree), its hue by climate, the
         // fields' broad tone; brighter than the ground's mean, which holds soil and shade.
@@ -1149,14 +1164,12 @@ struct Out {
     @builtin(position) clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) along: vec2<f32>,                      // up the blade 0..1, across -1..1
-    @location(3) @interpolate(flat) albedo: vec4<f32>,  // colour, random
-    @location(4) @interpolate(flat) light: vec4<f32>,   // land's sun and sky, clump, how grassy
-    @location(5) @interpolate(flat) kind: vec2<f32>,    // kind, crowding
-    @location(6) flower: f32,                           // 1 on a flower or seed head
-    @location(7) axis: vec3<f32>,                       // along the blade
-    @location(8) petal: vec2<f32>,                      // on a flower's head: across, up (-1..1); far below on its stem
-    @location(9) shaded: vec3<f32>,                     // the light worked out at the vertex (perVertex)
+    // Up the blade 0..1; 1 on a flower or seed head; on a flower's head across and up (-1..1), far below on its stem.
+    @location(2) along: vec4<f32>,
+    // As selectMain packed them: colour (sqrt) and a random; the land's sun and sky, clump, how grassy; width, lean,
+    // crowding, kind. Few outputs: every vertex's are stored and read back (2-3 million a frame).
+    @location(3) @interpolate(flat) look: vec3<u32>,
+    ${perVertex ? '@location(4) shaded: vec3<f32>,                     // the light worked out at the vertex' : ''}
 };
 
 @vertex
@@ -1274,21 +1287,19 @@ fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance:
     out.clip = frame.clip * vec4<f32>(pos, 1.0);
     out.rel = pos;
     out.normal = normal;
-    out.along = vec2<f32>(select(t, 1.0, flowerDisc && flower > 0.5), sideSign);
-    let c = unpack4x8unorm(b.z);
-    out.albedo = vec4<f32>(c.rgb * c.rgb * 0.8, c.a);
-    out.light = unpack4x8unorm(b.w);
-    out.kind = vec2<f32>(f32(kind), look.z);
-    out.flower = flower;
-    out.axis = dp;
-    out.petal = petal;
+    out.along = vec4<f32>(select(t, 1.0, flowerDisc && flower > 0.5), flower, petal);
+    out.look = vec3<u32>(b.z, b.w, b.y);
     ${perVertex ? 'out.shaded = shadeBlade(out);' : ''}
     return out;
 }
 
 // A blade's light at a point of it (per pixel near; per vertex in the far bands: perVertex).
 fn shadeBlade(in: Out) -> vec3<f32> {
-    ${skip.shade ? 'return in.albedo.rgb * 2.0;' : ''}
+    let c4 = unpack4x8unorm(in.look.x);
+    let inAlbedo = vec4<f32>(c4.rgb * c4.rgb * 0.8, c4.a);
+    let inLight = unpack4x8unorm(in.look.y);
+    let inLook = unpack4x8unorm(in.look.z);
+    ${skip.shade ? 'return inAlbedo.rgb * 2.0;' : ''}
     let distance = length(in.rel);
     let V = -in.rel / max(distance, 0.001);
     var N = normalize(in.normal);
@@ -1296,24 +1307,25 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let L = frame.sunDir.xyz;
     let up = frame.up.xyz;
     let t = in.along.x;
-    let kind = u32(in.kind.x + 0.5);
-    let crowd = in.kind.y;
+    let kind = u32(inLook.w * 255.0 + 0.5);
+    let crowd = inLook.z;
+    let petalAt = in.along.zw;
     // A flower's head: its colour only there, a centre, the petals' edges a little darker.
-    let headIn = select(in.flower, smoothstep(-1.08, -0.92, in.petal.y), kind == 6u);
+    let headIn = select(in.along.y, smoothstep(-1.08, -0.92, petalAt.y), kind == 6u);
     let flower = headIn;
     // Far off a blade is a pixel: its own differences only flicker. Toward the mean with distance; the height ramp
     // fades to its mean too (every fake fades far, Black Ops 4).
     let calm = step3(16.0, 44.0, distance);
     // Stems of flowers and seed heads are green.
-    var headColor = in.albedo.rgb;
+    var headColor = inAlbedo.rgb;
     if (kind == 6u) {
-        let r = length(in.petal);
+        let r = length(petalAt);
         let white = min(min(headColor.r, headColor.g), headColor.b) > 0.4;
         let centre = select(headColor * 0.45, vec3<f32>(0.55, 0.36, 0.03), white);
         headColor = mix(centre, headColor, smoothstep(0.24, 0.34, r)) * mix(1.0, 0.78, smoothstep(0.65, 1.0, r));
     }
     // Stems of flowers and seed heads as green as the grass about them: dark, they stood as sticks.
-    var albedo = select(in.albedo.rgb, mix(vec3<f32>(0.10, 0.15, 0.045), headColor, flower), kind >= 5u);
+    var albedo = select(inAlbedo.rgb, mix(vec3<f32>(0.10, 0.15, 0.045), headColor, flower), kind >= 5u);
     let blade = kind < 5u || kind == ${KIND.LEAF}u;
     // Darker low in the blade, lighter toward the tip; dry grass bleaches at the tips. The ramp is the canopy's own
     // occlusion: the main reason a field looks deep.
@@ -1323,7 +1335,7 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let ramp = mix(mix(0.16 + 0.12 * (1.0 - crowd), 1.0, pow(saturate(t), 1.15)), mix(0.62, 1.0, saturate(t)), fromAbove);
     let tipTint = select(vec3<f32>(1.12, 1.07, 0.88), vec3<f32>(1.25, 1.18, 1.08), kind == 1u);
     if (blade) { albedo *= mix(vec3<f32>(1.0), tipTint, step3(0.55, 1.0, t)); }
-    albedo = mix(albedo, in.albedo.rgb * 0.95, 0.45 * calm * select(0.0, 1.0, blade));
+    albedo = mix(albedo, inAlbedo.rgb * 0.95, 0.45 * calm * select(0.0, 1.0, blade));
     // The hotspot: with the sun behind the viewer, the shadows in the canopy lie behind the blades that cast them.
     let hotspot = pow(saturate(dot(V, L)), 3.0);
     // Far off a blade keeps a little of its ramp: dark roots between tufts are what make a distant field read as grass.
@@ -1334,8 +1346,8 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let NdotL = dot(N, L);
     // The sun reaches low parts of the canopy less, the more so the lower it stands.
     let depth = 1.0 - t;
-    let canopy = exp(-depth * (1.0 + 1.8 * crowd) * mix(1.6, 0.6, saturate(sunUp)) * in.light.w);
-    let sunSeen = in.light.x * mix(mix(mix(0.2, 1.0, canopy), 1.0, 0.75 * hotspot), 0.92, calm);
+    let canopy = exp(-depth * (1.0 + 1.8 * crowd) * mix(1.6, 0.6, saturate(sunUp)) * inLight.w);
+    let sunSeen = inLight.x * mix(mix(mix(0.2, 1.0, canopy), 1.0, 0.75 * hotspot), 0.92, calm);
     let diffuse = max(NdotL, 0.0);
     // Light through the blade from behind, strongest looking toward the sun: without it grass is far too dark.
     let back = max(-NdotL, 0.0);
@@ -1344,7 +1356,7 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let through = (back * ${n(GRASS_CANOPY.back)} + glow * ${n(GRASS_CANOPY.toward)}) * thin * albedo * ${v3(GRASS_CANOPY.tint)} * select(1.0, 1.3, flower > 0.5 && kind == ${KIND.BLOSSOM}u);
     // A thin waxy highlight along the blade (the rounded normal makes it a line), faded very near and far.
     let H = normalize(L + V);
-    let gloss = mix(24.0, 70.0, in.albedo.a);
+    let gloss = mix(24.0, 70.0, inAlbedo.a);
     let sheen = pow(max(dot(N, H), 0.0), gloss) * 0.12 * (0.3 + 0.7 * t) * step3(0.6, 2.5, distance) * (1.0 - calm)
         * select(1.0, 0.25, kind == 1u || flower > 0.5);
 
@@ -1354,7 +1366,7 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let sky = dot(sun, vec3<f32>(0.333)) * 0.34 * day * mix(vec3<f32>(1.0), skyTint, 0.8);
     let overhead = 0.55 + 0.45 * dot(N, up);
     let bounce = sun * max(sunUp, 0.0) * vec3<f32>(0.115, 0.105, 0.070) * (0.6 + 0.4 * depth);
-    let open = in.light.y;
+    let open = inLight.y;
     let lit = sun * (diffuse * albedo + through + sheen) * sunSeen + albedo * (ambient + sky * overhead * open + bounce);
     let night = albedo * vec3<f32>(mix(0.30, 0.06, day));
     let own = max(lit, night) * occlusion;
@@ -1365,8 +1377,8 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     if (far <= 0.0) { return own; }
     let velvet = normalize(V - up * dot(V, up) + up);
     let nC = normalize(up + 0.5 * (velvet - up));
-    let land = vec2<f32>(in.light.x, open);
-    let share = in.light.w;
+    let land = vec2<f32>(inLight.x, open);
+    let share = inLight.w;
     let gc = grassCanopy(${n(GRASS_CANOPY.depth)} * share / max(dot(V, up), 0.02), grassSunDepth(sunUp, share, V, L), ${n(GRASS_CANOPY.ramp)});
     let sunShare = 0.65 * land.x * step3(0.0, 0.25, sunUp);
     let canopyLit = albedo * lightAt(nC, up, up, L, sun, ambient, 0.8, 1.0, land);

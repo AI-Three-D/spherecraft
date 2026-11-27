@@ -230,8 +230,12 @@ export class GrassPass {
         // Bend at the tip per metre of height (gusts on top), and the sway's size: grass leans well over in a gale but
         // never lies flat, and sways a little even in still air.
         f.set([dot(wind, east), dot(wind, north), 0.75 * clamp(windSpeed / 22, 0, 1), 0.015 + 0.03 * clamp(windSpeed / 12, 0, 1)], 60);
-        const pixelFrom = 0.011 / ((c.thinPixels ?? c.minPixels) * pixelAngle);
+        // Past 1440 pixels high the far tufts are not made more (the store holds about 1440's): they widen instead.
+        const pixelFrom = 0.011 / ((c.thinPixels ?? c.minPixels) * Math.max(pixelAngle, 2 * Math.tan(fov / 2) / 1440));
         f.set([c.distance, c.density, c.thinFrom, pixelFrom], 64);
+        // What the kept tufts were made for (how many a patch holds): other settings, or pixels 15 % another size (a
+        // resize, a zoom), and they are all made again.
+        const madeFor = `${c.distance}|${c.density}|${c.thinFrom}|${Math.round(Math.log(pixelFrom) / Math.log(1.15))}`;
         f.set([c.bands[0], c.bands[1], c.minPixels, c.maxWiden], 68);
         f.set([...camRel, seaLevel ?? -1.0e9], 72);
 
@@ -289,7 +293,12 @@ export class GrassPass {
         // This frame's counts, where last frame's patches are now, this frame's half of the patch table.
         encoder.clearBuffer(this._control, 0, CTRL.PERSIST * 4);
         encoder.clearBuffer(this._control, CTRL_REMAP * 4, MAX_PATCHES * 4);
-        encoder.clearBuffer(this._patchHash, this._parity * HASH_CAP * 32, HASH_CAP * 32);
+        if (madeFor !== this._madeFor) {
+            encoder.clearBuffer(this._patchHash);
+            this._madeFor = madeFor;
+        } else {
+            encoder.clearBuffer(this._patchHash, this._parity * HASH_CAP * 32, HASH_CAP * 32);
+        }
         // For measuring the steps apart (splitPasses): each its own pass, timed by its label.
         let pass = encoder.beginComputePass({ label: this.splitPasses ? 'Grass patches' : 'Grass scatter' });
         const run = (name, group) => { pass.setPipeline(this._steps[name]); pass.setBindGroup(0, group); pass.setBindGroup(1, this._groundGroup); };
