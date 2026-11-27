@@ -240,6 +240,17 @@ export class GrassPass {
         f.set([s.x / sl, s.y / sl, s.z / sl, this._time], 48);
         f.set([sunColor.r * sunI, sunColor.g * sunI, sunColor.b * sunI, windSpeed], 52);
         f.set([amb.r * ambI, amb.g * ambI, amb.b * ambI, pixelAngle], 56);
+        // What every blade pixel shares this frame (grassWgsl.js shadeBlade): the sky's light and the day, the ground's
+        // bounce, how deep the sun reaches into the canopy for its height.
+        {
+            const sunRgb = [sunColor.r * sunI, sunColor.g * sunI, sunColor.b * sunI], ambRgb = [amb.r * ambI, amb.g * ambI, amb.b * ambI];
+            const sunUp = dot(up, [s.x / sl, s.y / sl, s.z / sl]);
+            const t = Math.min(1, Math.max(0, (sunUp + 0.10) / 0.30)), day = t * t * (3 - 2 * t);
+            const ambMean = Math.max(dot(ambRgb, [0.333, 0.333, 0.333]), 1e-4), sunMean = dot(sunRgb, [0.333, 0.333, 0.333]);
+            f.set([0, 1, 2].map(i => sunMean * 0.34 * day * (0.2 + 0.8 * ambRgb[i] / ambMean)).concat(day), 88);
+            const bounceRgb = [0.115, 0.105, 0.070];
+            f.set([0, 1, 2].map(i => sunRgb[i] * Math.max(sunUp, 0) * bounceRgb[i]).concat(1.6 + (0.6 - 1.6) * Math.min(1, Math.max(0, sunUp))), 92);
+        }
         // Bend at the tip per metre of height (gusts on top), and the sway's size: grass leans well over in a gale but
         // never lies flat, and sways a little even in still air.
         f.set([dot(wind, east), dot(wind, north), 0.75 * clamp(windSpeed / 22, 0, 1), 0.015 + 0.03 * clamp(windSpeed / 12, 0, 1)], 60);
@@ -283,7 +294,7 @@ export class GrassPass {
             // The gusts' field is in the face's own metres (grassWgsl.js q): a patch is nominally this long.
             const nominal = 2 * R / patchesPerFace;
             const carried = [dot(this._carried, ex) * nominal / mx, dot(this._carried, ey) * nominal / my];
-            const o = 88 + faces * 28;
+            const o = 96 + faces * 28;
             f.set([...ca, la], o);
             f.set([...du, face], o + 4);
             f.set([...dv, Math.max(mx, my)], o + 8);

@@ -50,7 +50,7 @@ export const MAX_PATCHES = 65536;
 /** Tallest blade (m) and widest (m) the packed form holds. */
 export const MAX_HEIGHT = 2.0;
 export const MAX_WIDTH = 0.05;
-export const FRAME_FLOATS = 88 + MAX_FACES * 28;
+export const FRAME_FLOATS = 96 + MAX_FACES * 28;
 export const CONTROL_WORDS = CTRL.GENLIST + 2 * MAX_PATCHES;
 export const CTRL_REMAP = CTRL.GENLIST + MAX_PATCHES;
 /** Every sway's rate is a whole number of turns in this many seconds, so time can wrap at it without a jump. */
@@ -91,6 +91,8 @@ struct Frame {
     counts: vec4<u32>,             // faces, deepest tile level, hash mask, hash capacity
     visible: vec4<u32>,            // the drawn tiles' table: mask, capacity, this frame's epoch; coarsest mesh level
     cache: vec4<u32>,              // which half of the cache is this frame's (0 or 1)
+    light: vec4<f32>,              // the same for every blade pixel this frame (GrassPass.js): the sky's light, the day
+    bounce: vec4<f32>,             // the ground's bounce (before the depth in the canopy), the sun's depth factor in it
     faces: array<Face, ${MAX_FACES}>,
 };
 `;
@@ -1394,35 +1396,40 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     if (blade) { albedo *= mix(vec3<f32>(1.0), tipTint, step3(0.55, 1.0, t)); }
     albedo = mix(albedo, inAlbedo.rgb * 0.95, 0.45 * calm * select(0.0, 1.0, blade));
     // The hotspot: with the sun behind the viewer, the shadows in the canopy lie behind the blades that cast them.
-    let hotspot = pow(saturate(dot(V, L)), 3.0);
+    let toward = saturate(dot(V, L));
+    let hotspot = toward * toward * toward;
     // Far off a blade keeps a little of its ramp: dark roots between tufts are what make a distant field read as grass.
     let occlusion = mix(mix(ramp, 1.0, 0.35 * hotspot), mix(0.66 + 0.12 * hotspot, ramp, 0.3), 0.7 * calm);
 
     let sunUp = dot(up, L);
-    let day = step3(-0.10, 0.20, sunUp);
+    let day = frame.light.w;
     let NdotL = dot(N, L);
     // The sun reaches low parts of the canopy less, the more so the lower it stands.
     let depth = 1.0 - t;
-    let canopy = exp(-depth * (1.0 + 1.8 * crowd) * mix(1.6, 0.6, saturate(sunUp)) * inLight.w);
+    let canopy = exp(-depth * (1.0 + 1.8 * crowd) * frame.bounce.w * inLight.w);
     let sunSeen = inLight.x * mix(mix(mix(0.2, 1.0, canopy), 1.0, 0.75 * hotspot), 0.92, calm);
     let diffuse = max(NdotL, 0.0);
     // Light through the blade from behind, strongest looking toward the sun: without it grass is far too dark.
     let back = max(-NdotL, 0.0);
-    let glow = pow(saturate(dot(-V, L)), 5.0);
+    let away = saturate(-dot(V, L));
+    let away2 = away * away;
+    let glow = away2 * away2 * away;
     let thin = select(0.6, 0.42, kind == 1u || kind == 3u || kind == 5u);
     let through = (back * ${n(GRASS_CANOPY.back)} + glow * ${n(GRASS_CANOPY.toward)}) * thin * albedo * ${v3(GRASS_CANOPY.tint)} * select(1.0, 1.3, flower > 0.5 && kind == ${KIND.BLOSSOM}u);
     // A thin waxy highlight along the blade (the rounded normal makes it a line), faded very near and far.
-    let H = normalize(L + V);
-    let gloss = mix(24.0, 70.0, inAlbedo.a);
-    let sheen = pow(max(dot(N, H), 0.0), gloss) * 0.12 * (0.3 + 0.7 * t) * step3(0.6, 2.5, distance) * (1.0 - calm)
-        * select(1.0, 0.25, kind == 1u || flower > 0.5);
+    var sheen = 0.0;
+    if (calm < 1.0) {
+        let H = normalize(L + V);
+        let gloss = mix(24.0, 70.0, inAlbedo.a);
+        sheen = pow(max(dot(N, H), 0.0), gloss) * 0.12 * (0.3 + 0.7 * t) * step3(0.6, 2.5, distance) * (1.0 - calm)
+            * select(1.0, 0.25, kind == 1u || flower > 0.5);
+    }
 
     let sun = frame.sunColor.rgb;
     let ambient = frame.ambient.rgb;
-    let skyTint = ambient / max(dot(ambient, vec3<f32>(0.333)), 1.0e-4);
-    let sky = dot(sun, vec3<f32>(0.333)) * 0.34 * day * mix(vec3<f32>(1.0), skyTint, 0.8);
+    let sky = frame.light.rgb;
     let overhead = 0.55 + 0.45 * dot(N, up);
-    let bounce = sun * max(sunUp, 0.0) * vec3<f32>(0.115, 0.105, 0.070) * (0.6 + 0.4 * depth);
+    let bounce = frame.bounce.rgb * (0.6 + 0.4 * depth);
     let open = inLight.y;
     let lit = sun * (diffuse * albedo + through + sheen) * sunSeen + albedo * (ambient + sky * overhead * open + bounce);
     let night = albedo * vec3<f32>(mix(0.30, 0.06, day));
@@ -1439,7 +1446,7 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let gc = grassCanopy(${n(GRASS_CANOPY.depth)} * share / max(dot(V, up), 0.02), grassSunDepth(sunUp, share, V, L), ${n(GRASS_CANOPY.ramp)});
     let sunShare = 0.65 * land.x * step3(0.0, 0.25, sunUp);
     let canopyLit = albedo * lightAt(nC, up, up, L, sun, ambient, 0.8, 1.0, land);
-    let grassThrough = ${n(GRASS_CANOPY.back)} * max(-dot(velvet, L), 0.0) + ${n(GRASS_CANOPY.toward)} * pow(saturate(dot(-V, L)), 5.0);
+    let grassThrough = ${n(GRASS_CANOPY.back)} * max(-dot(velvet, L), 0.0) + ${n(GRASS_CANOPY.toward)} * glow;
     let ground = canopyLit * mix(gc.x, gc.y, sunShare)
         + sun * land.x * albedo * ${v3(GRASS_CANOPY.tint)} * (${n(GRASS_CANOPY.glow)} * grassThrough);
     // A blade's own light and shade stay a little: the field keeps its grain.
