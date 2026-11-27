@@ -6,7 +6,7 @@
 
 ## Seventh round (2026-11-27): less work, not profiled
 
-The GPU was in other use (Codex), so these are changes that do less work for the same picture, checked for correctness but not timed. Profile them with `grassBench.mjs` against `c8f403c`.
+The GPU was in other use (Codex), so these are changes that do less work for the same picture, checked for correctness but not timed. Profile them with `grassBench.mjs` against `3041d77` (the sixth round).
 
 | Change | Commit | What it saves | Checked |
 | --- | --- | --- | --- |
