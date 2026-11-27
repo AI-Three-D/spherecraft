@@ -851,7 +851,7 @@ export class EngineConfig {
 function createGrassConfig(raw = {}) {
   const config = requireObject(raw ?? {}, 'rendering.grass');
   const out = { enabled: requireBool(config.enabled ?? false, 'rendering.grass.enabled') };
-  for (const key of ['distance', 'density', 'thinFrom', 'minPixels', 'maxWiden']) {
+  for (const key of ['distance', 'density', 'thinFrom', 'minPixels', 'maxWiden', 'thinPixels']) {
     if (config[key] !== undefined) out[key] = requireNumber(config[key], `rendering.grass.${key}`);
   }
   if (config.bands !== undefined) {

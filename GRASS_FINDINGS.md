@@ -4,6 +4,25 @@
 
 **Not profiled yet.** The GPU was shared with another job all session, so no timing was taken. The ready-to-run measurement is `tools/perf/grass/grassBench.mjs`; the counts below are what it will be measuring.
 
+## Third round (2026-11-27): the shaking was the wind turning, and a third further
+
+**Shaking while standing still** ("most of the time violent, now and then a gentle sway"):
+- **Cause.** The gusts' pattern and the sway's phase were taken as the wind's direction times the place on the cube face, which is up to ~150 km from the face's corner. The weather turns the wind at up to 0.1 rad/s and picks a new way every few seconds. At that distance even a slow turn swept the gust pattern past each blade at ~15 km/s, and moved the sway phase thousands of radians a second. Only when the wind had finished turning did the gentle sway show. A changing wind speed did the same through `speed × time`. The test rig had held the wind fixed, so it never showed.
+- **Fix.** The gust field is fixed to the ground and carried by the wind's travel, summed frame by frame (`GrassPass._carried`). A turn changes only where it drifts next. Each sway is a whole number of turns in an hour, so time wraps there with no jump and its phase stays exact however long the game runs (`wave()`).
+- **Measured.** Your pose at 45 cm above the ground, with the game's own wind turning to a new way about every second. Change per frame over the lower 70 % of the picture, in grey levels:
+  - previous commit: 32–35;
+  - now: 11–13, as much as a steady wind of that speed (8.9 at 6 m/s, 12.4 at 15 m/s).
+
+**A third further.**
+- Range 180 → 240 m.
+- Detail bands 7 / 18 → 9.5 / 24 m.
+- Flowers and seed heads to 35–50 m.
+- Full density to ~21 m instead of 16 m: `thinPixels` 0.6.
+- The patch grid is now 512 wide, so the range also holds near cube-face corners, where patches shrink to ~1.2 m.
+- At your view: 27k / 59k / 141k blades, ~1.6 M vertices, 16k patches.
+
+Pictures `15` (your view, grass to 240 m) and `16` (grass-root height).
+
 ## Second round (2026-11-27): flicker, blades in the ground, and range
 
 Three problems reported from the game, each fixed at its cause:
@@ -31,7 +50,7 @@ Frame-to-frame change of a still view in wind, lower 70 % of the picture, grey l
 
 ## What it is
 
-Grass blades within 180 m of the camera, made on the GPU every frame from the ground the terrain draws. Past them, the ground itself takes the grass canopy's look. Both are tuned so that they meet without a visible line. There is nothing to stream or store: blades are a function of the world position and the tile data already resident.
+Grass blades within 240 m of the camera, made on the GPU every frame from the ground the terrain draws. Past them, the ground itself takes the grass canopy's look. Both are tuned so that they meet without a visible line. There is nothing to stream or store: blades are a function of the world position and the tile data already resident.
 
 - `core/renderer/grass/grassWgsl.js`: the scatter (compute) and the blades (vertex and fragment).
 - `core/renderer/grass/GrassPass.js`: the driver, owned by `QuadtreeTerrainRenderer` and drawn right after the terrain pass.
@@ -171,7 +190,7 @@ Candidates once measured:
 
 ## Switches
 
-- `rendering.grass` (`enabled`, `distance` 180, `density` 1500, `thinFrom` 2, `bands`, `minPixels` 0.8, `maxWiden` 16). Engine default off; the game turns it on.
+- `rendering.grass` (`enabled`, `distance` 240, `density` 1500, `thinFrom` 2, `bands` [9.5, 24], `minPixels` 0.8, `maxWiden` 16, `thinPixels` 0.6). Engine default off; the game turns it on.
 - `B` in the game, or the "Grass blades" button: blades off, leaving the ground with the canopy alone.
 - `GRASS_CANOPY` in `terrainPass.wgsl.js`: the canopy's depth, gain, glow and hotspot.
 - `tools/perf/grass/grassRig.js` drives the camera and sun, and runs the hand-over measurement (`handover`, `teacher`).

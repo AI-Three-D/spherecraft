@@ -26,18 +26,21 @@ import { GRASS_HUE_WGSL } from './grassHue.wgsl.js';
 export const PATCH_LEVELS = 6;
 export const CELLS = 48;
 export const MAX_FACES = 3;
-export const GRID_MAX = 128;
+export const GRID_MAX = 256;
 /** Strip segments of a blade by distance band, and how many blades each band holds at most. */
 export const LOD_SEGMENTS = [7, 4, 2];
 export const LOD_CAPACITY = [131072, 262144, 524288];
 export const BLADE_WORDS = 8;
 export const PATCH_WORDS = 8;
-export const MAX_PATCHES = MAX_FACES * (2 * GRID_MAX) * (2 * GRID_MAX);
+/** Patches kept in a frame at most: about 15 thousand are in view at 240 m. */
+export const MAX_PATCHES = 65536;
 /** Tallest blade (m) and widest (m) the packed form holds. */
 export const MAX_HEIGHT = 2.0;
 export const MAX_WIDTH = 0.05;
 export const FRAME_FLOATS = 84 + MAX_FACES * 28;
 export const COUNTER_WORDS = 4;
+/** Every sway's rate is a whole number of turns in this many seconds, so time can wrap at it without a jump. */
+export const WAVE_PERIOD = 3600;
 /** Blade kinds. */
 export const KIND = Object.freeze({ MEADOW: 0, DRY: 1, WOOD: 2, TUNDRA: 3, REED: 4, SEED: 5, BLOSSOM: 6, SPIKE: 7 });
 
@@ -55,7 +58,7 @@ struct Face {
     da: vec4<f32>,      // the anchor's direction times the radius, less the camera (from the planet's centre), m
     na: vec4<f32>,      // the anchor's direction, patch area on the sphere (m^2)
     anchor: vec4<i32>,  // the anchor patch x, y on its face, the face, the patch grid's half width
-    wind: vec4<f32>,    // the wind along the face's x and y, and across it
+    wind: vec4<f32>,    // how far the gusts have been carried (face metres, x and y), the wind's way on the face
 };
 struct Frame {
     clip: mat4x4<f32>,             // of a point about the camera
@@ -63,7 +66,7 @@ struct Frame {
     up: vec4<f32>,                 // up at the camera, planet radius
     east: vec4<f32>,               // level directions, height scale (m)
     north: vec4<f32>,              // face size (m)
-    sunDir: vec4<f32>,             // time (s)
+    sunDir: vec4<f32>,             // time (s, 0..${WAVE_PERIOD}: every sway repeats in that time, so it wraps unseen)
     sunColor: vec4<f32>,           // wind speed (m/s)
     ambient: vec4<f32>,            // radians per pixel
     wind: vec4<f32>,               // wind east, north, gust strength, sway
@@ -75,6 +78,15 @@ struct Frame {
     visible: vec4<u32>,            // the drawn tiles' table: mask, capacity, this frame's epoch; coarsest mesh level
     faces: array<Face, ${MAX_FACES}>,
 };
+`;
+
+const WAVE_WGSL = /* wgsl */`
+// A sine at about this rate (rad/s), rounded to a whole number of turns per ${WAVE_PERIOD} s; its phase from the fraction of
+// turns, so it stays exact however long the game runs.
+fn wave(t: f32, rate: f32, phase: f32) -> f32 {
+    let turns = round(rate * ${(WAVE_PERIOD / (2 * Math.PI)).toFixed(6)});
+    return sin(6.2831853 * fract((t / ${WAVE_PERIOD}.0) * turns) + phase);
+}
 `;
 
 const HASH_WGSL = /* wgsl */`
@@ -93,7 +105,7 @@ export function buildGrassComputeWGSL({ faceSizeMeters, biome }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const [b0, b1, b2] = LOD_CAPACITY;
-    return /* wgsl */`${FRAME_WGSL}${HASH_WGSL}${GRASS_HUE_WGSL}
+    return /* wgsl */`${FRAME_WGSL}${HASH_WGSL}${WAVE_WGSL}${GRASS_HUE_WGSL}
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> hashTable: array<u32>;
 @group(0) @binding(2) var<storage, read_write> patches: array<vec4<u32>>;
@@ -641,25 +653,27 @@ fn bladesMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation
 
         // Seed heads stand out of tall and dry tufts; flowers in patches a few metres wide, where the meadow is lively.
         let seeds = select(0u, 1u, u01(pcg(h5 + 9u)) < (0.07 + 0.35 * grow.tall + 0.2 * zone) * select(0.4, 1.0, kind == 1u || kind == 0u) * step3(0.18, 0.4, tall)
-            * (1.0 - step3(26.0, 38.0, distance)));
+            * (1.0 - step3(frame.dist.x * 0.145, frame.dist.x * 0.21, distance)));
         let flowerPatch = vnoise(q / 7.0, 23u) * 0.65 + vnoise(q / 2.3, 29u) * 0.35;
         let meadow = step3(0.35, 0.75, grow.lively) * step3(0.25, 0.5, grow.wet) * select(0.25, 1.0, kind == 0u) * select(1.0, 0.0, kind >= 3u);
         let blossomShare = meadow * step3(0.48, 0.78, flowerPatch);
         // Past some 30 m a flower or a seed head is under a pixel: it only sparkles. The terrain carries them on.
-        let farOut = 1.0 - step3(26.0, 38.0, distance);
+        let farOut = 1.0 - step3(frame.dist.x * 0.145, frame.dist.x * 0.21, distance);
         let blossoms = select(0u, 1u, u01(pcg(h5 + 13u)) < 0.55 * blossomShare * farOut);
         let several = count + seeds + blossoms;
 
-        // Wind: gusts that travel with it (the same field moves the far meadows), each tuft's sway, and a lasting comb.
-        let along = dot(q, F.wind.xy);
-        let across = dot(q, F.wind.zw);
-        let speed = frame.sunColor.w;
+        // Wind: gusts carried with it (the same field moves the far meadows), each tuft's sway, and a lasting comb.
+        // The gusts' field is fixed to the ground and moved by how far the wind has carried it, summed frame by frame:
+        // a wind that turns changes only where the field drifts next. (Taken as the wind's way times the place, a
+        // turn of 0.1 rad/s swept it past a blade 150 km from the face's corner at 15 km/s: violent shaking.)
+        let carried = q - F.wind.xy;
         // Gusts roll on with the wind as broad waves; a tuft sways at its own pace (about 0.5-0.8 Hz, set by its
         // stiffness, not by the wind's speed), less far off where a blade is a pixel and any motion only flickers.
-        let travel = along - speed * time * 0.6;
-        let gust = vnoise(vec2<f32>(travel / 24.0, across / 30.0), 7u) * 0.75 + vnoise(vec2<f32>(travel / 8.0, across / 10.0), 11u) * 0.25;
+        let gust = vnoise(carried / 22.0, 7u) * 0.75 + vnoise(carried / 7.5 + 13.1, 11u) * 0.25;
         let push = frame.wind.z * (0.45 + 0.55 * gust);
-        let sway = frame.wind.w * sin(time * mix(3.2, 5.0, r2) + r * 6.2831853 + along * 0.35) * (0.6 + 0.6 * gust)
+        // Neighbours sway nearly together (a phase that changes over metres), each a little on its own.
+        let phase = 6.2831853 * vnoise(q / 4.5, 59u) + r * 1.2;
+        let sway = frame.wind.w * wave(time, mix(3.2, 5.0, r2), phase) * (0.6 + 0.6 * gust)
             * (1.0 - 0.8 * step3(10.0, 35.0, distance));
         let combTurn = (vnoise(q / 19.0, 31u) - 0.5) * 2.2;
         let comb = 0.12 + 0.35 * vnoise(q / 13.0, 37u);
@@ -774,7 +788,7 @@ fn finishMain() {
 /** The blades drawn: vertex and fragment. */
 export function buildGrassDrawWGSL() {
     const [b0, b1] = LOD_CAPACITY;
-    return /* wgsl */`${FRAME_WGSL}
+    return /* wgsl */`${FRAME_WGSL}${WAVE_WGSL}
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> blades: array<vec4<u32>>;
 const MAX_H: f32 = ${n(MAX_HEIGHT)};
@@ -828,7 +842,7 @@ fn vsMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance:
     across = normalize(across - normalize(level2 + up * 1.0e-4) * (dot(across, normalize(level2 + up * 1.0e-4)) * 0.55 * edgeOn));
     let lean = look.y;
     // Each blade's own flutter on top of its tuft's sway.
-    let flutter = 0.012 * frame.wind.w / 0.045 * sin(time * (3.0 + 2.0 * seed) + seed * 40.0) * (1.0 - smoothstep(6.0, 25.0, distance));
+    let flutter = 0.012 * frame.wind.w / 0.045 * wave(time, 3.0 + 2.0 * seed, seed * 40.0) * (1.0 - smoothstep(6.0, 25.0, distance));
     let windV = bend.x * east + bend.y * north + across * flutter;
     // A quadratic curve of about the blade's length (AMD's (2 L0 + L1) / 3): bending lowers the tip.
     var tip = up * (1.0 - 0.55 * lean * lean) + fdir * (lean * 1.05) + windV;

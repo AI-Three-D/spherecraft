@@ -4,7 +4,7 @@
 // hidden-surface removal keeps shading to about one blade fragment a pixel.
 
 import {
-    BLADE_WORDS, COUNTER_WORDS, FRAME_FLOATS, GRID_MAX, LOD_CAPACITY, MAX_FACES, MAX_PATCHES, PATCH_LEVELS, PATCH_WORDS,
+    BLADE_WORDS, COUNTER_WORDS, FRAME_FLOATS, GRID_MAX, LOD_CAPACITY, MAX_FACES, MAX_PATCHES, PATCH_LEVELS, PATCH_WORDS, WAVE_PERIOD,
     buildGrassComputeWGSL, buildGrassDrawWGSL,
 } from './grassWgsl.js';
 
@@ -31,7 +31,7 @@ const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 export const GRASS_DEFAULTS = Object.freeze({
     enabled: true,
     /** Blades end here (m); the terrain's grass canopy goes on. */
-    distance: 180,
+    distance: 240,
     /**
      * Blades per square metre close by (grass 35 cm tall), the distance (m) from which they thin, and how fast: as 1 / d
      * the ground stays hidden at all distances (grassWgsl.js).
@@ -39,13 +39,15 @@ export const GRASS_DEFAULTS = Object.freeze({
     density: 1500,
     thinFrom: 2,
     /** Distance bands of finer and coarser blades (m). */
-    bands: [7, 18],
-    /**
-     * No blade drawn thinner than this many pixels, widened at most so much. From where a typical blade (1.1 cm) is that
-     * thin, blades thin out as 1 / d^2 while they widen as d: fewer, wider blades, the same cover.
-     */
+    bands: [9.5, 24],
+    /** No blade drawn thinner than this many pixels, widened at most so much. */
     minPixels: 0.8,
     maxWiden: 16,
+    /**
+     * From where a typical blade (1.1 cm) is this many pixels wide, blades thin out as 1 / d^2 while they are widened
+     * as d: fewer, wider blades, the same cover. Under minPixels keeps them dense further (here about 21 m).
+     */
+    thinPixels: 0.6,
 });
 
 export class GrassPass {
@@ -154,7 +156,9 @@ export class GrassPass {
     compute(encoder, { u, camera, environment, seaLevel = null, deltaTime = 1 / 60, viewportHeight }) {
         this._drawing = false;
         if (!this.enabled || !this._ready || !this.landLight?.ready || !this._ensureGroundGroup()) return;
-        this._time += Math.min(Math.max(deltaTime || 0, 0), 0.1);
+        const dt = Math.min(Math.max(deltaTime || 0, 0), 0.1);
+        // Every sway repeats in WAVE_PERIOD (grassWgsl.js wave), so time wraps there without a jump.
+        this._time = (this._time + dt) % WAVE_PERIOD;
         const c = this.config;
         const R = this.planetConfig.radius;
         const origin = u.planetOrigin.value, p = camera.position;
@@ -190,6 +194,9 @@ export class GrassPass {
         let wind = wd ? [wd.x, 0, wd.y] : [1, 0, 0];
         wind = sub(wind, scale(up, dot(wind, up)));
         wind = length(wind) > 1e-6 ? unit(wind) : east;
+        // How far the wind has carried its gusts, summed frame by frame over the world: a turn of the wind changes only
+        // where they go next.
+        this._carried = add(this._carried ?? [0, 0, 0], scale(wind, windSpeed * 0.6 * dt));
         const fov = (camera.fov ?? 60) * Math.PI / 180;
         const pixelAngle = 2 * Math.tan(fov / 2) / Math.max(1, viewportHeight || 900);
 
@@ -202,7 +209,7 @@ export class GrassPass {
         // Bend at the tip per metre of height (gusts on top), and the sway's size: grass leans well over in a gale but
         // never lies flat, and sways a little even in still air.
         f.set([dot(wind, east), dot(wind, north), 0.75 * clamp(windSpeed / 22, 0, 1), 0.015 + 0.03 * clamp(windSpeed / 12, 0, 1)], 60);
-        const pixelFrom = 0.011 / (c.minPixels * pixelAngle);
+        const pixelFrom = 0.011 / ((c.thinPixels ?? c.minPixels) * pixelAngle);
         f.set([c.distance, c.density, c.thinFrom, pixelFrom], 64);
         f.set([c.bands[0], c.bands[1], c.minPixels, c.maxWiden], 68);
         f.set([...camRel, seaLevel ?? -1.0e9], 72);
@@ -235,6 +242,9 @@ export class GrassPass {
             widest = Math.max(widest, half);
             const ex = unit(jx), ey = unit(jy);
             const windFace = unit([dot(wind, ex), dot(wind, ey), 0]);
+            // The gusts' field is in the face's own metres (grassWgsl.js q): a patch is nominally this long.
+            const nominal = 2 * R / patchesPerFace;
+            const carried = [dot(this._carried, ex) * nominal / mx, dot(this._carried, ey) * nominal / my];
             const o = 84 + faces * 28;
             f.set([...ca, la], o);
             f.set([...du, face], o + 4);
@@ -242,7 +252,7 @@ export class GrassPass {
             f.set([...da, 0], o + 12);
             f.set([...na, area], o + 16);
             I.set([anchor[0], anchor[1], face, half], o + 20);
-            f.set([windFace[0], windFace[1], -windFace[1], windFace[0]], o + 24);
+            f.set([carried[0], carried[1], windFace[0], windFace[1]], o + 24);
             faces++;
         }
         const tableCapacity = quadtree.getLoadedTileTableCapacity();

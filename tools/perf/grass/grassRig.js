@@ -28,6 +28,8 @@ export async function boot() {
     if (clouds) Object.assign(clouds.settings, { windSpeedKmS: 0, weatherEvolveKmS: 0, boilKmS: 0 });
     window.windMps = 6;
     window.windAngle = 0.6;
+    // The game's own wind, kept for tests of a turning wind (gameWind()); by default a fixed one.
+    window.__gameWind = w._updateWind.bind(w);
     w._updateWind = (dt, env) => { env.windSpeed = window.windMps; env.windDirection.set(Math.cos(window.windAngle), Math.sin(window.windAngle)); };
     const st = document.createElement('style');
     st.id = 'rigHide';
@@ -252,4 +254,23 @@ export async function motionFlicker({ dir = POSES.grassland, eye = 1.8, bearing 
         grass.enabled = false; const off = await run();
         return { on, off };
     } finally { grass.enabled = true; grass.compute = compute; }
+}
+
+// The game's own wind, turning to a new way and speed every second or so (as the weather does, only more often).
+export function gameWind(changesPerSecond = 1) {
+    const w = window.gameEngine.renderer.weatherController;
+    w.config.windChangeChancePerSecond = changesPerSecond;
+    w._updateWind = window.__gameWind;
+}
+
+// Frame-to-frame change of a still view over the lower 70 % of the picture (grey levels), frames as rendered.
+export async function stillChange(frames = 8) {
+    const shots = [];
+    for (let i = 0; i < frames; i++) shots.push(await grabNext(800, 450));
+    let s = 0, n = 0;
+    for (let k = 1; k < shots.length; k++) {
+        const a = shots[k - 1].d, b = shots[k].d;
+        for (let i = 4 * 800 * 135; i < a.length; i += 4) { s += Math.abs(a[i + 1] - b[i + 1]); n++; }
+    }
+    return +(s / n).toFixed(2);
 }
