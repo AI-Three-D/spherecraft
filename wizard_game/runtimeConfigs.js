@@ -238,6 +238,10 @@ export function createEngineConfig() {
         nightAmbient: 1.0,
         moonlight: 1.0,
       },
+      // Grass blades over the ground where it is grass (core/renderer/grass/GrassPass.js GRASS_DEFAULTS).
+      grass: {
+        enabled: true,
+      },
       terrainShader: {
         // Generated ground surfaces (groundMaterials.js) and the light over the land (TerrainLightMap.js).
         groundMaterials: true,

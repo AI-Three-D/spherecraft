@@ -45,7 +45,13 @@ export class TerrainPass {
         Object.assign(this, o);
         this.enabled = true;
         /** For measuring: whether off-screen tiles are left out, and those behind land (terrainShader.occlusion sets it first), every tile is taken for wet, half floats are used, the air is worked out per pixel. */
-        this.options = { cull: true, occlusion: o.shaderConfig?.occlusion === true, allWet: false, half: true, exactAir: false };
+        /** Where grass blades end this frame (m), 0 without: the ground under them is shaded (GrassPass.js). */
+        this.grassReach = 0;
+        this.options = { cull: true, occlusion: o.shaderConfig?.occlusion === true, allWet: false, half: true, exactAir: false,
+            /** The ground's grass look (hue, the canopy past the blades) and the grass grain (GrassPass.js): off as before grass. */
+            grass: o.grassLook === true, grain: o.grassLook === true && !!o.grain,
+            /** The field past the blades traced through its slices (grassSlices.js): an experiment, off until it looks right. */
+            slices: false };
         this._pipelines = new Map();
         this._pending = new Map();
         this._ready = false;
@@ -99,6 +105,9 @@ export class TerrainPass {
                 ...[7, 8, 9].map(i => at(i, F, { sampler: {} })),
                 at(10, F, array), at(11, F, uniform), at(12, F, { texture: { sampleType: 'float' } }),
                 ...(this.biome ? [at(13, F, array)] : []),
+                ...(this.grain ? [at(this._grainBinding(), F, { texture: { sampleType: 'float' } })] : []),
+                ...(this.grain && this.portraits ? [at(this._grainBinding() + 1, F, array)] : []),
+                ...(this.grain && this.portraits && this.slices ? [at(this._grainBinding() + 2, F, array)] : []),
             ]),
             none: layout([]),
             water: layout([
@@ -135,7 +144,10 @@ export class TerrainPass {
         this._ready = true;
     }
 
-    _key(kind, wet, rain) { return `${kind}${wet ? ' wet' : ''}${rain ? ' rain' : ''}${this.options.half ? '' : ' full'}${this.options.exactAir ? ' exact' : ''}`; }
+    /** The grass grain's binding in the ground group (grassGrain.js): after the climate, when there is one. */
+    _grainBinding() { return this.biome ? 14 : 13; }
+
+    _key(kind, wet, rain) { return `${kind}${wet ? ' wet' : ''}${rain ? ' rain' : ''}${this.options.half ? '' : ' full'}${this.options.exactAir ? ' exact' : ''}${this.options.grass ? '' : ' plain'}${this.options.grain ? '' : ' nograin'}${this.options.portraits === false ? ' noportraits' : ''}${this.options.slices === false ? ' noslices' : ''}`; }
 
     _build(kind, wet, rain) {
         const key = this._key(kind, wet, rain);
@@ -145,6 +157,10 @@ export class TerrainPass {
             faceSizeMeters: 2 * this.planetConfig.radius, ...KIND_OPTIONS[kind], water: wet, rain,
             half: this.options.half && device.features.has('shader-f16'), exactAir: this.options.exactAir,
             fineEndMeters: this.shaderConfig.groundFineEndMeters, deepEndMeters: this.shaderConfig.groundDeepEndMeters, biome: this.biome ?? null,
+            grain: this.grain && this.options.grass && this.options.grain ? this._grainBinding() : null, grassLook: this.options.grass,
+            portraits: this.grain && this.portraits && this.options.grass && this.options.grain && this.options.portraits !== false ? this._grainBinding() + 1 : null,
+            // The field past the blades traced through its slices (grassSlices.js, grassMedium.wgsl.js).
+            slices: this.grain && this.portraits && this.slices && this.options.grass && this.options.grain && this.options.slices !== false ? this._grainBinding() + 2 : null,
         });
         const made = device.createRenderPipelineAsync({
             label: `Terrain ${key}`, layout: wet ? this._wetLayout : this._dryLayout,
@@ -192,6 +208,9 @@ export class TerrainPass {
             this._groundOf = ground;
             this._groundGroup = device.createBindGroup({ layout: this._layouts.ground, entries: entries([
                 ...views, this.ground.albedoView, this.ground.surfaceView, this.ground.sampler, this.ground.wideSampler, this._sampler, this.air.view, this.air.frame, lut, ...climate,
+                ...(this.grain ? [this.grain.view] : []),
+                ...(this.grain && this.portraits ? [this.portraits.view] : []),
+                ...(this.grain && this.portraits && this.slices ? [this.slices.view] : []),
             ]) });
         }
         const land = this.landLight.resources;
@@ -246,7 +265,9 @@ export class TerrainPass {
             ...color(u.sunLightColor.value, u.sunLightIntensity.value), tierFade?.start ?? 0,
             ...color(u.ambientLightColor.value, u.ambientLightIntensity.value), tierFade?.end ?? 0,
             ...color(u.fogColor.value, 1), normalFrom,
-            normalFrom + shaderConfig.normalMapDistanceFadeMeters, 1, 0, 0,
+            normalFrom + shaderConfig.normalMapDistanceFadeMeters, 1, this.grassReach ?? 0, 0,
+            // What the camera's float cannot hold (terrainPass.wgsl.js vertex: the land from the camera, exactly).
+            p.x - Math.fround(p.x), p.y - Math.fround(p.y), p.z - Math.fround(p.z), 0,
         ], 32);
         this.device.queue.writeBuffer(this._frameBuffer, 0, f);
         this._rain = wetness > 0;

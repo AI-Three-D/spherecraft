@@ -395,6 +395,7 @@ export class EngineConfig {
         }
       },
       volumetricClouds: createVolumetricCloudsConfig(rendering.volumetricClouds),
+      grass: createGrassConfig(rendering.grass),
       skyColorContrast: requireNumber(rendering.skyColorContrast ?? 0, 'rendering.skyColorContrast'),
       // Night look in the tonemap (0 = off): at full night colour moves `grade` (0..1) of the way
       // toward blue night vision, and exposure changes by `exposure` (+1 doubles, -0.2 is 20 % darker).
@@ -841,6 +842,23 @@ export class EngineConfig {
     }
     return Math.max(0, arr.length - 1);
   }
+}
+
+/**
+ * Grass blades over the ground (core/renderer/grass/GrassPass.js GRASS_DEFAULTS). Off unless enabled; drawn only with
+ * the terrain pass.
+ */
+function createGrassConfig(raw = {}) {
+  const config = requireObject(raw ?? {}, 'rendering.grass');
+  const out = { enabled: requireBool(config.enabled ?? false, 'rendering.grass.enabled') };
+  for (const key of ['distance', 'density', 'thinFrom', 'minPixels', 'maxWiden', 'thinPixels']) {
+    if (config[key] !== undefined) out[key] = requireNumber(config[key], `rendering.grass.${key}`);
+  }
+  if (config.bands !== undefined) {
+    if (!Array.isArray(config.bands) || config.bands.length !== 2) throw new Error('EngineConfig rendering.grass.bands must be [near, mid] metres');
+    out.bands = config.bands.map((x, i) => requireNumber(x, `rendering.grass.bands[${i}]`));
+  }
+  return out;
 }
 
 /**
