@@ -24,9 +24,13 @@ import { GRASS_CANOPY_WGSL, GRASS_HUE_WGSL } from './grassHue.wgsl.js';
 import { FIELD_NOISE_WGSL } from './grassField.wgsl.js';
 import { GRAIN_LATTICES, GRAIN_SIZE, GRAIN_WRAP_M } from './grassGrain.js';
 import { GRASS_PORTRAIT_WGSL, PORTRAIT_PERIOD_M, PORTRAIT_SIZE } from './grassPortraits.js';
+import { ECOLOGY_LATTICE_WGSL } from '../../world/ecology/ecologyLattice.wgsl.js';
+import { GROUND_LEVELS, buildDrawnGroundWGSL } from '../../world/ecology/drawnGround.wgsl.js';
+import { buildWindWGSL } from '../../world/ecology/wind.wgsl.js';
+import { buildEcologyReadWGSL } from '../../world/ecology/ecologyField.wgsl.js';
 
 /** Patches per tile edge (2^6): a patch is 2 m where tiles are 128 m. Lattice points (tufts) per patch edge. */
-export const PATCH_LEVELS = 6;
+export const PATCH_LEVELS = GROUND_LEVELS;
 export const CELLS = 48;
 export const MAX_FACES = 3;
 export const GRID_MAX = 256;
@@ -59,7 +63,7 @@ export const MAX_WIDTH = 0.05;
 export const STROKE_FROM = 0.6;
 export const STROKE_TO = 1.0;
 export const TUFT_FILL = 0.53;
-export const FRAME_FLOATS = 100 + MAX_FACES * 28;
+export const FRAME_FLOATS = 100;
 export const CONTROL_WORDS = CTRL.GENLIST + 2 * MAX_PATCHES;
 export const CTRL_REMAP = CTRL.GENLIST + MAX_PATCHES;
 /** Every sway's rate is a whole number of turns in this many seconds, so time can wrap at it without a jump. */
@@ -74,15 +78,6 @@ const mean = name => v3(GROUND_LAYERS.find(l => l.name === name).mean);
 
 
 const FRAME_WGSL = /* wgsl */`
-struct Face {
-    ca: vec4<f32>,      // the anchor's point on the cube (exact in floats), its length
-    du: vec4<f32>,      // how that point moves per patch along the face's x, the face
-    dv: vec4<f32>,      // per patch along y, metres a patch spans on the sphere (largest side)
-    da: vec4<f32>,      // the anchor's direction times the radius, less the camera (from the planet's centre), m
-    na: vec4<f32>,      // the anchor's direction, patch area on the sphere (m^2)
-    anchor: vec4<i32>,  // the anchor patch x, y on its face, the face, the patch grid's half width
-    wind: vec4<f32>,    // how far the gusts have been carried (face metres, x and y), the wind's way on the face
-};
 struct Frame {
     clip: mat4x4<f32>,             // of a point about the camera
     planes: array<vec4<f32>, 5>,   // inward, about the camera
@@ -97,13 +92,12 @@ struct Frame {
                                    // where they are a pixel wide and thin as 1 / d^2 (fewer, wider: the same cover)
     lod: vec4<f32>,                // band edges (m), least width in pixels, most widening
     camera: vec4<f32>,             // from the planet's centre (for the land's light), sea level (m)
-    counts: vec4<u32>,             // faces, deepest tile level, hash mask, hash capacity
-    visible: vec4<u32>,            // the drawn tiles' table: mask, capacity, this frame's epoch; coarsest mesh level
+    spare0: vec4<u32>,             // (the faces and tables moved to the shared GroundFrame: drawnGround.wgsl.js)
+    spare1: vec4<u32>,
     cache: vec4<u32>,              // which half of the cache is this frame's (0 or 1); split; patch cull off; teacher
     light: vec4<f32>,              // the same for every blade pixel this frame (GrassPass.js): the sky's light, the day
     bounce: vec4<f32>,             // the ground's bounce (before the depth in the canopy), the sun's depth factor in it
     thick: vec4<f32>,              // grass blades' width near, far, the distances (m) it grows between (GrassPass.js)
-    faces: array<Face, ${MAX_FACES}>,
 };
 `;
 
@@ -116,16 +110,6 @@ fn wave(t: f32, rate: f32, phase: f32) -> f32 {
 }
 `;
 
-const HASH_WGSL = /* wgsl */`
-fn pcg(v: u32) -> u32 {
-    let s = v * 747796405u + 2891336453u;
-    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
-    return (w >> 22u) ^ w;
-}
-fn hash3(x: u32, y: u32, z: u32) -> u32 { return pcg(x ^ pcg(y ^ pcg(z + 0x9e3779b9u))); }
-fn u01(h: u32) -> f32 { return f32(h >> 8u) * (1.0 / 16777216.0); }
-fn step3(a: f32, b: f32, x: f32) -> f32 { let t = saturate((x - a) / (b - a)); return t * t * (3.0 - 2.0 * t); }
-`;
 
 /** Compute: patches about the camera, then tufts in them. */
 /**
@@ -134,16 +118,16 @@ fn step3(a: f32, b: f32, x: f32) -> f32 { let t = saturate((x - a) / (b - a)); r
  * drawn (patches on the finest loaded tiles).
  */
 /** fullSlant: the sine of the sight line's elevation at which blades stand at full density (densityAt). */
-export function buildGrassComputeWGSL({ faceSizeMeters, biome, skip = {}, segments = LOD_SEGMENTS, fullSlant = 0.9 }) {
+/** ecology: the ecology field is bound (light under the canopy: core/world/ecology). */
+export function buildGrassComputeWGSL({ faceSizeMeters, biome, skip = {}, segments = LOD_SEGMENTS, fullSlant = 0.9, ecology = false }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const [b0, b1, b2] = LOD_CAPACITY;
-    return /* wgsl */`${FRAME_WGSL}${HASH_WGSL}${WAVE_WGSL}${GRASS_HUE_WGSL}
+    return /* wgsl */`${FRAME_WGSL}${ECOLOGY_LATTICE_WGSL}${WAVE_WGSL}${GRASS_HUE_WGSL}
 alias h = f32; alias h2 = vec2<f32>; alias h3 = vec3<f32>;
 ${GROUND_LIGHT_WGSL}
 ${GRASS_CANOPY_WGSL}
 @group(0) @binding(0) var<uniform> frame: Frame;
-@group(0) @binding(1) var<storage, read> hashTable: array<u32>;
 @group(0) @binding(2) var<storage, read_write> patches: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read_write> control: array<atomic<u32>>;
 // The cache: tufts' blades as offsets from their patch, both halves (this frame's, last frame's).
@@ -153,9 +137,10 @@ ${GRASS_CANOPY_WGSL}
 @group(0) @binding(7) var<storage, read_write> drawn: array<vec4<u32>>;
 // The patches of this frame and of the last, by key (key, key, stamp, stamp, slot; 8 words), both halves.
 @group(0) @binding(8) var<storage, read_write> patchHash: array<atomic<u32>>;
-// The quadtree's tiles drawn this frame (instanceBufferBuilder.wgsl.js VisibleEntry: key, epoch, pad).
-@group(0) @binding(6) var<storage, read> visibleTable: array<vec4<u32>>;
-@group(1) @binding(0) var heightTexture: texture_2d_array<f32>;
+// The faces about the camera, the loaded and drawn tiles' tables, the heights: the shared ground (drawnGround.wgsl.js).
+${buildDrawnGroundWGSL({ frame: [0, 9], loaded: [0, 1], visible: [0, 6], height: [1, 0] })}
+// The shared wind's gusts (wind.wgsl.js).
+${buildWindWGSL({ binding: [0, 10] })}
 @group(1) @binding(1) var tileNormals: texture_2d_array<f32>;
 @group(1) @binding(2) var climateMap: texture_2d_array<f32>;
 @group(1) @binding(3) var groundSurface: texture_2d_array<f32>;
@@ -165,6 +150,8 @@ ${buildTerrainLightWGSL(1, 6, 7)}
 @group(1) @binding(8) var tileBeds: texture_2d_array<f32>;
 @group(1) @binding(9) var grassGrain: texture_2d<f32>;
 @group(1) @binding(10) var grassPortraits: texture_2d_array<f32>;
+${ecology ? `// The ecology field (core/world/ecology/ecologyField.wgsl.js): the forest's shade on the blades' light.
+${buildEcologyReadWGSL({ a: [1, 11], b: [1, 12], layers: [0, 11], withPatch: true })}` : ''}
 
 const CELLS: u32 = ${CELLS}u;
 const PATCH_LEVELS: u32 = ${PATCH_LEVELS}u;
@@ -207,204 +194,12 @@ fn grainAt(q: vec2<f32>, rel: vec3<f32>, fx: vec3<f32>, fy: vec3<f32>, footprint
 }
 ${biome ? biomeCoverWGSL(biome) : ''}
 
-// ---- the loaded tiles (residentTileHeightLookupWgsl.js)
-fn hashKey(keyLo: u32, keyHi: u32) -> u32 {
-    let kl = keyLo ^ (keyLo >> 16u);
-    let kh = keyHi ^ (keyHi >> 16u);
-    return ((kl * 0x9E3779B1u) ^ (kh * 0x85EBCA77u)) & frame.counts.z;
-}
-// A loaded tile's layer, with 4096 added when its material (the beds) is made; -1 when not loaded.
-fn lookupLayer(face: u32, depth: u32, x: u32, y: u32) -> i32 {
-    let keyLo = (x & 0xFFFFu) | ((y & 0xFFFFu) << 16u);
-    let keyHi = (depth & 0xFFFFu) | ((face & 0xFFFFu) << 16u);
-    var idx = hashKey(keyLo, keyHi);
-    for (var i = 0u; i < min(frame.counts.w, 256u); i++) {
-        let base = idx * 4u;
-        let hi = hashTable[base + 1u];
-        if (hi == 0xFFFFFFFFu) { return -1; }
-        if (hi == keyHi && hashTable[base] == keyLo) {
-            let made = hashTable[base + 3u] != 0xFFFFFFFFu && (hashTable[base + 3u] & 1u) != 0u;
-            return i32(hashTable[base + 2u] & 4095u) + select(0, 4096, made);
-        }
-        idx = (idx + 1u) & frame.counts.z;
-    }
-    return -1;
-}
-// The finest loaded tile over a patch: its layer (4096 more with beds), and patches per tile edge as a shift. -1: none.
-fn tileOver(face: u32, p: vec2<u32>) -> vec2<i32> {
-    for (var k = 0u; k < 4u; k++) {
-        let depth = frame.counts.y - k;
-        let shift = PATCH_LEVELS + k;
-        let layer = lookupLayer(face, depth, p.x >> shift, p.y >> shift);
-        if (layer >= 0) { return vec2<i32>(layer, i32(shift)); }
-    }
-    return vec2<i32>(-1, 0);
-}
-// Where in its tile a point of a patch lies (0..1).
-fn inTile(p: vec2<u32>, shift: u32, f: vec2<f32>) -> vec2<f32> {
-    return (vec2<f32>(p & vec2<u32>((1u << shift) - 1u)) + f) / f32(1u << shift);
-}
-
-// ---- the ground as the terrain draws it. Blades stand on the drawn triangles, not on the finest heights loaded: the
-// terrain picks coarser meshes for high ground near the camera (2-16 m fans), and finer heights there leave blades
-// under or over the surface by up to metres.
-fn visibleAt(face: u32, depth: u32, x: u32, y: u32) -> bool {
-    let keyLo = (x & 0xFFFFu) | ((y & 0xFFFFu) << 16u);
-    let keyHi = (depth & 0xFFFFu) | ((face & 0xFFFFu) << 16u);
-    let start = hashKeyVisible(keyLo, keyHi);
-    for (var i = 0u; i < min(frame.visible.y, 128u); i++) {
-        let e = visibleTable[(start + i) & frame.visible.x];
-        if (e.y == 0xFFFFFFFFu) { return false; }
-        if (e.y == keyHi && e.x == keyLo && e.z == frame.visible.z) { return true; }
-    }
-    return false;
-}
-fn hashKeyVisible(keyLo: u32, keyHi: u32) -> u32 {
-    let kl = keyLo ^ (keyLo >> 16u);
-    let kh = keyHi ^ (keyHi >> 16u);
-    return ((kl * 0x9E3779B1u) ^ (kh * 0x85EBCA77u)) & frame.visible.x;
-}
-// The drawn tile over a patch: x its geometry's layer (4096 more when its material is made), y patches per drawn tile
-// edge as a shift, z ancestor levels up to the geometry's layer, w the mesh's level. x -1: none drawn or loaded.
-fn drawnOver(face: u32, p: vec2<u32>) -> vec4<i32> {
-    let deepest = frame.counts.y;
-    var depth = deepest + 1u;
-    for (var k = 0u; k <= 7u && k <= deepest; k++) {
-        let d = deepest - k;
-        let t = p >> vec2<u32>(PATCH_LEVELS + k);
-        if (visibleAt(face, d, t.x, t.y)) { depth = d; break; }
-    }
-    if (depth > deepest) {
-        // Not among the drawn tiles (beside the view): the finest loaded heights.
-        let loaded = tileOver(face, p);
-        return vec4<i32>(loaded.x, loaded.y, 0, 0);
-    }
-    let shift = PATCH_LEVELS + deepest - depth;
-    // Geometry: the nearest loaded layer, own then ancestors (instanceBufferBuilder.wgsl.js).
-    for (var up = 0u; up < 5u && up <= depth; up++) {
-        let t = p >> vec2<u32>(shift + up);
-        let layer = lookupLayer(face, depth - up, t.x, t.y);
-        if (layer >= 0) { return vec4<i32>(layer, i32(shift), i32(up), i32(min(deepest - depth, frame.visible.w))); }
-    }
-    return vec4<i32>(-1, 0, 0, 0);
-}
-// A texel row of the 129 x 129 vertex grid of a drawn tile, as terrainChunkVertexShaderBuilder.js sampleHeightChunkLocal
-// takes it from its layer: own tile (up 0), or the part of an ancestor's.
-fn vertexHeight(layer: i32, up: u32, part: vec2<f32>, v: vec2<f32>) -> f32 {
-    let size = vec2<f32>(textureDimensions(heightTexture));
-    let scale = 1.0 / f32(1u << up);
-    let chunkSize = max(vec2<i32>(floor(size * scale + 0.5)), vec2<i32>(1));
-    let maxLocal = max(chunkSize - 1, vec2<i32>(1));
-    let base = vec2<i32>(floor(part * size + 0.5));
-    let coord = vec2<f32>(base) + clamp(v / 128.0, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(maxLocal);
-    let c0 = floor(coord);
-    let f = coord - c0;
-    let lo = base;
-    let hi = min(base + maxLocal, vec2<i32>(size) - 1);
-    let a = clamp(vec2<i32>(c0), lo, hi);
-    let b = clamp(vec2<i32>(c0) + 1, lo, hi);
-    let h0 = mix(textureLoad(heightTexture, a, layer, 0).r, textureLoad(heightTexture, vec2<i32>(b.x, a.y), layer, 0).r, f.x);
-    let h1 = mix(textureLoad(heightTexture, vec2<i32>(a.x, b.y), layer, 0).r, textureLoad(heightTexture, b, layer, 0).r, f.x);
-    return mix(h0, h1, f.y) * frame.east.w;
-}
-// The adaptive cell of a drawn tile's mesh over grid point g (terrainGeometryBuilder.js _buildAdaptiveCells): x, z, size.
-fn meshCell(g: vec2<f32>, maxStep: i32) -> vec3<i32> {
-    var c = vec3<i32>(0, 0, 128);
-    for (var i = 0; i < 8; i++) {
-        let inset = min(min(c.x, c.y), min(128 - (c.x + c.z), 128 - (c.y + c.z)));
-        if (c.z <= 1 || (c.z <= maxStep && inset >= c.z)) { break; }
-        let half = c.z >> 1u;
-        c = vec3<i32>(c.x + select(0, half, g.x >= f32(c.x + half)), c.y + select(0, half, g.y >= f32(c.y + half)), half);
-    }
-    return c;
-}
-// Height of the drawn surface at a point of a drawn tile (0..1): the triangle of its mesh that holds it.
-fn drawnHeight(layer: i32, up: u32, part: vec2<f32>, lod: u32, local: vec2<f32>) -> f32 {
-    let g = clamp(local, vec2<f32>(0.0), vec2<f32>(0.99999)) * 128.0;
-    let maxStep = min(1 << lod, 128);
-    let cell = meshCell(g, maxStep);
-    let c0 = vec2<f32>(cell.xy);
-    let size = f32(cell.z);
-    if (cell.z <= 1) {
-        // Two triangles split from (x1, z0) to (x0, z1).
-        let f = g - c0;
-        if (f.x + f.y < 1.0) {
-            let h00 = vertexHeight(layer, up, part, c0);
-            return h00 + f.x * (vertexHeight(layer, up, part, c0 + vec2<f32>(1.0, 0.0)) - h00) + f.y * (vertexHeight(layer, up, part, c0 + vec2<f32>(0.0, 1.0)) - h00);
-        }
-        let h11 = vertexHeight(layer, up, part, c0 + 1.0);
-        return h11 + (1.0 - f.x) * (vertexHeight(layer, up, part, c0 + vec2<f32>(0.0, 1.0)) - h11) + (1.0 - f.y) * (vertexHeight(layer, up, part, c0 + vec2<f32>(1.0, 0.0)) - h11);
-    }
-    // A fan about the cell's middle; its rim has a vertex wherever the neighbour beyond an edge is a smaller cell.
-    let centre = c0 + 0.5 * size;
-    let d = g - centre;
-    var a = vec2<f32>(0.0);
-    var b = vec2<f32>(0.0);
-    if (abs(d.x) >= abs(d.y)) {
-        let x = select(c0.x, c0.x + size, d.x > 0.0);
-        let z = centre.y + d.y * (0.5 * size / max(abs(d.x), 1.0e-6));
-        var lo = c0.y;
-        var hi = c0.y + size;
-        let outside = x + select(-0.5, 0.5, d.x > 0.0);
-        if (outside > 0.0 && outside < 128.0) {
-            let n = meshCell(vec2<f32>(outside, clamp(z, c0.y, c0.y + size - 0.001)), maxStep);
-            lo = max(lo, f32(n.y));
-            hi = min(hi, f32(n.y + n.z));
-        }
-        a = vec2<f32>(x, lo);
-        b = vec2<f32>(x, hi);
-    } else {
-        let z = select(c0.y, c0.y + size, d.y > 0.0);
-        let x = centre.x + d.x * (0.5 * size / max(abs(d.y), 1.0e-6));
-        var lo = c0.x;
-        var hi = c0.x + size;
-        let outside = z + select(-0.5, 0.5, d.y > 0.0);
-        if (outside > 0.0 && outside < 128.0) {
-            let n = meshCell(vec2<f32>(clamp(x, c0.x, c0.x + size - 0.001), outside), maxStep);
-            lo = max(lo, f32(n.x));
-            hi = min(hi, f32(n.x + n.z));
-        }
-        a = vec2<f32>(lo, z);
-        b = vec2<f32>(hi, z);
-    }
-    // Barycentric about the triangle centre, a, b.
-    let e1 = a - centre;
-    let e2 = b - centre;
-    let det = e1.x * e2.y - e1.y * e2.x;
-    let wa = (d.x * e2.y - d.y * e2.x) / det;
-    let wb = (e1.x * d.y - e1.y * d.x) / det;
-    let hc = vertexHeight(layer, up, part, centre);
-    return hc + wa * (vertexHeight(layer, up, part, a) - hc) + wb * (vertexHeight(layer, up, part, b) - hc);
-}
-// Ground height (m), between texels, as the terrain's vertices take it.
-fn heightAt(layer: i32, local: vec2<f32>) -> f32 {
-    let last = vec2<i32>(textureDimensions(heightTexture)) - 1;
-    let at = clamp(local, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(last);
-    let i = min(vec2<i32>(floor(at)), last);
-    let j = min(i + 1, last);
-    let f = at - vec2<f32>(i);
-    let h0 = mix(textureLoad(heightTexture, i, layer, 0).r, textureLoad(heightTexture, vec2<i32>(j.x, i.y), layer, 0).r, f.x);
-    let h1 = mix(textureLoad(heightTexture, vec2<i32>(i.x, j.y), layer, 0).r, textureLoad(heightTexture, j, layer, 0).r, f.x);
-    return mix(h0, h1, f.y) * frame.east.w;
-}
 // The texel centres of a tile's edges lie on its edges.
 fn texelUv(local: vec2<f32>) -> vec2<f32> {
     let size = vec2<f32>(textureDimensions(tileNormals));
     return (clamp(local, vec2<f32>(0.0), vec2<f32>(1.0)) * (size - 1.0) + 0.5) / size;
 }
 
-// A point of the face, d patches from the anchor, at height h: from the camera, and its direction from the planet's centre.
-// n1 - na = dc / |c1| + ca (1 / |c1| - 1 / |ca|), with the last bracket as a quotient of small numbers.
-struct Place { rel: vec3<f32>, up: vec3<f32> };
-fn placeAbout(F: Face, d: vec2<f32>, h: f32) -> Place {
-    let dc = F.du.xyz * d.x + F.dv.xyz * d.y;
-    let la = F.ca.w;
-    let grow = 2.0 * dot(F.ca.xyz, dc) + dot(dc, dc);
-    let l1 = sqrt(la * la + grow);
-    let dn = dc / l1 - F.ca.xyz * (grow / ((la + l1) * l1 * la));
-    let up = F.na.xyz + dn;
-    return Place(frame.up.w * dn + F.da.xyz + h * up, up);
-}
 
 fn turnedUv(m: vec2<f32>, p: vec2<f32>) -> vec2<f32> { return vec2<f32>(dot(m, p), m.x * p.y - m.y * p.x); }
 fn lieOf(uv: vec2<f32>, variants: f32) -> vec2<f32> {
@@ -497,14 +292,14 @@ fn growthAt(layer: i32, local: vec2<f32>, q: vec2<f32>, elevation: f32) -> Growt
 @compute @workgroup_size(64)
 fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     let slot = id.z;
-    if (slot >= frame.counts.x) { return; }
-    let F = frame.faces[slot];
+    if (slot >= ground.tables.x) { return; }
+    let F = ground.faces[slot];
     let half = F.anchor.w;
     let side = 2 * half;
     if (id.x >= u32(side * side)) { return; }
     let d = vec2<i32>(i32(id.x) % side, i32(id.x) / side) - half;
     let P = F.anchor.xy + d;
-    let edge = 1 << (frame.counts.y + PATCH_LEVELS);
+    let edge = 1 << (ground.tables.y + PATCH_LEVELS);
     if (any(P < vec2<i32>(0)) || any(P >= vec2<i32>(edge))) { return; }
     // Far off one workgroup takes a block of 2 x 2 or 4 x 4 patches, aligned on the face (the same blocks however the
     // camera moves, and the same lattice points in them): enough tufts to fill its threads. Every patch of a block
@@ -512,24 +307,26 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     var span = 1;
     for (var s = 4; s >= 2; s /= 2) {
         let B = P & vec2<i32>(~(s - 1));
-        let mid = placeAbout(F, vec2<f32>(B - F.anchor.xy) + 0.5 * f32(s), 0.0).rel;
+        let mid = groundPlace(F, vec2<f32>(B - F.anchor.xy) + 0.5 * f32(s), 0.0).rel;
         let flat = length(mid - frame.up.xyz * dot(mid, frame.up.xyz));
         if (flat > frame.dist.x * select(0.17, 0.38, s == 4)) { span = s; break; }
     }
     if (any((P & vec2<i32>(span - 1)) != vec2<i32>(0))) { return; }
     let sf = f32(span);
     let reach = F.dv.w * 0.75 * sf;
-    let sea = placeAbout(F, vec2<f32>(d) + 0.5 * sf, 0.0);
+    let sea = groundPlace(F, vec2<f32>(d) + 0.5 * sf, 0.0);
     // Level distance first: nothing to read for most of the grid.
     let level = sea.rel - frame.up.xyz * dot(sea.rel, frame.up.xyz);
     if (length(level) - reach > frame.dist.x) { return; }
     let face = u32(F.anchor.z);
     let p = vec2<u32>(P);
-    let tile = ${skip.drawn ? 'vec4<i32>(tileOver(face, p), 0, 0)' : 'drawnOver(face, p)'};
+    // (A tile beside the view, not drawn: its finest loaded heights, as mesh level 0.)
+    var tile = ${skip.drawn ? 'vec4<i32>(groundTileOver(face, p), 0, 0)' : 'groundDrawnOver(face, p)'};
+    tile.w = max(tile.w, 0);
     if (tile.x < 0) { return; }
     let up = u32(tile.z);
     let part = vec2<f32>((p >> vec2<u32>(u32(tile.y))) & vec2<u32>((1u << up) - 1u)) / f32(1u << up);
-    let h = drawnHeight(tile.x & 4095, up, part, u32(tile.w), inTile(p, u32(tile.y), vec2<f32>(0.5 * sf)));
+    let h = groundDrawnHeight(tile.x & 4095, up, part, u32(tile.w), groundInTile(p, u32(tile.y), vec2<f32>(0.5 * sf)));
     if (h < frame.camera.w) { return; }
     let rel = sea.rel + h * sea.up;
     let distance = length(rel);
@@ -543,7 +340,9 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let slotOut = atomicAdd(&control[0], 1u);
     if (slotOut >= MAX_PATCHES) { return; }
-    let land = landLightAt(frame.camera.xyz + rel, clampSampler);
+    var land = landLightAt(frame.camera.xyz + rel, clampSampler);
+    ${ecology ? `// Under a forest (none until one is made, or the mock forest): its shade on the patch, at the blades' height.
+    land *= canopyLight(ecologyAtPatch(face, p, vec2<f32>(0.5 * sf)), dot(frame.up.xyz, frame.sunDir.xyz), 0.0);` : ''}
     let packedD = u32(d.x + 32768) | (u32(d.y + 32768) << 16u);
     let headY = slot | (u32(tile.y) << 4u) | (up << 8u) | (u32(tile.w) << 12u) | (u32(span) << 16u);
     let nearest = max(distance - reach, 0.0);
@@ -565,18 +364,16 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var k = 0; k < 5 && frame.cache.z == 0u; k++) {
         if (dot(frame.planes[k].xyz, rel) + frame.planes[k].w < -(2.0 * reach + 0.5 * MAX_H + 1.6)) { seen = 0u; }
     }
-    patches[slotOut * 4u + 2u] = vec4<u32>(bitcast<vec3<u32>>(placeAbout(F, vec2<f32>(d), h).rel), seen);
-    // The wind's gusts at the block's corners, this frame (carried with the wind: GrassPass.js).
-    let metres = frame.north.w / f32(1u << (frame.counts.y + PATCH_LEVELS));
+    patches[slotOut * 4u + 2u] = vec4<u32>(bitcast<vec3<u32>>(groundPlace(F, vec2<f32>(d), h).rel), seen);
+    // The wind's gusts at the block's corners, this frame (the shared wind: wind.wgsl.js, carried with it).
     var g = vec4<f32>(0.0);
     for (var c = 0u; c < 4u; c++) {
-        let carried = (vec2<f32>(P) + vec2<f32>(f32(c & 1u), f32(c >> 1u)) * sf) * metres - F.wind.xy;
-        g[c] = vnoise(carried / 22.0, 7u) * 0.75 + vnoise(carried / 7.5 + 13.1, 11u) * 0.25;
+        g[c] = windGust(groundPlace(F, vec2<f32>(d) + vec2<f32>(f32(c & 1u), f32(c >> 1u)) * sf, h).rel);
     }
     // The ground's tilt over the block (the drawn heights half a patch apart), its normal's level part (east, north): the
     // canopy lies along the ground, so the far light takes the sight line's slant to it (shadeBlade, as the terrain).
-    let hx = drawnHeight(tile.x & 4095, up, part, u32(tile.w), inTile(p, u32(tile.y), vec2<f32>(0.5 * sf + 0.5, 0.5 * sf)));
-    let hy = drawnHeight(tile.x & 4095, up, part, u32(tile.w), inTile(p, u32(tile.y), vec2<f32>(0.5 * sf, 0.5 * sf + 0.5)));
+    let hx = groundDrawnHeight(tile.x & 4095, up, part, u32(tile.w), groundInTile(p, u32(tile.y), vec2<f32>(0.5 * sf + 0.5, 0.5 * sf)));
+    let hy = groundDrawnHeight(tile.x & 4095, up, part, u32(tile.w), groundInTile(p, u32(tile.y), vec2<f32>(0.5 * sf, 0.5 * sf + 0.5)));
     let stepM = 0.5 * F.dv.w;
     let ex = normalize(F.du.xyz - sea.up * dot(sea.up, F.du.xyz));
     let ey = normalize(F.dv.xyz - sea.up * dot(sea.up, F.dv.xyz));
@@ -768,7 +565,7 @@ fn chooseBlade(r0: vec4<u32>, r1: vec4<u32>, owner: u32) -> Chosen {
         let fadeIn = saturate((tufts - rs.x) / max(0.3 * tufts, 1.0e-6));
         // Where in its block the blade stands: its offset along the face's metres per owner (placeAbout), over the
         // block's patches.
-        let F = frame.faces[head.y & 15u];
+        let F = ground.faces[head.y & 15u];
         let toMetres = frame.up.w / F.ca.w;
         let jx = toMetres * (F.du.xyz - F.na.xyz * dot(F.na.xyz, F.du.xyz));
         let jy = toMetres * (F.dv.xyz - F.na.xyz * dot(F.na.xyz, F.dv.xyz));
@@ -912,19 +709,6 @@ fn densityAt(d: f32, s: f32) -> f32 {
     return frame.dist.y * min(1.0, max(frame.dist.z / x, steep)) * min(1.0, frame.dist.w / x);
 }
 
-// Lattice points are ranked so that the coarser ones of a nested set come first: a point on every 2^k-th row and column
-// has a rank under 4^-k. A patch whose ranks kept end under 4^-k needs to visit only those points, and as the camera
-// moves the kept set still changes one point at a time. Level of a point (up to 4, every 16th) and its rank:
-fn latticeLevel(g: vec2<u32>) -> u32 {
-    let m = g.x | g.y | 16u;
-    return countTrailingZeros(m);
-}
-fn latticeRank(level: u32, u: f32) -> f32 {
-    let hi = exp2(-2.0 * f32(level));
-    let lo = select(hi * 0.25, 0.0, level >= 4u);
-    return mix(lo, hi, u);
-}
-
 // Flower colours (linear): buttercup, hawkweed orange, daisy white, cornflower blue, poppy red; spikes: lupine, pink
 // orchid, deep violet.
 fn blossomColor(kind: u32, pick: f32, g: Growth) -> vec3<f32> {
@@ -1025,24 +809,24 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
     let nearest = bitcast<f32>(head.w);
     let cellArea = bitcast<f32>(more.x);
     let land = unpack2x16unorm(more.y);
-    let F = frame.faces[slot];
+    let F = ground.faces[slot];
     let face = u32(F.anchor.z);
     let P = vec2<u32>(F.anchor.xy + d);
     // The drawn tile's part of its geometry's layer (an ancestor's quarter, sixteenth...).
     let part = vec2<f32>((P >> vec2<u32>(shift)) & vec2<u32>((1u << ancestor) - 1u)) / f32(1u << ancestor);
     let partScale = 1.0 / f32(1u << ancestor);
-    let metres = frame.north.w / f32(1u << (frame.counts.y + PATCH_LEVELS));
+    let metres = frame.north.w / f32(1u << (ground.tables.y + PATCH_LEVELS));
     if (thread < 4u) {
         let cf = vec2<f32>(f32(thread & 1u), f32(thread >> 1u)) * sf;
-        let localC = part + inTile(P, shift, cf) * partScale;
-        let hC = heightAt(layer, localC);
+        let localC = part + groundInTile(P, shift, cf) * partScale;
+        let hC = groundHeightAt(layer, localC);
         let qC = (vec2<f32>(P) + cf) * metres;
-        let carried = qC - F.wind.xy;
         corners[thread] = Corner(${skip.growth ? 'Growth(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.3, 0.55, 0.5, 0.05, 0.0, vec3<f32>(1.0))' : 'growthAt(layer, localC, qC, hC)'}, hC,
             // (Hue, straw and shade patches by the field's noise, as the ground's: grassField.wgsl.js.)
             vec4<f32>(vnoise(qC / 8.5, 51u), fieldNoise(qC / 4.2 + 7.3, 53u), fieldNoise(qC / 6.1 + 3.1, 57u), vnoise(qC / 11.0 + 5.7, 61u)),
             vec4<f32>(vnoise(qC / 7.0, 23u), vnoise(qC / 2.3, 29u), vnoise(qC / 4.5, 59u), fieldNoise(qC / 3.2, 63u)),
-            vec4<f32>(vnoise(qC / 19.0, 31u), vnoise(qC / 13.0, 37u), vnoise(carried / 22.0, 7u), vnoise(carried / 7.5 + 13.1, 11u)));
+            // (z, w unused: the gusts are the shared wind's, at the patch's corners.)
+            vec4<f32>(vnoise(qC / 19.0, 31u), vnoise(qC / 13.0, 37u), 0.0, 0.0));
     }
     workgroupBarrier();
     // Most tufts a lattice point can hold here, over density: the first test, before anything is read for a point.
@@ -1081,12 +865,12 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
         let h2 = pcg(h1);
         // A point of a coarser set lies anywhere in its own block, so that the set does not stand in rows.
         let f = (vec2<f32>(c) + vec2<f32>(u01(h1), u01(h2)) * f32(1u << own)) / f32(CELLS);
-        let drawn = inTile(P, shift, f);
+        let drawn = groundInTile(P, shift, f);
         let local = part + drawn * partScale;
         // The distance from the corners' heights decides; the drawn height only places what is kept.
         let fc = f / sf;
         let hApprox = mix(mix(corners[0].height, corners[1].height, fc.x), mix(corners[2].height, corners[3].height, fc.x), fc.y);
-        let distance = length(placeAbout(F, vec2<f32>(d) + f, hApprox - 0.03).rel);
+        let distance = length(groundPlace(F, vec2<f32>(d) + f, hApprox - 0.03).rel);
         // While the patch stays in its step a tuft comes at most 15 % nearer (its distance falls no faster than the
         // patch's); by the camera's feet, where patches share the first step, density is the same within 2 m.
         let reachD = select(distance / 1.15, min(distance / 1.15, 2.0), nearest < 2.0);
@@ -1174,8 +958,8 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
         let tuftScale = cellArea * total * byHeight * clumpy / perTuft;
         let tufts = densityAt(reachD, elevationMost) * tuftScale;
         if (rank >= tufts) { continue; }
-        let height = ${skip.height ? 'heightAt(layer, local)' : 'drawnHeight(layer, ancestor, part, lod, drawn)'};
-        let place = placeAbout(F, vec2<f32>(d) + f, height - 0.03);
+        let height = ${skip.height ? 'groundHeightAt(layer, local)' : 'groundDrawnHeight(layer, ancestor, part, lod, drawn)'};
+        let place = groundPlace(F, vec2<f32>(d) + f, height - 0.03);
         // Tufts thin out with distance by their rank: one just kept grows out of the ground, so none pops.
         let count = clamp(u32(ceil(perTuft * mix(0.6, 1.4, r2))), 1u, 12u);
 

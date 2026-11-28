@@ -36,6 +36,13 @@ describe('terrain pass shaders', () => {
         }
     }
     it('validates the exact air', () => valid(buildTerrainPassFragmentWGSL({ ...options, exactAir: true })));
+    it('validates with the ecology field (light under the canopy, debug views)', () => {
+        for (const half of [false, true]) {
+            const code = buildTerrainPassFragmentWGSL({ ...options, water: true, rain: true, half, ecology: true });
+            valid(code);
+            expect(code).toContain('ecologyAtLayer(layer');
+        }
+    });
     it('validates the rest', () => {
         valid(buildTerrainPassVertexWGSL({ segments: 128 }));
         valid(buildTerrainDrawListWGSL({ lodLevels: 7, capacity: 8192, solidLod: 5 }));

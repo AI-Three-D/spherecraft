@@ -117,6 +117,8 @@ export class TerrainPass {
             tiles: layout([
                 at(0, V, stored), at(1, V, stored), at(2, V, stored), at(3, V, uniform),
                 at(4, V, array), at(5, V, { sampler: {} }), at(6, V, uniform), at(7, V, { texture: { sampleType: 'float' } }),
+                // The ecology field (core/world/ecology/ecologyField.wgsl.js): light under the canopy, debug views.
+                ...(this.ecology ? [at(8, F, array), at(9, F, { texture: { sampleType: 'uint', viewDimension: '2d-array' } }), at(10, F, stored)] : []),
             ]),
             list: layout([
                 at(0, C, uniform), ...[1, 2, 3, 4].map(i => at(i, C, stored)), ...[5, 6].map(i => at(i, C, { buffer: { type: 'storage' } })),
@@ -161,6 +163,7 @@ export class TerrainPass {
             portraits: this.grain && this.portraits && this.options.grass && this.options.grain && this.options.portraits !== false ? this._grainBinding() + 1 : null,
             // The field past the blades traced through its slices (grassSlices.js, grassMedium.wgsl.js).
             slices: this.grain && this.portraits && this.slices && this.options.grass && this.options.grain && this.options.slices !== false ? this._grainBinding() + 2 : null,
+            ecology: !!this.ecology,
         });
         const made = device.createRenderPipelineAsync({
             label: `Terrain ${key}`, layout: wet ? this._wetLayout : this._dryLayout,
@@ -218,7 +221,8 @@ export class TerrainPass {
         const tiles = [instances, stitch, land.frame, land.map, lut];
         if (!same(this._tilesOf, tiles)) {
             this._tilesOf = tiles;
-            this._tilesGroup = device.createBindGroup({ layout: this._layouts.tiles, entries: entries([instances, stitch, this._list, land.frame, land.map, this._sampler, this.air.frame, lut]) });
+            this._tilesGroup = device.createBindGroup({ layout: this._layouts.tiles, entries: entries([instances, stitch, this._list, land.frame, land.map, this._sampler, this.air.frame, lut,
+                ...(this.ecology ? this.ecology.resources : [])]) });
         }
         const coverage = this._covered ? this.coverage.view : this._noCoverage;
         const meta = this.tileManager.getIndirectArgsBuffer(), bounds = this.tileManager.getTileBoundsBuffer();
@@ -266,8 +270,9 @@ export class TerrainPass {
             ...color(u.ambientLightColor.value, u.ambientLightIntensity.value), tierFade?.end ?? 0,
             ...color(u.fogColor.value, 1), normalFrom,
             normalFrom + shaderConfig.normalMapDistanceFadeMeters, 1, this.grassReach ?? 0, 0,
-            // What the camera's float cannot hold (terrainPass.wgsl.js vertex: the land from the camera, exactly).
-            p.x - Math.fround(p.x), p.y - Math.fround(p.y), p.z - Math.fround(p.z), 0,
+            // What the camera's float cannot hold (terrainPass.wgsl.js vertex: the land from the camera, exactly); the
+            // ecology field's debug view (ecologyField.wgsl.js ecologyDebugColour; 0 off).
+            p.x - Math.fround(p.x), p.y - Math.fround(p.y), p.z - Math.fround(p.z), this.ecologyDebug ?? 0,
         ], 32);
         this.device.queue.writeBuffer(this._frameBuffer, 0, f);
         this._rain = wetness > 0;

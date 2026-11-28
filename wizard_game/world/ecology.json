@@ -1,0 +1,102 @@
+{
+  "_comment": "What grows where (core/world/ecology/ecologyRegistry.js; ECOLOGY_FOUNDATION_PLAN.md F8). Tree species are the forest system's ids; until it registers them they are placeholders. Stand fields beyond trees and canopy are optional and passed through.",
+  "ecosystems": [
+    {
+      "id": "boreal",
+      "match": { "cover": "forest", "temperatureC": [-10, 6], "humidity": [0.35, 1.0] },
+      "stands": [
+        {
+          "id": "spruce",
+          "share": 0.5,
+          "trees": [
+            { "species": "forest:norway-spruce", "share": 0.85 },
+            { "species": "forest:birch", "share": 0.15 }
+          ],
+          "canopy": { "cover": [0.6, 0.9], "top": [16, 28], "crownLAI": [4, 7] }
+        },
+        {
+          "id": "pine-heath",
+          "share": 0.4,
+          "trees": [
+            { "species": "forest:scots-pine", "share": 1.0 }
+          ],
+          "canopy": { "cover": [0.3, 0.6], "top": [14, 24], "crownLAI": [2, 4] }
+        },
+        { "id": "clearing", "share": 0.1, "trees": [] }
+      ],
+      "ground": [
+        { "type": "moss", "where": "under", "cover": 0.8 },
+        { "type": "bilberry", "where": "under", "stands": ["spruce", "pine-heath"], "weight": 0.5 },
+        { "type": "lingonberry", "where": "under", "stands": ["pine-heath"], "weight": 0.4 },
+        { "type": "fern", "where": "under", "stands": ["spruce"], "light": [0.1, 0.5] },
+        { "type": "grass", "where": "open" }
+      ],
+      "rocks": { "boulders": 0.02, "stones": 0.3 },
+      "deadfall": { "logs": 0.01, "stumps": 0.02 }
+    },
+    {
+      "id": "temperate",
+      "match": { "cover": "forest", "temperatureC": [6, 18], "humidity": [0.35, 1.0] },
+      "stands": [
+        {
+          "id": "broadleaf",
+          "share": 0.6,
+          "trees": [
+            { "species": "forest:beech", "share": 0.6 },
+            { "species": "forest:oak", "share": 0.4 }
+          ],
+          "canopy": { "cover": [0.7, 0.95], "top": [20, 32], "crownLAI": [4, 6] }
+        },
+        {
+          "id": "mixed",
+          "share": 0.3,
+          "trees": [
+            { "species": "forest:oak", "share": 0.5 },
+            { "species": "forest:scots-pine", "share": 0.5 }
+          ],
+          "canopy": { "cover": [0.5, 0.8], "top": [16, 28], "crownLAI": [3, 5] }
+        },
+        { "id": "glade", "share": 0.1, "trees": [] }
+      ],
+      "ground": [
+        { "type": "leaf-litter", "where": "under", "cover": 0.7 },
+        { "type": "fern", "where": "under", "stands": ["broadleaf", "mixed"], "light": [0.1, 0.6] },
+        { "type": "grass", "where": "open" }
+      ],
+      "rocks": { "boulders": 0.01, "stones": 0.2 },
+      "deadfall": { "logs": 0.015, "stumps": 0.02 }
+    },
+    {
+      "id": "tropical",
+      "match": { "cover": "forest", "temperatureC": [18, 40], "humidity": [0.4, 1.0] },
+      "stands": [
+        {
+          "id": "rainforest",
+          "share": 0.6,
+          "trees": [
+            { "species": "forest:emergent", "share": 0.2 },
+            { "species": "forest:canopy-broadleaf", "share": 0.6 },
+            { "species": "forest:palm", "share": 0.2 }
+          ],
+          "canopy": { "cover": [0.85, 0.98], "top": [25, 40], "crownLAI": [5, 8] }
+        },
+        {
+          "id": "palm-grove",
+          "share": 0.25,
+          "trees": [
+            { "species": "forest:palm", "share": 1.0 }
+          ],
+          "canopy": { "cover": [0.5, 0.75], "top": [12, 22], "crownLAI": [2.5, 4] }
+        },
+        { "id": "gap", "share": 0.15, "trees": [] }
+      ],
+      "ground": [
+        { "type": "fern", "where": "under", "stands": ["rainforest"], "light": [0.05, 0.4] },
+        { "type": "broadleaf-understory", "where": "under", "stands": ["rainforest", "palm-grove"], "weight": 0.6 },
+        { "type": "grass", "where": "open" }
+      ],
+      "rocks": { "boulders": 0.01, "stones": 0.1 },
+      "deadfall": { "logs": 0.02, "stumps": 0.01 }
+    }
+  ]
+}
