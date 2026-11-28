@@ -1581,6 +1581,7 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let up = frame.up.xyz;
     let t = in.along.x;
     let kind = u32(inLook.w * 255.0 + 0.5) & 15u;
+    let stroke = (u32(inLook.w * 255.0 + 0.5) & 16u) != 0u;
     let crowd = inLook.z;
     let petalAt = in.along.zw;
     // A flower's head: its colour only there, a centre, the petals' edges a little darker.
@@ -1665,6 +1666,16 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let ground = vec3<f32>(unpack2x16float(in.ground.x), unpack2x16float(in.ground.y).x);
     // (For measuring: every blade drawn as the field about it, GrassPass.teacher = 2.)
     if (frame.cache.w == 2u) { return ground; }
+    // A tuft's stroke stands for its blades and the gaps between them: it takes the field's light about it (the light
+    // the ground past the blades has, with its patches) and the tuft's shape on it, darker at the foot and lighter to
+    // the tips, of mean 1 over the stroke's outline (vsMain: its width's middle by area is at t = 0.4155), a little
+    // apart from tuft to tuft. Lit as one upright blade facing the camera, its foot showed whole where a tuft's lies hidden
+    // among its blades: a band of dark stubble where strokes were wide enough to show their own light (pale toward
+    // the sun), at whatever thickness.
+    if (stroke) {
+        let shaped = (1.0 + 0.35 * (t - 0.4155)) * mix(0.94, 1.06, inAlbedo.a);
+        return ground * mix(shaped, 1.0, far);
+    }
     if (far <= 0.0) { return own; }
     // A blade's own light and shade stay a little: the field keeps its grain.
     let grain = clamp(dot(own, vec3<f32>(0.333)) / max(dot(ground, vec3<f32>(0.333)), 1.0e-4), 0.6, 1.6);

@@ -44,6 +44,12 @@ The user's report, from the game's follow camera (6 m over the player, looking d
 - At 3.5 m from standing height the blades are visibly a little wider; the middle field reads fuller and a little deeper green, as the wider blades hide more of the paler ground.
 - To compare live: Settings, Grass, Blade thickness (also Next, or Shift+B), with the choice shown on screen. `GRASS_THICKNESS_TIERS`, each the same at every distance (the user's choice, to compare the width alone): 0 as made (1×), 1 slightly thicker (1.25×, the default), 2 thicker (1.5×), 3 thick (1.8×), 4 about GrassWorks (2.2×). The shader still takes a width that grows from `near` to `far`.
 
+**Strokes lit as the field** (the user's report: a band of dark "beard stubble" at a fixed distance, stronger with thicker blades, absent nearer):
+- Strokes were lit as one upright blade facing the camera, with a blade's dark foot. A tuft's foot lies hidden among its blades, so where strokes were wide enough to show their own light (from the hand-over to about 40 m) they stood as a band: dark stubble in the user's light, pale spikes with the sun at 0.6. Thicker blades make wider strokes, which show more.
+- Now a stroke takes the field's light about it (`fieldLight`, the light the ground and the far blades share, with its patches), times the tuft's shape: 1 + 0.35 (t − 0.4155), darker at the foot and lighter at the tips, of mean 1 over the stroke's outline, ±6 % from tuft to tuft.
+- Mean brightness by distance at the user's pose (grey levels, the game against every blade drawn as its field light, `GrassPass.teacher = 2`), 16-40 m: before, +0.4 to +6 with the sun at 0.6; after, within 0.1-1 with the sun at 0.6 and 0.2-0.8 with it at 0.22. No band in either picture at the thickest setting.
+- Nearer, the blades are still 3-14 levels above the field's light from about 5 m up (the canopy fit was made at standing height).
+
 **Counts, from the grassland pose** (blades drawn per band, near/middle/far; records kept):
 
 | Eye | Before | After |
