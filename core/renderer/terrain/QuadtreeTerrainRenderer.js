@@ -12,6 +12,7 @@ import { TerrainLightMap } from './light/TerrainLightMap.js';
 import { TerrainPass } from './draw/TerrainPass.js';
 import { GrassPass } from '../grass/GrassPass.js';
 import { EcologyField } from '../../world/ecology/EcologyField.js';
+import { ObstacleCells } from '../../world/ecology/ObstacleCells.js';
 import { createGrassGrain } from '../grass/grassGrain.js';
 import { createGrassPortraits } from '../grass/grassPortraits.js';
 import { createGrassSlices } from '../grass/grassSlices.js';
@@ -124,6 +125,18 @@ export class QuadtreeTerrainRenderer {
             } catch (error) {
                 ecology.destroy();
                 Logger.warn(`[QTR] ecology field unavailable: ${error?.message ?? error}`);
+            }
+        }
+        // The obstacle table (core/world/ecology/ObstacleCells.js): discs in world cells about the camera, made in layer
+        // order (geology, trees, deadfall) for what grows to keep clear of.
+        if (ecologyConfig?.enabled !== false && !this._obstacles) {
+            const obstacles = new ObstacleCells({ device: this.backend.device, tileManager: this.tileManager, planetConfig: this.planetConfig, config: ecologyConfig?.obstacles });
+            try {
+                await obstacles.initialize();
+                this._obstacles = obstacles;
+            } catch (error) {
+                obstacles.destroy();
+                Logger.warn(`[QTR] obstacle table unavailable: ${error?.message ?? error}`);
             }
         }
         const pass = new TerrainPass({
@@ -245,7 +258,10 @@ export class QuadtreeTerrainRenderer {
         this._tierFade = this._computeTierFadeDistances();
         this._drawnByPass = this._initialized && this.tileManager?.isReady() && this._passDraws(frame.camera);
         // The ecology field first: the terrain and grass read it in this frame's commands.
-        if (this._drawnByPass) this._ecology?.update(encoder);
+        if (this._drawnByPass) {
+            this._ecology?.update(encoder);
+            this._obstacles?.update(encoder, { camRel: [position.x - origin.x, position.y - origin.y, position.z - origin.z] });
+        }
         if (this._drawnByPass) {
             if (this.grass) {
                 const water = this._waterData?.value;
@@ -637,6 +653,8 @@ export class QuadtreeTerrainRenderer {
         this._slices = null;
         this._ecology?.destroy();
         this._ecology = null;
+        this._obstacles?.destroy();
+        this._obstacles = null;
         this._ground?.destroy();
         this._ground = null;
         this._landLight?.dispose();

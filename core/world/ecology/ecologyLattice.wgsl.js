@@ -67,14 +67,9 @@ fn ecoFaceDirection(face: u32, uv: vec2<f32>) -> vec3<f32> {
         default: { return vec3<f32>(-st.x, st.y, -1.0); }
     }
 }
-// The face a direction falls on, and its (u, v) there: (face, u, v).
-fn ecoDirectionToFace(dir: vec3<f32>) -> vec3<f32> {
-    let a = abs(dir);
-    var face = 4u;
-    var c = dir / a.z;
-    if (a.x >= a.y && a.x >= a.z) { face = select(1u, 0u, dir.x >= 0.0); c = dir / a.x; }
-    else if (a.y >= a.z) { face = select(3u, 2u, dir.y >= 0.0); c = dir / a.y; }
-    else { face = select(5u, 4u, dir.z >= 0.0); }
+// A direction's (u, v) on a given face's plane (past 0..1 when it falls on another face).
+fn ecoUvOnFace(face: u32, dir: vec3<f32>) -> vec2<f32> {
+    let c = dir / dot(dir, ecoFaceDirection(face, vec2<f32>(0.5)));
     var st = vec2<f32>(0.0);
     switch (face) {
         case 0u: { st = vec2<f32>(-c.z, c.y); }
@@ -84,7 +79,16 @@ fn ecoDirectionToFace(dir: vec3<f32>) -> vec3<f32> {
         case 4u: { st = vec2<f32>(c.x, c.y); }
         default: { st = vec2<f32>(-c.x, c.y); }
     }
-    return vec3<f32>(f32(face), (st + 1.0) * 0.5);
+    return (st + 1.0) * 0.5;
+}
+// The face a direction falls on, and its (u, v) there: (face, u, v).
+fn ecoDirectionToFace(dir: vec3<f32>) -> vec3<f32> {
+    let a = abs(dir);
+    var face = 4u;
+    if (a.x >= a.y && a.x >= a.z) { face = select(1u, 0u, dir.x >= 0.0); }
+    else if (a.y >= a.z) { face = select(3u, 2u, dir.y >= 0.0); }
+    else { face = select(5u, 4u, dir.z >= 0.0); }
+    return vec3<f32>(f32(face), ecoUvOnFace(face, dir));
 }
 // The cell (dx, dy) cells from a cell of a level, across its face's edge if beyond it: (face, ix, iy).
 fn ecoNeighbourCell(face: u32, level: u32, cell: vec2<u32>, d: vec2<i32>) -> vec3<u32> {

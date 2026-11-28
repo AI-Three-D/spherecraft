@@ -2,6 +2,16 @@
 
 Status: second version, after Codex's review, 2026-11-28. Branch `ecology/foundation` from main `6d1dc09` (grass merged). §6 records each review point and what was done with it.
 
+**Built (2026-11-28, same branch).** `core/world/ecology/README.md` is the reference to code against. It differs from this plan in these places:
+- **Light under the canopy (F6)** is applied where the land light is read: the terrain pass per pixel and grass per patch, through one shared `canopyLight`. It is not inside `TerrainLightMap`. That is finer (4 m), needs no change to the light map's rebuild key, and keeps one function for every reader.
+- **Overflow (F5)** keeps records by priority, then by the record's own words (its id first). That is deterministic, but not by radius.
+- **The habitat writer** samples coarse tiles at their texels' middles.
+- **Not done yet:**
+  - timing tool and overlay (F9; passes are labelled);
+  - a hook for a forest producer to write realized ecology (the mock forest shows the path);
+  - instanced meshes (F10, with the ground layer).
+- **Old code:** nothing removed. The old biomes' tile catalog is still read throughout terrain generation (§5, step 9: listed in the README).
+
 Process: this plan is merged to main so both sides work from it. Claude then implements it on a new branch (§5), which is merged to main; Codex merges main into `forest-prop-streaming` and continues with trees only. Claude builds the ground layer (ground cover, small rocks, mushrooms, deadfall) on top.
 
 ## 1. What is shared and what is not

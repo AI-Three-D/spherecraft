@@ -9,6 +9,7 @@ import { buildDrawnGroundWGSL } from './drawnGround.wgsl.js';
 import { buildWindWGSL } from './wind.wgsl.js';
 import { ECO_TABLE_VEC4S, compileEcologyRegistry, standNumericId } from './ecologyRegistry.js';
 import { buildGrassComputeWGSL } from '../../renderer/grass/grassWgsl.js';
+import { buildObstacleAppendWGSL, buildObstacleFinalizeWGSL, buildObstacleReadWGSL } from './obstacles.wgsl.js';
 
 const valid = code => expect(() => validate(parseWgsl(code))).not.toThrow();
 const earth = normalizeBiomeLandscape({ preset: 'earth' });
@@ -30,6 +31,13 @@ ${buildEcologyReadWGSL({ a: [1, 0], b: [1, 1], layers: [1, 2], withPatch: true }
     let c = ecologyDebugColour(ecologyAtLayer(3, vec2<f32>(0.2)), 4u);
     _ = g.height + s.height + l.x + c.x;
 }`);
+    });
+    it('validate: the obstacle table: finalize, append, query', () => {
+        valid(buildObstacleFinalizeWGSL());
+        valid(`${ECOLOGY_LATTICE_WGSL}${buildObstacleAppendWGSL()}
+@compute @workgroup_size(1) fn main() { obstacleAppend(0u, obstacleRecord(7u, vec2<f32>(0.5), 1.0, 2.0, 1u, 0u, 15u)); }`);
+        valid(`${ECOLOGY_LATTICE_WGSL}${buildDrawnGroundWGSL()}${buildObstacleReadWGSL({ frame: [1, 0], table: [1, 1], headers: [1, 2], records: [1, 3] })}
+@compute @workgroup_size(1) fn main() { _ = obstacleClearance(2u, vec2<u32>(100u, 200u), vec2<f32>(0.5), 10.0, 0xFFFFFFFFu); }`);
     });
     it('validate: grass with the field bound', () => {
         valid(buildGrassComputeWGSL({ faceSizeMeters: 262144, biome: earth, ecology: true }));
