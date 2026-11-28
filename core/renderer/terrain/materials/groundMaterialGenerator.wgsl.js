@@ -233,6 +233,19 @@ fn bedOf(layer: Layer, uv: vec2f) -> Bed {
             let fissure = exposed * (1.0 - smoothstep(0.01, 0.095, cells.f2 - cells.f1)) * (1.0 - 0.72 * frost);
             return Bed(0.18 * w.x - 0.22 * fissure, fissure, frost, 0.0);
         }
+        case 12u: { // boreal forest floor: a carpet of feather moss in cushions over hummocks, needle litter where it is thin
+            var b = soilBed(uv, P, 0.5, s);
+            let cushion = worley(uv, vec2i(i32(P * 9.0)), 0.9, s + 121u);
+            let hummock = worley(uv, vec2i(i32(P * 2.2)), 0.85, s + 122u);
+            let thin = smoothstep(0.08, 0.32, fbm(uv, 5, 4, 0.55, s + 123u) + 0.25 * (cushion.f1 - 0.5));
+            let moss = 1.0 - 0.8 * thin;
+            let fibre = fbm(uv, i32(P * 80.0), 2, 0.5, s + 124u);
+            b.height = 0.3 * b.height + moss * (0.022 * (1.0 - cushion.f1 * cushion.f1) + 0.035 * (1.0 - hummock.f1) + 0.004 * fibre);
+            b.tint = mix(b.tint, sat(0.25 + 0.55 * cushion.id.x + 0.2 * hummock.id.y + 0.3 * fibre), moss);
+            b.kind = select(0.0, 6.0, moss > 0.5);
+            b.aux = moss * (1.0 - 0.5 * cushion.f1);
+            return b;
+        }
         default: { // mud: silt, worn smooth
             let w = vec2f(fbm(uv, 4, 4, 0.5, s + 51u), fbm(uv, 4, 4, 0.5, s + 52u));
             let h = 0.028 * w.x + 0.004 * fbm(uv, 40, 3, 0.5, s + 53u);
@@ -467,6 +480,12 @@ fn colorOf(v: vec4f, uv: vec2f, cavity: f32) -> vec4f { // w roughness
                 let c = mix(vec3f(0.126, 0.147, 0.073), vec3f(0.253, 0.245, 0.137), tint);
                 return vec4f(c, 0.92);
             }
+            if (layer.index == 12u) {
+                // Feather moss: olive in the shade of its cushions, yellow-green on their tops and its fronds' tips.
+                var c = mix(vec3f(0.032, 0.040, 0.009), vec3f(0.120, 0.135, 0.030), tint);
+                c = mix(c, vec3f(0.135, 0.118, 0.036), smoothstep(0.7, 0.95, fract(tint * 7.3)) * 0.6);
+                return vec4f(c * (0.7 + 0.45 * aux), 0.92);
+            }
             let c = mix(vec3f(0.028, 0.042, 0.008), vec3f(0.085, 0.105, 0.020), tint);
             return vec4f(c, 0.9);
         }
@@ -512,6 +531,12 @@ fn colorOf(v: vec4f, uv: vec2f, cavity: f32) -> vec4f { // w roughness
         case 10u: {
             let c = mix(vec3f(0.15, 0.28, 0.37), vec3f(0.55, 0.65, 0.70), tint);
             return vec4f(c * (1.0 - 0.57 * aux), mix(0.34, 0.69, tint));
+        }
+        case 12u: { // between the moss: humus under old needles, warm brown with rusty specks
+            let specks = smoothstep(0.1, 0.4, fbm(uv, 260, 2, 0.5, s + 131u));
+            var c = mix(vec3f(0.046, 0.036, 0.020), vec3f(0.104, 0.082, 0.046), tint);
+            c = mix(c, vec3f(0.160, 0.105, 0.050), specks * 0.6);
+            return vec4f(c, 0.85);
         }
         default: {
             let dead = smoothstep(0.1, 0.35, fbm(uv, 60, 3, 0.6, s + 5u));

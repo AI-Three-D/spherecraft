@@ -6,6 +6,9 @@ import { buildTileBoundsWGSL } from '../../../world/quadtree/tileBounds.js';
 import { airFrame, AIR_HEIGHTS, airUv, buildAirTableWGSL } from './TerrainAir.js';
 import { stripGridIndices } from './TerrainPass.js';
 import { normalizeBiomeLandscape } from '../../../world/terrain-generator/biomeLandscapeConfig.js';
+import { readFileSync } from 'node:fs';
+import { compileEcologyRegistry, standNumericId } from '../../../world/ecology/ecologyRegistry.js';
+import { forestFloorSurfaces } from '../materials/forestFloor.js';
 
 const valid = code => expect(() => validate(parseWgsl(code))).not.toThrow();
 
@@ -42,6 +45,22 @@ describe('terrain pass shaders', () => {
             valid(code);
             expect(code).toContain('ecologyAtLayer(layer');
         }
+    });
+    it('validates the forest floor under each stand\'s canopy, from the registry', () => {
+        const compiled = compileEcologyRegistry(JSON.parse(readFileSync(new URL('../../../../wizard_game/world/ecology.json', import.meta.url), 'utf8')));
+        const floors = forestFloorSurfaces(compiled);
+        const spruce = floors.find(f => f.stand === standNumericId('boreal', 'spruce'));
+        expect(spruce).toMatchObject({ moss: 0.85, litter: 0, lichen: 0 });
+        expect(floors.find(f => f.stand === standNumericId('boreal', 'pine-heath'))).toMatchObject({ moss: 0.45, lichen: 0.35 });
+        for (const [name, kind] of Object.entries(kinds)) {
+            for (const half of [false, true]) {
+                const code = buildTerrainPassFragmentWGSL({ ...options, ...kind, water: true, rain: true, half, biome, ecology: true, floors });
+                valid(code);
+                expect(code).toContain(`case ${spruce.stand}u:`);
+            }
+        }
+        // No stands with a floor of their own: all litter, and still valid.
+        valid(buildTerrainPassFragmentWGSL({ ...options, biome, ecology: true, floors: [] }));
     });
     it('validates the rest', () => {
         valid(buildTerrainPassVertexWGSL({ segments: 128 }));

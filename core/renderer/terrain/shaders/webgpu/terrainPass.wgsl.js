@@ -182,7 +182,7 @@ export function lattices(faceSizeMeters) {
     };
     // Rounded as groundSurface.wgsl.js prints them: over the planet a last digit moves the patterns by metres.
     const turned = (period, degrees) => [Math.cos(degrees * Math.PI / 180), Math.sin(degrees * Math.PI / 180)].map(x => Number((x * wrap / period).toFixed(5)));
-    const turns = [11, 37, 23, 68, 52, 0, 17, 74, 31, 58, 42, 65];
+    const turns = [11, 37, 23, 68, 52, 0, 17, 74, 31, 58, 42, 65, 29];
     const [mosaic, cliff, fields] = GROUND_WIDE;
     const unit = n => n.map(x => x / Math.hypot(...n));
     return {
@@ -208,8 +208,10 @@ const table = (name, type, rows) => `const ${name} = array<${type}, ${rows.lengt
  * half: 16-bit floats where they are enough. exactAir: the air worked out here, not from TerrainAir's tables.
  * biome: the landscape's rules (biomeLandscapeConfig.js): what the ground is made of follows the tile's climate, not the
  * splat's families (groundSurface.wgsl.js biomeLandscape).
+ * floors: with biome and ecology, the forest floor under each stand's canopy (forestFloorSurfaces): the shares of moss,
+ * litter and lichen; litter takes what they leave, and a stand not listed is all litter.
  */
-export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null, grain = null, grassLook = true, portraits = null, slices = null, ecology = false }) {
+export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null, grain = null, grassLook = true, portraits = null, slices = null, ecology = false, floors = [] }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const deep = fine && deepEndMeters > 0;
@@ -221,7 +223,9 @@ export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live
     const layerOf = name => GROUND_LAYERS.findIndex(l => l.name === name);
     // The weights of the close surfaces, with their layers.
     const weights = [['wGrass', 'grass'], ['wDry', 'dryGrass'], ['wForest', 'forest'], ['wDirt', 'dirt'], ['wGravel', 'gravel'], ['wRock', 'rock'], ['wSand', 'sand'], ['wSnow', 'snow'], ['wMud', 'mud'],
-        ...(biome ? [['wTundra', 'tundra'], ['wMarsh', 'marsh']] : [])].map(([w, name]) => [w, layerOf(name)]);
+        ...(biome ? [['wTundra', 'tundra'], ['wMarsh', 'marsh'], ['wMoss', 'moss']] : [])].map(([w, name]) => [w, layerOf(name)]);
+    // The floor under a forest's canopy (core/world/ecology): only where the landscape's rules draw the ground.
+    const forestFloor = !!(biome && ecology);
     return /* wgsl */`${half ? 'enable f16;' : ''}
 alias h = ${half ? 'f16' : 'f32'}; alias h2 = vec2<h>; alias h3 = vec3<h>; alias h4 = vec4<h>;
 ${FRAME_WGSL}${AIR_FRAME_WGSL}
@@ -244,6 +248,13 @@ ${grain !== null ? `@group(1) @binding(${grain}) var grassGrain: texture_2d<f32>
 ${GRAIN_LATTICES.map((n, i) => `const GRAIN${i} = ${vector(L.over(n))};`).join('\n')}` : ''}
 ${slices !== null ? `@group(1) @binding(${slices}) var grassSlices: texture_2d_array<f32>;` : ''}
 ${ecology ? buildEcologyReadWGSL({ a: [3, 8], b: [3, 9], layers: [3, 10] }) : ''}
+${forestFloor ? `// The forest floor under a stand's canopy (ecology.json ground types the terrain draws): moss, litter, lichen.
+fn floorSurfaceOf(stand: u32) -> vec3<f32> {
+    switch (stand) {
+        ${floors.map(f => `case ${f.stand >>> 0}u: { return vec3<f32>(${[f.moss, f.litter, f.lichen].map(number).join(', ')}); }`).join('\n        ')}
+        default: { return vec3<f32>(0.0); }
+    }
+}` : ''}
 ${portraits !== null ? `@group(1) @binding(${portraits}) var grassPortraits: texture_2d_array<f32>;
 const GRAIN0_TURN: f32 = ${number(Math.atan2(GRAIN_LATTICES[0][1], GRAIN_LATTICES[0][0]))};
 ${GRASS_PORTRAIT_WGSL}` : ''}
@@ -413,7 +424,17 @@ fn main(in: In) -> @location(0) vec4<f32> {
         let litter = mix(h(0.78), 1.0, step3(0.3, 0.7, a.x * 0.5 + b.x * 0.5));
         let shortGrass = cover.grass + cover.forest * (1.0 - litter);
         let peat = 0.75 * step3(0.39, 0.69, 0.64 * a.y + 0.36 * b.x);
-        let marshColor = mix(${mean('marsh')}, ${mean('mud')} * h3(0.66, 0.62, 0.53), peat);` : `
+        let marshColor = mix(${mean('marsh')}, ${mean('mud')} * h3(0.66, 0.62, 0.53), peat);
+        ${forestFloor ? `
+        // Under a forest its own floor in place of the open ground's soft cover: moss, litter and lichen by their shares
+        // (floorSurfaceOf), litter taking the rest.
+        var floorKinds = h3(floorSurfaceOf(eco.stand));
+        floorKinds.y += max(1.0 - floorKinds.x - floorKinds.y - floorKinds.z, 0.0);
+        floorKinds /= max(floorKinds.x + floorKinds.y + floorKinds.z, 0.001);
+        // Wherever the stand's trees stand at all (grassWgsl.js floorPresence: an open pine heath's floor is the heath's).
+        let floorShare = step3(0.05, 0.3, h(eco.cover));` : `
+        let floorKinds = h3(0.0, 1.0, 0.0);
+        let floorShare: h = 0.0;`}` : `
         let steep = step3(0.15, 0.31, slope + 0.16 * edge);
         let shed = step3(0.20, 0.40, slope + 0.18 * edge);
         let ledges = step3(0.35, 0.62, 0.55 * a.x + 0.45 * b.x + slope * 1.2);
@@ -435,9 +456,13 @@ fn main(in: In) -> @location(0) vec4<f32> {
             farColor = (shortGrass * mix(${mean('grass')}, ${mean('dryGrass')}, dryGrass) + cover.forest * litter * ${mean('forest')}
                 + cover.tundra * ${mean('tundra')} * tundraTone + cover.sand * ${mean('sand')} * sandTone + cover.snow * ${mean('snow')}
                 + cover.marsh * marshColor) / max(1.0 - cover.rock, 0.001);
+            // The forest's floor in place of the soft cover under its canopy.
+            let softShare = saturate((shortGrass + cover.forest * litter + cover.tundra) / max(1.0 - cover.rock, 0.001));
+            farColor = mix(farColor, floorKinds.x * ${mean('moss')} + floorKinds.y * ${mean('forest')} + floorKinds.z * ${mean('tundra')} * tundraTone,
+                floorShare * softShare);
             farRock = cover.rock;
             rock = farRock * farShare;
-            leaf = shortGrass * farShare;
+            leaf = shortGrass * farShare * (1.0 - floorShare);
             snow = cover.snow * farShare;
         }` : `
             let coarse = h3(textureSampleLevel(tileColors, clampSampler, in.uv.xy, layer, 0.0).rgb);
@@ -485,17 +510,24 @@ fn main(in: In) -> @location(0) vec4<f32> {
             let gravel = step3(0.075, 0.25, slope) * step3(0.36, 0.72, 0.6 * a.z + 0.4 * b.y);
             let meadow = shortGrass * exposed;
             let turf = meadow * (1.0 - bare) * (1.0 - gravel);
-            let wGrass = turf * (1.0 - dryGrass);
-            let wDry = turf * dryGrass;
-            let wForest = cover.forest * litter * exposed;
-            let wDirt = meadow * bare * (1.0 - gravel);
+            // Under a canopy the forest's floor takes the soft ground's share (floorKinds): moss, litter, lichen.
+            let keepOpen = 1.0 - floorShare;
+            let litterGround = cover.forest * litter * exposed;
+            let dirtGround = meadow * bare * (1.0 - gravel);
+            let tundraGround = cover.tundra * exposed;
+            let floorLand = floorShare * (turf + litterGround + dirtGround + tundraGround);
+            let wGrass = turf * (1.0 - dryGrass) * keepOpen;
+            let wDry = turf * dryGrass * keepOpen;
+            let wForest = litterGround * keepOpen + floorLand * floorKinds.y;
+            let wDirt = dirtGround * keepOpen;
             let wGravel = meadow * gravel;
             let wRock = cover.rock * exposed;
             let wSand = cover.sand * exposed;
             let wSnow = cover.snow * exposed;
-            let wTundra = cover.tundra * exposed;
+            let wTundra = tundraGround * keepOpen + floorLand * floorKinds.z;
             let wMarsh = cover.marsh * exposed * (1.0 - peat);
-            let wMud = bed + cover.marsh * exposed * peat;` : `
+            let wMud = bed + cover.marsh * exposed * peat;
+            let wMoss = floorLand * floorKinds.x;` : `
             cold = families.w;
             let lowland = 1.0 - step3(0.02, 0.10, slope);
             let bare = step3(0.66, 0.78, bareness + 0.9 * slope);

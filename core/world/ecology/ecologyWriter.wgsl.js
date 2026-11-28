@@ -15,7 +15,7 @@ export function buildEcologyWriterWGSL({ biome }) {
     return /* wgsl */`${ECOLOGY_LATTICE_WGSL}
 ${biome ? biomeCoverWGSL(biome) : ''}
 struct WriterFrame {
-    counts: vec4<u32>,  // jobs, resolution, mock forest (1), world seed
+    counts: vec4<u32>,  // jobs, resolution, mock forest (1), the mock's stand everywhere vegetated (0: by habitat)
     scale: vec4<f32>,   // planet radius (m), height scale (m), unused, unused
 };
 @group(0) @binding(0) var<uniform> wf: WriterFrame;
@@ -100,16 +100,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wg
         break;
     }` : ''}
     // Realized: empty, or the mock forest (a stand of trees where its hint is one, its canopy ranges by noise, gaps).
+    // A lab can ask for one stand wherever the landscape is vegetated (wf.counts.w), whatever the climate.
     var realized = vec3<f32>(0.0);
     var stand = ${0}u;
-    if (wf.counts.z == 1u && hint != 0u) {
+    var mockHint = hint;
+    var mockSuit = suitability;
+    ${biome ? `if (wf.counts.w != 0u) { mockHint = wf.counts.w; mockSuit = 0.9 * step3(0.25, 0.5, cover.grass + cover.forest) * (1.0 - ice); }` : ''}
+    if (wf.counts.z == 1u && mockHint != 0u) {
+        let hint = mockHint;
+        let suitability = mockSuit;
         let standCount = u32(registry[0].y);
         for (var s = 0u; s < standCount; s++) {
             let a = registry[STANDS_AT + s * 3u];
             if (u32(a.x) != hint) { continue; }
             let b = registry[STANDS_AT + s * 3u + 1u];
             if (registry[STANDS_AT + s * 3u + 2u].x > 0.5) {
-                let gaps = smoothstep(0.3, 0.55, ecoNoise3(world / 35.0, 79u));
+                let gaps = smoothstep(0.18, 0.4, ecoNoise3(world / 35.0, 79u));
                 let cover = suitability * mix(a.z, a.w, ecoNoise3(world / 90.0, 83u)) * gaps;
                 if (cover > 0.02) {
                     stand = hint;

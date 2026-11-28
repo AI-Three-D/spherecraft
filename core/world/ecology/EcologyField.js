@@ -23,6 +23,8 @@ export const ECOLOGY_DEFAULTS = Object.freeze({
     resolution: 32,
     /** Realized forest made from habitat and noise, for labs and tests; never on in the game by default. */
     mockForest: false,
+    /** With the mock forest: one stand ("ecosystem/stand") wherever the landscape is vegetated, whatever the climate (labs). */
+    mockStand: null,
     /** Layers made at most a frame. */
     maxJobsPerFrame: 96,
 });
@@ -99,6 +101,19 @@ export class EcologyField {
     }
     get mockForest() { return !!this.config.mockForest; }
 
+    /** The mock forest's stand everywhere vegetated ("ecosystem/stand"), or null for the habitat's choice. */
+    set mockStand(name) {
+        if (name === this.config.mockStand) return;
+        this.config.mockStand = name ?? null;
+        this._epoch++;
+    }
+    get mockStand() { return this.config.mockStand; }
+    _mockStandId() {
+        if (!this.config.mockStand) return 0;
+        const [eco, id] = String(this.config.mockStand).split('/');
+        return this.compiled.stands.find(s => s.ecosystem === eco && s.id === id)?.numericId ?? 0;
+    }
+
     _sourceGroup() {
         const textures = this.tileManager.getArrayTextures?.();
         const view = name => textures?.[name]?._gpuTexture?.view;
@@ -158,7 +173,7 @@ export class EcologyField {
             const d = this._jobData;
             jobs.forEach((j, i) => d.set([j.layer, j.info.face, j.info.depth, j.beds, j.info.x, j.info.y, 0, 0], i * 8));
             this.device.queue.writeBuffer(this._jobs, 0, d, 0, jobs.length * 8);
-            this._frame.set([jobs.length, this.config.resolution, this.config.mockForest ? 1 : 0, 0], 0);
+            this._frame.set([jobs.length, this.config.resolution, this.config.mockForest ? 1 : 0, this._mockStandId()], 0);
             this._frameF.set([this.planetConfig.radius, this.planetConfig.heightScale, 0, 0], 4);
             this.device.queue.writeBuffer(this._frameBuffer, 0, this._frame);
             const pass = encoder.beginComputePass({ label: 'Ecology habitat' });

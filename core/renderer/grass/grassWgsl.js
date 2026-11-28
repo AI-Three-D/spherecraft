@@ -62,6 +62,8 @@ export const MAX_WIDTH = 0.05;
  */
 export const STROKE_FROM = 0.6;
 export const STROKE_TO = 1.0;
+/** A floor plant's stems and twigs are made and drawn to this share of the same distance (grassWgsl.js FLOOR). */
+export const STEMS_TO = 0.5;
 export const TUFT_FILL = 0.53;
 export const FRAME_FLOATS = 100;
 export const CONTROL_WORDS = CTRL.GENLIST + 2 * MAX_PATCHES;
@@ -69,7 +71,17 @@ export const CTRL_REMAP = CTRL.GENLIST + MAX_PATCHES;
 /** Every sway's rate is a whole number of turns in this many seconds, so time can wrap at it without a jump. */
 export const WAVE_PERIOD = 3600;
 /** Blade kinds. */
-export const KIND = Object.freeze({ MEADOW: 0, DRY: 1, WOOD: 2, TUNDRA: 3, REED: 4, SEED: 5, BLOSSOM: 6, SPIKE: 7, LEAF: 8 });
+export const KIND = Object.freeze({ MEADOW: 0, DRY: 1, WOOD: 2, TUNDRA: 3, REED: 4, SEED: 5, BLOSSOM: 6, SPIKE: 7, LEAF: 8, STEM: 9, BERRY: 10 });
+/**
+ * The forest floor's plants (core/world/ecology: a stand's ground types under the canopy), as the generator builds them
+ * from parts (STEM, LEAF, BERRY): codes of the community table (GrassPass.js floorCommunity).
+ */
+export const FLOOR = Object.freeze({ BILBERRY: 16, LINGONBERRY: 17, FERN: 18, UNDERSTORY: 19, FOREST_GRASS: 20 });
+/** A floor plant's stroke (a STEM stroke) is drawn this many times as wide as its record holds (MAX_WIDTH caps it). */
+export const FLOOR_STROKE_SCALE = 12;
+/** Stands and entries the community table holds (GrassPass.js floorCommunity). */
+export const FLOOR_STANDS = 64;
+export const FLOOR_ENTRIES = 256;
 
 const n = x => { const s = Number(x).toPrecision(9); return /[.e]/.test(s) ? s : `${s}.0`; };
 const v2 = a => `vec2<f32>(${a.map(n).join(', ')})`;
@@ -111,6 +123,159 @@ fn wave(t: f32, rate: f32, phase: f32) -> f32 {
 `;
 
 
+// A floor plant built from parts (FLOOR codes, generateMain): a dwarf shrub (bilberry, lingonberry) is a few woody
+// stems with small leaves along them and berries where light reaches; a fern is a crown of arching fronds, each a stalk
+// with pairs of leaflets along it, longest low on the frond. Leaves are placed on their stem's curve as the vertex
+// shader draws it (without wind). Far off, the plant is one stroke as wide as it is (a STEM stroke: FLOOR_STROKE_SCALE).
+// Parts share the plant's rank, so a plant thins out whole; far off its leaves thin out by their own (rule 3).
+const FLOOR_TWIG_WGSL = /* wgsl */`
+// A stem's curve as vsMain draws a STEM: a quadratic of about its length from its root, leaning toward its facing
+// (without wind).
+struct Twig { root: vec3<f32>, ctrl: vec3<f32>, tip: vec3<f32>, dir: vec3<f32>, angle: f32, tall: f32 };
+fn floorTwig(root: vec3<f32>, up: vec3<f32>, dir: vec3<f32>, angle: f32, tall: f32, lean: f32) -> Twig {
+    let tipV = up * (1.0 - 0.55 * lean * lean) + dir * (lean * 1.05);
+    let ctrlV = up * 0.68 + dir * (lean * 0.22);
+    let size = (2.0 * length(tipV) + length(ctrlV) + length(tipV - ctrlV)) / 3.0;
+    return Twig(root, ctrlV * (tall / size), tipV * (tall / size), dir, angle, tall);
+}
+fn twigAt(t: Twig, s: f32) -> vec3<f32> { return t.root + 2.0 * (1.0 - s) * s * t.ctrl + s * s * t.tip; }
+fn twigTangent(t: Twig, s: f32) -> vec3<f32> { return 2.0 * (1.0 - s) * t.ctrl + 2.0 * s * (t.tip - t.ctrl); }
+// A bilberry shoot's side twig (tw 1 or 2): from the shoot's upper half, out to one side or the other, near level.
+struct SideTwig { twig: Twig, root: vec3<f32>, angle: f32, tall: f32, lean: f32 };
+fn floorSideTwig(stem: Twig, hs: u32, tw: u32, up: vec3<f32>, east: vec3<f32>, north: vec3<f32>) -> SideTwig {
+    let h = pcg(hs + tw * 0x632BE5ABu);
+    let angle = stem.angle + select(-1.0, 1.0, tw == 1u) * mix(0.8, 1.6, u01(h));
+    let dir = cos(angle) * east + sin(angle) * north;
+    let root = twigAt(stem, mix(0.35, 0.65, u01(pcg(h + 1u))));
+    let tall = stem.tall * mix(0.35, 0.55, u01(pcg(h + 2u)));
+    let lean = mix(0.55, 0.8, u01(pcg(h + 3u)));
+    return SideTwig(floorTwig(root, up, dir, angle, tall, lean), root, angle, tall, lean);
+}
+// A floor plant's leaf j of the shoot whose hash is hs: its hash, and its own rank (chooseBlade, rule 3); a fern's
+// leaflets ranked in pairs.
+fn floorLeafHash(hs: u32, j: u32) -> u32 { return pcg(hs + (j + 5u) * 0x85EBCA77u); }
+fn floorLeafRank(hs: u32, j: u32, fern: bool) -> f32 {
+    return select(u01(pcg(floorLeafHash(hs, j) + 4u)), u01(pcg(hs + (j / 2u + 40u) * 0x27D4EB2Du)), fern);
+}
+`;
+const FLOOR_PLANT_WGSL = /* wgsl */`
+        if (shrubPlant || fernPlant) {
+            let lingon = floorCode == ${FLOOR.LINGONBERRY}u;
+            let stems = select(select(3u + u32(r2 * 2.99), 3u + u32(r2 * 2.99), lingon), 5u + u32(r2 * 3.99), fernPlant);
+            let perStem = select(select(10u, 9u, lingon), 22u, fernPlant);
+            let twigs = select(0u, 2u, floorCode == ${FLOOR.BILBERRY}u);
+            // Berries where light reaches the floor: blue-black bilberries along the stems, red lingonberries at the tips.
+            let berryChance = select(select(0.4, 0.55, lingon), 0.0, fernPlant) * step3(0.08, 0.35, ecoHere.y);
+            let hb = pcg(h5 + 51u);
+            let berries = select(0u, select(1u + u32(u01(hb) * 2.99), 2u + u32(u01(hb) * 3.99), lingon), u01(pcg(hb)) < berryChance);
+            let nearEnough = reachD < ${n(STROKE_TO)} * frame.dist.w;
+            // Leaves made: those it can show while its patch keeps its distance step (reachD), by its largest leaf;
+            // chooseBlade thins them further by their rank as they come under a few pixels (rule 3).
+            let leafMost = select(select(0.035, 0.017, lingon), tall * 0.3, fernPlant) * 1.2;
+            let leavesShare = floorLeafShare(leafMost, reachD);
+            var leaves = 0u;
+            if (nearEnough) {
+                for (var st = 0u; st < stems; st++) {
+                    let hs = pcg(h5 + (st + 1u) * 0x9E3779B9u);
+                    for (var j = 0u; j < perStem; j++) { leaves += select(0u, 1u, floorLeafRank(hs, j, fernPlant) < leavesShare); }
+                }
+            }
+            // Its stems and twigs (a few millimetres thick) while it can come within half the distance where a blade is under
+            // a pixel; past it its leaves alone (chooseBlade narrows the stems out before).
+            let withStems = reachD < ${n(STEMS_TO)} * frame.dist.w;
+            let parts = select(0u, stems * (1u + twigs), withStems) + leaves + berries;
+            let farEnough = distance * 1.2 > ${n(STROKE_FROM)} * frame.dist.w;
+            let plantRecords = select(0u, parts, nearEnough) + select(0u, 1u, farEnough);
+            if (plantRecords == 0u) { continue; }
+            let first = atomicAdd(&control[CTRL_STORE], plantRecords);
+            if (first + plantRecords > STORE_CAP) { incomplete(at); continue; }
+            let shade = mix(0.85, 1.15, r) * grow.tone;
+            let leafC = select(select(vec3<f32>(0.085, 0.18, 0.035), vec3<f32>(0.04, 0.10, 0.025), lingon), vec3<f32>(0.065, 0.15, 0.03), fernPlant) * shade;
+            let stemC = select(select(vec3<f32>(0.08, 0.16, 0.035), vec3<f32>(0.12, 0.075, 0.035), lingon), vec3<f32>(0.09, 0.12, 0.04), fernPlant);
+            let berryC = select(vec3<f32>(0.03, 0.035, 0.09), vec3<f32>(0.40, 0.02, 0.02), lingon);
+            let swayP = fract(n1.z + r * 1.2 / 6.2831853);
+            var k = 0u;
+            var tipOf = place.rel;
+            if (nearEnough) {
+                for (var st = 0u; st < stems; st++) {
+                    let hs = pcg(h5 + (st + 1u) * 0x9E3779B9u);
+                    let angle = clumpTurn + f32(st) * GOLDEN + (u01(hs) - 0.5) * 0.9;
+                    let fdir = cos(angle) * east + sin(angle) * north;
+                    let sLean = select(mix(0.15, 0.45, u01(pcg(hs + 1u))), mix(0.5, 0.82, u01(pcg(hs + 1u))), fernPlant);
+                    let sTall = tall * mix(0.72, 1.1, u01(pcg(hs + 2u)));
+                    let stemRoot = place.rel + fdir * (spread * 0.4 * u01(pcg(hs + 3u)));
+                    let stem = floorTwig(stemRoot, up, fdir, angle, sTall, sLean);
+                    if (st == 0u) { tipOf = twigAt(stem, 1.0); }
+                    if (withStems) {
+                        writeRecord(first + k, stemRoot - origin, at, angle, sTall, select(0.0028, 0.0045, fernPlant), sLean, 0.5, ${KIND.STEM}u,
+                            stemC, u01(hs), leafC, 1.0, rank, tuftScale, n2.xy, r2, swayP, clump, 0.0, 0u);
+                        k++;
+                        // A bilberry shoot branches: two twigs out from its upper half to either side, held out level.
+                        for (var tw = 1u; tw <= twigs; tw++) {
+                            let tg = floorSideTwig(stem, hs, tw, up, east, north);
+                            writeRecord(first + k, tg.root - origin, at, tg.angle, tg.tall, 0.0018, tg.lean, 0.5, ${KIND.STEM}u,
+                                stemC, u01(pcg(hs + tw)), leafC, 1.0, rank, tuftScale, n2.xy, r2, swayP, clump, 0.0, 0u);
+                            k++;
+                        }
+                    }
+                    for (var j = 0u; j < perStem; j++) {
+                        let leafRank = floorLeafRank(hs, j, fernPlant);
+                        if (leafRank >= leavesShare) { continue; }
+                        let hj = floorLeafHash(hs, j);
+                        let side = select(-1.0, 1.0, (j & 1u) == 0u);
+                        // Which of the shoot's twigs the leaf is on (0: the shoot itself), and where along it.
+                        let tw = j % (1u + twigs);
+                        let onTwig = f32(j / (1u + twigs));
+                        let ofTwig = f32((perStem + twigs - tw) / (1u + twigs));
+                        var t = select(0.25, 0.42, tw == 0u) + select(0.73, 0.56, tw == 0u) * (onTwig + 0.5) / max(ofTwig, 1.0);
+                        var len = select(mix(0.022, 0.035, u01(hj)), mix(0.011, 0.017, u01(hj)), lingon);
+                        var wid = len * select(0.58, 0.62, lingon);
+                        var lLean = mix(0.55, 0.92, u01(pcg(hj + 1u)));
+                        var forward = 0.6;
+                        if (fernPlant) {
+                            // Leaflets in pairs, longest a third of the way up the frond, small at its tip.
+                            let pair = f32(j / 2u) + 0.5;
+                            let pairs = f32(perStem / 2u);
+                            t = 0.2 + 0.77 * pair / pairs;
+                            len = sTall * 0.24 * sin(3.14159 * (0.22 + 0.74 * pair / pairs)) * mix(0.85, 1.1, u01(hj));
+                            wid = len * 0.24;
+                            lLean = 0.93;
+                            forward = 0.35;
+                        }
+                        var on = stem;
+                        if (tw != 0u) { on = floorSideTwig(stem, hs, tw, up, east, north).twig; }
+                        let pt = twigAt(on, t);
+                        let tangent = twigTangent(on, t);
+                        let flat = tangent - up * dot(tangent, up);
+                        let along = select(on.dir, normalize(flat), length(flat) > 1.0e-3);
+                        let out = normalize(cross(up, along) * side + along * forward);
+                        let leafAngle = atan2(dot(out, north), dot(out, east)) + (u01(pcg(hj + 2u)) - 0.5) * select(0.7, 0.2, fernPlant);
+                        // Leaves thin out far off by their own rank (chooseBlade, rule 3); a fern's leaflets in pairs.
+                        writeRecord(first + k, pt - origin, at, leafAngle, len, wid, lLean, 0.5, ${KIND.LEAF}u,
+                            leafC * mix(0.88, 1.12, u01(pcg(hj + 3u))), u01(hj), leafC, 1.0, rank, tuftScale, n2.xy, r2, swayP, clump,
+                            leafRank, 6u);
+                        k++;
+                    }
+                }
+                for (var b = 0u; b < berries; b++) {
+                    let hbb = pcg(hb + (b + 7u) * 0x9E3779B9u);
+                    let jitter = (vec3<f32>(u01(hbb), u01(pcg(hbb)), u01(pcg(hbb + 1u))) - 0.5) * select(0.06, 0.02, lingon);
+                    let pt = select(mix(place.rel, tipOf, mix(0.45, 0.85, u01(pcg(hbb + 2u)))), tipOf, lingon) + jitter;
+                    writeRecord(first + k, pt - origin, at, u01(hbb) * 6.2831853, 0.004, select(0.008, 0.0075, lingon), 0.0, 0.5, ${KIND.BERRY}u,
+                        berryC * mix(0.85, 1.15, u01(pcg(hbb + 3u))), u01(hbb), leafC, 1.0, rank, tuftScale, n2.xy, r2, swayP, clump, 0.0, 0u);
+                    k++;
+                }
+            }
+            if (farEnough) {
+                // The plant as one stroke: as wide as it covers from the side, about half of its spread.
+                let across = select(tall * 0.9, tall * 1.3, fernPlant);
+                writeRecord(first + k, place.rel - origin, at, clumpTurn, tall * select(0.8, 0.55, fernPlant), min(across * 0.5 / ${n(FLOOR_STROKE_SCALE)}, MAX_W), 0.1, 0.5,
+                    ${KIND.STEM}u, leafC, r, leafC, 1.0, rank, tuftScale, n2.xy, r2, swayP, clump, 0.0, 8u);
+            }
+            continue;
+        }
+`;
+
 /** Compute: patches about the camera, then tufts in them. */
 /**
  * skip: for measuring only, parts left out (tools/perf/grass/scatterParts.mjs): tuft (all after the rank test), height
@@ -151,7 +316,51 @@ ${buildTerrainLightWGSL(1, 6, 7)}
 @group(1) @binding(9) var grassGrain: texture_2d<f32>;
 @group(1) @binding(10) var grassPortraits: texture_2d_array<f32>;
 ${ecology ? `// The ecology field (core/world/ecology/ecologyField.wgsl.js): the forest's shade on the blades' light.
-${buildEcologyReadWGSL({ a: [1, 11], b: [1, 12], layers: [0, 11], withPatch: true })}` : ''}
+${buildEcologyReadWGSL({ a: [1, 11], b: [1, 12], layers: [0, 11], withPatch: true })}
+// What grows on a stand's floor under its canopy (ecology.json ground types: GrassPass.js floorCommunity): per stand
+// (its id, first entry, entries), per entry (FLOOR code, weight, light from, light to).
+struct FloorCommunity {
+    head: vec4<u32>,
+    stands: array<vec4<u32>, ${FLOOR_STANDS}>,
+    entries: array<vec4<f32>, ${FLOOR_ENTRIES}>,
+};
+@group(0) @binding(12) var<uniform> community: FloorCommunity;
+fn floorEntryWeight(e: vec4<f32>, light: f32) -> f32 {
+    return e.y * step3(e.z - 0.05, e.z + 0.05, light) * (1.0 - step3(e.w - 0.05, e.w + 0.05, light));
+}
+// The stand's ground plants' total weight in this light (the share of the sun the canopy lets through), and one of them
+// by u (0..1 of that total): (total, code).
+fn floorPick(stand: u32, light: f32, u: f32) -> vec2<f32> {
+    for (var s = 0u; s < community.head.x; s++) {
+        let st = community.stands[s];
+        if (st.x != stand) { continue; }
+        var total = 0.0;
+        for (var k = 0u; k < st.z; k++) { total += floorEntryWeight(community.entries[st.y + k], light); }
+        var pick = u * total;
+        for (var k = 0u; k < st.z; k++) {
+            let e = community.entries[st.y + k];
+            let w = floorEntryWeight(e, light);
+            if (pick < w) { return vec2<f32>(total, e.x); }
+            pick -= w;
+        }
+        return vec2<f32>(total, 0.0);
+    }
+    return vec2<f32>(0.0);
+}
+// The most weight the stand's ground plants have in any light (all of them: a bound).
+fn floorMost(stand: u32) -> f32 {
+    for (var s = 0u; s < community.head.x; s++) {
+        let st = community.stands[s];
+        if (st.x != stand) { continue; }
+        var total = 0.0;
+        for (var k = 0u; k < st.z; k++) { total += community.entries[st.y + k].y; }
+        return total;
+    }
+    return 0.0;
+}
+// How far a place is its stand's floor, by the canopy's cover: wherever its trees stand at all (an open pine heath's
+// floor is the heath's between its crowns too).
+fn floorPresence(cover: f32) -> f32 { return step3(0.05, 0.3, cover); }` : ''}
 
 const CELLS: u32 = ${CELLS}u;
 const PATCH_LEVELS: u32 = ${PATCH_LEVELS}u;
@@ -341,8 +550,12 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     let slotOut = atomicAdd(&control[0], 1u);
     if (slotOut >= MAX_PATCHES) { return; }
     var land = landLightAt(frame.camera.xyz + rel, clampSampler);
-    ${ecology ? `// Under a forest (none until one is made, or the mock forest): its shade on the patch, at the blades' height.
-    land *= canopyLight(ecologyAtPatch(face, p, vec2<f32>(0.5 * sf)), dot(frame.up.xyz, frame.sunDir.xyz), 0.0);` : ''}
+    var shelter = 1.0;
+    ${ecology ? `// Under a forest (none until one is made, or the mock forest): its shade on the patch, at the blades' height, and
+    // its shelter from the wind (the air under a closed canopy moves at a fraction of the open wind's speed).
+    let patchEco = ecologyAtPatch(face, p, vec2<f32>(0.5 * sf));
+    land *= canopyLight(patchEco, dot(frame.up.xyz, frame.sunDir.xyz), 0.0);
+    shelter = 1.0 - 0.75 * step3(0.1, 0.7, patchEco.cover);` : ''}
     let packedD = u32(d.x + 32768) | (u32(d.y + 32768) << 16u);
     let headY = slot | (u32(tile.y) << 4u) | (up << 8u) | (u32(tile.w) << 12u) | (u32(span) << 16u);
     let nearest = max(distance - reach, 0.0);
@@ -379,7 +592,7 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     let ey = normalize(F.dv.xyz - sea.up * dot(sea.up, F.dv.xyz));
     let groundN = normalize(sea.up - ex * ((hx - h) / stepM) - ey * ((hy - h) / stepM));
     let tilt = vec2<f32>(dot(groundN, frame.east.xyz), dot(groundN, frame.north.xyz));
-    patches[slotOut * 4u + 3u] = vec4<u32>(pack2x16float(g.xy), pack2x16float(g.zw), pack2x16float(tilt), 0u);
+    patches[slotOut * 4u + 3u] = vec4<u32>(pack2x16float(g.xy), pack2x16float(g.zw), pack2x16float(tilt), pack2x16float(vec2<f32>(shelter, 0.0)));
     // Its entry in this frame's table. If last frame had it alike (the same tile, mesh and distance step, made for a
     // height step the camera has not risen past nor sunk two below), its tufts are carried over (copyMain); else they
     // are made (generateMain).
@@ -519,13 +732,20 @@ fn fieldLight(rel: vec3<f32>, distance: f32, groundN: vec3<f32>, farC: vec4<f32>
 // ground's far off. Band 3: not drawn.
 // out2: the ground's grass colour here (what a sub-pixel blade is mixed toward: shadeBlade).
 struct Chosen { band: u32, out0: vec4<u32>, out1: vec4<u32>, out2: vec4<u32> };
+// The share of a floor plant's leaves kept so far off (m), for leaves this long (m): all while one is 3.5 pixels long,
+// down to 3 in 10 (rule 3; generateMain makes no more than its patch's distance step can show).
+fn floorLeafShare(len: f32, distance: f32) -> f32 {
+    let pixels = len * ${n(0.6 / 0.011)} * frame.dist.w / max(distance, 0.01);
+    return clamp(pixels * pixels / 12.25, 0.3, 1.0);
+}
 fn chooseBlade(r0: vec4<u32>, r1: vec4<u32>, owner: u32) -> Chosen {
     var chosen = Chosen(3u, vec4<u32>(0u), vec4<u32>(0u), vec4<u32>(0u));
     let offset = vec3<f32>(unpack2x16float(r0.x), unpack2x16float(r0.y).x);
     let rel = bitcast<vec3<f32>>(patches[owner * 4u + 2u].xyz) + offset;
     let distance = length(rel);
     let shape = unpack4x8unorm(r0.z);
-    let tall = shape.y * MAX_H;
+    let tallShare = shape.y * shape.y;
+    let tall = tallShare * MAX_H;
     let rs = unpack2x16float(r1.z);
     // The sight line's elevation over the level (densityAt): the camera's height over the root.
     let elevation = saturate(-dot(rel, frame.up.xyz) / max(distance, 0.01));
@@ -541,9 +761,23 @@ fn chooseBlade(r0: vec4<u32>, r1: vec4<u32>, owner: u32) -> Chosen {
     // distance, the blades narrowing as the stroke widens.
     let stroke = (kindFlags >> 7u) == 1u;
     let handOver = step3(${n(STROKE_FROM)} * frame.dist.w, ${n(STROKE_TO)} * frame.dist.w, distance);
-    let tuftBlade = !stroke && rule == 0u && (kind <= 4u || kind == ${KIND.LEAF}u);
+    let tuftBlade = !stroke && (rule == 0u || rule == 3u) && (kind <= 4u || kind == ${KIND.LEAF}u || kind == ${KIND.STEM}u || kind == ${KIND.BERRY}u);
     if (stroke) { keep = keep && handOver > 0.0; }
     if (tuftBlade) { keep = keep && handOver < 1.0; }
+    // A floor plant's leaf (rule 3): fewer and larger as they shrink on screen, by their own rank (v), so a plant keeps
+    // its cover with a third of its leaves (stochastic simplification). All of them while one is 3.5 pixels long.
+    var enlarge = 1.0;
+    // A floor plant's stems and twigs (generateMain makes them to STEMS_TO): narrowed out before, so none ends in a line.
+    var narrow = 1.0;
+    if (kind == ${KIND.STEM}u && !stroke) {
+        narrow = 1.0 - step3(${n(STEMS_TO * 0.55)} * frame.dist.w, ${n(STEMS_TO)} * frame.dist.w, distance);
+        keep = keep && narrow > 0.0;
+    }
+    if (rule == 3u) {
+        let share = floorLeafShare(tall, distance);
+        keep = keep && v < share;
+        enlarge = inverseSqrt(share);
+    }
     let handWidth = select(select(1.0, 1.0 - handOver, tuftBlade), handOver, stroke);
     // (Out over a long way, not in a line: thinner than a pixel they are drawn faint, mixed with the field: shadeBlade.)
     if (rule == 1u) { keep = keep && v < 1.0 - step3(frame.dist.x * 0.1, frame.dist.x * 0.35, distance); }
@@ -578,15 +812,16 @@ fn chooseBlade(r0: vec4<u32>, r1: vec4<u32>, owner: u32) -> Chosen {
             * (1.0 - 0.8 * step3(10.0, 35.0, distance));
         let combTurn = (place.x - 0.5) * 2.2;
         let prevailing = frame.wind.xy * cos(combTurn) + vec2<f32>(-frame.wind.y, frame.wind.x) * sin(combTurn);
-        let bend = frame.wind.xy * push + vec2<f32>(-frame.wind.y, frame.wind.x) * sway + prevailing * (0.12 + 0.35 * place.y);
+        // Less of it all under a forest's canopy (the patch's shelter, patchesMain).
+        let bend = (frame.wind.xy * push + vec2<f32>(-frame.wind.y, frame.wind.x) * sway + prevailing * (0.12 + 0.35 * place.y)) * unpack2x16float(gusts.w).x;
         // (Not for the teacher, frame.cache.w: the field as it is, drawn dense and zoomed in: tools/perf/grass/grassRig.js.)
         let farness = select(0.0, step3(frame.dist.x * 0.3, frame.dist.x * 0.85, distance), (kind <= 2u || kind == ${KIND.LEAF}u) && frame.cache.w == 0u);
         // Facing (8 bits, as kept), height grown in (12), the ground's tilt east and north (6 each).
         let tilt = clamp(unpack2x16float(patches[owner * 4u + 3u].z), vec2<f32>(-0.95), vec2<f32>(0.95));
-        let packedShape = u32(round(shape.x * 255.0)) | (u32(round(saturate(shape.y * fadeIn) * 4095.0)) << 8u)
+        let packedShape = u32(round(shape.x * 255.0)) | (u32(round(saturate(tallShare * fadeIn * enlarge) * 4095.0)) << 8u)
             | (u32(round((tilt.x * 0.5 + 0.5) * 63.0)) << 20u) | (u32(round((tilt.y * 0.5 + 0.5) * 63.0)) << 26u);
         chosen.out0 = vec4<u32>(bitcast<vec3<u32>>(rel), packedShape);
-        chosen.out1 = vec4<u32>(pack2x16float(bend), pack4x8unorm(vec4<f32>(look.x * mix(0.5, 1.0, fadeIn) * handWidth, look.yz,
+        chosen.out1 = vec4<u32>(pack2x16float(bend), pack4x8unorm(vec4<f32>(saturate(look.x * mix(0.5, 1.0, fadeIn) * handWidth * enlarge * narrow), look.yz,
             f32(kind | select(0u, 16u, stroke)) / 255.0)),
             pack4x8unorm(vec4<f32>(mix(near.rgb, farC.rgb, farness), near.a)),
             pack4x8unorm(vec4<f32>(unpack2x16unorm(patches[owner * 4u + 1u].y), place.z, farC.a)));
@@ -740,17 +975,22 @@ fn writeRecord(index: u32, offset: vec3<f32>, slot: u32, facing: f32, tall: f32,
                rate: f32, phase: f32, clump: f32, v: f32, flags: u32) {
     let at = (frame.cache.x * STORE_CAP + index) * 2u;
     store[at] = vec4<u32>(pack2x16float(offset.xy), (pack2x16float(vec2<f32>(offset.z, 0.0)) & 0xFFFFu) | (slot << 16u),
-        pack4x8unorm(vec4<f32>(fract(facing / 6.2831853), saturate(tall / MAX_H), rate, phase)),
+        // Height as its square root (decoded in chooseBlade): leaves of 2 cm and blades of 1.5 m both keep their size.
+        pack4x8unorm(vec4<f32>(fract(facing / 6.2831853), sqrt(saturate(tall / MAX_H)), rate, phase)),
         pack4x8unorm(vec4<f32>(saturate(width / MAX_W), lean, crowd, f32(kind | (flags << 4u)) / 255.0)));
     store[at + 1u] = vec4<u32>(pack4x8unorm(vec4<f32>(sqrt(saturate(albedo / 0.8)), seed)),
         pack4x8unorm(vec4<f32>(sqrt(saturate(far / 0.8)), grassy)), pack2x16float(vec2<f32>(rank, scale)),
         pack4x8unorm(vec4<f32>(comb, clump, saturate(v))));
 }
+${ecology ? FLOOR_TWIG_WGSL : ''}
 
 // A patch's corners: the ground's rules, the height, and the noises that change over metres, worked out once per patch
 // for its tufts to take between (about 7 in 8 lattice points that pass the first test are no tuft in the end).
-struct Corner { grow: Growth, height: f32, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32> };
+struct Corner { grow: Growth, height: f32, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, eco: vec4<f32> };
 var<workgroup> corners: array<Corner, 4>;
+// The stand at the block's middle (categorical: not between corners), and its floor plants' most weight.
+var<workgroup> blockStand: u32;
+var<workgroup> blockFloor: f32;
 fn mixGrowth(a: Growth, b: Growth, t: f32) -> Growth {
     return Growth(mix(a.grass, b.grass, t), mix(a.dry, b.dry, t), mix(a.forest, b.forest, t), mix(a.tundra, b.tundra, t),
         mix(a.marsh, b.marsh, t), mix(a.sparse, b.sparse, t), mix(a.lush, b.lush, t), mix(a.lively, b.lively, t),
@@ -826,11 +1066,25 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
             vec4<f32>(vnoise(qC / 8.5, 51u), fieldNoise(qC / 4.2 + 7.3, 53u), fieldNoise(qC / 6.1 + 3.1, 57u), vnoise(qC / 11.0 + 5.7, 61u)),
             vec4<f32>(vnoise(qC / 7.0, 23u), vnoise(qC / 2.3, 29u), vnoise(qC / 4.5, 59u), fieldNoise(qC / 3.2, 63u)),
             // (z, w unused: the gusts are the shared wind's, at the patch's corners.)
-            vec4<f32>(vnoise(qC / 19.0, 31u), vnoise(qC / 13.0, 37u), 0.0, 0.0));
+            vec4<f32>(vnoise(qC / 19.0, 31u), vnoise(qC / 13.0, 37u), 0.0, 0.0),
+            // Under a forest (the ecology field, realized): its cover, and the sun's share through it at noon (a place's
+            // light for what grows, not the hour's).
+            ${ecology ? `vec4<f32>(0.0)); {
+            let e = ecologyAtPatch(face, P + vec2<u32>(cf), vec2<f32>(0.0));
+            corners[thread].eco = vec4<f32>(e.cover, canopyTransmission(e, 1.0), 0.0, 0.0);
+        }
+        if (thread == 0u) {
+            let e = ecologyAtPatch(face, P, vec2<f32>(0.5 * sf));
+            blockStand = select(0u, e.stand, e.status != ECO_UNKNOWN && e.cover > 0.0);
+            blockFloor = select(0.0, floorMost(blockStand), blockStand != 0u);
+        }` : `vec4<f32>(0.0, 1.0, 0.0, 0.0));
+        if (thread == 0u) { blockStand = 0u; blockFloor = 0.0; }`}
     }
     workgroupBarrier();
     // Most tufts a lattice point can hold here, over density: the first test, before anything is read for a point.
-    let bound = tuftsBound();
+    // (Under a forest the stand's floor plants too, as much as the canopy covers: the fewest parts a plant has, 2.5.)
+    let coverMost = max(max(corners[0].eco.x, corners[1].eco.x), max(corners[2].eco.x, corners[3].eco.x));
+    let bound = max(tuftsBound(), ${ecology ? 'floorPresence(coverMost)' : '0.0'} * blockFloor * 1.6 * 1.9 / 2.5);
     // The camera's height over the patch its tufts are made for (the top of a step over it: patchesMain), from the
     // middle of its corners; and the most the ground falls below that across it.
     let madeStep = (more.z >> 8u) & 31u;
@@ -890,14 +1144,30 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
             grow.grass *= dryLand; grow.dry *= dryLand; grow.forest *= dryLand; grow.tundra *= dryLand; grow.marsh *= dryLand; grow.sparse *= dryLand;
         }
         var w = kindWeights(grow);
-        let total = w[0] + w[1] + w[2] + w[3] + w[4];
-        if (total < 0.02) { continue; }
-
-        // Which kind this tuft is: drawn in proportion to what grows here.
+        let openTotal = w[0] + w[1] + w[2] + w[3] + w[4];
+        // Under a forest (the ecology field, realized), the stand's own floor plants (ecology.json ground types) in place
+        // of the landscape's grass wherever its trees stand (floorPresence), by the light that reaches the floor.
+        let ecoHere = between(corners[0].eco, corners[1].eco, corners[2].eco, corners[3].eco, fc);
+        let floorHere = ${ecology ? 'floorPresence(select(0.0, ecoHere.x, blockStand != 0u))' : '0.0'};
         let h3v = pcg(h2);
+        ${ecology ? `let floorChoice = floorPick(blockStand, ecoHere.y, u01(pcg(h3v + 101u)));` : 'let floorChoice = vec2<f32>(0.0);'}
+        let underTotal = floorHere * floorChoice.x;
+        // The landscape's own grass gives way to the stand's floor (a spruce stand's holds next to none of it).
+        let openShare = 1.0 - floorHere;
+        let total = openTotal * openShare + underTotal;
+        if (total < 0.02) { continue; }
+        // A floor plant (its FLOOR code), or a kind of the landscape's grass: drawn in proportion to what grows here.
+        var floorCode = 0u;
         var pick = u01(h3v) * total;
         var kind = 4u;
-        for (var i = 0u; i < 4u; i++) { if (pick < w[i]) { kind = i; break; } pick -= w[i]; }
+        if (pick >= openTotal * openShare) {
+            floorCode = u32(floorChoice.y + 0.5);
+            kind = 2u;
+            if (floorCode == ${FLOOR.UNDERSTORY}u) { kind = 0u; }
+        } else {
+            pick /= max(openShare, 1.0e-4);
+            for (var i = 0u; i < 4u; i++) { if (pick < w[i]) { kind = i; break; } pick -= w[i]; }
+        }
 
         // Clumps (Voronoi, about 0.6 m): height, facing and colour shared, blades drawn toward the middle.
         let cq = q * ${skip.clump ? '0.0' : '1.7'};
@@ -945,14 +1215,23 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
         let hueZone = step3(0.25, 0.75, n0.y);
         let strawZone = step3(0.45, 0.9, n0.z);
         tall *= mix(0.7, 1.12, sqrt(r)) * mix(0.75, 1.25, clump) * mix(0.75, 1.3, zone) * (1.0 - 0.5 * step3(0.15, 0.35, grow.slope));
+        // The forest floor's plants: dwarf shrubs (bilberry knee-high in spruce, lingonberry low in pine), ferns
+        // (arching fronds), broadleaf understory (as forbs), forest grass (as woodland grass). perTuft: parts a plant
+        // has, against blades a tuft has: the plants a square metre holds (bilberry some 30, ferns a few).
+        let shrubPlant = floorCode == ${FLOOR.BILBERRY}u || floorCode == ${FLOOR.LINGONBERRY}u;
+        let fernPlant = floorCode == ${FLOOR.FERN}u;
+        if (floorCode == ${FLOOR.BILBERRY}u) { tall = mix(0.16, 0.32, 0.5 * lushness + 0.5 * r3); perTuft = 18.0; spread = 0.07; arch = 0.25; width = 0.013; }
+        if (floorCode == ${FLOOR.LINGONBERRY}u) { tall = mix(0.08, 0.17, r3); perTuft = 36.0; spread = 0.05; arch = 0.15; width = 0.009; }
+        if (fernPlant) { tall = mix(0.4, 0.8, 0.5 * lushness + 0.5 * r3); perTuft = 420.0; spread = 0.04; arch = 0.65; width = 0.004; }
         // Low broadleaf plants among the grass of a meadow (plantain, clover, young dock): a rosette of a few wide leaves
-        // that lie out low. They give the field a lower, darker body of other shapes.
-        let forb = kind == 0u && u01(pcg(h2 + 77u)) < 0.16 * step3(0.25, 0.6, grow.wet) * mix(0.6, 1.4, grow.lively);
+        // that lie out low. They give the field a lower, darker body of other shapes. On a forest's floor, its understory.
+        let forb = (kind == 0u && u01(pcg(h2 + 77u)) < 0.16 * step3(0.25, 0.6, grow.wet) * mix(0.6, 1.4, grow.lively))
+            || floorCode == ${FLOOR.UNDERSTORY}u;
         if (forb) { tall = mix(0.08, 0.17, r3); perTuft = 4.0; spread = 0.015; arch = 0.9; width = mix(0.024, 0.04, r3); }
         // Fewer tufts where grass is tall (it hides the ground sooner), more where short.
         let byHeight = clamp(0.35 / max(tall, 0.05), 0.5, 1.6);
-        // Bunchgrass and thin grass gather in clumps with gaps between; a meadow stays even.
-        let gather = select(1.0 - total, 0.8, kind == 1u || kind == 3u);
+        // Bunchgrass and thin grass gather in clumps with gaps between; a meadow stays even; floor plants in patches.
+        let gather = select(select(1.0 - total, 0.8, kind == 1u || kind == 3u), 0.6, shrubPlant || fernPlant);
         let clumpy = mix(1.0, mix(0.25, 1.9, clump * clump), saturate(gather));
         // Tufts a lattice point holds per blade per square metre: as drawn, times the density at the distance.
         let tuftScale = cellArea * total * byHeight * clumpy / perTuft;
@@ -960,6 +1239,7 @@ fn generateMain(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocati
         if (rank >= tufts) { continue; }
         let height = ${skip.height ? 'groundHeightAt(layer, local)' : 'groundDrawnHeight(layer, ancestor, part, lod, drawn)'};
         let place = groundPlace(F, vec2<f32>(d) + f, height - 0.03);
+        ${ecology ? FLOOR_PLANT_WGSL : ''}
         // Tufts thin out with distance by their rank: one just kept grows out of the ground, so none pops.
         let count = clamp(u32(ceil(perTuft * mix(0.6, 1.4, r2))), 1u, 12u);
 
@@ -1260,7 +1540,8 @@ fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u3
 
     // Rows: blades taper; seed heads and spike flowers are a stem with a head over its top part; a flower's last two
     // rows are its head, turned to the camera.
-    let flowerDisc = kind == 6u;
+    // A berry is drawn as a flower's head, on no stem (its height is a few millimetres).
+    let flowerDisc = kind == 6u || kind == ${KIND.BERRY}u;
     let spiky = kind == 5u || kind == 7u;
     var t = f32(level) / f32(segments);
     // A flower's stem ends three rows before the strip does (one before in the coarsest band): its head is those rows.
@@ -1306,7 +1587,11 @@ fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u3
         }
     } else if (stroke) {
         // A tuft from the side: narrower at its foot, widest about its middle where the blades arch out, to the tips.
-        width *= (0.6 + 0.4 * sin(3.14159 * t)) * (1.0 - t * t * t);
+        // A floor plant's (a STEM stroke: shrub, fern) is as wide as the plant, past what a record holds.
+        width *= (0.6 + 0.4 * sin(3.14159 * t)) * (1.0 - t * t * t) * select(1.0, ${n(FLOOR_STROKE_SCALE)}, kind == ${KIND.STEM}u);
+    } else if (kind == ${KIND.STEM}u) {
+        // A woody stem or a fern's stalk: a little narrower to its tip.
+        width *= 1.0 - 0.5 * t;
     } else if (kind == ${KIND.LEAF}u) {
         // A leaf: narrow at its stalk, widest past its middle, to a point.
         width *= pow(sin(3.14159 * clamp(t * 0.92 + 0.06, 0.0, 1.0)), 0.75) * smoothstep(0.0, 0.25, t);
@@ -1369,7 +1654,7 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let crowd = inLook.z;
     let petalAt = in.along.zw;
     // A flower's head: its colour only there, a centre, the petals' edges a little darker.
-    let headIn = select(in.along.y, smoothstep(-1.08, -0.92, petalAt.y), kind == 6u);
+    let headIn = select(in.along.y, smoothstep(-1.08, -0.92, petalAt.y), kind == 6u || kind == ${KIND.BERRY}u);
     let flower = headIn;
     // Far off a blade is a pixel: its own differences only flicker. Toward the mean with distance; the height ramp
     // fades to its mean too (every fake fades far, Black Ops 4).
@@ -1383,7 +1668,8 @@ fn shadeBlade(in: Out) -> vec3<f32> {
         headColor = mix(centre, headColor, smoothstep(0.24, 0.34, r)) * mix(1.0, 0.78, smoothstep(0.65, 1.0, r));
     }
     // Stems of flowers and seed heads as green as the grass about them: dark, they stood as sticks.
-    var albedo = select(inAlbedo.rgb, mix(vec3<f32>(0.10, 0.15, 0.045), headColor, flower), kind >= 5u);
+    // (Stems and berries of the forest floor keep their own colour.)
+    var albedo = select(inAlbedo.rgb, mix(vec3<f32>(0.10, 0.15, 0.045), headColor, flower), kind >= 5u && kind <= 7u);
     let blade = kind < 5u || kind == ${KIND.LEAF}u;
     // Darker low in the blade, lighter toward the tip; dry grass bleaches at the tips. The ramp is the canopy's own
     // occlusion: the main reason a field looks deep.
@@ -1441,7 +1727,7 @@ fn shadeBlade(in: Out) -> vec3<f32> {
     let lookW = unpack4x8unorm(in.look.w);
     // Per row as drawn; a flower's head by its true share (vsMain), its stem as thin as it is (2.5 mm).
     let stemCover = saturate(0.002 / (max(distance, 0.05) * frame.ambient.w * 1.6));
-    let coverage = select(in.along.z, select(stemCover, lookW.w, flower > 0.5), kind == 6u);
+    let coverage = select(in.along.z, select(stemCover, lookW.w, flower > 0.5), kind == 6u || kind == ${KIND.BERRY}u);
     // Blades also toward the ground's colour at the end of their reach; every kind toward the field about it as it covers
     // less than it is drawn (a widened seed head or blade tip, pale and thin, lit as wide stood as speckle).
     let ownKind = kind <= 2u || kind == ${KIND.LEAF}u;

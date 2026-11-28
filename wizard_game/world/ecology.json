@@ -1,9 +1,9 @@
 {
-  "_comment": "What grows where (core/world/ecology/ecologyRegistry.js; ECOLOGY_FOUNDATION_PLAN.md F8). Tree species are the forest system's ids; until it registers them they are placeholders. Stand fields beyond trees and canopy are optional and passed through.",
+  "_comment": "What grows where (core/world/ecology/ecologyRegistry.js; ECOLOGY_FOUNDATION_PLAN.md F8). Tree species are the forest system's ids; until it registers them they are placeholders. Stand fields beyond trees and canopy are optional and passed through. Temperature bands are in the landscape's own scale (biomeLandscapeConfig.js: forest from about 6 C, its treeline at 9 C), not Earth's mean annual temperatures: its coldest forests are the boreal ones.",
   "ecosystems": [
     {
       "id": "boreal",
-      "match": { "cover": "forest", "temperatureC": [-10, 6], "humidity": [0.35, 1.0] },
+      "match": { "cover": "forest", "temperatureC": [5, 13], "humidity": [0.35, 1.0] },
       "stands": [
         {
           "id": "spruce",
@@ -25,10 +25,13 @@
         { "id": "clearing", "share": 0.1, "trees": [] }
       ],
       "ground": [
-        { "type": "moss", "where": "under", "cover": 0.8 },
+        { "type": "moss", "where": "under", "stands": ["spruce"], "cover": 0.85 },
+        { "type": "moss", "where": "under", "stands": ["pine-heath"], "cover": 0.45 },
+        { "type": "lichen", "where": "under", "stands": ["pine-heath"], "cover": 0.35 },
         { "type": "bilberry", "where": "under", "stands": ["spruce", "pine-heath"], "weight": 0.5 },
         { "type": "lingonberry", "where": "under", "stands": ["pine-heath"], "weight": 0.4 },
         { "type": "fern", "where": "under", "stands": ["spruce"], "light": [0.1, 0.5] },
+        { "type": "forest-grass", "where": "under", "weight": 0.2, "light": [0.25, 1.0] },
         { "type": "grass", "where": "open" }
       ],
       "rocks": { "boulders": 0.02, "stones": 0.3 },
@@ -36,7 +39,7 @@
     },
     {
       "id": "temperate",
-      "match": { "cover": "forest", "temperatureC": [6, 18], "humidity": [0.35, 1.0] },
+      "match": { "cover": "forest", "temperatureC": [13, 21], "humidity": [0.35, 1.0] },
       "stands": [
         {
           "id": "broadleaf",
@@ -68,7 +71,7 @@
     },
     {
       "id": "tropical",
-      "match": { "cover": "forest", "temperatureC": [18, 40], "humidity": [0.4, 1.0] },
+      "match": { "cover": "forest", "temperatureC": [21, 40], "humidity": [0.4, 1.0] },
       "stands": [
         {
           "id": "rainforest",

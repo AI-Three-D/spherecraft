@@ -11,6 +11,9 @@ describe('grass shaders', () => {
         valid(buildGrassComputeWGSL({ faceSizeMeters: 262144, biome: normalizeBiomeLandscape({ preset: 'earth' }) }));
     });
     it('validates the scatter without them', () => valid(buildGrassComputeWGSL({ faceSizeMeters: 262144, biome: null })));
+    it('validates the scatter with the ecology field (the forest floor plants)', () => {
+        valid(buildGrassComputeWGSL({ faceSizeMeters: 262144, biome: normalizeBiomeLandscape({ preset: 'earth' }), ecology: true }));
+    });
     it('validates the blades', () => valid(buildGrassDrawWGSL()));
 });
 

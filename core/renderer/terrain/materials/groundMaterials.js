@@ -80,6 +80,15 @@ export const GROUND_LAYERS = Object.freeze([
         piece('blade', 'straw', 4100, { length: [8, 22], width: [0.24, 0.51], root: [-0.7, 1.0], rise: 3.2, curl: 0.8, clump: 0.20 }),
         piece('blade', 'blade', 7200, { length: [8, 20], width: [0.32, 0.64], root: [-0.6, 1.5], rise: 4.6, curl: 1.15, tall: 1, clump: 0.16 }),
     ] },
+    // The boreal forest's floor under its canopy (ecology.json ground type "moss"; terrainPass.wgsl.js floorSurfaceOf):
+    // feather moss in cushions, its fronds lying over them, spruce needles where it is thin, twigs, a few birch leaves.
+    { name: 'moss', periodM: 2.4, mean: [0.060, 0.068, 0.019], slope: 2, look: [0, 0.4, 0.3, 12], deepM: 0.04, pieces: [
+        piece('blade', 'straw', 36000, { length: [0.9, 1.6], width: [0.08, 0.13], root: [-0.4, 1.6], rise: 0.15, curl: 0.15 }),
+        piece('blade', 'moss', 14000, { length: [1.2, 2.6], width: [0.25, 0.45], root: [1.6, 4.4], rise: 0.6, curl: 1.4, clumpCells: 8, clump: -0.15 }),
+        piece('blade', 'moss', 5000, { length: [2, 3.6], width: [0.3, 0.5], root: [2.4, 5], rise: 0.9, curl: 1.6, clumpCells: 11, clump: 0.05 }),
+        piece('twig', 'twig', 40, { length: [5, 18], width: [0.2, 0.6], root: [1.5, 4], rise: 0.6, curl: 1.0 }),
+        piece('leaf', 'leaf', 50, { length: [2.5, 4.5], width: [2, 3.4], root: [2.5, 5.5], rise: 0.6, curl: 0.4 }),
+    ] },
 ]);
 
 /** Wide patterns: 0 the mosaic of open ground, 1 the face of a cliff, 2 the fields (period in metres). Variants lie side by side in any order, turned around or not. */

@@ -11,6 +11,7 @@ import {
 } from './grassWgsl.js';
 import { GroundFrame } from '../../world/ecology/GroundFrame.js';
 import { WindField } from '../../world/ecology/WindField.js';
+import { FLOOR_COMMUNITY_BYTES, buildFloorCommunity } from './floorPlants.js';
 
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -141,8 +142,8 @@ export class GrassPass {
                 at(7, C, storage), at(8, C, storage),
                 // The shared ground frame (drawnGround.wgsl.js) and wind (wind.wgsl.js).
                 at(9, C, { buffer: { type: 'uniform' } }), at(10, C, { buffer: { type: 'uniform' } }),
-                // The ecology field's layer records (ecologyField.wgsl.js), when it is bound.
-                ...(this.ecology ? [at(11, C, { buffer: { type: 'read-only-storage' } })] : []),
+                // The ecology field's layer records (ecologyField.wgsl.js) and the floor's plant communities, when bound.
+                ...(this.ecology ? [at(11, C, { buffer: { type: 'read-only-storage' } }), at(12, C, { buffer: { type: 'uniform' } })] : []),
             ] }),
             ground: device.createBindGroupLayout({ entries: [
                 at(0, C, { texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }),
@@ -194,10 +195,17 @@ export class GrassPass {
         this._renderFar = renderFar ?? render;
         const quadtree = this.tileManager.quadtreeGPU;
         this._groundFrame = new GroundFrame(device, { label: 'Grass ground frame' });
+        // What grows on each stand's floor under its canopy (floorPlants.js, from the ecosystem registry).
+        if (this.ecology) {
+            const floor = buildFloorCommunity(this.ecology.compiled);
+            this._community = buffer('floor community', FLOOR_COMMUNITY_BYTES, U.UNIFORM | U.COPY_DST);
+            device.queue.writeBuffer(this._community, 0, floor.data);
+            this.floorCommunity = floor;
+        }
         this._wind = new WindField(device, { label: 'Grass wind' });
         const workGroup = args => device.createBindGroup({ layout: this._layouts.work, entries: [
             this._frameBuffer, quadtree.getLoadedTileTableBuffer(), this._patches, this._control, this._store, args, quadtree._visibleTableBuffer,
-            this._bandIndex, this._patchHash, this._groundFrame.buffer, this._wind.buffer, ...(this.ecology ? [this.ecology.layers] : []),
+            this._bandIndex, this._patchHash, this._groundFrame.buffer, this._wind.buffer, ...(this.ecology ? [this.ecology.layers, this._community] : []),
         ].map((b, binding) => ({ binding, resource: { buffer: b } })) });
         this._dispatchGroup = workGroup(this._dispatchArgs);
         this._drawArgsGroup = workGroup(this._args);
@@ -387,6 +395,7 @@ export class GrassPass {
 
     destroy() {
         this._groundFrame?.destroy();
+        this._community?.destroy();
         this._wind?.destroy();
         for (const b of [this._frameBuffer, this._patches, this._control, this._store, this._bandIndex, this._patchHash, this._dispatchArgs, this._args, ...(this._indexBuffers ?? [])]) b?.destroy();
         this._ready = false;

@@ -25,7 +25,7 @@ const table = (name, type, rows) => `const ${name} = array<${type}, ${rows.lengt
 /** close, farTier: with the close ground, with the far tiers' (and the way from one to the other). */
 export function buildGroundSurfaceWGSL({ faceSizeMeters, fineEndMeters = 150, deepEndMeters = 16, close = true, farTier = true, biomeLandscape = null }) {
     const wrap = faceSizeMeters * GROUND_WRAP_SHARE;
-    const turns = [11, 37, 23, 68, 52, 0, 17, 74, 31, 58, 42, 65];
+    const turns = [11, 37, 23, 68, 52, 0, 17, 74, 31, 58, 42, 65, 29];
     const near = GROUND_LAYERS.map((l, i) => lattice(wrap, l.periodM, turns[i]));
     const far = GROUND_LAYERS.map((l, i) => lattice(wrap, l.periodM * 4.7, turns[i] + 33));
     const mosaic = lattice(wrap, GROUND_WIDE[0].periodM, 20);

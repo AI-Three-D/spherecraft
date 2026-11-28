@@ -6,6 +6,7 @@
 import { buildTerrainPassFragmentWGSL, buildTerrainPassVertexWGSL, TERRAIN_PASS_FLOATS } from '../shaders/webgpu/terrainPass.wgsl.js';
 import { buildTerrainDrawListWGSL, DRAW_BUCKETS, DRAW_LIST_FRAME_FLOATS, drawBucket, frustumPlanes, HORIZON_DIRECTIONS, HORIZON_EPOCHS, HORIZON_RINGS, HORIZON_TILES, SEA_VIEW_WORDS, TILE_KIND, TILE_KINDS } from './terrainDrawList.wgsl.js';
 import { TerrainAir } from './TerrainAir.js';
+import { forestFloorSurfaces } from '../materials/forestFloor.js';
 import { WaterCoverage } from '../../../world/water/WaterCoverage.js';
 import { WATER_BINDINGS, WATER_FIELD_BINDINGS } from '../../../world/water/waterWgsl.js';
 
@@ -164,6 +165,8 @@ export class TerrainPass {
             // The field past the blades traced through its slices (grassSlices.js, grassMedium.wgsl.js).
             slices: this.grain && this.portraits && this.slices && this.options.grass && this.options.grain && this.options.slices !== false ? this._grainBinding() + 2 : null,
             ecology: !!this.ecology,
+            // The floor under each stand's canopy, from the ecology registry (forestFloor.js).
+            floors: this.ecology ? forestFloorSurfaces(this.ecology.compiled) : [],
         });
         const made = device.createRenderPipelineAsync({
             label: `Terrain ${key}`, layout: wet ? this._wetLayout : this._dryLayout,
