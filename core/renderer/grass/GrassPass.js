@@ -5,27 +5,17 @@
 // without discard, so the GPU's hidden-surface removal keeps shading to about one blade fragment a pixel.
 
 import {
-    BLADES_PER_INSTANCE, CONTROL_WORDS, CTRL, CTRL_REMAP, FRAME_FLOATS, GRID_MAX, HASH_CAP, LOD_CAPACITY, LOD_SEGMENTS, MAX_FACES, MAX_PATCHES, PATCH_LEVELS,
+    BLADES_PER_INSTANCE, CONTROL_WORDS, CTRL, CTRL_REMAP, FRAME_FLOATS, HASH_CAP, LOD_CAPACITY, LOD_SEGMENTS, MAX_PATCHES,
     PATCH_WORDS, RECORD_WORDS, STORE_CAP, WAVE_PERIOD,
     buildGrassComputeWGSL, buildGrassDrawWGSL,
 } from './grassWgsl.js';
+import { GroundFrame } from '../../world/ecology/GroundFrame.js';
+import { WindField } from '../../world/ecology/WindField.js';
 
-// The cube the planet is made of (terrainChunkVertexShaderBuilder.js getCubePoint): each face's axis, and its point's
-// change per unit of x and y (x, y = 2 uv - 1).
-const FACES = [
-    { axis: [1, 0, 0], u: [0, 0, -1], v: [0, 1, 0] },
-    { axis: [-1, 0, 0], u: [0, 0, 1], v: [0, 1, 0] },
-    { axis: [0, 1, 0], u: [1, 0, 0], v: [0, 0, -1] },
-    { axis: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1] },
-    { axis: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0] },
-    { axis: [0, 0, -1], u: [-1, 0, 0], v: [0, 1, 0] },
-];
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const length = a => Math.hypot(a[0], a[1], a[2]);
 const scale = (a, k) => a.map(x => x * k);
-const add = (a, b) => a.map((x, i) => x + b[i]);
-const sub = (a, b) => a.map((x, i) => x - b[i]);
 const unit = a => scale(a, 1 / (length(a) || 1));
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 
@@ -85,7 +75,7 @@ export function grassThicknessIndex(config) {
 }
 /** Sets a grass config's thickness to a tier (the next one when none is given); returns its index. */
 export function setGrassThickness(config, index = (Math.max(grassThicknessIndex(config), 0) + 1) % GRASS_THICKNESS_TIERS.length) {
-    const { name, ...tier } = GRASS_THICKNESS_TIERS[index];
+    const { name: _name, ...tier } = GRASS_THICKNESS_TIERS[index];
     config.thickness = tier;
     return index;
 }
@@ -149,6 +139,8 @@ export class GrassPass {
                 at(0, C, { buffer: { type: 'uniform' } }), at(1, C, { buffer: { type: 'read-only-storage' } }),
                 at(2, C, storage), at(3, C, storage), at(4, C, storage), at(5, C, storage), at(6, C, { buffer: { type: 'read-only-storage' } }),
                 at(7, C, storage), at(8, C, storage),
+                // The shared ground frame (drawnGround.wgsl.js) and wind (wind.wgsl.js).
+                at(9, C, { buffer: { type: 'uniform' } }), at(10, C, { buffer: { type: 'uniform' } }),
             ] }),
             ground: device.createBindGroupLayout({ entries: [
                 at(0, C, { texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }),
@@ -197,9 +189,11 @@ export class GrassPass {
         this._render = render;
         this._renderFar = renderFar ?? render;
         const quadtree = this.tileManager.quadtreeGPU;
+        this._groundFrame = new GroundFrame(device, { label: 'Grass ground frame' });
+        this._wind = new WindField(device, { label: 'Grass wind' });
         const workGroup = args => device.createBindGroup({ layout: this._layouts.work, entries: [
             this._frameBuffer, quadtree.getLoadedTileTableBuffer(), this._patches, this._control, this._store, args, quadtree._visibleTableBuffer,
-            this._bandIndex, this._patchHash,
+            this._bandIndex, this._patchHash, this._groundFrame.buffer, this._wind.buffer,
         ].map((b, binding) => ({ binding, resource: { buffer: b } })) });
         this._dispatchGroup = workGroup(this._dispatchArgs);
         this._drawArgsGroup = workGroup(this._args);
@@ -243,7 +237,7 @@ export class GrassPass {
         if (altitude > this.planetConfig.maxTerrainHeight + c.distance) return;
         const pole = Math.abs(up[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
         const east = unit(cross(pole, up)), north = cross(up, east);
-        const f = this._f, I = this._i, W = this._u;
+        const f = this._f, W = this._u;
         f.fill(0);
 
         // The view's turn alone, then the projection: for points about the camera.
@@ -263,14 +257,8 @@ export class GrassPass {
         const s = u.sunLightDirection.value, sl = Math.hypot(s.x, s.y, s.z) || 1;
         const sunColor = u.sunLightColor.value, sunI = u.sunLightIntensity.value;
         const amb = u.ambientLightColor.value, ambI = u.ambientLightIntensity.value;
-        const windSpeed = Number.isFinite(environment?.windSpeed) ? environment.windSpeed : 3;
-        const wd = environment?.windDirection;
-        let wind = wd ? [wd.x, 0, wd.y] : [1, 0, 0];
-        wind = sub(wind, scale(up, dot(wind, up)));
-        wind = length(wind) > 1e-6 ? unit(wind) : east;
-        // How far the wind has carried its gusts, summed frame by frame over the world: a turn of the wind changes only
-        // where they go next.
-        this._carried = add(this._carried ?? [0, 0, 0], scale(wind, windSpeed * 0.6 * dt));
+        // The shared wind (WindField.js): its way, speed and the gusts carried with it, summed frame by frame.
+        const { direction: wind, speed: windSpeed } = this._wind.update({ dt, environment, camRel, up, east });
         const fov = (camera.fov ?? 60) * Math.PI / 180;
         const pixelAngle = 2 * Math.tan(fov / 2) / Math.max(1, viewportHeight || 900);
 
@@ -306,51 +294,10 @@ export class GrassPass {
         f.set([c.bands[0], c.bands[1], c.minPixels, c.maxWiden], 68);
         f.set([...camRel, seaLevel ?? -1.0e9], 72);
 
-        // The faces near enough, each with an anchor patch about the camera.
+        // The faces near enough, each with an anchor patch about the camera, and the tiles' tables: the shared ground
+        // frame (GroundFrame.js), for the blades' reach.
         const quadtree = this.tileManager.quadtreeGPU;
-        const depth = quadtree.maxDepth;
-        const patchesPerFace = 2 ** (depth + PATCH_LEVELS);
-        let faces = 0, widest = 0;
-        for (let face = 0; face < 6 && faces < MAX_FACES; face++) {
-            const F = FACES[face];
-            const m = dot(up, F.axis);
-            if (m < 0.3) continue;
-            const uv = [(dot(up, F.u) / m + 1) / 2, (dot(up, F.v) / m + 1) / 2];
-            // How far the face is: from the camera's place to the nearest point of it.
-            const nearestUv = uv.map(t => clamp(t, 0, 1));
-            const onFace = unit(add(F.axis, add(scale(F.u, 2 * nearestUv[0] - 1), scale(F.v, 2 * nearestUv[1] - 1))));
-            const away = 2 * Math.asin(Math.min(1, length(sub(onFace, up)) / 2)) * R;
-            if (away > c.distance + 8) continue;
-            const anchor = uv.map(t => Math.floor(t * patchesPerFace));
-            const ca = add(F.axis, add(scale(F.u, 2 * anchor[0] / patchesPerFace - 1), scale(F.v, 2 * anchor[1] / patchesPerFace - 1)));
-            const la = length(ca), na = scale(ca, 1 / la);
-            const da = sub(scale(na, R), camRel);
-            const du = scale(F.u, 2 / patchesPerFace), dv = scale(F.v, 2 / patchesPerFace);
-            // The sphere's metres per patch about the anchor.
-            const jx = scale(sub(du, scale(na, dot(na, du))), R / la), jy = scale(sub(dv, scale(na, dot(na, dv))), R / la);
-            const mx = length(jx), my = length(jy);
-            const area = length(cross(jx, jy));
-            const half = Math.min(GRID_MAX, Math.ceil(c.distance / Math.min(mx, my)) + 1);
-            widest = Math.max(widest, half);
-            const ex = unit(jx), ey = unit(jy);
-            const windFace = unit([dot(wind, ex), dot(wind, ey), 0]);
-            // The gusts' field is in the face's own metres (grassWgsl.js q): a patch is nominally this long.
-            const nominal = 2 * R / patchesPerFace;
-            const carried = [dot(this._carried, ex) * nominal / mx, dot(this._carried, ey) * nominal / my];
-            const o = 100 + faces * 28;
-            f.set([...ca, la], o);
-            f.set([...du, face], o + 4);
-            f.set([...dv, Math.max(mx, my)], o + 8);
-            f.set([...da, 0], o + 12);
-            f.set([...na, area], o + 16);
-            I.set([anchor[0], anchor[1], face, half], o + 20);
-            f.set([carried[0], carried[1], windFace[0], windFace[1]], o + 24);
-            faces++;
-        }
-        const tableCapacity = quadtree.getLoadedTileTableCapacity();
-        W.set([faces, depth, tableCapacity - 1, tableCapacity], 76);
-        // The tiles drawn this frame: the quadtree has built them already in this encoder (TerrainModule.compute).
-        W.set([quadtree.visibleTableMask, quadtree.visibleTableCapacity, quadtree._visibleEpoch, quadtree.maxGeomLOD], 80);
+        const { faces, widest } = this._groundFrame.update({ camRel, radius: R, heightScale: this.planetConfig.heightScale, quadtree, reach: c.distance });
         if (!faces) return;
         // This frame's half of the cache and of the patch table; the other half is last frame's.
         this._parity ^= 1;
@@ -434,6 +381,8 @@ export class GrassPass {
     }
 
     destroy() {
+        this._groundFrame?.destroy();
+        this._wind?.destroy();
         for (const b of [this._frameBuffer, this._patches, this._control, this._store, this._bandIndex, this._patchHash, this._dispatchArgs, this._args, ...(this._indexBuffers ?? [])]) b?.destroy();
         this._ready = false;
     }

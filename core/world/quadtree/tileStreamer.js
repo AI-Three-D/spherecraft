@@ -255,6 +255,10 @@ class TileArrayPool {
         for (var i = 0; i < this.capacity; i++) {
             this.freeLayers.push(i);
         }
+        // What is in each layer, counted: raised when a copy into it is submitted and when it is released. What is
+        // derived from a layer (core/world/ecology/) keys on it, so data made for a layer's last tile, or before its
+        // refinement arrived, is never read as the new one's.
+        this.layerVersions = new Uint32Array(this.capacity);
 
         const wantsNearestByType = (type) =>
             type === 'height' ||
@@ -462,6 +466,7 @@ class TileArrayPool {
         for (let i = 0; i < count; i++) {
             const { textures, layer } = this._pendingCopies[i];
             touchedLayers.add(layer);
+            this.layerVersions[layer]++;
             for (const type of this.types) {
                 const src = textures[type]?._gpuTexture?.texture;
                 const dst = this.textures.get(type);
@@ -551,7 +556,13 @@ class TileArrayPool {
             }
             this._pendingCopies = kept;
         }
+        this.layerVersions[layer]++;
         this.freeLayers.push(layer);
+    }
+
+    /** What is in a layer, counted (layerVersions). */
+    getLayerVersion(layer) {
+        return this.layerVersions[layer] ?? 0;
     }
 
     getWrapper(type) {
