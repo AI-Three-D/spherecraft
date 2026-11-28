@@ -4621,7 +4621,7 @@
             const i = gameEngine.ui?.stepGrassThickness?.() ?? setGrassThickness(config);
             const t = GRASS_THICKNESS_TIERS[i];
             grassThicknessShow();
-            debugSay(`Grass thickness ${i} of ${GRASS_THICKNESS_TIERS.length - 1}: ${t.name} (${t.near}x near, ${t.far}x by ${t.to} m).`, 'GrassThickness');
+            debugSay(`Grass thickness ${i} of ${GRASS_THICKNESS_TIERS.length - 1}: ${t.name} (${t.near === t.far ? `${t.near}x at every distance` : `${t.near}x near, ${t.far}x by ${t.to} m`}).`, 'GrassThickness');
         }
         document.getElementById('grass-thickness').addEventListener('click', () => grassThicknessStep());
         setInterval(grassThicknessShow, 1000);

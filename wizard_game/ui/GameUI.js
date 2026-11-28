@@ -285,7 +285,8 @@ export class GameUI {
             thickness.disabled = !config;
             if (document.activeElement !== thickness) thickness.value = String(i);
             thicknessStatus.textContent = !t ? 'Grass unavailable'
-                : `${t.near.toFixed(2)}× near, ${t.far.toFixed(2)}× by ${t.to} m. Shift+B steps.`;
+                : t.near === t.far ? `${t.near.toFixed(2)}× at every distance. Shift+B steps.`
+                    : `${t.near.toFixed(2)}× near, ${t.far.toFixed(2)}× by ${t.to} m. Shift+B steps.`;
             this._grassLabel = !config ? '' : `Grass: ${i >= 0 ? `${i} ${GRASS_THICKNESS_TIERS[i].name}` : 'custom'}`;
         };
         this._syncGrassThickness();

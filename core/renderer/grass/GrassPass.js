@@ -63,19 +63,20 @@ export const GRASS_DEFAULTS = Object.freeze({
      * metres (their strokes too). Thicker, a field reads as grass farther off; GrassWorks' blades (1 : 20 of their
      * height) were judged too thick, ours are made 1 : 30-50.
      */
-    thickness: { near: 1.25, far: 1.8, from: 3, to: 30 },
+    thickness: { near: 1.25, far: 1.25, from: 3, to: 30 },
 });
 
 /**
  * Grass blades' width, to compare live (GRASS_DEFAULTS.thickness takes one): as made, then four steps to about
- * GrassWorks' blade (0.12 wide for 2.4 tall, 1 : 20; ours are made 1 : 30 for a meadow, thinner for dry grass).
+ * GrassWorks' blade (0.12 wide for 2.4 tall, 1 : 20; ours are made 1 : 30 for a meadow, thinner for dry grass). The
+ * same at every distance, to compare the width alone (thickness can also grow from `near` to `far`).
  */
 export const GRASS_THICKNESS_TIERS = Object.freeze([
     { name: 'as made', near: 1.0, far: 1.0, from: 3, to: 30 },
-    { name: 'slightly thicker', near: 1.25, far: 1.8, from: 3, to: 30 },
-    { name: 'thicker', near: 1.5, far: 2.1, from: 3, to: 30 },
-    { name: 'thick', near: 1.8, far: 2.5, from: 3, to: 30 },
-    { name: 'about GrassWorks', near: 2.2, far: 3.0, from: 3, to: 30 },
+    { name: 'slightly thicker', near: 1.25, far: 1.25, from: 3, to: 30 },
+    { name: 'thicker', near: 1.5, far: 1.5, from: 3, to: 30 },
+    { name: 'thick', near: 1.8, far: 1.8, from: 3, to: 30 },
+    { name: 'about GrassWorks', near: 2.2, far: 2.2, from: 3, to: 30 },
 ]);
 /** Which of GRASS_THICKNESS_TIERS a grass config's thickness is, or -1. */
 export function grassThicknessIndex(config) {
