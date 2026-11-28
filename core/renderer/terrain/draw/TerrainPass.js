@@ -266,6 +266,8 @@ export class TerrainPass {
             ...color(u.ambientLightColor.value, u.ambientLightIntensity.value), tierFade?.end ?? 0,
             ...color(u.fogColor.value, 1), normalFrom,
             normalFrom + shaderConfig.normalMapDistanceFadeMeters, 1, this.grassReach ?? 0, 0,
+            // What the camera's float cannot hold (terrainPass.wgsl.js vertex: the land from the camera, exactly).
+            p.x - Math.fround(p.x), p.y - Math.fround(p.y), p.z - Math.fround(p.z), 0,
         ], 32);
         this.device.queue.writeBuffer(this._frameBuffer, 0, f);
         this._rain = wetness > 0;

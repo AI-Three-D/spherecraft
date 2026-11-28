@@ -39,6 +39,7 @@ const VIEWS = [
     ['meadow standing', 'grassland', 150, 1.8, -10, 120],
     ['meadow standing, toward sun', 'grassland', 150, 1.8, -6, 15],
     ['meadow from 8 m', 'grassland', 150, 8, -12, 120],
+    ['meadow follow camera', 'grassland', 150, 6, -30, 120],
     ['meadow from 15 m', 'grassland', 150, 15, -16, 120],
     ['meadow walking', 'grassland', 150, 1.8, -10, 120, true],
     ['forest floor', 'forest-floor', 0, 1.7, -8, 90],

@@ -18,7 +18,7 @@ import { grassMediumWGSL } from '../../../grass/grassMedium.wgsl.js';
 import { SLICE_PERIOD_M } from '../../../grass/grassSlices.js';
 import { GRASS_FIELD_WGSL } from '../../../grass/grassField.wgsl.js';
 
-export const TERRAIN_PASS_FLOATS = 60;
+export const TERRAIN_PASS_FLOATS = 64;
 /** The ground's daylight, in the shader's floats h, h2, h3 (the grass blades far off take it too: grassWgsl.js). Needs step3. */
 export const GROUND_LIGHT_WGSL = /* wgsl */`
 // Daylight on the ground (terrainChunkFragmentShaderBuilder.js terrainLight).
@@ -63,6 +63,8 @@ struct Frame {
     ambient: vec3<f32>, fadeEnd: f32,
     fogColor: vec3<f32>, normalStart: f32,
     normalEnd: f32, useAtlasMode: f32, grassReach: f32, pad1: f32,
+    // The camera's position less its float (camera): what a float some 131 km from the centre cannot hold (vertex).
+    cameraLow: vec3<f32>, pad2: f32,
 };
 `;
 
@@ -125,13 +127,18 @@ fn main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u
         }
     }
     var out: Out;
-    let viewPos = uniforms.view * vec4<f32>(worldPosition, 1.0);
+    // From the camera, exactly: the point less the camera's float (both floats this far out, so the difference is
+    // exact), less the rest of the camera's position; then the view's turn alone. Through the whole view matrix (its
+    // translation a float of the camera's ~131 km from the centre) the land moved in steps of up to 8 mm as the camera
+    // moved, irregular from frame to frame, while the blades on it (GrassPass.js, from the camera) moved smoothly.
+    let fromCamera = (worldPosition - uniforms.camera) - uniforms.cameraLow;
+    let viewPos = vec4<f32>(mat3x3<f32>(uniforms.view[0].xyz, uniforms.view[1].xyz, uniforms.view[2].xyz) * fromCamera, 1.0);
     out.clip = uniforms.projection * viewPos;
     let faceSize = uniforms.planetRadius * 2.0;
     let wrapped = fract(chunk.chunkLocation / ${GROUND_WRAP_SHARE}) * (faceSize * ${GROUND_WRAP_SHARE});
     out.ground = vec3<f32>(wrapped + uv * chunk.chunkSizeUV * faceSize, height * heightMultiplier);
     out.face = chunk.chunkLocation * faceSize - wrapped;
-    out.rel = worldPosition - uniforms.camera;
+    out.rel = fromCamera;
     out.up = sphereDir;
     out.sunlight = sunOnPath(worldPosition - uniforms.planetOrigin, uniforms.camera - uniforms.planetOrigin, uniforms.sunDir);
     out.land = landLightAt(worldPosition - uniforms.planetOrigin, landSampler);
@@ -351,8 +358,6 @@ fn main(in: In) -> @location(0) vec4<f32> {
     var rough: h = 0.8;
     var wet: h = 0.35;
     var pool: h = 0.0;
-    // The grass grain's coordinates bent by the ground's own patterns, so that its repeats never stand in rows.
-    var grainWarp = vec2<f32>(0.0);
     // The hue of the grass by climate, on the grass share (grassWgsl.js grassHue; the blades take it alike).
     var grassTint = h3(1.0);
     // The grass blades' own colour here (grassWgsl.js), for the canopy past them.
@@ -381,7 +386,6 @@ fn main(in: In) -> @location(0) vec4<f32> {
         if (distance < 9000.0) {
             a = mix(h4(textureSampleGrad(groundSurface, wideSampler, uvA, ${W.masks} + i32(lie.x), axA, ayA)), a, h(smoothstep(5000.0, 9000.0, distance)));
         }
-        grainWarp = (vec2<f32>(a.xy) - 0.5) * 14.0 + wideBend * 0.1;
         let edge = 0.6 * (a.x - 0.5) + 0.5 * (b.y - 0.5) + 0.35 * (a.y - 0.5);
         ${biome ? `
         // What covers the ground follows the tile's climate: temperature, humidity, glacier ice, bedrock (biomeLandscape.wgsl.js).
@@ -705,7 +709,10 @@ ${grassLook ? `
     // The grain of grass (grassGrain.js): tufts, the dark between them, straw and clumps, the same the far blades take
     // their colour from. Fine, and tussocks; mean 1, so its mips take it away far off without a change of colour.
     if (grassShare > 0.0 && distance < 4000.0) {
-        let gp = in.ground.xy + grainWarp;
+        // Not bent by the ground's patterns: bent, the strands stood as marble swirls from above, and as its mips did not
+        // know the bend, they shimmered. The portrait is one stand; the field's variation comes from grassField.wgsl.js.
+        // At the same place as the blades take it (grassWgsl.js grainAt).
+        let gp = in.ground.xy;
         ${portraits !== null ? `
         // The field's portrait seen from here (grassPortraits.js): our blades rendered from the view's elevation and
         // way over the ground, as a structure of mean 1 (the canopy above gives the mean).

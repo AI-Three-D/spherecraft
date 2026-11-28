@@ -42,14 +42,22 @@ export const GRASS_DEFAULTS = Object.freeze({
     thinFrom: 2,
     /** Distance bands of finer and coarser blades (m). */
     bands: [9.5, 24],
-    /** No blade drawn thinner than this many pixels, widened at most so much. */
-    minPixels: 0.8,
-    maxWiden: 16,
+    /**
+     * No strip drawn thinner than this many pixels, widened at most so much; its colour mixed with the field's by the
+     * share it truly covers (grassWgsl.js vsMain). Thinner, strips fell on pixels' middles or between them.
+     */
+    minPixels: 1.25,
+    maxWiden: 32,
     /**
      * From where a typical blade (1.1 cm) is this many pixels wide, blades thin out as 1 / d^2 while they are widened
      * as d: fewer, wider blades, the same cover. Under minPixels keeps them dense further (here about 21 m).
      */
     thinPixels: 0.6,
+    /**
+     * The sine of the sight line's elevation from which blades stand at full density: as many as hide the ground at
+     * that slant, out to where they are resolved (grassWgsl.js densityAt). 0.9 from standing height is thinFrom's 1 / d.
+     */
+    fullSlant: 0.9,
 });
 
 export class GrassPass {
@@ -124,7 +132,7 @@ export class GrassPass {
         const faceSizeMeters = 2 * this.planetConfig.radius;
         const skip = this.skip ?? {};
         const segments = this.segments ?? LOD_SEGMENTS;
-        const work = device.createShaderModule({ label: 'Grass scatter', code: buildGrassComputeWGSL({ faceSizeMeters, biome: this.biome ?? null, skip, segments }) });
+        const work = device.createShaderModule({ label: 'Grass scatter', code: buildGrassComputeWGSL({ faceSizeMeters, biome: this.biome ?? null, skip, segments, fullSlant: this.config.fullSlant }) });
         const layout = device.createPipelineLayout({ bindGroupLayouts: [this._layouts.work, this._layouts.ground] });
         const step = entryPoint => device.createComputePipelineAsync({ label: `Grass ${entryPoint}`, layout, compute: { module: work, entryPoint } });
         const blade = (label, perVertex) => {
@@ -261,7 +269,7 @@ export class GrassPass {
         f.set([c.distance, c.density, c.thinFrom, pixelFrom], 64);
         // What the kept tufts were made for (how many a patch holds): other settings, or pixels 15 % another size (a
         // resize, a zoom), and they are all made again.
-        const madeFor = `${c.distance}|${c.density}|${c.thinFrom}|${Math.round(Math.log(pixelFrom) / Math.log(1.15))}`;
+        const madeFor = `${c.distance}|${c.density}|${c.thinFrom}|${c.fullSlant}|${Math.round(Math.log(pixelFrom) / Math.log(1.15))}`;
         f.set([c.bands[0], c.bands[1], c.minPixels, c.maxWiden], 68);
         f.set([...camRel, seaLevel ?? -1.0e9], 72);
 

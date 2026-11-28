@@ -2,7 +2,67 @@
 
 2026-11-26, branch `grass/biome-grass` from main 70b83fe. M1 Pro, Chrome WebGPU, 2400×1350. Pictures: `screenshots/grass_2026-11-26/`.
 
-**Where it stands (2026-11-28, eighth round: the near-to-far hand-over; cost not reliably re-measured):** grass costs 1.9–3.2 ms at high standing still and 3.5 ms walking; 1.4–2.0 ms at medium (2.3 walking). It was 6.7–9.0 ms at high. Budget 2 ms. Sections Seventh round and Tuft cache.
+**Where it stands (2026-11-28, ninth round: follow camera, tuft strokes, the ground's jitter; cost not reliably re-measured):** grass cost 1.9–3.2 ms at high standing still and 3.5 ms walking in the seventh round; 1.4–2.0 ms at medium (2.3 walking). It was 6.7–9.0 ms at high. The eighth and ninth rounds were timed only against each other, under other GPU load: the ninth is no dearer. Budget 2 ms. Sections Ninth round, Seventh round and Tuft cache.
+
+## Ninth round (2026-11-28): the follow camera, tufts as strokes, the ground's jitter
+
+The user's report, from the game's follow camera (6 m over the player, looking down about 30°):
+- It did not look like dense grass. They had to crouch to 2-3 m to see long strands.
+- High and above should carry grass much farther. They hoped for a cleverer level of detail for the middle distance, such as tuft geometry.
+- There was flicker while moving, not convincingly only from missing antialiasing.
+
+(The wizard is not drawn because `features.actors` is false in `wizard_game/runtimeConfigs.js`, as on main. Grass has nothing to do with it.)
+
+**What was wrong:**
+
+| Finding | How it was found |
+| --- | --- |
+| The terrain moved in steps of up to 8 mm as the camera moved. The blades on it moved smoothly. | Camera stepped 1 mm at a time, grass off: the frame changed by 8.6, 0, 0, 6.1, 2.4, 0… grey levels. The terrain vertex shader put each vertex at its absolute position (~131 km from the planet's centre) and through the whole view matrix, whose camera translation is a float. Walking, the error changes every frame: up to about half a pixel of judder for ground 7 m away, with the blades sliding against it. |
+| Blade density fell as 1 / d from 2 m, a rule for a standing eye. | From 6 m up, a sight line crosses a third of the canopy that it crosses from standing height, so the ground's texture showed between sparse strands. The teacher, which thins blades the same way, looked the same. |
+| The ground's grass texture was bent by the ground's mosaic, up to ±7 m. | From above, the strands stood as marble swirls. Its mip level did not know the bend, so it was undersampled where stretched. The blades take the same texture unbent, so the two did not agree. |
+| Seed heads (0.1-0.3 px wide at 30 m) and flower heads (1 px dots) were drawn whole where they fell on a pixel's middle. | Enlarged crops of two frames: broken dashes and dots that changed from frame to frame. |
+
+**What changed:**
+- **The terrain is drawn from the camera** (`terrainPass.wgsl.js` vertex, `TerrainPass.js`). The vertex less the camera's float, less the rest of the camera's position (`cameraLow`), then the view's rotation alone. 1 mm steps now change the ground evenly; what is left is a dither of 1-2 grey levels.
+- **Density follows the sight line's slant** (`densityAt(d, s)`, `fullSlant` 0.9, which is the old law from standing height).
+  - It applies only where blades are resolved: fading out from 0.75 to 1.5 × the distance where a blade is 0.6 px. It is capped at 3.5 × the standing-height density.
+  - The tuft cache stamps each patch with the camera's height over it in 20 % steps. Tufts are made for one step higher, and remade when the camera rises past that or sinks two steps.
+- **Tufts become strokes in the middle distance** (`STROKE_FROM` 0.6, `STROKE_TO` 1.0 × that distance, about 10-16 m at 1350 px).
+  - Each tuft writes one more record: a stroke as tall as its blades stand on the whole, and as wide as they cover together (`TUFT_FILL` 0.53 × count × width). It has the tuft's colour and straw, faces the camera, and is thinned and lit as the blades are.
+  - Each tuft hands over on its own by distance, its blades narrowing as its stroke widens. Past the hand-over a patch keeps only strokes, seeds and flowers.
+  - The far band drew about 193 thousand blades; it now draws about 39 thousand strokes. The cache holds 413 thousand records at standing height instead of 680 thousand.
+- **No strip is drawn under 1.25 px** (`minPixels`, from 0.8; `maxWiden` 32), stems and seed heads included. Each shows its own colour by the share it truly covers.
+  - Flower heads under 1.5 px are drawn that large both ways, at their true area's share.
+  - Pixels flipping by more than 20 grey levels on a 1 mm step went down 22 % at 6-16 m.
+- **The ground's texture is no longer bent.** It is taken at the same places as the blades take it.
+- **The store holds 1.5 million records a half** (96 MB), up from 1 million. With the denser near field it reached 944 thousand from 6 m before strokes, and an overflow remakes patches every frame in an order that changes: flicker of its own.
+
+**Counts, from the grassland pose** (blades drawn per band, near/middle/far; records kept):
+
+| Eye | Before | After |
+| --- | --- | --- |
+| 1.8 m | 56k / 76k / 193k; 680k | 56k / 59k / 39k; 413k |
+| 6 m, 30° down | (at the user's pose: 22k / 68k / 52k; 467k) | 74k / 173k / 39k; 699k |
+| 12 m | | 0 / 94k / 40k; 439k |
+
+**Cost, not reliable** (`grassBench.mjs`, high, 2592×1350, eighth round `cee3768` and this one back to back, 3 rounds):
+- The game was open in another browser on the same GPU. The terrain alone took 6.9-8.9 ms (90th percentile 13-14), two to three times the seventh round's, so the absolute numbers say little.
+- Grass (full frame less the terrain without grass), ms:
+
+| View | Eighth round | Ninth round |
+| --- | ---: | ---: |
+| Standing | 6.9 | 4.8 |
+| Standing, toward the sun | 4.9 | 2.3 |
+| From 8 m | 6.6 | 5.9 |
+| Follow camera (6 m, 30° down) | 9.6 | 9.5 |
+| Walking | 7.2 | 6.8 |
+
+- Read as: no dearer than the eighth round, cheaper where strokes replace the far band. The follow camera draws 244 thousand strips against 280 thousand. A clean run needs the GPU to itself.
+
+**Open:**
+- **Near blades alias at their edges.** About 3 % of pixels at 6-10 m flip on a 1 mm step. The main pass has no multisampling and no temporal antialiasing anywhere in the renderer. That is the remaining flicker and needs a renderer-level change.
+- **Strokes carry more contrast in the middle distance than the teacher's thin blades.** That is the point of them, but a stroke is fair only if the tuft it stands for is compact. Clumpier tufts near would make the teacher agree.
+- **From 6 m up the near blades are 6-9 grey levels brighter than the ground under them.** The canopy was fitted on views at 1.8-12 m eye height, looking 8° down.
 
 ## Eighth round (2026-11-28): one field from near to far, against a teacher
 
