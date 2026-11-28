@@ -141,11 +141,15 @@ export class GrassPass {
                 at(7, C, storage), at(8, C, storage),
                 // The shared ground frame (drawnGround.wgsl.js) and wind (wind.wgsl.js).
                 at(9, C, { buffer: { type: 'uniform' } }), at(10, C, { buffer: { type: 'uniform' } }),
+                // The ecology field's layer records (ecologyField.wgsl.js), when it is bound.
+                ...(this.ecology ? [at(11, C, { buffer: { type: 'read-only-storage' } })] : []),
             ] }),
             ground: device.createBindGroupLayout({ entries: [
                 at(0, C, { texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }),
                 at(1, C, array), at(2, C, array), at(3, C, array), at(4, C, { sampler: {} }), at(5, C, { sampler: {} }),
                 at(6, C, { buffer: { type: 'uniform' } }), at(7, C, array), at(8, C, array), at(9, C, { texture: { sampleType: 'float' } }), at(10, C, array),
+                // The ecology field's textures.
+                ...(this.ecology ? [at(11, C, array), at(12, C, { texture: { sampleType: 'uint', viewDimension: '2d-array' } })] : []),
             ] }),
             draw: device.createBindGroupLayout({ entries: [
                 at(0, V | F, { buffer: { type: 'uniform' } }), at(1, V, { buffer: { type: 'read-only-storage' } }),
@@ -154,7 +158,7 @@ export class GrassPass {
         const faceSizeMeters = 2 * this.planetConfig.radius;
         const skip = this.skip ?? {};
         const segments = this.segments ?? LOD_SEGMENTS;
-        const work = device.createShaderModule({ label: 'Grass scatter', code: buildGrassComputeWGSL({ faceSizeMeters, biome: this.biome ?? null, skip, segments, fullSlant: this.config.fullSlant }) });
+        const work = device.createShaderModule({ label: 'Grass scatter', code: buildGrassComputeWGSL({ faceSizeMeters, biome: this.biome ?? null, skip, segments, fullSlant: this.config.fullSlant, ecology: !!this.ecology }) });
         const layout = device.createPipelineLayout({ bindGroupLayouts: [this._layouts.work, this._layouts.ground] });
         const step = entryPoint => device.createComputePipelineAsync({ label: `Grass ${entryPoint}`, layout, compute: { module: work, entryPoint } });
         const blade = (label, perVertex) => {
@@ -193,7 +197,7 @@ export class GrassPass {
         this._wind = new WindField(device, { label: 'Grass wind' });
         const workGroup = args => device.createBindGroup({ layout: this._layouts.work, entries: [
             this._frameBuffer, quadtree.getLoadedTileTableBuffer(), this._patches, this._control, this._store, args, quadtree._visibleTableBuffer,
-            this._bandIndex, this._patchHash, this._groundFrame.buffer, this._wind.buffer,
+            this._bandIndex, this._patchHash, this._groundFrame.buffer, this._wind.buffer, ...(this.ecology ? [this.ecology.layers] : []),
         ].map((b, binding) => ({ binding, resource: { buffer: b } })) });
         this._dispatchGroup = workGroup(this._dispatchArgs);
         this._drawArgsGroup = workGroup(this._args);
@@ -208,7 +212,8 @@ export class GrassPass {
         const view = name => textures[name]?._gpuTexture?.view;
         const land = this.landLight.resources;
         const parts = [view('height'), view('normal'), (this.biome && view('climate')) || view('normal'), this.ground.surfaceView,
-            this.ground.wideSampler, this._clamp, land.frame, land.map, view('splatIndex'), this.grain.view, this.portraits.view];
+            this.ground.wideSampler, this._clamp, land.frame, land.map, view('splatIndex'), this.grain.view, this.portraits.view,
+            ...(this.ecology ? [this.ecology.viewA, this.ecology.viewB] : [])];
         if (parts.some(p => !p)) return false;
         if (this._groundOf && this._groundOf.every((x, i) => x === parts[i])) return true;
         this._groundOf = parts;

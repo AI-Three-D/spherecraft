@@ -14,6 +14,7 @@ import { buildEdgeStitchWGSL, CUBE_POINT_WGSL, SAMPLE_HEIGHT_WGSL } from './terr
 import { GRASS_CANOPY_WGSL, GRASS_HUE_WGSL } from '../../../grass/grassHue.wgsl.js';
 import { GRAIN_LATTICES } from '../../../grass/grassGrain.js';
 import { GRASS_PORTRAIT_WGSL } from '../../../grass/grassPortraits.js';
+import { buildEcologyReadWGSL } from '../../../../world/ecology/ecologyField.wgsl.js';
 import { grassMediumWGSL } from '../../../grass/grassMedium.wgsl.js';
 import { SLICE_PERIOD_M } from '../../../grass/grassSlices.js';
 import { GRASS_FIELD_WGSL } from '../../../grass/grassField.wgsl.js';
@@ -208,7 +209,7 @@ const table = (name, type, rows) => `const ${name} = array<${type}, ${rows.lengt
  * biome: the landscape's rules (biomeLandscapeConfig.js): what the ground is made of follows the tile's climate, not the
  * splat's families (groundSurface.wgsl.js biomeLandscape).
  */
-export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null, grain = null, grassLook = true, portraits = null, slices = null }) {
+export function buildTerrainPassFragmentWGSL({ faceSizeMeters, fine = true, live = true, far = true, water = false, rain = false, half = true, exactAir = false, fineEndMeters = 150, deepEndMeters = 16, biome = null, grain = null, grassLook = true, portraits = null, slices = null, ecology = false }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const deep = fine && deepEndMeters > 0;
@@ -242,6 +243,7 @@ ${biome ? '@group(1) @binding(13) var climateMap: texture_2d_array<f32>;' : ''}
 ${grain !== null ? `@group(1) @binding(${grain}) var grassGrain: texture_2d<f32>;
 ${GRAIN_LATTICES.map((n, i) => `const GRAIN${i} = ${vector(L.over(n))};`).join('\n')}` : ''}
 ${slices !== null ? `@group(1) @binding(${slices}) var grassSlices: texture_2d_array<f32>;` : ''}
+${ecology ? buildEcologyReadWGSL({ a: [3, 8], b: [3, 9], layers: [3, 10] }) : ''}
 ${portraits !== null ? `@group(1) @binding(${portraits}) var grassPortraits: texture_2d_array<f32>;
 const GRAIN0_TURN: f32 = ${number(Math.atan2(GRAIN_LATTICES[0][1], GRAIN_LATTICES[0][0]))};
 ${GRASS_PORTRAIT_WGSL}` : ''}
@@ -342,6 +344,13 @@ fn main(in: In) -> @location(0) vec4<f32> {
     let dx = dpdx(in.ground);
     let dy = dpdy(in.ground);
     let toEye = h3(-in.rel / max(distance, 0.01));
+    ${ecology ? `
+    // The forest over this ground (core/world/ecology): its shade on the land's light (none until a forest is made, or
+    // the mock forest), and the field's debug views.
+    let eco = ecologyAtLayer(layer, in.uv.xy);
+    if (frame.pad2 > 0.5) { return vec4<f32>(ecologyDebugColour(eco, u32(frame.pad2 + 0.5)), 1.0); }
+    let canopyLand = canopyLight(eco, dot(up32, frame.sunDir), 0.0) * vec2<f32>(nearShadowAt(in.rel), 1.0);` : `
+    let canopyLand = vec2<f32>(1.0);`}
 
     // The tile's normal, about the planet's: its tangent lies level, across the planet's axis.
     let e = textureSampleLevel(tileNormals, clampSampler, in.uv.xy, layer, 0.0).rg * 2.0 - 1.0;
@@ -691,7 +700,7 @@ ${grassLook ? `
         gc = mix(gc, h3(vec3<f32>(f32(gc.x) * m.x / met, f32(gc.x) * m.y / met, m.z)), mediumShare);
     }` : ''}
     // The blades' ramp shades all their light, their self-shade only the sun's: sunlight's share of the day's light.
-    let sunShare = h(0.65) * h(in.land.x) * step3(0.0, 0.25, h(sunUpG));
+    let sunShare = h(0.65) * h(in.land.x * canopyLand.x) * step3(0.0, 0.25, h(sunUpG));
     // Where blades stand (GrassPass.js, out to grassReach m) they are the canopy's top; the ground between them shows
     // what lies under it. As they sink into the ground at the end of their reach, it takes their place.
     var lowered: h = 1.0;
@@ -751,7 +760,7 @@ ${grassLook ? `
     let velvet = normalize(toEye - shape * dot(toEye, shape) + shape);
     n = normalize(mix(n, velvet, 0.5 * canopySeen));
     ` : ``}
-    let land = h2(in.land);
+    let land = h2(in.land * canopyLand);
     ${rain ? `
     // Rain: soaked ground is darker, and lies smooth under its puddles.
     let wetness = h(frame.wetness);

@@ -75,7 +75,7 @@ export class WorldConfigLoader {
     // ── Load ─────────────────────────────────────────────────────────────
 
     async load() {
-        const [terrain, planet, postprocessing, engine, textures, biomes, assets, atmosphereBanks, particles] = await Promise.all([
+        const [terrain, planet, postprocessing, engine, textures, biomes, assets, atmosphereBanks, particles, ecology] = await Promise.all([
             this._fetchJSON('terrain.json'),
             this._fetchJSON('planet.json'),
             this._fetchJSON('postprocessing.json'),
@@ -85,6 +85,8 @@ export class WorldConfigLoader {
             this._fetchJSON('assets.json').catch(() => ({ profiles: [] })),
             this._fetchJSON('atmosphere_banks.json').catch(() => ({})),
             this._fetchJSON('particles.json').catch(() => ({})),
+            // What grows where (core/world/ecology/ecologyRegistry.js).
+            this._fetchJSON('ecology.json').catch(() => null),
         ]);
 
         if (!biomes.tileCatalog) {
@@ -94,6 +96,7 @@ export class WorldConfigLoader {
         this.raw = { terrain, planet, postprocessing, engine, textures, biomes, assets, atmosphereBanks, particles };
 
         const engineConfig   = this._buildEngineConfig(terrain, planet, engine);
+        if (ecology) engineConfig.ecology = { ...(engineConfig.ecology ?? {}), registry: ecology };
         const gameDataConfig = this._buildGameDataConfig(terrain, planet, textures, biomes, assets, atmosphereBanks, particles);
 
         const worldAuthoring = gameDataConfig?.planets?.[0]?.worldAuthoring ?? null;

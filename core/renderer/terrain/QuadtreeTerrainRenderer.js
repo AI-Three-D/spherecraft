@@ -11,6 +11,7 @@ import { createGroundMaterials } from './materials/groundMaterials.js';
 import { TerrainLightMap } from './light/TerrainLightMap.js';
 import { TerrainPass } from './draw/TerrainPass.js';
 import { GrassPass } from '../grass/GrassPass.js';
+import { EcologyField } from '../../world/ecology/EcologyField.js';
 import { createGrassGrain } from '../grass/grassGrain.js';
 import { createGrassPortraits } from '../grass/grassPortraits.js';
 import { createGrassSlices } from '../grass/grassSlices.js';
@@ -109,11 +110,28 @@ export class QuadtreeTerrainRenderer {
         // Slices of the field, from its own blades (grassSlices.js): past the blades the terrain traces its sight line through
         // them. An experiment, off: only made when asked for (rendering.grass.slices; TerrainPass options.slices too).
         if (grassConfig?.enabled && grassConfig.slices === true && !this._slices) this._slices = await createGrassSlices(this.backend.device);
+        // The ecology field (core/world/ecology/EcologyField.js): habitat and realized forest per pool layer, read by the
+        // terrain pass and grass (light under the canopy) and by what grows.
+        const ecologyConfig = this.engineConfig.rendering?.ecology;
+        if (ecologyConfig?.enabled !== false && !this._ecology) {
+            const ecology = new EcologyField({
+                device: this.backend.device, tileManager: this.tileManager, planetConfig: this.planetConfig, biome,
+                registry: this.engineConfig.ecology?.registry ?? null, config: ecologyConfig,
+            });
+            try {
+                await ecology.initialize();
+                this._ecology = ecology;
+            } catch (error) {
+                ecology.destroy();
+                Logger.warn(`[QTR] ecology field unavailable: ${error?.message ?? error}`);
+            }
+        }
         const pass = new TerrainPass({
             device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground, landLight: this._landLight,
             planetConfig: this.planetConfig, shaderConfig: shader, segments: Math.max(...this._lodSegments), biome, grain: this._grain ?? null,
             portraits: this._portraits ?? null,
             slices: this._slices ?? null,
+            ecology: this._ecology ?? null,
             grassLook: !!grassConfig?.enabled,
             meshes: Array.from({ length: this._maxGeomLOD + 1 }, (_, lod) => this._geometries.get(lod).index.data),
         });
@@ -130,7 +148,7 @@ export class QuadtreeTerrainRenderer {
             const grass = new GrassPass({
                 device: this.backend.device, backend: this.backend, tileManager: this.tileManager, ground: this._ground,
                 landLight: this._landLight, planetConfig: this.planetConfig, biome, config: grassConfig, grain: this._grain,
-                portraits: this._portraits,
+                portraits: this._portraits, ecology: this._ecology ?? null,
             });
             try {
                 await grass.initialize();
@@ -226,6 +244,8 @@ export class QuadtreeTerrainRenderer {
         });
         this._tierFade = this._computeTierFadeDistances();
         this._drawnByPass = this._initialized && this.tileManager?.isReady() && this._passDraws(frame.camera);
+        // The ecology field first: the terrain and grass read it in this frame's commands.
+        if (this._drawnByPass) this._ecology?.update(encoder);
         if (this._drawnByPass) {
             if (this.grass) {
                 const water = this._waterData?.value;
@@ -615,6 +635,8 @@ export class QuadtreeTerrainRenderer {
         this._portraits = null;
         this._slices?.destroy();
         this._slices = null;
+        this._ecology?.destroy();
+        this._ecology = null;
         this._ground?.destroy();
         this._ground = null;
         this._landLight?.dispose();

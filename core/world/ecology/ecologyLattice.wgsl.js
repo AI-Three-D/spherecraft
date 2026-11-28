@@ -30,6 +30,21 @@ fn latticeRank(level: u32, u: f32) -> f32 {
     return mix(lo, hi, u);
 }
 
+// Value noise over a 3D position (0..1): continuous across cube faces and at the poles, for anything that varies over
+// the world (the wind's gusts, stands). Integer cells offset by 2^22: fine for positions to 4 million cells.
+fn ecoNoise3(p: vec3<f32>, seed: u32) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let w = f * f * (3.0 - 2.0 * f);
+    let k = vec3<u32>(vec3<i32>(i) + vec3<i32>(1 << 22));
+    let s = seed * 0x9E3779B1u;
+    let a = mix(u01(hash3(k.x ^ s, k.y, k.z)), u01(hash3((k.x + 1u) ^ s, k.y, k.z)), w.x);
+    let b = mix(u01(hash3(k.x ^ s, k.y + 1u, k.z)), u01(hash3((k.x + 1u) ^ s, k.y + 1u, k.z)), w.x);
+    let c = mix(u01(hash3(k.x ^ s, k.y, k.z + 1u)), u01(hash3((k.x + 1u) ^ s, k.y, k.z + 1u)), w.x);
+    let e = mix(u01(hash3(k.x ^ s, k.y + 1u, k.z + 1u)), u01(hash3((k.x + 1u) ^ s, k.y + 1u, k.z + 1u)), w.x);
+    return mix(mix(a, b, w.y), mix(c, e, w.y), w.z);
+}
+
 // A stable id of a candidate (lo, hi), and the one order of candidates: higher priority first, then the smaller id.
 fn ecoId(face: u32, level: u32, ix: u32, iy: u32, k: u32) -> vec2<u32> {
     return vec2<u32>((ix & 0xFFFFFFu) | ((k & 0xFFu) << 24u), (iy & 0xFFFFFFu) | ((level & 31u) << 24u) | ((face & 7u) << 29u));

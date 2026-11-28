@@ -242,6 +242,12 @@ export function createEngineConfig() {
       grass: {
         enabled: true,
       },
+      // The ecology field under trees and ground cover (core/world/ecology/EcologyField.js ECOLOGY_DEFAULTS). The
+      // registry comes from world/ecology.json (WorldConfigLoader). mockForest: realized forest from habitat, for labs.
+      ecology: {
+        enabled: true,
+        mockForest: false,
+      },
       terrainShader: {
         // Generated ground surfaces (groundMaterials.js) and the light over the land (TerrainLightMap.js).
         groundMaterials: true,

@@ -27,6 +27,7 @@ import { GRASS_PORTRAIT_WGSL, PORTRAIT_PERIOD_M, PORTRAIT_SIZE } from './grassPo
 import { ECOLOGY_LATTICE_WGSL } from '../../world/ecology/ecologyLattice.wgsl.js';
 import { GROUND_LEVELS, buildDrawnGroundWGSL } from '../../world/ecology/drawnGround.wgsl.js';
 import { buildWindWGSL } from '../../world/ecology/wind.wgsl.js';
+import { buildEcologyReadWGSL } from '../../world/ecology/ecologyField.wgsl.js';
 
 /** Patches per tile edge (2^6): a patch is 2 m where tiles are 128 m. Lattice points (tufts) per patch edge. */
 export const PATCH_LEVELS = GROUND_LEVELS;
@@ -117,7 +118,8 @@ fn wave(t: f32, rate: f32, phase: f32) -> f32 {
  * drawn (patches on the finest loaded tiles).
  */
 /** fullSlant: the sine of the sight line's elevation at which blades stand at full density (densityAt). */
-export function buildGrassComputeWGSL({ faceSizeMeters, biome, skip = {}, segments = LOD_SEGMENTS, fullSlant = 0.9 }) {
+/** ecology: the ecology field is bound (light under the canopy: core/world/ecology). */
+export function buildGrassComputeWGSL({ faceSizeMeters, biome, skip = {}, segments = LOD_SEGMENTS, fullSlant = 0.9, ecology = false }) {
     const L = lattices(faceSizeMeters);
     const W = GROUND_WIDE_LAYERS;
     const [b0, b1, b2] = LOD_CAPACITY;
@@ -148,6 +150,8 @@ ${buildTerrainLightWGSL(1, 6, 7)}
 @group(1) @binding(8) var tileBeds: texture_2d_array<f32>;
 @group(1) @binding(9) var grassGrain: texture_2d<f32>;
 @group(1) @binding(10) var grassPortraits: texture_2d_array<f32>;
+${ecology ? `// The ecology field (core/world/ecology/ecologyField.wgsl.js): the forest's shade on the blades' light.
+${buildEcologyReadWGSL({ a: [1, 11], b: [1, 12], layers: [0, 11], withPatch: true })}` : ''}
 
 const CELLS: u32 = ${CELLS}u;
 const PATCH_LEVELS: u32 = ${PATCH_LEVELS}u;
@@ -336,7 +340,9 @@ fn patchesMain(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let slotOut = atomicAdd(&control[0], 1u);
     if (slotOut >= MAX_PATCHES) { return; }
-    let land = landLightAt(frame.camera.xyz + rel, clampSampler);
+    var land = landLightAt(frame.camera.xyz + rel, clampSampler);
+    ${ecology ? `// Under a forest (none until one is made, or the mock forest): its shade on the patch, at the blades' height.
+    land *= canopyLight(ecologyAtPatch(face, p, vec2<f32>(0.5 * sf)), dot(frame.up.xyz, frame.sunDir.xyz), 0.0);` : ''}
     let packedD = u32(d.x + 32768) | (u32(d.y + 32768) << 16u);
     let headY = slot | (u32(tile.y) << 4u) | (up << 8u) | (u32(tile.w) << 12u) | (u32(span) << 16u);
     let nearest = max(distance - reach, 0.0);
