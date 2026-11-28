@@ -37,6 +37,12 @@ The user's report, from the game's follow camera (6 m over the player, looking d
 - **The ground's texture is no longer bent.** It is taken at the same places as the blades take it.
 - **The store holds 1.5 million records a half** (96 MB), up from 1 million. With the denser near field it reached 944 thousand from 6 m before strokes, and an overflow remakes patches every frame in an order that changes: flicker of its own.
 
+**Thicker grass, on request** (after looking at GrassWorks again):
+- GrassWorks' documented blade is 0.12 wide for 2.4 tall (no units), about 1 : 20. Ours are made 1 : 30-50 (0.8-1.5 cm for 25-85 cm). The user found theirs too thick and asked for slightly thicker near, growing with distance.
+- Grass blades and their strokes are drawn `thickness.near` 1.25 times as wide as made, growing to `thickness.far` 1.8 between 3 and 30 m (`GRASS_DEFAULTS.thickness`, per frame in `frame.thick`, so it can be tuned live). Broadleaf plants, flowers and seed heads keep their sizes.
+- Their true width also sets how much of their own colour they show (`basePixels`, the per-row coverage), so a wider blade far off fades into the field later.
+- At 3.5 m from standing height the blades are visibly a little wider; the middle field reads fuller and a little deeper green, as the wider blades hide more of the paler ground.
+
 **Counts, from the grassland pose** (blades drawn per band, near/middle/far; records kept):
 
 | Eye | Before | After |

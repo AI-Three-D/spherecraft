@@ -58,6 +58,12 @@ export const GRASS_DEFAULTS = Object.freeze({
      * that slant, out to where they are resolved (grassWgsl.js densityAt). 0.9 from standing height is thinFrom's 1 / d.
      */
     fullSlant: 0.9,
+    /**
+     * Grass blades' width over what they are made with: a little wider near, growing to `far` between `from` and `to`
+     * metres (their strokes too). Thicker, a field reads as grass farther off; GrassWorks' blades (1 : 20 of their
+     * height) were judged too thick, ours are made 1 : 30-50.
+     */
+    thickness: { near: 1.25, far: 1.8, from: 3, to: 30 },
 });
 
 export class GrassPass {
@@ -261,6 +267,9 @@ export class GrassPass {
             const bounceRgb = [0.115, 0.105, 0.070];
             f.set([0, 1, 2].map(i => sunRgb[i] * Math.max(sunUp, 0) * bounceRgb[i]).concat(1.6 + (0.6 - 1.6) * Math.min(1, Math.max(0, sunUp))), 92);
         }
+        // Grass blades' width over what they are made with: near, far, and the distances between (grassWgsl.js vsMain).
+        const t = c.thickness ?? GRASS_DEFAULTS.thickness;
+        f.set([t.near, t.far, t.from, t.to], 96);
         // Bend at the tip per metre of height (gusts on top), and the sway's size: grass leans well over in a gale but
         // never lies flat, and sways a little even in still air.
         f.set([dot(wind, east), dot(wind, north), 0.75 * clamp(windSpeed / 22, 0, 1), 0.015 + 0.03 * clamp(windSpeed / 12, 0, 1)], 60);
@@ -304,7 +313,7 @@ export class GrassPass {
             // The gusts' field is in the face's own metres (grassWgsl.js q): a patch is nominally this long.
             const nominal = 2 * R / patchesPerFace;
             const carried = [dot(this._carried, ex) * nominal / mx, dot(this._carried, ey) * nominal / my];
-            const o = 96 + faces * 28;
+            const o = 100 + faces * 28;
             f.set([...ca, la], o);
             f.set([...du, face], o + 4);
             f.set([...dv, Math.max(mx, my)], o + 8);

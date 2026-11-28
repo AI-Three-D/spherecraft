@@ -59,7 +59,7 @@ export const MAX_WIDTH = 0.05;
 export const STROKE_FROM = 0.6;
 export const STROKE_TO = 1.0;
 export const TUFT_FILL = 0.53;
-export const FRAME_FLOATS = 96 + MAX_FACES * 28;
+export const FRAME_FLOATS = 100 + MAX_FACES * 28;
 export const CONTROL_WORDS = CTRL.GENLIST + 2 * MAX_PATCHES;
 export const CTRL_REMAP = CTRL.GENLIST + MAX_PATCHES;
 /** Every sway's rate is a whole number of turns in this many seconds, so time can wrap at it without a jump. */
@@ -102,6 +102,7 @@ struct Frame {
     cache: vec4<u32>,              // which half of the cache is this frame's (0 or 1); split; patch cull off; teacher
     light: vec4<f32>,              // the same for every blade pixel this frame (GrassPass.js): the sky's light, the day
     bounce: vec4<f32>,             // the ground's bounce (before the depth in the canopy), the sun's depth factor in it
+    thick: vec4<f32>,              // grass blades' width near, far, the distances (m) it grows between (GrassPass.js)
     faces: array<Face, ${MAX_FACES}>,
 };
 `;
@@ -1441,6 +1442,9 @@ fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u3
     let angle = shape.x * 6.2831853;
     // Out at the edge the blades sink into the ground: no line where they end.
     let edgeFade = smoothstep(frame.dist.x, frame.dist.x * 0.7, distance);
+    // Grass a little wider than as made, more so farther off (frame.thick): thin blades showed the field as a lawn.
+    // Not the broadleaf plants, flowers and seed heads, which have their own sizes.
+    let thick = select(1.0, mix(frame.thick.x, frame.thick.y, step3(frame.thick.z, frame.thick.w, distance)), kind <= 4u);
     let tall = shape.y * MAX_H * edgeFade;
     let fdir = cos(angle) * east + sin(angle) * north;
     // Seen edge-on a blade is a sliver: turn it partly toward the camera (Tsushima).
@@ -1456,7 +1460,7 @@ fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u3
     // a field drawn zoomed in and boxed down, grassRig.js zoomTruth: drawn whole, thin blades carried twice its
     // contrast at 20-90 m, and the line where they gave out was the field's edge).
     let baseOpen = sqrt(max(1.0 - dot(across, toEye) * dot(across, toEye), 0.0));
-    let basePixels = look.x * MAX_W * mix(0.3, 1.0, edgeFade) * 0.8 * max(baseOpen, 0.25) / (max(distance, 0.05) * frame.ambient.w);
+    let basePixels = look.x * MAX_W * mix(0.3, 1.0, edgeFade) * thick * 0.8 * max(baseOpen, 0.25) / (max(distance, 0.05) * frame.ambient.w);
     let coverage = saturate(basePixels / max(frame.lod.z, 1.0e-3));
     // Each blade's own flutter on top of its tuft's sway.
     let flutter = 0.012 * frame.wind.w / 0.045 * wave(time, 3.0 + 2.0 * seed, seed * 40.0) * (1.0 - smoothstep(6.0, 25.0, distance));
@@ -1481,7 +1485,7 @@ fn vsMain(@builtin(vertex_index) corner: u32, @builtin(instance_index) group: u3
     let s = 1.0 - t;
     var p = root + tall * (2.0 * s * t * ctrl + t * t * tip);
     let dp = normalize(2.0 * s * ctrl + 2.0 * t * (tip - ctrl) + up * 1.0e-4);
-    var width = look.x * MAX_W * mix(0.3, 1.0, edgeFade);
+    var width = look.x * MAX_W * mix(0.3, 1.0, edgeFade) * thick;
     var side = across;
     var flower = 0.0;
     var headCover = 1.0;
