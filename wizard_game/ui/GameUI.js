@@ -2,6 +2,7 @@
 import { MidNearDebugPanel } from '../../tools/MidNearDebugPanel.js';
 import { clamp01 } from '../../shared/math/index.js';
 import { createAdaptiveQualityConfig } from '../../core/AdaptiveQuality.js';
+import { GRASS_THICKNESS_TIERS, grassThicknessIndex, setGrassThickness } from '../../core/renderer/grass/GrassPass.js';
 
 /**
  * Manages the in-game UI elements including HUD, crash screen, and debug controls.
@@ -130,6 +131,7 @@ export class GameUI {
                 <span data-hud="fps"></span>
                 <span data-hud="camera"></span>
                 <span data-hud="weather"></span>
+                <span data-hud="grass"></span>
             </div>
         `;
         document.body.appendChild(ui);
@@ -157,10 +159,17 @@ export class GameUI {
             <label>Ground mist <input type="checkbox" data-feature="localMist"></label>
             <label>Cloud reprojection <input type="checkbox" data-feature="reprojection"></label>
             <div class="note">Low uses cirrus only. Enabling a volumetric effect switches to a custom medium tier.</div>
+            <h2>Grass</h2>
+            <label>Blade thickness <select id="grass-thickness-setting" style="width:170px">${GRASS_THICKNESS_TIERS.map((t, i) => `<option value="${i}">${i}: ${t.name}</option>`).join('')}<option value="-1" disabled>Custom</option></select></label>
+            <div class="row">
+                <span id="grass-thickness-status" class="note"></span>
+                <button id="grass-thickness-next" type="button" title="Next thickness (Shift+B)">Next</button>
+            </div>
             <h2>On-screen display</h2>
             <label>Detail level <input type="checkbox" data-display="detail" checked></label>
             <label>FPS <input type="checkbox" data-display="fps" checked></label>
             <label>Weather <input type="checkbox" data-display="weather" checked></label>
+            <label>Grass thickness <input type="checkbox" data-display="grass" checked></label>
             <h2>Performance</h2>
             <label>Active FPS cap <select id="max-fps-setting"><option value="0">Unlimited</option><option value="30">30 FPS</option><option value="60">60 FPS</option><option value="90">90 FPS</option><option value="120">120 FPS</option></select></label>
             <label>Adaptive power saving <input id="adaptive-quality-enabled" type="checkbox"></label>
@@ -259,6 +268,36 @@ export class GameUI {
             });
         }
         this._adaptiveQualityStatus = settings.querySelector('#adaptive-quality-status');
+        // Grass blades' width (GRASS_THICKNESS_TIERS), to compare live: chosen here, stepped by Next or Shift+B.
+        const thickness = settings.querySelector('#grass-thickness-setting');
+        const thicknessStatus = settings.querySelector('#grass-thickness-status');
+        const grassConfig = () => this.engine?.renderer?.quadtreeTerrainRenderer?.grass?.config ?? null;
+        thickness.addEventListener('change', () => {
+            const config = grassConfig();
+            if (config && Number(thickness.value) >= 0) setGrassThickness(config, Number(thickness.value));
+            this._syncGrassThickness();
+        });
+        settings.querySelector('#grass-thickness-next').addEventListener('click', () => this.stepGrassThickness());
+        this._syncGrassThickness = () => {
+            const config = grassConfig();
+            const i = grassThicknessIndex(config);
+            const t = config?.thickness;
+            thickness.disabled = !config;
+            if (document.activeElement !== thickness) thickness.value = String(i);
+            thicknessStatus.textContent = !t ? 'Grass unavailable'
+                : `${t.near.toFixed(2)}× near, ${t.far.toFixed(2)}× by ${t.to} m. Shift+B steps.`;
+            this._grassLabel = !config ? '' : `Grass: ${i >= 0 ? `${i} ${GRASS_THICKNESS_TIERS[i].name}` : 'custom'}`;
+        };
+        this._syncGrassThickness();
+    }
+
+    /** The next grass blade thickness (GRASS_THICKNESS_TIERS); returns its index, or -1 without grass. */
+    stepGrassThickness() {
+        const config = this.engine?.renderer?.quadtreeTerrainRenderer?.grass?.config;
+        if (!config) return -1;
+        const i = setGrassThickness(config);
+        this._syncGrassThickness?.();
+        return i;
     }
 
     /**
@@ -574,6 +613,8 @@ export class GameUI {
         this._hudContent.querySelector('[data-hud="camera"]').textContent = this._buildCameraInfo(camera);
         const target = weather?.getWeatherPreview().target;
         this._hudContent.querySelector('[data-hud="weather"]').textContent = weather?.effects[target]?.label ?? target ?? 'Weather unavailable';
+        this._syncGrassThickness?.();
+        this._hudContent.querySelector('[data-hud="grass"]').textContent = this._grassLabel ?? '';
     }
 
     _buildCameraInfo(camera) {

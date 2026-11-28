@@ -42,6 +42,7 @@ The user's report, from the game's follow camera (6 m over the player, looking d
 - Grass blades and their strokes are drawn `thickness.near` 1.25 times as wide as made, growing to `thickness.far` 1.8 between 3 and 30 m (`GRASS_DEFAULTS.thickness`, per frame in `frame.thick`, so it can be tuned live). Broadleaf plants, flowers and seed heads keep their sizes.
 - Their true width also sets how much of their own colour they show (`basePixels`, the per-row coverage), so a wider blade far off fades into the field later.
 - At 3.5 m from standing height the blades are visibly a little wider; the middle field reads fuller and a little deeper green, as the wider blades hide more of the paler ground.
+- To compare live: Settings, Grass, Blade thickness (also Next, or Shift+B), with the choice shown on screen. `GRASS_THICKNESS_TIERS`: 0 as made (1×), 1 slightly thicker (1.25× near to 1.8× by 30 m, the default), 2 thicker (1.5 to 2.1), 3 thick (1.8 to 2.5), 4 about GrassWorks (2.2 to 3.0).
 
 **Counts, from the grassland pose** (blades drawn per band, near/middle/far; records kept):
 

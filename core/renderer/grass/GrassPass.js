@@ -66,6 +66,29 @@ export const GRASS_DEFAULTS = Object.freeze({
     thickness: { near: 1.25, far: 1.8, from: 3, to: 30 },
 });
 
+/**
+ * Grass blades' width, to compare live (GRASS_DEFAULTS.thickness takes one): as made, then four steps to about
+ * GrassWorks' blade (0.12 wide for 2.4 tall, 1 : 20; ours are made 1 : 30 for a meadow, thinner for dry grass).
+ */
+export const GRASS_THICKNESS_TIERS = Object.freeze([
+    { name: 'as made', near: 1.0, far: 1.0, from: 3, to: 30 },
+    { name: 'slightly thicker', near: 1.25, far: 1.8, from: 3, to: 30 },
+    { name: 'thicker', near: 1.5, far: 2.1, from: 3, to: 30 },
+    { name: 'thick', near: 1.8, far: 2.5, from: 3, to: 30 },
+    { name: 'about GrassWorks', near: 2.2, far: 3.0, from: 3, to: 30 },
+]);
+/** Which of GRASS_THICKNESS_TIERS a grass config's thickness is, or -1. */
+export function grassThicknessIndex(config) {
+    const t = config?.thickness;
+    return GRASS_THICKNESS_TIERS.findIndex(x => t && x.near === t.near && x.far === t.far && x.from === t.from && x.to === t.to);
+}
+/** Sets a grass config's thickness to a tier (the next one when none is given); returns its index. */
+export function setGrassThickness(config, index = (Math.max(grassThicknessIndex(config), 0) + 1) % GRASS_THICKNESS_TIERS.length) {
+    const { name, ...tier } = GRASS_THICKNESS_TIERS[index];
+    config.thickness = tier;
+    return index;
+}
+
 export class GrassPass {
     /**
      * @param {object} o device, backend, tileManager, ground (createGroundMaterials), landLight (TerrainLightMap),

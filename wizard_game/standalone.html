@@ -509,7 +509,7 @@
     </div>
     
     <div class="controls-hint">
-        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | Shift+G: Ground surfaces | B: Grass blades | H: Sea and far water prototype | N: Res while moving | Shift+L: Cloud detail | U: Cloud reprojection | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour
+        Up/Down Arrow Keys: Control Altitude | D: Toggle Debug | T: Freeze/Resume Day-Night | R: Next site (Shift+R: new sites here) | Y: Rocks in the water | J: River bank preview | G: Terrain fix prototype | Shift+G: Ground surfaces | B: Grass blades | Shift+B: Grass thickness | H: Sea and far water prototype | N: Res while moving | Shift+L: Cloud detail | U: Cloud reprojection | M: Cloud lights | Shift+M: Night look | Shift+N: Sunset colour
     </div>
     <!-- Debug: fly through a few viewing sites (debugSiteStep below). -->
     <div id="river-goto-box" style="position:fixed;right:16px;bottom:56px;z-index:1000;display:flex;flex-direction:column;align-items:flex-end;gap:6px;font:12px monospace;">
@@ -525,6 +525,7 @@
         <button id="water-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Water fix (H)</button>
         <button id="ground-look" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Ground (Shift+G)</button>
         <button id="grass-toggle" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Grass blades (B)</button>
+        <button id="grass-thickness" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Grass thickness (Shift+B)</button>
         <button id="terrain-fix" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Terrain fix (G)</button>
         <button id="rock-mode" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Rocks: wall (Y)</button>
         <button id="river-goto" type="button" style="padding:6px 10px;background:rgba(20,60,90,.85);color:#fff;border:1px solid #6af;border-radius:4px;cursor:pointer;font:12px monospace;">Next site (R)</button>
@@ -539,6 +540,7 @@
         import { WorldConfigLoader } from './WorldConfigLoader.js';
         import { createEngineConfig, createGameDataConfig, FAIR_WEATHER_CLOUD_LOOK } from './runtimeConfigs.js';
         import { CLOUD_DETAIL_TIERS } from '../core/renderer/volumetricClouds/cloudDetailTiers.js';
+        import { GRASS_THICKNESS_TIERS, grassThicknessIndex, setGrassThickness } from '../core/renderer/grass/GrassPass.js';
         import { TERRAIN_FIX_PROTOTYPES, applyTerrainFixToConfig, applyTerrainFixLive, terrainFixIndexOf } from './terrainFixPrototypes.js';
         import { WATER_FIX_PROTOTYPES, applyWaterFixLive, waterFixIndexOf } from './waterFixPrototypes.js';
         import { ScreenRaycaster } from './actors/nav/ScreenRaycaster.js';
@@ -4605,6 +4607,25 @@
         document.getElementById('grass-toggle').addEventListener('click', () => grassStep());
         setTimeout(grassShow, 2000);
 
+        // Debug: grass blades' width in turn (GRASS_THICKNESS_TIERS): as made, then four steps to about GrassWorks'.
+        // Live, per frame; the settings panel shows and chooses the same (GameUI.js).
+        function grassThicknessShow() {
+            const config = gameEngine?.renderer?.quadtreeTerrainRenderer?.grass?.config;
+            const i = grassThicknessIndex(config);
+            document.getElementById('grass-thickness').textContent = !config ? 'Grass thickness: unavailable (Shift+B)'
+                : i >= 0 ? `Grass thickness ${i}: ${GRASS_THICKNESS_TIERS[i].name} (Shift+B)` : 'Grass thickness: custom (Shift+B)';
+        }
+        function grassThicknessStep() {
+            const config = gameEngine?.renderer?.quadtreeTerrainRenderer?.grass?.config;
+            if (!config) return;
+            const i = gameEngine.ui?.stepGrassThickness?.() ?? setGrassThickness(config);
+            const t = GRASS_THICKNESS_TIERS[i];
+            grassThicknessShow();
+            debugSay(`Grass thickness ${i} of ${GRASS_THICKNESS_TIERS.length - 1}: ${t.name} (${t.near}x near, ${t.far}x by ${t.to} m).`, 'GrassThickness');
+        }
+        document.getElementById('grass-thickness').addEventListener('click', () => grassThicknessStep());
+        setInterval(grassThicknessShow, 1000);
+
         // Debug: sea and far water prototypes in turn (waterFixPrototypes.js,
         // WATER_STATUS.md). Live: no rebuild or regeneration. ?waterFix=N picks
         // one as soon as the water data exists.
@@ -4842,6 +4863,10 @@
             // Debug: grass blades on or off.
             if (e.key.toLowerCase() === 'b' && !e.repeat && !e.shiftKey && !e.target?.closest?.('input, textarea')) {
                 grassStep();
+            }
+            // Debug: grass blades' width, the next step.
+            if (e.key.toLowerCase() === 'b' && !e.repeat && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !e.target?.closest?.('input, textarea')) {
+                grassThicknessStep();
             }
             // Debug: sea and far water prototypes, the next one.
             if (e.key.toLowerCase() === 'h' && !e.repeat && !e.target?.closest?.('input, textarea')) {
